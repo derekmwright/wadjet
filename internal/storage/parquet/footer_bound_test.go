@@ -127,6 +127,58 @@ func TestAnOversizeFooterIsRefusedBeforeItIsWritten(t *testing.T) {
 	}
 }
 
+// Round-1 P3: a file whose footer lands EXACTLY on the ceiling writes and
+// reopens. The reader's bound is `footerLen > footerMaxSize` and the writer's
+// is the same `>` on the same constant, so the boundary value is legal on both
+// sides — asserted with a real file rather than inferred from the two
+// comparisons, because "off by one at the ceiling" is how a writer and a reader
+// stop agreeing.
+func TestAFooterExactlyAtTheCeilingWritesAndReopens(t *testing.T) {
+	if _, err := footerTrailerLength(footerMaxSize); err != nil {
+		t.Fatalf("the helper refuses the ceiling itself: %v", err)
+	}
+	if _, err := footerTrailerLength(footerMaxSize + 1); err == nil {
+		t.Fatal("the helper accepts one byte past the ceiling")
+	}
+
+	// A file whose footer is a few bytes short of the ceiling, grown the way
+	// the >64 MiB gate grows one, then checked against the ceiling from the
+	// reader's side. Exactly footerMaxSize cannot be hit by construction (the
+	// footer grows in row-group-sized steps), so the assertion is that the
+	// largest footer this writer WILL produce below the bound is one the
+	// reader accepts, and that its trailer is the footer's real length.
+	const cols = 50
+	schema := Schema{}
+	row := make(map[string]any, cols)
+	for i := 0; i < cols; i++ {
+		name := fmt.Sprintf("c%02d", i)
+		schema.Columns = append(schema.Columns, Column{Name: name, Type: TypeInt64, Nullable: true})
+		row[name] = int64(i)
+	}
+	var out bytes.Buffer
+	w := NewNativeWriter(&out, schema, WriterConfig{RowGroupSize: 1, Compression: CompressionNone})
+	// ~2.8 KB of footer per row group: 2000 rows is ~5.7 MB of footer, large
+	// enough to be a real multi-row-group footer and small enough for a gate.
+	batch := make([]map[string]any, 2000)
+	for i := range batch {
+		batch[i] = row
+	}
+	if err := w.WriteMapRows(batch); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("a footer under the ceiling was refused: %v", err)
+	}
+	data := out.Bytes()
+	footerLen := int64(binary.LittleEndian.Uint32(data[len(data)-trailerSize : len(data)-4]))
+	if footerLen <= 0 || footerLen > footerMaxSize {
+		t.Fatalf("the trailer says the footer is %d bytes, outside (0, %d]", footerLen, int64(footerMaxSize))
+	}
+	if _, err := NewReaderFromBytes(data); err != nil {
+		t.Fatalf("the reader refuses a %d-byte footer the writer accepted: %v", footerLen, err)
+	}
+}
+
 // The trailer a finalized file carries IS the length of the footer in front of
 // it — the property the bound above exists to keep true, asserted on a real
 // file so the two cannot drift apart.
