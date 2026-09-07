@@ -944,6 +944,18 @@ list renames the leading outputs positionally and HIDES what it replaces. The
 block-namespace rule itself moved to `plansql.BlockOutputColumns` so the binder
 and the classifier read one definition of it.
 
+**A STAR is two rules, and reading them as one over-claims.** A bare `*` stands
+for every FROM item in FROM order; a QUALIFIED `alias.*` stands for THAT source
+alone. `SELECT dim.* FROM dim JOIN t ON …` publishes dim's columns and none of
+t's, and a classifier that published both sides made an OUTER reference to a
+name only the other side carries look INNER — this section's own defect with
+the sign flipped, silently wrong on all four arms in the CTE spelling and loud
+in the derived-table one. A qualifier that names no FROM item this layer can
+resolve makes the whole block unknown rather than a superset. And a star
+publishes IN THE POSITION IT IS WRITTEN, because a column-alias list is overlaid
+POSITIONALLY over this list: `SELECT a, t.*, b` has to publish the star's
+columns between `a` and `b`.
+
 Complete-or-nil is load-bearing, not tidiness. A PARTIAL list would let a
 column-alias list be overlaid on the wrong positions, and — worse — would read
 as *"this relation does not have that name"* for every column missing from it,
@@ -951,6 +963,27 @@ which is the direction that turns an inner reference into an outer one. A star
 over a source this layer cannot resolve therefore makes the whole block
 unknown, and unknown falls back to the pre-existing identifier comparison: the
 classifier never claims a relation it cannot name has a column.
+
+**The expansion is bounded by the SCOPE, never by a count.** `CTEColumns`
+resolves item i's body at scope i, so `scope` strictly decreases, an item's own
+name is never in its own scope, and a `WITH RECURSIVE` body terminates as
+unknown for that reason rather than because a counter ran out. A numeric depth
+bound is not a safety net here: unknown is not a refusal, it falls back to the
+outer scope, so a bound TRUNCATES a long chain of star-bodied items into exactly
+the wrong number this section is about. Nine chained items answered 5000 for
+PostgreSQL's 4000 while such a bound stood.
+
+**The classifier decides, and so does the SUBSTITUTION.** Saying a name is inner
+is only half of it: the per-row re-run rewrites a bare name to the outer row's
+literal, and it took its list of names from "collides with an outer column"
+rather than from the classifier. One QUALIFIED outer reference was therefore
+enough to substitute the inner column beside it — `(SELECT COUNT(*) FROM c WHERE
+id < d.id)` answered 0 for every outer row where PostgreSQL counts c's rows
+below it, over a base table as well as a CTE. `OuterRef.Bare` records which
+spelling the classifier resolved, `dedup` ORs it across the spellings of one
+name, and `expr.buildUnqualOuterCols` reads it. Without that, this section's
+rule holds only for a subquery with NO outer reference at all, which is not the
+rule.
 
 Measured against live PostgreSQL 17 over the type-matrix fixture, before →
 after, on all four arms (`CorrelatedLocalRoutes` delta in brackets):
@@ -966,8 +999,13 @@ after, on all four arms (`CorrelatedLocalRoutes` delta in brackets):
 | the same name in both scopes | 5000 [1] | 10 [0] | 10 |
 | the CTE reference under a JOIN | 4616 [1] | 10 [0] | 10 |
 | the WHERE producer over 5000 outer rows | 3871, **spilled arm hangs** [1] | 3870 [0] | 3870 |
+| a QUALIFIED star over a join (CTE and derived spellings) | 10 silently / loud [1] | 4616 [1] | 4616 |
+| a nine- and a twelve-link chain of star-bodied CTEs | 5000 [1] | 4000 [0] | 4000 |
+| an inner BARE name beside an outer QUALIFIED one, over a CTE and over a base table | 0 per outer row [1] | 1,2,3 [1] | 1,2,3 |
+| `EXISTS` under `OR` / `NOT` / `CASE`, uncorrelated | loud on both DAG arms | right [0] | right |
 | ctl qualified / aliased / base table / top level | right | right | right |
-| ctl genuinely correlated (3 spellings) | right [1] | right [1] | right |
+| ctl a bare star over a join, and the qualified star naming the side that HAS the name | right | right | right |
+| ctl genuinely correlated (4 spellings) | right [1] | right [1] | right |
 
 The three controls are the boundary. Their VALUES were right before this change
 too; what separates "we stopped mis-correlating" from "we stopped correlating"
@@ -999,6 +1037,19 @@ The interaction of the list with the scope rule IS closed, and two controls say
 so: `(SELECT * FROM t) x(idd)` and `WITH c(kk) AS (SELECT * FROM t)` both HIDE
 the name they rename, so a subquery naming it is reading the enclosing query —
 PostgreSQL's answer, and this engine's.
+
+**What the repair UNMASKED.** Three shapes were wrong on every arm because the
+subquery was mis-correlated and its predicate dropped; with the scope right the
+single-process arms answer PostgreSQL and the DAG arms reach lowering gaps the
+wrong answer had been hiding. Each is pinned with the sentence it fails by: TWO
+qualified stars in one SELECT list (the logical builder emits a projection
+column literally named `dim.*`, which no executor schema carries — all four arms
+failed that way before), a RECURSIVE CTE named inside a subquery (§1b: it has no
+stage lowering, and the DAG meets that as an unbuildable stage rather than as
+§1c's routed refusal), and a UNION of two `SELECT *` arms as the subquery's FROM
+(the union stage's column pruning drops a column its own arms declare). wrong →
+right on two arms and loud on two is within doctrine; each pin fails the day its
+gap closes.
 
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
@@ -1069,6 +1120,23 @@ NOT evaluated — `plansql.DanglingTableRefs` guards it exactly as the
 pipeline with `CorrelatedLocalRoutes` moving (§1c). The correlated control is
 an INEQUALITY correlation, the spelling that does not decorrelate into a semi
 join and therefore reaches this site.
+
+**A subquery is a leaf of a PREDICATE, so the walk has to be the predicate's.**
+`resolveSubqueryAST` had arms for a comparison, an arithmetic operator and a
+parenthesis, and none for `AND`, `OR`, `NOT` or `CASE`. `AND` looked handled
+because the filter is split into conjuncts before this walk; `OR` and `NOT`
+cannot be split, so `… WHERE d.id < 2 OR EXISTS (…)` shipped verbatim and every
+task still failed while this section claimed the shape worked. Walking the
+boolean tree is what makes the rule true of a PREDICATE rather than of one shape
+of predicate; a `HAVING` and a `JOIN … ON` reach the same walk and are cells of
+the gate.
+
+**A refusal keeps its own sentence.** The evaluation asks the shared access
+lookup for every relation the subquery's plan reads, and discarding its error
+turned `permission denied for table "…"` into a task failure — the sentence the
+scalar and IN siblings hand back at the same site. A 42501 is not a routing
+refusal but the query's answer on every path, so it is PARKED the way a
+cardinality violation is (ADR-0034 item 6).
 
 ### 3. A build-side narrowing is all-or-nothing, and the condition is read STRUCTURALLY
 

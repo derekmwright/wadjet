@@ -635,9 +635,16 @@ SELECT (SELECT MAX(v) FROM c WHERE id < 4000) AS mx FROM devices WHERE id < 2
 Here `id` is `c`'s, not `devices`'s, so this subquery is not correlated: it is
 evaluated once. Qualify the reference (`WHERE devices.id < 4000`) to mean the
 enclosing query's column, as PostgreSQL requires when both scopes carry the
-name. A `FROM` item's column-alias list renames its leading columns and hides
-the names it replaces, so `FROM (SELECT id, v FROM t) x(idd, vv)` puts `idd`
-and `vv` in scope and not `id`.
+name. The rule holds inside a CORRELATED subquery too: in `(SELECT COUNT(*)
+FROM c WHERE id < d.id)` the bare `id` is `c`'s and `d.id` is the enclosing
+row's.
+
+What a `FROM` item puts in scope is what it publishes. A column-alias list
+renames its leading columns and hides the names it replaces, so `FROM (SELECT
+id, v FROM t) x(idd, vv)` puts `idd` and `vv` in scope and not `id`. A
+QUALIFIED star publishes only the source it names — `SELECT dim.* FROM dim JOIN
+t ON …` publishes `dim`'s columns, so a name only `t` carries is still the
+enclosing query's — while a bare `*` publishes every `FROM` item.
 
 Subqueries that reference columns from the outer query. The optimizer decorrelates them where it can — EXISTS / NOT EXISTS and IN become semi/anti joins, and a correlated scalar subquery becomes a join against a grouped aggregate — so they are not re-executed per outer row. Either side may be a CTE, a derived table, a comma-joined list or a base table: the subquery's own FROM clause is planned the way a top-level FROM clause is.
 

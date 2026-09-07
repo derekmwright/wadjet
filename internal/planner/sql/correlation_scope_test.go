@@ -1,6 +1,7 @@
 package sql
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -237,6 +238,120 @@ func TestAColumnAliasListRenamesPositionally(t *testing.T) {
 			got := sourceColumns(&info.Tables[0], TableColumns(i1Catalog))
 			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
 				t.Fatalf("sourceColumns = %v, want %v\n  SQL: %s", got, tc.want, tc.sql)
+			}
+		})
+	}
+}
+
+// A STAR PUBLISHES WHAT IT STANDS FOR — round-1 review B1/P3.
+//
+// `alias.*` is ONE source; a bare `*` is every FROM item in FROM order; and
+// either sits where the SELECT list writes it, because sourceColumns overlays a
+// column-alias list POSITIONALLY over this list. Reading a qualified star as
+// "every item" published a SUPERSET, and a superset turns an OUTER reference
+// into an inner one — #955 with the sign flipped, silently wrong on four arms.
+func TestAStarPublishesWhatItStandsFor(t *testing.T) {
+	resolve := TableColumns(func(table string) []string {
+		switch strings.ToLower(table) {
+		case "decpair":
+			return []string{"id", "a", "b", "s"}
+		case "dim":
+			return []string{"k", "label"}
+		case "tx":
+			return []string{"id", "g"}
+		}
+		return nil
+	})
+	for _, tc := range []struct {
+		name string
+		sql  string
+		want []string
+	}{
+		{name: "a_qualified_star_is_that_source_alone",
+			sql:  `SELECT dim.* FROM dim JOIN tx ON tx.g = dim.k`,
+			want: []string{"k", "label"}},
+		{name: "the_other_side_of_the_same_join",
+			sql:  `SELECT tx.* FROM dim JOIN tx ON tx.g = dim.k`,
+			want: []string{"id", "g"}},
+		{name: "two_qualified_stars_are_both_sources_in_order",
+			sql:  `SELECT dim.*, tx.* FROM dim JOIN tx ON tx.g = dim.k`,
+			want: []string{"k", "label", "id", "g"}},
+		{name: "a_bare_star_is_every_from_item_in_from_order",
+			sql:  `SELECT * FROM dim JOIN tx ON tx.g = dim.k`,
+			want: []string{"k", "label", "id", "g"}},
+		{name: "a_qualifier_naming_no_from_item_is_unknown",
+			sql:  `SELECT nosuch.* FROM dim`,
+			want: nil},
+		{name: "a_qualified_star_over_a_source_the_resolver_cannot_name_is_unknown",
+			sql:  `SELECT q.* FROM notatable q`,
+			want: nil},
+		// POSITION. Only a column-alias list can see it, and that is exactly
+		// what sourceColumns overlays over this list.
+		{name: "a_star_publishes_where_it_is_written",
+			sql:  `SELECT t.id, t.*, t.a FROM decpair t`,
+			want: []string{"id", "id", "a", "b", "s", "a"}},
+		{name: "a_star_before_the_explicit_names",
+			sql:  `SELECT t.*, t.id FROM decpair t`,
+			want: []string{"id", "a", "b", "s", "id"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info, err := parseBlockText(tc.sql)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			got := blockPublishedColumns(info, resolve)
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("blockPublishedColumns = %v, want %v\n  SQL: %s", got, tc.want, tc.sql)
+			}
+		})
+	}
+}
+
+// The alias overlay is what makes POSITION observable, so it is asserted
+// through the overlay and not only through the list.
+func TestAColumnAliasListOverlaysTheStarInPosition(t *testing.T) {
+	resolve := TableColumns(func(table string) []string {
+		if strings.ToLower(table) == "decpair" {
+			return []string{"id", "a", "b", "s"}
+		}
+		return nil
+	})
+	info, err := parseBlockText(`SELECT 1 FROM (SELECT t.id, t.*, t.a FROM decpair t) x(p, q)`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got := sourceColumns(&info.Tables[0], resolve)
+	want := []string{"p", "q", "a", "b", "s", "a"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("sourceColumns = %v, want %v — the list renames the LEADING columns, "+
+			"and which those are depends on where the star sits", got, want)
+	}
+}
+
+// CTEColumns terminates on the SCOPE, not on a depth count: item i's body is
+// resolved at scope i, so an item's own name is never in its own scope. A
+// numeric bound truncated a long chain instead, and "unknown" is not a
+// refusal — it falls back to the outer scope, which is #955's wrong number
+// (round-1 review B4).
+func TestCTEColumnsFollowsAChainOfAnyLength(t *testing.T) {
+	base := TableColumns(func(table string) []string {
+		if strings.ToLower(table) == "typemx" {
+			return []string{"id", "g", "c_i64"}
+		}
+		return nil
+	})
+	for _, n := range []int{1, 8, 9, 12, 40} {
+		t.Run(fmt.Sprintf("chain_of_%d", n), func(t *testing.T) {
+			ctes := []CTEDef{{Name: "c1", SQL: `SELECT * FROM typemx`}}
+			for i := 2; i <= n; i++ {
+				ctes = append(ctes, CTEDef{
+					Name: fmt.Sprintf("c%d", i),
+					SQL:  fmt.Sprintf(`SELECT * FROM c%d`, i-1),
+				})
+			}
+			got := CTEColumns(ctes, base)(fmt.Sprintf("c%d", n))
+			if strings.Join(got, ",") != "id,g,c_i64" {
+				t.Fatalf("link %d of a %d-link chain = %v, want [id g c_i64]", n, n, got)
 			}
 		})
 	}

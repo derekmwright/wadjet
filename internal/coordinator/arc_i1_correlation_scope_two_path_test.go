@@ -2,6 +2,8 @@ package coordinator
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,11 +92,17 @@ type i1Cell struct {
 	// routes is the routing delta each DAG arm must produce for this one
 	// query. The zero value says the DAG EXECUTED the shape as stages.
 	routes a2Routes
-	// pin, when set, says this cell DIVERGES from PostgreSQL and records what
-	// this engine answers instead. The gate then asserts the divergence: a
-	// cell that starts agreeing FAILS, which is how the pin gets deleted.
-	pin    string
-	pinWhy string
+	// pin, when set, says this cell DIVERGES from PostgreSQL on EVERY arm and
+	// records what this engine answers instead. The gate then asserts the
+	// divergence: a cell that starts agreeing FAILS, which is how the pin gets
+	// deleted.
+	pin string
+	// pinArms is the same claim per ARM, for a shape the arms answer
+	// DIFFERENTLY — the value where the arm diverges, keyed by arm name; an
+	// arm absent from it is held to want. A substring is enough, so a pinned
+	// error can be named by its sentence rather than by a task id.
+	pinArms map[string]string
+	pinWhy  string
 }
 
 func i1Cells() []i1Cell {
@@ -296,7 +304,184 @@ func i1Cells() []i1Cell {
 			pinWhy: "a column-alias list is the WHOLE namespace here, not a positional rename, " +
 				"so `s` is read as the enclosing query's and substituted per outer row",
 			routes: a2Routes{Correlated: 1}},
+
+		// --- A STAR PUBLISHES WHAT IT STANDS FOR (round-1 review B1/P3) ----
+		//
+		// `alias.*` is ONE source. Reading it as "every FROM item" published a
+		// SUPERSET to the classifier, and a superset turns an OUTER reference
+		// into an inner one — #955 with the sign flipped. The first two cells
+		// are the shapes that broke: `c` publishes `k, label`, so `id` is
+		// decpair's and PostgreSQL counts every row of c.
+		{name: "30_a_qualified_star_publishes_one_side_of_a_join_cte",
+			sql: `WITH c AS (SELECT dim.* FROM typemx_dim dim JOIN typemx tx ON tx.g = dim.k) ` +
+				`SELECT (SELECT COUNT(*) FROM c WHERE id < 10) AS n FROM decpair WHERE id < 2`,
+			want: `n | 4616`, routes: a2Routes{Correlated: 1}},
+		{name: "31_a_qualified_star_publishes_one_side_of_a_join_derived",
+			sql: `SELECT (SELECT COUNT(*) FROM (SELECT dim.* FROM typemx_dim dim JOIN typemx tx ` +
+				`ON tx.g = dim.k) t WHERE id < 10) AS n FROM decpair WHERE id < 2`,
+			want: `n | 4616`, routes: a2Routes{Correlated: 1}},
+		// The other side of the same join DOES publish `id`, so the same
+		// spelling one alias over is INNER — the discriminator that separates
+		// "we read the qualifier" from "we stopped expanding stars".
+		{name: "32_ctl_the_qualified_star_names_the_side_that_has_the_name",
+			sql: `WITH c AS (SELECT tx.* FROM typemx_dim dim JOIN typemx tx ON tx.g = dim.k) ` +
+				`SELECT (SELECT COUNT(*) FROM c WHERE id < 10) AS n FROM decpair WHERE id < 2`,
+			want: `n | 10`},
+		{name: "33_ctl_a_bare_star_is_every_from_item",
+			sql: `WITH c AS (SELECT * FROM typemx_dim dim JOIN typemx tx ON tx.g = dim.k) ` +
+				`SELECT (SELECT COUNT(*) FROM c WHERE id < 10) AS n FROM decpair WHERE id < 2`,
+			want: `n | 10`},
+		{name: "34_a_qualified_star_under_a_column_alias_list",
+			sql: `SELECT (SELECT COUNT(*) FROM (SELECT dim.* FROM typemx_dim dim JOIN typemx tx ` +
+				`ON tx.g = dim.k) t(kk, ll) WHERE id < 10) AS n FROM decpair WHERE id < 2`,
+			want: `n | 4616`, routes: a2Routes{Correlated: 1}},
+
+		// --- THE PER-ROW RE-RUN SUBSTITUTES ONLY BARE NAMES (B3) -----------
+		//
+		// An inner bare name BESIDE an outer qualified one, which is the
+		// commonest correlated shape there is. All four answered 0 for every
+		// outer row at base — the predicate had become `1 < 1`, `2 < 2`,
+		// `3 < 3` — over a base table as well as a CTE.
+		{name: "35_an_inner_bare_name_beside_an_outer_qualified_one",
+			sql: `WITH c AS (SELECT id, c_i64 AS v FROM typemx) ` +
+				`SELECT d.id, (SELECT COUNT(*) FROM c WHERE id < d.id) AS n ` +
+				`FROM decpair d WHERE d.id < 4 ORDER BY d.id`,
+			want: `id,n | 1,1 | 2,2 | 3,3`, routes: a2Routes{Correlated: 1}},
+		{name: "36_the_same_over_a_base_table",
+			sql: `SELECT d.id, (SELECT COUNT(*) FROM typemx WHERE id < d.id) AS n ` +
+				`FROM decpair d WHERE d.id < 4 ORDER BY d.id`,
+			want: `id,n | 1,1 | 2,2 | 3,3`, routes: a2Routes{Correlated: 1}},
+		{name: "37_two_inner_bare_names_and_one_outer",
+			sql: `WITH c AS (SELECT id, g, c_i64 AS v FROM typemx) ` +
+				`SELECT d.id, (SELECT COUNT(*) FROM c WHERE id < d.id AND g < 3) AS n ` +
+				`FROM decpair d WHERE d.id < 4 ORDER BY d.id`,
+			want: `id,n | 1,1 | 2,2 | 3,3`, routes: a2Routes{Correlated: 1}},
+		{name: "38_the_mixed_predicate_nested_two_deep",
+			sql: `WITH c AS (SELECT id, c_i64 AS v FROM typemx) ` +
+				`SELECT d.id, (SELECT COUNT(*) FROM c WHERE c.id < ` +
+				`(SELECT MAX(id) FROM typemx WHERE id < d.id)) AS n ` +
+				`FROM decpair d WHERE d.id < 4 ORDER BY d.id`,
+			want: `id,n | 1,0 | 2,1 | 3,2`, routes: a2Routes{Correlated: 1}},
+		// The control that was right at base too: no name collides, so the
+		// substitution had nothing to over-reach into.
+		{name: "39_ctl_a_correlated_subquery_with_no_name_collision",
+			sql: `WITH c AS (SELECT id, g, c_i64 AS v FROM typemx) ` +
+				`SELECT d.id, (SELECT COUNT(*) FROM c WHERE g = 1 AND c.id < d.id) AS n ` +
+				`FROM decpair d WHERE d.id < 4 ORDER BY d.id`,
+			want: `id,n | 1,0 | 2,1 | 3,1`, routes: a2Routes{Correlated: 1}},
+
+		// --- THE EXISTS CONSTANT REACHES EVERY POSITION (B2) ---------------
+		//
+		// `AND` was reachable only because the filter is split into conjuncts
+		// before the walk. `OR` and `NOT` cannot be split, so these four
+		// failed both DAG arms at base with the SubqueryRunner error.
+		{name: "40_a_false_exists_under_OR",
+			sql: `SELECT COUNT(*) AS n FROM decpair d WHERE d.id < 2 OR EXISTS ` +
+				`(SELECT 1 FROM typemx t WHERE t.id < 0)`,
+			want: `n | 1`},
+		{name: "41_a_true_exists_under_OR",
+			sql: `SELECT COUNT(*) AS n FROM decpair d WHERE d.id < 2 OR EXISTS ` +
+				`(SELECT 1 FROM typemx t WHERE t.id < 10)`,
+			want: `n | 9`},
+		{name: "42_a_not_exists_under_OR",
+			sql: `SELECT COUNT(*) AS n FROM decpair d WHERE d.id < 2 OR NOT EXISTS ` +
+				`(SELECT 1 FROM typemx t WHERE t.id < 0)`,
+			want: `n | 9`},
+		{name: "43_a_parenthesized_NOT_over_an_exists",
+			sql: `SELECT COUNT(*) AS n FROM decpair d WHERE NOT (EXISTS ` +
+				`(SELECT 1 FROM typemx t WHERE t.id < 0))`,
+			want: `n | 9`},
+		{name: "44_an_exists_inside_an_AND_of_an_OR",
+			sql: `SELECT COUNT(*) AS n FROM decpair d WHERE d.id < 5 AND (d.id > 3 OR EXISTS ` +
+				`(SELECT 1 FROM typemx t WHERE t.id < 0))`,
+			want: `n | 1`},
+		{name: "45_an_exists_in_a_CASE_condition",
+			sql: `SELECT COUNT(*) AS n FROM decpair d WHERE CASE WHEN EXISTS ` +
+				`(SELECT 1 FROM typemx t WHERE t.id < 0) THEN true ELSE d.id < 2 END`,
+			want: `n | 1`},
+		{name: "46_an_exists_in_a_HAVING",
+			sql: `SELECT COUNT(*) AS n FROM (SELECT a, COUNT(*) AS c FROM decpair GROUP BY a ` +
+				`HAVING COUNT(*) > 0 AND EXISTS (SELECT 1 FROM typemx t WHERE t.id < 0)) q`,
+			want: `n | 0`},
+		{name: "47_an_exists_in_a_JOIN_condition",
+			sql: `SELECT COUNT(*) AS n FROM decpair d JOIN typemx_dim k ON d.id = k.k AND EXISTS ` +
+				`(SELECT 1 FROM typemx t WHERE t.id < 0)`,
+			want: `n | 0`},
+
+		// --- THE CHAIN IS NOT TRUNCATED (B4) -------------------------------
+		//
+		// Nine links was one past the removed bound and answered 5000 for
+		// PostgreSQL's 4000; twelve is well past it.
+		{name: "48_a_nine_link_chain_of_star_bodied_ctes", sql: i1Chain(9), want: `n | 4000`},
+		{name: "49_a_twelve_link_chain_of_star_bodied_ctes", sql: i1Chain(12), want: `n | 4000`},
+
+		// --- WHAT THIS ARC UNMASKED AND DOES NOT CLOSE ---------------------
+		//
+		// Three shapes were WRONG on every arm at base because the subquery
+		// was mis-correlated and its predicate dropped. With the scope fixed
+		// the single-process arms answer PostgreSQL and the DAG arms reach
+		// pre-existing lowering gaps that the wrong answer had been hiding.
+		// wrong → (right on two arms, loud on two) is within doctrine, and
+		// each is pinned with the sentence it fails by so the day the gap
+		// closes the pin fails.
+		//
+		// MULTIPLE qualified stars in one SELECT list: the logical builder
+		// emits a projection column literally named `dim.*` that no executor
+		// schema carries. All four arms failed that way at base; the DAG arms
+		// now plan the CTE as a stage and answer.
+		{name: "50_pin_two_qualified_stars_in_one_select_list",
+			sql: `WITH c AS (SELECT dim.*, tx.* FROM typemx_dim dim JOIN typemx tx ON tx.g = dim.k) ` +
+				`SELECT (SELECT COUNT(*) FROM c WHERE id < 10) AS n FROM decpair WHERE id < 2`,
+			want: `n | 10`,
+			pinArms: map[string]string{
+				"single":   `column "dim.*" does not exist in the input schema`,
+				spilledArm: `column "dim.*" does not exist in the input schema`,
+			},
+			pinWhy: "the logical builder does not expand a SECOND qualified star; it emits a " +
+				"projection column named `dim.*` and the single-process CTE materialization " +
+				"then cannot resolve it (all four arms failed this way at base)"},
+		// A RECURSIVE CTE named inside a subquery. It has no stage lowering
+		// (ADR-0021 §1b), and the DAG reaches that as a build failure rather
+		// than as the routed refusal §1c would give it.
+		{name: "51_pin_a_recursive_cte_named_inside_a_subquery",
+			sql: `WITH RECURSIVE r(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM r WHERE id < 5) ` +
+				`SELECT (SELECT COUNT(*) FROM r WHERE id < 4) AS n FROM decpair WHERE id < 2`,
+			want: `n | 3`,
+			pinArms: map[string]string{
+				"dag":     `has no dependencies and no ScanFiles`,
+				"dagshuf": `has no dependencies and no ScanFiles`,
+			},
+			pinWhy: "a recursive CTE has no stage lowering, and the DAG reaches that as an " +
+				"unbuildable stage instead of the routed refusal ADR-0021 §1c gives a " +
+				"subquery it cannot run (all four arms answered 5 for PostgreSQL's 3 at base)"},
+		// A UNION of two star arms as the subquery's FROM. The stage's column
+		// pruning drops a column the union still declares.
+		{name: "52_pin_a_union_of_two_star_arms_as_the_inner_from",
+			sql: `SELECT (SELECT COUNT(*) FROM (SELECT * FROM typemx WHERE id < 2000 ` +
+				`UNION ALL SELECT * FROM typemx WHERE id >= 2000) t WHERE id < 10) AS n ` +
+				`FROM decpair WHERE id < 2`,
+			want: `n | 10`,
+			pinArms: map[string]string{
+				"dag":     `column "g" does not exist in the input schema`,
+				"dagshuf": `column "g" does not exist in the input schema`,
+			},
+			pinWhy: "the union stage's column pruning drops a column its own arms still " +
+				"declare (all four arms answered 0 for PostgreSQL's 10 at base)"},
 	}
+}
+
+// i1Chain is n chained star-bodied CTEs with a subquery over the last one. The
+// classifier has to follow every link to know that `id` is the chain's and not
+// the enclosing query's, so the chain length is the assertion.
+func i1Chain(n int) string {
+	var b strings.Builder
+	b.WriteString("WITH c1 AS (SELECT * FROM typemx)")
+	for i := 2; i <= n; i++ {
+		fmt.Fprintf(&b, ", c%d AS (SELECT * FROM c%d)", i, i-1)
+	}
+	fmt.Fprintf(&b, " SELECT (SELECT COUNT(*) FROM c%d WHERE id < 4000) AS n "+
+		"FROM decpair WHERE id < 2", n)
+	return b.String()
 }
 
 func TestArcI1AnUnqualifiedNameBindsTheInnerRelation(t *testing.T) {
@@ -317,6 +502,25 @@ func TestArcI1AnUnqualifiedNameBindsTheInnerRelation(t *testing.T) {
 				got, err := i1Run(ctx, arm, tc.sql)
 				if arm.coord != nil {
 					a2CheckRoutes(t, arm.name, before, a2ReadRoutes(arm.coord), tc.routes, tc.sql)
+				}
+				if want, pinned := tc.pinArms[arm.name]; pinned {
+					// A pinned arm claims a DIVERGENCE, and the divergence may
+					// be a value or a refusal. Either way the day it agrees
+					// with PostgreSQL this fails and the pin is deleted.
+					switch {
+					case err != nil && strings.Contains(err.Error(), want):
+						// The recorded failure, unchanged.
+					case err == nil && got == want:
+						// The recorded wrong value, unchanged.
+					case err == nil && got == tc.want:
+						t.Errorf("%s arm now AGREES with PostgreSQL (%s), so this pin is FIXED: "+
+							"delete it from i1Cells.\n  pinned reason: %s\n  SQL: %s",
+							arm.name, tc.want, tc.pinWhy, tc.sql)
+					default:
+						t.Errorf("%s arm answers %v%s, which is neither PostgreSQL's %s nor the "+
+							"pinned %q\n  SQL: %s", arm.name, got, i1ErrText(err), tc.want, want, tc.sql)
+					}
+					continue
 				}
 				if err != nil {
 					t.Errorf("%s arm: %v\n  SQL: %s\n  PostgreSQL 17 answers %s",
@@ -372,4 +576,14 @@ func i1Run(ctx context.Context, arm i1Arm, sql string) (string, error) {
 	case <-qctx.Done():
 		return "", context.DeadlineExceeded
 	}
+}
+
+// i1ErrText renders an error for a failure message, or nothing when there is
+// none, so a pinned cell's diagnostic reads the same whether the arm diverged
+// by VALUE or by REFUSAL.
+func i1ErrText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return " (error: " + err.Error() + ")"
 }
