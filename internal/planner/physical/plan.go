@@ -820,6 +820,12 @@ type SortKeySpec struct {
 	Column    string
 	Desc      bool
 	NullsLast bool
+	// WrittenTerm is the ORDER BY term exactly as the QUERY wrote it, kept
+	// because Column is rewritten by four passes before planning ends and a
+	// consumer that has to ask "which OUTPUT column does this term name" can
+	// no longer read the question off it. Planner-only; the wire carries
+	// Column, SlotPos and the ordering flags (execute_stage_dag.go).
+	WrittenTerm string
 	// SlotPos is the 1-based position of the input column this key sorts on,
 	// or 0 to resolve Column by name. A name is an address only while it is
 	// unique, and two output columns may legally share one (#557).
@@ -7441,10 +7447,11 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		}
 		for _, ob := range node.OrderBy {
 			key := SortKeySpec{
-				Column:    resolveSortKeyColumn(ob.Column, sortChild),
-				Desc:      ob.Desc,
-				NullsLast: resolveNullsLast(ob),
-				SlotPos:   sortKeySlotPosStage(ob, node),
+				Column:      resolveSortKeyColumn(ob.Column, sortChild),
+				Desc:        ob.Desc,
+				NullsLast:   resolveNullsLast(ob),
+				SlotPos:     sortKeySlotPosStage(ob, node),
+				WrittenTerm: strings.TrimSpace(ob.Column),
 			}
 			// A projection absorbed onto the producer while this subtree was
 			// walked (absorbAggregateOutputProjection) MAKES the alias real

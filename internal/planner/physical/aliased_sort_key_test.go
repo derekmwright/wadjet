@@ -112,8 +112,17 @@ func TestAliasedSortKeyResolvesToGroupedColumn(t *testing.T) {
 				t.Fatalf("aliased plan carries %d sort keys, un-aliased control carries %d", len(got), len(ctrl))
 			}
 			for i := range got {
-				if got[i] != ctrl[i] {
-					t.Errorf("sort key %d differs from the un-aliased control: got %+v, control %+v", i, got[i], ctrl[i])
+				// WrittenTerm is the ORDER BY term the QUERY wrote, so it
+				// differs between an aliased query and its un-aliased control
+				// BY CONSTRUCTION (`p` vs `o_orderpriority`) and is excluded
+				// from the comparison. Everything a fragment executes on —
+				// the resolved Column, the ordering flags, the position and
+				// the materialization annotations — must still be identical,
+				// which is what #313's invariant is about.
+				a, b := got[i], ctrl[i]
+				a.WrittenTerm, b.WrittenTerm = "", ""
+				if a != b {
+					t.Errorf("sort key %d differs from the un-aliased control: got %+v, control %+v", i, a, b)
 				}
 			}
 			// The key must name a column the stage it sorts really emits.

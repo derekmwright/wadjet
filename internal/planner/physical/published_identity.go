@@ -65,6 +65,7 @@ func bindConsumersToPublishedIdentity(stages []Stage) {
 	for i := range stages {
 		respellConsumersOverProducerOutput(stages, idx, i)
 		respellUnionArmsOverProducerOutput(stages, idx, i, false)
+		respellSortKeysOverProducerOutput(stages, idx, i)
 	}
 }
 
@@ -670,4 +671,119 @@ func publishedNameForExpr(stages []Stage, idx map[string]int, root int, text str
 		}
 	}
 	return ""
+}
+
+// An ORDER BY term names an OUTPUT column, and the producing stage has its own
+// name for that output's value (#947).
+//
+// `SELECT DISTINCT a AS b, b AS a FROM t ORDER BY a` publishes two columns
+// whose names are SWAPPED relative to their sources. PostgreSQL binds the term
+// to the OUTPUT column `a`, whose value is the source `b`. On the DAG the
+// SELECT list is a Project, which `walkStages` emits no stage for (ADR-0025):
+// the sort is folded onto the producing aggregate, whose output publishes the
+// SOURCE names `a` and `b`, and the key `a` bound the source `a` — the right
+// rows in the wrong sequence, on both DAG arms, where the single-process path
+// and PostgreSQL agree. Without the DISTINCT or the GROUP BY there is no
+// aggregate to fold onto and all four arms agree, which is what says this is
+// the fold's binding and not the parser's.
+//
+// The rule is the one this file applies everywhere: the consumer asks the
+// producer what it CALLS the value. The term names output item i; that item's
+// source expression is what the producer publishes; bind THAT.
+//
+// The boundary is a fact rather than a model: the re-spell only fires where
+// the term BINDS on the producer's stream AND the item's source binds to a
+// DIFFERENT column there. A term that binds nothing is left to
+// resolveDerivedAliasSortKeys, which owns it; a term whose source is the same
+// column is already right.
+func respellSortKeysOverProducerOutput(stages []Stage, idx map[string]int, i int) {
+	s := &stages[i]
+	if len(s.SortKeys) == 0 || len(s.ProjectExprs) > 0 {
+		// A stage that runs the projection ITSELF sorts after it, so its keys
+		// already address the output.
+		return
+	}
+	specs := selectListAbove(stages, s)
+	if len(specs) == 0 {
+		return
+	}
+	in := stageStreamColumnsFiltered(stages, idx, s, passThroughDepth, true)
+	if len(in) == 0 {
+		return
+	}
+	for k := range s.SortKeys {
+		key := &s.SortKeys[k]
+		if key.SlotPos > 0 || key.Column == "" {
+			continue // already addressed by position
+		}
+		// The QUERY's term, not the current Column: several passes rewrite
+		// that field before planning ends — resolveSortKeyColumn chases a
+		// term through the SELECT list by SOURCE name, resolveHiddenSortKeys
+		// and resolveDerivedAliasSortKeys retarget it — and "which OUTPUT
+		// column does this term name" can only be asked of what was written.
+		term := strings.TrimSpace(key.WrittenTerm)
+		if term == "" {
+			term = strings.TrimSpace(key.Column)
+		}
+		src, ok := uniqueOutputSource(specs, term)
+		if !ok || src == "" || strings.EqualFold(strings.TrimSpace(src), term) {
+			continue
+		}
+		want, ok := bindStreamColumn(src, in)
+		if !ok || strings.EqualFold(want, key.Column) {
+			continue
+		}
+		// The key as it stands must bind SOMETHING ELSE on this stream. One
+		// that binds nothing belongs to resolveDerivedAliasSortKeys, which
+		// owns the shapes where the producer publishes no such name at all.
+		bound, ok := bindStreamColumn(key.Column, in)
+		if !ok || strings.EqualFold(bound, want) {
+			continue
+		}
+		key.Column = want
+	}
+}
+
+// selectListAbove is the SELECT-list projection a consumer stage runs directly
+// over this one, or nil when no single consumer carries one.
+//
+// The DAG emits no stage for an ordinary Project, so the only place the select
+// list appears as a stage is where a pass INSERTED one over a producer that
+// could not evaluate it — an aggregate, a union, a DISTINCT
+// (project_stage_insert.go). That is exactly the shape whose sort was folded
+// onto the producer.
+func selectListAbove(stages []Stage, s *Stage) []ProjectExprSpec {
+	var found []ProjectExprSpec
+	for i := range stages {
+		c := &stages[i]
+		if len(c.Dependencies) != 1 || c.Dependencies[0] != s.ID {
+			continue
+		}
+		if len(c.ProjectExprs) == 0 {
+			continue
+		}
+		if found != nil {
+			return nil // two consumers project differently; no single answer
+		}
+		found = c.ProjectExprs
+	}
+	return found
+}
+
+// uniqueOutputSource is the source expression of the one output column a term
+// names, by PostgreSQL's rule: an ORDER BY term may name an output column by
+// its alias or by the spelling the SELECT list wrote, and two items answering
+// to one name is ambiguous and binds nothing here.
+func uniqueOutputSource(specs []ProjectExprSpec, term string) (string, bool) {
+	src, hits := "", 0
+	for _, p := range specs {
+		if p.Name == "" || !strings.EqualFold(p.Name, term) {
+			continue
+		}
+		src, hits = p.Expr, hits+1
+	}
+	if hits != 1 {
+		return "", false
+	}
+	return src, true
 }
