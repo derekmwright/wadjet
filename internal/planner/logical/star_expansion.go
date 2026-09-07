@@ -35,27 +35,106 @@ func ExpandStarProjections(n *Node) {
 	if n.Type != NodeProject || len(n.Children) == 0 || !HasStarProjection(n) {
 		return
 	}
-	scan := loneScan(n.Children[0])
-	if scan == nil || len(scan.ScanColumns) == 0 {
-		return
-	}
+	lone := loneScan(n.Children[0])
 
-	expanded := make([]Projection, 0, len(n.Projections)+len(scan.ScanColumns))
+	expanded := make([]Projection, 0, len(n.Projections)+8)
+	changed := false
 	for _, proj := range n.Projections {
 		if !isStarProjection(proj) {
 			expanded = append(expanded, proj)
 			continue
 		}
-		for _, col := range scan.ScanColumns {
+		// A QUALIFIED star names its own relation, so it expands wherever
+		// that relation's scan is — a join below does not make `o.*`
+		// unknowable, only `*` (#955's rule, applied to the shape a lateral
+		// produces). `SELECT o.*, s.n` was `column "o.*" does not exist in
+		// the input schema` on the single-process arms and, on the DAG, a
+		// column whose NAME and VALUE were both the string `*`.
+		src := lone
+		if qual := starQualifier(proj); qual != "" {
+			src = scanNamed(n.Children[0], qual)
+		}
+		if src == nil || len(src.ScanColumns) == 0 {
+			expanded = append(expanded, proj)
+			continue
+		}
+		changed = true
+		qual := starQualifier(proj)
+		for _, col := range src.ScanColumns {
+			// A QUALIFIED star expands to QUALIFIED references. The bare name
+			// binds the FIRST column of that name in the join's output, which
+			// for `SELECT o.*, li.amount FROM o JOIN li` is li's `id`: the
+			// star's own relation was named and the expansion has to keep
+			// naming it. The published name stays the column's own, which is
+			// what PostgreSQL publishes.
+			ref := &plansql.ColRef{Column: col}
+			expr := col
+			if qual != "" {
+				ref.Table = qual
+				expr = qual + "." + col
+			}
 			expanded = append(expanded, Projection{
-				Column:  col,
+				Column:  expr,
 				Alias:   col,
-				Expr:    col,
-				ASTExpr: &plansql.ColRef{Column: col},
+				Expr:    expr,
+				ASTExpr: ref,
 			})
 		}
 	}
+	if !changed {
+		return
+	}
 	n.Projections = expanded
+}
+
+// starQualifier is the relation a QUALIFIED star names, or "" for a bare `*`.
+func starQualifier(proj Projection) string {
+	e := strings.TrimSpace(proj.Expr)
+	if e == "" {
+		e = strings.TrimSpace(proj.Column)
+	}
+	if !strings.HasSuffix(e, ".*") {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimSuffix(e, ".*"))
+}
+
+// scanNamed is the scan under n that answers to alias, or nil. A star can only
+// be expanded from a BASE-TABLE scan's catalog-annotated schema: a lateral's
+// own output is a projection this pass cannot enumerate, and it carries the
+// correlation slot the join is about to drop, so naming its columns here would
+// publish one.
+func scanNamed(n *Node, alias string) *Node {
+	var found *Node
+	var walk func(*Node)
+	walk = func(cur *Node) {
+		if cur == nil || found != nil {
+			return
+		}
+		// NOT into a decorrelated LATERAL. `setSubtreeAlias` puts the
+		// lateral's alias on its SCAN too, so `s.*` would expand to the inner
+		// TABLE's columns — which the lateral does not publish (its
+		// projection does) and which include the correlation slot the join is
+		// about to drop. Measured: `SELECT s.*, o.id` came back as the inner
+		// table's four columns, all NULL, on the single-process arms and as
+		// `id,__key_0` on the DAG.
+		if cur.LateralSubtree {
+			return
+		}
+		if cur.Type == NodeScan {
+			for _, name := range cur.ScopeNames() {
+				if strings.EqualFold(name, alias) {
+					found = cur
+					return
+				}
+			}
+		}
+		for _, child := range cur.Children {
+			walk(child)
+		}
+	}
+	walk(n)
+	return found
 }
 
 // HasStarProjection reports whether node is a Project that still carries an

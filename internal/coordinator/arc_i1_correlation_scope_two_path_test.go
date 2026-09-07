@@ -434,21 +434,18 @@ func i1Cells() []i1Cell {
 		// each is pinned with the sentence it fails by so the day the gap
 		// closes the pin fails.
 		//
-		// MULTIPLE qualified stars in one SELECT list: the logical builder
-		// emits a projection column literally named `dim.*` that no executor
-		// schema carries. All four arms failed that way at base; the DAG arms
-		// now plan the CTE as a stage and answer.
-		{name: "50_pin_two_qualified_stars_in_one_select_list",
+		// MULTIPLE qualified stars in one SELECT list. It was pinned here as
+		// loud on the single-process arms — the logical builder emitted a
+		// projection column literally named `dim.*` that no executor schema
+		// carries — and arc J1 round 3 closed it: a QUALIFIED star names its
+		// own relation, so it expands from that relation's scan wherever the
+		// scan is, a join below it included, and to QUALIFIED references so
+		// the bare name cannot bind the other side's column of that name
+		// (logical.ExpandStarProjections). The pin is deleted as its proof.
+		{name: "50_two_qualified_stars_in_one_select_list",
 			sql: `WITH c AS (SELECT dim.*, tx.* FROM typemx_dim dim JOIN typemx tx ON tx.g = dim.k) ` +
 				`SELECT (SELECT COUNT(*) FROM c WHERE id < 10) AS n FROM decpair WHERE id < 2`,
-			want: `n | 10`,
-			pinArms: map[string]string{
-				"single":   `column "dim.*" does not exist in the input schema`,
-				spilledArm: `column "dim.*" does not exist in the input schema`,
-			},
-			pinWhy: "the logical builder does not expand a SECOND qualified star; it emits a " +
-				"projection column named `dim.*` and the single-process CTE materialization " +
-				"then cannot resolve it (all four arms failed this way at base)"},
+			want: `n | 10`},
 		// A RECURSIVE CTE named inside a subquery. It has no stage lowering
 		// (ADR-0021 §1b), and the DAG reaches that as a build failure rather
 		// than as the routed refusal §1c would give it.

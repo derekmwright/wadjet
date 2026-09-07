@@ -132,6 +132,50 @@ func TestArcJ1AStoredReservedColumnSurvivesALateral(t *testing.T) {
 				`SELECT * FROM jki WHERE order_id = o.id) s ON true ORDER BY 1, 2`,
 			want: `oid,k | 1,inner-1 | 1,inner-2 | 2,inner-3`},
 
+		// THE SHAPE THAT DEFEATED THE KEY TEST (round 2's rule): the user's
+		// stored column IS what the query correlates on, so it is a join key
+		// of its own side and "exclude a name that is a key of its own side"
+		// admitted it. Only the POSITION says which column the lowering put
+		// there — and the side is the one the lowering BUILT, not whichever
+		// one happens to carry the name (logical.Node.LateralSubtree).
+		{name: "correlate-on-the-stored-key-star",
+			sql: `SELECT * FROM jko o JOIN LATERAL (SELECT MAX(amount) AS mx ` +
+				`FROM jki WHERE __key_0 = o.__key_0) s ON true ORDER BY o.id`,
+			want: `id,__key_0,__key_1,__sortkey_0,mx | 1,mine-1,k1-1,s-1,NULL | ` +
+				`2,mine-2,k1-2,s-2,NULL`},
+		{name: "correlate-on-the-stored-key-by-name",
+			sql: `SELECT o.id AS i, o.__key_0 AS mine, s.mx AS mx FROM jko o JOIN LATERAL (` +
+				`SELECT MAX(amount) AS mx FROM jki WHERE __key_0 = o.__key_0) s ON true ` +
+				`ORDER BY o.id`,
+			want: `i,mine,mx | 1,mine-1,NULL | 2,mine-2,NULL`},
+		{name: "correlate-on-the-stored-key-and-read-the-other-families",
+			sql: `SELECT o.__key_1 AS b, o.__sortkey_0 AS c FROM jko o JOIN LATERAL (` +
+				`SELECT MAX(amount) AS mx FROM jki WHERE __key_0 = o.__key_0) s ON true ` +
+				`ORDER BY 1`,
+			want: `b,c | k1-1,s-1 | k1-2,s-2`},
+		// A LATERAL whose FILTER names a stored reserved column its own list
+		// does not publish. The single-process arm refused it
+		// (`filter column "__key_0" does not exist in the input schema`) and
+		// the DAG answered every lateral value NULL: a predicate carried as
+		// TEXT contributed no column refs, so the scan was never told to read
+		// what the filter reads (logical.collectNodeColumnRefs). The ordinary
+		// -column spelling below was loud on every arm for the same reason.
+		{name: "a-stored-name-in-the-lateral-s-filter",
+			sql: `SELECT o.customer AS c, s.mx AS mx FROM lat_ord o JOIN LATERAL (` +
+				`SELECT MAX(amount) AS mx FROM jki WHERE __key_0 = 'inner-1' ` +
+				`AND order_id = o.id) s ON true ORDER BY 1`,
+			want: `c,mx | Alice,50 | Bob,NULL | Carol,NULL`},
+		{name: "ctl-an-ordinary-column-in-the-lateral-s-filter",
+			sql: `SELECT o.customer AS c, s.mx AS mx FROM lat_ord o JOIN LATERAL (` +
+				`SELECT MAX(amount) AS mx FROM lat_item WHERE product = 'Widget' ` +
+				`AND order_id = o.id) s ON true ORDER BY 1`,
+			want: `c,mx | Alice,50 | Bob,75 | Carol,NULL`},
+		{name: "ctl-the-same-filter-with-a-star",
+			sql: `SELECT * FROM lat_ord o JOIN LATERAL (SELECT MAX(amount) AS mx ` +
+				`FROM jki WHERE __key_0 = 'inner-1' AND order_id = o.id) s ON true ` +
+				`ORDER BY o.id`,
+			want: `id,customer,total,mx | 1,Alice,150,50 | 2,Bob,200,NULL | 3,Carol,0,NULL`},
+
 		// THE CONTROLS: the same tables with no lateral at all, and the
 		// minted slot still absent from a star that has one.
 		{name: "ctl-no-lateral", sql: `SELECT * FROM jko ORDER BY id`,

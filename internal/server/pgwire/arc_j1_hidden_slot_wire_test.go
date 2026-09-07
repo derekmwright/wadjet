@@ -157,6 +157,17 @@ func TestArcJ1AHiddenSlotIsNotInTheRowDescription(t *testing.T) {
 			[]string{"mine"}, ""},
 		{"ctl_the_stored_table_with_no_lateral", `SELECT * FROM j1stored`,
 			[]string{"id", "__key_0"}, ""},
+		// The shape that defeated the key test: the stored column IS what the
+		// query correlates on, so it is a join key of its own side. Only the
+		// POSITION says which column the lowering minted (round 3).
+		{"a_stored_name_that_is_the_correlation_key",
+			`SELECT * FROM j1stored o JOIN LATERAL (SELECT MAX(amount) AS mx ` +
+				`FROM j1item WHERE product = o.__key_0) s ON true`,
+			[]string{"id", "__key_0", "mx"}, ""},
+		{"the_same_read_by_name",
+			`SELECT o.__key_0 AS mine FROM j1stored o JOIN LATERAL (` +
+				`SELECT MAX(amount) AS mx FROM j1item WHERE product = o.__key_0) s ON true`,
+			[]string{"mine"}, ""},
 		{"ctl_an_explicit_list_over_the_lateral",
 			`SELECT o.customer AS c, s.mx AS m ` + aggLateral,
 			[]string{"c", "m"}, ""},
@@ -181,7 +192,8 @@ func TestArcJ1AHiddenSlotIsNotInTheRowDescription(t *testing.T) {
 			// spell is a name a client cannot use — but a name a table
 			// STORES is the user's, and the cells above assert it stays.
 			for _, name := range got {
-				if strings.HasPrefix(c.name, "a_stored_") || strings.HasPrefix(c.name, "ctl_the_stored_") {
+				if strings.HasPrefix(c.name, "a_stored_") || strings.HasPrefix(c.name, "ctl_the_stored_") ||
+					strings.HasPrefix(c.name, "the_same_read_") {
 					continue
 				}
 				if fam := plansql.ReservedSlotFamily(name); fam != "" {

@@ -49,10 +49,11 @@ type SortMergeJoin struct {
 	BuildColOrigins     map[string]string
 	QualifyAllBuildCols bool
 	OutputFilter        map[string]bool
-	// OutputExclude is HashJoinProbe.OutputExclude — the columns this join
-	// materialized for itself and must not publish, whatever a consumer
-	// asks for. See there.
-	OutputExclude map[string]bool
+	// OutputExcludeProbe / OutputExcludeBuild are HashJoinProbe's — the
+	// columns this join materialized for itself, by ORDINAL in their own
+	// side. See there.
+	OutputExcludeProbe map[int]string
+	OutputExcludeBuild map[int]string
 
 	// Spill enables tracker accounting and spill-to-disk. When nil the
 	// operator buffers unbounded in memory (embedded/test paths), like Sort.
@@ -426,8 +427,8 @@ func (j *SortMergeJoin) Finalize(_ context.Context) error {
 	}
 
 	j.outSchema, j.outMapping = joinOutputSchemaWithMapping(j.JoinType, j.probe.schema, j.build.schema,
-		j.BuildTableAlias, j.BuildColOrigins, j.QualifyAllBuildCols, j.OutputFilter, j.OutputExclude,
-		j.LeftKeys, j.RightKeys)
+		j.BuildTableAlias, j.BuildColOrigins, j.QualifyAllBuildCols, j.OutputFilter,
+		j.OutputExcludeProbe, j.OutputExcludeBuild)
 
 	if err := j.resolveCompareKernels(); err != nil {
 		j.mu.Lock()

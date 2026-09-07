@@ -204,6 +204,20 @@ func wireKeyTypes(types []parquet.TypeID) []int {
 	return out
 }
 
+// wireHiddenJoinCols is physical.HiddenJoinCol on the wire: the ordinal a
+// join's own materialized column sits at in its side, the name expected
+// there, and which side that is.
+func wireHiddenJoinCols(cols []physical.HiddenJoinCol) []distributed.HiddenJoinColumn {
+	if len(cols) == 0 {
+		return nil
+	}
+	out := make([]distributed.HiddenJoinColumn, len(cols))
+	for i, c := range cols {
+		out[i] = distributed.HiddenJoinColumn{Ordinal: c.Ordinal, Name: c.Name, Probe: c.Probe}
+	}
+	return out
+}
+
 func wireColumnSpecs(cols []parquet.Column) []distributed.ColumnSpec {
 	if len(cols) == 0 {
 		return nil

@@ -923,10 +923,27 @@ func collectNodeColumnRefs(n *Node, refs map[string]bool) {
 	switch n.Type {
 	case NodeFilter:
 		for _, pred := range n.Predicates {
-			if pred.ASTExpr != nil {
+			switch {
+			case pred.ASTExpr != nil:
 				collectASTColumnRefs(pred.ASTExpr, refs)
-			} else if pred.Column != "" {
+			case pred.Column != "":
 				refs[strings.ToLower(pred.Column)] = true
+			case pred.Raw != "":
+				// A predicate carried as TEXT contributed NO column refs, so
+				// the scan under it was never told to read what the filter
+				// reads. `SELECT * FROM o JOIN LATERAL (SELECT MAX(amount)
+				// AS mx FROM i WHERE k = 'x' AND order_id = o.id) s` narrowed
+				// the lateral's scan to [amount order_id]: the single-process
+				// arm then refused (`filter column "k" does not exist in the
+				// input schema`) and the distributed one evaluated the
+				// predicate against a column it had not read — NULL, so no
+				// rows, so every lateral value came back NULL in silence.
+				//
+				// The same set the join condition's own refs come from; it
+				// only ever WIDENS a scan's read set, which is the safe
+				// direction (sanitizeScanNeeds narrows it again against the
+				// real schema).
+				extractJoinColumnRefs(pred.Raw, refs)
 			}
 		}
 	case NodeProject:

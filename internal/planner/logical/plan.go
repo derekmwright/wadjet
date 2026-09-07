@@ -236,6 +236,22 @@ type Node struct {
 	// star is what makes the slot unreachable rather than usually-hidden
 	// (ADR-0026 §3c). Empty on every other join.
 	HiddenJoinCols []string
+	// LateralSubtree marks the node a DECORRELATED LATERAL's lowering built —
+	// the side of the join that carries the columns it MINTED.
+	//
+	// The marker is on the SUBTREE and not on the join's child index because
+	// a join-order pass may swap the children, and "which side minted this"
+	// has to survive that. Searching both sides for the slot's NAME instead
+	// found the OUTER relation's stored `__key_0` and dropped the user's
+	// column — the round-2 blocker in its third shape.
+	LateralSubtree bool
+	// LateralCountDefaults, on the same JOIN node, names the lateral's output
+	// columns whose EMPTY-INPUT value is 0 rather than NULL — the COUNT
+	// family of an UNGROUPED aggregate. An outer row the lateral matches
+	// nothing for survives only as this join's LEFT pad, and a pad writes
+	// NULL; the default is carried on the COLUMN, above the join, so a star
+	// sees it without anybody rewriting a reference (#977, ADR-0026 §3c).
+	LateralCountDefaults []string
 	// LateralAggregate marks the aggregate a DECORRELATED LATERAL's lowering
 	// built — the one whose group key IS the correlation key, whatever name
 	// it publishes it under.

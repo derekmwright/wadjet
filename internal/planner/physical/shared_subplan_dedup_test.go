@@ -436,7 +436,11 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		// different relation than one that does not — so two stages that
 		// differ here are not interchangeable.
 		"HiddenJoinCols": "hashed",
-		"JoinFilter":     "hashed", "BuildFilterExprs": "hashed",
+		// The lateral's empty-input defaults change the VALUES a stage emits
+		// (a padded COUNT reads 0, not NULL), so two stages that differ here
+		// are not interchangeable.
+		"LateralCountDefaults": "hashed",
+		"JoinFilter":           "hashed", "BuildFilterExprs": "hashed",
 		// NOT IN's three-valued rule changes which rows the stage EMITS
 		// (#507), so an anti join that owes it is not interchangeable with
 		// one that does not.

@@ -503,6 +503,225 @@ func TestArcJ1TheReservedNamespaceRefusesOnlyMinting(t *testing.T) {
 	}
 }
 
+// THE LATERAL'S OWN BLOCK READS THE SLOT — every site of it, not the SELECT
+// list alone (arc J1 round 3, #956).
+//
+// The mint moves the key the AGGREGATE publishes to `__key_N`, so every
+// expression ABOVE that aggregate has to read the slot. Round 2 rewrote select
+// items only, and a HAVING over the key was left naming a column the aggregate
+// no longer publishes: `filter column "order_id" does not exist in the input
+// schema` on the single-process arm and `SELECT list no stage computes` on both
+// DAG arms — where the BASE answers PostgreSQL's row. Right → loud, and this
+// is its first measurement.
+//
+// The WHERE and the GROUP BY keep the source column: both are resolved against
+// the aggregate's INPUT. And the walk runs only where an aggregate republishes
+// the key — without one the injected item is a SIBLING in the same projection,
+// nothing has computed it yet, and `CASE WHEN order_id > 1 …` re-spelled to
+// the slot read NULL and took the ELSE arm on every row.
+func TestArcJ1TheLateralBlockReadsTheSlot(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	t.Cleanup(cancel)
+	arms := e3Arms(t, ctx)
+
+	for _, tc := range []struct{ name, sql, want string }{
+		{"having-the-key", `SELECT o.customer AS c, s.mx AS mx FROM lat_ord o JOIN LATERAL (` +
+			`SELECT MAX(amount) AS mx FROM lat_item WHERE order_id = o.id ` +
+			`GROUP BY order_id HAVING order_id > 1) s ON true ORDER BY 1`,
+			`c,mx | Bob,125`},
+		{"having-the-key-twice", `SELECT o.customer AS c, s.mx AS mx FROM lat_ord o JOIN LATERAL (` +
+			`SELECT MAX(amount) AS mx FROM lat_item WHERE order_id = o.id ` +
+			`GROUP BY order_id HAVING order_id > 1 AND order_id < 3) s ON true ORDER BY 1`,
+			`c,mx | Bob,125`},
+		{"having-the-key-inside-a-case", `SELECT o.customer AS c, s.mx AS mx FROM lat_ord o ` +
+			`JOIN LATERAL (SELECT MAX(amount) AS mx FROM lat_item WHERE order_id = o.id ` +
+			`GROUP BY order_id HAVING CASE WHEN order_id > 1 THEN 1 ELSE 0 END = 1) s ON true ` +
+			`ORDER BY 1`,
+			`c,mx | Bob,125`},
+		{"the-lateral-s-own-order-by-over-the-key",
+			`SELECT o.customer AS c, s.mx AS mx FROM lat_ord o JOIN LATERAL (` +
+				`SELECT MAX(amount) AS mx FROM lat_item WHERE order_id = o.id ` +
+				`GROUP BY order_id ORDER BY order_id) s ON true ORDER BY 1`,
+			`c,mx | Alice,100 | Bob,125`},
+		// THE CONTROLS: a HAVING that does not name the key, and the key in a
+		// select item of a lateral with NO aggregate — where the re-spell
+		// must NOT run.
+		{"ctl-having-count", `SELECT o.customer AS c, s.mx AS mx FROM lat_ord o JOIN LATERAL (` +
+			`SELECT MAX(amount) AS mx FROM lat_item WHERE order_id = o.id ` +
+			`GROUP BY order_id HAVING COUNT(*) > 1) s ON true ORDER BY 1`,
+			`c,mx | Alice,100 | Bob,125`},
+		{"ctl-the-key-in-a-CASE-with-no-aggregate",
+			`SELECT o.customer AS c, s.k AS k FROM lat_ord o JOIN LATERAL (` +
+				`SELECT CASE WHEN order_id > 1 THEN 'hi' ELSE 'lo' END AS k FROM lat_item ` +
+				`WHERE order_id = o.id) s ON true ORDER BY 1,2`,
+			`c,k | Alice,lo | Alice,lo | Bob,hi | Bob,hi`},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				cols, rows, err := arm.run(tc.sql)
+				if err != nil {
+					t.Fatalf("%s arm: %v\n  want %s (live PostgreSQL 17)\n  SQL: %s",
+						arm.name, err, tc.want, tc.sql)
+				}
+				if got := e3Render(cols, rows); got != tc.want {
+					t.Fatalf("%s arm: %s\n  want %s (live PostgreSQL 17)\n  SQL: %s",
+						arm.name, got, tc.want, tc.sql)
+				}
+			}
+		})
+	}
+}
+
+// AN UNGROUPED AGGREGATE'S EMPTY-INPUT VALUE RIDES ON THE COLUMN (#977).
+//
+// PostgreSQL evaluates a LATERAL once per outer row, and `COUNT(*)` over an
+// empty input is 0 — so an outer row the lateral matches nothing for comes
+// back with 0, not NULL. This engine decorrelates into a join, so that row
+// exists only as a LEFT pad, and a pad writes NULL.
+//
+// Rewriting the enclosing query's REFERENCES to `COALESCE(<ref>, 0)` reaches a
+// named reference and nothing else: a star has none. Refusing the star instead
+// (round 2) refused queries whose outer rows ALL match, which is a right answer
+// taken away. The default belongs on the COLUMN, above the join, where a star,
+// a derived star, a CTE, the wire, a scalar subquery's substitution and an
+// EXISTS all read it.
+func TestArcJ1TheEmptyInputDefaultIsOnTheColumn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	t.Cleanup(cancel)
+	arms := e3Arms(t, ctx)
+
+	const cnt = `LEFT JOIN LATERAL (SELECT COUNT(*) AS n FROM lat_item ` +
+		`WHERE order_id = o.id) s ON true`
+
+	for _, tc := range []struct{ name, sql, want string }{
+		{"a-star-sees-the-default", `SELECT * FROM lat_ord o ` + cnt + ` ORDER BY o.id`,
+			`id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`},
+		{"a-derived-star-sees-it",
+			`SELECT * FROM (SELECT * FROM lat_ord o ` + cnt + `) x ORDER BY x.id`,
+			`id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`},
+		{"a-cte-star-sees-it",
+			`WITH c AS (SELECT * FROM lat_ord o ` + cnt + `) SELECT * FROM c ORDER BY c.id`,
+			`id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`},
+		{"the-named-spelling-still-does",
+			`SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + cnt + ` ORDER BY 1`,
+			`c,n | Alice,2 | Bob,2 | Carol,0`},
+		{"an-outer-star-beside-the-lateral-column",
+			`SELECT o.*, s.n FROM lat_ord o ` + cnt + ` ORDER BY o.id`,
+			`id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`},
+		// A star over a lateral where EVERY outer row matches was RIGHT one
+		// commit before round 2's refusal and refused by it: a plan-time
+		// refusal cannot know the data.
+		{"a-star-where-every-outer-row-matches",
+			`SELECT * FROM lat_item o LEFT JOIN LATERAL (SELECT COUNT(*) AS n ` +
+				`FROM lat_item i WHERE i.order_id = o.order_id) s ON true ORDER BY o.id`,
+			`id,order_id,product,amount,n | 1,1,Widget,50,2 | 2,1,Gadget,100,2 | ` +
+				`3,2,Widget,75,2 | 4,2,Doohickey,125,2`},
+		// MAX over an empty input IS NULL, so that lateral needs no default
+		// and its star was always right — the control that says the rule is
+		// the COUNT family's and not every aggregate's.
+		{"ctl-a-MAX-lateral-keeps-its-NULL",
+			`SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT MAX(amount) AS mx ` +
+				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id`,
+			`id,customer,total,mx | 1,Alice,150,100 | 2,Bob,200,125 | 3,Carol,0,NULL`},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				cols, rows, err := arm.run(tc.sql)
+				if err != nil {
+					t.Fatalf("%s arm: %v\n  want %s (live PostgreSQL 17)\n  SQL: %s",
+						arm.name, err, tc.want, tc.sql)
+				}
+				if got := e3Render(cols, rows); got != tc.want {
+					t.Fatalf("%s arm: %s\n  want %s (live PostgreSQL 17)\n  SQL: %s",
+						arm.name, got, tc.want, tc.sql)
+				}
+			}
+		})
+	}
+}
+
+// A QUALIFIED STAR BESIDE ANOTHER SELECT ITEM names its own relation, so it
+// expands — over a join, and over a lateral join (arc J1 round 3).
+//
+// `SELECT o.*, s.n` is the spelling `docs/sql-reference.md` names as the way
+// to get a lateral's defaulted column, and it was
+// `column "o.*" does not exist in the input schema` on the single-process arms
+// and a column whose NAME and VALUE were both the string `*` on the DAG. The
+// same over a PLAIN join was loud on every arm, so this is older than laterals.
+//
+// `s.*` — the LATERAL's own star — is NOT expanded and stays loud: the
+// lateral's output is a projection this pass cannot enumerate, and the scan
+// under it carries the correlation slot the join is about to drop, so naming
+// its columns here would publish one. Pinned with the sentence.
+func TestArcJ1AQualifiedStarBesideAnotherItemExpands(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	t.Cleanup(cancel)
+	arms := e3Arms(t, ctx)
+
+	const cnt = `LEFT JOIN LATERAL (SELECT COUNT(*) AS n FROM lat_item ` +
+		`WHERE order_id = o.id) s ON true`
+
+	for _, tc := range []struct{ name, sql, want, wantErrLike string }{
+		{name: "outer-star-beside-a-lateral-column",
+			sql:  `SELECT o.*, s.n FROM lat_ord o ` + cnt + ` ORDER BY o.id`,
+			want: `id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`},
+		{name: "outer-star-beside-a-plain-join-column",
+			sql: `SELECT o.*, li.amount FROM lat_ord o JOIN lat_item li ` +
+				`ON li.order_id = o.id ORDER BY o.id, li.amount`,
+			want: `id,customer,total,amount | 1,Alice,150,50 | 1,Alice,150,100 | ` +
+				`2,Bob,200,75 | 2,Bob,200,125`},
+		{name: "outer-star-beside-a-computed-item",
+			sql:  `SELECT o.*, o.total * 2 AS t2 FROM lat_ord o ` + cnt + ` ORDER BY o.id`,
+			want: `id,customer,total,t2 | 1,Alice,150,300 | 2,Bob,200,400 | 3,Carol,0,0`},
+		// PINNED: the LATERAL's own star beside another item. Loud on every
+		// arm and with one sentence, which is what it was NOT before — the
+		// DAG invented a column called `*`.
+		{name: "pinned-the-lateral-s-own-star-beside-another-item",
+			sql:         `SELECT s.*, o.id FROM lat_ord o ` + cnt + ` ORDER BY o.id`,
+			wantErrLike: `column "s.*" does not exist in the input schema`},
+		{name: "pinned-both-stars",
+			sql:         `SELECT o.*, s.* FROM lat_ord o ` + cnt + ` ORDER BY o.id`,
+			wantErrLike: `column "s.*" does not exist in the input schema`},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				cols, rows, err := arm.run(tc.sql)
+				if tc.wantErrLike != "" {
+					if err == nil {
+						t.Fatalf("%s arm ANSWERED %s where the pin says it fails\n  SQL: %s",
+							arm.name, e3Render(cols, rows), tc.sql)
+					}
+					if !strings.Contains(err.Error(), tc.wantErrLike) {
+						t.Errorf("%s arm failed by a DIFFERENT sentence: %v\n  SQL: %s",
+							arm.name, err, tc.sql)
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatalf("%s arm: %v\n  want %s (live PostgreSQL 17)\n  SQL: %s",
+						arm.name, err, tc.want, tc.sql)
+				}
+				if got := e3Render(cols, rows); got != tc.want {
+					t.Fatalf("%s arm: %s\n  want %s (live PostgreSQL 17)\n  SQL: %s",
+						arm.name, got, tc.want, tc.sql)
+				}
+			}
+		})
+	}
+}
+
 // A WINDOW INSIDE A CORRELATED LATERAL IS REFUSED, NOT ANSWERED WRONGLY.
 //
 // The decorrelation moves the correlated predicate out of the subquery and

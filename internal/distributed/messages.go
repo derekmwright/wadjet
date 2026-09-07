@@ -195,7 +195,11 @@ type Task struct {
 	// decorrelated LATERAL's correlation key — which the probe must not
 	// publish however wide Columns is. See physical.Stage.HiddenJoinCols and
 	// exec.HashJoinProbe.OutputExclude.
-	HiddenJoinColumns []string `json:"hidden_join_columns,omitempty"`
+	HiddenJoinColumns []HiddenJoinColumn `json:"hidden_join_columns,omitempty"`
+	// LateralCountDefaults are the lateral's COUNT outputs, whose empty-input
+	// value is 0 rather than the NULL a LEFT pad writes. See
+	// physical.Stage.LateralCountDefaults and exec.LateralEmptyDefault.
+	LateralCountDefaults []string `json:"lateral_count_defaults,omitempty"`
 
 	// Fused join: additional broadcast joins absorbed into a single task.
 	// The worker builds hash tables for each fused join, then chains probes
@@ -580,10 +584,15 @@ type OpSpec struct {
 	QualifyAllBuildCols bool              `json:"qualify_all_build_cols,omitempty"`
 	BuildColOrigins     map[string]string `json:"build_col_origins,omitempty"` // bare build col → owning scan alias (multi-table builds only)
 	OutputColumns       []string          `json:"output_columns,omitempty"`    // OutputFilter for primary probe
-	// HiddenColumns is the probe's OutputExclude: columns the join
-	// materialized for itself and must not publish, whatever OutputColumns
-	// asks for. See exec.HashJoinProbe.OutputExclude.
-	HiddenColumns   []string `json:"hidden_columns,omitempty"`
+	// HiddenColumns are the columns the join materialized for itself and must
+	// not publish, whatever OutputColumns asks for — addressed by ORDINAL in
+	// their own side. See HiddenJoinColumn and
+	// exec.HashJoinProbe.OutputExcludeProbe.
+	HiddenColumns []HiddenJoinColumn `json:"hidden_columns,omitempty"`
+	// CountDefaults are the lateral COUNT outputs whose empty-input value is
+	// 0 rather than the NULL a LEFT pad writes; the worker runs
+	// exec.LateralEmptyDefault for them directly above the probe.
+	CountDefaults   []string `json:"count_defaults,omitempty"`
 	LateMaterialize bool     `json:"late_materialize,omitempty"` // emit view-column join output (deferred gather)
 	// BuildSchema / ProbeSchema are the plan-declared columns of each side,
 	// read ONLY when that side turns out to be empty — an outer join still
@@ -1072,6 +1081,18 @@ type WindowFrameSpec struct {
 type WindowBoundSpec struct {
 	Type   string `json:"type"` // unbounded_preceding, preceding, current_row, following, unbounded_following
 	Offset int    `json:"offset,omitempty"`
+}
+
+// HiddenJoinColumn is physical.HiddenJoinCol on the wire: one column a join
+// MINTED for itself, addressed by its ORDINAL in the side that carries it.
+// The name is the planner's expectation at that ordinal and is a SAFETY CHECK
+// — when the plan and the runtime disagree the column is KEPT, because an
+// extra column is a divergence a gate sees and a dropped one is a user's data
+// gone. See exec.HashJoinProbe.OutputExcludeProbe.
+type HiddenJoinColumn struct {
+	Ordinal int    `json:"ordinal"`
+	Name    string `json:"name"`
+	Probe   bool   `json:"probe,omitempty"`
 }
 
 // FusedJoinSpec describes an additional broadcast join absorbed into a task.

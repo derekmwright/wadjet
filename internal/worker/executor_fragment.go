@@ -2296,7 +2296,7 @@ func (e *Executor) buildFragmentSortMergeJoin(ctx context.Context, task distribu
 		}
 		j.OutputFilter = filter
 	}
-	j.OutputExclude = hiddenColumnSet(spec.HiddenColumns, spec.OutputColumns)
+	j.OutputExcludeProbe, j.OutputExcludeBuild = hiddenColumnSets(spec.HiddenColumns, spec.OutputColumns)
 	if sm := e.spillFor(ctx); sm != nil {
 		j.Spill = sm
 	}
@@ -3042,12 +3042,20 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 	// The join's OWN materialized columns are dropped on this path exactly
 	// as the single-process planner drops them, so both paths publish one
 	// column set for one query (exec.HashJoinProbe.OutputExclude).
-	probe.OutputExclude = hiddenColumnSet(spec.HiddenColumns, spec.OutputColumns)
-	return []exec.UnaryOperator{probe}, cleanup, nil
+	probe.OutputExcludeProbe, probe.OutputExcludeBuild = hiddenColumnSets(spec.HiddenColumns, spec.OutputColumns)
+	ops := []exec.UnaryOperator{probe}
+	// The lateral's empty-input default rides DIRECTLY above the probe, the
+	// same position the single-process planner gives it: an outer row the
+	// lateral matched nothing for exists only as this join's pad, and the
+	// column's own value there is 0, not NULL (exec.LateralEmptyDefault).
+	if op := exec.NewLateralEmptyDefault(spec.CountDefaults); op != nil {
+		ops = append(ops, op)
+	}
+	return ops, cleanup, nil
 }
 
-// hiddenColumnSet is OpSpec.HiddenColumns as the probe's OutputExclude set,
-// minus anything this stage's OWN column list asks for.
+// hiddenColumnSets is OpSpec.HiddenColumns as the probe's per-side
+// OutputExclude maps, minus anything this stage's OWN column list asks for.
 //
 // A LATERAL's projection emits no stage of its own, so on this path it is
 // materialized ABOVE the join — and that projection is exactly the operator
@@ -3061,9 +3069,9 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 // BELOW the join, nothing above may name the slot, and a reference to it
 // through a derived star reads a column that does not exist — which is what
 // PostgreSQL answers as well.
-func hiddenColumnSet(cols, asked []string) map[string]bool {
+func hiddenColumnSets(cols []distributed.HiddenJoinColumn, asked []string) (probe, build map[int]string) {
 	if len(cols) == 0 {
-		return nil
+		return nil, nil
 	}
 	needed := make(map[string]bool, len(asked))
 	for _, a := range asked {
@@ -3072,17 +3080,23 @@ func hiddenColumnSet(cols, asked []string) map[string]bool {
 			needed[strings.ToLower(bare)] = true
 		}
 	}
-	excl := make(map[string]bool, len(cols))
 	for _, c := range cols {
-		if needed[strings.ToLower(c)] {
+		if needed[strings.ToLower(c.Name)] {
 			continue
 		}
-		excl[c] = true
+		if c.Probe {
+			if probe == nil {
+				probe = map[int]string{}
+			}
+			probe[c.Ordinal] = c.Name
+			continue
+		}
+		if build == nil {
+			build = map[int]string{}
+		}
+		build[c.Ordinal] = c.Name
 	}
-	if len(excl) == 0 {
-		return nil
-	}
-	return excl
+	return probe, build
 }
 
 // fragmentSink is the internal interface every fragment-sink kind implements:

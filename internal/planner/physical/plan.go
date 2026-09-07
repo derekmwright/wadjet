@@ -254,8 +254,13 @@ type Stage struct {
 	// and declaredJoinSchema leaves them out of the declaration, so the
 	// stage's empty-side files and its full ones describe the same relation
 	// (ADR-0010). Nil on every other join.
-	HiddenJoinCols []string
-	JoinFilter     string // semi/anti join inequality filter (e.g., "l2.l_suppkey != l1.l_suppkey")
+	HiddenJoinCols []HiddenJoinCol
+	// LateralCountDefaults is logical.Node.LateralCountDefaults for this join
+	// stage: the lateral's COUNT outputs, whose empty-input value is 0 and not
+	// the NULL a LEFT pad writes. The worker runs exec.LateralEmptyDefault
+	// directly above the probe, exactly as the single-process planner does.
+	LateralCountDefaults []string
+	JoinFilter           string // semi/anti join inequality filter (e.g., "l2.l_suppkey != l1.l_suppkey")
 	// NullAwareAnti carries logical.Node.NullAwareAnti to the worker: this
 	// anti join came from a NOT IN and owes its three-valued rule, not the
 	// two-valued "did nothing match" an anti join asks on its own (#507).
@@ -723,7 +728,7 @@ type ChainedJoinSpec struct {
 	// HiddenJoinCols is the absorbed stage's own materialized columns (see
 	// Stage.HiddenJoinCols): fusing a join into its parent must not turn a
 	// column the join hid into one the fused stage publishes.
-	HiddenJoinCols []string
+	HiddenJoinCols []HiddenJoinCol
 	// JoinBuildSchema is the absorbed join's declared build columns, read
 	// only when that build turns out to be empty (#348).
 	JoinBuildSchema []parquet.Column
@@ -8030,8 +8035,9 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// worker drops them from the probe's output exactly as the
 		// single-process planner does, so the two paths publish one column
 		// set (ADR-0026 3c).
-		if len(node.HiddenJoinCols) > 0 {
-			stage.HiddenJoinCols = append([]string(nil), node.HiddenJoinCols...)
+		stage.HiddenJoinCols = stageHiddenPositions(node)
+		if len(node.LateralCountDefaults) > 0 {
+			stage.LateralCountDefaults = append([]string(nil), node.LateralCountDefaults...)
 		}
 		// Propagate semi/anti join inequality filters
 		if node.JoinFilter != "" {
@@ -9144,7 +9150,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		if f := joinProbeOutputFilter(node); f != nil {
 			probe.OutputFilter = f
 		}
-		probe.OutputExclude = joinProbeOutputExclude(node)
+		probe.OutputExcludeProbe, probe.OutputExcludeBuild = joinHiddenPositions(node)
 
 		bridge := &reverseBloomBridge{
 			childSource:   leftSource,
@@ -9159,7 +9165,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 			workers:       innerPipelineWorkers(leftSource),
 			spill:         p.getSpillManager(),
 		}
-		return bridge, []exec.UnaryOperator{probe}, &exec.CollectSink{}, nil
+		return bridge, append([]exec.UnaryOperator{probe}, lateralEmptyDefaultOps(node)...), &exec.CollectSink{}, nil
 	}
 
 	if deferBuild {
@@ -9172,7 +9178,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		if f := joinProbeOutputFilter(node); f != nil {
 			probe.OutputFilter = f
 		}
-		probe.OutputExclude = joinProbeOutputExclude(node)
+		probe.OutputExcludeProbe, probe.OutputExcludeBuild = joinHiddenPositions(node)
 
 		bridge := &deferredJoinBridge{
 			childSource: leftSource,
@@ -9190,7 +9196,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 				probe:    probe,
 			}, nil, &exec.CollectSink{}, nil
 		}
-		return bridge, []exec.UnaryOperator{probe}, &exec.CollectSink{}, nil
+		return bridge, append([]exec.UnaryOperator{probe}, lateralEmptyDefaultOps(node)...), &exec.CollectSink{}, nil
 	}
 
 	// Immediate: wait for build to complete before accessing hash table state.
@@ -9248,8 +9254,14 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	if f := joinProbeOutputFilter(node); f != nil {
 		probe.OutputFilter = f
 	}
-	probe.OutputExclude = joinProbeOutputExclude(node)
+	probe.OutputExcludeProbe, probe.OutputExcludeBuild = joinHiddenPositions(node)
 	leftOps = append(leftOps, probe)
+	// The lateral's empty-input default rides directly above the probe: an
+	// outer row the lateral matched nothing for exists only as this join's
+	// pad, and the column's own value there is 0, not NULL. Above the join
+	// rather than in the enclosing query's references, so a star sees it
+	// (exec.LateralEmptyDefault, #977).
+	leftOps = append(leftOps, lateralEmptyDefaultOps(node)...)
 
 	// For RIGHT and FULL OUTER joins, unmatched build-side rows must be
 	// flushed after all probe batches have been processed. Wrap the source
@@ -18435,18 +18447,163 @@ func limitPushdownSafe(node *logical.Node) bool {
 // narrows there. An OutputFilter can only NARROW, so adding a qualifier that
 // names no column costs nothing; the expansion is unconditional for that
 // reason rather than guessing which qualifiers are ROW columns.
-// joinProbeOutputExclude is the join's own materialized columns — the ones it
-// must not publish however wide the consumer's ask is. See
-// exec.HashJoinProbe.OutputExclude and logical.Node.HiddenJoinCols.
-func joinProbeOutputExclude(node *logical.Node) map[string]bool {
-	if len(node.HiddenJoinCols) == 0 {
+// lateralEmptyDefaultOps is the operator that carries an ungrouped aggregate's
+// empty-input value on the lateral's own output column, or nil when this join
+// has none. See exec.LateralEmptyDefault and logical.Node.LateralCountDefaults.
+func lateralEmptyDefaultOps(node *logical.Node) []exec.UnaryOperator {
+	if node == nil || len(node.LateralCountDefaults) == 0 {
 		return nil
 	}
-	excl := make(map[string]bool, len(node.HiddenJoinCols))
-	for _, c := range node.HiddenJoinCols {
-		excl[c] = true
+	op := exec.NewLateralEmptyDefault(node.LateralCountDefaults)
+	if op == nil {
+		return nil
 	}
-	return excl
+	return []exec.UnaryOperator{op}
+}
+
+// HiddenJoinCol is one column a join MINTED for itself: the ORDINAL it sits
+// at in the side that carries it, the name the planner expects there (a
+// safety check, never the identity), and which side that is.
+type HiddenJoinCol struct {
+	Ordinal int
+	Name    string
+	Probe   bool
+}
+
+// stageHiddenPositions is joinHiddenPositions against the model the
+// DISTRIBUTED path runs under: what each side's STAGE emits, which is not what
+// the logical subtree emits — a Project emits no stage, so a lateral whose
+// SELECT list is a bare projection streams its SCAN's columns and the slot's
+// alias never lands there at all. A slot the stream does not carry has no
+// ordinal and is dropped by nobody, which is the honest answer for that shape.
+func stageHiddenPositions(node *logical.Node) []HiddenJoinCol {
+	if node == nil || len(node.HiddenJoinCols) == 0 || len(node.Children) < 2 {
+		return nil
+	}
+	side := lateralSideOf(node)
+	if side < 0 {
+		return nil
+	}
+	var out []HiddenJoinCol
+	declared := declaredJoinSchema(node.Children[side], nil)
+	for _, hidden := range node.HiddenJoinCols {
+		for i, col := range declared {
+			if !strings.EqualFold(col.Name, hidden) {
+				continue
+			}
+			out = append(out, HiddenJoinCol{Ordinal: i, Name: hidden, Probe: side == 0})
+			break
+		}
+	}
+	return out
+}
+
+// lateralSideOf is which child of this join the LATERAL lowering built, or -1
+// when neither says so. Only that side can carry a column this join minted;
+// the other one's `__key_0` is a USER's stored column (ADR-0012), and looking
+// for the name on both sides dropped it.
+func lateralSideOf(node *logical.Node) int {
+	if node == nil || len(node.Children) < 2 {
+		return -1
+	}
+	for i := 0; i < 2; i++ {
+		if node.Children[i] != nil && node.Children[i].LateralSubtree {
+			return i
+		}
+	}
+	return -1
+}
+
+// joinHiddenPositions is where each column this join MINTED sits in the side
+// that carries it — the identity `exec.HashJoinProbe.OutputExcludeProbe` /
+// `OutputExcludeBuild` drop by.
+//
+// A NAME cannot be that identity. Reading is not minting, so a table may
+// already store a column called `__key_0` (ADR-0012), and a query may
+// CORRELATE ON it — which is exactly when a "is it a join key of its own
+// side" test admits the user's column to the exclusion. Only the position
+// says which column this lowering put there.
+//
+// The model is the SINGLE-PROCESS one: what each side's subtree EMITS, which
+// for a Project is its projections in order. The distributed path computes its
+// own against the STAGE's stream, because a Project emits no stage there
+// (stageHiddenPositions).
+func joinHiddenPositions(node *logical.Node) (probe, build map[int]string) {
+	if node == nil || len(node.HiddenJoinCols) == 0 || len(node.Children) < 2 {
+		return nil, nil
+	}
+	side := lateralSideOf(node)
+	if side < 0 {
+		return nil, nil
+	}
+	names := emittedColumnNames(node.Children[side])
+	if len(names) == 0 {
+		return nil, nil
+	}
+	found := map[int]string{}
+	for _, hidden := range node.HiddenJoinCols {
+		for i, n := range names {
+			if !strings.EqualFold(n, hidden) {
+				continue
+			}
+			found[i] = hidden
+			break
+		}
+	}
+	if len(found) == 0 {
+		return nil, nil
+	}
+	if side == 0 {
+		return found, nil
+	}
+	return nil, found
+}
+
+// emittedColumnNames is the ORDER a batch from this subtree arrives in, as
+// far as the logical plan states it: a Project emits its projections, an
+// Aggregate its published keys then its aggregates, a Scan its columns. A
+// shape it cannot state returns nil, and a position nobody can compute drops
+// nothing.
+func emittedColumnNames(n *logical.Node) []string {
+	for cur := n; cur != nil; {
+		switch cur.Type {
+		case logical.NodeProject:
+			out := make([]string, 0, len(cur.Projections))
+			for _, pr := range cur.Projections {
+				name := pr.Alias
+				if name == "" {
+					name = pr.Column
+				}
+				if name == "" {
+					name = strings.TrimSpace(pr.Expr)
+				}
+				out = append(out, name)
+			}
+			return out
+		case logical.NodeAggregate:
+			published, resolve := stageGroupKeyNames(cur, aggInput(cur))
+			out := append([]string(nil), stageEmittedKeyNames(published, resolve)...)
+			for _, agg := range cur.AggExprs {
+				out = append(out, agg.OutputCol)
+			}
+			return out
+		case logical.NodeScan:
+			return cur.ScanColumns
+		}
+		if len(cur.Children) != 1 {
+			return nil
+		}
+		cur = cur.Children[0]
+	}
+	return nil
+}
+
+// aggInput is the node an aggregate reads, or nil.
+func aggInput(n *logical.Node) *logical.Node {
+	if n == nil || len(n.Children) != 1 {
+		return nil
+	}
+	return n.Children[0]
 }
 
 func joinProbeOutputFilter(node *logical.Node) map[string]bool {

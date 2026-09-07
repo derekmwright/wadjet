@@ -1341,9 +1341,15 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 				// cases and which of them this can express.
 				plan := lateralEmptyInputPlan(jt, empty,
 					lateralJoinNullExtendsAfter(info.Joins, joinIdx))
-				if err := refuseStarOverADefaultedLateral(info, join.RightAlias,
-					empty, plan); err != nil {
-					return nil, err
+				var countDefaults []string
+				switch plan {
+				case lateralPadOnly, lateralPadThenFilter:
+					// The empty-input value rides on the COLUMN. The
+					// reference rewrite below stays for the shapes it
+					// already serves — a WHERE the ON moved into, an
+					// aggregate over the lateral's column — and the two
+					// agree: COALESCE(0, 0) is 0.
+					countDefaults = append(countDefaults, empty.countOutputs...)
 				}
 				switch plan {
 				case lateralPadThenFilter:
@@ -1362,6 +1368,7 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 				case lateralNoRepair:
 					// Left as written. See lateralEmptyInputPlan.
 				}
+				right.LateralSubtree = true
 				lat := NewJoin(left, right, jt, joinCond)
 				// The correlation key this lowering MATERIALIZED is the
 				// join's to key on and nobody else's to see: the enclosing
@@ -1371,6 +1378,7 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 				// place below every star, derived star and CTE star, so the
 				// trim cannot be reached around (ADR-0026 3c).
 				lat.HiddenJoinCols = hiddenCols
+				lat.LateralCountDefaults = countDefaults
 				items[idx] = lat
 			} else {
 				rightRef := &plansql.TableRef{
@@ -2109,7 +2117,16 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 			}
 			keyRename[strings.ToLower(strings.TrimSpace(innerCol))] = slot
 			mintedKeys[strings.ToLower(strings.TrimSpace(innerCol))] = slot
-			respellKeyRefsToSlot(subInfo.Columns, innerCol, slot)
+			if hasAgg {
+				// ONLY over an aggregate. There the projection sits ABOVE the
+				// operator that republishes the key under the slot, so a
+				// reference to the slot resolves. Without one, the injected
+				// item is a SIBLING in the SAME projection and nothing has
+				// computed it yet: `CASE WHEN order_id > 1 …` re-spelled to
+				// `__key_0` read NULL from the projection's INPUT and every
+				// row took the ELSE arm.
+				respellKeyRefsToSlot(subInfo, innerCol, slot)
+			}
 		}
 		// Keys first, mirroring the order buildAggregate emits them in, so
 		// the projection above stays elidable in the ordinary shape.
@@ -2306,60 +2323,6 @@ func lateralKeyNameCollides(cols []plansql.SelectColumn, innerCol string) bool {
 	return false
 }
 
-// refuseStarOverADefaultedLateral refuses a `SELECT *` over a LATERAL whose
-// empty-input default the star cannot reach.
-//
-// An UNGROUPED aggregate over an empty input still yields a row in PostgreSQL,
-// and for the COUNT family that row's value is 0, not NULL. This lowering
-// gives the outer row back by making the join LEFT and rewriting the enclosing
-// query's REFERENCES to `COALESCE(<ref>, 0)` — and a star has no reference to
-// rewrite. It expands in a later pass over the plan's own schema, and a star
-// over a JOIN is never expanded at all (guessing its column set would silently
-// change which columns the query returns), so there is nothing here to reach.
-//
-// The result was `Carol, NULL` where PostgreSQL 17 answers `Carol, 0`: a
-// plausible wrong number, on every arm once the correlation slot stopped
-// widening the star (arc J1 round 1 — before it, both DAG arms refused the
-// shape for an unrelated reason and the divergence was two arms narrower).
-// A number that is wrong for exactly the rows a LEFT pad manufactures is the
-// hardest kind to notice, so the shape is refused instead, and the message
-// names the spelling that answers.
-//
-// Narrow on purpose: only where a DEFAULT exists (the COUNT family — MAX over
-// an empty input IS NULL, and a star over that lateral is right and stays
-// answerable), only where the repair is the one that applies defaults, and
-// only for a star that covers the lateral.
-func refuseStarOverADefaultedLateral(info *plansql.SelectInfo, alias string,
-	empty lateralEmptyInput, plan lateralEmptyInputCase) error {
-	if len(empty.countOutputs) == 0 || info == nil {
-		return nil
-	}
-	if plan != lateralPadOnly && plan != lateralPadThenFilter {
-		return nil
-	}
-	starred := false
-	for _, c := range info.Columns {
-		if !c.Star {
-			continue
-		}
-		// A bare `*` covers every relation; `s.*` covers this one.
-		if c.TableRef == "" || strings.EqualFold(c.TableRef, alias) {
-			starred = true
-			break
-		}
-	}
-	if !starred {
-		return nil
-	}
-	return sqlerr.New("0A000",
-		"`SELECT *` over a LATERAL subquery whose %s has no rows for an outer row "+
-			"cannot be answered: an ungrouped COUNT over an empty input is 0 in "+
-			"PostgreSQL, the star expands after the default is applied, and the "+
-			"column would read NULL instead — name the lateral's columns "+
-			"(`SELECT o.*, s.%s`) so the default reaches them",
-		strings.Join(empty.countOutputs, ", "), empty.countOutputs[0])
-}
-
 // refuseDecorrelatedWindow refuses a LATERAL whose WINDOW FRAME the
 // decorrelation would silently change.
 //
@@ -2453,12 +2416,12 @@ func lateralBareKeyName(innerCol string) string {
 // respellKeyRefsToSlot points the subquery's own references to the correlation
 // key at the SLOT the aggregate publishes it under.
 //
-// The item keeps its alias and its position; only what it READS changes, from
-// the source column to the slot. It matters on the DAG and not on the
-// single-process path, which is what made it invisible for a round: a Project
-// emits no stage, so what a fragment above the aggregate sees is the
+// Every site keeps its own text and its own position; only what it READS
+// changes, from the source column to the slot. It matters on the DAG and not
+// on the single-process path, which is what made it invisible for a round: a
+// Project emits no stage, so what a fragment above the aggregate sees is the
 // AGGREGATE's output — the key under `__key_N` and the aggregates under their
-// own names. An item still reading the SOURCE column then bound whatever
+// own names. A site still reading the SOURCE column then bound whatever
 // answered to that name in the stream, and in the colliding shape that is the
 // AGGREGATE:
 //
@@ -2467,27 +2430,79 @@ func lateralBareKeyName(innerCol string) string {
 //	  → `oid` read `order_id` = the MAX. `Alice,100,100` for PostgreSQL's
 //	    `Alice,1,100`, on both DAG arms.
 //
+// IT WALKS THE BLOCK, not the select list. Round 2 rewrote select items only,
+// and a HAVING over the key — `GROUP BY order_id HAVING order_id > 1` — was
+// left reading a column the aggregate no longer publishes: `filter column
+// "order_id" does not exist in the input schema` on the single-process arm and
+// `SELECT list no stage computes` on both DAG arms, where the base answers
+// PostgreSQL's row. HAVING and the subquery's own ORDER BY read what the
+// aggregate PUBLISHES and take the slot; the WHERE and the GROUP BY are
+// resolved against its INPUT and keep the source column. `plansql.RewriteExpr`
+// reaches a reference nested in a CASE, a cast or a function call, and stops
+// at an aggregate call for the same reason the WHERE is left alone.
+//
+// A WINDOW spec is deliberately not walked: `refuseDecorrelatedWindow` reads
+// PARTITION BY as the query WROTE it to decide whether the decorrelation
+// preserves the frame, and a slot there would make the allowed spelling
+// (`PARTITION BY <the correlation key>`) look like an unrelated partition and
+// be refused.
+//
 // The planted reference carries ColRef.Slot, which is the provenance every
 // pass that has to tell a planner-planted slot reference from a user's column
 // of that name reads (ADR-0025 rule 1).
-func respellKeyRefsToSlot(cols []plansql.SelectColumn, innerCol, slot string) {
+func respellKeyRefsToSlot(info *plansql.SelectInfo, innerCol, slot string) {
 	bare := lateralBareKeyName(innerCol)
 	if bare == "" {
 		bare = strings.TrimSpace(innerCol)
 	}
-	for i := range cols {
-		c := &cols[i]
-		if c.Star || c.IsAgg || c.IsWindow {
+	respell := func(n plansql.Node) plansql.Node {
+		if n == nil {
+			return nil
+		}
+		return plansql.RewriteExpr(n, func(x plansql.Node) (plansql.Node, bool) {
+			ref, ok := x.(*plansql.ColRef)
+			if !ok || !strings.EqualFold(ref.Column, bare) {
+				return nil, false
+			}
+			return &plansql.ColRef{Column: slot, Slot: true}, true
+		})
+	}
+	for i := range info.Columns {
+		c := &info.Columns[i]
+		if c.Star || c.IsAgg || c.IsWindow || c.ASTExpr == nil {
 			continue
 		}
-		if c.ColumnRef == "" || !strings.EqualFold(c.ColumnRef, bare) {
+		rewritten := respell(c.ASTExpr)
+		if rewritten == c.ASTExpr {
 			continue
 		}
-		ref := &plansql.ColRef{Column: slot, Slot: true}
-		c.ASTExpr = ref
-		c.Expr = ref.String()
-		c.ColumnRef = slot
-		c.TableRef = ""
+		c.ASTExpr = rewritten
+		c.Expr = rewritten.String()
+		if ref, ok := rewritten.(*plansql.ColRef); ok {
+			c.ColumnRef = ref.Column
+			c.TableRef = ""
+		}
+	}
+	// HAVING and the subquery's own ORDER BY run ABOVE the aggregate, over
+	// what it PUBLISHES — so they take the slot with the select list. The
+	// WHERE and the GROUP BY do not: both are resolved against the
+	// aggregate's INPUT, where the source column is the only name there is.
+	if info.HavingExpr != nil {
+		if rewritten := respell(info.HavingExpr); rewritten != info.HavingExpr {
+			info.HavingExpr = rewritten
+			info.Having = rewritten.String()
+		}
+	}
+	for i := range info.OrderBy {
+		if info.OrderBy[i].Expr == nil {
+			continue
+		}
+		rewritten := respell(info.OrderBy[i].Expr)
+		if rewritten == info.OrderBy[i].Expr {
+			continue
+		}
+		info.OrderBy[i].Expr = rewritten
+		info.OrderBy[i].Column = rewritten.String()
 	}
 }
 

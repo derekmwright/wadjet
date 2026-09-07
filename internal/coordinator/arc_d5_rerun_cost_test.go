@@ -439,7 +439,20 @@ func TestAFailedSharedScanDoesNotStrandItsOtherReaders(t *testing.T) {
 	tmdWriteTables(t, ctx, infra, nil)
 	coord := tmdCoordinator(t, ctx, infra)
 
+	// The failing reader's filter names a column NO relation has. It used to
+	// name `amount` — a real column the lateral's SELECT list does not
+	// publish — and that shape ANSWERS now: a predicate carried as TEXT
+	// contributed no column refs, so the scan under it was never told to read
+	// what the filter reads, and arc J1 round 3 closed that
+	// (logical.collectNodeColumnRefs). The cell below keeps that answer, and
+	// this one keeps the property the gate is for: a reader that fails must
+	// release its shared-scan claim, and the client must be told the REASON.
 	const twoReadersFirstFails = `SELECT o.customer AS c, s.n AS n, s2.m AS m FROM lat_ord o ` +
+		`JOIN LATERAL (SELECT COUNT(*) AS n FROM lat_item WHERE order_id = o.id) s ON true ` +
+		`JOIN LATERAL (SELECT COUNT(*) AS m FROM lat_item ` +
+		`WHERE order_id = o.id AND nosuchcol > 60) s2 ON true ORDER BY c`
+	const twoReadersFilterNotPublished = `SELECT o.customer AS c, s.n AS n, s2.m AS m ` +
+		`FROM lat_ord o ` +
 		`JOIN LATERAL (SELECT COUNT(*) AS n FROM lat_item WHERE order_id = o.id) s ON true ` +
 		`JOIN LATERAL (SELECT COUNT(*) AS m FROM lat_item ` +
 		`WHERE order_id = o.id AND amount > 60) s2 ON true ORDER BY c`
@@ -466,7 +479,19 @@ func TestAFailedSharedScanDoesNotStrandItsOtherReaders(t *testing.T) {
 		{
 			name:    "the failing reader releases its claim, and the cause survives",
 			sql:     twoReadersFirstFails,
-			wantErr: `filter column "amount" does not exist`,
+			wantErr: `nosuchcol`,
+		},
+		{
+			// The shape the cell above used to carry: a lateral whose filter
+			// names a real column its SELECT list does not publish. It was
+			// loud on every arm and answers PostgreSQL now.
+			name: "a lateral filter over a column the list does not publish answers",
+			sql:  twoReadersFilterNotPublished,
+			want: []string{
+				"c=Alice|n=int64:2|m=int64:1",
+				"c=Bob|n=int64:2|m=int64:2",
+				"c=Carol|n=int64:0|m=int64:0",
+			},
 		},
 		{
 			name: "two clean readers of one table still answer",

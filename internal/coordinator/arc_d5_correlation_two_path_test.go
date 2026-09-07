@@ -658,40 +658,34 @@ func arcD5LateralCells() []arcD5Cell {
 		// query CAN name the lateral's output, PostgreSQL resolves it, and it
 		// applies the empty-input default there like anywhere else.
 		//
-		// Here the outer row's `s.n` is substituted into the subquery's text
-		// per row by the re-run (§1e), and on the padded row it substitutes
-		// the LEFT join's NULL rather than 0 — so `amount > NULL` matches
-		// nothing and Carol's answer collapses. Not a regression: fd679ae9
-		// answers the same. Silent, on all four arms, which is why both are
-		// pinned rather than described.
-		//
-		// Closing it is not a bigger walk. The reference lives in TEXT, so
-		// reaching it means parsing the subquery, rewriting the tree and
-		// rendering it back — and the value that needs defaulting is an OUTER
-		// value substituted by the re-run, which is the correlation model's
-		// next layer rather than this rewrite's (report deferral D11). The day
-		// either cell answers PostgreSQL's row it FAILS, and that is the day
-		// the layer landed.
+		// CLOSED by arc J1 round 3, and the two cells are its proof. The
+		// outer row's `s.n` is substituted into the subquery's text per row
+		// by the re-run (§1e), and it used to substitute the LEFT join's NULL
+		// rather than 0 — `amount > NULL` matched nothing and Carol's answer
+		// collapsed. Reaching it through the REFERENCE was the next layer's
+		// work (report deferral D11), and the reference never had to be
+		// reached: the empty-input default now rides on the lateral's own
+		// OUTPUT COLUMN, above the join, so every reader of that column — a
+		// star, a derived star, a scalar subquery's substitution, an EXISTS —
+		// sees the 0 (exec.LateralEmptyDefault, #977).
 		//
 		// The counters say the same thing from the other side: both route
 		// with CorrelatedLocalRoutes rather than UnreachableOutputLocalRoutes
 		// — the DAG declines these for the CORRELATED SUBQUERY in them, not
 		// for the lateral's projection, which is exactly the layer that owns
 		// the defect.
-		{issue: "#767", name: "boundary_scalar_subquery_reads_the_pad_not_the_default",
+		{issue: "#767", name: "a_scalar_subquery_reads_the_defaulted_column",
 			sql: `SELECT o.customer AS c, ` +
 				`(SELECT COUNT(*) FROM lat_item i WHERE i.amount > s.n * 40) AS k ` +
 				`FROM lat_ord o ` + lat + `ON true ORDER BY 1`,
-			want:           []string{"c=Alice|k=int64:2", "c=Bob|k=int64:2", "c=Carol|k=int64:0"},
-			wantCorrRoutes: 1,
-			pgSays:         "Alice 2, Bob 2, Carol 4 — Carol's s.n is 0 there, not NULL"},
-		{issue: "#767", name: "boundary_exists_reads_the_pad_and_drops_the_row",
+			want:           []string{"c=Alice|k=int64:2", "c=Bob|k=int64:2", "c=Carol|k=int64:4"},
+			wantCorrRoutes: 1},
+		{issue: "#767", name: "an_exists_reads_the_defaulted_column",
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
 				`ON true WHERE EXISTS (` +
 				`SELECT 1 FROM lat_item i WHERE i.amount > s.n * 40) ORDER BY 1`,
-			want:           []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2"},
-			wantCorrRoutes: 1,
-			pgSays:         "three rows — Carol survives at 0, because 0 * 40 admits every amount"},
+			want:           []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
+			wantCorrRoutes: 1},
 
 		// A WINDOW over a defaulted COUNT. It USED to reach the same stage
 		// carrier defect the `SELECT *` cell still pins — ADR-0010's
@@ -870,28 +864,20 @@ func arcD5LateralCells() []arcD5Cell {
 			wantUnreachableRoutes: 1,
 			pgSays:                "3, 3, 1 as BIGINT — the values and now the box too (#849)"},
 
-		// THE `SELECT *` BOUNDARY IS REFUSED, on every arm (arc J1 round 2).
-		//
-		// The empty-input default is applied by rewriting the enclosing
-		// query's REFERENCES to `COALESCE(<ref>, 0)`, and a star has no
-		// reference to rewrite: it expands in a later pass over the plan's
-		// own schema, and a star over a JOIN is never expanded at all. So the
-		// padded COUNT read NULL where PostgreSQL reads 0 — a plausible wrong
-		// number for exactly the rows a LEFT pad manufactures, which is the
-		// hardest kind to notice.
-		//
-		// It reached this cell's DAG arms when the correlation slot stopped
-		// widening the star (round 1: they had been refusing the shape for an
-		// unrelated reason), and a loud→wrong-value move is not a
-		// disposition. The shape is refused instead and the message names the
-		// spelling that answers, which is the cells above. MAX over an empty
-		// input IS NULL, so a star over THAT lateral needs no default and
-		// still answers (arc J1's own star census).
-		{issue: "#767", name: "boundary_select_star_over_an_aggregated_lateral",
-			sql:         `SELECT * FROM lat_ord o ` + lat + `ON true ORDER BY o.customer`,
-			wantErrLike: "cannot be answered: an ungrouped COUNT over an empty input is 0",
-			pgSays: "three rows with columns (id, customer, total, n) and Carol at n = 0 — " +
-				"PostgreSQL answers it; this engine refuses rather than printing NULL"},
+		// THE `SELECT *` OVER AN AGGREGATED LATERAL ANSWERS POSTGRESQL, and
+		// this cell is the third disposition it has had in one arc: NULL for
+		// Carol where PostgreSQL says 0 (the reference rewrite cannot reach a
+		// star), then a REFUSAL (round 2, which also refused queries whose
+		// outer rows all match — a right answer taken away), and now the
+		// answer. The default rides on the lateral's own OUTPUT COLUMN above
+		// the join, so the star reads it like any other column
+		// (exec.LateralEmptyDefault, #977).
+		{issue: "#767", name: "select_star_over_an_aggregated_lateral",
+			sql: `SELECT * FROM lat_ord o ` + lat + `ON true ORDER BY o.customer`,
+			want: []string{
+				"id=int64:1|customer=Alice|total=float:150|n=int64:2",
+				"id=int64:2|customer=Bob|total=float:200|n=int64:2",
+				"id=int64:3|customer=Carol|total=float:0|n=int64:0"}},
 
 		// The NON-aggregated lateral, which none of this may touch.
 		// THE NESTED SHAPES the filing asks for, and the third of them is a
