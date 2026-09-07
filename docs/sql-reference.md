@@ -794,13 +794,11 @@ this engine  Alice NULL, Bob NULL, Carol NULL      <- one cell differs
 
 Every other combination of join kind and `ON` matches PostgreSQL.
 
-`SELECT *` over a lateral whose ungrouped `COUNT` can see no rows for an outer
-row is REFUSED (`0A000`) rather than answered: the star expands after the
-default is applied, so the column would read NULL where PostgreSQL reads 0, and
-a wrong number for exactly the rows a `LEFT` pad manufactures is the hardest
-kind to notice. Name the lateral's columns — `SELECT o.*, s.n` — and the
-default reaches them. `MAX` over an empty input IS NULL, so a star over that
-lateral needs no default and answers.
+An ungrouped aggregate inside a lateral keeps PostgreSQL's empty-input value
+for an outer row the lateral matches nothing for: `COUNT(*)` reads 0 there, not
+NULL, and it does so through every spelling — `SELECT *`, `SELECT o.*, s.n`, a
+derived table's star, a CTE's star, a scalar subquery over the column and an
+`EXISTS`. `MAX` over an empty input IS NULL, which is what that column reads.
 
 The correlated equality is turned into a join, and a join needs the inner
 value as a column, so the planner materializes one under a name from its
@@ -809,10 +807,13 @@ in a `SELECT *` result, not in a derived table's or a CTE's star over the
 join, and not in the wire's `RowDescription`: `SELECT *` over a lateral
 returns the columns PostgreSQL returns.
 
-A QUALIFIED star over a lateral join is a separate, older gap: `SELECT o.*`
-and `SELECT s.*` both publish every column of the JOIN rather than the named
-relation's own, so PostgreSQL's three and one columns come back as four. Name
-the columns you want.
+A QUALIFIED star publishes its own relation's columns — `SELECT o.*, s.n` over
+a lateral join, and `SELECT o.*, li.amount` over a plain one, both answer what
+PostgreSQL answers. Two exceptions remain: a qualified star ALONE
+(`SELECT o.*` with nothing beside it) still publishes every column of the join,
+and the LATERAL's own star beside another item (`SELECT s.*, o.id`) is refused
+— a lateral's output is a projection this expansion cannot enumerate. Name the
+columns in those two.
 
 An inner `SELECT` list that aliases something to the correlation key's own name
 answers what PostgreSQL answers. `JOIN LATERAL (SELECT MAX(t.id) AS g …

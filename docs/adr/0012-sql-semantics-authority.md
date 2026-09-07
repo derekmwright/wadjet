@@ -1697,19 +1697,24 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      recorded here as a divergence with its mechanism, and closing it needs
      the lateral's own projection to be materialized onto its stage.
 
-   - **`SELECT *` over a LATERAL whose ungrouped COUNT can see no rows is
-     REFUSED, where PostgreSQL answers.** (Added 2026-09-07, arc J1 round 2.)
-     An ungrouped aggregate over an empty input still yields a row in
-     PostgreSQL, and for the COUNT family that row's value is 0. This engine
-     gives the outer row back by making the join LEFT and rewriting the
-     enclosing query's REFERENCES to `COALESCE(<ref>, 0)` — and a star has no
-     reference to rewrite: it expands in a later pass over the plan's own
-     schema, and a star over a JOIN is never expanded at all, because guessing
-     its column set would silently change which columns the query returns. The
-     column therefore read NULL where PostgreSQL reads 0, for exactly the rows
-     a LEFT pad manufactures. `0A000` now, with the spelling that answers in
-     the message (`SELECT o.*, s.n`). MAX over an empty input IS NULL, so a
-     star over that lateral needs no default and still answers.
+   - **WITHDRAWN the same day (arc J1 round 3): the refusal of `SELECT *` over
+     a LATERAL whose ungrouped COUNT can see no rows.** It fired on the SHAPE,
+     and a plan-time refusal cannot know the data — it refused queries whose
+     outer rows all match, which had answered correctly one commit earlier. The
+     empty-input value rides on the lateral's own OUTPUT COLUMN now
+     (`exec.LateralEmptyDefault`, #977), so every reader of that column sees the
+     0 and there is no divergence to record.
+
+   - **A qualified star ALONE over a lateral join publishes the whole join.**
+     (Amended 2026-09-07, arc J1 round 3.) `SELECT o.*` with nothing beside it
+     publishes four columns where PostgreSQL publishes three. A qualified star
+     BESIDE another select item now expands from its own relation's scan and
+     agrees with PostgreSQL, over a lateral join and a plain one alike; the
+     LATERAL's own star beside another item (`SELECT s.*, o.id`) is refused,
+     because a lateral's output is a projection that expansion cannot
+     enumerate and the scan under it carries the correlation slot the join is
+     about to drop. Pinned in
+     `coordinator.TestArcJ1AQualifiedStarBesideAnotherItemExpands`.
 
    - **A star over a NON-aggregated LATERAL publishes PostgreSQL's columns in
      a different ORDER.** (Added 2026-09-07, arc J1 round 2; PRE-EXISTING.)

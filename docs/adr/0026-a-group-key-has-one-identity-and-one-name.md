@@ -1,6 +1,6 @@
 # ADR-0026: A GROUP BY key has one identity and one published name
 
-Status: Accepted (2026-08-30, #720 / #723 / #725; amended 2026-09-03 by arc S1 — §4b's deferral is CLOSED, the phantom scan column under it is named at its real site, and a sort or window key over a computed derived alias needs no second name ON THE WIRE because the definition is materialized at plan time; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended 2026-09-04 by arc E3 — §3a is CLOSED: a HAVING binds its aggregate through the slot that aggregate OWNS, and the gather pairs a lone rename by CLASS (#785); amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795); amended 2026-09-04 by arc F4 — §3a's fragment-projection residual is closed for the THREE WRAPPED spellings it pinned, and it was two defects: an unaliased SELECT item was invisible to the class walk's lookup, and a fragment projection above an aggregate addressed a duplicated name by NAME where it now addresses the SLOT. Two sibling spellings — under a SET-OP wrapper and under a DISTINCT — are NOT closed and stay pinned (2026-09-05). Amended 2026-09-07 by arc J2 with §6 — the two names are not a property of GROUP BY keys: a UNION arm's projection, an aggregate argument, a window argument, an ORDER BY term and a projection's DECLARED TYPE each have a second spelling, and every one of them binds through the identity its producer published (#770, #947, #949; the mechanism is in ADR-0025); amended 2026-09-07 by arc J1 with §3c — a key the PLANNER MINTED is published under a hidden slot and RESOLVED by the column it reads, which is §2's pair of names in the opposite direction, and the stage's published list says what `exec.PublishedGroupKeyNames` will emit (#956, #767); amended the same day after review — the minted column is DROPPED BY THE JOIN that made it rather than trimmed at the statement's output, because a star-only query has no output projection to trim, and the collision is closed in the spelling where the SELECT list carries the key too (#956, #767); amended again after the second review — the drop is by IDENTITY (the slot the join KEYS ON, on the side it minted it for) and never by a name a table could also own, the colliding spelling takes the FULL mint with its own references re-spelled to the slot, and the distributed path's materialized lateral projection is what may ask for the slot back (#956, #767).
+Status: Accepted (2026-08-30, #720 / #723 / #725; amended 2026-09-03 by arc S1 — §4b's deferral is CLOSED, the phantom scan column under it is named at its real site, and a sort or window key over a computed derived alias needs no second name ON THE WIRE because the definition is materialized at plan time; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended 2026-09-04 by arc E3 — §3a is CLOSED: a HAVING binds its aggregate through the slot that aggregate OWNS, and the gather pairs a lone rename by CLASS (#785); amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795); amended 2026-09-04 by arc F4 — §3a's fragment-projection residual is closed for the THREE WRAPPED spellings it pinned, and it was two defects: an unaliased SELECT item was invisible to the class walk's lookup, and a fragment projection above an aggregate addressed a duplicated name by NAME where it now addresses the SLOT. Two sibling spellings — under a SET-OP wrapper and under a DISTINCT — are NOT closed and stay pinned (2026-09-05). Amended 2026-09-07 by arc J2 with §6 — the two names are not a property of GROUP BY keys: a UNION arm's projection, an aggregate argument, a window argument, an ORDER BY term and a projection's DECLARED TYPE each have a second spelling, and every one of them binds through the identity its producer published (#770, #947, #949; the mechanism is in ADR-0025); amended 2026-09-07 by arc J1 with §3c — a key the PLANNER MINTED is published under a hidden slot and RESOLVED by the column it reads, which is §2's pair of names in the opposite direction, and the stage's published list says what `exec.PublishedGroupKeyNames` will emit (#956, #767); amended the same day after review — the minted column is DROPPED BY THE JOIN that made it rather than trimmed at the statement's output, because a star-only query has no output projection to trim, and the collision is closed in the spelling where the SELECT list carries the key too (#956, #767); amended a third time after review — the drop's identity is a POSITION on the side the lowering BUILT (a name, and a name that is a join key, both dropped a user's stored `__key_0`), the re-spell walks the whole block, and an ungrouped aggregate's empty-input value rides on the lateral's OUTPUT COLUMN rather than on the references to it (#977); amended again after the second review — the drop is by IDENTITY (the slot the join KEYS ON, on the side it minted it for) and never by a name a table could also own, the colliding spelling takes the FULL mint with its own references re-spelled to the slot, and the distributed path's materialized lateral projection is what may ask for the slot back (#956, #767).
 
 §2 REWRITTEN 2026-09-02 from a sketch into the design that closes #794 and
 #795: a Stage carries TWO names per GROUP BY key — the PUBLISHED name in
@@ -858,6 +858,23 @@ an optimisation — "nothing above needs these, do not gather them" — and its
 absence means "emit everything", which is exactly the star case; the exclusion
 is a correctness rule that has to hold when there is no filter at all.
 
+**THE IDENTITY IS A POSITION.** A name is not one — reading is not minting, so
+a table may already store `__key_0` (ADR-0012) — and neither is "a name that is
+a join KEY of its own side": a query that CORRELATES ON the stored column makes
+it a key, which is exactly when that rule admits the user's column to the
+exclusion and drops it. `SELECT * FROM o JOIN LATERAL (… WHERE __key_0 =
+o.__key_0) s` lost `o.__key_0` on all four arms and on the wire.
+
+The join drops the column at the ORDINAL its own lowering put it at, on the
+side that lowering BUILT — `logical.Node.LateralSubtree` marks that side, so a
+join-order swap cannot move the rule to the other one, and the name at the
+ordinal is a SAFETY CHECK: when the plan's model of a side's emitted order
+disagrees with the runtime the column is KEPT, because an extra column is a
+divergence a gate sees and a dropped one is a user's data gone. The two paths
+compute the ordinal against the model in force for each — the logical subtree's
+emitted order on the single-process path, the STAGE's stream on the distributed
+one, where a Project emits no stage.
+
 **A NAME IS NOT THE IDENTITY, and the drop is by identity.** Reading is not
 minting, so a table may already STORE a column called `__key_0` (ADR-0012), and
 excluding by bare name over the join's whole output dropped the USER's column:
@@ -901,6 +918,16 @@ item still reading the source column bound whatever answered to that name in
 the stage's stream, which in the colliding shape is the AGGREGATE:
 `SELECT order_id AS oid, MAX(amount) AS order_id …` answered `Alice,100,100`
 for PostgreSQL's `Alice,1,100` on both DAG arms.
+
+It walks the BLOCK, not the select list. HAVING and the subquery's own ORDER BY
+read what the aggregate PUBLISHES and take the slot with the list; the WHERE and
+the GROUP BY are resolved against its INPUT and keep the source column. A
+HAVING left behind named a column the aggregate no longer publishes and turned
+`GROUP BY order_id HAVING order_id > 1` from PostgreSQL's row into a refusal on
+all four arms. And the walk runs only where an AGGREGATE republishes the key:
+without one the injected item is a SIBLING in the same projection, nothing has
+computed it yet, and a re-spelled `CASE WHEN order_id > 1 …` read NULL and took
+the ELSE arm on every row.
 
 **Who may ask for the slot back is decided by the CALLER.** On the distributed
 path the lateral's projection is materialized ABOVE the join, and that
