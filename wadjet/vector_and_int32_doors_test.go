@@ -189,6 +189,20 @@ func TestAnOutOfRangeCastRefusesAtTheDoor(t *testing.T) {
 		{`SELECT 3000000000::DATE`, "22003"},
 		{`SELECT 1000000000000::DATE`, "22003"},
 		{`SELECT 1000000000000000::DATE`, "22003"},
+		// #911's six, moved up from the PIN below them. They escaped the guard
+		// because `parseDateValue` reads a bare number as
+		// `time.Date(1970,1,1).AddDate(0, 0, n)` and time.Date multiplies the
+		// day count by 86400 in an unmodulated uint64: 2^63−1 days came back as
+		// epoch minus one, so what reached the store was the int64 -1 and the
+		// store had nothing left to reject. The last two are not int64 values
+		// at all — they parse as float64 — and Go's float-to-int conversion is
+		// implementation-defined for them.
+		{`SELECT 9223372036854775807::DATE`, "22003"},
+		{`SELECT 9223372036854775806::DATE`, "22003"},
+		{`SELECT (-9223372036854775808)::DATE`, "22003"},
+		{`SELECT 4611686018427387904::DATE`, "22003"},
+		{`SELECT 9223372036854775808::DATE`, "22003"},
+		{`SELECT (-9223372036854775809)::DATE`, "22003"},
 	} {
 		t.Run(c.sql, func(t *testing.T) {
 			r, err := db.Query(ctx, c.sql)
@@ -210,57 +224,84 @@ func TestAnOutOfRangeCastRefusesAtTheDoor(t *testing.T) {
 		})
 	}
 
-	// PIN — delete a cell when it starts refusing, which is the proof the cast
-	// path was fixed.
-	//
-	// Large magnitudes escape the guard, and the escape starts well below the
-	// int64 extremes: 2^62 answers 1970-01-01, and so do two literals that are
-	// not int64 values at all. Where the value IS narrowed on the way through,
-	// what survives is the low 32 bits read as an int32 —
-	// 9223372036854775807 is 0xFFFFFFFF there, which is day -1. Everything
-	// from 2^31 up to 10^15 refuses, so the narrowing happens BEFORE
-	// batch.Vector.SetValue for these and the store has nothing left to check.
-	// That is a cast-path defect in the expression layer, not this arc's seam
-	// (round-2 review N1 widened the bracket this pin records).
+	// The DATE cast still ANSWERS across the whole int32 day range, which is
+	// what says the refusals above are about the VALUE and not about the cast
+	// having been withdrawn. Both ends of the carrier and a fractional
+	// operand, whose truncation toward zero is the reading parseDateValue's
+	// numeric arms already had.
 	for _, c := range []struct{ sql, answers string }{
-		{`SELECT 9223372036854775807::DATE`, "1969-12-31"},
-		{`SELECT 9223372036854775806::DATE`, "1969-12-30"},
-		{`SELECT (-9223372036854775808)::DATE`, "1970-01-01"},
-		{`SELECT 4611686018427387904::DATE`, "1970-01-01"},
-		{`SELECT 9223372036854775808::DATE`, "1970-01-01"},
-		{`SELECT (-9223372036854775809)::DATE`, "1970-01-01"},
+		{`SELECT 0::DATE`, "1970-01-01"},
+		{`SELECT (-1)::DATE`, "1969-12-31"},
+		{`SELECT 1.9::DATE`, "1970-01-02"},
 	} {
-		t.Run("pin/"+c.sql, func(t *testing.T) {
+		t.Run("answers/"+c.sql, func(t *testing.T) {
 			r, err := db.Query(ctx, c.sql)
 			if err != nil {
-				t.Fatalf("this now refuses (%v) — the cast path was fixed; "+
-					"delete this pin and move the case into the table above", err)
+				t.Fatalf("a day count an int32 holds was refused: %v", err)
 			}
 			if got := fmt.Sprint(r.Rows); !strings.Contains(got, c.answers) {
-				t.Errorf("answered %s; the pin recorded %s", got, c.answers)
+				t.Errorf("answered %s; want %s", got, c.answers)
 			}
 		})
 	}
 
-	// The two CodeQL siblings, recorded rather than asserted-by-analogy: a
-	// PORT or PROTOCOL cast does NOT reach the narrowing seam, because the
-	// cast never declares the result PORT. Measured, so the record cannot
-	// drift again in either direction.
-	for _, sql := range []string{`SELECT 3000000000::PORT`, `SELECT 3000000000::PROTOCOL`} {
-		t.Run(sql+"/does-not-reach-the-seam", func(t *testing.T) {
-			r, err := db.Query(ctx, sql)
+	// The two CodeQL siblings, and INT32 and FLOAT32 beside them (#901).
+	//
+	// This block used to RECORD that `3000000000::PORT` answers the widened
+	// number "because the cast never declares the result PORT". It reached no
+	// guard at all: `int32`, `float32`, `port` and `protocol` matched no label
+	// in Cast.Eval's switch and fell to `default: return v`, while
+	// inferCastType declared STRING for the same four names — a number
+	// published as TEXT under OID 25, which is the #310/#443 shape and the one
+	// #652 closed for names that answer to nothing at all.
+	//
+	// PostgreSQL raises `integer out of range` for `3000000000::int4`, and the
+	// PORT/PROTOCOL bound is the engine's own, stated in docs/data-types.md
+	// before this fix existed. Both sides of the boundary are here, because a
+	// table of refusals alone cannot say whether the cast still WORKS.
+	for _, c := range []struct {
+		sql   string
+		want  string // "" = must answer
+		value any    // the answer, when it answers
+		decl  parquet.TypeID
+	}{
+		{`SELECT 3000000000::INT32 AS v`, "22003", nil, 0},
+		{`SELECT 2147483648::INT32 AS v`, "22003", nil, 0},
+		{`SELECT (-2147483649)::INT32 AS v`, "22003", nil, 0},
+		{`SELECT 9223372036854775807::INT32 AS v`, "22003", nil, 0},
+		{`SELECT 2147483647::INT32 AS v`, "", int64(2147483647), parquet.TypeInt64},
+		{`SELECT (-2147483648)::INT32 AS v`, "", int64(-2147483648), parquet.TypeInt64},
+		{`SELECT 3000000000::PORT AS v`, "22003", nil, 0},
+		{`SELECT 9223372036854775807::PORT AS v`, "22003", nil, 0},
+		{`SELECT 443::PORT AS v`, "", int32(443), parquet.TypePort},
+		{`SELECT 3000000000::PROTOCOL AS v`, "22003", nil, 0},
+		{`SELECT 6::PROTOCOL AS v`, "", int32(6), parquet.TypeProtocol},
+		{`SELECT CAST(1e40 AS FLOAT32) AS v`, "22003", nil, 0},
+		{`SELECT CAST(1.5 AS FLOAT32) AS v`, "", float32(1.5), parquet.TypeFloat32},
+	} {
+		t.Run(c.sql, func(t *testing.T) {
+			r, err := db.Query(ctx, c.sql)
+			if c.want != "" {
+				if err == nil {
+					t.Fatalf("answered %v where the value has no place in the destination", r.Rows)
+				}
+				if got := sqlerr.StateOf(err); got != c.want {
+					t.Errorf("SQLSTATE %q; want %q (%v)", got, c.want, err)
+				}
+				return
+			}
 			if err != nil {
-				t.Skipf("this cast now refuses (%v) — if that is deliberate, "+
-					"move it into the table above", err)
+				t.Fatalf("an in-range cast was refused: %v", err)
 			}
-			if len(r.Rows) != 1 {
-				t.Fatalf("got %d rows; want 1", len(r.Rows))
+			if len(r.Rows) != 1 || r.Rows[0]["v"] != c.value {
+				t.Errorf("= %v, want %#v", r.Rows, c.value)
 			}
-			// It answers the widened number: no PORT vector is written, so
-			// batch.Vector's int4 guard is never asked. The domain question
-			// ("is 3000000000 a port") is a different defect and not this
-			// arc's; the seam gate in internal/engine/batch covers the store.
-			t.Logf("%s answers %v — the seam is unreached from this door", sql, r.Rows)
+			// The DECLARATION beside the value: a number under OID 25 is what
+			// a driver reads as a string, and it is the half a value-only
+			// assertion cannot see.
+			if len(r.ColumnMetas) != 1 || r.ColumnMetas[0].TypeID != c.decl {
+				t.Errorf("declares %v, want %v", r.ColumnMetas, c.decl)
+			}
 		})
 	}
 }

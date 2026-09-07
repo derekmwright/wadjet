@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/oracle"
 	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
 )
@@ -13,12 +14,15 @@ import (
 // A number with no int32 is REFUSED on every arm, never wrapped into a
 // plausible-looking value.
 //
-// `<bigint>::DATE` is the one shape in the grammar that reaches
+// `<bigint>::DATE` was the one shape in the grammar that reached
 // batch.Vector.SetValue's DATE arm, and at de5bc970 it WRAPPED:
 // `SELECT 3000000000::DATE` answered -3543531-12-19, a date rendered like any
 // other, with no error on any path (CodeQL go/incorrect-integer-conversion
-// #34; #32 and #33 are the PORT/PROTOCOL twins, which no SQL cast reaches
-// today and which internal/engine/batch's seam gate covers instead).
+// #34). #32 and #33 are the PORT/PROTOCOL twins, and the record here used to
+// say no SQL cast reaches them: it did not, because `::PORT` and `::PROTOCOL`
+// — and `::INT32` — matched no label in Cast.Eval's switch and were declared
+// STRING, so the number came back as TEXT rather than reaching any vector.
+// Those three are in the table below since #901.
 //
 // PostgreSQL has no int-to-date cast at all: `SELECT 3000000000::date` is
 // 42846, `cannot cast type bigint to date`. Wadjet's cast is a deliberate
@@ -45,6 +49,11 @@ func TestAnInt32DomainRefusalHoldsOnEveryArm(t *testing.T) {
 	tmdWriteTables(t, ctx, infraB, nil)
 	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) { c.BroadcastBytesOverride = 1 })
 
+	// The FOURTH arm is the spilled one (ADR-0027): a refusal raised per row
+	// has to survive the drain and the merge as well as the worker's panic
+	// boundary, and this census had only the three distribution arms.
+	spilled := na2Standalone(t, ctx, 512*1024)
+
 	arms := []struct {
 		name string
 		run  func(string) (*oracle.Result, error)
@@ -52,6 +61,12 @@ func TestAnInt32DomainRefusalHoldsOnEveryArm(t *testing.T) {
 		{"single", func(sql string) (*oracle.Result, error) { return tmdRunSingle(ctx, single, sql) }},
 		{"dag", func(sql string) (*oracle.Result, error) { return tmdRunDAG(ctx, coord, sql) }},
 		{"dag-shuffled", func(sql string) (*oracle.Result, error) { return tmdRunDAG(ctx, coordB, sql) }},
+		{"spilled", func(sql string) (*oracle.Result, error) {
+			restore := exec.ForceAggDrainEvery(1)
+			restoreRuns := exec.ForceSmallSpillRuns(512)
+			defer func() { restoreRuns(); exec.ForceAggDrainEvery(restore) }()
+			return tmdRunSingle(ctx, spilled, sql)
+		}},
 	}
 
 	tbl := typematrix.Table
@@ -70,22 +85,71 @@ func TestAnInt32DomainRefusalHoldsOnEveryArm(t *testing.T) {
 		// cast existing. c_i32 rather than c_i64 because c_i64 runs to
 		// i*1000003 and leaves the int32 range on its own.
 		{"date_inside_the_range", "SELECT (c_i32 + 1)::DATE AS v FROM " + tbl, false},
+		// #911: the magnitudes that escaped the store guard entirely, because
+		// parseDateValue read the day count through time.Date's unmodulated
+		// 86400 multiply and handed SetValue an int64 that FITS an int32 —
+		// 2^63-1 days came back as day -1, rendered 1969-12-31. Constants,
+		// because the wrap needs a magnitude past 2^57 that no column in the
+		// matrix carries.
+		{"date_int64_max", "SELECT 9223372036854775807::DATE AS v", true},
+		{"date_int64_min", "SELECT (-9223372036854775808)::DATE AS v", true},
+		{"date_two_to_the_62", "SELECT 4611686018427387904::DATE AS v", true},
+		// #901: the three siblings that reached NO guard at all, because the
+		// cast declared STRING and Cast.Eval handed the operand back. Built
+		// from the column for the same reason the DATE cells are, so the
+		// value is a computed per-row box and not a constant the planner
+		// could fold.
+		{"int32_above_the_range", "SELECT (c_i64 + 3000000000)::INT32 AS v FROM " + tbl, true},
+		{"int32_below_the_range", "SELECT (c_i64 - 3000000000)::INT32 AS v FROM " + tbl, true},
+		{"int32_inside_the_range", "SELECT (c_i32 + 1)::INT32 AS v FROM " + tbl, false},
+		{"port_above_the_range", "SELECT (c_i64 + 3000000000)::PORT AS v FROM " + tbl, true},
+		{"port_inside_the_range", "SELECT (c_i32 + 1)::PORT AS v FROM " + tbl, false},
+		{"protocol_above_the_range", "SELECT (c_i64 + 3000000000)::PROTOCOL AS v FROM " + tbl, true},
+		{"protocol_inside_the_range", "SELECT (c_i32 + 1)::PROTOCOL AS v FROM " + tbl, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {
 				_, err := arm.run(tc.sql)
 				switch {
 				case tc.refused && err == nil:
-					t.Errorf("%s arm: %s answered instead of refusing; no int32 holds that day count",
+					t.Errorf("%s arm: %s answered instead of refusing; no int32 holds that value",
 						arm.name, tc.sql)
 				case tc.refused && !strings.Contains(err.Error(), "integer out of range"):
 					t.Errorf("%s arm: %s refused with %v, want PostgreSQL's \"integer out of range\"",
 						arm.name, tc.sql, err)
 				case !tc.refused && err != nil:
-					t.Errorf("%s arm: %s refused a day count an int32 holds: %v",
+					t.Errorf("%s arm: %s refused a value an int32 holds: %v",
 						arm.name, tc.sql, err)
 				}
 			}
 		})
 	}
+
+	// FLOAT32 is the same enumeration gap one family over and carries REAL's
+	// own message rather than int4's, so it is asserted apart from the table
+	// (#901). `CAST(x AS FLOAT32)` used to answer the double as TEXT where
+	// `CAST(x AS REAL)` raised on the same value.
+	t.Run("float32_past_the_carrier", func(t *testing.T) {
+		for _, arm := range arms {
+			_, err := arm.run("SELECT CAST(c_f64 + 1e300 AS FLOAT32) AS v FROM " + tbl)
+			if err == nil {
+				t.Errorf("%s arm: a value no float4 holds was answered, not refused", arm.name)
+				continue
+			}
+			// The wording depends on the source: a LITERAL operand names its
+			// own text ("value 1e40 is out of range for type real"), a COLUMN
+			// one says "value out of range: overflow". Both are REAL's 22003;
+			// what this cell is about is that the cast refuses at all.
+			if !strings.Contains(err.Error(), "out of range") {
+				t.Errorf("%s arm: refused with %v, want REAL's own 22003", arm.name, err)
+			}
+		}
+	})
+	t.Run("float32_inside_the_carrier", func(t *testing.T) {
+		for _, arm := range arms {
+			if _, err := arm.run("SELECT CAST(c_i32 AS FLOAT32) AS v FROM " + tbl); err != nil {
+				t.Errorf("%s arm: refused a value a float4 holds: %v", arm.name, err)
+			}
+		}
+	})
 }

@@ -6808,7 +6808,17 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	// what tells the DAG's gather materialization to build an INT64 vector
 	// for this destination (#813), and a label here it does not know would
 	// put the same query's answer in a float64 one.
-	case "int", "integer", "int4", "bigint", "int8", "signed", "smallint", "int2":
+	// INT32, PORT and PROTOCOL are here because they are integer destinations
+	// this engine HAS and this switch did not implement: all three fell to
+	// `default: return v` and answered the operand unchanged under a STRING
+	// declaration, so `3000000000::INT32` answered 3000000000 where
+	// PostgreSQL raises `integer out of range` for the same magnitude, and
+	// `3000000000::PORT` answered it under a type whose whole carrier is a
+	// signed 32-bit field (#901). castIntInRange carries their bound; PORT
+	// and PROTOCOL then reach a PORT/PROTOCOL vector, whose own int4 guard is
+	// the second net (batch.IntegerRangeError).
+	case "int", "integer", "int4", "int32", "bigint", "int8", "signed", "smallint", "int2",
+		"port", "protocol":
 		// A string that does not read as a number is refused, not coerced to
 		// 0: PostgreSQL raises 22P02 invalid_text_representation and ADR-0012
 		// makes it the authority on error-versus-not. The per-row error
@@ -6883,7 +6893,10 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 			return castIntInRange(castFloatToInt64(ToFloat64(v), dest), dest)
 		}
 		return castIntInRange(castFloatToInt64Even(ToFloat64(v), dest), dest)
-	case "real", "float4":
+	// FLOAT32 is the same gap one family over: it is this engine's own name
+	// for float4 and matched no label, so `CAST(1e40 AS FLOAT32)` answered
+	// 1e+40 as TEXT where `CAST(1e40 AS REAL)` raises 22003 (#901).
+	case "real", "float4", "float32":
 		// REAL is float4, a NARROWER type than the float64 every other
 		// numeric box in this engine carries — and this arm used to sit
 		// beside "float"/"double" and answer ToFloat64, so `CAST(x AS REAL)`
@@ -12557,6 +12570,22 @@ func castTemporal(b *batch.RecordBatch, row int, operand Expr, v any, kind castT
 	if out, isText := castTemporalText(src, kind); isText {
 		return out
 	}
+	// A NUMBER cast to DATE is a DAY COUNT, and it is answered in the DATE
+	// carrier's own domain rather than through time.Date (#911).
+	//
+	// parseDateValue reads a bare number as `time.Date(1970,1,1).AddDate(0, 0,
+	// n)`, and time.Date multiplies the day count by 86400 in an unmodulated
+	// uint64: `(2^63-1)·86400 ≡ -86400 (mod 2^64)`, so the instant came back
+	// at epoch minus one day and `9223372036854775807::DATE` answered
+	// 1969-12-31. What reached batch.Vector.SetValue was the int64 -1, which
+	// fits an int32 — so the store's own guard, which refuses 3000000000::DATE
+	// with 22003, had nothing left to reject. The narrowing has to be decided
+	// where the day count is still the number the query wrote.
+	if kind == castToDateKind {
+		if days, isNum := epochDayOperand(src); isNum {
+			return castIntInRange(days, "date")
+		}
+	}
 	t, _, ok := parseDateArg(src)
 	if !ok {
 		return nil
@@ -12565,6 +12594,39 @@ func castTemporal(b *batch.RecordBatch, row int, operand Expr, v any, kind castT
 		return epochDaysOf(t)
 	}
 	return t.UTC().UnixMilli()
+}
+
+// epochDayOperand reads a bare NUMBER as the day count a DATE cast means, with
+// no calendar arithmetic in between — the reading parseDateValue's numeric arms
+// already have, minus the wrap.
+//
+// A float TRUNCATES toward zero, which is what `int(tv)` did there, and one
+// with no int64 at all (`9223372036854775808` is parsed as a float64, being
+// outside int64) raises rather than taking Go's implementation-defined
+// conversion: on amd64 that yields MinInt64, whose 86400-multiple wraps to
+// zero, and the cast answered 1970-01-01 for it.
+func epochDayOperand(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	case int32:
+		return int64(n), true
+	case float64:
+		return epochDayFromFloat(n), true
+	case float32:
+		return epochDayFromFloat(float64(n)), true
+	}
+	return 0, false
+}
+
+func epochDayFromFloat(f float64) int64 {
+	t := math.Trunc(f)
+	if math.IsNaN(t) || t >= 9223372036854775808.0 || t < -9223372036854775808.0 {
+		raiseIntegerOutOfRange("date")
+	}
+	return int64(t)
 }
 
 // epochDaysOf floors an instant to the UTC day it falls in and returns that

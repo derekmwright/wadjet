@@ -381,13 +381,30 @@ matches and a cast converts — same value, same refusal, same SQLSTATE. The
 raised and accepted `'0000-01-01'`; it now takes both its value and its
 refusal from the shared accept-set.
 
-A DATE, a PORT and a PROTOCOL are all stored in a signed 32-bit field, and a
-number with no room in one is `22003 integer out of range` — never a wrapped
-value. `3000000000::DATE` used to answer `-3543531-12-19`, a date rendered
-like any other; it is now an error on every execution path. (PostgreSQL has no
-integer-to-date cast at all — `3000000000::date` is `42846` there — so this
-cast is a wadjet superset, and inside a superset a value it cannot represent is
-loud.)
+An INT32, a DATE, a PORT and a PROTOCOL are all stored in a signed 32-bit
+field, and a number with no room in one is `22003 integer out of range` —
+never a wrapped value. That bound is applied by the CAST itself, so it holds
+whether or not the result is ever written to a column:
+
+| cast | in range | out of range |
+|---|---|---|
+| `::INT32` | the number, declared `bigint` | `22003` |
+| `::PORT`, `::PROTOCOL` | the number, declared `integer` (OID 23, the same OID the column declares) | `22003` |
+| `::DATE` | the day count, declared `date` | `22003` |
+| `::FLOAT32` | the value rounded to float4, declared `real` | `22003`, `value … is out of range for type real` |
+
+`3000000000::DATE` used to answer `-3543531-12-19`, a date rendered like any
+other, and `9223372036854775807::DATE` answered `1969-12-31`: the day count was
+read through calendar arithmetic that wrapped, so what reached the column was a
+number an `int32` holds and the column's own guard had nothing to reject.
+`3000000000::INT32`, `::PORT` and `::PROTOCOL` answered `3000000000` as TEXT,
+and `CAST(1e40 AS FLOAT32)` answered `1e+40` the same way, because those four
+spellings named a type the cast did not convert to.
+
+(PostgreSQL has no integer-to-date cast at all — `3000000000::date` is `42846`
+there — so that one is a wadjet superset, and inside a superset a value it
+cannot represent is loud. `3000000000::int4` is `22003 integer out of range` on
+PostgreSQL, which is where `::INT32`'s bound comes from.)
 
 `Date` takes the unambiguous year-first spellings PostgreSQL's default
 `DateStyle` reads exactly one way: a four-or-more-digit leading year with a

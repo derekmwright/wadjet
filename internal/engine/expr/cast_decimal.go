@@ -385,9 +385,16 @@ func castDecimalToInt(v any, dest string) (int64, bool) {
 // It is the one place that bound lives, so every SOURCE reaches the same
 // refusal. An integer box used to return from the cast before any check at
 // all, so `CAST(99999 AS SMALLINT)` answered 99999 where PostgreSQL refuses.
+// INT32, PORT, PROTOCOL and DATE share the int4 bound (#901, #911). INT32 is a second
+// spelling of int4 and PostgreSQL raises `integer out of range` for the same
+// magnitude; PORT and PROTOCOL are wadjet's own, and docs/data-types.md
+// already states their rule — "a DATE, a PORT and a PROTOCOL are all stored in
+// a signed 32-bit field, and a number with no room in one is 22003 integer out
+// of range". The check belongs HERE as well as at the store, because a cast
+// whose result is aggregated, compared or grouped may never reach a vector.
 func castIntInRange(v int64, dest string) int64 {
 	switch dest {
-	case "int", "integer", "int4":
+	case "int", "integer", "int4", "int32", "port", "protocol", "date":
 		if v < -(1<<31) || v > (1<<31)-1 {
 			raiseIntegerOutOfRange(dest)
 		}

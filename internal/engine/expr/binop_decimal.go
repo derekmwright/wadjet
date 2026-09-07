@@ -906,7 +906,11 @@ func raiseNumericFieldOverflow(p, s int) {
 func raiseIntegerOutOfRange(dest string) {
 	name := "bigint"
 	switch dest {
-	case "int", "integer", "int4":
+	case "int", "integer", "int4", "int32", "port", "protocol", "date":
+		// INT32 is int4 under another name, and PORT and PROTOCOL are stored
+		// in the same signed 32-bit field (docs/data-types.md), so all three
+		// take int4's message — the same sentence batch.IntegerRangeError
+		// raises at the store for the same magnitude (#901).
 		name = "integer"
 	case "smallint", "int2":
 		name = "smallint"
@@ -1028,9 +1032,17 @@ func Int64ResultOf(e Expr, b *batch.RecordBatch) bool {
 // The list is Cast.Eval's own switch, and it is a function rather than a
 // second copy of that switch so the two cannot drift: a destination this says
 // yes to must be one that switch answers an int64 for.
+// PORT and PROTOCOL are deliberately ABSENT although Cast.Eval's integer arm
+// takes them and answers an int64 for them (#901). This predicate's one caller
+// is the DAG gather's materialization, and telling it "int64" would build an
+// INT64 vector for a column the plan declares PORT — where declining sends it
+// to evalDeclaredColumn, which builds the PORT vector the declaration names
+// and so reaches the store's own int4 guard on both engines. The contract this
+// list owes is one-directional: everything it says yes to answers an int64,
+// not that everything answering an int64 is here.
 func IsIntegerCastDest(dest string) bool {
 	switch strings.ToLower(strings.TrimSpace(dest)) {
-	case "int", "integer", "int4", "bigint", "int8", "signed", "smallint", "int2":
+	case "int", "integer", "int4", "int32", "bigint", "int8", "signed", "smallint", "int2":
 		return true
 	}
 	return false

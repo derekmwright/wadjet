@@ -12116,7 +12116,13 @@ func inferCastType(typeName string) parquet.TypeID {
 	// projection declared STRING, so `CAST(x AS SIGNED)` published the number
 	// as text — the same disagreement between the two layers that #652 is
 	// about, one spelling over.
-	case "INTEGER", "INT", "INT4", "BIGINT", "INT8", "INT64", "SMALLINT", "INT2", "SIGNED":
+	// INT32 joins the family rather than getting a carrier of its own: it is
+	// a second spelling of int4, and the comment below is why every integer
+	// spelling lands on INT64. Before #901 it matched no label here and no
+	// label in Cast.Eval either, so `x::INT32` published its operand
+	// unchanged under a STRING declaration — #310/#443's shape, and the one
+	// #652 closed for names that answer to nothing at all.
+	case "INTEGER", "INT", "INT4", "INT32", "BIGINT", "INT8", "INT64", "SMALLINT", "INT2", "SIGNED":
 		// Every integer spelling lands on INT64: the engine has no int16
 		// and reads an INT32 column as an int64 everywhere else. The cast
 		// evaluator still enforces each spelling's own RANGE (22003 past
@@ -12124,7 +12130,7 @@ func inferCastType(typeName string) parquet.TypeID {
 		// a client under is int8 where PostgreSQL says int4/int2, recorded
 		// in ADR-0012 item 12's divergence list.
 		return parquet.TypeInt64
-	case "REAL", "FLOAT4":
+	case "REAL", "FLOAT4", "FLOAT32":
 		// float4, not float8: expr.Cast now ROUNDS to float32 for these two
 		// spellings, so the projection has to allocate a column that can hold
 		// what the evaluator produces. Declaring FLOAT64 would widen the
@@ -12143,6 +12149,19 @@ func inferCastType(typeName string) parquet.TypeID {
 		return parquet.TypeDate
 	case "TIMESTAMP", "DATETIME", "TIMESTAMPTZ":
 		return parquet.TypeTimestamp
+	case "PORT", "PROTOCOL":
+		// The declaration half of #901. Cast.Eval's integer arm answers an
+		// int64 for these two now; declaring STRING for it published the
+		// number as text under OID 25 where a PORT COLUMN declares int4
+		// (OID 23, #834) — the same layer disagreement #652 is about, and
+		// the reason the value never reached the store's int4 guard. Naming
+		// the real type also puts the guard back on the path: the projection
+		// allocates a PORT/PROTOCOL vector, and batch.IntegerRangeError is
+		// the second net behind castIntInRange's.
+		if strings.EqualFold(strings.TrimSpace(typeName), "PORT") {
+			return parquet.TypePort
+		}
+		return parquet.TypeProtocol
 	case "UUID":
 		// The declaration half of #839. `CAST(x AS UUID)` declared STRING, so
 		// the cast changed neither the value nor the type a client sees —
