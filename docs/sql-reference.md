@@ -580,12 +580,13 @@ arithmetic above it, exactly as the plain `SELECT MAX(bigint_col) FROM t` is —
 the two spellings answer the same value at the same type. An `ORDER BY` term
 the SELECT list does not carry is engine scaffolding and is never the value.
 
-A `ROW` field path may not be an `IN` subquery's SELECT list. `x IN (SELECT
-c_row.b FROM t)` is refused on every arm: the semi join this lowers to keys on
-a column the subquery's output does not carry — the output carries the `ROW`
-column `c_row`, not a column `b` — and answering it would need the field path
-materialised under a name of its own. The field path itself reads normally
-everywhere else, including as the OUTER key of the same predicate
+A `ROW` field path may be an `IN` subquery's SELECT list: `x IN (SELECT c_row.b
+FROM t)` answers what PostgreSQL's `x IN (SELECT (c_row).b FROM t)` answers,
+including through `NOT IN`, whose result is empty when the field is NULL on any
+row (SQL's three-valued rule). The predicate is not lowered to a semi join
+there — a join key is a column, and a field path is a value that has to be
+extracted — so it runs as a subquery predicate. The field path reads normally
+everywhere else too, including as the OUTER key of the same predicate
 (`c_row.b IN (SELECT b FROM u)`) and in a literal list.
 
 A subquery used where ONE column is required must return one column. Two
@@ -770,6 +771,22 @@ Every other combination of join kind and `ON` matches PostgreSQL.
 `SELECT *` over an aggregated lateral is a second gap of the same kind: the
 star expands after the default is applied, so a `COUNT` column reached through
 it reads NULL rather than 0. Name the columns to get the default.
+
+A star over a lateral also publishes ONE COLUMN MORE than PostgreSQL does. The
+correlated equality is turned into a join, and a join needs the inner value as
+a column, so the planner adds one: it is named `__key_0` — the reserved
+namespace no query can spell — and a star over the join shows it. Naming the
+columns you want is the way to avoid it, and it is what a `SELECT *` over a
+lateral is worth doing anyway. On the distributed engine such a star is
+REFUSED rather than answered (the join's files would describe two different
+relations); the same query with its columns named answers on every engine.
+
+An inner `SELECT` list that aliases something to the correlation key's own name
+answers what PostgreSQL answers. `JOIN LATERAL (SELECT MAX(t.id) AS g …
+WHERE t.g = d.k) s` reads `s.g` as the MAX, and `JOIN LATERAL (SELECT amount AS
+order_id … WHERE order_id = o.id) li` reads `li.order_id` as the amount — the
+key the planner adds cannot be shadowed by an alias, because it does not use a
+name a query can write.
 
 ## Aggregate Functions
 
@@ -1111,6 +1128,20 @@ reference to a WITH item that is not yet defined — its own name inside its
 body, or a forward reference to a later item — is SQLSTATE `42P01`
 (`relation "..." does not exist`), as it is in PostgreSQL. `WITH RECURSIVE` is
 the exception: a recursive CTE's name IS visible inside its own body.
+
+A `WITH RECURSIVE` column list renames its body's columns BY POSITION, so a
+body that publishes two columns under one name is renamed apart by it and both
+values survive:
+
+```sql
+WITH RECURSIVE t(a, b) AS (SELECT 1 AS x, 10 AS x UNION ALL
+                           SELECT a + 1, b * b FROM t WHERE a < 3)
+SELECT a, b FROM t ORDER BY a          -- 1,10 | 2,100 | 3,10000
+```
+
+A recursive CTE is answered by the single-process engine; the distributed
+engine has no stage lowering for one and refuses such a query rather than
+answering it differently.
 
 A `WITH` may also be written INSIDE a nested query block — a derived table, a
 CTE body, a `LATERAL` subquery — and its items are in scope for that block; the

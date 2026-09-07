@@ -1,6 +1,6 @@
 # ADR-0022: A ROW field path is not a column reference
 
-Status: Accepted (2026-08-25; amended 2026-09-04 by arc E3 for #769 — rule 1's ORDER is stated the other way round and asked in ONE place)
+Status: Accepted (2026-08-25; amended 2026-09-04 by arc E3 for #769 — rule 1's ORDER is stated the other way round and asked in ONE place; amended 2026-09-07 by arc J1 — the "not decided here" entry for a field path as an IN-subquery's INNER key is CLOSED, and it closed at the DANGLING-REFERENCE GUARD rather than at the lowering: rule 7)
 
 ## Context
 
@@ -161,43 +161,62 @@ delegate a field path to their row-at-a-time fallback, and `KernelFilter`
 checks the literal against the FIELD's type before delegating, so the
 refusal survives the delegation.
 
+**7. A qualifier that names a COLUMN of a relation the subquery reads is a
+field path, not a lost correlation.** (2026-09-07, #866.)
+
+`expr.refuseDanglingSubquery` runs once per uncorrelated subquery, right
+before it is executed standalone, and fails the query when the text still
+carries a qualified reference no FROM clause inside it provides. That is a
+correlation the classifier missed, and run standalone it does not fail — it
+answers a confident constant (#734, #679, #535).
+
+A ROW field path is the same shape and a different fact. `c_row.b` names no
+FROM item either, and the guard therefore refused
+`d.b IN (SELECT c_row.b FROM typemx_nested)` with `0A000 … is correlated on
+c_row.b`, for a query PostgreSQL 17 answers in one row. The refusal's own
+sentence called the reference correlated, which it is not.
+
+`plansql.DanglingTableRefsWithScope` takes a `TableColumns` resolver and drops
+every reference whose QUALIFIER is a column of a relation the subquery reads.
+The resolver is the planner's own (`Planner.subqueryInnerColumns`, which is
+`plansql.CTEColumns` over the catalog), threaded to the three uncorrelated
+evaluators through `expr.WithSubqueryScope` beside the two plan-time answers
+they already take. A NIL resolver — the worker's own compile sites, which have
+no catalog — keeps the pre-#866 answer, and so does a relation the resolver
+cannot name: a real lost correlation stays refused, which is the safe
+direction.
+
+The boundary is stated rather than assumed: the test is "the qualifier is a
+COLUMN", not "the qualifier is a ROW column", because `TableColumns` answers
+names and not types. A subquery whose inner relation has a column spelled like
+an OUTER relation's alias would stop being refused. It is contrived — the
+qualifier must not also be an inner table or alias, which `DanglingTableRefs`
+excludes first — and both directions are gated.
+
 ## Not decided here
 
 - **A field path as an IN-subquery's INNER key** — `x IN (SELECT c_row.b FROM
-  t)`. Added 2026-09-06 (arc H1, #866).
+  t)`. Added 2026-09-06 (arc H1, #866); **CLOSED 2026-09-07 by arc J1**, and
+  the answer is rule 7 below rather than anything in this list. The entry is
+  kept because what it predicted was wrong in an instructive way.
 
-  The decorrelation lowers an `IN` to a semi join whose BUILD side is the
-  subquery's own plan — `Scan → [Join …] → [Filter] → [Aggregate]`, and never a
-  Project. That plan emits the ROW column `c_row` and no column called `b`, so
-  `exec.HashJoin` resolved the build key to index -1, the degenerate
-  all-rows-equal key. Measured against PostgreSQL 17 over the corpus fixtures:
-  PG answered one row (`did = 6`), the single-process and spilled arms answered
-  the two rows whose OUTER key is NULL — which `NULL IN (…)` must exclude,
-  while the one row that matches was dropped — the DAG answered nothing, and
-  the shuffled arm failed with `partitioned shuffle: key "c_row.b" not in
-  schema`. The `NOT IN` twin was wrong on all four arms.
+  H1 recorded that answering it "needs the field path MATERIALISED into the
+  subquery's own output under a hidden slot", and arc J1 built exactly that:
+  a Project publishing `__path_0` above the build side, with the semi join
+  keyed on the slot. The single-process and spilled arms then answered
+  PostgreSQL's row. **The stage DAG answered ZERO rows and its `NOT IN` twin
+  every row, silently**, because no stage materializes the slot —
+  `absorbComputedSubqueryProjection` is the pass that would, and a semi join's
+  build side reaches it as `Distinct → Project → Project → Scan`
+  (`dedupSemiAntiBuildSide`'s dedup) where its own resolvability check
+  declines. A plan-time refusal keyed on the slot cannot rescue it either: the
+  build dep is an `exchange-replicate` whose column list is empty, so
+  `carrierInputColumns` reports the input as UN-MODELLED and every carrier
+  assert skips it. The materialization was WITHDRAWN.
 
-  The lowering now DECLINES when the inner key's qualifier names no relation
-  the subquery reads, which is exactly what a field path is in that position,
-  and the predicate stays a filter. That leaves a LOUD refusal naming
-  `c_row.b` on every arm with `CorrelatedLocalRoutes` moving on both DAG ones —
-  never a wrong count — and it is the MIRROR of the OUTER-key decline rule 1
-  already carries as its ninth resolver.
-
-  **What answering it needs** is the field path MATERIALISED into the
-  subquery's own output under a name of its own — a hidden slot (ADR-0026 §3a),
-  which is the same mechanism this ADR already defers for the aliased-key
-  LATERAL case. That means a Project on a build side
-  `logical.repairDecorrelatedSpelling` models as Project-free, so it is a
-  plan-shape change rather than a resolver addition, and it is its own arc.
-
-  **Second half, recorded so it is not rediscovered:** the refusal's SENTENCE
-  calls the reference "correlated", which it is not.
-  `plansql.DanglingTableRefs` reads a qualifier naming no relation as an OUTER
-  table and has no schema to tell a ROW column from one; giving it that
-  knowledge means threading a `TableColumns` resolver and the ROW fields into
-  `internal/planner/sql`. Gated at
-  `internal/coordinator/arc_h1_field_path_in_subquery_test.go`.
+  What the shape actually needed was for the `IN` to stay a filter predicate —
+  which the DECLINE already made it — and for the predicate route to stop
+  being refused. See rule 7.
 
 
 - **Three-part paths.** `rw.inner.k` and `t.rw.f` do not parse at all
