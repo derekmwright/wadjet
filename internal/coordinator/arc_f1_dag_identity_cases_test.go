@@ -176,6 +176,12 @@ func TestF1AJoinArmPublishesTheColumnsItSelects(t *testing.T) {
 				"JOIN decpair u ON x.id = u.id WHERE x.w > 1 ORDER BY xw, yw",
 			want: "cols=[xw:DECIMAL(9,2) yw:DECIMAL(22,4)] rows=5 | 2.00,1000.0000 | " +
 				"12.75,1274.9900 | 12.75,1275.0000 | 12.75,1275.0100 | 12.75,NULL",
+			// EXECUTED as stages on both DAG arms, stated rather than left to
+			// omission: rows alone cannot tell that from a query the
+			// coordinator refused and answered locally, and a cell that used
+			// to be a LOUD refusal is exactly where a regression would come
+			// back as a silent local route.
+			routed: map[string]string{},
 		},
 		{
 			name: "770 control: two arms whose aliases are DISTINCT",

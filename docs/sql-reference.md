@@ -879,8 +879,9 @@ inside a derived table and a CTE exactly as at the top level.
 
 `ORDER BY` binds the output column even when the SELECT list SWAPS two names,
 and on every execution path: `SELECT DISTINCT a AS b, b AS a FROM t ORDER BY a`
-orders by the output `a`, whose value is the source `b`. The distributed path
-ordered by the source `a` before v0.18.58.
+orders by the output `a`, whose value is the source `b`, and so does the same
+query with a join under it (`… FROM t x JOIN u ON x.id = u.id`). The
+distributed path ordered by the source `a` in both spellings before v0.18.58.
 
 ### GROUPING SETS
 

@@ -426,12 +426,13 @@ window-argument spellings, at three, four and five relations and with three
 derived arms, plus six controls), `TestJ2AnOrderByTermNamesAnOutputColumn`
 (#947) and `TestJ2ADistinctArmComputedColumnKeepsItsType` (#949), each on four
 arms against live PostgreSQL 17.11.
-`coordinator.TestH2TwoJoinArmsPublishingOneAliasIsDeferred`, the fifteen-cell
-census the deferral was recorded as, is DELETED: every shape in it answers.
+`coordinator.TestH2TwoJoinArmsPublishingOneAliasIsDeferred`, the census the
+deferral was recorded as — SEVENTEEN cells, thirteen pinned and four controls —
+is DELETED: every shape in it answers.
 
-### NOT settled: a window's PARTITION BY key, and a SELECT list nothing runs
+### NOT settled: three shapes, all pinned fail-on-agree
 
-Two shapes this decision does not reach, both pinned fail-on-agree.
+Three shapes this decision does not reach.
 
 **A window's PARTITION BY key** is the sixth consumer and it is bound at
 EMISSION, because the key is also the stage's DISTRIBUTION and rewriting it
@@ -446,6 +447,33 @@ it, together with the distinct-alias twin — right on the local path, refused o
 both DAG arms — as the control that says the first is about the collision. The
 repair has to make the arm-aware choice at emission time, where the stream
 model this decision uses is not yet available; that is its own arc.
+
+The shuffled arm's DISPOSITION moved here, from a payload failure at
+`exchange-repartition-window-9-9` to the same wrong number the others give, and
+the argument that licenses that is an ASYMMETRY rather than a preference:
+`single`, `spilled` and `dag` already answered the wrong number at `a3f9b664`,
+so no refusal became a wrong answer for anyone — what went away is a payload
+accident that happened to mask one arm, and a query that answers the same wrong
+number everywhere is a smaller hazard than one that answers three ways. Keeping
+the refusal is not available at this decision's site either: it would mean
+teaching the carry that a value wanted ONLY by a PARTITION BY key must not be
+carried, a special case keyed on the consumer kind, which is the model rule 11
+refuses.
+
+**A join stage whose tasks write different `.wshf` schemas.** An OUTER join with
+a NON-KEY predicate in its ON clause — `LEFT JOIN … ON x.id = y.id AND
+y.id <> 5` — makes the NULL-padded side produce a task output whose column
+order differs from its siblings', and ADR-0010's reader refuses the second file:
+`join-8/….wshf names column 3 "y.w" where an earlier file of the same stage
+input named it "y.id"`. It is PRE-EXISTING and not this decision's: the
+TWO-RELATION spelling, which no carry reaches, fails identically at `a3f9b664`,
+and that cell is pinned beside the others as the control which says so. What
+the carry does is make the three-relation shape REACH it — at `a3f9b664` the
+join's payload had no `y.w`, so its files agreed and the query was SILENTLY
+wrong instead (`s:FLOAT64` with five NULLs for the window consumer; the column
+gone for the UNION ALL one). Silent-wrong → loud is the direction, and it is
+still a shape this decision does not close: the root cause is the join stage's
+own per-task output schema, not the payload, and the repair belongs there.
 
 **A SELECT list no stage runs** is #813 item 1's residual, and it is ADR-0025's
 own first question rather than this one. `CAST(SUM(x) OVER () AS BIGINT) AS v`

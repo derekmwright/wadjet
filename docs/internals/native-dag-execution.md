@@ -415,11 +415,13 @@ is MATERIALIZED instead" (`join_input_projection.go`, ADR-0025):
   projection's declared TYPE — carrying a value only where NO published
   spelling reaches it. `TestTPCHStageDumpGolden` is byte-identical across the
   whole arc: every TPC-H consumer already binds, so a respell costs no bytes.
-  The two shapes it does not reach — a window's PARTITION BY key, which is bound
-  at emission because it is also the stage's distribution, and a SELECT list no
-  stage RUNS (#813 item 1) — are pinned fail-on-agree in
-  `coordinator.TestJ2AJoinConsumerBindsThePublishedIdentity` and
-  `coordinator.TestH2TheWindowDeclaredTypeCensus`.
+  The three shapes it does not reach — a window's PARTITION BY key, which is
+  bound at emission because it is also the stage's distribution; a join stage
+  whose tasks write different `.wshf` schemas under an OUTER join with a
+  non-key ON predicate (pre-existing, and the root cause is that stage's own
+  output schema); and a SELECT list no stage RUNS (#813 item 1) — are pinned
+  fail-on-agree in `coordinator.TestJ2AJoinConsumerBindsThePublishedIdentity`
+  and `coordinator.TestH2TheWindowDeclaredTypeCensus`.
 - once an arm's SELECT list is materialized its stream is the arm's OUTPUT, so
   the join names it with `joinArmAlias` and `materializedBuildColOrigins` — the
   MATERIALIZED answers — rather than `stageBuildTableAlias`'s raw one. The
