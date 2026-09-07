@@ -1393,6 +1393,14 @@ SELECT CAST(dst_port AS Int64) FROM flow_logs
 SELECT CAST(bytes_in AS Float64) / CAST(packets AS Float64) AS avg_size FROM flow_logs
 ```
 
+Every type this engine has can be named as a cast destination, and each one
+converts to that type and declares it. `INT32` is a second spelling of `int4`
+and lands on the same carrier every integer spelling does (`bigint` on the
+wire); `PORT` and `PROTOCOL` declare `integer` (OID 23), the same OID their
+columns declare; `FLOAT32` is `REAL`. All four, and `DATE` from an integer day
+count, are stored in a signed 32-bit field, so a value with no room in one is
+`22003 integer out of range` — see the table below and `docs/data-types.md`.
+
 `CAST(<col> AS STRING)` renders the value's own printed form — the text the
 column projects and the text `LIKE` matches against, which for a TIMESTAMP is
 `2006-01-02 15:04:05` (UTC, with milliseconds only when non-zero), for a DATE
@@ -1428,6 +1436,8 @@ are different answers — a client branches on them:
 | `CAST('abcdef' AS TEXT(5))` | `42601` | type modifier is not allowed for type "text" |
 | `CAST(x AS FLOAT(0))` / `FLOAT(54)` | `22023` | precision for type float must be at least 1 bit / less than 54 bits |
 | `CAST(x AS DECIMAL(p,s))` past the carrier | `22003` | numeric field overflow |
+| `CAST(x AS INT32 \| PORT \| PROTOCOL \| DATE)` past the int4 range those four are stored in | `22003` | integer out of range |
+| `CAST(1e40 AS FLOAT32)` — the same type `REAL` names | `22003` | … is out of range for type real |
 | `bigint` arithmetic past its range — including under a `CAST`, `ABS`/`MOD`, or a `CASE`/`COALESCE`/`NULLIF`/`GREATEST`/`LEAST` over integer branches | `22003` | bigint out of range |
 | `ABS(<int4 column>)` at `-2147483648` | `22003` | integer out of range |
 | `ABS(<int8 column>)` at `-9223372036854775808` | `22003` | bigint out of range |
