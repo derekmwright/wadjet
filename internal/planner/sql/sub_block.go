@@ -75,3 +75,54 @@ func parseBlockText(sql string) (*SelectInfo, error) {
 	}
 	return info, nil
 }
+
+// BlockOutputColumns lists the column names one query block PUBLISHES, and
+// reports whether the list is incomplete because the SELECT list holds a star.
+//
+// It is the block-namespace rule in ONE place: the binder asks it for the
+// output aliases a GROUP BY may name, for a derived table's published columns
+// and for a CTE's; correlation analysis asks it for the same reason one level
+// down — an unqualified name inside a subquery binds the subquery's own FROM
+// first, and a CTE reference or a derived table is a relation with a schema
+// exactly as a base table is (ADR-0021 §1k).
+//
+// A set operation publishes its LEFT arm's names, which is PostgreSQL's rule.
+// A star is not expanded here: naming what it stands for needs the sources'
+// schemas, which this package does not have, so the second result says "ask
+// somebody with a catalog".
+func BlockOutputColumns(info *SelectInfo) ([]string, bool) {
+	if info == nil {
+		return nil, true
+	}
+	if info.Union != nil {
+		return BlockOutputColumns(info.Union.Left)
+	}
+	var names []string
+	for i := range info.Columns {
+		c := info.Columns[i]
+		if c.Star {
+			return nil, true
+		}
+		if name := SelectItemName(c); name != "" {
+			names = append(names, strings.ToLower(name))
+		}
+	}
+	return names, false
+}
+
+// SelectItemName is the name one SELECT item publishes: its alias, else the
+// column it names, else the expression text as written — and for a window call
+// the name the logical builder's projection gives it, so the namespace this
+// enumerates is the one the query really produces.
+func SelectItemName(c SelectColumn) string {
+	if c.IsWindow {
+		return WindowOutputName(c)
+	}
+	if c.Alias != "" {
+		return c.Alias
+	}
+	if c.ColumnRef != "" {
+		return c.ColumnRef
+	}
+	return strings.TrimSpace(c.Expr)
+}

@@ -1265,8 +1265,13 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 		return nil, pred, false
 	}
 
-	// Check for correlated references
-	refs, err := plansql.FindCorrelatedRefsWithColumns(subq.SQL, outerTables, outerColMap)
+	// Check for correlated references. The WITH items in scope are part of
+	// the resolver: a CTE reference in the subquery's FROM is a relation with
+	// a schema, and an unqualified name it supplies binds THERE (#955). This
+	// package has no catalog, so a base table's columns are still unknown here
+	// and the identifier-comparison fallback decides those.
+	refs, err := plansql.FindCorrelatedRefsWithScope(subq.SQL, outerTables, outerColMap,
+		plansql.CTEColumns(ctes, nil))
 	if err != nil || len(refs) == 0 {
 		return nil, pred, false
 	}
@@ -3141,8 +3146,10 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 	}
 
 	// Check for correlated references — use column-aware version to
-	// detect unqualified outer refs (e.g., c_custkey from customer).
-	refs, err := plansql.FindCorrelatedRefsWithColumns(exists.SQL, outerTables, outerColMap)
+	// detect unqualified outer refs (e.g., c_custkey from customer), with the
+	// WITH items in scope as relations of their own (#955).
+	refs, err := plansql.FindCorrelatedRefsWithScope(exists.SQL, outerTables, outerColMap,
+		plansql.CTEColumns(ctes, nil))
 	if err != nil || len(refs) == 0 {
 		return nil // uncorrelated, keep as-is
 	}

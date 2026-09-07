@@ -15442,18 +15442,31 @@ func cteOutputNames(n *logical.Node) []string {
 	return nil
 }
 
-// subqueryInnerColumns returns a resolver that reports a table's columns from
-// the catalog, so correlation analysis can bind an unqualified name inside a
-// subquery to the subquery's own FROM before considering the outer query —
-// the SQL scoping rule. Without it, a name that also exists in the outer
-// scope is claimed by the outer scope unless the outer table's identifier
-// happens to be spelled the same as an inner table, which turns an ordinary
-// uncorrelated subquery into a per-row correlated one (issue #334).
+// subqueryInnerColumns returns a resolver that reports a relation's columns, so
+// correlation analysis can bind an unqualified name inside a subquery to the
+// subquery's own FROM before considering the outer query — the SQL scoping
+// rule. Without it, a name that also exists in the outer scope is claimed by
+// the outer scope unless the outer table's identifier happens to be spelled the
+// same as an inner table, which turns an ordinary uncorrelated subquery into a
+// per-row correlated one (issue #334).
 //
-// Unknown tables (CTEs, table functions) resolve to nil, which leaves the
-// name to the identifier-comparison fallback rather than silently declaring
-// it inner.
+// A CTE reference is a relation with a schema exactly as a base table is, so
+// the WITH items in scope are part of the resolver and not an exception to it
+// (#955). While they were, `WITH c AS (SELECT id, … FROM t) SELECT (SELECT
+// MAX(v) FROM c WHERE id < 4000) FROM d` read that `id` as d's, substituted the
+// outer row's value into the predicate — making it constant TRUE — and answered
+// the unfiltered aggregate on every arm in silence. A derived table needs
+// nothing here: it carries its own body, and the classifier reads it.
+//
+// A relation this cannot name resolves to nil, which leaves the name to the
+// identifier-comparison fallback rather than silently declaring it inner.
 func (p *Planner) subqueryInnerColumns() plansql.TableColumns {
+	return plansql.CTEColumns(p.ctes, p.catalogColumns())
+}
+
+// catalogColumns is the base of subqueryInnerColumns' resolver: a relation's
+// declared schema, from the catalog.
+func (p *Planner) catalogColumns() plansql.TableColumns {
 	if p.catalog == nil {
 		return nil
 	}

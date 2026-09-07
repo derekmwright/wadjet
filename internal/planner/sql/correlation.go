@@ -12,12 +12,21 @@ type OuterRef struct {
 	Column string // column name (lowercased)
 }
 
-// TableColumns reports the column names of a table named in a subquery's FROM
-// clause, or nil when the table is unknown (a CTE, a table function, a planner
-// with no catalog). It is what lets correlation analysis apply the SQL scoping
-// rule: an unqualified name inside a subquery is resolved against the
-// subquery's own FROM first, and only a name that does NOT resolve there is a
-// reference to the outer query.
+// TableColumns reports the COMPLETE column list of a relation named in a
+// subquery's FROM clause, or nil when the relation is unknown (a table
+// function, a planner with no catalog). It is what lets correlation analysis
+// apply the SQL scoping rule: an unqualified name inside a subquery is
+// resolved against the subquery's own FROM first, and only a name that does
+// NOT resolve there is a reference to the outer query.
+//
+// Complete-or-nil is the contract, not a convenience. A PARTIAL list would let
+// a column-alias list be overlaid on the wrong positions and, worse, would
+// read as "this relation does not have that name" for every column missing
+// from it — the direction that turns an inner reference into an outer one. A
+// resolver that can name only SOME of a relation's columns answers nil.
+//
+// A CTE is a relation with a schema like any other; CTEColumns wraps a
+// resolver with the WITH items in scope so this contract holds for them too.
 type TableColumns func(table string) []string
 
 // outerRefScope carries the name-resolution context for one correlation
@@ -208,31 +217,192 @@ func collectInnerTables(info *SelectInfo) map[string]bool {
 }
 
 // collectInnerColumns returns the column namespace of the subquery's own FROM
-// clause: the union of the columns of every table it names. Returns nil when
-// no resolver was supplied or none of the tables could be resolved.
+// clause: the union of the columns every FROM item publishes. Returns nil when
+// no item could be resolved.
+//
+// It asks each ITEM what it publishes rather than asking a catalog about a
+// NAME, because a subquery's FROM is not only base tables. A CTE reference, a
+// derived table and a set-operation arm are relations with schemas, and SQL
+// scopes innermost-first over all of them: in
+//
+//	WITH c AS (SELECT id, c_i64 AS v FROM t)
+//	SELECT (SELECT MAX(v) FROM c WHERE id < 4000) FROM d
+//
+// that `id` is c's. While only a catalog name resolved it fell through to the
+// ENCLOSING query, the subquery was classified CORRELATED, the outer row's
+// value was substituted into the predicate — making it constant TRUE — and
+// every arm answered the unfiltered aggregate in silence (#955).
 func collectInnerColumns(info *SelectInfo, resolve TableColumns) map[string]bool {
-	if resolve == nil {
-		return nil
-	}
 	var m map[string]bool
-	add := func(table string) {
-		if table == "" {
-			return
-		}
-		for _, col := range resolve(table) {
+	add := func(cols []string) {
+		for _, col := range cols {
+			if col == "" {
+				continue
+			}
 			if m == nil {
 				m = make(map[string]bool)
 			}
 			m[strings.ToLower(col)] = true
 		}
 	}
-	for _, t := range info.Tables {
-		add(t.Name)
+	for i := range info.Tables {
+		add(sourceColumns(&info.Tables[i], resolve))
 	}
-	for _, j := range info.Joins {
-		add(j.RightTable)
+	for i := range info.Joins {
+		add(sourceColumns(joinRightSource(&info.Joins[i]), resolve))
 	}
 	return m
+}
+
+// sourceColumns reports the COMPLETE column list one FROM item publishes, or
+// nil when it cannot be named exactly — the TableColumns contract applied to a
+// FROM item rather than to a name.
+//
+// A derived table is answered from its own parsed body (the MEMOIZED parse,
+// ADR-0032, which is why the reference is taken by pointer); everything else is
+// a name for the resolver. A COLUMN-ALIAS LIST renames the leading outputs
+// positionally and HIDES the names it replaces, which is why it is applied over
+// a complete list and is the whole answer when there is none.
+func sourceColumns(t *TableRef, resolve TableColumns) []string {
+	if t == nil {
+		return nil
+	}
+	var names []string
+	switch {
+	case t.IsFunction:
+		// A table function's namespace is open to this package; only an
+		// explicit alias list can name any of it.
+	case strings.HasPrefix(t.Name, "("):
+		if body, err := t.SubSelect(); err == nil && body != nil {
+			names = blockPublishedColumns(body, resolve)
+		}
+	default:
+		if resolve != nil && t.Name != "" {
+			names = resolve(t.Name)
+		}
+	}
+	n := len(t.ColumnAliases)
+	if n == 0 {
+		return names
+	}
+	if len(names) == 0 {
+		// The source's own names are unknown, so the list cannot be overlaid
+		// positionally — but the names IN it are published whatever they
+		// rename, and naming them is never the unsafe direction.
+		return append([]string(nil), t.ColumnAliases...)
+	}
+	if n > len(names) {
+		// PostgreSQL's 42P10, which the binder raises. Nothing here can say
+		// what the relation publishes, so it says nothing.
+		return nil
+	}
+	out := append([]string(nil), names...)
+	copy(out, t.ColumnAliases)
+	return out
+}
+
+// blockPublishedColumns is one query block's output namespace, with a star
+// standing for the columns the block's own FROM supplies. nil means the
+// namespace cannot be named exactly — a star over a source this package cannot
+// resolve — which is the TableColumns contract one level down.
+func blockPublishedColumns(info *SelectInfo, resolve TableColumns) []string {
+	if info == nil {
+		return nil
+	}
+	if info.Union != nil {
+		// A set operation publishes its LEFT arm's names, PostgreSQL's rule.
+		return blockPublishedColumns(info.Union.Left, resolve)
+	}
+	var out []string
+	var star bool
+	for i := range info.Columns {
+		if info.Columns[i].Star {
+			star = true
+			continue
+		}
+		if name := SelectItemName(info.Columns[i]); name != "" {
+			out = append(out, strings.ToLower(name))
+		}
+	}
+	if !star {
+		return out
+	}
+	for i := range info.Tables {
+		cols := sourceColumns(&info.Tables[i], resolve)
+		if cols == nil {
+			return nil
+		}
+		out = append(out, cols...)
+	}
+	for i := range info.Joins {
+		cols := sourceColumns(joinRightSource(&info.Joins[i]), resolve)
+		if cols == nil {
+			return nil
+		}
+		out = append(out, cols...)
+	}
+	return out
+}
+
+// joinRightSource is a join's right-hand FROM item, by POINTER into the AST so
+// a derived table there memoizes its parsed body on the reference every other
+// reader holds (ADR-0032).
+func joinRightSource(j *JoinInfo) *TableRef {
+	if j.RightTableRef != nil {
+		return j.RightTableRef
+	}
+	return &TableRef{Name: j.RightTable, Alias: j.RightAlias}
+}
+
+// cteScopeDepth bounds CTEColumns' expansion of a body whose SELECT list is a
+// star. A WITH RECURSIVE item's body names the item itself, so the expansion is
+// not structurally decreasing; the bound is what makes it terminate. A depth
+// this stops at answers nil — unknown — which is the safe direction.
+const cteScopeDepth = 8
+
+// CTEColumns wraps a resolver with the WITH items in scope, so a CTE reference
+// answers the TableColumns contract the way a base table does: the item's
+// explicit column list where it has one, else the names its body publishes.
+// That is PostgreSQL's rule and the binder's (physical.registerCTE).
+//
+// An item's body sees the items BEFORE it and not itself — PostgreSQL's scoping
+// rule, and what keeps a self-referencing body from resolving against the item
+// it is defining.
+func CTEColumns(ctes []CTEDef, base TableColumns) TableColumns {
+	if len(ctes) == 0 {
+		return base
+	}
+	// The definitions are read by POINTER into the caller's slice so a body's
+	// parse is memoized where every other reader sees it (ADR-0032).
+	index := make(map[string]int, len(ctes))
+	for i := range ctes {
+		index[strings.ToLower(ctes[i].Name)] = i
+	}
+	var resolveAt func(scope, depth int) TableColumns
+	resolveAt = func(scope, depth int) TableColumns {
+		return func(table string) []string {
+			i, ok := index[strings.ToLower(table)]
+			if !ok || i >= scope {
+				if base == nil {
+					return nil
+				}
+				return base(table)
+			}
+			c := &ctes[i]
+			if len(c.Columns) > 0 {
+				return c.Columns
+			}
+			if depth >= cteScopeDepth {
+				return nil
+			}
+			body, err := c.BodySelect()
+			if err != nil || body == nil {
+				return nil
+			}
+			return blockPublishedColumns(body, resolveAt(i, depth+1))
+		}
+	}
+	return resolveAt(len(ctes), 0)
 }
 
 func dedup(refs []OuterRef) []OuterRef {

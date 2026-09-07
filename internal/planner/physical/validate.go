@@ -1357,36 +1357,13 @@ func (b *binder) blockSubqueries(info *plansql.SelectInfo) []string {
 
 // blockOutputs returns a block's output column names and whether it has a star
 // (which makes its output unenumerable → treat as open).
+//
+// The rule lives in the parser package because correlation analysis needs the
+// same namespace one level down: an unqualified name inside a subquery binds
+// the subquery's own FROM first, and a CTE reference or a derived table is a
+// relation with a schema exactly as a base table is (ADR-0021 §1k, #955).
 func blockOutputs(info *plansql.SelectInfo) ([]string, bool) {
-	if info == nil {
-		return nil, true
-	}
-	if info.Union != nil {
-		return blockOutputs(info.Union.Left)
-	}
-	var names []string
-	for i := range info.Columns {
-		c := info.Columns[i]
-		if c.Star {
-			return nil, true
-		}
-		name := c.Alias
-		if name == "" {
-			name = c.ColumnRef
-		}
-		if name == "" {
-			name = strings.TrimSpace(c.Expr)
-		}
-		if c.IsWindow {
-			// The same choice the logical builder's projection makes, so the
-			// namespace this enumerates is the one the query really produces.
-			name = plansql.WindowOutputName(c)
-		}
-		if name != "" {
-			names = append(names, strings.ToLower(name))
-		}
-	}
-	return names, false
+	return plansql.BlockOutputColumns(info)
 }
 
 // joinRightRef extracts the right-hand table reference of a join.
