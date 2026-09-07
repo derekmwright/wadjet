@@ -9955,9 +9955,14 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	// a rename of a value computed BELOW the aggregate, so it types against
 	// the aggregate's input rather than its output.
 	childColTypes := emittedColDecls(child)
+	// A SELECT-list scalar subquery types against its OWN plan, not against
+	// this projection's input columns (#874).
+	childColTypes.subqueryDecl = p.subqueryOutputColumn
 	var aggInputColTypes colDecls
 	if isOverAggregate && len(aggNode.Children) > 0 {
 		aggInputColTypes = inputColDecls(aggNode.Children[0])
+		aggInputColTypes.subqueryDecl = p.subqueryOutputColumn
+
 	}
 
 	// When the aggregate below emits two output columns of one NAME, a
@@ -11520,6 +11525,28 @@ type colDecls struct {
 	// value back at the wrong power of ten — which is why colRefDeclaredType
 	// used to decline the type outright (ADR-0024 item 2, #529/#555/#587).
 	dec map[string]logical.DecimalMeta
+	// subqueryDecl resolves a SCALAR SUBQUERY's single declared output
+	// column, and nil means "this caller cannot ask" — which is what every
+	// construction site that has no Planner leaves it at, and what
+	// nodeDeclaredType's SubqueryNode arm declines on.
+	//
+	// It exists because a subquery is a WHOLE SECOND QUERY whose type lives
+	// in the CATALOG, not in the enclosing query's columns: `SELECT id,
+	// (SELECT MAX(c_i64) FROM typemx) AS mx` has nothing in `types` that
+	// describes `mx`. Without it the projection fell to its STRING fallback
+	// and a bigint came back as a Go string on every arm and every door,
+	// where PostgreSQL declares int8 (#874) — and the const-arith fold saw an
+	// Undecided operand and folded `+ 1` on the FLOAT rung (#714's third box).
+	subqueryDecl func(sql string) (parquet.Column, bool)
+	// placeholderTypes is the declared type of each `:scalar_N` deferred
+	// literal, keyed by the placeholder's NAME.
+	//
+	// It is a map of its own rather than an entry in `types` because a
+	// placeholder is not a column and must not be resolvable as one: a user
+	// column called `scalar_1` would otherwise answer for it. The DAG's
+	// SELECT-list lowering fills it from each producer's own plan, which is
+	// the only thing that knows what the value will be (#874).
+	placeholderTypes map[string]parquet.TypeID
 }
 
 // colType resolves a column reference to its declared type, mirroring the
@@ -11927,6 +11954,47 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 		return nodeDeclaredType(n.Inner, decls)
 	case *plansql.CaseNode:
 		return caseDeclaredType(n, decls)
+	case *plansql.LiteralPlaceholder:
+		// A DEFERRED LITERAL declares what its PRODUCER will produce (#874).
+		// The DAG's SELECT-list lowering replaces a scalar subquery with this
+		// node and then types the item; without the declaration the item fell
+		// to the STRING fallback — and `(:scalar_1) + 1` folded on the FLOAT
+		// rung — while the single-process path answered the subquery's own
+		// type. Two paths disagreeing about a column's type is the one thing
+		// the lowering is not allowed to do.
+		if t, ok := decls.placeholderTypes[n.Name]; ok {
+			return expr.Decl(t), expr.Decided
+		}
+		return expr.DeclType{}, expr.Undecided
+	case *plansql.SubqueryNode:
+		// A SCALAR SUBQUERY DECLARES THE TYPE OF ITS OWN OUTPUT COLUMN
+		// (#874). The declaration comes from the subquery's own plan, which
+		// is what subqueryOutputColumn already resolves for the BOXED
+		// COMPARISON (#696) — the same answer, asked one layer earlier so
+		// the projection allocates the right output vector instead of its
+		// STRING fallback.
+		//
+		// Undecided when nothing can ask (a caller with no Planner) or when
+		// the subquery does not resolve to exactly ONE column, which is the
+		// honest answer: a wrong declaration here builds an output vector
+		// that reads every value back wrong, and that is worse than the
+		// fallback (ADR-0012 item 8).
+		if decls.subqueryDecl == nil {
+			return expr.DeclType{}, expr.Undecided
+		}
+		col, ok := decls.subqueryDecl(n.SQL)
+		if !ok {
+			return expr.DeclType{}, expr.Undecided
+		}
+		if col.Type == parquet.TypeDecimal {
+			// (p,s) or nothing: a DECIMAL declared without its scale builds a
+			// vector that reads every value at the wrong power of ten.
+			if col.Precision == 0 {
+				return expr.DeclType{}, expr.Undecided
+			}
+			return expr.DeclDecimal(col.Precision, col.Scale), expr.Decided
+		}
+		return expr.Decl(col.Type), expr.Decided
 	case *plansql.CmpExpr, *plansql.AndNode, *plansql.OrNode, *plansql.NotNode,
 		*plansql.IsExpr, *plansql.LikeExpr, *plansql.BetweenExpr,
 		*plansql.InExpr, *plansql.ExistsNode, *plansql.AnyAllExpr:

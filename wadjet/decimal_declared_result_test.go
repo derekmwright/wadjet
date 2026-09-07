@@ -432,32 +432,41 @@ func TestDecimalChoiceExpressionRefusesAValueWithNoCarrier(t *testing.T) {
 //
 // A branch that decided no type still PRODUCES a value at runtime, and a
 // DECIMAL one arrives as text at ITS OWN scale. Folding only the branches
-// that spoke declared `COALESCE(a, (SELECT MAX(b) FROM t))` numeric(9,2) —
-// so the subquery's 12.7501 was TRUNCATED to 12.75 on the way into the output
-// vector, and at the comparison sites the operand classified as nothing and
-// GREATEST picked by BYTE order ("3.00" over "12.7501"). The fold now
-// declines, which puts every such shape back exactly where it was before
-// ADR-0024: a loud refusal, or the STRING fallback that renders the decimal
-// text unchanged.
+// that spoke declared `COALESCE(a, <undeclared>)` numeric(9,2) — so a wider
+// operand's 12.7501 was TRUNCATED to 12.75 on the way into the output vector,
+// and at the comparison sites the operand classified as nothing and GREATEST
+// picked by BYTE order ("3.00" over "12.7501"). The fold declines, which puts
+// every such shape back exactly where it was before ADR-0024: a loud refusal,
+// or the STRING fallback that renders the decimal text unchanged.
+//
+// THE UNDECLARED OPERAND IS NOW A CONTAINER ELEMENT, not a scalar subquery.
+// `element_at(arr, 2)` over a DECIMAL element list still decides nothing —
+// the call is typed from the registry and the container's element declaration
+// does not reach it — while a SCALAR SUBQUERY does declare its own output
+// column since #874, and the four shapes it used to stand for now ANSWER
+// PostgreSQL's values (TestDecimalChoiceFoldsOverAScalarSubquery below).
+// Swapping the operand keeps this clause testing what it is about.
 //
 // A bare NULL is the exception and stays one: it names no type AND produces
 // no value, which is SQL's `unknown`, so COALESCE(d, NULL) is numeric here as
 // it is on PostgreSQL.
 func TestDecimalChoiceDeclinesOverAnUndeclaredProducer(t *testing.T) {
 	db := ddrOpen(t)
-	sub := "(SELECT MAX(b) FROM " + ddrTable + ")"
+	// arr[2] is 3.00 on every row, so a fold that took it would be visible in
+	// the values as well as in the declaration.
+	sub := "element_at(arr, 2)"
 
 	// A CASE falls back to STRING, which renders the branch's own text — so
-	// row 6, where the subquery wins, keeps all four digits.
+	// row 6, where the undeclared operand wins, keeps its own spelling.
 	res := ddrQuery(t, db, "SELECT CASE WHEN a IS NULL THEN "+sub+" ELSE a END AS c FROM "+ddrTable+" ORDER BY id")
 	var got []string
 	for _, r := range res.Rows {
 		got = append(got, fmt.Sprintf("%v", r["c"]))
 	}
-	want := []string{"12.75", "12.75", "12.75", "2.00", "-0.01", "12.7501", "12.75"}
+	want := []string{"12.75", "12.75", "12.75", "2.00", "-0.01", "3.00", "12.75"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("CASE over a scalar subquery = %v, want %v (row 6 is the subquery's own value, "+
-			"which a fold to numeric(9,2) would have truncated to 12.75)", got, want)
+		t.Errorf("CASE over an undeclared producer = %v, want %v (row 6 is the operand's own "+
+			"value, which a fold to numeric(9,2) would render at the fold's scale)", got, want)
 	}
 
 	// COALESCE and GREATEST have a numeric fallback rather than a string one,
@@ -883,6 +892,98 @@ func TestDecimalChoiceOverAContainerElementComparesByValue(t *testing.T) {
 	}
 }
 
+// TestDecimalChoiceFoldsOverAScalarSubquery is the other side of the clause
+// above, and it is what #874 moved.
+//
+// A SCALAR SUBQUERY declares the type of its own single output column now, so
+// a DECIMAL fold over one resolves against a REAL (p,s) instead of declining:
+// `COALESCE(numeric(9,2), (SELECT MAX(numeric(18,4)) ...))` folds to
+// DECIMAL(18,4) and every digit survives. All four shapes refused before;
+// PostgreSQL 17 answers all four, measured live over these same seven rows.
+//
+// The one difference from PostgreSQL is the RENDERING: numeric carries each
+// VALUE's own dscale there and a single-scale vector renders every row at the
+// fold's, so `12.75` reads `12.7500` here. That is ADR-0024's recorded
+// per-value-dscale deferral and it is true of every DECIMAL fold in this
+// engine, not of this shape. The DIGITS agree, which is what the cells check.
+//
+// The BOUNDARY is a subquery whose own plan cannot name a (p,s) — a COMPUTED
+// decimal, where declaredProjectionDecl answers DecKnown=false — and it still
+// declines, because a DECIMAL declared without its scale builds a vector that
+// reads every value at the wrong power of ten.
+func TestDecimalChoiceFoldsOverAScalarSubquery(t *testing.T) {
+	db := ddrOpen(t)
+	sub := "(SELECT MAX(b) FROM " + ddrTable + ")"
+	for _, tc := range []struct{ name, sql, want string }{
+		{"case", "SELECT CASE WHEN a IS NULL THEN " + sub + " ELSE a END AS c FROM " +
+			ddrTable + " ORDER BY id",
+			"12.7500,12.7500,12.7500,2.0000,-0.0100,12.7501,12.7500"},
+		{"coalesce", "SELECT COALESCE(a, " + sub + ") AS c FROM " + ddrTable + " ORDER BY id",
+			"12.7500,12.7500,12.7500,2.0000,-0.0100,12.7501,12.7500"},
+		{"greatest", "SELECT GREATEST(a, " + sub + ") AS c FROM " + ddrTable + " ORDER BY id",
+			"12.7501,12.7501,12.7501,12.7501,12.7501,12.7501,12.7501"},
+		{"least", "SELECT LEAST(a, " + sub + ") AS c FROM " + ddrTable + " ORDER BY id",
+			"12.7500,12.7500,12.7500,2.0000,-0.0100,12.7501,12.7500"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			res := ddrQuery(t, db, tc.sql)
+			var got []string
+			for _, r := range res.Rows {
+				got = append(got, fmt.Sprintf("%v", r["c"]))
+			}
+			if strings.Join(got, ",") != tc.want {
+				t.Errorf("%s\n  got  %v\n  want %s (live PostgreSQL 17, at the fold's scale)",
+					tc.sql, got, tc.want)
+			}
+			if m := res.ColumnMetas[0]; m.TypeID != parquet.TypeDecimal || m.Scale != 4 {
+				t.Errorf("%s declared %s(%d,%d), want DECIMAL(_,4) — the fold resolves against "+
+					"the subquery's own declaration", tc.sql, m.TypeID, m.Precision, m.Scale)
+			}
+		})
+	}
+
+	// AN ARITHMETIC SUBQUERY resolves a (p,s) of its own and folds too — the
+	// declaration comes from the subquery's PLAN, not from a bare column, so
+	// `MAX(b * 2)` is DECIMAL(20,4) and `SUM(b) / 3` is DECIMAL(38,6). The
+	// values are PostgreSQL's digits at that scale.
+	for _, tc := range []struct{ name, sql, want string }{
+		{"an arithmetic aggregate",
+			"SELECT COALESCE(a, (SELECT MAX(b * 2) FROM " + ddrTable + ")) AS c FROM " +
+				ddrTable + " ORDER BY id",
+			"12.7500,12.7500,12.7500,2.0000,-0.0100,25.5002,12.7500"},
+		{"a divided sum",
+			"SELECT COALESCE(a, (SELECT SUM(b) / 3 FROM " + ddrTable + ")) AS c FROM " +
+				ddrTable + " ORDER BY id",
+			"12.750000,12.750000,12.750000,2.000000,-0.010000,16.413333,12.750000"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			res := ddrQuery(t, db, tc.sql)
+			var got []string
+			for _, r := range res.Rows {
+				got = append(got, fmt.Sprintf("%v", r["c"]))
+			}
+			if strings.Join(got, ",") != tc.want {
+				t.Errorf("%s\n  got  %v\n  want %s", tc.sql, got, tc.want)
+			}
+		})
+	}
+
+	// THE BOUNDARY, and it is reachable: a subquery whose OWN SELECT LIST is
+	// an undeclared producer — a container element — names no type at all, so
+	// the item declares STRING and the fold declines exactly as it does for
+	// the element itself. The declaration this commit adds is the SUBQUERY'S
+	// OWN PLAN's answer and nothing more.
+	res := ddrQuery(t, db, "SELECT COALESCE(a, (SELECT element_at(arr, 2) FROM "+ddrTable+
+		" WHERE id = 1)) AS c FROM "+ddrTable+" ORDER BY id")
+	if m := res.ColumnMetas[0]; m.TypeID != parquet.TypeString {
+		t.Errorf("COALESCE over a subquery that selects a container element declared %s(%d,%d), "+
+			"want STRING — its plan can name no type, so neither can the fold",
+			m.TypeID, m.Precision, m.Scale)
+	}
+}
+
 // TestNullifComparesByValueAgainstAnUndeclaredOperand is the review's second
 // P0.
 //
@@ -925,15 +1026,32 @@ func TestNullifComparesByValueAgainstAnUndeclaredOperand(t *testing.T) {
 		})
 	}
 
-	// The PROJECTED form of the same shape is a loud refusal rather than an
-	// answer: the fold declines (argument 1 names no type and produces a
-	// value), so the call keeps nullif's FLOAT64 fallback and the decimal
-	// text has nowhere to go. That is what this engine answered before
-	// ADR-0024 too — a scalar subquery has no declaration for the planner to
-	// read, which is the gap TODO(#555) closes.
+	// The PROJECTED form of the same shape ANSWERS since #874: a scalar
+	// subquery declares the type of its own output column, so the fold has a
+	// (p,s) to resolve against and nullif's FLOAT64 fallback is never
+	// reached. That is the gap TODO(#555) named, and this is it closed —
+	// PostgreSQL 17 answers exactly these seven cells and declares
+	// numeric(9,2), measured live.
+	res := ddrQuery(t, db,
+		"SELECT NULLIF(a, (SELECT b FROM "+ddrTable+" WHERE id = 1)) AS c FROM "+ddrTable+" ORDER BY id")
+	var got []string
+	for _, r := range res.Rows {
+		got = append(got, fmt.Sprintf("%v", r["c"]))
+	}
+	if want := "<nil>,<nil>,<nil>,2.00,-0.01,<nil>,<nil>"; strings.Join(got, ",") != want {
+		t.Errorf("projected NULLIF over a scalar subquery = %v, want %s (live PostgreSQL 17)",
+			got, want)
+	}
+	if m := res.ColumnMetas[0]; m.TypeID != parquet.TypeDecimal || m.Precision != 9 || m.Scale != 2 {
+		t.Errorf("projected NULLIF declared %s(%d,%d), want DECIMAL(9,2) — PostgreSQL's own",
+			m.TypeID, m.Precision, m.Scale)
+	}
+
+	// The BOUNDARY, unchanged: a CONTAINER ELEMENT still decides nothing, so
+	// the same projected call over one keeps its refusal.
 	if _, err := db.Query(context.Background(),
-		"SELECT NULLIF(a, (SELECT b FROM "+ddrTable+" WHERE id = 1)) AS c FROM "+ddrTable); err == nil {
-		t.Error("a projected NULLIF over a scalar subquery answered; the fold must decline " +
+		"SELECT NULLIF(a, element_at(arr, 2)) AS c FROM "+ddrTable); err == nil {
+		t.Error("a projected NULLIF over a container element answered; the fold must decline " +
 			"while the operand has no declaration")
 	}
 }

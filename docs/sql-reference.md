@@ -574,6 +574,22 @@ SELECT src_ip, bytes_in,
 FROM flow_logs
 ```
 
+A scalar subquery's **result is its SELECT list**, and it declares that list's
+type. `(SELECT MAX(bigint_col) FROM t)` is `bigint` on the wire and in
+arithmetic above it, exactly as the plain `SELECT MAX(bigint_col) FROM t` is —
+the two spellings answer the same value at the same type. An `ORDER BY` term
+the SELECT list does not carry is engine scaffolding and is never the value.
+
+A subquery used where ONE column is required must return one column. Two
+columns is SQLSTATE `42601`:
+
+```sql
+SELECT (SELECT id, name FROM t LIMIT 1)      -- 42601 subquery must return only one column
+SELECT * FROM u WHERE id IN (SELECT id, name FROM t)  -- 42601 subquery has too many columns
+```
+
+`EXISTS` reads no value, so `EXISTS (SELECT 1, 2 FROM t)` is legal.
+
 With auth enabled, a subquery's relations are authorized like any others: an
 identity that may not read `flow_logs` is refused `42501` whether it names the
 table in the `FROM` clause or only inside a subquery, and a mask or row filter

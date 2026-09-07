@@ -72,9 +72,16 @@ func TestArcH1AScalarSubqueryIsItsSelectList(t *testing.T) {
 		{name: "string", routes: true,
 			sql:  `SELECT id, (SELECT c_str FROM typemx ORDER BY id LIMIT 1) AS v FROM typemx WHERE id < 2 ORDER BY id`,
 			want: `id,v | 0,s-000000 | 1,s-000000`},
+		// BYTES renders as the byte slice a BYTES column boxes as, which is
+		// what the PLAIN spelling of the same value answers
+		// (TestArcH1AScalarSubqueryAnswersItsOwnType asserts that pairing
+		// directly). Before #874 the item fell to the STRING fallback and
+		// this cell read `bytes-000000-`; the DIGITS are the same value,
+		// under the type a bytea has.
 		{name: "bytes", routes: true,
-			sql:  `SELECT id, (SELECT c_bytes FROM typemx ORDER BY id LIMIT 1) AS v FROM typemx WHERE id < 2 ORDER BY id`,
-			want: `id,v | 0,bytes-000000- | 1,bytes-000000-`},
+			sql: `SELECT id, (SELECT c_bytes FROM typemx ORDER BY id LIMIT 1) AS v FROM typemx WHERE id < 2 ORDER BY id`,
+			want: `id,v | 0,[98 121 116 101 115 45 48 48 48 48 48 48 45] | ` +
+				`1,[98 121 116 101 115 45 48 48 48 48 48 48 45]`},
 		{name: "date", routes: true,
 			sql:  `SELECT id, (SELECT c_date FROM typemx ORDER BY id LIMIT 1) AS v FROM typemx WHERE id < 2 ORDER BY id`,
 			want: `id,v | 0,2010-01-01 | 1,2010-01-01`},

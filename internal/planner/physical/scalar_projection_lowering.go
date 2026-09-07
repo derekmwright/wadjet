@@ -94,6 +94,7 @@ func (p *Planner) lowerProjectionSubquery(stages *[]Stage, item *logical.Project
 	// subqueries, or the item is not lowered at all.
 	want := countExprSubqueries(item.ASTExpr)
 	var deferred []deferredScalar
+	var placeholderTypes map[string]parquet.TypeID
 	before := p.scalarPlaceholderSeq
 	stagesBefore := len(*stages)
 	resolved := p.resolveSubqueryAST(p.planCtx, item.ASTExpr, &deferred, decls)
@@ -154,15 +155,30 @@ func (p *Planner) lowerProjectionSubquery(stages *[]Stage, item *logical.Project
 			p.projScalarProducers = map[string]projScalarProducer{}
 		}
 		p.projScalarProducers[d.Placeholder] = projScalarProducer{producerID: producerID}
+		if placeholderTypes == nil {
+			placeholderTypes = map[string]parquet.TypeID{}
+		}
+		placeholderTypes[d.Placeholder] = valueType
 	}
 	// The item's own type, taken from the ordinary projection inference over
-	// a tree whose subqueries are now placeholders: a bare placeholder falls
-	// to the string fallback, which is what the single path answers, and
-	// `(SELECT …) + 1` folds float8, which is also what the single path
-	// answers. Both are what PostgreSQL does NOT say (bigint in each case),
-	// and that is a box defect this lowering neither introduces nor is
-	// allowed to fix on one path only.
-	decl = inferProjectionDeclType(resolved, parquet.TypeString, nil, decls)
+	// a tree whose subqueries are now placeholders — and each placeholder
+	// carries the DECLARED TYPE OF ITS OWN PRODUCER (#874).
+	//
+	// Without that the item fell to the string fallback and `(SELECT …) + 1`
+	// folded float8, which is what the single-process path used to answer
+	// too; both are what PostgreSQL does NOT say (bigint in each case). Now
+	// that the single path declares the subquery's own type, this path has to
+	// say the same thing or the two disagree about a column's type, which is
+	// the one thing the lowering is not allowed to do.
+	//
+	// The producer's type is the authority and it is already known here:
+	// emitScalarProducerStagesTyped returns it, and it has just been checked
+	// against scalarProducerValueIsLiteralSafe — so it is one of BOOL, INT32,
+	// INT64 and STRING, none of which carries a second parameter a bare
+	// TypeID could lose.
+	phDecls := decls
+	phDecls.placeholderTypes = placeholderTypes
+	decl = inferProjectionDeclType(resolved, parquet.TypeString, nil, phDecls)
 	return resolved.String(), decl, true, true
 }
 
