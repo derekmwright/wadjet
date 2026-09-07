@@ -2,6 +2,9 @@ package physical
 
 import (
 	"strings"
+
+	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // A CONSUMER BINDS THROUGH THE IDENTITY ITS PRODUCER PUBLISHED (#770).
@@ -44,27 +47,68 @@ import (
 // before the payload is settled and asks what the arms can SUPPLY; this one
 // runs after and asks what they will SHIP. Both are needed: the first picks
 // the value, the second picks its name.
+// The pass runs in two phases, and the order is the whole of the argument
+// that it costs nothing: phase 1 CARRIES only what no spelling on the stream
+// reaches, phase 2 then RESPELLS every consumer against the stream those
+// carries produced. Doing them in one loop would respell against a stream a
+// later stage's carry is about to change.
 func bindConsumersToPublishedIdentity(stages []Stage) {
 	idx := make(map[string]int, len(stages))
 	for i := range stages {
 		idx[stages[i].ID] = i
 	}
 	for i := range stages {
-		s := &stages[i]
-		if !stageComputesGroupKeys(s) {
-			continue
+		carryUnreachableConsumerValues(stages, idx, i)
+	}
+	for i := range stages {
+		respellConsumersOverProducerOutput(stages, idx, i)
+	}
+}
+
+// carryUnreachableConsumerValues widens the payload with the values stage i's
+// fragment will evaluate and NO spelling on its input reaches.
+//
+// Only a value the producing subtree really computes is carried
+// (`widenNarrowingStagesBelow`'s own subtree test), and only after every
+// cheaper answer has been tried: the ALIAS the arm's fragment may publish
+// first, then the SOURCE column a plain rename reads. A definition's columns
+// are never carried — recomputing a value the arm already computed is a
+// second carry AND a second evaluation.
+func carryUnreachableConsumerValues(stages []Stage, idx map[string]int, i int) {
+	s := &stages[i]
+	keys := stageGroupKeyList(s)
+	groups := stageComputesGroupKeys(s) && len(s.GroupByResolve) == len(keys)
+	specs := stageComputedAggSpecs(s)
+	if !groups && len(specs) == 0 {
+		return
+	}
+	in, arms := aggregateInputStreamColumnsShipped(stages, idx, s)
+	if len(in) == 0 {
+		return
+	}
+	root := i
+	if !isJoinStage(s.Type) {
+		j, ok := idx[firstDep(s)]
+		if !ok {
+			return
 		}
-		keys := stageGroupKeyList(s)
-		if len(s.GroupByResolve) != len(keys) {
-			continue
+		root = j
+	}
+	carry := func(candidates ...string) {
+		for _, c := range candidates {
+			if c == "" {
+				continue
+			}
+			if keep := refsSubtreeCanSupply(stages, idx, root, []string{c},
+				map[int]map[string]string{}); len(keep) == 1 {
+				widenNarrowingStagesBelow(stages, idx, root, keep)
+				return
+			}
 		}
-		in, arms := aggregateInputStreamColumnsShipped(stages, idx, s)
-		if len(in) == 0 {
-			continue
-		}
-		var carry []string
+	}
+	if groups {
 		for k := range s.GroupByResolve {
-			r := &s.GroupByResolve[k]
+			r := s.GroupByResolve[k]
 			// A COMPUTED resolution is an expression the fragment evaluates,
 			// and its own references are already carried by
 			// `groupKeyResolutionRefs`. Only a NAME is looked up.
@@ -74,30 +118,267 @@ func bindConsumersToPublishedIdentity(stages []Stage) {
 			if _, ok := bindStreamColumn(r.Expr, in); ok {
 				continue
 			}
+			if _, ok := publishedSpellingFor(r.Expr, keys[k], arms, in); ok {
+				continue
+			}
+			carry(r.Expr)
+		}
+	}
+	for _, spec := range specs {
+		for _, ref := range spec.InputRefs {
+			if _, _, ok := producerSpellingForRef(ref, arms, in); ok {
+				continue
+			}
+			carry(stripQualifier(ref.Written), ref.Source)
+		}
+	}
+}
+
+// respellConsumersOverProducerOutput rewrites every consumer reference on
+// stage i to the spelling its producer PUBLISHES.
+func respellConsumersOverProducerOutput(stages []Stage, idx map[string]int, i int) {
+	s := &stages[i]
+	keys := stageGroupKeyList(s)
+	groups := stageComputesGroupKeys(s) && len(s.GroupByResolve) == len(keys)
+	specs := stageComputedAggSpecs(s)
+	if !groups && len(specs) == 0 {
+		return
+	}
+	in, arms := aggregateInputStreamColumnsShipped(stages, idx, s)
+	if len(in) == 0 {
+		return
+	}
+	if groups {
+		for k := range s.GroupByResolve {
+			r := &s.GroupByResolve[k]
+			if r.Computed || r.Expr == "" {
+				continue
+			}
+			if _, ok := bindStreamColumn(r.Expr, in); ok {
+				continue
+			}
 			if name, ok := publishedSpellingFor(r.Expr, keys[k], arms, in); ok {
 				r.Expr = name
-				continue
 			}
-			carry = append(carry, r.Expr)
 		}
-		if len(carry) == 0 {
+	}
+	for _, spec := range specs {
+		respellAggSpecOverProducerOutput(spec, arms, in)
+	}
+}
+
+// stageComputedAggSpecs is every aggregate spec whose ARGUMENT this stage's
+// fragment resolves against a RAW input, in the three places a stage can carry
+// one. It is stageComputesGroupKeys' twin, and it excludes a merge for the
+// same reason: a final or merge aggregate over a partial's output reads that
+// partial's OutputCol, never the argument's own spelling.
+func stageComputedAggSpecs(s *Stage) []*AggSpec {
+	var lists [][]AggSpec
+	switch s.Type {
+	case StageScan:
+		lists = append(lists, s.FusedAggSpecs)
+	case StageAggregate:
+		lists = append(lists, s.AggSpecs)
+	case StageFinalAggregate, StageMergeAggregate:
+		if s.RawInputAggregate {
+			lists = append(lists, s.AggSpecs)
+		}
+	case StageHashJoin, StageBroadcastJoin, StageSortMergeJoin:
+		lists = append(lists, s.ChainedAggSpecs, s.FusedAggSpecs)
+	}
+	var out []*AggSpec
+	for _, l := range lists {
+		for k := range l {
+			if len(l[k].InputRefs) > 0 {
+				out = append(out, &l[k])
+			}
+		}
+	}
+	return out
+}
+
+// producerSpellingForRef answers, for ONE reference an argument makes to a
+// derived table's alias, what the producing fragment calls that value.
+//
+// The rules are `resolveDerivedAliasKey`'s, asked of an argument instead of a
+// key and against the stream the fragment will really see. Each asks WHICH ARM
+// first: the reference names a derived table, that table is one arm of the
+// join, and a column of the same name on another arm is a different value.
+//
+//  1. the stream spells the reference EXACTLY, because the arm's fragment
+//     materialized the alias and the join qualified this arm's copy;
+//  2. exactly one column of the alias's bare name FROM THE REFERENCE'S ARM —
+//     the arm materialized it and nothing else spells it that way;
+//  3. the SOURCE column a plain rename reads, under the one spelling the
+//     stream gives it on that arm. This is the answer
+//     aggInputAliasIsMaterializedUnderItsName gets wrong: it says a JOIN
+//     materializes the alias, and attachScanSelectProjections puts no
+//     projection on an arm whose SELECT list is a bare rename, so the join
+//     publishes the SOURCE and reading the alias reads nothing;
+//  4. the DEFINITION, re-spelled into the arm's own spellings, which the
+//     fragment's pre-aggregate projection then evaluates.
+//
+// The second return says the replacement is an EXPRESSION rather than a name,
+// so the caller parenthesizes it before splicing it into a larger one.
+func producerSpellingForRef(ref AggInputRef, arms map[string]bool,
+	in []streamCol) (string, bool, bool) {
+	arm, constrained := keyArmConstraint(ref.Written, arms)
+	fromArm := func(c streamCol) bool {
+		return !constrained || strings.EqualFold(c.Arm, arm)
+	}
+	for _, c := range in {
+		if !c.Dropped && fromArm(c) && strings.EqualFold(c.Name, ref.Written) {
+			return c.Name, false, true
+		}
+	}
+	if name, ok := publishedSpellingFor(ref.Written, ref.Written, arms, in); ok {
+		return name, false, true
+	}
+	if ref.Source != "" {
+		if name, ok := publishedSpellingFor(ref.Source, ref.Written, arms, in); ok {
+			return name, false, true
+		}
+	}
+	if ref.Def != "" {
+		if respelled, ok := respellDefOverArm(ref.Def, in, arm, constrained); ok {
+			return respelled, true, true
+		}
+	}
+	return "", false, false
+}
+
+// respellAggSpecOverProducerOutput rewrites the spec's argument text so every
+// reference names what its producer publishes.
+//
+// InputCol is rewritten only where it IS the whole argument: with an InputExpr
+// present it is the NAME the worker's pre-aggregate projection writes the
+// value under, not a name it reads (see AggSpec.InputExpr), and rewriting it
+// would break that pairing.
+func respellAggSpecOverProducerOutput(spec *AggSpec, arms map[string]bool, in []streamCol) {
+	byWritten := make(map[string]AggInputRef, len(spec.InputRefs))
+	for _, r := range spec.InputRefs {
+		byWritten[strings.ToLower(r.Written)] = r
+	}
+	rewrite := func(text string) (string, bool) {
+		node, err := plansql.ParseExpression(text)
+		if err != nil {
+			return "", false
+		}
+		out, changed, complete := rewriteColRefs(node, func(c *plansql.ColRef) (plansql.Node, bool) {
+			ref, ok := byWritten[strings.ToLower(c.String())]
+			if !ok {
+				return nil, false
+			}
+			if _, ok := bindStreamColumnFromArm(ref.Written, arms, in); ok {
+				return nil, false
+			}
+			name, isExpr, ok := producerSpellingForRef(ref, arms, in)
+			if !ok {
+				return nil, false
+			}
+			if isExpr {
+				inner, err := plansql.ParseExpression(name)
+				if err != nil {
+					return nil, false
+				}
+				// PARENTHESIZED, because the definition is substituted into a
+				// larger expression and `b * 100` spliced bare into `x + …`
+				// would re-associate (respellAggInputExpr's own rule).
+				return &plansql.ParenNode{Inner: inner}, true
+			}
+			if strings.EqualFold(name, c.String()) {
+				return nil, false
+			}
+			if dot := strings.IndexByte(name, '.'); dot > 0 {
+				return &plansql.ColRef{Table: name[:dot], Column: name[dot+1:]}, true
+			}
+			return &plansql.ColRef{Column: name}, true
+		})
+		// A walk that met a node kind it does not rewrite has NOT considered
+		// every reference, and a PARTIAL respell looks resolved without being
+		// it — respellAggInputExpr's rule, for its reason.
+		if !complete || !changed {
+			return "", false
+		}
+		return out.String(), true
+	}
+	if spec.InputExpr != "" {
+		if text, ok := rewrite(spec.InputExpr); ok {
+			spec.InputExpr = text
+		}
+		return
+	}
+	if spec.InputCol == "" || spec.InputCol == "*" {
+		return
+	}
+	if text, ok := rewrite(spec.InputCol); ok {
+		spec.InputCol = text
+	}
+}
+
+// bindStreamColumnFromArm is bindStreamColumn with the ARM constraint the
+// reference's own qualifier states.
+//
+// The arm is what makes a bind that SUCCEEDS still wrong. `SUM(y.w + x.w)`
+// over two arms that both publish `w` binds both references to the probe's
+// `w` through the runtime's strip-the-qualifier step and answers 2 x SUM(y.w)
+// — 9650.0000 where PostgreSQL answers 4865.2500, silently. Asking whether the
+// bind lands on the arm the reference NAMES is what separates "the payload has
+// this value" from "the payload has a value of this name".
+func bindStreamColumnFromArm(name string, arms map[string]bool, in []streamCol) (string, bool) {
+	arm, constrained := keyArmConstraint(name, arms)
+	if !constrained {
+		return bindStreamColumn(name, in)
+	}
+	armCols := make([]streamCol, 0, len(in))
+	for _, c := range in {
+		if strings.EqualFold(c.Arm, arm) {
+			armCols = append(armCols, c)
+		}
+	}
+	return bindStreamColumn(name, armCols)
+}
+
+// aggInputAliasCandidates records, for every reference in the spec's shipped
+// argument that names a derived table's SELECT-list alias, the two candidate
+// spellings only the finished stage graph can settle.
+//
+// It reads the text the SPEC carries rather than the query's, so a reference
+// the emission-time passes already re-spelled to its source records nothing:
+// `resolveAggInputName` reports a source column as no rename at all.
+func aggInputAliasCandidates(spec AggSpec, child *logical.Node) []AggInputRef {
+	text := spec.InputExpr
+	if text == "" {
+		text = spec.InputCol
+	}
+	if text == "" || text == "*" || child == nil {
+		return nil
+	}
+	node, err := plansql.ParseExpression(text)
+	if err != nil {
+		return nil
+	}
+	var out []AggInputRef
+	seen := map[string]bool{}
+	for _, c := range collectColRefs(node) {
+		written := c.String()
+		if seen[strings.ToLower(written)] {
 			continue
 		}
-		// The value reaches this fragment under no spelling. Carry it, the
-		// same way `ensureJoinCarriesEvaluatedColumns` carries a computed
-		// resolution's references: into this stage's own OutputFilter and
-		// into every narrowing stage below that can supply it, never into a
-		// producer's read set.
-		root := i
-		if !isJoinStage(s.Type) {
-			j, ok := idx[firstDep(s)]
-			if !ok {
-				continue
-			}
-			root = j
+		resolved, expr, _, renamed := resolveAggInputName(written, child)
+		if !renamed {
+			continue
 		}
-		widenNarrowingStagesBelow(stages, idx, root, carry)
+		seen[strings.ToLower(written)] = true
+		r := AggInputRef{Written: written}
+		if expr != nil {
+			r.Def = expr.String()
+		} else {
+			r.Source = resolved
+		}
+		out = append(out, r)
 	}
+	return out
 }
 
 // aggregateInputStreamColumnsShipped is aggregateInputStreamColumns asking

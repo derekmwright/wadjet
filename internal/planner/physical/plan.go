@@ -779,6 +779,35 @@ type AggSpec struct {
 	// already forces the one-level RawInputAggregate shape (hasDistinctAgg),
 	// so the worker's final stage sees raw rows and the set is exact.
 	Distinct bool
+	// InputRefs is the planner's own DEFERRED decision about every reference
+	// in this argument that names a derived table's SELECT-list alias, and it
+	// never reaches the wire (agg_wire.go copies fields by name). It is
+	// GroupKeyResolution.Alias/Def one consumer over: which spelling the
+	// producing fragment publishes for such a value is decided by
+	// attachScanSelectProjections and absorbWindowArmProjection, which run
+	// after walkStages, so emission records the candidates and
+	// bindConsumersToPublishedIdentity settles them against the finished
+	// stream (ADR-0026 §2, #770).
+	InputRefs []AggInputRef
+}
+
+// AggInputRef is one reference inside an aggregate's argument that names a
+// derived table's SELECT-list alias, with the candidate spellings only the
+// finished stage graph can settle.
+//
+// The three answers to "what does the producer call this value" are the same
+// three a GROUP BY key has: it publishes the ALIAS (Written resolves), it
+// publishes the SOURCE column a plain rename reads (Source), or it publishes
+// nothing and the value has to be recomputed from the DEFINITION (Def).
+type AggInputRef struct {
+	// Written is the spelling the shipped argument text uses.
+	Written string
+	// Source is the source column a plain rename names, and "" when the
+	// alias names an expression.
+	Source string
+	// Def is the alias's defining expression, re-spelled into the columns the
+	// derived table's own input carries, and "" for a plain rename.
+	Def string
 }
 
 // SortKeySpec defines a sort key in a stage.
@@ -7229,6 +7258,13 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 					}
 				}
 			}
+			// The candidate spellings of every reference in the shipped
+			// argument that names a derived table's alias. Recorded from the
+			// text the spec really carries — a reference the passes above
+			// already re-spelled to its source is no longer an alias and
+			// records nothing — and settled at the end of planning, where the
+			// producing fragment's real output is known (#770).
+			spec.InputRefs = aggInputAliasCandidates(spec, aggChild)
 			aggSpecs = append(aggSpecs, spec)
 		}
 		// The key's TWO names: what the aggregate publishes it as, and what

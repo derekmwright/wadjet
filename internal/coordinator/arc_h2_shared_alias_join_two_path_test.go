@@ -119,54 +119,6 @@ func TestH2TwoJoinArmsPublishingOneAliasIsDeferred(t *testing.T) {
 			why: armWhy,
 		},
 		{
-			// An aggregate ARGUMENT that IS a bare reference: loud.
-			name: "770 PINNED: an aggregate ARGUMENT naming the contested alias",
-			sql:  "SELECT SUM(y.w) AS s " + arm3,
-			want: "cols=[s:DECIMAL(38,4)] rows=1 | 4825.0000",
-			pin:  map[string]string{"dagshuf": shufFail},
-			why:  "the aggregate's argument is re-spelled to a source the join's payload never carried",
-		},
-		{
-			// A HAVING term naming the alias: the aggregate-argument consumer
-			// again, reached from the predicate rather than the SELECT list,
-			// and the GROUP BY key beside it is the arm that DOES resolve.
-			name: "770 PINNED: a HAVING term over the contested alias",
-			sql: "SELECT x.w AS xw " + arm3 +
-				" GROUP BY x.w HAVING MAX(y.w) > 1000 ORDER BY xw",
-			want: "cols=[xw:DECIMAL(9,2)] rows=1 | 12.75",
-			pin:  map[string]string{"dagshuf": shufFail},
-			why: "the HAVING aggregate's argument is re-spelled to a source the join's payload " +
-				"never carried; the query's own GROUP BY key (`x.w`) resolves and this does not",
-		},
-		{
-			// B2: the same consumer with an EXPRESSION argument, and here it is
-			// SILENT — and differently silent on the two arms. 9650.0000 is
-			// 2 x SUM(y.w): `x.w` bound the OTHER arm's column.
-			name: "770 PINNED: an aggregate argument that is an EXPRESSION answers a NUMBER",
-			sql:  "SELECT SUM(y.w + x.w) AS s " + arm3,
-			want: "cols=[s:DECIMAL(38,4)] rows=1 | 4865.2500",
-			pin: map[string]string{
-				"dag":     "cols=[s:DECIMAL(38,4)] rows=1 | 9650.0000",
-				"dagshuf": "cols=[s:DECIMAL(38,4)] rows=1 | NULL",
-			},
-			why: "a silent wrong answer, not the loud refusal the bare-reference form gives: " +
-				"9650.0000 is 2 x SUM(y.w), so `x.w` bound the other arm's column",
-		},
-		{
-			// B2's second witness, inside #877's own family: a WINDOW arm
-			// joined to a plain rename of the same name. NULL on both DAG arms.
-			name: "770 PINNED: a window arm joined to a rename of the same alias",
-			sql: "SELECT SUM(x.w + y.w) AS s FROM (SELECT id, SUM(a) OVER () AS w FROM decpair) x " +
-				"JOIN (SELECT id, a AS w FROM decpair) y ON x.id = y.id",
-			want: "cols=[s:DECIMAL(38,2)] rows=1 | 423.92",
-			pin: map[string]string{
-				"dag":     "cols=[s:DECIMAL(38,2)] rows=1 | NULL",
-				"dagshuf": "cols=[s:DECIMAL(38,2)] rows=1 | NULL",
-			},
-			why: "the contested alias is one arm's WINDOW slot and the other's rename; " +
-				"the sibling shape with TWO window arms is the control below and answers",
-		},
-		{
 			// B3: a WINDOW over the contested alias — the value AND the
 			// declaration are gone on the shuffled arm. A right value under a
 			// wrong OID is what ADR-0012 says a value oracle cannot see; here
@@ -183,12 +135,5 @@ func TestH2TwoJoinArmsPublishingOneAliasIsDeferred(t *testing.T) {
 				"takes the DECLARATION with it: FLOAT64 where PostgreSQL and every other arm " +
 				"say numeric",
 		},
-		{
-			// The sibling of the window cell above, with BOTH arms windows —
-			// which #877 fixed in this branch and which answers here.
-			name: "770 control: an expression over TWO window arms",
-			sql: "SELECT SUM(p.w + q.w) AS s FROM (SELECT id, SUM(a) OVER () AS w FROM decpair) p " +
-				"JOIN (SELECT id, MAX(a) OVER () AS w FROM decpair) q ON p.id = q.id",
-			want: "cols=[s:DECIMAL(38,2)] rows=1 | 591.66",
-		}})
+	})
 }

@@ -136,6 +136,74 @@ func TestJ2AJoinConsumerBindsThePublishedIdentity(t *testing.T) {
 				"1275.0100 | NULL",
 		},
 
+		// The AGGREGATE ARGUMENT, which is the same gap one consumer over: the
+		// spec ships the alias as TEXT and the fragment compiles it against
+		// the join's stream. `aggInputAliasIsMaterializedUnderItsName` says a
+		// JOIN materializes a derived alias under its own name, and that is
+		// false whenever the arm's SELECT list is a bare rename —
+		// attachScanSelectProjections puts no projection there, so the join
+		// publishes the SOURCE column and the alias names nothing.
+		{
+			// An argument that IS a bare reference. Loud on the shuffled arm:
+			// `aggregate input "y.w" is not a column of its input`.
+			name: "770 an aggregate ARGUMENT naming the contested alias",
+			sql:  "SELECT SUM(y.w) AS s " + arm3,
+			want: "cols=[s:DECIMAL(38,4)] rows=1 | 4825.0000",
+		},
+		{
+			// The same argument reached from a HAVING rather than the SELECT
+			// list, with the query's own GROUP BY key beside it.
+			name: "770 a HAVING term over the contested alias",
+			sql: "SELECT x.w AS xw " + arm3 +
+				" GROUP BY x.w HAVING MAX(y.w) > 1000 ORDER BY xw",
+			want: "cols=[xw:DECIMAL(9,2)] rows=1 | 12.75",
+		},
+		{
+			// An argument that is an EXPRESSION over BOTH contested arms, and
+			// this one was SILENT: 9650.0000 is 2 x SUM(y.w), because the
+			// runtime's strip-the-qualifier step bound `x.w` to the probe's
+			// `w` — a bind that succeeds and is still the wrong value, which
+			// is why bindStreamColumnFromArm asks which ARM it landed on.
+			name: "770 an aggregate argument that is an EXPRESSION over both arms",
+			sql:  "SELECT SUM(y.w + x.w) AS s " + arm3,
+			want: "cols=[s:DECIMAL(38,4)] rows=1 | 4865.2500",
+		},
+		{
+			// The same expression argument one relation deeper and with a
+			// coefficient, so the substitution is exercised inside a larger
+			// term where a bare splice would re-associate.
+			name: "770 an expression argument over four relations",
+			sql: "SELECT SUM(y.w * 2 + x.w) AS s FROM (SELECT id, a AS w FROM decpair) x " +
+				"JOIN (SELECT id, b*100 AS w FROM decpair) y ON x.id = y.id " +
+				"JOIN decpair u ON x.id = u.id JOIN decpair v ON x.id = v.id WHERE x.w > 1",
+			want: "cols=[s:DECIMAL(38,4)] rows=1 | 9690.2500",
+		},
+		{
+			// MIN, MAX and COUNT of the contested alias in one query: the
+			// respell is per SPEC, so three of them have to agree.
+			name: "770 three aggregates over the contested alias at once",
+			sql:  "SELECT MIN(y.w) AS lo, MAX(y.w) AS hi, COUNT(y.w) AS n " + arm3,
+			want: "cols=[lo:DECIMAL(22,4) hi:DECIMAL(22,4) n:INT64] rows=1 | " +
+				"1000.0000,1275.0100,4",
+		},
+		{
+			// A WINDOW arm joined to a plain rename of the same name — #877's
+			// own family. `respellWindowSlotAliasRefs` re-spells x's alias to
+			// its `__win_0` slot and left y's naming nothing, so the sum was
+			// NULL on both DAG arms while the sibling with TWO window arms
+			// (the control below) answered.
+			name: "770 a window arm joined to a rename of the same alias",
+			sql: "SELECT SUM(x.w + y.w) AS s FROM (SELECT id, SUM(a) OVER () AS w FROM decpair) x " +
+				"JOIN (SELECT id, a AS w FROM decpair) y ON x.id = y.id",
+			want: "cols=[s:DECIMAL(38,2)] rows=1 | 423.92",
+		},
+		{
+			name: "770 control: an expression over TWO window arms",
+			sql: "SELECT SUM(p.w + q.w) AS s FROM (SELECT id, SUM(a) OVER () AS w FROM decpair) p " +
+				"JOIN (SELECT id, MAX(a) OVER () AS w FROM decpair) q ON p.id = q.id",
+			want: "cols=[s:DECIMAL(38,2)] rows=1 | 591.66",
+		},
+
 		// The controls. Each answers PostgreSQL on all four arms at
 		// a3f9b664 as well, so they say the fix is about a CONTESTED alias
 		// crossing a join boundary and not about derived aliases in general.
