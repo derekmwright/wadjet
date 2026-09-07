@@ -1803,6 +1803,37 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 		}
 	}
 
+	// A ROW FIELD PATH as the INNER key — the mirror of the outer-key decline
+	// above, and #866.
+	//
+	// `d.b IN (SELECT c_row.b FROM typemx_nested)` names a FIELD of a ROW
+	// column. The semi join's build side is the subquery's own plan, which
+	// emits the ROW column `c_row` and no column called `b`, so
+	// exec.HashJoin resolved the build key to -1 — the degenerate
+	// all-rows-equal key — and the join answered the rows whose OUTER key is
+	// NULL while dropping the one row that matches. Measured against live
+	// PostgreSQL 17 over the same rows: PG answers `did = 6`, the
+	// single-process and spilled arms answered `8, 9` (decpair's two
+	// NULL-keyed rows, which `NULL IN (…)` must exclude), the DAG answered
+	// NOTHING, and the shuffled arm failed loudly with `partitioned shuffle:
+	// key "c_row.b" not in schema`. The NOT IN twin was wrong on ALL FOUR
+	// arms: seven rows for PostgreSQL's six.
+	//
+	// The test is that the QUALIFIER names no relation this subquery reads.
+	// That is exactly what a field path is here — the subquery is
+	// uncorrelated by construction at this point, so a qualifier that is not
+	// a relation is a ROW column — and it needs no catalog, which the inner
+	// plan does not have annotated yet at this point in the walk.
+	//
+	// Declining leaves the IN where it was: an ordinary filter predicate,
+	// whose subquery runs as written and whose field path resolves through
+	// ADR-0022 rule 1's vectorized filters. It is the same answer #482, #516
+	// and #769 take for a shape this rewrite cannot NAME.
+	if ref := plainColRef(info.Columns[0].ASTExpr); ref != nil && ref.Table != "" &&
+		!innerTableSet[strings.ToLower(ref.Table)] {
+		return nil
+	}
+
 	// Classify WHERE conditions into inner-only vs correlated
 	var innerFilterNodes []plansql.Node
 	var correlationKeys []DecorrelatedKey
