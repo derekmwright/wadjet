@@ -1552,7 +1552,7 @@ func (p *Planner) subqueryOutputColumn(sql string) (col parquet.Column, ok bool)
 		return parquet.Column{}, false
 	}
 	p.AnnotateScanColumns(ctx, plan)
-	schema := declaredOutputSchema(plan)
+	schema := declaredOutputSchema(plan, p.subqueryOutputColumn)
 	if len(schema) != 1 {
 		// Not a scalar subquery's shape. Declining is the honest answer: a
 		// wrong declaration here would pick a comparison RULE, which is worse
@@ -3063,7 +3063,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 			Sink:    sink,
 			Workers: pipelineWorkers,
 		},
-		OutputSchema: declaredOutputSchema(node),
+		OutputSchema: declaredOutputSchema(node, p.subqueryOutputColumn),
 	}
 	// Hand the sink the plan's answer for the case where no batch will ever
 	// tell it: a zero-row result. It is consulted only then (#416).
@@ -3422,7 +3422,7 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// gives it their TYPES, so pgwire declares the same OIDs for an empty
 	// result as for a full one (#416).
 	if outSchema := republishDeclaredSchema(outputProj,
-		declaredOutputSchema(node)); len(outSchema) > 0 {
+		declaredOutputSchema(node, p.subqueryOutputColumn)); len(outSchema) > 0 {
 		for i := range stages {
 			if stages[i].Type == StageExchangeGather {
 				stages[i].OutputSchema = outSchema

@@ -33,7 +33,15 @@ import (
 // Naming follows the SELECT list exactly as the projection builder does
 // (alias, else the unqualified column, else the cleaned expression text), so
 // an empty result names its columns the way a non-empty one would.
-func declaredOutputSchema(root *logical.Node) []parquet.Column {
+// subqueryDecl resolves a SELECT-list scalar subquery's own declared output
+// column, and nil means the caller cannot ask. It is threaded here rather
+// than left to the projection builder because a ZERO-ROW result has no batch
+// to read its schema off and this walk IS its answer (#416): without it the
+// empty and non-empty arms of the same query disagreed about the type of a
+// scalar-subquery column, which is the disagreement #416 exists to prevent
+// (#874).
+func declaredOutputSchema(root *logical.Node,
+	subqueryDecl func(string) (parquet.Column, bool)) []parquet.Column {
 	if cols, ok := setOpDeclaredOutputSchema(root); ok {
 		return cols
 	}
@@ -41,6 +49,7 @@ func declaredOutputSchema(root *logical.Node) []parquet.Column {
 		return cols
 	}
 	projs, childTypes, strictInt, ok := declaredProjectionInputs(root)
+	childTypes.subqueryDecl = subqueryDecl
 	if !ok {
 		return nil
 	}
@@ -237,7 +246,9 @@ func setOpArmSchemasAndTypmods(n *logical.Node) ([][]parquet.Column, []map[strin
 			mods = append(mods, nestedMods...)
 			continue
 		}
-		schema := declaredOutputSchema(c)
+		// nil: this walk has no planner to ask, so a scalar subquery in a
+		// SET-OPERATION ARM declares what it always did.
+		schema := declaredOutputSchema(c, nil)
 		if len(schema) == 0 {
 			return nil, nil
 		}
