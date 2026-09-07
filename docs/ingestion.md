@@ -112,6 +112,33 @@ the buffered rows. A fresh ingester created after the recreate writes normally.
 This is the ingest-side of ADR-0030 — a write commits against the table identity
 it read.
 
+### The Parquet writer underneath
+
+Ingestion drives `parquet.NewWriter`, and that writer refuses rather than
+produces a file a reader cannot read (ADR-0018 §10, §13, §14). Three of its
+rules are visible to anyone who builds a `parquet.Schema` in Go — through the
+embedded API, a custom tool, or a test:
+
+- **An impossible declaration is refused when the writer is constructed**, not
+  when the file is read back. A `DECIMAL` with a negative scale, a scale past
+  the precision the file will declare, or a precision above 38 or below zero; a
+  `VECTOR` whose `Dimension × 4` does not fit the format's fixed-width field; a
+  `MAP` spelled with `Fields` instead of an `ElementType` `ROW`; an `ARRAY`
+  without an element type; an empty `ROW` — each is an error naming the column,
+  from `parquet.NewWriter` and from the first call on a
+  `parquet.NewNativeWriter`, with no bytes written. `Precision: 0` is still the
+  "unconstrained" spelling and means 38.
+- **The writer copies the schema you hand it.** Reusing and amending a schema
+  object while a writer is alive is safe; the file follows the schema as it was
+  at construction.
+- **`Close` is final.** A later `WriteRows` or `Close` returns
+  `parquet.ErrWriterClosed` and leaves the finalized file byte-for-byte as it
+  was, so a stray second `Close` cannot append a second footer.
+
+None of this changes what `Ingest` accepts: `ingest.checkType` still refuses a
+bad row where the INSERT that carried it can be named, and it asks the writer's
+own rules so the two answers agree.
+
 ### Partitioning Strategy
 
 Partition keys determine how data is organized on storage:

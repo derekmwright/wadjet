@@ -1036,6 +1036,102 @@ Three invariants, each a claim a gate proves on revert:
   `parquet.TestMapKeyCarrierTextCoversEveryType` (every one of the 22 TypeIDs
   has a decision; a new type with none fails the exhaustiveness loop).
 
+### 14. A writer that cannot write the file exactly refuses, and a closed writer is closed (2026-09-07, ARC P3)
+
+(Added 2026-09-07, #969 #970 #971 #972 #973 #974.)
+
+§10 settled that the writer validates every VALUE it is given. Six defects sat
+one level up, in the writer's own STATE and its DECLARATION: the file could not
+be written correctly before a single value was offered, or stopped being
+writable after it was finished. Every one of them returned nil from `WriteRows`
+and `Close`. Measured at `f415faba`:
+
+| what happened | what the file was |
+|---|---|
+| a `WriteRows` after `Close`, row group not full (#972) | unchanged; the accepted row silently LOST |
+| a `WriteRows` after `Close`, row crossing `RowGroupSize` (#972) | a column chunk appended AFTER the trailer; "invalid magic", and pyarrow: "Parquet magic bytes not found in footer" |
+| a second `Close` (#972) | a second footer and trailer over the first |
+| footer length past `math.MaxUint32` (#974) | the trailer narrowed: 2^32 → 0, 2^32+4 → 4 |
+| caller renames a column after construction (#973) | "carries path [a] but schema leaf 0 is [b]" — unreadable here, and pyarrow reads it as column `b` |
+| caller retypes an ARRAY's `ElementType` (#973) | pyarrow OPENS it as `list<element: string>` and reinterprets the INT64 bytes |
+| a malformed MAP through `NewNativeWriter` (#970) | "row group 0 column 0 carries path [a] but schema leaf 0 is [m key_value a]"; pyarrow: "Malformed schema: not enough elements" |
+| `DECIMAL(9,-1)` (#969) | a row of `1.25` read back as `0`; pyarrow refuses the file |
+| `DECIMAL(50,2)`, `DECIMAL(-3,2)` (#969) | the file declares `DECIMAL(38,2)` — not what was asked for |
+| `VECTOR(536870912)` (#971) | `type_length` wrapped to -2147483648; pyarrow: "Invalid FIXED_LEN_BYTE_ARRAY length: 0" |
+
+**The position: a writer that cannot write the file exactly refuses, and it
+refuses at the earliest moment the fact is knowable — construction for a
+declaration, the call itself for a state. It never finalizes a file a reader
+cannot read.** Four rules:
+
+- **One validation, every constructor.** `ValidateWriteSchema` runs in
+  `NewNativeWriter` as it always did in `NewWriter`, and `NewWriter` now RETURNS
+  the native writer's latched error rather than running its own copy of the
+  check, so the two exported doors cannot diverge. A constructor with no error
+  in its signature latches instead: the first `WriteMapRows` and the `Close`
+  both refuse, with nothing written. The corollary is the same one §2 draws for
+  the reader — the guarantee belongs to the exported surface, not to the one
+  caller anybody happens to have in mind.
+
+- **A declaration the file cannot carry is not a declaration.** A DECIMAL's
+  scale is measured against the precision **the file will declare**
+  (`decimalEffectivePrecision`), which is what a foreign reader applies and what
+  keeps the documented `Precision <= 0` unconstrained sentinel working; scale
+  below zero, scale past that precision, and a precision above 38 or below zero
+  are refused by name. `scale == precision` stays legal, because pyarrow opens
+  `DECIMAL(38,38)`. A VECTOR's width is computed in int64 (the `int` form wraps
+  on a 32-bit build before any check could see it) and refused past
+  `math.MaxInt32`; `MaxInt32/4` components is the widest legal dimension and
+  writes a file pyarrow opens as `fixed_size_binary[2147483644]`. Both rules
+  apply at every depth, because `validateWriteColumn` recurses and #969's
+  `ROW(DECIMAL(9,-1))` reached a file.
+
+  The schema-element builders return an error rather than emit a field they had
+  to narrow. That is the structural backstop at the cast, in the same position
+  as `checkPageSize` (§13): if the validator and the builder ever disagree, the
+  file is not written at all.
+
+- **The writer owns its schema.** Both constructors deep-copy the caller's
+  `Schema` — `Columns`, nested `Fields`, `ElementType`, recursively — and use
+  only that copy for validation, leaf buffers, decomposition and the footer.
+  This is not a hypothetical: the writer reads the schema at two separate
+  moments (leaf paths at construction, the footer's schema tree at `Close`), and
+  reusing and amending a catalog schema object between them is ordinary. The
+  `Writer` holds the NATIVE writer's copy, not a second one, so there is one
+  schema per file and not two to keep in step.
+
+- **A closed writer is closed.** A parquet file ends with its footer, its
+  four-byte length and the magic trailer, so the last byte `Close` writes is the
+  end of the artifact: nothing can be appended and nothing taken back. The first
+  `Close` latches — whether it succeeded or failed — and every later
+  `WriteRows`, `WriteMapRows` and `Close` returns `ErrWriterClosed` having
+  touched neither the leaf buffers nor the output. `Writer.WriteRows` asks the
+  gate BEFORE `prepareRows`, which rewrites the caller's own maps in place. A
+  writer whose `Close` FAILED keeps returning that failure, which is the more
+  specific answer and what §10's latch already promised.
+
+  The footer's own size is bounded the same way and BEFORE any footer byte goes
+  out: `footerTrailerLength` is the only source of a trailer value, and it
+  refuses past `math.MaxUint32` (the format's width) and past `footerMaxSize`
+  (§2's corollary — the reader's ceilings are ceilings on what this package may
+  WRITE, and a 64 MiB footer is a file wadjet itself will not open). Reachable
+  from row-group metadata alone, not only from huge values: one `RowGroup` plus
+  one `ColumnChunk` per column accumulates per flush and is retained to `Close`.
+
+Gates, each proven to fail on revert: `TestAClosedWriterIsClosed` (both
+row-group sizes x both doors; the file is byte-identical after the refused write
+and the refused second `Close`), `TestARefusedWriteDoesNotTouchTheCallersRows`,
+`TestFooterTrailerLengthBoundary` and `TestAnOversizeFooterIsRefusedBeforeItIs
+Written` (a real >64 MiB footer; no gate allocates a 4 GB one),
+`TestTheWriterOwnsItsSchema` (seven mutation shapes x both doors, byte-identical
+files), `TestColumnCloneSharesNothing`,
+`TestEveryConstructorRefusesASchemaItCannotWrite` (17 shapes x both doors, zero
+bytes), `TestTheValidBoundaryDeclarationsStillWrite` and
+`TestVectorAndDecimalBoundaries` (the legal side, opened in pyarrow), and
+`FuzzWriteSchemaShape`, which feeds the writer its OWN untrusted input class — an
+arbitrary schema declaration — and asserts the disposition is refused-with-
+nothing-written or finalized-and-reopenable, never a third thing.
+
 ## Consequences
 
 - Files that were read before and are refused now: a footer whose row groups

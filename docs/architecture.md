@@ -335,6 +335,37 @@ its residuals.
 - **Reader**: Reads full row groups, automatically maps Parquet schema to Wadjet types
 - **Schema inference**: Parquet physical/logical types are mapped to Wadjet types (including network primitives)
 
+#### What the writer guarantees
+
+A file the writer finalizes is one both Wadjet and a reference reader (PyArrow)
+can open. Three rules make that a guarantee rather than a habit — see
+[ADR-0018 §14](adr/0018-parquet-file-numbers-are-input.md):
+
+- **A schema it cannot write is refused at construction.** `parquet.NewWriter`
+  returns the error; `parquet.NewNativeWriter` cannot, so it latches it and the
+  first `WriteMapRows`/`Close` returns it having written nothing. Both doors ask
+  the same `ValidateWriteSchema`. Refused shapes include a malformed `MAP`
+  (key/value on `Fields` rather than an `ElementType` `ROW`), an `ARRAY` with no
+  element type, an empty `ROW`, a `DECIMAL` whose declaration the file cannot
+  carry (negative scale, scale past the precision the file will declare,
+  precision above 38 or negative), and a `VECTOR` whose width in bytes
+  (`Dimension × 4`) does not fit the format's `FIXED_LEN_BYTE_ARRAY`
+  `type_length`. `Precision: 0` remains the "unconstrained" spelling and means
+  38.
+- **The writer owns its schema.** Both constructors take a deep copy, so
+  amending a reusable `parquet.Schema` while a writer is alive changes nothing
+  about the file it produces.
+- **A closed writer is closed.** `Close` is terminal and idempotent-by-refusal:
+  every later `WriteRows`, `WriteMapRows` and `Close` returns
+  `parquet.ErrWriterClosed` without touching the output, so the finalized file
+  is exactly what the first `Close` wrote. A `Close` that fails keeps returning
+  its own failure.
+
+The footer is bounded the same way: it must fit both the format's four-byte
+trailer length and the 64 MiB footer this package will read back, checked before
+any footer byte is written, so an oversize file is a loud `Close` rather than an
+unreadable artifact.
+
 ## Memory Management
 
 ### Per-Task Memory Budget
