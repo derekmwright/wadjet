@@ -389,11 +389,11 @@ queries the carry makes answerable.
 
 That is an arc with its own brief. Until it lands, the whole shape family is
 censused fail-on-agree in
-`coordinator.TestH2TwoJoinArmsPublishingOneAliasIsDeferred` — eleven pinned
+`coordinator.TestH2TwoJoinArmsPublishingOneAliasIsDeferred` — thirteen pinned
 cells (the DISTINCT / GROUP BY / UNION / UNION ALL / swapped-arms spellings, the
-four- and three-arm boundary shapes, the bare and EXPRESSION aggregate
-arguments, the window arm, and the window over the alias with its declaration)
-and four controls that answer. Closing #770 means deleting cells from that
+four- and three-arm boundary shapes, COUNT(DISTINCT) and a HAVING term, the bare
+and EXPRESSION aggregate arguments, the window arm, and the window over the
+alias with its declaration) and four controls that answer. Closing #770 means deleting cells from that
 table.
 
 ## A carrier is never handed what it cannot evaluate

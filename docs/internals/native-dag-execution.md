@@ -411,7 +411,7 @@ is MATERIALIZED instead" (`join_input_projection.go`, ADR-0025):
   a name `NeededColumns` never mentions, and the join underneath drops it. A
   carry bounded by "the consuming stage already names it" was built in arc H2
   and withdrawn: it closes the filed query at three relations and reopens at
-  four. See ADR-0025's NOT SETTLED section and the eleven pinned cells in
+  four. See ADR-0025's NOT SETTLED section and the thirteen pinned cells in
   `coordinator.TestH2TwoJoinArmsPublishingOneAliasIsDeferred`.
 - once an arm's SELECT list is materialized its stream is the arm's OUTPUT, so
   the join names it with `joinArmAlias` and `materializedBuildColOrigins` — the

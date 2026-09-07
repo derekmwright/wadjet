@@ -172,6 +172,29 @@ func TestH2TwoJoinArmsPublishingOneAliasIsDeferred(t *testing.T) {
 			why:  "the aggregate's argument is re-spelled to a source the join's payload never carried",
 		},
 		{
+			// COUNT(DISTINCT y.w): the DISTINCT-inside-an-aggregate spelling
+			// reaches the GROUP-KEY consumer rather than the argument one, so
+			// it fails on `w` and not on `y.w` — the same payload gap through
+			// a fourth SQL surface.
+			name: "770 PINNED: COUNT(DISTINCT) over the contested alias",
+			sql:  "SELECT COUNT(DISTINCT y.w) AS n " + arm3,
+			want: "cols=[n:INT64] rows=1 | 4",
+			pin:  map[string]string{"dagshuf": shufFail},
+			why:  groupKeyWhy + "; the DISTINCT inside the aggregate lowers to that key",
+		},
+		{
+			// A HAVING term naming the alias: the aggregate-argument consumer
+			// again, reached from the predicate rather than the SELECT list,
+			// and the GROUP BY key beside it is the arm that DOES resolve.
+			name: "770 PINNED: a HAVING term over the contested alias",
+			sql: "SELECT x.w AS xw " + arm3 +
+				" GROUP BY x.w HAVING MAX(y.w) > 1000 ORDER BY xw",
+			want: "cols=[xw:DECIMAL(9,2)] rows=1 | 12.75",
+			pin:  map[string]string{"dagshuf": shufFail},
+			why: "the HAVING aggregate's argument is re-spelled to a source the join's payload " +
+				"never carried; the query's own GROUP BY key (`x.w`) resolves and this does not",
+		},
+		{
 			// B2: the same consumer with an EXPRESSION argument, and here it is
 			// SILENT — and differently silent on the two arms. 9650.0000 is
 			// 2 x SUM(y.w): `x.w` bound the OTHER arm's column.
