@@ -74,8 +74,13 @@ func a2StageCells() []a2StageCell {
 		{issue: "#812", name: "ctl_select_list_scalar_subquery_over_a_cte_uses_the_other_route",
 			sql: `WITH c AS (SELECT id, d92 AS v FROM zzp) ` +
 				`SELECT c.id AS id, (SELECT MAX(c2.id) FROM c c2) AS m FROM c ORDER BY c.id`,
+			// int64, not a bare rendering: since #874 a SELECT-list scalar
+			// subquery declares the type of its own output column, so `m`
+			// arrives as the bigint PostgreSQL says it is instead of the
+			// projection's STRING fallback. The ROUTE is what this cell is
+			// about and it has not moved.
 			want: []string{
-				"id=int64:1|m=3", "id=int64:2|m=3", "id=int64:3|m=3"},
+				"id=int64:1|m=int64:3", "id=int64:2|m=int64:3", "id=int64:3|m=int64:3"},
 			pgSays: "3 rows, m = 3"},
 	}
 }
