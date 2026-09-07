@@ -1098,8 +1098,8 @@ cannot read.** Four rules:
   now — one function, not two agreeing constants. The footer's own encoder
   narrowed the same field a second time
   (`thrift_encoder.go`, outside `buildLeafSchemaElement`, which is why a sweep
-  of that function alone missed it); it writes 0 — an obviously absent
-  annotation — it REFUSES, and `EncodeFileMetaData` answers nil so `Close`
+  of that function alone missed it); it REFUSES a dimension it cannot state,
+  and `EncodeFileMetaData` answers nil so `Close`
   refuses to finalize a footer that could not be stated honestly. A substituted
   placeholder is the same mistake as a clamped length: the file would declare
   something nobody asked for. The same sweep found the row group's byte-array run: its offset
