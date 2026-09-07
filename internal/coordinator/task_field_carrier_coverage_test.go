@@ -80,10 +80,13 @@ func TestTaskFieldCarrierCoverage(t *testing.T) {
 		// correlation key) — a column-name list the worker applies as the
 		// probe's OutputExclude, never a file path.
 		"HiddenJoinColumns": notFile,
-		// The lateral's COUNT outputs, whose empty-input value is 0 — a
-		// column-name list the worker turns into an operator, never a file
+		// The lateral's empty-input constants, the column whose NULL marks the
+		// row that needs them, and whether the operator drops that column —
+		// values and names the worker turns into an operator, never a file
 		// path.
-		"LateralCountDefaults": notFile,
+		"LateralEmptyDefaults": notFile,
+		"LateralPadMarker":     notFile,
+		"LateralDropMarker":    notFile,
 		"ShuffleKeys":          notFile, "ShuffleKeyTypes": notFile, "NumPartitions": notFile,
 		"ComputedCols": notFile, "DropCols": notFile,
 		"PartialAggKeys": notFile, "PartialAggSpecs": notFile, "PartitionID": notFile,

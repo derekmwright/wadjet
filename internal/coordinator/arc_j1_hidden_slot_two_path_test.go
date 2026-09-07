@@ -576,65 +576,157 @@ func TestArcJ1TheLateralBlockReadsTheSlot(t *testing.T) {
 	}
 }
 
-// AN UNGROUPED AGGREGATE'S EMPTY-INPUT VALUE RIDES ON THE COLUMN (#977).
+// AN UNGROUPED AGGREGATE'S EMPTY-INPUT VALUE IS THE ITEM'S OWN, AND IT LANDS
+// ONLY ON THE ROWS THE PAD MANUFACTURED (#977, arc J1 round 4).
 //
-// PostgreSQL evaluates a LATERAL once per outer row, and `COUNT(*)` over an
-// empty input is 0 — so an outer row the lateral matches nothing for comes
-// back with 0, not NULL. This engine decorrelates into a join, so that row
-// exists only as a LEFT pad, and a pad writes NULL.
+// PostgreSQL evaluates a LATERAL once per outer row, and an ungrouped
+// aggregate over an empty input still yields a row: `COUNT(*)` is 0 there,
+// `SUM(x)` is NULL, and an item BUILT from them is that item over those
+// values. This engine decorrelates into a join, so that row exists only as a
+// LEFT pad, and a pad writes NULL.
 //
-// Rewriting the enclosing query's REFERENCES to `COALESCE(<ref>, 0)` reaches a
-// named reference and nothing else: a star has none. Refusing the star instead
-// (round 2) refused queries whose outer rows ALL match, which is a right answer
-// taken away. The default belongs on the COLUMN, above the join, where a star,
-// a derived star, a CTE, the wire, a scalar subquery's substitution and an
-// EXISTS all read it.
-func TestArcJ1TheEmptyInputDefaultIsOnTheColumn(t *testing.T) {
+// Round 3 stamped a literal 0 into every NULL of a COUNT column. Both halves
+// of that were wrong:
+//
+//   - WHICH ROWS: a matched row may hold a NULL of its own.
+//     `NULLIF(COUNT(*), 2)` is NULL for a row that counted 2, and stamping it
+//     turned two RIGHT rows into wrong ones. The pad is marked by the
+//     CORRELATION KEY — the join keys on it, a NULL key matches nothing — so
+//     the default lands where the KEY is null and nowhere else.
+//   - WHAT VALUE: `COUNT(*)+1` is 1, `COUNT(*)=0` is true,
+//     `COALESCE(SUM(x),0)` is 0, `CASE WHEN COUNT(*)>5 THEN 1 END` is NULL.
+//     The constant is folded from the item at plan time with each aggregate
+//     replaced by its empty-input value.
+//
+// ONE mechanism for every consumer: the star, the named spelling, a derived
+// star, a CTE star, a scalar subquery over the column and an EXISTS. The
+// reference rewrite that used to serve the named path — `COALESCE(ref, 0)` —
+// had the same matched-NULL defect and is DELETED.
+func TestArcJ1TheEmptyInputDefaultIsTheItemsValue(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	t.Cleanup(cancel)
 	arms := e3Arms(t, ctx)
 
-	const cnt = `LEFT JOIN LATERAL (SELECT COUNT(*) AS n FROM lat_item ` +
-		`WHERE order_id = o.id) s ON true`
+	// lat_ord: Alice and Bob have two items each, Carol none — a matched row,
+	// a matched row and the pad. The `filtered` lateral additionally gives a
+	// matched row whose count is ONE, so a cell can hold a matched NULL, a
+	// matched non-NULL and a pad at once.
+	lat := func(item string) string {
+		return `FROM lat_ord o LEFT JOIN LATERAL (SELECT ` + item + ` AS n FROM lat_item ` +
+			`WHERE order_id = o.id) s ON true ORDER BY o.id`
+	}
+	filtered := func(item string) string {
+		return `FROM lat_ord o LEFT JOIN LATERAL (SELECT ` + item + ` AS n FROM lat_item ` +
+			`WHERE order_id = o.id AND amount > 60) s ON true ORDER BY o.id`
+	}
 
-	for _, tc := range []struct{ name, sql, want string }{
-		{"a-star-sees-the-default", `SELECT * FROM lat_ord o ` + cnt + ` ORDER BY o.id`,
-			`id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`},
-		{"a-derived-star-sees-it",
-			`SELECT * FROM (SELECT * FROM lat_ord o ` + cnt + `) x ORDER BY x.id`,
-			`id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`},
-		{"a-cte-star-sees-it",
-			`WITH c AS (SELECT * FROM lat_ord o ` + cnt + `) SELECT * FROM c ORDER BY c.id`,
-			`id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`},
-		{"the-named-spelling-still-does",
-			`SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + cnt + ` ORDER BY 1`,
-			`c,n | Alice,2 | Bob,2 | Carol,0`},
-		{"an-outer-star-beside-the-lateral-column",
-			`SELECT o.*, s.n FROM lat_ord o ` + cnt + ` ORDER BY o.id`,
-			`id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`},
-		// A star over a lateral where EVERY outer row matches was RIGHT one
-		// commit before round 2's refusal and refused by it: a plan-time
-		// refusal cannot know the data.
-		{"a-star-where-every-outer-row-matches",
-			`SELECT * FROM lat_item o LEFT JOIN LATERAL (SELECT COUNT(*) AS n ` +
-				`FROM lat_item i WHERE i.order_id = o.order_id) s ON true ORDER BY o.id`,
-			`id,order_id,product,amount,n | 1,1,Widget,50,2 | 2,1,Gadget,100,2 | ` +
-				`3,2,Widget,75,2 | 4,2,Doohickey,125,2`},
-		// MAX over an empty input IS NULL, so that lateral needs no default
-		// and its star was always right — the control that says the rule is
-		// the COUNT family's and not every aggregate's.
-		{"ctl-a-MAX-lateral-keeps-its-NULL",
-			`SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT MAX(amount) AS mx ` +
-				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id`,
-			`id,customer,total,mx | 1,Alice,150,100 | 2,Bob,200,125 | 3,Carol,0,NULL`},
+	for _, tc := range []struct {
+		name, sql, want string
+		// wantErrLikeDAG pins a shape the DISTRIBUTED arms refuse; the
+		// single-process arms still answer `want`.
+		wantErrLikeDAG string
+	}{
+		// THE FIVE EXPRESSIONS, through the star.
+		{name: "star/count", sql: `SELECT * ` + lat(`COUNT(*)`),
+			want: `id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`},
+		{name: "star/count-plus-one", sql: `SELECT * ` + lat(`COUNT(*) + 1`),
+			want:           `id,customer,total,n | 1,Alice,150,3 | 2,Bob,200,3 | 3,Carol,0,1`,
+			wantErrLikeDAG: "one stage's files describe one relation"},
+		{name: "star/count-equals-zero", sql: `SELECT * ` + lat(`COUNT(*) = 0`),
+			want: `id,customer,total,n | 1,Alice,150,false | 2,Bob,200,false | ` +
+				`3,Carol,0,true`,
+			wantErrLikeDAG: "one stage's files describe one relation"},
+		{name: "star/coalesce-sum", sql: `SELECT * ` + lat(`COALESCE(SUM(amount), 0)`),
+			want:           `id,customer,total,n | 1,Alice,150,150 | 2,Bob,200,200 | 3,Carol,0,0`,
+			wantErrLikeDAG: "one stage's files describe one relation"},
+		{name: "star/nullif-keeps-a-matched-NULL", sql: `SELECT * ` + lat(`NULLIF(COUNT(*), 2)`),
+			want:           `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,NULL | 3,Carol,0,0`,
+			wantErrLikeDAG: "one stage's files describe one relation"},
+		{name: "star/case-with-no-else-is-NULL",
+			sql: `SELECT * ` + lat(`CASE WHEN COUNT(*) > 5 THEN 1 END`),
+			want: `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,NULL | ` +
+				`3,Carol,0,NULL`,
+			wantErrLikeDAG: "one stage's files describe one relation"},
+		{name: "star/sum-has-no-default", sql: `SELECT * ` + lat(`SUM(amount)`),
+			want: `id,customer,total,n | 1,Alice,150,150 | 2,Bob,200,200 | 3,Carol,0,NULL`},
+		// ALL THREE ROW KINDS IN ONE CELL: a matched NULL, a matched value and
+		// the pad.
+		{name: "star/matched-NULL-matched-value-and-the-pad",
+			sql:            `SELECT * ` + filtered(`NULLIF(COUNT(*), 1)`),
+			want:           `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,2 | 3,Carol,0,0`,
+			wantErrLikeDAG: "one stage's files describe one relation"},
+
+		// THE NAMED SPELLING — the path the deleted reference rewrite served.
+		{name: "named/nullif-keeps-a-matched-NULL",
+			sql:  `SELECT o.customer AS c, s.n AS n ` + lat(`NULLIF(COUNT(*), 2)`),
+			want: `c,n | Alice,NULL | Bob,NULL | Carol,0`},
+		{name: "named/count-plus-one",
+			sql:  `SELECT o.customer AS c, s.n AS n ` + lat(`COUNT(*) + 1`),
+			want: `c,n | Alice,3 | Bob,3 | Carol,1`},
+		{name: "named/count-equals-zero",
+			sql:  `SELECT o.customer AS c, s.n AS n ` + lat(`COUNT(*) = 0`),
+			want: `c,n | Alice,false | Bob,false | Carol,true`},
+		{name: "named/matched-NULL-matched-value-and-the-pad",
+			sql:  `SELECT o.customer AS c, s.n AS n ` + filtered(`NULLIF(COUNT(*), 1)`),
+			want: `c,n | Alice,NULL | Bob,2 | Carol,0`},
+		{name: "named/case-with-no-else-is-NULL",
+			sql:  `SELECT o.customer AS c, s.n AS n ` + lat(`CASE WHEN COUNT(*) > 5 THEN 1 END`),
+			want: `c,n | Alice,NULL | Bob,NULL | Carol,NULL`},
+
+		// A DERIVED STAR and a CTE STAR read the same column.
+		{name: "derived-star/nullif",
+			sql:            `SELECT * FROM (SELECT * ` + lat(`NULLIF(COUNT(*), 2)`) + `) x`,
+			want:           `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,NULL | 3,Carol,0,0`,
+			wantErrLikeDAG: "one stage's files describe one relation"},
+		{name: "cte-star/nullif",
+			sql:            `WITH c AS (SELECT * ` + lat(`NULLIF(COUNT(*), 2)`) + `) SELECT * FROM c`,
+			want:           `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,NULL | 3,Carol,0,0`,
+			wantErrLikeDAG: "one stage's files describe one relation"},
+
+		// THE INNER SPELLING keeps the pad too — an ungrouped aggregate over
+		// an empty input still yields a row, so the outer row survives.
+		{name: "inner/count",
+			sql: `SELECT * FROM lat_ord o JOIN LATERAL (SELECT COUNT(*) AS n FROM lat_item ` +
+				`WHERE order_id = o.id) s ON true ORDER BY o.id`,
+			want: `id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`},
+		{name: "inner/named-nullif",
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o JOIN LATERAL (` +
+				`SELECT NULLIF(COUNT(*), 2) AS n FROM lat_item WHERE order_id = o.id) s ` +
+				`ON true ORDER BY 1`,
+			want: `c,n | Alice,NULL | Bob,NULL | Carol,0`},
+
+		// A SCALAR SUBQUERY and an EXISTS over the defaulted column — the two
+		// consumers the reference rewrite could never reach.
+		{name: "scalar-subquery-over-the-column",
+			sql: `SELECT o.customer AS c, (SELECT COUNT(*) FROM lat_item i ` +
+				`WHERE i.amount > s.n * 40) AS k FROM lat_ord o LEFT JOIN LATERAL (` +
+				`SELECT COUNT(*) AS n FROM lat_item WHERE order_id = o.id) s ON true ORDER BY 1`,
+			want: `c,k | Alice,2 | Bob,2 | Carol,4`},
+		{name: "exists-over-the-column",
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o LEFT JOIN LATERAL (` +
+				`SELECT COUNT(*) AS n FROM lat_item WHERE order_id = o.id) s ON true ` +
+				`WHERE EXISTS (SELECT 1 FROM lat_item i WHERE i.amount > s.n * 40) ORDER BY 1`,
+			want: `c,n | Alice,2 | Bob,2 | Carol,0`},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {
 				cols, rows, err := arm.run(tc.sql)
+				if tc.wantErrLikeDAG != "" && arm.coord != nil {
+					if err == nil {
+						t.Fatalf("%s arm ANSWERED %s where the pin says it fails — the "+
+							"stage carries the defaulted column now, so delete the pin\n  SQL: %s",
+							arm.name, e3Render(cols, rows), tc.sql)
+					}
+					if !strings.Contains(err.Error(), tc.wantErrLikeDAG) {
+						t.Errorf("%s arm failed by a DIFFERENT sentence: %v\n  SQL: %s",
+							arm.name, err, tc.sql)
+					}
+					continue
+				}
 				if err != nil {
 					t.Fatalf("%s arm: %v\n  want %s (live PostgreSQL 17)\n  SQL: %s",
 						arm.name, err, tc.want, tc.sql)
@@ -692,6 +784,84 @@ func TestArcJ1AQualifiedStarBesideAnotherItemExpands(t *testing.T) {
 			wantErrLike: `column "s.*" does not exist in the input schema`},
 		{name: "pinned-both-stars",
 			sql:         `SELECT o.*, s.* FROM lat_ord o ` + cnt + ` ORDER BY o.id`,
+			wantErrLike: `column "s.*" does not exist in the input schema`},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				cols, rows, err := arm.run(tc.sql)
+				if tc.wantErrLike != "" {
+					if err == nil {
+						t.Fatalf("%s arm ANSWERED %s where the pin says it fails\n  SQL: %s",
+							arm.name, e3Render(cols, rows), tc.sql)
+					}
+					if !strings.Contains(err.Error(), tc.wantErrLike) {
+						t.Errorf("%s arm failed by a DIFFERENT sentence: %v\n  SQL: %s",
+							arm.name, err, tc.sql)
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatalf("%s arm: %v\n  want %s (live PostgreSQL 17)\n  SQL: %s",
+						arm.name, err, tc.want, tc.sql)
+				}
+				if got := e3Render(cols, rows); got != tc.want {
+					t.Fatalf("%s arm: %s\n  want %s (live PostgreSQL 17)\n  SQL: %s",
+						arm.name, got, tc.want, tc.sql)
+				}
+			}
+		})
+	}
+}
+
+// A QUALIFIED STAR EXPANDS FROM THE RELATION'S OWN OUTPUT LIST, never from a
+// scan beneath it (arc J1 round 4).
+//
+// Round 3 expanded `d.*` from the SCAN under the relation, which for a derived
+// table, a CTE or a VALUES list is not the relation: `SELECT d.*, x.id FROM
+// (SELECT id, customer FROM lat_ord) d` published `total` as well, and a
+// `d(a, b)` column-alias list was ignored entirely — loud → silently wrong.
+//
+// A block that NAMES itself is answered only from its own projection. Where
+// that projection was elided, or its body is a star this pass cannot
+// enumerate, the star stays unexpanded and the query stays LOUD — which is
+// what it was before the expansion existed, and never a guess.
+func TestArcJ1AQualifiedStarExpandsFromTheRelationsOutput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	t.Cleanup(cancel)
+	arms := e3Arms(t, ctx)
+
+	for _, tc := range []struct{ name, sql, want, wantErrLike string }{
+		{name: "a-derived-table",
+			sql: `SELECT d.*, x.id AS i FROM (SELECT id, customer FROM lat_ord) d ` +
+				`JOIN lat_ord x ON x.id = d.id ORDER BY x.id`,
+			want: `id,customer,i | 1,Alice,1 | 2,Bob,2 | 3,Carol,3`},
+		{name: "a-derived-table-with-a-column-alias-list",
+			sql: `SELECT d.*, x.id AS i FROM (SELECT id, customer FROM lat_ord) d(a, b) ` +
+				`JOIN lat_ord x ON x.id = d.a ORDER BY x.id`,
+			want: `a,b,i | 1,Alice,1 | 2,Bob,2 | 3,Carol,3`},
+		{name: "a-cte",
+			sql: `WITH c AS (SELECT id, customer FROM lat_ord) SELECT c.*, x.id AS i ` +
+				`FROM c JOIN lat_ord x ON x.id = c.id ORDER BY x.id`,
+			want: `id,customer,i | 1,Alice,1 | 2,Bob,2 | 3,Carol,3`},
+		{name: "a-base-table-still-expands",
+			sql: `SELECT o.*, li.amount AS a FROM lat_ord o JOIN lat_item li ` +
+				`ON li.order_id = o.id ORDER BY o.id, li.amount`,
+			want: `id,customer,total,a | 1,Alice,150,50 | 1,Alice,150,100 | ` +
+				`2,Bob,200,75 | 2,Bob,200,125`},
+		// NOT COMPUTABLE, so LOUD: the block's body is a star over a join.
+		{name: "pinned-a-derived-table-whose-body-is-a-star-over-a-join",
+			sql: `SELECT d.*, x.id AS i FROM (SELECT * FROM lat_ord o JOIN lat_item li ` +
+				`ON li.order_id = o.id) d JOIN lat_ord x ON x.id = d.id ORDER BY x.id`,
+			wantErrLike: `column "d.*" does not exist in the input schema`},
+		// The lateral's own star beside another item: still loud, still one
+		// sentence on every arm.
+		{name: "pinned-the-lateral-s-own-star-beside-another-item",
+			sql: `SELECT s.*, o.id FROM lat_ord o LEFT JOIN LATERAL (SELECT COUNT(*) AS n ` +
+				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id`,
 			wantErrLike: `column "s.*" does not exist in the input schema`},
 	} {
 		tc := tc

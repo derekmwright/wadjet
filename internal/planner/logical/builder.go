@@ -1341,15 +1341,18 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 				// cases and which of them this can express.
 				plan := lateralEmptyInputPlan(jt, empty,
 					lateralJoinNullExtendsAfter(info.Joins, joinIdx))
-				var countDefaults []string
+				var emptyDefaults []LateralEmptyDefault
 				switch plan {
 				case lateralPadOnly, lateralPadThenFilter:
-					// The empty-input value rides on the COLUMN. The
-					// reference rewrite below stays for the shapes it
-					// already serves — a WHERE the ON moved into, an
-					// aggregate over the lateral's column — and the two
-					// agree: COALESCE(0, 0) is 0.
-					countDefaults = append(countDefaults, empty.countOutputs...)
+					// The empty-input value rides on the COLUMN, once, for
+					// every consumer: a star, a derived star, a CTE, the
+					// wire, a scalar subquery's substitution and an EXISTS.
+					// The REFERENCE rewrite this replaced could reach none of
+					// those, and could not tell a pad from a matched NULL
+					// either — it wrapped every reference in COALESCE(…, 0),
+					// so `NULLIF(COUNT(*), 2)` read 0 on a matched row that
+					// counted 2.
+					emptyDefaults = empty.defaults
 				}
 				switch plan {
 				case lateralPadThenFilter:
@@ -1361,10 +1364,8 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 					jt = "left"
 					joinCond = empty.correlationCond
 					andIntoWhere(info, empty.onResidual, empty.onResidualExpr)
-					applyLateralEmptyInputDefaults(info, join.RightAlias, empty)
 				case lateralPadOnly:
 					jt = "left"
-					applyLateralEmptyInputDefaults(info, join.RightAlias, empty)
 				case lateralNoRepair:
 					// Left as written. See lateralEmptyInputPlan.
 				}
@@ -1378,7 +1379,10 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 				// place below every star, derived star and CTE star, so the
 				// trim cannot be reached around (ADR-0026 3c).
 				lat.HiddenJoinCols = hiddenCols
-				lat.LateralCountDefaults = countDefaults
+				lat.LateralEmptyDefaults = emptyDefaults
+				if len(emptyDefaults) > 0 {
+					lat.LateralPadMarker = empty.padMarker
+				}
 				items[idx] = lat
 			} else {
 				rightRef := &plansql.TableRef{
@@ -2127,6 +2131,27 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 				// row took the ELSE arm.
 				respellKeyRefsToSlot(subInfo, innerCol, slot)
 			}
+		}
+		// The marker a padded row is recognised by: the name the lateral
+		// PUBLISHES its correlation key under — the slot where one was
+		// minted, the list's own name otherwise. The join keys on it, so it
+		// is NULL exactly on the rows the LEFT pad manufactured.
+		for _, pub := range keyRename {
+			empty.padMarker = pub
+			break
+		}
+		if empty.padMarker == "" && len(injected) > 0 {
+			empty.padMarker = injected[0].Alias
+		}
+		// QUALIFIED by the lateral's own alias where it has one: the join
+		// emits a build column that collides with a probe column under
+		// `alias.name`, and the PROBE's column of that name is a different
+		// one — a user's stored `__key_0` (ADR-0012). The operator matches
+		// the qualified spelling first and falls back to a bare name only
+		// when exactly one column carries it.
+		if empty.padMarker != "" && join.RightAlias != "" &&
+			!strings.Contains(empty.padMarker, ".") {
+			empty.padMarker = join.RightAlias + "." + empty.padMarker
 		}
 		// Keys first, mirroring the order buildAggregate emits them in, so
 		// the projection above stays elidable in the ordinary shape.

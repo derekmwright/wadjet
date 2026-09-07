@@ -255,11 +255,15 @@ type Stage struct {
 	// stage's empty-side files and its full ones describe the same relation
 	// (ADR-0010). Nil on every other join.
 	HiddenJoinCols []HiddenJoinCol
-	// LateralCountDefaults is logical.Node.LateralCountDefaults for this join
-	// stage: the lateral's COUNT outputs, whose empty-input value is 0 and not
-	// the NULL a LEFT pad writes. The worker runs exec.LateralEmptyDefault
-	// directly above the probe, exactly as the single-process planner does.
-	LateralCountDefaults []string
+	// LateralEmptyDefaults is the empty-input value of each output column of
+	// an ungrouped-aggregate lateral, LateralPadMarker the column whose NULL
+	// marks the row that needs it, and LateralDropMarker says this stage's
+	// default operator is the one that removes the marker. The worker runs
+	// exec.LateralEmptyDefault directly above the probe, exactly as the
+	// single-process planner does.
+	LateralEmptyDefaults []LateralEmptyDefaultSpec
+	LateralPadMarker     string
+	LateralDropMarker    bool
 	JoinFilter           string // semi/anti join inequality filter (e.g., "l2.l_suppkey != l1.l_suppkey")
 	// NullAwareAnti carries logical.Node.NullAwareAnti to the worker: this
 	// anti join came from a NOT IN and owes its three-valued rule, not the
@@ -3555,6 +3559,56 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 
 // PlanDistributed generates a stage DAG for distributed execution.
 // Returns stages with dependency ordering suitable for coordinator dispatch.
+// refuseUnexpandedStarBesideItems refuses a star that SHARES its SELECT list
+// and could not be expanded.
+//
+// Every consumer below resolves an output column by name, and `d.*` is not
+// one: the single-process arms failed with `column "d.*" does not exist in the
+// input schema` and the DAG published a column whose NAME and VALUE were both
+// the string `*`. One sentence on every arm, and the shapes that CAN be
+// expanded — a base table, a derived table or a CTE whose own SELECT list
+// names its columns — are expanded before this runs
+// (logical.ExpandStarProjections).
+func refuseUnexpandedStarBesideItems(node *logical.Node) error {
+	if node == nil || node.Type != logical.NodeProject || len(node.Projections) < 2 {
+		return nil
+	}
+	for _, pr := range logical.VisibleProjections(node.Projections) {
+		name := strings.TrimSpace(pr.Expr)
+		if name == "" {
+			name = strings.TrimSpace(pr.Column)
+		}
+		if name != "*" && !strings.HasSuffix(name, ".*") {
+			continue
+		}
+		return sqlerr.New("0A000",
+			"column %q does not exist in the input schema: a `%s` beside other select "+
+				"items expands only from a relation whose column list is known — a base "+
+				"table, or a derived table or CTE whose own SELECT list names its "+
+				"columns — and this one's is not; name the columns",
+			name, name)
+	}
+	return nil
+}
+
+// refuseUnexpandedStarAnywhere is refuseUnexpandedStarBesideItems over a whole
+// plan, for the DISTRIBUTED entry: the stage planner does not go through
+// buildProject, and the rule is the plan's, not one path's.
+func refuseUnexpandedStarAnywhere(node *logical.Node) error {
+	if node == nil {
+		return nil
+	}
+	if err := refuseUnexpandedStarBesideItems(node); err != nil {
+		return err
+	}
+	for _, child := range node.Children {
+		if err := refuseUnexpandedStarAnywhere(child); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]Stage, error) {
 	p.planCtx = ctx // store for scalar subquery evaluation during stage generation
 	if len(node.CTEs) > 0 {
@@ -3563,6 +3617,14 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// Ensure scan nodes have column metadata — needed by assignJoinKeySides
 	// to assign shuffle keys to the correct child side.
 	p.AnnotateScanColumns(ctx, node)
+	// A star that shares its SELECT list and could not be expanded is the
+	// PLAN's defect, not one path's: this entry does not go through
+	// buildProject, and without the check the DAG published a column whose
+	// name and value were both `*` while the single-process arms refused.
+	logical.ExpandStarProjections(node)
+	if err := refuseUnexpandedStarAnywhere(node); err != nil {
+		return nil, err
+	}
 	// Per-row correlated subqueries have no distributed lowering: refuse
 	// with a typed error BEFORE stage generation so the coordinator can
 	// route the query onto its local single-process engine instead of the
@@ -8036,8 +8098,13 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// single-process planner does, so the two paths publish one column
 		// set (ADR-0026 3c).
 		stage.HiddenJoinCols = stageHiddenPositions(node)
-		if len(node.LateralCountDefaults) > 0 {
-			stage.LateralCountDefaults = append([]string(nil), node.LateralCountDefaults...)
+		if marker, cols, drop := lateralEmptySpec(node); marker != "" {
+			stage.LateralPadMarker = marker
+			stage.LateralDropMarker = drop
+			for _, c := range cols {
+				stage.LateralEmptyDefaults = append(stage.LateralEmptyDefaults,
+					LateralEmptyDefaultSpec{Column: c.Column, Text: c.Text})
+			}
 		}
 		// Propagate semi/anti join inequality filters
 		if node.JoinFilter != "" {
@@ -10337,6 +10404,9 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	// literal column "*". logical.Optimize expands it (before column pruning,
 	// which is what #315 turned on); this catches the unoptimized-plan case.
 	p.expandStarProjections(ctx, node, child)
+	if err := refuseUnexpandedStarBesideItems(node); err != nil {
+		return nil, nil, nil, err
+	}
 
 	// If the child (or child chain through Filter/HAVING) leads to an Aggregate,
 	// skip the projection when possible — the aggregate already produces correctly
@@ -18451,14 +18521,52 @@ func limitPushdownSafe(node *logical.Node) bool {
 // empty-input value on the lateral's own output column, or nil when this join
 // has none. See exec.LateralEmptyDefault and logical.Node.LateralCountDefaults.
 func lateralEmptyDefaultOps(node *logical.Node) []exec.UnaryOperator {
-	if node == nil || len(node.LateralCountDefaults) == 0 {
-		return nil
-	}
-	op := exec.NewLateralEmptyDefault(node.LateralCountDefaults)
+	marker, cols, drop := lateralEmptySpec(node)
+	op := exec.NewLateralEmptyDefault(marker, cols, drop)
 	if op == nil {
 		return nil
 	}
 	return []exec.UnaryOperator{op}
+}
+
+// lateralEmptySpec is the empty-input default's three parts: the column whose
+// NULL marks a padded row, one constant per output column, and whether this
+// operator is the one that drops the marker.
+//
+// It drops the marker when the marker IS a slot the lowering minted — the join
+// would otherwise drop it BELOW this operator, and the marker is what this
+// operator reads. Where the lateral publishes its key under a name the query
+// wrote, the column is the user's and nobody drops it.
+func lateralEmptySpec(node *logical.Node) (marker string, cols []exec.LateralDefault, drop bool) {
+	if node == nil || len(node.LateralEmptyDefaults) == 0 || node.LateralPadMarker == "" {
+		return "", nil, false
+	}
+	for _, d := range node.LateralEmptyDefaults {
+		if d.Null || d.Text == "" {
+			// The pad already writes NULL. Carrying it would only give the
+			// operator a value to stamp where the right answer is no value.
+			continue
+		}
+		cols = append(cols, exec.LateralDefault{Column: d.Column, Text: d.Text})
+	}
+	marker = node.LateralPadMarker
+	for _, h := range node.HiddenJoinCols {
+		if sameLateralMarker(h, marker) {
+			drop = true
+			break
+		}
+	}
+	if len(cols) == 0 && !drop {
+		return "", nil, false
+	}
+	return marker, cols, drop
+}
+
+// LateralEmptyDefaultSpec is one output column's empty-input constant on a
+// join stage; see logical.LateralEmptyDefault and exec.LateralDefault.
+type LateralEmptyDefaultSpec struct {
+	Column string
+	Text   string
 }
 
 // HiddenJoinCol is one column a join MINTED for itself: the ORDINAL it sits
@@ -18487,6 +18595,9 @@ func stageHiddenPositions(node *logical.Node) []HiddenJoinCol {
 	var out []HiddenJoinCol
 	declared := declaredJoinSchema(node.Children[side], nil)
 	for _, hidden := range node.HiddenJoinCols {
+		if lateralMarkerDroppedAbove(node, hidden) {
+			continue
+		}
 		for i, col := range declared {
 			if !strings.EqualFold(col.Name, hidden) {
 				continue
@@ -18496,6 +18607,30 @@ func stageHiddenPositions(node *logical.Node) []HiddenJoinCol {
 		}
 	}
 	return out
+}
+
+// lateralMarkerDroppedAbove reports whether the empty-input default operator
+// ABOVE this join is the one that removes name — the marker it reads. The join
+// leaves it in place then, because the join's own drop runs below.
+func lateralMarkerDroppedAbove(node *logical.Node, name string) bool {
+	if node == nil || node.LateralPadMarker == "" || len(node.LateralEmptyDefaults) == 0 {
+		return false
+	}
+	return sameLateralMarker(name, node.LateralPadMarker)
+}
+
+// sameLateralMarker compares a hidden column's name with the pad marker on
+// their BARE halves: the marker is qualified by the lateral's alias so the
+// OPERATOR can tell a colliding build column from a user's stored one, and
+// `HiddenJoinCols` carries the slot as the lowering minted it.
+func sameLateralMarker(a, b string) bool {
+	bare := func(s string) string {
+		if dot := strings.LastIndexByte(s, '.'); dot >= 0 && dot < len(s)-1 {
+			return s[dot+1:]
+		}
+		return s
+	}
+	return strings.EqualFold(bare(a), bare(b))
 }
 
 // lateralSideOf is which child of this join the LATERAL lowering built, or -1
@@ -18542,6 +18677,9 @@ func joinHiddenPositions(node *logical.Node) (probe, build map[int]string) {
 	}
 	found := map[int]string{}
 	for _, hidden := range node.HiddenJoinCols {
+		if lateralMarkerDroppedAbove(node, hidden) {
+			continue
+		}
 		for i, n := range names {
 			if !strings.EqualFold(n, hidden) {
 				continue

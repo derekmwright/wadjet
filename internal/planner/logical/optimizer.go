@@ -2166,6 +2166,24 @@ func pushFilterThroughJoin(filter, join *Node) *Node {
 	kind := joinKind(join.JoinType)
 	leftPadded, rightPadded := nullSupplyingSides(kind)
 
+	// A DECORRELATED LATERAL's pad is not a NULL row — it is PostgreSQL's
+	// per-outer-row evaluation of an ungrouped aggregate over an empty input,
+	// and the operator above this join writes the item's real value into it
+	// (`COUNT(*)` is 0 there). A predicate over that column therefore sees a
+	// VALUE, not the manufactured NULL: `WHERE s.n = 0` keeps the row, and
+	// demoting the join to an inner one because the predicate "rejects nulls"
+	// deletes exactly the row PostgreSQL returns. Neither the demotion nor
+	// the push may fire on that side.
+	//
+	// The reference rewrite this replaced hid the question by spelling the
+	// predicate `COALESCE(s.n, 0) = 0`, which is not null-rejecting — and it
+	// could not tell a pad from a matched NULL, which is why it is gone.
+	leftDefaulted, rightDefaulted := false, false
+	if len(join.LateralEmptyDefaults) > 0 && len(join.Children) == 2 {
+		leftDefaulted = join.Children[0] != nil && join.Children[0].LateralSubtree
+		rightDefaulted = join.Children[1] != nil && join.Children[1].LateralSubtree
+	}
+
 	// A semi/anti join emits its PROBE (left) side's columns alone; the
 	// build (right) side is not visible above the join. So a predicate here
 	// can only reference left-side columns, and an UNQUALIFIED name must
@@ -2222,6 +2240,11 @@ func pushFilterThroughJoin(filter, join *Node) *Node {
 			switch {
 			case !leftPadded:
 				leftPreds = append(leftPreds, pred)
+			case leftDefaulted:
+				// The pad carries a VALUE, so the predicate is not deciding
+				// about a NULL and the demotion would delete a row
+				// PostgreSQL returns. See the note above.
+				remainingPreds = append(remainingPreds, pred)
 			case rejectsNulls(pred):
 				leftPreds = append(leftPreds, pred)
 				demoteLeft = true
@@ -2232,6 +2255,8 @@ func pushFilterThroughJoin(filter, join *Node) *Node {
 			switch {
 			case !rightPadded:
 				rightPreds = append(rightPreds, pred)
+			case rightDefaulted:
+				remainingPreds = append(remainingPreds, pred)
 			case rejectsNulls(pred):
 				rightPreds = append(rightPreds, pred)
 				demoteRight = true

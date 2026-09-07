@@ -245,13 +245,21 @@ type Node struct {
 	// found the OUTER relation's stored `__key_0` and dropped the user's
 	// column — the round-2 blocker in its third shape.
 	LateralSubtree bool
-	// LateralCountDefaults, on the same JOIN node, names the lateral's output
-	// columns whose EMPTY-INPUT value is 0 rather than NULL — the COUNT
-	// family of an UNGROUPED aggregate. An outer row the lateral matches
-	// nothing for survives only as this join's LEFT pad, and a pad writes
-	// NULL; the default is carried on the COLUMN, above the join, so a star
-	// sees it without anybody rewriting a reference (#977, ADR-0026 §3c).
-	LateralCountDefaults []string
+	// LateralEmptyDefaults, on the same JOIN node, is what each output column
+	// of an UNGROUPED-aggregate lateral reads for an outer row the lateral
+	// matched nothing for — the item's own value over an empty input, folded
+	// at plan time. An outer row with no match survives only as this join's
+	// LEFT pad, and a pad writes NULL; the default is carried on the COLUMN,
+	// above the join, so a star sees it without anybody rewriting a reference
+	// (#977, ADR-0026 §3c).
+	LateralEmptyDefaults []LateralEmptyDefault
+	// LateralPadMarker is the column whose NULL says a row IS that pad: the
+	// join keys on it and a NULL key matches nothing, so it is null exactly
+	// on the manufactured rows. Reading the DEFAULTED column's own nulls
+	// instead cannot tell a pad from a matched NULL — `NULLIF(COUNT(*),2)`
+	// over a matched row that counted 2 is legitimately NULL, and stamping it
+	// turned right rows into wrong ones.
+	LateralPadMarker string
 	// LateralAggregate marks the aggregate a DECORRELATED LATERAL's lowering
 	// built — the one whose group key IS the correlation key, whatever name
 	// it publishes it under.

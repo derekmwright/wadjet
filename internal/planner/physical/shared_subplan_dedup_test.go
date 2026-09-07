@@ -438,8 +438,11 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		"HiddenJoinCols": "hashed",
 		// The lateral's empty-input defaults change the VALUES a stage emits
 		// (a padded COUNT reads 0, not NULL), so two stages that differ here
-		// are not interchangeable.
-		"LateralCountDefaults": "hashed",
+		// are not interchangeable. The marker and the drop decide WHICH rows
+		// and WHICH column, so they are part of the same identity.
+		"LateralEmptyDefaults": "hashed",
+		"LateralPadMarker":     "hashed",
+		"LateralDropMarker":    "hashed",
 		"JoinFilter":           "hashed", "BuildFilterExprs": "hashed",
 		// NOT IN's three-valued rule changes which rows the stage EMITS
 		// (#507), so an anti join that owes it is not interchangeable with

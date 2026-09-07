@@ -3048,10 +3048,28 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 	// same position the single-process planner gives it: an outer row the
 	// lateral matched nothing for exists only as this join's pad, and the
 	// column's own value there is 0, not NULL (exec.LateralEmptyDefault).
-	if op := exec.NewLateralEmptyDefault(spec.CountDefaults); op != nil {
+	if op := lateralEmptyDefaultOp(spec); op != nil {
 		ops = append(ops, op)
 	}
 	return ops, cleanup, nil
+}
+
+// lateralEmptyDefaultOp is the operator that carries an ungrouped-aggregate
+// lateral's empty-input values on its own output columns; nil when this
+// fragment's join has none.
+func lateralEmptyDefaultOp(spec distributed.OpSpec) exec.UnaryOperator {
+	if spec.PadMarker == "" {
+		return nil
+	}
+	cols := make([]exec.LateralDefault, 0, len(spec.EmptyDefaults))
+	for _, d := range spec.EmptyDefaults {
+		cols = append(cols, exec.LateralDefault{Column: d.Column, Text: d.Text})
+	}
+	op := exec.NewLateralEmptyDefault(spec.PadMarker, cols, spec.DropMarker)
+	if op == nil {
+		return nil
+	}
+	return op
 }
 
 // hiddenColumnSets is OpSpec.HiddenColumns as the probe's per-side

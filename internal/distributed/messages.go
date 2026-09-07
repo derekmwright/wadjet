@@ -196,10 +196,14 @@ type Task struct {
 	// publish however wide Columns is. See physical.Stage.HiddenJoinCols and
 	// exec.HashJoinProbe.OutputExclude.
 	HiddenJoinColumns []HiddenJoinColumn `json:"hidden_join_columns,omitempty"`
-	// LateralCountDefaults are the lateral's COUNT outputs, whose empty-input
-	// value is 0 rather than the NULL a LEFT pad writes. See
-	// physical.Stage.LateralCountDefaults and exec.LateralEmptyDefault.
-	LateralCountDefaults []string `json:"lateral_count_defaults,omitempty"`
+	// LateralEmptyDefaults is the empty-input value of each output column of
+	// an ungrouped-aggregate lateral, LateralPadMarker the column whose NULL
+	// marks the row that needs it, and LateralDropMarker says the default
+	// operator is the one that removes the marker. See
+	// physical.Stage.LateralEmptyDefaults and exec.LateralEmptyDefault.
+	LateralEmptyDefaults []LateralEmptyDefault `json:"lateral_empty_defaults,omitempty"`
+	LateralPadMarker     string                `json:"lateral_pad_marker,omitempty"`
+	LateralDropMarker    bool                  `json:"lateral_drop_marker,omitempty"`
 
 	// Fused join: additional broadcast joins absorbed into a single task.
 	// The worker builds hash tables for each fused join, then chains probes
@@ -589,11 +593,14 @@ type OpSpec struct {
 	// their own side. See HiddenJoinColumn and
 	// exec.HashJoinProbe.OutputExcludeProbe.
 	HiddenColumns []HiddenJoinColumn `json:"hidden_columns,omitempty"`
-	// CountDefaults are the lateral COUNT outputs whose empty-input value is
-	// 0 rather than the NULL a LEFT pad writes; the worker runs
+	// EmptyDefaults / PadMarker / DropMarker are the lateral's empty-input
+	// values, the column whose NULL marks the row that needs them, and
+	// whether this operator removes that marker; the worker runs
 	// exec.LateralEmptyDefault for them directly above the probe.
-	CountDefaults   []string `json:"count_defaults,omitempty"`
-	LateMaterialize bool     `json:"late_materialize,omitempty"` // emit view-column join output (deferred gather)
+	EmptyDefaults   []LateralEmptyDefault `json:"empty_defaults,omitempty"`
+	PadMarker       string                `json:"pad_marker,omitempty"`
+	DropMarker      bool                  `json:"drop_marker,omitempty"`
+	LateMaterialize bool                  `json:"late_materialize,omitempty"` // emit view-column join output (deferred gather)
 	// BuildSchema / ProbeSchema are the plan-declared columns of each side,
 	// read ONLY when that side turns out to be empty — an outer join still
 	// owes the rows the empty side shapes and cannot name their columns
@@ -1081,6 +1088,14 @@ type WindowFrameSpec struct {
 type WindowBoundSpec struct {
 	Type   string `json:"type"` // unbounded_preceding, preceding, current_row, following, unbounded_following
 	Offset int    `json:"offset,omitempty"`
+}
+
+// LateralEmptyDefault is one output column's empty-input constant on the wire,
+// rendered as text so both paths parse it at the vector's own type. See
+// exec.LateralDefault.
+type LateralEmptyDefault struct {
+	Column string `json:"column"`
+	Text   string `json:"text"`
 }
 
 // HiddenJoinColumn is physical.HiddenJoinCol on the wire: one column a join

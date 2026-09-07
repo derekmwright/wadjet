@@ -50,17 +50,21 @@ func ExpandStarProjections(n *Node) {
 		// produces). `SELECT o.*, s.n` was `column "o.*" does not exist in
 		// the input schema` on the single-process arms and, on the DAG, a
 		// column whose NAME and VALUE were both the string `*`.
-		src := lone
-		if qual := starQualifier(proj); qual != "" {
-			src = scanNamed(n.Children[0], qual)
+		var cols []string
+		qual := starQualifier(proj)
+		if qual == "" {
+			if lone != nil {
+				cols = lone.ScanColumns
+			}
+		} else {
+			cols = relationOutputColumns(n.Children[0], qual)
 		}
-		if src == nil || len(src.ScanColumns) == 0 {
+		if len(cols) == 0 {
 			expanded = append(expanded, proj)
 			continue
 		}
 		changed = true
-		qual := starQualifier(proj)
-		for _, col := range src.ScanColumns {
+		for _, col := range cols {
 			// A QUALIFIED star expands to QUALIFIED references. The bare name
 			// binds the FIRST column of that name in the join's output, which
 			// for `SELECT o.*, li.amount FROM o JOIN li` is li's `id`: the
@@ -99,34 +103,61 @@ func starQualifier(proj Projection) string {
 	return strings.TrimSpace(strings.TrimSuffix(e, ".*"))
 }
 
-// scanNamed is the scan under n that answers to alias, or nil. A star can only
-// be expanded from a BASE-TABLE scan's catalog-annotated schema: a lateral's
-// own output is a projection this pass cannot enumerate, and it carries the
-// correlation slot the join is about to drop, so naming its columns here would
-// publish one.
-func scanNamed(n *Node, alias string) *Node {
-	var found *Node
+// relationOutputColumns is what the relation called alias PUBLISHES, in order,
+// or nil when this pass cannot enumerate it — in which case the star stays
+// unexpanded and the query stays LOUD, which is what it was before this
+// expansion existed. Never a guess.
+//
+// The OUTPUT list, never a scan beneath a projection. A derived table, a CTE
+// and a VALUES list all sit above their own scans, and expanding from the scan
+// published columns the relation does not have:
+// `SELECT d.*, x.id FROM (SELECT id, customer FROM lat_ord) d` came back with
+// `total` as well, and a `d(a, b)` column-alias list was ignored entirely —
+// loud → silently wrong.
+//
+// A block that names itself (`DerivedAlias`, `CTEName`) is therefore answered
+// ONLY from its own projection, and where that projection was elided — the
+// planner drops one whose shape matches its input — there is no list here to
+// read and the answer is nil. A base-table scan is the one relation whose
+// output IS its catalog schema.
+//
+// A decorrelated LATERAL is enumerated by nobody here: `setSubtreeAlias` puts
+// its alias on its SCAN too, its own output is a projection this pass does not
+// resolve, and that projection carries the correlation slot the join is about
+// to drop — so `s.*` beside another item stays unexpanded and LOUD.
+func relationOutputColumns(n *Node, alias string) []string {
+	var found []string
 	var walk func(*Node)
 	walk = func(cur *Node) {
 		if cur == nil || found != nil {
 			return
 		}
-		// NOT into a decorrelated LATERAL. `setSubtreeAlias` puts the
-		// lateral's alias on its SCAN too, so `s.*` would expand to the inner
-		// TABLE's columns — which the lateral does not publish (its
-		// projection does) and which include the correlation slot the join is
-		// about to drop. Measured: `SELECT s.*, o.id` came back as the inner
-		// table's four columns, all NULL, on the single-process arms and as
-		// `id,__key_0` on the DAG.
 		if cur.LateralSubtree {
 			return
 		}
+		// A block that NAMES itself answers for that name and hides what is
+		// under it, whichever way the answer comes out.
+		named := cur.DerivedAlias != "" || cur.CTEName != ""
+		if named {
+			if !strings.EqualFold(cur.DerivedAlias, alias) && !strings.EqualFold(cur.CTEName, alias) {
+				return
+			}
+			if cur.Type == NodeProject {
+				found = projectionOutputNames(cur)
+			}
+			return
+		}
 		if cur.Type == NodeScan {
-			for _, name := range cur.ScopeNames() {
-				if strings.EqualFold(name, alias) {
-					found = cur
-					return
-				}
+			// The scan's OWN names, not the DERIVED-TABLE aliases stamped on
+			// it by setSubtreeAlias: `(SELECT * FROM o JOIN li) d` stamps `d`
+			// on BOTH inner scans, and expanding from one of them published
+			// that TABLE's columns for a relation whose output is the join's
+			// — `id,order_id,product,amount` all NULL where the block
+			// publishes seven columns. A base-table scan is the only relation
+			// whose output IS its catalog schema.
+			if strings.EqualFold(cur.TableName, alias) || strings.EqualFold(cur.TableAlias, alias) {
+				found = cur.ScanColumns
+				return
 			}
 		}
 		for _, child := range cur.Children {
@@ -135,6 +166,30 @@ func scanNamed(n *Node, alias string) *Node {
 	}
 	walk(n)
 	return found
+}
+
+// projectionOutputNames is a Project's published column list, or nil when one
+// of its items is a star this pass has not expanded — a column set that is not
+// knowable is not guessed at.
+func projectionOutputNames(n *Node) []string {
+	out := make([]string, 0, len(n.Projections))
+	for _, pr := range VisibleProjections(n.Projections) {
+		name := pr.PublishedName
+		if name == "" {
+			name = pr.Alias
+		}
+		if name == "" {
+			name = pr.Column
+		}
+		if name == "" || name == "*" || strings.HasSuffix(name, ".*") {
+			return nil
+		}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // HasStarProjection reports whether node is a Project that still carries an

@@ -48,8 +48,19 @@ type lateralEmptyInput struct {
 	// holds an aggregate and the QUERY wrote no GROUP BY of its own.
 	ungroupedAggregate bool
 	// countOutputs are the output names whose empty-input value is 0 rather
-	// than NULL — the COUNT family.
+	// than NULL — the COUNT family. Kept for the shapes that ask "does this
+	// lateral default anything at all"; the VALUES are in defaults.
 	countOutputs []string
+	// defaults is one folded constant per output column: what the item
+	// evaluates to over an empty input. `COUNT(*)+1` is 1, `COUNT(*)=0` is
+	// true, `COALESCE(SUM(x),0)` is 0, `NULLIF(COUNT(*),2)` is 0 and
+	// `CASE WHEN COUNT(*)>5 THEN 1 END` is NULL — a literal 0 on the COUNT
+	// column is none of those. See lateralEmptyDefaults.
+	defaults []LateralEmptyDefault
+	// padMarker is the column whose NULL says a row is the LEFT pad this
+	// repair manufactures: the name the lateral publishes its correlation
+	// key under, which the join keys on, so a NULL there matches nothing.
+	padMarker string
 	// correlationCond is the condition the DECORRELATION produced (the
 	// promoted correlated equalities), and onResidual / onResidualExpr are
 	// the `ON` the QUERY WROTE, `true` excluded. They are kept apart because
@@ -195,6 +206,7 @@ func lateralEmptyInputOf(info *plansql.SelectInfo, hasAgg, correlated bool) late
 		return lateralEmptyInput{}
 	}
 	out := lateralEmptyInput{ungroupedAggregate: true}
+	out.defaults = lateralEmptyDefaults(info)
 	for _, col := range info.Columns {
 		if !col.IsAgg || !strings.EqualFold(col.AggFunc, "count") {
 			continue
@@ -208,81 +220,6 @@ func lateralEmptyInputOf(info *plansql.SelectInfo, hasAgg, correlated bool) late
 		}
 	}
 	return out
-}
-
-// applyLateralEmptyInputDefaults rewrites the ENCLOSING query's references to
-// the lateral's COUNT outputs into `COALESCE(<ref>, 0)`, so a NULL-padded
-// outer row reads the 0 an ungrouped COUNT over an empty input has.
-//
-// It rewrites the SELECT list, WHERE, HAVING and ORDER BY, which is every
-// place the enclosing query can name one. `SELECT *` is the boundary and is
-// pinned rather than described: a star expands to the raw column and reads
-// NULL where PostgreSQL reads 0, because the expansion happens in a later
-// pass over the plan's own schema and there is nothing here to rewrite.
-func applyLateralEmptyInputDefaults(info *plansql.SelectInfo, alias string, empty lateralEmptyInput) {
-	if len(empty.countOutputs) == 0 {
-		return
-	}
-	names := make(map[string]bool, len(empty.countOutputs))
-	for _, n := range empty.countOutputs {
-		names[strings.ToLower(n)] = true
-	}
-	alias = strings.ToLower(alias)
-	rewrite := func(n plansql.Node) plansql.Node {
-		return coalesceLateralCountRefs(n, alias, names)
-	}
-	for i := range info.Columns {
-		col := &info.Columns[i]
-		if col.ASTExpr != nil {
-			if rewritten := rewrite(col.ASTExpr); rewritten != col.ASTExpr {
-				col.ASTExpr = rewritten
-				col.Expr = rewritten.String()
-			}
-		}
-		// An AGGREGATE's argument is a SECOND place the column lives, and the
-		// one the builder reads for `SUM(s.n)`: SelectColumn.ASTExpr is the
-		// whole item, AggArgExpr / AggArgs / AggArg are what buildAggregate
-		// takes the input from. Rewriting only the first left `SUM(s.n)`
-		// reading the LEFT join's NULL pad — Carol at NULL for PostgreSQL's
-		// 0 on the single-process arm, and a hard `column "s.n" does not
-		// exist in the input schema` on both DAG arms.
-		if !col.IsAgg {
-			continue
-		}
-		if col.AggArgExpr != nil {
-			if rewritten := rewrite(col.AggArgExpr); rewritten != col.AggArgExpr {
-				col.AggArgExpr = rewritten
-				col.AggArg = rewritten.String()
-			}
-		}
-		for j := range col.AggArgs {
-			if col.AggArgs[j] == nil {
-				continue
-			}
-			if rewritten := rewrite(col.AggArgs[j]); rewritten != col.AggArgs[j] {
-				col.AggArgs[j] = rewritten
-			}
-		}
-	}
-	if info.WhereExpr != nil {
-		info.WhereExpr = rewrite(info.WhereExpr)
-		info.Where = info.WhereExpr.String()
-	}
-	if info.HavingExpr != nil {
-		info.HavingExpr = rewrite(info.HavingExpr)
-		info.Having = info.HavingExpr.String()
-	}
-	for i := range info.OrderBy {
-		if info.OrderBy[i].Expr == nil {
-			continue
-		}
-		rewritten := rewrite(info.OrderBy[i].Expr)
-		if rewritten == info.OrderBy[i].Expr {
-			continue
-		}
-		info.OrderBy[i].Expr = rewritten
-		info.OrderBy[i].Column = rewritten.String()
-	}
 }
 
 // coalesceLateralCountRefs returns node with every reference to one of the
