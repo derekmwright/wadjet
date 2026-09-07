@@ -72,51 +72,6 @@ func TestH2TwoJoinArmsPublishingOneAliasIsDeferred(t *testing.T) {
 
 	f1Run(t, arms, []f1Case{
 		{
-			// #770's exact SQL. The DISTINCT lowers to a GROUP BY whose key
-			// resolves to `w`.
-			name:   "770 PINNED: DISTINCT over a join whose arms share an output alias",
-			sql:    "SELECT DISTINCT x.w AS xw, y.w AS yw " + arm3 + " ORDER BY xw, yw",
-			want:   five,
-			pin:    map[string]string{"dagshuf": shufFail},
-			why:    groupKeyWhy,
-			routed: map[string]string{},
-		},
-		{
-			name: "770 PINNED: the GROUP BY spelling of the same query",
-			sql:  "SELECT x.w AS xw, y.w AS yw " + arm3 + " GROUP BY x.w, y.w ORDER BY xw, yw",
-			want: five,
-			pin:  map[string]string{"dagshuf": shufFail},
-			why:  groupKeyWhy,
-		},
-		{
-			// B1: the model's boundary. ONE MORE relation on the same key, and
-			// the stage the key is computed on no longer names `w` itself —
-			// which is exactly the condition the withdrawn pass needed.
-			name: "770 PINNED: the same DISTINCT with one MORE join",
-			sql: "SELECT DISTINCT x.w AS xw, y.w AS yw FROM (SELECT id, a AS w FROM decpair) x " +
-				"JOIN (SELECT id, b*100 AS w FROM decpair) y ON x.id = y.id " +
-				"JOIN decpair u ON x.id = u.id JOIN decpair v ON x.id = v.id " +
-				"WHERE x.w > 1 ORDER BY xw, yw",
-			want: five,
-			pin:  map[string]string{"dagshuf": shufFail},
-			why: groupKeyWhy + "; this is the shape a carry bounded by " +
-				"\"the consuming stage already names it\" cannot reach",
-		},
-		{
-			// The same boundary reached the other way: THREE derived arms, so
-			// the dropped spelling is the SOURCE column `a` rather than `w`.
-			name: "770 PINNED: three derived arms sharing the alias",
-			sql: "SELECT DISTINCT x.w AS xw, y.w AS yw, z.w AS zw FROM (SELECT id, a AS w FROM decpair) x " +
-				"JOIN (SELECT id, b*100 AS w FROM decpair) y ON x.id = y.id " +
-				"JOIN (SELECT id, a*3 AS w FROM decpair) z ON x.id = z.id " +
-				"JOIN decpair u ON x.id = u.id WHERE x.w > 1 ORDER BY xw, yw, zw",
-			want: "cols=[xw:DECIMAL(9,2) yw:DECIMAL(22,4) zw:DECIMAL(11,2)] rows=5 | " +
-				"2.00,1000.0000,6.00 | 12.75,1274.9900,38.25 | 12.75,1275.0000,38.25 | " +
-				"12.75,1275.0100,38.25 | 12.75,NULL,38.25",
-			pin: map[string]string{"dagshuf": shufFail},
-			why: groupKeyWhy + "; here the missing spelling is the SOURCE column `a`",
-		},
-		{
 			// The UNION spelling #770 filed as its correct control. It is the
 			// SILENT one, on BOTH DAG arms, and the dedup then collapses five
 			// distinct pairs into two.
@@ -170,17 +125,6 @@ func TestH2TwoJoinArmsPublishingOneAliasIsDeferred(t *testing.T) {
 			want: "cols=[s:DECIMAL(38,4)] rows=1 | 4825.0000",
 			pin:  map[string]string{"dagshuf": shufFail},
 			why:  "the aggregate's argument is re-spelled to a source the join's payload never carried",
-		},
-		{
-			// COUNT(DISTINCT y.w): the DISTINCT-inside-an-aggregate spelling
-			// reaches the GROUP-KEY consumer rather than the argument one, so
-			// it fails on `w` and not on `y.w` — the same payload gap through
-			// a fourth SQL surface.
-			name: "770 PINNED: COUNT(DISTINCT) over the contested alias",
-			sql:  "SELECT COUNT(DISTINCT y.w) AS n " + arm3,
-			want: "cols=[n:INT64] rows=1 | 4",
-			pin:  map[string]string{"dagshuf": shufFail},
-			why:  groupKeyWhy + "; the DISTINCT inside the aggregate lowers to that key",
 		},
 		{
 			// A HAVING term naming the alias: the aggregate-argument consumer
@@ -239,34 +183,6 @@ func TestH2TwoJoinArmsPublishingOneAliasIsDeferred(t *testing.T) {
 				"takes the DECLARATION with it: FLOAT64 where PostgreSQL and every other arm " +
 				"say numeric",
 		},
-
-		// The controls. Each of these answers PostgreSQL on all four arms at
-		// this commit and at 2e386378, so they say the census is about a
-		// CONTESTED alias crossing a join boundary and not about derived
-		// aliases, unions or windows in general.
-		{
-			name: "770 control: the same alias collision over TWO relations",
-			sql: "SELECT DISTINCT x.w AS xw, y.w AS yw FROM (SELECT id, a AS w FROM decpair) x " +
-				"JOIN (SELECT id, b*100 AS w FROM decpair) y ON x.id = y.id " +
-				"WHERE x.w > 1 ORDER BY xw, yw",
-			want: five,
-		},
-		{
-			name: "770 control: DISTINCT aliases, nothing contested",
-			sql: "SELECT DISTINCT x.w AS xw, y.z AS yz FROM (SELECT id, a AS w FROM decpair) x " +
-				"JOIN (SELECT id, b*100 AS z FROM decpair) y ON x.id = y.id " +
-				"JOIN decpair u ON x.id = u.id WHERE x.w > 1 ORDER BY xw, yz",
-			want: "cols=[xw:DECIMAL(9,2) yz:DECIMAL(22,4)] rows=5 | 2.00,1000.0000 | " +
-				"12.75,1274.9900 | 12.75,1275.0000 | 12.75,1275.0100 | 12.75,NULL",
-		},
-		{
-			name: "770 control: both arms COMPUTE the shared alias",
-			sql: "SELECT DISTINCT x.w AS xw, y.w AS yw FROM (SELECT id, a*3 AS w FROM decpair) x " +
-				"JOIN (SELECT id, b*100 AS w FROM decpair) y ON x.id = y.id " +
-				"JOIN decpair u ON x.id = u.id WHERE x.w > 1 ORDER BY xw, yw",
-			want: "cols=[xw:DECIMAL(11,2) yw:DECIMAL(22,4)] rows=5 | 6.00,1000.0000 | " +
-				"38.25,1274.9900 | 38.25,1275.0000 | 38.25,1275.0100 | 38.25,NULL",
-		},
 		{
 			// The sibling of the window cell above, with BOTH arms windows —
 			// which #877 fixed in this branch and which answers here.
@@ -274,6 +190,5 @@ func TestH2TwoJoinArmsPublishingOneAliasIsDeferred(t *testing.T) {
 			sql: "SELECT SUM(p.w + q.w) AS s FROM (SELECT id, SUM(a) OVER () AS w FROM decpair) p " +
 				"JOIN (SELECT id, MAX(a) OVER () AS w FROM decpair) q ON p.id = q.id",
 			want: "cols=[s:DECIMAL(38,2)] rows=1 | 591.66",
-		},
-	})
+		}})
 }

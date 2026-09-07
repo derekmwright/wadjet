@@ -3828,6 +3828,13 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// shuffle entirely (join_carried_columns.go).
 	ensureJoinCarriesEvaluatedColumns(stages)
 	ensureJoinCarriesGatherOutputs(stages)
+	// ADR-0026 §2's two names, applied to a JOIN's consumers: a group key
+	// resolves by the spelling the join PUBLISHES for the value, and the
+	// payload carries only what no published spelling reaches
+	// (published_identity.go, #770). Runs after both carry passes because it
+	// asks what the fragment's input will really SHIP, which is what those
+	// passes have just settled.
+	bindConsumersToPublishedIdentity(stages)
 	if err := assertJoinFiltersAreBacked(stages); err != nil {
 		return nil, err
 	}

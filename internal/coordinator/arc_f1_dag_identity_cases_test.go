@@ -161,35 +161,21 @@ func TestF1AJoinArmPublishesTheColumnsItSelects(t *testing.T) {
 				"12.75,NULL | NULL,NULL",
 		},
 		{
-			// #770, PINNED on the shuffled arm and DEFERRED. The filing says
-			// both DAG arms return 2 rows with a NULL; on this base the
-			// broadcast arm is RIGHT and the shuffled arm is LOUD, so the
-			// tree moved and the shape is no longer silent.
-			//
-			// The mechanism is the one above — two arms publish `w`, so the
-			// resolve-back-to-the-source-name convention has two sources and
-			// names neither — and materializing a CONTESTED rename is the
-			// repair that follows from it. It was built and WITHDRAWN: it
-			// closes this cell and moves THREE shapes in
-			// `TestAWindowBetweenTheSelectListAndItsJoinThreeArms` from right
-			// to wrong (two answer NULL for a qualified reference resolved in
-			// the other arm; one refuses with a sort key that no longer
-			// exists), because the needed-column lists and the stream's
-			// spelling stop agreeing the moment a resolver returns the
-			// qualified name. Right → wrong is a blocker; ADR-0025 carries
-			// the four-configuration census.
-			//
-			// Fail-on-agree: the day the shuffled arm answers, this pin is
-			// stale and must be deleted rather than kept.
-			name: "770 PINNED: DISTINCT over a join whose two arms publish one alias",
+			// #770. The shuffled-arm pin here was DELETED by arc J2, in the
+			// commit that made the cell agree: a consumer now binds through
+			// the identity the producing join PUBLISHES, and the payload
+			// carries only a value no published spelling reaches
+			// (physical.bindConsumersToPublishedIdentity). Two arms publish
+			// `w`, so the resolve-back-to-the-source-name convention had two
+			// sources and named neither; asking the stream what it will ship
+			// answers it without materializing the contested rename, which is
+			// the repair that was built and withdrawn twice (ADR-0025).
+			name: "770 DISTINCT over a join whose two arms publish one alias",
 			sql: "SELECT DISTINCT x.w AS xw, y.w AS yw FROM (SELECT id, a AS w FROM decpair) x " +
 				"JOIN (SELECT id, b*100 AS w FROM decpair) y ON x.id = y.id " +
 				"JOIN decpair u ON x.id = u.id WHERE x.w > 1 ORDER BY xw, yw",
 			want: "cols=[xw:DECIMAL(9,2) yw:DECIMAL(22,4)] rows=5 | 2.00,1000.0000 | " +
 				"12.75,1274.9900 | 12.75,1275.0000 | 12.75,1275.0100 | 12.75,NULL",
-			pin: map[string]string{"dagshuf": `ERR native DAG: stage join-8 (hash_join)`},
-			why: "two arms publish `w` and neither is materialized; see the arc report's " +
-				"DEFERRED item for the repair that was built and withdrawn",
 		},
 		{
 			name: "770 control: two arms whose aliases are DISTINCT",
