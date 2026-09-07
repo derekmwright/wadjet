@@ -60,9 +60,11 @@ func bindConsumersToPublishedIdentity(stages []Stage) {
 	}
 	for i := range stages {
 		carryUnreachableConsumerValues(stages, idx, i)
+		respellUnionArmsOverProducerOutput(stages, idx, i, true)
 	}
 	for i := range stages {
 		respellConsumersOverProducerOutput(stages, idx, i)
+		respellUnionArmsOverProducerOutput(stages, idx, i, false)
 	}
 }
 
@@ -543,4 +545,129 @@ func publishedSpellingFor(name, written string, arms map[string]bool, in []strea
 		return "", false
 	}
 	return match, true
+}
+
+// A UNION ARM's projection is the fourth consumer, and it is the one that
+// arrives as an EXPRESSION rather than a name.
+//
+// An arm forwarding a derived table's COMPUTED column is rewritten into the
+// expression that DEFINES it (#554), so `SELECT y.w` over
+// `(SELECT id, b*100 AS w FROM t) y` projects `b * 100 AS yw`. The producing
+// fragment computed that value already and publishes it as `w`; the join above
+// carries `w` and never carries `b`, so the arm recomputed the definition over
+// a stream with no `b` and every row of that column came back NULL — and the
+// UNION's dedup then collapsed five distinct pairs into two, which is a wrong
+// ROW COUNT rather than a visible NULL.
+//
+// `respellSpecsOverProducerOutput` already asks whether the spec resolves and
+// DECLINES when it does not, which leaves the arm shipping the text that
+// answers NULL. Asking the producer what it CALLS the value is the answer it
+// is missing: a fragment that materializes an expression publishes it under a
+// name, and that name is the arm's projection.
+func respellUnionArmsOverProducerOutput(stages []Stage, idx map[string]int, i int, carry bool) {
+	s := &stages[i]
+	if s.Type != StageUnion {
+		return
+	}
+	for a := range s.UnionArms {
+		j, ok := idx[s.UnionArmDep(a)]
+		if !ok {
+			continue
+		}
+		in := stageStreamColumnsFiltered(stages, idx, &stages[j], passThroughDepth, true)
+		if len(in) == 0 {
+			continue
+		}
+		for k := range s.UnionArms[a].Projections {
+			sp := &s.UnionArms[a].Projections[k]
+			if sp.Expr == "" || specResolvesOverStream(sp.Expr, in) {
+				continue
+			}
+			name := publishedNameForExpr(stages, idx, j, sp.Expr)
+			if name == "" {
+				continue
+			}
+			if _, bound := bindStreamColumn(name, in); bound {
+				if !carry {
+					sp.Expr = name
+				}
+				continue
+			}
+			if carry {
+				if keep := refsSubtreeCanSupply(stages, idx, j, []string{name},
+					map[int]map[string]string{}); len(keep) == 1 {
+					widenNarrowingStagesBelow(stages, idx, j, keep)
+				}
+			}
+		}
+	}
+}
+
+// specResolvesOverStream reports whether every column reference in a
+// projection's text binds on the stream, with the runtime resolver's own
+// rules including its refusal to guess between two `.bare` matches.
+func specResolvesOverStream(text string, in []streamCol) bool {
+	ast, err := plansql.ParseExpression(text)
+	if err != nil {
+		return true // not ours to judge; leave the spec alone
+	}
+	for _, ref := range collectColRefs(ast) {
+		if strings.HasPrefix(ref.Column, windowKeyColPrefix) || strings.HasPrefix(ref.Column, ":") {
+			continue // the fragment computes it, or dispatch substitutes it
+		}
+		if _, ok := bindStreamColumn(ref.String(), in); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// publishedNameForExpr is the name some fragment at or below root publishes
+// for the value this expression computes.
+//
+// The comparison is `plansql.ExprIdentity`, which is what ADR-0026 §1 makes
+// the identity of an expression: parentheses, identifier case and whitespace
+// erased and nothing else. A projection whose Name IS its Expr publishes no
+// second name and is skipped — that is a column passing through, not a value
+// being computed.
+func publishedNameForExpr(stages []Stage, idx map[string]int, root int, text string) string {
+	ast, err := plansql.ParseExpression(text)
+	if err != nil {
+		return ""
+	}
+	want := plansql.ExprIdentity(ast)
+	if want == "" {
+		return ""
+	}
+	seen := make(map[int]bool, 8)
+	queue := []int{root}
+	for depth := 0; len(queue) > 0 && depth < passThroughDepth*4; depth++ {
+		next := queue
+		queue = nil
+		for _, k := range next {
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			s := &stages[k]
+			for _, p := range s.ProjectExprs {
+				if p.Name == "" || p.Expr == "" || strings.EqualFold(p.Name, p.Expr) {
+					continue
+				}
+				node, err := plansql.ParseExpression(p.Expr)
+				if err != nil {
+					continue
+				}
+				if plansql.ExprIdentity(node) == want {
+					return p.Name
+				}
+			}
+			for _, dep := range s.Dependencies {
+				if d, ok := idx[dep]; ok {
+					queue = append(queue, d)
+				}
+			}
+		}
+	}
+	return ""
 }

@@ -136,6 +136,36 @@ func TestJ2AJoinConsumerBindsThePublishedIdentity(t *testing.T) {
 				"1275.0100 | NULL",
 		},
 
+		// The UNION ARM's projection, the consumer that arrives as an
+		// EXPRESSION rather than a name. An arm forwarding a derived table's
+		// COMPUTED column is rewritten into the expression that defines it
+		// (#554), so the arm shipped `b * 100 AS yw` over a join stream that
+		// carries the computed `w` and never carries `b`. #770 filed the
+		// UNION spelling as its correct CONTROL; it was the silent one.
+		{
+			name: "770 the UNION spelling of the same query",
+			sql: "SELECT x.w AS xw, y.w AS yw " + arm3 + " UNION " +
+				"SELECT x.w AS xw, y.w AS yw " + arm3 + " ORDER BY xw, yw",
+			want: five,
+		},
+		{
+			// UNION ALL, where no dedup hides the loss behind a smaller row
+			// count: ten rows with the second column gone.
+			name: "770 the UNION ALL spelling keeps ten rows and the column",
+			sql: "SELECT x.w AS xw, y.w AS yw " + arm3 + " UNION ALL " +
+				"SELECT x.w AS xw, y.w AS yw " + arm3 + " ORDER BY xw, yw",
+			want: "cols=[xw:DECIMAL(9,2) yw:DECIMAL(22,4)] rows=10 | 2.00,1000.0000 | " +
+				"2.00,1000.0000 | 12.75,1274.9900 | 12.75,1274.9900 | 12.75,1275.0000 | " +
+				"12.75,1275.0000 | 12.75,1275.0100 | 12.75,1275.0100 | 12.75,NULL | 12.75,NULL",
+		},
+		{
+			name: "770 the UNION spelling with the two arms swapped",
+			sql: "SELECT y.w AS yw, x.w AS xw " + arm3 + " UNION " +
+				"SELECT y.w AS yw, x.w AS xw " + arm3 + " ORDER BY yw, xw",
+			want: "cols=[yw:DECIMAL(22,4) xw:DECIMAL(9,2)] rows=5 | 1000.0000,2.00 | " +
+				"1274.9900,12.75 | 1275.0000,12.75 | 1275.0100,12.75 | NULL,12.75",
+		},
+
 		// The AGGREGATE ARGUMENT, which is the same gap one consumer over: the
 		// spec ships the alias as TEXT and the fragment compiles it against
 		// the join's stream. `aggInputAliasIsMaterializedUnderItsName` says a
