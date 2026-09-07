@@ -134,19 +134,22 @@ func TestArcF3ExprTypingOnEveryArm(t *testing.T) {
 		f3RunOnEveryArm(t, arms, tc.name, tc.sql, []string{tc.want})
 	}
 
-	// The SET-OPERATION face of the same walk, on every arm. The two shapes
-	// whose arms agree ANSWER — that is #867's fix crossing a UNION — and the
-	// shape whose arms DISAGREE is pinned fail-on-agree beside them: the walk
-	// types a column only when every arm declares it identically, and a name
-	// left out of that map takes nodeDeclaredType's float fall-through, so
-	// `… UNION ALL SELECT NULL` goes out as float8/OID 701 where PostgreSQL
-	// sends numeric/OID 1700 with the outer `+ 1` intact. Pre-existing and
-	// filed; `wadjet.TestArithmeticOverAComputedAggregateCarriesTheAggregatesType`
-	// carries the declaration half.
+	// The SET-OPERATION face of the same walk, on every arm.
 	//
-	// The census had no set-operation cell at all before this, so neither
-	// side of that boundary was gated on the distributed arms (round-4 review
-	// P-B-1).
+	// The two shapes whose arms AGREE were #867's fix crossing a UNION; the
+	// shapes whose arms DISAGREE were pinned fail-on-agree beside them until
+	// #884, because the walk typed a column only when every arm declared it
+	// identically and a name left out of that map takes nodeDeclaredType's
+	// float fall-through — so `… UNION ALL SELECT NULL` went out as
+	// float8/OID 701 where PostgreSQL sends numeric/OID 1700, with the outer
+	// `+ 1` lost at int8 magnitude. Both arms of the walk answer from
+	// setOpDeclaredOutputSchema now, which skips an UNKNOWN-typed literal arm,
+	// folds the rest through setOpWiden and resolves DECIMAL (p,s) through
+	// batch.DecimalCommon.
+	//
+	// The values are the single-table answers this census already asserts
+	// above (agg_wide_product, agg_decimal_product), doubled where the query
+	// doubles the rows — nothing here is transcribed from a run.
 	f3RunOnEveryArm(t, arms, "setop_agg_same_typed_arms",
 		`SELECT SUM(v * 3000000) + 1 AS v FROM (SELECT c_i64 AS v FROM typemx `+
 			`UNION ALL SELECT c_i64 FROM typemx) x`,
@@ -155,9 +158,28 @@ func TestArcF3ExprTypingOnEveryArm(t *testing.T) {
 		`SELECT SUM(v * 2) + 1 AS v FROM (SELECT c_dec AS v FROM typemx `+
 			`UNION ALL SELECT c_dec FROM typemx) x`,
 		[]string{"v=49500246.5296"})
-	f3PinnedFloatOnEveryArm(t, arms, "residual_setop_agg_null_arm",
+	f3RunOnEveryArm(t, arms, "setop_agg_null_arm",
 		`SELECT SUM(v * 3000000) + 1 AS v FROM (SELECT c_i64 AS v FROM typemx `+
-			`UNION ALL SELECT NULL) x`, "36280278840510000001")
+			`UNION ALL SELECT NULL) x`, []string{"v=36280278840510000001"})
+	f3RunOnEveryArm(t, arms, "setop_agg_int32_and_int64_arms",
+		`SELECT SUM(v * 3000000) + 1 AS v FROM (SELECT c_i32 AS v FROM typemx `+
+			`UNION ALL SELECT c_i64 FROM typemx) x`,
+		[]string{"v=36280387436400000001"})
+	f3RunOnEveryArm(t, arms, "setop_agg_decimal_and_null_arms",
+		`SELECT SUM(v * 2) + 1 AS v FROM (SELECT c_dec AS v FROM typemx `+
+			`UNION ALL SELECT NULL) x`, []string{"v=24750123.7648"})
+	// The DECIMAL cross-scale shape, which is the one the filing says was a
+	// hard DAG failure as well as a float8 answer: `decpair` carries
+	// numeric(9,2) and numeric(18,4), and the union of them is numeric with
+	// typmod -1 on PostgreSQL 17.11 (measured through pg_attribute) answering
+	// 205.4600. This engine's carrier takes DecimalCommon's (18,4), which
+	// prints the same digits.
+	f3RunOnEveryArm(t, arms, "setop_agg_decimal_cross_scale",
+		`SELECT SUM(v * 2) + 1 AS v FROM (SELECT a AS v FROM `+dbpTable+
+			` UNION ALL SELECT b FROM `+dbpTable+`) x`, []string{"v=205.4600"})
+	f3RunOnEveryArm(t, arms, "setop_agg_decimal_and_bigint_arms",
+		`SELECT SUM(v * 2) + 1 AS v FROM (SELECT a AS v FROM `+dbpTable+
+			` UNION ALL SELECT id FROM `+dbpTable+`) x`, []string{"v=196.98"})
 
 	// ---------------------------------------------------------------- #628
 	// A COMPUTED boolean against a quoted literal, which reaches the row
@@ -782,36 +804,6 @@ func f3SpellingsDisagree(t *testing.T, arms []struct {
 			}
 		}
 	})
-}
-
-// f3PinnedFloatOnEveryArm pins a shape this engine answers as a FLOAT where
-// PostgreSQL answers an exact number: every arm must come back with a `float:`
-// box, and the pin fails the day any of them stops doing so — which is what
-// makes deleting it the fix's proof.
-//
-// It asserts the BOX and not the digits on purpose: a float sum's last ulp
-// moves with the order the arms are aggregated in, on one arm as much as
-// between two (ADR-0013's legal nondeterminism), and pinning that would be
-// pinning noise.
-func f3PinnedFloatOnEveryArm(t *testing.T, arms []struct {
-	name string
-	run  func(string) ([]string, error)
-}, name, sql, pgAnswer string) {
-	t.Helper()
-	for _, arm := range arms {
-		t.Run(name+"/"+arm.name, func(t *testing.T) {
-			got, err := arm.run(sql)
-			if err != nil {
-				t.Fatalf("REFUSED: %v\n  SQL: %s", err, sql)
-			}
-			j := strings.Join(got, ";")
-			if !strings.Contains(j, "float:") {
-				t.Errorf("%s answers %s, no longer a float — PostgreSQL answers %s, so if "+
-					"this is now exact the set-operation walk reconciles arms of DIFFERING "+
-					"type: delete this pin\n  SQL: %s", arm.name, j, pgAnswer, sql)
-			}
-		})
-	}
 }
 
 // f3RunOnEveryArm asserts one query's rows on all three arms.

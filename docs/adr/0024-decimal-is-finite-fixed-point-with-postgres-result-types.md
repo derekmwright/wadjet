@@ -374,6 +374,40 @@ spellings plus the `SELECT *` control.
 > said it could not type. An ADR may not describe a mechanism the code does not
 > have — the same standard round 1 applied to the #764 entry.
 
+**A SET OPERATION is not a boundary either, and arms of DIFFERING type are
+reconciled rather than left untyped.** (Added 2026-09-06, #884.) The set-op arm
+`emittedColTypes` gained for #867 named a column only when EVERY arm's schema
+declared it identically, on the grounds that "unifying them is
+select_common_type's job". Leaving the name out is not neutral, for the same
+reason the empty map is not: `nodeDeclaredType`'s arithmetic arm falls through
+to `Decl(FLOAT64), Decided`. So
+
+    SELECT SUM(v * 3000000) + 1 FROM (SELECT c_i64 AS v FROM t UNION ALL SELECT NULL) x
+
+— the commonest set-operation spelling there is — went out as float8 / OID 701
+where PostgreSQL 17.11 answers the exact numeric 36280278840510000001, with the
+outer `+ 1` lost at int8 magnitude. So did `int4 ∪ int8`, `DECIMAL ∪ NULL`, the
+BARE-argument spelling `SUM(v) + 1`, and `DECIMAL(9,2) ∪ DECIMAL(18,4)`, which
+additionally hard-failed the DAG through the #361 silent-write guard.
+
+select_common_type is not guessed there: both arms answer from
+`setOpDeclaredOutputSchema`, the SAME function that already computes the
+plan-declared output schema for a query whose output IS a set operation. It
+skips an arm whose column is an UNKNOWN-typed literal (measured live on 17.11
+through `pg_attribute`: `int8 ∪ NULL` is bigint, `int4 ∪ NULL` is **integer**,
+not bigint — an unknown arm contributes no type), folds the rest through
+`setOpWiden`'s ladder and resolves DECIMAL (p,s) through `batch.DecimalCommon`.
+Two walks over one question now answer from one place, and the declared schema
+and the emitted-type map cannot disagree about a column they both describe.
+
+The TYPMOD divergence ADR-0012 item 12 records is unchanged and is the reason
+the two answers differ in what they claim: PostgreSQL's `numeric(9,2) ∪
+numeric(18,4)` is `numeric` with typmod −1 and prints each value at its own
+scale, and a wadjet DECIMAL vector has exactly one scale, so the CARRIER takes
+`DecimalCommon`'s (18,4) while the WIRE keeps declaring unconstrained through
+`setOpArmDecimalDisagreements`. The digits are PostgreSQL's; the trailing zeros
+are the open item (#764, below).
+
 **"At every value-producing site" includes every POSITION the same expression
 can be written in.** (Added 2026-09-03, #841.) An expression has ONE
 disposition: `bigint * bigint` overflow is 22003 whether the product is

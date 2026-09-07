@@ -2,7 +2,6 @@ package wadjet
 
 import (
 	"context"
-	"math"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
@@ -12,10 +11,6 @@ import (
 // Arithmetic OVER an aggregate carries the AGGREGATE'S declared type when the
 // aggregate's argument is computed over columns the SCAN below it carries
 // (#867, ADR-0024 item 2).
-//
-// Not when a derived table or CTE has RENAMED those columns: three spellings
-// are still float8 with the outer operand lost, they are pinned fail-on-agree
-// at the end of this file, and #867 stays open for them.
 //
 // It used to carry it only when the argument was a BARE COLUMN. Give the
 // aggregate an expression and the whole term fell to float8 — and at int8
@@ -193,11 +188,18 @@ func TestArithmeticOverAComputedAggregateCarriesTheAggregatesType(t *testing.T) 
 	// `UNION ALL` found no declaration for `v`, fell to the float rule, and
 	// went out as OID 701 where PostgreSQL sends 1700 (round-3 review P-B).
 	//
-	// Both arms read the schemas `setOpArmSchemas` already computes for the
-	// wire's typmod reconciliation, and both take the same rule the wire
-	// takes: a column the arms declare DIFFERENTLY is left untyped, because
-	// unifying them is select_common_type's job and naming a type this walk
-	// did not verify is the direction that corrupts.
+	// Both arms answer from `setOpDeclaredOutputSchema`, the SAME function
+	// that computes the plan-declared output schema for a query whose output
+	// IS a set operation: it skips an arm whose column is an UNKNOWN-typed
+	// literal, folds the rest through setOpWiden's ladder, and resolves
+	// DECIMAL (p,s) through batch.DecimalCommon (#884).
+	//
+	// They used to compare the arms for AGREEMENT and leave a disagreeing
+	// column untyped — and "left out" is not neutral: nodeDeclaredType over a
+	// map without the name falls through to Decl(FLOAT64), Decided. So the
+	// four shapes at the end of this table were float8/OID 701 with the outer
+	// `+ 1` lost at int8 magnitude, and `UNION ALL SELECT NULL` is the
+	// commonest set-op spelling there is.
 	//
 	// The values are arithmetic over the single-table answers above — two
 	// copies of the same table through UNION ALL — so no number here is
@@ -216,6 +218,27 @@ func TestArithmeticOverAComputedAggregateCarriesTheAggregatesType(t *testing.T) 
 		{"setop_bare_argument",
 			`SELECT SUM(v) + 1 AS v FROM (SELECT c_i64 AS v FROM ` + tbl +
 				` UNION ALL SELECT c_i64 FROM ` + tbl + `) x`, "24186852560341"},
+		// #884's three, moved up from the fail-on-agree pin that stood here.
+		// An UNKNOWN-typed NULL arm contributes no type — PostgreSQL resolves
+		// `c_i64 UNION ALL SELECT NULL` to bigint and `c_i32 UNION ALL SELECT
+		// NULL` to integer, measured live on 17.11 through pg_attribute — so
+		// the answer is the single-table one; the mixed integer widths widen
+		// to bigint, so the answer is the sum of the two single-table sums.
+		{"setop_null_arm",
+			`SELECT SUM(v * 3000000) + 1 AS v FROM (SELECT c_i64 AS v FROM ` + tbl +
+				` UNION ALL SELECT NULL) x`, "36280278840510000001"},
+		{"setop_int32_and_int64_arms",
+			`SELECT SUM(v * 3000000) + 1 AS v FROM (SELECT c_i32 AS v FROM ` + tbl +
+				` UNION ALL SELECT c_i64 FROM ` + tbl + `) x`, "36280387436400000001"},
+		{"setop_decimal_and_null_arms",
+			`SELECT SUM(v * 2) + 1 AS v FROM (SELECT c_dec AS v FROM ` + tbl +
+				` UNION ALL SELECT NULL) x`, "24750123.7648"},
+		// The BARE-argument spelling of the same NULL arm, which the filing
+		// does not name and which was float8 too: what was missing is the
+		// declaration, not the arithmetic inside the aggregate.
+		{"setop_bare_argument_null_arm",
+			`SELECT SUM(v) + 1 AS v FROM (SELECT c_i64 AS v FROM ` + tbl +
+				` UNION ALL SELECT NULL) x`, "12093426280171"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			res, err := db.Query(ctx, c.sql)
@@ -232,76 +255,19 @@ func TestArithmeticOverAComputedAggregateCarriesTheAggregatesType(t *testing.T) 
 		})
 	}
 
-	// The BOUNDARY of that arm, pinned fail-on-agree. The set-operation walk
-	// types a column only when EVERY arm declares it identically; an arm that
-	// disagrees leaves the name out of the map, and "left out" is not neutral
-	// — `nodeDeclaredType` over a map without it takes its float
-	// fall-through, exactly the "not undecided, it actively declares FLOAT64"
-	// correction #867 needed one node-kind over. So the observable result is
-	// float8/OID 701 where PostgreSQL sends numeric/OID 1700, with the outer
-	// `+ 1` lost at int8 magnitude:
-	//
-	//	… c_i64 UNION ALL SELECT NULL     PG 36280278840510000001 (numeric)
-	//	                                  here 3.628027884050994e+19 (float8)
-	//	… c_i32 UNION ALL c_i64           PG exact numeric; here float8
-	//	… DECIMAL(18,4) ∪ DECIMAL(20,6)   PG 49500246.529600; here float8,
-	//	                                  and a hard DAG failure (#361 guard)
-	//
-	// `UNION ALL SELECT NULL` is the commonest set-op spelling there is, so
-	// this boundary is not an edge case; it is pre-existing (identical at
-	// dea4e795, where the SAME-typed shapes were float8 too) and filed with
-	// the arc's report. Closing it means reconciling arms of differing type
-	// the way select_common_type does — an unknown/NULL arm contributing
-	// nothing rather than poisoning the column — which is a rule this walk
-	// does not have and must not guess.
-	//
-	// These cells FAIL when the value or the declaration moves: deleting them
-	// is the proof.
-	//
-	// The VALUE is pinned by MAGNITUDE, not to the last digit: a float sum's
-	// last ulp moves with the order the arms are aggregated in, which is
-	// ADR-0013's legal nondeterminism and not the defect. What IS the defect
-	// is that the box is a float64 at all — an exact answer arrives as its
-	// decimal TEXT — so `isFloat` is the fail-on-agree condition and the
-	// declaration is asserted beside it.
-	for _, c := range []struct {
-		name, sql, pgAnswer string
-		near                float64
-	}{
-		{"residual_setop_null_arm",
-			`SELECT SUM(v * 3000000) + 1 AS v FROM (SELECT c_i64 AS v FROM ` + tbl +
-				` UNION ALL SELECT NULL) x`, "36280278840510000001", 3.628027884051e+19},
-		{"residual_setop_int32_and_int64_arms",
-			`SELECT SUM(v * 3000000) + 1 AS v FROM (SELECT c_i32 AS v FROM ` + tbl +
-				` UNION ALL SELECT c_i64 FROM ` + tbl + `) x`, "an exact numeric", 3.6280387436400e+19},
-		{"residual_setop_decimal_and_null_arms",
-			`SELECT SUM(v * 2) + 1 AS v FROM (SELECT c_dec AS v FROM ` + tbl +
-				` UNION ALL SELECT NULL) x`, "24750123.7648", 2.47501237648e+07},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			res, err := db.Query(ctx, c.sql)
-			if err != nil {
-				t.Fatalf("%v\n  SQL: %s", err, c.sql)
-			}
-			got, isFloat := res.Rows[0]["v"].(float64)
-			if !isFloat {
-				t.Errorf("= %#v, no longer a float64; PostgreSQL answers %s and this pin "+
-					"records the float8 approximation. The set-operation walk reconciles "+
-					"arms of DIFFERING type now: re-measure this family, delete these "+
-					"three cells and close the issue\n  SQL: %s",
-					res.Rows[0]["v"], c.pgAnswer, c.sql)
-				return
-			}
-			if d := math.Abs(got-c.near) / c.near; d > 1e-9 {
-				t.Errorf("= %v, %g away from the magnitude this pin records (%v) — that is "+
-					"more than a float sum's ordering can move it, so the ANSWER changed"+
-					"\n  SQL: %s", got, d, c.near, c.sql)
-			}
-			if d := res.ColumnMetas[0].TypeID; d != parquet.TypeFloat64 {
-				t.Errorf("declares %v; this pin records FLOAT64, which is wire OID 701 "+
-					"where PostgreSQL sends 1700 (numeric)\n  SQL: %s", d, c.sql)
-			}
-		})
+	// The BOUNDARY of that arm. `emittedColTypes` answers from
+	// setOpDeclaredOutputSchema now, and that function declines — returns
+	// ok=false — for a set operation whose arms it cannot type at all, so
+	// the map is empty and nodeDeclaredType takes its float fall-through
+	// exactly as before. What must NOT happen is a type named for a pair
+	// the ladder does not reconcile: `c_i64 UNION ALL SELECT c_str` has no
+	// common type on PostgreSQL (42804) and is refused at plan time here
+	// (ADR-0012 item 12), and this cell says the reconciliation did not
+	// quietly start answering it instead.
+	if _, err := db.Query(ctx, `SELECT SUM(v) + 1 AS v FROM (SELECT c_i64 AS v FROM `+tbl+
+		` UNION ALL SELECT c_str FROM `+tbl+`) x`); err == nil {
+		t.Errorf("a set operation over bigint and text answered; PostgreSQL raises 42804 " +
+			"and this engine refuses it at plan time")
 	}
 
 	// The float row's DECLARATION, which is the half that is a claim: a float

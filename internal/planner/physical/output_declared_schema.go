@@ -1120,26 +1120,37 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		// fell to `nodeDeclaredType`'s float rule, and went out as OID 701
 		// where PostgreSQL sends 1700 (round-3 review P-B).
 		//
-		// A column the arms declare DIFFERENTLY is left untyped rather than
-		// reconciled here: unifying them is select_common_type's job, the
-		// wire path does it separately, and naming a type this walk did not
-		// verify is the direction that corrupts.
+		// A column the arms declare DIFFERENTLY used to be left untyped here,
+		// and "left out" is not neutral: nodeDeclaredType over a map without
+		// the name does not report Undecided — its arithmetic arm falls
+		// through to Decl(FLOAT64), Decided. So `SUM(v * 3000000) + 1` over
+		// `c_i64 UNION ALL SELECT NULL` — the commonest set-op spelling there
+		// is — went out as float8/OID 701 where PostgreSQL sends an exact
+		// numeric, with the outer `+ 1` lost at int8 magnitude (#884).
+		//
+		// select_common_type is not guessed here either: it is
+		// setOpDeclaredOutputSchema, the SAME function that computes the
+		// plan-declared output schema for a query whose output IS this set
+		// operation. It skips an arm whose column is an UNKNOWN-typed literal
+		// (PostgreSQL resolves `c_i64 ∪ NULL` to bigint, not to text), folds
+		// the rest through setOpWiden's ladder, and resolves DECIMAL (p,s)
+		// through batch.DecimalCommon. Two walks over one question now answer
+		// from one place.
+		//
+		// The NAMES stay arms[0]'s, which is what a set operation's result
+		// columns are called and what this map is keyed by; the reconciliation
+		// contributes the TYPES only.
 		arms := setOpArmSchemas(n)
 		if len(arms) == 0 {
 			return nil
 		}
-		out := make(map[string]parquet.TypeID, len(arms[0]))
-		for i, col := range arms[0] {
-			agree := true
-			for _, other := range arms {
-				if i >= len(other) || other[i].Type != col.Type {
-					agree = false
-					break
-				}
-			}
-			if agree {
-				out[strings.ToLower(col.Name)] = col.Type
-			}
+		cols, ok := setOpDeclaredOutputSchema(n)
+		if !ok || len(cols) != len(arms[0]) {
+			return nil
+		}
+		out := make(map[string]parquet.TypeID, len(cols))
+		for i, col := range cols {
+			out[strings.ToLower(arms[0][i].Name)] = col.Type
 		}
 		return out
 	case logical.NodeWindow:
@@ -1420,27 +1431,33 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 		// had a TYPE and no scale, so binOpDecimalType declined and the term
 		// fell to float8 with the exact value rendered through a float64
 		// (round-3 review P-B).
+		//
+		// It compared the arms' widths for AGREEMENT and left a disagreeing
+		// column out, which is #884's other half: `DECIMAL(18,4) ∪
+		// DECIMAL(20,6)` had no scale and fell to float8 for the same reason.
+		// The (p,s) comes from setOpDeclaredOutputSchema now — batch.
+		// DecimalCommon over the arms that carry a type, the same widening the
+		// executed schema and the DAG's arm reconciliation already use — so
+		// the CARRIER's scale is one answer computed once. Precision 0 is
+		// still "unconstrained" and still contributes nothing, which is what
+		// the wire declares for it (ADR-0012 item 12's recorded typmod
+		// divergence: PostgreSQL's result is numeric with typmod -1 where a
+		// wadjet DECIMAL vector has exactly one scale).
 		arms := setOpArmSchemas(n)
 		if len(arms) == 0 {
 			return nil
 		}
-		out := make(map[string]logical.DecimalMeta, len(arms[0]))
-		for i, col := range arms[0] {
-			if col.Type != parquet.TypeDecimal {
+		cols, ok := setOpDeclaredOutputSchema(n)
+		if !ok || len(cols) != len(arms[0]) {
+			return nil
+		}
+		out := make(map[string]logical.DecimalMeta, len(cols))
+		for i, col := range cols {
+			if col.Type != parquet.TypeDecimal || col.Precision <= 0 {
 				continue
 			}
-			agree := true
-			for _, other := range arms {
-				if i >= len(other) || other[i].Type != parquet.TypeDecimal ||
-					other[i].Precision != col.Precision || other[i].Scale != col.Scale {
-					agree = false
-					break
-				}
-			}
-			if agree {
-				out[strings.ToLower(col.Name)] = logical.DecimalMeta{
-					Precision: col.Precision, Scale: col.Scale,
-				}
+			out[strings.ToLower(arms[0][i].Name)] = logical.DecimalMeta{
+				Precision: col.Precision, Scale: col.Scale,
 			}
 		}
 		return out
