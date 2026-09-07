@@ -665,6 +665,11 @@ type WindowColSpec struct {
 	LagLeadDefault any
 	NtileBuckets   int
 	NthValueN      int
+	// InputRefs is AggSpec.InputRefs for a WINDOW argument: the planner-only
+	// record of the candidate spellings for a reference naming a derived
+	// table's alias, settled at the end of planning by
+	// bindConsumersToPublishedIdentity. Never on the wire.
+	InputRefs []AggInputRef
 }
 
 // FusedJoinSpec describes a broadcast join absorbed into a parent join stage.
@@ -8200,8 +8205,14 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				inputCol = cleanExpr(src)
 			}
 			winCols = append(winCols, WindowColSpec{
-				Func:           we.Func,
-				InputCol:       inputCol,
+				Func:     we.Func,
+				InputCol: inputCol,
+				// …and the candidates for the case the scoping above cannot
+				// settle: an argument naming a derived arm's COMPUTED alias
+				// has no source column to rewrite to, so it travels as the
+				// alias and the window's input may publish it under another
+				// name or not at all (#770).
+				InputRefs:      aliasCandidatesForText(inputCol, winChild),
 				OutputCol:      ec.OutputCol,
 				OutputType:     ec.OutputType,
 				PartitionBy:    partitionBy,

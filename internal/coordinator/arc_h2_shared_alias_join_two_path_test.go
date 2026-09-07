@@ -118,22 +118,5 @@ func TestH2TwoJoinArmsPublishingOneAliasIsDeferred(t *testing.T) {
 			},
 			why: armWhy,
 		},
-		{
-			// B3: a WINDOW over the contested alias — the value AND the
-			// declaration are gone on the shuffled arm. A right value under a
-			// wrong OID is what ADR-0012 says a value oracle cannot see; here
-			// the value is gone too.
-			name: "770 PINNED: a WINDOW over the contested alias loses its value and its type",
-			sql:  "SELECT x.w AS xw, SUM(y.w) OVER () AS s " + arm3 + " ORDER BY xw",
-			want: "cols=[xw:DECIMAL(9,2) s:DECIMAL(38,4)] rows=5 | 2.00,4825.0000 | " +
-				"12.75,4825.0000 | 12.75,4825.0000 | 12.75,4825.0000 | 12.75,4825.0000",
-			pin: map[string]string{
-				"dagshuf": "cols=[xw:DECIMAL(9,2) s:FLOAT64] rows=5 | 2.00,NULL | 12.75,NULL | " +
-					"12.75,NULL | 12.75,NULL | 12.75,NULL",
-			},
-			why: "the window's argument is the fourth consumer of the same payload gap, and it " +
-				"takes the DECLARATION with it: FLOAT64 where PostgreSQL and every other arm " +
-				"say numeric",
-		},
 	})
 }

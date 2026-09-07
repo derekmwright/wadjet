@@ -198,6 +198,91 @@ func TestJ2AJoinConsumerBindsThePublishedIdentity(t *testing.T) {
 			want: "cols=[s:DECIMAL(38,2)] rows=1 | 423.92",
 		},
 		{
+			// The WINDOW argument, the fourth consumer, and it takes the
+			// DECLARATION with it: FLOAT64 with every value NULL on the
+			// shuffled arm, where PostgreSQL and every other arm say numeric.
+			// A right value under a wrong OID is what ADR-0012 says a value
+			// oracle cannot see; here the value was gone too.
+			name: "770 a WINDOW over the contested alias keeps its value and its type",
+			sql:  "SELECT x.w AS xw, SUM(y.w) OVER () AS s " + arm3 + " ORDER BY xw",
+			want: "cols=[xw:DECIMAL(9,2) s:DECIMAL(38,4)] rows=5 | 2.00,4825.0000 | " +
+				"12.75,4825.0000 | 12.75,4825.0000 | 12.75,4825.0000 | 12.75,4825.0000",
+		},
+		{
+			name: "770 a WINDOW over the contested alias, one relation deeper",
+			sql: "SELECT x.w AS xw, SUM(y.w) OVER () AS s FROM (SELECT id, a AS w FROM decpair) x " +
+				"JOIN (SELECT id, b*100 AS w FROM decpair) y ON x.id = y.id " +
+				"JOIN decpair u ON x.id = u.id JOIN decpair v ON x.id = v.id " +
+				"WHERE x.w > 1 ORDER BY xw",
+			want: "cols=[xw:DECIMAL(9,2) s:DECIMAL(38,4)] rows=5 | 2.00,4825.0000 | " +
+				"12.75,4825.0000 | 12.75,4825.0000 | 12.75,4825.0000 | 12.75,4825.0000",
+		},
+		{
+			// MAX rather than SUM, so the declaration follows the INPUT's
+			// (p,s) instead of the aggregate's widening rule.
+			name: "770 a MAX window over the contested alias",
+			sql:  "SELECT x.w AS xw, MAX(y.w) OVER () AS s " + arm3 + " ORDER BY xw",
+			want: "cols=[xw:DECIMAL(9,2) s:DECIMAL(22,4)] rows=5 | 2.00,1275.0100 | " +
+				"12.75,1275.0100 | 12.75,1275.0100 | 12.75,1275.0100 | 12.75,1275.0100",
+		},
+		{
+			// PINNED, a SIXTH consumer this arc does not reach: the window's
+			// own PARTITION BY key. `resolveWindowKeys` settles it at
+			// emission, because the key is also the stage's DISTRIBUTION and
+			// rewriting it after EnsureDistribution would leave the two
+			// disagreeing — and it settles it ARM-BLIND, so `PARTITION BY x.w`
+			// over two arms that both publish `w` binds the OTHER arm's
+			// column. That column is distinct on every row, so the window
+			// partitions each row on its own and answers its own value where
+			// PostgreSQL answers the partition's total.
+			//
+			// Wrong on ALL FOUR arms at a3f9b664 and here, so it is a
+			// wadjet-vs-PostgreSQL divergence rather than a two-path one, and
+			// nothing in this arc moved a value. The shuffled arm's
+			// DISPOSITION did move: at a3f9b664 it failed at
+			// `exchange-repartition-window-9-9` because the payload was
+			// incomplete, and now that the carry completes it, it computes the
+			// same wrong partition as the other three. Fail-on-agree.
+			name: "770 PINNED: a PARTITIONED window over the contested alias binds the other arm",
+			sql: "SELECT x.w AS xw, SUM(y.w) OVER (PARTITION BY x.w) AS s " + arm3 +
+				" ORDER BY xw, s",
+			want: "cols=[xw:DECIMAL(9,2) s:DECIMAL(38,4)] rows=5 | 2.00,1000.0000 | " +
+				"12.75,3825.0000 | 12.75,3825.0000 | 12.75,3825.0000 | 12.75,3825.0000",
+			pin: map[string]string{
+				"single": "cols=[xw:DECIMAL(9,2) s:DECIMAL(38,4)] rows=5 | 2.00,1000.0000 | " +
+					"12.75,1274.9900 | 12.75,1275.0000 | 12.75,1275.0100 | 12.75,NULL",
+				spilledArm: "cols=[xw:DECIMAL(9,2) s:DECIMAL(38,4)] rows=5 | 2.00,1000.0000 | " +
+					"12.75,1274.9900 | 12.75,1275.0000 | 12.75,1275.0100 | 12.75,NULL",
+				"dag": "cols=[xw:DECIMAL(9,2) s:DECIMAL(38,4)] rows=5 | 2.00,1000.0000 | " +
+					"12.75,1274.9900 | 12.75,1275.0000 | 12.75,1275.0100 | 12.75,NULL",
+				"dagshuf": "cols=[xw:DECIMAL(9,2) s:DECIMAL(38,4)] rows=5 | 2.00,1000.0000 | " +
+					"12.75,1274.9900 | 12.75,1275.0000 | 12.75,1275.0100 | 12.75,NULL",
+			},
+			why: "a window's PARTITION BY key is the sixth consumer of the published identity " +
+				"and the one this arc does not reach: it is settled at emission because it is " +
+				"also the stage's distribution, and it is settled arm-blind",
+		},
+		{
+			// The same query with the two aliases DISTINCT: the partition is
+			// right on the local path, and the DAG refuses it outright — a
+			// second pre-existing defect in the same key, and the control that
+			// says the cell above is about the COLLISION.
+			name: "770 PINNED: the same PARTITIONED window with distinct aliases",
+			sql: "SELECT x.w AS xw, SUM(y.z) OVER (PARTITION BY x.w) AS s " +
+				"FROM (SELECT id, a AS w FROM decpair) x " +
+				"JOIN (SELECT id, b*100 AS z FROM decpair) y ON x.id = y.id " +
+				"JOIN decpair u ON x.id = u.id WHERE x.w > 1 ORDER BY xw, s",
+			want: "cols=[xw:DECIMAL(9,2) s:DECIMAL(38,4)] rows=5 | 2.00,1000.0000 | " +
+				"12.75,3825.0000 | 12.75,3825.0000 | 12.75,3825.0000 | 12.75,3825.0000",
+			pin: map[string]string{
+				"dag":     "ERR native DAG: stage window-5 (window)",
+				"dagshuf": "ERR native DAG: stage exchange-repartition-window-9-9",
+			},
+			why: "`window: PARTITION BY \"w\" is not a column of its input` — the key was " +
+				"re-spelled to the source `a` at emission and the window's input publishes " +
+				"the alias; identical at a3f9b664",
+		},
+		{
 			name: "770 control: an expression over TWO window arms",
 			sql: "SELECT SUM(p.w + q.w) AS s FROM (SELECT id, SUM(a) OVER () AS w FROM decpair) p " +
 				"JOIN (SELECT id, MAX(a) OVER () AS w FROM decpair) q ON p.id = q.id",

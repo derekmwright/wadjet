@@ -47,8 +47,9 @@ import (
 // before the payload is settled and asks what the arms can SUPPLY; this one
 // runs after and asks what they will SHIP. Both are needed: the first picks
 // the value, the second picks its name.
-// The pass runs in two phases, and the order is the whole of the argument
-// that it costs nothing: phase 1 CARRIES only what no spelling on the stream
+//
+// The pass runs in two phases, and the order is the whole of the argument that
+// it costs nothing: phase 1 CARRIES only what no spelling on the stream
 // reaches, phase 2 then RESPELLS every consumer against the stream those
 // carries produced. Doing them in one loop would respell against a stream a
 // later stage's carry is about to change.
@@ -79,7 +80,8 @@ func carryUnreachableConsumerValues(stages []Stage, idx map[string]int, i int) {
 	keys := stageGroupKeyList(s)
 	groups := stageComputesGroupKeys(s) && len(s.GroupByResolve) == len(keys)
 	specs := stageComputedAggSpecs(s)
-	if !groups && len(specs) == 0 {
+	wins := stageComputedWindowCols(s)
+	if !groups && len(specs) == 0 && len(wins) == 0 {
 		return
 	}
 	in, arms := aggregateInputStreamColumnsShipped(stages, idx, s)
@@ -132,6 +134,14 @@ func carryUnreachableConsumerValues(stages []Stage, idx map[string]int, i int) {
 			carry(stripQualifier(ref.Written), ref.Source)
 		}
 	}
+	for _, wc := range wins {
+		for _, ref := range wc.InputRefs {
+			if _, _, ok := producerSpellingForRef(ref, arms, in); ok {
+				continue
+			}
+			carry(stripQualifier(ref.Written), ref.Source)
+		}
+	}
 }
 
 // respellConsumersOverProducerOutput rewrites every consumer reference on
@@ -141,7 +151,8 @@ func respellConsumersOverProducerOutput(stages []Stage, idx map[string]int, i in
 	keys := stageGroupKeyList(s)
 	groups := stageComputesGroupKeys(s) && len(s.GroupByResolve) == len(keys)
 	specs := stageComputedAggSpecs(s)
-	if !groups && len(specs) == 0 {
+	wins := stageComputedWindowCols(s)
+	if !groups && len(specs) == 0 && len(wins) == 0 {
 		return
 	}
 	in, arms := aggregateInputStreamColumnsShipped(stages, idx, s)
@@ -165,6 +176,37 @@ func respellConsumersOverProducerOutput(stages []Stage, idx map[string]int, i in
 	for _, spec := range specs {
 		respellAggSpecOverProducerOutput(spec, arms, in)
 	}
+	for _, wc := range wins {
+		// A window's argument is a NAME by construction — an expression
+		// argument is materialized into `__winkey_N` by an earlier pass — so
+		// there is one reference and no splice to parenthesize.
+		for _, ref := range wc.InputRefs {
+			if !strings.EqualFold(ref.Written, wc.InputCol) {
+				continue
+			}
+			if _, ok := bindStreamColumnFromArm(ref.Written, arms, in); ok {
+				continue
+			}
+			if name, isExpr, ok := producerSpellingForRef(ref, arms, in); ok && !isExpr {
+				wc.InputCol = name
+			}
+		}
+	}
+}
+
+// stageComputedWindowCols is every window column whose ARGUMENT this stage's
+// fragment resolves against its raw input.
+func stageComputedWindowCols(s *Stage) []*WindowColSpec {
+	if s.Type != StageWindow {
+		return nil
+	}
+	var out []*WindowColSpec
+	for k := range s.WindowCols {
+		if len(s.WindowCols[k].InputRefs) > 0 {
+			out = append(out, &s.WindowCols[k])
+		}
+	}
+	return out
 }
 
 // stageComputedAggSpecs is every aggregate spec whose ARGUMENT this stage's
@@ -351,6 +393,12 @@ func aggInputAliasCandidates(spec AggSpec, child *logical.Node) []AggInputRef {
 	if text == "" {
 		text = spec.InputCol
 	}
+	return aliasCandidatesForText(text, child)
+}
+
+// aliasCandidatesForText is aggInputAliasCandidates over one expression text —
+// an aggregate's argument, or a window's.
+func aliasCandidatesForText(text string, child *logical.Node) []AggInputRef {
 	if text == "" || text == "*" || child == nil {
 		return nil
 	}
@@ -400,7 +448,8 @@ func aggregateInputStreamColumnsShipped(stages []Stage, idx map[string]int,
 		bare := *s
 		bare.ChainedAggGroupBy, bare.ChainedAggSpecs = nil, nil
 		return joinStreamColumnsArms(stages, idx, &bare, passThroughDepth, true)
-	case s.Type == StageAggregate, s.Type == StageFinalAggregate, s.Type == StageMergeAggregate:
+	case s.Type == StageAggregate, s.Type == StageFinalAggregate, s.Type == StageMergeAggregate,
+		s.Type == StageWindow:
 	default:
 		return nil, nil
 	}
