@@ -117,41 +117,7 @@ func ensureJoinCarriesEvaluatedColumns(stages []Stage) {
 		// join's OutputFilter. Only the field paths are added — an ordinary
 		// argument names a column the payload already carries because the
 		// aggregate reads it.
-		//
-		// That last sentence is not true of an argument naming a derived
-		// table's alias over two arms that publish it: `SUM(y.w)` over #770's
-		// join fails the shuffled arm outright (`aggregate input "y.w" is not
-		// a column of its input`). Carrying the whole reference fixes it and
-		// costs bytes on the wire everywhere else — it put `n_name` /
-		// `n1.n_name` / `n2.n_name` onto eight TPC-H exchanges and joins in
-		// Q05/Q07/Q08/Q09/Q10 and `c_name`/`l_quantity` onto two Q18 joins,
-		// every one of them a SECOND carry of a value the chained link's own
-		// list already supplies. DEFERRED with that mechanism; the shape is
-		// pinned in TestH2TwoJoinArmsPublishingOneAliasKeepBothColumns.
 		ownRefs = append(ownRefs, rowContainerRefsOnly(aggregateInputRefs(stages, s), computed)...)
-		// …and what a UNION ARM over this join projects. Same rule as the
-		// group key's, and the same reason: a set operation's arm carries the
-		// query's SELECT list, the arm's fragment evaluates it against the
-		// producer's OUTPUT, and this stage's OutputFilter is what narrows
-		// that output. A reference forwarding a derived table's COMPUTED
-		// column is rewritten into the EXPRESSION that builds it
-		// (setOpArmComputedSource, #554), so the arm reads the definition's
-		// source columns — names the join node's NeededColumns never mentions,
-		// because the query only ever wrote the alias:
-		//
-		//	SELECT x.w AS xw, y.w AS yw FROM (SELECT id, a AS w FROM t) x
-		//	  JOIN (SELECT id, b*100 AS w FROM t) y ON x.id = y.id
-		//	  JOIN t u ON x.id = u.id WHERE x.w > 1
-		//	UNION <the same block>
-		//	-- PG 5 rows · single 5 · both DAG arms 2 rows with `yw` NULL
-		//
-		// `yw` reaches the union arm as `b * 100`, the join shipped no `b`,
-		// and expr.ColRef.Eval answers nil for every row — so the column was
-		// NULL and the dedup then collapsed five rows into two. Silently, on
-		// both arms. respellSpecsOverProducerOutput sees it and can only
-		// DECLINE (there is no other spelling to move to); carrying the column
-		// is what makes the spelling it already has correct.
-		ownRefs = append(ownRefs, unionArmProjectionRefs(stages, s)...)
 		chainRefs := probeSideChainRefs(stages, idx, s)
 		// A ROW FIELD PATH names no column, so carrying `c_row.b` carries
 		// nothing: what the fragment reads is the CONTAINER, and the
@@ -219,10 +185,6 @@ func ensureJoinCarriesEvaluatedColumns(stages []Stage) {
 			}
 		}
 		refs := append(append([]string(nil), ownRefs...), chainRefs...)
-		// …and the group-key resolution spellings this stage's own list
-		// already names, which need no widening HERE and do need the stages
-		// below to stop dropping them (#770).
-		refs = append(refs, groupKeyResolutionNamesBelow(stages, idx, s)...)
 		if len(refs) == 0 {
 			continue
 		}
@@ -246,115 +208,14 @@ func ensureJoinCarriesEvaluatedColumns(stages []Stage) {
 	}
 }
 
-// unionArmProjectionRefs lists the columns every UNION ARM reading this stage
-// projects. An arm's fragment evaluates the arm's SELECT list against this
-// stage's OUTPUT, which this stage's own Columns list narrows, so those
-// references belong in it exactly as its own ProjectExprs do.
-func unionArmProjectionRefs(stages []Stage, s *Stage) []string {
-	var texts []string
-	for i := range stages {
-		c := &stages[i]
-		if c.Type != StageUnion {
-			continue
-		}
-		for a := range c.UnionArms {
-			if c.UnionArmDep(a) != s.ID {
-				continue
-			}
-			texts = append(texts, projectExprTexts(c.UnionArms[a].Projections)...)
-		}
-	}
-	if len(texts) == 0 {
-		return nil
-	}
-	return exprColumnRefs(texts)
-}
-
-// groupKeyResolutionNamesBelow lists the group-key RESOLUTION spellings that
-// this stage's OutputFilter ALREADY names, so the stages BELOW it can be kept
-// from dropping them. It answers #770.
-//
-// A group key has a PUBLISHED name and a RESOLUTION spelling, and they are two
-// different names whenever the key names a derived table's alias (ADR-0026
-// §2). The payload lists are built from the join node's `NeededColumns`, which
-// spells the PUBLISHED one, so the resolution spelling reaches a join's list
-// only where some other pass put it there — and a join further DOWN, built
-// from its own NeededColumns, drops it:
-//
-//	SELECT DISTINCT x.w AS xw, y.w AS yw
-//	  FROM (SELECT id, a AS w FROM t) x
-//	  JOIN (SELECT id, b*100 AS w FROM t) y ON x.id = y.id
-//	  JOIN t u ON x.id = u.id
-//	 WHERE x.w > 1
-//	-- PG 5 rows · single 5 · DAG broadcast 5 · DAG SHUFFLED: task failure,
-//	--   `GROUP BY key "w" is not a column of its input (input has: id,
-//	--    x.id, x.a, u.id)`
-//
-// `y.w` resolves as `w`, which the y arm's fragment materializes; the join the
-// aggregate sits on lists `w`, and the join UNDERNEATH it — where the two arms
-// actually meet — does not. The broadcast arm fuses all three relations into
-// ONE join and never crosses that boundary, which is why only the shuffled arm
-// failed.
-//
-// The filter is what keeps this from being a payload widening. A stage that
-// ALREADY names the column is stating that it expects the value here, so every
-// stage between it and the producer has to keep it: nothing is added to this
-// stage's own list, only to the narrowing stages below. A stage that does NOT
-// name it is a different case — the key reaches its fragment another way, a
-// chained link's own `Columns` being the usual one — and adding it would be a
-// second carry of a value already carried: unfiltered, this put `n_name` /
-// `n1.n_name` / `n2.n_name` onto eight TPC-H joins and exchanges across
-// Q05/Q07/Q09/Q10, two STRING columns crossing the network twice more on
-// queries that were never wrong.
-func groupKeyResolutionNamesBelow(stages []Stage, idx map[string]int, s *Stage) []string {
-	if len(s.Columns) == 0 {
-		return nil // empty already means "carry everything"
-	}
-	have := make(map[string]bool, len(s.Columns))
-	for _, c := range s.Columns {
-		have[strings.ToLower(c)] = true
-	}
-	var out []string
-	add := func(c *Stage) {
-		if len(c.GroupByResolve) == 0 || !stageComputesGroupKeys(c) {
-			return
-		}
-		published := stageGroupKeyList(c)
-		for i, r := range c.GroupByResolve {
-			if r.Computed || r.Expr == "" || !have[strings.ToLower(r.Expr)] {
-				continue
-			}
-			// The two spellings are one field's worth of information while
-			// they are the SAME string, which is every ordinary `GROUP BY c`
-			// (ADR-0026 §2). Then the payload lists already name the key,
-			// because NeededColumns spells it — Q10's `n_name` and Q18's
-			// `c_name` are exactly that, and pushing them down is a second
-			// carry of a value the chained link's own list already supplies.
-			if i < len(published) && strings.EqualFold(published[i], r.Expr) {
-				continue
-			}
-			out = append(out, r.Expr)
-		}
-	}
-	add(s)
-	for i := range stages {
-		c := &stages[i]
-		if len(c.Dependencies) == 1 && c.Dependencies[0] == s.ID {
-			add(c)
-		}
-	}
-	return out
-}
-
 // groupKeyResolutionRefs lists the columns the GROUP BY keys computed over
 // this join's output are RESOLVED by — the chain-terminal aggregate on the
 // stage itself, and any aggregate stage that reads it.
 //
-// Only a COMPUTED resolution contributes here: a resolution that is a NAME is
-// a column of the stream in its own right (§2c — a name is not re-read as
-// structure, here as well as in the fragment). Where the payload does NOT
-// already name it, groupKeyResolutionNamesBelow is what carries it, and only
-// downwards.
+// Only a COMPUTED resolution contributes references: a resolution that is a
+// NAME is a column of the stream in its own right and is already in the
+// payload for the reason the key is (§2c — a name is not re-read as structure,
+// here as well as in the fragment).
 func groupKeyResolutionRefs(stages []Stage, idx map[string]int, s *Stage) []string {
 	var texts []string
 	add := func(c *Stage) {

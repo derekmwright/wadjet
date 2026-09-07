@@ -1,6 +1,6 @@
 # ADR-0025: A stage never carries a predicate or a projection its fragment will not run
 
-Status: Accepted (2026-08-29, #656; amended 2026-09-03 by arc S1 — a scan's read set is a plan-time fact, and a column the gather computes is typed by the plan; amended 2026-09-06 by arc H2 — a stage carries the SECOND spelling its consumer resolves by, and the aggregate ARGUMENT half of that is an open residual)
+Status: Accepted (2026-08-29, #656; amended 2026-09-03 by arc S1 — a scan's read set is a plan-time fact, and a column the gather computes is typed by the plan; amended 2026-09-06 by arc H2 — a consumer that resolves a column by a SECOND spelling is NOT SETTLED, and #770 is deferred with its census)
 
 ## Context
 
@@ -317,27 +317,29 @@ still wrong. It refuses with the sentinel, so the coordinator answers the query
 locally instead of panicking — verified by disabling the type repair and
 watching the same SQL answer correctly through the refusal.
 
-## A stage carries the SECOND spelling its consumer resolves by (2026-09-06, #770)
+## NOT SETTLED: a consumer that resolves a column by a SECOND spelling (2026-09-06, #770)
 
 The sections above are about a stage carrying a predicate or a projection its
-fragment will not RUN. This is the mirror: a stage whose fragment WILL run
-something, over a column its payload does not carry.
+fragment will not RUN. This is the mirror, and it is an OPEN position rather
+than a decided one: a stage whose fragment WILL run something, over a column
+its payload does not carry.
 
 A join stage's `Columns` is an OutputFilter and its exchanges' are payload
-manifests, and both are built from the join node's `NeededColumns` at stage
-emission. `NeededColumns` spells the name the QUERY wrote. Three consumers
-spell something else:
+manifests, both built from the join node's `NeededColumns` at stage emission.
+`NeededColumns` spells the name the QUERY wrote. Four consumers spell something
+else, and where the two differ the column is dropped and the consumer reads
+NULL — or fails:
 
 - a GROUP BY key has a PUBLISHED name and a RESOLUTION spelling (ADR-0026 §2),
   and where the two differ the resolution spelling is a name no payload list
   mentions;
 - a UNION ARM forwarding a derived table's COMPUTED column is rewritten into
-  the EXPRESSION that builds it (#554), so the arm reads the definition's
-  source columns;
-- an aggregate ARGUMENT naming a derived table's alias is re-spelled to the
-  source the stream carries.
+  the EXPRESSION that builds it (#554), so it reads the definition's sources;
+- an aggregate ARGUMENT naming the alias is re-spelled to the source;
+- a WINDOW argument naming it is re-spelled the same way, and there the
+  DECLARATION goes with the value — FLOAT64 where every other arm says numeric.
 
-All three are one query at #770:
+All four are one query at #770:
 
 	SELECT DISTINCT x.w AS xw, y.w AS yw
 	  FROM (SELECT id, a AS w FROM t) x
@@ -345,31 +347,54 @@ All three are one query at #770:
 	  JOIN t u ON x.id = u.id
 	 WHERE x.w > 1
 
-PostgreSQL answers five rows. The DISTINCT spelling failed the SHUFFLED arm
+PostgreSQL answers five rows. The DISTINCT spelling fails the SHUFFLED arm
 outright (`GROUP BY key "w" is not a column of its input`) and the UNION
-spelling answered 2 rows with `yw` NULL on BOTH DAG arms, the dedup collapsing
-five distinct pairs into two. The broadcast arm fuses all three relations into
-ONE join, never crosses the boundary, and was right — which is why the arms
-disagreed rather than both being wrong.
+spelling answers 2 rows with `yw` NULL on BOTH DAG arms, silently, the dedup
+collapsing five distinct pairs into two. The broadcast arm fuses all three
+relations into ONE join, never crosses the boundary, and is right — which is
+why the arms disagree rather than both being wrong.
 
-`groupKeyResolutionNamesBelow` and `unionArmProjectionRefs`
-(`join_carried_columns.go`) close the first two, and the FILTER on the first is
-the part worth recording: a resolution NAME is pushed into the narrowing stages
-BELOW this one, never added to this one's own list, and only when this stage
-ALREADY names it and the two spellings DIFFER. Both conditions are what keep
-it from being a payload widening — bytes on the wire are a co-equal metric, and
-the unfiltered version put `n_name` / `n1.n_name` / `n2.n_name` onto eight
-TPC-H joins and exchanges across Q05/Q07/Q09/Q10 and `c_name` onto a Q18 join,
-every one a second carry of a value the chained link's own `Columns` already
-supplies.
+### Why the obvious repair is not the decision
 
-**The aggregate ARGUMENT is the open residual.** `SUM(y.w)` over the same join
-still fails the shuffled arm, and the only repair found for it carries the
-whole argument reference through the joins below — which is the widening just
-measured. A group key has a second spelling to test; an argument does not, so
-the narrow question that separates "needed here" from "already carried" has no
-answer yet. Pinned fail-on-agree in
-`coordinator.TestH2TwoJoinArmsPublishingOneAliasKeepBothColumns`.
+Two have been built and withdrawn.
+
+**Materializing the contested rename** was withdrawn earlier: a resolver that
+returns the qualified name and a stream that ships the probe's copy bare stop
+agreeing, and it moves three shapes in
+`TestAWindowBetweenTheSelectListAndItsJoinThreeArms` from right to wrong.
+
+**Carrying the second spelling down, bounded by "the consuming stage already
+names it"**, was built in arc H2 and withdrawn in the same branch. It closed the
+filed query at exactly THREE relations and reopened at four: the bound is a
+MODEL of where the value can be needed, not a fact about it, and rule 11 does
+not ship a fix bounded by a model the same commit knows to be incomplete. Add
+one more relation on the same key and the stage the key is computed on no longer
+names the spelling itself, so the push-down never starts.
+
+**Carrying it unconditionally** does close every shape and is a payload
+widening: measured, it put `n_name` / `n1.n_name` / `n2.n_name` onto eight TPC-H
+joins and exchanges across Q05/Q07/Q08/Q09/Q10 and `c_name` / `l_quantity` onto
+two Q18 joins, each a second carry of a value the chained link's own `Columns`
+already supplies.
+
+### What the decision has to be
+
+Either the consumer resolves through the link's PUBLISHED IDENTITY — ADR-0026's
+two names applied to join and exchange consumers, so a consumer asks the
+producer what it calls the value instead of guessing a spelling and hoping the
+payload carries it — or a general carry whose payload cost is MEASURED rather
+than assumed prohibitive. Bytes on the wire is a metric, not a veto: the eight
+lines above are a number to weigh, and no one has weighed them against the
+queries the carry makes answerable.
+
+That is an arc with its own brief. Until it lands, the whole shape family is
+censused fail-on-agree in
+`coordinator.TestH2TwoJoinArmsPublishingOneAliasIsDeferred` — eleven pinned
+cells (the DISTINCT / GROUP BY / UNION / UNION ALL / swapped-arms spellings, the
+four- and three-arm boundary shapes, the bare and EXPRESSION aggregate
+arguments, the window arm, and the window over the alias with its declaration)
+and four controls that answer. Closing #770 means deleting cells from that
+table.
 
 ## A carrier is never handed what it cannot evaluate
 
