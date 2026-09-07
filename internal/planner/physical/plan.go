@@ -8098,12 +8098,15 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// single-process planner does, so the two paths publish one column
 		// set (ADR-0026 3c).
 		stage.HiddenJoinCols = stageHiddenPositions(node)
-		if marker, cols, drop := lateralEmptySpec(node); marker != "" {
+		if marker, _, drop := lateralEmptySpec(node); marker != "" {
 			stage.LateralPadMarker = marker
 			stage.LateralDropMarker = drop
-			for _, c := range cols {
+			for _, d := range node.LateralEmptyDefaults {
+				if d.ExprSQL == "" {
+					continue
+				}
 				stage.LateralEmptyDefaults = append(stage.LateralEmptyDefaults,
-					LateralEmptyDefaultSpec{Column: c.Column, Text: c.Text})
+					LateralEmptyDefaultSpec{Column: d.Column, ExprSQL: d.ExprSQL})
 			}
 		}
 		// Propagate semi/anti join inequality filters
@@ -18529,9 +18532,26 @@ func lateralEmptyDefaultOps(node *logical.Node) []exec.UnaryOperator {
 	return []exec.UnaryOperator{op}
 }
 
+// compileLateralDefault compiles one column's empty-input rule — the CASE the
+// logical layer rendered — through the engine's own expression compiler, the
+// same route every other computed column takes. A rule that will not compile
+// is dropped rather than approximated: the column then reads what the pad
+// wrote, which is NULL.
+func compileLateralDefault(sql string) (exec.Expression, error) {
+	node, err := plansql.ParseExpression(sql)
+	if err != nil {
+		return nil, err
+	}
+	compiled, err := expr.Compile(node)
+	if err != nil {
+		return nil, err
+	}
+	return compiled.Eval, nil
+}
+
 // lateralEmptySpec is the empty-input default's three parts: the column whose
-// NULL marks a padded row, one constant per output column, and whether this
-// operator is the one that drops the marker.
+// NULL marks a padded row, one COMPILED rule per output column, and whether
+// this operator is the one that drops the marker.
 //
 // It drops the marker when the marker IS a slot the lowering minted — the join
 // would otherwise drop it BELOW this operator, and the marker is what this
@@ -18542,12 +18562,17 @@ func lateralEmptySpec(node *logical.Node) (marker string, cols []exec.LateralDef
 		return "", nil, false
 	}
 	for _, d := range node.LateralEmptyDefaults {
-		if d.Null || d.Text == "" {
-			// The pad already writes NULL. Carrying it would only give the
-			// operator a value to stamp where the right answer is no value.
+		if d.ExprSQL == "" {
+			// The item's empty-input value is NULL, which is what the pad
+			// already writes — or this pass could not build the rule. Either
+			// way the column is left exactly as the pad wrote it.
 			continue
 		}
-		cols = append(cols, exec.LateralDefault{Column: d.Column, Text: d.Text})
+		compiled, err := compileLateralDefault(d.ExprSQL)
+		if err != nil {
+			continue
+		}
+		cols = append(cols, exec.LateralDefault{Column: d.Column, Expr: compiled})
 	}
 	marker = node.LateralPadMarker
 	for _, h := range node.HiddenJoinCols {
@@ -18562,11 +18587,12 @@ func lateralEmptySpec(node *logical.Node) (marker string, cols []exec.LateralDef
 	return marker, cols, drop
 }
 
-// LateralEmptyDefaultSpec is one output column's empty-input constant on a
-// join stage; see logical.LateralEmptyDefault and exec.LateralDefault.
+// LateralEmptyDefaultSpec is one output column's empty-input RULE on a join
+// stage — the CASE the logical layer rendered, which the worker compiles; see
+// logical.LateralEmptyDefault and exec.LateralDefault.
 type LateralEmptyDefaultSpec struct {
-	Column string
-	Text   string
+	Column  string
+	ExprSQL string
 }
 
 // HiddenJoinCol is one column a join MINTED for itself: the ORDINAL it sits

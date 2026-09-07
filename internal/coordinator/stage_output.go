@@ -211,7 +211,7 @@ func wireLateralDefaults(cols []physical.LateralEmptyDefaultSpec) []distributed.
 	}
 	out := make([]distributed.LateralEmptyDefault, len(cols))
 	for i, c := range cols {
-		out[i] = distributed.LateralEmptyDefault{Column: c.Column, Text: c.Text}
+		out[i] = distributed.LateralEmptyDefault{Column: c.Column, ExprSQL: c.ExprSQL}
 	}
 	return out
 }

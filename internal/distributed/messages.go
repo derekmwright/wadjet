@@ -1090,12 +1090,15 @@ type WindowBoundSpec struct {
 	Offset int    `json:"offset,omitempty"`
 }
 
-// LateralEmptyDefault is one output column's empty-input constant on the wire,
-// rendered as text so both paths parse it at the vector's own type. See
-// exec.LateralDefault.
+// LateralEmptyDefault is one output column's empty-input RULE on the wire:
+// the SQL of `CASE WHEN <marker> IS NULL THEN <the item over an empty input>
+// ELSE <the column> END`, which the worker parses and compiles like any other
+// computed column. It travels as an expression rather than a value because a
+// value needs a per-type writer and a string or a container vector has no slot
+// to write into. See exec.LateralDefault.
 type LateralEmptyDefault struct {
-	Column string `json:"column"`
-	Text   string `json:"text"`
+	Column  string `json:"column"`
+	ExprSQL string `json:"expr_sql"`
 }
 
 // HiddenJoinColumn is physical.HiddenJoinCol on the wire: one column a join

@@ -2,20 +2,19 @@ package exec
 
 import (
 	"context"
-	"strconv"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
-	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// LateralDefault is one output column's EMPTY-INPUT value: the constant the
-// lateral's SELECT item evaluates to when the subquery sees no rows, rendered
-// as text so one spelling crosses the wire and both paths parse it at the
-// vector's own type. See logical.LateralEmptyDefault.
+// LateralDefault is one output column's empty-input rule, COMPILED: the
+// expression `CASE WHEN <marker> IS NULL THEN <the item over an empty input>
+// ELSE <the column> END`, built as SQL at plan time and compiled by whichever
+// side is running — the planner on the single-process path, the worker on the
+// distributed one.
 type LateralDefault struct {
 	Column string
-	Text   string
+	Expr   Expression
 }
 
 // LateralEmptyDefault carries an ungrouped aggregate's EMPTY-INPUT VALUES on
@@ -28,30 +27,34 @@ type LateralDefault struct {
 // the lateral matches nothing for survives only as a LEFT pad — and a pad
 // writes NULL into every column of that side.
 //
-// TWO RULES, and the first cut had neither.
+// TWO RULES:
 //
 //  1. WHICH ROWS. A pad is not "a row whose value is NULL": a matched row may
 //     hold a NULL of its own. `NULLIF(COUNT(*), 2)` is NULL for a matched row
 //     that counted 2, and stamping the column's own nulls turned two RIGHT
 //     rows into wrong ones. The pad is marked by the correlation key: the join
 //     keys on it, a NULL key matches nothing, so the KEY column is NULL
-//     exactly on the rows the pad manufactured. This operator reads that
-//     column — the hidden slot where the lowering minted one, the published
-//     key otherwise — and writes only where IT is null.
+//     exactly on the rows the pad manufactured.
 //
-//  2. WHAT VALUE. Not a literal 0 on a COUNT column: the constant is the
-//     ITEM's own value over the empty input, folded at plan time
-//     (logical.lateralEmptyDefaults). `COUNT(*)+1` is 1, `COUNT(*)=0` is
-//     true, `COALESCE(SUM(x),0)` is 0, `CASE WHEN COUNT(*)>5 THEN 1 END` is
-//     NULL — and a NULL default is not carried at all, because the pad
-//     already wrote it.
+//  2. WHAT VALUE. The ITEM's own value over an empty input, not a literal 0 on
+//     a COUNT column: `COUNT(*)+1` is 1, `COUNT(*)=0` is true,
+//     `CAST(COUNT(*) AS VARCHAR)` is '0' and `ARRAY[COUNT(*)]` is `{0}`.
+//
+// BOTH LIVE IN ONE COMPILED EXPRESSION, and that is the whole operator: the
+// first cut carried the value as TEXT and stamped it into the vector in place
+// through a hand-written type switch. That cannot be right for a varlen or a
+// container vector, and it was not — a STRING default emptied a MATCHED row
+// and concatenated two values into the padded one, and a star over it crashed
+// in `slice bounds out of range`. An expression takes the engine's own typed
+// kernel for all 22 types and writes a NEW vector, which is what every other
+// computed column in the engine does.
 //
 // The marker is dropped here rather than by the join, because the join's drop
-// runs BELOW this operator and the marker is what this operator reads.
+// runs BELOW this operator and the marker is what the expression reads.
 type LateralEmptyDefault struct {
 	// Marker is the column whose NULL marks a padded row.
 	Marker string
-	// Cols are the defaults to write, by output column name.
+	// Cols are the compiled per-column rules.
 	Cols []LateralDefault
 	// DropMarker removes the marker column from the output — the join left it
 	// in place for this operator, and nothing above may see it.
@@ -59,9 +62,7 @@ type LateralEmptyDefault struct {
 
 	resolved  bool
 	markerIdx int
-	targets   []int
-	texts     []string
-	keep      []int
+	inner     *Project
 }
 
 // NewLateralEmptyDefault returns the operator, or nil when this join has
@@ -81,31 +82,26 @@ func (o *LateralEmptyDefault) Init(_ context.Context) error { return nil }
 
 func (o *LateralEmptyDefault) Close() error { return nil }
 
-func (o *LateralEmptyDefault) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
+func (o *LateralEmptyDefault) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if in == nil {
 		return in, nil
 	}
 	if !o.resolved {
 		o.resolve(in)
 	}
-	if o.markerIdx >= 0 && o.markerIdx < len(in.Columns) && in.Len > 0 {
-		marker := in.Columns[o.markerIdx]
-		if marker != nil && marker.Nulls.HasNulls() {
-			for _, ci := range o.targets {
-				if ci < 0 || ci >= len(in.Columns) {
-					continue
-				}
-				o.fill(in, ci, marker)
-			}
-		}
-	}
-	if !o.DropMarker || o.markerIdx < 0 {
+	if o.inner == nil {
 		return in, nil
 	}
-	return o.narrow(in), nil
+	return o.inner.Execute(ctx, in)
 }
 
-// resolve locates the marker and each defaulted column, once.
+// resolve locates the marker and builds the projection this operator IS: one
+// output column per input column, the defaulted ones computed by their own
+// compiled expression and every other one copied by POSITION.
+//
+// It is built from the first batch because that is where the column list is: a
+// `SELECT *` over a join has none at plan time, which is the whole reason this
+// arc exists.
 func (o *LateralEmptyDefault) resolve(in *batch.RecordBatch) {
 	o.resolved = true
 	o.markerIdx = -1
@@ -114,13 +110,6 @@ func (o *LateralEmptyDefault) resolve(in *batch.RecordBatch) {
 			return name[dot+1:]
 		}
 		return name
-	}
-	want := make(map[string]string, len(o.Cols))
-	for _, c := range o.Cols {
-		if c.Text == "" {
-			continue
-		}
-		want[batch.FoldIdent(bare(c.Column))] = c.Text
 	}
 	// THE MARKER IS MATCHED QUALIFIED FIRST. A build column that collided
 	// with a probe column is emitted qualified ("s.__key_0") and the PROBE's
@@ -144,112 +133,34 @@ func (o *LateralEmptyDefault) resolve(in *batch.RecordBatch) {
 	if o.markerIdx < 0 && len(bareHits) == 1 {
 		o.markerIdx = bareHits[0]
 	}
-	o.texts = o.texts[:0]
+	if o.markerIdx < 0 {
+		return // the plan and the runtime disagree; leave the batch alone
+	}
+
+	byName := make(map[string]Expression, len(o.Cols))
+	for _, c := range o.Cols {
+		if c.Expr == nil {
+			continue
+		}
+		byName[batch.FoldIdent(bare(c.Column))] = c.Expr
+	}
+	projections := make([]ProjectColumn, 0, len(in.Schema))
 	for i, col := range in.Schema {
-		if i == o.markerIdx {
+		if o.DropMarker && i == o.markerIdx {
 			continue
 		}
-		if text, ok := want[batch.FoldIdent(bare(col.Name))]; ok {
-			o.targets = append(o.targets, i)
-			o.texts = append(o.texts, text)
+		p := ProjectColumn{
+			Name:         col.Name,
+			Type:         col.Type,
+			SourceCol:    col.Name,
+			DirectCopy:   col.Name,
+			SourceIdx:    i,
+			SourceIdxSet: true,
 		}
+		if e, ok := byName[batch.FoldIdent(bare(col.Name))]; ok {
+			p = ProjectColumn{Name: col.Name, Type: col.Type, Expr: e, SourceCol: col.Name}
+		}
+		projections = append(projections, p)
 	}
-	for i := range in.Schema {
-		if i == o.markerIdx {
-			continue
-		}
-		o.keep = append(o.keep, i)
-	}
-}
-
-// fill writes one column's constant on every padded row.
-func (o *LateralEmptyDefault) fill(in *batch.RecordBatch, ci int, marker *batch.Vector) {
-	text := ""
-	for i, t := range o.targets {
-		if t == ci {
-			text = o.texts[i]
-			break
-		}
-	}
-	if text == "" {
-		return
-	}
-	v := in.Columns[ci]
-	if v == nil {
-		return
-	}
-	// A VIEW shares its base vector's storage with other consumers, so writing
-	// through it would edit rows this batch does not own.
-	if v.IsView() {
-		in.FlattenColumn(ci)
-		v = in.Columns[ci]
-		if v == nil {
-			return
-		}
-	}
-	val, ok := constantAt(v.Type, text)
-	if !ok {
-		return
-	}
-	for r := 0; r < in.Len; r++ {
-		if !marker.Nulls.IsNull(r) {
-			continue
-		}
-		v.SetValue(r, val)
-		v.Nulls.SetValid(r)
-	}
-}
-
-// narrow returns the batch without the marker column.
-func (o *LateralEmptyDefault) narrow(in *batch.RecordBatch) *batch.RecordBatch {
-	cols := make([]*batch.Vector, 0, len(o.keep))
-	schema := make([]parquet.Column, 0, len(o.keep))
-	for _, i := range o.keep {
-		if i >= len(in.Columns) || i >= len(in.Schema) {
-			continue
-		}
-		cols = append(cols, in.Columns[i])
-		schema = append(schema, in.Schema[i])
-	}
-	out := &batch.RecordBatch{Columns: cols, Schema: schema, Len: in.Len, Sel: in.Sel}
-	return out
-}
-
-// constantAt parses the rendered constant at the column's own type. A type it
-// cannot write leaves the row as the pad wrote it, which is NULL — never a
-// value invented for it.
-func constantAt(t batch.TypeID, text string) (any, bool) {
-	switch t {
-	case batch.TypeInt64, batch.TypeInt32:
-		n, err := strconv.ParseInt(text, 10, 64)
-		if err != nil {
-			f, ferr := strconv.ParseFloat(text, 64)
-			if ferr != nil {
-				return nil, false
-			}
-			n = int64(f)
-		}
-		if t == batch.TypeInt32 {
-			return int32(n), true
-		}
-		return n, true
-	case batch.TypeFloat64, batch.TypeFloat32:
-		f, err := strconv.ParseFloat(text, 64)
-		if err != nil {
-			return nil, false
-		}
-		if t == batch.TypeFloat32 {
-			return float32(f), true
-		}
-		return f, true
-	case batch.TypeBool:
-		b, err := strconv.ParseBool(text)
-		if err != nil {
-			return nil, false
-		}
-		return b, true
-	case batch.TypeString, batch.TypeBytes, batch.TypeDecimal:
-		return text, true
-	}
-	return nil, false
+	o.inner = &Project{Projections: projections}
 }

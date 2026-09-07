@@ -206,7 +206,6 @@ func lateralEmptyInputOf(info *plansql.SelectInfo, hasAgg, correlated bool) late
 		return lateralEmptyInput{}
 	}
 	out := lateralEmptyInput{ungroupedAggregate: true}
-	out.defaults = lateralEmptyDefaults(info)
 	for _, col := range info.Columns {
 		if !col.IsAgg || !strings.EqualFold(col.AggFunc, "count") {
 			continue

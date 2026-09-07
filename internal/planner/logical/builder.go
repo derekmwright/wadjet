@@ -1354,6 +1354,10 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 					// counted 2.
 					emptyDefaults = empty.defaults
 				}
+				if err := refuseUnorderedLateralOn(plan, empty, join.RightAlias,
+					join.CondExpr, join.Condition); err != nil {
+					return nil, err
+				}
 				switch plan {
 				case lateralPadThenFilter:
 					// The lateral yields a row for every outer row (LEFT on
@@ -2152,6 +2156,12 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 		if empty.padMarker != "" && join.RightAlias != "" &&
 			!strings.Contains(empty.padMarker, ".") {
 			empty.padMarker = join.RightAlias + "." + empty.padMarker
+		}
+		// The defaults are built HERE and not in lateralEmptyInputOf because
+		// each one is an expression OVER the marker, and the marker is what
+		// the loop above just decided.
+		if empty.ungroupedAggregate {
+			empty.defaults = lateralEmptyDefaults(subInfo, empty.padMarker)
 		}
 		// Keys first, mirroring the order buildAggregate emits them in, so
 		// the projection above stays elidable in the ordinary shape.

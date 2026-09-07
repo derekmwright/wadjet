@@ -19,9 +19,11 @@ import (
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/engine/memory"
 	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -3063,7 +3065,18 @@ func lateralEmptyDefaultOp(spec distributed.OpSpec) exec.UnaryOperator {
 	}
 	cols := make([]exec.LateralDefault, 0, len(spec.EmptyDefaults))
 	for _, d := range spec.EmptyDefaults {
-		cols = append(cols, exec.LateralDefault{Column: d.Column, Text: d.Text})
+		if d.ExprSQL == "" {
+			continue
+		}
+		node, err := plansql.ParseExpression(d.ExprSQL)
+		if err != nil {
+			continue
+		}
+		compiled, err := expr.Compile(node)
+		if err != nil {
+			continue
+		}
+		cols = append(cols, exec.LateralDefault{Column: d.Column, Expr: compiled.Eval})
 	}
 	op := exec.NewLateralEmptyDefault(spec.PadMarker, cols, spec.DropMarker)
 	if op == nil {
