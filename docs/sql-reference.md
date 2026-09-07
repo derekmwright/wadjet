@@ -1393,13 +1393,22 @@ SELECT CAST(dst_port AS Int64) FROM flow_logs
 SELECT CAST(bytes_in AS Float64) / CAST(packets AS Float64) AS avg_size FROM flow_logs
 ```
 
-Every type this engine has can be named as a cast destination, and each one
-converts to that type and declares it. `INT32` is a second spelling of `int4`
-and lands on the same carrier every integer spelling does (`bigint` on the
-wire); `PORT` and `PROTOCOL` declare `integer` (OID 23), the same OID their
-columns declare; `FLOAT32` is `REAL`. All four, and `DATE` from an integer day
-count, are stored in a signed 32-bit field, so a value with no room in one is
-`22003 integer out of range` — see the table below and `docs/data-types.md`.
+`INT32`, `PORT`, `PROTOCOL` and `FLOAT32` convert and declare their own type.
+`INT32` is a second spelling of `int4` and lands on the carrier every integer
+spelling lands on (`bigint` on the wire); `PORT` and `PROTOCOL` declare
+`integer` (OID 23), the same OID their columns declare; `FLOAT32` is `REAL`.
+Those four, and `DATE` from an integer day count, are stored in a signed 32-bit
+field, so a value with no room in one is `22003 integer out of range` — see the
+table below and `docs/data-types.md`. `PORT` and `PROTOCOL` also read TEXT
+(`'443'::PORT` is 443, `'abc'::PORT` is `22P02`).
+
+The remaining type names are **accepted destinations this engine does not
+convert to**: `BYTES`, `IPV4`, `IPV6`, `CIDR`, `MAC`, `DURATION`, `ARRAY`,
+`MAP` and `VECTOR(n)` hand the operand's text back under a `text` declaration
+(OID 25), and `ROW` is a syntax error. The four network ones are a recorded
+divergence — ADR-0012's list, "a CAST to a NETWORK type does not read its
+text", held fail-on-agree by `expr.TestCastToANetworkTypeStillPassesThrough`.
+A name that answers to no type at all is `42704`, not a text column (#652).
 
 `CAST(<col> AS STRING)` renders the value's own printed form — the text the
 column projects and the text `LIKE` matches against, which for a TIMESTAMP is

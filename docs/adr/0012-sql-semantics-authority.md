@@ -646,6 +646,25 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      data exception, and minting 22007 for it would put a data-exception code
      on a type error. The boundary is attempted from the outside by
      `expr.TestCastTemporalRefusalStopsAtText`.
+   - **An INTEGER cast to DATE is a wadjet SUPERSET, and its out-of-range
+     refusal is `22003`, not `22008`.** (Added 2026-09-06, #911.) PostgreSQL
+     has NO integer-to-date cast in any spelling — `0::date`, `2932896::date`,
+     `3000000000::date` and `9223372036854775807::date` are all **42846**
+     `cannot cast type integer|bigint to date`, measured on 17.11 — so there is
+     no server answer to follow for the boundary, and the bound is the engine's
+     own DATE carrier: a signed 32-bit day count.
+
+     The class is the one this engine already gives for a number with no room
+     in a 32-bit field, which is what `docs/data-types.md` said before the cast
+     was fixed and what `batch.IntegerRangeError` raises at the store. `22008`
+     — the class the arc brief proposed — is the DATE accept-set's answer for
+     TEXT naming a calendar date that does not exist (`'2020-02-30'`), which is
+     a different question with a different input; splitting the two by the
+     SOURCE keeps `'…'::DATE` agreeing with PostgreSQL where PostgreSQL has an
+     opinion, and keeps the superset's own refusal in the family its carrier
+     belongs to. Gated on four arms by
+     `coordinator.TestAnInt32DomainRefusalHoldsOnEveryArm` and at the door by
+     `wadjet.TestAnOutOfRangeCastRefusesAtTheDoor`.
    - **A CAST to a NETWORK type does not read its text.** (Added 2026-09-03,
      #839's census.) `CAST('abc' AS IPV4|IPV6|CIDR|MACADDR)` returns the text
      under a STRING declaration; PostgreSQL raises 22P02 for its
@@ -660,6 +679,23 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `expr.TestCastToANetworkTypeStillPassesThrough`, which fails the day the
      cast starts refusing. UUID and the float family were the same shape and
      ARE fixed: both had a single unambiguous accept-set to read.
+
+     **PORT and PROTOCOL have LEFT this family.** (Amended 2026-09-06, #901.)
+     The paragraph's reason — "the network types have none" — was never true of
+     those two: their carrier is a signed 32-bit field and their text is an
+     INTEGER, which `kernel.IntLitText` is the engine's one accept-set for and
+     which every other integer destination already reads. So `'443'::PORT` is
+     443 under a PORT declaration (OID 23, the same OID a PORT column declares
+     since #834), `'abc'::PORT` is `22P02 invalid input syntax for type
+     integer`, and a value with no int32 is `22003 integer out of range` — all
+     measured. `IPV4`, `IPV6`, `CIDR` and `MAC` are unchanged and are what the
+     paragraph above now covers; they are four, not six.
+
+     Before #901 all four of `INT32`, `PORT`, `PROTOCOL` and `FLOAT32` were
+     accepted NAMES with no cast at all — `Cast.Eval`'s switch matched none of
+     them and `physical.inferCastType` declared STRING — so they looked like
+     this family from the outside while being the #310/#443 shape instead: a
+     NUMBER published as text under OID 25.
    - **The CAST door reads the engine's ONE temporal accept-set, and inherits
      its refusals.** (Added 2026-09-03, #840; the accept-set is #639's and
      #641's. Amended 2026-09-04: #641 landed and the last residual here closed
