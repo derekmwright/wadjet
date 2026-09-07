@@ -98,6 +98,12 @@ func NewWriter(w io.Writer, schema Schema, cfg WriterConfig) (*Writer, error) {
 // Values for network types (IPv4, IPv6, MAC) are converted from their string
 // representations to the internal binary format before writing.
 func (w *Writer) WriteRows(rows []map[string]any) error {
+	// Before prepareRows, which converts network/temporal values IN THE
+	// CALLER'S OWN MAPS: a write this writer will not perform must leave
+	// them as it found them (ErrWriterClosed, #972).
+	if err := w.nw.checkWritable(); err != nil {
+		return err
+	}
 	if err := w.prepareRows(rows); err != nil {
 		return err
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -52,6 +53,54 @@ type NativeWriter struct {
 	// row are already inconsistent with the schema and no later row can
 	// repair them.
 	err error
+
+	// closed latches the FINALIZATION, which err cannot express: a Close
+	// that succeeded leaves err nil, and the writer then looked exactly like
+	// a fresh one to WriteMapRows. See ErrWriterClosed.
+	closed bool
+}
+
+// ErrWriterClosed is returned by every call on a writer whose file has
+// already been finalized.
+//
+// A parquet file ends with its footer, a four-byte footer length and the
+// magic trailer, so the last byte Close writes is the end of the artifact.
+// Nothing can be appended to it and nothing can be taken back. Before this,
+// neither Writer nor NativeWriter recorded that Close had run, and a later
+// WriteRows/WriteMapRows returned nil in both of the two shapes the row-group
+// size selects (#972, measured at f415faba on a one-INT64-column file):
+//
+//   - the row fitted the open row group, so it was buffered, nothing reached
+//     the output, and the accepted row was silently LOST;
+//   - the row crossed RowGroupSize, so a whole column chunk was appended
+//     AFTER the trailer — 292 bytes became 347 and both wadjet's reader and
+//     pyarrow then refused the file ("invalid magic", "Parquet magic bytes
+//     not found in footer"). A finalized, readable file became unreadable
+//     because of a call that returned success.
+//
+// Close was not idempotent either: a second Close wrote a second footer and
+// trailer over the first, which is what a `defer w.Close()` beside an
+// explicit one would have done.
+//
+// The rule is therefore the simplest one that has no such shapes: a closed
+// writer is closed. The first Close latches it — whether it succeeded or
+// failed — and every later WriteRows, WriteMapRows and Close returns a loud
+// error having touched neither the leaf buffers nor the output. A writer
+// whose Close FAILED keeps returning that failure instead, because it is the
+// more specific answer and it is what #888's latch already promised.
+var ErrWriterClosed = errors.New("parquet: writer is closed (the file was already finalized)")
+
+// checkWritable is the one gate every write door asks before it accepts
+// anything. Writer.WriteRows asks it BEFORE prepareRows, which rewrites the
+// caller's own maps in place: a refused write must not touch those either.
+func (nw *NativeWriter) checkWritable() error {
+	if nw.err != nil {
+		return nw.err
+	}
+	if nw.closed {
+		return ErrWriterClosed
+	}
+	return nil
 }
 
 // leafRange identifies a contiguous range of leaf buffers for a top-level column.
@@ -382,8 +431,8 @@ func wadjetTypeToPhysical(t TypeID) PhysicalType {
 // Nested types (ARRAY, MAP, ROW) are decomposed into leaf-level
 // (value, defLevel, repLevel) triples.
 func (nw *NativeWriter) WriteMapRows(rows []map[string]any) error {
-	if nw.err != nil {
-		return nw.err
+	if err := nw.checkWritable(); err != nil {
+		return err
 	}
 	for _, row := range rows {
 		for colIdx, col := range nw.schema.Columns {
@@ -988,10 +1037,23 @@ func countLeaves(col Column) int {
 }
 
 // Close flushes any remaining rows and writes the file footer.
+//
+// It is terminal: see ErrWriterClosed. A second Close appends nothing.
 func (nw *NativeWriter) Close() error {
 	if nw.err != nil {
+		// A failed writer stays failed, and stays closed: the finalization
+		// is over either way, so no later call may write.
+		nw.closed = true
 		return nw.err
 	}
+	if nw.closed {
+		return ErrWriterClosed
+	}
+	// Latched BEFORE the first byte of the finalization goes out, so a Close
+	// that dies half way through the footer cannot be retried into a second
+	// one.
+	nw.closed = true
+
 	// Write magic header if this is the first write.
 	if nw.written == 0 {
 		if err := nw.writeBytes([]byte("PAR1")); err != nil {
