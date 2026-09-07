@@ -2128,7 +2128,7 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 	// group key under the key's own text -- which is the collision the slot
 	// exists to avoid, one operator lower. Record the slot as the key's
 	// PUBLISHED name; the aggregate keeps RESOLVING it by the source column.
-	stampMintedGroupKeys(right, mintedKeys)
+	markLateralAggregate(right, mintedKeys)
 	if join.RightAlias != "" {
 		setSubtreeAlias(right, join.RightAlias)
 	}
@@ -2581,8 +2581,9 @@ func lateralScopeNames(info *plansql.SelectInfo) []string {
 	return out
 }
 
-// stampMintedGroupKeys records, on the aggregate a decorrelated LATERAL built,
-// the hidden slot each minted correlation key is PUBLISHED under.
+// markLateralAggregate marks the aggregate a decorrelated LATERAL built and
+// records, on it, the hidden slot each minted correlation key is PUBLISHED
+// under.
 //
 // The aggregate keeps RESOLVING the key by the source column it groups on —
 // `GroupBy` is untouched — and publishes it under the slot, which is
@@ -2596,12 +2597,18 @@ func lateralScopeNames(info *plansql.SelectInfo) []string {
 // the first one it finds. A nested block's aggregate is a different relation
 // whose key of that name is a different value, and stamping it would publish
 // somebody else's column under this lateral's slot.
-func stampMintedGroupKeys(n *Node, minted map[string]string) {
-	if n == nil || len(minted) == 0 {
+func markLateralAggregate(n *Node, minted map[string]string) {
+	if n == nil {
 		return
 	}
 	switch n.Type {
 	case NodeAggregate:
+		// The mark is made whether or not a key was minted: it says WHOSE
+		// aggregate this is, and the stage's naming rule is scoped by that.
+		n.LateralAggregate = true
+		if len(minted) == 0 {
+			return
+		}
 		if len(n.GroupByPublish) < len(n.GroupBy) {
 			grown := make([]string, len(n.GroupBy))
 			copy(grown, n.GroupByPublish)
@@ -2615,7 +2622,7 @@ func stampMintedGroupKeys(n *Node, minted map[string]string) {
 		return
 	case NodeProject, NodeFilter, NodeSort, NodeLimit, NodeDistinct, NodeWindow:
 		if len(n.Children) > 0 {
-			stampMintedGroupKeys(n.Children[0], minted)
+			markLateralAggregate(n.Children[0], minted)
 		}
 	}
 }

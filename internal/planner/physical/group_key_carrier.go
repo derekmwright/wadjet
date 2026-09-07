@@ -187,7 +187,7 @@ func stageGroupKeyNames(agg, child *logical.Node) (published []string, resolve [
 			resolve[i] = GroupKeyResolution{Expr: k.Slot}
 			resolved, def, defScope, renamed := resolveAggInputName(gb, child)
 			if !renamed {
-				execRule[i] = !k.Minted && !k.Delimited
+				execRule[i] = agg.LateralAggregate && !k.Minted && !k.Delimited
 				break
 			}
 			if def == nil {
@@ -227,6 +227,14 @@ func stageGroupKeyNames(agg, child *logical.Node) (published []string, resolve [
 	// partition was empty wrote a `.wshf` file without that column and one
 	// with rows wrote it: `declares 3 columns [k g c] where an earlier file of
 	// the same stage input declared 4 [k g c t.g]` (ADR-0010, #767's DAG half).
+	//
+	// SCOPED TO A DECORRELATED LATERAL'S AGGREGATE. The mismatch is that
+	// lowering's: it always groups on a QUALIFIED plain column, and the join
+	// it manufactures reads what the stream publishes. Applying the strip to
+	// every aggregate published a stripped name for an ordinary
+	// `SELECT DISTINCT x.a AS b, x.b AS a … ORDER BY a` as well, where `a` is
+	// also an OUTPUT name of the query and the consumer bound the wrong one —
+	// the swap #947 closed, which this arc met when it rebased onto it.
 	//
 	// Only for the keys marked above. A key whose two names ALREADY differ —
 	// a derived table's alias (`GROUP BY u.k` over `SELECT n_regionkey AS k`),

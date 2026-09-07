@@ -235,7 +235,22 @@ type Node struct {
 	// through one of those stars would read it by name. One drop below every
 	// star is what makes the slot unreachable rather than usually-hidden
 	// (ADR-0026 §3c). Empty on every other join.
-	HiddenJoinCols   []string
+	HiddenJoinCols []string
+	// LateralAggregate marks the aggregate a DECORRELATED LATERAL's lowering
+	// built — the one whose group key IS the correlation key, whatever name
+	// it publishes it under.
+	//
+	// It scopes the one place the stage's published list has to say what
+	// `exec.PublishedGroupKeyNames` will emit rather than what the GROUP BY
+	// text says (physical.stageGroupKeyNames): the qualifier strip. A
+	// decorrelated lateral always groups on a QUALIFIED plain column
+	// (`GROUP BY t.g`) and the stream publishes the stripped `g`, so a join
+	// above it carried a name no file had (ADR-0010, #767). Applying that to
+	// EVERY aggregate published a stripped name for an ordinary
+	// `SELECT DISTINCT x.a AS b, x.b AS a` too, where it collides with the
+	// query's own output names and an ORDER BY term bound the wrong column
+	// (#947's gate). The mismatch is the lateral's; so is the rule.
+	LateralAggregate bool
 	AggExprs         []AggExpr
 	GroupingSetNulls []string   // columns that should be NULL in this grouping set (legacy, per-node)
 	GroupingSets     [][]string // single-pass grouping sets: each entry lists the columns in that set
