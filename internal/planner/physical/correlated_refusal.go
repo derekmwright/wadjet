@@ -128,6 +128,18 @@ func (p *Planner) refuseScalarRows(err error) {
 	}
 }
 
+// refusePlanTimeAnswer parks a refusal raised while the coordinator EVALUATED
+// a subquery at plan time and which is the query's answer on every path — an
+// authorization decision, whose SQLSTATE and sentence belong to the client and
+// not to a planning narrative (ADR-0034 item 6). Same slot as
+// refuseScalarRows, and for the same reason: it is not a ROUTING refusal, so
+// re-running the query locally would reach it again after doing the work twice.
+func (p *Planner) refusePlanTimeAnswer(err error) {
+	if p.scalarRowsErr == nil {
+		p.scalarRowsErr = err
+	}
+}
+
 // visitExprSubqueries walks an expression AST and calls visit for every
 // embedded subquery, labelled by construct. It does not descend into the
 // subquery SQL itself: correlation analysis (FindCorrelatedRefsWithScope)

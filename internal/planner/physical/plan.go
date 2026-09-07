@@ -1155,6 +1155,12 @@ type Planner struct {
 	// into a literal set, for the same reason and by the same mechanism as
 	// correlatedErr. See in_subquery_set.go.
 	inSubqueryErr error
+	// scalarRowsErr records a refusal this planner raised while EVALUATING a
+	// subquery at plan time — a cardinality violation (21000) or an
+	// authorization decision (42501). Neither is a routing refusal: both are
+	// the query's answer on every path, so re-running locally would reach the
+	// same error after doing the work twice.
+	//
 	// scalarRowsErr records a SCALAR subquery this planner executed at plan
 	// time that returned more than one row. Parked rather than returned for
 	// the same reason as the three above — walkStages has no error return —
@@ -2100,6 +2106,15 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, def
 		}
 		rows, _, err := p.executeSubquerySchema(ctx, n.SQL)
 		if err != nil {
+			// An AUTHORIZATION refusal is the decision's own sentence, not a
+			// planning narrative, and it is the query's answer on every path
+			// (ADR-0034 item 6). Swallowing it shipped the filter and the
+			// task failed with "EXISTS subquery requires a SubqueryRunner"
+			// where the scalar and IN siblings say `permission denied for
+			// table "…"` (round-1 review P1).
+			if sqlerr.StateOf(err) == "42501" {
+				p.refusePlanTimeAnswer(err)
+			}
 			return node
 		}
 		exists := len(rows) > 0
@@ -2161,6 +2176,46 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, def
 			return &plansql.ParenNode{Inner: inner}
 		}
 		return node
+
+	// The BOOLEAN TREE. A subquery is a leaf of a predicate, not a predicate,
+	// and the arms above only reach the positions a comparison or an
+	// arithmetic operator puts it in. `AND` looked handled because the filter
+	// is split into conjuncts BEFORE this walk; `OR` and `NOT` cannot be
+	// split, so `… WHERE d.id < 2 OR EXISTS (…)` shipped verbatim and every
+	// task failed with "EXISTS subquery requires a SubqueryRunner"
+	// (round-1 review B2). Walking the tree is what makes the rule ADR-0021
+	// §2b states — an uncorrelated EXISTS is a query-wide constant — true of
+	// the predicate rather than of one shape of predicate.
+	case *plansql.AndNode:
+		return &plansql.AndNode{
+			Left:  p.resolveSubqueryAST(ctx, n.Left, deferred, decls),
+			Right: p.resolveSubqueryAST(ctx, n.Right, deferred, decls),
+		}
+
+	case *plansql.OrNode:
+		return &plansql.OrNode{
+			Left:  p.resolveSubqueryAST(ctx, n.Left, deferred, decls),
+			Right: p.resolveSubqueryAST(ctx, n.Right, deferred, decls),
+		}
+
+	case *plansql.NotNode:
+		return &plansql.NotNode{Inner: p.resolveSubqueryAST(ctx, n.Inner, deferred, decls)}
+
+	case *plansql.CaseNode:
+		out := &plansql.CaseNode{}
+		if n.Subject != nil {
+			out.Subject = p.resolveSubqueryAST(ctx, n.Subject, deferred, decls)
+		}
+		for _, w := range n.Whens {
+			out.Whens = append(out.Whens, plansql.WhenClause{
+				Cond:   p.resolveSubqueryAST(ctx, w.Cond, deferred, decls),
+				Result: p.resolveSubqueryAST(ctx, w.Result, deferred, decls),
+			})
+		}
+		if n.Else != nil {
+			out.Else = p.resolveSubqueryAST(ctx, n.Else, deferred, decls)
+		}
+		return out
 
 	default:
 		return node
