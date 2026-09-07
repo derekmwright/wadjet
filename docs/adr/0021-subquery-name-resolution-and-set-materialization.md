@@ -17,6 +17,10 @@ and §5a closes §1c's named boundary: an alias hides its table name.
 §2a (2026-09-04) gives a SELECT-LIST scalar subquery the producer stage a
 predicate's has had since Q11 (#659), and §1f gains the other half of #539:
 where a null-aware anti join's replicated build is DECLARED.
+§1k (2026-09-07) settles WHICH SCOPE an unqualified name inside a subquery
+binds to — the inner relation's SCHEMA decides, whatever kind of relation it is
+— and §2b gives an uncorrelated EXISTS the plan-time evaluation an
+uncorrelated scalar subquery and an IN-subquery already had (#955).
 
 ## Context
 
@@ -897,6 +901,84 @@ comma-joined correlated inner in the census moves from ONE
 relation is read once instead of once per outer row. The answers are
 unchanged, which is the point: only the counter and the read count can see it.
 
+### 1k. An unqualified name binds the INNER relation's schema, whatever kind of relation it is
+
+(Added 2026-09-07, #955.)
+
+§1d gave the correlation COLLECTORS a CTE's scope so an outer reference
+qualified by a CTE name could be recognized. This is the other direction, and
+it is where the silent answers were: **which scope an UNQUALIFIED name binds
+to.**
+
+SQL scopes innermost-first. An unqualified column inside a subquery binds to
+the subquery's own FROM when that FROM has a column of the name; only a name NO
+inner relation carries is a reference to the enclosing query. The classifier
+implemented exactly that rule (`walkForOuterRefs`'s bare-name arm, since #334)
+and could not apply it, because it asked a CATALOG about a NAME:
+`collectInnerColumns` called `resolve(t.Name)` per FROM entry, and
+`Planner.subqueryInnerColumns` was `catalog.GetTable`. A CTE reference is not
+in the catalog. A derived table's "name" is its own SQL text. Both resolved to
+nothing, so every unqualified name they supply fell through to the outer scope.
+
+The consequence is not a missed optimization. A subquery classified correlated
+has the outer row's value SUBSTITUTED into its WHERE, so
+
+```sql
+WITH c AS (SELECT id, c_i64 AS v FROM typemx)
+SELECT (SELECT MAX(v) FROM c WHERE id < 4000) AS mx FROM decpair WHERE id < 2
+```
+
+became `WHERE 1 < 4000` — constant TRUE, the predicate gone — and answered
+`4999014997` for PostgreSQL 17's `3999011997` on all four arms, in silence. And
+it is re-run once per outer row: over 5000 outer rows at a 512 KiB budget the
+same shape did not finish in ten minutes. One misclassification, a wrong number
+and a hang.
+
+**The rule now: a FROM item is asked what IT publishes, and a resolver answers
+the COMPLETE column list of a relation or nothing at all.** A derived table
+answers from its own parsed body (the memoized parse, ADR-0032); a CTE
+reference answers from the WITH items in scope — its explicit column list where
+it has one, else the names its body publishes, which is `registerCTE`'s rule and
+PostgreSQL's; a set operation publishes its LEFT arm's names; a column-alias
+list renames the leading outputs positionally and HIDES what it replaces. The
+block-namespace rule itself moved to `plansql.BlockOutputColumns` so the binder
+and the classifier read one definition of it.
+
+Complete-or-nil is load-bearing, not tidiness. A PARTIAL list would let a
+column-alias list be overlaid on the wrong positions, and — worse — would read
+as *"this relation does not have that name"* for every column missing from it,
+which is the direction that turns an inner reference into an outer one. A star
+over a source this layer cannot resolve therefore makes the whole block
+unknown, and unknown falls back to the pre-existing identifier comparison: the
+classifier never claims a relation it cannot name has a column.
+
+Measured against live PostgreSQL 17 over the type-matrix fixture, before →
+after, on all four arms (`CorrelatedLocalRoutes` delta in brackets):
+
+| shape | before | after | PG |
+|---|---|---|---|
+| the filing shape, inner FROM a CTE reference | 4999014997 [1] | 3999011997 [0] | 3999011997 |
+| nested two deep | 4999014997 [1] | 3997011991 [0] | 3997011991 |
+| the CTE column is an explicit alias | 5000 [1] | 4000 [0] | 4000 |
+| inner FROM a DERIVED table | 4999014997 [1] | 3999011997 [0] | 3999011997 |
+| inner FROM a SET-OPERATION arm | 4999014997 [1] | 3999011997 [0] | 3999011997 |
+| the derived table's SELECT list is `*` | 5000 [1] | 4000 [0] | 4000 |
+| the same name in both scopes | 5000 [1] | 10 [0] | 10 |
+| the CTE reference under a JOIN | 4616 [1] | 10 [0] | 10 |
+| the WHERE producer over 5000 outer rows | 3871, **spilled arm hangs** [1] | 3870 [0] | 3870 |
+| ctl qualified / aliased / base table / top level | right | right | right |
+| ctl genuinely correlated (3 spellings) | right [1] | right [1] | right |
+
+The three controls are the boundary. Their VALUES were right before this change
+too; what separates "we stopped mis-correlating" from "we stopped correlating"
+is that their counter still moves.
+
+**What this does NOT close.** §1d's two pins are about a QUALIFIED outer
+reference whose qualifier the INNER relation also answers to
+(`boundary_cte_on_both_sides_outer_unaliased_stays_silent`,
+`boundary_unaliased_base_table_correlation_stays_silent`). No schema decides
+those — both scopes carry the identifier — and they stay pinned.
+
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
 `resolveSubqueryAST` gains an `InExpr` case. An uncorrelated IN-subquery is
@@ -939,6 +1021,33 @@ An EMPTY set is a real answer and not an absence: `x IN ()` is FALSE for every
 row and `x NOT IN ()` is TRUE for every row, including a row whose key is
 NULL, because an empty set has nothing to be UNKNOWN about. Neither renders as
 an empty value list, so both render as the constant they are.
+
+### 2b. An uncorrelated EXISTS is a query-wide constant, and the coordinator evaluates it
+
+(Added 2026-09-07, #955's second half.)
+
+§2 is the same sentence for `IN`: a subquery predicate the join could not
+express reaches the stage DAG, the worker has no `SubqueryRunner`, and the
+filter used to ship verbatim and fail (#524). `resolveSubqueryAST` gained an
+arm for a scalar `SubqueryNode` (executed or deferred to a producer stage) and
+one for `InExpr` (materialized as a SET). `ExistsNode` fell through `default:`
+and every task failed with *"EXISTS subquery requires a SubqueryRunner"* —
+`#524`'s family with the EXISTS arm never written.
+
+It was reachable at base for a base table, for `NOT EXISTS`, for a QUALIFIED
+CTE reference and beside another predicate — none of them through the scope
+classifier — and §1k made one more shape reach it, because an `EXISTS` that
+stops being mis-correlated stops being refused-and-routed as well.
+
+**An UNCORRELATED `EXISTS` reads no outer row, so it is TRUE or FALSE for every
+row of every task: a query-wide constant.** It is evaluated once at plan time
+and the predicate becomes that boolean, which is what the single-process path's
+memoizing evaluator already computes. A subquery that is not self-contained is
+NOT evaluated — `plansql.DanglingTableRefs` guards it exactly as the
+`SubqueryNode` arm above is guarded, and the coordinator answers on its local
+pipeline with `CorrelatedLocalRoutes` moving (§1c). The correlated control is
+an INEQUALITY correlation, the spelling that does not decorrelate into a semi
+join and therefore reaches this site.
 
 ### 3. A build-side narrowing is all-or-nothing, and the condition is read STRUCTURALLY
 

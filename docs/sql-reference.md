@@ -600,10 +600,12 @@ The count comes from the subquery's SELECT list, not from what it returns, so
 an EMPTY multi-column subquery is refused too — as it is on PostgreSQL, which
 decides this during parse analysis.
 
-`EXISTS` reads no value, so `EXISTS (SELECT 1, 2 FROM t)` is legal on the
-single-process path. On the stage DAG an `EXISTS` inside a filter is refused
-whatever its column count (`EXISTS subquery requires a SubqueryRunner`), which
-is a separate gap.
+`EXISTS` reads no value, so `EXISTS (SELECT 1, 2 FROM t)` is legal, whatever
+its column count. An `EXISTS` that reads no outer row is a constant for the
+whole query: the coordinator evaluates it once and the predicate becomes that
+boolean, on the stage DAG as on the single-process path. A CORRELATED `EXISTS`
+that does not become a semi join is answered by the coordinator's own
+single-process pipeline instead.
 
 With auth enabled, a subquery's relations are authorized like any others: an
 identity that may not read `flow_logs` is refused `42501` whether it names the
@@ -618,6 +620,24 @@ WHERE src_ip IN (SELECT ip_address FROM device_inventory WHERE role = 'server')
 ```
 
 ### Correlated Subqueries
+
+**A name is resolved innermost-first.** An unqualified column inside a subquery
+is the subquery's own whenever the subquery's `FROM` supplies it — and that
+holds for every kind of relation a `FROM` can name: a base table, a CTE
+reference, a derived table or a set-operation arm. Only a name that NO relation
+the subquery reads carries is a reference to the enclosing query.
+
+```sql
+WITH c AS (SELECT id, bytes_in AS v FROM flow_logs)
+SELECT (SELECT MAX(v) FROM c WHERE id < 4000) AS mx FROM devices WHERE id < 2
+```
+
+Here `id` is `c`'s, not `devices`'s, so this subquery is not correlated: it is
+evaluated once. Qualify the reference (`WHERE devices.id < 4000`) to mean the
+enclosing query's column, as PostgreSQL requires when both scopes carry the
+name. A `FROM` item's column-alias list renames its leading columns and hides
+the names it replaces, so `FROM (SELECT id, v FROM t) x(idd, vv)` puts `idd`
+and `vv` in scope and not `id`.
 
 Subqueries that reference columns from the outer query. The optimizer decorrelates them where it can — EXISTS / NOT EXISTS and IN become semi/anti joins, and a correlated scalar subquery becomes a join against a grouped aggregate — so they are not re-executed per outer row. Either side may be a CTE, a derived table, a comma-joined list or a base table: the subquery's own FROM clause is planned the way a top-level FROM clause is.
 
