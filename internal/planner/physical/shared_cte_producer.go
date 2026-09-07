@@ -86,13 +86,17 @@ func assertNoConsumerScopedFilterOnSharedStage(stages []Stage) error {
 		// What makes an attachment unsafe is that it belongs to ONE
 		// consumer, and stage emission is where that is knowable: it
 		// distinguishes a predicate attached INSIDE a CTE body from one
-		// attached ABOVE a reference, and records the second as
-		// ConsumerScoped. filterCarrierIndex already REFUSES to attach a
-		// consumer's filter to a stage it knows is shared — it gives the
-		// consumer its own StageProject instead — so this assert's job is
-		// the case emission could not see: a stage that was single-consumer
-		// when the filter landed and acquired a second consumer afterwards,
-		// which is exactly when the marker is set and the count is not yet 2.
+		// attached ABOVE a reference.
+		//
+		// Since #876 filterCarrierIndex refuses to attach a consumer's
+		// filter to ANY recorded CTE terminal — not only one already known
+		// to be shared — and gives the consumer its own StageProject, so
+		// that case no longer reaches this assert and NOTHING SETS
+		// ConsumerScoped today. The field and this walk are kept as the
+		// structural half: they are what would notice a future pass that
+		// MERGES two stages into one and so creates a second consumer after
+		// a filter has landed, which is the case stage emission cannot see.
+		// Said plainly rather than left implying a live trigger.
 		//
 		// Deriving ownership structurally instead would mean asking whether
 		// every consumer's LOGICAL ancestry carries the same predicate, and

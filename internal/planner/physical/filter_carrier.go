@@ -170,15 +170,32 @@ func filterCarrierIndex(stages *[]Stage, cteTerminals map[string]bool) int {
 	if last < 0 {
 		return -1
 	}
-	shared, isCTETerminal := cteTerminals[(*stages)[last].ID]
-	if !shared && stageEvaluatesFilter(&(*stages)[last]) {
-		// A single-reference CTE body's terminal may carry it, but it is
-		// marked: a later pass that gives the stage a second consumer turns
-		// this into the shared case, and assertNoConsumerScopedFilterOn-
-		// SharedStage is what notices.
-		(*stages)[last].ConsumerScoped = (*stages)[last].ConsumerScoped || isCTETerminal
+	_, isCTETerminal := cteTerminals[(*stages)[last].ID]
+	if !isCTETerminal && stageEvaluatesFilter(&(*stages)[last]) {
 		return last
 	}
+	// A CTE BODY'S TERMINAL NEVER CARRIES A CONSUMER'S FILTER, whatever the
+	// reference count says right now (#876).
+	//
+	// The count is `cteRefCounts` over the statement's OWN logical plan, and
+	// a CTE named only inside a scalar subquery's TEXT appears there ZERO
+	// times: each producer is planned by its own
+	// emitScalarProducerStagesTyped walk over the SHARED dedup cache, and the
+	// second walk has not happened when the first one's filter is attached.
+	// So "not known shared yet" was a claim about the ORDER OF WALKS, not
+	// about the plan — the marker plus assertNoConsumerScopedFilterOnShared-
+	// Stage then turned the hazard into a hard refusal for a query
+	// PostgreSQL answers:
+	//
+	//	WITH c AS (SELECT id, c_i64 AS v FROM typemx)
+	//	SELECT COUNT(*) FROM typemx
+	//	WHERE c_i64 < (SELECT MAX(v) FROM c WHERE c.id < 4000)
+	//	  AND c_i64 > (SELECT MIN(v) FROM c WHERE c.id < 4000)
+	//
+	// The consumer gets its own StageProject instead, which is what the
+	// deduped ALIAS has had since #656. Presence in the map — not a true
+	// value — is the test, because presence is the engine's own claim that a
+	// reference may be pointed here.
 	depID := (*stages)[last].ID
 	*stages = append(*stages, Stage{
 		ID:           fmt.Sprintf("project-%d", len(*stages)),
