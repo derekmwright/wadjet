@@ -98,6 +98,80 @@ func declaredJoinSchema(n *logical.Node, want []string) []parquet.Column {
 				})
 			}
 		}
+		if cur.Type == logical.NodeAggregate && len(cur.Children) == 1 {
+			// AN AGGREGATE'S OUTPUT IS NOT ITS INPUT, so the walk stops here
+			// rather than describing this side by the columns of the scan
+			// underneath it.
+			//
+			// A decorrelated LATERAL is the shape that makes it matter: its
+			// build side is `Project -> Aggregate -> Scan`, and the walk
+			// declared the SCAN's `g` (INT32) for a side whose real output
+			// carries `g` = MAX(id) (INT64). A task whose build partition was
+			// empty then wrote a `.wshf` file declaring that column INT32
+			// while every task with rows declared it INT64, and the consumer
+			// types itself from whichever file it reads first — refused at the
+			// read as `column "g" is INT32 ... but INT64 in an earlier file`
+			// (ADR-0010), or, where the two shapes differed in WIDTH,
+			// `declares 2 columns where an earlier file ... declared 5`.
+			// #767's DAG half, and #956's after the correlation key moved
+			// into a hidden slot.
+			//
+			// The names are the DAG's own: the published list `stageGroupKeyNames`
+			// computes, put through `exec.PublishedGroupKeyNames`' output rule
+			// by `stageEmittedKeyNames`, then one column per aggregate under
+			// its OutputCol. Keys first, which is the order the operator emits
+			// them in.
+			in := emittedColTypes(cur.Children[0])
+			published, resolve := stageGroupKeyNames(cur, cur.Children[0])
+			emitted := stageEmittedKeyNames(published, resolve)
+			keyTypes, _ := derivedGroupKeyTypes(cur.GroupBy, cur.Children[0])
+			for i, name := range emitted {
+				lc := strings.ToLower(name)
+				if seen[lc] || (len(wantSet) > 0 && !wantSet[lc]) {
+					continue
+				}
+				t, ok := lookupColType(in, cur.GroupBy[i])
+				if !ok {
+					t, ok = keyTypes[cur.GroupBy[i]]
+				}
+				if !ok {
+					// No plan-time type for this key. Declaring one that is
+					// merely plausible is what the ADR-0010 guard exists to
+					// catch, so the column is left out and the runtime's own
+					// schema stands wherever the side is not empty.
+					continue
+				}
+				seen[lc] = true
+				out = append(out, parquet.Column{Name: name, Type: t, Nullable: true})
+			}
+			for _, agg := range cur.AggExprs {
+				lc := strings.ToLower(agg.OutputCol)
+				if agg.OutputCol == "" || seen[lc] || (len(wantSet) > 0 && !wantSet[lc]) {
+					continue
+				}
+				t, known := aggSpecOutputType(cur, agg)
+				if !known {
+					continue
+				}
+				col := parquet.Column{Name: agg.OutputCol, Type: t, Nullable: true}
+				if t == parquet.TypeDecimal {
+					// A DECIMAL carries half of every value in its HEADER
+					// (ADR-0010): the chunk holds the unscaled integer and the
+					// header holds the scale. Declaring one with no (p,s) is
+					// exactly the disagreement the shuffle guard refuses, so a
+					// DECIMAL aggregate whose (p,s) is not known at plan time
+					// is left out rather than declared at scale 0.
+					m, known := aggSpecOutputDecimal(cur, agg)
+					if !known {
+						continue
+					}
+					col.Precision, col.Scale = m.Precision, m.Scale
+				}
+				seen[lc] = true
+				out = append(out, col)
+			}
+			return
+		}
 		if cur.Type == logical.NodeScan {
 			for _, name := range cur.ScanColumns {
 				lc := strings.ToLower(name)

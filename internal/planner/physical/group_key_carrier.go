@@ -131,6 +131,10 @@ func stageGroupKeyNames(agg, child *logical.Node) (published []string, resolve [
 	keys := groupKeyOutputs(agg)
 	published = make([]string, len(agg.GroupBy))
 	resolve = make([]GroupKeyResolution, len(agg.GroupBy))
+	// execRule[i] marks a key whose two names are the SAME string, so the
+	// fragment gets no GroupByOutNames for it and `exec.PublishedGroupKeyNames`
+	// own rule decides what the aggregate emits. See the loop's tail.
+	execRule := make([]bool, len(agg.GroupBy))
 	for i, gb := range agg.GroupBy {
 		k := groupKeyOut{Name: plansql.NormalizeIdentRef(strings.TrimSpace(gb))}
 		if i < len(keys) {
@@ -172,10 +176,18 @@ func stageGroupKeyNames(agg, child *logical.Node) (published []string, resolve [
 			// A bare column reference. The input carries it under its own
 			// name unless a Project below renames it — and the DAG emits no
 			// stage for a Project, so the fragment sees the source column.
+			//
+			// RESOLVED by k.Slot and PUBLISHED as k.Name. The two are the
+			// same string for every key the query wrote — Slot IS Name there
+			// — and differ only for a key the planner MINTED, which resolves
+			// by the input column and publishes under a hidden slot (#956).
+			// Reading the published name for both is what would send the slot
+			// to a fragment that has no column of that name.
 			published[i] = k.Name
-			resolve[i] = GroupKeyResolution{Expr: k.Name}
+			resolve[i] = GroupKeyResolution{Expr: k.Slot}
 			resolved, def, defScope, renamed := resolveAggInputName(gb, child)
 			if !renamed {
+				execRule[i] = !k.Minted && !k.Delimited
 				break
 			}
 			if def == nil {
@@ -202,7 +214,44 @@ func stageGroupKeyNames(agg, child *logical.Node) (published []string, resolve [
 			}
 		}
 	}
+	// A key whose RESOLUTION is its PUBLISHED name gets no GroupByOutNames, so
+	// the fragment's aggregate names it by `exec.PublishedGroupKeyNames`' own
+	// rule: the relation qualifier is stripped, and kept only where stripping
+	// would make two keys collide. This list has to SAY that, because it is
+	// what every consumer above the stage reads.
+	//
+	// It did not, and the two names then disagreed for every QUALIFIED key
+	// that is a plain column — the shape a decorrelated LATERAL always
+	// produces (`GROUP BY t.g`). A join above one carried `t.g` in its output
+	// set while the build stream published `g`, so a fragment whose build
+	// partition was empty wrote a `.wshf` file without that column and one
+	// with rows wrote it: `declares 3 columns [k g c] where an earlier file of
+	// the same stage input declared 4 [k g c t.g]` (ADR-0010, #767's DAG half).
+	//
+	// Only for the keys marked above. A key whose two names ALREADY differ —
+	// a derived table's alias (`GROUP BY u.k` over `SELECT n_regionkey AS k`),
+	// a derived, literal, delimited or minted key — has a name the planner
+	// decided and hands to the fragment through GroupByOutNames, and exec's
+	// strip does not run on it (#467, #480, #740, ADR-0026 §2).
+	if anyExecRule(execRule) {
+		emitted := exec.PublishedGroupKeyNames(published, nil, false)
+		for i := range published {
+			if execRule[i] {
+				published[i] = emitted[i]
+			}
+		}
+	}
 	return published, resolve
+}
+
+// anyExecRule reports whether any key is left to exec's own naming rule.
+func anyExecRule(flags []bool) bool {
+	for _, f := range flags {
+		if f {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveExprs is the resolution list as plain text, for the callers that need
