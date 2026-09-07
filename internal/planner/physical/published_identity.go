@@ -304,7 +304,7 @@ func respellAggSpecOverProducerOutput(spec *AggSpec, arms map[string]bool, in []
 	for _, r := range spec.InputRefs {
 		byWritten[strings.ToLower(r.Written)] = r
 	}
-	rewrite := func(text string) (string, bool) {
+	rewrite := func(text string, namesOnly bool) (string, bool) {
 		node, err := plansql.ParseExpression(text)
 		if err != nil {
 			return "", false
@@ -322,6 +322,14 @@ func respellAggSpecOverProducerOutput(spec *AggSpec, arms map[string]bool, in []
 				return nil, false
 			}
 			if isExpr {
+				// A bare InputCol with no InputExpr is a name the operator
+				// LOOKS UP, so a definition substituted there would hand it
+				// `(b * 100)` to find as a column. The caller says which it
+				// is; declining leaves the spelling for
+				// assertAggregateInputsResolve to judge.
+				if namesOnly {
+					return nil, false
+				}
 				inner, err := plansql.ParseExpression(name)
 				if err != nil {
 					return nil, false
@@ -348,7 +356,7 @@ func respellAggSpecOverProducerOutput(spec *AggSpec, arms map[string]bool, in []
 		return out.String(), true
 	}
 	if spec.InputExpr != "" {
-		if text, ok := rewrite(spec.InputExpr); ok {
+		if text, ok := rewrite(spec.InputExpr, false); ok {
 			spec.InputExpr = text
 		}
 		return
@@ -356,7 +364,7 @@ func respellAggSpecOverProducerOutput(spec *AggSpec, arms map[string]bool, in []
 	if spec.InputCol == "" || spec.InputCol == "*" {
 		return
 	}
-	if text, ok := rewrite(spec.InputCol); ok {
+	if text, ok := rewrite(spec.InputCol, true); ok {
 		spec.InputCol = text
 	}
 }
