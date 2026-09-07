@@ -313,6 +313,66 @@ func TestJ2AJoinConsumerBindsThePublishedIdentity(t *testing.T) {
 				"the alias; identical at a3f9b664",
 		},
 		{
+			// PINNED. An OUTER join with a NON-KEY predicate in its ON
+			// clause, where the NULL-padded side makes the join stage's tasks
+			// write DIFFERENT `.wshf` schemas: one file names column 3 `y.w`
+			// and an earlier file of the same stage input named it `y.id`,
+			// which ADR-0010's reader refuses.
+			//
+			// The root cause is PRE-EXISTING and is not this pass: the
+			// TWO-RELATION spelling below fails the same way at a3f9b664,
+			// where no carry runs at all. What the carry does is make the
+			// three-relation shape REACH it — at a3f9b664 the join's payload
+			// had no `y.w`, so its files agreed on a schema and the query was
+			// SILENTLY wrong instead (`s:FLOAT64`, five NULLs on both DAG
+			// arms; the UNION ALL twin lost the column on both). Silent wrong
+			// -> loud is the direction the project asks for, and it is still
+			// a shape this arc does not close.
+			//
+			// Fail-on-agree, per arm: the day the join stage writes one
+			// schema for every task, these answer PostgreSQL and the pins go.
+			name: "770 PINNED: an OUTER join with a non-key ON predicate, window consumer",
+			sql: "SELECT x.w AS xw, SUM(y.w) OVER () AS s FROM (SELECT id, a AS w FROM decpair) x " +
+				"LEFT JOIN (SELECT id, b*100 AS w FROM decpair) y ON x.id = y.id AND y.id <> 5 " +
+				"JOIN decpair u ON x.id = u.id WHERE x.w > 1 ORDER BY xw",
+			want: "cols=[xw:DECIMAL(9,2) s:DECIMAL(38,4)] rows=5 | 2.00,3825.0000 | " +
+				"12.75,3825.0000 | 12.75,3825.0000 | 12.75,3825.0000 | 12.75,3825.0000",
+			pin: map[string]string{"dagshuf": "ERR native DAG: stage window-9 (window)"},
+			why: "the join stage's tasks write different .wshf schemas on the NULL-padded side " +
+				"(ADR-0010); pre-existing — the two-relation cell below fails identically at " +
+				"a3f9b664 — and reached here because the carry adds `y.w` to a payload whose " +
+				"files then stop agreeing. At a3f9b664 this was SILENT: s:FLOAT64, five NULLs",
+		},
+		{
+			name: "770 PINNED: an OUTER join with a non-key ON predicate, UNION ALL consumer",
+			sql: "SELECT x.w AS xw, y.w AS yw FROM (SELECT id, a AS w FROM decpair) x " +
+				"LEFT JOIN (SELECT id, b*100 AS w FROM decpair) y ON x.id = y.id AND y.id <> 5 " +
+				"JOIN decpair u ON x.id = u.id WHERE x.w > 1 UNION ALL " +
+				"SELECT x.w AS xw, y.w AS yw FROM (SELECT id, a AS w FROM decpair) x " +
+				"LEFT JOIN (SELECT id, b*100 AS w FROM decpair) y ON x.id = y.id AND y.id <> 5 " +
+				"JOIN decpair u ON x.id = u.id WHERE x.w > 1 ORDER BY xw, yw",
+			want: "cols=[xw:DECIMAL(9,2) yw:DECIMAL(22,4)] rows=10 | 2.00,NULL | 2.00,NULL | " +
+				"12.75,1274.9900 | 12.75,1274.9900 | 12.75,1275.0000 | 12.75,1275.0000 | " +
+				"12.75,1275.0100 | 12.75,1275.0100 | 12.75,NULL | 12.75,NULL",
+			pin: map[string]string{"dagshuf": "ERR native DAG: stage union-18 (union)"},
+			why: "the same .wshf schema divergence one consumer over; at a3f9b664 both DAG " +
+				"arms answered ten rows with the second column gone",
+		},
+		{
+			// The TWO-RELATION spelling, which no carry reaches: this is the
+			// control that says the root cause is the join stage's per-task
+			// output schema and not the payload. Identical at a3f9b664.
+			name: "770 PINNED: the same OUTER join over TWO relations, which no carry reaches",
+			sql: "SELECT x.w AS xw, SUM(y.w) OVER () AS s FROM (SELECT id, a AS w FROM decpair) x " +
+				"LEFT JOIN (SELECT id, b*100 AS w FROM decpair) y ON x.id = y.id AND y.id <> 5 " +
+				"WHERE x.w > 1 ORDER BY xw",
+			want: "cols=[xw:DECIMAL(9,2) s:DECIMAL(38,4)] rows=5 | 2.00,3825.0000 | " +
+				"12.75,3825.0000 | 12.75,3825.0000 | 12.75,3825.0000 | 12.75,3825.0000",
+			pin: map[string]string{"dagshuf": "ERR native DAG: stage window-5 (window)"},
+			why: "identical at a3f9b664, where the pass under test does not run — the " +
+				"divergence is in the join stage's own output schema",
+		},
+		{
 			name: "770 control: an expression over TWO window arms",
 			sql: "SELECT SUM(p.w + q.w) AS s FROM (SELECT id, SUM(a) OVER () AS w FROM decpair) p " +
 				"JOIN (SELECT id, MAX(a) OVER () AS w FROM decpair) q ON p.id = q.id",
