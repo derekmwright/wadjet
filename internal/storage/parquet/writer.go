@@ -83,14 +83,16 @@ func NewWriter(w io.Writer, schema Schema, cfg WriterConfig) (*Writer, error) {
 	if cfg.RowGroupSize <= 0 {
 		cfg.RowGroupSize = 128 * 1024
 	}
-	if err := ValidateWriteSchema(schema); err != nil {
-		return nil, err
-	}
-
-	// The native writer deep-copies the schema (#973); this one holds THAT
-	// copy, not the caller's and not a second copy of its own, so prepareRows
-	// and the decomposition below it read one and the same schema.
+	// The native writer deep-copies the schema (#973) and validates that copy
+	// (#970); this one holds THAT copy, not the caller's and not a second copy
+	// of its own, so prepareRows and the decomposition below it read one and
+	// the same schema, validated once. The refusal is RETURNED here, which is
+	// this constructor's contract, and latched there, which is all the other
+	// one's signature allows.
 	nw := NewNativeWriter(w, schema, cfg)
+	if nw.err != nil {
+		return nil, nw.err
+	}
 	return &Writer{
 		schema: nw.schema,
 		config: cfg,

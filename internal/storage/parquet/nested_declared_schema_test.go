@@ -366,7 +366,11 @@ func TestNestedDeclaredTypesNeedTheFooterBlob(t *testing.T) {
 // case a real writer never produces and a corrupt or hostile footer does.
 func ndsTree(t *testing.T, schema Schema) (*SchemaNode, []*SchemaNode) {
 	t.Helper()
-	return BuildSchemaTree(buildSchemaElements(schema))
+	elements, err := buildSchemaElements(schema)
+	if err != nil {
+		t.Fatalf("buildSchemaElements: %v", err)
+	}
+	return BuildSchemaTree(elements)
 }
 
 func ndsBlob(t *testing.T, declared Schema) []KeyValue {
@@ -616,7 +620,11 @@ func FuzzOverlayDeclaredSchema(f *testing.F) {
 		ndsLeaf("dec", TypeDecimal),
 		{Name: "vec", Type: TypeVector, Nullable: true, Dimension: 4},
 	}}
-	root, leaves := BuildSchemaTree(buildSchemaElements(file))
+	fileElements, err := buildSchemaElements(file)
+	if err != nil {
+		f.Fatalf("buildSchemaElements: %v", err)
+	}
+	root, leaves := BuildSchemaTree(fileElements)
 	base := schemaFromTree(root, leaves)
 	// FlatColumns and BuildSchemaTree walk the same structure in the same
 	// order, so leaf i of the tree is path i of the schema.

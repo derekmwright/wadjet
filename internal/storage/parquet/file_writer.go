@@ -207,6 +207,21 @@ func NewNativeWriter(w io.Writer, schema Schema, cfg WriterConfig) *NativeWriter
 		config: cfg,
 		codec:  codec,
 	}
+	// ONE validation, both constructors. NewWriter has always run this;
+	// NewNativeWriter — exported, documented with a usage example, and the
+	// door every test in this package uses — did not, so the malformed-MAP
+	// corruption ValidateWriteSchema exists to refuse was still reachable
+	// through it: WriteMapRows nil, Close nil, 623 bytes, and neither this
+	// package ("row group 0 column 0 carries path [a] but schema leaf 0 is
+	// [m key_value a]") nor pyarrow ("Malformed schema: not enough elements")
+	// could open the result (#970).
+	//
+	// The constructor's signature cannot report it, so the error is latched
+	// the way a decomposition failure is: the first WriteMapRows or Close
+	// returns it, before any output.
+	if err := ValidateWriteSchema(schema); err != nil {
+		nw.fail(err)
+	}
 	nw.initLeafBuffers()
 	return nw
 }
@@ -372,12 +387,95 @@ func validateWriteColumn(c Column, path string) error {
 		// The leaf is FIXED_LEN_BYTE_ARRAY and its type_length is the
 		// dimension: without one the footer declares a zero-width leaf,
 		// which says nothing about how wide the values actually are.
-		if c.Dimension <= 0 {
-			return fmt.Errorf("column %q: a VECTOR needs a positive Dimension, got %d", path, c.Dimension)
+		if _, err := vectorTypeLength(c.Dimension); err != nil {
+			return fmt.Errorf("column %q: %w", path, err)
+		}
+		return nil
+	case TypeDecimal:
+		if _, _, err := checkDecimalDeclaration(c.Precision, c.Scale); err != nil {
+			return fmt.Errorf("column %q: %w", path, err)
 		}
 		return nil
 	}
 	return nil
+}
+
+// vectorTypeLength is the FIXED_LEN_BYTE_ARRAY width a VECTOR(dimension) leaf
+// declares — and the only way to obtain one.
+//
+// ValidateWriteSchema used to require only Dimension > 0 and
+// buildLeafSchemaElement then wrote `int32(col.Dimension * 4)`, an unchecked
+// narrowing (of an int multiplication that itself overflows on a 32-bit
+// build). Measured at f415faba with NewWriter and Close both returning nil
+// (#971):
+//
+//	Dimension 536870911 (MaxInt32/4) -> type_length 2147483644; pyarrow opens it
+//	Dimension 536870912              -> type_length -2147483648; pyarrow refuses
+//	                                    it: "Invalid FIXED_LEN_BYTE_ARRAY
+//	                                    length: 0"
+//	Dimension 2147483647             -> the same refusal
+//
+// A fixed-width leaf carries no per-value length — the chunk is one run of
+// bytes cut every type_length bytes on the way back (ADR-0018 §10, Width) — so
+// a wrong width is not a wrong number in one field, it is the boundary of
+// every value in the column.
+func vectorTypeLength(dimension int) (int32, error) {
+	if dimension <= 0 {
+		return 0, fmt.Errorf("a VECTOR needs a positive Dimension, got %d", dimension)
+	}
+	// int64 throughout: dimension*4 in int arithmetic wraps on a 32-bit build
+	// before any check could see it.
+	width := int64(dimension) * 4
+	if width > math.MaxInt32 {
+		return 0, fmt.Errorf("a VECTOR of %d float32 components is %d bytes wide, past the %d a "+
+			"FIXED_LEN_BYTE_ARRAY type_length can carry", dimension, width, int64(math.MaxInt32))
+	}
+	return int32(width), nil
+}
+
+// checkDecimalDeclaration returns the (precision, scale) a DECIMAL column's
+// footer annotation will carry, or the reason the column cannot be written.
+//
+// `Precision <= 0` is this package's documented "unconstrained" sentinel and
+// becomes 38 (decimalEffectivePrecision), so the FILE's precision — not the
+// field — is what the scale is measured against, and it is what a foreign
+// reader will apply. Measured at f415faba, all reached through NewWriter with
+// Close returning nil (#969):
+//
+//	DECIMAL(9,-1)  a row of "1.25" read back as 0, and pyarrow refuses the
+//	               file: "Scale must be a non-negative integer that does not
+//	               exceed precision for Decimal logical type"
+//	DECIMAL(4,9)   an EMPTY file still carries the annotation, and pyarrow
+//	               refuses it the same way
+//	DECIMAL(0,40)  the file declares decimal(38,40); pyarrow refuses it
+//	DECIMAL(50,2)  the file declares decimal(38,2) — wadjet reads back its own
+//	               output as DECIMAL(38,2), not the DECIMAL(50,2) asked for
+//	DECIMAL(-3,2)  the same silent re-declaration
+//
+// ParseDecimalParams enforces 1 <= precision <= 38 and 0 <= scale <= precision
+// for DDL; a Column built in Go bypassed it entirely. Scale == precision is
+// legal and stays legal (pyarrow opens DECIMAL(38,38)).
+func checkDecimalDeclaration(precision, scale int) (int32, int32, error) {
+	if precision > MaxDecimalDigits {
+		return 0, 0, fmt.Errorf("a DECIMAL precision of %d is past the %d digits a 128-bit unscaled "+
+			"carrier holds; the file would declare DECIMAL(%d,%d) instead",
+			precision, MaxDecimalDigits, decimalEffectivePrecision(precision), scale)
+	}
+	if precision < 0 {
+		return 0, 0, fmt.Errorf("a DECIMAL precision of %d is not a precision; the file would declare "+
+			"DECIMAL(%d,%d) instead (0 is the unconstrained sentinel and means %d)",
+			precision, decimalEffectivePrecision(precision), scale, MaxDecimalDigits)
+	}
+	if scale < 0 {
+		return 0, 0, fmt.Errorf("a DECIMAL scale of %d is negative; a file annotated that way is one "+
+			"the reference implementation refuses to open", scale)
+	}
+	eff := decimalEffectivePrecision(precision)
+	if scale > eff {
+		return 0, 0, fmt.Errorf("a DECIMAL scale of %d is past the precision %d the file will declare; "+
+			"a file annotated that way is one the reference implementation refuses to open", scale, eff)
+	}
+	return int32(eff), int32(scale), nil
 }
 
 func mapElementDesc(e *Column) string {
@@ -1455,7 +1553,10 @@ func (nw *NativeWriter) writeFooter() error {
 	}
 
 	// Build schema elements (flattened schema tree).
-	schemaElements := buildSchemaElements(nw.schema)
+	schemaElements, err := buildSchemaElements(nw.schema)
+	if err != nil {
+		return err
+	}
 
 	// Stamp the DECLARED schema alongside the parquet one. Nine of the 22
 	// types have no parquet annotation that can carry them —
@@ -1537,7 +1638,13 @@ func (nw *NativeWriter) writeFooter() error {
 
 // buildSchemaElements creates the flattened schema tree for the footer.
 // Handles flat columns and nested types (ARRAY/LIST, MAP, ROW/STRUCT).
-func buildSchemaElements(schema Schema) []SchemaElement {
+//
+// It returns an error rather than emitting a field it had to narrow: this is
+// the structural backstop at the cast, in the same position as checkPageSize
+// (#929). ValidateWriteSchema refuses the same shapes at construction, where
+// the caller still has its rows; if the two ever disagree the file is not
+// written at all rather than written with a wrapped width (#971).
+func buildSchemaElements(schema Schema) ([]SchemaElement, error) {
 	// Root element (message).
 	root := SchemaElement{
 		Name:        "wadjet_schema",
@@ -1546,22 +1653,24 @@ func buildSchemaElements(schema Schema) []SchemaElement {
 	elements := []SchemaElement{root}
 
 	for _, col := range schema.Columns {
-		buildColumnSchemaElements(col, &elements)
+		if err := buildColumnSchemaElements(col, &elements); err != nil {
+			return nil, err
+		}
 	}
-	return elements
+	return elements, nil
 }
 
 // buildColumnSchemaElements recursively emits SchemaElements for a single column.
-func buildColumnSchemaElements(col Column, elements *[]SchemaElement) {
+func buildColumnSchemaElements(col Column, elements *[]SchemaElement) error {
 	switch col.Type {
 	case TypeArray:
-		buildArraySchemaElements(col, elements)
+		return buildArraySchemaElements(col, elements)
 	case TypeMap:
-		buildMapSchemaElements(col, elements)
+		return buildMapSchemaElements(col, elements)
 	case TypeRow:
-		buildRowSchemaElements(col, elements)
+		return buildRowSchemaElements(col, elements)
 	default:
-		buildLeafSchemaElement(col, elements)
+		return buildLeafSchemaElement(col, elements)
 	}
 }
 
@@ -1572,7 +1681,7 @@ func buildColumnSchemaElements(col Column, elements *[]SchemaElement) {
 //	    optional <element_type> element
 //	  }
 //	}
-func buildArraySchemaElements(col Column, elements *[]SchemaElement) {
+func buildArraySchemaElements(col Column, elements *[]SchemaElement) error {
 	rep := FieldOptional
 	if !col.Nullable {
 		rep = FieldRequired
@@ -1602,7 +1711,7 @@ func buildArraySchemaElements(col Column, elements *[]SchemaElement) {
 		elemCol = *col.ElementType
 		elemCol.Nullable = true // elements are always optional in LIST
 	}
-	buildColumnSchemaElements(elemCol, elements)
+	return buildColumnSchemaElements(elemCol, elements)
 }
 
 // buildMapSchemaElements emits the standard Parquet MAP schema:
@@ -1613,7 +1722,7 @@ func buildArraySchemaElements(col Column, elements *[]SchemaElement) {
 //	    optional <value_type> value
 //	  }
 //	}
-func buildMapSchemaElements(col Column, elements *[]SchemaElement) {
+func buildMapSchemaElements(col Column, elements *[]SchemaElement) error {
 	rep := FieldOptional
 	if !col.Nullable {
 		rep = FieldRequired
@@ -1640,12 +1749,15 @@ func buildMapSchemaElements(col Column, elements *[]SchemaElement) {
 	if col.ElementType != nil && col.ElementType.Type == TypeRow && len(col.ElementType.Fields) == 2 {
 		keyCol := col.ElementType.Fields[0]
 		keyCol.Nullable = false // keys are required
-		buildColumnSchemaElements(keyCol, elements)
+		if err := buildColumnSchemaElements(keyCol, elements); err != nil {
+			return err
+		}
 
 		valCol := col.ElementType.Fields[1]
 		valCol.Nullable = true // values are optional
-		buildColumnSchemaElements(valCol, elements)
+		return buildColumnSchemaElements(valCol, elements)
 	}
+	return nil
 }
 
 // buildRowSchemaElements emits the Parquet STRUCT schema:
@@ -1655,7 +1767,7 @@ func buildMapSchemaElements(col Column, elements *[]SchemaElement) {
 //	  optional <type> field2
 //	  ...
 //	}
-func buildRowSchemaElements(col Column, elements *[]SchemaElement) {
+func buildRowSchemaElements(col Column, elements *[]SchemaElement) error {
 	rep := FieldOptional
 	if !col.Nullable {
 		rep = FieldRequired
@@ -1668,12 +1780,15 @@ func buildRowSchemaElements(col Column, elements *[]SchemaElement) {
 	*elements = append(*elements, group)
 
 	for _, field := range col.Fields {
-		buildColumnSchemaElements(field, elements)
+		if err := buildColumnSchemaElements(field, elements); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // buildLeafSchemaElement emits a single leaf SchemaElement.
-func buildLeafSchemaElement(col Column, elements *[]SchemaElement) {
+func buildLeafSchemaElement(col Column, elements *[]SchemaElement) error {
 	se := SchemaElement{
 		Name: col.Name,
 	}
@@ -1714,19 +1829,26 @@ func buildLeafSchemaElement(col Column, elements *[]SchemaElement) {
 	case TypeDecimal:
 		ct := ConvertedDecimal
 		se.ConvertedType = &ct
-		prec := decimalEffectivePrecision(col.Precision)
-		se.Precision = int32(prec)
-		se.Scale = int32(col.Scale)
+		prec, scale, err := checkDecimalDeclaration(col.Precision, col.Scale)
+		if err != nil {
+			return fmt.Errorf("column %q: %w", col.Name, err)
+		}
+		se.Precision = prec
+		se.Scale = scale
 		if pt == PhysicalFixedLenByteArray {
 			se.TypeLength = decimalFLBAWidth
 		}
 		se.LogicalType = &LogicalType{
 			Type:      LogicalDecimal,
-			Precision: prec,
-			Scale:     col.Scale,
+			Precision: int(prec),
+			Scale:     int(scale),
 		}
 	case TypeVector:
-		se.TypeLength = int32(col.Dimension * 4) // dim × sizeof(float32)
+		width, err := vectorTypeLength(col.Dimension) // dim × sizeof(float32)
+		if err != nil {
+			return fmt.Errorf("column %q: %w", col.Name, err)
+		}
+		se.TypeLength = width
 		se.LogicalType = &LogicalType{
 			Type:      LogicalVector,
 			Dimension: col.Dimension,
@@ -1734,6 +1856,7 @@ func buildLeafSchemaElement(col Column, elements *[]SchemaElement) {
 	}
 
 	*elements = append(*elements, se)
+	return nil
 }
 
 // --- Leaf buffer methods ---

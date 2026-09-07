@@ -721,7 +721,10 @@ func TestMalformedMapSchemaMisplacesLaterColumns(t *testing.T) {
 		t.Fatal("ValidateWriteSchema accepted the malformed MAP")
 	}
 
-	elements := buildSchemaElements(bad)
+	elements, err := buildSchemaElements(bad)
+	if err != nil {
+		t.Fatalf("buildSchemaElements: %v", err)
+	}
 	root, leaves := BuildSchemaTree(elements)
 	if root == nil {
 		t.Fatal("no schema root")
