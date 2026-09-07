@@ -3632,6 +3632,13 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if err := p.refuseCorrelatedSubqueries(node); err != nil {
 		return nil, err
 	}
+	// A star reading a decorrelated LATERAL whose block projection is not the
+	// column list its stage emits. One spelling was LOUD and the other
+	// silently dropped the column; both are routed to the single-process
+	// pipeline, where the lateral's Project is a real operator (#984).
+	if err := p.refuseLateralProjection(node); err != nil {
+		return nil, err
+	}
 	// A `SELECT * ... ORDER BY <n>` whose star never expanded (#810). This is
 	// a genuine refusal of the QUERY, not of the distributed plan: it is NOT
 	// one of the typed errors the coordinator routes local on, because the
