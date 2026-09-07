@@ -960,6 +960,32 @@ func declaredProjectionDecl(proj logical.Projection, decls colDecls, strictInt m
 		return expr.Decl(fc.Type)
 	}
 	if proj.ASTExpr != nil && !isSimpleColRefForRename(proj.ASTExpr) {
+		// The producer may PUBLISH this expression as a column, under its own
+		// text. That is what an aggregate does with a derived GROUP BY key,
+		// and the DISTINCT lowering makes every SELECT item one:
+		// `SELECT DISTINCT a * 2 AS v` becomes `GROUP BY a * 2` with a
+		// Project above it, and the aggregate emits `a * 2` while emitting
+		// no `a` at all.
+		//
+		// Above such a producer the expression is a NAME and not arithmetic
+		// — ADR-0026 §2c, and the same question this arc asks everywhere: the
+		// consumer takes the producer's own declaration instead of
+		// re-deriving one. Re-reading it as structure looks for `a`, finds
+		// nothing, and falls to the float rule, so an exact DECIMAL was
+		// declared FLOAT64 on every arm — and on the DAG the pre-aggregate
+		// projection then allocated a float vector for a DECIMAL value and
+		// #361's silent-write guard failed the task after three attempts
+		// (#949).
+		if name := strings.TrimSpace(proj.Expr); name != "" {
+			if t, ok := lookupColType(decls.types, name); ok {
+				if t == parquet.TypeDecimal {
+					if m, ok := lookupColDecimal(decls.dec, name); ok && m.Precision > 0 {
+						return expr.DeclDecimal(m.Precision, m.Scale)
+					}
+				}
+				return expr.Decl(t)
+			}
+		}
 		return inferProjectionDeclType(proj.ASTExpr, parquet.TypeString, strictInt, decls)
 	}
 	// A PARENTHESIZED bare reference — `SELECT (a)` — is a bare reference,
