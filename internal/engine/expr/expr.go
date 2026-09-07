@@ -6076,6 +6076,9 @@ type SubqueryRunner func(sql string) ([]map[string]any, error)
 type ScalarSubquery struct {
 	SQL    string
 	Runner SubqueryRunner
+	// Cols is the subquery's SELECT-list COLUMN COUNT, resolved from its own
+	// plan at compile time — see refuseMultiColumnSubqueryByPlan.
+	Cols SubqueryColumnsFunc
 	// Decl is the DECLARED type of the subquery's single output column, and
 	// DeclKnown says whether anything resolved it (#696). It carries no value
 	// and changes no evaluation: it exists so the boxed comparison can read
@@ -6117,6 +6120,9 @@ func (e *ScalarSubquery) resolveSlow() {
 	// u.did) > 0` over a CTE was planned here and answered a query-wide
 	// constant 0 on all four arms (#535).
 	refuseDanglingSubquery("scalar", e.SQL)
+	// BEFORE THE RUN: PostgreSQL decides the column count during parse
+	// analysis, so an EMPTY multi-column subquery is 42601 there too.
+	refuseMultiColumnSubqueryByPlan(e.Cols, e.SQL, false)
 	// TWO ROWS, not the whole result: `> 1` is the entire cardinality rule,
 	// so the read stops where the answer is known (plansql.AppendRowLimit).
 	// e.SQL — not the bounded text — is what every error below names, because
@@ -6159,6 +6165,9 @@ type MemoryAccountant interface {
 // Example: WHERE user_id IN (SELECT user_id FROM active_users)
 // Uncorrelated: executed once and result set cached in a hash set for O(1) lookup.
 type InSubquery struct {
+	// Cols is the subquery's SELECT-list COLUMN COUNT — see
+	// refuseMultiColumnSubqueryByPlan.
+	Cols   SubqueryColumnsFunc
 	Expr   Expr
 	SQL    string
 	Runner SubqueryRunner
@@ -6461,6 +6470,7 @@ func (e *InSubquery) resolveSlow() {
 	// The same guard the other two uncorrelated evaluators carry: a set this
 	// resolves ONCE has to be one that reads no outer row (#734/#679/#535).
 	refuseDanglingSubquery("IN", e.SQL)
+	refuseMultiColumnSubqueryByPlan(e.Cols, e.SQL, true)
 	rows, err := e.Runner(e.SQL)
 	if err != nil {
 		// NOT an empty set. Treating the failure as "every probe misses" is

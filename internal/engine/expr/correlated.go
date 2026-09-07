@@ -13,6 +13,10 @@ import (
 // Unlike ScalarSubquery, it cannot cache the result because the inner query
 // depends on values from the outer row.
 type CorrelatedScalarSubquery struct {
+	// Cols is the subquery's SELECT-list COLUMN COUNT, resolved from its own
+	// plan at compile time, and it is asked BEFORE the subquery runs — see
+	// refuseMultiColumnSubqueryByPlan.
+	Cols            SubqueryColumnsFunc
 	Runner          SubqueryRunner
 	OuterRefs       []plansql.OuterRef // correlated column references
 	OuterTables     map[string]bool    // outer table aliases
@@ -38,6 +42,9 @@ func (e *CorrelatedScalarSubquery) Eval(b *batch.RecordBatch, row int) any {
 	if err != nil {
 		failEval(err)
 	}
+	// BEFORE THE RUN: how many columns the SELECT list has is decided at
+	// analysis time on PostgreSQL, so it fires over an empty result too.
+	refuseMultiColumnSubqueryByPlan(e.Cols, sql, false)
 	// TWO ROWS, not the whole result: `> 1` is the entire cardinality rule
 	// (ADR-0021 §5), so the second row is where the answer is already known.
 	// The bound is on the READ and not on the rule — a third row raises the
@@ -80,6 +87,9 @@ func (e *CorrelatedScalarSubquery) buildSQL(b *batch.RecordBatch, row int) (stri
 
 // CorrelatedInSubquery checks if a value is in the result set of a correlated subquery.
 type CorrelatedInSubquery struct {
+	// Cols is the subquery's SELECT-list COLUMN COUNT — see
+	// refuseMultiColumnSubqueryByPlan.
+	Cols            SubqueryColumnsFunc
 	Expr            Expr
 	Runner          SubqueryRunner
 	Not             bool
@@ -119,6 +129,7 @@ func (e *CorrelatedInSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool
 	if err != nil {
 		failEval(err)
 	}
+	refuseMultiColumnSubqueryByPlan(e.Cols, sql, true)
 	rows, runErr := e.Runner(sql)
 	if runErr != nil {
 		// NOT `e.Not`. A membership test whose set could not be built has no
@@ -400,6 +411,29 @@ func ScalarSubqueryValue(sql string, rows []map[string]any) (any, error) {
 		return v, nil
 	}
 	return nil, nil
+}
+
+// refuseMultiColumnSubqueryByPlan raises PostgreSQL's 42601 from the
+// SUBQUERY'S OWN PLAN, before it is run.
+//
+// It is the primary guard and the row-count one below is the backstop, because
+// PostgreSQL decides this during PARSE ANALYSIS: `subquery must return only
+// one column` fires whatever the subquery would return, and an EMPTY one is
+// not an exception. Counting the rows cannot reach that case —
+// `(SELECT id, c_i64 FROM t WHERE id < 0)` returned no row, so there was
+// nothing to count, and the scalar answered SQL NULL where PostgreSQL raises
+// (round-1 P1). Asking the plan reaches it, and reaches a two-column subquery
+// over a two-row relation in the right order as well.
+//
+// cols is nil when nothing could resolve the arity — a compile site with no
+// planner — and the row-count backstop is then all there is.
+func refuseMultiColumnSubqueryByPlan(cols SubqueryColumnsFunc, sql string, inPredicate bool) {
+	if cols == nil {
+		return
+	}
+	if n, ok := cols(sql); ok && n > 1 {
+		failEval(&SubqueryColumnsError{SQL: sql, Columns: n, InPredicate: inPredicate})
+	}
 }
 
 // refuseMultiColumnSubquery raises PostgreSQL's 42601 when a subquery used

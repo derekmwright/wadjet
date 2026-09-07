@@ -596,7 +596,14 @@ SELECT (SELECT id, name FROM t LIMIT 1)      -- 42601 subquery must return only 
 SELECT * FROM u WHERE id IN (SELECT id, name FROM t)  -- 42601 subquery has too many columns
 ```
 
-`EXISTS` reads no value, so `EXISTS (SELECT 1, 2 FROM t)` is legal.
+The count comes from the subquery's SELECT list, not from what it returns, so
+an EMPTY multi-column subquery is refused too — as it is on PostgreSQL, which
+decides this during parse analysis.
+
+`EXISTS` reads no value, so `EXISTS (SELECT 1, 2 FROM t)` is legal on the
+single-process path. On the stage DAG an `EXISTS` inside a filter is refused
+whatever its column count (`EXISTS subquery requires a SubqueryRunner`), which
+is a separate gap.
 
 With auth enabled, a subquery's relations are authorized like any others: an
 identity that may not read `flow_logs` is refused `42501` whether it names the

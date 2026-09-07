@@ -54,6 +54,15 @@ type compileContext struct {
 	// nil means "not known", which is every caller that cannot plan a
 	// subquery — the compile then classifies as it always did.
 	subqueryDecl SubqueryDeclFunc
+	// subqueryCols answers how many COLUMNS a subquery's SELECT list has,
+	// resolved from its own plan at compile time. It is what lets a
+	// construct that requires ONE column refuse before a single row is read,
+	// which is PostgreSQL's order: `subquery must return only one column` is
+	// raised during parse analysis, so it fires over an EMPTY subquery too
+	// (round-1 P1). Counting the returned rows cannot reach that case, and
+	// counting a Go map keyed by NAME cannot see two columns that share one
+	// (round-1 B1).
+	subqueryCols SubqueryColumnsFunc
 	// setRowBound bounds the MEMBERSHIP SET an IN-subquery may build, in
 	// rows. Zero means unbounded, which is every caller that does not ask.
 	//
@@ -81,10 +90,28 @@ type SubqueryDeclFunc func(sql string) (typ batch.TypeID, precision, scale int, 
 // double it.
 type CompileOption func(*compileContext)
 
+// SubqueryColumnsFunc answers how many columns a subquery's SELECT list has.
+// ok=false means the caller could not resolve it, and every construct that
+// asks then keeps the answer it had.
+type SubqueryColumnsFunc func(sql string) (int, bool)
+
 // WithSubqueryDeclTypes supplies the resolver described on
 // compileContext.subqueryDecl (#696).
 func WithSubqueryDeclTypes(f SubqueryDeclFunc) CompileOption {
 	return func(c *compileContext) { c.subqueryDecl = f }
+}
+
+// WithSubqueryEnv supplies both plan-time answers a subquery construct takes
+// from the planner: its single output column's DECLARED TYPE (#696) and its
+// SELECT list's COLUMN COUNT (round-1 P1). They travel together because they
+// come from one walk of one plan, and a call site that took only the first
+// would leave a construct unable to refuse a multi-column subquery before it
+// reads a row.
+func WithSubqueryEnv(decl SubqueryDeclFunc, cols SubqueryColumnsFunc) CompileOption {
+	return func(c *compileContext) {
+		c.subqueryDecl = decl
+		c.subqueryCols = cols
+	}
 }
 
 // WithBudget charges an uncorrelated InSubquery's membership set to the
@@ -446,6 +473,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 						info, _ := plansql.ExtractSelect(parsed)
 						if info != nil {
 							return &CorrelatedInSubquery{
+								Cols:            ctx.subqueryCols,
 								Expr:            left,
 								Runner:          ctx.runner,
 								Not:             n.Not,
@@ -459,6 +487,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 					}
 				}
 				in := &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Not: n.Not,
+					Cols:   ctx.subqueryCols,
 					Budget: ctx.budget, SetBound: ctx.setRowBound}
 				if ctx.trackInSubquery != nil {
 					ctx.trackInSubquery(in)
@@ -602,6 +631,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 				info, _ := plansql.ExtractSelect(parsed)
 				if info != nil {
 					cs := &CorrelatedScalarSubquery{
+						Cols:            ctx.subqueryCols,
 						Runner:          ctx.runner,
 						OuterRefs:       refs,
 						OuterTables:     ctx.outerTables,
@@ -623,7 +653,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 				}
 			}
 		}
-		sq := &ScalarSubquery{SQL: n.SQL, Runner: ctx.runner}
+		sq := &ScalarSubquery{SQL: n.SQL, Runner: ctx.runner, Cols: ctx.subqueryCols}
 		// The subquery's OUTPUT declaration, so the boxed comparison can read
 		// this operand as the number it is rather than as the text it boxes
 		// to (#696). Resolved once, at compile time, from the plan — never

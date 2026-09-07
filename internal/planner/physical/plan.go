@@ -1511,13 +1511,65 @@ func (p *Planner) forSubquery() *Planner {
 //
 // The cost is one logical build per compiled scalar subquery, at plan time.
 func (p *Planner) subqueryDeclOption() expr.CompileOption {
-	return expr.WithSubqueryDeclTypes(func(sql string) (parquet.TypeID, int, int, bool) {
+	return expr.WithSubqueryEnv(func(sql string) (parquet.TypeID, int, int, bool) {
 		cols, ok := p.subqueryOutputColumn(sql)
 		if !ok {
 			return 0, 0, 0, false
 		}
 		return cols.Type, cols.Precision, cols.Scale, true
-	})
+	}, p.subqueryOutputArity)
+}
+
+// subqueryOutputArity is how many columns a subquery's SELECT list has, from
+// the subquery's OWN PLAN.
+//
+// It is what lets a construct requiring ONE column refuse before the subquery
+// runs, which is PostgreSQL's order — `subquery must return only one column`
+// is a parse-analysis error there, so it fires over an EMPTY subquery too
+// (round-1 P1). Counting rows cannot reach that case and counting the row map
+// cannot see two columns that share a name (round-1 B1); the declared schema
+// is positional and knows both.
+//
+// It recovers from a panic and answers not-known for anything it cannot plan,
+// exactly as subqueryOutputColumn does and for the same reason: an unplannable
+// subquery must cost the refusal its evidence, never the query its answer.
+func (p *Planner) subqueryOutputArity(sql string) (n int, ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			n, ok = 0, false
+		}
+	}()
+	ctx := p.planCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	pq, err := plansql.Parse(sql)
+	if err != nil {
+		return 0, false
+	}
+	info, err := plansql.ExtractSelect(pq)
+	if err != nil {
+		return 0, false
+	}
+	var plan *logical.Node
+	if len(p.ctes) > 0 {
+		plan, err = logical.BuildFromSelectWithCTEs(info,
+			append(append([]plansql.CTEDef(nil), p.ctes...), info.CTEs...))
+	} else {
+		plan, err = logical.BuildFromSelect(info)
+	}
+	if err != nil || plan == nil {
+		return 0, false
+	}
+	p.AnnotateScanColumns(ctx, plan)
+	schema := declaredOutputSchema(plan, p.subqueryOutputColumn)
+	if len(schema) == 0 {
+		// A shape this walk cannot name — a star it could not expand, a
+		// projection it cannot read. Not-known, and the row-count backstop
+		// still applies.
+		return 0, false
+	}
+	return len(schema), true
 }
 
 // subqueryOutputColumn resolves a scalar subquery's single declared output
@@ -1777,9 +1829,17 @@ func (p *Planner) executeSubquerySchema(ctx context.Context, sql string) ([]map[
 //
 // The suffix is `:N`, the column's position: a colon cannot appear in an
 // identifier the binder resolves, so a disambiguated key can collide with
-// nothing, and no consumer of these rows reads a value by NAME — they all
-// iterate, and the one that does not (`materializeInSubquery`) refuses
-// anything but a single column first.
+// nothing.
+//
+// Every consumer of THESE rows iterates rather than reading a value by name,
+// and the one that comes closest (`materializeInSubquery`) refuses anything
+// but a single column first — but "no consumer reads by name" is NOT true of
+// the runner's rows in general, and saying so would be the false claim a
+// reviewer found: the RECURSIVE-CTE materialization keys its working row by
+// name, so a duplicate-name column list already collapsed there before this
+// pass existed. That path does not come through here, it is broken on both
+// sides of this change, and it has its own filing; recorded so the next
+// reader does not take the narrow statement for the wide one.
 func subqueryRowsPerColumn(schema []parquet.Column, sink *exec.CollectSink) []map[string]any {
 	rows := sink.ToRows()
 	vals := sink.ToRowValues()

@@ -47,6 +47,21 @@ func TestArcH1AMultiColumnSubqueryIs42601OnTheWire(t *testing.T) {
 			`SELECT (SELECT x.id, x.c_i64 FROM h1scal x WHERE x.id = 2) AS v ` +
 				`FROM h1scal WHERE id = 1`,
 			"subquery must return only one column"},
+		// ZERO ROWS. PostgreSQL raises this in parse analysis, so it does not
+		// depend on what the subquery would have returned; counting the rows
+		// cannot reach the case and the first cut answered NULL here.
+		{"two_columns_no_rows",
+			`SELECT (SELECT x.id, x.c_i64 FROM h1scal x WHERE x.id < 0) AS v ` +
+				`FROM h1scal WHERE id = 1`,
+			"subquery must return only one column"},
+		{"two_columns_one_name_no_rows",
+			`SELECT (SELECT ABS(x.c_dec), ABS(x.c_f64) FROM h1scal x WHERE x.id < 0) AS v ` +
+				`FROM h1scal WHERE id = 1`,
+			"subquery must return only one column"},
+		{"in_two_columns_no_rows",
+			`SELECT COUNT(*) AS n FROM h1scal d WHERE d.id IN ` +
+				`(SELECT x.id, x.c_i64 FROM h1scal x WHERE x.id < 0)`,
+			"subquery has too many columns"},
 	} {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
@@ -71,7 +86,9 @@ func TestArcH1AMultiColumnSubqueryIs42601OnTheWire(t *testing.T) {
 		})
 	}
 
-	// THE CONTROL: one column is one column, and it still answers.
+	// THE CONTROLS: one column is one column, and it still answers — over an
+	// EMPTY input too, which is what says the refusal is about the SELECT
+	// list's arity and about nothing else.
 	t.Run("ctl_one_column", func(t *testing.T) {
 		conn := connectPgconn(t, srv.Addr())
 		res := conn.ExecParams(context.Background(),
@@ -82,6 +99,18 @@ func TestArcH1AMultiColumnSubqueryIs42601OnTheWire(t *testing.T) {
 		}
 		if got := string(res.Rows[0][0]); got != "4999014997" {
 			t.Errorf("wire sent %q, want 4999014997", got)
+		}
+	})
+	t.Run("ctl_one_column_no_rows", func(t *testing.T) {
+		conn := connectPgconn(t, srv.Addr())
+		res := conn.ExecParams(context.Background(),
+			`SELECT (SELECT MAX(c_i64) FROM h1scal WHERE id < 0) AS v FROM h1scal WHERE id = 1`,
+			nil, nil, nil, []int16{0}).Read()
+		if res.Err != nil {
+			t.Fatalf("a one-column subquery over an empty input was refused: %v", res.Err)
+		}
+		if res.Rows[0][0] != nil {
+			t.Errorf("wire sent %q, want NULL", string(res.Rows[0][0]))
 		}
 	})
 }

@@ -97,6 +97,30 @@ func TestArcH1AMultiColumnSubqueryIsRefused(t *testing.T) {
 		{"in-star-over-a-two-column-relation",
 			`SELECT COUNT(*) AS n FROM decpair d WHERE d.id IN (SELECT * FROM typemx_dim)`,
 			"subquery has too many columns"},
+
+		// ZERO ROWS. PostgreSQL raises this during PARSE ANALYSIS, so it does
+		// not depend on what the subquery would have returned: an empty
+		// multi-column subquery is 42601 there too. Counting the returned
+		// rows cannot reach that case — there is nothing to count — and the
+		// first cut answered SQL NULL for the scalar and a row count for the
+		// IN. The arity comes from the subquery's own PLAN now, asked before
+		// it runs.
+		{"scalar-two-columns-no-rows",
+			`SELECT d.id AS did, (SELECT x.id, x.c_i64 FROM typemx x WHERE x.id < 0) AS v ` +
+				`FROM decpair d WHERE d.id < 2`,
+			"subquery must return only one column"},
+		{"scalar-two-columns-one-name-no-rows",
+			`SELECT d.id AS did, (SELECT ABS(x.a), ABS(x.b) FROM decpair x WHERE x.id < 0) AS v ` +
+				`FROM decpair d WHERE d.id < 2`,
+			"subquery must return only one column"},
+		{"in-two-columns-no-rows",
+			`SELECT COUNT(*) AS n FROM decpair d WHERE d.id IN ` +
+				`(SELECT x.id, x.c_i64 FROM typemx x WHERE x.id < 0)`,
+			"subquery has too many columns"},
+		{"correlated-in-two-columns-no-rows",
+			`SELECT COUNT(*) AS n FROM decpair d WHERE d.id IN ` +
+				`(SELECT t.id, t.c_i64 FROM typemx t WHERE t.id = d.id AND t.id < 0)`,
+			"subquery has too many columns"},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
@@ -129,6 +153,17 @@ func TestArcH1AMultiColumnSubqueryIsRefused(t *testing.T) {
 			{"one-column-in",
 				`SELECT COUNT(*) AS n FROM decpair d WHERE d.id IN (SELECT t.id FROM typemx t)`,
 				`n | 9`},
+			// A ONE-column subquery over an EMPTY input still answers, which
+			// is the other side of the zero-row rule: the refusal is about
+			// the SELECT list's arity and about nothing else.
+			{"one-column-scalar-no-rows",
+				`SELECT d.id AS did, (SELECT MAX(t.id) FROM typemx t WHERE t.id < 0) AS v ` +
+					`FROM decpair d WHERE d.id < 2`,
+				`did,v | 1,NULL`},
+			{"one-column-in-no-rows",
+				`SELECT COUNT(*) AS n FROM decpair d WHERE d.id IN ` +
+					`(SELECT t.id FROM typemx t WHERE t.id < 0)`,
+				`n | 0`},
 			{"exists-over-two-columns",
 				`SELECT COUNT(*) AS n FROM decpair d WHERE EXISTS ` +
 					`(SELECT t.id, t.c_i64 FROM typemx t WHERE t.id = d.id)`,

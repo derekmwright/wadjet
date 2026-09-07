@@ -184,6 +184,27 @@ func (p *Planner) materializeInSubquery(ctx context.Context, in *plansql.InExpr,
 			ErrInSubqueryDistributed, len(rows), bound))
 		return nil, false
 	}
+	// THE COLUMN COUNT COMES FROM THE SCHEMA, and it is asked BEFORE the
+	// empty-set shortcut (round-1 P1). PostgreSQL raises `subquery has too
+	// many columns` during parse analysis, so an EMPTY multi-column subquery
+	// is 42601 there too — the row loop below cannot reach that case because
+	// it has no row to count, and this path answered `x IN ()` for it.
+	// Declining routes the query to the local pipeline, where the compiled
+	// IN construct raises the 42601 from the subquery's own plan.
+	cols := len(setSchema)
+	if cols == 0 {
+		// A ZERO-ROW result has no batch to read a schema off, so the count
+		// comes from the subquery's own PLAN — which is where PostgreSQL
+		// takes it from too.
+		if n, ok := p.subqueryOutputArity(subq.SQL); ok {
+			cols = n
+		}
+	}
+	if cols > 1 {
+		p.refuseInSubquery(fmt.Errorf("%w: the subquery yields %d columns, not one",
+			ErrInSubqueryDistributed, cols))
+		return nil, false
+	}
 	if len(rows) == 0 {
 		return emptyInSetPredicate(in.Not), true
 	}
