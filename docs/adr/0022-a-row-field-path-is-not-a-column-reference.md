@@ -163,6 +163,43 @@ refusal survives the delegation.
 
 ## Not decided here
 
+- **A field path as an IN-subquery's INNER key** — `x IN (SELECT c_row.b FROM
+  t)`. Added 2026-09-06 (arc H1, #866).
+
+  The decorrelation lowers an `IN` to a semi join whose BUILD side is the
+  subquery's own plan — `Scan → [Join …] → [Filter] → [Aggregate]`, and never a
+  Project. That plan emits the ROW column `c_row` and no column called `b`, so
+  `exec.HashJoin` resolved the build key to index -1, the degenerate
+  all-rows-equal key. Measured against PostgreSQL 17 over the corpus fixtures:
+  PG answered one row (`did = 6`), the single-process and spilled arms answered
+  the two rows whose OUTER key is NULL — which `NULL IN (…)` must exclude,
+  while the one row that matches was dropped — the DAG answered nothing, and
+  the shuffled arm failed with `partitioned shuffle: key "c_row.b" not in
+  schema`. The `NOT IN` twin was wrong on all four arms.
+
+  The lowering now DECLINES when the inner key's qualifier names no relation
+  the subquery reads, which is exactly what a field path is in that position,
+  and the predicate stays a filter. That leaves a LOUD refusal naming
+  `c_row.b` on every arm with `CorrelatedLocalRoutes` moving on both DAG ones —
+  never a wrong count — and it is the MIRROR of the OUTER-key decline rule 1
+  already carries as its ninth resolver.
+
+  **What answering it needs** is the field path MATERIALISED into the
+  subquery's own output under a name of its own — a hidden slot (ADR-0026 §3a),
+  which is the same mechanism this ADR already defers for the aliased-key
+  LATERAL case. That means a Project on a build side
+  `logical.repairDecorrelatedSpelling` models as Project-free, so it is a
+  plan-shape change rather than a resolver addition, and it is its own arc.
+
+  **Second half, recorded so it is not rediscovered:** the refusal's SENTENCE
+  calls the reference "correlated", which it is not.
+  `plansql.DanglingTableRefs` reads a qualifier naming no relation as an OUTER
+  table and has no schema to tell a ROW column from one; giving it that
+  knowledge means threading a `TableColumns` resolver and the ROW fields into
+  `internal/planner/sql`. Gated at
+  `internal/coordinator/arc_h1_field_path_in_subquery_test.go`.
+
+
 - **Three-part paths.** `rw.inner.k` and `t.rw.f` do not parse at all
   ("trailing input after the end of the statement"). That is a parser feature,
   and it fails loudly rather than answering wrongly.

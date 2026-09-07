@@ -580,6 +580,14 @@ arithmetic above it, exactly as the plain `SELECT MAX(bigint_col) FROM t` is —
 the two spellings answer the same value at the same type. An `ORDER BY` term
 the SELECT list does not carry is engine scaffolding and is never the value.
 
+A `ROW` field path may not be an `IN` subquery's SELECT list. `x IN (SELECT
+c_row.b FROM t)` is refused on every arm: the semi join this lowers to keys on
+a column the subquery's output does not carry — the output carries the `ROW`
+column `c_row`, not a column `b` — and answering it would need the field path
+materialised under a name of its own. The field path itself reads normally
+everywhere else, including as the OUTER key of the same predicate
+(`c_row.b IN (SELECT b FROM u)`) and in a literal list.
+
 A subquery used where ONE column is required must return one column. Two
 columns is SQLSTATE `42601`:
 

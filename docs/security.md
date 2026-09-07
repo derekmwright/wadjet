@@ -206,9 +206,9 @@ There are exactly three permissions, and `admin` implies the other two.
 
 1. Look up the user's role from their authentication credentials
 2. Find the matching role definition
-5. For each table referenced in the query, check if the role's `tables` list includes it (or `"*"`)
-6. Check if the role's `allow` list includes the required permission
-7. If the role does not grant access, the request is denied — HTTP 403, pgwire SQLSTATE 42501, gRPC `PermissionDenied`, all with the message `permission denied for table "<name>"`
+3. For each table referenced in the query, check if the role's `tables` list includes it (or `"*"`)
+4. Check if the role's `allow` list includes the required permission
+5. If the role does not grant access, the request is denied — HTTP 403, pgwire SQLSTATE 42501, gRPC `PermissionDenied`, all with the message `permission denied for table "<name>"`
 
 Both halves are required: a role holding `write` may only write the tables its `tables` list names, and a role that lists a table may only do to it what its `allow` list permits. This is the decision every door asks for — see ADR-0034.
 

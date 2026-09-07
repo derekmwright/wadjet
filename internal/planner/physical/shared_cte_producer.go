@@ -88,15 +88,18 @@ func assertNoConsumerScopedFilterOnSharedStage(stages []Stage) error {
 		// distinguishes a predicate attached INSIDE a CTE body from one
 		// attached ABOVE a reference.
 		//
-		// Since #876 filterCarrierIndex refuses to attach a consumer's
-		// filter to ANY recorded CTE terminal — not only one already known
-		// to be shared — and gives the consumer its own StageProject, so
-		// that case no longer reaches this assert and NOTHING SETS
-		// ConsumerScoped today. The field and this walk are kept as the
-		// structural half: they are what would notice a future pass that
-		// MERGES two stages into one and so creates a second consumer after
-		// a filter has landed, which is the case stage emission cannot see.
-		// Said plainly rather than left implying a live trigger.
+		// filterCarrierIndex sets the marker and this walk is its LIVE
+		// trigger: it attaches a consumer's filter to a CTE terminal that is
+		// not yet known to be shared and marks it, and #876's own residual —
+		// two scalar producers that each filter one reference of one CTE —
+		// is refused here when the second producer is pointed at that stage
+		// (TestArcH1TwoFilteredProducersOverOneCTEAreRefusedLoudly).
+		//
+		// #876 tried the stronger rule — never attach to any recorded CTE
+		// terminal, give the consumer its own StageProject — and WITHDREW it:
+		// the project that then carries an outer WHERE over a shared CTE
+		// answered ZERO for PostgreSQL's 4838 on Q15's own shape. So the
+		// marker stays, and so does this assert.
 		//
 		// Deriving ownership structurally instead would mean asking whether
 		// every consumer's LOGICAL ancestry carries the same predicate, and
