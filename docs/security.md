@@ -206,9 +206,9 @@ There are exactly three permissions, and `admin` implies the other two.
 
 1. Look up the user's role from their authentication credentials
 2. Find the matching role definition
-3. For each table referenced in the query, check if the role's `tables` list includes it (or `"*"`)
-4. Check if the role's `allow` list includes the required permission
-5. If the role does not grant access, the request is denied — HTTP 403, pgwire SQLSTATE 42501, gRPC `PermissionDenied`, all with the message `permission denied for table "<name>"`
+5. For each table referenced in the query, check if the role's `tables` list includes it (or `"*"`)
+6. Check if the role's `allow` list includes the required permission
+7. If the role does not grant access, the request is denied — HTTP 403, pgwire SQLSTATE 42501, gRPC `PermissionDenied`, all with the message `permission denied for table "<name>"`
 
 Both halves are required: a role holding `write` may only write the tables its `tables` list names, and a role that lists a table may only do to it what its `allow` list permits. This is the decision every door asks for — see ADR-0034.
 
@@ -269,6 +269,17 @@ else — a role with `tables: ["*"]` and a deny rule on `secret` sees neither
 `DESCRIBE` on a relation this identity may not read is `42501` / HTTP 403,
 naming the table. `SHOW TABLES` is never a refusal: it returns the visible
 subset, which may be empty.
+
+**An error's hint is metadata too.** The unknown-column diagnostic lists the
+relation's available columns, so `SELECT nosuchcol FROM secret` is `42501`
+naming the table — not `42703` with `secret`'s column list — for an identity
+that may not read it. The decision is asked per relation as names are bound,
+which covers a subquery block, a CTE body, a derived table and a
+set-operation arm as well as the `FROM` list; the binder pools those schemas
+into one hint, so a statement whose outer relation is readable published the
+denied one's columns beside it. A relation the identity MAY read still answers
+`42703` with the list, and a relation that does not exist still answers
+`42P01`: the decision is asked only once the catalog has found the table.
 
 This is a deliberate divergence from PostgreSQL, which shows `\d` and `\dt` to
 any role regardless of privileges. Metadata visibility is a product decision
@@ -735,20 +746,24 @@ list names no targets, the way an `INSERT` with no column list does not.
 
 ### Policy Evaluation Order
 
-1. Column references are bound against the schema **this identity** can see, so
+1. Table access is decided for every relation the binder resolves, before its
+   schema is used for anything — so an unknown-column error over a denied
+   relation is `42501` and never a list of that relation's columns
+2. Column references are bound against the schema **this identity** can see, so
    a denied column resolves to nothing (42703) before anything is planned
-2. Table access is decided for every base table the plan reads — including the
-   tables behind derived tables, CTE references and set-operation arms
-3. The security projection is injected above each policed scan: masked columns
+3. Table access is decided again for every base table the plan reads —
+   including the tables behind derived tables, CTE references and
+   set-operation arms
+4. The security projection is injected above each policed scan: masked columns
    become their mask expression, denied columns are gone
-4. Row filter predicates are injected as Filter nodes between the scan and that
+5. Row filter predicates are injected as Filter nodes between the scan and that
    projection
-5. The optimizer pushes filters down to scan operators and through partition
+6. The optimizer pushes filters down to scan operators and through partition
    pruning; the security projection is a barrier the optimizer preserves
-6. In distributed mode the projection is absorbed into the scan stage
+7. In distributed mode the projection is absorbed into the scan stage
    (`SecurityProjectExprs`) and applied on the worker before anything else
    consumes rows; row filters propagate via the physical plan's `FilterExprs`
-7. Query executes — restricted values never leave the scan
+8. Query executes — restricted values never leave the scan
 
 An expression subquery (`(SELECT MAX(col) FROM t)`, an `IN` set, an `EXISTS`)
 is a second query with a plan of its own, and every relation it reads asks the

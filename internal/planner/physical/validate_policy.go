@@ -32,12 +32,35 @@ type policedColumnSource struct {
 	// so `SELECT nosuchcol FROM t` cannot answer with a hint that lists a
 	// column the policy denies.
 	deniedFor func(table string) map[string]bool
+	// denyTable is the TABLE decision, asked for one relation at the moment
+	// the binder resolves it, and nil when no caller can ask (#946).
+	//
+	// It has to be here and not in front of the binder. The binder POOLS the
+	// schemas of every relation a statement resolves before it writes its
+	// hint: `SELECT id FROM emp WHERE id = (SELECT MAX(nocol) FROM secret)`
+	// answered `unknown column "nocol" (available: acct, amt, dept, id, note,
+	// salary, ssn)` — emp's columns UNIONED with secret's `note` — for an
+	// identity that may not read `secret` at all. So the decision has to
+	// precede the resolution of EVERY relation the binder touches, which is
+	// CTE bodies, derived tables, subquery blocks and set-operation arms as
+	// well as the FROM list, and this is the one seam that sees all of them.
+	//
+	// It is asked AFTER the relation is found, so a name that is not a table
+	// keeps PostgreSQL's 42P01 and only an existing-but-denied relation earns
+	// the 42501. `docs/security.md` and ADR-0034: metadata follows the table
+	// decision, and an error's hint is metadata.
+	denyTable func(table string) error
 }
 
 func (p policedColumnSource) GetTable(ctx context.Context, name string) (*catalog.TableMeta, error) {
 	meta, err := p.src.GetTable(ctx, name)
 	if err != nil || meta == nil {
 		return meta, err
+	}
+	if p.denyTable != nil {
+		if derr := p.denyTable(resolveTableSpelling(p.src, name)); derr != nil {
+			return nil, derr
+		}
 	}
 	drop := p.deniedFor(resolveTableSpelling(p.src, name))
 	if len(drop) == 0 {
@@ -81,15 +104,27 @@ func (p policedColumnSource) AmbiguousTableNames(name string) []string {
 // nothing about the column, not even its name in an error's hint, survives
 // the policy.
 //
-// deniedFor nil, or a nil catalog, is the plain unfiltered validation.
-func ValidateColumnsUnderPolicy(ctx context.Context, cat *catalog.Catalog, info *plansql.SelectInfo, deniedFor func(table string) map[string]bool) error {
+// denyTable is the TABLE decision for the same relations, asked as the binder
+// resolves each one so a DENIED relation's column list never reaches a hint
+// (#946). It is separate from deniedFor because the two answers have different
+// shapes and different refusals: a denied COLUMN does not exist (42703, and
+// nothing about it survives), a denied RELATION is a refusal (42501, and
+// nothing about it is published).
+//
+// Both nil, or a nil catalog, is the plain unfiltered validation.
+func ValidateColumnsUnderPolicy(ctx context.Context, cat *catalog.Catalog, info *plansql.SelectInfo,
+	deniedFor func(table string) map[string]bool, denyTable func(table string) error) error {
 	if cat == nil || info == nil {
 		return nil
 	}
-	if deniedFor == nil {
+	if deniedFor == nil && denyTable == nil {
 		return validateColumns(ctx, cat, info)
 	}
-	return validateColumns(ctx, policedColumnSource{src: cat, deniedFor: deniedFor}, info)
+	if deniedFor == nil {
+		deniedFor = func(string) map[string]bool { return nil }
+	}
+	return validateColumns(ctx,
+		policedColumnSource{src: cat, deniedFor: deniedFor, denyTable: denyTable}, info)
 }
 
 // applyContextColumnPolicies enforces the query's policy on a plan this

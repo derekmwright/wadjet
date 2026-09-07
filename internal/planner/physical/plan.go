@@ -1640,9 +1640,12 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 		// a mask-only policy — the common case — has nothing for the binder
 		// to refuse.
 		if denied := pol.DeniedColumns(); len(denied) > 0 {
+			// nil table hook: applyContextColumnPolicies below asks the
+			// ACCESS decision for every relation this plan reads (#945), so
+			// the binder's own refusal would be a second copy of it.
 			if err := ValidateColumnsUnderPolicy(ctx, p.catalog, info, func(table string) map[string]bool {
 				return denied[strings.ToLower(table)]
-			}); err != nil {
+			}, nil); err != nil {
 				return nil, nil, nil, err
 			}
 		}
@@ -2071,9 +2074,12 @@ func (p *Planner) emitScalarProducerStagesTyped(stages *[]Stage, subquerySQL str
 	// becomes a task.
 	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 || logical.PolicyLookupFromContext(ctx) != nil {
 		if denied := pol.DeniedColumns(); len(denied) > 0 {
+			// nil table hook: applyContextColumnPolicies below asks the
+			// ACCESS decision for every relation this plan reads (#945), so
+			// the binder's own refusal would be a second copy of it.
 			if err := ValidateColumnsUnderPolicy(ctx, p.catalog, info, func(table string) map[string]bool {
 				return denied[strings.ToLower(table)]
-			}); err != nil {
+			}, nil); err != nil {
 				return "", 0, false, err
 			}
 		}
