@@ -401,10 +401,17 @@ is MATERIALIZED instead" (`join_input_projection.go`, ADR-0025):
   because `FusedJoinSpec` has no field for one and dropping it un-computes the
   arm's column one pass after it was computed.
 - a RENAME whose bare name the join's OTHER arm also publishes has TWO sources,
-  so the spelling names neither. That one is NOT materialized — the repair was
-  built and withdrawn, because a resolver that returns the qualified name and a
-  stream that ships the probe's copy bare stop agreeing (#770; ADR-0025's
-  section names the four shapes it moved from right to wrong).
+  so the spelling names neither. That one is still NOT materialized — the
+  repair was built and withdrawn, because a resolver that returns the qualified
+  name and a stream that ships the probe's copy bare stop agreeing (ADR-0025's
+  section names the four shapes it moved from right to wrong). What #770 needed
+  instead was for the join to CARRY what its consumer resolves by: a GROUP BY
+  key's resolution spelling and a UNION arm's projection are written against
+  names `NeededColumns` never mentions, and the join underneath dropped them
+  (`groupKeyResolutionNamesBelow` / `unionArmProjectionRefs`,
+  `join_carried_columns.go`). An aggregate ARGUMENT naming such an alias is
+  the same gap and is still open — see ADR-0025's residuals and the pin in
+  `TestH2TwoJoinArmsPublishingOneAliasKeepBothColumns`.
 - once an arm's SELECT list is materialized its stream is the arm's OUTPUT, so
   the join names it with `joinArmAlias` and `materializedBuildColOrigins` — the
   MATERIALIZED answers — rather than `stageBuildTableAlias`'s raw one. The
@@ -418,6 +425,7 @@ is MATERIALIZED instead" (`join_input_projection.go`, ADR-0025):
 | which SIDE of a join a key belongs to | `subtreeNaming.ownsKey` → `assignJoinKeySides` | `subtree_naming.go` |
 | aggregate argument, GROUP BY key | `resolveAggInputName` / `aggStageGroupKey` | `plan.go` |
 | a column reference INSIDE an aggregate argument expression | `respellAggInputExpr` | `window_alias_respell.go` |
+| a reference to a derived table's alias for a WINDOW's output slot | `respellWindowSlotAliasRefs` | `window_alias_respell.go` |
 | ORDER BY term over an AGGREGATE producer | `resolveSortKeyColumn` | `plan.go` |
 | ORDER BY term over a SCAN/JOIN/WINDOW producer | `annotateDerivedAliasSortKey` → `resolveDerivedAliasSortKeys` | `hidden_sort_key.go` |
 | a UNION/INTERSECT/EXCEPT arm's projection | `setOpArmProjection` | `set_op_stages.go` |

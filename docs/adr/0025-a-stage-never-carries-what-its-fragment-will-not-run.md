@@ -1,6 +1,6 @@
 # ADR-0025: A stage never carries a predicate or a projection its fragment will not run
 
-Status: Accepted (2026-08-29, #656; amended 2026-09-03 by arc S1 — a scan's read set is a plan-time fact, and a column the gather computes is typed by the plan)
+Status: Accepted (2026-08-29, #656; amended 2026-09-03 by arc S1 — a scan's read set is a plan-time fact, and a column the gather computes is typed by the plan; amended 2026-09-06 by arc H2 — a stage carries the SECOND spelling its consumer resolves by, and the aggregate ARGUMENT half of that is an open residual)
 
 ## Context
 
@@ -316,6 +316,60 @@ what the producer says it emits. Two arms declaring the same wrong thing is
 still wrong. It refuses with the sentinel, so the coordinator answers the query
 locally instead of panicking — verified by disabling the type repair and
 watching the same SQL answer correctly through the refusal.
+
+## A stage carries the SECOND spelling its consumer resolves by (2026-09-06, #770)
+
+The sections above are about a stage carrying a predicate or a projection its
+fragment will not RUN. This is the mirror: a stage whose fragment WILL run
+something, over a column its payload does not carry.
+
+A join stage's `Columns` is an OutputFilter and its exchanges' are payload
+manifests, and both are built from the join node's `NeededColumns` at stage
+emission. `NeededColumns` spells the name the QUERY wrote. Three consumers
+spell something else:
+
+- a GROUP BY key has a PUBLISHED name and a RESOLUTION spelling (ADR-0026 §2),
+  and where the two differ the resolution spelling is a name no payload list
+  mentions;
+- a UNION ARM forwarding a derived table's COMPUTED column is rewritten into
+  the EXPRESSION that builds it (#554), so the arm reads the definition's
+  source columns;
+- an aggregate ARGUMENT naming a derived table's alias is re-spelled to the
+  source the stream carries.
+
+All three are one query at #770:
+
+	SELECT DISTINCT x.w AS xw, y.w AS yw
+	  FROM (SELECT id, a AS w FROM t) x
+	  JOIN (SELECT id, b*100 AS w FROM t) y ON x.id = y.id
+	  JOIN t u ON x.id = u.id
+	 WHERE x.w > 1
+
+PostgreSQL answers five rows. The DISTINCT spelling failed the SHUFFLED arm
+outright (`GROUP BY key "w" is not a column of its input`) and the UNION
+spelling answered 2 rows with `yw` NULL on BOTH DAG arms, the dedup collapsing
+five distinct pairs into two. The broadcast arm fuses all three relations into
+ONE join, never crosses the boundary, and was right — which is why the arms
+disagreed rather than both being wrong.
+
+`groupKeyResolutionNamesBelow` and `unionArmProjectionRefs`
+(`join_carried_columns.go`) close the first two, and the FILTER on the first is
+the part worth recording: a resolution NAME is pushed into the narrowing stages
+BELOW this one, never added to this one's own list, and only when this stage
+ALREADY names it and the two spellings DIFFER. Both conditions are what keep
+it from being a payload widening — bytes on the wire are a co-equal metric, and
+the unfiltered version put `n_name` / `n1.n_name` / `n2.n_name` onto eight
+TPC-H joins and exchanges across Q05/Q07/Q09/Q10 and `c_name` onto a Q18 join,
+every one a second carry of a value the chained link's own `Columns` already
+supplies.
+
+**The aggregate ARGUMENT is the open residual.** `SUM(y.w)` over the same join
+still fails the shuffled arm, and the only repair found for it carries the
+whole argument reference through the joins below — which is the widening just
+measured. A group key has a second spelling to test; an argument does not, so
+the narrow question that separates "needed here" from "already carried" has no
+answer yet. Pinned fail-on-agree in
+`coordinator.TestH2TwoJoinArmsPublishingOneAliasKeepBothColumns`.
 
 ## A carrier is never handed what it cannot evaluate
 

@@ -955,6 +955,22 @@ SELECT * FROM flow_logs ORDER BY bytes_in DESC NULLS LAST
 A position past the end of the select list is SQLSTATE `42P10`
 (`ORDER BY position N is not in select list`).
 
+### ORDER BY over two output columns of the same name
+
+A query may legally publish two output columns under one name, and each
+`ORDER BY` term then binds to the item it NAMES rather than to the first
+column that answers to the bare name:
+
+```sql
+-- Two outputs called `id`; the second key sorts by the SECOND one
+WITH cte AS (SELECT id, a FROM t)
+SELECT a.id, b.id FROM cte a JOIN cte b ON a.a = b.a ORDER BY a.id, b.id
+```
+
+A term that matches no single select item keeps resolving by name, and a term
+whose bare name matches TWO items — `ORDER BY id` above — binds to the first
+of them. PostgreSQL refuses that one as ambiguous; wadjet answers it.
+
 ### ORDER BY an aggregate the SELECT list does not carry
 
 ```sql
