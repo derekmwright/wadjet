@@ -1684,6 +1684,27 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 		}
 		return nil, nil, nil, fmt.Errorf("subquery execution plan error: %w", err)
 	}
+
+	// A SUBQUERY'S RESULT IS ITS SELECT LIST, and nothing else (#875).
+	//
+	// The logical builder materializes an ORDER BY term the SELECT list does
+	// not carry as a HIDDEN column on the projection, and `Plan` drops it
+	// again before the rows reach the client (#320, the call beside
+	// buildPipeline there). This path had no such trim, so a subquery's rows
+	// arrived carrying `__sortkey_N` beside the one column the query asked
+	// for — and every consumer that reduces a subquery's row to ONE value
+	// picks that value out of a Go MAP (expr.ScalarSubqueryValue,
+	// InSubquery.resolveSlow's "first column only", CorrelatedInSubquery's).
+	// Map iteration order is randomized per range statement, so `SELECT c_ts
+	// FROM typemx ORDER BY id LIMIT 1` answered `id` about one run in five,
+	// on ALL FOUR ARMS and in silence.
+	//
+	// The trim is the same operator the top-level statement gets, from the
+	// same plan, so the two paths cannot disagree about which columns a
+	// SELECT list has.
+	if trim := hiddenSortTrimOp(logicalPlan); trim != nil {
+		ops = append(ops, trim)
+	}
 	return source, ops, sink, nil
 }
 
