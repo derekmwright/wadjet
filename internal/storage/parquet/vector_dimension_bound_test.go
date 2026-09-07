@@ -104,25 +104,55 @@ func TestAnAcceptedVectorDimensionSurvivesTheFile(t *testing.T) {
 // back. A dimension the format cannot carry is encoded as an obviously absent
 // 0, never as a wrapped number that looks like a real declaration.
 func TestTheFooterNeverDeclaresAWrappedVectorDimension(t *testing.T) {
-	roundTrip := func(dim int) int {
+	roundTrip := func(dim int) (int, error) {
 		t.Helper()
 		enc := newThriftEncoder()
 		enc.encodeLogicalType(&LogicalType{Type: LogicalVector, Dimension: dim})
+		if enc.refused != nil {
+			return 0, enc.refused
+		}
 		lt, err := newThriftDecoder(enc.Bytes()).decodeLogicalType()
 		if err != nil {
 			t.Fatalf("decoding the encoded LogicalType for VECTOR(%d): %v", dim, err)
 		}
-		return lt.Dimension
+		return lt.Dimension, nil
 	}
 	for _, dim := range []int{1, 3, MaxVectorDimension} {
-		if got := roundTrip(dim); got != dim {
+		got, err := roundTrip(dim)
+		if err != nil {
+			t.Errorf("a legal VECTOR(%d) was refused by the encoder: %v", dim, err)
+		} else if got != dim {
 			t.Errorf("a legal VECTOR(%d) came back as VECTOR(%d)", dim, got)
 		}
 	}
-	for _, dim := range []int{MaxVectorDimension + 1, 1 << 61, 1 << 62, (1 << 62) + 1, math.MaxInt, -1} {
-		if got := roundTrip(dim); got != 0 {
-			t.Errorf("VECTOR(%d) was encoded as VECTOR(%d) — a wrapped dimension the reader would "+
-				"hand back as a real declaration (round-1 B1/N3)", dim, got)
+	// REFUSED, not substituted (round-2 N): a placeholder is the same mistake
+	// as a clamped length — the file would state something nobody asked for.
+	for _, dim := range []int{MaxVectorDimension + 1, 1 << 61, 1 << 62, (1 << 62) + 1, math.MaxInt, 0, -1} {
+		if _, err := roundTrip(dim); err == nil {
+			t.Errorf("the encoder stated a VECTOR(%d) instead of refusing it (round-2 N)", dim)
 		}
+	}
+}
+
+// Round-2 N, end to end: a footer the encoder refuses is not finalized. The
+// writer refuses such a column at construction, so this drives the seam
+// directly — the metadata is built by hand and handed to the encoder, which is
+// where a future divergence between the two would land.
+func TestAFooterTheEncoderRefusesIsNotFinalized(t *testing.T) {
+	md := &FileMetaData{
+		Version: 1,
+		Schema: []SchemaElement{
+			{Name: "wadjet_schema", NumChildren: 1},
+			{
+				Name: "v", Type: func() *PhysicalType { p := PhysicalFixedLenByteArray; return &p }(),
+				RepetitionType: FieldOptional, TypeLength: 4,
+				LogicalType: &LogicalType{Type: LogicalVector, Dimension: 1 << 62},
+			},
+		},
+		CreatedBy: CreatedBy(),
+	}
+	if got := EncodeFileMetaData(md); got != nil {
+		t.Fatalf("EncodeFileMetaData produced %d bytes for a footer declaring VECTOR(2^62); it must "+
+			"refuse rather than state a substituted dimension (round-2 N)", len(got))
 	}
 }

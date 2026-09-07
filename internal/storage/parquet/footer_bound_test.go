@@ -141,12 +141,68 @@ func TestAFooterExactlyAtTheCeilingWritesAndReopens(t *testing.T) {
 		t.Fatal("the helper accepts one byte past the ceiling")
 	}
 
-	// A file whose footer is a few bytes short of the ceiling, grown the way
-	// the >64 MiB gate grows one, then checked against the ceiling from the
-	// reader's side. Exactly footerMaxSize cannot be hit by construction (the
-	// footer grows in row-group-sized steps), so the assertion is that the
+	// A footer of EXACTLY footerMaxSize bytes, assembled into a real file and
+	// handed to the reader. The metadata is padded to the byte with a
+	// key-value entry, because a writer's own footer grows in row-group-sized
+	// steps and cannot land on the ceiling by construction — and "off by one
+	// at the ceiling" is exactly how a writer and a reader stop agreeing
+	// (round-2 N).
+	t.Run("exactly at the ceiling", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("assembles a 64 MiB footer")
+		}
+		i64 := PhysicalInt64
+		base := func(pad int) *FileMetaData {
+			return &FileMetaData{
+				Version: 1,
+				Schema: []SchemaElement{
+					{Name: "wadjet_schema", NumChildren: 1},
+					{Name: "x", Type: &i64, RepetitionType: FieldOptional},
+				},
+				CreatedBy:        CreatedBy(),
+				KeyValueMetadata: []KeyValue{{Key: "pad", Value: strings.Repeat("p", pad)}},
+			}
+		}
+		// One byte of padding is one byte of footer over this range, so solve
+		// it directly; the varint carrying the padding's own length can grow
+		// once, so correct and re-solve, then assert the result.
+		pad := footerMaxSize - len(EncodeFileMetaData(base(0)))
+		footer := EncodeFileMetaData(base(pad))
+		if len(footer) != footerMaxSize {
+			pad -= len(footer) - footerMaxSize
+			footer = EncodeFileMetaData(base(pad))
+		}
+		if len(footer) != footerMaxSize {
+			t.Fatalf("could not land the footer on the ceiling: %d bytes, want %d",
+				len(footer), footerMaxSize)
+		}
+
+		trailer, err := footerTrailerLength(int64(len(footer)))
+		if err != nil {
+			t.Fatalf("the writer's own bound refuses a footer of exactly %d bytes: %v",
+				footerMaxSize, err)
+		}
+		file := make([]byte, 0, len(footer)+12)
+		file = append(file, []byte("PAR1")...)
+		file = append(file, footer...)
+		var lenBuf [4]byte
+		binary.LittleEndian.PutUint32(lenBuf[:], trailer)
+		file = append(file, lenBuf[:]...)
+		file = append(file, []byte("PAR1")...)
+
+		if _, err := NewReaderFromBytes(file); err != nil {
+			t.Fatalf("the reader refuses a footer of exactly %d bytes, which the writer accepts: %v",
+				footerMaxSize, err)
+		}
+		if _, err := footerTrailerLength(int64(footerMaxSize) + 1); err == nil {
+			t.Fatal("the writer's bound accepts one byte past the ceiling")
+		}
+	})
+
+	// A file whose footer is a few MB, grown the way the >64 MiB gate grows
+	// one, then checked against the ceiling from the reader's side: the
 	// largest footer this writer WILL produce below the bound is one the
-	// reader accepts, and that its trailer is the footer's real length.
+	// reader accepts, and its trailer is the footer's real length.
 	const cols = 50
 	schema := Schema{}
 	row := make(map[string]any, cols)

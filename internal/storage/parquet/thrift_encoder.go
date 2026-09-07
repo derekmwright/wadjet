@@ -2,6 +2,7 @@ package parquet
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
 )
 
@@ -15,6 +16,11 @@ import (
 // thriftEncoder writes Thrift compact protocol data to a byte buffer.
 type thriftEncoder struct {
 	buf []byte
+	// refused latches a field this encoder cannot state honestly. It has no
+	// caller to return an error to — the encoders are pure appends — so
+	// EncodeFileMetaData answers nil, and writeFooter refuses to finalize a
+	// file whose footer could not be encoded (round-2 N).
+	refused error
 }
 
 func newThriftEncoder() *thriftEncoder {
@@ -126,6 +132,13 @@ func (e *thriftEncoder) writeStop() {
 // --- Parquet metadata encoders ---
 
 // EncodeFileMetaData encodes FileMetaData to Thrift compact protocol.
+//
+// It returns nil when the metadata contains a field this encoder cannot state
+// honestly — today only a VECTOR dimension outside what a FIXED_LEN_BYTE_ARRAY
+// can carry, which ValidateWriteSchema and buildLeafSchemaElement both refuse
+// first. Substituting a placeholder was the round-1 shape and it is the wrong
+// answer for the same reason a clamped length is: the file would state
+// something nobody asked for. A nil footer makes Close refuse (round-2 N).
 func EncodeFileMetaData(md *FileMetaData) []byte {
 	e := newThriftEncoder()
 	var lastFieldID int16
@@ -181,6 +194,9 @@ func EncodeFileMetaData(md *FileMetaData) []byte {
 	}
 
 	e.writeStop()
+	if e.refused != nil {
+		return nil
+	}
 	return e.Bytes()
 }
 
@@ -306,11 +322,11 @@ func (e *thriftEncoder) encodeLogicalType(lt *LogicalType) {
 		e.writeFieldHeader(100, thriftStruct, &lastFieldID)
 		var vecLast int16
 		e.writeFieldHeader(1, thriftI32, &vecLast)
-		dim := int32(0)
-		if lt.Dimension > 0 && lt.Dimension <= MaxVectorDimension {
-			dim = int32(lt.Dimension)
+		if lt.Dimension < 1 || lt.Dimension > MaxVectorDimension {
+			e.refused = fmt.Errorf("parquet: a VECTOR of %d components cannot be declared in a "+
+				"footer (1..%d)", lt.Dimension, MaxVectorDimension)
 		}
-		e.writeI32(dim)
+		e.writeI32(int32(lt.Dimension & MaxVectorDimension))
 		e.writeStop()
 	}
 	e.writeStop()

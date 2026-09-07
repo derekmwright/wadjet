@@ -92,3 +92,59 @@ func TestOnlyOneConcurrentCloseFinalizesTheFile(t *testing.T) {
 		mustPyArrowRead(t, out.Bytes(), 1, "a file closed by eight goroutines at once")
 	}
 }
+
+// Round-2 P: the same race against a FAILING output stream, which is where the
+// remaining one lived.
+//
+// The loser of the CAS used to read nw.err to decide what to report, while the
+// winner was writing that same field through nw.fail() as its finalization
+// died: "WARNING: DATA RACE" in 5 of 10 runs. The finalization now runs under a
+// mutex, so a second caller WAITS for it and then reads a finished result
+// rather than racing one — which keeps #888's answer ("every later call returns
+// the latched failure") instead of trading it away for the fix.
+func TestOnlyOneConcurrentCloseFinalizesAFailingStream(t *testing.T) {
+	for _, failAt := range []int{1, 2, 3} {
+		out := &failingWriter{failAt: failAt}
+		w := NewNativeWriter(out, Schema{Columns: []Column{
+			{Name: "x", Type: TypeInt64, Nullable: true},
+		}}, WriterConfig{RowGroupSize: 100, Compression: CompressionNone})
+		if err := w.WriteMapRows([]map[string]any{{"x": int64(1)}}); err != nil {
+			t.Fatalf("failAt=%d: the row was refused before any output: %v", failAt, err)
+		}
+
+		const goroutines = 8
+		errs := make([]error, goroutines)
+		var start, done sync.WaitGroup
+		start.Add(1)
+		done.Add(goroutines)
+		for i := 0; i < goroutines; i++ {
+			go func(i int) {
+				defer done.Done()
+				start.Wait()
+				errs[i] = w.Close()
+			}(i)
+		}
+		start.Done()
+		done.Wait()
+
+		// Every caller reports the finalization's own failure. #888's promise
+		// is that the first output failure is latched and every later call
+		// returns it, and the mutex makes that answer available to a
+		// concurrent caller without a race: it waits for the finalization it
+		// lost and then reads the finished result (round-2 P).
+		for i, err := range errs {
+			if err == nil {
+				t.Fatalf("failAt=%d: Close %d returned nil over a failed output stream", failAt, i)
+			}
+			if !errors.Is(err, errInjectedOutput) {
+				t.Fatalf("failAt=%d: Close %d reported %v, want the injected output failure",
+					failAt, i, err)
+			}
+		}
+
+		if err := w.WriteMapRows([]map[string]any{{"x": int64(2)}}); !errors.Is(err, errInjectedOutput) {
+			t.Fatalf("failAt=%d: a write after the failed Close returned %v, want the output failure",
+				failAt, err)
+		}
+	}
+}

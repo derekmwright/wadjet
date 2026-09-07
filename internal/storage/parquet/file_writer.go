@@ -11,6 +11,7 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/klauspost/compress/gzip"
@@ -66,6 +67,10 @@ type NativeWriter struct {
 	// here is a second footer written over a complete file rather than a
 	// merely garbled one (round-1 N1).
 	closed atomic.Bool
+	// closeMu serialises the finalization itself, so a second Close waits for
+	// the first rather than racing it for nw.err (round-2 P). It is held only
+	// by Close; checkWritable reads the atomic latch and never blocks.
+	closeMu sync.Mutex
 }
 
 // ErrWriterClosed is returned by every call on a writer whose file has
@@ -1201,7 +1206,22 @@ func (nw *NativeWriter) Close() error {
 	// one — and, because the claim is a CAS, so that two goroutines racing to
 	// Close cannot both write a footer: exactly one wins and the other is told
 	// the file is already finalized.
-	if !nw.closed.CompareAndSwap(false, true) {
+	// The finalization runs under closeMu, and a second caller waits for it
+	// rather than racing it.
+	//
+	// The round-1 shape claimed the latch with a CompareAndSwap and let the
+	// loser read nw.err to decide what to report — a data race with the
+	// winner's own nw.fail(), measured under -race against a failing output
+	// stream in 5 of 10 runs. Returning ErrWriterClosed unconditionally there
+	// removes the race but also removes an answer #888 promised: "the first
+	// output or flush failure is latched and every later WriteRows and the
+	// Close return it" (ADR-0018 §10). Holding the mutex keeps both — the
+	// second caller observes a FINISHED finalization, so nw.err is visible to
+	// it through the lock and it reports the same failure the first Close did
+	// (round-2 P).
+	nw.closeMu.Lock()
+	defer nw.closeMu.Unlock()
+	if nw.closed.Load() {
 		// A writer whose finalization FAILED keeps returning that failure: it
 		// is the more specific answer and it is what #888's latch promised.
 		if err := nw.err; err != nil {
@@ -1209,6 +1229,11 @@ func (nw *NativeWriter) Close() error {
 		}
 		return ErrWriterClosed
 	}
+	// Claimed BEFORE the first byte of the finalization goes out, so a Close
+	// that dies half way through the footer cannot be retried into a second
+	// one, and so checkWritable's lock-free read sees the file as finished
+	// from this point on.
+	nw.closed.Store(true)
 	if nw.err != nil {
 		// A failed writer stays failed, and stays closed: the finalization
 		// is over either way, so no later call may write.
@@ -1656,6 +1681,12 @@ func (nw *NativeWriter) writeFooter() error {
 	}
 
 	footerBytes := EncodeFileMetaData(md)
+	if len(footerBytes) == 0 {
+		// The encoder refused a field it could not state honestly rather than
+		// substituting a placeholder for it (round-2 N). Nothing has been
+		// written yet, so the file is simply not finalized.
+		return fmt.Errorf("refusing to finalize the file: its footer could not be encoded")
+	}
 
 	// BEFORE the first footer byte goes out: a footer whose length the
 	// trailer cannot carry has no honest file to be part of, and once the

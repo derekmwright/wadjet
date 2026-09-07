@@ -1099,8 +1099,10 @@ cannot read.** Four rules:
   narrowed the same field a second time
   (`thrift_encoder.go`, outside `buildLeafSchemaElement`, which is why a sweep
   of that function alone missed it); it writes 0 — an obviously absent
-  annotation — rather than a wrapped number that reads back as a real
-  declaration. The same sweep found the row group's byte-array run: its offset
+  annotation — it REFUSES, and `EncodeFileMetaData` answers nil so `Close`
+  refuses to finalize a footer that could not be stated honestly. A substituted
+  placeholder is the same mistake as a clamped length: the file would declare
+  something nobody asked for. The same sweep found the row group's byte-array run: its offset
   table is `uint32`, so a column accumulating more than 4 GiB in one row group
   wrapped every offset after the boundary, and `appendEntryWithValue` now
   refuses that value where the row can still be named.
@@ -1136,13 +1138,20 @@ cannot read.** Four rules:
   writer whose `Close` FAILED keeps returning that failure, which is the more
   specific answer and what §10's latch already promised.
 
-  The latch is claimed with a CompareAndSwap and is the ONE synchronized field
-  in the writer. A writer is not safe for concurrent use — leaf buffers, error
-  latch and byte count are all unsynchronized, and two goroutines writing rows
-  to one writer corrupt the file — but the damage a lost race does at THIS
-  field is a second footer written over a complete one, which is the sequential
-  defect reached through another door, so exactly one caller finalizes and
-  every other is told the file is already finalized.
+  The finalization is the ONE synchronized part of the writer: `Close` runs
+  under a mutex and the latch is an atomic the write doors read without
+  blocking. A writer is not safe for concurrent use — leaf buffers, error latch
+  and byte count are all unsynchronized, and two goroutines writing rows to one
+  writer corrupt the file — but the damage a lost race does at the LATCH is a
+  second footer written over a complete one, which is the sequential defect
+  reached through another door. Claiming it with a bare CompareAndSwap was not
+  enough: the loser then read the winner's error field to decide what to
+  report, which is a data race (measured under `-race` against a failing output
+  stream, 5 of 10 runs) — and answering `ErrWriterClosed` unconditionally
+  instead would have removed §10's promise that every later call returns the
+  latched failure. Under the mutex the second caller waits for a FINISHED
+  finalization and reports the same error the first `Close` returned, so both
+  properties hold at once.
 
   The footer's own size is bounded the same way and BEFORE any footer byte goes
   out: `footerTrailerLength` is the only source of a trailer value, and it

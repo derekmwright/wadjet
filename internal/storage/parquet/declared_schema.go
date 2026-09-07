@@ -81,6 +81,9 @@ func StripDeclaredSchema(data []byte) ([]byte, error) {
 	out := make([]byte, 0, len(data))
 	out = append(out, data[:start]...)
 	footer := EncodeFileMetaData(meta)
+	if len(footer) == 0 {
+		return nil, fmt.Errorf("parquet: the rewritten footer could not be encoded")
+	}
 	out = append(out, footer...)
 	var lenBuf [4]byte
 	binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(footer)))
@@ -136,6 +139,9 @@ func StripCidrStatsOrder(data []byte) ([]byte, error) {
 	out := make([]byte, 0, len(data))
 	out = append(out, data[:start]...)
 	footer := EncodeFileMetaData(meta)
+	if len(footer) == 0 {
+		return nil, fmt.Errorf("parquet: the rewritten footer could not be encoded")
+	}
 	out = append(out, footer...)
 	var lenBuf [4]byte
 	binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(footer)))

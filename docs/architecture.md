@@ -363,8 +363,9 @@ can open. Three rules make that a guarantee rather than a habit — see
   `parquet.ErrWriterClosed` without touching the output, so the finalized file
   is exactly what the first `Close` wrote. A `Close` that fails keeps returning
   its own failure. A writer is not safe for concurrent use, with one exception:
-  the closed latch is atomic, so two goroutines racing to `Close` cannot both
-  finalize — one writes the footer and the other is refused.
+  `Close` is serialized, so two goroutines racing to `Close` cannot both
+  finalize — one writes the footer and the other waits and is handed that
+  `Close`'s own result.
 
 The footer is bounded the same way: it must fit both the format's four-byte
 trailer length and the 64 MiB footer this package will read back, checked before
