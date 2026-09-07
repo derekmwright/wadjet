@@ -1697,6 +1697,30 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      recorded here as a divergence with its mechanism, and closing it needs
      the lateral's own projection to be materialized onto its stage.
 
+   - **`SELECT *` over a LATERAL whose ungrouped COUNT can see no rows is
+     REFUSED, where PostgreSQL answers.** (Added 2026-09-07, arc J1 round 2.)
+     An ungrouped aggregate over an empty input still yields a row in
+     PostgreSQL, and for the COUNT family that row's value is 0. This engine
+     gives the outer row back by making the join LEFT and rewriting the
+     enclosing query's REFERENCES to `COALESCE(<ref>, 0)` — and a star has no
+     reference to rewrite: it expands in a later pass over the plan's own
+     schema, and a star over a JOIN is never expanded at all, because guessing
+     its column set would silently change which columns the query returns. The
+     column therefore read NULL where PostgreSQL reads 0, for exactly the rows
+     a LEFT pad manufactures. `0A000` now, with the spelling that answers in
+     the message (`SELECT o.*, s.n`). MAX over an empty input IS NULL, so a
+     star over that lateral needs no default and still answers.
+
+   - **A star over a NON-aggregated LATERAL publishes PostgreSQL's columns in
+     a different ORDER.** (Added 2026-09-07, arc J1 round 2; PRE-EXISTING.)
+     `SELECT * FROM o JOIN LATERAL (SELECT amount …) li` publishes
+     `amount, id, customer, total` on the single-process arms where PostgreSQL
+     publishes `id, customer, total, amount`: a join emits its PROBE side
+     first, and the planner may make the lateral the probe. The column SET is
+     PostgreSQL's; the sequence is not, and a `SELECT *` has no ORDER BY to
+     make it stable either way. Pinned in
+     `pgwire.TestArcJ1AHiddenSlotIsNotInTheRowDescription`.
+
 6. **A numeric literal's carrier is its TEXT, not a float64.** (Added
    2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as
    `numeric` and compares it at full precision, so `WHERE d = 493827160549382.7160549350`

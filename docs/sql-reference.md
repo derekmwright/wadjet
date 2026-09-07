@@ -794,9 +794,13 @@ this engine  Alice NULL, Bob NULL, Carol NULL      <- one cell differs
 
 Every other combination of join kind and `ON` matches PostgreSQL.
 
-`SELECT *` over an aggregated lateral is a second gap of the same kind: the
-star expands after the default is applied, so a `COUNT` column reached through
-it reads NULL rather than 0. Name the columns to get the default.
+`SELECT *` over a lateral whose ungrouped `COUNT` can see no rows for an outer
+row is REFUSED (`0A000`) rather than answered: the star expands after the
+default is applied, so the column would read NULL where PostgreSQL reads 0, and
+a wrong number for exactly the rows a `LEFT` pad manufactures is the hardest
+kind to notice. Name the lateral's columns — `SELECT o.*, s.n` — and the
+default reaches them. `MAX` over an empty input IS NULL, so a star over that
+lateral needs no default and answers.
 
 The correlated equality is turned into a join, and a join needs the inner
 value as a column, so the planner materializes one under a name from its
