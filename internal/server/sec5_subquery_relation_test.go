@@ -145,6 +145,25 @@ func TestAScalarSubqueryAsksTheTableDecisionOnEveryDoor(t *testing.T) {
 						// relation and nothing else. Not the rule that denied,
 						// not its description, and not a site-local prefix
 						// naming where the check fired (ADR-0034 item 6).
+						//
+						// EQUALITY on the doors that answer in process, and
+						// that includes the two DAG ones — the coordinator
+						// route is where a routing narrative used to be
+						// prefixed (`physical plan: …`, `table-less SELECT
+						// with no distributed stage local execution: …`), and
+						// a `Contains` assertion cannot see a prefix, which is
+						// how it survived round 0. The two network doors keep
+						// `Contains`: pgx renders `ERROR: <msg> (SQLSTATE …)`
+						// and the HTTP door wraps the body's error field, so
+						// the message is not the whole string there — those
+						// are asserted exactly, on the wire, in
+						// TestADeniedScalarSubqueryLeavesPgwireAs42501.
+						exact := strings.HasPrefix(door.name, "embedded/")
+						if exact && err.Error() != want {
+							t.Errorf("the refusal carries something besides the decision's "+
+								"own sentence\n  sql:  %s\n  want: %q\n  got:  %q",
+								tc.sql, want, err.Error())
+						}
 						if !strings.Contains(err.Error(), want) {
 							t.Errorf("refusal does not carry the shared decision's text\n"+
 								"  sql:  %s\n  want: %s\n  got:  %v", tc.sql, want, err)

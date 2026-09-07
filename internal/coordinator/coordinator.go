@@ -1155,6 +1155,12 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		if errors.Is(err, physical.ErrUnbuildableStageDistributed) {
 			return c.runUnbuildableStageLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
+		// An authorization refusal is not a planning narrative: it reaches
+		// the client as the decision's own sentence, the same one the
+		// FROM-list denial on this connection carries (round-1 P1).
+		if refusal, ok := authorizationRefusal(err); ok {
+			return nil, refusal
+		}
 		return nil, fmt.Errorf("physical plan: %w", err)
 	}
 
@@ -3555,6 +3561,10 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	planner.QueryLimits = c.resolveQueryLimits(ctx)
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
+		// The async door's sibling of the same rule.
+		if refusal, ok := authorizationRefusal(err); ok {
+			return "", "", refusal
+		}
 		return "", "", fmt.Errorf("physical plan: %w", err)
 	}
 

@@ -1675,6 +1675,13 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 	// Build physical pipeline
 	source, ops, sink, err := p.buildPipeline(ctx, logicalPlan)
 	if err != nil {
+		// An authorization refusal raised while the pipeline is BUILT — the
+		// table-function guard `buildScan` asks (#943) is the one that gets
+		// here — is the decision's own sentence, not a planning narrative
+		// about the subquery (ADR-0034 item 6; round-1 P1).
+		if sqlerr.StateOf(err) == "42501" {
+			return nil, nil, nil, err
+		}
 		return nil, nil, nil, fmt.Errorf("subquery execution plan error: %w", err)
 	}
 	return source, ops, sink, nil

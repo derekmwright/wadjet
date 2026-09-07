@@ -10,6 +10,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // runRefusedLocal executes a query the stage DAG REFUSED — it produced no
@@ -69,6 +70,9 @@ func (c *Coordinator) runRefusedLocal(
 	planner.QueryLimits = c.resolveQueryLimits(ctx)
 	physPlan, err := planner.Plan(ctx, logicalPlan)
 	if err != nil {
+		if refusal, ok := authorizationRefusal(err); ok {
+			return nil, refusal
+		}
 		return nil, fmt.Errorf("%s requires single-process execution (%v); local planning failed: %w", what, refusal, err)
 	}
 	if physPlan.Cleanup != nil {
@@ -87,6 +91,9 @@ func (c *Coordinator) runRefusedLocal(
 		if errors.Is(err, exec.ErrCollectBudget) {
 			return nil, fmt.Errorf("%s executes single-process on the coordinator and its result exceeded the local budget (%d bytes); "+
 				"narrow the query or raise --local-fastpath-bytes: %w", what, sink.MaxBytes, err)
+		}
+		if refusal, ok := authorizationRefusal(err); ok {
+			return nil, refusal
 		}
 		return nil, fmt.Errorf("%s local execution: %w", what, err)
 	}
@@ -120,4 +127,31 @@ func (c *Coordinator) runRefusedLocal(
 		WireUnconstrainedDecimal: sink.SchemaHintWireUnconstrainedDecimal,
 		StringLength:             sink.SchemaHintStringLength,
 	}, nil
+}
+
+// authorizationRefusal returns the refusal itself when err carries SQLSTATE
+// 42501, and reports whether it did — so a caller returns the shared
+// decision's own sentence instead of its own routing narrative.
+//
+// The coordinator is the door a DEPLOYED server uses: `wadjet serve` puts
+// pgwire and HTTP on this route, and every one of its wrappers names an
+// internal route. A refused caller was told `table-less SELECT with no
+// distributed stage local execution: permission denied for table "x"`, or
+// `physical plan: permission denied for table "x"`, where the FROM-list denial
+// on the same connection said `permission denied for table "x"` — one
+// operation, two messages, and the difference names which internal route ran
+// (ADR-0034 item 6; round-1 P1).
+//
+// It returns the innermost `*sqlerr.Error`, so a chain of wrappers collapses
+// to the sentence the decision wrote — the table-function refusal reaches this
+// route under two of them.
+func authorizationRefusal(err error) (error, bool) {
+	if sqlerr.StateOf(err) != "42501" {
+		return nil, false
+	}
+	var refusal *sqlerr.Error
+	if errors.As(err, &refusal) {
+		return refusal, true
+	}
+	return err, true
 }
