@@ -124,6 +124,32 @@ Table **aliases**, CTE names and function names are matched byte for byte, as
 qualifiers are. `SELECT * FROM t` publishes each column under the schema's own
 spelling.
 
+### The `__`-prefixed names are reserved
+
+The planner materializes its own values into hidden columns — a window
+function's output, a materialized `ORDER BY` or `GROUP BY` term, an aggregate's
+derived argument, a decorrelated `LATERAL`'s correlation key — and every
+consumer of one reads it BY NAME. A query that MINTS a name in that namespace
+is refused with SQLSTATE `42939` rather than answered:
+
+```sql
+SELECT amount AS __key_0 FROM items   -- 42939, reserved column namespace "__key_"*
+CREATE TABLE t (__win_0 BIGINT)       -- 42939, same rule at the DDL door
+```
+
+The reserved prefixes are `__agg_`, `__agg_expr_`, `__avg_count`, `__avg_sum`,
+`__covar_state`, `__default__`, `__gb_expr_`, `__grouping_`, `__having_`,
+`__key_`, `__precomp_agg_`, `__row_loc`, `__rowcount_only__`, `__scalar_`,
+`__setop_`, `__sortkey_`, `__subsume_f`, `__tl_`, `__var_state`, `__win_` and
+`__winkey_`. PostgreSQL has no such namespace and answers these queries; this
+is a recorded divergence (ADR-0012), and the trade is deliberate — the
+alternative is not answering them either, it is answering them WRONGLY, with
+the user's column read in place of the planner's or the other way round.
+
+READING is not minting: a table that already stores such a column stays
+readable, `SELECT *` included. The planner renumbers its own slot to step
+around a stored name.
+
 ### A relation or column name is also a storage location
 
 A table's data lives at `tables/<name>/…` in the object store, and a partition
@@ -772,21 +798,33 @@ Every other combination of join kind and `ON` matches PostgreSQL.
 star expands after the default is applied, so a `COUNT` column reached through
 it reads NULL rather than 0. Name the columns to get the default.
 
-A star over a lateral also publishes ONE COLUMN MORE than PostgreSQL does. The
-correlated equality is turned into a join, and a join needs the inner value as
-a column, so the planner adds one: it is named `__key_0` — the reserved
-namespace no query can spell — and a star over the join shows it. Naming the
-columns you want is the way to avoid it, and it is what a `SELECT *` over a
-lateral is worth doing anyway. On the distributed engine such a star is
-REFUSED rather than answered (the join's files would describe two different
-relations); the same query with its columns named answers on every engine.
+The correlated equality is turned into a join, and a join needs the inner
+value as a column, so the planner materializes one under a name from its
+reserved namespace (`__key_0`). It is dropped again at the join, so it is not
+in a `SELECT *` result, not in a derived table's or a CTE's star over the
+join, and not in the wire's `RowDescription`: `SELECT *` over a lateral
+returns the columns PostgreSQL returns.
+
+A QUALIFIED star over a lateral join is a separate, older gap: `SELECT o.*`
+and `SELECT s.*` both publish every column of the JOIN rather than the named
+relation's own, so PostgreSQL's three and one columns come back as four. Name
+the columns you want.
 
 An inner `SELECT` list that aliases something to the correlation key's own name
 answers what PostgreSQL answers. `JOIN LATERAL (SELECT MAX(t.id) AS g …
-WHERE t.g = d.k) s` reads `s.g` as the MAX, and `JOIN LATERAL (SELECT amount AS
-order_id … WHERE order_id = o.id) li` reads `li.order_id` as the amount — the
-key the planner adds cannot be shadowed by an alias, because it does not use a
-name a query can write.
+WHERE t.g = d.k) s` reads `s.g` as the MAX, `JOIN LATERAL (SELECT t.g AS gk,
+MAX(t.id) AS g … GROUP BY t.g) s` reads `s.gk` as the key and `s.g` as the MAX,
+and `JOIN LATERAL (SELECT amount AS order_id … WHERE order_id = o.id) li` reads
+`li.order_id` as the amount — the key the planner adds cannot be shadowed by an
+alias, because it does not use a name a query can write.
+
+A WINDOW FUNCTION inside a CORRELATED lateral is refused (`0A000`). The
+correlation is evaluated as a join, so the window would be computed over the
+whole inner relation instead of over the correlated rows — a different
+answer, not a near miss. Add the correlation column to the window's
+`PARTITION BY` (`SUM(amount) OVER (PARTITION BY order_id)` beside
+`WHERE order_id = o.id`), which answers, or compute the window outside the
+lateral. An UNcorrelated lateral's window is unaffected.
 
 ## Aggregate Functions
 

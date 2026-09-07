@@ -1,6 +1,6 @@
 # ADR-0026: A GROUP BY key has one identity and one published name
 
-Status: Accepted (2026-08-30, #720 / #723 / #725; amended 2026-09-03 by arc S1 — §4b's deferral is CLOSED, the phantom scan column under it is named at its real site, and a sort or window key over a computed derived alias needs no second name ON THE WIRE because the definition is materialized at plan time; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended 2026-09-04 by arc E3 — §3a is CLOSED: a HAVING binds its aggregate through the slot that aggregate OWNS, and the gather pairs a lone rename by CLASS (#785); amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795); amended 2026-09-04 by arc F4 — §3a's fragment-projection residual is closed for the THREE WRAPPED spellings it pinned, and it was two defects: an unaliased SELECT item was invisible to the class walk's lookup, and a fragment projection above an aggregate addressed a duplicated name by NAME where it now addresses the SLOT. Two sibling spellings — under a SET-OP wrapper and under a DISTINCT — are NOT closed and stay pinned (2026-09-05). Amended 2026-09-07 by arc J2 with §6 — the two names are not a property of GROUP BY keys: a UNION arm's projection, an aggregate argument, a window argument, an ORDER BY term and a projection's DECLARED TYPE each have a second spelling, and every one of them binds through the identity its producer published (#770, #947, #949; the mechanism is in ADR-0025); amended 2026-09-07 by arc J1 with §3c — a key the PLANNER MINTED is published under a hidden slot and RESOLVED by the column it reads, which is §2's pair of names in the opposite direction, and the stage's published list says what `exec.PublishedGroupKeyNames` will emit (#956, #767).
+Status: Accepted (2026-08-30, #720 / #723 / #725; amended 2026-09-03 by arc S1 — §4b's deferral is CLOSED, the phantom scan column under it is named at its real site, and a sort or window key over a computed derived alias needs no second name ON THE WIRE because the definition is materialized at plan time; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended 2026-09-04 by arc E3 — §3a is CLOSED: a HAVING binds its aggregate through the slot that aggregate OWNS, and the gather pairs a lone rename by CLASS (#785); amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795); amended 2026-09-04 by arc F4 — §3a's fragment-projection residual is closed for the THREE WRAPPED spellings it pinned, and it was two defects: an unaliased SELECT item was invisible to the class walk's lookup, and a fragment projection above an aggregate addressed a duplicated name by NAME where it now addresses the SLOT. Two sibling spellings — under a SET-OP wrapper and under a DISTINCT — are NOT closed and stay pinned (2026-09-05). Amended 2026-09-07 by arc J2 with §6 — the two names are not a property of GROUP BY keys: a UNION arm's projection, an aggregate argument, a window argument, an ORDER BY term and a projection's DECLARED TYPE each have a second spelling, and every one of them binds through the identity its producer published (#770, #947, #949; the mechanism is in ADR-0025); amended 2026-09-07 by arc J1 with §3c — a key the PLANNER MINTED is published under a hidden slot and RESOLVED by the column it reads, which is §2's pair of names in the opposite direction, and the stage's published list says what `exec.PublishedGroupKeyNames` will emit (#956, #767); amended the same day after review — the minted column is DROPPED BY THE JOIN that made it rather than trimmed at the statement's output, because a star-only query has no output projection to trim, and the collision is closed in the spelling where the SELECT list carries the key too (#956, #767).
 
 §2 REWRITTEN 2026-09-02 from a sketch into the design that closes #794 and
 #795: a Stage carries TWO names per GROUP BY key — the PUBLISHED name in
@@ -835,16 +835,72 @@ declared 4 [k g c t.g]`, ADR-0010). Only keys whose two names are already the
 same take exec's rule; a derived, literal, delimited or minted key has a name
 the planner decided and hands over explicitly.
 
-**What is NOT closed.** A `SELECT *` over an aggregated LATERAL is LOUD on both
-DAG arms. Two facts meet: the correlation slot is a column of the lateral's
-output, so a star publishes a column PostgreSQL does not (an older divergence,
-recorded in ADR-0012 — this arc RENAMES the phantom from the source column's
-name to `__key_N` rather than removing it); and a star gives the join node no
-`NeededColumns`, so `joinSideSchemas` narrows the declared side schemas to the
-KEYS alone and an empty build partition writes a narrower file than a full one.
-Closing it is `joinSideSchemas` describing a star's width, which is the stage
-model's question. Pinned at
-`coordinator.TestArcJ1AStarOverAnAggregatedLateralIsLoudOnTheDAG`.
+**A minted column is dropped by the operator that made it, not at the
+statement's output.** A slot the query never wrote is not a result column, and
+a `SELECT *` over the join used to publish it: five columns where PostgreSQL
+sends four, five `FieldDescription`s in the wire's `RowDescription`, and the
+name readable through a derived table's or a CTE's star (`SELECT x.__key_0
+FROM (SELECT * FROM …) x` answered the key's value).
+
+Trimming it where `__sortkey_N` is trimmed does not reach any of that. That
+trim reads the statement's OUTPUT PROJECTION, and a star-only query has none —
+`hiddenSortTrimOp` returns nil for it by construction, because an unexpanded
+star has no column list to narrow to. Below the star there is exactly one
+place the column exists: the JOIN that needed it. So `logical.Node.HiddenJoinCols`
+carries the minted slots to `exec.HashJoinProbe.OutputExclude` (and the
+sort-merge join's, and through `OpSpec.HiddenColumns` to the worker), and the
+join drops them from its OUTPUT SCHEMA while still keying on them. One drop,
+below every door: the outer star, the qualified star, a derived table's star, a
+CTE's star, the wire, and any reference by name from above.
+
+`OutputExclude` is deliberately not the inverse of `OutputFilter`. A filter is
+an optimisation — "nothing above needs these, do not gather them" — and its
+absence means "emit everything", which is exactly the star case; the exclusion
+is a correctness rule that has to hold when there is no filter at all.
+
+**Two spellings of the same collision, and only one of them needs a column.**
+Where the SELECT list does not carry the key, the slot is INJECTED as an output
+item and the join keys on it. Where the list DOES carry it under another name
+(`SELECT t.g AS gk, MAX(t.id) AS g … GROUP BY t.g`), nothing is injected — the
+join keys on `gk`, which the list already publishes — but the AGGREGATE below
+still publishes its key under the source column's stripped text, which is the
+same `g` the list aliased its MAX to, and the projection resolves by name.
+That spelling answered `0,0,0…` for PostgreSQL's `0,0,4998…` on the
+single-process arm and on both DAG arms. It takes the slot as its
+`GroupByPublish` and adds no column.
+
+The rename is made ONLY where the names really collide. `SELECT t.g, COUNT(*)
+AS c` has its projection ELIDED over the aggregate (the shapes match), so what
+the lateral emits IS the aggregate's output and the join keys on that; moving
+the key to a slot there left the shuffle with `key "s.g" not in schema`. A
+rename that breaks no collision buys nothing.
+
+**What is NOT closed.**
+
+- `SELECT t.g, MAX(t.id) AS g` — the key under its OWN name beside an
+  aggregate of that name — publishes two columns called `g`. PostgreSQL
+  refuses the outer `s.g` as ambiguous (42702) and this engine answers the
+  key, which is a superset; taking the slot there made both DAG arms answer NO
+  ROWS, so it is left where it is and pinned as
+  `956/pinned-ambiguous-own-name-answers-the-key`.
+- On the DISTRIBUTED arms a star over a NON-aggregated lateral still shows the
+  key's SOURCE column: that lateral's projection emits no stage, so the stream
+  carries the scan's names and the slot's alias never lands, which
+  `OutputExclude` cannot match by name. The single-process arms and PostgreSQL
+  publish four columns and the DAG publishes five. Recorded in ADR-0012 and
+  pinned per-arm in `coordinator.TestArcJ1AStarOverALateralPublishesPostgres-
+  Columns`; closing it needs the lateral's own projection materialized onto
+  its stage.
+- A QUALIFIED star (`o.*`, `s.*`) publishes the whole join rather than the
+  named relation. Older than this arc and independent of laterals; ADR-0012.
+
+**A star's declared side schemas are the whole relation, not the keys.**
+`joinSideSchemas` built its `want` list from `NeededColumns` plus the join
+keys, and no NeededColumns is not "needs nothing" — it is a star, which needs
+every column. Narrowing to the keys made a task with an EMPTY build partition
+write a file two columns wide beside files carrying the whole relation, and the
+shuffle read refused the pair (ADR-0010). An empty `want` keeps every column,
+which is what the star asks for.
 
 #### 3b. A lowering records the SLOT the operator below publishes, never the call the query wrote (2026-09-04, #797)
 

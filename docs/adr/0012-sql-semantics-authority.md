@@ -1660,6 +1660,43 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      wrong one (the server prints `1.00` for a scale-2 column row). It is its
      own arc. Pinned by `coordinator.TestLiteralScaleInADecimalFold`.
 
+   - **The `__`-prefixed column namespace is RESERVED, where PostgreSQL has
+     no such namespace.** (Added 2026-09-07, arc J1 / #956.) The planner
+     materializes its own values into hidden columns — `__win_N`,
+     `__sortkey_N`, `__gb_expr_N`, `__key_N` and the rest of
+     `plansql.reservedSlotPrefixes` — and every consumer reads one BY NAME. A
+     query that MINTS such a name is refused, `42939`: an output alias
+     (`SELECT amount AS __key_0`), a derived table's or CTE's column list, and
+     the DDL / ingest doors. PostgreSQL answers all of them. The trade is
+     stated in `reserved_slots.go` and it is the one this ADR's item 1 asks
+     for: the alternative to refusing is not answering them, it is answering
+     them WRONGLY — the user's column read where the planner's was meant, or
+     the reverse (#694 under the slot's own name). READING is not minting: a
+     stored column of such a name stays readable, star included, and the
+     planner renumbers its own slot around it.
+
+   - **A QUALIFIED star over a LATERAL join publishes the whole join.**
+     (Added 2026-09-07, arc J1; PRE-EXISTING, measured, not closed here.)
+     `SELECT o.*` and `SELECT s.*` over `j1ord o JOIN LATERAL (…) s` both
+     publish every column of the join — four where PostgreSQL sends three and
+     one. The unqualified `SELECT *` agrees with PostgreSQL as of this arc
+     (the correlation key is dropped at the join, ADR-0026 §3c); the
+     QUALIFIED spelling is not narrowed to its named relation at all, which is
+     older and independent of the lateral. Pinned with PostgreSQL's list
+     beside it in `pgwire.TestArcJ1AHiddenSlotIsNotInTheRowDescription`.
+
+   - **On the DISTRIBUTED arms, a star over a NON-aggregated LATERAL still
+     publishes the inner correlation column under its SOURCE name.** (Added
+     2026-09-07, arc J1; PRE-EXISTING, not closed here.) A lateral whose
+     SELECT list is a bare projection emits no stage of its own, so the
+     stage's stream carries the SCAN's column names and the materialized
+     key's alias never lands — `order_id, amount, id, customer, total` on
+     `dag`/`dagshuf` where the single-process arms and PostgreSQL publish
+     four columns. The two arms therefore disagree about the column SET of
+     one star, which is NOT in ADR-0013's list of legal nondeterminism; it is
+     recorded here as a divergence with its mechanism, and closing it needs
+     the lateral's own projection to be materialized onto its stage.
+
 6. **A numeric literal's carrier is its TEXT, not a float64.** (Added
    2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as
    `numeric` and compares it at full precision, so `WHERE d = 493827160549382.7160549350`
