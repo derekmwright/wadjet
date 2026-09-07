@@ -272,7 +272,7 @@ func aggInputAliasIsAggregateGroupKey(n *logical.Node, exprText string) (string,
 // aggInputAliasIsMaterializedUnderItsName reports whether the producer between
 // the aggregate and its source materializes the derived alias under the ALIAS
 // — which is what attachScanSelectProjections' alias-naming OpProject does on a
-// join arm's fragment, and on a sort, a LIMIT, a window or a union.
+// join arm's fragment, and on a sort, a LIMIT or a union.
 //
 // An AGGREGATE is deliberately not in the list. It may publish the alias
 // (absorbAggregateOutputProjection puts the SELECT list on a collapsing
@@ -280,11 +280,22 @@ func aggInputAliasIsAggregateGroupKey(n *logical.Node, exprText string) (string,
 // computing the expression works in both cases, because the aggregate's own
 // outputs are what the expression reads. So an aggregate below falls through to
 // the compute answer, which is what ff7c3f19 did for every one of these shapes.
+//
+// A WINDOW was in the list and does not belong there, which is the other half
+// of #877/#878. The alias-naming OpProject a window fragment can carry comes
+// from attachScanSelectProjections, and that pass attaches the OUTERMOST SELECT
+// list and returns at its first aggregate item — so whenever an AGGREGATE is
+// the consumer asking this question, the answer is provably no: nothing put the
+// alias on the window's fragment, and reading it gave NULL on every row. It
+// stops the walk rather than being deleted from the case list, because a
+// producer below a window is not the aggregate's producer either.
 func aggInputAliasIsMaterializedUnderItsName(n *logical.Node) bool {
 	for depth := 0; n != nil && depth < aggRespellDepth; depth++ {
 		switch n.Type {
+		case logical.NodeWindow:
+			return false
 		case logical.NodeJoin, logical.NodeSort, logical.NodeLimit,
-			logical.NodeWindow, logical.NodeDistinct:
+			logical.NodeDistinct:
 			return true
 		case logical.NodeProject, logical.NodeFilter:
 			if len(n.Children) != 1 {
@@ -296,4 +307,52 @@ func aggInputAliasIsMaterializedUnderItsName(n *logical.Node) bool {
 		}
 	}
 	return false
+}
+
+// respellWindowSlotAliasRefs rewrites every column reference naming a derived
+// table's or CTE's SELECT-list alias for a WINDOW OUTPUT SLOT to the slot
+// itself.
+//
+// It is the third answer to "what does the producer below call this value",
+// and the one the two answers above cannot give. A window publishes its result
+// under the hidden slot `__win_N`, never under the alias the SELECT list gives
+// it: `SELECT g.id AS id, SUM(g.a) OVER () AS w FROM …` is a Project over a
+// Window, and walkStages emits no stage for a Project (ADR-0025). On the
+// single-process pipeline that Project is a real operator and `w` is a real
+// column; on the DAG `w` is a name nothing publishes, so an aggregate above
+// reading `SUM(w * 2)` compiled that text against a batch with no `w`,
+// `expr.ColRef.Eval` answered nil on every row, and the SUM came back NULL —
+// 953.82 single-process and on PostgreSQL, NULL on both DAG arms (#877, and
+// #878 one qualifier deeper, where the derived table is a CTE joined to a
+// second reference of itself).
+//
+// The BOUNDARY is exact and needs no model of what a later pass will do: the
+// resolved name is in the window-output slot family, which is RESERVED
+// (plansql.RefuseReservedSlotName — a user cannot store or alias a column
+// there), so a reference that resolves to one names the planner's own slot and
+// nothing else. Every other resolution is left to the two rules above.
+//
+// DAG-only, like its siblings: it rewrites the stage spec's TEXT, never the
+// logical node the local engine runs.
+func respellWindowSlotAliasRefs(n plansql.Node, child *logical.Node) (plansql.Node, bool) {
+	if n == nil || child == nil {
+		return n, false
+	}
+	out, changed, complete := rewriteColRefs(n, func(ref *plansql.ColRef) (plansql.Node, bool) {
+		resolved, expr, _, renamed := resolveAggInputName(ref.String(), child)
+		if !renamed || expr != nil {
+			return nil, false
+		}
+		if plansql.ReservedSlotFamily(resolved) != string(plansql.SlotWindowOutput) {
+			return nil, false
+		}
+		return &plansql.ColRef{Column: cleanExpr(resolved)}, true
+	})
+	if !complete {
+		// Same rule as respellDerivedAliasRefs: a walk that met a node kind it
+		// does not rewrite has NOT considered every reference, and a partial
+		// respell looks resolved without being it.
+		return n, false
+	}
+	return out, changed
 }

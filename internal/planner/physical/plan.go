@@ -6759,6 +6759,20 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 					if respelled, ok := respellAggInputExpr(stageExpr, exprCols); ok {
 						stageExpr = respelled
 					}
+					// And the one resolution that rewrite declines by
+					// construction: a reference to a derived table's or CTE's
+					// alias for a WINDOW OUTPUT SLOT. respellAggInputExpr
+					// respells only where the walk reaches a SCAN through
+					// Project and Filter alone, and a Window stops it — so
+					// `SUM(w * 2)` over `SELECT SUM(a) OVER () AS w` shipped
+					// the text `w * 2`, which the window stage's stream cannot
+					// resolve (it publishes `__win_0`), and every row read NULL
+					// (#877; #878 is the same through a CTE joined to itself).
+					// The slot family is RESERVED, so a name that resolves into
+					// it is the planner's own and nothing else.
+					if respelled, ok := respellWindowSlotAliasRefs(stageExpr, exprCols); ok {
+						stageExpr = respelled
+					}
 					spec.InputExpr = stageExpr.String()
 					// And the type that expression evaluates into, since
 					// the worker builds the pre-aggregate projection from

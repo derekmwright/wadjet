@@ -366,28 +366,30 @@ func TestF1AWindowDeclaresTheSameTypeThroughADerivedTable(t *testing.T) {
 	arms := f1Arms(t, ctx)
 
 	f1Run(t, arms, []f1Case{
+		// The three cells below answered 953.82 by being REFUSED at plan time
+		// and routed to the coordinator's local pipeline: the aggregate's
+		// argument named `w`, the derived table's alias for the window's
+		// output slot, and no stage published it, so
+		// assertAggregateInputsResolve refused the plan (#702's backstop).
+		// Since #877 the argument is respelled to the slot the window really
+		// publishes and all three EXECUTE as stages. The values are unchanged
+		// and the disposition is asserted, so this is where that move shows.
 		{
 			name: "796 a computed aggregate argument over a window whose INPUT is a derived table",
 			sql: "SELECT SUM(w*2) AS s FROM (SELECT id, SUM(a) OVER () AS w " +
 				"FROM (SELECT id, a FROM decpair) t) x",
 			want: "cols=[s:DECIMAL(38,2)] rows=1 | 953.82",
-			routed: map[string]string{
-				"dag": "unreachable output +1", "dagshuf": "unreachable output +1"},
 		},
 		{
 			name: "796 control: the same window DIRECTLY over the scan",
 			sql:  "SELECT SUM(w*2) AS s FROM (SELECT id, SUM(a) OVER () AS w FROM decpair) x",
 			want: "cols=[s:DECIMAL(38,2)] rows=1 | 953.82",
-			routed: map[string]string{
-				"dag": "unreachable output +1", "dagshuf": "unreachable output +1"},
 		},
 		{
 			name: "796 the derived table RENAMES the window's input column",
 			sql: "SELECT SUM(w*2) AS s FROM (SELECT id, SUM(v) OVER () AS w " +
 				"FROM (SELECT id, a AS v FROM decpair) t) x",
 			want: "cols=[s:DECIMAL(38,2)] rows=1 | 953.82",
-			routed: map[string]string{
-				"dag": "unreachable output +1", "dagshuf": "unreachable output +1"},
 		},
 		{
 			name: "796 MIN over a derived table keeps the input's own declaration",
