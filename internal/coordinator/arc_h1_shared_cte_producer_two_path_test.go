@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -58,15 +59,6 @@ func TestArcH1TwoConsumersOfOneCTEKeepTheirOwnColumns(t *testing.T) {
 				`SELECT COUNT(*) AS n FROM typemx ` +
 				`WHERE c_i64 < (SELECT MAX(v) FROM c) AND c_i64 > (SELECT MIN(v) FROM c)`,
 			`n | 95`},
-		// Each reference carries its OWN filter — the shape #656 named for
-		// filters, met here by two producers. The reference is QUALIFIED
-		// (`c.id`) deliberately: the BARE spelling binds to the enclosing
-		// query and drops the predicate, which is a separate defect this arc
-		// found and recorded rather than widened into (see REPORT.md).
-		{"two-producers-each-with-its-own-filter", cte + `SELECT COUNT(*) AS n FROM typemx ` +
-			`WHERE c_i64 < (SELECT MAX(v) FROM c WHERE c.id < 4000) ` +
-			`AND c_i64 > (SELECT MIN(v) FROM c WHERE c.id < 4000)`,
-			`n | 3869`},
 
 		// NO SUBQUERY AT ALL. The mutation is in the fusion, not in the
 		// producer lowering, so two ORDINARY consumers of one CTE body — each
@@ -114,5 +106,66 @@ func TestArcH1TwoConsumersOfOneCTEKeepTheirOwnColumns(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TWO PRODUCERS THAT EACH FILTER ONE SHARED CTE REFERENCE ARE REFUSED, LOUDLY.
+//
+// It is the residual of #876 and it is stated here rather than left to a
+// reader's surprise. Each reference carries its OWN `WHERE`, so the predicate
+// belongs to ONE consumer and must not land on the stage the other one reads —
+// the rule #656 settled. `filterCarrierIndex` attaches it anyway while the
+// stage is still single-consumer (the reference COUNT cannot see a CTE named
+// only inside a scalar subquery's TEXT), and
+// `assertNoConsumerScopedFilterOnSharedStage` then refuses the plan once the
+// second producer is pointed at that stage.
+//
+// PostgreSQL 17 answers 3869. The refusal is not that answer, and it is not
+// pinned as if it were: it is LOUD, it names the stage and the rule, and the
+// single-process arms answer PostgreSQL's number — so a client gets a number
+// or an error, never a wrong number.
+//
+// What it would take to answer is in this arc's REPORT: the consumer needs its
+// own StageProject, which was tried in this commit and WITHDRAWN because the
+// project that then carries an outer WHERE over a shared CTE answered ZERO for
+// PostgreSQL's 4838 on Q15's own shape.
+//
+// The reference is QUALIFIED (`c.id`) deliberately: the BARE spelling binds to
+// the ENCLOSING query and drops the predicate, which is a separate defect this
+// arc found, measured and recorded rather than widened into.
+func TestArcH1TwoFilteredProducersOverOneCTEAreRefusedLoudly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	t.Cleanup(cancel)
+	arms := e3Arms(t, ctx)
+
+	const sql = `WITH c AS (SELECT id, c_i64 AS v FROM typemx) SELECT COUNT(*) AS n FROM typemx ` +
+		`WHERE c_i64 < (SELECT MAX(v) FROM c WHERE c.id < 4000) ` +
+		`AND c_i64 > (SELECT MIN(v) FROM c WHERE c.id < 4000)`
+	for _, arm := range arms {
+		cols, rows, err := arm.run(sql)
+		if arm.coord == nil {
+			// The single-process arms answer PostgreSQL's number.
+			if err != nil {
+				t.Errorf("%s arm refused a shape it can answer: %v", arm.name, err)
+				continue
+			}
+			if got := e3Render(cols, rows); got != `n | 3869` {
+				t.Errorf("%s arm: %s, want n | 3869 (live PostgreSQL 17)", arm.name, got)
+			}
+			continue
+		}
+		if err == nil {
+			t.Errorf("%s arm ANSWERED %s — each producer's WHERE belongs to ONE consumer and "+
+				"the CTE body's stage is shared; answering means one of them read the other's "+
+				"filtered stream", arm.name, e3Render(cols, rows))
+			continue
+		}
+		if !strings.Contains(err.Error(), "scoped to ONE of them") {
+			t.Errorf("%s arm refused with %q, want the shared-producer refusal (#656)",
+				arm.name, err.Error())
+		}
 	}
 }
