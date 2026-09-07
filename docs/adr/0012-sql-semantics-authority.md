@@ -1711,6 +1711,15 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      dag/dagshuf    → order_id,      id, customer, total   (`oid` is GONE)
      ```
 
+     The same star over a derived table holding an AGGREGATE publishes a
+     RESERVED SLOT to the client, which is worse than losing a column:
+     `SELECT * FROM lat_ord o JOIN (SELECT order_id, CAST(COUNT(*) AS VARCHAR)
+     AS n FROM lat_item GROUP BY order_id) s ON s.order_id = o.id` answers
+     `order_id, n, __agg_0, id, customer, total` on `dag`/`dagshuf` against
+     five columns on the single-process arms. Reading `__agg_0` is not a
+     minting refusal (ADR-0026 §3c) — it is the stage's own stream reaching a
+     door it should never reach.
+
      It is the mechanism behind three shapes this arc pins: a lateral that
      publishes its correlation key twice loses the duplicate on the DAG; one
      that publishes it under an ALIAS shows the source name; and a lateral
