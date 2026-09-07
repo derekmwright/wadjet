@@ -152,4 +152,59 @@ func TestAnInt32DomainRefusalHoldsOnEveryArm(t *testing.T) {
 			}
 		}
 	})
+
+	// The VALUE and its BOX on every arm, not only the disposition (round-1
+	// review P2).
+	//
+	// The table above asserts `err != nil` and `err == nil`, and a right→wrong
+	// move on the DAG's S3 round trip is invisible to that: the cast's result
+	// is MATERIALIZED between stages there, and a declaration the gather reads
+	// differently would change the box a client sees while every cell stayed
+	// green. na2Run prints the Go box beside the value (`int64:` / `int32:` /
+	// `float:`), so a PORT that arrives as a float64 or an INT32 that arrives
+	// as a string fails here.
+	//
+	// The values are the fixture's own arithmetic — `c_i32` is `id*3`, NULL on
+	// every 29th row — so nothing here is transcribed from a run. Where
+	// PostgreSQL has the cast (`::INT32` is `int4`), its answer is the same
+	// number; `PORT`, `PROTOCOL`, `FLOAT32` and an integer `DATE` are wadjet's
+	// own spellings and the number is the engine's.
+	for _, c := range []struct {
+		name, sql string
+		want      []string
+	}{
+		{"int32_value", `SELECT (c_i32 + 1)::INT32 AS v FROM ` + tbl + ` WHERE id = 400`,
+			[]string{"v=int64:1201"}},
+		{"port_value", `SELECT (c_i32 + 1)::PORT AS v FROM ` + tbl + ` WHERE id = 400`,
+			[]string{"v=int32:1201"}},
+		{"protocol_value", `SELECT (c_i32 + 1)::PROTOCOL AS v FROM ` + tbl + ` WHERE id = 400`,
+			[]string{"v=int32:1201"}},
+		{"float32_value", `SELECT CAST(c_i32 AS FLOAT32) AS v FROM ` + tbl + ` WHERE id = 400`,
+			[]string{"v=float:1200"}},
+		{"date_value", `SELECT (c_i32 % 100)::DATE AS v FROM ` + tbl + ` WHERE id = 400`,
+			[]string{"v=1970-01-01"}},
+		// A PORT cast as a GROUP BY key: on the shuffled arm this is the
+		// partition key, so the declaration crosses a repartition and comes
+		// back out of a .wshf file.
+		{"port_group_key",
+			`SELECT (c_i32 + 1)::PORT AS g, COUNT(*) AS n FROM ` + tbl +
+				` WHERE id > 0 AND id < 5 GROUP BY (c_i32 + 1)::PORT ORDER BY 1`,
+			[]string{"g=int32:10|n=int64:1", "g=int32:13|n=int64:1",
+				"g=int32:4|n=int64:1", "g=int32:7|n=int64:1"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			for _, arm := range arms {
+				got, err := arm.run(c.sql)
+				rows, rerr := na2Run(got, err)
+				if rerr != nil {
+					t.Errorf("%s arm: %v\n  SQL: %s", arm.name, rerr, c.sql)
+					continue
+				}
+				if strings.Join(rows, ";") != strings.Join(c.want, ";") {
+					t.Errorf("%s arm: = %v, want %v — the value or its BOX moved\n  SQL: %s",
+						arm.name, rows, c.want, c.sql)
+				}
+			}
+		})
+	}
 }
