@@ -1298,15 +1298,27 @@ func compileCaseNode(n *plansql.CaseNode, ctx *compileContext) (Expr, error) {
 	return c, nil
 }
 
-// buildUnqualOuterCols extracts unqualified outer column mappings from detected refs.
-// These are refs that were resolved via outerCols (column→table mapping) rather than
-// explicit table qualifiers.
+// buildUnqualOuterCols is the map the per-row re-run substitutes a BARE name
+// through: `<name>` becomes the outer row's literal.
+//
+// Only a reference the classifier found WRITTEN BARE belongs in it. A name it
+// found through a QUALIFIED spelling is an outer reference under THAT spelling
+// and says nothing about the bare one, which SQL resolves innermost-first —
+// `(SELECT COUNT(*) FROM c WHERE id < d.id)` has an inner `id` and an outer
+// `d.id`, and substituting both answered 0 for every outer row where
+// PostgreSQL counts c's rows below it, on all four arms and over a base table
+// as well as a CTE (round-1 review B3). `OuterRef.Bare` is that distinction,
+// recorded where the scope is known instead of re-derived here from a name
+// collision.
 func buildUnqualOuterCols(refs []plansql.OuterRef, outerCols map[string]string) map[string]string {
 	if len(outerCols) == 0 {
 		return nil
 	}
 	var result map[string]string
 	for _, ref := range refs {
+		if !ref.Bare {
+			continue
+		}
 		col := ref.Column
 		if tbl, ok := outerCols[col]; ok && tbl == ref.Table {
 			if result == nil {

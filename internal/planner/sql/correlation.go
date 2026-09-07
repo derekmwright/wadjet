@@ -10,6 +10,15 @@ import (
 type OuterRef struct {
 	Table  string // outer table alias (lowercased)
 	Column string // column name (lowercased)
+	// Bare records that the reference was written WITHOUT a qualifier and
+	// resolved to the outer scope because no inner relation publishes the
+	// name. Only such a name may be substituted by its bare spelling: the
+	// per-row re-run rewrites `<name>` to a literal, and doing that for a name
+	// discovered through a QUALIFIED spelling replaces the INNER column of the
+	// same name too. `(SELECT COUNT(*) FROM c WHERE id < d.id)` answered 0 for
+	// every outer row where PostgreSQL counts c's rows below it, because the
+	// one ref `d.id` put `id` in the substitution map (round-1 review B3).
+	Bare bool
 }
 
 // TableColumns reports the COMPLETE column list of a relation named in a
@@ -457,15 +466,20 @@ func CTEColumns(ctes []CTEDef, base TableColumns) TableColumns {
 	return resolveAt(len(ctes))
 }
 
+// dedup collapses repeated references to one entry. Bare is ORed across the
+// spellings of one name: a column written both bare and qualified in the same
+// subquery is genuinely both, and the bare occurrence still needs its literal.
 func dedup(refs []OuterRef) []OuterRef {
-	seen := make(map[string]bool, len(refs))
+	at := make(map[string]int, len(refs))
 	var out []OuterRef
 	for _, r := range refs {
 		key := r.Table + "." + r.Column
-		if !seen[key] {
-			seen[key] = true
-			out = append(out, r)
+		if i, ok := at[key]; ok {
+			out[i].Bare = out[i].Bare || r.Bare
+			continue
 		}
+		at[key] = len(out)
+		out = append(out, r)
 	}
 	return out
 }
@@ -493,7 +507,7 @@ func walkForOuterRefs(node Node, s *outerRefScope, refs *[]OuterRef) {
 				return
 			}
 			if tbl, ok := s.outerCols[col]; ok && !s.innerTables[tbl] {
-				*refs = append(*refs, OuterRef{Table: tbl, Column: col})
+				*refs = append(*refs, OuterRef{Table: tbl, Column: col, Bare: true})
 			}
 		}
 	// A subquery nested inside this one can correlate on the OUTERMOST

@@ -693,7 +693,7 @@ func TestIsIntNative(t *testing.T) {
 
 func TestBuildUnqualOuterCols(t *testing.T) {
 	// Empty outerCols returns nil
-	refs := []plansql.OuterRef{{Table: "t1", Column: "id"}}
+	refs := []plansql.OuterRef{{Table: "t1", Column: "id", Bare: true}}
 	result := buildUnqualOuterCols(refs, nil)
 	if result != nil {
 		t.Fatal("expected nil for empty outerCols")
@@ -707,10 +707,27 @@ func TestBuildUnqualOuterCols(t *testing.T) {
 	}
 
 	// Non-matching table
-	refs2 := []plansql.OuterRef{{Table: "t3", Column: "id"}}
+	refs2 := []plansql.OuterRef{{Table: "t3", Column: "id", Bare: true}}
 	result2 := buildUnqualOuterCols(refs2, outerCols)
 	if result2 != nil {
 		t.Fatal("expected nil for non-matching table")
+	}
+
+	// A reference the classifier found through a QUALIFIED spelling says
+	// nothing about the BARE one, which SQL resolves innermost-first. Putting
+	// it in this map substituted the INNER column of the same name into the
+	// per-row re-run: `(SELECT COUNT(*) FROM c WHERE id < d.id)` answered 0
+	// for every outer row (#955, round-1 review B3).
+	qualifiedOnly := []plansql.OuterRef{{Table: "t1", Column: "id"}}
+	if got := buildUnqualOuterCols(qualifiedOnly, outerCols); got != nil {
+		t.Fatalf("a qualified-only ref must not be substituted by its bare name, got %v", got)
+	}
+	// Written BOTH ways in one subquery, the bare occurrence still needs its
+	// literal — dedup ORs the flag, and this is the map that reads it.
+	both := []plansql.OuterRef{{Table: "t1", Column: "id", Bare: true}, {Table: "t2", Column: "name"}}
+	got := buildUnqualOuterCols(both, outerCols)
+	if len(got) != 1 || got["id"] != "t1" {
+		t.Fatalf("expected only the bare ref, got %v", got)
 	}
 }
 
