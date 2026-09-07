@@ -2186,37 +2186,111 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, def
 	// (round-1 review B2). Walking the tree is what makes the rule ADR-0021
 	// §2b states — an uncorrelated EXISTS is a query-wide constant — true of
 	// the predicate rather than of one shape of predicate.
+	//
+	// Only the EXISTS leaves. See resolveBooleanExists: a boolean connective
+	// SHORT-CIRCUITS, and hoisting a scalar out of an arm the query may never
+	// evaluate makes that arm's failure the query's answer.
 	case *plansql.AndNode:
 		return &plansql.AndNode{
-			Left:  p.resolveSubqueryAST(ctx, n.Left, deferred, decls),
-			Right: p.resolveSubqueryAST(ctx, n.Right, deferred, decls),
+			Left:  p.resolveBooleanExists(ctx, n.Left, deferred, decls),
+			Right: p.resolveBooleanExists(ctx, n.Right, deferred, decls),
 		}
 
 	case *plansql.OrNode:
 		return &plansql.OrNode{
-			Left:  p.resolveSubqueryAST(ctx, n.Left, deferred, decls),
-			Right: p.resolveSubqueryAST(ctx, n.Right, deferred, decls),
+			Left:  p.resolveBooleanExists(ctx, n.Left, deferred, decls),
+			Right: p.resolveBooleanExists(ctx, n.Right, deferred, decls),
 		}
 
 	case *plansql.NotNode:
-		return &plansql.NotNode{Inner: p.resolveSubqueryAST(ctx, n.Inner, deferred, decls)}
+		return &plansql.NotNode{Inner: p.resolveBooleanExists(ctx, n.Inner, deferred, decls)}
 
 	case *plansql.CaseNode:
 		out := &plansql.CaseNode{}
 		if n.Subject != nil {
-			out.Subject = p.resolveSubqueryAST(ctx, n.Subject, deferred, decls)
+			out.Subject = p.resolveBooleanExists(ctx, n.Subject, deferred, decls)
 		}
 		for _, w := range n.Whens {
 			out.Whens = append(out.Whens, plansql.WhenClause{
-				Cond:   p.resolveSubqueryAST(ctx, w.Cond, deferred, decls),
-				Result: p.resolveSubqueryAST(ctx, w.Result, deferred, decls),
+				Cond:   p.resolveBooleanExists(ctx, w.Cond, deferred, decls),
+				Result: p.resolveBooleanExists(ctx, w.Result, deferred, decls),
 			})
 		}
 		if n.Else != nil {
-			out.Else = p.resolveSubqueryAST(ctx, n.Else, deferred, decls)
+			out.Else = p.resolveBooleanExists(ctx, n.Else, deferred, decls)
 		}
 		return out
 
+	default:
+		return node
+	}
+}
+
+// resolveBooleanExists resolves the EXISTS leaves under a boolean connective
+// and leaves every other leaf exactly as it found it.
+//
+// A boolean connective SHORT-CIRCUITS, and hoisting is unconditional
+// evaluation: it turns a subquery the query may never reach into one the query
+// always runs, so any way that subquery can FAIL becomes the query's answer.
+// PostgreSQL 17 measured, and the single-process path agrees with it because
+// it evaluates per row and lazily:
+//
+//	… WHERE d.id < 100 OR d.id > (SELECT id FROM t WHERE id < 5)   -- 9 rows
+//	… WHERE d.id < 0   OR d.id > (SELECT id FROM t WHERE id < 5)   -- 21000
+//
+// The subquery returns five rows either way. The first answers because the
+// left arm is true for every row and the right one is never needed; the second
+// raises because it IS needed. Hoisting made the first 21000 as well
+// (round-1 review P2) — a query PostgreSQL answers, refused.
+//
+// An EXISTS is the leaf where hoisting is sound: it reads no outer row, it is
+// TRUE or FALSE rather than a value, and it cannot raise the cardinality
+// violation that is the failure at issue. A SCALAR subquery in a
+// short-circuitable position keeps whatever the path did before — which on the
+// DAG is a loud task failure, pinned per arm beside PostgreSQL's answer in
+// coordinator.TestArcI1AnUnqualifiedNameBindsTheInnerRelation, because
+// answering it needs the DAG to evaluate a subquery lazily and that is not a
+// scope repair.
+func (p *Planner) resolveBooleanExists(ctx context.Context, node plansql.Node,
+	deferred *[]deferredScalar, decls colDecls) plansql.Node {
+	if node == nil {
+		return nil
+	}
+	switch n := node.(type) {
+	case *plansql.ExistsNode:
+		return p.resolveSubqueryAST(ctx, n, deferred, decls)
+	case *plansql.AndNode:
+		return &plansql.AndNode{
+			Left:  p.resolveBooleanExists(ctx, n.Left, deferred, decls),
+			Right: p.resolveBooleanExists(ctx, n.Right, deferred, decls),
+		}
+	case *plansql.OrNode:
+		return &plansql.OrNode{
+			Left:  p.resolveBooleanExists(ctx, n.Left, deferred, decls),
+			Right: p.resolveBooleanExists(ctx, n.Right, deferred, decls),
+		}
+	case *plansql.NotNode:
+		return &plansql.NotNode{Inner: p.resolveBooleanExists(ctx, n.Inner, deferred, decls)}
+	case *plansql.ParenNode:
+		if inner := p.resolveBooleanExists(ctx, n.Inner, deferred, decls); inner != nil {
+			return &plansql.ParenNode{Inner: inner}
+		}
+		return node
+	case *plansql.CaseNode:
+		out := &plansql.CaseNode{}
+		if n.Subject != nil {
+			out.Subject = p.resolveBooleanExists(ctx, n.Subject, deferred, decls)
+		}
+		for _, w := range n.Whens {
+			out.Whens = append(out.Whens, plansql.WhenClause{
+				Cond:   p.resolveBooleanExists(ctx, w.Cond, deferred, decls),
+				Result: p.resolveBooleanExists(ctx, w.Result, deferred, decls),
+			})
+		}
+		if n.Else != nil {
+			out.Else = p.resolveBooleanExists(ctx, n.Else, deferred, decls)
+		}
+		return out
 	default:
 		return node
 	}

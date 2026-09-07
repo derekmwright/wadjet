@@ -1960,26 +1960,27 @@ func arcD5SelectListSubqueryCells() []arcD5Cell {
 			pgSays: "7.5700000000000000 at PostgreSQL's own division scale; wadjet's AVG scale " +
 				"is s+4, so this is the same number to the digits both keep (ADR-0012 item 9)"},
 
-		// A subquery inside a CASE arm. This cell used to record a ROUTE, and
-		// its reason was that `resolveSubqueryAST`'s walk did not descend into
-		// a CaseNode — so the item was declined and kept its typed refusal
-		// rather than reaching a worker that cannot compile it.
+		// A SCALAR subquery inside a CASE arm routes, and the reason is now
+		// sharper than "the walk does not descend into a CaseNode".
 		//
-		// The walk descends now (#955, round-1 review B2): the same omission
-		// left an uncorrelated EXISTS under `OR` or `NOT` shipping to a worker
-		// verbatim and failing every task, and the repair is the boolean tree
-		// — AND, OR, NOT and CASE — rather than one node. So the DAG RESOLVES
-		// this item and executes the shape as stages, at the same values. The
-		// boundary moved outward and the counter says so; the shapes that
-		// still route are the ones the walk reaches and DECLINES, which are
-		// the cells above and below this one.
-		{issue: "#659", name: "select_list_subquery_inside_a_case_arm_lowers",
+		// The walk DOES descend (#955, round-1 review B2) — it had to, because
+		// an uncorrelated EXISTS under `OR` or `NOT` shipped to a worker
+		// verbatim and failed every task — but it resolves only the EXISTS
+		// leaves it finds there. A boolean connective SHORT-CIRCUITS, and
+		// hoisting is unconditional evaluation, so hoisting a SCALAR out of an
+		// arm the query may never reach makes that arm's failure the query's
+		// answer: `… WHERE d.id < 100 OR d.id > (SELECT id FROM t WHERE id<5)`
+		// is 9 rows on PostgreSQL 17 and on this engine's single-process path,
+		// and 21000 if the subquery is hoisted (round-1 review P2). So a
+		// scalar leaf in a boolean position keeps the disposition it had, and
+		// this cell keeps its route.
+		{issue: "#659", name: "boundary_select_list_subquery_inside_a_case_arm_routes",
 			sql: `SELECT id, CASE WHEN id > 1 THEN (SELECT MAX(c_i64) FROM typemx) ELSE 0 END AS mx ` +
 				`FROM typemx WHERE id<3 ORDER BY id`,
 			want: []string{"id=int64:0|mx=int64:0", "id=int64:1|mx=int64:0",
 				"id=int64:2|mx=int64:4999014997"},
-			wantScalarProjRoutes: 0,
-			pgSays:               "0, 0, 4999014997 — right on every arm, and now at no route"},
+			wantScalarProjRoutes: 1,
+			pgSays:               "0, 0, 4999014997 — right on every arm, at one route"},
 		// A CORRELATED SELECT-list subquery is not lowered by anything here:
 		// it needs a re-run per outer row, which only the coordinator-local
 		// pipeline has. It routes on the CORRELATED counter, not this one.
