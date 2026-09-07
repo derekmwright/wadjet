@@ -716,18 +716,35 @@ func respellSortKeysOverProducerOutput(stages []Stage, idx map[string]int, i int
 	if len(s.SortKeys) == 0 {
 		return
 	}
-	// The SELECT-list projection the fragment runs: this stage's OWN when it
-	// has one — with a JOIN under the DISTINCT the fold puts the list AND the
-	// sort on the same stage — and otherwise the one its single consumer
-	// carries.
-	specs, own := s.ProjectExprs, true
+	// WHERE the SELECT-list projection runs relative to this sort is the whole
+	// question, and there are three places it can be.
+	//
+	//  1. THIS stage's own list, ahead of its own sort — with a JOIN under a
+	//     DISTINCT the fold puts the list AND the sort on one stage.
+	//  2. The stage BELOW. A LIMIT emits a dedicated `sort-N` over the
+	//     projected stream (`… ORDER BY a LIMIT 4` puts `project-9` between
+	//     the aggregate and the sort), so that sort reads OUTPUT columns even
+	//     though it carries no projection of its own.
+	//  3. The stage ABOVE — the `project` stage a pass inserted over a
+	//     producer that could not evaluate the list. Then the sort runs first
+	//     and reads the projection's INPUT.
+	//
+	// 1 and 2 are the same relation and take the OUTPUT-name rule; 3 takes the
+	// source rule. Below wins over above, because it decides what THIS sort
+	// reads.
+	specs := s.ProjectExprs
+	projected := len(specs) > 0 && fragmentProjectsBeforeSorting(s)
 	if len(specs) == 0 {
-		specs, own = selectListAbove(stages, s), false
+		if d, ok := idx[firstDep(s)]; ok && len(stages[d].ProjectExprs) > 0 {
+			specs, projected = stages[d].ProjectExprs, true
+		} else {
+			specs = selectListAbove(stages, s)
+		}
 	}
 	if len(specs) == 0 {
 		return
 	}
-	afterProjection := own && fragmentProjectsBeforeSorting(s)
+	afterProjection := projected
 	var in []streamCol
 	if !afterProjection {
 		in = stageStreamColumnsFiltered(stages, idx, s, passThroughDepth, true)

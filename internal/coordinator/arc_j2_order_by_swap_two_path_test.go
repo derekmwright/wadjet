@@ -142,7 +142,72 @@ func TestJ2AnOrderByTermNamesAnOutputColumn(t *testing.T) {
 				"12.75,12.7499,3 | 12.75,NULL,8 | NULL,1.0000,7 | NULL,NULL,9",
 		},
 
+		// …and the same swap under a LIMIT, which is a different STAGE and was
+		// a different defect: the LIMIT emits a dedicated `sort-N` over the
+		// ALREADY-PROJECTED stream (`project-9` sits between the aggregate and
+		// the sort), so that sort reads OUTPUT columns while carrying no
+		// projection of its own — and its key was still the source-chased
+		// spelling. Wrong ROW SET, not wrong order: the top-4 was taken over
+		// the other output. Identical at a3f9b664, b73e34a3 and 1c1d500e.
+		{
+			name: "947 the join swap under a LIMIT takes the top-N over the OUTPUT column",
+			sql: "SELECT DISTINCT x.a AS b, x.b AS a FROM decpair x " +
+				"JOIN decpair u ON x.id = u.id ORDER BY a LIMIT 4",
+			want: "cols=[b:DECIMAL(9,2) a:DECIMAL(18,4)] rows=4 | -0.01,-0.0100 | " +
+				"0.00,0.0000 | NULL,1.0000 | 2.00,10.0000",
+		},
+		{
+			name: "947 the join swap under LIMIT with OFFSET",
+			sql: "SELECT DISTINCT x.a AS b, x.b AS a FROM decpair x " +
+				"JOIN decpair u ON x.id = u.id ORDER BY a LIMIT 4 OFFSET 2",
+			want: "cols=[b:DECIMAL(9,2) a:DECIMAL(18,4)] rows=4 | NULL,1.0000 | " +
+				"2.00,10.0000 | 12.75,12.7499 | 12.75,12.7500",
+		},
+		{
+			// The ORDINAL spelling under a LIMIT, which #557's position
+			// identity binds and which was wrong here too.
+			name: "947 the join swap under a LIMIT, ordered by ORDINAL",
+			sql: "SELECT DISTINCT x.a AS b, x.b AS a FROM decpair x " +
+				"JOIN decpair u ON x.id = u.id ORDER BY 2 LIMIT 4",
+			want: "cols=[b:DECIMAL(9,2) a:DECIMAL(18,4)] rows=4 | -0.01,-0.0100 | " +
+				"0.00,0.0000 | NULL,1.0000 | 2.00,10.0000",
+		},
+		{
+			// The MIRROR term under a LIMIT — a re-spell that moved every key
+			// would take the wrong four here. Tiebroken on `x.id`: the four
+			// rows whose key is 12.75 are peers (ADR-0013).
+			name: "947 the join swap under a LIMIT, ordered by the other output",
+			sql: "SELECT DISTINCT x.a AS b, x.b AS a, x.id FROM decpair x " +
+				"JOIN decpair u ON x.id = u.id ORDER BY b, x.id LIMIT 4",
+			want: "cols=[b:DECIMAL(9,2) a:DECIMAL(18,4) id:INT64] rows=4 | -0.01,-0.0100,4 | " +
+				"0.00,0.0000,6 | 2.00,10.0000,5 | 12.75,12.7500,1",
+		},
+		{
+			name: "947 the join swap under a LIMIT with a third key column",
+			sql: "SELECT DISTINCT x.a AS b, x.b AS a, x.id FROM decpair x " +
+				"JOIN decpair u ON x.id = u.id ORDER BY a, x.id LIMIT 4",
+			want: "cols=[b:DECIMAL(9,2) a:DECIMAL(18,4) id:INT64] rows=4 | -0.01,-0.0100,4 | " +
+				"0.00,0.0000,6 | NULL,1.0000,7 | 2.00,10.0000,5",
+		},
+
 		// Controls. Each answers PostgreSQL on all four arms at a3f9b664 too.
+		{
+			// The same LIMIT with NO DISTINCT — no aggregate to fold the sort
+			// onto, and right on every arm before this arc.
+			name: "947 control: the join swap under a LIMIT with no DISTINCT",
+			sql: "SELECT x.a AS b, x.b AS a FROM decpair x JOIN decpair u ON x.id = u.id " +
+				"ORDER BY a LIMIT 5",
+			want: "cols=[b:DECIMAL(9,2) a:DECIMAL(18,4)] rows=5 | -0.01,-0.0100 | " +
+				"0.00,0.0000 | NULL,1.0000 | 2.00,10.0000 | 12.75,12.7499",
+		},
+		{
+			// The LIMIT over a SINGLE relation, where the dedicated sort reads
+			// the aggregate's own output and was already right.
+			name: "947 control: the swap under a LIMIT over one relation",
+			sql:  "SELECT DISTINCT a AS b, b AS a FROM decpair ORDER BY a LIMIT 4",
+			want: "cols=[b:DECIMAL(9,2) a:DECIMAL(18,4)] rows=4 | -0.01,-0.0100 | " +
+				"0.00,0.0000 | NULL,1.0000 | 2.00,10.0000",
+		},
 		{
 			// The same query with no DISTINCT and no GROUP BY: no aggregate to
 			// fold the sort onto, and every arm was already right.
@@ -176,6 +241,37 @@ func TestJ2AnOrderByTermNamesAnOutputColumn(t *testing.T) {
 			want: "cols=[k:DECIMAL(9,2) m:DECIMAL(18,4)] rows=9 | -0.01,-0.0100 | " +
 				"0.00,0.0000 | NULL,1.0000 | 2.00,10.0000 | 12.75,12.7499 | 12.75,12.7500 | " +
 				"12.75,12.7501 | 12.75,NULL | NULL,NULL",
+		},
+		{
+			// PINNED, and a DIFFERENT family: two output columns of one name,
+			// where PostgreSQL refuses (`ORDER BY "a" is ambiguous`) and
+			// wadjet answers. The superset is allowed (ADR-0012), but the two
+			// paths must not answer two different things: the local path
+			// returns the two DISTINCT columns and both DAG arms return
+			// `x.b` TWICE, with `x.a` gone and its DECLARATION with it. That
+			// is #556/#557's territory — output slots have identity BY
+			// POSITION and the DAG collapses two `ProjectExprs` of one name —
+			// not the published-identity pass, and it is identical at
+			// a3f9b664, b73e34a3 and 1c1d500e. `want` is the local path's
+			// answer, which is the one that is right about the values.
+			name: "947 PINNED: two outputs named `a` answer differently on the two paths",
+			sql: "SELECT x.b AS a, x.a FROM decpair x JOIN decpair u ON x.id = u.id " +
+				"GROUP BY x.a, x.b ORDER BY a",
+			want: "cols=[a:DECIMAL(18,4) a:DECIMAL(9,2)] rows=9 | -0.0100,-0.01 | " +
+				"0.0000,0.00 | 1.0000,NULL | 10.0000,2.00 | 12.7499,12.75 | 12.7500,12.75 | " +
+				"12.7501,12.75 | NULL,12.75 | NULL,NULL",
+			pin: map[string]string{
+				"dag": "cols=[a:DECIMAL(18,4) a:DECIMAL(18,4)] rows=9 | -0.0100,-0.0100 | " +
+					"0.0000,0.0000 | 1.0000,1.0000 | 10.0000,10.0000 | 12.7499,12.7499 | " +
+					"12.7500,12.7500 | 12.7501,12.7501 | NULL,NULL | NULL,NULL",
+				"dagshuf": "cols=[a:DECIMAL(18,4) a:DECIMAL(18,4)] rows=9 | -0.0100,-0.0100 | " +
+					"0.0000,0.0000 | 1.0000,1.0000 | 10.0000,10.0000 | 12.7499,12.7499 | " +
+					"12.7500,12.7500 | 12.7501,12.7501 | NULL,NULL | NULL,NULL",
+			},
+			why: "PostgreSQL 17 refuses this as ambiguous; the superset is allowed and the " +
+				"two paths disagreeing is not. The DAG's aggregate emits two projections " +
+				"named `a` and collapses them (#556/#557's position identity), so the second " +
+				"output carries the first's value and its declared type",
 		},
 	})
 }
