@@ -682,7 +682,7 @@ func arcD5LateralCells() []arcD5Cell {
 			sql: `SELECT o.customer AS c, ` +
 				`(SELECT COUNT(*) FROM lat_item i WHERE i.amount > s.n * 40) AS k ` +
 				`FROM lat_ord o ` + lat + `ON true ORDER BY 1`,
-			want:           []string{"c=Alice|k=2", "c=Bob|k=2", "c=Carol|k=0"},
+			want:           []string{"c=Alice|k=int64:2", "c=Bob|k=int64:2", "c=Carol|k=int64:0"},
 			wantCorrRoutes: 1,
 			pgSays:         "Alice 2, Bob 2, Carol 4 — Carol's s.n is 0 there, not NULL"},
 		{issue: "#767", name: "boundary_exists_reads_the_pad_and_drops_the_row",
@@ -1854,8 +1854,13 @@ func arcD5ScalarCardinalityCells() []arcD5Cell {
 // is falsifiable from both sides.
 func arcD5SelectListSubqueryCells() []arcD5Cell {
 	const cte = `WITH c AS (SELECT id, c_i64 AS v FROM typemx) `
+	// int64, not a bare rendering: since #874 a SELECT-list scalar subquery
+	// declares the type of its own output column, so the value arrives as the
+	// bigint PostgreSQL says it is instead of the projection's STRING
+	// fallback. The pin these cells carried for that box is deleted below.
 	rows := []string{
-		"id=int64:0|mx=4999014997", "id=int64:1|mx=4999014997", "id=int64:2|mx=4999014997",
+		"id=int64:0|mx=int64:4999014997", "id=int64:1|mx=int64:4999014997",
+		"id=int64:2|mx=int64:4999014997",
 	}
 	return []arcD5Cell{
 		// THE TWO THAT LOWER. Zero routes is the whole assertion: the answers
@@ -1869,11 +1874,9 @@ func arcD5SelectListSubqueryCells() []arcD5Cell {
 				`WHERE id<3 ORDER BY id`,
 			want: rows,
 			pgSays: "three rows, all with the same max, and the DAG computes it in a producer " +
-				"stage. The BOX is a text one on every arm (na2Run prints no Go type for it) " +
-				"where PostgreSQL says bigint - expr.ScalarSubquery declares nothing, so the " +
-				"item falls to the projection's string fallback. That is true at this arc's " +
-				"base and on the single-process path, and the lowering deliberately does not " +
-				"fix it on ONE path: filed"},
+				"stage. The BOX is bigint on every arm, which is PostgreSQL's: the item was " +
+				"a TEXT one until #874 gave nodeDeclaredType a SubqueryNode arm, and the pin " +
+				"that recorded the divergence is deleted with it"},
 		{issue: "#659", name: "select_list_scalar_subquery_over_a_derived_table_lowers",
 			loweredOnlyWhenDeferred: true,
 			sql: `SELECT id, (SELECT MAX(v) FROM (SELECT c_i64 AS v FROM typemx) d) AS mx ` +
@@ -1885,20 +1888,20 @@ func arcD5SelectListSubqueryCells() []arcD5Cell {
 			loweredOnlyWhenDeferred: true,
 			sql: `SELECT id, (SELECT MAX(c_i64) FROM typemx) + 1 AS mx FROM typemx ` +
 				`WHERE id<3 ORDER BY id`,
-			want: []string{"id=int64:0|mx=float:4.99901e+09", "id=int64:1|mx=float:4.99901e+09",
-				"id=int64:2|mx=float:4.99901e+09"},
-			pgSays: "4999014998 three times as BIGINT. The value agrees on every arm; the BOX " +
-				"does not, and it did not before this lowering either - a scalar subquery " +
-				"declares no type to the const-arith fold, so `<subquery> + 1` folds float8. " +
-				"That is ADR-0024's rung (#714's third box), not this lowering's doing, and " +
-				"the four arms agree with each other"},
+			want: []string{"id=int64:0|mx=int64:4999014998", "id=int64:1|mx=int64:4999014998",
+				"id=int64:2|mx=int64:4999014998"},
+			pgSays: "4999014998 three times as BIGINT, which is now what every arm answers. " +
+				"It folded FLOAT8 until #874 - a scalar subquery declared no type to the " +
+				"const-arith fold, which is #714's third box - and the pin that recorded " +
+				"that rung is deleted with the fix"},
 		// TWO subqueries in one SELECT list: two producers, two placeholders,
 		// and the substitution has to keep them apart.
 		{issue: "#659", name: "two_select_list_scalar_subqueries_lower",
 			loweredOnlyWhenDeferred: true,
 			sql: `SELECT id, (SELECT MAX(c_i64) FROM typemx) AS hi, ` +
 				`(SELECT MIN(c_i64) FROM typemx) AS lo FROM typemx WHERE id<2 ORDER BY id`,
-			want: []string{"id=int64:0|hi=4999014997|lo=0", "id=int64:1|hi=4999014997|lo=0"}},
+			want: []string{"id=int64:0|hi=int64:4999014997|lo=int64:0",
+				"id=int64:1|hi=int64:4999014997|lo=int64:0"}},
 
 		// THE BOUNDARIES, each with its own mechanism.
 		//
@@ -1918,8 +1921,8 @@ func arcD5SelectListSubqueryCells() []arcD5Cell {
 		{issue: "#659", name: "boundary_select_list_subquery_over_a_shared_cte_no_filter_routes",
 			sql: `WITH c AS (SELECT id, c_i64 AS v FROM typemx WHERE id<3) ` +
 				`SELECT id, (SELECT MAX(v) FROM c) AS mx FROM c ORDER BY id`,
-			want: []string{"id=int64:0|mx=2000006", "id=int64:1|mx=2000006",
-				"id=int64:2|mx=2000006"},
+			want: []string{"id=int64:0|mx=int64:2000006", "id=int64:1|mx=int64:2000006",
+				"id=int64:2|mx=int64:2000006"},
 			wantScalarProjRoutes: 1,
 			pgSays: "2000006 three times - the CTE keeps three rows, so its MAX is the third's. " +
 				"The cycle is the SHARING, not the filter: this spelling HUNG on the DAG " +
@@ -1973,7 +1976,8 @@ func arcD5SelectListSubqueryCells() []arcD5Cell {
 		{issue: "#659", name: "boundary_correlated_select_list_subquery_routes_as_correlated",
 			sql: `SELECT a.id AS id, (SELECT MAX(b.c_i64) FROM typemx b WHERE b.id = a.id) AS mx ` +
 				`FROM typemx a WHERE a.id<3 ORDER BY id`,
-			want:           []string{"id=int64:0|mx=0", "id=int64:1|mx=1000003", "id=int64:2|mx=2000006"},
+			want: []string{"id=int64:0|mx=int64:0", "id=int64:1|mx=int64:1000003",
+				"id=int64:2|mx=int64:2000006"},
 			wantCorrRoutes: 1},
 		// A SELECT-list subquery that is NOT provably one row is executed at
 		// plan time rather than deferred (ADR-0021 §5 can only be applied

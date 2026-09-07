@@ -59,6 +59,20 @@ func TestArcH1AScalarSubqueryAnswersItsOwnType(t *testing.T) {
 			`SELECT MAX(c_uuid) AS v FROM typemx`},
 		{"ipv4", `SELECT (SELECT MAX(c_ipv4) FROM typemx) AS v FROM decpair WHERE id = 1`,
 			`SELECT MAX(c_ipv4) AS v FROM typemx`},
+		// #948: a WINDOW inside a DERIVED TABLE inside the subquery. The
+		// filing measured `s:STRING` on all four arms where PostgreSQL
+		// declares numeric, and it is this mechanism one nesting deeper —
+		// the subquery's own plan types the window and the derived table
+		// perfectly well, and nothing asked it. The plain spelling declared
+		// DECIMAL(38,2) throughout, which is what makes the pair the proof.
+		{"window-in-a-derived-table",
+			`SELECT (SELECT SUM(w*2) FROM (SELECT id, SUM(a) OVER () AS w FROM decpair) x) AS v ` +
+				`FROM decpair WHERE id = 1`,
+			`SELECT SUM(w*2) AS v FROM (SELECT id, SUM(a) OVER () AS w FROM decpair) x`},
+		{"derived-table-without-a-window",
+			`SELECT (SELECT SUM(w*2) FROM (SELECT id, a AS w FROM decpair) x) AS v ` +
+				`FROM decpair WHERE id = 1`,
+			`SELECT SUM(w*2) AS v FROM (SELECT id, a AS w FROM decpair) x`},
 		// A BARE COLUMN subquery, not an aggregate: the same question with no
 		// aggregate result type in the way.
 		{"bare-column", `SELECT (SELECT c_i64 FROM typemx WHERE id = 3) AS v FROM decpair WHERE id = 1`,

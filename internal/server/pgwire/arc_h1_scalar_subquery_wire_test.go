@@ -85,6 +85,17 @@ func TestArcH1AScalarSubqueryDeclaresItsOwnTypeOnTheWire(t *testing.T) {
 			25, "s-000002"},
 		{"bare_column_subquery", `SELECT (SELECT c_i64 FROM h1scal WHERE id = 2) AS v ` +
 			`FROM h1scal WHERE id = 1`, 20, "7"},
+		// #948: a WINDOW inside a DERIVED TABLE inside the subquery. The
+		// filing measured a STRING declaration on all four arms where
+		// PostgreSQL declares numeric; it is this mechanism one nesting
+		// deeper, and the same declaration closes it. OID 1700 with typmod
+		// -1, which is what PostgreSQL sends for a numeric expression.
+		{"window_in_a_derived_table_in_a_subquery",
+			`SELECT (SELECT SUM(w*2) FROM (SELECT id, SUM(c_dec) OVER () AS w FROM h1scal) x) AS v ` +
+				`FROM h1scal WHERE id = 1`, 1700, "55.00"},
+		{"ctl_the_same_without_the_subquery",
+			`SELECT SUM(w*2) AS v FROM (SELECT id, SUM(c_dec) OVER () AS w FROM h1scal) x`,
+			1700, "55.00"},
 
 		// THE CONTROLS: the same value spelled WITHOUT a subquery must not
 		// move, and neither must the wire's own reading of it.
@@ -122,13 +133,14 @@ func TestArcH1AScalarSubqueryDeclaresItsOwnTypeOnTheWire(t *testing.T) {
 	// the property #874 is about, and it holds; the width question belongs to
 	// the aggregate.
 	//
-	// `(SELECT MAX(c_dec) …)` stays TEXT because the subquery's plan declares
-	// a DECIMAL with NO (p,s) — `declaredProjectionDecl`'s honest fallback for
-	// a COMPUTED decimal (#458) — and a DECIMAL declared without its scale
-	// builds an output vector that reads every value at the wrong power of
-	// ten. Declining is the rule ADR-0024 item 2 states, and the plain
-	// `MAX(c_dec)` spelling reaches the wire the same way. Asserted in both
-	// directions so the pair cannot drift apart unnoticed.
+	// `(SELECT MAX(c_dec) …)` is asserted against its PLAIN spelling rather
+	// than against a literal OID, because what this arc owns is that the two
+	// agree: a DECIMAL whose plan cannot name a (p,s) declines the
+	// declaration (`declaredProjectionDecl`'s honest fallback for a COMPUTED
+	// decimal, #458 — a DECIMAL declared without its scale builds an output
+	// vector that reads every value at the wrong power of ten, ADR-0024 item
+	// 2), and the plain spelling reaches the wire through the same rule.
+	// Asserted in both directions so the pair cannot drift apart unnoticed.
 	t.Run("recorded-int32-and-decimal-agree-with-their-plain-spelling", func(t *testing.T) {
 		for _, c := range []struct{ name, sub, plain string }{
 			{"int32", `SELECT (SELECT MAX(c_i32) FROM h1scal) AS v FROM h1scal WHERE id = 1`,
