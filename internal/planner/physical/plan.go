@@ -3635,6 +3635,49 @@ func GatherOutputStringLength(stages []Stage) map[string]int {
 	return nil
 }
 
+// qualifySharedRenameSource re-attaches a SELECT item's own qualifier to the
+// source column its rename resolved to, when another item resolves the same
+// bare source under a DIFFERENT qualifier.
+//
+// A bare source reached under two qualifiers is not an address. `WITH cte AS
+// (SELECT id AS WatchID, a FROM t) SELECT a.WatchID, b.WatchID FROM cte a JOIN
+// cte b ON a.a = b.a` resolves BOTH items to the CTE's source column `id`, so
+// the join fragment's projection read the same column twice and the second
+// output carried the first arm's value — `1,1 | 1,1 | 1,1 | 1,1` on both DAG
+// arms where PostgreSQL has `1,1 | 1,2 | 1,3 | 1,8`, silently, and right on
+// both local arms (#905's ClickBench spelling; the #513/#629 duplicate-output
+// -name class). It is the ALIASED CTE column that makes it reachable: without
+// the rename the items are already `a.id` / `b.id` and no resolution happens.
+//
+// A join qualifies a column both sides carry, so `a.id` is the spelling the
+// stream really has; where it carries the bare name instead, the runtime
+// lookup's qualified-to-bare fallback (columnIndexFallback) finds it anyway.
+// The re-qualification is therefore safe in both shapes and is applied ONLY to
+// the contested case, so a single-qualifier rename — every ordinary derived
+// alias, and every TPC-H plan — is left exactly as it was.
+func qualifySharedRenameSource(name, src string, proj []logical.Projection, child *logical.Node) string {
+	dot := strings.LastIndexByte(name, '.')
+	if dot <= 0 || strings.Contains(src, ".") {
+		return src
+	}
+	qual := name[:dot]
+	for i := range proj {
+		other := proj[i].Expr
+		if other == "" {
+			other = proj[i].Column
+		}
+		od := strings.LastIndexByte(other, '.')
+		if od <= 0 || strings.EqualFold(other[:od], qual) {
+			continue // unqualified, or this item's own qualifier
+		}
+		if !strings.EqualFold(resolveOutputRenameSource(other, child), src) {
+			continue
+		}
+		return qual + "." + src
+	}
+	return src
+}
+
 // attachScanSelectProjections sets ProjectExprs on a leaf scan stage when
 // (a) the terminal gather's sole dependency is that scan (nothing computes
 // between scan and gather) and (b) the outermost SELECT list contains at
@@ -3869,7 +3912,7 @@ func (p *Planner) attachScanSelectProjections(root *logical.Node, stages []Stage
 			}
 		}
 		if !strings.EqualFold(src, specs[j].Name) {
-			specs[j].Expr = src
+			specs[j].Expr = qualifySharedRenameSource(specs[j].Name, src, proj, renameChild)
 			anyNestedRename = true
 		}
 	}

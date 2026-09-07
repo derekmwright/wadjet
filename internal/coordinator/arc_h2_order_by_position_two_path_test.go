@@ -126,32 +126,56 @@ func TestH2ADuplicateOutputNameOrdersByPosition(t *testing.T) {
 			want: "cols=[k:INT64 k:DECIMAL(9,2)] rows=4 | 1,12.75 | 2,12.75 | 3,12.75 | 4,-0.01",
 		},
 		{
-			// The ClickBench spelling #905 was found in, PINNED on the two
-			// DAG arms: with the CTE's column itself an ALIAS
-			// (`SELECT id AS WatchID`), the DAG's second output column carries
-			// the FIRST arm's value — 1,1 | 1,1 | 1,1 | 1,1 where PostgreSQL
-			// has 1,1 | 1,2 | 1,3 | 1,8. That is a duplicate-output-name
-			// identity defect in the GATHER's renames, not in the sort: it is
-			// present with and without this commit's change, on both DAG arms
-			// and on neither local arm. Fail-on-agree: the day the DAG
-			// publishes both columns, delete the pin.
-			name: "905 PINNED (DAG): the CTE column is itself an alias",
+			// The ClickBench spelling #905 was found in, and the DAG's half of
+			// the same class: with the CTE's column itself an ALIAS
+			// (`SELECT id AS WatchID`), BOTH select items resolve to the CTE's
+			// one source column `id`, so the join fragment's projection read
+			// it twice and the second output carried the first arm's value —
+			// 1,1 | 1,1 | 1,1 | 1,1 on both DAG arms where PostgreSQL has
+			// 1,1 | 1,2 | 1,3 | 1,8, silently, and right on both local arms.
+			// qualifySharedRenameSource re-attaches each item's own qualifier
+			// when another item resolves the same bare source under a
+			// different one.
+			name: "905 the CTE column is itself an alias (the DAG half)",
 			sql: "WITH cte AS (SELECT id AS WatchID, a FROM decpair) " +
 				"SELECT a.WatchID, b.WatchID FROM cte a JOIN cte b ON a.a = b.a " +
 				"ORDER BY a.WatchID, b.WatchID",
 			want: "cols=[watchid:INT64 watchid:INT64] rows=19 | 1,1 | 1,2 | 1,3 | 1,8 | 2,1 | " +
 				"2,2 | 2,3 | 2,8 | 3,1 | 3,2 | 3,3 | 3,8 | 4,4 | 5,5 | 6,6 | 8,1 | 8,2 | 8,3 | 8,8",
-			pin: map[string]string{
-				"dag": "cols=[watchid:INT64 watchid:INT64] rows=19 | 1,1 | 1,1 | 1,1 | 1,1 | " +
-					"2,2 | 2,2 | 2,2 | 2,2 | 3,3 | 3,3 | 3,3 | 3,3 | 4,4 | 5,5 | 6,6 | 8,8 | " +
-					"8,8 | 8,8 | 8,8",
-				"dagshuf": "cols=[watchid:INT64 watchid:INT64] rows=19 | 1,1 | 1,1 | 1,1 | 1,1 | " +
-					"2,2 | 2,2 | 2,2 | 2,2 | 3,3 | 3,3 | 3,3 | 3,3 | 4,4 | 5,5 | 6,6 | 8,8 | " +
-					"8,8 | 8,8 | 8,8",
-			},
-			why: "the DAG binds both gather renames to the CTE's single source column when the " +
-				"CTE's own item is an alias; the sort is right and the VALUES are not. " +
-				"Pre-existing at 2e386378 and unmoved by #905's fix.",
+		},
+		{
+			name: "905 the aliased CTE spelling with the second key DESC",
+			sql: "WITH cte AS (SELECT id AS WatchID, a FROM decpair) " +
+				"SELECT a.WatchID, b.WatchID FROM cte a JOIN cte b ON a.a = b.a " +
+				"ORDER BY a.WatchID, b.WatchID DESC LIMIT 6",
+			want: "cols=[watchid:INT64 watchid:INT64] rows=6 | 1,8 | 1,3 | 1,2 | 1,1 | 2,8 | 2,3",
+		},
+		{
+			// THREE references of one CTE, so a repair that only ever
+			// distinguishes two qualifiers cannot pass.
+			name: "905 three references of the same aliased CTE",
+			sql: "WITH cte AS (SELECT id AS WatchID, a FROM decpair) " +
+				"SELECT a.WatchID, b.WatchID, c.WatchID FROM cte a JOIN cte b ON a.a = b.a " +
+				"JOIN cte c ON a.a = c.a ORDER BY a.WatchID, b.WatchID, c.WatchID LIMIT 8",
+			want: "cols=[watchid:INT64 watchid:INT64 watchid:INT64] rows=8 | 1,1,1 | 1,1,2 | " +
+				"1,1,3 | 1,1,8 | 1,2,1 | 1,2,2 | 1,2,3 | 1,2,8",
+		},
+		{
+			// The boundary from the other side: ONE qualified rename, so the
+			// source is not contested and the spelling must not be touched.
+			name: "905 control: a single qualified rename over a self-join",
+			sql: "WITH cte AS (SELECT id AS WatchID, a FROM decpair) " +
+				"SELECT a.WatchID FROM cte a JOIN cte b ON a.a = b.a ORDER BY a.WatchID LIMIT 6",
+			want: "cols=[watchid:INT64] rows=6 | 1 | 1 | 1 | 1 | 2 | 2",
+		},
+		{
+			// Two qualifiers resolving to DIFFERENT sources: nothing is
+			// contested and neither spelling moves.
+			name: "905 control: two qualifiers, different sources",
+			sql: "WITH cte AS (SELECT id AS k, a AS m FROM decpair) " +
+				"SELECT a.k, b.m FROM cte a JOIN cte b ON a.m = b.m ORDER BY a.k, b.m LIMIT 6",
+			want: "cols=[k:INT64 m:DECIMAL(9,2)] rows=6 | 1,12.75 | 1,12.75 | 1,12.75 | " +
+				"1,12.75 | 2,12.75 | 2,12.75",
 		},
 	})
 }
