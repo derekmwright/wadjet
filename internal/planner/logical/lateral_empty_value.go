@@ -197,12 +197,51 @@ func refuseUnorderedLateralOn(plan lateralEmptyInputCase, empty lateralEmptyInpu
 // that as "rejects" is how `ON o.id > 1` would silently answer NULL where
 // PostgreSQL answers a value.
 func onRejectsThePad(node plansql.Node) bool {
-	if node == nil || !isConstantCondition(node) {
+	val, ok := foldConstant(node)
+	if !ok {
 		return false
+	}
+	b, isBool := val.(bool)
+	return val == nil || (isBool && !b)
+}
+
+// onFoldsToTrue reports whether a written join condition is a constant TRUE —
+// `ON true`, `ON 1 = 1`, `ON 2 > 1`. Such a condition rejects nothing, so it
+// says nothing about which pairs the join keeps and is not a residual the
+// empty-input repair has to move or refuse.
+//
+// It folds through the expression compiler rather than matching the text,
+// because "is this constant" is the compiler's question and a text match
+// answers it for exactly one spelling.
+func onFoldsToTrue(node plansql.Node, text string) bool {
+	if node == nil {
+		if strings.TrimSpace(text) == "" {
+			return false
+		}
+		parsed, err := plansql.ParseExpression(text)
+		if err != nil {
+			return strings.EqualFold(strings.TrimSpace(text), "true")
+		}
+		node = parsed
+	}
+	val, ok := foldConstant(node)
+	if !ok {
+		return false
+	}
+	b, isBool := val.(bool)
+	return isBool && b
+}
+
+// foldConstant evaluates a condition that reads no row, reporting ok=false
+// when it reads one or cannot be evaluated at all. NULL comes back as a nil
+// value with ok=true, which is a real answer and not a failure.
+func foldConstant(node plansql.Node) (any, bool) {
+	if node == nil || !isConstantCondition(node) {
+		return nil, false
 	}
 	compiled, err := expr.Compile(node)
 	if err != nil {
-		return false
+		return nil, false
 	}
 	var (
 		val any
@@ -216,11 +255,7 @@ func onRejectsThePad(node plansql.Node) bool {
 		}()
 		val = compiled.Eval(&batch.RecordBatch{Len: 1}, 0)
 	}()
-	if !ok {
-		return false
-	}
-	b, isBool := val.(bool)
-	return val == nil || (isBool && !b)
+	return val, ok
 }
 
 // isConstantCondition reports whether node reads no column and calls no

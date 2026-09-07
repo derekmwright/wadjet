@@ -2205,7 +2205,13 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 	// the written ON.
 	corrCond := strings.Join(correlatedParts, " AND ")
 	empty.onResidual = ""
-	if join.Condition != "" && !strings.EqualFold(strings.TrimSpace(join.Condition), "true") {
+	// A condition that FOLDS to a constant TRUE rejects nothing, so it is not
+	// a residual at all — it is `ON true` under another spelling, and the
+	// repair that makes the join LEFT on the correlation alone IS its
+	// semantics. Testing the TEXT for "true" made `ON 1 = 1` a residual, which
+	// refused a query PostgreSQL answers `Carol, 0`, while `ON true` answered
+	// it; both are one constant and they fold the same way.
+	if join.Condition != "" && !onFoldsToTrue(join.CondExpr, join.Condition) {
 		empty.onResidual = join.Condition
 		empty.onResidualExpr = join.CondExpr
 	}
