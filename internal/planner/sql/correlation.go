@@ -132,6 +132,25 @@ func FindCorrelatedRefsWithScope(subquerySQL string, outerTables map[string]bool
 // scope. Only qualified references are visible to it — unqualified correlation
 // needs the scoped analysis.
 func DanglingTableRefs(subquerySQL string) []OuterRef {
+	return DanglingTableRefsWithScope(subquerySQL, nil)
+}
+
+// DanglingTableRefsWithScope is DanglingTableRefs with a resolver that can
+// tell a ROW FIELD PATH from a reference to an outer relation.
+//
+// The two look identical in the grammar. `c_row.b` is a qualified column
+// reference whose qualifier names no FROM item, which is exactly the shape a
+// lost correlation has — and `c_row` is a ROW-typed COLUMN of the relation the
+// subquery reads, so the reference is self-contained and the subquery answers
+// on its own. Without a schema this cannot be told apart, and the refusal
+// therefore fired on `d.b IN (SELECT c_row.b FROM typemx_nested)`, a query
+// PostgreSQL answers in one row (#866, ADR-0022).
+//
+// resolve answers a relation's COMPLETE column list or nil (the contract
+// TableColumns states). A nil resolver, or a relation it cannot name, leaves
+// the reference dangling — which is the answer this had before, and the safe
+// direction: a real lost correlation stays refused.
+func DanglingTableRefsWithScope(subquerySQL string, resolve TableColumns) []OuterRef {
 	parsed, err := Parse(subquerySQL)
 	if err != nil {
 		return nil
@@ -156,7 +175,32 @@ func DanglingTableRefs(subquerySQL string) []OuterRef {
 			walkForOuterRefs(col.ASTExpr, scope, &refs)
 		}
 	}
-	return dedup(refs)
+	return dropFieldPathRefs(dedup(refs), info, resolve)
+}
+
+// dropFieldPathRefs removes every reference whose QUALIFIER is a column of a
+// relation the subquery itself reads — a ROW field path, not an outer table.
+func dropFieldPathRefs(refs []OuterRef, info *SelectInfo, resolve TableColumns) []OuterRef {
+	if len(refs) == 0 || resolve == nil || info == nil {
+		return refs
+	}
+	cols := map[string]bool{}
+	for name := range collectInnerTables(info) {
+		for _, c := range resolve(name) {
+			cols[strings.ToLower(c)] = true
+		}
+	}
+	if len(cols) == 0 {
+		return refs
+	}
+	out := refs[:0:0]
+	for _, r := range refs {
+		if cols[strings.ToLower(r.Table)] {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 func findCorrelatedRefs(subquerySQL string, outerTables map[string]bool, outerCols map[string]string, resolve TableColumns) ([]OuterRef, error) {

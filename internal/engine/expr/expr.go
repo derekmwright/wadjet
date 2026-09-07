@@ -6079,6 +6079,10 @@ type ScalarSubquery struct {
 	// Cols is the subquery's SELECT-list COLUMN COUNT, resolved from its own
 	// plan at compile time — see refuseMultiColumnSubqueryByPlan.
 	Cols SubqueryColumnsFunc
+	// Scope resolves a relation's COMPLETE column list, so the dangling-
+	// reference guard can tell a ROW FIELD PATH from a lost correlation
+	// (#866). Nil keeps the pre-#866 answer.
+	Scope plansql.TableColumns
 	// Decl is the DECLARED type of the subquery's single output column, and
 	// DeclKnown says whether anything resolved it (#696). It carries no value
 	// and changes no evaluation: it exists so the boxed comparison can read
@@ -6119,7 +6123,7 @@ func (e *ScalarSubquery) resolveSlow() {
 	// reads no outer row. `WHERE (SELECT COUNT(*) FROM dim WHERE dim.k =
 	// u.did) > 0` over a CTE was planned here and answered a query-wide
 	// constant 0 on all four arms (#535).
-	refuseDanglingSubquery("scalar", e.SQL)
+	refuseDanglingSubquery("scalar", e.SQL, e.Scope)
 	// BEFORE THE RUN: PostgreSQL decides the column count during parse
 	// analysis, so an EMPTY multi-column subquery is 42601 there too.
 	refuseMultiColumnSubqueryByPlan(e.Cols, e.SQL, false)
@@ -6172,6 +6176,10 @@ type InSubquery struct {
 	SQL    string
 	Runner SubqueryRunner
 	Not    bool
+	// Scope resolves a relation's COMPLETE column list, so the dangling-
+	// reference guard can tell a ROW FIELD PATH from a lost correlation
+	// (#866). Nil keeps the pre-#866 answer.
+	Scope plansql.TableColumns
 	// Budget charges the membership set resolveSlow builds to the caller's
 	// per-task memory tracker (ADR-0006, #528). nil (CompileWithRunner,
 	// CompileWithScope, etc.) keeps the map unbudgeted, exactly as before
@@ -6469,7 +6477,7 @@ func (e *InSubquery) resolveSlow() {
 	e.probe.expr = e.Expr
 	// The same guard the other two uncorrelated evaluators carry: a set this
 	// resolves ONCE has to be one that reads no outer row (#734/#679/#535).
-	refuseDanglingSubquery("IN", e.SQL)
+	refuseDanglingSubquery("IN", e.SQL, e.Scope)
 	refuseMultiColumnSubqueryByPlan(e.Cols, e.SQL, true)
 	rows, err := e.Runner(e.SQL)
 	if err != nil {
@@ -6715,6 +6723,10 @@ type ExistsSubquery struct {
 	SQL    string
 	Runner SubqueryRunner
 	Not    bool
+	// Scope resolves a relation's COMPLETE column list, so the dangling-
+	// reference guard can tell a ROW FIELD PATH from a lost correlation
+	// (#866). Nil keeps the pre-#866 answer.
+	Scope plansql.TableColumns
 	// resolved publishes exists: stored last under resolveMu. Same
 	// contract, and the same defect, as ScalarSubquery's (#398).
 	resolved  atomic.Bool
@@ -6750,7 +6762,7 @@ func (e *ExistsSubquery) resolveSlow() {
 	// and rebinds it — so this answered a query-wide CONSTANT, TRUE or FALSE
 	// according to whether the two relations happened to share a column name.
 	// Checked once here, where it costs one parse per query (#734/#679/#535).
-	refuseDanglingSubquery("EXISTS", e.SQL)
+	refuseDanglingSubquery("EXISTS", e.SQL, e.Scope)
 	// ONE ROW. EXISTS asks whether there is a row; the first one answers it.
 	rows, err := e.Runner(plansql.WithRowLimit(e.SQL, 1))
 	if err != nil {

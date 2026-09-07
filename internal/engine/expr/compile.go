@@ -76,6 +76,12 @@ type compileContext struct {
 	// subquery as 54000 — a resource complaint — where this engine's own rule
 	// is 21000, a statement about the data.
 	setRowBound int
+	// subqueryScope resolves a relation's COMPLETE column list, so the
+	// dangling-reference guard can tell a ROW FIELD PATH (`c_row.b`, whose
+	// qualifier is a COLUMN) from a lost correlation (`o.id`, whose
+	// qualifier is an outer relation). Nil keeps the pre-#866 answer: every
+	// qualifier the subquery's FROM does not name is dangling.
+	subqueryScope plansql.TableColumns
 }
 
 // SubqueryDeclFunc resolves a scalar subquery's SQL to the declared type of
@@ -112,6 +118,25 @@ func WithSubqueryEnv(decl SubqueryDeclFunc, cols SubqueryColumnsFunc) CompileOpt
 		c.subqueryDecl = decl
 		c.subqueryCols = cols
 	}
+}
+
+// Options composes several CompileOptions into one, for a caller that hands a
+// single option to a dozen compile sites and needs to add a second answer to
+// it without touching any of them.
+func Options(opts ...CompileOption) CompileOption {
+	return func(c *compileContext) {
+		for _, o := range opts {
+			if o != nil {
+				o(c)
+			}
+		}
+	}
+}
+
+// WithSubqueryScope supplies the relation resolver described on
+// compileContext.subqueryScope (#866).
+func WithSubqueryScope(resolve plansql.TableColumns) CompileOption {
+	return func(c *compileContext) { c.subqueryScope = resolve }
 }
 
 // WithBudget charges an uncorrelated InSubquery's membership set to the
@@ -487,7 +512,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 					}
 				}
 				in := &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Not: n.Not,
-					Cols:   ctx.subqueryCols,
+					Cols: ctx.subqueryCols, Scope: ctx.subqueryScope,
 					Budget: ctx.budget, SetBound: ctx.setRowBound}
 				if ctx.trackInSubquery != nil {
 					ctx.trackInSubquery(in)
@@ -653,7 +678,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 				}
 			}
 		}
-		sq := &ScalarSubquery{SQL: n.SQL, Runner: ctx.runner, Cols: ctx.subqueryCols}
+		sq := &ScalarSubquery{SQL: n.SQL, Runner: ctx.runner, Cols: ctx.subqueryCols, Scope: ctx.subqueryScope}
 		// The subquery's OUTPUT declaration, so the boxed comparison can read
 		// this operand as the number it is rather than as the text it boxes
 		// to (#696). Resolved once, at compile time, from the plan — never
@@ -693,7 +718,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 				}
 			}
 		}
-		return &ExistsSubquery{SQL: n.SQL, Runner: ctx.runner, Not: n.Not}, nil
+		return &ExistsSubquery{SQL: n.SQL, Runner: ctx.runner, Not: n.Not, Scope: ctx.subqueryScope}, nil
 
 	case *plansql.ArrayLitNode:
 		elems := make([]Expr, len(n.Elements))

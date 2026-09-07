@@ -1557,13 +1557,19 @@ func (p *Planner) forSubquery() *Planner {
 //
 // The cost is one logical build per compiled scalar subquery, at plan time.
 func (p *Planner) subqueryDeclOption() expr.CompileOption {
-	return expr.WithSubqueryEnv(func(sql string) (parquet.TypeID, int, int, bool) {
+	env := expr.WithSubqueryEnv(func(sql string) (parquet.TypeID, int, int, bool) {
 		cols, ok := p.subqueryOutputColumn(sql)
 		if !ok {
 			return 0, 0, 0, false
 		}
 		return cols.Type, cols.Precision, cols.Scale, true
 	}, p.subqueryOutputArity)
+	// …and the RELATION resolver the dangling-reference guard needs to tell a
+	// ROW FIELD PATH from a lost correlation (#866). It travels with the
+	// other two plan-time answers because it is the same question asked of
+	// the same plan, and a compile site that took only the first two would
+	// refuse `d.b IN (SELECT c_row.b FROM t)` — a query PostgreSQL answers.
+	return expr.Options(env, expr.WithSubqueryScope(p.subqueryInnerColumns()))
 }
 
 // subqueryOutputArity is how many columns a subquery's SELECT list has, from

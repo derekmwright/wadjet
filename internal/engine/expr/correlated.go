@@ -650,8 +650,8 @@ func (e *DanglingSubqueryError) SQLState() string { return "0A000" }
 // STANDALONE, with no outer row — still names a relation it does not read.
 // Called once per query from the uncorrelated evaluators' resolveSlow, never
 // per row.
-func refuseDanglingSubquery(kind, sql string) {
-	if refs := plansql.DanglingTableRefs(sql); len(refs) > 0 {
+func refuseDanglingSubquery(kind, sql string, scope plansql.TableColumns) {
+	if refs := plansql.DanglingTableRefsWithScope(sql, scope); len(refs) > 0 {
 		failEval(&DanglingSubqueryError{Kind: kind, SQL: sql, Refs: refs})
 	}
 }
