@@ -708,7 +708,8 @@ func TestNewWriterRefusesAStructurallyImpossibleSchema(t *testing.T) {
 }
 
 // TestMalformedMapSchemaMisplacesLaterColumns records what the refusal
-// prevents, by driving the two walks that used to disagree directly.
+// prevents, by driving the reader's walk over the tree the writer used to
+// emit for a malformed MAP.
 func TestMalformedMapSchemaMisplacesLaterColumns(t *testing.T) {
 	bad := Schema{Columns: []Column{
 		{Name: "m", Type: TypeMap, Fields: []Column{
@@ -721,9 +722,28 @@ func TestMalformedMapSchemaMisplacesLaterColumns(t *testing.T) {
 		t.Fatal("ValidateWriteSchema accepted the malformed MAP")
 	}
 
-	elements, err := buildSchemaElements(bad)
-	if err != nil {
-		t.Fatalf("buildSchemaElements: %v", err)
+	if _, err := buildSchemaElements(bad); err == nil {
+		t.Fatal("buildSchemaElements emitted a tree for the malformed MAP; the builder's own " +
+			"backstop is gone (round-1 P1)")
+	}
+
+	// The footer the writer used to produce, built by hand: the MAP's outer
+	// group, a key_value group DECLARING two children, and then nothing of its
+	// own — so the next two top-level columns stand where its key and value
+	// belong. buildSchemaElements refuses to emit this now (round-1 P1), which
+	// is the fix; the reader-side consequence stays on the record here,
+	// because it is the reason the refusal exists.
+	i64 := PhysicalInt64
+	ctMap, ctKV, ctI64 := ConvertedMap, ConvertedMapKeyValue, ConvertedInt64
+	elements := []SchemaElement{
+		{Name: "wadjet_schema", NumChildren: 3},
+		{Name: "m", NumChildren: 1, RepetitionType: FieldRequired, ConvertedType: &ctMap,
+			LogicalType: &LogicalType{Type: LogicalMap}},
+		{Name: "key_value", NumChildren: 2, RepetitionType: FieldRepeated, ConvertedType: &ctKV},
+		{Name: "a", Type: &i64, RepetitionType: FieldRequired, ConvertedType: &ctI64,
+			LogicalType: &LogicalType{Type: LogicalInteger, BitWidth: 64, IsSigned: true}},
+		{Name: "b", Type: &i64, RepetitionType: FieldRequired, ConvertedType: &ctI64,
+			LogicalType: &LogicalType{Type: LogicalInteger, BitWidth: 64, IsSigned: true}},
 	}
 	root, leaves := BuildSchemaTree(elements)
 	if root == nil {
