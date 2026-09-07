@@ -301,10 +301,22 @@ func sourceColumns(t *TableRef, resolve TableColumns) []string {
 	return out
 }
 
-// blockPublishedColumns is one query block's output namespace, with a star
-// standing for the columns the block's own FROM supplies. nil means the
-// namespace cannot be named exactly — a star over a source this package cannot
-// resolve — which is the TableColumns contract one level down.
+// blockPublishedColumns is one query block's output namespace, IN THE ORDER the
+// SELECT list writes it, with a star standing for the columns of the FROM items
+// it covers. nil means the namespace cannot be named exactly, which is the
+// TableColumns contract one level down.
+//
+// A star is not one rule but two, and reading them as one over-claims. A BARE
+// `*` stands for every FROM item, in FROM order. A QUALIFIED `alias.*` stands
+// for THAT source alone — `SELECT dim.* FROM dim JOIN t ON …` publishes dim's
+// columns and none of t's — and claiming both sides made an OUTER reference to
+// a name only the other side carries look INNER, which is #955's own defect
+// with the sign flipped: the value went silently wrong on all four arms in the
+// CTE spelling and loud in the derived-table one (round-1 review B1).
+//
+// Order is load-bearing rather than cosmetic: sourceColumns overlays a
+// column-alias list POSITIONALLY over this list, so `SELECT a, t.*, b` has to
+// publish the star's columns between `a` and `b` and not after them (B1/P3).
 func blockPublishedColumns(info *SelectInfo, resolve TableColumns) []string {
 	if info == nil {
 		return nil
@@ -313,35 +325,77 @@ func blockPublishedColumns(info *SelectInfo, resolve TableColumns) []string {
 		// A set operation publishes its LEFT arm's names, PostgreSQL's rule.
 		return blockPublishedColumns(info.Union.Left, resolve)
 	}
-	var out []string
-	var star bool
+	out := make([]string, 0, len(info.Columns))
 	for i := range info.Columns {
-		if info.Columns[i].Star {
-			star = true
+		c := info.Columns[i]
+		if !c.Star {
+			if name := SelectItemName(c); name != "" {
+				out = append(out, strings.ToLower(name))
+			}
 			continue
 		}
-		if name := SelectItemName(info.Columns[i]); name != "" {
-			out = append(out, strings.ToLower(name))
+		cols, ok := starColumns(info, c.TableRef, resolve)
+		if !ok {
+			return nil
 		}
+		out = append(out, cols...)
 	}
-	if !star {
-		return out
+	return out
+}
+
+// starColumns is what one star in a SELECT list stands for: the named source's
+// columns for `alias.*`, every FROM item's for a bare `*`. The second result is
+// false when any source it covers cannot be named exactly — including a
+// qualifier that matches no FROM item this layer can see — because a partial
+// answer here is a claim about a relation's schema and the caller's contract
+// is complete-or-nothing.
+func starColumns(info *SelectInfo, qualifier string, resolve TableColumns) ([]string, bool) {
+	if qualifier != "" {
+		q := strings.ToLower(strings.TrimSuffix(qualifier, "."))
+		for i := range info.Tables {
+			if sourceIdentifier(&info.Tables[i]) == q {
+				cols := sourceColumns(&info.Tables[i], resolve)
+				return cols, cols != nil
+			}
+		}
+		for i := range info.Joins {
+			ref := joinRightSource(&info.Joins[i])
+			if sourceIdentifier(ref) == q {
+				cols := sourceColumns(ref, resolve)
+				return cols, cols != nil
+			}
+		}
+		return nil, false
 	}
+	var out []string
 	for i := range info.Tables {
 		cols := sourceColumns(&info.Tables[i], resolve)
 		if cols == nil {
-			return nil
+			return nil, false
 		}
 		out = append(out, cols...)
 	}
 	for i := range info.Joins {
 		cols := sourceColumns(joinRightSource(&info.Joins[i]), resolve)
 		if cols == nil {
-			return nil
+			return nil, false
 		}
 		out = append(out, cols...)
 	}
-	return out
+	return out, true
+}
+
+// sourceIdentifier is the name the enclosing block calls one FROM item by: its
+// alias where it has one, else its own name. An ALIAS HIDES the table name,
+// which is the rule collectInnerTables states one level up.
+func sourceIdentifier(t *TableRef) string {
+	if t == nil {
+		return ""
+	}
+	if t.Alias != "" {
+		return strings.ToLower(t.Alias)
+	}
+	return strings.ToLower(t.Name)
 }
 
 // joinRightSource is a join's right-hand FROM item, by POINTER into the AST so
@@ -353,12 +407,6 @@ func joinRightSource(j *JoinInfo) *TableRef {
 	}
 	return &TableRef{Name: j.RightTable, Alias: j.RightAlias}
 }
-
-// cteScopeDepth bounds CTEColumns' expansion of a body whose SELECT list is a
-// star. A WITH RECURSIVE item's body names the item itself, so the expansion is
-// not structurally decreasing; the bound is what makes it terminate. A depth
-// this stops at answers nil — unknown — which is the safe direction.
-const cteScopeDepth = 8
 
 // CTEColumns wraps a resolver with the WITH items in scope, so a CTE reference
 // answers the TableColumns contract the way a base table does: the item's
@@ -378,8 +426,15 @@ func CTEColumns(ctes []CTEDef, base TableColumns) TableColumns {
 	for i := range ctes {
 		index[strings.ToLower(ctes[i].Name)] = i
 	}
-	var resolveAt func(scope, depth int) TableColumns
-	resolveAt = func(scope, depth int) TableColumns {
+	// The recursion terminates STRUCTURALLY and needs no depth bound: item i's
+	// body is resolved at scope i, so `scope` strictly decreases and an item's
+	// own name is never in its own scope — which is also the reason a WITH
+	// RECURSIVE body answers "unknown" rather than looping. A numeric bound
+	// here would TRUNCATE a long chain of star-bodied items instead, and
+	// "unknown" is not a refusal: it falls back to the outer scope, which is
+	// #955's own wrong answer (round-1 review B4).
+	var resolveAt func(scope int) TableColumns
+	resolveAt = func(scope int) TableColumns {
 		return func(table string) []string {
 			i, ok := index[strings.ToLower(table)]
 			if !ok || i >= scope {
@@ -392,17 +447,14 @@ func CTEColumns(ctes []CTEDef, base TableColumns) TableColumns {
 			if len(c.Columns) > 0 {
 				return c.Columns
 			}
-			if depth >= cteScopeDepth {
-				return nil
-			}
 			body, err := c.BodySelect()
 			if err != nil || body == nil {
 				return nil
 			}
-			return blockPublishedColumns(body, resolveAt(i, depth+1))
+			return blockPublishedColumns(body, resolveAt(i))
 		}
 	}
-	return resolveAt(len(ctes), 0)
+	return resolveAt(len(ctes))
 }
 
 func dedup(refs []OuterRef) []OuterRef {
