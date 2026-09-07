@@ -12735,6 +12735,79 @@ func sortKeySlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 	return ob.SlotPos
 }
 
+// sortKeyLocalSlotPos is the single-process pipeline's address for an ORDER BY
+// key: sortKeySlotPos's ordinal answer first, and then the SELECT-list
+// POSITION of the item the key NAMES.
+//
+// The name alone stopped being an address the moment two output columns could
+// share one, which is #556/#557's position identity one consumer over.
+// `WITH cte AS (...) SELECT a.id, b.id FROM cte a JOIN cte b ON a.a = b.a
+// ORDER BY a.id, b.id` publishes two columns called `id`; the Sort's keys are
+// built as `cleanExpr(ob.Column)`, which STRIPS the qualifier, so both keys
+// became `id` and `columnIndexFallback` bound both of them to the FIRST one.
+// The second key was never applied: PostgreSQL 17 answers
+// `1,1 | 1,2 | 1,3 | 1,8` and the single-process path answered
+// `1,8 | 1,3 | 1,2 | 1,1` — the right rows in the wrong sequence, which no
+// multiset comparison can see (#905, the #629 family). The stage DAG is right
+// on this shape already, because its sort keys keep the QUALIFIED spelling and
+// its join stage publishes `a.id` and `b.id` under those names; the single
+// path's Project output carries neither, so the position is the only address
+// it has.
+//
+// The match is the one PostgreSQL makes: an ORDER BY term may name an output
+// column, by its alias or by the spelling the SELECT list wrote. Exactly one
+// visible item must match — two is ambiguous and keeps today's by-name
+// resolution, which is also what the qualified-to-bare fallback is for.
+//
+// It is deliberately NOT wired into sortKeySlotPosStage. A position there
+// addresses the PRODUCING STAGE's output, which is the select list only for a
+// single narrowed relation (see that function), and the DAG does not need it.
+func sortKeyLocalSlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
+	if pos := sortKeySlotPos(ob, sortNode); pos > 0 {
+		return pos
+	}
+	term := strings.TrimSpace(ob.Column)
+	if term == "" || sortNode == nil || len(sortNode.Children) == 0 {
+		return 0
+	}
+	child := sortNode.Children[0]
+	if child == nil || child.Type != logical.NodeProject || logical.HasStarProjection(child) {
+		return 0
+	}
+	visible := logical.VisibleProjections(child.Projections)
+	// The same prefix proof sortKeySlotPos makes: a visible position is an
+	// index into the batch only while the visible items really are the prefix
+	// of the projection list.
+	for i := 0; i < len(visible); i++ {
+		if child.Projections[i] != visible[i] {
+			return 0
+		}
+	}
+	match := 0
+	for i := range visible {
+		if visible[i].Alias == "" || !strings.EqualFold(visible[i].Alias, term) {
+			continue
+		}
+		if match > 0 {
+			return 0 // two items answer to this name
+		}
+		match = i + 1
+	}
+	if match > 0 {
+		return match
+	}
+	for i := range visible {
+		if !strings.EqualFold(strings.TrimSpace(projSourceName(&visible[i])), term) {
+			continue
+		}
+		if match > 0 {
+			return 0
+		}
+		match = i + 1
+	}
+	return match
+}
+
 func (p *Planner) buildSort(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
 	if len(node.Children) == 0 {
 		return nil, nil, nil, fmt.Errorf("sort has no child")
@@ -12755,12 +12828,13 @@ func (p *Planner) buildSort(ctx context.Context, node *logical.Node) (exec.Sourc
 			Column:    cleanExpr(ob.Column),
 			Order:     order,
 			NullsLast: resolveNullsLast(ob),
-			// The select-list POSITION, when the term was written as one.
-			// The Project below a Sort narrows the schema to exactly its
-			// visible outputs in order, so position i of the select list is
-			// column i of this operator's input — and it is the only address
-			// that survives two outputs sharing a name (#557).
-			SlotPos: sortKeySlotPos(ob, node),
+			// The select-list POSITION: the Project below a Sort narrows the
+			// schema to exactly its visible outputs in order, so position i of
+			// the select list is column i of this operator's input — and it is
+			// the only address that survives two outputs sharing a name
+			// (#557 for a term written as an ordinal, #905 for one written as
+			// a name).
+			SlotPos: sortKeyLocalSlotPos(ob, node),
 		})
 	}
 
@@ -12858,7 +12932,7 @@ func (p *Planner) buildTopN(ctx context.Context, sortNode *logical.Node, n int) 
 			Column:    cleanExpr(ob.Column),
 			Order:     order,
 			NullsLast: resolveNullsLast(ob),
-			SlotPos:   sortKeySlotPos(ob, sortNode),
+			SlotPos:   sortKeyLocalSlotPos(ob, sortNode),
 		})
 	}
 
