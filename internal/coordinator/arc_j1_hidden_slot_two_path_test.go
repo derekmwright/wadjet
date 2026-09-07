@@ -625,39 +625,37 @@ func TestArcJ1TheEmptyInputDefaultIsTheItemsValue(t *testing.T) {
 
 	for _, tc := range []struct {
 		name, sql, want string
-		// wantErrLikeDAG pins a shape the DISTRIBUTED arms refuse; the
-		// single-process arms still answer `want`.
-		wantErrLikeDAG string
+		// wantRoutedDAG says the DISTRIBUTED arms answer `want` by ROUTING to
+		// the coordinator-local pipeline rather than by running the DAG: a
+		// star over a lateral whose item is COMPUTED publishes a column no
+		// stage emits (`n` where the aggregate publishes `__agg_0`), and a
+		// Project emits no stage. These cells used to fail LOUDLY under
+		// ADR-0010; the route is what makes them PostgreSQL's answer (#984).
+		wantRoutedDAG bool
 	}{
 		// THE FIVE EXPRESSIONS, through the star.
 		{name: "star/count", sql: `SELECT * ` + lat(`COUNT(*)`),
 			want: `id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`},
 		{name: "star/count-plus-one", sql: `SELECT * ` + lat(`COUNT(*) + 1`),
-			want:           `id,customer,total,n | 1,Alice,150,3 | 2,Bob,200,3 | 3,Carol,0,1`,
-			wantErrLikeDAG: "one stage's files describe one relation"},
+			want: `id,customer,total,n | 1,Alice,150,3 | 2,Bob,200,3 | 3,Carol,0,1`, wantRoutedDAG: true},
 		{name: "star/count-equals-zero", sql: `SELECT * ` + lat(`COUNT(*) = 0`),
 			want: `id,customer,total,n | 1,Alice,150,false | 2,Bob,200,false | ` +
-				`3,Carol,0,true`,
-			wantErrLikeDAG: "one stage's files describe one relation"},
+				`3,Carol,0,true`, wantRoutedDAG: true},
 		{name: "star/coalesce-sum", sql: `SELECT * ` + lat(`COALESCE(SUM(amount), 0)`),
-			want:           `id,customer,total,n | 1,Alice,150,150 | 2,Bob,200,200 | 3,Carol,0,0`,
-			wantErrLikeDAG: "one stage's files describe one relation"},
+			want: `id,customer,total,n | 1,Alice,150,150 | 2,Bob,200,200 | 3,Carol,0,0`, wantRoutedDAG: true},
 		{name: "star/nullif-keeps-a-matched-NULL", sql: `SELECT * ` + lat(`NULLIF(COUNT(*), 2)`),
-			want:           `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,NULL | 3,Carol,0,0`,
-			wantErrLikeDAG: "one stage's files describe one relation"},
+			want: `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,NULL | 3,Carol,0,0`, wantRoutedDAG: true},
 		{name: "star/case-with-no-else-is-NULL",
 			sql: `SELECT * ` + lat(`CASE WHEN COUNT(*) > 5 THEN 1 END`),
 			want: `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,NULL | ` +
-				`3,Carol,0,NULL`,
-			wantErrLikeDAG: "one stage's files describe one relation"},
+				`3,Carol,0,NULL`, wantRoutedDAG: true},
 		{name: "star/sum-has-no-default", sql: `SELECT * ` + lat(`SUM(amount)`),
 			want: `id,customer,total,n | 1,Alice,150,150 | 2,Bob,200,200 | 3,Carol,0,NULL`},
 		// ALL THREE ROW KINDS IN ONE CELL: a matched NULL, a matched value and
 		// the pad.
 		{name: "star/matched-NULL-matched-value-and-the-pad",
-			sql:            `SELECT * ` + filtered(`NULLIF(COUNT(*), 1)`),
-			want:           `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,2 | 3,Carol,0,0`,
-			wantErrLikeDAG: "one stage's files describe one relation"},
+			sql:  `SELECT * ` + filtered(`NULLIF(COUNT(*), 1)`),
+			want: `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,2 | 3,Carol,0,0`, wantRoutedDAG: true},
 
 		// THE NAMED SPELLING — the path the deleted reference rewrite served.
 		{name: "named/nullif-keeps-a-matched-NULL",
@@ -678,13 +676,11 @@ func TestArcJ1TheEmptyInputDefaultIsTheItemsValue(t *testing.T) {
 
 		// A DERIVED STAR and a CTE STAR read the same column.
 		{name: "derived-star/nullif",
-			sql:            `SELECT * FROM (SELECT * ` + lat(`NULLIF(COUNT(*), 2)`) + `) x`,
-			want:           `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,NULL | 3,Carol,0,0`,
-			wantErrLikeDAG: "one stage's files describe one relation"},
+			sql:  `SELECT * FROM (SELECT * ` + lat(`NULLIF(COUNT(*), 2)`) + `) x`,
+			want: `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,NULL | 3,Carol,0,0`, wantRoutedDAG: true},
 		{name: "cte-star/nullif",
-			sql:            `WITH c AS (SELECT * ` + lat(`NULLIF(COUNT(*), 2)`) + `) SELECT * FROM c`,
-			want:           `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,NULL | 3,Carol,0,0`,
-			wantErrLikeDAG: "one stage's files describe one relation"},
+			sql:  `WITH c AS (SELECT * ` + lat(`NULLIF(COUNT(*), 2)`) + `) SELECT * FROM c`,
+			want: `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,NULL | 3,Carol,0,0`, wantRoutedDAG: true},
 
 		// THE INNER SPELLING keeps the pad too — an ungrouped aggregate over
 		// an empty input still yields a row, so the outer row survives.
@@ -714,18 +710,19 @@ func TestArcJ1TheEmptyInputDefaultIsTheItemsValue(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {
+				var routesBefore int64
+				if arm.coord != nil {
+					routesBefore = arm.coord.LateralProjectionLocalRoutes()
+				}
 				cols, rows, err := arm.run(tc.sql)
-				if tc.wantErrLikeDAG != "" && arm.coord != nil {
-					if err == nil {
-						t.Fatalf("%s arm ANSWERED %s where the pin says it fails — the "+
-							"stage carries the defaulted column now, so delete the pin\n  SQL: %s",
-							arm.name, e3Render(cols, rows), tc.sql)
+				if arm.coord != nil {
+					routed := arm.coord.LateralProjectionLocalRoutes() > routesBefore
+					if routed != tc.wantRoutedDAG {
+						t.Fatalf("%s arm routed=%v, want %v — the ROWS alone cannot tell "+
+							"a DAG that ran this from a DAG that handed it to the local "+
+							"pipeline, and which one it was is the claim\n  SQL: %s",
+							arm.name, routed, tc.wantRoutedDAG, tc.sql)
 					}
-					if !strings.Contains(err.Error(), tc.wantErrLikeDAG) {
-						t.Errorf("%s arm failed by a DIFFERENT sentence: %v\n  SQL: %s",
-							arm.name, err, tc.sql)
-					}
-					continue
 				}
 				if err != nil {
 					t.Fatalf("%s arm: %v\n  want %s (live PostgreSQL 17)\n  SQL: %s",

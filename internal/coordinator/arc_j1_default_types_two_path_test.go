@@ -160,16 +160,16 @@ func TestArcJ1TheEmptyInputDefaultIsRightForEveryTypeFamily(t *testing.T) {
 						arm.name, got, fam.want, named)
 				}
 			}
-			// THE STAR SPELLINGS take the same operator and must publish the
-			// same value under the lateral's own name, with the correlation
-			// slot gone. The DAG arms are PINNED: a lateral whose item is a
-			// COMPUTED expression has no stage that materializes it (a Project
-			// emits no stage), so the join's build files carry the aggregate's
-			// raw slot while the empty-build task carries the DECLARED schema,
-			// and the two disagree under ADR-0010. That is not this operator's
-			// doing — it fails identically with the operator removed — and it
-			// is not about laterals either; see
-			// TestArcJ1TheDagStarOverADerivedSideLosesAColumn.
+			// THE STAR SPELLINGS take the same operator and publish the same
+			// value under the lateral's own name, with the correlation slot
+			// gone — and on the DISTRIBUTED arms they get there by ROUTING.
+			// Every item here is COMPUTED, so the lateral's block publishes
+			// `n` where its aggregate stage publishes `__agg_0`; a Project
+			// emits no stage, so the DAG has no relation to hand the star. It
+			// used to fail loudly under ADR-0010; it is routed to the
+			// coordinator-local pipeline now and answers PostgreSQL (#984).
+			// The counter is asserted because the ROWS cannot tell a DAG that
+			// ran this from a DAG that handed it over.
 			starWant := strings.ReplaceAll(fam.want, "Alice,", "1,Alice,150,")
 			starWant = strings.ReplaceAll(starWant, "Bob,", "2,Bob,200,")
 			starWant = strings.ReplaceAll(starWant, "Carol,", "3,Carol,0,")
@@ -178,19 +178,17 @@ func TestArcJ1TheEmptyInputDefaultIsRightForEveryTypeFamily(t *testing.T) {
 				{"derived-star", `SELECT * FROM (SELECT * ` + lat(fam.item) + `) x`},
 			} {
 				for _, arm := range arms {
-					cols, rows, err := arm.run(sp.sql)
+					var routesBefore int64
 					if arm.coord != nil {
-						if err == nil {
-							t.Fatalf("%s/%s ANSWERED %s where the pin says the stage "+
-								"model refuses it — the stage carries the computed "+
-								"column now, so delete the pin\n  SQL: %s",
-								sp.name, arm.name, e3Render(cols, rows), sp.sql)
-						}
-						if !strings.Contains(err.Error(), "one stage's files describe one relation") {
-							t.Errorf("%s/%s failed by a DIFFERENT sentence: %v\n  SQL: %s",
-								sp.name, arm.name, err, sp.sql)
-						}
-						continue
+						routesBefore = arm.coord.LateralProjectionLocalRoutes()
+					}
+					cols, rows, err := arm.run(sp.sql)
+					if arm.coord != nil &&
+						arm.coord.LateralProjectionLocalRoutes() == routesBefore {
+						t.Fatalf("%s/%s ran on the DAG where the routing is the "+
+							"claim — if a stage publishes the block's projection "+
+							"now (#984), delete this route and its counter\n  SQL: %s",
+							sp.name, arm.name, sp.sql)
 					}
 					if err != nil {
 						t.Fatalf("%s/%s: %v\n  SQL: %s", sp.name, arm.name, err, sp.sql)
@@ -206,7 +204,7 @@ func TestArcJ1TheEmptyInputDefaultIsRightForEveryTypeFamily(t *testing.T) {
 }
 
 // A PUBLISHED CORRELATION KEY IS A USER COLUMN, ONCE OR THREE TIMES, UNDER ANY
-// ALIAS (#956, arc J1 round 5).
+// ALIAS, ON EVERY ARM (#956, #984, arc J1 rounds 5 and 6).
 //
 // The lowering MINTS a hidden slot for the correlation key and drops it above
 // the join. What it must never drop is a column the QUERY published: the key
@@ -216,12 +214,154 @@ func TestArcJ1TheEmptyInputDefaultIsRightForEveryTypeFamily(t *testing.T) {
 // its own name or under aliases, and every one of those is a column of the
 // answer under the name the query gave it.
 //
-// The DAG's `SELECT *` is pinned, and the pin is NOT about laterals: the same
-// loss reproduces over a plain join whose right side is a derived table that
-// publishes a column twice — see
-// TestArcJ1TheDagStarOverADerivedSideLosesAColumn, which has no LATERAL, no
-// aggregate and no hidden slot in it at all.
+// ROUND 5 PINNED THE DAG HERE AND THE PIN WAS BUILT ON THE HALF THAT COULD NOT
+// MOVE. The `lat()` helper spelled the INNER join only, and the two join kinds
+// failed DIFFERENTLY: the INNER one answered with the duplicate silently gone,
+// the LEFT one failed loudly (the join's empty-build task declared the block's
+// projection where its siblings declared the stream — ADR-0010). Every cell
+// runs BOTH kinds now, which is what makes the claim about the shape rather
+// than about one spelling of it.
+//
+// The disposition is a ROUTE. A star over a lateral whose block projection is
+// not its stage's column list has no distributed relation to publish — a
+// Project emits no stage — so the plan is refused and answered on the
+// coordinator-local pipeline, where the lateral's Project is a real operator.
+// The counter says which happened, because the ROWS cannot: `wantRouted` is
+// asserted on dag/dagshuf beside the values.
+//
+// The SINGLE-publish spelling is the control and it must NOT route: its
+// projection IS its stream, so the DAG runs it exactly as before. Without that
+// cell this gate would pass just as happily if the refusal had swallowed every
+// lateral.
+//
+// K3 REMOVES THE ROUTING. When a stage declares the block's PROJECTION (#984)
+// these cells run distributed and the `wantRouted` column comes out.
 func TestArcJ1APublishedKeyIsAUserColumn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	t.Cleanup(cancel)
+	arms := e3Arms(t, ctx)
+
+	// BOTH JOIN KINDS. `kind` is "" for the INNER spelling and "LEFT" for the
+	// outer one — the two that failed differently and hid each other.
+	lat := func(kind, items string) string {
+		return `FROM lat_ord o ` + kind + ` JOIN LATERAL (SELECT ` + items +
+			`, COUNT(*) AS n FROM lat_item WHERE order_id = o.id GROUP BY order_id) s ` +
+			`ON true ORDER BY o.id`
+	}
+
+	// The LEFT spelling keeps Carol, whose lateral matched nothing: the join
+	// pads her and the key columns read NULL, which is PostgreSQL's row for an
+	// outer join over a GROUPED lateral (an empty input yields no group).
+	const (
+		inner2 = `id,customer,total,order_id,n | 1,Alice,150,1,2 | 2,Bob,200,2,2`
+		left2  = inner2 + ` | 3,Carol,0,NULL,NULL`
+	)
+
+	for _, tc := range []struct {
+		name, items string
+		// wantInner and wantLeft are PostgreSQL's rendering for the two join
+		// kinds; wantRouted says the DAG arms reach it by routing.
+		wantInner, wantLeft string
+		wantRouted          bool
+		// pinInnerDAG, when set, is the DAG arms' rendering of the INNER
+		// spelling where it is NOT wantInner: a join emits its PROBE side
+		// first and the planner may make the lateral the probe, so the same
+		// columns arrive in a different ORDER (ADR-0012). The column SET and
+		// the values are PostgreSQL's, which is what this gate is about; a
+		// `SELECT *` has no ORDER BY over columns to make the sequence stable
+		// either way. The LEFT spelling has no such pin — it agrees exactly.
+		pinInnerDAG string
+	}{
+		// THE CONTROL. One publish under the key's own name: the block's
+		// projection IS its aggregate's stream, so nothing is refused and the
+		// DAG runs it. This cell is why the refusal above can be trusted to be
+		// about the shape and not about laterals.
+		{name: "once-under-its-own-name", items: `order_id`,
+			wantInner: inner2, wantLeft: left2,
+			pinInnerDAG: `order_id,n,id,customer,total | 1,2,1,Alice,150 | 2,2,2,Bob,200`},
+
+		// A RENAME the stream does not carry.
+		{name: "once-under-an-alias", items: `order_id AS oid`,
+			wantInner: `id,customer,total,oid,n | 1,Alice,150,1,2 | 2,Bob,200,2,2`,
+			wantLeft: `id,customer,total,oid,n | 1,Alice,150,1,2 | 2,Bob,200,2,2 | ` +
+				`3,Carol,0,NULL,NULL`,
+			wantRouted:  true,
+			pinInnerDAG: `oid,n,id,customer,total | 1,2,1,Alice,150 | 2,2,2,Bob,200`},
+
+		// The SAME source column published TWICE and THREE times: the stream
+		// carries one of it.
+		{name: "twice", items: `order_id, order_id AS oid`,
+			wantInner: `id,customer,total,order_id,oid,n | 1,Alice,150,1,1,2 | ` +
+				`2,Bob,200,2,2,2`,
+			wantLeft: `id,customer,total,order_id,oid,n | 1,Alice,150,1,1,2 | ` +
+				`2,Bob,200,2,2,2 | 3,Carol,0,NULL,NULL,NULL`,
+			wantRouted: true,
+			pinInnerDAG: `order_id,oid,n,id,customer,total | 1,1,2,1,Alice,150 | ` +
+				`2,2,2,2,Bob,200`},
+		{name: "three-times", items: `order_id, order_id AS oid, order_id AS oid2`,
+			wantInner: `id,customer,total,order_id,oid,oid2,n | 1,Alice,150,1,1,1,2 | ` +
+				`2,Bob,200,2,2,2,2`,
+			wantLeft: `id,customer,total,order_id,oid,oid2,n | 1,Alice,150,1,1,1,2 | ` +
+				`2,Bob,200,2,2,2,2 | 3,Carol,0,NULL,NULL,NULL,NULL`,
+			wantRouted: true,
+			pinInnerDAG: `order_id,oid,oid2,n,id,customer,total | 1,1,1,2,1,Alice,150 | ` +
+				`2,2,2,2,2,Bob,200`},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			for _, kind := range []struct{ name, sql, want, pin string }{
+				{"inner", `SELECT * ` + lat("", tc.items), tc.wantInner, tc.pinInnerDAG},
+				{"left", `SELECT * ` + lat("LEFT", tc.items), tc.wantLeft, ""},
+			} {
+				for _, arm := range arms {
+					var routesBefore int64
+					if arm.coord != nil {
+						routesBefore = arm.coord.LateralProjectionLocalRoutes()
+					}
+					cols, rows, err := arm.run(kind.sql)
+					if arm.coord != nil {
+						routed := arm.coord.LateralProjectionLocalRoutes() > routesBefore
+						if routed != tc.wantRouted {
+							t.Fatalf("%s/%s routed=%v, want %v — a star over a lateral "+
+								"whose projection its stage does not publish is ROUTED, "+
+								"and one whose projection IS its stream is not\n  SQL: %s",
+								kind.name, arm.name, routed, tc.wantRouted, kind.sql)
+						}
+					}
+					if err != nil {
+						t.Fatalf("%s/%s: %v\n  want %s (live PostgreSQL 17)\n  SQL: %s",
+							kind.name, arm.name, err, kind.want, kind.sql)
+					}
+					got := e3Render(cols, rows)
+					want := kind.want
+					if kind.pin != "" && arm.coord != nil {
+						if got == kind.want {
+							t.Fatalf("%s/%s ANSWERED PostgreSQL's ORDER %s where the pin "+
+								"says the join emits its probe side first — delete the "+
+								"pin\n  SQL: %s", kind.name, arm.name, got, kind.sql)
+						}
+						want = kind.pin
+					}
+					if got != want {
+						t.Fatalf("%s/%s: %s\n  want %s\n  SQL: %s",
+							kind.name, arm.name, got, want, kind.sql)
+					}
+				}
+			}
+		})
+	}
+}
+
+// THE NAMED SPELLING OVER THE SAME LATERAL IS NOT ROUTED (#984, arc J1 round 6).
+//
+// The refusal above is scoped to a STAR, and this is the cell that says so. A
+// SELECT list that NAMES its columns asks the gather for them by name and gets
+// them on every arm — it was right before the route existed and it must not
+// start paying for one. Same lateral, same duplicate publish, both join kinds.
+func TestArcJ1ANamedListOverThatLateralStaysDistributed(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
 	}
@@ -229,77 +369,151 @@ func TestArcJ1APublishedKeyIsAUserColumn(t *testing.T) {
 	t.Cleanup(cancel)
 	arms := e3Arms(t, ctx)
 
-	lat := func(items string) string {
-		return `FROM lat_ord o JOIN LATERAL (SELECT ` + items + `, COUNT(*) AS n ` +
-			`FROM lat_item WHERE order_id = o.id GROUP BY order_id) s ON true ORDER BY o.id`
+	lat := func(kind string) string {
+		return `FROM lat_ord o ` + kind + ` JOIN LATERAL (SELECT order_id, ` +
+			`order_id AS oid, COUNT(*) AS n FROM lat_item WHERE order_id = o.id ` +
+			`GROUP BY order_id) s ON true ORDER BY 1`
 	}
-
-	for _, tc := range []struct {
-		name, sql, want string
-		// pinDAG is what the DISTRIBUTED arms answer today where that is NOT
-		// `want`: a KNOWN DEFECT, pinned so it cannot get worse silently and
-		// so a fix deletes the pin as its proof.
-		pinDAG string
-	}{
-		// THE NAMED SPELLINGS are right on every arm — the key is published
-		// under the name the query gave it, as many times as it gave it.
-		{name: "named/once-under-its-own-name",
-			sql:  `SELECT o.customer AS c, s.order_id AS k, s.n AS n ` + lat(`order_id`),
-			want: `c,k,n | Alice,1,2 | Bob,2,2`},
-		{name: "named/once-under-an-alias",
-			sql:  `SELECT o.customer AS c, s.oid AS k, s.n AS n ` + lat(`order_id AS oid`),
-			want: `c,k,n | Alice,1,2 | Bob,2,2`},
-		{name: "named/twice",
-			sql: `SELECT o.customer AS c, s.order_id AS a, s.oid AS b, s.n AS n ` +
-				lat(`order_id, order_id AS oid`),
-			want: `c,a,b,n | Alice,1,1,2 | Bob,2,2,2`},
-		{name: "named/three-times",
-			sql: `SELECT o.customer AS c, s.order_id AS a, s.oid AS b, s.oid2 AS d, ` +
-				`s.n AS n ` + lat(`order_id, order_id AS oid, order_id AS oid2`),
-			want: `c,a,b,d,n | Alice,1,1,1,2 | Bob,2,2,2,2`},
-		{name: "named/the-alias-only",
-			sql:  `SELECT o.customer AS c, s.oid AS k ` + lat(`order_id, order_id AS oid`),
+	for _, tc := range []struct{ name, sql, want string }{
+		{name: "inner/the-alias", sql: `SELECT o.customer AS c, s.oid AS k ` + lat(""),
 			want: `c,k | Alice,1 | Bob,2`},
-
-		// THE STAR SPELLINGS publish every one of them, under its own name,
-		// and never the slot. The DAG shows the STAGE's stream instead.
-		{name: "star/once-under-its-own-name", sql: `SELECT * ` + lat(`order_id`),
-			want:   `id,customer,total,order_id,n | 1,Alice,150,1,2 | 2,Bob,200,2,2`,
-			pinDAG: `order_id,n,id,customer,total | 1,2,1,Alice,150 | 2,2,2,Bob,200`},
-		{name: "star/once-under-an-alias", sql: `SELECT * ` + lat(`order_id AS oid`),
-			want:   `id,customer,total,oid,n | 1,Alice,150,1,2 | 2,Bob,200,2,2`,
-			pinDAG: `order_id,n,id,customer,total | 1,2,1,Alice,150 | 2,2,2,Bob,200`},
-		{name: "star/twice", sql: `SELECT * ` + lat(`order_id, order_id AS oid`),
-			want: `id,customer,total,order_id,oid,n | 1,Alice,150,1,1,2 | ` +
-				`2,Bob,200,2,2,2`,
-			pinDAG: `order_id,n,id,customer,total | 1,2,1,Alice,150 | 2,2,2,Bob,200`},
-		{name: "star/three-times",
-			sql: `SELECT * ` + lat(`order_id, order_id AS oid, order_id AS oid2`),
-			want: `id,customer,total,order_id,oid,oid2,n | 1,Alice,150,1,1,1,2 | ` +
-				`2,Bob,200,2,2,2,2`,
-			pinDAG: `order_id,n,id,customer,total | 1,2,1,Alice,150 | 2,2,2,Bob,200`},
+		{name: "inner/both-names", sql: `SELECT o.customer AS c, s.order_id AS a, s.oid AS b ` + lat(""),
+			want: `c,a,b | Alice,1,1 | Bob,2,2`},
+		{name: "left/the-alias", sql: `SELECT o.customer AS c, s.oid AS k ` + lat("LEFT"),
+			want: `c,k | Alice,1 | Bob,2 | Carol,NULL`},
+		{name: "left/both-names", sql: `SELECT o.customer AS c, s.order_id AS a, s.oid AS b ` + lat("LEFT"),
+			want: `c,a,b | Alice,1,1 | Bob,2,2 | Carol,NULL,NULL`},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {
+				var routesBefore int64
+				if arm.coord != nil {
+					routesBefore = arm.coord.LateralProjectionLocalRoutes()
+				}
 				cols, rows, err := arm.run(tc.sql)
+				if arm.coord != nil &&
+					arm.coord.LateralProjectionLocalRoutes() > routesBefore {
+					t.Fatalf("%s arm ROUTED a NAMED select list — the refusal is scoped "+
+						"to a star, and this list was right on the DAG before it "+
+						"existed\n  SQL: %s", arm.name, tc.sql)
+				}
 				if err != nil {
 					t.Fatalf("%s arm: %v\n  want %s (live PostgreSQL 17)\n  SQL: %s",
 						arm.name, err, tc.want, tc.sql)
 				}
-				got := e3Render(cols, rows)
-				want := tc.want
-				if tc.pinDAG != "" && arm.coord != nil {
-					if got == tc.want {
-						t.Fatalf("%s arm ANSWERED PostgreSQL's %s where the pin says it "+
-							"loses a column — the stage publishes the projection now, "+
-							"so delete the pin\n  SQL: %s", arm.name, got, tc.sql)
-					}
-					want = tc.pinDAG
+				if got := e3Render(cols, rows); got != tc.want {
+					t.Fatalf("%s arm: %s\n  want %s (live PostgreSQL 17)\n  SQL: %s",
+						arm.name, got, tc.want, tc.sql)
 				}
-				if got != want {
-					t.Fatalf("%s arm: %s\n  want %s\n  SQL: %s",
-						arm.name, got, want, tc.sql)
+			}
+		})
+	}
+}
+
+// A STAR OVER A LATERAL WHOSE PROJECTION IS NOT ITS STREAM IS ROUTED, NOT
+// ANSWERED WRONG AND NOT REFUSED (#984, arc J1 round 6).
+//
+// This is the disposition gate for the refusal itself, over the three ways a
+// block projection leaves its stage's column list behind. Each cell asserts
+// the ROUTE by counter on dag/dagshuf and PostgreSQL's rendering on all four
+// arms, and each was one of two wrong things before: LOUD (`shuffle read: …
+// one stage's files describe one relation`) for the LEFT spelling, or a
+// silently missing column for the INNER one.
+//
+// The two CONTROLS at the end are the load-bearing half. A refusal that fired
+// on every lateral would pass every routed cell above and still be a
+// disaster — it would take an ordinary distributed query off the DAG for
+// nothing. So: a lateral whose block IS its stream runs distributed, and so
+// does a plain join's star.
+func TestArcJ1AStarOverAnUnstageableLateralProjectionIsRouted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	t.Cleanup(cancel)
+	arms := e3Arms(t, ctx)
+
+	for _, tc := range []struct {
+		name, sql, want string
+		wantRouted      bool
+	}{
+		// A RENAME the stream does not carry: the aggregate publishes
+		// `__agg_0` and the block publishes `n`.
+		{name: "computed-item/string",
+			sql: `SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT ` +
+				`CAST(COUNT(*) AS VARCHAR) AS n FROM lat_item WHERE order_id = o.id) s ` +
+				`ON true ORDER BY o.id`,
+			want:       `id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`,
+			wantRouted: true},
+		{name: "computed-item/count-plus-one",
+			sql: `SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT COUNT(*) + 1 AS n ` +
+				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id`,
+			want:       `id,customer,total,n | 1,Alice,150,3 | 2,Bob,200,3 | 3,Carol,0,1`,
+			wantRouted: true},
+		// A DERIVED table's star and a CTE's star reach the same join.
+		{name: "derived-star/computed-item",
+			sql: `SELECT * FROM (SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT ` +
+				`COUNT(*) + 1 AS n FROM lat_item WHERE order_id = o.id) s ON true) x ` +
+				`ORDER BY x.id`,
+			want:       `id,customer,total,n | 1,Alice,150,3 | 2,Bob,200,3 | 3,Carol,0,1`,
+			wantRouted: true},
+		{name: "cte-star/computed-item",
+			sql: `WITH q AS (SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT ` +
+				`COUNT(*) + 1 AS n FROM lat_item WHERE order_id = o.id) s ON true) ` +
+				`SELECT * FROM q ORDER BY id`,
+			want:       `id,customer,total,n | 1,Alice,150,3 | 2,Bob,200,3 | 3,Carol,0,1`,
+			wantRouted: true},
+		// A source column published twice under ONE name. The stream has one
+		// column called `order_id` and cannot answer to it twice; the
+		// qualified second name is this engine's own (PostgreSQL sends
+		// `order_id` twice) and is pinned on EVERY arm, not just the DAG.
+		{name: "same-name-twice",
+			sql: `SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT order_id, order_id, ` +
+				`COUNT(*) AS n FROM lat_item WHERE order_id = o.id GROUP BY order_id) s ` +
+				`ON true ORDER BY o.id`,
+			want: `id,customer,total,order_id,s.order_id,n | 1,Alice,150,1,1,2 | ` +
+				`2,Bob,200,2,2,2 | 3,Carol,0,NULL,NULL,NULL`,
+			wantRouted: true},
+
+		// CONTROLS — these must stay on the DAG.
+		{name: "ctl/block-is-its-stream",
+			sql: `SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT COUNT(*) AS n ` +
+				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id`,
+			want: `id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`},
+		{name: "ctl/sum-is-its-stream",
+			sql: `SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT SUM(amount) AS n ` +
+				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id`,
+			want: `id,customer,total,n | 1,Alice,150,150 | 2,Bob,200,200 | 3,Carol,0,NULL`},
+		{name: "ctl/a-plain-join-star",
+			sql: `SELECT * FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ` +
+				`ORDER BY o.id, i.id`,
+			want: `id,order_id,product,amount,o.id,customer,total | ` +
+				`1,1,Widget,50,1,Alice,150 | 2,1,Gadget,100,1,Alice,150 | ` +
+				`3,2,Widget,75,2,Bob,200 | 4,2,Doohickey,125,2,Bob,200`},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				var routesBefore int64
+				if arm.coord != nil {
+					routesBefore = arm.coord.LateralProjectionLocalRoutes()
+				}
+				cols, rows, err := arm.run(tc.sql)
+				if arm.coord != nil {
+					routed := arm.coord.LateralProjectionLocalRoutes() > routesBefore
+					if routed != tc.wantRouted {
+						t.Fatalf("%s arm routed=%v, want %v\n  SQL: %s",
+							arm.name, routed, tc.wantRouted, tc.sql)
+					}
+				}
+				if err != nil {
+					t.Fatalf("%s arm: %v\n  want %s (live PostgreSQL 17)\n  SQL: %s",
+						arm.name, err, tc.want, tc.sql)
+				}
+				if got := e3Render(cols, rows); got != tc.want {
+					t.Fatalf("%s arm: %s\n  want %s (live PostgreSQL 17)\n  SQL: %s",
+						arm.name, got, tc.want, tc.sql)
 				}
 			}
 		})
@@ -427,9 +641,28 @@ func TestArcJ1AnOnConditionOverADefaultedColumnIsRightOrLoud(t *testing.T) {
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o LEFT JOIN ` + cnt +
 				` ON o.id > 1 ORDER BY 1`,
 			wantErrLike: `cannot be answered`},
+		// A CONDITION THAT FOLDS TO A CONSTANT TRUE IS `ON true` UNDER ANOTHER
+		// SPELLING. It rejects nothing, so it says nothing about which pairs
+		// the join keeps, and the repair that makes the join LEFT on the
+		// correlation alone IS its semantics. The residual test used to match
+		// the TEXT "true", so `ON 1 = 1` became a residual and was REFUSED
+		// where `ON true` answered — one constant, two dispositions. It folds
+		// through the expression compiler now.
 		{name: "left-on-true-is-the-plain-shape",
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o LEFT JOIN ` + cnt +
 				` ON true ORDER BY 1`,
+			want: `c,n | Alice,2 | Bob,2 | Carol,0`},
+		{name: "left-on-one-equals-one-is-the-same-constant",
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o LEFT JOIN ` + cnt +
+				` ON 1 = 1 ORDER BY 1`,
+			want: `c,n | Alice,2 | Bob,2 | Carol,0`},
+		{name: "left-on-two-greater-than-one-is-the-same-constant",
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o LEFT JOIN ` + cnt +
+				` ON 2 > 1 ORDER BY 1`,
+			want: `c,n | Alice,2 | Bob,2 | Carol,0`},
+		{name: "inner-on-one-equals-one",
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o JOIN ` + cnt +
+				` ON 1 = 1 ORDER BY 1`,
 			want: `c,n | Alice,2 | Bob,2 | Carol,0`},
 		// WHERE is evaluated ABOVE the join and stays right.
 		{name: "where-over-the-defaulted-column",
