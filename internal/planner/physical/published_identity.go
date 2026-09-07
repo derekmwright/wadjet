@@ -699,25 +699,41 @@ func publishedNameForExpr(stages []Stage, idx map[string]int, root int, text str
 // producer what it CALLS the value. The term names output item i; that item's
 // source expression is what the producer publishes; bind THAT.
 //
-// The boundary is a fact rather than a model: the re-spell only fires where
-// the term BINDS on the producer's stream AND the item's source binds to a
-// DIFFERENT column there. A term that binds nothing is left to
-// resolveDerivedAliasSortKeys, which owns it; a term whose source is the same
-// column is already right.
+// WHICH relation the key addresses depends on where the fragment runs the
+// projection relative to the sort, and that is a fact about the EXECUTOR
+// rather than a property of the plan: `fragmentProjectsBeforeSorting` mirrors
+// the builders. Where the projection runs FIRST the key addresses the
+// projection's OUTPUT NAMES, so the term binds the output column it names;
+// where the sort runs first it addresses the projection's INPUT, so the term
+// binds that output item's SOURCE.
+//
+// The boundary is a fact in both directions: the re-spell only fires where the
+// key AS IT STANDS binds something ELSE in the same relation. A key that binds
+// nothing there is left to resolveDerivedAliasSortKeys, which owns it; a key
+// that already binds the same column is right.
 func respellSortKeysOverProducerOutput(stages []Stage, idx map[string]int, i int) {
 	s := &stages[i]
-	if len(s.SortKeys) == 0 || len(s.ProjectExprs) > 0 {
-		// A stage that runs the projection ITSELF sorts after it, so its keys
-		// already address the output.
+	if len(s.SortKeys) == 0 {
 		return
 	}
-	specs := selectListAbove(stages, s)
+	// The SELECT-list projection the fragment runs: this stage's OWN when it
+	// has one — with a JOIN under the DISTINCT the fold puts the list AND the
+	// sort on the same stage — and otherwise the one its single consumer
+	// carries.
+	specs, own := s.ProjectExprs, true
+	if len(specs) == 0 {
+		specs, own = selectListAbove(stages, s), false
+	}
 	if len(specs) == 0 {
 		return
 	}
-	in := stageStreamColumnsFiltered(stages, idx, s, passThroughDepth, true)
-	if len(in) == 0 {
-		return
+	afterProjection := own && fragmentProjectsBeforeSorting(s)
+	var in []streamCol
+	if !afterProjection {
+		in = stageStreamColumnsFiltered(stages, idx, s, passThroughDepth, true)
+		if len(in) == 0 {
+			return
+		}
 	}
 	for k := range s.SortKeys {
 		key := &s.SortKeys[k]
@@ -732,6 +748,35 @@ func respellSortKeysOverProducerOutput(stages []Stage, idx map[string]int, i int
 		term := strings.TrimSpace(key.WrittenTerm)
 		if term == "" {
 			term = strings.TrimSpace(key.Column)
+		}
+		if afterProjection {
+			// The sort reads the projection's OWN output, so the address IS
+			// the output name the term writes. A re-spell is needed only
+			// where the key as it stands names a DIFFERENT VALUE, and the
+			// test for that is the SOURCE: an earlier pass chased the term to
+			// the source of the item it names, and where the projection also
+			// publishes a column of that source's name — a pass-through, or a
+			// group key under its own text — the key already binds the right
+			// value and moving it would be the defect. Under a rename SWAP
+			// the two sources differ, and that is the whole of #947's join
+			// spelling.
+			out, ok := uniqueOutputName(specs, term)
+			if !ok || strings.EqualFold(out, key.Column) {
+				continue
+			}
+			srcTerm, ok := uniqueOutputSource(specs, term)
+			if !ok {
+				continue
+			}
+			srcKey, ok := uniqueOutputSource(specs, key.Column)
+			if !ok {
+				continue // the key names no output here; not this pass's shape
+			}
+			if strings.EqualFold(strings.TrimSpace(srcTerm), strings.TrimSpace(srcKey)) {
+				continue // the same value under two names — already right
+			}
+			key.Column = out
+			continue
 		}
 		src, ok := uniqueOutputSource(specs, term)
 		if !ok || src == "" || strings.EqualFold(strings.TrimSpace(src), term) {
@@ -750,6 +795,44 @@ func respellSortKeysOverProducerOutput(stages []Stage, idx map[string]int, i int
 		}
 		key.Column = want
 	}
+}
+
+// fragmentProjectsBeforeSorting mirrors the ORDER the coordinator's fragment
+// builders put OpProject and OpSort in, which is what decides whether a sort
+// key addresses the projection's output or its input.
+//
+// It is an enumeration of EXECUTOR code, not a model of the plan — the way
+// `bindStreamColumn` is an enumeration of the runtime resolver. Every builder
+// in `execute_stage_dag.go` that appends `projectOpFromSpecs(stage.ProjectExprs)`
+// BEFORE its OpSort is listed (the aggregate fragment, the two join fragments
+// and the window fragment), so a new builder is a visible gap rather than a
+// silent one. `buildSortFragmentOps` runs OpSort FIRST and its projection
+// above it, because a WHERE over an `ORDER BY … LIMIT` must see the LIMIT's
+// rows; a stage of that kind therefore keeps the input-side rule.
+func fragmentProjectsBeforeSorting(s *Stage) bool {
+	switch s.Type {
+	case StageAggregate, StageFinalAggregate, StageMergeAggregate,
+		StageHashJoin, StageBroadcastJoin, StageSortMergeJoin, StageWindow:
+		return true
+	}
+	return false
+}
+
+// uniqueOutputName is the one output column a term names, by the rule
+// uniqueOutputSource applies — and it answers the NAME rather than the SOURCE,
+// for a stage that sorts above its own projection.
+func uniqueOutputName(specs []ProjectExprSpec, term string) (string, bool) {
+	name, hits := "", 0
+	for _, p := range specs {
+		if p.Name == "" || !strings.EqualFold(p.Name, term) {
+			continue
+		}
+		name, hits = p.Name, hits+1
+	}
+	if hits != 1 {
+		return "", false
+	}
+	return name, true
 }
 
 // selectListAbove is the SELECT-list projection a consumer stage runs directly

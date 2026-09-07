@@ -40,6 +40,9 @@ func TestJ2AnOrderByTermNamesAnOutputColumn(t *testing.T) {
 	const swappedID = "cols=[b:DECIMAL(9,2) a:DECIMAL(18,4) id:INT64] rows=9 | " +
 		"-0.01,-0.0100,4 | 0.00,0.0000,6 | NULL,1.0000,7 | 2.00,10.0000,5 | " +
 		"12.75,12.7499,3 | 12.75,12.7500,1 | 12.75,12.7501,2 | 12.75,NULL,8 | NULL,NULL,9"
+	// The same nine rows through a JOIN, where the swap is over base columns
+	// rather than a derived table's aliases.
+	const joinSwap = swappedID
 
 	f1Run(t, arms, []f1Case{
 		{
@@ -92,6 +95,51 @@ func TestJ2AnOrderByTermNamesAnOutputColumn(t *testing.T) {
 			want: "cols=[b:DECIMAL(9,2) a:DECIMAL(20,4)] rows=9 | -0.01,-0.0200 | " +
 				"0.00,0.0000 | NULL,2.0000 | 2.00,20.0000 | 12.75,25.4998 | 12.75,25.5000 | " +
 				"12.75,25.5002 | 12.75,NULL | NULL,NULL",
+		},
+
+		// The same swap with a JOIN under the DISTINCT. This is where the
+		// first cut of the fix bailed: with a join the fold puts the SELECT
+		// LIST and the sort on ONE stage, and "a stage that runs the
+		// projection itself sorts after it, so its keys already address the
+		// output" was a MODEL — the key does address the output, and under a
+		// SWAP the source spelling an earlier pass chased the term to IS
+		// another output's name, so it bound the wrong one. Wrong on both DAG
+		// arms at a3f9b664 and through `f8dccd46`. `x.id` is the tiebreaker:
+		// the two rows whose key is NULL are peers (ADR-0013).
+		{
+			name: "947 the swap under DISTINCT with a JOIN below it",
+			sql: "SELECT DISTINCT x.a AS b, x.b AS a, x.id FROM decpair x " +
+				"JOIN decpair u ON x.id = u.id ORDER BY a, x.id",
+			want: joinSwap,
+		},
+		{
+			name: "947 the GROUP BY spelling of the join swap",
+			sql: "SELECT x.a AS b, x.b AS a, x.id FROM decpair x JOIN decpair u ON x.id = u.id " +
+				"GROUP BY x.a, x.b, x.id ORDER BY a, x.id",
+			want: joinSwap,
+		},
+		{
+			name: "947 the join swap under a LEFT JOIN",
+			sql: "SELECT DISTINCT x.a AS b, x.b AS a, x.id FROM decpair x " +
+				"LEFT JOIN decpair u ON x.id = u.id ORDER BY a, x.id",
+			want: joinSwap,
+		},
+		{
+			name: "947 the join swap over THREE relations",
+			sql: "SELECT DISTINCT x.a AS b, x.b AS a, x.id FROM decpair x " +
+				"JOIN decpair u ON x.id = u.id JOIN decpair v ON x.id = v.id ORDER BY a, x.id",
+			want: joinSwap,
+		},
+		{
+			// The MIRROR term over the same join, which orders by the OTHER
+			// output — a re-spell that moved every key would swap this one
+			// too and it would fail.
+			name: "947 the join swap ordered by the other output",
+			sql: "SELECT DISTINCT x.a AS b, x.b AS a, x.id FROM decpair x " +
+				"JOIN decpair u ON x.id = u.id ORDER BY b, x.id",
+			want: "cols=[b:DECIMAL(9,2) a:DECIMAL(18,4) id:INT64] rows=9 | -0.01,-0.0100,4 | " +
+				"0.00,0.0000,6 | 2.00,10.0000,5 | 12.75,12.7500,1 | 12.75,12.7501,2 | " +
+				"12.75,12.7499,3 | 12.75,NULL,8 | NULL,1.0000,7 | NULL,NULL,9",
 		},
 
 		// Controls. Each answers PostgreSQL on all four arms at a3f9b664 too.
