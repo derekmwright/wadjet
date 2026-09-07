@@ -873,9 +873,18 @@ func TestAggregateOverADerivedColumnGroupedTwoPath(t *testing.T) {
 // Enumerating the materializing kinds was the first repair and it was wrong
 // twice, once per kind nobody had thought of; the rule is stated positively
 // now — respell only where the walk reaches a SCAN through Project and Filter
-// alone. Both engines still refuse this shape for an unrelated DECIMAL
-// declaration reason (#729's family), and AGREEING TO REFUSE is what this
-// asserts: the silent number is the outcome the boundary exists to prevent.
+// alone.
+//
+// Until arc J2 this asserted that both engines REFUSE the shape, for the
+// unrelated DECLARATION reason the comment above called "#729's family": the
+// aggregate below emits `a * 2` under that text and the Project above it was
+// read as ARITHMETIC, so `v` declared FLOAT64 and the DECIMAL value met #361's
+// silent-write guard on every arm. That was the right pin while it held — a
+// loud failure beats the silent 0 the respell would have produced — and it is
+// stale now that the declaration comes from the producer (#949). Both engines
+// answer PostgreSQL's 29.50, and the assertion is the VALUE, which is the
+// stronger form of the same boundary: 0 is what a respell under a DISTINCT
+// gives, and 0 would fail here.
 func TestAggregateArgumentRespellDeclinesUnderADistinct(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
@@ -890,10 +899,15 @@ func TestAggregateArgumentRespellDeclinesUnderADistinct(t *testing.T) {
 		"(SELECT DISTINCT a * 2 AS v FROM " + dbpTable + ") x"
 	for _, arm := range sfcArms(ctx, single, coord) {
 		res, err := arm.run(sql)
-		if err == nil {
-			t.Errorf("%s arm ANSWERED %v where both engines refuse; a respell under a "+
-				"producer that MATERIALIZES the name turns a loud failure into a silent "+
-				"number (#702)\n  SQL: %s", arm.name, res.Rows, sql)
+		if err != nil {
+			t.Errorf("%s arm REFUSED a query PostgreSQL answers 29.50: %v\n  SQL: %s",
+				arm.name, err, sql)
+			continue
+		}
+		if len(res.Rows) != 1 || fmt.Sprint(res.Rows[0]["v"]) != "29.50" {
+			t.Errorf("%s arm answered %v, want PostgreSQL's 29.50 — 0 is what a respell "+
+				"under a producer that MATERIALIZES the name gives, and it is the outcome "+
+				"this boundary exists to prevent (#702)\n  SQL: %s", arm.name, res.Rows, sql)
 		}
 	}
 }
