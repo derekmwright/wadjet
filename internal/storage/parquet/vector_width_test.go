@@ -107,8 +107,15 @@ func assertVectorRefused(t *testing.T, col Column, rows []map[string]any) {
 		t.Fatalf("writing %v into a VECTOR(%d) column succeeded and produced %s",
 			rows, col.Dimension, back)
 	}
-	if s := sqlerr.StateOf(err); s != "22023" && s != "42804" {
-		t.Errorf("refusing %v: SQLSTATE %q, want 22023 or 42804: %v", rows, s, err)
+	// One class per rule, whichever door asks (#913): a WIDTH refusal is
+	// pgvector's 22000 — the same class and the same sentence the SQL doors
+	// raise through batch.VectorWidthError — a byte count that is not a whole
+	// number of float32s is not a vector of any width and keeps 22023, and a
+	// box that is not a vector at all is 42804. 22023 is what this resolver
+	// used to answer for the WIDTH too, and that split reached a user as one
+	// value with two classes, decided by which door it came through.
+	if s := sqlerr.StateOf(err); s != "22000" && s != "22023" && s != "42804" {
+		t.Errorf("refusing %v: SQLSTATE %q, want 22000, 22023 or 42804: %v", rows, s, err)
 	}
 }
 

@@ -534,11 +534,19 @@ a vector — no brackets, a component that is not a number, `NaN` or an infinity
 | door | off-width value | malformed text |
 |---|---|---|
 | `INSERT`, `UPDATE`, `MERGE`, `COPY` | `22000`, `expected N dimensions, not M` | `22P02`, `invalid input syntax for type vector` |
-| embedded ingest API | `22023`, `column "v" is VECTOR(N); the value has M components` | — (it takes Go values, not text) |
+| embedded ingest API | `22000`, `column "v": expected N dimensions, not M` | — (it takes Go values, not text) |
 
 `22000` with pgvector's wording is what PostgreSQL's `vector` extension answers
-for `'[1]'::vector(2)`, and it is the class this engine means; the ingest API's
-`22023` is the same rule under a second name and is expected to converge on it.
+for `'[1]'::vector(2)`, and it is the class this engine means at every door.
+The ingest API prefixes the column name because it takes a whole ROW, and which
+column was wrong is the localization pgvector's own message does not carry; it
+used to answer `22023` with a sentence of its own, so the same value had two
+classes decided only by which door it arrived at.
+
+A raw `[]byte` handed to the ingest API is held to the same width. A byte count
+that is a whole number of `float32`s is a vector of the wrong width and takes
+the refusal above; one that is not is not a vector of any width, and is `22023`
+naming the byte counts.
 
 ```sql
 INSERT INTO doc_embeddings (doc_id, embedding) VALUES (1, '[0.1,0.2,0.3]')

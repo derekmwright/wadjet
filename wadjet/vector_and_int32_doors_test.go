@@ -117,37 +117,51 @@ func TestAVectorLiteralIsExactlyTheDeclaredWidthAtEveryDoor(t *testing.T) {
 	// The ingest API is the other door onto the same leaf, and it takes Go
 	// boxes rather than literal text.
 	//
-	// Its rule is arc S1's (parquet.CheckLeafBox, reached from
-	// ingest.checkType), which lands separately. The probe below decides
-	// whether that rule is present in THIS tree: where it is not, the whole
-	// arm skips with the reason rather than pretending the door is fixed —
-	// and where it is, every case is asserted.
+	// Its rule lives in parquet.CheckLeafBox (reached from ingest.checkType),
+	// and it answered a DIFFERENT class and a different sentence for the same
+	// value: 22023, `column "v" is VECTOR(2); the value has 3 components`,
+	// where every SQL door says 22000, `expected 2 dimensions, not 3`. One
+	// value, one rule, two answers decided by which door it arrived at —
+	// docs/data-types.md recorded the split and said it was expected to
+	// converge. It has (#913), and this arm asserts the CLASS and the WORDING
+	// rather than error-or-not, which is the assertion that cannot see a
+	// divergence.
 	t.Run("ingest-api", func(t *testing.T) {
-		// The LONG case is the discriminator: a door with no width rule
-		// ADMITS it and truncates silently, where a short one at least
-		// leaves a page the reader refuses.
-		if err := s4IngestVector(t, "vprobe", []float32{1, 2, 3}); err == nil {
-			t.Skip("this tree's ingest door has no VECTOR width rule yet " +
-				"(arc S1's parquet.CheckLeafBox); the cases below hold once it lands")
-		}
 		for _, c := range []struct {
 			name string
 			val  any
-			ok   bool
+			frag string // "" = must be accepted
 		}{
-			{"correct", []float32{1, 2}, true},
-			{"short", []float32{1}, false},
-			{"long", []float32{1, 2, 3}, false},
-			{"empty", []float32{}, false},
-			{"nil-typed", []float32(nil), false},
+			{"correct", []float32{1, 2}, ""},
+			{"short", []float32{1}, "expected 2 dimensions, not 1"},
+			{"long", []float32{1, 2, 3}, "expected 2 dimensions, not 3"},
+			{"empty", []float32{}, "expected 2 dimensions, not 0"},
+			{"nil-typed", []float32(nil), "expected 2 dimensions, not 0"},
 		} {
 			t.Run(c.name, func(t *testing.T) {
 				err := s4IngestVector(t, "vi"+c.name, c.val)
-				if c.ok && err != nil {
-					t.Fatalf("a %s vector was refused: %v", c.name, err)
+				if c.frag == "" {
+					if err != nil {
+						t.Fatalf("a %s vector was refused: %v", c.name, err)
+					}
+					return
 				}
-				if !c.ok && err == nil {
-					t.Errorf("the ingest API admitted a %s vector into a VECTOR(2)", c.name)
+				if err == nil {
+					t.Fatalf("the ingest API admitted a %s vector into a VECTOR(2)", c.name)
+				}
+				if got := sqlerr.StateOf(err); got != "22000" {
+					t.Errorf("SQLSTATE %q; want 22000, the class every SQL door gives "+
+						"for the same value (%v)", got, err)
+				}
+				if !strings.Contains(err.Error(), c.frag) {
+					t.Errorf("refusal %q does not say %q, which is what every SQL door "+
+						"says for the same value", err, c.frag)
+				}
+				// The column name still localizes it: the ingest door takes a
+				// whole ROW, and which column was wrong is what pgvector's own
+				// message does not carry.
+				if !strings.Contains(err.Error(), `"v"`) {
+					t.Errorf("refusal %q does not name the column", err)
 				}
 			})
 		}

@@ -415,7 +415,9 @@ func bytesLeafValue(col Column, v any) ([]byte, error) {
 // is enforced here, on the way in.
 func vectorLeafValue(col Column, v any) ([]byte, error) {
 	if col.Dimension <= 0 {
-		return nil, sqlerr.New("22023",
+		// 22000 and the SQL doors' own sentence, for vectorWidthError's
+		// reason: one rule, one class, whichever door asks (#913).
+		return nil, sqlerr.New("22000",
 			"column %q declares VECTOR with no dimension, which has no fixed width", col.Name)
 	}
 	switch t := v.(type) {
@@ -443,6 +445,13 @@ func vectorLeafValue(col Column, v any) ([]byte, error) {
 		return buf, nil
 	case []byte:
 		if len(t) != col.Dimension*4 {
+			// A whole number of float32s is a vector of the WRONG WIDTH and
+			// takes the same refusal every other door gives for that (#913).
+			// A byte count that is not a multiple of four is not a vector of
+			// any width, so it keeps 22023 and says so in bytes.
+			if len(t)%4 == 0 {
+				return nil, vectorWidthError(col, len(t)/4)
+			}
 			return nil, sqlerr.New("22023",
 				"column %q is VECTOR(%d), which is %d bytes; the value is %d bytes",
 				col.Name, col.Dimension, col.Dimension*4, len(t))
@@ -452,10 +461,25 @@ func vectorLeafValue(col Column, v any) ([]byte, error) {
 	return nil, leafBoxError(col.Type, v)
 }
 
+// vectorWidthError is pgvector's own class and wording, so a VECTOR of the
+// wrong width is ONE refusal at every door (#913).
+//
+// The SQL doors (INSERT, UPDATE, MERGE, COPY) raise batch.VectorWidthError —
+// SQLSTATE 22000, `expected N dimensions, not M`, which is what PostgreSQL's
+// vector extension answers for `'[1]'::vector(2)`. This leaf resolver is the
+// ingest API's door onto the same rule, and it answered 22023 with a sentence
+// of its own, so the same value had two classes and two messages decided by
+// which door it came through. `internal/engine/batch` cannot be imported from
+// here (batch imports this package), which is why the class is written out
+// rather than shared — docs/data-types.md carries both halves of the table.
+//
+// The column NAME rides ahead of pgvector's sentence rather than inside it:
+// the ingest door takes a whole ROW, so which column was wrong is the
+// localization pgvector's own message does not carry, and ingest.checkType
+// already prefixes it for every other leaf refusal.
 func vectorWidthError(col Column, got int) error {
-	return sqlerr.New("22023",
-		"column %q is VECTOR(%d); the value has %d components",
-		col.Name, col.Dimension, got)
+	return sqlerr.New("22000",
+		"expected %d dimensions, not %d", col.Dimension, got)
 }
 
 // leafRangeError is PostgreSQL's numeric_value_out_of_range, the SQLSTATE it
