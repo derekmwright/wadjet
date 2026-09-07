@@ -2075,6 +2075,42 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, def
 		typ, typed := scalarColType(schema)
 		return scalarToLiteral(v, typ, typed)
 
+	case *plansql.ExistsNode:
+		// `EXISTS (SELECT …)` that reached here did NOT decorrelate into a
+		// semi/anti join, and the worker has no SubqueryRunner either — the
+		// filter shipped verbatim and every task failed with "EXISTS subquery
+		// requires a SubqueryRunner". That is #524's family with the EXISTS
+		// arm never written: the sibling cases have handled a scalar subquery
+		// (executed here) and an IN-subquery (materialized as a SET) since,
+		// and `default:` shipped this one.
+		//
+		// An UNCORRELATED `EXISTS` is a query-wide CONSTANT — it reads no
+		// outer row, so it is TRUE or FALSE for every row of every task — so
+		// it is evaluated once here and the predicate becomes that boolean.
+		// A subquery that is not self-contained is not evaluated: standalone,
+		// its dangling reference resolves to no column and the constant would
+		// be confidently wrong, so it takes the refusal the SubqueryNode arm
+		// above takes and the coordinator answers on its local pipeline
+		// (ADR-0021 §1c).
+		if dangling := plansql.DanglingTableRefs(n.SQL); len(dangling) > 0 {
+			p.refuseCorrelated(fmt.Errorf("%w: an EXISTS subquery references outer %s"+
+				" and cannot be evaluated as a query-wide constant",
+				ErrCorrelatedSubqueryDistributed, describeOuterRefs(dangling)))
+			return node
+		}
+		rows, _, err := p.executeSubquerySchema(ctx, n.SQL)
+		if err != nil {
+			return node
+		}
+		exists := len(rows) > 0
+		if n.Not {
+			exists = !exists
+		}
+		if exists {
+			return &plansql.Lit{Value: "true", Kind: plansql.LitBool}
+		}
+		return &plansql.Lit{Value: "false", Kind: plansql.LitBool}
+
 	case *plansql.InExpr:
 		// `x IN (SELECT …)` that reached here did NOT decorrelate into a
 		// semi/anti join, and the worker has no SubqueryRunner to execute it
