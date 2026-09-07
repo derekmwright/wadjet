@@ -1265,6 +1265,62 @@ duplicates-within-arm, NULL membership, empty arms, type widening, stacked
 ORDER BY/LIMIT/WHERE), `duckdb_compare_test.go` + `pagination_test.go`
 (values and sequence against DuckDB).
 
+## A star over a LATERAL whose projection is not its stream (refused → routed local)
+
+A Project emits no stage. So on the DAG a decorrelated LATERAL subquery's
+`SELECT` list is not a relation of its own: the Aggregate (or Scan) beneath it
+is what materializes to S3, and a `SELECT *` above the join — a bare star, a
+derived table's, a CTE's — publishes THAT stream. Where the block's projection
+and the stage's stream agree the star is right and runs distributed; where they
+differ the client was handed a relation the query did not write, and the two
+join kinds failed DIFFERENTLY, which is what hid it:
+
+```
+SELECT * FROM lat_ord o {LEFT,} JOIN LATERAL (
+  SELECT order_id, order_id AS oid, COUNT(*) AS n … GROUP BY order_id) s ON true
+PostgreSQL   id, customer, total, order_id, oid, n
+INNER, DAG   order_id,           n, id, customer, total   ← `oid` silently gone
+LEFT,  DAG   LOUD — `shuffle read: … one stage's files describe one relation`
+```
+
+The LEFT one is loud because the join's EMPTY-BUILD task falls back to the
+plan's DECLARED build schema (the projection) while its non-empty siblings read
+the file's (the stream), so one stage writes two relations — ADR-0010.
+
+Mechanism (the same refuse-and-route shape as the correlated subqueries below):
+
+- `Planner.refuseLateralProjection`
+  (`physical/lateral_projection_refusal.go`) — pre-pass over the optimized
+  logical plan, run in `PlanDistributed` beside `refuseCorrelatedSubqueries`.
+  It descends carrying `projected`: a `Project` between the root and the join
+  means the statement NAMED its columns, and a named list is resolved by name
+  on both paths, so only a join whose own output IS the statement's output is
+  examined. At such a join it compares the lateral side's projection with
+  `lateralStreamNames` — the first node below it that is not a Project — and
+  reports the first published name the stream does not carry, or carries only
+  once for two publishes. The MINTED correlation slot is excluded, because the
+  join drops it: `SELECT COUNT(*) AS n` publishes `__key_0, n` over a stream of
+  `order_id, n` and stays distributed.
+- Typed error `physical.ErrLateralProjectionDistributed`; the coordinator
+  matches it after `PlanDistributed` and answers on the coordinator-local
+  single-process pipeline (`Coordinator.runLateralProjectionLocal`), where the
+  block's Project is a real operator. Counter:
+  `LateralProjectionLocalRoutes()`. Guards as ever in
+  `Coordinator.runRefusedLocal`.
+
+Coverage: `coordinator/arc_j1_default_types_two_path_test.go` —
+`TestArcJ1AStarOverAnUnstageableLateralProjectionIsRouted` (the three ways a
+projection leaves its stream, plus three CONTROLS that must stay distributed),
+`TestArcJ1APublishedKeyIsAUserColumn` (both join kinds per cell, route asserted
+by counter), `TestArcJ1ANamedListOverThatLateralStaysDistributed` (the scope).
+
+**K3 REMOVES THIS.** The structural fix is #984 — a stage declares the block's
+PROJECTION rather than its stream — and the day it lands every shape routed
+here runs distributed and the refusal, its counter and its gates come out. Its
+sibling with no LATERAL in it (`SELECT * FROM t JOIN (SELECT c, c AS d FROM u)
+s ON …`, which loses `d` on the DAG) is not covered by this route — nothing
+mints a slot there — and stays pinned in ADR-0012 until #984.
+
 ## Correlated subqueries (refused → routed local)
 
 A subquery whose correlation SURVIVES decorrelation (a non-equi correlation —

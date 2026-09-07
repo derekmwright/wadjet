@@ -803,6 +803,10 @@ nothing can be proven about it. Move the condition to `WHERE`, or write the
 INNER spelling — `JOIN LATERAL (…) s ON s.item_count = 0` answers, because
 there the condition IS a filter and is applied after the default.
 
+A condition that is a constant TRUE is not a condition at all: `ON 1 = 1` and
+`ON 2 > 1` behave exactly as `ON true` does, and none of the three is
+refused.
+
 An ungrouped aggregate inside a lateral keeps PostgreSQL's empty-input value
 for an outer row the lateral matches nothing for, and the value is the SELECT
 ITEM's own over an empty input: `COUNT(*)` reads 0 there, `COUNT(*) + 1` reads
@@ -820,10 +824,18 @@ A lateral may PUBLISH its correlation key in its own `SELECT` list, once or
 several times, under its own name or under aliases; every one of those is a
 column of the answer under the name the query gave it. `JOIN LATERAL (SELECT
 order_id, order_id AS oid, COUNT(*) AS n … GROUP BY order_id) s` publishes
-`order_id`, `oid` and `n`. On the DISTRIBUTED arms a `SELECT *` over such a
-join currently shows the stage's stream instead and can lose the duplicate —
-name the columns there. The same is true of any `SELECT *` over a join whose
-right side is a derived table introducing a column.
+`order_id`, `oid` and `n` on every execution path.
+
+In a distributed deployment such a query is executed on the coordinator rather
+than across the workers, because a lateral subquery's `SELECT` list is not a
+distributed stage of its own: where the list publishes a column the stage below
+it does not — a source column twice, a rename, an expression over an
+aggregate — a `SELECT *` over the join is planned locally so that it publishes
+the columns the query wrote. Naming the columns instead of writing `*` keeps
+the query distributed and answers the same rows. This does not apply to
+`SELECT *` over a join whose right side is an ordinary derived table
+introducing a column — that one still publishes the stage's columns on the
+distributed path, so name them.
 
 The correlated equality is turned into a join, and a join needs the inner
 value as a column, so the planner materializes one under a name from its

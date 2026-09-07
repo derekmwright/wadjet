@@ -1720,17 +1720,27 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      minting refusal (ADR-0026 §3c) — it is the stage's own stream reaching a
      door it should never reach.
 
-     It is the mechanism behind three shapes this arc pins: a lateral that
-     publishes its correlation key twice loses the duplicate on the DAG; one
-     that publishes it under an ALIAS shows the source name; and a lateral
-     whose SELECT item is a COMPUTED expression makes the join's empty-build
-     task declare the projection's schema while its non-empty siblings declare
-     the aggregate's, which is loud rather than wrong — ADR-0010's
-     `one stage's files describe one relation`. The named spellings are right
-     on every arm; only the star reads the stream. Pinned per arm in
-     `coordinator.TestArcJ1TheDagStarOverADerivedSideLosesAColumn`, which the
-     other pins point at, so the day a stage publishes a projection they can
-     all be deleted together.
+     THE LATERAL HALF OF IT IS NO LONGER A DIVERGENCE: a star over a
+     decorrelated LATERAL whose block projection is not its stage's column
+     list is REFUSED at plan time and ROUTED to the coordinator-local
+     pipeline, where the block's Project is a real operator, and it answers
+     PostgreSQL on all four arms (`ErrLateralProjectionDistributed`,
+     `Coordinator.LateralProjectionLocalRoutes`). That covers the three
+     spellings this arc found — the key published TWICE, published under an
+     ALIAS, and a COMPUTED item whose aggregate publishes `__agg_0` — and it
+     had to, because the two join kinds failed DIFFERENTLY and hid each other:
+     the INNER one answered with the column silently gone, the LEFT one failed
+     loudly under ADR-0010's `one stage's files describe one relation`. The
+     route is scoped to a STAR; a named SELECT list over the same lateral was
+     always right and stays distributed.
+
+     What remains a divergence is the shape with NO LATERAL, above: nothing
+     mints a slot there, so there is no lateral subtree to recognise and the
+     route does not fire. Pinned per arm in
+     `coordinator.TestArcJ1TheDagStarOverADerivedSideLosesAColumn`. When #984
+     lands — a stage declares the block's PROJECTION rather than its stream —
+     that pin goes AND the routing above is deleted with it; the two are one
+     defect seen from two sides.
 
    - **A written `ON` over an unrepaired LATERAL with an empty-input default
      is REFUSED (0A000) where PostgreSQL answers.** (Added 2026-09-07, arc J1
