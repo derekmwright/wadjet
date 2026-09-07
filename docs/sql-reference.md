@@ -795,10 +795,14 @@ this engine  Alice NULL, Bob NULL, Carol NULL      <- one cell differs
 Every other combination of join kind and `ON` matches PostgreSQL.
 
 An ungrouped aggregate inside a lateral keeps PostgreSQL's empty-input value
-for an outer row the lateral matches nothing for: `COUNT(*)` reads 0 there, not
-NULL, and it does so through every spelling — `SELECT *`, `SELECT o.*, s.n`, a
-derived table's star, a CTE's star, a scalar subquery over the column and an
-`EXISTS`. `MAX` over an empty input IS NULL, which is what that column reads.
+for an outer row the lateral matches nothing for, and the value is the SELECT
+ITEM's own over an empty input: `COUNT(*)` reads 0 there, `COUNT(*) + 1` reads
+1, `COUNT(*) = 0` reads true, `COALESCE(SUM(x), 0)` reads 0, and
+`CASE WHEN COUNT(*) > 5 THEN 1 END` and `SUM(x)` read NULL. It applies to that
+row alone — a matched row whose value is legitimately NULL keeps its NULL, so
+`NULLIF(COUNT(*), 2)` is NULL for a row that counted 2 — and it reaches every
+spelling: `SELECT *`, `SELECT o.*, s.n`, a derived table's star, a CTE's star,
+a `WHERE` over the column, a scalar subquery and an `EXISTS`.
 
 The correlated equality is turned into a join, and a join needs the inner
 value as a column, so the planner materializes one under a name from its
@@ -807,13 +811,18 @@ in a `SELECT *` result, not in a derived table's or a CTE's star over the
 join, and not in the wire's `RowDescription`: `SELECT *` over a lateral
 returns the columns PostgreSQL returns.
 
-A QUALIFIED star publishes its own relation's columns — `SELECT o.*, s.n` over
-a lateral join, and `SELECT o.*, li.amount` over a plain one, both answer what
-PostgreSQL answers. Two exceptions remain: a qualified star ALONE
-(`SELECT o.*` with nothing beside it) still publishes every column of the join,
-and the LATERAL's own star beside another item (`SELECT s.*, o.id`) is refused
-— a lateral's output is a projection this expansion cannot enumerate. Name the
-columns in those two.
+A QUALIFIED star beside another select item publishes its own relation's
+columns — `SELECT o.*, s.n` over a lateral join, `SELECT o.*, li.amount` over a
+plain one, and `SELECT d.*, x.id` over a derived table, a `d(a, b)` alias list
+or a CTE all answer what PostgreSQL answers, from that relation's own OUTPUT
+list.
+
+Where the list is not knowable the star is REFUSED (`0A000`) rather than
+guessed: a derived table whose body is itself a star over a join, and a
+LATERAL's own star (`SELECT s.*, o.id`), whose output is a projection this
+expansion does not enumerate. A qualified star ALONE (`SELECT o.*` with nothing
+beside it) is a third shape — it still publishes every column of the join.
+Name the columns in those three.
 
 An inner `SELECT` list that aliases something to the correlation key's own name
 answers what PostgreSQL answers. `JOIN LATERAL (SELECT MAX(t.id) AS g …

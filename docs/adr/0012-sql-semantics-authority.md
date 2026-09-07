@@ -1706,15 +1706,18 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      0 and there is no divergence to record.
 
    - **A qualified star ALONE over a lateral join publishes the whole join.**
-     (Amended 2026-09-07, arc J1 round 3.) `SELECT o.*` with nothing beside it
-     publishes four columns where PostgreSQL publishes three. A qualified star
-     BESIDE another select item now expands from its own relation's scan and
-     agrees with PostgreSQL, over a lateral join and a plain one alike; the
-     LATERAL's own star beside another item (`SELECT s.*, o.id`) is refused,
-     because a lateral's output is a projection that expansion cannot
-     enumerate and the scan under it carries the correlation slot the join is
-     about to drop. Pinned in
-     `coordinator.TestArcJ1AQualifiedStarBesideAnotherItemExpands`.
+     (Amended 2026-09-07, arc J1 rounds 3 and 4.) `SELECT o.*` with nothing
+     beside it publishes four columns where PostgreSQL publishes three: a
+     star-only SELECT list has no projection for the expansion to rewrite, so
+     that spelling never reaches it. A qualified star BESIDE another select
+     item expands from its relation's own OUTPUT list — a base table's schema,
+     a derived table's or CTE's SELECT list, a `d(a, b)` column-alias list —
+     and agrees with PostgreSQL. Two shapes are REFUSED rather than guessed:
+     a derived table whose body is itself a star over a join, and the
+     LATERAL's own star (`SELECT s.*, o.id`), whose output is a projection the
+     expansion does not enumerate and whose scan carries the correlation slot
+     the join is about to drop. Pinned in
+     `coordinator.TestArcJ1AQualifiedStarExpandsFromTheRelationsOutput`.
 
    - **A star over a NON-aggregated LATERAL publishes PostgreSQL's columns in
      a different ORDER.** (Added 2026-09-07, arc J1 round 2; PRE-EXISTING.)
