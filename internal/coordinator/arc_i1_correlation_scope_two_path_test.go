@@ -90,6 +90,11 @@ type i1Cell struct {
 	// routes is the routing delta each DAG arm must produce for this one
 	// query. The zero value says the DAG EXECUTED the shape as stages.
 	routes a2Routes
+	// pin, when set, says this cell DIVERGES from PostgreSQL and records what
+	// this engine answers instead. The gate then asserts the divergence: a
+	// cell that starts agreeing FAILS, which is how the pin gets deleted.
+	pin    string
+	pinWhy string
 }
 
 func i1Cells() []i1Cell {
@@ -244,6 +249,53 @@ func i1Cells() []i1Cell {
 			sql: `SELECT COUNT(*) AS n FROM decpair d WHERE EXISTS ` +
 				`(SELECT 1 FROM typemx t WHERE t.id < d.id)`,
 			want: `n | 9`, routes: a2Routes{Correlated: 1}},
+
+		// --- a column-alias list interacting with the scope rule -----------
+		//
+		// These two are right for the RIGHT reason and would break if the
+		// alias overlay were dropped: a list HIDES the names it replaces, so
+		// `id` is not an inner name here and IS a reference to the enclosing
+		// query — which is exactly what PostgreSQL 17 answers, 5000 rather
+		// than 10, on both spellings.
+		{name: "27_ctl_a_derived_star_under_an_alias_list_hides_the_renamed_name",
+			sql: `SELECT (SELECT COUNT(*) FROM (SELECT * FROM typemx) t(idd) WHERE id < 10) AS n ` +
+				`FROM decpair WHERE id < 2`,
+			want: `n | 5000`, routes: a2Routes{Correlated: 1}},
+		{name: "28_ctl_a_cte_column_list_hides_the_renamed_name",
+			sql: `WITH c(kk) AS (SELECT * FROM typemx) ` +
+				`SELECT (SELECT COUNT(*) FROM c WHERE id < 10) AS n FROM decpair WHERE id < 2`,
+			want: `n | 5000`, routes: a2Routes{Correlated: 1}},
+
+		// --- the divergence this arc does NOT close ------------------------
+		//
+		// PostgreSQL's column-alias list renames the LEADING columns and the
+		// rest keep their names: `WITH c(kk) AS (SELECT id, s FROM decpair)`
+		// publishes `kk` AND `s`, so the `s` below is c's and the subquery is
+		// not correlated — one row per outer row.
+		//
+		// This engine treats the list as the WHOLE namespace, in the binder
+		// (`registerCTE` stores `cte.Columns` outright) and in the logical
+		// builder, so `s` is not an inner name, binds the enclosing query, and
+		// the subquery is re-run per outer row with the value substituted:
+		// 9 for the row whose `s` is '1.50' and 0 for the one whose is '1.5'.
+		//
+		// It is the same FAMILY as this arc's subject and a different root
+		// cause, and fixing it at the classifier alone would be a bandaid: the
+		// classifier would call the reference inner while the binder still
+		// refuses `s` as unknown, turning a wrong number into a refusal for a
+		// legal query. Closing it means applying a column-alias list
+		// POSITIONALLY everywhere it is read — the binder, the CTE
+		// materialization and the derived-table path, which also owns
+		// ADR-0012's recorded divergence that a list over a `SELECT *` body is
+		// not applied at all. That is its own arc.
+		{name: "29_pin_a_short_cte_column_list_hides_the_columns_it_did_not_rename",
+			sql: `WITH c(kk) AS (SELECT id, s FROM decpair) ` +
+				`SELECT (SELECT COUNT(*) FROM c WHERE s = '1.50') AS n FROM decpair d WHERE d.id < 3`,
+			want: `n | 1 | 1`,
+			pin:  `n | 9 | 0`,
+			pinWhy: "a column-alias list is the WHOLE namespace here, not a positional rename, " +
+				"so `s` is read as the enclosing query's and substituted per outer row",
+			routes: a2Routes{Correlated: 1}},
 	}
 }
 
@@ -269,6 +321,20 @@ func TestArcI1AnUnqualifiedNameBindsTheInnerRelation(t *testing.T) {
 				if err != nil {
 					t.Errorf("%s arm: %v\n  SQL: %s\n  PostgreSQL 17 answers %s",
 						arm.name, err, tc.sql, tc.want)
+					continue
+				}
+				if tc.pin != "" {
+					switch got {
+					case tc.want:
+						t.Errorf("%s arm now AGREES with PostgreSQL (%s), so this pin is FIXED: "+
+							"delete it from i1Cells.\n  pinned reason: %s\n  SQL: %s",
+							arm.name, tc.want, tc.pinWhy, tc.sql)
+					case tc.pin:
+						// The recorded divergence, unchanged.
+					default:
+						t.Errorf("%s arm answers %s, which is neither PostgreSQL's %s nor the "+
+							"pinned %s\n  SQL: %s", arm.name, got, tc.want, tc.pin, tc.sql)
+					}
 					continue
 				}
 				if got != tc.want {

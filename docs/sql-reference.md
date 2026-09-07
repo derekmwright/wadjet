@@ -1059,6 +1059,16 @@ subquery publishes `kk` and the second column's own name. More aliases than the
 subquery has columns is SQLSTATE `42P10` (`table "b" has 2 columns available
 but 3 columns specified`). Both are PostgreSQL's rules.
 
+The prefix rule holds for a DERIVED TABLE. On a **CTE** the list is currently
+the whole namespace rather than a prefix rename: `WITH c(kk) AS (SELECT id, s
+FROM t)` publishes `kk` alone, and naming `s` is `42703 unknown column "s"
+(available: kk)` where PostgreSQL resolves it. Inside a subquery over such a
+CTE the same name binds the ENCLOSING query instead, so the subquery is read as
+correlated and answers the enclosing row's value — pinned as
+`29_pin_a_short_cte_column_list_hides_the_columns_it_did_not_rename` in
+`coordinator.TestArcI1AnUnqualifiedNameBindsTheInnerRelation` with
+PostgreSQL's answer beside it.
+
 A list written over a subquery whose SELECT list contains `*` is not applied:
 the star's width is not resolvable at that point, and renaming the wrong
 columns would be a wrong answer rather than a missing one. PostgreSQL does

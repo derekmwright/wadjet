@@ -979,6 +979,27 @@ reference whose qualifier the INNER relation also answers to
 `boundary_unaliased_base_table_correlation_stays_silent`). No schema decides
 those — both scopes carry the identifier — and they stay pinned.
 
+Nor does it close the shape a COLUMN-ALIAS LIST on a CTE reaches. PostgreSQL's
+list renames the LEADING columns and the rest keep their names; this engine
+treats it as the whole namespace, in the binder (`registerCTE` stores
+`cte.Columns` outright) and in the logical builder, so `WITH c(kk) AS (SELECT
+id, s FROM t)` publishes `kk` alone. A subquery over such a CTE therefore reads
+`s` as the enclosing query's and answers the enclosing row's value — the same
+FAMILY as this section's subject, with a different root cause. Repairing it at
+the classifier alone would be a bandaid: the classifier would call the
+reference inner while the binder still refuses `s` as unknown, turning a wrong
+number into a refusal for a legal query. Closing it means applying a
+column-alias list POSITIONALLY everywhere it is read — the binder, the CTE
+materialization and the derived-table path, which also owns ADR-0012's recorded
+divergence that a list over a `SELECT *` body is not applied at all. It is
+pinned with PostgreSQL's answer beside it in
+`coordinator.TestArcI1AnUnqualifiedNameBindsTheInnerRelation`.
+
+The interaction of the list with the scope rule IS closed, and two controls say
+so: `(SELECT * FROM t) x(idd)` and `WITH c(kk) AS (SELECT * FROM t)` both HIDE
+the name they rename, so a subquery naming it is reading the enclosing query —
+PostgreSQL's answer, and this engine's.
+
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
 `resolveSubqueryAST` gains an `InExpr` case. An uncorrelated IN-subquery is
