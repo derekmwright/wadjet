@@ -693,19 +693,14 @@ func arcD5LateralCells() []arcD5Cell {
 			wantCorrRoutes: 1,
 			pgSays:         "three rows — Carol survives at 0, because 0 * 40 admits every amount"},
 
-		// A WINDOW over a defaulted COUNT: a third query shape reaching the
-		// SAME carrier defect the `SELECT *` cell pins (report deferral D4).
-		// The single-process arm answers PostgreSQL's running total over all
-		// three rows — Carol's defaulted 0 contributing nothing to it, which
-		// is the repair working — and both DAG arms fail in the shuffle with
-		// ADR-0010's name-consistency check, because the join stage carries
-		// `s.id` where an earlier file of the same stage input named the
-		// column `order_id`.
-		//
-		// Three distinct shapes now reach one message, which is what says the
-		// defect is the stage model's carried-column derivation and not any
-		// of the three spellings. Wrong-to-loud is the allowed direction: at
-		// fd679ae9 this answered two rows, dropping Carol.
+		// A WINDOW over a defaulted COUNT. It USED to reach the same stage
+		// carrier defect the `SELECT *` cell still pins — ADR-0010's
+		// name-consistency refusal, because the join stage carried `s.id`
+		// where an earlier file of the same stage input named the column
+		// `order_id`. Arc J1 closed that: the lateral's correlation key is
+		// published under a hidden slot and the join stage's files declare one
+		// column set (ADR-0026 §3c), so all four arms answer PostgreSQL now.
+		// The `wantErrLikeDAG` pin is deleted as the proof.
 		//
 		// The VALUE is PostgreSQL's; the TYPE is not. `SUM` over a BIGINT is
 		// `numeric` in PostgreSQL and float HERE — while the very same sum
@@ -714,13 +709,12 @@ func arcD5LateralCells() []arcD5Cell {
 		// `lateral_count_default_reaches_an_aggregate_argument` above). One
 		// number, two spellings, two boxes: that is ADR-0024's rung, not this
 		// repair's doing, and it has no lateral in its own repro.
-		{issue: "#767", name: "window_over_the_default_reaches_the_dag_carrier_defect",
+		{issue: "#767", name: "window_over_the_default_answers_on_every_arm",
 			sql: `SELECT o.customer AS c, SUM(s.n) OVER (ORDER BY o.customer) AS running ` +
 				`FROM lat_ord o ` + lat + `ON true ORDER BY 1`,
 			want: []string{"c=Alice|running=float:2", "c=Bob|running=float:4",
 				"c=Carol|running=float:4"},
-			wantErrLikeDAG: `names column 2 "s.id"`,
-			pgSays:         "2, 4, 4 as NUMERIC — the values agree, the box does not (ADR-0024)"},
+			pgSays: "2, 4, 4 as NUMERIC — the values agree, the box does not (ADR-0024)"},
 
 		// The control that says the decline is CONDITIONAL on null-extension
 		// and not on "any join after the lateral": a LEFT join cannot null-
@@ -886,12 +880,12 @@ func arcD5LateralCells() []arcD5Cell {
 		{issue: "#767", name: "boundary_select_star_over_an_aggregated_lateral",
 			sql: `SELECT * FROM lat_ord o ` + lat + `ON true ORDER BY o.customer`,
 			want: []string{
-				"id=int64:1|customer=Alice|total=float:150|order_id=int64:1|n=int64:2",
-				"id=int64:2|customer=Bob|total=float:200|order_id=int64:2|n=int64:2",
-				"id=int64:3|customer=Carol|total=float:0|order_id=NULL|n=NULL"},
-			wantErrLikeDAG: "where an earlier file of the same stage input named it",
+				"id=int64:1|customer=Alice|total=float:150|__key_0=int64:1|n=int64:2",
+				"id=int64:2|customer=Bob|total=float:200|__key_0=int64:2|n=int64:2",
+				"id=int64:3|customer=Carol|total=float:0|__key_0=NULL|n=NULL"},
+			wantErrLikeDAG: "one stage's files describe one relation",
 			pgSays: "three rows with columns (id, customer, total, n) and Carol at n = 0 — " +
-				"no order_id, and no refusal on any arm"},
+				"no key column, and no refusal on any arm"},
 
 		// The NON-aggregated lateral, which none of this may touch.
 		// THE NESTED SHAPES the filing asks for, and the third of them is a

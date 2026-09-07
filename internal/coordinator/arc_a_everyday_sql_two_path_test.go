@@ -478,12 +478,13 @@ func arcACells() []arcACell {
 		// THE BOUNDARY, pinned rather than described (protocol rule 11). The
 		// injected key is a real output column of the lateral side, so an
 		// OUTER `SELECT *` sees it: PostgreSQL publishes only `amount` here
-		// and wadjet publishes `order_id, amount`. That is NOT new — the
-		// AGGREGATED arm has injected and leaked the same way since #591, and
-		// this cell's pre-fix reading for the aggregated spelling is
-		// `[id customer total order_id n]` — but this commit makes it true of
-		// the non-aggregated arm too, so it is stated here with the answer it
-		// gives rather than left to be discovered.
+		// and wadjet publishes one column more. That is NOT new — the
+		// AGGREGATED arm has injected and leaked the same way since #591 —
+		// and arc J1 RENAMED the leaked column rather than removing it: the
+		// key is minted into `__key_0`, the reserved namespace no query can
+		// spell, so it can no longer be mistaken for the relation's own
+		// `order_id` (#956, ADR-0026 §3c). On the DAG the star still shows
+		// the SCAN's own `order_id`, which the wantDAG below records.
 		//
 		// Before this commit this shape answered ZERO ROWS AND NO COLUMNS, so
 		// the move is catastrophically-wrong → right-rows-plus-a-column. The
@@ -495,11 +496,20 @@ func arcACells() []arcACell {
 				`JOIN LATERAL (SELECT amount FROM lat_item WHERE order_id = o.id) li ON true ` +
 				`ORDER BY o.customer, li.amount`,
 			want: []string{
+				"__key_0=int64:1|amount=float:100|id=int64:1|customer=Alice|total=float:150",
+				"__key_0=int64:1|amount=float:50|id=int64:1|customer=Alice|total=float:150",
+				"__key_0=int64:2|amount=float:125|id=int64:2|customer=Bob|total=float:200",
+				"__key_0=int64:2|amount=float:75|id=int64:2|customer=Bob|total=float:200"},
+			// The DAG shows the SOURCE column, not the slot: a star gives the
+			// join node no NeededColumns, so the stage carries the scan's own
+			// list and `order_id` is lat_item's own column there. Same value,
+			// two names, one extra column either way.
+			wantDAG: []string{
 				"order_id=int64:1|amount=float:100|id=int64:1|customer=Alice|total=float:150",
 				"order_id=int64:1|amount=float:50|id=int64:1|customer=Alice|total=float:150",
 				"order_id=int64:2|amount=float:125|id=int64:2|customer=Bob|total=float:200",
 				"order_id=int64:2|amount=float:75|id=int64:2|customer=Bob|total=float:200"},
-			pgSays: "the same four rows with columns (id, customer, total, amount) — no order_id"},
+			pgSays: "the same four rows with columns (id, customer, total, amount) — no key column"},
 		// P2's shape, CLOSED by arc J1's hidden slot (#767's mirror, #956).
 		// `lateralSelectsColumn` used to decide "the subquery already
 		// publishes the key" by matching the key's name against a select
@@ -536,6 +546,13 @@ func arcACells() []arcACell {
 				`LEFT JOIN LATERAL (SELECT amount FROM lat_item WHERE order_id = o.id) li ON true ` +
 				`ORDER BY o.customer, li.amount`,
 			want: []string{
+				"id=int64:1|customer=Alice|total=float:150|__key_0=int64:1|amount=float:100",
+				"id=int64:1|customer=Alice|total=float:150|__key_0=int64:1|amount=float:50",
+				"id=int64:2|customer=Bob|total=float:200|__key_0=int64:2|amount=float:125",
+				"id=int64:2|customer=Bob|total=float:200|__key_0=int64:2|amount=float:75",
+				"id=int64:3|customer=Carol|total=float:0|__key_0=NULL|amount=NULL"},
+			// As above: the DAG's star output names the SCAN's own column.
+			wantDAG: []string{
 				"id=int64:1|customer=Alice|total=float:150|order_id=int64:1|amount=float:100",
 				"id=int64:1|customer=Alice|total=float:150|order_id=int64:1|amount=float:50",
 				"id=int64:2|customer=Bob|total=float:200|order_id=int64:2|amount=float:125",
