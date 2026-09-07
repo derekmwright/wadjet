@@ -458,6 +458,63 @@ where a CAST, a set-operation unified type or a stored column named it. That is
 a change to what `exec.ProjectColumn.Precision` MEANS (a cap, or a hint), and
 it is not made here.
 
+**#712 and #764 are ONE item, and it is a CARRIER change.** (Added 2026-09-06,
+arc H3's round 0; both re-measured on this tree against live PostgreSQL 17.11,
+and both DEFERRED rather than bounded.) The paragraph above ends at a
+declaration; the arc that re-opened it found the other half is the same fact.
+
+A composite's DECIMAL result should be `numeric` with typmod −1 — measured on
+the server through `pg_attribute` for `COALESCE`, `GREATEST`, `LEAST` and
+`CASE` over a `numeric(15,2)` column beside a literal, while `NULLIF` keeps
+argument 0's typmod and a fold over arms carrying the SAME typmod keeps it (all
+three of which this engine already matches). An unconstrained numeric prints
+every VALUE at its own scale, so PostgreSQL answers
+`12.75; 12.3456789012345; 1.00; -3.50` where this engine answers
+`12.7500000000000; 12.3456789012345; 1.0000000000000; -3.5000000000000` —
+the same numbers, with trailing zeros whose count tracks the literal's
+fractional length (#764). The declaration half and the rendering half are the
+SAME missing thing: `batch.DecimalColumn` carries `{Data []Int128; Scale int}`,
+one scale for the whole column, and `Int128.FormatDecimal(scale)` emits exactly
+that many fraction digits for every row. There is nowhere to put "this value
+was written at scale 2 and that one at scale 13", and the box that KNEW it —
+the arm's own rendered text — is re-parsed at the vector's scale by
+`ParseDecimalStringChecked` on the way in.
+
+Two consequences measured on this tree, both new to this record:
+
+  - The 39-digit value #712 was filed for is the same fact wearing the
+    declaration's hat: `GREATEST(CAST(c_dec AS DECIMAL(38,30)), 100000000)`
+    answers `100000000.000000000000000000000000000000` — 39 digits under a
+    DECIMAL(38,30) declaration, and the same NUMBER PostgreSQL prints as
+    `100000000`. No value is wrong and nothing downstream enforces the bound;
+    what is wrong is the bound and the zeros, and both come from the single
+    scale.
+  - The max-scale rule (ADR-0012 item 12, the only choice that moves no value)
+    can turn an answer into a REFUSAL through this: `SUM(GREATEST(CAST(c_dec AS
+    DECIMAL(38,30)), 100000000))` over four rows is `22003` here — four values
+    of 10^8 at scale 30 is 4·10^38, past the carrier — where PostgreSQL answers
+    `400000000` because its fold's values carry scale 0. This joins the list of
+    shapes below where the 128-bit carrier raises and the server answers.
+
+What closing it takes: a per-value render scale on the DECIMAL vector (a side
+array populated only by a fold whose declared typmod is −1, read by
+`GetValue`'s renderer and by pgwire's binary `dscale`, and IGNORED by the group
+key, the sort key and the comparison kernels, for which the value is the same
+number either way), carried through the SPILL and SHUFFLE formats and the
+parquet leaf — otherwise the DAG arm, which materializes every stage, would
+print different text from the single-process one, which is the two-path defect
+class ADR-0018 §3 forbids. That is a change to the columnar format, not a
+typing rule, and it is the next arc's lead rather than a filed follow-up.
+
+Bounding it instead is what this ADR already refused once: enforcing `10^p` at
+`SetValueChecked`/`SetComputedChecked` turns a right answer loud, and picking
+the fold's scale from the declared arms alone drops digits a wider arm holds
+(#724's `DecimalChoiceFractionalLiteralValue` regression). Neither is shipped.
+The gates that hold the residual meanwhile are
+`coordinator.TestLiteralScaleInADecimalFold`, whose fourteen entries carry
+PostgreSQL's own text beside this engine's and FAIL when an entry starts
+agreeing, and `SetComputedChecked`'s own doc comment.
+
 ### 5. On the wire, a DECIMAL carries the typmod its inputs AGREE on — `select_common_typmod`
 
 PostgreSQL does not gate on "computed". It runs `select_common_typmod` over
