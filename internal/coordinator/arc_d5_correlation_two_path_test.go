@@ -779,19 +779,25 @@ func arcD5LateralCells() []arcD5Cell {
 			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=NULL"},
 			wantUnreachableRoutes: 1,
 			pgSays:                "Carol NULL — an OUTER join pads the pair its ON rejects"},
-		// THE BOUNDARY of the repair, pinned rather than described. An OUTER
-		// join whose ON the DEFAULT row would satisfy needs the lateral's
-		// columns NULLED per column for the pairs the ON rejects and KEPT for
-		// the one it accepts — a CASE per output over a schema this pass does
-		// not have — so the join is left exactly as written and Carol reads
-		// NULL where PostgreSQL reads 0. Alice and Bob are right, which is
-		// what says this is the one cell and not the class.
-		{issue: "#767", name: "boundary_left_on_the_default_row_satisfies_reads_null",
+		// THE BOUNDARY of the repair, and it is LOUD now (arc J1 round 5).
+		// An OUTER join whose ON the DEFAULT row would SATISFY needs the
+		// lateral's columns nulled per column for the pairs the ON rejects and
+		// KEPT for the one it accepts — a CASE per output over a schema this
+		// pass does not have. This cell used to pin the wrong answer that
+		// followed: Carol read NULL where PostgreSQL reads 0, one cell of
+		// three, a wrong NUMBER on a row a pad manufactured.
+		//
+		// The ON is now FOLDED over the empty-input defaults. `ON s.n > 1`
+		// folds to a definite `0 > 1` and keeps answering (the cell above);
+		// this one folds to TRUE, so the two orders provably disagree and it
+		// is one 0A000 sentence naming WHERE, which is evaluated after the
+		// default and answers. Deleting the pin is the fix's proof.
+		{issue: "#767", name: "boundary_left_on_the_default_row_satisfies_is_refused",
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + left +
 				`ON s.n = 0 ORDER BY o.customer`,
-			want:                  []string{"c=Alice|n=NULL", "c=Bob|n=NULL", "c=Carol|n=NULL"},
-			wantUnreachableRoutes: 1,
-			pgSays:                "Alice NULL, Bob NULL, Carol 0 — only Carol's cell diverges"},
+			wantErrLike: "cannot be answered",
+			pgSays: "Alice NULL, Bob NULL, Carol 0 — refused rather than answered, " +
+				"because only Carol's cell would diverge and it would be a NUMBER"},
 		// A subquery the QUERY grouped keeps the ordinary rule, ON and all.
 		{issue: "#767", name: "control_user_grouped_lateral_with_an_on",
 			sql: `SELECT o.customer AS c, s.n2 AS n FROM lat_ord o JOIN LATERAL (` +
