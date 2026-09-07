@@ -2384,10 +2384,22 @@ func lateralBareKeyName(innerCol string) string {
 // It is what this layer can see without a catalog: the select items' aliases
 // and column references, and the GROUP BY terms. A STORED column named
 // `__key_0` is not in it — reading is not minting, so the reservation does not
-// refuse such a column and only the allocator's seed could step off it. That
-// gap is stated rather than papered over: it needs the inner relation's
-// schema, which `buildLateralSubquery` runs before AnnotateScanColumns has
-// supplied.
+// refuse such a column (ADR-0012) and only the allocator's seed could step off
+// it. This layer cannot see one: it runs before AnnotateScanColumns supplies
+// the inner relation's schema.
+//
+// It does not have to. For a stored `__key_0` to reach the lateral's OUTPUT
+// and meet the minted one, the SELECT list has to carry it, and there are only
+// two ways:
+//
+//   - it NAMES the column — which puts it in the seed above, so the allocator
+//     steps to `__key_1` (verified by review over a catalog-door fixture);
+//   - it is a STAR — and `lateralSelectsColumn` reports a star as publishing
+//     the key already, so nothing is injected and no slot is minted at all.
+//
+// Any other list does not publish the stored column, so the two never share an
+// output batch. The gap is in what this function CAN SEE, not in what can
+// collide.
 func lateralScopeNames(info *plansql.SelectInfo) []string {
 	if info == nil {
 		return nil

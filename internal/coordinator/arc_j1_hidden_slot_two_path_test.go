@@ -204,7 +204,11 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 			want: `k,gk,g | 0,0,4998 | 1,1,4999 | 2,2,4993 | 3,3,4994 | 4,4,4995 | ` +
 				`5,5,4996 | 6,6,4997 | 7,NULL,NULL`,
 			routes: "unreachable output"},
-		{name: "956/on-the-small-fixture-with-the-key-published",
+		// A CONTROL, not a proof: the small fixture's key is `order_id` and
+		// its aggregate is `g`, so the two names do not collide and no slot
+		// is taken. Reverting the mint leaves this cell green, which is what
+		// makes it a control.
+		{name: "956/ctl-published-key-with-no-collision",
 			sql: `SELECT o.customer AS c, s.gk AS gk, s.g AS g FROM lat_ord o JOIN LATERAL (` +
 				`SELECT li.order_id AS gk, MAX(li.amount) AS g FROM lat_item li ` +
 				`WHERE li.order_id = o.id GROUP BY li.order_id) s ON true ORDER BY 1`,
