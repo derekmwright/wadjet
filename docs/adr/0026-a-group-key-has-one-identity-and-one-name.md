@@ -1,6 +1,6 @@
 # ADR-0026: A GROUP BY key has one identity and one published name
 
-Status: Accepted (2026-08-30, #720 / #723 / #725; amended 2026-09-03 by arc S1 — §4b's deferral is CLOSED, the phantom scan column under it is named at its real site, and a sort or window key over a computed derived alias needs no second name ON THE WIRE because the definition is materialized at plan time; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended 2026-09-04 by arc E3 — §3a is CLOSED: a HAVING binds its aggregate through the slot that aggregate OWNS, and the gather pairs a lone rename by CLASS (#785); amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795); amended 2026-09-04 by arc F4 — §3a's fragment-projection residual is closed for the THREE WRAPPED spellings it pinned, and it was two defects: an unaliased SELECT item was invisible to the class walk's lookup, and a fragment projection above an aggregate addressed a duplicated name by NAME where it now addresses the SLOT. Two sibling spellings — under a SET-OP wrapper and under a DISTINCT — are NOT closed and stay pinned (2026-09-05). Amended 2026-09-07 by arc J2 with §6 — the two names are not a property of GROUP BY keys: a UNION arm's projection, an aggregate argument, a window argument, an ORDER BY term and a projection's DECLARED TYPE each have a second spelling, and every one of them binds through the identity its producer published (#770, #947, #949; the mechanism is in ADR-0025); amended 2026-09-07 by arc J1 with §3c — a key the PLANNER MINTED is published under a hidden slot and RESOLVED by the column it reads, which is §2's pair of names in the opposite direction, and the stage's published list says what `exec.PublishedGroupKeyNames` will emit (#956, #767); amended the same day after review — the minted column is DROPPED BY THE JOIN that made it rather than trimmed at the statement's output, because a star-only query has no output projection to trim, and the collision is closed in the spelling where the SELECT list carries the key too (#956, #767); amended a fourth time after review — the empty-input default is the ITEM's folded value and lands only where the correlation key is NULL, the reference rewrite is deleted, and a qualified star expands from its relation's OUTPUT list or is refused; amended a third time after review — the drop's identity is a POSITION on the side the lowering BUILT (a name, and a name that is a join key, both dropped a user's stored `__key_0`), the re-spell walks the whole block, and an ungrouped aggregate's empty-input value rides on the lateral's OUTPUT COLUMN rather than on the references to it (#977); amended again after the second review — the drop is by IDENTITY (the slot the join KEYS ON, on the side it minted it for) and never by a name a table could also own, the colliding spelling takes the FULL mint with its own references re-spelled to the slot, and the distributed path's materialized lateral projection is what may ask for the slot back (#956, #767).
+Status: Accepted (2026-08-30, #720 / #723 / #725; amended 2026-09-03 by arc S1 — §4b's deferral is CLOSED, the phantom scan column under it is named at its real site, and a sort or window key over a computed derived alias needs no second name ON THE WIRE because the definition is materialized at plan time; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended 2026-09-04 by arc E3 — §3a is CLOSED: a HAVING binds its aggregate through the slot that aggregate OWNS, and the gather pairs a lone rename by CLASS (#785); amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795); amended 2026-09-04 by arc F4 — §3a's fragment-projection residual is closed for the THREE WRAPPED spellings it pinned, and it was two defects: an unaliased SELECT item was invisible to the class walk's lookup, and a fragment projection above an aggregate addressed a duplicated name by NAME where it now addresses the SLOT. Two sibling spellings — under a SET-OP wrapper and under a DISTINCT — are NOT closed and stay pinned (2026-09-05). Amended 2026-09-07 by arc J2 with §6 — the two names are not a property of GROUP BY keys: a UNION arm's projection, an aggregate argument, a window argument, an ORDER BY term and a projection's DECLARED TYPE each have a second spelling, and every one of them binds through the identity its producer published (#770, #947, #949; the mechanism is in ADR-0025); amended 2026-09-07 by arc J1 with §3c — a key the PLANNER MINTED is published under a hidden slot and RESOLVED by the column it reads, which is §2's pair of names in the opposite direction, and the stage's published list says what `exec.PublishedGroupKeyNames` will emit (#956, #767); amended the same day after review — the minted column is DROPPED BY THE JOIN that made it rather than trimmed at the statement's output, because a star-only query has no output projection to trim, and the collision is closed in the spelling where the SELECT list carries the key too (#956, #767); amended a fourth time after review — the empty-input default is the ITEM's folded value and lands only where the correlation key is NULL, the reference rewrite is deleted, and a qualified star expands from its relation's OUTPUT list or is refused; amended a third time after review — the drop's identity is a POSITION on the side the lowering BUILT (a name, and a name that is a join key, both dropped a user's stored `__key_0`), the re-spell walks the whole block, and an ungrouped aggregate's empty-input value rides on the lateral's OUTPUT COLUMN rather than on the references to it (#977); amended again after the second review — the drop is by IDENTITY (the slot the join KEYS ON, on the side it minted it for) and never by a name a table could also own, the colliding spelling takes the FULL mint with its own references re-spelled to the slot, and the distributed path's materialized lateral projection is what may ask for the slot back (#956, #767); amended a fifth time after review — the empty-input default is a COMPILED PROJECTION EXPRESSION and not a stamped value (a text carrier could not write a varlen or a container vector and emptied a MATCHED string row), a published correlation key is a USER column under whatever name and however many times the query published it, and a written ON over an unrepaired lateral is folded over the defaults and REFUSED unless it provably rejects the padded row — never NULL where PostgreSQL answers a value (#977, #956).
 
 §2 REWRITTEN 2026-09-02 from a sketch into the design that closes #794 and
 #795: a Stage carries TWO names per GROUP BY key — the PUBLISHED name in
@@ -852,11 +852,51 @@ alias so a user's stored column of that name on the probe side is never
 mistaken for it (ADR-0012).
 
 WHAT VALUE: not a literal 0 on a COUNT column. It is the SELECT ITEM's value
-over an empty input, folded at plan time with each aggregate replaced by its
-own — COUNT-family 0, everything else NULL — and carried per column as text the
-operator parses at the vector's type. `COUNT(*)+1` is 1, `COUNT(*)=0` is true,
-`COALESCE(SUM(x),0)` is 0, `CASE WHEN COUNT(*)>5 THEN 1 END` is NULL, and a
-NULL default is not carried at all because the pad already wrote it.
+over an empty input — the item with each aggregate replaced by its own
+empty-input value, COUNT-family 0 and everything else NULL. `COUNT(*)+1` is 1,
+`COUNT(*)=0` is true, `COALESCE(SUM(x),0)` is 0, `CASE WHEN COUNT(*)>5 THEN 1
+END` is NULL, and a NULL default is not carried at all because the pad already
+wrote it.
+
+**AND IT IS AN EXPRESSION, NOT A VALUE.** The first cut folded the item to a
+CONSTANT, carried it per column as TEXT, and wrote it into the padded row's
+vector IN PLACE through a hand-written type switch. A value carrier needs one
+writer per type, and that switch could not write a varlen or a container
+vector: `CAST(COUNT(*) AS VARCHAR)` answered `2 | "" | "20"` — a MATCHED row
+emptied and the padded one holding two values run together, because a string
+vector's offsets are not a slot you can overwrite — and the star spellings
+crashed in `slice bounds out of range`.
+
+Both rules now live in ONE compiled projection expression, built as an AST at
+plan time and rendered as
+`CASE WHEN <marker> IS NULL THEN <item over an empty input> ELSE <column> END`:
+`internal/planner/logical.lateralEmptyDefaults` builds it, the physical planner
+and the worker each compile it through `internal/engine/expr`, and
+`exec.LateralEmptyDefault` IS a `Project` over the join's output — every other
+column copied by POSITION, the defaulted ones computed, the marker omitted.
+There is no per-type writer left to get wrong: the default takes the engine's
+own typed kernel for all 22 types and writes a NEW vector, which is what every
+computed column in the engine does. Twenty type families are gated with all
+three row kinds in one cell — a matched NULL, a matched value and the pad —
+across five arms (`TestArcJ1TheEmptyInputDefaultIsRightForEveryTypeFamily`).
+
+**A WRITTEN `ON` IS PART OF THE SEMANTICS, AND WHERE THIS ORDER CANNOT ANSWER
+IT, IT REFUSES.** PostgreSQL evaluates the lateral per outer row and applies
+the ON AFTER it, so for an outer row whose lateral input is empty there IS a
+lateral row — the item over an empty input — and the ON decides that pair. On
+the unrepaired path (an OUTER join with a written ON) this lowering has the two
+reversed: the join pads because the correlation found nothing, and the ON never
+sees the defaulted row, so the answer is NULL whatever the ON says. The two
+agree exactly where the ON REJECTS the pair, so the ON is FOLDED over the
+defaults and a definite FALSE keeps the plan — `ON s.n > 1` folds to `0 > 1`
+and answers as it always did. Everything else is 0A000 in one sentence:
+`ON s.n = 0` folds TRUE (PostgreSQL's `Carol, 0` against this engine's
+`Carol, NULL`), and `ON o.id > 1` cannot be folded at all because it reads an
+OUTER column — that one is the reason the refusal is not scoped to ONs naming
+the lateral, since it was silently `Carol, NULL` with no complaint. The INNER
+spelling is untouched: `lateralPadThenFilter` MOVES its ON into the enclosing
+WHERE, which is evaluated ABOVE the default, so `JOIN LATERAL … ON s.n = 0`
+answers PostgreSQL's row.
 
 ONE mechanism for every consumer, so the REFERENCE rewrite that used to serve
 the named spelling — wrapping each reference in `COALESCE(ref, 0)` — is DELETED:

@@ -765,10 +765,10 @@ NULL-padded by a `LEFT JOIN LATERAL`.
 
 **The join's own `ON` still decides.** The lateral produces its row first —
 including the defaulted one for an outer row it matched nothing for — and the
-`ON` is applied to that pair afterwards, so `ON s.item_count > 0` drops the
-empty order and `ON s.item_count = 0` keeps only the empty ones. Writing
-`ON true` is what makes the empty-input row unconditional; it is not the only
-supported spelling.
+`ON` is applied to that pair afterwards, so on an INNER `JOIN LATERAL`,
+`ON s.item_count > 0` drops the empty order and `ON s.item_count = 0` keeps
+only the empty ones. Writing `ON true` is what makes the empty-input row
+unconditional; it is not the only supported spelling.
 
 A `RIGHT` or `FULL` join written after the lateral turns the empty-input rule
 off for that query: such a join can produce rows in which the lateral's
@@ -776,23 +776,32 @@ columns are NULL for a reason of its own, and those NULLs are left alone
 rather than defaulted. The rest of the join behaves normally. A `LEFT` join
 after the lateral is unaffected.
 
-One case is not yet right, and it is a VALUE rather than a row: a written `ON`
-on a `LEFT JOIN LATERAL` that the DEFAULT row would PASS —
-`LEFT JOIN LATERAL (…) s ON s.item_count = 0`. Every outer row is kept, as
-PostgreSQL keeps them, and the `ON` correctly nulls the lateral's columns for
-the rows it rejects; what differs is the row the `ON` ACCEPTS. For the order
-with no line items, PostgreSQL reads `item_count = 0` and this engine reads
-NULL:
+On an OUTER `LEFT JOIN LATERAL` a written `ON` is applied by the join, which
+is BEFORE the empty-input value exists, and PostgreSQL applies it after. Where
+the condition REJECTS the empty-input row the two orders agree — the outer row
+is kept with the lateral's columns NULL either way — and the query answers, so
+`LEFT JOIN LATERAL (…) s ON s.item_count > 0` is unaffected. Where it would
+ACCEPT that row they do not agree, and rather than print NULL where PostgreSQL
+prints a value the condition is REFUSED (`0A000`) in one sentence:
 
-```
+```sql
+-- refused: PostgreSQL keeps the empty order at item_count = 0
+SELECT o.customer, s.item_count FROM orders o
 LEFT JOIN LATERAL (SELECT COUNT(*) AS item_count FROM line_items
-                    WHERE order_id = o.id) s ON s.item_count = 0
+                   WHERE order_id = o.id) s ON s.item_count = 0
 
-PostgreSQL   Alice NULL, Bob NULL, Carol 0
-this engine  Alice NULL, Bob NULL, Carol NULL      <- one cell differs
+-- answers: a WHERE is evaluated after the default
+SELECT o.customer, s.item_count FROM orders o
+LEFT JOIN LATERAL (SELECT COUNT(*) AS item_count FROM line_items
+                   WHERE order_id = o.id) s ON true
+WHERE s.item_count = 0
 ```
 
-Every other combination of join kind and `ON` matches PostgreSQL.
+A condition over an OUTER column (`ON o.id > 1`) is refused for the same
+reason: whether the empty-input row passes depends on the outer row, so
+nothing can be proven about it. Move the condition to `WHERE`, or write the
+INNER spelling — `JOIN LATERAL (…) s ON s.item_count = 0` answers, because
+there the condition IS a filter and is applied after the default.
 
 An ungrouped aggregate inside a lateral keeps PostgreSQL's empty-input value
 for an outer row the lateral matches nothing for, and the value is the SELECT
@@ -802,7 +811,19 @@ ITEM's own over an empty input: `COUNT(*)` reads 0 there, `COUNT(*) + 1` reads
 row alone — a matched row whose value is legitimately NULL keeps its NULL, so
 `NULLIF(COUNT(*), 2)` is NULL for a row that counted 2 — and it reaches every
 spelling: `SELECT *`, `SELECT o.*, s.n`, a derived table's star, a CTE's star,
-a `WHERE` over the column, a scalar subquery and an `EXISTS`.
+a `WHERE` over the column, a scalar subquery and an `EXISTS`. The value is the
+item evaluated at the engine's own types, so it is right for every column type
+— `CAST(COUNT(*) AS VARCHAR)` reads `'0'`, `CAST(COUNT(*) AS DECIMAL(9,2))`
+reads `0.00`, `ARRAY[COUNT(*)]` reads `{0}` — and not only for numbers.
+
+A lateral may PUBLISH its correlation key in its own `SELECT` list, once or
+several times, under its own name or under aliases; every one of those is a
+column of the answer under the name the query gave it. `JOIN LATERAL (SELECT
+order_id, order_id AS oid, COUNT(*) AS n … GROUP BY order_id) s` publishes
+`order_id`, `oid` and `n`. On the DISTRIBUTED arms a `SELECT *` over such a
+join currently shows the stage's stream instead and can lose the duplicate —
+name the columns there. The same is true of any `SELECT *` over a join whose
+right side is a derived table introducing a column.
 
 The correlated equality is turned into a join, and a join needs the inner
 value as a column, so the planner materializes one under a name from its

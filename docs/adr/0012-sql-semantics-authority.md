@@ -1697,6 +1697,50 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      recorded here as a divergence with its mechanism, and closing it needs
      the lateral's own projection to be materialized onto its stage.
 
+   - **On the DISTRIBUTED arms, `SELECT *` shows the STAGE's stream and not
+     the query's projection — with no LATERAL in the query.** (Added
+     2026-09-07, arc J1 round 5; PRE-EXISTING, not closed here, recorded for
+     filing.) A Project emits no stage, so a column a PROJECTION introduces is
+     not in the stream the star publishes. The reproducer has no lateral, no
+     aggregate, no correlation and no hidden slot in it:
+
+     ```
+     SELECT * FROM lat_ord o
+       JOIN (SELECT order_id, order_id AS oid FROM lat_item) s ON s.order_id = o.id
+     single/spilled → order_id, oid, id, customer, total   (PostgreSQL's five)
+     dag/dagshuf    → order_id,      id, customer, total   (`oid` is GONE)
+     ```
+
+     It is the mechanism behind three shapes this arc pins: a lateral that
+     publishes its correlation key twice loses the duplicate on the DAG; one
+     that publishes it under an ALIAS shows the source name; and a lateral
+     whose SELECT item is a COMPUTED expression makes the join's empty-build
+     task declare the projection's schema while its non-empty siblings declare
+     the aggregate's, which is loud rather than wrong — ADR-0010's
+     `one stage's files describe one relation`. The named spellings are right
+     on every arm; only the star reads the stream. Pinned per arm in
+     `coordinator.TestArcJ1TheDagStarOverADerivedSideLosesAColumn`, which the
+     other pins point at, so the day a stage publishes a projection they can
+     all be deleted together.
+
+   - **A written `ON` over an unrepaired LATERAL with an empty-input default
+     is REFUSED (0A000) where PostgreSQL answers.** (Added 2026-09-07, arc J1
+     round 5, #977.) PostgreSQL evaluates the lateral per outer row and applies
+     the ON AFTER it, so an outer row the lateral matched nothing for still
+     offers the ON a row carrying the item's empty-input value. This engine
+     decorrelates into a join, which pads on the correlation BEFORE the ON is
+     applied, so on the unrepaired path (an OUTER join carrying a written ON)
+     it would answer NULL whatever the ON says. Where the ON provably REJECTS
+     the padded row the two orders agree and the query answers — `ON s.n > 1`
+     folds to `0 > 1`. Where it does not, the answer would be NULL where
+     PostgreSQL prints a value (`ON s.n = 0` is PostgreSQL's `Carol, 0`;
+     `ON o.id > 1` is too, and cannot be folded at all because it reads an
+     OUTER column), so it is one sentence naming the condition and pointing at
+     WHERE, which is evaluated after the default and is already right. A
+     refusal is a divergence and is recorded as one; a wrong number is not an
+     option. Gated in
+     `coordinator.TestArcJ1AnOnConditionOverADefaultedColumnIsRightOrLoud`.
+
    - **WITHDRAWN the same day (arc J1 round 3): the refusal of `SELECT *` over
      a LATERAL whose ungrouped COUNT can see no rows.** It fired on the SHAPE,
      and a plan-time refusal cannot know the data — it refused queries whose
