@@ -500,35 +500,29 @@ func arcACells() []arcACell {
 				"order_id=int64:2|amount=float:125|id=int64:2|customer=Bob|total=float:200",
 				"order_id=int64:2|amount=float:75|id=int64:2|customer=Bob|total=float:200"},
 			pgSays: "the same four rows with columns (id, customer, total, amount) — no order_id"},
-		// P2's shape, pinned. `lateralSelectsColumn` decides "the subquery
-		// already publishes the key" by matching the key's name against a
-		// select item's ALIAS as well as against its source column — so an
-		// inner projection that aliases some OTHER column to the key's name
-		// looks like it publishes the key, the injection is skipped, and the
-		// join key is missing again. Zero rows for PostgreSQL's four, on all
-		// four arms, at this arc's base and at its tip alike.
+		// P2's shape, CLOSED by arc J1's hidden slot (#767's mirror, #956).
+		// `lateralSelectsColumn` used to decide "the subquery already
+		// publishes the key" by matching the key's name against a select
+		// item's ALIAS as well as its source, so an inner projection that
+		// aliases some OTHER column to the key's name looked like it
+		// published the key, the injection was skipped, and the join key was
+		// missing: zero rows for PostgreSQL's four, on all four arms.
 		//
-		// It is NOT fixed here, and not for want of effort. Matching on the
-		// published COLUMN instead would inject `order_id` beside an output
-		// column ALREADY named `order_id` that holds the AMOUNT — two columns
-		// of one name in the lateral side's schema, resolved by
-		// `batch.RecordBatch.ColumnIndex`'s first match. The row count would
-		// become four and `li.order_id` would then read the KEY (1,1,2,2) where
-		// PostgreSQL reads the amount (50,100,75,125): an obviously-wrong zero
-		// traded for a plausible wrong number, which protocol item 8 refuses.
-		// Publishing the key under a name nothing can collide with — a hidden
-		// slot — is the fix, and that is the same slot-and-permutation
-		// territory #785 was deferred into (ADR-0026 §3a).
-		//
-		// So `control_lateral_non_agg_key_published` says only what it
-		// measures: a subquery publishing the key under its OWN name needs no
-		// injection. It does not say that naming the key is always safe, and
-		// this cell is why.
-		{issue: "#767", name: "boundary_inner_alias_shadowing_the_key_answers_nothing",
+		// The key is materialized into `__key_0` now — the reserved
+		// namespace, which no alias can shadow — so the item aliased
+		// `order_id` keeps the AMOUNT and the join keys on the slot. Kept
+		// here as a cell of this census with PostgreSQL's rows, and asserted
+		// again beside its family in
+		// `TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot`.
+		{issue: "#767", name: "inner_alias_shadowing_the_key_answers_the_amount",
 			sql: `SELECT o.customer AS c, li.order_id AS a FROM lat_ord o ` +
 				`JOIN LATERAL (SELECT amount AS order_id FROM lat_item WHERE order_id = o.id) li ` +
 				`ON true ORDER BY o.customer, a`,
-			want:   []string{},
+			want: []string{
+				"c=Alice|a=float:50",
+				"c=Alice|a=float:100",
+				"c=Bob|a=float:75",
+				"c=Bob|a=float:125"},
 			pgSays: "4 rows — Alice 50, Alice 100, Bob 75, Bob 125"},
 		// The LEFT twin of the outer-star boundary below. The INNER spelling
 		// answers on all four arms; this one is LOUD on dag-shuffled, and was
