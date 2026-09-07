@@ -16,6 +16,12 @@ package pgwire
 // OID 1700 with typmod -1 (what it sends for any unconstrained numeric).
 //
 // Every OID and value below is PostgreSQL 17's, measured live over these rows.
+//
+// The WITNESS is `sum_over_the_arms_computed_column`: reverting the
+// published-name lookup in `declaredProjectionDecl` sends OID 701 there and
+// fails that cell ALONE. The other three #949 shapes already declared numeric
+// with the hunk out — they are corroboration that the arm's own (p,s) crosses
+// the stage, not independent proofs of the fix.
 
 import (
 	"context"
