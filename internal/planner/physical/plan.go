@@ -6327,6 +6327,16 @@ func resolveShuffleKey(key string, child *logical.Node) string {
 		if n.Type == logical.NodeProject {
 			bare := derivedScopeBareName(resolved, n)
 			proj := projectionForName(n.Projections, resolved, bare)
+			if proj != nil && bare != "" && projectsAMintedGroupKey(n, bare) {
+				// The aggregate below PUBLISHES this name (a hidden
+				// correlation slot, ADR-0026 3a): the stage emits it under
+				// exactly this name and nothing below carries it, so the walk
+				// stops here. Chasing proj.Column would hand the shuffle the
+				// key's SOURCE column, which the aggregate stage does not
+				// emit -- measured as `partitioned shuffle: key "g" not in
+				// schema` and, where the join still built, zero matched rows.
+				return bare
+			}
 			switch {
 			case proj != nil && proj.Column != "" && !strings.EqualFold(proj.Column, resolved):
 				resolved = proj.Column
@@ -6359,6 +6369,30 @@ func resolveShuffleKey(key string, child *logical.Node) string {
 		}
 	}
 	return resolved
+}
+
+// projectsAMintedGroupKey reports whether the aggregate below a Project
+// publishes `name` as one of its group keys' MINTED slots -- the reverse of an
+// ordinary key, whose published name is a column of the aggregate's input.
+//
+// A minted key exists on the DAG only under that slot, exactly as a computed
+// output exists only under its own alias, so a name walk that reaches one has
+// arrived rather than having something further to chase.
+func projectsAMintedGroupKey(project *logical.Node, name string) bool {
+	if project == nil || len(project.Children) == 0 {
+		return false
+	}
+	agg := findAggregateAncestor(project.Children[0])
+	if agg == nil {
+		return false
+	}
+	for i := range agg.GroupBy {
+		if i < len(agg.GroupByPublish) && agg.GroupByPublish[i] != "" &&
+			strings.EqualFold(agg.GroupByPublish[i], name) {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveAggInputName maps a name an aggregate stage READS — an aggregate

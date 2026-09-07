@@ -75,6 +75,18 @@ type groupKeyOut struct {
 	// Literal marks a constant key the single-process path elides from the
 	// key set and re-attaches afterwards; its Name is the synthetic one.
 	Literal bool
+	// Minted marks a key the PLANNER made rather than the query: its Name is
+	// a hidden slot the logical plan chose (logical.Node.GroupByPublish) and
+	// its Slot is the ordinary input column it resolves by — the reverse of
+	// a Derived key, which resolves by a slot and publishes under its text.
+	//
+	// A decorrelated LATERAL mints one. The correlation key is promoted into
+	// the join condition, so the subquery's output has to carry it, and
+	// carrying it under the SOURCE COLUMN'S OWN NAME is what put it beside
+	// `MAX(t.id) AS g` under the single name `g` — the aggregate's output
+	// then answered to `g` twice and the query returned the KEY (#956,
+	// ADR-0026 §3a).
+	Minted bool
 }
 
 // groupKeyOutputs describes an Aggregate node's GROUP BY keys. The rules are
@@ -159,6 +171,13 @@ func groupKeyOutputs(agg *logical.Node) []groupKeyOut {
 			} else {
 				k.Identity = strings.ToLower(strings.TrimSpace(gb))
 			}
+			// A minted key leaves through HERE, not through the tail below:
+			// the LATERAL decorrelation records its GROUP BY as TEXT and
+			// supplies no GroupByExprs, so `haveExprs` is false for every key
+			// of that aggregate. Applying the override at one exit only left
+			// the key published under its source column's stripped name,
+			// which is the collision the slot exists to remove.
+			applyMintedName(agg, i, &k)
 			out[i] = k
 			continue
 		}
@@ -203,9 +222,33 @@ func groupKeyOutputs(agg *logical.Node) []groupKeyOut {
 			// sometimes is a slot that protects only sometimes.
 			k.Slot = allocGroupKeySlot(alloc)
 		}
+		applyMintedName(agg, i, &k)
 		out[i] = k
 	}
 	return out
+}
+
+// applyMintedName publishes key i under the hidden slot the LOGICAL plan chose
+// for it (logical.Node.GroupByPublish), if it chose one.
+//
+// It is decided LAST so it overrides every naming rule above: the point of the
+// slot is that nothing else in the query can answer to that name, and a rule
+// that could still rename it would be a second opinion about a name that has
+// to have exactly one (ADR-0026 3a).
+//
+// Only for a key the aggregate's input already carries. A MINTED key that is
+// also DERIVED would need two slots -- one to resolve by and one to publish
+// under -- and no lowering produces one; leaving that shape on the derived
+// rule keeps it answering as it does today.
+func applyMintedName(agg *logical.Node, i int, k *groupKeyOut) {
+	if i >= len(agg.GroupByPublish) || agg.GroupByPublish[i] == "" {
+		return
+	}
+	if k.Derived || k.Literal || k.PublishedBelow {
+		return
+	}
+	k.Name = agg.GroupByPublish[i]
+	k.Minted = true
 }
 
 // allocGroupKeySlot takes the next group-key slot from a scope's allocator.
@@ -284,7 +327,7 @@ func groupKeyByIdentity(agg *logical.Node) map[string]string {
 		// column reference can spell. Leaving that last one out re-parsed
 		// `g + 1` as arithmetic over a `g` the aggregate does not emit and
 		// answered NULL for every row (ADR-0026).
-		if !k.Derived && !k.Literal && nameIsPlainColumn(k.Name) {
+		if !k.Derived && !k.Literal && !k.Minted && nameIsPlainColumn(k.Name) {
 			continue
 		}
 		if k.Identity == "" {
@@ -377,7 +420,7 @@ func publishedGroupKeyNames(keys []groupKeyOut, elided map[int]bool) (names []st
 		if elided[i] {
 			continue
 		}
-		if k.Derived || k.Delimited {
+		if k.Derived || k.Delimited || k.Minted {
 			names = append(names, k.Name)
 			derived = true
 			continue

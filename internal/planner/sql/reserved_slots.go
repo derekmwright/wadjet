@@ -68,6 +68,13 @@ const (
 	SlotVarState     SlotFamily = "__var_state"   // STDDEV/VARIANCE partial state
 	SlotCovarState   SlotFamily = "__covar_state" // CORR/COVAR partial state
 	SlotGrouping     SlotFamily = "__grouping_"   // a GROUPING(...) bitmask
+	// SlotCorrKey is a DECORRELATED LATERAL's correlation key: a value the
+	// enclosing query never named, which the lowering has to publish so the
+	// join it manufactures has a column to key on. Publishing it under the
+	// SOURCE COLUMN's name is how `SELECT MAX(t.id) AS g … WHERE t.g = d.k`
+	// answered the KEY (#956) and `SELECT amount AS order_id … WHERE
+	// order_id = o.id` answered nothing (#767). ADR-0026 §3a.
+	SlotCorrKey SlotFamily = "__key_" // a decorrelated correlation key
 	// The SUFFIX-minted families: their names carry a discriminator rather than
 	// a bare index, so they are rendered with fmt.Sprintf against the constant
 	// rather than through SlotName. They are reserved on the same grounds.
@@ -102,6 +109,7 @@ var allSlotFamilies = []SlotFamily{
 	SlotWindowOutput, SlotWindowKey, SlotSortKey, SlotGroupKey, SlotAggInput,
 	SlotNestedAgg, SlotScalar, SlotHaving, SlotTwoLevel, SlotSetOpCount,
 	SlotAvgSum, SlotAvgCount, SlotVarState, SlotCovarState, SlotGrouping,
+	SlotCorrKey,
 }
 
 // reservedSlotPrefixes is the reservation. It is a superset of the families
@@ -118,6 +126,7 @@ var reservedSlotPrefixes = []string{
 	"__gb_expr_",
 	"__grouping_",
 	"__having_",
+	"__key_",
 	"__precomp_agg_",
 	"__row_loc",
 	"__rowcount_only__",

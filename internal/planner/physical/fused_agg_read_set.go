@@ -22,8 +22,16 @@ func pruneFusedAggOutputCols(cols, groupBy []string, specs []AggSpec, filterExpr
 		return cols
 	}
 	// Anything read stays, even if it collides with an output name.
+	//
+	// By the BASE name too. A group key reaches here under both of its
+	// names (ADR-0026 §2) and the RESOLUTION spelling is what the fragment
+	// reads — `t.g` for a key a decorrelated LATERAL groups on. Deleting the
+	// qualified text alone left `g` in the output set, so the read set lost
+	// the scan's own `g` and the fragment failed with `GROUP BY key "t.g" is
+	// not a column of its input (input has: id)` (#956).
 	for _, g := range groupBy {
 		delete(outputs, g)
+		delete(outputs, baseColName(g))
 	}
 	for _, s := range specs {
 		if s.InputExpr != "" {

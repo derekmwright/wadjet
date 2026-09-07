@@ -203,7 +203,26 @@ type Node struct {
 	// final. An aggregate's output column IS its group key's text, so a key
 	// named from write order moves the #526 mismatch one node up rather
 	// than removing it. Nil elsewhere, and nil again after the repair.
-	InnerGroupRefs   []InnerKeyRef
+	InnerGroupRefs []InnerKeyRef
+	// GroupByPublish parallels GroupBy and names the HIDDEN SLOT a group key
+	// is PUBLISHED under when the planner MINTED the key rather than the
+	// query naming it. Empty entries — every ordinary GROUP BY — keep the
+	// aggregate's own naming rule (exec.PublishedGroupKeyNames' qualifier
+	// strip); a set entry is the name exec publishes and every consumer
+	// above resolves by, while GroupBy stays the spelling the key is
+	// RESOLVED by against the aggregate's input. That is ADR-0026 §2's pair
+	// of names, used in the direction §3a asks for: the key takes a name
+	// nothing in the query can answer to, instead of taking one an alias can
+	// shadow.
+	//
+	// The decorrelation of a LATERAL subquery is what mints one. Its
+	// correlated equality is promoted into the join condition, so the join
+	// can key on the inner value only if the subquery's output publishes it
+	// — and publishing it under the source column's own name put it beside
+	// `MAX(t.id) AS g` under one name `g`, where `batch.RecordBatch.ColumnIndex`
+	// answers with the first match and the query returned the KEY for the
+	// aggregate (#956).
+	GroupByPublish   []string
 	AggExprs         []AggExpr
 	GroupingSetNulls []string   // columns that should be NULL in this grouping set (legacy, per-node)
 	GroupingSets     [][]string // single-pass grouping sets: each entry lists the columns in that set

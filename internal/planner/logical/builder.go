@@ -1856,6 +1856,9 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 	// SELECT list publishes it under, when the two differ. See the comment on
 	// lateralPublishedKeyName below.
 	var keyRename map[string]string
+	// mintedKeys maps a correlated inner column to the HIDDEN SLOT this
+	// lowering materialized it into, for the GroupByPublish stamp below.
+	var mintedKeys map[string]string
 	if len(correlatedParts) > 0 {
 		// The key must be SELECTED — and, for an aggregated subquery, grouped.
 		// The rewrite above promotes the correlated equality into the join
@@ -1899,6 +1902,11 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 		//
 		// The GROUP BY half stays gated on hasAgg: a subquery with no
 		// aggregate has nothing to group.
+		// ONE allocator for this lateral, from the shared reserved-slot API:
+		// a slot is safe only when nothing else answers to it, and a per-key
+		// namer is what let two slots of one family land in one column
+		// (ADR-0026 2a). Seeded with every name the subquery itself binds.
+		alloc := plansql.NewSlotAllocator(lateralScopeNames(subInfo)...)
 		var injected []plansql.SelectColumn
 		for _, cp := range correlatedParts {
 			innerCol := extractInnerColumn(cp, leftAliases)
@@ -1926,11 +1934,13 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 			// join at it would answer a plausible wrong number for an
 			// obvious zero. That one stays pinned and needs a hidden slot
 			// (ADR-0026 3a).
+			published := false
 			if pub, ok := lateralPublishedKeyName(subInfo.Columns, innerCol); ok {
 				if keyRename == nil {
 					keyRename = map[string]string{}
 				}
 				keyRename[strings.ToLower(strings.TrimSpace(innerCol))] = pub
+				published = true
 			}
 			if hasAgg {
 				// Add to GROUP BY if not already present
@@ -1945,12 +1955,79 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 					subInfo.GroupBy = append(subInfo.GroupBy, innerCol)
 				}
 			}
-			if lateralSelectsColumn(subInfo.Columns, innerCol) || lateralSelectsColumn(injected, innerCol) {
+			if published {
 				continue
 			}
-			if col, ok := lateralKeySelectItem(innerCol); ok {
-				injected = append(injected, col)
+			if lateralSelectsColumn(subInfo.Columns, innerCol) ||
+				lateralSelectsColumn(injected, innerCol) {
+				// The list publishes the key under its OWN name (or through a
+				// star), so nothing needs materializing -- but the promoted
+				// equality still names it the way the SUBQUERY wrote it, and
+				// what the lateral EMITS is the bare column. On the DAG those
+				// are two names: the join's output filter carries `t.g`, the
+				// build stream carries `g`, and a fragment whose build side is
+				// empty writes a file WITHOUT the qualified copy while one with
+				// rows writes it -- `declares 3 columns [k g c] where an earlier
+				// file ... declared 4 [k g c t.g]` (ADR-0010, #767's DAG half).
+				//
+				// Spelling it against the LATERAL's own alias is the same rule
+				// the alias case above takes: the join keys on the name the
+				// subquery publishes.
+				if bare := lateralBareKeyName(innerCol); bare != "" && bare != innerCol {
+					if keyRename == nil {
+						keyRename = map[string]string{}
+					}
+					keyRename[strings.ToLower(strings.TrimSpace(innerCol))] = bare
+				}
+				continue
 			}
+			col, ok := lateralKeySelectItem(innerCol)
+			if !ok {
+				continue
+			}
+			// THE KEY IS PUBLISHED UNDER A HIDDEN SLOT (ADR-0026 3a).
+			//
+			// Under its SOURCE COLUMN's name -- what this injected until #956
+			// -- the key is an ordinary output column of the lateral, and
+			// every consumer above resolves by name off a batch that may
+			// answer to that name twice. Two shapes did exactly that,
+			// silently, and in opposite directions:
+			//
+			//   SELECT MAX(t.id) AS g, COUNT(*) AS c ... WHERE t.g = d.k
+			//     the aggregate's output is [g(key), g(max), c] and `s.g`
+			//     read the KEY -- 0,1,2,... where PostgreSQL 17 answers
+			//     4998,4999,4993,... (#956);
+			//   SELECT amount AS order_id ... WHERE order_id = o.id
+			//     an item ALREADY answers to the key's name while holding a
+			//     different value, so the injection was skipped entirely and
+			//     the join keyed on a column its build side does not carry --
+			//     ZERO rows for PostgreSQL's four (#767's mirror).
+			//
+			// `__key_N` is in the reserved namespace (plansql/reserved_slots),
+			// so no query can spell it and no alias can shadow it: the
+			// collision is impossible rather than unlikely. The promoted
+			// equality is re-spelled to it below, and for an AGGREGATED
+			// lateral the aggregate PUBLISHES the key under it while still
+			// RESOLVING it by the source column (Node.GroupByPublish).
+			slot, allocated := alloc.Next(plansql.SlotCorrKey)
+			if !allocated {
+				// An exhausted family has no known SQL. Publishing under the
+				// source column's own name is what this did before the slot
+				// existed -- right for every shape but the two above, and
+				// never a name invented from nothing.
+				injected = append(injected, col)
+				continue
+			}
+			col.Alias = slot
+			injected = append(injected, col)
+			if keyRename == nil {
+				keyRename = map[string]string{}
+			}
+			if mintedKeys == nil {
+				mintedKeys = map[string]string{}
+			}
+			keyRename[strings.ToLower(strings.TrimSpace(innerCol))] = slot
+			mintedKeys[strings.ToLower(strings.TrimSpace(innerCol))] = slot
 		}
 		// Keys first, mirroring the order buildAggregate emits them in, so
 		// the projection above stays elidable in the ordinary shape.
@@ -1961,6 +2038,11 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 	if err != nil {
 		return nil, "", lateralEmptyInput{}, fmt.Errorf("building LATERAL subquery plan: %w", err)
 	}
+	// An AGGREGATED lateral groups on the key, and an aggregate publishes a
+	// group key under the key's own text -- which is the collision the slot
+	// exists to avoid, one operator lower. Record the slot as the key's
+	// PUBLISHED name; the aggregate keeps RESOLVING it by the source column.
+	stampMintedGroupKeys(right, mintedKeys)
 	if join.RightAlias != "" {
 		setSubtreeAlias(right, join.RightAlias)
 	}
@@ -2113,6 +2195,89 @@ func lateralKeySelectItem(innerCol string) (plansql.SelectColumn, bool) {
 	return col, true
 }
 
+// lateralBareKeyName is the unqualified column a correlated equality's inner
+// side names, or "" when it names something this cannot take apart.
+func lateralBareKeyName(innerCol string) string {
+	node, err := plansql.ParseExpression(innerCol)
+	if err != nil || node == nil {
+		return ""
+	}
+	ref, ok := node.(*plansql.ColRef)
+	if !ok {
+		return ""
+	}
+	return ref.Column
+}
+
+// lateralScopeNames lists every name a LATERAL subquery's own text binds, for
+// seeding the slot allocator that publishes its correlation key.
+//
+// It is what this layer can see without a catalog: the select items' aliases
+// and column references, and the GROUP BY terms. A STORED column named
+// `__key_0` is not in it — reading is not minting, so the reservation does not
+// refuse such a column and only the allocator's seed could step off it. That
+// gap is stated rather than papered over: it needs the inner relation's
+// schema, which `buildLateralSubquery` runs before AnnotateScanColumns has
+// supplied.
+func lateralScopeNames(info *plansql.SelectInfo) []string {
+	if info == nil {
+		return nil
+	}
+	out := make([]string, 0, len(info.Columns)*2+len(info.GroupBy))
+	for _, c := range info.Columns {
+		if c.Alias != "" {
+			out = append(out, c.Alias)
+		}
+		if c.ColumnRef != "" {
+			out = append(out, c.ColumnRef)
+		}
+		if e := strings.TrimSpace(c.Expr); e != "" {
+			out = append(out, e)
+		}
+	}
+	out = append(out, info.GroupBy...)
+	return out
+}
+
+// stampMintedGroupKeys records, on the aggregate a decorrelated LATERAL built,
+// the hidden slot each minted correlation key is PUBLISHED under.
+//
+// The aggregate keeps RESOLVING the key by the source column it groups on —
+// `GroupBy` is untouched — and publishes it under the slot, which is
+// ADR-0026 §2's pair of names in the direction §3a asks for. Without it the
+// aggregate emits the key under the source column's stripped name, beside an
+// aggregate output the query aliased the same way, and the first match wins
+// (#956).
+//
+// Only the OUTERMOST aggregate of the subquery is stamped: the walk descends
+// through the nodes that leave an aggregate's own output visible and stops at
+// the first one it finds. A nested block's aggregate is a different relation
+// whose key of that name is a different value, and stamping it would publish
+// somebody else's column under this lateral's slot.
+func stampMintedGroupKeys(n *Node, minted map[string]string) {
+	if n == nil || len(minted) == 0 {
+		return
+	}
+	switch n.Type {
+	case NodeAggregate:
+		if len(n.GroupByPublish) < len(n.GroupBy) {
+			grown := make([]string, len(n.GroupBy))
+			copy(grown, n.GroupByPublish)
+			n.GroupByPublish = grown
+		}
+		for i, gb := range n.GroupBy {
+			if slot, ok := minted[strings.ToLower(strings.TrimSpace(gb))]; ok {
+				n.GroupByPublish[i] = slot
+			}
+		}
+		return
+	case NodeProject, NodeFilter, NodeSort, NodeLimit, NodeDistinct, NodeWindow:
+		if len(n.Children) > 0 {
+			stampMintedGroupKeys(n.Children[0], minted)
+		}
+	}
+}
+
 // lateralPublishedKeyName returns the name a LATERAL subquery's SELECT list
 // publishes innerCol under, when that name is NOT innerCol's own.
 //
@@ -2197,9 +2362,13 @@ func lateralSelectsColumn(cols []plansql.SelectColumn, innerCol string) bool {
 		if strings.EqualFold(strings.TrimSpace(c.Expr), strings.TrimSpace(innerCol)) {
 			return true
 		}
-		if c.Alias != "" && strings.EqualFold(c.Alias, bare) {
-			return true
-		}
+		// The item's SOURCE, never its ALIAS. A NAME is not a value: an item
+		// that merely answers to the key's name publishes whatever IT reads —
+		// `MAX(t.id) AS g` beside `WHERE t.g = d.k` (#956) and
+		// `amount AS order_id` beside `WHERE order_id = o.id` (#767's mirror)
+		// both looked like they published the key, so no key was materialized
+		// and the join had nothing to key on. Both are minted into a hidden
+		// slot by the caller now.
 		if !c.IsAgg && c.ColumnRef != "" && strings.EqualFold(c.ColumnRef, bare) {
 			return true
 		}
