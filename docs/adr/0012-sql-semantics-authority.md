@@ -338,9 +338,30 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      Pinned on the VALUE, not on the declaration, in
      `coordinator.TestF1AWindowDeclaresTheSameTypeThroughADerivedTable`: the
      cell asserts the float64 digits wadjet answers and names PostgreSQL's, so
-     it fails the day the accumulator becomes exact. The CAST spelling
-     (`CAST(SUM(x) OVER () AS BIGINT)`) already declares its target on every
-     path and is a cell there.
+     it fails the day the accumulator becomes exact.
+
+     CENSUSED 2026-09-06 by arc H2, which replaced those two sampled pins with
+     the full cross of five window aggregates and six numeric widths over
+     `numwidth`, on all four arms, in
+     `coordinator.TestH2TheWindowDeclaredTypeCensus`. Each divergent cell
+     names PostgreSQL's own answer beside wadjet's and each agreeing cell is
+     asserted as a control, so the deferral is measured rather than sampled
+     and the eventual fix's proof is deleting a table of cells. The census
+     found one width the filing does not name: a FLOAT32 input takes the same
+     float64 accumulator, so `SUM(real) OVER ()` declares float8 and answers
+     `1.67772251e+07` where PostgreSQL declares real and answers
+     `1.6777224e+07` — and where wadjet's OWN grouped spelling declares
+     FLOAT32 and answers `1.6777226e+07`. Three answers to one question, so
+     the repair has to settle the grouped side too.
+
+     ITEM 1 of the filing is CLOSED, and closed by measurement rather than by
+     a change: `CAST(SUM(x) OVER () AS BIGINT)` was reported as INT64
+     single-process and FLOAT64 on the stage DAG, and at 2e386378 both
+     spellings declare INT64 on all four arms and answer PostgreSQL's digits.
+     The DAG reaches that answer by REFUSING the plan and routing to the
+     coordinator's local pipeline, which the census asserts as a routing
+     counter beside the rows — so what closed is the DIVERGENCE, and the DAG
+     still never declares this expression itself.
    - **A column-alias list over a `SELECT *` is not applied.** (Added
      2026-09-04, #613.) `(…) AS b(kk, nn)` renames a derived table's columns
      positionally, and PostgreSQL applies it whatever the subquery's SELECT
