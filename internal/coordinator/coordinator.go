@@ -3942,13 +3942,39 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (*SQL
 		}, nil
 	}
 
-	// Apply probe-split merge if needed (same as ExecuteSQL path)
+	// Apply probe-split merge if needed (same as ExecuteSQL path).
+	//
+	// A MERGE FAILURE IS THE ANSWER ON THIS DOOR TOO (#1002 round 2). The
+	// merge is what applies the query's ORDER BY over the workers' partials,
+	// and it refuses `0A000` when it cannot — a key that does not resolve, or
+	// partials that do not describe one relation (ADR-0026 §8a). This site
+	// dropped `mergeErr` on the floor and returned the UNMERGED batches, so
+	// the async HTTP door answered 200 with the rows in whatever order the
+	// tasks finished in: the silently different order the refusal exists to
+	// prevent, on the one door that never sees it. `ExecuteSQL` has reported
+	// it since the refusal was added; a rule that holds on one door and not
+	// the other is not a rule.
+	//
+	// It rides on `SQLResult.Error` rather than the returned error, because
+	// this function's error is the query-not-found / not-authorized channel —
+	// `internal/server.handleGetQueryResults` maps it to 404 — while
+	// `Error` is the "the query has a failure to report" channel the same
+	// handler already answers 200 with, and the one `ExecuteSQL` fills for a
+	// failed query.
 	if meta.mergeInfo != nil && len(batches) > 0 {
 		merged, mergedRows, mergeErr := c.mergeProbePartials(newSliceStream(batches), columns, meta.mergeInfo)
-		if mergeErr == nil {
-			batches = merged
-			totalRows = mergedRows
+		if mergeErr != nil {
+			return &SQLResult{
+				QueryID:     queryID,
+				Error:       mergeErr.Error(),
+				ResultFiles: info.ResultFiles,
+				TotalRows:   info.TotalRows,
+				Elapsed:     elapsed,
+				Plan:        planStr,
+			}, nil
 		}
+		batches = merged
+		totalRows = mergedRows
 	}
 
 	declared := schemaOrDeclared(gatherSchema(batches), meta.stages)

@@ -89,6 +89,33 @@ func TestM1AMergedOrderIsTheQuerysOrderAtScale(t *testing.T) {
 			sql: "SELECT DISTINCT * FROM typemx a JOIN typemx b ON b.id = a.id " +
 				"ORDER BY a.id DESC LIMIT 20 OFFSET 2500",
 		},
+		{
+			// THE CONTAINER CARRIERS, at the same scale. `typemx_nested` is
+			// the same 5000 rows over ARRAY / ROW / ROW-of-containers / MAP /
+			// VECTOR, each carrying a NULL every few rows — the carriers whose
+			// offsets the coalesce also has to advance, and the ones a flat
+			// table cannot reach. ARRAY and MAP write both ends of their span
+			// and self-heal; ROW carries the `BytesColumn` family in its
+			// children and does not, which is why it is here rather than in
+			// the unit matrix alone.
+			name: "a star DISTINCT over a 5000-row nested self-join",
+			sql: "SELECT DISTINCT * FROM typemx_nested a JOIN typemx_nested b ON b.id = a.id " +
+				"ORDER BY a.id DESC",
+		},
+		{
+			// The same ASC, so a run that reverses is not the run that passes.
+			name: "the same nested self-join ORDER BY id ASC",
+			sql: "SELECT DISTINCT * FROM typemx_nested a JOIN typemx_nested b ON b.id = a.id " +
+				"ORDER BY a.id",
+		},
+		{
+			// A GROUP BY that carries the containers through the merge as
+			// OUTPUT columns rather than only as payload beside a flat key.
+			name: "GROUP BY over the nested table's containers at scale",
+			sql: "SELECT a.id, a.c_arr, a.c_row, a.c_map, a.c_vec FROM typemx_nested a " +
+				"JOIN typemx_nested b ON b.id = a.id " +
+				"GROUP BY a.id, a.c_arr, a.c_row, a.c_map, a.c_vec ORDER BY a.id DESC",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var ref string
