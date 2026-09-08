@@ -2364,3 +2364,17 @@ class: `markCoPathingSelfJoinBuilds` decides `Stage.QualifyAllBuildCols` from
 the ARM's stage DAG, so the broadcast and shuffle arms publish different names
 for one statement (§7's boundary paragraph carries the measurement). Both belong
 to the arc that makes a join's published names a property of the query.
+
+Arc N1 adds a THIRD producer of that class and closes it only for manufactured
+joins (§8e): `reorderJoins` swaps an ORDINARY inner join's sides by estimated
+rows, so `SELECT * FROM lat_ord o JOIN lat_item i ON i.order_id = o.id`
+publishes `i`'s columns and then `o`'s where PostgreSQL publishes `o`'s first —
+a COST decision changing what the star means, on all four arms and at every
+tip measured. And two shapes still declare NO columns at all when they return
+no rows (a star over a bushy join, a star over a query carrying a decorrelated
+LATERAL); ADR-0012's divergence list records that they are refused rather than
+answered until the declaration reaches them.
+
+§8f leaves one of its own: a WRITTEN qualified ORDER BY term beside a duplicate
+output name is rewritten onto the select-list alias and binds the first column
+of it. Pinned in `coordinator.TestN1AnOrdinalSortKeyBindsItsSlot`.
