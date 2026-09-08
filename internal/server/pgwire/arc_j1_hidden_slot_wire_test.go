@@ -120,6 +120,13 @@ func TestArcJ1AHiddenSlotIsNotInTheRowDescription(t *testing.T) {
 		// answers it; the refusal is the recorded divergence (ADR-0012) and
 		// the alternative was publishing a column set that is not the one the
 		// query asked for.
+		//
+		// The substring is the PLANNER's sentence, and that is the point of
+		// asserting it here rather than any error at all: the same statement
+		// reached the executor's generic `operator execute: column "s.*" does
+		// not exist in the input schema` (42000) until a star-only SELECT list
+		// built a projection for the planner's refusal to see (#979), and a
+		// client cannot act on that one.
 		wantErrLike string
 	}{
 		{"star", `SELECT * ` + aggLateral,
@@ -145,7 +152,7 @@ func TestArcJ1AHiddenSlotIsNotInTheRowDescription(t *testing.T) {
 		// wire is the honest form of not knowing.
 		{"inner_qualified_star", `SELECT s.* ` + aggLateral, nil,
 			"(mx) — the lateral's own star is refused here (ADR-0012)",
-			`column "s.*" does not exist in the input schema`},
+			"a `s.*` expands only from a relation whose column list is known"},
 		{"derived_star", `SELECT * FROM (SELECT * ` + aggLateral + `) x`,
 			[]string{"id", "customer", "total", "mx"}, "", ""},
 		{"cte_star", `WITH c AS (SELECT * ` + aggLateral + `) SELECT * FROM c`,

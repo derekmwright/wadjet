@@ -3435,6 +3435,13 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		p.ctes = node.CTEs
 	}
 
+	// A star that could not be expanded, refused with the planner's own
+	// sentence BEFORE the ordinal one — the order PlanDistributed uses, so
+	// both engines say the same thing about `SELECT s.* … ORDER BY 1`: the
+	// star is the reason and the un-countable ordinal is its consequence.
+	if err := refuseUnexpandedStarAnywhere(node); err != nil {
+		return nil, err
+	}
 	// A `SELECT * ... ORDER BY <n>` whose star never expanded (#810). Refused
 	// here rather than in buildSort so this path and PlanDistributed say the
 	// same thing about the same query.
@@ -3580,8 +3587,8 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 
 // PlanDistributed generates a stage DAG for distributed execution.
 // Returns stages with dependency ordering suitable for coordinator dispatch.
-// refuseUnexpandedStarBesideItems refuses a star that SHARES its SELECT list
-// and could not be expanded.
+// refuseUnexpandedStarBesideItems refuses a QUALIFIED star in a SELECT list
+// that could not be expanded.
 //
 // Every consumer below resolves an output column by name, and `d.*` is not
 // one: the single-process arms failed with `column "d.*" does not exist in the
@@ -3590,8 +3597,23 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 // expanded — a base table, a derived table or a CTE whose own SELECT list
 // names its columns — are expanded before this runs
 // (logical.ExpandStarProjections).
+//
+// It used to require a SECOND select item, because a star ALONE built no
+// Project at all and so could not reach it. One does now (#979), and without
+// this the LATERAL's own star — the shape the expansion deliberately declines —
+// escaped to the executor's generic `42000 operator execute: column "s.*" does
+// not exist in the input schema` instead of the planner's one sentence, which
+// is what `docs/sql-reference.md` and ADR-0012 describe.
+//
+// A node carrying a DEFERRED column-alias list is left alone: its star is the
+// wrapper `deferColumnAliasesOverStar` made, and
+// `RefuseUnappliedColumnAliasLists` refuses it with a sentence about the LIST,
+// which is the more specific answer for that shape (#958).
 func refuseUnexpandedStarBesideItems(node *logical.Node) error {
-	if node == nil || node.Type != logical.NodeProject || len(node.Projections) < 2 {
+	if node == nil || node.Type != logical.NodeProject || len(node.Projections) == 0 {
+		return nil
+	}
+	if len(node.DeferredColumnAliases) > 0 {
 		return nil
 	}
 	for _, pr := range logical.VisibleProjections(node.Projections) {
@@ -3603,10 +3625,10 @@ func refuseUnexpandedStarBesideItems(node *logical.Node) error {
 			continue
 		}
 		return sqlerr.New("0A000",
-			"column %q does not exist in the input schema: a `%s` beside other select "+
-				"items expands only from a relation whose column list is known — a base "+
-				"table, or a derived table or CTE whose own SELECT list names its "+
-				"columns — and this one's is not; name the columns",
+			"column %q does not exist in the input schema: a `%s` expands only from a "+
+				"relation whose column list is known — a base table, or a derived table "+
+				"or CTE whose own SELECT list names its columns — and this one's is not; "+
+				"name the columns",
 			name, name)
 	}
 	return nil

@@ -82,6 +82,34 @@ func TestArcK1AStarIsItsSourceInItsPosition(t *testing.T) {
 			want: ord3,
 		},
 		{
+			// THE LATERAL'S OWN STAR, ALONE — a WRONG → LOUD move this arc
+			// makes, and declares. At bb8635a4 `SELECT s.*` published the
+			// whole join (`id, customer, total, mx`) where PostgreSQL
+			// publishes `mx`, on four arms and on the wire; it is refused now,
+			// because the expansion deliberately declines a lateral's own
+			// output (ADR-0012, arc J1's reason: that output is a projection
+			// this pass does not enumerate, and its scan carries the
+			// correlation slot the join is about to drop).
+			//
+			// The refusal is the PLANNER's one sentence on every arm, which is
+			// what `docs/sql-reference.md` and ADR-0012 promise. It reached the
+			// executor's generic `42000 operator execute: column "s.*" …` for
+			// as long as a star-only list built no projection for
+			// `refuseUnexpandedStarBesideItems` to see.
+			name: "979 the lateral's own star alone is refused, in one sentence",
+			sql:  `SELECT s.* ` + lat,
+			want: `ERR building physical plan: column "s.*" does not exist in the input ` +
+				"schema: a `s.*` expands only from a relation whose column list is known",
+			pin: map[string]string{
+				"dag": `ERR physical plan: column "s.*" does not exist in the input ` +
+					"schema: a `s.*` expands only from a relation whose column list is known",
+				"dagshuf": `ERR physical plan: column "s.*" does not exist in the input ` +
+					"schema: a `s.*` expands only from a relation whose column list is known",
+			},
+			why: "ONE refusal under the two engines' own error prefixes, not a divergence; " +
+				"PostgreSQL publishes `mx` and answers",
+		},
+		{
 			name: "979 ctl a qualified star BESIDE another item, right since J1",
 			sql:  `SELECT o.*, s.mx ` + lat + ` ORDER BY o.id`,
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 mx:FLOAT64] rows=3 | " +
@@ -219,13 +247,17 @@ func TestArcK1AStarIsItsSourceInItsPosition(t *testing.T) {
 			want: "cols=[n:INT64] rows=1 | 10",
 		},
 		{
-			// The TOP-LEVEL spelling, which no suite covered: dim's two
-			// columns then tx's, PostgreSQL's order.
+			// The TOP-LEVEL spelling, which no suite covered — and which the
+			// round-1 review found had no STAR in it at all. It does now:
+			// `o.*, i.*` publishes o's three columns then i's four, in
+			// PostgreSQL's order (measured live).
 			name: "962 two qualified stars at the top level publish both lists in order",
-			sql: `SELECT dim.k, dim.label, tx.id, tx.g FROM typemx_dim dim ` +
-				`JOIN typemx tx ON tx.g = dim.k WHERE tx.id < 3 ORDER BY tx.id`,
-			want: "cols=[k:INT32 label:STRING id:INT64 g:INT32] rows=3 | " +
-				"0,grp-0,0,0 | 1,grp-1,1,1 | 2,grp-2,2,2",
+			sql: `SELECT o.*, i.* FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ` +
+				`ORDER BY o.id, i.id`,
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 id:INT64 order_id:INT64 " +
+				"product:STRING amount:FLOAT64] rows=4 | 1,Alice,150,1,1,Widget,50 | " +
+				"1,Alice,150,2,1,Gadget,100 | 2,Bob,200,3,2,Widget,75 | " +
+				"2,Bob,200,4,2,Doohickey,125",
 		},
 	})
 }

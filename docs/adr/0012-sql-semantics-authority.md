@@ -1825,11 +1825,20 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
 
      What is NOT expanded is unchanged and still refused rather than guessed:
      a bare `*` over a JOIN (the entry below), a derived table whose body is
-     itself such a star, and the LATERAL's own star (`SELECT s.*, o.id`), whose
-     output is a projection the expansion does not enumerate and whose scan
-     carries the correlation slot the join is about to drop. Gated by
-     `coordinator.TestArcJ1AQualifiedStarExpandsFromTheRelationsOutput` and
-     `coordinator.TestArcK1AStarIsItsSourceInItsPosition`.
+     itself such a star, and the LATERAL's own star, whose output is a
+     projection the expansion does not enumerate and whose scan carries the
+     correlation slot the join is about to drop.
+
+     The lateral's own star ALONE (`SELECT s.*` with nothing beside it) is a
+     WRONG → LOUD move and is recorded as one: it published the whole join —
+     four columns where PostgreSQL publishes `mx`, on four arms and on the
+     wire — and is refused now, with the PLANNER's one sentence rather than the
+     executor's generic `operator execute: column "s.*" does not exist in the
+     input schema`. A star-only SELECT list built no projection for that
+     refusal to see until #979. Gated by
+     `coordinator.TestArcJ1AQualifiedStarExpandsFromTheRelationsOutput`,
+     `coordinator.TestArcK1AStarIsItsSourceInItsPosition` and
+     `pgwire.TestArcJ1AHiddenSlotIsNotInTheRowDescription`.
 
    - **A star over a NON-aggregated LATERAL publishes PostgreSQL's columns in
      a different ORDER.** (Added 2026-09-07, arc J1 round 2; PRE-EXISTING.)

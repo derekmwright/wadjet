@@ -856,8 +856,11 @@ plain join, a derived table or a CTE.
 
 Where the list is not knowable the star is REFUSED (`0A000`) rather than
 guessed: a derived table whose body is itself a BARE star over a join, and a
-LATERAL's own star (`SELECT s.*, o.id`), whose output is a projection this
-expansion does not enumerate. Name the columns in those two.
+LATERAL's own star — `SELECT s.*, o.id` and `SELECT s.*` alike, whose output is
+a projection this expansion does not enumerate. Name the columns in those two.
+PostgreSQL answers the second (it publishes the lateral's columns), so the
+refusal is a recorded divergence and not a bug report; it replaced publishing
+the whole join.
 
 An inner `SELECT` list that aliases something to the correlation key's own name
 answers what PostgreSQL answers. `JOIN LATERAL (SELECT MAX(t.id) AS g …
