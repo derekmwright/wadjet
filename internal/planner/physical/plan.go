@@ -6116,9 +6116,24 @@ func markCoPathingSelfJoinBuilds(stages []Stage) {
 			continue
 		}
 		// Walk through Exchange wrappers (one or two levels) to the scan.
+		//
+		// A stage that does not publish its INPUT's columns ends the walk,
+		// and the join it builds is not a repeated scan of that table (#981).
+		// An aggregate's output is its group keys and its aggregates; a stage
+		// carrying a materialized block projection publishes the block's own
+		// names. Two laterals over ONE table are exactly that shape — `(SELECT
+		// MAX(amount) AS mx FROM lat_item …) s` beside `(SELECT MIN(amount) AS
+		// mn FROM lat_item …) s2` — and reading the table through them marked
+		// both joins as co-pathing self-joins, so every build column was
+		// force-qualified and the client was handed `s.mx`, `s2.mn` where
+		// PostgreSQL and the single-process path publish `mx`, `mn`. Names
+		// that really DO collide are still qualified, by the `isDup` +
+		// BuildColOrigins rule in joinOutputSchemaWithMapping, which is the
+		// rule for a collision the plan cannot see coming.
 		cur := stageByID[buildDep]
 		for hop := 0; cur != nil && cur.Type != StageScan && hop < 3; hop++ {
-			if len(cur.Dependencies) == 0 {
+			if len(cur.Dependencies) == 0 || stageCollapsesItsInput(cur) ||
+				len(cur.ProjectExprs) > 0 {
 				cur = nil
 				break
 			}

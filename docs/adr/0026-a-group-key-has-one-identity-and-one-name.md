@@ -1883,7 +1883,7 @@ arm, and on the DAG a DECIMAL value written into a float vector, which is what
 
 ## §7 A derived block a STAR reads is a relation, and a stage publishes it
 
-Added 2026-09-07 by arc K3 (#984, #980).
+Added 2026-09-07 by arc K3 (#984, #980, #981).
 
 §2 gave a GROUP BY key two names, and §6 generalized that: a consumer binds
 through the identity its producer published. §7 is the same rule for the
@@ -1953,6 +1953,19 @@ is ADR-0010's refusal), and a block publishing one NAME twice. Both answer
 PostgreSQL on the coordinator-local pipeline. A plan-time test cannot know
 whether the pass will succeed, and a refusal that fires where it would have
 takes an ordinary distributed query off the DAG for nothing.
+
+**A build side that collapses its input is not a repeated scan of its table
+(#981).** `markCoPathingSelfJoinBuilds` walks a join's build dependency chain
+to the underlying scan and force-qualifies every build column when two joins
+read one table in one chain — Q07's self-join rule. It walked THROUGH an
+aggregate, so two laterals over one table looked like a self-join and the
+client was handed `s.mx`, `s2.mn` where PostgreSQL and the single-process path
+publish `mx`, `mn`. An aggregate's output is its group keys and its aggregates;
+a stage carrying a materialized block projection publishes the block's names.
+Neither is the table's columns, so the walk stops there. Names that really do
+collide are still qualified, by the `isDup` + `BuildColOrigins` rule in
+`joinOutputSchemaWithMapping`, which is the rule for a collision the plan
+cannot see coming.
 
 **Not settled.** Two independent LATERALs over one table publish the SECOND
 lowering's minted slot to the client (`__key_1` beside `mx` and `mn`) on both

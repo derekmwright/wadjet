@@ -159,6 +159,35 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 			sql: `SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT COUNT(*) AS n ` +
 				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id`,
 			want: `id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`},
+
+		// #981 — THE WIRE'S NAMES ARE THE PLAN'S NAMES. Two laterals over ONE
+		// table made `markCoPathingSelfJoinBuilds` read the table through the
+		// aggregates and mark both joins as a co-pathing SELF-JOIN, so every
+		// build column was force-qualified and the client was handed `s.mx`,
+		// `s2.mn` where PostgreSQL and the single-process path publish `mx`,
+		// `mn`. An aggregate's output is not its table's columns, so the walk
+		// stops there and the two builds are not a repeated scan.
+		{name: "981/nested-laterals-publish-bare-names",
+			sql: `SELECT * FROM lat_ord o JOIN LATERAL (SELECT MAX(amount) AS mx ` +
+				`FROM lat_item WHERE order_id = o.id) s ON true JOIN LATERAL (` +
+				`SELECT MIN(amount) AS mn FROM lat_item WHERE amount >= s.mx) s2 ` +
+				`ON true ORDER BY o.id`,
+			want: `id,customer,total,mx,mn | 1,Alice,150,100,NULL | 2,Bob,200,125,NULL | ` +
+				`3,Carol,0,NULL,NULL`},
+		{name: "981/nested-laterals-two-inner-items",
+			sql: `SELECT * FROM lat_ord o JOIN LATERAL (SELECT MAX(amount) AS mx ` +
+				`FROM lat_item WHERE order_id = o.id) s ON true JOIN LATERAL (` +
+				`SELECT MIN(amount) AS mn, MAX(id) AS zz FROM lat_item WHERE amount >= s.mx) s2 ` +
+				`ON true ORDER BY o.id`,
+			want: `id,customer,total,mx,mn,zz | 1,Alice,150,100,NULL,NULL | ` +
+				`2,Bob,200,125,NULL,NULL | 3,Carol,0,NULL,NULL,NULL`},
+		// THE CONTROL FOR THE MARKING: a real self-join over one table still
+		// qualifies, which is what the pass was written for (Q07's shape).
+		{name: "981/ctl-a-self-join-still-qualifies",
+			sql: `SELECT * FROM lat_item a JOIN lat_item b ON b.order_id = a.order_id ` +
+				`AND b.id > a.id ORDER BY a.id, b.id`,
+			want: `id,order_id,product,amount,b.id,b.order_id,b.product,b.amount | ` +
+				`1,1,Widget,50,2,1,Gadget,100 | 3,2,Widget,75,4,2,Doohickey,125`},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
