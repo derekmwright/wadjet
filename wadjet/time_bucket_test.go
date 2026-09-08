@@ -93,6 +93,21 @@ func TestTimeBucketAnswersWhatDateBinAnswers(t *testing.T) {
 			`SELECT time_bucket(INTERVAL '30' SECOND, TIMESTAMP '2020-02-11 15:44:17') AS b`,
 			ms("2020-02-11 15:44:00"),
 			`date_bin('30 seconds','2020-02-11 15:44:17','1970-01-01') = 2020-02-11 15:44:00`},
+		// A LITERAL WITH NO UNIT IS SECONDS. The parser defaulted it to DAY,
+		// so this answered `2020-02-10 00:00:00` — a two-DAY bucket for a
+		// two-SECOND stride, silently. `interval '2'` is `00:00:02` on
+		// PostgreSQL 17.11 and `interval '90'` is `00:01:30`, both measured;
+		// the same default made `ts + INTERVAL '2'` move the instant by two
+		// days. Same silent-wrong-value class as the sub-second units, by a
+		// spelling that never reaches the unit table at all (#965 round 3).
+		{"unitless_stride_is_seconds",
+			`SELECT time_bucket(INTERVAL '2', TIMESTAMP '2020-02-11 15:44:17') AS b`,
+			ms("2020-02-11 15:44:16"),
+			`date_bin(interval '2','2020-02-11 15:44:17',epoch) = 2020-02-11 15:44:16`},
+		{"unitless_ninety_is_ninety_seconds",
+			`SELECT time_bucket(INTERVAL '90', TIMESTAMP '2020-02-11 15:44:17') AS b`,
+			ms("2020-02-11 15:43:30"),
+			`interval '90' = 00:01:30, so date_bin bins to 2020-02-11 15:43:30`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

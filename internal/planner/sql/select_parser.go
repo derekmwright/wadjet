@@ -2908,7 +2908,19 @@ func (p *selectParser) parseIntervalLiteral() (Node, error) {
 		if p.peek() == TokenIdent {
 			unit = normalizeIntervalUnit(p.advance().val)
 		} else {
-			unit = "day" // default
+			// NO UNIT AT ALL IS SECONDS, WHICH IS WHAT POSTGRESQL MEANS.
+			// Measured on 17.11: `interval '2'` is `00:00:02` and
+			// `interval '90'` is `00:01:30`; `date_bin(interval '2',
+			// '2020-02-11 15:44:17', epoch)` is `15:44:16`.
+			//
+			// This defaulted to DAY, so `time_bucket(INTERVAL '2', ts)`
+			// answered a two-DAY bucket for a two-SECOND stride and
+			// `ts + INTERVAL '2'` moved the instant by two days — the same
+			// silent-wrong-value class as the sub-second units #1005 closed,
+			// reached by a spelling that never gets as far as the unit table
+			// (#965 round 3). Nothing in the tree spelled it, so no query
+			// that answered changes its answer.
+			unit = "second"
 		}
 	} else {
 		return nil, fmt.Errorf("invalid INTERVAL literal %q", valStr)

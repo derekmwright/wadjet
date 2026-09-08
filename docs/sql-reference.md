@@ -987,9 +987,14 @@ declared scale.
 to a hand-written `SUM(price*volume)/SUM(volume)` beside it, because that
 expression takes ordinary division typing rather than `AVG`'s:
 
-- over INTEGER columns the written-out quotient is INTEGER division, which is
-  a different function — over the same rows PostgreSQL and wadjet both answer
-  `14` for `SUM(p*v)/SUM(v)` where the bar's `vwap` is `14.5833`;
+- over a **32-bit** integer price the written-out quotient is INTEGER division,
+  which is a different function: `SUM(p*v)` and `SUM(v)` are both `BIGINT`, so
+  over the same rows PostgreSQL and wadjet both answer `14` where the bar's
+  `vwap` is `14.5833`. Over a **64-bit** integer price they are not —
+  `SUM(int8)` is `NUMERIC` on both engines, so the quotient is exact and
+  answers `14.583333` here and `14.5833333333333333` on the server (see below);
+  a `BIGINT` price is the one integer case where the two spellings are both
+  fractional and still differ, and they differ only in scale;
 - over DECIMAL columns the quotient carries division's scale (§DECIMAL
   arithmetic) and `vwap` carries `AVG`'s, so the two agree to the LESSER of
   the two scales and the wider one keeps more digits;
@@ -2067,7 +2072,7 @@ FROM flow_logs
 
 ## Built-in Functions
 
-Wadjet includes 359 built-in scalar functions across several categories.
+Wadjet includes 360 built-in scalar functions across several categories.
 
 ### String Functions
 
@@ -2493,6 +2498,15 @@ GROUP  BY 1 ORDER BY 1;
   `MILLISECOND`, `MICROSECOND`, `QUARTER`, or a typo — is `0A000`. It used to
   be silently read as DAYS, so `INTERVAL '500' MILLISECOND` was a 500-day
   interval to `TIME_BUCKET` and to date arithmetic alike.
+- A literal with **no unit at all** is SECONDS, which is what PostgreSQL means:
+  `INTERVAL '2'` is two seconds and `INTERVAL '90'` is ninety. It used to
+  default to DAYS.
+- The plural keywords `SECONDS`, `MINUTES` and `HOURS` are `42601` in the
+  trailing-keyword position (`INTERVAL '30' SECONDS`) — those three words are
+  lexer keywords, so the parser never reaches its unit table. `DAYS`, `WEEKS`,
+  `MONTHS` and `YEARS` are accepted there, and every plural works inside the
+  combined spelling (`INTERVAL '30 seconds'`). PostgreSQL accepts all of them
+  in both positions; this is a pre-existing gap, not a rule.
 - It is a monotone function of its argument, so a range predicate on the same
   column still prunes row groups beside it — measured, not assumed: over a
   five-row-group fixture the same threshold removes the same two row groups
