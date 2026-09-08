@@ -571,8 +571,15 @@ func spillMxCells() []spillMxCell {
 		// associative: under a budget the raw-row spill re-reads the input in
 		// a different order and the operator folds it in a different shape,
 		// which is precisely the condition the tiebreak has to be a VALUE for.
+		//
+		// The FORCED-DRAIN arm is armed here for the same reason it is armed
+		// on the plain GROUP BY shapes: under a budget the drain lands where
+		// tracker timing puts it, and a merge law that is wrong only when a
+		// clone drains mid-batch is exactly the condition-triggered defect
+		// #790 was (round-2 review, P5). The bar carries an extraState, so a
+		// drain re-folds partial states in an order no unforced run reaches.
 		if spillMxBarPrice(n) {
-			add(spillMxCell{name: "ohlcv_" + n, sql: fmt.Sprintf(
+			add(spillMxCell{name: "ohlcv_" + n, forcedDrainArm: true, sql: fmt.Sprintf(
 				`SELECT g AS gk, (b).open AS o, (b).high AS h, (b).low AS l,
 				        (b).close AS c, (b).volume AS v, (b).vwap AS w
 				 FROM (SELECT g, ohlcv(c_ts, %[1]s, c_i32) AS b FROM %[2]s GROUP BY g) t`, n, tbl)})

@@ -871,27 +871,53 @@ func decodeOhlcvState(s string) (ohlcvState, bool) {
 	return st, true
 }
 
+// absorbEncodedOhlcvState folds one ENCODED partial into a live state, and it
+// is the ONE step every consumer of a shipped state runs: the merge stage's
+// AggOhlcvStateMerge arm, MergeOhlcvStates below, and any future fan-in. A
+// second copy of these six lines is a seam, and a seam in a merge law is
+// ADR-0023 item 8's defect shape — two producers of the same bytes that agree
+// until one of them is changed. (They had already drifted: this arm adopted
+// the source's declared FIELDS on an empty destination and MergeOhlcvStates
+// did not, which was invisible only because MergeOhlcvStates had no
+// production caller — round-2 review, P3.)
+//
+// The destination's DOMAIN is adopted only when it has seen nothing, for the
+// reason ohlcvState.merge states: within one aggregate the carrier is one
+// decision.
+//
+// Reports whether the input parsed. An unparseable input is skipped rather
+// than treated as an empty bar.
+func absorbEncodedOhlcvState(dst *ohlcvState, encoded string) bool {
+	partial, ok := decodeOhlcvState(encoded)
+	if !ok {
+		return false
+	}
+	if dst.n == 0 {
+		dst.dom = partial.dom
+		if len(dst.fields) != len(OhlcvFieldNames) {
+			dst.fields = partial.fields
+		}
+	}
+	dst.merge(&partial)
+	return true
+}
+
 // MergeOhlcvStates folds one encoded partial into another and re-emits the
-// encoded result. It is what a MERGE stage runs, and it is the same law the
-// in-process merge runs — one function, so a fan-in tree of merge stages
-// cannot answer differently from a single one.
+// encoded result — the encoded/encoded face of absorbEncodedOhlcvState, so a
+// fan-in tree of merge stages cannot answer differently from a single one.
 //
 // An unparseable input is skipped rather than treated as an empty bar.
 func MergeOhlcvStates(acc, next string) string {
 	a, aok := decodeOhlcvState(acc)
-	b, bok := decodeOhlcvState(next)
-	switch {
-	case !aok && !bok:
+	if !aok {
+		if _, bok := decodeOhlcvState(next); bok {
+			return next
+		}
 		return ""
-	case !aok:
-		return next
-	case !bok:
+	}
+	if !absorbEncodedOhlcvState(&a, next) {
 		return acc
 	}
-	if a.n == 0 {
-		a.dom = b.dom
-	}
-	a.merge(&b)
 	return a.encode()
 }
 

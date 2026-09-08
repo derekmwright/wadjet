@@ -2,6 +2,7 @@ package scan
 
 import (
 	"math"
+	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/optswitch"
@@ -31,8 +32,39 @@ type StatsPredicate struct {
 	Value  any
 }
 
-// CanPruneRowGroup returns true if the row group can be skipped based on min/max stats.
+// statsPrunedRowGroups counts every row group the static min/max prune has
+// decided to skip, at every consumption site. `ScanStats.PrunedRowGroups` is
+// per-Scanner and reachable only from inside this package, and the planner's
+// own two prune sites do not go through a Scanner at all — so a gate one layer
+// up ("this query still prunes") had no way to measure what it claimed and
+// compared ANSWERS with pruning on and off instead. Those agree whether or not
+// a single row group was skipped, which is the property the kill switch exists
+// to hold, not evidence that the prune ENGAGED (#965 round 2, P1).
+//
+// Read through a snapshot, the shape `DictPruneStatsSnapshot` already uses.
+var statsPrunedRowGroups atomic.Int64
+
+// StatsPrunedRowGroupsSnapshot returns how many row groups the static
+// predicate prune has decided to skip in this process. Take it before and
+// after a query; the DELTA is that query's prune. It never resets, so a caller
+// that forgets the "before" reads a number that means nothing.
+//
+// A row group evaluated by two prune sites in one query counts twice. That
+// makes the number a comparable MEASURE rather than an exact row-group count,
+// which is what a gate comparing two spellings of the same query needs.
+func StatsPrunedRowGroupsSnapshot() int64 { return statsPrunedRowGroups.Load() }
+
+// CanPruneRowGroup returns true if the row group can be skipped based on
+// min/max stats, and counts the decision (see statsPrunedRowGroups).
 func CanPruneRowGroup(pred StatsPredicate, stats pqt.RowGroupStats) bool {
+	if canPruneRowGroup(pred, stats) {
+		statsPrunedRowGroups.Add(1)
+		return true
+	}
+	return false
+}
+
+func canPruneRowGroup(pred StatsPredicate, stats pqt.RowGroupStats) bool {
 	colStats, ok := stats.Columns[pred.Column]
 	if !ok || !colStats.HasStats {
 		return false // no stats available, can't prune

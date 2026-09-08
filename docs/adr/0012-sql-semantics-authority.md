@@ -2076,12 +2076,20 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      happened to cancel. The other five fields of that bar are PostgreSQL's
      exactly. Gated as `zero_volume_has_no_vwap`.
 
-     Gated in `coordinator.TestTheBarIsTheSameOnEveryArm` (seventeen cells on
-     three arms, including a COMPUTED argument — which is where the planner's
+     Gated in `coordinator.TestTheBarIsTheSameOnEveryArm` (25 cells on three
+     arms, including a COMPUTED argument — which is where the planner's
      declaration runs out and where three arm divergences were found),
+     `coordinator.TestTheBarsDeclaredTypeIsTheSameOnEveryArm` (the DECLARATION
+     rather than the values: 11 price × volume cells on five arms, with rows
+     and over an empty input), `coordinator.TestABarBreaksATieByValueWhenThe
+     TieIsSplitAcrossTasks` (the tiebreak with each tied row in its own file),
      `exec.TestTheBars*` (the merge law, the encoding, the tiebreak, the
-     declared types, the state's self-description), `wadjet.TestTimeBucket*`
-     and `pgwire.TestPGWireRendersTheBarAsAPostgresComposite`.
+     declared types, the state's self-description), `wadjet.TestTimeBucket*`,
+     the `ohlcv_*` cells of `wadjet.TestTypeMatrixAnswersTheSameUnderEvery
+     MemoryBudget`, and on the wire
+     `pgwire.TestPGWireRendersTheBarAsAPostgresComposite`,
+     `pgwire.TestPGWireDeclaresABarFieldTheSameWithRowsAndWithout` and
+     `server.TestTheBarDeclaresTheSameThingOnBothWireDoors`.
 
    - **A ROW column declares OID 25 (text), not `record` 2249.** (Added
      2026-09-08, arc A1; the divergence predates it.) `\gdesc` on

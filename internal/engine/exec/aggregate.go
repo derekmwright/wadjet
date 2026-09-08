@@ -4441,18 +4441,9 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			if !ok {
 				continue
 			}
-			partial, ok := decodeOhlcvState(s)
-			if !ok {
-				continue
-			}
-			dst := ext.extraState[i].(*ohlcvState)
-			if dst.n == 0 {
-				dst.dom = partial.dom
-				if len(dst.fields) != len(OhlcvFieldNames) {
-					dst.fields = partial.fields
-				}
-			}
-			dst.merge(&partial)
+			// One step, shared with MergeOhlcvStates, so the merge stage and
+			// the encoded/encoded face cannot drift apart (round-2 P3).
+			absorbEncodedOhlcvState(ext.extraState[i].(*ohlcvState), s)
 
 		case AggMinBy, AggMaxBy:
 			idx1 := h.aggColIdx[i]

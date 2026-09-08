@@ -2,12 +2,15 @@ package wadjet
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/scan"
+	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
@@ -199,35 +202,151 @@ func TestTimeBucketRefusesWhatDateBinRefuses(t *testing.T) {
 }
 
 // time_bucket is a MONOTONE function of its source, so it never stands between
-// a range predicate on the same column and the row-group prune. This asserts
-// the property that makes it usable as a downsampling GROUP BY key at scale:
-// `WHERE ts >= …` beside `GROUP BY time_bucket(…)` prunes exactly as it does
-// without the projection.
+// a range predicate on the same column and the row-group prune. That is the
+// property that makes it usable as a downsampling GROUP BY key at scale, and
+// this MEASURES it: the prune COUNTER, not two answers that agree.
+//
+// The first draft of this gate compared the row counts of a bucketed and an
+// unbucketed query and called it a prune test. It was not one — those counts
+// agree whether or not a single row group was skipped — and its fixture held
+// ONE row group, so nothing could be pruned at all (#965 round 2, P1).
+// `scan.StatsPrunedRowGroupsSnapshot` reports what the static min/max prune
+// decided; the DELTA across one query is that query's prune.
+//
+// Over the type-matrix fixture: 5000 rows in five row groups, c_ts spanning
+// 2023-11-14 22:13 .. 2023-11-18 10:55, with the threshold in the MIDDLE so
+// the predicate crosses group bounds instead of matching everything. Two of
+// the five row groups fall away, bare and bucketed alike.
+//
+// A PRE-EXISTING GAP, measured here and pinned below: the threshold has to be
+// written as an epoch-millisecond literal for the prune to engage at all.
+// `c_ts >= TIMESTAMP '2030-01-01'` prunes NOTHING — not even when it is above
+// every row's maximum — and neither does the quoted spelling or `c_date >=
+// DATE '…'`, while the same instant as a bare integer prunes all five. So a
+// TYPED TEMPORAL LITERAL never reaches the row-group prune. That is not this
+// arc's mechanism and it costs no rows, only reads; it is stated here because
+// it is what made the original claim untestable — a timestamp predicate
+// written the way anyone writes one never reached the prune for time_bucket to
+// stand in front of.
 func TestTimeBucketDoesNotBlockTheRowGroupPrune(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate builds the 5000-row type-matrix fixture")
+	}
 	ctx := context.Background()
-	db := tbOpen(t, ctx)
+	db := tmOpen(t)
+	prev := scan.StatsPrune.Set(true)
+	t.Cleanup(func() { scan.StatsPrune.Set(prev) })
 
-	plain, err := db.Query(ctx, `SELECT COUNT(*) AS n FROM tbt WHERE ts >= TIMESTAMP '2020-02-11 00:00:00'`)
-	if err != nil {
-		t.Fatal(err)
+	// rowsAndPrune runs one query and reports (rows counted, row groups the
+	// static prune decided to skip). The counter is process-wide and never
+	// resets, so it is read as a delta — and this package's tests do not run
+	// in parallel, which is what makes the delta this query's.
+	rowsAndPrune := func(t *testing.T, sql string) (int64, int64) {
+		t.Helper()
+		before := scan.StatsPrunedRowGroupsSnapshot()
+		res, err := db.Query(ctx, sql)
+		if err != nil {
+			t.Fatalf("%v\n  SQL: %s", err, sql)
+		}
+		pruned := scan.StatsPrunedRowGroupsSnapshot() - before
+		var total int64
+		for _, r := range res.Rows {
+			n, _ := tmAsInt64(r["n"])
+			total += n
+		}
+		return total, pruned
 	}
-	bucketed, err := db.Query(ctx, `SELECT time_bucket(INTERVAL '1' DAY, ts) AS b, COUNT(*) AS n
-	                                FROM tbt WHERE ts >= TIMESTAMP '2020-02-11 00:00:00' GROUP BY 1`)
-	if err != nil {
-		t.Fatal(err)
+
+	mid := time.Date(2023, 11, 16, 16, 35, 0, 0, time.UTC).UnixMilli()
+	bare := fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE c_ts >= %d", typematrix.Table, mid)
+	bucketed := fmt.Sprintf(`SELECT SUM(n) AS n FROM (
+	   SELECT time_bucket(INTERVAL '1' DAY, c_ts) AS b, COUNT(*) AS n
+	   FROM %s WHERE c_ts >= %d GROUP BY 1) t`, typematrix.Table, mid)
+
+	bareRows, barePruned := rowsAndPrune(t, bare)
+	bucketRows, bucketPruned := rowsAndPrune(t, bucketed)
+
+	// The fixture has to be able to prove something before the comparison
+	// means anything: a predicate that prunes nothing makes "the bucket did
+	// not block the prune" vacuously true, which is exactly how the first
+	// draft passed.
+	if barePruned == 0 {
+		t.Fatalf("the BARE predicate pruned no row group, so this gate proves nothing.\n"+
+			"  SQL: %s\nEither the threshold no longer splits the fixture's c_ts range "+
+			"or the static min/max prune stopped engaging for TIMESTAMP.", bare)
 	}
-	var total int64
-	for _, r := range bucketed.Rows {
-		n, _ := r["n"].(int64)
-		total += n
+	if bucketPruned != barePruned {
+		t.Errorf("TIME_BUCKET STOOD BETWEEN THE PREDICATE AND THE PRUNE\n"+
+			"  bare predicate pruned %d row groups\n  with the bucket projection: %d\n"+
+			"  SQL: %s\nThe predicate pushed to the scan should still be the bare "+
+			"`c_ts >= …` structuredConjuncts extracted; a projection over the column "+
+			"is not supposed to reach it.", barePruned, bucketPruned, bucketed)
 	}
-	want, _ := plain.Rows[0]["n"].(int64)
-	if total != want {
-		t.Errorf("bucketed rows = %d, plain predicate rows = %d — the predicate and the "+
-			"bucket projection disagree about which rows survive", total, want)
+	if bareRows != bucketRows || bareRows == 0 {
+		t.Errorf("the two spellings kept different rows: bare %d, bucketed %d",
+			bareRows, bucketRows)
 	}
-	if want == 0 {
-		t.Fatal("fixture: the predicate matched nothing, so this proves nothing")
+
+	// The same property with the predicate on ANOTHER column, so the bucket is
+	// a pure projection rather than a projection over the filtered column.
+	idBare := fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE id >= 2500", typematrix.Table)
+	idBucketed := fmt.Sprintf(`SELECT SUM(n) AS n FROM (
+	   SELECT time_bucket(INTERVAL '1' DAY, c_ts) AS b, COUNT(*) AS n
+	   FROM %s WHERE id >= 2500 GROUP BY 1) t`, typematrix.Table)
+	idBareRows, idBarePruned := rowsAndPrune(t, idBare)
+	idBucketRows, idBucketPruned := rowsAndPrune(t, idBucketed)
+	if idBarePruned == 0 {
+		t.Fatalf("the id predicate pruned nothing; the fixture changed under this gate")
+	}
+	if idBucketPruned != idBarePruned || idBareRows != idBucketRows {
+		t.Errorf("a bucket projection changed a prune on ANOTHER column: "+
+			"pruned %d vs %d, rows %d vs %d",
+			idBarePruned, idBucketPruned, idBareRows, idBucketRows)
+	}
+
+	// The CONTROL. A query with no predicate must prune nothing — otherwise
+	// the counter is measuring something else and every number above is noise.
+	if _, pruned := rowsAndPrune(t, fmt.Sprintf(
+		"SELECT COUNT(*) AS n FROM %s", typematrix.Table)); pruned != 0 {
+		t.Errorf("an unfiltered scan pruned %d row groups — the counter is not "+
+			"measuring the static predicate prune", pruned)
+	}
+
+	// THE PINS. Each of these prunes NOTHING today; each is a read cost and
+	// never a wrong row, and each has to be moved deliberately.
+	for _, pin := range []struct {
+		name, sql, why string
+	}{
+		// A TYPED TEMPORAL LITERAL does not reach the prune, even above every
+		// bound. Measured: the same instant as a bare integer prunes all five
+		// row groups.
+		{"typed_timestamp_literal", fmt.Sprintf(
+			"SELECT COUNT(*) AS n FROM %s WHERE c_ts >= TIMESTAMP '2030-01-01 00:00:00'",
+			typematrix.Table),
+			"a TIMESTAMP literal above every row still reads every row group"},
+		{"quoted_timestamp_literal", fmt.Sprintf(
+			"SELECT COUNT(*) AS n FROM %s WHERE c_ts >= '2030-01-01 00:00:00'",
+			typematrix.Table), "the quoted spelling, same gap"},
+		{"typed_date_literal", fmt.Sprintf(
+			"SELECT COUNT(*) AS n FROM %s WHERE c_date >= DATE '2030-01-01'",
+			typematrix.Table), "DATE has the same gap"},
+		// The bucket used as the PREDICATE's own column. structuredConjuncts
+		// requires a bare column reference, so nothing is pushed. A monotone-
+		// function rewrite taught to that layer would start pruning here — and
+		// `TimeBucketInThePredicate` in TestTypeMatrixPruningNeverChanges
+		// TheAnswer is the gate that would have to prove the answer did not
+		// change with it.
+		{"bucket_in_the_predicate", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %s
+			 WHERE time_bucket(INTERVAL '1' DAY, c_ts) >= TIMESTAMP '2023-11-16 00:00:00'`,
+			typematrix.Table), "a monotone rewrite would push this down"},
+	} {
+		if _, pruned := rowsAndPrune(t, pin.sql); pruned != 0 {
+			t.Errorf("%s now prunes %d row groups (%s).\nThat is an improvement, not a "+
+				"failure — move this pin, and check the matching cell in "+
+				"TestTypeMatrixPruningNeverChangesTheAnswer still agrees across both "+
+				"prune settings.", pin.name, pruned, pin.why)
+		}
 	}
 }
 

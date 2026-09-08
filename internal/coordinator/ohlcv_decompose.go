@@ -5,7 +5,6 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -63,27 +62,6 @@ func (c *Coordinator) decomposeOhlcvFor(specs []distributed.AggSpec) []distribut
 	out := decomposeOhlcv(specs)
 	if anyOhlcvFunc(func(i int) string { return specs[i].Func }, len(specs)) {
 		c.ohlcvStateRoutes.Add(1)
-	}
-	return out
-}
-
-// decomposeOhlcvPhysical is the physical.AggSpec variant, for stage specs the
-// dispatcher rewrites before converting to wire format.
-func decomposeOhlcvPhysical(specs []physical.AggSpec) []physical.AggSpec {
-	if !anyOhlcvFunc(func(i int) string { return specs[i].Func }, len(specs)) {
-		return specs
-	}
-	out := make([]physical.AggSpec, 0, len(specs))
-	for _, a := range specs {
-		if !isOhlcvFunc(a.Func) {
-			out = append(out, a)
-			continue
-		}
-		s := a
-		s.Func = exec.OhlcvStateFunc
-		s.OutputCol = ohlcvStateColumn(a.OutputCol)
-		s.OutputType = parquet.TypeString
-		out = append(out, s)
 	}
 	return out
 }

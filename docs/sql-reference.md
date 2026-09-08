@@ -2489,7 +2489,13 @@ GROUP  BY 1 ORDER BY 1;
   parser's single `N unit` pair, so `INTERVAL '1 day 6 hours'` is not
   spellable; write `INTERVAL '30' HOUR`.
 - It is a monotone function of its argument, so a range predicate on the same
-  column still prunes row groups beside it.
+  column still prunes row groups beside it — measured, not assumed: over a
+  five-row-group fixture the same threshold removes the same two row groups
+  with and without the bucket projection. Note the separate, pre-existing
+  limit it does not change: a range predicate on a `TIMESTAMP` or `DATE`
+  column reaches the row-group prune only when the threshold is an
+  epoch-millisecond (or epoch-day) literal. `WHERE ts >= TIMESTAMP '…'` is
+  evaluated per row today, which costs reads and never rows.
 
 A function that RETURNS an instant renders it the one way this engine renders
 a timestamp — `DATE_TRUNC('day', ts)` is `2023-11-14 00:00:00`, the same text
