@@ -604,6 +604,18 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 		sort.Strings(columns)
 	}
+	// AN EMPTY COLUMN LIST IS NEVER AN ANSWER (sqlerr.EmptyResultColumns).
+	//
+	// This door runs its OWN pipeline rather than calling `wadjet.DB.Query` or
+	// `Coordinator.ExecuteSQL`, so it asks the shared decision itself. A
+	// result with no columns and no error is the engine failing to describe
+	// its own output, and at the client it cannot be told from a query that
+	// legitimately found nothing — which is how #1008 and #1010 reached one.
+	if len(columns) == 0 {
+		err := sqlerr.EmptyResultColumns("query")
+		writeSQLError(w, http.StatusInternalServerError, err.Error(), err)
+		return
+	}
 
 	// Extract actual rows scanned from the pipeline source
 	var rowsScanned int64
