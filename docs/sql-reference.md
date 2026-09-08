@@ -1167,6 +1167,27 @@ A term that matches no single select item keeps resolving by name, and a term
 whose bare name matches TWO items — `ORDER BY id` above — binds to the first
 of them. PostgreSQL refuses that one as ambiguous; wadjet answers it.
 
+A `SELECT *` has no select list to take a position from, and there a
+**QUALIFIED** term names the column of the relation its qualifier names:
+
+```sql
+-- A total order across both references of one CTE: the third key is `b`'s
+-- amount inside each of `a`'s peer groups
+WITH q AS (SELECT order_id, amount FROM items)
+SELECT * FROM q a JOIN q b ON b.order_id = a.order_id
+ORDER BY a.order_id, a.amount, b.amount
+
+-- Two relations sharing ONE column name: `o.id` is the orders id, not the
+-- items id the join publishes first
+SELECT * FROM orders o JOIN items i ON i.order_id = o.id ORDER BY o.id DESC, i.amount
+```
+
+Before v0.18.65 the single-process and spilled paths dropped the qualifier
+from every sort key, so the two spellings became one key and both bound the
+first column of that bare name: the trailing key was never applied and the
+rows came back in the join's emission order. Both distributed paths were
+already correct.
+
 ### ORDER BY an aggregate the SELECT list does not carry
 
 ```sql

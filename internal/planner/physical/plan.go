@@ -13782,7 +13782,7 @@ func (p *Planner) buildSort(ctx context.Context, node *logical.Node) (exec.Sourc
 			order = exec.Descending
 		}
 		keys = append(keys, exec.SortKey{
-			Column:    cleanExpr(ob.Column),
+			Column:    sortKeyLocalColumn(ob),
 			Order:     order,
 			NullsLast: resolveNullsLast(ob),
 			// The select-list POSITION: the Project below a Sort narrows the
@@ -13886,7 +13886,7 @@ func (p *Planner) buildTopN(ctx context.Context, sortNode *logical.Node, n int) 
 			order = exec.Descending
 		}
 		keys = append(keys, exec.SortKey{
-			Column:    cleanExpr(ob.Column),
+			Column:    sortKeyLocalColumn(ob),
 			Order:     order,
 			NullsLast: resolveNullsLast(ob),
 			SlotPos:   sortKeyLocalSlotPos(ob, sortNode),

@@ -369,25 +369,24 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 			want: `id,customer,total,order_id,product | 1,Alice,150,1,Gadget | ` +
 				`1,Alice,150,1,Widget | 2,Bob,200,2,Doohickey`},
 		// EXECUTED and PostgreSQL's exact order at bb8635a4, and the local
-		// pipeline gets this ORDER BY wrong — so routing it turned a right
-		// answer into a wrong one (round-1 B1). The single arms' order is the
-		// pre-existing local defect, pinned here rather than described.
+		// pipeline got this ORDER BY wrong — so routing it turned a right
+		// answer into a wrong one (round-1 B1). K3 PINNED the single arms'
+		// order in `wantDAG` rather than describing it; #989 is that pin's
+		// mechanism and arc L1 removed it, so all four arms now answer
+		// PostgreSQL's order and the pin is DELETED as the fix's proof.
 		{name: "boundary/a-twice-referenced-CTE-executes",
 			sql: `WITH q AS (SELECT order_id, amount FROM lat_item) SELECT * FROM q a ` +
 				`JOIN q b ON b.order_id = a.order_id ORDER BY a.order_id, a.amount, b.amount`,
-			want: `order_id,amount,b.order_id,b.amount | 1,50,1,100 | 1,50,1,50 | ` +
-				`1,100,1,100 | 1,100,1,50 | 2,75,2,125 | 2,75,2,75 | 2,125,2,125 | 2,125,2,75`,
-			wantDAG: `order_id,amount,b.order_id,b.amount | 1,50,1,50 | 1,50,1,100 | ` +
+			want: `order_id,amount,b.order_id,b.amount | 1,50,1,50 | 1,50,1,100 | ` +
 				`1,100,1,50 | 1,100,1,100 | 2,75,2,75 | 2,75,2,125 | 2,125,2,75 | 2,125,2,125`},
 		// LOUD on both DAG arms at bb8635a4. A CTE body is planned ONCE, so
 		// the second reference's Project nodes never reach the publish hook —
-		// the verdict is carried to them where the subtree is deduped.
+		// the verdict is carried to them where the subtree is deduped. Its
+		// #989 pin is deleted here for the same reason as the cell above.
 		{name: "boundary/a-twice-referenced-CTE-with-a-rename-executes",
 			sql: `WITH q AS (SELECT order_id AS k, amount FROM lat_item) SELECT * FROM q a ` +
 				`JOIN q b ON b.k = a.k ORDER BY a.k, a.amount, b.amount`,
-			want: `k,amount,b.k,b.amount | 1,50,1,100 | 1,50,1,50 | 1,100,1,100 | ` +
-				`1,100,1,50 | 2,75,2,125 | 2,75,2,75 | 2,125,2,125 | 2,125,2,75`,
-			wantDAG: `k,amount,b.k,b.amount | 1,50,1,50 | 1,50,1,100 | 1,100,1,50 | ` +
+			want: `k,amount,b.k,b.amount | 1,50,1,50 | 1,50,1,100 | 1,100,1,50 | ` +
 				`1,100,1,100 | 2,75,2,75 | 2,75,2,125 | 2,125,2,75 | 2,125,2,125`},
 		// SQL's `unknown` DECIDES: PostgreSQL declares a bare NULL select item
 		// `text`. Leaving it undecided routed a query that executed correctly

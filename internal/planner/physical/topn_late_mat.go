@@ -174,7 +174,7 @@ func (p *Planner) tryBuildTopNLateMat(ctx context.Context, sortNode *logical.Nod
 			order = exec.Descending
 		}
 		keys = append(keys, exec.SortKey{
-			Column:    cleanExpr(ob.Column),
+			Column:    sortKeyLocalColumn(ob),
 			Order:     order,
 			NullsLast: resolveNullsLast(ob),
 		})
