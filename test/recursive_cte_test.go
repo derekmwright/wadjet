@@ -2,6 +2,7 @@ package test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
@@ -203,12 +204,31 @@ func TestRecursiveCTE_EmptyAnchor(t *testing.T) {
 		)
 		SELECT * FROM org
 	`
+	// A star over a RECURSIVE CTE whose anchor is empty declares no columns:
+	// `starOnlySourceScan` describes a scan, a grouping and the pass-through
+	// nodes, and the materialized recursive relation is none of those. The
+	// engine used to hand that back as a result with zero columns AND zero
+	// rows, which is what this test asserted — and which is exactly the
+	// signature two silent wrong answers wore (#1008, #1010). An empty column
+	// list is never an answer, so the door refuses it now (XX000).
+	//
+	// PostgreSQL 17 ANSWERS this statement, with `id, name, parent_id` and no
+	// rows, so the refusal is a wadjet-side bound recorded in ADR-0012's
+	// divergence list; DECLARING the recursive relation's columns is the
+	// follow-up that closes it. What this test holds until then is that the
+	// engine says so out loud rather than returning a table with no shape.
 	r, err := db.Query(ctx, sql)
-	if err != nil {
-		t.Fatalf("query failed: %v", err)
+	if err == nil {
+		if len(r.Columns) == 0 {
+			t.Fatalf("a result with no columns was returned instead of a refusal: rows=%d", len(r.Rows))
+		}
+		if len(r.Rows) != 0 {
+			t.Errorf("expected 0 rows for empty anchor, got %d", len(r.Rows))
+		}
+		return
 	}
-	if len(r.Rows) != 0 {
-		t.Errorf("expected 0 rows for empty anchor, got %d", len(r.Rows))
+	if !strings.Contains(err.Error(), "the result has no columns at all") {
+		t.Fatalf("query failed for another reason: %v", err)
 	}
 }
 

@@ -59,6 +59,33 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
    to begin with, and are recorded here so a future gate does not mistake
    them for undecided.)
 
+   - **A result with NO COLUMNS AT ALL is refused, where PostgreSQL answers
+     with a header and zero rows.** (Added 2026-09-08, #1008 / #1010.)
+     PostgreSQL sends a RowDescription with fields for every statement that
+     produces a result set, whether or not it returns rows, and clients depend
+     on it. Wadjet derives a `SELECT *`'s columns from the DATA and falls back
+     to a plan-time declaration (`physical.declaredOutputSchema`, #416, #846,
+     #978) — and three shapes have no declaration today: a star over a BUSHY
+     join (`starJoinDeclaredOutputSchema` declines where a side contains a
+     join of its own), a star over a query carrying a decorrelated LATERAL's
+     minted slot, and a star over a RECURSIVE CTE. With no rows to read a
+     schema off, those returned a result with zero columns and no error.
+
+     That is not a smaller answer, it is the engine failing to describe its
+     own output, and at the client it cannot be told from a query that
+     legitimately found nothing — which is exactly how two silent wrong
+     answers reached a client (#1008, #1010) without any value comparison
+     noticing, because two empty column lists compare equal. The two places a
+     result set is assembled now refuse it (`sqlerr.EmptyResultColumns`,
+     XX000: nothing about the STATEMENT is wrong, so the class cannot blame
+     the client, and this is not a feature declined but the engine failing to
+     describe itself).
+
+     The divergence is in the REFUSING direction and it replaces an answer
+     that was not PostgreSQL's either. DECLARING those three shapes' columns
+     is what closes it, and it is the recorded follow-up; until then the
+     engine says so out loud rather than handing back a table with no shape.
+
    - **Metadata visibility follows the effective table-access decision, where
      PostgreSQL shows it to anyone.** (Added 2026-09-06, ADR-0034.) PostgreSQL
      lets any role that can connect read `pg_catalog` and `information_schema`

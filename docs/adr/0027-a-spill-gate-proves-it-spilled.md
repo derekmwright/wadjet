@@ -86,6 +86,27 @@ Mechanisms, each with its instrumented evidence in the commit body:
    BOTH sides of a comparison cancels the defect — #790 was nearly missed
    that way.
 
+   **The JOIN has one too, since 2026-09-08 (#1010).**
+   `exec.ForceJoinPartitionEvictEvery(N)` evicts one in-memory build
+   partition on every Nth arriving batch of a partition-on-arrival build,
+   through the real `spillOneInMemoryPartition` — the same files, the same
+   probe routing, the same flush. It was the missing member of this family
+   and the reason is the family's own: a grace join evicts when
+   `ShouldSpillFor(SpillCheap)` reads the WHOLE query's memory, so on a small
+   fixture whether a join spills at all is decided by what the scan happens
+   to be holding, and the same order evicted a partition in one run of `go
+   test` and not in the next on one machine with no code change between them.
+   A defect that only EXISTS after an eviction (the nested pipeline that
+   never drained the evicted partitions) had nothing to make its own trigger
+   fire. `exec.ForcedJoinEvictions` is asserted beside
+   `exec.JoinPartitionsEvicted`, so a knob that silently fails to engage
+   cannot turn the gate it arms into a no-op.
+
+   Which knob is armed is a claim about WHERE the defect is.
+   `ForceSmallSpillRuns` makes #1010's shape answer CORRECTLY at base, so a
+   gate that armed it would have proved nothing; the eviction knob forces the
+   CONDITION the defect needs and never the path the defect is in.
+
 7. **A TOLERANCE in a spill gate ratchets, exactly like a pin.** `knownBug`
    and `knownError` already fail their cell when the pinned state stops
    reproducing — deleting the pin is the fix's proof. `budgetMayRefuse`, the
@@ -229,6 +250,25 @@ Mechanisms, each with its instrumented evidence in the commit body:
    gates cannot make, and which that E5 note recorded as owed and blocked.
    `exec.Window` has no `CloneSink` today, so it has no clone arm to be wrong
    about; the day it gets one, decision 1 covers it before it is written.
+
+10. **A spilled operator's rows come back through ITS OWN flush, wherever
+   that operator is running (2026-09-08, #1010).** A grace hash join that
+   evicts a build partition holds those rows on disk; the probe routes the
+   matching probe rows to disk with them and emits nothing for them.
+   `exec.Pipeline.flushSpilledOps` drains the operators of the TOP pipeline
+   — and `physical.pipelineSource` is how a NESTED chain is driven (a join's
+   build side, a set-operation arm, a lateral's inner side). It drove Init,
+   Next and the bounded-output resumption and never the flush, so a spilled
+   join under one of those answered with its evicted partitions' rows simply
+   missing, silently, and a star over more than one join then declared no
+   columns at all because no batch ever arrived.
+
+   The rule is not "the top pipeline flushes": it is that any driver of an
+   operator chain owes that chain its flush, through the one
+   `exec.FlushableOperator` interface and in the same ascending order.
+   `joinFlushSource` already carried it for a RIGHT/FULL join's own probe
+   (#550) and its comment stated the general case; `pipelineSource.nextFlushed`
+   is that sentence applied to every nested chain.
 
 ## Alternatives rejected
 

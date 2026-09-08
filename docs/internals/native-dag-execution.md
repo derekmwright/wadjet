@@ -999,6 +999,20 @@ because the probe sits in its `innerOps` and `exec.Pipeline.flushSpilledOps`
 never sees it. `exec.JoinPartitionsEvicted` counts evictions so a gate can
 prove it reached this path instead of skipping.
 
+**Every driver of an operator chain owes that chain its flush** (#1010). The
+sentence above is general, not a property of RIGHT/FULL joins:
+`exec.Pipeline.flushSpilledOps` drains the operators of the TOP pipeline, and
+`physical.pipelineSource` — which drives a join's BUILD side, a set-operation
+arm and a lateral's inner side — drove `Init`, `Next` and the bounded-output
+resumption and never the flush. A spilled join under one of those answered
+with its evicted partitions' rows missing, silently, and a star over more than
+one join then declared no columns at all because no batch ever arrived.
+`pipelineSource.nextFlushed` drains through the same `exec.FlushableOperator`
+interface and in the same ascending order.
+`exec.ForceJoinPartitionEvictEvery` makes the eviction deterministic for a
+gate (ADR-0027 decision 6); at a small fixture's budget whether a join spills
+at all is otherwise decided by what the scan happens to be holding.
+
 **Why RIGHT/FULL never broadcast.** Any layout that REPLICATES the build side
 across tasks is unsound for them: each task holds the whole build and sees one
 slice of the probe, so each emits the same unmatched rows (25 → 75 on three

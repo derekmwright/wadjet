@@ -2267,6 +2267,76 @@ The case the rescan exists for (#785 — an item spelled through a derived table
 alias, over a stream carrying the bare name twice) has ZERO exact matches and is
 unchanged.
 
+### 8e. A DEPENDENT join is not reorderable (#1008)
+
+A decorrelated LATERAL is a join the PLANNER manufactured: its inner side is a
+plan OF the outer side's rows, and the node carries the rules that make it
+correct — the `__key_N` slot it minted and drops (§3c), the pad marker, the
+empty-input defaults. `reorderJoins` treated it as an ordinary inner join, and
+reordering it is not a cost decision:
+
+* `flattenJoinChain` walked THROUGH it, so two LATERALs over one outer
+  flattened to THREE relations and `costBasedJoinReorder` rebuilt the chain
+  with `NewJoin` — which carries none of those rules. `SELECT *` over two
+  grouped laterals published `__key_0` and `__key_1` in the client's relation,
+  and the re-hung conditions keyed a STRING against the integer correlation
+  column: `cols=[] rows=0` on the single-process arms where PostgreSQL 17
+  answers eight rows, and the loud `join key "s.__key_0" is STRING on the
+  probe side` (#615) on both DAG arms.
+* The two-way swap exchanged the SIDES, and for a manufactured join the side
+  order IS the answer — PostgreSQL publishes the outer relation's columns and
+  then the lateral's. One grouped lateral came back as `p, id, customer,
+  total`, and the same swap is what made
+  `pgwire.TestArcJ1AHiddenSlotIsNotInTheRowDescription`'s
+  `star_over_a_non_aggregated_lateral` cell record a divergence from
+  PostgreSQL that was never the join operator's doing. That pin is spent.
+
+**The rule.** A join the planner manufactured is one relation to the cost
+model: `isDependentJoin` reads the lowering's own marks
+(`Node.LateralSubtree` on the side it built, plus the rules it hangs on the
+join), `flattenJoinChain` stops there, and the two-way swap declines. An
+ordinary inner join is reordered exactly as before — which is §6a's "not
+settled" paragraph, unchanged: an ORDINARY join's sides are still ordered by
+estimated rows, so `SELECT *` over one still publishes the cost model's order
+rather than the query's.
+
+### 8f. An ORDINAL sort key binds the slot the producer PUBLISHED (#1003)
+
+An output slot's identity is its POSITION (#557), so `ORDER BY 1, 2` addresses
+slots, not names — and two output columns may legally carry one name.
+`sortKeySlotPosStage` dropped the position for any sort whose subtree contains
+a join, because on the DAG a Project emits no stage and a select-list position
+need not address the producing stage's stream. The key then resolved by NAME,
+and `ColumnIndexFallback` answers a duplicate with the FIRST match:
+
+    SELECT DISTINCT a.order_id AS amount, b.amount FROM lat_item a
+    JOIN lat_item b ON b.order_id = a.order_id ORDER BY 1, 2 DESC
+
+publishes `amount` twice, both keys bound column one, and the two DAG arms
+returned `1,50 | 1,100 | …` where PostgreSQL 17 and both single-process arms
+return `1,100 | 1,50 | …`. The rows are right and the SEQUENCE is not, which
+no unordered comparison can see and which ADR-0013 lists no nondeterminism
+class for.
+
+**The rule is §8's own, one consumer over: what the producer PUBLISHES decides,
+and it is MEASURED.** The position is used when the stage producing the sort's
+input publishes the select list as the ordered prefix of its own output —
+which the `final_aggregate` stage under that query does, materializing
+`[a.order_id→amount, b.amount→amount, a.order_id, b.amount]`. The whole
+visible list is compared, source expression and name (a projection has more
+than one legitimate name — §2's resolution spelling and the `PublishedName`
+the client is told — and either matches), so a producer that publishes the
+same names in another order, or narrows the list, does not qualify. Where the
+projection is not materialized — `SELECT clt1.c2, clt2.c1 FROM clt1, clt2
+ORDER BY 2`, whose join stage carries no `ProjectExprs` — the key resolves by
+name exactly as before, which is the bound this replaces the guess with.
+
+A WRITTEN qualified term beside a duplicate output name is NOT closed by this:
+`resolveSortKeyColumn` rewrites it onto the select-list alias, which the
+producer publishes twice, so `ORDER BY 1, b.amount DESC` still binds the first
+column on both DAG arms. It is pinned in `TestN1AnOrdinalSortKeyBindsItsSlot`
+with its mechanism, and it belongs to the same arc as §6a's remaining half.
+
 ### Gates
 
 | gate | what it holds |
@@ -2281,6 +2351,10 @@ unchanged.
 | `pgwire.TestArcJ1AHiddenSlotIsNotInTheRowDescription` | 8c on the wire door |
 | `coordinator.TestM1AGatherRenameBindsWhatItsSourceNames` | 8d — seven shapes, two controls |
 | `coordinator.TestArcE3` (#785 cells) | 8d's boundary: the rescan's own case is unchanged |
+| `coordinator.TestN1AGroupedLateralAnswersItsRows` | 8e's VALUES — a lateral whose inner GROUPS, seven shapes incl. LEFT, nested and different tables |
+| `coordinator.TestN1ATwoGroupedLateralsPublishTheirOwnColumns` | 8e's COLUMN LIST and its order, with three controls (an ordinary two- and three-way join, #988's ungrouped laterals) |
+| `coordinator.TestN1AnOrdinalSortKeyBindsItsSlot` | 8f — eight cells, both keys DESC in turn, the ordinals swapped, 5000 rows, two controls |
+| `coordinator.TestN1AResultWithNoColumnsIsRefused` | an empty column list is never an answer (ADR-0012's divergence list) |
 
 ### Not settled
 

@@ -767,6 +767,9 @@ JOIN LATERAL (
 ) s ON true
 ```
 
+`SELECT *` over a lateral join publishes the OUTER relation's columns first
+and the lateral's after them, which is PostgreSQL's order.
+
 An UNGROUPED aggregate over an empty input still yields one row, so an outer
 row the lateral matches nothing for **survives even an inner join**, with
 `COUNT` reading 0 and every other aggregate NULL — the order with no line
@@ -1445,13 +1448,41 @@ two columns called `abs`, and an explicit `AS u` twice is two called `u`. Both
 keep their own values, on every execution path and over a set operation.
 
 A slot's identity is its POSITION, so `ORDER BY 2` sorts by the second output
-column whatever it is called. Sorting by an ambiguous NAME (`ORDER BY u` where
-two columns are called `u`) is answered here — it binds the first — where
-PostgreSQL refuses it with SQLSTATE `42702`.
+column whatever it is called, on every execution path — including the
+distributed one, where the ordinal used to fall back to the ambiguous name and
+sort by the first column of it. Sorting by an ambiguous NAME (`ORDER BY u`
+where two columns are called `u`) is answered here — it binds the first —
+where PostgreSQL refuses it with SQLSTATE `42702`. A qualified reference beside
+a duplicate output name (`ORDER BY 1, b.amount` where the SELECT list renames
+`b.amount`) still binds the first column of that name on the distributed path;
+write the ordinal for both keys.
 
 Reading a result by column name cannot represent both columns; the embedded
 API exposes the positional form (`QueryResult.Cells`) for exactly this case,
 and the wire protocol sends every column regardless.
+
+## Every result declares its columns
+
+A statement that produces a result set produces COLUMNS, whether or not it
+produces rows: `SELECT a, b FROM t WHERE false` comes back with `a` and `b`
+and no rows, and so does `SELECT *` over a table, over a join, over a derived
+table, over a non-recursive CTE, over a grouping and over a set operation.
+
+Three shapes have no such declaration yet, and a query of that shape that
+returns NO ROWS is REFUSED (`XX000`) rather than answered with an empty column
+list:
+
+* `SELECT *` over a join whose own sides contain joins (three relations or
+  more);
+* `SELECT *` over a query containing a decorrelated `LATERAL`;
+* `SELECT *` over a RECURSIVE CTE.
+
+PostgreSQL answers all three with a header and zero rows. The refusal is a
+wadjet-side bound and it replaces something worse: a result carrying no
+columns at all, which psql prints as nothing, which pgJDBC's `executeQuery`
+has no metadata for, and which a client cannot tell from a query that
+legitimately found nothing. Naming the columns in the SELECT list answers in
+every one of the three cases.
 
 ## Set operations
 
