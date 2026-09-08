@@ -3011,15 +3011,32 @@ func condQualifiers(join plansql.JoinInfo) map[string]bool {
 // batch.RecordBatch.ColumnIndex returns the FIRST match, so a name two columns
 // answer to cannot say which one a predicate meant (#785).
 //
-// The keys are compared under their PUBLISHED names, which is what the
-// aggregate emits: `cleanExpr` of the GROUP BY term, the same string
-// NewAggregate is given (ADR-0026 §2b).
+// The keys are compared the way the RESOLVER reads them, which is the question
+// this predicate is really asking: `exec.columnIndexFallback` tries the exact
+// spelling and then the BARE part of a qualified one, so a HAVING naming `a`
+// finds a key the aggregate emits as `x.a` just as surely as one it emits as
+// `a`. Comparing `cleanExpr(gb)` alone — whitespace only, the qualifier intact
+// — answered false for every QUALIFIED key, so `SELECT x.a AS b, SUM(x.b) AS a
+// FROM decpair x GROUP BY x.a HAVING SUM(x.b) > 0` reused the SELECT list's
+// aggregate, the rewritten predicate named `a`, and the filter compared the
+// GROUP KEY (#968; the same defect ADR-0026 §3a records for the unqualified
+// spelling).
+//
+// Answering true where the operator would in fact have kept the qualifier
+// costs one extra aggregate computation under a `__having_N` slot and can
+// never be a wrong answer — which is why the bare test is the whole rule here
+// and not an approximation of `exec.PublishedGroupKeyNames`.
 func aggOutputNameIsShared(out string, groupBy []string, aggs []AggExpr) bool {
 	if out == "" {
 		return false
 	}
 	for _, gb := range groupBy {
-		if strings.EqualFold(cleanExpr(gb), out) {
+		key := cleanExpr(gb)
+		if strings.EqualFold(key, out) {
+			return true
+		}
+		if _, bare, ok := plansql.SplitIdentRef(key); ok && bare != "" &&
+			strings.EqualFold(bare, out) {
 			return true
 		}
 	}
