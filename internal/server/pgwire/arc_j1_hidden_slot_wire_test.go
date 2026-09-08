@@ -115,33 +115,46 @@ func TestArcJ1AHiddenSlotIsNotInTheRowDescription(t *testing.T) {
 		// differs — a divergence this arc does NOT close is stated, never
 		// left to be discovered.
 		pgSays string
+		// wantErrLike marks a statement this engine REFUSES rather than
+		// answering, with the substring the refusal must carry. PostgreSQL
+		// answers it; the refusal is the recorded divergence (ADR-0012) and
+		// the alternative was publishing a column set that is not the one the
+		// query asked for.
+		wantErrLike string
 	}{
 		{"star", `SELECT * ` + aggLateral,
-			[]string{"id", "customer", "total", "mx"}, ""},
+			[]string{"id", "customer", "total", "mx"}, "", ""},
 		{"star_over_an_aliased_key", `SELECT * FROM j1ord o JOIN LATERAL (` +
 			`SELECT MAX(amount) AS order_id FROM j1item WHERE order_id = o.id) s ON true`,
-			[]string{"id", "customer", "total", "order_id"}, ""},
+			[]string{"id", "customer", "total", "order_id"}, "", ""},
 		{"star_over_a_non_aggregated_lateral", `SELECT * FROM j1ord o JOIN LATERAL (` +
 			`SELECT amount FROM j1item WHERE order_id = o.id) li ON true`,
 			[]string{"amount", "id", "customer", "total"},
 			"the same four columns as (id, customer, total, amount) — PostgreSQL puts " +
-				"the LATERAL's columns last, and a join here emits the probe side first"},
+				"the LATERAL's columns last, and a join here emits the probe side first", ""},
+		// A QUALIFIED star names ONE relation on the wire too (arc K1, #979):
+		// it published the whole join for as long as a star-only SELECT list
+		// built no projection for the expansion to rewrite.
 		{"outer_qualified_star", `SELECT o.* ` + aggLateral,
-			[]string{"id", "customer", "total", "mx"},
-			"(id, customer, total) — a QUALIFIED star is not narrowed to its own " +
-				"relation here, which is pre-existing and not this arc's (see REPORT)"},
-		{"inner_qualified_star", `SELECT s.* ` + aggLateral,
-			[]string{"id", "customer", "total", "mx"},
-			"(mx) — same pre-existing qualified-star gap"},
+			[]string{"id", "customer", "total"}, "", ""},
+		// The LATERAL's OWN star is still refused, which is arc J1's decision
+		// and ADR-0012's record: the lateral's output is a projection the
+		// expansion does not enumerate, and its scan carries the correlation
+		// slot the join is about to drop. It published the whole join before,
+		// which is a column set the query did not ask for; a refusal on the
+		// wire is the honest form of not knowing.
+		{"inner_qualified_star", `SELECT s.* ` + aggLateral, nil,
+			"(mx) — the lateral's own star is refused here (ADR-0012)",
+			`column "s.*" does not exist in the input schema`},
 		{"derived_star", `SELECT * FROM (SELECT * ` + aggLateral + `) x`,
-			[]string{"id", "customer", "total", "mx"}, ""},
+			[]string{"id", "customer", "total", "mx"}, "", ""},
 		{"cte_star", `WITH c AS (SELECT * ` + aggLateral + `) SELECT * FROM c`,
-			[]string{"id", "customer", "total", "mx"}, ""},
+			[]string{"id", "customer", "total", "mx"}, "", ""},
 		{"ctl_a_plain_join_star_is_untouched",
 			`SELECT * FROM j1ord o JOIN j1item li ON li.order_id = o.id`,
 			[]string{"id", "order_id", "product", "amount", "o.id", "customer", "total"},
 			"(id, customer, total, id, order_id, product, amount) — the join's own " +
-				"duplicate-name qualification, pre-existing and unrelated"},
+				"duplicate-name qualification, pre-existing and unrelated", ""},
 		// A STORED column in the reserved namespace is a USER's column and
 		// reaches the wire: the drop is by identity — the slot this join
 		// minted, on the side it minted it for — never by a name a table
@@ -150,32 +163,42 @@ func TestArcJ1AHiddenSlotIsNotInTheRowDescription(t *testing.T) {
 		{"a_stored_reserved_name_is_on_the_wire",
 			`SELECT * FROM j1stored o JOIN LATERAL (SELECT MAX(amount) AS mx ` +
 				`FROM j1item WHERE order_id = o.id) s ON true`,
-			[]string{"id", "__key_0", "mx"}, ""},
+			[]string{"id", "__key_0", "mx"}, "", ""},
 		{"a_stored_reserved_name_by_name",
 			`SELECT o.__key_0 AS mine FROM j1stored o JOIN LATERAL (` +
 				`SELECT MAX(amount) AS mx FROM j1item WHERE order_id = o.id) s ON true`,
-			[]string{"mine"}, ""},
+			[]string{"mine"}, "", ""},
 		{"ctl_the_stored_table_with_no_lateral", `SELECT * FROM j1stored`,
-			[]string{"id", "__key_0"}, ""},
+			[]string{"id", "__key_0"}, "", ""},
 		// The shape that defeated the key test: the stored column IS what the
 		// query correlates on, so it is a join key of its own side. Only the
 		// POSITION says which column the lowering minted (round 3).
 		{"a_stored_name_that_is_the_correlation_key",
 			`SELECT * FROM j1stored o JOIN LATERAL (SELECT MAX(amount) AS mx ` +
 				`FROM j1item WHERE product = o.__key_0) s ON true`,
-			[]string{"id", "__key_0", "mx"}, ""},
+			[]string{"id", "__key_0", "mx"}, "", ""},
 		{"the_same_read_by_name",
 			`SELECT o.__key_0 AS mine FROM j1stored o JOIN LATERAL (` +
 				`SELECT MAX(amount) AS mx FROM j1item WHERE product = o.__key_0) s ON true`,
-			[]string{"mine"}, ""},
+			[]string{"mine"}, "", ""},
 		{"ctl_an_explicit_list_over_the_lateral",
 			`SELECT o.customer AS c, s.mx AS m ` + aggLateral,
-			[]string{"c", "m"}, ""},
+			[]string{"c", "m"}, "", ""},
 	} {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			conn := connectPgconn(t, srv.Addr())
 			res := conn.ExecParams(context.Background(), c.sql, nil, nil, nil, []int16{0}).Read()
+			if c.wantErrLike != "" {
+				if res.Err == nil {
+					t.Fatalf("ANSWERED where the record says it is refused\n  SQL: %s", c.sql)
+				}
+				if !strings.Contains(res.Err.Error(), c.wantErrLike) {
+					t.Fatalf("refused by a DIFFERENT sentence: %v\n  want %q\n  SQL: %s",
+						res.Err, c.wantErrLike, c.sql)
+				}
+				return
+			}
 			if res.Err != nil {
 				t.Fatalf("%v\n  SQL: %s", res.Err, c.sql)
 			}

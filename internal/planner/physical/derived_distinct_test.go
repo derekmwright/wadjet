@@ -42,7 +42,18 @@ func distinctGroupStages(stages []Stage, keys ...string) []*Stage {
 		}
 		match := true
 		for _, g := range s.GroupByCols {
-			if !want[strings.ToLower(g)] {
+			// A key may be QUALIFIED: a `SELECT DISTINCT s.*` expands to
+			// QUALIFIED references, so the dedup groups on `s.s_suppkey`
+			// rather than on `s_suppkey`. The qualifier is spelling — the
+			// runtime resolver strips it (`exec.columnIndexFallback`) and the
+			// four-arm gate `coordinator.TestArcK1AStarIsItsSourceInItsPosition`
+			// asserts the ROWS — so this plan-shape check compares the column
+			// the key names.
+			name := strings.ToLower(g)
+			if dot := strings.LastIndexByte(name, '.'); dot >= 0 {
+				name = name[dot+1:]
+			}
+			if !want[name] {
 				match = false
 				break
 			}

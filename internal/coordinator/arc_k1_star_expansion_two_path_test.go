@@ -87,6 +87,28 @@ func TestArcK1AStarIsItsSourceInItsPosition(t *testing.T) {
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 mx:FLOAT64] rows=3 | " +
 				"1,Alice,150,100 | 2,Bob,200,125 | 3,Carol,0,NULL",
 		},
+		{
+			// A qualified star ALONE under DISTINCT, which is the shape that
+			// says the expansion's QUALIFIED references really resolve: the
+			// DISTINCT lowers to a GROUP BY whose keys are then `o.id`,
+			// `o.customer`, `o.total`, and on the shuffled arm the exchange
+			// is keyed on them. `SELECT DISTINCT s.*` is what
+			// `physical.TestDerivedStarDistinctEmitsADedupStage` checks as a
+			// plan shape; this is the same thing as ROWS, on four arms.
+			name: "979 DISTINCT over a qualified star alone, over a join",
+			sql: `SELECT DISTINCT o.* FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ` +
+				`ORDER BY 1`,
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64] rows=2 | " +
+				"1,Alice,150 | 2,Bob,200",
+		},
+		{
+			// The same over a relation big enough to really shuffle: 5000
+			// distinct rows, so the exchange keyed on the qualified names is
+			// exercised rather than elided.
+			name: "979 DISTINCT over a qualified star alone, 5000 rows",
+			sql:  `SELECT COUNT(*) AS c FROM (SELECT DISTINCT tx.* FROM typemx tx) u`,
+			want: "cols=[c:INT64] rows=1 | 5000",
+		},
 
 		// ---- #982 a positional ORDER BY counts the star's columns ----------
 		{

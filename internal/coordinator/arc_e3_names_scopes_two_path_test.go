@@ -503,40 +503,30 @@ func TestArcE3NamesAndScopesTwoPath(t *testing.T) {
 			sql: "WITH u AS (SELECT g AS x, COUNT(*) AS g FROM collslot GROUP BY g " +
 				"HAVING COUNT(*) > 0) SELECT x, g FROM u ORDER BY x",
 			want: "x,g | 0,80 | 1,80 | 2,80"},
-		// The ORDER BY face of the same collision, PINNED. `ORDER BY COUNT(*)`
-		// over an aggregate aliased `g` resolves the sort key to what the
-		// aggregate PUBLISHES — the name `g` — and the stage then sorts by
-		// the first column of that name, which is the KEY. The rows are all
-		// there and every value is right; the SEQUENCE is `x` descending.
+		// The ORDER BY face of the same collision, and it is CLOSED (arc K1,
+		// #968). `ORDER BY COUNT(*)` over an aggregate aliased `g` resolved
+		// the sort key to what the aggregate PUBLISHES — the name `g` — and
+		// the stage sorted by the first column of that name, which is the
+		// KEY: every row and every value right, the SEQUENCE `x` descending,
+		// on both DAG arms.
 		//
-		// It is the same first-match rule the gather's pairing and the
-		// fragment's projection each meet, at a third consumer, and closing
-		// it means the sort key carrying the aggregate's POSITION —
-		// `SortKeySpec.SlotPos` exists for the positional-ORDER-BY case
-		// (#557) and nothing sets it here. Pre-existing: base answers the
-		// same. The non-colliding control beside it is right on every arm,
-		// which is what says the collision is the trigger.
-		//
-		// ARC F4 measured the shape and WITHDREW a fix. A positional ORDER BY
-		// addresses the SELECT LIST; a stage's sort addresses its PRODUCER's
-		// output; over an aggregate those are `[group keys…, aggregate
-		// outputs…]` and not the same list, so a late pass was written to map
-		// one onto the other from the producer's finished output. It moved the
-		// sibling cell below from one wrong sequence to another — the DAG then
-		// ordered by the LAST key alone — which says the sort these keys reach
-		// is not the one the mapping assumed, and neither coordinate system
-		// alone explains the answer. Finding WHICH operator applies them (the
-		// stage dump emits no sort stage for either shape: the ordering rides
-		// the aggregate stage, and the coordinator merges partial results
-		// above it) is the first step of that fix, and it is its own change.
+		// This comment used to say what closing it would take — "the sort key
+		// carrying the aggregate's POSITION, and `SortKeySpec.SlotPos` exists
+		// and nothing sets it here" — and that is what landed. The half arc F4
+		// withdrew was the mapping alone: a positional ORDER BY addresses the
+		// SELECT LIST while a stage's sort addresses its PRODUCER's output,
+		// and mapping one onto the other from the finished output moved the
+		// sibling cell from one wrong sequence to another. What was missing is
+		// the CLASS — whether the term names an aggregate call or a key
+		// reference, which only the SELECT list can say — recorded at emission
+		// on `SortKeySpec.NamesAggregateOutput` and settled against
+		// `aggregateEmittedSlots` at the end of planning. The pin is deleted
+		// as the proof; the non-colliding control beside it, right on every
+		// arm throughout, is what says the collision was the trigger.
 		{name: "785/order-by-the-aggregate-under-a-colliding-alias",
 			sql: "SELECT COUNT(*) AS g, g AS x FROM typemx GROUP BY g " +
 				"ORDER BY COUNT(*) DESC, x",
-			want: "g,x | 660,0 | 660,1 | 660,6 | 659,2 | 659,3 | 659,4 | 659,5 | 384,NULL",
-			pin: map[string]string{
-				"dag":     "g,x | 384,NULL | 660,6 | 659,5 | 659,4 | 659,3 | 659,2 | 660,1 | 660,0",
-				"dagshuf": "g,x | 384,NULL | 660,6 | 659,5 | 659,4 | 659,3 | 659,2 | 660,1 | 660,0",
-			}},
+			want: "g,x | 660,0 | 660,1 | 660,6 | 659,2 | 659,3 | 659,4 | 659,5 | 384,NULL"},
 		{name: "785/ctl-order-by-the-aggregate-without-a-collision",
 			sql: "SELECT COUNT(*) AS c, g AS x FROM typemx GROUP BY g " +
 				"ORDER BY COUNT(*) DESC, x",
