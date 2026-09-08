@@ -133,6 +133,18 @@ func f1Run(t *testing.T, arms []f1Arm, cases []f1Case) {
 					t.Errorf("%s\n  arm  %s\n  got  %s\n  want %s%s",
 						tc.sql, arm.name, got, want, f1Why(tc.why))
 				}
+				// AN EMPTY COLUMN LIST IS NEVER AN ANSWER, in any cell of any
+				// census this harness runs (arc N1). A statement that produces
+				// a result set declares its columns or fails
+				// (`sqlerr.EmptyResultColumns`, ADR-0012's divergence list),
+				// so a rendering that begins `cols=[]` is a defect whatever
+				// the cell expected — and it is the shape two silent wrong
+				// answers wore (#1008, #1010) precisely because a comparison
+				// of two empty column lists succeeds.
+				if strings.HasPrefix(got, "cols=[] ") {
+					t.Errorf("%s\n  arm  %s answered with NO COLUMNS, which is never an "+
+						"answer: a result set declares its columns or fails", tc.sql, arm.name)
+				}
 				// Rows alone cannot tell an EXECUTED query from one the DAG
 				// refused and the coordinator answered locally, and both are
 				// results this arc moves.
