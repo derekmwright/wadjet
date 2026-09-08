@@ -461,19 +461,19 @@ func i1Cells() []i1Cell {
 			pinWhy: "a recursive CTE has no stage lowering, and the DAG reaches that as an " +
 				"unbuildable stage instead of the routed refusal ADR-0021 §1c gives a " +
 				"subquery it cannot run (all four arms answered 5 for PostgreSQL's 3 at base)"},
-		// A UNION of two star arms as the subquery's FROM. The stage's column
-		// pruning drops a column the union still declares.
-		{name: "52_pin_a_union_of_two_star_arms_as_the_inner_from",
+		// A UNION of two star arms as the subquery's FROM. The pin is SPENT:
+		// `pushColumnNeeds` had no set-op arm, so the outer need was pushed
+		// straight through the union into both star arms and their scans read
+		// one column, while the union stage's arm projection — the arms'
+		// declared output list, which is what the operation publishes — still
+		// asked for all 22 (#961). A set operation's arms supply its result
+		// columns now. Full census:
+		// `TestM1ASetOperationsArmsSupplyItsResultColumns`.
+		{name: "52_a_union_of_two_star_arms_as_the_inner_from",
 			sql: `SELECT (SELECT COUNT(*) FROM (SELECT * FROM typemx WHERE id < 2000 ` +
 				`UNION ALL SELECT * FROM typemx WHERE id >= 2000) t WHERE id < 10) AS n ` +
 				`FROM decpair WHERE id < 2`,
-			want: `n | 10`,
-			pinArms: map[string]string{
-				"dag":     `column "g" does not exist in the input schema`,
-				"dagshuf": `column "g" does not exist in the input schema`,
-			},
-			pinWhy: "the union stage's column pruning drops a column its own arms still " +
-				"declare (all four arms answered 0 for PostgreSQL's 10 at base)"},
+			want: `n | 10`},
 
 		// The fourth member of that family, and the DERIVED-TABLE spelling of
 		// controls 32 and 33: a star over a JOIN inside a derived table, then
