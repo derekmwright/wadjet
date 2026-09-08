@@ -991,6 +991,29 @@ func pmCells() []pmCell {
 		{name: "bare_star_over_a_join_named_second_zero_rows",
 			sql:      `SELECT * FROM e7other b JOIN e7emp a ON a.id = b.id WHERE a.id < 0`,
 			noSalary: true, want: nil},
+		// The SELF-JOIN puts the policed relation on BOTH sides, so a walk
+		// that read one side past its barrier and the other through it would
+		// still publish the denied name — the two-table cells above cannot
+		// tell those apart.
+		{name: "bare_star_over_a_self_join_zero_rows",
+			sql:      `SELECT * FROM e7emp a JOIN e7emp b ON a.id = b.id WHERE a.id < 0`,
+			noSalary: true, want: nil},
+		// A DERIVED side, in both orders. The body is a BARE star on purpose:
+		// `(SELECT * FROM e7emp) d` elides its own projection, so the side the
+		// join sees is the barrier over the scan and the declaration has to
+		// read the barrier. The qualified spelling `(SELECT a.* FROM e7emp a)`
+		// does NOT exercise this — its block projection is enumerated, the
+		// materialized-block arm answers for it, and the scan below is never
+		// reached. Measured: the qualified twin is right with the fix reverted
+		// and these two are not.
+		{name: "bare_star_over_a_derived_policed_side_zero_rows",
+			sql: `SELECT * FROM (SELECT * FROM e7emp) d JOIN e7other b ON d.id = b.id ` +
+				`WHERE d.id < 0`,
+			noSalary: true, want: nil},
+		{name: "bare_star_over_a_derived_policed_side_named_second_zero_rows",
+			sql: `SELECT * FROM e7other b JOIN (SELECT * FROM e7emp) d ON d.id = b.id ` +
+				`WHERE d.id < 0`,
+			noSalary: true, want: nil},
 		// A column-alias list renames the star's columns POSITIONALLY, so the
 		// width it must match is the POLICED width — five, not the catalog's
 		// six. Reading the catalog's list here renamed `salary` to `k5` and
