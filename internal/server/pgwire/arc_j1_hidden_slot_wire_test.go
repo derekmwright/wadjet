@@ -134,11 +134,16 @@ func TestArcJ1AHiddenSlotIsNotInTheRowDescription(t *testing.T) {
 		{"star_over_an_aliased_key", `SELECT * FROM j1ord o JOIN LATERAL (` +
 			`SELECT MAX(amount) AS order_id FROM j1item WHERE order_id = o.id) s ON true`,
 			[]string{"id", "customer", "total", "order_id"}, "", ""},
+		// This cell recorded a DIVERGENCE from PostgreSQL until arc N1: the
+		// wire carried `(amount, id, customer, total)` where PostgreSQL puts
+		// the LATERAL's columns last. The cause was not the join operator's
+		// output rule but `reorderJoins`, which swapped a MANUFACTURED
+		// lateral join's sides by estimated rows — a cost decision changing
+		// what `SELECT *` publishes. A dependent join is not reorderable
+		// (#1008), and the divergence is gone rather than pinned.
 		{"star_over_a_non_aggregated_lateral", `SELECT * FROM j1ord o JOIN LATERAL (` +
 			`SELECT amount FROM j1item WHERE order_id = o.id) li ON true`,
-			[]string{"amount", "id", "customer", "total"},
-			"the same four columns as (id, customer, total, amount) — PostgreSQL puts " +
-				"the LATERAL's columns last, and a join here emits the probe side first", ""},
+			[]string{"id", "customer", "total", "amount"}, "", ""},
 		// A QUALIFIED star names ONE relation on the wire too (arc K1, #979):
 		// it published the whole join for as long as a star-only SELECT list
 		// built no projection for the expansion to rewrite.
