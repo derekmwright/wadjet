@@ -1692,6 +1692,29 @@ func (p *Planner) subqueryOutputArity(sql string) (n int, ok bool) {
 	return len(schema), true
 }
 
+// DeclaredOutputSchema is the PLAN-TIME declaration of a statement's output
+// columns — the same walk `Plan` stamps on a single-process pipeline as
+// `Plan.OutputSchema` — for a door that assembles a result set from batches it
+// may not have.
+//
+// The ASYNC door is that door (#1008 round 2): `SubmitSQL` plans stages and
+// `GetQueryResults` reads the columns off the gathered batches, of which a
+// ZERO-ROW query has none, and the DAG's own `GatherOutputSchema` describes a
+// gather stage that a one-stage plan does not have. Every zero-row SELECT
+// therefore came back with no columns at all on that door while the other
+// three described it from exactly this walk. Calling it rather than copying it
+// is what keeps the four doors' answers the same list.
+//
+// The caller has already annotated the plan; this does not re-annotate,
+// because a second AnnotateScanColumns over an optimized plan is not free and
+// the walk needs only what the first one left.
+func (p *Planner) DeclaredOutputSchema(plan *logical.Node) []parquet.Column {
+	if plan == nil {
+		return nil
+	}
+	return declaredOutputSchema(plan, p.subqueryOutputColumn)
+}
+
 // subqueryOutputColumn resolves a scalar subquery's single declared output
 // column. It recovers from a panic for the reason every plan-time helper on
 // this path does: an unplannable subquery must cost the comparison its

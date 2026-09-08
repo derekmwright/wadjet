@@ -75,11 +75,16 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      own output, and at the client it cannot be told from a query that
      legitimately found nothing — which is exactly how two silent wrong
      answers reached a client (#1008, #1010) without any value comparison
-     noticing, because two empty column lists compare equal. The two places a
+     noticing, because two empty column lists compare equal. All FOUR places a
      result set is assembled now refuse it (`sqlerr.EmptyResultColumns`,
      XX000: nothing about the STATEMENT is wrong, so the class cannot blame
      the client, and this is not a feature declined but the engine failing to
-     describe itself).
+     describe itself): the embedded `wadjet.DB.Query`,
+     `Coordinator.ExecuteSQL`, the HTTP query door — which runs its own
+     pipeline and so inherits nothing — and `Coordinator.GetQueryResults`, the
+     async door, whose zero-row results are described from
+     `physical.Planner.DeclaredOutputSchema` because it has no batch to read a
+     schema off at all.
 
      The divergence is in the REFUSING direction and it replaces an answer
      that was not PostgreSQL's either. DECLARING those three shapes' columns

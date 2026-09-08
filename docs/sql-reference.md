@@ -1484,6 +1484,12 @@ has no metadata for, and which a client cannot tell from a query that
 legitimately found nothing. Naming the columns in the SELECT list answers in
 every one of the three cases.
 
+Every door answers the same way — the embedded API, the PostgreSQL wire
+protocol, `POST /v1/queries`, `POST /v1/queries/async` with
+`GET /v1/queries/{id}/results`, and gRPC. The asynchronous pair describes a
+zero-row result from the plan, like the others, and reports the refusal on the
+result's `error` field with SQLSTATE `XX000`.
+
 ## Set operations
 
 `UNION`, `UNION ALL`, `INTERSECT` and `EXCEPT` combine two queries. Either arm

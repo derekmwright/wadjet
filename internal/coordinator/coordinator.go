@@ -241,6 +241,12 @@ type queryMeta struct {
 	// context that never carried the mark (#859 round 3).
 	policyEnforced bool
 	mergeInfo      *logical.MergeInfo // non-nil for probe-split queries needing merge
+	// declared is the PLAN-TIME output schema, for the zero-row result this
+	// door has no batch to read one from. `physical.GatherOutputSchema`
+	// describes a GATHER stage, and a one-stage plan has none, so without
+	// this every zero-row SELECT came back from the async door with no
+	// columns at all while the other three doors described it (#1008 round 2).
+	declared []parquet.Column
 	// prebuiltTasks, if non-nil for a given stage, supplies the publish loop's
 	// task list instead of calling createTasksForStage. Set by the shuffle path
 	// where each worker's task carries different PreScannedInputs.
@@ -3645,6 +3651,13 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	planner.LateMaterialization = c.config.LateMaterialization
 	planner.DynamicFiltersEnabled = c.config.DynamicFilters
 	planner.QueryLimits = c.resolveQueryLimits(ctx)
+	// The PLAN's own declaration of this statement's columns, taken before the
+	// stages are built because that is the only thing a ZERO-ROW result on
+	// this door can be described from: `GetQueryResults` reads its columns off
+	// the gathered batches, and there are none (#1008 round 2). It is the same
+	// walk the embedded door's `Plan.OutputSchema` carries, so the four doors
+	// describe one statement with one list.
+	declaredOut := planner.DeclaredOutputSchema(logicalPlan)
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
 		// The async door's sibling of the same rule.
@@ -3687,7 +3700,8 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		c.tracker.Start(queryID)
 		c.tracker.Complete(queryID)
 		c.mu.Lock()
-		c.queryMetas[queryID] = &queryMeta{planStr: planStr, policyEnforced: logical.PolicyEnforced(ctx)}
+		c.queryMetas[queryID] = &queryMeta{planStr: planStr,
+			policyEnforced: logical.PolicyEnforced(ctx), declared: declaredOut}
 		c.mu.Unlock()
 		return queryID, planStr, nil
 	}
@@ -3695,7 +3709,8 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	// Store metadata
 	c.mu.Lock()
 	c.queryMetas[queryID] = &queryMeta{stages: physStages, planStr: planStr, sqlText: sql,
-		mergeInfo: probeSplitMergeInfo, policyEnforced: logical.PolicyEnforced(ctx)}
+		mergeInfo: probeSplitMergeInfo, policyEnforced: logical.PolicyEnforced(ctx),
+		declared: declaredOut}
 	c.mu.Unlock()
 
 	// Register stages with tracker
@@ -3908,7 +3923,7 @@ func (c *Coordinator) GetQueryStatus(ctx context.Context, queryID string) (*Quer
 }
 
 // GetQueryResults retrieves the final results for a completed query.
-func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (*SQLResult, error) {
+func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (res *SQLResult, err error) {
 	info := c.tracker.Get(queryID)
 	if info == nil {
 		return nil, fmt.Errorf("query not found: %s", queryID)
@@ -3919,6 +3934,29 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (*SQL
 	if err := c.authorizeQueryAccess(ctx, info); err != nil {
 		return nil, err
 	}
+
+	// AN EMPTY COLUMN LIST IS NEVER AN ANSWER, ON THIS DOOR TOO
+	// (sqlerr.EmptyResultColumns, #1008 / #1010 round 2).
+	//
+	// This is the FOURTH place a result set is assembled — `SubmitSQL` is its
+	// own entry and this function reads the columns off the gathered batches,
+	// of which a zero-row query has none. Every zero-row SELECT answered HTTP
+	// 200 with `"columns": null` here, including the shapes the other three
+	// doors describe from the plan, so the rule held on three doors and not
+	// the fourth. It rides on `SQLResult.Error` — the channel this door
+	// already answers 200-with-a-failure on and the one #1002's merge refusal
+	// took — while the returned error stays the not-found / not-authorized
+	// channel `internal/server.handleGetQueryResults` maps to 404.
+	//
+	// Registered after the authorization check so a refusal above it is
+	// untouched; a result that already carries an `Error` (an incomplete
+	// query, a merge that could not be applied) is left alone.
+	defer func() {
+		if err != nil || res == nil || res.Error != "" || len(res.Columns) > 0 {
+			return
+		}
+		res.Error = sqlerr.EmptyResultColumns("async query results").Error()
+	}()
 
 	c.mu.Lock()
 	meta := c.queryMetas[queryID]
@@ -3948,10 +3986,12 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (*SQL
 	if meta == nil || len(meta.stages) == 0 {
 		return &SQLResult{
 			QueryID:     queryID,
+			Columns:     columnNamesOf(metaDeclared(meta)),
 			ResultFiles: info.ResultFiles,
 			TotalRows:   info.TotalRows,
 			Elapsed:     elapsed,
 			Plan:        planStr,
+			Schema:      metaDeclared(meta),
 		}, nil
 	}
 
@@ -4003,6 +4043,12 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (*SQL
 	}
 
 	declared := schemaOrDeclared(gatherSchema(batches), meta.stages)
+	if len(declared) == 0 {
+		// The PLAN's declaration, which is what a zero-row result on this
+		// door has instead of a batch: `GatherOutputSchema` describes a
+		// GATHER stage and a one-stage plan has none (#1008 round 2).
+		declared = meta.declared
+	}
 	return &SQLResult{
 		QueryID: queryID,
 		// See the sibling construction in executeStageDAG: a bare `SELECT *`
@@ -4024,6 +4070,28 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (*SQL
 		WireUnconstrainedDecimal: physical.GatherOutputWireUnconstrainedDecimal(meta.stages),
 		StringLength:             physical.GatherOutputStringLength(meta.stages),
 	}, nil
+}
+
+// metaDeclared is the plan-time declaration a query's metadata carries, or nil
+// when the metadata is gone — a reaped query cannot describe its own result,
+// and the door rule turns that into a refusal rather than an empty answer.
+func metaDeclared(meta *queryMeta) []parquet.Column {
+	if meta == nil {
+		return nil
+	}
+	return meta.declared
+}
+
+// columnNamesOf is a declared schema's names, in its order.
+func columnNamesOf(schema []parquet.Column) []string {
+	if len(schema) == 0 {
+		return nil
+	}
+	out := make([]string, len(schema))
+	for i, c := range schema {
+		out[i] = c.Name
+	}
+	return out
 }
 
 // schemaOrDeclared prefers the schema read off real batches and falls back to
