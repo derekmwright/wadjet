@@ -734,14 +734,14 @@ func substituteNestedRenameList(nodes []plansql.Node, child *logical.Node) ([]pl
 // slice is returned untouched when nothing resolves, keeping unaffected
 // plans byte-identical; when something does, duplicates introduced by the
 // mapping (alias and its source both needed) collapse.
-func resolveJoinNeededColumns(node *logical.Node) []string {
+func resolveJoinNeededColumns(node *logical.Node, published map[*logical.Node]bool) []string {
 	if len(node.NeededColumns) == 0 {
 		return node.NeededColumns
 	}
 	changed := false
 	resolved := make([]string, len(node.NeededColumns))
 	for i, c := range node.NeededColumns {
-		resolved[i] = resolveShuffleKey(c, node)
+		resolved[i] = resolveShuffleKey(c, node, published)
 		if resolved[i] != c {
 			changed = true
 		}

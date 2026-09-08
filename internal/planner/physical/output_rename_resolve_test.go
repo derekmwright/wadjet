@@ -126,7 +126,7 @@ func TestResolveJoinNeededColumns(t *testing.T) {
 		Children:      []*logical.Node{scan, sub},
 		NeededColumns: []string{"k", "n_name", "n_regionkey"}}
 
-	got := resolveJoinNeededColumns(join)
+	got := resolveJoinNeededColumns(join, nil)
 	want := []string{"r_regionkey", "n_name", "n_regionkey"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("resolved = %v, want %v", got, want)
@@ -135,7 +135,7 @@ func TestResolveJoinNeededColumns(t *testing.T) {
 	// Alias AND its source both needed: the mapping introduces a duplicate,
 	// which must collapse.
 	join.NeededColumns = []string{"k", "r_regionkey", "n_name"}
-	got = resolveJoinNeededColumns(join)
+	got = resolveJoinNeededColumns(join, nil)
 	want = []string{"r_regionkey", "n_name"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("deduped = %v, want %v", got, want)
@@ -143,7 +143,7 @@ func TestResolveJoinNeededColumns(t *testing.T) {
 
 	// Nothing resolves: the ORIGINAL slice comes back untouched.
 	join.NeededColumns = []string{"n_name", "n_regionkey"}
-	got = resolveJoinNeededColumns(join)
+	got = resolveJoinNeededColumns(join, nil)
 	if len(got) != 2 || &got[0] != &join.NeededColumns[0] {
 		t.Errorf("unchanged plan must return the original slice, got %v", got)
 	}

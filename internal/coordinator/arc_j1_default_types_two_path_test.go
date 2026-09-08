@@ -520,59 +520,6 @@ func TestArcJ1AStarOverAnUnstageableLateralProjectionIsRouted(t *testing.T) {
 	}
 }
 
-// THE DAG'S `SELECT *` OVER A DERIVED SIDE LOSES A COLUMN, WITH NO LATERAL IN
-// THE QUERY (arc J1 round 5, recorded for filing).
-//
-// This is the MECHANISM behind every DAG pin in this arc, isolated: a plain
-// inner join whose right side is a derived table publishing `order_id` twice.
-// No LATERAL, no aggregate, no correlation, no hidden slot — and the
-// single-process arms answer PostgreSQL's five columns while the DAG arms
-// answer four. A Project emits no stage, so `SELECT *` on the distributed path
-// shows the STAGE's stream rather than the query's projection; a column the
-// projection introduces is not in that stream.
-//
-// It is here so the pins in this arc cannot be read as a lateral defect, and
-// so the day the DAG publishes a projection this test fails and every pin
-// beside it can be deleted together.
-func TestArcJ1TheDagStarOverADerivedSideLosesAColumn(t *testing.T) {
-	if testing.Short() {
-		t.Skip("-short: this gate stands up an embedded NATS cluster")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	t.Cleanup(cancel)
-	arms := e3Arms(t, ctx)
-
-	const sql = `SELECT * FROM lat_ord o JOIN (SELECT order_id, order_id AS oid ` +
-		`FROM lat_item) s ON s.order_id = o.id ORDER BY o.id`
-	const want = `order_id,oid,id,customer,total | 1,1,1,Alice,150 | 1,1,1,Alice,150 | ` +
-		`2,2,2,Bob,200 | 2,2,2,Bob,200`
-	const pinDAG = `order_id,id,customer,total | 1,1,Alice,150 | 1,1,Alice,150 | ` +
-		`2,2,Bob,200 | 2,2,Bob,200`
-
-	for _, arm := range arms {
-		cols, rows, err := arm.run(sql)
-		if err != nil {
-			t.Fatalf("%s arm: %v\n  SQL: %s", arm.name, err, sql)
-		}
-		got := e3Render(cols, rows)
-		if arm.coord == nil {
-			if got != want {
-				t.Fatalf("%s arm: %s\n  want %s (live PostgreSQL 17)\n  SQL: %s",
-					arm.name, got, want, sql)
-			}
-			continue
-		}
-		if got == want {
-			t.Fatalf("%s arm ANSWERED PostgreSQL's %s — the stage publishes the "+
-				"projection now. DELETE this pin and every `pinDAG` beside it in "+
-				"this arc\n  SQL: %s", arm.name, got, sql)
-		}
-		if got != pinDAG {
-			t.Fatalf("%s arm: %s\n  pinned at %s\n  SQL: %s", arm.name, got, pinDAG, sql)
-		}
-	}
-}
-
 // AN `ON` CONDITION OVER A DEFAULTED COLUMN IS EITHER RIGHT OR LOUD, NEVER
 // NULL WHERE POSTGRESQL SAYS 0 (arc J1 round 5).
 //

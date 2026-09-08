@@ -316,12 +316,12 @@ func TestDerivedScopeBareNameOnlyStripsInsideItsOwnScope(t *testing.T) {
 		t.Errorf("resolveAggInputName(%q) = %q (renamed=%v), want it left alone — "+
 			"the sibling arm's alias must not capture another relation's column", "t.c", got, renamed)
 	}
-	if got := resolveShuffleKey("t.c", join); got != "t.c" {
+	if got := resolveShuffleKey("t.c", join, nil); got != "t.c" {
 		t.Errorf("resolveShuffleKey(%q) = %q, want it left alone", "t.c", got)
 	}
 	// And it does resolve when the reference really does name the derived
 	// table.
-	if got := resolveShuffleKey("v.c", join); got != "d" {
+	if got := resolveShuffleKey("v.c", join, nil); got != "d" {
 		t.Errorf("resolveShuffleKey(%q) = %q, want %q", "v.c", got, "d")
 	}
 }

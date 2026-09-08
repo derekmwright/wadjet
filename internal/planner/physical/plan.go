@@ -1181,6 +1181,13 @@ type Planner struct {
 	// only discovered after the first has already emitted its stages.
 	cteRefCounts map[string]int
 
+	// starReadBlocks is the set of derived-block Project nodes a STAR reads
+	// by POSITION, computed once before the walk because the answer depends
+	// on what stands ABOVE a node and walkStages descends. walkStages'
+	// `default:` arm publishes each of them onto the stage that materializes
+	// it, so the relation above the block is the one the query wrote (#984).
+	starReadBlocks map[*logical.Node]bool
+
 	// scanDeletes caches the merge-on-read DELETE state walkStages read for
 	// each base table, table name → (file path → file-absolute deleted row
 	// indices). Captured from the SAME manifest object that produced the
@@ -6005,6 +6012,7 @@ func (p *Planner) generateStages(node *logical.Node) []Stage {
 	p.ctePlannedTerminal = make(map[string]string)
 	p.cteTerminals = make(map[string]bool)
 	p.cteRefCounts = countCTEReferences(node)
+	p.starReadBlocks = starReadBlockProjections(node)
 	p.scanDeletes = nil
 	p.limitStageRoot = node
 	p.setOpErr = nil
@@ -6533,7 +6541,7 @@ func sumFusedBytes(stages []Stage, specs []FusedJoinSpec) int64 {
 // resolveOutputRenameSource. Each Project substitutes at most once (a
 // projection list is simultaneous, so `b AS a, a AS b` must not chase
 // itself) and the walk only ever descends, so it terminates.
-func resolveShuffleKey(key string, child *logical.Node) string {
+func resolveShuffleKey(key string, child *logical.Node, published map[*logical.Node]bool) string {
 	if child == nil {
 		return key
 	}
@@ -6542,7 +6550,7 @@ func resolveShuffleKey(key string, child *logical.Node) string {
 		if n.Type == logical.NodeProject {
 			bare := derivedScopeBareName(resolved, n)
 			proj := projectionForName(n.Projections, resolved, bare)
-			if proj != nil && bare != "" && projectsAMintedGroupKey(n, bare) {
+			if proj != nil && bare != "" && (published[n] || projectsAMintedGroupKey(n, bare)) {
 				// The aggregate below PUBLISHES this name (a hidden
 				// correlation slot, ADR-0026 3a): the stage emits it under
 				// exactly this name and nothing below carries it, so the walk
@@ -6567,12 +6575,12 @@ func resolveShuffleKey(key string, child *logical.Node) string {
 			}
 		}
 		if n.Type == logical.NodeJoin && len(n.Children) == 2 {
-			if r := resolveShuffleKey(resolved, n.Children[0]); r != resolved {
+			if r := resolveShuffleKey(resolved, n.Children[0], published); r != resolved {
 				return r
 			}
 			jt := strings.ToLower(n.JoinType)
 			if jt != "semi" && jt != "anti" {
-				return resolveShuffleKey(resolved, n.Children[1])
+				return resolveShuffleKey(resolved, n.Children[1], published)
 			}
 			return resolved
 		}
@@ -7985,10 +7993,10 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// match the actual column names in the data (e.g., supplier_no → l_suppkey).
 		if len(node.Children) >= 2 {
 			for i, key := range leftKeys {
-				leftKeys[i] = resolveShuffleKey(key, node.Children[0])
+				leftKeys[i] = resolveShuffleKey(key, node.Children[0], p.starReadBlocks)
 			}
 			for i, key := range rightKeys {
-				rightKeys[i] = resolveShuffleKey(key, node.Children[1])
+				rightKeys[i] = resolveShuffleKey(key, node.Children[1], p.starReadBlocks)
 			}
 		}
 
@@ -8038,7 +8046,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// producer's raw columns: `[id, y.id]` for a query that asked for
 			// `[id, w]`. It bit only the SHUFFLED lowering, because the
 			// broadcast one has no payload list to get wrong (#694 round 2).
-			needed := resolveJoinNeededColumns(node)
+			needed := resolveJoinNeededColumns(node, p.starReadBlocks)
 			var shuffleCols []string
 			if len(needed) > 0 {
 				seen := make(map[string]bool, len(needed)+len(leftKeys)+len(rightKeys))
@@ -8111,7 +8119,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			ID:                 stageID,
 			Type:               joinType,
 			Tasks:              joinTasks,
-			Columns:            resolveJoinNeededColumns(node),
+			Columns:            resolveJoinNeededColumns(node, p.starReadBlocks),
 			JoinType:           jt,
 			JoinLeftKeys:       leftKeys,
 			JoinRightKeys:      rightKeys,
@@ -8585,6 +8593,20 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				p.recordAggProjectionRenames((*stages)[idx].ID,
 					absorbAggregateOutputProjection(node, &(*stages)[idx]))
 			}
+		}
+		// A DERIVED BLOCK A STAR READS PUBLISHES ITS OWN PROJECTION (#984).
+		//
+		// The absorb above renames what the aggregate emits and is additive;
+		// this publishes the block's whole list, by position, because the
+		// consumer is a STAR and reads by position. Only for a block the
+		// pre-pass marked — no Project between it and the root, a JOIN in
+		// between, and a projection that is not already the stage's own
+		// column list — so a named SELECT list, which resolves each column
+		// through its own consumer, is untouched.
+		if node.Type == logical.NodeProject && p.starReadBlocks[node] &&
+			len(*stages) > preDefaultCount &&
+			!p.cteTerminals[(*stages)[len(*stages)-1].ID] {
+			publishBlockProjection(node, stages, preDefaultCount)
 		}
 		// ABAC security barrier (InjectColumnPolicies wraps the scan in a
 		// Project of masked/visible columns). An ordinary Project can pass

@@ -1733,59 +1733,37 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      recorded here as a divergence with its mechanism, and closing it needs
      the lateral's own projection to be materialized onto its stage.
 
-   - **On the DISTRIBUTED arms, `SELECT *` shows the STAGE's stream and not
-     the query's projection — with no LATERAL in the query.** (Added
-     2026-09-07, arc J1 round 5; PRE-EXISTING, not closed here, recorded for
-     filing.) A Project emits no stage, so a column a PROJECTION introduces is
-     not in the stream the star publishes. The reproducer has no lateral, no
-     aggregate, no correlation and no hidden slot in it:
+   - **CLOSED 2026-09-07 by arc K3 (#984): on the DISTRIBUTED arms `SELECT *`
+     showed the STAGE's stream and not the query's projection.** A Project
+     emits no stage, so a derived block's SELECT list was not a relation on the
+     DAG and a star above the join published the Scan's or the Aggregate's own
+     column list. Four spellings were silently wrong on both DAG arms — a
+     source column published TWICE (`order_id, order_id AS oid` lost `oid`), a
+     RENAME (`order_id AS k` published as `order_id`), an ALIAS OVER AN
+     AGGREGATE (`CAST(COUNT(*) AS VARCHAR) AS n` published `__agg_0` to the
+     client beside `n`) and a COMPUTED item (`amount * 2 AS d` published the
+     source `amount` too, because the materialization that computes it is
+     deliberately additive). A named SELECT list over every one of those blocks
+     was right on all four arms throughout, because each consumer resolves its
+     own column; the star is the consumer with no names.
 
-     ```
-     SELECT * FROM lat_ord o
-       JOIN (SELECT order_id, order_id AS oid FROM lat_item) s ON s.order_id = o.id
-     single/spilled → order_id, oid, id, customer, total   (PostgreSQL's five)
-     dag/dagshuf    → order_id,      id, customer, total   (`oid` is GONE)
-     ```
+     A derived block a star reads now emits its PROJECTION as the stage's
+     column set — by position, under the block's own names
+     (`physical.starReadBlockProjections` / `publishBlockProjection`,
+     `Stage.ProjectExprs`) — and the join's keys and its OutputFilter bind to
+     what the producer publishes rather than to the source the alias once
+     resolved to. Gated in
+     `coordinator.TestArcK3ADerivedBlockPublishesItsOwnProjection` — five
+     spellings plus seven controls, four arms, every `want` PostgreSQL 17's
+     column set and values.
 
-     The same star over a derived table holding an AGGREGATE publishes a
-     RESERVED SLOT to the client, which is worse than losing a column:
-     `SELECT * FROM lat_ord o JOIN (SELECT order_id, CAST(COUNT(*) AS VARCHAR)
-     AS n FROM lat_item GROUP BY order_id) s ON s.order_id = o.id` answers
-     `order_id, n, __agg_0, id, customer, total` on `dag`/`dagshuf` against
-     five columns on the single-process arms. Reading `__agg_0` is not a
-     minting refusal (ADR-0026 §3c) — it is the stage's own stream reaching a
-     door it should never reach.
-
-     THE LATERAL HALF OF IT IS NO LONGER A DIVERGENCE: a star over a
-     decorrelated LATERAL whose block projection is not its stage's column
-     list is REFUSED at plan time and ROUTED to the coordinator-local
-     pipeline, where the block's Project is a real operator, and it answers
-     PostgreSQL on all four arms (`ErrLateralProjectionDistributed`,
-     `Coordinator.LateralProjectionLocalRoutes`). That covers the three
-     spellings this arc found — the key published TWICE, published under an
-     ALIAS, and a COMPUTED item whose aggregate publishes `__agg_0` — and it
-     had to, because the two join kinds failed DIFFERENTLY and hid each other:
-     the INNER one answered with the column silently gone, the LEFT one failed
-     loudly under ADR-0010's `one stage's files describe one relation`. The
-     route is scoped to a STAR; a named SELECT list over the same lateral was
-     always right and stays distributed.
-
-     What remains a divergence is the shape with NO LATERAL, above: nothing
-     mints a slot there, so there is no lateral subtree to recognise and the
-     route does not fire. Pinned per arm in
-     `coordinator.TestArcJ1TheDagStarOverADerivedSideLosesAColumn`. When #984
-     lands — a stage declares the block's PROJECTION rather than its stream —
-     that pin goes AND the routing above is deleted with it; the two are one
-     defect seen from two sides.
-
-     One more thing the route keeps: the INNER-joined routed star publishes
-     the PROBE side's columns first (`order_id, oid, n, id, customer, total`)
-     where PostgreSQL publishes the FROM order (`id, customer, total,
-     order_id, oid, n`) — the same SET and VALUES, a different column ORDER.
-     (Added 2026-09-07, arc J1 round 6 review.) The LEFT-joined spelling is
-     byte-identical to PostgreSQL. This is the star-column-order entry above
-     seen through the route, pinned in the INNER cells of
-     `coordinator.TestArcJ1APublishedKeyIsAUserColumn`, and it goes with #984.
+     WHAT REMAINS a divergence is the star's column ORDER, which is older and
+     independent: this engine publishes the JOIN OPERATOR's order (probe side
+     first) where PostgreSQL publishes the FROM order, and for some shapes the
+     two distribution paths choose different probe sides, so `single` and `dag`
+     order one relation two ways. Same set, same names, same values. Pinned per
+     arm in that gate's `ctl/derived-aggregate-is-its-stream` cell and in the
+     INNER cells of `coordinator.TestArcJ1APublishedKeyIsAUserColumn`.
 
    - **A written `ON` over an unrepaired LATERAL with an empty-input default
      is REFUSED (0A000) where PostgreSQL answers.** (Added 2026-09-07, arc J1
