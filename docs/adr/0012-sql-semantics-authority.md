@@ -1799,7 +1799,15 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `declaredJoinSchema` walks a nested join by concatenating its sides, which
      is not the operator's rule; and it declines outright if any name in the
      answer is in the reserved namespace, which is proof the walk stopped below
-     an operator that still had work to do. Gated by the four join shapes added
+     an operator that still had work to do. EACH SIDE IS DECLARED BY WHAT IT
+     PUBLISHES: a derived block is a real relation on both paths, so reading
+     the scan below it invented `s.id`, `product` and `qty` into the
+     `RowDescription` of `SELECT * FROM kord o JOIN (SELECT order_id, amount
+     FROM kitem WHERE …) s` — ten fields where PostgreSQL and the non-empty
+     twin describe seven — and dropped a rename's alias entirely. The same list
+     shapes an EMPTY side of a join, where reading the scan padded a LEFT
+     join's unmatched rows with eight columns for PostgreSQL's five on the
+     single-process arms. Gated by the four join shapes added
      to `pgwire.TestZeroRowSelectDescribesLikeItsNonEmptyTwin`, each paired with
      the SAME statement under a predicate that matches — a join's side order is
      a cost decision, so dropping the predicate would compare two relations

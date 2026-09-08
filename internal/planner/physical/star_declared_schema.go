@@ -199,8 +199,17 @@ func starJoinDeclaredOutputSchema(root *logical.Node) ([]parquet.Column, bool) {
 	if join == nil {
 		return nil, false
 	}
-	probe := declaredJoinSchema(join.Children[0], nil, nil)
-	build := declaredJoinSchema(join.Children[1], nil, nil)
+	// EACH SIDE IS DECLARED BY WHAT IT PUBLISHES, never by its stream. A
+	// derived block is a real relation on both paths — a `Project` operator on
+	// the single-process one, a materialized projection on the DAG — so a
+	// declaration read from the scan below it describes columns the engine
+	// does not emit: `(SELECT order_id, amount FROM kitem WHERE …)` declared
+	// TEN fields where PostgreSQL and the non-empty twin describe seven, with
+	// `s.id`, `product` and `qty` invented and a rename's alias missing
+	// (round-1 B3). That is #984's own defect living inside #978's answer.
+	published := sideBlockProjections(join)
+	probe := declaredJoinSchema(join.Children[0], nil, published)
+	build := declaredJoinSchema(join.Children[1], nil, published)
 	if len(probe) == 0 || len(build) == 0 {
 		return nil, false
 	}
@@ -277,4 +286,33 @@ func containsJoin(n *logical.Node) bool {
 		}
 	}
 	return false
+}
+
+// sideBlockProjections marks the block Project on each side of this join, so
+// declaredJoinSchema describes the side by the relation it PUBLISHES.
+//
+// It is not `Planner.publishedBlocks`: that set answers "did the DAG's stage
+// materialize this projection", and the question here is the other one — what
+// does this side EMIT — whose answer is the same on both paths, because a
+// Project the DAG did not materialize is still a real operator on the
+// single-process path and the DAG's star reads the block through the pruning
+// that narrows to it.
+func sideBlockProjections(join *logical.Node) map[*logical.Node]bool {
+	out := map[*logical.Node]bool{}
+	for _, side := range join.Children {
+		for cur := side; cur != nil && len(cur.Children) == 1; cur = cur.Children[0] {
+			if cur.Type == logical.NodeProject {
+				if !cur.SecurityBarrier && !logical.HasStarProjection(cur) &&
+					len(cur.Projections) > 0 {
+					out[cur] = true
+				}
+				break
+			}
+			if cur.Type != logical.NodeFilter && cur.Type != logical.NodeLimit &&
+				cur.Type != logical.NodeSort && cur.Type != logical.NodeDistinct {
+				break
+			}
+		}
+	}
+	return out
 }

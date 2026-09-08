@@ -9220,7 +9220,12 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// no batch at all: an outer join still owes the rows the empty side
 	// shapes and cannot name their columns without this (#348/#352). Computed
 	// after the semi/anti swap above so the sides are final.
-	hj.ProbeSchemaHint, hj.BuildSchemaHint = joinSideSchemas(node, hj.LeftKeys, hj.RightKeys, nil)
+	// Declared by what each side PUBLISHES. On this path a derived block's
+	// Project is a real operator, so a hint read from the scan below it
+	// described an EMPTY side by columns the full side never emits — eight
+	// columns for PostgreSQL's five (round-1 P2).
+	hj.ProbeSchemaHint, hj.BuildSchemaHint = joinSideSchemas(node, hj.LeftKeys, hj.RightKeys,
+		sideBlockProjections(node))
 
 	// For semi/anti joins without a filter, enable key-only build:
 	// only build the key index and bloom filter, skip batch storage and arena refs.

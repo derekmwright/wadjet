@@ -117,6 +117,30 @@ func zrShapes() []struct{ name, empty, full string } {
 		{"star_join_ordered",
 			"SELECT * FROM zrfull a JOIN zrother b ON b.c0 = a.c0 WHERE a.c0 = 999 ORDER BY a.c0",
 			"SELECT * FROM zrfull a JOIN zrother b ON b.c0 = a.c0 WHERE a.c0 = 1 ORDER BY a.c0"},
+		// A DERIVED SIDE is declared by what the BLOCK publishes, never by the
+		// stream under it. Reading the stream invented `id`, `product` and
+		// `qty` into the declaration and dropped a rename's alias — #984's own
+		// defect living inside #978's answer (round-1 B3), and the reason this
+		// shape was declined before the operator's namer was called.
+		{"star_derived_side_filtered",
+			"SELECT * FROM zrfull a JOIN (SELECT c0, d1 FROM zrother WHERE c0 > 900) b " +
+				"ON b.c0 = a.c0", "SELECT * FROM zrfull a JOIN (SELECT c0, d1 FROM zrother " +
+				"WHERE c0 > 0) b ON b.c0 = a.c0"},
+		{"star_derived_side_computed",
+			"SELECT * FROM zrfull a JOIN (SELECT c0, c0 * 2 AS d2 FROM zrother) b " +
+				"ON b.c0 = a.c0 WHERE a.c0 = 999",
+			"SELECT * FROM zrfull a JOIN (SELECT c0, c0 * 2 AS d2 FROM zrother) b " +
+				"ON b.c0 = a.c0 WHERE a.c0 = 1"},
+		{"star_derived_side_rename",
+			"SELECT * FROM zrfull a JOIN (SELECT c0 AS oid, d1 FROM zrother) b " +
+				"ON b.oid = a.c0 WHERE a.c0 = 999",
+			"SELECT * FROM zrfull a JOIN (SELECT c0 AS oid, d1 FROM zrother) b " +
+				"ON b.oid = a.c0 WHERE a.c0 = 1"},
+		{"star_cte_side",
+			"WITH q AS (SELECT c0, d1 FROM zrother) SELECT * FROM zrfull a JOIN q b " +
+				"ON b.c0 = a.c0 WHERE a.c0 = 999",
+			"WITH q AS (SELECT c0, d1 FROM zrother) SELECT * FROM zrfull a JOIN q b " +
+				"ON b.c0 = a.c0 WHERE a.c0 = 1"},
 		// The controls: written-out select lists, which #416 already covered.
 		// They are here so a regression that took the declaration away from
 		// EVERY zero-row result is not read as a star-only one.

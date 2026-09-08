@@ -255,6 +255,18 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 			want: `k,k,id,customer,total | 1,50,1,Alice,150 | 1,100,1,Alice,150 | ` +
 				`2,75,2,Bob,200 | 2,125,2,Bob,200`},
 
+		// AN EMPTY DERIVED BUILD IS SHAPED BY WHAT THE BLOCK PUBLISHES. A
+		// LEFT join over a derived side that matches NOTHING has no batch to
+		// take a schema from, so the plan's declaration is the answer — and
+		// read from the scan below the block it padded the row with the
+		// table's own columns: eight for PostgreSQL's five, on the
+		// single-process arms, at bb8635a4 and until round 2 (round-1 P2).
+		{name: "boundary/an-empty-derived-build-declares-the-block",
+			sql: `SELECT * FROM lat_ord o LEFT JOIN (SELECT order_id, id * 1.5 AS h ` +
+				`FROM lat_item WHERE amount > 1000) s ON s.order_id = o.id ORDER BY o.id`,
+			want: `id,customer,total,order_id,h | 1,Alice,150,NULL,NULL | ` +
+				`2,Bob,200,NULL,NULL | 3,Carol,0,NULL,NULL`},
+
 		// THE RESIDUE — three shapes, each ROUTED, each measured wrong or loud
 		// at bb8635a4 without the route. This list is the one ADR-0026 §7 and
 		// docs/sql-reference.md state, and it is complete.

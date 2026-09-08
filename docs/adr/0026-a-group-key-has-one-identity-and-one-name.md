@@ -1985,6 +1985,16 @@ A block publishing ONE NAME TWICE (`order_id AS k, amount AS k`) is NOT in the
 residue: it is marked, published and EXECUTES distributed, where `bb8635a4`
 published `order_id, amount` and lost both aliases.
 
+**The declaration reads the PUBLISHED list too, never the stream.** A derived
+block is a real relation on both paths — a `Project` operator on the
+single-process one, a materialized projection on the DAG — so `declaredJoinSchema`
+is given the side's block wherever it is asked what a side EMITS: for the
+zero-row `SELECT *` declaration (§ ADR-0012's #978 entry) and for the schema an
+EMPTY side of a join is padded with. Read from the scan instead, the first
+invented `s.id`, `product` and `qty` into a `RowDescription` and dropped a
+rename's alias, and the second padded a LEFT join's unmatched rows with eight
+columns for PostgreSQL's five.
+
 **A build side that collapses its input is not a repeated scan of its table
 (#981).** `markCoPathingSelfJoinBuilds` walks a join's build dependency chain
 to the underlying scan and force-qualifies every build column when two joins
