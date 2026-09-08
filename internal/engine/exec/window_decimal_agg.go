@@ -139,7 +139,14 @@ func (c windowExactCells) at(r int) batch.Int128 {
 // is a non-decreasing function of the row index — so each row is added once
 // and removed once and the whole partition costs O(n) regardless of frame
 // width.
+//
+// `cells` is HELD here rather than passed to slide/recompute. Those are called
+// once per ROW, and windowExactCells is three slice headers plus an int — 80
+// bytes copied per call for state that is fixed for the whole partition.
+// Resolving it once into the accumulator is ADR-0002's typed-kernel rule
+// applied to the argument as well as to the dispatch.
 type exactFrameAcc struct {
+	cells    windowExactCells
 	sum      batch.Int128
 	count    int64
 	lo, hi   int
@@ -172,7 +179,7 @@ type exactFrameAcc struct {
 // the accumulator already holds, and an unchecked one would let a wrapped
 // intermediate become a plausible-looking total; the flag it raises is not
 // final, since windowExactFrames recomputes the frame before refusing.
-func (a *exactFrameAcc) slide(in *batch.Vector, cells windowExactCells, start, lo, hi int) {
+func (a *exactFrameAcc) slide(in *batch.Vector, start, lo, hi int) {
 	if hi < lo {
 		hi = lo
 	}
@@ -182,7 +189,7 @@ func (a *exactFrameAcc) slide(in *batch.Vector, cells windowExactCells, start, l
 	for a.lo < lo {
 		r := start + a.lo
 		if !in.Nulls.IsNullFast(r) {
-			s, ok := a.sum.SubChecked(cells.at(r))
+			s, ok := a.sum.SubChecked(a.cells.at(r))
 			a.sum = s
 			a.overflow = a.overflow || !ok
 			a.count--
@@ -192,7 +199,7 @@ func (a *exactFrameAcc) slide(in *batch.Vector, cells windowExactCells, start, l
 	for a.hi < hi {
 		r := start + a.hi
 		if !in.Nulls.IsNullFast(r) {
-			s, ok := a.sum.AddChecked(cells.at(r))
+			s, ok := a.sum.AddChecked(a.cells.at(r))
 			a.sum = s
 			a.overflow = a.overflow || !ok
 			a.count++
@@ -216,7 +223,7 @@ func (a *exactFrameAcc) reset(pos int) {
 // answer the other spelling of the query gives. Called only when the
 // incremental slide raised the flag, so its O(frame width) cost is paid on
 // the rare overflowing frame and never on the common path.
-func (a *exactFrameAcc) recompute(in *batch.Vector, cells windowExactCells, start, lo, hi int) {
+func (a *exactFrameAcc) recompute(in *batch.Vector, start, lo, hi int) {
 	if hi < lo {
 		hi = lo
 	}
@@ -224,7 +231,7 @@ func (a *exactFrameAcc) recompute(in *batch.Vector, cells windowExactCells, star
 	for a.hi < hi {
 		r := start + a.hi
 		if !in.Nulls.IsNullFast(r) {
-			s, ok := a.sum.AddChecked(cells.at(r))
+			s, ok := a.sum.AddChecked(a.cells.at(r))
 			a.sum = s
 			a.overflow = a.overflow || !ok
 			a.count++
@@ -266,7 +273,7 @@ func windowExactFrames(winVec, inputVec *batch.Vector, cells windowExactCells,
 		// it is refused instead.
 		return windowDecimalAvgUnrepresentable(wc.OutputCol)
 	}
-	var acc exactFrameAcc
+	acc := exactFrameAcc{cells: cells}
 	out := winVec.DecimalData.Data
 	// The division memo. A frame whose ends did not move has the same (sum,
 	// count) as the previous row's and therefore the same quotient — which is
@@ -279,14 +286,14 @@ func windowExactFrames(winVec, inputVec *batch.Vector, cells windowExactCells,
 	var memoQ batch.Int128
 	for i := 0; i < n; i++ {
 		lo, hi := fr.bounds(i)
-		acc.slide(inputVec, cells, start, lo, hi)
+		acc.slide(inputVec, start, lo, hi)
 		if acc.overflow {
 			// The incremental state left the range. That is not yet an
 			// answer: a slide carries state between frames, so the flag may
 			// belong to a transient rather than to THIS frame's rows. Sum
 			// them on their own — the grouped SUM's own arithmetic — and
 			// refuse only if that overflows too.
-			acc.recompute(inputVec, cells, start, lo, hi)
+			acc.recompute(inputVec, start, lo, hi)
 			if acc.overflow {
 				if avg {
 					return windowDecimalAvgUnrepresentable(wc.OutputCol)
@@ -329,13 +336,13 @@ func windowExactFrames(winVec, inputVec *batch.Vector, cells windowExactCells,
 // query actually returns.
 func windowExactIntFrames(winVec, inputVec *batch.Vector, cells windowExactCells,
 	fr resolvedFrame, start, n int, wc WindowColumn) error {
-	var acc exactFrameAcc
+	acc := exactFrameAcc{cells: cells}
 	out := winVec.Int64Data
 	for i := 0; i < n; i++ {
 		lo, hi := fr.bounds(i)
-		acc.slide(inputVec, cells, start, lo, hi)
+		acc.slide(inputVec, start, lo, hi)
 		if acc.overflow {
-			acc.recompute(inputVec, cells, start, lo, hi)
+			acc.recompute(inputVec, start, lo, hi)
 			if acc.overflow {
 				return integerSumOverflow(wc.OutputCol)
 			}
