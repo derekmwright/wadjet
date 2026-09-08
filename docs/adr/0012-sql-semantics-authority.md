@@ -333,6 +333,31 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      makes a future drift between the two producers a failing test rather than
      a report.
 
+     A **COMPUTED** argument takes the same rule, read from the ARGUMENT's own
+     width rather than from the column it is materialized into (added
+     2026-09-08, #987 review B1). PostgreSQL's SUM rule is by input width, and
+     it reads the EXPRESSION: `sum(CASE WHEN … THEN 1 ELSE 0 END)` is bigint
+     there because the CASE is int4, which is TPC-H Q12's shape. Every integer
+     expression in this engine computes in int64 (ADR-0024's recorded
+     widening), so the materialized column declares INT64 for int4 arithmetic
+     and int8 arithmetic alike and cannot answer the question. The GROUPED
+     path walks the argument's AST for it (`physical.aggComputedInputDecl`
+     over `aggInputIsWideInteger`); the window did not carry an AST at all,
+     fell to the float8 fallback at plan time and was widened to
+     `DECIMAL(38,0)` by the operator — so six expressions went out under OID
+     1700 windowed and OID 20 grouped, which is this same entry's defect with
+     the spellings' roles swapped. `logical.WindowExpr` now carries
+     `InputExpr` as `logical.AggExpr` already did, and
+     `physical.windowComputedArgDecl` asks the same two functions over the
+     same declarations. One `int8` operand anywhere in the expression makes
+     the whole of it numeric, in both spellings, as PostgreSQL does.
+
+     The operator's runtime correction honors a bigint declaration over an
+     int64-carried input for that reason: no VECTOR can tell `SUM(i32 * 1)`
+     from `SUM(i64 * 1)`, only the plan can. A total that does not fit the
+     declaration is 22003, never a wrapped number — loud in the one direction
+     the inference could be wrong.
+
    - **A window SUM/AVG over an INTEGER column answers in float64 — wrong
      DIGITS, not only a wrong declaration.** (Added 2026-09-04, #813, arc F1;
      CORRECTED 2026-09-05 after the arc's round-1 review, which measured what
@@ -418,6 +443,17 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `sql.parseWindowFunc`, the one site where a call becomes a window call,
      so it covers every door and both the bare and the nested spelling; gated
      by `coordinator.TestAWindowFunctionRefusesDISTINCT` on four arms.
+
+     The MESSAGE is PostgreSQL's sentence, once (amended 2026-09-08, #987
+     review P3). It arrived as `parsing SQL: parsing SQL: DISTINCT is not
+     implemented for window functions (sum)`, because the refusal is raised
+     inside the recursive descent and `parseDispatch` prefixed everything that
+     came out of it. `sql.wrapParseFailure` applies to the TEXT the rule
+     `sql.Parse` already applies to the SQLSTATE — an error that carries its
+     own code keeps it — so a parse FAILURE still gets a stage label and a
+     deliberate REFUSAL passes through as written. The single remaining label
+     is the door's own and is a recorded difference between the doors
+     (`server/http_door_sqlstate_test.go`).
    - **`SUM`/`AVG` over PORT and PROTOCOL follow `int4`'s result types.**
      (Added 2026-09-07, #953, arc K2.) PostgreSQL has neither type, so this is
      an EXTENSION rather than a divergence — but it is not a free choice
