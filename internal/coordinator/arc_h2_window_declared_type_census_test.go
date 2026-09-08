@@ -236,6 +236,121 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 		{name: "953 boundary control: SUM(DATE) grouped", sql: k2grp("SUM", "c_date"),
 			want: "cols=[v:FLOAT64] rows=1 | 8.583688e+07"},
 
+		// #953's grouped half reaches the accumulator through FOUR producers
+		// and the whole-table cells above exercise only the ones a scalar
+		// aggregate uses. Round 1 found that: reverting the PROTOCOL arm of
+		// `kernel.ResolveRowSum` ALONE, or the four `agg_scatter.go` SUM/AVG
+		// arms ALONE, left every gate in the branch green while
+		// `SUM(c_proto) … GROUP BY` came back NULL on four arms. A gate that
+		// passes with the fix reverted is not a gate.
+		//
+		// A KEYED GROUP BY drives the row updater and the SoA scatter;
+		// DISTINCT drives the distinct-set path, which is a third producer
+		// again. Each cell below fails on the single-hunk revert of the
+		// producer it names.
+		// The three group SUMs add to 621435 — the whole-table total the cell
+		// above pins — and each group's AVG is that group's SUM over its own
+		// COUNT(*) (1660 / 1640 / 1637), so every number here is checkable
+		// from PostgreSQL's `sum(int4)` rule and arithmetic, not taken on
+		// faith. `c_proto % 3` declares float8, which is the modulo's own
+		// pre-existing typing and not this arc's.
+		{name: "953 keyed: SUM(PROTOCOL) GROUP BY a key — the row updater and the SoA scatter",
+			sql:  "SELECT c_proto % 3 AS g, SUM(c_proto) AS s FROM typemx GROUP BY c_proto % 3 ORDER BY 1",
+			want: "cols=[g:FLOAT64 s:INT64] rows=4 | 0,209145 | 1,205430 | 2,206860 | NULL,NULL"},
+		{name: "953 keyed: AVG(PROTOCOL) GROUP BY a key — the exact Int128 scatter",
+			sql: "SELECT c_proto % 3 AS g, AVG(c_proto) AS a FROM typemx GROUP BY c_proto % 3 ORDER BY 1",
+			want: "cols=[g:FLOAT64 a:DECIMAL(38,4)] rows=4 | 0,125.9910 | 1,125.2622 | " +
+				"2,126.3653 | NULL,NULL"},
+		{name: "953 keyed: SUM(PORT) GROUP BY a key",
+			sql: "SELECT c_port % 3 AS g, SUM(c_port) AS s FROM typemx GROUP BY c_port % 3 ORDER BY 1",
+			want: "cols=[g:FLOAT64 s:INT64] rows=4 | 0,5792238 | 1,5792226 | " +
+				"2,5792214 | NULL,NULL"},
+		// PROTOCOL holds 0..255 with every value present, so the DISTINCT
+		// total is 0+1+…+255 = 32640 over 256 values — sharply different from
+		// the raw 621435, which is what lets this cell tell a working DISTINCT
+		// from a dropped one.
+		{name: "953 DISTINCT: SUM(DISTINCT PROTOCOL) is the distinct total, not the raw one",
+			sql:  "SELECT SUM(DISTINCT c_proto) AS s, COUNT(DISTINCT c_proto) AS n FROM typemx",
+			want: "cols=[s:INT64 n:INT64] rows=1 | 32640,256"},
+		{name: "953 DISTINCT: AVG(DISTINCT PROTOCOL) is 32640/256",
+			sql:  "SELECT AVG(DISTINCT c_proto) AS a FROM typemx",
+			want: "cols=[a:DECIMAL(38,4)] rows=1 | 127.5000"},
+		// PORT's values are all distinct, so DISTINCT must change NEITHER the
+		// total nor the count. Asserted as that equality, so the cell carries
+		// its own proof instead of a number from elsewhere.
+		{name: "953 DISTINCT: SUM(DISTINCT PORT) equals SUM(PORT) — every value is distinct",
+			sql: "SELECT SUM(DISTINCT c_port) AS s, SUM(c_port) AS t, " +
+				"COUNT(DISTINCT c_port) AS n, COUNT(c_port) AS c FROM typemx",
+			want: "cols=[s:INT64 t:INT64 n:INT64 c:INT64] rows=1 | 17376678,17376678,4932,4932"},
+
+		// #987 review P4's control: the window WITHOUT DISTINCT still answers.
+		// The refusal itself is TestAWindowFunctionRefusesDISTINCT, which
+		// asserts the SQLSTATE rather than a rendered message — the four arms
+		// wrap the parse error under different prefixes and a prefix match
+		// would pin the wrapping instead of the refusal.
+		{name: "987 P4 control: a window WITHOUT DISTINCT still answers",
+			sql:  k2win("SUM", "c_proto"),
+			want: "cols=[v:INT64] rows=1 | 621435"},
+
+		// A COMPUTED window argument. The first REPORT called this a deferral
+		// — "a computed window argument keeps float8" — and round 1 measured
+		// it FALSE: the pre-window projection materializes the expression as a
+		// column with its own INT64 declaration, so windowSpecOutputType's new
+		// integer arm reads it and these are exact too. Two of them returned
+		// the WRONG NUMBER at bb8635a4 and nothing in the branch held any of
+		// it; every `want` is PostgreSQL 17.11's over these ten rows.
+		{name: "987 computed argument: SUM(int8 * 1) OVER ()",
+			sql:  "SELECT SUM(w_i64 * 1) OVER () AS v FROM numwidth ORDER BY 1 LIMIT 1",
+			want: "cols=[v:DECIMAL(38,0)] rows=1 | 9007201419001868"},
+		{name: "987 computed argument: SUM(int8 * 2) OVER ()",
+			sql:  "SELECT SUM(w_i64 * 2) OVER () AS v FROM numwidth ORDER BY 1 LIMIT 1",
+			want: "cols=[v:DECIMAL(38,0)] rows=1 | 18014402838003736"},
+		{
+			// base answered 9.007201419001876e+15; PostgreSQL says …877.
+			name: "987 computed argument: SUM(int8 + 1) OVER () — the digits moved",
+			sql:  "SELECT SUM(w_i64 + 1) OVER () AS v FROM numwidth ORDER BY 1 LIMIT 1",
+			want: "cols=[v:DECIMAL(38,0)] rows=1 | 9007201419001877",
+		},
+		{name: "987 computed argument: SUM(int8 + int4) OVER ()",
+			sql:  "SELECT SUM(w_i64 + w_i32) OVER () AS v FROM numwidth ORDER BY 1 LIMIT 1",
+			want: "cols=[v:DECIMAL(38,0)] rows=1 | 4328521749"},
+		{
+			// base answered 9.007201402224632e+15; PostgreSQL says …634.
+			name: "987 computed argument: SUM(CASE …) OVER () — the digits moved",
+			sql: "SELECT SUM(CASE WHEN w_key > 3 THEN w_i64 ELSE 0 END) OVER () AS v " +
+				"FROM numwidth ORDER BY 1 LIMIT 1",
+			want: "cols=[v:DECIMAL(38,0)] rows=1 | 9007201402224634",
+		},
+		{
+			// #987 review P2, and the arc's own position 3 read in the other
+			// direction. ABS answers in its ARGUMENT's numeric domain, so
+			// `sum(abs(int8))` is numeric in PostgreSQL — which the WINDOW
+			// spelling already said and the GROUPED spelling did not:
+			// aggInputIsWideInteger declined every non-polymorphic function
+			// and read the expression as int4, declaring bigint. Same digits,
+			// two boxes. Both ask expr.NumericDomainScalarFn now.
+			name: "987 P2: SUM(ABS(int8)) is numeric in BOTH spellings",
+			sql:  "SELECT SUM(ABS(w_i64)) OVER () AS v FROM numwidth ORDER BY 1 LIMIT 1",
+			want: "cols=[v:DECIMAL(38,0)] rows=1 | 9007201419001908",
+		},
+		{name: "987 P2: the GROUPED spelling of the same aggregate",
+			sql:  "SELECT SUM(ABS(w_i64)) AS v FROM numwidth",
+			want: "cols=[v:DECIMAL(38,0)] rows=1 | 9007201419001908"},
+		{
+			// The BOUNDARY of P2, attempted from the other side: a computed
+			// int4 argument stays bigint in both spellings, which is
+			// PostgreSQL's answer and TPC-H Q12's shape.
+			name: "987 P2 boundary: SUM(ABS(int4)) stays bigint in both spellings",
+			sql:  "SELECT SUM(ABS(w_i32)) OVER () AS v FROM numwidth ORDER BY 1 LIMIT 1",
+			want: "cols=[v:INT64] rows=1 | 2164260914",
+		},
+		{name: "987 P2 boundary control: the GROUPED SUM(ABS(int4))",
+			sql:  "SELECT SUM(ABS(w_i32)) AS v FROM numwidth",
+			want: "cols=[v:INT64] rows=1 | 2164260914"},
+		{name: "987 P2 boundary control: SUM(CASE of ones) stays bigint (TPC-H Q12's shape)",
+			sql:  "SELECT SUM(CASE WHEN w_key > 3 THEN 1 ELSE 0 END) AS v FROM numwidth",
+			want: "cols=[v:INT64] rows=1 | 6"},
+
 		{
 			// The int4 half of the same shape: bigint, and the sliding frame
 			// again, because SUM(int4) writes through a DIFFERENT arm of

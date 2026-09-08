@@ -69,3 +69,42 @@ func TestIntegerAccOutputTypeIsPostgresRule(t *testing.T) {
 		})
 	}
 }
+
+// TestTheFlatScatterCoversEveryTypeTheIntegerTableNames is the SoA half of the
+// #953 blocker (round-1 B1).
+//
+// isFlatSumType is what tells the aggregate that the flat scatter has a SUM/AVG
+// arm for a column type — and therefore that it increments the count for it.
+// TypeProtocol was missing from it, and from the scatter's four SUM/AVG arms,
+// which is one half of why the GROUPED SUM(c_proto) answered NULL. Reverting
+// that entry ALONE changes no query answer, because HashAggregate falls back to
+// a producer that is now also correct; a redundancy is not a gate, so the
+// agreement is asserted here, where the entry is visible on its own.
+//
+// The two lists are not the same list, and the boundary types say so: DATE,
+// TIMESTAMP and DURATION ARE flat-summable and are deliberately NOT in the
+// integer table, because PostgreSQL has no `sum(date)` to follow.
+func TestTheFlatScatterCoversEveryTypeTheIntegerTableNames(t *testing.T) {
+	for _, typ := range []parquet.TypeID{
+		parquet.TypeInt32, parquet.TypeInt64, parquet.TypePort, parquet.TypeProtocol,
+	} {
+		if !integerAccInput(typ) {
+			t.Errorf("%v is not in the integer result-type table", typ)
+		}
+		if !isFlatSumType(typ) {
+			t.Errorf("%v is in the integer result-type table but the flat scatter has no "+
+				"SUM/AVG arm for it — the declaration and the carrier disagree", typ)
+		}
+	}
+	for _, typ := range []parquet.TypeID{
+		parquet.TypeDate, parquet.TypeTimestamp, parquet.TypeDuration,
+	} {
+		if integerAccInput(typ) {
+			t.Errorf("%v joined the integer result-type table; PostgreSQL has no "+
+				"integer aggregate for it to follow", typ)
+		}
+		if !isFlatSumType(typ) {
+			t.Errorf("%v stopped being flat-summable — that is a value change, not a typing one", typ)
+		}
+	}
+}
