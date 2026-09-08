@@ -199,10 +199,17 @@ func TestArcK1AnOutputSlotHasOneIdentity(t *testing.T) {
 		// hunk in a names arc. Trading one silent wrong answer for another is
 		// not a fix (rule 11).
 		//
-		// The consumers still on the name path, named: a stage's GROUP BY key,
-		// a join key and a join stage's projection, the coordinator's
-		// post-gather DISTINCT/LIMIT, a window's ARGUMENT, and a sort over a
-		// derived block's star.
+		// THE BOUNDARY IS A RULE, not this list. **Every consumer above the
+		// aggregate that still resolves by NAME answers the group key on the
+		// DAG**, and the cells below are witnesses to it rather than an
+		// enumeration of it — a reader who takes them for the boundary will
+		// find more shapes outside, because there are more consumers. The ones
+		// witnessed here: a stage's GROUP BY key, a join key and a join
+		// stage's projection, the coordinator's post-gather DISTINCT/LIMIT, a
+		// window's ARGUMENT, a sort over a derived block's star, a SECOND
+		// aggregate sharing the alias, and an explicit column read through a
+		// derived table. The census in REPORT counts these cells, not the
+		// rule's full extent.
 		{
 			name: "968 PINNED an outer GROUP BY over the collision",
 			sql: `SELECT t.a AS ta, COUNT(*) AS n FROM (SELECT x.a AS b, SUM(x.b) AS a ` +
@@ -326,6 +333,59 @@ func TestArcK1AnOutputSlotHasOneIdentity(t *testing.T) {
 			why: "the star expands to the block's two output names and the sort term `t.a` " +
 				"reaches the aggregate's stream as `a`, where the slot pass has no SELECT " +
 				"item to read a class from",
+		},
+		{
+			// TWO AGGREGATES BOTH ALIASED `a`, beside the key that publishes
+			// that name too — three columns of one name in the aggregate's
+			// output. The single-process projection hands out the first and
+			// the second AGGREGATE slot by class (the cursor cell above proves
+			// it), so slot 2 is the SUM there; on the DAG the gather's pairing
+			// takes the first column of the name and slot 2 carries the group
+			// key, with the key's declared type.
+			//
+			// The window beside it ranks correctly on all four arms, which is
+			// what says this is the deferred consumer and not the one round 2
+			// closed.
+			name: "968 PINNED two aggregates sharing the key's name, read on the DAG",
+			sql: `SELECT x.a AS b, SUM(x.b) AS a, MIN(x.b) AS a, ` +
+				`RANK() OVER (ORDER BY MIN(x.b)) AS rk FROM decpair x GROUP BY x.a ORDER BY 2`,
+			want: "cols=[b:DECIMAL(9,2) a:DECIMAL(38,4) a:DECIMAL(18,4) rk:INT64] rows=5 | " +
+				"-0.01,-0.0100,-0.0100,1 | 0.00,0.0000,0.0000,2 | NULL,1.0000,1.0000,3 | " +
+				"2.00,10.0000,10.0000,4 | 12.75,38.2500,12.7499,5",
+			pin: map[string]string{
+				"dag": "cols=[b:DECIMAL(9,2) a:DECIMAL(9,2) a:DECIMAL(38,4) rk:INT64] rows=5 | " +
+					"-0.01,-0.01,-0.0100,1 | 0.00,0.00,0.0000,2 | NULL,NULL,1.0000,3 | " +
+					"2.00,2.00,10.0000,4 | 12.75,12.75,38.2500,5",
+				"dagshuf": "cols=[b:DECIMAL(9,2) a:DECIMAL(9,2) a:DECIMAL(38,4) rk:INT64] rows=5 | " +
+					"-0.01,-0.01,-0.0100,1 | 0.00,0.00,0.0000,2 | NULL,NULL,1.0000,3 | " +
+					"2.00,2.00,10.0000,4 | 12.75,12.75,38.2500,5",
+			},
+			why: "the gather's rename pairing resolves each output name against the " +
+				"aggregate's stream and takes the first of THREE columns called `a`; the " +
+				"single-process projection hands out the two aggregate slots by class",
+		},
+		{
+			// The collision read through a derived table by an EXPLICIT
+			// column — no star, no outer aggregate, just `t.a`. It was wrong
+			// on ALL FOUR arms at bb8635a4; the two single-process arms answer
+			// now, because the projection over the aggregate binds by slot,
+			// and the DAG's derived-block consumer is the same name path as
+			// the cells above. `t.rk` beside it is right on every arm.
+			name: "968 PINNED the collision read through a derived table by name",
+			sql: `SELECT t.rk AS rk, t.a AS a FROM (SELECT x.a AS b, SUM(x.b) AS a, ` +
+				`RANK() OVER (ORDER BY SUM(x.b)) AS rk FROM decpair x GROUP BY x.a) t ` +
+				`ORDER BY rk`,
+			want: "cols=[rk:INT64 a:DECIMAL(38,4)] rows=5 | 1,-0.0100 | 2,0.0000 | " +
+				"3,1.0000 | 4,10.0000 | 5,38.2500",
+			pin: map[string]string{
+				"dag": "cols=[rk:INT64 a:DECIMAL(9,2)] rows=5 | 1,-0.01 | 2,0.00 | " +
+					"3,NULL | 4,2.00 | 5,12.75",
+				"dagshuf": "cols=[rk:INT64 a:DECIMAL(9,2)] rows=5 | 1,-0.01 | 2,0.00 | " +
+					"3,NULL | 4,2.00 | 5,12.75",
+			},
+			why: "a derived block's consumer reads `a` off the aggregate's stream, which " +
+				"publishes it twice, and takes the first; wrong on all four arms at " +
+				"bb8635a4 and right on the single-process arms now",
 		},
 	})
 }

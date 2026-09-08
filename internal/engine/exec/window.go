@@ -394,9 +394,20 @@ func (w *Window) bindKeyNames(b *batch.RecordBatch) error {
 func boundWindowKey(b *batch.RecordBatch, clause, name string) (string, error) {
 	idx := columnIndexFallback(b, name)
 	if idx < 0 {
-		have := make([]string, len(b.Schema))
-		for i, c := range b.Schema {
-			have[i] = c.Name
+		// The available list names each column ONCE. A producer may emit one
+		// name twice — a group key beside an aggregate aliased to it — and
+		// `(input has: a, a)` is that collision talking rather than anything
+		// the user wrote or can act on: PostgreSQL names the column, not the
+		// schema (#968, round-2 P3). Order is the schema's, so the list still
+		// reads as the row does.
+		have := make([]string, 0, len(b.Schema))
+		seen := make(map[string]bool, len(b.Schema))
+		for _, c := range b.Schema {
+			if seen[c.Name] {
+				continue
+			}
+			seen[c.Name] = true
+			have = append(have, c.Name)
 		}
 		// 0A000 for the reason unresolvedSortKey states: this reaches a
 		// client for a query PostgreSQL answers (#658), and it carried no
