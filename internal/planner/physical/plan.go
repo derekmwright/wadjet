@@ -16854,37 +16854,35 @@ func aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.Deci
 // would change the scale of its own output column. Both engines are exact to
 // the digits they keep and agree to min(scale): ADR-0012 item 9's class.
 //
-// ok=false for every type these rules do not name, which is every non-integer
-// input and wadjet's own int-backed types (DATE/TIMESTAMP/DURATION/PORT/
-// PROTOCOL) — they have no PostgreSQL integer to follow.
+// ok=false for every type these rules do not name.
+//
+// The RULE itself is exec.IntegerAccOutputType, not this pair. The same
+// question is asked by the WINDOW's plan-time declaration
+// (windowSpecOutputType), by the window operator's runtime correction of it
+// (exec.windowAccOutputType) and by exec.aggIntExact, and two tables are two
+// chances for the grouped and the windowed spelling of one query to answer
+// under different types — which is exactly what #813 was. These two are the
+// planner's ADAPTERS onto that table: the function NAME rather than a bool,
+// and logical.DecimalMeta rather than a bare (p,s).
 func aggIntegerOutputType(fn string, in parquet.TypeID) (parquet.TypeID, bool) {
-	switch strings.ToLower(strings.TrimSpace(fn)) {
-	case "sum":
-		switch in {
-		case parquet.TypeInt32:
-			return parquet.TypeInt64, true
-		case parquet.TypeInt64:
-			return parquet.TypeDecimal, true
-		}
-	case "avg":
-		switch in {
-		case parquet.TypeInt32, parquet.TypeInt64:
-			return parquet.TypeDecimal, true
-		}
+	name := strings.ToLower(strings.TrimSpace(fn))
+	if name != "sum" && name != "avg" {
+		return 0, false
 	}
-	return 0, false
+	t, _, _, ok := exec.IntegerAccOutputType(name == "avg", in)
+	return t, ok
 }
 
 func aggIntegerOutputDecimal(fn string, in parquet.TypeID) (logical.DecimalMeta, bool) {
-	t, ok := aggIntegerOutputType(fn, in)
+	name := strings.ToLower(strings.TrimSpace(fn))
+	if name != "sum" && name != "avg" {
+		return logical.DecimalMeta{}, false
+	}
+	t, prec, scale, ok := exec.IntegerAccOutputType(name == "avg", in)
 	if !ok || t != parquet.TypeDecimal {
 		return logical.DecimalMeta{}, false
 	}
-	scale := 0
-	if strings.EqualFold(strings.TrimSpace(fn), "avg") {
-		scale = batch.AvgScale(0)
-	}
-	return logical.DecimalMeta{Precision: batch.MaxDecimalPrecision, Scale: scale}, true
+	return logical.DecimalMeta{Precision: prec, Scale: scale}, true
 }
 
 // aggInputColumnType and aggInputColumnDecimal answer "what does this

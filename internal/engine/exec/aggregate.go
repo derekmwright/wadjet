@@ -7409,9 +7409,10 @@ func (h *HashAggregate) planCountArrays(b *batch.RecordBatch) []int32 {
 // Taken from the live server (`pg_typeof(sum(c_i32))` = bigint,
 // `pg_typeof(sum(c_i64))` = numeric, `pg_typeof(avg(c_i32))` = numeric): the
 // two SUM rules differ because int4's sum has a wider integer type to grow
-// into and int8's does not. Only TypeInt32 and TypeInt64 are here —
-// TypeDate/Timestamp/Duration/Port/Protocol are wadjet's own int-backed types
-// with no PostgreSQL integer to follow, and they keep the rules they had.
+// into and int8's does not. WHICH input types those rules cover is
+// IntegerAccOutputType's answer, not a list repeated here: the window
+// operator and both planner declarations ask the same function, and a list
+// that drifted from it would be a carrier disagreeing with a declaration.
 //
 // It is the ONE predicate every accumulation path consults, so the flat
 // scatter arrays, the row updaters, the batch kernels, the spill run's latched
@@ -7426,27 +7427,21 @@ func (h *HashAggregate) planCountArrays(b *batch.RecordBatch) []int32 {
 // declared output type, and a planner that could not resolve the input at all
 // keeps the float64 it always had, with the accumulator agreeing.
 func aggIntExact(agg AggColumn, typ batch.TypeID) bool {
-	switch agg.Func {
-	case AggSum:
-		// INT32 is here too, and only the DECLARATION lets it in. A user's
-		// SUM(int4) declares bigint and keeps its int64 array; the SUM LEG of
-		// a decomposed AVG(int4) declares numeric, because AVG(int*) is
-		// numeric and its sum has to be the same carrier. Deciding that from
-		// the input type alone made the partial's carrier depend on whether a
-		// task SAW A BATCH: one that did emitted int64 (the SUM(int4) rule)
-		// and one that did not emitted the spec's DECIMAL, and ADR-0010's
-		// shuffle type guard refused the read. `SELECT AVG(c_i32) FROM typemx
-		// WHERE id < 3` — any predicate selective enough to leave a scan task
-		// empty — was a hard DAG failure on a query the single-process path
-		// answers (#784, review round 2 B2).
-		if typ != batch.TypeInt64 && typ != batch.TypeInt32 {
-			return false
-		}
-	case AggAvg:
-		if typ != batch.TypeInt32 && typ != batch.TypeInt64 {
-			return false
-		}
-	default:
+	// The INT32 class is in scope too, and only the DECLARATION lets it in. A
+	// user's SUM(int4) declares bigint and keeps its int64 array; the SUM LEG
+	// of a decomposed AVG(int4) declares numeric, because AVG(int*) is numeric
+	// and its sum has to be the same carrier. Deciding that from the input
+	// type alone made the partial's carrier depend on whether a task SAW A
+	// BATCH: one that did emitted int64 (the SUM(int4) rule) and one that did
+	// not emitted the spec's DECIMAL, and ADR-0010's shuffle type guard
+	// refused the read. `SELECT AVG(c_i32) FROM typemx WHERE id < 3` — any
+	// predicate selective enough to leave a scan task empty — was a hard DAG
+	// failure on a query the single-process path answers (#784, review round
+	// 2 B2).
+	if agg.Func != AggSum && agg.Func != AggAvg {
+		return false
+	}
+	if !integerAccInput(typ) {
 		return false
 	}
 	return agg.OutputType == parquet.TypeDecimal
