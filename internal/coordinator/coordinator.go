@@ -2742,6 +2742,31 @@ func mergeShardOf(key []byte, shards int) int {
 // reAggregatePartials' finalize step where the source value is already in a
 // typed vector slot.
 func copyVectorValue(dst *batch.Vector, dstRow int, src *batch.Vector, srcRow int, typ parquet.TypeID) {
+	// A NULL ROW IS STILL A WRITE, and the batch package's own null writer is
+	// the one that knows what each carrier owes (#1007).
+	//
+	// A variable-length column's value at row i is `Data[Offsets[i]:Offsets[i+1]]`,
+	// so a row that writes NOTHING leaves `Offsets[i+1]` at zero and the NEXT
+	// non-null value is read from the start of the arena — every byte written
+	// so far, concatenated, under one row's name. ARRAY, MAP and ROW have the
+	// same shape one level down. `coalesceForOrdering` used to set the null bit
+	// and `continue`, and `SELECT DISTINCT * FROM typemx a JOIN typemx b ON
+	// b.id = a.id ORDER BY a.id DESC` came back on both DAG arms with 116 of
+	// its 5000 `c_str` values carrying the concatenation of every value above
+	// them — a silent CORRUPTION of any coordinator merge over more than one
+	// batch whose STRING/BYTES/IPv6/CIDR/UUID/ARRAY/MAP/ROW column carries a
+	// NULL.
+	//
+	// `batch.Vector.WriteNullAt` is that writer: it sets the bit AND advances
+	// the offsets by an empty span, recursing into a ROW's children. Deciding
+	// it HERE rather than at each caller is the point — this is the second
+	// copier in the engine and `exec.copyVectorValue` already decides it
+	// inside, which is why the single-process paths were never wrong.
+	if src.Nulls.IsNullFast(srcRow) {
+		dst.WriteNullAt(dstRow)
+		return
+	}
+	dst.Nulls.SetValid(dstRow)
 	switch typ {
 	case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
 		dst.Int32Data[dstRow] = src.Int32Data[srcRow]
@@ -2867,11 +2892,9 @@ func coalesceForOrdering(batches []*batch.RecordBatch) []*batch.RecordBatch {
 				src = int(b.Sel[i])
 			}
 			for ci := range schema {
-				out.Columns[ci].Nulls.SetValid(ri)
-				if b.Columns[ci].Nulls.IsNullFast(src) {
-					out.Columns[ci].Nulls.SetNull(ri)
-					continue
-				}
+				// The null decision lives inside copyVectorValue, because a
+				// NULL row of a variable-length column still owes its offset
+				// (#1007) and no caller should be able to forget it.
 				copyVectorValue(out.Columns[ci], ri, b.Columns[ci], src, schema[ci].Type)
 			}
 			ri++
