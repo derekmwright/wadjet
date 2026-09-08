@@ -292,6 +292,12 @@ type Coordinator struct {
 	// `Stage.GroupByCols` is one field for both (#736), and that were routed to
 	// the coordinator-local single-process pipeline instead.
 	localGroupKey atomic.Int64
+	// ohlcvStateRoutes counts aggregate stages dispatched with a bar
+	// DECOMPOSED into its mergeable state (#965, ADR-0035). Rows cannot tell
+	// that route from the one-level RawInputAggregate over raw rows — both
+	// answer the same bar — so the claim is asserted here instead of
+	// inferred. See OhlcvStateRoutes.
+	ohlcvStateRoutes atomic.Int64
 	// localInSubquery counts queries whose plan the stage DAG refused for an
 	// IN-subquery the planner could not materialize into a literal set, and
 	// which ran on the coordinator-local pipeline instead (#524).
