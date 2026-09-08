@@ -79,7 +79,19 @@ type f1Case struct {
 	want string
 	// pin overrides want for the named arm, with the mechanism in `why`.
 	pin map[string]string
-	why string
+	// wantDag and wantDagshuf are the same thing for the two DISTRIBUTED arms
+	// under their own names, and they exist because #993's second half is that
+	// a census carrying ONE expectation for both DAG arms cannot state what an
+	// arm-specific divergence IS — it has to drop the shape instead. Most
+	// specific first: wantDagshuf / wantDag, then pin[arm], then want.
+	//
+	// `pin` could carry the same two keys; these are here because a per-ARM
+	// map and a per-ENGINE expectation read differently at the call site, and
+	// the shapes that need them are the ones where the two DAG arms are two
+	// engines rather than two configurations of one.
+	wantDag     string
+	wantDagshuf string
+	why         string
 	// routed is the local-route counter delta each DAG arm is expected to
 	// move, keyed by arm name — "" or absent meaning the arm EXECUTED the
 	// query as stages. Rows alone cannot tell those apart, and both are
@@ -100,6 +112,14 @@ func f1Run(t *testing.T, arms []f1Arm, cases []f1Case) {
 				want := tc.want
 				if p, ok := tc.pin[arm.name]; ok {
 					want = p
+				}
+				// Most specific last: a named per-DAG-arm expectation wins
+				// over `pin` and over `want`.
+				switch {
+				case arm.name == "dag" && tc.wantDag != "":
+					want = tc.wantDag
+				case arm.name == "dagshuf" && tc.wantDagshuf != "":
+					want = tc.wantDagshuf
 				}
 				// A pinned REFUSAL is matched by prefix: the message carries a
 				// byte count that moves with the corpus, and what the pin
