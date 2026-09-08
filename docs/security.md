@@ -588,8 +588,15 @@ the column's own type (`value: "TIMESTAMP '1970-01-01'"`) when a client
 depends on the declaration.
 
 **Column denial** (`columns: {<column>: deny}`): for this identity the column
-**does not exist**. It is absent from `SELECT *` and from the result schema,
-and naming it anywhere in a statement — the SELECT list, a WHERE clause, an
+**does not exist**. It is absent from the result schema and from every star —
+`SELECT *`, `SELECT t.*`, a star beside another item, a derived table's or a
+CTE's star, a star under a positional `ORDER BY`, a star over a join, and a
+star renamed by a column-alias list, which renames the columns the identity can
+see and not the ones the catalog declares — because a star expands from what
+its source **publishes**, which under a policy is the security projection's
+list and never the catalog's.
+
+Naming the column anywhere in a statement — the SELECT list, a WHERE clause, an
 aggregate, a derived table, a CTE, a subquery — is
 `42703 unknown column "<name>"`, the same error the engine gives for a column
 the table really does not have. It is not returned as NULL, and a predicate on

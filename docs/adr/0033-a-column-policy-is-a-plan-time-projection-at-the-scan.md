@@ -481,3 +481,66 @@ Every fixture in this arc registers its relation through the CATALOG, because
 the DDL door folds a name it MINTS: a CamelCase relation is one a dataset
 brought, which is the only way the two spellings can differ at all — and the
 reason every previous policy fixture, all lower case, was blind to this.
+
+## Amendment 2026-09-08 — a star expands from the POLICED list, not the catalog's
+
+Decision 1 says the security projection replaces the column "for every consumer
+above the scan… `SELECT *`". A star is a consumer above the scan, but it is a
+consumer of a particular kind: it does not name a column, it asks for the
+relation's column LIST, and until this amendment it asked the wrong thing for
+it.
+
+`logical.ExpandStarProjections` read that list off the scan's catalog-annotated
+`ScanColumns` — the table as the CATALOG declares it, underneath the barrier.
+`SELECT *` was right anyway, but only by accident of shape: a bare star alone
+builds no projection at all, so the plan's output IS the security projection's
+output. Every other spelling read past the barrier. In v0.18.61 `SELECT a.*`
+sent an analyst a `salary` column its policy DENIES, on the embedded, pgwire
+and HTTP single-process doors; a census over eight doors and 22 star shapes
+found 40 leaking door-cells, six shapes of which predate the reported one.
+
+**A star's source is what the relation PUBLISHES for this identity.**
+
+`logical.StarSourceColumns` is the one list every star expansion asks for, and
+`publishedScanColumns` inside it answers with the security projection's list
+wherever one stands over the scan. Consequences:
+
+1. **One source, every spelling.** `*`, `t.*`, a star beside another item, a
+   derived table's or a CTE's star, a star nested inside either, a star under a
+   positional `ORDER BY`, a star over a join, a star under a filter or a LIMIT,
+   and a star inside a subquery all take the same list. The rule cannot differ
+   by spelling, which is the failure this amendment exists to make impossible —
+   `SELECT *` had a gate cell and `SELECT a.*`, one keystroke away, did not.
+
+2. **A column-alias list renames what the identity can SEE.** The width a
+   `d(k1, …, kn)` list must match is the POLICED width. Reading the catalog's
+   list renamed the denied column to `k5` and left the real fifth column behind
+   under its own name — a denied column laundered through a rename, invisible
+   to any check that looks for the column's name.
+
+3. **A list that cannot be enumerated REFUSES.** A barrier whose own column
+   list cannot be read answers nil, the star stays unexpanded, and the planner
+   refuses it (0A000, one sentence). It never falls back to the catalog list: a
+   security control never degrades to a grant, which is the same rule an
+   uncoverable scan already follows.
+
+4. **Second answers are gated structurally, not only by cells.**
+   `logical.TestOnlyOnePathReadsAScanColumnListForAStar` parses the three
+   planner packages and asserts that `publishedScanColumns` is the only
+   function inside `star_expansion.go` that reads a scan's own column list,
+   that `ExpandStarProjections`'s call sites are pinned, and that no other
+   planner function reads a scan's column list while talking about stars —
+   except four named "what does this subtree publish" helpers, each of which
+   returns at the first Project (which a security projection is) and each of
+   which has a test showing it. An allow-list entry that stops matching FAILS.
+
+Not settled here: a star whose source is a decorrelated LATERAL is still
+refused rather than expanded (#979), and a star inside a decorrelated `IN`
+subquery's derived table is refused on the single-process arms while the DAG
+answers it — an arm divergence in the expansion's REACH, not in the policed
+list, and it predates this amendment.
+
+Gate: `server.TestPolicyMaskingIsPlanTimeOnEveryDoor` (17 star cells, eight
+doors, no `-short`), `logical.TestEveryStarSpellingExpandsFromThePolicedList`,
+and CI's "Door Security Gates (no -short)" step — the matrix skips under
+`-short`, which is why v0.18.61 shipped through a green CI.
