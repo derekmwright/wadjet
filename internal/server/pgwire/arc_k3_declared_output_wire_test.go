@@ -29,6 +29,17 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
+// pinned reports whether this field name is part of the cell's own expected
+// list — the only way a reserved name is tolerated here.
+func pinned(want []string, name string) bool {
+	for _, w := range want {
+		if w == name {
+			return true
+		}
+	}
+	return false
+}
+
 func TestArcK3TheWireDeclaresTheBlocksProjection(t *testing.T) {
 	srv := setupJ1LateralDB(t)
 	for _, c := range []struct {
@@ -76,6 +87,27 @@ func TestArcK3TheWireDeclaresTheBlocksProjection(t *testing.T) {
 			[]string{"id", "order_id", "product", "amount", "o.id", "customer", "total"},
 			"(id, customer, total, id, order_id, product, amount) — the join's own " +
 				"duplicate-name qualification, pre-existing and unrelated"},
+		// A PRE-EXISTING LEAK, PINNED ON THE WIRE. A block with its own
+		// `ORDER BY … LIMIT` carries a materialized `__sortkey_N`, and this
+		// door — a single-process server — has always published it.
+		// PostgreSQL sends five fields. Held here so the day it stops leaking
+		// this cell fails; the property assertion below exempts nothing that
+		// the cell's own list does not already name. The DAG's answer for the
+		// same shapes is pinned per arm in
+		// `coordinator.TestArcK3ADerivedBlockPublishesItsOwnProjection`.
+		{"pinned_a_materialized_sort_key_reaches_the_wire",
+			`SELECT * FROM j1ord o JOIN (SELECT order_id, product FROM j1item ` +
+				`ORDER BY amount LIMIT 3) s ON s.order_id = o.id`,
+			[]string{"id", "customer", "total", "order_id", "product", "__sortkey_0"},
+			"(id, customer, total, order_id, product) — five; this engine publishes " +
+				"the block's own ORDER BY term as a sixth column"},
+		{"pinned_an_introducing_block_with_a_sort_key",
+			`SELECT * FROM j1ord o JOIN (SELECT order_id, order_id AS oid FROM j1item ` +
+				`ORDER BY amount LIMIT 3) s ON s.order_id = o.id`,
+			[]string{"id", "customer", "total", "order_id", "oid", "__sortkey_0"},
+			"(id, customer, total, order_id, oid) — five; the sixth is this engine's " +
+				"materialized ORDER BY term, and at v0.18.60 this statement FAILED"},
+
 		{"ctl_star_over_a_block_that_is_its_stream",
 			`SELECT * FROM j1ord o JOIN (SELECT order_id FROM j1item) s ` +
 				`ON s.order_id = o.id`,
@@ -100,6 +132,12 @@ func TestArcK3TheWireDeclaresTheBlocksProjection(t *testing.T) {
 			// itself is on the wire. A name no query can spell is a name no
 			// client can use.
 			for _, name := range got {
+				// A cell whose own expectation NAMES a reserved column is
+				// pinning a pre-existing leak, not exempting one: the day it
+				// stops leaking the list above changes and the cell fails.
+				if pinned(c.want, name) {
+					continue
+				}
 				if fam := plansql.ReservedSlotFamily(name); fam != "" {
 					t.Errorf("%s\n  RowDescription carries %q, which is in the reserved "+
 						"%s namespace and no query can spell", c.sql, name, fam)

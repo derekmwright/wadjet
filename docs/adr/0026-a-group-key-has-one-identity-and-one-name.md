@@ -1957,11 +1957,19 @@ twice-referenced CTE that answered PostgreSQL exactly was taken off the DAG by
 refusing a narrowing block, and the lateral shapes this arc closes were
 reopened by not marking one.
 
-One block is not a candidate at all: one whose own `ORDER BY` was
-MATERIALIZED. Its list carries a `__sortkey_N` the sort below still needs, so
-publishing it puts a name no query can spell on the wire and dropping it takes
-the key from the operator that reads it. Neither is an improvement on what the
-engine already does.
+A block whose own `ORDER BY` was MATERIALIZED carries a `__sortkey_N` the sort
+below still needs, so its projection can never be published: publishing the
+slot puts a name no query can spell on the wire, dropping it takes the key from
+the operator that reads it. What follows depends on the class, and it is the
+rule again rather than an exception. A NARROWING one is not a candidate at all
+— not publishing is what the engine already does, and for a narrowing block
+that is right or merely leaky. An INTRODUCING one stays a candidate and is
+therefore ROUTED, because there the alternative is a LOST COLUMN: at
+`bb8635a4` `(SELECT order_id, amount, amount AS a2 … ORDER BY id LIMIT 4)`
+dropped `a2` silently on both DAG arms and the `order_id AS oid` spelling
+failed loudly. Routed, the DAG answers exactly what the single-process arms
+answer — `__sortkey_0` included, which is that path's own PRE-EXISTING leak,
+pinned on every arm and filed rather than fixed here.
 
 **What the route is now.** `ErrLateralProjectionDistributed` is kept and
 RETRIGGERED. It used to fire on a name test over every lateral; it fires now on
@@ -1981,6 +1989,19 @@ things follow, each of which was a right-to-routed move until it was fixed:
     produces no value, and PostgreSQL declares it `text`; leaving it undecided
     put `SELECT order_id, NULL AS c` in the residue.
 
+**A COMPUTED ITEM IS NOT INTRODUCED WHERE ITS PRODUCER MATERIALIZES IT.**
+`absorbComputedSubqueryProjection` projects a computed alias INTO the producing
+fragment for a scan, a window and a join, so `(SELECT MAX(amount) …) AS sq`,
+`ARRAY[amount] AS a`, an all-NULL `CASE` and `COALESCE(NULL, NULL)` are columns
+the star already reads correctly — and calling them introduced took three
+shapes that answered PostgreSQL exactly off the DAG the moment this pass could
+not TYPE them. Over an AGGREGATE the absorb declines, and there a computed item
+really is missing. The discriminator is the PRODUCER, never the expression's
+type or its kind: three special cases for three undecided kinds were three too
+many, and `coordinator.TestArcK3NoBlockItemKindRoutesSilently` sweeps every
+column of the type-matrix corpus in four expression shapes so the next
+undecided kind cannot route silently either.
+
 **The residue is three shapes**, each measured wrong or loud at `bb8635a4`
 without the route, each answering PostgreSQL on the coordinator-local pipeline,
 each gated by counter in
@@ -1988,7 +2009,7 @@ each gated by counter in
 
 | shape | at bb8635a4 |
 |---|---|
-| a CONTAINER over an aggregate (`ARRAY[COUNT(*)] AS a`) — decides no type, and a projection materialized at a type the empty side declares differently is ADR-0010's refusal | routed |
+| a CONTAINER over an AGGREGATE (`ARRAY[COUNT(*)] AS a`) — it decides no type, and a projection materialized at a type the empty side declares differently is ADR-0010's refusal. Over a plain column the same expression EXECUTES. | routed |
 | a BARE AGGREGATE alias beside a computed sibling (`SUM(x) AS sa, SUM(x)*1 AS sb`) — an aggregate item is computed by the aggregate stage, not by a projection above it | silent wrong (`__agg_1` published) |
 | a WINDOW inside the block (`SUM(x) OVER () AS w`) | loud |
 

@@ -111,18 +111,14 @@ func blockProjectionLeavesItsStream(p *logical.Node) blockDivergence {
 	if len(names) == 0 {
 		return blockAgrees
 	}
-	// A BLOCK WHOSE OWN ORDER BY WAS MATERIALIZED is left alone entirely. Its
-	// list carries a `__sortkey_N` the sort below still needs, and a
-	// projection that publishes it puts a name no query can spell on the wire
-	// while one that drops it takes the key away from the operator that reads
-	// it. Neither is an improvement on what the engine already does, so the
-	// block is not a candidate at all: `SELECT * FROM o JOIN (SELECT order_id,
-	// product FROM item ORDER BY amount LIMIT 3) s` publishes the scan's
-	// `amount` beside the block's two columns exactly as it did at v0.18.60.
+	// A MATERIALIZED ORDER BY TERM in the block's own list is remembered, not
+	// acted on yet: what it means depends on the class, decided below.
 	sortKeyFamily := plansql.ReservedSlotFamily(plansql.SlotName(plansql.SlotSortKey, 0))
+	materializedSortKey := false
 	for _, name := range names {
 		if plansql.ReservedSlotFamily(strings.ToLower(blockBareName(name))) == sortKeyFamily {
-			return blockAgrees
+			materializedSortKey = true
+			break
 		}
 	}
 	stream := blockStreamNames(p)
@@ -160,15 +156,54 @@ func blockProjectionLeavesItsStream(p *logical.Node) blockDivergence {
 	for _, s := range stream {
 		have[strings.ToLower(blockBareName(s))] = true
 	}
+	// A COMPUTED item over a producer that MATERIALIZES it is already on the
+	// stream, whatever the logical tree says. absorbComputedSubqueryProjection
+	// projects a computed alias INTO the producing fragment for a scan, a
+	// window and a join (#383, #742, #780), so `(SELECT MAX(amount) …) AS sq`,
+	// `ARRAY[amount] AS a` and an all-NULL CASE are columns the star already
+	// reads correctly — and calling them INTRODUCED took three shapes that
+	// answered PostgreSQL exactly off the DAG the moment this pass could not
+	// type them (round-2 B1).
+	//
+	// Over an AGGREGATE the absorb declines, and there a computed item really
+	// is missing: `SUM(x) AS sa, SUM(x)*1 AS sb` published `__agg_1` to the
+	// client at v0.18.60. That is the difference, and it is a property of the
+	// PRODUCER rather than of the expression's type.
+	materialized := blockProducerMaterializesComputed(p)
+	for _, pr := range logical.VisibleProjections(p.Projections) {
+		if !materialized || pr.IsAgg || pr.Alias == "" || pr.ASTExpr == nil ||
+			isSimpleColRefForRename(pr.ASTExpr) {
+			continue
+		}
+		have[strings.ToLower(blockBareName(pr.Alias))] = true
+	}
 	seen := make(map[string]bool, len(names))
 	for _, name := range names {
 		bare := strings.ToLower(blockBareName(name))
 		if bare == "" || seen[bare] || !have[bare] {
+			// INTRODUCES stands even with a materialized sort key. The
+			// publish will decline (the projection cannot drop a key the sort
+			// below reads), so the block is refused and ROUTED — and that is
+			// the improvement here, because a star over such a block loses the
+			// introduced column silently or fails loudly at v0.18.60
+			// (`sort: key column "oid" does not exist`).
 			return blockIntroduces
 		}
 		seen[bare] = true
 	}
 	if len(names) != len(stream) {
+		if materializedSortKey {
+			// A NARROWING block whose own ORDER BY was materialized is left
+			// alone entirely. Its list carries a `__sortkey_N` the sort below
+			// still needs, so publishing it puts a name no query can spell on
+			// the wire and dropping it takes the key from the operator that
+			// reads it — and NOT publishing is what the engine already does,
+			// which for a narrowing block is right or merely leaky, never a
+			// lost column. `SELECT * FROM o JOIN (SELECT order_id, product
+			// FROM item ORDER BY amount LIMIT 3) s` publishes the scan's
+			// `amount` exactly as it did at v0.18.60.
+			return blockAgrees
+		}
 		return blockNarrows
 	}
 	return blockAgrees
@@ -182,16 +217,18 @@ func blockProjectionLeavesItsStream(p *logical.Node) blockDivergence {
 //     item, an alias over an aggregate) or one published TWICE. The star sees
 //     the wrong relation, always, so a block this pass cannot publish is
 //     REFUSED and routed — it was wrong or loud before the pass existed.
-//   - blockNarrows: every published name is the stream's, once, and the stream
-//     carries MORE. Publishing is an improvement — column pruning removes most
-//     of the extras but not the ones something else keeps alive, and a lateral
-//     whose block is a bare `SELECT amount` published the scan's `order_id`
-//     beside it. But NOT publishing is exactly what the engine did before, so
-//     a narrowing block the pass cannot carry is left alone and never routed.
-//   - blockIntroduces: a name the stream does not carry (a rename, a computed
-//     item, an alias over an aggregate) or one published TWICE. The star sees
-//     the wrong relation, always, so a block this pass cannot publish IS
-//     refused and routed — it was wrong or loud before the pass existed.
+//   - blockNarrows: every published name is on the stream, once, and the
+//     stream carries MORE. Publishing is an improvement — column pruning
+//     removes most of the extras but not the ones something else keeps alive,
+//     and a lateral whose block is a bare `SELECT amount` published the scan's
+//     `order_id` beside it. But NOT publishing is exactly what the engine did
+//     before, so a narrowing block the pass cannot carry is left alone and
+//     never routed.
+//   - blockIntroduces: a name the stream does not carry (a rename, an alias
+//     over an aggregate, a computed item the producer will NOT materialize) or
+//     one published TWICE. The star sees the wrong relation, always, so a
+//     block this pass cannot publish IS refused and routed — it was wrong or
+//     loud before the pass existed.
 //
 // Both classes are MARKED; the class decides only what happens when the
 // publish DECLINES. That asymmetry is the whole rule: the route is not
@@ -545,4 +582,28 @@ func markStarReadBlocks(n *logical.Node, candidates map[*logical.Node]blockDiver
 	for _, c := range n.Children {
 		markStarReadBlocks(c, candidates, published)
 	}
+}
+
+// blockProducerMaterializesComputed reports whether the fragment under this
+// block will compute its COMPUTED select items itself.
+//
+// It is absorbComputedSubqueryProjection's own scope, asked of the logical
+// tree: a chain of stage-less nodes ending at a SCAN, a WINDOW or a JOIN. An
+// AGGREGATE is deliberately not in it — that pass declines over one, and a
+// computed item above an aggregate is a column no stage emits.
+func blockProducerMaterializesComputed(p *logical.Node) bool {
+	if p == nil || len(p.Children) != 1 {
+		return false
+	}
+	cur := p.Children[0]
+	for cur != nil && len(cur.Children) == 1 &&
+		(cur.Type == logical.NodeFilter ||
+			(cur.Type == logical.NodeProject && !cur.SecurityBarrier)) {
+		cur = cur.Children[0]
+	}
+	if cur == nil {
+		return false
+	}
+	return cur.Type == logical.NodeScan || cur.Type == logical.NodeWindow ||
+		cur.Type == logical.NodeJoin
 }

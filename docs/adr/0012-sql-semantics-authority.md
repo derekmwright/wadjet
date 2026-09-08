@@ -1766,12 +1766,16 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      pipeline's ORDER BY is wrong for shapes the DAG gets right), it may take
      only what was already wrong or loud, and the residue is THREE shapes,
      listed with their `bb8635a4` disposition in ADR-0026 §7: a CONTAINER over
-     an aggregate (routed there too), a BARE AGGREGATE alias beside a computed
+     an AGGREGATE (routed there too), a BARE AGGREGATE alias beside a computed
      sibling (silently wrong there), and a WINDOW inside the block (loud
      there). All three answer PostgreSQL on the local pipeline, asserted by
      counter in `coordinator.TestArcK3ADerivedBlockPublishesItsOwnProjection`.
      A block publishing one NAME twice is NOT among them — it executes
-     distributed, where `bb8635a4` lost both aliases.
+     distributed, where `bb8635a4` lost both aliases; neither is a COMPUTED
+     item over a scan, a window or a join, whose value the producing fragment
+     materializes whatever its type (a scalar-subquery item, `ARRAY[amount]`,
+     an all-NULL `CASE`), swept over the whole type-matrix corpus in
+     `coordinator.TestArcK3NoBlockItemKindRoutesSilently`.
 
      WHAT REMAINS a divergence is the star's column ORDER, which is older and
      independent: this engine publishes the JOIN OPERATOR's order (probe side

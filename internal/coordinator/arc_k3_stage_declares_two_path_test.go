@@ -200,6 +200,73 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 			want: `id,order_id,product,amount,b.id,b.order_id,b.product,b.amount | ` +
 				`1,1,Widget,50,2,1,Gadget,100 | 3,2,Widget,75,4,2,Doohickey,125`},
 		// ------------------------------------------------------------------
+		// A COMPUTED ITEM OVER A PRODUCER THAT MATERIALIZES IT IS ALREADY ON
+		// THE STREAM (round 3). absorbComputedSubqueryProjection projects a
+		// computed alias INTO the producing fragment for a scan, a window and
+		// a join, so these columns were right at bb8635a4 and calling them
+		// INTRODUCED took them off the DAG the moment this pass could not type
+		// them. Each EXECUTES, counter +0, values identical at base.
+		{name: "computed/scalar-subquery-item",
+			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, ` +
+				`(SELECT MAX(amount) FROM lat_item) AS sq FROM lat_item) s ` +
+				`ON s.order_id = o.id ORDER BY o.id, sq`,
+			want: `order_id,sq,id,customer,total | 1,125,1,Alice,150 | 1,125,1,Alice,150 | ` +
+				`2,125,2,Bob,200 | 2,125,2,Bob,200`},
+		{name: "computed/scalar-subquery-over-a-CTE",
+			sql: `WITH q AS (SELECT MAX(amount) AS m FROM lat_item) SELECT * FROM lat_ord o ` +
+				`JOIN (SELECT order_id, (SELECT m FROM q) AS sq FROM lat_item) s ` +
+				`ON s.order_id = o.id ORDER BY o.id, sq`,
+			want: `order_id,sq,id,customer,total | 1,125,1,Alice,150 | 1,125,1,Alice,150 | ` +
+				`2,125,2,Bob,200 | 2,125,2,Bob,200`},
+		{name: "computed/an-all-NULL-CASE",
+			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, ` +
+				`CASE WHEN order_id = 1 THEN NULL ELSE NULL END AS c FROM lat_item) s ` +
+				`ON s.order_id = o.id ORDER BY o.id`,
+			want: `order_id,c,id,customer,total | 1,NULL,1,Alice,150 | 1,NULL,1,Alice,150 | ` +
+				`2,NULL,2,Bob,200 | 2,NULL,2,Bob,200`},
+		{name: "computed/a-CASE-with-one-typed-arm",
+			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, ` +
+				`CASE WHEN order_id = 1 THEN 7 ELSE NULL END AS c FROM lat_item) s ` +
+				`ON s.order_id = o.id ORDER BY o.id`,
+			want: `order_id,c,id,customer,total | 1,7,1,Alice,150 | 1,7,1,Alice,150 | ` +
+				`2,NULL,2,Bob,200 | 2,NULL,2,Bob,200`},
+		{name: "computed/COALESCE-of-two-NULLs",
+			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, COALESCE(NULL, NULL) AS c ` +
+				`FROM lat_item) s ON s.order_id = o.id ORDER BY o.id`,
+			want: `order_id,c,id,customer,total | 1,NULL,1,Alice,150 | 1,NULL,1,Alice,150 | ` +
+				`2,NULL,2,Bob,200 | 2,NULL,2,Bob,200`},
+		// The container cases publish the SOURCE column beside the container,
+		// on every arm and identically at bb8635a4 — a pre-existing leak this
+		// arc does not touch, pinned in `want` so it fails the day it stops.
+		{name: "computed/a-container-over-a-plain-column",
+			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, ARRAY[amount] AS a ` +
+				`FROM lat_item) s ON s.order_id = o.id ORDER BY o.id`,
+			want: `amount,order_id,a,id,customer,total | 50,1,[50],1,Alice,150 | ` +
+				`100,1,[100],1,Alice,150 | 75,2,[75],2,Bob,200 | 125,2,[125],2,Bob,200`},
+		{name: "computed/a-two-element-container",
+			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, ARRAY[amount, amount * 2] ` +
+				`AS a FROM lat_item) s ON s.order_id = o.id ORDER BY o.id`,
+			want: `amount,order_id,a,id,customer,total | 50,1,[50 100],1,Alice,150 | ` +
+				`100,1,[100 200],1,Alice,150 | 75,2,[75 150],2,Bob,200 | ` +
+				`125,2,[125 250],2,Bob,200`},
+
+		// AN INTRODUCING BLOCK WITH A MATERIALIZED ORDER BY (round-2 P1). The
+		// publish cannot drop a key the sort below reads, so the block is
+		// refused and ROUTED — and that is the improvement: at bb8635a4 the
+		// first of these lost `a2` silently on both DAG arms and the second
+		// failed LOUDLY (`sort: key column "oid" does not exist`). The DAG now
+		// answers exactly what the single-process arms answer, `__sortkey_0`
+		// included: that leak is PRE-EXISTING on the single path, pinned in
+		// `want` on every arm, and filed rather than fixed here.
+		{name: "sortkey/introducing-block-keeps-its-column",
+			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, amount, amount AS a2 ` +
+				`FROM lat_item ORDER BY id LIMIT 4) s ON s.order_id = o.id ` +
+				`ORDER BY o.id, s.amount`,
+			want: `order_id,amount,a2,__sortkey_0,id,customer,total | ` +
+				`1,50,50,1,1,Alice,150 | 1,100,100,2,1,Alice,150 | ` +
+				`2,75,75,3,2,Bob,200 | 2,125,125,4,2,Bob,200`},
+
+		// ------------------------------------------------------------------
 		// THE BOUNDARY, SHAPE BY SHAPE (round 2). The route is NOT
 		// answer-preserving — the coordinator-local pipeline's ORDER BY is
 		// wrong for some shapes the DAG gets right — so it may take only what

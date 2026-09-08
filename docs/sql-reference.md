@@ -833,10 +833,12 @@ published under its alias, and an alias over an aggregate publishes the alias
 alone. Every execution path answers the same relation.
 
 Three shapes still run on the coordinator rather than across the workers, and
-they are the ones whose columns the planner cannot state ahead of time: a
-CONTAINER built from an aggregate (`ARRAY[COUNT(*)] AS a`), a BARE AGGREGATE
-alias beside a computed sibling (`SUM(x) AS sa, SUM(x) * 1 AS sb`), and a
-WINDOW function inside the subquery. They answer the same rows either way;
+each is a column the planner cannot state ahead of time: a CONTAINER built from
+an AGGREGATE (`ARRAY[COUNT(*)] AS a` — over a plain column, `ARRAY[amount]`,
+the same expression stays distributed), a BARE AGGREGATE alias beside a
+computed sibling (`SUM(x) AS sa, SUM(x) * 1 AS sb`), and a WINDOW function
+inside the subquery. A subquery with its own `ORDER BY … LIMIT` that also
+introduces a column runs there too. They answer the same rows either way;
 naming the columns instead of writing `*` keeps them distributed.
 
 The correlated equality is turned into a join, and a join needs the inner
