@@ -363,16 +363,28 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      counter beside the rows — so what closed is the DIVERGENCE, and the DAG
      still never declares this expression itself.
    - **A column-alias list over a `SELECT *` is not applied.** (Added
-     2026-09-04, #613.) `(…) AS b(kk, nn)` renames a derived table's columns
-     positionally, and PostgreSQL applies it whatever the subquery's SELECT
-     list looks like: `SELECT * FROM (SELECT * FROM t) AS b(kk, nn)` publishes
-     `kk | nn | …` there. Wadjet leaves the list alone when the subquery's
-     SELECT list carries a `*`, so it publishes the inner names, because the
-     star's width is a catalog question `logical.applyColumnAliases` cannot
-     ask — `ExpandStarProjections` answers it later, and renaming the wrong
-     columns would be a wrong ANSWER rather than a missing one. The VALUES and
-     the arity refusal are unaffected; only the star spelling diverges, and
-     only in the published NAMES.
+     2026-09-04, #613. CLOSED and RE-SCOPED 2026-09-07 by arc K1, #958: the
+     entry was right about the reason and wrong about the symptom, and the
+     shape it now covers is much narrower.)
+
+     `(…) AS b(kk, nn)` renames a derived table's columns positionally, and
+     PostgreSQL applies it whatever the subquery's SELECT list looks like:
+     `SELECT * FROM (SELECT * FROM t) AS b(kk, nn)` publishes `kk | nn | …`
+     there. The star's width is a catalog question `logical.applyColumnAliases`
+     cannot ask, so the list was dropped — and the entry said the relation then
+     published the inner names. It did not: every reference to a name the list
+     renames TO was LOUD (`sort: key column "kk" does not exist in the input
+     schema`), or, through a derived table, silently NULL.
+
+     The list is now DEFERRED to `ExpandStarProjections`, which answers the
+     width one pass later (`logical.ApplyDeferredColumnAliases`), so the common
+     shapes — a star over a base table, a CTE, a derived table, a set operation
+     — are applied and agree with PostgreSQL, and the arity refusal moves with
+     them. What remains is a list over a star the expansion DECLINES, which is
+     the entry below's shape: a bare `*` over a JOIN. There the list cannot be
+     applied truthfully and is REFUSED in one sentence (0A000) rather than
+     dropped. Gated by
+     `coordinator.TestArcK1AColumnAliasListRenamesPositionally`.
 
    - **`ORDER BY <name>` over two output columns of that name is answered,
      not refused.** (Added 2026-09-03, #557.) An output slot's identity is its
@@ -1127,6 +1139,18 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      entry (`logical.RefuseUnresolvedOrdinalSortKeys`); the refusal itself did
      not change.
 
+     **A SET OPERATION is countable and no longer refused** (2026-09-07, arc
+     K1, #982). `SELECT * FROM (SELECT … UNION ALL SELECT …) u ORDER BY 2` was
+     refused on every arm and PostgreSQL answers it; a set operation publishes
+     its LEFTMOST arm's names, which is the rule `plansql.BlockOutputColumns`
+     and `applyColumnAliases` already read, so `projectOutputNamesBelow`
+     descends it. A VALUES derived table is covered by the same step, since the
+     parser desugars `VALUES` into a UNION ALL of SELECTs. The JOIN cases above
+     are unchanged and are what is left of #810's residual: lifting them needs
+     an ORDERED model of a join's emitted columns, and the three refusals lift
+     together. Gated by
+     `coordinator.TestArcK1AStarIsItsSourceInItsPosition`.
+
    - **Abbreviated CIDR and inet literals.** (Added 2026-09-03, #627. CLOSED
      and RE-SCOPED 2026-09-05: the divergence was real, and half of what this
      entry described was the wrong grammar.)
@@ -1790,18 +1814,22 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      0 and there is no divergence to record.
 
    - **A qualified star ALONE over a lateral join publishes the whole join.**
-     (Amended 2026-09-07, arc J1 rounds 3 and 4.) `SELECT o.*` with nothing
-     beside it publishes four columns where PostgreSQL publishes three: a
-     star-only SELECT list has no projection for the expansion to rewrite, so
-     that spelling never reaches it. A qualified star BESIDE another select
-     item expands from its relation's own OUTPUT list — a base table's schema,
-     a derived table's or CTE's SELECT list, a `d(a, b)` column-alias list —
-     and agrees with PostgreSQL. Two shapes are REFUSED rather than guessed:
-     a derived table whose body is itself a star over a join, and the
-     LATERAL's own star (`SELECT s.*, o.id`), whose output is a projection the
-     expansion does not enumerate and whose scan carries the correlation slot
-     the join is about to drop. Pinned in
-     `coordinator.TestArcJ1AQualifiedStarExpandsFromTheRelationsOutput`.
+     (Amended 2026-09-07, arc J1 rounds 3 and 4. CLOSED 2026-09-07 by arc K1,
+     #979, and it was never about laterals.) `SELECT o.*` with nothing beside
+     it published the whole join — over a LATERAL four columns for
+     PostgreSQL's three, and over a PLAIN join seven for three, one of them
+     literally named `o.id`. `logical.isStarOnly` read a QUALIFIED star as the
+     identity of its input, which only a BARE star is, so the list built no
+     projection and the expansion never saw the star. It builds one now and
+     the two spellings agree.
+
+     What is NOT expanded is unchanged and still refused rather than guessed:
+     a bare `*` over a JOIN (the entry below), a derived table whose body is
+     itself such a star, and the LATERAL's own star (`SELECT s.*, o.id`), whose
+     output is a projection the expansion does not enumerate and whose scan
+     carries the correlation slot the join is about to drop. Gated by
+     `coordinator.TestArcJ1AQualifiedStarExpandsFromTheRelationsOutput` and
+     `coordinator.TestArcK1AStarIsItsSourceInItsPosition`.
 
    - **A star over a NON-aggregated LATERAL publishes PostgreSQL's columns in
      a different ORDER.** (Added 2026-09-07, arc J1 round 2; PRE-EXISTING.)

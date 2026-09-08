@@ -850,12 +850,14 @@ plain one, and `SELECT d.*, x.id` over a derived table, a `d(a, b)` alias list
 or a CTE all answer what PostgreSQL answers, from that relation's own OUTPUT
 list.
 
+A QUALIFIED star ALONE (`SELECT o.*` with nothing beside it) publishes the same
+columns: it names one relation whichever way it is written, over a lateral, a
+plain join, a derived table or a CTE.
+
 Where the list is not knowable the star is REFUSED (`0A000`) rather than
-guessed: a derived table whose body is itself a star over a join, and a
+guessed: a derived table whose body is itself a BARE star over a join, and a
 LATERAL's own star (`SELECT s.*, o.id`), whose output is a projection this
-expansion does not enumerate. A qualified star ALONE (`SELECT o.*` with nothing
-beside it) is a third shape — it still publishes every column of the join.
-Name the columns in those three.
+expansion does not enumerate. Name the columns in those two.
 
 An inner `SELECT` list that aliases something to the correlation key's own name
 answers what PostgreSQL answers. `JOIN LATERAL (SELECT MAX(t.id) AS g …
@@ -1160,10 +1162,12 @@ One shape is refused that PostgreSQL answers: a positional reference over a
 `SELECT *` whose FROM clause is a **join**, or a derived table whose **own**
 FROM is a join, where the star is left unexpanded because its column set is not
 resolvable from the catalog alone. That is `42P10` with a message saying so;
-name the columns, or sort by the column itself. A star over an ordinary derived
-table is not affected: `SELECT * FROM (SELECT * FROM t) x ORDER BY 1` answers,
-as do an explicit column list, aliased columns, and a nested derived table
-inside it (measured on all three execution paths).
+name the columns, or sort by the column itself. Every other relation kind
+answers: a base table, an ordinary derived table
+(`SELECT * FROM (SELECT * FROM t) x ORDER BY 1`), a CTE, a SET OPERATION
+(`SELECT * FROM (SELECT … UNION ALL SELECT …) u ORDER BY 2`) and a `VALUES`
+derived table, as do an explicit column list, aliased columns, and a nested
+derived table inside one.
 
 ## Derived tables and CTE column lists
 
@@ -1180,22 +1184,18 @@ subquery publishes `kk` and the second column's own name. More aliases than the
 subquery has columns is SQLSTATE `42P10` (`table "b" has 2 columns available
 but 3 columns specified`). Both are PostgreSQL's rules.
 
-The prefix rule holds for a DERIVED TABLE. On a **CTE** the list is currently
-the whole namespace rather than a prefix rename: `WITH c(kk) AS (SELECT id, s
-FROM t)` publishes `kk` alone, and naming `s` is `42703 unknown column "s"
-(available: kk)` where PostgreSQL resolves it. Inside a subquery over such a
-CTE the same name binds the ENCLOSING query instead, so the subquery is read as
-correlated and answers the enclosing row's value — pinned as
-`29_pin_a_short_cte_column_list_hides_the_columns_it_did_not_rename` in
-`coordinator.TestArcI1AnUnqualifiedNameBindsTheInnerRelation` with
-PostgreSQL's answer beside it.
+The prefix rule holds for a DERIVED TABLE and for a **CTE**: `WITH c(kk) AS
+(SELECT id, s FROM t)` publishes `kk` AND `s`, and naming `s` — at top level or
+inside a subquery over that CTE — resolves to the CTE's own column, as
+PostgreSQL resolves it.
 
-A list written over a subquery whose SELECT list contains `*` is not applied:
-the star's width is not resolvable at that point, and renaming the wrong
-columns would be a wrong answer rather than a missing one. PostgreSQL does
-apply it there, so that spelling publishes the inner column names here and the
-aliases there — a divergence in the published NAMES only, recorded in
-ADR-0012.
+A list written over a subquery whose SELECT list contains `*` is applied where
+the star's width is knowable, which is every relation kind the expansion
+reaches: `WITH c(kk) AS (SELECT * FROM t)` publishes `kk` and the rest of `t`'s
+columns under their own names, and an overlong list there is the same `42P10`.
+Over a star the expansion DECLINES — a bare `*` over a join — the list cannot
+be applied truthfully and the statement is refused with `0A000` naming the
+relation; name the columns in the subquery.
 
 ### CTE scope
 
@@ -1767,6 +1767,13 @@ SELECT
     ROW_NUMBER() OVER (ORDER BY bytes_in DESC NULLS LAST) AS rank
 FROM flow_logs
 ```
+
+A QUALIFIED key names the relation it writes, including where two join arms
+publish the same bare name: `SUM(y.w) OVER (PARTITION BY x.w)` over arms that
+both publish `w` partitions on `x`'s column. A BARE key over such a pair is
+ambiguous — PostgreSQL refuses it with `42702 column reference "w" is
+ambiguous` and wadjet answers it by binding one of them (ADR-0012). Qualify the
+key.
 
 ### Window Frame Specifications
 
