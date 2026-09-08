@@ -2068,10 +2068,20 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      supported spelling for the last is a derived table or CTE, and it is
      gated.
 
-     Gated in `coordinator.TestTheBarIsTheSameOnEveryArm` (twelve cells on
-     three arms), `exec.TestTheBars*` (the merge law, the encoding, the
-     tiebreak, the declared types), `wadjet.TestTimeBucket*` and
-     `pgwire.TestPGWireRendersTheBarAsAPostgresComposite`.
+     One SUPERSET: a bar whose total volume is ZERO answers a NULL `vwap`
+     and keeps its four prices, where PostgreSQL's `SUM(px*vol)/SUM(vol)`
+     raises 22012 (division_by_zero). A weighted mean over zero total weight
+     is undefined, which is what NULL says, and raising would fail the whole
+     query — every other bucket's bar with it — for one group whose volumes
+     happened to cancel. The other five fields of that bar are PostgreSQL's
+     exactly. Gated as `zero_volume_has_no_vwap`.
+
+     Gated in `coordinator.TestTheBarIsTheSameOnEveryArm` (seventeen cells on
+     three arms, including a COMPUTED argument — which is where the planner's
+     declaration runs out and where three arm divergences were found),
+     `exec.TestTheBars*` (the merge law, the encoding, the tiebreak, the
+     declared types, the state's self-description), `wadjet.TestTimeBucket*`
+     and `pgwire.TestPGWireRendersTheBarAsAPostgresComposite`.
 
    - **A ROW column declares OID 25 (text), not `record` 2249.** (Added
      2026-09-08, arc A1; the divergence predates it.) `\gdesc` on

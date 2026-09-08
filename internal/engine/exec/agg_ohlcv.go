@@ -515,9 +515,14 @@ func (s *ohlcvState) value(fields []parquet.Column) (any, error) {
 	}
 	out["volume"] = ohlcvNarrowFloat(s.sumVolF, fields[4])
 	if s.sumVolF == 0 {
-		// Division by a zero total. PostgreSQL's float division by zero is
-		// 22012, and a bar whose volume is zero has no weighted average, so
-		// the field is NULL rather than an infinity nothing can compare.
+		// A ZERO total weight. PostgreSQL's own `SUM(px*vol)/SUM(vol)` raises
+		// 22012 (division_by_zero) here; the bar answers a NULL vwap and keeps
+		// its four prices. That is a deliberate superset, recorded in
+		// ADR-0012's divergence list: a weighted mean over zero total weight
+		// is undefined, which is what NULL says, and raising would fail the
+		// WHOLE query — every other bucket's bar with it — for one group whose
+		// volumes happened to cancel. The other five fields of that bar are
+		// still exactly PostgreSQL's.
 		out["vwap"] = nil
 	} else {
 		out["vwap"] = s.sumPVF / s.sumVolF
@@ -532,7 +537,7 @@ func (s *ohlcvState) value(fields []parquet.Column) (any, error) {
 // approximately.
 func (s *ohlcvState) exactVwap(field parquet.Column) (any, error) {
 	if s.sumVol.IsZero() {
-		return nil, nil
+		return nil, nil // see value()'s float arm for the zero-total rule
 	}
 	q, st := batch.DecimalDivAt(s.sumPV, s.dom.pvScale, s.sumVol, s.dom.volScale,
 		field.Precision, field.Scale)

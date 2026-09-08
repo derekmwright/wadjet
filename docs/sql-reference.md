@@ -993,6 +993,11 @@ PostgreSQL's rule for a multi-argument aggregate. A group in which every row is
 skipped answers a NULL bar — not a bar of nulls — and a field of a null ROW is
 null.
 
+**Zero total volume.** A bar whose volumes sum to zero has no weighted mean, so
+`vwap` is null and the four prices stand. Writing the quotient out by hand
+(`SUM(price*volume)/SUM(volume)`) raises `22012` instead, here as on the
+server; the bar answers rather than failing the whole query for one bucket.
+
 **Declared types.** Each field declares what its own spelled-out aggregate
 declares:
 
