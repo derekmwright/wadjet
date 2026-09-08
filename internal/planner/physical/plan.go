@@ -3759,10 +3759,16 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// A STAR OVER A BLOCK NO STAGE COULD PUBLISH (#984). Asked AFTER stage
 	// generation, because the answer is what the pass DID: every block a star
 	// reads whose projection differs from its stream is materialized onto a
-	// stage, and the handful the pass declines — a computed item the plan
-	// cannot type, a producer that cannot carry a projection — leave the star
-	// reading the stream, which is the wrong relation. Routed, not answered
-	// short.
+	// stage, and one the pass declines — a producer that cannot carry a
+	// projection above it, or specs that do not resolve against what it emits
+	// — would leave the star reading the stream, which is the wrong relation.
+	// Routed, not answered short. A block item's TYPE is never a reason: it is
+	// declared by the same inference the single-process path uses.
+	//
+	// AFTER the errors above and BEFORE enforceQueryLimits: an authorization
+	// refusal is the query's answer on every path and must not be routed
+	// around (#945), and a limit is about the plan this one has already
+	// settled.
 	if err := refuseUnpublishedStarBlock(p.starReadBlocks, p.publishedBlocks); err != nil {
 		return nil, err
 	}
