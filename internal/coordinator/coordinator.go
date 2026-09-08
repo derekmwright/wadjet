@@ -1918,10 +1918,18 @@ func (c *Coordinator) mergeProbePartials(in BatchStream, columns []string, mi *l
 	// below, which handles it correctly.
 	keep := mi.KeepRows()
 	if len(mi.OrderBy) > 0 && keep > 0 && len(batches) == 1 && batches[0].Len > keep*4 {
-		batches = c.topKBatches(batches, columns, colIdx, mi.OrderBy, keep)
+		var err error
+		batches, err = c.topKBatches(batches, mi.OrderBy, keep)
+		if err != nil {
+			return nil, 0, err
+		}
 	} else {
 		if len(mi.OrderBy) > 0 {
-			batches = c.sortBatches(batches, columns, colIdx, mi.OrderBy)
+			var err error
+			batches, err = c.sortBatches(batches, mi.OrderBy)
+			if err != nil {
+				return nil, 0, err
+			}
 		}
 		if keep >= 0 {
 			batches = limitBatches(batches, keep)
@@ -1965,9 +1973,12 @@ func (c *Coordinator) dedupGatherResult(gr *gatherResult, mi *logical.MergeInfo)
 	gr.renamer = nil
 
 	if len(mi.OrderBy) > 0 || mi.HasLimit {
-		colIdx := mergeColIdx(gr.columns)
 		if len(mi.OrderBy) > 0 {
-			gr.batches = c.sortBatches(gr.batches, gr.columns, colIdx, mi.OrderBy)
+			sorted, err := c.sortBatches(gr.batches, mi.OrderBy)
+			if err != nil {
+				return err
+			}
+			gr.batches = sorted
 		}
 		// Truncate to limit+offset, not limit: the caller applies the OFFSET
 		// after this, so the rows it skips must still be here. >= 0, not
@@ -2776,18 +2787,26 @@ func copyVectorValue(dst *batch.Vector, dstRow int, src *batch.Vector, srcRow in
 //
 // Returns the batch slice to use, which is a NEW single-batch slice whenever
 // it had to coalesce.
-func (c *Coordinator) sortBatches(batches []*batch.RecordBatch, columns []string, colIdx map[string]int, orderBy []logical.OrderExpr) []*batch.RecordBatch {
+func (c *Coordinator) sortBatches(batches []*batch.RecordBatch, orderBy []logical.OrderExpr) ([]*batch.RecordBatch, error) {
 	batches = coalesceForOrdering(batches)
 	if len(batches) != 1 {
-		return batches // a shape coalesceForOrdering declined to flatten
+		// The partials do not describe one relation, so there is no relation
+		// to order. Saying so is the answer: the alternative is the rows in
+		// the arrival order the client did not ask for (#1002).
+		return batches, fmt.Errorf(
+			"ordering a merged result: %d partial batches do not share one schema", len(batches))
 	}
 	b := batches[0]
 	nRows := b.Len
 	if nRows <= 1 {
-		return batches
+		return batches, nil
 	}
 
 	schema := b.Schema
+	keyIdx, err := mergeSortKeyIndices(b, orderBy)
+	if err != nil {
+		return nil, err
+	}
 
 	// Build index permutation and sort it
 	indices := make([]int, nRows)
@@ -2796,7 +2815,7 @@ func (c *Coordinator) sortBatches(batches []*batch.RecordBatch, columns []string
 	}
 
 	slices.SortFunc(indices, func(i, j int) int {
-		return compareBatchRows(b, i, j, orderBy, colIdx, schema)
+		return compareBatchRows(b, i, j, orderBy, keyIdx, schema)
 	})
 
 	// Apply permutation: set selection vector
@@ -2805,7 +2824,7 @@ func (c *Coordinator) sortBatches(batches []*batch.RecordBatch, columns []string
 		sel[i] = uint32(idx)
 	}
 	b.Sel = sel
-	return batches
+	return batches, nil
 }
 
 // coalesceForOrdering flattens N batches into ONE so an ordering can be
@@ -2868,18 +2887,23 @@ func coalesceForOrdering(batches []*batch.RecordBatch) []*batch.RecordBatch {
 
 // topKBatches selects the top-k rows by order-by keys using a min-heap,
 // avoiding O(n log n) full sort when only k << n results are needed.
-func (c *Coordinator) topKBatches(batches []*batch.RecordBatch, columns []string, colIdx map[string]int, orderBy []logical.OrderExpr, k int) []*batch.RecordBatch {
+func (c *Coordinator) topKBatches(batches []*batch.RecordBatch, orderBy []logical.OrderExpr, k int) ([]*batch.RecordBatch, error) {
 	batches = coalesceForOrdering(batches)
 	if len(batches) != 1 {
-		return batches
+		return batches, fmt.Errorf(
+			"ordering a merged result: %d partial batches do not share one schema", len(batches))
 	}
 	b := batches[0]
 	nRows := b.Len
 	if nRows <= k {
-		return batches
+		return batches, nil
 	}
 
 	schema := b.Schema
+	keyIdx, err := mergeSortKeyIndices(b, orderBy)
+	if err != nil {
+		return nil, err
+	}
 
 	// Min-heap where "minimum" = worst in desired sort order (last to keep).
 	// compareBatchRows returns < 0 when i sorts before j, so the heap's
@@ -2890,7 +2914,7 @@ func (c *Coordinator) topKBatches(batches []*batch.RecordBatch, columns []string
 	}
 
 	cmp := func(a, b int) int {
-		return compareBatchRows(batches[0], a, b, orderBy, colIdx, schema)
+		return compareBatchRows(batches[0], a, b, orderBy, keyIdx, schema)
 	}
 
 	// worst-first: h[i] sorts after h[j] → "less" for heap
@@ -2938,17 +2962,18 @@ func (c *Coordinator) topKBatches(batches []*batch.RecordBatch, columns []string
 	}
 	b.Sel = sel
 	b.Len = k
-	return batches
+	return batches, nil
 }
 
 // compareBatchRows compares two rows in a batch by the order-by keys.
 // Returns negative if row a < row b, positive if a > b, 0 if equal.
-func compareBatchRows(b *batch.RecordBatch, a, bIdx int, orderBy []logical.OrderExpr, colIdx map[string]int, schema []parquet.Column) int {
-	for _, ob := range orderBy {
-		ci, ok := colIdx[ob.Column]
-		if !ok {
-			continue
-		}
+//
+// keyIdx is one column index per ORDER BY term, resolved ONCE by
+// mergeSortKeyIndices — a name is not resolved here, and a key that does not
+// resolve never reaches this function (#1002).
+func compareBatchRows(b *batch.RecordBatch, a, bIdx int, orderBy []logical.OrderExpr, keyIdx []int, schema []parquet.Column) int {
+	for k, ob := range orderBy {
+		ci := keyIdx[k]
 		col := b.Columns[ci]
 
 		// NULL ordering is ABSOLUTE — it is not flipped by ASC/DESC, so it is

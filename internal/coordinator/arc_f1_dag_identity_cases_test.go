@@ -600,8 +600,10 @@ func TestF1ADistributedOrderByOrdersEveryContainerType(t *testing.T) {
 			// comparator that ties is only VISIBLE when the input order is
 			// not already the answer. These rows are deliberately shuffled.
 			c := &Coordinator{}
-			c.sortBatches([]*batch.RecordBatch{b}, []string{"id", "k"},
-				map[string]int{"id": 0, "k": 1}, []logical.OrderExpr{tc.orderBy})
+			if _, err := c.sortBatches([]*batch.RecordBatch{b},
+				[]logical.OrderExpr{tc.orderBy}); err != nil {
+				t.Fatalf("sortBatches: %v", err)
+			}
 			var got []int64
 			for i := 0; i < b.ActiveLen(); i++ {
 				row := i

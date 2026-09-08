@@ -96,11 +96,12 @@ func TestSortBatchesOrdersCidrByInetOrder(t *testing.T) {
 		{"id": int64(2), "c_cidr": "9.0.0.0/8"},
 		{"id": int64(3), "c_cidr": "10.0.0.1"},
 	})
-	colIdx := map[string]int{"id": 0, "c_cidr": 1}
 	orderBy := []logical.OrderExpr{{Column: "c_cidr"}}
 
 	c := &Coordinator{}
-	c.sortBatches([]*batch.RecordBatch{b}, []string{"id", "c_cidr"}, colIdx, orderBy)
+	if _, err := c.sortBatches([]*batch.RecordBatch{b}, orderBy); err != nil {
+		t.Fatalf("sortBatches: %v", err)
+	}
 
 	var order []int64
 	rows := b.ActiveLen()

@@ -54,20 +54,12 @@ func TestL1AQualifiedOrderByTermBindsTheReferenceItNames(t *testing.T) {
 
 	const cte = "WITH q AS (SELECT order_id, amount FROM lat_item) "
 	const starCols = "cols=[order_id:INT64 amount:FLOAT64 b.order_id:INT64 b.amount:FLOAT64]"
-	// #1002's pinned cells: the self-join star's eight columns, and what the
-	// two DAG arms answer instead of PostgreSQL's sequence.
+	// #1002's two cells: the self-join star's eight columns. They were PINNED
+	// per DAG arm until the coordinator's merge bound its sort keys through
+	// the engine's own resolver; the pins are spent and the cells now assert
+	// PostgreSQL's sequence on all four arms.
 	const distinctCols = "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 " +
 		"b.id:INT64 b.order_id:INT64 b.product:STRING b.amount:FLOAT64]"
-	const distinctWrong = distinctCols + " rows=8 | " +
-		"1,1,Widget,50,1,1,Widget,50 | 2,1,Gadget,100,1,1,Widget,50 | " +
-		"3,2,Widget,75,3,2,Widget,75 | 4,2,Doohickey,125,3,2,Widget,75 | " +
-		"1,1,Widget,50,2,1,Gadget,100 | 2,1,Gadget,100,2,1,Gadget,100 | " +
-		"3,2,Widget,75,4,2,Doohickey,125 | 4,2,Doohickey,125,4,2,Doohickey,125"
-	const distinctWrongDesc = distinctCols + " rows=8 | " +
-		"3,2,Widget,75,4,2,Doohickey,125 | 4,2,Doohickey,125,4,2,Doohickey,125 | " +
-		"1,1,Widget,50,2,1,Gadget,100 | 2,1,Gadget,100,2,1,Gadget,100 | " +
-		"3,2,Widget,75,3,2,Widget,75 | 4,2,Doohickey,125,3,2,Widget,75 | " +
-		"1,1,Widget,50,1,1,Widget,50 | 2,1,Gadget,100,1,1,Widget,50"
 
 	f1Run(t, arms, []f1Case{
 		{
@@ -209,32 +201,28 @@ func TestL1AQualifiedOrderByTermBindsTheReferenceItNames(t *testing.T) {
 				"1,1,Widget,50,1,Alice,150 | 2,1,Gadget,100,1,Alice,150",
 		},
 		{
-			// #1002 — the DISTINCT sibling of the headline shape, PINNED per
-			// DAG arm, not fixed. One keyword from the cell five rows above
-			// this one, whose non-DISTINCT twin is right on all four arms.
+			// #1002 — the DISTINCT sibling of the headline shape. One keyword
+			// from the cell five rows above this one, whose non-DISTINCT twin
+			// is right on all four arms.
 			//
 			// Eight rows, all distinct in the three keys: a TOTAL order, and
-			// ADR-0013 lists no class that covers one. PostgreSQL 17 and the
-			// two single-process arms answer `want`. Both DAG arms answer the
-			// keys in the WRONG ORDER — measured, not inferred: the sequence
-			// they produce is `(b.amount ASC, a.amount ASC)`, so the LEADING
-			// key `a.order_id` is not applied at all (its column runs
-			// 1,1,2,2,1,1,2,2) and the TRAILING key leads. With `b.amount
-			// DESC` the same arms answer `(b.amount DESC, a.amount ASC)`,
-			// which is what says the list is mis-ordered rather than
-			// truncated.
+			// ADR-0013 lists no class that covers one. Both DAG arms used to
+			// answer `(b.amount ASC, a.amount ASC)` — the LEADING key
+			// `a.order_id` not applied at all — and `(b.amount DESC, a.amount
+			// ASC)` for the DESC spelling below, which is what said the key
+			// LIST was mis-ordered rather than truncated.
 			//
-			// PRE-EXISTING and NOT this arc's: byte-identical at 62e2d2dc and
-			// at this branch's tip, on the two arms the #989 fix does not
-			// reach — that fix is confined to the three single-process
-			// `exec.SortKey` sites, and `SortKeySpec` and the worker fragment
-			// builder are untouched. `exec.PublishedGroupKeyNames` is not the
-			// cause: it keeps a duplicate name QUALIFIED, so the DISTINCT
-			// stage still publishes `b.amount`.
-			//
-			// A pin that starts agreeing FAILS, so deleting these two cells is
-			// the #1002 fix's proof.
-			name: "1002 pinned: the DISTINCT sibling mis-orders the keys on both DAG arms",
+			// A star DISTINCT over a SELF-JOIN is the one user DISTINCT that
+			// reaches the coordinator's merge un-deduplicated
+			// (`starDistinctGroupKeys` declines a name two scans publish), and
+			// that merge dropped every key its exact `mergeColIdx` lookup
+			// missed. `mergeSortKeyIndices` binds through
+			// `exec.ColumnIndexFallback`, the resolver `sortKeyLocalColumn`
+			// above relies on, so one key resolves one way on every path. The
+			// full census is `TestM1AMergedOrderIsTheQuerysOrder`; these two
+			// cells are its spent pins, kept here because this gate is where
+			// the shape was found.
+			name: "1002 the DISTINCT sibling binds the same keys on all four arms",
 			sql: "SELECT DISTINCT * FROM lat_item a JOIN lat_item b ON b.order_id = a.order_id " +
 				"ORDER BY a.order_id, a.amount, b.amount",
 			want: distinctCols + " rows=8 | " +
@@ -242,16 +230,11 @@ func TestL1AQualifiedOrderByTermBindsTheReferenceItNames(t *testing.T) {
 				"2,1,Gadget,100,1,1,Widget,50 | 2,1,Gadget,100,2,1,Gadget,100 | " +
 				"3,2,Widget,75,3,2,Widget,75 | 3,2,Widget,75,4,2,Doohickey,125 | " +
 				"4,2,Doohickey,125,3,2,Widget,75 | 4,2,Doohickey,125,4,2,Doohickey,125",
-			wantDag:     distinctWrong,
-			wantDagshuf: distinctWrong,
-			why: "#1002 (pre-existing, both DAG arms): PostgreSQL 17 and the single-process " +
-				"arms answer a.order_id, a.amount, b.amount; the DAG arms answer " +
-				"(b.amount, a.amount) and never apply the leading key.",
 		},
 		{
-			// The DESC direction of the same pin, so a run that ignores the
+			// The DESC direction of the same shape, so a run that ignores the
 			// key list cannot pass by accident in one direction.
-			name: "1002 pinned: the same with DESC on the trailing key",
+			name: "1002 the same with DESC on the trailing key",
 			sql: "SELECT DISTINCT * FROM lat_item a JOIN lat_item b ON b.order_id = a.order_id " +
 				"ORDER BY a.order_id, a.amount, b.amount DESC",
 			want: distinctCols + " rows=8 | " +
@@ -259,11 +242,6 @@ func TestL1AQualifiedOrderByTermBindsTheReferenceItNames(t *testing.T) {
 				"2,1,Gadget,100,2,1,Gadget,100 | 2,1,Gadget,100,1,1,Widget,50 | " +
 				"3,2,Widget,75,4,2,Doohickey,125 | 3,2,Widget,75,3,2,Widget,75 | " +
 				"4,2,Doohickey,125,4,2,Doohickey,125 | 4,2,Doohickey,125,3,2,Widget,75",
-			wantDag:     distinctWrongDesc,
-			wantDagshuf: distinctWrongDesc,
-			why: "#1002 (pre-existing, both DAG arms): the DAG arms answer " +
-				"(b.amount DESC, a.amount ASC), which is the key list mis-ordered rather " +
-				"than truncated.",
 		},
 	})
 }

@@ -203,10 +203,11 @@ func TestSortBatchesOrdersMissingTypes(t *testing.T) {
 				schema[1].Scale = tc.scale
 			}
 			b := batch.FromRows(schema, tc.rows)
-			colIdx := map[string]int{"id": 0, "k": 1}
 
 			c := &Coordinator{}
-			c.sortBatches([]*batch.RecordBatch{b}, []string{"id", "k"}, colIdx, []logical.OrderExpr{tc.orderBy})
+			if _, err := c.sortBatches([]*batch.RecordBatch{b}, []logical.OrderExpr{tc.orderBy}); err != nil {
+				t.Fatalf("sortBatches: %v", err)
+			}
 
 			var got []int64
 			n := b.ActiveLen()

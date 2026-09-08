@@ -49,8 +49,15 @@ func TestMergeOrdersAcrossBatches(t *testing.T) {
 			mk([2]any{int64(5), int64(50)}, [2]any{int64(6), nil}),
 		}
 	}
-	colIdx := map[string]int{"id": 0, "k": 1}
-	cols := []string{"id", "k"}
+	// The merge now REFUSES an ordering it cannot apply (#1002), so every
+	// call here asserts the ordering succeeded before it reads the rows.
+	must := func(batches []*batch.RecordBatch, err error) []*batch.RecordBatch {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("ordering the merged partials: %v", err)
+		}
+		return batches
+	}
 	read := func(batches []*batch.RecordBatch) []int64 {
 		var got []int64
 		for _, b := range batches {
@@ -78,20 +85,20 @@ func TestMergeOrdersAcrossBatches(t *testing.T) {
 
 	c := &Coordinator{}
 	t.Run("sort ascending, NULLS LAST", func(t *testing.T) {
-		got := read(c.sortBatches(build(), cols, colIdx, []logical.OrderExpr{{Column: "k"}}))
+		got := read(must(c.sortBatches(build(), []logical.OrderExpr{{Column: "k"}})))
 		same(t, got, []int64{2, 4, 1, 3, 5, 6})
 	})
 	t.Run("sort descending, NULLS FIRST", func(t *testing.T) {
-		got := read(c.sortBatches(build(), cols, colIdx, []logical.OrderExpr{{Column: "k", Desc: true}}))
+		got := read(must(c.sortBatches(build(), []logical.OrderExpr{{Column: "k", Desc: true}})))
 		same(t, got, []int64{6, 5, 3, 1, 4, 2})
 	})
 	t.Run("top-K across batches", func(t *testing.T) {
-		got := read(c.topKBatches(build(), cols, colIdx, []logical.OrderExpr{{Column: "k"}}, 3))
+		got := read(must(c.topKBatches(build(), []logical.OrderExpr{{Column: "k"}}, 3)))
 		same(t, got, []int64{2, 4, 1})
 	})
 	t.Run("one batch is untouched", func(t *testing.T) {
 		one := []*batch.RecordBatch{mk([2]any{int64(9), int64(1)}, [2]any{int64(8), int64(2)})}
-		out := c.sortBatches(one, cols, colIdx, []logical.OrderExpr{{Column: "k"}})
+		out := must(c.sortBatches(one, []logical.OrderExpr{{Column: "k"}}))
 		if len(out) != 1 || out[0] != one[0] {
 			t.Fatalf("a single-batch input was replaced; it must be sorted in place")
 		}
