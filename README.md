@@ -250,9 +250,9 @@ analytics engine.
 | Network & protocol | 100+ | CIDR/subnet math, MAC, port/protocol semantics, TCP/DNS/TLS/HTTP deep inspection, ICMP, IPv6 tunneling, JA3/JA3S fingerprinting, payload search |
 | GeoIP / ASN | 11 | MaxMind GeoLite2/GeoIP2 city + ASN lookup |
 | Vector & embeddings | 5 + `embed()` | cosine_similarity, l2_distance, dot_product, vector_norm, vector_dims, embed()/embed_model()/embed_dim() |
-| Date/time | 30+ | truncation, extraction, ISO 8601, Unix time, timezone conversion |
+| Date/time | 30+ | truncation, extraction, `time_bucket` (PostgreSQL's `date_bin`), ISO 8601, Unix time, timezone conversion |
 | String | 45+ | regex, padding, encoding, distance (Levenshtein/Soundex/Hamming) |
-| Aggregate | 28 | approx_distinct, corr, covar, percentile_cont/disc, mode, median, min_by/max_by |
+| Aggregate | 29 | approx_distinct, corr, covar, percentile_cont/disc, mode, median, min_by/max_by, ohlcv |
 
 Full signatures for every function: [SQL Reference § Built-in Functions](docs/sql-reference.md#built-in-functions).
 
@@ -267,7 +267,7 @@ Full analytical SQL via a custom recursive descent parser:
 - CTEs (`WITH ... AS`), UNION / INTERSECT / EXCEPT (with ALL variants)
 - INNER, LEFT, RIGHT, FULL OUTER, CROSS JOINs, with `ON` or `USING (col, ...)`
 - Subqueries: scalar, IN, EXISTS, correlated subqueries (over a base table, a derived table or a CTE), and `LATERAL` joins
-- Window functions with PARTITION BY, ORDER BY, NULLS FIRST/LAST, and ROWS/RANGE frame specs
+- 16 window functions (the rank family, SUM/COUNT/AVG/MIN/MAX, LAG/LEAD, FIRST_VALUE/LAST_VALUE/NTH_VALUE, NTILE, PERCENT_RANK, CUME_DIST) with PARTITION BY, ORDER BY, NULLS FIRST/LAST, and ROWS/RANGE frame specs; any other aggregate in the window position is refused `0A000` with the supported set named
 - GROUP BY, GROUPING SETS, CUBE, ROLLUP, and ORDER BY with positional references (including over `SELECT *`)
 - CASE, CAST, LIKE, BETWEEN, IN, IS NULL/TRUE/FALSE, `= ANY`/`= SOME`/`<> ALL`, row-value comparison `(a, b) < (c, d)`
 - Fixed-point DECIMAL(p,s) type with Int128 arithmetic (DuckDB-style scaled integers)
@@ -276,7 +276,7 @@ Full analytical SQL via a custom recursive descent parser:
 - VECTOR(N) type for embedding storage with cosine_similarity, l2_distance, dot_product, vector_norm, vector_dims
 - `embed()` SQL function — OpenAI, Voyage AI, and Ollama embedding providers with batched API calls (one call per record batch) and LRU cache
 - 359 built-in scalar functions (string, math, trig, date/time, network, UUID, conditional, regex, hash, encoding, bitwise, JSON, URL, deep packet inspection, ICMP, IPv6, JA3 fingerprinting, payload search, GeoIP/ASN, vector distance)
-- 28 aggregate functions including approx_distinct, corr, covar, percentile_cont/disc, mode, median, min_by/max_by
+- 29 aggregate functions including approx_distinct, corr, covar, percentile_cont/disc, mode, median, min_by/max_by, and `ohlcv(ts, price, volume)` — one mergeable state that answers a whole downsampled bar as a ROW (`open`, `high`, `low`, `close`, `volume`, `vwap`), grouped by `TIME_BUCKET(INTERVAL '5' MINUTE, ts)` ([ADR-0035](docs/adr/0035-mergeable-aggregate-states.md))
 - User-defined functions (CREATE FUNCTION)
 
 ```sql
