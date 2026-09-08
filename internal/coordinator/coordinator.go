@@ -311,11 +311,11 @@ type Coordinator struct {
 	// coordinator-local pipeline instead (#656 F2).
 	localUnreachableOutput atomic.Int64
 	// localLateralProjection counts queries whose plan the stage DAG refused
-	// because a STAR reads a decorrelated LATERAL whose block projection is
-	// not the column list its stage emits, and which ran on the
-	// coordinator-local pipeline instead (#984). Separate from
-	// localUnreachableOutput because the shape is the opposite one: there NO
-	// stage computed the list, here a stage computes a DIFFERENT list.
+	// because a STAR reads a derived block whose projection NO STAGE COULD BE
+	// MADE TO PUBLISH, and which ran on the coordinator-local pipeline instead
+	// (#984). Separate from localUnreachableOutput because the shape is the
+	// opposite one: there NO stage computed the list, here a stage computes a
+	// DIFFERENT list.
 	localLateralProjection atomic.Int64
 	// localTableLess counts queries whose plan the stage DAG refused because
 	// they read from no table at all, and which ran on the coordinator-local
@@ -1145,13 +1145,14 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		if errors.Is(err, physical.ErrUnreachableGatherOutput) {
 			return c.runUnreachableOutputLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
-		// And a star over a decorrelated LATERAL whose block projection is not
-		// what its stage emits — a source column published twice, a rename the
-		// stream does not carry. A Project emits no stage, so the star
-		// published the STREAM: one spelling failed loudly under ADR-0010 and
-		// the other silently dropped a column PostgreSQL sends. The
-		// single-process pipeline runs the lateral's Project as a real
-		// operator (#984).
+		// And a star over a derived block whose projection no stage could be
+		// made to publish. Arc K3 materializes that projection onto the stage
+		// for every block it can state (#984); this is the residue — a
+		// computed item with no plan-time type, a producer that cannot carry a
+		// projection — where the star would otherwise publish the STREAM. One
+		// spelling failed loudly under ADR-0010 and the other silently dropped
+		// a column PostgreSQL sends; the single-process pipeline runs the
+		// block's Project as a real operator.
 		if errors.Is(err, physical.ErrLateralProjectionDistributed) {
 			return c.runLateralProjectionLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}

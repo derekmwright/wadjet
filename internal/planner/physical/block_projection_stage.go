@@ -3,7 +3,9 @@ package physical
 import (
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // A DERIVED BLOCK A STAR READS IS A RELATION, AND SOME STAGE PUBLISHES IT
@@ -92,11 +94,13 @@ func starReadBlockProjections(root *logical.Node) map[*logical.Node]bool {
 // different relation from the one the stage below it emits — a different
 // WIDTH, a name the stream does not carry, or one name published twice.
 //
-// A block carrying a MINTED correlation slot is excluded: the slot is dropped
-// by the join that made it, by POSITION on the side the lowering built
-// (ADR-0026 §3c), and materializing the projection would move that position.
-// The lateral spellings are handled where the slot is known — see
-// blockProjectionIsStageable's caller.
+// A RESERVED SLOT counts on neither side. The lateral lowering mints its
+// correlation key into the block's list AND into the stream below it, and the
+// join drops it again by POSITION on the side it built (ADR-0026 §3c) — so it
+// is neither a column the block publishes nor one the stream owes, and
+// counting it would call a block that IS its stream a divergence. Where the
+// projection is materialized the join's drop reads its ordinal from the
+// projection instead of from the stream (stageHiddenPositions).
 func blockProjectionLeavesItsStream(p *logical.Node) bool {
 	if p == nil || p.SecurityBarrier || len(p.Children) != 1 ||
 		logical.HasStarProjection(p) || len(p.Projections) == 0 {
@@ -106,19 +110,25 @@ func blockProjectionLeavesItsStream(p *logical.Node) bool {
 	if len(names) == 0 {
 		return false
 	}
-	for _, name := range names {
-		if strings.HasPrefix(strings.ToLower(blockBareName(name)), "__") {
-			// A minted slot in the block's own list: the join drops it by
-			// position and this pass must not move it.
-			return false
-		}
-	}
 	stream := blockStreamNames(p)
 	if len(stream) == 0 {
 		// A stream this pass cannot state says nothing, exactly as
 		// lateralProjectionNotInStream declines rather than guessing.
 		return false
 	}
+	// A RESERVED SLOT is compared on neither side. The lowering minted it
+	// into both lists and the join drops it again; counting it would report a
+	// divergence for a block that publishes exactly its stream.
+	user := func(in []string) []string {
+		out := in[:0:0]
+		for _, n := range in {
+			if !strings.HasPrefix(strings.ToLower(blockBareName(n)), "__") {
+				out = append(out, n)
+			}
+		}
+		return out
+	}
+	names, stream = user(names), user(stream)
 	if len(names) != len(stream) {
 		return true
 	}
@@ -162,6 +172,145 @@ func blockBareName(s string) string {
 	return s
 }
 
+// blockColumn is ONE column the block publishes, in the block's own order:
+// the name a consumer above reads it under, the expression the stage's own
+// input evaluates it from, and the type it is declared as.
+//
+// The three travel together because two of them are read by different passes
+// and a disagreement between those passes is an ADR-0010 refusal, not a
+// cosmetic one: the fragment computes the column from Expr and declares it
+// from Decl, and an empty side of the same join declares it from Decl alone.
+// Deriving both from one walk is what makes "one stage's files describe one
+// relation" true by construction rather than by two rules agreeing.
+type blockColumn struct {
+	Name string
+	Expr string
+	Decl parquet.Column
+	// DeclKnown is carried beside Decl because parquet.TypeBool IS the zero
+	// value: `COUNT(*) = 0 AS n` reads as "no declaration" through a
+	// `Type != 0` test, projectOpFromSpecs then drops the type off the wire,
+	// and the worker's buildSelectProjection guesses STRING for a column that
+	// is a bool (#445). The empty side of the same join declared BOOL, and
+	// the two files disagreed under ADR-0010.
+	DeclKnown bool
+}
+
+// blockPublishedColumns is the relation a derived block publishes, or ok=false
+// when the plan cannot state it.
+//
+// ok=false is a real answer and not a shrug: a column with no plan-time type
+// would be COMPUTED by the fragment and MISSING from the empty side's
+// declaration, which is the width disagreement ADR-0010 refuses. Declining
+// leaves the plan exactly as it was.
+func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool) ([]blockColumn, bool) {
+	if p == nil || len(p.Children) != 1 || len(p.Projections) == 0 {
+		return nil, false
+	}
+	// The STREAM's own declaration, typed by the walk that owns each
+	// producer's rule — the aggregate arm types a group key and an AggSpec,
+	// the scan arm reads the catalog annotation. A minted correlation slot and
+	// an `__agg_N` have a type only their producer can state, and a second
+	// rule for them is the disagreement ADR-0026 exists to prevent.
+	stream := declaredJoinSchema(p.Children[0], nil, published)
+	byName := make(map[string]parquet.Column, len(stream))
+	for _, col := range stream {
+		byName[strings.ToLower(blockBareName(col.Name))] = col
+	}
+	// A COMPUTED item is typed against what the stage's input EMITS, not
+	// against what the block's child reads: above an aggregate the operands
+	// are `__agg_N` and a minted slot, and typing `COUNT(*) + 1` against the
+	// scan's columns answers nothing at all.
+	decls := inputColDecls(p.Children[0])
+	if decls.types == nil {
+		decls.types = map[string]parquet.TypeID{}
+	}
+	strictInt := strictIntArithCols(p.Children[0])
+	if strictInt == nil {
+		strictInt = map[string]bool{}
+	}
+	for _, col := range stream {
+		lc := strings.ToLower(blockBareName(col.Name))
+		if _, ok := decls.types[lc]; !ok {
+			decls.types[lc] = col.Type
+			if col.Type == parquet.TypeDecimal {
+				if decls.dec == nil {
+					decls.dec = map[string]logical.DecimalMeta{}
+				}
+				decls.dec[lc] = logical.DecimalMeta{
+					Precision: col.Precision, Scale: col.Scale,
+				}
+			}
+		}
+		// An INTEGER the producer emits keeps integer arithmetic exact above
+		// it, the same hint absorbComputedSubqueryProjection passes when it
+		// materializes a computed column into a scan fragment (#297, #445):
+		// without it `COUNT(*) + 1` declares FLOAT64 where every other path
+		// answers a bigint (ADR-0024).
+		if col.Type == parquet.TypeInt32 || col.Type == parquet.TypeInt64 {
+			strictInt[lc] = true
+		}
+	}
+	out := make([]blockColumn, 0, len(p.Projections))
+	for _, pr := range p.Projections {
+		if pr.IsAgg {
+			// An aggregate SELECT item is computed by the aggregate stage,
+			// not by a projection above it.
+			return nil, false
+		}
+		name := pr.Alias
+		if name == "" {
+			name = pr.Column
+		}
+		if name == "" {
+			name = strings.TrimSpace(pr.Expr)
+		}
+		bare := strings.ToLower(blockBareName(name))
+		if bare == "" {
+			return nil, false
+		}
+		if pr.ASTExpr != nil && !isSimpleColRefForRename(pr.ASTExpr) {
+			// The CONFIDENCE, not the TypeID: parquet.TypeBool is the zero
+			// value, so `COUNT(*) = 0 AS n` reads as "no type at all" through
+			// a `t == 0` test and the whole block goes unpublished — which is
+			// the ADR-0010 refusal again, for a column that was decided.
+			decl, conf := inferProjectionDeclTypeConf(pr.ASTExpr, 0, strictInt, decls)
+			if conf == expr.Undecided {
+				return nil, false
+			}
+			t, prec, scale := declTypeParts(decl)
+			out = append(out, blockColumn{
+				Name: name, Expr: pr.ASTExpr.String(),
+				Decl: parquet.Column{
+					Name: name, Type: t, Precision: prec, Scale: scale, Nullable: true,
+				},
+				DeclKnown: true,
+			})
+			continue
+		}
+		// A BARE item is read under the spelling the STREAM carries. The
+		// source first, because that is what an ordinary rename reads; then
+		// the item's OWN name, because a MINTED correlation slot's item is
+		// spelled `__key_0` and reads `order_id`, and the aggregate below
+		// emits the slot rather than the source it was computed from.
+		src := pr.Column
+		if src == "" {
+			src = strings.TrimSpace(pr.Expr)
+		}
+		spelling := strings.ToLower(blockBareName(src))
+		col, ok := byName[spelling]
+		if !ok {
+			spelling = bare
+			col, ok = byName[spelling]
+		}
+		if !ok {
+			return nil, false
+		}
+		col.Name, col.Nullable = name, true
+		out = append(out, blockColumn{Name: name, Expr: spelling, Decl: col, DeclKnown: true})
+	}
+	return out, true
+}
+
 // publishBlockProjection makes the stages this block's subtree just emitted
 // publish the block's own relation, and reports whether it could.
 //
@@ -175,87 +324,90 @@ func blockBareName(s string) string {
 // It DECLINES rather than approximating: a spec that does not resolve against
 // what the terminal emits would compute NULL for the column, which is worse
 // than the missing one this pass exists to restore. A decline leaves the plan
-// exactly as it was, so the shape keeps whatever disposition it had.
-func publishBlockProjection(node *logical.Node, stages *[]Stage, from int) bool {
+// exactly as it was, so the shape keeps whatever disposition it had — and the
+// CALLER records only the blocks that were really published, because the
+// declaration and the join's key binding read that set and a block marked
+// published but not materialized is the ADR-0010 disagreement again.
+func publishBlockProjection(node *logical.Node, stages *[]Stage, from int,
+	published map[*logical.Node]bool) bool {
 	if from < 0 || from >= len(*stages) {
 		return false
 	}
-	target := len(*stages) - 1
-	specs := blockProjectionSpecs(node)
-	if len(specs) == 0 {
+	cols, ok := blockPublishedColumns(node, published)
+	if !ok || len(cols) == 0 {
 		return false
+	}
+	target := len(*stages) - 1
+	specs := make([]ProjectExprSpec, len(cols))
+	for i, c := range cols {
+		specs[i] = ProjectExprSpec{
+			Expr: c.Expr, Name: c.Name, Type: c.Decl.Type, TypeKnown: c.DeclKnown,
+			Precision: c.Decl.Precision, Scale: c.Decl.Scale,
+		}
 	}
 	respelled, ok := respellSpecsOverProducerOutput(*stages, target, specs)
 	if !ok || !specsResolveAgainstStageOutput(*stages, target, respelled) {
 		return false
 	}
+	if !orderingSurvivesAProjectStage(*stages, target, respelled) {
+		return false
+	}
 	s := &(*stages)[target]
 	if stageAppliesProjection(s) && len(s.ProjectExprs) == 0 &&
-		len(s.SecurityProjectExprs) == 0 && orderingSurvivesAProjectStage(*stages, target, respelled) {
+		len(s.SecurityProjectExprs) == 0 {
 		s.ProjectExprs = respelled
 		return true
 	}
 	keys := (*stages)[target].SortKeys
-	if !orderingSurvivesAProjectStage(*stages, target, respelled) {
-		return false
-	}
 	*stages = insertProjectStageAbove(*stages, target, respelled)
 	carryOrderingOntoProjectStage(*stages, len(*stages)-1, keys)
 	return true
 }
 
-// blockProjectionSpecs is the block's SELECT list as projection specs, by
-// position, named the way the block publishes them.
+// materializedBlockUnder is the marked block at or below n, reached through the
+// nodes that emit no stage of their own, or nil when this side carries none.
 //
-// The EXPRESSION is the AST's own rendering rather than the text the query
-// wrote, for the reason declaredJoinSchema reads the AST too: the logical
-// layer has already replaced each aggregate call with a reference to the slot
-// the aggregate stage emits, so `CAST(COUNT(*) AS VARCHAR)` renders as a
-// computation over `__agg_0` — which is what the stage's input really carries.
-func blockProjectionSpecs(node *logical.Node) []ProjectExprSpec {
-	var colTypes colDecls
-	var strictInt map[string]bool
-	if len(node.Children) == 1 {
-		colTypes = inputColDecls(node.Children[0])
-		strictInt = strictIntArithCols(node.Children[0])
+// A side's root is not always the block: a Filter or a Limit the optimizer
+// left above it emits no stage either, so the projection the stage publishes
+// is still the first Project below them.
+func materializedBlockUnder(n *logical.Node, published map[*logical.Node]bool) *logical.Node {
+	for cur := n; cur != nil && len(cur.Children) == 1; cur = cur.Children[0] {
+		if published[cur] {
+			return cur
+		}
+		if cur.Type != logical.NodeFilter && cur.Type != logical.NodeLimit &&
+			cur.Type != logical.NodeProject && cur.Type != logical.NodeDistinct {
+			return nil
+		}
 	}
-	specs := make([]ProjectExprSpec, 0, len(node.Projections))
-	for _, pr := range node.Projections {
-		if pr.IsAgg {
-			// An aggregate SELECT item is computed by the aggregate stage,
-			// not by a projection above it.
-			return nil
-		}
-		name := pr.Alias
-		if name == "" {
-			name = pr.Column
-		}
-		if name == "" {
-			name = strings.TrimSpace(pr.Expr)
-		}
-		if name == "" {
-			return nil
-		}
-		spec := ProjectExprSpec{Name: name}
-		switch {
-		case pr.ASTExpr != nil:
-			spec.Expr = pr.ASTExpr.String()
-			if !isSimpleColRefForRename(pr.ASTExpr) {
-				spec.Type, spec.Precision, spec.Scale = declTypeParts(
-					inferProjectionDeclType(pr.ASTExpr, 0, strictInt, colTypes))
-				spec.TypeKnown = spec.Type != 0
-			}
-		case pr.Expr != "":
-			spec.Expr = strings.ToLower(pr.Expr)
-		case pr.Column != "":
-			spec.Expr = pr.Column
-		default:
-			return nil
-		}
-		if spec.Expr == "" {
-			return nil
-		}
-		specs = append(specs, spec)
+	return nil
+}
+
+// declaredBlockSchema is the block's published relation as a plan-time column
+// list — the declaration a side of a join that delivers NO BATCH AT ALL is
+// shaped by.
+//
+// A stage's files describe ONE relation (ADR-0010), and once a block is
+// materialized that relation is the PROJECTION. declaredJoinSchema's ordinary
+// walk descends past a Project and declares the scan's or the aggregate's own
+// columns, so an empty build task wrote the stream's columns beside sibling
+// files carrying the projection's: `declares 3 columns where an earlier file
+// of the same stage input declared 4`, and where the widths happened to agree,
+// `names column 3 "n" where an earlier file ... named it "__agg_0"`. That is
+// #980's own sentence, and it is what the shape does the moment the lateral
+// route stops standing in front of it.
+func declaredBlockSchema(p *logical.Node, wantSet map[string]bool,
+	published map[*logical.Node]bool) []parquet.Column {
+	cols, ok := blockPublishedColumns(p, published)
+	if !ok {
+		return nil
 	}
-	return specs
+	out := make([]parquet.Column, 0, len(cols))
+	for _, c := range cols {
+		if len(wantSet) > 0 && !wantSet[strings.ToLower(blockBareName(c.Name))] {
+			continue
+		}
+		out = append(out, c.Decl)
+	}
+	return out
 }

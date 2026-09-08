@@ -1187,6 +1187,11 @@ type Planner struct {
 	// `default:` arm publishes each of them onto the stage that materializes
 	// it, so the relation above the block is the one the query wrote (#984).
 	starReadBlocks map[*logical.Node]bool
+	// publishedBlocks is the subset of starReadBlocks the pass really
+	// materialized. Every CONSUMER reads this one — the join's keys, its
+	// OutputFilter, the declaration for an empty side and the hidden slot's
+	// ordinal — because a block the pass declined still emits its stream.
+	publishedBlocks map[*logical.Node]bool
 
 	// scanDeletes caches the merge-on-read DELETE state walkStages read for
 	// each base table, table name → (file path → file-absolute deleted row
@@ -3691,13 +3696,6 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if err := p.refuseCorrelatedSubqueries(node); err != nil {
 		return nil, err
 	}
-	// A star reading a decorrelated LATERAL whose block projection is not the
-	// column list its stage emits. One spelling was LOUD and the other
-	// silently dropped the column; both are routed to the single-process
-	// pipeline, where the lateral's Project is a real operator (#984).
-	if err := p.refuseLateralProjection(node); err != nil {
-		return nil, err
-	}
 	// A `SELECT * ... ORDER BY <n>` whose star never expanded (#810). This is
 	// a genuine refusal of the QUERY, not of the distributed plan: it is NOT
 	// one of the typed errors the coordinator routes local on, because the
@@ -3757,6 +3755,16 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	}
 	if p.scalarRowsErr != nil {
 		return nil, p.scalarRowsErr
+	}
+	// A STAR OVER A BLOCK NO STAGE COULD PUBLISH (#984). Asked AFTER stage
+	// generation, because the answer is what the pass DID: every block a star
+	// reads whose projection differs from its stream is materialized onto a
+	// stage, and the handful the pass declines — a computed item the plan
+	// cannot type, a producer that cannot carry a projection — leave the star
+	// reading the stream, which is the wrong relation. Routed, not answered
+	// short.
+	if err := refuseUnpublishedStarBlock(p.starReadBlocks, p.publishedBlocks); err != nil {
+		return nil, err
 	}
 	if err := p.enforceQueryLimits(ctx, stages, node); err != nil {
 		return nil, err
@@ -6013,6 +6021,7 @@ func (p *Planner) generateStages(node *logical.Node) []Stage {
 	p.cteTerminals = make(map[string]bool)
 	p.cteRefCounts = countCTEReferences(node)
 	p.starReadBlocks = starReadBlockProjections(node)
+	p.publishedBlocks = map[*logical.Node]bool{}
 	p.scanDeletes = nil
 	p.limitStageRoot = node
 	p.setOpErr = nil
@@ -7993,10 +8002,10 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// match the actual column names in the data (e.g., supplier_no → l_suppkey).
 		if len(node.Children) >= 2 {
 			for i, key := range leftKeys {
-				leftKeys[i] = resolveShuffleKey(key, node.Children[0], p.starReadBlocks)
+				leftKeys[i] = resolveShuffleKey(key, node.Children[0], p.publishedBlocks)
 			}
 			for i, key := range rightKeys {
-				rightKeys[i] = resolveShuffleKey(key, node.Children[1], p.starReadBlocks)
+				rightKeys[i] = resolveShuffleKey(key, node.Children[1], p.publishedBlocks)
 			}
 		}
 
@@ -8046,7 +8055,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// producer's raw columns: `[id, y.id]` for a query that asked for
 			// `[id, w]`. It bit only the SHUFFLED lowering, because the
 			// broadcast one has no payload list to get wrong (#694 round 2).
-			needed := resolveJoinNeededColumns(node, p.starReadBlocks)
+			needed := resolveJoinNeededColumns(node, p.publishedBlocks)
 			var shuffleCols []string
 			if len(needed) > 0 {
 				seen := make(map[string]bool, len(needed)+len(leftKeys)+len(rightKeys))
@@ -8114,12 +8123,12 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			joinTasks = p.WorkerCount
 		}
 		stageID := fmt.Sprintf("join-%d", len(*stages))
-		probeSchema, buildSchema := joinSideSchemas(node, leftKeys, rightKeys)
+		probeSchema, buildSchema := joinSideSchemas(node, leftKeys, rightKeys, p.publishedBlocks)
 		stage := Stage{
 			ID:                 stageID,
 			Type:               joinType,
 			Tasks:              joinTasks,
-			Columns:            resolveJoinNeededColumns(node, p.starReadBlocks),
+			Columns:            resolveJoinNeededColumns(node, p.publishedBlocks),
 			JoinType:           jt,
 			JoinLeftKeys:       leftKeys,
 			JoinRightKeys:      rightKeys,
@@ -8165,7 +8174,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// worker drops them from the probe's output exactly as the
 		// single-process planner does, so the two paths publish one column
 		// set (ADR-0026 3c).
-		stage.HiddenJoinCols = stageHiddenPositions(node)
+		stage.HiddenJoinCols = stageHiddenPositions(node, p.publishedBlocks)
 		if marker, _, drop := lateralEmptySpec(node); marker != "" {
 			stage.LateralPadMarker = marker
 			stage.LateralDropMarker = drop
@@ -8606,7 +8615,14 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		if node.Type == logical.NodeProject && p.starReadBlocks[node] &&
 			len(*stages) > preDefaultCount &&
 			!p.cteTerminals[(*stages)[len(*stages)-1].ID] {
-			publishBlockProjection(node, stages, preDefaultCount)
+			// Only a block that was REALLY materialized is recorded. The
+			// declaration for an empty side and the join's key binding both
+			// read this set, and a block marked published that the pass then
+			// declined would have them describing a relation no task writes —
+			// which is the ADR-0010 disagreement this pass exists to end.
+			if publishBlockProjection(node, stages, preDefaultCount, p.publishedBlocks) {
+				p.publishedBlocks[node] = true
+			}
 		}
 		// ABAC security barrier (InjectColumnPolicies wraps the scan in a
 		// Project of masked/visible columns). An ordinary Project can pass
@@ -9169,7 +9185,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// no batch at all: an outer join still owes the rows the empty side
 	// shapes and cannot name their columns without this (#348/#352). Computed
 	// after the semi/anti swap above so the sides are final.
-	hj.ProbeSchemaHint, hj.BuildSchemaHint = joinSideSchemas(node, hj.LeftKeys, hj.RightKeys)
+	hj.ProbeSchemaHint, hj.BuildSchemaHint = joinSideSchemas(node, hj.LeftKeys, hj.RightKeys, nil)
 
 	// For semi/anti joins without a filter, enable key-only build:
 	// only build the key index and bloom filter, skip batch storage and arena refs.
@@ -18783,7 +18799,14 @@ type HiddenJoinCol struct {
 // SELECT list is a bare projection streams its SCAN's columns and the slot's
 // alias never lands there at all. A slot the stream does not carry has no
 // ordinal and is dropped by nobody, which is the honest answer for that shape.
-func stageHiddenPositions(node *logical.Node) []HiddenJoinCol {
+//
+// WHERE THE BLOCK IS MATERIALIZED THE TWO MODELS ARE ONE (#984). A block a
+// star reads publishes its own projection onto the stage, so the stage's
+// column list IS the subtree's emitted list and the ordinal is read from the
+// projection — the single-process model, from the same function that computes
+// it there. Reading the stream's ordinal for a materialized block would drop
+// whatever column happens to sit at the slot's old position.
+func stageHiddenPositions(node *logical.Node, published map[*logical.Node]bool) []HiddenJoinCol {
 	if node == nil || len(node.HiddenJoinCols) == 0 || len(node.Children) < 2 {
 		return nil
 	}
@@ -18792,7 +18815,22 @@ func stageHiddenPositions(node *logical.Node) []HiddenJoinCol {
 		return nil
 	}
 	var out []HiddenJoinCol
-	declared := declaredJoinSchema(node.Children[side], nil)
+	if block := materializedBlockUnder(node.Children[side], published); block != nil {
+		for _, hidden := range node.HiddenJoinCols {
+			if lateralMarkerDroppedAbove(node, hidden) {
+				continue
+			}
+			for i, name := range emittedColumnNames(block) {
+				if !strings.EqualFold(name, hidden) {
+					continue
+				}
+				out = append(out, HiddenJoinCol{Ordinal: i, Name: hidden, Probe: side == 0})
+				break
+			}
+		}
+		return out
+	}
+	declared := declaredJoinSchema(node.Children[side], nil, nil)
 	for _, hidden := range node.HiddenJoinCols {
 		if lateralMarkerDroppedAbove(node, hidden) {
 			continue

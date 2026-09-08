@@ -200,35 +200,31 @@ func (c *Coordinator) UnreachableOutputLocalRoutes() int64 {
 
 // runLateralProjectionLocal executes a query the stage DAG refused
 // (physical.ErrLateralProjectionDistributed) on the coordinator-local
-// single-process pipeline, where a lateral subquery's SELECT list is a real
+// single-process pipeline, where a derived block's SELECT list is a real
 // Project operator and every column it publishes is a real column.
 //
-// A Project emits no stage, so on the DAG a decorrelated lateral's block is
-// not a relation: the Aggregate or Scan beneath it is what materializes, and a
-// star above the join published THAT. A source column the block publishes
-// twice, or under a name the stream does not carry, is therefore missing or
-// misnamed — and the two spellings failed differently, which is what hid it:
-// the LEFT one failed LOUDLY (the join's empty-build task declared the
-// projection where its siblings declared the stream, ADR-0010) and the INNER
-// one answered with the column silently gone.
+// A Project emits no stage, so on the DAG a derived block is not a relation:
+// the Aggregate or Scan beneath it is what materializes, and a star above the
+// join published THAT. Arc K3 made the block's projection a stage's own column
+// set (#984), so almost every shape that used to arrive here runs distributed
+// now; what still routes is the residue the pass DECLINES — a computed item
+// whose type the plan cannot state, or a producer that cannot carry a
+// projection at all. Routing beats both of the alternatives, exactly as #359
+// does for correlated subqueries: the LEFT spelling failed LOUDLY under
+// ADR-0010 and the INNER one answered with a column silently gone.
 //
-// Routing beats both, exactly as #359 does for correlated subqueries. It is
-// scoped to a star, so a named SELECT list over the same lateral stays
+// Scoped to a star, so a named SELECT list over the same block stays
 // distributed — the gather resolves those by name and they are already right.
-//
-// K3 REMOVES IT: when a stage declares the block's PROJECTION rather than its
-// stream (#984), every shape routed here runs distributed and this route, its
-// counter and its gate go with it.
 func (c *Coordinator) runLateralProjectionLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
 	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
 		"a star over a LATERAL whose projection no stage publishes", &c.localLateralProjection)
 }
 
 // LateralProjectionLocalRoutes reports how many plans refused because a star
-// reads a decorrelated LATERAL whose block projection is not the column list
-// its stage emits were routed to the coordinator-local pipeline (#984).
-// Separate from the others so a gate can assert WHICH refusal fired — and that
-// an ordinary single-publish lateral did NOT fire it and stayed distributed.
+// reads a derived block whose projection no stage could be made to publish
+// were routed to the coordinator-local pipeline (#984). Separate from the
+// others so a gate can assert WHICH refusal fired — and that a block whose
+// projection a stage DOES carry did NOT fire it and stayed distributed.
 func (c *Coordinator) LateralProjectionLocalRoutes() int64 {
 	return c.localLateralProjection.Load()
 }

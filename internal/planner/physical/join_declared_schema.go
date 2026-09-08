@@ -30,7 +30,7 @@ import (
 //
 // Ordering mirrors buildReadSchema: table-schema order per scan, scans in
 // walk order, which is the order a real batch from that side arrives in.
-func declaredJoinSchema(n *logical.Node, want []string) []parquet.Column {
+func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.Node]bool) []parquet.Column {
 	if n == nil {
 		return nil
 	}
@@ -53,6 +53,23 @@ func declaredJoinSchema(n *logical.Node, want []string) []parquet.Column {
 	var walk func(*logical.Node)
 	walk = func(cur *logical.Node) {
 		if cur == nil {
+			return
+		}
+		if cur.Type == logical.NodeProject && published[cur] {
+			// A MATERIALIZED BLOCK IS ITS PROJECTION (#984, #980). The stage
+			// under this join runs the block's SELECT list as an OpProject,
+			// so the relation it publishes is the projection and not the
+			// stream below it. Declaring the stream here made an EMPTY side
+			// write a file of a different WIDTH from its siblings' —
+			// ADR-0010's `one stage's files describe one relation`.
+			for _, col := range declaredBlockSchema(cur, wantSet, published) {
+				lc := strings.ToLower(blockBareName(col.Name))
+				if seen[lc] {
+					continue
+				}
+				seen[lc] = true
+				out = append(out, col)
+			}
 			return
 		}
 		if cur.Type == logical.NodeProject {
@@ -210,7 +227,7 @@ func declaredJoinSchema(n *logical.Node, want []string) []parquet.Column {
 // joinSideSchemas returns the declared probe- and build-side schemas for a
 // join node: the columns downstream needs plus the join keys, which is
 // exactly what the shuffle carries for each side.
-func joinSideSchemas(node *logical.Node, leftKeys, rightKeys []string) (probe, build []parquet.Column) {
+func joinSideSchemas(node *logical.Node, leftKeys, rightKeys []string, published map[*logical.Node]bool) (probe, build []parquet.Column) {
 	if node == nil || len(node.Children) < 2 {
 		return nil, nil
 	}
@@ -223,11 +240,13 @@ func joinSideSchemas(node *logical.Node, leftKeys, rightKeys []string) (probe, b
 	// on every star over a decorrelated LATERAL. An empty want keeps every
 	// column, which is what a star asks for.
 	if len(node.NeededColumns) == 0 {
-		return declaredJoinSchema(node.Children[0], nil), declaredJoinSchema(node.Children[1], nil)
+		return declaredJoinSchema(node.Children[0], nil, published),
+			declaredJoinSchema(node.Children[1], nil, published)
 	}
 	want := make([]string, 0, len(node.NeededColumns)+len(leftKeys)+len(rightKeys))
 	want = append(want, node.NeededColumns...)
 	want = append(want, leftKeys...)
 	want = append(want, rightKeys...)
-	return declaredJoinSchema(node.Children[0], want), declaredJoinSchema(node.Children[1], want)
+	return declaredJoinSchema(node.Children[0], want, published),
+		declaredJoinSchema(node.Children[1], want, published)
 }

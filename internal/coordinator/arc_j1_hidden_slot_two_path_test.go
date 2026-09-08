@@ -350,15 +350,12 @@ func TestArcJ1AStarOverALateralPublishesPostgresColumns(t *testing.T) {
 		{name: "star-over-a-non-aggregated-lateral",
 			sql: `SELECT * FROM lat_ord o JOIN LATERAL (SELECT amount FROM lat_item ` +
 				`WHERE order_id = o.id) li ON true ORDER BY o.id, li.amount`,
+			// CLOSED by arc K3 (#984): the lateral's block emits its own
+			// projection as the stage's column list now, so the DAG publishes
+			// PostgreSQL's four columns instead of the scan's `order_id`
+			// beside them. The `wantDAG` that pinned the leak is deleted.
 			want: `amount,id,customer,total | 50,1,Alice,150 | 100,1,Alice,150 | ` +
 				`75,2,Bob,200 | 125,2,Bob,200`,
-			// PRE-EXISTING and not closed here: a lateral whose SELECT list is
-			// a bare projection emits no stage of its own, so the DAG's stream
-			// carries the SCAN's names and the materialized key's alias never
-			// lands — the source column rides out under its own name.
-			// Recorded in ADR-0012 with its mechanism.
-			wantDAG: `order_id,amount,id,customer,total | 1,50,1,Alice,150 | ` +
-				`1,100,1,Alice,150 | 2,75,2,Bob,200 | 2,125,2,Bob,200`,
 			pgSays: "(id, customer, total, amount) — four columns, the lateral's last"},
 		// Both CLOSED by arc K1 (#976): the binder HAS a catalog, so a derived
 		// block whose body is a star gets a real column list
@@ -626,39 +623,36 @@ func TestArcJ1TheEmptyInputDefaultIsTheItemsValue(t *testing.T) {
 			`WHERE order_id = o.id AND amount > 60) s ON true ORDER BY o.id`
 	}
 
-	for _, tc := range []struct {
-		name, sql, want string
-		// wantRoutedDAG says the DISTRIBUTED arms answer `want` by ROUTING to
-		// the coordinator-local pipeline rather than by running the DAG: a
-		// star over a lateral whose item is COMPUTED publishes a column no
-		// stage emits (`n` where the aggregate publishes `__agg_0`), and a
-		// Project emits no stage. These cells used to fail LOUDLY under
-		// ADR-0010; the route is what makes them PostgreSQL's answer (#984).
-		wantRoutedDAG bool
-	}{
+	// These cells ran on the coordinator-local pipeline until arc K3: a star
+	// over a lateral whose item is COMPUTED publishes a column no stage
+	// emitted (`n` where the aggregate publishes `__agg_0`), and a Project
+	// emits no stage, so the DAG was handed the query. The lateral's block is
+	// a stage's own column set now (#984), so every one of them runs
+	// distributed and the route, its counter and their assertions are gone.
+	for _, tc := range []struct{ name, sql, want string }{
 		// THE FIVE EXPRESSIONS, through the star.
 		{name: "star/count", sql: `SELECT * ` + lat(`COUNT(*)`),
 			want: `id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`},
 		{name: "star/count-plus-one", sql: `SELECT * ` + lat(`COUNT(*) + 1`),
-			want: `id,customer,total,n | 1,Alice,150,3 | 2,Bob,200,3 | 3,Carol,0,1`, wantRoutedDAG: true},
+			want: `id,customer,total,n | 1,Alice,150,3 | 2,Bob,200,3 | 3,Carol,0,1`},
 		{name: "star/count-equals-zero", sql: `SELECT * ` + lat(`COUNT(*) = 0`),
 			want: `id,customer,total,n | 1,Alice,150,false | 2,Bob,200,false | ` +
-				`3,Carol,0,true`, wantRoutedDAG: true},
+				`3,Carol,0,true`},
 		{name: "star/coalesce-sum", sql: `SELECT * ` + lat(`COALESCE(SUM(amount), 0)`),
-			want: `id,customer,total,n | 1,Alice,150,150 | 2,Bob,200,200 | 3,Carol,0,0`, wantRoutedDAG: true},
+			want: `id,customer,total,n | 1,Alice,150,150 | 2,Bob,200,200 | 3,Carol,0,0`},
 		{name: "star/nullif-keeps-a-matched-NULL", sql: `SELECT * ` + lat(`NULLIF(COUNT(*), 2)`),
-			want: `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,NULL | 3,Carol,0,0`, wantRoutedDAG: true},
+			want: `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,NULL | 3,Carol,0,0`},
 		{name: "star/case-with-no-else-is-NULL",
 			sql: `SELECT * ` + lat(`CASE WHEN COUNT(*) > 5 THEN 1 END`),
 			want: `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,NULL | ` +
-				`3,Carol,0,NULL`, wantRoutedDAG: true},
+				`3,Carol,0,NULL`},
 		{name: "star/sum-has-no-default", sql: `SELECT * ` + lat(`SUM(amount)`),
 			want: `id,customer,total,n | 1,Alice,150,150 | 2,Bob,200,200 | 3,Carol,0,NULL`},
 		// ALL THREE ROW KINDS IN ONE CELL: a matched NULL, a matched value and
 		// the pad.
 		{name: "star/matched-NULL-matched-value-and-the-pad",
 			sql:  `SELECT * ` + filtered(`NULLIF(COUNT(*), 1)`),
-			want: `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,2 | 3,Carol,0,0`, wantRoutedDAG: true},
+			want: `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,2 | 3,Carol,0,0`},
 
 		// THE NAMED SPELLING — the path the deleted reference rewrite served.
 		{name: "named/nullif-keeps-a-matched-NULL",
@@ -680,10 +674,10 @@ func TestArcJ1TheEmptyInputDefaultIsTheItemsValue(t *testing.T) {
 		// A DERIVED STAR and a CTE STAR read the same column.
 		{name: "derived-star/nullif",
 			sql:  `SELECT * FROM (SELECT * ` + lat(`NULLIF(COUNT(*), 2)`) + `) x`,
-			want: `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,NULL | 3,Carol,0,0`, wantRoutedDAG: true},
+			want: `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,NULL | 3,Carol,0,0`},
 		{name: "cte-star/nullif",
 			sql:  `WITH c AS (SELECT * ` + lat(`NULLIF(COUNT(*), 2)`) + `) SELECT * FROM c`,
-			want: `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,NULL | 3,Carol,0,0`, wantRoutedDAG: true},
+			want: `id,customer,total,n | 1,Alice,150,NULL | 2,Bob,200,NULL | 3,Carol,0,0`},
 
 		// THE INNER SPELLING keeps the pad too — an ungrouped aggregate over
 		// an empty input still yields a row, so the outer row survives.
@@ -713,20 +707,7 @@ func TestArcJ1TheEmptyInputDefaultIsTheItemsValue(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {
-				var routesBefore int64
-				if arm.coord != nil {
-					routesBefore = arm.coord.LateralProjectionLocalRoutes()
-				}
 				cols, rows, err := arm.run(tc.sql)
-				if arm.coord != nil {
-					routed := arm.coord.LateralProjectionLocalRoutes() > routesBefore
-					if routed != tc.wantRoutedDAG {
-						t.Fatalf("%s arm routed=%v, want %v — the ROWS alone cannot tell "+
-							"a DAG that ran this from a DAG that handed it to the local "+
-							"pipeline, and which one it was is the claim\n  SQL: %s",
-							arm.name, routed, tc.wantRoutedDAG, tc.sql)
-					}
-				}
 				if err != nil {
 					t.Fatalf("%s arm: %v\n  want %s (live PostgreSQL 17)\n  SQL: %s",
 						arm.name, err, tc.want, tc.sql)

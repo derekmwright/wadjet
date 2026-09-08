@@ -162,14 +162,12 @@ func TestArcJ1TheEmptyInputDefaultIsRightForEveryTypeFamily(t *testing.T) {
 			}
 			// THE STAR SPELLINGS take the same operator and publish the same
 			// value under the lateral's own name, with the correlation slot
-			// gone — and on the DISTRIBUTED arms they get there by ROUTING.
-			// Every item here is COMPUTED, so the lateral's block publishes
-			// `n` where its aggregate stage publishes `__agg_0`; a Project
-			// emits no stage, so the DAG has no relation to hand the star. It
-			// used to fail loudly under ADR-0010; it is routed to the
-			// coordinator-local pipeline now and answers PostgreSQL (#984).
-			// The counter is asserted because the ROWS cannot tell a DAG that
-			// ran this from a DAG that handed it over.
+			// gone. Every item here is COMPUTED, so the lateral's block
+			// publishes `n` where its aggregate stage publishes `__agg_0` —
+			// which is the relation the block's own projection now IS on the
+			// stage (#984), so these run DISTRIBUTED. They failed loudly under
+			// ADR-0010 at v0.18.59 and answered by routing to the local
+			// pipeline at v0.18.60.
 			starWant := strings.ReplaceAll(fam.want, "Alice,", "1,Alice,150,")
 			starWant = strings.ReplaceAll(starWant, "Bob,", "2,Bob,200,")
 			starWant = strings.ReplaceAll(starWant, "Carol,", "3,Carol,0,")
@@ -178,18 +176,7 @@ func TestArcJ1TheEmptyInputDefaultIsRightForEveryTypeFamily(t *testing.T) {
 				{"derived-star", `SELECT * FROM (SELECT * ` + lat(fam.item) + `) x`},
 			} {
 				for _, arm := range arms {
-					var routesBefore int64
-					if arm.coord != nil {
-						routesBefore = arm.coord.LateralProjectionLocalRoutes()
-					}
 					cols, rows, err := arm.run(sp.sql)
-					if arm.coord != nil &&
-						arm.coord.LateralProjectionLocalRoutes() == routesBefore {
-						t.Fatalf("%s/%s ran on the DAG where the routing is the "+
-							"claim — if a stage publishes the block's projection "+
-							"now (#984), delete this route and its counter\n  SQL: %s",
-							sp.name, arm.name, sp.sql)
-					}
 					if err != nil {
 						t.Fatalf("%s/%s: %v\n  SQL: %s", sp.name, arm.name, err, sp.sql)
 					}
@@ -411,15 +398,19 @@ func TestArcJ1ANamedListOverThatLateralStaysDistributed(t *testing.T) {
 	}
 }
 
-// A STAR OVER A LATERAL WHOSE PROJECTION IS NOT ITS STREAM IS ROUTED, NOT
-// ANSWERED WRONG AND NOT REFUSED (#984, arc J1 round 6).
+// A STAR OVER A LATERAL WHOSE PROJECTION IS NOT ITS STREAM IS RIGHT, AND THE
+// DISPOSITION IS THE CLAIM (#984, arc J1 round 6; retriggered by arc K3).
 //
-// This is the disposition gate for the refusal itself, over the three ways a
-// block projection leaves its stage's column list behind. Each cell asserts
-// the ROUTE by counter on dag/dagshuf and PostgreSQL's rendering on all four
-// arms, and each was one of two wrong things before: LOUD (`shuffle read: …
+// Each cell was one of two wrong things at v0.18.59 — LOUD (`shuffle read: …
 // one stage's files describe one relation`) for the LEFT spelling, or a
-// silently missing column for the INNER one.
+// silently missing column for the INNER one — and answered by ROUTING to the
+// coordinator-local pipeline at v0.18.60. Arc K3 made the block's projection a
+// stage's own column set, so the computed spellings RUN DISTRIBUTED now and
+// only the shapes the pass declines are still handed over.
+//
+// The counter is asserted on every cell in both directions, because the ROWS
+// cannot tell a DAG that ran the query from a DAG that handed it to the local
+// engine, and this arc MOVES that fact for four of them.
 //
 // The two CONTROLS at the end are the load-bearing half. A refusal that fired
 // on every lateral would pass every routed cell above and still be a
@@ -444,26 +435,22 @@ func TestArcJ1AStarOverAnUnstageableLateralProjectionIsRouted(t *testing.T) {
 			sql: `SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT ` +
 				`CAST(COUNT(*) AS VARCHAR) AS n FROM lat_item WHERE order_id = o.id) s ` +
 				`ON true ORDER BY o.id`,
-			want:       `id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`,
-			wantRouted: true},
+			want: `id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`},
 		{name: "computed-item/count-plus-one",
 			sql: `SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT COUNT(*) + 1 AS n ` +
 				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id`,
-			want:       `id,customer,total,n | 1,Alice,150,3 | 2,Bob,200,3 | 3,Carol,0,1`,
-			wantRouted: true},
+			want: `id,customer,total,n | 1,Alice,150,3 | 2,Bob,200,3 | 3,Carol,0,1`},
 		// A DERIVED table's star and a CTE's star reach the same join.
 		{name: "derived-star/computed-item",
 			sql: `SELECT * FROM (SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT ` +
 				`COUNT(*) + 1 AS n FROM lat_item WHERE order_id = o.id) s ON true) x ` +
 				`ORDER BY x.id`,
-			want:       `id,customer,total,n | 1,Alice,150,3 | 2,Bob,200,3 | 3,Carol,0,1`,
-			wantRouted: true},
+			want: `id,customer,total,n | 1,Alice,150,3 | 2,Bob,200,3 | 3,Carol,0,1`},
 		{name: "cte-star/computed-item",
 			sql: `WITH q AS (SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT ` +
 				`COUNT(*) + 1 AS n FROM lat_item WHERE order_id = o.id) s ON true) ` +
 				`SELECT * FROM q ORDER BY id`,
-			want:       `id,customer,total,n | 1,Alice,150,3 | 2,Bob,200,3 | 3,Carol,0,1`,
-			wantRouted: true},
+			want: `id,customer,total,n | 1,Alice,150,3 | 2,Bob,200,3 | 3,Carol,0,1`},
 		// A source column published twice under ONE name. The stream has one
 		// column called `order_id` and cannot answer to it twice; the
 		// qualified second name is this engine's own (PostgreSQL sends

@@ -497,11 +497,10 @@ func arcACells() []arcACell {
 				"amount=float:50|id=int64:1|customer=Alice|total=float:150",
 				"amount=float:125|id=int64:2|customer=Bob|total=float:200",
 				"amount=float:75|id=int64:2|customer=Bob|total=float:200"},
-			wantDAG: []string{
-				"order_id=int64:1|amount=float:100|id=int64:1|customer=Alice|total=float:150",
-				"order_id=int64:1|amount=float:50|id=int64:1|customer=Alice|total=float:150",
-				"order_id=int64:2|amount=float:125|id=int64:2|customer=Bob|total=float:200",
-				"order_id=int64:2|amount=float:75|id=int64:2|customer=Bob|total=float:200"},
+			// The DAG's `order_id` leak is CLOSED by arc K3 (#984): the
+			// lateral's block emits its own projection as the stage's column
+			// list, so every arm publishes the same four columns and the
+			// `wantDAG` that pinned the scan's name is gone.
 			pgSays: "the same four rows with columns (id, customer, total, amount)"},
 		// P2's shape, CLOSED by arc J1's hidden slot (#767's mirror, #956).
 		// `lateralSelectsColumn` used to decide "the subquery already
@@ -544,21 +543,12 @@ func arcACells() []arcACell {
 				"id=int64:2|customer=Bob|total=float:200|amount=float:125",
 				"id=int64:2|customer=Bob|total=float:200|amount=float:75",
 				"id=int64:3|customer=Carol|total=float:0|amount=NULL"},
-			// As above: the DAG's star output names the SCAN's own column.
-			wantDAG: []string{
-				"id=int64:1|customer=Alice|total=float:150|order_id=int64:1|amount=float:100",
-				"id=int64:1|customer=Alice|total=float:150|order_id=int64:1|amount=float:50",
-				"id=int64:2|customer=Bob|total=float:200|order_id=int64:2|amount=float:125",
-				"id=int64:2|customer=Bob|total=float:200|order_id=int64:2|amount=float:75",
-				"id=int64:3|customer=Carol|total=float:0|order_id=NULL|amount=NULL"},
-			// The shuffled arm's refusal is a WIDTH mismatch now, not a NAME
-			// one: with the key dropped from the join's output, a task whose
-			// build partition is empty declares the lateral's projected
-			// columns while a task with rows carries the scan's own list —
-			// which is the DAG's un-materialized lateral projection (the
-			// wantDAG above), one file wide and one file narrow. Loud at
-			// base, loud here, different sentence.
-			wantErrLikeDAGShuffled: "one stage's files describe one relation",
+			// CLOSED by arc K3 (#984). Both halves of this boundary moved
+			// together, which is what the boundary was for: the DAG's
+			// `order_id` leak is gone because the lateral's block emits its
+			// own projection as the stage's column list, and the shuffled
+			// arm's ADR-0010 refusal is gone with it because the empty-build
+			// task now declares the SAME relation its siblings write.
 			pgSays: "five rows with columns (id, customer, total, amount) — no order_id, " +
 				"and no refusal on any arm"},
 		// ------------------------------------------------------------------

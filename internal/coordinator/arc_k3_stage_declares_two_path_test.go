@@ -126,6 +126,39 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 			want: `id,order_id,product,amount,o.id,customer,total | ` +
 				`1,1,Widget,50,1,Alice,150 | 2,1,Gadget,100,1,Alice,150 | ` +
 				`3,2,Widget,75,2,Bob,200 | 4,2,Doohickey,125,2,Bob,200`},
+
+		// #980 — A LATERAL'S DEFAULTED COLUMN IS PART OF THE STAGE'S ONE
+		// COLUMN SET. Each of these answered on the single arms and, at
+		// v0.18.60, on the DAG arms only by ROUTING off it; with the route
+		// gone they are the shape ADR-0010 refused (`one stage's files
+		// describe one relation`) until the lateral join stage carried the
+		// defaulted column in the relation it declares. Carol has no items, so
+		// every cell exercises the empty-input default.
+		{name: "980/count-plus-one",
+			sql: `SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT COUNT(*) + 1 AS n ` +
+				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id`,
+			want: `id,customer,total,n | 1,Alice,150,3 | 2,Bob,200,3 | 3,Carol,0,1`},
+		{name: "980/coalesce-sum",
+			sql: `SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT COALESCE(SUM(amount), 0) ` +
+				`AS n FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id`,
+			want: `id,customer,total,n | 1,Alice,150,150 | 2,Bob,200,200 | 3,Carol,0,0`},
+		// A BOOLEAN item, and it is not a spelling: parquet.TypeBool is the
+		// ZERO TypeID, so a declaration carried as "type, and non-zero means
+		// known" loses it — the fragment then guesses STRING for the column
+		// while the empty side of the same join declares BOOL, and ADR-0010
+		// refuses the pair. The known-ness travels beside the type for that.
+		{name: "980/count-equals-zero-is-a-bool",
+			sql: `SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT COUNT(*) = 0 AS n ` +
+				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id`,
+			want: `id,customer,total,n | 1,Alice,150,false | 2,Bob,200,false | 3,Carol,0,true`},
+		{name: "980/string-default",
+			sql: `SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT CAST(COUNT(*) AS VARCHAR) ` +
+				`AS n FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id`,
+			want: `id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`},
+		{name: "980/ctl-bare-count-is-its-stream",
+			sql: `SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT COUNT(*) AS n ` +
+				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id`,
+			want: `id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {

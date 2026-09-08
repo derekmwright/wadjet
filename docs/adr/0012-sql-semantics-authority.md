@@ -1757,6 +1757,20 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      spellings plus seven controls, four arms, every `want` PostgreSQL 17's
      column set and values.
 
+     THE ROUTE THAT STOOD IN FOR IT IS RETRIGGERED, NOT DELETED.
+     `ErrLateralProjectionDistributed` and
+     `Coordinator.LateralProjectionLocalRoutes` used to fire on a NAME test
+     over every lateral whose block left its stream behind; they now fire on
+     what the pass DID — the blocks a star reads that no stage could be made
+     to carry. Two shapes are left in that residue, both loud-beats-wrong:
+     a computed item whose type the plan cannot state (`ARRAY[COUNT(*)]`
+     inside a CASE with a NULL arm decides nothing, and a projection
+     materialized at a type the empty side declares differently is ADR-0010's
+     refusal), and a block publishing one NAME twice, whose specs do not
+     resolve against the producer's output. Both answer PostgreSQL by routing
+     to the coordinator-local pipeline, asserted by counter in
+     `coordinator.TestArcJ1AStarOverAnUnstageableLateralProjectionIsRouted`.
+
      WHAT REMAINS a divergence is the star's column ORDER, which is older and
      independent: this engine publishes the JOIN OPERATOR's order (probe side
      first) where PostgreSQL publishes the FROM order, and for some shapes the
