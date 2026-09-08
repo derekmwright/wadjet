@@ -892,6 +892,13 @@ func pmCells() []pmCell {
 			noSalary: true, want: starRow},
 		{name: "qualified_star_under_a_positional_order_by",
 			sql: `SELECT a.* FROM e7emp a ORDER BY 1`, noSalary: true, want: starRow},
+		// The bare-star twin: `ORDER BY 1` counts the columns the query
+		// PUBLISHES, and under a policy that is the security projection's five
+		// and not the catalog's six — so position 5 is `amt`, not `salary`.
+		{name: "bare_star_under_a_positional_order_by",
+			sql: `SELECT * FROM e7emp ORDER BY 1`, noSalary: true, want: starRow},
+		{name: "bare_star_under_the_last_position",
+			sql: `SELECT * FROM e7emp ORDER BY 5`, noSalary: true, want: starRow},
 		{name: "qualified_star_under_a_filter",
 			sql: `SELECT a.* FROM e7emp a WHERE a.id = 1`, noSalary: true,
 			want: []string{pmStarRow(1)}},
