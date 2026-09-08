@@ -979,9 +979,28 @@ not a finance-only function; "price" is any measure and "volume" any weight.
 
 **What each field is.** `open` and `close` are the price at the earliest and
 the latest instant in the group, `high` and `low` its extremes, `volume` the
-sum of the weights, and `vwap` the weighted mean
-`SUM(price*volume) / SUM(volume)` — equal, digit for digit, to that expression
-written out beside it in the same query.
+sum of the weights, and `vwap` the weighted mean of the price — the exact
+quotient of `SUM(price*volume)` by `SUM(volume)`, computed at `AVG(price)`'s
+declared scale.
+
+**`vwap` is a mean, not the quotient expression.** It is not digit-identical
+to a hand-written `SUM(price*volume)/SUM(volume)` beside it, because that
+expression takes ordinary division typing rather than `AVG`'s:
+
+- over INTEGER columns the written-out quotient is INTEGER division, which is
+  a different function — over the same rows PostgreSQL and wadjet both answer
+  `14` for `SUM(p*v)/SUM(v)` where the bar's `vwap` is `14.5833`;
+- over DECIMAL columns the quotient carries division's scale (§DECIMAL
+  arithmetic) and `vwap` carries `AVG`'s, so the two agree to the LESSER of
+  the two scales and the wider one keeps more digits;
+- over FLOAT columns the two are the same float64 quotient.
+
+Both are exact to the digits they keep. `AVG`'s scale is a fixed increment on
+the input's rather than PostgreSQL's magnitude-dependent division scale, for
+the reason recorded in [ADR-0024](adr/0024-decimal-is-finite-fixed-point-with-postgres-result-types.md)
+and [ADR-0012](adr/0012-sql-semantics-authority.md): a scale that depends on
+the values would let the same query over more rows change the declared type of
+its own output column.
 
 **Ties.** Two rows sharing an instant are ordered by PRICE: `open` is the
 SMALLER price at the earliest instant and `close` the LARGER price at the

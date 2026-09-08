@@ -612,10 +612,18 @@ func (s *ohlcvState) value(fields []parquet.Column) (any, error) {
 }
 
 // exactVwap is Σ(price×volume) / Σ(volume) through the engine's OWN decimal
-// division at the declared scale — batch.DecimalDivAt, half away from zero,
-// ADR-0024's rounding. Reusing it is what makes `(bar).vwap` equal the same
-// query's `SUM(price*volume)/SUM(volume)` digit for digit instead of
-// approximately.
+// division at the DECLARED scale — batch.DecimalDivAt, half away from zero,
+// ADR-0024's rounding. The digits it keeps are exact rather than a float
+// quotient's, which is what this reuse buys.
+//
+// The scale is AVG(price)'s, because `vwap` is a weighted MEAN. It is NOT the
+// same scale a hand-written `SUM(price*volume)/SUM(volume)` beside it carries
+// — that expression takes DIVISION's scale, `max(6, s1+p2+1)`, and over
+// INTEGER columns it is integer division outright (`14` where the bar answers
+// `14.5833`, on PostgreSQL too). The two agree to the lesser of the two
+// scales; ADR-0035 §Decision 6 states the relation and ADR-0012's divergence
+// list records it. An earlier version of both said "digit for digit", which
+// was false on every exact price type.
 func (s *ohlcvState) exactVwap(field parquet.Column) (any, error) {
 	if s.sumVol.IsZero() {
 		return nil, nil // see value()'s float arm for the zero-total rule

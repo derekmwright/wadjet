@@ -2569,6 +2569,32 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        worth doing it is RAISING `batch.AvgScaleIncrement` — a bigger fixed
        number of fractional digits, still fixed — and that is a benchmarked
        type-width change rather than a correctness fix.
+
+     - **`(ohlcv(...)).vwap` takes AVG's scale, so it is NOT the written-out
+       `SUM(price*volume)/SUM(volume)` digit for digit.** (#965, 2026-09-08.)
+       The bar's `vwap` is a weighted MEAN and declares what `AVG(price)`
+       declares; the hand-written quotient beside it declares what DIVISION
+       declares. Measured on this engine over an INT8 price:
+       `(b).vwap` = `14.5833` and `SUM(p*v)/SUM(v)` = `14.583333`; over
+       `DECIMAL(18,4)`, `14.58333333` against `14.583333`. Over INTEGER
+       columns the written-out spelling is INTEGER division and answers `14` —
+       on PostgreSQL 17 too, measured, so that half is not a divergence from
+       the server but a difference between two functions.
+
+       Against the SERVER the divergence is the AVG bullet above and nothing
+       more: PostgreSQL's `sum(v*w)/sum(w)` over the same rows answers
+       `14.5833333333333333` (`select_div_scale`, re-measured 2026-09-08
+       alongside `175::numeric/12` = `14.5833333333333333`,
+       `1::numeric/3` = `0.33333333333333333333` and
+       `1000000::numeric/3` = `333333.333333333333` — sixteen SIGNIFICANT
+       digits, so the fractional count moves with the magnitude). Wadjet's
+       `vwap` keeps AVG's fixed digits, and the two agree to
+       `min(both scales)`.
+
+       ADR-0035's first statement of this claimed "digit for digit" and was
+       wrong; the corrected relation, and the gate that asserts it on int4,
+       int8 and three DECIMAL prices rather than only on float8, are in
+       ADR-0035 §Decision 6.
      - **A COMPUTED integer argument is declared by its own WIDTH**, the way a
        bare column is. (Amended 2026-09-03, #841; this bullet used to read
        "declared BIGINT, not numeric".) Wadjet declares every integer

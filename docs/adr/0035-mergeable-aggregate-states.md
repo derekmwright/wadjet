@@ -150,12 +150,32 @@ NULL — an aggregate over no rows is NULL on the server, and `(NULL::record).f`
 is NULL there too (both measured) — so the whole ROW is NULL, not a composite
 of empty slots.
 
-Beside that external oracle there is an INTERNAL identity that is sharper
-because it needs no rounding: every field of the bar must equal the aggregate
-it is spelled as, IN THE SAME QUERY. `(bar).vwap` is
-`SUM(price*volume)/SUM(volume)` digit for digit, which is what makes reusing
-the engine's own `batch.DecimalDivAt` rather than a float quotient load-bearing.
-Gated in `coordinator.TestTheBarIsTheSameOnEveryArm`.
+Beside that external oracle there is an INTERNAL identity: every field of the
+bar equals the aggregate it is spelled as, IN THE SAME QUERY. For `open`,
+`high`, `low`, `close` and `volume` that identity is exact and is gated as
+such in `coordinator.TestTheBarIsTheSameOnEveryArm`.
+
+**`vwap` is the exception, and the first statement of this ADR overstated it.**
+It said `(bar).vwap` was `SUM(price*volume)/SUM(volume)` "digit for digit".
+Measured over an INT8 price, it is not: the bar answers `14.5833` and the
+written-out quotient `14.583333`. `vwap` is a MEAN and carries `AVG(price)`'s
+type — `DECIMAL(38, min(s+4,38))` when both inputs are exact — while the
+written-out quotient carries division's own scale (ADR-0024 §arithmetic,
+`s = max(6, s1 + p2 + 1)`). Over INTEGER columns the gap is not a scale at
+all: `SUM(p*v)/SUM(v)` is INTEGER division and answers `14`, on this engine
+and on PostgreSQL alike.
+
+The identity that DOES hold, and the one the gate asserts, is that the two
+agree to the LESSER of their two scales, on every exact price type and not
+only on float8. That is the same relation ADR-0012 already records for `AVG`
+against PostgreSQL's magnitude-dependent division scale, and it is why reusing
+`batch.DecimalDivAt` at `AvgScale` rather than a float quotient is still
+load-bearing: the digits `vwap` keeps are exact, they are simply AVG's digits
+rather than division's.
+
+Recorded as a divergence in ADR-0012 §divergence list. Gated in
+`coordinator.TestTheBarIsTheSameOnEveryArm` (`vwap_agrees_*` cells over int4,
+int8, DECIMAL(9,2), DECIMAL(18,4) and DECIMAL(38,10) prices).
 
 ## Consequences
 

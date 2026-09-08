@@ -65,6 +65,21 @@ func ohlcvBkt(text string) string {
 	return fmt.Sprintf("bkt=int64:%d", ohlcvMillis(text))
 }
 
+// ohlcvVwapAgreeSQL compares `(bar).vwap` with the written-out weighted
+// quotient AT THE LESSER of their two scales, and renders both numbers beside
+// the verdict so a scale that moved is visible in the diff rather than hidden
+// behind a boolean.
+func ohlcvVwapAgreeSQL(px, vol, quotient string, minScale int) string {
+	return fmt.Sprintf(
+		`SELECT CASE WHEN ROUND(w,%d) = ROUND(q,%d) THEN 'agree' ELSE 'DIFFER' END AS at_min_scale,
+		        w AS vwap, q AS quotient
+		 FROM (SELECT (b).vwap AS w, q FROM (
+		         SELECT ohlcv(ts, %s, %s) AS b, %s AS q
+		         FROM %s
+		         WHERE ts IS NOT NULL AND %s IS NOT NULL AND %s IS NOT NULL) t) u`,
+		minScale, minScale, px, vol, quotient, ohlcvTable, px, vol)
+}
+
 func ohlcvCells() []ohlcvCell {
 	// The SELECT-list order, which is the order na2Run renders a row in.
 	nullBar := "|o=NULL|h=NULL|l=NULL|c=NULL|v=NULL|w=NULL"
@@ -139,10 +154,11 @@ func ohlcvCells() []ohlcvCell {
 				"min/max of numeric(9,2) keeps (9,2), sum(int4) is bigint"},
 		// THE INTERNAL IDENTITY. Every field of the bar equals the aggregate
 		// it is spelled as, in the SAME query, so a bar and the five
-		// aggregates beside it cannot drift apart. vwap is the sharp one: it
-		// must be `SUM(price*volume)/SUM(volume)` digit for digit, not
-		// approximately, which is what makes reusing the engine's own decimal
-		// division rather than a float quotient load-bearing.
+		// aggregates beside it cannot drift apart. Over a FLOAT price that
+		// includes vwap exactly, because both sides are the same float64
+		// quotient. Over an EXACT price it does NOT — see the vwap_agrees_*
+		// cells below, which is B2 of the round-2 review and a correction to
+		// what ADR-0035 first claimed.
 		{name: "the_bar_equals_its_spelled_out_aggregates",
 			sql: `SELECT bkt,
 			             CASE WHEN (b).high = hi THEN 'same' ELSE 'DIFFERS' END AS high_is,
@@ -162,6 +178,66 @@ func ohlcvCells() []ohlcvCell {
 				ohlcvBkt("2020-09-13 12:01:00") + "|high_is=same|low_is=same|vol_is=same|vwap_is=same",
 			},
 			pgSays: "the same identity holds on the server for the same spellings"},
+
+		// vwap IN THE EXACT DOMAIN — round-2 review, B2.
+		//
+		// ADR-0035, the SQL reference and the round-1 report all said
+		// `(bar).vwap` was `SUM(price*volume)/SUM(volume)` "digit for digit".
+		// It is not, and the only cell that compared them ran over a FLOAT
+		// price, where both sides are the same float64 quotient and the claim
+		// happens to hold.
+		//
+		// `vwap` is a weighted MEAN and carries AVG(price)'s type; the
+		// written-out quotient carries DIVISION's. The relation that DOES
+		// hold — and the one these cells assert on every exact price type —
+		// is that the two agree to the LESSER of their two scales, with the
+		// wider one keeping more digits. Both numbers are rendered beside the
+		// verdict so the scales are visible rather than asserted in a
+		// comment.
+		{name: "vwap_agrees_at_min_scale_int32",
+			sql: ohlcvVwapAgreeSQL("px_i32", "vol_i32",
+				"CAST(SUM(px_i32*vol_i32) AS DECIMAL(38,6))/SUM(vol_i32)", 4),
+			want: []string{"at_min_scale=agree|vwap=14.5833|quotient=14.583333"},
+			pgSays: "sum(v*w)/sum(w) is 14.5833333333333333 on the server " +
+				"(select_div_scale); wadjet's vwap keeps AVG's fixed 4"},
+		{name: "vwap_agrees_at_min_scale_int64",
+			sql: ohlcvVwapAgreeSQL("px_i64", "vol_i64",
+				"SUM(px_i64*vol_i64)/SUM(vol_i64)", 4),
+			want:   []string{"at_min_scale=agree|vwap=14.5833|quotient=14.583333"},
+			pgSays: "same; sum(int8) is numeric there and DECIMAL(38,0) here"},
+		{name: "vwap_agrees_at_min_scale_decimal92",
+			sql: ohlcvVwapAgreeSQL("px_d92", "vol_i32",
+				"SUM(px_d92*vol_i32)/SUM(vol_i32)", 6),
+			want: []string{"at_min_scale=agree|vwap=14.583333|quotient=14.583333"},
+			pgSays: "the one exact type where AVG's scale and division's " +
+				"coincide, so the two spellings render identically"},
+		{name: "vwap_agrees_at_min_scale_decimal184",
+			sql: ohlcvVwapAgreeSQL("px_d184", "vol_d92",
+				"SUM(px_d184*vol_d92)/SUM(vol_d92)", 6),
+			want:   []string{"at_min_scale=agree|vwap=14.58333333|quotient=14.583333"},
+			pgSays: "AVG(numeric(18,4)) is scale 8 here; the quotient is scale 6"},
+		{name: "vwap_agrees_at_min_scale_decimal3810",
+			sql: ohlcvVwapAgreeSQL("px_d3810", "vol_i64",
+				"SUM(px_d3810*vol_i64)/SUM(vol_i64)", 6),
+			want:   []string{"at_min_scale=agree|vwap=14.58333333333333|quotient=14.5833333333"},
+			pgSays: "the widest DECIMAL the carrier holds: AVG's +4 on scale 10"},
+		{name: "vwap_agrees_at_min_scale_float64",
+			sql: ohlcvVwapAgreeSQL("px_f64", "vol_i64",
+				"SUM(px_f64*vol_i64)/SUM(vol_i64)", 6),
+			want:   []string{"at_min_scale=agree|vwap=float:14.5833|quotient=float:14.5833"},
+			pgSays: "both sides are the same double quotient"},
+		// The half that is NOT a divergence from the server: over INTEGER
+		// columns the written-out quotient is INTEGER DIVISION, a different
+		// function. PostgreSQL 17 answers 14 for this spelling too. Held so
+		// that "vwap is not the quotient expression" reads as a measured
+		// fact rather than as a caveat.
+		{name: "the_integer_quotient_spelling_is_integer_division",
+			sql: ohlcvVwapAgreeSQL("px_i32", "vol_i32",
+				"SUM(px_i32*vol_i32)/SUM(vol_i32)", 0),
+			want: []string{"at_min_scale=DIFFER|vwap=14.5833|quotient=int64:14"},
+			pgSays: "sum(int4*int4)/sum(int4) is bigint division and answers 14 " +
+				"on the server; avg(price) there is 14.5833333333333333"},
+
 		// The empty group: an aggregate over no rows is NULL, and a field of
 		// a NULL composite is NULL (both measured).
 		{name: "empty_input_is_a_null_bar",
