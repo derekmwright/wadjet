@@ -300,14 +300,15 @@ func i1Cells() []i1Cell {
 		// materialization and the derived-table path, which also owns
 		// ADR-0012's recorded divergence that a list over a `SELECT *` body is
 		// not applied at all. That is its own arc.
-		{name: "29_pin_a_short_cte_column_list_hides_the_columns_it_did_not_rename",
+		// CLOSED by arc K1 (#958): the list is a POSITIONAL rename in every
+		// reader now — `plansql.OverlayColumnAliases`, taken by
+		// `plansql.CTEColumns` and by the binder's `registerCTE` — so `s` is an
+		// inner name, the subquery is uncorrelated and answers once per outer
+		// row. The pin is deleted as its proof.
+		{name: "29_a_short_cte_column_list_keeps_the_columns_it_did_not_rename",
 			sql: `WITH c(kk) AS (SELECT id, s FROM decpair) ` +
 				`SELECT (SELECT COUNT(*) FROM c WHERE s = '1.50') AS n FROM decpair d WHERE d.id < 3`,
-			want: `n | 1 | 1`,
-			pin:  `n | 9 | 0`,
-			pinWhy: "a column-alias list is the WHOLE namespace here, not a positional rename, " +
-				"so `s` is read as the enclosing query's and substituted per outer row",
-			routes: a2Routes{Correlated: 1}},
+			want: `n | 1 | 1`},
 
 		// --- A STAR PUBLISHES WHAT IT STANDS FOR (round-1 review B1/P3) ----
 		//
@@ -480,17 +481,16 @@ func i1Cells() []i1Cell {
 		// filter names. All four arms answered 4616 for PostgreSQL's 10 at
 		// base — silently wrong, because the mis-correlated subquery dropped
 		// the predicate — and are loud now that the predicate is kept.
-		{name: "53_pin_a_derived_qualified_star_over_a_join_is_filtered",
+		// CLOSED by arc K1 (#963): a QUALIFIED star ALONE built no projection
+		// at all, so nothing carried the star for `ExpandStarProjections` to
+		// rewrite and the derived block published the JOIN. `isStarOnly` now
+		// reads `tx.*` as what it is — one relation, not the identity of the
+		// input — and the filter's column is there. The pin is deleted as its
+		// proof; its BARE-star twin below is NOT closed and stays pinned.
+		{name: "53_a_derived_qualified_star_over_a_join_is_filtered",
 			sql: `SELECT (SELECT COUNT(*) FROM (SELECT tx.* FROM typemx_dim dim JOIN typemx tx ` +
 				`ON tx.g = dim.k) t WHERE id < 10) AS n FROM decpair WHERE id < 2`,
-			want: `n | 10`,
-			pinArms: map[string]string{
-				"single": `filter column "id" does not exist in the input schema`, spilledArm: `filter column "id" does not exist in the input schema`,
-				"dag": `filter column "id" does not exist in the input schema`, "dagshuf": `filter column "id" does not exist in the input schema`,
-			},
-			pinWhy: "a derived table whose body is a star over a JOIN does not publish that " +
-				"star's columns to a filter above it (all four arms answered 4616 at base)",
-			routes: a2Routes{UnreachableOutput: 1}},
+			want: `n | 10`},
 		{name: "54_pin_a_derived_bare_star_over_a_join_is_filtered",
 			sql: `SELECT (SELECT COUNT(*) FROM (SELECT * FROM typemx_dim dim JOIN typemx tx ` +
 				`ON tx.g = dim.k) t WHERE id < 10) AS n FROM decpair WHERE id < 2`,

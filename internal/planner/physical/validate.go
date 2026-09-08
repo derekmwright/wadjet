@@ -890,11 +890,39 @@ func (b *binder) registerCTE(ctx context.Context, cte *plansql.CTEDef) error {
 		if err := refuseReservedSlotNames(cte.Columns, "CTE column"); err != nil {
 			return err
 		}
-		b.ctes[name] = cteEntry{cols: cte.Columns}
-	} else if names, star := blockOutputs(body); star {
+	}
+	names, star := blockOutputs(body)
+	switch {
+	case len(cte.Columns) == 0:
+		if star {
+			b.ctes[name] = cteEntry{open: true}
+		} else {
+			b.ctes[name] = cteEntry{cols: names}
+		}
+	case star:
+		// A COLUMN-ALIAS LIST over a body whose width nothing here can count.
+		// The aliases ARE published — they rename the leading columns whatever
+		// those are — but the TAIL is unknown, so the scope stays OPEN rather
+		// than claiming the list is the whole namespace. Reading it as the
+		// namespace is what made `WITH c(kk) AS (SELECT * FROM lat_ord)
+		// SELECT * FROM c ORDER BY kk` refuse the very name it renamed to.
 		b.ctes[name] = cteEntry{open: true}
-	} else {
-		b.ctes[name] = cteEntry{cols: names}
+	case len(cte.Columns) > len(names):
+		// PostgreSQL's own arity refusal, and the CTE spelling of it: measured
+		// live, `WITH query "c" has 2 columns available but 3 columns
+		// specified`. The logical builder raises the identical sentence; this
+		// one fires first for a statement the builder never reaches.
+		return sqlerr.New("42P10",
+			"WITH query %q has %d columns available but %d columns specified",
+			cte.Name, len(names), len(cte.Columns))
+	default:
+		// The list renames the LEADING columns and the rest keep their own
+		// names — PostgreSQL's rule, in the one place it is written
+		// (`plansql.OverlayColumnAliases`). Storing `cte.Columns` outright
+		// made every column the list did NOT rename unknown: `s` was 42703 at
+		// top level and, inside a subquery, bound the enclosing query and
+		// answered a wrong number (#958).
+		b.ctes[name] = cteEntry{cols: plansql.OverlayColumnAliases(cte.Columns, names)}
 	}
 	return nil
 }

@@ -334,24 +334,57 @@ func sourceColumns(t *TableRef, resolve TableColumns) []string {
 			names = resolve(t.Name)
 		}
 	}
-	n := len(t.ColumnAliases)
+	return OverlayColumnAliases(t.ColumnAliases, names)
+}
+
+// OverlayColumnAliases applies a COLUMN-ALIAS LIST — `(…) AS b(kk, nn)`,
+// `WITH c(kk) AS (…)` — to a relation's own published column list, and is the
+// one statement of PostgreSQL's rule for every reader of such a list.
+//
+// The rule, measured live on postgres:17-alpine:
+//
+//	names [id s], aliases [kk]          → [kk s]   a SHORTER list renames a PREFIX
+//	names [id s], aliases [kk nn]       → [kk nn]
+//	names [id s], aliases [kk nn extra] → nil      42P10, which the binder raises
+//
+// The prefix half is the whole of #958: read as the WHOLE namespace, a list
+// published `kk` alone, so `WITH c(kk) AS (SELECT id, s FROM decpair)` refused
+// `s` at top level and, inside a subquery, bound it to the ENCLOSING query and
+// answered `9, 0` for PostgreSQL's `1, 1`.
+//
+// An UNKNOWN source list is not the same as an empty one: the aliases are
+// published whatever they rename, so naming them alone is the honest answer
+// and it is never the unsafe direction. A caller that needs a COMPLETE list
+// (the `TableColumns` contract) tests the source list itself before asking.
+func OverlayColumnAliases(aliases, names []string) []string {
+	n := len(aliases)
 	if n == 0 {
 		return names
 	}
 	if len(names) == 0 {
-		// The source's own names are unknown, so the list cannot be overlaid
-		// positionally — but the names IN it are published whatever they
-		// rename, and naming them is never the unsafe direction.
-		return append([]string(nil), t.ColumnAliases...)
+		return append([]string(nil), aliases...)
 	}
 	if n > len(names) {
-		// PostgreSQL's 42P10, which the binder raises. Nothing here can say
-		// what the relation publishes, so it says nothing.
+		// PostgreSQL's 42P10. Nothing here can say what the relation
+		// publishes, so it says nothing.
 		return nil
 	}
 	out := append([]string(nil), names...)
-	copy(out, t.ColumnAliases)
+	copy(out, aliases)
 	return out
+}
+
+// BlockPublishedColumns is one query block's output namespace with every STAR
+// expanded from resolve, or nil when it cannot be named exactly.
+//
+// It is `BlockOutputColumns` for a caller that HAS a catalog. That one answers
+// "(nil, there is a star)" and tells the caller to ask somebody who can name
+// what the star stands for; this is that somebody, and the two must never grow
+// separate ideas of what a block publishes — which is why this is the same
+// function the correlation classifier already resolves a CTE reference with,
+// exported rather than reimplemented.
+func BlockPublishedColumns(info *SelectInfo, resolve TableColumns) []string {
+	return blockPublishedColumns(info, resolve)
 }
 
 // blockPublishedColumns is one query block's output namespace, IN THE ORDER the
@@ -497,14 +530,25 @@ func CTEColumns(ctes []CTEDef, base TableColumns) TableColumns {
 				return base(table)
 			}
 			c := &ctes[i]
-			if len(c.Columns) > 0 {
-				return c.Columns
-			}
 			body, err := c.BodySelect()
 			if err != nil || body == nil {
+				if len(c.Columns) > 0 {
+					// The body cannot be read, so the list is all that is
+					// knowable — and the aliases ARE published whatever they
+					// rename.
+					return append([]string(nil), c.Columns...)
+				}
 				return nil
 			}
-			return blockPublishedColumns(body, resolveAt(i))
+			// A COLUMN-ALIAS LIST is a POSITIONAL RENAME of the leading
+			// columns, not the whole namespace: `WITH c(kk) AS (SELECT id, s
+			// …)` publishes `kk` AND `s`. Read as the namespace it published
+			// `kk` alone, so `s` was not an inner name, bound the ENCLOSING
+			// query, and the subquery was re-run per outer row with the value
+			// substituted — `9, 0` for PostgreSQL's `1, 1` (#958). One rule,
+			// the same `OverlayColumnAliases` a derived table's list takes.
+			return OverlayColumnAliases(c.Columns,
+				blockPublishedColumns(body, resolveAt(i)))
 		}
 	}
 	return resolveAt(len(ctes))
