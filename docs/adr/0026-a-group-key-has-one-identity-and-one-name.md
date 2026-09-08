@@ -1955,7 +1955,12 @@ made the operation above read columns that were no longer there (`[<nil>]` for
 **ONE TYPE INFERENCE.** The block's published projection is typed by the call
 `declaredJoinSchema`'s own computed-column arm and `attachScanSelectProjections`
 already make for the statement's own SELECT list — same walk, same `strictInt`
-hint, same STRING fallback. There is no such thing as an item this engine
+hint, same STRING fallback, and the same SCALAR-SUBQUERY RESOLVER. One
+inference means one set of ARGUMENTS too: without `subqueryDecl`, `(SELECT
+MAX(amount) …) AS sq` fell to the STRING fallback and a zero-row `SELECT *`
+over a block holding one declared it `text` where the same statement under a
+matching predicate declared `int8` and PostgreSQL declares integer — a WRONG
+declaration, which is worse than the none #978 replaced. There is no such thing as an item this engine
 cannot declare: `ARRAY[c0]`, an all-NULL `CASE`, a bare `NULL` and
 `COALESCE(NULL, NULL)` reach a client with an OID today, and so does a
 scalar-subquery item. A WEAKER SECOND INFERENCE HERE WAS THE DEFECT that three
@@ -1985,6 +1990,24 @@ LEFT lateral, and in a set-op arm; a scalar-subquery item; an all-NULL `CASE`;
 a bare `NULL`; one name published twice; a twice-referenced CTE with and
 without a rename. The container spellings no longer publish their SOURCE column
 beside the container either — the stage emits exactly what the block wrote.
+
+**The rule's boundary, measured and recorded.** A block this pass cannot state
+the STREAM of is never marked, and the one that matters is a block whose body
+is itself a JOIN: `(SELECT i.amount AS id, i.order_id FROM lat_item i JOIN
+lat_ord o2 ON o2.id = i.order_id)` under a star publishes NINE columns on `dag`
+and seven on `dagshuf`, with `id` carrying the join's own `id` rather than the
+block's aliased `amount`, where PostgreSQL and the single-process arms publish
+five. Identical at `bb8635a4` and at `a0539069`, so this arc neither creates
+nor closes it. Closing it needs a join's emitted list stated at plan time —
+`exec.JoinOutputSchema` is that list, and reaching it here needs the side
+schemas the star declaration already assembles, one level deeper.
+
+A block whose own `ORDER BY` was materialized publishes its `__sortkey_N` and
+EXECUTES, in both the narrowing and the introducing spelling; the introducing
+one is then refused by the SELECT-list reachability check
+(`UnreachableOutputLocalRoutes`, #656) rather than by this one, because the
+projection it publishes drops a column the sort above still names. Measured at
+this tip, with and without a LIMIT.
 
 **Two PRE-EXISTING leaks are pinned, not fixed.** A block whose own `ORDER BY`
 was MATERIALIZED publishes its `__sortkey_N` (the sort below still reads that

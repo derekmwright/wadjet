@@ -265,7 +265,8 @@ type blockColumn struct {
 // would be COMPUTED by the fragment and MISSING from the empty side's
 // declaration, which is the width disagreement ADR-0010 refuses. Declining
 // leaves the plan exactly as it was.
-func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool) ([]blockColumn, bool) {
+func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool,
+	subqueryDecl func(string) (parquet.Column, bool)) ([]blockColumn, bool) {
 	if p == nil || len(p.Children) != 1 || len(p.Projections) == 0 {
 		return nil, false
 	}
@@ -274,7 +275,7 @@ func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool) ([
 	// the scan arm reads the catalog annotation. A minted correlation slot and
 	// an `__agg_N` have a type only their producer can state, and a second
 	// rule for them is the disagreement ADR-0026 exists to prevent.
-	stream := declaredJoinSchema(p.Children[0], nil, published)
+	stream := declaredJoinSchema(p.Children[0], nil, published, subqueryDecl)
 	byName := make(map[string]parquet.Column, len(stream))
 	for _, col := range stream {
 		byName[strings.ToLower(blockBareName(col.Name))] = col
@@ -284,6 +285,14 @@ func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool) ([
 	// are `__agg_N` and a minted slot, and typing `COUNT(*) + 1` against the
 	// scan's columns answers nothing at all.
 	decls := inputColDecls(p.Children[0])
+	// THE SCALAR-SUBQUERY RESOLVER IS PART OF THE INFERENCE, not an extra.
+	// `declaredOutputSchema` hands it to the same walk for the statement's own
+	// SELECT list, and without it here `(SELECT MAX(amount) FROM lat_item) AS
+	// sq` fell to the STRING fallback: a zero-row `SELECT *` over a block
+	// holding one declared `sq` as text where the same statement under a
+	// matching predicate declares int8 and PostgreSQL declares integer. One
+	// inference means one set of arguments too (round-4 B1).
+	decls.subqueryDecl = subqueryDecl
 	if decls.types == nil {
 		decls.types = map[string]parquet.TypeID{}
 	}
@@ -419,11 +428,11 @@ func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool) ([
 // declaration and the join's key binding read that set and a block marked
 // published but not materialized is the ADR-0010 disagreement again.
 func publishBlockProjection(node *logical.Node, stages *[]Stage, from int,
-	published map[*logical.Node]bool) bool {
+	published map[*logical.Node]bool, subqueryDecl func(string) (parquet.Column, bool)) bool {
 	if from < 0 || from >= len(*stages) {
 		return false
 	}
-	cols, ok := blockPublishedColumns(node, published)
+	cols, ok := blockPublishedColumns(node, published, subqueryDecl)
 	if !ok || len(cols) == 0 {
 		return false
 	}
@@ -487,8 +496,8 @@ func materializedBlockUnder(n *logical.Node, published map[*logical.Node]bool) *
 // #980's own sentence, and it is what the shape does the moment the lateral
 // route stops standing in front of it.
 func declaredBlockSchema(p *logical.Node, wantSet map[string]bool,
-	published map[*logical.Node]bool) []parquet.Column {
-	cols, ok := blockPublishedColumns(p, published)
+	published map[*logical.Node]bool, subqueryDecl func(string) (parquet.Column, bool)) []parquet.Column {
+	cols, ok := blockPublishedColumns(p, published, subqueryDecl)
 	if !ok {
 		return nil
 	}

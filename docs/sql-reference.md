@@ -834,13 +834,20 @@ alone. Every execution path answers the same relation.
 
 Two shapes still run on the coordinator rather than across the workers: a bare
 aggregate alias beside a computed sibling (`SUM(x) AS sa, SUM(x) * 1 AS sb`),
-and a WINDOW function inside the subquery. A subquery with its own `ORDER BY …
-LIMIT` that also introduces a column runs there too. They answer the same rows
-either way; naming the columns instead of writing `*` keeps them distributed.
+and a WINDOW function inside the subquery. A subquery carrying its own `ORDER
+BY` that ALSO introduces a column runs there too — the same subquery without
+the extra column stays distributed. They answer the same rows either way;
+naming the columns instead of writing `*` keeps them distributed.
 
 A subquery item's TYPE never decides where the query runs: a container
 (`ARRAY[amount]`, `ARRAY[COUNT(*)]`), a scalar subquery, an all-NULL `CASE` and
-a bare `NULL` are published like any other column.
+a bare `NULL` are published like any other column, and are declared the way the
+same item is declared outside a subquery.
+
+One shape is not covered and is wrong on the distributed path in a way this
+release does not change: `SELECT *` over a subquery whose own body is a JOIN
+publishes that join's columns rather than the subquery's `SELECT` list. Name
+the columns.
 
 The correlated equality is turned into a join, and a join needs the inner
 value as a column, so the planner materializes one under a name from its

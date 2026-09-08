@@ -55,10 +55,11 @@ import (
 //
 // ok=false means "not a bare star over a resolvable scan", and the ordinary
 // projection walk answers (with its own nil, where there is no Project).
-func starOnlyDeclaredOutputSchema(root *logical.Node) ([]parquet.Column, bool) {
+func starOnlyDeclaredOutputSchema(root *logical.Node,
+	subqueryDecl func(string) (parquet.Column, bool)) ([]parquet.Column, bool) {
 	scan, names := starOnlySourceScan(root)
 	if scan == nil || len(scan.ScanColumns) == 0 {
-		return starJoinDeclaredOutputSchema(root)
+		return starJoinDeclaredOutputSchema(root, subqueryDecl)
 	}
 	if names == nil {
 		names = scan.ScanColumns
@@ -194,7 +195,8 @@ func starOnlySourceScan(n *logical.Node) (*logical.Node, []string) {
 //     answered from the logical tree at all.
 //   - A side whose columns the plan cannot type declines the whole schema, the
 //     same rule the scan arm above applies: no declaration beats a wrong one.
-func starJoinDeclaredOutputSchema(root *logical.Node) ([]parquet.Column, bool) {
+func starJoinDeclaredOutputSchema(root *logical.Node,
+	subqueryDecl func(string) (parquet.Column, bool)) ([]parquet.Column, bool) {
 	join := starOnlySourceJoin(root)
 	if join == nil {
 		return nil, false
@@ -208,8 +210,8 @@ func starJoinDeclaredOutputSchema(root *logical.Node) ([]parquet.Column, bool) {
 	// `s.id`, `product` and `qty` invented and a rename's alias missing
 	// (round-1 B3). That is #984's own defect living inside #978's answer.
 	published := sideBlockProjections(join)
-	probe := declaredJoinSchema(join.Children[0], nil, published)
-	build := declaredJoinSchema(join.Children[1], nil, published)
+	probe := declaredJoinSchema(join.Children[0], nil, published, subqueryDecl)
+	build := declaredJoinSchema(join.Children[1], nil, published, subqueryDecl)
 	if len(probe) == 0 || len(build) == 0 {
 		return nil, false
 	}

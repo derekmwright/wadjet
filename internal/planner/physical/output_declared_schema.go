@@ -45,7 +45,7 @@ func declaredOutputSchema(root *logical.Node,
 	if cols, ok := setOpDeclaredOutputSchema(root); ok {
 		return cols
 	}
-	if cols, ok := starOnlyDeclaredOutputSchema(root); ok {
+	if cols, ok := starOnlyDeclaredOutputSchema(root, subqueryDecl); ok {
 		return cols
 	}
 	projs, childTypes, strictInt, ok := declaredProjectionInputs(root)

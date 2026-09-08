@@ -8157,7 +8157,8 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			joinTasks = p.WorkerCount
 		}
 		stageID := fmt.Sprintf("join-%d", len(*stages))
-		probeSchema, buildSchema := joinSideSchemas(node, leftKeys, rightKeys, p.publishedBlocks)
+		probeSchema, buildSchema := joinSideSchemas(node, leftKeys, rightKeys,
+			p.publishedBlocks, p.subqueryOutputColumn)
 		stage := Stage{
 			ID:                 stageID,
 			Type:               joinType,
@@ -8661,7 +8662,8 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// read this set, and a block marked published that the pass then
 			// declined would have them describing a relation no task writes —
 			// which is the ADR-0010 disagreement this pass exists to end.
-			if publishBlockProjection(node, stages, preDefaultCount, p.publishedBlocks) {
+			if publishBlockProjection(node, stages, preDefaultCount, p.publishedBlocks,
+				p.subqueryOutputColumn) {
 				p.publishedBlocks[node] = true
 			}
 		}
@@ -9231,7 +9233,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// described an EMPTY side by columns the full side never emits — eight
 	// columns for PostgreSQL's five (round-1 P2).
 	hj.ProbeSchemaHint, hj.BuildSchemaHint = joinSideSchemas(node, hj.LeftKeys, hj.RightKeys,
-		sideBlockProjections(node))
+		sideBlockProjections(node), p.subqueryOutputColumn)
 
 	// For semi/anti joins without a filter, enable key-only build:
 	// only build the key index and bloom filter, skip batch storage and arena refs.
@@ -18876,7 +18878,7 @@ func stageHiddenPositions(node *logical.Node, published map[*logical.Node]bool) 
 		}
 		return out
 	}
-	declared := declaredJoinSchema(node.Children[side], nil, nil)
+	declared := declaredJoinSchema(node.Children[side], nil, nil, nil)
 	for _, hidden := range node.HiddenJoinCols {
 		if lateralMarkerDroppedAbove(node, hidden) {
 			continue

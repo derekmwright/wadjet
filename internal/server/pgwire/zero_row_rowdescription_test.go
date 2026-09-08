@@ -136,6 +136,22 @@ func zrShapes() []struct{ name, empty, full string } {
 				"ON b.oid = a.c0 WHERE a.c0 = 999",
 			"SELECT * FROM zrfull a JOIN (SELECT c0 AS oid, d1 FROM zrother) b " +
 				"ON b.oid = a.c0 WHERE a.c0 = 1"},
+		// A SCALAR-SUBQUERY item in the derived side. Its type comes from the
+		// subquery's own declaration, and the block inference has to be handed
+		// the same resolver the statement's own projection gets or it falls to
+		// the STRING fallback: the zero-row arm declared `sq` as text (25)
+		// where the non-empty twin declares int8 (20) and PostgreSQL declares
+		// integer. One inference means one set of arguments (round-4 B1).
+		{"star_derived_side_scalar_subquery",
+			"SELECT * FROM zrfull a JOIN (SELECT c0, (SELECT MAX(c0) FROM zrother) AS sq " +
+				"FROM zrother) b ON b.c0 = a.c0 WHERE a.c0 = 999",
+			"SELECT * FROM zrfull a JOIN (SELECT c0, (SELECT MAX(c0) FROM zrother) AS sq " +
+				"FROM zrother) b ON b.c0 = a.c0 WHERE a.c0 = 1"},
+		{"star_left_join_derived_side_scalar_subquery",
+			"SELECT * FROM zrfull a LEFT JOIN (SELECT c0, (SELECT MAX(c0) FROM zrother) AS sq " +
+				"FROM zrother WHERE c0 > 900) b ON b.c0 = a.c0 WHERE a.c0 = 999",
+			"SELECT * FROM zrfull a LEFT JOIN (SELECT c0, (SELECT MAX(c0) FROM zrother) AS sq " +
+				"FROM zrother WHERE c0 > 0) b ON b.c0 = a.c0 WHERE a.c0 = 1"},
 		{"star_cte_side",
 			"WITH q AS (SELECT c0, d1 FROM zrother) SELECT * FROM zrfull a JOIN q b " +
 				"ON b.c0 = a.c0 WHERE a.c0 = 999",

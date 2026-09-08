@@ -30,7 +30,8 @@ import (
 //
 // Ordering mirrors buildReadSchema: table-schema order per scan, scans in
 // walk order, which is the order a real batch from that side arrives in.
-func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.Node]bool) []parquet.Column {
+func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.Node]bool,
+	subqueryDecl func(string) (parquet.Column, bool)) []parquet.Column {
 	if n == nil {
 		return nil
 	}
@@ -62,7 +63,7 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 			// stream below it. Declaring the stream here made an EMPTY side
 			// write a file of a different WIDTH from its siblings' —
 			// ADR-0010's `one stage's files describe one relation`.
-			for _, col := range declaredBlockSchema(cur, wantSet, published) {
+			for _, col := range declaredBlockSchema(cur, wantSet, published, subqueryDecl) {
 				lc := strings.ToLower(blockBareName(col.Name))
 				if seen[lc] {
 					continue
@@ -241,7 +242,8 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 // joinSideSchemas returns the declared probe- and build-side schemas for a
 // join node: the columns downstream needs plus the join keys, which is
 // exactly what the shuffle carries for each side.
-func joinSideSchemas(node *logical.Node, leftKeys, rightKeys []string, published map[*logical.Node]bool) (probe, build []parquet.Column) {
+func joinSideSchemas(node *logical.Node, leftKeys, rightKeys []string,
+	published map[*logical.Node]bool, subqueryDecl func(string) (parquet.Column, bool)) (probe, build []parquet.Column) {
 	if node == nil || len(node.Children) < 2 {
 		return nil, nil
 	}
@@ -254,13 +256,13 @@ func joinSideSchemas(node *logical.Node, leftKeys, rightKeys []string, published
 	// on every star over a decorrelated LATERAL. An empty want keeps every
 	// column, which is what a star asks for.
 	if len(node.NeededColumns) == 0 {
-		return declaredJoinSchema(node.Children[0], nil, published),
-			declaredJoinSchema(node.Children[1], nil, published)
+		return declaredJoinSchema(node.Children[0], nil, published, subqueryDecl),
+			declaredJoinSchema(node.Children[1], nil, published, subqueryDecl)
 	}
 	want := make([]string, 0, len(node.NeededColumns)+len(leftKeys)+len(rightKeys))
 	want = append(want, node.NeededColumns...)
 	want = append(want, leftKeys...)
 	want = append(want, rightKeys...)
-	return declaredJoinSchema(node.Children[0], want, published),
-		declaredJoinSchema(node.Children[1], want, published)
+	return declaredJoinSchema(node.Children[0], want, published, subqueryDecl),
+		declaredJoinSchema(node.Children[1], want, published, subqueryDecl)
 }
