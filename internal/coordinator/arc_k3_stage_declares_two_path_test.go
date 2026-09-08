@@ -46,7 +46,18 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 	t.Cleanup(cancel)
 	arms := e3Arms(t, ctx)
 
-	for _, tc := range []struct{ name, sql, want, wantDAG string }{
+	for _, tc := range []struct {
+		name, sql, want, wantDAG string
+		// wantRouted says the DISTRIBUTED arms answer by handing the query to
+		// the coordinator-local pipeline rather than by running the DAG. It is
+		// asserted on EVERY cell, in both directions, because the ROWS cannot
+		// tell the two apart and the route is not answer-preserving: the local
+		// pipeline's ORDER BY is wrong for some shapes the DAG gets right, so
+		// "right rows" is not evidence that a cell is well. Round 1 found two
+		// shapes that had moved from executed to routed behind a green gate
+		// that read only rows.
+		wantRouted bool
+	}{
 		// A SOURCE COLUMN PUBLISHED TWICE. The stream carries one column
 		// called `order_id` and cannot answer to it twice; the projection
 		// reads it twice, which is what PostgreSQL publishes.
@@ -188,11 +199,111 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 				`AND b.id > a.id ORDER BY a.id, b.id`,
 			want: `id,order_id,product,amount,b.id,b.order_id,b.product,b.amount | ` +
 				`1,1,Widget,50,2,1,Gadget,100 | 3,2,Widget,75,4,2,Doohickey,125`},
+		// ------------------------------------------------------------------
+		// THE BOUNDARY, SHAPE BY SHAPE (round 2). The route is NOT
+		// answer-preserving — the coordinator-local pipeline's ORDER BY is
+		// wrong for some shapes the DAG gets right — so it may take only what
+		// was already WRONG or LOUD without it. Every `wantRouted: false` cell
+		// below EXECUTES distributed; the three that route say why, each
+		// measured at bb8635a4.
+		//
+		// A NARROWING block is left alone deliberately: column pruning answers
+		// it on every arm, the `amount` its own ORDER BY keeps alive is a
+		// PRE-EXISTING leak identical at bb8635a4, and marking it bought
+		// nothing while costing a route.
+		{name: "boundary/narrowing-block-is-left-alone",
+			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, product FROM lat_item ` +
+				`ORDER BY amount LIMIT 3) s ON s.order_id = o.id ORDER BY o.id, s.product`,
+			want: `id,customer,total,order_id,product,__sortkey_0 | 1,Alice,150,1,Gadget,100 | ` +
+				`1,Alice,150,1,Widget,50 | 2,Bob,200,2,Widget,75`,
+			wantDAG: `id,customer,total,order_id,product,amount | 1,Alice,150,1,Gadget,100 | ` +
+				`1,Alice,150,1,Widget,50 | 2,Bob,200,2,Widget,75`},
+		// EXECUTED and PostgreSQL's exact order at bb8635a4, and the local
+		// pipeline gets this ORDER BY wrong — so routing it turned a right
+		// answer into a wrong one (round-1 B1). The single arms' order is the
+		// pre-existing local defect, pinned here rather than described.
+		{name: "boundary/a-twice-referenced-CTE-executes",
+			sql: `WITH q AS (SELECT order_id, amount FROM lat_item) SELECT * FROM q a ` +
+				`JOIN q b ON b.order_id = a.order_id ORDER BY a.order_id, a.amount, b.amount`,
+			want: `order_id,amount,b.order_id,b.amount | 1,50,1,100 | 1,50,1,50 | ` +
+				`1,100,1,100 | 1,100,1,50 | 2,75,2,125 | 2,75,2,75 | 2,125,2,125 | 2,125,2,75`,
+			wantDAG: `order_id,amount,b.order_id,b.amount | 1,50,1,50 | 1,50,1,100 | ` +
+				`1,100,1,50 | 1,100,1,100 | 2,75,2,75 | 2,75,2,125 | 2,125,2,75 | 2,125,2,125`},
+		// LOUD on both DAG arms at bb8635a4. A CTE body is planned ONCE, so
+		// the second reference's Project nodes never reach the publish hook —
+		// the verdict is carried to them where the subtree is deduped.
+		{name: "boundary/a-twice-referenced-CTE-with-a-rename-executes",
+			sql: `WITH q AS (SELECT order_id AS k, amount FROM lat_item) SELECT * FROM q a ` +
+				`JOIN q b ON b.k = a.k ORDER BY a.k, a.amount, b.amount`,
+			want: `k,amount,b.k,b.amount | 1,50,1,100 | 1,50,1,50 | 1,100,1,100 | ` +
+				`1,100,1,50 | 2,75,2,125 | 2,75,2,75 | 2,125,2,125 | 2,125,2,75`,
+			wantDAG: `k,amount,b.k,b.amount | 1,50,1,50 | 1,50,1,100 | 1,100,1,50 | ` +
+				`1,100,1,100 | 2,75,2,75 | 2,75,2,125 | 2,125,2,75 | 2,125,2,125`},
+		// SQL's `unknown` DECIDES: PostgreSQL declares a bare NULL select item
+		// `text`. Leaving it undecided routed a query that executed correctly
+		// at bb8635a4 (round-1 B2).
+		{name: "boundary/a-bare-NULL-item-is-text-and-executes",
+			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, NULL AS c FROM lat_item) s ` +
+				`ON s.order_id = o.id ORDER BY o.id, s.order_id`,
+			want: `order_id,c,id,customer,total | 1,NULL,1,Alice,150 | 1,NULL,1,Alice,150 | ` +
+				`2,NULL,2,Bob,200 | 2,NULL,2,Bob,200`},
+		// SILENT WRONG at bb8635a4 (`order_id,amount` — both aliases lost).
+		// It EXECUTES distributed, which round 1's docs denied.
+		{name: "boundary/one-name-published-twice-executes",
+			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id AS k, amount AS k ` +
+				`FROM lat_item) s ON s.k = o.id ORDER BY o.id`,
+			want: `k,k,id,customer,total | 1,50,1,Alice,150 | 1,100,1,Alice,150 | ` +
+				`2,75,2,Bob,200 | 2,125,2,Bob,200`},
+
+		// THE RESIDUE — three shapes, each ROUTED, each measured wrong or loud
+		// at bb8635a4 without the route. This list is the one ADR-0026 §7 and
+		// docs/sql-reference.md state, and it is complete.
+		//
+		// ROUTED at bb8635a4 too: `ARRAY[COUNT(*)]` decides no type, and a
+		// projection materialized at a type the empty side declares
+		// differently is ADR-0010's refusal.
+		{name: "residue/a-container-over-an-aggregate",
+			sql: `SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT ARRAY[COUNT(*)] AS a ` +
+				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id`,
+			want:       `id,customer,total,a | 1,Alice,150,[2] | 2,Bob,200,[2] | 3,Carol,0,[0]`,
+			wantRouted: true},
+		// SILENT WRONG at bb8635a4: the DAG published `__agg_1` beside `sa`
+		// and `sb`. An aggregate SELECT item is computed by the aggregate
+		// stage, not by a projection above it.
+		{name: "residue/a-bare-aggregate-alias-beside-a-computed-sibling",
+			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, SUM(amount) AS sa, ` +
+				`SUM(amount) * 1 AS sb FROM lat_item GROUP BY order_id) s ` +
+				`ON s.order_id = o.id ORDER BY o.id`,
+			want: `id,customer,total,order_id,sa,sb | 1,Alice,150,1,150,150 | ` +
+				`2,Bob,200,2,200,200`,
+			wantDAG: `order_id,sa,sb,id,customer,total | 1,150,150,1,Alice,150 | ` +
+				`2,200,200,2,Bob,200`,
+			wantRouted: true},
+		// LOUD on both DAG arms at bb8635a4.
+		{name: "residue/a-window-inside-the-block",
+			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, SUM(amount) OVER () AS w ` +
+				`FROM lat_item) s ON s.order_id = o.id ORDER BY o.id, w`,
+			want: `order_id,w,id,customer,total | 1,350,1,Alice,150 | 1,350,1,Alice,150 | ` +
+				`2,350,2,Bob,200 | 2,350,2,Bob,200`,
+			wantRouted: true},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {
+				var routesBefore int64
+				if arm.coord != nil {
+					routesBefore = arm.coord.LateralProjectionLocalRoutes()
+				}
 				cols, rows, err := arm.run(tc.sql)
+				if arm.coord != nil {
+					routed := arm.coord.LateralProjectionLocalRoutes() > routesBefore
+					if routed != tc.wantRouted {
+						t.Fatalf("%s arm routed=%v, want %v — a block whose projection a "+
+							"stage carries EXECUTES; only one the plan cannot state is "+
+							"handed over, and only where it was wrong or loud before\n  SQL: %s",
+							arm.name, routed, tc.wantRouted, tc.sql)
+					}
+				}
 				if err != nil {
 					t.Fatalf("%s arm: %v\n  want %s\n  SQL: %s", arm.name, err, tc.want, tc.sql)
 				}
@@ -205,8 +316,14 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 					t.Fatalf("%s arm: %s\n  want %s (PostgreSQL 17's column set and values)\n  SQL: %s",
 						arm.name, got, want, tc.sql)
 				}
+				// Nothing the planner minted for itself reaches a client —
+				// unless the cell's own expectation names it, which is how a
+				// PRE-EXISTING leak this arc does not touch is PINNED rather
+				// than exempted: the day it stops leaking, the rendering
+				// changes and the cell fails.
 				for _, c := range cols {
-					if strings.HasPrefix(strings.ToLower(c), "__") {
+					if strings.HasPrefix(strings.ToLower(c), "__") &&
+						!strings.Contains(want, c) {
 						t.Fatalf("%s arm published the reserved slot %q to the client\n  SQL: %s",
 							arm.name, c, tc.sql)
 					}

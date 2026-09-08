@@ -1186,7 +1186,7 @@ type Planner struct {
 	// on what stands ABOVE a node and walkStages descends. walkStages'
 	// `default:` arm publishes each of them onto the stage that materializes
 	// it, so the relation above the block is the one the query wrote (#984).
-	starReadBlocks map[*logical.Node]bool
+	starReadBlocks map[*logical.Node]blockDivergence
 	// publishedBlocks is the subset of starReadBlocks the pass really
 	// materialized. Every CONSUMER reads this one — the join's keys, its
 	// OutputFilter, the declaration for an empty side and the hidden slot's
@@ -7225,6 +7225,19 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// second reference has just been pointed at the stage, rather
 			// than only where the first one was recorded (#876).
 			p.cteTerminals[termID] = true
+			// A CTE BODY IS PLANNED ONCE, so this reference's block was
+			// published (or not) by the walk that planned it — this clone's
+			// Project nodes are different pointers and never reach the publish
+			// hook below. Carrying the verdict here is what keeps the refusal
+			// honest: without it a twice-referenced CTE whose projection WAS
+			// materialized still looked unpublished, and the query was routed
+			// off the DAG onto a pipeline that is not answer-preserving
+			// (round-1 B1). The cached terminal's own ProjectExprs is the
+			// observable fact, not a guess.
+			if idx, ok := p.stageIndexByID(*stages, termID); ok &&
+				len((*stages)[idx].ProjectExprs) > 0 {
+				markStarReadBlocks(node, p.starReadBlocks, p.publishedBlocks)
+			}
 			aliasID := fmt.Sprintf("cte-alias-%d", len(*stages))
 			*stages = append(*stages, Stage{
 				ID:           aliasID,
@@ -8627,9 +8640,16 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// between, and a projection that is not already the stage's own
 		// column list — so a named SELECT list, which resolves each column
 		// through its own consumer, is untouched.
-		if node.Type == logical.NodeProject && p.starReadBlocks[node] &&
-			len(*stages) > preDefaultCount &&
-			!p.cteTerminals[(*stages)[len(*stages)-1].ID] {
+		//
+		// A CTE TERMINAL IS PUBLISHED TOO, unlike the absorb above. The
+		// cteTerminals guard exists for anything CONSUMER-SPECIFIC — a filter
+		// belonging to one reference of a CTE read by two — and a block's own
+		// SELECT list is the opposite of that: it is the relation the CTE
+		// DEFINES, identical for every reference. Withholding it there left a
+		// twice-referenced CTE marked and unpublishable, so the query was
+		// refused and routed instead of executing (round-1 B1).
+		if node.Type == logical.NodeProject && p.starReadBlocks[node] != blockAgrees &&
+			len(*stages) > preDefaultCount {
 			// Only a block that was REALLY materialized is recorded. The
 			// declaration for an empty side and the join's key binding both
 			// read this set, and a block marked published that the pass then

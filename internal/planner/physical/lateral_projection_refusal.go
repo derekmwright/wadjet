@@ -47,10 +47,15 @@ var ErrLateralProjectionDistributed = errors.New(
 
 // refuseUnpublishedStarBlock returns the refusal when a block a star reads was
 // NOT materialized onto a stage.
-func refuseUnpublishedStarBlock(candidates, published map[*logical.Node]bool) error {
+func refuseUnpublishedStarBlock(candidates map[*logical.Node]blockDivergence,
+	published map[*logical.Node]bool) error {
 	var missing []string
-	for block := range candidates {
-		if published[block] {
+	for block, class := range candidates {
+		if published[block] || class != blockIntroduces {
+			// A NARROWING block that could not be published is left exactly as
+			// it was: column pruning answers it on every arm and did before
+			// this pass existed, so refusing it would move a query that is
+			// RIGHT onto a path that is not answer-preserving (round-1 B1).
 			continue
 		}
 		names := emittedColumnNames(block)

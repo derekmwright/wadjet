@@ -1761,15 +1761,17 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `ErrLateralProjectionDistributed` and
      `Coordinator.LateralProjectionLocalRoutes` used to fire on a NAME test
      over every lateral whose block left its stream behind; they now fire on
-     what the pass DID — the blocks a star reads that no stage could be made
-     to carry. Two shapes are left in that residue, both loud-beats-wrong:
-     a computed item whose type the plan cannot state (`ARRAY[COUNT(*)]`
-     inside a CASE with a NULL arm decides nothing, and a projection
-     materialized at a type the empty side declares differently is ADR-0010's
-     refusal), and a block publishing one NAME twice, whose specs do not
-     resolve against the producer's output. Both answer PostgreSQL by routing
-     to the coordinator-local pipeline, asserted by counter in
-     `coordinator.TestArcJ1AStarOverAnUnstageableLateralProjectionIsRouted`.
+     what the pass DID — the marked blocks no stage could be made to carry.
+     Because that route is NOT answer-preserving (the coordinator-local
+     pipeline's ORDER BY is wrong for shapes the DAG gets right), it may take
+     only what was already wrong or loud, and the residue is THREE shapes,
+     listed with their `bb8635a4` disposition in ADR-0026 §7: a CONTAINER over
+     an aggregate (routed there too), a BARE AGGREGATE alias beside a computed
+     sibling (silently wrong there), and a WINDOW inside the block (loud
+     there). All three answer PostgreSQL on the local pipeline, asserted by
+     counter in `coordinator.TestArcK3ADerivedBlockPublishesItsOwnProjection`.
+     A block publishing one NAME twice is NOT among them — it executes
+     distributed, where `bb8635a4` lost both aliases.
 
      WHAT REMAINS a divergence is the star's column ORDER, which is older and
      independent: this engine publishes the JOIN OPERATOR's order (probe side

@@ -1942,17 +1942,48 @@ relation:
    are ONE model wherever the block is materialized, so `stageHiddenPositions`
    reads the projection there.
 
+**What is MARKED, and what is left alone.** Only a block that INTRODUCES a
+name — a rename, a computed item, an alias over an aggregate, or one name
+published twice — is marked. A block that merely NARROWS its stream is not,
+and that is a decision: column pruning already answers a narrowing on every
+arm, the columns that survive it do so because something else needs them (a
+`__sortkey_N` for the block's own ORDER BY), and there the projection cannot be
+published anyway. Marking them bought nothing and cost two things it must not —
+a twice-referenced CTE taken off the DAG, and `__sortkey_0` put on the wire
+where the DAG had published a user column.
+
 **What the route is now.** `ErrLateralProjectionDistributed` is kept and
 RETRIGGERED. It used to fire on a name test over every lateral; it fires now on
-what the pass DID — the blocks a star reads that no stage could be made to
-carry, asked after stage generation because that is the only place the answer
-is exact. Two shapes are in that residue: a computed item whose type the plan
-cannot state (a container expression inside a CASE with a NULL arm decides
-nothing, and materializing it under a type the empty side declares differently
-is ADR-0010's refusal), and a block publishing one NAME twice. Both answer
-PostgreSQL on the coordinator-local pipeline. A plan-time test cannot know
-whether the pass will succeed, and a refusal that fires where it would have
-takes an ordinary distributed query off the DAG for nothing.
+what the pass DID — the marked blocks no stage could be made to carry, asked
+after stage generation because that is the only place the answer is exact.
+
+THE ROUTE IS NOT ANSWER-PRESERVING, so it may take only what was already wrong
+or loud. The coordinator-local pipeline's ORDER BY is wrong for shapes the DAG
+gets right, so a query that EXECUTED correctly must never be handed to it. Three
+things follow, each of which was a right-to-routed move until it was fixed:
+
+  - a NARROWING block is never marked, so it never routes (above);
+  - a CTE body is planned ONCE, so the second reference's `Project` nodes never
+    reach the publish hook — the verdict is carried to them where the subtree
+    is deduped, or a twice-referenced CTE is marked, unpublishable and routed;
+  - SQL's `unknown` DECIDES. A bare `NULL` select item names no type and
+    produces no value, and PostgreSQL declares it `text`; leaving it undecided
+    put `SELECT order_id, NULL AS c` in the residue.
+
+**The residue is three shapes**, each measured wrong or loud at `bb8635a4`
+without the route, each answering PostgreSQL on the coordinator-local pipeline,
+each gated by counter in
+`coordinator.TestArcK3ADerivedBlockPublishesItsOwnProjection`:
+
+| shape | at bb8635a4 |
+|---|---|
+| a CONTAINER over an aggregate (`ARRAY[COUNT(*)] AS a`) — decides no type, and a projection materialized at a type the empty side declares differently is ADR-0010's refusal | routed |
+| a BARE AGGREGATE alias beside a computed sibling (`SUM(x) AS sa, SUM(x)*1 AS sb`) — an aggregate item is computed by the aggregate stage, not by a projection above it | silent wrong (`__agg_1` published) |
+| a WINDOW inside the block (`SUM(x) OVER () AS w`) | loud |
+
+A block publishing ONE NAME TWICE (`order_id AS k, amount AS k`) is NOT in the
+residue: it is marked, published and EXECUTES distributed, where `bb8635a4`
+published `order_id, amount` and lost both aliases.
 
 **A build side that collapses its input is not a repeated scan of its table
 (#981).** `markCoPathingSelfJoinBuilds` walks a join's build dependency chain

@@ -832,11 +832,12 @@ s.order_id = o.id` publishes `order_id` and `oid`, a renamed column is
 published under its alias, and an alias over an aggregate publishes the alias
 alone. Every execution path answers the same relation.
 
-A handful of shapes still run on the coordinator rather than across the
-workers, and they are the ones whose column TYPES the planner cannot state
-ahead of time — a container expression built inside a `CASE` whose other arm is
-`NULL`, and a block that publishes one NAME twice. Naming the columns instead
-of writing `*` keeps those distributed and answers the same rows.
+Three shapes still run on the coordinator rather than across the workers, and
+they are the ones whose columns the planner cannot state ahead of time: a
+CONTAINER built from an aggregate (`ARRAY[COUNT(*)] AS a`), a BARE AGGREGATE
+alias beside a computed sibling (`SUM(x) AS sa, SUM(x) * 1 AS sb`), and a
+WINDOW function inside the subquery. They answer the same rows either way;
+naming the columns instead of writing `*` keeps them distributed.
 
 The correlated equality is turned into a join, and a join needs the inner
 value as a column, so the planner materializes one under a name from its

@@ -5,6 +5,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -66,16 +67,16 @@ import (
 // the statement's output projection — findOutputProjectionNode answers it and
 // the gather already projects it, which is why `SELECT * FROM (SELECT
 // order_id, order_id AS oid FROM lat_item) s` has always been right.
-func starReadBlockProjections(root *logical.Node) map[*logical.Node]bool {
-	out := map[*logical.Node]bool{}
+func starReadBlockProjections(root *logical.Node) map[*logical.Node]blockDivergence {
+	out := map[*logical.Node]blockDivergence{}
 	var walk func(n *logical.Node, projected, joined bool)
 	walk = func(n *logical.Node, projected, joined bool) {
 		if n == nil {
 			return
 		}
 		if n.Type == logical.NodeProject {
-			if !projected && joined && blockProjectionLeavesItsStream(n) {
-				out[n] = true
+			if d := blockProjectionLeavesItsStream(n); !projected && joined && d != blockAgrees {
+				out[n] = d
 			}
 			projected = true
 		}
@@ -101,20 +102,20 @@ func starReadBlockProjections(root *logical.Node) map[*logical.Node]bool {
 // counting it would call a block that IS its stream a divergence. Where the
 // projection is materialized the join's drop reads its ordinal from the
 // projection instead of from the stream (stageHiddenPositions).
-func blockProjectionLeavesItsStream(p *logical.Node) bool {
+func blockProjectionLeavesItsStream(p *logical.Node) blockDivergence {
 	if p == nil || p.SecurityBarrier || len(p.Children) != 1 ||
 		logical.HasStarProjection(p) || len(p.Projections) == 0 {
-		return false
+		return blockAgrees
 	}
 	names := emittedColumnNames(p)
 	if len(names) == 0 {
-		return false
+		return blockAgrees
 	}
 	stream := blockStreamNames(p)
 	if len(stream) == 0 {
 		// A stream this pass cannot state says nothing, exactly as
 		// lateralProjectionNotInStream declines rather than guessing.
-		return false
+		return blockAgrees
 	}
 	// A RESERVED SLOT is compared on neither side. The lowering minted it
 	// into both lists and the join drops it again; counting it would report a
@@ -129,9 +130,17 @@ func blockProjectionLeavesItsStream(p *logical.Node) bool {
 		return out
 	}
 	names, stream = user(names), user(stream)
-	if len(names) != len(stream) {
-		return true
-	}
+	// NARROWING IS THE WEAK CLASS. A block that publishes FEWER columns than
+	// the stream — every one of them the stream's, once, and no name of its
+	// own — is answered by the column pruning that already runs: the star sees
+	// the narrowed list on every arm and always did. Marking it anyway cost an
+	// OpProject on every such block and, where the projection could not then be
+	// published, took a query that was RIGHT off the DAG (round-1 B1: a CTE
+	// referenced twice, whose ORDER BY the local pipeline gets wrong).
+	//
+	// What the star really cannot see is a name the block INTRODUCES — a
+	// rename, a computed item, an alias over an aggregate — or one it publishes
+	// TWICE, because one stream column cannot answer to it twice.
 	have := make(map[string]bool, len(stream))
 	for _, s := range stream {
 		have[strings.ToLower(blockBareName(s))] = true
@@ -140,12 +149,39 @@ func blockProjectionLeavesItsStream(p *logical.Node) bool {
 	for _, name := range names {
 		bare := strings.ToLower(blockBareName(name))
 		if bare == "" || seen[bare] || !have[bare] {
-			return true
+			return blockIntroduces
 		}
 		seen[bare] = true
 	}
-	return false
+	return blockAgrees
 }
+
+// blockDivergence is HOW a block's projection differs from its stream, and the
+// two classes are not degrees of confidence — they are different questions
+// about what the star would see without this pass.
+//
+//   - blockIntroduces: a name the stream does not carry (a rename, a computed
+//     item, an alias over an aggregate) or one published TWICE. The star sees
+//     the wrong relation, always, so a block this pass cannot publish is
+//     REFUSED and routed — it was wrong or loud before the pass existed.
+//   - blockAgrees: every published name is the stream's, once. That INCLUDES
+//     a block that merely NARROWS its stream, and leaving those alone is a
+//     decision rather than an oversight. Column pruning already answers a
+//     narrowing on every arm; the leftovers reach the star only where
+//     something else needs them (a `__sortkey_N` for the block's own ORDER
+//     BY), and there the pass cannot publish anyway — so marking them bought
+//     nothing and cost two things it must not. A twice-referenced CTE was
+//     taken off the DAG and answered by a local pipeline whose ORDER BY for
+//     that shape is wrong (round-1 B1), and a block with its own ORDER BY …
+//     LIMIT put `__sortkey_0` on the wire where the DAG had published a user
+//     column. Both are RIGHT-or-equal at base, and the rule is that the route
+//     may take only what was already wrong or loud.
+type blockDivergence int
+
+const (
+	blockAgrees blockDivergence = iota
+	blockIntroduces
+)
 
 // blockStreamNames is what the STAGE under this block's projection emits: the
 // first node below it that is not a Project, because a Project emits no stage.
@@ -250,8 +286,14 @@ func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool) ([
 			strictInt[lc] = true
 		}
 	}
-	out := make([]blockColumn, 0, len(p.Projections))
-	for _, pr := range p.Projections {
+	// VISIBLE items only. A hidden `__sortkey_N` is the planner's own — a
+	// materialized ORDER BY term the block's SELECT list does not carry — and
+	// publishing it put a reserved name on the wire that no query can spell
+	// (round-1 P3). It is the same list extractOutputRenames walks for the
+	// statement's own projection, and for the same reason.
+	items := logical.VisibleProjections(p.Projections)
+	out := make([]blockColumn, 0, len(items))
+	for _, pr := range items {
 		if pr.IsAgg {
 			// An aggregate SELECT item is computed by the aggregate stage,
 			// not by a projection above it.
@@ -275,7 +317,24 @@ func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool) ([
 			// the ADR-0010 refusal again, for a column that was decided.
 			decl, conf := inferProjectionDeclTypeConf(pr.ASTExpr, 0, strictInt, decls)
 			if conf == expr.Undecided {
-				return nil, false
+				// SQL's `unknown` DECIDES. A bare NULL select item names no
+				// type and produces no value, and PostgreSQL declares it
+				// `text` (OID 25) — which is what this engine publishes for
+				// `SELECT NULL AS c` on every arm already. Declining it left
+				// `SELECT order_id, NULL AS c` in the residue and took a query
+				// that was RIGHT off the DAG (round-1 B2), onto a path that is
+				// not answer-preserving.
+				//
+				// Asked of the LITERAL rather than of the inference's
+				// `Untyped` flag, which this walk does not reach for a bare
+				// `NULL` (it answers the zero DeclType). Anything else
+				// undecided still declines: a container built from an
+				// aggregate produces a value at runtime, at its own type, and
+				// text is not it.
+				if !astIsBareNull(pr.ASTExpr) {
+					return nil, false
+				}
+				decl = expr.DeclType{ID: parquet.TypeString}
 			}
 			t, prec, scale := declTypeParts(decl)
 			out = append(out, blockColumn{
@@ -410,4 +469,44 @@ func declaredBlockSchema(p *logical.Node, wantSet map[string]bool,
 		out = append(out, c.Decl)
 	}
 	return out
+}
+
+// astIsBareNull reports whether this select item is the literal `NULL` and
+// nothing else — SQL's `unknown`, which PostgreSQL declares as text.
+func astIsBareNull(n plansql.Node) bool {
+	for {
+		switch t := n.(type) {
+		case *plansql.ParenNode:
+			n = t.Inner
+		case *plansql.Lit:
+			return t.Kind == plansql.LitNull
+		default:
+			return false
+		}
+	}
+}
+
+// stageIndexByID is the index of the stage with this ID, or ok=false.
+func (p *Planner) stageIndexByID(stages []Stage, id string) (int, bool) {
+	for i := range stages {
+		if stages[i].ID == id {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// markStarReadBlocks records every candidate block in this subtree as
+// published, for a subtree whose stages another walk already emitted.
+func markStarReadBlocks(n *logical.Node, candidates map[*logical.Node]blockDivergence,
+	published map[*logical.Node]bool) {
+	if n == nil {
+		return
+	}
+	if candidates[n] != blockAgrees {
+		published[n] = true
+	}
+	for _, c := range n.Children {
+		markStarReadBlocks(c, candidates, published)
+	}
 }
