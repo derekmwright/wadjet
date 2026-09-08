@@ -130,6 +130,27 @@ the price column is, `volume` when the volume column is, and `vwap` only when
 both are — PostgreSQL's own promotion, where one approximate operand makes the
 quotient approximate.
 
+**Two rules govern a field that has no answer, and which one applies is decided
+by whether the field is UNDEFINED or UNREPRESENTABLE.** They look alike from
+outside the bar and are not:
+
+- **Undefined is per FIELD.** A bar whose volumes sum to zero has no weighted
+  mean, so `vwap` is NULL and the four prices stand. Raising there would fail
+  the whole query — every other bucket's bar with it — for one group whose
+  volumes happened to cancel, and a mean over zero total weight is exactly what
+  NULL says. The superset over PostgreSQL's `22012` is recorded in ADR-0012.
+- **Unrepresentable is per QUERY.** An exact sum that leaves the 128-bit
+  carrier raises `22003` and the statement fails. That is ADR-0024 item 4 and
+  it is not negotiable per field: a bar carrying a silently narrower `volume`
+  beside five right numbers is a wrong answer nobody can see, and the state
+  latches `overflow` through every merge so a partial that overflowed on one
+  worker cannot be finished quietly on another.
+
+The distinction is the same one the rest of the engine draws — "no value" is a
+NULL, "a value that does not fit" is an error — and it is written here because
+a bar is the first result where both can happen to DIFFERENT fields of the same
+value.
+
 **6. The value oracle is the aggregate SPELLED OUT in PostgreSQL, with the same
 row filter.** PostgreSQL has no `ohlcv`, but it has every piece of one, and a
 multi-argument aggregate there SKIPS a row where any argument is NULL —

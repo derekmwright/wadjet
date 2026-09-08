@@ -2488,6 +2488,11 @@ GROUP  BY 1 ORDER BY 1;
   `TIME_BUCKET('15 minutes', ts)` is `42804`. The accepted grammar is the SQL
   parser's single `N unit` pair, so `INTERVAL '1 day 6 hours'` is not
   spellable; write `INTERVAL '30' HOUR`.
+- The units an `INTERVAL` literal accepts anywhere in this engine are `YEAR`,
+  `MONTH`, `WEEK`, `DAY`, `HOUR`, `MINUTE` and `SECOND`. Any other unit —
+  `MILLISECOND`, `MICROSECOND`, `QUARTER`, or a typo — is `0A000`. It used to
+  be silently read as DAYS, so `INTERVAL '500' MILLISECOND` was a 500-day
+  interval to `TIME_BUCKET` and to date arithmetic alike.
 - It is a monotone function of its argument, so a range predicate on the same
   column still prunes row groups beside it — measured, not assumed: over a
   five-row-group fixture the same threshold removes the same two row groups

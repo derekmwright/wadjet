@@ -185,6 +185,26 @@ func TestTimeBucketRefusesWhatDateBinRefuses(t *testing.T) {
 		// inspection. Refused loudly, with the spelling that works.
 		{"string_stride", `SELECT time_bucket('15 minutes', ts) FROM tbt`, "42804",
 			"the stride must be an INTERVAL literal"},
+		// A SUB-SECOND UNIT USED TO BE DAYS. `INTERVAL '500' MILLISECOND`
+		// reached the expression compiler's `default:` arm, which set
+		// `iv.Days = 500` — half a second asked for, sixteen months
+		// delivered, silently. PostgreSQL accepts the spelling and means half
+		// a second; `expr.IntervalValue` has no sub-second field, so this
+		// engine cannot, and the standing rule is the loud error.
+		//
+		// The refusal is the COMPILER's, not time_bucket's, because the wrong
+		// value was minted before the function saw it — an `IntervalValue`
+		// carrying 500 days is indistinguishable from `INTERVAL '500' DAY`.
+		// It therefore covers date arithmetic too, which had the same defect
+		// (`ts + INTERVAL '500' MILLISECOND` moved the instant by 500 days).
+		{"millisecond_stride", `SELECT time_bucket(INTERVAL '500' MILLISECOND, ts) FROM tbt`,
+			"0A000", `interval unit "millisecond" is not supported`},
+		{"microsecond_stride", `SELECT time_bucket(INTERVAL '1' MICROSECOND, ts) FROM tbt`,
+			"0A000", `interval unit "microsecond" is not supported`},
+		// A calendar unit this engine has no arm for, which used to be days
+		// as well — `INTERVAL '1' QUARTER` was one day, not three months.
+		{"quarter_stride", `SELECT time_bucket(INTERVAL '1' QUARTER, ts) FROM tbt`,
+			"0A000", `interval unit "quarter" is not supported`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := db.Query(ctx, tc.sql)
