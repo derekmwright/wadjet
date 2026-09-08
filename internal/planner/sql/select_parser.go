@@ -2402,6 +2402,30 @@ func (p *selectParser) parseWindowFunc(fn *FuncCallNode) (Node, error) {
 		return nil, fmt.Errorf("expected '(' after OVER")
 	}
 
+	// DISTINCT inside a window call is REFUSED, with PostgreSQL's own
+	// SQLSTATE and message (measured live on 17.11:
+	// `ERROR: 0A000: DISTINCT is not implemented for window functions`).
+	//
+	// Both places that turn this node into a plan — windowSpecFromNode's
+	// argument STRING and logical.windowExprFromNode's — build the argument
+	// list from `a.String()` and never look at Func.Distinct, so
+	// `SUM(DISTINCT x) OVER ()` answered the NON-distinct total: 621435 over
+	// typemx's protocol column where the grouped `SUM(DISTINCT c_proto)`
+	// answers 32640. A plausible wrong number is what "loud beats plausible"
+	// exists to stop, and PostgreSQL does not implement the feature at all,
+	// so the refusal is the answer rather than a deferral (#987 review, P4).
+	//
+	// It is refused HERE, at the one site where a function call becomes a
+	// window call, because that covers every door and both shapes — the bare
+	// SELECT-list window and one nested inside a larger expression — with one
+	// rule. Refusing later would need the flag carried through two more
+	// structures that deliberately do not have it.
+	if fn != nil && fn.Distinct {
+		name := strings.ToLower(strings.TrimSpace(fn.Name))
+		return nil, sqlerr.New("0A000",
+			"DISTINCT is not implemented for window functions (%s)", name)
+	}
+
 	wfn := &WindowFuncNode{Func: fn}
 
 	// PARTITION BY
