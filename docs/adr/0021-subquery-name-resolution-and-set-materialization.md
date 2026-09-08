@@ -1017,21 +1017,22 @@ reference whose qualifier the INNER relation also answers to
 `boundary_unaliased_base_table_correlation_stays_silent`). No schema decides
 those — both scopes carry the identifier — and they stay pinned.
 
-Nor does it close the shape a COLUMN-ALIAS LIST on a CTE reaches. PostgreSQL's
-list renames the LEADING columns and the rest keep their names; this engine
-treats it as the whole namespace, in the binder (`registerCTE` stores
-`cte.Columns` outright) and in the logical builder, so `WITH c(kk) AS (SELECT
-id, s FROM t)` publishes `kk` alone. A subquery over such a CTE therefore reads
-`s` as the enclosing query's and answers the enclosing row's value — the same
-FAMILY as this section's subject, with a different root cause. Repairing it at
-the classifier alone would be a bandaid: the classifier would call the
-reference inner while the binder still refuses `s` as unknown, turning a wrong
-number into a refusal for a legal query. Closing it means applying a
-column-alias list POSITIONALLY everywhere it is read — the binder, the CTE
-materialization and the derived-table path, which also owns ADR-0012's recorded
-divergence that a list over a `SELECT *` body is not applied at all. It is
-pinned with PostgreSQL's answer beside it in
-`coordinator.TestArcI1AnUnqualifiedNameBindsTheInnerRelation`.
+Nor did it close the shape a COLUMN-ALIAS LIST on a CTE reaches — **CLOSED
+2026-09-07 by arc K1 (#958), the way this paragraph said it had to be.**
+PostgreSQL's list renames the LEADING columns and the rest keep their names;
+this engine treated it as the whole namespace, in the binder (`registerCTE`
+stored `cte.Columns` outright) and in the correlation classifier
+(`CTEColumns` returned it outright), so `WITH c(kk) AS (SELECT id, s FROM t)`
+published `kk` alone and a subquery over such a CTE read `s` as the enclosing
+query's and answered the enclosing row's value. Repairing it at the classifier
+alone would have been a bandaid — the classifier would call the reference inner
+while the binder still refused `s` as unknown, turning a wrong number into a
+refusal for a legal query — so the rule is now in ONE place,
+`plansql.OverlayColumnAliases`, and every reader takes it: the classifier, the
+binder and the derived-table path that already had it right. ADR-0012's
+divergence for a list over a `SELECT *` body closes with it, for every star the
+expansion can count. The pin is deleted as the proof and its cell kept as a
+value in `coordinator.TestArcI1AnUnqualifiedNameBindsTheInnerRelation`.
 
 The interaction of the list with the scope rule IS closed, and two controls say
 so: `(SELECT * FROM t) x(idd)` and `WITH c(kk) AS (SELECT * FROM t)` both HIDE
@@ -1041,17 +1042,21 @@ PostgreSQL's answer, and this engine's.
 **What the repair UNMASKED.** Three shapes were wrong on every arm because the
 subquery was mis-correlated and its predicate dropped; with the scope right the
 single-process arms answer PostgreSQL and the DAG arms reach lowering gaps the
-wrong answer had been hiding. Each is pinned with the sentence it fails by: TWO
-qualified stars in one SELECT list (the logical builder emits a projection
-column literally named `dim.*`, which no executor schema carries — all four arms
-failed that way before), a RECURSIVE CTE named inside a subquery (§1b: it has no
-stage lowering, and the DAG meets that as an unbuildable stage rather than as
-§1c's routed refusal), and a UNION of two `SELECT *` arms as the subquery's FROM
-(the union stage's column pruning drops a column its own arms declare), and a
-star over a JOIN inside a derived table that is then FILTERED — the builder does
-not publish that star's columns to the filter above it, on all four arms. wrong
-→ right on two arms and loud on two, or wrong → loud on four, is within
-doctrine; each pin fails the day its gap closes.
+wrong answer had been hiding. Each was pinned with the sentence it fails by, and two are now CLOSED: TWO
+qualified stars in one SELECT list (the logical builder emitted a projection
+column literally named `dim.*` — closed by arc J1's qualified-star expansion,
+#962, verified on four arms at `bb8635a4`), and a QUALIFIED star over a JOIN
+inside a derived table that is then FILTERED (closed by arc K1, #963: a
+qualified star ALONE built no projection at all, so nothing carried the star
+for the expansion to rewrite and the derived block published the join). Two
+remain pinned: a RECURSIVE CTE named inside a subquery (§1b: it has no stage
+lowering, and the DAG meets that as an unbuildable stage rather than as §1c's
+routed refusal), and a UNION of two `SELECT *` arms as the subquery's FROM (the
+union stage's column pruning drops a column its own arms declare) — and the
+BARE-star twin of #963, which needs the ordered model of a join's emitted
+columns ADR-0012's #810 entry names. wrong → right on two arms and loud on two,
+or wrong → loud on four, is within doctrine; each pin fails the day its gap
+closes.
 
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
