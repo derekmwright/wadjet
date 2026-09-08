@@ -212,19 +212,20 @@ func OhlcvOutputFields(price parquet.Column, vol parquet.Column) ([]parquet.Colu
 		}
 		return c
 	}
-	volOut := parquet.Column{Name: "volume", Type: vol.Type, Nullable: true}
-	if t, p, s, ok := IntegerAccOutputType(false, vol.Type); ok {
-		volOut.Type, volOut.Precision, volOut.Scale = t, p, s
-	} else if vol.Type == parquet.TypeDecimal {
-		volOut.Type = parquet.TypeDecimal
-		volOut.Precision, volOut.Scale = batch.MaxDecimalPrecision, vol.Scale
-	} else {
-		volOut.Type = parquet.TypeFloat64
-	}
-	if !dom.volExact {
-		// The volume sum is carried in a float64, so it declares one. Its own
-		// column's type decided that, not the price's.
-		volOut.Type, volOut.Precision, volOut.Scale = parquet.TypeFloat64, 0, 0
+	// `volume` is SUM(volume)'s type, and it is EXACT exactly when the volume
+	// column is — its own column decides that, not the price's. An
+	// approximate volume is summed in a float64 and declares one; the two
+	// exact families are the integers (exec.IntegerAccOutputType, the ONE
+	// accumulator table) and DECIMAL, whose sum keeps its scale at the
+	// carrier's full precision.
+	volOut := parquet.Column{Name: "volume", Type: parquet.TypeFloat64, Nullable: true}
+	if dom.volExact {
+		if t, p, s, ok := IntegerAccOutputType(false, vol.Type); ok {
+			volOut.Type, volOut.Precision, volOut.Scale = t, p, s
+		} else {
+			volOut.Type = parquet.TypeDecimal
+			volOut.Precision, volOut.Scale = batch.MaxDecimalPrecision, vol.Scale
+		}
 	}
 	vwap := parquet.Column{Name: "vwap", Type: parquet.TypeFloat64, Nullable: true}
 	if dom.pvExact() {
