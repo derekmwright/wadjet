@@ -754,8 +754,8 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 		if err := b.validateBlock(ctx, inner, lateralOuter); err != nil {
 			return err
 		}
-		names, star := blockOutputs(inner)
-		if star {
+		names, known := b.blockColumns(ctx, inner)
+		if !known {
 			into.open = true
 			return nil
 		}
@@ -891,15 +891,15 @@ func (b *binder) registerCTE(ctx context.Context, cte *plansql.CTEDef) error {
 			return err
 		}
 	}
-	names, star := blockOutputs(body)
+	names, known := b.blockColumns(ctx, body)
 	switch {
 	case len(cte.Columns) == 0:
-		if star {
+		if !known {
 			b.ctes[name] = cteEntry{open: true}
 		} else {
 			b.ctes[name] = cteEntry{cols: names}
 		}
-	case star:
+	case !known:
 		// A COLUMN-ALIAS LIST over a body whose width nothing here can count.
 		// The aliases ARE published — they rename the leading columns whatever
 		// those are — but the TAIL is unknown, so the scope stays OPEN rather
@@ -1392,6 +1392,56 @@ func (b *binder) blockSubqueries(info *plansql.SelectInfo) []string {
 // relation with a schema exactly as a base table is (ADR-0021 §1k, #955).
 func blockOutputs(info *plansql.SelectInfo) ([]string, bool) {
 	return plansql.BlockOutputColumns(info)
+}
+
+// blockColumns is blockOutputs for the question this binder can actually
+// answer: it HAS a catalog, so a STAR is expanded rather than reported.
+//
+// `plansql.BlockOutputColumns` says "(nil, there is a star)" and tells the
+// caller to ask somebody with a catalog. Nobody did, so a derived block whose
+// body held a star opened its scope — and an OPEN scope validates nothing:
+// `SELECT x.nosuchcol FROM (SELECT * FROM o JOIN LATERAL (…) s) x` answered
+// NULL on every arm where PostgreSQL raises 42703 (#976), and a CTE whose body
+// held a star could not have a column-alias list counted against it (#958).
+//
+// The expansion itself is `plansql.BlockPublishedColumns`, the SAME function
+// the correlation classifier resolves a CTE reference with (ADR-0021 §1k), so
+// the binder and the classifier cannot come to different conclusions about
+// what a block publishes. Complete-or-nil: a list that cannot be named exactly
+// leaves the scope open, exactly as before.
+func (b *binder) blockColumns(ctx context.Context, info *plansql.SelectInfo) ([]string, bool) {
+	if names, star := blockOutputs(info); !star {
+		return names, len(names) > 0
+	}
+	names := plansql.BlockPublishedColumns(info, b.tableColumns(ctx))
+	return names, len(names) > 0
+}
+
+// tableColumns is the binder's catalog and CTE scope as a plansql.TableColumns
+// resolver: the COMPLETE column list of a relation, or nil when it cannot be
+// named exactly. An OPEN CTE answers nil, which is the same "unknown" its
+// scope entry means.
+func (b *binder) tableColumns(ctx context.Context) plansql.TableColumns {
+	return func(table string) []string {
+		if e, ok := b.ctes[strings.ToLower(table)]; ok {
+			if e.open {
+				return nil
+			}
+			return e.cols
+		}
+		if b.src == nil {
+			return nil
+		}
+		meta, err := b.src.GetTable(ctx, resolveTableSpelling(b.src, table))
+		if err != nil || meta == nil {
+			return nil
+		}
+		out := make([]string, 0, len(meta.Schema.Columns))
+		for _, c := range meta.Schema.Columns {
+			out = append(out, c.Name)
+		}
+		return out
+	}
 }
 
 // joinRightRef extracts the right-hand table reference of a join.

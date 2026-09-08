@@ -130,7 +130,13 @@ func TestValidateColumns(t *testing.T) {
 		{"derived output valid", "SELECT id FROM (SELECT id FROM events) d", false},
 		{"derived output typo", "SELECT nosuchcol FROM (SELECT id FROM events) d", true},
 		{"derived body typo", "SELECT id FROM (SELECT nosuchcol FROM events) d", true},
-		{"derived star is open", "SELECT nosuchcol FROM (SELECT * FROM events) d", false},
+		// A derived block whose body is a STAR is no longer open: this binder
+		// has a catalog and expands the star (blockColumns), so an unknown
+		// name through it is 42703 as PostgreSQL answers it (#976). It was
+		// `false` here for as long as the star made the scope open.
+		{"derived star names the source's columns", "SELECT nosuchcol FROM (SELECT * FROM events) d", true},
+		{"ctl derived star's real column resolves", "SELECT id FROM (SELECT * FROM events) d", false},
+		{"ctl derived star over a JOIN names both sides", "SELECT nosuchcol FROM (SELECT * FROM events e JOIN other o ON o.eid = e.id) d", true},
 
 		// --- subqueries / correlation ---
 		{"correlated outer ref ok", "SELECT id FROM events e WHERE EXISTS (SELECT 1 FROM other o WHERE o.eid = e.id)", false},

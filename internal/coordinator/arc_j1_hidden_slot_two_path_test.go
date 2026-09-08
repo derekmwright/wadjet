@@ -340,9 +340,13 @@ func TestArcJ1AStarOverALateralPublishesPostgresColumns(t *testing.T) {
 			want: three},
 		{name: "cte-star", sql: `WITH c AS (SELECT * ` + lat + `) SELECT * FROM c ORDER BY c.id`,
 			want: three},
+		// CLOSED by arc K1 (#979): a star-only SELECT list built no Project at
+		// all, so the expansion never saw the star. `isStarOnly` now reads a
+		// QUALIFIED star as what it is — one relation, not the identity of the
+		// input — and this publishes o's three columns, as PostgreSQL does.
 		{name: "outer-qualified-star", sql: `SELECT o.* ` + lat + ` ORDER BY o.id`,
-			want:   three,
-			pgSays: "(id, customer, total) — a qualified star is not narrowed here (ADR-0012)"},
+			want:   `id,customer,total | 1,Alice,150 | 2,Bob,200 | 3,Carol,0`,
+			pgSays: "(id, customer, total)"},
 		{name: "star-over-a-non-aggregated-lateral",
 			sql: `SELECT * FROM lat_ord o JOIN LATERAL (SELECT amount FROM lat_item ` +
 				`WHERE order_id = o.id) li ON true ORDER BY o.id, li.amount`,
@@ -356,25 +360,24 @@ func TestArcJ1AStarOverALateralPublishesPostgresColumns(t *testing.T) {
 			wantDAG: `order_id,amount,id,customer,total | 1,50,1,Alice,150 | ` +
 				`1,100,1,Alice,150 | 2,75,2,Bob,200 | 2,125,2,Bob,200`,
 			pgSays: "(id, customer, total, amount) — four columns, the lateral's last"},
+		// Both CLOSED by arc K1 (#976): the binder HAS a catalog, so a derived
+		// block whose body is a star gets a real column list
+		// (`binder.blockColumns`) and an unknown name through it is 42703 as
+		// PostgreSQL answers it. The slot is as unreachable as a column that
+		// does not exist, which is still the property this pair asserts — it
+		// is now asserted through a refusal rather than through a NULL.
+		// `coordinator.TestArcK1AStarIsItsSourceInItsPosition` carries the
+		// message and the available-column list.
 		{name: "ctl-the-slot-is-not-readable-through-a-derived-star",
-			sql: `SELECT x.__key_0 AS leaked FROM (SELECT * ` + lat + `) x ORDER BY 1`,
-			// The same answer an unknown column through a derived star gives
-			// (the cell below): the slot is as unreachable as a column that
-			// does not exist.
-			want:    `leaked | NULL | NULL | NULL`,
+			sql:     `SELECT x.__key_0 AS leaked FROM (SELECT * ` + lat + `) x ORDER BY 1`,
+			want:    "ERR",
 			wantDAG: "ERR",
 			pgSays:  "42703, column x.__key_0 does not exist"},
-		// NOT the intended answer, and filed rather than presented as one: a
-		// column that does not exist should be 42703 here as it is over a
-		// PLAIN derived table (`unknown column "x.nosuchcol"`). A derived
-		// table whose body is a STAR OVER A JOIN has no computable column
-		// list — the planner refuses to guess one — so nothing validates the
-		// reference and it reads NULL. Pinned in both spellings so the day it
-		// starts refusing, both move together.
-		{name: "pinned-an-unknown-column-through-a-derived-star-reads-NULL",
-			sql:    `SELECT x.nosuchcol AS leaked FROM (SELECT * ` + lat + `) x ORDER BY 1`,
-			want:   `leaked | NULL | NULL | NULL`,
-			pgSays: "42703, column x.nosuchcol does not exist"},
+		{name: "an-unknown-column-through-a-derived-star-is-42703",
+			sql:     `SELECT x.nosuchcol AS leaked FROM (SELECT * ` + lat + `) x ORDER BY 1`,
+			want:    "ERR",
+			wantDAG: "ERR",
+			pgSays:  "42703, column x.nosuchcol does not exist"},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
