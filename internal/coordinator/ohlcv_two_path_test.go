@@ -338,11 +338,16 @@ func ohlcvSchema() parquet.Schema {
 		{Name: "id", Type: parquet.TypeInt32},
 		{Name: "ts", Type: parquet.TypeTimestamp, Nullable: true},
 		{Name: "px_f64", Type: parquet.TypeFloat64, Nullable: true},
+		{Name: "px_f32", Type: parquet.TypeFloat32, Nullable: true},
 		{Name: "px_i64", Type: parquet.TypeInt64, Nullable: true},
+		{Name: "px_i32", Type: parquet.TypeInt32, Nullable: true},
 		{Name: "px_d92", Type: parquet.TypeDecimal, Precision: 9, Scale: 2, Nullable: true},
+		{Name: "px_d184", Type: parquet.TypeDecimal, Precision: 18, Scale: 4, Nullable: true},
+		{Name: "px_d3810", Type: parquet.TypeDecimal, Precision: 38, Scale: 10, Nullable: true},
 		{Name: "vol_i64", Type: parquet.TypeInt64, Nullable: true},
 		{Name: "vol_i32", Type: parquet.TypeInt32, Nullable: true},
 		{Name: "vol_f64", Type: parquet.TypeFloat64, Nullable: true},
+		{Name: "vol_d92", Type: parquet.TypeDecimal, Precision: 9, Scale: 2, Nullable: true},
 		{Name: "c_str", Type: parquet.TypeString, Nullable: true},
 	}}
 }
@@ -398,16 +403,23 @@ func ohlcvRows(rows []ohlcvRow) []map[string]any {
 			"c_str": "x",
 		}
 		if v.px != nil {
-			m["px_i64"] = int64(v.px.(float64))
-			m["px_d92"] = fmt.Sprintf("%.2f", v.px.(float64))
+			f := v.px.(float64)
+			m["px_f32"] = float32(f)
+			m["px_i64"] = int64(f)
+			m["px_i32"] = int32(f)
+			m["px_d92"] = fmt.Sprintf("%.2f", f)
+			m["px_d184"] = fmt.Sprintf("%.4f", f)
+			m["px_d3810"] = fmt.Sprintf("%.10f", f)
 		} else {
-			m["px_i64"], m["px_d92"] = nil, nil
+			m["px_f32"], m["px_i64"], m["px_i32"] = nil, nil, nil
+			m["px_d92"], m["px_d184"], m["px_d3810"] = nil, nil, nil
 		}
 		if v.vol != nil {
 			m["vol_i32"] = int32(v.vol.(int64))
 			m["vol_f64"] = float64(v.vol.(int64))
+			m["vol_d92"] = fmt.Sprintf("%d.00", v.vol.(int64))
 		} else {
-			m["vol_i32"], m["vol_f64"] = nil, nil
+			m["vol_i32"], m["vol_f64"], m["vol_d92"] = nil, nil, nil
 		}
 		out = append(out, m)
 	}
