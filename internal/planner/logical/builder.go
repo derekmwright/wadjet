@@ -544,6 +544,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 				OutputCol:   syntheticName,
 				PartitionBy: partBy,
 				OrderBy:     orderBy,
+				InputExpr:   windowArgNode(col.ASTExpr),
 			}
 			if ws.Frame != nil {
 				we.Frame = convertFrame(ws.Frame)
@@ -1071,6 +1072,23 @@ func respellOverAggregate(term string, aggRefs, keyRefs map[string]string) strin
 	return out.String()
 }
 
+// windowArgNode returns the AST of a window function's FIRST argument, for
+// WindowExpr.InputExpr. It takes the SELECT item rather than the
+// WindowFuncNode so both construction sites — the bare SELECT-list window,
+// which holds a plansql.WindowSpec with no node on it, and the nested one,
+// which holds the node itself — can ask one function.
+//
+// nil for `COUNT(*)`, for a zero-argument rank function, and for anything that
+// is not a window node: a consumer must treat a missing node as "unknown", not
+// as a narrower answer.
+func windowArgNode(n plansql.Node) plansql.Node {
+	wfn, ok := n.(*plansql.WindowFuncNode)
+	if !ok || wfn.Func == nil || wfn.Func.Star || len(wfn.Func.Args) == 0 {
+		return nil
+	}
+	return wfn.Func.Args[0]
+}
+
 func windowExprFromNode(wfn *plansql.WindowFuncNode, outputCol string) WindowExpr {
 	inputCol := ""
 	if wfn.Func.Star {
@@ -1100,6 +1118,7 @@ func windowExprFromNode(wfn *plansql.WindowFuncNode, outputCol string) WindowExp
 		OutputCol:   outputCol,
 		PartitionBy: partBy,
 		OrderBy:     orderBy,
+		InputExpr:   windowArgNode(wfn),
 	}
 	if wfn.Frame != nil {
 		we.Frame = convertFrame(wfn.Frame)

@@ -251,14 +251,30 @@ func TestWindowIntegerSumIsExactAboveTwoToThe53(t *testing.T) {
 }
 
 // TestAnInt64WindowSumPastTheCarrierAnswersInNumeric is the CONTROL that says
-// why the bigint arm below has to be reached directly.
+// why the bigint arm below has to be reached directly, and it pins BOTH
+// dispositions of an int8 input whose spec does not say DECIMAL.
 //
 // `SUM(int8) OVER ()` declares NUMERIC, so a total of 3*(2^63-1) is a number
-// this engine can answer, and PostgreSQL answers the same digits. The
-// operator's own correction (retypeValueColumns) is what gets it there: the
-// spec below asks for an INT64 output over an int8 column, which is the
-// declaration a pre-#987 stage spec carries, and the operator moves it UP to
-// the accumulator's type rather than writing a wrapped int64.
+// this engine can answer, and PostgreSQL answers the same digits.
+//
+// A FLOAT8 spec is the declaration a spec the planner could not type carries,
+// and it is what every pre-#987 window sum over an integer carried — #813 item
+// 2's whole complaint was float8. retypeValueColumns moves it UP to the
+// accumulator's type and the digits come back exact. That is the
+// defence-in-depth #345 asks for: nothing downstream of the operator can fix a
+// declaration.
+//
+// An INT64 spec is NOT a mis-declaration to be corrected. It is what the
+// planner emits for an int4-domain COMPUTED argument, and no input VECTOR can
+// be told from an int8 one: every integer expression in this engine computes
+// in int64 (ADR-0024's recorded widening), so `SUM(i32 * 1) OVER ()` and
+// `SUM(i64 * 1) OVER ()` hand the operator identical vectors and only the PLAN
+// knows which is which (physical.windowComputedArgDecl, #987 review B1).
+// Widening it back here would put the window's OID at 1700 where its grouped
+// twin's is 20, which is the divergence B1 filed. So the operator honors a
+// bigint declaration — and a total that does not fit it is 22003, PostgreSQL's
+// own `bigint out of range`, never a wrapped number. Loud in the one direction
+// the inference could be wrong, which is what makes it safe to make.
 func TestAnInt64WindowSumPastTheCarrierAnswersInNumeric(t *testing.T) {
 	schema := []parquet.Column{
 		{Name: "ts", Type: parquet.TypeInt64},
@@ -269,20 +285,44 @@ func TestAnInt64WindowSumPastTheCarrierAnswersInNumeric(t *testing.T) {
 		{"ts": int64(1), "v": int64(9223372036854775807)},
 		{"ts": int64(2), "v": int64(9223372036854775807)},
 	}
-	cols := []WindowColumn{{
-		Func: WinSum, InputCol: "v", OutputCol: "w", OutputType: parquet.TypeInt64,
-	}}
-	out, outSchema := runWindowInMemory(t, schema, cols, rows)
-	for _, c := range outSchema {
-		if c.Name == "w" && c.Type != parquet.TypeDecimal {
-			t.Fatalf("declared %v — sum(int8) is numeric, and an int64 there would wrap", c.Type)
+	t.Run("an untyped float8 spec is corrected to the accumulator", func(t *testing.T) {
+		cols := []WindowColumn{{
+			Func: WinSum, InputCol: "v", OutputCol: "w", OutputType: parquet.TypeFloat64,
+		}}
+		out, outSchema := runWindowInMemory(t, schema, cols, rows)
+		for _, c := range outSchema {
+			if c.Name == "w" && c.Type != parquet.TypeDecimal {
+				t.Fatalf("declared %v — sum(int8) is numeric, and a float64 there "+
+					"loses every digit past 2^53", c.Type)
+			}
 		}
-	}
-	// PostgreSQL 17.11 over the same three rows, measured live.
-	const want = "27670116110564327421"
-	if got := fmt.Sprint(out[0]["w"]); got != want {
-		t.Errorf("w = %s, want %s (PostgreSQL 17)", got, want)
-	}
+		// PostgreSQL 17.11 over the same three rows, measured live.
+		const want = "27670116110564327421"
+		if got := fmt.Sprint(out[0]["w"]); got != want {
+			t.Errorf("w = %s, want %s (PostgreSQL 17)", got, want)
+		}
+	})
+	t.Run("a bigint spec is honored and refuses rather than wrapping", func(t *testing.T) {
+		ctx := context.Background()
+		w := NewWindow([]WindowColumn{{
+			Func: WinSum, InputCol: "v", OutputCol: "w", OutputType: parquet.TypeInt64,
+		}})
+		if err := w.Init(ctx); err != nil {
+			t.Fatal(err)
+		}
+		err := w.Consume(ctx, batch.FromRows(schema, rows))
+		if err == nil {
+			err = w.Finalize(ctx)
+		}
+		if err == nil {
+			t.Fatal("a bigint window sum of 3*(2^63-1) answered — a wrapped total is " +
+				"a different number wearing the right type (ADR-0024 item 4)")
+		}
+		if got := sqlerr.StateOf(err); got != "22003" {
+			t.Fatalf("SQLSTATE %q, want 22003 (PostgreSQL: `bigint out of range`): %v",
+				got, err)
+		}
+	})
 }
 
 // TestWindowBigintSumRefusesAWrappedTotal — a total the BIGINT declaration

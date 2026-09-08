@@ -439,9 +439,24 @@ func resolveWindowExactCells(winVec, inputVec *batch.Vector) (windowExactCells, 
 // answered exactly. One question, two spellings, two numbers. It asks
 // IntegerAccOutputType rather than repeating the rule so that the grouped
 // declaration, this one and the planner's window declaration cannot drift.
-func windowAccOutputType(fn WindowFunc, in parquet.TypeID) parquet.TypeID {
+//
+// `declared` is the spec's own type, and it decides ONE case this correction
+// must not touch: a SUM whose plan says bigint over an int64-carried input.
+// Every integer expression in this engine computes in int64 (ADR-0024's
+// widening), so the input VECTOR of `SUM(CASE WHEN … THEN 1 ELSE 0 END)
+// OVER ()` is indistinguishable from `SUM(int8_col + 0) OVER ()`'s — while the
+// PLAN, which still has the argument's syntax, can tell them apart and says
+// bigint for the first (physical.windowArgIsNarrowInteger, #987 review B1).
+// Widening it back to numeric here would undo that and put the window's OID
+// at 1700 where its grouped twin's is 20. Both arms accumulate in the same
+// Int128 and the bigint arm refuses a total that does not fit rather than
+// wrapping, so keeping the narrower declaration costs no exactness.
+func windowAccOutputType(fn WindowFunc, declared, in parquet.TypeID) parquet.TypeID {
 	if in == parquet.TypeDecimal {
 		return parquet.TypeDecimal
+	}
+	if fn == WinSum && declared == parquet.TypeInt64 && in == parquet.TypeInt64 {
+		return parquet.TypeInt64
 	}
 	if out, _, _, ok := IntegerAccOutputType(fn == WinAvg, in); ok {
 		return out

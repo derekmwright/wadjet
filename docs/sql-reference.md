@@ -1787,11 +1787,15 @@ wrapped number. `MIN`, `MAX` and the value functions (`LAG`, `LEAD`,
 `FIRST_VALUE`, `LAST_VALUE`, `NTH_VALUE`) answer their input column's own type;
 `COUNT`, `ROW_NUMBER`, `RANK`, `DENSE_RANK` and `NTILE` answer `BIGINT`.
 
-A **computed** argument follows the same table, through the type the
-expression itself declares: `SUM(bigint_col * 2) OVER ()` and
-`SUM(ABS(bigint_col)) OVER ()` are `NUMERIC`, and so are their `GROUP BY`
-spellings. `SUM(CASE WHEN … THEN 1 ELSE 0 END)` stays `BIGINT`, because
-nothing in it is wider than `int4` — which is PostgreSQL's answer too.
+A **computed** argument follows the same table, read from the ARGUMENT's own
+width rather than from the column the expression is materialized into — the
+same rule in the windowed and the `GROUP BY` spelling, because they are one
+question written twice. `SUM(bigint_col * 2)` and `SUM(ABS(bigint_col))` are
+`NUMERIC` in both; `SUM(CASE WHEN … THEN 1 ELSE 0 END)`, `SUM(int_col * 1)`,
+`SUM(-int_col)` and `SUM(MOD(int_col, 10))` are `BIGINT` in both, because
+nothing in them is wider than `int4`. One `int8` operand anywhere in the
+expression makes the whole of it `NUMERIC`, which is PostgreSQL's answer as
+well: `SUM(CASE WHEN … THEN bigint_col ELSE 0 END)` is `NUMERIC`.
 
 **`DISTINCT` inside a window call is refused** with SQLSTATE `0A000`,
 `DISTINCT is not implemented for window functions`, which is PostgreSQL's own

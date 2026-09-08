@@ -306,7 +306,7 @@ func (w *Window) retypeValueColumns() bool {
 				// planner because a stage spec the coordinator could not type
 				// arrives with the FLOAT64 fallback, and nothing downstream
 				// of the operator can fix a declaration (#345).
-				t = windowAccOutputType(wc.Func, t)
+				t = windowAccOutputType(wc.Func, wc.OutputType, t)
 			}
 			if minMax {
 				// The input type, for every type the engine has (#569).

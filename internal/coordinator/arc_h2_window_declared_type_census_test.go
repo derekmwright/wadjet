@@ -356,6 +356,60 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 			sql:  "SELECT SUM(CASE WHEN w_key > 3 THEN 1 ELSE 0 END) AS v FROM numwidth",
 			want: "cols=[v:INT64] rows=1 | 6"},
 
+		// #987 review B1: the SAME question, WINDOWED. Round 2's fix read the
+		// MATERIALIZED argument column, and every integer expression in this
+		// engine computes in int64 (ADR-0024's widening) — so an int4-domain
+		// expression came back INT64 and declared DECIMAL(38,0), OID 1700,
+		// where its GROUPED twin two lines up declares bigint and where
+		// PostgreSQL declares bigint. One question, two spellings, two boxes:
+		// exactly the class #813 was, with the spellings' roles swapped.
+		//
+		// The width survives only in the SYNTAX, which is why the grouped path
+		// walks the AST (aggInputIsWideInteger) and why the window now carries
+		// the argument's node to ask that same function
+		// (physical.windowArgIsNarrowInteger). Every shape below is asserted
+		// in BOTH spellings, and the OIDs beside them are
+		// pgwire.TestAComputedIntegerWindowArgumentDeclaresPostgresOID.
+		{name: "987 B1: SUM(CASE of ones) OVER () is bigint (TPC-H Q12's shape, windowed)",
+			sql: "SELECT SUM(CASE WHEN w_key > 3 THEN 1 ELSE 0 END) OVER () AS v " +
+				"FROM numwidth ORDER BY 1 LIMIT 1",
+			want: "cols=[v:INT64] rows=1 | 6"},
+		{name: "987 B1: SUM(int4 * 1) OVER () is bigint",
+			sql:  "SELECT SUM(w_i32 * 1) OVER () AS v FROM numwidth ORDER BY 1 LIMIT 1",
+			want: "cols=[v:INT64] rows=1 | 2164260874"},
+		{name: "987 B1 control: SUM(int4 * 1) grouped",
+			sql:  "SELECT SUM(w_i32 * 1) AS v FROM numwidth",
+			want: "cols=[v:INT64] rows=1 | 2164260874"},
+		{name: "987 B1: SUM(-int4) OVER () is bigint",
+			sql:  "SELECT SUM(-w_i32) OVER () AS v FROM numwidth ORDER BY 1 LIMIT 1",
+			want: "cols=[v:INT64] rows=1 | -2164260874"},
+		{name: "987 B1 control: SUM(-int4) grouped",
+			sql:  "SELECT SUM(-w_i32) AS v FROM numwidth",
+			want: "cols=[v:INT64] rows=1 | -2164260874"},
+		{name: "987 B1: SUM(int4 + 1) OVER () is bigint",
+			sql:  "SELECT SUM(w_i32 + 1) OVER () AS v FROM numwidth ORDER BY 1 LIMIT 1",
+			want: "cols=[v:INT64] rows=1 | 2164260882"},
+		{name: "987 B1 control: SUM(int4 + 1) grouped",
+			sql:  "SELECT SUM(w_i32 + 1) AS v FROM numwidth",
+			want: "cols=[v:INT64] rows=1 | 2164260882"},
+		{name: "987 B1: SUM(MOD(int4, 10)) OVER () is bigint",
+			sql:  "SELECT SUM(MOD(w_i32, 10)) OVER () AS v FROM numwidth ORDER BY 1 LIMIT 1",
+			want: "cols=[v:INT64] rows=1 | 24"},
+		{name: "987 B1 control: SUM(MOD(int4, 10)) grouped",
+			sql:  "SELECT SUM(MOD(w_i32, 10)) AS v FROM numwidth",
+			want: "cols=[v:INT64] rows=1 | 24"},
+		{
+			// The OTHER side of the same walk, and the reason it is a walk
+			// rather than "a computed argument is int4": one int8 arm makes
+			// the CASE int8, so this one is numeric in both spellings. A fix
+			// that narrowed every computed argument would pass the six cells
+			// above and fail this one.
+			name: "987 B1 boundary: a CASE with an int8 arm is numeric, grouped",
+			sql: "SELECT SUM(CASE WHEN w_key > 3 THEN w_i64 ELSE 0 END) AS v " +
+				"FROM numwidth",
+			want: "cols=[v:DECIMAL(38,0)] rows=1 | 9007201402224634",
+		},
+
 		{
 			// The int4 half of the same shape: bigint, and the sliding frame
 			// again, because SUM(int4) writes through a DIFFERENT arm of

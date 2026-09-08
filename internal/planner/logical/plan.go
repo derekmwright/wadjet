@@ -530,6 +530,19 @@ type WindowExpr struct {
 	PartitionBy []string
 	OrderBy     []OrderExpr
 	Frame       *WindowFrameSpec
+	// InputExpr is the AST of the FIRST argument, as AggExpr.InputExpr is
+	// for the grouped spelling, and nil when there is none (`COUNT(*)`,
+	// `ROW_NUMBER()`) or when the builder could not carry one.
+	//
+	// A materialized argument column cannot answer PostgreSQL's SUM rule on
+	// its own: every integer expression declares INT64 in this engine
+	// (ADR-0024's widening), so `SUM(CASE WHEN … THEN 1 ELSE 0 END) OVER ()`
+	// — int4 in PostgreSQL, bigint under SUM — reads identically to
+	// `SUM(int8_col + 0) OVER ()`, which is numeric there. The WIDTH survives
+	// only in the AST, which is why the grouped path walks it
+	// (aggInputIsWideInteger) and why the window now carries the same node to
+	// ask the same question (#987 review, B1).
+	InputExpr plansql.Node
 }
 
 // InputColumn returns the COLUMN argument of a window expression.

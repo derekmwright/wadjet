@@ -16400,6 +16400,70 @@ func windowValueFunc(fn string) bool {
 // scan below annotates, two scans that disagree, or an input the walk cannot
 // describe at all. A confidently wrong type here is worse than the fallback —
 // nothing downstream corrects a declaration, which is the whole of #345.
+// windowComputedArgDecl types a window aggregate's COMPUTED argument from the
+// argument's own AST, and reports whether that expression carries an
+// int8-domain operand. It is aggComputedInputDecl's window face and asks the
+// same two functions — nodeDeclaredType and aggInputIsWideInteger — over the
+// same declarations, because the two spellings of one aggregate have to reach
+// the same type.
+//
+// Both halves are needed and neither is enough alone. The DECLARATION cannot
+// tell int4 arithmetic from int8 arithmetic: every integer expression in this
+// engine computes in int64 (ADR-0024's recorded widening), so `w_i32 * 1` and
+// `w_i64 * 1` both declare INT64. The WIDTH walk cannot tell an integer
+// expression from a float one: it answers "not wide" for both. Together they
+// say what PostgreSQL says — `sum(int4-domain)` is bigint, `sum(int8-domain)`
+// is numeric, and anything that is not an integer keeps the float64 fallback.
+//
+// Three guards keep it to the shapes it can see:
+//
+//   - a BARE column declines here and is typed by colRefDeclaredType above:
+//     an int4 column already declares INT32, which IntegerAccOutputType
+//     answers directly.
+//   - no node, or an undecided expression, declines. Unknown keeps the
+//     existing fallback rather than narrowing on a guess.
+//   - the node must still SPELL the argument the operator will evaluate.
+//     respellOverAggregate rewrites InputCol when a window sits above an
+//     aggregate, and a rewritten argument resolves its ColRefs against names
+//     the stale AST does not carry — so a mismatch declines rather than
+//     typing a spelling that no longer applies.
+//
+// #987 review B1: `SUM(CASE WHEN … THEN 1 ELSE 0 END) OVER ()` — TPC-H Q12's
+// shape, bigint in PostgreSQL and bigint in the grouped spelling here — went
+// out as DECIMAL(38,0) under OID 1700 where its grouped twin went out under
+// 20. One question, two spellings, two boxes.
+func windowComputedArgDecl(node *logical.Node, we logical.WindowExpr) (expr.DeclType, bool, bool) {
+	if we.InputExpr == nil || node == nil || len(node.Children) == 0 {
+		return expr.DeclType{}, false, false
+	}
+	if _, bare := we.InputExpr.(*plansql.ColRef); bare {
+		return expr.DeclType{}, false, false
+	}
+	if cleanExpr(we.InputExpr.String()) != cleanExpr(we.InputCol) {
+		return expr.DeclType{}, false, false
+	}
+	decls := inputColDecls(node.Children[0])
+	if len(decls.types) == 0 {
+		decls = emittedColDecls(node.Children[0])
+	}
+	d, c := nodeDeclaredType(we.InputExpr, decls)
+	if c == expr.Undecided {
+		return expr.DeclType{}, false, false
+	}
+	return d, aggInputIsWideInteger(we.InputExpr, decls), true
+}
+
+// integerAccArgWidth maps a computed argument's DECLARED type plus the width
+// walk's verdict onto the input width exec.IntegerAccOutputType answers about.
+// An int64-carried expression that provably holds no int8-domain operand is
+// PostgreSQL's int4 case; everything else is its own declaration.
+func integerAccArgWidth(declared parquet.TypeID, wide bool) parquet.TypeID {
+	if declared == parquet.TypeInt64 && !wide {
+		return parquet.TypeInt32
+	}
+	return declared
+}
+
 func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclType {
 	fn := strings.ToLower(strings.TrimSpace(we.Func))
 	minMax := fn == "min" || fn == "max"
@@ -16443,6 +16507,26 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 	// aggregate's above it and the wire's agree through a nesting level.
 	t, conf := colRefDeclaredType(&plansql.ColRef{Column: col}, emittedColDecls(node.Children[0]))
 	if conf != expr.Decided {
+		// A COMPUTED argument has no column declaration to read: the
+		// pre-window projection materializes `w_i32 * 1` under that name and
+		// colRefDeclaredType declines every name it cannot find in a scan.
+		// The GROUPED spelling does not stop here — aggComputedInputDecl
+		// types the argument from its own AST — so until #987's review this
+		// was the whole of B1: `SUM(CASE WHEN … THEN 1 ELSE 0 END) OVER ()`
+		// fell to float8 at plan time and was corrected to DECIMAL(38,0) at
+		// runtime, while its grouped twin declared bigint, which is
+		// PostgreSQL's type.
+		if sumAvg {
+			if d, wide, ok := windowComputedArgDecl(node, we); ok {
+				if out, prec, scale, iok := exec.IntegerAccOutputType(
+					fn == "avg", integerAccArgWidth(d.ID, wide)); iok {
+					if out == parquet.TypeDecimal {
+						return expr.DeclDecimal(prec, scale)
+					}
+					return expr.Decl(out)
+				}
+			}
+		}
 		return expr.Decl(windowOutputType(fn))
 	}
 	if sumAvg {
@@ -16469,6 +16553,9 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 		//
 		// Every other input type keeps the float64 the name list answers.
 		if t.ID != parquet.TypeDecimal || !t.DecKnown {
+			// t is a COLUMN's declaration here — a computed argument does
+			// not resolve through colRefDeclaredType and is typed in the
+			// undecided arm above, by windowComputedArgDecl.
 			out, prec, scale, ok := exec.IntegerAccOutputType(fn == "avg", t.ID)
 			if !ok {
 				return expr.Decl(windowOutputType(fn))
