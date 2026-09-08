@@ -35,6 +35,12 @@ import (
 // because a pass-through naming fewer slots than the gather will read answers
 // NULL. `slot_in_subquery_arg` is the shape that puts a subquery in the same
 // query, and `three_slots` the widest slot count in the corpus.
+//
+// `w` is a bare NUMERIC rather than the `float:` box these cells carried
+// before #987. `SUM(plain) OVER ()` over an int8 column is numeric — which is
+// PostgreSQL's own type and what the GROUPED spelling already answered — and
+// arithmetic over it stays numeric. Every NUMBER here is unchanged; these
+// cells are about which stage computes the item, not about its carrier.
 type wwslCell struct {
 	name string
 	sql  string
@@ -52,8 +58,8 @@ func wwslCells() []wwslCell {
 		{name: "wrapped_window_beside_expression",
 			sql: `SELECT id, SUM(plain) OVER () + 0 AS w, plain + 1 AS s FROM wintab0 ORDER BY id`,
 			want: []string{
-				"id=int64:1|w=float:10000|s=int64:1001", "id=int64:2|w=float:10000|s=int64:2001",
-				"id=int64:3|w=float:10000|s=int64:3001", "id=int64:4|w=float:10000|s=int64:4001"},
+				"id=int64:1|w=10000|s=int64:1001", "id=int64:2|w=10000|s=int64:2001",
+				"id=int64:3|w=10000|s=int64:3001", "id=int64:4|w=10000|s=int64:4001"},
 			pgSays: "4 rows, w=10000 on each"},
 		// The wrapped item beside a STRING expression: the attachable item is
 		// what the gather cannot compute for itself.
@@ -61,17 +67,17 @@ func wwslCells() []wwslCell {
 			sql: `SELECT id, SUM(plain) OVER () + 0 AS w, 'x' || CAST(plain AS STRING) AS s ` +
 				`FROM wintab0 ORDER BY id`,
 			want: []string{
-				"id=int64:1|w=float:10000|s=x1000", "id=int64:2|w=float:10000|s=x2000",
-				"id=int64:3|w=float:10000|s=x3000", "id=int64:4|w=float:10000|s=x4000"},
+				"id=int64:1|w=10000|s=x1000", "id=int64:2|w=10000|s=x2000",
+				"id=int64:3|w=10000|s=x3000", "id=int64:4|w=10000|s=x4000"},
 			pgSays: "4 rows, s = x1000 … x4000"},
 		{name: "two_wrapped_windows_beside_expression",
 			sql: `SELECT id, SUM(plain) OVER () + 0 AS w1, MAX(id) OVER () + 0 AS w2, ` +
 				`plain + 1 AS s FROM wintab0 ORDER BY id`,
 			want: []string{
-				"id=int64:1|w1=float:10000|w2=int64:4|s=int64:1001",
-				"id=int64:2|w1=float:10000|w2=int64:4|s=int64:2001",
-				"id=int64:3|w1=float:10000|w2=int64:4|s=int64:3001",
-				"id=int64:4|w1=float:10000|w2=int64:4|s=int64:4001"},
+				"id=int64:1|w1=10000|w2=int64:4|s=int64:1001",
+				"id=int64:2|w1=10000|w2=int64:4|s=int64:2001",
+				"id=int64:3|w1=10000|w2=int64:4|s=int64:3001",
+				"id=int64:4|w1=10000|w2=int64:4|s=int64:4001"},
 			pgSays: "4 rows, w1=10000 w2=4"},
 		// TWO slots in ONE item: the first takes the item's position and the
 		// second rides past the end of the select list. Getting this wrong is
@@ -82,22 +88,22 @@ func wwslCells() []wwslCell {
 			sql: `SELECT id, SUM(plain) OVER () + MAX(id) OVER () AS w, plain + 1 AS s ` +
 				`FROM wintab0 ORDER BY id`,
 			want: []string{
-				"id=int64:1|w=float:10004|s=int64:1001", "id=int64:2|w=float:10004|s=int64:2001",
-				"id=int64:3|w=float:10004|s=int64:3001", "id=int64:4|w=float:10004|s=int64:4001"},
+				"id=int64:1|w=10004|s=int64:1001", "id=int64:2|w=10004|s=int64:2001",
+				"id=int64:3|w=10004|s=int64:3001", "id=int64:4|w=10004|s=int64:4001"},
 			pgSays: "4 rows, w=10004"},
 		{name: "two_slots_in_one_item_reversed",
 			sql: `SELECT id, plain + 1 AS s, MAX(id) OVER () - SUM(plain) OVER () AS w ` +
 				`FROM wintab0 ORDER BY id`,
 			want: []string{
-				"id=int64:1|s=int64:1001|w=float:-9996", "id=int64:2|s=int64:2001|w=float:-9996",
-				"id=int64:3|s=int64:3001|w=float:-9996", "id=int64:4|s=int64:4001|w=float:-9996"},
+				"id=int64:1|s=int64:1001|w=-9996", "id=int64:2|s=int64:2001|w=-9996",
+				"id=int64:3|s=int64:3001|w=-9996", "id=int64:4|s=int64:4001|w=-9996"},
 			pgSays: "4 rows, w=-9996"},
 		{name: "three_slots_in_one_item",
 			sql: `SELECT id, SUM(plain) OVER () + MAX(id) OVER () + MIN(id) OVER () AS w, ` +
 				`plain + 1 AS s FROM wintab0 ORDER BY id`,
 			want: []string{
-				"id=int64:1|w=float:10005|s=int64:1001", "id=int64:2|w=float:10005|s=int64:2001",
-				"id=int64:3|w=float:10005|s=int64:3001", "id=int64:4|w=float:10005|s=int64:4001"},
+				"id=int64:1|w=10005|s=int64:1001", "id=int64:2|w=10005|s=int64:2001",
+				"id=int64:3|w=10005|s=int64:3001", "id=int64:4|w=10005|s=int64:4001"},
 			pgSays: "4 rows, w=10005"},
 		// The __agg_ half of the same slot family.
 		{name: "wrapped_aggregate_beside_expression",
@@ -108,16 +114,16 @@ func wwslCells() []wwslCell {
 			sql: `SELECT id, SUM(plain) OVER (PARTITION BY id) + 0 AS w, plain + 1 AS s ` +
 				`FROM wintab0 ORDER BY id`,
 			want: []string{
-				"id=int64:1|w=float:1000|s=int64:1001", "id=int64:2|w=float:2000|s=int64:2001",
-				"id=int64:3|w=float:3000|s=int64:3001", "id=int64:4|w=float:4000|s=int64:4001"},
+				"id=int64:1|w=1000|s=int64:1001", "id=int64:2|w=2000|s=int64:2001",
+				"id=int64:3|w=3000|s=int64:3001", "id=int64:4|w=4000|s=int64:4001"},
 			pgSays: "4 rows, one partition each"},
 		{name: "wrapped_window_over_a_string_column",
 			sql: `SELECT id, SUM(id) OVER () + 0 AS w, c_str || 'z' AS s FROM typemx ` +
 				`WHERE id < 5 ORDER BY id`,
 			want: []string{
-				"id=int64:0|w=float:10|s=s-000000z", "id=int64:1|w=float:10|s=s-000001z",
-				"id=int64:2|w=float:10|s=s-000002z", "id=int64:3|w=float:10|s=s-000003z",
-				"id=int64:4|w=float:10|s=s-000004z"},
+				"id=int64:0|w=10|s=s-000000z", "id=int64:1|w=10|s=s-000001z",
+				"id=int64:2|w=10|s=s-000002z", "id=int64:3|w=10|s=s-000003z",
+				"id=int64:4|w=10|s=s-000004z"},
 			pgSays: "5 rows, s = s-00000Nz"},
 		// A subquery elsewhere in the query: the walk that lists an item's
 		// slots refuses to guess inside one, and this shape proves the refusal
@@ -126,8 +132,8 @@ func wwslCells() []wwslCell {
 			sql: `SELECT id, SUM(plain) OVER () + 0 AS w, plain + 1 AS s FROM wintab0 ` +
 				`WHERE id IN (SELECT id FROM wintab0) ORDER BY id`,
 			want: []string{
-				"id=int64:1|w=float:10000|s=int64:1001", "id=int64:2|w=float:10000|s=int64:2001",
-				"id=int64:3|w=float:10000|s=int64:3001", "id=int64:4|w=float:10000|s=int64:4001"},
+				"id=int64:1|w=10000|s=int64:1001", "id=int64:2|w=10000|s=int64:2001",
+				"id=int64:3|w=10000|s=int64:3001", "id=int64:4|w=10000|s=int64:4001"},
 			pgSays: "4 rows, w=10000"},
 		// #776's own headline shape, and the DEFERRAL under it. The wrapped
 		// window inside a DERIVED TABLE, read through a bare forward of its
@@ -164,16 +170,16 @@ func wwslCells() []wwslCell {
 			sql: `SELECT x.id AS zid, x.w AS zw, x.plain + 1 AS s ` +
 				`FROM (SELECT id, plain, SUM(plain) OVER () + 0 AS w FROM wintab0) x ORDER BY x.id`,
 			want: []string{
-				"zid=int64:1|zw=float:10000|s=int64:1001", "zid=int64:2|zw=float:10000|s=int64:2001",
-				"zid=int64:3|zw=float:10000|s=int64:3001", "zid=int64:4|zw=float:10000|s=int64:4001"},
+				"zid=int64:1|zw=10000|s=int64:1001", "zid=int64:2|zw=10000|s=int64:2001",
+				"zid=int64:3|zw=10000|s=int64:3001", "zid=int64:4|zw=10000|s=int64:4001"},
 			wantUnreach: 1,
 			pgSays:      "4 rows — [zid|zw|s], which is what #776 asked for"},
 		{name: "two_derived_tables_over_one_wrapped_window_routes",
 			sql: `SELECT z.id AS zid, z.w AS zw, z.s AS s FROM (SELECT x.id, x.w, x.plain + 1 AS s ` +
 				`FROM (SELECT id, plain, SUM(plain) OVER () + 0 AS w FROM wintab0) x) z ORDER BY z.id`,
 			want: []string{
-				"zid=int64:1|zw=float:10000|s=int64:1001", "zid=int64:2|zw=float:10000|s=int64:2001",
-				"zid=int64:3|zw=float:10000|s=int64:3001", "zid=int64:4|zw=float:10000|s=int64:4001"},
+				"zid=int64:1|zw=10000|s=int64:1001", "zid=int64:2|zw=10000|s=int64:2001",
+				"zid=int64:3|zw=10000|s=int64:3001", "zid=int64:4|zw=10000|s=int64:4001"},
 			wantUnreach: 1,
 			pgSays:      "the same 4 rows"},
 		// Controls, both right before this change and required to stay right.
@@ -184,8 +190,8 @@ func wwslCells() []wwslCell {
 		{name: "ctl_unwrapped_window_beside_expression",
 			sql: `SELECT id, SUM(plain) OVER () AS w, plain + 1 AS s FROM wintab0 ORDER BY id`,
 			want: []string{
-				"id=int64:1|w=float:10000|s=int64:1001", "id=int64:2|w=float:10000|s=int64:2001",
-				"id=int64:3|w=float:10000|s=int64:3001", "id=int64:4|w=float:10000|s=int64:4001"},
+				"id=int64:1|w=10000|s=int64:1001", "id=int64:2|w=10000|s=int64:2001",
+				"id=int64:3|w=10000|s=int64:3001", "id=int64:4|w=10000|s=int64:4001"},
 			pgSays: "4 rows"},
 		{name: "ctl_no_window_at_all",
 			sql: `SELECT id, plain + 1 AS s FROM wintab0 ORDER BY id`,
@@ -196,8 +202,8 @@ func wwslCells() []wwslCell {
 		{name: "ctl_wrapped_window_alone",
 			sql: `SELECT id, SUM(plain) OVER () + 0 AS w FROM wintab0 ORDER BY id`,
 			want: []string{
-				"id=int64:1|w=float:10000", "id=int64:2|w=float:10000",
-				"id=int64:3|w=float:10000", "id=int64:4|w=float:10000"},
+				"id=int64:1|w=10000", "id=int64:2|w=10000",
+				"id=int64:3|w=10000", "id=int64:4|w=10000"},
 			pgSays: "4 rows — nothing to attach, and nothing attached"},
 	}
 }

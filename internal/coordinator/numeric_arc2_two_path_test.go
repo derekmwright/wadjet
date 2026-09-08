@@ -313,6 +313,30 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 				"k=int32:0|s=9232379236109516801|a=3077459745369838933.6667|c=int64:3",
 				"k=int32:1|s=9214364837600034815|a=2303591209400008703.7500|c=int64:4",
 			}},
+		// #987 — the WINDOWED spelling of the four cells above, on the same
+		// five arms and over the same rows. It was float64 until this arc:
+		// the type was wrong AND, because a float sum depends on the order
+		// its rows arrive in, the digits were wrong in a way that could
+		// differ between two runs of the same query on the same data. Every
+		// `want` here is byte-identical to its grouped twin, which is the
+		// assertion — one question, one answer, whichever way it is written.
+		{"#987", "sum_of_int64_over_a_window_is_numeric",
+			`SELECT SUM(b) OVER () AS s FROM bigsum ORDER BY 1 LIMIT 1`,
+			[]string{"s=18446744073709551616"}},
+		{"#987", "avg_of_int64_over_a_window_is_exact",
+			`SELECT AVG(b) OVER () AS a FROM bigsum ORDER BY 1 LIMIT 1`,
+			[]string{"a=2635249153387078802.2857"}},
+		{"#987", "sum_of_int32_over_a_window_is_bigint",
+			`SELECT SUM(w) OVER () AS s FROM i32wide ORDER BY 1 LIMIT 1`,
+			[]string{"s=int64:6000000000"}},
+		{"#987", "sum_and_avg_over_a_partitioned_window_past_int64",
+			`SELECT g AS k, SUM(b) OVER (PARTITION BY g) AS s, AVG(b) OVER (PARTITION BY g) AS a ` +
+				`FROM bigsum ORDER BY k, s LIMIT 2`,
+			[]string{
+				"k=int32:0|s=9232379236109516801|a=3077459745369838933.6667",
+				"k=int32:0|s=9232379236109516801|a=3077459745369838933.6667",
+			}},
+
 		// EVERY SPELLING of the same sum, because the carrier is not the same
 		// for all of them and the divergence was SILENT (review round 2 F4).
 		//

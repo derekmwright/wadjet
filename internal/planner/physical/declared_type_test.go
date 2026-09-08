@@ -473,7 +473,14 @@ func TestWindowSpecOutputType(t *testing.T) {
 		{"percent_rank", win(scan(nation)), "percent_rank", "", parquet.TypeFloat64},
 		{"cume_dist", win(scan(nation)), "cume_dist", "", parquet.TypeFloat64},
 		{"count", win(scan(nation)), "count", "n_name", parquet.TypeInt64},
-		{"sum finalizes to float64 whatever it summed", win(scan(nation)), "sum", "n_nationkey", parquet.TypeFloat64},
+		// SUM/AVG answer their ACCUMULATOR's type, from the one table the
+		// grouped aggregate reads (exec.IntegerAccOutputType): `sum(int4)`
+		// is bigint, `avg(int4)` numeric, and a type the table does not name
+		// keeps the name list's float64 (#987).
+		{"sum over an int4 is bigint", win(scan(nation)), "sum", "n_nationkey", parquet.TypeInt64},
+		{"avg over an int4 is numeric", win(scan(nation)), "avg", "n_nationkey", parquet.TypeDecimal},
+		{"sum over a TIMESTAMP keeps float64", win(scan(nation)), "sum", "n_seen_at", parquet.TypeFloat64},
+		{"sum over a DATE keeps float64", win(scan(nation)), "sum", "n_founded", parquet.TypeFloat64},
 
 		// MIN/MAX resolve from the input column since #361, across the
 		// compareAny-vetted types; #345 had left them on the name list.

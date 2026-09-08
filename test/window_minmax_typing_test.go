@@ -99,11 +99,12 @@ func TestWindowMinMaxOverTypedColumns(t *testing.T) {
 			 FROM w ORDER BY k`,
 			[]any{4.5, 4.5, 4.5, 4.5}},
 
-		// ---- The aggregate window functions that finalize to a fixed
-		// type must keep their name-list answer. ----
-		{"sum over an INT32 column stays float64",
+		// ---- The aggregate window functions. COUNT finalizes to a fixed
+		// type; SUM/AVG answer their ACCUMULATOR's, which for an integer
+		// input is PostgreSQL's own `sum(int4) -> bigint` since #987. ----
+		{"sum over an INT32 column is bigint",
 			"SELECT SUM(i32) OVER (ORDER BY k) AS x FROM w ORDER BY k",
-			[]any{10.0, 30.0, 60.0, 100.0}},
+			[]any{int64(10), int64(30), int64(60), int64(100)}},
 		{"count over an INT32 column stays int64",
 			"SELECT COUNT(i32) OVER (ORDER BY k) AS x FROM w ORDER BY k",
 			[]any{int64(1), int64(2), int64(3), int64(4)}},

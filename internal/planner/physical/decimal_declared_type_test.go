@@ -349,10 +349,11 @@ func TestWindowSpecOutputTypeResolvesDecimal(t *testing.T) {
 		// An unconstrained DECIMAL declines, as it does for a projection.
 		{"an unconstrained DECIMAL declines", "min", "nops", expr.Decl(parquet.TypeFloat64)},
 		{"sum over an unconstrained DECIMAL declines", "sum", "nops", expr.Decl(parquet.TypeFloat64)},
-		// An INT column keeps the float64 the name list answers. PostgreSQL
-		// says bigint/numeric there, and the GROUPED aggregate answers
-		// float64 too — the two move together or not at all.
-		{"sum over an int stays float64", "sum", "n", expr.Decl(parquet.TypeFloat64)},
+		// An INT column answers PostgreSQL's own result type, which is what
+		// the GROUPED aggregate answers: the two move together, from one
+		// table (exec.IntegerAccOutputType, #987).
+		{"sum over an int8 is numeric", "sum", "n", expr.DeclDecimal(38, 0)},
+		{"avg over an int8 is numeric", "avg", "n", expr.DeclDecimal(38, 4)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := windowSpecOutputType(win, logical.WindowExpr{Func: tc.fn, InputCol: tc.input, OutputCol: "w"})

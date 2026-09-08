@@ -224,17 +224,17 @@ func TestF1AWindowKeyGuardReadsProvenanceNotSpelling(t *testing.T) {
 		{
 			name: "745 PARTITION BY a STORED __winkey_1",
 			sql:  "SELECT id, SUM(id) OVER (PARTITION BY __winkey_1) AS w FROM oldtab ORDER BY id",
-			want: "cols=[id:INT64 w:FLOAT64] rows=4 | 1,1 | 2,2 | 3,3 | 4,4",
+			want: "cols=[id:INT64 w:DECIMAL(38,0)] rows=4 | 1,1 | 2,2 | 3,3 | 4,4",
 		},
 		{
 			name: "745 control: PARTITION BY an ordinary stored column",
 			sql:  "SELECT id, SUM(id) OVER (PARTITION BY plain) AS w FROM oldtab ORDER BY id",
-			want: "cols=[id:INT64 w:FLOAT64] rows=4 | 1,1 | 2,2 | 3,3 | 4,4",
+			want: "cols=[id:INT64 w:DECIMAL(38,0)] rows=4 | 1,1 | 2,2 | 3,3 | 4,4",
 		},
 		{
 			name: "745 control: a key the FRAGMENT really materializes still answers",
 			sql:  "SELECT id, SUM(id) OVER (PARTITION BY id % 2) AS w FROM oldtab ORDER BY id",
-			want: "cols=[id:INT64 w:FLOAT64] rows=4 | 1,4 | 2,6 | 3,4 | 4,6",
+			want: "cols=[id:INT64 w:DECIMAL(38,0)] rows=4 | 1,4 | 2,6 | 3,4 | 4,6",
 		},
 		{
 			name: "745 control: the same stored column as a GROUP BY key",

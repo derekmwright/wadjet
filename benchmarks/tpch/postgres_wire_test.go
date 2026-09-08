@@ -806,6 +806,23 @@ func wireCorpus() []wireCase {
 					"alternative. Same number, exact on both sides to the digits each keeps, agreeing to " +
 					"min(scale): ADR-0012 item 9's class",
 			}},
+		// The WINDOWED spelling of the entry above, at the wire (#987). It is
+		// the same question and it owes the same OIDs: `sum(int4) over ()` is
+		// bigint (20) and `avg(int4) over ()` numeric (1700) on the live
+		// server, and wadjet declared 701 for both until the window operator
+		// took the grouped spelling's exact accumulator. A value oracle
+		// cannot see this — a float64 total of small integers renders the
+		// same digits as a bigint one, which is why the divergence survived
+		// every value corpus in the tree.
+		{name: "SumAvgOverIntegerWindowed",
+			sql: `SELECT SUM(n_regionkey) OVER () AS s, AVG(n_regionkey) OVER () AS a ` +
+				`FROM nation ORDER BY 1 LIMIT 1`,
+			pins: map[string]string{
+				wirePropFloatRender: "same AVG SCALE as SumAvgOverInteger above: PostgreSQL's " +
+					"magnitude-dependent numeric division scale against wadjet's fixed " +
+					"batch.AvgScale(0) = 4. Same number, exact on both sides to the digits each " +
+					"keeps (ADR-0024 item 2's explicitly chosen rule)",
+			}},
 		// Integer arithmetic inside a CASE arm, at the wire. Both engines
 		// answer the same digits here and the OID underneath them said
 		// float8 (701) where PostgreSQL says an integer — a driver handing

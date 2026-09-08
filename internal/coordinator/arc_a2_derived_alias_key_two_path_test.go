@@ -114,29 +114,35 @@ func a2AliasKeyCells() []a2AliasKeyCell {
 		// The FILED shape — a plain renamed alias — is FIXED and the census
 		// confirms it; the residual is the computed one, which nothing in the
 		// tree named until this file.
+		//
+		// `s` is a bare NUMERIC here rather than the `float:` box these cells
+		// carried before #987: `SUM(v) OVER (…)` over an int8 column is
+		// numeric, which is what PostgreSQL declares and what the GROUPED
+		// spelling already answered. The NUMBERS are unchanged — these cells
+		// are about the KEY the window partitions by, not about its carrier.
 		{issue: "#658", name: "window_partition_by_computed_alias",
 			sql: `SELECT z.id, z.gk, SUM(z.v) OVER (PARTITION BY z.gk) AS s ` +
 				`FROM (SELECT id, g*2 AS gk, id AS v FROM typemx WHERE id < 6) z ORDER BY z.id`,
 			want: []string{
-				"id=int64:0|gk=int64:0|s=float:0", "id=int64:1|gk=int64:2|s=float:1",
-				"id=int64:2|gk=int64:4|s=float:2", "id=int64:3|gk=int64:6|s=float:3",
-				"id=int64:4|gk=int64:8|s=float:4", "id=int64:5|gk=int64:10|s=float:5"},
+				"id=int64:0|gk=int64:0|s=0", "id=int64:1|gk=int64:2|s=1",
+				"id=int64:2|gk=int64:4|s=2", "id=int64:3|gk=int64:6|s=3",
+				"id=int64:4|gk=int64:8|s=4", "id=int64:5|gk=int64:10|s=5"},
 			pgSays: "6 rows, each its own partition"},
 		{issue: "#658", name: "window_order_by_computed_alias",
 			sql: `SELECT z.id, z.gk, SUM(z.v) OVER (ORDER BY z.gk) AS s ` +
 				`FROM (SELECT id, g*2 AS gk, id AS v FROM typemx WHERE id < 6) z ORDER BY z.id`,
 			want: []string{
-				"id=int64:0|gk=int64:0|s=float:0", "id=int64:1|gk=int64:2|s=float:1",
-				"id=int64:2|gk=int64:4|s=float:3", "id=int64:3|gk=int64:6|s=float:6",
-				"id=int64:4|gk=int64:8|s=float:10", "id=int64:5|gk=int64:10|s=float:15"},
+				"id=int64:0|gk=int64:0|s=0", "id=int64:1|gk=int64:2|s=1",
+				"id=int64:2|gk=int64:4|s=3", "id=int64:3|gk=int64:6|s=6",
+				"id=int64:4|gk=int64:8|s=10", "id=int64:5|gk=int64:10|s=15"},
 			pgSays: "6 rows, running total"},
 		{issue: "#658", name: "window_cte_spelling",
 			sql: `WITH c AS (SELECT id, g*2 AS gk, id AS v FROM typemx WHERE id < 6) ` +
 				`SELECT c.id, c.gk, SUM(c.v) OVER (PARTITION BY c.gk) AS s FROM c ORDER BY c.id`,
 			want: []string{
-				"id=int64:0|gk=int64:0|s=float:0", "id=int64:1|gk=int64:2|s=float:1",
-				"id=int64:2|gk=int64:4|s=float:2", "id=int64:3|gk=int64:6|s=float:3",
-				"id=int64:4|gk=int64:8|s=float:4", "id=int64:5|gk=int64:10|s=float:5"},
+				"id=int64:0|gk=int64:0|s=0", "id=int64:1|gk=int64:2|s=1",
+				"id=int64:2|gk=int64:4|s=2", "id=int64:3|gk=int64:6|s=3",
+				"id=int64:4|gk=int64:8|s=4", "id=int64:5|gk=int64:10|s=5"},
 			pgSays: "6 rows, each its own partition"},
 		// The alias that SHADOWS a base column, which is what
 		// `materializeAliasColumns`' collision branch is really about.
@@ -156,15 +162,15 @@ func a2AliasKeyCells() []a2AliasKeyCell {
 			sql: `SELECT z.id, SUM(z.v) OVER (PARTITION BY z.g) AS s ` +
 				`FROM (SELECT id, g*0 AS g, id AS v FROM typemx WHERE id<6) z ORDER BY z.id`,
 			want: []string{
-				"id=int64:0|s=float:15", "id=int64:1|s=float:15", "id=int64:2|s=float:15",
-				"id=int64:3|s=float:15", "id=int64:4|s=float:15", "id=int64:5|s=float:15"},
+				"id=int64:0|s=15", "id=int64:1|s=15", "id=int64:2|s=15",
+				"id=int64:3|s=15", "id=int64:4|s=15", "id=int64:5|s=15"},
 			pgSays: "6 rows, s=15 on each — ONE partition, because g*0 is 0 for every row"},
 		{issue: "#658", name: "window_order_by_an_alias_that_shadows_a_base_column",
 			sql: `SELECT z.id, SUM(z.v) OVER (ORDER BY z.g) AS s ` +
 				`FROM (SELECT id, g*0 AS g, id AS v FROM typemx WHERE id<6) z ORDER BY z.id`,
 			want: []string{
-				"id=int64:0|s=float:15", "id=int64:1|s=float:15", "id=int64:2|s=float:15",
-				"id=int64:3|s=float:15", "id=int64:4|s=float:15", "id=int64:5|s=float:15"},
+				"id=int64:0|s=15", "id=int64:1|s=15", "id=int64:2|s=15",
+				"id=int64:3|s=15", "id=int64:4|s=15", "id=int64:5|s=15"},
 			pgSays: "6 rows, s=15 on each — one peer group, so the running total is the total"},
 		// The other side of that boundary: the SAME query with the alias NOT
 		// shadowing anything. It was right before and must stay right, and it
@@ -174,8 +180,8 @@ func a2AliasKeyCells() []a2AliasKeyCell {
 			sql: `SELECT z.id, SUM(z.v) OVER (PARTITION BY z.gk) AS s ` +
 				`FROM (SELECT id, g*0 AS gk, id AS v FROM typemx WHERE id<6) z ORDER BY z.id`,
 			want: []string{
-				"id=int64:0|s=float:15", "id=int64:1|s=float:15", "id=int64:2|s=float:15",
-				"id=int64:3|s=float:15", "id=int64:4|s=float:15", "id=int64:5|s=float:15"},
+				"id=int64:0|s=15", "id=int64:1|s=15", "id=int64:2|s=15",
+				"id=int64:3|s=15", "id=int64:4|s=15", "id=int64:5|s=15"},
 			pgSays: "the same 6 rows"},
 		// THE DECLINE PATH. `materializeAliasColumns` refuses a producer that
 		// already carries a projection — `materializeSortKey`'s own rule: those
@@ -201,9 +207,9 @@ func a2AliasKeyCells() []a2AliasKeyCell {
 			sql: `SELECT z.id, z.gk, SUM(z.v) OVER (PARTITION BY z.gk) AS s ` +
 				`FROM (SELECT id, g AS gk, id AS v FROM typemx WHERE id < 6) z ORDER BY z.id`,
 			want: []string{
-				"id=int64:0|gk=int32:0|s=float:0", "id=int64:1|gk=int32:1|s=float:1",
-				"id=int64:2|gk=int32:2|s=float:2", "id=int64:3|gk=int32:3|s=float:3",
-				"id=int64:4|gk=int32:4|s=float:4", "id=int64:5|gk=int32:5|s=float:5"},
+				"id=int64:0|gk=int32:0|s=0", "id=int64:1|gk=int32:1|s=1",
+				"id=int64:2|gk=int32:2|s=2", "id=int64:3|gk=int32:3|s=3",
+				"id=int64:4|gk=int32:4|s=4", "id=int64:5|gk=int32:5|s=5"},
 			pgSays: "6 rows — the FILED #658 shape, fixed and gated here"},
 	}
 }

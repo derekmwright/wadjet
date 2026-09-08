@@ -696,19 +696,19 @@ func arcD5LateralCells() []arcD5Cell {
 		// column set (ADR-0026 §3c), so all four arms answer PostgreSQL now.
 		// The `wantErrLikeDAG` pin is deleted as the proof.
 		//
-		// The VALUE is PostgreSQL's; the TYPE is not. `SUM` over a BIGINT is
-		// `numeric` in PostgreSQL and float HERE — while the very same sum
-		// over the very same column, spelled as a GROUP BY aggregate rather
-		// than a window, now comes back DECIMAL and agrees (see
-		// `lateral_count_default_reaches_an_aggregate_argument` above). One
-		// number, two spellings, two boxes: that is ADR-0024's rung, not this
-		// repair's doing, and it has no lateral in its own repro.
+		// The VALUE is PostgreSQL's and so, since #987, is the TYPE. This cell
+		// used to read `running=float:2`: `SUM` over a BIGINT is `numeric` in
+		// PostgreSQL and was float HERE, while the very same sum over the very
+		// same column spelled as a GROUP BY aggregate came back DECIMAL (see
+		// `lateral_count_default_reaches_an_aggregate_argument` above) — one
+		// number, two spellings, two boxes. The window operator now takes the
+		// grouped spelling's exact accumulator, so the two agree.
 		{issue: "#767", name: "window_over_the_default_answers_on_every_arm",
 			sql: `SELECT o.customer AS c, SUM(s.n) OVER (ORDER BY o.customer) AS running ` +
 				`FROM lat_ord o ` + lat + `ON true ORDER BY 1`,
-			want: []string{"c=Alice|running=float:2", "c=Bob|running=float:4",
-				"c=Carol|running=float:4"},
-			pgSays: "2, 4, 4 as NUMERIC — the values agree, the box does not (ADR-0024)"},
+			want: []string{"c=Alice|running=2", "c=Bob|running=4",
+				"c=Carol|running=4"},
+			pgSays: "2, 4, 4 as NUMERIC — and NUMERIC is what both spellings answer now"},
 
 		// The control that says the decline is CONDITIONAL on null-extension
 		// and not on "any join after the lateral": a LEFT join cannot null-
