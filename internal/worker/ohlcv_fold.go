@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -34,12 +35,16 @@ const ohlcvStatePrefix = exec.OhlcvStateColumnPrefix
 // the stage above them would re-aggregate finished bars — which is a MAX over
 // two ROWs, the defect the decomposition exists to remove.
 //
-// It takes NO declaration from the plan: the encoded state carries the ROW it
-// was COMPUTED for, in its own header. The planner cannot always supply one —
-// it has no catalog column to walk for a COMPUTED argument, and
-// `ohlcv(ts, price*2, volume)` is exactly that — so a fold that depended on
-// the spec answered in process and failed loud on the DAG.
-func applyOhlcvFold(batches []*batch.RecordBatch) ([]*batch.RecordBatch, error) {
+// The declaration comes from the PLAN — `distributed.AggSpec.OutputFields`,
+// derived once by `physical.aggOhlcvOutputFields` from the input columns'
+// declared types, for a bare argument and a COMPUTED one alike. The encoded
+// state's own header is the fallback, for a spec that carried none.
+//
+// Neither is invented. A fold that reached this point with no declaration used
+// to substitute FLOAT64 for every field, which is how the same statement
+// declared DECIMAL(18,4) against a standalone server and FLOAT64 against a
+// coordinator — OID 1700 against 701 in the RowDescription (#965 round 2, B1).
+func applyOhlcvFold(batches []*batch.RecordBatch, aggs []distributed.AggSpec) ([]*batch.RecordBatch, error) {
 	if len(batches) == 0 {
 		return batches, nil
 	}
@@ -47,15 +52,30 @@ func applyOhlcvFold(batches []*batch.RecordBatch) ([]*batch.RecordBatch, error) 
 	if len(cols) == 0 {
 		return batches, nil
 	}
+	declared := ohlcvFieldsBySpec(aggs)
 	out := make([]*batch.RecordBatch, len(batches))
 	for i, b := range batches {
-		fb, err := foldOneOhlcvBatch(b, cols)
+		fb, err := foldOneOhlcvBatch(b, cols, declared)
 		if err != nil {
 			return nil, err
 		}
 		out[i] = fb
 	}
 	return out, nil
+}
+
+// ohlcvFieldsBySpec indexes the PLAN's declaration by the ORIGINAL output
+// column name, which is what the synthetic's suffix is.
+func ohlcvFieldsBySpec(aggs []distributed.AggSpec) map[string][]parquet.Column {
+	out := map[string][]parquet.Column{}
+	for _, a := range aggs {
+		name, ok := exec.OhlcvStateOutput(a.OutputCol)
+		if !ok || len(a.OutputFields) == 0 {
+			continue
+		}
+		out[name] = aggSpecOutputFields(a)
+	}
+	return out
 }
 
 // ohlcvFoldCol is one bar state column to finish.
@@ -75,7 +95,8 @@ func findOhlcvFoldCols(schema []parquet.Column) []ohlcvFoldCol {
 	return out
 }
 
-func foldOneOhlcvBatch(in *batch.RecordBatch, cols []ohlcvFoldCol) (*batch.RecordBatch, error) {
+func foldOneOhlcvBatch(in *batch.RecordBatch, cols []ohlcvFoldCol,
+	declared map[string][]parquet.Column) (*batch.RecordBatch, error) {
 	if in == nil {
 		return nil, nil
 	}
@@ -83,15 +104,10 @@ func foldOneOhlcvBatch(in *batch.RecordBatch, cols []ohlcvFoldCol) (*batch.Recor
 	for _, c := range cols {
 		byIdx[c.stateIdx] = c
 	}
-	// The output ROW's shape comes from the states themselves, so the schema
-	// is decided by reading the first one that is not NULL. A column of only
-	// NULL bars declares the bar's field NAMES with no types, which is what a
-	// zero-row group can honestly say and what SetValue never has to write
-	// into.
 	newSchema := make([]parquet.Column, len(in.Schema))
 	copy(newSchema, in.Schema)
 	for _, c := range cols {
-		f, err := ohlcvFieldsInColumn(in.Columns[c.stateIdx], in.Len)
+		f, err := ohlcvFoldFields(declared[c.outputCol], in.Columns[c.stateIdx], in.Len)
 		if err != nil {
 			return nil, fmt.Errorf("ohlcv fold %q: %w", c.outputCol, err)
 		}
@@ -116,12 +132,22 @@ func foldOneOhlcvBatch(in *batch.RecordBatch, cols []ohlcvFoldCol) (*batch.Recor
 	return out, nil
 }
 
-// ohlcvFieldsInColumn reads the declared ROW out of the first state in the
-// column that carries one. Every state in one column came from one aggregate
-// and so declares the same thing; a column of NULLs declares the names only.
-func ohlcvFieldsInColumn(stateCol *batch.Vector, n int) ([]parquet.Column, error) {
+// ohlcvFoldFields is the ROW this column is folded into: the PLAN's
+// declaration when the spec carried one, and otherwise the declaration the
+// first non-empty state carries in its own header.
+//
+// Nothing is invented. The previous fallback — FLOAT64 for every field when
+// every state in the column was empty — was reached exactly for a zero-row
+// result, which is where a wrong declaration is INVISIBLE in the values and
+// fully visible on the wire: the same statement sent OID 1700 from a
+// standalone server and 701 from a coordinator (#965 round 2, B1). A stage
+// that has neither source fails loudly instead.
+func ohlcvFoldFields(declared []parquet.Column, stateCol *batch.Vector, n int) ([]parquet.Column, error) {
 	if stateCol.Type != parquet.TypeString {
 		return nil, fmt.Errorf("expected an encoded bar state string, got %v", stateCol.Type)
+	}
+	if len(declared) == len(exec.OhlcvFieldNames) {
+		return declared, nil
 	}
 	for i := 0; i < n; i++ {
 		if stateCol.Nulls.IsNullFast(i) {
@@ -135,16 +161,8 @@ func ohlcvFieldsInColumn(stateCol *batch.Vector, n int) ([]parquet.Column, error
 			return f, nil
 		}
 	}
-	// Every state in this column is NULL or empty — a stage whose tasks all
-	// filtered everything away. The bar's field NAMES are what it can
-	// honestly declare; nothing will be written into the children, and the
-	// alternative (guessing types) is what the state's own header exists to
-	// stop. This is the identity-row shape #685 records for a DECIMAL.
-	out := make([]parquet.Column, len(exec.OhlcvFieldNames))
-	for i, name := range exec.OhlcvFieldNames {
-		out[i] = parquet.Column{Name: name, Type: parquet.TypeFloat64, Nullable: true}
-	}
-	return out, nil
+	return nil, fmt.Errorf("the bar's declared fields reached neither the spec " +
+		"(AggSpec.OutputFields) nor any state in this column, so there is no ROW to fold into")
 }
 
 // writeOhlcvColumn decodes each row's merged state and writes the finished

@@ -2172,9 +2172,9 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, task distributed.Ta
 				}
 				// And __ohlcv_state#X into the bar it encodes (#965,
 				// ADR-0035). It takes the spec list because the bar's
-				// declared ROW fields travel there and nowhere else out
-				// here.
-				folded, ferr = applyOhlcvFold(folded)
+				// declared ROW is a PLAN-time decision that travels there,
+				// like every other declared type.
+				folded, ferr = applyOhlcvFold(folded, spec.Aggregates)
 				if ferr != nil {
 					return nil, ferr
 				}

@@ -12049,6 +12049,34 @@ func inputColTypes(n *logical.Node) map[string]parquet.TypeID {
 // dropped rather than picking a side, exactly as the type walk does — a field
 // path resolved against the wrong side's ROW is the same silent-wrong-column
 // failure, one level down.
+// aggregateProjectionFields is the ROW a projected AGGREGATE declares, when it
+// declares one. Today that is the bar and nothing else: every other aggregate
+// answers a scalar or hands back a value its INPUT column already declared,
+// and the latter reaches this walk through the column below it.
+//
+// It goes through aggOhlcvOutputFields, which is the same function
+// AggSpec.OutputFields and the operator's own schema come from — the ONE
+// derivation ADR-0035 item 5 names. A second one here is how a bar comes to be
+// declared one thing by the projection above it and another by the stage that
+// produces it.
+func aggregateProjectionFields(project *logical.Node, p logical.Projection) ([]parquet.Column, bool) {
+	agg := logical.AggregateBelowProject(project)
+	if agg == nil {
+		return nil, false
+	}
+	want := strings.ToLower(cleanExpr(p.Alias))
+	if want == "" {
+		want = strings.ToLower(cleanExpr(p.Column))
+	}
+	for _, a := range agg.AggExprs {
+		if strings.ToLower(cleanExpr(a.OutputCol)) != want {
+			continue
+		}
+		return aggOhlcvOutputFields(agg, a)
+	}
+	return nil, false
+}
+
 func inputColFields(n *logical.Node) map[string][]parquet.Column {
 	if n == nil {
 		return nil
@@ -12084,7 +12112,37 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 		}
 		var out map[string][]parquet.Column
 		for _, p := range n.Projections {
-			if p.IsAgg || p.Column == "" {
+			if p.IsAgg {
+				// An aggregate output is a NEW name, and its declaration
+				// comes from the aggregate rather than from the columns
+				// below. Forwarding `below`'s entry would be the defect this
+				// arm's `return nil` was avoiding — `SUM(x) AS c_row` must
+				// not inherit c_row's field list — but NIL-ing the whole map
+				// also throws away every OTHER name in it, and it left a
+				// ROW-valued aggregate with no plan-time declaration at all.
+				//
+				// So: publish what the aggregate itself declares (a bar's
+				// ROW, #965), and SHADOW the name otherwise, which is the
+				// precise statement of "the fields below no longer describe
+				// this name".
+				name := strings.ToLower(cleanExpr(p.Alias))
+				if name == "" {
+					name = strings.ToLower(cleanExpr(p.Column))
+				}
+				if name == "" {
+					return nil
+				}
+				if out == nil {
+					out = make(map[string][]parquet.Column)
+				}
+				if f, ok := aggregateProjectionFields(n, p); ok {
+					out[name] = f
+				} else {
+					out[name] = nil
+				}
+				continue
+			}
+			if p.Column == "" {
 				return nil
 			}
 			f, ok := below[strings.ToLower(cleanExpr(p.Column))]
@@ -12099,6 +12157,25 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 				out = make(map[string][]parquet.Column)
 			}
 			out[strings.ToLower(cleanExpr(name))] = f
+		}
+		return out
+	case logical.NodeAggregate:
+		// An aggregate publishes its OWN outputs and forwards nothing: every
+		// name it emits is either a group KEY (whose fields come from the
+		// column below, and a container group key is a different question
+		// this walk has never answered) or an aggregate OUTPUT. Only the
+		// second kind can declare a ROW today — the bar — and it declares it
+		// through the one derivation ADR-0035 item 5 names.
+		var out map[string][]parquet.Column
+		for i := range n.AggExprs {
+			f, ok := aggOhlcvOutputFields(n, n.AggExprs[i])
+			if !ok {
+				continue
+			}
+			if out == nil {
+				out = make(map[string][]parquet.Column)
+			}
+			out[strings.ToLower(cleanExpr(n.AggExprs[i].OutputCol))] = f
 		}
 		return out
 	case logical.NodeJoin:
@@ -16875,10 +16952,25 @@ func aggOhlcvOutputFields(node *logical.Node, agg logical.AggExpr) ([]parquet.Co
 		}
 		return c, true
 	}
+	// The PRICE may be a COMPUTED argument, and the plan can type one: it is
+	// the same declaration aggSpecOutputType and aggSpecOutputDecimal take for
+	// every other aggregate over an expression (#867). Without it the bar had
+	// no plan-time declaration at all for `ohlcv(ts, price*2, volume)`, and a
+	// declaration the plan declines is one every consumer then invents
+	// differently — which is exactly how the DAG and the single path came to
+	// declare two things (#965 round 2, B1).
 	price, ok := col(agg.InputCol)
 	if !ok {
-		return nil, false
+		t, prec, scale, known := aggComputedInputExprDecl(node, agg)
+		if !known {
+			return nil, false
+		}
+		price = parquet.Column{Name: agg.InputCol, Type: t, Precision: prec, Scale: scale}
 	}
+	// The VOLUME must be a bare column: a computed one is refused on every arm
+	// (the pre-aggregate projection carries a reference and declines an
+	// expression, #713), so there is no shape where this declines and the
+	// query answers.
 	vol, ok := col(agg.InputCol3)
 	if !ok {
 		return nil, false
@@ -16993,6 +17085,31 @@ func aggComputedInputDecl(node *logical.Node, agg logical.AggExpr) (parquet.Type
 	}
 	return aggOutputFromInputDecl(agg.Func, agg.Distinct, d.ID, d.Precision, d.Scale,
 		aggInputIsWideInteger(agg.InputExpr, decls))
+}
+
+// aggComputedInputExprDecl is the declaration of the EXPRESSION an aggregate
+// computes over, as opposed to aggComputedInputDecl's declaration of what the
+// aggregate then ANSWERS. The two are the same walk and differ in one step:
+// this one stops before aggOutputFromInputDecl.
+//
+// The bar needs the input's own type because its ROW fields ARE its inputs'
+// types — `ohlcv(ts, price*2, volume)` declares open/high/low/close as
+// `price*2`'s DECIMAL(20,4), the way MIN of that expression would. Without it
+// the plan declined a computed bar entirely, and a declaration the plan
+// declines is one every consumer invents differently (#965 round 2, B1).
+func aggComputedInputExprDecl(node *logical.Node, agg logical.AggExpr) (parquet.TypeID, int, int, bool) {
+	if agg.InputExpr == nil || node == nil || len(node.Children) == 0 {
+		return 0, 0, 0, false
+	}
+	decls := inputColDecls(node.Children[0])
+	if len(decls.types) == 0 {
+		decls = emittedColDecls(node.Children[0])
+	}
+	d, c := nodeDeclaredType(agg.InputExpr, decls)
+	if c == expr.Undecided {
+		return 0, 0, 0, false
+	}
+	return d.ID, d.Precision, d.Scale, true
 }
 
 // aggComputedInputOutputType is aggComputedInputDecl's TypeID-only face.

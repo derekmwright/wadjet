@@ -300,6 +300,26 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 			if srcIdx < 0 {
 				if fc, ok := fieldPathColumn(in, projSourceName(proj)); ok {
 					fc.Name, fc.Nullable = proj.Name, true
+					// A DECIMAL(0,s) is not a type (ADR-0024, #685), and a
+					// field read out of a DECODED container is exactly where
+					// one comes from: a WSHF chunk carries a ROW child's
+					// SCALE and has no room for its PRECISION, so a field
+					// path over a container that crossed a stage boundary
+					// declares precision 0 while the same query in process
+					// declares the real one.
+					//
+					// The PLAN knows it — this projection's own declaration
+					// — so take it, and only for the one thing the batch
+					// could not carry: the types and the scales must already
+					// agree, so this fills a hole rather than overriding an
+					// answer. Everything else about a field path still comes
+					// from the parent's declaration, which is #568's rule and
+					// the reason this arm runs before the name lookups at all.
+					if fc.Type == parquet.TypeDecimal && fc.Precision == 0 &&
+						proj.Type == parquet.TypeDecimal && proj.Precision > 0 &&
+						proj.Scale == fc.Scale {
+						fc.Precision = proj.Precision
+					}
 					schema[i] = fc
 					continue
 				}

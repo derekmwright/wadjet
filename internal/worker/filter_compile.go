@@ -533,6 +533,21 @@ func buildSelectProjection(specs []distributed.ProjectSpec) (*exec.Project, erro
 				SourceCol:  src,
 				Expr:       exec.ColumnRef(src),
 			}
+			// The plan's declaration rides along even on a pass-through.
+			// exec.Project still types a pass-through from the INPUT column,
+			// which is right and is what makes a rename keep its source's
+			// type — but a FIELD PATH's input is a ROW child, and a ROW child
+			// that crossed a stage boundary lost its DECIMAL precision (a
+			// WSHF chunk carries a container child's scale and has no room
+			// for its precision). Then `(bar).open` declared DECIMAL(0,4) on
+			// the DAG where the same query declared DECIMAL(18,4) in process
+			// — OID-visible, and DECIMAL(0,s) is not a type at all
+			// (ADR-0024, #685). exec.Project fills that ONE hole from here
+			// and takes the input's answer for everything else.
+			if p.Type != nil {
+				pc.Type = parquet.TypeID(*p.Type)
+			}
+			pc.Precision, pc.Scale = p.Precision, p.Scale
 			// The planner's SLOT beats the name, and it is set exactly where
 			// the name is ambiguous: an aggregate publishing a group key and
 			// an aggregate output under one name (ADR-0026 section 3a, #785).
