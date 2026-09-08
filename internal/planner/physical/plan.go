@@ -7798,7 +7798,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				Column:               resolveSortKeyColumn(ob.Column, sortChild),
 				Desc:                 ob.Desc,
 				NullsLast:            resolveNullsLast(ob),
-				SlotPos:              sortKeySlotPosStage(ob, node),
+				SlotPos:              sortKeySlotPosStage(ob, node, (*stages)[preCount:]),
 				WrittenTerm:          strings.TrimSpace(ob.Column),
 				NamesAggregateOutput: sortTermNamesAggregateItem(ob.Column, sortChild),
 			}
@@ -13858,15 +13858,121 @@ func (a *aggPreProject) Close() error { return nil }
 // internal/coordinator/collide_two_path_test.go: one relation uses the
 // position, a join declines it and resolves by name, and both answer
 // PostgreSQL's order.
-func sortKeySlotPosStage(ob logical.OrderExpr, sortNode *logical.Node) int {
+func sortKeySlotPosStage(ob logical.OrderExpr, sortNode *logical.Node, produced []Stage) int {
 	pos := sortKeySlotPos(ob, sortNode)
 	if pos == 0 {
 		return 0
 	}
-	if subtreeJoinsRelations(sortNode) {
-		return 0
+	if !subtreeJoinsRelations(sortNode) {
+		return pos
 	}
-	return pos
+	// …unless the producer MATERIALIZED the select list, which is the one
+	// case where the stream and the select list are the same list (#1003).
+	if producerPublishesSelectList(produced, sortNode) {
+		return pos
+	}
+	return 0
+}
+
+// producerPublishesSelectList reports whether the stage that produces this
+// sort's input publishes the SELECT list as the ordered prefix of its own
+// output.
+//
+// It is the measurement the bound above otherwise has to guess at, and
+// declining to measure it is a silent wrong ORDER (#1003). Two output columns
+// may legally carry one name — `SELECT DISTINCT a.order_id AS amount,
+// b.amount … ORDER BY 1, 2 DESC` publishes `amount` twice — and once the
+// position is dropped the key is resolved by that name, which
+// `ColumnIndexFallback` answers with the FIRST match. BOTH keys then bound
+// column one, so the two DAG arms returned the rows sorted by the leading key
+// alone where PostgreSQL 17 and the single-process arms apply both. A total
+// order is not one of ADR-0013's nondeterminism classes.
+//
+// What makes the position usable here is not the producer's KIND but what it
+// PUBLISHES (ADR-0026 §8, K3's rule): the `final_aggregate` stage under that
+// query materializes `[a.order_id→amount, b.amount→amount, a.order_id,
+// b.amount]`, so the select list IS positions 1 and 2 of the stream. Where the
+// projection is NOT materialized — `SELECT clt1.c2, clt2.c1 FROM clt1, clt2
+// ORDER BY 2`, whose join stage carries no ProjectExprs — the check fails and
+// the key resolves by name exactly as before.
+//
+// The whole visible list is compared, name AND source expression, so a
+// producer that publishes the same names in another order, or narrows the
+// list, does not qualify.
+func producerPublishesSelectList(produced []Stage, sortNode *logical.Node) bool {
+	if len(produced) == 0 || sortNode == nil || len(sortNode.Children) == 0 {
+		return false
+	}
+	child := sortNode.Children[0]
+	if child == nil || child.Type != logical.NodeProject || logical.HasStarProjection(child) {
+		return false
+	}
+	visible := logical.VisibleProjections(child.Projections)
+	if len(visible) == 0 {
+		return false
+	}
+	specs := produced[len(produced)-1].ProjectExprs
+	if len(specs) < len(visible) {
+		return false
+	}
+	for i, pr := range visible {
+		src := cleanExpr(pr.Expr)
+		if src == "" {
+			src = pr.Column
+		}
+		if src == "" || !sameProjectionSource(specs[i].Expr, src) {
+			return false
+		}
+		// The SOURCE is the identity; the NAME is the check, and a
+		// projection has more than one legitimately — the resolution
+		// spelling every pass inside the planner binds by, and the
+		// PublishedName the client is told (ADR-0026 §2). The stage
+		// materializes whichever the output owes.
+		if !projectionAnswersToName(pr, specs[i].Name) {
+			return false
+		}
+	}
+	return true
+}
+
+// sameProjectionSource reports whether a stage spec's source expression and a
+// logical projection's name the SAME input column.
+//
+// They may differ by a QUALIFIER and by nothing else: an aggregate publishes a
+// group key under its stripped name (ADR-0026 §2) so the logical projection
+// reads `order_id`, while the stage spec keeps the written `a.order_id`. Where
+// both sides carry a qualifier they must agree on it, so two arms of a
+// self-join are never taken for one another.
+func sameProjectionSource(specExpr, projExpr string) bool {
+	a := plansql.NormalizeIdentRef(cleanExpr(specExpr))
+	b := plansql.NormalizeIdentRef(cleanExpr(projExpr))
+	if a == "" || b == "" {
+		return false
+	}
+	if strings.EqualFold(a, b) {
+		return true
+	}
+	ab, bb := blockBareName(a), blockBareName(b)
+	if !strings.EqualFold(ab, bb) {
+		return false
+	}
+	// Exactly one side was bare; two different qualifiers are two columns.
+	return a == ab || b == bb
+}
+
+// projectionAnswersToName reports whether name is one of the names this
+// projection legitimately publishes.
+func projectionAnswersToName(pr logical.Projection, name string) bool {
+	if name == "" {
+		return false
+	}
+	name = plansql.NormalizeIdentRef(name)
+	for _, cand := range []string{pr.PublishedName, pr.Alias, pr.Column, cleanExpr(pr.Expr)} {
+		if cand != "" && strings.EqualFold(plansql.NormalizeIdentRef(cand), name) {
+			return true
+		}
+	}
+	return false
 }
 
 // subtreeJoinsRelations reports whether a node's subtree combines two
