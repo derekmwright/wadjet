@@ -12,6 +12,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -536,10 +537,42 @@ func pmRigUpWith(t *testing.T, ctx context.Context, provider *auth.Provider) pmR
 			return pmFromRows(out.Columns, rows), nil
 		}
 	}
+	// The ninth door ASSERTS ITS OWN ENGAGEMENT. A door that silently stopped
+	// taking the fast path — a config rename, a threshold change, a planner
+	// change that pushes these statements over the budget — would be a second
+	// copy of `embedded/dag` still reporting nine green doors, which is the
+	// failure mode the door exists to prevent. Counted rather than asserted
+	// per cell, because not every cell reaches the router: a statement refused
+	// at authorization or at planning never gets a routing decision at all.
+	var fpCalls, fpEngaged atomic.Int64
+	fastPathRun := dagRun(dagFastPath)
 	doors = append(doors,
 		pmDoor{"embedded/dag", dagRun(dag)},
 		pmDoor{"embedded/dag-shuffled", dagRun(dagShuffled)},
-		pmDoor{"embedded/dag-fastpath", dagRun(dagFastPath)})
+		pmDoor{"embedded/dag-fastpath", func(t *testing.T, key, sql string) (pmResult, error) {
+			before := dagFastPath.LocalFastPathHits()
+			res, err := fastPathRun(t, key, sql)
+			fpCalls.Add(1)
+			if dagFastPath.LocalFastPathHits() > before {
+				fpEngaged.Add(1)
+			}
+			return res, err
+		}})
+	t.Cleanup(func() {
+		calls, engaged := fpCalls.Load(), fpEngaged.Load()
+		if calls == 0 {
+			return // this test never drove that door
+		}
+		if engaged == 0 {
+			t.Errorf("embedded/dag-fastpath ran %d statements and NOT ONE took the local fast "+
+				"path: the door is a duplicate of embedded/dag and gates nothing", calls)
+		}
+		if h := dag.LocalFastPathHits(); h != 0 {
+			t.Errorf("embedded/dag took the local fast path %d times; it is configured with "+
+				"LocalFastPathBytes: 0 and must always go through the DAG, or the two doors "+
+				"are one door", h)
+		}
+	})
 
 	// --- pgwire: the single-process door and the DAG door -----------------
 	pgSingle := pgwire.NewServer(single, pgwire.Config{AuthProvider: provider}, logger)
@@ -894,7 +927,8 @@ func pmCells() []pmCell {
 		// MEASURED with THESE cells, `WADJET_E7_CENSUS=1`, one tree per base
 		// (round-1 review §1.3; the nine-door figure measured here):
 		//
-		//   v0.18.60 (bb8635a4)   8 leaking cells over  2 shapes
+		//   v0.18.60 (bb8635a4)   8 leaking cells over  2 shapes on 8 doors
+		//                        10 over the same 2 with the fast-path door
 		//   v0.18.61 (a0539069)  52 leaking cells over 13 shapes on 8 doors
 		//                        65 over the same 13 with the fast-path door
 		//   tip                   0

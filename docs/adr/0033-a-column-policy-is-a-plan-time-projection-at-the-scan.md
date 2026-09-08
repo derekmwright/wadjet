@@ -503,7 +503,7 @@ cells (`WADJET_E7_CENSUS=1`, one tree per base):
 
 | tree | leaking cells / shapes |
 |---|---|
-| v0.18.60 `bb8635a4` | 8 / **2** (`SELECT *, id AS z`, `SELECT a.*, a.id AS z`) |
+| v0.18.60 `bb8635a4` | 8 / **2** on eight doors; **10 / 2** with the ninth (`SELECT *, id AS z`, `SELECT a.*, a.id AS z`, both of which leak on the fast path too) |
 | v0.18.61 `a0539069` | 52 / **13** on eight doors; **65 / 13** with the coordinator's default local fast path as a ninth door |
 | the fix | **0** |
 
