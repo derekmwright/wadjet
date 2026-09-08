@@ -209,6 +209,25 @@ int8, DECIMAL(9,2), DECIMAL(18,4) and DECIMAL(38,10) prices).
   planner's declaration runs out, and it is the cell that found all three of
   the bar's arm divergences — none of which was a wrong number, and every one
   of which was invisible to a census over bare columns.
+- **A VALUE census cannot see a declaration, so a state needs a second one.**
+  Every value cell of this arc was green while `(b).open` over a
+  DECIMAL(18,4) price declared DECIMAL(18,4) in process and DECIMAL(0,4) on the
+  DAG, and while an EMPTY input declared FLOAT64 there and DECIMAL(18,4) here —
+  OID 1700 against 701 to a client. A renderer shows a DECIMAL as its exact
+  text and cannot see `(p,s)` at all, and a unit table over the declaration
+  function has no plan and no arm. So the census is TWO: values on the arms,
+  and `(type, precision, scale)` at the END of every path, with rows AND over
+  an empty input, plus the OID and typmod through a client on both wire doors
+  (`TestTheBarsDeclaredTypeIsTheSameOnEveryArm`,
+  `TestTheBarDeclaresTheSameThingOnBothWireDoors`). The declaration is derived
+  ONCE, at plan time, from the input columns' declared types, and every
+  consumer READS it — the fold, the empty-input default and the wire included.
+- **A state that ships needs ONE fold step, not two faces of one.** The
+  encoded/encoded helper and the merge stage's own arm were separate copies of
+  the same six lines and had already drifted (one adopted an empty
+  destination's declared fields from the source and the other did not). That is
+  ADR-0023 item 8's seam shape in a merge law, where it is worse: two copies of
+  a merge that agree until one is changed.
 - **Until the decomposition exists, the function goes on
   `aggNeedsWholeInput`.** That list is the honest dispatch for a
   non-re-aggregatable answer, and the two-phase split over one is a silent
