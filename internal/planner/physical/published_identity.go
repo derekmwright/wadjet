@@ -66,6 +66,10 @@ func bindConsumersToPublishedIdentity(stages []Stage) {
 		respellConsumersOverProducerOutput(stages, idx, i)
 		respellUnionArmsOverProducerOutput(stages, idx, i, false)
 		respellSortKeysOverProducerOutput(stages, idx, i)
+		// After the re-spell, which decides WHICH NAME the key binds; this
+		// decides WHICH COLUMN OF THAT NAME, where the producer publishes it
+		// twice (#968). See sort_key_slots.go.
+		pinSortKeySlotsOverProducerOutput(stages, idx, i)
 	}
 }
 
