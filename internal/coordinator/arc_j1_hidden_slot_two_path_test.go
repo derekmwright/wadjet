@@ -354,8 +354,14 @@ func TestArcJ1AStarOverALateralPublishesPostgresColumns(t *testing.T) {
 			// projection as the stage's column list now, so the DAG publishes
 			// PostgreSQL's four columns instead of the scan's `order_id`
 			// beside them. The `wantDAG` that pinned the leak is deleted.
-			want: `amount,id,customer,total | 50,1,Alice,150 | 100,1,Alice,150 | ` +
-				`75,2,Bob,200 | 125,2,Bob,200`,
+			//
+			// The ORDER was still not PostgreSQL's — the lateral's column came
+			// FIRST — and that was `reorderJoins` swapping a manufactured
+			// lateral join's sides by estimated rows, a cost decision changing
+			// what `SELECT *` publishes. A dependent join is not reorderable
+			// (#1008, ADR-0026 §8e), so `pgSays` is now what every arm says.
+			want: `id,customer,total,amount | 1,Alice,150,50 | 1,Alice,150,100 | ` +
+				`2,Bob,200,75 | 2,Bob,200,125`,
 			pgSays: "(id, customer, total, amount) — four columns, the lateral's last"},
 		// Both CLOSED by arc K1 (#976): the binder HAS a catalog, so a derived
 		// block whose body is a star gets a real column list

@@ -489,28 +489,35 @@ func arcACells() []arcACell {
 			want: []string{
 				"c=Alice|a=float:50", "c=Alice|a=float:100",
 				"c=Bob|a=float:75", "c=Bob|a=float:125"}},
-		// THE BOUNDARY, and it now differs BY ARM. The key the decorrelation
-		// materializes is dropped by the join that made it (ADR-0026 §3c), so
-		// the single-process arms publish PostgreSQL's four columns — in a
-		// different ORDER, because a join emits its probe side first and this
-		// lateral is the probe. On the DAG the lateral's projection emits no
-		// stage of its own, so the stream carries the SCAN's names, the
-		// slot's alias never lands, and the source column rides out under its
-		// own name: five columns there. Recorded in ADR-0012 with the
-		// mechanism; the wantDAG below is what it answers.
+		// THE BOUNDARY. The key the decorrelation materializes is dropped by
+		// the join that made it (ADR-0026 §3c), so every arm publishes
+		// PostgreSQL's four columns.
 		//
 		// Before arc J1 this shape answered ZERO ROWS AND NO COLUMNS on every
-		// arm, so the move is catastrophically-wrong → right (single) and →
-		// right-plus-one-column (DAG).
+		// arm. Two things were still not PostgreSQL's until arc N1, and both
+		// had ONE cause — `reorderJoins` swapping a manufactured lateral
+		// join's sides by estimated rows (#1008, ADR-0026 §8e):
+		//
+		//   - the column ORDER put the lateral's `amount` FIRST, because a
+		//     join emits its probe side first and the swap made the lateral
+		//     the probe;
+		//   - the ROW order was `100, 50` for Alice and `125, 75` for Bob —
+		//     the second sort key `li.amount` DESCENDING — where PostgreSQL
+		//     answers 50, 100 and 75, 125. A wrong sequence under right
+		//     values, which is what no unordered comparison can see.
+		//
+		// Both were recorded here as PostgreSQL's answer and neither was.
+		// Measured on live postgres:17-alpine again at arc N1's tip: all four
+		// arms now answer exactly what PostgreSQL does.
 		{issue: "#767", name: "boundary_outer_star_sees_the_injected_key",
 			sql: `SELECT * FROM lat_ord o ` +
 				`JOIN LATERAL (SELECT amount FROM lat_item WHERE order_id = o.id) li ON true ` +
 				`ORDER BY o.customer, li.amount`,
 			want: []string{
-				"amount=float:100|id=int64:1|customer=Alice|total=float:150",
-				"amount=float:50|id=int64:1|customer=Alice|total=float:150",
-				"amount=float:125|id=int64:2|customer=Bob|total=float:200",
-				"amount=float:75|id=int64:2|customer=Bob|total=float:200"},
+				"id=int64:1|customer=Alice|total=float:150|amount=float:50",
+				"id=int64:1|customer=Alice|total=float:150|amount=float:100",
+				"id=int64:2|customer=Bob|total=float:200|amount=float:75",
+				"id=int64:2|customer=Bob|total=float:200|amount=float:125"},
 			// The DAG's `order_id` leak is CLOSED by arc K3 (#984): the
 			// lateral's block emits its own projection as the stage's column
 			// list, so every arm publishes the same four columns and the

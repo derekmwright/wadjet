@@ -253,30 +253,26 @@ func TestArcJ1APublishedKeyIsAUserColumn(t *testing.T) {
 		// kinds; wantRouted says the DAG arms reach it by routing.
 		wantInner, wantLeft string
 		wantRouted          bool
-		// pinInnerDAG, when set, is the DAG arms' rendering of the INNER
-		// spelling where it is NOT wantInner: a join emits its PROBE side
-		// first and the planner may make the lateral the probe, so the same
-		// columns arrive in a different ORDER (ADR-0012). The column SET and
-		// the values are PostgreSQL's, which is what this gate is about; a
-		// `SELECT *` has no ORDER BY over columns to make the sequence stable
-		// either way. The LEFT spelling has no such pin — it agrees exactly.
-		pinInnerDAG string
+		// The DAG arms used to render the INNER spelling in a DIFFERENT
+		// ORDER — the lateral's columns first — because `reorderJoins` swapped
+		// a manufactured lateral join's sides by estimated rows and a join
+		// emits its PROBE side first. Four `pinInnerDAG` values recorded it.
+		// A dependent join is not reorderable (#1008, ADR-0026 §8e), so every
+		// arm now renders PostgreSQL's order and the pins are SPENT.
 	}{
 		// THE CONTROL. One publish under the key's own name: the block's
 		// projection IS its aggregate's stream, so nothing is refused and the
 		// DAG runs it. This cell is why the refusal above can be trusted to be
 		// about the shape and not about laterals.
 		{name: "once-under-its-own-name", items: `order_id`,
-			wantInner: inner2, wantLeft: left2,
-			pinInnerDAG: `order_id,n,id,customer,total | 1,2,1,Alice,150 | 2,2,2,Bob,200`},
+			wantInner: inner2, wantLeft: left2},
 
 		// A RENAME the stream does not carry.
 		{name: "once-under-an-alias", items: `order_id AS oid`,
 			wantInner: `id,customer,total,oid,n | 1,Alice,150,1,2 | 2,Bob,200,2,2`,
 			wantLeft: `id,customer,total,oid,n | 1,Alice,150,1,2 | 2,Bob,200,2,2 | ` +
 				`3,Carol,0,NULL,NULL`,
-			wantRouted:  true,
-			pinInnerDAG: `oid,n,id,customer,total | 1,2,1,Alice,150 | 2,2,2,Bob,200`},
+			wantRouted: true},
 
 		// The SAME source column published TWICE and THREE times: the stream
 		// carries one of it.
@@ -285,23 +281,19 @@ func TestArcJ1APublishedKeyIsAUserColumn(t *testing.T) {
 				`2,Bob,200,2,2,2`,
 			wantLeft: `id,customer,total,order_id,oid,n | 1,Alice,150,1,1,2 | ` +
 				`2,Bob,200,2,2,2 | 3,Carol,0,NULL,NULL,NULL`,
-			wantRouted: true,
-			pinInnerDAG: `order_id,oid,n,id,customer,total | 1,1,2,1,Alice,150 | ` +
-				`2,2,2,2,Bob,200`},
+			wantRouted: true},
 		{name: "three-times", items: `order_id, order_id AS oid, order_id AS oid2`,
 			wantInner: `id,customer,total,order_id,oid,oid2,n | 1,Alice,150,1,1,1,2 | ` +
 				`2,Bob,200,2,2,2,2`,
 			wantLeft: `id,customer,total,order_id,oid,oid2,n | 1,Alice,150,1,1,1,2 | ` +
 				`2,Bob,200,2,2,2,2 | 3,Carol,0,NULL,NULL,NULL,NULL`,
-			wantRouted: true,
-			pinInnerDAG: `order_id,oid,oid2,n,id,customer,total | 1,1,1,2,1,Alice,150 | ` +
-				`2,2,2,2,2,Bob,200`},
+			wantRouted: true},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			for _, kind := range []struct{ name, sql, want, pin string }{
-				{"inner", `SELECT * ` + lat("", tc.items), tc.wantInner, tc.pinInnerDAG},
-				{"left", `SELECT * ` + lat("LEFT", tc.items), tc.wantLeft, ""},
+			for _, kind := range []struct{ name, sql, want string }{
+				{"inner", `SELECT * ` + lat("", tc.items), tc.wantInner},
+				{"left", `SELECT * ` + lat("LEFT", tc.items), tc.wantLeft},
 			} {
 				for _, arm := range arms {
 					var routesBefore int64
@@ -324,14 +316,6 @@ func TestArcJ1APublishedKeyIsAUserColumn(t *testing.T) {
 					}
 					got := e3Render(cols, rows)
 					want := kind.want
-					if kind.pin != "" && arm.coord != nil {
-						if got == kind.want {
-							t.Fatalf("%s/%s ANSWERED PostgreSQL's ORDER %s where the pin "+
-								"says the join emits its probe side first — delete the "+
-								"pin\n  SQL: %s", kind.name, arm.name, got, kind.sql)
-						}
-						want = kind.pin
-					}
 					if got != want {
 						t.Fatalf("%s/%s: %s\n  want %s\n  SQL: %s",
 							kind.name, arm.name, got, want, kind.sql)

@@ -294,11 +294,17 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id, a`,
 			want: `id,customer,total,a | 1,Alice,150,[100] | 1,Alice,150,[50] | ` +
 				`2,Bob,200,[125] | 2,Bob,200,[75] | 3,Carol,0,NULL`},
+		// Its column ORDER used to differ from the LEFT twin's above — the
+		// lateral's column first — because `reorderJoins` swapped a
+		// manufactured lateral join's sides by estimated rows and only an
+		// INNER join is reordered. A dependent join is not reorderable
+		// (#1008, ADR-0026 §8e), so the two twins now agree and both are
+		// PostgreSQL's order.
 		{name: "computed/a-container-inside-an-INNER-lateral",
 			sql: `SELECT * FROM lat_ord o JOIN LATERAL (SELECT ARRAY[amount] AS a ` +
 				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id, a`,
-			want: `a,id,customer,total | [100],1,Alice,150 | [50],1,Alice,150 | ` +
-				`[125],2,Bob,200 | [75],2,Bob,200`},
+			want: `id,customer,total,a | 1,Alice,150,[100] | 1,Alice,150,[50] | ` +
+				`2,Bob,200,[125] | 2,Bob,200,[75]`},
 		{name: "computed/an-all-NULL-CASE-inside-a-lateral",
 			sql: `SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT ` +
 				`CASE WHEN amount > 60 THEN NULL ELSE NULL END AS c FROM lat_item ` +
