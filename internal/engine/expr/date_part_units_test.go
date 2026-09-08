@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -105,6 +106,18 @@ func datePartFamily() []datePartCase {
 			fn: "date_trunc", unitArg: &Lit{Val: "day"},
 			wantDate: "1996-03-13 00:00:00", wantInstant: "1996-03-13 00:00:00",
 		},
+		// time_bucket reads its SOURCE through the same boundary date_trunc
+		// does, and renders through the same instant renderer (#965). An
+		// HOUR stride is the cell that tells the DATE column (midnight) from
+		// the TIMESTAMP column (14:25:36) apart.
+		{
+			fn: "time_bucket", unitArg: &Lit{Val: IntervalValue{Hours: 1}},
+			wantDate: "1996-03-13 00:00:00", wantInstant: "1996-03-13 14:00:00",
+		},
+		{
+			fn: "time_bucket", unitArg: &Lit{Val: IntervalValue{Days: 1}},
+			wantDate: "1996-03-13 00:00:00", wantInstant: "1996-03-13 00:00:00",
+		},
 		// The two-argument extract(): reachable as written SQL, and the one
 		// shape with a vectorized kernel of its own to disagree with.
 		{fn: "extract", unitArg: &Lit{Val: "year"}, wantDate: 1996.0, wantInstant: 1996.0},
@@ -143,8 +156,15 @@ func datePartFamily() []datePartCase {
 }
 
 func caseLabel(c datePartCase) string {
-	if c.unitArg != nil {
-		return c.fn + "_" + c.unitArg.Val.(string)
+	if c.unitArg == nil {
+		return c.fn
+	}
+	switch v := c.unitArg.Val.(type) {
+	case string:
+		return c.fn + "_" + v
+	case IntervalValue:
+		// time_bucket's leading argument is a STRIDE, not a unit name.
+		return fmt.Sprintf("%s_%dd%dh%dm%ds", c.fn, v.Days, v.Hours, v.Minutes, v.Seconds)
 	}
 	return c.fn
 }

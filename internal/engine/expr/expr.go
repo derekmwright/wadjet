@@ -2831,7 +2831,13 @@ var temporalInputFuncs = map[string]bool{
 	"day_of_week": true, "day_of_year": true,
 	"last_day_of_month": true,
 	"date_trunc":        true, "extract": true,
-	"epoch": true, "to_unixtime": true, "date_format": true,
+	// time_bucket reads its SOURCE and its ORIGIN as column instants for the
+	// same reason date_trunc does: a TIMESTAMP column boxes epoch
+	// MILLISECONDS and a DATE column epoch DAYS, and parseTime reads a bare
+	// int64 as epoch SECONDS. Without this entry every bucket over a
+	// timestamp column would land in 1970 (#319's shape).
+	"time_bucket": true,
+	"epoch":       true, "to_unixtime": true, "date_format": true,
 	"at_timezone": true, "timezone": true,
 	// The date-arithmetic family, held back from the #319 fix and settled
 	// by issue #322. It reads its date through parseDateValue, which takes
@@ -3859,13 +3865,18 @@ func init() {
 		"ip_netmask":    {fnIPNetmask, RetString},
 
 		// Date/time functions
-		"now":          {fnNow, RetTimestamp},
-		"year":         {fnYear, RetFloat64},
-		"month":        {fnMonth, RetFloat64},
-		"day":          {fnDay, RetFloat64},
-		"hour":         {fnHour, RetFloat64},
-		"minute":       {fnMinute, RetFloat64},
-		"date_trunc":   {fnDateTrunc, RetTimestamp},
+		"now":        {fnNow, RetTimestamp},
+		"year":       {fnYear, RetFloat64},
+		"month":      {fnMonth, RetFloat64},
+		"day":        {fnDay, RetFloat64},
+		"hour":       {fnHour, RetFloat64},
+		"minute":     {fnMinute, RetFloat64},
+		"date_trunc": {fnDateTrunc, RetTimestamp},
+		// time_bucket is PostgreSQL's date_bin under the name every
+		// time-series engine spells it. TIMESTAMP in, TIMESTAMP out — the
+		// declaration a downsampling GROUP BY key has to carry, or every
+		// client reads the bucket as text (#965).
+		"time_bucket":  {fnTimeBucket, RetTimestamp},
 		"extract":      {fnExtract, RetFloat64},
 		"current_date": {fnCurrentDate, RetString},
 		"date_diff":    {fnDateDiff, RetFloat64},

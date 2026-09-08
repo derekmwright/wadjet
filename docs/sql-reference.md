@@ -2322,6 +2322,7 @@ LIMIT 10
 | `SECOND(ts)` | Extract second | `SECOND(timestamp)` |
 | `EXTRACT(part FROM ts)` | Extract date part | `EXTRACT(hour FROM timestamp)` |
 | `DATE_TRUNC(part, ts)` | Truncate to precision. `part` is one of `microseconds`, `milliseconds`, `second`, `minute`, `hour`, `day`, `week`, `month`, `quarter`, `year`, `decade`, `century`, `millennium` (case-insensitive); anything else is SQLSTATE 22023 | `DATE_TRUNC('hour', timestamp)` |
+| `TIME_BUCKET(stride, ts)` / `TIME_BUCKET(stride, ts, origin)` | Floor `ts` to the largest multiple of `stride` measured from `origin` (default `1970-01-01`). PostgreSQL's `date_bin`, digit for digit. Returns TIMESTAMP | `TIME_BUCKET(INTERVAL '15' MINUTE, ts)` |
 | `DATE_DIFF(a, b)` | Whole days between two instants (a - b), truncated toward the past | `DATE_DIFF(end_ts, start_ts)` |
 | `DATE_ADD(ts, n)` / `DATE_ADD(ts, INTERVAL)` | Add n **days**, or an INTERVAL in its own unit, preserving time-of-day | `DATE_ADD(ts, 7)` |
 | `TO_DATE(s)` | Parse string to date | `TO_DATE('2026-03-15')` |
@@ -2343,6 +2344,40 @@ LIMIT 10
 | `TIMEZONE_MINUTE(epoch_ms)` | Extract timezone minute offset | `TIMEZONE_MINUTE(ts)` → `0` |
 | `AT_TIMEZONE(ts, tz)` | Convert timestamp to timezone | `AT_TIMEZONE(ts, 'America/New_York')` |
 | `HUMAN_READABLE_SECONDS(n)` | Format seconds as human string | `HUMAN_READABLE_SECONDS(3661)` → `'1 hour, 1 minute, 1 second'` |
+
+#### TIME_BUCKET
+
+`TIME_BUCKET` is PostgreSQL's `date_bin` under the name every time-series
+engine spells it, and PostgreSQL is its oracle for every answer:
+
+```sql
+SELECT TIME_BUCKET(INTERVAL '5' MINUTE, ts) AS bucket, COUNT(*)
+FROM   flows
+GROUP  BY 1 ORDER BY 1;
+```
+
+- The bucket is the largest `origin + k * stride` that does not exceed `ts`.
+  The division **floors toward the past**, so a pre-1970 instant lands in the
+  bucket below it, not the one above.
+- A boundary belongs to the bucket it **opens**: with a 15-minute stride,
+  `15:45:00` buckets to `15:45:00`.
+- The origin defaults to `1970-01-01 00:00:00`. The three-argument form takes
+  any instant, including one **after** the source — only its offset modulo the
+  stride matters.
+- A `DATE` source is the day's midnight, which is what PostgreSQL's implicit
+  `date` → `timestamp` cast makes it. The result is always TIMESTAMP.
+- NULL in any argument is NULL.
+- Buckets are **UTC** and exactly `stride` wide. There is no DST here to make
+  an hour bucket 3600 seconds one day and 7200 the next — which is also why a
+  stride containing MONTHS or YEARS is refused (`0A000`, PostgreSQL's own
+  refusal): those units have no fixed width. A stride of zero or less is
+  `22008`.
+- The stride must be spelled as an `INTERVAL` literal —
+  `TIME_BUCKET('15 minutes', ts)` is `42804`. The accepted grammar is the SQL
+  parser's single `N unit` pair, so `INTERVAL '1 day 6 hours'` is not
+  spellable; write `INTERVAL '30' HOUR`.
+- It is a monotone function of its argument, so a range predicate on the same
+  column still prunes row groups beside it.
 
 A function that RETURNS an instant renders it the one way this engine renders
 a timestamp — `DATE_TRUNC('day', ts)` is `2023-11-14 00:00:00`, the same text

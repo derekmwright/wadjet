@@ -333,8 +333,9 @@ operand all render this way, and it is PostgreSQL's text for each.
 read produces.
 
 Those functions also DECLARE `timestamp` (OID 1114), which is what a driver
-reads to pick a column class — `DATE_TRUNC`, `FROM_UNIXTIME`, `DATE_PARSE`,
-`TIMEZONE`, `NOW`, `CURRENT_TIMESTAMP` and `PG_POSTMASTER_START_TIME`. Three
+reads to pick a column class — `DATE_TRUNC`, `TIME_BUCKET`, `FROM_UNIXTIME`,
+`DATE_PARSE`, `TIMEZONE`, `NOW`, `CURRENT_TIMESTAMP` and
+`PG_POSTMASTER_START_TIME`. Three
 temporal functions deliberately declare `text` instead, because text is what
 they produce: `DATE_FORMAT` (the caller's format string), `TO_ISO8601` (its
 name is its contract) and `AT_TIMEZONE` (a wall clock in another zone, whose
@@ -373,11 +374,13 @@ wall clock in the zone you asked for, and the rendering above carries no zone �
 printed bare, `at_timezone(ts, 'America/New_York')` would read back as UTC and
 be five hours wrong — so it keeps its offset.
 
-What a timestamp-valued function gets wrong beyond that is its DECLARED type:
-`DATE_TRUNC` returns `timestamp` (OID 1114) on PostgreSQL and `text` (OID 25)
-here, because the scalar registry has one static return type per function and
-no TIMESTAMP-valued function result exists. Recorded in ADR-0012's divergence
-list, with the three clock functions above.
+That paragraph used to end with a divergence — `DATE_TRUNC` declaring `text`
+(OID 25) where PostgreSQL declares `timestamp` — and it is CLOSED: #868 gave
+`Vector.SetValue` a TIMESTAMP arm that reads an instant's own text back into
+epoch milliseconds, so a timestamp-valued function declares what it returns.
+`TIME_BUCKET` (#965) is registered the same way and declares OID 1114 too. The
+three functions above that still declare `text` do so because text is what they
+produce, not because the declaration is missing.
 
 **Where this accept-set applies: everywhere.** The INGEST door (`COPY`, the Go
 ingester, a Bento-written table registered through Wadjet), a DATE literal in
