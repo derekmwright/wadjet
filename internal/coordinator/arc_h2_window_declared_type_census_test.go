@@ -275,9 +275,14 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 		{name: "953 DISTINCT: AVG(DISTINCT PROTOCOL) is 32640/256",
 			sql:  "SELECT AVG(DISTINCT c_proto) AS a FROM typemx",
 			want: "cols=[a:DECIMAL(38,4)] rows=1 | 127.5000"},
-		// PORT's values are all distinct, so DISTINCT must change NEITHER the
-		// total nor the count. Asserted as that equality, so the cell carries
-		// its own proof instead of a number from elsewhere.
+		// PORT's values are all distinct (1024..6023), so DISTINCT must change
+		// NEITHER the total nor the count — asserted as that equality, so the
+		// cell carries its own proof rather than a number from elsewhere.
+		//
+		// It is a CONTROL and not a discriminator, and saying so is the point:
+		// because every value is distinct, a DISTINCT that was DROPPED would
+		// answer exactly the same four numbers. The cell that can tell those
+		// apart is PROTOCOL's above, where the two totals differ by 20x.
 		{name: "953 DISTINCT: SUM(DISTINCT PORT) equals SUM(PORT) — every value is distinct",
 			sql: "SELECT SUM(DISTINCT c_port) AS s, SUM(c_port) AS t, " +
 				"COUNT(DISTINCT c_port) AS n, COUNT(c_port) AS c FROM typemx",
