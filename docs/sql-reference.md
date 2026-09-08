@@ -2507,6 +2507,12 @@ GROUP  BY 1 ORDER BY 1;
   `MONTHS` and `YEARS` are accepted there, and every plural works inside the
   combined spelling (`INTERVAL '30 seconds'`). PostgreSQL accepts all of them
   in both positions; this is a pre-existing gap, not a rule.
+- The value must be a WHOLE NUMBER, so the clock and fractional spellings are
+  `42601`: `INTERVAL '02:00:00'`, `INTERVAL '1:30'` and `INTERVAL '2.5'` are
+  all refused where PostgreSQL reads them as two hours, ninety minutes and two
+  and a half seconds. Write the unit — `INTERVAL '2' HOUR`, `INTERVAL '90'
+  MINUTE` — or the combined form, `INTERVAL '90 minutes'`. Sub-second values
+  have no spelling here at all (see the unit list above).
 - It is a monotone function of its argument, so a range predicate on the same
   column still prunes row groups beside it — measured, not assumed: over a
   five-row-group fixture the same threshold removes the same two row groups
