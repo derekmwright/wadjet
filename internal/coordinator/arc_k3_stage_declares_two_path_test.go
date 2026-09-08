@@ -299,7 +299,17 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 		// manufactured lateral join's sides by estimated rows and only an
 		// INNER join is reordered. A dependent join is not reorderable
 		// (#1008, ADR-0026 §8e), so the two twins now agree and both are
-		// PostgreSQL's order.
+		// PostgreSQL's column order.
+		//
+		// THE ROW ORDER IS NOT PostgreSQL'S, in this cell and in its LEFT and
+		// FILTERED siblings, and that is recorded rather than fixed here.
+		// `ORDER BY … a` over an ARRAY sorts by the value's TEXT rendering
+		// (`"[100]" < "[50]"`), where PostgreSQL compares arrays
+		// element-wise and answers `{50}, {100}` and `{75}, {125}` — measured
+		// live on postgres:17-alpine at arc N1's tip. Pre-existing (K3,
+		// v0.18.62), unmoved by anything in #1008, and a defect of the
+		// comparison kernel rather than of what a stage publishes: it is a
+		// filing candidate, not this cell's subject.
 		{name: "computed/a-container-inside-an-INNER-lateral",
 			sql: `SELECT * FROM lat_ord o JOIN LATERAL (SELECT ARRAY[amount] AS a ` +
 				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id, a`,

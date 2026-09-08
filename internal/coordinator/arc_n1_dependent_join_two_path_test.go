@@ -153,6 +153,58 @@ func TestN1ATwoGroupedLateralsPublishTheirOwnColumns(t *testing.T) {
 				"3,2,Widget,75,2,Bob,200 | 4,2,Doohickey,125,2,Bob,200",
 		},
 		{
+			// A GROUPED LATERAL CARRYING ITS OWN `ORDER BY`. The rows are
+			// PostgreSQL's on every arm — the grouping fix answers it — and on
+			// the DAG arms the minted slot RIDES OUT to the client beside
+			// them. `stageHiddenPositions` looks for the slot's ordinal in
+			// what the lateral's STAGE publishes, and with a Sort of the
+			// lateral's own between the projection and the join that list is
+			// not the projection's, so the join drops nothing. Not closed
+			// here: it is the DAG's stage-stream model (ADR-0026 §3c's
+			// distributed half), and it belongs with the arc that gives a
+			// lateral's own ORDER BY / LIMIT its per-outer-row meaning, below.
+			name: "1008 boundary: a grouped lateral with its own ORDER BY leaks the slot on the DAG",
+			sql: "SELECT * FROM lat_ord o " +
+				"JOIN LATERAL (SELECT i.product AS p FROM lat_item i WHERE i.order_id = o.id " +
+				"GROUP BY i.product ORDER BY i.product) s ON true ORDER BY o.id, p",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 p:STRING] rows=4 | " +
+				"1,Alice,150,Gadget | 1,Alice,150,Widget | 2,Bob,200,Doohickey | 2,Bob,200,Widget",
+			wantDag: "cols=[id:INT64 customer:STRING total:FLOAT64 __key_0:INT64 p:STRING] rows=4 | " +
+				"1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | " +
+				"2,Bob,200,2,Doohickey | 2,Bob,200,2,Widget",
+			wantDagshuf: "cols=[id:INT64 customer:STRING total:FLOAT64 __key_0:INT64 p:STRING] rows=4 | " +
+				"1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | " +
+				"2,Bob,200,2,Doohickey | 2,Bob,200,2,Widget",
+			why: "the lateral's own Sort sits between its projection and the join, " +
+				"so the stage publishes a list stageHiddenPositions cannot find the " +
+				"slot's ordinal in; the ROWS are PostgreSQL's on all four arms",
+		},
+		{
+			// THE SAME WITH `LIMIT 1`, a wrong answer on every arm, DEFERRED
+			// with its mechanism. PostgreSQL evaluates a lateral per outer
+			// row, so its LIMIT bounds each one — two rows here, one per
+			// order. The decorrelation makes the lateral ONE relation joined
+			// once, so the LIMIT bounds the whole of it and a single row
+			// survives. Repairing it means the bound travelling with the
+			// correlation key (a per-key top-N), which is ADR-0021's territory
+			// and not a boundary this arc can move; a bounded repair would put
+			// a plausible number where an obvious one is.
+			name: "1008 boundary: a grouped lateral's own LIMIT is not per outer row",
+			sql: "SELECT * FROM lat_ord o " +
+				"JOIN LATERAL (SELECT i.product AS p FROM lat_item i WHERE i.order_id = o.id " +
+				"GROUP BY i.product ORDER BY i.product LIMIT 1) s ON true ORDER BY o.id, p",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 p:STRING] rows=1 | " +
+				"2,Bob,200,Doohickey",
+			wantDag: "cols=[id:INT64 customer:STRING total:FLOAT64 __key_0:INT64 p:STRING] rows=1 | " +
+				"2,Bob,200,2,Doohickey",
+			wantDagshuf: "cols=[id:INT64 customer:STRING total:FLOAT64 __key_0:INT64 p:STRING] rows=1 | " +
+				"2,Bob,200,2,Doohickey",
+			why: "PostgreSQL 17 answers TWO rows — 1,Alice,150,Gadget and " +
+				"2,Bob,200,Doohickey — because a lateral's LIMIT bounds each outer " +
+				"row's evaluation; the decorrelated form bounds the whole relation " +
+				"once. DEFERRED: the bound has to travel with the correlation key",
+		},
+		{
 			// CONTROL: an ordinary THREE-way inner join, the shape
 			// costBasedJoinReorder itself owns.
 			name: "control: an ordinary three-way inner join",

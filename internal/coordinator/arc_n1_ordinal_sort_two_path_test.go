@@ -125,6 +125,20 @@ func TestN1AnOrdinalSortKeyBindsItsSlot(t *testing.T) {
 				"0,4998 | 0,4984 | 0,4977 | 0,4970 | 0,4963 | 0,4956",
 		},
 		{
+			// A GROUP BY spelling rather than a DISTINCT one, over two
+			// relations that publish one name. The fix is broader than the
+			// DISTINCT cells that found it, and this cell is what says so:
+			// with `producerPublishesSelectList` neutralised both DAG arms
+			// answer `Doohickey,75 | Doohickey,125 | …` — key 2 ascending
+			// where the query wrote DESC.
+			name: "1003 a GROUP BY over two relations publishing one name",
+			sql: "SELECT b.product AS amount, a.amount " + selfJoin +
+				"GROUP BY b.product, a.amount ORDER BY 1, 2 DESC",
+			want: "cols=[amount:STRING amount:FLOAT64] rows=8 | " +
+				"Doohickey,125 | Doohickey,75 | Gadget,100 | Gadget,50 | " +
+				"Widget,125 | Widget,100 | Widget,75 | Widget,50",
+		},
+		{
 			// CONTROL: the same query with the second item ALIASED apart, so
 			// no name is duplicated and the by-name resolution was right all
 			// along. It must not move.
