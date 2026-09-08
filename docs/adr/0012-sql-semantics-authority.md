@@ -1742,6 +1742,15 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      that pin goes AND the routing above is deleted with it; the two are one
      defect seen from two sides.
 
+     One more thing the route keeps: the INNER-joined routed star publishes
+     the PROBE side's columns first (`order_id, oid, n, id, customer, total`)
+     where PostgreSQL publishes the FROM order (`id, customer, total,
+     order_id, oid, n`) — the same SET and VALUES, a different column ORDER.
+     (Added 2026-09-07, arc J1 round 6 review.) The LEFT-joined spelling is
+     byte-identical to PostgreSQL. This is the star-column-order entry above
+     seen through the route, pinned in the INNER cells of
+     `coordinator.TestArcJ1APublishedKeyIsAUserColumn`, and it goes with #984.
+
    - **A written `ON` over an unrepaired LATERAL with an empty-input default
      is REFUSED (0A000) where PostgreSQL answers.** (Added 2026-09-07, arc J1
      round 5, #977.) PostgreSQL evaluates the lateral per outer row and applies

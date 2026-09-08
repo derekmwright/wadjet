@@ -1318,8 +1318,9 @@ by counter), `TestArcJ1ANamedListOverThatLateralStaysDistributed` (the scope).
 PROJECTION rather than its stream — and the day it lands every shape routed
 here runs distributed and the refusal, its counter and its gates come out. Its
 sibling with no LATERAL in it (`SELECT * FROM t JOIN (SELECT c, c AS d FROM u)
-s ON …`, which loses `d` on the DAG) is not covered by this route — nothing
-mints a slot there — and stays pinned in ADR-0012 until #984.
+s ON …`, which loses `d` on the DAG, and the plain derived table's RENAME
+`SELECT c AS d`, which loses its alias the same way) is not covered by this
+route — nothing mints a slot there — and stays pinned in ADR-0012 until #984.
 
 ## Correlated subqueries (refused → routed local)
 
