@@ -60,6 +60,32 @@ jobs:
         # for seven weeks.
         run: go test -short -p 2 ./internal/... ./wadjet/ ./test/ -timeout 8m
 
+      - name: Door Security Gates (no -short)
+        # The step above runs -short, and every gate that stands up the three
+        # doors skips under it — including the #859 masking matrix, which is
+        # why v0.18.61 shipped `SELECT a.*` publishing a DENIED column's name
+        # to the identity the policy denies it to, through CI, green.
+        #
+        # A security control that is only asserted when somebody remembers to
+        # drop a flag is not asserted. These are the packages where a door
+        # decides whether a caller may see something — ADR-0034 (every door
+        # authorizes before it acts) and #859 (the policy is enforced at the
+        # scan, for every consumer above it) — run WITHOUT -short.
+        #
+        # Eleven tests in ./internal/server/ run here that the step above
+        # skips: TestPolicyMaskingIsPlanTimeOnEveryDoor,
+        # TestPolicyMaskingLeavesUnpolicedIdentitiesAlone,
+        # TestAsyncDoorRefusesAPolicedStatement,
+        # TestLegacyYAMLCellPoliciesAreEnforcedAtThePlanOnEveryDoor,
+        # TestARowFilterSeesTheTrueValueAndTheUserPredicateSeesTheMask,
+        # the four TestARowFilter* residuals, the two TestMerge* policy
+        # refusals, the four TestAQueryLimit/ceiling obligations, and
+        # TestCoordinatorStreamCarriesDuplicateNamesPositionally.
+        # pgwire and auth carry no -short skip today; they are in the step so
+        # that a future one is covered by construction rather than by a name
+        # list somebody has to remember to extend.
+        run: go test -p 2 ./internal/server/ ./internal/server/pgwire/ ./internal/auth/... -timeout 15m
+
       - name: Race Detector (planner + executor concurrency)
         # Nothing ran under -race before issue #334, and that is how a plain
         # scalar-subquery query shipped able to kill the process: a shared
