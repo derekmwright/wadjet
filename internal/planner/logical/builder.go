@@ -720,8 +720,20 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	return plan, nil
 }
 
+// isStarOnly reports whether a SELECT list is the IDENTITY of its input, so no
+// projection has to be built for it.
+//
+// A BARE `*` is: it stands for every column of every FROM item, in order, which
+// is exactly what the node below publishes. A QUALIFIED `o.*` is NOT — it names
+// ONE relation, and over a join the input carries the others too. Reading the
+// two the same way is the whole of #979: `SELECT o.*` built no Project, so
+// `ExpandStarProjections` (which only ever rewrites a Project) never saw the
+// star, and the query published the entire join — `id, order_id, product,
+// amount, o.id, customer, total` where PostgreSQL 17 publishes o's three, with
+// a column literally called `o.id` among them. The same list with one more item
+// beside it has always been right, because that one has a projection.
 func isStarOnly(cols []plansql.SelectColumn) bool {
-	return len(cols) == 1 && cols[0].Star
+	return len(cols) == 1 && cols[0].Star && cols[0].TableRef == ""
 }
 
 // windowOutputName is plansql.WindowOutputName. The rule lives there because
