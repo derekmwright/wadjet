@@ -496,8 +496,26 @@ it.
 builds no projection at all, so the plan's output IS the security projection's
 output. Every other spelling read past the barrier. In v0.18.61 `SELECT a.*`
 sent an analyst a `salary` column its policy DENIES, on the embedded, pgwire
-and HTTP single-process doors; a census over eight doors and 22 star shapes
-found 40 leaking door-cells, six shapes of which predate the reported one.
+and HTTP single-process doors.
+
+The regression is TWELVE spellings, not one. Measured with the gate's own star
+cells (`WADJET_E7_CENSUS=1`, one tree per base):
+
+| tree | leaking cells / shapes |
+|---|---|
+| v0.18.60 `bb8635a4` | 8 / **2** (`SELECT *, id AS z`, `SELECT a.*, a.id AS z`) |
+| v0.18.61 `a0539069` | 52 / **13** on eight doors; **65 / 13** with the coordinator's default local fast path as a ninth door |
+| the fix | **0** |
+
+Only the two shapes that had a projection to expand at BOTH bases predate the
+reported one; the other eleven — the qualified star alone, its derived, CTE and
+two-deep spellings, the positional `ORDER BY`, both join orders, the filter, the
+`ORDER BY … LIMIT`, the union arm and `SELECT * FROM (SELECT a.* …) d` — are
+right on all eight doors at v0.18.60.
+
+The fast-path figure is the one a deployment sees: `--local-fastpath-bytes`
+defaults to 64 MiB, so a small query on a coordinator runs in process, and the
+gate had that configuration pinned OFF.
 
 **A star's source is what the relation PUBLISHES for this identity.**
 
@@ -540,7 +558,8 @@ subquery's derived table is refused on the single-process arms while the DAG
 answers it — an arm divergence in the expansion's REACH, not in the policed
 list, and it predates this amendment.
 
-Gate: `server.TestPolicyMaskingIsPlanTimeOnEveryDoor` (17 star cells, eight
-doors, no `-short`), `logical.TestEveryStarSpellingExpandsFromThePolicedList`,
+Gate: `server.TestPolicyMaskingIsPlanTimeOnEveryDoor` (21 new star cells, NINE
+doors — the ninth is a coordinator at the shipped `--local-fastpath-bytes`
+default — no `-short`), `logical.TestEveryStarSpellingExpandsFromThePolicedList`,
 and CI's "Door Security Gates (no -short)" step — the matrix skips under
 `-short`, which is why v0.18.61 shipped through a green CI.

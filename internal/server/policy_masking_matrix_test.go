@@ -890,8 +890,20 @@ func pmCells() []pmCell {
 		// item, `a.*` alone, `a.*` beside an item, a derived table's or a
 		// CTE's star, a star under a positional ORDER BY, a star over a join,
 		// a star renamed by a column-alias list, a star inside a subquery.
-		// Six of these were already leaking before the one that was reported,
-		// and gating only the reported one would have left the other five.
+		//
+		// MEASURED with THESE cells, `WADJET_E7_CENSUS=1`, one tree per base
+		// (round-1 review §1.3; the nine-door figure measured here):
+		//
+		//   v0.18.60 (bb8635a4)   8 leaking cells over  2 shapes
+		//   v0.18.61 (a0539069)  52 leaking cells over 13 shapes on 8 doors
+		//                        65 over the same 13 with the fast-path door
+		//   tip                   0
+		//
+		// So v0.18.61 regressed TWELVE spellings and only TWO predate it —
+		// `SELECT *, id AS z` and `SELECT a.*, a.id AS z`, the two arms that
+		// had a projection to expand at BOTH bases. Every other spelling here
+		// is right 8/8 at v0.18.60. Gating only the reported `SELECT a.*`
+		// would have left eleven leaking spellings behind.
 		{name: "star_beside_an_item", sql: `SELECT *, id AS z FROM e7emp`, noSalary: true,
 			want: starRowWithZ},
 		{name: "qualified_star_beside_an_item", sql: `SELECT a.*, a.id AS z FROM e7emp a`,

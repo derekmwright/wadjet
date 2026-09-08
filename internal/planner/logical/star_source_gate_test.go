@@ -228,6 +228,17 @@ func TestEveryStarSpellingExpandsFromThePolicedList(t *testing.T) {
 // The allow-list is per FUNCTION, not per file, and each entry states why that
 // function is not an expansion site. Adding one is a decision, which is the
 // point of the gate.
+//
+// WHAT IT CANNOT CATCH, so the next reader does not over-trust it (round-1
+// review, N1/N2). Arm (c) needs a `.ScanColumns` read AND a star token in the
+// SAME function, and arm (a) is scoped to `star_expansion.go`: a helper in
+// another file that reads `.ScanColumns` and names no star token passes both —
+// measured, by moving `subtreeOutputNames`' scan arm into a bare
+// `func(n *Node) []string { return n.ScanColumns }`. Arm (b) pins call sites
+// per FILE, so a SECOND call inside an already-pinned file does not fire it.
+// `TestEveryStarSpellingExpandsFromThePolicedList` and the door matrix are the
+// backstop for both; this gate narrows where a second answer can hide, it does
+// not close the set.
 func TestOnlyOnePathReadsAScanColumnListForAStar(t *testing.T) {
 	allowed := map[string]string{
 		// Not an expansion. It DECLARES the output schema of a bare `SELECT *`
