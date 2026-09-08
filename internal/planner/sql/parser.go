@@ -310,6 +310,30 @@ func Parse(sql string) (*ParsedQuery, error) {
 	return q, nil
 }
 
+// wrapParseFailure labels a parse FAILURE with the stage it happened in, and
+// leaves a deliberate REFUSAL alone.
+//
+// It is the TEXT half of the rule Parse already applies to the SQLSTATE: an
+// error that carries its own code knows better than the wrapper does, so it
+// keeps it. A refusal raised inside the recursive descent — `DISTINCT is not
+// implemented for window functions`, 0A000, which is PostgreSQL's own code and
+// message — is a complete sentence about a legal statement, and prefixing it
+// said "parsing SQL:" twice by the time it reached the wire, because the
+// embedded door adds that same phrase again:
+//
+//	parsing SQL: parsing SQL: DISTINCT is not implemented for window functions (sum)
+//
+// PostgreSQL sends the sentence and nothing else. One prefix is the door's own
+// stage label and is asserted as a recorded difference by the two-door census
+// (server/http_door_sqlstate_test.go); two is noise this function removes
+// (#987 review, P3).
+func wrapParseFailure(err error) error {
+	if sqlerr.StateOf(err) != "" {
+		return err
+	}
+	return fmt.Errorf("parsing SQL: %w", err)
+}
+
 func parseDispatch(sql string) (*ParsedQuery, error) {
 	trimmed := strings.TrimSpace(sql)
 	// Strip trailing semicolons
@@ -374,13 +398,13 @@ func parseDispatch(sql string) (*ParsedQuery, error) {
 	sp := newSelectParser(trimmed)
 	info, err := sp.parseSelectOrUnion()
 	if err != nil {
-		return nil, fmt.Errorf("parsing SQL: %w", err)
+		return nil, wrapParseFailure(err)
 	}
 	// The statement has to be consumed in full. Anything left over is input
 	// this parser did not understand, and returning an answer computed from
 	// the prefix would silently discard it (#337).
 	if err := sp.expectEndOfStatement(); err != nil {
-		return nil, fmt.Errorf("parsing SQL: %w", err)
+		return nil, wrapParseFailure(err)
 	}
 
 	// Resolve positional references (GROUP BY 1, ORDER BY 1 DESC)

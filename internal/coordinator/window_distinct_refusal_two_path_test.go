@@ -25,11 +25,18 @@ import (
 // commit of this arc before this one.
 //
 // It is asserted as a SQLSTATE rather than through the census's rendered `ERR
-// …` string on purpose: the four arms wrap a parse failure under different
-// prefixes (`parsing SQL: parsing SQL: …` single-process, `parse: parsing SQL:
-// …` on the DAG), so a prefix match would pin the WRAPPING and say nothing
-// about the refusal. What a client sees is the code and the message, and those
-// are what this asserts.
+// …` string on purpose: the arms label the stage differently (`parsing SQL: …`
+// through the embedded door, `parse: …` on the DAG), so a full-string match
+// would pin the door's own label and say nothing about the refusal. What a
+// client sees is the code and the message, and those are what this asserts.
+//
+// The message is asserted to appear ONCE and to carry ONE stage label. It
+// carried two — `parsing SQL: parsing SQL: DISTINCT is not implemented for
+// window functions (sum)` — because the refusal is raised inside the recursive
+// descent and parseDispatch prefixed everything that came out of it, including
+// errors that already knew their own SQLSTATE and already spelled a complete
+// sentence. PostgreSQL sends the sentence and nothing else
+// (sql.wrapParseFailure, #987 review P3).
 func TestAWindowFunctionRefusesDISTINCT(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
@@ -69,8 +76,18 @@ func TestAWindowFunctionRefusesDISTINCT(t *testing.T) {
 				if st := sqlerr.StateOf(err); st != "0A000" {
 					t.Errorf("%s\n  arm %s: SQLSTATE %q, want 0A000: %v", tc.sql, arm.name, st, err)
 				}
-				if !strings.Contains(err.Error(), want) {
+				msg := err.Error()
+				if !strings.Contains(msg, want) {
 					t.Errorf("%s\n  arm %s: %v\n  want a message containing %q", tc.sql, arm.name, err, want)
+				}
+				if n := strings.Count(msg, want); n != 1 {
+					t.Errorf("%s\n  arm %s: the refusal appears %d times: %q",
+						tc.sql, arm.name, n, msg)
+				}
+				if n := strings.Count(msg, "parsing SQL:"); n > 1 {
+					t.Errorf("%s\n  arm %s: %d stage labels, want at most one — "+
+						"PostgreSQL sends the sentence and nothing else: %q",
+						tc.sql, arm.name, n, msg)
 				}
 			}
 		})
