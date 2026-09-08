@@ -8386,7 +8386,13 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				// ec.OrderBy carries the RESOLVED spelling; ob.Column is
 				// what the query wrote. A stage keyed on the latter would
 				// send the worker the name #585 could not resolve.
-				orderBy = append(orderBy, SortKeySpec{Column: ec.OrderBy[i].Column, Desc: ob.Desc, NullsLast: resolveNullsLast(ob)})
+				// SlotPos rides along: `windowExecColumn` decided it from the
+				// aggregate's emitted output, and the worker rebuilds an
+				// `exec.SortKey` from this spec — so without it the DAG's
+				// window binds the key by NAME where the single-process one
+				// binds it by position (#968).
+				orderBy = append(orderBy, SortKeySpec{Column: ec.OrderBy[i].Column, Desc: ob.Desc,
+					NullsLast: resolveNullsLast(ob), SlotPos: ec.OrderBy[i].SlotPos})
 			}
 			// A key naming a derived table's or CTE's SELECT-list alias
 			// (`PARTITION BY gk` over `SELECT g AS gk`) is bound by neither
@@ -16425,6 +16431,17 @@ func windowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string
 			Column:    keyName(ob.Column),
 			Order:     order,
 			NullsLast: resolveNullsLast(ob),
+			// A WINDOW reads its keys by NAME off the input batch, and a name
+			// stops being an address the moment the producer emits it twice.
+			// `SELECT x.a AS b, SUM(x.b) AS a, RANK() OVER (ORDER BY SUM(x.b))
+			// … GROUP BY x.a` re-spells the window's term to `a` — which the
+			// aggregate below publishes for its KEY as well — and the rank
+			// came back in the key's order beside a correct sum, on every arm
+			// (#968). The CLASS travels on the term (`NamesAggregateOutput`,
+			// set where respellOverAggregate rewrote it) and the POSITION is
+			// read here, from the same `aggregateEmittedOutputNames` model the
+			// projection and the sort key use.
+			SlotPos: windowOrderKeySlot(node, keyName(ob.Column), ob.NamesAggregateOutput),
 		})
 	}
 	partBy := make([]string, len(we.PartitionBy))

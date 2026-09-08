@@ -74,6 +74,17 @@ func pinSortKeySlotsOverProducerOutput(stages []Stage, idx map[string]int, i int
 		if !dep {
 			return
 		}
+		// A WINDOW between the sort and the aggregate APPENDS its outputs to
+		// its input, so the input's slots are unchanged and the model one
+		// stage further down still holds. Without this step
+		// `SELECT x.a AS b, SUM(x.b) AS a, RANK() OVER (…) … ORDER BY a`
+		// came back in the group KEY's order on both DAG arms — the rows were
+		// right and the sequence was not (#968).
+		if stages[d].Type == StageWindow && len(stages[d].ProjectExprs) == 0 {
+			if w, hasDep := idx[firstDep(&stages[d])]; hasDep {
+				d = w
+			}
+		}
 		names, classes, ok = aggregateEmittedSlots(&stages[d])
 	}
 	if !ok {
@@ -115,4 +126,57 @@ func pinSortKeySlotsOverProducerOutput(stages []Stage, idx map[string]int, i int
 		seen[cursor]++
 		key.SlotPos = want + 1
 	}
+}
+
+// windowOrderKeySlot is the 1-based position a WINDOW's ORDER BY key addresses
+// in its input, or 0 to keep the name path.
+//
+// It answers only where the window reads an AGGREGATE directly and that
+// aggregate emits the key's name TWICE — the one case a name cannot say which
+// column is meant. `aggregateEmittedOutputNames` is the model, the same one
+// `buildProject`'s slot pinning and `pinSortKeySlotsOverProducerOutput` read,
+// and the class comes from the term itself.
+//
+// Everywhere else it answers 0 and nothing changes: a window whose producer is
+// not an aggregate, a name only one column answers to, a term no re-spell gave
+// a class.
+func windowOrderKeySlot(win *logical.Node, name string, isAgg bool) int {
+	if win == nil || len(win.Children) != 1 || strings.TrimSpace(name) == "" {
+		return 0
+	}
+	names, ok := aggregateEmittedOutputNames(win.Children[0])
+	if !ok {
+		return 0
+	}
+	agg := findAggregateAncestor(win.Children[0])
+	if agg == nil {
+		return 0
+	}
+	nAgg := len(agg.AggExprs)
+	if nAgg == 0 || nAgg > len(names) {
+		return 0
+	}
+	want := strings.ToLower(strings.TrimSpace(name))
+	hits := 0
+	for _, n := range names {
+		if strings.EqualFold(strings.TrimSpace(n), want) {
+			hits++
+		}
+	}
+	if hits < 2 {
+		return 0 // one column answers to it; the name IS the address
+	}
+	// An aggregate emits `[group keys…, aggregate outputs…]`, so the class
+	// splits the list at len(names)-nAgg — the same split
+	// `aggregateEmittedSlots` makes for a Stage.
+	lo, hi := 0, len(names)-nAgg
+	if isAgg {
+		lo, hi = len(names)-nAgg, len(names)
+	}
+	for i := lo; i < hi; i++ {
+		if strings.EqualFold(strings.TrimSpace(names[i]), want) {
+			return i + 1
+		}
+	}
+	return 0
 }

@@ -120,6 +120,48 @@ func TestArcK1AnOutputSlotHasOneIdentity(t *testing.T) {
 			want: five,
 		},
 		{
+			// A WINDOW's ORDER BY over the colliding aggregate. The term is
+			// re-spelled to the aggregate's output name, which the aggregate
+			// also publishes for its KEY, so the rank came back in the KEY's
+			// order beside a correct sum — wrong on ALL FOUR arms, the only
+			// consumer of this collision that was.
+			//
+			// The CLASS is recorded where respellOverAggregate rewrote the
+			// term and the POSITION is read from `aggregateEmittedOutputNames`,
+			// which is 99cd49ab's rule at a second consumer; `exec.SortKey`
+			// already carried the slot and the window operator now asks for it.
+			name: "968 a window ORDER BY over the colliding aggregate",
+			sql: `SELECT x.a AS b, SUM(x.b) AS a, RANK() OVER (ORDER BY SUM(x.b)) AS rk ` +
+				`FROM decpair x GROUP BY x.a ORDER BY a`,
+			want: "cols=[b:DECIMAL(9,2) a:DECIMAL(38,4) rk:INT64] rows=5 | " +
+				"-0.01,-0.0100,1 | 0.00,0.0000,2 | NULL,1.0000,3 | 2.00,10.0000,4 | " +
+				"12.75,38.2500,5",
+		},
+		{
+			// The same over 5000 rows, where both DAG arms really shuffle and
+			// the sort above the window reads the window stage's output — the
+			// step that has to see THROUGH the window to the aggregate's model.
+			name: "968 a window ORDER BY over the collision, 5000 rows",
+			sql: `SELECT x.g AS b, SUM(x.c_i64) AS g, RANK() OVER (ORDER BY SUM(x.c_i64)) AS rk ` +
+				`FROM typemx x GROUP BY x.g ORDER BY g LIMIT 3`,
+			want: "cols=[b:INT32 g:DECIMAL(38,0) rk:INT64] rows=3 | " +
+				"NULL,929156787462,1 | 3,1591177773519,2 | 2,1592105776303,3",
+		},
+		{
+			// The BOUNDARY of that fix, and PostgreSQL's own answer: a window
+			// ORDER BY written as the output ALIAS is not an output reference
+			// at all — PG binds it to the INPUT column, the group key, and
+			// answers `1,2,5,3,4` (measured live). wadjet answers the same, so
+			// the class recorded above is about the aggregate CALL spelling
+			// and not about the name.
+			name: "968 ctl a window ORDER BY written as the alias binds the input",
+			sql: `SELECT x.a AS b, SUM(x.b) AS a, RANK() OVER (ORDER BY a) AS rk ` +
+				`FROM decpair x GROUP BY x.a ORDER BY a`,
+			want: "cols=[b:DECIMAL(9,2) a:DECIMAL(38,4) rk:INT64] rows=5 | " +
+				"-0.01,-0.0100,1 | 0.00,0.0000,2 | NULL,1.0000,5 | 2.00,10.0000,3 | " +
+				"12.75,38.2500,4",
+		},
+		{
 			// TWO aggregates under one name beside the key, so the per-class
 			// cursor has to hand out the FIRST and the SECOND aggregate slot
 			// rather than the same one twice. PostgreSQL answers it; a cursor
@@ -130,6 +172,160 @@ func TestArcK1AnOutputSlotHasOneIdentity(t *testing.T) {
 			want: "cols=[b:DECIMAL(9,2) a:DECIMAL(38,4) a2:DECIMAL(18,4)] rows=5 | " +
 				"-0.01,-0.0100,-0.0100 | 0.00,0.0000,0.0000 | NULL,1.0000,1.0000 | " +
 				"2.00,10.0000,10.0000 | 12.75,38.2500,12.7499",
+		},
+
+		// ---- THE CONSUMERS THIS ARC DOES NOT REACH, pinned fail-on-agree ----
+		//
+		// Everything above is a consumer of the collision that reads the
+		// aggregate's output THROUGH a spelling this arc could give a slot:
+		// the projection immediately over it, the sort key on the stage the
+		// aggregate produces, the window's ORDER BY term. The four below read
+		// it through a consumer that has no slot to be given, and every one of
+		// them is the DAG saying the group key where PostgreSQL says the sum.
+		// They are wrong at `bb8635a4` too, on the same arms.
+		//
+		// WHY THEY ARE PINNED RATHER THAN FIXED. The producer-side repair —
+		// making the aggregate stage PUBLISH its SELECT list, so the stream
+		// carries `[b, a]` instead of `[a, a]` and every consumer above binds
+		// unambiguously — was BUILT in round 2 and WITHDRAWN. It closes B1, B3
+		// and their 5000-row twins, and it breaks the CTE-consumed-twice cell:
+		// the join key had already been resolved to `a` meaning "the first
+		// column of that name", and renaming the two apart silently changes
+		// what that resolved name MEANS. The join then keyed on the SUM and
+		// returned a row PostgreSQL excludes. Retargeting the prior consumers
+		// needs each of them to carry its CLASS — a rename map has no class,
+		// which is exactly the permutation ADR-0026 §3a's decline records —
+		// and that is the same structural work §3a already deferred, not a
+		// hunk in a names arc. Trading one silent wrong answer for another is
+		// not a fix (rule 11).
+		//
+		// The consumers still on the name path, named: a stage's GROUP BY key,
+		// a join key and a join stage's projection, the coordinator's
+		// post-gather DISTINCT/LIMIT, a window's ARGUMENT, and a sort over a
+		// derived block's star.
+		{
+			name: "968 PINNED an outer GROUP BY over the collision",
+			sql: `SELECT t.a AS ta, COUNT(*) AS n FROM (SELECT x.a AS b, SUM(x.b) AS a ` +
+				`FROM decpair x GROUP BY x.a) t GROUP BY t.a ORDER BY ta`,
+			want: "cols=[ta:DECIMAL(38,4) n:INT64] rows=5 | -0.0100,1 | 0.0000,1 | " +
+				"1.0000,1 | 10.0000,1 | 38.2500,1",
+			pin: map[string]string{
+				"dag": "cols=[ta:DECIMAL(9,2) n:INT64] rows=5 | -0.01,1 | 0.00,1 | " +
+					"2.00,1 | 12.75,1 | NULL,1",
+				"dagshuf": "cols=[ta:DECIMAL(9,2) n:INT64] rows=5 | -0.01,1 | 0.00,1 | " +
+					"2.00,1 | 12.75,1 | NULL,1",
+			},
+			why: "a stage's GROUP BY key is a NAME with no slot: the outer aggregate reads " +
+				"`a` off a stream that publishes it twice and takes the first, the key — " +
+				"with the key's declared type on the wire",
+		},
+		{
+			name: "968 PINNED the same at 5000 rows, through a real shuffle",
+			sql: `SELECT t.g AS tg, COUNT(*) AS n FROM (SELECT x.g AS b, SUM(x.c_i64) AS g ` +
+				`FROM typemx x GROUP BY x.g) t GROUP BY t.g ORDER BY tg LIMIT 3`,
+			want: "cols=[tg:DECIMAL(38,0) n:INT64] rows=3 | 929156787462,1 | " +
+				"1591177773519,1 | 1592105776303,1",
+			pin: map[string]string{
+				"dag":     "cols=[tg:INT32 n:INT64] rows=3 | 0,1 | 1,1 | 2,1",
+				"dagshuf": "cols=[tg:INT32 n:INT64] rows=3 | 0,1 | 1,1 | 2,1",
+			},
+			why: "same site as the cell above, with the partial→final re-aggregation and a " +
+				"shuffle between; the declared type moves with the value",
+		},
+		{
+			name: "968 PINNED a CTE of the collision consumed twice in one join",
+			sql: `WITH g AS (SELECT x.a AS b, SUM(x.b) AS a FROM decpair x GROUP BY x.a) ` +
+				`SELECT g1.a AS a1, g2.b AS b2 FROM g g1 JOIN g g2 ON g1.b = g2.b ORDER BY a1`,
+			want: "cols=[a1:DECIMAL(38,4) b2:DECIMAL(9,2)] rows=4 | -0.0100,-0.01 | " +
+				"0.0000,0.00 | 10.0000,2.00 | 38.2500,12.75",
+			pin: map[string]string{
+				spilledArm: "ERR building physical plan: building hash table",
+				"dag": "cols=[a1:DECIMAL(9,2) b2:DECIMAL(9,2)] rows=4 | -0.01,-0.01 | " +
+					"0.00,0.00 | 2.00,2.00 | 12.75,12.75",
+				"dagshuf": "cols=[a1:DECIMAL(9,2) b2:DECIMAL(9,2)] rows=4 | -0.01,-0.01 | " +
+					"0.00,0.00 | 2.00,2.00 | 12.75,12.75",
+			},
+			why: "a join stage's projection reads `g1.a` off the two exchanges of one " +
+				"aggregate and takes the first column of that name; the SPILLED arm's " +
+				"refusal is the 512 KiB budget on a self-join, identical at bb8635a4",
+		},
+		{
+			name: "968 ctl the same CTE consumed ONCE",
+			sql: `WITH g AS (SELECT x.a AS b, SUM(x.b) AS a FROM decpair x GROUP BY x.a) ` +
+				`SELECT g1.a AS a1, g1.b AS b1 FROM g g1 ORDER BY a1`,
+			want: "cols=[a1:DECIMAL(38,4) b1:DECIMAL(9,2)] rows=5 | -0.0100,-0.01 | " +
+				"0.0000,0.00 | 1.0000,NULL | 10.0000,2.00 | 38.2500,12.75",
+			routed: map[string]string{
+				"dag": "unreachable output +1", "dagshuf": "unreachable output +1",
+			},
+		},
+		{
+			name: "968 PINNED DISTINCT together with LIMIT",
+			sql: `SELECT DISTINCT x.a AS b, SUM(x.b) AS a FROM decpair x GROUP BY x.a ` +
+				`ORDER BY a LIMIT 3`,
+			want: cols + " rows=3 | -0.01,-0.0100 | 0.00,0.0000 | NULL,1.0000",
+			pin: map[string]string{
+				"dag":     cols + " rows=3 | -0.01,-0.0100 | 0.00,0.0000 | 2.00,10.0000",
+				"dagshuf": cols + " rows=3 | -0.01,-0.0100 | 0.00,0.0000 | 2.00,10.0000",
+			},
+			why: "the coordinator's post-gather DISTINCT and LIMIT run over the gathered " +
+				"rows by NAME; DISTINCT alone and LIMIT alone are right (both are cells " +
+				"above), and only the pair takes the top three in the KEY's order",
+		},
+		{
+			name: "968 PINNED DISTINCT with LIMIT at 5000 rows",
+			sql: `SELECT DISTINCT x.g AS b, SUM(x.c_i64) AS g FROM typemx x GROUP BY x.g ` +
+				`ORDER BY g LIMIT 3`,
+			want: "cols=[b:INT32 g:DECIMAL(38,0)] rows=3 | NULL,929156787462 | " +
+				"3,1591177773519 | 2,1592105776303",
+			pin: map[string]string{
+				"dag": "cols=[b:INT32 g:DECIMAL(38,0)] rows=3 | 2,1592105776303 | " +
+					"0,1593407780209 | 1,1597875793613",
+				"dagshuf": "cols=[b:INT32 g:DECIMAL(38,0)] rows=3 | 2,1592105776303 | " +
+					"0,1593407780209 | 1,1597875793613",
+			},
+			why: "same site; a DIFFERENT ROW SET, because the LIMIT is taken in the key's " +
+				"order and the two smallest sums never reach the client",
+		},
+		{
+			name: "968 PINNED a window ARGUMENT over the colliding aggregate",
+			sql: `SELECT x.a AS b, SUM(x.b) AS a, SUM(SUM(x.b)) OVER () AS tot ` +
+				`FROM decpair x GROUP BY x.a ORDER BY a`,
+			want: "cols=[b:DECIMAL(9,2) a:DECIMAL(38,4) tot:DECIMAL(38,2)] rows=5 | " +
+				"-0.01,-0.0100,49.2400 | 0.00,0.0000,49.2400 | NULL,1.0000,49.2400 | " +
+				"2.00,10.0000,49.2400 | 12.75,38.2500,49.2400",
+			pin: map[string]string{
+				"single": "cols=[b:DECIMAL(9,2) a:DECIMAL(38,4) tot:DECIMAL(38,2)] rows=5 | " +
+					"-0.01,-0.0100,14.74 | 0.00,0.0000,14.74 | NULL,1.0000,14.74 | " +
+					"2.00,10.0000,14.74 | 12.75,38.2500,14.74",
+				spilledArm: "cols=[b:DECIMAL(9,2) a:DECIMAL(38,4) tot:DECIMAL(38,2)] rows=5 | " +
+					"-0.01,-0.0100,14.74 | 0.00,0.0000,14.74 | NULL,1.0000,14.74 | " +
+					"2.00,10.0000,14.74 | 12.75,38.2500,14.74",
+				"dag": "cols=[b:DECIMAL(9,2) a:DECIMAL(38,4) tot:DECIMAL(38,2)] rows=5 | " +
+					"-0.01,-0.0100,14.74 | 0.00,0.0000,14.74 | NULL,1.0000,14.74 | " +
+					"2.00,10.0000,14.74 | 12.75,38.2500,14.74",
+				"dagshuf": "cols=[b:DECIMAL(9,2) a:DECIMAL(38,4) tot:DECIMAL(38,2)] rows=5 | " +
+					"-0.01,-0.0100,14.74 | 0.00,0.0000,14.74 | NULL,1.0000,14.74 | " +
+					"2.00,10.0000,14.74 | 12.75,38.2500,14.74",
+			},
+			why: "a window's ARGUMENT is a plain string on `exec.WindowColumn` with no slot " +
+				"to carry a position, so it binds the first column of the name and sums " +
+				"the KEYS: 14.74 for PostgreSQL's 49.2400, on all four arms",
+		},
+		{
+			name: "968 PINNED a sort over a derived star of the collision",
+			sql: `SELECT t.* FROM (SELECT x.a AS b, SUM(x.b) AS a FROM decpair x ` +
+				`GROUP BY x.a) t ORDER BY t.a`,
+			want: five,
+			pin: map[string]string{
+				"dag": cols + " rows=5 | -0.01,-0.0100 | 0.00,0.0000 | 2.00,10.0000 | " +
+					"12.75,38.2500 | NULL,1.0000",
+				"dagshuf": cols + " rows=5 | -0.01,-0.0100 | 0.00,0.0000 | 2.00,10.0000 | " +
+					"12.75,38.2500 | NULL,1.0000",
+			},
+			why: "the star expands to the block's two output names and the sort term `t.a` " +
+				"reaches the aggregate's stream as `a`, where the slot pass has no SELECT " +
+				"item to read a class from",
 		},
 	})
 }

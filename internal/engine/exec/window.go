@@ -1224,9 +1224,15 @@ func computeWindowColumnar(combined *batch.RecordBatch, winVecIdx int, wc Window
 
 	if len(sortKeys) > 0 {
 		// Resolve column indices for sort
+		// SortKey.index, not ResolveColumnIndex: a key the planner addressed
+		// by POSITION means the column at that position, and a name stops
+		// being an address the moment the producer emits it twice — an
+		// aggregate whose group key and aggregate output publish one name
+		// (#968). A key with no position falls back to the name, which is
+		// what every key had before.
 		sortKeyIdxs := make([]int, len(sortKeys))
 		for i, key := range sortKeys {
-			sortKeyIdxs[i] = combined.ResolveColumnIndex(key.Column)
+			sortKeyIdxs[i] = key.index(combined)
 		}
 
 		// Build and sort permutation
@@ -1285,7 +1291,7 @@ func computeWindowColumnar(combined *batch.RecordBatch, winVecIdx int, wc Window
 	}
 	orderIdxs := make([]int, len(wc.OrderBy))
 	for i, key := range wc.OrderBy {
-		orderIdxs[i] = combined.ResolveColumnIndex(key.Column)
+		orderIdxs[i] = key.index(combined)
 	}
 
 	// Walk partitions on sorted data

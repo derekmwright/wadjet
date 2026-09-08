@@ -4282,8 +4282,14 @@ func buildWindowFragment(stage physical.Stage, t *distributed.Task, taskInputs m
 		var orderBy []distributed.SortKeySpec
 		for _, ob := range wc.OrderBy {
 			orderBy = append(orderBy, distributed.SortKeySpec{
-				Column:    ob.Column,
-				Desc:      ob.Desc,
+				Column: ob.Column,
+				Desc:   ob.Desc,
+				// The POSITION the planner decided, where the producer emits
+				// the key's name twice and a name says nothing (#968). The
+				// worker already rebuilds an `exec.SortKey` from it; without
+				// this line the DAG's window bound by name while the
+				// single-process one bound by slot.
+				SlotPos:   ob.SlotPos,
 				NullsLast: distributed.NullsLastPtr(ob.NullsLast),
 			})
 		}

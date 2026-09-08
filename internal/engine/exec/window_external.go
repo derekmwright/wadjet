@@ -431,9 +431,12 @@ func computeWindowPartition(parts []*batch.RecordBatch, schema []parquet.Column,
 		if wc.InputCol != "" {
 			inputIdx = combined.ResolveColumnIndex(wc.InputCol)
 		}
+		// SortKey.index, for the reason the in-memory path takes it: a key the
+		// planner addressed by POSITION means the column at that position
+		// (#968). A key with no position falls back to the name.
 		orderIdxs := make([]int, len(wc.OrderBy))
 		for j, key := range wc.OrderBy {
-			orderIdxs[j] = combined.ResolveColumnIndex(key.Column)
+			orderIdxs[j] = key.index(combined)
 		}
 		if err := computePartitionColumnar(combined, combined.Columns[base+i], 0, n, wc, inputIdx, orderIdxs); err != nil {
 			return nil, err

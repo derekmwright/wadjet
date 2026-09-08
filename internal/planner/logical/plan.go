@@ -596,6 +596,16 @@ type OrderExpr struct {
 	// is refused loudly rather than sorted on the constant, which would be a
 	// silent no-op.
 	Position int
+	// NamesAggregateOutput records that this term named an AGGREGATE CALL
+	// before it was re-spelled over the aggregate below it
+	// (respellOverAggregate). It is the CLASS, kept because a name stops
+	// being an address the moment the aggregate emits one twice: `GROUP BY
+	// x.a` beside `SUM(x.b) AS a` publishes two columns called `a`, and a
+	// WINDOW's `ORDER BY SUM(x.b)` — re-spelled to `a` — bound the group key
+	// and ranked five rows in the key's order while the aggregate's own
+	// column beside it was right (#968). Only the window's ORDER BY sets it;
+	// a term nothing re-spelled has no class to record.
+	NamesAggregateOutput bool
 	// SlotPos is the 1-based select-list POSITION this key was written as,
 	// kept even after Column has been resolved to a name. Unlike Position it
 	// is not a "not yet resolved" marker: it is the ADDRESS, for the case

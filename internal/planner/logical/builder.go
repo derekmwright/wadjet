@@ -563,8 +563,17 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 					winExprs[i].PartitionBy[j], winAggRefs, groupKeyRefs)
 			}
 			for j := range winExprs[i].OrderBy {
-				winExprs[i].OrderBy[j].Column = respellOverAggregate(
-					winExprs[i].OrderBy[j].Column, winAggRefs, groupKeyRefs)
+				before := winExprs[i].OrderBy[j].Column
+				after := respellOverAggregate(before, winAggRefs, groupKeyRefs)
+				winExprs[i].OrderBy[j].Column = after
+				// …and WHICH map re-spelled it, which is the CLASS the name
+				// itself can no longer carry once the aggregate emits it
+				// twice. Asking the aggregate map ALONE is the test: a term
+				// that names an aggregate CALL is re-spelled by it, and a
+				// group-key reference is not (#968).
+				if after != before && respellOverAggregate(before, winAggRefs, nil) == after {
+					winExprs[i].OrderBy[j].NamesAggregateOutput = true
+				}
 			}
 		}
 		plan = NewWindow(plan, winExprs)
