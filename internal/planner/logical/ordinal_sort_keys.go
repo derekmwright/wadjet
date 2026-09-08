@@ -156,6 +156,18 @@ func projectOutputNamesBelow(n *Node) []string {
 			// RequiredColumns is deliberately NOT used, because pruning may
 			// narrow it and a position counts the query's OUTPUT columns.
 			return append([]string(nil), n.ScanColumns...)
+		case NodeUnion, NodeIntersect, NodeExcept:
+			// A SET OPERATION publishes its LEFTMOST arm's names — PostgreSQL's
+			// rule, the same one `plansql.BlockOutputColumns` and
+			// `applyColumnAliases` already read — so a position over it is
+			// countable. `SELECT * FROM (SELECT … UNION ALL SELECT …) u
+			// ORDER BY 2` was refused on every arm for a query PostgreSQL
+			// answers, and psql and every table preview send exactly that
+			// shape (#982, #810's residual).
+			if len(n.Children) == 0 {
+				return nil
+			}
+			n = n.Children[0]
 		case NodeDistinct, NodeFilter, NodeLimit:
 			if len(n.Children) == 0 {
 				return nil
