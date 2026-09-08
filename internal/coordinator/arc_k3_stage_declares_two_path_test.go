@@ -235,18 +235,25 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 				`FROM lat_item) s ON s.order_id = o.id ORDER BY o.id`,
 			want: `order_id,c,id,customer,total | 1,NULL,1,Alice,150 | 1,NULL,1,Alice,150 | ` +
 				`2,NULL,2,Bob,200 | 2,NULL,2,Bob,200`},
-		// The container cases publish the SOURCE column beside the container,
-		// on every arm and identically at bb8635a4 — a pre-existing leak this
-		// arc does not touch, pinned in `want` so it fails the day it stops.
+		// The container cases: the single-process arms publish PostgreSQL's
+		// column SET, and the DAG publishes the container's SOURCE column
+		// beside it. That leak is PRE-EXISTING and identical at bb8635a4 —
+		// what this arc changes is only the disposition, from routed back to
+		// executed — so it is pinned per arm rather than described, and the
+		// day the DAG stops leaking, `wantDAG` fails.
 		{name: "computed/a-container-over-a-plain-column",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, ARRAY[amount] AS a ` +
 				`FROM lat_item) s ON s.order_id = o.id ORDER BY o.id`,
-			want: `amount,order_id,a,id,customer,total | 50,1,[50],1,Alice,150 | ` +
+			want: `order_id,a,id,customer,total | 1,[50],1,Alice,150 | ` +
+				`1,[100],1,Alice,150 | 2,[75],2,Bob,200 | 2,[125],2,Bob,200`,
+			wantDAG: `amount,order_id,a,id,customer,total | 50,1,[50],1,Alice,150 | ` +
 				`100,1,[100],1,Alice,150 | 75,2,[75],2,Bob,200 | 125,2,[125],2,Bob,200`},
 		{name: "computed/a-two-element-container",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, ARRAY[amount, amount * 2] ` +
 				`AS a FROM lat_item) s ON s.order_id = o.id ORDER BY o.id`,
-			want: `amount,order_id,a,id,customer,total | 50,1,[50 100],1,Alice,150 | ` +
+			want: `order_id,a,id,customer,total | 1,[50 100],1,Alice,150 | ` +
+				`1,[100 200],1,Alice,150 | 2,[75 150],2,Bob,200 | 2,[125 250],2,Bob,200`,
+			wantDAG: `amount,order_id,a,id,customer,total | 50,1,[50 100],1,Alice,150 | ` +
 				`100,1,[100 200],1,Alice,150 | 75,2,[75 150],2,Bob,200 | ` +
 				`125,2,[125 250],2,Bob,200`},
 
