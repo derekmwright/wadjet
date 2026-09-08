@@ -146,7 +146,7 @@ func TestN1ATwoGroupedLateralsPublishTheirOwnColumns(t *testing.T) {
 			// still reorders. Its column list is what it was at base — this
 			// change narrows the rule to MANUFACTURED joins and nothing else.
 			name: "control: an ordinary two-way inner join",
-			sql: "SELECT * FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ORDER BY i.id",
+			sql:  "SELECT * FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ORDER BY i.id",
 			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 " +
 				"o.id:INT64 customer:STRING total:FLOAT64] rows=4 | " +
 				"1,1,Widget,50,1,Alice,150 | 2,1,Gadget,100,1,Alice,150 | " +
