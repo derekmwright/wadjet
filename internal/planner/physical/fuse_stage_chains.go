@@ -228,8 +228,18 @@ func fuseOneChainLink(stages []Stage) ([]Stage, bool) {
 			QualifyAllBuildCols: c.QualifyAllBuildCols,
 			Columns:             c.Columns,
 			HiddenJoinCols:      c.HiddenJoinCols,
-			Partitioned:         c.Type == StageHashJoin,
-			JoinBuildSchema:     c.JoinBuildSchema,
+			// The absorbed join's own empty-input rules. A LATERAL's pad
+			// marker and its defaults belong to the JOIN that manufactured the
+			// padded row, so the fused fragment runs one
+			// `exec.LateralEmptyDefault` per absorbed lateral join. Without
+			// them the second of two independent laterals published its minted
+			// slot `__key_1` to the client and left its defaults unapplied
+			// (#988).
+			LateralEmptyDefaults: c.LateralEmptyDefaults,
+			LateralPadMarker:     c.LateralPadMarker,
+			LateralDropMarker:    c.LateralDropMarker,
+			Partitioned:          c.Type == StageHashJoin,
+			JoinBuildSchema:      c.JoinBuildSchema,
 		})
 		p.ChainedJoins = append(p.ChainedJoins, c.ChainedJoins...)
 		p.Dependencies = append(p.Dependencies, cBuildDeps...)

@@ -191,6 +191,30 @@ func TestArcJ1AHiddenSlotIsNotInTheRowDescription(t *testing.T) {
 		{"ctl_an_explicit_list_over_the_lateral",
 			`SELECT o.customer AS c, s.mx AS m ` + aggLateral,
 			[]string{"c", "m"}, "", ""},
+		// TWO INDEPENDENT LATERALS over one table (#988). The leak is a
+		// DISTRIBUTED one — `fuseStageChains` absorbed the second join into
+		// the first's fragment and its `ChainedJoinSpec` carried neither the
+		// pad marker nor the empty-input defaults, so `__key_1` reached the
+		// client on both DAG arms. This door is single-process and was right
+		// throughout; it is here because the wire is where a leaked column is
+		// SEEN, and a shape whose column set moved on one path is asserted on
+		// every door this package can drive.
+		{"two_independent_laterals",
+			`SELECT * FROM j1ord o JOIN LATERAL (SELECT MAX(amount) AS mx FROM j1item ` +
+				`WHERE order_id = o.id) s ON true JOIN LATERAL (SELECT MIN(amount) AS mn ` +
+				`FROM j1item WHERE order_id = o.id) s2 ON true`,
+			[]string{"id", "customer", "total", "mx", "mn"}, "", ""},
+		{"three_independent_laterals",
+			`SELECT * FROM j1ord o JOIN LATERAL (SELECT MAX(amount) AS mx FROM j1item ` +
+				`WHERE order_id = o.id) s ON true JOIN LATERAL (SELECT MIN(amount) AS mn ` +
+				`FROM j1item WHERE order_id = o.id) s2 ON true JOIN LATERAL (` +
+				`SELECT SUM(amount) AS sm FROM j1item WHERE order_id = o.id) s3 ON true`,
+			[]string{"id", "customer", "total", "mx", "mn", "sm"}, "", ""},
+		{"derived_star_over_two_laterals",
+			`SELECT * FROM (SELECT * FROM j1ord o JOIN LATERAL (SELECT MAX(amount) AS mx ` +
+				`FROM j1item WHERE order_id = o.id) s ON true JOIN LATERAL (` +
+				`SELECT MIN(amount) AS mn FROM j1item WHERE order_id = o.id) s2 ON true) x`,
+			[]string{"id", "customer", "total", "mx", "mn"}, "", ""},
 	} {
 		c := c
 		t.Run(c.name, func(t *testing.T) {

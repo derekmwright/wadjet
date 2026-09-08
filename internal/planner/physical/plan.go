@@ -733,6 +733,19 @@ type ChainedJoinSpec struct {
 	// Stage.HiddenJoinCols): fusing a join into its parent must not turn a
 	// column the join hid into one the fused stage publishes.
 	HiddenJoinCols []HiddenJoinCol
+	// LateralEmptyDefaults / LateralPadMarker / LateralDropMarker are the
+	// absorbed join's own empty-input rules (see the Stage fields of the same
+	// names). A LATERAL's pad marker and its per-column defaults belong to the
+	// JOIN that manufactured the padded row, so a fused fragment owes one
+	// `exec.LateralEmptyDefault` per absorbed lateral join, not one per
+	// fragment: with these fields missing, `SELECT * FROM o JOIN LATERAL (…) s
+	// ON true JOIN LATERAL (…) s2 ON true` published the second lowering's
+	// minted slot `__key_1` to the client and left its empty-input default
+	// unapplied — `COUNT(*) + 1` came back NULL for an outer row the lateral
+	// matched nothing for, where PostgreSQL answers 1 (#988).
+	LateralEmptyDefaults []LateralEmptyDefaultSpec
+	LateralPadMarker     string
+	LateralDropMarker    bool
 	// JoinBuildSchema is the absorbed join's declared build columns, read
 	// only when that build turns out to be empty (#348).
 	JoinBuildSchema []parquet.Column
@@ -6365,6 +6378,16 @@ func fuseJoinStages(stages []Stage) []Stage {
 		// the day a shape needs it; until then, not fusing is the honest
 		// alternative to carrying it silently.
 		if s.NullAwareAnti || consumer.NullAwareAnti {
+			continue
+		}
+		// A LATERAL's hidden slot and its empty-input defaults belong to the
+		// JOIN that minted them, and `FusedJoinSpec` has a field for neither —
+		// absorbing such a stage would publish a reserved name to the client
+		// and leave an unmatched outer row's defaults unapplied (#988). Same
+		// call as the two above: not fusing is the honest alternative to
+		// carrying it nowhere. `ChainedJoinSpec` DOES carry both, so the
+		// downstream-fusion pass absorbs these instead of declining.
+		if s.LateralPadMarker != "" || len(s.HiddenJoinCols) > 0 {
 			continue
 		}
 		// Absorbing a stage DELETES it, and `FusedJoinSpec` has no field for

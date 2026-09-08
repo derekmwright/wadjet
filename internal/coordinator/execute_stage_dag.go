@@ -3158,8 +3158,16 @@ func (c *Coordinator) dispatchComputeStage(
 				QualifyAllBuildCols: cj.QualifyAllBuildCols,
 				OutputColumns:       append([]string(nil), cj.Columns...),
 				HiddenColumns:       wireHiddenJoinCols(cj.HiddenJoinCols),
-				LateMaterialize:     c.config.LateMaterialization,
-				BuildSchema:         wireColumnSpecs(cj.JoinBuildSchema),
+				// The absorbed join's own empty-input rules ride with it, so
+				// the worker builds one `exec.LateralEmptyDefault` per
+				// absorbed lateral join — the position the single-process
+				// planner gives it, directly above the probe that made the pad
+				// (#988).
+				EmptyDefaults:   wireLateralDefaults(cj.LateralEmptyDefaults),
+				PadMarker:       cj.LateralPadMarker,
+				DropMarker:      cj.LateralDropMarker,
+				LateMaterialize: c.config.LateMaterialization,
+				BuildSchema:     wireColumnSpecs(cj.JoinBuildSchema),
 			})
 			if len(cj.FilterExprs) > 0 {
 				chainedOps = append(chainedOps, distributed.OpSpec{
