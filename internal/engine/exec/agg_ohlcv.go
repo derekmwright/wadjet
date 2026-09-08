@@ -64,6 +64,14 @@ import (
 // never a wrapped or narrowed number (ADR-0024).
 type ohlcvState struct {
 	dom ohlcvDomain
+	// fields is the DECLARED ROW this state finishes as. It is written by the
+	// operator that computed the values, and it travels INSIDE the encoding,
+	// because the operator is the only layer that always knows it: the
+	// planner cannot walk a COMPUTED argument to a catalog column, and the
+	// coordinator's fold sees a string and no vectors at all. Carrying it
+	// here is what makes `ohlcv(ts, px*2, vol)` answer the same on the DAG as
+	// in process instead of failing at the fold (#965).
+	fields []parquet.Column
 
 	n       int64
 	firstTS int64
@@ -405,9 +413,12 @@ func (s *ohlcvState) merge(o *ohlcvState) {
 		// the AggOhlcvStateMerge arm each do. Reading it out of the source
 		// here would let a float-domain accumulator silently become an exact
 		// one because the first partial it saw was.
-		dom := s.dom
+		dom, fields := s.dom, s.fields
 		*s = *o
 		s.dom = dom
+		if len(fields) == len(OhlcvFieldNames) {
+			s.fields = fields
+		}
 		return
 	}
 	s.overflow = s.overflow || o.overflow
@@ -474,8 +485,9 @@ func (s *ohlcvState) value(fields []parquet.Column) (any, error) {
 		return nil, ohlcvOverflow()
 	}
 	if len(fields) != len(OhlcvFieldNames) {
-		return nil, sqlerr.New("XX000", "ohlcv: %d declared fields, want %d",
-			len(fields), len(OhlcvFieldNames))
+		return nil, sqlerr.New("XX000",
+			"ohlcv: the bar has no declared field list (%d of %d), so there is no "+
+				"ROW to write it into", len(fields), len(OhlcvFieldNames))
 	}
 	out := make(map[string]any, len(fields))
 	if s.dom.exact {
@@ -581,18 +593,21 @@ func ohlcvOverflow() error {
 
 // --- the encoded partial state ----------------------------------------------
 
-// ohlcvStateWidth is the encoded width of a bar's partial state: 128 raw bytes
-// hex-encoded to 256 ASCII characters.
+// ohlcvStateWidth is the encoded width of a bar's partial state: 136 raw bytes
+// hex-encoded to 272 ASCII characters.
 //
-//	[0]      format version (1)
-//	[1]      flags: bit0 exact, bit1 overflow
-//	[2]      price scale       [3] volume scale     [4] product scale
-//	[5:8]    reserved, zero
-//	[8:16]   n            int64 BE
-//	[16:24]  firstTS      int64 BE
-//	[24:32]  lastTS       int64 BE
-//	[32:48]  open      [48:64] high   [64:80] low   [80:96] close
-//	[96:112] sumVolume    [112:128] sumPriceTimesVolume
+//	[0]       format version (1)
+//	[1]       flags: bit0 exact, bit1 overflow
+//	[2]       carrier price scale  [3] volume scale  [4] product scale
+//	[5:8]     the PRICE field's declared (type, precision, scale)
+//	[8:11]    the VOLUME field's declared (type, precision, scale)
+//	[11:14]   the VWAP field's declared (type, precision, scale)
+//	[14:16]   reserved, zero
+//	[16:24]   n            int64 BE
+//	[24:32]   firstTS      int64 BE
+//	[32:40]   lastTS       int64 BE
+//	[40:56]   open   [56:72] high   [72:88] low   [88:104] close
+//	[104:120] sumVolume    [120:136] sumPriceTimesVolume
 //
 // A value slot is an Int128 (Hi then Lo, big-endian) when exact, and a float64
 // in its low 8 bytes when not. The state travels as a STRING column — through
@@ -600,11 +615,13 @@ func ohlcvOverflow() error {
 // varianceState.encode records: every one of those is happier with text than
 // with arbitrary bytes, and float64 bits round-trip exactly through hex.
 //
-// The domain is IN the header, so the coordinator's fold decodes a bar with
-// nothing but the string.
-const ohlcvStateWidth = 256
+// Both the carrier AND the declared ROW are in the header, so the
+// coordinator's fold finishes a bar with nothing but the string. Everything
+// there fits a byte: 22 type ids, and a DECIMAL's precision and scale top out
+// at 38.
+const ohlcvStateWidth = 272
 
-const ohlcvStateBytes = 128
+const ohlcvStateBytes = 136
 
 func (s *ohlcvState) encode() string {
 	var buf [ohlcvStateBytes]byte
@@ -618,25 +635,63 @@ func (s *ohlcvState) encode() string {
 	buf[2] = byte(s.dom.priceScale)
 	buf[3] = byte(s.dom.volScale)
 	buf[4] = byte(s.dom.pvScale)
-	binary.BigEndian.PutUint64(buf[8:16], uint64(s.n))
-	binary.BigEndian.PutUint64(buf[16:24], uint64(s.firstTS))
-	binary.BigEndian.PutUint64(buf[24:32], uint64(s.lastTS))
+	// The declared ROW: the price group (all four fields share it), the
+	// volume field and the vwap field.
+	putOhlcvField(buf[5:8], s.fields, 0)
+	putOhlcvField(buf[8:11], s.fields, 4)
+	putOhlcvField(buf[11:14], s.fields, 5)
+	binary.BigEndian.PutUint64(buf[16:24], uint64(s.n))
+	binary.BigEndian.PutUint64(buf[24:32], uint64(s.firstTS))
+	binary.BigEndian.PutUint64(buf[32:40], uint64(s.lastTS))
 	if s.dom.exact {
-		putOhlcvInt128(buf[32:48], s.firstPx)
-		putOhlcvInt128(buf[48:64], s.high)
-		putOhlcvInt128(buf[64:80], s.low)
-		putOhlcvInt128(buf[80:96], s.lastPx)
-		putOhlcvInt128(buf[96:112], s.sumVol)
-		putOhlcvInt128(buf[112:128], s.sumPV)
+		putOhlcvInt128(buf[40:56], s.firstPx)
+		putOhlcvInt128(buf[56:72], s.high)
+		putOhlcvInt128(buf[72:88], s.low)
+		putOhlcvInt128(buf[88:104], s.lastPx)
+		putOhlcvInt128(buf[104:120], s.sumVol)
+		putOhlcvInt128(buf[120:136], s.sumPV)
 	} else {
-		putOhlcvFloat(buf[32:48], s.firstPxF)
-		putOhlcvFloat(buf[48:64], s.highF)
-		putOhlcvFloat(buf[64:80], s.lowF)
-		putOhlcvFloat(buf[80:96], s.lastPxF)
-		putOhlcvFloat(buf[96:112], s.sumVolF)
-		putOhlcvFloat(buf[112:128], s.sumPVF)
+		putOhlcvFloat(buf[40:56], s.firstPxF)
+		putOhlcvFloat(buf[56:72], s.highF)
+		putOhlcvFloat(buf[72:88], s.lowF)
+		putOhlcvFloat(buf[88:104], s.lastPxF)
+		putOhlcvFloat(buf[104:120], s.sumVolF)
+		putOhlcvFloat(buf[120:136], s.sumPVF)
 	}
 	return hex.EncodeToString(buf[:])
+}
+
+// putOhlcvField writes one declared field's (type, precision, scale). An
+// absent declaration writes zeroes, which decode reads back as "not declared"
+// and the caller then supplies — the shape a state built before its operator
+// resolved its columns has.
+func putOhlcvField(dst []byte, fields []parquet.Column, i int) {
+	if i >= len(fields) {
+		return
+	}
+	dst[0] = byte(fields[i].Type)
+	dst[1] = byte(fields[i].Precision)
+	dst[2] = byte(fields[i].Scale)
+}
+
+// getOhlcvFields rebuilds the declared ROW from the header. ok=false when the
+// header carries no declaration at all.
+func getOhlcvFields(buf []byte) ([]parquet.Column, bool) {
+	if buf[5] == 0 && buf[8] == 0 && buf[11] == 0 {
+		return nil, false
+	}
+	col := func(name string, at int) parquet.Column {
+		return parquet.Column{
+			Name: name, Type: parquet.TypeID(buf[at]), Nullable: true,
+			Precision: int(buf[at+1]), Scale: int(buf[at+2]),
+		}
+	}
+	out := make([]parquet.Column, 0, len(OhlcvFieldNames))
+	for _, n := range OhlcvFieldNames[:4] {
+		out = append(out, col(n, 5))
+	}
+	out = append(out, col("volume", 8), col("vwap", 11))
+	return out, true
 }
 
 func putOhlcvInt128(dst []byte, v batch.Int128) {
@@ -681,24 +736,27 @@ func decodeOhlcvState(s string) (ohlcvState, bool) {
 			pvScale:    int(buf[4]),
 		},
 		overflow: buf[1]&2 != 0,
-		n:        int64(binary.BigEndian.Uint64(buf[8:16])),
-		firstTS:  int64(binary.BigEndian.Uint64(buf[16:24])),
-		lastTS:   int64(binary.BigEndian.Uint64(buf[24:32])),
+		n:        int64(binary.BigEndian.Uint64(buf[16:24])),
+		firstTS:  int64(binary.BigEndian.Uint64(buf[24:32])),
+		lastTS:   int64(binary.BigEndian.Uint64(buf[32:40])),
+	}
+	if f, ok := getOhlcvFields(buf[:]); ok {
+		st.fields = f
 	}
 	if st.dom.exact {
-		st.firstPx = getOhlcvInt128(buf[32:48])
-		st.high = getOhlcvInt128(buf[48:64])
-		st.low = getOhlcvInt128(buf[64:80])
-		st.lastPx = getOhlcvInt128(buf[80:96])
-		st.sumVol = getOhlcvInt128(buf[96:112])
-		st.sumPV = getOhlcvInt128(buf[112:128])
+		st.firstPx = getOhlcvInt128(buf[40:56])
+		st.high = getOhlcvInt128(buf[56:72])
+		st.low = getOhlcvInt128(buf[72:88])
+		st.lastPx = getOhlcvInt128(buf[88:104])
+		st.sumVol = getOhlcvInt128(buf[104:120])
+		st.sumPV = getOhlcvInt128(buf[120:136])
 	} else {
-		st.firstPxF = getOhlcvFloat(buf[32:48])
-		st.highF = getOhlcvFloat(buf[48:64])
-		st.lowF = getOhlcvFloat(buf[64:80])
-		st.lastPxF = getOhlcvFloat(buf[80:96])
-		st.sumVolF = getOhlcvFloat(buf[96:112])
-		st.sumPVF = getOhlcvFloat(buf[112:128])
+		st.firstPxF = getOhlcvFloat(buf[40:56])
+		st.highF = getOhlcvFloat(buf[56:72])
+		st.lowF = getOhlcvFloat(buf[72:88])
+		st.lastPxF = getOhlcvFloat(buf[88:104])
+		st.sumVolF = getOhlcvFloat(buf[104:120])
+		st.sumPVF = getOhlcvFloat(buf[120:136])
 	}
 	return st, true
 }
@@ -728,25 +786,44 @@ func MergeOhlcvStates(acc, next string) string {
 }
 
 // FinalizeOhlcvState decodes a fully merged partial and finishes it as the bar
-// its declared fields describe. It is the coordinator/worker fold's entry
-// point (worker/var_fold.go's family), and it goes through exactly the same
+// its own header describes. It is the coordinator/worker fold's entry point
+// (worker/var_fold.go's family), and it goes through exactly the same
 // ohlcvState.value the single-process operator calls.
+//
+// It takes NO declaration argument, and that is the point: the operator that
+// computed the values wrote their declared types beside them, so the fold
+// cannot finish a bar against a field list the values were not computed for.
+// The planner's list is a DECLARATION for the stage and the wire; this is the
+// one the value belongs to.
 //
 // ok=false with a nil error means SQL NULL — an empty group, or a state
 // nothing wrote.
-func FinalizeOhlcvState(encoded string, fields []parquet.Column) (any, bool, error) {
+func FinalizeOhlcvState(encoded string) (any, []parquet.Column, bool, error) {
 	st, ok := decodeOhlcvState(encoded)
 	if !ok {
-		return nil, false, nil
+		return nil, nil, false, nil
+	}
+	if st.n == 0 {
+		// An EMPTY bar is NULL whatever shape it would have had, and it is
+		// the one state that legitimately carries no declaration: a partial
+		// task whose filter matched no rows never resolved its input columns,
+		// so it had nothing to declare from. That identity row is the shape
+		// #685 is about, one type over.
+		return nil, st.fields, false, nil
+	}
+	fields := st.fields
+	if len(fields) != len(OhlcvFieldNames) {
+		return nil, nil, false, sqlerr.New("XX000",
+			"ohlcv: the encoded state carries no declared fields")
 	}
 	v, err := st.value(fields)
 	if err != nil {
-		return nil, false, err
+		return nil, nil, false, err
 	}
 	if v == nil {
-		return nil, false, nil
+		return nil, fields, false, nil
 	}
-	return v, true, nil
+	return v, fields, true, nil
 }
 
 // OhlcvStateColumnPrefix marks the synthetic column a partial bar travels in.
@@ -777,6 +854,17 @@ func OhlcvStateOutput(col string) (string, bool) {
 // another; the runtime fallback exists because a computed argument, or a
 // partial's own output read by a merge stage, gives the planner no column to
 // walk (aggSpecOutputType's "unresolved" answer).
+// declaredFields is the ROW this state finishes as: its OWN declaration when
+// it has one (stamped at construction, or carried in from a decoded partial),
+// and the operator's derivation otherwise. The state's own comes first because
+// it is the one the VALUES were computed against.
+func (s *ohlcvState) declaredFields(h *HashAggregate, j int) []parquet.Column {
+	if len(s.fields) == len(OhlcvFieldNames) {
+		return s.fields
+	}
+	return h.ohlcvFields(j)
+}
+
 func (h *HashAggregate) ohlcvFields(j int) []parquet.Column {
 	if j < len(h.Aggs) && len(h.Aggs[j].OutputFields) == len(OhlcvFieldNames) {
 		return h.Aggs[j].OutputFields
@@ -798,14 +886,12 @@ func (h *HashAggregate) ohlcvFields(j int) []parquet.Column {
 			return fields
 		}
 	}
-	// Nothing resolved. A float bar is the shape every numeric input can be
-	// narrowed to, and value() reports a mismatch rather than writing a
-	// number the column cannot hold.
-	fields := make([]parquet.Column, len(OhlcvFieldNames))
-	for i, n := range OhlcvFieldNames {
-		fields[i] = parquet.Column{Name: n, Type: parquet.TypeFloat64, Nullable: true}
-	}
-	return fields
+	// Nothing resolved: NO declaration. A guessed one is the worst answer
+	// available — it builds a ROW vector whose children are the wrong types
+	// and writes the values into them — so value() reports the absence
+	// instead, and every caller that can supply one (a decoded partial's own
+	// header) is asked first.
+	return nil
 }
 
 // The wire spellings of the bar's partial and merge forms. They are function

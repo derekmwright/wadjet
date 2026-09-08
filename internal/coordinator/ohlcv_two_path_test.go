@@ -194,6 +194,35 @@ func ohlcvCells() []ohlcvCell {
 			pgSays: "the same two bars; the embedded API boxes a ROW as a map, so this cell " +
 				"asserts the SHAPE and the values, and pgwire's own composite rendering is " +
 				"gated in pgwire.TestPGWireRendersTheBarAsAPostgresComposite"},
+		// A COMPUTED PRICE answers, and its declared fields follow the
+		// EXPRESSION's type rather than the column's: `px_d92*2` is
+		// DECIMAL(11,2), so the four price fields are, and vwap takes AVG's
+		// +4 on that scale. The planner cannot walk a computed argument to a
+		// catalog column, so this is the cell that exercises the operator's
+		// own derivation of the ROW from the vectors it reads — the SAME
+		// function (exec.OhlcvOutputFields), asked at the other end.
+		{name: "a_computed_price_answers",
+			sql: `SELECT (b).open AS o, (b).high AS h, (b).low AS l, (b).close AS c,
+			             (b).volume AS v, (b).vwap AS w
+			      FROM (SELECT ohlcv(ts, px_d92*2, vol_i64) AS b FROM ` + ohlcvTable + `) t`,
+			want:   []string{"o=20.00|h=42.00|l=14.00|c=42.00|v=24|w=29.166667"},
+			pgSays: "the same bar over 2*px: (20, 42, 14, 42, 24, 29.1666666…)"},
+		// THE BOUNDARY, from both sides. A computed ORDERING key or a computed
+		// VOLUME is materialized by NO engine — the pre-aggregate projection
+		// carries a bare column reference and declines an expression, which is
+		// #713's rule for MIN_BY's second argument and applies here to the
+		// second AND the third. Both fail loud, on every arm, with the same
+		// message; the fix deliberately does not invent a pass-through for a
+		// name nothing produces, which would replace one engine's loud failure
+		// with a column of NULLs.
+		{name: "a_computed_ordering_key_is_loud_on_every_arm",
+			sql:            `SELECT ohlcv(ts + 0, px_f64, vol_i64) AS b FROM ` + ohlcvTable,
+			wantErrLikeAll: "is not a column of its input",
+			pgSays:         "PostgreSQL answers it; no wadjet engine materializes a computed second argument"},
+		{name: "a_computed_volume_is_loud_on_every_arm",
+			sql:            `SELECT ohlcv(ts, px_f64, vol_i64*2) AS b FROM ` + ohlcvTable,
+			wantErrLikeAll: "is not a column of its input",
+			pgSays:         "PostgreSQL answers it; same boundary, one argument over"},
 		// THE BOUNDARY, from both sides. An argument type that has no bar is
 		// refused on every arm with the same sentence, never answered as an
 		// empty bar.

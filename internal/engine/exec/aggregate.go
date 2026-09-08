@@ -1795,7 +1795,12 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 			h.aggColIdx3[i] = columnIndexFallback(b, agg.InputCol3)
 			// Loud for the one function that READS it, stale metadata on the
 			// merge stage above it — readsSecondColumn's rule.
-			if h.aggColIdx3[i] < 0 && agg.Func == AggOhlcv {
+			// AggOhlcvState is here beside AggOhlcv because a PARTIAL bar
+			// reads the raw columns too; only the MERGE form consumes an
+			// encoded state and carries InputCol3 as stale metadata. Without
+			// it, `ohlcv(ts, price, volume*2)` failed loud in process and
+			// answered a NULL bar on the DAG (#965, #713's boundary).
+			if h.aggColIdx3[i] < 0 && (agg.Func == AggOhlcv || agg.Func == AggOhlcvState) {
 				return unresolvedAggColumn("aggregate input", agg.InputCol3, b)
 			}
 			if idx := h.aggColIdx3[i]; idx >= 0 && idx < len(b.Schema) {
@@ -4139,7 +4144,22 @@ func (h *HashAggregate) initGroupState(ext *groupStateExtras, b *batch.RecordBat
 			if i < len(h.aggOhlcvDom) {
 				dom = h.aggOhlcvDom[i]
 			}
-			ext.extraState[i] = &ohlcvState{dom: dom}
+			// The declared ROW is stamped on at construction, by the forms
+			// that READ the raw columns, and travels with the values through
+			// the encoding — so a merge stage and the coordinator's fold
+			// finish the bar against the declaration it was COMPUTED for
+			// rather than one they had to be told (#965).
+			//
+			// The MERGE form stamps NOTHING. Its input is the encoded state
+			// column, a STRING, so any declaration it derived would be a
+			// guess — and a guessed one is worse than none: it wrote a
+			// DECIMAL bar's digits into FLOAT64 children and tripped the #361
+			// silent-write guard. It adopts the first partial's instead.
+			st := &ohlcvState{dom: dom}
+			if agg.Func != AggOhlcvStateMerge {
+				st.fields = h.ohlcvFields(i)
+			}
+			ext.extraState[i] = st
 		case AggMinBy:
 			ext.extraState[i] = &minMaxByState{isMin: true}
 		case AggMaxBy:
@@ -4428,6 +4448,9 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			dst := ext.extraState[i].(*ohlcvState)
 			if dst.n == 0 {
 				dst.dom = partial.dom
+				if len(dst.fields) != len(OhlcvFieldNames) {
+					dst.fields = partial.fields
+				}
 			}
 			dst.merge(&partial)
 
@@ -5128,7 +5151,7 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 				out.Columns[colIdx].SetValue(i, state.encode())
 			case AggOhlcv:
 				state := ext.extraState[j].(*ohlcvState)
-				v, err := state.value(h.ohlcvFields(j))
+				v, err := state.value(state.declaredFields(h, j))
 				if err != nil {
 					return nil, err
 				}
@@ -6048,6 +6071,9 @@ func (h *HashAggregate) mergeExtraState(dst, src *groupStateExtras) {
 			}
 			if d.n == 0 {
 				d.dom = s.dom
+				if len(d.fields) != len(OhlcvFieldNames) {
+					d.fields = s.fields
+				}
 			}
 			d.merge(s)
 		case *minMaxByState:

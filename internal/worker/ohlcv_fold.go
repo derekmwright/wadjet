@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -35,11 +34,12 @@ const ohlcvStatePrefix = exec.OhlcvStateColumnPrefix
 // the stage above them would re-aggregate finished bars — which is a MAX over
 // two ROWs, the defect the decomposition exists to remove.
 //
-// aggs is the fragment's own spec list; it carries each bar's DECLARED FIELDS
-// (distributed.AggSpec.OutputFields), which is the only source for them out
-// here — the worker has no catalog, and the state's own header carries the
-// carrier and the scales but not the parquet types.
-func applyOhlcvFold(batches []*batch.RecordBatch, aggs []distributed.AggSpec) ([]*batch.RecordBatch, error) {
+// It takes NO declaration from the plan: the encoded state carries the ROW it
+// was COMPUTED for, in its own header. The planner cannot always supply one —
+// it has no catalog column to walk for a COMPUTED argument, and
+// `ohlcv(ts, price*2, volume)` is exactly that — so a fold that depended on
+// the spec answered in process and failed loud on the DAG.
+func applyOhlcvFold(batches []*batch.RecordBatch) ([]*batch.RecordBatch, error) {
 	if len(batches) == 0 {
 		return batches, nil
 	}
@@ -47,10 +47,9 @@ func applyOhlcvFold(batches []*batch.RecordBatch, aggs []distributed.AggSpec) ([
 	if len(cols) == 0 {
 		return batches, nil
 	}
-	fields := ohlcvFieldsBySpec(aggs)
 	out := make([]*batch.RecordBatch, len(batches))
 	for i, b := range batches {
-		fb, err := foldOneOhlcvBatch(b, cols, fields)
+		fb, err := foldOneOhlcvBatch(b, cols)
 		if err != nil {
 			return nil, err
 		}
@@ -76,22 +75,7 @@ func findOhlcvFoldCols(schema []parquet.Column) []ohlcvFoldCol {
 	return out
 }
 
-// ohlcvFieldsBySpec indexes the declared bar fields by the ORIGINAL output
-// column name, which is what the synthetic's suffix is.
-func ohlcvFieldsBySpec(aggs []distributed.AggSpec) map[string][]parquet.Column {
-	out := map[string][]parquet.Column{}
-	for _, a := range aggs {
-		name, ok := exec.OhlcvStateOutput(a.OutputCol)
-		if !ok || len(a.OutputFields) == 0 {
-			continue
-		}
-		out[name] = aggSpecOutputFields(a)
-	}
-	return out
-}
-
-func foldOneOhlcvBatch(in *batch.RecordBatch, cols []ohlcvFoldCol,
-	fields map[string][]parquet.Column) (*batch.RecordBatch, error) {
+func foldOneOhlcvBatch(in *batch.RecordBatch, cols []ohlcvFoldCol) (*batch.RecordBatch, error) {
 	if in == nil {
 		return nil, nil
 	}
@@ -99,16 +83,17 @@ func foldOneOhlcvBatch(in *batch.RecordBatch, cols []ohlcvFoldCol,
 	for _, c := range cols {
 		byIdx[c.stateIdx] = c
 	}
+	// The output ROW's shape comes from the states themselves, so the schema
+	// is decided by reading the first one that is not NULL. A column of only
+	// NULL bars declares the bar's field NAMES with no types, which is what a
+	// zero-row group can honestly say and what SetValue never has to write
+	// into.
 	newSchema := make([]parquet.Column, len(in.Schema))
 	copy(newSchema, in.Schema)
 	for _, c := range cols {
-		f := fields[c.outputCol]
-		if len(f) == 0 {
-			// No declaration reached this fragment. Refuse rather than
-			// inventing one: a ROW vector built from a guessed field list
-			// writes the right numbers into the wrong fields, silently.
-			return nil, fmt.Errorf("ohlcv fold %q: the bar's declared fields did not "+
-				"reach this fragment (AggSpec.OutputFields)", c.outputCol)
+		f, err := ohlcvFieldsInColumn(in.Columns[c.stateIdx], in.Len)
+		if err != nil {
+			return nil, fmt.Errorf("ohlcv fold %q: %w", c.outputCol, err)
 		}
 		newSchema[c.stateIdx] = parquet.Column{
 			Name: c.outputCol, Type: parquet.TypeRow, Nullable: true, Fields: f,
@@ -124,10 +109,40 @@ func foldOneOhlcvBatch(in *batch.RecordBatch, cols []ohlcvFoldCol,
 			out.Columns[i] = in.Columns[i]
 			continue
 		}
-		if err := writeOhlcvColumn(out.Columns[i], in.Columns[c.stateIdx],
-			fields[c.outputCol], in.Len); err != nil {
+		if err := writeOhlcvColumn(out.Columns[i], in.Columns[c.stateIdx], in.Len); err != nil {
 			return nil, fmt.Errorf("ohlcv fold column %q: %w", c.outputCol, err)
 		}
+	}
+	return out, nil
+}
+
+// ohlcvFieldsInColumn reads the declared ROW out of the first state in the
+// column that carries one. Every state in one column came from one aggregate
+// and so declares the same thing; a column of NULLs declares the names only.
+func ohlcvFieldsInColumn(stateCol *batch.Vector, n int) ([]parquet.Column, error) {
+	if stateCol.Type != parquet.TypeString {
+		return nil, fmt.Errorf("expected an encoded bar state string, got %v", stateCol.Type)
+	}
+	for i := 0; i < n; i++ {
+		if stateCol.Nulls.IsNullFast(i) {
+			continue
+		}
+		_, f, _, err := exec.FinalizeOhlcvState(stateCol.BytesData.StringValue(i))
+		if err != nil {
+			return nil, err
+		}
+		if len(f) > 0 {
+			return f, nil
+		}
+	}
+	// Every state in this column is NULL or empty — a stage whose tasks all
+	// filtered everything away. The bar's field NAMES are what it can
+	// honestly declare; nothing will be written into the children, and the
+	// alternative (guessing types) is what the state's own header exists to
+	// stop. This is the identity-row shape #685 records for a DECIMAL.
+	out := make([]parquet.Column, len(exec.OhlcvFieldNames))
+	for i, name := range exec.OhlcvFieldNames {
+		out[i] = parquet.Column{Name: name, Type: parquet.TypeFloat64, Nullable: true}
 	}
 	return out, nil
 }
@@ -136,7 +151,7 @@ func foldOneOhlcvBatch(in *batch.RecordBatch, cols []ohlcvFoldCol,
 // bar. A NULL or unparseable state, and a group that kept no rows, are SQL
 // NULL — an aggregate over no rows is NULL, and a bar of NULLs would be a bar
 // pretending to exist.
-func writeOhlcvColumn(dst, stateCol *batch.Vector, fields []parquet.Column, n int) error {
+func writeOhlcvColumn(dst, stateCol *batch.Vector, n int) error {
 	if stateCol.Type != parquet.TypeString {
 		return fmt.Errorf("expected an encoded bar state string, got %v", stateCol.Type)
 	}
@@ -145,7 +160,7 @@ func writeOhlcvColumn(dst, stateCol *batch.Vector, fields []parquet.Column, n in
 			dst.Nulls.SetNull(i)
 			continue
 		}
-		v, ok, err := exec.FinalizeOhlcvState(stateCol.BytesData.StringValue(i), fields)
+		v, _, ok, err := exec.FinalizeOhlcvState(stateCol.BytesData.StringValue(i))
 		if err != nil {
 			return err
 		}

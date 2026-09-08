@@ -2174,7 +2174,7 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, task distributed.Ta
 				// ADR-0035). It takes the spec list because the bar's
 				// declared ROW fields travel there and nowhere else out
 				// here.
-				folded, ferr = applyOhlcvFold(folded, spec.Aggregates)
+				folded, ferr = applyOhlcvFold(folded)
 				if ferr != nil {
 					return nil, ferr
 				}
