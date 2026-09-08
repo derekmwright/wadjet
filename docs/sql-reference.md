@@ -402,7 +402,7 @@ SELECT ip_address FROM blocklist
 All set operations support ORDER BY and LIMIT on the combined result. Operations are left-associative when chained (e.g., `A UNION B EXCEPT C` is `(A UNION B) EXCEPT C`).
 
 A set operation's arms always produce the operation's whole result row, whatever
-the query above it reads. Before v0.18.65 a filter or an aggregate above a set
+the query above it reads. Before this release a filter or an aggregate above a set
 operation of two `SELECT *` arms pruned those arms down to the columns it named,
 which is not a narrowing a set operation can take: the arms are matched by
 POSITION over the whole row, and for every spelling but `UNION ALL` that row is
@@ -1610,7 +1610,12 @@ SELECT DISTINCT src_ip, dst_port FROM flow_logs WHERE date = '2026-03-15'
 A `SELECT DISTINCT *` over a SELF-JOIN — two references to one table, so one
 column name belongs to two relations — is deduplicated by the coordinator on
 the distributed paths, and the query's `ORDER BY` is applied after that dedup.
-Before v0.18.65 that re-sort dropped every key whose written spelling the
+A result larger than one batch (2048 rows) is assembled there too, and before
+this release that assembly skipped a NULL row instead of writing it: the next
+non-null value of a text, bytes, IPv6, CIDR, UUID or nested column came back as
+every value above it, run together. 116 of 5000 values in one column of one such
+query were affected, with the rows and their order right.
+Before this release that re-sort dropped every key whose written spelling the
 merged result did not carry EXACTLY, so `SELECT DISTINCT * FROM t a JOIN t b ON
 b.k = a.k ORDER BY a.k, a.amount, b.amount` came back ordered by `b.amount`
 alone on the distributed paths: the right rows in the wrong order, and under an

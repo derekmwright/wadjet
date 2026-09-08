@@ -1056,7 +1056,22 @@ ordering. `mergeSortKeyIndices` (`coordinator/merge_sort_keys.go`) resolves the
 keys ONCE through `exec.ColumnIndexFallback` — the engine's one resolver, which
 `physical.sortKeyLocalColumn` and the DAG's own sort stage already bind through
 — preferring `SlotPos` where the planner recorded one, and a key that still
-does not resolve is an ERROR rather than a silently different order.
+does not resolve is a `0A000` refusal rather than a silently different order.
+
+**Above 2048 rows the merge COALESCES, and a NULL row is still a write**
+(#1007). `coalesceForOrdering` flattens the partials into one batch so a
+selection vector can express an order across them, and it skipped
+`copyVectorValue` for a NULL row — which for a `BytesColumn` (STRING, BYTES,
+IPv6, CIDR, UUID, and a ROW carrying one) leaves the closing offset at zero, so
+the NEXT non-null value is read as `Data[0:Offsets[i+2]]`: the whole arena so
+far. `SELECT DISTINCT * FROM typemx a JOIN typemx b ON b.id = a.id ORDER BY
+a.id DESC` came back on both DAG arms with 116 of 5000 `c_str` values carrying
+the concatenation of every value above them, rows and order right. The null
+decision lives inside `copyVectorValue` now and delegates to
+`batch.Vector.WriteNullAt` — the batch package's own null writer, which sets the
+bit AND advances the offsets by an empty span. `exec.copyVectorValue` (the
+engine's other copier, `exec/sort.go`) always decided it inside, which is why
+the single-process paths were never wrong.
 
 The refusal is not the answer: it is the handoff. Refusing beat dropping the DISTINCT (#466, the #308 position — a loud failure over a silently different answer), but the query still HAS an answer and one engine in the coordinator process computes it, so an error would be a worse outcome than either. What the refusal buys is that nothing reaches `walkStages` with a semantics-carrying Distinct in it.
 

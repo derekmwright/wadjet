@@ -2150,9 +2150,38 @@ truncation is applied after the ordering.
 `physical.sortKeyLocalColumn` (§6a) and the DAG's own sort stage already bind
 through — preferring `SlotPos` where the planner recorded one (§2, #557). A key
 that still does not resolve, and a set of partials that do not describe one
-relation, are ERRORS. The alternative is rows in an order the client did not ask
-for and cannot detect; `reAggregatePartials` already refuses an unresolvable
-GROUP BY name one screen up for exactly that reason.
+relation, are `0A000` REFUSALS — PostgreSQL answers the statement and what
+wadjet is saying is that its own merge cannot. The alternative is rows in an
+order the client did not ask for and cannot detect; `reAggregatePartials`
+already refuses an unresolvable GROUP BY name one screen up for exactly that
+reason. An EMPTY result is neither refusal: it has no order to get wrong.
+
+**And a NULL row is still a WRITE (#1007).** Above one batch the merge has to
+COALESCE — a selection vector reorders within one batch and cannot express an
+order across two — and `coalesceForOrdering` set the null bit and skipped
+`copyVectorValue`. A variable-length column's value at row i is
+`Data[Offsets[i]:Offsets[i+1]]`, so a row that writes nothing leaves the closing
+offset at zero and the NEXT non-null value is read from the arena's origin:
+`SELECT DISTINCT * FROM typemx a JOIN typemx b ON b.id = a.id ORDER BY a.id
+DESC` returned 116 of its 5000 `c_str` values as the concatenation of every
+value above them, on both DAG arms, with the rows and the ORDER right.
+
+The rule this settles is narrower than "fix the offsets": **the null decision
+belongs INSIDE the copier, and the copier delegates it to the batch package's
+own writer.** `batch.Vector.WriteNullAt` knows what each carrier owes — the bit,
+an empty span for a `BytesColumn`, a ROW's children recursively. The engine's
+other copier (`exec.copyVectorValue`) already decided it inside, which is why no
+single-process path was ever wrong; the coordinator's left it to its two callers
+and one of them got it wrong. A copier that a caller can get wrong is the defect,
+not the caller.
+
+The gate for it is per CARRIER and it is a UNIT gate, because the SQL that
+reaches it needs more than 2048 rows and every shape cell in this arc's own
+census is eight: `coordinator.TestCoalescingAMergeAdvancesAVarlenNullsOffset`
+(five `BytesColumn` types, ARRAY, MAP, ROW, three fixed-width controls) with
+`TestM1AMergedOrderIsTheQuerysOrderAtScale` as the SQL half. ARRAY and MAP write
+BOTH ends of their span and self-heal — they are coverage, not reproductions,
+and saying which is which is what keeps the gate honest.
 
 **Why only this shape reached it.** `rewriteDistinctAsGroupBy` gives every other
 `DISTINCT` a stage — a projection's items become GROUP BY keys, and a star over
@@ -2243,6 +2272,10 @@ unchanged.
 | gate | what it holds |
 |---|---|
 | `coordinator.TestM1AMergedOrderIsTheQuerysOrder` | 8a — ten shapes, four arms, incl. LIMIT (top-K heap), OFFSET, a zero-row result, the arm-swapping predicate, and two controls that never reach the merge |
+| `coordinator.TestM1AMergedOrderIsTheQuerysOrderAtScale` | 8a past ONE BATCH — seven 5000-row shapes, the two DAG arms asserted row for row against the single-process one |
+| `coordinator.TestCoalescingAMergeAdvancesAVarlenNullsOffset` + `TestCoalescingAdvancesEveryNullsOffset` | 8a's null-write rule, per carrier |
+| `coordinator.TestTheMergeRefusesAnOrderingItCannotApply` | 8a's two refusals through both comparators, their SQLSTATE, and the empty boundary |
+| `physical.TestFuseJoinStagesDeclinesAJoinWhoseRulesTheSpecCannotCarry` | 8c's other half — a spec that cannot carry a rule does not absorb the join |
 | `coordinator.TestM1ASetOperationsArmsSupplyItsResultColumns` | 8b — twelve shapes, all four set-op spellings, three controls holding the explicit-list boundary |
 | `coordinator.TestM1AEveryLateralJoinDropsItsOwnSlot` | 8c — ten shapes incl. three and nested laterals, same and different tables, derived and CTE stars |
 | `pgwire.TestArcJ1AHiddenSlotIsNotInTheRowDescription` | 8c on the wire door |
