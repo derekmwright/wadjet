@@ -397,11 +397,17 @@ func (s *ohlcvState) merge(o *ohlcvState) {
 		return
 	}
 	if s.n == 0 {
+		// The DESTINATION's domain is kept, always. Within one aggregate the
+		// carrier is ONE decision (OhlcvDomainFor, taken from the input
+		// declarations), so a merge is never the place to change it; a caller
+		// folding into a state it has not typed yet sets `dom` from the
+		// source FIRST and explicitly — MergeOhlcvStates, mergeExtraState and
+		// the AggOhlcvStateMerge arm each do. Reading it out of the source
+		// here would let a float-domain accumulator silently become an exact
+		// one because the first partial it saw was.
 		dom := s.dom
 		*s = *o
-		if dom.exact || dom.priceScale != 0 || dom.volScale != 0 {
-			s.dom = dom
-		}
+		s.dom = dom
 		return
 	}
 	s.overflow = s.overflow || o.overflow
