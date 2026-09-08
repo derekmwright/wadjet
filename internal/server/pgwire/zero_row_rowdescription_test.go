@@ -52,6 +52,20 @@ func zrSetup(t *testing.T) *Server {
 	if _, err := db.Query(ctx, "INSERT INTO zrfull VALUES (1,'a',1.5), (2,'b',2.5)"); err != nil {
 		t.Fatal(err)
 	}
+	// A SECOND relation, for the JOIN shapes #846 deferred and #978 closes.
+	// Its `c0` is deliberately spelled like zrfull's: a duplicate bare name is
+	// what makes the join QUALIFY, and a declaration that does not reproduce
+	// that qualification would describe a relation the engine never emits.
+	other := parquet.Schema{Columns: []parquet.Column{
+		{Name: "c0", Type: parquet.TypeInt32},
+		{Name: "d1", Type: parquet.TypeString},
+	}}
+	if err := db.CreateTable(ctx, "zrother", other, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Query(ctx, "INSERT INTO zrother VALUES (1,'x'), (2,'y')"); err != nil {
+		t.Fatal(err)
+	}
 	srv := NewServer(db, Config{}, nil)
 	if err := srv.Start("127.0.0.1:0"); err != nil {
 		t.Fatal(err)
@@ -83,6 +97,26 @@ func zrShapes() []struct{ name, empty, full string } {
 			"WITH q AS (SELECT c0, c1 FROM zrfull) SELECT * FROM q"},
 		{"star_union_all_empties", "SELECT * FROM zrempty UNION ALL SELECT * FROM zrempty",
 			"SELECT * FROM zrfull UNION ALL SELECT * FROM zrfull"},
+		// #978 — the shape #846 DEFERRED. `SELECT *` over a JOIN has no
+		// Project to read and no single scan to describe, so a result with
+		// rows was described from the first batch and one without rows by
+		// nothing at all. The declaration calls the join operator's OWN namer
+		// now (exec.JoinOutputSchema), so the two describe identically —
+		// including the `b.c0` the duplicate name is qualified to.
+		//
+		// The reference is the SAME statement with a predicate that MATCHES,
+		// not the predicate-free query: a join's side order is a cost
+		// decision, so dropping the WHERE changes the plan and the pair would
+		// compare two different relations rather than one relation twice.
+		{"star_join_no_match",
+			"SELECT * FROM zrfull a JOIN zrother b ON b.c0 = a.c0 WHERE a.c0 = 999",
+			"SELECT * FROM zrfull a JOIN zrother b ON b.c0 = a.c0 WHERE a.c0 = 1"},
+		{"star_left_join_no_match",
+			"SELECT * FROM zrfull a LEFT JOIN zrother b ON b.c0 = a.c0 WHERE a.c0 = 999",
+			"SELECT * FROM zrfull a LEFT JOIN zrother b ON b.c0 = a.c0 WHERE a.c0 = 1"},
+		{"star_join_ordered",
+			"SELECT * FROM zrfull a JOIN zrother b ON b.c0 = a.c0 WHERE a.c0 = 999 ORDER BY a.c0",
+			"SELECT * FROM zrfull a JOIN zrother b ON b.c0 = a.c0 WHERE a.c0 = 1 ORDER BY a.c0"},
 		// The controls: written-out select lists, which #416 already covered.
 		// They are here so a regression that took the declaration away from
 		// EVERY zero-row result is not read as a star-only one.
@@ -333,10 +367,22 @@ func TestParameterizedStarDescribesAndExecutes(t *testing.T) {
 		{"star_over_table_one_row", "SELECT * FROM zrfull WHERE c0 = $1", 1, 1, 3, 3},
 		{"star_over_table_zero_rows", "SELECT * FROM zrfull WHERE c0 = $1", 999, 0, 3, 3},
 		{"star_over_empty_table", "SELECT * FROM zrempty WHERE c0 = $1", 1, 0, 3, 3},
+		// The join star DESCRIBES now (arc K3, #978): its schema comes from
+		// the plan, through the join operator's own namer, so the shape no
+		// longer depends on the probe's substituted parameters and Describe
+		// can promise what Execute delivers — six fields with a row and six
+		// with none. It answered NoData until v0.18.60, and the zero-row arm
+		// then produced NO fields at Execute either, which is the defect
+		// #978 names.
+		//
+		// The promise is still CHECKED rather than trusted: a plan whose join
+		// order the bound parameters change would deliver a different list,
+		// and shapeAgrees refuses that with 42804 instead of handing a client
+		// tuples under the wrong description. Loud beats plausible.
 		{"star_over_join_one_row",
-			"SELECT * FROM zrfull a JOIN zrfull b ON a.c0 = b.c0 WHERE a.c0 = $1", 1, 1, -1, 6},
+			"SELECT * FROM zrfull a JOIN zrfull b ON a.c0 = b.c0 WHERE a.c0 = $1", 1, 1, 6, 6},
 		{"star_over_join_zero_rows",
-			"SELECT * FROM zrfull a JOIN zrfull b ON a.c0 = b.c0 WHERE a.c0 = $1", 999, 0, -1, 0},
+			"SELECT * FROM zrfull a JOIN zrfull b ON a.c0 = b.c0 WHERE a.c0 = $1", 999, 0, 6, 6},
 		// The control: a written-out list is declared either way, so a
 		// regression that turned every parameterized Describe into NoData
 		// would not hide behind the join cell.

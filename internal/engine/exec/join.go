@@ -4877,6 +4877,27 @@ func splitJoinQualifier(name string) (qual, bare string) {
 	return "", name
 }
 
+// JoinOutputSchema is what a join with these two side schemas will PUBLISH,
+// for a caller that has to describe the result before any row exists (#978).
+//
+// It is the operator's own rule and not a copy of it, which is the whole point
+// of exporting it: a zero-row `SELECT *` over a join must be described by the
+// same namer that would have named a non-empty one, or the client is told
+// about a relation the engine does not produce — the failure mode ADR-0026
+// exists to prevent, and the reason `starOnlyDeclaredOutputSchema` DECLINED
+// this shape rather than writing a second qualification rule.
+//
+// The caller owns the arguments' truth: the two side schemas, the build's
+// alias and per-column origins, whether the plan forced qualification, and the
+// positions of the columns the join materialized for itself.
+func JoinOutputSchema(joinType JoinType, probeSchema, buildSchema []parquet.Column,
+	buildAlias string, buildColOrigins map[string]string, qualifyAllBuildCols bool,
+	outputFilter map[string]bool, excludeProbe, excludeBuild map[int]string) []parquet.Column {
+	out, _ := joinOutputSchemaWithMapping(joinType, probeSchema, buildSchema, buildAlias,
+		buildColOrigins, qualifyAllBuildCols, outputFilter, excludeProbe, excludeBuild)
+	return out
+}
+
 // joinOutputSchemaWithMapping computes a join's output schema — probe columns
 // first, then build columns with duplicate-name qualification — and the
 // per-output-column source mapping. Shared by HashJoinProbe and SortMergeJoin

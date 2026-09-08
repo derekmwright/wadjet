@@ -3,7 +3,9 @@ package physical
 import (
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -43,15 +45,11 @@ import (
 //   - Anything with a Project below the pass-through nodes. Not this
 //     function's case at all — findOutputProjectionNode answers it, and
 //     `SELECT * FROM (SELECT c0 AS x FROM t) s` must publish `x`, not `c0`.
-//   - A star over a JOIN. ExpandStarProjections declines the same shape for
-//     the same reason (its column set is not knowable from one scan), and the
-//     executed schema qualifies the right side's columns ("b.c0",
-//     exec/join.go's qualCol) under a rule that lives in the operator. There
-//     is no second copy of that rule here: a name spelled two ways by two
-//     namers is ADR-0026's defect, and a declaration that disagreed with the
-//     non-empty answer would be worse than none. Zero-row `SELECT *` over a
-//     join is DEFERRED, tracked with the executed naming itself, which
-//     diverges from PostgreSQL (c0, c1, c0, c1) whether or not there are rows.
+//   - A star over a JOIN, which is starJoinDeclaredOutputSchema's case below.
+//     It is answered by CALLING the operator's own namer rather than by
+//     copying it, which is why it can be answered at all: a name spelled two
+//     ways by two namers is ADR-0026's defect, and a declaration that
+//     disagreed with the non-empty answer would be worse than none.
 //   - A star over an Aggregate, a Window, or a table function. The emitted
 //     names there are the operator's, not the catalog's.
 //
@@ -60,7 +58,7 @@ import (
 func starOnlyDeclaredOutputSchema(root *logical.Node) ([]parquet.Column, bool) {
 	scan, names := starOnlySourceScan(root)
 	if scan == nil || len(scan.ScanColumns) == 0 {
-		return nil, false
+		return starJoinDeclaredOutputSchema(root)
 	}
 	if names == nil {
 		names = scan.ScanColumns
@@ -162,4 +160,121 @@ func starOnlySourceScan(n *logical.Node) (*logical.Node, []string) {
 		}
 	}
 	return nil, nil
+}
+
+// starJoinDeclaredOutputSchema is the declaration for `SELECT *` over a JOIN —
+// the one zero-row shape that reached a client with NO COLUMNS AT ALL, on
+// every arm (#978, #846's twin).
+//
+// `SELECT * FROM a JOIN b ON …` produces no Project node for the walk above to
+// read and no single scan for it to describe, so a result WITH rows was
+// described from the first batch and a result without rows was described by
+// nothing: psql printed no header, pgJDBC's executeQuery had no column
+// metadata, and the pgwire door sent an EMPTY RowDescription because that was
+// the most honest thing it could say. `SELECT * FROM a WHERE false` has
+// declared its columns since #416.
+//
+// THE NAMES ARE THE OPERATOR'S OWN. The join executor emits the probe's
+// columns and then the build's, with every DUPLICATE bare name qualified by
+// its owning alias, and that rule lives in `exec.joinOutputSchemaWithMapping`.
+// This function does not reimplement it — it assembles the arguments from the
+// plan and calls it (`exec.JoinOutputSchema`), which is why the declaration
+// and the executed answer cannot disagree. A second copy of that rule is
+// exactly what this file declined to write before, and it was right to.
+//
+// THE BOUNDARY IS ONE JOIN, and it is a claim rather than a convenience:
+//
+//   - Neither side may contain a join of its own. `declaredJoinSchema` walks a
+//     nested join by CONCATENATING its sides and dropping duplicate names,
+//     which is not the operator's rule, so a bushy shape would be described by
+//     a list the engine never produces.
+//   - `QualifyAllBuildCols` is a STAGE property set only where TWO joins in one
+//     chain build from one table (markCoPathingSelfJoinBuilds), so with one
+//     join in the plan it is false on every path — which is what lets this be
+//     answered from the logical tree at all.
+//   - A side whose columns the plan cannot type declines the whole schema, the
+//     same rule the scan arm above applies: no declaration beats a wrong one.
+func starJoinDeclaredOutputSchema(root *logical.Node) ([]parquet.Column, bool) {
+	join := starOnlySourceJoin(root)
+	if join == nil {
+		return nil, false
+	}
+	probe := declaredJoinSchema(join.Children[0], nil, nil)
+	build := declaredJoinSchema(join.Children[1], nil, nil)
+	if len(probe) == 0 || len(build) == 0 {
+		return nil, false
+	}
+	excludeProbe, excludeBuild := joinHiddenPositions(join)
+	out := exec.JoinOutputSchema(mapExecJoinType(strings.ToLower(join.JoinType)),
+		probe, build, joinArmAlias(join.Children[1]),
+		subtreeNamingOf(join.Children[1]).materializedBuildColOrigins(),
+		false, joinProbeOutputFilter(join), excludeProbe, excludeBuild)
+	if len(out) == 0 {
+		return nil, false
+	}
+	// A RESERVED NAME IN THE ANSWER MEANS THIS WALK STOPPED TOO EARLY, and it
+	// is the property rather than a list of shapes. A decorrelated LATERAL
+	// whose empty-input default drops the pad MARKER leaves the slot on the
+	// join's output for the operator ABOVE it to remove (ADR-0026 §3c), and
+	// this walk models the join, not that operator — so the declaration
+	// carried `__key_0` where the executed answer does not. Nothing the
+	// planner minted for itself is ever in a client's relation, so seeing one
+	// is proof the declaration is not the statement's output, and no
+	// declaration beats a wrong one.
+	for _, col := range out {
+		if plansql.ReservedSlotFamily(col.Name) != "" ||
+			plansql.ReservedSlotFamily(blockBareName(col.Name)) != "" {
+			return nil, false
+		}
+	}
+	return out, true
+}
+
+// starOnlySourceJoin is the single JOIN a bare `SELECT *` reads, or nil when
+// the plan is not that shape.
+//
+// The descent is starOnlySourceScan's — a Filter, Sort, Limit or Distinct
+// above the join passes its input through unchanged — and it stops at a
+// Project for the same reason: reaching one means findOutputProjectionNode
+// owns the answer.
+func starOnlySourceJoin(n *logical.Node) *logical.Node {
+	for n != nil {
+		switch n.Type {
+		case logical.NodeJoin:
+			if len(n.Children) != 2 || containsJoin(n.Children[0]) || containsJoin(n.Children[1]) {
+				return nil
+			}
+			switch strings.ToLower(n.JoinType) {
+			case "semi", "anti":
+				// A semi/anti join publishes its probe alone, and no star
+				// spells one: the lowering makes them from IN and EXISTS.
+				return nil
+			}
+			return n
+		case logical.NodeFilter, logical.NodeSort, logical.NodeLimit, logical.NodeDistinct:
+			if len(n.Children) != 1 {
+				return nil
+			}
+			n = n.Children[0]
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
+// containsJoin reports whether this subtree holds a join anywhere.
+func containsJoin(n *logical.Node) bool {
+	if n == nil {
+		return false
+	}
+	if n.Type == logical.NodeJoin {
+		return true
+	}
+	for _, c := range n.Children {
+		if containsJoin(c) {
+			return true
+		}
+	}
+	return false
 }

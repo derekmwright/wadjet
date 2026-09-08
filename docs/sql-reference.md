@@ -826,16 +826,17 @@ column of the answer under the name the query gave it. `JOIN LATERAL (SELECT
 order_id, order_id AS oid, COUNT(*) AS n … GROUP BY order_id) s` publishes
 `order_id`, `oid` and `n` on every execution path.
 
-In a distributed deployment such a query is executed on the coordinator rather
-than across the workers, because a lateral subquery's `SELECT` list is not a
-distributed stage of its own: where the list publishes a column the stage below
-it does not — a source column twice, a rename, an expression over an
-aggregate — a `SELECT *` over the join is planned locally so that it publishes
-the columns the query wrote. Naming the columns instead of writing `*` keeps
-the query distributed and answers the same rows. This does not apply to
-`SELECT *` over a join whose right side is an ordinary derived table
-introducing a column — that one still publishes the stage's columns on the
-distributed path, so name them.
+The same holds for an ordinary DERIVED TABLE or CTE under a `SELECT *`:
+`SELECT * FROM orders o JOIN (SELECT order_id, order_id AS oid FROM items) s ON
+s.order_id = o.id` publishes `order_id` and `oid`, a renamed column is
+published under its alias, and an alias over an aggregate publishes the alias
+alone. Every execution path answers the same relation.
+
+A handful of shapes still run on the coordinator rather than across the
+workers, and they are the ones whose column TYPES the planner cannot state
+ahead of time — a container expression built inside a `CASE` whose other arm is
+`NULL`, and a block that publishes one NAME twice. Naming the columns instead
+of writing `*` keeps those distributed and answers the same rows.
 
 The correlated equality is turned into a join, and a join needs the inner
 value as a column, so the planner materializes one under a name from its

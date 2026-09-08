@@ -1779,6 +1779,30 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      arm in that gate's `ctl/derived-aggregate-is-its-stream` cell and in the
      INNER cells of `coordinator.TestArcJ1APublishedKeyIsAUserColumn`.
 
+   - **CLOSED 2026-09-07 by arc K3 (#978): a zero-row `SELECT *` over a JOIN
+     carried no columns at all**, on every arm and on the wire. `SELECT *`
+     over a join has no Project for the declaration walk to read and no single
+     scan for it to describe, so a result WITH rows was described from the
+     first batch and one without rows by nothing: psql printed no header,
+     pgJDBC's executeQuery had no column metadata, and the extended protocol
+     answered a parameterized Describe with NoData. It is the shape #846
+     deferred, and it was NOT a distributed property — the single-process arms
+     did it too.
+
+     The declaration calls the join operator's OWN namer
+     (`exec.JoinOutputSchema`) rather than reproducing it, which is why it can
+     be made at all: probe columns then build columns, duplicates qualified by
+     their owning alias, minus the columns the join materialized for itself.
+     Bounded to ONE join whose sides hold no join of their own, because
+     `declaredJoinSchema` walks a nested join by concatenating its sides, which
+     is not the operator's rule; and it declines outright if any name in the
+     answer is in the reserved namespace, which is proof the walk stopped below
+     an operator that still had work to do. Gated by the four join shapes added
+     to `pgwire.TestZeroRowSelectDescribesLikeItsNonEmptyTwin`, each paired with
+     the SAME statement under a predicate that matches — a join's side order is
+     a cost decision, so dropping the predicate would compare two relations
+     rather than one relation twice.
+
    - **A written `ON` over an unrepaired LATERAL with an empty-input default
      is REFUSED (0A000) where PostgreSQL answers.** (Added 2026-09-07, arc J1
      round 5, #977.) PostgreSQL evaluates the lateral per outer row and applies

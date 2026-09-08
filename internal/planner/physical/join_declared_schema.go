@@ -203,7 +203,21 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 					continue
 				}
 				seen[lc] = true
-				out = append(out, parquet.Column{Name: name, Type: t, Nullable: true})
+				col := parquet.Column{Name: name, Type: t, Nullable: true}
+				if t == parquet.TypeDecimal {
+					// A DECIMAL carries half of every value in its (p, s):
+					// the chunk holds the unscaled integer and the header
+					// holds the scale (ADR-0010). Leaving them at zero
+					// declared `numeric` with no typmod where the same query
+					// with rows declares NUMERIC(18,4), so a zero-row answer
+					// and a non-empty one described the column differently on
+					// the wire — and an empty side of a join wrote a header
+					// its siblings disagree with.
+					if m, ok := lookupColDecimal(cur.ScanColDecimal, name); ok {
+						col.Precision, col.Scale = m.Precision, m.Scale
+					}
+				}
+				out = append(out, col)
 			}
 			return
 		}
