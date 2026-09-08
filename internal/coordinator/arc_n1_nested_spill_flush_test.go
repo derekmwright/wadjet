@@ -136,11 +136,22 @@ func TestN1ANestedPipelineDrainsItsSpilledJoins(t *testing.T) {
 	}
 }
 
-// n1SpillBudget is the budget these cells run under. It is the smallest one at
-// which this shape's joins evict a partition and the build is still admitted:
-// below it the build refuses loudly (`memory budget exceeded`), and far above
-// it nothing spills at all and the cells would compare two in-memory runs.
-const n1SpillBudget = 512 << 10
+// n1SpillBudget is the budget these cells run under, and it is deliberately
+// LARGE: the forcing knob decides whether a partition is evicted, and the
+// budget's only job is to put the join on the spill-eligible dispatch at all
+// (`Build` partitions on arrival when a MemTracker and a SpillManager are both
+// set) without refusing anything.
+//
+// It was 512 KiB — "the smallest one at which this shape's joins evict a
+// partition and the build is still admitted" — and that made the cells'
+// disposition a property of the PROCESS: a full-package run had ~590 KiB of
+// outstanding forced bytes ("spill tracking") by the third order, so the build
+// refused `memory budget exceeded` and the gate went red in 1 of 2 full runs
+// while passing alone every time. A gate whose trigger is a budget the load can
+// push past is the coin toss ADR-0027 decision 6 exists to remove — and this
+// arc added the knob that removes it, so the knob is what drives the eviction
+// here.
+const n1SpillBudget = 64 << 20
 
 // n1BudgetedLateralDB is a budgeted engine over the LATERAL fixture alone.
 //

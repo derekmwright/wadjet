@@ -9893,8 +9893,25 @@ func (s *rightSemiFlushSource) Init(ctx context.Context) error {
 
 func (s *rightSemiFlushSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
 	if !s.flushed {
-		// Drain the probe pipeline — RightSemi/RightAnti probe returns nil
-		// for each batch (just marks matched entries), so we loop until exhausted.
+		// Drain the probe pipeline. A RightSemi/RightAnti probe returns nil
+		// for each input batch — it only marks matched entries — so this loop
+		// used to pull until exhaustion and DISCARD what came back, on the
+		// reasoning that nothing could come back.
+		//
+		// That reasoning stopped being true when `pipelineSource` learned to
+		// drain its operators' spilled partitions (#1010): the probe is in
+		// `innerOps`, it is a `FlushableOperator`, and the batches its
+		// evicted partitions replay now arrive HERE. Discarding them lost
+		// them for good — the `NextFlush` loop below then found the probe
+		// already drained — so `WHERE EXISTS` over a build that evicted a
+		// partition answered 149 rows for PostgreSQL's 150, silently, on
+		// every path this source runs on (#1010 round 2).
+		//
+		// A batch this source is handed is the join's OUTPUT, whichever
+		// mechanism produced it. It is returned, exactly as `joinFlushSource`
+		// returns what its own pipeline hands back — the difference between
+		// the two wrappers was the whole defect. `s.flushed` stays false, so
+		// the next call resumes the drain where it left off.
 		for {
 			b, err := s.pipeline.Next(ctx)
 			if err != nil {
@@ -9903,8 +9920,10 @@ func (s *rightSemiFlushSource) Next(ctx context.Context) (*batch.RecordBatch, er
 			if b == nil {
 				break
 			}
-			// probe.Execute returned nil for each batch, but the pipeline
-			// source wraps probe as an op, so we just keep pulling
+			if b.ActiveLen() == 0 {
+				continue
+			}
+			return b, nil
 		}
 		s.flushed = true
 	}
