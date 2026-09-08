@@ -74,8 +74,8 @@ func windowAccumulates(f WindowFunc) bool {
 // `SUM(d) OVER (ROWS BETWEEN CURRENT ROW AND CURRENT ROW)` over three
 // 9x10^37 values hold 1.8x10^38 between two frames that each hold 9x10^37,
 // and refuse a query PostgreSQL and the grouped spelling both answer.
-// decimalFrameAcc.slide retracts before it adds and resets outright between
-// disjoint frames; windowDecimalFrames RECOMPUTES any frame whose incremental
+// exactFrameAcc.slide retracts before it adds and resets outright between
+// disjoint frames; windowExactFrames RECOMPUTES any frame whose incremental
 // state flagged overflow, and refuses only if the frame's own rows overflow
 // on their own.
 func windowDecimalSumOverflow(col string) error {
@@ -98,7 +98,35 @@ func windowDecimalAvgUnrepresentable(col string) error {
 		"the range DECIMAL(38) can represent", col)
 }
 
-// decimalFrameAcc is the exact running state of one window frame: the Int128
+// windowExactCells is one input column read as EXACT Int128 cells, resolved
+// ONCE per partition (ADR-0002's typed-kernel rule: resolve the type once,
+// then dispatch to a typed reader, never per row).
+//
+// Three carriers reach it and they are the three the engine stores an exactly
+// summable number in: a DECIMAL's Int128 array, an int64 array, and an int32
+// array (INT32 and — since #953 — the int4-domain PORT and PROTOCOL). The
+// DECIMAL arm hands back the stored cell untouched, which is what keeps the
+// #586 path byte-identical; the integer arms widen at scale 0, which is
+// exactly what kernel.sumRowInt64Decimal does for the GROUPED spelling
+// (#784).
+type windowExactCells struct {
+	dec   []batch.Int128
+	i64   []int64
+	i32   []int32
+	scale int // the INPUT's scale: its own for a DECIMAL, 0 for an integer
+}
+
+func (c windowExactCells) at(r int) batch.Int128 {
+	if c.dec != nil {
+		return c.dec[r]
+	}
+	if c.i64 != nil {
+		return batch.Int128From(c.i64[r])
+	}
+	return batch.Int128From(int64(c.i32[r]))
+}
+
+// exactFrameAcc is the exact running state of one window frame: the Int128
 // sum of the frame's non-NULL rows and how many there were.
 //
 // Both halves matter. The sum is Int128 because that is the carrier the value
@@ -111,7 +139,7 @@ func windowDecimalAvgUnrepresentable(col string) error {
 // is a non-decreasing function of the row index — so each row is added once
 // and removed once and the whole partition costs O(n) regardless of frame
 // width.
-type decimalFrameAcc struct {
+type exactFrameAcc struct {
 	sum      batch.Int128
 	count    int64
 	lo, hi   int
@@ -143,19 +171,18 @@ type decimalFrameAcc struct {
 // Both directions stay CHECKED even so. A retract is a subtraction of a value
 // the accumulator already holds, and an unchecked one would let a wrapped
 // intermediate become a plausible-looking total; the flag it raises is not
-// final, since windowDecimalFrames recomputes the frame before refusing.
-func (a *decimalFrameAcc) slide(in *batch.Vector, start, lo, hi int) {
+// final, since windowExactFrames recomputes the frame before refusing.
+func (a *exactFrameAcc) slide(in *batch.Vector, cells windowExactCells, start, lo, hi int) {
 	if hi < lo {
 		hi = lo
 	}
 	if lo >= a.hi {
 		a.reset(lo)
 	}
-	data := in.DecimalData.Data
 	for a.lo < lo {
 		r := start + a.lo
 		if !in.Nulls.IsNullFast(r) {
-			s, ok := a.sum.SubChecked(data[r])
+			s, ok := a.sum.SubChecked(cells.at(r))
 			a.sum = s
 			a.overflow = a.overflow || !ok
 			a.count--
@@ -165,7 +192,7 @@ func (a *decimalFrameAcc) slide(in *batch.Vector, start, lo, hi int) {
 	for a.hi < hi {
 		r := start + a.hi
 		if !in.Nulls.IsNullFast(r) {
-			s, ok := a.sum.AddChecked(data[r])
+			s, ok := a.sum.AddChecked(cells.at(r))
 			a.sum = s
 			a.overflow = a.overflow || !ok
 			a.count++
@@ -176,7 +203,7 @@ func (a *decimalFrameAcc) slide(in *batch.Vector, start, lo, hi int) {
 
 // reset empties the accumulator and positions it at an empty frame starting
 // at pos.
-func (a *decimalFrameAcc) reset(pos int) {
+func (a *exactFrameAcc) reset(pos int) {
 	a.sum, a.count, a.overflow = batch.Int128{}, 0, false
 	a.lo, a.hi = pos, pos
 }
@@ -189,16 +216,15 @@ func (a *decimalFrameAcc) reset(pos int) {
 // answer the other spelling of the query gives. Called only when the
 // incremental slide raised the flag, so its O(frame width) cost is paid on
 // the rare overflowing frame and never on the common path.
-func (a *decimalFrameAcc) recompute(in *batch.Vector, start, lo, hi int) {
+func (a *exactFrameAcc) recompute(in *batch.Vector, cells windowExactCells, start, lo, hi int) {
 	if hi < lo {
 		hi = lo
 	}
 	a.reset(lo)
-	data := in.DecimalData.Data
 	for a.hi < hi {
 		r := start + a.hi
 		if !in.Nulls.IsNullFast(r) {
-			s, ok := a.sum.AddChecked(data[r])
+			s, ok := a.sum.AddChecked(cells.at(r))
 			a.sum = s
 			a.overflow = a.overflow || !ok
 			a.count++
@@ -207,15 +233,32 @@ func (a *decimalFrameAcc) recompute(in *batch.Vector, start, lo, hi int) {
 	}
 }
 
-// windowDecimalFrames computes SUM or AVG over every frame of one partition
-// into an exact DECIMAL output vector.
+// windowExactFrames computes SUM or AVG over every frame of one partition
+// into an EXACT output vector — a DECIMAL one, or the INT64 one PostgreSQL's
+// `sum(int4)` declares.
 //
-// winVec's scale is the DECLARED output scale — the input's own for SUM,
-// AvgScale(input) for AVG — so the division's added digits come from the
-// difference between the two rather than from a constant this function would
-// have to keep in step with WindowDecimalAggMeta.
-func windowDecimalFrames(winVec, inputVec *batch.Vector, fr resolvedFrame, start, n int, wc WindowColumn) error {
-	addScale := winVec.DecimalData.Scale - inputVec.DecimalData.Scale
+// For a DECIMAL input, winVec's scale is the DECLARED output scale — the
+// input's own for SUM, AvgScale(input) for AVG — so the division's added
+// digits come from the difference between the two rather than from a constant
+// this function would have to keep in step with WindowDecimalAggMeta. For an
+// INTEGER input the input's scale is 0 and the same subtraction gives AVG its
+// four digits.
+func windowExactFrames(winVec, inputVec *batch.Vector, cells windowExactCells,
+	fr resolvedFrame, start, n int, wc WindowColumn) error {
+	avg := wc.Func == WinAvg
+	// The BIGINT arm: `SUM(int4) OVER (…)` declares bigint, exactly as the
+	// grouped spelling does, and accumulates in the same Int128 the numeric
+	// arms use so that no INTERMEDIATE can wrap. Only the frame's own total
+	// has to fit, and one that does not is 22003 — PostgreSQL's own answer
+	// there is `22003: bigint out of range`, measured live. AVG never
+	// declares an integer output, so this arm is SUM's alone.
+	if winVec.Type == batch.TypeInt64 {
+		if avg {
+			return windowDecimalAvgUnrepresentable(wc.OutputCol)
+		}
+		return windowExactIntFrames(winVec, inputVec, cells, fr, start, n, wc)
+	}
+	addScale := winVec.DecimalData.Scale - cells.scale
 	if addScale < 0 {
 		// Unreachable through windowOutputColumn, whose SUM scale IS the
 		// input's and whose AVG scale is never below it. A spec that reached
@@ -223,9 +266,8 @@ func windowDecimalFrames(winVec, inputVec *batch.Vector, fr resolvedFrame, start
 		// it is refused instead.
 		return windowDecimalAvgUnrepresentable(wc.OutputCol)
 	}
-	var acc decimalFrameAcc
+	var acc exactFrameAcc
 	out := winVec.DecimalData.Data
-	avg := wc.Func == WinAvg
 	// The division memo. A frame whose ends did not move has the same (sum,
 	// count) as the previous row's and therefore the same quotient — which is
 	// EVERY row of a whole-partition window, the commonest shape there is.
@@ -237,14 +279,14 @@ func windowDecimalFrames(winVec, inputVec *batch.Vector, fr resolvedFrame, start
 	var memoQ batch.Int128
 	for i := 0; i < n; i++ {
 		lo, hi := fr.bounds(i)
-		acc.slide(inputVec, start, lo, hi)
+		acc.slide(inputVec, cells, start, lo, hi)
 		if acc.overflow {
 			// The incremental state left the range. That is not yet an
 			// answer: a slide carries state between frames, so the flag may
 			// belong to a transient rather than to THIS frame's rows. Sum
 			// them on their own — the grouped SUM's own arithmetic — and
 			// refuse only if that overflows too.
-			acc.recompute(inputVec, start, lo, hi)
+			acc.recompute(inputVec, cells, start, lo, hi)
 			if acc.overflow {
 				if avg {
 					return windowDecimalAvgUnrepresentable(wc.OutputCol)
@@ -274,7 +316,43 @@ func windowDecimalFrames(winVec, inputVec *batch.Vector, fr resolvedFrame, start
 	return nil
 }
 
-// windowFloat64Frames is windowDecimalFrames' inexact twin: SUM/AVG over
+// windowExactIntFrames is windowExactFrames' BIGINT arm: an exact Int128
+// running total written back as an int64, which is what `SUM(int4) OVER (…)`
+// declares (exec.IntegerAccOutputType, PostgreSQL's `sum(int4) -> bigint`).
+//
+// The accumulator is the wide one on purpose. PostgreSQL's own int4 sum
+// accumulates in int8 and the frame's total is the only thing that has to fit
+// it; accumulating in int64 here would additionally make a PREFIX of the
+// frame able to wrap, so a frame whose own total is in range could fail. The
+// Int128 carrier removes that difference — over an int4 column no
+// intermediate can leave it at all — and the fit test is on the value the
+// query actually returns.
+func windowExactIntFrames(winVec, inputVec *batch.Vector, cells windowExactCells,
+	fr resolvedFrame, start, n int, wc WindowColumn) error {
+	var acc exactFrameAcc
+	out := winVec.Int64Data
+	for i := 0; i < n; i++ {
+		lo, hi := fr.bounds(i)
+		acc.slide(inputVec, cells, start, lo, hi)
+		if acc.overflow {
+			acc.recompute(inputVec, cells, start, lo, hi)
+			if acc.overflow {
+				return integerSumOverflow(wc.OutputCol)
+			}
+		}
+		if hi <= lo || acc.count == 0 {
+			continue
+		}
+		if !acc.sum.FitsInt64() {
+			return integerSumOverflow(wc.OutputCol)
+		}
+		out[start+i] = acc.sum.ToInt64()
+		winVec.Nulls.SetValid(start + i)
+	}
+	return nil
+}
+
+// windowFloat64Frames is windowExactFrames' inexact twin: SUM/AVG over
 // every frame of one partition into a FLOAT64 output vector, which is what
 // every non-DECIMAL numeric input still answers.
 //
@@ -304,39 +382,69 @@ func windowFloat64Frames(winVec, inputVec *batch.Vector, rd windowNumericReader,
 	}
 }
 
-// windowExactDecimal reports whether this window column's SUM/AVG runs on the
-// exact path: an accumulating function whose OUTPUT vector and INPUT vector
-// are both DECIMAL.
+// resolveWindowExactCells reports whether this window column's SUM/AVG runs
+// on the EXACT path, and hands back the cell reader it runs with.
 //
-// Both halves are asked because they are declared in different places. The
+// Two questions are asked because they are declared in different places. The
 // output type comes from the planner (windowSpecOutputType) or the stage spec,
 // corrected at runtime by Window.retypeValueColumns; the input type is
 // whatever vector arrives. They agree in every plan the planner builds — but a
 // spec whose declaration the planner had to decline keeps FLOAT64 and takes
 // the inexact path, which is the pre-#586 answer rather than a wrong write
 // into a vector of the other type.
-func windowExactDecimal(winVec, inputVec *batch.Vector) bool {
-	return winVec != nil && inputVec != nil &&
-		winVec.Type == batch.TypeDecimal && inputVec.Type == batch.TypeDecimal
+//
+// A DECIMAL input needs a DECIMAL output. An INTEGER input — the set
+// IntegerAccOutputType names — needs the DECIMAL that PostgreSQL's
+// sum(int8)/avg(int) declare, or the INT64 its sum(int4) declares; either is
+// a carrier that holds the total exactly, which is the whole point (#987).
+func resolveWindowExactCells(winVec, inputVec *batch.Vector) (windowExactCells, bool) {
+	if winVec == nil || inputVec == nil {
+		return windowExactCells{}, false
+	}
+	if inputVec.Type == batch.TypeDecimal {
+		if winVec.Type != batch.TypeDecimal {
+			return windowExactCells{}, false
+		}
+		return windowExactCells{dec: inputVec.DecimalData.Data, scale: inputVec.DecimalData.Scale}, true
+	}
+	if !integerAccInput(inputVec.Type) {
+		return windowExactCells{}, false
+	}
+	if winVec.Type != batch.TypeDecimal && winVec.Type != batch.TypeInt64 {
+		return windowExactCells{}, false
+	}
+	if inputVec.Type == batch.TypeInt64 {
+		return windowExactCells{i64: inputVec.Int64Data}, true
+	}
+	// INT32 and the int4-domain PORT/PROTOCOL, all Int32Data-backed.
+	return windowExactCells{i32: inputVec.Int32Data}, true
 }
 
-// windowAccOutputType is Window.retypeValueColumns' rule for SUM and AVG: a
-// DECIMAL input makes the output DECIMAL, and every other numeric input keeps
-// FLOAT64.
+// windowAccOutputType is Window.retypeValueColumns' rule for SUM and AVG: the
+// output type is the ACCUMULATOR's, not the input's. A DECIMAL input makes it
+// DECIMAL; an INTEGER input takes PostgreSQL's own result type, which is
+// exec.IntegerAccOutputType — bigint for sum(int4), numeric for sum(int8) and
+// for avg of either; everything else keeps FLOAT64.
 //
-// The second clause is not decoration. A stage spec built before this change,
-// or a planner declaration resolved against a different scan, can declare
-// DECIMAL over an input that is not one; writing float sums into a DECIMAL
-// vector's Int128 array would produce values off by a power of ten with
-// nothing to report it, so the declaration is corrected DOWN as well as up.
+// The last clause is not decoration. A stage spec built before this change, or
+// a planner declaration resolved against a different scan, can declare DECIMAL
+// over an input that is not one; writing float sums into a DECIMAL vector's
+// Int128 array would produce values off by a power of ten with nothing to
+// report it, so the declaration is corrected DOWN as well as up.
 //
-// INT32/INT64 keep FLOAT64 and are a recorded residual: PostgreSQL's
-// sum(int4) is bigint, sum(int8) and avg(int) are numeric. Fixing that is a
-// separate change to the GROUPED aggregate first — it answers float64 for an
-// integer column too — because the two spellings have to keep agreeing.
-func windowAccOutputType(in parquet.TypeID) parquet.TypeID {
+// The INTEGER arm is #987 and #813: until it existed, `SUM(int8) OVER ()`
+// accumulated in float64, so past 2^53 the total depended on the ORDER the
+// rows arrived in — the same query answered 9007201419001868 or
+// 9007201419001864 on the same data — while `SUM(int8) GROUP BY` next to it
+// answered exactly. One question, two spellings, two numbers. It asks
+// IntegerAccOutputType rather than repeating the rule so that the grouped
+// declaration, this one and the planner's window declaration cannot drift.
+func windowAccOutputType(fn WindowFunc, in parquet.TypeID) parquet.TypeID {
 	if in == parquet.TypeDecimal {
 		return parquet.TypeDecimal
+	}
+	if out, _, _, ok := IntegerAccOutputType(fn == WinAvg, in); ok {
+		return out
 	}
 	return parquet.TypeFloat64
 }

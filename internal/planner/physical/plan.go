@@ -16456,13 +16456,27 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 		// the other, with the window's digits past a float64's ~16 already
 		// gone.
 		//
+		// An INTEGER input answers PostgreSQL's own result type — bigint for
+		// sum(int4), numeric for sum(int8) and for avg of either — through
+		// exec.IntegerAccOutputType, the SAME function the grouped
+		// aggregate's declaration asks (aggIntegerOutputType) and the same
+		// one the operator's runtime correction asks
+		// (exec.windowAccOutputType). Until #987 this fell to float8 while
+		// the grouped spelling was exact, so the two spellings of one
+		// question disagreed about the type AND, past 2^53, about the digits
+		// — an order-dependent total from a float64 accumulator (#813,
+		// ADR-0012's divergence list, now deleted).
+		//
 		// Every other input type keeps the float64 the name list answers.
-		// PostgreSQL's sum(int4) is bigint and sum(int8)/avg(int) are
-		// numeric; wadjet's GROUPED aggregate answers float64 for an integer
-		// column too, and the two spellings have to keep agreeing, so that
-		// divergence moves when the aggregate's does — not here.
 		if t.ID != parquet.TypeDecimal || !t.DecKnown {
-			return expr.Decl(windowOutputType(fn))
+			out, prec, scale, ok := exec.IntegerAccOutputType(fn == "avg", t.ID)
+			if !ok {
+				return expr.Decl(windowOutputType(fn))
+			}
+			if out == parquet.TypeDecimal {
+				return expr.DeclDecimal(prec, scale)
+			}
+			return expr.Decl(out)
 		}
 		prec, scale := exec.WindowDecimalAggMeta(parseWindowFunc(fn), t.Scale)
 		return expr.DeclDecimal(prec, scale)

@@ -224,20 +224,35 @@ func WindowMinMaxType(in parquet.TypeID) (parquet.TypeID, bool) {
 // ADR-0012 item 9). Declaring them at the input's own (p,s) instead would
 // hand the parquet writer a leaf too small for the value, and would make the
 // two spellings of one question disagree about their answer's type.
+//
+// An INTEGER input reaches the same branch through IntegerAccOutputType: its
+// output type is not its input's either, and `SUM(int8) OVER ()` /
+// `AVG(int*) OVER ()` are DECIMAL(38,0) / DECIMAL(38,4) with no scale to read
+// off the input column at all (#987). That is why the accumulating family is
+// dispatched BEFORE the `col.Type != wc.OutputType` test the copying family
+// takes: for these two the types differ on purpose, and the old test skipped
+// the column outright, which would have declared DECIMAL(0,0).
 func windowOutputColumn(wc WindowColumn, schema []parquet.Column) parquet.Column {
 	out := parquet.Column{Name: wc.OutputCol, Type: wc.OutputType, Nullable: true}
 	if wc.InputCol == "" {
 		return out
 	}
 	for _, col := range schema {
-		if col.Name != wc.InputCol || col.Type != wc.OutputType {
+		if col.Name != wc.InputCol {
 			continue
 		}
 		if windowAccumulates(wc.Func) {
-			if col.Type == parquet.TypeDecimal {
-				out.Precision, out.Scale = WindowDecimalAggMeta(wc.Func, col.Scale)
+			if wc.OutputType == parquet.TypeDecimal {
+				if col.Type == parquet.TypeDecimal {
+					out.Precision, out.Scale = WindowDecimalAggMeta(wc.Func, col.Scale)
+				} else if _, p, s, ok := IntegerAccOutputType(wc.Func == WinAvg, col.Type); ok {
+					out.Precision, out.Scale = p, s
+				}
 			}
 			break
+		}
+		if col.Type != wc.OutputType {
+			continue
 		}
 		out.Precision, out.Scale = col.Precision, col.Scale
 		out.Fields, out.ElementType, out.Dimension = col.Fields, col.ElementType, col.Dimension
@@ -285,12 +300,13 @@ func (w *Window) retypeValueColumns() bool {
 			if acc {
 				// SUM/AVG do not copy an input value, so their type is not
 				// the input's — it is the ACCUMULATOR's: DECIMAL over a
-				// DECIMAL column (exactly, #586), FLOAT64 over everything
-				// else. Corrected here as well as declared by the planner
-				// because a stage spec the coordinator could not type
+				// DECIMAL column (exactly, #586), PostgreSQL's own bigint or
+				// numeric over an INTEGER one (#987/#813), FLOAT64 over
+				// everything else. Corrected here as well as declared by the
+				// planner because a stage spec the coordinator could not type
 				// arrives with the FLOAT64 fallback, and nothing downstream
 				// of the operator can fix a declaration (#345).
-				t = windowAccOutputType(t)
+				t = windowAccOutputType(wc.Func, t)
 			}
 			if minMax {
 				// The input type, for every type the engine has (#569).
@@ -1654,10 +1670,11 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 		if !summable {
 			return nil
 		}
-		// A DECIMAL input with a DECIMAL output takes the exact Int128
-		// accumulator; everything else takes the float64 one.
-		if windowExactDecimal(winVec, inputVec) {
-			return windowDecimalFrames(winVec, inputVec, fr, start, n, wc)
+		// A DECIMAL or INTEGER input with the carrier its declaration names
+		// takes the exact Int128 accumulator; everything else takes the
+		// float64 one.
+		if cells, exact := resolveWindowExactCells(winVec, inputVec); exact {
+			return windowExactFrames(winVec, inputVec, cells, fr, start, n, wc)
 		}
 		if winVec.Type != batch.TypeFloat64 {
 			// A declaration the operator could not reconcile with the input
@@ -1922,7 +1939,7 @@ func resolveWindowNumeric(v *batch.Vector) (windowNumericReader, bool) {
 	return windowNumericReader{}, false
 }
 
-// float64FrameAcc is decimalFrameAcc's inexact twin: the running float64 sum
+// float64FrameAcc is exactFrameAcc's inexact twin: the running float64 sum
 // of a frame's non-NULL rows and how many there were.
 //
 // The COUNT is separate from the frame's WIDTH because SQL excludes NULLs
@@ -1975,7 +1992,7 @@ func (a *float64FrameAcc) reset(pos int) {
 }
 
 // slide advances the accumulator to [lo, hi), retracting before it adds and
-// resetting outright between disjoint frames — decimalFrameAcc.slide's order,
+// resetting outright between disjoint frames — exactFrameAcc.slide's order,
 // for a reason that survives the change of carrier. Adding first makes the
 // accumulator transiently hold the previous frame plus the arriving rows, a
 // value belonging to neither; on the exact carrier that transient could refuse

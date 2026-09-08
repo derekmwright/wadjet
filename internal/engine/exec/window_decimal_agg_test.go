@@ -736,31 +736,40 @@ func TestWindowFloat64SlideTransientIsNotTheFrame(t *testing.T) {
 // one resolution per partition, and its switch and numericPromotable's are the
 // same list stated twice — a type in one and not the other answers 0 for every
 // row rather than NULL, which is #412's exact symptom through a new door.
+//
+// The answers are compared as TEXT because since #987 the carrier is no longer
+// one type: an INT32 input sums into the bigint PostgreSQL's `sum(int4)`
+// declares and averages into its numeric, an INT64 input sums into numeric,
+// and everything else keeps float64. The values are the same numbers either
+// way, and the rendering is what says WHICH declaration answered.
 func TestWindowSumAvgReadEveryNumericTypeWithoutAPerRowSwitch(t *testing.T) {
 	for _, tc := range []struct {
-		typ  parquet.TypeID
-		col  parquet.Column
-		vals []any
-		want float64
+		typ   parquet.TypeID
+		col   parquet.Column
+		vals  []any
+		wantS string
+		wantA string
 	}{
 		{typ: parquet.TypeFloat64, col: parquet.Column{Name: "v", Type: parquet.TypeFloat64, Nullable: true},
-			vals: []any{1.5, 2.25}, want: 3.75},
+			vals: []any{1.5, 2.25}, wantS: "3.75", wantA: "1.875"},
 		{typ: parquet.TypeFloat32, col: parquet.Column{Name: "v", Type: parquet.TypeFloat32, Nullable: true},
-			vals: []any{float32(1.5), float32(2.25)}, want: 3.75},
+			vals: []any{float32(1.5), float32(2.25)}, wantS: "3.75", wantA: "1.875"},
+		// sum(int8) is numeric, avg(int8) is numeric (#987).
 		{typ: parquet.TypeInt64, col: parquet.Column{Name: "v", Type: parquet.TypeInt64, Nullable: true},
-			vals: []any{int64(7), int64(11)}, want: 18},
+			vals: []any{int64(7), int64(11)}, wantS: "18", wantA: "9.0000"},
+		// sum(int4) is BIGINT, avg(int4) is numeric.
 		{typ: parquet.TypeInt32, col: parquet.Column{Name: "v", Type: parquet.TypeInt32, Nullable: true},
-			vals: []any{int32(7), int32(11)}, want: 18},
+			vals: []any{int32(7), int32(11)}, wantS: "18", wantA: "9.0000"},
 		{typ: parquet.TypePort, col: parquet.Column{Name: "v", Type: parquet.TypePort, Nullable: true},
-			vals: []any{int32(80), int32(443)}, want: 523},
+			vals: []any{int32(80), int32(443)}, wantS: "523", wantA: "261.5"},
 		{typ: parquet.TypeProtocol, col: parquet.Column{Name: "v", Type: parquet.TypeProtocol, Nullable: true},
-			vals: []any{int32(6), int32(17)}, want: 23},
+			vals: []any{int32(6), int32(17)}, wantS: "23", wantA: "11.5"},
 		{typ: parquet.TypeDuration, col: parquet.Column{Name: "v", Type: parquet.TypeDuration, Nullable: true},
-			vals: []any{int64(1000), int64(2000)}, want: 3000},
+			vals: []any{int64(1000), int64(2000)}, wantS: "3000", wantA: "1500"},
 		{typ: parquet.TypeDate, col: parquet.Column{Name: "v", Type: parquet.TypeDate, Nullable: true},
-			vals: []any{int32(10), int32(20)}, want: 30},
+			vals: []any{int32(10), int32(20)}, wantS: "30", wantA: "15"},
 		{typ: parquet.TypeTimestamp, col: parquet.Column{Name: "v", Type: parquet.TypeTimestamp, Nullable: true},
-			vals: []any{int64(1000), int64(2000)}, want: 3000},
+			vals: []any{int64(1000), int64(2000)}, wantS: "3000", wantA: "1500"},
 	} {
 		tc := tc
 		t.Run(tc.typ.String(), func(t *testing.T) {
@@ -777,11 +786,12 @@ func TestWindowSumAvgReadEveryNumericTypeWithoutAPerRowSwitch(t *testing.T) {
 					PartitionBy: []string{"k"}},
 			}
 			for _, r := range mustRows(t, schema, cols, rows) {
-				if r["s"] != tc.want {
-					t.Errorf("SUM = %v, want %v", r["s"], tc.want)
+				if got := fmt.Sprint(r["s"]); got != tc.wantS {
+					t.Errorf("SUM = %v (%T), want %s", r["s"], r["s"], tc.wantS)
 				}
-				if r["a"] != tc.want/2 {
-					t.Errorf("AVG = %v, want %v (two non-NULL rows, not three)", r["a"], tc.want/2)
+				if got := fmt.Sprint(r["a"]); got != tc.wantA {
+					t.Errorf("AVG = %v (%T), want %s (two non-NULL rows, not three)",
+						r["a"], r["a"], tc.wantA)
 				}
 			}
 		})

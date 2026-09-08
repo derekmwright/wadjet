@@ -342,13 +342,12 @@ func TestF1AKeylessJoinAsksForWhatItNeeds(t *testing.T) {
 // reading it inherited the float box, on every arm, where PostgreSQL answers
 // numeric.
 //
-// The last cell is #813's surviving half, PINNED rather than fixed: PostgreSQL
-// declares `sum(int8) over ()` numeric and `sum(int4) over ()` bigint, and
-// every arm here declares float8. It is a DECLARATION divergence with the
-// right digits, it is uniform across the four arms, and closing it is an exact
-// integer accumulator in the window operator (exec.windowAccOutputType) —
-// recorded in this arc's report and in ADR-0012's divergence list. The pin
-// fails the day the declaration moves, which is what makes it a proof.
+// The last cells were #813's surviving half, PINNED on the float64 answer.
+// #987 closed it (arc K2): PostgreSQL declares `sum(int8) over ()` numeric and
+// `sum(int4) over ()` bigint, the window operator now accumulates an integer
+// input in the same Int128 carrier the GROUPED spelling uses, and the pins are
+// deleted here as that fix's proof — the cells assert PostgreSQL's own type
+// and digits beside the grouped controls that always had them.
 func TestF1AWindowDeclaresTheSameTypeThroughADerivedTable(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
@@ -396,20 +395,14 @@ func TestF1AWindowDeclaresTheSameTypeThroughADerivedTable(t *testing.T) {
 				"dag": "unreachable output +1", "dagshuf": "unreachable output +1"},
 		},
 		{
-			// #813 pinned on the VALUE, which is what it actually is. The
-			// first version of this pin, and ADR-0012's entry with it, said
-			// "the digits are right"; over `numwidth`, whose `w_i64` carries
-			// values past 2^53 on purpose, they are not. The window's float64
-			// accumulator loses them where the GROUPED spelling below keeps
-			// them exactly — one question, two spellings, two numbers.
-			// Fail-on-agree: the day the accumulator is exact this reads
-			// 1000800157666874.2222 and the cell must be deleted.
-			name: "813 PINNED VALUE: AVG(int8) OVER () loses digits the grouped spelling keeps",
+			// #813's value half, CLOSED by #987. This cell was pinned on the
+			// float64 answer 1.0008001576668742e+15 — over `numwidth`, whose
+			// `w_i64` carries values past 2^53 on purpose, the window's
+			// accumulator lost digits the GROUPED spelling below kept. The
+			// two spellings now answer the same number under the same type.
+			name: "813 AVG(int8) OVER () keeps the digits the grouped spelling keeps",
 			sql:  "SELECT AVG(w_i64) OVER () AS w FROM numwidth ORDER BY 1 LIMIT 1",
-			want: "cols=[w:FLOAT64] rows=1 | 1.0008001576668742e+15",
-			why: "PostgreSQL 17 and the grouped spelling both answer " +
-				"1000800157666874.2222 numeric; exec.windowAccOutputType gives an integer " +
-				"input a float64 accumulator. DEFERRED with mechanism (ADR-0012).",
+			want: "cols=[w:DECIMAL(38,4)] rows=1 | 1000800157666874.2222",
 		},
 		{
 			// The control that makes the cell above a divergence rather than
@@ -424,12 +417,9 @@ func TestF1AWindowDeclaresTheSameTypeThroughADerivedTable(t *testing.T) {
 			want: "cols=[w:DECIMAL(38,0)] rows=1 | 9007201419001868",
 		},
 		{
-			name: "813 PINNED: SUM(int8) OVER () declares float8 where PostgreSQL declares numeric",
+			name: "813 SUM(int8) OVER () declares numeric, as PostgreSQL does",
 			sql:  "SELECT SUM(id) OVER () AS w FROM decpair ORDER BY 1 LIMIT 1",
-			want: "cols=[w:FLOAT64] rows=1 | 45",
-			why: "the window accumulator is float64 for an integer input " +
-				"(exec.windowAccOutputType); declaring the exact type without moving " +
-				"the carrier is the #361 silent-write class. DEFERRED with mechanism.",
+			want: "cols=[w:DECIMAL(38,0)] rows=1 | 45",
 		},
 	})
 }

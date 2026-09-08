@@ -1761,6 +1761,25 @@ Window functions compute values across sets of rows related to the current row w
 | `PERCENT_RANK()` | Relative rank: (rank - 1) / (total - 1) |
 | `CUME_DIST()` | Cumulative distribution |
 
+### The type a window aggregate answers
+
+`SUM(x) OVER (…)` declares and answers exactly what `SUM(x) … GROUP BY`
+declares and answers — one question written two ways:
+
+| input | `SUM` | `AVG` |
+|---|---|---|
+| `INT32` | `BIGINT` | `NUMERIC(38,4)` |
+| `INT64` | `NUMERIC(38,0)` | `NUMERIC(38,4)` |
+| `DECIMAL(p,s)` | `DECIMAL(38,s)` | `DECIMAL(38,s+4)` |
+| `FLOAT32` / `FLOAT64` | `DOUBLE PRECISION` | `DOUBLE PRECISION` |
+
+The integer and decimal rows accumulate exactly, in every frame form —
+`OVER ()`, `PARTITION BY`, a running `ORDER BY` frame, a sliding `ROWS`/`RANGE`
+frame — and a total the declared type cannot hold is SQLSTATE `22003`, never a
+wrapped number. `MIN`, `MAX` and the value functions (`LAG`, `LEAD`,
+`FIRST_VALUE`, `LAST_VALUE`, `NTH_VALUE`) answer their input column's own type;
+`COUNT`, `ROW_NUMBER`, `RANK`, `DENSE_RANK` and `NTILE` answer `BIGINT`.
+
 ### Basic Window Functions
 
 ```sql

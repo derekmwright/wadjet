@@ -103,8 +103,18 @@ type globalDecAgg struct {
 	// addScale is how many digits the AVG division adds: the declared output
 	// scale minus the input's. Zero for SUM, which keeps the input's scale.
 	addScale int
+	// bigint marks the arm whose OUTPUT is an int64 rather than a DECIMAL —
+	// PostgreSQL's `sum(int4)`. The accumulator is the same Int128; only the
+	// write differs, and a total that does not fit is 22003 rather than a
+	// wrapped number.
+	bigint bool
 }
 
+// globalDecAggs decides, once per window group, which of its SUM/AVG columns
+// run on the EXACT Int128 carrier and what the write at the end of it is.
+// It is the streaming evaluator's copy of resolveWindowExactCells' question,
+// asked from the SCHEMA rather than from a vector because pass 1 runs before
+// any output vector exists.
 func globalDecAggs(schema []parquet.Column, g windowSpecGroup, inputIdxs []int) []globalDecAgg {
 	out := make([]globalDecAgg, len(g.cols))
 	for i, wc := range g.cols {
@@ -114,22 +124,54 @@ func globalDecAggs(schema []parquet.Column, g windowSpecGroup, inputIdxs []int) 
 		}
 		in := schema[ii]
 		oc := windowOutputColumn(wc, schema)
-		if in.Type != parquet.TypeDecimal || oc.Type != parquet.TypeDecimal {
+		inScale := in.Scale
+		switch {
+		case in.Type == parquet.TypeDecimal:
+			if oc.Type != parquet.TypeDecimal {
+				continue
+			}
+		case integerAccInput(in.Type):
+			// An integer's cells are read at scale 0 whatever the column
+			// says, which is what kernel.sumRowInt64Decimal does for the
+			// grouped spelling (#784, #987).
+			inScale = 0
+			if oc.Type == parquet.TypeInt64 {
+				out[i] = globalDecAgg{exact: true, bigint: true}
+				continue
+			}
+			if oc.Type != parquet.TypeDecimal {
+				continue
+			}
+		default:
 			continue
 		}
-		if oc.Scale < in.Scale {
-			continue // see windowDecimalFrames: never produced by the rule
+		if oc.Scale < inScale {
+			continue // see windowExactFrames: never produced by the rule
 		}
-		out[i] = globalDecAgg{exact: true, addScale: oc.Scale - in.Scale}
+		out[i] = globalDecAgg{exact: true, addScale: oc.Scale - inScale}
 	}
 	return out
+}
+
+// globalExactCell reads one row of an exactly-summable input column as an
+// Int128 — the streaming evaluator's windowExactCells, one row at a time
+// because that is how this path sees its input.
+func globalExactCell(col *batch.Vector, r int) batch.Int128 {
+	switch col.Type {
+	case batch.TypeDecimal:
+		return col.DecimalData.Data[r]
+	case batch.TypeInt64:
+		return batch.Int128From(col.Int64Data[r])
+	default:
+		return batch.Int128From(int64(col.Int32Data[r]))
+	}
 }
 
 // decAvgMemo caches one column's last exact AVG division. Both writers below
 // answer MANY rows from ONE (sum, count) — every row of a whole-input window,
 // every row of a closed ORDER-BY peer group — and batch.DecimalAvg falls to an
 // allocating big.Int division whenever the sum scaled by 10^addScale leaves
-// int64, which a wide DECIMAL's does routinely. windowDecimalFrames carries
+// int64, which a wide DECIMAL's does routinely. windowExactFrames carries
 // the same memo for the same reason.
 type decAvgMemo struct {
 	sum   Int128Sum
@@ -146,9 +188,23 @@ func writeGlobalDecAgg(vec *batch.Vector, r int, wc WindowColumn, da globalDecAg
 		if wc.Func == WinAvg {
 			return windowDecimalAvgUnrepresentable(wc.OutputCol)
 		}
+		if da.bigint {
+			return integerSumOverflow(wc.OutputCol)
+		}
 		return windowDecimalSumOverflow(wc.OutputCol)
 	}
 	if cnt == 0 {
+		return nil
+	}
+	if da.bigint {
+		// PostgreSQL's `sum(int4) -> bigint`: the accumulator is wide so no
+		// intermediate can wrap, and only the answer has to fit the declared
+		// type. One that does not is 22003, never a wrapped total.
+		if !sum.FitsInt64() {
+			return integerSumOverflow(wc.OutputCol)
+		}
+		vec.Int64Data[r] = sum.ToInt64()
+		vec.Nulls.SetValid(r)
 		return nil
 	}
 	if wc.Func == WinAvg {
@@ -251,7 +307,7 @@ func collectGlobalWindowStats(m *runMerger, schema []parquet.Column, g windowSpe
 							if col.Nulls.IsNullFast(r) {
 								continue
 							}
-							v, ok := st.decSum[i].AddChecked(col.DecimalData.Data[r])
+							v, ok := st.decSum[i].AddChecked(globalExactCell(col, r))
 							st.decSum[i] = v
 							st.decOverflow[i] = st.decOverflow[i] || !ok
 							st.cnt[i]++
@@ -813,7 +869,7 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 // group closes.
 //
 // The DECIMAL arm is exact and its overflow is STICKY, matching the grouped
-// aggregate and the in-memory frame accumulator (windowDecimalFrames): a
+// aggregate and the in-memory frame accumulator (windowExactFrames): a
 // running total that leaves the carrier's range fails the query rather than
 // reporting a wrapped number, and it stays failed even if later rows bring
 // it back (ADR-0012 item 9).
@@ -822,13 +878,16 @@ func (s *globalWindowStreamer) accumulateRunning(wc WindowColumn, i, r int, inVe
 		if inVec.Nulls.IsNullFast(r) {
 			return nil
 		}
-		v, ok := s.runDecSum[i].AddChecked(inVec.DecimalData.Data[r])
+		v, ok := s.runDecSum[i].AddChecked(globalExactCell(inVec, r))
 		s.runDecSum[i] = v
 		s.runNonNull[i]++
 		if !ok {
 			s.runDecOver[i] = true
 			if wc.Func == WinAvg {
 				return windowDecimalAvgUnrepresentable(wc.OutputCol)
+			}
+			if s.decAgg[i].bigint {
+				return integerSumOverflow(wc.OutputCol)
 			}
 			return windowDecimalSumOverflow(wc.OutputCol)
 		}

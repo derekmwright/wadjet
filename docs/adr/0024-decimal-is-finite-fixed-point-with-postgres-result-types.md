@@ -75,6 +75,16 @@ Category resolution is PostgreSQL's, already pinned for set operations by
     MIN/MAX/FIRST_VALUE/LAG/… keep the input's (p,s); SUM → (38,s); AVG → (38, min(s+4,38))
     windowed SUM/AVG answer what the grouped ones answer, exactly
 
+**The last line held for DECIMAL from #586 and for INTEGER only from #987**
+(2026-09-07, arc K2). A windowed SUM/AVG over an int4/int8 column accumulated
+in float64 — so it declared float8 where the grouped spelling declared bigint
+or numeric, and past 2^53 it answered a number that depended on the ORDER the
+rows arrived in. `exec.IntegerAccOutputType` is now the ONE table the grouped
+declaration, the window declaration and the operator's runtime correction all
+read, and `exec.windowExactFrames` runs the integer arms on the same Int128
+carrier as the grouped path, in every frame form and in both spilled
+evaluators. A total the declaration cannot hold is item 4's 22003.
+
 **The INTEGER half of the choice rule landed 2026-08-29 (#695), and the BOX is
 what it took.** The type fold was the easy half: an integer contributes its
 whole range at scale 0 and a numeric LITERAL its own spelling, so

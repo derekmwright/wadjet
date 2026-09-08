@@ -22,24 +22,22 @@ import (
 //     expression itself.
 //
 //  2. `SUM(<integer>) OVER ()` declares float8 where the GROUPED spelling is
-//     exact. REPRODUCES, on every arm including single-process, so it is a
-//     wadjet-vs-PostgreSQL divergence and not a two-path one. DEFERRED with
-//     its mechanism (ADR-0012's divergence list): `exec.windowAccOutputType`
-//     gives every non-DECIMAL input a FLOAT64 accumulator, and declaring the
-//     exact type over that carrier would be the #361 silent-write class on
-//     top of a wrong declaration. The repair is an exact integer accumulator
-//     in the window operator — `decimalFrameAcc` reads `DecimalData` directly
-//     and needs a per-type cell reader, `windowOutputColumn` needs the (p,s)
-//     for an integer input, and `SUM(int4) -> bigint` needs an INT64 output
-//     path neither frame evaluator has — plus the same in
-//     `window_global.go`'s three sites and the spilled path.
+//     exact. CLOSED 2026-09-07 by #987 (arc K2). The float64 accumulator was
+//     worse than a wrong declaration: past 2^53 its total depended on the
+//     ORDER the rows arrived in, so this very file's
+//     `CAST(SUM(int8) OVER () AS BIGINT)` cell answered 9007201419001864
+//     about one run in twenty on the routed DAG arms and 9007201419001868 on
+//     the rest. `exec.IntegerAccOutputType` is now the ONE table the grouped
+//     declaration, the window declaration and the operator's runtime
+//     correction all read, and `exec.windowExactFrames` accumulates an
+//     integer input in the same Int128 carrier the grouped spelling uses. The
+//     cells below are what the repair moved, and they are the proof.
 //
-// This is the CENSUS the deferral is recorded as, replacing two sampled pins
-// with the full cross of five window aggregates and six widths. Every `want`
-// is what wadjet answers on all four arms; every DIVERGENT cell names
-// PostgreSQL's own answer in `why`, so the day the accumulator becomes exact
-// the cell FAILS and deleting it is the fix's proof. A cell with no `why`
-// already agrees with PostgreSQL and is a control: it fails if the repair
+// This is the CENSUS, the full cross of five window aggregates and six
+// widths. Every `want` is what wadjet answers on all four arms; every
+// DIVERGENT cell names PostgreSQL's own answer in `why`, so the day the
+// divergence closes the cell FAILS and deleting it is the fix's proof. A cell
+// with no `why` agrees with PostgreSQL and is a control: it fails if a repair
 // moves something it should not.
 //
 // The GROUPED spelling of each aggregate rides beside it. That pairing is the
@@ -64,21 +62,21 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 		// SUM — the family #813 is about. The two DECIMAL widths already
 		// answer PostgreSQL's type and digits (#586); the four others do not.
 		{
-			name: "813 SUM(int4) OVER ()",
+			// CLOSED by #987: bigint, exactly what PostgreSQL declares, and
+			// the same INT64 2164260874 the GROUPED spelling below answers.
+			name: "813 SUM(int4) OVER () is bigint",
 			sql:  win("SUM", "w_i32"),
-			want: "cols=[v:FLOAT64] rows=1 | 2.164260874e+09",
-			why: "PostgreSQL 17 declares bigint and answers 2164260874; the GROUPED " +
-				"spelling below is INT64 2164260874. exec.windowAccOutputType gives an " +
-				"integer input a FLOAT64 accumulator. DEFERRED (ADR-0012).",
+			want: "cols=[v:INT64] rows=1 | 2164260874",
 		},
 		{name: "813 control: SUM(int4) grouped", sql: grp("SUM", "w_i32"),
 			want: "cols=[v:INT64] rows=1 | 2164260874"},
 		{
-			name: "813 SUM(int8) OVER ()",
+			// CLOSED by #987: numeric, and the digits past 2^53 the float64
+			// accumulator used to lose — intermittently, since its error
+			// depended on the order the DAG's tasks delivered rows in.
+			name: "813 SUM(int8) OVER () is numeric and exact",
 			sql:  win("SUM", "w_i64"),
-			want: "cols=[v:FLOAT64] rows=1 | 9.007201419001868e+15",
-			why: "PostgreSQL 17 declares numeric and answers 9007201419001868, which " +
-				"the GROUPED spelling below answers exactly. DEFERRED (ADR-0012).",
+			want: "cols=[v:DECIMAL(38,0)] rows=1 | 9007201419001868",
 		},
 		{name: "813 control: SUM(int8) grouped", sql: grp("SUM", "w_i64"),
 			want: "cols=[v:DECIMAL(38,0)] rows=1 | 9007201419001868"},
@@ -106,19 +104,19 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 		// AVG — the same rule, and the width where the DIGITS are visibly
 		// gone rather than merely mis-declared.
 		{
-			name: "813 AVG(int4) OVER ()",
+			// CLOSED by #987. PostgreSQL prints 270532609.25000000 — its
+			// numeric division picks a magnitude-dependent scale; wadjet's is
+			// the fixed +4 of ADR-0024 item 2. Both are exact to the digits
+			// they keep and agree to min(scale), which is ADR-0012 item 9's
+			// class, not a value divergence.
+			name: "813 AVG(int4) OVER () is numeric",
 			sql:  win("AVG", "w_i32"),
-			want: "cols=[v:FLOAT64] rows=1 | 2.7053260925e+08",
-			why: "PostgreSQL 17 declares numeric and answers 270532609.25000000. " +
-				"DEFERRED (ADR-0012).",
+			want: "cols=[v:DECIMAL(38,4)] rows=1 | 270532609.2500",
 		},
 		{
 			name: "813 AVG(int8) OVER () — the DIGITS, not only the type",
 			sql:  win("AVG", "w_i64"),
-			want: "cols=[v:FLOAT64] rows=1 | 1.0008001576668742e+15",
-			why: "PostgreSQL 17 answers 1000800157666874.2222 numeric and so does the " +
-				"GROUPED spelling below; the window's float64 accumulator has lost the " +
-				"fraction. DEFERRED (ADR-0012).",
+			want: "cols=[v:DECIMAL(38,4)] rows=1 | 1000800157666874.2222",
 		},
 		{name: "813 control: AVG(int8) grouped is exact", sql: grp("AVG", "w_i64"),
 			want: "cols=[v:DECIMAL(38,4)] rows=1 | 1000800157666874.2222"},
@@ -160,6 +158,50 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 			want: "cols=[v:INT64] rows=1 | 9007201419001868",
 			routed: map[string]string{
 				"dag": "unreachable output +1", "dagshuf": "unreachable output +1"},
+		},
+
+		// #987 IS NOT `OVER ()`. The float64 accumulator was wrong in every
+		// FRAME form, and the sliding one exercises the retract as well as the
+		// add — a subtraction above 2^53 loses digits the same way. Every row
+		// below is PostgreSQL 17.11's, taken live over these ten rows, and
+		// every row is asserted rather than a LIMIT 1 sample: the running
+		// frame's error was two ulps at row 4 and none at row 8, so a sample
+		// of one row could pass a float accumulator.
+		{
+			name: "987 the RUNNING frame is exact above 2^53",
+			sql: "SELECT w_key, SUM(w_i64) OVER (ORDER BY w_key) AS v " +
+				"FROM numwidth ORDER BY w_key",
+			want: "cols=[w_key:INT64 v:DECIMAL(38,0)] rows=10 | 0,2 | 1,5 | 2,17 | " +
+				"3,16777234 | 4,9007199271518227 | 5,9007199271518207 | " +
+				"6,9007199271518207 | 7,9007199271518207 | 8,9007199271518220 | " +
+				"9,9007201419001868",
+		},
+		{
+			name: "987 the SLIDING frame's exit subtraction is exact above 2^53",
+			sql: "SELECT w_key, SUM(w_i64) OVER (ORDER BY w_key " +
+				"ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS v FROM numwidth ORDER BY w_key",
+			want: "cols=[w_key:INT64 v:DECIMAL(38,0)] rows=10 | 0,5 | 1,17 | " +
+				"2,16777232 | 3,9007199271518222 | 4,9007199271518190 | " +
+				"5,9007199254740973 | 6,-20 | 7,13 | 8,2147483661 | 9,2147483661",
+		},
+		{
+			name: "987 a PARTITION BY running frame is exact above 2^53",
+			sql: "SELECT w_key, SUM(w_i64) OVER (PARTITION BY w_key % 2 ORDER BY w_key) AS v " +
+				"FROM numwidth ORDER BY w_key",
+			want: "cols=[w_key:INT64 v:DECIMAL(38,0)] rows=10 | 0,2 | 1,3 | 2,14 | " +
+				"3,16777220 | 4,9007199254741007 | 5,16777200 | 6,9007199254741007 | " +
+				"7,16777200 | 8,9007199254741020 | 9,2164260848",
+		},
+		{
+			// The int4 half of the same shape: bigint, and the sliding frame
+			// again, because SUM(int4) writes through a DIFFERENT arm of
+			// windowExactFrames (an int64 output vector, not a DECIMAL one).
+			name: "987 SUM(int4) over a sliding frame is bigint",
+			sql: "SELECT w_key, SUM(w_i32) OVER (ORDER BY w_key " +
+				"ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS v FROM numwidth ORDER BY w_key",
+			want: "cols=[w_key:INT64 v:INT64] rows=10 | 0,5 | 1,17 | 2,16777232 | " +
+				"3,16777229 | 4,16777197 | 5,-20 | 6,-20 | 7,13 | 8,2147483660 | " +
+				"9,2147483660",
 		},
 	}
 	f1Run(t, arms, cases)

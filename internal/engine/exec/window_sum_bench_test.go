@@ -25,10 +25,15 @@ import (
 
 // wsbRows builds n rows of one numeric column plus a partition key and a
 // unique order key.
-func wsbRows(n, groups int, dec bool) ([]parquet.Column, []map[string]any) {
+// kind is "float64", "decimal" or "int64" — the three accumulators a window
+// SUM/AVG can take since #987 gave an integer input the exact one.
+func wsbRows(n, groups int, kind string) ([]parquet.Column, []map[string]any) {
 	val := parquet.Column{Name: "v", Type: parquet.TypeFloat64, Nullable: true}
-	if dec {
+	switch kind {
+	case "decimal":
 		val = parquet.Column{Name: "v", Type: parquet.TypeDecimal, Precision: 38, Scale: 10, Nullable: true}
+	case "int64":
+		val = parquet.Column{Name: "v", Type: parquet.TypeInt64, Nullable: true}
 	}
 	schema := []parquet.Column{
 		{Name: "g", Type: parquet.TypeInt64},
@@ -41,8 +46,10 @@ func wsbRows(n, groups int, dec bool) ([]parquet.Column, []map[string]any) {
 		switch {
 		case i%17 == 16:
 			r["v"] = nil // NULLs, so the null branch is on the measured path
-		case dec:
+		case kind == "decimal":
 			r["v"] = batch.Int128From(int64(i+1) * 12345678901).FormatDecimal(10)
+		case kind == "int64":
+			r["v"] = int64(i+1) * 12345678901
 		default:
 			r["v"] = float64(i) * 1.25
 		}
@@ -56,12 +63,8 @@ func BenchmarkWindowSum(b *testing.B) {
 		rows   = 32768
 		groups = 16
 	)
-	for _, dec := range []bool{false, true} {
-		typ := "float64"
-		if dec {
-			typ = "decimal"
-		}
-		schema, data := wsbRows(rows, groups, dec)
+	for _, typ := range []string{"float64", "decimal", "int64"} {
+		schema, data := wsbRows(rows, groups, typ)
 		batches := make([]*batch.RecordBatch, 0, (rows+batch.DefaultBatchSize-1)/batch.DefaultBatchSize)
 		for pos := 0; pos < rows; pos += batch.DefaultBatchSize {
 			end := min(pos+batch.DefaultBatchSize, rows)
@@ -149,19 +152,23 @@ func BenchmarkWindowSum(b *testing.B) {
 // per-row write and nothing else.
 func BenchmarkWindowFrameSlide(b *testing.B) {
 	const n = 32768
-	for _, dec := range []bool{false, true} {
-		typ := "float64"
-		if dec {
-			typ = "decimal"
-		}
-		schema, data := wsbRows(n, 1, dec) // ONE partition: no sort, no concat
+	for _, typ := range []string{"float64", "decimal", "int64"} {
+		schema, data := wsbRows(n, 1, typ) // ONE partition: no sort, no concat
 		src := batch.FromRows(schema, data)
 		inputVec := src.Columns[src.ColumnIndex("v")]
 
+		// The output column is the one the DECLARATION names, which for an
+		// integer input is PostgreSQL's own numeric (#987) — the arm that
+		// must not slow the DECIMAL one down, since both now share the
+		// accumulator.
 		outCol := parquet.Column{Name: "w", Type: parquet.TypeFloat64, Nullable: true}
-		if dec {
+		switch typ {
+		case "decimal":
 			outCol = parquet.Column{Name: "w", Type: parquet.TypeDecimal,
 				Precision: 38, Scale: 10, Nullable: true}
+		case "int64":
+			outCol = parquet.Column{Name: "w", Type: parquet.TypeDecimal,
+				Precision: batch.MaxDecimalPrecision, Scale: 0, Nullable: true}
 		}
 		for _, shape := range []struct {
 			name  string
@@ -181,20 +188,26 @@ func BenchmarkWindowFrameSlide(b *testing.B) {
 				name string
 				f    WindowFunc
 			}{{"sum", WinSum}, {"avg", WinAvg}} {
-				wc := WindowColumn{Func: fn.f, InputCol: "v", OutputCol: "w", Frame: shape.frame}
+				oc := outCol
+				if typ == "int64" && fn.f == WinAvg {
+					oc.Scale = batch.AvgScale(0)
+				}
+				wc := WindowColumn{Func: fn.f, InputCol: "v", OutputCol: "w",
+					OutputType: oc.Type, Frame: shape.frame}
 				fr := resolveFrame(wc, n, false, nil)
-				winVec := batch.NewColumnVector(outCol, n)
+				winVec := batch.NewColumnVector(oc, n)
 				rd, ok := resolveWindowNumeric(inputVec)
 				if !ok {
 					b.Fatalf("%s has no numeric reading", inputVec.Type)
 				}
+				cells, exact := resolveWindowExactCells(winVec, inputVec)
 				b.Run(fmt.Sprintf("%s/%s/%s", typ, shape.name, fn.name), func(b *testing.B) {
 					b.ReportAllocs()
 					b.ResetTimer()
 					for i := 0; i < b.N; i++ {
 						winVec.Nulls = batch.NewBitmapAllNull(n)
-						if dec {
-							if err := windowDecimalFrames(winVec, inputVec, fr, 0, n, wc); err != nil {
+						if exact {
+							if err := windowExactFrames(winVec, inputVec, cells, fr, 0, n, wc); err != nil {
 								b.Fatal(err)
 							}
 							continue

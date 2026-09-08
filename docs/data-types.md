@@ -691,6 +691,15 @@ integers are exact types, not float64: `SUM(int4)` is `bigint`, `SUM(int8)` is
 `DECIMAL(p,s)` is `DECIMAL(38,s)` and `AVG` is `DECIMAL(38,s+4)`. An overflow is
 SQLSTATE 22003, never a wrapped or saturated number.
 
+The **windowed** spelling answers the same type and the same digits:
+`SUM(x) OVER (…)` and `SUM(x) … GROUP BY` are one question written twice, and
+the exact accumulator is the same one — in every frame form, including a
+`ROWS`/`RANGE` frame that slides (its exit subtraction is exact too) and the
+spilled evaluators. Before this, a windowed integer `SUM` accumulated in
+float64: past 2^53 it lost digits, and because a float sum depends on the order
+its rows arrive in, a distributed run could answer a *different* wrong number
+each time.
+
 Explicit casting is available via `CAST(column AS type)`:
 
 ```sql

@@ -303,10 +303,41 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      same rule; a boxed comparator that reads a rendered address or a
      formatted decimal is not that order (`internal/engine/exec/
      compare_boxed.go`).
+   - **CLOSED 2026-09-07 (#987, arc K2): a window SUM/AVG over an INTEGER
+     column is EXACT and declares what PostgreSQL declares.** The entry below
+     is kept as the record of what the divergence was and how it was measured;
+     it is no longer a divergence, and the pins that held it are deleted.
+
+     The repair is one table and one accumulator.
+     `exec.IntegerAccOutputType` is now the single rule — PostgreSQL's
+     `sum(int4) -> bigint`, `sum(int8) -> numeric`, `avg(int*) -> numeric` —
+     and four sites ask it: the grouped aggregate's declaration
+     (`physical.aggIntegerOutputType`), the window's declaration
+     (`physical.windowSpecOutputType`), the window operator's runtime
+     correction of that declaration (`exec.windowAccOutputType`) and the
+     grouped carrier predicate (`exec.aggIntExact`).
+     `exec.windowExactFrames` accumulates an integer input in the same Int128
+     carrier `kernel.sumRowInt64Decimal` uses for the grouped spelling, read
+     through a per-type cell reader resolved once per partition, in EVERY
+     frame form — `OVER ()`, `PARTITION BY`, a running `ORDER BY` frame, a
+     sliding `ROWS`/`RANGE` frame including its exit SUBTRACTION — and in both
+     spilled evaluators (`window_global.go`'s two passes and
+     `window_external.go`'s walker, which re-enters the same code). A total
+     the declaration cannot hold is 22003, which is PostgreSQL's own SQLSTATE
+     for `bigint out of range`, measured live.
+
+     The census below now asserts PostgreSQL's own types and digits on all
+     four arms, plus the three frame forms the filing did not name; the two
+     `TestF1AWindowDeclaresTheSameTypeThroughADerivedTable` pins are gone; and
+     `exec.TestTheWindowAndGroupedIntegerSumWriteTheSameValue` is the seam that
+     makes a future drift between the two producers a failing test rather than
+     a report.
+
    - **A window SUM/AVG over an INTEGER column answers in float64 — wrong
      DIGITS, not only a wrong declaration.** (Added 2026-09-04, #813, arc F1;
      CORRECTED 2026-09-05 after the arc's round-1 review, which measured what
-     the first version of this entry asserted without measuring.) PostgreSQL
+     the first version of this entry asserted without measuring. CLOSED
+     2026-09-07 — see the entry above.) PostgreSQL
      declares `sum(int4) over ()` bigint and `sum(int8) over ()` /
      `avg(int) over ()` numeric, and since #784 the GROUPED spelling of each
      answers exactly that — so wadjet's two spellings of one question
@@ -326,19 +357,23 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      | `SUM(w_i64) OVER (ORDER BY … ROWS …)`, row 4 | `9007199271518226` | `9007199271518227` |
      | `SUM(w_i64)` (grouped control) | `9007201419001868` DECIMAL(38,0) | the same |
 
-     A VALUE divergence is never allowed by this ADR, and this one is not
-     being allowed — it is RECORDED, pinned fail-on-agree, and deferred with
-     its mechanism, because the repair is an exact integer accumulator in the
-     window operator (`decimalFrameAcc` reads `DecimalData` directly and needs
-     a per-type cell reader; `windowAccOutputType` and `windowOutputColumn`
-     need the integer rules; `SUM(int4) → bigint` needs an INT64 output path
-     neither frame has) and not a declaration. Declaring the exact type over
-     today's carrier would be the #361 silent-write class on top of it.
+     A VALUE divergence is never allowed by this ADR, and this one was not
+     allowed — it was RECORDED, pinned fail-on-agree, and deferred with its
+     mechanism, because the repair is an exact integer accumulator in the
+     window operator and not a declaration. Declaring the exact type over the
+     float carrier would have been the #361 silent-write class on top of it.
+     The mechanism the deferral named is the one that shipped, and #987 added
+     the fact the filing did not have: the float error is ORDER-DEPENDENT, so
+     the census's own `CAST(SUM(int8) OVER () AS BIGINT)` cell answered
+     9007201419001864 on about one routed-DAG run in twenty and
+     9007201419001868 on the rest. A wrong number that is not even the same
+     wrong number each time.
 
      Pinned on the VALUE, not on the declaration, in
-     `coordinator.TestF1AWindowDeclaresTheSameTypeThroughADerivedTable`: the
-     cell asserts the float64 digits wadjet answers and names PostgreSQL's, so
-     it fails the day the accumulator becomes exact.
+     `coordinator.TestF1AWindowDeclaresTheSameTypeThroughADerivedTable` — the
+     cells asserted the float64 digits wadjet answered and named PostgreSQL's,
+     so they failed the day the accumulator became exact, and deleting them is
+     the fix's proof.
 
      CENSUSED 2026-09-06 by arc H2, which replaced those two sampled pins with
      the full cross of five window aggregates and six numeric widths over
@@ -353,6 +388,13 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `1.6777224e+07` — and where wadjet's OWN grouped spelling declares
      FLOAT32 and answers `1.6777226e+07`. Three answers to one question, so
      the repair has to settle the grouped side too.
+
+     **That FLOAT32 cell is the part of this entry still OPEN** (#813 item 2,
+     deferred to 0.19.x). The integer repair does not close it and cannot: an
+     exact carrier has nothing to say about a float sum's association order,
+     and settling it means moving the GROUPED float32 accumulator as well. The
+     census cell `813 SUM(real) OVER ()` stays pinned with PostgreSQL's answer
+     in its `why`, so it is measured rather than remembered.
 
      ITEM 1 of the filing is CLOSED, and closed by measurement rather than by
      a change: `CAST(SUM(x) OVER () AS BIGINT)` was reported as INT64
