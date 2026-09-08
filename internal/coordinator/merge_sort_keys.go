@@ -1,13 +1,13 @@
 package coordinator
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // THE COORDINATOR'S MERGE APPLIES THE QUERY'S ORDERING OR SAYS IT CANNOT
@@ -44,9 +44,17 @@ import (
 // function replaces — rows in an order the client did not ask for and cannot
 // detect — and `reAggregatePartials` already refuses an unresolvable GROUP BY
 // name one screen up for the same reason.
+// mergeOrderSQLState is the class both merge refusals carry: PostgreSQL
+// ANSWERS these statements, and what wadjet is saying is that ITS OWN merge
+// cannot apply the ordering — `0A000`, feature not supported, which is the code
+// the rest of this family uses for a wadjet-side bound (#811 family C, ADR-0012).
+// A refusal that reaches a client with no SQLSTATE is one the client cannot act
+// on.
+const mergeOrderSQLState = "0A000"
+
 func mergeSortKeyIndices(b *batch.RecordBatch, orderBy []logical.OrderExpr) ([]int, error) {
 	if b == nil {
-		return nil, fmt.Errorf("ordering a merged result: no batch to order")
+		return nil, sqlerr.New(mergeOrderSQLState, "ordering a merged result: no batch to order")
 	}
 	out := make([]int, len(orderBy))
 	for i, ob := range orderBy {
@@ -61,7 +69,7 @@ func mergeSortKeyIndices(b *batch.RecordBatch, orderBy []logical.OrderExpr) ([]i
 			for j, c := range b.Schema {
 				have[j] = c.Name
 			}
-			return nil, fmt.Errorf(
+			return nil, sqlerr.New(mergeOrderSQLState,
 				"ordering a merged result: ORDER BY key %q does not resolve in the merged columns [%s]",
 				ob.Column, strings.Join(have, " "))
 		}
@@ -92,7 +100,7 @@ func orderableBatchesErr(batches []*batch.RecordBatch) error {
 	if total == 0 {
 		return nil
 	}
-	return fmt.Errorf(
+	return sqlerr.New(mergeOrderSQLState,
 		"ordering a merged result: %d partial batches carrying %d rows do not share one schema",
 		len(batches), total)
 }
