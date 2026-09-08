@@ -393,23 +393,26 @@ func buildAggInputProjection(
 	// emitting a pass-through of a name nothing produces would replace one
 	// engine's loud failure with a column of NULLs, which is the trade this
 	// file exists to refuse.
-	for _, a := range aggs {
-		if a.InputCol3 != "" && !seen[a.InputCol3] {
-			if node, err := plansql.ParseExpression(a.InputCol3); err == nil {
-				if _, bare := node.(*plansql.ColRef); bare {
-					addPassthrough(a.InputCol3)
-				}
-			}
+	// InputCol2 and InputCol3 take the SAME rule, spelled once: a name the
+	// expression parser cannot read at all is still passed through (a
+	// delimited identifier reaches here as its bare spelling), and only a
+	// name it reads as something OTHER than a bare column reference is
+	// declined. Writing the third argument's arm separately is how the two
+	// would come to disagree.
+	passArg := func(col string) {
+		if col == "" || seen[col] {
+			return
 		}
-		if a.InputCol2 == "" || seen[a.InputCol2] {
-			continue
-		}
-		if node, err := plansql.ParseExpression(a.InputCol2); err == nil {
+		if node, err := plansql.ParseExpression(col); err == nil {
 			if _, bare := node.(*plansql.ColRef); !bare {
-				continue
+				return
 			}
 		}
-		addPassthrough(a.InputCol2)
+		addPassthrough(col)
+	}
+	for _, a := range aggs {
+		passArg(a.InputCol2)
+		passArg(a.InputCol3)
 	}
 
 	// Make sure all bare columns referenced by expressions are passed
