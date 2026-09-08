@@ -22,7 +22,7 @@ func BenchmarkOhlcvObserveExact(b *testing.B) {
 	rows := ohlcvBenchRows(2048)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		s := &ohlcvState{dom: ohlcvDomain{exact: true, priceScale: 2, volScale: 0, pvScale: 2}}
+		s := &ohlcvState{dom: ohlcvDomain{priceExact: true, volExact: true, priceScale: 2, volScale: 0, pvScale: 2}}
 		for _, r := range rows {
 			s.observeExact(r.ts, batch.Int128From(r.px), batch.Int128From(r.vol))
 		}
@@ -65,7 +65,7 @@ func BenchmarkMinByObserveBaseline(b *testing.B) {
 // once per group rather than once per row.
 func BenchmarkOhlcvMergeExact(b *testing.B) {
 	rows := ohlcvBenchRows(2048)
-	dom := ohlcvDomain{exact: true, priceScale: 2, volScale: 0, pvScale: 2}
+	dom := ohlcvDomain{priceExact: true, volExact: true, priceScale: 2, volScale: 0, pvScale: 2}
 	left := &ohlcvState{dom: dom}
 	right := &ohlcvState{dom: dom}
 	for i, r := range rows {
@@ -86,7 +86,7 @@ func BenchmarkOhlcvMergeExact(b *testing.B) {
 // every merge stage once per group on the way in.
 func BenchmarkOhlcvEncodeDecode(b *testing.B) {
 	rows := ohlcvBenchRows(256)
-	s := &ohlcvState{dom: ohlcvDomain{exact: true, priceScale: 2, volScale: 0, pvScale: 2}}
+	s := &ohlcvState{dom: ohlcvDomain{priceExact: true, volExact: true, priceScale: 2, volScale: 0, pvScale: 2}}
 	for _, r := range rows {
 		s.observeExact(r.ts, batch.Int128From(r.px), batch.Int128From(r.vol))
 	}
@@ -101,7 +101,7 @@ func BenchmarkOhlcvEncodeDecode(b *testing.B) {
 // And the finish, once per group.
 func BenchmarkOhlcvFinalize(b *testing.B) {
 	rows := ohlcvBenchRows(256)
-	s := &ohlcvState{dom: ohlcvDomain{exact: true, priceScale: 2, volScale: 0, pvScale: 2}}
+	s := &ohlcvState{dom: ohlcvDomain{priceExact: true, volExact: true, priceScale: 2, volScale: 0, pvScale: 2}}
 	for _, r := range rows {
 		s.observeExact(r.ts, batch.Int128From(r.px), batch.Int128From(r.vol))
 	}

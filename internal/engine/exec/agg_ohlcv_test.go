@@ -27,7 +27,7 @@ func TestTheBarsMergeIsAssociativeAndCommutative(t *testing.T) {
 		name string
 		d    ohlcvDomain
 	}{
-		{"exact", ohlcvDomain{exact: true, priceScale: 2, volScale: 0, pvScale: 2}},
+		{"exact", ohlcvDomain{priceExact: true, volExact: true, priceScale: 2, volScale: 0, pvScale: 2}},
 		{"float", ohlcvDomain{}},
 	} {
 		t.Run(dom.name, func(t *testing.T) {
@@ -65,8 +65,8 @@ func TestTheBarsMergeIsAssociativeAndCommutative(t *testing.T) {
 // query is distributed and not otherwise — the class ADR-0027 exists for.
 func TestTheBarsEncodedStateRoundTrips(t *testing.T) {
 	for _, dom := range []ohlcvDomain{
-		{exact: true, priceScale: 4, volScale: 2, pvScale: 6},
-		{exact: true},
+		{priceExact: true, volExact: true, priceScale: 4, volScale: 2, pvScale: 6},
+		{priceExact: true, volExact: true},
 		{},
 	} {
 		rows := ohlcvTestRows(37)
@@ -118,7 +118,7 @@ func TestTheBarsEncodedStateRoundTrips(t *testing.T) {
 // open and close whichever order they are folded in, and the answer must be
 // PostgreSQL's `ORDER BY ts, price` / `ORDER BY ts DESC, price DESC`.
 func TestTheBarsTiebreakIsAValueNotAnArrivalOrder(t *testing.T) {
-	dom := ohlcvDomain{exact: true}
+	dom := ohlcvDomain{priceExact: true, volExact: true}
 	one := func(order []int) *ohlcvState {
 		s := &ohlcvState{dom: dom}
 		// Three instants; the first and the last are each shared by two rows.
@@ -196,6 +196,20 @@ func TestTheBarsDeclaredFieldsFollowItsInputs(t *testing.T) {
 			parquet.TypePort, [2]int{0, 0}, parquet.TypeInt64, [2]int{0, 0},
 			parquet.TypeDecimal, [2]int{38, 4},
 			"PORT and PROTOCOL are int4-domain values (#834, #953)"},
+		// The two MIXED cells, and they are the ones that make the carrier a
+		// per-GROUP decision rather than a per-bar one. With one flag for the
+		// whole bar, the first declared `open` DECIMAL(18,4) and carried it
+		// through a float64, and the second declared `volume` NUMERIC over an
+		// int8 column and summed it in a float — declarations that promise an
+		// exactness the carrier does not deliver.
+		{"exact_price_approximate_volume", dec(18, 4), flat(parquet.TypeFloat64),
+			parquet.TypeDecimal, [2]int{18, 4}, parquet.TypeFloat64, [2]int{0, 0},
+			parquet.TypeFloat64, [2]int{0, 0},
+			"min(numeric(18,4)) keeps its digits; sum(float8) and the quotient are double"},
+		{"approximate_price_exact_volume", flat(parquet.TypeFloat64), flat(parquet.TypeInt64),
+			parquet.TypeFloat64, [2]int{0, 0}, parquet.TypeDecimal, [2]int{38, 0},
+			parquet.TypeFloat64, [2]int{0, 0},
+			"min(float8) is double; sum(int8) is numeric; one float operand makes the quotient double"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fields, ok := OhlcvOutputFields(tc.price, tc.vol)
@@ -278,7 +292,7 @@ func ohlcvTestRows(n int) []ohlcvTestRow {
 func ohlcvFoldAll(dom ohlcvDomain, rows []ohlcvTestRow) *ohlcvState {
 	s := &ohlcvState{dom: dom}
 	for _, r := range rows {
-		if dom.exact {
+		if dom.priceExact {
 			s.observeExact(r.ts, batch.Int128From(r.px), batch.Int128From(r.vol))
 		} else {
 			s.observeFloat(r.ts, float64(r.px), float64(r.vol))
@@ -306,7 +320,7 @@ func ohlcvSame(a, b *ohlcvState) bool {
 		a.overflow != b.overflow || !reflect.DeepEqual(a.dom, b.dom) {
 		return false
 	}
-	if a.dom.exact {
+	if a.dom.priceExact {
 		return a.firstPx == b.firstPx && a.lastPx == b.lastPx &&
 			a.high == b.high && a.low == b.low &&
 			a.sumVol == b.sumVol && a.sumPV == b.sumPV
@@ -317,7 +331,7 @@ func ohlcvSame(a, b *ohlcvState) bool {
 }
 
 func ohlcvShow(s *ohlcvState) string {
-	if s.dom.exact {
+	if s.dom.priceExact {
 		return "n=" + itoa(s.n) + " first=(" + itoa(s.firstTS) + "," + s.firstPx.String() +
 			") last=(" + itoa(s.lastTS) + "," + s.lastPx.String() + ") hi=" + s.high.String() +
 			" lo=" + s.low.String() + " vol=" + s.sumVol.String() + " pv=" + s.sumPV.String()

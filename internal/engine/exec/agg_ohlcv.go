@@ -77,12 +77,13 @@ type ohlcvState struct {
 	firstTS int64
 	lastTS  int64
 
-	// Exact carriers (dom.exact). Prices are at dom.priceScale, sumVol at
-	// dom.volScale, sumPV at dom.pvScale.
+	// Exact carriers, each used only when its own group's carrier says so.
+	// Prices are at dom.priceScale, sumVol at dom.volScale, sumPV at
+	// dom.pvScale.
 	firstPx, lastPx, high, low batch.Int128
 	sumVol, sumPV              batch.Int128
 
-	// Approximate carriers (!dom.exact).
+	// Approximate carriers, the other half of the same three pairs.
 	firstPxF, lastPxF, highF, lowF float64
 	sumVolF, sumPVF                float64
 
@@ -93,15 +94,33 @@ type ohlcvState struct {
 }
 
 // ohlcvDomain is everything about a bar that is decided at PLAN time and holds
-// for every row and every merge: which carrier the numbers use, and at what
-// scales. It travels INSIDE the encoded state so the coordinator's fold needs
-// nothing but the string.
+// for every row and every merge: which carrier each group of numbers uses, and
+// at what scales. It travels INSIDE the encoded state so the coordinator's fold
+// needs nothing but the string.
+//
+// There is one carrier PER GROUP, not one for the bar. A single flag was the
+// first design and it was a declaration that lied: with a DECIMAL price and a
+// FLOAT volume it declared `open` DECIMAL(18,4) — correctly, since MIN of that
+// column is — and then carried it through a float64, so a wide price lost its
+// digits on the way out. The mirror case declared `volume` NUMERIC over an
+// int8 column and summed it in a float, which is wrong past 2^53. The
+// exactness of each group depends only on the columns that feed it:
+//
+//	open/high/low/close   exact iff the PRICE column is
+//	sumVol                exact iff the VOLUME column is
+//	sumPV, and vwap       exact iff BOTH are — one approximate operand makes
+//	                      the product and the quotient approximate, which is
+//	                      PostgreSQL's own promotion
 type ohlcvDomain struct {
-	exact      bool
-	priceScale int // scale of open/high/low/close
-	volScale   int // scale of sumVol
-	pvScale    int // scale of sumPV = priceScale + volScale
+	priceExact bool
+	volExact   bool
+	priceScale int // scale of open/high/low/close, when exact
+	volScale   int // scale of sumVol, when exact
+	pvScale    int // scale of sumPV = priceScale + volScale, when exact
 }
+
+// pvExact is the product's carrier: exact only when both operands are.
+func (d ohlcvDomain) pvExact() bool { return d.priceExact && d.volExact }
 
 // --- domain and declared output ---------------------------------------------
 
@@ -145,12 +164,15 @@ func OhlcvDomainFor(priceType parquet.TypeID, priceScale int,
 	if !ok {
 		return ohlcvDomain{}, false
 	}
-	d := ohlcvDomain{exact: pExact && vExact, priceScale: pScale, volScale: vScale}
-	if !d.exact {
-		d.priceScale, d.volScale = 0, 0
+	d := ohlcvDomain{priceExact: pExact, volExact: vExact}
+	if pExact {
+		d.priceScale = pScale
+	}
+	if vExact {
+		d.volScale = vScale
 	}
 	d.pvScale = d.priceScale + d.volScale
-	if d.pvScale > batch.MaxDecimalScale {
+	if d.pvExact() && d.pvScale > batch.MaxDecimalScale {
 		// Two wide-scale inputs whose product has no exact carrier. Refusing
 		// the PLAN is the honest answer: the alternative is a vwap silently
 		// rounded to a scale nobody asked for.
@@ -199,8 +221,13 @@ func OhlcvOutputFields(price parquet.Column, vol parquet.Column) ([]parquet.Colu
 	} else {
 		volOut.Type = parquet.TypeFloat64
 	}
+	if !dom.volExact {
+		// The volume sum is carried in a float64, so it declares one. Its own
+		// column's type decided that, not the price's.
+		volOut.Type, volOut.Precision, volOut.Scale = parquet.TypeFloat64, 0, 0
+	}
 	vwap := parquet.Column{Name: "vwap", Type: parquet.TypeFloat64, Nullable: true}
-	if dom.exact {
+	if dom.pvExact() {
 		vwap.Type = parquet.TypeDecimal
 		vwap.Precision, vwap.Scale = batch.MaxDecimalPrecision, batch.AvgScale(dom.priceScale)
 	}
@@ -294,86 +321,115 @@ func (s *ohlcvState) observe(r ohlcvReader, row int) {
 	if !ok {
 		return
 	}
-	if s.dom.exact {
-		px, ok1 := ohlcvExactCell(r.pxVec, row)
-		vol, ok2 := ohlcvExactCell(r.volVec, row)
-		if !ok1 || !ok2 {
-			return
-		}
-		s.observeExact(ts, px, vol)
+	// Each cell is read in ITS OWN carrier, so a bar with a DECIMAL price and
+	// a float volume keeps every digit of the price.
+	var pxI, volI batch.Int128
+	var pxF, volF float64
+	okPx, okVol := true, true
+	if s.dom.priceExact {
+		pxI, okPx = ohlcvExactCell(r.pxVec, row)
+	} else {
+		pxF, okPx = ohlcvFloatCell(r.pxVec, row)
+	}
+	if s.dom.volExact {
+		volI, okVol = ohlcvExactCell(r.volVec, row)
+	} else {
+		volF, okVol = ohlcvFloatCell(r.volVec, row)
+	}
+	if !okPx || !okVol {
 		return
 	}
-	px, ok1 := ohlcvFloatCell(r.pxVec, row)
-	vol, ok2 := ohlcvFloatCell(r.volVec, row)
-	if !ok1 || !ok2 {
-		return
-	}
-	s.observeFloat(ts, px, vol)
+	s.observeCells(ts, pxI, pxF, volI, volF)
 }
 
-func (s *ohlcvState) observeExact(ts int64, px, vol batch.Int128) {
+// observeCells folds one row in, each group through its own carrier. Only the
+// fields the domain says are exact read the Int128 arguments and only the
+// approximate ones read the float64s.
+func (s *ohlcvState) observeCells(ts int64, pxI batch.Int128, pxF float64, volI batch.Int128, volF float64) {
 	if s.n == 0 {
-		s.firstTS, s.firstPx = ts, px
-		s.lastTS, s.lastPx = ts, px
-		s.high, s.low = px, px
-		s.sumVol = batch.Int128{}
-		s.sumPV = batch.Int128{}
+		s.firstTS, s.lastTS = ts, ts
+		if s.dom.priceExact {
+			s.firstPx, s.lastPx, s.high, s.low = pxI, pxI, pxI, pxI
+		} else {
+			s.firstPxF, s.lastPxF, s.highF, s.lowF = pxF, pxF, pxF, pxF
+		}
+		s.sumVol, s.sumPV = batch.Int128{}, batch.Int128{}
+		s.sumVolF, s.sumPVF = 0, 0
+	} else if s.dom.priceExact {
+		if ohlcvBefore(ts, pxI, s.firstTS, s.firstPx) {
+			s.firstTS, s.firstPx = ts, pxI
+		}
+		if ohlcvBefore(s.lastTS, s.lastPx, ts, pxI) {
+			s.lastTS, s.lastPx = ts, pxI
+		}
+		if pxI.Cmp(s.high) > 0 {
+			s.high = pxI
+		}
+		if pxI.Cmp(s.low) < 0 {
+			s.low = pxI
+		}
 	} else {
-		if ohlcvBefore(ts, px, s.firstTS, s.firstPx) {
-			s.firstTS, s.firstPx = ts, px
+		if ohlcvBeforeF(ts, pxF, s.firstTS, s.firstPxF) {
+			s.firstTS, s.firstPxF = ts, pxF
 		}
-		if ohlcvBefore(s.lastTS, s.lastPx, ts, px) {
-			s.lastTS, s.lastPx = ts, px
+		if ohlcvBeforeF(s.lastTS, s.lastPxF, ts, pxF) {
+			s.lastTS, s.lastPxF = ts, pxF
 		}
-		if px.Cmp(s.high) > 0 {
-			s.high = px
+		if kernel.CompareFloat64(pxF, s.highF) > 0 {
+			s.highF = pxF
 		}
-		if px.Cmp(s.low) < 0 {
-			s.low = px
+		if kernel.CompareFloat64(pxF, s.lowF) < 0 {
+			s.lowF = pxF
 		}
 	}
 	s.n++
-	if v, st := batch.DecimalAdd(s.sumVol, s.dom.volScale, vol, s.dom.volScale, s.dom.volScale); st == batch.DecimalOK {
-		s.sumVol = v
-	} else {
-		s.overflow = true
-	}
-	// price × volume at the product scale: exact, no rounding, because the
-	// output scale IS the sum of the input scales.
-	if pv, st := batch.DecimalMul(px, s.dom.priceScale, vol, s.dom.volScale, s.dom.pvScale); st == batch.DecimalOK {
-		if v, st2 := batch.DecimalAdd(s.sumPV, s.dom.pvScale, pv, s.dom.pvScale, s.dom.pvScale); st2 == batch.DecimalOK {
-			s.sumPV = v
+
+	if s.dom.volExact {
+		if v, st := batch.DecimalAdd(s.sumVol, s.dom.volScale, volI, s.dom.volScale, s.dom.volScale); st == batch.DecimalOK {
+			s.sumVol = v
 		} else {
 			s.overflow = true
 		}
 	} else {
-		s.overflow = true
+		s.sumVolF += volF
 	}
+
+	if s.dom.pvExact() {
+		// price x volume at the product scale: exact, no rounding, because
+		// the output scale IS the sum of the input scales.
+		if pv, st := batch.DecimalMul(pxI, s.dom.priceScale, volI, s.dom.volScale, s.dom.pvScale); st == batch.DecimalOK {
+			if v, st2 := batch.DecimalAdd(s.sumPV, s.dom.pvScale, pv, s.dom.pvScale, s.dom.pvScale); st2 == batch.DecimalOK {
+				s.sumPV = v
+			} else {
+				s.overflow = true
+			}
+		} else {
+			s.overflow = true
+		}
+		return
+	}
+	// One approximate operand makes the product approximate; the exact side
+	// is widened to a float64 to meet it, which is PostgreSQL's promotion.
+	p, v := pxF, volF
+	if s.dom.priceExact {
+		p = pxI.ToFloat64(s.dom.priceScale)
+	}
+	if s.dom.volExact {
+		v = volI.ToFloat64(s.dom.volScale)
+	}
+	s.sumPVF += p * v
+}
+
+// observeExact and observeFloat are the two SAME-carrier spellings, kept
+// because most bars are one or the other and because the gates and the
+// benchmark read better for it. Both go through observeCells, so there is one
+// fold and not three.
+func (s *ohlcvState) observeExact(ts int64, px, vol batch.Int128) {
+	s.observeCells(ts, px, 0, vol, 0)
 }
 
 func (s *ohlcvState) observeFloat(ts int64, px, vol float64) {
-	if s.n == 0 {
-		s.firstTS, s.firstPxF = ts, px
-		s.lastTS, s.lastPxF = ts, px
-		s.highF, s.lowF = px, px
-		s.sumVolF, s.sumPVF = 0, 0
-	} else {
-		if ohlcvBeforeF(ts, px, s.firstTS, s.firstPxF) {
-			s.firstTS, s.firstPxF = ts, px
-		}
-		if ohlcvBeforeF(s.lastTS, s.lastPxF, ts, px) {
-			s.lastTS, s.lastPxF = ts, px
-		}
-		if kernel.CompareFloat64(px, s.highF) > 0 {
-			s.highF = px
-		}
-		if kernel.CompareFloat64(px, s.lowF) < 0 {
-			s.lowF = px
-		}
-	}
-	s.n++
-	s.sumVolF += vol
-	s.sumPVF += px * vol
+	s.observeCells(ts, batch.Int128{}, px, batch.Int128{}, vol)
 }
 
 // ohlcvBefore is the (ts, price) lexicographic order that decides open and
@@ -422,7 +478,7 @@ func (s *ohlcvState) merge(o *ohlcvState) {
 		return
 	}
 	s.overflow = s.overflow || o.overflow
-	if s.dom.exact {
+	if s.dom.priceExact {
 		if ohlcvBefore(o.firstTS, o.firstPx, s.firstTS, s.firstPx) {
 			s.firstTS, s.firstPx = o.firstTS, o.firstPx
 		}
@@ -434,16 +490,6 @@ func (s *ohlcvState) merge(o *ohlcvState) {
 		}
 		if o.low.Cmp(s.low) < 0 {
 			s.low = o.low
-		}
-		if v, st := batch.DecimalAdd(s.sumVol, s.dom.volScale, o.sumVol, s.dom.volScale, s.dom.volScale); st == batch.DecimalOK {
-			s.sumVol = v
-		} else {
-			s.overflow = true
-		}
-		if v, st := batch.DecimalAdd(s.sumPV, s.dom.pvScale, o.sumPV, s.dom.pvScale, s.dom.pvScale); st == batch.DecimalOK {
-			s.sumPV = v
-		} else {
-			s.overflow = true
 		}
 	} else {
 		if ohlcvBeforeF(o.firstTS, o.firstPxF, s.firstTS, s.firstPxF) {
@@ -458,7 +504,23 @@ func (s *ohlcvState) merge(o *ohlcvState) {
 		if kernel.CompareFloat64(o.lowF, s.lowF) < 0 {
 			s.lowF = o.lowF
 		}
+	}
+	if s.dom.volExact {
+		if v, st := batch.DecimalAdd(s.sumVol, s.dom.volScale, o.sumVol, s.dom.volScale, s.dom.volScale); st == batch.DecimalOK {
+			s.sumVol = v
+		} else {
+			s.overflow = true
+		}
+	} else {
 		s.sumVolF += o.sumVolF
+	}
+	if s.dom.pvExact() {
+		if v, st := batch.DecimalAdd(s.sumPV, s.dom.pvScale, o.sumPV, s.dom.pvScale, s.dom.pvScale); st == batch.DecimalOK {
+			s.sumPV = v
+		} else {
+			s.overflow = true
+		}
+	} else {
 		s.sumPVF += o.sumPVF
 	}
 	s.n += o.n
@@ -490,7 +552,11 @@ func (s *ohlcvState) value(fields []parquet.Column) (any, error) {
 				"ROW to write it into", len(fields), len(OhlcvFieldNames))
 	}
 	out := make(map[string]any, len(fields))
-	if s.dom.exact {
+	// Each group is narrowed through ITS OWN carrier, which is what makes the
+	// declared type honest: a DECIMAL price beside a float volume keeps every
+	// digit of the price, and an int8 volume beside a float price still sums
+	// exactly.
+	if s.dom.priceExact {
 		for i, v := range []batch.Int128{s.firstPx, s.high, s.low, s.lastPx} {
 			cell, err := ohlcvNarrowExact(v, s.dom.priceScale, fields[i])
 			if err != nil {
@@ -498,11 +564,21 @@ func (s *ohlcvState) value(fields []parquet.Column) (any, error) {
 			}
 			out[fields[i].Name] = cell
 		}
+	} else {
+		for i, v := range []float64{s.firstPxF, s.highF, s.lowF, s.lastPxF} {
+			out[fields[i].Name] = ohlcvNarrowFloat(v, fields[i])
+		}
+	}
+	if s.dom.volExact {
 		vol, err := ohlcvNarrowExact(s.sumVol, s.dom.volScale, fields[4])
 		if err != nil {
 			return nil, err
 		}
 		out["volume"] = vol
+	} else {
+		out["volume"] = ohlcvNarrowFloat(s.sumVolF, fields[4])
+	}
+	if s.dom.pvExact() {
 		vwap, err := s.exactVwap(fields[5])
 		if err != nil {
 			return nil, err
@@ -510,11 +586,15 @@ func (s *ohlcvState) value(fields []parquet.Column) (any, error) {
 		out["vwap"] = vwap
 		return out, nil
 	}
-	for i, v := range []float64{s.firstPxF, s.highF, s.lowF, s.lastPxF} {
-		out[fields[i].Name] = ohlcvNarrowFloat(v, fields[i])
+	// The denominator comes from whichever carrier holds the volume sum. With
+	// a float PRICE and an exact VOLUME the product is approximate but the
+	// total is not, and reading the float slot there gave every such bar a
+	// NULL vwap.
+	den := s.sumVolF
+	if s.dom.volExact {
+		den = s.sumVol.ToFloat64(s.dom.volScale)
 	}
-	out["volume"] = ohlcvNarrowFloat(s.sumVolF, fields[4])
-	if s.sumVolF == 0 {
+	if den == 0 {
 		// A ZERO total weight. PostgreSQL's own `SUM(px*vol)/SUM(vol)` raises
 		// 22012 (division_by_zero) here; the bar answers a NULL vwap and keeps
 		// its four prices. That is a deliberate superset, recorded in
@@ -525,7 +605,7 @@ func (s *ohlcvState) value(fields []parquet.Column) (any, error) {
 		// still exactly PostgreSQL's.
 		out["vwap"] = nil
 	} else {
-		out["vwap"] = s.sumPVF / s.sumVolF
+		out["vwap"] = s.sumPVF / den
 	}
 	return out, nil
 }
@@ -631,11 +711,14 @@ const ohlcvStateBytes = 136
 func (s *ohlcvState) encode() string {
 	var buf [ohlcvStateBytes]byte
 	buf[0] = 1
-	if s.dom.exact {
+	if s.dom.priceExact {
 		buf[1] |= 1
 	}
 	if s.overflow {
 		buf[1] |= 2
+	}
+	if s.dom.volExact {
+		buf[1] |= 4
 	}
 	buf[2] = byte(s.dom.priceScale)
 	buf[3] = byte(s.dom.volScale)
@@ -648,19 +731,25 @@ func (s *ohlcvState) encode() string {
 	binary.BigEndian.PutUint64(buf[16:24], uint64(s.n))
 	binary.BigEndian.PutUint64(buf[24:32], uint64(s.firstTS))
 	binary.BigEndian.PutUint64(buf[32:40], uint64(s.lastTS))
-	if s.dom.exact {
+	if s.dom.priceExact {
 		putOhlcvInt128(buf[40:56], s.firstPx)
 		putOhlcvInt128(buf[56:72], s.high)
 		putOhlcvInt128(buf[72:88], s.low)
 		putOhlcvInt128(buf[88:104], s.lastPx)
-		putOhlcvInt128(buf[104:120], s.sumVol)
-		putOhlcvInt128(buf[120:136], s.sumPV)
 	} else {
 		putOhlcvFloat(buf[40:56], s.firstPxF)
 		putOhlcvFloat(buf[56:72], s.highF)
 		putOhlcvFloat(buf[72:88], s.lowF)
 		putOhlcvFloat(buf[88:104], s.lastPxF)
+	}
+	if s.dom.volExact {
+		putOhlcvInt128(buf[104:120], s.sumVol)
+	} else {
 		putOhlcvFloat(buf[104:120], s.sumVolF)
+	}
+	if s.dom.pvExact() {
+		putOhlcvInt128(buf[120:136], s.sumPV)
+	} else {
 		putOhlcvFloat(buf[120:136], s.sumPVF)
 	}
 	return hex.EncodeToString(buf[:])
@@ -735,7 +824,8 @@ func decodeOhlcvState(s string) (ohlcvState, bool) {
 	}
 	st := ohlcvState{
 		dom: ohlcvDomain{
-			exact:      buf[1]&1 != 0,
+			priceExact: buf[1]&1 != 0,
+			volExact:   buf[1]&4 != 0,
 			priceScale: int(buf[2]),
 			volScale:   int(buf[3]),
 			pvScale:    int(buf[4]),
@@ -748,19 +838,25 @@ func decodeOhlcvState(s string) (ohlcvState, bool) {
 	if f, ok := getOhlcvFields(buf[:]); ok {
 		st.fields = f
 	}
-	if st.dom.exact {
+	if st.dom.priceExact {
 		st.firstPx = getOhlcvInt128(buf[40:56])
 		st.high = getOhlcvInt128(buf[56:72])
 		st.low = getOhlcvInt128(buf[72:88])
 		st.lastPx = getOhlcvInt128(buf[88:104])
-		st.sumVol = getOhlcvInt128(buf[104:120])
-		st.sumPV = getOhlcvInt128(buf[120:136])
 	} else {
 		st.firstPxF = getOhlcvFloat(buf[40:56])
 		st.highF = getOhlcvFloat(buf[56:72])
 		st.lowF = getOhlcvFloat(buf[72:88])
 		st.lastPxF = getOhlcvFloat(buf[88:104])
+	}
+	if st.dom.volExact {
+		st.sumVol = getOhlcvInt128(buf[104:120])
+	} else {
 		st.sumVolF = getOhlcvFloat(buf[104:120])
+	}
+	if st.dom.pvExact() {
+		st.sumPV = getOhlcvInt128(buf[120:136])
+	} else {
 		st.sumPVF = getOhlcvFloat(buf[120:136])
 	}
 	return st, true

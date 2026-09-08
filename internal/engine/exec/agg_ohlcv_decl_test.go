@@ -34,7 +34,7 @@ func TestTheBarsStateCarriesItsDeclaredRow(t *testing.T) {
 		t.Fatal("no bar over a decimal price and an int8 volume")
 	}
 	s := &ohlcvState{
-		dom:    ohlcvDomain{exact: true, priceScale: 2, volScale: 0, pvScale: 2},
+		dom:    ohlcvDomain{priceExact: true, volExact: true, priceScale: 2, volScale: 0, pvScale: 2},
 		fields: fields,
 	}
 	for _, r := range ohlcvTestRows(11) {

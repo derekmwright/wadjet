@@ -207,6 +207,22 @@ func ohlcvCells() []ohlcvCell {
 			      FROM (SELECT ohlcv(ts, px_d92*2, vol_i64) AS b FROM ` + ohlcvTable + `) t`,
 			want:   []string{"o=20.00|h=42.00|l=14.00|c=42.00|v=24|w=29.166667"},
 			pgSays: "the same bar over 2*px: (20, 42, 14, 42, 24, 29.1666666…)"},
+		// The two MIXED-CARRIER bars. Each group of fields is carried in ITS
+		// OWN carrier — the price by the price column's type, the volume by
+		// the volume column's — so a DECIMAL price beside a float volume keeps
+		// every digit of the price, and an int8 volume beside a float price
+		// still sums exactly. One carrier for the whole bar was the first
+		// design and it declared an exactness it did not deliver.
+		{name: "an_exact_price_with_an_approximate_volume",
+			sql: `SELECT (b).open AS o, (b).high AS h, (b).volume AS v, (b).vwap AS w
+			      FROM (SELECT ohlcv(ts, px_d92, vol_f64) AS b FROM ` + ohlcvTable + `) t`,
+			want:   []string{"o=10.00|h=21.00|v=float:24|w=float:14.5833"},
+			pgSays: "min(numeric(9,2)) keeps its digits; sum(float8) and the quotient are double"},
+		{name: "an_approximate_price_with_an_exact_volume",
+			sql: `SELECT (b).open AS o, (b).high AS h, (b).volume AS v, (b).vwap AS w
+			      FROM (SELECT ohlcv(ts, px_f64, vol_i64) AS b FROM ` + ohlcvTable + `) t`,
+			want:   []string{"o=float:10|h=float:21|v=24|w=float:14.5833"},
+			pgSays: "min(float8) is double; sum(int8) is numeric; the quotient is double"},
 		// THE BOUNDARY, from both sides. A computed ORDERING key or a computed
 		// VOLUME is materialized by NO engine — the pre-aggregate projection
 		// carries a bare column reference and declines an expression, which is
@@ -326,6 +342,7 @@ func ohlcvSchema() parquet.Schema {
 		{Name: "px_d92", Type: parquet.TypeDecimal, Precision: 9, Scale: 2, Nullable: true},
 		{Name: "vol_i64", Type: parquet.TypeInt64, Nullable: true},
 		{Name: "vol_i32", Type: parquet.TypeInt32, Nullable: true},
+		{Name: "vol_f64", Type: parquet.TypeFloat64, Nullable: true},
 		{Name: "c_str", Type: parquet.TypeString, Nullable: true},
 	}}
 }
@@ -388,8 +405,9 @@ func ohlcvRows(rows []ohlcvRow) []map[string]any {
 		}
 		if v.vol != nil {
 			m["vol_i32"] = int32(v.vol.(int64))
+			m["vol_f64"] = float64(v.vol.(int64))
 		} else {
-			m["vol_i32"] = nil
+			m["vol_i32"], m["vol_f64"] = nil, nil
 		}
 		out = append(out, m)
 	}
