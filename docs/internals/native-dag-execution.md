@@ -1040,7 +1040,23 @@ A DISTINCT is executed by being turned into a GROUP BY. Three outcomes, and no s
 |---|---|
 | `SELECT DISTINCT a, b + c AS x …` — every projection is a usable group key | **Rewritten in place**, wherever the Distinct sits. Sharded. |
 | `SELECT DISTINCT *` / `SELECT DISTINCT t.*` — no `NodeProject` exists at all (a bare-star select list produces none), so the plan is `Distinct → Scan` or `Distinct → Filter → Scan` or `Distinct → Join(Scan, Scan)` | **Rewritten in place** by `rewriteStarDistinct`: the group keys are the relation's own columns, read off `Node.ScanColumns` (the catalog annotation `ExpandStarProjections` uses). Descends only through column-preserving nodes — a Filter, and a join that emits BOTH sides — and declines a semi/anti join, a nested aggregate/projection, an unannotated scan, or a name that appears in two scans (one group key cannot stand for two columns). Sharded. |
-| `SELECT DISTINCT a, SUM(b) …` (an aggregate projection has no group key) or a projection carrying a subquery | **Not rewritten.** On the ROOT path `ExecuteSQL` applies `dedupGatherResult` over the projected gather output (`MergeInfo.HasDistinct`) — correct, but single-node at the coordinator. Anywhere else nothing on the DAG would apply it, so `PlanDistributed` returns `ErrDistinctDistributed` (`planner/physical/distinct_refusal.go`) and the coordinator **routes the query to its local single-process pipeline** (`Coordinator.runDistinctLocal`, `coordinator/refused_local.go`) — the #359 pattern, counter `DistinctLocalRoutes()`. |
+| `SELECT DISTINCT a, SUM(b) …` (an aggregate projection has no group key), a projection carrying a subquery, or a star over a SELF-JOIN (the third row's decline: one name in two scans) | **Not rewritten.** On the ROOT path `ExecuteSQL` applies `dedupGatherResult` over the projected gather output (`MergeInfo.HasDistinct`) — correct, but single-node at the coordinator. Anywhere else nothing on the DAG would apply it, so `PlanDistributed` returns `ErrDistinctDistributed` (`planner/physical/distinct_refusal.go`) and the coordinator **routes the query to its local single-process pipeline** (`Coordinator.runDistinctLocal`, `coordinator/refused_local.go`) — the #359 pattern, counter `DistinctLocalRoutes()`. |
+
+**The coordinator's dedup does not preserve order, so it re-applies the ORDER
+BY — and that re-sort has to BIND the query's keys** (#1002). `dedupGatherResult`
+and `mergeProbePartials` both bound each key by an exact lookup in
+`mergeColIdx` and `continue`d past a key that missed. A join publishes the
+probe's columns bare and every duplicate build column qualified by its owning
+alias, so `SELECT DISTINCT * FROM lat_item a JOIN lat_item b ON b.order_id =
+a.order_id ORDER BY a.order_id, a.amount, b.amount` — a TOTAL order, and
+ADR-0013 lists no nondeterminism class that covers one — dropped BOTH `a.`
+keys and came back sorted by `b.amount` alone on both DAG arms. Under an
+OFFSET that is a wrong ROW SET too, since the truncation is applied after the
+ordering. `mergeSortKeyIndices` (`coordinator/merge_sort_keys.go`) resolves the
+keys ONCE through `exec.ColumnIndexFallback` — the engine's one resolver, which
+`physical.sortKeyLocalColumn` and the DAG's own sort stage already bind through
+— preferring `SlotPos` where the planner recorded one, and a key that still
+does not resolve is an ERROR rather than a silently different order.
 
 The refusal is not the answer: it is the handoff. Refusing beat dropping the DISTINCT (#466, the #308 position — a loud failure over a silently different answer), but the query still HAS an answer and one engine in the coordinator process computes it, so an error would be a worse outcome than either. What the refusal buys is that nothing reaches `walkStages` with a semantics-carrying Distinct in it.
 
@@ -1124,6 +1140,23 @@ concatenation well-formed:
 - **Names.** SQL takes the result columns from the first arm; every arm is
   projected onto them. Without the projection a pass-through parquet scan arm
   reaches the consumer carrying every column of its table.
+
+  **The arms have to SUPPLY those columns, so nothing above the operation
+  prunes them** (#961). A set operation matches its arms BY POSITION over the
+  whole result row, and for every spelling but `UNION ALL` that row is also the
+  DEDUP KEY. `logical.pushColumnNeeds` had no set-op case, so an outer need
+  fell through the generic recursion straight into both arms:
+  `SELECT COUNT(*) FROM (SELECT * FROM t WHERE id < 2000 UNION ALL SELECT *
+  FROM t WHERE id >= 2000) u WHERE id < 10` pushed `{id}` into two STAR arms
+  whose scans read `[id]` alone, while the arm projection — built from the
+  arms' DECLARED output lists — still asked for the table's whole list. Both
+  DAG arms failed with `column "g" does not exist in the input schema`, and on
+  the single-process path, which has no name-based arm projection to fail, the
+  narrowing landed on the DEDUP KEY instead and was SILENT: a distinct `UNION`,
+  an `INTERSECT` and an `EXCEPT` over two star arms each answered 0. A set-op
+  node now pushes `nil` (all columns) into every arm; an arm with an explicit
+  SELECT list is a `Project`, which narrows again from its own items, so only
+  the STAR arm is widened.
 - **Types.** The arms' outputs are separate `.wshf` files read as one stream, so
   a column declared FLOAT64 by one arm and INT32 by another is a decoding
   error, not a union — it panicked the gather task writing the second arm's

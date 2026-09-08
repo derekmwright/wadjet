@@ -94,5 +94,70 @@ func TestL1AStarOverAJoinPublishesThePlanNotTheQuery(t *testing.T) {
 			want: qualA + " rows=0",
 			why:  why,
 		},
+		// #993's SURVIVING half, measured by arc M1 and pinned per DAG ARM.
+		//
+		// The filing's column SET no longer reproduces — arc K3's v0.18.62
+		// made all four arms publish PostgreSQL's ten — and what is left is a
+		// NAME divergence between the two DAG arms: `dag` publishes the outer
+		// relation's non-key columns bare, `dagshuf` qualifies all of them.
+		//
+		// Its producer is `physical.markCoPathingSelfJoinBuilds`, which sets
+		// `Stage.QualifyAllBuildCols` when two joins in one chain BUILD over
+		// the same table (Q07's rule). Disabling that pass in place makes all
+		// four arms agree on the bare spelling, which is what localizes it.
+		// The two DAG arms differ because the walk reads each join's BUILD
+		// dependency and the arms' stage DAGs put different sides on the build:
+		// over this statement the broadcast arm finds ONE lat_ord build and the
+		// shuffle arm finds TWO, so only the shuffle arm marks. `WADJET_STAGE_
+		// FUSION=0` does not change it, so the fusion passes are not the cause.
+		//
+		// Same producer as #997 and the same rule broken — which side builds is
+		// a cost decision and must not decide a NAME — so this rides that arc.
+		// The second cell is the same statement with NO derived block, which is
+		// what says the block K3's publishing rule stops at is not the
+		// condition: the divergence is the join's names, not the block's.
+		{
+			name: "993 a star over a derived block whose body is a join",
+			sql: "SELECT * FROM lat_ord o JOIN (SELECT * FROM lat_item i " +
+				"JOIN lat_ord o2 ON o2.id = i.order_id) s ON s.order_id = o.id ORDER BY s.id",
+			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 o.id:INT64 " +
+				"customer:STRING total:FLOAT64 o2.id:INT64 o2.customer:STRING o2.total:FLOAT64] " +
+				"rows=4 | 1,1,Widget,50,1,Alice,150,1,Alice,150 | " +
+				"2,1,Gadget,100,1,Alice,150,1,Alice,150 | " +
+				"3,2,Widget,75,2,Bob,200,2,Bob,200 | " +
+				"4,2,Doohickey,125,2,Bob,200,2,Bob,200",
+			wantDagshuf: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 " +
+				"o.id:INT64 o.customer:STRING o.total:FLOAT64 o2.id:INT64 o2.customer:STRING " +
+				"o2.total:FLOAT64] rows=4 | 1,1,Widget,50,1,Alice,150,1,Alice,150 | " +
+				"2,1,Gadget,100,1,Alice,150,1,Alice,150 | " +
+				"3,2,Widget,75,2,Bob,200,2,Bob,200 | " +
+				"4,2,Doohickey,125,2,Bob,200,2,Bob,200",
+			why: "#993 (deferred, rides #997): PostgreSQL publishes the three FROM arms in " +
+				"written order with every name bare — `id, customer, total, id, order_id, " +
+				"product, amount, id, customer, total`. This tree publishes the join " +
+				"operator's order on all four arms (#997), and `dagshuf` additionally " +
+				"qualifies the outer relation's non-key columns because " +
+				"markCoPathingSelfJoinBuilds marks a second lat_ord build there.",
+		},
+		{
+			name: "993 the same three relations with NO derived block",
+			sql: "SELECT * FROM lat_ord o JOIN lat_item i ON i.order_id = o.id " +
+				"JOIN lat_ord o2 ON o2.id = i.order_id ORDER BY i.id",
+			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 o.id:INT64 " +
+				"customer:STRING total:FLOAT64 o2.id:INT64 o2.customer:STRING o2.total:FLOAT64] " +
+				"rows=4 | 1,1,Widget,50,1,Alice,150,1,Alice,150 | " +
+				"2,1,Gadget,100,1,Alice,150,1,Alice,150 | " +
+				"3,2,Widget,75,2,Bob,200,2,Bob,200 | " +
+				"4,2,Doohickey,125,2,Bob,200,2,Bob,200",
+			wantDagshuf: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 " +
+				"o.id:INT64 o.customer:STRING o.total:FLOAT64 o2.id:INT64 o2.customer:STRING " +
+				"o2.total:FLOAT64] rows=4 | 1,1,Widget,50,1,Alice,150,1,Alice,150 | " +
+				"2,1,Gadget,100,1,Alice,150,1,Alice,150 | " +
+				"3,2,Widget,75,2,Bob,200,2,Bob,200 | " +
+				"4,2,Doohickey,125,2,Bob,200,2,Bob,200",
+			why: "#993 (deferred): the SAME divergence with no derived block at all, which " +
+				"is what says K3's `a block whose body is a JOIN is never marked` boundary " +
+				"is not the condition.",
+		},
 	})
 }

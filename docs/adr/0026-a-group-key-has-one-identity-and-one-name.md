@@ -2050,6 +2050,23 @@ nor closes it. Closing it needs a join's emitted list stated at plan time —
 `exec.JoinOutputSchema` is that list, and reaching it here needs the side
 schemas the star declaration already assembles, one level deeper.
 
+RE-MEASURED 2026-09-08 by arc M1 (#993): the column SET half of that boundary
+no longer reproduces — v0.18.62's `Stage.ProjectExprs` closed it and all four
+arms publish PostgreSQL's ten for the bare-star spelling. What survives is a
+NAME divergence between the two DAG arms, and it is NOT the block's: the SAME
+three relations written as a plain three-way join, with no derived block at
+all, diverge identically. Its producer is `markCoPathingSelfJoinBuilds`, which
+sets `Stage.QualifyAllBuildCols` when two joins in one chain BUILD over the
+same table (Q07's rule) — disabling that pass in place makes all four arms
+agree on the bare spelling, and `WADJET_STAGE_FUSION=0` does not change it. The
+two DAG arms differ because the walk reads each join's BUILD dependency and the
+arms' stage DAGs put different sides on the build: over this statement the
+broadcast arm finds ONE `lat_ord` build and the shuffle arm finds TWO, so only
+the shuffle arm marks. That is §6a's rule broken by a second producer — which
+side builds is a cost decision and must not decide a NAME — so it rides #997's
+arc rather than a second pass here. Pinned per DAG arm, in both spellings, in
+`coordinator.TestL1AStarOverAJoinPublishesThePlanNotTheQuery`.
+
 A block whose own `ORDER BY` was materialized publishes its `__sortkey_N` — the
 sort below still reads that key, so the projection cannot drop it — and what
 happens next is decided by THE SORT KEY, not by the class:
@@ -2088,10 +2105,155 @@ collide are still qualified, by the `isDup` + `BuildColOrigins` rule in
 `joinOutputSchemaWithMapping`, which is the rule for a collision the plan
 cannot see coming.
 
-**Not settled.** Two independent LATERALs over one table publish the SECOND
-lowering's minted slot to the client (`__key_1` beside `mx` and `mn`) on both
-DAG arms. The slot is left in place by the join for the empty-input default
-operator above it to drop (`Stage.LateralPadMarker` / `LateralDropMarker`), and
-with two such joins only one drop runs. Pre-existing and measured identical at
-`bb8635a4` — where it was worse, spelled `s2.__key_1` — and untouched here: it
-is the pad-marker drop's own mechanism, not the stage's column set.
+**Not settled here; CLOSED 2026-09-08 by arc M1 (#988) — see §8.** Two
+independent LATERALs over one table publish the SECOND lowering's minted slot
+to the client (`__key_1` beside `mx` and `mn`) on both DAG arms. The slot is
+left in place by the join for the empty-input default operator above it to drop
+(`Stage.LateralPadMarker` / `LateralDropMarker`), and with two such joins only
+one drop runs. Pre-existing and measured identical at `bb8635a4` — where it was
+worse, spelled `s2.__key_1` — and untouched here: it is the pad-marker drop's
+own mechanism, not the stage's column set. §8 names the mechanism exactly: the
+second join is ABSORBED by `fuseStageChains` into the first's stage, and
+`ChainedJoinSpec` carried neither the marker nor the defaults.
+
+## §8 The DAG publishes the PLAN's column set and ORDER, never a stage's stream
+
+Added 2026-09-08 by arc M1 (#1002, #961, #988, and the gather-rename defect the
+#1002 gate found).
+
+§2 gave a group key two names, §6 generalized it to every consumer, and §7 made
+a derived block a relation. §8 is the same rule stated for the two things a
+consumer can lose besides a name: the ORDER of the rows and the SET of the
+columns. Four producers broke it, each in its own way, and each fix is the same
+sentence — *ask the producer, do not re-derive*.
+
+### 8a. A merge that cannot apply the query's ordering says so (#1002)
+
+Two coordinator merges re-apply a top-level `ORDER BY` over rows the DAG has
+already produced: `mergeProbePartials`, after a probe-split re-aggregate or
+dedup, and `dedupGatherResult`, after the post-gather `DISTINCT` `walkStages`
+emits no stage for (#163). Both bound each key by an EXACT lookup in
+`mergeColIdx` and `continue`d past a key that missed.
+
+A dropped key is a silent wrong ORDER, and ADR-0013 lists no nondeterminism
+class that covers a TOTAL one. A join publishes the probe's columns bare and
+every duplicate build column qualified by its owning alias, so
+`SELECT DISTINCT * FROM lat_item a JOIN lat_item b ON b.order_id = a.order_id
+ORDER BY a.order_id, a.amount, b.amount` had NEITHER `a.` key in that map: both
+DAG arms returned the rows sorted by `b.amount` alone — the LEADING key not
+applied at all — where PostgreSQL 17 and the two single-process arms answer the
+written sequence. Under an `OFFSET` it is a wrong ROW SET as well, because the
+truncation is applied after the ordering.
+
+**The rule.** `mergeSortKeyIndices` resolves the keys ONCE, through
+`exec.ColumnIndexFallback` — the engine's one resolver, which
+`physical.sortKeyLocalColumn` (§6a) and the DAG's own sort stage already bind
+through — preferring `SlotPos` where the planner recorded one (§2, #557). A key
+that still does not resolve, and a set of partials that do not describe one
+relation, are ERRORS. The alternative is rows in an order the client did not ask
+for and cannot detect; `reAggregatePartials` already refuses an unresolvable
+GROUP BY name one screen up for exactly that reason.
+
+**Why only this shape reached it.** `rewriteDistinctAsGroupBy` gives every other
+`DISTINCT` a stage — a projection's items become GROUP BY keys, and a star over
+ONE relation takes `rewriteStarDistinct` — but a star over a SELF-JOIN declines
+there, because `starDistinctGroupKeys` refuses a name two scans publish (one
+group key cannot stand for two columns, #277). That decline is what routes the
+statement to the coordinator's dedup, and the re-sort after it.
+
+### 8b. A set operation's arms supply the operation's result columns (#961)
+
+`UNION`, `INTERSECT` and `EXCEPT` match their arms BY POSITION over the whole
+result row: the result column list is the first arm's, every arm is projected
+onto it (§7's exclusion), and for every spelling but `UNION ALL` that whole row
+is also the DEDUP KEY. Nothing above the operation can therefore say that an arm
+may stop producing a column.
+
+`logical.pushColumnNeeds` had no set-op case at all, so an outer need fell
+through the generic recursion straight into both arms. Two STAR arms then read
+ONE column each while the union stage's arm projection — built from the arms'
+DECLARED output lists, which is what the operation publishes — still asked for
+the table's whole list, and both DAG arms failed with `column "g" does not exist
+in the input schema`. On the single-process path there is no name-based arm
+projection to fail and the narrowing landed on the DEDUP KEY instead, silently:
+a distinct `UNION`, an `INTERSECT` and an `EXCEPT` over two star arms each
+answered 0 on all four arms where PostgreSQL answers 30, 20 and 10.
+
+A set-op node pushes `nil` — this walk's "all columns" — into every arm now. An
+arm with an explicit SELECT list is a `Project`, which builds its own needs set
+from its own items and is narrowed exactly as before, so only the STAR arm,
+which has no `Project` at all, is widened. This is the rule `rewriteStarDistinct`
+already states one operator over ("the group keys are required columns, so the
+pruner keeps them", #277).
+
+### 8c. A join's own rules travel with it when a stage absorbs it (#988)
+
+A decorrelated LATERAL's join owns two rules: the drop of the `__key_N` slot the
+lowering minted (§3c) and the per-column empty-input defaults
+`exec.LateralEmptyDefault` applies above it. `fuseStageChains` absorbs a 1:1
+downstream join into its upstream stage as a `ChainedJoinSpec`, which carried
+that join's `HiddenJoinCols` but neither its `LateralPadMarker` nor its
+`LateralEmptyDefaults` — so with two independent LATERALs over one table exactly
+one drop and one default ran per QUERY. `__key_1` reached the client on both DAG
+arms beside `mx` and `mn`, and the absorbed lateral's `COUNT(*) + 1` came back
+NULL for an outer row it matched nothing for where PostgreSQL answers 1: a wrong
+VALUE, not only a leaked name. `WADJET_STAGE_FUSION=0` answered PostgreSQL on
+both DAG arms at base, which is what localizes it to the fusion.
+
+**The rule.** A spec that replaces a join is the whole record of that join, or
+the join is not absorbed. `ChainedJoinSpec` carries all three fields and the
+dispatcher puts them on the chained `OpSpec`, so the worker builds one
+`exec.LateralEmptyDefault` per absorbed lateral join. `FusedJoinSpec` has a
+field for none of it, so `fuseJoinStages` DECLINES a candidate carrying a pad
+marker or a hidden slot — the same call its `NullAwareAnti` and `ProjectExprs`
+guards already make, and the honest alternative to carrying a rule nowhere.
+
+### 8d. A gather rename binds the column its source NAMES, exact spelling first
+
+A SELECT list of plain group-key references emits no stage: the aggregate
+materializes and the gather's `OutputRename{From, To}` maps each item back onto
+what that stage publishes. An aggregate publishes a key under BOTH spellings
+(§2), and the join's own names ride the stream too, so the gather resolved
+against `[order_id amount amount a.order_id a.amount b.amount]`.
+
+`classScopedMatch` — the §2 class rule for an item whose name several columns
+answer to — rescanned for the BARE name whenever the EXACT spelling matched
+fewer than TWO columns, which is every uniquely-resolving qualified reference.
+`a.amount` and `b.amount` each matched exactly ONE column and both were re-bound
+to the first bare `amount`, so
+
+    SELECT a.order_id, a.amount, b.amount FROM lat_item a
+    JOIN lat_item b ON b.order_id = a.order_id
+    GROUP BY a.order_id, a.amount, b.amount ORDER BY a.order_id, a.amount, b.amount
+
+returned eight rows whose THIRD column carried the SECOND's value on both DAG
+arms — the right groups under wrong values — where PostgreSQL 17 and the
+single-process arms answer eight distinct triples. `SELECT DISTINCT` over the
+same self-join lowers to the same tree and had it too.
+
+The rescan runs only when the exact spelling matched NOTHING now, which is
+`exec.ColumnIndexFallback`'s order and §2c's rule: a column REFERENCE is
+resolved as a column name, and a name that resolves is not re-read as a shape.
+The case the rescan exists for (#785 — an item spelled through a derived table's
+alias, over a stream carrying the bare name twice) has ZERO exact matches and is
+unchanged.
+
+### Gates
+
+| gate | what it holds |
+|---|---|
+| `coordinator.TestM1AMergedOrderIsTheQuerysOrder` | 8a — nine shapes, four arms, incl. LIMIT (top-K heap), OFFSET, the arm-swapping predicate, and two controls that never reach the merge |
+| `coordinator.TestM1ASetOperationsArmsSupplyItsResultColumns` | 8b — twelve shapes, all four set-op spellings, three controls holding the explicit-list boundary |
+| `coordinator.TestM1AEveryLateralJoinDropsItsOwnSlot` | 8c — ten shapes incl. three and nested laterals, same and different tables, derived and CTE stars |
+| `pgwire.TestArcJ1AHiddenSlotIsNotInTheRowDescription` | 8c on the wire door |
+| `coordinator.TestM1AGatherRenameBindsWhatItsSourceNames` | 8d — seven shapes, two controls |
+| `coordinator.TestArcE3` (#785 cells) | 8d's boundary: the rescan's own case is unchanged |
+
+### Not settled
+
+The star's column ORDER and its qualified side are still the PLAN's — §6a's
+"NOT settled" paragraph, #997 — and arc M1 adds a SECOND producer of the same
+class: `markCoPathingSelfJoinBuilds` decides `Stage.QualifyAllBuildCols` from
+the ARM's stage DAG, so the broadcast and shuffle arms publish different names
+for one statement (§7's boundary paragraph carries the measurement). Both belong
+to the arc that makes a join's published names a property of the query.

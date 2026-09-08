@@ -401,6 +401,18 @@ SELECT ip_address FROM blocklist
 
 All set operations support ORDER BY and LIMIT on the combined result. Operations are left-associative when chained (e.g., `A UNION B EXCEPT C` is `(A UNION B) EXCEPT C`).
 
+A set operation's arms always produce the operation's whole result row, whatever
+the query above it reads. Before v0.18.65 a filter or an aggregate above a set
+operation of two `SELECT *` arms pruned those arms down to the columns it named,
+which is not a narrowing a set operation can take: the arms are matched by
+POSITION over the whole row, and for every spelling but `UNION ALL` that row is
+also the deduplication key. `SELECT COUNT(*) FROM (SELECT * FROM t WHERE id <
+2000 UNION ALL SELECT * FROM t WHERE id >= 2000) u WHERE id < 10` failed with
+`column "g" does not exist in the input schema` on the distributed paths, and a
+distinct `UNION`, an `INTERSECT` or an `EXCEPT` of two `SELECT *` arms answered
+zero rows on every path. Arms that name their columns explicitly are unaffected
+and are still pruned to what the query reads.
+
 ## EXPLAIN
 
 View the query plan without executing:
@@ -1594,6 +1606,17 @@ Deduplicate result rows:
 SELECT DISTINCT protocol FROM flow_logs
 SELECT DISTINCT src_ip, dst_port FROM flow_logs WHERE date = '2026-03-15'
 ```
+
+A `SELECT DISTINCT *` over a SELF-JOIN — two references to one table, so one
+column name belongs to two relations — is deduplicated by the coordinator on
+the distributed paths, and the query's `ORDER BY` is applied after that dedup.
+Before v0.18.65 that re-sort dropped every key whose written spelling the
+merged result did not carry EXACTLY, so `SELECT DISTINCT * FROM t a JOIN t b ON
+b.k = a.k ORDER BY a.k, a.amount, b.amount` came back ordered by `b.amount`
+alone on the distributed paths: the right rows in the wrong order, and under an
+`OFFSET` a different page. A qualified key binds the relation its qualifier
+names on every path now, and an ordering the merge cannot apply is an error
+rather than a silently different order.
 
 ## CASE Expressions
 

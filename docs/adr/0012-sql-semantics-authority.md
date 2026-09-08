@@ -1969,6 +1969,24 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `coordinator.TestL1AStarOverAJoinPublishesThePlanNotTheQuery`, so the
      arc's proof is deleting the pin.
 
+     EXTENDED 2026-09-08 by arc M1 (#993): there is a SECOND producer of the
+     same divergence, and it splits the two DISTRIBUTED arms from each other.
+     `physical.markCoPathingSelfJoinBuilds` sets `Stage.QualifyAllBuildCols`
+     when two joins in one chain BUILD over the same table (Q07's self-join
+     rule), and it reads each join's BUILD dependency out of the ARM's stage
+     DAG — so over `SELECT * FROM lat_ord o JOIN lat_item i ON i.order_id =
+     o.id JOIN lat_ord o2 ON o2.id = i.order_id` the broadcast arm finds ONE
+     `lat_ord` build and the shuffle arm finds TWO, and `dagshuf` publishes
+     `o.customer, o.total` where `single`, `spilled` and `dag` publish them
+     bare. PostgreSQL publishes every name bare, the three FROM arms in written
+     order. Disabling that pass in place makes all four arms agree;
+     `WADJET_STAGE_FUSION=0` does not change it, so the fusion passes are not
+     the cause. It reproduces with NO derived block in the statement, which is
+     what says arc K3's "a block whose body is a JOIN is never marked" boundary
+     is not the condition. Pinned per DAG arm, in both spellings, in the same
+     gate; it rides #997's arc because it is the same rule — which side builds
+     is a cost decision and must not decide a NAME.
+
    - **CLOSED 2026-09-07 by arc K3 (#978): a zero-row `SELECT *` over a JOIN
      carried no columns at all**, on every arm and on the wire. `SELECT *`
      over a join has no Project for the declaration walk to read and no single

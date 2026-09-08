@@ -93,6 +93,23 @@ the primary probe in `buildJoinFragment`:
 
 ## Interactions
 
+- **A join's OWN rules are absorbed with it, or the join is not absorbed
+  (#988).** `ChainedJoinSpec` is the whole record of the join it replaces, and
+  a field it lacks is a rule that stops running. A decorrelated LATERAL's join
+  owns two of them: the drop of the `__key_N` slot the lowering minted, and the
+  per-column empty-input defaults `exec.LateralEmptyDefault` applies above it
+  (ADR-0026 §3c). The spec carried `HiddenJoinCols` but neither
+  `LateralPadMarker` nor `LateralEmptyDefaults`, so with two independent
+  LATERALs over one table — the second join absorbed into the first's fragment
+  — exactly one drop and one default ran per QUERY: `__key_1` reached the
+  client on both DAG arms, and the absorbed lateral's `COUNT(*) + 1` came back
+  NULL for an outer row it matched nothing for where PostgreSQL answers 1. All
+  three fields ride the spec now and the dispatcher puts them on the chained
+  `OpSpec`, so the worker builds one `exec.LateralEmptyDefault` per absorbed
+  lateral join. `FusedJoinSpec` (the `fuseJoinStages` pass, broadcast joins
+  absorbed BEFORE the primary) has a field for none of it and now DECLINES a
+  candidate carrying a pad marker or a hidden slot — the same call the
+  `NullAwareAnti` and `ProjectExprs` guards beside it make.
 - **Worker admission / memory (hazard: fused build residency).** The fused
   task holds P's partition build and C's build simultaneously.
   `estimateComputeTaskBytes` sums over the union of deps (partitioned ÷ N,
