@@ -56,7 +56,15 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 		if cur == nil {
 			return
 		}
-		if cur.Type == logical.NodeProject && published[cur] {
+		// A SECURITY PROJECTION IS THE RELATION ITS SIDE PUBLISHES, for the
+		// same reason a materialized block is: an ABAC column policy puts one
+		// directly over the scan, and what the side hands the join is that
+		// projection — DENIED columns gone, MASKED ones replaced. Declaring
+		// the scan under it named `salary` in the RowDescription of
+		// `SELECT * FROM policed JOIN other`, to the identity whose policy
+		// denies it (#859, ADR-0033's 2026-09-08 amendment). Same rule and
+		// same reader as the block arm; nothing else about this walk moves.
+		if cur.Type == logical.NodeProject && (published[cur] || cur.SecurityBarrier) {
 			// A MATERIALIZED BLOCK IS ITS PROJECTION (#984, #980). The stage
 			// under this join runs the block's SELECT list as an OpProject,
 			// so the relation it publishes is the projection and not the

@@ -976,6 +976,21 @@ func pmCells() []pmCell {
 		{name: "qualified_star_over_a_join_named_second",
 			sql:      `SELECT a.* FROM e7other b JOIN e7emp a ON a.id = b.id`,
 			noSalary: true, want: []string{pmStarRow(1), pmStarRow(2), pmStarRow(3)}},
+		// The BARE star over a join, with ZERO rows: nothing is read, so the
+		// column list the client receives is entirely the DECLARED schema
+		// (#846, and #978's join arm). A denied column's NAME reaching a
+		// RowDescription is the same disclosure as one reaching a row, and
+		// this is the only shape where the declaration is the whole answer.
+		// The cell asserts the SCHEMA, not the naming: a bare star over a
+		// join spells the right side's columns the operator's way, which is
+		// ADR-0026's territory and diverges from PostgreSQL with or without a
+		// policy.
+		{name: "bare_star_over_a_join_zero_rows",
+			sql:      `SELECT * FROM e7emp a JOIN e7other b ON a.id = b.id WHERE a.id < 0`,
+			noSalary: true, want: nil},
+		{name: "bare_star_over_a_join_named_second_zero_rows",
+			sql:      `SELECT * FROM e7other b JOIN e7emp a ON a.id = b.id WHERE a.id < 0`,
+			noSalary: true, want: nil},
 		// A column-alias list renames the star's columns POSITIONALLY, so the
 		// width it must match is the POLICED width — five, not the catalog's
 		// six. Reading the catalog's list here renamed `salary` to `k5` and

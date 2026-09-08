@@ -542,7 +542,16 @@ wherever one stands over the scan. Consequences:
    security control never degrades to a grant, which is the same rule an
    uncoverable scan already follows.
 
-4. **Second answers are gated structurally, not only by cells.**
+4. **A DECLARATION is a read too.** The zero-row `SELECT *` declaration (#846)
+   and its join arm (#978) describe a relation without reading a row, and a
+   denied column's NAME in a `RowDescription` is the same disclosure as one in
+   a row. The scan arm was already safe — its walk stops at any Project, and a
+   security projection is one — but v0.18.62's join arm read each side past the
+   barrier and declared `salary` for `SELECT * FROM policed JOIN other`, on
+   either join side. `declaredJoinSchema` now reads a security projection the
+   way it already reads a materialized block: the side IS its projection.
+
+5. **Second answers are gated structurally, not only by cells.**
    `logical.TestOnlyOnePathReadsAScanColumnListForAStar` parses the three
    planner packages and asserts that `publishedScanColumns` is the only
    function inside `star_expansion.go` that reads a scan's own column list,
