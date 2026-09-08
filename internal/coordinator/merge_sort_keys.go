@@ -69,3 +69,30 @@ func mergeSortKeyIndices(b *batch.RecordBatch, orderBy []logical.OrderExpr) ([]i
 	}
 	return out, nil
 }
+
+// orderableBatchesErr is what a merge says when `coalesceForOrdering` did not
+// hand it ONE batch to order.
+//
+// It is nil for an EMPTY result — zero batches, or several carrying no active
+// rows, which is what a merge over partials that all filtered everything out
+// looks like. There is nothing to put in an order there and no answer to get
+// wrong.
+//
+// Everything else is a REFUSAL: `coalesceForOrdering` declines when the
+// partials do not share one schema, which means they do not describe one
+// relation, and the alternative to saying so is the rows in their arrival
+// order — an order the client did not ask for and cannot detect (#1002).
+func orderableBatchesErr(batches []*batch.RecordBatch) error {
+	total := 0
+	for _, b := range batches {
+		if b != nil {
+			total += b.ActiveLen()
+		}
+	}
+	if total == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"ordering a merged result: %d partial batches carrying %d rows do not share one schema",
+		len(batches), total)
+}

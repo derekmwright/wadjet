@@ -2790,11 +2790,7 @@ func copyVectorValue(dst *batch.Vector, dstRow int, src *batch.Vector, srcRow in
 func (c *Coordinator) sortBatches(batches []*batch.RecordBatch, orderBy []logical.OrderExpr) ([]*batch.RecordBatch, error) {
 	batches = coalesceForOrdering(batches)
 	if len(batches) != 1 {
-		// The partials do not describe one relation, so there is no relation
-		// to order. Saying so is the answer: the alternative is the rows in
-		// the arrival order the client did not ask for (#1002).
-		return batches, fmt.Errorf(
-			"ordering a merged result: %d partial batches do not share one schema", len(batches))
+		return batches, orderableBatchesErr(batches)
 	}
 	b := batches[0]
 	nRows := b.Len
@@ -2890,8 +2886,7 @@ func coalesceForOrdering(batches []*batch.RecordBatch) []*batch.RecordBatch {
 func (c *Coordinator) topKBatches(batches []*batch.RecordBatch, orderBy []logical.OrderExpr, k int) ([]*batch.RecordBatch, error) {
 	batches = coalesceForOrdering(batches)
 	if len(batches) != 1 {
-		return batches, fmt.Errorf(
-			"ordering a merged result: %d partial batches do not share one schema", len(batches))
+		return batches, orderableBatchesErr(batches)
 	}
 	b := batches[0]
 	nRows := b.Len

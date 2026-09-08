@@ -178,6 +178,18 @@ func TestM1AMergedOrderIsTheQuerysOrder(t *testing.T) {
 				"4,2,Doohickey,125,3,2,Widget,75 | 4,2,Doohickey,125,4,2,Doohickey,125",
 		},
 		{
+			// ZERO ROWS. `coalesceForOrdering` is handed nothing to flatten,
+			// and an empty result has no order to get wrong — the refusal
+			// above must not fire here.
+			name: "1002 a zero-row star DISTINCT over a self-join still answers",
+			sql:  selfJoin + "WHERE a.id < 0 ORDER BY a.order_id, a.amount, b.amount",
+			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 a.id:INT64 " +
+				"a.order_id:INT64 a.product:STRING a.amount:FLOAT64] rows=0",
+			why: "#997: the zero-row declaration takes the join operator's own namer, so it " +
+				"carries the same plan-dependent qualification the arm-swapped cell above " +
+				"does. PostgreSQL declares `id, order_id, product, amount` twice.",
+		},
+		{
 			// CONTROL: a star DISTINCT over ONE relation. `rewriteStarDistinct`
 			// reads the group keys off the scan, so this becomes a GROUP BY
 			// with a stage of its own and never reaches the coordinator's
