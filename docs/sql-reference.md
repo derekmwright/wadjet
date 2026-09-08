@@ -1810,6 +1810,26 @@ Window functions compute values across sets of rows related to the current row w
 | `PERCENT_RANK()` | Relative rank: (rank - 1) / (total - 1) |
 | `CUME_DIST()` | Cumulative distribution |
 
+That table is the whole set. **Any other aggregate in the window position is
+refused, SQLSTATE `0A000`**, and the refusal names the supported set:
+
+```
+wadjet=> SELECT STDDEV(x) OVER (ORDER BY id) FROM t;
+ERROR:  STDDEV is not supported as a window function; the window functions are
+        ROW_NUMBER, RANK, DENSE_RANK, SUM, COUNT, AVG, MIN, MAX, LAG, LEAD,
+        FIRST_VALUE, LAST_VALUE, NTILE, PERCENT_RANK, CUME_DIST, NTH_VALUE
+```
+
+PostgreSQL answers every one of those — there, any aggregate may be used as a
+window function — so this is a loud refusal of valid input rather than a
+semantic difference, and it is in ADR-0012's divergence list. The alternative
+was worse: the plan used to fall through to `ROW_NUMBER` with an output vector
+typed for the function nobody recognized, and 23 of the 28 aggregates crashed
+the query with an internal error instead of saying what was wrong.
+
+The workaround is the grouped spelling with a join back, or a self-join on the
+frame's bounds.
+
 ### The type a window aggregate answers
 
 `SUM(x) OVER (…)` declares and answers exactly what `SUM(x) … GROUP BY`

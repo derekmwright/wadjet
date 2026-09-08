@@ -2394,7 +2394,11 @@ func (e *Executor) buildFragmentWindow(ctx context.Context, spec distributed.OpS
 	for i, wc := range spec.WindowCols {
 		fn, ok := exec.ParseWindowFunc(wc.Func)
 		if !ok {
-			return nil, fmt.Errorf("window: unsupported function %q for output column %q", wc.Func, wc.OutputCol)
+			// The same sentence and the same SQLSTATE the single-process
+			// planner raises (physical.refuseUnwindowable). A plain
+			// fmt.Errorf here carried no SQLSTATE, so pgwire reported the
+			// generic XX000 for a refusal that has a class (#965).
+			return nil, exec.RefuseUnsupportedWindowFunc(wc.Func)
 		}
 		var orderBy []exec.SortKey
 		for _, k := range wc.OrderBy {

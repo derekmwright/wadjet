@@ -13965,6 +13965,9 @@ func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Sou
 		childOps = append(childOps, NewComputedColumnsOpWithMeta(keyProjections, keyMeta))
 	}
 
+	if err := refuseUnwindowable(node.WindowExprs); err != nil {
+		return nil, nil, nil, err
+	}
 	var winCols []exec.WindowColumn
 	for _, we := range node.WindowExprs {
 		winCols = append(winCols, windowExecColumn(node, we, winKeys))
@@ -16356,14 +16359,28 @@ func parseAggFunc(s string) exec.AggFunc {
 	}
 }
 
-// parseWindowFunc maps a SQL window function name onto its operator constant,
-// falling back to ROW_NUMBER for a name exec does not implement. The fallback
-// is the single-process pipeline's long-standing behavior and is left alone
-// here; callers that can afford to refuse an unknown name (the worker's
-// fragment builder) use exec.ParseWindowFunc's ok directly.
+// parseWindowFunc maps a SQL window function name onto its operator constant.
+// A name exec has no window form for still resolves to ROW_NUMBER — the zero
+// value — but no plan reaches the operator with one, because refuseUnwindowable
+// runs first at every site that builds a window operator.
 func parseWindowFunc(s string) exec.WindowFunc {
 	fn, _ := exec.ParseWindowFunc(s)
 	return fn
+}
+
+// refuseUnwindowable fails the plan for a window expression whose function has
+// no window form, with the SAME sentence the worker's fragment builder raises
+// (exec.RefuseUnsupportedWindowFunc). Before it, such a plan reached
+// exec.Window as ROW_NUMBER with a mis-typed output vector and PANICKED —
+// 23 of the 28 known aggregates did, reported as "internal error in pipeline"
+// with no SQLSTATE (#965's census; see exec.RefuseUnsupportedWindowFunc).
+func refuseUnwindowable(exprs []logical.WindowExpr) error {
+	for _, we := range exprs {
+		if _, ok := exec.ParseWindowFunc(we.Func); !ok {
+			return exec.RefuseUnsupportedWindowFunc(we.Func)
+		}
+	}
+	return nil
 }
 
 // windowOutputType declares the output type of an INPUT-INDEPENDENT window

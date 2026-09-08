@@ -2037,6 +2037,35 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      option. Gated in
      `coordinator.TestArcJ1AnOnConditionOverADefaultedColumnIsRightOrLoud`.
 
+   - **An aggregate with no window form is REFUSED (0A000) where PostgreSQL
+     answers.** (Added 2026-09-08, arc A1, #965.) In PostgreSQL any aggregate
+     may be used as a window function; here the window operator implements
+     sixteen — ROW_NUMBER, RANK, DENSE_RANK, SUM, COUNT, AVG, MIN, MAX, LAG,
+     LEAD, FIRST_VALUE, LAST_VALUE, NTILE, PERCENT_RANK, CUME_DIST, NTH_VALUE
+     — and every other name is refused in one sentence that lists those.
+
+     It is recorded here because the alternative shipped for a long time and
+     was worse than a divergence. `exec.ParseWindowFunc` answers
+     `(WinRowNumber, false)` for a name it has no arm for and the planner
+     DISCARDED the second value, so the plan reached the operator as
+     ROW_NUMBER with an output vector typed for the function nobody
+     recognized. Census over the 28 names `plansql.IsAggregate` accepts,
+     spelled `<agg> OVER (PARTITION BY g ORDER BY x)`, measured 2026-09-08 on
+     the v0.18.64 tip: 5 answered right (the five that have a window form), 23
+     PANICKED — "internal error in pipeline: runtime error: index out of range
+     [0] with length 0", ADR-0019's boundary failing the query with no
+     SQLSTATE a client can act on — and 0 answered wrong. Loud beats plausible,
+     but a class beats a crash: the refusal is `exec.RefuseUnsupportedWindow
+     Func`, raised by BOTH doors (`physical.refuseUnwindowable` on the
+     single-process plan, the worker's fragment builder on the DAG) so one
+     sentence and one SQLSTATE reach a client whichever path planned the
+     query. Gated in
+     `wadjet.TestAnAggregateWithNoWindowFormRefusesRatherThanCrashing`, which
+     walks `plansql.IsAggregate` rather than a list, so a new aggregate joins
+     the gate for free and cannot ship with the crash — and which fails if a
+     name in its refusal list acquires a window form, so lifting the
+     divergence is a deliberate edit.
+
    - **WITHDRAWN the same day (arc J1 round 3): the refusal of `SELECT *` over
      a LATERAL whose ungrouped COUNT can see no rows.** It fired on the SHAPE,
      and a plan-time refusal cannot know the data — it refused queries whose

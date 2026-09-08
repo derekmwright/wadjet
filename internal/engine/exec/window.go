@@ -40,10 +40,9 @@ const (
 // ParseWindowFunc maps a SQL window function name (case-insensitive) onto its
 // WindowFunc constant. ok is false for a name this operator does not
 // implement, and the returned WindowFunc is then WinRowNumber — the zero
-// value, which the single-process planner has always fallen back to. A caller
-// that ships the spec somewhere else (the distributed fragment builder) should
-// refuse on !ok instead: computing ROW_NUMBER for a function nobody
-// recognized is a wrong answer with no error attached.
+// value. NO caller may use that value: every one of them refuses through
+// RefuseUnsupportedWindowFunc instead (see its comment for the census that
+// made the fallback indefensible).
 //
 // It lives here rather than in the planner because both the planner and the
 // worker turn a name into this package's constant, and two switch statements
@@ -2035,4 +2034,52 @@ func rowMapCarries(part []map[string]any, col string) bool {
 		}
 	}
 	return false
+}
+
+// RefuseUnsupportedWindowFunc is the ONE refusal for an aggregate used in the
+// window position that this operator has no window form for. Both doors raise
+// it — the single-process planner's buildWindow and the worker's fragment
+// builder — so a client reads one sentence and one SQLSTATE whichever path
+// planned the query.
+//
+// It replaces a fallback to ROW_NUMBER that was never reached as a wrong
+// ANSWER but was reached as a crash. Census over the 28 names in
+// plansql.knownAggregates, `<agg> OVER (PARTITION BY g ORDER BY x)`, measured
+// 2026-09-08 before this function existed:
+//
+//	 5 answered right   SUM COUNT AVG MIN MAX
+//	23 panicked         everything else — "internal error in pipeline:
+//	                    runtime error: index out of range [0] with length 0",
+//	                    ADR-0019's boundary turning a nil output vector into
+//	                    a query failure with no SQLSTATE a client can act on
+//	 0 answered wrong
+//
+// PostgreSQL 17 ANSWERS all 23 (every aggregate is a window function there;
+// only GROUPING is a syntax error in the window position). So this is a loud
+// refusal of PostgreSQL-valid input, recorded in ADR-0012's divergence list,
+// and 0A000 is the class the rest of this engine's "PostgreSQL can, we cannot
+// yet" refusals carry.
+func RefuseUnsupportedWindowFunc(name string) error {
+	return sqlerr.New("0A000",
+		"%s is not supported as a window function; the window functions are %s",
+		strings.ToUpper(strings.TrimSpace(name)), strings.Join(WindowFuncNames(), ", "))
+}
+
+// WindowFuncNames is the set ParseWindowFunc accepts, in the order the
+// operator declares them. It is derived from that switch by construction —
+// a hand-kept second list is how the refusal starts naming functions that no
+// longer work, or omitting ones that do.
+func WindowFuncNames() []string {
+	all := []string{
+		"ROW_NUMBER", "RANK", "DENSE_RANK", "SUM", "COUNT", "AVG", "MIN", "MAX",
+		"LAG", "LEAD", "FIRST_VALUE", "LAST_VALUE", "NTILE", "PERCENT_RANK",
+		"CUME_DIST", "NTH_VALUE",
+	}
+	out := all[:0:0]
+	for _, n := range all {
+		if _, ok := ParseWindowFunc(n); ok {
+			out = append(out, n)
+		}
+	}
+	return out
 }
