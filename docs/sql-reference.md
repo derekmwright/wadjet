@@ -1182,7 +1182,7 @@ ORDER BY a.order_id, a.amount, b.amount
 SELECT * FROM orders o JOIN items i ON i.order_id = o.id ORDER BY o.id DESC, i.amount
 ```
 
-Before v0.18.65 the single-process and spilled paths dropped the qualifier
+Through v0.18.64 the single-process and spilled paths dropped the qualifier
 from every sort key, so the two spellings became one key and both bound the
 first column of that bare name: the trailing key was never applied and the
 rows came back in the join's emission order. Both distributed paths were
