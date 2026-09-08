@@ -176,6 +176,24 @@ func ohlcvCells() []ohlcvCell {
 			      FROM (SELECT ohlcv(ts, px_f64, vol_i64) AS b FROM ` + ohlcvZeroTable + `) t`,
 			want:   []string{"o=float:5|c=float:6|v=0|w=NULL"},
 			pgSays: "SUM(px*vol)/SUM(vol) with SUM(vol) = 0 is a division by zero; the bar answers NULL"},
+		// A STAR over a derived block that publishes a bar. The block's
+		// PROJECTION is what the stage publishes (K3, #984), and a bar is the
+		// first column in one that no catalog describes — so this is where a
+		// lost declaration shows up as a missing or mis-shaped column rather
+		// than as a wrong number.
+		{name: "star_over_a_block_publishing_a_bar",
+			sql: `SELECT * FROM (SELECT time_bucket(INTERVAL '1' MINUTE, ts) AS bkt,
+			                            ohlcv(ts, px_i64, vol_i64) AS b
+			                     FROM ` + ohlcvTable + ` GROUP BY 1) t ORDER BY bkt`,
+			want: []string{
+				ohlcvBkt("2020-09-13 12:00:00") + "|b=map[string]interface {}:map[close:11 high:14 low:7 open:10 volume:11 vwap:9.1818]",
+				ohlcvBkt("2020-09-13 12:01:00") + "|b=map[string]interface {}:map[close:21 high:21 low:18 open:18 volume:13 vwap:19.1538]",
+				ohlcvBkt("2020-09-13 12:02:00") + "|b=NULL",
+				"bkt=NULL|b=NULL",
+			},
+			pgSays: "the same two bars; the embedded API boxes a ROW as a map, so this cell " +
+				"asserts the SHAPE and the values, and pgwire's own composite rendering is " +
+				"gated in pgwire.TestPGWireRendersTheBarAsAPostgresComposite"},
 		// THE BOUNDARY, from both sides. An argument type that has no bar is
 		// refused on every arm with the same sentence, never answered as an
 		// empty bar.
