@@ -196,7 +196,7 @@ func hiddenSortProjection(ob plansql.OrderByItem, child, project *Node, name str
 		// The star has to expand into real columns before the projection can
 		// carry anything alongside it, and ExpandStarProjections only resolves
 		// a star that reads one base table.
-		if loneScan(child) == nil {
+		if scan, _ := loneScan(child); scan == nil {
 			// 0A000, not 42703: PostgreSQL ANSWERS this shape. The refusal is
 			// wadjet's own bound — a star over a join is left unexpanded
 			// because guessing its column set would change which columns the

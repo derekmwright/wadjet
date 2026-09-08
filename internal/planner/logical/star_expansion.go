@@ -35,7 +35,6 @@ func ExpandStarProjections(n *Node) {
 	if n.Type != NodeProject || len(n.Children) == 0 || !HasStarProjection(n) {
 		return
 	}
-	lone := loneScan(n.Children[0])
 
 	expanded := make([]Projection, 0, len(n.Projections)+8)
 	changed := false
@@ -50,15 +49,8 @@ func ExpandStarProjections(n *Node) {
 		// produces). `SELECT o.*, s.n` was `column "o.*" does not exist in
 		// the input schema` on the single-process arms and, on the DAG, a
 		// column whose NAME and VALUE were both the string `*`.
-		var cols []string
 		qual := starQualifier(proj)
-		if qual == "" {
-			if lone != nil {
-				cols = lone.ScanColumns
-			}
-		} else {
-			cols = relationOutputColumns(n.Children[0], qual)
-		}
+		cols := StarSourceColumns(n.Children[0], qual)
 		if len(cols) == 0 {
 			expanded = append(expanded, proj)
 			continue
@@ -89,6 +81,57 @@ func ExpandStarProjections(n *Node) {
 		return
 	}
 	n.Projections = expanded
+}
+
+// StarSourceColumns is the ONE list a star expands from: what the relation the
+// star names PUBLISHES to the plan above it, for THIS identity. qualifier is
+// "" for a bare `*` (the star's source is the single scan below it) and the
+// relation's name for `alias.*`. nil means "not knowable here", and the caller
+// leaves the star unexpanded, which is a refusal one pass later.
+//
+// PUBLISHES, not "declares in the catalog". Where an ABAC column policy applies
+// the plan carries a SECURITY PROJECTION directly above the scan (#859,
+// ADR-0033 decision 1): it drops every DENIED column and replaces every MASKED
+// one with its mask, and it is what every consumer above the scan reads. A star
+// is such a consumer. Reading the scan's catalog-annotated ScanColumns past that
+// projection published a denied column's NAME to an identity the policy denies
+// it to — `SELECT a.* FROM e7emp a` came back with a `salary` column on the
+// embedded, pgwire and HTTP doors — and the column read NULL only because the
+// name resolved to nothing above the barrier, which is an accident of the
+// resolver and not the policy working.
+//
+// Every star spelling asks THIS function, so the answer cannot differ between
+// `*` beside an item, `a.*` alone, `a.*` beside an item, a derived table's or a
+// CTE's star, a star under a positional ORDER BY, or a star nested inside any of
+// them: a star is its source in its position, and its source is what the plan
+// below it publishes.
+func StarSourceColumns(input *Node, qualifier string) []string {
+	if input == nil {
+		return nil
+	}
+	if qualifier != "" {
+		return relationOutputColumns(input, qualifier)
+	}
+	scan, barrier := loneScan(input)
+	if scan == nil {
+		return nil
+	}
+	return publishedScanColumns(scan, barrier)
+}
+
+// publishedScanColumns is what one scan PUBLISHES: the security projection's
+// column list when a column policy put one over it, and the scan's own
+// catalog-annotated columns when none applies.
+//
+// A barrier whose own list cannot be enumerated answers nil — the star then
+// stays unexpanded and the query is refused. That direction is deliberate: a
+// security control never degrades to a grant, so "I could not read the policed
+// list" must never fall back to the catalog's.
+func publishedScanColumns(scan, barrier *Node) []string {
+	if barrier != nil {
+		return projectionOutputNames(barrier)
+	}
+	return scan.ScanColumns
 }
 
 // starQualifier is the relation a QUALIFIED star names, or "" for a bare `*`.
@@ -127,13 +170,19 @@ func starQualifier(proj Projection) string {
 // to drop — so `s.*` beside another item stays unexpanded and LOUD.
 func relationOutputColumns(n *Node, alias string) []string {
 	var found []string
-	var walk func(*Node)
-	walk = func(cur *Node) {
+	// barrier is the nearest enclosing security projection, carried down the
+	// walk the way CheckPolicyPlanOrder carries it: a scan reached through one
+	// publishes the barrier's list and not its own (StarSourceColumns).
+	var walk func(cur, barrier *Node)
+	walk = func(cur, barrier *Node) {
 		if cur == nil || found != nil {
 			return
 		}
 		if cur.LateralSubtree {
 			return
+		}
+		if cur.Type == NodeProject && cur.SecurityBarrier {
+			barrier = cur
 		}
 		// A block that NAMES itself answers for that name and hides what is
 		// under it, whichever way the answer comes out.
@@ -156,15 +205,15 @@ func relationOutputColumns(n *Node, alias string) []string {
 			// publishes seven columns. A base-table scan is the only relation
 			// whose output IS its catalog schema.
 			if strings.EqualFold(cur.TableName, alias) || strings.EqualFold(cur.TableAlias, alias) {
-				found = cur.ScanColumns
+				found = publishedScanColumns(cur, barrier)
 				return
 			}
 		}
 		for _, child := range cur.Children {
-			walk(child)
+			walk(child, barrier)
 		}
 	}
-	walk(n)
+	walk(n, nil)
 	return found
 }
 
@@ -215,27 +264,31 @@ func isStarProjection(proj Projection) bool {
 	return e == "*" || strings.HasSuffix(e, ".*")
 }
 
-// loneScan returns the single scan node under n, or nil when n reads from
-// none or from more than one.
-func loneScan(n *Node) *Node {
-	var found *Node
+// loneScan returns the single scan node under n and the nearest security
+// projection enclosing it, or nil when n reads from none or from more than one
+// scan. The barrier travels with the scan because what the scan PUBLISHES is
+// the barrier's list wherever one stands over it (StarSourceColumns).
+func loneScan(n *Node) (scan, barrier *Node) {
 	count := 0
-	var walk func(*Node)
-	walk = func(cur *Node) {
+	var walk func(cur, bar *Node)
+	walk = func(cur, bar *Node) {
 		if cur == nil {
 			return
 		}
+		if cur.Type == NodeProject && cur.SecurityBarrier {
+			bar = cur
+		}
 		if cur.Type == NodeScan {
-			found = cur
+			scan, barrier = cur, bar
 			count++
 		}
 		for _, child := range cur.Children {
-			walk(child)
+			walk(child, bar)
 		}
 	}
-	walk(n)
+	walk(n, nil)
 	if count != 1 {
-		return nil
+		return nil, nil
 	}
-	return found
+	return scan, barrier
 }

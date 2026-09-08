@@ -671,6 +671,13 @@ type pmCell struct {
 	noSalary bool
 }
 
+// pmStarRow is row i of e7emp as THIS identity may see it: id, dept and amt
+// as stored, ssn and acct masked, and salary absent. Column names sort, which
+// is what pmResult.canon does.
+func pmStarRow(i int) string {
+	return fmt.Sprintf("acct=%s|amt=%d|dept=d%d|id=%d|ssn=%s", pmMaskAcct, i, i%3, i, pmMaskSSN)
+}
+
 func pmCells() []pmCell {
 	all := func(f func(i int) string) []string {
 		out := make([]string, 0, pmRows)
@@ -680,6 +687,12 @@ func pmCells() []pmCell {
 		sort.Strings(out)
 		return out
 	}
+	// The policed row of e7emp, in the canonical rendering: every column the
+	// analyst may see, masked where the policy masks, and NO `salary`. It is
+	// the answer every star spelling below must give, which is the point of
+	// having one expression of it.
+	starRow := all(pmStarRow)
+	starRowWithZ := all(func(i int) string { return fmt.Sprintf("%s|z=%d", pmStarRow(i), i) })
 	return []pmCell{
 		{name: "select_masked_column", sql: `SELECT id, ssn FROM e7emp`,
 			want: all(func(i int) string { return fmt.Sprintf("id=%d|ssn=%s", i, pmMaskSSN) })},
@@ -844,10 +857,99 @@ func pmCells() []pmCell {
 			want: all(func(int) string { return "ssn=" + pmMaskSSN })},
 		{name: "count_star_with_a_denied_column",
 			sql: `SELECT COUNT(*) AS c FROM e7emp`, want: []string{"c=12"}},
-		{name: "qualified_star", sql: `SELECT a.* FROM e7emp a`, noSalary: true,
+		{name: "qualified_star", sql: `SELECT a.* FROM e7emp a`, noSalary: true, want: starRow},
+
+		// ------------------------------------------------------------------
+		// THE STAR FAMILY. A star expands from the list its source PUBLISHES,
+		// which under a column policy is the security projection's list and
+		// never the catalog's: a denied column is ABSENT and a masked one is
+		// masked, in every spelling, on every door.
+		//
+		// `SELECT a.* FROM e7emp a` published a `salary` column to the analyst
+		// on the four single-process doors — the NAME of a column the policy
+		// denies, disclosed to the identity it is denied to, reading NULL only
+		// because it resolved to nothing above the barrier, which is the
+		// resolver's accident and not the policy working.
+		//
+		// Every spelling is a cell because the rule is ONE rule: `*` beside an
+		// item, `a.*` alone, `a.*` beside an item, a derived table's or a
+		// CTE's star, a star under a positional ORDER BY, a star over a join,
+		// a star renamed by a column-alias list, a star inside a subquery.
+		// Six of these were already leaking before the one that was reported,
+		// and gating only the reported one would have left the other five.
+		{name: "star_beside_an_item", sql: `SELECT *, id AS z FROM e7emp`, noSalary: true,
+			want: starRowWithZ},
+		{name: "qualified_star_beside_an_item", sql: `SELECT a.*, a.id AS z FROM e7emp a`,
+			noSalary: true, want: starRowWithZ},
+		{name: "star_over_a_derived_qualified_star",
+			sql: `SELECT * FROM (SELECT a.* FROM e7emp a) d`, noSalary: true, want: starRow},
+		{name: "qualified_star_of_a_derived_star",
+			sql: `SELECT d.* FROM (SELECT a.* FROM e7emp a) d`, noSalary: true, want: starRow},
+		{name: "qualified_star_of_a_cte_star",
+			sql: `WITH c AS (SELECT a.* FROM e7emp a) SELECT c.* FROM c`, noSalary: true, want: starRow},
+		{name: "qualified_star_nested_two_deep",
+			sql:      `SELECT x.* FROM (SELECT d.* FROM (SELECT a.* FROM e7emp a) d) x`,
+			noSalary: true, want: starRow},
+		{name: "qualified_star_under_a_positional_order_by",
+			sql: `SELECT a.* FROM e7emp a ORDER BY 1`, noSalary: true, want: starRow},
+		{name: "qualified_star_under_a_filter",
+			sql: `SELECT a.* FROM e7emp a WHERE a.id = 1`, noSalary: true,
+			want: []string{pmStarRow(1)}},
+		{name: "qualified_star_with_order_by_and_limit",
+			sql: `SELECT a.* FROM e7emp a ORDER BY a.id LIMIT 3`, noSalary: true,
+			want: []string{pmStarRow(1), pmStarRow(2), pmStarRow(3)}},
+		// Over a JOIN the star still names ONE relation, so the answer is that
+		// relation's policed columns and nothing of the other's — in either
+		// join order, since the star's source is the relation it names and not
+		// the side it happens to sit on.
+		{name: "qualified_star_over_a_join",
+			sql:      `SELECT a.* FROM e7emp a JOIN e7other b ON a.id = b.id`,
+			noSalary: true, want: []string{pmStarRow(1), pmStarRow(2), pmStarRow(3)}},
+		{name: "qualified_star_over_a_join_named_second",
+			sql:      `SELECT a.* FROM e7other b JOIN e7emp a ON a.id = b.id`,
+			noSalary: true, want: []string{pmStarRow(1), pmStarRow(2), pmStarRow(3)}},
+		// A column-alias list renames the star's columns POSITIONALLY, so the
+		// width it must match is the POLICED width — five, not the catalog's
+		// six. Reading the catalog's list here renamed `salary` to `k5` and
+		// left `amt` behind under its own name: the denied column laundered
+		// through a rename, where `noSalary` cannot see it and only the VALUES
+		// say which column is which.
+		{name: "star_renamed_by_a_column_alias_list",
+			sql: `SELECT * FROM (SELECT * FROM e7emp) d(k1,k2,k3,k4,k5)`,
 			want: all(func(i int) string {
-				return fmt.Sprintf("acct=0|amt=%d|dept=d%d|id=%d|ssn=%s", i, i%3, i, pmMaskSSN)
+				return fmt.Sprintf("k1=%d|k2=d%d|k3=%s|k4=0|k5=%d", i, i%3, pmMaskSSN, i)
 			})},
+		{name: "qualified_star_in_a_union_arm",
+			sql: `SELECT a.* FROM e7emp a UNION ALL SELECT b.* FROM e7emp b`, noSalary: true,
+			want: append(append([]string(nil), starRow...), starRow...)},
+		{name: "qualified_star_inside_an_exists_subquery",
+			sql: `SELECT COUNT(*) AS c FROM e7emp x WHERE EXISTS (` +
+				`SELECT a.* FROM e7emp a WHERE a.id = x.id)`,
+			want: []string{fmt.Sprintf("c=%d", pmRows)}},
+		{name: "qualified_star_in_a_derived_table_under_an_aggregate",
+			sql:  `SELECT COUNT(*) AS c FROM (SELECT a.* FROM e7emp a) d WHERE d.id < 3`,
+			want: []string{"c=2"}},
+		// The subquery pipeline is its own planning site, and it plans its own
+		// star: the derived star here is expanded inside a scalar subquery,
+		// under the policy the enclosing statement carries.
+		{name: "qualified_star_in_a_derived_table_inside_a_scalar_subquery",
+			sql: `SELECT x.id, (SELECT MAX(d.ssn) FROM (SELECT a.* FROM e7emp a) d) AS m ` +
+				`FROM e7emp x WHERE x.id = 1`,
+			want: []string{"id=1|m=" + pmMaskSSN}},
+		// The star does not make the denied column reachable beside it: the
+		// same 42703 a missing name gets, which is the deniedLike control.
+		{name: "denied_column_beside_a_star",
+			sql: `SELECT *, salary FROM e7emp`, deniedLike: "salary"},
+		{name: "denied_column_beside_a_qualified_star",
+			sql: `SELECT a.*, a.salary FROM e7emp a`, deniedLike: "salary"},
+		// The boundary from the other side: a star whose source is a
+		// decorrelated LATERAL cannot be enumerated at all, and that shape is
+		// REFUSED with one sentence on every door rather than expanded from
+		// anything — the policed list included (#979, ADR-0012).
+		{name: "a_laterals_own_star_is_refused",
+			sql: `SELECT s.* FROM e7other o, LATERAL (` +
+				`SELECT a.id AS mx FROM e7emp a WHERE a.id = o.id) s`,
+			wantErrLike: `column "s.*" does not exist in the input schema`},
 		{name: "aggregate_of_a_case_over_masked",
 			sql:  `SELECT SUM(CASE WHEN ssn = 'true-ssn-01' THEN 1 ELSE 0 END) AS c FROM e7emp`,
 			want: []string{"c=0"}},
