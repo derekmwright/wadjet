@@ -2242,7 +2242,7 @@ unchanged.
 
 | gate | what it holds |
 |---|---|
-| `coordinator.TestM1AMergedOrderIsTheQuerysOrder` | 8a — nine shapes, four arms, incl. LIMIT (top-K heap), OFFSET, the arm-swapping predicate, and two controls that never reach the merge |
+| `coordinator.TestM1AMergedOrderIsTheQuerysOrder` | 8a — ten shapes, four arms, incl. LIMIT (top-K heap), OFFSET, a zero-row result, the arm-swapping predicate, and two controls that never reach the merge |
 | `coordinator.TestM1ASetOperationsArmsSupplyItsResultColumns` | 8b — twelve shapes, all four set-op spellings, three controls holding the explicit-list boundary |
 | `coordinator.TestM1AEveryLateralJoinDropsItsOwnSlot` | 8c — ten shapes incl. three and nested laterals, same and different tables, derived and CTE stars |
 | `pgwire.TestArcJ1AHiddenSlotIsNotInTheRowDescription` | 8c on the wire door |

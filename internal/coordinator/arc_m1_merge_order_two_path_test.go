@@ -34,14 +34,15 @@ import (
 // the DAG's own sort stage already bind through, and a key that still does not
 // resolve is an ERROR rather than a silently different order.
 //
-// THE BOUNDARY IS A CLAIM and the cells attempt it from both sides: the
+// THE BOUNDARY IS A CLAIM and the ten cells attempt it from both sides: the
 // non-DISTINCT twin and the single-relation star DISTINCT never reach this
 // merge and must not move; the DESC and key-swapped spellings mean a run that
 // ignores the key LIST cannot pass in one direction by accident; LIMIT takes
 // the top-K heap instead of the full sort, which is the second comparator;
-// OFFSET proves the truncation happens after the ordering; and the
-// arm-swapping predicate proves the binding needs no model of which side of
-// the join built.
+// OFFSET proves the truncation happens after the ordering; the arm-swapping
+// predicate proves the binding needs no model of which side of the join built;
+// and the ZERO-ROW cell holds the refusal's own boundary — an empty result has
+// no order to get wrong, so the merge must not refuse it.
 func TestM1AMergedOrderIsTheQuerysOrder(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
