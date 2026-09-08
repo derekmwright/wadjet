@@ -57,6 +57,28 @@ func aggInputIsWideInteger(node plansql.Node, decls colDecls) bool {
 		}
 		return n.Else != nil && aggInputIsWideInteger(n.Else, decls)
 	case *plansql.FuncCallNode:
+		// ABS and MOD answer in their ARGUMENT's own numeric domain — that is
+		// expr.NumericDomainScalarFn's set, measured against PostgreSQL for
+		// every width by #768, and it is the same predicate that makes a
+		// materialized `ABS(int8_col)` column declare INT64 through
+		// scalarFnDeclaredNumericDomain. So they are as wide as their
+		// arguments, exactly as a polymorphic choice is.
+		//
+		// This is the half the WINDOW spelling already had and the grouped one
+		// did not (#987 review, P2). `SUM(ABS(w_i64)) OVER ()` reads the
+		// materialized argument's INT64 declaration and answers numeric, which
+		// is PostgreSQL's type; the GROUPED spelling declined here, read the
+		// expression as int4 and declared bigint. Same digits, two boxes — the
+		// exact class #813 was, with the spellings' roles swapped. Both ask
+		// this one predicate now.
+		if _, domain := expr.NumericDomainScalarFn(n.Name); domain {
+			for _, a := range n.Args {
+				if aggInputIsWideInteger(a, decls) {
+					return true
+				}
+			}
+			return false
+		}
 		// COALESCE / GREATEST / LEAST / NULLIF / IF choose between their
 		// arguments and are as wide as the widest. Every other function
 		// declines: an unrecognized return width keeps today's reading, which
