@@ -68,11 +68,32 @@ and float64 bits round-trip exactly through hex. Fixed width is load-bearing:
 `decode` refuses anything else, so a truncated or foreign value is "no rows to
 merge" rather than a plausible empty state.
 
-The bar's is 128 bytes → 256 hex characters, and its first eight bytes are a
-HEADER carrying the format version and the DOMAIN — which carrier the numbers
-use and at what scales. That is the one thing the variance family did not need
-and every typed state does: the coordinator's fold decodes a bar with nothing
-but the string, no plan and no catalog.
+The bar's is 136 bytes → 272 hex characters, and its first sixteen bytes are a
+HEADER carrying the format version, the CARRIER (exact or float, and at what
+scales) and the DECLARED ROW (each field's type, precision and scale). That
+header is the one thing the variance family did not need and every TYPED state
+does, and both halves of it were learned the hard way:
+
+- Without the CARRIER, a merge stage cannot know whether the sixteen-byte value
+  slots hold an Int128 or a float64.
+- Without the DECLARED ROW, the fold has to be told the shape by the plan — and
+  the plan does not always know it. `aggOhlcvOutputFields` walks each argument
+  to a catalog column and correctly declines an EXPRESSION, so
+  `ohlcv(ts, price*2, volume)` answered in process and failed loud on the DAG.
+  Letting the fold derive a shape of its own is worse: its input is a STRING
+  column, so any shape it produced would be a guess, and a guessed one wrote a
+  DECIMAL bar's digits into FLOAT64 children and tripped the #361 silent-write
+  guard.
+
+So **the operator that COMPUTED the values writes their declared types beside
+them**, and the fold takes nothing but the string — no plan, no catalog, and no
+field list it could be handed the wrong one of. That is the rule for the next
+typed state as much as for this one.
+
+The one state that legitimately carries no declaration is the EMPTY one: a
+partial task whose filter matched no rows never resolved its input columns, so
+it has nothing to declare. Its bar is NULL whatever shape it would have had —
+the identity-row shape #685 records for a DECIMAL, one type over.
 
 **4. The synthetic column's name carries the KIND, in a namespace no identifier
 can enter.** `__var_state#<kind>#<out>`, `__ohlcv_state#<out>`: the `#` is
@@ -131,6 +152,10 @@ Gated in `coordinator.TestTheBarIsTheSameOnEveryArm`.
   anything else; the tiebreak under permuted fold order; the declared-type
   table against live PostgreSQL; the arm census (single / DAG / DAG-shuffled)
   against the spelled-out oracle; the wire's rendering of the result.
+- **The arm census must include a COMPUTED argument.** That is where the
+  planner's declaration runs out, and it is the cell that found all three of
+  the bar's arm divergences — none of which was a wrong number, and every one
+  of which was invisible to a census over bare columns.
 - **Until the decomposition exists, the function goes on
   `aggNeedsWholeInput`.** That list is the honest dispatch for a
   non-re-aggregatable answer, and the two-phase split over one is a silent
