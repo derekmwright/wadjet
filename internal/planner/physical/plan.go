@@ -6387,6 +6387,15 @@ func fuseJoinStages(stages []Stage) []Stage {
 		// call as the two above: not fusing is the honest alternative to
 		// carrying it nowhere. `ChainedJoinSpec` DOES carry both, so the
 		// downstream-fusion pass absorbs these instead of declining.
+		//
+		// NO SQL REACHES THIS, MEASURED. With the guard disabled, a lateral's
+		// join feeding another join's probe answers PostgreSQL on all four
+		// arms — that shape fuses through `fuseStageChains`, which carries the
+		// fields. So this is a guard on a condition no statement is known to
+		// produce, and it is gated at the level it is written instead:
+		// `TestFuseJoinStagesDeclinesAJoinWhoseRulesTheSpecCannotCarry`
+		// drives the pass over a synthetic stage list, with a plain leaf
+		// beside the marked ones so a decline for the wrong reason fails too.
 		if s.LateralPadMarker != "" || len(s.HiddenJoinCols) > 0 {
 			continue
 		}
