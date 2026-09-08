@@ -578,8 +578,10 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 	columns := deriveColumns(selectInfo, rows, outSchema)
 	// AN EMPTY COLUMN LIST IS NEVER AN ANSWER (sqlerr.EmptyResultColumns).
 	//
-	// Everything above the statement switch produces a result SET, so a list
-	// with nothing in it is the engine failing to describe its own output —
+	// Everything BELOW the statement switch at the top of Query produces a
+	// result SET (DDL, DML, SHOW, EXPLAIN and DESCRIBE return above it), so a
+	// list with nothing in it is the engine failing to describe its own output
+	// —
 	// and it is indistinguishable at the client from a query that
 	// legitimately found nothing. #1008 and #1010 both reached a client that
 	// way. This door and the coordinator's are the two places a result set is
