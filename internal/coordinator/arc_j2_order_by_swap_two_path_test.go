@@ -243,35 +243,55 @@ func TestJ2AnOrderByTermNamesAnOutputColumn(t *testing.T) {
 				"12.75,12.7501 | 12.75,NULL | NULL,NULL",
 		},
 		{
-			// PINNED, and a DIFFERENT family: two output columns of one name,
-			// where PostgreSQL refuses (`ORDER BY "a" is ambiguous`) and
-			// wadjet answers. The superset is allowed (ADR-0012), but the two
-			// paths must not answer two different things: the local path
-			// returns the two DISTINCT columns and both DAG arms return
-			// `x.b` TWICE, with `x.a` gone and its DECLARATION with it. That
-			// is #556/#557's territory — output slots have identity BY
-			// POSITION and the DAG collapses two `ProjectExprs` of one name —
-			// not the published-identity pass, and it is identical at
-			// a3f9b664, b73e34a3 and 1c1d500e. `want` is the local path's
-			// answer, which is the one that is right about the values.
-			name: "947 PINNED: two outputs named `a` answer differently on the two paths",
+			// #947's OWN family, and its pin is SPENT (arc M1, 2026-09-08).
+			// Two output columns of one name, where PostgreSQL refuses
+			// (`ORDER BY "a" is ambiguous`) and wadjet answers — the superset
+			// is allowed (ADR-0012), and the two paths answering two different
+			// things was not. Both DAG arms returned `x.b` TWICE, with `x.a`
+			// gone and its DECLARATION with it, because the gather's rename
+			// resolver threw away an EXACT match whenever the exact spelling
+			// matched fewer than two columns and re-bound the item to the
+			// first column of its BARE name (`classScopedMatch`, ADR-0026
+			// §8d). Both outputs carry their own value and their own declared
+			// type on all four arms now.
+			//
+			// The predicate is what makes the ORDER TOTAL: `x.b` is NULL for
+			// two group keys, and with the ambiguous `a` as the ONLY sort key
+			// those two rows TIE — ADR-0013 class 2, either order legal — so
+			// the unfiltered spelling below states each DAG arm's sequence
+			// rather than asserting one.
+			name: "947 two outputs named `a` each carry their own value and type",
+			sql: "SELECT x.b AS a, x.a FROM decpair x JOIN decpair u ON x.id = u.id " +
+				"WHERE x.b IS NOT NULL GROUP BY x.a, x.b ORDER BY a",
+			want: "cols=[a:DECIMAL(18,4) a:DECIMAL(9,2)] rows=7 | -0.0100,-0.01 | " +
+				"0.0000,0.00 | 1.0000,NULL | 10.0000,2.00 | 12.7499,12.75 | 12.7500,12.75 | " +
+				"12.7501,12.75",
+		},
+		{
+			// The same statement with the two NULL-`x.b` group keys back in.
+			// The values and the declared types agree on all four arms; the
+			// SEQUENCE of the last two rows does not, and it cannot be
+			// asserted as one answer because those two rows tie on the only
+			// sort key (ADR-0013 class 2). Stated per arm rather than dropped,
+			// so the day the DAG's ordering of a tie changes, this cell says
+			// so instead of the corpus quietly losing the shape.
+			name: "947 the same with NULL keys: two rows tie on the only sort key",
 			sql: "SELECT x.b AS a, x.a FROM decpair x JOIN decpair u ON x.id = u.id " +
 				"GROUP BY x.a, x.b ORDER BY a",
 			want: "cols=[a:DECIMAL(18,4) a:DECIMAL(9,2)] rows=9 | -0.0100,-0.01 | " +
 				"0.0000,0.00 | 1.0000,NULL | 10.0000,2.00 | 12.7499,12.75 | 12.7500,12.75 | " +
 				"12.7501,12.75 | NULL,12.75 | NULL,NULL",
 			pin: map[string]string{
-				"dag": "cols=[a:DECIMAL(18,4) a:DECIMAL(18,4)] rows=9 | -0.0100,-0.0100 | " +
-					"0.0000,0.0000 | 1.0000,1.0000 | 10.0000,10.0000 | 12.7499,12.7499 | " +
-					"12.7500,12.7500 | 12.7501,12.7501 | NULL,NULL | NULL,NULL",
-				"dagshuf": "cols=[a:DECIMAL(18,4) a:DECIMAL(18,4)] rows=9 | -0.0100,-0.0100 | " +
-					"0.0000,0.0000 | 1.0000,1.0000 | 10.0000,10.0000 | 12.7499,12.7499 | " +
-					"12.7500,12.7500 | 12.7501,12.7501 | NULL,NULL | NULL,NULL",
+				"dag": "cols=[a:DECIMAL(18,4) a:DECIMAL(9,2)] rows=9 | -0.0100,-0.01 | " +
+					"0.0000,0.00 | 1.0000,NULL | 10.0000,2.00 | 12.7499,12.75 | " +
+					"12.7500,12.75 | 12.7501,12.75 | NULL,NULL | NULL,12.75",
+				"dagshuf": "cols=[a:DECIMAL(18,4) a:DECIMAL(9,2)] rows=9 | -0.0100,-0.01 | " +
+					"0.0000,0.00 | 1.0000,NULL | 10.0000,2.00 | 12.7499,12.75 | " +
+					"12.7500,12.75 | 12.7501,12.75 | NULL,NULL | NULL,12.75",
 			},
-			why: "PostgreSQL 17 refuses this as ambiguous; the superset is allowed and the " +
-				"two paths disagreeing is not. The DAG's aggregate emits two projections " +
-				"named `a` and collapses them (#556/#557's position identity), so the second " +
-				"output carries the first's value and its declared type",
+			why: "ADR-0013 class 2: the last two rows tie on `a` (both NULL), so either " +
+				"order is legal and the arms need not agree on it. The VALUES and the " +
+				"DECLARED TYPES agree, which is what #947's pin was about.",
 		},
 	})
 }

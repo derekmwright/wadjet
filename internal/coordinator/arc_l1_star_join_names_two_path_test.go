@@ -62,6 +62,18 @@ func TestL1AStarOverAJoinPublishesThePlanNotTheQuery(t *testing.T) {
 		"b.order_id:INT64 b.product:STRING b.amount:FLOAT64]"
 	const qualA = "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 a.id:INT64 " +
 		"a.order_id:INT64 a.product:STRING a.amount:FLOAT64]"
+	// #993's two cells: the three-relation shape, with and without the derived
+	// block, stated PER ARM. `single` and `spilled` take `want`; the two DAG
+	// arms take their own, and they differ from each other, which is the
+	// divergence being pinned.
+	const rows993 = " rows=4 | 1,1,Widget,50,1,Alice,150,1,Alice,150 | " +
+		"2,1,Gadget,100,1,Alice,150,1,Alice,150 | " +
+		"3,2,Widget,75,2,Bob,200,2,Bob,200 | " +
+		"4,2,Doohickey,125,2,Bob,200,2,Bob,200"
+	const bare993 = "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 o.id:INT64 " +
+		"customer:STRING total:FLOAT64 o2.id:INT64 o2.customer:STRING o2.total:FLOAT64]" + rows993
+	const qual993 = "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 o.id:INT64 " +
+		"o.customer:STRING o.total:FLOAT64 o2.id:INT64 o2.customer:STRING o2.total:FLOAT64]" + rows993
 	const why = "#997 (deferred): PostgreSQL publishes `id, order_id, product, amount, id, " +
 		"order_id, product, amount` for all three cells — the FROM clause's arm order, " +
 		"duplicates kept by POSITION. wadjet qualifies the BUILD side, and reorderJoins " +
@@ -120,18 +132,9 @@ func TestL1AStarOverAJoinPublishesThePlanNotTheQuery(t *testing.T) {
 			name: "993 a star over a derived block whose body is a join",
 			sql: "SELECT * FROM lat_ord o JOIN (SELECT * FROM lat_item i " +
 				"JOIN lat_ord o2 ON o2.id = i.order_id) s ON s.order_id = o.id ORDER BY s.id",
-			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 o.id:INT64 " +
-				"customer:STRING total:FLOAT64 o2.id:INT64 o2.customer:STRING o2.total:FLOAT64] " +
-				"rows=4 | 1,1,Widget,50,1,Alice,150,1,Alice,150 | " +
-				"2,1,Gadget,100,1,Alice,150,1,Alice,150 | " +
-				"3,2,Widget,75,2,Bob,200,2,Bob,200 | " +
-				"4,2,Doohickey,125,2,Bob,200,2,Bob,200",
-			wantDagshuf: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 " +
-				"o.id:INT64 o.customer:STRING o.total:FLOAT64 o2.id:INT64 o2.customer:STRING " +
-				"o2.total:FLOAT64] rows=4 | 1,1,Widget,50,1,Alice,150,1,Alice,150 | " +
-				"2,1,Gadget,100,1,Alice,150,1,Alice,150 | " +
-				"3,2,Widget,75,2,Bob,200,2,Bob,200 | " +
-				"4,2,Doohickey,125,2,Bob,200,2,Bob,200",
+			want:        bare993,
+			wantDag:     bare993,
+			wantDagshuf: qual993,
 			why: "#993 (deferred, rides #997): PostgreSQL publishes the three FROM arms in " +
 				"written order with every name bare — `id, customer, total, id, order_id, " +
 				"product, amount, id, customer, total`. This tree publishes the join " +
@@ -143,18 +146,9 @@ func TestL1AStarOverAJoinPublishesThePlanNotTheQuery(t *testing.T) {
 			name: "993 the same three relations with NO derived block",
 			sql: "SELECT * FROM lat_ord o JOIN lat_item i ON i.order_id = o.id " +
 				"JOIN lat_ord o2 ON o2.id = i.order_id ORDER BY i.id",
-			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 o.id:INT64 " +
-				"customer:STRING total:FLOAT64 o2.id:INT64 o2.customer:STRING o2.total:FLOAT64] " +
-				"rows=4 | 1,1,Widget,50,1,Alice,150,1,Alice,150 | " +
-				"2,1,Gadget,100,1,Alice,150,1,Alice,150 | " +
-				"3,2,Widget,75,2,Bob,200,2,Bob,200 | " +
-				"4,2,Doohickey,125,2,Bob,200,2,Bob,200",
-			wantDagshuf: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 " +
-				"o.id:INT64 o.customer:STRING o.total:FLOAT64 o2.id:INT64 o2.customer:STRING " +
-				"o2.total:FLOAT64] rows=4 | 1,1,Widget,50,1,Alice,150,1,Alice,150 | " +
-				"2,1,Gadget,100,1,Alice,150,1,Alice,150 | " +
-				"3,2,Widget,75,2,Bob,200,2,Bob,200 | " +
-				"4,2,Doohickey,125,2,Bob,200,2,Bob,200",
+			want:        bare993,
+			wantDag:     bare993,
+			wantDagshuf: qual993,
 			why: "#993 (deferred): the SAME divergence with no derived block at all, which " +
 				"is what says K3's `a block whose body is a JOIN is never marked` boundary " +
 				"is not the condition.",
