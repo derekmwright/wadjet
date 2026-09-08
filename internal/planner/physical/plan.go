@@ -8409,17 +8409,14 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// same thing.
 			var winAliases []aliasColumn
 			for i, pb := range partitionBy {
-				if src, scoped := windowArgSourceInScope(pb, winChild); scoped {
-					if src != "" {
-						partitionBy[i] = cleanExpr(src)
-					}
-					// Scoped with no SOURCE column is a COMPUTED alias inside
-					// that arm, and the key stays as written. Materializing it
-					// from the arm's own subtree was BUILT and WITHDRAWN: it
-					// moved three shapes from executed-and-right to a local
-					// route (`SUM(x.w) OVER (PARTITION BY y.w)` among them),
-					// and a right-to-routed move is not a fix. What is left is
-					// one shuffled-arm refusal, pinned with its mechanism.
+				// Scoped with a SOURCE column: that arm's column is the key.
+				// Scoped with NONE is a COMPUTED alias, and the walk FALLS
+				// THROUGH to the un-scoped passes below — they are what
+				// materializes a computed derived alias (#658), and skipping
+				// them because the scoping ran left `PARTITION BY z.gk` over a
+				// single derived relation refusing its own plan.
+				if src, scoped := windowArgSourceInScope(pb, winChild); scoped && src != "" {
+					partitionBy[i] = cleanExpr(src)
 					continue
 				}
 				if src := derivedAliasSourceColumn(pb, winChild); src != "" {
@@ -8432,10 +8429,8 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				}
 			}
 			for i := range orderBy {
-				if src, scoped := windowArgSourceInScope(orderBy[i].Column, winChild); scoped {
-					if src != "" {
-						orderBy[i].Column = cleanExpr(src)
-					}
+				if src, scoped := windowArgSourceInScope(orderBy[i].Column, winChild); scoped && src != "" {
+					orderBy[i].Column = cleanExpr(src)
 					continue
 				}
 				if src := derivedAliasSourceColumn(orderBy[i].Column, winChild); src != "" {
