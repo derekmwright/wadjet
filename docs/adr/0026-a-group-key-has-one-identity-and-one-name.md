@@ -2002,12 +2002,24 @@ nor closes it. Closing it needs a join's emitted list stated at plan time —
 `exec.JoinOutputSchema` is that list, and reaching it here needs the side
 schemas the star declaration already assembles, one level deeper.
 
-A block whose own `ORDER BY` was materialized publishes its `__sortkey_N` and
-EXECUTES, in both the narrowing and the introducing spelling; the introducing
-one is then refused by the SELECT-list reachability check
-(`UnreachableOutputLocalRoutes`, #656) rather than by this one, because the
-projection it publishes drops a column the sort above still names. Measured at
-this tip, with and without a LIMIT.
+A block whose own `ORDER BY` was materialized publishes its `__sortkey_N` — the
+sort below still reads that key, so the projection cannot drop it — and what
+happens next is decided by THE SORT KEY, not by the class:
+
+  - keying on a column the block PUBLISHES executes distributed with every
+    routing counter at zero (`… ORDER BY product LIMIT 3` over a block
+    publishing `order_id, product`);
+  - keying on a column it does NOT publish is refused by the SELECT-list
+    reachability check (`UnreachableOutputLocalRoutes`, #656) and answered on
+    the coordinator-local pipeline (`… ORDER BY amount …`), on BOTH DAG arms,
+    with and without a LIMIT, and whether or not the block also introduces a
+    column.
+
+Measured at this tip in both spellings and gated as a pair. An earlier
+statement of this in §7 and in `docs/sql-reference.md` said such a block
+executes in the narrowing spelling; that was wrong, and it was wrong because
+the measurement that produced it had truncated the routing counter out of the
+probe's own output.
 
 **Two PRE-EXISTING leaks are pinned, not fixed.** A block whose own `ORDER BY`
 was MATERIALIZED publishes its `__sortkey_N` (the sort below still reads that

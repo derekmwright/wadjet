@@ -834,10 +834,15 @@ alone. Every execution path answers the same relation.
 
 Two shapes still run on the coordinator rather than across the workers: a bare
 aggregate alias beside a computed sibling (`SUM(x) AS sa, SUM(x) * 1 AS sb`),
-and a WINDOW function inside the subquery. A subquery carrying its own `ORDER
-BY` that ALSO introduces a column runs there too — the same subquery without
-the extra column stays distributed. They answer the same rows either way;
-naming the columns instead of writing `*` keeps them distributed.
+and a WINDOW function inside the subquery.
+
+A subquery with its own `ORDER BY` runs there too when it sorts by a column it
+does NOT select — `(SELECT order_id, product FROM items ORDER BY amount LIMIT
+3)` — with or without a `LIMIT`. Sorting by a column the subquery does select
+(`… ORDER BY product LIMIT 3`) stays distributed.
+
+All of these answer the same rows either way; naming the columns instead of
+writing `*` keeps them distributed.
 
 A subquery item's TYPE never decides where the query runs: a container
 (`ARRAY[amount]`, `ARRAY[COUNT(*)]`), a scalar subquery, an all-NULL `CASE` and
