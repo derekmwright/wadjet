@@ -823,6 +823,19 @@ func wireCorpus() []wireCase {
 					"batch.AvgScale(0) = 4. Same number, exact on both sides to the digits each " +
 					"keeps (ADR-0024 item 2's explicitly chosen rule)",
 			}},
+		// A COMPUTED int8 argument, both spellings, at the wire (#987 review
+		// P2). ABS answers in its argument's own numeric domain, so
+		// `sum(abs(bigint))` is numeric in PostgreSQL — measured live for both
+		// spellings — and the two must carry the SAME OID here or a client
+		// reading a grouped total and a windowed one in the same session gets
+		// two types for one answer. The GROUPED spelling declared bigint (20)
+		// until aggInputIsWideInteger learned expr.NumericDomainScalarFn's
+		// set; the windowed one already said numeric. No pin: the OIDs agree
+		// with the live server on both.
+		{name: "SumAbsOverInt8Grouped",
+			sql: `SELECT SUM(ABS(d_key)) AS v FROM dec_probe`},
+		{name: "SumAbsOverInt8Windowed",
+			sql: `SELECT SUM(ABS(d_key)) OVER () AS v FROM dec_probe ORDER BY 1 LIMIT 1`},
 		// Integer arithmetic inside a CASE arm, at the wire. Both engines
 		// answer the same digits here and the OID underneath them said
 		// float8 (701) where PostgreSQL says an integer — a driver handing
