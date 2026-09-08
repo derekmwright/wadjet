@@ -45,6 +45,20 @@ type arcACell struct {
 	// can only say "all four arms agree" has to leave it out — which is how a
 	// boundary goes unrecorded.
 	wantDAG []string
+	// wantDag and wantDagshuf are the SAME thing one arm finer, and they
+	// exist because `wantDAG` alone could not say what #993 is: the two DAG
+	// arms are two engines, and a divergence BETWEEN them — a broadcast
+	// stream and a shuffled stream carrying different column names for one
+	// query — had no honest expectation to be written as. The census could
+	// only drop such a shape, which is the second half of that filing (the
+	// first being the wrong column set itself).
+	//
+	// Precedence, most specific first: wantDagshuf / wantDag, then wantDAG,
+	// then want. The per-arm ERROR fields beside them (wantErrLikeDAG,
+	// wantErrLikeDAGShuffled) already worked this way; these are the value
+	// halves that were missing.
+	wantDag     []string
+	wantDagshuf []string
 	// wantErrLikeDAG, when set, is what the two DAG arms' error must carry
 	// instead. It exists because a stage carries its projection as TEXT and
 	// the worker RE-PARSES it, so a refusal the single-process compiler makes
@@ -781,6 +795,48 @@ func arcACells() []arcACell {
 			want: []string{
 				"c=Alice|a=float:50", "c=Alice|a=float:100",
 				"c=Bob|a=float:75", "c=Bob|a=float:125"}},
+
+		// ------------------------------------------------------------------
+		// #993 — a star over a derived block whose BODY is a join, and the
+		// reason the two per-DAG-arm fields above exist.
+		//
+		// PostgreSQL publishes TEN columns, the three FROM arms in written
+		// order:
+		//
+		//   id, customer, total | id, order_id, product, amount | id, customer, total
+		//
+		// The filing's "nine on dag, seven on dagshuf, five in PostgreSQL"
+		// counted a different fixture and no longer reproduces: K3's v0.18.62
+		// (`Stage.ProjectExprs`, `blockPublishedColumns`) closed the
+		// column-SET half, and all four arms now publish ten. What SURVIVES is
+		// an arm-specific NAME divergence — `dag-shuffled` qualifies the outer
+		// `lat_ord`'s non-key columns (`o.customer`, `o.total`) where the
+		// other three arms publish them bare — and that is exactly the state
+		// this census could not say before: one `wantDAG` for both DAG arms
+		// meant the shape had to be dropped rather than recorded.
+		//
+		// The column ORDER (`lat_item` first, `lat_ord o` second) is #997's
+		// separate divergence, deferred with its mechanism in ADR-0026 §6a and
+		// pinned in arc_l1_order_by_qualifier_two_path_test.go.
+		//
+		// A pin that starts agreeing FAILS: when either half is fixed, the arm
+		// whose list changes fails here and the field it needed is deleted.
+		{issue: "#993", name: "a star over a join-bodied derived block names the outer arm per DAG arm",
+			sql: `SELECT * FROM lat_ord o JOIN (SELECT * FROM lat_item i ` +
+				`JOIN lat_ord o2 ON o2.id = i.order_id) s ON s.order_id = o.id ` +
+				`ORDER BY s.amount`,
+			pgSays: "ten columns: id, customer, total | id, order_id, product, amount | " +
+				"id, customer, total — the three FROM arms in written order",
+			want: []string{
+				"id=int64:1|order_id=int64:1|product=Widget|amount=float:50|o.id=int64:1|customer=Alice|total=float:150|o2.id=int64:1|o2.customer=Alice|o2.total=float:150",
+				"id=int64:2|order_id=int64:1|product=Gadget|amount=float:100|o.id=int64:1|customer=Alice|total=float:150|o2.id=int64:1|o2.customer=Alice|o2.total=float:150",
+				"id=int64:3|order_id=int64:2|product=Widget|amount=float:75|o.id=int64:2|customer=Bob|total=float:200|o2.id=int64:2|o2.customer=Bob|o2.total=float:200",
+				"id=int64:4|order_id=int64:2|product=Doohickey|amount=float:125|o.id=int64:2|customer=Bob|total=float:200|o2.id=int64:2|o2.customer=Bob|o2.total=float:200"},
+			wantDagshuf: []string{
+				"id=int64:1|order_id=int64:1|product=Widget|amount=float:50|o.id=int64:1|o.customer=Alice|o.total=float:150|o2.id=int64:1|o2.customer=Alice|o2.total=float:150",
+				"id=int64:2|order_id=int64:1|product=Gadget|amount=float:100|o.id=int64:1|o.customer=Alice|o.total=float:150|o2.id=int64:1|o2.customer=Alice|o2.total=float:150",
+				"id=int64:3|order_id=int64:2|product=Widget|amount=float:75|o.id=int64:2|o.customer=Bob|o.total=float:200|o2.id=int64:2|o2.customer=Bob|o2.total=float:200",
+				"id=int64:4|order_id=int64:2|product=Doohickey|amount=float:125|o.id=int64:2|o.customer=Bob|o.total=float:200|o2.id=int64:2|o2.customer=Bob|o2.total=float:200"}},
 	}
 }
 
@@ -808,16 +864,32 @@ func TestArcAEverydaySQLMatchesPostgres(t *testing.T) {
 			// digest in benchmarks/tpch, not here.
 			want := append([]string(nil), tc.want...)
 			sort.Strings(want)
+			sorted := func(rows []string) []string {
+				out := append([]string(nil), rows...)
+				sort.Strings(out)
+				return out
+			}
 			wantOnDAG := want
 			if tc.wantDAG != nil {
-				wantOnDAG = append([]string(nil), tc.wantDAG...)
-				sort.Strings(wantOnDAG)
+				wantOnDAG = sorted(tc.wantDAG)
+			}
+			wantOnDag, wantOnDagshuf := wantOnDAG, wantOnDAG
+			if tc.wantDag != nil {
+				wantOnDag = sorted(tc.wantDag)
+			}
+			if tc.wantDagshuf != nil {
+				wantOnDagshuf = sorted(tc.wantDagshuf)
 			}
 			check := func(arm string, got []string, err error) {
 				t.Helper()
 				want := want
-				if strings.HasPrefix(arm, "dag") {
-					want = wantOnDAG
+				// The expectation is PER ARM, most specific first: the two
+				// DAG arms are two engines and may answer differently.
+				switch arm {
+				case "dag":
+					want = wantOnDag
+				case "dag-shuffled":
+					want = wantOnDagshuf
 				}
 				// The expected disposition is PER ARM. A shape can be loud on
 				// one engine and answering on another — a refusal one path
