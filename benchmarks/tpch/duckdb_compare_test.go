@@ -1190,38 +1190,40 @@ func duckdbCorpus() []duckdbCase {
 		// differing only in frame, and getting it wrong is a plausible
 		// number rather than an error.
 		//
-		// PINNED on both arms since #987, and the pin is about the AVG's TYPE,
-		// not about any number. `avg(int)` is DOUBLE in DuckDB and NUMERIC in
-		// PostgreSQL, and PostgreSQL decides semantics here (ADR-0012), so
-		// `sliding_avg` now renders `0.5000` — wadjet's fixed batch.AvgScale(0)
-		// = 4, ADR-0024 item 2 — where this DuckDB-derived digest holds `0.5`.
-		// Every VALUE in the row is PostgreSQL 17.11's, measured live over
-		// identical rows: running 0, total 50, sliding 1, avg 0.5, count 2;
-		// PostgreSQL prints the average `0.50000000000000000000` at its own
-		// magnitude-dependent scale, so all three engines agree on the number
-		// and disagree only on how many digits they keep.
-		//
-		// The three SUM columns and the COUNT are unaffected — the digest is
-		// over the whole entry, so one column's rendering moves it. This
-		// entry's digests were regenerated from DuckDB at bb8635a4 and are NOT
-		// re-derived here: the pin fails the day wadjet renders `0.5` again,
-		// which is what would happen if the window's AVG went back to float.
+		// The SUMs and the COUNT are NOT pinned and are compared against
+		// DuckDB in full. They were, briefly: #987 pinned the whole entry for
+		// a divergence that belongs to ONE column, and a fingerprint is taken
+		// over the entry, so the four columns that agree lost their oracle to
+		// the one that does not (#987 review, P1). The AVG rides in its own
+		// entry below for exactly that reason.
 		duckdbCase{name: "WindowAggregateFrames", sql: `SELECT n_nationkey,
 			SUM(n_regionkey) OVER (ORDER BY n_nationkey) AS running,
 			SUM(n_regionkey) OVER (ORDER BY n_nationkey
 			  ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS total,
 			SUM(n_regionkey) OVER (ORDER BY n_nationkey ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS sliding,
-			AVG(n_regionkey) OVER (ORDER BY n_nationkey ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS sliding_avg,
 			COUNT(*) OVER (ORDER BY n_nationkey ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS sliding_count
+			FROM nation ORDER BY n_nationkey`},
+		// The one column of that query whose TYPE differs from DuckDB's, and
+		// only that column. `avg(int)` is DOUBLE in DuckDB and NUMERIC in
+		// PostgreSQL; PostgreSQL decides semantics here (ADR-0012), so since
+		// #987 this renders `0.5000` — wadjet's fixed batch.AvgScale(0) = 4,
+		// ADR-0024 item 2 — where DuckDB renders `0.5`. All three engines
+		// agree on the NUMBER and disagree only on how many digits they keep:
+		// PostgreSQL 17.11 prints `0.50000000000000000000` at its own
+		// magnitude-dependent scale.
+		//
+		// The pin fails the day wadjet renders `0.5` again, which is what
+		// would happen if the window's AVG went back to a float accumulator.
+		duckdbCase{name: "WindowAggregateFramesAvg", sql: `SELECT n_nationkey,
+			AVG(n_regionkey) OVER (ORDER BY n_nationkey ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS sliding_avg
 			FROM nation ORDER BY n_nationkey`,
 			knownBugArm: armBoth,
 			knownBug: "DELIBERATE, and it is the AVG's TYPE rather than any value: `avg(int)` is " +
 				"DOUBLE in DuckDB and NUMERIC in PostgreSQL, which decides semantics here " +
 				"(ADR-0012). Since #987 the window's AVG follows PostgreSQL, so sliding_avg " +
-				"renders 0.5000 (batch.AvgScale(0) = 4, ADR-0024 item 2) where this " +
-				"DuckDB-derived digest holds 0.5. Every value in the row is PostgreSQL " +
-				"17.11's, measured live: 0 | 50 | 1 | 0.5 | 2. The same divergence is pinned " +
-				"in the pg-oracle wire arm as float_text_render on SumAvgOverInteger"},
+				"renders 0.5000 (batch.AvgScale(0) = 4, ADR-0024 item 2) where DuckDB " +
+				"renders 0.5. The same divergence is pinned in the pg-oracle wire arm as " +
+				"float_text_render on SumAvgOverInteger"},
 		// A frame that is EMPTY for the leading rows. SUM and the value
 		// functions answer NULL there; COUNT answers 0, the one aggregate an
 		// empty frame does not make NULL.

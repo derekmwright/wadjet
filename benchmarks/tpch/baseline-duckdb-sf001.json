@@ -3431,11 +3431,22 @@
         "running",
         "total",
         "sliding",
-        "sliding_avg",
         "sliding_count"
       ],
-      "fine": "3c8508232cb4a4fd",
-      "coarse": "f701272f697ad3e3"
+      "fine": "333391f0e0d8f7b5",
+      "coarse": "333391f0e0d8f7b5"
+    },
+    "WindowAggregateFramesAvg": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey",
+        "sliding_avg"
+      ],
+      "fine": "fd13bfd34364dda5",
+      "coarse": "6e9c238af10a2e97"
     },
     "WindowEmptyFrame": {
       "source": "duckdb",
