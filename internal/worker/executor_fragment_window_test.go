@@ -106,7 +106,21 @@ func TestExecuteFragment_ScanWindowUnpartitioned(t *testing.T) {
 		t.Fatalf("parse output: %v", err)
 	}
 	// val → (rn, total), so the assertion does not depend on emission order.
-	got := map[int64][2]float64{}
+	//
+	// Both are read at their DECLARED type, and `total` is the reason this
+	// comment exists. The spec above asks for FLOAT64 — a declaration the
+	// coordinator could not resolve, which is what the operator's runtime
+	// correction is FOR (exec.Window.retypeValueColumns, #345): SUM over an
+	// int8 column is `numeric` in PostgreSQL and accumulates in an exact
+	// Int128 here, so the operator re-declares the column DECIMAL(38,0) and
+	// writes the total into the decimal carrier. Reading it through
+	// Float64Data used to pass because the column WAS a float64 vector, back
+	// when a windowed integer SUM accumulated in float64 and lost every digit
+	// past 2^53 (#813 item 1, closed by #987). The float slice is empty now,
+	// and an assertion that indexes it panics rather than fails — so the
+	// SCHEMA is asserted first and the value read from the box the schema
+	// names.
+	got := map[int64][2]int64{}
 	for {
 		b, err := r.Next()
 		if err != nil {
@@ -124,21 +138,36 @@ func TestExecuteFragment_ScanWindowUnpartitioned(t *testing.T) {
 				t.Fatalf("output schema missing %q: %+v", name, b.Schema)
 			}
 		}
+		// The K2 rule, on the WORKER's own path: `SUM(int8) OVER ()` is
+		// numeric — DECIMAL(38,0) — whatever the spec declared, and the same
+		// carrier the GROUPED spelling of that aggregate uses.
+		if tot := b.Schema[idx["total"]]; tot.Type != parquet.TypeDecimal ||
+			tot.Precision != 38 || tot.Scale != 0 {
+			t.Fatalf("total declares %v(%d,%d), want DECIMAL(38,0) — SUM over an int8 "+
+				"column is numeric in PostgreSQL and exact here, and the operator "+
+				"re-declares a spec it was handed as float64 (#987, #813 item 1)",
+				tot.Type, tot.Precision, tot.Scale)
+		}
 		for i := 0; i < b.ActiveLen(); i++ {
 			row := i
 			if b.Sel != nil {
 				row = int(b.Sel[i])
 			}
-			got[b.Columns[idx["val"]].Int64Data[row]] = [2]float64{
-				float64(b.Columns[idx["rn"]].Int64Data[row]),
-				b.Columns[idx["total"]].Float64Data[row],
+			cell := b.Columns[idx["total"]].DecimalData.Data[row]
+			if !cell.FitsInt64() {
+				t.Fatalf("total = %s does not fit an int64; this fixture's total is 270", cell)
+			}
+			got[b.Columns[idx["val"]].Int64Data[row]] = [2]int64{
+				b.Columns[idx["rn"]].Int64Data[row],
+				cell.ToInt64(),
 			}
 		}
 	}
 	// ROW_NUMBER over val DESC: 90, 70, 50, 30, 20, 10.
-	// SUM with no ORDER BY and no PARTITION BY is the whole-input total.
+	// SUM with no ORDER BY and no PARTITION BY is the whole-input total, and
+	// it is EXACT — 270 digit for digit, not 270 within a float's tolerance.
 	const wantTotal = 50 + 10 + 90 + 30 + 70 + 20
-	want := map[int64][2]float64{
+	want := map[int64][2]int64{
 		90: {1, wantTotal}, 70: {2, wantTotal}, 50: {3, wantTotal},
 		30: {4, wantTotal}, 20: {5, wantTotal}, 10: {6, wantTotal},
 	}
