@@ -576,6 +576,18 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 		stringLengthPos = collectSink.SchemaHintStringLengthPos
 	}
 	columns := deriveColumns(selectInfo, rows, outSchema)
+	// AN EMPTY COLUMN LIST IS NEVER AN ANSWER (sqlerr.EmptyResultColumns).
+	//
+	// Everything above the statement switch produces a result SET, so a list
+	// with nothing in it is the engine failing to describe its own output —
+	// and it is indistinguishable at the client from a query that
+	// legitimately found nothing. #1008 and #1010 both reached a client that
+	// way. This door and the coordinator's are the two places a result set is
+	// assembled, so the refusal here covers pgwire, the HTTP doors and gRPC,
+	// which all render what these two return.
+	if len(columns) == 0 {
+		return nil, sqlerr.EmptyResultColumns("embedded query")
+	}
 
 	// Derive typed column metadata
 	var metas []ColumnMeta

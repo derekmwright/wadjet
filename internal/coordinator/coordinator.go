@@ -1011,6 +1011,25 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		return nil, fmt.Errorf("extract: %w", err)
 	}
 
+	// AN EMPTY COLUMN LIST IS NEVER AN ANSWER (sqlerr.EmptyResultColumns).
+	//
+	// Registered HERE and not at the top: above this line the entry still
+	// dispatches statements that legitimately return no result set at all
+	// (the alert DDL returns a bare error). From here down every return is a
+	// result SET, and one with no columns is the engine failing to describe
+	// its own output — indistinguishable at the client from a query that
+	// legitimately found nothing. #1008 and #1010 both reached a client that
+	// way. Four paths assemble a result below (the native gather, the
+	// probe-split merge, the local fast path and the refused-local route) and
+	// this is the one place all four return through.
+	defer func() {
+		if err != nil || res == nil || res.Error != "" || len(res.Columns) > 0 {
+			return
+		}
+		err = sqlerr.EmptyResultColumns("coordinator query")
+		res.Error = err.Error()
+	}()
+
 	// Reject references to columns that resolve to no source (plan-time name
 	// binding), against the schema the CALLING IDENTITY can see — a column an
 	// ABAC policy denies is not in this caller's table, so it is not in the
