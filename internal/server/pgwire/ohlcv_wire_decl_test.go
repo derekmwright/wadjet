@@ -17,12 +17,20 @@ import (
 // what that declaration MEANS — the OID a client reads, and the typmod beside
 // it.
 //
-// A bar field's typmod is -1 for the reason every aggregate-produced DECIMAL's
-// is: live PostgreSQL keeps numeric(p,s)'s typmod only for a bare column
-// reference, so an aggregate result is WireUnconstrained here (#457/#458).
-// That is exactly why the OID is asserted with rows AND over an EMPTY input:
-// the typmod cannot show a lost precision, and over no rows the VALUES cannot
-// either — a wrong declaration there is invisible in everything but this.
+// A bar field sends its REAL typmod — numeric(9,2) is 589830 — where live
+// PostgreSQL sends −1. PostgreSQL keeps a numeric's typmod for a BARE COLUMN
+// REFERENCE and drops it for anything an aggregate produced, grouped or not
+// and through a composite field path or not (measured on 17.11; the four
+// probes are written out in `server.TestTheBarDeclaresTheSameThingOnBoth
+// WireDoors`). Wadjet marks an aggregate's own DECIMAL result
+// `WireUnconstrained` (#457/#458) and a FIELD PATH over a bar is not one, so
+// it keeps what it declares. That is a DIVERGENCE, it is in ADR-0012's list,
+// and it is asserted here as what this engine does rather than assumed away.
+//
+// The OID is asserted with rows AND over an EMPTY input because over no rows
+// the VALUES cannot show a wrong declaration at all — which is exactly how the
+// round-1 defect (FLOAT64 invented for a column of empty states, OID 701
+// against 1700) reached a client unseen.
 func TestPGWireDeclaresABarFieldTheSameWithRowsAndWithout(t *testing.T) {
 	db := ohlcvWireDB(t)
 	srv := startTestServer(t, db)

@@ -2603,6 +2603,43 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        wrong; the corrected relation, and the gate that asserts it on int4,
        int8 and three DECIMAL prices rather than only on float8, are in
        ADR-0035 §Decision 6.
+
+     - **A bar FIELD sends its real numeric typmod where PostgreSQL sends
+       −1.** (#965, 2026-09-08.) Measured on 17.11 over the same rows:
+
+           SELECT px FROM t                                  -> numeric(9,2)
+           SELECT min(px) FROM t                             -> numeric
+           SELECT date_bin(…) g, min(px) o FROM t GROUP BY 1  -> numeric
+           SELECT (r).f1 FROM (SELECT date_bin(…) g,
+                               ROW(min(px)) r … GROUP BY 1)   -> numeric
+
+       PostgreSQL keeps a numeric's typmod for a BARE COLUMN REFERENCE and
+       drops it for anything an aggregate produced — grouped or not, through a
+       composite field path or not. Wadjet sends `(b).open` over a
+       DECIMAL(9,2) price as typmod 589830 (= `numeric(9,2)`), in the grouped
+       and the ungrouped spelling alike.
+
+       It is the same family as #457/#458 and #542 and stops one step short of
+       them: an aggregate's OWN DECIMAL result is marked `WireUnconstrained`
+       here and sends −1 as the server does, but a FIELD PATH over a bar is
+       not an aggregate call, so it keeps the declaration the plan derived.
+       The VALUE is right on every path and the OID is PostgreSQL's; what
+       differs is a modifier that says MORE than the server says, never less.
+
+       Recorded rather than changed, and the reason is worth stating: the
+       modifier is right about the data, and moving it to −1 is a change to
+       what every ROW field path declares — not to this function. Gated as
+       what this engine does in `pgwire.TestPGWireDeclaresABarFieldTheSameWith
+       RowsAndWithout` and `server.TestTheBarDeclaresTheSameThingOnBothWire
+       Doors`, so a move toward the server's answer moves those lines and this
+       entry together.
+
+       One consequence worth naming: because `pgwire.TypeMod` answers −1 for
+       `Precision <= 0`, a LOST precision and an honestly-unconstrained
+       numeric send the same four bytes. That is why round 3's grouped-bar
+       divergence — DECIMAL(0,2) on the DAG arms — was invisible on the wire
+       and visible only in `wadjet.ColumnMeta.Precision`, and why the arm
+       census asserts `(type, precision, scale)` rather than the typmod.
      - **A COMPUTED integer argument is declared by its own WIDTH**, the way a
        bare column is. (Amended 2026-09-03, #841; this bullet used to read
        "declared BIGINT, not numeric".) Wadjet declares every integer

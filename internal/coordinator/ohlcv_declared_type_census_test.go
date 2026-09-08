@@ -76,22 +76,24 @@ func TestTheBarsDeclaredTypeIsTheSameOnEveryArm(t *testing.T) {
 
 	for _, tc := range odcCells() {
 		t.Run(tc.name, func(t *testing.T) {
-			for _, empty := range []bool{false, true} {
-				sql := tc.sql(empty)
-				label := "rows"
-				if empty {
-					label = "empty"
-				}
-				for _, arm := range arms {
-					got, err := arm.run(sql)
-					if err != nil {
-						t.Errorf("%s arm (%s): %v\n  SQL: %s", arm.name, label, err, sql)
-						continue
+			for _, shape := range []string{"ungrouped", "grouped"} {
+				for _, empty := range []bool{false, true} {
+					sql := tc.sql(shape, empty)
+					label := shape + "/rows"
+					if empty {
+						label = shape + "/empty"
 					}
-					if strings.Join(got, " | ") != strings.Join(tc.want, " | ") {
-						t.Errorf("%s arm (%s)\n  got  %s\n  want %s\n  PostgreSQL: %s\n  SQL: %s",
-							arm.name, label, strings.Join(got, " | "), strings.Join(tc.want, " | "),
-							tc.pgSays, sql)
+					for _, arm := range arms {
+						got, err := arm.run(sql)
+						if err != nil {
+							t.Errorf("%s arm (%s): %v\n  SQL: %s", arm.name, label, err, sql)
+							continue
+						}
+						if strings.Join(got, " | ") != strings.Join(tc.want, " | ") {
+							t.Errorf("%s arm (%s)\n  got  %s\n  want %s\n  PostgreSQL: %s\n  SQL: %s",
+								arm.name, label, strings.Join(got, " | "), strings.Join(tc.want, " | "),
+								tc.pgSays, sql)
+						}
 					}
 				}
 			}
@@ -107,16 +109,42 @@ type odcCell struct {
 	pgSays string
 }
 
-func (c odcCell) sql(empty bool) string {
+// odcFields is the SELECT list every shape publishes: all six bar fields, so
+// no field goes unwatched.
+const odcFields = `(b).open AS o, (b).high AS h, (b).low AS l, (b).close AS c,
+	                 (b).volume AS v, (b).vwap AS w`
+
+// sql builds one cell in one SHAPE. Both shapes matter and only one of them
+// was ever gated: round 2's census was UNGROUPED in all eleven cells, and the
+// GROUPED spelling — the bucket published beside the bar, which is what every
+// README, release-note and sql-reference example writes — kept round 1's
+// divergence on all three DAG arms (#965 round 3).
+//
+// The mechanism was one more site of round 2's own class: `inputColFields`
+// returned nil for the WHOLE block at a COMPUTED projection, and the bucket is
+// one, so `(b).open` reached the stage with no declared (p,s) and a ROW child
+// that crossed a WSHF boundary — where a container carries its scale and has
+// no room for its precision — declared DECIMAL(0,s). A gate whose corpus never
+// groups cannot see that, which is why the shape is a dimension here now
+// rather than a cell.
+func (c odcCell) sql(shape string, empty bool) string {
 	where := ""
 	if empty {
 		where = " WHERE id < 0"
 	}
-	return fmt.Sprintf(
-		`SELECT (b).open AS o, (b).high AS h, (b).low AS l, (b).close AS c,
-		        (b).volume AS v, (b).vwap AS w
+	switch shape {
+	case "ungrouped":
+		return fmt.Sprintf(`SELECT %s
 		 FROM (SELECT ohlcv(ts, %s, %s) AS b FROM %s%s) t`,
-		c.price, c.volume, ohlcvTable, where)
+			odcFields, c.price, c.volume, ohlcvTable, where)
+	case "grouped":
+		// The headline shape: a computed group key PUBLISHED beside the bar.
+		return fmt.Sprintf(`SELECT %s
+		 FROM (SELECT time_bucket(INTERVAL '1' MINUTE, ts) AS g, ohlcv(ts, %s, %s) AS b
+		       FROM %s%s GROUP BY 1) t`,
+			odcFields, c.price, c.volume, ohlcvTable, where)
+	}
+	panic("odcCell.sql: unknown shape " + shape)
 }
 
 // odcCells is every bar field's declaration over the price × volume matrix the
@@ -226,4 +254,163 @@ func tmdRunDAGDeclAll(ctx context.Context, coord *Coordinator, sql string) (cols
 		return nil, fmt.Errorf("materializing distributed rows: %w", rerr)
 	}
 	return schema, nil
+}
+
+// EVERY GROUPED SPELLING DECLARES THE SAME THING (#965 round 3).
+//
+// The census above holds the price × volume MATRIX in two shapes. This holds
+// the SHAPE space at one point of that matrix — a DECIMAL(18,4) price with a
+// DECIMAL(9,2) volume, which is the pairing whose three field groups declare
+// three different things (prices (18,4), volume (38,2), vwap (38,8)), so a
+// spelling that loses one of them cannot hide behind another.
+//
+// Why a second gate rather than more cells: the divergence round 3 found was
+// not about a TYPE at all. It was about a SHAPE — a computed group key
+// published beside the bar — and the matrix census would have needed all
+// eleven cells re-run per spelling to say the same thing. The two gates split
+// the axes: types there, spellings here.
+//
+// Every spelling below is one a user writes. `GROUP BY 1`, the CTE, the key
+// dropped, two keys, the bar beside COUNT(*) and SUM, a filter and an ORDER BY
+// on a bar FIELD above the block — the review's list, plus the two the
+// original defect was localized with (the key dropped and a BARE column as the
+// key, both of which always agreed and which are the controls that say the
+// trigger is the COMPUTED key and not grouping as such).
+func TestTheBarsDeclaredTypeSurvivesEveryGroupedSpelling(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up embedded NATS clusters")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
+	t.Cleanup(cancel)
+
+	single := tmdStandalone(t, ctx)
+	spilled := na2Standalone(t, ctx, 512*1024)
+	infra := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infra, nil)
+	coord := tmdCoordinator(t, ctx, infra)
+	infraB := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infraB, nil)
+	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) { c.BroadcastBytesOverride = 1 })
+	infraM := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infraM, nil)
+	coordM := tmdCoordinatorWithWorkers(t, ctx, infraM, func(w *worker.Config) { w.MorselWorkers = 4 })
+
+	arms := []struct {
+		name string
+		run  func(string) ([]string, error)
+	}{
+		{"single", func(sql string) ([]string, error) { return odcDecls(tmdRunSingleDeclAll(ctx, single, sql)) }},
+		{"single+budget", func(sql string) ([]string, error) { return odcDecls(tmdRunSingleDeclAll(ctx, spilled, sql)) }},
+		{"dag", func(sql string) ([]string, error) { return odcDecls(tmdRunDAGDeclAll(ctx, coord, sql)) }},
+		{"dag+shuffled", func(sql string) ([]string, error) { return odcDecls(tmdRunDAGDeclAll(ctx, coordB, sql)) }},
+		{"dag+morsel4", func(sql string) ([]string, error) { return odcDecls(tmdRunDAGDeclAll(ctx, coordM, sql)) }},
+	}
+
+	// The bar over px_d184 × vol_d92, in the census's own spelling.
+	const bar = `ohlcv(ts, px_d184, vol_d92)`
+	const bkt = `time_bucket(INTERVAL '1' MINUTE, ts)`
+	// The six fields' declarations at this point of the matrix. Identical to
+	// the census's `decimal184_price_decimal92_volume` cell, and deliberately
+	// spelled out again: a shared constant would let the two gates agree by
+	// construction rather than by measurement.
+	sixFields := []string{
+		"o=DECIMAL(18,4)", "h=DECIMAL(18,4)", "l=DECIMAL(18,4)", "c=DECIMAL(18,4)",
+		"v=DECIMAL(38,2)", "w=DECIMAL(38,8)",
+	}
+	withKey := append([]string{"g=TIMESTAMP"}, sixFields...)
+
+	for _, tc := range []struct {
+		name string
+		sql  func(where string) string
+		want []string
+	}{
+		{"key_published_beside_the_bar", func(w string) string {
+			return fmt.Sprintf(`SELECT %s FROM (SELECT %s AS g, %s AS b FROM %s%s GROUP BY 1) t`,
+				odcFields, bkt, bar, ohlcvTable, w)
+		}, sixFields},
+		{"key_and_bar_both_selected", func(w string) string {
+			return fmt.Sprintf(`SELECT g, %s FROM (SELECT %s AS g, %s AS b FROM %s%s GROUP BY 1) t ORDER BY g`,
+				odcFields, bkt, bar, ohlcvTable, w)
+		}, withKey},
+		// CONTROL: the key DROPPED from the block's select list. Always
+		// agreed, before the fix and after — it never reaches the computed
+		// projection at all, which is how the trigger was localized.
+		{"ctl_key_dropped", func(w string) string {
+			return fmt.Sprintf(`SELECT %s FROM (SELECT %s AS b FROM %s%s GROUP BY %s) t`,
+				odcFields, bar, ohlcvTable, w, bkt)
+		}, sixFields},
+		// CONTROL: a BARE column as the group key. Also always agreed: a
+		// column reference is not a computed projection.
+		{"ctl_bare_column_key", func(w string) string {
+			return fmt.Sprintf(`SELECT %s FROM (SELECT c_str AS g, %s AS b FROM %s%s GROUP BY 1) t`,
+				odcFields, bar, ohlcvTable, w)
+		}, sixFields},
+		{"group_by_the_expression_not_the_ordinal", func(w string) string {
+			return fmt.Sprintf(`SELECT %s FROM (SELECT %s AS g, %s AS b FROM %s%s GROUP BY %s) t`,
+				odcFields, bkt, bar, ohlcvTable, w, bkt)
+		}, sixFields},
+		{"cte_spelling", func(w string) string {
+			return fmt.Sprintf(`WITH bars AS (SELECT %s AS g, %s AS b FROM %s%s GROUP BY 1)
+			                    SELECT %s FROM bars`, bkt, bar, ohlcvTable, w, odcFields)
+		}, sixFields},
+		{"two_group_keys", func(w string) string {
+			return fmt.Sprintf(`SELECT %s FROM (SELECT %s AS g, c_str AS s, %s AS b
+			                    FROM %s%s GROUP BY 1, 2) t`,
+				odcFields, bkt, bar, ohlcvTable, w)
+		}, sixFields},
+		{"bar_beside_count", func(w string) string {
+			return fmt.Sprintf(`SELECT %s, n FROM (SELECT %s AS g, %s AS b, COUNT(*) AS n
+			                    FROM %s%s GROUP BY 1) t`,
+				odcFields, bkt, bar, ohlcvTable, w)
+		}, append(append([]string{}, sixFields...), "n=INT64")},
+		{"bar_beside_sum", func(w string) string {
+			return fmt.Sprintf(`SELECT %s, s FROM (SELECT %s AS g, %s AS b, SUM(vol_i64) AS s
+			                    FROM %s%s GROUP BY 1) t`,
+				odcFields, bkt, bar, ohlcvTable, w)
+		}, append(append([]string{}, sixFields...), "s=DECIMAL(38,0)")},
+		// A bar FIELD used above the block, which is where round 2's repair
+		// runs and where the review found two more divergent spellings.
+		{"field_filtered_above", func(w string) string {
+			return fmt.Sprintf(`SELECT %s FROM (SELECT %s AS g, %s AS b FROM %s%s GROUP BY 1) t
+			                    WHERE (b).high > 12`, odcFields, bkt, bar, ohlcvTable, w)
+		}, sixFields},
+		{"field_ordered_above", func(w string) string {
+			return fmt.Sprintf(`SELECT %s FROM (SELECT %s AS g, %s AS b FROM %s%s GROUP BY 1) t
+			                    ORDER BY (b).vwap DESC`, odcFields, bkt, bar, ohlcvTable, w)
+		}, sixFields},
+		// A COMPUTED price under a computed group key: the two mechanisms
+		// round 2 and round 3 fixed, in one statement. DECIMAL(18,4) * 2 is
+		// DECIMAL(20,4) by ADR-0024's multiply rule, and vwap follows the
+		// argument's scale.
+		{"computed_price_under_a_computed_key", func(w string) string {
+			return fmt.Sprintf(`SELECT %s FROM (SELECT %s AS g,
+			                    ohlcv(ts, px_d184*2, vol_d92) AS b FROM %s%s GROUP BY 1) t`,
+				odcFields, bkt, ohlcvTable, w)
+		}, []string{
+			"o=DECIMAL(20,4)", "h=DECIMAL(20,4)", "l=DECIMAL(20,4)", "c=DECIMAL(20,4)",
+			"v=DECIMAL(38,2)", "w=DECIMAL(38,8)",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, empty := range []bool{false, true} {
+				where, label := "", "rows"
+				if empty {
+					where, label = " WHERE id < 0", "empty"
+				}
+				sql := tc.sql(where)
+				for _, arm := range arms {
+					got, err := arm.run(sql)
+					if err != nil {
+						t.Errorf("%s arm (%s): %v\n  SQL: %s", arm.name, label, err, sql)
+						continue
+					}
+					if strings.Join(got, " | ") != strings.Join(tc.want, " | ") {
+						t.Errorf("%s arm (%s)\n  got  %s\n  want %s\n  SQL: %s",
+							arm.name, label, strings.Join(got, " | "),
+							strings.Join(tc.want, " | "), sql)
+					}
+				}
+			}
+		})
+	}
 }

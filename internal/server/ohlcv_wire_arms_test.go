@@ -20,6 +20,32 @@ package server
 // Both doors are real pgwire servers over the same rows; the DAG door differs
 // only in `SetCoordinator`. The expected declarations are the census's own
 // list, parsed into (OID, typmod) here so the two gates cannot drift apart.
+//
+// TWO SHAPES since round 3, and the grouped one is the point: round 2's corpus
+// was ungrouped in all eleven cells, and the GROUPED spelling — the bucket
+// published beside the bar, which every doc example writes — still declared
+// DECIMAL(0,s) on the three DAG arms. It was not visible HERE at the time, and
+// that is worth stating precisely: `pgwire.TypeMod` answers −1 for
+// `Precision <= 0`, so the lost precision and an honestly-unconstrained
+// numeric send the same four bytes. The wire could not tell them apart; the
+// embedded API's `ColumnMeta.Precision` could. Both shapes now send the same
+// typmod on both doors, which is what this gate holds.
+//
+// WHAT POSTGRESQL SENDS, measured on 17.11 for the same shapes:
+//
+//	SELECT px FROM t                                     -> numeric(9,2)
+//	SELECT min(px) FROM t                                -> numeric   (typmod -1)
+//	SELECT date_bin(…) g, min(px) o FROM t GROUP BY 1     -> numeric   (typmod -1)
+//	SELECT (r).f1 FROM (SELECT date_bin(…) g,
+//	                    ROW(min(px)) r FROM t GROUP BY 1) -> numeric   (typmod -1)
+//
+// PostgreSQL keeps a numeric's typmod for a BARE COLUMN REFERENCE and drops it
+// for anything an aggregate produced — grouped or not, through a composite
+// field path or not. This engine sends the real typmod (numeric(9,2) is 589830)
+// for a bar's field in BOTH shapes. That is a DIVERGENCE, it is recorded in
+// ADR-0012's list beside #457/#458 and #542 rather than left to be discovered,
+// and it is asserted here as what this engine does: a change toward −1 is a
+// deliberate one that moves these lines and the ADR entry together.
 
 import (
 	"context"
@@ -78,16 +104,30 @@ func owaCells() []owaCell {
 	}
 }
 
-func (c owaCell) sql(empty bool) string {
+// owaFields is the SELECT list every shape publishes.
+const owaFields = `(b).open AS o, (b).high AS h, (b).low AS l, (b).close AS c,
+	                 (b).volume AS v, (b).vwap AS w`
+
+// sql builds one cell in one SHAPE. The GROUPED spelling is the one the
+// feature exists for — every README, release-note and sql-reference example
+// writes the bucket beside the bar — and round 2's corpus had none of it, so a
+// declaration that diverged there reached the wire unwatched (#965 round 3).
+func (c owaCell) sql(shape string, empty bool) string {
 	where := ""
 	if empty {
 		where = " WHERE id < 0"
 	}
-	return fmt.Sprintf(
-		`SELECT (b).open AS o, (b).high AS h, (b).low AS l, (b).close AS c,
-		        (b).volume AS v, (b).vwap AS w
-		 FROM (SELECT ohlcv(ts, %s, %s) AS b FROM owabars%s) t`,
-		c.price, c.volume, where)
+	switch shape {
+	case "ungrouped":
+		return fmt.Sprintf(`SELECT %s FROM (SELECT ohlcv(ts, %s, %s) AS b FROM owabars%s) t`,
+			owaFields, c.price, c.volume, where)
+	case "grouped":
+		return fmt.Sprintf(`SELECT %s FROM (
+		   SELECT time_bucket(INTERVAL '1' MINUTE, ts) AS g, ohlcv(ts, %s, %s) AS b
+		   FROM owabars%s GROUP BY 1) t`,
+			owaFields, c.price, c.volume, where)
+	}
+	panic("owaCell.sql: unknown shape " + shape)
 }
 
 // owaWire is the wire face of one declared type: what PostgreSQL 17 sends for
@@ -134,11 +174,18 @@ func TestTheBarDeclaresTheSameThingOnBothWireDoors(t *testing.T) {
 
 	for _, c := range owaCells() {
 		t.Run(c.name, func(t *testing.T) {
-			for _, empty := range []bool{false, true} {
-				label, sql := "rows", c.sql(false)
-				if empty {
-					label, sql = "empty", c.sql(true)
+			for _, sh := range []struct {
+				shape string
+				empty bool
+			}{
+				{"ungrouped", false}, {"ungrouped", true},
+				{"grouped", false}, {"grouped", true},
+			} {
+				label := sh.shape + "/rows"
+				if sh.empty {
+					label = sh.shape + "/empty"
 				}
+				sql := c.sql(sh.shape, sh.empty)
 				want := make([]string, len(c.decls))
 				for i, d := range c.decls {
 					oid, tm := owaWire(t, d)

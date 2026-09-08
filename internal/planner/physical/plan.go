@@ -12143,7 +12143,42 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 				continue
 			}
 			if p.Column == "" {
-				return nil
+				// A COMPUTED item, which is the group-key half of the same
+				// question the aggregate arm above answers. Its own name is
+				// bound to a value the fields below do not describe — so
+				// SHADOW that name — but nothing about it says the fields
+				// below stopped describing the OTHER names, and nil-ing the
+				// whole map is what threw the bar's declaration away.
+				//
+				// `SELECT (b).open FROM (SELECT time_bucket(…) AS g,
+				// ohlcv(…) AS b FROM t GROUP BY 1) x` is the shape and it is
+				// the shape the feature is FOR: every README, release-note
+				// and sql-reference example writes the bucket beside the bar.
+				// `g` is a computed projection, so this arm returned nil for
+				// the whole block, `(b).open` reached the stage with no
+				// declared (p,s), and the field path over a ROW that crossed
+				// a WSHF boundary — where a container child carries its scale
+				// and has no room for its precision — declared DECIMAL(0,2)
+				// on the DAG against DECIMAL(9,2) in process (#965 round 3).
+				// The same block with the key DROPPED, or with a BARE column
+				// as the key, always agreed: they never reach this arm.
+				//
+				// Symmetric with the aggregate arm, including its refusal: a
+				// name this cannot spell cannot be shadowed either, and a map
+				// that silently keeps a stale entry for it is worse than no
+				// map at all.
+				name := strings.ToLower(cleanExpr(p.Alias))
+				if name == "" {
+					name = strings.ToLower(cleanExpr(p.Expr))
+				}
+				if name == "" {
+					return nil
+				}
+				if out == nil {
+					out = make(map[string][]parquet.Column)
+				}
+				out[name] = nil
+				continue
 			}
 			f, ok := below[strings.ToLower(cleanExpr(p.Column))]
 			if !ok {
