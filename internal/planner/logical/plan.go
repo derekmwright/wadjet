@@ -363,6 +363,17 @@ type Node struct {
 	// the QUERY calls that arm (#751, #773).
 	DerivedAlias string
 
+	// DeferredColumnAliases is a COLUMN-ALIAS LIST this Project owes its
+	// child, deferred because the child's SELECT list holds a `*` whose width
+	// the builder cannot count. DeferredAliasRelation and DeferredAliasKind
+	// are what PostgreSQL's 42P10 names the relation — a derived table is a
+	// `table`, a CTE is a `WITH query`. See column_alias_defer.go: cleared by
+	// ApplyDeferredColumnAliases in the pass after the star expands, so no
+	// consumer ever reads a node still carrying one.
+	DeferredColumnAliases []string
+	DeferredAliasRelation string
+	DeferredAliasKind     string
+
 	// ScalarDecorrelated marks a LEFT join produced by
 	// decorrelateScalarSubqueries (children[1] is the grouped aggregate
 	// materializing the subquery result). reduceDecorrelatedScalarAggs

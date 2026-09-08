@@ -32,9 +32,14 @@ func Optimize(plan *Node, annotators ...func(*Node)) *Node {
 	// narrowed the scan to whatever else the SELECT list mentioned and the
 	// star's own columns came back NULL (#315). See star_expansion.go.
 	ExpandStarProjections(plan)
-	// Immediately after, and for the same reason: a `SELECT *` list's Nth
-	// output column has a name only once the star has one column per
-	// projection (#810).
+	// Immediately after, and for the same reason: a COLUMN-ALIAS LIST over a
+	// `SELECT *` body renames the LEADING output columns, and which columns
+	// those are is what the expansion just decided (#958, ADR-0012's entry).
+	// Before ResolveOrdinalSortKeys, so a positional ORDER BY over the renamed
+	// relation counts the columns under the names the query will see.
+	plan = ApplyDeferredColumnAliases(plan)
+	// …and for the same reason again: a `SELECT *` list's Nth output column
+	// has a name only once the star has one column per projection (#810).
 	ResolveOrdinalSortKeys(plan)
 	// The enclosing WITH, for the FROM items of the subqueries the next three
 	// passes lower. They re-parse the subquery from its SQL text, which does

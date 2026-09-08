@@ -1590,6 +1590,13 @@ func resolveTableOrCTE(table *plansql.TableRef, ctes []plansql.CTEDef) (*Node, e
 			// aliases, because a CTE's body SQL is re-read by consumers that
 			// would not see the rewrite — the cte cache and the physical
 			// binder's own view (validate.go's b.ctes).
+			// A list over a `SELECT *` body is DEFERRED to the pass that knows
+			// the star's width rather than dropped (column_alias_defer.go);
+			// every other spelling is renamed here as before.
+			if wrapped, ok := deferColumnAliasesOverStar(plan, selectInfo,
+				cte.Columns, cte.Name, "WITH query"); ok {
+				return wrapped, nil
+			}
 			renamed, err := applyColumnAliasProject(plan, selectInfo, cte.Columns, cte.Name, "WITH query")
 			if err != nil {
 				return nil, err
@@ -1619,6 +1626,15 @@ func resolveTableOrCTE(table *plansql.TableRef, ctes []plansql.CTEDef) (*Node, e
 		plan, err := BuildFromSelectWithCTEs(selectInfo, scopeCTEs(ctes, selectInfo.CTEs))
 		if err != nil {
 			return nil, fmt.Errorf("building plan for derived table: %w", err)
+		}
+		// A list over a `SELECT *` body: applyColumnAliases above declined it
+		// because the star's width is not countable there, so it is DEFERRED
+		// to the pass that knows it (column_alias_defer.go). The wrapper goes
+		// on BEFORE the alias stamps, so DerivedAlias lands on the relation
+		// the enclosing query actually sees.
+		if wrapped, ok := deferColumnAliasesOverStar(plan, selectInfo,
+			table.ColumnAliases, aliasName, "table"); ok {
+			plan = wrapped
 		}
 		// Apply alias as table alias on the root scan if available
 		if table.Alias != "" {

@@ -3441,6 +3441,13 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	if err := logical.RefuseUnresolvedOrdinalSortKeys(node); err != nil {
 		return nil, err
 	}
+	// …and a COLUMN-ALIAS LIST longer than the `SELECT *` body it renames, for
+	// the same reason and at the same place: the width is a pass later than
+	// the builder, so PostgreSQL's 42P10 is raised a pass later too (#958,
+	// column_alias_defer.go).
+	if err := logical.RefuseUnappliedColumnAliasLists(node); err != nil {
+		return nil, err
+	}
 
 	// The projection whose names the CLIENT reads, resolved once (#732).
 	p.outputProjection = findOutputProjectionNode(node)
@@ -3637,6 +3644,15 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// name and value were both `*` while the single-process arms refused.
 	logical.ExpandStarProjections(node)
 	if err := refuseUnexpandedStarAnywhere(node); err != nil {
+		return nil, err
+	}
+	// …and the same for a COLUMN-ALIAS LIST longer than the `SELECT *` body it
+	// renames: the width is a pass later than the builder, so PostgreSQL's
+	// 42P10 is raised a pass later too (#958, column_alias_defer.go). The
+	// apply is a no-op on a plan Optimize already walked and is here so this
+	// entry never refuses a list it merely has not applied yet.
+	node = logical.ApplyDeferredColumnAliases(node)
+	if err := logical.RefuseUnappliedColumnAliasLists(node); err != nil {
 		return nil, err
 	}
 	// Per-row correlated subqueries have no distributed lowering: refuse
