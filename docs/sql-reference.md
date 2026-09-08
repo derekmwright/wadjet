@@ -1465,24 +1465,34 @@ and the wire protocol sends every column regardless.
 
 A statement that produces a result set produces COLUMNS, whether or not it
 produces rows: `SELECT a, b FROM t WHERE false` comes back with `a` and `b`
-and no rows, and so does `SELECT *` over a table, over a join, over a derived
-table, over a non-recursive CTE, over a grouping and over a set operation.
+and no rows, and so does `SELECT *` over a table, over ONE join, over ONE
+`LATERAL` — grouped, ungrouped or `LEFT` — over a derived table, over a
+non-recursive CTE, over a grouping and over a set operation.
 
-Three shapes have no such declaration yet, and a query of that shape that
-returns NO ROWS is REFUSED (`XX000`) rather than answered with an empty column
-list:
+The declaration is a walk over the PLAN, and it describes ONE join by asking
+the join operator itself what it publishes. Three shapes are past that bound,
+and a query of one of them that returns NO ROWS is REFUSED (`XX000`) rather
+than answered with an empty column list:
 
-* `SELECT *` over a join whose own sides contain joins (three relations or
-  more);
-* `SELECT *` over a query containing a decorrelated `LATERAL`;
+* `SELECT *` over a join whose own SIDES contain a join — three or more
+  relations, and equally TWO or more `LATERAL`s, because each one is a join the
+  planner manufactures;
+* `SELECT *` over a `LATERAL` whose subquery is an UNGROUPED aggregate
+  (`SELECT MAX(x) …`), whose join carries a column the planner minted for
+  itself and the declaration will not publish;
 * `SELECT *` over a RECURSIVE CTE.
 
-PostgreSQL answers all three with a header and zero rows. The refusal is a
-wadjet-side bound and it replaces something worse: a result carrying no
-columns at all, which psql prints as nothing, which pgJDBC's `executeQuery`
-has no metadata for, and which a client cannot tell from a query that
-legitimately found nothing. Naming the columns in the SELECT list answers in
-every one of the three cases.
+A single `LATERAL` that is not an ungrouped aggregate is NOT among them: a
+zero-row `SELECT * FROM t JOIN LATERAL (SELECT c FROM u WHERE u.k = t.k) s ON
+true` answers with its columns, and so do the `GROUP BY` and `LEFT JOIN
+LATERAL` spellings.
+
+PostgreSQL answers all three refused shapes with a header and zero rows. The
+refusal is a wadjet-side bound and it replaces something worse: a result
+carrying no columns at all, which psql prints as nothing, which pgJDBC's
+`executeQuery` has no metadata for, and which a client cannot tell from a query
+that legitimately found nothing. Naming the columns in the SELECT list answers
+in every one of the three cases.
 
 Every door answers the same way — the embedded API, the PostgreSQL wire
 protocol, `POST /v1/queries`, `POST /v1/queries/async` with

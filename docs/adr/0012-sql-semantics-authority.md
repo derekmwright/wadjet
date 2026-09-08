@@ -65,11 +65,17 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      produces a result set, whether or not it returns rows, and clients depend
      on it. Wadjet derives a `SELECT *`'s columns from the DATA and falls back
      to a plan-time declaration (`physical.declaredOutputSchema`, #416, #846,
-     #978) — and three shapes have no declaration today: a star over a BUSHY
-     join (`starJoinDeclaredOutputSchema` declines where a side contains a
-     join of its own), a star over a query carrying a decorrelated LATERAL's
-     minted slot, and a star over a RECURSIVE CTE. With no rows to read a
-     schema off, those returned a result with zero columns and no error.
+     #978) — and three shapes are past its bound: a star over a join whose
+     SIDES contain a join (`starJoinDeclaredOutputSchema` declines there, which
+     is three or more relations and equally TWO or more LATERALs), a star over
+     a LATERAL whose subquery is an UNGROUPED AGGREGATE — whose join carries
+     the pad marker the declaration will not publish — and a star over a
+     RECURSIVE CTE. With no rows to read a schema off, those returned a result
+     with zero columns and no error.
+
+     A SINGLE LATERAL that is not an ungrouped aggregate is not among them and
+     answers with its columns, in the plain, `GROUP BY` and `LEFT JOIN LATERAL`
+     spellings alike — measured on four arms.
 
      That is not a smaller answer, it is the engine failing to describe its
      own output, and at the client it cannot be told from a query that
