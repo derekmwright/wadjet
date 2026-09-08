@@ -872,7 +872,24 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 		{"greatest", `SELECT GREATEST(c_i64, 1) * 2 AS v FROM typemx WHERE id = 1`, "v=int64:2000006"},
 		{"least", `SELECT LEAST(c_i64, 9223372036854775807) * 2 AS v FROM typemx WHERE id = 1`, "v=int64:2000006"},
 		{"nullif", `SELECT NULLIF(c_i64, 1) * 2 AS v FROM typemx WHERE id = 1`, "v=int64:2000006"},
-		{"summed_cast", `SELECT SUM(CAST(c_i64 AS BIGINT) * 2) AS v FROM typemx WHERE id = 1`, "v=int64:2000006"},
+		// NUMERIC, not int64, and measured: PostgreSQL 17.11 answers
+		//
+		//	SELECT pg_typeof(SUM(v::bigint * 2)) FROM (SELECT 1000003::bigint AS v) t
+		//	  numeric
+		//
+		// because `bigint * int4` is bigint and `sum(bigint)` is numeric.
+		// This cell asserted `int64:` until #987's round-4 fix, and that was
+		// this walk's cast blindness written down as an expectation: with no
+		// CastNode arm, `aggInputIsWideInteger` read the int8 operand under
+		// the cast as int4 and SUM declared bigint — in BOTH spellings, and
+		// past int64 that reading REFUSED 22003 a query PostgreSQL answers.
+		// na2Run prints a DECIMAL through its string arm, so the box shows
+		// as bare text here; the BOX itself is asserted by
+		// TestH2TheWindowDeclaredTypeCensus (`DECIMAL(38,0)`) and by
+		// pgwire.TestAComputedIntegerWindowArgumentDeclaresPostgresOID (OID
+		// 1700). What this cell still proves is #849's own point: not a
+		// FLOAT — a float64 box would print `float:`.
+		{"summed_cast", `SELECT SUM(CAST(c_i64 AS BIGINT) * 2) AS v FROM typemx WHERE id = 1`, "v=2000006"},
 		{"added_cast", `SELECT CAST(c_i64 AS BIGINT) + 2 AS v FROM typemx WHERE id = 1`, "v=int64:1000005"},
 		// The BOUNDARY, from the outside: a FLOAT operand under the same
 		// producers is double precision on the server and must stay float here.
