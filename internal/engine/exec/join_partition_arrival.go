@@ -281,6 +281,16 @@ func (h *HashJoin) absorbArrivalBatch(b *batch.RecordBatch) error {
 		if _, err := h.spillOneInMemoryPartition(); err != nil {
 			return fmt.Errorf("spilling under pressure: %w", err)
 		}
+	} else if h.forcedEvictDue() {
+		// TEST ONLY (join_force_spill.go): the same eviction, taken because a
+		// gate asked for it rather than because the pool is under pressure.
+		// Whether a small fixture crosses the threshold at all is a coin toss,
+		// and a gate for a defect that only exists after an eviction cannot
+		// depend on one (ADR-0027 decision 6).
+		if _, err := h.spillOneInMemoryPartition(); err != nil {
+			return fmt.Errorf("spilling under the forcing knob: %w", err)
+		}
+		ForcedJoinEvictions.Add(1)
 	}
 
 	h.reconcileHashMemory()

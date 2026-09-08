@@ -286,6 +286,11 @@ type HashJoin struct {
 	accInstanceID uint64
 	accState      atomic.Int32
 
+	// forcedEvictSeen counts arriving build batches for the TEST-ONLY
+	// eviction forcing knob (join_force_spill.go). Written under h.mu on the
+	// build path and read nowhere else.
+	forcedEvictSeen int64
+
 	// trackedHashOverhead tracks how much hash table overhead has been charged
 	// to the memory tracker via EstimateBatchBytes (40 bytes/row). When the
 	// actual hash table grows beyond this (e.g., string arenas, grow() doubling),
