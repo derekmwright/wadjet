@@ -476,6 +476,18 @@ func pmRigUpWith(t *testing.T, ctx context.Context, provider *auth.Provider) pmR
 	}
 	dag := newCoord()
 	dagShuffled := newCoord(func(c *coordinator.Config) { c.BroadcastBytesOverride = 1 })
+	// The SHIPPED DEFAULT, as its own door. `--local-fastpath-bytes` is
+	// 64 MiB and this fixture is a few KB, so in a default deployment every
+	// statement in this matrix takes the coordinator's in-process pipeline —
+	// an entry the two DAG doors above pin OFF (`LocalFastPathBytes: 0`) and
+	// that `embedded/single` does not reach either, because that door is
+	// `wadjet.DB` and this one is `coordinator.ExecuteSQL` choosing to run
+	// locally. It was the one door of a default deployment the matrix did not
+	// have, and it is not a duplicate of any other: with the v0.18.61 star
+	// expansion the census is 52 leaking cells over the eight doors below and
+	// 65 with this one, because the fast path leaks exactly as the
+	// single-process doors do (round-1 review, P1).
+	dagFastPath := newCoord(func(c *coordinator.Config) { c.LocalFastPathBytes = 64 << 20 })
 	// Heartbeat on the workers' behalf so planning sees the cluster now.
 	deadline := time.Now().Add(30 * time.Second)
 	for {
@@ -491,12 +503,14 @@ func pmRigUpWith(t *testing.T, ctx context.Context, provider *auth.Provider) pmR
 			}
 		}
 		nc.Flush()
-		if dag.Workers().Count() >= 3 && dagShuffled.Workers().Count() >= 3 {
+		if dag.Workers().Count() >= 3 && dagShuffled.Workers().Count() >= 3 &&
+			dagFastPath.Workers().Count() >= 3 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("workers did not register: dag=%d shuffled=%d",
-				dag.Workers().Count(), dagShuffled.Workers().Count())
+			t.Fatalf("workers did not register: dag=%d shuffled=%d fastpath=%d",
+				dag.Workers().Count(), dagShuffled.Workers().Count(),
+				dagFastPath.Workers().Count())
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -524,7 +538,8 @@ func pmRigUpWith(t *testing.T, ctx context.Context, provider *auth.Provider) pmR
 	}
 	doors = append(doors,
 		pmDoor{"embedded/dag", dagRun(dag)},
-		pmDoor{"embedded/dag-shuffled", dagRun(dagShuffled)})
+		pmDoor{"embedded/dag-shuffled", dagRun(dagShuffled)},
+		pmDoor{"embedded/dag-fastpath", dagRun(dagFastPath)})
 
 	// --- pgwire: the single-process door and the DAG door -----------------
 	pgSingle := pgwire.NewServer(single, pgwire.Config{AuthProvider: provider}, logger)
@@ -656,7 +671,7 @@ type pmCell struct {
 	// with instead of an answer.
 	wantErrLike string
 	// There is deliberately NO per-arm expectation here. Every cell asserts
-	// ONE answer on all eight runners. An earlier revision carried a
+	// ONE answer on all NINE runners. An earlier revision carried a
 	// `wantDAG` pin for a shape the DAG answered differently; the review
 	// measured that difference and it was a per-row disclosure, not a path
 	// quirk. A pin is never the disposition for a leak: the shape either
@@ -779,7 +794,7 @@ func pmCells() []pmCell {
 
 		// ------------------------------------------------------------------
 		// Round-1 review: the shapes the first matrix did not carry. Thirteen
-		// of them leaked at af6f18db on all eight runners — EXCEPT, INTERSECT
+		// of them leaked at af6f18db on all eight runners of that day — EXCEPT, INTERSECT
 		// and UNION-distinct over a masked column, and a correlated scalar
 		// subquery's OUTER reference, among them.
 		{name: "window_order_by_masked",
@@ -991,7 +1006,7 @@ func pmCells() []pmCell {
 		// so `WHERE bal > (SELECT MIN(bal) FROM e7bal)` returned exactly the
 		// rows whose stored balance was positive (ids 2 4 6 8) where the
 		// in-process pipeline returned none. Every cell below asserts the
-		// in-process answer on all eight runners.
+		// in-process answer on every runner.
 		{name: "per_row_bit_scalar_subquery_gt",
 			sql:  `SELECT id FROM e7bal WHERE bal > (SELECT MIN(bal) FROM e7bal) ORDER BY id`,
 			want: nil},
@@ -1144,9 +1159,9 @@ func pmCells() []pmCell {
 		// query is SQL TEXT when enforcement runs, so what it contains — a
 		// derived table, a set operation, a correlation — is the client's
 		// choice and no per-shape teaching can enumerate it (#859 round 4).
-		// Every one of them used to REFUSE 0A000 on all eight runners, and
-		// SEVEN of them now ANSWER — with the MASK, uniformly on all eight
-		// (7 cells x 8 runners is the 56 failures a base measurement shows;
+		// Every one of them used to REFUSE 0A000 on every runner, and
+		// SEVEN of them now ANSWER — with the MASK, uniformly on all of them
+		// (7 cells x the 8 runners of that day is the 56 failures a base measurement shows;
 		// these notes first said six). That is
 		// a change in what the branch promises and it is recorded here rather
 		// than absorbed: the refusal was never the right answer, it was the
@@ -1186,7 +1201,7 @@ func pmCells() []pmCell {
 		// EXISTS: an EXISTS over a set operation is refused on the DAG arms
 		// for a pre-existing reason of its own ("EXISTS subquery requires a
 		// SubqueryRunner"), so that spelling cannot assert ONE disposition on
-		// all eight runners — and a cell that accepts two messages asserts
+		// every runner — and a cell that accepts two messages asserts
 		// neither.
 		{name: "hidden_relation_union_distinct_inside_in",
 			sql: `SELECT d.id FROM e7other d WHERE d.id IN (` +
