@@ -163,6 +163,33 @@ func TestTypeMatrixPruningNeverChangesTheAnswer(t *testing.T) {
 		// A BARE address is a /32 host route, as PostgreSQL's inet reads it.
 		{"CidrEqualsABareAddress",
 			fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE c_cidr = '172.16.2.187'", typematrix.Table)},
+		// TIME_BUCKET beside a range predicate on the SAME column (#965).
+		// A downsampling GROUP BY key is only usable at scale if it does not
+		// stand between the predicate and the row-group prune, and it does
+		// not: `time_bucket` is a projection over `c_ts`, and the predicate
+		// pushed to the scan is still the bare `c_ts >= …` that
+		// structuredConjuncts extracted. Comparing the two prune settings is
+		// what makes that a measurement rather than a claim about the code.
+		//
+		// The bucketed COUNT is summed back to one number so the comparison
+		// is the same shape as every other cell here. The threshold sits in
+		// the MIDDLE of the fixture's c_ts range (2023-11-14 22:13 ..
+		// 2023-11-18 10:55), so the predicate crosses row-group bounds
+		// instead of matching everything or nothing.
+		{"TimeBucketBesideARangePredicate",
+			fmt.Sprintf(`SELECT SUM(n) AS n FROM (
+			   SELECT time_bucket(INTERVAL '1' DAY, c_ts) AS b, COUNT(*) AS n
+			   FROM %s WHERE c_ts >= TIMESTAMP '2023-11-16 16:35:00' GROUP BY 1) t`,
+				typematrix.Table)},
+		// And the bucket used as the PREDICATE's own column, which is the
+		// shape that would silently start pruning if a monotone-function
+		// rewrite were ever taught to this layer. Both settings must still
+		// agree; today neither prunes, because structuredConjuncts requires a
+		// bare column reference.
+		{"TimeBucketInThePredicate",
+			fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s
+			   WHERE time_bucket(INTERVAL '1' DAY, c_ts) >= TIMESTAMP '2023-11-16 00:00:00'`,
+				typematrix.Table)},
 	}
 	for _, tc := range extra {
 		tc := tc
