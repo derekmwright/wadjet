@@ -1942,15 +1942,26 @@ relation:
    are ONE model wherever the block is materialized, so `stageHiddenPositions`
    reads the projection there.
 
-**What is MARKED, and what is left alone.** Only a block that INTRODUCES a
-name — a rename, a computed item, an alias over an aggregate, or one name
-published twice — is marked. A block that merely NARROWS its stream is not,
-and that is a decision: column pruning already answers a narrowing on every
-arm, the columns that survive it do so because something else needs them (a
-`__sortkey_N` for the block's own ORDER BY), and there the projection cannot be
-published anyway. Marking them bought nothing and cost two things it must not —
-a twice-referenced CTE taken off the DAG, and `__sortkey_0` put on the wire
-where the DAG had published a user column.
+**What is MARKED, and what a decline means.** Two classes are marked and the
+class decides only what happens when the publish DECLINES. A block that
+INTRODUCES a name — a rename, a computed item, an alias over an aggregate, one
+name published twice — makes the star read the wrong relation whatever else is
+true, so one the pass cannot carry is refused and routed. A block that merely
+NARROWS its stream is published where it can be (a lateral whose block is a
+bare `SELECT amount` otherwise publishes the scan's `order_id` beside it) and
+LEFT EXACTLY AS IT WAS where it cannot — never refused, never routed.
+
+That asymmetry is the rule, not a convenience. The route is not
+answer-preserving, so it may carry only what was already wrong or loud: a
+twice-referenced CTE that answered PostgreSQL exactly was taken off the DAG by
+refusing a narrowing block, and the lateral shapes this arc closes were
+reopened by not marking one.
+
+One block is not a candidate at all: one whose own `ORDER BY` was
+MATERIALIZED. Its list carries a `__sortkey_N` the sort below still needs, so
+publishing it puts a name no query can spell on the wire and dropping it takes
+the key from the operator that reads it. Neither is an improvement on what the
+engine already does.
 
 **What the route is now.** `ErrLateralProjectionDistributed` is kept and
 RETRIGGERED. It used to fire on a name test over every lateral; it fires now on
@@ -1962,7 +1973,7 @@ or loud. The coordinator-local pipeline's ORDER BY is wrong for shapes the DAG
 gets right, so a query that EXECUTED correctly must never be handed to it. Three
 things follow, each of which was a right-to-routed move until it was fixed:
 
-  - a NARROWING block is never marked, so it never routes (above);
+  - a NARROWING block is never REFUSED, so it never routes (above);
   - a CTE body is planned ONCE, so the second reference's `Project` nodes never
     reach the publish hook — the verdict is carried to them where the subtree
     is deduped, or a twice-referenced CTE is marked, unpublishable and routed;

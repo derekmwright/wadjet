@@ -111,6 +111,20 @@ func blockProjectionLeavesItsStream(p *logical.Node) blockDivergence {
 	if len(names) == 0 {
 		return blockAgrees
 	}
+	// A BLOCK WHOSE OWN ORDER BY WAS MATERIALIZED is left alone entirely. Its
+	// list carries a `__sortkey_N` the sort below still needs, and a
+	// projection that publishes it puts a name no query can spell on the wire
+	// while one that drops it takes the key away from the operator that reads
+	// it. Neither is an improvement on what the engine already does, so the
+	// block is not a candidate at all: `SELECT * FROM o JOIN (SELECT order_id,
+	// product FROM item ORDER BY amount LIMIT 3) s` publishes the scan's
+	// `amount` beside the block's two columns exactly as it did at v0.18.60.
+	sortKeyFamily := plansql.ReservedSlotFamily(plansql.SlotName(plansql.SlotSortKey, 0))
+	for _, name := range names {
+		if plansql.ReservedSlotFamily(strings.ToLower(blockBareName(name))) == sortKeyFamily {
+			return blockAgrees
+		}
+	}
 	stream := blockStreamNames(p)
 	if len(stream) == 0 {
 		// A stream this pass cannot state says nothing, exactly as
@@ -130,7 +144,8 @@ func blockProjectionLeavesItsStream(p *logical.Node) blockDivergence {
 		return out
 	}
 	names, stream = user(names), user(stream)
-	// NARROWING IS THE WEAK CLASS. A block that publishes FEWER columns than
+	// NARROWING IS THE WEAK CLASS, and the difference is what happens when the
+	// publish declines rather than whether the block is looked at. A block that publishes FEWER columns than
 	// the stream — every one of them the stream's, once, and no name of its
 	// own — is answered by the column pruning that already runs: the star sees
 	// the narrowed list on every arm and always did. Marking it anyway cost an
@@ -153,6 +168,9 @@ func blockProjectionLeavesItsStream(p *logical.Node) blockDivergence {
 		}
 		seen[bare] = true
 	}
+	if len(names) != len(stream) {
+		return blockNarrows
+	}
 	return blockAgrees
 }
 
@@ -164,22 +182,29 @@ func blockProjectionLeavesItsStream(p *logical.Node) blockDivergence {
 //     item, an alias over an aggregate) or one published TWICE. The star sees
 //     the wrong relation, always, so a block this pass cannot publish is
 //     REFUSED and routed — it was wrong or loud before the pass existed.
-//   - blockAgrees: every published name is the stream's, once. That INCLUDES
-//     a block that merely NARROWS its stream, and leaving those alone is a
-//     decision rather than an oversight. Column pruning already answers a
-//     narrowing on every arm; the leftovers reach the star only where
-//     something else needs them (a `__sortkey_N` for the block's own ORDER
-//     BY), and there the pass cannot publish anyway — so marking them bought
-//     nothing and cost two things it must not. A twice-referenced CTE was
-//     taken off the DAG and answered by a local pipeline whose ORDER BY for
-//     that shape is wrong (round-1 B1), and a block with its own ORDER BY …
-//     LIMIT put `__sortkey_0` on the wire where the DAG had published a user
-//     column. Both are RIGHT-or-equal at base, and the rule is that the route
-//     may take only what was already wrong or loud.
+//   - blockNarrows: every published name is the stream's, once, and the stream
+//     carries MORE. Publishing is an improvement — column pruning removes most
+//     of the extras but not the ones something else keeps alive, and a lateral
+//     whose block is a bare `SELECT amount` published the scan's `order_id`
+//     beside it. But NOT publishing is exactly what the engine did before, so
+//     a narrowing block the pass cannot carry is left alone and never routed.
+//   - blockIntroduces: a name the stream does not carry (a rename, a computed
+//     item, an alias over an aggregate) or one published TWICE. The star sees
+//     the wrong relation, always, so a block this pass cannot publish IS
+//     refused and routed — it was wrong or loud before the pass existed.
+//
+// Both classes are MARKED; the class decides only what happens when the
+// publish DECLINES. That asymmetry is the whole rule: the route is not
+// answer-preserving — the coordinator-local pipeline's ORDER BY is wrong for
+// shapes the DAG gets right — so it may carry only what was already wrong or
+// loud. Refusing a narrowing block took a twice-referenced CTE that answered
+// PostgreSQL exactly off the DAG (round-1 B1); not marking one at all reopened
+// the lateral shapes round 1 closed.
 type blockDivergence int
 
 const (
 	blockAgrees blockDivergence = iota
+	blockNarrows
 	blockIntroduces
 )
 
@@ -292,6 +317,7 @@ func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool) ([
 	// (round-1 P3). It is the same list extractOutputRenames walks for the
 	// statement's own projection, and for the same reason.
 	items := logical.VisibleProjections(p.Projections)
+	sortKeyFamily := plansql.ReservedSlotFamily(plansql.SlotName(plansql.SlotSortKey, 0))
 	out := make([]blockColumn, 0, len(items))
 	for _, pr := range items {
 		if pr.IsAgg {
@@ -309,6 +335,16 @@ func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool) ([
 		bare := strings.ToLower(blockBareName(name))
 		if bare == "" {
 			return nil, false
+		}
+		// A MATERIALIZED ORDER BY TERM is the planner's own and is not part of
+		// the relation the block publishes. `VisibleProjections` trims the
+		// ones the builder flagged hidden; a block whose own `ORDER BY amount
+		// LIMIT 3` was materialized carries one as an ordinary item, and
+		// publishing it put `__sortkey_0` on the wire where no query can spell
+		// it. The correlation slot is NOT trimmed here — the join keys on it
+		// and drops it by position (ADR-0026 §3c).
+		if plansql.ReservedSlotFamily(bare) == sortKeyFamily {
+			continue
 		}
 		if pr.ASTExpr != nil && !isSimpleColRefForRename(pr.ASTExpr) {
 			// The CONFIDENCE, not the TypeID: parquet.TypeBool is the zero

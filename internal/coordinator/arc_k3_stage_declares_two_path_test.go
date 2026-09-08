@@ -207,10 +207,13 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 		// below EXECUTES distributed; the three that route say why, each
 		// measured at bb8635a4.
 		//
-		// A NARROWING block is left alone deliberately: column pruning answers
-		// it on every arm, the `amount` its own ORDER BY keeps alive is a
-		// PRE-EXISTING leak identical at bb8635a4, and marking it bought
-		// nothing while costing a route.
+		// A block whose OWN ORDER BY was materialized is not a candidate at
+		// all: its list carries a `__sortkey_N` the sort below still needs, so
+		// publishing it puts a name no query can spell on the wire and
+		// dropping it takes the key from the operator that reads it. The
+		// `amount` the DAG publishes beside the block's two columns is the
+		// PRE-EXISTING leak, identical at bb8635a4, and the single arms' own
+		// `__sortkey_0` is pinned here rather than exempted.
 		{name: "boundary/narrowing-block-is-left-alone",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, product FROM lat_item ` +
 				`ORDER BY amount LIMIT 3) s ON s.order_id = o.id ORDER BY o.id, s.product`,
