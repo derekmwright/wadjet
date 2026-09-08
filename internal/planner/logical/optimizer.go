@@ -3748,6 +3748,10 @@ func reorderJoins(n *Node) *Node {
 	if !isInnerJoin(n) {
 		return n
 	}
+	// A DEPENDENT JOIN IS NOT REORDERABLE (#1008).
+	if isDependentJoin(n) {
+		return n
+	}
 	// Don't reorder joins involving CTE references — the CTE's cardinality is
 	// unknown at plan time, so cost estimates are unreliable and reordering can
 	// break key assignment when both tables share column names.
@@ -3797,10 +3801,55 @@ func isInnerJoin(n *Node) bool {
 	return jt == "" || jt == "join" || jt == "inner" || jt == "inner join" || jt == "cross"
 }
 
+// isDependentJoin reports whether this join is one the PLANNER manufactured
+// for a decorrelated LATERAL — a dependent join, whose inner side is a plan OF
+// the outer side's rows.
+//
+// Such a join is not a free inner join and reordering it is not a cost
+// decision (#1008):
+//
+//   - `costBasedJoinReorder` REBUILDS the chain with `NewJoin`, which carries
+//     none of the rules the lowering attached to the node it built — the slot
+//     it minted and drops (`HiddenJoinCols`), the pad marker and the
+//     empty-input defaults (ADR-0026 §3c). Two LATERALs over one outer flatten
+//     to THREE relations, so `SELECT * FROM lat_ord o JOIN LATERAL (… GROUP BY
+//     i.product) s ON true JOIN LATERAL (…) s2 ON true` came back with
+//     `__key_0` and `__key_1` in the client's relation, and the re-hung
+//     conditions keyed a STRING against the integer correlation column: `join
+//     key "s.__key_0" is STRING on the probe side` on both DAG arms, and on
+//     the single-process arms a star over two joins that declares nothing —
+//     `cols=[] rows=0` where PostgreSQL 17 answers eight rows.
+//   - `flattenJoinChain` walks THROUGH the manufactured join, which makes the
+//     lateral's inner subtree and the relation it CORRELATES ON two
+//     independent relations the cost model may put in either order — the inner
+//     placed before the outer it depends on.
+//   - The two-way swap below exchanges the sides, and for a manufactured join
+//     the side order is the ANSWER: `SELECT *` publishes the outer relation's
+//     columns and then the lateral's, which is what PostgreSQL publishes.
+//
+// The marker is the lowering's own: `Node.LateralSubtree` on the side it
+// BUILT (builder.go), plus the rules it hangs on the join, so a shape that
+// mints no slot is still recognised.
+func isDependentJoin(n *Node) bool {
+	if n == nil || n.Type != NodeJoin {
+		return false
+	}
+	for _, c := range n.Children {
+		if c != nil && c.LateralSubtree {
+			return true
+		}
+	}
+	return len(n.HiddenJoinCols) > 0 || n.LateralPadMarker != "" ||
+		len(n.LateralEmptyDefaults) > 0
+}
+
 // flattenJoinChain walks a left-deep chain of inner joins, collecting leaf
 // relations and the join conditions between them.
+//
+// A DEPENDENT join is a leaf: it is one relation to the cost model, never a
+// chain to be taken apart (isDependentJoin, #1008).
 func flattenJoinChain(n *Node, rels *[]*Node, edges *[]joinEdge) {
-	if n.Type != NodeJoin || !isInnerJoin(n) {
+	if n.Type != NodeJoin || !isInnerJoin(n) || isDependentJoin(n) {
 		*rels = append(*rels, n)
 		return
 	}
