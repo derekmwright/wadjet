@@ -72,15 +72,26 @@ jobs:
         # authorizes before it acts) and #859 (the policy is enforced at the
         # scan, for every consumer above it) — run WITHOUT -short.
         #
-        # Eleven tests in ./internal/server/ run here that the step above
-        # skips: TestPolicyMaskingIsPlanTimeOnEveryDoor,
-        # TestPolicyMaskingLeavesUnpolicedIdentitiesAlone,
-        # TestAsyncDoorRefusesAPolicedStatement,
-        # TestLegacyYAMLCellPoliciesAreEnforcedAtThePlanOnEveryDoor,
-        # TestARowFilterSeesTheTrueValueAndTheUserPredicateSeesTheMask,
-        # the four TestARowFilter* residuals, the two TestMerge* policy
-        # refusals, the four TestAQueryLimit/ceiling obligations, and
-        # TestCoordinatorStreamCarriesDuplicateNamesPositionally.
+        # ELEVEN tests in ./internal/server/ run here that the step above
+        # skips. Measured, not inferred from the `testing.Short()` sites —
+        # five tests in those same files do NOT skip and already ran
+        # (`go test -short -v -run '<names>' ./internal/server/` prints
+        # 11 SKIP / 5 PASS). The eleven:
+        #   TestPolicyMaskingIsPlanTimeOnEveryDoor
+        #   TestPolicyMaskingLeavesUnpolicedIdentitiesAlone
+        #   TestAsyncDoorRefusesAPolicedStatement
+        #   TestLegacyYAMLCellPoliciesAreEnforcedAtThePlanOnEveryDoor
+        #   TestARowFilterSeesTheTrueValueAndTheUserPredicateSeesTheMask
+        #   TestARowFilterMayNameAColumnThePolicyDenies
+        #   TestARowFilterOverAMaskedColumnComparesTheStoredValue
+        #   TestARowFilterNamingAnotherTablesColumnRefuses
+        #   TestARowFilterNamingAColumnThatDoesNotExistStillRefuses
+        #   TestAQueryLimitObligationIsEnforcedOnEveryDoor
+        #   TestCoordinatorStreamCarriesDuplicateNamesPositionally
+        # The two TestMerge* policy refusals, TestTheTighterOfTheTwoCeilings
+        # Wins, TestAPolicyCeilingCannotWidenTheDeploymentsGuard and
+        # TestAQueryLimitObligationThatCannotBeEnforcedRefusesToLoad ran under
+        # -short already; they are re-run here, not newly covered.
         # pgwire and auth carry no -short skip today; they are in the step so
         # that a future one is covered by construction rather than by a name
         # list somebody has to remember to extend.
