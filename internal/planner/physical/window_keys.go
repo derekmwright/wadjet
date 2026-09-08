@@ -152,8 +152,28 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 				k.Expr, k.Text = ast, ast.String()
 				k.Field = fieldOf(colFields, ref)
 			case ref.Table != "":
+				// A QUALIFIED reference KEEPS its qualifier where the input's
+				// column set cannot settle it. Dropping to the bare name is
+				// safe only while one column answers to it, and over a JOIN —
+				// the input shape `inputColTypes` declines outright, so the
+				// bind below never even runs there — two arms routinely do:
+				// `PARTITION BY x.w` over arms that both publish `w` reached
+				// the operator as `w`, bound the OTHER arm's column, made
+				// every row its own partition and answered its own value
+				// where PostgreSQL answers the partition's total — on all
+				// four arms, in silence (#975).
+				//
+				// The qualified spelling is what a join PUBLISHES for a
+				// contested bare name (`joinOutputSchemaWithMapping` qualifies
+				// every duplicate by its owning alias), and it costs nothing
+				// where the name is not contested: `exec.columnIndexFallback`
+				// tries the exact spelling, then the bare part, then a unique
+				// `.bare` suffix, so `x.w` still finds a lone `w`.
 				if bound, ok := bindWindowColRef(ref, colTypes); ok {
 					k.Name = bound
+				} else if ref.Column != "" {
+					k.Name = plansql.NormalizeIdentRef(ref.Table) + "." +
+						plansql.NormalizeIdentRef(ref.Column)
 				}
 			}
 		}

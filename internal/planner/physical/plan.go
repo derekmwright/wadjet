@@ -8395,8 +8395,33 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// name — which is the same two names ADR-0026 §2 gives a GROUP BY
 			// key and #807 gives a sort key, at the third caller of one
 			// function.
+			// …and a QUALIFIED key resolves inside the ARM its qualifier
+			// names, for the reason the ARGUMENT does below (#742 round 4):
+			// `derivedAliasSourceColumn` stops at a Join because it has no way
+			// to choose an arm, so asked of one it answers nothing and the key
+			// travelled as written. On the DAG the arm's own Project emits no
+			// stage, so the join's stream carries x's SOURCE column and not
+			// its alias, and `PARTITION BY x.w` over two arms that both
+			// publish `w` bound the other arm's column — every row its own
+			// partition, the window's own value where PostgreSQL answers the
+			// partition's total (#975). Scoping it is what makes the key name
+			// a column of the stream AND the stage's distribution key name the
+			// same thing.
 			var winAliases []aliasColumn
 			for i, pb := range partitionBy {
+				if src, scoped := windowArgSourceInScope(pb, winChild); scoped {
+					if src != "" {
+						partitionBy[i] = cleanExpr(src)
+					}
+					// Scoped with no SOURCE column is a COMPUTED alias inside
+					// that arm, and the key stays as written. Materializing it
+					// from the arm's own subtree was BUILT and WITHDRAWN: it
+					// moved three shapes from executed-and-right to a local
+					// route (`SUM(x.w) OVER (PARTITION BY y.w)` among them),
+					// and a right-to-routed move is not a fix. What is left is
+					// one shuffled-arm refusal, pinned with its mechanism.
+					continue
+				}
 				if src := derivedAliasSourceColumn(pb, winChild); src != "" {
 					partitionBy[i] = cleanExpr(src)
 					continue
@@ -8407,6 +8432,12 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				}
 			}
 			for i := range orderBy {
+				if src, scoped := windowArgSourceInScope(orderBy[i].Column, winChild); scoped {
+					if src != "" {
+						orderBy[i].Column = cleanExpr(src)
+					}
+					continue
+				}
 				if src := derivedAliasSourceColumn(orderBy[i].Column, winChild); src != "" {
 					orderBy[i].Column = cleanExpr(src)
 					continue

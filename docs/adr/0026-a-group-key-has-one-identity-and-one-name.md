@@ -1848,6 +1848,7 @@ names, and #770, #947 and #949 are what that cost:
 | a WINDOW argument | the same, and the DECLARATION goes with the value |
 | an ORDER BY term | the OUTPUT column it names, versus the producer's SOURCE names the fold leaves it addressing |
 | a projection's DECLARED TYPE | the producer's own declaration, versus the expression re-read as arithmetic |
+| a window's PARTITION BY key (2026-09-07, #975) | the arm its qualifier NAMES publishes it as an alias on one engine and as a source column on the other |
 
 The rule is the same one, stated once: **a consumer binds through the identity
 its PRODUCER published**, and where the producer publishes nothing for the
@@ -1856,6 +1857,14 @@ mirror of the runtime resolver and its measured payload cost (zero — the TPC-H
 stage-dump golden is byte-identical) are in ADR-0025's SETTLED section, which
 is where a payload question belongs; this section records only that §2's
 carrier is the pattern the others follow.
+
+The SIXTH is the PARTITION BY key, and it is the one that cannot wait for the
+end of planning: the key is also the stage's DISTRIBUTION, so it settles at
+EMISSION and the arm-aware choice has to be made there. ADR-0025's "SETTLED:
+the sixth consumer" section carries it — a qualified key keeps its qualifier
+where the input's column set cannot bind it, and the DAG resolves it inside the
+arm its qualifier names. Same rule, different site, because the deadline is
+different.
 
 Each consumer records its candidates at emission and settles them at the end
 of planning, exactly as `GroupKeyResolution.Alias`/`Def` does:

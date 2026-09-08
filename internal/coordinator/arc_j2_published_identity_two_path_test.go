@@ -256,61 +256,32 @@ func TestJ2AJoinConsumerBindsThePublishedIdentity(t *testing.T) {
 				"12.75,1275.0100 | 12.75,1275.0100 | 12.75,1275.0100 | 12.75,1275.0100",
 		},
 		{
-			// PINNED, a SIXTH consumer this arc does not reach: the window's
-			// own PARTITION BY key. `resolveWindowKeys` settles it at
-			// emission, because the key is also the stage's DISTRIBUTION and
-			// rewriting it after EnsureDistribution would leave the two
-			// disagreeing — and it settles it ARM-BLIND, so `PARTITION BY x.w`
-			// over two arms that both publish `w` binds the OTHER arm's
-			// column. That column is distinct on every row, so the window
-			// partitions each row on its own and answers its own value where
-			// PostgreSQL answers the partition's total.
-			//
-			// Wrong on ALL FOUR arms at a3f9b664 and here, so it is a
-			// wadjet-vs-PostgreSQL divergence rather than a two-path one, and
-			// nothing in this arc moved a value. The shuffled arm's
-			// DISPOSITION did move: at a3f9b664 it failed at
-			// `exchange-repartition-window-9-9` because the payload was
-			// incomplete, and now that the carry completes it, it computes the
-			// same wrong partition as the other three. Fail-on-agree.
-			name: "770 PINNED: a PARTITIONED window over the contested alias binds the other arm",
+			// The SIXTH consumer, pinned here by this arc and CLOSED by K1
+			// (#975): `resolveWindowKeys` still settles the key at emission,
+			// because the key is also the stage's DISTRIBUTION — but it no
+			// longer settles it arm-blind. The qualifier survives where the
+			// input's column set cannot bind it, and the DAG resolves it
+			// inside the arm its qualifier names. Both pins are deleted as
+			// the proof.
+			name: "770 a PARTITIONED window over the contested alias binds its own arm",
 			sql: "SELECT x.w AS xw, SUM(y.w) OVER (PARTITION BY x.w) AS s " + arm3 +
 				" ORDER BY xw, s",
 			want: "cols=[xw:DECIMAL(9,2) s:DECIMAL(38,4)] rows=5 | 2.00,1000.0000 | " +
 				"12.75,3825.0000 | 12.75,3825.0000 | 12.75,3825.0000 | 12.75,3825.0000",
-			pin: map[string]string{
-				"single": "cols=[xw:DECIMAL(9,2) s:DECIMAL(38,4)] rows=5 | 2.00,1000.0000 | " +
-					"12.75,1274.9900 | 12.75,1275.0000 | 12.75,1275.0100 | 12.75,NULL",
-				spilledArm: "cols=[xw:DECIMAL(9,2) s:DECIMAL(38,4)] rows=5 | 2.00,1000.0000 | " +
-					"12.75,1274.9900 | 12.75,1275.0000 | 12.75,1275.0100 | 12.75,NULL",
-				"dag": "cols=[xw:DECIMAL(9,2) s:DECIMAL(38,4)] rows=5 | 2.00,1000.0000 | " +
-					"12.75,1274.9900 | 12.75,1275.0000 | 12.75,1275.0100 | 12.75,NULL",
-				"dagshuf": "cols=[xw:DECIMAL(9,2) s:DECIMAL(38,4)] rows=5 | 2.00,1000.0000 | " +
-					"12.75,1274.9900 | 12.75,1275.0000 | 12.75,1275.0100 | 12.75,NULL",
-			},
-			why: "a window's PARTITION BY key is the sixth consumer of the published identity " +
-				"and the one this arc does not reach: it is settled at emission because it is " +
-				"also the stage's distribution, and it is settled arm-blind",
 		},
 		{
-			// The same query with the two aliases DISTINCT: the partition is
-			// right on the local path, and the DAG refuses it outright — a
-			// second pre-existing defect in the same key, and the control that
-			// says the cell above is about the COLLISION.
-			name: "770 PINNED: the same PARTITIONED window with distinct aliases",
+			// The same query with the two aliases DISTINCT: right on the local
+			// path at a3f9b664 and refused on both DAG arms
+			// (`window: PARTITION BY "w" is not a column of its input`), which
+			// was the control saying the cell above is about the COLLISION.
+			// The arm-scoped resolution answers it on every arm too.
+			name: "770 the same PARTITIONED window with distinct aliases",
 			sql: "SELECT x.w AS xw, SUM(y.z) OVER (PARTITION BY x.w) AS s " +
 				"FROM (SELECT id, a AS w FROM decpair) x " +
 				"JOIN (SELECT id, b*100 AS z FROM decpair) y ON x.id = y.id " +
 				"JOIN decpair u ON x.id = u.id WHERE x.w > 1 ORDER BY xw, s",
 			want: "cols=[xw:DECIMAL(9,2) s:DECIMAL(38,4)] rows=5 | 2.00,1000.0000 | " +
 				"12.75,3825.0000 | 12.75,3825.0000 | 12.75,3825.0000 | 12.75,3825.0000",
-			pin: map[string]string{
-				"dag":     "ERR native DAG: stage window-5 (window)",
-				"dagshuf": "ERR native DAG: stage exchange-repartition-window-9-9",
-			},
-			why: "`window: PARTITION BY \"w\" is not a column of its input` — the key was " +
-				"re-spelled to the source `a` at emission and the window's input publishes " +
-				"the alias; identical at a3f9b664",
 		},
 		{
 			// PINNED. An OUTER join with a NON-KEY predicate in its ON

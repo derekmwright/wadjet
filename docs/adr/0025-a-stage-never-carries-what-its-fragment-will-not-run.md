@@ -430,35 +430,11 @@ arms against live PostgreSQL 17.11.
 deferral was recorded as — SEVENTEEN cells, thirteen pinned and four controls —
 is DELETED: every shape in it answers.
 
-### NOT settled: three shapes, all pinned fail-on-agree
+### NOT settled: two shapes, both pinned fail-on-agree
 
-Three shapes this decision does not reach.
-
-**A window's PARTITION BY key** is the sixth consumer and it is bound at
-EMISSION, because the key is also the stage's DISTRIBUTION and rewriting it
-after `EnsureDistribution` would leave the two disagreeing. `resolveWindowKeys`
-settles it ARM-BLIND, so `PARTITION BY x.w` over two arms that both publish `w`
-binds the other arm's column; that column is distinct on every row, so each row
-becomes its own partition and the window answers its own value where
-PostgreSQL answers the partition's total. Wrong on ALL FOUR arms, so a
-wadjet-vs-PostgreSQL divergence rather than a two-path one. Pinned in
-`TestJ2AJoinConsumerBindsThePublishedIdentity` with PostgreSQL's answer beside
-it, together with the distinct-alias twin — right on the local path, refused on
-both DAG arms — as the control that says the first is about the collision. The
-repair has to make the arm-aware choice at emission time, where the stream
-model this decision uses is not yet available; that is its own arc.
-
-The shuffled arm's DISPOSITION moved here, from a payload failure at
-`exchange-repartition-window-9-9` to the same wrong number the others give, and
-the argument that licenses that is an ASYMMETRY rather than a preference:
-`single`, `spilled` and `dag` already answered the wrong number at `a3f9b664`,
-so no refusal became a wrong answer for anyone — what went away is a payload
-accident that happened to mask one arm, and a query that answers the same wrong
-number everywhere is a smaller hazard than one that answers three ways. Keeping
-the refusal is not available at this decision's site either: it would mean
-teaching the carry that a value wanted ONLY by a PARTITION BY key must not be
-carried, a special case keyed on the consumer kind, which is the model rule 11
-refuses.
+The third — **a window's PARTITION BY key** — was pinned here and is CLOSED by
+arc K1 (#975); its record is below, under "SETTLED: the sixth consumer". Two
+shapes this decision does not reach remain.
 
 **A join stage whose tasks write different `.wshf` schemas.** An OUTER join with
 a NON-KEY predicate in its ON clause — `LEFT JOIN … ON x.id = y.id AND
@@ -486,6 +462,68 @@ what remains is a routing counter, asserted as one in
 `coordinator.TestH2TheWindowDeclaredTypeCensus`. Making the DAG declare it
 means making some fragment RUN the item, which is the attach pass's decision
 and not a spelling.
+
+
+## SETTLED: the sixth consumer — a window's PARTITION BY key (2026-09-07, #975, arc K1)
+
+The key is bound at EMISSION and has to be, because it is also the stage's
+DISTRIBUTION: the exchange ahead of a window stage hash-partitions on it
+(`distribution.go`, `windowPartitionKeys`), and rewriting the key after
+`EnsureDistribution` would leave the two disagreeing. What was wrong was not
+WHERE it is bound but that it was bound ARM-BLIND, in two steps each of which
+is right on its own:
+
+- `resolveWindowKeys` dropped a qualified reference to its BARE form
+  (`cleanExpr`), which is safe only while one column answers to that name;
+- the bind that would have narrowed it further reads `inputColTypes`, which
+  DECLINES a join outright — so over the one input shape where two columns do
+  answer to a bare name, nothing ran at all.
+
+`PARTITION BY x.w` over two arms that both publish `w` therefore bound the
+other arm's column, which is distinct on every row: every row became its own
+partition and the window answered its own value where PostgreSQL answers the
+partition's total. Wrong on ALL FOUR arms — a wadjet-vs-PostgreSQL divergence
+rather than a two-path one.
+
+**The decision: a qualified key keeps its qualifier where the input's column
+set cannot settle it, and the DAG resolves it INSIDE the arm its qualifier
+names.** Two rules, because the two engines see two different streams and that
+is a fact about the executor, not a preference:
+
+- the single-process join publishes the arm's ALIAS — its Project is a real
+  operator — and `joinOutputSchemaWithMapping` qualifies every duplicate bare
+  name by its owning alias, so the qualified spelling binds exactly. It costs
+  nothing where the name is not contested: `exec.columnIndexFallback` tries the
+  exact spelling, then the bare part, then a unique `.bare` suffix.
+- the DAG's join publishes the arm's SOURCE column, because that Project emits
+  no stage, so the key is resolved through `windowArgSourceInScope` — the
+  arm-aware helper the window's ARGUMENT has used since #742 round 4, at the
+  PARTITION BY and window-ORDER-BY sites as well now.
+
+Neither is reachable until the qualifier survives, which is why arc J2's
+attempt to route the key through that helper alone moved nothing: the arm had
+already been erased upstream of it.
+
+**What this does NOT close, and one repair withdrawn.** A key naming an arm's
+COMPUTED alias (`PARTITION BY y.w` over `SELECT b*100 AS w`) has no source
+column to resolve to and stays as written; on the SHUFFLED arm the exchange is
+keyed on that name and the join's payload does not carry it, so the query
+refuses. It refused at `bb8635a4` too, under the bare spelling of the same
+missing name — no value and no disposition moved. Materializing that alias from
+the arm's own subtree was BUILT and WITHDRAWN: it moved three shapes from
+executed-and-right to a LOCAL ROUTE, and a right-to-routed move is not a fix
+(correctness protocol rule 11). Pinned fail-on-agree in
+`coordinator.TestArcK1AWindowPartitionKeyBindsItsOwnArm`.
+
+A key spelled BARE over a contested name has no arm to be scoped to at all.
+PostgreSQL refuses it (42702 `column reference "w" is ambiguous`, measured) and
+wadjet answers by binding one of the two — a superset, recorded in ADR-0012
+with the cell that says which column it binds.
+
+Gated by `coordinator.TestArcK1AWindowPartitionKeyBindsItsOwnArm` (seven cells,
+four arms, live PostgreSQL 17) and by the two cells in
+`TestJ2AJoinConsumerBindsThePublishedIdentity` whose pins are DELETED as the
+proof.
 
 ## A carrier is never handed what it cannot evaluate
 

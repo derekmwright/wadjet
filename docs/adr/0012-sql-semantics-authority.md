@@ -391,6 +391,18 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      (`ORDER BY 2` sorted by column 1 on every arm), is PostgreSQL's answer
      now.
 
+   - **`PARTITION BY <bare name>` over two join arms that both publish it is
+     answered, not refused.** (Added 2026-09-07, #975.) PostgreSQL raises
+     42702 `column reference "w" is ambiguous` for
+     `SUM(y.w) OVER (PARTITION BY w)` where two FROM items publish `w`,
+     verified live; wadjet binds one of them and answers. It is the same
+     superset as the `ORDER BY <name>` entry above and it is the BOUNDARY of
+     #975's fix rather than a residual of it: that fix makes a QUALIFIED key
+     bind the arm its qualifier names, and a key with no qualifier names no
+     arm. `coordinator.TestArcK1AWindowPartitionKeyBindsItsOwnArm`'s
+     `975 ctl the BARE contested spelling PostgreSQL refuses` records which
+     column it binds, so a change there is a diff rather than a surprise.
+
    - **A FOLDED identifier resolves case-insensitively when exactly one
      column matches.** (Added 2026-09-03, #731.) An UNQUOTED identifier folds
      to lower case at the lexer and a DELIMITED one keeps its bytes, which is
