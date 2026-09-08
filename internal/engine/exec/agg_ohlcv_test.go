@@ -29,6 +29,17 @@ func TestTheBarsMergeIsAssociativeAndCommutative(t *testing.T) {
 	}{
 		{"exact", ohlcvDomain{priceExact: true, volExact: true, priceScale: 2, volScale: 0, pvScale: 2}},
 		{"float", ohlcvDomain{}},
+		// The two MIXED carriers. Their merge law is the same law, but it
+		// reads three different pairs of slots, so a split that got one of
+		// them wrong would still pass the two above (#965).
+		//
+		// Scale 0 on the exact side, deliberately: with a scale the exact
+		// values reach the float product as `n / 10^s`, which is not exactly
+		// representable, and the sum then depends on the order it was added
+		// in — ADR-0013's nondeterminism class 9, not a merge-law defect.
+		// This gate asserts the LAW; float associativity is not part of it.
+		{"exact_price_float_volume", ohlcvDomain{priceExact: true}},
+		{"float_price_exact_volume", ohlcvDomain{volExact: true}},
 	} {
 		t.Run(dom.name, func(t *testing.T) {
 			rng := rand.New(rand.NewSource(1))
@@ -68,6 +79,11 @@ func TestTheBarsEncodedStateRoundTrips(t *testing.T) {
 		{priceExact: true, volExact: true, priceScale: 4, volScale: 2, pvScale: 6},
 		{priceExact: true, volExact: true},
 		{},
+		// The two MIXED carriers: the header's flag bits and the three slot
+		// groups have to agree about which half of each pair was written, or
+		// a decoded state reads a float64's bits as an Int128.
+		{priceExact: true},
+		{volExact: true},
 	} {
 		rows := ohlcvTestRows(37)
 		a := ohlcvFoldAll(dom, rows[:20])
@@ -289,14 +305,15 @@ func ohlcvTestRows(n int) []ohlcvTestRow {
 	return rows
 }
 
+// ohlcvFoldAll folds every row in, handing each cell to the carrier the domain
+// says it uses — the same dispatch observe() makes from the vectors, which is
+// what lets a MIXED domain be exercised here at all.
 func ohlcvFoldAll(dom ohlcvDomain, rows []ohlcvTestRow) *ohlcvState {
 	s := &ohlcvState{dom: dom}
 	for _, r := range rows {
-		if dom.priceExact {
-			s.observeExact(r.ts, batch.Int128From(r.px), batch.Int128From(r.vol))
-		} else {
-			s.observeFloat(r.ts, float64(r.px), float64(r.vol))
-		}
+		s.observeCells(r.ts,
+			batch.Int128From(r.px), float64(r.px),
+			batch.Int128From(r.vol), float64(r.vol))
 	}
 	return s
 }
@@ -311,34 +328,61 @@ func ohlcvSplit(rng *rand.Rand, rows []ohlcvTestRow) [][]ohlcvTestRow {
 	return parts
 }
 
-// ohlcvSame compares two states field for field. reflect.DeepEqual over the
-// struct would compare the unused carrier too — an exact state's float fields
-// are zero on one side and zero on the other, but a float state's Int128
-// fields are equally untouched — so it is spelled out per domain.
+// ohlcvSame compares two states group by group, each through ITS OWN carrier.
+// reflect.DeepEqual over the struct would compare the unused half too, and
+// comparing every group through ONE carrier is the hole the per-group split
+// (#965) opened: over a MIXED domain it would read the Int128 volume slots
+// (both zero) and never see a difference in the float ones.
 func ohlcvSame(a, b *ohlcvState) bool {
 	if a.n != b.n || a.firstTS != b.firstTS || a.lastTS != b.lastTS ||
 		a.overflow != b.overflow || !reflect.DeepEqual(a.dom, b.dom) {
 		return false
 	}
 	if a.dom.priceExact {
-		return a.firstPx == b.firstPx && a.lastPx == b.lastPx &&
-			a.high == b.high && a.low == b.low &&
-			a.sumVol == b.sumVol && a.sumPV == b.sumPV
+		if a.firstPx != b.firstPx || a.lastPx != b.lastPx ||
+			a.high != b.high || a.low != b.low {
+			return false
+		}
+	} else if a.firstPxF != b.firstPxF || a.lastPxF != b.lastPxF ||
+		a.highF != b.highF || a.lowF != b.lowF {
+		return false
 	}
-	return a.firstPxF == b.firstPxF && a.lastPxF == b.lastPxF &&
-		a.highF == b.highF && a.lowF == b.lowF &&
-		a.sumVolF == b.sumVolF && a.sumPVF == b.sumPVF
+	if a.dom.volExact {
+		if a.sumVol != b.sumVol {
+			return false
+		}
+	} else if a.sumVolF != b.sumVolF {
+		return false
+	}
+	if a.dom.pvExact() {
+		return a.sumPV == b.sumPV
+	}
+	return a.sumPVF == b.sumPVF
 }
 
+// ohlcvShow prints the slots ohlcvSame READ, per group. Printing one carrier
+// for the whole state made a mixed-domain divergence report two identical
+// lines, which is a failure message that hides the failure.
 func ohlcvShow(s *ohlcvState) string {
+	out := "n=" + itoa(s.n)
 	if s.dom.priceExact {
-		return "n=" + itoa(s.n) + " first=(" + itoa(s.firstTS) + "," + s.firstPx.String() +
-			") last=(" + itoa(s.lastTS) + "," + s.lastPx.String() + ") hi=" + s.high.String() +
-			" lo=" + s.low.String() + " vol=" + s.sumVol.String() + " pv=" + s.sumPV.String()
+		out += " first=(" + itoa(s.firstTS) + "," + s.firstPx.String() +
+			") last=(" + itoa(s.lastTS) + "," + s.lastPx.String() +
+			") hi=" + s.high.String() + " lo=" + s.low.String()
+	} else {
+		out += " first=(" + itoa(s.firstTS) + "," + ftoa(s.firstPxF) +
+			") last=(" + itoa(s.lastTS) + "," + ftoa(s.lastPxF) +
+			") hi=" + ftoa(s.highF) + " lo=" + ftoa(s.lowF)
 	}
-	return "n=" + itoa(s.n) + " first=(" + itoa(s.firstTS) + "," + ftoa(s.firstPxF) +
-		") last=(" + itoa(s.lastTS) + "," + ftoa(s.lastPxF) + ") hi=" + ftoa(s.highF) +
-		" lo=" + ftoa(s.lowF) + " vol=" + ftoa(s.sumVolF) + " pv=" + ftoa(s.sumPVF)
+	if s.dom.volExact {
+		out += " vol=" + s.sumVol.String()
+	} else {
+		out += " vol=" + ftoa(s.sumVolF)
+	}
+	if s.dom.pvExact() {
+		return out + " pv=" + s.sumPV.String()
+	}
+	return out + " pv=" + ftoa(s.sumPVF)
 }
 
 func itoa(v int64) string   { return strconv.FormatInt(v, 10) }
