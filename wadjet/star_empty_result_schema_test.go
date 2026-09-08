@@ -43,6 +43,26 @@ func TestStarEmptyResultDeclaresSameColumnsAsNonEmpty(t *testing.T) {
 		// each arm through the same walk, so an arm that declares nothing
 		// nils the whole set operation.
 		{"star_union_all", "SELECT * FROM mbtypes WHERE %s UNION ALL SELECT * FROM mbtypes WHERE %[1]s"},
+		// THE DEFERRED HALF OF #846, closed by #978, and the pin that used to
+		// hold it here (`TestStarOverAJoinIsStillUndeclared`) is deleted as
+		// its proof. A star over a JOIN declares the join operator's OWN
+		// output — `exec.JoinOutputSchema`, the namer the executed answer
+		// uses — so the two arms describe one relation.
+		//
+		// PostgreSQL publishes `id, g, …, id, g, …`: duplicate names kept by
+		// POSITION. This engine keeps the first side's names and qualifies the
+		// second by its owning alias (`a.id`, `a.g`, …), which is the executed
+		// convention on every arm and a PRE-EXISTING divergence older than
+		// this test — the cell asserts the two arms AGREE, which is #978's
+		// claim, not that either matches PostgreSQL's spelling.
+		//
+		// WHICH side is qualified is a COST decision: the same statement
+		// without the predicate plans the other side as the build and
+		// publishes `b.id, b.g, …`. That is why the pair is one statement
+		// under two predicates and never a predicate against no predicate.
+		{"star_self_join", "SELECT * FROM mbtypes a JOIN mbtypes b ON a.id = b.id WHERE a.%s"},
+		{"star_join_ordered", "SELECT * FROM mbtypes a JOIN mbtypes b ON a.id = b.id " +
+			"WHERE a.%s ORDER BY a.id"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			full, err := db.Query(ctx, fmt.Sprintf(tc.tmpl, "id < 100"))
@@ -118,45 +138,5 @@ func TestStarOverAGroupingDeclaresItsGroupKeys(t *testing.T) {
 					" empty %s\n full  %s", got, want)
 			}
 		})
-	}
-}
-
-// TestStarOverAJoinIsStillUndeclared is #846's DEFERRED cell, and it is a pin:
-// it fails the day the declaration arrives, which is when it must be deleted.
-//
-// A star over a JOIN is not expanded at plan time — logical.
-// ExpandStarProjections declines the same shape for the same reason, that its
-// column set is not knowable from one scan — and the executed schema qualifies
-// the right side's columns under a rule that lives in the join operator
-// ("b.c0", exec/join.go's qualCol). Declaring it here would mean a second
-// namer for the same column (ADR-0026), and the names it would have to
-// reproduce are themselves a divergence: PostgreSQL describes `SELECT * FROM t
-// a JOIN t b ON …` as c0, c1, c0, c1 — four columns, duplicate names kept by
-// POSITION (#556/#557) — where wadjet answers c0, c1, b.c0, b.c1 whether or
-// not there are rows.
-//
-// So the zero-row cell is deferred with the naming, not fixed under it. What
-// the door still guarantees is that the client gets an empty RESULT SET rather
-// than no result set: pgwire sends a zero-field RowDescription for this, never
-// EmptyQueryResponse or NoData (see internal/server/pgwire's
-// TestZeroRowSelectAlwaysSendsARowDescription).
-func TestStarOverAJoinIsStillUndeclared(t *testing.T) {
-	ctx := context.Background()
-	db := mbOpen(t)
-
-	res, err := db.Query(ctx,
-		"SELECT * FROM mbtypes a JOIN mbtypes b ON a.id = b.id WHERE a.id < 0")
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	if len(res.Rows) != 0 {
-		t.Fatalf("expected zero rows, got %d", len(res.Rows))
-	}
-	if len(res.Columns) != 0 {
-		t.Fatalf("a zero-row `SELECT *` over a JOIN now declares %v.\n"+
-			"That is the deferred half of #846 and it is FIXED — delete this pin, and "+
-			"assert the invariant in TestStarEmptyResultDeclaresSameColumnsAsNonEmpty "+
-			"instead, together with whether the names agree with PostgreSQL's.",
-			res.Columns)
 	}
 }

@@ -152,6 +152,14 @@ func zrShapes() []struct{ name, empty, full string } {
 				"FROM zrother WHERE c0 > 900) b ON b.c0 = a.c0 WHERE a.c0 = 999",
 			"SELECT * FROM zrfull a LEFT JOIN (SELECT c0, (SELECT MAX(c0) FROM zrother) AS sq " +
 				"FROM zrother WHERE c0 > 0) b ON b.c0 = a.c0 WHERE a.c0 = 1"},
+		// A SELF-JOIN. Both sides carry every name, so every build column is
+		// qualified — and WHICH side is the build is a cost decision, which is
+		// exactly why the pair is one statement under two predicates.
+		// PostgreSQL publishes the six names by POSITION (`c0, c1, c2, c0, c1,
+		// c2`); this engine qualifies the build side, on every arm.
+		{"star_self_join",
+			"SELECT * FROM zrfull a JOIN zrfull b ON a.c0 = b.c0 WHERE a.c0 = 999",
+			"SELECT * FROM zrfull a JOIN zrfull b ON a.c0 = b.c0 WHERE a.c0 = 1"},
 		{"star_cte_side",
 			"WITH q AS (SELECT c0, d1 FROM zrother) SELECT * FROM zrfull a JOIN q b " +
 				"ON b.c0 = a.c0 WHERE a.c0 = 999",

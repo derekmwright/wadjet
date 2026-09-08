@@ -138,6 +138,30 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 				`CAST(COUNT(*) AS VARCHAR) AS n FROM lat_item GROUP BY order_id) s ` +
 				`ON s.order_id = o.id ORDER BY 1`,
 			want: `nn | 2 | 2`},
+		// A SELF-JOIN's star, zero rows and non-empty, on four arms. Every
+		// name is a duplicate, so every build column is qualified — and WHICH
+		// side is the build is a COST decision, so the pair is one statement
+		// under two predicates. PostgreSQL publishes the names by POSITION
+		// (`id, order_id, product, amount` twice); this engine qualifies the
+		// build side, on every arm and at every base — the star-column-naming
+		// divergence ADR-0012 records, not something this arc moves.
+		//
+		// `981/ctl-a-self-join-still-qualifies` above is the same table joined
+		// to itself under a DIFFERENT predicate and qualifies with `b.` where
+		// these qualify with `a.`. Both are right, and together they are the
+		// evidence for the sentence above: a pair that dropped the predicate
+		// instead of changing it would be comparing two plans.
+		{name: "selfjoin/star-with-rows",
+			sql: `SELECT * FROM lat_item a JOIN lat_item b ON a.id = b.id ` +
+				`WHERE a.id < 100 ORDER BY a.id`,
+			want: `id,order_id,product,amount,a.id,a.order_id,a.product,a.amount | ` +
+				`1,1,Widget,50,1,1,Widget,50 | 2,1,Gadget,100,2,1,Gadget,100 | ` +
+				`3,2,Widget,75,3,2,Widget,75 | 4,2,Doohickey,125,4,2,Doohickey,125`},
+		{name: "selfjoin/star-with-no-rows-declares-the-same",
+			sql: `SELECT * FROM lat_item a JOIN lat_item b ON a.id = b.id ` +
+				`WHERE a.id < 0 ORDER BY a.id`,
+			want: `id,order_id,product,amount,a.id,a.order_id,a.product,a.amount`},
+
 		{name: "ctl/a-plain-join-star",
 			sql: `SELECT * FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ` +
 				`ORDER BY o.id, i.id`,
