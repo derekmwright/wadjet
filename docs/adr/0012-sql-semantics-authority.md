@@ -369,7 +369,11 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      target leaves the integer table, so `SUM(x::numeric)` is numeric and
      `SUM(x::float8)` double, as PostgreSQL has them. Gated in both spellings
      by the census's cast cells — including a 10^5-row total that now ANSWERS
-     — and by the pgwire OID gate's six cast entries.
+     — and by the pgwire OID gate's seven cast entries. Of the census's
+     TWELVE cast cells EIGHT fail when the arm is disabled alone, and of the
+     wire gate's seven FOUR do; the rest are controls that cannot move,
+     because a NARROWING cast, a cast to a non-integer target and an UNCAST
+     column answer the same either way — which is what makes them controls.
 
      The operator's runtime correction honors a bigint declaration over an
      int64-carried input for that reason: no VECTOR can tell `SUM(i32 * 1)`
@@ -496,10 +500,13 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      int-domain family with it, which is an expression-layer arc. The two
      spellings AGREE with each other and PostgreSQL has neither type, so this
      is internal consistency rather than a value divergence. Six cells in
-     `coordinator.TestH2TheWindowDeclaredTypeCensus` and five in
-     `pgwire.TestAComputedIntegerWindowArgumentDeclaresPostgresOID` are
-     PINNED to the float8 answer: the day the expression layer changes, they
-     FAIL and deleting them is the proof.
+     `coordinator.TestH2TheWindowDeclaredTypeCensus` and THREE in
+     `pgwire.TestAComputedIntegerWindowArgumentDeclaresPostgresOID`
+     (`port_times_one_PINNED`, `protocol_times_one_PINNED`,
+     `protocol_abs_PINNED`) are PINNED to the float8 answer: the day the
+     expression layer changes, they FAIL and deleting them is the proof. The
+     wire gate's `port_bare` and `protocol_bare` are CONTROLS beside them,
+     not pins — they assert OID 20, which is the rule that does hold.
 
      What was there before was worse than a wrong type. `TypeProtocol` had no
      arm in `kernel.ResolveRowSum`, `exec.isFlatSumType` or the SoA scatter's

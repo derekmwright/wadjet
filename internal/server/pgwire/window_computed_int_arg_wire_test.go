@@ -136,6 +136,11 @@ func TestAComputedIntegerWindowArgumentDeclaresPostgresOID(t *testing.T) {
 		// the control that says the arm reads the TARGET and not "is there a
 		// cast".
 		{"cast_to_numeric", "CAST(i64 AS DECIMAL(20,0))", oidNumeric, "9007199254740978"},
+		// The #849 shape — a cast under ARITHMETIC under the aggregate.
+		// `numeric_arc2_two_path_test.go` carries it too, but na2Run renders
+		// a DECIMAL through its string arm and cannot show the box; this is
+		// where the OID is seen.
+		{"cast_int8_times_two", "CAST(i64 AS BIGINT) * 2", oidNumeric, "18014398509481956"},
 
 		// PINNED, fail-on-agree (#987 review round 3, P1). A BARE PORT or
 		// PROTOCOL takes int4's result types — the two cells first — and the

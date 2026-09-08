@@ -455,6 +455,20 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 				"numwidth b, numwidth c, numwidth d, numwidth e ORDER BY 1 LIMIT 1",
 			want: "cols=[v:DECIMAL(38,0)] rows=1 | 90072014190018680000",
 		},
+		{
+			// The #849 shape, which `numeric_arc2_two_path_test.go`'s
+			// `control_summed_cast` cell also carries — but na2Run renders a
+			// DECIMAL through its STRING arm, so `v=2000006` there proves
+			// only "not a float". Here the box is spelled out, and on the
+			// wire it is OID 1700 (pgwire's `cast_int8_times_two`).
+			// PostgreSQL 17.11 over the same rows: numeric.
+			name: "987 R3 B1: SUM(CAST(int8 AS BIGINT) * 2) is numeric — the #849 shape",
+			sql:  "SELECT SUM(CAST(c_i64 AS BIGINT) * 2) OVER () AS v FROM typemx ORDER BY 1 LIMIT 1",
+			want: "cols=[v:DECIMAL(38,0)] rows=1 | 24186852560340",
+		},
+		{name: "987 R3 B1 control: the GROUPED spelling of the #849 shape",
+			sql:  "SELECT SUM(CAST(c_i64 AS BIGINT) * 2) AS v FROM typemx",
+			want: "cols=[v:DECIMAL(38,0)] rows=1 | 24186852560340"},
 		{name: "987 R3 B1 control: the same total one cast away",
 			sql: "SELECT SUM(a.w_i64) OVER () AS v FROM numwidth a, numwidth b, " +
 				"numwidth c, numwidth d, numwidth e ORDER BY 1 LIMIT 1",
