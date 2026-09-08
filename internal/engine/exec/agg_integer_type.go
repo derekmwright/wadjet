@@ -35,15 +35,25 @@ import (
 // function they were answered from two tables and disagreed about the type
 // AND the digits of the same total (#813, ADR-0012's divergence list).
 //
-// Only INT32 and INT64 for now: wadjet's own int-backed types (DATE,
-// TIMESTAMP, DURATION, PORT, PROTOCOL) keep the float64 they had.
+// PORT and PROTOCOL are here beside INT32 (#953). They are int4-domain values
+// — PORT is 0..65535 and PROTOCOL 0..255 — and since #834 both DECLARE int4
+// on the wire, so `sum(port)` is a sum over an int4 column as far as any
+// client can see and PostgreSQL's answer for that is bigint. Before this they
+// were worse than mis-typed: `SUM(protocol)` had no arm in the grouped
+// dispatch at all and answered NULL where the WINDOWED spelling answered the
+// total.
+//
+// DATE, TIMESTAMP and DURATION are deliberately NOT here: `date` and
+// `timestamp` are their own wire types with no PostgreSQL `sum`, and an
+// interval's sum is an interval rather than a number. They keep float64 in
+// both spellings, which is what they already agreed on.
 //
 // ok=false for every other input type, and the caller then keeps whatever it
 // declared before — which is what makes this additive rather than a second
 // dispatch nothing keeps in step with the first.
 func IntegerAccOutputType(avg bool, in parquet.TypeID) (out parquet.TypeID, precision, scale int, ok bool) {
 	switch in {
-	case parquet.TypeInt32:
+	case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol:
 		if avg {
 			return parquet.TypeDecimal, batch.MaxDecimalPrecision, batch.AvgScale(0), true
 		}

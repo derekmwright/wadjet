@@ -760,10 +760,11 @@ func TestWindowSumAvgReadEveryNumericTypeWithoutAPerRowSwitch(t *testing.T) {
 		// sum(int4) is BIGINT, avg(int4) is numeric.
 		{typ: parquet.TypeInt32, col: parquet.Column{Name: "v", Type: parquet.TypeInt32, Nullable: true},
 			vals: []any{int32(7), int32(11)}, wantS: "18", wantA: "9.0000"},
+		// PORT and PROTOCOL follow int4 in both spellings (#953).
 		{typ: parquet.TypePort, col: parquet.Column{Name: "v", Type: parquet.TypePort, Nullable: true},
-			vals: []any{int32(80), int32(443)}, wantS: "523", wantA: "261.5"},
+			vals: []any{int32(80), int32(443)}, wantS: "523", wantA: "261.5000"},
 		{typ: parquet.TypeProtocol, col: parquet.Column{Name: "v", Type: parquet.TypeProtocol, Nullable: true},
-			vals: []any{int32(6), int32(17)}, wantS: "23", wantA: "11.5"},
+			vals: []any{int32(6), int32(17)}, wantS: "23", wantA: "11.5000"},
 		{typ: parquet.TypeDuration, col: parquet.Column{Name: "v", Type: parquet.TypeDuration, Nullable: true},
 			vals: []any{int64(1000), int64(2000)}, wantS: "3000", wantA: "1500"},
 		{typ: parquet.TypeDate, col: parquet.Column{Name: "v", Type: parquet.TypeDate, Nullable: true},

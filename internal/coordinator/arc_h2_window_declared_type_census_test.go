@@ -57,6 +57,13 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 	grp := func(fn, col string) string {
 		return fmt.Sprintf("SELECT %s(%s) AS v FROM numwidth", fn, col)
 	}
+	// The network types live on the type-matrix table, not on numwidth.
+	k2win := func(fn, col string) string {
+		return fmt.Sprintf("SELECT %s(%s) OVER () AS v FROM typemx ORDER BY 1 LIMIT 1", fn, col)
+	}
+	k2grp := func(fn, col string) string {
+		return fmt.Sprintf("SELECT %s(%s) AS v FROM typemx", fn, col)
+	}
 
 	cases := []f1Case{
 		// SUM — the family #813 is about. The two DECIMAL widths already
@@ -192,6 +199,43 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 				"3,16777220 | 4,9007199254741007 | 5,16777200 | 6,9007199254741007 | " +
 				"7,16777200 | 8,9007199254741020 | 9,2164260848",
 		},
+		// #953: PORT and PROTOCOL declare int4 on the wire (#834), so
+		// `sum(port)` is `sum(int4)`. Both spellings are asserted because
+		// before this they were not merely mis-typed: the GROUPED
+		// `SUM(c_proto)` had no arm in the aggregate's dispatch at all and
+		// answered NULL where the WINDOWED spelling answered 621435.
+		{name: "953 SUM(PORT) OVER () is bigint", sql: k2win("SUM", "c_port"),
+			want: "cols=[v:INT64] rows=1 | 17376678"},
+		{name: "953 control: SUM(PORT) grouped", sql: k2grp("SUM", "c_port"),
+			want: "cols=[v:INT64] rows=1 | 17376678"},
+		{name: "953 AVG(PORT) OVER () is numeric", sql: k2win("AVG", "c_port"),
+			want: "cols=[v:DECIMAL(38,4)] rows=1 | 3523.2518"},
+		{name: "953 control: AVG(PORT) grouped", sql: k2grp("AVG", "c_port"),
+			want: "cols=[v:DECIMAL(38,4)] rows=1 | 3523.2518"},
+		{name: "953 SUM(PROTOCOL) OVER () is bigint", sql: k2win("SUM", "c_proto"),
+			want: "cols=[v:INT64] rows=1 | 621435"},
+		{name: "953 the GROUPED SUM(PROTOCOL) answers, where it used to be NULL",
+			sql:  k2grp("SUM", "c_proto"),
+			want: "cols=[v:INT64] rows=1 | 621435"},
+		{name: "953 AVG(PROTOCOL) OVER () is numeric", sql: k2win("AVG", "c_proto"),
+			want: "cols=[v:DECIMAL(38,4)] rows=1 | 125.8730"},
+		{name: "953 control: AVG(PROTOCOL) grouped", sql: k2grp("AVG", "c_proto"),
+			want: "cols=[v:DECIMAL(38,4)] rows=1 | 125.8730"},
+		// The BOUNDARY of #953, attempted from the other side: DATE,
+		// TIMESTAMP and DURATION are int-backed too and stay float8 in BOTH
+		// spellings, because `date` and `timestamp` are their own wire types
+		// with no PostgreSQL `sum` and an interval's sum is an interval.
+		{name: "953 boundary: SUM(DURATION) stays float8 in both spellings",
+			sql:  k2win("SUM", "c_dur"),
+			want: "cols=[v:FLOAT64] rows=1 | 1.234567e+13"},
+		{name: "953 boundary control: SUM(DURATION) grouped", sql: k2grp("SUM", "c_dur"),
+			want: "cols=[v:FLOAT64] rows=1 | 1.234567e+13"},
+		{name: "953 boundary: SUM(DATE) stays float8 in both spellings",
+			sql:  k2win("SUM", "c_date"),
+			want: "cols=[v:FLOAT64] rows=1 | 8.583688e+07"},
+		{name: "953 boundary control: SUM(DATE) grouped", sql: k2grp("SUM", "c_date"),
+			want: "cols=[v:FLOAT64] rows=1 | 8.583688e+07"},
+
 		{
 			// The int4 half of the same shape: bigint, and the sliding frame
 			// again, because SUM(int4) writes through a DIFFERENT arm of

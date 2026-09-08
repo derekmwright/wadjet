@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -130,7 +131,12 @@ func TestWindowSumOverPromotableTypesStillAnswers(t *testing.T) {
 		{"d": "1970-01-11", "dur": int64(1000), "p": int32(80)},
 		{"d": "1970-01-21", "dur": int64(2000), "p": int32(443)},
 	}
-	want := map[string]float64{"d": 30, "dur": 3000, "p": 523}
+	// The answers are compared as TEXT, because the CARRIER differs by type
+	// and that is the rule rather than an accident: DATE and DURATION have no
+	// PostgreSQL `sum` to follow and keep float64, while PORT declares int4 on
+	// the wire (#834) so `sum(port)` is `sum(int4)` — bigint (#953). The
+	// numbers are the same either way.
+	want := map[string]string{"d": "30", "dur": "3000", "p": "523"}
 	for col, sum := range want {
 		win := NewWindow([]WindowColumn{{
 			Func: WinSum, InputCol: col, OutputCol: "w", OutputType: parquet.TypeFloat64,
@@ -145,9 +151,11 @@ func TestWindowSumOverPromotableTypesStillAnswers(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, row := range b.ToRows() {
-			got, ok := row["w"].(float64)
-			if !ok || got != sum {
-				t.Fatalf("window SUM(%s) = %v, want %v", col, row["w"], sum)
+			if row["w"] == nil {
+				t.Fatalf("window SUM(%s) = NULL, want %s", col, sum)
+			}
+			if got := fmt.Sprint(row["w"]); got != sum {
+				t.Fatalf("window SUM(%s) = %v (%T), want %s", col, row["w"], row["w"], sum)
 			}
 		}
 	}

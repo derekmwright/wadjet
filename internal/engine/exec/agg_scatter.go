@@ -403,7 +403,10 @@ func scatterFlatIntDecimal(fa *flatAccumArrays, gi []int32, col *batch.Vector, s
 			return scatterSumIntDecimal(fa.sumDec, fa.count, col.Int64Data, gi, &col.Nulls, sel, n)
 		}
 		return scatterSumIntDecimalNoCount(fa.sumDec, col.Int64Data, gi, &col.Nulls, sel, n)
-	case batch.TypeInt32:
+	// PORT and PROTOCOL ride the INT32 arm: int4-domain values in an int32
+	// array, declaring int4 on the wire since #834, so `avg(port)` is
+	// `avg(int4)` and takes the exact carrier (#953).
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol:
 		if withCount {
 			return scatterSumIntDecimal(fa.sumDec, fa.count, col.Int32Data, gi, &col.Nulls, sel, n)
 		}
@@ -760,7 +763,7 @@ func scatterFlatAggUpdate(fa *flatAccumArrays, gi []int32, fn AggFunc, col *batc
 		switch col.Type {
 		case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
 			scatterSumFloat(fa.sumF64, fa.count, col.Int64Data, gi, &col.Nulls, sel, n)
-		case batch.TypeInt32, batch.TypePort, batch.TypeDate:
+		case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 			scatterSumInt(fa.sumI64, fa.count, col.Int32Data, gi, &col.Nulls, sel, n)
 		case batch.TypeFloat64:
 			scatterSumFloat(fa.sumF64, fa.count, col.Float64Data, gi, &col.Nulls, sel, n)
@@ -777,7 +780,7 @@ func scatterFlatAggUpdate(fa *flatAccumArrays, gi []int32, fn AggFunc, col *batc
 			if scatterSumInt64Checked(fa.sumI64, fa.count, col.Int64Data, gi, &col.Nulls, sel, n) {
 				fa.sumIntOverflow = true
 			}
-		case batch.TypeInt32, batch.TypePort, batch.TypeDate:
+		case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 			scatterSumInt(fa.sumI64, fa.count, col.Int32Data, gi, &col.Nulls, sel, n)
 		case batch.TypeFloat64:
 			scatterSumFloat(fa.sumF64, fa.count, col.Float64Data, gi, &col.Nulls, sel, n)
@@ -844,7 +847,7 @@ func scatterFlatAggUpdateNoCount(fa *flatAccumArrays, gi []int32, fn AggFunc, co
 		switch col.Type {
 		case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
 			scatterSumFloatNoCount(fa.sumF64, col.Int64Data, gi, &col.Nulls, sel, n)
-		case batch.TypeInt32, batch.TypePort, batch.TypeDate:
+		case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 			scatterSumIntNoCount(fa.sumI64, col.Int32Data, gi, &col.Nulls, sel, n)
 		case batch.TypeFloat64:
 			scatterSumFloatNoCount(fa.sumF64, col.Float64Data, gi, &col.Nulls, sel, n)
@@ -862,7 +865,7 @@ func scatterFlatAggUpdateNoCount(fa *flatAccumArrays, gi []int32, fn AggFunc, co
 		if scatterSumInt64Checked(fa.sumI64, nil, col.Int64Data, gi, &col.Nulls, sel, n) {
 			fa.sumIntOverflow = true
 		}
-	case batch.TypeInt32, batch.TypePort, batch.TypeDate:
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 		scatterSumIntNoCount(fa.sumI64, col.Int32Data, gi, &col.Nulls, sel, n)
 	case batch.TypeFloat64:
 		scatterSumFloatNoCount(fa.sumF64, col.Float64Data, gi, &col.Nulls, sel, n)

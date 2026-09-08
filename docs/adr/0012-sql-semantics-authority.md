@@ -404,6 +404,30 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      coordinator's local pipeline, which the census asserts as a routing
      counter beside the rows — so what closed is the DIVERGENCE, and the DAG
      still never declares this expression itself.
+   - **`SUM`/`AVG` over PORT and PROTOCOL follow `int4`'s result types.**
+     (Added 2026-09-07, #953, arc K2.) PostgreSQL has neither type, so this is
+     an EXTENSION rather than a divergence — but it is not a free choice
+     either: since #834 both DECLARE `integer` (OID 23) on the wire, so a
+     client sees an int4 column and `sum(<that column>)` has exactly one
+     PostgreSQL answer, `bigint`. `AVG` is `numeric(38,4)`, as it is for int4.
+     Both spellings, grouped and windowed, take the same rule from
+     `exec.IntegerAccOutputType`.
+
+     What was there before was worse than a wrong type. `TypeProtocol` had no
+     arm in `kernel.ResolveRowSum`, `exec.isFlatSumType` or the SoA scatter's
+     SUM/AVG dispatch — only in MIN/MAX — so the GROUPED `SUM(c_proto)`
+     answered **NULL** over the type-matrix table while the WINDOWED spelling
+     answered 621435. Two spellings of one question, one of them silently
+     empty. `coordinator.TestH2TheWindowDeclaredTypeCensus` now asserts both
+     spellings of `SUM`/`AVG` over PORT and PROTOCOL on all four arms.
+
+     DATE, TIMESTAMP and DURATION are deliberately outside this rule, and the
+     census asserts that from the other side. `date` and `timestamp` are their
+     own wire types with no PostgreSQL `sum` at all, and an interval's sum is
+     an interval rather than a number, so all three keep the float64 both
+     spellings already agreed on. DURATION declares `bigint` on the wire and so
+     has an argument for `numeric`; that is a filing candidate, not a change
+     made here.
    - **A column-alias list over a `SELECT *` is not applied.** (Added
      2026-09-04, #613. CLOSED and RE-SCOPED 2026-09-07 by arc K1, #958: the
      entry was right about the reason and wrong about the symptom, and the

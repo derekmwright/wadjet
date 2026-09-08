@@ -7452,7 +7452,7 @@ func aggIntExact(agg AggColumn, typ batch.TypeID) bool {
 func isFlatSumType(t batch.TypeID) bool {
 	switch t {
 	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration,
-		batch.TypeInt32, batch.TypePort, batch.TypeDate,
+		batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate,
 		batch.TypeFloat64, batch.TypeFloat32, batch.TypeDecimal:
 		return true
 	}

@@ -432,7 +432,10 @@ func ResolveRowSumIntExact(typ batch.TypeID, noNulls bool) RowAggUpdater {
 			return sumRowInt64DecimalNoNulls
 		}
 		return sumRowInt64Decimal
-	case batch.TypeInt32:
+	// PORT and PROTOCOL are int4-domain values in an int32 array and declare
+	// int4 on the wire (#834), so `avg(port)` is `avg(int4)` — numeric —
+	// exactly as exec.IntegerAccOutputType says (#953).
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol:
 		if noNulls {
 			return sumRowInt32DecimalNoNulls
 		}
@@ -449,7 +452,7 @@ func ResolveBatchSumIntExact(typ batch.TypeID) BatchAggKernel {
 		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			batchSumIntExact(acc, &vec.Nulls, sel, vecLen, func(row int) int64 { return vec.Int64Data[row] })
 		}
-	case batch.TypeInt32:
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol:
 		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			batchSumIntExact(acc, &vec.Nulls, sel, vecLen, func(row int) int64 { return int64(vec.Int32Data[row]) })
 		}
@@ -489,7 +492,7 @@ func ResolveRowSum(typ batch.TypeID) RowAggUpdater {
 	switch typ {
 	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
 		return sumRowInt64
-	case batch.TypeInt32, batch.TypePort, batch.TypeDate:
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 		return sumRowInt32
 	case batch.TypeFloat64:
 		return sumRowFloat64
@@ -507,7 +510,7 @@ func ResolveRowSumNoNulls(typ batch.TypeID) RowAggUpdater {
 	switch typ {
 	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
 		return sumRowInt64NoNulls
-	case batch.TypeInt32, batch.TypePort, batch.TypeDate:
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 		return sumRowInt32NoNulls
 	case batch.TypeFloat64:
 		return sumRowFloat64NoNulls
@@ -816,7 +819,7 @@ func ResolveBatchSum(typ batch.TypeID) BatchAggKernel {
 			s, c := sumSliceExactInt64(vec.Int64Data, &vec.Nulls, sel, vecLen, acc)
 			foldInt64Checked(acc, s, c)
 		}
-	case batch.TypeInt32, batch.TypePort, batch.TypeDate:
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			// WIDENED to int64 before the addition, and folded through the same
 			// checked add the int64 arm uses: `SUM(int4)` is bigint, so the

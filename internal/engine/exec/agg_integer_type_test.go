@@ -31,6 +31,12 @@ func TestIntegerAccOutputTypeIsPostgresRule(t *testing.T) {
 		// pg_typeof(avg(int4)) -> numeric ; pg_typeof(avg(int8)) -> numeric
 		{"avg int4", true, parquet.TypeInt32, parquet.TypeDecimal, p, batch.AvgScale(0), true},
 		{"avg int8", true, parquet.TypeInt64, parquet.TypeDecimal, p, batch.AvgScale(0), true},
+		// PORT and PROTOCOL declare int4 on the wire (#834), so they follow
+		// int4's rules in both spellings (#953).
+		{"sum port", false, parquet.TypePort, parquet.TypeInt64, 0, 0, true},
+		{"sum protocol", false, parquet.TypeProtocol, parquet.TypeInt64, 0, 0, true},
+		{"avg port", true, parquet.TypePort, parquet.TypeDecimal, p, batch.AvgScale(0), true},
+		{"avg protocol", true, parquet.TypeProtocol, parquet.TypeDecimal, p, batch.AvgScale(0), true},
 
 		// NOT in the table. A DECIMAL input has its own rule
 		// (WindowDecimalAggMeta / aggSpecOutputDecimal), and the float widths

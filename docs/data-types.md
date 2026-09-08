@@ -223,6 +223,13 @@ an integer parameter. The remaining network types declare `text`:
 | `IPv4`, `IPv6`, `CIDR`, `MAC` | `text` | 25 |
 | `UUID` | `uuid` | 2950 |
 
+Because `Port` and `Protocol` declare `integer`, `SUM` and `AVG` over them
+follow `int4`'s rules: `SUM(port)` is `bigint` and `AVG(port)` is
+`numeric(38,4)`, in the grouped and the windowed spelling alike. `Duration`,
+`Date` and `Timestamp` are excluded — PostgreSQL has no `sum(date)` or
+`sum(timestamp)`, and an interval's sum is an interval rather than a number —
+so those keep `double precision` in both spellings.
+
 **Literal spellings in a comparison.** A `MAC` or `UUID` literal compared
 against a column is read in every spelling PostgreSQL accepts, at every site
 (`=`, `IN`, `CASE`, `IS DISTINCT FROM`, `GREATEST`, `LEAST`):

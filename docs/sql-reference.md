@@ -1768,10 +1768,11 @@ declares and answers — one question written two ways:
 
 | input | `SUM` | `AVG` |
 |---|---|---|
-| `INT32` | `BIGINT` | `NUMERIC(38,4)` |
+| `INT32`, `PORT`, `PROTOCOL` | `BIGINT` | `NUMERIC(38,4)` |
 | `INT64` | `NUMERIC(38,0)` | `NUMERIC(38,4)` |
 | `DECIMAL(p,s)` | `DECIMAL(38,s)` | `DECIMAL(38,s+4)` |
 | `FLOAT32` / `FLOAT64` | `DOUBLE PRECISION` | `DOUBLE PRECISION` |
+| `DATE`, `TIMESTAMP`, `DURATION` | `DOUBLE PRECISION` | `DOUBLE PRECISION` |
 
 The integer and decimal rows accumulate exactly, in every frame form —
 `OVER ()`, `PARTITION BY`, a running `ORDER BY` frame, a sliding `ROWS`/`RANGE`
