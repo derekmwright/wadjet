@@ -37,12 +37,13 @@ import (
 // needed. A `SELECT *` has no Project to take a position from, which is why
 // every cell below that reproduces the defect is a star.
 //
-// THE BOUNDARY IS A CLAIM, and the controls attempt it from both sides: the
-// explicit-select-list spellings (D, F) were already right through #905's
-// position and must not move; a star over a join of two DIFFERENT tables (J)
-// has no duplicate bare name for the qualifier to disambiguate and must not
-// move; the top-N builder (K) is the second sort site and carries the same
-// key construction.
+// THE BOUNDARY IS A CLAIM, and the cells attempt it from both sides: the two
+// explicit-select-list controls were already right through #905's position and
+// must not move; the DESC cell agreed at base by accident of this fixture's
+// emission order and must not move either; the arm-swapping cell (a predicate
+// makes `reorderJoins` qualify the OTHER side) proves the fix needs no model of
+// which side built; and the top-N builder is the second sort site, which
+// carried the same key construction.
 func TestL1AQualifiedOrderByTermBindsTheReferenceItNames(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
