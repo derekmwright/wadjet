@@ -98,6 +98,20 @@ func aggregateEmittedSlots(s *Stage) (names []string, isAgg []bool, ok bool) {
 	if len(aggs) == 0 {
 		return nil, nil, false
 	}
+	// The names the fragment's aggregate really EMITS. The published list
+	// still spells a plain qualified key `x.a`; the operator calls that column
+	// `a` (`exec.PublishedGroupKeyNames`), and asking the published list
+	// whether two columns share a name missed every collision between a
+	// qualified key and an aggregate aliased to its bare form (#968).
+	//
+	// A resolve list of the wrong length is dropped rather than paired
+	// positionally with the wrong keys: a stage that consumes a partial's
+	// OUTPUT carries none, and exec's own rule is what names its keys there.
+	resolve := s.GroupByResolve
+	if len(resolve) != len(keys) {
+		resolve = nil
+	}
+	keys = stageEmittedKeyNames(keys, resolve)
 	for _, k := range keys {
 		names = append(names, k)
 		isAgg = append(isAgg, false)

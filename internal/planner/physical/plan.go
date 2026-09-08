@@ -851,6 +851,20 @@ type SortKeySpec struct {
 	// or 0 to resolve Column by name. A name is an address only while it is
 	// unique, and two output columns may legally share one (#557).
 	SlotPos int
+	// NamesAggregateOutput records, at EMISSION, whether the SELECT item this
+	// term names is an AGGREGATE call rather than a group-key reference —
+	// the CLASS, recorded where the SELECT list is still in hand, exactly as
+	// AggSpec.InputRefs and WrittenTerm are (ADR-0026 §6).
+	//
+	// It is the half a name cannot supply. An aggregate emits `[group keys…,
+	// aggregate outputs…]` into ONE schema, and `SELECT x.a AS b, SUM(x.b) AS
+	// a … GROUP BY x.a` puts two columns called `a` in it; `ORDER BY a` names
+	// the SELECT list's second item, and without the class the sort binds the
+	// first column of that name — the group key — and answers the right rows
+	// in the wrong order on both DAG arms (#968).
+	//
+	// Planner-only: what reaches the wire is the SlotPos it settles.
+	NamesAggregateOutput bool
 
 	// SourceExpr, SourceColumn and SourceType describe what MATERIALIZES a
 	// synthetic ORDER BY key — a term the SELECT list does not carry, which
@@ -7644,11 +7658,12 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		}
 		for _, ob := range node.OrderBy {
 			key := SortKeySpec{
-				Column:      resolveSortKeyColumn(ob.Column, sortChild),
-				Desc:        ob.Desc,
-				NullsLast:   resolveNullsLast(ob),
-				SlotPos:     sortKeySlotPosStage(ob, node),
-				WrittenTerm: strings.TrimSpace(ob.Column),
+				Column:               resolveSortKeyColumn(ob.Column, sortChild),
+				Desc:                 ob.Desc,
+				NullsLast:            resolveNullsLast(ob),
+				SlotPos:              sortKeySlotPosStage(ob, node),
+				WrittenTerm:          strings.TrimSpace(ob.Column),
+				NamesAggregateOutput: sortTermNamesAggregateItem(ob.Column, sortChild),
 			}
 			// A projection absorbed onto the producer while this subtree was
 			// walked (absorbAggregateOutputProjection) MAKES the alias real
@@ -10556,7 +10571,11 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	keySlotByName := map[string][]int{}
 	aggSlotByName := map[string][]int{}
 	if isOverAggregate && aggNode != nil {
-		if full, ok := aggregateOutputNames(child); ok {
+		// The EMITTED names, not the planner's spelling of them: the whole
+		// point of this map is to find a name TWO columns of the operator's
+		// output batch answer to, and a key the planner spells `x.a` is a
+		// column the operator calls `a` (#968).
+		if full, ok := aggregateEmittedOutputNames(child); ok {
 			nAgg := len(aggNode.AggExprs)
 			nKey := len(full) - nAgg
 			clean := nKey >= 0
@@ -17071,10 +17090,43 @@ func hasAggregateAncestor(node *logical.Node) bool {
 // OutputCol, then the constant columns litPostOps re-attaches for the literal
 // keys elided from the key set.
 //
-// "Could not determine" is not a failure: the only caller uses this to decide
+// "Could not determine" is not a failure: the caller uses this to decide
 // whether a projection is redundant, and an undetermined answer keeps the
 // projection.
+//
+// The names are the PLANNER's spelling of each key — `x.a` for `GROUP BY x.a`.
+// That is not what the operator publishes; `aggregateEmittedOutputNames` is.
+// The redundancy check wants this one: a spelling that is wider than the
+// emitted name can only fail to match, and failing to match keeps the
+// projection, which is always sound.
 func aggregateOutputNames(node *logical.Node) ([]string, bool) {
+	return aggregateOutputNameList(node, false)
+}
+
+// aggregateEmittedOutputNames is aggregateOutputNames with the GROUP-BY half
+// stated the way the aggregate OPERATOR states it: `exec.PublishedGroupKeyNames`
+// over the same published list `buildAggregate` hands `exec.NewHashAggregate`,
+// which strips a key's relation qualifier and keeps it only where stripping
+// would make two KEYS collide.
+//
+// The distinction is the whole of #968. `SELECT x.a AS b, SUM(x.b) AS a
+// FROM decpair x GROUP BY x.a` emits TWO columns called `a` — the key, whose
+// qualifier the operator strips, and the aggregate, whose OutputCol is the
+// user's alias — and `batch.RecordBatch.ColumnIndex` answers with the first.
+// The #575 slot pinning exists for exactly that collision and never saw it,
+// because it asked this list for `x.a` and found no duplicate: the projection
+// stayed on the name path and `SUM(x.b) AS a` returned the group key's value
+// under the aggregate's alias and the KEY's declared type, on the
+// single-process arms, silently.
+//
+// Only a consumer that needs a physical SLOT asks this. A consumer that asks
+// "could another column answer to this NAME" wants the resolver's rule, which
+// strips the qualifier unconditionally (exec.columnIndexFallback).
+func aggregateEmittedOutputNames(node *logical.Node) ([]string, bool) {
+	return aggregateOutputNameList(node, true)
+}
+
+func aggregateOutputNameList(node *logical.Node, emitted bool) ([]string, bool) {
 	if node == nil {
 		return nil, false
 	}
@@ -17098,7 +17150,7 @@ func aggregateOutputNames(node *logical.Node) ([]string, bool) {
 		if len(node.Children) == 0 {
 			return nil, false
 		}
-		return aggregateOutputNames(node.Children[0])
+		return aggregateOutputNameList(node.Children[0], emitted)
 	case node.Type == logical.NodeProject:
 		// Only the synthetic finalization projections findAggregateAncestor
 		// walks through; a real one is the pipeline's output already.
@@ -17124,12 +17176,23 @@ func aggregateOutputNames(node *logical.Node) ([]string, bool) {
 		// publishes the wrong columns (#568, #590).
 		names := make([]string, 0, len(node.GroupBy)+len(node.AggExprs))
 		var elidedLits []string
-		for _, k := range groupKeyOutputs(node) {
+		keyOuts := groupKeyOutputs(node)
+		elided := map[int]bool{}
+		for i, k := range keyOuts {
 			if k.Literal {
+				elided[i] = true
 				elidedLits = append(elidedLits, k.Name)
 				continue
 			}
 			names = append(names, k.Name)
+		}
+		if emitted {
+			// buildAggregate's own two lines: the derived/delimited/minted
+			// keys carry a planner-decided name as GroupByOutNames, and every
+			// other key takes exec's rule. Passing the all-empty list when
+			// nothing is derived is the same input a nil GroupByOutNames is.
+			over, _ := publishedGroupKeyNames(keyOuts, elided)
+			names = exec.PublishedGroupKeyNames(names, over, false)
 		}
 		for i := range node.AggExprs {
 			names = append(names, node.AggExprs[i].OutputCol)
