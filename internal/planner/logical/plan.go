@@ -504,7 +504,12 @@ type AggExpr struct {
 	// InputCol stays a single column name throughout: column pruning and
 	// requiredColumns read it as one, and InputCol2 is registered beside
 	// it rather than packed into the same string.
-	InputCol2  string
+	InputCol2 string
+	// InputCol3 is the THIRD column argument, which today only ohlcv has
+	// (#965). It travels beside InputCol2 through every layer for the same
+	// reason: an aggregate whose argument list is trimmed answers something
+	// plausible instead of failing (#713).
+	InputCol3  string
 	Separator  string
 	Percentile float64
 }

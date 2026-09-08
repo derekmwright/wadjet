@@ -68,6 +68,15 @@ const (
 	// first argument.
 	AggCovarState
 	AggCovarStateMerge
+	// AggOhlcv is the bar (#965, ADR-0035): ohlcv(ts, price, volume) folded
+	// into ONE mergeable state and finished as a ROW. AggOhlcvState and
+	// AggOhlcvStateMerge carry that state across a partial/final split, the
+	// way the variance and covariance pairs above do — a finished bar cannot
+	// be re-aggregated (a MAX of two bars is not a bar), but the state can,
+	// because its merge is associative and commutative.
+	AggOhlcv
+	AggOhlcvState
+	AggOhlcvStateMerge
 )
 
 // AggColumn defines an aggregation to perform.
@@ -89,9 +98,14 @@ type AggColumn struct {
 	// aggregate and a DECIMAL one whose input is not a bare column reference.
 	OutputPrecision int
 	OutputScale     int
-	Separator       string  // separator for STRING_AGG (default ',')
-	InputCol2       string  // second input column (corr, covar, min_by, max_by)
-	Percentile      float64 // percentile value for percentile_cont/percentile_disc
+	Separator       string // separator for STRING_AGG (default ',')
+	InputCol2       string // second input column (corr, covar, min_by, max_by)
+	InputCol3       string // third input column (ohlcv's volume, #965)
+	// OutputFields declares a ROW-valued aggregate's fields — ohlcv's bar.
+	// The output vector is built from them, so a missing list is a bar that
+	// cannot be written at all rather than one written wrong.
+	OutputFields []parquet.Column
+	Percentile   float64 // percentile value for percentile_cont/percentile_disc
 	// Distinct is SQL's `AGG(DISTINCT x)` for every aggregate but COUNT,
 	// which spells it as its own AggFunc (AggCountDistinct) because its whole
 	// state IS the set.
@@ -223,12 +237,19 @@ type HashAggregate struct {
 	// genKeyNext (chained-hash pattern). strGroupIndex is NOT maintained on
 	// this path; ensureStrGroupIndexForMerge rebuilds it for the slow
 	// merge fallback.
-	genKeyIdx        *intHashTable
-	genKeyNext       []int32
-	keySerCols       []keySerCol // per-batch resolved key accessors (scratch)
-	groupColIdx      []int
-	aggColIdx        []int
-	aggColIdx2       []int // second column indices for two-column aggregates
+	genKeyIdx   *intHashTable
+	genKeyNext  []int32
+	keySerCols  []keySerCol // per-batch resolved key accessors (scratch)
+	groupColIdx []int
+	aggColIdx   []int
+	aggColIdx2  []int // second column indices for two-column aggregates
+	aggColIdx3  []int // third column indices (ohlcv's volume, #965)
+	aggOhlcvDom []ohlcvDomain
+	// aggVolMeta is the DECLARATION of ohlcv's third input column, kept for
+	// the same reason aggInputMeta keeps the first's: the bar's `volume`
+	// field is SUM(volume)'s type, which a bare TypeID cannot carry for a
+	// DECIMAL.
+	aggVolMeta       []parquet.Column
 	groupColTypes    []batch.TypeID
 	groupColMeta     []parquet.Column // full input column metadata per group col (Decimal Scale/Precision survive into outputSchema)
 	aggInputTypes    []batch.TypeID   // observed input column type per aggregate (0 = unresolved)
@@ -1651,6 +1672,11 @@ func readsSecondColumn(fn AggFunc) bool {
 	switch fn {
 	case AggCorr, AggCovarSamp, AggCovarPop, AggCovarState, AggMinBy, AggMaxBy:
 		return true
+	case AggOhlcv, AggOhlcvState:
+		// ohlcv's InputCol2 is its ORDERING key — the instant. AggOhlcvState
+		// is here beside AggOhlcv because a PARTIAL bar reads raw rows too;
+		// only the MERGE form reads an encoded state and nothing else.
+		return true
 	}
 	return false
 }
@@ -1682,6 +1708,9 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 	}
 	h.aggColIdx = make([]int, len(h.Aggs))
 	h.aggColIdx2 = make([]int, len(h.Aggs))
+	h.aggColIdx3 = make([]int, len(h.Aggs))
+	h.aggOhlcvDom = make([]ohlcvDomain, len(h.Aggs))
+	h.aggVolMeta = make([]parquet.Column, len(h.Aggs))
 	h.aggInputTypes = make([]batch.TypeID, len(h.Aggs))
 	h.aggInputMeta = make([]parquet.Column, len(h.Aggs))
 	h.aggInputDecScale = make([]int, len(h.Aggs))
@@ -1692,6 +1721,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 	h.hasBoxedMinMax = false
 	for i, agg := range h.Aggs {
 		h.aggColIdx2[i] = -1 // default: no second column
+		h.aggColIdx3[i] = -1 // default: no third column
 		if agg.Func == AggCountDistinct || agg.Func == AggApproxDistinct {
 			if agg.InputCol != "" {
 				h.aggColIdx[i] = columnIndexFallback(b, agg.InputCol)
@@ -1761,6 +1791,17 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 				return unresolvedAggColumn("aggregate input", agg.InputCol2, b)
 			}
 		}
+		if agg.InputCol3 != "" {
+			h.aggColIdx3[i] = columnIndexFallback(b, agg.InputCol3)
+			// Loud for the one function that READS it, stale metadata on the
+			// merge stage above it — readsSecondColumn's rule.
+			if h.aggColIdx3[i] < 0 && agg.Func == AggOhlcv {
+				return unresolvedAggColumn("aggregate input", agg.InputCol3, b)
+			}
+			if idx := h.aggColIdx3[i]; idx >= 0 && idx < len(b.Schema) {
+				h.aggVolMeta[i] = b.Schema[idx]
+			}
+		}
 	}
 
 	// Pre-resolve float64 extractors for aggregates that need per-row numeric conversion
@@ -1792,6 +1833,28 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 			if idx := h.aggColIdx2[i]; idx >= 0 {
 				h.aggF64Extract2[i] = resolveOrderKeyExtractor(b.Columns[idx].Type)
 			}
+		case AggOhlcv, AggOhlcvState:
+			// The bar's CARRIER, resolved from the vectors the operator will
+			// actually read — through exec.OhlcvDomainFor, the same function
+			// the planner asked to DECLARE the ROW. One question, one answer,
+			// so the bar cannot be declared exact and computed as a float.
+			//
+			// An argument type that has no bar is REFUSED here rather than
+			// answered. The refusal is at the OPERATOR, which both the
+			// single-process pipeline and every worker fragment run, so one
+			// sentence reaches a client whichever path planned the query. A
+			// silent NULL was the alternative and it is the worst of the
+			// three: `ohlcv(text_col, price, volume)` folded no rows and
+			// answered an empty bar (#965).
+			px, tsi, vol := h.aggColIdx[i], h.aggColIdx2[i], h.aggColIdx3[i]
+			if px >= 0 && tsi >= 0 && vol >= 0 {
+				pv, tv, vv := b.Columns[px], b.Columns[tsi], b.Columns[vol]
+				dom, err := ohlcvResolveDomain(tv, pv, vv)
+				if err != nil {
+					return err
+				}
+				h.aggOhlcvDom[i] = dom
+			}
 		}
 	}
 
@@ -1819,7 +1882,8 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 			AggBoolAnd, AggBoolOr, AggCorr, AggCovarSamp, AggCovarPop,
 			AggCovarState, AggCovarStateMerge,
 			AggPercentileCont, AggPercentileDisc, AggMedian,
-			AggMinBy, AggMaxBy:
+			AggMinBy, AggMaxBy,
+			AggOhlcv, AggOhlcvState, AggOhlcvStateMerge:
 			allSimpleAggs = false
 			h.needsExtra = true
 		case AggMode:
@@ -4066,6 +4130,16 @@ func (h *HashAggregate) initGroupState(ext *groupStateExtras, b *batch.RecordBat
 			ext.extraState[i] = &covarianceState{}
 		case AggPercentileCont, AggPercentileDisc, AggMode, AggMedian:
 			ext.extraState[i] = &collectState{}
+		case AggOhlcv, AggOhlcvState, AggOhlcvStateMerge:
+			// The carrier is resolved at Consume from the vectors, so a
+			// group minted before the first batch is seen would carry the
+			// zero domain. resolveIndices runs first (h.resolved), so
+			// aggOhlcvDom is already filled here.
+			dom := ohlcvDomain{}
+			if i < len(h.aggOhlcvDom) {
+				dom = h.aggOhlcvDom[i]
+			}
+			ext.extraState[i] = &ohlcvState{dom: dom}
 		case AggMinBy:
 			ext.extraState[i] = &minMaxByState{isMin: true}
 		case AggMaxBy:
@@ -4311,6 +4385,51 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 				continue
 			}
 			ext.extraState[i].(*collectState).values = append(ext.extraState[i].(*collectState).values, extract(v, row))
+
+		case AggOhlcv, AggOhlcvState:
+			// ohlcv(ts, price, volume). InputCol is the PRICE, InputCol2 the
+			// instant, InputCol3 the volume — see logical.parseAggExtraArgs
+			// for why the arguments are repointed onto MIN_BY's slots.
+			//
+			// A row is SKIPPED when ANY of the three is NULL. That is
+			// PostgreSQL's rule for a multi-argument aggregate, measured on
+			// 17.11: regr_count(y,x) over (1,1),(2,NULL),(NULL,3),(4,4) is 2.
+			px, tsi, voli := h.aggColIdx[i], h.aggColIdx2[i], h.aggColIdx3[i]
+			if px < 0 || tsi < 0 || voli < 0 {
+				continue
+			}
+			pv, tv, vv := b.Columns[px], b.Columns[tsi], b.Columns[voli]
+			if pv.Nulls.IsNullFast(row) || tv.Nulls.IsNullFast(row) || vv.Nulls.IsNullFast(row) {
+				continue
+			}
+			ext.extraState[i].(*ohlcvState).observe(
+				ohlcvReader{tsVec: tv, pxVec: pv, volVec: vv}, row)
+
+		case AggOhlcvStateMerge:
+			// One input row is one upstream partial's encoded bar. Folding
+			// them is the whole point of the column: re-aggregating FINISHED
+			// bars here would take a MAX of two ROWs, which is not a bar.
+			idx := h.aggColIdx[i]
+			if idx < 0 {
+				continue
+			}
+			v := b.Columns[idx]
+			if v.Nulls.IsNullFast(row) {
+				continue
+			}
+			s, ok := v.GetString(row)
+			if !ok {
+				continue
+			}
+			partial, ok := decodeOhlcvState(s)
+			if !ok {
+				continue
+			}
+			dst := ext.extraState[i].(*ohlcvState)
+			if dst.n == 0 {
+				dst.dom = partial.dom
+			}
+			dst.merge(&partial)
 
 		case AggMinBy, AggMaxBy:
 			idx1 := h.aggColIdx[i]
@@ -5000,6 +5119,20 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 			case AggMode:
 				state := ext.extraState[j].(*collectState)
 				out.Columns[colIdx].SetValue(i, computeMode(state.values))
+			case AggOhlcvState, AggOhlcvStateMerge:
+				// Partial output: the STATE, for the merge stage above (or
+				// the final fold) to combine. Never a finished bar — a bar
+				// is not re-aggregatable, which is the whole reason the
+				// state exists (ADR-0035).
+				state := ext.extraState[j].(*ohlcvState)
+				out.Columns[colIdx].SetValue(i, state.encode())
+			case AggOhlcv:
+				state := ext.extraState[j].(*ohlcvState)
+				v, err := state.value(h.ohlcvFields(j))
+				if err != nil {
+					return nil, err
+				}
+				out.Columns[colIdx].SetValue(i, v)
 			case AggMinBy, AggMaxBy:
 				state := ext.extraState[j].(*minMaxByState)
 				if !state.hasValue {
@@ -5224,6 +5357,20 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 		}
 		resolved := i < len(h.aggColIdx) && h.aggColIdx[i] >= 0 && i < len(h.aggInputTypes)
 		switch agg.Func {
+		case AggOhlcv:
+			// The bar is a ROW, and a ROW vector with no FieldNames cannot be
+			// written at all — SetValue has nothing to address. The fields
+			// come from the planner (AggColumn.OutputFields), derived through
+			// exec.OhlcvOutputFields, and the operator re-derives them from
+			// the vectors it actually reads when the planner could not
+			// resolve the input columns. One function either way.
+			out.Type = parquet.TypeRow
+			out.Precision, out.Scale = 0, 0
+			out.Fields = h.ohlcvFields(i)
+		case AggOhlcvState, AggOhlcvStateMerge:
+			// The encoded partial travels as text.
+			out.Type = parquet.TypeString
+			out.Precision, out.Scale = 0, 0
 		case AggMinBy, AggMaxBy:
 			// MIN_BY/MAX_BY emit a value taken VERBATIM from their first
 			// argument — finalize writes back the very box GetValue
@@ -5893,6 +6040,16 @@ func (h *HashAggregate) mergeExtraState(dst, src *groupStateExtras) {
 			} else {
 				dst.extraState[j] = s
 			}
+		case *ohlcvState:
+			d, ok := dst.extraState[j].(*ohlcvState)
+			if !ok || d == nil {
+				dst.extraState[j] = s
+				continue
+			}
+			if d.n == 0 {
+				d.dom = s.dom
+			}
+			d.merge(s)
 		case *minMaxByState:
 			d, ok := dst.extraState[j].(*minMaxByState)
 			if !ok {

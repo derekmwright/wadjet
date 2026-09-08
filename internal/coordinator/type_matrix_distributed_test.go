@@ -463,6 +463,14 @@ func tmdTables() []tmdTable {
 		// concession for a RELATION name (ADR-0012) had no fixture on the DAG
 		// or on the worker at all. See table_name_case_two_path_test.go.
 		{tncTable, tncSchema(), tncData()},
+		// The BAR fixture (#965). Rides along for the same reason as the
+		// fixtures above: only TestTheBarIsTheSameOnEveryArm names it, and no
+		// type-matrix corpus entry does. The type matrix cannot stand in for
+		// it — nothing there has two rows sharing an instant, which is the
+		// tie the bar's (ts, price) tiebreak exists to decide, and nothing
+		// there pairs a price column with a volume column at all.
+		{ohlcvTable, ohlcvSchema(), ohlcvData()},
+		{ohlcvZeroTable, ohlcvSchema(), ohlcvZeroData()},
 	}, append(multikeyTables(), collideTables()...)...)
 }
 

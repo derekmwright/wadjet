@@ -1,6 +1,7 @@
 package coordinator
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/distributed"
@@ -65,7 +66,9 @@ func TestDecomposeVar_PassesThroughOtherAggregates(t *testing.T) {
 		t.Fatalf("produced %d specs, want %d", len(got), len(in))
 	}
 	for i := range in {
-		if got[i] != in[i] {
+		// reflect.DeepEqual rather than ==: an AggSpec carries a slice field
+		// (OutputFields, #965) and is no longer comparable.
+		if !reflect.DeepEqual(got[i], in[i]) {
 			t.Errorf("spec %d rewritten: %+v, want %+v", i, got[i], in[i])
 		}
 	}

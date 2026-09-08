@@ -91,11 +91,25 @@ func wireAggSpecs(specs []physical.AggSpec) []distributed.AggSpec {
 	out := make([]distributed.AggSpec, 0, len(specs))
 	for _, a := range specs {
 		spec := distributed.AggSpec{
-			Func:       a.Func,
-			InputCol:   a.InputCol,
-			OutputCol:  a.OutputCol,
-			InputExpr:  a.InputExpr,
-			InputCol2:  a.InputCol2,
+			Func:      a.Func,
+			InputCol:  a.InputCol,
+			OutputCol: a.OutputCol,
+			InputExpr: a.InputExpr,
+			InputCol2: a.InputCol2,
+			InputCol3: a.InputCol3,
+			OutputFields: func() []distributed.AggFieldSpec {
+				if len(a.OutputFields) == 0 {
+					return nil
+				}
+				fs := make([]distributed.AggFieldSpec, len(a.OutputFields))
+				for i, f := range a.OutputFields {
+					fs[i] = distributed.AggFieldSpec{
+						Name: f.Name, Type: int(f.Type),
+						Precision: f.Precision, Scale: f.Scale,
+					}
+				}
+				return fs
+			}(),
 			Separator:  a.Separator,
 			Percentile: a.Percentile,
 			Distinct:   a.Distinct,

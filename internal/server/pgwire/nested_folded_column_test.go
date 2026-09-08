@@ -214,6 +214,23 @@ func nfcFieldNames(col parquet.Column) []string {
 // Map-iteration-dependent wire bytes are not one of ADR-0013's eight legal
 // classes of nondeterminism.
 //
+// AMENDED 2026-09-08 (arc A1, #965). The expected bytes moved from `(A,9)` to
+// `(9,A)`, and it is the pin agreeing rather than the guard weakening.
+//
+// `(A,9)` was the sorted-key rendering — "no declaration bound" — and it was
+// the only DETERMINISTIC answer available while the catalog walk was the only
+// source of one: two catalog names folding to one key cannot choose between
+// their declarations. That is still true and
+// TestPGWireNestedAliasDropsAnAmbiguousFold still asserts it, at the resolver,
+// with metas that carry no declaration of their own.
+//
+// What changed is that a RESULT now carries its own (wadjet.ColumnMeta.Fields,
+// added for a bar, which no catalog describes at all). This query is not
+// ambiguous to the PLANNER — it reads `nsa.Attrs` and nothing else — so the
+// declaration is nsa's, `(9,A)` is the right rendering, and it is as
+// deterministic as the plan is. Both halves of this gate still hold: the bytes
+// are identical across 25 runs, and they are now identical AND right.
+//
 // The assertion is both halves: the bytes are the SAME every run, and they are
 // the declaration-less rendering — the ambiguous reference resolving to
 // nothing, which is what makes them the same.
@@ -252,14 +269,17 @@ func TestPGWireNestedAmbiguousReferenceRendersIdenticallyEveryRun(t *testing.T) 
 				"fixture: %q, run 0 returned %q. Tally so far: %v", i, row, first, seen)
 		}
 	}
-	// (A,9) is the sorted-key rendering: no declaration bound, which is the
-	// only deterministic answer available when two catalog names fold to one.
-	// (9,A) is nsa.Attrs's declaration and (,) is nsb.ATTRS's — either means
-	// an ambiguous alias was published.
-	if !bytes.Contains(first, []byte("(A,9)")) {
-		t.Fatalf("DataRow %q: the ambiguous folded reference bound a DECLARATION. "+
-			"(9,A) is nsa.Attrs's field order and (,) is nsb.ATTRS's, and choosing between "+
-			"them is Go map iteration order; the miss must be reported as a miss", first)
+	// (9,A) is nsa.Attrs's declared field order, which is the column this
+	// query reads. (,) is nsb.ATTRS's — two empty slots, because
+	// formatPgComposite would find neither `gamma` nor `delta` in the value —
+	// and (A,9) is the sorted-key rendering that means no declaration bound at
+	// all. Only the first is right, and it can only come from the PLAN.
+	if !bytes.Contains(first, []byte("(9,A)")) {
+		t.Fatalf("DataRow %q: want (9,A), nsa.Attrs's declared field order.\n"+
+			"  (A,9) means no declaration bound — the catalog walk's ambiguous fold, which "+
+			"the result's own declaration is supposed to answer before.\n"+
+			"  (,)   means nsb.ATTRS's declaration was taken, which IS the map-iteration "+
+			"defect this gate exists for.", first)
 	}
 }
 

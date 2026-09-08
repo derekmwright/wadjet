@@ -637,6 +637,11 @@ var knownAggregates = map[string]bool{
 	"min_by":        true,
 	"max_by":        true,
 	"median":        true,
+	// ohlcv(ts, price, volume) — one mergeable state returning a whole bar
+	// as a ROW (#965, ADR-0035). PostgreSQL has no such function; the bar it
+	// answers is PostgreSQL's spelled out as MIN/MAX/first/last/SUM per
+	// bucket, which is the value oracle for every field.
+	"ohlcv": true,
 }
 
 // IsAggregate returns true if the function name is a known aggregate.

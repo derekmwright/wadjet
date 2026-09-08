@@ -807,9 +807,17 @@ type AggSpec struct {
 	// carried them at all: the parser kept only Args[0], so MIN_BY had no
 	// ordering column and answered NULL, STRING_AGG ignored the separator
 	// the query asked for, and PERCENTILE_CONT read its fraction as 0.
-	InputCol2  string
-	Separator  string
-	Percentile float64
+	InputCol2 string
+	// InputCol3 is the third column argument (ohlcv's volume, #965). It rides
+	// beside InputCol2 everywhere the spec travels.
+	InputCol3 string
+	// OutputFields declares a ROW-valued aggregate's fields — today only
+	// ohlcv's bar. A bare TypeID cannot hold them, and a ROW vector with no
+	// FieldNames cannot be written at all, so the declaration travels with
+	// the spec the way OutputPrecision/OutputScale do for a DECIMAL.
+	OutputFields []parquet.Column
+	Separator    string
+	Percentile   float64
 	// Distinct is SQL's `AGG(DISTINCT x)` for every aggregate but COUNT,
 	// which travels as the Func string "count_distinct" instead. It is
 	// mirrored onto distributed.AggSpec at dispatch and read back into
@@ -7417,6 +7425,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// name binds to the FIRST column of that name (#622).
 			agg.InputCol = plansql.NormalizeIdentRef(strings.TrimSpace(agg.InputCol))
 			agg.InputCol2 = plansql.NormalizeIdentRef(strings.TrimSpace(agg.InputCol2))
+			agg.InputCol3 = plansql.NormalizeIdentRef(strings.TrimSpace(agg.InputCol3))
 			inputExpr := agg.InputExpr
 			exprCols := aggChild
 			if resolved, expr, exprInput, renamed := resolveAggInputName(agg.InputCol, aggChild); renamed {
@@ -7479,6 +7488,9 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			if resolved, expr, _, renamed := resolveAggInputName(agg.InputCol2, aggChild); renamed && expr == nil {
 				agg.InputCol2 = resolved
 			}
+			if resolved, expr, _, renamed := resolveAggInputName(agg.InputCol3, aggChild); renamed && expr == nil {
+				agg.InputCol3 = resolved
+			}
 			outType, outTypeKnown := aggSpecOutputType(node, agg)
 			spec := AggSpec{
 				Func:            agg.Func,
@@ -7487,8 +7499,12 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				OutputType:      outType,
 				OutputTypeKnown: outTypeKnown,
 				InputCol2:       agg.InputCol2,
+				InputCol3:       agg.InputCol3,
 				Separator:       agg.Separator,
 				Percentile:      agg.Percentile,
+			}
+			if fields, ok := aggOhlcvOutputFields(node, agg); ok {
+				spec.OutputFields = fields
 			}
 			// The (p,s) that goes with a DECIMAL OutputType. See the field's
 			// comment: without it a partial task whose filter matched nothing
@@ -11374,6 +11390,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 			Func:       fn,
 			InputCol:   inputCol,
 			InputCol2:  agg.InputCol2,
+			InputCol3:  agg.InputCol3,
 			Separator:  agg.Separator,
 			Percentile: agg.Percentile,
 			OutputCol:  agg.OutputCol,
@@ -11393,6 +11410,12 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		// both read this function.
 		if m, known := aggSpecOutputDecimal(node, agg); known {
 			ac.OutputPrecision, ac.OutputScale = m.Precision, m.Scale
+		}
+		// A ROW-valued aggregate's FIELDS, which a bare TypeID cannot carry
+		// either. Same function the stage spec uses, so the two paths declare
+		// one bar (#965).
+		if fields, ok := aggOhlcvOutputFields(node, agg); ok {
+			ac.OutputFields = fields
 		}
 		// A COMPUTED argument is declared from the projection this path
 		// materializes it under, which is the DAG's rule read off the local
@@ -16348,6 +16371,12 @@ func parseAggFunc(s string) exec.AggFunc {
 		return exec.AggPercentileDisc
 	case "mode":
 		return exec.AggMode
+	case "ohlcv":
+		return exec.AggOhlcv
+	case exec.OhlcvStateFunc:
+		return exec.AggOhlcvState
+	case exec.OhlcvStateMergeFunc:
+		return exec.AggOhlcvStateMerge
 	case "min_by":
 		return exec.AggMinBy
 	case "max_by":
@@ -16788,6 +16817,12 @@ func aggOutputType(funcName string, distinct bool) parquet.TypeID {
 		return parquet.TypeString
 	case "bool_and", "every", "bool_or":
 		return parquet.TypeBool
+	case "ohlcv":
+		return parquet.TypeRow
+	case exec.OhlcvStateFunc, exec.OhlcvStateMergeFunc:
+		// A partial bar travels as its encoded state — text, the way the
+		// variance and covariance partials do (ADR-0010).
+		return parquet.TypeString
 	default:
 		return parquet.TypeFloat64
 	}
@@ -16813,6 +16848,44 @@ func aggOutputType(funcName string, distinct bool) parquet.TypeID {
 // as a zero TypeID because TypeBool IS zero: MIN_BY over a BOOL column
 // declares BOOL, and a caller reading that as "undeclared" is how a
 // declaration goes missing on exactly one path (#354, #371).
+// aggOhlcvOutputFields declares a bar's ROW fields from the PRICE and VOLUME
+// column declarations, through exec.OhlcvOutputFields — the same function the
+// operator asks at Consume, so the declaration and the value are one decision.
+//
+// ok=false when either input is not a bare column this subtree can type (a
+// computed argument, a name no scan below carries, two scans disagreeing).
+// The operator then re-derives the list from the vectors it reads, which is
+// exactly what aggSpecOutputType's "unresolved" answer does for MIN/MAX.
+func aggOhlcvOutputFields(node *logical.Node, agg logical.AggExpr) ([]parquet.Column, bool) {
+	if strings.ToLower(strings.TrimSpace(agg.Func)) != "ohlcv" {
+		return nil, false
+	}
+	col := func(name string) (parquet.Column, bool) {
+		t, ok := aggInputColumnType(node, name)
+		if !ok {
+			return parquet.Column{}, false
+		}
+		c := parquet.Column{Name: name, Type: t}
+		if t == parquet.TypeDecimal {
+			m, known := aggInputColumnDecimal(node, name)
+			if !known {
+				return parquet.Column{}, false
+			}
+			c.Precision, c.Scale = m.Precision, m.Scale
+		}
+		return c, true
+	}
+	price, ok := col(agg.InputCol)
+	if !ok {
+		return nil, false
+	}
+	vol, ok := col(agg.InputCol3)
+	if !ok {
+		return nil, false
+	}
+	return exec.OhlcvOutputFields(price, vol)
+}
+
 func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID, bool) {
 	fn := strings.ToLower(strings.TrimSpace(agg.Func))
 	// SUM and AVG join the input-dependent list for ONE input type: over a
@@ -16826,6 +16899,11 @@ func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID,
 	case "min", "max", "min_by", "max_by":
 	case "sum", "avg":
 		decimalCapable = true
+	case "ohlcv":
+		// The bar is a ROW whatever its inputs are; the FIELDS depend on
+		// them, and they travel on AggSpec.OutputFields rather than here,
+		// because a bare TypeID cannot carry a field list.
+		return parquet.TypeRow, true
 	default:
 		return aggOutputType(agg.Func, agg.Distinct), true
 	}

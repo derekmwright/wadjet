@@ -1014,6 +1014,9 @@ func collectNodeColumnRefs(n *Node, refs map[string]bool) {
 			// have to survive pruning the same way. A pruned ordering column
 			// is not a missing column downstream — HashAggregate resolves it
 			// to -1 and skips every row, which is a NULL answer.
+			if agg.InputCol3 != "" {
+				refs[strings.ToLower(agg.InputCol3)] = true
+			}
 			if agg.InputCol2 != "" {
 				refs[strings.ToLower(agg.InputCol2)] = true
 			}

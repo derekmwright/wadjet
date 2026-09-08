@@ -319,7 +319,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 				found := false
 				if len(hAgg.Args) <= 1 {
 					for _, existing := range aggs {
-						if existing.InputCol2 != "" || existing.Separator != "" || existing.Percentile != 0 {
+						if existing.InputCol2 != "" || existing.InputCol3 != "" || existing.Separator != "" || existing.Percentile != 0 {
 							continue
 						}
 						if strings.EqualFold(existing.Func, funcName) &&
@@ -1013,7 +1013,7 @@ func reuseOrAddAggregate(call *plansql.FuncCallNode, aggs *[]AggExpr, counter *i
 	}
 	if len(call.Args) <= 1 {
 		for _, existing := range *aggs {
-			if existing.InputCol2 != "" || existing.Separator != "" || existing.Percentile != 0 {
+			if existing.InputCol2 != "" || existing.InputCol3 != "" || existing.Separator != "" || existing.Percentile != 0 {
 				continue
 			}
 			if strings.EqualFold(existing.Func, funcName) &&

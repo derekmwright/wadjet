@@ -937,11 +937,79 @@ lateral. An UNcorrelated lateral's window is unaffected.
 | `MEDIAN(column)` | Median value (= percentile_cont(0.5)) | Skips nulls |
 | `MIN_BY(return_col, sort_col)` | Value at row where sort_col is minimum | Skips nulls |
 | `MAX_BY(return_col, sort_col)` | Value at row where sort_col is maximum | Skips nulls |
+| `OHLCV(ts, price, volume)` | The whole bar as a ROW — see below | Skips a row where ANY argument is null |
 
 `DISTINCT` is accepted by every aggregate in this table, not only `COUNT`:
 `SUM(DISTINCT x)`, `AVG(DISTINCT x)` and `STRING_AGG(DISTINCT x, ',')` each
 de-duplicate their input at the value's exact type before aggregating.
 `MIN`/`MAX` are unaffected by de-duplication and answer the same either way.
+
+### OHLCV — a whole bar as one aggregate
+
+`OHLCV(ts, price, volume)` downsamples a stream into one bar per group and
+returns it as a `ROW` with six fields, in this order:
+
+```
+(open, high, low, close, volume, vwap)
+```
+
+```sql
+SELECT TIME_BUCKET(INTERVAL '5' MINUTE, ts) AS bucket,
+       OHLCV(ts, price, size)              AS bar
+FROM   trades
+GROUP  BY 1
+ORDER  BY 1;
+```
+
+To read one field, put the aggregate in a derived table or a CTE and take the
+field off the resulting COLUMN:
+
+```sql
+SELECT bucket, (bar).open, (bar).close, (bar).vwap
+FROM (
+  SELECT TIME_BUCKET(INTERVAL '5' MINUTE, ts) AS bucket,
+         OHLCV(ts, price, size)              AS bar
+  FROM trades GROUP BY 1
+) t
+ORDER BY bucket;
+```
+
+It is general-purpose downsampling — latency, sensor readings, flow bytes —
+not a finance-only function; "price" is any measure and "volume" any weight.
+
+**What each field is.** `open` and `close` are the price at the earliest and
+the latest instant in the group, `high` and `low` its extremes, `volume` the
+sum of the weights, and `vwap` the weighted mean
+`SUM(price*volume) / SUM(volume)` — equal, digit for digit, to that expression
+written out beside it in the same query.
+
+**Ties.** Two rows sharing an instant are ordered by PRICE: `open` is the
+SMALLER price at the earliest instant and `close` the LARGER price at the
+latest. The tiebreak is a value rather than a row order, so the answer does not
+depend on how the query was executed.
+
+**NULLs.** A row is skipped when ANY of the three arguments is null, which is
+PostgreSQL's rule for a multi-argument aggregate. A group in which every row is
+skipped answers a NULL bar — not a bar of nulls — and a field of a null ROW is
+null.
+
+**Declared types.** Each field declares what its own spelled-out aggregate
+declares:
+
+| field | type |
+|---|---|
+| `open`, `high`, `low`, `close` | the price column's own type (`DECIMAL(p,s)` keeps its `(p,s)`) |
+| `volume` | `SUM(volume)`'s type — `BIGINT` for `INT32`, `NUMERIC` for `INT64`, `DOUBLE PRECISION` for a float |
+| `vwap` | `AVG(price)`'s type — `NUMERIC(38, scale+4)` when both inputs are exact, `DOUBLE PRECISION` when either is a float |
+
+The whole ROW declares OID 25 (text) on the wire and renders as a PostgreSQL
+composite — `(10.00,21.00,7.00,21.00,24,14.583333)`, with an empty slot for a
+null field. See [data-types.md](data-types.md) §ROW.
+
+**Refusals.** `ts` must be a `TIMESTAMP` or a `DATE` and `price`/`volume` must
+be numeric; anything else is `42883`. `OHLCV(DISTINCT ...)` is `0A000`, and so
+is `OHLCV(...) OVER (...)` — a bar over a moving frame is not computed here,
+and a wrong bar is not offered in its place.
 
 ### Examples
 

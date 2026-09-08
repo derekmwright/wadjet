@@ -523,7 +523,7 @@ func caaAggIndex(agg *Node, p *Projection, fn *plansql.FuncCallNode) int {
 func caaEnsureAgg(agg *Node, f, col string, colNode plansql.Node, counter *int) string {
 	for i := range agg.AggExprs {
 		a := &agg.AggExprs[i]
-		if a.Distinct || a.InputCol2 != "" || a.Separator != "" || a.Percentile != 0 {
+		if a.Distinct || a.InputCol2 != "" || a.InputCol3 != "" || a.Separator != "" || a.Percentile != 0 {
 			continue
 		}
 		if strings.EqualFold(a.Func, f) && strings.EqualFold(a.InputCol, col) {

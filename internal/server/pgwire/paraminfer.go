@@ -318,6 +318,17 @@ func (c *pgConn) nestedColumnSchemas(sql string, metas []wadjet.ColumnMeta) *nes
 	if !needed {
 		return nil
 	}
+	// The RESULT's own declaration first. A ROW the plan declared carries its
+	// field list on the meta (wadjet.ColumnMeta.Fields), and that beats every
+	// guess below it: it is per-result rather than a cross-table name match,
+	// it is POSITIONAL, and it is the only source at all for a ROW no catalog
+	// describes — which is what an aggregate that CONSTRUCTS one produces
+	// (ohlcv's bar, #965). Before it, such a column reached
+	// formatPgComposite with no declaration and rendered in SORTED-KEY order:
+	// a well-formed DataRow carrying the right numbers in the wrong places.
+	if ns := nestedSchemaFromMetas(metas); ns != nil {
+		return ns
+	}
 
 	ctx, cancel := c.inferenceContext()
 	defer cancel()
@@ -420,4 +431,37 @@ func containsIdentWord(s, word string) bool {
 		}
 		from = i + 1
 	}
+}
+
+// nestedSchemaFromMetas builds the declaration map out of the result's own
+// column metadata. It answers only when EVERY nested-typed column has a
+// declaration, so a result that mixes a declared ROW with an undeclared one
+// still falls through to the catalog walk rather than half-answering.
+//
+// `ordered` is set, because these entries ARE the output column list in
+// order — the positional fallback nestedColumnFor offers is exact here, which
+// is what makes a renamed or duplicated ROW column resolve.
+func nestedSchemaFromMetas(metas []wadjet.ColumnMeta) *nestedFieldSchema {
+	any := false
+	for _, m := range metas {
+		if m.TypeID != parquet.TypeRow {
+			continue
+		}
+		if len(m.Fields) == 0 {
+			return nil
+		}
+		any = true
+	}
+	if !any {
+		return nil
+	}
+	byName := make(map[string]parquet.Column, len(metas))
+	ordered := make([]parquet.Column, len(metas))
+	for i, m := range metas {
+		col := parquet.Column{Name: m.Name, Type: m.TypeID,
+			Precision: m.Precision, Scale: m.Scale, Fields: m.Fields}
+		ordered[i] = col
+		byName[m.Name] = col
+	}
+	return &nestedFieldSchema{byName: byName, ordered: ordered}
 }

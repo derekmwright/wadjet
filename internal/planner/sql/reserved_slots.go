@@ -67,6 +67,7 @@ const (
 	SlotAvgCount     SlotFamily = "__avg_count"   // AVG's decomposed COUNT leg
 	SlotVarState     SlotFamily = "__var_state"   // STDDEV/VARIANCE partial state
 	SlotCovarState   SlotFamily = "__covar_state" // CORR/COVAR partial state
+	SlotOhlcvState   SlotFamily = "__ohlcv_state" // OHLCV's partial bar state (ADR-0035)
 	SlotGrouping     SlotFamily = "__grouping_"   // a GROUPING(...) bitmask
 	// SlotCorrKey is a DECORRELATED LATERAL's correlation key: a value the
 	// enclosing query never named, which the lowering has to publish so the
@@ -108,8 +109,8 @@ var suffixMintedFamilies = []SlotFamily{
 var allSlotFamilies = []SlotFamily{
 	SlotWindowOutput, SlotWindowKey, SlotSortKey, SlotGroupKey, SlotAggInput,
 	SlotNestedAgg, SlotScalar, SlotHaving, SlotTwoLevel, SlotSetOpCount,
-	SlotAvgSum, SlotAvgCount, SlotVarState, SlotCovarState, SlotGrouping,
-	SlotCorrKey,
+	SlotAvgSum, SlotAvgCount, SlotVarState, SlotCovarState, SlotOhlcvState,
+	SlotGrouping, SlotCorrKey,
 }
 
 // reservedSlotPrefixes is the reservation. It is a superset of the families
@@ -127,6 +128,7 @@ var reservedSlotPrefixes = []string{
 	"__grouping_",
 	"__having_",
 	"__key_",
+	"__ohlcv_state",
 	"__precomp_agg_",
 	"__row_loc",
 	"__rowcount_only__",

@@ -660,7 +660,7 @@ func aggregateOutputForCall(call *plansql.FuncCallNode, agg *Node) string {
 		inputCol = ""
 	}
 	for _, a := range agg.AggExprs {
-		if a.InputCol2 != "" || a.Separator != "" || a.Percentile != 0 {
+		if a.InputCol2 != "" || a.InputCol3 != "" || a.Separator != "" || a.Percentile != 0 {
 			continue
 		}
 		if strings.EqualFold(a.Func, funcName) &&

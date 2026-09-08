@@ -2037,6 +2037,59 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      option. Gated in
      `coordinator.TestArcJ1AnOnConditionOverADefaultedColumnIsRightOrLoud`.
 
+   - **`OHLCV` and `TIME_BUCKET` are EXTENSIONS, and their oracle is
+     PostgreSQL spelled out.** (Added 2026-09-08, arc A1, #965, ADR-0035.)
+
+     `TIME_BUCKET(stride, ts[, origin])` IS `date_bin(stride, ts, origin)`
+     under another name, and every one of its answers and both of its refusals
+     (0A000 for a stride containing months or years, 22008 for a non-positive
+     one) are the server's, measured on 17.11. Two differences are wadjet's
+     and both are narrowing: the default origin is `1970-01-01` where
+     `date_bin` has no two-argument form at all, and the stride must be an
+     INTERVAL literal (42804 otherwise) because the accepted interval grammar
+     is the SQL parser's and a second one in the expression layer would agree
+     with the first only by inspection — so `INTERVAL '1 day 6 hours'`, which
+     the server bins with, is not spellable here.
+
+     `OHLCV(ts, price, volume)` has no PostgreSQL equivalent, and its value
+     oracle is the bar spelled out per field with the SAME row filter a
+     multi-argument aggregate applies (`regr_count(y,x)` over
+     `(1,1),(2,NULL),(NULL,3),(4,4)` is 2, measured). The declared field types
+     are the server's for the aggregates the fields ARE — `min` of the price
+     column's type, `sum(volume)`'s type, `avg(price)`'s type. Three shapes
+     PostgreSQL would answer are REFUSED rather than approximated:
+     `OHLCV(DISTINCT …)` (0A000 — the server dedupes on the whole argument
+     tuple and this engine's distinct set for a multi-argument aggregate is
+     keyed on two columns), `OHLCV(…) OVER (…)` (0A000, with every other
+     aggregate that has no window arm — see the entry below), and
+     `(OHLCV(…)).open` inside one query block (42809 at the parser, which is
+     ADR-0022's "a field path's container is a bare column reference" and
+     applies to every composite-returning expression, not to this one). The
+     supported spelling for the last is a derived table or CTE, and it is
+     gated.
+
+     Gated in `coordinator.TestTheBarIsTheSameOnEveryArm` (twelve cells on
+     three arms), `exec.TestTheBars*` (the merge law, the encoding, the
+     tiebreak, the declared types), `wadjet.TestTimeBucket*` and
+     `pgwire.TestPGWireRendersTheBarAsAPostgresComposite`.
+
+   - **A ROW column declares OID 25 (text), not `record` 2249.** (Added
+     2026-09-08, arc A1; the divergence predates it.) `\gdesc` on
+     `ROW(1::int4, 2.5::float8, 'x'::text)` says `record`, OID 2249, measured
+     on 17.11. `pgTypeOID` has no ROW arm and falls to its text default, as it
+     does for ARRAY (#992), MAP, and the network types. The VALUE is
+     PostgreSQL's own composite text in DECLARED field order, byte for byte
+     including the empty slot for a NULL field, so a client that parses the
+     text gets the server's answer; only the OID a driver binds by differs.
+     Moving it to 2249 is a decision about the whole ROW TYPE — every column of
+     it, on every door — and is #992's neighbour rather than a per-function
+     choice. What arc A1 DID close is the declaration REACHING the renderer:
+     until #965 the only source of a composite's field order was the CATALOG,
+     which describes no value an aggregate constructs, and such a column
+     rendered with SORTED KEYS — a well-formed DataRow carrying the right
+     values in the wrong places. `wadjet.ColumnMeta.Fields` is the result's own
+     declaration now and every door reads it first.
+
    - **An aggregate with no window form is REFUSED (0A000) where PostgreSQL
      answers.** (Added 2026-09-08, arc A1, #965.) In PostgreSQL any aggregate
      may be used as a window function; here the window operator implements

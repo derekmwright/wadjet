@@ -1,6 +1,10 @@
 package physical
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/derekmwright/wadjet/internal/engine/exec"
+)
 
 // aggNeedsWholeInput reports whether an aggregate's answer for one group
 // cannot be assembled from per-task partial answers for that group.
@@ -53,6 +57,14 @@ func aggNeedsWholeInput(fn string) bool {
 	case "median", "percentile_cont", "percentile_disc",
 		"quantile_cont", "quantile_disc", "mode",
 		"min_by", "max_by", "string_agg":
+		return true
+	case exec.OhlcvFunc:
+		// A FINISHED bar is not re-aggregatable — a MAX of two bars is not a
+		// bar — so the plain two-phase split is a wrong answer that looks
+		// plausible. The bar's STATE is mergeable and its decomposition is
+		// what ADR-0035 is about; until that ships, the one-level shape is
+		// the correct dispatch and this list is where a
+		// non-re-aggregatable answer belongs.
 		return true
 	}
 	return false

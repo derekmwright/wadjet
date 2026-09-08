@@ -394,6 +394,13 @@ func buildAggInputProjection(
 	// engine's loud failure with a column of NULLs, which is the trade this
 	// file exists to refuse.
 	for _, a := range aggs {
+		if a.InputCol3 != "" && !seen[a.InputCol3] {
+			if node, err := plansql.ParseExpression(a.InputCol3); err == nil {
+				if _, bare := node.(*plansql.ColRef); bare {
+					addPassthrough(a.InputCol3)
+				}
+			}
+		}
 		if a.InputCol2 == "" || seen[a.InputCol2] {
 			continue
 		}
@@ -621,7 +628,7 @@ func fragmentGroupKeyPlan(spec distributed.OpSpec) (*fragmentGroupKeys, error) {
 	// filter column are the three ways something can (ADR-0026 §2a).
 	alloc := plansql.NewSlotAllocator(spec.GroupByCols...)
 	for _, a := range spec.Aggregates {
-		alloc.Seed(a.InputCol, a.InputCol2, a.OutputCol)
+		alloc.Seed(a.InputCol, a.InputCol2, a.InputCol3, a.OutputCol)
 	}
 	for _, r := range spec.GroupByResolve {
 		alloc.Seed(r.Expr)
@@ -726,7 +733,7 @@ func derivedGroupKeys(groupBy []string, aggs []distributed.AggSpec, filterCols [
 	// landing in one column.
 	alloc := plansql.NewSlotAllocator(groupBy...)
 	for _, a := range aggs {
-		alloc.Seed(a.InputCol, a.InputCol2, a.OutputCol)
+		alloc.Seed(a.InputCol, a.InputCol2, a.InputCol3, a.OutputCol)
 	}
 	alloc.Seed(filterCols...)
 	mint := func() string {

@@ -317,6 +317,23 @@ type ColumnMeta struct {
 	// keeps a real typmod only for a BARE column reference. pgTypeMod
 	// treats this the same as Precision <= 0 (FIX 2, #457/#458 fold-in).
 	WireUnconstrained bool
+	// Fields is a ROW column's declared field list, in declared ORDER.
+	//
+	// It is here for the reason Precision and Scale are: a bare TypeID is not
+	// a type for a ROW either, and the layer above needs the names AND their
+	// order to render one. PostgreSQL renders a composite in DECLARED field
+	// order — `ROW(1,2.5,'x')` is `(1,2.5,x)` — and a renderer with no
+	// declaration can only sort the keys, which for a bar
+	// (open, high, low, close, volume, vwap) puts `close` first and produces
+	// a well-formed DataRow carrying the right six numbers in the wrong six
+	// places (#965).
+	//
+	// Until the bar there was no ROW value that was not a column of some
+	// table, so pgwire could recover the declaration from the CATALOG
+	// (nestedColumnSchemas). An aggregate CONSTRUCTS one, and no catalog
+	// describes it. Nil for every non-ROW column and for a ROW the plan could
+	// not declare, where that catalog fallback still applies.
+	Fields []parquet.Column
 	// StringLength is the declared CHARACTER count of a parameterized string
 	// destination — `CAST(x AS VARCHAR(4))` — and 0 for a column that is not a
 	// string destination at all. PostgreSQL carries it on the wire as atttypmod
@@ -1006,6 +1023,7 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 			metas[i].TypeID = col.Type
 			metas[i].TypeName = col.Type.String()
 			metas[i].Precision, metas[i].Scale = col.Precision, col.Scale
+			metas[i].Fields = col.Fields
 			continue
 		}
 
@@ -1015,6 +1033,7 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 			metas[i].TypeID = col.Type
 			metas[i].TypeName = col.Type.String()
 			metas[i].Precision, metas[i].Scale = col.Precision, col.Scale
+			metas[i].Fields = col.Fields
 			continue
 		}
 
@@ -1023,6 +1042,7 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 			metas[i].TypeID = col.Type
 			metas[i].TypeName = col.Type.String()
 			metas[i].Precision, metas[i].Scale = col.Precision, col.Scale
+			metas[i].Fields = col.Fields
 			continue
 		}
 

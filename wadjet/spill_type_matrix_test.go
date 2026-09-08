@@ -13,6 +13,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // The spill sweep: every type, through every spilling operator, must answer
@@ -526,7 +527,15 @@ func (c spillMxCell) family() string {
 		return "sort"
 	case strings.HasPrefix(c.name, "window_"):
 		return "window"
-	case strings.HasPrefix(c.name, "group_by_distinct_"):
+	case strings.HasPrefix(c.name, "group_by_distinct_"), strings.HasPrefix(c.name, "ohlcv_"):
+		// The bar joins the LEGACY raw-row family, not the partial-state one,
+		// and that is a property of ADR-0035's pattern rather than an accident
+		// of naming: an aggregate carrying an extraState never reaches
+		// canUseExternalMerge (it clears h.simpleAggs), so under pressure it
+		// spills raw INPUT rows and re-aggregates them in Finalize. Correct,
+		// slower, and exactly what MIN_BY and the variance family already do.
+		// Asserting the partial-drain counter here would assert a path the bar
+		// does not take.
 		return "rawrow"
 	case strings.HasPrefix(c.name, "join_computed_"):
 		return "crossjoin"
@@ -553,6 +562,21 @@ func spillMxCells() []spillMxCell {
 		// picked by the key column's type.
 		add(spillMxCell{name: "group_by_" + n, forcedDrainArm: true, sql: fmt.Sprintf(
 			`SELECT %[1]s AS k, COUNT(*) AS n, COUNT(%[1]s) AS nn, SUM(id) AS s FROM %[2]s GROUP BY %[1]s`, n, tbl)})
+		// The BAR over this column as its PRICE, with the timestamp column as
+		// the ordering key (#965, ADR-0035). Only the numeric types can be a
+		// price; the rest are the refusal boundary and are gated in
+		// coordinator.TestTheBarIsTheSameOnEveryArm rather than here.
+		//
+		// This is the cell that would catch a state whose merge is not
+		// associative: under a budget the raw-row spill re-reads the input in
+		// a different order and the operator folds it in a different shape,
+		// which is precisely the condition the tiebreak has to be a VALUE for.
+		if spillMxBarPrice(n) {
+			add(spillMxCell{name: "ohlcv_" + n, sql: fmt.Sprintf(
+				`SELECT g AS gk, (b).open AS o, (b).high AS h, (b).low AS l,
+				        (b).close AS c, (b).volume AS v, (b).vwap AS w
+				 FROM (SELECT g, ohlcv(c_ts, %[1]s, c_i32) AS b FROM %[2]s GROUP BY g) t`, n, tbl)})
+		}
 		// The LEGACY raw-row path: COUNT(DISTINCT) is a non-simple aggregate,
 		// so canUseExternalMerge is false and group keys go to disk as boxed
 		// values (#632's path).
@@ -882,6 +906,24 @@ func spillMxRender(columns []string, rows []map[string]any, ordered bool) []stri
 
 // spillMxOpen loads the flat type matrix into an embedded DB with the given
 // per-query memory budget (0 = unbounded).
+// spillMxBarPrice reports whether a type-matrix column can be a bar's PRICE.
+// Derived from the engine's own answer (exec.OhlcvPriceInput) rather than from
+// a list here, so a type that gains or loses a bar moves this sweep with it.
+func spillMxBarPrice(name string) bool {
+	for _, c := range typematrix.Columns() {
+		if c.Name != name {
+			continue
+		}
+		scale := 0
+		if c.Type == parquet.TypeDecimal {
+			scale = 4 // typematrix declares c_dec as DECIMAL(18,4)
+		}
+		_, _, ok := exec.OhlcvPriceInput(c.Type, scale)
+		return ok
+	}
+	return false
+}
+
 func spillMxOpen(t *testing.T, budget int64) *DB {
 	t.Helper()
 	ctx := context.Background()

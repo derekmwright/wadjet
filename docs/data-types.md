@@ -519,6 +519,32 @@ is the one spelling PostgreSQL offers for an ambiguous container and wadjet
 does not; the derived-table rename above is the way to write it today.
 ADR-0022 carries the mechanism and what closing it takes.
 
+**A ROW an aggregate CONSTRUCTS.** Until `OHLCV` (see
+[sql-reference.md](sql-reference.md) §OHLCV) every ROW value in a result had
+been read out of some table's column, so its field names and their ORDER could
+be recovered from the catalog. An aggregate that builds one is described by no
+catalog, and a composite renders in DECLARED field order — `(open, high, low,
+close, volume, vwap)`, which is not alphabetical — so the declaration travels
+with the RESULT instead: `wadjet.ColumnMeta.Fields` carries a ROW column's
+field list, and every door reads it before falling back to the catalog. A
+renderer with no declaration can only sort the keys, which produces a
+well-formed row carrying the right values in the wrong places.
+
+On the wire a ROW column declares OID **25 (text)** and its value is
+PostgreSQL's own composite text: parentheses, comma-separated fields, an EMPTY
+slot for a NULL field, and a field quoted (with `"` doubled) when it contains a
+comma, a quote, or is empty.
+
+```
+(10.00,21.00,7.00,21.00,24,14.583333)     a bar
+(1,,3)                                     the middle field is NULL
+("a,b","has ""quote""","")                 quoting
+```
+
+PostgreSQL declares `record` = OID 2249 for an anonymous composite. Declaring
+25 instead is recorded in ADR-0012's divergence list beside ARRAY's (#992); the
+VALUE — which is what a client parses — is PostgreSQL's, byte for byte.
+
 **Array functions:** `cardinality`, `element_at`, `array_contains`, `array_join`, `array_min`, `array_max`, `array_length`
 
 **Map functions:** `map_keys`, `map_values`, `map_entries`, `map_from_entries`

@@ -111,13 +111,15 @@ func newCappedPartialAggPartitioned(keys []string, specs []distributed.AggSpec, 
 			unknown = true
 		}
 		aggs[i] = exec.AggColumn{
-			Func:       fn,
-			InputCol:   s.InputCol,
-			InputCol2:  s.InputCol2,
-			Separator:  s.Separator,
-			Percentile: s.Percentile,
-			OutputCol:  s.OutputCol,
-			OutputType: aggSpecOutputType(s),
+			Func:         fn,
+			InputCol:     s.InputCol,
+			InputCol2:    s.InputCol2,
+			InputCol3:    s.InputCol3,
+			OutputFields: aggSpecOutputFields(s),
+			Separator:    s.Separator,
+			Percentile:   s.Percentile,
+			OutputCol:    s.OutputCol,
+			OutputType:   aggSpecOutputType(s),
 		}
 	}
 	return &cappedPartialAgg{

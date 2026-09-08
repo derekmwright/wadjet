@@ -2170,6 +2170,14 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, task distributed.Ta
 				if ferr != nil {
 					return nil, ferr
 				}
+				// And __ohlcv_state#X into the bar it encodes (#965,
+				// ADR-0035). It takes the spec list because the bar's
+				// declared ROW fields travel there and nowhere else out
+				// here.
+				folded, ferr = applyOhlcvFold(folded, spec.Aggregates)
+				if ferr != nil {
+					return nil, ferr
+				}
 				if len(folded) == 0 {
 					return nil, nil
 				}
@@ -2506,11 +2514,18 @@ func (e *Executor) buildFragmentHashAggregate(ctx context.Context, spec distribu
 			if fn == exec.AggCovarState {
 				fn = exec.AggCovarStateMerge
 			}
+			// And the bar's: the partial emitted an encoded state per group;
+			// merging folds those states rather than re-aggregating finished
+			// bars, which would take a MAX of two ROWs (#965, ADR-0035).
+			if fn == exec.AggOhlcvState {
+				fn = exec.AggOhlcvStateMerge
+			}
 		}
 		aggCols[i] = exec.AggColumn{
 			Func:       fn,
 			InputCol:   inputCol,
 			InputCol2:  a.InputCol2,
+			InputCol3:  a.InputCol3,
 			Separator:  a.Separator,
 			Percentile: a.Percentile,
 			// SQL's DISTINCT for every aggregate but COUNT, which arrives as
@@ -2526,6 +2541,10 @@ func (e *Executor) buildFragmentHashAggregate(ctx context.Context, spec distribu
 			// filter matched nothing IS that row (#685).
 			OutputPrecision: a.OutputPrecision,
 			OutputScale:     a.OutputScale,
+			// A ROW-valued aggregate's declared FIELDS. The worker has no
+			// catalog to re-derive them from, so they cross on the spec
+			// (distributed.AggFieldSpec) the way the DECIMAL (p,s) does.
+			OutputFields: aggSpecOutputFields(a),
 		}
 		if mergeByPosition {
 			aggCols[i].InputColIdx = len(spec.GroupByCols) + i

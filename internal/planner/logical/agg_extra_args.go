@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // aggArity is the argument count each multi-argument aggregate requires.
@@ -21,6 +22,7 @@ var aggArity = map[string]int{
 	"percentile_disc": 2,
 	"quantile_cont":   2,
 	"quantile_disc":   2,
+	"ohlcv":           3,
 }
 
 // parseAggExtraArgs fills a's arguments past the first from the parsed
@@ -81,6 +83,29 @@ func parseAggExtraArgs(a *AggExpr, args []plansql.Node) error {
 		// column whichever way round the call was written.
 		a.InputCol = cleanExpr(args[colIdx].String())
 		a.InputExpr = args[colIdx]
+	case "ohlcv":
+		if a.Distinct {
+			// PostgreSQL dedupes a multi-argument aggregate on the whole
+			// argument TUPLE (`regr_count(DISTINCT y, x)` over (1,1),(1,2) is
+			// 2, measured). This engine's DISTINCT set for a multi-argument
+			// aggregate is keyed on the first TWO columns only
+			// (distinctFirstSighting), so a bar would dedupe on (price, ts)
+			// and ignore the volume — a wrong bar, silently, for the rows
+			// that share a price and an instant. Refused until the set is
+			// keyed on the whole tuple.
+			return sqlerr.New("0A000", "ohlcv(DISTINCT ...) is not supported")
+		}
+		// ohlcv(ts, price, volume). The arguments are REPOINTED so the bar
+		// reuses MIN_BY's slots rather than growing a parallel set: InputCol
+		// is the PRICE — the value the bar's open/high/low/close are, and the
+		// one aggSpecOutputType walks for their declared type — and InputCol2
+		// is the ORDERING key, which is exactly what MIN_BY/MAX_BY put there
+		// and what the pre-aggregate projection already materializes (#713).
+		// PERCENTILE_CONT repoints its own InputCol for the same reason.
+		a.InputCol2 = cleanExpr(args[0].String())
+		a.InputCol = cleanExpr(args[1].String())
+		a.InputExpr = args[1]
+		a.InputCol3 = cleanExpr(args[2].String())
 	case "string_agg":
 		// STRING_AGG(col) is legal and means the default separator.
 		if len(args) < 2 {

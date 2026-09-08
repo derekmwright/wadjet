@@ -248,16 +248,38 @@ func aggOutputTypeString(funcName string) parquet.TypeID {
 	case "count", "count_distinct", "approx_distinct":
 		return parquet.TypeInt64
 	case "string_agg", "var_state", "var_state_merge",
-		"covar_state", "covar_state_merge":
+		"covar_state", "covar_state_merge",
+		exec.OhlcvStateFunc, exec.OhlcvStateMergeFunc:
 		// A variance partial ships its (count, mean, M2) triple as an
 		// encoded string, a covariance partial its (count, meanX, meanY, C,
-		// M2x, M2y) sextuple; only the final fold produces a float.
+		// M2x, M2y) sextuple, an ohlcv partial its whole bar state; only the
+		// final fold produces a value.
 		return parquet.TypeString
+	case exec.OhlcvFunc:
+		return parquet.TypeRow
 	case "bool_and", "every", "bool_or":
 		return parquet.TypeBool
 	default:
 		return parquet.TypeFloat64
 	}
+}
+
+// aggSpecOutputFields turns the wire's flat field list back into the columns a
+// ROW-valued aggregate declares. The worker has no catalog, so this is the
+// ONLY source for a bar's field types out here — a dropped list would leave
+// the output ROW vector with no children to write into.
+func aggSpecOutputFields(a distributed.AggSpec) []parquet.Column {
+	if len(a.OutputFields) == 0 {
+		return nil
+	}
+	out := make([]parquet.Column, len(a.OutputFields))
+	for i, f := range a.OutputFields {
+		out[i] = parquet.Column{
+			Name: f.Name, Type: parquet.TypeID(f.Type),
+			Precision: f.Precision, Scale: f.Scale, Nullable: true,
+		}
+	}
+	return out
 }
 
 // parseAggFuncString maps the canonical string form carried on
@@ -324,6 +346,12 @@ func parseAggFuncString(s string) (exec.AggFunc, bool) {
 		return exec.AggPercentileDisc, true
 	case "mode":
 		return exec.AggMode, true
+	case exec.OhlcvFunc:
+		return exec.AggOhlcv, true
+	case exec.OhlcvStateFunc:
+		return exec.AggOhlcvState, true
+	case exec.OhlcvStateMergeFunc:
+		return exec.AggOhlcvStateMerge, true
 	case "min_by":
 		return exec.AggMinBy, true
 	case "max_by":
