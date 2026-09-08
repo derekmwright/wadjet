@@ -1764,17 +1764,17 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      what the pass DID — the marked blocks no stage could be made to carry.
      Because that route is NOT answer-preserving (the coordinator-local
      pipeline's ORDER BY is wrong for shapes the DAG gets right), it may take
-     only what was already wrong or loud, and the residue is THREE shapes,
-     listed with their `bb8635a4` disposition in ADR-0026 §7: a CONTAINER over
-     an AGGREGATE (routed there too), a BARE AGGREGATE alias beside a computed
-     sibling (silently wrong there), and a WINDOW inside the block (loud
-     there). All three answer PostgreSQL on the local pipeline, asserted by
-     counter in `coordinator.TestArcK3ADerivedBlockPublishesItsOwnProjection`.
-     A block publishing one NAME twice is NOT among them — it executes
-     distributed, where `bb8635a4` lost both aliases; neither is a COMPUTED
-     item over a scan, a window or a join, whose value the producing fragment
-     materializes whatever its type (a scalar-subquery item, `ARRAY[amount]`,
-     an all-NULL `CASE`), swept over the whole type-matrix corpus in
+     only what was already wrong or loud, and the residue is TWO shapes,
+     listed with their `bb8635a4` disposition in ADR-0026 §7: a BARE AGGREGATE
+     alias beside a computed sibling (silently wrong there) and a WINDOW inside
+     the block (loud there). Both answer PostgreSQL on the local pipeline,
+     asserted by counter in
+     `coordinator.TestArcK3ADerivedBlockPublishesItsOwnProjection`. A block's
+     item TYPE is not a disposition: the projection is typed by the same
+     inference the single path uses to declare that block, so a container
+     (over a column, a filtered scan, an aggregate, a lateral or a set-op
+     arm), a scalar-subquery item, an all-NULL `CASE` and a bare `NULL` all
+     execute — swept over the whole type-matrix corpus in
      `coordinator.TestArcK3NoBlockItemKindRoutesSilently`.
 
      WHAT REMAINS a divergence is the star's column ORDER, which is older and

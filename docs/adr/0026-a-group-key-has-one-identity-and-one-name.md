@@ -1942,90 +1942,55 @@ relation:
    are ONE model wherever the block is materialized, so `stageHiddenPositions`
    reads the projection there.
 
-**What is MARKED, and what a decline means.** Two classes are marked and the
-class decides only what happens when the publish DECLINES. A block that
-INTRODUCES a name — a rename, a computed item, an alias over an aggregate, one
-name published twice — makes the star read the wrong relation whatever else is
-true, so one the pass cannot carry is refused and routed. A block that merely
-NARROWS its stream is published where it can be (a lateral whose block is a
-bare `SELECT amount` otherwise publishes the scan's `order_id` beside it) and
-LEFT EXACTLY AS IT WAS where it cannot — never refused, never routed.
+**What is MARKED.** A block whose projection is not the column list of the
+stream beneath it — a name the stream does not carry, a name published twice, or
+a stream that carries more than the block publishes. One class, one question,
+asked of the STREAM. Two things are excluded, and neither is an allowlist: a
+block whose stream this pass cannot state at all (there is no known divergence
+to act on), and an ARM of a set operation, because `UNION`, `INTERSECT` and
+`EXCEPT` name their arms — publishing an arm's own list onto the arm's stage
+made the operation above read columns that were no longer there (`[<nil>]` for
+`[50]`).
 
-That asymmetry is the rule, not a convenience. The route is not
-answer-preserving, so it may carry only what was already wrong or loud: a
-twice-referenced CTE that answered PostgreSQL exactly was taken off the DAG by
-refusing a narrowing block, and the lateral shapes this arc closes were
-reopened by not marking one.
+**ONE TYPE INFERENCE.** The block's published projection is typed by the call
+`declaredJoinSchema`'s own computed-column arm and `attachScanSelectProjections`
+already make for the statement's own SELECT list — same walk, same `strictInt`
+hint, same STRING fallback. There is no such thing as an item this engine
+cannot declare: `ARRAY[c0]`, an all-NULL `CASE`, a bare `NULL` and
+`COALESCE(NULL, NULL)` reach a client with an OID today, and so does a
+scalar-subquery item. A WEAKER SECOND INFERENCE HERE WAS THE DEFECT that three
+rounds of this arc kept re-discovering: it declined on `expr.Undecided`, and
+every decline became a DISPOSITION — a query the single path answers with a
+declared type was routed off the DAG, or left to read the stream.
 
-A block whose own `ORDER BY` was MATERIALIZED carries a `__sortkey_N` the sort
-below still needs, so its projection can never be published: publishing the
-slot puts a name no query can spell on the wire, dropping it takes the key from
-the operator that reads it. What follows depends on the class, and it is the
-rule again rather than an exception. A NARROWING one is not a candidate at all
-— not publishing is what the engine already does, and for a narrowing block
-that is right or merely leaky. An INTRODUCING one stays a candidate and is
-therefore ROUTED, because there the alternative is a LOST COLUMN: at
-`bb8635a4` `(SELECT order_id, amount, amount AS a2 … ORDER BY id LIMIT 4)`
-dropped `a2` silently on both DAG arms and the `order_id AS oid` spelling
-failed loudly. Routed, the DAG answers exactly what the single-process arms
-answer — `__sortkey_0` included, which is that path's own PRE-EXISTING leak,
-pinned on every arm and filed rather than fixed here.
+**THE FALLBACK IS THE ROUTE.** A marked block that still cannot be published is
+refused with one sentence and routed to the coordinator-local pipeline, which
+is answer-preserving. There is no second disposition: "left alone" is gone,
+because it is the door a star walks through onto the stream. Every routed shape
+is measured at `bb8635a4` to have been wrong or loud there; a base-right shape
+that routes is a defect in the inference, to be fixed, never a pin.
 
-**What the route is now.** `ErrLateralProjectionDistributed` is kept and
-RETRIGGERED. It used to fire on a name test over every lateral; it fires now on
-what the pass DID — the marked blocks no stage could be made to carry, asked
-after stage generation because that is the only place the answer is exact.
-
-THE ROUTE IS NOT ANSWER-PRESERVING, so it may take only what was already wrong
-or loud. The coordinator-local pipeline's ORDER BY is wrong for shapes the DAG
-gets right, so a query that EXECUTED correctly must never be handed to it. Three
-things follow, each of which was a right-to-routed move until it was fixed:
-
-  - a NARROWING block is never REFUSED, so it never routes (above);
-  - a CTE body is planned ONCE, so the second reference's `Project` nodes never
-    reach the publish hook — the verdict is carried to them where the subtree
-    is deduped, or a twice-referenced CTE is marked, unpublishable and routed;
-  - SQL's `unknown` DECIDES. A bare `NULL` select item names no type and
-    produces no value, and PostgreSQL declares it `text`; leaving it undecided
-    put `SELECT order_id, NULL AS c` in the residue.
-
-**A COMPUTED ITEM IS NOT INTRODUCED WHERE ITS PRODUCER MATERIALIZES IT.**
-`absorbComputedSubqueryProjection` projects a computed alias INTO the producing
-fragment for a scan, a window and a join, so `(SELECT MAX(amount) …) AS sq`,
-`ARRAY[amount] AS a`, an all-NULL `CASE` and `COALESCE(NULL, NULL)` are columns
-the star already reads correctly — and calling them introduced took three
-shapes that answered PostgreSQL exactly off the DAG the moment this pass could
-not TYPE them. Over an AGGREGATE the absorb declines, and there a computed item
-really is missing. The discriminator is the PRODUCER, never the expression's
-type or its kind: three special cases for three undecided kinds were three too
-many, and `coordinator.TestArcK3NoBlockItemKindRoutesSilently` sweeps every
-column of the type-matrix corpus in four expression shapes so the next
-undecided kind cannot route silently either.
-
-**The residue is three shapes**, each measured wrong or loud at `bb8635a4`
-without the route, each answering PostgreSQL on the coordinator-local pipeline,
-each gated by counter in
+**The residue is TWO shapes**, each measured at `bb8635a4`, each answering
+PostgreSQL on the coordinator-local pipeline, each gated by counter in
 `coordinator.TestArcK3ADerivedBlockPublishesItsOwnProjection`:
 
 | shape | at bb8635a4 |
 |---|---|
-| a CONTAINER over an AGGREGATE (`ARRAY[COUNT(*)] AS a`) — it decides no type, and a projection materialized at a type the empty side declares differently is ADR-0010's refusal. Over a plain column the same expression EXECUTES. | routed |
 | a BARE AGGREGATE alias beside a computed sibling (`SUM(x) AS sa, SUM(x)*1 AS sb`) — an aggregate item is computed by the aggregate stage, not by a projection above it | silent wrong (`__agg_1` published) |
 | a WINDOW inside the block (`SUM(x) OVER () AS w`) | loud |
 
-A block publishing ONE NAME TWICE (`order_id AS k, amount AS k`) is NOT in the
-residue: it is marked, published and EXECUTES distributed, where `bb8635a4`
-published `order_id, amount` and lost both aliases.
+Everything else the earlier rounds listed now EXECUTES: a container over a
+plain column, over a FILTERED scan, over an aggregate, inside an INNER and a
+LEFT lateral, and in a set-op arm; a scalar-subquery item; an all-NULL `CASE`;
+a bare `NULL`; one name published twice; a twice-referenced CTE with and
+without a rename. The container spellings no longer publish their SOURCE column
+beside the container either — the stage emits exactly what the block wrote.
 
-**The declaration reads the PUBLISHED list too, never the stream.** A derived
-block is a real relation on both paths — a `Project` operator on the
-single-process one, a materialized projection on the DAG — so `declaredJoinSchema`
-is given the side's block wherever it is asked what a side EMITS: for the
-zero-row `SELECT *` declaration (§ ADR-0012's #978 entry) and for the schema an
-EMPTY side of a join is padded with. Read from the scan instead, the first
-invented `s.id`, `product` and `qty` into a `RowDescription` and dropped a
-rename's alias, and the second padded a LEFT join's unmatched rows with eight
-columns for PostgreSQL's five.
+**Two PRE-EXISTING leaks are pinned, not fixed.** A block whose own `ORDER BY`
+was MATERIALIZED publishes its `__sortkey_N` (the sort below still reads that
+key), on every arm and on the wire; and two independent LATERALs over one table
+publish the second lowering's `__key_1`. Both are in a `want` string, so the
+day either stops leaking its cell fails.
 
 **A build side that collapses its input is not a repeated scan of its table
 (#981).** `markCoPathingSelfJoinBuilds` walks a join's build dependency chain

@@ -50,20 +50,8 @@ var ErrLateralProjectionDistributed = errors.New(
 func refuseUnpublishedStarBlock(candidates map[*logical.Node]blockDivergence,
 	published map[*logical.Node]bool) error {
 	var missing []string
-	for block, class := range candidates {
-		if published[block] || class != blockIntroduces {
-			// A NARROWING block that could not be published is left exactly as
-			// it was, because refusing it would move a query that is RIGHT
-			// onto a path that is not answer-preserving (round-1 B1).
-			//
-			// NO CELL FAILS WHEN THIS CONDITION IS REMOVED, and that is worth
-			// saying rather than hiding: every narrowing block reachable from
-			// the corpus IS publishable today (a union arm, a DISTINCT, a
-			// GROUP BY, a LIMIT, a twice-referenced CTE — all measured), and
-			// the one shape that cannot be published is refused a candidate
-			// earlier, where its materialized sort key is seen. This is the
-			// structural guarantee that a FUTURE decline cannot silently route
-			// a right answer, not a repair of a defect that exists.
+	for block := range candidates {
+		if published[block] {
 			continue
 		}
 		names := emittedColumnNames(block)

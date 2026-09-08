@@ -3,7 +3,6 @@ package physical
 import (
 	"strings"
 
-	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -83,6 +82,18 @@ func starReadBlockProjections(root *logical.Node) map[*logical.Node]blockDiverge
 		if n.Type == logical.NodeJoin {
 			joined = true
 		}
+		// A SET OPERATION NAMES ITS ARMS. `UNION`, `INTERSECT` and `EXCEPT`
+		// publish the operation's own result columns and project every arm
+		// onto them, so an arm's `Project` is not a relation any star reads —
+		// it is an input to one. Marking an arm published its list onto the
+		// arm's own stage, and the set op above then read columns that were no
+		// longer there: `(SELECT order_id, ARRAY[amount] AS a FROM lat_item
+		// UNION ALL …)` answered `[<nil>]` for `[50]`. The arms are treated
+		// exactly as a Project above them would be.
+		if n.Type == logical.NodeUnion || n.Type == logical.NodeIntersect ||
+			n.Type == logical.NodeExcept {
+			projected = true
+		}
 		for _, child := range n.Children {
 			walk(child, projected, joined)
 		}
@@ -110,16 +121,6 @@ func blockProjectionLeavesItsStream(p *logical.Node) blockDivergence {
 	names := emittedColumnNames(p)
 	if len(names) == 0 {
 		return blockAgrees
-	}
-	// A MATERIALIZED ORDER BY TERM in the block's own list is remembered, not
-	// acted on yet: what it means depends on the class, decided below.
-	sortKeyFamily := plansql.ReservedSlotFamily(plansql.SlotName(plansql.SlotSortKey, 0))
-	materializedSortKey := false
-	for _, name := range names {
-		if plansql.ReservedSlotFamily(strings.ToLower(blockBareName(name))) == sortKeyFamily {
-			materializedSortKey = true
-			break
-		}
 	}
 	stream := blockStreamNames(p)
 	if len(stream) == 0 {
@@ -156,55 +157,25 @@ func blockProjectionLeavesItsStream(p *logical.Node) blockDivergence {
 	for _, s := range stream {
 		have[strings.ToLower(blockBareName(s))] = true
 	}
-	// A COMPUTED item over a producer that MATERIALIZES it is already on the
-	// stream, whatever the logical tree says. absorbComputedSubqueryProjection
-	// projects a computed alias INTO the producing fragment for a scan, a
-	// window and a join (#383, #742, #780), so `(SELECT MAX(amount) …) AS sq`,
-	// `ARRAY[amount] AS a` and an all-NULL CASE are columns the star already
-	// reads correctly — and calling them INTRODUCED took three shapes that
-	// answered PostgreSQL exactly off the DAG the moment this pass could not
-	// type them (round-2 B1).
-	//
-	// Over an AGGREGATE the absorb declines, and there a computed item really
-	// is missing: `SUM(x) AS sa, SUM(x)*1 AS sb` published `__agg_1` to the
-	// client at v0.18.60. That is the difference, and it is a property of the
-	// PRODUCER rather than of the expression's type.
-	materialized := blockProducerMaterializesComputed(p)
-	for _, pr := range logical.VisibleProjections(p.Projections) {
-		if !materialized || pr.IsAgg || pr.Alias == "" || pr.ASTExpr == nil ||
-			isSimpleColRefForRename(pr.ASTExpr) {
-			continue
-		}
-		have[strings.ToLower(blockBareName(pr.Alias))] = true
-	}
+	// WHAT THE STREAM CARRIES IS MEASURED, never inferred from the producer's
+	// KIND. Round 3 read "a computed item over a scan, a window or a join is
+	// materialized by absorbComputedSubqueryProjection, so it is not
+	// introduced" — an allowlist, and every allowlist this arc wrote grew a
+	// hole: a decorrelated LATERAL answers that test and does NOT get the
+	// absorb's benefit (the star then read the correlation columns), and a
+	// set-op arm fails it and did not need to be marked at all. The question
+	// is only whether the stream beneath this block carries a column of this
+	// name, and it is asked of the stream.
 	seen := make(map[string]bool, len(names))
 	for _, name := range names {
 		bare := strings.ToLower(blockBareName(name))
 		if bare == "" || seen[bare] || !have[bare] {
-			// INTRODUCES stands even with a materialized sort key. The
-			// publish will decline (the projection cannot drop a key the sort
-			// below reads), so the block is refused and ROUTED — and that is
-			// the improvement here, because a star over such a block loses the
-			// introduced column silently or fails loudly at v0.18.60
-			// (`sort: key column "oid" does not exist`).
 			return blockIntroduces
 		}
 		seen[bare] = true
 	}
 	if len(names) != len(stream) {
-		if materializedSortKey {
-			// A NARROWING block whose own ORDER BY was materialized is left
-			// alone entirely. Its list carries a `__sortkey_N` the sort below
-			// still needs, so publishing it puts a name no query can spell on
-			// the wire and dropping it takes the key from the operator that
-			// reads it — and NOT publishing is what the engine already does,
-			// which for a narrowing block is right or merely leaky, never a
-			// lost column. `SELECT * FROM o JOIN (SELECT order_id, product
-			// FROM item ORDER BY amount LIMIT 3) s` publishes the scan's
-			// `amount` exactly as it did at v0.18.60.
-			return blockAgrees
-		}
-		return blockNarrows
+		return blockIntroduces
 	}
 	return blockAgrees
 }
@@ -217,31 +188,25 @@ func blockProjectionLeavesItsStream(p *logical.Node) blockDivergence {
 //     item, an alias over an aggregate) or one published TWICE. The star sees
 //     the wrong relation, always, so a block this pass cannot publish is
 //     REFUSED and routed — it was wrong or loud before the pass existed.
-//   - blockNarrows: every published name is on the stream, once, and the
-//     stream carries MORE. Publishing is an improvement — column pruning
-//     removes most of the extras but not the ones something else keeps alive,
-//     and a lateral whose block is a bare `SELECT amount` published the scan's
-//     `order_id` beside it. But NOT publishing is exactly what the engine did
-//     before, so a narrowing block the pass cannot carry is left alone and
-//     never routed.
-//   - blockIntroduces: a name the stream does not carry (a rename, an alias
-//     over an aggregate, a computed item the producer will NOT materialize) or
-//     one published TWICE. The star sees the wrong relation, always, so a
-//     block this pass cannot publish IS refused and routed — it was wrong or
-//     loud before the pass existed.
+//   - blockAgrees: the block's list IS the stream's, name for name and once
+//     each. Nothing to do.
+//   - blockIntroduces: anything else — a name the stream does not carry, a
+//     name published twice, or a stream that carries MORE than the block
+//     publishes. The star reads the stream, so any of the three hands the
+//     client a relation the query did not write.
 //
-// Both classes are MARKED; the class decides only what happens when the
-// publish DECLINES. That asymmetry is the whole rule: the route is not
-// answer-preserving — the coordinator-local pipeline's ORDER BY is wrong for
-// shapes the DAG gets right — so it may carry only what was already wrong or
-// loud. Refusing a narrowing block took a twice-referenced CTE that answered
-// PostgreSQL exactly off the DAG (round-1 B1); not marking one at all reopened
-// the lateral shapes round 1 closed.
+// ONE CLASS, and that is the round-4 correction. Three rounds each split this
+// question a different way — narrowing versus introducing, then producer kind
+// — and each split grew a hole, because each was a MODEL of what the DAG would
+// do rather than a measurement. There is no second disposition now: a block
+// whose projection is not its stream is published, and one that cannot be
+// published is REFUSED and routed, which is answer-preserving and is what J1
+// shipped. "Left alone" is gone, because it is the door a star walks through
+// onto the stream.
 type blockDivergence int
 
 const (
 	blockAgrees blockDivergence = iota
-	blockNarrows
 	blockIntroduces
 )
 
@@ -384,32 +349,25 @@ func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool) ([
 			continue
 		}
 		if pr.ASTExpr != nil && !isSimpleColRefForRename(pr.ASTExpr) {
-			// The CONFIDENCE, not the TypeID: parquet.TypeBool is the zero
-			// value, so `COUNT(*) = 0 AS n` reads as "no type at all" through
-			// a `t == 0` test and the whole block goes unpublished — which is
-			// the ADR-0010 refusal again, for a column that was decided.
-			decl, conf := inferProjectionDeclTypeConf(pr.ASTExpr, 0, strictInt, decls)
-			if conf == expr.Undecided {
-				// SQL's `unknown` DECIDES. A bare NULL select item names no
-				// type and produces no value, and PostgreSQL declares it
-				// `text` (OID 25) — which is what this engine publishes for
-				// `SELECT NULL AS c` on every arm already. Declining it left
-				// `SELECT order_id, NULL AS c` in the residue and took a query
-				// that was RIGHT off the DAG (round-1 B2), onto a path that is
-				// not answer-preserving.
-				//
-				// Asked of the LITERAL rather than of the inference's
-				// `Untyped` flag, which this walk does not reach for a bare
-				// `NULL` (it answers the zero DeclType). Anything else
-				// undecided still declines: a container built from an
-				// aggregate produces a value at runtime, at its own type, and
-				// text is not it.
-				if !astIsBareNull(pr.ASTExpr) {
-					return nil, false
-				}
-				decl = expr.DeclType{ID: parquet.TypeString}
-			}
-			t, prec, scale := declTypeParts(decl)
+			// ONE INFERENCE, and it is the SINGLE PATH'S. This is the call
+			// `declaredJoinSchema`'s own computed-column arm makes and the
+			// call `attachScanSelectProjections` makes for the statement's own
+			// SELECT list: the same walk, the same `strictInt` hint, the same
+			// scalar-subquery resolver, and the same STRING FALLBACK.
+			//
+			// A weaker second inference here is what three rounds of this arc
+			// kept tripping over. It declined on `expr.Undecided` and each
+			// decline became a DISPOSITION — a query the single path answers
+			// with a declared type was routed off the DAG, or worse, left to
+			// read the stream. There is no such thing as an item this engine
+			// cannot declare: `SELECT ARRAY[c0] AS a`, an all-NULL `CASE`, a
+			// bare `NULL` and `COALESCE(NULL, NULL)` all reach a client with
+			// an OID today (25, 25, 25, 701), and a scalar-subquery item
+			// reaches it with its own (20, through `subqueryDecl`). Whatever
+			// that walk answers is what this stage publishes, so the two paths
+			// describe one relation by construction.
+			t, prec, scale := declTypeParts(
+				inferProjectionDeclType(pr.ASTExpr, parquet.TypeString, strictInt, decls))
 			out = append(out, blockColumn{
 				Name: name, Expr: pr.ASTExpr.String(),
 				Decl: parquet.Column{
@@ -544,21 +502,6 @@ func declaredBlockSchema(p *logical.Node, wantSet map[string]bool,
 	return out
 }
 
-// astIsBareNull reports whether this select item is the literal `NULL` and
-// nothing else — SQL's `unknown`, which PostgreSQL declares as text.
-func astIsBareNull(n plansql.Node) bool {
-	for {
-		switch t := n.(type) {
-		case *plansql.ParenNode:
-			n = t.Inner
-		case *plansql.Lit:
-			return t.Kind == plansql.LitNull
-		default:
-			return false
-		}
-	}
-}
-
 // stageIndexByID is the index of the stage with this ID, or ok=false.
 func (p *Planner) stageIndexByID(stages []Stage, id string) (int, bool) {
 	for i := range stages {
@@ -582,28 +525,4 @@ func markStarReadBlocks(n *logical.Node, candidates map[*logical.Node]blockDiver
 	for _, c := range n.Children {
 		markStarReadBlocks(c, candidates, published)
 	}
-}
-
-// blockProducerMaterializesComputed reports whether the fragment under this
-// block will compute its COMPUTED select items itself.
-//
-// It is absorbComputedSubqueryProjection's own scope, asked of the logical
-// tree: a chain of stage-less nodes ending at a SCAN, a WINDOW or a JOIN. An
-// AGGREGATE is deliberately not in it — that pass declines over one, and a
-// computed item above an aggregate is a column no stage emits.
-func blockProducerMaterializesComputed(p *logical.Node) bool {
-	if p == nil || len(p.Children) != 1 {
-		return false
-	}
-	cur := p.Children[0]
-	for cur != nil && len(cur.Children) == 1 &&
-		(cur.Type == logical.NodeFilter ||
-			(cur.Type == logical.NodeProject && !cur.SecurityBarrier)) {
-		cur = cur.Children[0]
-	}
-	if cur == nil {
-		return false
-	}
-	return cur.Type == logical.NodeScan || cur.Type == logical.NodeWindow ||
-		cur.Type == logical.NodeJoin
 }

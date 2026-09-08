@@ -235,27 +235,55 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 				`FROM lat_item) s ON s.order_id = o.id ORDER BY o.id`,
 			want: `order_id,c,id,customer,total | 1,NULL,1,Alice,150 | 1,NULL,1,Alice,150 | ` +
 				`2,NULL,2,Bob,200 | 2,NULL,2,Bob,200`},
-		// The container cases: the single-process arms publish PostgreSQL's
-		// column SET, and the DAG publishes the container's SOURCE column
-		// beside it. That leak is PRE-EXISTING and identical at bb8635a4 —
-		// what this arc changes is only the disposition, from routed back to
-		// executed — so it is pinned per arm rather than described, and the
-		// day the DAG stops leaking, `wantDAG` fails.
+		// The container cases. At bb8635a4 the DAG published the container's
+		// SOURCE column beside it — five columns for PostgreSQL's four — and
+		// the FILTERED spelling did too, because the predicate keeps the
+		// source alive through pruning. Publishing the block's projection ends
+		// both: the stage emits exactly what the block wrote.
 		{name: "computed/a-container-over-a-plain-column",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, ARRAY[amount] AS a ` +
 				`FROM lat_item) s ON s.order_id = o.id ORDER BY o.id`,
 			want: `order_id,a,id,customer,total | 1,[50],1,Alice,150 | ` +
-				`1,[100],1,Alice,150 | 2,[75],2,Bob,200 | 2,[125],2,Bob,200`,
-			wantDAG: `amount,order_id,a,id,customer,total | 50,1,[50],1,Alice,150 | ` +
-				`100,1,[100],1,Alice,150 | 75,2,[75],2,Bob,200 | 125,2,[125],2,Bob,200`},
+				`1,[100],1,Alice,150 | 2,[75],2,Bob,200 | 2,[125],2,Bob,200`},
 		{name: "computed/a-two-element-container",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, ARRAY[amount, amount * 2] ` +
 				`AS a FROM lat_item) s ON s.order_id = o.id ORDER BY o.id`,
 			want: `order_id,a,id,customer,total | 1,[50 100],1,Alice,150 | ` +
-				`1,[100 200],1,Alice,150 | 2,[75 150],2,Bob,200 | 2,[125 250],2,Bob,200`,
-			wantDAG: `amount,order_id,a,id,customer,total | 50,1,[50 100],1,Alice,150 | ` +
-				`100,1,[100 200],1,Alice,150 | 75,2,[75 150],2,Bob,200 | ` +
-				`125,2,[125 250],2,Bob,200`},
+				`1,[100 200],1,Alice,150 | 2,[75 150],2,Bob,200 | 2,[125 250],2,Bob,200`},
+		{name: "computed/a-container-over-a-FILTERED-scan",
+			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, ARRAY[amount] AS a ` +
+				`FROM lat_item WHERE amount > 60) s ON s.order_id = o.id ORDER BY o.id, a`,
+			want: `id,customer,total,order_id,a | 1,Alice,150,1,[100] | ` +
+				`2,Bob,200,2,[125] | 2,Bob,200,2,[75]`},
+		// A CONTAINER INSIDE A LATERAL, both join kinds. At bb8635a4 these
+		// were ROUTED; at round 3 they read the lateral's stream and published
+		// the correlation columns (dag) or failed under ADR-0010 (dagshuf).
+		{name: "computed/a-container-inside-a-LEFT-lateral",
+			sql: `SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT ARRAY[amount] AS a ` +
+				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id, a`,
+			want: `id,customer,total,a | 1,Alice,150,[100] | 1,Alice,150,[50] | ` +
+				`2,Bob,200,[125] | 2,Bob,200,[75] | 3,Carol,0,NULL`},
+		{name: "computed/a-container-inside-an-INNER-lateral",
+			sql: `SELECT * FROM lat_ord o JOIN LATERAL (SELECT ARRAY[amount] AS a ` +
+				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id, a`,
+			want: `a,id,customer,total | [100],1,Alice,150 | [50],1,Alice,150 | ` +
+				`[125],2,Bob,200 | [75],2,Bob,200`},
+		{name: "computed/an-all-NULL-CASE-inside-a-lateral",
+			sql: `SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT ` +
+				`CASE WHEN amount > 60 THEN NULL ELSE NULL END AS c FROM lat_item ` +
+				`WHERE order_id = o.id) s ON true ORDER BY o.id`,
+			want: `id,customer,total,c | 1,Alice,150,NULL | 1,Alice,150,NULL | ` +
+				`2,Bob,200,NULL | 2,Bob,200,NULL | 3,Carol,0,NULL`},
+		// A SET-OP ARM is not a relation a star reads: the operation names its
+		// arms. Marking one published its list onto the arm's own stage and
+		// the union above then read columns that were no longer there —
+		// `[<nil>]` for `[50]`, measured, in round 4's first cut.
+		{name: "computed/a-container-in-a-set-op-arm",
+			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, ARRAY[amount] AS a ` +
+				`FROM lat_item UNION ALL SELECT order_id, ARRAY[amount] FROM lat_item ` +
+				`WHERE amount > 1000) s ON s.order_id = o.id ORDER BY o.id, a`,
+			want: `order_id,a,id,customer,total | 1,[100],1,Alice,150 | ` +
+				`1,[50],1,Alice,150 | 2,[125],2,Bob,200 | 2,[75],2,Bob,200`},
 
 		// AN INTRODUCING BLOCK WITH A MATERIALIZED ORDER BY (round-2 P1). The
 		// publish cannot drop a key the sort below reads, so the block is
@@ -281,19 +309,17 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 		// below EXECUTES distributed; the three that route say why, each
 		// measured at bb8635a4.
 		//
-		// A block whose OWN ORDER BY was materialized is not a candidate at
-		// all: its list carries a `__sortkey_N` the sort below still needs, so
-		// publishing it puts a name no query can spell on the wire and
-		// dropping it takes the key from the operator that reads it. The
-		// `amount` the DAG publishes beside the block's two columns is the
-		// PRE-EXISTING leak, identical at bb8635a4, and the single arms' own
-		// `__sortkey_0` is pinned here rather than exempted.
-		{name: "boundary/narrowing-block-is-left-alone",
+		// A block whose own ORDER BY was MATERIALIZED publishes its list with
+		// the `__sortkey_N` in it — the sort below still reads that key, so it
+		// cannot be dropped. Both paths therefore publish the same six
+		// columns, where bb8635a4's DAG published the scan's `amount` in the
+		// slot's place. PostgreSQL sends five; the sixth is this engine's own
+		// materialized ORDER BY term on EVERY arm, PRE-EXISTING on the single
+		// path, pinned in `want` rather than exempted.
+		{name: "boundary/a-block-with-a-materialized-sort-key",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, product FROM lat_item ` +
 				`ORDER BY amount LIMIT 3) s ON s.order_id = o.id ORDER BY o.id, s.product`,
 			want: `id,customer,total,order_id,product,__sortkey_0 | 1,Alice,150,1,Gadget,100 | ` +
-				`1,Alice,150,1,Widget,50 | 2,Bob,200,2,Widget,75`,
-			wantDAG: `id,customer,total,order_id,product,amount | 1,Alice,150,1,Gadget,100 | ` +
 				`1,Alice,150,1,Widget,50 | 2,Bob,200,2,Widget,75`},
 		// EXECUTED and PostgreSQL's exact order at bb8635a4, and the local
 		// pipeline gets this ORDER BY wrong — so routing it turned a right
@@ -344,18 +370,18 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 			want: `id,customer,total,order_id,h | 1,Alice,150,NULL,NULL | ` +
 				`2,Bob,200,NULL,NULL | 3,Carol,0,NULL,NULL`},
 
-		// THE RESIDUE — three shapes, each ROUTED, each measured wrong or loud
+		// THE RESIDUE — TWO shapes, each ROUTED, each measured wrong or loud
 		// at bb8635a4 without the route. This list is the one ADR-0026 §7 and
 		// docs/sql-reference.md state, and it is complete.
 		//
-		// ROUTED at bb8635a4 too: `ARRAY[COUNT(*)]` decides no type, and a
-		// projection materialized at a type the empty side declares
-		// differently is ADR-0010's refusal.
-		{name: "residue/a-container-over-an-aggregate",
+		// ROUTED at bb8635a4 and until round 4, when the type stopped being a
+		// disposition: the block's projection is typed by the SAME inference
+		// the single path uses, so a container over an aggregate is published
+		// like any other item and the query EXECUTES.
+		{name: "computed/a-container-over-an-aggregate",
 			sql: `SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT ARRAY[COUNT(*)] AS a ` +
 				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id`,
-			want:       `id,customer,total,a | 1,Alice,150,[2] | 2,Bob,200,[2] | 3,Carol,0,[0]`,
-			wantRouted: true},
+			want: `id,customer,total,a | 1,Alice,150,[2] | 2,Bob,200,[2] | 3,Carol,0,[0]`},
 		// SILENT WRONG at bb8635a4: the DAG published `__agg_1` beside `sa`
 		// and `sb`. An aggregate SELECT item is computed by the aggregate
 		// stage, not by a projection above it.
