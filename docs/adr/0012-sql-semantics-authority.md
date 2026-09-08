@@ -404,6 +404,20 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      coordinator's local pipeline, which the census asserts as a routing
      counter beside the rows — so what closed is the DIVERGENCE, and the DAG
      still never declares this expression itself.
+   - **`DISTINCT` inside a window call is REFUSED, not answered.** (Added
+     2026-09-07, #987 review P4.) PostgreSQL 17.11 does not implement the
+     feature and says so: `ERROR: 0A000: DISTINCT is not implemented for
+     window functions`. Wadjet dropped the keyword — both structures that turn
+     a parsed window call into a plan build the argument list from the
+     argument NODES and never read `FuncCallNode.Distinct` — so
+     `SUM(DISTINCT c_proto) OVER ()` answered 621435, the RAW total, where the
+     grouped `SUM(DISTINCT c_proto)` answers 32640. This is not a divergence
+     entry: it is wadjet following PostgreSQL, recorded because the previous
+     behaviour was a plausible wrong number rather than a missing feature, and
+     "loud beats plausible" is the rule that decides it. Refused at
+     `sql.parseWindowFunc`, the one site where a call becomes a window call,
+     so it covers every door and both the bare and the nested spelling; gated
+     by `coordinator.TestAWindowFunctionRefusesDISTINCT` on four arms.
    - **`SUM`/`AVG` over PORT and PROTOCOL follow `int4`'s result types.**
      (Added 2026-09-07, #953, arc K2.) PostgreSQL has neither type, so this is
      an EXTENSION rather than a divergence — but it is not a free choice

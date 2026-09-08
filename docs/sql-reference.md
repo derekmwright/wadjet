@@ -1771,8 +1771,14 @@ declares and answers — one question written two ways:
 | `INT32`, `PORT`, `PROTOCOL` | `BIGINT` | `NUMERIC(38,4)` |
 | `INT64` | `NUMERIC(38,0)` | `NUMERIC(38,4)` |
 | `DECIMAL(p,s)` | `DECIMAL(38,s)` | `DECIMAL(38,s+4)` |
-| `FLOAT32` / `FLOAT64` | `DOUBLE PRECISION` | `DOUBLE PRECISION` |
+| `FLOAT32` / `FLOAT64` | `DOUBLE PRECISION` \* | `DOUBLE PRECISION` |
 | `DATE`, `TIMESTAMP`, `DURATION` | `DOUBLE PRECISION` | `DOUBLE PRECISION` |
+
+\* The `FLOAT32` cell is the one row of this table that is not PostgreSQL's:
+`sum(real)` is `real` there. It is a known divergence, recorded in
+[ADR-0012](adr/0012-sql-semantics-authority.md) and deferred — settling it
+means moving the grouped `FLOAT32` accumulator as well, which is a separate
+change. Every other row matches PostgreSQL.
 
 The integer and decimal rows accumulate exactly, in every frame form —
 `OVER ()`, `PARTITION BY`, a running `ORDER BY` frame, a sliding `ROWS`/`RANGE`
@@ -1780,6 +1786,18 @@ frame — and a total the declared type cannot hold is SQLSTATE `22003`, never a
 wrapped number. `MIN`, `MAX` and the value functions (`LAG`, `LEAD`,
 `FIRST_VALUE`, `LAST_VALUE`, `NTH_VALUE`) answer their input column's own type;
 `COUNT`, `ROW_NUMBER`, `RANK`, `DENSE_RANK` and `NTILE` answer `BIGINT`.
+
+A **computed** argument follows the same table, through the type the
+expression itself declares: `SUM(bigint_col * 2) OVER ()` and
+`SUM(ABS(bigint_col)) OVER ()` are `NUMERIC`, and so are their `GROUP BY`
+spellings. `SUM(CASE WHEN … THEN 1 ELSE 0 END)` stays `BIGINT`, because
+nothing in it is wider than `int4` — which is PostgreSQL's answer too.
+
+**`DISTINCT` inside a window call is refused** with SQLSTATE `0A000`,
+`DISTINCT is not implemented for window functions`, which is PostgreSQL's own
+code and message: `SUM(DISTINCT x) OVER ()` has no answer there and previously
+returned the non-distinct total here. `SUM(DISTINCT x)` without `OVER` is
+unaffected, and so is `SELECT DISTINCT` beside a window function.
 
 ### Basic Window Functions
 
