@@ -23,15 +23,14 @@ import (
 // projections of the result. One expansion site, one rename rule
 // (`plansql.OverlayColumnAliases`), and no second model of a star's width.
 //
-// Where the expansion DECLINES — a bare star over a join, whose column set the
-// planner refuses to guess — the wrapper is REMOVED and the query keeps exactly
-// the disposition it had before the deferral existed. That is the shape ADR-0012's
-// entry narrows to.
-//
-// An OVERLONG list is 42P10 in PostgreSQL and cannot be raised here: `Optimize`
-// returns no error. The node keeps its marker instead and
-// `RefuseOverlongColumnAliasLists` raises it at both physical entries, beside
-// the star refusals that live there for the same reason.
+// Neither failure mode is silent, and neither can be raised here — `Optimize`
+// returns no error — so the node keeps its marker and
+// `RefuseUnappliedColumnAliasLists` turns it into the refusal at the two plan
+// entries, beside the star and ordinal refusals that live there for the same
+// reason: an OVERLONG list is PostgreSQL's own 42P10, and a list over a star
+// the expansion DECLINED (a bare `*` over a join, ADR-0012, #810) is one 0A000
+// sentence. Dropping that second one silently is what made every reference to
+// a name the list renames TO read NULL.
 
 // deferColumnAliasesOverStar wraps plan in a Project carrying the star and
 // records aliases on it, for a body whose SELECT list holds a star this layer
@@ -68,11 +67,9 @@ func deferColumnAliasesOverStar(plan *Node, info *plansql.SelectInfo,
 // ApplyDeferredColumnAliases renames the leading output columns of every node
 // carrying a deferred column-alias list, once the star above it has expanded.
 //
-// A node whose star did NOT expand loses its wrapper: the list is unappliable
-// and the relation goes back to publishing the inner names, which is what it
-// published before the deferral. A node whose list is LONGER than the expanded
-// width keeps both its wrapper and its marker, so
-// RefuseOverlongColumnAliasLists can raise PostgreSQL's 42P10 for it.
+// A node whose star did NOT expand, and one whose list is LONGER than the
+// expanded width, both KEEP their wrapper and their marker, so
+// RefuseUnappliedColumnAliasLists can raise the right refusal for each.
 func ApplyDeferredColumnAliases(n *Node) *Node {
 	if n == nil {
 		return n
