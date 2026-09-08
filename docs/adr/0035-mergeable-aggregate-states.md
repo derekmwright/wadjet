@@ -75,7 +75,14 @@ header is the one thing the variance family did not need and every TYPED state
 does, and both halves of it were learned the hard way:
 
 - Without the CARRIER, a merge stage cannot know whether the sixteen-byte value
-  slots hold an Int128 or a float64.
+  slots hold an Int128 or a float64. There is one carrier per FIELD GROUP, not
+  one per state, and that is a rule rather than a detail of this bar: the
+  exactness of a group depends on the columns that FEED it and on nothing
+  else. A single flag declared `open` DECIMAL over a DECIMAL price and carried
+  it through a float because the VOLUME happened to be one, and declared
+  `volume` NUMERIC over an int8 column and summed it in a float because the
+  PRICE happened to be one — in both directions a declaration promising an
+  exactness the carrier did not deliver.
 - Without the DECLARED ROW, the fold has to be told the shape by the plan — and
   the plan does not always know it. `aggOhlcvOutputFields` walks each argument
   to a catalog column and correctly declines an EXPRESSION, so
@@ -117,6 +124,11 @@ Each field declares what its OWN spelled-out aggregate declares:
 | open, high, low, close | the PRICE column's own type | `min(int4)`→integer, `min(real)`→real, `min(numeric(9,2))`→numeric(9,2) |
 | volume | `SUM(volume)`'s type (`exec.IntegerAccOutputType`) | `sum(int4)`→bigint, `sum(int8)`→numeric |
 | vwap | `AVG(price)`'s type — a vwap IS a weighted average of price | `avg(int)`→numeric; ADR-0024's +4 scale rule |
+
+and each is EXACT exactly when the columns feeding it are: the four prices when
+the price column is, `volume` when the volume column is, and `vwap` only when
+both are — PostgreSQL's own promotion, where one approximate operand makes the
+quotient approximate.
 
 **6. The value oracle is the aggregate SPELLED OUT in PostgreSQL, with the same
 row filter.** PostgreSQL has no `ohlcv`, but it has every piece of one, and a
