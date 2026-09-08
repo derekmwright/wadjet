@@ -1942,9 +1942,32 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      independent: this engine publishes the JOIN OPERATOR's order (probe side
      first) where PostgreSQL publishes the FROM order, and for some shapes the
      two distribution paths choose different probe sides, so `single` and `dag`
-     order one relation two ways. Same set, same names, same values. Pinned per
-     arm in that gate's `ctl/derived-aggregate-is-its-stream` cell and in the
-     INNER cells of `coordinator.TestArcJ1APublishedKeyIsAUserColumn`.
+     order one relation two ways. Same set, same values. Pinned per arm in that
+     gate's `ctl/derived-aggregate-is-its-stream` cell and in the INNER cells of
+     `coordinator.TestArcJ1APublishedKeyIsAUserColumn`.
+
+     CORRECTED 2026-09-08 by arc L1 (#997): "same NAMES" was wrong, and the
+     order and the names are ONE divergence rather than two. The join qualifies
+     the BUILD side's duplicate columns by their owning alias, and which side
+     builds is a cost decision — `logical.reorderJoins` expresses it by
+     SWAPPING the join node's two children and `physical.buildJoin` reads
+     `Children[0]` as probe and `Children[1]` as build — so `SELECT * FROM t a
+     JOIN t b ON a.id = b.id` publishes `…, b.id, b.order_id, …` with no
+     predicate and `…, a.id, a.order_id, …` under `WHERE a.id < 100`, on all
+     four arms. The SAME STATEMENT's RowDescription changes with the data. A
+     client that keys on column labels (JDBC by label, DataGrip, Superset) sees
+     two schemas for one query. PostgreSQL publishes the FROM clause's arms in
+     written order and keeps duplicate names by POSITION, never qualified.
+
+     Deferred as an arc, with the mechanism in ADR-0026 §6a's "NOT settled"
+     paragraph: the build side has to become a PROPERTY of the join node, with
+     the children left in the query's written order and
+     `repairDecorrelatedSpelling`, `inner_key_spelling.go`,
+     `dedupSemiAntiBuildSide`, `physical.buildJoin`, `walkStages`, the worker
+     fragment builder and `exec.joinOutputSchemaWithMapping` all reading that
+     property. Pinned per predicate — none, selective, zero-row — in
+     `coordinator.TestL1AStarOverAJoinPublishesThePlanNotTheQuery`, so the
+     arc's proof is deleting the pin.
 
    - **CLOSED 2026-09-07 by arc K3 (#978): a zero-row `SELECT *` over a JOIN
      carried no columns at all**, on every arm and on the wire. `SELECT *`
