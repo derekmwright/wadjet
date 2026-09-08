@@ -352,6 +352,25 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      same declarations. One `int8` operand anywhere in the expression makes
      the whole of it numeric, in both spellings, as PostgreSQL does.
 
+     A **CAST is an operand whose width is its TARGET's** (added 2026-09-08,
+     #987 review round 3, B1). `aggInputIsWideInteger` had no `CastNode` arm,
+     so it fell off its end and read every int8 operand written under a cast
+     as int4: `SUM(bigint_col::bigint)` declared bigint in BOTH spellings
+     where PostgreSQL declares numeric — this arc's own defect one node
+     deeper, and #841's grouped half since it shipped. It was a DISPOSITION
+     move as well as a declaration: past int64 the bigint reading refused
+     `22003` a query PostgreSQL answers, while the identical query one cast
+     away answered it exactly, and "PostgreSQL answers and we refuse" is the
+     direction this ADR does not allow — the permitted superset runs the
+     other way. The arm reads the TARGET NAME
+     (`physical.castTargetIsWideInteger`), not `nodeDeclaredType`'s answer:
+     every integer cast spelling lands on INT64 there (item 12's recorded OID
+     divergence), which cannot tell `::int4` from `::bigint`. A non-integer
+     target leaves the integer table, so `SUM(x::numeric)` is numeric and
+     `SUM(x::float8)` double, as PostgreSQL has them. Gated in both spellings
+     by the census's cast cells — including a 10^5-row total that now ANSWERS
+     — and by the pgwire OID gate's six cast entries.
+
      The operator's runtime correction honors a bigint declaration over an
      int64-carried input for that reason: no VECTOR can tell `SUM(i32 * 1)`
      from `SUM(i64 * 1)`, only the plan can. A total that does not fit the
@@ -461,7 +480,26 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      client sees an int4 column and `sum(<that column>)` has exactly one
      PostgreSQL answer, `bigint`. `AVG` is `numeric(38,4)`, as it is for int4.
      Both spellings, grouped and windowed, take the same rule from
-     `exec.IntegerAccOutputType`.
+     `exec.IntegerAccOutputType` — for a **bare** argument. Under ARITHMETIC
+     they do not, and that is a recorded GAP rather than a rule (added
+     2026-09-08, #987 review round 3, P1): `SUM(c_port * 1)`,
+     `SUM(ABS(c_proto))` and `AVG(c_proto * 1)` answer float8 in BOTH
+     spellings, where the bare column answers bigint and numeric(38,4).
+
+     The mechanism is one layer below the declaration and is deliberate
+     there. `expr.operandIsInt` keeps the network types on the FLOAT path
+     ("Timestamps/dates/network types keep the float path — their arithmetic
+     semantics are handled elsewhere"), and `physical.intArithAllInt` mirrors
+     that predicate exactly so a declaration can never promise an integer the
+     kernel will not produce. Moving the declaration alone would be that
+     promise; closing the gap means moving `expr.operandIsInt` and the
+     int-domain family with it, which is an expression-layer arc. The two
+     spellings AGREE with each other and PostgreSQL has neither type, so this
+     is internal consistency rather than a value divergence. Six cells in
+     `coordinator.TestH2TheWindowDeclaredTypeCensus` and five in
+     `pgwire.TestAComputedIntegerWindowArgumentDeclaresPostgresOID` are
+     PINNED to the float8 answer: the day the expression layer changes, they
+     FAIL and deleting them is the proof.
 
      What was there before was worse than a wrong type. `TypeProtocol` had no
      arm in `kernel.ResolveRowSum`, `exec.isFlatSumType` or the SoA scatter's

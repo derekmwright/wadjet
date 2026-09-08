@@ -367,7 +367,8 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 		// The width survives only in the SYNTAX, which is why the grouped path
 		// walks the AST (aggInputIsWideInteger) and why the window now carries
 		// the argument's node to ask that same function
-		// (physical.windowArgIsNarrowInteger). Every shape below is asserted
+		// (physical.windowComputedArgDecl, over aggInputIsWideInteger and
+		// physical.integerAccArgWidth). Every shape below is asserted
 		// in BOTH spellings, and the OIDs beside them are
 		// pgwire.TestAComputedIntegerWindowArgumentDeclaresPostgresOID.
 		{name: "987 B1: SUM(CASE of ones) OVER () is bigint (TPC-H Q12's shape, windowed)",
@@ -398,6 +399,112 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 		{name: "987 B1 control: SUM(MOD(int4, 10)) grouped",
 			sql:  "SELECT SUM(MOD(w_i32, 10)) AS v FROM numwidth",
 			want: "cols=[v:INT64] rows=1 | 24"},
+		// #987 review ROUND 3, B1: a CAST is an operand whose width is its
+		// TARGET's, and the walk had no arm for one — so every int8 operand
+		// written under a cast read as int4 and `SUM(bigint_col::bigint)`
+		// declared bigint in BOTH spellings where PostgreSQL declares
+		// numeric. It is not only a declaration: past int64 a total
+		// PostgreSQL ANSWERS became 22003, which the cell below the six
+		// asserts is answered again.
+		{name: "987 R3 B1: SUM(CAST(int8 AS BIGINT)) OVER () is numeric",
+			sql:  "SELECT SUM(CAST(w_i64 AS BIGINT)) OVER () AS v FROM numwidth ORDER BY 1 LIMIT 1",
+			want: "cols=[v:DECIMAL(38,0)] rows=1 | 9007201419001868"},
+		{name: "987 R3 B1 control: SUM(CAST(int8 AS BIGINT)) grouped",
+			sql:  "SELECT SUM(CAST(w_i64 AS BIGINT)) AS v FROM numwidth",
+			want: "cols=[v:DECIMAL(38,0)] rows=1 | 9007201419001868"},
+		{name: "987 R3 B1: SUM(int8::BIGINT) OVER () — the other spelling of the cast",
+			sql:  "SELECT SUM(w_i64::BIGINT) OVER () AS v FROM numwidth ORDER BY 1 LIMIT 1",
+			want: "cols=[v:DECIMAL(38,0)] rows=1 | 9007201419001868"},
+		{
+			// A cast WIDENS as well as keeps: `sum(int4_col::bigint)` is
+			// numeric in PostgreSQL because the argument is int8 by the time
+			// SUM sees it, even though the column is int4.
+			name: "987 R3 B1: SUM(CAST(int4 AS BIGINT)) OVER () is numeric, not bigint",
+			sql:  "SELECT SUM(CAST(w_i32 AS BIGINT)) OVER () AS v FROM numwidth ORDER BY 1 LIMIT 1",
+			want: "cols=[v:DECIMAL(38,0)] rows=1 | 2164260874",
+		},
+		{name: "987 R3 B1 control: SUM(CAST(int4 AS BIGINT)) grouped",
+			sql:  "SELECT SUM(CAST(w_i32 AS BIGINT)) AS v FROM numwidth",
+			want: "cols=[v:DECIMAL(38,0)] rows=1 | 2164260874"},
+		{
+			// The BOUNDARY: a cast NARROWS too. `sum(int8_col::int4)` is
+			// bigint in PostgreSQL — the argument is int4 by then — so an
+			// arm that answered "wide" for every cast would fail here.
+			// w_key, not w_i64: 2^53+1 has no int4 and the CAST itself
+			// refuses, which is PostgreSQL's `integer out of range` and a
+			// different question from this one.
+			name: "987 R3 B1 boundary: SUM(CAST(int8 AS INTEGER)) OVER () is bigint",
+			sql:  "SELECT SUM(CAST(w_key AS INTEGER)) OVER () AS v FROM numwidth ORDER BY 1 LIMIT 1",
+			want: "cols=[v:INT64] rows=1 | 45",
+		},
+		{name: "987 R3 B1 boundary control: SUM(CAST(int8 AS INTEGER)) grouped",
+			sql:  "SELECT SUM(CAST(w_key AS INTEGER)) AS v FROM numwidth",
+			want: "cols=[v:INT64] rows=1 | 45"},
+		{name: "987 R3 B1 boundary control: the same column UNCAST is numeric",
+			sql:  "SELECT SUM(w_key) OVER () AS v FROM numwidth ORDER BY 1 LIMIT 1",
+			want: "cols=[v:DECIMAL(38,0)] rows=1 | 45"},
+		{
+			// The DISPOSITION half, and the reason B1 was a blocker rather
+			// than a mis-declaration: 10^5 rows put the total past int64, so
+			// the bigint reading refused 22003 a query PostgreSQL answers —
+			// while the identical query one cast away answered it exactly.
+			// "PostgreSQL answers and we refuse" is the direction ADR-0012
+			// does not allow.
+			name: "987 R3 B1: a cast total past int64 ANSWERS, as PostgreSQL does",
+			sql: "SELECT SUM(CAST(a.w_i64 AS BIGINT)) OVER () AS v FROM numwidth a, " +
+				"numwidth b, numwidth c, numwidth d, numwidth e ORDER BY 1 LIMIT 1",
+			want: "cols=[v:DECIMAL(38,0)] rows=1 | 90072014190018680000",
+		},
+		{name: "987 R3 B1 control: the same total one cast away",
+			sql: "SELECT SUM(a.w_i64) OVER () AS v FROM numwidth a, numwidth b, " +
+				"numwidth c, numwidth d, numwidth e ORDER BY 1 LIMIT 1",
+			want: "cols=[v:DECIMAL(38,0)] rows=1 | 90072014190018680000"},
+
+		// #987 review ROUND 3, P1 — PINNED, fail-on-agree. A bare PORT or
+		// PROTOCOL takes int4's result types (the eight #953 cells above);
+		// the same column under ARITHMETIC does not, in EITHER spelling,
+		// because `c_port * 1` is evaluated on the float path.
+		// `expr.operandIsInt` keeps the network types there deliberately
+		// ("Timestamps/dates/network types keep the float path — their
+		// arithmetic semantics are handled elsewhere"), and
+		// `physical.intArithAllInt` mirrors it so a declaration cannot
+		// promise an integer the kernel will not produce. Moving the
+		// declaration alone would be exactly that promise.
+		//
+		// The two spellings AGREE with each other and PostgreSQL has neither
+		// type, so this is an internal-consistency gap, not a value
+		// divergence — but it is one the docs claimed was closed, so it is
+		// pinned here and recorded in ADR-0012's #953 entry with its
+		// mechanism. The day the expression layer makes network arithmetic
+		// integral, these cells FAIL and deleting them is the proof.
+		{name: "953 P1 PINNED: SUM(PROTOCOL * 1) OVER () is float8, not bigint",
+			sql:  "SELECT SUM(c_proto * 1) OVER () AS v FROM typemx ORDER BY 1 LIMIT 1",
+			want: "cols=[v:FLOAT64] rows=1 | 621435",
+			why: "the bare SUM(c_proto) is INT64 621435 two dozen cells up. PORT and " +
+				"PROTOCOL arithmetic runs on the float path by design (expr.operandIsInt); " +
+				"closing it means moving the KERNEL, not this declaration. PINNED."},
+		{name: "953 P1 PINNED control: the GROUPED spelling agrees",
+			sql:  "SELECT SUM(c_proto * 1) AS v FROM typemx",
+			want: "cols=[v:FLOAT64] rows=1 | 621435",
+			why:  "same mechanism; the two spellings agree with each other, which is the point"},
+		{name: "953 P1 PINNED: SUM(PORT * 1) OVER () is float8",
+			sql:  "SELECT SUM(c_port * 1) OVER () AS v FROM typemx ORDER BY 1 LIMIT 1",
+			want: "cols=[v:FLOAT64] rows=1 | 1.7376678e+07",
+			why: "the bare SUM(c_port) is INT64 17376678 — the same number in a different " +
+				"box AND a different rendering. PINNED with SUM(c_proto * 1)."},
+		{name: "953 P1 PINNED control: the GROUPED spelling agrees",
+			sql:  "SELECT SUM(c_port * 1) AS v FROM typemx",
+			want: "cols=[v:FLOAT64] rows=1 | 1.7376678e+07",
+			why:  "same mechanism"},
+		{name: "953 P1 PINNED: SUM(ABS(PROTOCOL)) OVER () is float8",
+			sql:  "SELECT SUM(ABS(c_proto)) OVER () AS v FROM typemx ORDER BY 1 LIMIT 1",
+			want: "cols=[v:FLOAT64] rows=1 | 621435",
+			why:  "ABS answers in its argument's domain, and that domain is the float path here"},
+		{name: "953 P1 PINNED: AVG(PROTOCOL * 1) OVER () is float8, not numeric(38,4)",
+			sql:  "SELECT AVG(c_proto * 1) OVER () AS v FROM typemx ORDER BY 1 LIMIT 1",
+			want: "cols=[v:FLOAT64] rows=1 | 125.87299979744785",
+			why:  "the bare AVG(c_proto) is DECIMAL(38,4). PINNED with the SUM cells."},
+
 		{
 			// The OTHER side of the same walk, and the reason it is a walk
 			// rather than "a computed argument is int4": one int8 arm makes

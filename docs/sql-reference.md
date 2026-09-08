@@ -1787,15 +1787,30 @@ wrapped number. `MIN`, `MAX` and the value functions (`LAG`, `LEAD`,
 `FIRST_VALUE`, `LAST_VALUE`, `NTH_VALUE`) answer their input column's own type;
 `COUNT`, `ROW_NUMBER`, `RANK`, `DENSE_RANK` and `NTILE` answer `BIGINT`.
 
-A **computed** argument follows the same table, read from the ARGUMENT's own
-width rather than from the column the expression is materialized into — the
-same rule in the windowed and the `GROUP BY` spelling, because they are one
-question written twice. `SUM(bigint_col * 2)` and `SUM(ABS(bigint_col))` are
-`NUMERIC` in both; `SUM(CASE WHEN … THEN 1 ELSE 0 END)`, `SUM(int_col * 1)`,
-`SUM(-int_col)` and `SUM(MOD(int_col, 10))` are `BIGINT` in both, because
-nothing in them is wider than `int4`. One `int8` operand anywhere in the
-expression makes the whole of it `NUMERIC`, which is PostgreSQL's answer as
-well: `SUM(CASE WHEN … THEN bigint_col ELSE 0 END)` is `NUMERIC`.
+A **computed** argument over `INT32`/`INT64` follows the same table, read from
+the ARGUMENT's own width rather than from the column the expression is
+materialized into — the same rule in the windowed and the `GROUP BY` spelling,
+because they are one question written twice. `SUM(bigint_col * 2)` and
+`SUM(ABS(bigint_col))` are `NUMERIC` in both; `SUM(CASE WHEN … THEN 1 ELSE 0
+END)`, `SUM(int_col * 1)`, `SUM(-int_col)` and `SUM(MOD(int_col, 10))` are
+`BIGINT` in both, because nothing in them is wider than `int4`. One `int8`
+operand anywhere in the expression makes the whole of it `NUMERIC`, which is
+PostgreSQL's answer as well: `SUM(CASE WHEN … THEN bigint_col ELSE 0 END)` is
+`NUMERIC`.
+
+A **`CAST` answers in its target's width**, whatever the operand's was, as
+PostgreSQL does: `SUM(bigint_col::BIGINT)` and `SUM(int_col::BIGINT)` are
+`NUMERIC`, `SUM(bigint_col::INTEGER)` is `BIGINT`, and a cast to a
+non-integer type leaves the table entirely — `SUM(x::NUMERIC)` is `NUMERIC`
+and `SUM(x::DOUBLE PRECISION)` is `DOUBLE PRECISION`.
+
+`PORT` and `PROTOCOL` take this table only as a **bare** argument:
+`SUM(port_col)` is `BIGINT` and `AVG(port_col)` is `NUMERIC(38,4)`. Under
+arithmetic — `SUM(port_col * 1)`, `SUM(ABS(proto_col))` — both spellings
+answer `DOUBLE PRECISION`, because network arithmetic is evaluated on the
+float path. That is a recorded gap, not a rule
+([ADR-0012](adr/0012-sql-semantics-authority.md), `#953`); the two spellings
+agree with each other, and PostgreSQL has neither type.
 
 **`DISTINCT` inside a window call is refused** with SQLSTATE `0A000`,
 `DISTINCT is not implemented for window functions`, which is PostgreSQL's own

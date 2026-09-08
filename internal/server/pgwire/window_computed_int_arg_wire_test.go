@@ -51,6 +51,12 @@ func TestAComputedIntegerWindowArgumentDeclaresPostgresOID(t *testing.T) {
 		{Name: "k", Type: parquet.TypeInt64},
 		{Name: "i32", Type: parquet.TypeInt32, Nullable: true},
 		{Name: "i64", Type: parquet.TypeInt64, Nullable: true},
+		// The two int4-domain NETWORK types, which declare integer (OID 23)
+		// on the wire since #834 and take int4's SUM/AVG result types when
+		// they are a BARE argument (#953). Under arithmetic they do not —
+		// see the pinned entries below.
+		{Name: "pt", Type: parquet.TypePort, Nullable: true},
+		{Name: "pr", Type: parquet.TypeProtocol, Nullable: true},
 	}}
 	if err := db.CreateTable(ctx, "k2oid", schema, nil); err != nil {
 		t.Fatal(err)
@@ -60,11 +66,12 @@ func TestAComputedIntegerWindowArgumentDeclaresPostgresOID(t *testing.T) {
 	// 2^53+1 is here so the int8 boundary entry loses a digit the moment
 	// anything routes it through a float64.
 	if err := ing.Ingest(ctx, []map[string]any{
-		{"k": int64(1), "i32": int32(2), "i64": int64(2)},
-		{"k": int64(2), "i32": int32(3), "i64": int64(3)},
-		{"k": int64(3), "i32": int32(-20), "i64": int64(-20)},
-		{"k": int64(4), "i32": int32(16777217), "i64": int64(9007199254740993)},
-		{"k": int64(5), "i32": int32(0), "i64": int64(0)},
+		{"k": int64(1), "i32": int32(2), "i64": int64(2), "pt": int32(1024), "pr": int32(6)},
+		{"k": int64(2), "i32": int32(3), "i64": int64(3), "pt": int32(80), "pr": int32(17)},
+		{"k": int64(3), "i32": int32(-20), "i64": int64(-20), "pt": int32(443), "pr": int32(1)},
+		{"k": int64(4), "i32": int32(16777217), "i64": int64(9007199254740993),
+			"pt": int32(8080), "pr": int32(6)},
+		{"k": int64(5), "i32": int32(0), "i64": int64(0), "pt": int32(0), "pr": int32(0)},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -81,6 +88,7 @@ func TestAComputedIntegerWindowArgumentDeclaresPostgresOID(t *testing.T) {
 	const (
 		oidInt8    = 20
 		oidNumeric = 1700
+		oidFloat8  = 701
 	)
 	// Every `want` and every `oid` is PostgreSQL 17.11's, measured over rows
 	// identical to the five above.
@@ -106,6 +114,43 @@ func TestAComputedIntegerWindowArgumentDeclaresPostgresOID(t *testing.T) {
 		// narrowed everything is caught.
 		{"int8_times_one", "i64 * 1", oidNumeric, "9007199254740978"},
 		{"int8_abs", "ABS(i64)", oidNumeric, "9007199254741018"},
+
+		// A CAST is an operand whose width is its TARGET's, and the shared
+		// width walk had no arm for one (#987 review round 3, B1) — so every
+		// int8 operand written under a cast read as int4 and came out under
+		// OID 20 in both spellings where PostgreSQL sends 1700. It is not
+		// only a declaration: past int64 the bigint reading refuses 22003 a
+		// query PostgreSQL answers, which the census asserts over 10^5 rows.
+		{"cast_int8_to_bigint", "CAST(i64 AS BIGINT)", oidNumeric, "9007199254740978"},
+		{"cast_int8_to_bigint_colon", "i64::BIGINT", oidNumeric, "9007199254740978"},
+		// A cast WIDENS as well as keeps: the column is int4, the ARGUMENT
+		// is int8, and PostgreSQL types the argument.
+		{"cast_int4_to_bigint", "CAST(i32 AS BIGINT)", oidNumeric, "16777202"},
+		// …and NARROWS. `sum(int8_col::int4)` is bigint there, so an arm
+		// that answered "wide" for every cast would fail here. k, not i64:
+		// 2^53+1 has no int4 and the cast itself refuses, which is
+		// PostgreSQL's `integer out of range` and a different question.
+		{"cast_int8_to_integer", "CAST(k AS INTEGER)", oidInt8, "15"},
+		{"cast_int4_to_integer", "CAST(i32 AS INTEGER)", oidInt8, "16777202"},
+		// A non-integer target leaves the integer table entirely, which is
+		// the control that says the arm reads the TARGET and not "is there a
+		// cast".
+		{"cast_to_numeric", "CAST(i64 AS DECIMAL(20,0))", oidNumeric, "9007199254740978"},
+
+		// PINNED, fail-on-agree (#987 review round 3, P1). A BARE PORT or
+		// PROTOCOL takes int4's result types — the two cells first — and the
+		// same column under ARITHMETIC does not, in either spelling, because
+		// `pt * 1` is evaluated on the FLOAT path: `expr.operandIsInt` keeps
+		// the network types there deliberately and `physical.intArithAllInt`
+		// mirrors it, so a declaration cannot promise an integer the kernel
+		// will not produce. Closing it means moving the KERNEL. PostgreSQL
+		// has neither type, so the two spellings agreeing with each other is
+		// the property at stake; ADR-0012's #953 entry carries the mechanism.
+		{"port_bare", "pt", oidInt8, "9627"},
+		{"protocol_bare", "pr", oidInt8, "30"},
+		{"port_times_one_PINNED", "pt * 1", oidFloat8, "9627"},
+		{"protocol_times_one_PINNED", "pr * 1", oidFloat8, "30"},
+		{"protocol_abs_PINNED", "ABS(pr)", oidFloat8, "30"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			for _, sp := range []struct {

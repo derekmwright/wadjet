@@ -39,6 +39,23 @@ import (
 //	SUM(int64_col + 0)                   WIDE     → numeric  (PostgreSQL: numeric)
 //	SUM(row_number_slot * 2)             WIDE     → numeric  (PostgreSQL: numeric)
 //	SUM(9223372036854775807 * x)         WIDE     → numeric  (the literal is int8)
+//	SUM(int64_col::bigint)               WIDE     → numeric  (the CAST's target)
+//	SUM(int64_col::int4)                 not wide → bigint   (the cast narrows)
+//
+// It is asked by BOTH spellings — `aggComputedInputDecl` for `GROUP BY` and
+// `windowComputedArgDecl` for `OVER (…)` — so an arm added here moves the two
+// together by construction. That is why the CAST arm closes one divergence in
+// two places at once, and why a missing arm is a divergence in two places at
+// once: `SUM(bigint_col::bigint)` read as int4 in both.
+//
+// NOT covered, deliberately, and recorded rather than guessed at: PORT and
+// PROTOCOL under ARITHMETIC. Both are int4-domain and a BARE one takes int4's
+// result types (exec.IntegerAccOutputType, #953), but `c_port * 1` is
+// evaluated on the FLOAT path — `expr.operandIsInt` keeps the network types
+// there on purpose, and `intArithAllInt` mirrors it so the declaration cannot
+// promise an integer the kernel will not produce. Answering "int4-domain" here
+// alone would be that promise. See ADR-0012's #953 entry for the mechanism and
+// the pinned cells.
 func aggInputIsWideInteger(node plansql.Node, decls colDecls) bool {
 	switch n := node.(type) {
 	case *plansql.ParenNode:
@@ -92,6 +109,40 @@ func aggInputIsWideInteger(node plansql.Node, decls colDecls) bool {
 			}
 		}
 		return false
+	case *plansql.CastNode:
+		// A CAST answers in its TARGET type's domain, whatever the operand's
+		// was — that is the whole point of writing one. PostgreSQL:
+		//
+		//	sum(bigint_col::bigint)   numeric   the cast keeps int8
+		//	sum(bigint_col::int4)     bigint    the cast NARROWS to int4
+		//	sum(int_col::bigint)      numeric   the cast WIDENS to int8
+		//	sum(x::numeric)           numeric   not an integer at all
+		//	sum(x::float8)            double    likewise
+		//
+		// So the target decides, and nodeDeclaredType is what reads it
+		// (inferCastType, and castDeclaredDecimal for a DECIMAL destination).
+		// Only INT64 is "wide"; INT32 is the int4 case this walk already
+		// answers false for, and a non-integer target leaves the integer
+		// table entirely — its declaration is what
+		// exec.IntegerAccOutputType declines, and the float or DECIMAL
+		// reading stands.
+		//
+		// Without this arm the walk fell off its end and answered "not wide"
+		// for every int8 operand written under a cast, so
+		// `SUM(bigint_col::bigint)` declared bigint in BOTH spellings where
+		// PostgreSQL declares numeric — and past int64 a total PostgreSQL
+		// ANSWERS became 22003 on four arms, while the identical query one
+		// cast away answered it exactly. "PostgreSQL answers and we refuse"
+		// is the direction ADR-0012 does not allow; the permitted superset
+		// runs the other way (#987 review round 3, B1; #841's grouped half).
+		//
+		// The TARGET NAME is read, not nodeDeclaredType's answer for the
+		// node: every integer cast spelling lands on INT64 there, because
+		// the engine has no int16 and reads an int4 column as int64
+		// everywhere else (inferCastType, ADR-0012 item 12's recorded OID
+		// divergence). That reading cannot tell `::int4` from `::bigint`,
+		// which is the only thing this walk is asking about.
+		return castTargetIsWideInteger(n.TypeName)
 	case *plansql.ColRef:
 		if decls.isFieldPath(n) {
 			f, ok := decls.field(n)
@@ -107,6 +158,27 @@ func aggInputIsWideInteger(node plansql.Node, decls colDecls) bool {
 		// the arithmetic around it is int8 arithmetic and its SUM is numeric.
 		v, err := strconv.ParseInt(strings.TrimSpace(n.Value), 10, 64)
 		return err == nil && (v > 2147483647 || v < -2147483648)
+	}
+	return false
+}
+
+// castTargetIsWideInteger reports whether a CAST's target names the int8
+// domain, for aggInputIsWideInteger's CastNode arm.
+//
+// The spellings are inferCastType's own integer list, split by WIDTH — which
+// that function deliberately does not do, because the engine carries every
+// integer as an int64 and the declaration only has to be wide enough. The
+// aggregate's RESULT TYPE is the one question where the width is the whole
+// answer: `sum(int4)` is bigint and `sum(int8)` is numeric.
+//
+// SIGNED has no PostgreSQL meaning (it is a MySQL spelling this engine
+// accepts) and is read as int8: numeric is the reading that cannot lose
+// digits, and an unknown target answers false for the same reason it is safe
+// to — a non-integer target's declaration leaves the integer table anyway.
+func castTargetIsWideInteger(typeName string) bool {
+	switch strings.ToUpper(strings.TrimSpace(typeName)) {
+	case "BIGINT", "INT8", "INT64", "SIGNED":
+		return true
 	}
 	return false
 }

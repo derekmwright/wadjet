@@ -461,7 +461,8 @@ func resolveWindowExactCells(winVec, inputVec *batch.Vector) (windowExactCells, 
 // widening), so the input VECTOR of `SUM(CASE WHEN … THEN 1 ELSE 0 END)
 // OVER ()` is indistinguishable from `SUM(int8_col + 0) OVER ()`'s — while the
 // PLAN, which still has the argument's syntax, can tell them apart and says
-// bigint for the first (physical.windowArgIsNarrowInteger, #987 review B1).
+// bigint for the first (physical.windowComputedArgDecl and
+// physical.integerAccArgWidth, #987 review B1).
 // Widening it back to numeric here would undo that and put the window's OID
 // at 1700 where its grouped twin's is 20. Both arms accumulate in the same
 // Int128 and the bigint arm refuses a total that does not fit rather than
