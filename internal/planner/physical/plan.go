@@ -10336,6 +10336,11 @@ type pipelineSource struct {
 	// draining now that its input is exhausted; len(ops) means every one of
 	// them has been drained. See nextFlushed (#1010).
 	flushIdx int
+	// drained latches the input's end. Once the source has answered nil it is
+	// never pulled again: a flushed batch is a real return, so the consumer
+	// calls Next once more, and an exhausted source is not owed a second
+	// question.
+	drained bool
 }
 
 func (ps *pipelineSource) Init(ctx context.Context) error {
@@ -10382,11 +10387,15 @@ func (ps *pipelineSource) Next(ctx context.Context) (*batch.RecordBatch, error) 
 			}
 			continue
 		}
+		if ps.drained {
+			return ps.nextFlushed(ctx)
+		}
 		b, err := ps.source.Next(ctx)
 		if err != nil {
 			return nil, err
 		}
 		if b == nil {
+			ps.drained = true
 			return ps.nextFlushed(ctx)
 		}
 		b, err = ps.runFrom(ctx, 0, b)
