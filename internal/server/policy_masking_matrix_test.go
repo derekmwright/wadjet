@@ -288,6 +288,12 @@ type pmRig struct {
 	// under `queries/<id>/`, so an empty listing there is the evidence that a
 	// refusal happened BEFORE anything was dispatched (#945).
 	store objstore.Store
+	// fastPathStats reports how many statements the `embedded/dag-fastpath`
+	// door ran, how many of those the coordinator ROUTED to its in-process
+	// pipeline, and how many times the plain `embedded/dag` door took that
+	// route (it must be none: it is configured with LocalFastPathBytes: 0).
+	// The census asserts on it — see TestPolicyMaskingIsPlanTimeOnEveryDoor.
+	fastPathStats func() (calls, engaged, dagHits int64)
 }
 
 func pmWriteFixture(t *testing.T, ctx context.Context, store objstore.Store, cat *catalog.Catalog) {
@@ -558,21 +564,14 @@ func pmRigUpWith(t *testing.T, ctx context.Context, provider *auth.Provider) pmR
 			}
 			return res, err
 		}})
-	t.Cleanup(func() {
-		calls, engaged := fpCalls.Load(), fpEngaged.Load()
-		if calls == 0 {
-			return // this test never drove that door
-		}
-		if engaged == 0 {
-			t.Errorf("embedded/dag-fastpath ran %d statements and NOT ONE took the local fast "+
-				"path: the door is a duplicate of embedded/dag and gates nothing", calls)
-		}
-		if h := dag.LocalFastPathHits(); h != 0 {
-			t.Errorf("embedded/dag took the local fast path %d times; it is configured with "+
-				"LocalFastPathBytes: 0 and must always go through the DAG, or the two doors "+
-				"are one door", h)
-		}
-	})
+	// The counters are handed to the CENSUS, not asserted here: several tests
+	// share this rig to drive a handful of statements that are all REFUSED
+	// (a denied relation, an unenforceable row filter), and a refusal never
+	// reaches the router at all. The claim "this door is the fast path"
+	// belongs to the gate that runs the whole corpus over it.
+	fastPathStats := func() (calls, engaged, dagHits int64) {
+		return fpCalls.Load(), fpEngaged.Load(), dag.LocalFastPathHits()
+	}
 
 	// --- pgwire: the single-process door and the DAG door -----------------
 	pgSingle := pgwire.NewServer(single, pgwire.Config{AuthProvider: provider}, logger)
@@ -687,7 +686,8 @@ func pmRigUpWith(t *testing.T, ctx context.Context, provider *auth.Provider) pmR
 		pmDoor{"http/local", httpRun(hsLocal.URL)},
 		pmDoor{"http/dag", httpRun(hsDAG.URL)})
 
-	return pmRig{doors: doors, provider: provider, asyncBase: hsDAG.URL, store: store}
+	return pmRig{doors: doors, provider: provider, asyncBase: hsDAG.URL, store: store,
+		fastPathStats: fastPathStats}
 }
 
 // ---------------------------------------------------------------------------
@@ -1344,6 +1344,27 @@ func TestPolicyMaskingIsPlanTimeOnEveryDoor(t *testing.T) {
 	t.Cleanup(cancel)
 	rig := pmRigUp(t, ctx)
 	leaks := pmTrueValues()
+
+	// The ninth door ASSERTS ITS OWN ENGAGEMENT, here, where the whole corpus
+	// runs over it. A door that silently stopped taking the local fast path —
+	// a config rename, a threshold change, a planner change that pushes these
+	// statements over the budget — would be a second copy of `embedded/dag`
+	// still reporting nine green doors, which is precisely the failure this
+	// door was added to prevent. Asserted as a COUNT over the corpus, not per
+	// cell: a statement refused at authorization or at planning never reaches
+	// the router, and this matrix deliberately carries many such cells.
+	t.Cleanup(func() {
+		calls, engaged, dagHits := rig.fastPathStats()
+		if calls > 0 && engaged == 0 {
+			t.Errorf("embedded/dag-fastpath ran %d statements and NOT ONE took the local fast "+
+				"path: the door is a duplicate of embedded/dag and gates nothing", calls)
+		}
+		if dagHits != 0 {
+			t.Errorf("embedded/dag took the local fast path %d times; it is configured with "+
+				"LocalFastPathBytes: 0 and must always go through the DAG, or the two doors "+
+				"are one door", dagHits)
+		}
+	})
 
 	for _, cell := range pmCells() {
 		for _, door := range rig.doors {
