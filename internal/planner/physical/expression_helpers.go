@@ -2,7 +2,6 @@
 package physical
 
 import (
-	"context"
 	"strconv"
 	"strings"
 
@@ -265,20 +264,6 @@ func wrapExpr(e expr.Expr) exec.Expression {
 // expr.FilterPredicate, so the row loop neither boxes nor re-dispatches.
 func wrapPredicate(e expr.Expr) exec.Predicate {
 	return expr.FilterPredicate(e)
-}
-
-// expandStarProjections runs logical star expansion on a plan that reached the
-// physical planner without it — logical.Optimize expands stars before column
-// pruning, so this only fires for plans built and planned without optimizing.
-// The rewrite reads the scan's annotated schema, so annotate first; that costs
-// a catalog walk, which is why it is gated on a star actually being present.
-func (p *Planner) expandStarProjections(ctx context.Context, node, child *logical.Node) {
-	if p.catalog == nil || !logical.HasStarProjection(node) {
-		return
-	}
-	p.AnnotateScanColumns(ctx, child)
-	logical.ExpandStarProjections(node)
-	logical.ResolveOrdinalSortKeys(node)
 }
 
 // limitPushdownSafe reports whether a LIMIT may be applied independently by
