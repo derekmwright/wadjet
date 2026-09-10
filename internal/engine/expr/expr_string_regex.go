@@ -79,7 +79,7 @@ func fnRegexpExtract(args []any) any {
 		return nil
 	}
 	return matches[group]
-} // pattern string → *regexp.Regexp (nil for invalid)
+}
 
 func compileRegexpCached(pattern string) *regexp.Regexp {
 	if v, ok := regexpCache.Load(pattern); ok {
