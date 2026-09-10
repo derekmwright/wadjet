@@ -474,7 +474,7 @@ asynchronously. Any failure falls through to the durable copy. How eagerly those
 [design note](design/shuffle-durability.md)).
 
 Joins take one of three shapes, chosen in the physical planner
-(`internal/planner/physical/plan.go:6493`, emitted at `:6519-6522`, size gate at `:7145-7156`,
+(`internal/planner/physical/join_plan.go` and `stage_emission.go`,
 sort-merge gate at `sort_merge_join.go:24-45`) from a broadcast threshold the
 coordinator derives from the live worker pool before planning
 (`coordinator.go:1016, 3278`):

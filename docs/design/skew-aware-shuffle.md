@@ -70,10 +70,10 @@ which — since the mean includes the hot group — caps at the group count).
 Regression test: TestPlanSkewSplitTasks_UniformHeavyNoSplit.
 
 ### (d) Hot-partition-aware task layout
-In `dispatchComputeStage` (execute_stage_dag.go:1830) +
-`buildTaskInputsForStage` (:3099): non-hot partitions keep whole-partition
+In `dispatchComputeStage` (dag_compute.go) +
+`buildTaskInputsForStage` (`dag_task_inputs.go`): non-hot partitions keep whole-partition
 binding; a hot partition p becomes k sub-tasks that SPLIT probe[p]'s files
-(`splitFilesEvenly`, the broadcast probe-split pattern at :3238) and
+(`splitFilesEvenly`, the broadcast probe-split pattern in `dag_task_inputs.go`) and
 REPLICATE build[p] to each (:3236 pattern). Correctness: a probe row for
 key k needs the complete build side for k, which replication preserves;
 join output partials merge exactly like broadcast probe-split already does

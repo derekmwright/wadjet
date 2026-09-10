@@ -53,18 +53,18 @@ SQL text
 | `wadjet/` | Public embeddable API (`wadjet.DB`, `wadjet.Open()`) |
 | `cmd/wadjet/` | CLI entry point (Cobra: serve, query, shell, mcp) |
 | `internal/engine/batch/` | Record batches, vectors, selection vectors, batch pooling |
-| `internal/engine/exec/` | Pipeline executor, operators (filter, project, join, sort, aggregate, window) |
-| `internal/engine/expr/` | Expression compiler, 273+ scalar functions |
+| `internal/engine/exec/` | Pipeline executor, operators (filter, project, join, sort, aggregate, window); aggregate seams in `agg_consume.go`, `agg_accumulators.go`, `agg_partial_merge.go`, `agg_spill.go` |
+| `internal/engine/expr/` | Expression compiler, 273+ scalar functions; sections in `expr_arith.go`, `expr_compare.go`, `expr_scalar_fns.go`, `expr_string_fns.go` |
 | `internal/engine/scan/` | 3-level predicate pushdown scanner |
 | `internal/engine/memory/` | Per-task memory budget, spill-to-disk |
 | `internal/planner/sql/` | SQL parser + AST types |
 | `internal/planner/logical/` | Logical plan builder + optimizer |
-| `internal/planner/physical/` | Physical planner + distributed task stages |
+| `internal/planner/physical/` | Physical planner + distributed task stages; `planner_config.go`, `stage_emission.go`, `declared_output.go`, `join_plan.go`, `dag_refusals.go` |
 | `internal/storage/objstore/` | S3-compatible object store (MemStore, MinIOStore, FileStore) |
 | `internal/storage/catalog/` | Metadata in NATS KV |
 | `internal/storage/parquet/` | Parquet reader/writer |
 | `internal/storage/ingest/` | Micro-batch accumulator + partitioner |
-| `internal/coordinator/` | Query coordinator (plan, dispatch, merge) |
+| `internal/coordinator/` | Query coordinator (plan, dispatch, merge); `dag_dispatch.go`, `dag_compute.go`, `dag_fragments.go`, `dag_merge.go` |
 | `internal/worker/` | Distributed task executor |
 | `internal/server/pgwire/` | PostgreSQL wire protocol |
 | `internal/auth/` | API keys, JWT, mTLS, RBAC, ABAC policy engine, identity enrichment |
@@ -197,7 +197,7 @@ refactor(scan): extract predicate pushdown into separate module
   task pg-oracle:test-decimal        # both oracle arms over the decimal fixture
   ```
   The FLOAT64 schema stays the default and the published-number benchmark; the variant is opt-in (`TPCH_DECIMAL=1`, or an explicit `Fixture`). Baseline numbers: `docs/benchmarks/tpch-decimal-baseline-2026-08-29.md`.
-- **Spill gate**: the spilled path is a fifth execution arm no shape corpus reaches on purpose — a spill is a condition, not a query shape (ADR-0027). After any change to a pipeline breaker's spill, drain, merge or clone path (`exec/aggregate*.go`, `pipeline.go`, `partitioned_agg.go`, `sort_external.go`, `window_external.go`, `join_spill.go`, `memory/spill.go`) run the type-matrix spill sweep, which asserts per family that the operator actually spilled and replicates every budgeted cell five times:
+- **Spill gate**: the spilled path is a fifth execution arm no shape corpus reaches on purpose — a spill is a condition, not a query shape (ADR-0027). After any change to a pipeline breaker's spill, drain, merge or clone path (`exec/aggregate*.go`, `exec/agg_*.go`, `pipeline.go`, `partitioned_agg.go`, `sort_external.go`, `window_external.go`, `join_spill.go`, `memory/spill.go`) run the type-matrix spill sweep, which asserts per family that the operator actually spilled and replicates every budgeted cell five times:
   ```bash
   go test -run 'TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget' ./wadjet/
   go test -run 'TestSpillArcShapesAgreeOnBothDistributionArms' ./internal/coordinator/   # DAG arms, forced drain

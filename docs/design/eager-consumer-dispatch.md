@@ -40,9 +40,9 @@ last) — this bounds the win honestly (§9).
 ## 2. What the code does today (verified)
 
 - **The barrier:** `executeStageDAG` allocates one `done` channel per
-  stage (`execute_stage_dag.go:361`); each stage goroutine blocks on all
-  dependencies' channels (`:410-420`); `close(done[s.ID])` fires only
-  after the whole stage completes (`:487-490`). Release is all-or-nothing.
+  stage (`dag_dispatch.go`); each stage goroutine blocks on all
+  dependencies' channels (same function); `close(done[s.ID])` fires only
+  after the whole stage completes (same function). Release is all-or-nothing.
 - **Consumer inputs are built after the barrier:** task specs carry
   explicit per-partition S3 key lists (`Task.Inputs map[string][]string`,
   built by `buildTaskInputsForStage` → `partitionFilesForWorker` from the
@@ -140,7 +140,7 @@ for **dispatch clearance**:
   changes.
 - **Join edges: after the early skew decision** (§6) — clearance is the
   decision point, not full producer completion.
-- The stage-level `dispatchSem` (`execute_stage_dag.go:387-397`) is
+- The stage-level `dispatchSem` (`dag_dispatch.go`) is
   acquired as today; eager stages hold their slot longer (they start
   earlier), so the sem floor stays ≥ 2 to avoid self-starvation of
   producers' stage goroutines. (`ClusterCapacity` sizing already
@@ -522,7 +522,7 @@ consumer spans shrank ~3×); the re-pair must re-derive the floor
 
 A1 — clearance-driven manifest activation (precondition 2): eagerFeed
 gains an `active` flag set at first consumer clearance
-(execute_stage_dag.go eagerActive branch). The publisher hook still
+(dag_dispatch.go eagerActive branch). The publisher hook still
 folds every completion into the replay list and the completion
 accounting (clearance decisions read those), but the NATS publish is
 gated on activation; the republisher starts at activation instead of

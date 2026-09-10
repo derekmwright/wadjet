@@ -66,7 +66,7 @@ regression is visible in worker logs instead of silent.
 
 Unfiltered leaf scans are not dispatched as scan stages; their
 repartition reads base parquet directly. `dispatchShuffleStage`
-(execute_stage_dag.go) synthesizes the source it hands to
+(dag_shuffle.go) synthesizes the source it hands to
 `runShuffleSide`:
 
 ```go

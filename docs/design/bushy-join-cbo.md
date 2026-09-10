@@ -86,22 +86,22 @@ assumes the build side (`Children[1]`) is a single base scan:
 
 | Step | Location | Left-deep assumption | Bushy failure |
 |---|---|---|---|
-| `parseJoinKeys` | physical/plan.go:4810 | positional split on `=`; side assignment deferred entirely to later repair | none by itself, but all repairs downstream inherit its guesses |
-| `fixJoinKeyOrder` | physical/plan.go:4842 | each equality has exactly one column resident in the build subtree; swap fires only on `leftInBuild && !rightInBuild` | multi-table build → both sides resident → no/false swap |
-| `collectPlanColumns` | physical/plan.go:4864 | unions ALL scans under `Children[1]` (special-cases only semi/anti) | inner-join build leaks several tables' columns into the membership set |
-| `findScanAlias` → `BuildTableAlias` | physical/plan.go:6978, 3481, 3928 | one scan under the build | returns the first scan's alias in DFS order; all other build tables' aliases are lost |
+| `parseJoinKeys` | physical/join_keys.go | positional split on `=`; side assignment deferred entirely to later repair | none by itself, but all repairs downstream inherit its guesses |
+| `fixJoinKeyOrder` | physical/join_keys.go | each equality has exactly one column resident in the build subtree; swap fires only on `leftInBuild && !rightInBuild` | multi-table build → both sides resident → no/false swap |
+| `collectPlanColumns` | physical/join_keys.go | unions ALL scans under `Children[1]` (special-cases only semi/anti) | inner-join build leaks several tables' columns into the membership set |
+| `findScanAlias` → `BuildTableAlias` | physical/join_keys.go | one scan under the build | returns the first scan's alias in DFS order; all other build tables' aliases are lost |
 | `joinOutputSchemaWithMapping` | exec/join.go:3190 | one `buildAlias` valid for every build column | stamps the wrong alias onto other tables' columns (e.g. region cols shipped as `n2.r_regionkey`) |
-| `markCoPathingSelfJoinBuilds` | physical/plan.go:2678 | build dep chain reaches a `StageScan` within 3 Exchange hops | build dep = join stage → walk bails → Q07-class self-join qualification silently disabled |
-| `columnIndexFallback` | exec/aggregate.go:693 | unqualified suffix match unique in schema | multi-table build → ambiguous → −1 → zero/wrong rows |
+| `markCoPathingSelfJoinBuilds` | physical/stage_generation.go | build dep chain reaches a `StageScan` within 3 Exchange hops | build dep = join stage → walk bails → Q07-class self-join qualification silently disabled |
+| `columnIndexFallback` | exec/agg_consume.go | unqualified suffix match unique in schema | multi-table build → ambiguous → −1 → zero/wrong rows |
 | `FixKeyAssignment` / SMJ counterpart | exec/join.go:1707, sort_merge_join.go:230 | runtime swap on the same asymmetric-membership rule | same blind spot as `fixJoinKeyOrder`, now against the real schema |
-| `resolveShuffleKey` | physical/plan.go:3073 | walks single-child chains only | breaks at a 2-child build; Project aliases inside a bushy build unresolved for shuffle keys |
-| `findScanRowEstimate` | physical/plan.go:6870 | first scan represents the build | mis-sized arena; wrong semi/anti swap threshold |
+| `resolveShuffleKey` | physical/group_key_binding.go | walks single-child chains only | breaks at a 2-child build; Project aliases inside a bushy build unresolved for shuffle keys |
+| `findScanRowEstimate` | physical/scan_filters.go | first scan represents the build | mis-sized arena; wrong semi/anti swap threshold |
 
 Two facts make Layer A tractable rather than a rewrite:
 
 1. **The dataflow layer already runs bushy trees.** `buildJoin` recursively
    builds `Children[1]` pipelines, `walkStages` records per-child leaf stages
-   and wires a join-stage build dependency generically (plan.go:3322-3345 —
+   and wires a join-stage build dependency generically (stage_emission.go —
    nested-join support is explicitly claimed there), and
    `ValidateNativeDAGShape` checks dependency counts only. Semi/anti
    subtrees-as-leaves ALREADY put join subtrees on the build side in
@@ -167,7 +167,7 @@ builds. With (a), qualifying "all build cols" is per-origin correct.
 
 **(e) Structure-independent build estimate.**
 The `findScanRowEstimate(Children[1])` uses (arena sizing, semi/anti swap
-threshold plan.go:3946) switch to `estimateSubtreeStats` — which already
+threshold join_plan.go) switch to `estimateSubtreeStats` — which already
 exists and handles join subtrees.
 
 Layer A changes NO plan shapes. Gate: golden snapshots

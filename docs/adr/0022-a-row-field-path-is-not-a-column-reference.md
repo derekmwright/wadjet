@@ -396,11 +396,11 @@ excludes first — and both directions are gated.
 
 - ADR-0012 (PostgreSQL decides semantics), ADR-0013 (the gates and their
   blind spots)
-- `internal/planner/physical/plan.go` (`colDecls`, `colRefDeclaredType`,
+- `internal/planner/physical/declared_output.go` (`colDecls`, `colRefDeclaredType`,
   `isPlainGroupKey`, `intArithAllInt`), `internal/planner/logical/optimizer.go`
   (`sanitizeScanNeeds`), `internal/engine/exec/project.go` (`ColumnRef`,
   `fieldPathColumn`), `internal/engine/exec/filter.go` (the four vectorized
-  filters' row fallbacks), `internal/engine/expr/expr.go`
+  filters' row fallbacks), `internal/engine/expr/expr_leaf.go`
   (`ColRef.valueType` / `valueVector` / `fieldValue`, and the boxing-undo
   family that keys on them)
 - #604, #609, #618 (residuals filed by this change), #603/#585 (window

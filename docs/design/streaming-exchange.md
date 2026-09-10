@@ -83,7 +83,7 @@ lookup: **Tier 0** same-worker `LocalStageCache` mmap → **Tier 1** NATS KV
 and list the partition prefix (`partition_shard_source.go:18`).
 
 **Barrier.** `executeStageDAG` blocks each stage on its dependencies'
-done-channels (`execute_stage_dag.go:410-420`). Note the barrier is
+done-channels (`dag_dispatch.go`). Note the barrier is
 *semantically forced* for hash exchanges as currently shaped: every producer
 task writes one file into **every** partition, so no partition's file set is
 complete until every producer task finishes.

@@ -5,9 +5,9 @@
 2026-08-22 amendment.
 **Code:** `internal/engine/exec/two_level_hash.go` (`twoLevelAmortizeMultiple`,
 `twoLevelMinAmortizeRows`, `rowBoundToggle`),
-`internal/engine/exec/aggregate.go` (`SetInputRowBound`, `indexLayoutStaysFlat`),
+`internal/engine/exec/aggregate.go` (`SetInputRowBound`) and `internal/engine/exec/agg_index.go` (`indexLayoutStaysFlat`),
 `internal/distributed/messages.go` (`OpSpec.InputRowBound`),
-`internal/coordinator/execute_stage_dag.go` (`aggregateInputRowBound`,
+`internal/coordinator/dag_task_inputs.go` (`aggregateInputRowBound`,
 `buildAggregateFragment`), `internal/worker/executor_fragment.go`
 (`buildFragmentHashAggregate`).
 
@@ -150,10 +150,10 @@ dark. A DAG corpus run that wants bucketed coverage under the override must also
 producing stage (exchange-repartition)
   → worker reports PartitionRowCounts()             (executor.go:1536)
   → StageOutput.PartitionRows                       (coordinator/stage_output.go)
-  → aggregateInputRowBound(stage, inputs, w, tasks) (execute_stage_dag.go)
+  → aggregateInputRowBound(stage, inputs, w, tasks) (dag_task_inputs.go)
   → OpSpec.InputRowBound                            (distributed/messages.go)
   → HashAggregate.SetInputRowBound  BEFORE Init     (worker/executor_fragment.go)
-  → indexLayoutStaysFlat, once, in resolveIndices   (exec/aggregate.go)
+  → indexLayoutStaysFlat, once, in resolveIndices   (exec/agg_index.go)
 ```
 
 Nothing new is measured, transported or estimated: `PartitionRows` has existed since the

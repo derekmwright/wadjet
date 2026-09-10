@@ -85,7 +85,7 @@ tracker:**
 |---|---|---|---|---|---|
 | 1 | `memory.ReserveOrForce` (`memory/acquire.go`) | a scan's file load — ONE ROW GROUP at a time where the footer is already decoded, the whole file otherwise | WARNs | `scan file load` | when THAT ROW GROUP is decoded (`fileSlot.releaseRG`), or, on the whole-file path, when the file's last one is |
 | 2 | the pool reconcile after (1)'s reservation (`planner/physical/util.go`) | the pooled buffer's real capacity above what was reserved — WHOLE-FILE path only; see the row-group note below | silent | `scan file load` | with (1) |
-| 3 | `scanSourceInner.trackScanBatch` (`planner/physical/plan.go`) | every decoded row-group batch | silent | `scan decoded batch` | when the batch leaves through `next()` |
+| 3 | `scanSourceInner.trackScanBatch` (`planner/physical/scanner_source.go`) | every decoded row-group batch | silent | `scan decoded batch` | when the batch leaves through `next()` |
 | 4 | `scanSourceInner.trackPooledBuf` (same file) | the EAGER scan path's whole-file buffers, `cap(buf)`, no ceiling | silent | `scan pooled buffer` | at scan close (`releasePooledBufs`) — coarser than (1) |
 | 5 | `HashJoin.reconcileHashMemory` (`engine/exec/join.go`) | the hash tables, arenas, chains and bloom | WARNs once when it crosses the budget | `hash join index` | **with the partition it belongs to** — the index is per grace partition, so an eviction frees it (#823, closed 2026-09-04); the rest at join Close |
 | 6 | `HashJoin.freezeAccum` / `reconcileArrivalCharge` (`engine/exec/join_partition_arrival.go`) | a per-partition accumulator's fixed-capacity excess, and a batch's per-partition pieces above the batch itself | silent | `hash join partition store` | with the partition (`releaseStoreBytes`), rest at Close |

@@ -44,7 +44,7 @@ Three parts:
    `stageRunsFilterExprs` / `stageAppliesProjection`
    (`planner/physical/filter_carrier.go`) answer, per stage type,
    whether the coordinator emits an `OpFilter` / `OpProject` for the
-   field. They are read off `execute_stage_dag.go` and are deliberately
+   field. They are read off `dag_fragments.go` and are deliberately
    separate from `projectableProducer`, which answers a different
    question — whether a computed sort key can be materialized INSIDE a
    fragment, below its ordering.
@@ -1430,7 +1430,8 @@ arc touches — thirteen of them, `internal/coordinator/coordinator.go`,
 `internal/engine/exec/{aggregate,join}.go`, `internal/engine/expr/expr.go`,
 `internal/planner/logical/optimizer.go` and eight under
 `internal/planner/physical/` — reverted to its `376b2cac` content with this
-tip's TESTS in place: **70 leaf subtests fail, across ten coordinator tests
+tip's TESTS in place (these are historical paths; R1 moved aggregate
+and expression declarations to `agg_*.go` and `expr_*.go` siblings): **70 leaf subtests fail, across ten coordinator tests
 plus `physical.TestElideCoPartitionedExchangeRewiresAUnionArm`** (which fails
 at its top level and has no subtests). Zero fail on the tip. Counted with
 `grep -c '^    --- FAIL'` on `go test -v`; per test:

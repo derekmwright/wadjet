@@ -50,7 +50,7 @@ the pull), each runs a **cloned** op chain (`Cloneable`,
 `operators.go:42` — "each clone gets its own scratch buffers"), each feeds
 a per-worker **`MergeableSink`** clone, partials merge after the join
 barrier. The planner enables it with `Workers = runtime.NumCPU()` whenever
-the source is channel-based (`planner/physical/plan.go:1573`), so the
+the source is channel-based (`planner/physical/planner_entry.go`), so the
 embedded `wadjet.DB`, the coordinator local fast path, and the HTTP server
 already execute this way. The distributed fragment runner is the only
 `pipeline.Run` caller that bypasses it.
@@ -61,11 +61,11 @@ already execute this way. The distributed fragment runner is the only
 |---|---|
 | Filter/Project/expr ops | `Cloneable` — fresh scratch per clone; trivially morsel-safe |
 | HashJoin probe | **Concurrency-safe by design**, proven in production: `broadcastJoinCache` shares one built join across concurrent probe *tasks* with zero probe-path synchronization (`worker/broadcast_join_cache.go:20-25`); per-probe scratch via `h.Probe()`, atomic lazy key resolution. Exception: RIGHT/FULL OUTER mark matched build rows under `h.mu` (`join.go:1834,1938`) — correct but serializing |
-| HashAggregate | `MergeableSink`: spill-less per-worker partials with SoA fast merges (`aggregate.go:2728,2743,2859`); merge itself single-threaded |
+| HashAggregate | `MergeableSink`: spill-less per-worker partials with SoA fast merges (`agg_partial_merge.go`); merge itself single-threaded |
 | Sort | `MergeableSink`: per-worker batch lists, concat merge, single sort at Finalize (`sort.go:312,323`) |
 | Limit | Shares itself — atomic counters + `DoneSignaler` (`limit.go:97-103`) |
 | **Window** | **NOT mergeable** — no CloneSink; N workers would serialize on its mutex (`window.go:123`). The serial funnel of the operator set |
-| Scan sources | Channel-based planner sources support concurrent `Next` (the allowlist at `plan.go:1573`); the fragment source (`cachedFileStreamSource`) is a single-threaded state machine; `RowGroupIter` walks row groups sequentially with unguarded cursors, though `ReadRowGroupNative` itself is safe per-row-group against the immutable `FileReader` |
+| Scan sources | Channel-based planner sources support concurrent `Next` (the allowlist at `planner_entry.go`); the fragment source (`cachedFileStreamSource`) is a single-threaded state machine; `RowGroupIter` walks row groups sequentially with unguarded cursors, though `ReadRowGroupNative` itself is safe per-row-group against the immutable `FileReader` |
 
 **Memory machinery is already morsel-ready.** Accounting is a worker-wide
 shared pool with per-task child trackers, all atomic/lock-free
@@ -431,7 +431,7 @@ Changes live in: `worker/executor_fragment.go` (engage Workers + dispenser
 `cachedFileStreamSource`/`partition_shard_source`, a new `cpuTokens`
 primitive (worker-scoped), and small additions in `exec` (formalize the
 `Source.Next` concurrency contract that today is an ad-hoc type allowlist
-at `plan.go:1573`; pressure-collapse hook on the parallel run). The
+at `planner_entry.go`; pressure-collapse hook on the parallel run). The
 embedded DB / fast path / HTTP paths are untouched (already parallel);
 `exec.Pipeline.runParallel` gains the collapse hook and token awareness,
 which those paths inherit.

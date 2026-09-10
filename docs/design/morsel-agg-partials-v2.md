@@ -32,9 +32,9 @@ failures:
    inside the GC death spiral that starves heartbeats — too late by
    construction.
 3. **The barrier merge is O(total) at the worst moment.** `mergeSinkState`
-   has a cheap SoA↔SoA path (`mergeIntGroupSoA`, `aggregate.go:2818-2823`)
+   has a cheap SoA↔SoA path (`mergeIntGroupSoA`, `agg_accumulator_merge.go`)
    but its fallback migrates **both** sides to the generic map
-   (`aggregate.go:2831-2833` → `migrateToGenericMap` →
+   (`agg_partial_merge.go` → `migrateToGenericMap` →
    `materializeFlatAccums`), materializing a second full copy of all
    partials (14.2 GB + 9.6 GB cum in the profiles) and nil'ing the SoA
    arrays so every subsequent merge also takes the fallback.
@@ -59,23 +59,23 @@ one `newFileRunSource` per file.
 tracking charge without any shared spill state.
 
 2.3 **The accounting gap is enumerable and mostly incremental-friendly.**
-`groupMemoryUsage` (`aggregate.go:308-350`) counts hash-table buckets, the
+`groupMemoryUsage` (`agg_state.go`) counts hash-table buckets, the
 24 B slim groupState, SoA arrays, and (via `strHashTable.MemoryUsage`,
 `str_hash.go:244-246`) the arena copy of string keys. It does NOT count:
 the ~96 B `groupStateExtras` struct, `keyValues []any` boxed keys,
 per-group `accs []kernel.Accumulator`, `distinctSets` maps + contents,
 `extraState`, `h.keys [][]any`, `h.serializedKeys []string` (two extra
 full copies of every string key), or generic-map overhead. Int-keyed SoA
-is nearly exact — the documented "accuracy budget" (`aggregate.go:316-323`)
+is nearly exact — the documented "accuracy budget" (`agg_state.go`)
 — which is why drift is fatal specifically on paths that leave pure
 int-SoA. All uncounted categories are append-once per group, so
 insert-time counters (bump on `ensureExtras` and the append sites) avoid
 O(groups) walks; the string arena already demonstrates the pattern.
 
 2.4 **Streaming emit already avoids materialization.** `Next` emits
-SoA-direct (`loadAccFromFlat`, `aggregate.go:2636-2640`); the ~3 GB
+SoA-direct (`loadAccFromFlat`, `agg_accumulators.go`); the ~3 GB
 materialize is confined to the migrate paths (comment
-`aggregate.go:2423-2438`).
+`agg_output.go`).
 
 2.5 **Row-level partition routing does not exist.** The only
 partition-by-hash selection is per-group at drain time
@@ -129,7 +129,7 @@ being an O(state) in-memory merge and becomes (mostly) a file handoff.
 
 ### 3.C Retire the migrate fallback in `mergeSinkState`
 
-- Replace `migrateToGenericMap()`-both-sides (`aggregate.go:2831-2833`)
+- Replace `migrateToGenericMap()`-both-sides (`agg_partial_merge.go`)
   with: drain the incompatible side(s) to partial-state runs and append
   file lists. In-memory merge remains only for the compatible fast paths
   (scalar, SoA↔SoA, dual-int).
@@ -137,7 +137,7 @@ being an O(state) in-memory merge and becomes (mostly) a file handoff.
   fixes the poisoning behavior (one fallback merge nil'ing
   `intFlatAccs` and forcing all later merges down the slow path).
 - The Q17 profile proves the fallback fired despite both sides being
-  int-keyed; the exact failed condition (`aggregate.go:2820`) must be
+  int-keyed; the exact failed condition (`agg_partial_merge.go`) must be
   identified during implementation — first task is an instrumented unit
   reproduction (candidates: post-partial-spill state on the primary,
   null-key demotion, compact-mode divergence). Whatever the trigger, with
@@ -178,7 +178,7 @@ never-OOM direction.
 
 ## 5. Blast radius
 
-`internal/engine/exec/aggregate.go` (counters, mergeSinkState fallback,
+`internal/engine/exec/agg_partial_merge.go` (counters, mergeSinkState fallback,
 clone self-drain entry), `aggregate_partial_spill.go` (writer reuse from
 clones — expected near-zero change), `internal/worker/executor_fragment.go`
 (barrier file handoff), `memory/spill.go` (none expected — TrackingOnlyView

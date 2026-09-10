@@ -662,7 +662,7 @@ and `absorbAggregateOutputProjection` still declines over it, so no
 permutation is ever carried as a rename map.
 
 **The gather's half of the same collision.** `renameSourceIndices`
-(`coordinator/execute_stage_dag.go`) pairs a group of renames sharing one
+(`coordinator/dag_merge.go`) pairs a group of renames sharing one
 source name with the columns of their own CLASS (#575); a group of ONE fell
 through to `resolveRenameSource`, which is deterministic in the name and
 therefore always answered the FIRST column. With the key NOT in the select

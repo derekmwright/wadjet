@@ -72,7 +72,7 @@ The in-memory columnar path (lines 171-305) resolves typed kernels once and uses
 
 > **CLOSED since this analysis was written.** HashAggregate spills **already-aggregated partial group state** in a columnar binary format and k-way merges the runs, combining accumulators on equal keys (`internal/engine/exec/aggregate_partial_spill.go`). An ungrouped aggregate never buffers input at all. `ToRows` survives only on the legacy raw-row path for extra-state aggregates and GROUPING SETS. The original analysis follows.
 
-**Location:** `internal/engine/exec/aggregate.go:323-331`
+**Location:** `internal/engine/exec/agg_spill.go`
 
 ```go
 rows := b.ToRows()  // creates map[string]any per row
@@ -307,7 +307,7 @@ The schema is static for the entire scan.
 
 > **CLOSED since this analysis was written.** `HashAggregate.GroupNDVHint` carries the planner's HLL-based estimate of GROUP-KEY cardinality and is used when sizing the table; the physical planner sets it from ANALYZE HLL sketches. The 4096 floor remains for plans with no statistics. The original analysis follows.
 
-**Location:** `internal/engine/exec/aggregate.go:450-461`
+**Location:** `internal/engine/exec/agg_consume.go`
 
 Without `InputRowHint`, the hash table starts at 4096 entries. TPC-H Q17 has 2M distinct keys, requiring 8+ resize-and-rehash cycles.
 
@@ -352,7 +352,7 @@ Parallel workers check `ctx.Err()` and all `DoneSignaler`s on every batch iterat
 | Bloom filter | Adaptive disable at <5% rejection | `bloom_filter_op.go:186-199` |
 | Sort | Top-K heap, typed kernels, index-based | `sort.go:249-280` |
 | Batch pooling | Size-class buckets, bitmap reuse | `batch/pool.go` |
-| Group state | Chunk allocator: 1.5M→366 heap objects | `aggregate.go:150-170` |
+| Group state | Chunk allocator: 1.5M→366 heap objects | `agg_state.go` |
 | Semi/anti join | Key-only mode: 2-4x less memory | `join.go:85-89` |
 | Null handling | NoNulls kernel variants skip bitmap checks | `kernel/agg.go:68-71` |
 
@@ -362,7 +362,7 @@ Parallel workers check `ctx.Err()` and all `DoneSignaler`s on every batch iterat
 
 Three separate paths fall back to `map[string]any` row format:
 1. **Sort spill** (`sort.go:102-145`)
-2. **Aggregate spill** (`aggregate.go:323-331`)
+2. **Aggregate spill** (`agg_spill.go`)
 3. **Worker shuffle** (`executor.go:672`)
 
 All three could use the columnar serialization from `join_spill.go:347-541`. Unifying on a columnar spill format would:

@@ -29,6 +29,29 @@ logical rewrite having turned every user DISTINCT into an aggregate, plus a
 post-gather `dedupGatherResult` for the root-path shapes the rewrite declines
 (see §Where dedup / aggregate / distinct happen).
 
+## File map after the R1 split (#1025)
+
+The declaration moves preserve the execution contracts and keep package
+initialization declarations in the original files. The two star-expansion callers
+remain in `physical/plan.go` because the structural gate pins that filename.
+Follow symbols rather than
+historical line numbers in older design notes.
+
+| Seam | Files |
+|---|---|
+| Planner configuration and entry | `physical/planner_config.go`, `planner_entry.go`, `plan.go`; star refusal helpers in `dag_refusals.go` |
+| Stage emission and schema | `physical/stage_emission.go`, `stage_types.go`, `declared_output.go` |
+| Join, key binding, subquery, policy | `physical/join_plan.go`, `group_key_binding.go`, `subquery_pipeline.go`, `validate_policy.go` |
+| Expression nodes and scalar registry | `expr/expr_leaf.go`, `expr_arith.go`, `expr_compare.go`, `expr_scalar_fns.go`; built-in registration remains in `expr/expr.go` |
+| Aggregate indexes, accumulators, partials, spill | `exec/agg_hash_tables.go`, `agg_accumulators.go`, `agg_partial_merge.go`, `agg_spill.go` |
+| Aggregate key encoding and OHLCV | `exec/agg_group_key.go`, `agg_key_encoding.go`; OHLCV already lives in `agg_ohlcv.go` |
+| DAG scheduling and gather | `coordinator/dag_dispatch.go`, `dag_gather.go` |
+| Task dispatch and fragment construction | `coordinator/dag_scan.go`, `dag_compute.go`, `dag_pipeline.go`, `dag_fragments.go`, `dag_join_fragments.go` |
+| Gather names and typed projections | `coordinator/dag_merge.go`, `dag_projection.go` |
+| Partial re-aggregation, ordering merge, dedup (ADR-0026 §8) | Already outside the split target: `coordinator/coordinator.go` (`mergeProbePartials`, `coalesceForOrdering`, `dedupGatherResult`) |
+| Local fast path and routing counters | Already separate: `coordinator/local_fastpath.go`, `correlated_local.go` |
+| Shuffle dispatch and durability | `coordinator/dag_shuffle.go`; durability remains in `peer_locations.go`, `stage_read.go`, `orchestrate_repartition.go` |
+
 ## Small-query local fast path (routing ahead of the DAG)
 
 Before planning a DAG, `ExecuteSQL` routes small queries onto a
@@ -97,11 +120,11 @@ the embedded engine per policy shape.
 
 ## Planning pipeline (logical → stages)
 
-`PlanDistributed` (`planner/physical/plan.go:1579`):
+`PlanDistributed` (`planner/physical/plan.go`):
 1. `AnnotateScanColumns` — scan column metadata for shuffle-key assignment.
-2. `generateStages` (`plan.go:2456`) → `walkStages` (`plan.go:2919`) builds the raw stage list, then `fuseJoinStages` / CTE flattening.
-3. `assignStageDistributions` + `EnsureDistribution` (`plan.go:1595,1612`) — the **distribution-property system**: each `Stage` gets a `Distribution` (Singleton / HashPartitioned{keys,count} / …); `EnsureDistribution` inserts `exchange-*` stages where a stage's input requirement isn't met by its child's output. This is *the* mechanism that introduces shuffles.
-4. Collapse/fuse passes: `collapseMergeTreesForNativeDAG`, `fuseSortIntoPredecessor`, `fuseScanAggregateShuffle` (`plan.go:1601-1659`).
+2. `generateStages` (`stage_generation.go`) → `walkStages` (`stage_emission.go`) builds the raw stage list, then `fuseJoinStages` / CTE flattening.
+3. `assignStageDistributions` + `EnsureDistribution` (`plan.go`) — the **distribution-property system**: each `Stage` gets a `Distribution` (Singleton / HashPartitioned{keys,count} / …); `EnsureDistribution` inserts `exchange-*` stages where a stage's input requirement isn't met by its child's output. This is *the* mechanism that introduces shuffles.
+4. Collapse/fuse passes: `collapseMergeTreesForNativeDAG`, `fuseSortIntoPredecessor`, `fuseScanAggregateShuffle` (`plan.go`).
 5. `applyDynamicFilters`, `AssertExchangeConsistency`, attach SELECT aliases to the terminal `exchange-gather`.
 
 `OutputDistribution` (`distribution.go`) is the other half, and its labels are
@@ -124,20 +147,20 @@ reads as "hash-partitioned on nothing" — refused plans the DAG can run (#480),
 and asking nothing of either side answers a WRONG COUNT, because each task then
 meets only its own slice of the build.
 
-### `walkStages` per-node behavior (`plan.go:2919`)
+### `walkStages` per-node behavior (`stage_emission.go`)
 
 | Logical node | Emits | Notes |
 |---|---|---|
 | `NodeScan` | `scan` stage (tasks = file/row-group split) | `buildScan` is the single-process analog |
-| `NodeJoin` | `hash_join`/`broadcast_join` (+ `exchange-repartition` shuffles for non-broadcast) | keys parsed at plan time (`plan.go:3145+`); RIGHT/FULL never broadcast — see §Outer joins |
-| `NodeAggregate` | `aggregate` (partial) → `final_aggregate` | two-phase (`plan.go:3034-3103`); the distribution pass adds the exchange |
-| `NodeSort` | `sort` → merge-sort tree | `plan.go:3105`. A key naming a term the SELECT list drops is a `__sortkey_N` that no stage emits — see §Synthetic sort keys. |
-| `NodeWindow` | `window` | `plan.go:3384`. One task per PARTITION BY partition when the input already arrives clustered on those keys; Singleton otherwise — see §Window. |
-| `NodeFilter` | pushes predicates onto child stage | `plan.go:3323` |
-| `NodeLimit` | a bound on the sort stage below it (unless a lower LIMIT already owns that sort — #525), a per-task `RowLimit` on the scans, and — for every LIMIT the coordinator's post-gather pass cannot see — a `limit` stage | `plan.go`, `needsLimitStage`. See §Where a LIMIT is applied. |
+| `NodeJoin` | `hash_join`/`broadcast_join` (+ `exchange-repartition` shuffles for non-broadcast) | keys parsed at plan time (`stage_emission.go`); RIGHT/FULL never broadcast — see §Outer joins |
+| `NodeAggregate` | `aggregate` (partial) → `final_aggregate` | two-phase (`stage_emission.go`); the distribution pass adds the exchange |
+| `NodeSort` | `sort` → merge-sort tree | `stage_emission.go`. A key naming a term the SELECT list drops is a `__sortkey_N` that no stage emits — see §Synthetic sort keys. |
+| `NodeWindow` | `window` | `stage_emission.go`. One task per PARTITION BY partition when the input already arrives clustered on those keys; Singleton otherwise — see §Window. |
+| `NodeFilter` | pushes predicates onto child stage | `stage_emission.go` |
+| `NodeLimit` | a bound on the sort stage below it (unless a lower LIMIT already owns that sort — #525), a per-task `RowLimit` on the scans, and — for every LIMIT the coordinator's post-gather pass cannot see — a `limit` stage | `stage_cost.go`, `needsLimitStage`. See §Where a LIMIT is applied. |
 | `NodeUnion` | `union` (+ a `GroupByAll` `final_aggregate` when not ALL) | `set_op_stages.go`. One task per arm: task *i* reads arm *i*'s whole output and projects it onto the result column names and types, so the stage's files ARE the concatenation. |
 | `NodeIntersect` / `NodeExcept` | `union` (with per-arm tag columns) + a grouped counting `final_aggregate` | `set_op_stages.go` (#346). The distribution pass inserts an `exchange-repartition` on the full result row between them — see §Set operations. |
-| **`NodeDistinct`** | **nothing — passthrough** | `default` case `plan.go:~3415`; walks children only. No USER DISTINCT reaches here — `logical.rewriteDistinctAsGroupBy` (optimizer) turns every `Distinct(Project)` in the tree, at any depth, into an aggregate-free `NodeAggregate` first, so it rides the aggregate stages (#466 widened this from the root path only). What still passes through: planner-inserted `BuildSideDedup` Distincts (semi/anti build dedup, decorrelated semijoin key source), which carry no user-visible semantics, and root-path fallback shapes the coordinator dedups after the gather. A user Distinct anywhere else is REFUSED by `refuseUnstageableDistinct` (`physical/distinct_refusal.go`) rather than dropped, and the coordinator answers it on the local single-process pipeline. |
+| **`NodeDistinct`** | **nothing — passthrough** | `default` case `stage_emission.go`; walks children only. No USER DISTINCT reaches here — `logical.rewriteDistinctAsGroupBy` (optimizer) turns every `Distinct(Project)` in the tree, at any depth, into an aggregate-free `NodeAggregate` first, so it rides the aggregate stages (#466 widened this from the root path only). What still passes through: planner-inserted `BuildSideDedup` Distincts (semi/anti build dedup, decorrelated semijoin key source), which carry no user-visible semantics, and root-path fallback shapes the coordinator dedups after the gather. A user Distinct anywhere else is REFUSED by `refuseUnstageableDistinct` (`physical/distinct_refusal.go`) rather than dropped, and the coordinator answers it on the local single-process pipeline. |
 | **`NodeProject`** | **nothing — passthrough**, unless a consumer needs it materialized | same `default` case; aliases recovered at gather, and every other consumer resolves them back to source names — see §Derived-table aliases and §Where a Filter and a Project land. ONE consumer cannot: a **STAR** has no name to resolve with and reads the stream by POSITION, so a derived block a star reads emits its own projection as the stage's column set (`starReadBlockProjections` / `publishBlockProjection` → `Stage.ProjectExprs`; ADR-0026 §7, #984). The join's keys, its OutputFilter, the declaration for an empty side and the hidden slot's ordinal all read the PUBLISHED list there. A block the pass cannot state is refused and routed local (`ErrLateralProjectionDistributed`, asked AFTER stage generation because that is where the answer is exact). |
 
 ## Where a Filter and a Project land (the #656 class)
@@ -291,7 +314,7 @@ and that stage is exactly the one whose input had no key to sort on.
 ### A scan's READ SET is a plan-time fact, and every emitted-set model rests on it
 
 `Stage.Columns` on a scan is `logical.Node.RequiredColumns` copied verbatim
-(`plan.go`'s scan arm), and it is a READ SET — the names ancestors asked for —
+(`stage_emission.go`'s scan arm), and it is a READ SET — the names ancestors asked for —
 not an output schema. Four models read it as one:
 
 | model | file | what it answers |
@@ -430,13 +453,13 @@ is MATERIALIZED instead" (`join_input_projection.go`, ADR-0025):
 
 | consumer | resolver | file |
 |---|---|---|
-| join key / shuffle partition key | `resolveShuffleKey` | `plan.go` |
+| join key / shuffle partition key | `resolveShuffleKey` | `group_key_binding.go` |
 | a join key's TYPE (both sides + the partition hash) | `resolveJoinKeyTypes` → `joinSideColTypes` → `emittedColTypes` / `setOpDeclaredOutputSchema` | `join_key_types.go` |
 | which SIDE of a join a key belongs to | `subtreeNaming.ownsKey` → `assignJoinKeySides` | `subtree_naming.go` |
-| aggregate argument, GROUP BY key | `resolveAggInputName` / `aggStageGroupKey` | `plan.go` |
+| aggregate argument, GROUP BY key | `resolveAggInputName` / `aggStageGroupKey` | `group_key_binding.go` |
 | a column reference INSIDE an aggregate argument expression | `respellAggInputExpr` | `window_alias_respell.go` |
 | a reference to a derived table's alias for a WINDOW's output slot | `respellWindowSlotAliasRefs` | `window_alias_respell.go` |
-| ORDER BY term over an AGGREGATE producer | `resolveSortKeyColumn` | `plan.go` |
+| ORDER BY term over an AGGREGATE producer | `resolveSortKeyColumn` | `group_key_binding.go` |
 | ORDER BY term over a SCAN/JOIN/WINDOW producer | `annotateDerivedAliasSortKey` → `resolveDerivedAliasSortKeys` | `hidden_sort_key.go` |
 | a UNION/INTERSECT/EXCEPT arm's projection | `setOpArmProjection` | `set_op_stages.go` |
 | the gather's result schema | `resolveOutputRenameSource` | `output_rename_resolve.go` |
@@ -619,9 +642,9 @@ Every stage dispatches as a **fragment**: a list of `distributed.OpSpec`
 operators (`distributed/messages.go:260`). The worker requires `Operators` to be
 non-empty (`worker/executor_stage.go:22`).
 
-Conversion lives in `coordinator/execute_stage_dag.go`:
-- `buildAggregateFragment` (`:2373`) → `OpShuffleSource` + `OpHashAggregate{GroupByCols, GroupByResolve, Aggregates, MergeMode, InputRowBound}`. **`MergeMode = stage.Type=="final_aggregate"||"merge_aggregate"`** (`:2400`) — merge mode rewrites `InputCol→OutputCol` and `COUNT→SUM`. `InputRowBound` is `aggregateInputRowBound`: the exact Σ`PartitionRows` over the partitions bound to this task (0 = unknown), which decides the worker aggregate's group-index layout — see `docs/design/unbounded-final-aggregate-layout.md`.
-- `buildSortFragment` (`:2514`), shuffle dispatch `dispatchShuffleStage` (`:772`).
+Conversion lives in `coordinator/dag_fragments.go` and `coordinator/dag_join_fragments.go`:
+- `buildAggregateFragment` (`dag_fragments.go`) → `OpShuffleSource` + `OpHashAggregate{GroupByCols, GroupByResolve, Aggregates, MergeMode, InputRowBound}`. **`MergeMode = stage.Type=="final_aggregate"||"merge_aggregate"`** — merge mode rewrites `InputCol→OutputCol` and `COUNT→SUM`. `InputRowBound` is `aggregateInputRowBound`: the exact Σ`PartitionRows` over the partitions bound to this task (0 = unknown), which decides the worker aggregate's group-index layout — see `docs/design/unbounded-final-aggregate-layout.md`.
+- `buildSortFragment` (`dag_fragments.go`), shuffle dispatch `dispatchShuffleStage` (`dag_shuffle.go`).
 - Terminal stage gets an `OpGatherSink` when `gatherReplySubject != ""`.
 
 ### A GROUP BY key crosses the boundary under TWO names
@@ -746,7 +769,7 @@ failure costs the query its consolidation and not its answer, and it runs
 only over an upstream the bypass declined — which by construction is
 multi-file BASE parquet, exactly what the guard refuses. Handing that over
 bare made the guard fail the query. Both branches build their output with the
-same function for that reason (`coordinator/execute_stage_dag.go`,
+same function for that reason (`coordinator/dag_shuffle.go`,
 `replicatePassThrough`); gate:
 `coordinator.TestReplicateFallbackKeepsTheQueryAnswerable`.
 
@@ -782,7 +805,7 @@ worker refused correctly and the client got an empty result set.
 Worker side: `buildFragmentUnary` (`worker/executor_fragment.go:952`) and
 `buildFragmentHashAggregate` (`:788`). **Gap:** the hash-aggregate fragment
 requires `len(GroupByCols)>0 || len(Aggregates)>0` and has **no `GroupByAll`**
-— the single-process `buildDistinct` (`plan.go:5583`) uses
+— the single-process `buildDistinct` (`sort_plan.go`) uses
 `HashAggregate.GroupByAll=true`, which has no distributed equivalent yet.
 
 ### …and the other thing a base-table read has to be told: which rows are deleted
@@ -889,7 +912,7 @@ peer-location hint, and it can only hint file lists it walks. It walks
 That last one matters because the two are not redundant. Every dispatcher
 except one mirrors its fragment's inputs into `Task.Inputs` as well as into
 `OpShuffleSource.InputFiles`; `dispatchFinalAggregateFanout`
-(`execute_stage_dag.go`, the `final_aggregate-N-merge-K` tasks and the final
+(`dag_aggregate_fanout.go`, the `final_aggregate-N-merge-K` tasks and the final
 merge over their `-interm-` outputs) does not. Before the annotator walked
 op source inputs, that whole task class was dispatched with a fetch token
 and **no hint at all**: no Tier-1.5 peer read was ever attempted, the first
@@ -1041,7 +1064,7 @@ it, with the inequality riding as the stage's post-filter.
 
   **An UNGROUPED partial that consumed no rows still writes a file.** SQL's identity row (SUM/MIN/MAX/AVG → NULL, COUNT → 0) is owed by every ungrouped aggregate, so a selective filter that matches nothing in one task's files produces a one-row `.wshf` there rather than nothing — unlike a GROUPED partial, which emits no rows and so writes no file at all (`writeStageOutput` returns early on `totalRows == 0`). That row is the one output with no input vector to type itself from, which makes it the place a parameterized declaration goes missing: it shipped `DECIMAL(0,0)` where its siblings shipped `DECIMAL(38,s)`, and the merge read their unscaled Int128s at scale 0 — `SUM(a) WHERE id < 5` answering `3824.00` for `38.24` (#685). `exec.AggColumn.OutputPrecision/OutputScale` (planner → `distributed.AggSpec` → `buildHashAggregate`) is what it declares now; ADR-0010 carries the rule and the reader-side guard behind it. AVG is split into `__avg_sum#X` + `__avg_count#X` by `decomposeAvg` before this, so the sum leg's declaration is the INPUT's scale and has to be carried too (`AggSpec.InputScale`) — `batch.AvgScale` saturates at 38 and cannot be inverted.
 - **Sort:** `sort` → merge-sort tree, merged at the gather. ✅
-- **Bare GROUP BY (no agg fn):** same stages as aggregates — the fused scan runs the partial dedup and hash-partitions on the group keys; the `final_aggregate` fans out one task per disjoint partition. The dispatch gate that routes a fused scan into `dispatchScanAggregateStage` accepts `FusedAggGroupBy`-only stages (`execute_stage_dag.go`, was `FusedAggSpecs`-only — issue #166). ✅ sharded.
+- **Bare GROUP BY (no agg fn):** same stages as aggregates — the fused scan runs the partial dedup and hash-partitions on the group keys; the `final_aggregate` fans out one task per disjoint partition. The dispatch gate that routes a fused scan into `dispatchScanAggregateStage` accepts `FusedAggGroupBy`-only stages (`dag_dispatch.go`, was `FusedAggSpecs`-only — issue #166). ✅ sharded.
 - **DISTINCT, anywhere in the plan:** rewritten at logical-optimize time to an aggregate-free GROUP BY over the projection below it (`logical.rewriteDistinctAsGroupBy`, `planner/logical/distinct_rewrite.go`) — bare columns AND scalar expressions (derived group-bys are evaluated by the worker's `buildAggInputProjection`). Rides the sharded path above; the coordinator does no dedup (`MergeInfo.HasDistinct` is false post-rewrite). ✅ sharded.
 
   The rewrite walks the WHOLE tree. It used to walk only the root path, and a DISTINCT inside a derived table feeding an aggregate then reached nobody: `walkStages` emits no stage for it, and `ExtractMergeInfo` returns at the first `NodeAggregate` it meets, so the coordinator never saw it either. `SELECT COUNT(*) FROM (SELECT DISTINCT c FROM t) u` answered with the raw count on the DAG and the deduplicated one single-process — silent, deterministic, and unnoticed because the two shapes on either side of it (root `SELECT DISTINCT`, and a derived DISTINCT feeding a plain projection, which `ExtractMergeInfo` does see past one Project) were both correct (#466).
@@ -1096,8 +1119,8 @@ Declaring the star's group keys is also what stops the column pruner from eating
 
 A DISTINCT aggregate has no bounded partial form (#291), so the DAG routes
 every aggregate carrying one through the one-level shape:
-`RawInputAggregate: true, Tasks: 1` (`planner/physical/plan.go`, the
-`hasDistinctAgg` arm), and `execute_stage_dag.go` then REFUSES to fan it
+`RawInputAggregate: true, Tasks: 1` (`planner/physical/stage_emission.go`, the
+`hasDistinctAgg` arm), and `dag_compute.go` then REFUSES to fan it
 out. One task reads the whole input. Measured intra-node, before any
 cluster factor: grouped `COUNT(DISTINCT)` 291.0 ms at one worker against
 67.5 ms at eight (4.31x); ungrouped 189.9 → 49.3 (3.85x).
@@ -1163,7 +1186,7 @@ list.
 order, `Tasks = len(UnionArms)`. Task *i* reads arm *i*'s output **whole** (not
 a partition slice) and its fragment is
 `[OpShuffleSource, OpProject(arm→result columns), OpDecimalCoerce?, OpFilter?, sink]`
-(`coordinator/execute_stage_dag.go buildUnionFragment`). Three things make the
+(`coordinator/dag_fragments.go buildUnionFragment`). Three things make the
 concatenation well-formed:
 
 - **Names.** SQL takes the result columns from the first arm; every arm is
@@ -1590,7 +1613,7 @@ worker rejected it (`executeStage: empty Operators … StageType="window"`), so
 round-trip test — and has been deleted; the spec rides
 `OpSpec.WindowCols` like every other fragment operator's configuration.
 
-**Fragment shape** (`coordinator/execute_stage_dag.go buildWindowFragment`):
+**Fragment shape** (`coordinator/dag_fragments.go buildWindowFragment`):
 
 ```
 [OpShuffleSource, OpWindow, OpFilter?(predicate above the window),
@@ -1812,7 +1835,7 @@ sharded rewrite, so this is a narrow residual shape.
 
 **Fixed 2026-07 (#169):** a bare expression SELECT over a scan returned raw
 scan columns distributed — no compute stage existed and the gather can only
-rename/drop. Now `attachScanSelectProjections` (plan.go) sets
+rename/drop. Now `attachScanSelectProjections` (stage_projection.go) sets
 `Stage.ProjectExprs` on a leaf scan feeding the gather directly, the scan
 dispatches through the fragment path, and an `OpProject` op computes the
 SELECT list worker-side (plan-time type inference via `inferProjectionType`
@@ -1877,8 +1900,8 @@ row.
 | `exec/join.go` key-build worker | `hash join key build worker` | **releases `sourceMu`** (siblings block on it) + `cancelBuild()` |
 | `exec/join_spill.go` build prefetch ×2 | `join spill build prefetch` | sends the partition's error down the prefetch channel |
 | `scan/scanner.go` file prefetch ×2 | `scan file prefetch`, `scan reader-at prefetch` | sends this file's result **exactly once** (`sent` guard) |
-| `physical/plan.go` `buildJoin` | `hash join build` | sets `buildErr` before the build barrier opens |
-| `physical/plan.go` scan/rg workers, ch closer | `scan worker`, `scan row-group worker`, `scan batch-channel closer` | error onto `errCh` + `cancel()` |
+| `physical/join_plan.go` `buildJoin` | `hash join build` | sets `buildErr` before the build barrier opens |
+| `physical/scanner_source.go` scan/rg workers, ch closer | `scan worker`, `scan row-group worker`, `scan batch-channel closer` | error onto `errCh` + `cancel()` |
 | `physical/util.go` footer readers | `scan footer reader` | records **`fatalScanErr`** — a tolerated per-file failure would silently drop that file's rows |
 | `physical/sort_merge_join.go` build | `sort-merge join build` | sets `buildErr` before the barrier |
 | `physical/metadata_minmax.go` workers | `min/max metadata worker` | `declined` → the query falls back to a real scan |
@@ -1937,7 +1960,7 @@ correctness of a distributed change before EC2.
 ## Where a LIMIT is applied
 
 Three things can bound a stream on the DAG. Deciding which one owns a given
-`NodeLimit` is `needsLimitStage` (`planner/physical/plan.go`):
+`NodeLimit` is `needsLimitStage` (`planner/physical/stage_cost.go`):
 
 | Applier | Reaches | How |
 |---|---|---|

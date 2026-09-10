@@ -65,9 +65,9 @@ shuffle join family in `distributed_tpch_test.go:1417-1596`).
   `Stage.SortKeys` only gates serial execution). Order is operator-internal
   today.
 - **The seams are single points.** Local: `buildJoin`
-  (`plan.go:3857`, the one place `exec.NewHashJoin` is constructed) serves
+  (`join_plan.go`, the one place `exec.NewHashJoin` is constructed) serves
   embedded, local fast path, and standalone alike. Distributed: walkStages'
-  join case (`plan.go:3306`) already branches broadcast vs hash_join; op
+  join case (`stage_emission.go`) already branches broadcast vs hash_join; op
   types live in `messages.go:254-283`; the worker maps op→operator in
   `buildFragmentUnary` (`executor_fragment.go:1556`).
 - **Memory contract template = Sort.** Lazy `RegisterAccounted` on first
@@ -155,7 +155,7 @@ unchanged):
   keep the strictly-better broadcast/hash path);
 - BOTH sides' estimated bytes exceed `SortMergeJoinThreshold`. The build
   side estimate exists today (`isBroadcastCandidate`'s selectivity-scaled
-  walk, `plan.go:3689-3725`); v1 mirrors that walk on `node.Children[0]`
+  walk, `join_plan.go`); v1 mirrors that walk on `node.Children[0]`
   for the probe side (CBO `RelStatsOf` scaling included). Threshold default
   proposed: the worker pool budget signal the coordinator already computes
   for broadcast (`broadcastThresholdFromCluster`, `workers.go:334`) scaled
@@ -163,8 +163,8 @@ unchanged):
   cannot sit resident without dominating the pool". Single knob
   (`--sort-merge-join-bytes`), `0 = disabled` = the shipped default.
 
-Decision sites: local `buildJoin` (`plan.go:3857`) grows an SMJ branch
-before `NewHashJoin`; distributed walkStages' join case (`plan.go:3306`)
+Decision sites: local `buildJoin` (`join_plan.go`) grows an SMJ branch
+before `NewHashJoin`; distributed walkStages' join case (`stage_emission.go`)
 emits `StageSortMergeJoin` instead of `StageHashJoin` — the exchange-
 repartition children are IDENTICAL (co-partitioning already suffices), so
 the shuffle plumbing, streaming exchange, and task retry story carry over
@@ -176,7 +176,7 @@ untouched.
   (LeftKeys/RightKeys/BuildAlias/BuildFiles/OutputColumns) — no new fields
   expected in v1.
 - Coordinator: `buildSortMergeJoinFragment` alongside `buildJoinFragment`
-  (`execute_stage_dag.go:2284`); dispatch gate alongside the join branches
+  (`dag_join_fragments.go`); dispatch gate alongside the join branches
   (`:2014,:2205`). Task `EstimatedBytes` for admission should reflect SMJ's
   smaller resident footprint — v1 keeps the existing estimate (conservative:
   over-admission is the risk to avoid; relaxing admission is the PAYOFF

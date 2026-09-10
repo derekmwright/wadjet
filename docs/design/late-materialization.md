@@ -8,7 +8,7 @@ Every hash-join probe batch is fully materialized today: match pairs are
 collected as references, then every output column is gathered (copied) into a
 freshly allocated batch (`join.go:2141-2148`). In a fused multi-join pipeline
 (Q05/Q07/Q08/Q09 shapes — `buildPipeline` appends successive probes into one
-`[]UnaryOperator`, plan.go:4190; distributed fragments carry consecutive
+`[]UnaryOperator`, pipeline_plan.go; distributed fragments carry consecutive
 `OpHashJoinProbe` specs, executor_fragment.go:1656), a column that merely
 passes through k joins on its way to the aggregate is copied k times, and rows
 eliminated by a later probe or residual filter are copied and then thrown away.
@@ -55,19 +55,19 @@ batches.
 - There is no view/dictionary vector anywhere: `batch.Vector` is owned typed
   storage (vector.go:225-246); every consumer reads `Int64Data[row]` etc.
   directly. The expression compiler is row-indexed on concrete vectors
-  (expr.go:116,163-165) and its `EvalVec` path additionally requires dense
+  (expr_leaf.go) and its `EvalVec` path additionally requires dense
   rows. Filter kernels read raw columns (filter.go:407).
 - Pipeline ownership: after each op, `prev.Release()` recycles the input
   batch (pipeline.go:100-101). A reference into the probe input would dangle
   without an explicit pinning contract (build batches already have one).
 - Retaining consumers: Sort (`Detach`+append, sort.go:91-92), Window
   (window.go:129-130), CollectSink/BatchSink (pipeline.go:594), the deferred
-  join / reverse-bloom bridges (plan.go:4218, :4087). Serializing sinks all
+  join / reverse-bloom bridges (join_sources.go). Serializing sinks all
   gather rows anyway: shuffle `writeChunk(cols, sel, n)`
   (shuffle_format.go:159-187), `gatherReplySink` (gather_reply_sink.go:75),
   `partitionedShuffleSink` (partitioned_shuffle_sink.go:142).
 - Column pruning through joins already exists (`OutputFilter` from
-  `NeededColumns`, join.go:1902-1912, plan.go:4183) — late materialization is
+  `NeededColumns`, join.go:1902-1912, join_plan.go) — late materialization is
   orthogonal: it defers the *row* copy of the columns that survive pruning.
 - Adjacent prior art: PR #192 `BuildStoreCols` arrival projection returns a
   view RecordBatch sharing vectors (join.go:1517-1556) — the share-and-detach

@@ -2499,9 +2499,10 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      is not addressed by this decision.
    - **What is now covered, and what is left.** (Updated 2026-08-24, #459's
      close.) The predicate kernels (`=`, `>`, `IN` — `internal/engine/expr/
-     expr.go`'s `cmpFloat64Op`/`cmpFloat32Op`, `internal/engine/exec/kernel/
+     expr_compare.go`'s `cmpFloat64Op`/`cmpFloat32Op`, `internal/engine/exec/kernel/
      compare.go`'s `ResolveFilterKernel`), the PRIMARY (non-spilled) GROUP
-     BY/DISTINCT hash key (`internal/engine/exec/aggregate.go`'s
+     BY/DISTINCT hash key (`internal/engine/exec/agg_group_key.go` and
+     `internal/engine/exec/agg_key_encoding.go`'s
      `typedRowHash`/`serializeGroupKey`/`appendColumnValue`), and the
      hash-join key (`internal/engine/exec/join.go`'s `buildKeyFromBatch`/
      `buildProbeKey`) now compare/hash the canonical bits — a `WHERE f = f`
@@ -2514,7 +2515,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      router, keyed independently of the in-process hash above, and its
      scalar FLOAT32/FLOAT64 arms moved with #459 — its VECTOR arm did not,
      because a VECTOR element's canonicalization lives in a different
-     function (`appendVectorKey`, aggregate.go) that #459 did not touch;
+     function (`appendVectorKey`, agg_key_encoding.go) that #459 did not touch;
      the router disagreeing with that key for one type was the same
      defect class one type over (`hashVectorValue` too, kept in step per
      its own comment requiring the two hash the same byte stream), closed
@@ -3995,18 +3996,18 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
   matched nothing) — item 10 and item 11 above record the settled position
   for; `internal/engine/exec/kernel/compare.go` (`CidrSortKey`,
   `likeTextRenderer`), `internal/engine/expr/compile.go` (`tryNetworkLit`,
-  `kernel.IPv6LitKey`), `internal/engine/expr/expr.go` (`CmpNetworkLit`,
-  `Like.EvalBoolNull`), `internal/oracle/typematrix/typematrix.go`
+  `kernel.IPv6LitKey`), `internal/engine/expr/expr_compare.go` (`CmpNetworkLit`),
+  `internal/engine/expr/expr_special.go` (`Like.EvalBoolNull`), `internal/oracle/typematrix/typematrix.go`
   (`networkOrdLit`)
 - #521 (CAST AS STRING did not render DATE or FLOAT32 the way the projection
   and LIKE already did — closed, item 11's amendment above) and #520 (ORDER
   BY/GROUP BY/DISTINCT/COUNT(DISTINCT)/MIN/MAX/hash-join keys over a CIDR
   column still used TEXT order — item 10's own "known residual," now
-  closed) — `internal/engine/expr/expr.go` (`boxedTextOperand`),
+  closed) — `internal/engine/expr/expr_cast.go` (`boxedTextOperand`),
   `internal/engine/exec/kernel/compare.go` (`CidrOrderKey`),
   `internal/engine/exec/kernel/sort.go`, `internal/engine/exec/kernel/agg.go`,
   `internal/engine/exec/kernel/types.go` (`Accumulator.Merge`),
-  `internal/engine/exec/aggregate.go` (`appendColumnValue`),
+  `internal/engine/exec/agg_key_encoding.go` (`appendColumnValue`),
   `internal/engine/exec/partitioned_agg.go` (`legacyCompositeHash`),
   `internal/worker/partitioned_shuffle_sink.go`
 - #546 (the single-process set operation dedupped CIDR by stored TEXT while
@@ -4037,7 +4038,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
   boxed value, an unspecified text form — item 11's own open question,
   settled as a refusal, closed) — `internal/engine/exec/kernel/compare.go`
   (`ResolveLikeFilterKernel`), `internal/engine/exec/filter.go`
-  (`likeConstError`), `internal/engine/expr/expr.go` (`containerLikeKind`),
+  (`likeConstError`), `internal/engine/expr/expr_special.go` (`containerLikeKind`),
   `internal/engine/expr/fatal.go` (`raiseNoLikeOperator`)
 - #444 (boxed ROW comparator ordered fields by name, not declared position),
   #446 (VECTOR/ARRAY(FLOAT) comparators not transitive under NaN) — the work
@@ -4053,6 +4054,6 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
 - Exact numeric aggregates (item 9): `internal/engine/batch/decimal.go`
   (`AddChecked`, `AvgScale`, `DecimalAvg`), `internal/engine/exec/kernel/types.go`
   (`Accumulator.FinalSum`/`FinalAvg`/`FinalMin`/`FinalMax`),
-  `internal/engine/exec/aggregate.go` (`outputSchema`, `minMaxOutputType`),
-  `internal/planner/physical/plan.go` (`aggSpecOutputType`),
+  `internal/engine/exec/agg_output.go` (`outputSchema`, `minMaxOutputType`),
+  `internal/planner/physical/aggregate_declared_output.go` (`aggSpecOutputType`),
   `internal/worker/avg_fold.go`

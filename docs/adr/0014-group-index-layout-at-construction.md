@@ -211,6 +211,6 @@ and the ClickBench check: `docs/design/unbounded-final-aggregate-layout.md`.
   ClickBench-confound addendum; `…-window2-analysis-2026-08-22.md` §1
 - `docs/design/unbounded-final-aggregate-layout.md` (the 2026-08-22 amendment's
   mechanism, plumbing, `R*` derivation and expected SF100 shape)
-- `internal/engine/exec/two_level_hash.go`, `internal/engine/exec/aggregate.go`,
+- `internal/engine/exec/two_level_hash.go`, `internal/engine/exec/agg_index.go`,
   `internal/worker/shuffle_partial_agg.go`,
-  `internal/coordinator/execute_stage_dag.go` (`aggregateInputRowBound`)
+  `internal/coordinator/dag_task_inputs.go` (`aggregateInputRowBound`)

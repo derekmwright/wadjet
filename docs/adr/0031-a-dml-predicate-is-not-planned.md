@@ -99,7 +99,7 @@ disqualify it:
    that is not in it.
 3. **It is fenced off from every path a DML predicate must still work on.**
    `topn_late_mat.go:63` bails out when the plan has streaming sources,
-   materialized inputs or a scan-file filter, and `plan.go:15556` fails loudly
+   materialized inputs or a scan-file filter, and `scanner_source.go` fails loudly
    on anything but the row-group-parallel scan. A `DELETE` on a table with an
    `ARRAY` column, or under LIMIT pushdown, takes the lazy/nested fallback
    path — which is exactly where the guard refuses.
@@ -145,8 +145,8 @@ user saw."
 ## An UNVERIFIED lead on the same invariant, recorded as a lead
 
 Reading the fallback scan path suggests it applies delete markers with **no
-row offset**: `plan.go:15850` indexes the delete set by the batch index `i`,
-while its producer `readBatchDirect` (`util.go:149`, called at `plan.go:15832`
+row offset**: `scanner_source.go` indexes the delete set by the batch index `i`,
+while its producer `readBatchDirect` (`util.go:149`, called at `scanner_source.go`
 WITH `inner.scanPreds`) concatenates only NON-PRUNED row groups
 (`util.go:186`, `:206`). If a row group is ever pruned on that path against a
 table that has delete markers, `i` is a COMPACTED index and the wrong rows
@@ -154,7 +154,7 @@ would be skipped. `scan.Scanner` reads the same way (`scanner.go:485` over the
 compacted concat at `scanner.go:452`).
 
 **It did not reproduce.** The lazy path is taken when `rowLimit > 0` (LIMIT
-pushdown) or the read schema is nested (`plan.go:15568`). Attempted over a
+pushdown) or the read schema is nested (`scanner_source.go`). Attempted over a
 single file of three four-row row groups with `id = 10` (file-absolute row 9)
 deleted:
 
@@ -169,7 +169,7 @@ deleted:
 
 Every one right, id = 10 absent from all of them. The most likely reason is
 that `scanPreds` is empty whenever `rowLimit > 0` — the sibling guard at
-`plan.go:15564` refuses `rowPreds` on this path for the same class of reason —
+`scanner_source.go` refuses `rowPreds` on this path for the same class of reason —
 so nothing is pruned and `i` IS file-absolute. On the nested arm
 `readBatchViaRows` ignores the predicates entirely and reads every row, so `i`
 is file-absolute there too.
