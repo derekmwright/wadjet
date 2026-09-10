@@ -3,6 +3,9 @@ package physical
 
 import (
 	"context"
+	"os"
+	"sync"
+
 	"github.com/derekmwright/wadjet/internal/config"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
@@ -12,8 +15,6 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
-	"os"
-	"sync"
 )
 
 // Planner converts logical plans to physical plans.

@@ -2,12 +2,13 @@
 package physical
 
 import (
+	"strconv"
+	"strings"
+
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
-	"strconv"
-	"strings"
 )
 
 // inferProjectionTypeCols is inferProjectionType with the input's column types

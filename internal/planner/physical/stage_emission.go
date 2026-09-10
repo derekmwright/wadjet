@@ -4,13 +4,14 @@ package physical
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
-	"log/slog"
-	"strings"
-	"time"
 )
 
 func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *string) {

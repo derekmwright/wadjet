@@ -3,10 +3,11 @@ package physical
 
 import (
 	"context"
+	"strings"
+
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
-	"strings"
 )
 
 // NewComputedColumnsOp returns an operator that passes every input column

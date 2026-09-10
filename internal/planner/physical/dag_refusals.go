@@ -4,9 +4,10 @@ package physical
 import (
 	"context"
 	"fmt"
+	"strings"
+
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
-	"strings"
 )
 
 // PlanDistributed generates a stage DAG for distributed execution.

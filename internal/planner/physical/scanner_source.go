@@ -4,6 +4,10 @@ package physical
 import (
 	"context"
 	"fmt"
+	"runtime"
+	"sync"
+	"sync/atomic"
+
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
@@ -13,9 +17,6 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
-	"runtime"
-	"sync"
-	"sync/atomic"
 )
 
 // newScannerSource creates a scanner exec.Source from the catalog. snap may

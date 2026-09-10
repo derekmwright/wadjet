@@ -4,12 +4,13 @@ package physical
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
+
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
-	"strconv"
-	"strings"
 )
 
 func (p *Planner) buildSetOp(ctx context.Context, node *logical.Node, op string) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {

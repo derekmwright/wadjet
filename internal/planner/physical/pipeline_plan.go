@@ -4,9 +4,10 @@ package physical
 import (
 	"context"
 	"fmt"
+	"strings"
+
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"strings"
 )
 
 func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {

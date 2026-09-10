@@ -2,13 +2,14 @@
 package physical
 
 import (
+	"strconv"
+	"strings"
+
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
-	"strconv"
-	"strings"
 )
 
 // windowOutputType declares the output type of an INPUT-INDEPENDENT window

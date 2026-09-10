@@ -3,9 +3,10 @@ package physical
 
 import (
 	"context"
+	"strings"
+
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
-	"strings"
 )
 
 // collectOuterColumns recursively collects a column-name→table mapping from

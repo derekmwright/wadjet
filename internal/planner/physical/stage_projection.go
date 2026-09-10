@@ -2,9 +2,10 @@
 package physical
 
 import (
+	"strings"
+
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
-	"strings"
 )
 
 // GatherOutputSchema returns the plan-declared output schema carried on a

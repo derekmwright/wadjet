@@ -3,12 +3,13 @@ package physical
 
 import (
 	"context"
+	"strconv"
+	"strings"
+
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"strconv"
-	"strings"
 )
 
 func parseSimplePredicate(raw string) exec.UnaryOperator {

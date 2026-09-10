@@ -3,9 +3,10 @@ package physical
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
-	"strings"
 )
 
 // parseJoinKeys reads a join condition STRUCTURALLY and returns the equi-join

@@ -4,6 +4,7 @@ package physical
 import (
 	"context"
 	"fmt"
+
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 )

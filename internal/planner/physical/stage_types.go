@@ -3,11 +3,12 @@ package physical
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
-	"strings"
 )
 
 // PhysicalPlan represents an executable query plan.

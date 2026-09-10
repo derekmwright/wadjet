@@ -4,10 +4,11 @@ package physical
 import (
 	"context"
 	"fmt"
+	"strings"
+
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
-	"strings"
 )
 
 // sortKeySlotPosStage is sortKeySlotPos for the DAG, which needs a stricter

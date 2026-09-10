@@ -4,10 +4,11 @@ package physical
 import (
 	"context"
 	"fmt"
-	"github.com/derekmwright/wadjet/internal/engine/exec"
-	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"log/slog"
 	"strings"
+
+	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
 // isBroadcastCandidate returns true if the right (build) side of a join is

@@ -4,15 +4,16 @@ package physical
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strconv"
+	"strings"
+	"time"
+
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
-	"log/slog"
-	"strconv"
-	"strings"
-	"time"
 )
 
 // ScalarSubqueriesAreDeferred reports whether the toggle above is on. Exported

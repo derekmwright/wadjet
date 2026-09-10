@@ -2,13 +2,14 @@
 package physical
 
 import (
-	"github.com/derekmwright/wadjet/internal/optswitch"
-	"github.com/derekmwright/wadjet/internal/planner/logical"
-	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
+
+	"github.com/derekmwright/wadjet/internal/optswitch"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // ScalarDeferToggle gates deferring ALL uncorrelated scalar subqueries to

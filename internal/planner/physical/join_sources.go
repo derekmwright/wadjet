@@ -4,12 +4,13 @@ package physical
 import (
 	"context"
 	"fmt"
-	"github.com/derekmwright/wadjet/internal/engine/batch"
-	"github.com/derekmwright/wadjet/internal/engine/exec"
-	"github.com/derekmwright/wadjet/internal/engine/memory"
 	"log/slog"
 	"strings"
 	"sync"
+
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/memory"
 )
 
 // deferredJoinBridge creates a pipeline break for deferred hash join builds.

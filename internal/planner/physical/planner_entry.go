@@ -3,6 +3,7 @@ package physical
 
 import (
 	"context"
+
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 )

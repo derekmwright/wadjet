@@ -3,9 +3,10 @@ package physical
 
 import (
 	"context"
+	"strings"
+
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
-	"strings"
 )
 
 // AnnotateScanColumns walks the logical plan tree and populates ScanColumns

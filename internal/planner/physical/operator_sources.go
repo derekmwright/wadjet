@@ -3,11 +3,12 @@ package physical
 
 import (
 	"context"
-	"github.com/derekmwright/wadjet/internal/engine/batch"
-	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"os"
 	"runtime"
 	"strconv"
+
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 )
 
 // scanParallelism returns the worker count for scan/decode/pipeline

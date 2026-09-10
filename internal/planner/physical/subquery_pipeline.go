@@ -4,13 +4,14 @@ package physical
 import (
 	"context"
 	"fmt"
+	"strings"
+
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
-	"strings"
 )
 
 // makeSubqueryRunner creates a SubqueryRunner that executes SQL via this planner.

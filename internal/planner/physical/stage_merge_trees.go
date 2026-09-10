@@ -3,6 +3,7 @@ package physical
 
 import (
 	"fmt"
+
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )

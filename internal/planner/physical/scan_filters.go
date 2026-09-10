@@ -2,9 +2,10 @@
 package physical
 
 import (
+	"strings"
+
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"strings"
 )
 
 // frontLoadBlooms reorders the operator chain to move bloom filter operators

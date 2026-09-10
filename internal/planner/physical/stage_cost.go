@@ -4,6 +4,7 @@ package physical
 import (
 	"context"
 	"fmt"
+
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
