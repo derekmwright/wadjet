@@ -177,41 +177,13 @@ func compareFilterFloat[T FloatOrdered](getData func(v *batch.Vector) []T, val T
 	}
 }
 
-// compareFilterFloat32Widen compares a FLOAT32 (`real`) column against a
-// float64 constant AT DOUBLE WIDTH, widening every row's value instead of
-// narrowing the constant — PostgreSQL's rule for `real <op> <numeric literal>`
-// (#631).
-//
-// PostgreSQL has no `real <op> numeric-literal` operator to resolve to: an
-// unsuffixed decimal constant is `numeric`, an integer constant is `integer`,
-// and both resolve the comparison through `float8`, so the COLUMN is the side
-// that moves. Verified with EXPLAIN VERBOSE on postgres:17 for all six
-// operators and for an integer literal:
-//
-//	real = 3.1        ->  Filter: (r_val = '3.1'::double precision)
-//	real > 3.1        ->  Filter: (r_val > '3.1'::double precision)
-//	real = 3          ->  Filter: (r_val = '3'::double precision)
-//	real = 3.1::numeric -> Filter: (r_val = '3.1'::double precision)
-//
-// The narrowing this replaces (`float32(toFloat64(value))`) is a DIFFERENT
-// predicate whenever the literal is not exactly representable in float32,
-// which is most literals: over a column holding real(i)+0.1, PostgreSQL
-// answers `= 3.1` with NO rows (float64(float32(3.1)) != 3.1) where the
-// narrowing answered the row, and `< 3.1` with the row 3.1 INCLUDED where the
-// narrowing excluded it as equal. It is not only an equality question — all
-// six operators move a row across the boundary.
-//
-// Widening also makes the ROW-GROUP PRUNE and the filter read one predicate.
-// scan.CanPruneRowGroup compares a float32 statistics bound against the
-// float64 literal through compareValuesOK, which widens — so under the old
-// narrowing kernel a row group whose max was exactly float32(3.1) was pruned
-// for `= 3.1` while the kernel would have MATCHED its rows (ADR-0018's "a
-// prune must not read the predicate differently from the filter").
-//
-// The loop is compareFilterFloat's, with float64() on the load: the constant's
-// NaN-ness still picks the shape (see that function for why the non-NaN case
-// must keep resolveFloatConstPred2's non-capturing two-argument form), and the
-// widening conversion is one register instruction per row.
+// compareFilterFloat32Widen widens each REAL row to double; never narrow an
+// unquoted numeric/integer scalar literal to REAL (#631).
+// All six operators follow this rule, including equality and boundary rows.
+// The filter and row-group prune must read one predicate (ADR-0018).
+// Literal NaN-ness selects loop shape; non-NaN literals retain
+// resolveFloatConstPred2's non-capturing two-argument form.
+// See docs/internals/kernel-real-scalar-literal-widening.md for the design.
 func compareFilterFloat32Widen(val float64, op CompareOp) FilterKernel {
 	if val != val {
 		keep := resolveFloatConstPred(op, val)
@@ -562,35 +534,14 @@ func toBytesString(v any) string {
 	}
 }
 
-// compareFilterDecimal compares a DECIMAL column against a constant.
-//
-// Without this arm ResolveFilterKernel returned nil for DECIMAL, and every
-// caller read that as "the column does not exist": `WHERE dec_col <> 5.0005`
-// failed the query with `filter column "c_dec" does not exist in the input
-// schema` whenever the predicate reached the operator-level filter instead of
-// the scan (#401).
-//
-// The comparison is EXACT, per ADR-0012 — PostgreSQL compares numeric against
-// a numeric literal at full precision. The column's values live at its own
-// scale, so the constant is truncated to that scale and the truncation's
-// RESIDUAL is carried: with a DECIMAL(18,4) column, `> 2499.5074494849528`
-// must still exclude the row holding exactly 2499.5074, which comparing
-// against the truncated constant alone would admit.
-//
-// The literal cannot be resolved once at RESOLVE time — the scale comes off
-// the vector, and a kernel resolved from one batch can be handed the next one
-// — so it is memoized BY SCALE inside the closure, the way inFilterDecimal
-// memoizes its set for the same reason. A column's scale does not change
-// across the batches of one query, so the parse runs once and every later
-// batch reads two fields.
-//
-// Unsynchronized deliberately, on inFilterDecimal's own argument and for the
-// same reason: the single caller is KernelFilter.Execute, and
-// KernelFilter.Clone returns a fresh KernelFilter with `kern` nil, so every
-// parallel worker resolves its own closure. That is already required by the
-// operator's other per-instance scratch (`outSel`); this adds no new
-// constraint. It is NOT ColumnCompare's predicate, which Filter.Clone DOES
-// share and which is why that one carries no mutable state at all.
+// compareFilterDecimal compares exact numeric values at full precision
+// (ADR-0012, #401). Resolve the constant at vector scale plus its residual;
+// truncation alone must not admit an equal-carrier boundary row.
+// Memoize BY SCALE inside the closure, since resolve time has no vector scale.
+// The memo is intentionally unsynchronized: KernelFilter.Execute owns it and
+// Clone clears kern so each worker resolves its own closure, like outSel.
+// Do not share it like ColumnCompare predicates, which must be immutable.
+// See docs/internals/kernel-decimal-filter-residual-cache.md for the design.
 func compareFilterDecimal(op CompareOp, value any) FilterKernel {
 	text, ok := DecimalConstText(value)
 	if !ok {
@@ -810,61 +761,15 @@ func compareFilterString(op CompareOp, val string) FilterKernel {
 	}
 }
 
-// CidrSortKey re-keys a CIDR/inet TEXT value ("192.168.1.0/24", "10.0.0.1/8",
-// or a bare "10.0.0.1") into PostgreSQL's `inet` order — network_cmp — as a
-// byte string two keys compare LEXICALLY in exactly that order.
-//
-// PostgreSQL's network_cmp_internal compares, in this sequence:
-//
-//  1. the address FAMILY (v4 before v6),
-//  2. the common bits under the SMALLER of the two prefix lengths,
-//  3. the prefix length itself,
-//  4. the FULL, UNMASKED address.
-//
-// The key is [family][address masked to its own prefix, full width][prefix
-// length][full unmasked address], which reproduces that order exactly. Step 2
-// needs both operands and no single-value key can hold it directly, but the
-// masked address is equivalent: if the first min(len) bits differ, both keys
-// retain the differing bit and compare the same way; if they agree, the
-// shorter prefix's key has zeros where the longer one may have ones, so it
-// sorts first — which is step 3's answer — and when those bits are zero too
-// the keys tie and the explicit prefix-length byte decides. The trailing full
-// address is step 4.
-//
-// Verified against live PostgreSQL 17 over host-bearing and canonical values,
-// v4 and v6, at mixed prefix lengths — the whole table is
-// TestCidrSortKeyMatchesPostgresInetOrder's fixture. Three of its consequences
-// are worth naming because a simpler key gets them wrong:
-//
-//	'9.255.255.255/32' < '10.0.0.0/8'   — common bits decide before the mask
-//	'192.168.1.5/24'   < '192.168.1.0/32' — the MASK outranks the address
-//	'10.0.0.0/8'       < '10.0.0.1/8'   — host bits are kept, and ordered last
-//
-// That last one is why the key cannot be built from net.ParseCIDR's MASKED
-// network alone, which is what this function did when #492 introduced it:
-// keying only ipnet.IP threw the host bits away, so '10.0.0.1/8' and
-// '10.0.0.0/8' became the SAME value and `= '10.0.0.1/8'` answered rows
-// holding a different address. Wadjet's CIDR column is unvalidated text
-// (internal/storage/ingest), and host-bearing prefixes are ordinary in the
-// network data this type exists for, so those are not edge values.
-//
-// A BARE address with no "/" is a /32 (v4) or /128 (v6), which is what
-// PostgreSQL's inet does with the same input — `'10.0.0.1'::inet =
-// '10.0.0.1/32'::inet` is true. A v4-MAPPED v6 address ("::ffff:10.0.0.2")
-// keeps the v6 family, also matching PostgreSQL (`family()` answers 6).
-//
-// ok is false when s is not an address at all. Callers must turn that into a
-// query ERROR, never a match-nothing kernel: see ResolveFilterKernel's
-// TypeCIDR arm.
-//
-// Exported — unlike this file's other literal parse helpers
-// (parseIPv4ToInt64, parseMACToInt64), which internal/engine/expr duplicates
-// locally rather than importing — because this one is not a trivial
-// re-encode: expr.CmpNetworkLit's CIDR literal and this kernel's per-row CIDR
-// key MUST agree bit for bit, and two structural parsers maintained
-// separately is exactly the shape #492 already is (the kernel path numeric,
-// the expr path lexical). One implementation, shared, is what keeps them from
-// drifting apart again.
+// CidrSortKey produces lexical keys in PostgreSQL inet order: family, common
+// bits under the shorter prefix, prefix length, then full unmasked address.
+// Encode [family][address masked to own prefix][prefix][full address]; never
+// discard host bits as net.ParseCIDR's network alone would (#492).
+// Bare v4/v6 addresses mean /32 or /128; v4-mapped v6 stays family 6.
+// Invalid input returns ok=false and callers must raise, never match nothing.
+// Share this structural key with expr.CmpNetworkLit and stats; all must agree
+// bit-for-bit. TestCidrSortKeyMatchesPostgresInetOrder pins the mixed-prefix order.
+// See docs/internals/kernel-cidr-inet-sort-key.md for the design.
 func CidrSortKey(s string) (string, bool) {
 	t := s
 	if !strings.ContainsRune(t, '/') {
@@ -928,29 +833,14 @@ func CidrSortKey(s string) (string, bool) {
 	return string(buf), true
 }
 
-// CidrAddressText reports whether s names an address WITHOUT PostgreSQL's
-// abbreviated cidr grammar — the question a site asks when it does NOT know
-// the column's type, and the accept-set CidrSortKey had before #627 widened it.
-//
-// The two callers are `expr.tryNetworkLit` and `expr.firstNonAddressLit`, and
-// both are type-blind by construction: the column's declared type is not known
-// at compile time, so they ask "could this literal be an address in ANY
-// family" and let the column's real type pick the branch at eval time.
-//
-// Handing them the widened grammar was a silent wrong answer, caught by the
-// PostgreSQL oracle: the first version of #627's fix read the CIDR type's
-// grammar, under which `'3.1'` and `'2'` ARE addresses (3.1.0.0/16 and
-// 2.0.0.0/8), so `CASE WHEN d_val < '3.1' THEN 1 ELSE 0 END = 1` compiled to a
-// network comparison over a DOUBLE column and answered 15 rows where
-// PostgreSQL answers 8 — the literal ordered as an ADDRESS where the column
-// wanted a number. The grammar is inet's now and no bare number reaches this
-// question, but the MASKED abbreviations still do: `'10/8'` is an address
-// beside a cidr column and a 22P02 beside a numeric one, which is exactly the
-// knowledge these two sites lack.
-//
-// Every CIDR-TYPED site keeps the wide grammar: the kernel's TypeCIDR arm, the
-// IN set, the row-group bound, the boxed-pair key and the plan-time refusal
-// all know the column is a cidr, and `cd = '10/8'` finds its row through them.
+// CidrAddressText is the type-BLIND address gate for expr.tryNetworkLit and
+// expr.firstNonAddressLit (#627); exclude abbreviated v4 forms such as 10/8
+// whose meaning requires a known network column.
+// Accept whole quads using PgIPv4PtonQuad, including leading zeros/trailing dot,
+// and ordinary IPv6 forms. Let resolved column type select runtime semantics.
+// CIDR-typed filters, IN, stats, boxed keys and refusals keep CidrSortKey's
+// wide INET grammar; never feed that grammar indiscriminately to numeric sites.
+// See docs/internals/kernel-type-blind-network-literal-gate.md for the design.
 func CidrAddressText(s string) bool {
 	// A WHOLE dotted quad, in PostgreSQL's own inet grammar: it reads the
 	// leading zeros in '010.1.2.3' and the trailing dot in '10.1.2.3.' that
@@ -1002,27 +892,12 @@ func CidrOrderKey(s string) string {
 	return s
 }
 
-// IPv6LitKey re-keys an IPv6 filter literal into the form a TypeIPv6 column's
-// rows compare against: the address's raw 16 bytes, which a byte comparison
-// orders exactly as the address's own big-endian numeric value.
-//
-// A v4-shaped literal is not that, and is not a v4-MAPPED v6 address either.
-// PostgreSQL's inet compares the FAMILY first and puts every v4 address below
-// every v6 one (`'255.255.255.255'::inet < '::'::inet` is true), including
-// below a v4-mapped v6 address, which it still calls family 6
-// (`family('::ffff:10.0.0.2'::inet)` answers 6). The key for a v4 literal is
-// therefore the EMPTY string: it is shorter than, and a prefix of, every
-// 16-byte row value, so it compares strictly below all of them and equals
-// none — PostgreSQL's family rule, with no per-row re-keying.
-//
-// Reading a v4 literal as its v4-mapped 16 bytes instead — which is what
-// the TypeIPv6 kernel arm used to do, through a plain net.ParseIP —
-// placed it in the MIDDLE of the v6 range (below 2001:db8:: and above ::1),
-// while the row-at-a-time path fell through to a lexical text comparison
-// entirely: two paths, two orders, neither PostgreSQL's.
-//
-// ok is false for a literal that is no address at all; the caller raises the
-// query error, the same as CidrSortKey's.
+// IPv6LitKey returns raw 16-byte keys for v6 literals, ordered big-endian.
+// A v4-shaped literal uses EMPTY string, strictly below every v6 row and equal
+// to none: family precedes address. Do not map v4 literals into v6 bytes.
+// A v4-MAPPED v6 literal remains family 6 and uses its 16-byte key.
+// Invalid addresses return ok=false for the caller's query error.
+// See docs/internals/kernel-ipv6-literal-family-key.md for the design.
 func IPv6LitKey(s string) (key string, ok bool) {
 	// A /128 prefix is the address itself on the server, and a TypeIPv6 column
 	// is exactly that (#627). A narrower prefix names a network this type
@@ -1054,35 +929,13 @@ func IPv6LitKey(s string) (key string, ok bool) {
 	return string(ip.To16()), true
 }
 
-// IPv6RowKey re-keys a TypeIPv6 column's RENDERED text back into the raw 16
-// bytes the column actually stores, which is what the vectorized kernel
-// compares (ResolveColColFilterKernel's TypeIPv6 arm reads BytesData directly)
-// and what a byte comparison orders as the address's own big-endian value.
-//
-// It exists because the two evaluation sites read the column through different
-// doors. The kernel has the vector and reads the 16 bytes; the row-at-a-time
-// evaluator has ColRef.Eval's BOX, which for TypeIPv6 is the address's TEXT
-// (Vector.GetValue renders it through batch.FormatIPv6, PostgreSQL's inet
-// output rather than Go's — a v4-mapped address prints `::ffff:10.0.0.1`
-// there and `10.0.0.1` in Go, #580). Comparing that text
-// lexically is not the address's order — "2001:db8::9" sorts ABOVE
-// "2001:db8::10" as text and BELOW it as an address — so `WHERE a < z`
-// answered one thing through the scan and the opposite through a projection
-// or a later DAG stage's re-parsed filter (#565, #492's finding one type
-// over).
-//
-// The round trip is exact: Vector.SetValue stores `net.ParseIP(s).To16()` and
-// GetValue renders that back, so parsing the rendering recovers the identical
-// bytes — including for a v4-MAPPED address, which Go renders as a dotted quad
-// and re-parses to the same v4-mapped 16 bytes, keeping the row on the v6 side
-// of PostgreSQL's family split the way the stored bytes already put it. That
-// is why this is NOT IPv6LitKey: a LITERAL dotted quad is a v4 address and
-// keys BELOW every v6 row (PostgreSQL compares family first), while a STORED
-// one is a v4-mapped v6 address and keys among them.
-//
-// ok is false for a rendering that names no address, which a 16-byte column
-// does not produce — GetValue answers "" only for a value that is not 16 bytes
-// wide, which SetValue never writes.
+// IPv6RowKey recovers the stored 16 bytes from rendered TypeIPv6 text so boxed
+// ordering matches the vector kernel (#565, #492, #580).
+// The round trip must retain v4-mapped bytes: a STORED dotted quad is mapped v6,
+// while a LITERAL dotted quad uses IPv6LitKey's below-all-v6 family sentinel.
+// Never order rendered variable-width address text lexically.
+// Invalid renderings return ok=false; a valid 16-byte stored address always parses.
+// See docs/internals/kernel-ipv6-stored-row-key.md for the design.
 func IPv6RowKey(s string) (string, bool) {
 	ip := net.ParseIP(s)
 	if ip == nil {
@@ -1321,38 +1174,14 @@ func ResolveInFilterKernelArity(typ batch.TypeID, values []any, negate bool, syn
 		}
 		return inFilterInt64(getInt64Data, set, negate)
 	case batch.TypeFloat32:
-		// PostgreSQL's `real IN (...)` is ARITY-DEPENDENT, and the two arities
-		// compare at DIFFERENT widths (both verified with EXPLAIN VERBOSE on
-		// postgres:17):
-		//
-		//	multi-element  →  real = ANY('{...}'::real[])   -- NARROW to real
-		//	single-element →  real = 'x'::double precision  -- WIDEN to double
-		//
-		// So the fix for #549 (the multi-element list matching nothing because
-		// it compared at float64 width) narrows ONLY when the SYNTACTIC list
-		// held more than one element. The decision is syntacticLen, NOT
-		// len(values): a NULL member is stripped before the kernel sees the
-		// list, and PostgreSQL still casts the whole `{...}` to real[] when the
-		// SOURCE had >1 element, so `real IN (0.1, NULL)` narrows and matches
-		// even though only 0.1 reaches here. A truly single-element list keeps
-		// the historical WIDENING path, which already matched PostgreSQL:
-		// `f IN (0.1)` → 0 rows (0.1 is not representable in float32, so the
-		// widened column value differs), and `f IN (1e40)` → 0 rows with NO
-		// error (1e40 is a finite double that widens, misses, and never becomes
-		// the +Inf a real cast would).
-		//
-		// Single-element IN and the scalar `=` kernel now AGREE — both widen
-		// (#631 fixed `=`) — but they are still separate kernels, because the
-		// MULTI-element arity does not: `real IN (16777217, 99)` narrows and
-		// matches the row holding 16777216, while `real = 16777217` widens and
-		// matches nothing (both verified on postgres:17). IN is therefore not
-		// lowered to a chain of `=` for this type, and the tests do NOT assert
-		// IN == OR-of-equals for real.
-		// A QUOTED member narrows at BOTH arities: it is unknown-typed, so
-		// PostgreSQL coerces it straight to real and `r IN ('3.1')` plans as
-		// `r = '3.1'::real` where `r IN (3.1)` plans as `r = '3.1'::double
-		// precision` (both verified with EXPLAIN VERBOSE, #646). The widening
-		// arm below is therefore for a SINGLE UNQUOTED member only.
+		// REAL IN width uses SYNTACTIC arity, including stripped NULL members (#549).
+		// More than one member narrows to REAL; a SINGLE UNQUOTED member widens the
+		// column to double, matching scalar comparison (#631).
+		// Do not lower multi-member REAL IN to OR-of-equals; those widths differ.
+		// Quoted members narrow at BOTH arities using REAL input grammar (#646).
+		// An unquoted finite double outside REAL range can miss at single arity,
+		// while a narrowed multi-member cast must refuse unrepresentable REAL values.
+		// See docs/internals/kernel-real-in-list-syntactic-width.md for the design.
 		if syntacticLen <= 1 && !listHasQuotedConst(values) {
 			set, hasNaN, st := floatInSet(values)
 			if st != NumConstOK {
@@ -1951,33 +1780,13 @@ func inFilterKeyed(set map[string]struct{}, keyOf func(string) (string, bool), n
 
 // --- LIKE filter kernel ---
 
-// ResolveLikeFilterKernel creates a FilterKernel for SQL LIKE pattern
-// matching against a column of the given type. Converts SQL LIKE patterns
-// (% and _) to optimized matching functions.
-//
-// The column's underlying storage is not always TEXT in BytesData: TypeIPv4/
-// TypeMAC/TypePort/TypeProtocol box as Int64Data/Int32Data, and TypeIPv6/
-// TypeUUID box as BytesData but hold the address's RAW binary form, not the
-// human-readable text a LIKE pattern is written against. This used to be a
-// single BytesData.UnsafeStringValue call with no type check at all —
-// indexing an empty backing store for the Int64Data/Int32Data types (a
-// process-killing panic, since it is not the one deliberate FatalEvalPanic
-// shape recover() converts back into a query error) and matching nothing for
-// IPv6/UUID (their raw bytes never contain the pattern's text) (#497).
-// likeTextRenderer resolves the row->text function once per column, the same
-// per-type-dispatch-once discipline ResolveFilterKernel already follows, so
-// the inner loop has no per-row type switch.
-//
-// nil for the four container types (#522): PostgreSQL has no `~~` operator
-// for any composite or array type (verified live: `ARRAY[1,2,3] LIKE 'x'`
-// raises "operator does not exist: integer[] ~~ unknown", SQLSTATE 42883),
-// and there is no established text form for a ROW/ARRAY/MAP/VECTOR value
-// this engine has committed to anywhere else — the old default arm's
-// `fmt.Sprint(Vector.GetValue(i))` (`[1 2 3]`, `map[k0:0]`) was never a
-// contract, just what happened to fall out of not refusing. The caller
-// (exec.LikeFilter) turns a nil kernel into that same 42883, the way
-// KernelFilter already turns decimalConstError/networkConstError into a
-// query error for a different type family.
+// ResolveLikeFilterKernel compiles SQL %/_ patterns and resolves a row-text
+// renderer once per column, with no per-row type switch (#497).
+// Storage is not display: numeric network encodings and raw IPv6/UUID bytes
+// must render before matching, never blindly index BytesData.
+// ARRAY/ROW/MAP/VECTOR return nil; exec.LikeFilter raises 42883 (#522).
+// Do not invent fmt.Sprint container LIKE semantics.
+// See docs/internals/kernel-like-type-and-rendering-boundary.md for the design.
 func ResolveLikeFilterKernel(typ batch.TypeID, pattern string, negate bool) FilterKernel {
 	switch typ {
 	case batch.TypeArray, batch.TypeRow, batch.TypeMap, batch.TypeVector:
@@ -2011,44 +1820,16 @@ func ResolveLikeFilterKernel(typ batch.TypeID, pattern string, negate bool) Filt
 	}
 }
 
-// likeTextRenderer resolves, once per column, the row->text function LIKE
-// matches a pattern against.
-//
-// Wadjet renders every SIX network-native types and UUID as human-readable
-// text for CAST AS STRING and scalar function arguments (#484) — LIKE follows
-// the same convention rather than refusing outright the way PostgreSQL does
-// for inet/cidr/macaddr (verified live: `'10.0.0.1'::inet LIKE '10.%'` raises
-// "operator does not exist: inet ~~ unknown"). ADR-0012 item 11 records the
-// decision and its reasons. TypeCIDR is already TEXT in its own storage
-// (parquet/schema.go), so it falls through to the same BytesData path
-// TypeString/TypeBytes use.
-//
-// That CAST-agreement claim used to be scoped to seven types, DATE excepted:
-// CAST AS STRING answered the epoch DAY (15007) for a DATE column while this
-// renderer, the projection and PostgreSQL's own `date::text` all answered
-// 2011-02-02 — a separate defect in CAST's string family (#521). #521 also
-// found the identical gap for FLOAT32 (CAST AS STRING answered the
-// float64-widened text, not the float32-shortest-round-trip form this
-// renderer and the projection use). Both are fixed now — Cast.Eval's
-// string-family case renders every ColRef operand through the same
-// boxedTextOperand this file's LIKE kernel already agrees with — so the
-// claim covers every flat type again.
-//
-// The default arm covers every remaining flat type (Int64/Float64/Bool/
-// Decimal/Date) with the row's own boxed value — fmt.Sprint on whatever
-// Vector.GetValue returns — never indexing BytesData on a column that does
-// not have it, which is the one invariant this function exists to restore
-// regardless of what LIKE against a given type is decided to MEAN. The four
-// container types never reach here at all: ResolveLikeFilterKernel refuses
-// them before calling this function (#522).
-//
-// This rendering is the DEFINITION of what LIKE matches, so the
-// row-at-a-time path has to reproduce it rather than the other way round:
-// expr.boxedTextOperand reads Vector.GetValue for the four types ColRef.Eval
-// boxes differently (IPv4, MAC, DATE, FLOAT32) — the same resolver Cast.Eval
-// now shares — and wadjet.TestLikeAnswersTheSameAtBothSites sweeps every
-// flat type through both sites. Changing a per-type arm here without
-// checking that sweep re-opens the divergence it exists to catch.
+// likeTextRenderer defines LIKE's display text, shared with CAST/scalar
+// rendering and expr.boxedTextOperand (#484, #521; ADR-0012 item 11).
+// Render all six network types and UUID as human-readable text, despite
+// PostgreSQL refusing network LIKE. STRING/BYTES/CIDR use stored bytes.
+// Other flat types use their display rule; never index absent BytesData.
+// DATE and FLOAT32 must match their own declared rendering, not day counts
+// or widened float digits; TIMESTAMP explicitly formats epoch milliseconds.
+// Containers are refused before entry (#522). TestLikeAnswersTheSameAtBothSites
+// must pass after any per-type rendering change.
+// See docs/internals/kernel-like-display-text-contract.md for the design.
 func likeTextRenderer(typ batch.TypeID) func(*batch.Vector, int) string {
 	switch typ {
 	case batch.TypeString, batch.TypeBytes, batch.TypeCIDR:
@@ -2273,32 +2054,13 @@ const (
 	IntBoundAll
 )
 
-// IntFilterBound resolves an integer column's filter constant AND its operator
-// together, which is what a NON-INTEGRAL constant needs and Int64FilterConst
-// alone cannot give (#704).
-//
-// `int64(3.5)` is 3, so `c = 3.5` matched the row holding 3 and `c IN (3.5)`
-// matched it too; Go truncates TOWARD ZERO, so `c = -0.5` matched the row
-// holding 0. PostgreSQL compares `bigint = numeric` exactly and answers no
-// rows for all three. The typemx measurement in the arc brief read 0 for the
-// INT64 column only because no row of it holds 3 — `c_i64 = 1000003.5` matched
-// one, which is the same defect one fixture row away.
-//
-// For an integer column c and a constant f with a fraction, floor(f) = n:
-//
-//	c =  f  ->  no row          c <> f  ->  every non-NULL row
-//	c >  f  ->  c >  n          c >= f  ->  c >  n
-//	c <  f  ->  c <= n          c <= f  ->  c <= n
-//
-// The same rewrite answers a constant OUTSIDE int64 entirely (±Infinity
-// included, which is why the infinities need no arm of their own): there the
-// verdict is the whole column's, one way or the other. A NaN constant declines
-// — the caller raises rather than comparing against an implementation-defined
-// conversion — and no SQL spelling reaches this with one, since a quoted 'NaN'
-// is read by the integer grammar and refused there.
-//
-// Every non-float box delegates to Int64FilterConst with the operator
-// unchanged, so the ordinary path is exactly what it was.
+// IntFilterBound resolves integer constants AND operators together (#704).
+// For fractional f with n=floor(f): = keeps none, <> all non-NULL rows,
+// > and >= become > n, while < and <= become <= n.
+// Out-of-int64 constants, including infinities, yield whole-column verdicts;
+// NaN declines for a query error, never implementation-defined integer conversion.
+// Non-float boxes use Int64FilterConst with unchanged operator.
+// See docs/internals/kernel-integer-fractional-filter-bound.md for the design.
 func IntFilterBound(v any, op CompareOp) (int64, CompareOp, IntBoundVerdict, IntConstStatus) {
 	var f float64
 	switch tv := v.(type) {
@@ -2407,30 +2169,14 @@ func matchAllNonNullKernel[T Ordered](getData func(v *batch.Vector) []T, min T) 
 // same six-byte set kernel.ParseBoolText trims.
 const pgIntWhitespace = " \t\n\v\f\r"
 
-// Int64FilterConst resolves an integer-column filter constant to an int64,
-// reporting a non-OK status for a text literal that is not a usable integer.
-//
-// An integer box (int64/int32/int from a parameter or a folded literal)
-// arrives already in the domain. A SQL text literal, though, is a STRING here
-// — and the old toInt64 read a string through parseTimestampString, so `k =
-// 'abc'` (and even `k = '42'`, which no timestamp layout matches) coerced to
-// 0 and MATCHED every row holding zero (#536, the integer rung of #463's
-// silent-sentinel ladder). It is read through Go's base-10 integer grammar
-// now, so '42' compares as 42 and 'abc' names no integer (IntConstSyntax): the
-// caller (ResolveFilterKernel's integer arms return a nil kernel; the row path
-// panics) refuses the query the way PostgreSQL does, rather than answering the
-// zero rows.
-//
-// The grammar is PostgreSQL's own, not Go's: parseIntText reads the 0x/0o/0b
-// radix prefixes, the underscore digit separators and the leading-zero
-// decimals PostgreSQL 16+ accepts (`'0x1A'` = 26, `'1_000'` = 1000, `'007'` =
-// 7), which Go's base-10 reader refused and Go's base-0 reader would have
-// misread ('017' is decimal seven there, not octal fifteen). Refusing input
-// PostgreSQL answers was a PG-superset regression (#634); it is closed.
-//
-// TIMESTAMP is deliberately NOT routed here: its string literal IS a timestamp
-// and must keep reading through parseTimestampString — a quoted numeric string
-// against a TIMESTAMP column is #493's territory, not this fix's.
+// Int64FilterConst accepts integer-domain boxes or parses text with
+// parseIntText; invalid text returns syntax status for a query refusal,
+// never a zero sentinel (#536, #463).
+// The grammar includes radix prefixes, underscore separators and decimal
+// leading zeros (#634); neither Go base-10 nor base-0 is equivalent.
+// TIMESTAMP text retains parseTimestampString, not this integer grammar (#493).
+// Fractional/out-of-range float bounds require IntFilterBound's operator rewrite.
+// See docs/internals/kernel-integer-filter-constant-grammar.md for the design.
 func Int64FilterConst(v any) (int64, IntConstStatus) {
 	switch tv := v.(type) {
 	case int64:
@@ -2793,29 +2539,12 @@ func parseMACToInt64(s string) (int64, bool) {
 	return int64(n), true
 }
 
-// pgMACGroupedHex reads the two macaddr spellings PostgreSQL accepts and Go's
-// net.ParseMAC does not (#627).
-//
-// PostgreSQL takes six spellings for one address; Go's parser takes four of
-// them (`xx:xx:xx:xx:xx:xx`, `xx-xx-...`, the dotted `xxxx.xxxx.xxxx`, and the
-// same in upper case). The two it does not are the ones that group the twelve
-// hex digits into halves:
-//
-//	08002b:010203      a colon between two 6-digit groups
-//	08002b-010203      a hyphen between them
-//	0800-2b01-0203     three 4-digit groups (Go takes `0800.2b01.0203`, not this)
-//
-// This is a VALUE-PRESERVING widening: every spelling names the same six
-// bytes, and the address a query means does not depend on which one the user
-// typed. It is #627's half that ships; the abbreviated CIDR/inet grammar is
-// its own decision, because PostgreSQL's abbreviation is CLASSFUL address
-// inference (`'10'` is 10.0.0.0/8 and `'192.168'` is 192.168.0.0/24) and
-// reproducing inet_net_pton bit-exactly is a different size of change.
-//
-// The digits must be exactly twelve hexadecimal characters AND the separators
-// must split them 6+6 or 4+4+4, which is the whole of PostgreSQL's grouped-hex
-// grammar; the size check below carries the measurement. A string Go rejected
-// for a real reason is still rejected here.
+// pgMACGroupedHex extends net.ParseMAC with PostgreSQL grouped hex (#627).
+// Require exactly twelve hex digits split 6+6 or 4+4+4 by colon/hyphen.
+// Accept the additional spellings as the same six bytes, never infer another
+// address; malformed runs or non-hex characters remain refused.
+// CIDR/INET abbreviation grammar is separate from this MAC parser.
+// See docs/internals/kernel-mac-grouped-hex-grammar.md for the design.
 func pgMACGroupedHex(s string) ([]byte, bool) {
 	digits := make([]byte, 0, 12)
 	var sizes []int

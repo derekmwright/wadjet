@@ -52,29 +52,15 @@ type Accumulator struct {
 	// rides the accumulator rather than a per-operator flag because every
 	// merge, spill and clone path already carries the accumulator.
 	DecOverflow bool
-	// DecScaleConflict marks an accumulator handed two DECIMAL values at
-	// DIFFERENT scales. The Int128s it carries are unscaled integers counted
-	// in ONE scale, so 12.75 (1275 at scale 2) added to 0.1275 (1275 at scale
-	// 4) is 2550 under whichever scale wins — 25.50 or 0.2550 depending on
-	// arrival order, never the 12.8775 that is the answer. It rides the
-	// accumulator beside DecOverflow, for the same reason and through the same
-	// emit-time channel (exec.aggEmitErr), because there is no other way for a
-	// kernel with no error return to refuse.
-	//
-	// It is one door of several, not the last one, and the difference matters
-	// because the first draft of this comment claimed otherwise. The planner
-	// reconciles a set operation's arms (#533), the shuffle writer refuses a
-	// cross-scale chunk, and the shuffle reader refuses a cross-scale stage
-	// input (#685) — those cover the producers that exist. This covers the
-	// UNGROUPED accumulator; the GROUPED paths keep their state in the flat
-	// SoA arrays, which hold one scale per aggregate and no per-group
-	// accumulator to carry a flag on, so their latch is
-	// exec.HashAggregate.decScaleConflict instead and reaches the same
-	// aggEmitErr. What NEITHER covers is the SCAN: two base-table files whose
-	// footers declare one column at two scales are read, mixed and answered
-	// with no check anywhere, on every path including the fast one. That is a
-	// scan-level schema-drift check and a pre-existing residual — recorded in
-	// ADR-0010 rather than fixed here.
+	// DecScaleConflict latches contributed DECIMAL values at incompatible scales;
+	// unscaled carriers cannot be added under whichever scale happens to win.
+	// Like DecOverflow it raises through exec.aggEmitErr at emission.
+	// This is the UNGROUPED guard; grouped SoA state uses
+	// exec.HashAggregate.decScaleConflict to reach the same error channel.
+	// Other boundaries reconcile set-operation arms (#533), refuse cross-scale
+	// shuffle chunks/stage inputs (#685), and reconcile file/catalog scales on scan.
+	// See ADR-0010 for the historical residual; this is not the only guard.
+	// See docs/internals/kernel-decimal-accumulator-scale-conflict.md for the design.
 	DecScaleConflict bool
 	// StrType is the SOURCE column type behind MinStr/MaxStr. The five
 	// byte-backed types share one accumulator slot but not one boxed shape:

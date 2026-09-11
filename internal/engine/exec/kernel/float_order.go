@@ -2,45 +2,13 @@ package kernel
 
 import "math"
 
-// The one float ordering, used by every comparator in the tree.
-//
-// # Why a function and not `if a < b / if a > b`
-//
-// The inline three-way form every float comparator used to carry reports 0
-// for any pair involving NaN, because both `<` and `>` are false against a
-// NaN. On a SCALAR column that reads as "NaN ties with everything", which is
-// survivable only because a scalar comparator is asked about exactly ONE
-// position and so never has two answers to reconcile. Over a VECTOR or an
-// ARRAY(FLOAT) it is not an equivalence relation at all: for
-//
-//	a = [NaN, 0, 2]   b = [0, 1, 2]   c = [1, 0, 1]
-//
-// position 0 ties a against both b and c, so a < b (position 1) and b < c
-// (position 0) and yet a > c (position 2) — `ResolveSortCompare` did not
-// return a total order for those types whenever a NaN sat at differing
-// positions, which is the property #415 set out to establish and #446
-// disproved.
-//
-// # The order, and who decided it (ADR-0012: PostgreSQL decides semantics)
-//
-// PostgreSQL's float8_cmp_internal / float4_cmp_internal (utils/adt/float.c)
-// give float a TOTAL order by placing NaN ABOVE every other value and equal
-// to itself:
-//
-//	-Inf < ... < -0.0 = +0.0 < ... < +Inf < NaN,  NaN = NaN
-//
-// so `ORDER BY f` puts NaN last (ASC) and `GROUP BY f` collects the NaNs into
-// one group, and the relation is genuinely transitive at every arity. Wadjet
-// now applies exactly that, at every level: the scalar FLOAT32/FLOAT64
-// columns, a VECTOR's elements, an ARRAY(FLOAT)'s elements, and the boxed
-// comparator on the spill/window path (compareAny, exec/sort.go).
-//
-// It is a total order on VALUES, not on bit patterns: -0.0 and +0.0 compare
-// equal (as `==` and PostgreSQL both say), and all NaNs compare equal
-// whatever their payload. The key serializers are canonicalized to match, so
-// "compares equal" and "serializes alike" stay the same relation — see
-// keyFloat32bits / keyFloat64bits and appendKeyValue's float arms
-// (exec/sort.go).
+// All float comparisons use PostgreSQL VALUE order (ADR-0012; #415, #446):
+// -Inf < finite values < +Inf < NaN; -0.0 == +0.0 and all NaNs are equal.
+// Apply recursively to scalar Float32/64, VECTOR, ARRAY elements and boxed
+// spill/window comparisons. Bare < / > cannot define a transitive NaN order.
+// Canonicalize keyFloat32bits/keyFloat64bits and appendKeyValue so comparator
+// equality and serialized key equality remain identical across payload bits.
+// See docs/internals/kernel-float-total-order.md for the design.
 
 // CompareFloat64 orders two float64 values with NaN greatest and NaN == NaN.
 func CompareFloat64(a, b float64) int {
@@ -97,39 +65,14 @@ func CompareFloat32(a, b float32) int {
 	}
 }
 
-// --- The same order, as the six SQL predicates ---
-//
-// A predicate is not free to disagree with the comparator. PostgreSQL's `=`,
-// `<`, `>` … over float8/float4 are the operators of the total order above,
-// not IEEE754's: `'NaN' = 'NaN'` is TRUE, `'NaN' > 'Infinity'` is TRUE, and
-// `-0.0 = 0.0` is TRUE (verified against live postgres:17-alpine). Go's own
-// operators are IEEE754, so `WHERE f = f` dropped the NaN rows and
-// `WHERE f > 1e300` dropped them too, while `ORDER BY f` and `GROUP BY f`
-// had already been taught to place NaN greatest and fold it into one value
-// (#446/#459, ADR-0012 item 8).
-//
-// The forms below are the CHEAP spellings of that rule, not
-// `CompareFloat64(a,b) <op> 0`: each is the plain IEEE operator plus, at most,
-// one self-inequality test that only runs when the plain operator already said
-// no. On data with no NaN — which is all of TPC-H and ClickBench — that extra
-// test is a predictable never-taken branch. The self-inequality `a != a` is
-// the NaN test; math.IsNaN is the same instruction behind a call, and this is
-// the innermost loop of every float filter.
-//
-//	Eq  a = b   both equal, or both NaN
-//	Ne  a <> b  the negation of Eq
-//	Lt  a < b   plain, or (b is NaN and a is not: NaN is greatest)
-//	Le  a <= b  plain, or b is NaN (everything is <= NaN)
-//	Gt  a > b   plain, or (a is NaN and b is not)
-//	Ge  a >= b  plain, or a is NaN (NaN is >= everything, itself included)
-//
-// Against a CONSTANT the cost is not "at most one extra test" but ZERO, and
-// resolveFloatConstPred below is where that is spent: with a non-NaN c,
-// `a > c || a is NaN` is exactly `!(a <= c)` and `a >= c || a is NaN` is
-// exactly `!(a < c)` — one machine comparison each, the same one the IEEE
-// kernel issued, with the sense flipped. (Both hold because `a <= c` and
-// `a < c` are FALSE for a NaN a, which is the whole reason the naive
-// spellings needed a second test.)
+// The six SQL float predicates must implement the comparator's total order,
+// not IEEE NaN semantics (#446, #459, ADR-0012 item 8).
+// Eq includes two NaNs; Ne negates Eq. Lt allows non-NaN < NaN; Le allows
+// anything <= NaN. Gt allows NaN > non-NaN; Ge allows NaN >= anything.
+// Signed zeros compare equal. Keep cheap IEEE-plus-NaN spellings.
+// For non-NaN constant c, a>c is !(a<=c) and a>=c is !(a<c), so constant
+// specialization needs no extra NaN test.
+// See docs/internals/kernel-float-predicate-order.md for the design.
 
 // FloatOrdered is the float element type the predicates below are written for.
 type FloatOrdered interface{ ~float32 | ~float64 }
