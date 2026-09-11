@@ -9,29 +9,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 )
 
-// cappedPartialAgg pre-combines shuffle-task rows on the exchange's
-// partial-agg keys before they reach the partitioning sink (exchange
-// partial aggregation — the Trino-style reduce-before-ship mechanism).
-// Specs are name-preserving (OutputCol == InputCol) and restricted to
-// self-mergeable functions (SUM/MIN/MAX) by the planner's eligibility
-// pass, so consumers are untouched: a grouped final_aggregate merges
-// partials exactly as it would raw rows, and a join consumer probes the
-// same (key, value) column names.
-//
-// Memory is bounded by capBytes: when the hash state exceeds the cap the
-// current groups are flushed downstream and a fresh epoch begins. Poorly
-// clustered inputs therefore degrade to shipping ~one row per input row
-// in aggregate form — never spilling, never OOMing. The output schema is
-// identical across epochs (same HashAggregate config), which the
-// partitioned sink requires: it locks the WSHF schema from the first
-// batch it consumes.
-//
-// NOTE on types: the shipped column type may differ from the raw payload's
-// (SUM over an int32-class column widens to int64, for one), so consumers
-// resolve WSHF columns by name and type per batch; every chunk this operator
-// emits shares one schema. SUM over a DECIMAL ships a DECIMAL at the column's
-// own scale since #455 — it used to ship the float64 the accumulator
-// finalized through, which is where the digits went.
+// cappedPartialAgg precombines shuffle rows using planner-vetted self-mergeable
+// SUM/MIN/MAX specs with OutputCol==InputCol.
+// Flush groups downstream and start a fresh epoch when state exceeds capBytes;
+// never spill. Poor clustering degrades toward one aggregate row per input.
+// Every epoch must emit the same WSHF schema, fixed from the first batch.
+// Consumers resolve names/types per batch because SUM can widen raw types;
+// DECIMAL SUM preserves its column scale (#455).
+// See docs/internals/worker-capped-shuffle-partial-aggregation.md for the design.
 type cappedPartialAgg struct {
 	groupBy  []string
 	aggs     []exec.AggColumn
@@ -128,28 +113,14 @@ func newCappedPartialAggPartitioned(keys []string, specs []distributed.AggSpec, 
 	}
 }
 
-// resolveAgainst intersects the configured keys/specs with the actual
-// batch schema (see the type comment). Called once, on the first batch.
-//
-// Presence is decided by batch.ResolveSchemaIndex, not by a byte-exact set
-// probe, and a name that resolves is REWRITTEN to the schema's spelling. The
-// declared keys and specs are plan-side names, so they can arrive in the
-// lexer's folded spelling (#731) while the stream carries the catalog's own —
-// `RegionID`. Byte-exact, a MIXED-case schema (`RegionID` beside an
-// already-folded `counterid`) is the case that hurts: the folded names are
-// present, the CamelCase ones are not, so the intersection drops PART of the
-// grouping and this operator pre-combines rows belonging to DIFFERENT groups
-// — a wrong number the consumer cannot detect, where a total miss merely
-// disables the pre-combine. Carrying the schema's spelling forward keeps the
-// flushed WSHF payload in the same spelling as the raw one it replaces, which
-// is the contract the type comment states (specs are name-preserving) and
-// what the downstream by-name resolution assumes.
-//
-// The camel-case invariance battery does not yet distinguish this site:
-// measured with every other fix in place and this one reverted, it owns 0 of
-// its cells, because its aggregate shapes reach the exchange with keys the
-// scan already spelled the schema's way. The change is the hazard closed, not
-// a cell recovered.
+// resolveAgainst runs once on the first batch and intersects configured
+// keys/specs with the actual schema. Resolve via batch.ResolveSchemaIndex,
+// rewriting plan-folded names to stored spellings (#731).
+// A partial byte-exact match must not drop CamelCase grouping keys and combine
+// different groups. Keep flushed payload names identical to the raw names.
+// The camel-case invariance corpus does not isolate this site: its scan already
+// supplies schema spellings, so passing that gate alone does not prove it.
+// See docs/internals/worker-partial-agg-schema-intersection.md for the design.
 func (p *cappedPartialAgg) resolveAgainst(b *batch.RecordBatch) {
 	p.resolved = true
 	resolve := func(name string) (string, bool) {

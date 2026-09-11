@@ -38,33 +38,15 @@ type morsel struct {
 	retire func()
 }
 
-// batchRecycler is implemented by fragment sources that OWN the storage of
-// the batches they emit and can hand it to a later decode once the consumer
-// is done with it — today, the parquet scan source's row-group backing pool
-// (scan.BackingPool, docs/design/scan-output-backing-reuse.md).
-//
-// RecycleBatch is the RELEASE half of that pool's ownership rule and the
-// dispenser's retire edge is the only place that can supply it: retire fires
-// once every zero-copy view minted over the parent has been retired, which is
-// after the whole op chain AND the sink consume — strictly later than
-// ChainDriver's ReleaseInputs edge, which is what makes it safe for the
-// late-materialization views that read the parent's columns through
-// Vector.Base after Execute returned. The CLAIM half (Detach) is checked
-// inside the pool, not here: this call is "I am done", never "nobody kept
-// it".
-//
-// The mint stamp is the batch's identity at the moment the consumer took
-// delivery of it (batch.MintStamp). It is captured then, not at release time,
-// so a retire that somehow fires twice around a re-mint names the OLD
-// generation and the pool refuses it — a stale release must never re-admit a
-// live backing.
-//
-// armBackingReuse is the other half of the contract: a source only builds a
-// pool when a consumer with a release edge asks for the hook. Consumers
-// without one (the shuffle task's plain Next loop, planner.StreamingSources,
-// the hash-join build source, the post-breaker phases) never call
-// batchRecyclerOf, so those sources allocate no pool at all rather than one
-// that could never take anything back.
+// batchRecycler owns reusable source backing (docs/design/scan-output-backing-reuse.md).
+// Recycle only after ALL parent views retire, after the whole op chain AND
+// sink consume, later than ChainDriver.ReleaseInputs; Vector.Base may still
+// be read after Execute. Detach checks retained claims inside the pool.
+// Capture MintStamp on delivery, not release, so duplicate retire cannot
+// re-admit a live reminted backing under its new generation.
+// Only consumers with a retire edge arm a pool through batchRecyclerOf;
+// consumers without that edge allocate no pool.
+// See docs/internals/worker-source-backing-recycle-contract.md for the design.
 type batchRecycler interface {
 	armBackingReuse()
 	RecycleBatch(b *batch.RecordBatch, mint batch.MintStamp)
@@ -97,32 +79,15 @@ func batchRecyclerOf(src exec.Source) batchRecycler {
 	return nil
 }
 
-// morselDispenser replaces the parallel fragment paths' raw batch channel:
-// a single producer goroutine pulls from the fragment source, admits each
-// decoded batch against a byte budget, optionally splits it into
-// ~DefaultBatchSize zero-copy views, and feeds k consumers.
-//
-// Splitting is what makes row-group-sized batches safe AND parallel: k
-// consumers work different slices of the same admitted parent instead of
-// each holding a private 280 MB batch, per-morsel backpressure checks
-// actually run every ~2048 rows instead of once per row group, and derived
-// batches (join-probe output pools size off ActiveLen) stay morsel-sized.
-//
-// View safety rests on audited facts about the fragment op chains (see
-// morsel-execution.md §4.1 v1.5): linear-path operators (exec.Filter,
-// exec.Project, HashJoinProbe, DynamicFilterEmitOp) never write input column
-// storage, never append to or replace in.Columns, and mutate only the batch's
-// own Sel FIELD (pointer reassignment to operator-private scratch). Views
-// therefore share the parent's column vectors and get a private Sel slice.
-// The Sel slices are three-index subslices of one parent-sized array, so
-// even an op that compacted in place into in.Sel (the KernelFilter family —
-// not built for fragments today) would write only its own view's region.
-//
-// split must be false when the downstream sink RETAINS consumed batches and
-// charges them by MemBytes (exec.Sort stores the batch and charges
-// b.MemBytes(), which is Sel-blind — each retained view would charge the
-// full parent). HashAggregate copies rows out during Consume, so views are
-// safe there.
+// morselDispenser admits decoded parents against a byte budget and feeds k
+// consumers optionally split zero-copy views (~DefaultBatchSize).
+// Views share vectors: operators must not mutate column storage or replace/
+// append in.Columns, and each view owns its Sel field and capacity-clipped
+// subslice. This bounds scratch writes to its region
+// (morsel-execution.md §4.1 v1.5).
+// Disable splitting when sinks retain batches charged by Sel-blind MemBytes,
+// as Sort does; HashAggregate copies rows during Consume and is safe.
+// See docs/internals/worker-morsel-dispenser-view-safety.md for the design.
 type morselDispenser struct {
 	ch     chan morsel
 	budget int64

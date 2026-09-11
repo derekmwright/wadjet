@@ -15,31 +15,15 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 )
 
-// manifestStreamSource is the eager-consumer input source
-// (docs/design/eager-consumer-dispatch.md §3.2): it consumes one producer
-// stage's shuffle files as each producer TASK completes, instead of a
-// frozen file list built after the whole stage drained.
-//
-// Contract:
-//   - The candidate set (spec.ProducerTaskIDs) is fixed at task build;
-//     which files exist, and where, streams in as ProducerTaskManifests
-//     (Replay for tasks completed before dispatch, NATS for the rest —
-//     subscribe happens in Init, before any wait, so nothing is missed;
-//     duplicates are idempotent).
-//   - Files outside [PartitionStart, PartitionEnd] are ignored.
-//   - Reads go through the standard tiered fetch (LocalStageCache → peer
-//     → S3) by delegating each resolved manifest's in-range files to an
-//     inner cachedFileStreamSource; manifest PeerAddr hints are
-//     registered so the peer tier works for files the task spec could
-//     not have hinted.
-//   - Attempt fencing (§5): consuming any file of producer task T pins
-//     T's attempt. A later manifest for T with a higher attempt poisons
-//     the source; Next returns errStaleInputAttempt and the task fails
-//     loudly (coordinator retries it against the stable attempt set).
-//
-// StaleInputAttemptMarker tags the poison error so the coordinator's
-// result classification can retry the consumer task without burning the
-// generic failure path's diagnostics.
+// manifestStreamSource fixes ProducerTaskIDs at task build; files arrive via
+// Replay and NATS, subscribed in Init before waiting, with idempotent duplicates
+// (docs/design/eager-consumer-dispatch.md §3.2).
+// Ignore files outside [PartitionStart, PartitionEnd]; register manifest PeerAddr
+// hints and delegate in-range files through LocalStageCache→peer→S3.
+// Consuming a producer task's first file pins its attempt (§5). A later higher
+// attempt poisons Next with errStaleInputAttempt; never mix attempts.
+// StaleInputAttemptMarker enables coordinator consumer retries with that diagnosis.
+// See docs/internals/worker-eager-manifest-source.md for the design.
 const StaleInputAttemptMarker = "eager-dispatch stale input attempt"
 
 type manifestFileSet struct {

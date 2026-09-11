@@ -261,27 +261,14 @@ func (t *timedSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
 // (batchRecyclerOf) reach the real source underneath.
 func (t *timedSource) unwrapSource() exec.Source { return t.Source }
 
-// applyBackpressure pauses the consume loop briefly when the process heap
-// is approaching GOMEMLIMIT. The signal (HeapBackpressureActive) fires at
-// 70% of GOMEMLIMIT — well before the 95% spill backstop — and the pause
-// gives GC time to reclaim before the next batch lands. Without this hook,
-// scan-heavy stages allocate faster than GC can collect at SF100, the heap
-// climbs to the limit, and STW pauses lengthen until heartbeats starve and
-// coord reaps the worker (Q17 SF100, 2026-05-07).
-//
-// Returns ctx.Err() if the context was cancelled during the pause; nil
-// otherwise. Cheap when no pressure: one cached atomic check per batch.
-//
-// Backpressure is also installed at the engine level (exec.Pipeline.runSerial
-// / runParallel) so single-process queries and breaker-phase consumes get
-// it for free. This wrapper exists for the linear/breaker-final loops that
-// don't go through Pipeline, and adds per-task counters + occasional logs.
-// applyBackpressureSink is the sink-aware variant for consume loops feeding
-// a pipeline breaker (#326): when the valve fires and the sink is a
-// spill-capable breaker holding the dominant tracked share, its spill path
-// runs instead of the 50ms sleep — sleeping the holder of live state
-// reclaims nothing. Clone sinks (tracking-only spill views) and sinks that
-// hold little fall through to the ordinary pause.
+// applyBackpressureSink asks the cached 70%-of-GOMEMLIMIT signal per batch,
+// before the 95% spill backstop.
+// At pressure, drain a spill-capable sink holding the dominant tracked share
+// before sleeping; tracking-only clones and small holders take the pause (#326).
+// applyBackpressure pauses 50ms, returning ctx.Err() if cancelled.
+// This covers linear/breaker-final loops outside exec.Pipeline and adds task
+// counters/logs; pipeline loops have their own pressure boundary.
+// See docs/internals/worker-fragment-backpressure.md for the design.
 func (p *fragmentProgress) applyBackpressureSink(ctx context.Context, sink exec.Sink) error {
 	if !memory.HeapBackpressureActive() {
 		return nil
@@ -377,58 +364,16 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 		}
 	}
 
-	// Empty source files: legitimate "upstream produced nothing" case (e.g.,
-	// an aggregate or semi-join filtered every row). Emit zero rows and no
-	// result files; downstream stages handle the empty-input shape via their
-	// own short-circuits; we short-circuit here before any S3 I/O happens.
-	//
-	// Exception: OpGatherSink. The coordinator's gather receiver counts
-	// terminal markers, not messages — skipping finalize would leave it
-	// hanging until the 10-minute gather timeout. Open + finalize the sink
-	// (its Finalize publishes a terminal even with no batches consumed) so
-	// the receiver unblocks immediately on empty fragments.
-	//
-	// Exception: eager-fed aliases (Task.EagerInputs). Their InputFiles is
-	// empty BY CONSTRUCTION — the file set streams in as producer-task
-	// manifests — so "no frozen files" carries no emptiness signal at all.
-	// Short-circuiting here silently dropped the entire input (0 rows,
-	// task success) when eager dispatch first went end-to-end.
-	// Exception: an UNGROUPED aggregate fragment that owes SQL its identity
-	// row. An ungrouped aggregate returns exactly one row for any input,
-	// including none — COUNT()=0, SUM/MIN/MAX/AVG=NULL — and a downstream
-	// consumer (scalar-subquery substitution, #292) blocks on that row
-	// existing. Fall through with an empty source so the aggregate
-	// finalizes and the row is written.
-	//
-	// Two shapes qualify, and the difference is whose type the row wears.
-	//
-	//  1. COUNT-family, at ANY stage: their output type (int64) is
-	//     input-independent, so a partial identity row is typed the same as
-	//     every sibling's and merges cleanly.
-	//
-	//  2. Anything else, ONLY on the ungrouped final (EmitEmptyIdentity) and
-	//     ONLY when the planner declared every aggregate's output type
-	//     (AggSpec.OutputType). MIN/MAX types follow the input column, which
-	//     cannot be read here — zero input files, no schema — so without the
-	//     declaration the row would guess. The final is also where guessing
-	//     costs the least even if the declaration were wrong: its input being
-	//     empty means there are no sibling partials to merge against, and the
-	//     planner makes it a Singleton, so the identity row it emits is the
-	//     one row of the answer, not one of N (#329).
-	//
-	// Everything else keeps the empty-output short-circuit: a partial or
-	// merge_aggregate that produces nothing is absorbed by the final above
-	// it, which emits the row instead — and one mistyped partial poisons the
-	// merge for every sibling (a float64-typed NULL min among string-typed
-	// partials broke the skew-parity left join before this gate).
-	//
-	// Exception: a RIGHT or FULL join whose PROBE partition is empty. Its
-	// build rows are all unmatched by construction, and they are the rows the
-	// join exists to preserve — one shuffle partition holding build rows and
-	// no probe rows is the ordinary case, not a degenerate one. Falling
-	// through builds the hash table, probes nothing, and lets the flush emit
-	// them NULL-padded on the probe side, using the declared ProbeSchema for
-	// their names (#352).
+	// Empty frozen input normally emits no rows/files and skips S3 I/O.
+	// Gather sinks must still Init/Finalize to publish their terminal marker.
+	// EagerInputs have empty lists by construction and must not short-circuit.
+	// Ungrouped COUNT-family aggregates emit identity at any stage; other families
+	// only on EmitEmptyIdentity finals with EVERY AggSpec.OutputType declared
+	// (#292, #329). That final is Singleton; never invent a partial's type.
+	// Other empty partial/merge aggregates defer identity to the final.
+	// RIGHT/FULL joins with an empty probe but nonempty/eager build must run and
+	// flush unmatched build rows, NULL-padding declared ProbeSchema (#352).
+	// See docs/internals/worker-empty-fragment-output-contract.md for the design.
 	emptyScalarAgg := false
 	emptyProbeOuterJoin := false
 	_, eagerSource := task.EagerInputs[sourceSpec.InputAlias]
@@ -1268,39 +1213,15 @@ func consumeMorsels(ctx context.Context, d *morselDispenser, gate *widthGate, pr
 	}
 }
 
-// runFragmentLinearParallel is the morsel-driven variant of
-// runFragmentLinear: a single producer feeds the byte-bounded morsel
-// dispenser (which splits row-group-sized decoded batches into ~2048-row
-// zero-copy views — see morsel_dispenser.go for the budget and view-safety
-// story), consumed by k goroutines that each run a private Clone()d copy of
-// the op chain. The fragment sink is shared and internally concurrent: the
-// exchange sink locks per PARTITION, the unpartitioned sink appends under
-// its lock and double-buffers the chunk encode outside it, and the gather
-// sink serializes internally (low-volume reply path). Every sink consumes
-// each batch synchronously and retains no reference afterward, so no Sel
-// snapshot is needed. The previous sink-WIDE mutex here serialized k
-// consumers through the fragment's dominant cost (hash+append+encode) and
-// held join/probe fragments +12-27% slower under morsel-auto (SF100
-// default-flip gate, 2026-07-07).
-//
-// Pressure COLLAPSES k (the breaker-path rule, applied here): the linear
-// path's transients — dispenser in-flight bytes, join-probe output batches —
-// are tracker-invisible by design, so the collapse signal is the process
-// heap itself (memory.HeapBackpressureActive, 70% of GOMEMLIMIT). On the
-// first trip during parallel consume the consumers stop and the remaining
-// input drains serially through the original chain: parallelism is a
-// fair-weather optimization, and the pressure story is exactly today's
-// SF100-validated serial one. The SF100 2026-07-03 A/B failed on precisely
-// this gap — Q17/Q18 grace-join linear fragments blew the worker heap with
-// zero collapses because only the breaker path had a collapse rule.
-//
-// One batch is pushed through the ORIGINAL ops before cloning ("warmup",
-// same pattern as exec.Pipeline.runParallel): operator scratch is per-clone,
-// but predicate/expression closures are SHARED across clones and resolve
-// column indices lazily on first use (exec.ColumnCompare's cachedIdx,
-// expr.ColRef's sync.Once). The warmup batch completes those writes while
-// the chain is still single-threaded; clones then only read the resolved
-// caches.
+// runFragmentLinearParallel feeds byte-bounded zero-copy morsels to k private
+// Clone()d op chains; the shared sink must be internally concurrent.
+// Sinks consume synchronously without retaining batches, so Sel needs no snapshot.
+// At the first process-heap pressure trip, stop parallel consumers and drain
+// remaining input serially through the original chain; transients are untracked.
+// Run one warmup batch through ORIGINAL ops before cloning: scratch is private,
+// but shared expression/predicate closures lazily resolve column indices.
+// Clones must only read those resolved caches (morsel_dispenser.go).
+// See docs/internals/worker-linear-morsel-parallelism.md for the design.
 func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distributed.Task, src exec.Source, ops []exec.UnaryOperator, sink fragmentSink, result *distributed.ResultNotification, k int, gate *widthGate) error {
 	fragStart := time.Now()
 	progress := exec.ProgressReporterFromContext(ctx)
@@ -1504,29 +1425,15 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 	return nil
 }
 
-// runBreakerConsumeParallel is the morsel-parallel variant of the breaker
-// consume phase (source → first breaker): the single producer feeds a
-// bounded channel consumed by k goroutines, each running a Clone()d op
-// chain into its own CloneSink partial; partials merge into the primary at
-// the barrier (the exec.Pipeline.runParallel shape, with two additions the
-// never-OOM rules require — memo §4.3):
-//
-//  1. Clones RESERVE. Each clone sink charges its accumulated state to a
-//     tracking-only view of the shared SpillManager, so admission and the
-//     primary's spill trigger see the k× partial footprint. Clones never
-//     spill — there is no concurrent spill format.
-//  2. Pressure COLLAPSES k. When the real SpillManager's ShouldSpillFor
-//     trips during parallel consume, the consumers stop, partials merge
-//     into the spill-armed primary (the merge transfers the memory
-//     accounting), and the remaining input drains serially through the
-//     ORIGINAL chain into the primary — whose own partial-drain spill
-//     machinery is exactly today's SF100-validated path. Parallelism is a
-//     fair-weather optimization; the pressure story is unchanged serial.
-//
-// Sel is snapshotted before every breaker Consume: breakers retain batches
-// (Sort stores them) while upstream Filters reuse per-instance Sel scratch —
-// same rule as drainThroughBreaker. Finalize on the primary is called here,
-// matching the serial Pipeline.Run contract for the j==0 phase.
+// runBreakerConsumeParallel uses a bounded producer and cloned op/sink partials,
+// merging into the primary at the barrier (memo §4.3).
+// Clones reserve accumulated state through tracking-only SpillManager views;
+// they never spill because no concurrent spill format exists.
+// On ShouldSpillFor pressure, stop consumers, merge accounting into the
+// spill-armed primary, then drain serially through the ORIGINAL chain.
+// Snapshot Sel before every breaker Consume: retained batches must outlive
+// upstream reusable filter scratch. Finalize the primary here, as serial Run does.
+// See docs/internals/worker-breaker-morsel-parallelism.md for the design.
 func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distributed.Task, src exec.Source, ops []exec.UnaryOperator, sink exec.MergeableSink, k int, gate *widthGate) error {
 	fragStart := time.Now()
 	fp := newFragmentProgress(e.logger, task, e)
@@ -3357,36 +3264,14 @@ func applyBuildSchema(src exec.Source, spec distributed.OpSpec) error {
 	return applyDeclaredScanSchema(src, string(spec.Type)+" build", spec.BuildAlias, spec.BuildFiles, spec.BuildColumnTypes)
 }
 
-// applyDeclaredScanSchema hands a source the catalog's declared column types,
-// and REFUSES the read when a base-table parquet input arrives without them.
-//
-// The declaration is not an optimization. A parquet file cannot express nine
-// of this engine's types (IPv4, IPv6, MAC, UUID, BYTES, PORT, PROTOCOL,
-// DURATION have no logical annotation; CIDR is written as plain UTF8), and
-// files written before v0.18.0 do not carry wadjet's own footer key either —
-// so a scan that types its columns from the FILE answers 167772165 where the
-// catalog says 10.0.0.5 (#396/#423). Worse, and the reason this refuses
-// rather than warns: parquet.Reader.SchemaAs(nil) short-circuits to the
-// file's own schema, so the catalog never enters the comparison and a file
-// whose stored type CONTRADICTS the catalog decodes silently as whatever it
-// happens to hold. A stale or foreign file — the shape a chunk-name collision
-// (#494) produces on its own — returned the string 'hello' for a column the
-// catalog calls BIGINT, while the single-process reader refused it by name
-// ("schema declares INT64 but the file stores STRING").
-//
-// Stage output is the legitimate empty case and is left alone: a .wshf
-// payload carries its own types, and there is nothing for a declaration to
-// add. That is the whole of the distinction, and readsBaseTableParquet is
-// where it is drawn.
-//
-// WADJET_DECLARED_SCHEMA_STRICT=0 restores the pre-#503 behavior — the file's
-// own types win — for the same reason WADJET_FASTPATH_STRICT=0 exists: this
-// refusal turns a class of query that USED to answer into a hard failure, and
-// a plumbing path nobody has found yet (a stage that forgets to carry
-// ScanSchema) then takes a deployment down rather than answering as it did
-// last release. It is a way out, not a supported mode: what it restores is a
-// read that can answer 167772165 for 10.0.0.5, so it logs at Warn every time
-// it is used.
+// applyDeclaredScanSchema supplies catalog declarations to base-parquet sources;
+// missing declarations must refuse (#396, #423, #494, #503).
+// File annotations cannot preserve all nine type identities or validate drift
+// against an absent catalog schema. Stage WSHF output carries its own types;
+// readsBaseTableParquet defines that legitimate empty-declaration boundary.
+// WADJET_DECLARED_SCHEMA_STRICT=0 permits file-only typing and warns EVERY use:
+// an emergency escape hatch that can return wrong values, not a supported mode.
+// See docs/internals/worker-required-base-scan-schema.md for the design.
 func applyDeclaredScanSchema(src exec.Source, what, alias string, files []string, declared []distributed.ColumnSpec) error {
 	if len(declared) > 0 {
 		if cs, ok := src.(*cachedFileStreamSource); ok {

@@ -156,30 +156,15 @@ func compileFilterExprs(exprs []string, scanSchema bool) ([]exec.UnaryOperator, 
 	return ops, cols, nil
 }
 
-// buildAggInputProjection returns a Project operator that materializes
-// each aggregate's derived input expression into a named column that
-// HashAggregate can look up by AggSpec.InputCol. Pass-through columns
-// (GROUP BY keys, filter references, bare-column aggregate inputs) are
-// included via DirectCopy so the output batch contains everything the
-// downstream aggregate or filter needs.
-//
-// Returns (nil, nil) when no aggregate has a derived InputExpr — the
-// caller skips inserting a Project in that case.
-//
-// The referenced-columns list is the union of all bare columns each
-// derived expression reads; callers extend the source projection hint
-// with these so parquet readers don't prune them.
-// groupByTypes is the plan-time type of each derived key, keyed by its
-// exact GroupByCols text (OpSpec.GroupByTypes), and groupByDecimal carries
-// the (p,s) of its DECIMAL entries. Together they override the
-// schema-blind ProjectionOutputType inference below, which has no catalog
-// and typed COALESCE(l_extendedprice, 0) Int64 from the literal alone —
-// truncating every float group key on write (#379). Absent entries (bare
-// keys, older coordinators) keep the inference.
-// keys, when non-nil, is the planner's own two-name answer (OpSpec.
-// GroupByResolve) and REPLACES the text-parsing recovery below: it says which
-// keys this fragment materializes, which slot each one lands in, and what the
-// aggregate publishes them as. nil is an older coordinator.
+// buildAggInputProjection materializes derived aggregate inputs and group keys
+// into columns the aggregate resolves; DirectCopy keeps needed keys, filter
+// references and bare aggregate arguments. No derived work returns nil, nil.
+// Return the union of raw referenced columns so callers retain them at read time.
+// groupByTypes/Decimal override schema-blind inference by exact key text (#379);
+// absent entries retain inference.
+// Non-nil keys carries OpSpec.GroupByResolve's materialized slot/publication
+// names and replaces text recovery; nil is compatibility for older coordinators.
+// See docs/internals/worker-aggregate-input-projection.md for the design.
 func buildAggInputProjection(
 	groupBy []string,
 	aggs []distributed.AggSpec,
@@ -377,28 +362,13 @@ func buildAggInputProjection(
 		})
 	}
 
-	// The SECOND argument of a two-column aggregate — CORR/COVAR_*(x, y),
-	// MIN_BY/MAX_BY(value, ordering) — is a column of this projection's
-	// OUTPUT too, and it was only ever added by the `InputExpr == ""` branch
-	// above, which a COMPUTED first argument skips. So `MIN_BY(a*2, id)`
-	// reached HashAggregate with `input has: a * 2`, the ordering column gone
-	// from the stream, and both DAG arms failed loud on a query the
-	// single-process path answers (#713). A projection NARROWS to its
-	// outputs: every argument the aggregate will read has to be one of them.
-	//
-	// Only a bare column REFERENCE is passed through. A computed second
-	// argument (`MIN_BY(a, id*2)`) is materialized by no engine — the
-	// single-process pre-aggregate projection does not carry it either, and
-	// both paths fail loud with the same message and the same class — so
-	// emitting a pass-through of a name nothing produces would replace one
-	// engine's loud failure with a column of NULLs, which is the trade this
-	// file exists to refuse.
-	// InputCol2 and InputCol3 take the SAME rule, spelled once: a name the
-	// expression parser cannot read at all is still passed through (a
-	// delimited identifier reaches here as its bare spelling), and only a
-	// name it reads as something OTHER than a bare column reference is
-	// declined. Writing the third argument's arm separately is how the two
-	// would come to disagree.
+	// The projection must carry InputCol2 AND InputCol3 even when InputExpr is
+	// computed: every downstream aggregate argument needs an output column (#713).
+	// Use the same passArg rule for both: retain bare references and names the
+	// parser cannot read (including bare spellings of delimited identifiers).
+	// Decline parsed computed arguments; this path does not materialize them,
+	// and passing an unproduced name would replace a loud failure with NULLs.
+	// See docs/internals/worker-aggregate-extra-argument-carriage.md for the design.
 	passArg := func(col string) {
 		if col == "" || seen[col] {
 			return
@@ -707,27 +677,15 @@ func fragmentGroupKeyNames(spec distributed.OpSpec) (resolve, published []string
 	return p.resolve, p.published, true, nil
 }
 
-// derivedGroupKeys splits a fragment's GROUP BY key list into the keys this
-// fragment must COMPUTE and the column each key is RESOLVED by.
-//
-// It is the COMPATIBILITY path since ADR-0026's two-name carrier landed: a
-// spec that carries OpSpec.GroupByResolve says both names outright and nothing
-// is derived from text. See fragmentGroupKeyPlan.
-//
-// A key is derived when parsing it yields anything but a bare column
-// reference, and also when it IS a bare reference the planner marked derived:
-// a ROW FIELD PATH (`c_row.b`) parses to a ColRef and names no column any
-// stage emits, so HashAggregate could not look it up and the key serialized
-// as NULL. groupByTypes is the planner's answer — derivedGroupKeyTypes
-// records an entry for exactly the keys that must be computed here, and a
-// bare column has none (#568).
-//
-// slots is parallel to groupBy: a bare key resolves by its own name, and a
-// derived key by a hidden `__gb_expr_N` that no query can spell (the planner's
-// reserved namespace). Naming the computed column after the key's own text
-// instead put it in the user's namespace, where it shadowed — or was shadowed
-// by — an input column of the same spelling, differently on each engine
-// (ADR-0026).
+// derivedGroupKeys is compatibility for specs without OpSpec.GroupByResolve
+// (ADR-0026); modern specs supply materialized/resolved names outright.
+// A parsed non-ColRef or a planner-marked derived key needs computation,
+// including ROW field paths that parse as ColRef (#568).
+// slots parallels groupBy: bare names resolve themselves; derived keys use
+// allocated __gb_expr_N slots, never the expression's user-visible spelling.
+// Seed allocation with every bound key, aggregate argument/output and filter
+// name so stored names and generated slots cannot collide (ADR-0026).
+// See docs/internals/worker-derived-group-key-compatibility.md for the design.
 func derivedGroupKeys(groupBy []string, aggs []distributed.AggSpec, filterCols []string,
 	groupByTypes map[string]int) (map[string]plansql.Node, []string) {
 	derived := make(map[string]plansql.Node)

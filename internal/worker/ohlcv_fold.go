@@ -18,32 +18,14 @@ import (
 // state, one way to finish it (ADR-0035).
 const ohlcvStatePrefix = exec.OhlcvStateColumnPrefix
 
-// applyOhlcvFold replaces every `__ohlcv_state#X` column with a ROW column
-// named X holding the finished bar for each group.
-//
-// It is a sibling of applyVarFold rather than a caller of applyStateFold,
-// because a bar's answer is a ROW and applyStateFold's `finalize` returns a
-// float64. Sharing the walk would mean widening that signature for every
-// caller; a bar is the first state whose answer is not a number and it will not
-// be the last (ADR-0035 names TDIGEST and TOP_K), so the shape to converge on
-// is a value-returning fold rather than a float-returning one — a change to
-// make when the second such state arrives, with two callers to test it
-// against, not with one.
-//
-// Called from the final_aggregate fragment only, on the same spec.FoldAvg
-// gate: intermediate merge_aggregate stages MUST keep shipping the state, or
-// the stage above them would re-aggregate finished bars — which is a MAX over
-// two ROWs, the defect the decomposition exists to remove.
-//
-// The declaration comes from the PLAN — `distributed.AggSpec.OutputFields`,
-// derived once by `physical.aggOhlcvOutputFields` from the input columns'
-// declared types, for a bare argument and a COMPUTED one alike. The encoded
-// state's own header is the fallback, for a spec that carried none.
-//
-// Neither is invented. A fold that reached this point with no declaration used
-// to substitute FLOAT64 for every field, which is how the same statement
-// declared DECIMAL(18,4) against a standalone server and FLOAT64 against a
-// coordinator — OID 1700 against 701 in the RowDescription (#965 round 2, B1).
+// applyOhlcvFold replaces __ohlcv_state#X with ROW X containing finished bars.
+// Run only on final_aggregate's FoldAvg gate; intermediate merge_aggregate
+// must retain states, never re-aggregate finished ROWs.
+// Use AggSpec.OutputFields, derived once from declared bare/computed inputs;
+// fall back to encoded state headers only for specs without that declaration.
+// Never invent FLOAT64 fields (#965). The ROW result cannot use applyStateFold's
+// float64 finalizer; ADR-0035 names future nonnumeric state families.
+// See docs/internals/worker-ohlcv-final-state-fold.md for the design.
 func applyOhlcvFold(batches []*batch.RecordBatch, aggs []distributed.AggSpec) ([]*batch.RecordBatch, error) {
 	if len(batches) == 0 {
 		return batches, nil

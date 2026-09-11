@@ -89,32 +89,14 @@ type prefetchResult struct {
 	err         error
 }
 
-// filePrefetcher downloads a source's upcoming S3 parquet files to the
-// spill dir while the current file decodes. Before it existed, the scan
-// path was strictly serial per task: one full-object GET blocked in
-// io.Copy until the entire file landed on NVMe, then decode ran with the
-// connection idle — on a standalone box that capped effective S3 read
-// parallelism at MaxConcurrent streams and produced the 2026-07-05 SF10
-// cold-S3 finding (suite 20m15s vs DuckDB httpfs 2m51s, same instance).
-//
-// Design constraints:
-//   - Strictly best-effort: any failure (miss, transient error, open
-//     failure on the temp) makes the consumer fall through to the
-//     untouched tiered open path in openNextFile. Prefetch can therefore
-//     never change results, only overlap I/O with decode.
-//   - Parquet keys only. Shuffle inputs (.wshf / partition=) resolve via
-//     the LocalStageCache / NATS-KV / peer tiers, which are either local
-//     or explicitly preferred over the durable S3 copy; blind-GETting
-//     them here would race the producer's async upload for no benefit.
-//   - Delivery is by file index and the consumer takes indices in order.
-//     The byte window admits the lowest not-yet-taken index regardless of
-//     occupancy: workers can finish downloads out of order, so without
-//     the bypass the window could fill with later files while the one the
-//     consumer is blocked on cannot start — a deadlock, not just a stall.
-//   - Whole-object GETs, no ranged reads: per-column ranged reads were
-//     tried 2026-03-20 and reverted the same day for S3 throttling
-//     (fe52a79); file-granularity requests at this fan-out are the shape
-//     S3 likes.
+// filePrefetcher overlaps upcoming-file I/O with decode, strictly best-effort:
+// miss/download/temp-open failures fall through to openNextFile's tiered path.
+// Parquet uses whole-object GETs, never per-column ranged reads.
+// Shuffle is eligible only under streaming-shuffle support and must use its
+// LocalStageCache/KV/peer-preferred fetch path, not blind S3 GETs.
+// Deliver by file index, consumed in order; admit the lowest not-yet-taken index
+// regardless of byte-window occupancy so later downloads cannot deadlock it.
+// See docs/internals/worker-file-prefetch-window-contract.md for the design.
 type filePrefetcher struct {
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
@@ -183,27 +165,14 @@ func (p *filePrefetcher) run(ctx context.Context, s *cachedFileStreamSource, job
 	defer p.wg.Done()
 	// The index being fetched, so the boundary below can answer for it.
 	inFlight := -1
-	// fetch reaches decode and decompression paths on a goroutine nobody
-	// joins for errors. Unrecovered, a panic there ends the worker process;
-	// recovered but undelivered, the consumer waits forever on an empty
-	// result slot. Deliver it as that file's error (#511). One defer per
-	// prefetch goroutine, not per file.
-	//
-	// The in-flight index is not the only obligation this goroutine owes.
-	// jobs is pre-filled with EVERY index and closed, and the pool is the
-	// only thing draining it: a panicking worker that resolves just its own
-	// index leaves the rest queued, and once all scanPrefetchConcurrency
-	// workers have died that way nothing will ever fill those slots — take()
-	// blocks forever on a result nobody owns. So the boundary takes
-	// ownership of what is left and fails it with the same error.
-	//
-	// It deliberately does NOT cancel: p.cancel reaches only this
-	// prefetcher's child context, while take() waits on the CALLER's, so
-	// cancelling would make live siblings abandon indices they had already
-	// received and reintroduce the hang from the other side. Draining is
-	// race-free instead — every index is delivered by channel receive, so
-	// exactly one goroutine owns it, whether that is a healthy sibling
-	// mid-fetch or this drain loop.
+	// Recover once per prefetch goroutine and deliver the panic as the in-flight
+	// file's error (#511); unrecovered kills the process, undelivered hangs take().
+	// Also drain/fail every remaining queued job: the pool alone owns those indices.
+	// Do NOT cancel the child context: take waits on its caller's context, and
+	// cancellation could make healthy siblings abandon already-owned slots.
+	// Channel receive gives each index exactly one owner across healthy fetches
+	// and panic drains; every result must be delivered once.
+	// See docs/internals/worker-prefetch-panic-delivery.md for the design.
 	defer exec.CatchQueryPanic(ctx, "scan file prefetch", func(err error) {
 		if inFlight >= 0 {
 			p.results[inFlight] <- &prefetchResult{err: err}
