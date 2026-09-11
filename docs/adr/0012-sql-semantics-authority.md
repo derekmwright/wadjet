@@ -2304,6 +2304,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `position_exists_subquery_empty`, `position_derived_body_empty`,
      `position_cte_body_empty` and `position_window_argument_empty`, and on ALL
      FIVE for `position_scalar_subquery_empty`.
+
      **"EVERY EXPRESSION POSITION" IS A CLAIM ABOUT THE WALK, AND THE WALK HAD
      THREE BLIND SPOTS** (amended 2026-09-11, round 7, #1018 B1). The sentence
      above was written for the positions the BINDER re-parses; the positions a
@@ -2665,6 +2666,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      on five arms. Disabling the two reads fails 14 wire subtests and seven
      census cells; disabling the window staging refusal alone fails the two
      windowed census cells on the three DAG arms.
+
      NOT closed, and recorded rather than quietly dropped: a SET-OPERATION ARM
      holding a scalar subquery is still declared TEXT beside a bigint arm, so
      that UNION is refused 42804 where PostgreSQL answers. It is pre-existing,

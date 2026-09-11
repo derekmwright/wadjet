@@ -647,15 +647,6 @@ func TestPGWireRefusesAnInvalidFlagNameInEveryExpressionPosition(t *testing.T) {
 		{"update_predicate",
 			`UPDATE users SET visits = 1 WHERE id < 0 AND tcp_flags_has_all(visits,'BOGUS')`,
 			`UPDATE users SET visits = 1 WHERE tcp_flags_has_all(visits,'BOGUS')`},
-		// The DML door is ADR-0031's: a DML predicate is not planned at all, so
-		// the binder never sees it and the COMPILE-time fold is what answers.
-		// It is here because "one refusal, whatever the door" is the claim.
-		{"delete_predicate",
-			`DELETE FROM users WHERE id < 0 AND tcp_flags_has_all(visits,'BOGUS')`,
-			`DELETE FROM users WHERE tcp_flags_has_all(visits,'BOGUS')`},
-		{"update_predicate",
-			`UPDATE users SET visits = 1 WHERE id < 0 AND tcp_flags_has_all(visits,'BOGUS')`,
-			`UPDATE users SET visits = 1 WHERE tcp_flags_has_all(visits,'BOGUS')`},
 	} {
 		for _, arm := range []struct {
 			label string
