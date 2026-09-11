@@ -7,27 +7,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// The #589 fixture: the parquet-inexpressible types INSIDE containers.
-//
-// Parquet has no annotation for IPv6 or UUID and spells CIDR as plain UTF8
-// text, so all three survive a round trip only because the writer stamps the
-// declared schema into the footer and the reader overlays it back. That
-// overlay used to stop at the top level, so the identical value inside a ROW,
-// an ARRAY or a MAP recovered as STRING: the row reader boxed sixteen intact
-// bytes as a Go string, batch.Vector.SetValue handed the string to
-// net.ParseIP, and the value read back as the EMPTY STRING. Silently — "" is
-// indistinguishable from a real empty value.
-//
-// The main matrix cannot see this. Its container columns (c_arr, c_row,
-// c_rownest, c_map) carry STRING and INT64 leaves only, which are exactly the
-// types parquet CAN annotate, so no gate built on it has ever put one of the
-// nine below a container. This fixture is that gap: the same value written to
-// a top-level column AND into every container position, so the flat column is
-// the anchor and any container that disagrees with it has lost the value.
-//
-// Anchoring on the flat column rather than on a literal is deliberate. A
-// differential between two engines can agree while BOTH are wrong; a
-// comparison against the position the overlay always covered cannot.
+// The #589 fixture tests declared IPv6/UUID/CIDR inside ROW/ARRAY/MAP,
+// where parquet annotations alone cannot restore the intended type.
+// Write identical values flat and in every container position; flat values
+// anchor overlay parity so nested byte/string reinterpretation becomes visible.
+// The main matrix's STRING/INT64 container leaves cannot cover this loss.
+// This parity check does not independently prove the flat anchor's correctness.
+// See docs/internals/typematrix-nested-declared-fixture.md for the design.
 
 // NestedDeclared is the fixture table name, and NestedDeclaredRows its size —
 // past 2×DefaultBatchSize is unnecessary here (the batch-reuse question is

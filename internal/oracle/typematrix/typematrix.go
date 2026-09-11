@@ -1,29 +1,12 @@
-// Package typematrix is the fixture and query corpus for the type-coverage
-// gates: one table carrying all 22 column types, and a generated corpus that
-// pushes every type through every consumer that can retain, re-key, re-order
-// or re-encode a value.
-//
-// Why it exists. Every differential corpus in this repo is built on three
-// storage types — Int32, Float64 and String (TPC-H schema.go; ClickBench adds
-// Int64 and Date). So an entire class of wrong-answer defects is structurally
-// invisible: no gate can see a bug that needs a BYTES, IPv4, UUID, DECIMAL or
-// nested column to fire. That is not hypothetical. (*Vector).GetValue's
-// TypeBytes arm returns a slice ALIASING the column arena, so MIN_BY over a
-// BYTES column answers with whatever the pool wrote into those bytes next —
-// a silent wrong answer that shipped through TPC-H, ClickBench, the DuckDB
-// fingerprint corpus, the PostgreSQL oracle, the two-path suite and the shape
-// fuzzer, because not one of them has a top-level BYTES column.
-//
-// The corpus is GENERATED from a column table rather than hand-written, so a
-// 23rd type is covered by adding one row to Columns() instead of by
-// remembering to write ten queries.
-//
-// This package holds no assertions. Three gates consume it, each supplying its
-// own reference:
-//
-//	wadjet.TestTypeMatrixBatchReuse             — poisoned pool vs clean pool
-//	wadjet.TestTypeMatrixOptimizationInvariance — each kill switch off vs on
-//	coordinator.TestTypeMatrixTwoPath           — stage DAG vs single process
+// Package typematrix supplies fixtures and generated consumer queries for all
+// 22 types; Columns() additions must expand coverage automatically.
+// Separate flat and nested tables keep pooled native-scan coverage reachable.
+// Exercise retention, re-keying, ordering and encoding, including BYTES aliases
+// that narrow benchmark type sets cannot expose.
+// No assertions live here: TestTypeMatrixBatchReuse compares poison/clean,
+// TestTypeMatrixOptimizationInvariance compares kill switches, and
+// coordinator.TestTypeMatrixTwoPath compares stage DAG/single-process answers.
+// See docs/internals/typematrix-generated-consumer-coverage.md for the design.
 package typematrix
 
 import (
@@ -294,35 +277,13 @@ func allData(n int) []map[string]any {
 	return rows
 }
 
-// cidrValue is row i's CIDR text. It cycles through four shapes on purpose:
-// a CANONICAL /24, a HOST-BEARING /24, a host-bearing /8 and a /32 host
-// route.
-//
-// The fixture used to be canonical /24s alone ("192.168.<i%256>.0/24"), which
-// made three of the four things PostgreSQL's inet order decides invisible to
-// this corpus: the mask length never varied, so "the shorter mask sorts
-// first" was never exercised; the host bits were always zero, so a key built
-// from the MASKED network alone — which is what #492's first CidrSortKey did
-// — could throw them away and still agree with itself; and no two rows shared
-// a network, so `= '10.0.0.1/8'` could not answer a DIFFERENT address's row.
-// Wadjet's CIDR column is unvalidated text (internal/storage/ingest) and
-// host-bearing prefixes are ordinary in the network data this type exists
-// for, so the canonical-only fixture was not the conservative choice.
-//
-// id=700 lands on case 0 and keeps its old value, "192.168.188.0/24", so
-// networkLit's equality literal is unchanged.
-//
-// id=298 spells id=299's own /32 address BARE (no "/32") instead of taking
-// its own case's shape. Both land inside union_c_cidr's `WHERE id < 300` arm,
-// so a query that unions the fixture against itself holds one address two
-// ways: PostgreSQL's inet calls a bare address and its own /32 host route ONE
-// value (`'10.0.0.1' = '10.0.0.1/32'`), and text order calls them two
-// distinct strings. That pair is what made #546 visible: the single-process
-// set operation's dedup (`rowHashKey`, keyed on the boxed value's raw text)
-// and the stage DAG's (a `GroupByAll` aggregate keyed through
-// `kernel.CidrOrderKey`, #520) answered the identical UNION DIFFERENTLY. Both
-// now key by inet (`physical.keyValueText`'s TypeCIDR arm), so these two rows
-// are what keeps that agreement gated rather than what records its absence.
+// cidrValue cycles canonical /24, host-bearing /24, host-bearing /8 and /32,
+// including shared networks so discarded host bits become observable (#492).
+// Keep id=700 at 192.168.188.0/24 for networkLit's equality anchor.
+// id=298 spells id=299's address bare; both must remain inside id<300 UNION.
+// Bare address and its /32 must be one inet value across row and GroupByAll
+// keys, not distinct text (#546, #520).
+// See docs/internals/typematrix-cidr-value-shapes.md for the design.
 func cidrValue(i int) string {
 	if i == 298 {
 		return strings.TrimSuffix(cidrValue(299), "/32")
@@ -410,28 +371,13 @@ func nestedRowValue(i int) any {
 	return v
 }
 
-// arrayValue returns an ARRAY(STRING) whose length cycles 0..2 so a
-// zero-length array and a NULL array are both present and must stay distinct.
-//
-// ids 101 and 102 break the pattern and hold ARRAY['a b'] and ARRAY['a','b'].
-// They are two DIFFERENT values that share a `%v` rendering (`[a b]`), which
-// is the one thing a container fixture built from `a%05d-%d` elements can
-// never contain: no two of those render alike, so an engine keying a
-// container by its RENDERING rather than by its structure agreed with itself
-// on every row, and no corpus entry over this table could see it. That is not
-// hypothetical — `SELECT DISTINCT a` answers 2 and `SELECT a UNION SELECT a`
-// answers 1 over a small table today, and `INTERSECT` of the two disjoint
-// one-row sets answers a row (#612).
-//
-// The pair does NOT make this corpus catch #612 on its own: at this table's
-// size a set operation lowers to a GroupByAll aggregate, which keys through
-// the columnar encoding and is right, and only the small-input `rowHashKey`
-// path renders. The pair is here because it is the shape every future
-// container keyer has to be held to, and because a corpus in which no two
-// container values render alike cannot hold anything to it. #612 is pinned at
-// the layer where the rendering path is reachable.
-//
-// Both ids are outside the c_arr NULL stride (103), so both are present.
+// arrayValue cycles lengths 0..2, keeping empty and NULL arrays distinct.
+// Non-NULL ids 101/102 are ['a b'] and ['a','b']: different structures sharing
+// one %v rendering, so keying by display must fail the fixture (#612).
+// The large matrix may lower set operations to GroupByAll and miss a small-input
+// rowHashKey defect; retain direct coverage at the layer reaching that path.
+// Both special ids must remain outside the c_arr NULL stride (103).
+// See docs/internals/typematrix-container-rendering-collision.md for the design.
 func arrayValue(i int) any {
 	switch i {
 	case 101:
@@ -524,29 +470,13 @@ var networkFuncArg = map[string]string{
 	"c_proto": "protocol_name",
 }
 
-// networkLit gives each network-native column a literal EQUAL to id=700's
-// value under allData's per-column formula (id=700 lands on a non-NULL
-// stride position for all six: 700 mod 59/61/67/71/73/79 never hits the
-// stride's NULL slot). EQUALITY only. ORDERING is a separate consumer class
-// (networkOrdLit, below): an ORDERING literal comparison (<, >) against
-// TypeIPv6 or TypeCIDR used to compare the column's rendered TEXT lexically
-// instead of the address's numeric/structural order, and disagreed outright
-// between this expr path and the stage DAG (#492, fixed) — this corpus now
-// gates it instead of skipping it as a known bug.
-//
-// c_port/c_proto carry the UNQUOTED spelling here (a bare numeric literal,
-// `c_port = 1724`), because that is how a `PORT = <int>` / `PROTOCOL = <int>`
-// predicate is actually written. The QUOTED spelling used to be a defect and
-// is now a gate of its own: networkQuotedLit below.
-//
-// It used to say the quoted form "hits a different, pre-existing bug (#493) —
-// kernel.toInt64's string case calls parseTimestampString, not a plain
-// integer parse, so `c_port = '1724'` silently compares against 0". That was
-// true when it was written and is not any more: #536 gave the integer arms
-// PostgreSQL's integer input grammar and #646 gave every numeric column type
-// the same rule, so `c_port = '1724'` reads 1724 and answers the same row on
-// both engines. The record is corrected rather than deleted because the
-// omission it explained is gone with it.
+// networkLit equals id=700's non-NULL value in all six network columns.
+// It covers EQUALITY only; networkOrdLit separately covers address/inet order
+// rather than display-text order (#492).
+// PORT/PROTOCOL use unquoted numeric spelling here; networkQuotedLit covers
+// quoted input separately. Both must agree now that #536/#646 fixed the old
+// #493 timestamp-parser fallback; quoted bad numeric text must not become zero.
+// See docs/internals/typematrix-network-equality-literals.md for the design.
 var networkLit = map[string]string{
 	"c_ipv4":  "'10.0.2.188'",
 	"c_ipv6":  "'2001:db8::2bc'",
@@ -587,33 +517,14 @@ var networkOrdLit = map[string]string{
 	"c_cidr": networkLit["c_cidr"],
 }
 
-// networkExtraLit adds the literal SHAPES the equality/ordering pair above
-// cannot reach, one per column, as (suffix, operator, literal) triples.
-//
-// Each is a shape #492's first fix answered differently on the two engines,
-// and none of them is exotic:
-//
-//   - c_cidr against a BARE address. PostgreSQL's inet reads "172.16.2.187"
-//     as "172.16.2.187/32" and so does wadjet now; the kernel used to answer
-//     an unparseable-literal sentinel that matched NOTHING while the
-//     row-at-a-time path compared the text, so `WHERE c_cidr = '<a bare
-//     address the fixture holds>'` answered zero rows on one engine and the
-//     row on the other. `>=` is the ordering half of the same literal.
-//   - c_cidr against a HOST-BEARING prefix. Two rows share the /24 network
-//     and differ only in host bits, which the masked-network key erased.
-//   - c_ipv6 against a v4-shaped literal. Different FAMILIES: PostgreSQL puts
-//     every v4 address below every v6 one, so every non-NULL row is `>` it.
-//     The kernel read the literal as its v4-MAPPED v6 bytes (mid-range) and
-//     the expr path fell through to a lexical text compare — two engines,
-//     two answers, neither PostgreSQL's.
-//
-// The literal shape that is NOT here is the one that must ERROR — `c_cidr <>
-// 'garbage'`, which raised zero rows through the scan and every row through
-// the row evaluator before #492's second pass. A corpus entry cannot carry it:
-// oracle.Run fails the whole run on any query error, so an entry whose correct
-// answer IS an error would read as a broken corpus. It lives in
-// wadjet.TestNonAddressLiteralAgainstACidrColumnIsAQueryError instead, where
-// both sites are asserted to raise the same SQLSTATE.
+// networkExtraLit supplies shapes ordinary equality/ordering pairs miss (#492):
+// CIDR bare address equals its /32, host-bearing prefixes retain host bits,
+// and every non-NULL IPv6 row sorts above a v4-shaped literal by family.
+// Include equality AND ordering for the CIDR forms.
+// Error literals cannot enter this success-only corpus: oracle.Run fails on
+// query errors. TestNonAddressLiteralAgainstACidrColumnIsAQueryError separately
+// requires both sites to raise the same SQLSTATE for malformed addresses.
+// See docs/internals/typematrix-network-extra-literal-shapes.md for the design.
 var networkExtraLit = []struct{ col, suffix, op, lit string }{
 	{"c_cidr", "bare", "=", "'172.16.2.187'"},
 	{"c_cidr", "bare_ord", ">=", "'172.16.2.187'"},
@@ -663,43 +574,15 @@ func Corpus() []Query {
 				`LAST_VALUE(%s) OVER (PARTITION BY g ORDER BY id) AS l `+
 				`FROM %s WHERE id < 400 ORDER BY id`, n, n, tbl),
 			oracle.CmpOrdered, n)
-		// Windowed MIN/MAX. Unlike the value functions above, the answer is
-		// CHOSEN by a comparison rather than lifted by position, so the
-		// entry gates two things at once: the output column's declared type
-		// (the input's own, with DECIMAL's scale and a container's shape
-		// riding along) and the ORDER the choice is made in.
-		//
-		// Until #569 twelve of the twenty-two types declined to declare and
-		// kept the planner's FLOAT64, which did not degrade the answer — it
-		// FAILED the query, "cannot store string into FLOAT64 vector", for
-		// CIDR/UUID/IPV6/IPV4/MAC/DECIMAL/BYTES/BOOL and all four
-		// containers, while the plain aggregate over the identical column
-		// answered correctly. A corpus entry could not have shown that
-		// before, because none of the entries above asks a window for a
-		// value it has to CHOOSE.
-		//
-		// Two shapes, because they are two evaluators and the comparison
-		// reaches the value through a different door in each:
-		//
-		//   whole-partition  the partition-at-a-time columnar path, which
-		//                    compares kernel.CompareValuesAt on the vector —
-		//                    and, on the DAG, a hash-partitioned window
-		//                    stage (#349) with its own declared schema.
-		//   OVER ()          the streaming empty-PARTITION-BY evaluator
-		//                    (window_global.go), which carries its running
-		//                    extreme as a BOX across batches and so compares
-		//                    through newBoxedCompare — the site where a
-		//                    network type's DISPLAY text is not its address
-		//                    order (#520/#565's shape, one consumer over).
-		//
-		// A SLIDING frame is deliberately not here. It exercises the deque's
-		// EVICTION, which is worth gating, but it does so identically on
-		// every arm this corpus feeds — the DAG's window stage runs the same
-		// operator — and each entry here costs a distributed query per type
-		// in coordinator.TestTypeMatrixTwoPath. It is gated instead in
-		// exec.TestWindowExternalMinMaxEveryType, which compares the
-		// in-memory and SPILLED evaluators against each other over all 22
-		// types and asserts the spill actually happened.
+		// Window MIN/MAX gates both chosen VALUE order and the input's declared type,
+		// including DECIMAL scale and container shape (#569).
+		// Cover whole-partition vector CompareValuesAt, including the DAG's own window
+		// stage schema (#349), AND OVER ()'s cross-batch boxed extreme comparator,
+		// where network display text is not address order (#520/#565).
+		// Sliding deque eviction is deliberately outside this per-type distributed
+		// corpus; TestWindowExternalMinMaxEveryType compares in-memory/spilled paths
+		// for all 22 types and must prove spill engagement.
+		// See docs/internals/typematrix-window-extreme-coverage.md for the design.
 		add("windowminmax_"+n,
 			fmt.Sprintf(`SELECT id, MIN(%s) OVER (PARTITION BY g ORDER BY id `+
 				`ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS lo, `+
