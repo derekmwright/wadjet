@@ -10,8 +10,9 @@ import (
 )
 
 // aggInputIsWideInteger answers wide only for a provable int8-domain operand
-// from the AST and the column and FUNCTION declarations (#966); other shapes
-// keep the int4 reading.
+// from the AST, the column declarations and PostgreSQL's own result width for
+// a function (expr.PGIntegerResultWidth, #966); other shapes keep the int4
+// reading.
 // Grouped aggComputedInputDecl and windowComputedArgDecl share this walk:
 // SUM(int2|int4-domain) is bigint; SUM(int8-domain) is numeric.
 // Expression declarations alone cannot recover width (ADR-0024).
@@ -58,31 +59,59 @@ func aggInputIsWideInteger(node plansql.Node, decls colDecls) bool {
 			}
 			return false
 		}
+		// A function's own result width is PostgreSQL's, from the ONE table
+		// in expr.PGIntegerResultWidth — never the Ret declaration, which is
+		// the CARRIER this engine stores the result in.
+		//
+		// The two are not the same fact and reading one for the other is
+		// wrong in both directions. Almost every integer-returning function
+		// here declares RetInt64 because every integer in this engine
+		// computes in an int64 (ADR-0024's widening), so `regexp_count`,
+		// whose PostgreSQL result is `integer`, declares it exactly as
+		// `bit_count`, whose PostgreSQL result is `bigint`, does. Round 3 of
+		// #966 read that declaration and made `SUM(regexp_count(…))` numeric
+		// where PostgreSQL declares bigint — twelve wire cells, grouped and
+		// windowed, text and binary.
+		//
+		// Measured on PostgreSQL 17.11:
+		//
+		//   sum(regexp_count('abab','a'))   bigint    (result integer)
+		//   sum(masklen(cidr))              bigint    (result integer)
+		//   sum(octet_length(text))         bigint    (result integer)
+		//   sum(bit_count(bytea))           numeric   (result bigint)
+		//   sum(txid_current())             numeric   (result bigint)
+		//
+		// A name the table does not know is not an integer-result function at
+		// all, and answers false: its own declaration leaves the integer
+		// accumulator table anyway.
+		if w, known := expr.PGIntegerResultWidth(n.Name); known {
+			switch w.Width {
+			case expr.PGIntWidth8:
+				return true
+			case expr.PGIntWidth4:
+				return false
+			}
+			// PGIntWidthOperands: the bitwise family, which is arithmetic for
+			// this purpose. `f8 & 18` is bigint in PostgreSQL and its SUM is
+			// numeric; `f4 & 18` is integer and its SUM is bigint. A shift
+			// names argument 0 only, because the count is a separate int4
+			// there and does not widen the result.
+			for i, a := range n.Args {
+				if !pgWidthArg(w, i) {
+					continue
+				}
+				if aggInputIsWideInteger(a, decls) {
+					return true
+				}
+			}
+			return false
+		}
 		// COALESCE / GREATEST / LEAST / NULLIF / IF choose between their
-		// arguments and are as wide as the widest.
+		// arguments and are as wide as the widest. Every other function
+		// declines: it is not an integer-result function, so its declaration
+		// leaves the integer accumulator table on its own.
 		if _, poly := expr.DefaultRegistry.ReturnType(n.Name).SameAsArgs(len(n.Args)); !poly {
-			// Everything else is as wide as it DECLARES. A function with a
-			// fixed RetInt64 is an int8-domain operand — it is exactly what
-			// `f8 & 18` is on PostgreSQL, whose type is bigint and whose SUM
-			// is therefore numeric — and a fixed RetInt32 is an int4-domain
-			// one, whose SUM is bigint (`SUM(length(s))`, PostgreSQL's own).
-			// Reading the declaration is what the CastNode arm already does
-			// with a target name, and what the ColRef arm does with a column.
-			//
-			// Not reading it was #966 round 2 B1: BITWISE_AND had just been
-			// declared int8, the walk did not follow an ordinary function, so
-			// SUM over it took the BIGINT accumulator and
-			// `SUM(BITWISE_AND(f8, 4611686018427387904))` over two rows of
-			// 2^62 answered 22003 where PostgreSQL answers
-			// 9223372036854775808 — a right value turned into a refusal, on
-			// all four arms and both the grouped and the windowed spelling,
-			// which share this walk.
-			//
-			// A declaration that is not a fixed integer (float, text, a
-			// container, DYNAMIC) answers false, which is the conservative
-			// side: a non-integer operand leaves the integer accumulator
-			// table for its own declaration anyway.
-			return expr.FuncDeclaresInt64(n.Name)
+			return false
 		}
 		for _, a := range n.Args {
 			if aggInputIsWideInteger(a, decls) {
@@ -135,6 +164,21 @@ func castTargetIsWideInteger(typeName string) bool {
 	switch strings.ToUpper(strings.TrimSpace(typeName)) {
 	case "BIGINT", "INT8", "INT64", "SIGNED":
 		return true
+	}
+	return false
+}
+
+// pgWidthArg reports whether argument i contributes its width to a
+// PGIntWidthOperands result. Nil WidthArgs means every argument, which is what
+// `&`, `|`, `#` and `~` want; the shifts name argument 0.
+func pgWidthArg(w expr.PGIntegerResult, i int) bool {
+	if len(w.WidthArgs) == 0 {
+		return true
+	}
+	for _, a := range w.WidthArgs {
+		if a == i {
+			return true
+		}
 	}
 	return false
 }

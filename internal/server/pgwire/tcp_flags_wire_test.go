@@ -187,24 +187,37 @@ func TestPGWireRefusesAnUnknownFlagName(t *testing.T) {
 	}
 }
 
-// SUM OVER AN INTEGER-DECLARED FUNCTION DECLARES NUMERIC (#966 round 2 B1).
+// SUM OVER A FUNCTION DECLARES WHAT POSTGRESQL DECLARES (#966 rounds 2-3).
 //
-// This is the half no value oracle can see. PostgreSQL's `f & k` over a BIGINT
-// operand is bigint and `SUM(bigint)` is NUMERIC — OID 1700 — so a wide sum
-// does not overflow; over an int4 operand `f & k` is int4 and its SUM is
-// bigint. Every bitwise result is declared int8 here (the value-preserving
-// widening already in ADR-0012's list), so BOTH spellings' SUM is numeric,
-// and the second cell below is where that divergence is visible: the VALUE is
-// 2 on both engines, and only the OID differs.
+// This is the half no value oracle can see: a right value under a wrong OID.
+// PostgreSQL's rule for an ACCUMULATING aggregate is by the operand's WIDTH —
+// `sum(int4)` is bigint (OID 20) and `sum(int8)` is numeric (OID 1700) — so
+// the question each cell asks is what width PostgreSQL declares for the
+// FUNCTION inside the SUM. Both sides of that rule are pinned here, because a
+// fix for one side is how the other side broke twice:
 //
-// Before the fix the aggregate-width walk did not follow an ordinary function,
-// so SUM took the BIGINT accumulator: the first cell answered 22003 where
-// PostgreSQL answers 9223372036854775846, and the second carried a right value
-// under OID 20.
+//   - round 2 B1: the walk followed no ordinary function at all, so
+//     `SUM(BITWISE_OR(wide, 1))` took the BIGINT accumulator and answered
+//     22003 where PostgreSQL answers 9223372036854775846.
+//   - round 3 B1: the walk then read the function's Ret DECLARATION, which is
+//     the CARRIER this engine stores a result in and not PostgreSQL's result
+//     type. Every integer here computes in an int64, so `regexp_count` —
+//     `integer` in PostgreSQL — declares RetInt64 exactly as `bit_count` —
+//     `bigint` in PostgreSQL — does, and `SUM(REGEXP_COUNT(…))` declared
+//     numeric where PostgreSQL declares bigint.
 //
-// The LENGTH cell is the control from the other side — an INT32-declared
-// function keeps the bigint accumulator, exactly as PostgreSQL's
-// `SUM(length(text))` is bigint.
+// The width is `expr.PGIntegerResultWidth`'s now: PostgreSQL's measured type
+// where PostgreSQL has the function, the domain's own width where it does not,
+// and the OPERANDS' width for the bitwise family, which is arithmetic for this
+// purpose. Measured on 17.11 for every cell below:
+//
+//	sum(f8 & 18)                  numeric   sum(f4 & 3)          bigint
+//	sum(bit_count(bytea))         numeric   sum(length(text))    bigint
+//	sum(regexp_count('abab','a')) bigint    sum(masklen(cidr))   bigint
+//	sum(octet_length('abc'))      bigint
+//
+// `users.visits` is INT64 and `users.id` is INT32, which is what makes the two
+// bitwise cells a pair rather than a repetition.
 func TestPGWireDeclaresSumOverAnIntegerFunction(t *testing.T) {
 	_, srv := setupRealDB(t)
 	conn := connectPgconn(t, srv.Addr())
@@ -214,14 +227,44 @@ func TestPGWireDeclaresSumOverAnIntegerFunction(t *testing.T) {
 		oid       uint32
 		want      string
 	}{
-		{"wide_or", `SELECT SUM(BITWISE_OR(4611686018427387922, 1)) AS v FROM users WHERE id < 3`,
+		// ---- the int8 side: numeric, as PostgreSQL's sum(bigint) is.
+		{"wide_literal_or", `SELECT SUM(BITWISE_OR(4611686018427387922, 1)) AS v FROM users WHERE id < 3`,
 			1700, "9223372036854775846"},
-		{"narrow_and", `SELECT SUM(BITWISE_AND(visits, 18)) AS v FROM users`, 1700, "2"},
-		{"windowed_or", `SELECT SUM(BITWISE_OR(4611686018427387922, 1)) OVER () AS v
+		{"wide_column_and", `SELECT SUM(BITWISE_AND(visits, 18)) AS v FROM users`, 1700, "2"},
+		{"windowed_wide_or", `SELECT SUM(BITWISE_OR(4611686018427387922, 1)) OVER () AS v
 		                 FROM users WHERE id = 1`, 1700, "4611686018427387923"},
+		// BIT_COUNT is PostgreSQL's own function and it declares BIGINT, even
+		// though a 64-bit word's population count is 0..64. PostgreSQL
+		// decides, so its SUM is numeric.
 		{"bit_count", `SELECT SUM(BIT_COUNT(4611686018427387922)) AS v FROM users WHERE id = 1`,
 			1700, "3"},
+
+		// ---- the int4 side: bigint, as PostgreSQL's sum(integer) is. These
+		// five are round 3's regression: all of them declared 1700 when the
+		// walk read the carrier.
+		{"narrow_column_and", `SELECT SUM(BITWISE_AND(id, 3)) AS v FROM users`, 20, "6"},
+		{"windowed_narrow_and", `SELECT SUM(BITWISE_AND(id, 3)) OVER () AS v FROM users WHERE id = 1`,
+			20, "1"},
+		{"regexp_count", `SELECT SUM(REGEXP_COUNT(name, 'a')) AS v FROM users WHERE id < 3`, 20, "1"},
+		{"windowed_regexp_count", `SELECT SUM(REGEXP_COUNT(name, 'a')) OVER () AS v
+		                 FROM users WHERE id = 1`, 20, "1"},
+		{"prefix_length", `SELECT SUM(PREFIX_LENGTH('10.0.0.0/24')) AS v FROM users WHERE id < 3`,
+			20, "48"},
+		{"payload_length", `SELECT SUM(PAYLOAD_LENGTH('abc')) AS v FROM users WHERE id < 3`,
+			20, "6"},
 		{"length_control", `SELECT SUM(LENGTH(name)) AS v FROM users WHERE id = 1`, 20, "5"},
+
+		// ---- AVG is numeric on BOTH sides in PostgreSQL, so it is the
+		// control that says a cell above moved because of the WIDTH rule and
+		// not because the aggregate's whole typing moved. The OID is the
+		// claim: the DIGITS are this engine's fixed +4 scale, PostgreSQL
+		// renders 0.66666666666666666667 and 0.50000000000000000000, and
+		// that scale is ADR-0024 item 2's recorded divergence rather than
+		// anything this arc decides.
+		{"avg_wide_is_numeric", `SELECT AVG(BITWISE_AND(visits, 18)) AS v FROM users`,
+			1700, "0.6667"},
+		{"avg_narrow_is_numeric", `SELECT AVG(REGEXP_COUNT(name, 'a')) AS v FROM users WHERE id < 3`,
+			1700, "0.5000"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := conn.ExecParams(context.Background(), tc.sql, nil, nil, nil, []int16{0}).Read()

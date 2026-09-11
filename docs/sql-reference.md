@@ -2011,6 +2011,23 @@ operand anywhere in the expression makes the whole of it `NUMERIC`, which is
 PostgreSQL's answer as well: `SUM(CASE WHEN … THEN bigint_col ELSE 0 END)` is
 `NUMERIC`.
 
+A **FUNCTION answers in the width PostgreSQL declares for it**, which is not
+the same as the width this engine carries its result in: every integer here
+computes in a 64-bit box, so `REGEXP_COUNT`, whose PostgreSQL result is
+`integer`, is carried exactly as `BIT_COUNT`, whose PostgreSQL result is
+`bigint`, is. `SUM(REGEXP_COUNT(s,'a'))`, `SUM(LENGTH(s))`,
+`SUM(PREFIX_LENGTH(c))` and `SUM(PAYLOAD_LENGTH(p))` are `BIGINT`;
+`SUM(BIT_COUNT(x))`, `SUM(FROM_HEX(s))`, `SUM(PARSE_BYTES(s))` and
+`SUM(HTTP_CONTENT_LENGTH(p))` are `NUMERIC`. A function PostgreSQL does not
+have takes the width that holds its whole domain — `IP_TTL` is a byte and is
+`BIGINT` summed, `IP_DIFF` reaches 2^32 and is `NUMERIC`.
+
+The **bitwise family follows its operands**, exactly as arithmetic does:
+`SUM(BITWISE_AND(int_col, 18))` is `BIGINT` and
+`SUM(BITWISE_AND(bigint_col, 18))` is `NUMERIC`, which are PostgreSQL's
+`sum(int_col & 18)` and `sum(bigint_col & 18)`. A shift follows the value it
+shifts, not the count.
+
 A **`CAST` answers in its target's width**, whatever the operand's was, as
 PostgreSQL does: `SUM(bigint_col::BIGINT)` and `SUM(int_col::BIGINT)` are
 `NUMERIC`, `SUM(bigint_col::INTEGER)` is `BIGINT`, and a cast to a

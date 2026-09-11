@@ -883,26 +883,3 @@ func (r Ret) Boolean() bool {
 func FuncReturnsInteger(name string) bool {
 	return DefaultRegistry.ReturnType(name).Integer()
 }
-
-// WideInteger reports whether a FIXED declaration names the int8 domain
-// specifically — RetInt64 and not RetInt32.
-//
-// Integer() above answers "arithmetic over this is integer arithmetic", which
-// is width-blind on purpose. This one is the width question, and there is
-// exactly one place where the width is the whole answer: an aggregate's result
-// type. `sum(int4)` is bigint and `sum(int8)` is numeric, so a function's
-// declared width decides which accumulator its SUM gets (#966 round 2 B1).
-//
-// A polymorphic declaration answers false for Integer's reason: it mirrors an
-// argument whose type is not known until a batch arrives, and the caller walks
-// those arguments itself.
-func (r Ret) WideInteger() bool {
-	return r.kind == retFixed && r.typ == batch.TypeInt64
-}
-
-// FuncDeclaresInt64 reports whether a registered function always returns the
-// int8 domain. It is FuncReturnsInteger's by-width twin, for the planner's
-// aggregate-width walk.
-func FuncDeclaresInt64(name string) bool {
-	return DefaultRegistry.ReturnType(name).WideInteger()
-}

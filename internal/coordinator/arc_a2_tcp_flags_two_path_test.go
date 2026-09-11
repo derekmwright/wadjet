@@ -301,23 +301,63 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmetic(t *testing.T) {
 				"k=int64:4|v=0|n=int64:4",
 				"k=int64:511|v=216|n=int64:12",
 			}},
-		// A SUM that does NOT overflow, so the only thing it can be wrong
-		// about is its TYPE. 568 is PostgreSQL's total for `SUM(f4 & 18)`
-		// over the fixture; PostgreSQL declares that bigint because `int4 &
-		// int4` is int4 there, and this engine declares every bitwise result
-		// int8 (the widening already in ADR-0012's list), so its SUM is
-		// numeric. Same digits, different box — which is why the WIRE gate,
-		// not this one, is where the OID is pinned.
-		{"sum_of_a_narrow_mask_is_the_same_number",
+		// A SUM over an INT4 OPERAND, where the only thing that can be wrong
+		// is the TYPE. 568 is PostgreSQL's total for `SUM(f4 & 18)` over the
+		// fixture and `pg_typeof` of it is BIGINT, because `int4 & int4` is
+		// integer there. The bitwise family is arithmetic for the width
+		// question — it is as wide as its OPERANDS — so this engine says
+		// bigint too, and na2Run renders a bigint as `int64:`.
+		//
+		// Round 3 read the function's RetInt64 CARRIER instead and declared
+		// this numeric; the cell rendered `v=568` then, which is the same
+		// digits in a DECIMAL box and a divergence from PostgreSQL's OID.
+		{"sum_of_a_narrow_mask_is_bigint_like_postgres",
 			`SELECT SUM(BITWISE_AND(f4,18)) AS v FROM tcpflow`,
-			[]string{"v=568"}},
+			[]string{"v=int64:568"}},
+		// id 3 and id 4 carry f4 = 18 and 16, so `18 & 18` + `16 & 18` is 34 —
+		// PostgreSQL's `sum(f4 & 18)` over the same two rows, bigint.
+		{"windowed_sum_of_a_narrow_mask_is_bigint",
+			`SELECT SUM(BITWISE_AND(f4,18)) OVER () AS v FROM tcpflow WHERE id = 3 OR id = 4`,
+			[]string{"v=int64:34", "v=int64:34"}},
+		// ---- the same rule read from the FUNCTION side (#966 round 3 review
+		// B1). These are functions whose PostgreSQL RESULT is `integer`, so
+		// PostgreSQL's SUM of them is BIGINT — measured on 17.11 over two rows:
+		//
+		//   sum(regexp_count('abab','a'))    4   bigint
+		//   sum(masklen('10.0.0.0/24'))     48   bigint
+		//   sum(octet_length('abc'))         6   bigint
+		//
+		// Every one of them declares RetInt64 here, because every integer in
+		// this engine computes in an int64; reading that declaration as a
+		// WIDTH made all of them numeric. The width is
+		// `expr.PGIntegerResultWidth`'s now, and it is PostgreSQL's.
+		{"sum_of_an_int4_result_function_is_bigint",
+			`SELECT SUM(REGEXP_COUNT('abab','a')) AS v FROM tcpflow WHERE id <= 2`,
+			[]string{"v=int64:4"}},
+		{"windowed_sum_of_an_int4_result_function_is_bigint",
+			`SELECT SUM(REGEXP_COUNT('abab','a')) OVER () AS v FROM tcpflow WHERE id <= 2`,
+			[]string{"v=int64:4", "v=int64:4"}},
+		{"sum_of_a_prefix_length_is_bigint",
+			`SELECT SUM(PREFIX_LENGTH('10.0.0.0/24')) AS v FROM tcpflow WHERE id <= 2`,
+			[]string{"v=int64:48"}},
+		{"sum_of_a_payload_length_is_bigint",
+			`SELECT SUM(PAYLOAD_LENGTH('abc')) AS v FROM tcpflow WHERE id <= 2`,
+			[]string{"v=int64:6"}},
 		// The control the width rule needs from the other side: LENGTH is
-		// declared INT32, so its SUM keeps the BIGINT accumulator, exactly as
-		// PostgreSQL's `SUM(length(text))` is bigint. If the fix had made
-		// every function wide this cell would be a DECIMAL.
+		// declared INT32 and its PostgreSQL result is `integer`, so its SUM
+		// keeps the BIGINT accumulator, exactly as PostgreSQL's
+		// `SUM(length(text))` is bigint.
 		{"sum_over_an_int4_declared_function_stays_bigint",
 			`SELECT SUM(LENGTH(TO_HEX(f8))) AS v FROM tcpflow WHERE id <= 4`,
 			[]string{"v=int64:6"}},
+		// And an int8-RESULT function stays numeric: BIT_COUNT is PostgreSQL's
+		// own and PostgreSQL declares it BIGINT, so `sum(bit_count(…))` is
+		// numeric there — which is why this cell renders without an `int64:`
+		// prefix while the four above do. PostgreSQL over two rows:
+		// `sum(bit_count('\x4000000000000012'::bytea))` is 6, numeric.
+		{"sum_of_an_int8_result_function_is_numeric",
+			`SELECT SUM(BIT_COUNT(4611686018427387922)) AS v FROM tcpflow WHERE id <= 2`,
+			[]string{"v=6"}},
 
 		// ---- a shape the pushdown DECLINES (computed argument): the residual
 		// exec filter must answer what the pushed spelling answers.

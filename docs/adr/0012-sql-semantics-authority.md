@@ -2293,6 +2293,10 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      with PostgreSQL: no gate counts any of them as agreement, and the arm
      census normalizes or labels each one where it appears (#966 round 2, N3).
      The int4-operand widening at the head of this entry is filed as #1018.
+     It is a SCALAR divergence only: `SUM(BITWISE_AND(int4_col, 18))` agrees
+     with PostgreSQL's `bigint` (see the width rule at the end of this entry),
+     because the width an aggregate reads follows the OPERANDS for this
+     family rather than the result's carrier.
 
      - **`BITWISE_RIGHT_SHIFT` is Trino's LOGICAL shift, not PostgreSQL's
        `>>`.** PostgreSQL's `>>` on an integer is arithmetic (sign-preserving):
@@ -2357,22 +2361,66 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      expression answered 2^63 as a float64 before the declaration changed — a
      right value turned into an error (#966 round 2, B1).
 
-     The rule is now the declaration's own width, read through
-     `physical.aggInputIsWideInteger`'s function arm: a function with a fixed
-     `RetInt64` declaration is an int8-domain operand, so SUM over it is
-     numeric, and one with a fixed `RetInt32` is an int4-domain one, so SUM
-     over it is bigint (`SUM(LENGTH(s))` is bigint here and on PostgreSQL).
-     The grouped and the windowed spellings share that walk and move together.
+     The first repair of this read the FUNCTION'S OWN `Ret` DECLARATION and
+     was wrong in the other direction (#966 round 3 review, B1). `Ret` names
+     the VECTOR a result is stored in, not the type PostgreSQL calls it, and
+     every integer in this engine computes in an int64 (ADR-0024's widening) —
+     so `regexp_count`, whose PostgreSQL result is `integer`, declares
+     `RetInt64` exactly as `bit_count`, whose PostgreSQL result is `bigint`,
+     does. Reading the carrier as a width made `SUM(REGEXP_COUNT(…))`,
+     `SUM(PREFIX_LENGTH(…))` and `SUM(PAYLOAD_LENGTH(…))` declare NUMERIC
+     where PostgreSQL declares BIGINT, grouped and windowed, in both wire
+     formats.
 
-     Because every bitwise result is declared int8 here, `SUM(BITWISE_AND(
-     int4_col, 18))` is NUMERIC where PostgreSQL's `sum(int4_col & 18)` is
-     bigint — the same digits under a different OID, and a consequence of the
-     widening recorded at the top of this entry rather than a second decision.
-     Pinned on the wire in
-     `pgwire.TestPGWireDeclaresSumOverAnIntegerFunction` (OID 1700 for the
-     bitwise spellings, OID 20 for the LENGTH control) and on five arms in
-     `coordinator.TestTheTCPFlagFamilyAnswersPostgresBitArithmetic`'s
-     `sum_*` cells.
+     **The rule is PostgreSQL's result width for the FUNCTION, from one
+     table**: `expr.PGIntegerResultWidth`, which
+     `physical.aggInputIsWideInteger` is the only reader of, so the grouped
+     and the windowed spelling — which already share that walk — cannot
+     disagree. An entry is decided in this order: PostgreSQL's measured
+     `pg_typeof` where PostgreSQL has the function, and otherwise the width
+     that holds the function's whole DOMAIN, which is the criterion
+     PostgreSQL applied to its own (`masklen` is `integer` because a prefix
+     length is 0..128; `bit_count` is `bigint` because a bytea's bit count is
+     not bounded by int4). Measured on 17.11:
+
+     | expression | PostgreSQL result | `sum(…)` |
+     |---|---|---|
+     | `regexp_count('abab','a')` | `integer` | `bigint` |
+     | `masklen('10.0.0.0/24'::cidr)` | `integer` | `bigint` |
+     | `octet_length('abc')` | `integer` | `bigint` |
+     | `length(s)`, `strpos`, `cardinality`, `ascii` | `integer` | `bigint` |
+     | `pg_backend_pid()` | `integer` | `bigint` |
+     | `bit_count('\x0102'::bytea)` | `bigint` | `numeric` |
+     | `txid_current()` | `bigint` | `numeric` |
+     | `f4 & 18`, `f4 \| 18`, `~f4`, `f4 << 2` | `integer` | `bigint` |
+     | `f8 & 18`, `f8 \| 18`, `~f8`, `f8 << 2` | `bigint` | `numeric` |
+
+     The last two rows are the BITWISE family, and they are why the table has
+     a third answer beside int4 and int8: that family's width **follows its
+     operands**, exactly as arithmetic does, and a SHIFT follows the value it
+     shifts rather than the count. So `SUM(BITWISE_AND(int4_col, 18))` is
+     `bigint` and `SUM(BITWISE_AND(int8_col, 18))` is `numeric` — both
+     PostgreSQL's answers, which retires the divergence the first repair
+     recorded here.
+
+     A function that returns an integer and has no row in that table is how
+     the defect comes back, so
+     `expr.TestEveryIntegerDeclaredFunctionNamesItsPostgresResultWidth`
+     asserts the table and the registry name the same set in BOTH directions,
+     and `expr.TestThePostgresResultWidthTableMatchesTheMeasuredTranscript`
+     holds the rows against the transcript above. On the wire:
+     `pgwire.TestPGWireDeclaresSumOverAnIntegerFunction` — thirteen cells, OID
+     1700 for the int8 side, OID 20 for the int4 side, and the AVG controls
+     numeric on both. On five arms:
+     `coordinator.TestTheTCPFlagFamilyAnswersPostgresBitArithmetic`'s `sum_*`
+     cells.
+
+     The SCALAR declaration is a separate, pre-existing divergence and this
+     entry does not close it: `SELECT REGEXP_COUNT('abab','a')` still declares
+     OID 20 where PostgreSQL declares OID 23, because the engine has no int4
+     result carrier for a function body that returns a Go `int64`. Only the
+     aggregate's width was ever decided from it, and that is what now reads
+     PostgreSQL's table instead.
 
    - **`tcp_flags` declares an ARRAY and a top-level projection of it is
      TEXT.** (Added 2026-09-08, arc A2, #966; the limitation predates it.)
