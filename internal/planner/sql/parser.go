@@ -436,27 +436,13 @@ func parseDispatch(sql string) (*ParsedQuery, error) {
 	return pq, nil
 }
 
-// collectWindowSpecs records each SelectInfo's own window columns on that
-// SelectInfo, through the whole set-operation tree, and returns the statement's
-// specs for the ParsedQuery.
-//
-// A SET OPERATION's arms are SelectInfos of their own, and this pass used to
-// read `info.Columns` at the OUTERMOST level only — which for a set operation
-// is empty, since the columns live on the arms. `SelectInfo.Windows` was
-// therefore always nil for an arm, and it is the flag the logical builder
-// gates window planning on: an arm whose SELECT list is a BARE window
-// (`SUM(a) OVER () AS s`) got NO Window node, its projection was left reading
-// `s` off the arm's INPUT, and the query answered the input column of that
-// name (`decpair.s`, a TEXT column, #733), or failed with `column "s2" does
-// not exist in the input schema` when the input had no such column (#746), on
-// every path. A window nested inside a larger expression
-// (`SUM(a) OVER () + 1`) was unaffected, because the builder extracts those
-// from the column's own AST rather than from this list — which is why the
-// class was invisible to the arithmetic shapes in the corpus.
-//
-// The two other post-parse passes over a set operation already descend into
-// the arms (CoerceBooleanLiterals recursively, resolvePositionalRefs through
-// resolveSetOpOrderBy). This one is the omission.
+// collectWindowSpecs records each SelectInfo's OWN window columns and collects
+// statement specs through the ENTIRE set-operation tree (#733, #746).
+// Set arms carry their columns even when the outer Columns is empty; their
+// Windows flag must reach the logical builder so bare windows get Window nodes.
+// Nested-expression extraction is a separate route and does not cover this case.
+// Match the recursive reach of the other post-parse set-operation passes.
+// See docs/internals/sql-set-arm-window-discovery.md for the design.
 func collectWindowSpecs(info *SelectInfo) []WindowSpec {
 	if info == nil {
 		return nil
@@ -1321,27 +1307,13 @@ func recordGroupByAliasOrigin(info *SelectInfo, i int, name string) {
 	}
 }
 
-// RevertGroupByAliasesShadowedByInput applies PostgreSQL's precedence for a
-// bare GROUP BY name: an INPUT COLUMN wins over a SELECT alias.
-//
-// The parser substitutes such a name with the alias's defining expression
-// unconditionally, and its own doc comment claimed the opposite ("a table
-// column with the same name keeps precedence over the alias") — protocol item
-// 9's exact failure mode, a record describing intended behaviour as present
-// behaviour. There is no precedence check in the parser and there cannot be
-// one: it has no schema and no scope. So the substitution is provisional and
-// this undoes it, called from the layer that knows what the FROM sources
-// provide.
-//
-// provides reports whether one of this block's own sources carries the bare
-// name. It must answer only where it is CERTAIN: an unenumerable source (a
-// table function, a SELECT *, a table absent from the catalog) has to answer
-// false, which keeps the substitution and the pre-#739 answer.
-//
-// The wrong-answer shape this closes: `SELECT h AS g, COUNT(*) FROM gcov
-// GROUP BY g, h` grouped by (h, h) and answered 2 rows where PostgreSQL — which
-// groups by (g, h) — answers 6. Both engines answered, and they answered
-// different numbers.
+// RevertGroupByAliasesShadowedByInput restores INPUT COLUMN precedence over
+// a SELECT alias for a bare GROUP BY name (#739).
+// Parser substitution is provisional: only the schema-aware layer can undo it.
+// provides must report only names CERTAINLY supplied by this block's sources;
+// unavailable catalog schemas, table functions or unenumerable SELECT * return
+// false, retaining substitution. Never infer precedence without scope evidence.
+// See docs/internals/sql-group-name-input-precedence.md for the design.
 func RevertGroupByAliasesShadowedByInput(info *SelectInfo, provides func(bare string) bool) {
 	if info == nil || provides == nil || len(info.GroupByAliasOrigin) == 0 {
 		return
@@ -1753,52 +1725,15 @@ func parseMerge(sql string, l *lexer) (*ParsedQuery, error) {
 		}
 		l.nextToken()
 
-		// PostgreSQL 17's WHEN NOT MATCHED BY SOURCE / BY TARGET. Both are
-		// real clause kinds with different meanings (BY SOURCE walks the
-		// TARGET rows no source row matched), so reading past the BY and
-		// treating the clause as an ordinary NOT MATCHED would act on the
-		// wrong rows. It is an unimplemented FEATURE, not bad SQL, so it is
-		// 0A000 and it refuses (#686 R2-3, wadjet#718).
-		//
-		// DEFERRED — #718. Re-examined by arc D3 against PostgreSQL 17.11 and
-		// deferred again: the MERGE builder does not make it cheap, because
-		// its clause SCOPE is a boolean by construction and BY SOURCE needs a
-		// third value. Three changes, and the third is the one that is not
-		// local:
-		//
-		//  1. The parser needs a CLAUSE-KIND field. MergeWhenClause carries
-		//     only `Matched bool`, which cannot express the difference
-		//     between NOT MATCHED, NOT MATCHED BY SOURCE and NOT MATCHED BY
-		//     TARGET. BY TARGET is a synonym for plain NOT MATCHED and maps
-		//     onto the existing branch.
-		//
-		//  2. The executor needs a SECOND set beside matchedTargetIndices.
-		//     That one records the targets a clause FIRED on, and BY SOURCE's
-		//     complement is "no source row matched this target AT ALL",
-		//     fired or not. PostgreSQL confirms the distinction is real:
-		//     `WHEN MATCHED AND t.n > 99 THEN DELETE WHEN NOT MATCHED BY
-		//     SOURCE THEN UPDATE SET n = 0` leaves the matched row ALONE even
-		//     though its MATCHED clause did not fire (measured, MERGE 2).
-		//
-		//  3. A BY SOURCE clause's scope is TARGET-ONLY, and that is a THIRD
-		//     scope. `wadjet.mergeEvaluator` threads a `matched bool` through
-		//     resolveRefIn, checkClauseColumns, checkConditionType, condition
-		//     and value, where false means SOURCE-only and true means the
-		//     merged namespace. Under BY SOURCE, `UPDATE SET n = s.n` is
-		//     42P01 "invalid reference to FROM-clause entry for table s" and
-		//     a BARE `n` resolves to the TARGET without ambiguity (both
-		//     measured). Every one of those signatures changes.
-		//
-		// PostgreSQL also answers `WHEN NOT MATCHED BY SOURCE THEN INSERT`
-		// and `WHEN NOT MATCHED BY TARGET THEN DELETE` with a SYNTAX error
-		// (42601) rather than a feature refusal — the action sets differ per
-		// clause kind.
-		//
-		// This is a FEATURE, not a wrong answer. It is pinned three ways: the
-		// ELEVEN #718 rows in the DML census, each carrying PostgreSQL 17's
-		// own answer beside the 0A000 so the implementing arc measures
-		// nothing; TestMergeNotMatchedBySourceIsReportedAsUnsupported; and the
-		// limitation bullet in docs/sql-reference.md.
+		// NOT MATCHED BY SOURCE/TARGET is unsupported: refuse 0A000 rather than
+		// silently treating BY SOURCE as ordinary NOT MATCHED (#686 R2-3, wadjet#718).
+		// Implementing it needs a clause kind, all-matched-target tracking separate
+		// from targets whose clauses FIRED, and target-only scope for BY SOURCE.
+		// BY TARGET aliases plain NOT MATCHED; BY SOURCE must not see source columns.
+		// Action sets differ too: SOURCE INSERT and TARGET DELETE are syntax errors in
+		// PostgreSQL. Keep TestMergeNotMatchedBySourceIsReportedAsUnsupported, the
+		// #718 DML census and docs/sql-reference.md aligned with the supported boundary.
+		// See docs/internals/sql-merge-by-source-feature-boundary.md for the design.
 		if l.peekToken().typ == TokenKWBy {
 			l.nextToken()
 			side := l.nextToken()
@@ -1853,28 +1788,12 @@ func parseMerge(sql string, l *lexer) (*ParsedQuery, error) {
 	}, nil
 }
 
-// scanMergeClauseUntil consumes input up to the next stop token that is at
-// DEPTH ZERO — outside every parenthesis and every CASE … END — and returns
-// the raw text it consumed.
-//
-// All four of a MERGE's scans used to stop at the first stop token whatever
-// its nesting, and a CASE expression carries the very keywords they stop on
-// (#722):
-//
-//	ON        stops at WHEN   broken by `ON CASE WHEN … END`
-//	AND       stops at THEN   broken by `AND CASE … THEN … END`
-//	THEN UPDATE SET  at WHEN  broken by `SET n = CASE WHEN … END`
-//	THEN INSERT …    at WHEN  broken by `VALUES (CASE WHEN … END)`
-//
-// The issue names the first two. A fix that patched only those would leave
-// `ON` and `THEN INSERT` broken, which is why all four go through one
-// function: the nesting rule is a property of a MERGE clause, not of one
-// clause position.
-//
-// The pattern is collectUntil's (dml_parser.go): the stop test is
-// `depth == 0 && stop`, never `stop` alone, and EOF breaks unconditionally so
-// an unbalanced `(` or a CASE with no END cannot spin at depth > 0 forever —
-// FuzzParseSQL found that shape once already.
+// scanMergeClauseUntil stops only at depth zero outside parentheses AND CASE
+// ... END, returning raw text (#722). Share this rule across ON, AND,
+// UPDATE SET and INSERT clause scans; each can contain the stop keywords.
+// EOF always terminates, even at nonzero depth, so malformed nesting cannot
+// spin. This is collectUntil's rule, covered by FuzzParseSQL.
+// See docs/internals/sql-merge-clause-nesting.md for the design.
 func scanMergeClauseUntil(l *lexer, stop ...TokenType) string {
 	stopAt := make(map[TokenType]bool, len(stop))
 	for _, t := range stop {

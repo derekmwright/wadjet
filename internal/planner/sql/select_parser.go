@@ -1886,28 +1886,13 @@ func (p *selectParser) parsePostfix() (Node, error) {
 				Args: []Node{expr, jsonPathArg(right)},
 			}
 		case TokenDot:
-			// PostgreSQL's ROW field path: `(container).field`.
-			//
-			// The PARENTHESES are the whole point. `c_row.b` is spelled like
-			// `table.column` and PostgreSQL reads it that way — it is a
-			// missing-FROM-clause error there — so the parenthesised form is
-			// the only spelling PostgreSQL reads as a field, and it is the
-			// only one that can carry a RELATION qualifier beside the
-			// container: `(x.c_row).b` says arm `x`, container `c_row`,
-			// field `b`, which the bare two-part form cannot say at all.
-			// That matters because a container two arms both publish is
-			// refused (42702, physical.colScope.resolveRef) and this is the
-			// escape hatch PostgreSQL offers for it.
-			//
-			// Only a PARENTHESISED expression takes a dot here. `a.b.c` is
-			// still a syntax error, which is ADR-0022's position and matches
-			// PostgreSQL's own reading of the unparenthesised three-part form
-			// (it takes the parts as catalog.schema.column and refuses).
-			//
-			// The container itself must be a BARE name. `(x.c_row).b` parses
-			// and is REFUSED (0A000) rather than answered, because a
-			// three-part identity is not something this engine's ColRef can
-			// carry — see below.
+			// Only parenthesized expressions take this field-access dot: (container).field.
+			// Redundant parentheses are allowed; unparenthesized a.b.c stays invalid
+			// (ADR-0022). The supported container is a BARE name.
+			// (x.c_row).b can disambiguate relations in PostgreSQL, but this engine's
+			// two-part ColRef cannot carry that three-part identity: parse then refuse
+			// 0A000, never bind an ambiguous parent (42702) or silently return NULL.
+			// See docs/internals/sql-parenthesized-row-field-path.md for the design.
 			pn, ok := expr.(*ParenNode)
 			if !ok {
 				return expr, nil
@@ -1948,27 +1933,13 @@ func (p *selectParser) parsePostfix() (Node, error) {
 				return nil, fmt.Errorf("expected field name after '.'")
 			}
 			if inner.Table != "" {
-				// A TWO-PART container reference. Two spellings reach here and
-				// the message must fit both, because the parser cannot tell
-				// them apart: a relation-qualified container `(x.c_row).b`,
-				// and a nested path `((c_row).rw).k` whose container is itself
-				// a path. Calling either one "relation-qualified" was wrong
-				// about the other, and neither is necessarily a container at
-				// all — `(d.b).x` over a DECIMAL column has this shape too,
-				// and PostgreSQL answers it 42809.
-				//
-				// Both need a THREE-part identity, and this engine has a
-				// two-part one: `plansql.ColRef` is {Table, Column} and every
-				// resolver ADR-0022 binds together reads those two fields.
-				// Measured on an attempt: the reference resolves to NULL at
-				// every arm, with no join anywhere in the query, because the
-				// container's declaration is keyed by its BARE name at each
-				// declaration site and the qualifier is stripped before the
-				// field is asked for.
-				//
-				// A silent NULL is the one answer this must not give, so the
-				// spelling is REFUSED while the identity is two-part.
-				// ADR-0022 carries the mechanism and what closing it takes.
+				// A two-part container may be relation-qualified (x.c_row).b or itself a
+				// nested path ((c_row).rw).k; the message must describe both (ADR-0022).
+				// It is not necessarily composite at all, as (d.b).x over DECIMAL demonstrates.
+				// Both spellings need three-part identity; ColRef and its resolvers carry two.
+				// Refuse 0A000 while that limit holds, never strip a qualifier into silent NULL.
+				// ADR-0022 records the resolver changes required to support it.
+				// See docs/internals/sql-three-part-row-identity-refusal.md for the design.
 				return nil, sqlerr.New("0A000",
 					"(%s.%s).%s: a ROW field path names an UNQUALIFIED container here, "+
 						"so a two-part container reference — a relation-qualified "+

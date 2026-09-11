@@ -9,38 +9,14 @@ import "strings"
 // RowDescription and what a query has to quote to refer to the column.
 const UnnamedOutputColumn = "?column?"
 
-// OutputColumnName is the name PostgreSQL publishes an unaliased SELECT item
-// under — its `FigureColname`, decided from the parsed AST and never from the
-// expression's TEXT.
-//
-// The whole rule, measured on PostgreSQL 17 over 49 spellings (#732):
-//
-//	g, t.g, (g)                       → g            (the column)
-//	(c_row).b                         → b            (the FIELD)
-//	abs(g), count(*), sum(g) OVER ()  → abs, count, sum   (the function)
-//	CASE …, COALESCE, NULLIF, GREATEST → case, coalesce, …
-//	EXISTS (…)                        → exists
-//	ARRAY[…]                          → array
-//	EXTRACT(YEAR FROM d)              → extract
-//	CAST(g AS int), g::int            → g            (the ARGUMENT)
-//	CAST('2020-01-01' AS date)        → date         (the TYPE, only when the
-//	                                                  argument has no name)
-//	(SELECT g FROM … LIMIT 1)         → g            (the subquery's column)
-//	g + 1, -g, 1, 'abc', g IS NULL,
-//	g = 1, g BETWEEN 1 AND 2,
-//	g IN (1,2), g || 'x', (SELECT 1)  → ?column?
-//
-// A CAST is the one PostgreSQL gets asked about most and the one most often
-// guessed wrong: it is named after its ARGUMENT, and reaches for the type only
-// when the argument itself is unnamed. The brief for arc E3 said "a CAST → the
-// TYPE" and the measurement said otherwise.
-//
-// Several `?column?` in one SELECT list is legal and is what PostgreSQL does:
-// `SELECT g + 1, g + 2` returns two columns of that name. Output slots have
-// identity by POSITION (#556/#557), so a duplicate published name is not a
-// collision.
-//
-// It returns "" for a STAR, which has no single name.
+// OutputColumnName uses an alias or the original parsed AST's PostgreSQL name,
+// not rewritten expression text (#732). Columns/fields use their leaf name;
+// functions, CASE/COALESCE/NULLIF/GREATEST/EXISTS/ARRAY/EXTRACT name themselves.
+// CAST inherits the argument's name, using the type only for unnamed arguments.
+// Scalar subqueries inherit their output name; unnamed expressions use ?column?.
+// Duplicate published names are legal: slots have POSITION identity (#556/#557).
+// STAR returns empty. AST-less synthetic callers retain their legacy fallback.
+// See docs/internals/sql-published-output-column-names.md for the design.
 func OutputColumnName(col SelectColumn) string {
 	if col.Alias != "" {
 		return col.Alias
