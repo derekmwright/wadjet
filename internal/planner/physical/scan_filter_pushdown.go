@@ -2,11 +2,13 @@ package physical
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/engine/scan"
 	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
@@ -76,6 +78,18 @@ func (p *Planner) tryPushFilterIntoScan(ctx context.Context, node *logical.Node,
 		}
 		structured, rest := logical.SplitConjunctsForPushdown(pred.ASTExpr)
 		for _, c := range rest {
+			// A TCP-flag predicate (or the BITWISE_AND spelling it
+			// generalizes) is a MASK TEST the scan answers once per
+			// dictionary entry (#966, scan/flag_filter.go). It pushes on the
+			// same terms a structured `col = literal` conjunct does — the
+			// per-entry cost is one integer AND, the same as a compare — and
+			// not on LIKE's terms, whose gate is about a double page read for
+			// a byte-array column.
+			if rp, name, ok := makeFlagRowPred(canon, colType, c); ok {
+				pushed = append(pushed, rp)
+				pushedCols = append(pushedCols, name)
+				continue
+			}
 			// LIKE conjuncts push as pattern predicates when the pattern
 			// column is filter-only, so the pushdown ELIDES its
 			// materialization (TPC-H Q13's `o_comment NOT LIKE` class).
@@ -204,6 +218,152 @@ func makeLikeRowPred(canon map[string]string, colType map[string]parquet.TypeID,
 		op = scan.OpNotLike
 	}
 	return scan.RowPred{Col: name, Op: op, Value: lit.Value}, name, true
+}
+
+// makeFlagRowPred recognizes the two spellings of a mask test over an integer
+// column and returns its RowPred:
+//
+//	tcp_flags_has_all(col, 'SYN', 'ACK')   -> OpFlagsAll,  mask 18
+//	tcp_flags_has_any(col, 'RST')          -> OpFlagsAny,  mask 4
+//	tcp_flags_has_none(col, 'ACK')         -> OpFlagsNone, mask 16
+//	BITWISE_AND(col, 18) = 18              -> OpFlagsAll,  mask 18
+//	BITWISE_AND(col, 18) <> 0              -> OpFlagsAny,  mask 18
+//	BITWISE_AND(col, 18) = 0               -> OpFlagsNone, mask 18
+//
+// The BITWISE_AND spelling is the one users already write, and it is the
+// PostgreSQL-equivalent form #966 names as the value oracle. `&` itself is not
+// an operator this parser lexes, so this is that spelling here.
+//
+// Everything else declines and stays in the exec filter: a comparison against
+// a constant that is neither the mask nor zero (`BITWISE_AND(col,18) = 16` is
+// none of the three tests), a negative mask, a non-integer column, a computed
+// flags argument, an unknown flag name (whose refusal is the evaluator's to
+// raise — pushing a folded mask would swallow it), and every shape over a
+// column the file does not hold as INT32/INT64.
+func makeFlagRowPred(canon map[string]string, colType map[string]parquet.TypeID, c plansql.Node) (scan.RowPred, string, bool) {
+	if !scan.FlagDictPushdown.On() {
+		return scan.RowPred{}, "", false
+	}
+	n := c
+	for {
+		if pn, ok := n.(*plansql.ParenNode); ok {
+			n = pn.Inner
+			continue
+		}
+		break
+	}
+	var (
+		colRef *plansql.ColRef
+		mask   int64
+		op     string
+	)
+	switch t := n.(type) {
+	case *plansql.FuncCallNode:
+		mode, ok := expr.TCPFlagPredicate(t.Name)
+		if !ok || len(t.Args) < 2 {
+			return scan.RowPred{}, "", false
+		}
+		cr, ok := t.Args[0].(*plansql.ColRef)
+		if !ok {
+			return scan.RowPred{}, "", false
+		}
+		names := make([]string, 0, len(t.Args)-1)
+		for _, a := range t.Args[1:] {
+			lit, ok := a.(*plansql.Lit)
+			if !ok || lit.Kind != plansql.LitString {
+				return scan.RowPred{}, "", false
+			}
+			names = append(names, lit.Value)
+		}
+		m, _, ok := expr.TCPFlagMask(names)
+		if !ok {
+			return scan.RowPred{}, "", false
+		}
+		colRef, mask = cr, m
+		switch mode {
+		case expr.TCPFlagsAll:
+			op = scan.OpFlagsAll
+		case expr.TCPFlagsAny:
+			op = scan.OpFlagsAny
+		default:
+			op = scan.OpFlagsNone
+		}
+	case *plansql.CmpExpr:
+		cr, m, ok := bitwiseAndOperand(t.Left)
+		if !ok {
+			return scan.RowPred{}, "", false
+		}
+		k, ok := integerLiteral(t.Right)
+		if !ok {
+			return scan.RowPred{}, "", false
+		}
+		switch {
+		case (t.Op == "=" || t.Op == "==") && k == m:
+			op = scan.OpFlagsAll
+		case (t.Op == "=" || t.Op == "==") && k == 0:
+			op = scan.OpFlagsNone
+		case (t.Op == "!=" || t.Op == "<>") && k == 0:
+			op = scan.OpFlagsAny
+		default:
+			return scan.RowPred{}, "", false
+		}
+		colRef, mask = cr, m
+	default:
+		return scan.RowPred{}, "", false
+	}
+	if mask < 0 {
+		// scan.andPlainPage uses -1 as "not a flag predicate"; a negative mask
+		// is pathological in any case and stays in the exec filter.
+		return scan.RowPred{}, "", false
+	}
+	name, ok := canon[strings.ToLower(colRef.Column)]
+	if !ok {
+		return scan.RowPred{}, "", false
+	}
+	switch colType[strings.ToLower(colRef.Column)] {
+	case parquet.TypeInt32, parquet.TypeInt64:
+	default:
+		// PORT/PROTOCOL/DURATION are integer-domain too, but their boxed form
+		// goes through the network rendering path in the expression layer; a
+		// scan that answered off the raw slice while the residual answered off
+		// the rendering would be two predicates with one spelling.
+		return scan.RowPred{}, "", false
+	}
+	return scan.RowPred{Col: name, Op: op, Value: mask}, name, true
+}
+
+// bitwiseAndOperand recognizes `BITWISE_AND(col, <integer literal>)` in either
+// argument order and returns the column and the mask.
+func bitwiseAndOperand(n plansql.Node) (*plansql.ColRef, int64, bool) {
+	fc, ok := n.(*plansql.FuncCallNode)
+	if !ok || strings.ToLower(fc.Name) != "bitwise_and" || len(fc.Args) != 2 {
+		return nil, 0, false
+	}
+	if cr, ok := fc.Args[0].(*plansql.ColRef); ok {
+		if m, ok := integerLiteral(fc.Args[1]); ok {
+			return cr, m, true
+		}
+	}
+	if cr, ok := fc.Args[1].(*plansql.ColRef); ok {
+		if m, ok := integerLiteral(fc.Args[0]); ok {
+			return cr, m, true
+		}
+	}
+	return nil, 0, false
+}
+
+// integerLiteral reads a whole-number literal exactly. A fractional or
+// out-of-range spelling declines rather than rounding into a mask.
+func integerLiteral(n plansql.Node) (int64, bool) {
+	lit, ok := n.(*plansql.Lit)
+	if !ok || lit.Kind != plansql.LitNumber {
+		return 0, false
+	}
+	v, err := strconv.ParseInt(strings.TrimSpace(lit.Value), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }
 
 // makeRowPred normalizes one structured conjunct into a scan.RowPred,

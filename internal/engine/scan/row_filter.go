@@ -360,6 +360,32 @@ func evalPredOnDict(dict *pqt.DictionaryData, p RowPred) ([]bool, error) {
 	if isLikeOp(p.Op) && d.PhysType() != pqt.PhysicalByteArray {
 		return nil, fmt.Errorf("scan filter: LIKE on non-string dictionary type %v", d.PhysType())
 	}
+	// A flag mask is answered ONCE PER DICTIONARY ENTRY here and then applied
+	// per RLE run below — the whole point of pushing it (flag_filter.go).
+	if isFlagOp(p.Op) {
+		want, ok := p.Value.(int64)
+		if !ok {
+			return nil, fmt.Errorf("scan filter: non-int64 mask for flag predicate")
+		}
+		flagDictMasks.Add(1)
+		switch d.PhysType() {
+		case pqt.PhysicalInt64:
+			src := d.Int64()
+			for i := 0; i < n && i < len(src); i++ {
+				mask[i] = flagMatch(src[i], want, p.Op)
+			}
+		case pqt.PhysicalInt32:
+			src := d.Int32()
+			for i := 0; i < n && i < len(src); i++ {
+				mask[i] = flagMatch(int64(src[i]), want, p.Op)
+			}
+		default:
+			return nil, fmt.Errorf("scan filter: flag predicate on non-integer dictionary type %v",
+				d.PhysType())
+		}
+		flagDictEntries.Add(int64(n))
+		return mask, nil
+	}
 	switch d.PhysType() {
 	case pqt.PhysicalInt64:
 		want, ok := p.Value.(int64)
@@ -426,6 +452,10 @@ func evalPredOnDict(dict *pqt.DictionaryData, p RowPred) ([]bool, error) {
 func andPlainPage(bm *rowBitmap, base, n int, page *pqt.PageData, p RowPred) error {
 	d := page.Data
 	nv := d.Count()
+	// flagMask is the folded mask for a flag predicate, and -1 when this is
+	// not one. A mask is a non-negative int64 (the planner folds it from
+	// names or from a literal), so -1 is not a value it can take.
+	flagMask := int64(-1)
 	var likeFn func([]byte) bool
 	if isLikeOp(p.Op) {
 		if d.PhysType() != pqt.PhysicalByteArray {
@@ -435,7 +465,29 @@ func andPlainPage(bm *rowBitmap, base, n int, page *pqt.PageData, p RowPred) err
 			likeFn = compileLike(pat, p.Op == OpNotLike)
 		}
 	}
+	if isFlagOp(p.Op) {
+		want, ok := p.Value.(int64)
+		if !ok {
+			return fmt.Errorf("scan filter: non-int64 mask for flag predicate")
+		}
+		switch d.PhysType() {
+		case pqt.PhysicalInt64, pqt.PhysicalInt32:
+		default:
+			return fmt.Errorf("scan filter: flag predicate on non-integer page type %v", d.PhysType())
+		}
+		flagMask = want
+	}
 	match := func(vi int) (bool, error) {
+		if flagMask >= 0 {
+			switch d.PhysType() {
+			case pqt.PhysicalInt64:
+				flagPlainValues.Add(1)
+				return flagMatch(d.Int64At(vi), flagMask, p.Op), nil
+			default:
+				flagPlainValues.Add(1)
+				return flagMatch(int64(d.Int32At(vi)), flagMask, p.Op), nil
+			}
+		}
 		switch d.PhysType() {
 		case pqt.PhysicalInt64:
 			want, ok := p.Value.(int64)
