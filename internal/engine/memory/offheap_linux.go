@@ -10,30 +10,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/optswitch"
 )
 
-// Off-heap growable arrays for aggregate group state (ADR-0006 amendment,
-// 2026-08-17). The typed-SoA aggregation paths accumulate multi-GB
-// pointer-free arrays (flat accumulators, key SoAs) whose growth used to
-// ride Go's append: every doubling holds old+new live simultaneously and
-// leaves the old array as garbage for the collector. At the 100M-group
-// scale (ClickBench Q33) that stacked ~10GB of transients on ~12GB of
-// live state between GC cycles — measured 22.3GB heap on 12GB live — and
-// whether a cold try fit under GOMEMLIMIT or spiraled through the
-// pressure-valve spill path was decided by GC timing (108s vs 21s cold
-// on identical binaries, attributed by a same-window binary control).
-//
-// The fix: back these arrays with anonymous MAP_NORESERVE reservations.
-// A slice is created over the reservation with len=0 and cap=the full
-// reserve, so every existing append site grows it IN PLACE forever — no
-// reallocation, no copy, no garbage, and the Go heap never sees the
-// bytes (the engine's own tracker still accounts them exactly; that
-// accounting, not heap size, drives spill decisions). Pages commit
-// lazily on first touch and arrive zeroed, which append's zero-writes
-// then satisfy for free.
-//
-// Scope guard: this is NOT the shelved BytesColumn decode arena
-// (2026-06-09) — no object lifetimes, no per-value layout, no sharing.
-// It manages whole pointer-free arrays with one owner each, registered
-// on an OffheapRegistry whose lifetime is the owning operator's.
+// Off-heap aggregate arrays use anonymous MAP_NORESERVE address reservations
+// for in-place growth within reserved capacity (ADR-0006 amendment).
+// Pages commit zeroed on touch; Go heap accounting does not see them, so the
+// engine tracker must still charge the bytes that drive spill decisions.
+// Only whole POINTER-FREE arrays with one owner qualify; no shared per-value
+// arenas or object lifetimes. OffheapRegistry lifetime is the owning operator's.
+// See docs/internals/memory-offheap-array-ownership.md for the design.
 var offheapAggToggle = optswitch.Register("offheap-agg", "WADJET_OFFHEAP_AGG",
 	"mmap-backed group-state arrays: in-place growth, no realloc transients, state invisible to GC")
 

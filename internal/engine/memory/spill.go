@@ -292,35 +292,14 @@ const (
 	SpillExpensive                     // spill when budget is 90% used
 )
 
-// ShouldSpillFor returns true when an operator with the given spill cost
-// class should spill. SpillCheap operators trigger at 40% of the per-tracker
-// budget; SpillExpensive operators trigger at 90%. Either class also triggers
-// if the global heap-pressure circuit breaker fires.
-//
-// The 40% SpillCheap threshold (was 60% pre-2026-05-19) is sized so that
-// 3 concurrent fragment tasks at SF100 mc=3 — each holding ~5.7 GB peak
-// HashJoin/build=lineitem state on a 14.8 GB GOMEMLIMIT worker — stay
-// cumulatively under the process heap limit. With per-task share = budget
-// / 3 ≈ 5 GB, a 60% threshold lets each task ramp to 3 GB before spilling,
-// and the 1.1× untracked overhead pushes 3 × 3 = 9 GB to ~10 GB heap. A
-// 40% threshold caps the per-task pre-spill peak at 2 GB; cumulative
-// 3 × 2 × 1.1 ≈ 6.6 GB heap. The architectural mechanism is documented
-// in project_q17_sf100_instrumented_2026-05-17.md and
-// project_bufio_fix_sf100_2026-05-18.md (worker-w0 hitting 19.7 GB
-// during shuffle-stage-7 from concurrent fragment-task heap stacking).
-//
-// Threshold sweep on the local Q17 probe (TestHashJoin_Q17ShapeRepro):
-//
-//	threshold   peak heap (vs tracker budget)
-//	30%         0.63×
-//	40% (now)   0.74×
-//	50%         0.92×
-//	60% (was)   1.10×
-//	70%         1.27×
-//
-// Wall time was flat across thresholds — earlier spill is essentially
-// free on local NVMe. Spill bytes 67-80 MB across the sweep (lower
-// threshold → more bytes spilled, as expected).
+// ShouldSpillFor uses static effective-budget thresholds of 40% for SpillCheap
+// and 90% for SpillExpensive, plus the global heap-pressure breaker.
+// Tracking-only mode never requests spill. The explicitly enabled floating
+// budget path instead uses cheapFrac and 98% of live available operator budget;
+// merely wiring reservoirs does not activate it.
+// Threshold rationale: project_q17_sf100_instrumented_2026-05-17.md and
+// project_bufio_fix_sf100_2026-05-18.md; TestHashJoin_Q17ShapeRepro covers the shape.
+// See docs/internals/memory-cost-sensitive-spill-thresholds.md for the design.
 func (sm *SpillManager) ShouldSpillFor(urgency SpillUrgency) bool {
 	if sm.trackingOnly {
 		return false
@@ -376,27 +355,12 @@ func (sm *SpillManager) effectiveBudget() int64 {
 	return sm.tracker.Budget()
 }
 
-// ShouldSpill returns true when the operator should spill to disk.
-//
-// It checks two independent signals:
-//
-//  1. **Per-tracker budget** — the original cooperative signal: each operator
-//     reports its tracked allocations and spills when its share of the budget
-//     is exhausted. Cheap (atomic load) and accurate when every allocation
-//     paths through the tracker.
-//
-//  2. **Process-wide heap pressure** — checks runtime.MemStats.HeapAlloc
-//     against GOMEMLIMIT and triggers spill when the heap approaches the
-//     soft limit. This catches allocations that bypass the tracker (probe
-//     pipeline batches, gather buffers, scan source channel buffers, every
-//     non-build operator that doesn't currently report memory). Without
-//     this signal, the SF100 deploy would hit 31 GB anon-rss with a 1.4 GB
-//     tracker budget — the tracker's view of memory was 22× smaller than
-//     reality, and the per-tracker spill check stayed under threshold while
-//     the process climbed past physical RAM.
-//
-// runtime.ReadMemStats is moderately expensive (sub-millisecond), so the
-// reading is rate-limited to once per 100 ms across all callers.
+// ShouldSpill checks tracked use against 60% of effective budget OR the
+// process-wide heap-pressure breaker; tracking-only mode returns false.
+// The heap signal catches allocations bypassing trackers, so accurate local
+// accounting alone must not remove this independent backstop.
+// Rate-limit shared runtime.ReadMemStats samples to once per 100ms.
+// See docs/internals/memory-cooperative-and-heap-spill-signals.md for the design.
 func (sm *SpillManager) ShouldSpill() bool {
 	if sm.trackingOnly {
 		return false
