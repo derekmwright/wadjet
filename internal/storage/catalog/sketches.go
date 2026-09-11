@@ -10,31 +10,12 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
-// FileSketches bundles every supported column's HLL + reservoir sample
-// for one parquet file into a single object-store blob. Storing these
-// sketches inline in the catalog manifest blew the NATS payload limit
-// at SF100 (63 lineitem files × 16 cols × 18 KB ≈ 18 MB > 1 MB max),
-// so the catalog now writes sketches to the object store and only
-// keeps a small reference in the manifest.
-//
-// One blob per parquet file (≈ 16 cols × 18 KB ≈ 300 KB at SF100).
-// The blob is read once per file during AggregateColumnStats and the
-// individual sketches feed cross-file merges. Lazy: not loaded unless
-// the planner asks for the table's aggregated stats.
-//
-// Wire format (binary, version-1):
-//
-//	[4]   magic "WSKB" (Wadjet SKetches Bundle)
-//	[1]   version (1)
-//	[1]   reserved
-//	[2]   column count K (uint16 LE)
-//	then K entries, each:
-//	  [2]  column name length (uint16 LE)
-//	  [N]  column name bytes
-//	  [4]  HLL bytes length (uint32 LE; 0 = no HLL)
-//	  [M]  HLL bytes (HLL wire format, see hll.go)
-//	  [4]  Sample bytes length (uint32 LE; 0 = no Sample)
-//	  [P]  Sample bytes (Sample wire format, see sample.go)
+// FileSketches stores supported columns' HLLs and reservoir samples in one
+// object-store blob per parquet file; keep only its reference in the manifest.
+// AggregateColumnStats loads it lazily once per file for cross-file merges.
+// WSKB v1 uses LE column/name/payload lengths; zero HLL/Sample length means
+// absent. Payload formats remain defined by hll.go and sample.go.
+// See docs/internals/catalog-file-sketch-bundle.md for the design.
 const (
 	sketchesMagic   = "WSKB"
 	sketchesVersion = 1

@@ -32,34 +32,13 @@ import (
 // (serialization_failure) — the class a client is expected to retry.
 var ErrDMLTargetMoved = errors.New("the files this statement read are no longer in the table's manifest")
 
-// ErrDMLRowSuperseded reports that a DML statement's manifest change cannot be
-// committed because ANOTHER STATEMENT has already superseded a row this one is
-// about to supersede.
-//
-// It is the row-level half of the same rule ErrDMLTargetMoved states over
-// files, and it is what #691 left open — ADR-0030 said so in its own words:
-// "Two writers racing each other … both succeed, and the second one's markers
-// are valid because the files did not move … Closing it needs a conflict rule
-// over ROWS, which this record does not decide." This is that rule.
-//
-// The window is the ordinary one: each statement reads the manifest, scans the
-// files it names, records WHICH ROW OF WHICH FILE it affected, and commits at
-// the end. Two statements over the same row both see it live, both write a
-// replacement, and both mark the copy they read — so the manifest ends up
-// naming BOTH replacements and the key is present twice. Measured on
-// v0.18.22, `UPDATE … n = 111 WHERE id = 1` against `UPDATE … n = 222 WHERE
-// id = 1`:
-//
-//	table afterwards:  1:111:a  1:222:a  2:20:b  3:30:c
-//	both statements:   UPDATE 1
-//
-// The same window resurrects a deleted row (an UPDATE whose scan predates a
-// concurrent DELETE re-publishes the row it read) and reports `DELETE 1` over
-// a row that is still readable.
-//
-// A statement that sees this redoes itself against the manifest that replaced
-// the one it read, exactly as ErrDMLTargetMoved makes it redo; the outcome is
-// then one of the two serial orders PostgreSQL could have produced.
+// ErrDMLRowSuperseded means another statement already superseded a row this
+// statement is about to supersede (#691, ADR-0030).
+// It complements ErrDMLTargetMoved's file check, preventing duplicate UPDATE
+// replacements and resurrection after DELETE even when files did not move.
+// Redo the statement against the new manifest, as for ErrDMLTargetMoved,
+// so conflicting statements yield a serial outcome.
+// See docs/internals/catalog-dml-row-conflict.md for the design.
 var ErrDMLRowSuperseded = errors.New("a row this statement supersedes was already superseded by another statement")
 
 // PendingFile is a data file already written to the object store but NOT yet
@@ -71,43 +50,16 @@ type PendingFile struct {
 	Entry      FileEntry
 }
 
-// CommitDML commits one DML statement's whole manifest change in a SINGLE CAS:
-// the files it wrote and the delete markers that remove the rows they replace,
-// or neither.
-//
-// Two properties, and both are load-bearing:
-//
-//  1. **Validation, over files and over rows.** Every marker names a file the
-//     manifest STILL HOLDS at commit time (`ErrDMLTargetMoved`), and no marker
-//     names a (file, row) the manifest ALREADY MARKS (`ErrDMLRowSuperseded`).
-//     The first is the check `AddDeleteMarkers` never had — it decodes the
-//     manifest and never looks at `Partitions`. The second is the one #691
-//     left open, and it rests on an invariant the DML door keeps: a statement
-//     filters its scan through `DeletedRowsByFile` before it matches anything
-//     (`deleteOnce`, `updateOnce` and `readMergeTarget` all do, which is
-//     #674's rule), so it NEVER mints a marker for a row the manifest it read
-//     already marked. An incoming (file, row) that is marked here was
-//     therefore marked by another statement SINCE this one read, and that is
-//     exactly the conflict.
-//
-//     Both predicates are exactly right rather than merely conservative. A
-//     concurrent write that did not touch this statement's files leaves its
-//     markers valid; two statements over DIFFERENT rows of the same file both
-//     commit, because their marker sets are disjoint. A blunt "the revision
-//     moved" test would be wrong in both directions — it fails on any
-//     unrelated write, and an UPDATE's own ingest moves the revision.
-//
-//  2. **Atomicity.** An UPDATE or MERGE used to commit twice — the ingester's
-//     AddNewFiles per flushed file, then AddDeleteMarkers — so a refusal at
-//     the second commit left the replacement rows beside the originals they
-//     were supposed to replace. Here the replacement files ride in the same
-//     CAS as the markers, so a refused statement has written nothing to the
-//     manifest and can simply be retried.
-//
-// What remains outside it: the parquet objects a refused attempt already wrote
-// stay in the object store, unreferenced, until the orphan sweep reclaims
-// them. That is a leak of bytes on a rare retry, never a wrong row — the
-// manifest is the only thing that decides which rows exist.
+// CommitDML publishes replacement files AND delete markers in one CAS, or neither.
+// Every marker's file must remain live (ErrDMLTargetMoved), and its row must
+// not already be marked (ErrDMLRowSuperseded; #691).
+// DML scans must exclude DeletedRowsByFile before matching (#674), so an
+// already-marked incoming row proves another statement committed since the read.
+// Disjoint rows of one file and unrelated writes may both commit; a revision
+// change alone is not a conflict. A refused statement may retry safely.
+// Uploaded objects from refused attempts remain unreferenced until orphan
+// reclaim; only the manifest decides row visibility.
+// See docs/internals/catalog-dml-atomic-publication.md for the design.
 func (c *Catalog) CommitDML(_ context.Context, tableName string, newFiles []PendingFile, markers []DeleteMarker) error {
 	if len(newFiles) == 0 && len(markers) == 0 {
 		return nil

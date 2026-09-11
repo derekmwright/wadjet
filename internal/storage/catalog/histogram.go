@@ -11,35 +11,12 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// Histogram is an equi-depth histogram over a column's values. Each
-// bucket holds boundary values and a count. For numeric columns, the
-// boundaries are int64-encoded; the planner converts to/from float64
-// for range comparisons.
-//
-// Equi-depth means each bucket holds approximately the same number of
-// values (1/K of the total). Bucket boundaries adapt to the data
-// distribution: dense regions get narrow buckets, sparse regions wide.
-// This gives accurate selectivity estimates for both common and rare
-// values.
-//
-// Used in stats.estimatePredSelectivity for range/equality filters
-// when the column has a histogram in the catalog. Replaces hardcoded
-// 0.33 / 0.1 fractions with data-driven estimates.
-//
-// Wire format (binary, version-1):
-//
-//	[1]   version (1)
-//	[1]   bucket count K (≤ 255)
-//	[1]   value type code (0=int64, 1=float64, 2=bytes)
-//	[1]   reserved
-//	[8]   total values
-//	[K+1] boundary values (K buckets → K+1 boundaries)
-//	[K*8] per-bucket counts (uint64 LE)
-//
-// Boundary encoding depends on type code:
-//   - int64: 8 bytes LE per value
-//   - float64: 8 bytes LE (math.Float64bits) per value
-//   - bytes: uint16 length prefix + raw bytes per value
+// Histogram uses approximately equi-depth buckets for range/equality estimates.
+// Version 1 records K <= 255 buckets, total values, K+1 boundaries and K counts.
+// Preserve native int64, float64 or bytes boundary encoding; do not force all
+// numeric boundaries through int64. Counts are uint64 LE; bytes have uint16
+// length prefixes. The exact framing and type tags are in the design.
+// See docs/internals/catalog-histogram-wire-format.md for the design.
 const (
 	histVersion        = 1
 	HistDefaultBuckets = 64

@@ -14,30 +14,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// AnalyzeTable computes HyperLogLog sketches over every column of every
-// file in the named table and writes them back into the manifest's
-// FileColumnStats.HLL field. Idempotent — re-running ANALYZE replaces
-// existing HLLs with freshly computed ones.
-//
-// Used when a table's data was pre-staged (e.g., the SF10/SF100 EC2
-// deploy buckets) without going through the ingest path, so HLL never
-// got collected at write time. The planner's NDV estimator then has
-// real distinct-count data instead of falling back to min/max-range
-// heuristics or FK-naming.
-//
-// Strategy: for each file, download the parquet bytes, decode row
-// groups via the existing parquet.Reader API, hash every column value
-// into a per-(file, column) HLL. After all files of one table are
-// processed, persist the augmented manifest.
-//
-// Cost: one full table scan, decompressed but not joined. SF10 lineitem
-// (60 chunks × 1M rows × 16 cols) takes 1-2 minutes serial. Cheap
-// relative to a single query at the same scale; expected to run once
-// per data load.
-//
-// Returns the count of files analyzed and any error from the first
-// failed file. Files that fail (corrupt, missing) are logged and
-// skipped — partial coverage is better than total failure.
+// AnalyzeTable recomputes per-file column HLLs and samples plus row-group
+// metadata, replacing previous statistics on repeated ANALYZE.
+// Decode each file and persist sketch blobs referenced by the manifest;
+// use a private manifest, never mutate GetManifest's shared revision.
+// Return the number processed and the first received file error; failed files
+// are not silently skipped. Statistics supply NDV/selectivity estimates.
+// See docs/internals/catalog-analyze-sketch-publication.md for the design.
 func (c *Catalog) AnalyzeTable(ctx context.Context, name string) (int, error) {
 	// loadManifest, not GetManifest: this rewrites the manifest in place
 	// (sketch keys onto every FileEntry, RGMetaKey, UpdatedAt) before

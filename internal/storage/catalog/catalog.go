@@ -222,29 +222,13 @@ type FileEntry struct {
 	// sketches are externalized (legacy inline path still supported via
 	// FileColumnStats.HLL / .Sample).
 	SketchesKey string `json:"sketches_key,omitempty"`
-	// EngineWritten marks an object WADJET ITSELF wrote: ingest's
-	// chunk_<uuid>, compaction's compacted_<uuid>, delete-marker GC's
-	// rewrite_<uuid>. It is the ownership marker DropTable's physical
-	// reclaim keys off — only a marked entry is ever scheduled for
-	// deletion (#494), so reclaim can only ever delete bytes this engine
-	// created.
-	//
-	// Set in exactly two places, both of which mint the path themselves:
-	// AddNewFiles (ingest, compaction) and SwapFileForGC's rewrite output.
-	// AddFiles — the REGISTRATION path — deliberately leaves it alone,
-	// because its callers point the catalog at objects somebody else
-	// staged: cmd/tpch-bench (--data-prefix "tables/"), cmd/clickbench-
-	// bench (--s3-prefix "tables/hits/"), internal/harness's s3_catalog,
-	// and iceberg.CatalogIntegration all register pre-existing operator
-	// data, and a bench bucket's reference dataset is not wadjet's to
-	// delete on a DROP.
-	//
-	// Absent means NOT owned, which is the safe default in both
-	// directions that matter: `omitempty` keeps it out of every manifest
-	// that has no engine-written files, and every manifest written before
-	// this field existed decodes with it false — so no pre-existing
-	// object can be reclaimed by a newer binary. Unmarked entries leak on
-	// DROP by design; see docs/adr/0020-drop-table-reclaim-is-opt-in.md.
+	// EngineWritten permits physical reclaim only for objects this engine wrote
+	// (#494); absent/false means unowned, including older manifests.
+	// Engine publication paths stamp newly minted outputs; AddFiles registration
+	// must not infer ownership from a path or mark operator-staged data.
+	// Unmarked files deliberately survive DROP. Ownership is independent of path
+	// convention; see docs/adr/0020-drop-table-reclaim-is-opt-in.md.
+	// See docs/internals/catalog-engine-written-ownership.md for the design.
 	EngineWritten bool `json:"engine_written,omitempty"`
 }
 
@@ -590,32 +574,12 @@ func (c *Catalog) GetTable(_ context.Context, name string) (*TableMeta, error) {
 	return &meta, nil
 }
 
-// GetManifest returns the partition manifest for a table.
-//
-// Freshness is decided by the manifest key's KV REVISION, on every call.
-// The cache only ever skips re-decoding a revision this process already
-// decoded; it is a decode memo, never a staleness window.
-//
-// It used to be one, and that was #483. A 2-second wall-clock TTL,
-// invalidated only by writes made through the same *Catalog value, is
-// sound only while a process holds exactly one of them. Standalone holds
-// three over the same KV — the coordinator's, the pgwire DB's, and a fresh
-// one per worker pipeline task — and pgwire routes SELECT through the
-// coordinator's catalog while INSERT/UPDATE/DELETE and DDL go through the
-// DB's. Every write therefore invalidated a cache no reader was consulting,
-// and reads answered from a manifest up to two seconds old. Statements
-// issued back to back (a psql script, a SQLancer round, any client driving
-// a session) all land inside that window: writes looked lost, and
-// DROP TABLE + CREATE TABLE of the same name answered out of the previous
-// incarnation's files — silently when the two schemas were
-// encoding-compatible, and as a decode-time type refusal when they were
-// not. A revision is the catalog's own notion of "which version is this",
-// so validating against it cannot drift from what the catalog holds; a
-// clock can.
-//
-// The returned manifest is SHARED with every other caller holding this
-// revision. Treat it as immutable — mutators inside this package take
-// loadManifest instead.
+// GetManifest validates the manifest key's KV REVISION on every call (#483).
+// The cache memoizes decoding only; never substitute a wall-clock staleness
+// window or rely on invalidations from this Catalog alone.
+// The returned manifest is SHARED and immutable for all readers of that
+// revision. Package mutators must take loadManifest instead.
+// See docs/internals/catalog-manifest-revision-memo.md for the design.
 func (c *Catalog) GetManifest(_ context.Context, tableName string) (*PartitionManifest, error) {
 	manifest, _, err := c.manifestWithRevision(tableName)
 	return manifest, err
@@ -1188,35 +1152,14 @@ func (c *Catalog) GCDeleteMarkers(_ context.Context, tableName string, minAge ti
 	return nil, nil, fmt.Errorf("GC delete markers failed after %d CAS retries (table %q)", maxRetries, tableName)
 }
 
-// SwapFileForGC publishes a delete-marker GC rewrite: the old file leaves the
-// partition, the rewritten replacement arrives, and the markers the rewrite
-// applied go away — all in the one conditional transaction CommitCompaction
-// runs, validated against the same two preconditions every compaction
-// publication is (input identity, and the delete-marker snapshot the output
-// was cut from).
-//
-// It used to be its own CAS loop with its own rule, and the rule was wrong in
-// two directions #894 and #895 reproduced:
-//
-//   - It appended the rewrite output without requiring that oldPath was still
-//     a member of the partition, so two GC sweeps over the same file each
-//     published a rewrite and the surviving rows appeared twice.
-//   - It removed only the row indices the rewrite APPLIED and left any that
-//     had arrived since, under the OLD file's path — where no reader can
-//     apply them, because that file is gone. The comment here used to say
-//     those rows stayed visible "for at most one GC cycle". They did not:
-//     the next sweep removes the dangling marker as an orphan, and the
-//     replacement carries the row forever. Removing a marker cannot remove a
-//     row from a file that already contains it.
-//
-// So a rewrite now applies ALL of a file's current markers or none of them:
-// if the marker set moved between the manifest read the rewrite was cut from
-// and this commit, the swap is refused with ErrCompactionDeletesAdvanced and
-// the caller re-reads and rewrites against the newer set. appliedIndices is
-// therefore a PRECONDITION, not just a cleanup list — it says which markers
-// the output reflects, and the commit checks it.
-//
-// If newFile is nil, the old file is simply removed (all rows were deleted).
+// SwapFileForGC atomically removes oldPath, publishes newFile and removes
+// applied markers through CommitCompaction (#894, #895).
+// oldPath must still be present, and appliedIndices must equal ALL current
+// markers for that file; it is a precondition, not merely a cleanup list.
+// Changed markers return ErrCompactionDeletesAdvanced: reread and rewrite,
+// never leave newer markers under a removed path or duplicate a replacement.
+// A nil newFile removes the old file when every row was deleted.
+// See docs/internals/catalog-delete-marker-gc-swap.md for the design.
 func (c *Catalog) SwapFileForGC(ctx context.Context, tableName string, oldPath string, newFile *FileEntry, partValues map[string]string, partPath string, appliedIndices map[int64]bool) error {
 	return c.CommitCompaction(ctx, CompactionCommit{
 		Table:          tableName,
@@ -1264,41 +1207,14 @@ func (c *Catalog) LoadUDFs() ([]UDFDef, error) {
 	return defs, nil
 }
 
-// DropTable removes a table from the catalog.
-//
-// Metadata only: the table's name and manifest KV keys go away here, which
-// is what makes it immediately invisible to every NEW query (GetTable,
-// GetManifest, and ListTables all answer from this same metadata, and #483
-// keys the manifest cache by KV revision so a stale in-process copy can't
-// serve a resurrected name's old files either). The table's DATA FILES are
-// deliberately NOT deleted here — see FlushDroppedTableFiles for why, when,
-// and under what guard they go.
-//
-// Tombstone-then-grace-delete, not a prefix delete under tables/<name>/,
-// and not "leave it forever" either (#494 asked for a decision between
-// those). A live prefix delete is the wrong shape regardless of timing: a
-// CREATE TABLE of the same name during the grace window gets an entirely
-// new, unrelated set of files at that same prefix (chunk/compacted names
-// are per-file random, not derived from the table name), and a prefix
-// delete run after the fact cannot tell that incarnation's files from the
-// dropped one's — it would eat the new table's data. Recording the exact
-// paths this incarnation OWNED (engine-written only — see the snapshot
-// below), once, right here, and checking each one against every CURRENT
-// manifest before ever deleting it (FlushDroppedTableFiles) has no such
-// blast radius. It doesn't reach
-// RGMetaKey/SketchesKey blobs under stats/<name>/ — those are named by
-// table+column, not by a birthday-collision-prone short ID, so they sit
-// outside #494's collision hazard; leaking them is a separate, lower-
-// severity storage-hygiene gap.
-//
-// Ordering matters twice. The metadata put that removes the name from
-// meta.Tables goes FIRST — it is the write that constitutes the drop, and
-// putting it first is what makes a failed DROP a clean no-op rather than a
-// table that is listed but unreadable (see the comment at the put). And
-// the pending-drop record is appended only AFTER that put succeeds: a
-// failed DROP must leave the table exactly as recoverable as it was before
-// the call — nothing scheduled for physical deletion — not half-gone with
-// its files already timed for reclaim.
+// DropTable removes metadata so new queries cannot see the table (#483).
+// Put meta.Tables FIRST, then append pending reclaim only after that succeeds:
+// a failed DROP must leave recoverable metadata and schedule no deletion.
+// Snapshot exact EngineWritten paths; never delete a tables/<name>/ prefix,
+// which could contain a recreated incarnation's files (#494).
+// FlushDroppedTableFiles performs guarded grace-period deletion later.
+// RGMetaKey/SketchesKey blobs are outside this reclaim and may leak.
+// See docs/internals/catalog-drop-metadata-order.md for the design.
 func (c *Catalog) DropTable(ctx context.Context, name string) error {
 	meta, err := c.getMeta()
 	if err != nil {
@@ -1514,31 +1430,14 @@ type pendingTableDrop struct {
 // operator chose. See docs/adr/0020-drop-table-reclaim-is-opt-in.md.
 const DefaultDropTableGrace = 30 * time.Minute
 
-// liveCatalogState observes the catalog as it stands RIGHT NOW: the set of
-// every file path referenced by ANY table's manifest, and the set of table
-// names that exist. Both halves are FlushDroppedTableFiles's guard.
-//
-// The path set is the load-bearing one: a path recorded in pendingDrops can
-// ALSO be live at flush time — the same table name re-created and the very
-// same object paths re-registered into it (#278's documented idempotent
-// re-registration workflow lets a harness/bench loader do exactly that, and
-// iceberg.CatalogIntegration.RefreshTable does it on every metadata
-// refresh: drop, recreate, re-register the same warehouse files) — and a
-// path referenced by any CURRENT manifest must never be deleted just
-// because some OTHER, already-gone incarnation once also owned it.
-//
-// The name set closes the window the path set alone cannot: CreateTable
-// publishes a table's name and its (empty) manifest BEFORE any AddFiles
-// call registers a single path into it, so there is an interval in which a
-// re-created table is live and its manifest is still empty. Nothing is
-// protected by path during that interval. A dropped name that has come back
-// since this flush started is therefore treated as "the world changed under
-// us" and its whole pending entry is left alone — see FlushDroppedTableFiles.
-//
-// A GetManifest error for a table ListTables just returned is treated as
-// "this sweep cannot prove anything is safe" rather than "that table has
-// no files": the caller declines to delete against a possibly-incomplete
-// picture.
+// liveCatalogState reads every current table name and manifest file path.
+// FlushDroppedTableFiles must preserve any referenced path, including files
+// re-registered after DROP (#278) or through Iceberg RefreshTable.
+// Names also protect tables recreated mid-flush before AddFiles registers
+// paths into their initially empty manifests.
+// A manifest read failure means safety is unproven, never an empty table:
+// the caller must decline deletion against that incomplete picture.
+// See docs/internals/catalog-live-reference-observation.md for the design.
 func (c *Catalog) liveCatalogState(ctx context.Context) (paths map[string]bool, names map[string]bool, err error) {
 	tables, err := c.ListTables(ctx)
 	if err != nil {
@@ -1561,79 +1460,16 @@ func (c *Catalog) liveCatalogState(ctx context.Context) (paths map[string]bool, 
 	return paths, names, nil
 }
 
-// FlushDroppedTableFiles physically deletes the data files of tables
-// DropTable removed at least grace ago (zero or negative flushes
-// everything pending, for tests). Three independent safety layers stand
-// between a pending path and the Delete call below; the first alone bounds
-// the blast radius to bytes wadjet wrote, and either of the next two alone
-// blocks the #494 review's reproduced data loss:
-//
-//  0. Ownership (DropTable, upstream of this list at all): a path is only
-//     ever in pendingDrops if its FileEntry was EngineWritten — stamped by
-//     AddNewFiles and SwapFileForGC, never by the AddFiles registration
-//     path. Nothing an operator staged and merely registered can reach
-//     this function, whatever shape its path takes.
-//  1. The live-manifest guard, RE-OBSERVED per pending entry immediately
-//     before that entry's deletes (liveCatalogState, and only when
-//     something is actually DUE): a path referenced by
-//     ANY current table's manifest is never deleted, no matter how long
-//     its OLD incarnation has been gone. This is the load-bearing layer —
-//     it is what makes drop-then-re-register-the-same-files (#278's
-//     workflow) and Iceberg's RefreshTable (drop+recreate over the same
-//     warehouse files, every refresh) safe. Building the set ONCE up front
-//     and deleting against it was the review's second reproduced data
-//     loss: a re-registration landing after the set was built and before
-//     the Delete fired was invisible to it. Re-observation narrows that
-//     window from "the whole flush" to "one entry's delete batch"; it does
-//     not close it (see the residual note below).
-//  2. Defense in depth: a path is only ever a delete candidate if it
-//     falls under its OWN table's partition.TablePrefix(name) —
-//     "tables/<name>/..." — and only via this catalog's own configured
-//     store and bucket. This is a CONVENTION, not an impossibility:
-//     iceberg/reader.go's resolvePath strips the scheme AND the bucket
-//     off an absolute data-file URI, so a warehouse at
-//     s3://somebucket/tables/events/... resolves into exactly the
-//     guarded shape. It is a cheap second opinion on paths that are
-//     already owned, not the thing standing between an Iceberg warehouse
-//     and a delete — layer 0 is (everything Iceberg registers goes
-//     through AddFiles, so none of it is ever marked).
-//
-// On top of those, this mirrors compaction.Compactor's own
-// deleteFromStore/FlushDeferredDeletes recreated-object guard: a path
-// whose object was modified after the drop was recorded is skipped,
-// since something has legitimately written there since.
-//
-// RESIDUAL, stated plainly: pendingDrops is in-process, and the
-// re-observation is a read; nothing serializes it against a write. dropMu
-// guards only pendingDrops itself, not the Head/Delete calls below, so
-// this is NOT scoped to a DIFFERENT *Catalog instance — a second
-// goroutine calling AddFiles on THIS SAME *Catalog while the delete loop
-// is mid-entry is just as invisible, and was reproduced directly against
-// one instance. The window is one pending entry's WHOLE delete batch
-// (every Head+Delete pair over that entry's paths), not a single call.
-// cmd/wadjet's standalone mode has no in-process AddFiles caller sharing
-// a *Catalog with its BackgroundCompactor (its pgwire server opens a
-// separate wadjet.DB), so this is unreachable through that binary today;
-// an embedder calling db.Catalog().AddFiles beside its own
-// BackgroundCompactor reaches it. Layer 0 — ownership — is the layer that
-// does not depend on timing at all, which is why it, not this one, is
-// what bounds the blast radius. See
-// docs/adr/0020-drop-table-reclaim-is-opt-in.md.
-//
-// Not called from within this package on any timer, and — unlike
-// compaction's own deferred-delete flush — not called unconditionally by
-// the production background sweep either: see
-// compaction.BackgroundConfig.ReclaimDroppedTables (opt-in, default off).
-// Not every process that can DROP a table runs that sweep against the
-// same *Catalog (an embedded wadjet.DB and a standalone pgwire DB each
-// hold their own), so leaving this off by default means "not reclaimed
-// yet" rather than "reclaimed here but not there" is the honest default
-// everywhere; a leaked object is an ops cleanup problem, where an
-// incorrectly deleted one is data loss. Like the compactor's own
-// pendingDeletes, this list is process-local — a crash before the grace
-// elapses leaves the files in place rather than losing track of them
-// destructively, the same trade compaction already makes. Returns the
-// number of files deleted.
+// FlushDroppedTableFiles deletes due EngineWritten paths only, under their own
+// table prefix in this store/bucket (#494, #278), returning the deleted count.
+// Reobserve every live manifest per entry; preserve referenced paths, newly
+// reborn table names and objects modified since DROP. Zero/negative grace is due.
+// Ownership bounds deletion; prefix convention alone cannot prove ownership.
+// The read/delete race spans an entry's whole batch, even with same-Catalog
+// AddFiles: dropMu guards only the queue. This is not a retirement interlock.
+// ReclaimDroppedTables is opt-in/default off, with no package timer; queues
+// are process-local and crashes leak. See docs/adr/0020-drop-table-reclaim-is-opt-in.md.
+// See docs/internals/catalog-dropped-table-reclaim.md for the design.
 func (c *Catalog) FlushDroppedTableFiles(ctx context.Context, grace time.Duration) int {
 	c.dropMu.Lock()
 	nothingPending := len(c.pendingDrops) == 0

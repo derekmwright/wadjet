@@ -6,36 +6,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
-// CheckStorableName refuses a relation or column name that cannot be one
-// component of an object key.
-//
-// A table's data lives at `tables/<name>/…` (partition.TablePrefix) and a
-// partition key's column name becomes a directory component below it
-// (`<col>=<value>/`), so these two names are not only identifiers: they are
-// spelled into the object store's namespace. The LEXER takes a delimited
-// identifier byte-exact, so `CREATE TABLE "../../../tmp/x"` handed the store a
-// key that climbed out of its root, and on `storage.type: file` that was an
-// arbitrary file write (CodeQL go/path-injection #23/#24/#25).
-//
-// objstore.ValidateObjectKey closes that at the store, which is the layer that
-// has to be right regardless of who the caller is. This is the layer where a
-// PERSON can be told what is wrong, at CREATE, before a table exists whose
-// every write would fail.
-//
-// The rule is objstore.ValidateObjectKey's, narrowed to ONE component: no
-// '/', no '\', no NUL, the name is not "." or "..", and it does not begin with
-// '.'. A ".." INSIDE a component ("x..y") is accepted, because it names a real
-// directory and the store accepts the key — the danger is a component that IS
-// "..", not the two characters. The SQLSTATE is PostgreSQL's 42602
-// invalid_name.
-//
-// This is a DELIBERATE DIVERGENCE and it is recorded in ADR-0012's list:
-// PostgreSQL accepts any of these inside a double-quoted identifier, because
-// its relations are rows in pg_class and never filenames. Wadjet's are objects
-// in a store, and the alternative to refusing the name is a table whose data
-// has no home — or, on a filesystem store, one whose data lands somewhere it
-// was never meant to. It is name-only and LOUD: no query answers differently,
-// and no name is silently rewritten.
+// CheckStorableName requires one usable object-key component at CREATE,
+// complementing objstore.ValidateObjectKey's store-level guard (#23/#24/#25).
+// Reject empty names, '/', backslash, NUL, '.', '..' and leading '.' with 42602;
+// internal '..' such as x..y remains allowed. Do not silently rewrite names.
+// This deliberate PostgreSQL identifier divergence is recorded in ADR-0012:
+// table and partition-column names enter the object-store namespace.
+// See docs/internals/catalog-storable-name-boundary.md for the design.
 func CheckStorableName(kind, name string) error {
 	switch {
 	case name == "":

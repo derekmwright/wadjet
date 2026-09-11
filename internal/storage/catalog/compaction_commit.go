@@ -8,31 +8,13 @@ import (
 	"time"
 )
 
-// ErrCompactionConflict reports that a compaction output cannot be published
-// because the snapshot it was cut from is no longer the table's state.
-//
-// It is the compaction half of the rule `ErrDMLTargetMoved` states for DML
-// (ADR-0030), and it exists for the same reason: a writer that reads a
-// manifest, spends time producing a replacement, and then commits, is running
-// a transaction whose read set has to be validated at commit time or not at
-// all. Compaction's read set is two things — WHICH FILES it consumed and
-// WHICH ROWS OF THEM were already deleted — and until #893/#894/#895 neither
-// was checked:
-//
-//   - `RemoveFiles` treated an input that was already gone as success, so two
-//     compactors could each publish a replacement for the same originals and
-//     the table ended up holding both copies of every row (#895).
-//   - a DELETE that committed after the output was written but before it was
-//     published was undone by the publication, because the output still
-//     carried the row and `RemoveFiles` stripped the marker that named it
-//     (#894).
-//
-// A conflict is not a failure: nothing was written, the previous snapshot is
-// intact, and the losing writer replans from the manifest that replaced the
-// one it read. It is detected BEFORE the CAS write is attempted, which is why
-// the caller may safely delete the output object it uploaded — a publication
-// ERROR (the KV refused, timed out, or is unreachable) says nothing about
-// whether the write landed, and the bytes are kept in that case.
+// ErrCompactionConflict means input identity or applied delete-marker state
+// changed since the output snapshot (ADR-0030; #893/#894/#895).
+// Validation refuses before CAS: nothing was published and the losing writer
+// may discard its output and replan from the current manifest.
+// A publication ERROR is different: a timeout/refusal may leave commit outcome
+// unknown, so retain the uploaded bytes rather than deleting live output.
+// See docs/internals/catalog-compaction-conflict-boundary.md for the design.
 var ErrCompactionConflict = errors.New("this compaction output was cut from a snapshot the table no longer has")
 
 var (
@@ -76,39 +58,14 @@ type CompactionCommit struct {
 	AppliedDeletes map[string]map[int64]bool
 }
 
-// CommitCompaction publishes a compaction replacement in ONE conditional
-// manifest transaction: the inputs leave the partition, their delete markers
-// leave with them, and the replacement arrives — or none of it does.
-//
-// Before #893 this was two CAS writes, `RemoveFiles` then `AddNewFiles`. Each
-// was atomic and the PAIR was not, which cost three distinct properties:
-//
-//  1. A failure between them left the table with the inputs gone and the
-//     replacement unpublished — zero visible rows, unrecoverable by retry
-//     because the compactor selects its inputs from the manifest it just
-//     emptied (#893).
-//  2. Even when both succeeded, a reader landing between them saw the
-//     intermediate manifest and answered from it.
-//  3. Neither call validated anything: `RemoveFiles` accepts inputs that are
-//     already gone (#895) and strips markers it never applied (#894).
-//
-// The validation is the other half of the fix and does not follow from
-// atomicity: a single atomic write of a stale plan is still wrong. Two
-// predicates, both exact rather than conservative:
-//
-//   - **Input identity.** Every path in Inputs is still in PartPath's file
-//     list. A losing compactor whose originals another compactor already
-//     consumed is refused with ErrCompactionInputMoved instead of adding a
-//     second copy of the same rows beside the winner's.
-//   - **The delete-marker snapshot.** The manifest's marker set for each
-//     input equals the set the output applied. A DELETE that committed while
-//     the output was being written moves the set, and the commit is refused
-//     with ErrCompactionDeletesAdvanced rather than republishing the row it
-//     removed.
-//
-// Neither predicate fires on a write that did not touch this partition's
-// files, so unrelated ingest, DML on other files, and compaction of other
-// partitions all commit alongside it.
+// CommitCompaction removes inputs and their markers and publishes the output
+// in ONE conditional manifest transaction, or changes none (#893).
+// Every input must remain in PartPath, else ErrCompactionInputMoved (#895).
+// Each input's current marker set must equal the output's applied snapshot,
+// else ErrCompactionDeletesAdvanced (#894); atomicity alone is insufficient.
+// Unrelated ingest, DML on other files and other-partition compaction do not
+// invalidate these predicates and may commit alongside this replacement.
+// See docs/internals/catalog-compaction-atomic-publication.md for the design.
 func (c *Catalog) CommitCompaction(_ context.Context, cc CompactionCommit) error {
 	if len(cc.Inputs) == 0 {
 		return fmt.Errorf("compaction commit for table %q names no input files", cc.Table)
