@@ -518,12 +518,26 @@ happens to select nothing is still a typo.
 That holds in **every position and on every plan**: a `SELECT` item, a `WHERE`
 or `JOIN ... ON` predicate, a `HAVING`, a `GROUP BY` key, an `ORDER BY` key, a
 set-operation arm, a projection above a `GROUP BY`, a window function's
-argument, `PARTITION BY` / `ORDER BY` terms or frame terms, and the body of a
+argument, `PARTITION BY` / `ORDER BY` terms, and the body of a
 derived table, a CTE or an `EXISTS` / `IN` / scalar subquery — in one process
 and on a distributed query alike. It holds for a subquery written in any of
 those positions, and for one nested inside another subquery, however deep. A
 misspelling is refused before any stage runs, so whether it is an error depends
 on neither the data nor the shape of the plan.
+
+Recursive CTE bodies include both the seed and recursive UNION arm, even
+when the seed is empty or the CTE is unused. The self-reference remains an
+open column scope while literal names are validated.
+
+The expression-position guarantee above concerns supported SELECT syntax.
+Expression-valued window frame bounds, named windows, LIMIT/OFFSET and
+INSERT expressions are rejected by the parser before this check. DML runs
+locally; UPDATE/DELETE predicates and UPDATE SET compile before rows, while
+empty-source MERGE SET/VALUES clauses can return `MERGE 0` without checking
+their expressions. An injected policy filter on an empty distributed stage
+may likewise never compile. Two further empty-input gaps remain: a shadowing CTE body can bypass the
+binder's name map, and an ORDER BY expression on a whole set operation is
+not validated. These remain coverage gaps (ADR-0012).
 
 The one thing still checked per row is a name the query does not spell as a
 constant — a column, or any other text expression. That name is not knowable

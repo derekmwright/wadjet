@@ -43,6 +43,8 @@ func TestTheTCPFlagDocsStateOneRefusalRule(t *testing.T) {
 			present: []string{
 				"Whatever the rows are includes NO rows.",
 				"every position and on every plan",
+				"Recursive CTE bodies include both the seed",
+				"shadowing CTE body",
 				// The three positions round 7 measured the walk missing, now
 				// named where a reader looks for them (#1018 round 7, B1).
 				"a `GROUP BY` key",
@@ -58,6 +60,8 @@ func TestTheTCPFlagDocsStateOneRefusalRule(t *testing.T) {
 			present: []string{
 				"constant is refused before any row",
 				"every expression position and on both plans",
+				"Recursive CTE bodies include both the seed",
+				"shadowing CTE body",
 				"a `GROUP BY` key",
 				"including one nested inside another subquery",
 			},
@@ -73,6 +77,10 @@ func TestTheTCPFlagDocsStateOneRefusalRule(t *testing.T) {
 			present: []string{
 				"AN INVALID LITERAL NAME IS REFUSED FROM THE DECLARATION, ROWS OR NO",
 				"THE DECIDING LAYER IS THE BINDER, NOT COMPILATION",
+				"RECURSIVE CTE BODIES ARE VALIDATED BEFORE ROWS",
+				"#1037",
+				"cte_shadowed_body",
+				"set_order_by",
 				`"EVERY EXPRESSION POSITION" IS A CLAIM ABOUT THE WALK, AND THE WALK HAD`,
 			},
 		},

@@ -870,11 +870,18 @@ func (b *binder) registerCTE(ctx context.Context, cte *plansql.CTEDef) error {
 	if _, exists := b.ctes[name]; exists {
 		return nil
 	}
-	// Recursive CTEs reference themselves; register open and skip body
-	// validation to avoid a false miss on the self-reference.
+	// Register a recursive self-reference as open BEFORE validating its body.
+	// An unknown schema prevents column-name conclusions, not schema-free
+	// literal refusals. The existing block walk visits both UNION arms even
+	// when the seed is empty or the CTE is unused; lazy compilation cannot
+	// guarantee either. Keep the published schema open as before.
 	if cte.Recursive {
 		b.ctes[name] = cteEntry{open: true}
-		return nil
+		body, err := cte.BodySelect()
+		if err != nil {
+			return nil // The parser/planner owns an unparseable body.
+		}
+		return b.validateBlock(ctx, body, nil)
 	}
 	body, perr := cte.BodySelect()
 	if perr != nil || body == nil {

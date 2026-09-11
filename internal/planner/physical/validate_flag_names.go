@@ -35,11 +35,12 @@ import (
 // WHAT IS STILL FOLDED AT COMPILE TIME. expr.compileFuncCallNamed keeps the
 // same call as the BACKSTOP for the doors this walk does not see: the DML
 // predicate, which is not planned at all (ADR-0031) and reaches the engine as a
-// compiled expression; a recursive CTE's body, which the binder registers open
-// and does not validate; a window function's raw OVER terms where they do not
-// parse; an expression the binder cannot re-parse (an ORDER BY item, a subquery
-// body); a policy row filter; and any entry point with no catalog, where
-// ValidateColumnsUnderPolicy declines. ONE function answers for both
+// compiled expression. Recursive CTEs are registered open, then their bodies
+// are validated by the existing block walk, including both UNION arms.
+// Compilation is only a backstop WHEN REACHED: a policy row filter on an empty
+// DAG may never compile; catalog-less table-less plans route locally; syntax
+// the binder cannot re-parse may be refused by the logical builder instead.
+// TestTCPFlagValidationDoors pins these distinct doors. ONE function answers for both
 // (expr.RefuseUnknownTCPFlagNameLiterals over expr.TCPFlagMask), so the two
 // layers cannot disagree about which names exist.
 func refuseUnknownFlagNames(node plansql.Node) error {

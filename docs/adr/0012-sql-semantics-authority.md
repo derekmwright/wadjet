@@ -2278,15 +2278,48 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
 
      The refusal is now asked at PLAN time by the BINDER —
      `physical.refuseUnknownFlagNames`, from `binder.checkExpr` over every
-     expression position of every query block, which `Plan` AND
+     expression position reached by the query-block walk, which `Plan` AND
      `PlanDistributed` both reach through `auth.ValidateStatementColumns`
      before any stage exists. It is deliberately NOT gated on a closed scope
      the way `checkLiteralTypes` is: it asks the scope nothing, because a name
      that names no flag names no flag whatever the FROM list turns out to be.
-     The compile-time call REMAINS as the BACKSTOP for the doors the binder
-     does not see — ADR-0031's DML predicate, which is not planned at all; a
-     recursive CTE's body, which the binder registers open; an expression it
-     cannot re-parse; a policy row filter; and an entry point with no catalog.
+     The compile-time call remains a backstop **when compilation is reached**.
+     It covers ADR-0031's empty-input UPDATE/DELETE predicates and UPDATE SET.
+     It does not guarantee validation of an empty DAG policy filter, or an
+     empty-source MERGE SET/VALUES expression (whose compilation is lazy).
+     Catalog-less table-less plans refuse distribution and compile locally.
+     An ORDER BY term the binder cannot re-parse is refused by the logical
+     builder with 42601. These doors are independently pinned by
+     `TestTCPFlagValidationDoors` and `TestTCPFlagASTCoverage`.
+
+     **RECURSIVE CTE BODIES ARE VALIDATED BEFORE ROWS** (2026-09-11, round 8,
+     B1). `binder.registerCTE` registers the recursive self-reference as open,
+     then calls the existing `validateBlock` over its body. Both UNION arms
+     are visited, even with an empty seed or an unused CTE. An open schema
+     prevents uncertain column-name diagnoses; it does not excuse a misspelled
+     literal flag name. Previously the body was skipped, and
+     `materializeRecursiveCTE` could swallow an `executeSubquery` error, so
+     even reached-input seeds could lose the compile-time refusal.
+     `TestTCPFlagASTCoverage` pins seed, recursive term and unused-body
+     spellings over empty and reached inputs, on five arms with zero route
+     deltas and both wire formats. Reverting body validation fails all six
+     shapes. No declaration walk is added.
+
+     Coverage is limited by parsed syntax: expression-valued frame bounds,
+     named windows, LIMIT/OFFSET, table-function arguments, TABLESAMPLE and
+     INSERT expressions in the coverage fixture are 42601 before binding.
+     MERGE ON supports column equalities only (0A000). DML has no DAG planning
+     path (0A000); its wire door executes locally. These are named residuals,
+     not claims that every possible SQL expression reaches this walk.
+     The round-8 inventory also pins `cte_shadowed_body`: `registerCTE`'s
+     additive name map skips a nested body when its name already exists.
+     The unused shadowing-body fixture answers zero rows on all five arms
+     and both formats. It pins `set_order_by` too: validateBlock returns
+     after the UNION arms without checking the wrapper ORDER BY, and
+     buildSetOpPlan carries the term as a column name, not a compiled
+     expression. All five arms and both formats answer zero rows; the DAG
+     arms take UnreachableOutputLocalRoutes +1 before the local answer. Both reproduce with the round-8 binder fix removed. These are
+     scope/set-operation coverage residuals, not recursive-body regressions.
 
      What stays per row is what is not knowable from the declaration: a name
      supplied by a COLUMN or by an expression, which is not a constant, and a
@@ -2666,6 +2699,21 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      on five arms. Disabling the two reads fails 14 wire subtests and seven
      census cells; disabling the window staging refusal alone fails the two
      windowed census cells on the three DAG arms.
+
+     **The BIGINT case above is exact; a wide DECIMAL literal is not**
+     (round 8, N1, #1037). `SUM((SELECT CAST(9007199254740993.25 AS
+     DECIMAL(30,2))))` over three users returns **27021597764222982** under
+     numeric OID 1700; PostgreSQL 17.11 returns **27021597764222979.75**.
+     The literal has already rounded through float64 before the aggregate
+     reads it. The reviewer reproduced the direct CAST at base `6fc99b39`:
+     **9007199254740994.00**, versus PostgreSQL's **9007199254740993.25**.
+     This pre-existing literal-ingestion defect is not repaired by declaring
+     the scalar-subquery argument. `TestScalarSubqueryAggregateMatrix` pins
+     all 24 divergent SUM/AVG/MIN/MAX plain/grouped/window wire cells, fails
+     on agreement, and asserts the other 156 values. Quoted DECIMAL input is
+     an exact control. The int4 MIN/MAX scalar argument also retains the
+     existing bigint declaration (OID 20 versus PostgreSQL 23); its values
+     agree and the declaration is pinned separately in the same fixture.
 
      NOT closed, and recorded rather than quietly dropped: a SET-OPERATION ARM
      holding a scalar subquery is still declared TEXT beside a bigint arm, so

@@ -2367,11 +2367,25 @@ named for — `SELECT 'x'::int FROM t WHERE false` raises there too.
 The refusal is the same in **every expression position and on both plans** — a
 `SELECT` item, `WHERE`, `JOIN ... ON`, `HAVING`, a `GROUP BY` key, an
 `ORDER BY` key, a set-operation arm, a projection above a `GROUP BY`, a window
-function's argument, `PARTITION BY` or `ORDER BY` terms or frame terms, a
+function's argument, `PARTITION BY` or `ORDER BY` terms, a
 derived table's or a CTE's body, an `EXISTS` / `IN` / scalar subquery, and an
 `UPDATE` or `DELETE` predicate — whether the query runs in one process or as a
 distributed stage DAG. A subquery written in any of those positions is walked
 the same way, including one nested inside another subquery.
+
+Recursive CTE bodies include both the seed and recursive UNION arm, even
+when the seed is empty or the CTE is unused. The self-reference remains an
+open column scope while literal names are validated.
+
+The expression-position guarantee above concerns supported SELECT syntax.
+Expression-valued window frame bounds, named windows, LIMIT/OFFSET and
+INSERT expressions are rejected by the parser before this check. DML runs
+locally; UPDATE/DELETE predicates and UPDATE SET compile before rows, while
+empty-source MERGE SET/VALUES clauses can return `MERGE 0` without checking
+their expressions. An injected policy filter on an empty distributed stage
+may likewise never compile. Two further empty-input gaps remain: a shadowing CTE body can bypass the
+binder's name map, and an ORDER BY expression on a whole set operation is
+not validated. These remain coverage gaps (ADR-0012).
 
 A flag NAME may be any text expression, including a column. A name that is not
 a constant is refused where it first exists, per row; only literal names are
