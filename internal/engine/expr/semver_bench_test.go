@@ -105,4 +105,30 @@ func BenchmarkSemverSatisfies(b *testing.B) {
 	benchSemverSink = n
 }
 
+// THE RANGE MEMO'S PER-ROW COST, on its own.
+//
+// `BenchmarkSemverSatisfies` above cannot separate the memo from the parse or
+// from the registry's `[]any` argument boxing, and the round-1 review read its
+// one-allocation-per-row as the memo's sync.Map key. This is the memo alone:
+// the same text asked once per corpus row, which is what a literal range in a
+// WHERE does. It allocates nothing with or without the one-entry fast path in
+// front of it — the allocation in the predicate benchmark is the argument
+// slice — and the fast path is what makes it about five times cheaper.
+func BenchmarkSemverRangeMemoLookup(b *testing.B) {
+	corpus := benchSemverCorpus()
+	semverRangeCache.reset()
+	b.ReportAllocs()
+	b.ResetTimer()
+	n := 0
+	for i := 0; i < b.N; i++ {
+		for range corpus {
+			r, err := parseSemverRangeCached("semver_satisfies", "^1.2.3 || >=2.0.0 <3.0.0")
+			if err == nil {
+				n += len(r)
+			}
+		}
+	}
+	benchSemverSink = n
+}
+
 var benchSemverSink int

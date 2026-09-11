@@ -335,3 +335,96 @@ func TestTheSemverFamilyIsLenientOnDataAndLoudOnTheQuery(t *testing.T) {
 		t.Errorf("semver_normalize_strict answered SQLSTATE %q, want 22023 (%v)", code, err)
 	}
 }
+
+// A RANGE WHOSE BOUND SITS AT THE ACCEPTANCE BOUND STILL NAMES ITS ROWS (#967).
+//
+// Adopted from the round-1 review's probe. A component is accepted up to
+// int64's MAXIMUM — `semver_major('9223372036854775807.0.0')` answers it, and
+// the shipped corpus draws components from that value — so every desugaring
+// that closes a band by raising a component by one can be handed one with
+// nowhere to go. Wrapped, the upper half drops every row the query named and
+// the lower half admits every row: the wrong boolean in both directions, with
+// no refusal to show for it. Saturated, the bound means what the expansion
+// means, and these counts are what it means.
+//
+// The `1.M.x` cells are the ones that would survive a WRONG fix: a bound
+// "made unbounded" rather than saturated would admit 2.0.0, which is outside
+// the band the query wrote.
+func TestARangeAtTheAcceptanceBoundKeepsTheRowsItNames(t *testing.T) {
+	const max = "9223372036854775807"
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt32},
+		{Name: "v", Type: parquet.TypeString, Nullable: true},
+	}}
+	if err := db.CreateTable(ctx, "a3max", schema, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	versions := []string{
+		max + ".0.0",      // 1
+		"1.0.0",           // 2
+		"5.0.0",           // 3
+		max + ".9.9",      // 4
+		"1." + max + ".0", // 5
+		"2.0.0",           // 6
+		"0.0." + max,      // 7
+	}
+	rows := make([]map[string]any, 0, len(versions))
+	for i, v := range versions {
+		rows = append(rows, map[string]any{"id": int32(i + 1), "v": v})
+	}
+	ing := db.NewIngester("a3max", schema, nil, ingest.Config{MaxBufferRows: 16, RowGroupSize: 16})
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	for _, tc := range []struct {
+		rng  string
+		want int64
+		why  string
+	}{
+		{"^" + max + ".0.0", 2, "the two rows whose major is the maximum"},
+		{max + ".x", 2, "the same band, spelled as an X-range"},
+		{"~" + max + ".x", 2, "the same band, spelled with a tilde"},
+		{">" + max + ".x", 0, "nothing is above the top of the domain"},
+		{"<=" + max + ".x", 7, "everything is below it"},
+		{"1.2.3 - " + max, 5, "every row at or above 1.2.3"},
+		{"^0.0." + max, 1, "the single version at that patch"},
+		{"1." + max + ".x", 1, "the 1.max band, and NOT 2.0.0"},
+		{"~1." + max + ".0", 1, "the same band under a tilde"},
+		{">1." + max + ".x", 4, "the rows above the 1.max band"},
+	} {
+		sql := fmt.Sprintf(`SELECT COUNT(*) AS n FROM a3max WHERE semver_satisfies(v, '%s')`, tc.rng)
+		if n := svtCount(t, db, ctx, sql); n != tc.want {
+			t.Errorf("%s matched %d rows, want %d (%s)", tc.rng, n, tc.want, tc.why)
+		}
+	}
+
+	// The scalar answer, both directions, where the review measured the
+	// wrong boolean.
+	for _, tc := range []struct {
+		expr string
+		want bool
+	}{
+		{fmt.Sprintf(`semver_satisfies('%s.0.0','^%s.0.0')`, max, max), true},
+		{fmt.Sprintf(`semver_satisfies('1.0.0','>%s.x')`, max), false},
+		{fmt.Sprintf(`semver_satisfies('2.0.0','1.%s.x')`, max), false},
+		{fmt.Sprintf(`semver_satisfies('1.%s.%s','1.%s.x')`, max, max, max), true},
+	} {
+		res, err := db.Query(ctx, `SELECT `+tc.expr+` AS s FROM a3max WHERE id = 1`)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.expr, err)
+		}
+		if got := res.Rows[0]["s"]; got != tc.want {
+			t.Errorf("%s = %v, want %v", tc.expr, got, tc.want)
+		}
+	}
+}

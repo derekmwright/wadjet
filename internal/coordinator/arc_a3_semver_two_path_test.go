@@ -215,6 +215,27 @@ func TestTheSemverFamilyOrdersByTheSpecificationOnEveryArm(t *testing.T) {
 		{name: "a_range_from_a_column",
 			sql:  `SELECT COUNT(*) AS n FROM semverpkg WHERE semver_satisfies(v, rng)`,
 			want: []string{"n=int64:" + fmt.Sprint(svColumnRangeMatches)}},
+
+		// THE BOUND AT THE TOP OF THE DOMAIN (#967, round-1 review B1). A
+		// component is accepted up to int64's maximum and the generated corpus
+		// draws components from that value, so a desugaring that closes a band
+		// by raising a component by one is handed one with nowhere to go on
+		// roughly one row in ten. Wrapped, the upper half answers FALSE for
+		// every row and the lower half answers TRUE for every row. The
+		// expectations are computed from the fixture's STRINGS, not from the
+		// range machinery these cells check.
+		{name: "a_band_whose_major_is_the_acceptance_bound",
+			sql: `SELECT COUNT(*) AS n FROM semverpkg
+			       WHERE semver_satisfies(v, '^9223372036854775807.0.0')`,
+			want: []string{"n=int64:" + fmt.Sprint(svBandReleases("9223372036854775807"))}},
+		{name: "nothing_is_above_the_acceptance_bound",
+			sql: `SELECT COUNT(*) AS n FROM semverpkg
+			       WHERE semver_satisfies(v, '>9223372036854775807.x')`,
+			want: []string{"n=int64:0"}},
+		{name: "a_band_whose_minor_is_the_acceptance_bound_still_bounds",
+			sql: `SELECT COUNT(*) AS n FROM semverpkg
+			       WHERE semver_satisfies(v, '1.9223372036854775807.x')`,
+			want: []string{"n=int64:" + fmt.Sprint(svBandReleases("1", "9223372036854775807"))}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {
@@ -430,6 +451,44 @@ func svData() []map[string]any {
 		add(v)
 	}
 	return rows
+}
+
+// svBandReleases counts the fixture's versions whose core begins with the
+// given fields and which carry NO pre-release, by reading the STRINGS.
+//
+// It is deliberately not a second call into the range machinery the cells
+// above check: an expectation computed by the code under test is not an
+// expectation. The pre-release exclusion is the published rule — an
+// intersection whose comparators name no pre-release admits no pre-release
+// version — and every band cell here is spelled with release bounds only.
+func svBandReleases(want ...string) int {
+	n := 0
+	for _, row := range svData() {
+		s, ok := row["v"].(string)
+		if !ok {
+			continue
+		}
+		if i := strings.IndexAny(s, "-+"); i >= 0 {
+			if s[i] == '-' {
+				continue
+			}
+			s = s[:i]
+		}
+		fields := strings.Split(s, ".")
+		if len(fields) != 3 || len(want) > 3 {
+			continue
+		}
+		match := true
+		for i, w := range want {
+			if fields[i] != w {
+				match = false
+			}
+		}
+		if match {
+			n++
+		}
+	}
+	return n
 }
 
 // --- the spill-engagement ledger, ADR-0027 §6's protocol ---

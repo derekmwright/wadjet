@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -169,6 +170,96 @@ func semverBound(major, minor, patch int64, zeroPre bool) semverVersion {
 	return v
 }
 
+// THE RAISED BOUND, AND WHAT IT MEANS AT THE TOP OF THE DOMAIN (#967).
+//
+// Every desugaring except an exact version closes its band by raising ONE
+// component by one: `^1.2.3` is `>=1.2.3 <2.0.0-0`, `~1.2` is
+// `>=1.2.0 <1.3.0-0`, `>1.2.x` is `>=1.3.0`. A component is accepted up to
+// int64's MAXIMUM — that is this family's recorded acceptance bound, and
+// `semver_major('9223372036854775807.0.0')` answers it — so the raise can land
+// one past a value the grammar can spell, and `+1` on an int64 at its maximum
+// is a NEGATIVE number. A negative upper bound is below every version, so the
+// `<` half drops every row the author meant to select; a negative lower bound
+// is below every version, so the `>=` half admits every row. Both are the
+// silent wrong boolean this file's header exists to prevent, and both are
+// reachable: the shipped corpus draws a component from that maximum.
+//
+// The bound is therefore SATURATED rather than wrapped, and the rewrite is
+// EXACT rather than approximate. Every component is bounded by int64, so no
+// version exists between `X.Y.max` and the unspellable `X.(Y+1).0`, and
+// therefore over the versions that exist
+//
+//	<X.(Y+1).0-0   is exactly   <=X.Y.max
+//	>=X.(Y+1).0    is exactly   >X.Y.max
+//
+// with `max` int64's maximum in every component below the raised one. The
+// `-0` the exclusive form carries is not lost with the rewrite: a `-0` bound
+// can never be the comparator that ADMITS a pre-release under the pre-release
+// rule (nothing sorts below the lowest pre-release of its own core), and the
+// saturated form carries no pre-release at all, so the rule answers the same.
+//
+// DROPPING the bound instead would be wrong for a minor or patch raise:
+// `1.9223372036854775807.x` bounded by nothing would admit `2.0.0`, which is
+// outside the band the author wrote. Only the MAJOR raise saturates to a
+// comparator true of every version, and it gets there by the same identity as
+// the other two rather than by a special case.
+//
+// REFUSING the range was the alternative, and is what node-semver does — it
+// refuses any component past 2^53-1, in a version and in a range alike. It is
+// not what this family does, because this family ACCEPTS such a version:
+// refusing `^M.0.0` while `semver_major('M.0.0')` answers M would make the
+// acceptance bound depend on which function was asked, and the range's meaning
+// is not in doubt — it is the one the saturated bound spells. Recorded in
+// ADR-0012 with the acceptance band.
+
+// semverUpperMajor is the exclusive upper bound `<(major+1).0.0-0`, saturated
+// to `<=major.max.max` when the raise would pass int64's maximum.
+func semverUpperMajor(major int64) semverComp {
+	if major == math.MaxInt64 {
+		return semverComp{op: semverOpLTE, ver: semverBound(major, math.MaxInt64, math.MaxInt64, false)}
+	}
+	return semverComp{op: semverOpLT, ver: semverBound(major+1, 0, 0, true)}
+}
+
+// semverUpperMinor is the exclusive upper bound `<major.(minor+1).0-0`,
+// saturated to `<=major.minor.max` when the raise would pass int64's maximum.
+func semverUpperMinor(major, minor int64) semverComp {
+	if minor == math.MaxInt64 {
+		return semverComp{op: semverOpLTE, ver: semverBound(major, minor, math.MaxInt64, false)}
+	}
+	return semverComp{op: semverOpLT, ver: semverBound(major, minor+1, 0, true)}
+}
+
+// semverUpperPatch is the exclusive upper bound `<major.minor.(patch+1)-0`,
+// saturated to `<=major.minor.patch` when the raise would pass int64's
+// maximum — the band is then the one version at its floor.
+func semverUpperPatch(major, minor, patch int64) semverComp {
+	if patch == math.MaxInt64 {
+		return semverComp{op: semverOpLTE, ver: semverBound(major, minor, patch, false)}
+	}
+	return semverComp{op: semverOpLT, ver: semverBound(major, minor, patch+1, true)}
+}
+
+// semverLowerMajor is the inclusive lower bound `>=(major+1).0.0`, saturated
+// to `>major.max.max` when the raise would pass int64's maximum — which no
+// version can satisfy, and nothing can: `>9223372036854775807.x` names the
+// versions above the top of the domain, and there are none.
+func semverLowerMajor(major int64) semverComp {
+	if major == math.MaxInt64 {
+		return semverComp{op: semverOpGT, ver: semverBound(major, math.MaxInt64, math.MaxInt64, false)}
+	}
+	return semverComp{op: semverOpGTE, ver: semverBound(major+1, 0, 0, false)}
+}
+
+// semverLowerMinor is the inclusive lower bound `>=major.(minor+1).0`,
+// saturated to `>major.minor.max` when the raise would pass int64's maximum.
+func semverLowerMinor(major, minor int64) semverComp {
+	if minor == math.MaxInt64 {
+		return semverComp{op: semverOpGT, ver: semverBound(major, minor, math.MaxInt64, false)}
+	}
+	return semverComp{op: semverOpGTE, ver: semverBound(major, minor+1, 0, false)}
+}
+
 // ParseSemverRange parses a node-semver range, and is the ONE reader of the
 // grammar: the evaluator, the binder's literal refusal and the compile-time
 // backstop all call it, so no two layers can disagree about which ranges
@@ -275,9 +366,9 @@ func semverHyphenRange(fn, whole string, fields []string, at int) ([]semverComp,
 	switch {
 	case hi.xMajor:
 	case hi.xMinor:
-		out = append(out, semverComp{op: semverOpLT, ver: semverBound(hi.major+1, 0, 0, true)})
+		out = append(out, semverUpperMajor(hi.major))
 	case hi.xPatch:
-		out = append(out, semverComp{op: semverOpLT, ver: semverBound(hi.major, hi.minor+1, 0, true)})
+		out = append(out, semverUpperMinor(hi.major, hi.minor))
 	default:
 		out = append(out, semverComp{op: semverOpLTE, ver: hi.exact()})
 	}
@@ -336,30 +427,30 @@ func desugarSemverComparator(fn, whole, tok string) ([]semverComp, error) {
 	switch op {
 	case ">":
 		if p.xMinor {
-			return []semverComp{{op: semverOpGTE, ver: semverBound(p.major+1, 0, 0, false)}}, nil
+			return []semverComp{semverLowerMajor(p.major)}, nil
 		}
-		return []semverComp{{op: semverOpGTE, ver: semverBound(p.major, minor+1, 0, false)}}, nil
+		return []semverComp{semverLowerMinor(p.major, minor)}, nil
 	case ">=":
 		return []semverComp{{op: semverOpGTE, ver: semverBound(p.major, minor, 0, false)}}, nil
 	case "<":
 		return []semverComp{{op: semverOpLT, ver: semverBound(p.major, minor, 0, true)}}, nil
 	case "<=":
 		if p.xMinor {
-			return []semverComp{{op: semverOpLT, ver: semverBound(p.major+1, 0, 0, true)}}, nil
+			return []semverComp{semverUpperMajor(p.major)}, nil
 		}
-		return []semverComp{{op: semverOpLT, ver: semverBound(p.major, minor+1, 0, true)}}, nil
+		return []semverComp{semverUpperMinor(p.major, minor)}, nil
 	}
 	// `=1.2.x`, or no operator at all: the whole band the unsaid components
 	// leave open.
 	if p.xMinor {
 		return []semverComp{
 			{op: semverOpGTE, ver: semverBound(p.major, 0, 0, false)},
-			{op: semverOpLT, ver: semverBound(p.major+1, 0, 0, true)},
+			semverUpperMajor(p.major),
 		}, nil
 	}
 	return []semverComp{
 		{op: semverOpGTE, ver: semverBound(p.major, p.minor, 0, false)},
-		{op: semverOpLT, ver: semverBound(p.major, p.minor+1, 0, true)},
+		semverUpperMinor(p.major, p.minor),
 	}, nil
 }
 
@@ -378,7 +469,7 @@ func semverCaret(fn, whole, rest string) ([]semverComp, error) {
 	if p.xMinor {
 		return []semverComp{
 			{op: semverOpGTE, ver: semverBound(p.major, 0, 0, false)},
-			{op: semverOpLT, ver: semverBound(p.major+1, 0, 0, true)},
+			semverUpperMajor(p.major),
 		}, nil
 	}
 	if p.xPatch {
@@ -386,12 +477,12 @@ func semverCaret(fn, whole, rest string) ([]semverComp, error) {
 		if p.major == 0 {
 			return []semverComp{
 				{op: semverOpGTE, ver: lo},
-				{op: semverOpLT, ver: semverBound(0, p.minor+1, 0, true)},
+				semverUpperMinor(0, p.minor),
 			}, nil
 		}
 		return []semverComp{
 			{op: semverOpGTE, ver: lo},
-			{op: semverOpLT, ver: semverBound(p.major+1, 0, 0, true)},
+			semverUpperMajor(p.major),
 		}, nil
 	}
 	lo := p.exact()
@@ -399,17 +490,17 @@ func semverCaret(fn, whole, rest string) ([]semverComp, error) {
 	case p.major == 0 && p.minor == 0:
 		return []semverComp{
 			{op: semverOpGTE, ver: lo},
-			{op: semverOpLT, ver: semverBound(0, 0, p.patch+1, true)},
+			semverUpperPatch(0, 0, p.patch),
 		}, nil
 	case p.major == 0:
 		return []semverComp{
 			{op: semverOpGTE, ver: lo},
-			{op: semverOpLT, ver: semverBound(0, p.minor+1, 0, true)},
+			semverUpperMinor(0, p.minor),
 		}, nil
 	}
 	return []semverComp{
 		{op: semverOpGTE, ver: lo},
-		{op: semverOpLT, ver: semverBound(p.major+1, 0, 0, true)},
+		semverUpperMajor(p.major),
 	}, nil
 }
 
@@ -426,7 +517,7 @@ func semverTilde(fn, whole, rest string) ([]semverComp, error) {
 	if p.xMinor {
 		return []semverComp{
 			{op: semverOpGTE, ver: semverBound(p.major, 0, 0, false)},
-			{op: semverOpLT, ver: semverBound(p.major+1, 0, 0, true)},
+			semverUpperMajor(p.major),
 		}, nil
 	}
 	lo := semverBound(p.major, p.minor, 0, false)
@@ -435,7 +526,7 @@ func semverTilde(fn, whole, rest string) ([]semverComp, error) {
 	}
 	return []semverComp{
 		{op: semverOpGTE, ver: lo},
-		{op: semverOpLT, ver: semverBound(p.major, p.minor+1, 0, true)},
+		semverUpperMinor(p.major, p.minor),
 	}, nil
 }
 
@@ -599,22 +690,44 @@ type semverRangeMemo struct {
 	n atomic.Int64
 }
 
+// semverRangeParse is one range text's outcome — the compiled range or the
+// refusal it earned. It is allocated ONCE per distinct text and held by
+// POINTER, which is what lets the hot path below publish the last one it used
+// without allocating anything.
 type semverRangeParse struct {
-	r   semverRange
-	err error
+	text string
+	r    semverRange
+	err  error
 }
 
 var semverRangeCache semverRangeMemo
 
-func (c *semverRangeMemo) load(s string) (semverRangeParse, bool) {
+// semverRangeLast is the last range text this process compiled.
+//
+// A range is ONE LITERAL per query in every shape but a range-valued column,
+// so after the first row every row reads this and never reaches the memo. What
+// that saves is MEASURED rather than assumed, because the round-1 review's
+// reading of the benchmark — that a sync.Map lookup boxes its string key and
+// therefore allocates once per row — does not reproduce: the lookup allocates
+// NOTHING (`BenchmarkSemverRangeMemoLookup`, 0 allocs/op either way; the
+// predicate benchmark's one allocation per row is the registry's `[]any`
+// argument seam, which is every scalar function's and not this one's). What it
+// costs is the hash and the map probe, and an atomic pointer load with a
+// string compare is about five times cheaper: 30.6 µs against 6.1 µs per 2048
+// lookups, which is 476.8 µs against 444.4 µs on BenchmarkSemverSatisfies.
+// A miss falls through to the bounded memo, which is unchanged and is still
+// what keeps a range-valued COLUMN from parsing the same text twice.
+var semverRangeLast atomic.Pointer[semverRangeParse]
+
+func (c *semverRangeMemo) load(s string) (*semverRangeParse, bool) {
 	v, ok := c.m.Load(s)
 	if !ok {
-		return semverRangeParse{}, false
+		return nil, false
 	}
-	return v.(semverRangeParse), true
+	return v.(*semverRangeParse), true
 }
 
-func (c *semverRangeMemo) store(s string, r semverRangeParse) {
+func (c *semverRangeMemo) store(s string, r *semverRangeParse) {
 	if c.n.Load() >= semverRangeMemoCap {
 		// Drop the generation, as temporalMemo does. Concurrent stores may
 		// overshoot by however many are in flight, which is bounded by the
@@ -636,6 +749,7 @@ func (c *semverRangeMemo) entries() int {
 func (c *semverRangeMemo) reset() {
 	c.m.Clear()
 	c.n.Store(0)
+	semverRangeLast.Store(nil)
 }
 
 // parseSemverRangeCached is the per-row entry point. The memo key is the range
@@ -643,13 +757,21 @@ func (c *semverRangeMemo) reset() {
 // bad range raises identically on the first row and on every row after it —
 // a cache that remembered only successes would make the error depend on
 // whether some earlier row had warmed it.
+//
+// The one-entry fast path in front of the memo is the allocation, not the
+// parse: see semverRangeLast.
 func parseSemverRangeCached(fn, text string) (semverRange, error) {
-	if p, ok := semverRangeCache.load(text); ok {
+	if p := semverRangeLast.Load(); p != nil && p.text == text {
 		return p.r, p.err
 	}
-	r, err := ParseSemverRange(fn, text)
-	semverRangeCache.store(text, semverRangeParse{r: r, err: err})
-	return r, err
+	p, ok := semverRangeCache.load(text)
+	if !ok {
+		r, err := ParseSemverRange(fn, text)
+		p = &semverRangeParse{text: text, r: r, err: err}
+		semverRangeCache.store(text, p)
+	}
+	semverRangeLast.Store(p)
+	return p.r, p.err
 }
 
 // fnSemverSatisfies is `semver_satisfies(version, range)`.

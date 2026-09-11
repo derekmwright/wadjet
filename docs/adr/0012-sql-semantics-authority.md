@@ -2732,8 +2732,8 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
 
    - **`tcp_flags` declares an ARRAY and a top-level projection of it is
      TEXT.** (Added 2026-09-08, arc A2, #966; the limitation predates it.)
-     `physical.scalarFnDeclaredType` declines every ARRAY/MAP/ROW-returning
-     function — a projection has no element type to size the child vector with
+     `physical.funcReturnType` (unexported, `internal/planner/physical/
+     declared_output.go`) declines every ARRAY/MAP/ROW-returning function — a projection has no element type to size the child vector with
      — so `SELECT tcp_flags(f)` is declared TEXT and the client is handed Go's
      rendering of the slice (`[SYN ACK]`) rather than a slice or PostgreSQL's
      `{SYN,ACK}`. `map_keys`, `map_values` and `map_entries` have answered that
@@ -2937,8 +2937,72 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `expr.TestCompilingACallWithAConstantRangeRefusesBeforeAnyRow`. Removing
      the binder call fails thirteen of those subtests.
 
+     **A GENERATED BOUND AT THE TOP OF THE DOMAIN IS SATURATED, NOT WRAPPED
+     AND NOT REFUSED.** (Added 2026-09-11, arc A3 round 2, #967.) Every range
+     spelling except an exact version closes its band by raising ONE component
+     by one — `^1.2.3` is `>=1.2.3 <2.0.0-0`, `>1.2.x` is `>=1.3.0` — and a
+     component is accepted up to int64's MAXIMUM, which is the acceptance
+     bound recorded above. The raise therefore has a reachable edge, and the
+     shipped corpus draws components from exactly that value. Wrapped, `+1`
+     there is a NEGATIVE number and the range answers the wrong boolean in
+     both directions: `^9223372036854775807.0.0` desugared to
+     `<-9223372036854775808.0.0-0`, which is below every version, so it
+     dropped every row it named; `>9223372036854775807.x` desugared to
+     `>=-9223372036854775808.0.0`, so it admitted every row. Found by the
+     round-1 adversarial review.
+
+     TWO POSITIONS WERE AVAILABLE AND THE SATURATING ONE IS TAKEN. Refusing
+     the range (22023, the loud half this family already has) is what
+     node-semver does — it refuses any component past `2^53-1`, in a version
+     and in a range alike. It is rejected here because THIS family accepts
+     such a version: `semver_major('9223372036854775807.0.0')` answers
+     `9223372036854775807`, so refusing `^9223372036854775807.0.0` would make
+     the acceptance bound depend on which function was asked, and the refusal
+     doctrine above is about ranges whose MEANING is unknown, which this one's
+     is not. The bound is rewritten instead, and the rewrite is EXACT rather
+     than a best effort: every component is bounded by int64, so NO version
+     exists between `X.Y.max` and the unspellable `X.(Y+1).0`, and therefore
+     over the versions that exist
+
+     | the bound the expansion names | what it is here |
+     |---|---|
+     | `<X.(Y+1).0-0` | `<=X.Y.9223372036854775807` |
+     | `>=X.(Y+1).0` | `>X.Y.9223372036854775807` |
+
+     with the maximum in every component below the raised one. The `-0` is not
+     lost with it: a `-0` bound can never be the comparator that ADMITS a
+     pre-release under the published pre-release rule, because nothing sorts
+     below the lowest pre-release of its own core, and the saturated form
+     carries no pre-release at all. So `^9223372036854775807.0.0` keeps its
+     rows, `>9223372036854775807.x` matches nothing — there is nothing above
+     the top of the domain — and `1.9223372036854775807.x` still REFUSES
+     `2.0.0`, which is the cell a bound "made unbounded" instead of saturated
+     would fail.
+
+     THE ACCEPTANCE BAND IS WIDER THAN node-semver's AND EXACT ACROSS IT.
+     node-semver is JavaScript and refuses a component past `2^53-1` because
+     it cannot represent one exactly; every component from `2^53` to `2^63-1`
+     is a version here and compares exactly, which is closer to the
+     specification (§9 bounds a numeric identifier at nothing) and is the
+     measured difference between the two implementations over a 5,341-string
+     corpus. Past `2^63-1` it is NULL, as recorded above.
+
+     Gated per SITE rather than per report: `expr.svBoundSites` in
+     `expr.TestEveryGeneratedBoundSaturatesAtTheAcceptanceBound` holds a row
+     for each of the sixteen places a component is raised, with the
+     desugaring it must render and probe versions on both sides of the band;
+     `expr.TestTheBoundTableCoversEveryRaiseSite` reads the source so a
+     seventeenth site cannot arrive without a cell;
+     `expr.TestNoDesugaringOverTheCorpusRendersANegativeComponent` asks the
+     same claim blind over every operator form applied to the shipped corpus;
+     `wadjet.TestARangeAtTheAcceptanceBoundKeepsTheRowsItNames` is the SQL
+     door, and the five-arm census carries three band cells whose expectations
+     are computed from the fixture's strings. Reverting the five bound
+     constructors to the wrapping form fails all sixteen site cells.
+
      **A ROW-RETURNING `semver_parse` IS NOT PART OF THIS FAMILY, and #1017 is
-     the reason.** `physical.scalarFnDeclaredType` declines every
+     the reason.** `physical.funcReturnType` (unexported,
+     `internal/planner/physical/declared_output.go`) declines every
      ARRAY/MAP/ROW return type, so such a projection would be declared TEXT
      and rendered Go-style at the top level — the entry above records that for
      `tcp_flags`. #1017 is a CLASS with a gate over the whole registry, and a

@@ -307,3 +307,85 @@ func TestPGWireRefusesAStringTheStrictNormalizerCannotRead(t *testing.T) {
 		}
 	}
 }
+
+// setupSemverBoundTable adds a table whose versions sit AT the acceptance
+// bound, so a range whose desugaring raises a component past int64's maximum
+// has rows on both sides of the bound to get right.
+func setupSemverBoundTable(t *testing.T) *Server {
+	t.Helper()
+	db, srv := setupRealDB(t)
+	ctx := context.Background()
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt32},
+		{Name: "v", Type: parquet.TypeString, Nullable: true},
+	}}
+	if err := db.CreateTable(ctx, "pkgmax", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	const max = "9223372036854775807"
+	rows := []map[string]any{
+		{"id": int32(1), "v": max + ".0.0"},
+		{"id": int32(2), "v": "1.0.0"},
+		{"id": int32(3), "v": "1." + max + ".0"},
+		{"id": int32(4), "v": "2.0.0"},
+	}
+	ing := db.NewIngester("pkgmax", schema, nil, ingest.Config{MaxBufferRows: 10, RowGroupSize: 10})
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return srv
+}
+
+// A RANGE WHOSE BOUND SITS AT THE ACCEPTANCE BOUND CARRIES THE SAME BOOLEAN IN
+// BOTH WIRE FORMATS (#967, round-1 review B1).
+//
+// The value gates say what the answer is; this says the WIRE carries it, in
+// text (`t`/`f`) and in binary (one byte), under OID 16. Before the bound was
+// saturated the first row answered `f` for every row and the third answered
+// `t` for every row — a wrong boolean is exactly as wrong on the wire.
+func TestPGWireCarriesARangeAtTheAcceptanceBoundInBothFormats(t *testing.T) {
+	srv := setupSemverBoundTable(t)
+	conn := connectPgconn(t, srv.Addr())
+	const max = "9223372036854775807"
+	for _, tc := range []struct {
+		name, rng string
+		want      []bool
+	}{
+		{"caret_at_the_maximum_major", "^" + max + ".0.0", []bool{true, false, false, false}},
+		{"above_the_maximum_major", ">" + max + ".x", []bool{false, false, false, false}},
+		{"the_maximum_minor_band_still_bounds", "1." + max + ".x", []bool{false, false, true, false}},
+		{"below_the_maximum", "<=" + max + ".x", []bool{true, true, true, true}},
+	} {
+		for _, format := range []int16{0, 1} {
+			t.Run(tc.name+map[int16]string{0: "/text", 1: "/binary"}[format], func(t *testing.T) {
+				res := conn.ExecParams(context.Background(),
+					`SELECT semver_satisfies(v, '`+tc.rng+`') AS s FROM pkgmax ORDER BY id`,
+					nil, nil, nil, []int16{format}).Read()
+				if res.Err != nil {
+					t.Fatalf("ExecParams: %v", res.Err)
+				}
+				if got := res.FieldDescriptions[0].DataTypeOID; got != 16 {
+					t.Errorf("declared OID %d, want 16", got)
+				}
+				if len(res.Rows) != len(tc.want) {
+					t.Fatalf("got %d rows, want %d", len(res.Rows), len(tc.want))
+				}
+				for i, w := range tc.want {
+					got := res.Rows[i][0]
+					var ok bool
+					if format == 0 {
+						ok = string(got) == map[bool]string{true: "t", false: "f"}[w]
+					} else {
+						ok = len(got) == 1 && got[0] == map[bool]byte{true: 1, false: 0}[w]
+					}
+					if !ok {
+						t.Errorf("row %d carried %q, want %v", i, got, w)
+					}
+				}
+			})
+		}
+	}
+}
