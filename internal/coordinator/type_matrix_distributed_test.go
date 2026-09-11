@@ -409,6 +409,13 @@ func tmdTables() []tmdTable {
 		// per numeric width but no VALUES chosen to differ at the wider one,
 		// so every cross-width key pair over it is vacuous.
 		{nwkTable, nwkSchema(), nwkData()},
+		// The TCP-FLAG fixture (#966). Rides along for the same reason as the
+		// fixtures above: only TestTheTCPFlagFamilyAnswersPostgresBitArithmetic
+		// names it, and no type-matrix corpus entry does. The type matrix cannot
+		// stand in for it — its c_i64 holds no value past 2^53, so the bitwise
+		// operators over it answer correctly through a float64 by luck, which is
+		// exactly the defect this arc's Round 0 found.
+		{tcpfTable, tcpfSchema(), tcpfData()},
 		// The RESERVED-NAME fixture (#694). A table that already stores a
 		// column in a hidden-slot family, as one written before the namespace
 		// was reserved does.

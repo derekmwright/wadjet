@@ -788,6 +788,16 @@ func pmCells() []pmCell {
 		{name: "select_denied_column", sql: `SELECT salary FROM e7emp`, deniedLike: "salary"},
 		{name: "aggregate_over_denied_column", sql: `SELECT SUM(salary) AS s FROM e7emp`, deniedLike: "salary"},
 		{name: "where_on_denied_column", sql: `SELECT COUNT(*) AS c FROM e7emp WHERE salary > 0`, deniedLike: "salary"},
+		// A flag function over a DENIED column is refused exactly as any
+		// other read of it is: a new function that reads a relation's column
+		// goes through the policed list, it does not get its own door (#966,
+		// ADR-0034).
+		{name: "flags_predicate_on_denied_column",
+			sql:        `SELECT COUNT(*) AS c FROM e7emp WHERE tcp_flags_has_any(salary,'SYN')`,
+			deniedLike: "salary"},
+		{name: "flags_projection_on_denied_column",
+			sql:        `SELECT tcp_flags_text(salary) AS s FROM e7emp`,
+			deniedLike: "salary"},
 		{name: "qualified_denied_column", sql: `SELECT a.salary FROM e7emp a`, deniedLike: "salary"},
 		{name: "denied_column_in_a_derived_table",
 			sql: `SELECT d.salary AS s FROM (SELECT salary FROM e7emp) d`, deniedLike: "salary"},
@@ -1119,6 +1129,38 @@ func pmCells() []pmCell {
 		{name: "per_row_bit_sum_and_min",
 			sql:  `SELECT SUM(bal) AS s, MIN(bal) AS lo, MAX(bal) AS hi FROM e7bal`,
 			want: []string{"hi=0|lo=0|s=0"}},
+
+		// The TCP-FLAG family over a MASKED column (#966). It is the same
+		// per-row-disclosure question as the sign predicates above, one
+		// function family over: a flag predicate reads BITS, and `bal` masks
+		// to 0, whose bits are all clear. So has_any over the whole nine-bit
+		// field selects NOTHING and has_none selects EVERY row — and if the
+		// scan ever answered these off the stored column instead, every one
+		// of the eight rows (±100 .. ±800) has a bit set in the low nine and
+		// the counts invert.
+		//
+		// The pushdown is what makes that a live question rather than a
+		// formality: a flag predicate over a bare column is exactly what
+		// makeFlagRowPred pushes INTO the scan, which reads the file. The
+		// security projection stands between the filter and the scan, so
+		// tryPushFilterIntoScan declines — and these cells are the proof,
+		// on every door and every arm.
+		{name: "flags_has_any_over_a_masked_column",
+			sql: `SELECT COUNT(*) AS c FROM e7bal WHERE tcp_flags_has_any(bal,` +
+				`'FIN','SYN','RST','PSH','ACK','URG','ECE','CWR','AE')`,
+			want: []string{"c=0"}},
+		{name: "flags_has_none_over_a_masked_column",
+			sql:  `SELECT COUNT(*) AS c FROM e7bal WHERE tcp_flags_has_none(bal,'RST')`,
+			want: []string{"c=8"}},
+		{name: "flags_has_all_over_a_masked_column",
+			sql:  `SELECT id FROM e7bal WHERE tcp_flags_has_all(bal,'RST') ORDER BY id`,
+			want: nil},
+		{name: "flags_text_over_a_masked_column",
+			sql:  `SELECT COUNT(*) AS c FROM e7bal WHERE tcp_flags_text(bal) = ''`,
+			want: []string{"c=8"}},
+		{name: "bitwise_and_pushdown_spelling_over_a_masked_column",
+			sql:  `SELECT COUNT(*) AS c FROM e7bal WHERE BITWISE_AND(bal, 511) <> 0`,
+			want: []string{"c=0"}},
 
 		// ------------------------------------------------------------------
 		// The predicate INSIDE a subquery. The matrix's older IN/EXISTS cells

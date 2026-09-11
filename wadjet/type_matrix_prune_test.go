@@ -60,15 +60,23 @@ func TestTypeMatrixPruningNeverChangesTheAnswer(t *testing.T) {
 
 	prevStats := scan.StatsPrune.Set(true)
 	prevDict := scan.DictPrune.Set(true)
+	// The flag-mask pushdown (#966) is the third switch this sweep flips. It
+	// is not a PRUNE — a min/max range cannot prove a bit, so it never skips a
+	// row group — but it is an optimization that decides a row's fate inside
+	// the scan instead of above it, which is the same contract: skipping work
+	// must never change an answer.
+	prevFlag := scan.FlagDictPushdown.Set(true)
 	t.Cleanup(func() {
 		scan.StatsPrune.Set(prevStats)
 		scan.DictPrune.Set(prevDict)
+		scan.FlagDictPushdown.Set(prevFlag)
 	})
 
 	count := func(t *testing.T, sql string, prune bool) (int64, bool) {
 		t.Helper()
 		scan.StatsPrune.Set(prune)
 		scan.DictPrune.Set(prune)
+		scan.FlagDictPushdown.Set(prune)
 		res, err := tmRun(ctx, db, sql)
 		if err != nil {
 			return 0, false
@@ -186,6 +194,44 @@ func TestTypeMatrixPruningNeverChangesTheAnswer(t *testing.T) {
 		// rewrite were ever taught to this layer. Both settings must still
 		// agree; today neither prunes, because structuredConjuncts requires a
 		// bare column reference.
+		// TCP-flag predicates over the two integer columns (#966). c_i32 and
+		// c_i64 are arbitrary integers rather than real flag fields, which is
+		// exactly what this sweep wants: the masks below split the fixture's
+		// row groups instead of matching everything or nothing, and the
+		// question is only whether the answer moves when the scan is allowed
+		// to decide the row itself.
+		//
+		// A flag predicate must NOT prune — the cells above have the counter
+		// for that (wadjet.TestAFlagPredicateNeverPrunesARowGroup); here the
+		// property is the ANSWER, over both widths, all three tests, and the
+		// BITWISE_AND spelling that pushes to the same place.
+		{"FlagsHasAllInt32",
+			fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE tcp_flags_has_all(c_i32, 'SYN', 'ACK')", typematrix.Table)},
+		{"FlagsHasAnyInt32",
+			fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE tcp_flags_has_any(c_i32, 'SYN', 'ACK')", typematrix.Table)},
+		{"FlagsHasNoneInt32",
+			fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE tcp_flags_has_none(c_i32, 'SYN', 'ACK')", typematrix.Table)},
+		{"FlagsHasAllInt64",
+			fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE tcp_flags_has_all(c_i64, 'FIN')", typematrix.Table)},
+		{"FlagsHasAnyInt64",
+			fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE tcp_flags_has_any(c_i64, 'FIN', 'AE')", typematrix.Table)},
+		{"FlagsHasNoneInt64",
+			fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE tcp_flags_has_none(c_i64, 'FIN', 'AE')", typematrix.Table)},
+		{"FlagsBitwiseAllSpelling",
+			fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE BITWISE_AND(c_i64, 18) = 18", typematrix.Table)},
+		{"FlagsBitwiseAnySpelling",
+			fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE BITWISE_AND(c_i32, 18) <> 0", typematrix.Table)},
+		{"FlagsBitwiseNoneSpelling",
+			fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE BITWISE_AND(c_i64, 18) = 0", typematrix.Table)},
+		// A flag predicate BESIDE a range predicate on another column: the
+		// range still prunes, and the flag conjunct rides in the same pushed
+		// set without changing which rows survive.
+		{"FlagsBesideARangePredicate",
+			fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE id >= 2500 AND tcp_flags_has_any(c_i32, 'SYN')", typematrix.Table)},
+		// A flag predicate the pushdown DECLINES (a computed argument), which
+		// must answer the same as the pushed spelling of the same test.
+		{"FlagsOverAComputedArgument",
+			fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE tcp_flags_has_any(ABS(c_i32), 'SYN')", typematrix.Table)},
 		{"TimeBucketInThePredicate",
 			fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s
 			   WHERE time_bucket(INTERVAL '1' DAY, c_ts) >= TIMESTAMP '2023-11-16 00:00:00'`,
