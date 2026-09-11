@@ -61,27 +61,13 @@ const bindSwapAttempts = 32
 // gated by hoping the scheduler cooperates). Nil in every non-test build.
 var bindSwapTestHook func()
 
-// BindToCatalog attaches the catalog a policy's names are resolved against and
-// binds the CURRENT policy set to it.
-//
-// It is separate from NewProvider because of startup order: the provider is
-// built from the config file, and the catalog does not exist yet at that
-// point. Calling this is what turns "a policy that names no relation" from a
-// rule that silently never matches into a startup refusal.
-//
-// A failure returns the error and swaps NOTHING — the caller decides whether
-// that is fatal (it is, at startup) — and the provider keeps running on the
-// policy set it already had.
-//
-// It is IDEMPOTENT: attaching a set that is already bound to this catalog
-// writes nothing at all. The HTTP DML door re-attaches per statement, so that
-// is a request-path property, not an optimization.
-//
-// The swap is a CAS, not a store. BindToCatalog reads the running set, binds a
-// COPY of it, and installs the copy; a set installed between the read and the
-// install would otherwise be OVERWRITTEN by the older snapshot — a retired
-// policy set coming back, which is a security control silently reverting. On a
-// lost CAS the newly installed set is bound instead.
+// BindToCatalog attaches the catalog and binds a COPY of the current policy set.
+// Already bound catalog/state is idempotent and writes nothing, including
+// request-path reattachment. Failure swaps no policy set and records BindError
+// so enforcement refuses even if the caller ignores the returned error.
+// Install via CAS, never Store over a concurrently reloaded set; on CAS loss
+// bind the newly installed set. Exhausted retries refuse rather than revert.
+// See docs/internals/auth-policy-binding-cas.md for the design.
 func (p *Provider) BindToCatalog(ctx context.Context, cat *catalog.Catalog) error {
 	if p == nil || cat == nil {
 		return nil

@@ -97,33 +97,13 @@ func New(cfg Config) (*Authenticator, *Authorizer) {
 	return authn, authz
 }
 
-// Build creates an Authenticator and Authorizer from configuration, reporting
-// a configuration it cannot honour.
-//
-// A configuration error is an ERROR, never "authentication disabled" (#931):
-//
-//   - `jwt.enabled` with no secret and no readable public key, an unparseable
-//     key file, a typo in the path — `NewJWTVerifier`'s error used to be
-//     DISCARDED and the verifier left nil.
-//   - `enabled: true` with no usable mechanism at all: no API keys, no JWT, no
-//     mTLS. An operator who wrote `enabled: true` did not ask for an open
-//     server.
-//   - A credential naming a role the configuration does not define — an
-//     `api_keys` entry, an mTLS `role_map` value, an mTLS `default_role` — and
-//     `enabled: true` with credentials but no `roles:` at all. Such a
-//     credential authenticates and then holds NO permission, so it can do
-//     nothing; before this batch it could read everything, because the data
-//     path did not consult the role at all. Either way the configuration
-//     cannot mean what the operator wrote, and the doctrine is that such a
-//     configuration refuses at LOAD rather than behaving surprisingly at
-//     runtime.
-//
-// On error the returned Authenticator is not a disabled one. It reports
-// Enabled() and refuses EVERY credential with the configuration error, so a
-// caller that ignores the error — and every door reads `Provider.Enabled()`,
-// not this — is closed rather than open. Startup and hot reload both report
-// it: `cmd/wadjet` refuses to start, and `Provider.UpdateFromConfig` refuses
-// the swap and keeps the running state.
+// Build refuses configuration it cannot honor (#931): invalid enabled JWT
+// keys/secrets, enabled auth without a usable API-key/JWT/mTLS mechanism,
+// credentials naming undefined roles, or enabled credentials with no roles.
+// On error the returned Authenticator remains Enabled and refuses EVERY
+// credential, so ignoring the error cannot disable authentication.
+// Startup refuses; UpdateFromConfig rejects reload and preserves running state.
+// See docs/internals/auth-configuration-fail-closed.md for the design.
 func Build(cfg Config) (*Authenticator, *Authorizer, error) {
 	roles := make(map[string]*RoleDef, len(cfg.Roles))
 	for _, r := range cfg.Roles {

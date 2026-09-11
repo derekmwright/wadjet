@@ -14,37 +14,15 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// EnforcePlanPolicies applies ABAC to a query at plan level: table-access
-// denial, column deny/mask injection and row-filter injection for every table
-// the plan READS. It is THE shared enforcement path — the embedded engine
-// (wadjet.DB.Query), the HTTP door and the coordinator's native-DAG executor
-// all call it with the same inputs, so an identity sees identical policy
-// behavior regardless of which door and which execution path answers.
-//
-// Masking and denial are PLAN-TIME, at the scan, unconditionally (#859):
-//
-//   - The security projection is built from the TABLE's catalog schema, which
-//     is always known here, and never from the scan's pruned column list.
-//     `SELECT *`, an aggregate-only SELECT list and a derived table all leave
-//     that list empty, and those are exactly the queries a mask matters most
-//     for.
-//   - The relations to police come from the PLAN, not from the statement's
-//     FROM list. `plansql.SelectInfo.Tables` carries a derived table under its
-//     own subquery TEXT, a CTE reference under the CTE's name, and NOTHING at
-//     all for the arms of a UNION — so a `UNION ALL` over a masked column was
-//     unmasked on every door, and a query with a derived table or a CTE was
-//     default-DENIED under the name `"(SELECT ...)"`.
-//   - A column policy that cannot be applied REFUSES. A security control never
-//     degrades to a grant (#802).
-//
-// The returned context carries the resolved policies so the physical planner
-// applies the same projection to an expression subquery, which it plans on its
-// own (physical.buildSubqueryPipeline).
-//
-// No-ops (returns the plan unchanged) when the provider is nil/disabled, no
-// identity is attached to ctx, or the provider has no evaluator — matching the
-// embedded engine's historical behavior. protocol labels the evaluation
-// environment for policy conditions and audit.
+// EnforcePlanPolicies is the shared embedded/HTTP/native-DAG policy path.
+// Apply scan denial/masks from the TABLE catalog schema, never pruned columns,
+// and discover relations from the PLAN, including derived/CTE/set arms (#859).
+// Unenforceable column controls REFUSE, never degrade to grants (#802).
+// Return policies in context for independently planned expression subqueries.
+// Nil/disabled provider is a no-op; enabled auth requires identity and shared
+// table access in both provider shapes, even without an evaluator.
+// Bind errors refuse; protocol supplies the decision environment/audit fallback.
+// See docs/internals/auth-plan-policy-boundary.md for the design.
 func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.Catalog, selectInfo *plansql.SelectInfo, plan *logical.Node, protocol string) (context.Context, *logical.Node, error) {
 	if provider == nil || !provider.Enabled() {
 		return ctx, plan, nil
@@ -272,44 +250,15 @@ func EnforceOptimizedPlan(ctx context.Context, cat *catalog.Catalog, plan *logic
 	return out, nil
 }
 
-// ValidateStatementColumns is the plan-time name binding every query entry
-// point runs before it builds a logical plan, done over the schema the CALLING
-// IDENTITY can see.
-//
-// It replaces a bare physical.Planner.ValidateColumns at those entry points.
-// The unfiltered binder answers `SELECT nosuchcol FROM t` with a hint that
-// lists the table's columns, and a column the policy DENIES has no business in
-// that list: an identity that may not read `salary` may not learn that
-// `salary` exists either. The policy is resolved LAZILY, per table, as the
-// binder resolves relations — so it covers CTE bodies, derived tables,
-// subquery blocks and set-operation arms without needing a plan.
-//
-// TABLE-LEVEL DENIAL IS DECIDED HERE TOO, since #946, and it has to be.
-//
-// The position this comment used to state — that table denial stays in
-// EnforcePlanPolicies so the order of the two refusals does not change — was
-// answerable only while the binder's diagnostic said nothing about a relation.
-// It says a great deal: `SELECT nocol FROM secret` answered `unknown column
-// "nocol" (available: id, note)` for an identity that may not read `secret`,
-// on every door and under BOTH provider shapes, and the hint POOLS relations —
-// `SELECT id FROM emp WHERE id = (SELECT MAX(nocol) FROM secret)` published
-// emp's columns unioned with secret's. `docs/security.md` and ADR-0034 say an
-// identity that may not read a table may not read its schema either, and an
-// error's hint is schema.
-//
-// So the decision is asked PER RELATION as the binder resolves it
-// (policedColumnSource.GetTable), which is the only seam that sees CTE bodies,
-// derived tables, subquery blocks and set-operation arms as well as the FROM
-// list. It is the SHARED rule — `TableAccess`, ADR-0034 item 5 — so the answer
-// and its sentence are the ones every other door gives, and it is installed in
-// BOTH provider shapes: the legacy `roles:` shape denies relations too, and it
-// was publishing their columns just as loudly.
-//
-// What changes for a denied relation is the CLASS of an existing refusal:
-// 42703 with a column list becomes 42501 with none. What does not change is a
-// relation the identity MAY read (42703 with the list, exactly as before), a
-// relation that does not exist (42P01 — the decision is asked only after the
-// catalog finds the table), or a statement with no provider.
+// ValidateStatementColumns binds against the CALLING IDENTITY's visible schema.
+// Resolve policies lazily per relation across CTEs, derived/subquery blocks and
+// set arms; never disclose denied columns through diagnostic hints.
+// Decide table denial here via TableAccess for BOTH provider shapes (#946,
+// ADR-0034 item 5; docs/security.md): schema itself is protected information.
+// Denied relations raise 42501 without column lists; readable relations retain
+// 42703 hints, missing catalog relations retain 42P01, and no-provider behavior
+// is unchanged. Check table access only after the catalog finds the relation.
+// See docs/internals/auth-policy-aware-name-diagnostics.md for the design.
 func ValidateStatementColumns(ctx context.Context, provider *Provider, cat *catalog.Catalog, info *plansql.SelectInfo, protocol string) error {
 	if cat == nil || info == nil {
 		return nil
