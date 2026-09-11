@@ -43,6 +43,10 @@ func TestTheTCPFlagDocsStateOneRefusalRule(t *testing.T) {
 			present: []string{
 				"Whatever the rows are includes NO rows.",
 				"every position and on every plan",
+				// The three positions round 7 measured the walk missing, now
+				// named where a reader looks for them (#1018 round 7, B1).
+				"a `GROUP BY` key",
+				"those positions, and for one nested inside another subquery",
 			},
 		},
 		{
@@ -54,6 +58,8 @@ func TestTheTCPFlagDocsStateOneRefusalRule(t *testing.T) {
 			present: []string{
 				"constant is refused before any row",
 				"every expression position and on both plans",
+				"a `GROUP BY` key",
+				"including one nested inside another subquery",
 			},
 		},
 		{
@@ -67,6 +73,7 @@ func TestTheTCPFlagDocsStateOneRefusalRule(t *testing.T) {
 			present: []string{
 				"AN INVALID LITERAL NAME IS REFUSED FROM THE DECLARATION, ROWS OR NO",
 				"THE DECIDING LAYER IS THE BINDER, NOT COMPILATION",
+				`"EVERY EXPRESSION POSITION" IS A CLAIM ABOUT THE WALK, AND THE WALK HAD`,
 			},
 		},
 	} {

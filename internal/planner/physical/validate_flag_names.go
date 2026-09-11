@@ -46,28 +46,13 @@ func refuseUnknownFlagNames(node plansql.Node) error {
 	if node == nil {
 		return nil
 	}
-	// A WINDOW call is its own node kind and walkExpr stops at it (its OVER
-	// terms are a different namespace, which is why the binder's name
-	// resolution skips them). Its ARGUMENTS and its frame terms are still
-	// expressions this statement wrote, and a misspelling in one is a
-	// misspelling: `SUM(TCP_FLAG_MASK('BOGUS')) OVER ()` is the same typo as
-	// the same call without the OVER.
-	if w, ok := node.(*plansql.WindowFuncNode); ok {
-		if err := refuseUnknownFlagNames(w.Func); err != nil {
-			return err
-		}
-		for _, p := range w.PartitionBy {
-			if err := refuseUnknownFlagNames(p); err != nil {
-				return err
-			}
-		}
-		for _, o := range w.OrderBy {
-			if err := refuseUnknownFlagNames(o.Expr); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
+	// ONE walk. A window call used to be handled by a copy of the descent
+	// written here, and that copy was TOP-LEVEL ONLY: it saw
+	// `SUM(TCP_FLAG_MASK('BOGUS')) OVER ()` and missed
+	// `1 + SUM(TCP_FLAG_MASK('BOGUS')) OVER ()`, because the wrapping
+	// arithmetic put the window node one level down where walkExpr stopped.
+	// walkExpr descends through a WindowFuncNode itself now, so the two can no
+	// longer disagree about which positions exist (#1018 round 7, B1).
 	var calls []*plansql.FuncCallNode
 	walkExpr(node, nil, nil, &calls)
 	for _, fc := range calls {

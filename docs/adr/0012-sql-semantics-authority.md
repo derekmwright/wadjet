@@ -2304,6 +2304,36 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `position_exists_subquery_empty`, `position_derived_body_empty`,
      `position_cte_body_empty` and `position_window_argument_empty`, and on ALL
      FIVE for `position_scalar_subquery_empty`.
+     **"EVERY EXPRESSION POSITION" IS A CLAIM ABOUT THE WALK, AND THE WALK HAD
+     THREE BLIND SPOTS** (amended 2026-09-11, round 7, #1018 B1). The sentence
+     above was written for the positions the BINDER re-parses; the positions a
+     SUBQUERY BODY can hide in are decided by a different collector, and that
+     collector — `binder.blockSubqueries` — walked WHERE, HAVING, QUALIFY, the
+     SELECT items and the JOIN conditions and NOT `GROUP BY` or `ORDER BY`,
+     while `walkExpr` stopped dead at a `WindowFuncNode`. So a subquery
+     written in one of those three positions was reached by no walk at all:
+     `… ORDER BY (SELECT TCP_FLAG_MASK('BOGUS') …)`, the `GROUP BY` spelling of
+     it and `SUM((SELECT TCP_FLAG_MASK('BOGUS') …)) OVER ()` each answered ZERO
+     ROWS AND NO ERROR in both wire formats over an empty input. The same
+     stop hid a window with no subquery in it at all once the call was wrapped:
+     `1 + SUM(TCP_FLAG_MASK('BOGUS')) OVER ()` put the window node one level
+     below the top-level special case the refusal carried, and answered zero
+     rows on the three DAG arms with every routing counter flat.
+
+     There is now ONE walk and no special case: `walkExpr` descends through a
+     `WindowFuncNode` — its argument, its PARTITION BY / ORDER BY terms and its
+     frame offsets — for all three of its collectors, and `blockSubqueries`
+     asks it of GROUP BY and of each re-parsed ORDER BY item as well.
+     Descending for NAME RESOLUTION costs no concession: PostgreSQL 17.11
+     resolves an OVER term against the INPUT relation, where an output alias is
+     `column "a" does not exist`, which is the scope the binder already passes.
+     Gated by `refusal/position_orderby_scalar_subquery_*`,
+     `position_groupby_scalar_subquery_*`,
+     `position_window_arg_scalar_subquery_*`,
+     `position_nested_window_in_arithmetic_*` and
+     `position_orderby_nested_scalar_subquery_empty` on five arms, and by the
+     same five names in both wire formats. Narrowing the walk back fails eight
+     census cells and eight wire subtests.
 
      `tcp_flags_from_string`, which reads a COMMA-SEPARATED list rather than an
      argument list, splits the two cases and answers the arithmetic where it

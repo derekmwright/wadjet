@@ -516,12 +516,14 @@ raises `22023` rather than answering zero rows — a typo in a query that
 happens to select nothing is still a typo.
 
 That holds in **every position and on every plan**: a `SELECT` item, a `WHERE`
-or `JOIN ... ON` predicate, a `HAVING`, an `ORDER BY` key, a set-operation arm,
-a projection above a `GROUP BY`, a window function's argument or frame terms,
-and the body of a derived table, a CTE or an `EXISTS` / `IN` / scalar subquery
-— in one process and on a distributed query alike. A misspelling is refused
-before any stage runs, so whether it is an error depends on neither the data nor
-the shape of the plan.
+or `JOIN ... ON` predicate, a `HAVING`, a `GROUP BY` key, an `ORDER BY` key, a
+set-operation arm, a projection above a `GROUP BY`, a window function's
+argument, `PARTITION BY` / `ORDER BY` terms or frame terms, and the body of a
+derived table, a CTE or an `EXISTS` / `IN` / scalar subquery — in one process
+and on a distributed query alike. It holds for a subquery written in any of
+those positions, and for one nested inside another subquery, however deep. A
+misspelling is refused before any stage runs, so whether it is an error depends
+on neither the data nor the shape of the plan.
 
 The one thing still checked per row is a name the query does not spell as a
 constant — a column, or any other text expression. That name is not knowable

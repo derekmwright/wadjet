@@ -1373,7 +1373,24 @@ func exprOperands(node plansql.Node) []plansql.Node {
 }
 
 // blockSubqueries collects the raw SQL of every subquery embedded in a block's
-// expressions (WHERE, SELECT, HAVING, QUALIFY) for recursive validation.
+// expressions, for recursive validation.
+//
+// EVERY EXPRESSION POSITION THE BLOCK HAS, and the list is the claim: WHERE,
+// JOIN/ON, every SELECT item (its argument included, and a window item's
+// arguments, OVER terms and frame offsets through walkExpr's WindowFuncNode
+// arm), GROUP BY, HAVING, QUALIFY and ORDER BY. GROUP BY and ORDER BY were
+// missing and the window arm did not exist, so a subquery written in one of
+// those three positions was reached by NO walk at all: `… ORDER BY (SELECT
+// TCP_FLAG_MASK('BOGUS') …)`, the GROUP BY spelling of it and `SUM((SELECT
+// TCP_FLAG_MASK('BOGUS') …)) OVER ()` each answered ZERO ROWS on both wire
+// formats over an empty input where the same misspelling anywhere else raised
+// 22023 (#1018 round 7, B1). Set-operation arms, derived-table bodies and CTE
+// bodies are their own blocks and reach this function through validateBlock's
+// own recursion; a subquery NESTED in a subquery reaches it the same way.
+//
+// ORDER BY items are raw text — the parser keeps the spelling — so they are
+// parsed here exactly as validateBlock parses them for name resolution, and an
+// item that does not parse contributes nothing, which is that loop's rule too.
 func (b *binder) blockSubqueries(info *plansql.SelectInfo) []string {
 	var subs []string
 	walkExpr(info.WhereExpr, nil, &subs, nil)
@@ -1385,6 +1402,16 @@ func (b *binder) blockSubqueries(info *plansql.SelectInfo) []string {
 	}
 	for i := range info.Joins {
 		walkExpr(info.Joins[i].CondExpr, nil, &subs, nil)
+	}
+	for _, gb := range info.GroupByExprs {
+		walkExpr(gb, nil, &subs, nil)
+	}
+	for _, ob := range info.OrderBy {
+		parsed, err := plansql.ParseExpression(ob.Column)
+		if err != nil {
+			continue
+		}
+		walkExpr(parsed, nil, &subs, nil)
 	}
 	return subs
 }
@@ -1565,6 +1592,30 @@ func walkExpr(node plansql.Node, refs *[]*plansql.ColRef, subs *[]string, calls 
 		walkExpr(n.Left, refs, subs, calls)
 		for _, v := range n.Values {
 			walkExpr(v, refs, subs, calls)
+		}
+	case *plansql.WindowFuncNode:
+		// A WINDOW call is a node kind of its own, and stopping here was the
+		// walk's one blind spot. Its ARGUMENT, its PARTITION BY / ORDER BY
+		// terms and its FRAME offsets are all expressions this statement
+		// wrote: `SUM(TCP_FLAG_MASK('BOGUS')) OVER ()` is the same typo as
+		// the same call without the OVER, and `SUM((SELECT …)) OVER ()` holds
+		// a subquery body exactly as `SUM((SELECT …))` does. PostgreSQL
+		// resolves an OVER term against the INPUT relation — an output alias
+		// is `column "a" does not exist` there, measured on 17.11 — which is
+		// the scope every caller of this walk already passes, so descending
+		// costs no concession (#1018 round 7, B1).
+		walkExpr(n.Func, refs, subs, calls)
+		for _, pb := range n.PartitionBy {
+			walkExpr(pb, refs, subs, calls)
+		}
+		for _, ob := range n.OrderBy {
+			walkExpr(ob.Expr, refs, subs, calls)
+		}
+		if n.Frame != nil {
+			walkExpr(n.Frame.Start.Offset, refs, subs, calls)
+			if n.Frame.End != nil {
+				walkExpr(n.Frame.End.Offset, refs, subs, calls)
+			}
 		}
 	}
 }

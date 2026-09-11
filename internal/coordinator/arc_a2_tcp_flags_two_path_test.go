@@ -612,6 +612,46 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmetic(t *testing.T) {
 		{"position_join_on_empty",
 			`SELECT COUNT(*) AS n FROM tcpflow a JOIN tcpflow b ON a.id = b.id AND tcp_flags_has_all(b.f8,'BOGUS') WHERE a.id < 0`,
 			`TCP flag name "BOGUS" not recognized`},
+		// THE THREE POSITIONS NO WALK REACHED (#1018 round 7, B1). Round 6
+		// put the refusal at the binder and listed the positions it covered;
+		// three were not on that list because the SUBQUERY COLLECTOR did not
+		// visit them. `blockSubqueries` walked WHERE, HAVING, QUALIFY, the
+		// SELECT items and the JOIN conditions — not GROUP BY, not ORDER BY —
+		// and `walkExpr` stopped dead at a WindowFuncNode, so a subquery
+		// written in a window's ARGUMENT was invisible from either end. All
+		// three answered ZERO ROWS AND NO ERROR on both wire formats over an
+		// empty input. The fourth cell is the same blind spot without a
+		// subquery: wrapping the window call in arithmetic put it one level
+		// below the top-level special case the old refusal carried.
+		{"position_orderby_scalar_subquery_empty",
+			`SELECT id AS n FROM tcpflow WHERE id < 0 ORDER BY (SELECT tcp_flag_mask('BOGUS') FROM tcpflow u2 WHERE u2.id = 1)`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"position_orderby_scalar_subquery_reached",
+			`SELECT id AS n FROM tcpflow ORDER BY (SELECT tcp_flag_mask('BOGUS') FROM tcpflow u2 WHERE u2.id = 1) LIMIT 1`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"position_groupby_scalar_subquery_empty",
+			`SELECT COUNT(*) AS n FROM tcpflow WHERE id < 0 GROUP BY (SELECT tcp_flag_mask('BOGUS') FROM tcpflow u2 WHERE u2.id = 1)`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"position_groupby_scalar_subquery_reached",
+			`SELECT COUNT(*) AS n FROM tcpflow GROUP BY (SELECT tcp_flag_mask('BOGUS') FROM tcpflow u2 WHERE u2.id = 1)`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"position_window_arg_scalar_subquery_empty",
+			`SELECT SUM((SELECT tcp_flag_mask('BOGUS') FROM tcpflow u2 WHERE u2.id = 1)) OVER () AS w FROM tcpflow WHERE id < 0`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"position_window_arg_scalar_subquery_reached",
+			`SELECT SUM((SELECT tcp_flag_mask('BOGUS') FROM tcpflow u2 WHERE u2.id = 1)) OVER () AS w FROM tcpflow`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"position_nested_window_in_arithmetic_empty",
+			`SELECT 1 + SUM(tcp_flag_mask('BOGUS')) OVER () AS w FROM tcpflow WHERE id < 0`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"position_nested_window_in_arithmetic_reached",
+			`SELECT 1 + SUM(tcp_flag_mask('BOGUS')) OVER () AS w FROM tcpflow`,
+			`TCP flag name "BOGUS" not recognized`},
+		// A subquery NESTED in a subquery, in the position the outer walk only
+		// just learned to visit: the recursion is the claim, not one level.
+		{"position_orderby_nested_scalar_subquery_empty",
+			`SELECT id AS n FROM tcpflow WHERE id < 0 ORDER BY (SELECT (SELECT tcp_flag_mask('BOGUS') FROM tcpflow u3 WHERE u3.id = 1) FROM tcpflow u2 WHERE u2.id = 1)`,
+			`TCP flag name "BOGUS" not recognized`},
 	} {
 		t.Run("refusal/"+tc.name, func(t *testing.T) {
 			a2fSQL["refusal/"+tc.name] = tc.sql

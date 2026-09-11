@@ -613,6 +613,40 @@ func TestPGWireRefusesAnInvalidFlagNameInEveryExpressionPosition(t *testing.T) {
 		{"cte_body",
 			`WITH c AS (SELECT tcp_flag_mask('BOGUS') AS m FROM users WHERE id < 0) SELECT COUNT(*) AS n FROM c`,
 			`WITH c AS (SELECT tcp_flag_mask('BOGUS') AS m FROM users) SELECT COUNT(*) AS n FROM c`},
+		// THE THREE POSITIONS ROUND 6'S LIST DID NOT ACTUALLY COVER, and the
+		// nested-window shape beside them (#1018 round 7, B1). The binder
+		// recursed into "every subquery blockSubqueries finds", and that
+		// collector never looked at GROUP BY or ORDER BY and stopped at a
+		// WindowFuncNode — so a subquery body in one of those positions was
+		// reached by no walk at all and each of these answered ZERO ROWS with
+		// no error in both formats. `nested_window_in_arithmetic` is the same
+		// blind spot without a subquery: the refusal carried its own
+		// top-level-only copy of the window descent, and `1 + SUM(…) OVER ()`
+		// puts the window one level down.
+		{"order_by_scalar_subquery",
+			`SELECT id FROM users WHERE id < 0 ORDER BY (SELECT tcp_flag_mask('BOGUS') FROM users u2 WHERE u2.id = 1)`,
+			`SELECT id FROM users ORDER BY (SELECT tcp_flag_mask('BOGUS') FROM users u2 WHERE u2.id = 1)`},
+		{"group_by_scalar_subquery",
+			`SELECT COUNT(*) AS n FROM users WHERE id < 0 GROUP BY (SELECT tcp_flag_mask('BOGUS') FROM users u2 WHERE u2.id = 1)`,
+			`SELECT COUNT(*) AS n FROM users GROUP BY (SELECT tcp_flag_mask('BOGUS') FROM users u2 WHERE u2.id = 1)`},
+		{"window_argument_scalar_subquery",
+			`SELECT SUM((SELECT tcp_flag_mask('BOGUS') FROM users u2 WHERE u2.id = 1)) OVER () AS w FROM users WHERE id < 0`,
+			`SELECT SUM((SELECT tcp_flag_mask('BOGUS') FROM users u2 WHERE u2.id = 1)) OVER () AS w FROM users`},
+		{"nested_window_in_arithmetic",
+			`SELECT 1 + SUM(tcp_flag_mask('BOGUS')) OVER () AS w FROM users WHERE id < 0`,
+			`SELECT 1 + SUM(tcp_flag_mask('BOGUS')) OVER () AS w FROM users`},
+		{"order_by_nested_scalar_subquery",
+			`SELECT id FROM users WHERE id < 0 ORDER BY (SELECT (SELECT tcp_flag_mask('BOGUS') FROM users u3 WHERE u3.id = 1) FROM users u2 WHERE u2.id = 1)`,
+			`SELECT id FROM users ORDER BY (SELECT (SELECT tcp_flag_mask('BOGUS') FROM users u3 WHERE u3.id = 1) FROM users u2 WHERE u2.id = 1)`},
+		// The DML door is ADR-0031's: a DML predicate is not planned at all, so
+		// the binder never sees it and the COMPILE-time fold is what answers.
+		// It is here because "one refusal, whatever the door" is the claim.
+		{"delete_predicate",
+			`DELETE FROM users WHERE id < 0 AND tcp_flags_has_all(visits,'BOGUS')`,
+			`DELETE FROM users WHERE tcp_flags_has_all(visits,'BOGUS')`},
+		{"update_predicate",
+			`UPDATE users SET visits = 1 WHERE id < 0 AND tcp_flags_has_all(visits,'BOGUS')`,
+			`UPDATE users SET visits = 1 WHERE tcp_flags_has_all(visits,'BOGUS')`},
 		// The DML door is ADR-0031's: a DML predicate is not planned at all, so
 		// the binder never sees it and the COMPILE-time fold is what answers.
 		// It is here because "one refusal, whatever the door" is the claim.
@@ -668,6 +702,13 @@ func TestPGWireRefusesAnInvalidFlagNameInEveryExpressionPosition(t *testing.T) {
 		{"a_computed_name_is_not_a_constant", `SELECT tcp_flags_has_all(visits, UPPER('bogus')) AS v FROM users WHERE id < 0`, 0},
 		{"a_null_name_in_an_order_by", `SELECT id AS n FROM users WHERE id < 0 ORDER BY tcp_flags_has_all(visits, NULL)`, 0},
 		{"ns_is_a_spelling_of_ae", `SELECT id AS g, tcp_flag_mask('NS') AS n FROM users WHERE id < 0 GROUP BY id`, 0},
+		// …and the boundary for the three positions round 7 added: a KNOWN
+		// name in each of them still answers, so the widened walk refuses a
+		// misspelling and not a position.
+		{"order_by_scalar_subquery_valid", `SELECT id FROM users WHERE id < 0 ORDER BY (SELECT tcp_flag_mask('SYN') FROM users u2 WHERE u2.id = 1)`, 0},
+		{"group_by_scalar_subquery_valid", `SELECT COUNT(*) AS n FROM users WHERE id < 0 GROUP BY (SELECT tcp_flag_mask('SYN') FROM users u2 WHERE u2.id = 1)`, 0},
+		{"window_argument_scalar_subquery_valid", `SELECT SUM((SELECT tcp_flag_mask('SYN') FROM users u2 WHERE u2.id = 1)) OVER () AS w FROM users WHERE id < 0`, 0},
+		{"nested_window_in_arithmetic_valid", `SELECT 1 + SUM(tcp_flag_mask('SYN')) OVER () AS w FROM users WHERE id < 0`, 0},
 	} {
 		t.Run("control/"+tc.name, func(t *testing.T) {
 			res := conn.ExecParams(context.Background(), tc.sql, nil, nil, nil, []int16{0}).Read()
