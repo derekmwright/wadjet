@@ -36,44 +36,15 @@ var ScalarDeferToggle = optswitch.Register("scalar-defer", "WADJET_SCALAR_DEFER"
 // cache Q02 regression) never get caught.
 var ProbeSplitMinBytes int64 = 64 * 1024 * 1024
 
-// ReverseBloomThreshold and ReverseBloomInnerThreshold gate the reverse-bloom
-// optimization (see buildJoin). Declared as vars so regression tests can lower
-// them to fire on tiny SF0.x datasets — TestTPCHReverseBloomForcedSF001 does
-// exactly that — and so they can be raised at runtime to turn the optimization
-// off without rebuilding.
-//
-// These lines used to say the vars existed "to disable the optimization while
-// we hunt the SF100 Q05 0-rows bug whose triggering code path is somewhere in
-// this optimization", and that the semi/anti threshold stayed at 10M because
-// there was "no evidence of bugs there yet". Both halves are settled now, and
-// not in the direction the second one guessed.
-//
-// A 0-rows MECHANISM in this optimization is identified and fixed (#543):
-// reverseBloomBridge installed the bloom whether or not the key column had
-// been found in the probe output, so a probeKey that did not resolve produced
-// an EMPTY bloom that rejected every build row — a join answering over an
-// empty build side, which is 0 rows for an inner or semi join. Forcing both
-// thresholds to 100 over the SF0.01 corpus fires it on exactly one query,
-// Q21, whose probeKey arrives alias-qualified as "l1.l_orderkey" against
-// batches carrying "l_orderkey": on the parent commit Q21 returns 0 rows
-// where the answer is 1 (and 0 where it is 100 at SF1). Init now refuses to
-// install a bloom whose column never resolved or that received no keys.
-//
-// Whether that mechanism is what produced the Q05 incident at SF100 was never
-// reduced to a repro and is not claimed here: Q05's own reverse blooms resolve
-// their columns at SF0.01, and the corpus-wide forced run shows Q21 as the
-// only unresolved one. What IS claimed is that this optimization could return
-// 0 rows for a reason that had nothing to do with the query, that the reason
-// is now gone, and that a gate runs the whole corpus with both thresholds
-// forced down so the next one cannot hide behind a production threshold.
-//
-// The semi/anti threshold's "no evidence of bugs there yet" was wrong twice
-// over: #543's key-encoding divergence was semi/anti-only in practice, since
-// that is where string keys appear, and the empty-bloom mechanism above fires
-// on a semi/anti query. The threshold stays at 10M for COST reasons.
-//
-// Init reads WADJET_REVERSE_BLOOM_INNER_THRESHOLD if set, so the bench can
-// disable the inner-join path on SF100 without rebuilding the binary.
+// ReverseBloomThreshold and ReverseBloomInnerThreshold gate buildJoin's
+// reverse bloom; vars let tests lower thresholds and runtime callers raise them.
+// TestTPCHReverseBloomForcedSF001 forces both over the whole corpus.
+// Never install a bloom whose probe key did not resolve or received no keys
+// (#543); semi/anti string-key encoding must also agree (#543).
+// The forced corpus reproduces Q21's unresolved key, not the SF100 Q05 incident;
+// that incident's mechanism remains unproven. The semi/anti 10M limit is for cost.
+// Init reads WADJET_REVERSE_BLOOM_INNER_THRESHOLD to disable the inner path
+// without rebuilding.
 var (
 	ReverseBloomThreshold      int64 = 10_000_000
 	ReverseBloomInnerThreshold int64 = 50_000_000

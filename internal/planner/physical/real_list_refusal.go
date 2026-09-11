@@ -11,36 +11,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// The plan-time refusal for a `real IN (...)` list holding a literal that
-// cannot be a real (#631 follow-up).
-//
-// PostgreSQL builds the array before it reads a row: `real IN (1e40, 3.1)`
-// casts `{1e40,3.1}` to real[] during parse analysis, 1e40 does not fit, and
-// the query fails with 22003 — whether or not any row would have been
-// examined, and whether or not the predicate is even reachable:
-//
-//	WHERE r_val IS NULL AND r_val IN (1e40, 3.1)  -> ERROR 22003
-//	WHERE r_key < 0     AND r_val IN (1e40, 3.1)  -> ERROR 22003
-//
-// Both evaluation paths raised this from inside the ROW LOOP instead, which
-// makes an error that PostgreSQL guarantees depend on the data: the kernel
-// resolves on the first BATCH, so an empty scan never raised, and the row
-// evaluator's binding raises on the first non-NULL row, so a predicate that
-// only ever meets NULLs never raised either. Both shapes above answered 0 rows
-// on at least one path.
-//
-// Refusing here fixes both at once, and at the layer that can: the planner
-// holds the catalog's declared types (AnnotateScanColumns leaves them on the
-// scan nodes, and inputColDecls walks them up to the filter), which is exactly
-// what decides whether the list is a real[] cast at all. It runs from Plan and
-// PlanDistributed, so the single-process engine, the small-query fast path and
-// the stage DAG all refuse identically, before any task is dispatched.
-//
-// The row-loop raises are KEPT as backstops. They cover the shapes this pass
-// cannot see — a predicate whose column resolves through a projection alias the
-// planner cannot type, a filter compiled from a fragment by a worker running
-// an older coordinator's plan — and a second refusal of a query already
-// refused costs nothing.
+// Refuse a real IN list containing an unrepresentable finite literal with
+// 22003 at plan time (#631), even for empty scans, NULL-only rows or unreachable
+// predicates: PostgreSQL casts the array before reading rows.
+// Use AnnotateScanColumns/inputColDecls to decide whether the operand is real.
+// Run from Plan and PlanDistributed before dispatch so local, fast-path and DAG
+// agree. Keep row-loop backstops for untyped projection aliases and worker
+// fragments compiled from older coordinator plans.
+// See docs/internals/real-in-list-plan-time-refusal.md for the design.
 
 // refuseUnrepresentableRealInList reports the first `real IN (...)` list in the
 // plan holding a finite literal past real's range.
@@ -128,28 +106,13 @@ func refuseRealInList(n *plansql.InExpr, decls colDecls) error {
 	return nil
 }
 
-// realTypedNode reports whether an operand's own type is REAL, which is what
-// decides the array cast — not whether it is a bare column.
-//
-// PostgreSQL resolves the list's element type over the members AND the probed
-// expression, so any real-typed left operand pulls the array to real[]
-// (EXPLAIN VERBOSE, postgres:17):
-//
-//	-r_val IN (-3.1, -7.1)          -> ((- r_val) = ANY ('{-3.1,-7.1}'::real[]))
-//	CAST(d_val AS REAL) IN (3.1,…)  -> ((d_val)::real = ANY ('{3.1,7.1}'::real[]))
-//	(r_val + 0) IN (3.1, 7.1)       -> (… = ANY ('{3.1,7.1}'::double precision[]))
-//
-// The third is why this cannot simply follow the operand down to a column: an
-// integer literal added to a real gives DOUBLE PRECISION in PostgreSQL
-// (pg_typeof(r_val + 0) is `double precision`), so that shape must stay
-// widened. Unary ± is the one operator that preserves real.
-//
-// It is NOT nodeDeclaredType. That function deliberately collapses FLOAT32 to
-// FLOAT64 for unary ± — it types the COLUMN a projection allocates, where the
-// engine materializes `-f32col` as a float64 — and reading it here would
-// answer "double" for the very shape PostgreSQL calls real. The two questions
-// are different; expr.realTypedOperand is this one's runtime twin and the two
-// must keep answering alike.
+// realTypedNode asks whether the operand itself is REAL for the IN-array cast,
+// not whether it contains a real column. Unary ± preserves REAL; adding an
+// integer literal widens to DOUBLE PRECISION, while CAST AS REAL names REAL.
+// Do not use nodeDeclaredType: it types projection vectors and deliberately
+// widens unary FLOAT32 to FLOAT64. Keep this answer aligned with the runtime
+// twin expr.realTypedOperand.
+// See docs/internals/real-operand-array-cast-typing.md for the design.
 func realTypedNode(node plansql.Node, decls colDecls) bool {
 	switch n := node.(type) {
 	case *plansql.ParenNode:

@@ -67,35 +67,13 @@ func respellDerivedAliasRefs(n plansql.Node, child *logical.Node) (plansql.Node,
 	return out, changed
 }
 
-// respellAggInputExpr rewrites an aggregate's ARGUMENT expression so that every
-// column reference in it names what the stage BELOW the aggregate really
-// emits.
-//
-// walkStages emits no stage for an ordinary Project, so a derived table's
-// SELECT list never happens on the DAG (ADR-0025). The aggregate's argument is
-// shipped to the worker as TEXT and compiled there against the batch the stage
-// hands it — which carries the SCAN's columns, not the derived table's names.
-// `SUM(CASE WHEN s = 'x' THEN twice ELSE 0 END)` over
-// `(SELECT s, id * 2 AS twice FROM t)` therefore read `twice` off a batch that
-// has no such column, `expr.ColRef.Eval` answered nil for every row, and the
-// SUM came back as the total of the CASE's ELSE branch — 0 where PostgreSQL
-// answers 2. It is TPC-H Q08's exact shape and it is type-independent: a plain
-// rename triggers it too, and a rename that SHADOWS a base column answered a
-// different wrong number rather than a zero (#702).
-//
-// resolveAggInputName already does this for an argument that IS a name; this
-// is the same resolution applied one level down, to each reference inside an
-// argument that is an EXPRESSION. Both outcomes it can report are used:
-//
-//	a RENAME       — the reference becomes the source column;
-//	a COMPUTED     — the reference becomes the expression that defines it,
-//	  alias          PARENTHESIZED, because the definition is substituted into
-//	                 a larger expression and `id * 2` spliced bare into `x * 3`
-//	                 would re-associate.
-//
-// The single-process pipeline runs that Project as a real operator, so it is
-// already right and this rewrite is DAG-only: it is applied to the stage spec's
-// text, never to the logical node the local engine executes.
+// respellAggInputExpr rewrites aggregate argument references to the columns
+// emitted by the stage below, using resolveAggInputName per reference (#702).
+// A rename becomes its source column; a computed alias becomes its defining
+// expression, parenthesized to preserve association inside the larger AST.
+// DAG-only: rewrite stage-spec text, never the logical node executed by the
+// local pipeline, where the derived Project is a real operator (ADR-0025).
+// See docs/internals/aggregate-argument-alias-substitution.md for the design.
 func respellAggInputExpr(n plansql.Node, child *logical.Node) (plansql.Node, bool) {
 	return respellAggInputExprAt(n, child, 0)
 }
@@ -164,37 +142,14 @@ func respellAggInputExprAt(n plansql.Node, child *logical.Node, depth int) (plan
 	return out, changed
 }
 
-// aggInputRespellable reports whether the derived names between the aggregate
-// and its producer are ones NO stage materializes — the only condition under
-// which respelling them to their sources is right.
-//
-// The question is never "does this name exist below" but "is this name
-// MATERIALIZED HERE", and it has a different answer per producer:
-//
-//   - A JOIN materializes it. attachScanSelectProjections puts an alias-naming
-//     OpProject on the arm's fragment, so `x.v` really IS a column of the
-//     join's output and the source spelling is the one that is not.
-//     Respelling took a CORRECT 25.50 to 0.00 on `SUM(CASE WHEN x.s = '1.50'
-//     THEN x.v ELSE 0 END)` over `(SELECT s, a * 2 AS v FROM t) x JOIN t y`,
-//     because a self-join qualifies both sides' `a`.
-//   - A DISTINCT materializes it. rewriteDistinctAsGroupBy lowers it to an
-//     aggregate whose OUTPUT is the projection's names, so `v` is emitted and
-//     `a` is gone: respelling turned a LOUD failure into a silent 0 on
-//     `SUM(CASE WHEN v > 0 THEN v ELSE 0 END)` over
-//     `(SELECT DISTINCT a * 2 AS v FROM t)`, where PostgreSQL answers 29.50.
-//   - An AGGREGATE, a SET OPERATION and a WINDOW each emit a new column set of
-//     their own, for the same reason.
-//   - A SORT and a LIMIT are pass-throughs, but ADR-0025 gave both an
-//     OpProject slot, so whether the alias is materialized on them is decided
-//     by a LATER pass and is not knowable here.
-//
-// Enumerating the materializing kinds was the first attempt and it was wrong
-// twice — once per kind nobody had thought of. The rule is stated POSITIVELY
-// instead: respell only where the walk reaches a SCAN through Project and
-// Filter alone, which is exactly the shapes #702 names and exactly the ones
-// where walkStages provably emits no stage for the Project. Everything else
-// keeps today's behaviour, and assertAggregateInputsResolve is what makes a
-// residual there loud rather than silent.
+// aggInputRespellable permits source respelling only when a Scan is reached
+// through Project and Filter alone (#702): no intervening stage materializes
+// the derived names. Join/Distinct materialize aliases; Aggregate/SetOp/Window
+// publish their own column sets. Sort/Limit may receive an OpProject in a
+// later pass, so materialization cannot be decided here (ADR-0025).
+// All other shapes retain their behavior; assertAggregateInputsResolve makes
+// unresolved residual inputs loud rather than silently reading missing names.
+// See docs/internals/aggregate-input-respelling-boundary.md for the design.
 func aggInputRespellable(n *logical.Node) bool {
 	for depth := 0; n != nil && depth < aggRespellDepth; depth++ {
 		switch n.Type {
@@ -212,30 +167,13 @@ func aggInputRespellable(n *logical.Node) bool {
 	return false
 }
 
-// aggInputAliasIsAggregateGroupKey reports whether the derived alias's DEFINING
-// EXPRESSION is a GROUP BY key of the aggregate below — the one case in which
-// the producer emits a column under that expression's TEXT, and so the one case
-// in which the aggregate's argument is a bare NAME spelled that way.
-//
-// It is the third answer to "is this name materialized here", and the three
-// differ in WHAT the producer calls the value: nothing materializes it
-// (substitute the expression), a join or an ordering materializes it under the
-// ALIAS, an aggregate materializes a GROUP BY key under its expression's TEXT.
-//
-// The first draft asked only "is there an aggregate below", and that was far
-// too wide. `SELECT SUM(v) FROM (SELECT SUM(a) * 2 AS v FROM t GROUP BY s) x`
-// has an aggregate below, but `SUM(a) * 2` is not a group key — the aggregate
-// emits `s` and `__agg_0`, and the alias is arithmetic OVER an aggregate
-// output. Spelling the argument `__agg_0 * 2` handed the operator a name it
-// cannot look up, and both DAG arms hard-failed after three attempts with
-// `aggregate input "__agg_0 * 2" is not a column of its input (input has: s,
-// __agg_0)` — a query PostgreSQL answers 105.98 and ff7c3f19 answered on every
-// arm. The expression has to be COMPUTED there, which is the first answer.
-//
-// Matching on the GROUP BY list is what separates the two: the DISTINCT rewrite
-// puts the whole projected expression in it (`SELECT DISTINCT a * 2 AS v`
-// groups by `a * 2`), and arithmetic over an aggregate output never appears
-// there.
+// aggInputAliasIsAggregateGroupKey matches a derived alias's defining expression
+// against the aggregate's GROUP BY list, where it is emitted under expression
+// text and can be read as a bare name. The mere presence of an aggregate is
+// insufficient: arithmetic over its output must be computed, not read by name.
+// DISTINCT groups by the whole projected expression and therefore qualifies;
+// join/ordering materialization uses the alias instead of expression text.
+// See docs/internals/aggregate-input-group-key-materialization.md for the design.
 func aggInputAliasIsAggregateGroupKey(n *logical.Node, exprText string) (string, bool) {
 	exprText = strings.TrimSpace(exprText)
 	if exprText == "" {
@@ -309,31 +247,13 @@ func aggInputAliasIsMaterializedUnderItsName(n *logical.Node) bool {
 	return false
 }
 
-// respellWindowSlotAliasRefs rewrites every column reference naming a derived
-// table's or CTE's SELECT-list alias for a WINDOW OUTPUT SLOT to the slot
-// itself.
-//
-// It is the third answer to "what does the producer below call this value",
-// and the one the two answers above cannot give. A window publishes its result
-// under the hidden slot `__win_N`, never under the alias the SELECT list gives
-// it: `SELECT g.id AS id, SUM(g.a) OVER () AS w FROM …` is a Project over a
-// Window, and walkStages emits no stage for a Project (ADR-0025). On the
-// single-process pipeline that Project is a real operator and `w` is a real
-// column; on the DAG `w` is a name nothing publishes, so an aggregate above
-// reading `SUM(w * 2)` compiled that text against a batch with no `w`,
-// `expr.ColRef.Eval` answered nil on every row, and the SUM came back NULL —
-// 953.82 single-process and on PostgreSQL, NULL on both DAG arms (#877, and
-// #878 one qualifier deeper, where the derived table is a CTE joined to a
-// second reference of itself).
-//
-// The BOUNDARY is exact and needs no model of what a later pass will do: the
-// resolved name is in the window-output slot family, which is RESERVED
-// (plansql.RefuseReservedSlotName — a user cannot store or alias a column
-// there), so a reference that resolves to one names the planner's own slot and
-// nothing else. Every other resolution is left to the two rules above.
-//
-// DAG-only, like its siblings: it rewrites the stage spec's TEXT, never the
-// logical node the local engine runs.
+// respellWindowSlotAliasRefs rewrites derived/CTE SELECT aliases resolving to
+// window output slots to those slots (#877, #878; ADR-0025).
+// Only the reserved window-output family qualifies: users cannot store or
+// alias a column there (plansql.RefuseReservedSlotName). Other resolutions
+// belong to the preceding alias rules.
+// DAG-only: rewrite stage-spec text, never the local engine's logical node.
+// See docs/internals/window-output-slot-alias-resolution.md for the design.
 func respellWindowSlotAliasRefs(n plansql.Node, child *logical.Node) (plansql.Node, bool) {
 	if n == nil || child == nil {
 		return n, false

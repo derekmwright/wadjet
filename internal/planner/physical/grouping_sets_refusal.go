@@ -7,39 +7,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
-// ErrGroupingSetsDistributed marks a plan the stage DAG refuses because it
-// carries GROUPING SETS / ROLLUP / CUBE, which the DAG has no representation
-// for at all.
-//
-// `logical.buildGroupingSets` emits ONE Aggregate whose GroupBy is the UNION of
-// every set's terms, with the sets themselves as node metadata. The
-// single-process builder reads that metadata into `exec.HashAggregate.
-// GroupingSets`, which inserts each row once per set under a set-prefixed key
-// and leaves the out-of-set columns NULL. `walkStages` reads it nowhere:
-// `Stage` has no field for it, `distributed.OpSpec` has no wire tag for it, and
-// no worker sets `hashAgg.GroupingSets`. The information is destroyed where the
-// stage's `GroupByCols` are copied, and is unreconstructible below that.
-//
-// So the DAG ran the union of the terms as a PLAIN GROUP BY and returned it as
-// the answer. Measured against PostgreSQL 17 over `collslot`:
-//
-//	GROUP BY GROUPING SETS ((g), (h))  PG 7 rows, DAG 12 — the CROSS PRODUCT
-//	GROUP BY ROLLUP (g)                PG 4 rows, DAG 3 — no grand total
-//
-// Silently, and for PLAIN column keys, which is wider than the filing said.
-//
-// Refusing is the #308 position, and this is a HANDOFF rather than the query's
-// outcome: Coordinator.ExecuteSQL matches this error and answers on the
-// coordinator-local single-process pipeline, exactly as it does for
-// ErrDistinctDistributed — the same class of defect one construct over, where
-// walkStages drops a construct it has no stage for.
-//
-// The refusal is deliberately UNCONDITIONAL rather than "only where the sets
-// differ from the union". A single-set GROUPING SETS is a plain GROUP BY and
-// would be safe to run on the DAG, but a predicate that has to be exactly right
-// about which shapes are equivalent is the kind that drifts; and no such query
-// is written by hand. When a Stage learns to carry the sets this refusal goes
-// away with it.
+// ErrGroupingSetsDistributed unconditionally refuses GROUPING SETS/ROLLUP/CUBE,
+// including a single set: Stage/OpSpec carry no sets and workers cannot restore
+// metadata lost when GroupByCols takes the union of terms. The local operator
+// inserts each row per set, with set-prefixed keys and NULL out-of-set columns.
+// Coordinator.ExecuteSQL hands off locally like ErrDistinctDistributed (#308).
+// Remove the refusal when Stage carries sets, not via an equivalence heuristic.
+// See docs/internals/distributed-grouping-sets-refusal.md for the design.
 var ErrGroupingSetsDistributed = errors.New(
 	"GROUPING SETS / ROLLUP / CUBE has no distributed stage")
 

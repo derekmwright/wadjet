@@ -6,29 +6,13 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// rewriteColRefs rebuilds n with every column reference sub claims replaced by
-// what sub returns, copy-on-write: a subtree nothing changed comes back as the
-// same pointer, so a caller that changed nothing has changed nothing.
-//
-// It exists because THREE respell sites had grown their own walk over the
-// expression AST, each covering the node kinds its own defect happened to
-// need. A walk that does not descend into a node kind is not a no-op: the
-// references inside that kind are left naming something the consuming stage
-// does not carry, `expr.ColRef.Eval` answers nil for them, and the query comes
-// back with a wrong number rather than an error. `respellDerivedAliasRefs`
-// handled arithmetic, a paren, a cast and a function call — so
-// `SUM(v * 2) OVER ()` over a derived alias was respelled and
-// `SUM(CASE WHEN s = 'x' THEN v ELSE 0 END)` over the same alias was not
-// (#702, TPC-H Q08's exact shape).
-//
-// complete reports whether the walk UNDERSTOOD every node it met. It is false
-// for a subquery, an EXISTS and a window call — each carries raw SQL or a
-// clause structure this walk deliberately does not rewrite — and for any node
-// kind added to the AST since. A caller may still use the partially rewritten
-// expression; what it may not do is treat a `complete == false` walk as proof
-// that every reference now names something. That proof is the schema assert's
-// job (assertCarrierSchemaResolves), which reads the finished plan and refuses
-// it when a name resolves to nothing.
+// rewriteColRefs replaces column references claimed by sub, copy-on-write:
+// unchanged subtrees retain their pointer (#702).
+// complete means every node was understood. Subqueries, EXISTS, window calls
+// and unknown node kinds return false; their raw SQL/clause structures are
+// not rewritten. A caller may use partial results, but complete=false cannot
+// prove references resolve. assertCarrierSchemaResolves checks the finished
+// plan and refuses unresolved names.
 func rewriteColRefs(n plansql.Node, sub func(*plansql.ColRef) (plansql.Node, bool)) (
 	out plansql.Node, changed, complete bool,
 ) {

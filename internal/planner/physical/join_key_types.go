@@ -8,41 +8,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// The COMMON TYPE of an equi-join key pair (#615, #650, #663).
-//
-// A comparison resolves its two operands to one type before comparing them;
-// a hash key was built from each side's own storage encoding. ADR-0023 says
-// those two must name one relation — "compares equal" and "keys alike" — and
-// across numeric widths they did not: `a.i = b.d` in a WHERE clause was right
-// and the same predicate as a JOIN key matched almost nothing, `numeric IN
-// (SELECT bigint)` panicked in the integer fast path, and an `int = float`
-// key in a three-relation join panicked inlineIntProbe.
-//
-// PostgreSQL's answer for a JOIN key is OPERATOR resolution, not the set
-// operations' `select_common_type` — the two ladders are different and both
-// are pinned by internal/coordinator's numwidth fixture. Read off EXPLAIN
-// VERBOSE on postgres:17.11:
-//
-//	int4    = int8     ->  int8      (int48eq; no cast on either side)
-//	int     = float4   ->  ((int)::float8) = float4      -> float8
-//	int     = float8   ->  ((int)::float8) = float8      -> float8
-//	int     = numeric  ->  ((int)::numeric) = numeric    -> numeric
-//	float4  = float8   ->  float48eq                     -> float8
-//	numeric = float4   ->  float4 = ((numeric)::float8)  -> float8
-//	numeric = float8   ->  float8 = ((numeric)::float8)  -> float8
-//	numeric = numeric  ->  numeric, exact, at either declared scale
-//
-// so float4 is NOT a rung: everything that meets it except another float4
-// goes to float8. (A set operation over the same pair narrows to real
-// instead, because real is a PREFERRED type of the numeric category for
-// `select_common_type` and merely a resolvable one for an operator. That path
-// is setOpWiden and is unchanged by this.)
-//
-// The DECIMAL rung needs no (p,s). batch.AppendDecimalKey is scale-
-// normalized, so 2, 2.00 and 2.0000 are one key already (#474) and an integer
-// keyed at scale 0 lands on the DECIMAL holding the same quantity. That is
-// also why nothing here can overflow: a key is the value's digits, not a
-// column.
+// Equi-join keys must encode one common comparison type (#615, #650, #663;
+// ADR-0023). Use operator resolution, not setOpWiden/select_common_type:
+// int4/int8 → int8; integer/numeric → numeric; any unequal numeric pair
+// involving float4/float8 → float8. float4 is not an intermediate rung.
+// Numeric/numeric stays exact across scales: batch.AppendDecimalKey normalizes
+// scale, including integer scale 0 (#474); no (p,s) or column-range overflow.
+// See docs/internals/equi-join-key-common-types.md for the design.
 
 // joinKeyCommonType is the ladder above for one pair of DECLARED types.
 //
@@ -133,40 +105,13 @@ func joinKeyLookupName(key string) string {
 	return k
 }
 
-// joinSideColTypes reports the declared type of every column ONE SIDE of a
-// join can offer a key, keyed by the name a key may SPELL it with.
-//
-// It is the shared declared-type layer, not a walk of its own. The first
-// version of this function WAS a walk of its own — scans and rename
-// projections only — and it answered nothing for a side rooted at an
-// aggregate, a window or a set operation, and dropped every computed
-// projection. resolveJoinKeyTypes then emitted KeyTypeUnresolved and
-// joinKeyUsesIntPath fell back to isIntKeyColumn(own), which is the exact
-// gate #615 replaces: `a.w_d2 = b.k` over `(SELECT w_i64 AS k … GROUP BY
-// w_i64)` answered 0 where PostgreSQL answers 3, and the CAST spelling of it
-// panicked on the DAG.
-//
-// Two maps, merged, because a key can be spelled either way:
-//
-//  1. What the side EMITS, under the names it emits them: emittedColTypes
-//     for an aggregate / window / projection / DISTINCT chain (its Project
-//     arm types a CAST through declaredProjectionType, which is where
-//     inferCastType lives), and setOpDeclaredOutputSchema for a side that IS
-//     a set operation — the arms reconciled through setOpWiden, the same
-//     ladder the executed schema uses. This is the spelling a derived
-//     table's key actually takes (`b.k`).
-//  2. The SOURCE names still visible below a RENAME, for the spelling
-//     resolveShuffleKey produces when it resolves an alias back to the
-//     column the shuffle reads. A rename carries its source's values, so
-//     both names describe one type; a COMPUTED projection binds only its
-//     alias, and its inputs keep their own types under their own names,
-//     which is correct — a key spelled with the input name is keyed on the
-//     input.
-//
-// A name the two disagree about is DELETED rather than picked between: a key
-// resolved against the wrong column is a silently different join, and
-// declining leaves the runtime backstop (exec.joinKeyEncodingMismatch) to
-// raise if the two sides really do disagree at run time.
+// joinSideColTypes merges shared declared types under both emitted names and
+// source names visible below renames (#615). Use emittedColTypes for
+// aggregate/window/projection/DISTINCT, and setOpDeclaredOutputSchema with
+// setOpWiden for set operations. Computed projections bind only their alias;
+// their inputs retain their own types under source names. Delete conflicting
+// names rather than choosing: exec.joinKeyEncodingMismatch remains the
+// runtime backstop. See docs/internals/join-side-declared-types.md for the design.
 func joinSideColTypes(n *logical.Node) map[string]parquet.TypeID {
 	if n == nil {
 		return nil

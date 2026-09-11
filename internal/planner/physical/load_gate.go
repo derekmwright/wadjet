@@ -5,40 +5,13 @@ import (
 	"sync"
 )
 
-// loadGate admits concurrent file loads by BYTES instead of file count.
-//
-// Its predecessor was a 4-slot counting semaphore (loadConcurrency = 4),
-// sized for SF100 lineitem files: "4 × 300 MB = 1.2 GB peak". That bound
-// was really a byte bound expressed in file units, and it collapsed on
-// small-file layouts: SF10 ships 600 × 6.5 MB lineitem files, and 4
-// concurrent GETs left a 16-core box ~98% idle on cold S3 (2026-07-05
-// Q06 profile: 56.6s wall, 7.98s CPU — pure download wait; suite 7×
-// slower than DuckDB httpfs on the same instance). Bounding bytes
-// directly gives small-file scans the lane count they need while holding
-// the same heap ceiling for large files.
-//
-// Semantics match the old semaphore: a slot's bytes are held from load
-// admission until the file's last row group is consumed (releaseRG) or
-// the scan is torn down (drainAbandoned).
-//
-// What those bytes MEAN differs by read path, and the difference is not
-// silent:
-//
-//   - Whole-file read: the admitted bytes are the file, and they ARE the
-//     live heap of the loaded file, not just the download window.
-//   - Row-group read (scan_rowgroup_load.go): the admitted bytes are the
-//     file's LARGEST ROW GROUP, and the slot may hold several row groups
-//     at once — one per rg worker that has demanded one and not yet
-//     released it. Measured on a 24-row-group file with 4 workers: 3-4
-//     resident, 7.0x-9.1x the admitted bytes. So on this path the gate
-//     bounds concurrent LOADS by a row group each, not the live heap;
-//     what bounds the live heap is the per-row-group charge on the query's
-//     memory tracker, which is the bound #789 was about. `budget` here is
-//     therefore a download-concurrency ceiling on the row-group path and a
-//     heap ceiling on the whole-file one.
-//
-// Progress guarantee: a load is always admitted when nothing is inflight,
-// so a file larger than the whole budget still loads — alone.
+// loadGate admits concurrent file loads by bytes, held until the last row
+// group is consumed (releaseRG) or the scan is torn down (drainAbandoned).
+// Whole-file admission charges the file's live heap. Row-group admission charges
+// only the file's largest row group; several RG workers may hold groups at once.
+// On that path budget bounds download concurrency, not live heap: per-row-group
+// charges on the query memory tracker bound the heap (#789).
+// When nothing is inflight, always admit one load, even if it exceeds budget.
 type loadGate struct {
 	budget   int64 // max inflight bytes (soft: single oversized load admits alone)
 	maxLanes int   // hard cap on concurrent loads (connection sanity)

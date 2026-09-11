@@ -2,27 +2,11 @@ package physical
 
 import "strings"
 
-// Retargeting the references an absorbed aggregate projection renamed away.
-//
-// absorbAggregateOutputProjection makes an aggregate stage emit `id` where it
-// used to emit the group key's expression text `g + 1`. That is the point —
-// no consumer can name the text. But everything ABOVE the stage was written
-// against the OLD spelling while the plan was still being built: the gather's
-// OutputRenames source, a sort key the resolver chased down to the group key,
-// a predicate re-spelled into it. Each of those then names a column no stage
-// emits any more.
-//
-// The gather is the one that fails SILENTLY. Its rename maps
-// `"g + 1"` → `id`, finds no such column, falls back to passing the stage's
-// output through, and the client gets the aggregate's full width — `[id, v]`
-// for `SELECT s.id FROM (… GROUP BY g + 1) s WHERE s.v > 0`, where
-// PostgreSQL and the single-process pipeline answer `[id]` (#656 follow-up,
-// F1). A sort key or a filter fails loud instead, which is why the gather is
-// the one that had to be found by a gate.
-//
-// The rewrite is deliberately conservative: a name is retargeted only when NO
-// stage emits it any more and some stage emits the new one. A plan where both
-// spellings are live is one this pass has no business touching.
+// Retarget gather OutputRenames, sort keys and predicates after an absorbed
+// aggregate projection renames a group-key expression to a usable alias.
+// A stale gather rename silently falls back to the stage's full width (#656).
+// Retarget only when NO stage emits the old spelling and some stage emits
+// the new one; leave plans with both spellings live untouched.
 
 // aggRenameSite is one absorb: the stage whose output was renamed, and the
 // renames it performed.

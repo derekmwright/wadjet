@@ -11,34 +11,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// setOpArmDecls describes the columns a set-operation ARM's SELECT list can
-// name. It is inputColDecls' job with the two differences #551 and #554 turn
-// on, and it exists separately because both differences are wrong for
-// inputColDecls' other callers.
-//
-//  1. A JOIN keeps a PER-SIDE answer. inputColTypes and inputColDecimal merge
-//     a join's two sides and DELETE any name they disagree on — right for a
-//     TypeID, because two tables genuinely have two `dx` columns and picking
-//     a side would answer about the wrong one. For a set operation that
-//     disagreement IS the fact being reconciled: `a.dx DECIMAL(9,2)` beside
-//     `b.dx DECIMAL(18,4)` resolved to DECIMAL with no (p,s), no coercion was
-//     emitted, and each arm's .wshf file kept its own scale — the wider arm's
-//     unscaled integer read at the narrower arm's scale, 100x out, silently
-//     (#551). The projection names the column QUALIFIED, so the two sides are
-//     told apart by keying each side's columns under its own relation names
-//     as well as bare; the BARE name still merges-and-deletes, which remains
-//     the honest answer for an unqualified reference two sides disagree on.
-//
-//  2. A PROJECT is descended INTO rather than stopped at, so a DERIVED-TABLE
-//     arm resolves through the names its subplan EMITS (#554). The nested
-//     set-operation arm already reads itself that way; a derived table is the
-//     same shape one node down.
-//
-// The walk is deliberately STRICTER than emittedColTypes about what it will
-// claim: a projection it cannot resolve produces NO entry, where
-// declaredProjectionDecl answers STRING. That fallback is right for advisory
-// wire metadata and poisonous here — a confidently-wrong arm type makes the
-// ladder cast the column, which moves values.
+// setOpArmDecls types the columns an arm's SELECT list can name (#551, #554).
+// Keep per-side JOIN declarations under qualified relation names; contested bare
+// names still merge-and-delete. Qualified DECIMAL (p,s) must survive reconciliation
+// so different arm scales cannot be read as one (#551).
+// Descend into Projects using subplan EMITTED names for derived arms (#554).
+// Unresolved projections contribute NO entry: advisory STRING fallback is unsafe
+// here because a guessed type can cast and change values.
+// See docs/internals/set-operation-arm-declarations.md for the design.
 func setOpArmDecls(n *logical.Node) colDecls {
 	return setOpArmDeclsInScope(n, nil)
 }
@@ -574,35 +554,14 @@ func setOpLitArm(e plansql.Node) (setOpLitDecimal, bool) {
 	}
 }
 
-// litDeclType is a numeric LITERAL's own type, as PostgreSQL reads its
-// SPELLING, with the plain decimal text that spelling expands to.
-//
-// PostgreSQL's rule, verified live against 17.11 with pg_typeof:
-//
-//	1.23456  1.  0.0        -> numeric   (a decimal point)
-//	1e2  1.5e1  1.5e-2      -> numeric   (an exponent, WITH or without a point)
-//	1  1234567890           -> integer
-//	12345678901             -> bigint
-//	123456789012345678901   -> numeric   (too wide for bigint)
-//
-// So a literal is numeric when it carries a decimal point OR an exponent, and
-// an INTEGER literal is numeric only when no integer type holds it. The
-// integer forms answer false here and stay on the ladder's integer rung, where
-// an integer arm contributes its whole range's digits.
-//
-// The (p,s) is the digits the literal EXPANDS to — PostgreSQL's numeric
-// constant carries typmod −1 and an exact value, and a finite carrier needs a
-// declaration wide enough to hold that value without moving it. `1e2` is
-// numeric(3,0), `1.5e-2` is numeric(3,3), `0.5` is numeric(1,1) (a leading
-// zero holds no place), and trailing zeros count because they are digits the
-// query wrote and a set operation must not drop a scale it stated.
-//
-// It is deliberately NOT wired into nodeDeclaredType's Lit case, which still
-// answers FLOAT64 for a fractional literal everywhere else: the declared type
-// of a literal in an ARITHMETIC expression is being decided alongside
-// ADR-0024 item 3's decimal arithmetic. A set-operation ARM is the one site
-// where the literal's own type is the whole answer — the arm produces the
-// literal and nothing else.
+// litDeclType resolves a numeric literal from its spelling and expanded decimal
+// text. Decimal points or exponents imply numeric; integers do only past bigint.
+// Representable integer forms return false and contribute their type's full range.
+// Derive (p,s) from expanded digits, excluding leading zeros but retaining stated
+// trailing zeros; PostgreSQL's exact numeric literal itself has typmod -1.
+// This serves set-operation arms, not nodeDeclaredType's fractional-literal
+// FLOAT64 fallback elsewhere (ADR-0024 item 3).
+// See docs/internals/set-operation-numeric-literal-typing.md for the design.
 func litDeclType(n *plansql.Lit) (setOpLitDecimal, bool) {
 	if n == nil || n.Kind != plansql.LitNumber {
 		return setOpLitDecimal{}, false

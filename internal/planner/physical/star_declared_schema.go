@@ -9,52 +9,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// starOnlyDeclaredOutputSchema is declaredOutputSchema for `SELECT *` — the
-// one SELECT list that produces no Project node to read.
-//
-// logical.BuildFromSelect skips the projection entirely when the list is a
-// bare star (builder.go's `if !isStarOnly(info.Columns)`), because the star
-// selects the input unchanged and a projection would be the identity. The
-// consequence is that findOutputProjectionNode finds nothing, declaredOutput
-// Schema answers nil, and a `SELECT *` that returns ZERO rows reaches the
-// client with no columns at all: psql prints nothing and JDBC's executeQuery
-// throws "No results were returned by the query" (#846). Every other zero-row
-// shape has been described from the plan since #416 — `SELECT c0 FROM t WHERE
-// false` declares c0 — so this was the one hole, and it is the shape a BI
-// tool opens a table with.
-//
-// The columns are the star's SOURCE columns, resolved exactly the way
-// logical.ExpandStarProjections resolves them for a star that DOES share its
-// SELECT list with another item: the lone scan below, its catalog-annotated
-// ScanColumns in schema order, with the types AnnotateScanColumns left beside
-// them. Same source, same order, so the declared answer and the executed one
-// describe one result.
-//
-// It is NOT only a description. declaredOutputSchema also feeds
-// subqueryOutputColumn (plan.go, #696), which picks the COMPARISON RULE for a
-// scalar subquery on every row — so `d = (SELECT * FROM one_row)` over two
-// DECIMALs of different scale answered ZERO rows without a declaration, where
-// PostgreSQL 17 and the named spelling `(SELECT v FROM one_row)` both answer
-// one. Declaring the star hands that call the same column the named spelling
-// has always handed it, which is why an approximation here would not be free
-// and why the walk DECLINES rather than guesses
-// (wadjet.TestStarScalarSubqueryComparesLikeItsNamedSpelling, round-1 P2).
-//
-// What it declines, and why the boundary is exactly here:
-//
-//   - Anything with a Project below the pass-through nodes. Not this
-//     function's case at all — findOutputProjectionNode answers it, and
-//     `SELECT * FROM (SELECT c0 AS x FROM t) s` must publish `x`, not `c0`.
-//   - A star over a JOIN, which is starJoinDeclaredOutputSchema's case below.
-//     It is answered by CALLING the operator's own namer rather than by
-//     copying it, which is why it can be answered at all: a name spelled two
-//     ways by two namers is ADR-0026's defect, and a declaration that
-//     disagreed with the non-empty answer would be worse than none.
-//   - A star over an Aggregate, a Window, or a table function. The emitted
-//     names there are the operator's, not the catalog's.
-//
-// ok=false means "not a bare star over a resolvable scan", and the ordinary
-// projection walk answers (with its own nil, where there is no Project).
+// starOnlyDeclaredOutputSchema declares bare SELECT * from its source scan,
+// in schema order with annotated types, matching the executed result.
+// The declaration also controls scalar-subquery comparison; decline rather
+// than guess. Projects belong to findOutputProjectionNode; joins delegate to
+// starJoinDeclaredOutputSchema and the executor's namer. Aggregate, Window
+// and table-function outputs are not catalog columns. ok=false leaves the
+// ordinary projection walk to answer. #846, #416, #696; ADR-0026.
+// See docs/internals/bare-star-output-declaration.md for the design.
 func starOnlyDeclaredOutputSchema(root *logical.Node,
 	subqueryDecl func(string) (parquet.Column, bool)) ([]parquet.Column, bool) {
 	scan, names := starOnlySourceScan(root)
@@ -163,38 +125,14 @@ func starOnlySourceScan(n *logical.Node) (*logical.Node, []string) {
 	return nil, nil
 }
 
-// starJoinDeclaredOutputSchema is the declaration for `SELECT *` over a JOIN —
-// the one zero-row shape that reached a client with NO COLUMNS AT ALL, on
-// every arm (#978, #846's twin).
-//
-// `SELECT * FROM a JOIN b ON …` produces no Project node for the walk above to
-// read and no single scan for it to describe, so a result WITH rows was
-// described from the first batch and a result without rows was described by
-// nothing: psql printed no header, pgJDBC's executeQuery had no column
-// metadata, and the pgwire door sent an EMPTY RowDescription because that was
-// the most honest thing it could say. `SELECT * FROM a WHERE false` has
-// declared its columns since #416.
-//
-// THE NAMES ARE THE OPERATOR'S OWN. The join executor emits the probe's
-// columns and then the build's, with every DUPLICATE bare name qualified by
-// its owning alias, and that rule lives in `exec.joinOutputSchemaWithMapping`.
-// This function does not reimplement it — it assembles the arguments from the
-// plan and calls it (`exec.JoinOutputSchema`), which is why the declaration
-// and the executed answer cannot disagree. A second copy of that rule is
-// exactly what this file declined to write before, and it was right to.
-//
-// THE BOUNDARY IS ONE JOIN, and it is a claim rather than a convenience:
-//
-//   - Neither side may contain a join of its own. `declaredJoinSchema` walks a
-//     nested join by CONCATENATING its sides and dropping duplicate names,
-//     which is not the operator's rule, so a bushy shape would be described by
-//     a list the engine never produces.
-//   - `QualifyAllBuildCols` is a STAGE property set only where TWO joins in one
-//     chain build from one table (markCoPathingSelfJoinBuilds), so with one
-//     join in the plan it is false on every path — which is what lets this be
-//     answered from the logical tree at all.
-//   - A side whose columns the plan cannot type declines the whole schema, the
-//     same rule the scan arm above applies: no declaration beats a wrong one.
+// starJoinDeclaredOutputSchema declares SELECT * over one join, including
+// zero rows, using exec.JoinOutputSchema: probe then build, duplicate bare
+// names qualified by their owning alias. #978, #846, #416.
+// Neither side may contain a join: declaredJoinSchema's nested concatenation
+// and deduplication do not match the executor. With one join,
+// QualifyAllBuildCols is false; it is a stage property for co-pathing joins.
+// Decline the whole schema if either side cannot be typed.
+// See docs/internals/join-star-output-declaration.md for the design.
 func starJoinDeclaredOutputSchema(root *logical.Node,
 	subqueryDecl func(string) (parquet.Column, bool)) ([]parquet.Column, bool) {
 	join := starOnlySourceJoin(root)

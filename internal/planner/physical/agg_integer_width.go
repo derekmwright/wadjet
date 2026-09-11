@@ -9,53 +9,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// The WIDTH of a COMPUTED integer aggregate argument (#841's second half).
-//
-// PostgreSQL's SUM rule is by INPUT WIDTH: `sum(int2|int4)` is bigint, because
-// there is a wider integer to grow into, and `sum(int8)` is NUMERIC, because
-// there is not. A BARE column already gets that rule here
-// (aggIntegerOutputType). A COMPUTED argument did not: every integer
-// expression declares INT64 in this engine (ADR-0024's recorded widening), so
-// aggOutputFromInputDecl could not tell `SUM(CASE WHEN … THEN 1 ELSE 0 END)`
-// — TPC-H Q12's shape, int4 in PostgreSQL and bigint under SUM — from
-// `SUM(bigint_col + 0)`, which is numeric there. It read them all as int4,
-// keeping Q12's OID and leaving the int8 case as a residual: the total sums
-// into an int64 carrier and a query PostgreSQL answers becomes 22003.
-//
-// That residual was invisible while `rewriteConstArithAggs` was lifting the
-// constant out — `SUM(b + 0)` ran as `SUM(b) + 0*COUNT(b)` over a BARE column,
-// which takes the exact path — and it surfaced the moment the lift stopped
-// moving refusals. It is the same question #841 asks: one expression, one
-// disposition, whichever position it is written in.
-//
-// The width is recoverable from the AST plus the column declarations, which is
-// what this walk does. It answers "wide" ONLY for an expression that provably
-// carries an int8-domain operand, and everything else keeps the int4 reading
-// it had — so the change is confined to shapes that can be pointed at, and no
-// declaration moves on a shape this walk cannot see through.
-//
-//	SUM(CASE WHEN … THEN 1 ELSE 0 END)   not wide → bigint   (PostgreSQL: bigint)
-//	SUM(int32_col * 2)                   not wide → bigint   (PostgreSQL: bigint)
-//	SUM(int64_col + 0)                   WIDE     → numeric  (PostgreSQL: numeric)
-//	SUM(row_number_slot * 2)             WIDE     → numeric  (PostgreSQL: numeric)
-//	SUM(9223372036854775807 * x)         WIDE     → numeric  (the literal is int8)
-//	SUM(int64_col::bigint)               WIDE     → numeric  (the CAST's target)
-//	SUM(int64_col::int4)                 not wide → bigint   (the cast narrows)
-//
-// It is asked by BOTH spellings — `aggComputedInputDecl` for `GROUP BY` and
-// `windowComputedArgDecl` for `OVER (…)` — so an arm added here moves the two
-// together by construction. That is why the CAST arm closes one divergence in
-// two places at once, and why a missing arm is a divergence in two places at
-// once: `SUM(bigint_col::bigint)` read as int4 in both.
-//
-// NOT covered, deliberately, and recorded rather than guessed at: PORT and
-// PROTOCOL under ARITHMETIC. Both are int4-domain and a BARE one takes int4's
-// result types (exec.IntegerAccOutputType, #953), but `c_port * 1` is
-// evaluated on the FLOAT path — `expr.operandIsInt` keeps the network types
-// there on purpose, and `intArithAllInt` mirrors it so the declaration cannot
-// promise an integer the kernel will not produce. Answering "int4-domain" here
-// alone would be that promise. See ADR-0012's #953 entry for the mechanism and
-// the pinned cells.
+// aggInputIsWideInteger answers wide only for a provable int8-domain operand
+// from the AST and column declarations; other shapes keep the int4 reading.
+// Grouped aggComputedInputDecl and windowComputedArgDecl share this walk:
+// SUM(int2|int4-domain) is bigint; SUM(int8-domain) is numeric.
+// Expression declarations alone cannot recover width (ADR-0024).
+// PORT/PROTOCOL arithmetic is deliberately excluded: expr.operandIsInt and
+// intArithAllInt keep it on the FLOAT path; bare columns use int4's table.
+// See docs/internals/computed-integer-aggregate-width.md for the design.
 func aggInputIsWideInteger(node plansql.Node, decls colDecls) bool {
 	switch n := node.(type) {
 	case *plansql.ParenNode:
@@ -110,38 +71,13 @@ func aggInputIsWideInteger(node plansql.Node, decls colDecls) bool {
 		}
 		return false
 	case *plansql.CastNode:
-		// A CAST answers in its TARGET type's domain, whatever the operand's
-		// was — that is the whole point of writing one. PostgreSQL:
-		//
-		//	sum(bigint_col::bigint)   numeric   the cast keeps int8
-		//	sum(bigint_col::int4)     bigint    the cast NARROWS to int4
-		//	sum(int_col::bigint)      numeric   the cast WIDENS to int8
-		//	sum(x::numeric)           numeric   not an integer at all
-		//	sum(x::float8)            double    likewise
-		//
-		// So the target decides, and nodeDeclaredType is what reads it
-		// (inferCastType, and castDeclaredDecimal for a DECIMAL destination).
-		// Only INT64 is "wide"; INT32 is the int4 case this walk already
-		// answers false for, and a non-integer target leaves the integer
-		// table entirely — its declaration is what
-		// exec.IntegerAccOutputType declines, and the float or DECIMAL
-		// reading stands.
-		//
-		// Without this arm the walk fell off its end and answered "not wide"
-		// for every int8 operand written under a cast, so
-		// `SUM(bigint_col::bigint)` declared bigint in BOTH spellings where
-		// PostgreSQL declares numeric — and past int64 a total PostgreSQL
-		// ANSWERS became 22003 on four arms, while the identical query one
-		// cast away answered it exactly. "PostgreSQL answers and we refuse"
-		// is the direction ADR-0012 does not allow; the permitted superset
-		// runs the other way (#987 review round 3, B1; #841's grouped half).
-		//
-		// The TARGET NAME is read, not nodeDeclaredType's answer for the
-		// node: every integer cast spelling lands on INT64 there, because
-		// the engine has no int16 and reads an int4 column as int64
-		// everywhere else (inferCastType, ADR-0012 item 12's recorded OID
-		// divergence). That reading cannot tell `::int4` from `::bigint`,
-		// which is the only thing this walk is asking about.
+		// A CAST's TARGET NAME decides its domain, independently of the operand.
+		// Only int8 is wide; int4 is not, and non-integer targets leave the integer
+		// accumulator table for their float or DECIMAL declaration.
+		// Do not use nodeDeclaredType: inferCastType declares every integer cast
+		// INT64 and cannot distinguish ::int4 from ::bigint (ADR-0012 item 12).
+		// The rule applies to grouped and window SUM (#987, #841); PostgreSQL
+		// answers must not become refusals (ADR-0012).
 		return castTargetIsWideInteger(n.TypeName)
 	case *plansql.ColRef:
 		if decls.isFieldPath(n) {

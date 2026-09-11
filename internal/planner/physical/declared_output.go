@@ -99,28 +99,12 @@ func inferProjectionDeclTypeConf(node plansql.Node, fallback parquet.TypeID,
 	}
 	_, bareRef := node.(*plansql.ColRef)
 	if bareRef && !astIsFieldPath(node, decls) {
-		// A bare column reference is a copy, and exec.Project types that
-		// output from the column it copies — the input schema is the
-		// authority there, and it sees renames and derived inputs the
-		// catalog cannot. Withholding colTypes keeps the answer Undecided,
-		// so this projection is typed by the caller's fallback exactly as
-		// before. #333 is about the arguments INSIDE an expression, where
-		// the output is computed and no input column describes it.
-		//
-		// A PARENTHESIZED bare reference — `SELECT (a)` — is deliberately
-		// NOT withheld, though isComputedProjection calls it uncomputed:
-		// exec.Project resolves its source by NAME and the name it holds is
-		// the parenthesized text, which matches no column, so nothing
-		// downstream corrects the fallback and every `SELECT (a)` was
-		// declared STRING where PostgreSQL declares the column's own type.
-		// Here the declaration IS the authority, exactly as it is for a ROW
-		// field path one clause down.
-		//
-		// A ROW FIELD PATH is the exception, and the reason the second
-		// clause exists: it LOOKS like a bare reference but copies no
-		// column, so the runtime has nothing to type it from and the
-		// fallback STRING stood — an INT64 field projected as text (#568).
-		// Here the catalog IS the authority, so the declarations stay.
+		// A bare reference copies its input column; exec.Project uses the input
+		// schema, including renames/derived inputs. Withhold declarations to leave
+		// the caller's fallback in charge (#333 concerns computed arguments).
+		// Do NOT withhold for parenthesized references: their text matches no input
+		// column, so runtime cannot correct the fallback. ROW field paths likewise
+		// copy no column; retain their catalog declaration (#568).
 		decls = colDecls{}
 	}
 	// A guess is still the answer here: nothing is left to consult, and a
@@ -246,29 +230,13 @@ func strictIntArithCols(n *logical.Node) map[string]bool {
 	return nil
 }
 
-// inputColTypes reports the catalog types of the columns visible at n's
-// OUTPUT, keyed by lower-cased name, or nil when they cannot be known. It is
-// what lets a bare column reference inside an expression decide a type
-// (nodeDeclaredType) instead of leaving the polymorphic declarations —
-// coalesce, nullif, greatest, least — to answer with the numeric fallback that
-// typed SELECT COALESCE(n_name, n_comment) Float64 and dropped every string
-// (#333). The map is logical.Node.ScanColTypes, populated by
-// AnnotateScanColumns, and is READ-ONLY: the scan's own map is returned
-// directly when there is only one.
-//
-// The walk is deliberately narrower than scanColumnType's, which searches
-// every scan below a node for one name. This describes a node's output, so it
-// stops at anything that can rebind a name to a different value — Project,
-// Aggregate, Window, the set operators. Descending past one of those would
-// answer
-//
-//	SELECT COALESCE(n_name) FROM (SELECT n_nationkey AS n_name FROM nation) t
-//
-// with the scan's string type for a value that arrives as an int64, which is
-// the same silent-drop corruption pointing the other way. For the same reason
-// a scan whose columns were never annotated (a table function, a catalog miss)
-// makes the whole answer nil rather than a partial map: a name missing from a
-// partial map is indistinguishable from a name that is not a column at all.
+// inputColTypes reports catalog types visible at n's OUTPUT, keyed by
+// lowercased name, or nil if unknown (#333). ScanColTypes comes from
+// AnnotateScanColumns and is READ-ONLY; a sole scan's map is returned directly.
+// Stop at name-rebinding nodes: Project, Aggregate, Window and set operators.
+// Do not search every underlying scan as scanColumnType does. An unannotated
+// scan makes the whole answer nil: a partial map cannot distinguish an unknown
+// column from a name that is not a column.
 func inputColTypes(n *logical.Node) map[string]parquet.TypeID {
 	if n == nil {
 		return nil
@@ -425,30 +393,11 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 				continue
 			}
 			if p.Column == "" {
-				// A COMPUTED item, which is the group-key half of the same
-				// question the aggregate arm above answers. Its own name is
-				// bound to a value the fields below do not describe — so
-				// SHADOW that name — but nothing about it says the fields
-				// below stopped describing the OTHER names, and nil-ing the
-				// whole map is what threw the bar's declaration away.
-				//
-				// `SELECT (b).open FROM (SELECT time_bucket(…) AS g,
-				// ohlcv(…) AS b FROM t GROUP BY 1) x` is the shape and it is
-				// the shape the feature is FOR: every README, release-note
-				// and sql-reference example writes the bucket beside the bar.
-				// `g` is a computed projection, so this arm returned nil for
-				// the whole block, `(b).open` reached the stage with no
-				// declared (p,s), and the field path over a ROW that crossed
-				// a WSHF boundary — where a container child carries its scale
-				// and has no room for its precision — declared DECIMAL(0,2)
-				// on the DAG against DECIMAL(9,2) in process (#965 round 3).
-				// The same block with the key DROPPED, or with a BARE column
-				// as the key, always agreed: they never reach this arm.
-				//
-				// Symmetric with the aggregate arm, including its refusal: a
-				// name this cannot spell cannot be shadowed either, and a map
-				// that silently keeps a stale entry for it is worse than no
-				// map at all.
+				// A computed item SHADOWS its own name, but leaves other names' field
+				// declarations intact (#965). Clearing the whole map loses the bar's (p,s)
+				// when a computed group key sits beside OHLCV; WSHF child metadata retains
+				// scale without precision. As with the aggregate arm, refuse the map if
+				// this item's name cannot be spelled: a stale unshadowed entry is unsafe.
 				name := strings.ToLower(cleanExpr(p.Alias))
 				if name == "" {
 					name = strings.ToLower(cleanExpr(p.Expr))
@@ -987,33 +936,13 @@ func ProjectionOutputType(node plansql.Node, fallback parquet.TypeID) expr.DeclT
 	return expr.Decl(fallback)
 }
 
-// nodeDeclaredType reports the type an expression decides on its own, and how
-// confidently.
-//
-// colTypes (inputColTypes) resolves a bare column reference to its catalog
-// type. Without it — and for a name it does not carry — a column reference
-// decides nothing, which is both what the caller's fallback is for and what a
-// polymorphic function declaration needs to know before moving on to its next
-// candidate argument. That was the whole answer until #333: nothing in
-// COALESCE(n_name, n_comment) decided anything, so coalesce's numeric fallback
-// stood, the projection allocated a Float64 vector, and every string write was
-// dropped for the integer 0.
-//
-// The confidence matters only inside a nested call: everything below returns a
-// type it decides outright, but a function call may return one it merely
-// guessed, and its caller must keep looking (see expr.Confidence, #331).
-// DeclaredTypeOfNode resolves an expression's DECLARED type against a table's
-// columns, for a caller outside the planner.
-//
-// The one caller is the DML door, and the question it has to answer is
-// PostgreSQL's assignment-cast rounding rule: a float8 source rounds half to
-// EVEN and a numeric source half AWAY FROM ZERO, and this engine boxes both
-// families as float64, so the BOX cannot decide it — `SET n = f` and
-// `SET n = 0 - 2.5` arrive at assignIntegerValue as the same Go type and want
-// opposite answers (#699). The declaration can decide it, and this is the
-// layer that already does so for every projection and comparison, so the DML
-// door reads the same answer the query path reads rather than a private
-// approximation of it.
+// DeclaredTypeOfNode resolves an expression's declared type against table
+// columns, using the query path's inference. DML must use the declaration,
+// not the float64 box shared by float8 and numeric: assignment rounds float8
+// half to EVEN and numeric half AWAY FROM ZERO (#699).
+// nodeDeclaredType leaves missing column declarations undecided (#333).
+// Nested function callers must keep looking past a guessed type for a
+// decided candidate (expr.Confidence, #331).
 func DeclaredTypeOfNode(node plansql.Node, schema []parquet.Column) (expr.DeclType, expr.Confidence) {
 	decls := colDecls{
 		types:  make(map[string]parquet.TypeID, len(schema)),
@@ -1074,35 +1003,11 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 			if t, ok := binOpDecimalType(n, decls); ok {
 				return t, expr.Decided
 			}
-			// Integer arithmetic over integer operands is INTEGER, and this
-			// is where that survived being nested. `inferProjectionDeclType`
-			// has held the rule since #369, but only for the OUTERMOST node
-			// of a projection, so `SELECT v + 100` declared INT64 while the
-			// same expression as a CASE branch, a COALESCE argument or an
-			// aggregate's input declared FLOAT64 — one expression, two
-			// answers, decided by where it sat.
-			//
-			// It only surfaced as a wrong TYPE once the fold stopped being
-			// order-dependent. `CommonDeclType` used to answer from the
-			// first non-DECIMAL decider, so {INT64, FLOAT64} returned INT64
-			// by argument order and `MIN(CASE WHEN g=0 THEN v ELSE v+100 END)`
-			// came back bigint for the reason a coin comes up heads —
-			// writing the arms the other way round already answered float8.
-			// e61f0a4e replaced that with PostgreSQL's select_common_type
-			// ladder, which folds {INT64, FLOAT64} to FLOAT64 correctly and
-			// so exposed the FLOAT64 this arm had been contributing all
-			// along (#724's stack; ADR-0024 item 2).
-			//
-			// PostgreSQL 17 on the same shapes: bigint for MIN over
-			// `bigint + 100`, integer for the int4 column, and double
-			// precision the moment a float or a numeric-spelled literal
-			// joins — which is why intArithAllInt, not a local rule, decides
-			// here. It is the same predicate the projection uses and a
-			// strict subset of expr.BinOpNumeric's runtime integer mode, so
-			// the declaration cannot promise an integer the kernel will not
-			// produce. It must ride IntArithOn for that reason: with
-			// WADJET_INT_ARITH=0 the kernel takes its float delegate, and
-			// declaring INT64 then would be the corrupting direction.
+			// Integer arithmetic over integer operands must declare INTEGER even when
+			// nested in CASE, COALESCE or an aggregate (#369, #724; ADR-0024 item 2).
+			// Use the projection's intArithAllInt predicate, a strict subset of runtime
+			// integer mode, so a declaration never promises what the kernel cannot emit.
+			// Require IntArithOn: WADJET_INT_ARITH=0 uses the float delegate.
 			if expr.IntArithOn() && intArithAllInt(n, nil, decls) {
 				return expr.Decl(parquet.TypeInt64), expr.Decided
 			}
@@ -1318,37 +1223,13 @@ func caseDeclaredType(n *plansql.CaseNode, decls colDecls) (expr.DeclType, expr.
 	return expr.DeclType{}, expr.Undecided
 }
 
-// funcReturnType types a function call from the return type declared where the
-// function is registered — the same declaration its vec kernel writes through.
-//
-// This replaces isNumericFunc, a hand-maintained list of function names that
-// had to be remembered separately from the 273+ registrations in
-// internal/engine/expr. Four times a function was missing from it, was
-// therefore typed String, and its kernel wrote Float64Data or BoolData into a
-// Bytes output vector — killing the server process for every connection, not
-// just the session that asked: the temporal extractors (ClickBench Q19/Q43),
-// the vector distance functions, the length family (`SELECT LENGTH(c) FROM t`),
-// and starts_with/contains/ends_with. The list also carried names that are
-// registered nowhere (date_part, strlen, ceiling, trunc), which is the same
-// drift pointing the other way.
-//
-// expr.Undecided means the declaration does not decide and the caller keeps its
-// own fallback. expr.Guessed means a polymorphic declaration answered with its
-// fallback because none of its candidate arguments decided: usable, but a
-// CALLING function still holding a candidate of its own must prefer that one —
-// which is the whole of #331, where coalesce took a nested nullif's numeric
-// fallback for fact and never asked the string literal beside it.
-// bytesOperand reports whether a node is DECLARED bytea. It is deliberately a
-// declaration test and not a value one: the box for a BYTES column and for a
-// STRING column are both readable as bytes, and ADR-0012 item 8 says which of
-// the two a site is looking at comes from the declaration.
-// stringOperand is bytesOperand's twin for TEXT, and the pair is what
-// separates `bytea || bytea` and `bytea || <unknown literal>` — both bytea on
-// the server — from `text || bytea`, which is text there.
-//
-// A QUOTED literal declares TypeString at this layer and is `unknown` on the
-// server, so it is deliberately NOT a string operand here: that is the case
-// PostgreSQL resolves to bytea.
+// stringOperand/bytesOperand distinguish TEXT/bytea by DECLARATION, never
+// by their byte-readable boxes (ADR-0012 item 8). A quoted literal is
+// TypeString here but PostgreSQL unknown, so stringOperand excludes it:
+// bytea || bytea and bytea || unknown resolve to bytea, text || bytea to text.
+// funcReturnType uses the registry declaration the vector kernel writes.
+// Undecided leaves the caller's fallback; Guessed is usable but a calling
+// polymorphic function must prefer a decided candidate it still has (#331).
 func stringOperand(n plansql.Node, decls colDecls) bool {
 	d, c := nodeDeclaredType(n, decls)
 	return c != expr.Undecided && d.ID == parquet.TypeString && !d.Quoted

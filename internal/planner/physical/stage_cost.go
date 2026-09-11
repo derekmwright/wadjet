@@ -88,28 +88,13 @@ type ShuffleCandidate struct {
 	BuildBytes  int64    // EstimatedBytes of the build scan (for logging)
 }
 
-// PickShuffleCandidate identifies the largest non-probe scan above
-// thresholdBytes as the shuffle candidate — the table that would otherwise be
-// broadcast-duplicated as the runtime build side — and returns the join stage
-// that connects it to the probe.
-//
-// The approach deliberately does NOT read BuildTableAlias on the join stage
-// because in probe-split mode the planner's logical build/probe assignment is
-// inverted at runtime: the planner labels the largest scan as the build (e.g.
-// "lineitem"), but probe-split partitions that scan across workers, making the
-// second-largest scan (e.g. "orders") the actual broadcast hash table.
-// Shuffling orders instead of broadcasting it is the correction.
-//
-// Algorithm:
-//  1. probeAlias = largest scan (matches CanProbeSplit's heuristic).
-//  2. candidate = largest non-probe scan above thresholdBytes.
-//  3. Walk join stages to find one that directly references the candidate
-//     scan (via LeftDepStage or RightDepStage) or via a FusedJoin entry
-//     whose BuildTableAlias matches the candidate alias.
-//  4. Extract build/probe keys from the matching join or fused-join entry.
-//
-// Phase 1: returns the single best candidate. Phase 2 (chained shuffles)
-// will return all candidates.
+// PickShuffleCandidate returns the largest non-probe scan above thresholdBytes
+// and its connecting join. Probe is the largest scan, matching CanProbeSplit;
+// do not use the join's logical BuildTableAlias, which probe-split can invert.
+// Find direct LeftDepStage/RightDepStage or a matching fused-join build alias,
+// and take that entry's build/probe keys. Return one best candidate only;
+// chained-shuffle multi-candidate selection is not implemented.
+// See docs/internals/shuffle-candidate-selection.md for the design.
 func PickShuffleCandidate(stages []Stage, thresholdBytes int64) (ShuffleCandidate, bool) {
 	// stage-id → stage lookup.
 	byID := map[string]Stage{}
@@ -301,29 +286,11 @@ func PickShuffleCandidate(stages []Stage, thresholdBytes int64) (ShuffleCandidat
 	return ShuffleCandidate{}, false
 }
 
-// LargeBuildScans returns scan stages that are build-side (not the probe alias)
-// and whose estimated size exceeds the given threshold. These are candidates for
-// the build-side broadcast cache: the coordinator pre-scans them once, caches the
-// result in S3, and each worker loads the shared cache instead of independently
-// scanning the large source table N times.
-//
-// The cache provides two wins for queries with selective build-side filters
-// or wide build tables:
-//
-//  1. Avoids decoding the source parquet on every worker (parquet decode is
-//     CPU-expensive; the cached WSHF format is essentially raw typed bytes
-//     and reads in a fraction of the time).
-//  2. Lets the planner overlap the slow source scan with the rest of the
-//     query once instead of N times.
-//
-// We previously gated this on len(large) >= 2 ("only cache when multiple
-// large builds would compound a worker's hash table footprint"), reasoning
-// that single-large-build queries can fit one hash table in memory and the
-// cache only adds spill+upload latency. SF100 deploy disproved that: Q07's
-// historical 3m13s was caching orders, and skipping it pushed the same
-// query past 19 minutes (workers stuck spilling/scanning parquet 3 times).
-// The win from caching orders comes mostly from amortising parquet decode,
-// not from memory deduplication.
+// LargeBuildScans returns non-probe scan stages meeting the size threshold as
+// build-side broadcast-cache candidates. Pre-scan/cache once in S3 so workers
+// share typed WSHF rather than repeatedly decoding source parquet, and overlap
+// the one source scan with other work. A SINGLE large build still qualifies:
+// caching amortizes decode, not merely multi-build memory footprint.
 func LargeBuildScans(stages []Stage, probeAlias string, thresholdBytes int64) []Stage {
 	var large []Stage
 	for _, s := range stages {
@@ -354,43 +321,14 @@ func CountJoinStages(stages []Stage) int {
 	return n
 }
 
-// canFuseScanAggregate returns true when child stages are all scans (or
-// filter-pushed scans). This means partial aggregation can be fused directly
-// into scan tasks, eliminating the separate aggregate stage and its S3 round-trip.
-// fusesIntoACTETerminal reports whether fusing an aggregate into these child
-// stages would REWRITE a stage that a CTE reference is (or may be) pointed at.
-//
-// The scan-aggregate fusion is the one optimization that changes what an
-// ALREADY-EMITTED stage emits: it stamps FusedAggSpecs onto the scan and
-// prunes its output columns, so the stage stops producing the CTE's rows and
-// starts producing that consumer's partial aggregates. walkStages' CTE dedup
-// then points every LATER reference at it — and the later reference's own
-// aggregate reads a relation that no longer exists.
-//
-// #876 measured it as a hard failure on both DAG arms:
-//
-//	WITH c AS (SELECT id, c_i64 AS v FROM typemx)
-//	SELECT COUNT(*) FROM typemx
-//	WHERE c_i64 < (SELECT MAX(v) FROM c) AND c_i64 > (SELECT MIN(v) FROM c)
-//	  hash aggregate: aggregate input "c_i64" is not a column of its input
-//	  (input has: max(v))
-//
-// `MAX(v)` fused into the CTE body's scan; `MIN(v)`'s producer deduped to that
-// same scan and asked it for `c_i64`.
-//
-// The reference COUNT cannot decide this. p.cteRefCounts is computed from the
-// statement's own logical plan, and a CTE named only inside a scalar
-// subquery's TEXT appears there ZERO times: each producer is planned by its
-// own emitScalarProducerStagesTyped walk, sharing this cache, and the second
-// walk has not happened when the first one fuses. What IS knowable at the
-// fusion is that the stage was recorded as a CTE terminal — which is the
-// engine's own claim that another reference may be pointed at it.
-//
-// Declining costs one scan -> aggregate materialization for an aggregate
-// whose direct child is a CTE body's scan. It is the same rule
-// assertNoConsumerScopedFilterOnSharedStage states for filters and
-// projections (#656), applied to the third thing a consumer can attach to a
-// producer it does not own.
+// fusesIntoACTETerminal detects scan-aggregate fusion that would rewrite a
+// recorded CTE terminal from relation rows to one consumer's partial aggregates.
+// Decline even if reference counts say zero: scalar-subquery TEXT references are
+// planned in later walks sharing the cache (#876). Recording a terminal promises
+// that later consumers may read its original stream. This is the shared-producer
+// ownership rule for filters/projections (#656), at the cost of scan→aggregate
+// materialization. canFuseScanAggregate separately requires all children be scans.
+// See docs/internals/cte-terminal-aggregate-fusion-boundary.md for the design.
 func (p *Planner) fusesIntoACTETerminal(childStages []Stage) bool {
 	if len(p.ctePlannedTerminal) == 0 {
 		return false
@@ -437,38 +375,13 @@ func hasFilterOrPartition(n *logical.Node) bool {
 	return false
 }
 
-// needsLimitStage reports whether this NodeLimit needs a StageLimit of its
-// own, given whether walkStages just handed its bound to a sort stage.
-//
-// Exactly three things can bound a stream on the DAG, and only one of them
-// applies to any given LIMIT:
-//
-//   - The coordinator's post-gather pass (`mi.Limit`/`mi.Offset` in
-//     ExecuteSQL). It reads `logical.ExtractMergeInfo`, which inspects the
-//     PLAN ROOT and nothing else — so it reaches a top-level LIMIT and no
-//     other.
-//   - A sort stage's top-N. It needs an ORDER BY below the LIMIT, and it
-//     truncates to limit+OFFSET rather than skipping, because the OFFSET is
-//     the coordinator's job in the shape it was written for. So it covers a
-//     sorted LIMIT with no OFFSET that NO LOWER LIMIT has already claimed,
-//     and only that.
-//   - This stage.
-//
-// "Disjoint" is a property of the OWNERSHIP RULE, not of the shapes: two
-// LIMITs in one query can both want the same sort stage, and until #525 the
-// outer one took it — overwriting the inner's bound and then suppressing its
-// own stage because it had just found a sort. walkStages' backwards scan
-// stops at a claimed sort for that reason, so `sorted` here means "a sort
-// stage carries THIS limit", never "there is a sort somewhere below".
-//
-// A LIMIT the first two miss bounded NOTHING before #478: `SELECT COUNT(*)
-// FROM (SELECT DISTINCT k FROM t LIMIT 2) u` counted every distinct k, and
-// its plain and explicit-GROUP-BY twins did the same. Silent, deterministic,
-// and dependent only on how much data sits behind the query.
-//
-// The root case is left exactly as it was rather than moved onto this stage:
-// the coordinator's pass is correct there, and emitting a stage as well would
-// apply the OFFSET twice.
+// needsLimitStage gives each LIMIT exactly one owner: coordinator post-gather
+// for the plan root, an unclaimed sort's top-N for sorted LIMIT without OFFSET,
+// or a dedicated StageLimit for everything else (#478), including OFFSET alone.
+// Sort top-N truncates to limit+offset but does not skip. sorted means THIS LIMIT
+// owns that sort, not that any sort exists below; stop the backward search at
+// an already-claimed sort so an outer LIMIT cannot overwrite an inner one (#525).
+// Never also stage the root LIMIT: that would apply OFFSET twice.
 func (p *Planner) needsLimitStage(node *logical.Node, sorted bool) bool {
 	if node == p.limitStageRoot {
 		return false // the coordinator's post-gather pass owns this one

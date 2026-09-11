@@ -83,27 +83,13 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 			}
 		case p.ASTExpr != nil && !isSimpleColRefForRename(p.ASTExpr) &&
 			(referencesSyntheticAgg(p.ASTExpr) || referencesSyntheticWindow(p.ASTExpr)):
-			// Wrapped aggregate — the logical layer replaced aggregate calls
-			// with ColRefs to their __agg_N synthetic columns. Compile+eval
-			// at gather time so the divisor (e.g. "/7.0" in Q17's avg_yearly)
-			// gets applied. We restrict this to expressions that reference
-			// __agg_N because pure scalar expressions like SUBSTR(o_orderdate,
-			// 1, 4) are computed by the worker's GROUP BY / project pipeline
-			// and surface as a column under the expression's lowercased text
-			// — those need a plain rename, not eval (and eval would mistype
-			// SUBSTR's string output as float64).
-			//
-			// A nested WINDOW expression (#610) is the same shape: the window
-			// is extracted into a __win_N column by the window stage and the
-			// surrounding SUM(x) OVER (...) + 1 references it. The Project
-			// above the window is a DAG passthrough, so nothing between the
-			// window stage and the gather ever applies the "+ 1"; evaluating
-			// it here is what keeps the DAG's answer equal to the
-			// single-process pipeline's instead of emitting the bare window.
-			//
-			// Verbatim, not lowercased, for the same reason as the aggregate
-			// arm above (#744): this is the CLIENT's name, and the source is
-			// resolved separately by firstColRefName.
+			// Evaluate expressions over __agg_N at gather so wrappers around aggregates
+			// are applied. Pure scalar GROUP BY/project outputs already exist under their
+			// lowercased expression text and need a plain rename, not evaluation.
+			// Nested window expressions over __win_N also need gather evaluation because
+			// the DAG's passthrough Project does not apply the wrapper (#610).
+			// Keep the client's target name verbatim, not lowercased (#744); resolve the
+			// source separately with firstColRefName.
 			target = p.Alias
 			if target == "" {
 				target = p.Expr

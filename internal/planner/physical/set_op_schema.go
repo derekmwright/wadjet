@@ -10,30 +10,11 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// setOpResolveUnknownLiteralArms gives an arm's UNKNOWN-typed literal column
-// the OTHER arm's type, before unifySetOpSchemas folds the two schemas.
-//
-// PostgreSQL's resolution algorithm has no type for a quoted literal or a bare
-// NULL of its own: step 3 gives such an input the type the other inputs
-// resolve to, so `SELECT '1.5' … UNION ALL SELECT a` (a numeric column) is
-// numeric and `SELECT '10.0.0.9' … UNION ALL SELECT c_ipv4` is inet. The arm's
-// PIPELINE, though, produces the literal in a STRING vector — that is what the
-// evaluator makes of a quoted constant — so the schema this path folds says
-// STRING for a column PostgreSQL says is numeric.
-//
-// Left unmasked the fold DECLINES that pair (STRING is not on the ladder) and
-// the result keeps the LEFTMOST arm's column, so a query whose literal is in
-// the first arm published OID 25 for a numeric column: the right value under a
-// wrong OID, which is the divergence the wire oracle exists to catch. The
-// stage DAG had already been taught the rule — reconcileSetOpArmTypes stamps
-// the resolved type on the literal arm's projection spec and
-// setOpDeclaredOutputSchema skips unknown arms in its fold — and a rule that
-// lands on one door only is a two-path split: measured, the same statement
-// declared STRING here and DECIMAL(9,2) there, rendering 1.5 against 1.50.
-//
-// The mask is the plan-time one, setOpUnknownLiteralArms, so both doors read
-// the same select items. Both arms unknown at a position is left alone:
-// PostgreSQL resolves that to text, which is what they already declare.
+// setOpResolveUnknownLiteralArms assigns quoted literals and bare NULL the
+// other arm's type before unifySetOpSchemas, despite their pipeline STRING vector.
+// Use the plan-time setOpUnknownLiteralArms mask so local and DAG select the same
+// items and declarations. Leave positions where both arms are UNKNOWN alone:
+// PostgreSQL resolves those to text, which they already declare.
 func setOpResolveUnknownLiteralArms(left, right []parquet.Column,
 	leftUnknown, rightUnknown []bool) ([]parquet.Column, []parquet.Column) {
 	if len(left) == 0 || len(left) != len(right) {
@@ -79,62 +60,15 @@ func setOpResolveUnknownLiteralArms(left, right []parquet.Column,
 	return left, right
 }
 
-// unifySetOpSchemas is the result type of a set operation: the first arm's
-// column NAMES — SQL says the result takes them — over the COMMON TYPE of the
-// two arms per position.
-//
-// The common type is the stage DAG's, not a second rule of this path's own:
-// setOpWiden is the ladder (INT32 → INT64 → DECIMAL → FLOAT64, pinned against
-// live postgres:17 by TestSetOpWidenLadder) and setOpDecimalTarget is the
-// (p,s) the DECIMAL rung resolves to. Both are called here, for EVERY rung,
-// so the two execution paths cannot disagree about what the output type IS —
-// which is a wire fact as well as an engine one, since a client reads the
-// column's OID (#541 shape 3).
-//
-// The rungs and what each one costs when it is NOT reconciled:
-//
-//   - DECIMAL over DECIMAL. The rows reach batch.FromRows as their rendered
-//     decimal TEXT, boxed at each arm's own scale, and FromRows re-reads that
-//     text at the schema's scale — so handing it the first arm's scale
-//     truncated the second arm's values: over `DECIMAL(9,2) UNION ALL
-//     DECIMAL(18,4)`, 12.7501 came back as 12.75 and 12.7499 as 12.74, and
-//     the UNION then counted 8 distinct values where PostgreSQL counts 9
-//     (#532). The scale is the max over the arms — the only choice that moves
-//     no value — and the precision is REBUILT from the widest integer part,
-//     the DAG's rule, because max(precision) is not a bound on the widened
-//     values: DECIMAL(18,2) alongside DECIMAL(9,4) needs 16 integer digits at
-//     scale 4, i.e. 20, where max(precision) declares 18 and the type is too
-//     small for its own values.
-//
-//   - DECIMAL over INTEGER. `numeric ∪ bigint` is `numeric` in PostgreSQL, so
-//     the integer arm widens INTO the DECIMAL at the DECIMAL's scale. Left
-//     unreconciled this was the silent corruption of #547: the integer arm's
-//     box is an int64, NOT text, so FromRows read it into the DECIMAL vector
-//     as an UNSCALED carrier and divided every integer by 10^scale (1 came
-//     back as 0.01).
-//
-//   - A FLOAT over anything numeric. float4 and float8 are both PREFERRED
-//     types of PostgreSQL's numeric category, so each beats the exact types
-//     it meets and only float8 beats float4: `numeric ∪ double precision` is
-//     double precision, `numeric ∪ real` is real, in EITHER arm order.
-//     Unreconciled, the arm order decided the answer: with the DECIMAL arm
-//     first the result stayed DECIMAL (a wrong OID on the wire, right-looking
-//     values), and with the FLOAT arm first the DECIMAL arm's rendered text
-//     was stored into a float vector and the #361 guard failed the query
-//     outright — the two halves of #541. Keeping real REAL is a value
-//     question as well as an OID one: a real column holding 0.1 renders 0.1,
-//     and the same value widened to double precision renders
-//     0.10000000149011612.
-//
-//   - INT32 over INT64. `integer ∪ bigint` is bigint. No VALUE moves here,
-//     which is why this rung used to be skipped; the OID does, and a client
-//     reading int4 for a column carrying int64 values is the same class of
-//     defect as the DECIMAL one, one type family over.
-//
-// Anything else — a non-numeric type, or a DECIMAL whose (p,s) nothing could
-// resolve — is left exactly as it was. A computed DECIMAL expression carries
-// no declared (p,s) (#555, being fixed in the declared-type layer), and
-// guessing one here would move values under a type nobody stated.
+// unifySetOpSchemas keeps first-arm names over per-position common types from
+// the DAG's setOpWiden and setOpDecimalTarget, including wire OIDs (#541).
+// DECIMAL scale is max; rebuild precision from max integer digits (#532).
+// Integers widen into numeric at its scale, never as unscaled carriers (#547).
+// FLOAT32/FLOAT64 beat exact types and only FLOAT64 beats FLOAT32, in either
+// arm order; preserve REAL's value rendering (#361, #541). INT32/INT64 becomes INT64.
+// Leave unsupported nonnumeric or unresolved DECIMAL (p,s) unchanged; never guess
+// a declaration that could move values (#555).
+// See docs/internals/local-set-operation-common-schema.md for the design.
 func unifySetOpSchemas(left, right []parquet.Column) []parquet.Column {
 	if len(left) == 0 {
 		return right
@@ -278,48 +212,15 @@ func setOpColTypeFromColumn(c parquet.Column) (setOpColType, bool) {
 	}
 }
 
-// coerceSetOpArmRows rewrites an arm's boxed rows so they carry the VALUE the
-// unified column expects, for every rung of the ladder that moves one.
-//
-// The boxes are not uniform across types and that asymmetry is the whole
-// problem: a DECIMAL boxes as its rendered TEXT (Vector.GetValue), an integer
-// as a raw int64, a float as a float64. Handing those to batch.FromRows under
-// a schema they were not boxed for is how the single-process path answered
-// wrongly, or refused, depending on which arm came first:
-//
-//   - integer box → DECIMAL column: read as an UNSCALED carrier, dividing
-//     every integer by 10^scale (1 → 0.01, #547). Rewritten to the integer's
-//     decimal TEXT, which routes it through the same exact text path a native
-//     DECIMAL box takes (ParseDecimalString at FromRows, DecimalTextAt at the
-//     dedup key), so it arrives at its true value and keys the same as an
-//     equal DECIMAL value.
-//   - DECIMAL text box → FLOAT column: the #361 silent-write guard refuses
-//     the store and the whole query fails, where PostgreSQL answers (#541
-//     shape 2). Converted to the float the widened column holds — narrowed to
-//     float32 in the BOX for a real result, so the dedup key sees the same
-//     number the already-real arm produces.
-//   - DECIMAL text box → wider DECIMAL column: exact as text, but the value
-//     may not FIT the widened (p,s) — the union's own type decision can put a
-//     value out of range that both arms held comfortably (#552). Checked, not
-//     assumed.
-//   - integer / float box → FLOAT32, FLOAT64 or INT64 column: converted here
-//     rather than relying on SetValue's own conversions, so the dedup key
-//     sees one box shape per column.
-//
-// Every value the unified DECIMAL cannot hold is a "numeric field overflow"
-// ERROR carrying SQLSTATE 22003, worded to match the stage DAG
-// (exec.coerceDecimalVector) so both paths refuse the same input the same way
-// — NOT a silently saturated Int128Max, which is what routing an out-of-range
-// value through DecimalTextAt's comparison-oriented saturating parser
-// produces (#553). Wadjet's finite DECIMAL carrier cannot hold PostgreSQL's
-// unconstrained numeric, so in the overflow band wadjet errors where
-// PostgreSQL answers; ADR-0024 item 7 records that residual (#552) as the
-// accepted cost of item 1's finite carrier.
-//
-// srcSchema is the arm's OWN schema; target is the unified result schema.
-// They correspond by POSITION, and the arm's rows are still keyed by
-// srcSchema's names (they have not been re-aligned to the result names yet),
-// so the rewrite is applied before alignSetOpRows.
+// coerceSetOpArmRows converts boxes before dedup/FromRows: integers to DECIMAL
+// text, DECIMAL text to floats (round the box to float32 for REAL), and integer/
+// float boxes to the unified FLOAT32/FLOAT64/INT64 shape. Check DECIMAL range.
+// Unrepresentable unified DECIMAL yields "numeric field overflow", SQLSTATE 22003,
+// matching exec.coerceDecimalVector; never use saturating comparison parsing.
+// PostgreSQL may answer beyond the finite carrier (ADR-0024 items 7 and 1).
+// srcSchema is the arm's OWN schema, positionally aligned to target; rows still
+// use source names, so coerce before alignSetOpRows.
+// See docs/internals/set-operation-box-coercion.md for the design.
 func coerceSetOpArmRows(rows []map[string]any, srcSchema, target []parquet.Column) ([]map[string]any, error) {
 	if len(target) == 0 || len(srcSchema) != len(target) {
 		return rows, nil

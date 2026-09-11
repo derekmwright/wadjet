@@ -5,42 +5,14 @@ import (
 	"strings"
 )
 
-// Where a Filter and a Project land on the stage DAG, and what happens when
-// nothing there can run them.
-//
-// walkStages lowers a logical Filter by appending its predicate text to the
-// stage it has just emitted, and a logical Project by emitting nothing at all
-// — a Project is a pass-through on the DAG, and the gather's OutputRenames
-// recover the SELECT list at the end. Both shortcuts hold only while the
-// stage underneath is one that RUNS what it is handed. When it is not, the
-// predicate or the projection is attached to a stage that ignores the field,
-// or to a stage a later pass deletes, and the query answers WITHOUT it —
-// silently, because no operator ever sees a name it cannot resolve (#656).
-//
-// Three things close that:
-//
-//   - stageEvaluatesFilter names, per stage type, whether the coordinator's
-//     fragment builder emits an OpFilter for Stage.FilterExprs — and, for the
-//     types whose projection runs ABOVE that filter, whether a projection is
-//     already attached. It is the planner-side mirror of the fragment
-//     builders, the way projectableProducer is for Stage.ProjectExprs.
-//
-//   - filterCarrierIndex gives a predicate a stage that will run it: the last
-//     emitted stage when that stage qualifies, and otherwise a StageProject
-//     of its own, inserted above it. Nothing is ever attached to a stage that
-//     will not evaluate it.
-//
-//   - resolveFilterAliasSpelling settles WHICH of the predicate's two
-//     spellings the carrying stage can evaluate, once every pass that can put
-//     an alias-naming projection on a fragment has run.
-//
-// Two gates hold it, and between them they cover the class rather than the
-// seven shapes. ValidateNativeDAGShape refuses, on every distributed query, a
-// plan that populates either field on a stage whose fragment ignores it — the
-// PLACEMENT half. TestStageDAGCarriesEveryFilterAndProjection asserts that
-// every predicate stage emission attached is still readable off some stage
-// after every rewriting pass — the CONSERVATION half, which is what a
-// carrier-deleting pass breaks.
+// Every attached filter/projection must be executed and survive rewrites (#656).
+// stageEvaluatesFilter mirrors fragment builders, including whether an
+// attached projection runs above the filter. filterCarrierIndex uses a
+// qualifying producer or inserts StageProject; never attach to an ignoring stage.
+// resolveFilterAliasSpelling chooses the executable spelling after every pass
+// that can attach an alias-naming projection. ValidateNativeDAGShape checks
+// placement; TestStageDAGCarriesEveryFilterAndProjection checks conservation.
+// See docs/internals/filter-and-projection-carriers.md for the design.
 
 // AttachedFilterExprs lists the predicates the last PlanDistributed's stage
 // emission attached to a stage. Every one of them must still be readable off
@@ -144,27 +116,12 @@ func projectionRunsAfterStageOperator(typ string) bool {
 	return false
 }
 
-// filterCarrierIndex returns the index of the stage a Filter's predicates
-// should be attached to, appending a StageProject above the last emitted
-// stage when that stage would not run them, or when it is SHARED.
-//
-// cteTerminals maps a CTE body's terminal stage ID to whether that CTE is
-// referenced more than once. Presence means the predicate sits ABOVE a CTE
-// reference rather than inside its body, so it belongs to one consumer; a
-// true value means every reference reads that stage, and the predicate must
-// not land on it at all.
-//
-// The FIRST reference walked emits the body's real producer, so
-// `filterIdx = len(*stages)-1` put its WHERE on the very stage the OTHER
-// references read, and every one of them saw a filtered stream:
-// `WITH c AS (…) SELECT … FROM (SELECT id FROM c WHERE v>x UNION ALL
-// SELECT id FROM c)` answered 18 rows where PostgreSQL answers 109, and 27
-// where three references answer 119. It is the mirror of the deduped-alias
-// case ADR-0025 already names — closed there, open here — and silent the
-// same way.
-//
-// Returns -1 when there is no stage to attach to at all, which the caller
-// treats as "nothing to do" exactly as it did before.
+// filterCarrierIndex attaches to the last stage or appends StageProject when
+// that stage cannot evaluate the predicates or is shared. cteTerminals presence
+// means this predicate is above one CTE reference, not inside the body; true
+// means multiple references read the terminal, so never attach there (ADR-0025).
+// This includes the first reference's real producer, not only deduped aliases.
+// Return -1 when no stage exists; the caller treats that as nothing to do.
 func filterCarrierIndex(stages *[]Stage, cteTerminals map[string]bool) int {
 	last := len(*stages) - 1
 	if last < 0 {

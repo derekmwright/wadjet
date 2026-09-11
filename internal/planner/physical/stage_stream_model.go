@@ -6,29 +6,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
-// What a stage's fragment SHIPS, per column, with the arm it came from.
-//
-// `stageEmittedColumns` answers a weaker question and answers it for one stage
-// at a time: which names appear in this stage's own lists. That is enough for
-// a reachability check and it is NOT enough to resolve a GROUP BY key, for two
-// reasons this model exists to fix (#795):
-//
-//   - a JOIN's output is not either side's column list. The executor emits the
-//     probe's columns, then the build's with every DUPLICATE name QUALIFIED by
-//     its owning alias (`joinOutputSchemaWithMapping`), so a stream really can
-//     carry `w` and `y.w` at once — and ADR-0026 §4a's claim that "a join
-//     stream carries `w`, never `y.w`" was a fact about the MODEL, not about
-//     the engine.
-//   - a chained link carries its OWN `Columns` as that link's output filter,
-//     so a fused chain's real output is the LAST link's list and not the
-//     stage's. Reading the stage's list refused a CTE shape the DAG was
-//     executing correctly.
-//
-// Nothing here infers from node kinds. Every rule below mirrors a line of the
-// executor: the qualification rule is `joinOutputSchemaWithMapping`'s, the
-// filter rule is its output-filter loop including both halves of the
-// qualified↔bare fallback, and a pass-through stage forwards what its
-// dependency ships.
+// Model the actual fragment output per column and owning arm (#795), not merely
+// names in stageEmittedColumns. Mirror joinOutputSchemaWithMapping: probe columns
+// then build columns, qualifying duplicates by owner (ADR-0026 §4a).
+// A fused chain's final link Columns is the output filter, not the stage's list.
+// Mirror both qualified↔bare filter fallbacks; passthrough stages forward their
+// dependency's stream. Do not infer these rules from logical node kinds.
+// See docs/internals/fragment-output-stream-model.md for the design.
 
 // streamCol is one column a fragment's output batch carries.
 type streamCol struct {

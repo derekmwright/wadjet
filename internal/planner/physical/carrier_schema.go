@@ -293,30 +293,13 @@ func gatherOutputSources(stages []Stage) (*Stage, map[string]string, bool) {
 	return nil, nil, false
 }
 
-// dropUnbackedJoinColumns removes from emitted the names that NO stage in the
-// plan produces.
-//
-// A join's Stage.Columns is an OutputFilter and an exchange's is a payload
-// manifest: both NARROW what arrives and neither can invent a column. Reading
-// them as "emitted" made the reachability check believe a name that nothing
-// computes. `SELECT x.id, x.w FROM (SELECT id, SUM(a) OVER () + 0 AS w FROM t)
-// x JOIN t y ON …` puts `w` in the filter because the SELECT list needs it,
-// while the window stage below emits `__win_0` and the derived table's
-// `__win_0 + 0 AS w` was attached to no fragment at all. The check passed, the
-// gather's rename found nothing at run time, and the client got the producer's
-// raw columns — the exact failure assertGatherOutputIsReachable exists to
-// refuse (#656 F2, reached through a join).
-//
-// The test is against EVERY PRODUCING stage in the plan, not against the
-// join's own inputs. Intersecting with the inputs was the first attempt and it
-// refused TPC-H Q02: a producer's emitted set is modelled per stage type and a
-// subtree the walk narrows differently makes a real column look absent, which
-// turns a working query into a refusal. Asking "does anything here compute
-// this name" cannot make that mistake — the phantom is a name nothing in the
-// plan produces, which is a much weaker and much safer question.
-//
-// Movers and filters are excluded from the producing set for the same reason
-// they are the problem: their column lists are what is under suspicion.
+// dropUnbackedJoinColumns removes names no producing stage in the plan emits.
+// Join Stage.Columns is an OutputFilter; exchange Columns is a payload
+// manifest. Both narrow input and neither can invent columns (#656 F2).
+// Check EVERY producing stage, not only this join's inputs: per-stage models
+// can understate a subtree's real columns (including TPC-H Q02).
+// Exclude movers and filters from the producing set; their column lists are
+// the claims being checked.
 func dropUnbackedJoinColumns(stages []Stage, idx map[string]int, s *Stage, emitted map[string]string) {
 	for depth := 0; s != nil && depth < passThroughDepth; depth++ {
 		if !forwardsInputColumns(s.Type) {

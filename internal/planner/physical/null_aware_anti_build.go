@@ -7,36 +7,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
-// ErrNullAwareAntiBuildNotReplicated marks a plan whose null-aware anti join
-// would read a PARTITIONED build side.
-//
-// `x NOT IN (SELECT y FROM t)` is three-valued and its third value is a fact
-// about the WHOLE build: TRUE only when x differs from every y, FALSE when it
-// equals one, and UNKNOWN — so WHERE drops the row — when x is NULL and the
-// build is non-empty, or when the build holds a NULL y. `exec.HashJoin`
-// implements that by reading one bit off its build side and emitting nothing
-// when it is set (#507).
-//
-// A hash-partitioned build splits that bit. The task holding the NULL
-// partition emits nothing; every other task emits its probe rows; and the
-// answer is the one a TWO-valued anti join gives — which is `NOT EXISTS`, a
-// different question. Nothing downstream can notice, because every task
-// behaved correctly for the rows it held.
-//
-// So the build must be REPLICATED, and this is the invariant that says it was.
-// It is a refusal rather than a repair for the reason ADR-0006 gives about
-// loudness: a plan this cannot show to be right is routed to the
-// coordinator-local pipeline, which answers it, instead of being dispatched to
-// workers that would each answer a different question.
-//
-// The refusal carries SQLSTATE 0A000 and the coordinator has an `errors.Is`
-// arm for it (`runNullAwareAntiLocal`, counter
-// `NullAwareAntiLocalRoutes`) — round 1 of this arc's review found all three
-// of those claims written down and none of them implemented: a bare
-// `errors.New` with no coder, and no routing arm, so a plan that tripped the
-// invariant would have reached the client as `physical plan: …` with no
-// class. A promise a document makes and the code does not keep is worse than
-// no promise.
+// ErrNullAwareAntiBuildNotReplicated marks a null-aware anti join reading a
+// partitioned build. NOT IN needs the WHOLE build: equality is FALSE, difference
+// from every y is TRUE, and a NULL probe with non-empty build or NULL build y
+// is UNKNOWN; WHERE drops UNKNOWN (#507). Partitioning splits the NULL bit.
+// Require replication; the assertion wraps the refusal with SQLSTATE 0A000 and
+// the coordinator routes through runNullAwareAntiLocal (NullAwareAntiLocalRoutes)
+// to answer locally rather than dispatch an unproven plan (ADR-0006).
 var ErrNullAwareAntiBuildNotReplicated = errors.New(
 	"a null-aware anti join's build side is not replicated")
 

@@ -23,39 +23,14 @@ const (
 	SetOpRightCountCol = "__setop_rcnt"
 )
 
-// emitSetOpStages lowers a set-operation node onto the stage DAG.
-//
-// walkStages used to walk both arms and emit nothing else, on the comment
-// "each side runs independently; merge results at the end" — and nothing
-// merged. The terminal gather then attached to whichever arm happened to be
-// emitted last, so `SELECT r_regionkey FROM region UNION ALL SELECT
-// r_regionkey FROM region` answered with five rows carrying r_regionkey,
-// r_name and r_comment: one arm, unprojected, at half the row count (#346).
-//
-// What is emitted here:
-//
-//	UNION ALL  → one StageUnion. Arm i is dispatched as task i, reads its
-//	             arm's whole output, and projects it onto the result column
-//	             names and types; the stage's files are therefore the
-//	             concatenation.
-//	UNION      → the same StageUnion plus a GroupByAll final_aggregate that
-//	             dedups the concatenation. The dedup is Singleton: correct,
-//	             but one task holds the whole distinct set (see the note on
-//	             emitSetOpDedup).
-//	INTERSECT  → the same StageUnion with per-arm TAG columns appended
-//	EXCEPT       (arm 0 rows carry (1,0), arm 1 rows (0,1)), then a grouped
-//	             counting final_aggregate: GROUP BY the full result row,
-//	             SUM the tags. The distribution pass inserts an
-//	             exchange-repartition on the full row between the two
-//	             (StageUnion is RoundRobin, a grouped final requires
-//	             ClusteredOn its group keys), so equal rows from both arms
-//	             — NULLs included, the shuffle hash marks them
-//	             deterministically — meet in one partition and each
-//	             partition is independently answerable. The stage's SetOp
-//	             marker makes its fragment append an emit operator that
-//	             turns each group's (countA, countB) into rows per the
-//	             operation's rule and drops the tags. See
-//	             emitSetOpCountingStage.
+// emitSetOpStages lowers all arms onto one DAG result (#346). UNION ALL uses
+// StageUnion: task i reads arm i's whole output and projects result names/types.
+// UNION adds Singleton GroupByAll dedup; one task holds the whole distinct set.
+// INTERSECT/EXCEPT append (1,0)/(0,1) arm tags and group by the full result row,
+// summing tags. Repartition on all result columns co-locates equal rows, including
+// NULLs, so each partition answers independently. The SetOp emit operator applies
+// membership/multiplicity rules to counts and drops tags.
+// See docs/internals/set-operation-stage-lowering.md for the design.
 func (p *Planner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 	if len(node.Children) < 2 {
 		p.refuseSetOp(fmt.Errorf("distributed planning: %s has %d arms, expected at least 2",
@@ -183,27 +158,13 @@ func (p *Planner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 	}
 }
 
-// emitSetOpCountingStage appends the counting half of an INTERSECT/EXCEPT: a
-// grouped final_aggregate over the tagged concatenation, GROUP BY the full
-// result row, SUMming the two tag columns. RawInputAggregate because the
-// input is raw tagged rows (the exchange re-partitions the concatenation, it
-// does not pre-aggregate), so the dispatcher must not run the merge-mode
-// spec rewrite.
-//
-// The stage deliberately carries no SortKeys/Limit, which is what makes
-// RequiredChildDistribution demand ClusteredOn(GroupByCols) — the full
-// result row — and EnsureDistribution insert the co-partitioning
-// exchange-repartition over the union. OutputDistribution then mirrors the
-// exchange's partitioning, so dispatchComputeStage fans the counting out one
-// task per partition: the sharded path, not a Singleton bottleneck. (A sort
-// later folded in by fuseSortIntoPredecessor collapses the stage to
-// Singleton via the same rules that govern every grouped final — correct,
-// serial.)
-//
-// NULL semantics ride existing machinery end to end: the shuffle hash marks
-// NULL key cells with a deterministic byte (equal rows co-locate) and
-// HashAggregate groups NULLs as equal, which is exactly the membership rule
-// SQL gives set operations.
+// emitSetOpCountingStage groups tagged INTERSECT/EXCEPT concatenation by the
+// full result row and SUMs both tags. RawInputAggregate forbids merge-mode spec
+// rewriting: the exchange repartitions RAW rows, not partial aggregates.
+// Keep SortKeys/Limit empty to require ClusteredOn(GroupByCols); EnsureDistribution
+// then repartitions and dispatches one task per partition. A later fused sort
+// may correctly collapse this to Singleton. Deterministic NULL hash markers and
+// HashAggregate's NULL equality preserve set membership semantics.
 func (p *Planner) emitSetOpCountingStage(stages *[]Stage, unionID string, node *logical.Node, outNames []string) {
 	op := "intersect"
 	if node.Type == logical.NodeExcept {
@@ -308,29 +269,14 @@ func setOpTypeMismatch(op, column string, a, b parquet.TypeID) error {
 		op, pgTypeName(a), pgTypeName(b), column)
 }
 
-// setOpCategory is PostgreSQL's TYPE CATEGORY, which is what its
-// UNION/CASE type-resolution algorithm asks about ("Type Conversion → UNION,
-// CASE, and Related Constructs", step 4): arms whose types are in different
-// categories have no common type and the statement is refused; arms within one
-// category are resolved to the type they all implicitly cast to.
-//
-// The mapping is wadjet's declared type to the category PostgreSQL puts its
-// WIRE type in, and every row of it was measured live on 17.11:
-//
-//	N numeric   INT32 INT64 FLOAT32 FLOAT64 DECIMAL — and PORT, PROTOCOL,
-//	            DURATION, which declare int4/int4/int8 on the wire (#834), so
-//	            `SELECT c_port … UNION ALL SELECT c_i64 …` is bigint ∪ integer
-//	            there and answers.
-//	S string    STRING (text).
-//	B boolean   BOOL.
-//	D datetime  DATE, TIMESTAMP. `date ∪ timestamp` → timestamp, both orders.
-//	I network   IPV4, IPV6, CIDR. `inet ∪ inet` → inet, `inet ∪ cidr` → inet,
-//	            both orders, values preserved.
-//	U other     BYTES, UUID, MAC, ARRAY, ROW, MAP, VECTOR. PostgreSQL puts
-//	            bytea, uuid and macaddr in one category too, and with no
-//	            implicit conversion between them its step 6 still fails —
-//	            `uuid ∪ bytea` is "UNION could not convert type bytea to uuid",
-//	            the same SQLSTATE — so each of these matches only itself here.
+// setOpCategory maps declared types to their PostgreSQL WIRE categories.
+// Different categories have no common type; within one, require implicit conversion.
+// Numeric: INT32/INT64/FLOAT32/FLOAT64/DECIMAL and PORT/PROTOCOL/DURATION
+// (int4/int4/int8 on wire, #834). String: STRING; boolean: BOOL.
+// Datetime: DATE/TIMESTAMP → TIMESTAMP. Network: IPV4/IPV6/CIDR → inet.
+// Other: BYTES/UUID/MAC/ARRAY/ROW/MAP/VECTOR each match only themselves;
+// sharing a category does not imply mutual implicit casts.
+// See docs/internals/set-operation-type-categories.md for the design.
 type setOpCategory int
 
 const (
@@ -473,32 +419,14 @@ func setOpCarrierGap(column string, a, b parquet.TypeID) error {
 			"does not yet; CAST both arms to one type", column, a, b)
 }
 
-// setOpQuotedLiteralGap is the refusal for an UNKNOWN-typed literal — a
-// QUOTED string — whose resolved type this engine cannot build from text.
-//
-// PostgreSQL types such a literal from the other arms and coerces it with THAT
-// type's input function, so `SELECT c_ts … UNION ALL SELECT '2010-01-01
-// 00:00:00'` is timestamp, `c_bool ∪ 'true'` boolean and `c_port ∪ 'notaport'`
-// 22P02. Wadjet's literal arm produces a STRING box and that box reaches the
-// result column's vector unchanged, so the nine types batch.VectorAcceptsText
-// says no to — BOOL, the four numeric machine types, TIMESTAMP, PORT, PROTOCOL
-// and DURATION — failed with the #361 silent-write guard: no SQLSTATE at all
-// (the pgwire door then says XX000, "the server broke"), mid-execution on the
-// single-process path and after THREE retries of a deterministic parse failure
-// on the stage DAG.
-//
-// So it is refused at PLAN time instead, with the same 0A000 the carrier gap
-// takes and for the same reason: PostgreSQL answers the query and this engine
-// does not yet. A bare NULL is unaffected — a NULL has no text to parse and
-// every vector takes one — and so is an UNQUOTED literal, which the evaluator
-// already types.
-//
-// Closing it means giving the literal its resolved type at PLAN time rather
-// than at the vector: parse the text into the target type's own box in the
-// arm's rows (the single path, beside setOpLiteralRows) and rewrite the arm's
-// projection expression to the target's literal spelling (the DAG, beside
-// reconcileSetOpArmTypes' stamp), which also makes unparseable text 22P02 the
-// way PostgreSQL reports it. Recorded in ADR-0012 item 12.
+// setOpQuotedLiteralGap refuses UNKNOWN quoted text at plan time with 0A000
+// when its resolved type cannot be built from text. VectorAcceptsText excludes
+// BOOL, four machine numeric types, TIMESTAMP, PORT, PROTOCOL and DURATION;
+// letting their STRING boxes reach vectors triggers #361 instead of a typed error.
+// Bare NULL and unquoted typed literals are unaffected. Closing the gap requires
+// plan-time target-box parsing locally and target-literal projection rewriting
+// on the DAG, including 22P02 for invalid text (ADR-0012 item 12).
+// See docs/internals/set-operation-quoted-literal-gap.md for the design.
 func setOpQuotedLiteralGap(column string, arm int, t parquet.TypeID) error {
 	return sqlerr.New("0A000",
 		"set operation not supported: result column %q resolves to %s and arm %d selects a "+
@@ -838,35 +766,12 @@ func setOpUnwrap(n *logical.Node) *logical.Node {
 	return nil
 }
 
-// setOpOutputNames is the set operation's result column list, taken from the
-// first arm's SELECT list as SQL requires — through any nesting, since a
-// chain of unions takes its names from the leftmost arm of the whole chain.
-//
-// One SELECT item's output name is declaredProjectionName's — alias, else the
-// COLUMN's own name, else the rendered expression — which is the rule the
-// declared-output-schema layer already publishes for a query that is not a set
-// operation, and PostgreSQL's own (measured live on 17.11: `SELECT x.id` is
-// `id`, `SELECT rd.d` is `d`, `SELECT id AS "MyId"` is `MyId`).
-//
-// This function used to build a rule of its own — alias, else the rendered
-// EXPRESSION, lower-cased — and each of those two differences was a divergence
-// between the two execution paths, which publish one query's columns to one
-// client:
-//
-//   - the EXPRESSION of a plain reference is its QUALIFIED spelling, so a set
-//     operation over a join published `x.id | x.w` and over a comma join
-//     `clt1.c0 | clt2.c1 | clt2.c0` on the DAG where the single-process path
-//     and PostgreSQL publish `id | w` and `c0 | c1 | c0`. A client binding by
-//     name found neither (#743).
-//   - LOWER-CASING is what the LEXER does to an unquoted identifier since
-//     #731, and doing it again here can only damage a DELIMITED one: `AS
-//     "MyId"` arrived as `myid` on the DAG and `MyId` on the single path, and
-//     an unaliased expression as `sum(a) over (...) + 1` against the single
-//     path's `sum(a) OVER (...) + 1`.
-//
-// The `SELECT *` names keep the CATALOG's spelling for the same reason: that
-// is what the arm's own stream carries and what the single-process path
-// publishes.
+// setOpOutputNames takes the first arm's names, descending nested set operations
+// to the whole chain's leftmost arm. Use declaredProjectionName: alias, then
+// column's own unqualified name, then rendered expression (#743).
+// Do not lowercase again: lexer folding already handled unquoted identifiers;
+// delimited aliases and expression rendering must survive verbatim (#731).
+// SELECT * keeps catalog spelling, matching the arm stream and local output.
 func setOpOutputNames(arm *logical.Node) []string {
 	inner := setOpUnwrap(arm)
 	if isSetOpNode(inner) && len(inner.Children) > 0 {
@@ -1163,28 +1068,12 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 	return plan, nil
 }
 
-// setOpRefDecl types a bare column reference an arm forwards, under either
-// spelling: the OUTPUT name the SELECT list wrote, or the SOURCE name the
-// stream carries (what the projection was just resolved to). A miss on both
-// leaves the column untyped, which is what it was before any spelling was
-// tried.
-//
-// The SELECT list's own spelling is tried FIRST, because setOpArmDecls now
-// answers for a derived table's EMITTED names and those are the ones the
-// SELECT list wrote (#554). Trying the resolved source name first would let a
-// derived table that binds one source name to another output name
-// (`SELECT e4 AS e2, e2 AS e4 …`) answer about the wrong column of the two.
-//
-// Each candidate goes through the qualifier-stripping lookup, so a QUALIFIED
-// spelling resolves too: an arm that ends in a join names its columns "a.u4"
-// (#533), and after #551 the qualified key is the one that says WHICH side's
-// column that is.
-//
-// The TypeID and the DECIMAL (p,s) come out of the SAME resolved key. Reading
-// them from two lookups is how a declaration comes to describe two different
-// columns — the mistake ADR-0024 removed from declaredProjectionDecl, and the
-// one this function used to make by resolving the type through any of four
-// spellings while reading the scale through one.
+// setOpRefDecl tries the SELECT list's own spelling before the resolved SOURCE:
+// derived arms declare EMITTED names, and swapped aliases must not capture the
+// wrong source (#554). Try qualifier-aware/stripping lookup for each candidate
+// (#533); qualified keys distinguish join sides (#551). Read TypeID and DECIMAL
+// (p,s) from the SAME resolved key (ADR-0024). If neither spelling resolves,
+// leave the column untyped.
 func setOpRefDecl(decls colDecls, resolved string, pr logical.Projection) (setOpColType, bool) {
 	for _, cand := range []string{pr.Expr, pr.Column, resolved, pr.Alias} {
 		if cand == "" {
@@ -1205,30 +1094,13 @@ func setOpRefDecl(decls colDecls, resolved string, pr logical.Projection) (setOp
 	return setOpColType{}, false
 }
 
-// reconcileSetOpArmTypes makes every arm emit the same TYPE per column, not
-// only the same name. It has to: the arms' outputs are separate .wshf files
-// read as one stream, and a column declared FLOAT64 in one file and INT32 in
-// another is not a union, it is a decoding error — `SELECT r_regionkey + 100
-// AS k FROM region UNION ALL SELECT n_nationkey AS k FROM nation` panicked
-// the gather task writing the second arm's chunk.
-//
-// Only numeric widening is performed (the ladder INT32 → INT64 → DECIMAL →
-// FLOAT64, applied with a CAST on the narrower arms, or with a value-moving
-// coercion where the destination is DECIMAL). Any other disagreement is
-// refused: coercing, say, a number to text to make the files line up would
-// answer a question the user did not ask.
-//
-// TWO DECIMAL arms need reconciling as much as two different TypeIDs do, and
-// this is the part that was missing (#533). A TypeID comparison calls
-// DECIMAL(9,2) and DECIMAL(18,4) equal — they are the same TypeID — so
-// nothing was rewritten, each arm's file kept its own scale in its WSHF
-// header, and the reader of both files took the first one's. The unscaled
-// integer 127501 then rendered as 1275.01 instead of 12.7501.
-// unknown, when non-nil, marks per arm and per column the select items that
-// are UNKNOWN-typed literals. PostgreSQL gives those no type of their own: they
-// take the other arms' and are read AS that type, which is what leaving them
-// uncast does here — SetValueChecked parses the literal's text into whatever
-// vector the reconciled column builds (#648 round 2).
+// reconcileSetOpArmTypes makes every arm's file emit the same column types.
+// Numeric widening uses casts or value-moving DECIMAL coercion; refuse unsupported
+// disagreements rather than invent a number-to-text conversion. Reconcile DECIMAL
+// (p,s) even when TypeIDs already match, or file headers reinterpret scale (#533).
+// unknown marks per-arm/per-column UNKNOWN literals: they take other arms' types
+// without casts, with SetValueChecked parsing text into the reconciled vector
+// (#648).
 func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string, op string, unknown [][]bool) error {
 	if len(plans) < 2 {
 		return nil
@@ -1298,28 +1170,13 @@ func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string, op string, 
 					continue
 				}
 				ct := plans[i].types[col]
-				// The arm's DECLARED spec is the arm's OWN type, not the
-				// reconciled one, because it is what the worker builds this
-				// arm's output vector from and the coercion below runs AFTER
-				// that vector exists. DecimalCoerce rewrites an unscaled
-				// carrier — an INT32/INT64 arm included, since an integer box
-				// is a value at scale 0 — so the value has to ARRIVE as what
-				// the arm produces.
-				//
-				// Declaring the TARGET here instead is what broke the seam
-				// with #551's landing: a COMPUTED integer arm
-				// (`n_regionkey + 100`) built a DECIMAL vector and the checked
-				// writer refused the int box before the coercion could touch
-				// it — "integer value 100 reached a DECIMAL(scale 1) column as
-				// a raw unscaled carrier" (ADR-0018 §4, ADR-0024 item 4). A
-				// BARE column arm never showed it: that one is a DirectCopy,
-				// which types itself from the input and ignores the spec.
-				//
-				// Stamping the arm's own type is still needed, and is what
-				// this clause is for: a spec left at the ZERO value declares
-				// TypeBool with no (p,s), and a DECIMAL vector built from that
-				// comes out at scale 0 with every value read back a
-				// hundredfold out (ADR-0024 item 2).
+				// Declare each spec at its arm's OWN type and (p,s): worker vectors exist
+				// BEFORE DecimalCoerce rewrites their unscaled carriers, including integers at
+				// scale 0. Stamping the target would reject computed integer boxes before
+				// coercion (#551; ADR-0018 §4, ADR-0024 item 4). Bare DirectCopy ignores the
+				// spec and types from input, so it does not test that seam. Do not leave the
+				// spec zero-valued: that declares BOOL without (p,s), and DECIMAL would be
+				// read at scale 0 (ADR-0024 item 2).
 				if ct.known {
 					plans[i].specs[col].Type = ct.typ
 					plans[i].specs[col].TypeKnown = true
@@ -1517,28 +1374,11 @@ func setOpNodeResultTypes(n *logical.Node) []setOpColType {
 	return out
 }
 
-// setOpWiden is the numeric ladder: INT32 → INT64 → DECIMAL → FLOAT32 →
-// FLOAT64.
-//
-// Every rung is PostgreSQL's, verified against postgres:17-alpine with
-// pg_typeof over the union itself:
-//
-//	`numeric UNION ALL bigint`          → numeric
-//	`numeric UNION ALL double precision`→ double precision
-//	`real    UNION ALL integer/bigint`  → real
-//	`real    UNION ALL numeric`         → real
-//	`real    UNION ALL double precision`→ double precision
-//
-// Arm ORDER changes none of them, and changes none of them here.
-//
-// FLOAT32 gets its OWN rung rather than sharing FLOAT64's. Both are PREFERRED
-// types of PostgreSQL's numeric category, so each beats the exact types
-// (integer, numeric) it meets and only float8 beats float4 — and the
-// difference is a VALUE, not just an OID: a real column holding 0.1 renders
-// 0.1, and the same column widened to double precision renders
-// 0.10000000149011612, which is the float32 value spelled to float64
-// precision and is not what either engine holds. `CREATE TABLE t (x FLOAT)`
-// declares a FLOAT32 column here, so this is reachable from plain DDL.
+// setOpWiden resolves INT32 → INT64 → DECIMAL → FLOAT32 → FLOAT64,
+// independent of arm order. Both float types beat exact numeric types; only
+// FLOAT64 beats FLOAT32. Keep REAL's separate rung: widening its stored value
+// to double changes its rendering as well as its OID. FLOAT in DDL is FLOAT32.
+// See docs/internals/set-operation-numeric-widening.md for the design.
 func setOpWiden(a, b parquet.TypeID) (parquet.TypeID, bool) {
 	if a == b {
 		return a, true

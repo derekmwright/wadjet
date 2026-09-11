@@ -12,54 +12,16 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// One object GET, many buffers.
-//
-// The whole-file read charges a scan's entire parquet file to the query's
-// memory tracker and releases it only when the file's LAST row group has been
-// decoded (ADR-0006 producer 1). While that charge is resident every other
-// operator's admission is measured against a floor that has nothing to do with
-// what the query is holding, and how far the scan ran ahead of its consumer
-// decides whether the query answers or refuses (#789).
-//
-// The bytes are read the same way — ONE Get per file, so the request count the
-// object store sees is unchanged, which is the recorded decision
-// (docs/design/scan-pread-reads.md: "one object GET beats per-chunk ranged
-// GETs") — but the body is landed into one buffer per ROW GROUP instead of one
-// per file, using the byte ranges the footer already carries. Each buffer is
-// charged when it lands and released when its row group has been decoded, so
-// the scan's resident charge is the row groups actually in flight rather than
-// the file.
-//
-// The read is DEMAND-DRIVEN and ADMITTED: the stream advances only when a
-// decode worker asks for a row group the loader has not reached, and each row
-// group's bytes are reserved before they are read — memory.ReserveOrForce,
-// the same bounded-wait-then-force every other non-discretionary charge uses,
-// so admission can neither fail a load nor deadlock. With room (or no budget)
-// every reservation is clean and the read runs at full speed; without room the
-// loader waits for the row group ahead of it to decode instead of piling the
-// whole file onto the ledger. One row group is always admitted without waiting
-// — the floor that stops a scan holding nothing from waiting on itself.
-//
-// It requires the file's footer to be decoded ALREADY (the process footer
-// cache, populated by buildRGUnits' pruning pass): the row-group byte ranges
-// live in it, and reading it from the object separately would be the second
-// request this design exists to avoid. A file whose row-group metadata came
-// from the catalog's persisted blob has no footer in that cache and keeps the
-// whole-file path.
-//
-// KNOWN BOUNDARY — the object body is held open across the file's decode.
-// The whole-file read did Get, read, Close in one span; this one opens the
-// body in `advance` and closes it in `close`, which runs when the file's last
-// row group has decoded. Between them the read is paced by the decode and, at
-// a tight budget, by admission — `fileLoadReserveWait` is 2 s per row group —
-// so a many-row-group file can hold one HTTP body open across a mostly idle
-// socket, times up to the load gate's lanes. MemStore and FileStore cannot
-// observe this and no S3 or MinIO run was made for it, so the cost is stated
-// rather than measured: a server-side idle reap becomes a mid-file read error
-// where it was previously impossible, and that error fails the query loudly
-// (`read <path> row group N: ...`) rather than answering short. Re-issuing the
-// Get from `s.pos` on a mid-stream read error is the fix if it is ever seen;
-// it is not written on speculation.
+// Row-group loads use ONE object Get per file and cached footer byte ranges;
+// without an already-decoded process-cached footer, use the whole-file path.
+// Advance only on decode demand; reserve each group's bytes before reading via
+// memory.ReserveOrForce (bounded wait then force). Admit one group without waiting
+// to avoid self-deadlock; release its charge after decoding (#789, ADR-0006 producer 1).
+// Keep the body open until the last group's decode: admission can wait 2s/group,
+// and idle sockets across load lanes can be reaped mid-file. Such read errors fail
+// the query loudly; resuming Get at s.pos is not implemented. MemStore/FileStore
+// cannot test that boundary, and no S3/MinIO run measured it.
+// See docs/internals/row-group-object-stream-loading.md for the design.
 
 // ScanRowGroupBuffers is the kill switch for row-group-at-a-time file loads.
 // Off, every scan takes the whole-file read this replaced.
@@ -412,49 +374,14 @@ var poisonReleasedSlabs atomic.Bool
 // Test-only in spirit; production never calls it.
 func PoisonReleasedSlabs(on bool) (prev bool) { return poisonReleasedSlabs.Swap(on) }
 
-// getSlab and putSlab reuse row-group buffers within one scan source, in
-// buckets that are power-of-two size classes OF THE ROW GROUP'S OWN byte
-// range.
-//
-// What a row group's buffer may be is not a matter of taste: it is charged to
-// the query's memory budget, so a buffer bigger than the row group is a charge
-// for memory the row group does not need. Three shapes were tried and each
-// failed at one end or the other, which is why the rule that ships states an
-// invariant instead of a preference:
-//
-//   - The process-wide readBufPool, whose only rule is "big enough". It also
-//     holds whole-FILE buffers, so a row-group request draws one and the
-//     charge becomes the largest file the process ever read.
-//   - The parquet chunk pool's size classes. They have a 64 KiB FLOOR, so a
-//     5 KiB row group is held in 64 KiB — a fixed floor is a tuning constant
-//     with a pool's manners, and the gates caught it.
-//   - One "big enough" pool per scan SOURCE. A source reads one TABLE, and a
-//     table's files do not share a row-group size: a compacted file beside a
-//     freshly ingested one is ordinary. Measured, a 332-byte row group of a
-//     1,988-byte file drew a 105,900-byte buffer another file left behind and
-//     was charged for it — 319x the row group, 53x the file.
-//   - Bucketing by the FILE's exact largest row group fixed that but keyed on
-//     a byte count that compression makes different for every file, so no two
-//     files shared a bucket and every row group allocated: +29.2% heap over
-//     the TPC-H SF1 suite, separated across five pairs.
-//
-// THE INVARIANT: a row group is CHARGED its own byte range, and HELD in a
-// buffer of at most twice that. The class is derived from the row group, so
-// there is no floor and no chosen number, and it decides only WHICH BUCKET a
-// buffer is reused from — a buffer is always allocated at exactly the row
-// group's size. Both halves are load-bearing: without the bucket, another
-// file's shape serves this row group (319x); allocating AT the class instead
-// of at the row group rounds every fresh buffer up to a power of two, which
-// measured +6.6% suite heap (see getSlab). Two row groups in one class differ by less than
-// 2x, which is where the bound comes from. The slack between the charge and
-// the buffer is pool capacity, bounded by the row group itself and reused
-// across the scan; ADR-0006's producer row 2 records that the row-group path
-// does not reconcile the charge up to it, and why.
-//
-// Gated by TestARowGroupIsHeldInABufferAtMostTwiceItsSize (the invariant, over
-// sizes from one byte to a megabyte) and
-// TestOneSourceWithTwoRowGroupSizesChargesEachRowGroupItsOwnBytes (the charge,
-// end to end over a table whose files have different row-group sizes).
+// getSlab/putSlab reuse buffers within one scan source using power-of-two
+// classes of each ROW GROUP's own byte range, with no minimum size.
+// Charge the group's own bytes; hold it in at most twice that capacity. Classes
+// choose reuse buckets only: fresh allocations are exactly the requested size.
+// Slack is reusable pool capacity bounded by the group; charges do not reconcile
+// up to it (ADR-0006 producer row 2). Gates: TestARowGroupIsHeldInABufferAtMostTwiceItsSize
+// and TestOneSourceWithTwoRowGroupSizesChargesEachRowGroupItsOwnBytes.
+// See docs/internals/row-group-buffer-size-classes.md for the design.
 
 // slabClass is the smallest power of two at least n — the row group's own size
 // class. No minimum: a 332-byte row group's class is 512, not a floor.

@@ -7,29 +7,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// declaredJoinSchema derives, at PLAN time, the columns one side of a join
-// will produce — from the catalog annotation AnnotateScanColumns leaves on
-// the scans beneath it (ScanColumns for the names and order, ScanColTypes for
-// the types), narrowed to the columns the join actually carries.
-//
-// It exists for the one case the runtime cannot answer: a side that delivers
-// no batch at all has no schema, and an outer join still owes rows shaped by
-// it. A LEFT JOIN over an empty build must emit every probe row with the
-// build's columns present and NULL — absent columns read as NULL through the
-// projection's missing-name fallback but make COUNT(col) count them and
-// `IS NULL` match none (#348) — and a RIGHT/FULL join over an empty probe
-// partition must emit its build rows with the probe's columns present and
-// NULL (#352).
-//
-// The result is advisory: exec.HashJoin consults it only when the side
-// produced nothing, so an approximation for a subtree the walk cannot type
-// exactly (an aggregate that renames its output, a table function) costs
-// nothing on any non-empty join. want narrows the column set — pass the
-// join's NeededColumns plus its keys, the same set the shuffle carries; an
-// empty want keeps every scan column.
-//
-// Ordering mirrors buildReadSchema: table-schema order per scan, scans in
-// walk order, which is the order a real batch from that side arrives in.
+// declaredJoinSchema derives one join side's plan-time schema from annotated
+// scan names/order/types, narrowed by want (NeededColumns plus join keys).
+// Empty want retains every scan column. Match buildReadSchema order: table
+// schema per scan, then scans in walk order. exec.HashJoin consults this
+// advisory schema only when the side produces no batch, so approximations for
+// untypable subtrees do not affect non-empty joins. Empty outer-join sides
+// must have present NULL columns, not absent columns (#348, #352).
 func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.Node]bool,
 	subqueryDecl func(string) (parquet.Column, bool)) []parquet.Column {
 	if n == nil {
@@ -125,28 +109,12 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 			}
 		}
 		if cur.Type == logical.NodeAggregate && len(cur.Children) == 1 {
-			// AN AGGREGATE'S OUTPUT IS NOT ITS INPUT, so the walk stops here
-			// rather than describing this side by the columns of the scan
-			// underneath it.
-			//
-			// A decorrelated LATERAL is the shape that makes it matter: its
-			// build side is `Project -> Aggregate -> Scan`, and the walk
-			// declared the SCAN's `g` (INT32) for a side whose real output
-			// carries `g` = MAX(id) (INT64). A task whose build partition was
-			// empty then wrote a `.wshf` file declaring that column INT32
-			// while every task with rows declared it INT64, and the consumer
-			// types itself from whichever file it reads first — refused at the
-			// read as `column "g" is INT32 ... but INT64 in an earlier file`
-			// (ADR-0010), or, where the two shapes differed in WIDTH,
-			// `declares 2 columns where an earlier file ... declared 5`.
-			// #767's DAG half, and #956's after the correlation key moved
-			// into a hidden slot.
-			//
-			// The names are the DAG's own: the published list `stageGroupKeyNames`
-			// computes, put through `exec.PublishedGroupKeyNames`' output rule
-			// by `stageEmittedKeyNames`, then one column per aggregate under
-			// its OutputCol. Keys first, which is the order the operator emits
-			// them in.
+			// Stop at an aggregate: its output differs from the scan underneath it.
+			// Empty and non-empty partitions must agree on output width and types
+			// (ADR-0010; #767, #956), including hidden correlation-key slots.
+			// Declare keys first using stageGroupKeyNames and stageEmittedKeyNames
+			// (exec.PublishedGroupKeyNames), then each aggregate under its OutputCol,
+			// in the operator's emission order.
 			in := emittedColTypes(cur.Children[0])
 			published, resolve := stageGroupKeyNames(cur, cur.Children[0])
 			emitted := stageEmittedKeyNames(published, resolve)

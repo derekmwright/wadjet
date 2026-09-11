@@ -169,29 +169,12 @@ func (p *Planner) attachScanSelectProjections(root *logical.Node, stages []Stage
 		// placeholder (#568).
 		if it.ASTExpr != nil && (!isSimpleColRefForRename(it.ASTExpr) || astIsFieldPath(it.ASTExpr, colTypes)) {
 			if referencesSyntheticAgg(it.ASTExpr) || referencesSyntheticWindow(it.ASTExpr) {
-				// A wrapped aggregate or window (`SUM(x) OVER (…) + 1`) is
-				// evaluated at the GATHER, from an OutputRename.Expr written
-				// against the synthetic output column. Its Expr text is the
-				// ABBREVIATED spelling (`sum(x) OVER (...) + 1`), which no
-				// parser accepts — before the window branch below existed
-				// this returned by the stage-type check instead, and
-				// attaching it made every task fail to compile it (#610's
-				// shapes, caught by the #656 window branch).
-				//
-				// So this ITEM cannot be attached. Abandoning the WHOLE
-				// SELECT list because of it was #776: one wrapped window
-				// beside two ordinary items left the other two computed by
-				// nobody, and the reachability check then refused the plan
-				// (`the gather renames "plain + 1" to "s" and no stage emits
-				// a column of that name`) for a query the DAG can run.
-				//
-				// What this item needs from the fragment is not its VALUE
-				// but the SLOT the gather will evaluate it from, so it is
-				// attached as a PASS-THROUGH of that slot and the rest of
-				// the list is attached normally. Its alias is not applied to
-				// the slot (aliasedSpecsFor / anyRenamed skip it): the
-				// gather's own rename carries the alias, and its Expr is
-				// what produces the value.
+				// Wrapped aggregate/window items are evaluated at gather from synthetic slots;
+				// their abbreviated Expr text is not parseable (#610, #656). Do not attach that
+				// item's expression, but do not abandon other SELECT items either (#776).
+				// Pass its required slots through and attach the rest normally. Never apply the
+				// item's alias to a slot (aliasedSpecsFor/anyRenamed skip it): gather's
+				// OutputRename.Expr computes the value and owns its alias.
 				slots, complete := syntheticSlotRefs(it.ASTExpr)
 				if !complete || len(slots) == 0 {
 					// A node kind the walk does not descend into may hide a

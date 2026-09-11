@@ -51,27 +51,12 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	// included (#685; see aggOutputFromInputDecl).
 	synDecl := make(map[string]parquet.Column)
 
-	// The declarations of what feeds the aggregate, resolved once: they are
-	// what tells a ROW FIELD PATH apart from a table-qualified column, and a
-	// field path is NOT a simple column reference however much it looks like
-	// one. exec.HashAggregate resolves its inputs by NAME through
-	// columnIndexFallback, which has no ROW arm, so `MIN(rw.n)` failed with
-	// `aggregate input "n" is not a column of its input` — cleanExpr having
-	// dropped the `rw.` on the way. Routing it through the synthetic
-	// pre-projection below is what materializes the field as a real column,
-	// at its declared type (#568).
-	//
-	// emittedColDecls, not inputColDecls: the walk has to cross a DERIVED
-	// TABLE. TPC-H Q08 is `SUM(CASE WHEN nation = 'BRAZIL' THEN volume ELSE 0
-	// END)` over `(SELECT …, l_extendedprice * (1 - l_discount) AS volume …)`,
-	// and inputColTypes stops at that subquery's Project — so `volume`
-	// decided nothing, the CASE declared its integer ELSE, and the branch's
-	// DECIMAL text met an INT64 vector at the #361 store guard. It is the
-	// same decline #529 hit one site over, where the SELECT list already
-	// resolves through emittedColDecls (see TestDecimalDecidesThroughParens
-	// AndDerivedTables), and the same walk declaredOutputSchema uses — so the
-	// aggregate's input, the SELECT list and the plan-declared schema now
-	// answer from one map.
+	// Resolve aggregate input declarations once with emittedColDecls, crossing
+	// derived-table Projects as the SELECT list and declaredOutputSchema do (#529).
+	// ROW field paths are not simple columns: columnIndexFallback has no ROW arm,
+	// so materialize them through the synthetic pre-projection at their declared
+	// type (#568). Derived computed arguments must retain their types through
+	// CASE rather than taking an ELSE type that fails the #361 store guard.
 	aggInputDecls := emittedColDecls(node.Children[0])
 
 	for i, agg := range node.AggExprs {

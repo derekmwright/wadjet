@@ -6,29 +6,12 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
-// Looking a DERIVED TABLE's SELECT-list alias up in the logical plan.
-//
-// walkStages emits no stage for an ordinary Project, so a derived table's
-// rename never happens anywhere on the DAG: every stream carries SOURCE
-// column names and each consumer compensates by resolving the alias back
-// through the plan — resolveShuffleKey for join keys, resolveAggInputName for
-// aggregate arguments and GROUP BY keys, resolveSortKeyColumn (plus
-// annotateDerivedAliasSortKey) for ORDER BY terms, resolveOutputRenameSource
-// for the gather's result schema. The two helpers here are that lookup: which
-// SELECT-list item a name refers to, and when a table qualifier on that name
-// may be dropped.
-//
-// derivedScopeBareName is the rule for when a reference qualified by the
-// derived table's own alias — `x.k`, `u.k`, `y.j`, the spelling every BI tool
-// writes — may drop that qualifier. It is NOT an unconditional strip:
-// `SUM(t.c)` over `t JOIN (SELECT d AS c FROM u) v` must keep naming t's own
-// column, and a blind strip would resolve it to `d`, a silently different
-// answer. The qualifier may only be dropped in a subtree that actually
-// contains the relation it names, which is exactly the derived table's own
-// scope: BuildFromTable's setSubtreeAlias stamps the derived alias onto every
-// Scan below it, so `u` names a relation inside `(SELECT ... FROM nation) u`
-// and names nothing inside the sibling arm of a join. Both join-recursing
-// resolvers descend one arm at a time, so the scoping is exact.
+// Ordinary Projects emit no DAG stage; consumers resolve SELECT-list aliases
+// back to source names (shuffle/aggregate/sort keys and gather renames).
+// derivedScopeBareName drops a derived-table qualifier ONLY when this subtree
+// contains the named relation. BuildFromTable's setSubtreeAlias stamps that
+// alias onto its scans; join-recursing resolvers examine one arm at a time.
+// Never strip unconditionally: a qualified sibling column must keep its scope.
 func derivedScopeBareName(name string, subtree *logical.Node) string {
 	dot := strings.LastIndexByte(name, '.')
 	if dot <= 0 || dot == len(name)-1 {

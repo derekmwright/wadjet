@@ -114,29 +114,14 @@ type Stage struct {
 	// GroupByResolve beside it is what the fragment that COMPUTES the key
 	// resolves it BY, against its own input.
 	GroupByCols []string
-	// GroupByResolve is GroupByCols' second spelling, index-aligned with it:
-	// the name or expression the COMPUTING fragment resolves each key by,
-	// against the columns its input carries. A stage whose fragment does not
-	// compute the keys — every merge-mode aggregate, whose input is a
-	// partial's output where the key is already a column under its published
-	// name — carries no list at all, and that is what makes the merge
-	// boundary correct by construction rather than by agreement (#794).
-	//
-	// The two are one field's worth of information only when they are the
-	// same string, which is every ordinary `GROUP BY c` and every ordinary
-	// `GROUP BY c + 1`. They are different strings whenever the key names a
-	// derived table's alias: the join stream carries `w` where the query
-	// wrote `x.w`, and the defining expression `a * 3` names a column the
-	// join does not carry at all. `Stage.GroupByCols` used to be both at
-	// once, and the worker re-derived "is this key derived?" by PARSING it —
-	// which is why every shape in that class answered one NULL group
-	// (ADR-0026 §2, §4a; #736, #777, #781, #794, #795).
-	//
-	// Index-aligned with whichever group-key list the stage carries:
-	// GroupByCols, FusedAggGroupBy on a fused scan-aggregate, or
-	// ChainedAggGroupBy on a join that absorbed one. A stage carries exactly
-	// one of the three; `stageGroupKeyList` is that rule, and
-	// TestStageCarriesOneGroupKeyList asserts it.
+	// GroupByResolve is the index-aligned input name/expression for COMPUTING keys;
+	// merge-mode aggregates carry none because partial outputs already publish keys
+	// (#794). Keep resolution separate from the published key, especially derived
+	// aliases; workers must not recover it by parsing (ADR-0026 §2, §4a;
+	// #736, #777, #781, #794, #795).
+	// Align with the stage's ONE key list: GroupByCols, FusedAggGroupBy or
+	// ChainedAggGroupBy. stageGroupKeyList and TestStageCarriesOneGroupKeyList
+	// express that exclusivity.
 	GroupByResolve []GroupKeyResolution
 	// GroupByTypes is the plan-time output type of each DERIVED (non-bare)
 	// GROUP BY key expression, keyed by the exact GroupByCols text — the
@@ -865,30 +850,14 @@ type SortKeySpec struct {
 	// Planner-only: what reaches the wire is the SlotPos it settles.
 	NamesAggregateOutput bool
 
-	// SourceExpr, SourceColumn and SourceType describe what MATERIALIZES a
-	// synthetic ORDER BY key — a term the SELECT list does not carry, which
-	// logical.resolveOrderBy named __sortkey_N. Nothing on the DAG computes
-	// a Project, so unless some pass puts that name on the producing stage
-	// the sort has no such column to key on (#424). They ride the key
-	// itself rather than the stage because every pass that moves a sort's
-	// ordering somewhere else — fuseSortIntoPredecessor's fold onto a
-	// join/aggregate, emitMergeSortTree, the gather's Exchange.Ordering —
-	// copies the SortKeySpec slice wholesale, so the definition travels with
-	// the key for free.
-	//
-	// SourceExpr is the term's expression text; SourceColumn is non-empty
-	// only when the term is a plain column reference, in which case the
-	// producer already emits that column under its own name and the key can
-	// simply be renamed to it. SourceType is the declared type a computed
-	// term's materialized column carries; SourceTypeKnown distinguishes a
-	// DECLARED SourceType from the zero value TypeBool shares (the same
-	// ProjectExprSpec.TypeKnown shape, #445/#472) — without it a genuinely
-	// BOOL sort key reads as "not set" and the materialized projection drops
-	// its type off the wire.
-	//
-	// Empty on every ordinary key, and read by exactly one pass
-	// (resolveHiddenSortKeys) — sortKeysEqual compares ORDERING, so these
-	// are deliberately outside that comparison.
+	// SourceExpr/SourceColumn/SourceType describe materializing a hidden __sortkey_N
+	// absent from the SELECT list (#424). Store them on SortKeySpec so folds, merge
+	// sort trees and Exchange.Ordering carry the definition with the ordering.
+	// SourceExpr is expression text; nonempty SourceColumn marks a plain reference
+	// whose existing producer column can be renamed. SourceType declares computed
+	// output; SourceTypeKnown distinguishes a declared BOOL from unset zero (#445/#472).
+	// Ordinary keys leave these empty. Only resolveHiddenSortKeys reads them;
+	// sortKeysEqual compares ordering and deliberately ignores materialization.
 	SourceExpr      string
 	SourceColumn    string
 	SourceType      parquet.TypeID
@@ -923,28 +892,13 @@ type SortKeySpec struct {
 	AliasExprPrecision int
 	AliasExprScale     int
 
-	// AliasSource is the column the producing stream carries for a key that
-	// names a DERIVED TABLE's SELECT-list alias — the non-synthetic sibling
-	// of SourceColumn above (#467, #468).
-	//
-	// `SELECT k FROM (SELECT s_suppkey AS k FROM supplier ORDER BY
-	// s_suppkey DESC) x` sorts on "k", because logical.resolveOrderBy binds
-	// an ORDER BY term to the SELECT list's OUTPUT name — which is also what
-	// PostgreSQL does, and is the whole point when the alias SHADOWS a base
-	// column of the same relation (`s_acctbal AS s_suppkey ... ORDER BY
-	// s_suppkey` means the alias). On the DAG that name exists nowhere
-	// unless attachScanSelectProjections materialized it, and only the
-	// OUTERMOST SELECT list gets that treatment: a derived table's sort
-	// either failed loud (`sort: key column "k" does not exist in the input
-	// schema`) or — with a shadowing alias — silently keyed on the WRONG
-	// column, ordering by base s_suppkey where PostgreSQL orders by
-	// s_acctbal.
-	//
-	// Set by annotateDerivedAliasSortKey at stage-emission time, where the
-	// logical Projects are still in hand, and consumed by
-	// resolveDerivedAliasSortKeys once planning can see whether the alias
-	// was materialized after all. Empty on every ordinary key, and outside
-	// SameOrdering for the same reason the fields above are.
+	// AliasSource names the producing stream column behind a derived-table
+	// SELECT-list alias, the nonsynthetic counterpart of SourceColumn (#467, #468).
+	// ORDER BY binds output aliases even when they shadow source names; a stage-less
+	// Project may leave that alias unmaterialized, so sorting must find its source.
+	// Set by annotateDerivedAliasSortKey while logical Projects exist; read by
+	// resolveDerivedAliasSortKeys after materialization is known. Empty on ordinary
+	// keys and excluded from SameOrdering.
 	AliasSource string
 }
 

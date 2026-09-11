@@ -7,52 +7,16 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// A CONSUMER BINDS THROUGH THE IDENTITY ITS PRODUCER PUBLISHED (#770).
-//
-// ADR-0026 §2 gave a GROUP BY key two names — the PUBLISHED name every
-// consumer above the aggregate reads it under, and the RESOLUTION spelling the
-// computing fragment looks up in its own input — and carried both on the
-// Stage. The two names stop at the aggregate. A JOIN publishes names of its
-// own: `joinOutputSchemaWithMapping` emits the probe's columns and then the
-// build's with every DUPLICATE bare name QUALIFIED by its owning alias, and a
-// join's `Columns` (an OutputFilter) plus its exchanges' payload manifests are
-// built from `NeededColumns`, which spells the name the QUERY wrote. So a
-// consumer that resolves a column by a SECOND spelling — the resolution
-// spelling of a group key, an aggregate's argument, a window's argument — is
-// handed a name and left to hope the payload carries it under exactly that
-// text.
-//
-// Two things go wrong, and #770 is both at once:
-//
-//   - the value IS on the stream, under the spelling the join published for
-//     it. `SELECT DISTINCT x.w, y.w, z.w` over three derived arms resolves
-//     x's key to the source column `a`, which the join publishes as `x.a`
-//     because z's arm carries an `a` too. The runtime's own fallback then
-//     finds TWO columns ending `.a` and declines, which is right — a stream
-//     with two `.a` is not one the engine may guess at — and the task fails
-//     on a query PostgreSQL answers.
-//   - the value is on NO stream at all, because a narrowing stage below
-//     dropped it. y's key resolves to `w`, which the y arm's fragment
-//     computes and the join UNDER the consumer filtered away.
-//
-// The first is answered by RESPELLING to what the producer publishes; it costs
-// no bytes. The second is answered by CARRYING the value, which does — so it
-// is asked SECOND and only of a reference the first could not place. The
-// TPC-H stage-dump golden is the measurement: every group key there already
-// binds, so no query gains a column.
-//
-// The two questions are asked of the stream the fragment will really see —
-// `aggregateInputStreamColumns` with the narrowing lists APPLIED — which is a
-// different question from the one `resolveStageGroupKeys` asks. That pass runs
-// before the payload is settled and asks what the arms can SUPPLY; this one
-// runs after and asks what they will SHIP. Both are needed: the first picks
-// the value, the second picks its name.
-//
-// The pass runs in two phases, and the order is the whole of the argument that
-// it costs nothing: phase 1 CARRIES only what no spelling on the stream
-// reaches, phase 2 then RESPELLS every consumer against the stream those
-// carries produced. Doing them in one loop would respell against a stream a
-// later stage's carry is about to change.
+// Consumers bind through the identity their producer PUBLISHED (#770,
+// ADR-0026 §2). Join duplicate build names are qualified by their owning alias;
+// NeededColumns spelling is not necessarily the emitted spelling (#770).
+// Ask the actual aggregateInputStreamColumns with narrowing lists APPLIED,
+// after payloads settle; resolveStageGroupKeys earlier asks what arms can supply.
+// First try every producer spelling, then carry only values no spelling reaches.
+// Run all carries in phase 1, then respell all consumers in phase 2 against the
+// resulting streams, so no later carry invalidates an earlier binding.
+// Already-binding group keys must gain no payload columns.
+// See docs/internals/consumer-published-identity.md for the design.
 func bindConsumersToPublishedIdentity(stages []Stage) {
 	idx := make(map[string]int, len(stages))
 	for i := range stages {
@@ -246,29 +210,13 @@ func stageComputedAggSpecs(s *Stage) []*AggSpec {
 	return out
 }
 
-// producerSpellingForRef answers, for ONE reference an argument makes to a
-// derived table's alias, what the producing fragment calls that value.
-//
-// The rules are `resolveDerivedAliasKey`'s, asked of an argument instead of a
-// key and against the stream the fragment will really see. Each asks WHICH ARM
-// first: the reference names a derived table, that table is one arm of the
-// join, and a column of the same name on another arm is a different value.
-//
-//  1. the stream spells the reference EXACTLY, because the arm's fragment
-//     materialized the alias and the join qualified this arm's copy;
-//  2. exactly one column of the alias's bare name FROM THE REFERENCE'S ARM —
-//     the arm materialized it and nothing else spells it that way;
-//  3. the SOURCE column a plain rename reads, under the one spelling the
-//     stream gives it on that arm. This is the answer
-//     aggInputAliasIsMaterializedUnderItsName gets wrong: it says a JOIN
-//     materializes the alias, and attachScanSelectProjections puts no
-//     projection on an arm whose SELECT list is a bare rename, so the join
-//     publishes the SOURCE and reading the alias reads nothing;
-//  4. the DEFINITION, re-spelled into the arm's own spellings, which the
-//     fragment's pre-aggregate projection then evaluates.
-//
-// The second return says the replacement is an EXPRESSION rather than a name,
-// so the caller parenthesizes it before splicing it into a larger one.
+// producerSpellingForRef resolves a derived-table argument against its actual
+// input stream, constraining every candidate to the reference's owning join arm.
+// Try, in order: exact published reference; unique arm-owned bare alias; a plain
+// rename's SOURCE under that arm's published spelling; then the DEFINITION
+// respelled over the arm for pre-aggregate evaluation. A join need not materialize
+// a bare-rename alias. The second return marks an expression, which callers must
+// parenthesize before splicing into a larger expression.
 func producerSpellingForRef(ref AggInputRef, arms map[string]bool,
 	in []streamCol) (string, bool, bool) {
 	arm, constrained := keyArmConstraint(ref.Written, arms)
@@ -685,36 +633,14 @@ func publishedNameForExpr(stages []Stage, idx map[string]int, root int, text str
 	return ""
 }
 
-// An ORDER BY term names an OUTPUT column, and the producing stage has its own
-// name for that output's value (#947).
-//
-// `SELECT DISTINCT a AS b, b AS a FROM t ORDER BY a` publishes two columns
-// whose names are SWAPPED relative to their sources. PostgreSQL binds the term
-// to the OUTPUT column `a`, whose value is the source `b`. On the DAG the
-// SELECT list is a Project, which `walkStages` emits no stage for (ADR-0025):
-// the sort is folded onto the producing aggregate, whose output publishes the
-// SOURCE names `a` and `b`, and the key `a` bound the source `a` — the right
-// rows in the wrong sequence, on both DAG arms, where the single-process path
-// and PostgreSQL agree. Without the DISTINCT or the GROUP BY there is no
-// aggregate to fold onto and all four arms agree, which is what says this is
-// the fold's binding and not the parser's.
-//
-// The rule is the one this file applies everywhere: the consumer asks the
-// producer what it CALLS the value. The term names output item i; that item's
-// source expression is what the producer publishes; bind THAT.
-//
-// WHICH relation the key addresses depends on where the fragment runs the
-// projection relative to the sort, and that is a fact about the EXECUTOR
-// rather than a property of the plan: `fragmentProjectsBeforeSorting` mirrors
-// the builders. Where the projection runs FIRST the key addresses the
-// projection's OUTPUT NAMES, so the term binds the output column it names;
-// where the sort runs first it addresses the projection's INPUT, so the term
-// binds that output item's SOURCE.
-//
-// The boundary is a fact in both directions: the re-spell only fires where the
-// key AS IT STANDS binds something ELSE in the same relation. A key that binds
-// nothing there is left to resolveDerivedAliasSortKeys, which owns it; a key
-// that already binds the same column is right.
+// An ORDER BY term names an output item; bind the producer's spelling of that
+// item's value (#947), even when a stage-less Project swaps aliases (ADR-0025).
+// fragmentProjectsBeforeSorting mirrors executor builders: projection-first
+// sorts bind output names; sort-first keys bind the selected item's SOURCE.
+// Respell only when the current key binds a DIFFERENT column in that relation.
+// Already-correct bindings stay; keys binding nothing belong to
+// resolveDerivedAliasSortKeys.
+// See docs/internals/sort-output-source-binding.md for the design.
 func respellSortKeysOverProducerOutput(stages []Stage, idx map[string]int, i int) {
 	s := &stages[i]
 	if len(s.SortKeys) == 0 {

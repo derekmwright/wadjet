@@ -8,47 +8,13 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// A join's exchange carries every column the join stage will EVALUATE.
-//
-// A join stage's `Columns` is an OutputFilter and its input exchanges'
-// `Columns` are payload manifests: both NARROW what arrives (ADR-0025, "A
-// stage's Columns list is a FILTER, not a promise"). They are computed from
-// the join node's `NeededColumns` at stage emission — before
-// `attachScanSelectProjections` decides that this join is where the outer
-// SELECT list gets computed, and before `resolveFilterAliasSpelling` decides
-// how a WHERE above the join is spelled. So a name that only those late
-// passes introduce is absent from every list the payload is built from, and
-// the shuffle drops the column the fragment is about to read:
-//
-//	SELECT p.w AS pw, q.w AS qw, r.w AS rw
-//	  FROM (SELECT id, SUM(b) OVER () AS w FROM t) p
-//	  JOIN (SELECT id, SUM(a) OVER () AS w FROM t) q ON p.id = q.id
-//	  JOIN (SELECT id, MIN(a) OVER () AS w FROM t) r ON p.id = r.id
-//
-// The three window slots are what the join's projection reads (`pw=__win_0`,
-// `qw=__win_1`, `rw=__win_2`) and the exchanges carried `[id r.id q.id p.id]`
-// — `column "__win_0" does not exist in the input schema`, on a query
-// PostgreSQL answers. The same gap is silent rather than loud whenever the
-// missing name resolves to SOMETHING ELSE on the stream, which is the shape
-// #700 was filed for: the exchange carried the CTE's alias while the
-// predicate had been re-spelled to the base column, so the filter was UNKNOWN
-// on every row and the query answered zero.
-//
-// The repair is to close the loop rather than to widen the payload
-// everywhere: after the late passes have settled what each join stage
-// evaluates, union those column references back into the join's own
-// OutputFilter and into its input exchanges' manifests. Only a stage that
-// really carries a filter or a projection is touched, so a plan with neither
-// is byte-identical, and an already-empty list is left empty — for both kinds
-// of list, empty means "carry everything" and narrowing it here would be the
-// defect in the other direction.
-//
-// Widening cannot invent a column: a payload naming something an arm does not
-// have is ignored (the manifest is applied per side and both sides already
-// receive the union of the two, which is why the two-arm spelling of the
-// shape above happened to work). The name-resolvability question — does
-// anything at all produce this? — stays with the checks in carrier_assert.go,
-// which run after this pass and refuse the plan when the answer is no.
+// A join must carry every column it evaluates. After late projection/filter
+// spelling passes, union references into its OutputFilter and input exchange
+// manifests (ADR-0025, #700). Touch only stages carrying filters/projections;
+// empty lists mean carry everything and must stay empty. Manifests apply per
+// side and cannot invent absent columns. carrier_assert.go runs afterward
+// and remains responsible for refusing unresolvable names.
+// See docs/internals/join-evaluated-column-payloads.md for the design.
 func ensureJoinCarriesEvaluatedColumns(stages []Stage) {
 	idx := make(map[string]int, len(stages))
 	for i := range stages {
@@ -66,50 +32,19 @@ func ensureJoinCarriesEvaluatedColumns(stages []Stage) {
 		if !isJoinStage(s.Type) {
 			continue
 		}
-		// Two classes, evaluated in two different places.
-		//
-		// A stage's OWN FilterExprs/ProjectExprs run against its INPUT, so a
-		// name the input already supplies needs nothing done.
-		//
-		// A CHAINED join's residual filter runs INSIDE this fragment, after
-		// the primary probe, against a stream this stage's own OutputFilter
-		// has already narrowed. So its columns have to be in that list
-		// whatever the input carries — which is the whole of the shape that
-		// answered zero:
-		//
-		//	WITH c AS (SELECT id, a * 2 AS dv FROM t)
-		//	SELECT COUNT(*) FROM c JOIN t x ON c.id = x.id JOIN t y ON c.id = y.id
-		//	WHERE c.dv > 1
-		//	-- PG 5 · single 5 · DAG broadcast 5 · DAG SHUFFLED 0
-		//
-		// A join CONDITION is deliberately NOT in either set: it is resolved
-		// by the join's key machinery from both sides, never read off the
-		// narrowed probe stream, and treating it as payload is what added
-		// `s_nationkey` to Q05's customer/orders exchange and `n1.n_name`
-		// to three Q07 manifests.
+		// Own FilterExprs/ProjectExprs read stage INPUT; names already supplied there
+		// need no widening. Chained residual filters run after the primary probe's
+		// OutputFilter, so their columns must survive that list regardless of input.
+		// Join CONDITIONS are in neither set: key machinery resolves them against
+		// both sides, not against the narrowed probe stream.
 		ownRefs := exprColumnRefs(s.FilterExprs, projectExprTexts(s.ProjectExprs))
-		// …and what the GROUP BY key the aggregate above this join is about to
-		// COMPUTE reads. `resolveStageGroupKeys` settles that spelling against
-		// what the join's ARMS can supply — deliberately not against what its
-		// OutputFilter ships today, because this pass is what makes them the
-		// same list. Leaving it out is how a shape the DAG evaluated correctly
-		// started refusing: the key used to reach the payload through the
-		// gather's rename (`aggStageRenames` recorded the dispatch spelling,
-		// so `ensureJoinCarriesGatherOutputs` widened with the definition's
-		// columns), and since the published name IS the query's own alias
-		// there is no rename to carry it (ADR-0026 §2, #794 round 2).
-		// A group key the aggregate above is about to COMPUTE reads its
-		// CONTAINER when it is a ROW FIELD PATH, and that expansion cannot go
-		// through withRowContainers below: that helper declines when the
-		// dotted name is itself "produced", and the aggregate PUBLISHES its
-		// key under exactly that name — `GROUP BY c_row.b` makes `c_row.b`
-		// look produced by the very stage that has yet to evaluate it. The
-		// container was then narrowed out of the join's payload and the
-		// fragment evaluated the field against a stream with no container:
-		// ONE NULL group over the whole table where the join's other arm has
-		// no column of the field's name, and — where it has one — the arm's
-		// column, which #361's silent-write guard turned into a task failure
-		// once the DECLARATION started coming from the field (#769 round 1).
+		// Also carry references of GROUP BY keys computed above this join.
+		// resolveStageGroupKeys uses the ARMS' supply; this pass must make the
+		// OutputFilter carry it (ADR-0026 §2, #794). For ROW field paths, carry the
+		// CONTAINER via rowContainersOf, not withRowContainers: the aggregate's
+		// published dotted key falsely looks already produced to that helper, before
+		// it has been evaluated. Missing containers can bind another arm's field-name
+		// column or form one NULL group (#361, #769).
 		ownRefs = append(ownRefs, rowContainersOf(groupKeyResolutionRefs(stages, idx, s), computed)...)
 		// …and what an AGGREGATE ARGUMENT over this join reads. Same rule,
 		// same reason: `MIN(c_row.b)` is materialized by a pre-aggregate
@@ -141,34 +76,12 @@ func ensureJoinCarriesEvaluatedColumns(stages []Stage) {
 		if len(chainRefs) > 0 && len(s.Columns) > 0 {
 			s.Columns = unionColumnNames(s.Columns, chainRefs)
 		}
-		// A CHAINED LINK'S OWN `Columns` narrows the JOINED stream, which
-		// carries BOTH sides — so the build-side half of its residual filter
-		// belongs in it too, and that is the half `probeSideChainRefs`
-		// deliberately drops.
-		//
-		// The fragment runs primary probe (OutputFilter = s.Columns) → link 0
-		// (OutputFilter = cj[0].Columns) → OpFilter(cj[0].FilterExprs) →
-		// link 1 → … → PostFilter(s.FilterExprs). So everything evaluated AT
-		// OR AFTER link k has to survive cj[k].Columns, wherever its value
-		// came from. Excluding the build side was right for `s.Columns` — the
-		// build enters below it and is unaffected by what that list drops —
-		// and wrong here:
-		//
-		//	WITH c AS (SELECT id, a * 2 AS dv FROM t)
-		//	SELECT COUNT(*) FROM t x JOIN t y ON x.id = y.id JOIN c ON c.id = x.id
-		//	WHERE c.dv > 1
-		//	-- PG 5 · single 5 · DAG broadcast 5 · DAG SHUFFLED 0
-		//
-		// `cj[0].Columns` is the absorbed join's NeededColumns, which for a
-		// COMPUTED alias publishes `dv` and not the `a` the re-spelled
-		// predicate reads; the link dropped `a` and then filtered on it,
-		// UNKNOWN on every row. The RENAME spelling of the same query is
-		// correct because the pruner resolves `dv` back to `a` and the list
-		// already had it, and the DERIVED spelling is correct because the
-		// predicate is pushed INTO the arm's scan — a CTE's Project is a
-		// materialization fence and declines that push. Three spellings of
-		// one query, one of them silently wrong: #755's un-pinned cte-last
-		// entry and #762's "the CTE anywhere but first".
+		// A chained link's Columns narrows the JOINED stream, so include both sides
+		// of residuals evaluated at or after that link (#755, #762). Fragment order is
+		// primary probe(s.Columns), link k(cj[k].Columns), its residual filter, later
+		// links, then stage PostFilter. Excluding build-side refs is valid for the
+		// primary s.Columns, where that build has not entered yet, but not for cj[k].
+		// probeSideChainRefs deliberately omits those build refs; add them here.
 		for k := range s.ChainedJoins {
 			if len(s.ChainedJoins[k].Columns) == 0 {
 				continue // empty already means "carry everything"
@@ -242,32 +155,12 @@ func groupKeyResolutionRefs(stages []Stage, idx map[string]int, s *Stage) []stri
 	return exprColumnRefs(texts)
 }
 
-// widenNarrowingStagesBelow unions refs into the OutputFilter of the stage at
-// root and of every join or exchange reachable from it, so a name the root
-// will evaluate is not dropped by a narrowing stage underneath.
-//
-// Only joins and exchanges are widened: their Columns is a FILTER or a payload
-// manifest, and neither can invent a column (ADR-0025). A producer's list is
-// its read set and is left alone — widening THAT would change what is scanned.
-// An empty list already means "carry everything" and stays empty.
-//
-// And a ref is pushed into a subtree ONLY IF THAT SUBTREE CAN SUPPLY IT.
-// Without that test the walk adds every referenced name to every intermediate
-// stage, which is a real cost paid on every row of every task: the first cut
-// of this pass widened 21 TPC-H stage lines across six queries — `s_nationkey`
-// onto Q05's customer/orders branch, which has no supplier scan under it;
-// `n1.n_name` and `n2.n_name` onto three Q07 exchanges, two STRING columns
-// crossing the network twice more; `__scalar_0` onto four Q02 stages, a
-// scalar-subquery placeholder no stage produces at all. None of those queries
-// was ever wrong — the consumer already had a path to the value — so every one
-// of those columns was a second carry of something already carried.
-//
-// Asking whether the subtree PRODUCES the name is the narrow question that
-// keeps the chain shapes working and leaves TPC-H alone: the CTE's `a` really
-// is produced by the scan under that branch, and `s_nationkey` really is not
-// produced under Q05's join-4. It is the same weak "does anything here compute
-// this" test dropUnbackedJoinColumns and assertJoinFiltersAreBacked already
-// use, asked per subtree instead of per plan.
+// widenNarrowingStagesBelow unions refs into root and reachable join/exchange
+// OutputFilters/manifests, only where that subtree can supply the name.
+// These lists narrow and cannot invent columns (ADR-0025); producer read sets
+// stay unchanged and empty lists retain carry-everything semantics.
+// Use the weak producing-stage test shared with dropUnbackedJoinColumns and
+// assertJoinFiltersAreBacked, scoped per subtree, to avoid redundant payloads.
 func widenNarrowingStagesBelow(stages []Stage, idx map[string]int, root int, refs []string) {
 	produced := make(map[int]map[string]string, len(stages))
 	seen := make(map[int]bool, 8)
@@ -286,27 +179,10 @@ func widenNarrowingStagesBelow(stages []Stage, idx map[string]int, root int, ref
 			widens = true
 		}
 		if !widens {
-			// A scan's SHIPPED set is a narrowing too, and it is the one
-			// narrowing below a join that this walk used to stop at.
-			// `pruneScanOutputColumns` sets OutputColumns to the columns a
-			// consumer DECLARED it wanted, and it runs before
-			// attachScanSelectProjections resolves the outer SELECT list
-			// back to a SOURCE column — so a column the scan reads for its
-			// own pushed filter and does not ship is exactly what the
-			// projection above the join then asks for:
-			//
-			//	SELECT x.w AS xw FROM (SELECT id, a AS w FROM t) x
-			//	JOIN (SELECT id, b AS w FROM t) z ON x.id = z.id
-			//	JOIN t u ON x.id = u.id WHERE x.w > 1
-			//	-- scan-1 reads [a id] for `a > 1` and ships OUT=[id];
-			//	--   join-8 projects `a AS xw`
-			//	-- PostgreSQL 5 rows · single 5 · DAG broadcast 5
-			//	-- DAG shuffled  ERROR column "a" does not exist (#766)
-			//
-			// The READ set is untouched — widening THAT would change what is
-			// scanned — so only a name the scan already reads is added back
-			// to what it ships. An empty OutputColumns already means "ship
-			// everything" and stays empty.
+			// A scan's OutputColumns also narrows its shipped set before late alias
+			// resolution can discover a source-column consumer (#766). Add back only
+			// columns the scan ALREADY READS; never widen its read set. An empty
+			// OutputColumns means ship everything and stays empty.
 			if s.Type == StageScan && len(s.OutputColumns) > 0 {
 				readable := make(map[string]string, len(s.Columns))
 				for _, c := range s.Columns {
@@ -425,27 +301,12 @@ func subtreeProducedColumns(stages []Stage, idx map[string]int, i int,
 	return out
 }
 
-// ensureJoinCarriesGatherOutputs is the same rule for the one consumer that
-// reads a join's output without evaluating anything: the GATHER.
-//
-// `attachScanSelectProjections` declines a SELECT list that is nothing but
-// renamed column references with no ordering that needs them materialized —
-// correctly, because the gather's own `OutputRename` does that job. But the
-// gather renames FROM a name, and the join's OutputFilter was narrowed to the
-// join node's NeededColumns, which spells a derived window column as the
-// alias the arms publish rather than as the slot the window stage emits. The
-// name the gather asks for is then absent, `assertGatherOutputIsReachable`
-// refuses the plan, and the query is answered by the local engine instead:
-//
-//	SELECT p.w AS pw, q.w AS qw, r.w AS rw, p.id FROM …three sibling window blocks…
-//	-- the stage DAG computed no SELECT list for this shape … emitted:
-//	--   [id p.id q.id r.id]
-//
-// Adding the gather's sources back to the join and to its exchanges is safe
-// in both directions. A name no stage produces is removed again by
-// `dropUnbackedJoinColumns` before the assert reads the set, so a genuinely
-// unreachable SELECT list is still refused and still routed local — this pass
-// can only rescue a name something really computes.
+// ensureJoinCarriesGatherOutputs restores gather OutputRename SOURCES to a
+// join's OutputFilter and exchanges when no SELECT projection materializes
+// them. NeededColumns may carry an alias instead of the window's emitted slot.
+// dropUnbackedJoinColumns removes unproduced names before
+// assertGatherOutputIsReachable, so unreachable SELECT lists still refuse
+// and route local; widening rescues only values something actually computes.
 func ensureJoinCarriesGatherOutputs(stages []Stage) {
 	idx := make(map[string]int, len(stages))
 	for i := range stages {
@@ -748,49 +609,15 @@ func unionColumnNames(base, add []string) []string {
 	return out
 }
 
-// assertJoinFiltersAreBacked refuses a plan whose JOIN stage carries a
-// predicate naming a column NOTHING in the plan computes.
-//
-// `assertCarrierSchemaResolves` deliberately excludes join stages: a join's
-// input is the qualified union of two sides with per-column origin rules only
-// the executor resolves, and asserting over it produces false refusals. That
-// exclusion is right, and it is also why one silent zero survives every gate
-// in this file — the identical query without the join REFUSES, loudly and
-// correctly:
-//
-//	WITH c AS (SELECT id, SUM(a) * 2 AS dv FROM t GROUP BY id)
-//	SELECT COUNT(*) FROM c WHERE c.dv > 1
-//	-- native-DAG: stage final_aggregate-1 filters on "c.dv > 1" and its
-//	--   input carries no [c.dv]; input: [__agg_0 id]   -> routed local, ANSWERS 5
-//
-//	… the same CTE with `JOIN t x ON c.id = x.id` added
-//	-- PostgreSQL 5 · single 5 · both DAG arms 0, in silence
-//
-// The cause is upstream and is not this check's to repair: `SUM(a) * 2 AS dv`
-// over a DECIMAL aggregate is DECLINED by absorbAggregateOutputProjection,
-// because AggSpec carries an OutputType but no (p,s) and a wrong DECIMAL
-// declaration is worse than no projection (ADR-0024 item 2). The decline is
-// correct; what is not correct is that nothing then computes `dv` and the
-// query answers WITHOUT the predicate. The same shape over a FLOAT or BIGINT
-// aggregate is not declined and answers correctly on every arm, which is what
-// says the type is the trigger and the join is only what hides it.
-//
-// So this asks the WEAKER question — does ANY producing stage in the plan
-// compute this name — which is the one `dropUnbackedJoinColumns` already asks
-// and which is known not to refuse TPC-H Q02. It cannot see a name that
-// resolves to the WRONG column, only one that resolves to nothing, and that is
-// exactly the class that answers zero in silence. Movers and joins are
-// excluded from the producing set for the same reason they are there: their
-// column lists are the thing under suspicion.
-//
-// The refusal wraps ErrUnreachableGatherOutput, so the coordinator routes the
-// query to its local engine and ANSWERS it — the same disposition its
-// join-free spelling already had.
-// producedColumnsInPlan is every column name a PRODUCING stage of the plan
-// computes. Movers and joins are excluded because their column lists are a
-// payload manifest and an OutputFilter — neither can invent a column, and
-// reading them as production is the mistake dropUnbackedJoinColumns exists to
-// undo.
+// producedColumnsInPlan records names computed by producing stages; movers and
+// joins are excluded because payload manifests and OutputFilters cannot invent columns.
+// assertJoinFiltersAreBacked refuses JOIN predicates naming no producer anywhere,
+// wrapping ErrUnreachableGatherOutput so the coordinator answers locally.
+// This weaker check cannot detect a reference bound to the wrong column;
+// assertCarrierSchemaResolves excludes joins because only the executor resolves
+// per-column origins in their qualified input union. DECIMAL projections must
+// not invent (p,s) when AggSpec carries only OutputType (ADR-0024 item 2).
+// See docs/internals/join-filter-production-check.md for the design.
 func producedColumnsInPlan(stages []Stage) map[string]string {
 	produced := map[string]string{}
 	for i := range stages {

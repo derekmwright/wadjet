@@ -131,28 +131,12 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			}
 		}
 		if !needsProject {
-			// Every check above asks whether a projection would COMPUTE
-			// anything; none asks whether the aggregate's output is the
-			// answer's SHAPE. It routinely is not. A HAVING over an
-			// aggregate the SELECT list does not carry adds a synthetic
-			// `__having_N` output column (logical/builder.go), and
-			// `GROUP BY a, b` with only `a` selected adds `b` — eliding
-			// the projection published both to the client, which is how
-			// `SELECT k FROM g GROUP BY k HAVING BOOL_OR(flag)` answered
-			// with a `__having_0` column nobody asked for (#591), and how
-			// a grouped-but-unselected key reached psql. A projection over
-			// an aggregate is elidable only when the aggregate already
-			// emits exactly the projected columns, in order; anything this
-			// cannot determine (grouping sets, an unrecognized node below)
-			// keeps the projection, which is always sound and merely costs
-			// a copy.
-			// …and not across a node that ADDS a column. aggregateOutputNames
-			// answers what the AGGREGATE publishes, which is what the #575 slot
-			// pinning needs; a WINDOW below this Project appends `__win_N` to
-			// that, so a projection whose list happens to equal the aggregate's
-			// outputs is NOT the node's whole output and eliding it would put
-			// the window's slot on the wire. Sort and LIMIT add nothing and are
-			// safe to look through.
+			// Elide an aggregate's projection only when its output exactly matches the
+			// projected columns in order; hidden HAVING outputs and unselected group keys
+			// must not reach the client (#591). Unknown shapes, including grouping sets,
+			// keep the projection. Do not look through a Window: it appends __win_N beyond
+			// aggregateOutputNames' aggregate-only answer (#575). Sort and LIMIT add no
+			// columns and are safe to look through.
 			if names, ok := aggregateOutputNames(child); ok &&
 				!wrapsAWindow(child) && namesMatchProjections(names, node.Projections) {
 				return p.buildPipeline(ctx, child)

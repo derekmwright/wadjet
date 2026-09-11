@@ -198,28 +198,12 @@ func groupKeyOutputs(agg *logical.Node) []groupKeyOut {
 			k.PublishedBelow = true
 		} else if !plain {
 			k.Derived = true
-			// The key is MATERIALIZED, so it needs a column of its own in
-			// the aggregate's input — and the input may already carry one
-			// under the name the key publishes under. `GROUP BY g + 1` over
-			// a relation that also has a column called "g + 1" is two
-			// different values wanting one name, and which one wins is an
-			// accident of the operator: the single-process pre-aggregate
-			// projection APPENDS and batch.RecordBatch.ColumnIndex answers
-			// with the FIRST exact match, so the input column won and the
-			// query grouped by it; the worker's projection NARROWS, so the
-			// key won and the two engines disagreed.
-			//
-			// The name is taken away from the collision entirely: the value
-			// goes into a hidden `__gb_expr_N`, which is in the reserved
-			// namespace (reserved_slots.go) and therefore a name NO query
-			// can spell, and the key is published under its own text by a
-			// rename at the aggregate's output (ADR-0026).
-			//
-			// ALWAYS, not only where a collision is visible from here: the
-			// aggregate's input schema at planning time does not carry a
-			// derived table's renames, so "is this name contested" cannot be
-			// answered where the decision is made — and a slot used only
-			// sometimes is a slot that protects only sometimes.
+			// ALWAYS materialize this key into its own reserved __gb_expr_N slot and
+			// rename to its published text at aggregate output (ADR-0026). An input may
+			// already carry that text with a different value; append and narrowing
+			// projections resolve the collision differently. Planning cannot detect all
+			// collisions because derived-table renames are absent from the input schema;
+			// a conditional slot cannot protect them. See reserved_slots.go.
 			k.Slot = allocGroupKeySlot(alloc)
 		}
 		applyMintedName(agg, i, &k)
@@ -364,29 +348,12 @@ func aggregateUnderOutput(root *logical.Node) *logical.Node {
 	return nil
 }
 
-// aggScopePreservingWrapper reports whether a node standing between an
-// aggregate and the SELECT list above it leaves the aggregate's OWN output
-// columns visible, under their own names.
-//
-// It is the same question `scopePreservingWrapper` (output_rename_resolve.go)
-// asks about a relation's scope, asked about an aggregate's output schema.
-//
-// The list itself is `logical.AggScopePreservingWrapper`, and this is a
-// delegation rather than a copy because the FOURTH reader —
-// `logical.aggregateOverGroupRows`, which decides whether a predicate above a
-// Project may be substituted below it — is in that package, and `physical`
-// imports `logical` and not the other way round. #774 is what a copy costs:
-// that reader stopped at a WINDOW with its own Filter-only list while ADR-0026
-// §4 named three walks reading one, and a `WHERE` on a computed key above a
-// window admitted no row at all on every arm.
-//
-// A WINDOW is on the list, and its omission is #737: `exec.Window` APPENDS its
-// output to its input, so every column the aggregate published is still there
-// under its own name. With the window stopping both walks, a SELECT item that
-// IS a computed group key was compiled as ARITHMETIC over an input column the
-// aggregate does not emit, and `SELECT g + 1 AS k, ROW_NUMBER() OVER (…) FROM
-// t GROUP BY g + 1` answered the right eight rows with a NULL key on all five
-// arms.
+// aggScopePreservingWrapper asks whether a wrapper keeps the aggregate's
+// OWN output columns visible under their own names. Delegate to
+// logical.AggScopePreservingWrapper so physical and logical readers share
+// one list (#774; ADR-0026 §4). Include Window: it APPENDS columns without
+// renaming existing ones; stopping there can re-evaluate a published group
+// key as arithmetic against absent inputs (#737).
 func aggScopePreservingWrapper(t logical.NodeType) bool {
 	return logical.AggScopePreservingWrapper(t)
 }

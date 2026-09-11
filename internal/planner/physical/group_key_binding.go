@@ -10,29 +10,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// resolveShuffleKey resolves a join key name through any Project alias nodes
-// in the child subtree. For example, a CTE with `l_suppkey AS supplier_no`
-// creates a Project that renames the column — the shuffle key `supplier_no`
-// must be mapped back to `l_suppkey` so the executor can find it in the data
-// (distributed walkStages treats ordinary Projects as passthrough, so the
-// physical columns keep their original names).
-//
-// Join nodes recurse into their output-visible children: both sides for
-// inner/outer joins, probe side only for semi/anti. First resolution wins.
-//
-// A key qualified by the derived table's own alias (`ON x.k = n_nationkey`)
-// resolves through derivedScopeBareName, which drops the qualifier only
-// inside the scope that owns it — without that the key reached the worker as
-// `x.k`, a broadcast join's probe matched nothing and the query returned 0
-// rows where the single-process path returned 24, and a hash join's shuffle
-// failed loud with `partitioned shuffle: key "x.a" not in schema` (#467,
-// #480).
-//
-// Renames CHAIN: `SELECT k AS j FROM (SELECT s_nationkey AS k FROM supplier)`
-// has to walk j → k → s_nationkey, mirroring resolveAggInputName and
-// resolveOutputRenameSource. Each Project substitutes at most once (a
-// projection list is simultaneous, so `b AS a, a AS b` must not chase
-// itself) and the walk only ever descends, so it terminates.
+// resolveShuffleKey follows Project aliases to the source columns ordinary
+// DAG Projects leave unchanged. Recurse into output-visible join children:
+// both sides for inner/outer, probe only for semi/anti; first resolution wins.
+// Use derivedScopeBareName to drop qualifiers only in their owning scope
+// (#467, #480). Follow chained renames, substituting at most once per Project:
+// a projection list is simultaneous (b AS a, a AS b must not chase itself).
+// The walk only descends, so it terminates.
 func resolveShuffleKey(key string, child *logical.Node, published map[*logical.Node]bool) string {
 	if child == nil {
 		return key
@@ -110,42 +94,14 @@ func projectsAMintedGroupKey(project *logical.Node, name string) bool {
 	return false
 }
 
-// resolveAggInputName maps a name an aggregate stage READS — an aggregate
-// argument, or a GROUP BY key — back to what the stage below it actually
-// emits, following the SELECT-list renames of any Project in between.
-//
-// walkStages treats an ordinary Project as a passthrough: it emits no stage,
-// so a subquery's rename never happens on the DAG. `SELECT MAX(n) FROM
-// (SELECT o_custkey AS n FROM orders)` therefore dispatched a scan reading
-// o_custkey and an aggregate asking for `n`, and exec.HashAggregate answers a
-// column it cannot resolve with NULL — 1499 on the single-process path and on
-// DuckDB, NULL on the DAG (#355). A renamed GROUP BY key is the louder half of
-// the same defect: an unresolvable key serializes as a NULL key, so every row
-// collapses into one NULL group.
-//
-// This is the aggregate's version of what resolveShuffleKey does for join keys
-// and resolveSortKeyColumn for ORDER BY terms — the same root cause, patched
-// per consumer because the passthrough is what all three share.
-//
-// Three outcomes:
-//
-//	name unchanged, alias false — not a rename; the name is whatever the
-//	  child already emits, which is the overwhelmingly common case.
-//	name rewritten, alias true — the Project renamed a plain column; the
-//	  aggregate reads the source column instead.
-//	expr non-nil, alias true — the Project computed an EXPRESSION under this
-//	  name (`SELECT o_custkey * 2 AS n`). There is no column to read; the
-//	  caller attaches it as the aggregate's derived InputExpr, which the
-//	  worker projects before aggregating. exprInput is then the node that
-//	  Project reads, which is what the expression's column references are
-//	  written against — the caller types the expression there, because the
-//	  Project's OWN output does not carry them and a polymorphic declaration
-//	  (COALESCE, NULLIF, GREATEST, LEAST) falls back to Float64 without them
-//	  and drops every string (#333).
-//
-// It stops at an Aggregate: that node's outputs are its own GroupBy and
-// OutputCol names, which the parent reads directly, and descending past it
-// would resolve a name against the wrong schema.
+// resolveAggInputName resolves aggregate arguments/group keys through Project
+// renames to the columns the stage below emits (#355). Unchanged/alias=false
+// means no rename; rewritten/alias=true reads a renamed plain column.
+// Non-nil expr/alias=true means a computed alias: attach derived InputExpr
+// for worker pre-projection, typing it at exprInput, the Project's INPUT,
+// where its references resolve (#333). Stop at an Aggregate: its own GroupBy
+// and OutputCol names define the schema the parent reads.
+// See docs/internals/aggregate-input-name-resolution.md for the design.
 func resolveAggInputName(name string, child *logical.Node) (resolved string, expr plansql.Node, exprInput *logical.Node, alias bool) {
 	resolved = name
 	if child == nil || name == "" {
@@ -317,43 +273,13 @@ func derivedGroupKeyDecl(key string, node plansql.Node, child *logical.Node) exp
 		strictIntArithCols(child), inputColDecls(child))
 }
 
-// namingScopeDecls answers WHICH declaration scope types a dispatched
-// expression, by descending the chain below the aggregate until it finds the
-// level whose emitted columns can name every column the expression references.
-//
-// Two consumers, one question. A GROUP BY key and an aggregate's ARGUMENT are
-// both re-spelled for dispatch — the key into its defining expression, the
-// argument into the column a rename Project binds — and ADR-0026 §2c's rule
-// applies to both: a name so re-spelled is TYPED where it was re-spelled TO,
-// not where the query wrote it. Asking the question in one place is what keeps
-// the two from answering it differently (ADR-0023 item 5).
-//
-// A Project emits no stage of its own on the DAG, so a key spelled against a
-// Project's OUTPUT and a key spelled against its INPUT are both evaluated in
-// the same fragment and only one of them resolves — and which one depends on
-// whether the key was re-spelled. Both scopes were consulted before, in fixed
-// order and each with its own gate, and neither gate asked the one question
-// that decides it:
-//
-//   - the emitted scope was accepted whenever `nodeDeclaredType` answered
-//     Decided, which arithmetic always does. The FLOAT rule is a rule, not an
-//     observation, so `GROUP BY k` over `(SELECT c_dec + 1 AS k FROM typemx) s`
-//     — dispatched as `c_dec + 1` into a scope carrying `k` and no `c_dec` —
-//     was answered FLOAT64 with confidence, and died at the #361 store guard:
-//     `cannot store string into FLOAT64 vector`, on a query the same SQL over
-//     the base table answers (#792).
-//   - the source scope (`sourceColDeclsThroughRenames`) stops at a COMPUTED
-//     projection item and returns NOTHING, because a rename may rebind a name
-//     to a different value. True of a name; not true of the DEFINING
-//     EXPRESSION that Project item was hoisted out of, which is spelled in the
-//     Project's own input scope. So `a * 3` over `(SELECT id, a * 3 AS w FROM
-//     decpair) x` had no scope at all and fell to the same float rule (#781's
-//     loud cell, #786).
-//
-// Descending is gated on coverage in both directions, which is what makes it
-// safe: a key the Project's OUTPUT can name stops at the OUTPUT, so a rebound
-// name is never read past its rebinding; a key it cannot name is looked for
-// one level down, where it either resolves or the walk gives up.
+// namingScopeDecls finds the first emitted scope covering EVERY reference in
+// a dispatched expression. Re-spelled GROUP BY keys and aggregate arguments
+// must be typed where they were re-spelled TO (ADR-0026 §2c; ADR-0023 item 5).
+// Coverage, not nodeDeclaredType confidence, gates descent: arithmetic can
+// decide FLOAT64 even with missing references (#361, #792). Computed Project
+// definitions need their input scope (#781, #786). Stop where OUTPUT covers
+// the expression; never read a rebound name past its rebinding.
 func namingScopeDecls(node plansql.Node, child *logical.Node) (colDecls, *logical.Node, bool) {
 	for n := child; n != nil; {
 		d := emittedColDecls(n)
@@ -520,31 +446,12 @@ func derivedGroupKeyTypes(groupBy []string, child *logical.Node) (map[string]par
 	return out, dec
 }
 
-// resolveSortKeyColumn maps an ORDER BY key that names a SELECT-list alias
-// back to the name the aggregate stage below it actually emits.
-//
-// The logical builder resolves ORDER BY to the SELECT list's OUTPUT name
-// (logical.resolveOrderByColumn), which is exactly what the single-process
-// pipeline needs — there the Project really does run below the Sort, so the
-// alias exists by the time the sort reads a row. Distributed walkStages
-// instead treats an ordinary Project as a passthrough (the same reason
-// resolveShuffleKey exists for join keys), so an aggregate's output keeps the
-// GroupBy spelling. A sort keyed on `p` from `o_orderpriority AS p` then
-// matches no column, the sort is a no-op, and the ORDER BY is silently lost —
-// while the same query without the rename sorts correctly (#313, and TPC-H
-// Q09 via `n_name AS nation` / `SUBSTR(o_orderdate,1,4) AS o_year`).
-//
-// Scope is deliberately the aggregate: a final_aggregate names its output
-// from GroupByCols and AggSpec.OutputCol, which walkStages copies verbatim
-// from this node, so the mapping is exact and decidable here. Sorts over a
-// bare scan or join are left alone — attachScanSelectProjections may attach
-// an alias-naming OpProject to the producing fragment later in
-// PlanDistributed, so the correct spelling for those is not yet known at
-// this point (it declines every plan carrying an aggregate, so the two
-// never overlap).
-//
-// Each Project substitutes at most once: a projection list is simultaneous,
-// so `b AS a, a AS b` must not chase itself.
+// resolveSortKeyColumn maps ORDER BY aliases to an aggregate's emitted
+// GroupByCols/AggSpec.OutputCol names (#313). Ordinary DAG Projects do not
+// perform the rename. Scope this to aggregates: scan/join producers may get
+// an alias-naming OpProject later via attachScanSelectProjections, which
+// declines aggregate plans. Each Project substitutes at most once because
+// its projection list is simultaneous.
 func resolveSortKeyColumn(key string, child *logical.Node) string {
 	// resolved is the preferred candidate, alt a second one to try when the
 	// first names no output of the aggregate below.

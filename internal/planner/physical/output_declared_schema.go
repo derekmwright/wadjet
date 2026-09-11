@@ -10,36 +10,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// declaredOutputSchema derives, at PLAN time, the columns a query will
-// produce — names from the SELECT list, types from the catalog annotation
-// AnnotateScanColumns leaves on the scans beneath it.
-//
-// It exists for the one case the runtime cannot answer. Wadjet derives a
-// result's schema from DATA FLOW: exec.CollectSink captures it from the first
-// batch it CONSUMES and exec.Project resolves its output types from the first
-// batch it SEES. A query that returns zero rows produces no batch, so it has
-// no schema — and `SELECT a, b FROM t WHERE false` handed the client OID 25
-// (text) for every column through pgwire's coordinator path, and no columns
-// AT ALL through the coordinator's correlated-local route: not an empty table
-// with headers, no table (#416).
-//
-// The result is ADVISORY. exec.CollectSink.SchemaHint is consulted only when
-// the sink consumed nothing, so an approximation for a shape this walk cannot
-// type exactly costs nothing on any non-empty result. Where a column's type
-// cannot be resolved it is declared STRING, which is what both entry points
-// already fall back to today — so an unresolved column is no worse than
-// before while a resolved one is right.
-//
-// Naming follows the SELECT list exactly as the projection builder does
-// (alias, else the unqualified column, else the cleaned expression text), so
-// an empty result names its columns the way a non-empty one would.
-// subqueryDecl resolves a SELECT-list scalar subquery's own declared output
-// column, and nil means the caller cannot ask. It is threaded here rather
-// than left to the projection builder because a ZERO-ROW result has no batch
-// to read its schema off and this walk IS its answer (#416): without it the
-// empty and non-empty arms of the same query disagreed about the type of a
-// scalar-subquery column, which is the disagreement #416 exists to prevent
-// (#874).
+// declaredOutputSchema derives plan-time output names from the SELECT list
+// and types from AnnotateScanColumns catalog annotations (#416).
+// The schema is advisory: CollectSink.SchemaHint applies only if nothing was
+// consumed. Unresolved types fall back to STRING; non-empty results use data flow.
+// Names match projection building: alias, unqualified column, then cleaned text.
+// subqueryDecl resolves scalar-subquery output declarations; nil means unavailable.
+// Zero-row and non-empty scalar-subquery columns must agree (#416, #416, #874).
 func declaredOutputSchema(root *logical.Node,
 	subqueryDecl func(string) (parquet.Column, bool)) []parquet.Column {
 	if cols, ok := setOpDeclaredOutputSchema(root); ok {
@@ -258,37 +235,14 @@ func setOpArmSchemasAndTypmods(n *logical.Node) ([][]parquet.Column, []map[strin
 	return out, mods
 }
 
-// declaredWireUnconstrainedDecimal names the DECIMAL output columns whose
-// PostgreSQL wire typmod must declare "unconstrained" (-1) even though this
-// engine's own declared/exec schema keeps a real (p,s) for them.
-//
-// Verified live against postgres:17-alpine's \gdesc: an aggregate function
-// call NEVER carries its argument's typmod through — MIN(n)/MAX(n)/
-// MIN_BY(x,n)/MAX_BY(x,n)/SUM(n)/AVG(n) over a numeric(p,s) column all
-// report an unconstrained numeric, and only a BARE column reference in the
-// SELECT list keeps (p,s). declaredOutputSchema's own Precision/Scale answer
-// stays real for these columns — internal/engine/exec/aggregate.go's DECIMAL
-// vector allocation and internal/storage/parquet's file writer both key
-// physical decisions off Precision/Scale (18-digit INT64 vs 38-digit
-// FixedLenByteArray encoding), so zeroing it there would risk silently
-// mis-encoding a materialized MIN/MAX-of-DECIMAL(38,s) result — this is
-// wire-metadata ONLY, consulted solely by pgTypeMod (fold-in to #457/#458,
-// FIX 2).
-//
-// The gate is PostgreSQL's select_common_typmod: a numeric result KEEPS a
-// typmod when every input it is resolved from carries the SAME one, and is
-// unconstrained otherwise — verified live against 17.11's \gdesc, where
-// GREATEST(a, a), COALESCE(a, a), CASE … THEN a ELSE a and NULLIF(a, b) over
-// numeric(9,2) a and numeric(18,4) b all describe as numeric(9,2), NULLIF(b,
-// a) and LEAST(b, b) as numeric(18,4), and GREATEST(a, b) as plain numeric.
-//
-// It is emphatically NOT "computed ⇒ unconstrained": that reading is wrong in
-// both directions, dropping the typmod PostgreSQL keeps for a choice over one
-// column and keeping the one it drops for a set operation over a computed
-// arm. What carries a typmod is a BARE COLUMN REFERENCE and the choice
-// constructs folded over bare references; an aggregate, a window function,
-// arithmetic, a CAST and every other function call carry -1, and one -1
-// anywhere in the fold makes the result -1 (#587, #542, ADR-0024 item 5).
+// declaredWireUnconstrainedDecimal marks outputs whose wire typmod is -1;
+// keep real (p,s) in execution/storage declarations to preserve vector allocation
+// and parquet encoding. Only pgTypeMod consults this map (#457/#458).
+// Bare references and choice folds keep a modifier only when all candidate inputs
+// carry the same one; any unconstrained input makes the fold unconstrained.
+// Aggregates, windows, arithmetic and other calls lose typmod (#587, #542).
+// See declaredTypmod for CAST handling and ADR-0024 item 5 for the rule.
+// See docs/internals/decimal-wire-and-carrier-modifiers.md for the design.
 func declaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
 	if out := setOpWireUnconstrainedDecimal(root); out != nil {
 		return out
@@ -365,39 +319,15 @@ func projectionKeepsTypmod(proj logical.Projection, decls colDecls, computed map
 	return p == d.Precision && sc == d.Scale
 }
 
-// declaredTypmod is PostgreSQL's select_common_typmod over an expression
-// tree: the (precision, scale) the result carries on the wire, and whether it
-// carries one at all.
-//
-// A BARE COLUMN REFERENCE carries its column's own typmod — unless some node
-// below the projection COMPUTED that column, which is how a window function
-// reaches the SELECT list looking exactly like a column (#587). The choice
-// constructs — CASE, COALESCE, NULLIF, IFNULL, IF, GREATEST, LEAST — fold
-// their branches, over the same candidate positions the TYPE resolution folds
-// (expr.Ret.SameAsArgs), and keep the typmod only when every branch carries
-// the same one. A NULL branch carries nothing and is skipped, the way it is
-// skipped when the common TYPE is chosen.
-//
-// A CAST is NOT one of the constructs that carry -1, and ADR-0024 item 5 said
-// it was until #708 corrected it from the live server: a cast to a
-// PARAMETERIZED numeric IMPOSES its destination's modifier on the result —
-// `CAST(a AS numeric(9,2))` and `a::numeric(18,4)` both describe with their
-// own (p,s) in PostgreSQL 17. That is the cast's own typmod, not
-// select_common_typmod over its inputs, so the arm below does not recurse
-// into the operand. Only a BARE `CAST(a AS numeric)` drops to plain numeric.
-//
-// Everything else — an aggregate, an operator, any other function call, and a
-// cast to a type whose modifier wadjet does not send — carries -1, and one of
-// those anywhere in the fold makes the whole result -1.
-//
-// That last class is a DIVERGENCE from PostgreSQL, not a match, and the first
-// version of this comment read the other way.
-//
-// The STRING family is no longer in it. `CAST(c AS VARCHAR(4))` truncates to
-// four characters (the VALUE half of #838, closed first because ADR-0012 item
-// 5 sets the order: a bound is ENFORCED before it is DECLARED) and now
-// declares its length too — see declaredStringLength below, which is this
-// function's twin for a modifier that is a LENGTH rather than a (p,s).
+// declaredTypmod resolves wire (p,s): bare columns keep their own modifier unless
+// computed below the projection (including window slots, #587). CASE, COALESCE,
+// NULLIF, IFNULL, IF, GREATEST and LEAST fold expr.Ret.SameAsArgs candidates;
+// skip NULL branches and retain only identical modifiers across all others.
+// Parameterized numeric CAST imposes its destination without recursing; bare
+// numeric CAST drops typmod (#708, ADR-0024 item 5). Other operations/calls and
+// casts whose modifiers wadjet does not send carry -1, which poisons the fold;
+// unsupported modifiers diverge from PostgreSQL. declaredStringLength handles
+// string CAST lengths, enforced before declaration (#838, ADR-0012 item 5).
 func declaredTypmod(node plansql.Node, decls colDecls, computed map[string]bool) (int, int, bool) {
 	switch n := node.(type) {
 	case *plansql.ParenNode:
@@ -683,30 +613,12 @@ func emittedComputedCols(n *logical.Node) map[string]bool {
 		}
 		return out
 	case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
-		// A set operation whose arms disagree about a DECIMAL's (p,s) emits
-		// that column with NO typmod, and a projection ABOVE it must not
-		// "keep" one (#884 round-1 B1).
-		//
-		// This arm is what makes ADR-0024's sentence true. `emittedColDecimal`
-		// now names such a column with `DecimalCommon`'s reconciled (p,s),
-		// because the arithmetic walk needs a scale to compute exactly on —
-		// and that same map is what `declaredTypmod`'s ColRef arm reads for a
-		// bare projection over the set operation. So the wire started sending
-		// numeric(20,6) for `SELECT v FROM (numeric(9,2) UNION ALL
-		// numeric(20,6)) x` where PostgreSQL sends numeric with typmod -1
-		// (measured through pg_attribute), on the derived-table, CTE, ORDER
-		// BY, EXCEPT and NULL-arm spellings. The CARRIER and the WIRE want
-		// different answers about the same node, and this is the seam that
-		// separates them: the carrier keeps the reconciled scale, the wire is
-		// told the column carries no modifier.
-		//
-		// `setOpWireUnconstrainedDecimal` already answers this when the set
-		// operation IS the query's output; the disagreeing set is the SAME
-		// function, so the two spellings cannot drift apart.
-		//
-		// Only the DISAGREEING columns: `numeric(9,2) UNION ALL numeric(9,2)`
-		// keeps numeric(9,2) on the server, and this map is "not a bare copy
-		// of a stored column", not "under a set operation".
+		// A set operation with disagreeing DECIMAL (p,s) must keep no wire typmod,
+		// even through a projection above it (#884, ADR-0024). The carrier retains
+		// DecimalCommon's reconciled scale for exact arithmetic; the wire does not.
+		// Use the same disagreements as setOpWireUnconstrainedDecimal so output and
+		// nested spellings agree. Mark only disagreeing columns: equal arm modifiers
+		// remain valid; being under a set operation alone does not make one computed.
 		dis := setOpArmDecimalDisagreements(n)
 		if len(dis) == 0 {
 			return nil
@@ -1181,36 +1093,11 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		}
 		return emittedColTypes(n.Children[0])
 	case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
-		// A set operation emits the columns its ARMS agree on, and the arms'
-		// own schemas are already computed by declaredOutputSchema — the same
-		// walk `setOpArmSchemas` reads for the wire's typmod reconciliation.
-		//
-		// Without this arm the walk answered nil for everything above a set
-		// operation, which is #867's failure mode one node-kind over:
-		// `SUM(v * 2) + 1` over a `UNION ALL` found no declaration for `v`,
-		// fell to `nodeDeclaredType`'s float rule, and went out as OID 701
-		// where PostgreSQL sends 1700 (round-3 review P-B).
-		//
-		// A column the arms declare DIFFERENTLY used to be left untyped here,
-		// and "left out" is not neutral: nodeDeclaredType over a map without
-		// the name does not report Undecided — its arithmetic arm falls
-		// through to Decl(FLOAT64), Decided. So `SUM(v * 3000000) + 1` over
-		// `c_i64 UNION ALL SELECT NULL` — the commonest set-op spelling there
-		// is — went out as float8/OID 701 where PostgreSQL sends an exact
-		// numeric, with the outer `+ 1` lost at int8 magnitude (#884).
-		//
-		// select_common_type is not guessed here either: it is
-		// setOpDeclaredOutputSchema, the SAME function that computes the
-		// plan-declared output schema for a query whose output IS this set
-		// operation. It skips an arm whose column is an UNKNOWN-typed literal
-		// (PostgreSQL resolves `c_i64 ∪ NULL` to bigint, not to text), folds
-		// the rest through setOpWiden's ladder, and resolves DECIMAL (p,s)
-		// through batch.DecimalCommon. Two walks over one question now answer
-		// from one place.
-		//
-		// The NAMES stay arms[0]'s, which is what a set operation's result
-		// columns are called and what this map is keyed by; the reconciliation
-		// contributes the TYPES only.
+		// Use setOpDeclaredOutputSchema's common types above a set operation (#867):
+		// leaving differing arm declarations untyped makes arithmetic fall to FLOAT64
+		// and can lose exact values (#884). Skip UNKNOWN literal arms, widen typed arms
+		// through setOpWiden, and reconcile DECIMAL (p,s) through batch.DecimalCommon.
+		// Keep arms[0]'s names; reconciliation contributes types only.
 		arms := setOpArmSchemas(n)
 		if len(arms) == 0 {
 			return nil
@@ -1252,27 +1139,12 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		}
 		return out
 	case logical.NodeJoin:
-		// A JOIN emits both sides' columns, and this walk must cross it
-		// ITSELF rather than fall through to inputColTypes: that one's own
-		// join arm recurses with inputColTypes, which has no Project,
-		// Aggregate or Window arm, so a side that is any of those answered
-		// nil and its `left == nil || right == nil` rule then nilled the
-		// WHOLE map. Every column of the query lost its type, and with it its
-		// typmod — which is #697: a decorrelated correlated subquery is a
-		// Join whose right side is an Aggregate, so `SELECT s_acctbal … WHERE
-		// ps_supplycost = (SELECT MIN(…) …)` described a bare numeric(15,2)
-		// column as unconstrained while the same projection without the
-		// subquery kept it. The same nil also declared every column of a
-		// ZERO-ROW result STRING — #416's failure mode, over the shape #416
-		// did not reach.
-		//
-		// A nil SIDE is tolerated rather than fatal, the way inputColFields'
-		// join arm already tolerates one: the names this walk resolved are
-		// still that side's own names, and a name it could not resolve is
-		// absent, which is exactly the "fall back to STRING" answer. The
-		// disagreement rule is inputColTypes' verbatim — a name the two sides
-		// declare at different types is DROPPED rather than picked, because a
-		// self-join is not the only way to reach one.
+		// Cross JOIN with emittedColTypes itself: inputColTypes cannot type Project,
+		// Aggregate or Window arms and can discard both sides when one is nil (#697).
+		// Retain known declarations for zero-row results rather than defaulting every
+		// column to STRING (#416, #416). A nil side is tolerated: unresolved names are absent
+		// and fall back to STRING. Drop bare names whose side types disagree; never
+		// arbitrarily pick one side's declaration.
 		if len(n.Children) != 2 {
 			return nil
 		}
@@ -1491,29 +1363,13 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 		}
 		return emittedColDecimal(n.Children[0])
 	case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
-		// The (p,s) companion to emittedColTypes' set-operation arm, and
-		// bound by the same rule the WIRE's reconciliation uses: a DECIMAL
-		// result keeps a typmod only when every arm carries the SAME one
-		// (setOpArmDecimalDisagreements, ADR-0012 item 12). An arm that
-		// disagrees contributes nothing, which leaves the column DECIMAL with
-		// no scale — exactly what the wire declares for it.
-		//
-		// Without it `SUM(v * 2) + 1` over a `UNION ALL` of DECIMAL columns
-		// had a TYPE and no scale, so binOpDecimalType declined and the term
-		// fell to float8 with the exact value rendered through a float64
-		// (round-3 review P-B).
-		//
-		// It compared the arms' widths for AGREEMENT and left a disagreeing
-		// column out, which is #884's other half: `DECIMAL(18,4) ∪
-		// DECIMAL(20,6)` had no scale and fell to float8 for the same reason.
-		// The (p,s) comes from setOpDeclaredOutputSchema now — batch.
-		// DecimalCommon over the arms that carry a type, the same widening the
-		// executed schema and the DAG's arm reconciliation already use — so
-		// the CARRIER's scale is one answer computed once. Precision 0 is
-		// still "unconstrained" and still contributes nothing, which is what
-		// the wire declares for it (ADR-0012 item 12's recorded typmod
-		// divergence: PostgreSQL's result is numeric with typmod -1 where a
-		// wadjet DECIMAL vector has exactly one scale).
+		// Resolve carrier (p,s) through setOpDeclaredOutputSchema/DecimalCommon over
+		// typed arms, including differing widths (#884); exact arithmetic needs a scale.
+		// Precision 0 is unconstrained and contributes nothing. The wire separately keeps
+		// a typmod only for identical arm modifiers (setOpArmDecimalDisagreements,
+		// ADR-0012 item 12); its numeric typmod -1 differs from a vector's one fixed scale
+		// (ADR-0012 item 12). This map describes the carrier, not wire agreement.
+		// See docs/internals/set-operation-carrier-scale.md for the design.
 		arms := setOpArmSchemas(n)
 		if len(arms) == 0 {
 			return nil

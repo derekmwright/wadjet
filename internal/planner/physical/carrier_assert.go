@@ -83,31 +83,14 @@ func assertCarrierSchemaResolves(stages []Stage) error {
 	return nil
 }
 
-// assertAggregateInputsResolve refuses a plan whose aggregate reads an
-// ARGUMENT expression its own input cannot supply.
-//
-// The same question assertCarrierSchemaResolves asks of a carried Filter or
-// Project, asked of the third field that travels as TEXT and is compiled at the
-// worker: AggSpec.InputExpr, which buildAggInputProjection materializes ahead
-// of HashAggregate. It is silent for exactly the same reason — `expr.ColRef`
-// answers nil for a name it cannot resolve, so the pre-projection writes NULL
-// into every row and the aggregate returns a number that is wrong rather than
-// missing. `SUM(CASE WHEN s = 'x' THEN twice ELSE 0 END)` over a derived table
-// computing `twice` came back as the total of its ELSE branch (#702).
-//
-// respellAggInputExpr is what makes those names resolve; this is the backstop
-// for the shapes it does not reach — a reference inside a node kind the
-// rewriter does not descend into, or a rename below a producer the alias walk
-// stops at. Refusing loses the DAG's parallelism for such a query; answering it
-// with the wrong number loses the query.
-//
-// Its INPUT is the aggregate's dependency, not the aggregate's own output, so
-// it needs a different schema from carrierInputColumns'. Only the PARTIAL
-// aggregate is checked: a final or merge aggregate reads its partials'
-// OUTPUTS, where an InputExpr is already materialized under InputCol and
-// re-resolving the text would be asking the wrong question. Join, union and
-// exchange-fed inputs are skipped by emittedThroughPassThrough / the
-// modelled check, the same exclusions the ADR names.
+// assertAggregateInputsResolve refuses an aggregate argument expression its
+// own input cannot supply, backing up respellAggInputExpr where the rewriter
+// or alias walk stops (#702). Unresolved ColRefs otherwise become NULL.
+// Check AggSpec.InputExpr against the dependency schema, not the aggregate's
+// outputs or carrierInputColumns'. Only check PARTIAL aggregates: final/merge
+// inputs already materialize that expression under InputCol.
+// Skip join, union and exchange-fed inputs excluded by
+// emittedThroughPassThrough/the modelled check.
 func assertAggregateInputsResolve(stages []Stage) error {
 	idx := make(map[string]int, len(stages))
 	for i := range stages {
@@ -294,30 +277,11 @@ func assertSortKeysResolve(stages []Stage) error {
 			if k.Column == "" {
 				continue
 			}
-			// A key still spelled `__sortkey_N` here has NO later pass. That
-			// slot is the planner's own materialization of an ORDER BY term,
-			// and both passes that settle one — resolveHiddenSortKeys and
-			// resolveDerivedAliasSortKeys — have already run: either the term
-			// is on some producer's OpProject (and is in `emitted`), or the
-			// key was renamed onto a real column (and is no longer spelled
-			// `__sortkey_N`), or the passes DECLINED. So the exemption below
-			// does not apply to it, and a hidden key nothing emits is
-			// unreachable however its Source fields are filled in.
-			//
-			// resolveHiddenSortKeys declines whenever the producer's fragment
-			// runs no OpProject — an aggregate-family stage, a union — which
-			// is exactly where fuseSortIntoPredecessor folds an ORDER BY over
-			// a derived table's aggregate:
-			//
-			//	SELECT d.g, d.s FROM (SELECT g, SUM(id) AS s FROM t GROUP BY g) d
-			//	ORDER BY d.s * 2
-			//	SELECT u.k FROM (SELECT DISTINCT id AS k, g AS v FROM t) u
-			//	ORDER BY u.k * 2
-			//	-- both: `sort: key column "__sortkey_0" does not exist in the
-			//	--   input schema`, three dispatch attempts in, on queries the
-			//	--   single-process pipeline answers (#787)
-			//
-			// Refusing here routes them to that pipeline instead of failing.
+			// A remaining __sortkey_N has NO later materialization pass:
+			// resolveHiddenSortKeys and resolveDerivedAliasSortKeys already ran.
+			// It must be in emitted; Source fields cannot exempt a missing hidden key.
+			// Producers without OpProject (aggregate-family stages, unions) can make
+			// the passes decline; refuse here to route to the local pipeline (#787).
 			if logical.IsHiddenSortColumn(k.Column) {
 				if _, ok := lookupEmittedColumn(emitted, k.Column); ok {
 					continue
@@ -342,29 +306,13 @@ func assertSortKeysResolve(stages []Stage) error {
 	return nil
 }
 
-// assertUnionArmsAgreeOnTypes refuses a plan whose set-operation arms declare
-// DIFFERENT types for the same output column.
-//
-// A union writes one .wshf stream per arm and every consumer reads them as one
-// relation, so the arms' declarations are not advice — they decide how the
-// bytes are read back. Two arms that disagree hand the consumer a column whose
-// declared type does not match its data: the sort above reads a FLOAT64 key
-// off an INT64 vector, gets an empty typed slice, and indexes it. That is a
-// runtime PANIC inside the fragment (`index out of range [0] with length 0`),
-// recovered by the query boundary and reported as an internal error, for a
-// query PostgreSQL answers (#656 R4).
-//
-// reconcileSetOpArmTypes is what makes the arms agree, and it can only do that
-// for arms it can TYPE; an arm it cannot type leaves the disagreement in the
-// plan. Refusing here is the backstop, and it uses the sentinel so the
-// coordinator routes the query local and ANSWERS it rather than panicking.
-//
-// An arm that declares nothing is not a disagreement: the worker copies the
-// source column and the type is whatever the producer emits — which is also
-// why a bare REFERENCE that declares a type is checked against its producer
-// rather than against the other arms. The worker DirectCopies such a spec and
-// ignores the declaration, so two arms can agree on paper and still write
-// different bytes.
+// assertUnionArmsAgreeOnTypes refuses set-operation arms that declare
+// different types for one output column; consumers read their .wshf streams
+// as one relation, so a mismatch can panic (#656). It backs up
+// reconcileSetOpArmTypes with a sentinel that routes the query local.
+// An undeclared arm is not a disagreement: the worker copies its source type.
+// Check a bare reference against its producer, not just other arms: DirectCopy
+// ignores the spec's declaration, so matching declarations can hide a mismatch.
 func assertUnionArmsAgreeOnTypes(stages []Stage) error {
 	idx := make(map[string]int, len(stages))
 	for i := range stages {

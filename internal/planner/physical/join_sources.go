@@ -596,28 +596,12 @@ func BuildSemiAntiFilter(filter string) func(probe *batch.RecordBatch, probeRow 
 	}
 }
 
-// filterColumnIndex resolves a semi/anti join filter's column name against a
-// batch: the exact spelling first, then the bare name for a qualified
-// reference over a single-relation build, then a UNIQUE qualified column for
-// a bare reference. Ambiguity resolves to -1 rather than to a guess — a
-// filter that silently reads the wrong relation's column is what #527 was.
-//
-// It DELEGATES rather than restating that rule, because the restatement
-// drifted. This function's own doc has claimed to mirror
-// exec.columnIndexFallback since it was written, and stopped doing so twice:
-// at #731 the mirror lost the identifier fold, so a folded reference (which
-// is what the lexer produces for every unquoted identifier) misses a
-// CamelCase build column byte-exactly and rejects EVERY candidate — a SEMI
-// join answering 0 rows and an ANTI join answering all of them, in silence;
-// and it never grew the ROW-field-path guard ADR-0022 added there, so
-// `attrs.score` fell through to a bare `score` published by some other
-// relation. One resolver, one rule.
-//
-// The camel-case invariance battery does not yet distinguish this site — the
-// extra conjuncts on its EXISTS/IN shapes name `tier`, which the fixture
-// spells folded, so the byte-exact probe happened to answer. Measured with
-// every other fix in place and this one reverted, it owns 0 of the battery's
-// cells; the delegation is the drift closed, not a cell recovered.
+// filterColumnIndex delegates to exec.ColumnIndexFallback: exact spelling,
+// then bare lookup for a qualified reference, then UNIQUE qualified lookup for
+// a bare reference; ambiguity returns -1, never a guess (#527). Preserve
+// identifier folding (#731) and ROW-field-path guards (ADR-0022).
+// The camel-case invariance battery does not distinguish this site: its
+// EXISTS/IN residuals use folded tier, so reverting delegation owns no cells.
 func filterColumnIndex(b *batch.RecordBatch, name string) int {
 	return exec.ColumnIndexFallback(b, name)
 }

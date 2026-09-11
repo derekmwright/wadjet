@@ -7,50 +7,13 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// renameCollidingSlots renumbers the planner's own hidden slots past any
-// STORED column of the same name, and past a slot ANOTHER BLOCK of the same
-// query already minted.
-//
-// A table written before the namespace was reserved — or by any binary that
-// did not enforce it — may carry a column called `__win_0`. Such a table stays
-// READABLE: refusing it at read time made every query against it fail,
-// `SELECT *` included, which is a trap rather than a guard rail (the DDL and
-// ingest doors refuse the name being CREATED, which is where the reservation
-// belongs). Readable means the planner and the stored column can meet in one
-// query, and then the planner's slot has to move:
-//
-//	SELECT __win_0, SUM(id) OVER () AS w FROM oldtab
-//
-// Here the window mints `__win_0`, the scan emits a column of that name, and
-// exec.Window appends its output beside it — #694's collision exactly, with
-// the planner on the other side of it. Renumbering the SLOT is the repair,
-// because the stored column is the one the user can see and name.
-//
-// The SECOND collision is between two blocks of one query (#747). The window
-// slot counter lives in `logical.BuildFromSelectWithCTEs`, which recurses per
-// SELECT BLOCK, so every block starts at zero and two sibling subqueries mint
-// the SAME `__win_0`:
-//
-//	SELECT p.w AS pw, q.w AS qw
-//	  FROM (SELECT id, SUM(b) OVER () AS w FROM t) p
-//	  JOIN (SELECT id, SUM(a) OVER () AS w FROM t) q ON p.id = q.id
-//	-- PostgreSQL pw=49.2400 qw=52.9900; the DAG answered p's window TWICE
-//
-// Both arms carry a column called `__win_0` into the join, the projection
-// above it resolves each reference to that one name, and one window's value
-// is published under both output columns. Three siblings collapsed on EVERY
-// path, single-process included, because the third arm's slot won.
-//
-// ADR-0025 recorded the opposite — "the blocks' slots are already distinct,
-// the allocator is per query" — and no fixture attempted it, which is method
-// 10 of the correctness protocol exactly. The allocator is per BLOCK; this is
-// the pass that makes the claim true, at the first point where the whole
-// query's slots are visible in one tree.
-//
-// It runs after AnnotateScanColumns, which is what puts a table's real column
-// list on the Scan node; before that pass there is no schema to collide with.
-// It is idempotent: a second run sees slots that are already distinct and
-// renames nothing.
+// renameCollidingSlots moves hidden slots past stored names and slots minted
+// by other query blocks (#694, #747). Old tables with reserved-family columns
+// must remain readable: DDL/ingest forbid creation, reads must move the slot.
+// Allocation is per BLOCK; this pass makes slots distinct across the whole query
+// (ADR-0025). Run after AnnotateScanColumns supplies stored schema names.
+// Idempotent: already-distinct slots are not renamed.
+// See docs/internals/query-block-slot-collisions.md for the design.
 func renameCollidingSlots(root *logical.Node) {
 	stored := map[string]bool{}
 	collectStoredNames(root, stored)
@@ -91,31 +54,14 @@ func renameCollidingSlots(root *logical.Node) {
 	}
 	seedWindowSlotNames(root, alloc)
 
-	// The rename is SCOPED to the subtree that minted the slot.
-	//
-	// One global map keyed by the old name cannot express two siblings, and
-	// two siblings are ordinary SQL: `(SELECT SUM(plain) OVER () AS w FROM t) p
-	// JOIN (SELECT SUM(id) OVER () AS w FROM t) q` mints `__win_0` in BOTH
-	// blocks. A map holding `__win_0 -> …` has room for one of them, and
-	// applying it across the whole tree rewrote the OTHER block's projection to
-	// a slot its own window never wrote: the single-process path failed with
-	// `column "__win_2" does not exist in the input schema` and the DAG handed
-	// both outputs one window's value.
-	//
-	// SlotAllocator fixed the collision WITHIN one scope; this is the same
-	// defect one level out, and the fix is the same idea applied to the map.
-	// walk returns the renames minted at or below a node that no ancestor has
-	// consumed yet. Each is applied to the node's own fields on the way up, so
-	// the Project above a Window (however many pass-throughs are between them)
-	// sees it — and a node with TWO OR MORE children is the BOUNDARY: it
-	// applies each child's map to that child alone and returns nothing, so a
-	// sibling's map can never reach across.
-	//
-	// claimed is the FIRST block to mint each slot, in walk order. It keeps
-	// one occurrence where it is and moves every later one, so a query with
-	// no collision is untouched and a query with two is renumbered by the
-	// minimum: the first arm's plan, its stage names and its snapshots do not
-	// move because a sibling appeared.
+	// Scope each rename to the subtree that minted its slot; one global old-name
+	// map cannot distinguish siblings. Walk returns unconsumed renames upward and
+	// applies them to ancestor fields, across passthroughs to the owning Project.
+	// A node with multiple children is the boundary: keep child maps on their own
+	// arms and return no map across siblings. claimed keeps the first occurrence
+	// in walk order and moves later ones only, minimizing changes to unaffected
+	// plans, stage names and snapshots.
+	// See docs/internals/scoped-slot-rename-propagation.md for the design.
 	claimed := map[string]bool{}
 	var walk func(n *logical.Node) map[string]string
 	walk = func(n *logical.Node) map[string]string {

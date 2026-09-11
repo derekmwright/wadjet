@@ -7,29 +7,13 @@ import "github.com/derekmwright/wadjet/internal/optswitch"
 var scanOutputPrune = optswitch.Register("scan-output-prune", "WADJET_SCAN_OUTPUT_PRUNE",
 	"narrow dispatched scan-stage output to the union of consumer-declared columns")
 
-// pruneScanOutputColumns narrows each dispatched scan stage's OUTPUT to
-// the union of what its consumers declare, leaving Columns (the read
-// set) untouched so pushed filters still see their columns.
-//
-// The leak this closes (2026-07-28, Q13): a scan-consumed filter column
-// (o_comment from the LEFT JOIN ON clause, pushed to the scan) stayed in
-// the scan's materialized output AND rode the downstream repartition —
-// 68.8 B/row shipped where 16 were consumed, twice, ≈16 GB excess I/O
-// per SF100 run on the single worst Trino-gap query. The exchange's
-// Columns projection was correct at plan time; the execution layer
-// shipped the scan's full read set because WSHF inputs carry no
-// projection.
-//
-// v1 eligibility is deliberately narrow — exactly the leaking shape:
-//   - the stage is a dispatched leaf scan (StageScan with ScanFiles);
-//   - EVERY consumer is an exchange-repartition with a non-empty
-//     Columns declaration and no computed-column machinery
-//     (ComputedCols/ExtraReadCols reads ride the parquet pass-through
-//     path, not stage outputs, and carry their own widening rules);
-//   - the union of consumer Columns (plus every consumer's Exchange
-//     keys, defensively) is a strict subset of the scan's read set.
-//
-// Anything else keeps the full output — correct, just wider.
+// pruneScanOutputColumns narrows scan OUTPUT to consumers' needs while leaving
+// Columns, the read set, untouched for pushed filters. Require a dispatched leaf
+// StageScan with ScanFiles and EVERY consumer an exchange-repartition declaring
+// non-empty Columns with no ComputedCols/ExtraReadCols machinery.
+// Consumer Columns plus all Exchange keys must form a strict subset of the read
+// set. Computed/extra reads have separate parquet passthrough widening rules.
+// Anything outside this boundary keeps the full output.
 func pruneScanOutputColumns(stages []Stage) {
 	if !scanOutputPrune.On() {
 		return

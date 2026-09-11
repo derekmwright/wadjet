@@ -7,42 +7,15 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// resolveOutputRenameSource maps an OutputRename SOURCE that names a nested
-// subquery's alias back to the column the DAG's streams actually carry (#385).
-//
-// walkStages treats an ordinary Project as a passthrough — it emits no stage
-// — so a subquery's rename never happens anywhere on the DAG: every stream
-// carries SOURCE column names, and each consumer compensates by resolving
-// aliases back through the plan (resolveShuffleKey for join keys,
-// resolveAggInputName for aggregate inputs, resolveSortKeyColumn for ORDER BY
-// terms). The GATHER is the consumer this helper compensates for: when the
-// outer SELECT merely forwards a subquery's alias (`SELECT k FROM (SELECT
-// r_regionkey AS k FROM region) t`), extractOutputRenames reads the outermost
-// Project and produces {From: k, To: k} — but no stage ever emitted a column
-// named k, so applyOutputRenames could not resolve the source, degraded to
-// its rename-only fallback, and the client saw the full upstream width under
-// source names.
-//
-// The walk starts at the child of the outermost Project (whose list the
-// renames came from) and substitutes at most once per Project — a projection
-// list is simultaneous, so `b AS a, a AS b` must not chase itself — while
-// descending through order/cardinality-preserving wrappers. Chained renames
-// across NESTED Projects (`SELECT a FROM (SELECT b AS a FROM (SELECT c AS b
-// ...))`) do resolve level by level.
-//
-// Three stop conditions mirror the sibling resolvers:
-//   - a COMPUTED alias (Projection.Column == "") stops the walk: the value
-//     has no source column to resolve to, and the #383/#169 machinery
-//     materializes it into the producing fragment under the alias itself;
-//   - an Aggregate stops the walk: its outputs are its own GroupBy /
-//     OutputCol names, and descending past it would resolve against the
-//     wrong schema (#355's aggStageRenames already handles group keys the
-//     aggregate itself had to resolve);
-//   - a Join recurses into both output-visible children (probe side only for
-//     semi/anti), first substitution wins.
-//
-// See resolveOutputRenameSource / resolveOutputRenameSourceForGather below for
-// the one place the two callers disagree.
+// resolveOutputRenameSource maps nested aliases to DAG stream SOURCE names
+// for gather OutputRenames (#385). Start below the outermost Project;
+// substitute at most once per simultaneous projection list, resolving nested
+// Projects level by level through order/cardinality-preserving wrappers.
+// Stop at computed aliases, materialized by #383/#169, and at Aggregates,
+// whose GroupBy/OutputCol outputs have their own schema (#355's aggStageRenames).
+// Joins recurse into output-visible children (probe only for semi/anti), first
+// substitution wins. See resolveOutputRenameSourceForGather for caller differences.
+// See docs/internals/gather-output-rename-resolution.md for the design.
 
 // aggregateGroupKeyName returns the name an aggregate stage emits for a
 // computed SELECT-list item that IS one of its GROUP BY keys — the key's own
@@ -304,29 +277,12 @@ func resolveRenameSourceInScope(name string, child *logical.Node) (string, bool)
 	return src, true
 }
 
-// windowArgKeepsItsQualifier reports whether a window function's ARGUMENT has
-// to keep the table qualifier the query wrote, because dropping it would leave
-// a name MORE THAN ONE arm of the window's input publishes.
-//
-// `cleanExpr` strips the qualifier unconditionally, which is right almost
-// everywhere — the streams carry the column bare and `exec.Window`'s
-// `columnIndexFallback` finds it — and is a coin toss where two arms of a join
-// publish one alias. It landed on opposite sides of that toss on the two
-// execution paths, because they name a join's duplicate columns differently:
-//
-//	SELECT x.id, x.w, y.w, SUM(y.w) OVER () AS s
-//	FROM (SELECT id, a AS w FROM decpair) x
-//	JOIN (SELECT id, a * 100 AS w FROM decpair) y ON x.id = y.id
-//	-- PostgreSQL s = 5299.00 (Σ y.w)
-//	-- single    s =   52.99  (Σ x.w) — its stream spells x's copy `w`
-//	-- and the mirror, SUM(x.w) OVER (), is wrong on the DAG instead,
-//	--    whose stream spells Y's copy `w` and x's under its source name
-//
-// So the qualifier is kept exactly where it is load-bearing, and the answer is
-// today's bare name everywhere else. Two arms publishing one name is the whole
-// of the trigger, and it is the same question `ownedJoinArm` asks one resolver
-// over: which relation does this reference name, and does anything else answer
-// to the same bare column.
+// windowArgKeepsItsQualifier retains a window argument's qualifier exactly
+// when more than one input arm publishes its bare name and the qualifier names
+// an input relation. Otherwise keep the usual bare-name resolution.
+// Duplicate aliases are different values; dropping their qualifier can bind the
+// other arm, and local/DAG join streams can give opposite arms the bare name.
+// See docs/internals/window-argument-qualification.md for the design.
 func windowArgKeepsItsQualifier(arg string, child *logical.Node) bool {
 	dot := strings.LastIndexByte(arg, '.')
 	if dot <= 0 || dot == len(arg)-1 || child == nil {
@@ -380,51 +336,14 @@ func windowArgSourceInScope(name string, child *logical.Node) (string, bool) {
 	return derivedAliasSourceColumn(bare, scope), true
 }
 
-// relationScopeSubtree descends through JOINs to the arm that answers to
-// name, and stops at the first node that neither is a two-arm join nor
-// preserves the scope — a Project there is the scope's own SELECT list and
-// must not be walked past.
-//
-// It also descends through the ROW-narrowing wrappers a join can wear, which
-// it did not and which cost a wrong answer (#742). A residual WHERE above the
-// join puts a Filter between the outer Project and the join — that is what a
-// CTE arm's predicate produces, because a CTE's Project is a materialization
-// fence the predicate cannot be pushed through, where the derived-table
-// spelling of the same query pushes it into the arm's own scan and leaves the
-// join directly below. With the Filter there the walk stopped at it, returned
-// the WHOLE join subtree as the "scope", and the caller's bare lookup then
-// took the first arm that answered — the other arm's column, silently:
-//
-//	WITH c AS (SELECT id, a * 2 AS dv FROM decpair)
-//	SELECT x.id AS xid, x.w AS xw, y.w AS yw
-//	FROM (SELECT id, a AS w FROM decpair) x
-//	JOIN (SELECT id, a * 100 AS w FROM decpair) y ON x.id = y.id
-//	JOIN c ON c.id = x.id WHERE c.dv > 1
-//	-- `y.w` resolved to `a`, which is X's w, on the shuffled lowering
-//
-// The test for descending is the one `resolveRenameSource` above already
-// applies, because these are two walks over one tree asking one question, and
-// where they disagree about what a scope is, one of them is wrong.
-// `resolveRenameSource` consumes a Project (it IS the rename), stops at an
-// Aggregate (its outputs are its own GroupBy/OutputCol names, so a bare lookup
-// below it resolves against the wrong schema), splits at a Join, and descends
-// through every other single-child node. `scopePreservingWrapper` is that same
-// set written out: Filter, Sort, Limit, Distinct and Window all narrow rows or
-// APPEND columns without renaming an existing one and without changing which
-// relations are below them, so descending asks the same question one level
-// down. A set operation is never a candidate — it has two or more children, and
-// it re-roots the output naming onto its first arm — and Project and Aggregate
-// stay stops for the reasons above.
-//
-// WINDOW was the omission, and it cost the same wrong answer one node over
-// (round 4 of #742): a window in the SELECT list puts a Window between the
-// outer Project and the join, the walk stopped there, and the qualified
-// duplicate alias captured on both DAG arms:
-//
-//	SELECT x.id AS xid, x.w AS xw, y.w AS yw, SUM(y.w) OVER () AS s
-//	FROM (SELECT id, a AS w FROM decpair) x
-//	JOIN (SELECT id, a * 100 AS w FROM decpair) y ON x.id = y.id
-//	-- PostgreSQL 12.75 | 1275.00 · both DAG arms answered yw = 12.75
+// relationScopeSubtree descends through two-arm JOINs to the named relation
+// and through scopePreservingWrapper: Filter, Sort, Limit, Distinct and Window.
+// These narrow rows or append columns without renaming existing ones; Filter
+// and Window must not hide a join and let a sibling capture a reference (#742).
+// Stop at Project (the scope's SELECT list), Aggregate (its own outputs), and
+// set operations (multiple arms with output names rooted in the first arm).
+// Unlike resolveRenameSource, this walk does not consume the scope's Project.
+// See docs/internals/relation-scope-through-wrappers.md for the design.
 func relationScopeSubtree(n *logical.Node, name string) *logical.Node {
 	if n == nil || name == "" || !subtreeNamesRelation(n, name) {
 		return nil
@@ -482,28 +401,13 @@ func scopePreservingWrapper(n *logical.Node) bool {
 	return false
 }
 
-// substituteNestedRenameRefs returns expr with every column reference that
-// names a NESTED subquery rename replaced by a reference to its source
-// column, resolved with the #385 walk (#387). attachScanSelectProjections
-// writes the outer SELECT list against the subquery's OUTPUT schema, but the
-// scan fragment it attaches to carries SOURCE names — walkStages drops the
-// rename-only Project as a passthrough — so `k + 1` over `r_regionkey AS k`
-// compiled against a schema with no `k` and the task hard-failed. Rewriting
-// the reference to `r_regionkey + 1` lets the fragment compute the value the
-// query means.
-//
-// Copy-on-write, mirroring the #384 predicate rewriter
-// (logical.substituteColRefs): shared unchanged subtrees are reused, and the
-// returned node is the input itself when nothing referenced a rename.
-// ok=false declines the whole rewrite — returned for subquery-bearing nodes
-// (their SQL re-parses in its own scope), window functions (evaluated by
-// their own stage), and any node kind this walk does not recognize. The
-// caller then leaves the spec untouched, which keeps today's LOUD failure
-// (the fragment errors on the unknown column) rather than inventing a
-// silently different expression.
-//
-// A rewritten reference drops its table qualifier: the qualifier named the
-// subquery alias, and the source column lives in the scan's own schema.
+// substituteNestedRenameRefs resolves nested subquery aliases to scan SOURCE
+// columns using the #385 walk (#387), dropping the subquery's table qualifier.
+// Copy-on-write like logical.substituteColRefs (#384): reuse unchanged subtrees
+// and return the input itself if no reference changes. Decline the whole rewrite
+// (ok=false) for subquery-bearing nodes, window functions or unknown node kinds.
+// Callers leave declined specs untouched, preserving loud unknown-column errors
+// rather than inventing an expression across an unsupported scope.
 func substituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql.Node, bool) {
 	if expr == nil || child == nil {
 		return expr, true

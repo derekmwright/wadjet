@@ -207,66 +207,27 @@ func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 			return nil, fmt.Errorf("executing %s right side: %w", u.op, err)
 		}
 
-		// SQL says the arms of a set operation correspond BY POSITION and
-		// the result takes the FIRST arm's column names. These rows are
-		// keyed maps, so an arm whose columns are spelled differently has
-		// to be re-keyed before anything compares or concatenates them —
-		// `SELECT n_regionkey FROM nation UNION SELECT r_regionkey FROM
-		// region` deduped nothing (every row of one arm was a distinct map
-		// from every row of the other) and batch.FromRows then read the
-		// right arm's values under names it does not carry and wrote NULLs.
-		//
-		// Schema() instead of Batches()[0].Schema — ToRows below releases the
-		// sinks' batches as it boxes them — and the arms' two schemas
-		// UNIFIED rather than the first one alone. Under the first arm's
-		// schema the arm ORDER decided the answer: FromRows re-reads each
-		// row's rendered decimal text at the schema's scale, so the first
-		// arm's scale truncated the second arm's values (#532); an INTEGER
-		// arm was read raw as an unscaled carrier (#547); and a DECIMAL arm
-		// under a FLOAT64 first arm failed the store outright while the same
-		// pair the other way round silently kept the DECIMAL type (#541).
-		// unifySetOpSchemas resolves the common type through the same
-		// setOpWiden / setOpDecimalTarget the stage DAG uses, so the two
-		// paths cannot answer with different types for the same query.
-		//
-		// The type is resolved HERE rather than at the FromRows call below
-		// because the DEDUP KEY needs it too: a set operation decides
-		// membership by equality, so two values the comparator calls equal
-		// have to produce one key — which their BOXES alone cannot say, a
-		// DECIMAL being rendered text (#499).
+		// Set-operation arms correspond by POSITION and use the first arm's names;
+		// re-key boxed rows before comparison/concatenation. Use Schema(), since ToRows
+		// releases batches. Unify both schemas via setOpWiden/setOpDecimalTarget before
+		// building the dedup key or FromRows: arm order must not change scale (#532),
+		// interpret an integer as unscaled DECIMAL (#547), or change FLOAT typing (#541).
+		// Equality keys also need the common declaration, since rendered DECIMAL boxes
+		// alone cannot establish equal values (#499).
 		leftSchema := setOpApplyLiteralDecls(leftSink.Schema(), u.leftLits)
 		rightSchema := setOpApplyLiteralDecls(rightSink.Schema(), u.rightLits)
 		leftSchema, rightSchema = setOpResolveUnknownLiteralArms(
 			leftSchema, rightSchema, u.leftUnknown, u.rightUnknown)
 		schema := unifySetOpSchemas(leftSchema, rightSchema)
 
-		// The boxes are not uniform across types — a DECIMAL is its rendered
-		// TEXT, an integer a raw int64, a float a float64 — so a widened
-		// column needs each arm's box MOVED into the shape the unified column
-		// reads, not merely relabelled. coerceSetOpArmRows does that for every
-		// rung of the ladder before the arms meet, so both the dedup key and
-		// FromRows read one shape per column — and ERRORS on a value that does
-		// not fit the unified DECIMAL, the same overflow the stage DAG raises
-		// (exec.coerceDecimalVector), rather than saturating silently. The
-		// right arm is coerced against its OWN schema, before alignSetOpRows
-		// re-keys it to the result names.
-		//
-		// POSITIONALLY, from here to the batch. SQL says the arms of a set
-		// operation correspond by POSITION and a result may legally carry two
-		// output columns of the same NAME — `SELECT n_name AS u, n_comment AS
-		// u FROM nation UNION ALL …` is two columns called `u` in PostgreSQL
-		// too. A map keyed by name holds ONE of them, so both output columns
-		// came back carrying the SECOND source column's value: every row
-		// wrong, no error, and only on this path — the stage DAG answers it
-		// correctly, which is what isolated the collapse as the cause (#556,
-		// and #844's UNION ALL branch, which is the same map).
-		//
-		// The rows keep their map form — every helper below reads it, and the
-		// DECIMAL, dedup and overflow rules those helpers encode are not what
-		// is wrong here — but their KEYS become slot positions, which are
-		// addresses. The schemas are renamed to match for the duration and
-		// the result batch is renamed back at the end, so nothing outside
-		// this function sees a slot name.
+		// Coerce each arm's boxes to the unified column shape BEFORE combining them:
+		// DECIMAL text, integers and floats must represent the same value to both dedup
+		// and FromRows. Overflow must error like exec.coerceDecimalVector, never saturate.
+		// Use the right arm's OWN schema before aligning result names.
+		// Keep positions as map keys through batching to preserve duplicate output names
+		// (#556, #844). Rename schemas to slots temporarily and restore result names
+		// at the end; no slot name may escape this function.
+		// See docs/internals/set-operation-positional-row-carriers.md for the design.
 		posResult := setOpSlotSchema(schema)
 		leftRows, err := coerceSetOpArmRows(
 			setOpLiteralRows(setOpArmRows(leftSink, leftSchema), u.leftLits),

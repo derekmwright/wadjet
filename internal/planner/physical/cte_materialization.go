@@ -171,32 +171,11 @@ func (p *Planner) cteCacheHasCollectors() bool {
 	return false
 }
 
-// cteMaterializingSink wraps the CTE collector and records the schema the CTE
-// body's own pipeline produced, which IS the CTE's schema.
-//
-// It used to SNIFF. The boxed CTE path rebuilt a schema from `map[string]any`
-// rows, where a numeric-looking string is indistinguishable from a number, so
-// it read the FIRST ROW of every STRING column and rewrote the WHOLE column to
-// INT64/FLOAT64 when that one value parsed; the columnar path inherited the
-// rule. That is a VALUE re-read as a TYPE — ADR-0026 §2c's confusion pointed
-// at data instead of at a name — and it made a column's type depend on the
-// rows the body happened to emit first.
-//
-// Over `decpair.s`, a genuine TEXT column holding "1.50", "1.5", "abc",
-// "1.500", the first row parsed. The column came back double precision:
-// `WHERE s = '1.50'` compared NUMBERS and counted 4 where PostgreSQL counts 1,
-// "abc" silently became NULL, and `SUM(CASE WHEN s='abc' THEN v ELSE 0 END)`
-// failed with `invalid input syntax for type double precision: "abc"` on a
-// query PostgreSQL answers with 25.50 (#727). The derived-table spelling of
-// the same query was right throughout, so two spellings of one question
-// answered two numbers. The old comment's claim — "real string data is never
-// touched: CEO doesn't parse" — is the impossibility no fixture attempted
-// (correctness-fix protocol rule 10), and adding `WHERE id = 3` to the body
-// was enough to flip the type back.
-//
-// Nothing needs the coercion now: a bare column carries the catalog's
-// declaration through the pipeline, and `SELECT 1` already declares INT64 at
-// the projection (#369), which is where a literal's type belongs.
+// cteMaterializingSink records the CTE body's own pipeline schema as the CTE
+// schema. Never infer a column's type by parsing its values: numeric-looking
+// TEXT must remain TEXT, independent of row order or filtering (#727;
+// ADR-0026 §2c). Bare columns carry catalog declarations; literals receive
+// their types at the projection (SELECT 1 is INT64, #369).
 type cteMaterializingSink struct {
 	coll   *exec.SpillableBatchCollector
 	schema []parquet.Column // the first non-empty batch's schema; nil until then

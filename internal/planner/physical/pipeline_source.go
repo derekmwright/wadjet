@@ -102,33 +102,13 @@ func (ps *pipelineSource) Next(ctx context.Context) (*batch.RecordBatch, error) 
 	}
 }
 
-// nextFlushed drains the SPILLED partitions of every operator in this chain
-// once the input is exhausted, one batch per call, pushing each through the
-// operators above it.
-//
-// A join that evicted partitions holds rows on DISK, and the only thing that
-// puts them back in the answer is its own flush. `exec.Pipeline.flushSpilledOps`
-// runs that drain for the operators of the TOP pipeline — and this source is
-// how a nested chain is driven: a join's build side, a set-operation arm, the
-// inner side of a lateral. Its operators are in `ps.ops`, never in the outer
-// pipeline's, so nothing flushed them, and a spilled join under one answered
-// with the evicted partitions' rows simply missing (#1010).
-//
-// It is a SILENT loss and the whole result can be empty: with two decorrelated
-// LATERALs joined to a fourth relation under a 512 KiB budget, every probe row
-// routed to a spilled partition, `HashJoinProbe.Execute` returned nil for each
-// of them, and the query answered `cols=[] rows=0` — no rows, and, being a
-// star over more than one join, no declared columns either — where PostgreSQL
-// 17 and the same query with a budget that does not spill answer four rows.
-//
-// `joinFlushSource` already carries this rule for the ONE shape it covers (a
-// RIGHT or FULL join's own probe, #550) and its comment states the general
-// case: "the probe sits in innerOps here, never in the outer Pipeline's Ops,
-// so exec.Pipeline.flushSpilledOps never sees it". This is that sentence
-// applied to every nested chain rather than to one join type. The drain is
-// `exec.FlushableOperator`, the same interface and the same ascending order
-// the top pipeline uses, so a flushed batch passes through the operators ABOVE
-// its producer exactly as an ordinary one does.
+// nextFlushed drains every nested operator's spilled partitions after input
+// exhaustion, one batch per call. Use exec.FlushableOperator in ascending order,
+// pushing each flushed batch through every operator above its producer.
+// These ps.ops are absent from the outer Pipeline's flushSpilledOps, including
+// join builds, set-operation arms and lateral inner chains; omitting this drain
+// silently drops spilled rows (#1010). joinFlushSource covers only a RIGHT/FULL
+// join's own probe (#550), not every nested chain.
 func (ps *pipelineSource) nextFlushed(ctx context.Context) (*batch.RecordBatch, error) {
 	for ps.flushIdx < len(ps.ops) {
 		fo, ok := ps.ops[ps.flushIdx].(exec.FlushableOperator)

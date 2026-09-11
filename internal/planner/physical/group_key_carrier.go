@@ -10,30 +10,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// A GROUP BY key travels the stage DAG under TWO names.
-//
-// The PUBLISHED name is what the aggregate emits the value as, and what every
-// consumer above it reads: `Stage.GroupByCols`, `plansql.GroupKeyName`, the
-// same text the single-process planner hands `exec.HashAggregate`.
-//
-// The RESOLUTION spelling is what the fragment that COMPUTES the key resolves
-// it by, against the columns its own input carries. It is one of three things,
-// and the third is why a second field is needed at all:
-//
-//   - a bare column of that input — every ordinary `GROUP BY c`, and every
-//     key an aggregate DIRECTLY BELOW already published (`SELECT DISTINCT
-//     g + 1 … GROUP BY g + 1` lowers to two aggregates keyed alike, and the
-//     outer one reads a column, not arithmetic);
-//   - an expression over columns that input carries, which the fragment
-//     materializes into a hidden `__gb_expr_N` slot;
-//   - a column a JOIN's stream spells differently from the query — `w` where
-//     the query wrote `x.w`, or `y.w` where the join qualified a duplicate.
-//
-// `Stage.GroupByCols` was one field doing both jobs, and the worker recovered
-// the second by PARSING the first (`worker.derivedGroupKeys`). Every unfixed
-// member of #736's family was that: a key whose two names differ answers one
-// NULL group over the whole table, silently, on both DAG arms, where the
-// single-process path answers PostgreSQL's rows (ADR-0026 §2, §4a).
+// A GROUP BY key's PUBLISHED name (Stage.GroupByCols/plansql.GroupKeyName)
+// is what the aggregate emits and consumers read. Its RESOLUTION spelling
+// names a bare input column (including an already-published inner key), an
+// expression materialized as __gb_expr_N, or a join column with a different
+// qualifier. Do not recover resolution by parsing publication: differing
+// names must not collapse rows into one NULL group (#736; ADR-0026 §2, §4a).
+// See docs/internals/group-key-publication-and-resolution.md for the design.
 
 // GroupKeyResolution is one GROUP BY key's resolution spelling: what the
 // fragment computing the key looks up in its input.
@@ -214,33 +197,14 @@ func stageGroupKeyNames(agg, child *logical.Node) (published []string, resolve [
 			}
 		}
 	}
-	// A key whose RESOLUTION is its PUBLISHED name gets no GroupByOutNames, so
-	// the fragment's aggregate names it by `exec.PublishedGroupKeyNames`' own
-	// rule: the relation qualifier is stripped, and kept only where stripping
-	// would make two keys collide. This list has to SAY that, because it is
-	// what every consumer above the stage reads.
-	//
-	// It did not, and the two names then disagreed for every QUALIFIED key
-	// that is a plain column — the shape a decorrelated LATERAL always
-	// produces (`GROUP BY t.g`). A join above one carried `t.g` in its output
-	// set while the build stream published `g`, so a fragment whose build
-	// partition was empty wrote a `.wshf` file without that column and one
-	// with rows wrote it: `declares 3 columns [k g c] where an earlier file of
-	// the same stage input declared 4 [k g c t.g]` (ADR-0010, #767's DAG half).
-	//
-	// SCOPED TO A DECORRELATED LATERAL'S AGGREGATE. The mismatch is that
-	// lowering's: it always groups on a QUALIFIED plain column, and the join
-	// it manufactures reads what the stream publishes. Applying the strip to
-	// every aggregate published a stripped name for an ordinary
-	// `SELECT DISTINCT x.a AS b, x.b AS a … ORDER BY a` as well, where `a` is
-	// also an OUTPUT name of the query and the consumer bound the wrong one —
-	// the swap #947 closed, which this arc met when it rebased onto it.
-	//
-	// Only for the keys marked above. A key whose two names ALREADY differ —
-	// a derived table's alias (`GROUP BY u.k` over `SELECT n_regionkey AS k`),
-	// a derived, literal, delimited or minted key — has a name the planner
-	// decided and hands to the fragment through GroupByOutNames, and exec's
-	// strip does not run on it (#467, #480, #740, ADR-0026 §2).
+	// For marked keys of a DECORRELATED LATERAL aggregate only, resolution equal
+	// to publication means no GroupByOutNames: mirror exec.PublishedGroupKeyNames,
+	// stripping qualifiers unless keys collide. Consumers must see the actual
+	// published schema, including empty partitions (ADR-0010, #767).
+	// Do not apply globally: ordinary output aliases can bind the wrong key (#947).
+	// Keys with differing names (derived aliases, literals, delimited or minted
+	// keys) already carry planner-chosen GroupByOutNames and bypass exec's strip
+	// (#467, #480, #740; ADR-0026 §2).
 	if anyExecRule(execRule) {
 		emitted := exec.PublishedGroupKeyNames(published, nil, false)
 		for i := range published {

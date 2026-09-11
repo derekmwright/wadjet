@@ -209,28 +209,12 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			exprCols := aggChild
 			if resolved, expr, exprInput, renamed := resolveAggInputName(agg.InputCol, aggChild); renamed {
 				if expr != nil {
-					// The alias named an EXPRESSION, not a column.
-					//
-					// Where nothing between here and the scan MATERIALIZES it,
-					// there is nothing to read: hand the worker the expression
-					// and let it project the value under the alias before
-					// aggregating — the same route a derived aggregate argument
-					// (`SUM(a * (1 - b))`) already takes, and it names its
-					// projected column InputCol, so the alias has to stay. Its
-					// column references are written against the Project's
-					// INPUT, which is where the type has to be resolved.
-					//
-					// Where a producer DOES materialize it, computing it again
-					// is the defect: `SUM(v)` over
-					// `(SELECT DISTINCT a * 2 AS v FROM t)` shipped
-					// InputCol="v" with InputExpr="a * 2", and the worker
-					// recomputed `a * 2` over a distinct stage's output — which
-					// emits the group key under that TEXT and carries no `a` at
-					// all. Every row read NULL and the SUM came back NULL,
-					// silently, where PostgreSQL answers 29.48. The producer's
-					// emitted name IS the expression's text, so the argument is
-					// a bare NAME there, exactly as aggStageGroupKey spells a
-					// computed GROUP BY key.
+					// If no producer materializes the alias's expression, send InputExpr to the
+					// worker's pre-aggregate projection, keep InputCol as its alias, and resolve
+					// types against the Project's INPUT. If a producer already materializes it,
+					// read its emitted NAME instead: recomputation may reference columns absent
+					// from the producer's output. A computed GROUP BY key is published under its
+					// expression text, as aggStageGroupKey specifies.
 					emitted, _ := aggInputAliasIsAggregateGroupKey(aggChild, expr.String())
 					switch {
 					case aggInputRespellable(aggChild):
@@ -1308,28 +1292,11 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// clusters the window's input is keyed on it, and rewriting the
 			// key after EnsureDistribution would leave the two disagreeing.
 			partitionBy := append([]string(nil), ec.PartitionBy...)
-			// A COMPUTED alias (`PARTITION BY gk` over `SELECT g*2 AS gk`)
-			// has no source column, so the walk above declines it and the
-			// key named nothing the window's input carries:
-			// `window: PARTITION BY "gk" is not a column of its input` on
-			// both DAG arms for a query the single-process path answers
-			// (#658). The value is MADE instead — the definition is
-			// materialized onto the producing fragment under the alias's own
-			// name — which is the same two names ADR-0026 §2 gives a GROUP BY
-			// key and #807 gives a sort key, at the third caller of one
-			// function.
-			// …and a QUALIFIED key resolves inside the ARM its qualifier
-			// names, for the reason the ARGUMENT does below (#742 round 4):
-			// `derivedAliasSourceColumn` stops at a Join because it has no way
-			// to choose an arm, so asked of one it answers nothing and the key
-			// travelled as written. On the DAG the arm's own Project emits no
-			// stage, so the join's stream carries x's SOURCE column and not
-			// its alias, and `PARTITION BY x.w` over two arms that both
-			// publish `w` bound the other arm's column — every row its own
-			// partition, the window's own value where PostgreSQL answers the
-			// partition's total (#975). Scoping it is what makes the key name
-			// a column of the stream AND the stage's distribution key name the
-			// same thing.
+			// Materialize a computed PARTITION BY alias under its own name when no source
+			// column exists (#658), carrying definition and published name as for GROUP BY
+			// (ADR-0026 §2) and sort keys (#807). Resolve qualified keys INSIDE their named
+			// arm (#742); unscoped lookup can bind a sibling's same-named alias (#975).
+			// The window key and its stage distribution key must name the same stream value.
 			var winAliases []aliasColumn
 			for i, pb := range partitionBy {
 				// Scoped with a SOURCE column: that arm's column is the key.

@@ -336,27 +336,13 @@ func respellSpecsOverProducerOutput(stages []Stage, producerIdx int, specs []Pro
 	return out, true
 }
 
-// orderingSurvivesAProjectStage reports whether inserting a StageProject
-// between the producer at producerIdx and its consumers keeps the producer's
-// ORDERING visible to them.
-//
-// A stage's ordering is read off the DIRECT dependency: the coordinator asks
-// what its gather's dependency is and whether that stage is ordered, and the
-// worker's merge does the same one level down. A projection inserted between
-// the two hides it — the new stage is a `project`, it declares no SortKeys,
-// and a Tasks=1 fragment concatenating several ordered input files could not
-// truthfully declare any, because concatenation is not a merge.
-//
-// So a producer that carries its own fused ordering keeps its consumers. The
-// symptom otherwise is the sharpest kind of silent: the right rows in the
-// wrong sequence. `SELECT a.s_suppkey AS lo, b.s_suppkey AS hi FROM supplier
-// a JOIN supplier b ON … ORDER BY lo, hi` came back as a correct 9-row
-// multiset with the ORDER BY ignored, because the projection renaming
-// `a.s_suppkey` to `lo` moved in between the join's fused sort and the gather.
-//
-// A producer with NO ordering of its own has nothing to lose, and that is the
-// case the insertion exists for: an aggregate, a union or a DISTINCT that
-// collapses its input and cannot evaluate the SELECT list itself.
+// orderingSurvivesAProjectStage checks that an inserted StageProject preserves
+// ordering visible to consumers, which read SortKeys from their DIRECT dependency.
+// A project cannot claim global order by concatenating several ordered inputs,
+// even with Tasks=1. Preserve a producer's fused ordering for its consumers.
+// A producer with no ordering has nothing to lose; aggregates, unions and DISTINCT
+// may need insertion because they cannot evaluate the SELECT list themselves.
+// See docs/internals/project-stage-ordering-visibility.md for the design.
 func orderingSurvivesAProjectStage(stages []Stage, producerIdx int, specs []ProjectExprSpec) bool {
 	if producerIdx < 0 || producerIdx >= len(stages) {
 		return true

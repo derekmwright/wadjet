@@ -7,33 +7,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
-// ErrDistinctDistributed marks a plan the stage DAG refuses because it
-// carries a DISTINCT the DAG has no stage for.
-//
-// walkStages treats NodeDistinct as a passthrough and emits nothing (#163).
-// Two things compensate, and each covers only part of the space:
-//
-//   - logical.rewriteDistinctAsGroupBy turns Distinct(Project) into a
-//     GroupBy aggregate, wherever it sits, so it gets a real stage. It
-//     declines a projection it cannot turn into a group key — an aggregate
-//     projection (SELECT DISTINCT a, SUM(b) …) or one containing a subquery.
-//   - The coordinator deduplicates the gather result when
-//     logical.ExtractMergeInfo reports HasDistinct, which it can only see
-//     for a Distinct on the ROOT path (below Limit/Sort/Project chains).
-//
-// A Distinct that both decline is executed by nobody, and the DAG answers
-// with every pre-dedup row: `SELECT COUNT(*) FROM (SELECT DISTINCT c FROM t) u`
-// returned the raw count distributed and the right one single-process (#466).
-// Refusing is the #308 position — a deterministic loud failure beats a
-// silently different answer — and it is a refusal the rewrite is expected to
-// make unreachable for every shape it handles.
-//
-// The refusal is a HANDOFF, not the query's outcome: Coordinator.ExecuteSQL
-// matches this error and answers on the coordinator-local single-process
-// pipeline, which applies a Distinct wherever it sits (runDistinctLocal, the
-// same move #359 makes for correlated subqueries). A caller with no local
-// engine reports it. What the refusal buys either way is that nothing
-// carrying DISTINCT semantics reaches walkStages.
+// ErrDistinctDistributed refuses DISTINCT with no executing DAG stage (#163).
+// rewriteDistinctAsGroupBy handles Distinct(Project), except aggregate or
+// subquery projections; gather dedup via ExtractMergeInfo covers only the
+// root Limit/Sort/Project path. Refuse shapes neither handles (#466, #308).
+// Coordinator.ExecuteSQL hands the refusal to runDistinctLocal, which applies
+// Distinct wherever it sits (#359); a caller without a local engine reports
+// the error. The rewrite should make the refusal unreachable for its shapes.
 var ErrDistinctDistributed = errors.New(
 	"DISTINCT in this position has no distributed stage")
 

@@ -8,30 +8,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
-// PlanDistributed generates a stage DAG for distributed execution.
-// Returns stages with dependency ordering suitable for coordinator dispatch.
-// refuseUnexpandedStarBesideItems refuses a QUALIFIED star in a SELECT list
-// that could not be expanded.
-//
-// Every consumer below resolves an output column by name, and `d.*` is not
-// one: the single-process arms failed with `column "d.*" does not exist in the
-// input schema` and the DAG published a column whose NAME and VALUE were both
-// the string `*`. One sentence on every arm, and the shapes that CAN be
-// expanded — a base table, a derived table or a CTE whose own SELECT list
-// names its columns — are expanded before this runs
-// (logical.ExpandStarProjections).
-//
-// It used to require a SECOND select item, because a star ALONE built no
-// Project at all and so could not reach it. One does now (#979), and without
-// this the LATERAL's own star — the shape the expansion deliberately declines —
-// escaped to the executor's generic `42000 operator execute: column "s.*" does
-// not exist in the input schema` instead of the planner's one sentence, which
-// is what `docs/sql-reference.md` and ADR-0012 describe.
-//
-// A node carrying a DEFERRED column-alias list is left alone: its star is the
-// wrapper `deferColumnAliasesOverStar` made, and
-// `RefuseUnappliedColumnAliasLists` refuses it with a sentence about the LIST,
-// which is the more specific answer for that shape (#958).
+// refuseUnexpandedStarBesideItems refuses any unexpanded qualified star,
+// including a star alone (#979), with the planner's common refusal sentence
+// (docs/sql-reference.md; ADR-0012). logical.ExpandStarProjections runs first
+// for base tables and derived tables/CTEs with known SELECT-list columns.
+// Leave DeferredColumnAliases alone: deferColumnAliasesOverStar created
+// that wrapper, and RefuseUnappliedColumnAliasLists provides the more
+// specific refusal about its list (#958).
+// PlanDistributed returns a stage DAG ordered for coordinator dispatch.
 func refuseUnexpandedStarBesideItems(node *logical.Node) error {
 	if node == nil || node.Type != logical.NodeProject || len(node.Projections) == 0 {
 		return nil

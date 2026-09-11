@@ -198,57 +198,15 @@ func ValidateNativeDAGShape(stages []Stage) error {
 	return nil
 }
 
-// fuseSortIntoPredecessor folds a Singleton sort stage into the compute
-// stage that produces its sole input, so the predecessor applies sort
-// in-process instead of writing intermediate output and letting a
-// separate sort task pick it up. Same savings class as
-// collapseRedundantFinalMergeSort but for the aggregate/join→sort edge:
-// one fewer stage, one fewer JetStream round-trip, one fewer
-// KV/S3 materialization per query.
-//
-// Predecessor eligibility:
-//   - Singleton distribution (sort output stays Singleton regardless of
-//     whether the predecessor was Hash-partitioned or Singleton; this
-//     pass handles only the Singleton predecessor case to preserve
-//     partition count semantics upstream).
-//   - Doesn't already carry SortKeys (we'd clobber them).
-//   - Is a compute stage type that the worker's Stage dispatcher knows
-//     how to post-sort: hash_join, broadcast_join, aggregate,
-//     final_aggregate. Other types (scan, merge_sort, window) are left
-//     alone until the worker dispatcher supports post-sort there too.
-//
-// Sort eligibility:
-//   - Type == "sort" and Singleton distribution.
-//   - Exactly one dependency.
-//
-// Correctness: the sort stage carried SortKeys + Limit; both move onto
-// the predecessor, and the fold is valid only while the predecessor still
-// runs as ONE task. Nothing in the plan guarantees that — a Singleton
-// broadcast_join is re-fanned-out at dispatch by broadcastJoinProbeSplit,
-// which slices the probe files across workers — so each task would sort
-// and limit its own slice and the outputs would be concatenated: the
-// wrong top-N, not merely the wrong order (#390).
-//
-// What makes the fold safe in the shape it was written for is that the
-// sort has NO DEPENDENTS at this point. EnsureDistribution has not run
-// yet, so the terminal gather does not exist; a dependent-free sort is
-// the one that will BECOME the gather's input, and dispatchGatherStage
-// re-imposes the fused SortKeys/Limit as a merge-sort gather fragment
-// (the #288 ordered-gather path). A sort that already has a dependent —
-// an ORDER BY + LIMIT inside a derived table or CTE feeding a join or an
-// aggregate — reaches a consumer that does no such thing: every other
-// consumer of a stage's output (a downstream stage's inputs, an
-// exchange-repartition or replicate source, a coordinator-read scalar)
-// reads a flat concatenation of the producing tasks' files. So this pass
-// refuses to fold into a predecessor whose sort someone else is reading,
-// and the standalone single-task sort stage stays in the plan to do the
-// global job.
-//
-// Downstream references to a dropped sort are rewritten to the
-// predecessor.
-// projectionCoversSortKeys reports whether every sort key names one of the
-// projection's outputs. An OpProject narrows the batch to exactly its
-// projections, so a key it does not emit cannot be sorted on downstream of it.
+// fuseSortIntoPredecessor moves SortKeys and Limit from a Singleton sort with
+// one dependency to its Singleton compute predecessor, which must support
+// post-sort and have no SortKeys. Rewrite references to the dropped sort.
+// Only dependent-free sorts may fold: dispatch can split a Singleton broadcast
+// join into tasks, so terminal gather must re-impose global ordering/limit
+// (#390, #288). Other consumers concatenate files and cannot restore global top-N.
+// projectionCoversSortKeys requires every sort key among projection outputs;
+// OpProject drops all other columns before downstream sorting.
+// See docs/internals/singleton-sort-fusion.md for the design.
 func projectionCoversSortKeys(specs []ProjectExprSpec, keys []SortKeySpec) bool {
 	for _, k := range keys {
 		covered := false
@@ -559,36 +517,13 @@ func collapseRedundantFinalMergeSort(stages []Stage) []Stage {
 	return out
 }
 
-// collapseMergeTreesForNativeDAG rewrites multi-level merge_aggregate /
-// merge_sort fan-out trees back into single-stage form. The trees are
-// emitted by emitMergeAggregateTree / emitMergeSortTree when the upstream
-// task count exceeds mergeFanout (16) — valid for the single-pipeline
-// executor where intermediate merges run in parallel as inner-pipeline
-// operators, but catastrophic for native-DAG execution where each
-// intermediate stage becomes an independent coordinator-worker round-trip
-// that re-scans the same upstream data.
-//
-// Shape produced by emitMergeAggregateTree (upstream > 16):
-//
-//	intermediate-0   final_aggregate  dep=[leafIDs...] MergeGroup=0
-//	intermediate-1   final_aggregate  dep=[leafIDs...] MergeGroup=1
-//	...
-//	intermediate-N   final_aggregate  dep=[leafIDs...] MergeGroup=N-1
-//	final            final_aggregate  dep=[intermediate-0, ..., intermediate-N]
-//
-// Rewrite to:
-//
-//	final            final_aggregate  dep=[leafIDs...]    (no MergeGroup)
-//
-// The same pattern applies to merge_sort trees. Rewriting is safe because:
-//   - Final stages already compute the full aggregate/sort from all upstream
-//     rows; the tree only exists to parallelize intra-worker merging.
-//   - Native-DAG dispatches workerCount tasks per stage, so parallelism
-//     comes from task-level parallelism, not stage-level fan-out.
-//   - executeStageAggregate + executeStageSort run as single-task fan-in
-//     today (they consume all upstream inputs and emit merged output);
-//     wiring them behind a N-partition dispatch is future work, but even
-//     single-task is faster than the 83-stage tree.
+// collapseMergeTreesForNativeDAG replaces multi-level merge_aggregate and
+// merge_sort trees with their final stage reading all leaf dependencies,
+// clearing MergeGroup/Count. Final stages compute the full aggregate/sort;
+// the tree only parallelizes intra-worker merging and native-DAG task dispatch
+// provides parallelism. executeStageAggregate and executeStageSort currently
+// remain single-task fan-in; N-partition dispatch is not implemented here.
+// See docs/internals/native-dag-merge-tree-collapse.md for the design.
 func collapseMergeTreesForNativeDAG(stages []Stage) []Stage {
 	// Pre-index stages by ID.
 	idIndex := make(map[string]int, len(stages))

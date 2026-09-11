@@ -8,48 +8,15 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// absorbComputedSubqueryProjection materializes a subquery's COMPUTED
-// projection columns into the scan stage that produces the subtree's rows
-// (#383).
-//
-// walkStages treats an ordinary Project as a passthrough — it emits no stage
-// — so a subquery's computed column never exists anywhere on the DAG. For a
-// RENAME the resolve-through helpers compensate per consumer
-// (resolveShuffleKey, resolveAggInputName, resolveSortKeyColumn, the gather's
-// OutputRenames), but a computed value has no source column to resolve TO:
-// `SELECT r_regionkey, NULLIF(r_regionkey, 2) AS rk2 FROM region` under a
-// join dispatched a scan reading [r_regionkey, rk2], the parquet reader
-// dropped the phantom rk2 (worse: its all-or-nothing projection guard fell
-// back to full width), and everything downstream that read rk2 — an outer
-// join's ON residual (#358), a projected output, a sort key — saw NULL or a
-// missing column, silently.
-//
-// The aggregate consumer already materializes derived inputs on its own
-// (#355: resolveAggInputName hands the worker an InputExpr to project before
-// aggregating), which is the resolve-through shape. This helper is the
-// materialize-at-source shape for the consumers that have no such hook: the
-// computed column is projected INTO the producing scan fragment
-// (Stage.ProjectExprs → OpProject, the #169 machinery), so the build/probe
-// files a join reads — and the rows a sort keys over — really carry it.
-//
-// Deliberately additive: bare and renamed columns pass through under their
-// SOURCE names (the DAG's naming convention, which every resolver
-// compensates for), and only computed aliases are appended. Nothing is
-// renamed and nothing existing is dropped, so plans without a computed
-// subquery projection are byte-identical — and the #355 aggregate path keeps
-// finding the source columns its InputExpr references.
-//
-// Scope: the subquery must be a Project over a scan-rooted chain
-// (Project → Filter* → Scan) whose subtree emitted exactly one scan stage.
-// Anything else — aggregates, nested joins, set operations, CTE-deduped
-// aliases, nested Projects — bails and keeps today's behavior.
-// requireEnclosing restricts the pass to a computing Project that sits UNDER
-// at least one other Project — a genuine subquery. The sort hook passes true:
-// a sort's child Project can be the query's OUTPUT projection
-// (`SELECT NULLIF(x, 1) AS k FROM t ORDER BY k`), and that shape belongs to
-// attachScanSelectProjections, which projects exactly the SELECT list under
-// its final names for the gather. A join input is never the output
-// projection, so the join hook passes false.
+// absorbComputedSubqueryProjection adds computed subquery aliases to their
+// producing fragment (#383); bare/renamed columns keep SOURCE names and no
+// existing column is dropped or renamed, preserving aggregate InputExpr inputs.
+// Scan-rooted Project → Filter* → Scan requires exactly one scan stage;
+// unsupported producers bail. Window and join arms have dedicated branches below.
+// requireEnclosing requires a computing Project under another Project: the sort
+// hook passes true to leave output projections to attachScanSelectProjections;
+// the join hook passes false. Stage.ProjectExprs uses #169's OpProject machinery.
+// See docs/internals/computed-subquery-materialization.md for the design.
 func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, requireEnclosing bool) bool {
 	// Find the COMPUTING Project: descend through stage-less Filters and
 	// rename-only Projects (an outer `SELECT rk2 FROM (…) t` wraps the
@@ -200,34 +167,13 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 			expr = ast.String()
 		}
 		spec := ProjectExprSpec{Expr: expr, Name: strings.ToLower(pr.Alias)}
-		// The computed column exists nowhere in the catalog, so its declared
-		// type IS its runtime type — the worker builds the output vector
-		// from it (#333), and a DECIMAL's (p,s) rides along or the vector
-		// comes out at scale 0 (ADR-0024 item 2).
-		//
-		// Over a WINDOW SLOT there is no declaration to read: the slot is
-		// not a catalog column and WindowColSpec carries a bare TypeID with
-		// no (p,s), so inferring here answers the FLOAT fallback and would
-		// render a DECIMAL sum at the wrong scale. Leave it unknown and let
-		// exec.Project take the type from the vector it computes, the same
-		// treatment a passthrough gets.
-		// The declaration is read against the schema the expression NOW
-		// names. A respelled reference reads the SOURCE column, which the
-		// rename's own output schema does not declare — inferring against
-		// that answered the FLOAT fallback and the fragment then tried to
-		// store a DECIMAL's rendering into a float vector. Same repair as
-		// attachScanSelectProjections' #387 branch, and the same helpers,
-		// with the FILTER nodes between the Projects stripped: neither emits
-		// a stage and the substitution walked through both.
-		//
-		// Over a WINDOW SLOT there is no catalog column to read at all, and
-		// leaving the declaration unknown is not an option either — a
-		// projection whose type the plan does not state answers NULL to the
-		// AGGREGATE above it (`SUM(c.dv)` came back NULL and its HAVING
-		// admitted no row) even where the same column PROJECTS correctly.
-		// windowSpecOutputType is the stage's own answer for the slot,
-		// DECIMAL (p,s) included, so the slot is declared here exactly as the
-		// window stage declares it.
+		// A computed column's declaration determines its runtime vector (#333),
+		// including DECIMAL (p,s), which must not default to scale 0 (ADR-0024 item 2).
+		// Infer against the schema the respelled expression NOW names: SOURCE columns,
+		// with intervening stage-less Filters stripped, as in #387.
+		// Window slots need windowSpecOutputType's complete declaration, including
+		// (p,s): a missing type can project correctly yet feed NULL to an aggregate.
+		// See docs/internals/computed-arm-declarations.md for the design.
 		declTypes, declStrict := colTypes, strictInt
 		switch {
 		case windowArm:
@@ -423,29 +369,12 @@ func absorbWindowArmProjection(childStages []Stage, computed []ProjectExprSpec,
 }
 
 // absorbJoinArmProjection materializes a derived arm's computed SELECT list
-// onto the JOIN stage that produces its rows (#780).
-//
-// Neither branch above can reach this shape. The scan branch needs the arm to
-// emit exactly one scan stage, and an arm that is itself a join emits two or
-// more; the value is computed over the JOINED stream anyway, which no single
-// scan carries. So on the DAG the column existed nowhere — `walkStages` emits
-// no stage for the arm's Project, and every consumer above it re-resolved the
-// bare name against the arm's RAW inner columns, where `a` is the scan's
-// column and not `g.a * 3`. That is a WRONG VALUE, silently, on both DAG arms.
-//
-// The target is the arm's TERMINAL stage, which is the one stream the
-// enclosing query sees. The passthrough is written from the stage-stream
-// model (stage_stream_model.go), not from the stage's column lists: a join's
-// output is neither side's list — the executor qualifies a duplicate build
-// column with its owning alias and DROPS one it cannot qualify — and the
-// model mirrors `joinOutputSchemaWithMapping` line for line, so what is
-// passed through is what the fragment really ships.
-//
-// The arm's own aliases are EXCLUDED from the passthrough, exactly as the
-// scan branch strips them from the read set: `g.a * 3 AS a` over an arm that
-// also carries a raw `a` is one name and two values, and the one the arm
-// PUBLISHES is the computed one. That is the whole of ADR-0025's arm
-// doctrine, applied to the stream rather than to the name.
+// on its terminal JOIN stage (#780); a single scan cannot carry joined values.
+// Passthrough uses stageStreamColumns, mirroring joinOutputSchemaWithMapping:
+// duplicate build columns are qualified by their owner or dropped if unqualifiable.
+// Exclude the arm's computed aliases from passthrough: a published computed
+// value must win over a raw column of the same name (ADR-0025).
+// See docs/internals/join-arm-projection-materialization.md for the design.
 func absorbJoinArmProjection(childStages []Stage, computed []ProjectExprSpec,
 	needCols map[string]bool, alias map[string]bool) bool {
 	leaves := leafStages(childStages)

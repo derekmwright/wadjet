@@ -276,30 +276,14 @@ func execToCmpOp(op exec.CompareOp) expr.CmpOp {
 	}
 }
 
-// inFilterForList builds the IN / NOT IN operator for a list of literals,
-// applying SQL's NULL rule to the LIST — which is not the same rule as for a
-// scalar comparison, and is the one that surprises people:
-//
-//	`x IN (a, NULL)` is TRUE where x = a and UNKNOWN everywhere else, because
-//	TRUE dominates the disjunction. A NULL member therefore drops out; with
-//	nothing else left the whole test is UNKNOWN and nothing qualifies.
-//
-//	`x NOT IN (a, NULL)` is `x <> a AND x <> NULL`, and the second conjunct is
-//	UNKNOWN for every row: the result is FALSE or UNKNOWN, never TRUE. A NULL
-//	anywhere in a NOT IN list empties the answer (#450).
-//
-// An empty list with no NULL in it is left alone — that is a different shape
-// and the set kernel already answers it.
-//
-// RESIDUAL (real NOT IN + NULL + over-range literal only): `real NOT IN (1e40,
-// NULL)` short-circuits to MatchNothing below on the NULL rule (#450) before any
-// literal is examined, so PostgreSQL's 22003 for the over-range 1e40 in the
-// real[] cast is not raised — wadjet answers empty. The positive `IN (1e40,
-// NULL)` is NOT affected: it keeps the over-range literal, carries the syntactic
-// arity of 2 (SetSyntacticLen below), narrows to real[], and raises 22003 like
-// PostgreSQL. Surfacing the error on the NOT-IN path would mean checking the
-// over-range literal before the MatchNothing short-circuit; left as a documented
-// residual (obscure — a NULL in a NOT IN already empties the answer).
+// inFilterForList applies SQL list NULL semantics: IN drops NULL members;
+// with none left it is UNKNOWN and qualifies nothing. NOT IN with any NULL
+// is FALSE or UNKNOWN, never TRUE (#450). Leave empty non-NULL lists to the kernel.
+// Residual: real NOT IN (1e40, NULL) returns MatchNothing before checking range,
+// so it omits PostgreSQL's 22003; checking literals before short-circuiting
+// would be required to surface it. Positive IN keeps the over-range literal
+// and syntactic arity 2 (SetSyntacticLen), narrows to real[] and raises 22003.
+// See docs/internals/literal-in-list-null-semantics.md for the examples.
 func inFilterForList(col string, values []any, texts []string, negate bool) exec.UnaryOperator {
 	kept := make([]any, 0, len(values))
 	keptTexts := make([]string, 0, len(texts))
@@ -430,30 +414,12 @@ func extractFilterOps(e expr.Expr, neg bool) []exec.UnaryOperator {
 			}
 		}
 	case *expr.CmpNetworkLit:
-		// Bare column vs. a string literal compileCmp pre-parsed as an IPv4
-		// or MAC address (tryNetworkLit/CmpNetworkLit in expr/compile.go).
-		// This case was missing entirely, so every `ipv4_col <op> 'lit'` /
-		// `mac_col <op> 'lit'` predicate fell through to nil here and ran
-		// row-at-a-time, losing the vectorized kernel a plain *expr.Cmp node
-		// got on this exact shape before compileCmp started emitting
-		// CmpNetworkLit (measured +43% on 400k rows).
-		//
-		// v.Col's type isn't known here — extractFilterOps has no schema,
-		// same as the *expr.Cmp arm above — so this builds the identical
-		// "col op const" kernel filter that arm would have built for the
-		// original `col op 'lit'`/`'lit' op col`, from v.Lit (the literal's
-		// original text) rather than the pre-parsed ipv4/mac int64s on the
-		// node: ResolveFilterKernel (exec/kernel/compare.go) dispatches
-		// purely on the column's REAL runtime type, parsing v.Lit itself via
-		// parseIPv4ToInt64/parseMACToInt64 for an actual network column and
-		// falling to compareFilterString for anything else. That is also
-		// why tryNetworkLit does not need to be, and cannot be, restricted
-		// to network-typed columns at compile time: a STRING column whose
-		// literal happens to parse as an address (`s = '10.1.2.3'`) rides
-		// this same case and gets exactly its normal compareFilterString
-		// kernel — using the pre-parsed int64s directly here, bypassing
-		// that dispatch, would misinterpret a STRING vector as encoded
-		// IPv4/MAC int64 data.
+		// CmpNetworkLit must build the same col-op-constant kernel as expr.Cmp from
+		// v.Lit's ORIGINAL TEXT, never its pre-parsed IPv4/MAC integers. This site has
+		// no schema: ResolveFilterKernel dispatches on the real runtime column type,
+		// parsing network literals for network columns and using compareFilterString
+		// otherwise. A STRING compared to an address-looking literal must remain a
+		// string comparison; tryNetworkLit cannot be restricted by type at compile time.
 		op, ok := maybeNegate(cmpToExecOp(v.Op), neg)
 		if !ok {
 			return nil

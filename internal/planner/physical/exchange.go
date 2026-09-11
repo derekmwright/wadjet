@@ -42,28 +42,11 @@ const (
 	// each keeping n rows is not the first n rows of their union.
 	StageLimit = "limit"
 
-	// StageProject applies a projection and/or a filter to its single
-	// dependency's output and nothing else.
-	//
-	// It exists because a logical Project emits no stage on the DAG and a
-	// logical Filter is appended to whatever stage was emitted last. Both
-	// shortcuts are sound only when the stage underneath can express what it
-	// is handed; when it cannot — a Filter above a Project that has itself
-	// been materialized onto the producer, a Filter above a deduped
-	// `cte-alias` whose target is SHARED with another reference and must not
-	// be filtered for it — the predicate used to be attached to a stage that
-	// ignored it or that a later pass deleted, and the query answered
-	// without it (#656).
-	//
-	// Singleton and one task, for StageLimit's reason: one task reading
-	// every partition of its input is always correct for a per-row operator,
-	// and the stage is only ever emitted for shapes that had no answer at
-	// all before. Fragment shape:
-	//
-	//	[OpShuffleSource, OpProject?, OpFilter?, sink]
-	//
-	// The filter runs ABOVE the projection — a predicate that reaches this
-	// stage is one written against the projection's outputs.
+	// StageProject applies only projection/filter to its single dependency.
+	// It is Singleton with one task reading every input partition. Fragment order
+	// is ShuffleSource, optional Project, optional Filter, sink: predicates name
+	// the projection's OUTPUTS. Use it when the producer cannot carry the operation
+	// or a shared CTE target must not be filtered for one reference (#656).
 	StageProject = "project"
 
 	// The stage types walkStages spells as literals. Named here so the

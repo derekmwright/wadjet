@@ -12,31 +12,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// windowOutputType declares the output type of an INPUT-INDEPENDENT window
-// function — the rank family, whose answer is a position or a ratio computed
-// from the frame, plus COUNT, which finalizes to int64 whatever it consumed.
-//
-// SUM and AVG reach this list only as a FALLBACK. Over a DECIMAL they answer
-// DECIMAL, exactly as the grouped forms do (#586, ADR-0012 item 9), and
-// windowSpecOutputType resolves that from the input column; the float64 here
-// is what every other numeric input still gets, and what an input the planner
-// could not type at all falls back to.
-//
-// The value functions — lag, lead, first_value, last_value, nth_value — are
-// NOT here: they return a value taken from their input column rather than
-// computing one, so their output type IS that column's type and no name list
-// can know it. Declaring them float64 typed the window's output vector
-// numeric while the value path wrote strings, and exec.Window (unlike
-// exec.Project) had no runtime correction, so every string write was dropped
-// for the integer 0 (#345). windowSpecOutputType resolves them instead.
-//
-// MIN/MAX over a window were the last input-dependent family answered from
-// this list, and landed on the float64 default: MIN(a_string) OVER (...)
-// and MIN(int32_col) OVER (...) had #345's symptom for the same reason
-// (#361). They resolve from the input column like the value functions, and
-// since #569 for EVERY type the engine has — exec.WindowMinMaxType names
-// them all, so what still reaches this list from a MIN/MAX is only an input
-// type the planner could not resolve at all.
+// windowOutputType declares input-independent rank/ratio functions and COUNT
+// (int64 regardless of input). Other names use the float64 fallback.
+// windowSpecOutputType resolves input-dependent value functions and MIN/MAX
+// from their argument, and SUM/AVG through accumulator typing; DECIMAL matches
+// the grouped result (#586, ADR-0012 item 9). Unresolved inputs keep fallback.
+// Value functions must copy the input type (#345); MIN/MAX use
+// exec.WindowMinMaxType for every supported type (#361, #569).
+// See docs/internals/window-function-result-type-dispatch.md for the design.
 func windowOutputType(funcName string) parquet.TypeID {
 	switch strings.ToLower(funcName) {
 	case "row_number", "rank", "dense_rank", "count", "ntile":
@@ -60,56 +43,16 @@ func windowValueFunc(fn string) bool {
 	return false
 }
 
-// windowSpecOutputType declares the output type of one window expression over
-// the subtree rooted at the Window node that owns it. It is to windowOutputType
-// what aggSpecOutputType is to aggOutputType (#329, #333): the name list
-// answers everything that is input-independent, and the input column answers
-// the rest.
-//
-// The value functions copy a value out of their argument column, so the
-// argument's catalog type is the answer. It is resolved through
-// inputColTypes — the Window node's own input schema, which stops at anything
-// that can rebind a name — and colRefDeclaredType, so a parameterized type
-// (DECIMAL without its scale, VECTOR without its dimension, the nested types)
-// declines the same way it does for a projection.
-//
-// UNDECIDABLE cases fall back to windowOutputType's float64, which is exactly
-// today's behavior: a computed argument (`FIRST_VALUE(a || b)`), a column no
-// scan below annotates, two scans that disagree, or an input the walk cannot
-// describe at all. A confidently wrong type here is worse than the fallback —
-// nothing downstream corrects a declaration, which is the whole of #345.
-// windowComputedArgDecl types a window aggregate's COMPUTED argument from the
-// argument's own AST, and reports whether that expression carries an
-// int8-domain operand. It is aggComputedInputDecl's window face and asks the
-// same two functions — nodeDeclaredType and aggInputIsWideInteger — over the
-// same declarations, because the two spellings of one aggregate have to reach
-// the same type.
-//
-// Both halves are needed and neither is enough alone. The DECLARATION cannot
-// tell int4 arithmetic from int8 arithmetic: every integer expression in this
-// engine computes in int64 (ADR-0024's recorded widening), so `w_i32 * 1` and
-// `w_i64 * 1` both declare INT64. The WIDTH walk cannot tell an integer
-// expression from a float one: it answers "not wide" for both. Together they
-// say what PostgreSQL says — `sum(int4-domain)` is bigint, `sum(int8-domain)`
-// is numeric, and anything that is not an integer keeps the float64 fallback.
-//
-// Three guards keep it to the shapes it can see:
-//
-//   - a BARE column declines here and is typed by colRefDeclaredType above:
-//     an int4 column already declares INT32, which IntegerAccOutputType
-//     answers directly.
-//   - no node, or an undecided expression, declines. Unknown keeps the
-//     existing fallback rather than narrowing on a guess.
-//   - the node must still SPELL the argument the operator will evaluate.
-//     respellOverAggregate rewrites InputCol when a window sits above an
-//     aggregate, and a rewritten argument resolves its ColRefs against names
-//     the stale AST does not carry — so a mismatch declines rather than
-//     typing a spelling that no longer applies.
-//
-// #987 review B1: `SUM(CASE WHEN … THEN 1 ELSE 0 END) OVER ()` — TPC-H Q12's
-// shape, bigint in PostgreSQL and bigint in the grouped spelling here — went
-// out as DECIMAL(38,0) under OID 1700 where its grouped twin went out under
-// 20. One question, two spellings, two boxes.
+// windowComputedArgDecl types the argument AST and checks int8-domain operands
+// with nodeDeclaredType and aggInputIsWideInteger over the same declarations as
+// grouped aggregates (#329, #333, #987; ADR-0024). Both answers are required:
+// integer expressions compute in int64; SUM(int4-domain) is bigint, SUM(int8-domain)
+// is numeric, and non-integers retain fallback. Bare columns, missing/undecided
+// nodes and AST/InputCol spelling mismatches decline, never guess after respelling.
+// windowSpecOutputType resolves input-dependent types in the owning window's
+// schema; rebinding and unavailable parameter metadata bound lookup (#345).
+// Undecidable arguments keep windowOutputType's fallback.
+// See docs/internals/computed-window-argument-declarations.md for the design.
 func windowComputedArgDecl(node *logical.Node, we logical.WindowExpr) (expr.DeclType, bool, bool) {
 	if we.InputExpr == nil || node == nil || len(node.Children) == 0 {
 		return expr.DeclType{}, false, false
@@ -155,34 +98,14 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 	if col == "" || len(node.Children) != 1 {
 		return expr.Decl(windowOutputType(fn))
 	}
-	// colRefDeclaredType declines every PARAMETERIZED type (DECIMAL without
-	// its scale, VECTOR without its dimension, the nested types), so those
-	// keep the float64 fallback here and are corrected at runtime instead:
-	// exec.Window.retypeValueColumns re-declares from the input vector and
-	// exec.windowOutputColumn carries the (p,s)/element/field metadata with
-	// it. A ZERO-ROW result has no such vector and is described from this
-	// declaration alone, which is why `MIN(dec_col) OVER (...)` matching no
-	// row still describes itself float8 while the same query matching rows
-	// describes itself numeric — tracked in #587, not fixable by widening
-	// colRefDeclaredType, whose decline exists for projections that have no
-	// runtime correction at all.
-	//
-	// inputColDecls, not inputColTypes: it carries the ROW columns' FIELDS
-	// too, so a windowed value function or MIN/MAX over a field path
-	// (`MIN(rw.f_i64) OVER ()`) resolves the field's type here instead of
-	// defaulting to float64 (#568). A field path of a parameterized type
-	// still declines and rides the same runtime correction as a column.
-	// emittedColDecls, not inputColDecls: the walk that CROSSES a derived
-	// table's Project instead of stopping at it (#529's walk, ADR-0026 §5).
-	// A window one nesting level above its scan —
-	// `SUM(a) OVER () FROM (SELECT id, a FROM t) u` — resolved NOTHING here
-	// and fell to the float64 fallback, so the same window that declares
-	// numeric directly over the table declared float8 through a derived
-	// table, and an aggregate reading it inherited the float box on every
-	// arm where PostgreSQL answers numeric (#796). It is the same walk the
-	// aggregate's own argument (aggInputDecls) and declaredOutputSchema
-	// already use, which is what makes the window's declaration, the
-	// aggregate's above it and the wire's agree through a nesting level.
+	// Resolve through emittedColDecls so derived Projects and ROW field metadata
+	// reach the same declaration used by aggregates and the wire (#529, #568,
+	// #796; ADR-0026 §5). Parameterized types require their metadata.
+	// Where colRefDeclaredType declines, keep fallback; runtime value-column
+	// retyping carries (p,s)/element/field metadata from the input vector.
+	// Zero-row results have no vector and depend solely on this declaration (#587);
+	// projection callers cannot rely on window runtime correction.
+	// See docs/internals/window-input-declaration-through-derived-plans.md for the design.
 	t, conf := colRefDeclaredType(&plansql.ColRef{Column: col}, emittedColDecls(node.Children[0]))
 	if conf != expr.Decided {
 		// A COMPUTED argument has no column declaration to read: the
@@ -208,28 +131,14 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 		return expr.Decl(windowOutputType(fn))
 	}
 	if sumAvg {
-		// SUM and AVG do NOT copy an input value, so their declaration is
-		// not the input's: they accumulate, and over a DECIMAL they answer
-		// what the GROUPED SUM/AVG answer — DECIMAL(38,s) and
-		// DECIMAL(38,min(s+4,38)), exactly (#586, #475, ADR-0012 item 9,
-		// ADR-0024 item 2). `SUM(d) GROUP BY g` and `SUM(d) OVER (PARTITION
-		// BY g)` are the same question written twice; a client that reads
-		// both in one result set was getting numeric for one and float8 for
-		// the other, with the window's digits past a float64's ~16 already
-		// gone.
-		//
-		// An INTEGER input answers PostgreSQL's own result type — bigint for
-		// sum(int4), numeric for sum(int8) and for avg of either — through
-		// exec.IntegerAccOutputType, the SAME function the grouped
-		// aggregate's declaration asks (aggIntegerOutputType) and the same
-		// one the operator's runtime correction asks
-		// (exec.windowAccOutputType). Until #987 this fell to float8 while
-		// the grouped spelling was exact, so the two spellings of one
-		// question disagreed about the type AND, past 2^53, about the digits
-		// — an order-dependent total from a float64 accumulator (#813,
-		// ADR-0012's divergence list, now deleted).
-		//
-		// Every other input type keeps the float64 the name list answers.
+		// SUM/AVG accumulate rather than copy input: DECIMAL results match grouped
+		// SUM DECIMAL(38,s) and AVG DECIMAL(38,min(s+4,38)) exactly
+		// (#586, #475; ADR-0012 item 9, ADR-0024 item 2).
+		// Integer results use exec.IntegerAccOutputType, shared by grouped declaration
+		// and window runtime correction: SUM(int4) is bigint, SUM(int8) and AVG of
+		// either are numeric (#987, #813; ADR-0012).
+		// Every other input retains the name list's float64 fallback.
+		// See docs/internals/window-accumulator-result-declarations.md for the design.
 		if t.ID != parquet.TypeDecimal || !t.DecKnown {
 			// t is a COLUMN's declaration here — a computed argument does
 			// not resolve through colRefDeclaredType and is typed in the

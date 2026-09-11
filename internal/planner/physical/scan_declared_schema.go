@@ -6,30 +6,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// The catalog's schema, and the nine types a parquet file cannot say.
-//
-// buildLeafSchemaElement has no logical annotation to write for IPv4, IPv6,
-// MAC, UUID, BYTES, PORT, PROTOCOL or DURATION — they are not parquet
-// concepts — and it writes CIDR as plain UTF8. A reader that recovers types
-// from the file therefore sees the INT64 / BYTE_ARRAY leaves those nine are
-// STORED in, which is why the stage DAG answered an IPv4 column as
-// 167772165 and a UUID as sixteen raw bytes while the single-process engine,
-// which reads the catalog, answered 10.0.0.5 (#396).
-//
-// #396 was closed for files written from v0.18.0 on by stamping the declared
-// schema into the footer (parquet.DeclaredSchemaKey) and overlaying it on
-// read: those files are self-describing and need nothing from the plan. A
-// file written by an OLDER build carries no such key, and on those the DAG
-// kept answering raw storage form — the same defect, unfixed, on exactly the
-// data a migration cannot rewrite (#423).
-//
-// annotateScanSchemas is the other half: the catalog's declared columns ride
-// the plan to the worker (Stage.ScanSchema → OpSpec.ColumnTypes → the scan
-// source), so the DAG types a column the way the catalog declares it whether
-// or not the file can say so itself. Where the file DOES carry the key the
-// two agree and the substitution is a no-op; where they disagree the
-// catalog wins if the file's bytes can carry its type and the task FAILS if
-// they cannot (parquet.Reader.SchemaAs → retypeFromCatalog).
+// annotateScanSchemas carries catalog declarations to workers through
+// Stage.ScanSchema → OpSpec.ColumnTypes → scan source. Parquet leaves alone
+// cannot declare IPv4, IPv6, MAC, UUID, BYTES, PORT, PROTOCOL, DURATION or CIDR.
+// DeclaredSchemaKey makes newer files self-describing (#396, #396), but older
+// files need catalog types to avoid exposing raw storage representations (#423).
+// Matching declarations are a no-op; on disagreement catalog wins only if the
+// bytes can carry its type, otherwise SchemaAs/retypeFromCatalog fails the task.
 func (p *Planner) annotateScanSchemas(ctx context.Context, stages []Stage) {
 	if p.catalog == nil {
 		return

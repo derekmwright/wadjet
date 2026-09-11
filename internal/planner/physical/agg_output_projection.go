@@ -8,39 +8,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// A SELECT list ABOVE an aggregate, carried onto the aggregate's own stage.
-//
-// An aggregate stage names its outputs the way the WORKER computes them: a
-// group key by the exact text of the GROUP BY expression ("g + 1"), an
-// aggregate by its AggSpec.OutputCol. The SELECT list above it names them by
-// the query's aliases, and on the DAG a Project emits no stage — so nothing
-// ever performs that rename, and nothing ever computes an expression written
-// over the aggregate's outputs (`COUNT(*) + 1 AS k`).
-//
-// Two consumers notice, and both used to fail rather than answer:
-//
-//   - a WHERE above the alias. walkStages re-spells the predicate into the
-//     Project's defining expression, which for a computed group key is
-//     `(g + 1) > 3` — an expression over `g`, a column the aggregate's OUTPUT
-//     does not carry. Every row answered UNKNOWN and the query returned
-//     nothing (#656 shape f).
-//   - a join key that is a computed alias. The shuffle key `b.k` named a
-//     column no stage emitted: `partitioned shuffle: key "b.k" not in
-//     schema` (#681).
-//
-// absorbAggregateOutputProjection puts what is MISSING onto the aggregate
-// stage as Stage.ProjectExprs, spelled against the names the stage really
-// emits — a computed group key becomes a DELIMITED identifier, because
-// "g + 1" is a column NAME here and re-parsing it as arithmetic is exactly
-// the defect. The aggregate fragment applies it after HAVING and before any
-// fused sort.
-//
-// It carries a name only where the stage has none a consumer can use: a plain
-// rename stays a pass-through, because every resolver on the DAG points the
-// other way (see absorbAggregateOutputProjection's own comment). It declines
-// outright — leaving the plan exactly as it was — for any projection it
-// cannot map onto an output the stage emits. A projection carried wrong is
-// worse than one not carried at all.
+// An aggregate emits group keys by GROUP BY text and aggregates by
+// AggSpec.OutputCol; a DAG Project emits no stage. Stage.ProjectExprs must
+// compute missing SELECT expressions against those published output names,
+// quoting computed group-key text as an identifier (#656, #681).
+// Apply the projection after HAVING and before any fused sort.
+// Plain renames stay pass-through: DAG consumers resolve back to sources.
+// Decline any projection that cannot map onto a published output.
 
 // aggregateProjectionTarget finds the aggregate-family stage a Project node
 // sits directly above, among the stages its subtree emitted from index `from`.
@@ -70,30 +44,14 @@ func aggregateProjectionTarget(project *logical.Node, stages []Stage, from int) 
 	return 0, false
 }
 
-// absorbAggregateOutputProjection sets stage.ProjectExprs from the SELECT
-// list of the Project directly above the aggregate, and reports whether it
-// did.
-//
-// It carries a name ONLY where the stage has none a consumer can use, and
-// this restraint is the whole of its safety. A PLAIN rename
-// (`l_suppkey AS supplier_no`, `SUM(…) AS total_revenue`,
-// `SELECT DISTINCT s_nationkey AS a`) must stay a pass-through: every
-// consumer on the DAG resolves such an alias BACK to the source column
-// (resolveShuffleKey, resolveAggInputName, resolveSortKeyColumn,
-// resolveOutputRenameSource), so emitting it under the alias instead breaks
-// the join key — Q15 answered 0 rows and a DISTINCT-alias join counted 27
-// where PostgreSQL counts 25.
-//
-// What has no usable name is a group key the worker computes under the TEXT
-// of its GROUP BY expression ("g + 1"), and an expression over the
-// aggregate's outputs (`COUNT(*) + 1`) that nothing computes at all. Those
-// get the alias; everything else keeps the name the stage already emits, and
-// when nothing needed one the whole projection is declined.
-// The returned map is the RENAMES it performed, lowercased old name to new.
-// Every downstream reference to an old name has to travel through it: the
-// stage stops emitting that name the moment the projection lands, and the
-// gather, the sort keys and the filters above it were all written against the
-// old spelling (#656 follow-up, F1).
+// absorbAggregateOutputProjection sets stage.ProjectExprs for the Project
+// above an aggregate only when a computed group key or an uncomputed
+// expression over aggregate outputs needs a usable alias.
+// Plain renames stay pass-through: resolveShuffleKey, resolveAggInputName,
+// resolveSortKeyColumn and resolveOutputRenameSource resolve back to sources.
+// Other outputs keep their emitted names; decline if no alias is needed.
+// Return performed renames as lowercased old name to new. Every downstream
+// reference, including gather, sort and filters, must use that map (#656).
 func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) map[string]string {
 	if len(project.Projections) == 0 || len(stage.ProjectExprs) > 0 {
 		return nil
@@ -151,35 +109,13 @@ func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) map[st
 		}
 		switch {
 		case computed:
-			// Nothing on the stage carries this value under any name, so
-			// there is no old spelling to retarget. The expression is written
-			// over the aggregate's OUTPUT columns (the logical planner already
-			// replaced its nested aggregates with refs to their synthetic
-			// OutputCol), so its declared type has to come from those outputs
-			// — there is no catalog column to read it off.
-			//
-			// The comment here used to say "AggSpec carries an OutputType but
-			// no (p,s) for a DECIMAL one, so an expression over a DECIMAL
-			// aggregate cannot be DECLARED here at all", and declined the
-			// whole projection on that ground. AggSpec has carried
-			// OutputPrecision/OutputScale since #685, so it is declarable:
-			// stageAggregateDecls folds this stage's own aggregate outputs
-			// into the map the inference reads.
-			//
-			// Two shapes turn on it. `SUM(c_i32 * 2)` is rewritten to
-			// `SUM(c_i32) * 2` above the aggregate, so the ARITHMETIC is what
-			// declares the client's type: bigint on the single-process path
-			// and float8 here, a wire OID that differs between the two engines
-			// for the same query (#784, review round 2 F3). And an aggregate
-			// over a DECIMAL WINDOW output — `SUM(w * 2)` over
-			// `SUM(a) OVER ()` — declared float8 and met the exact DECIMAL the
-			// evaluator produced at the #361 store guard, on both DAG arms
-			// (#775).
-			//
-			// The decline survives for the case that motivated it: a DECIMAL
-			// aggregate whose (p,s) the spec does NOT carry. A DECIMAL
-			// declared with no scale reads every value back at 10^0, which is
-			// worse than no projection (ADR-0024 item 2).
+			// This expression has no old spelling to retarget. Its declaration must
+			// come from the aggregate OUTPUT columns, not the catalog: nested aggregates
+			// already name synthetic OutputCol slots. stageAggregateDecls includes
+			// AggSpec.OutputPrecision/OutputScale (#685), keeping arithmetic and window
+			// aggregate consumers consistent with the #361 store guard (#784, #775).
+			// Decline a referenced DECIMAL aggregate whose spec lacks (p,s); declaring
+			// it without scale reads values at 10^0 (ADR-0024 item 2).
 			aggDecls, complete := stageAggregateDecls(stage, decls)
 			if !complete && referencesDecimalAggregate(p.ASTExpr, stage) {
 				return nil

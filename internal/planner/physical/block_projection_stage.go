@@ -8,55 +8,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// A DERIVED BLOCK A STAR READS IS A RELATION, AND SOME STAGE PUBLISHES IT
-// (#984).
-//
-// A Project emits no stage (walkStages' `default:` arm). On the DAG a derived
-// table's SELECT list is therefore not a relation of its own: the Aggregate or
-// the Scan below it is what materializes, and every consumer above compensates
-// per consumer — resolveShuffleKey, resolveAggInputName, resolveSortKeyColumn
-// and the gather's OutputRenames each map the name the query wrote back to the
-// name the stream carries.
-//
-// A STAR has no name to map. It reads the stream BY POSITION, so it publishes
-// whatever the stage below the block emits:
-//
-//	SELECT * FROM lat_ord o
-//	  JOIN (SELECT order_id, order_id AS oid FROM lat_item) s ON s.order_id = o.id
-//	PostgreSQL        id, customer, total, order_id, oid
-//	the stage's stream            …,       order_id        ← `oid` is not a column
-//
-// Four ways a block's projection leaves its stream behind, all four measured
-// as silently wrong answers on both DAG arms at v0.18.60 and all four one
-// question — is the projection, by position, the list the stage emits:
-//
-//   - a source column published TWICE (`order_id, order_id AS oid`): the
-//     stream carries one of it;
-//   - a RENAME (`order_id AS k`): the stream carries the source name, so the
-//     client is handed a column it never asked for under a name the query
-//     does not use;
-//   - an ALIAS OVER AN AGGREGATE (`CAST(COUNT(*) AS VARCHAR) AS n`): the
-//     aggregate stage emits its own `__agg_0` beside the computed `n`, and
-//     the reserved slot reaches the client;
-//   - a COMPUTED item (`amount * 2 AS d`): absorbComputedSubqueryProjection
-//     is deliberately ADDITIVE, so the stream carries the computed column AND
-//     the source it was computed from.
-//
-// The fix is the one the ADR names: the stage that materializes the block
-// publishes the BLOCK'S PROJECTION — by position, under the block's own names
-// — so the relation above the block is the relation the query wrote. Nothing
-// predicts a name here: the projection becomes a real OpProject through
-// Stage.ProjectExprs, exactly the machinery attachScanSelectProjections uses
-// for the statement's own SELECT list, and the join operator's own naming rule
-// then produces the star's columns from a relation that is already right.
-//
-// SCOPED TO A STAR, and the scope is the whole of why this is not a wider
-// change. A named SELECT list over every one of these blocks answers
-// PostgreSQL on all four arms today, because each consumer resolves its own
-// column; materializing under those is churn with no defect to fix. The test
-// is `projected` — a Project anywhere between the root and the block means the
-// statement named its columns — and it is the same test
-// refuseLateralProjection applies.
+// A derived block read by a star must publish its projection by position,
+// under its own names, through Stage.ProjectExprs/OpProject (#984). The join
+// then names the star's columns from that relation: duplicate sources, renames,
+// aggregate aliases and computed items must not expose the underlying stream.
+// Scope is star-only: a Project between root and block means named columns,
+// whose consumers resolve their own names (the projected test shared with
+// refuseLateralProjection).
+// See docs/internals/star-read-block-projections.md for the design.
 
 // starReadBlockProjections is the set of derived-block Project nodes a STAR
 // reads by position: no Project stands between the root and the block, a JOIN
@@ -180,29 +139,11 @@ func blockProjectionLeavesItsStream(p *logical.Node) blockDivergence {
 	return blockAgrees
 }
 
-// blockDivergence is HOW a block's projection differs from its stream, and the
-// two classes are not degrees of confidence — they are different questions
-// about what the star would see without this pass.
-//
-//   - blockIntroduces: a name the stream does not carry (a rename, a computed
-//     item, an alias over an aggregate) or one published TWICE. The star sees
-//     the wrong relation, always, so a block this pass cannot publish is
-//     REFUSED and routed — it was wrong or loud before the pass existed.
-//   - blockAgrees: the block's list IS the stream's, name for name and once
-//     each. Nothing to do.
-//   - blockIntroduces: anything else — a name the stream does not carry, a
-//     name published twice, or a stream that carries MORE than the block
-//     publishes. The star reads the stream, so any of the three hands the
-//     client a relation the query did not write.
-//
-// ONE CLASS, and that is the round-4 correction. Three rounds each split this
-// question a different way — narrowing versus introducing, then producer kind
-// — and each split grew a hole, because each was a MODEL of what the DAG would
-// do rather than a measurement. There is no second disposition now: a block
-// whose projection is not its stream is published, and one that cannot be
-// published is REFUSED and routed, which is answer-preserving and is what J1
-// shipped. "Left alone" is gone, because it is the door a star walks through
-// onto the stream.
+// blockDivergence compares the block's projection with its actual stream.
+// blockAgrees requires the same names, once each. blockIntroduces covers a
+// missing name, a duplicate publication or extra stream columns.
+// Publish every differing projection; if it cannot be published, REFUSE and
+// route it. Leaving it alone would let a star read the wrong relation.
 type blockDivergence int
 
 const (

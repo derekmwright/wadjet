@@ -11,28 +11,12 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// sortKeySlotPosStage is sortKeySlotPos for the DAG, which needs a stricter
-// proof and gets one.
-//
-// The position addresses the SELECT LIST, so it may only be used where the
-// operator's input IS the select list. On the single-process path a Project
-// operator sits directly below the Sort and it is. On the DAG **no stage is
-// emitted for a Project**, so the sort stage reads the materialized output of
-// the PRODUCING stage — which is the select list only when that producer is a
-// single relation, narrowed to exactly those columns by the scan-output
-// pruning. Put a JOIN or a set operation under it and the stage emits both
-// arms' whole schemas: `SELECT clt1.c2, clt2.c1 FROM clt1, clt2 ORDER BY 2`
-// then sorted by column ONE on both DAG arms, right values in the wrong
-// sequence (round-0 B4 — the author's own self-flag).
-//
-// The producer's final column list is NOT available here: Stage.OutputColumns
-// is filled by pruneScanOutputColumns AFTER walkStages returns, so an exact
-// check against it cannot be made at this point. The subtree's SHAPE can be,
-// and it is the claim this bound rests on — asserted from both sides in
-// benchmarks/tpch/duplicate_name_dag_test.go and
-// internal/coordinator/collide_two_path_test.go: one relation uses the
-// position, a join declines it and resolves by name, and both answer
-// PostgreSQL's order.
+// sortKeySlotPosStage may use a SELECT-list position only when it addresses
+// the producer's actual stream. Ordinary DAG Projects emit no stage; a single
+// narrowed relation supplies the list, but joins/set operations need stronger proof.
+// OutputColumns is populated only after walkStages; shape is the initial bound.
+// The duplicate_name_dag and collide_two_path gates test both sides of it.
+// See docs/internals/dag-sort-select-list-positions.md for the design.
 func sortKeySlotPosStage(ob logical.OrderExpr, sortNode *logical.Node, produced []Stage) int {
 	pos := sortKeySlotPos(ob, sortNode)
 	if pos == 0 {
@@ -49,31 +33,13 @@ func sortKeySlotPosStage(ob logical.OrderExpr, sortNode *logical.Node, produced 
 	return 0
 }
 
-// producerPublishesSelectList reports whether the stage that produces this
-// sort's input publishes the SELECT list as the ordered prefix of its own
-// output.
-//
-// It is the measurement the bound above otherwise has to guess at, and
-// declining to measure it is a silent wrong ORDER (#1003). Two output columns
-// may legally carry one name — `SELECT DISTINCT a.order_id AS amount,
-// b.amount … ORDER BY 1, 2 DESC` publishes `amount` twice — and once the
-// position is dropped the key is resolved by that name, which
-// `ColumnIndexFallback` answers with the FIRST match. BOTH keys then bound
-// column one, so the two DAG arms returned the rows sorted by the leading key
-// alone where PostgreSQL 17 and the single-process arms apply both. A total
-// order is not one of ADR-0013's nondeterminism classes.
-//
-// What makes the position usable here is not the producer's KIND but what it
-// PUBLISHES (ADR-0026 §8, K3's rule): the `final_aggregate` stage under that
-// query materializes `[a.order_id→amount, b.amount→amount, a.order_id,
-// b.amount]`, so the select list IS positions 1 and 2 of the stream. Where the
-// projection is NOT materialized — `SELECT clt1.c2, clt2.c1 FROM clt1, clt2
-// ORDER BY 2`, whose join stage carries no ProjectExprs — the check fails and
-// the key resolves by name exactly as before.
-//
-// The whole visible list is compared, name AND source expression, so a
-// producer that publishes the same names in another order, or narrows the
-// list, does not qualify.
+// producerPublishesSelectList proves the whole visible SELECT list is an ordered
+// PREFIX of the producer's output, comparing both name and source expression.
+// Producer kind alone is insufficient (ADR-0026 §8): reordered or narrowed lists
+// fail, while materialized duplicate names can still be addressed by position
+// (#1003). Falling back to the first matching name can lose a total-order key,
+// which ADR-0013 does not permit. Unmaterialized lists retain name resolution.
+// See docs/internals/materialized-select-list-prefix.md for the design.
 func producerPublishesSelectList(produced []Stage, sortNode *logical.Node) bool {
 	if len(produced) == 0 || sortNode == nil || len(sortNode.Children) == 0 {
 		return false
@@ -201,33 +167,14 @@ func sortKeySlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 	return ob.SlotPos
 }
 
-// sortKeyLocalSlotPos is the single-process pipeline's address for an ORDER BY
-// key: sortKeySlotPos's ordinal answer first, and then the SELECT-list
-// POSITION of the item the key NAMES.
-//
-// The name alone stopped being an address the moment two output columns could
-// share one, which is #556/#557's position identity one consumer over.
-// `WITH cte AS (...) SELECT a.id, b.id FROM cte a JOIN cte b ON a.a = b.a
-// ORDER BY a.id, b.id` publishes two columns called `id`; the Sort's keys are
-// built as `cleanExpr(ob.Column)`, which STRIPS the qualifier, so both keys
-// became `id` and `columnIndexFallback` bound both of them to the FIRST one.
-// The second key was never applied: PostgreSQL 17 answers
-// `1,1 | 1,2 | 1,3 | 1,8` and the single-process path answered
-// `1,8 | 1,3 | 1,2 | 1,1` — the right rows in the wrong sequence, which no
-// multiset comparison can see (#905, the #629 family). The stage DAG is right
-// on this shape already, because its sort keys keep the QUALIFIED spelling and
-// its join stage publishes `a.id` and `b.id` under those names; the single
-// path's Project output carries neither, so the position is the only address
-// it has.
-//
-// The match is the one PostgreSQL makes: an ORDER BY term may name an output
-// column, by its alias or by the spelling the SELECT list wrote. Exactly one
-// visible item must match — two is ambiguous and keeps today's by-name
-// resolution, which is also what the qualified-to-bare fallback is for.
-//
-// It is deliberately NOT wired into sortKeySlotPosStage. A position there
-// addresses the PRODUCING STAGE's output, which is the select list only for a
-// single narrowed relation (see that function), and the DAG does not need it.
+// sortKeyLocalSlotPos tries an ordinal first, then the visible SELECT-list
+// position named by alias or written expression (#556/#557; #905, #629).
+// Exactly one visible item must match; ambiguous names keep existing by-name/
+// qualified-to-bare fallback. Positions distinguish duplicate output names that
+// the local Project no longer qualifies; multiset tests cannot detect wrong order.
+// Do not wire this into sortKeySlotPosStage: DAG positions address producer output
+// and require that function's separate SELECT-list proof.
+// See docs/internals/local-sort-visible-item-positions.md for the design.
 func sortKeyLocalSlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 	if pos := sortKeySlotPos(ob, sortNode); pos > 0 {
 		return pos

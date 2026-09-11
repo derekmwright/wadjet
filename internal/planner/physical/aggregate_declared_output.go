@@ -31,34 +31,12 @@ func aggOutputType(funcName string, distinct bool) parquet.TypeID {
 	}
 }
 
-// aggSpecOutputType declares the output type of one aggregate over the
-// subtree rooted at the Aggregate node that owns it.
-//
-// COUNT is input-independent in this engine, so aggOutputType alone is exact
-// for it, and it is the same declaration the single-process pipeline compiles
-// into exec.AggColumn.OutputType. SUM and AVG are input-independent for every
-// type but DECIMAL, over which they answer in DECIMAL (#455).
-//
-// MIN/MAX are the exception, and MIN_BY/MAX_BY with them: their output IS
-// their (first) input's type, which exec.HashAggregate resolves from the
-// vector it observes at Consume. To declare the same thing at plan time the
-// input column has to resolve to a catalog type, so this walks the
-// aggregate's inputs for it and returns 0 — undeclared — when it cannot: a
-// derived-expression argument, a column no scan below carries, or two scans
-// carrying it at different types.
-// ok=false is the undeclared answer; callers fall back to the
-// function-name derivation. It is returned as a second value rather than
-// as a zero TypeID because TypeBool IS zero: MIN_BY over a BOOL column
-// declares BOOL, and a caller reading that as "undeclared" is how a
-// declaration goes missing on exactly one path (#354, #371).
-// aggOhlcvOutputFields declares a bar's ROW fields from the PRICE and VOLUME
-// column declarations, through exec.OhlcvOutputFields — the same function the
-// operator asks at Consume, so the declaration and the value are one decision.
-//
-// ok=false when either input is not a bare column this subtree can type (a
-// computed argument, a name no scan below carries, two scans disagreeing).
-// The operator then re-derives the list from the vectors it reads, which is
-// exactly what aggSpecOutputType's "unresolved" answer does for MIN/MAX.
+// aggOhlcvOutputFields derives ROW fields from PRICE and VOLUME declarations
+// through exec.OhlcvOutputFields, the operator's own Consume-time rule.
+// Unknown input declarations return ok=false so runtime vectors supply the fields.
+// aggSpecOutputType likewise distinguishes unknown from TypeBool's zero TypeID;
+// callers must use its bool, not treat BOOL as undeclared (#354, #371).
+// See docs/internals/aggregate-output-declaration-contracts.md for the design.
 func aggOhlcvOutputFields(node *logical.Node, agg logical.AggExpr) ([]parquet.Column, bool) {
 	if strings.ToLower(strings.TrimSpace(agg.Func)) != "ohlcv" {
 		return nil, false
@@ -304,37 +282,14 @@ func aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.Deci
 	}
 }
 
-// aggIntegerOutputType and aggIntegerOutputDecimal are PostgreSQL's result
-// types for SUM/AVG over an INTEGER column, taken from the live server (#784):
-//
-//	pg_typeof(sum(int4)) -> bigint     pg_typeof(sum(int8)) -> numeric
-//	pg_typeof(avg(int4)) -> numeric    pg_typeof(avg(int8)) -> numeric
-//
-// The two SUM rules differ because int4's sum has a wider integer type to grow
-// into and int8's does not; a wadjet SUM(int8) in int64 WRAPS past 2^63, which
-// ADR-0024 item 4 makes a 22003 rather than an answer. They mirror
-// exec.aggIntExact, which decides the CARRIER the accumulator uses, and the
-// two must agree: a plan that declares numeric over an int64 accumulator is
-// the #685 shape (a partial's identity row contradicting its siblings).
-//
-// AVG's SCALE is batch.AvgScale(0) = 4, the same +4 rule a DECIMAL input takes.
-// PostgreSQL's own numeric division picks a MAGNITUDE-DEPENDENT scale —
-// measured on the server, avg(c_i32) renders 16 fraction digits and
-// avg(c_i64) renders 8, both targeting about 16-20 significant digits — which
-// ADR-0024 rejected as a rule precisely because the same query over more rows
-// would change the scale of its own output column. Both engines are exact to
-// the digits they keep and agree to min(scale): ADR-0012 item 9's class.
-//
-// ok=false for every type these rules do not name.
-//
-// The RULE itself is exec.IntegerAccOutputType, not this pair. The same
-// question is asked by the WINDOW's plan-time declaration
-// (windowSpecOutputType), by the window operator's runtime correction of it
-// (exec.windowAccOutputType) and by exec.aggIntExact, and two tables are two
-// chances for the grouped and the windowed spelling of one query to answer
-// under different types — which is exactly what #813 was. These two are the
-// planner's ADAPTERS onto that table: the function NAME rather than a bool,
-// and logical.DecimalMeta rather than a bare (p,s).
+// aggIntegerOutputType/aggIntegerOutputDecimal adapt exec.IntegerAccOutputType
+// for function names and logical.DecimalMeta; all grouped/window declarations
+// and runtime carriers must agree (#784, #685, #813).
+// SUM(int4) is bigint, SUM(int8) and AVG of either are numeric; int64 overflow
+// must be 22003, never wrap (ADR-0024 item 4).
+// AVG uses batch.AvgScale(0)=4, independent of data magnitude (ADR-0024);
+// comparison to PostgreSQL is exact to min(scale) (ADR-0012 item 9).
+// Return ok=false for types outside the shared rule.
 func aggIntegerOutputType(fn string, in parquet.TypeID) (parquet.TypeID, bool) {
 	name := strings.ToLower(strings.TrimSpace(fn))
 	if name != "sum" && name != "avg" {
@@ -356,30 +311,11 @@ func aggIntegerOutputDecimal(fn string, in parquet.TypeID) (logical.DecimalMeta,
 	return logical.DecimalMeta{Precision: prec, Scale: scale}, true
 }
 
-// aggInputColumnType and aggInputColumnDecimal answer "what does this
-// aggregate's bare column argument declare" for the two halves of a
-// declaration, and they answer it against the aggregate's OWN INPUT before
-// falling back to the scans below it.
-//
-// scanColumnType/scanColumnDecimal search every Scan beneath a node for a
-// column of that NAME, which cannot see a RENAME: over
-// `SUM(v) FROM (SELECT dw AS v FROM decw) x` the scan carries `dw` and
-// nothing carries `v`, so the aggregate's output declared FLOAT64 while the
-// accumulator held an exact Int128 — and `SUM(v * 2)`, which is that
-// declaration times two in the projection ABOVE the aggregate, came back
-// -1.7283950641728393e+19 where the same query spelled over the base column
-// answers -17283950641728394664.17283948 (#728). Two spellings of one
-// question, two numbers, on the single-process path.
-//
-// emittedColDecls is the walk that CROSSES a rename or derived-table Project
-// — the same walk buildAggregate already uses for a COMPUTED argument
-// (aggInputDecls) and declaredOutputSchema uses for the SELECT list — so the
-// aggregate's input, its output and the projection above it now read one map.
-// It is consulted FIRST rather than as a fallback because where the two
-// disagree the emitted walk is the right one: a Project is free to bind a
-// name to a different column than the scan of that name below it
-// (`SELECT dw AS other, k AS dw`), and the scan walk would answer for the
-// column the query is NOT reading.
+// aggInputColumnType and aggInputColumnDecimal resolve both halves of a bare
+// aggregate argument's declaration. Rename/derived-table outputs must be reachable
+// when a scan does not carry the name (#728); a type and (p,s) must describe the
+// same column. The lookup order below accounts for dispatch-respelled sources.
+// See docs/internals/aggregate-argument-declaration-scope.md for the design.
 func aggInputColumnType(node *logical.Node, col string) (parquet.TypeID, bool) {
 	// The SCANS first; the emitted walk only for a name they do not carry.
 	//
@@ -452,34 +388,14 @@ func aggInputColumnDecimal(node *logical.Node, col string) (logical.DecimalMeta,
 	return logical.DecimalMeta{}, false
 }
 
-// aggOutputFromInputDecl is aggSpecOutputType/aggSpecOutputDecimal's rule for a
-// COMPUTED argument: the aggregate's declared output, derived from the
-// declaration its INPUT PROJECTION is built from.
-//
-// It exists because an aggregate over a computed argument had no declared
-// output at all — aggSpecOutputType declines a non-bare ColRef and falls to
-// aggOutputType's float64 — while the partials that saw a row emitted whatever
-// the projected vector actually was. On the stage DAG those are the same file
-// set: a partial whose filter matched nothing writes the identity row under the
-// float64 default, its siblings write DECIMAL, and one stage's files then
-// describe two different relations. Before #685's reader guard that was a
-// silent 10^scale on SUM(a * (1 - b)) — the TPC-H revenue shape — and after it,
-// a refused read. Neither is an answer.
-//
-// The derivation is BY CONSTRUCTION rather than by inference, which is what
-// makes it total: the worker builds the pre-aggregate projection from
-// AggSpec.InputType/InputPrecision/InputScale (worker.buildAggInputProjection),
-// so the vector every non-empty partial observes IS this declaration. Reading
-// the output off the same triple means the identity row and its siblings agree
-// whatever the triple says — including when it is the float64 fallback for an
-// expression nothing could type.
-//
-// ok=false only for a function whose output does not follow its input at all;
-// those keep aggOutputType's answer, which is already input-independent.
-// wideInt says the computed integer argument provably carries an int8-domain
-// operand (aggInputIsWideInteger). It is what lets this function apply
-// PostgreSQL's by-WIDTH SUM rule to an expression whose declared TypeID this
-// engine has already widened to INT64.
+// aggOutputFromInputDecl derives a computed argument's aggregate output from
+// AggSpec.InputType/InputPrecision/InputScale, the same declaration used by
+// worker.buildAggInputProjection. Empty-partial identity rows and non-empty
+// partials must agree, even when the input triple is a FLOAT64 fallback (#685).
+// Input-independent functions keep aggOutputType's answer. wideInt proves an
+// int8-domain operand via aggInputIsWideInteger, preserving the by-width SUM rule
+// after computed integer TypeIDs have widened to INT64.
+// See docs/internals/computed-aggregate-output-declarations.md for the design.
 func aggOutputFromInputDecl(fn string, distinct bool, in parquet.TypeID, precision, scale int, wideInt bool) (
 	out parquet.TypeID, outPrecision, outScale int, ok bool,
 ) {
@@ -504,30 +420,12 @@ func aggOutputFromInputDecl(fn string, distinct bool, in parquet.TypeID, precisi
 	}
 	switch name {
 	case "sum", "avg":
-		// An INTEGER input follows PostgreSQL's own types (#784), with ONE
-		// narrowing for a COMPUTED argument: SUM is bigint whatever the
-		// integer width, and only AVG becomes numeric.
-		//
-		// PostgreSQL's SUM rule is by INPUT WIDTH — int4 grows into bigint,
-		// int8 has nothing wider and becomes numeric — and wadjet declares
-		// EVERY integer expression INT64 (ADR-0024's recorded divergence), so
-		// a computed argument cannot tell the two apart. Reading them all as
-		// int8 would make `SUM(CASE WHEN … THEN 1 ELSE 0 END)` — TPC-H Q12's
-		// shape and a BI staple — numeric where PostgreSQL says bigint, on a
-		// sum of ones that cannot overflow anything. Reading them as int4
-		// keeps PostgreSQL's OID for that shape; the residual is a computed
-		// int8 sum past 2^63, which is the pre-existing "every integer
-		// spelling is INT64" divergence and not a new one.
-		//
-		// A BARE COLUMN is not affected: aggSpecOutputType answers it from the
-		// column's real width, where int8 is int8.
-		//
-		// The residual that paragraph names is CLOSED for every expression
-		// whose width can be READ (#841): aggInputIsWideInteger walks the AST
-		// and the column declarations and answers "this carries an int8-domain
-		// operand", which is exactly what PostgreSQL's rule needs. A shape it
-		// cannot see through keeps the int4 reading, so Q12's CASE of ones is
-		// still bigint and nothing moves on a shape nobody can point at.
+		// Integer AVG is numeric; computed integer SUM uses bigint unless
+		// aggInputIsWideInteger proves an int8-domain operand from AST and column
+		// declarations (#784, #841). A shape the walk cannot see through keeps the
+		// int4 reading, including Q12's CASE of ones; bare columns use real width.
+		// Do not infer width from TypeID: every integer expression declares INT64
+		// (ADR-0024's recorded divergence).
 		if _, ok := aggIntegerOutputType(name, in); ok {
 			if name == "avg" {
 				m, _ := aggIntegerOutputDecimal("avg", parquet.TypeInt32)

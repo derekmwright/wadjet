@@ -7,32 +7,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
-// ErrScalarSubqueryProjectionDistributed marks a plan the stage DAG refuses
-// because a SELECT-LIST item contains a subquery.
-//
-// The DAG lowers a scalar subquery in a PREDICATE: walkStages replaces it
-// with a `:scalar_N` placeholder, emits a producer stage for it, records the
-// edge in Stage.ScalarDependencies, and the coordinator substitutes the
-// producer's value into the filter text before dispatch
-// (resolveFilterSubqueries → emitScalarProducerStages →
-// substituteScalarDependencies). There is no such machinery for a
-// PROJECTION: attachScanSelectProjections attaches the SELECT list verbatim,
-// and the worker's expression compiler has no SubqueryRunner, so every task
-// failed three times with
-//
-//	compile projection "(SELECT MAX(v) FROM c)": subqueries require a SubqueryRunner
-//
-// for a query PostgreSQL answers and the single-process pipeline answers
-// (#659). Loud, but the query HAS an answer and one engine in this process
-// can compute it — so the planner refuses BEFORE stage generation and the
-// coordinator routes it onto its local pipeline, exactly as it does for a
-// correlated subquery (#359), an unstageable DISTINCT (#466) and an
-// unmaterializable IN set (#524).
-//
-// The refusal is not CTE-specific: the same failure reproduces for a subquery
-// over a base table or a dimension. What it does NOT cover is a subquery in a
-// WHERE or a HAVING, which the deferral machinery above really does lower —
-// those keep running on the DAG.
+// ErrScalarSubqueryProjectionDistributed refuses SELECT-list subqueries that
+// remain without distributed lowering (#659): workers have no SubqueryRunner.
+// The coordinator answers through its local pipeline, as for correlation (#359),
+// unstageable DISTINCT (#466) and unmaterializable IN sets (#524).
+// The refusal applies to base tables and dimensions as well as CTEs; it excludes
+// WHERE/HAVING subqueries handled by scalar producer deferral.
+// See docs/internals/unlowered-scalar-projection-refusal.md for the design.
 var ErrScalarSubqueryProjectionDistributed = errors.New(
 	"scalar subquery in a SELECT-list item has no distributed lowering")
 
