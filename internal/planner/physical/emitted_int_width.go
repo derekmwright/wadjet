@@ -208,6 +208,20 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 						continue
 					}
 				}
+				// A COMPUTED argument has no column to read the width off,
+				// and the carrier below is the INT64 every integer expression
+				// materializes in — so `MIN(BITWISE_AND(int4,3)) OVER ()`
+				// claimed int8 and its SUM went out numeric where PostgreSQL
+				// says bigint. The same walk the grouped spelling's
+				// aggArgIntWidth now takes (#1018 round 5 review, P1).
+				if we.InputExpr != nil {
+					if _, bare := we.InputExpr.(*plansql.ColRef); !bare {
+						if w := declaredIntWidth(we.InputExpr, in); w != intWidthUnknown {
+							out[name] = w
+							continue
+						}
+					}
+				}
 			}
 			out[name] = catalogIntWidth(d.ID)
 		}
@@ -257,11 +271,28 @@ func setOpArmIntWidths(n *logical.Node) [][]intWidth {
 	return out
 }
 
-// aggArgIntWidth is the width of a bare aggregate ARGUMENT, for the value-
+// aggArgIntWidth is the width of an aggregate ARGUMENT, for the value-
 // preserving aggregates (MIN/MAX/MIN_BY/MAX_BY).
+//
+// A COMPUTED argument takes the same walk every other declared width takes.
+// Declining it was not silence: the caller then recorded `catalogIntWidth` of
+// aggSpecOutputType, which is the INT64 CARRIER every integer expression is
+// computed in, so `MIN(BITWISE_AND(int4_col, 3))` positively declared int8 and
+// every reader above it made its SUM numeric — where PostgreSQL 17.11 answers
+// `integer` for the MIN (measured: `min(id & 3)`, `max(id & 3)`,
+// `min(regexp_count(name,'a'))`, grouped and `OVER ()`) and `bigint` for its
+// SUM (#1018 round 5 review, P1). `declaredIntWidth` already knew that
+// expression's width; this arm simply asks it, which is what the ColRef arm
+// does one level down.
 func aggArgIntWidth(agg logical.AggExpr, in colDecls) (intWidth, bool) {
 	if agg.InputExpr != nil {
 		if _, bare := agg.InputExpr.(*plansql.ColRef); !bare {
+			if w := declaredIntWidth(agg.InputExpr, in); w != intWidthUnknown {
+				return w, true
+			}
+			// Unknown is NOT int8. Leaving the caller to record the carrier is
+			// what it did before this arm existed, and a width nobody can
+			// prove must not be invented here.
 			return intWidthUnknown, false
 		}
 	}

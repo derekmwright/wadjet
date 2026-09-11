@@ -2524,10 +2524,27 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      CAST takes its TARGET NAME; an integer literal is int4 unless it does not
      fit; an aggregate takes its own declared result's width, except
      MIN/MAX/MIN_BY/MAX_BY, which hand back a value the input HELD and keep
-     its width; a set operation takes the WIDEST arm and records nothing at
-     all if any arm is silent, because narrowing on incomplete information is
-     how a SUM that should be numeric comes back as a bigint that can
-     overflow.
+     its width — the ARGUMENT's width, whether the argument is a bare column
+     or an EXPRESSION, which is the same walk one level down (amended
+     2026-09-11, round 6, P1: the computed case was declined, and declining
+     was not silence, because the caller then recorded the INT64 CARRIER, so
+     `MIN(BITWISE_AND(int4_col,3))` positively claimed int8 and its SUM went
+     out numeric where PostgreSQL 17.11 answers `integer` for the MIN and
+     `bigint` for the SUM — measured for `min(id & 3)`, `max(id & 3)`,
+     `min(regexp_count(name,'a'))`, grouped and `OVER ()`); a set operation
+     takes the WIDEST arm and records nothing at all if any arm is silent,
+     because narrowing on incomplete information is how a SUM that should be
+     numeric comes back as a bigint that can overflow.
+
+     The WINDOW spelling of MIN/MAX had the same gap one layer earlier: over a
+     computed argument its slot declared FLOAT8 — not in the integer family at
+     all, so no width could be recorded for it and `SUM(m)` over a derived
+     `MIN(f & 18) OVER ()` went out as OID 701 where PostgreSQL declares
+     bigint (int4 argument) or numeric (int8). `windowSpecOutputType`'s
+     undecided arm now types the computed argument with the SAME
+     `windowComputedArgDecl` its SUM/AVG arm reads and vets it through
+     `exec.WindowMinMaxType`, so the planner and the operator cannot come to
+     different conclusions.
 
      What it is NOT is an INT32 vector. The engine computes every integer
      expression in an int64, and declaring the narrow carrier for it would put

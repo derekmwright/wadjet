@@ -403,6 +403,43 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmetic(t *testing.T) {
 			`SELECT SUM(v) OVER () AS v FROM (SELECT BITWISE_AND(f8,18) AS v FROM tcpflow WHERE id <= 4) s`,
 			[]string{"v=36", "v=36", "v=36", "v=36"}},
 
+		// ---- MIN/MAX OVER A COMPUTED ARGUMENT KEEP THE ARGUMENT'S WIDTH
+		// (#1018 round 5 review, P1). MIN copies a value the input HELD, so
+		// its type is the INPUT's — and for a computed int4 argument the
+		// declaration exists. `aggArgIntWidth` declined anything but a bare
+		// column and the caller then recorded the INT64 CARRIER, so these
+		// rendered `v=0` (numeric) where PostgreSQL 17.11 renders a bigint,
+		// identically on all five arms. The WINDOW spelling was worse: its
+		// slot declared float8, which is not in the integer family at all, so
+		// no width could be recorded for it.
+		//
+		// PostgreSQL over the same four rows (f4/f8 = 0, 2, 18, 16):
+		//   sum(min(f&18))                    bigint 0  / numeric 0
+		//   sum(max(f&18))                    bigint 18
+		//   sum(min(f&18)) GROUP BY id        bigint 36 / numeric 36
+		//   sum(min(f&18) OVER ())            bigint 0  / numeric 0
+		{"min_over_a_computed_narrow_argument_is_bigint",
+			`SELECT SUM(m) AS v FROM (SELECT MIN(BITWISE_AND(f4,18)) AS m FROM tcpflow WHERE id <= 4) s`,
+			[]string{"v=int64:0"}},
+		{"max_over_a_computed_narrow_argument_is_bigint",
+			`SELECT SUM(m) AS v FROM (SELECT MAX(BITWISE_AND(f4,18)) AS m FROM tcpflow WHERE id <= 4) s`,
+			[]string{"v=int64:18"}},
+		{"min_over_a_computed_wide_argument_is_numeric",
+			`SELECT SUM(m) AS v FROM (SELECT MIN(BITWISE_AND(f8,18)) AS m FROM tcpflow WHERE id <= 4) s`,
+			[]string{"v=0"}},
+		{"grouped_min_over_a_computed_narrow_argument_is_bigint",
+			`SELECT SUM(m) AS v FROM (SELECT MIN(BITWISE_AND(f4,18)) AS m FROM tcpflow WHERE id <= 4 GROUP BY id) s`,
+			[]string{"v=int64:36"}},
+		{"grouped_min_over_a_computed_wide_argument_is_numeric",
+			`SELECT SUM(m) AS v FROM (SELECT MIN(BITWISE_AND(f8,18)) AS m FROM tcpflow WHERE id <= 4 GROUP BY id) s`,
+			[]string{"v=36"}},
+		{"windowed_min_over_a_computed_narrow_argument_is_bigint",
+			`SELECT SUM(m) AS v FROM (SELECT MIN(BITWISE_AND(f4,18)) OVER () AS m FROM tcpflow WHERE id <= 4) s`,
+			[]string{"v=int64:0"}},
+		{"windowed_min_over_a_computed_wide_argument_is_numeric",
+			`SELECT SUM(m) AS v FROM (SELECT MIN(BITWISE_AND(f8,18)) OVER () AS m FROM tcpflow WHERE id <= 4) s`,
+			[]string{"v=0"}},
+
 		// ---- THE VALID NAMES STILL ANSWER OVER AN EMPTY INPUT (#1018 round
 		// 5, B2's other side). A plan-time refusal that fired on a spelling
 		// the family DOES know would be the false positive the binder's

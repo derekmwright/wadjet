@@ -2035,8 +2035,11 @@ FROM flows) s` is `BIGINT` exactly as the direct `SUM(BITWISE_AND(id,3))` is,
 and `SUM(v) OVER ()` over the same derived table agrees with both. A set
 operation takes the WIDER arm, as PostgreSQL's common-type rule does: a
 `UNION ALL` of two `int4` arms is `BIGINT` summed and one with a `bigint` arm
-is `NUMERIC`. `MIN` and `MAX` hand back a value the column held and keep its
-width; `SUM` and `COUNT` answer `bigint`, so a `SUM` over a `SUM` is
+is `NUMERIC`. `MIN` and `MAX` hand back a value their ARGUMENT held and keep
+its width — a column's or a computed expression's alike, so
+`SUM(MIN(BITWISE_AND(id,3)))` is `BIGINT` and
+`SUM(MIN(BITWISE_AND(bigint_col,18)))` is `NUMERIC`, grouped and `OVER ()` —
+while `SUM` and `COUNT` answer `bigint`, so a `SUM` over a `SUM` is
 `NUMERIC`.
 
 A **`CAST` answers in its target's width**, whatever the operand's was, as

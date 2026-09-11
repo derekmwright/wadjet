@@ -379,6 +379,45 @@ func TestPGWireDeclaresSumOverAMaterializedIntegerColumn(t *testing.T) {
 			`SELECT SUM(v) OVER () AS v FROM (SELECT REGEXP_COUNT(name,'a') AS v FROM users) s LIMIT 1`,
 			20, "2"},
 
+		// ---- MIN/MAX OVER A COMPUTED ARGUMENT keeps the ARGUMENT's width
+		// too, not the carrier's (#1018 round 5 review, P1). These declared
+		// 1700 — `aggArgIntWidth` declined anything but a bare column and the
+		// caller then recorded the INT64 CARRIER, so a MIN of an int4
+		// expression positively claimed int8. PostgreSQL 17.11, measured:
+		// `min(id & 3)` / `max(id & 3)` / `min(regexp_count(name,'a'))` are
+		// `integer`, grouped and `OVER ()`, and their SUM is `bigint`;
+		// `min(visits & 18)` is `bigint` and its SUM `numeric`.
+		{"min_over_a_computed_narrow_argument",
+			`SELECT SUM(m) AS v FROM (SELECT MIN(BITWISE_AND(id,3)) AS m FROM users) s`, 20, "1"},
+		{"min_over_a_computed_narrow_argument_grouped",
+			`SELECT SUM(m) AS v FROM (SELECT MIN(BITWISE_AND(id,3)) AS m FROM users GROUP BY id) s`,
+			20, "6"},
+		{"max_over_a_computed_narrow_argument_grouped",
+			`SELECT SUM(m) AS v FROM (SELECT MAX(BITWISE_AND(id,3)) AS m FROM users GROUP BY id) s`,
+			20, "6"},
+		{"min_over_a_computed_int4_result_function",
+			`SELECT SUM(m) AS v FROM (SELECT MIN(REGEXP_COUNT(name,'a')) AS m FROM users GROUP BY id) s`,
+			20, "2"},
+		{"min_over_computed_arithmetic",
+			`SELECT SUM(m) AS v FROM (SELECT MIN(id*2) AS m FROM users) s`, 20, "2"},
+		{"min_over_a_computed_case",
+			`SELECT SUM(m) AS v FROM (SELECT MIN(CASE WHEN id>1 THEN id ELSE 0 END) AS m FROM users) s`,
+			20, "0"},
+		// The int8 side, and the CAST, are the boundary: the walk must not
+		// narrow what PostgreSQL keeps wide.
+		{"min_over_a_computed_wide_argument_is_numeric",
+			`SELECT SUM(m) AS v FROM (SELECT MIN(BITWISE_AND(visits,18)) AS m FROM users GROUP BY id) s`,
+			1700, "2"},
+		{"min_over_a_cast_to_bigint_is_numeric",
+			`SELECT SUM(m) AS v FROM (SELECT MIN(CAST(id AS BIGINT)) AS m FROM users) s`, 1700, "1"},
+		// And the WINDOW spelling of the same rule, which must agree with the
+		// grouped one.
+		{"windowed_min_over_a_computed_narrow_argument",
+			`SELECT SUM(m) AS v FROM (SELECT MIN(BITWISE_AND(id,3)) OVER () AS m FROM users) s`, 20, "3"},
+		{"windowed_min_over_a_computed_wide_argument",
+			`SELECT SUM(m) AS v FROM (SELECT MIN(BITWISE_AND(visits,18)) OVER () AS m FROM users) s`,
+			1700, "0"},
+
 		// ---- AVG is numeric on BOTH sides in PostgreSQL: the control.
 		{"avg_derived_narrow_is_numeric",
 			`SELECT AVG(v) AS v FROM (SELECT BITWISE_AND(id,3) AS v FROM users) s`, 1700, "2.0000"},

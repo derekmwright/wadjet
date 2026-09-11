@@ -143,6 +143,28 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 				}
 			}
 		}
+		if minMax {
+			// MIN/MAX COPY a value, so the answer is the ARGUMENT's own type
+			// whether the argument is a column or an expression — and the
+			// expression's type is the same `windowComputedArgDecl` the
+			// accumulating arm above reads. Without this the slot fell to
+			// float8: `SUM(m)` over a derived `MIN(BITWISE_AND(id,3)) OVER ()`
+			// declared OID 701 where PostgreSQL declares bigint, and the
+			// int8-argument twin declared 701 where it declares numeric —
+			// a declaration that is not even in the integer family, so the
+			// width attribute could not be recorded for it at all (#1018
+			// round 5 review, P1). exec.WindowMinMaxType is asked rather than
+			// assumed, exactly as the decided-column arm below asks it, so
+			// the planner and the operator cannot disagree about a type.
+			if d, _, ok := windowComputedArgDecl(node, we); ok {
+				if out, vetted := exec.WindowMinMaxType(d.ID); vetted {
+					if out == parquet.TypeDecimal && d.DecKnown {
+						return d
+					}
+					return expr.Decl(out)
+				}
+			}
+		}
 		return expr.Decl(windowOutputType(fn))
 	}
 	if sumAvg {
