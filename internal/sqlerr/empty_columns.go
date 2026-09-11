@@ -1,29 +1,12 @@
 package sqlerr
 
-// AN EMPTY COLUMN LIST IS NEVER AN ANSWER.
-//
-// A statement that produces a result set produces COLUMNS: PostgreSQL sends a
-// RowDescription with fields even when it returns no rows, and every client
-// depends on it — psql prints a header, pgJDBC's executeQuery has metadata to
-// read, a BI tool opens a table with it. A result carrying zero columns and no
-// error is therefore not a small answer, it is a defect that reached the
-// client wearing an answer's clothes, and it is INDISTINGUISHABLE from "the
-// query legitimately found nothing".
-//
-// Two silent wrong answers arrived exactly that way and neither was noticed by
-// any value comparison, because a comparison of two column lists that are both
-// empty succeeds: two LATERALs whose inner block GROUPS answered `cols=[]
-// rows=0` where PostgreSQL 17 answers eight rows (#1008), and nested LATERALs
-// joined to a fourth relation did the same on the spilled arm where the other
-// arms answer four (#1010). Both were rooted elsewhere and both are fixed;
-// this refusal is what makes the CLASS unable to be silent again.
-//
-// XX000 — internal error — is the class, and it is deliberate: nothing about
-// the STATEMENT is wrong. PostgreSQL answers these queries, so the code cannot
-// blame the client (ADR-0012's rule for a wadjet-side bound), and unlike the
-// 0A000 family this is not a feature the engine has declined to implement. It
-// is the engine failing to describe its own output, which is what XX000 is
-// for.
+// A result-producing statement must declare columns even when it returns no rows.
+// Zero columns without error must fail, not masquerade as an empty answer
+// (#1008, #1010); comparing two empty schemas cannot catch that shared failure.
+// Use XX000: the engine failed to describe output, not client-invalid SQL or
+// an intentionally unsupported 0A000 feature (ADR-0012).
+// Every result door must carry this refusal with its own path in the message.
+// See docs/internals/sqlerr-empty-result-column-refusal.md for the design.
 const EmptyResultSQLState = "XX000"
 
 // EmptyResultColumns is the refusal a door makes when a statement that
