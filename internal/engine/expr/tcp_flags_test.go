@@ -350,3 +350,67 @@ func TestTheTypedFlagKernelAgreesWithTheGenericCall(t *testing.T) {
 		t.Error("an unknown flag name specialized; the refusal would be lost")
 	}
 }
+
+// AN UNKNOWN FLAG NAME OUTRANKS A NULL FLAGS ARGUMENT (#966 round 2, P4).
+//
+// The family says two things — "NULL flags give NULL" and "a name I do not
+// know is 22023" — and until this was settled it did not say which wins. It
+// mattered: the three new predicates folded the mask first and raised, while
+// the legacy `has_tcp_flag` checked both arguments for NULL first and answered
+// NULL, so one family had two priorities and whether a typo was an ERROR
+// depended on which row the evaluator happened to be on.
+//
+// PostgreSQL 17.11 decides it for the operator equivalent, `(flags & mask)`
+// with the mask spelled wrong:
+//
+//	SELECT NULL::bigint & 'x'::bigint                 ERROR 22P02
+//	SELECT 'x'::int FROM (VALUES (1)) t WHERE false   ERROR 22P02
+//
+// A malformed mask operand is a property of the QUERY, and neither a NULL
+// other operand nor an empty row set excuses it. So: the NAMES are folded
+// first, everywhere. A NULL *name* is the other case — that is a NULL mask
+// operand, and `NULL & NULL` is NULL, so it answers NULL rather than raising.
+//
+// Recorded in ADR-0012's divergence list.
+func TestAnUnknownFlagNameOutranksANullFlagsArgument(t *testing.T) {
+	for _, fn := range []string{
+		"tcp_flags_has_all", "tcp_flags_has_any", "tcp_flags_has_none", "has_tcp_flag",
+	} {
+		f := DefaultRegistry.Lookup(fn)
+		if f == nil {
+			t.Fatalf("%s is not registered", fn)
+		}
+		// NULL flags, bad name -> the refusal, not NULL.
+		func() {
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Errorf("%s(NULL, 'BOGUS') answered where 22023 is due — a typo in "+
+						"the query text must not depend on the data", fn)
+					return
+				}
+				fe, ok := r.(fatalEval)
+				if !ok {
+					t.Errorf("%s(NULL, 'BOGUS') panicked with %#v, want a fatalEval", fn, r)
+					return
+				}
+				if state := sqlerr.StateOf(fe.err); state != "22023" {
+					t.Errorf("%s(NULL, 'BOGUS') raised SQLSTATE %s, want 22023", fn, state)
+				}
+			}()
+			f([]any{nil, "BOGUS"})
+		}()
+		// NULL name -> NULL, on every one of them: that is a NULL mask
+		// operand, and PostgreSQL's `NULL & NULL` is NULL.
+		if got := f([]any{int64(18), nil}); got != nil {
+			t.Errorf("%s(18, NULL) = %#v, want NULL", fn, got)
+		}
+		if got := f([]any{nil, nil}); got != nil {
+			t.Errorf("%s(NULL, NULL) = %#v, want NULL", fn, got)
+		}
+		// And a GOOD name with NULL flags is still NULL.
+		if got := f([]any{nil, "SYN"}); got != nil {
+			t.Errorf("%s(NULL, 'SYN') = %#v, want NULL", fn, got)
+		}
+	}
+}

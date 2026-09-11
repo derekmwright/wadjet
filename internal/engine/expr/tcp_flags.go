@@ -249,6 +249,13 @@ func tcpFlagsPredicate(fn string, mode TCPFlagPredicateMode, args []any) any {
 	if !ok {
 		return nil
 	}
+	// The ORDER of these two is the family's rule, settled in #966 round 2 P4
+	// and recorded in ADR-0012: the NAMES are folded into the mask FIRST, so
+	// an unknown one is 22023 whatever the flags argument holds, and only then
+	// does a NULL flags argument give NULL. PostgreSQL raises for the operator
+	// equivalent — `NULL::bigint & 'x'::bigint` is 22P02, and so is
+	// `'x'::int` under `WHERE false` — because a malformed mask operand is a
+	// property of the QUERY and not of the rows.
 	if args[0] == nil {
 		return nil // NULL flags -> NULL, as PostgreSQL's (f & m) = m does
 	}
@@ -495,12 +502,26 @@ func fnTCPFlagsToString(args []any) any {
 
 // fnHasTCPFlag tests if a TCP flags bitmask has a specific flag set.
 // has_tcp_flag(0x12, 'SYN') → true. It is tcp_flags_has_any with one name.
+//
+// THE NAME IS READ BEFORE THE FLAGS ARGUMENT (#966 round 2, P4). It used to
+// check both arguments for NULL first, so `has_tcp_flag(f, 'BOGUS')` answered
+// NULL on a row whose f was NULL and raised 22023 on the next one — whether a
+// typo is an error would have depended on the DATA, and the family's own
+// three predicates already read the name first. PostgreSQL 17.11 decides it
+// for the operator equivalent:
+//
+//	SELECT NULL::bigint & 'x'::bigint   ->  ERROR 22P02, invalid input syntax
+//	SELECT 'x'::int FROM (VALUES (1)) t WHERE false  ->  the same ERROR
+//
+// The mask operand's spelling is converted whatever the rows are, and a NULL
+// flags operand does not excuse it. A NULL *name* is different: that is a
+// NULL mask operand, and `NULL & NULL` is NULL.
 func fnHasTCPFlag(args []any) any {
-	if len(args) < 2 || args[0] == nil || args[1] == nil {
+	if len(args) < 2 || args[1] == nil {
 		return nil
 	}
 	mask, ok := maskFromArgs("has_tcp_flag", args[1:2])
-	if !ok {
+	if !ok || args[0] == nil {
 		return nil
 	}
 	return TCPFlagsMatch(tcpFlagsValue("has_tcp_flag", args[0]), mask, TCPFlagsAny)
