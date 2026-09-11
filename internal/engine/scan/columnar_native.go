@@ -445,28 +445,13 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 	return nil
 }
 
-// rowPresence reconstructs a ROW column's OWN null bitmap from the
-// definition levels of one of its leaves.
-//
-// A ROW is a parquet GROUP, and a group has no column chunk of its own: the
-// only record that a whole group was absent is that its leaves' definition
-// levels stop short of the group's level. The native reader used to read
-// only the leaves, so an absent group and a present group whose every field
-// is null decoded identically — a NULL ROW came back as a present ROW of
-// nulls (#425). Every consumer that separates "no value" from "a value made
-// of nothing" then answered wrong: IS NULL, COUNT, an outer join's padding
-// check, and any copy of the row across a shuffle.
-//
-// The rule is the format's: with the group's max definition level d, a leaf
-// definition level >= d means the group was PRESENT (the leaf may still be
-// null at a higher level), and < d means the group itself was absent.
-//
-// newRowPresence returns nil — no recording, no cost — when the group cannot
-// be null (d == 0, every ancestor REQUIRED) or when the leaf sits under a
-// REPEATED ancestor, where definition levels are per ELEMENT and no longer
-// line up one-to-one with the row group's rows. A ROW inside an ARRAY or MAP
-// never reaches this reader anyway (HasUnsupportedColumnarTypes routes those
-// schemas to the row reader), so the second guard is a backstop.
+// rowPresence records the ROW's OWN null bit from a leaf's definition level:
+// level >= group max definition d means present, even if that leaf is NULL;
+// level < d means absent. NULL ROW differs from a present all-NULL ROW (#425).
+// newRowPresence returns nil when d==0 or under REPEATED ancestors, whose
+// levels count elements rather than rows. Nested ARRAY/MAP schemas must use
+// the row-reader fallback; the repeated-level guard is only a backstop.
+// See docs/internals/scan-row-presence-definition-levels.md for the design.
 type rowPresence struct {
 	vec      *batch.Vector // the ROW column's own vector
 	defLevel int32         // the group node's max definition level
@@ -539,36 +524,13 @@ func rescaleTimestampChunk(vec *batch.Vector, leaves []*pqt.SchemaNode, colIdx, 
 	pqt.ScaleTimestampsToEngine(vec.Int64Data[:n], div)
 }
 
-// rescaleDecimalChunk moves a just-decoded DECIMAL chunk from the scale the
-// FILE declares to the scale the CATALOG does — the same shape as
-// rescaleTimestampChunk above, and for the same reason: the values a column
-// chunk carries mean what a DECLARATION says they mean, and the file's
-// declaration is input rather than fact (ADR-0018).
-//
-// For a TIMESTAMP the two declarations can only differ by a power of ten that
-// always divides exactly, so that one cannot fail. A DECIMAL can: the catalog's
-// scale may need digits the carrier has no room for, and the answer then is
-// PostgreSQL's 22003 rather than a wrapped number (#707).
-//
-// NULL slots are SKIPPED, and the per-row test that costs is the point.
-//
-// The first version of this rescaled them, on the argument that a null cell's
-// carrier is not a value and that "zero is the only carrier the batch allocator
-// puts there". That argument is FALSE: the scan reuses batches through a
-// BatchPool, and a reused batch hands back the previous file's carriers in
-// slots the new file marks NULL. So a file whose every VISIBLE value is fine
-// was refused — one file holding the widest DECIMAL(15,2) carrier followed by
-// an all-NULL file declared at scale 0 raises 22003 on the 0-to-2 multiply of a
-// number no query can see. Round 0's review flagged the premise as ungated and
-// could not break it end to end; asserting it directly
-// (TestPooledBatchesHandBackZeroedDecimalSlots) showed it never held.
-//
-// A null cell's carrier is unspecified, so it must not decide whether a file
-// reads. The branch runs only on the repair path, which by definition is a file
-// this writer did not produce.
-//
-// Non-inlined for the frame-size reason columnDecodePlan's comment gives: this
-// sits on the stack of every per-column errgroup goroutine.
+// rescaleDecimalChunk reconciles FILE scale with CATALOG scale and precision
+// (ADR-0018, #707); unrepresentable values raise 22003, never wrap.
+// SKIP NULL slots: reused batches may retain arbitrary previous carriers there,
+// which must not decide whether visible values can be read.
+// Keep this non-inlined to protect each per-column goroutine's stack frame,
+// for the same reason as columnDecodePlan.
+// See docs/internals/scan-decimal-chunk-reconciliation.md for the design.
 //
 //go:noinline
 func rescaleDecimalChunk(vec *batch.Vector, leaves []*pqt.SchemaNode, colIdx, offset, precision int) error {
@@ -927,28 +889,13 @@ func decodeOnePage(vec *batch.Vector, offset int, page *pqt.PageData, drs *dictR
 		page.NumNulls > 0, page.NumValues, fileType, catalogType, coerce)
 }
 
-// columnDecodePlan resolves everything readColumnNative needs to know about
-// one leaf before it starts reading pages: the type the FILE recovers for
-// it, its maximum definition level, and whether the values need converting
-// on the way into the catalog's vector — refusing the pairings where they
-// cannot get there at all.
-//
-// The copy paths switch on the FILE's type while writing into a vector
-// allocated for the CATALOG's, so the two must agree on which typed array
-// the values land in; storageClass answers that. A pairing that agrees is
-// copied verbatim, the three CoercibleTo pairings are converted, and nothing
-// else is decodable — the ones that used to reach the copy anyway did not
-// fail, they indexed the wrong array and panicked.
-//
-// It is one non-inlined function, and that is load-bearing rather than
-// tidy. readColumnNative's frame sits on the stack of every per-column
-// errgroup goroutine, and those start at the runtime's minimum: doing this
-// work inline grew the frame past what the initial stack holds, so EVERY
-// column read paid an extra runtime.newstack + copystack. That measured as
-// +7% on BenchmarkReadColumnar/rows=1000 with runtime.newstack going from
-// 4.9% to 8.8% of a GOMAXPROCS=1 profile. Check the frame with
-// `go build -gcflags=-S | grep readColumnNative STEXT` — it must stay at or
-// under the 0x268 it was before this guard existed.
+// columnDecodePlan resolves file type, max definition level and conversion
+// before page reads. File/catalog storageClass must match for direct copying;
+// otherwise require CoercibleTo, never index an incompatible typed array.
+// Keep this non-inlined: every per-column readColumnNative goroutine begins
+// with a minimum stack. Its frame must remain <= 0x268; inspect STEXT with
+// go build -gcflags=-S when changing the boundary.
+// See docs/internals/scan-leaf-decode-plan.md for the design.
 //
 //go:noinline
 func columnDecodePlan(leaves []*pqt.SchemaNode, colIdx int, catalogType pqt.TypeID) (

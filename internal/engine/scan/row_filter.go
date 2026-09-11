@@ -9,28 +9,13 @@ import (
 	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// Scan-level row filtering (Level 3 of the pushdown ladder, completed):
-// eligible `col <op> literal` conjuncts are evaluated by the scan itself,
-// straight off column pages, before any value is materialized into a
-// vector. Two structural wins over the decode-then-filter pipeline:
-//
-//   - Dictionary-encoded pages evaluate the predicate ONCE per dictionary
-//     (a few thousand entries) and map the resulting mask over the
-//     indices — no value gather, no per-row typed compare.
-//   - Filter-only columns (referenced by the filter and nothing else)
-//     are never materialized at all; the scan reads their pages here and
-//     the projected read schema excludes them.
-//   - RUN-GRANULARITY evaluation (WADJET_RLE_RUN_PREDS): a dictionary
-//     page's index stream is RLE — columns like ClickBench's EventDate
-//     are ONE run per row group, CounterID three — so the mask is applied
-//     once per run over a SPAN of rows rather than once per row, and the
-//     indices are never expanded to an int32 array at all.
-//
-// Semantics parity with the expression layer: NULL rows never match a
-// comparison; the planner only pushes conjuncts whose literal/column type
-// pair compares exactly (integral literals on int-class columns, numeric
-// on float, string on byte-array) — anything else stays in the residual
-// exec filter.
+// Scan row predicates evaluate eligible col <op> literal conjuncts before
+// materialization. Evaluate dictionary entries once and map masks over indices;
+// filter-only columns stay outside the projected schema.
+// WADJET_RLE_RUN_PREDS may apply masks by row span without expanding indices.
+// NULL never matches a comparison. Push only literal/type pairs with EXACT
+// expression parity; every other predicate remains in the residual exec filter.
+// See docs/internals/scan-page-row-predicate-boundary.md for the design.
 
 // RowPred is one pushed conjunct.
 type RowPred struct {
@@ -235,27 +220,13 @@ func andDictPageAny(bm *rowBitmap, base, n int, page *pqt.PageData, pr *pqt.Colu
 	return andDictPage(bm, base, n, indices, nv, dictMask, page.DefinitionLevels, pageMaxDef(page))
 }
 
-// dictRunPathEligible reports whether a run of k dictionary indices covers
-// exactly k consecutive ROWS on this page, which is the whole premise of
-// the run path.
-//
-// That holds only when the page has no nulls: values are stored dense over
-// non-null rows, so with nulls present a run of k values spans k *non-null*
-// rows and locating it means walking the definition levels row by row —
-// the very work the run path exists to skip. Such pages take the expand
-// path unchanged, keeping "a NULL never matches a comparison" implemented
-// in exactly one place.
-//
-// "No nulls" has to be established from the levels, not asserted by the
-// file. Three cases:
-//
-//   - no definition levels at all: a REQUIRED column, nothing to check;
-//   - NullsFromLevels: the reader counted the nulls off these levels
-//     (v1 pages always; v2 pages with no level data);
-//   - otherwise a v2 header's num_nulls claim, which is verified here with
-//     a compare-only pass. That pass costs far less than the RLE expansion
-//     plus per-row mask work it buys, and the caller runs it only after
-//     the census has already accepted the page.
+// dictRunPathEligible requires k dictionary indices to name k consecutive ROWS.
+// NULLs break that premise; those pages use expansion and its single NULL rule.
+// Establish no NULLs from definition levels, not an untrusted v2 header:
+// accept absent levels (REQUIRED), or NullsFromLevels with NumNulls==0;
+// otherwise verify each level with a compare-only pass after page census.
+// Truncated levels decline so expansion reports the error.
+// See docs/internals/scan-dictionary-run-row-alignment.md for the design.
 func dictRunPathEligible(page *pqt.PageData, n int) bool {
 	if page.DictIndexRLE == nil || page.NumNulls != 0 {
 		return false
