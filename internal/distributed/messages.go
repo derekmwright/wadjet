@@ -386,35 +386,15 @@ type Task struct {
 	// is intentional and safe.
 	Operators []OpSpec `json:"operators,omitempty"`
 
-	// DeleteMarkers carries the merge-on-read DELETE state for every
-	// base-table parquet file this task reads, under whichever carrier the
-	// file arrives on — Files, Inputs, PreScannedInputs, ScanFileFilter,
-	// BuildFiles, FusedJoins[].BuildFiles or Operators[].{InputFiles,
-	// BuildFiles}. One task-level list rather than a field per carrier,
-	// because the marker is a property of the FILE, not of the alias that
-	// happens to read it: a self-join reading one file twice must skip the
-	// same rows on both sides, and the coordinator cannot enumerate the
-	// carriers a future dispatcher will invent. Stamped centrally in
-	// Scheduler.PublishTasks from the plan's one manifest read, so every
-	// task of a query — retries included — sees ONE catalog revision's
-	// delete state (#491).
-	//
-	// A DELETE records the file-absolute row indices it removed rather than
-	// rewriting parquet; a scan that ignores them answers with the deleted
-	// rows still in it. The single-process engine reads the manifest
-	// itself; the DAG's worker has no business doing so (two tasks of one
-	// stage could then read different revisions and a join would see a row
-	// on one side and not the other), so the plan declares it — the same
-	// argument as ColumnTypes and AggSpec.OutputType.
-	//
-	// Empty for every task over a table with no deletes, which is the
-	// common case and costs nothing on the wire.
-	//
-	// ADR-0010 WHOLESALE-DEPLOY RULE: a worker that predates this field
-	// unmarshals it away and answers with the deleted rows — silently, and
-	// only for the fraction of a stage's tasks that landed on the old
-	// binary. Coordinator and workers deploy together, never rolling, for
-	// exactly the reason the partition-assignment function does.
+	// DeleteMarkers carries FILE-absolute merge-on-read state for every base-table
+	// carrier: Files/Inputs/PreScannedInputs/ScanFileFilter/BuildFiles, fused joins
+	// and operator input/build files. Self-join aliases must skip identical rows.
+	// Scheduler.PublishTasks stamps the plan's ONE manifest snapshot for all tasks
+	// and retries (#491); workers must not independently reread catalog revisions.
+	// No deletes means an empty omitted wire field.
+	// ADR-0010 requires wholesale coordinator/worker deployment: old workers drop
+	// this field and silently resurrect deleted rows on their fraction of tasks.
+	// See docs/internals/distributed-task-delete-snapshot.md for the design.
 	DeleteMarkers []DeleteSpec `json:"delete_markers,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
@@ -624,27 +604,14 @@ type OpSpec struct {
 	// GroupByCols is what this aggregate PUBLISHES each key as — the name the
 	// stage above and the gather read. Empty = scalar aggregate.
 	GroupByCols []string `json:"group_by_cols,omitempty"`
-	// GroupByResolve is index-aligned with GroupByCols: what THIS fragment
-	// resolves each key by, against the columns its own input carries. It is
-	// a different string from the published name whenever the key names a
-	// derived table's alias — a join's stream carries `w` where the query
-	// wrote `x.w`, and `y.w` where the join qualified a duplicate — and it is
-	// the hidden-slot marker (Computed) for a key the fragment must
-	// materialize.
-	//
-	// The worker decides NOTHING about a key by parsing text. It used to:
-	// `derivedGroupKeys` re-derived "is this key derived?" from the spelling,
-	// which cannot say (`GROUP BY "g + 1"` names a column and `GROUP BY g + 1`
-	// is arithmetic, and both are recorded as `g + 1`), so a key whose two
-	// names differ collapsed the whole table into one NULL group (ADR-0026
-	// §2/§2c, #736, #781, #794).
-	//
-	// Absent — an older coordinator — the worker falls back to that parse,
-	// which is exactly the behaviour this field replaces, for the reason
-	// GroupByTypes tolerates the same absence. A NEWER coordinator talking to
-	// an older worker degrades the same way and no further: GroupByCols is
-	// the published name, which for every shape the old parse got right is
-	// also the spelling it computed from.
+	// GroupByResolve aligns with GroupByCols and names each key in THIS fragment's
+	// input; Computed marks required materialization, separate from published names.
+	// Workers must not infer key identity from text: quoted names and arithmetic
+	// can have identical spelling (ADR-0026 §2/§2c; #736, #781, #794).
+	// Absent fields retain the legacy parser fallback, as GroupByTypes does;
+	// old workers likewise ignore the new resolution. That compatibility fallback
+	// retains old limitations and must not be mistaken for correct mixed-version semantics.
+	// See docs/internals/distributed-group-key-resolution.md for the design.
 	GroupByResolve []GroupKeyResolveSpec `json:"group_by_resolve,omitempty"`
 	// GroupByTypes carries the plan-time parquet.TypeID (as int) of each
 	// DERIVED GROUP BY key expression, keyed by the exact key text in
@@ -772,27 +739,13 @@ type PreComputedAggregate struct {
 	CacheFiles  []string  `json:"cache_files"`
 }
 
-// ColumnSpec is one column of a plan-declared schema on the wire: the name
-// and the parquet.TypeID as an int, matching AggSpec.OutputType's encoding.
-//
-// Precision, Scale and Dimension are the parameters a bare TypeID does not
-// carry — DECIMAL's two, VECTOR's one. A schema declared for a SCAN needs
-// them (OpSpec.ColumnTypes, #423): the reader allocates a VECTOR's storage
-// from its dimension and renders a DECIMAL from its scale, so a spec that
-// dropped them would declare a type the worker cannot build. They are
-// omitempty and zero for every other type, so the join-side declarations
-// (BuildSchema / ProbeSchema) encode exactly as they did before.
-//
-// ElementType and Fields carry a CONTAINER's shape, and they exist for the
-// same reason the three scalars above do: a bare TypeID that says ROW says
-// nothing about the ROW's fields, so a declaration that stopped at the top
-// level could not tell the worker what an IPv6 inside that ROW is. Nine of
-// this engine's types have no parquet annotation, so for a file written before
-// the wadjet.schema footer key existed the catalog is the ONLY place a nested
-// leaf's type survives — and it could not cross the wire (#608). ARRAY and MAP
-// use ElementType, ROW uses Fields, exactly as parquet.Column does. Both are
-// omitempty, so a flat declaration encodes byte-for-byte as it did before and
-// a worker that ignores them behaves exactly as it did.
+// ColumnSpec carries name and integer TypeID plus DECIMAL precision/scale and
+// VECTOR dimension; a bare ID cannot allocate/render those columns (#423).
+// ARRAY/MAP use ElementType and ROW uses Fields, recursively matching
+// parquet.Column so catalog-only nested leaf types survive the wire (#608).
+// Parameters/shape are omitted when unused; flat encodings stay unchanged.
+// An older worker ignoring nested declarations retains its old limitations.
+// See docs/internals/distributed-recursive-column-declaration.md for the design.
 type ColumnSpec struct {
 	Name        string       `json:"name"`
 	Type        int          `json:"type"`
@@ -872,28 +825,13 @@ type AggSpec struct {
 	// before the aggregate so HashAggregate sees a column named
 	// InputCol.
 	InputExpr string `json:"input_expr,omitempty"`
-	// OutputType is the plan-time parquet.TypeID of this aggregate's
-	// output column, carried as a plain int so the wire package stays free
-	// of the storage dependency.
-	//
-	// Nil means "the planner did not declare one" — either an older
-	// coordinator that predates the field, or a MIN/MAX whose input
-	// column the planner could not resolve to a catalog type. Workers
-	// fall back to deriving the type from Func alone in that case, and
-	// any decision that needs a TRUSTWORTHY type (emitting an ungrouped
-	// aggregate's identity row over zero input, where there is no input
-	// schema to read it from) must decline rather than guess.
-	//
-	// COUNT-family, SUM and AVG are input-independent in this engine, so
-	// the planner always declares them. MIN/MAX follow their input
-	// column, and are declared only when it resolves to exactly one
-	// catalog column type.
-	//
-	// A POINTER since #354, for WindowColSpec.OutputType's reason:
-	// parquet.TypeID's zero value is BOOL, so the plain int this used to be
-	// could not tell a declared BOOL_AND/BOOL_OR output from an absent
-	// declaration — the DAG read it as undeclared and fell back to a guess,
-	// reinstating #345's silent-drop shape for exactly one type.
+	// OutputType is a pointer to the plan-time integer TypeID; nil means undeclared,
+	// while zero is a REAL BOOL declaration (#354, #345), never an absence sentinel.
+	// Undeclared types use Func-only legacy fallback; decisions needing a trustworthy
+	// type, including zero-input identity emission, must decline rather than guess.
+	// COUNT-family is input-independent; SUM/AVG and MIN/MAX declarations follow
+	// their resolver's input-type rules. Preserve exact DECIMAL output metadata.
+	// See docs/internals/distributed-aggregate-output-type.md for the design.
 	OutputType *int `json:"output_type,omitempty"`
 	// OutputPrecision/OutputScale carry a DECIMAL OutputType's (p,s), for
 	// InputPrecision/InputScale's reason on the output side: a .wshf header
