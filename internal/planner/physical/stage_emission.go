@@ -1332,9 +1332,6 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 					orderBy[i].Column = c.Name
 				}
 			}
-			if len(winAliases) > 0 {
-				materializeWindowAliasKeys((*stages)[preCount:], winAliases)
-			}
 			// …and the ARGUMENT, which exec.Window also reads by name off
 			// the input batch: `SUM(v) OVER ()` over `SELECT c_i64 AS v`
 			// found no vector called `v` and wrote NULL in every row, the
@@ -1354,6 +1351,26 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				}
 			} else if src := derivedAliasSourceColumn(inputCol, winChild); src != "" {
 				inputCol = cleanExpr(src)
+			} else if c := derivedAliasColumnFor(inputCol, winChild); c.Expr != "" {
+				// A COMPUTED derived alias has no source column to rewrite
+				// to, so until now the argument travelled as a name the
+				// window's input never carried and exec.Window wrote NULL in
+				// every row — `SUM(v) OVER ()` over
+				// `(SELECT BITWISE_AND(f4,18) AS v FROM tcpflow) s` answered
+				// NULL on all three DAG arms and 36 on the single one, in
+				// silence (#1018 round 5; the argument half of #770).
+				//
+				// The repair is the one the PARTITION BY and ORDER BY keys
+				// two loops up already take: MATERIALIZE the alias on the
+				// producing stage under its own name, so the window reads a
+				// vector that exists. Same helper, same producer, same
+				// declared type — the argument is not a different kind of
+				// thing from a key.
+				winAliases = append(winAliases, c)
+				inputCol = c.Name
+			}
+			if len(winAliases) > 0 {
+				materializeWindowAliasKeys((*stages)[preCount:], winAliases)
 			}
 			winCols = append(winCols, WindowColSpec{
 				Func:     we.Func,

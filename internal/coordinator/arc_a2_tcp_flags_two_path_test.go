@@ -396,6 +396,13 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmetic(t *testing.T) {
 			`SELECT SUM(v) AS v FROM (SELECT BITWISE_AND(f4,18) AS v FROM tcpflow WHERE id <= 4
 			  UNION ALL SELECT BITWISE_AND(f8,18) AS v FROM tcpflow WHERE id <= 4) s`,
 			[]string{"v=72"}},
+		{"windowed_sum_over_a_derived_narrow_mask_is_bigint",
+			`SELECT SUM(v) OVER () AS v FROM (SELECT BITWISE_AND(f4,18) AS v FROM tcpflow WHERE id <= 4) s`,
+			[]string{"v=int64:36", "v=int64:36", "v=int64:36", "v=int64:36"}},
+		{"windowed_sum_over_a_derived_wide_mask_is_numeric",
+			`SELECT SUM(v) OVER () AS v FROM (SELECT BITWISE_AND(f8,18) AS v FROM tcpflow WHERE id <= 4) s`,
+			[]string{"v=36", "v=36", "v=36", "v=36"}},
+
 		// ---- a shape the pushdown DECLINES (computed argument): the residual
 		// exec filter must answer what the pushed spelling answers.
 		//

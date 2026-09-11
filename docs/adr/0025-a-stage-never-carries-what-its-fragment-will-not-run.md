@@ -1,6 +1,6 @@
 # ADR-0025: A stage never carries a predicate or a projection its fragment will not run
 
-Status: Accepted (2026-08-29, #656; amended 2026-09-03 by arc S1 — a scan's read set is a plan-time fact, and a column the gather computes is typed by the plan; amended 2026-09-06 by arc H2 — a consumer that resolves a column by a SECOND spelling is NOT SETTLED, and #770 is deferred with its census; SETTLED 2026-09-07 by arc J2 — a consumer binds through the identity its PRODUCER published, and the payload is widened only for a value no published spelling reaches (#770, #947, #949))
+Status: Accepted (2026-08-29, #656; amended 2026-09-03 by arc S1 — a scan's read set is a plan-time fact, and a column the gather computes is typed by the plan; amended 2026-09-06 by arc H2 — a consumer that resolves a column by a SECOND spelling is NOT SETTLED, and #770 is deferred with its census; SETTLED 2026-09-07 by arc J2 — a consumer binds through the identity its PRODUCER published, and the payload is widened only for a value no published spelling reaches (#770, #947, #949); amended 2026-09-11 by arc A2 — a WINDOW ARGUMENT naming a computed derived alias is materialized by its producer, exactly as a window KEY already was (#1018))
 
 ## Context
 
@@ -395,6 +395,34 @@ expression (planner-only; the wire carries neither), and
 it, because `Column` is rewritten by several passes before planning ends and
 "which OUTPUT column does this term name" cannot be asked of the rewritten
 field.
+
+### The same rule at a SINGLE relation: a window argument naming a computed derived alias (2026-09-11, #1018 round 5)
+
+The decision above is about a JOIN's published identity. The identical gap
+exists one producer over, with no join in the query at all, and it was a
+silent wrong answer on every DAG arm:
+
+```sql
+SELECT SUM(v) OVER () AS w FROM (SELECT BITWISE_AND(f4,18) AS v FROM tcpflow) s
+```
+
+answered NULL in every row on `dag`, `dag-shuffled` and `dag-morsel4`, and 36
+— PostgreSQL's number — on the single-process path. `SUM(v)` over a derived
+table's BARE rename is fine (`derivedAliasSourceColumn` re-spells it to the
+source column the stage publishes), and a computed alias in PARTITION BY or
+ORDER BY is fine (those keys are MATERIALIZED under their own name by
+`materializeWindowAliasKeys`). Only the ARGUMENT had neither: a computed alias
+has no source column to re-spell to, so the name travelled to the worker and
+`exec.Window` found no vector of that name and wrote NULL.
+
+The repair is the rule this section states, with the argument treated as what
+it is — not a different kind of thing from a key. `walkStages`' `NodeWindow`
+arm now asks `derivedAliasColumnFor` for the argument too and adds it to the
+same `winAliases` list the keys use, so the producing stage publishes the
+value under the name the window will read. Gated on all five arms by
+`coordinator.TestTheTCPFlagFamilyAnswersPostgresBitArithmetic`'s
+`windowed_sum_over_a_derived_*` cells; removing the argument's arm restores
+the NULL rows on the three DAG arms and leaves the single ones passing.
 
 ### Why the two earlier repairs were not the decision
 
