@@ -293,3 +293,52 @@ func TestFromHexRequiresTheWholeString(t *testing.T) {
 		}
 	}
 }
+
+// THE EXPRESSION SITES THAT STILL READ AN ARGUMENT THROUGH A DOUBLE
+// (#966 round 2, P2).
+//
+// The bitwise family reads its operands exactly now. The claim that came with
+// that fix — that no remaining `int64(ToFloat64(` site in this package can be
+// handed a value a double cannot hold — is FALSE, and this is the measurement
+// that says so. Three of them take an ordinary callable argument:
+//
+//	PARSE_BYTES('9007199254740993')          9007199254740992   (a digit lost)
+//	PARSE_RATE('9007199254740993')           9007199254740992
+//	HUMAN_READABLE_SECONDS(9007199254740993) ends in 32 seconds, not 33
+//
+// The real bound is narrower and is what this pin states: the remaining sites
+// are bounded by their DOMAIN being reached in practice (an epoch, a code
+// point, a duration), not by an input guard, and a caller who hands one a
+// literal past 2^53 gets the nearest double. The values below are today's, and
+// they reproduce unchanged at this arc's base — they are a residual this arc
+// declines to widen into, not a regression.
+//
+// It is a FAIL-ON-CHANGE pin. When these sites are made exact, this test fails
+// and deleting it is the proof; it must not be edited to track a new wrong
+// answer.
+func TestTheSitesThatStillReadAnArgumentThroughADouble(t *testing.T) {
+	for _, tc := range []struct {
+		fn   string
+		args []any
+		want any
+	}{
+		{"parse_bytes", []any{"9007199254740993"}, int64(9007199254740992)},
+		{"parse_rate", []any{"9007199254740993"}, int64(9007199254740992)},
+		{"human_readable_seconds", []any{int64(9007199254740993)},
+			"104249991374 days, 7 hours, 36 minutes, 32 seconds"},
+		{"from_unixtime", []any{int64(9007199254740993)}, "285428751-11-12 07:36:32"},
+		// And the control: the same functions are exact below 2^53, so the pin
+		// is about the carrier and not about the functions being broken.
+		{"parse_bytes", []any{"9007199254740992"}, int64(9007199254740992)},
+		{"parse_bytes", []any{"4503599627370497"}, int64(4503599627370497)},
+		{"human_readable_seconds", []any{int64(4503599627370497)},
+			"52124995687 days, 3 hours, 48 minutes, 17 seconds"},
+	} {
+		got := DefaultRegistry.Lookup(tc.fn)(tc.args)
+		if got != tc.want {
+			t.Errorf("%s(%v) = %#v, want %#v.\nIf this site became EXACT, delete the "+
+				"row — the pin is a record of a residual, not an expectation that it "+
+				"stay wrong.", tc.fn, tc.args, got, tc.want)
+		}
+	}
+}

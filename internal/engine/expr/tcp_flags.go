@@ -353,9 +353,29 @@ func describeFlagArg(v any) string {
 // It exists for the same reason ColEmptyStr and ColShapeLen do (shape_funcs.go)
 // and is built the same way — a specialized BoolNullExpr holding the generic
 // FuncCall as its Fallback, so every input shape it does not handle answers
-// exactly as it did before. The column's TYPE is resolved once per batch and
-// the values are read out of the typed Int32Data/Int64Data slice; the generic
-// path boxes every row into an `any` and re-reads the mask arguments per row.
+// exactly as it did before. What it saves per row is the BOXING and the mask
+// work: the value is read out of the column's own Int32Data/Int64Data slice
+// rather than through an `any`, and the names were folded into one int64 at
+// compile time instead of being re-read on every row.
+//
+// WHAT IT IS NOT, and an earlier version of this comment claimed it was
+// (#966 round 2, P3): it is not a VECTOR kernel that dispatches once per batch
+// and writes selection indices. `exec.Filter` calls a
+// `func(*batch.RecordBatch, int) bool` — that is the seam every predicate in
+// the engine goes through, not this family's — so EvalBoolNull is entered per
+// row and its `switch v.Type` runs per row with it. The switch is also not
+// pure dispatch: it is the SAFETY check that the column this batch carries is
+// still the shape the kernel reads, which is exactly what ColEmptyStr's
+// `v.Type != batch.TypeString` guard is, and hoisting it onto the cached
+// ColRef type would trust a resolution made from a different batch.
+//
+// The vectorized flag kernel exists, and it is the one that matters: the scan
+// evaluates the mask once per DICTIONARY ENTRY or over the plain page's own
+// typed slice and hands back row spans (scan/flag_filter.go,
+// scan/row_filter.go). This is the residual path for the rows that do not
+// reach it — a non-catalog source, the kill switch off, a fragment's leftover
+// conjunct. A batch-level boolean seam for exec.Filter would serve every
+// operator and is not this family's to add.
 //
 // Restricted to TypeInt32 and TypeInt64 deliberately. A PORT or PROTOCOL
 // column also stores in Int32Data, but its boxed form goes through the
