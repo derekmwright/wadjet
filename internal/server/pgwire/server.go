@@ -627,28 +627,11 @@ func (c *pgConn) handleSet(sql string) {
 	c.sessionVars[key] = val
 }
 
-// parseCopySQL extracts the table name and optional column list from a
-// COPY table [(col1, col2, ...)] FROM STDIN statement.
-// copyIdent reads ONE identifier out of a COPY statement the way the lexer
-// reads every other identifier: an unquoted one FOLDS, a delimited one keeps
-// its bytes and loses only its quotes (#731).
-//
-// COPY is hand-parsed rather than lexed, and this step used to be
-// `strings.Trim(col, "\"")` — which strips the quotes and folds nothing, so by
-// the time the name reached a resolver an unquoted `WatchID` and a delimited
-// `"WatchID"` were the same string and the rule that distinguishes them
-// ("byte-exact, then a unique case-insensitive match FOR A REFERENCE THAT IS
-// ITSELF FOLDED") had nothing left to key on. Measured over a LOWER-case
-// schema `lhits(watchid, useragent)` — so this was never a CamelCase-only
-// problem:
-//
-//	COPY lhits (watchid, useragent)  ACCEPTED
-//	COPY lhits (WatchID, UserAgent)  REFUSED, and PostgreSQL accepts it
-//	COPY lhits (WATCHID, USERAGENT)  REFUSED, and PostgreSQL accepts it
-//
-// and over a CamelCase one it went the other way: `COPY hits ("useragent")`
-// was ACCEPTED against a column spelled `UserAgent`, where PostgreSQL raises
-// 42703 for the delimited name.
+// copyIdent reads one COPY identifier using the lexer's naming rule (#731):
+// unquoted names fold; delimited names preserve bytes and unescape doubled quotes.
+// Never merely trim quotes and erase the distinction before resolution.
+// parseCopySQL uses it for COPY table [(columns)] FROM STDIN names.
+// See docs/internals/pgwire-copy-identifier-folding.md for the design.
 func copyIdent(s string) string {
 	s = strings.TrimSpace(s)
 	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
@@ -789,27 +772,13 @@ func (c *pgConn) handleCopyIn(sql string) {
 		}
 	}
 
-	// COPY is a WRITE, and it authorizes BEFORE it invites the client to
-	// stream — before `G` and before the ingester exists (#938).
-	//
-	// It used to authorize nowhere at all. Unlike INSERT, which reaches
-	// `wadjet.DB.ExecuteParsed` and its `auth.EnforceDMLPolicies` call, COPY
-	// writes through `ingest.Ingester` directly, so a role granted only
-	// `read` was handed CopyInResponse and its rows landed. That is the
-	// bulk-ingest path: the largest write on this door was the one with no
-	// decision on it.
-	//
-	// The SECOND question: does the COLUMN LIST survive the identity's column
-	// policy? `auth.EnforceDMLPolicies` over a synthesized INSERT — a COPY
-	// column list is an INSERT target list, so it earns INSERT's answer
-	// (naming a DENIED column is 42703) and no other. Forking a COPY-only rule
-	// here would be a second reading of one question. The first question — may
-	// this identity WRITE this relation — was asked above, before the
-	// relation's existence was reported.
-	//
-	// A refusal is sent INSTEAD of CopyInResponse, so the connection stays in
-	// the ordinary message loop and the caller gets its ReadyForQuery; no row
-	// is consumed and the ingester is never constructed.
+	// COPY must authorize WRITE before CopyInResponse ('G') or constructing an
+	// ingester (#938), including the relation decision before exposing existence.
+	// Check the column list through EnforceDMLPolicies on a synthesized INSERT,
+	// not a COPY-specific policy rule: denied targets get INSERT's 42703.
+	// Refuse instead of CopyInResponse; consume no rows and keep the ordinary
+	// message loop/ReadyForQuery available.
+	// See docs/internals/pgwire-copy-authorization-boundary.md for the design.
 	if err := auth.EnforceDMLPolicies(ctx, c.authProvider, c.db.Catalog(), &plansql.ParsedQuery{
 		Type: plansql.QueryInsert,
 		// The column list as the STATEMENT gave it (resolved to the schema's
@@ -2550,28 +2519,13 @@ func tableOID(name string) int {
 	return base + int(h%(1<<31-base))
 }
 
-// pgTypeOID maps Wadjet types to PostgreSQL type OIDs.
-// pgColumnOID is pgTypeOID with the whole column meta in hand, for the one
-// type whose OID depends on more than its name: a STRING cast to the VARCHAR
-// family is PostgreSQL's `character varying` (1043) rather than unconstrained
-// `text` (25), and a declared LENGTH rides in the type modifier beside it
-// (#838).
-//
-// The OID follows the DESTINATION NAME, not the presence of a length.
-// `CAST(x AS VARCHAR)` describes as 1043 at typmod -1 on the server, exactly
-// as `CAST(x AS VARCHAR(4))` describes as 1043 at typmod 8 — the length is a
-// constraint on a varchar, not what makes it one, and sending 25 for the
-// unparameterized spelling made the same cast change type when its modifier
-// was dropped (round-1 review, P2). StringLength carries both answers:
-// positive is a length, -1 is `character varying` unconstrained, 0 is text.
-//
-// `character(n)` (1042) is deliberately NOT sent for `CAST(x AS CHAR(n))`.
-// PostgreSQL's bpchar PADS a short value to n and then strips the blanks again
-// for length(), for `||` and for every comparison; this engine has one
-// TypeString and none of that, so declaring 1042 would name a type whose three
-// defining behaviours it does not implement. `character varying(n)` states
-// exactly what the value IS — at most n characters, compared by bytes — and
-// the padding residual is recorded in ADR-0012 item 5.
+// pgColumnOID uses the whole meta: TypeString with StringLength != 0 is
+// VARCHAR/1043, not text/25 (#838). Positive length is constrained; -1 is
+// unconstrained varchar; zero is text. OID follows destination, not length presence.
+// Do not send CHAR/bpchar1042: this engine does not implement its padding and
+// trailing-blank rules. Varchar states the implemented bounded-character value;
+// the padding residual is ADR-0012 item 5.
+// See docs/internals/pgwire-string-column-oid.md for the design.
 func pgColumnOID(m wadjet.ColumnMeta) int {
 	if m.TypeID == parquet.TypeString && m.StringLength != 0 {
 		return oidVarchar
@@ -3517,30 +3471,12 @@ func (c *pgConn) sendTypedRowDescription(metas []wadjet.ColumnMeta, fmtCodes []i
 	c.sendMsg('T', c.buf)
 }
 
-// TypeMod returns the PostgreSQL type modifier (atttypmod) for a result
-// column, or -1 for a type that has none. It is exported so the differential
-// oracle asserts the typmod a client is HANDED rather than a copy of this
-// rule (benchmarks/tpch, ADR-0024 item 5).
-//
-// The modifier is where PostgreSQL keeps the part of a declaration the OID
-// does not carry: numeric's (precision, scale), varchar/bpchar's length,
-// time/timestamp/interval's second precision. -1 means "unconstrained", which
-// is protocol-legal and is what every unparameterised type sends — so writing
-// the constant -1 for everything was less information rather than wrong
-// information, and it went unnoticed until DECIMAL started declaring OID 1700
-// (#454). What a client loses is ResultSetMetaData.getPrecision()/getScale():
-// a column declared DECIMAL(9,2) reports 0 or "unlimited", and a tool that
-// sizes a display column or round-trips DDL from a result set gets it wrong.
-//
-// numeric packs the pair as ((precision << 16) | scale) + VARHDRSZ, exactly as
-// PostgreSQL's numerictypmodin does (utils/adt/numeric.c). Precision 0 means
-// the declaration did not reach us — a plan-declared schema for a zero-row
-// result, an inferred type — and an unconstrained numeric is the honest
-// answer there, not a fabricated (0,0).
-//
-// The switch is keyed on the wadjet TypeID rather than the OID so that a type
-// which later gains a parameter (a VARCHAR(n), a TIME(n)) is added here and
-// not in the wire writer.
+// TypeMod exposes the actual client typmod for oracle checks (ADR-0024 item 5).
+// NUMERIC packs ((precision<<16)|scale)+VARHDRSZ (#454); absent precision or
+// WireUnconstrained emits -1, never invented (0,0). VARCHAR length emits n+4;
+// unconstrained types emit -1. Key on engine TypeID, not wire OID, when adding
+// parameterized types; keep the declaration's information at the wire boundary.
+// See docs/internals/pgwire-result-type-modifiers.md for the design.
 func TypeMod(m wadjet.ColumnMeta) int32 {
 	switch m.TypeID {
 	case parquet.TypeDecimal:
@@ -3599,27 +3535,13 @@ func pgTypeSize(oid int) int16 {
 	}
 }
 
-// timestampColumns returns a mask over columns marking those the
-// RowDescription declared as TIMESTAMP (OID 1114).
-//
-// The engine boxes a timestamp as epoch milliseconds — the right thing for
-// every compute path that shares that boxing — but a client reads the value
-// according to the OID we already told it, so the send path has to convert.
-// Without this the wire carried "826727136000" under a declared `timestamp`,
-// which psql prints back verbatim and a typed client (pgJDBC, DataGrip,
-// SQLAlchemy) fails to parse (#321).
-//
-// Returns nil when no column is a timestamp, so the common query pays one
-// nil check and nothing else. Metas normally arrive in column order; the
-// name lookup is the fallback for callers that reorder or rename.
-// The same reasoning covers DATE, which the engine boxes as a rendered
-// string: under a binary format code those text bytes were written beneath
-// the declared OID 1082, whose value is a 4-byte day count, so the client
-// decoded whatever the string happened to contain.
-//
-// Returns nil when no column needs conversion, so the common query pays one
-// nil check and nothing else. Metas normally arrive in column order; the
-// name lookup is the fallback for callers that reorder or rename.
+// sendColumnTypes marks outputs whose boxed form needs wire conversion (#321).
+// TIMESTAMP boxes epoch milliseconds; DATE boxes text but binary OID1082 needs
+// four-byte days. DECIMAL and UUID likewise have distinct binary encodings.
+// Match metas by position AND name, then name lookup for reordered columns.
+// Return nil if nothing needs conversion so ordinary rows pay only a nil check;
+// never send boxed text bytes under an incompatible declared binary OID.
+// See docs/internals/pgwire-send-column-conversions.md for the design.
 func sendColumnTypes(columns []string, metas []wadjet.ColumnMeta) []parquet.TypeID {
 	if len(metas) == 0 {
 		return nil

@@ -284,29 +284,13 @@ func isNestedTypeID(t parquet.TypeID) bool {
 	return false
 }
 
-// nestedColumnSchemas resolves the declared structure of every ROW/ARRAY/MAP
-// output column for the LEGACY (non-coord) query path, by matching it, by
-// name, against a column of the same name in a catalog table the statement
-// references — columnParamOIDs' technique, applied to a different question:
-// not which wire OID a BOUND PARAMETER should decode as, but which field
-// order and element type an OUTPUT VALUE should render with. The coord path
-// has an exact answer instead (queryViaCoord reads it straight off the
-// query's own output schema, which also covers a computed expression); this
-// is the best this layer can do without that.
-//
-// A column two tables carry under the same name but a DIFFERENT top-level
-// type is dropped, the same conflict rule columnParamOIDs applies — a wrong
-// confident structure would silently drop fields formatPgComposite cannot
-// find under it, which is worse than the order-agnostic fallback.
-//
-// Skipped entirely (nil, no catalog round trip) when metas says no output
-// column is a nested type, which is the ordinary query.
-//
-// Returns byName only (nestedFieldSchema.ordered left nil): entries here
-// come from whichever catalog table columns happen to share a name with
-// something in the SQL text, which has no positional relationship to the
-// output column list — unlike the coord path's nestedSchemaByName, there is
-// no positional fallback to offer.
+// nestedColumnSchemas first uses the result metas' own declared nested shape,
+// then falls back to catalog columns matched by name for the legacy path.
+// Conflicting top-level types drop the name rather than confidently apply a
+// wrong structure and lose fields. Skip all lookup if no output is nested.
+// Only result-derived declarations may supply ordered positional fallback;
+// catalog guesses return byName only. Coordinator output schema is authoritative.
+// See docs/internals/pgwire-legacy-nested-schema-resolution.md for the design.
 func (c *pgConn) nestedColumnSchemas(sql string, metas []wadjet.ColumnMeta) *nestedFieldSchema {
 	needed := false
 	for _, m := range metas {
@@ -362,33 +346,14 @@ func (c *pgConn) nestedColumnSchemas(sql string, metas []wadjet.ColumnMeta) *nes
 	if len(out) == 0 {
 		return nil
 	}
-	// This map is keyed by the CATALOG's spelling and looked up by an OUTPUT
-	// column name — a reference, which an unquoted identifier folds to lower
-	// case at the lexer (#731). CamelCase column names are ordinary in a
-	// catalog, so `SELECT Attrs FROM t` over a column declared `Attrs` missed
-	// here; `ordered` is deliberately nil on this path, so the positional
-	// fallback could not save it either. The consequence is wire-visible and
-	// silent: `formatPgValueTyped(val, nil)` renders a ROW in SORTED-KEY
-	// order rather than declared field order, and loses the ARRAY/MAP
-	// distinction — `(9,A)` came back as `(A,9)`. Publish the folded spelling
-	// as an alias so a folded reference finds its declaration; a byte-exact
-	// entry is never shadowed, and the `conflicting` rule above has already
-	// removed the names two tables spell differently.
-	//
-	// TWO catalog names that fold to ONE key are AMBIGUOUS and must resolve to
-	// nothing — batch/schema.go item 3's rule, which the hand-rolled map here
-	// has to carry itself. The `conflicting` pass above cannot see this case:
-	// it keys by the CATALOG spelling, so `Attrs` and `ATTRS` are two distinct
-	// entries that are never compared, and both are TypeRow anyway. Without
-	// the guard both are "untaken" and the winner is whichever Go's map
-	// iteration wrote last: over `nsa.Attrs ROW(zeta,alpha)` joined to
-	// `nsb.ATTRS`, 25 identical runs of
-	// `SELECT a.Attrs FROM nsa a JOIN nsb b ON a.id = b.id` rendered `(9,A)`
-	// twice and `(A,9)` 23 times — the WIRE BYTES changing run to run for one
-	// query over one fixture, which is not one of ADR-0013's eight legal
-	// classes of nondeterminism. Dropping the ambiguous alias renders the
-	// declaration-less way, which is the miss it is, and the same way every
-	// time.
+	// Publish unique folded aliases for catalog names so unquoted output references
+	// find their nested declaration (#731), without shadowing byte-exact entries.
+	// Two catalog names folding to one alias are ambiguous: drop that alias,
+	// matching batch/schema.go item 3; never let map iteration select field order
+	// (ADR-0013). Top-level-type conflicts alone cannot detect this case.
+	// These catalog guesses have no positional fallback; a miss renders through
+	// the deterministic declaration-less path.
+	// See docs/internals/pgwire-folded-nested-schema-aliases.md for the design.
 	aliases := make(map[string]parquet.Column)
 	ambiguous := make(map[string]bool)
 	for name, col := range out {

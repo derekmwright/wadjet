@@ -316,33 +316,14 @@ const (
 	pgNumericSignNegInf   uint16 = 0xF000
 )
 
-// renderBinaryNumeric decodes PostgreSQL's binary `numeric` wire format —
-//
-//	uint16 ndigits, int16 weight, uint16 sign, uint16 dscale, int16 digits[ndigits]
-//
-// (numeric_recv in the backend reads ndigits with pq_getmsgint(..., uint16),
-// same as sign and dscale; weight is the one signed field — "we allow any
-// int16 for weight", per its own comment) — where the value is
-// sum(digits[i] * 10000^(weight-i)) under sign and dscale
-// is the number of fraction digits to DISPLAY — into the exact decimal TEXT
-// PostgreSQL itself would print for the same value, then hands that text to
-// renderTextParam so the bare-literal path (and its "confirm it's a number"
-// fallback) stays the one place a numeric literal gets written, text or
-// binary.
-//
-// pgx v5 sends this for any parameter whose declared OID is 1700, which
-// paraminfer.go now infers for a placeholder compared against a DECIMAL
-// column — so this is the ordinary path for a Go client, not an exotic one
-// (#464). Before this, oidNumeric fell into the same arm as oidText and the
-// digit-group bytes were read back as if they were ASCII: garbage that
-// failed renderTextParam's number check and went out as a quoted string,
-// comparing a DECIMAL column to text and matching nothing (or, past `>`,
-// coercing in whatever direction that comparison's own fallback took).
-//
-// This is the read side of appendBinaryNumeric/pgNumericDigits (server.go),
-// which encodes the same format for values wadjet SENDS. Neither calls the
-// other, so a header-arithmetic mistake here would not be caught by that
-// side agreeing with itself.
+// renderBinaryNumeric decodes uint16 ndigits, int16 weight, uint16 sign/dscale
+// and base-10000 digits into exact decimal text (#464).
+// Only weight is signed; value is sum(digit[i]*10000^(weight-i)) with sign,
+// while dscale controls displayed fractional digits.
+// Pass text through renderTextParam so text/binary numeric literal emission
+// shares one validation path. appendBinaryNumeric/pgNumericDigits encode the
+// other direction independently; their self-consistency cannot prove this decoder.
+// See docs/internals/pgwire-binary-numeric-input.md for the design.
 func renderBinaryNumeric(raw []byte) (string, error) {
 	if len(raw) < 8 {
 		return "", fmt.Errorf("numeric parameter has %d bytes, want at least 8", len(raw))
