@@ -510,6 +510,71 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmetic(t *testing.T) {
 		{"unknown_name_on_a_null_row_legacy_spelling",
 			`SELECT has_tcp_flag(f8,'BOGUS') AS b FROM tcpflow WHERE id = 15`,
 			`TCP flag name "BOGUS" not recognized`},
+
+		// EVERY EXPRESSION POSITION, ON BOTH PLANNING PATHS (#1018 round 6,
+		// B1). Round 5 folded the constant name at COMPILATION, which the
+		// single-process path reaches while it PLANS and a DAG stage's
+		// fragment reaches only when a TASK RUNS. So a position whose stage
+		// received no rows was never folded: these four raised 22023 on
+		// `single` and `single+budget` and answered ZERO ROWS AND NO ERROR on
+		// `dag`, `dag-shuffled` and `dag-morsel4`, with every routing counter
+		// flat — the query really did run as a DAG. Their `_reached` twins,
+		// over the same table with the emptying predicate removed, were 22023
+		// on every arm: whether a typo was an error depended on the data AND
+		// on the plan shape.
+		//
+		// The refusal is now the BINDER's (physical.refuseUnknownFlagNames),
+		// which Plan and PlanDistributed both run before any stage exists.
+		// The pair — empty and reached — is the claim; either alone is not.
+		{"position_having_empty",
+			`SELECT id AS n FROM tcpflow WHERE id < 0 GROUP BY id HAVING COUNT(*) > 0 AND tcp_flags_has_all(MIN(f8),'BOGUS')`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"position_having_reached",
+			`SELECT id AS n FROM tcpflow GROUP BY id HAVING COUNT(*) > 0 AND tcp_flags_has_all(MIN(f8),'BOGUS')`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"position_order_by_empty",
+			`SELECT id AS n FROM tcpflow WHERE id < 0 ORDER BY tcp_flag_mask('BOGUS')`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"position_order_by_reached",
+			`SELECT id AS n FROM tcpflow ORDER BY tcp_flag_mask('BOGUS') LIMIT 1`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"position_union_arm_empty",
+			`SELECT tcp_flag_mask('SYN') AS n FROM tcpflow WHERE id < 0 UNION ALL SELECT tcp_flag_mask('BOGUS') AS n FROM tcpflow WHERE id < 0`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"position_union_arm_reached",
+			`SELECT tcp_flag_mask('SYN') AS n FROM tcpflow UNION ALL SELECT tcp_flag_mask('BOGUS') AS n FROM tcpflow`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"position_projection_above_group_by_empty",
+			`SELECT id AS g, tcp_flag_mask('BOGUS') AS n FROM tcpflow WHERE id < 0 GROUP BY id`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"position_projection_above_group_by_reached",
+			`SELECT id AS g, tcp_flag_mask('BOGUS') AS n FROM tcpflow GROUP BY id`,
+			`TCP flag name "BOGUS" not recognized`},
+		// A SUBQUERY BODY is the same gap one position over: on the DAG the
+		// EXISTS shape did not even answer, it handed the client the
+		// coordinator's own "EXISTS subquery requires a SubqueryRunner"
+		// (#1018 round 5 review, P3). The family's 22023 is the answer.
+		{"position_exists_subquery_empty",
+			`SELECT COUNT(*) AS n FROM tcpflow t WHERE EXISTS (SELECT 1 FROM tcpflow u WHERE u.id < 0 AND tcp_flags_has_all(u.f8,'BOGUS'))`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"position_in_subquery_empty",
+			`SELECT COUNT(*) AS n FROM tcpflow t WHERE t.id IN (SELECT u.id FROM tcpflow u WHERE u.id < 0 AND tcp_flags_has_all(u.f8,'BOGUS'))`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"position_scalar_subquery_empty",
+			`SELECT (SELECT MAX(tcp_flag_mask('BOGUS')) FROM tcpflow u2 WHERE u2.id < 0) AS v FROM tcpflow WHERE id < 0`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"position_window_argument_empty",
+			`SELECT SUM(tcp_flag_mask('BOGUS')) OVER () AS w FROM tcpflow WHERE id < 0`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"position_derived_body_empty",
+			`SELECT COUNT(*) AS n FROM (SELECT tcp_flag_mask('BOGUS') AS m FROM tcpflow WHERE id < 0) s`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"position_cte_body_empty",
+			`WITH c AS (SELECT tcp_flag_mask('BOGUS') AS m FROM tcpflow WHERE id < 0) SELECT COUNT(*) AS n FROM c`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"position_join_on_empty",
+			`SELECT COUNT(*) AS n FROM tcpflow a JOIN tcpflow b ON a.id = b.id AND tcp_flags_has_all(b.f8,'BOGUS') WHERE a.id < 0`,
+			`TCP flag name "BOGUS" not recognized`},
 	} {
 		t.Run("refusal/"+tc.name, func(t *testing.T) {
 			a2fSQL["refusal/"+tc.name] = tc.sql
@@ -527,6 +592,52 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmetic(t *testing.T) {
 				}
 				if !strings.Contains(err.Error(), tc.msg) {
 					t.Errorf("%s arm: %q does not carry %q", arm.name, err, tc.msg)
+				}
+			}
+		})
+	}
+
+	// THE BOUNDARY OF THE POSITION REFUSAL, FROM THE OTHER SIDE. The same
+	// positions with a name the family KNOWS answer over the same empty input
+	// on every arm: a plan-time fold that fired on one of these would be the
+	// false positive the binder's standing contract forbids. A name supplied
+	// by a COLUMN is not knowable before rows and keeps the per-row refusal,
+	// so it answers here too.
+	for _, tc := range []struct {
+		name, sql string
+		want      []string
+	}{
+		{"position_having_valid", `SELECT id AS n FROM tcpflow WHERE id < 0 GROUP BY id HAVING COUNT(*) > 0 AND tcp_flags_has_all(MIN(f8),'SYN')`, nil},
+		{"position_order_by_valid", `SELECT id AS n FROM tcpflow WHERE id < 0 ORDER BY tcp_flag_mask('SYN')`, nil},
+		{"position_union_arm_valid", `SELECT tcp_flag_mask('SYN') AS n FROM tcpflow WHERE id < 0 UNION ALL SELECT tcp_flag_mask('ACK') AS n FROM tcpflow WHERE id < 0`, nil},
+		{"position_projection_above_group_by_valid", `SELECT id AS g, tcp_flag_mask('SYN') AS n FROM tcpflow WHERE id < 0 GROUP BY id`, nil},
+		{"position_exists_subquery_valid", `SELECT COUNT(*) AS n FROM tcpflow t WHERE EXISTS (SELECT 1 FROM tcpflow u WHERE u.id < 0 AND tcp_flags_has_all(u.f8,'SYN'))`, []string{"n=int64:0"}},
+		{"position_window_argument_valid", `SELECT SUM(tcp_flag_mask('SYN')) OVER () AS w FROM tcpflow WHERE id < 0`, nil},
+		// A name that is NOT a constant is not knowable before rows, so it
+		// keeps the per-row refusal and this ANSWERS over an empty input —
+		// even though the name it would compute is the same misspelling.
+		{"position_having_computed_name_stays_per_row", `SELECT id AS n FROM tcpflow WHERE id < 0 GROUP BY id HAVING tcp_flags_has_all(MIN(f8), UPPER('bogus'))`, nil},
+	} {
+		t.Run("control/"+tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				before := a2fReadRoutes(arm.coord)
+				got, err := arm.run("control/"+tc.name+"/"+arm.name, tc.sql)
+				a2fCheckRoutes(t, arm.name, arm.coord, before, tc.sql)
+				if err != nil {
+					t.Errorf("%s arm REFUSED a query it must answer: %v\n  SQL: %s",
+						arm.name, err, tc.sql)
+					continue
+				}
+				if len(got) != len(tc.want) {
+					t.Errorf("%s arm: %d rows %v, want %d %v\n  SQL: %s",
+						arm.name, len(got), got, len(tc.want), tc.want, tc.sql)
+					continue
+				}
+				for i := range tc.want {
+					if got[i] != tc.want[i] {
+						t.Errorf("%s arm row %d: %q, want %q\n  SQL: %s",
+							arm.name, i, got[i], tc.want[i], tc.sql)
+					}
 				}
 			}
 		})
@@ -676,6 +787,11 @@ var (
 func a2fNonSpilling(sql string) string {
 	u := strings.ToUpper(sql)
 	switch {
+	case strings.Contains(u, "ID < 0") || strings.Contains(u, "ID<0"):
+		// The boundary controls empty the input on purpose. An aggregate that
+		// receives no rows has no accumulator state, so the forced drain has
+		// nothing to drain — which is the point of the cell, not a lapse.
+		return "an input the predicate empties: no rows reach the aggregate"
 	case strings.Contains(u, "GROUP BY"):
 		return "" // must engage
 	case strings.Contains(u, " OVER ("):
@@ -702,6 +818,11 @@ func a2fCheckSpillEngagement(t *testing.T) {
 	a2fEngaged.Range(func(k, v any) bool {
 		name := k.(string)
 		if !strings.HasSuffix(name, "/single+budget+forced-drain") {
+			return true
+		}
+		// A REFUSED query builds no pipeline at all, so there is nothing for
+		// the forced drain to reach. Its claim is the SQLSTATE, not a spill.
+		if strings.HasPrefix(name, "refusal/") {
 			return true
 		}
 		total++

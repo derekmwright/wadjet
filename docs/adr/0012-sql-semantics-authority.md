@@ -2252,22 +2252,58 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      from the DECLARATION, before any row exists. So a flag-NAME argument
      written as a STRING LITERAL — to `tcp_flags_has_all/any/none`,
      `has_tcp_flag`, `tcp_flag_mask` and `tcp_flags_from_string` — is folded
-     at COMPILATION, which is the seam every door goes through whether or not
-     it plans (ADR-0031's DML predicate and the subquery environment compile
-     without planning). The same fold, the same SQLSTATE and the same sentence
-     as the evaluator's, from `expr.RefuseUnknownTCPFlagNameLiterals` and
-     `expr.errUnknownTCPFlagName`: one refusal, two layers, never two rules.
-     An EMPTY name list is refused there too, for the same reason — an arity
-     is known without rows.
+     by `expr.RefuseUnknownTCPFlagNameLiterals`, with the same SQLSTATE and the
+     same sentence as the evaluator's `expr.errUnknownTCPFlagName`: one
+     refusal, two layers, never two rules. An EMPTY name list is refused with
+     it, for the same reason — an arity is known without rows.
+
+     **THE DECIDING LAYER IS THE BINDER, NOT COMPILATION** (amended
+     2026-09-11, round 6, #1018 B1). This entry's first version put the fold at
+     COMPILE time and called that one seam for every door, planned or not. That
+     is true of the SINGLE-PROCESS path, where `Plan` compiles the whole
+     expression tree while it builds the physical plan, and FALSE of the stage
+     DAG, where a stage's fragment compiles its own expressions WHEN A TASK
+     RUNS. Which expressions the coordinator compiles
+     while planning and which it defers into a fragment that may never run
+     differs BY POSITION, so a fold living only at compilation refused a
+     misspelling on `single` and `single+budget` and answered ZERO ROWS on
+     `dag`, `dag-shuffled` and `dag-morsel4` — with every local-routing counter
+     flat, so the query really did run as a DAG — in four positions: `HAVING`,
+     an `ORDER BY` key, a set-operation arm, and a projection above a
+     `GROUP BY`. A subquery body was worse: an `EXISTS` holding the misspelling
+     handed the client the coordinator's own "EXISTS subquery requires a
+     SubqueryRunner" instead of any SQLSTATE, and a SCALAR subquery answered
+     zero rows on all five arms. The version that introduced the fold therefore
+     introduced a single-vs-DAG DISAGREEMENT where the base had agreement.
+
+     The refusal is now asked at PLAN time by the BINDER —
+     `physical.refuseUnknownFlagNames`, from `binder.checkExpr` over every
+     expression position of every query block, which `Plan` AND
+     `PlanDistributed` both reach through `auth.ValidateStatementColumns`
+     before any stage exists. It is deliberately NOT gated on a closed scope
+     the way `checkLiteralTypes` is: it asks the scope nothing, because a name
+     that names no flag names no flag whatever the FROM list turns out to be.
+     The compile-time call REMAINS as the BACKSTOP for the doors the binder
+     does not see — ADR-0031's DML predicate, which is not planned at all; a
+     recursive CTE's body, which the binder registers open; an expression it
+     cannot re-parse; a policy row filter; and an entry point with no catalog.
 
      What stays per row is what is not knowable from the declaration: a name
      supplied by a COLUMN or by an expression, which is not a constant, and a
      NULL name, which is a NULL mask operand rather than a misspelling. Gated
-     on five arms by the census's `unknown_name_with_no_rows_at_all*` cells
-     and their `valid_names_over_an_empty_input_answer_no_rows` /
-     `a_column_supplied_name_over_an_empty_input_answers_no_rows` controls,
-     and on the wire in both formats by
-     `pgwire.TestPGWireRefusesAnInvalidFlagNameWithNoRows`.
+     on five arms by the census's `unknown_name_with_no_rows_at_all*` and
+     `position_*` cells (each position over an EMPTY input and over a REACHED
+     one — the pair is the claim, since "the refusal appears the moment a row
+     reaches the stage" is the defect) with their `control/position_*_valid`
+     answers beside them, and on the wire in both formats by
+     `pgwire.TestPGWireRefusesAnInvalidFlagNameWithNoRows` and
+     `pgwire.TestPGWireRefusesAnInvalidFlagNameInEveryExpressionPosition`.
+     Removing the binder call answers zero rows again on the three DAG arms for
+     `position_having_empty`, `position_order_by_empty`,
+     `position_union_arm_empty`, `position_projection_above_group_by_empty`,
+     `position_exists_subquery_empty`, `position_derived_body_empty`,
+     `position_cte_body_empty` and `position_window_argument_empty`, and on ALL
+     FIVE for `position_scalar_subquery_empty`.
 
      `tcp_flags_from_string`, which reads a COMMA-SEPARATED list rather than an
      argument list, splits the two cases and answers the arithmetic where it

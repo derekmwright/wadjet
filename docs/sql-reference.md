@@ -2355,6 +2355,13 @@ rows, because the names are the mask OPERAND and its spelling is a property of
 the query. That is PostgreSQL's own rule for the arithmetic this family is
 named for — `SELECT 'x'::int FROM t WHERE false` raises there too.
 
+The refusal is the same in **every expression position and on both plans** — a
+`SELECT` item, `WHERE`, `JOIN ... ON`, `HAVING`, an `ORDER BY` key, a
+set-operation arm, a projection above a `GROUP BY`, a window function's
+argument, `PARTITION BY` or `ORDER BY`, a derived table's or a CTE's body, an
+`EXISTS` / `IN` / scalar subquery, and an `UPDATE` or `DELETE` predicate —
+whether the query runs in one process or as a distributed stage DAG.
+
 A flag NAME may be any text expression, including a column. A name that is not
 a constant is refused where it first exists, per row; only literal names are
 folded before execution and pushed into the scan.

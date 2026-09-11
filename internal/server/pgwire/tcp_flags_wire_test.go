@@ -503,3 +503,141 @@ func pgErrCode(err error) string {
 	}
 	return ""
 }
+
+// AN INVALID LITERAL FLAG NAME IS REFUSED IN EVERY EXPRESSION POSITION, AND ON
+// BOTH PLANNING PATHS (#1018 round 6, B1).
+//
+// Round 5 folded the constant name at COMPILATION, which is where the
+// single-process path compiles the whole expression tree while it plans. On the
+// stage DAG a stage's fragment compiles its own expressions WHEN A TASK RUNS,
+// so a position whose stage receives no rows was never folded at all: HAVING,
+// an ORDER BY key, a set-operation arm and a projection above a GROUP BY raised
+// 22023 in one process and answered zero rows on three DAG arms, while a
+// SELECT-list projection and a WHERE predicate — the two the coordinator folds
+// on both paths — agreed. Whether a typo was an error depended on the data AND
+// on the plan shape.
+//
+// The refusal now happens at the BINDER (physical.refuseUnknownFlagNames),
+// which Plan and PlanDistributed both reach before any stage exists. The
+// arm-by-arm half of this gate is the five-arm census in
+// internal/coordinator; this one is the WIRE half, both formats, because the
+// SQLSTATE is the whole answer when there is no row to compare.
+//
+// Each position is asserted over an EMPTY input and over a NON-EMPTY one: the
+// pair is the claim, since "the refusal appears the moment a row reaches the
+// stage" is exactly the defect.
+func TestPGWireRefusesAnInvalidFlagNameInEveryExpressionPosition(t *testing.T) {
+	_, srv := setupRealDB(t)
+	conn := connectPgconn(t, srv.Addr())
+
+	const bogus = `TCP flag name "BOGUS" not recognized`
+	for _, tc := range []struct{ name, empty, nonEmpty string }{
+		{"having",
+			`SELECT id AS n FROM users WHERE id < 0 GROUP BY id HAVING COUNT(*) > 0 AND tcp_flags_has_all(MIN(visits),'BOGUS')`,
+			`SELECT id AS n FROM users GROUP BY id HAVING COUNT(*) > 0 AND tcp_flags_has_all(MIN(visits),'BOGUS')`},
+		{"order_by",
+			`SELECT id AS n FROM users WHERE id < 0 ORDER BY tcp_flag_mask('BOGUS')`,
+			`SELECT id AS n FROM users ORDER BY tcp_flag_mask('BOGUS')`},
+		{"union_all_arm",
+			`SELECT tcp_flag_mask('SYN') AS n FROM users WHERE id < 0 UNION ALL SELECT tcp_flag_mask('BOGUS') AS n FROM users WHERE id < 0`,
+			`SELECT tcp_flag_mask('SYN') AS n FROM users UNION ALL SELECT tcp_flag_mask('BOGUS') AS n FROM users`},
+		{"projection_above_group_by",
+			`SELECT id AS g, tcp_flag_mask('BOGUS') AS n FROM users WHERE id < 0 GROUP BY id`,
+			`SELECT id AS g, tcp_flag_mask('BOGUS') AS n FROM users GROUP BY id`},
+		{"exists_subquery",
+			`SELECT COUNT(*) AS n FROM users t WHERE EXISTS (SELECT 1 FROM users u WHERE u.id < 0 AND tcp_flags_has_all(u.visits,'BOGUS'))`,
+			`SELECT COUNT(*) AS n FROM users t WHERE EXISTS (SELECT 1 FROM users u WHERE tcp_flags_has_all(u.visits,'BOGUS'))`},
+		{"in_subquery",
+			`SELECT COUNT(*) AS n FROM users t WHERE t.id IN (SELECT u.id FROM users u WHERE u.id < 0 AND tcp_flags_has_all(u.visits,'BOGUS'))`,
+			`SELECT COUNT(*) AS n FROM users t WHERE t.id IN (SELECT u.id FROM users u WHERE tcp_flags_has_all(u.visits,'BOGUS'))`},
+		{"scalar_subquery",
+			`SELECT (SELECT MAX(tcp_flag_mask('BOGUS')) FROM users u2 WHERE u2.id < 0) AS v FROM users WHERE id < 0`,
+			`SELECT (SELECT MAX(tcp_flag_mask('BOGUS')) FROM users u2) AS v FROM users`},
+		{"window_argument",
+			`SELECT SUM(tcp_flag_mask('BOGUS')) OVER () AS w FROM users WHERE id < 0`,
+			`SELECT SUM(tcp_flag_mask('BOGUS')) OVER () AS w FROM users`},
+		{"window_partition_by",
+			`SELECT COUNT(*) OVER (PARTITION BY tcp_flag_mask('BOGUS')) AS w FROM users WHERE id < 0`,
+			`SELECT COUNT(*) OVER (PARTITION BY tcp_flag_mask('BOGUS')) AS w FROM users`},
+		{"window_order_by",
+			`SELECT RANK() OVER (ORDER BY tcp_flag_mask('BOGUS')) AS w FROM users WHERE id < 0`,
+			`SELECT RANK() OVER (ORDER BY tcp_flag_mask('BOGUS')) AS w FROM users`},
+		{"case_arm_never_taken",
+			`SELECT COUNT(*) AS n FROM users WHERE id < 0 AND CASE WHEN 1 = 0 THEN tcp_flags_has_all(visits,'BOGUS') ELSE TRUE END`,
+			`SELECT COUNT(*) AS n FROM users WHERE CASE WHEN 1 = 0 THEN tcp_flags_has_all(visits,'BOGUS') ELSE TRUE END`},
+		{"join_on_condition",
+			`SELECT COUNT(*) AS n FROM users a JOIN users b ON a.id = b.id AND tcp_flags_has_all(b.visits,'BOGUS') WHERE a.id < 0`,
+			`SELECT COUNT(*) AS n FROM users a JOIN users b ON a.id = b.id AND tcp_flags_has_all(b.visits,'BOGUS')`},
+		{"derived_table_body",
+			`SELECT COUNT(*) AS n FROM (SELECT tcp_flag_mask('BOGUS') AS m FROM users WHERE id < 0) s`,
+			`SELECT COUNT(*) AS n FROM (SELECT tcp_flag_mask('BOGUS') AS m FROM users) s`},
+		{"cte_body",
+			`WITH c AS (SELECT tcp_flag_mask('BOGUS') AS m FROM users WHERE id < 0) SELECT COUNT(*) AS n FROM c`,
+			`WITH c AS (SELECT tcp_flag_mask('BOGUS') AS m FROM users) SELECT COUNT(*) AS n FROM c`},
+		// The DML door is ADR-0031's: a DML predicate is not planned at all, so
+		// the binder never sees it and the COMPILE-time fold is what answers.
+		// It is here because "one refusal, whatever the door" is the claim.
+		{"delete_predicate",
+			`DELETE FROM users WHERE id < 0 AND tcp_flags_has_all(visits,'BOGUS')`,
+			`DELETE FROM users WHERE tcp_flags_has_all(visits,'BOGUS')`},
+		{"update_predicate",
+			`UPDATE users SET visits = 1 WHERE id < 0 AND tcp_flags_has_all(visits,'BOGUS')`,
+			`UPDATE users SET visits = 1 WHERE tcp_flags_has_all(visits,'BOGUS')`},
+	} {
+		for _, arm := range []struct {
+			label string
+			sql   string
+		}{{"empty_input", tc.empty}, {"non_empty_input", tc.nonEmpty}} {
+			for _, format := range []int16{0, 1} {
+				t.Run(fmt.Sprintf("%s/%s/format=%d", tc.name, arm.label, format), func(t *testing.T) {
+					res := conn.ExecParams(context.Background(), arm.sql, nil, nil, nil,
+						[]int16{format}).Read()
+					if res.Err == nil {
+						t.Fatalf("ANSWERED %d rows; 22023 naming BOGUS is due\n  SQL: %s",
+							len(res.Rows), arm.sql)
+					}
+					if got := pgErrCode(res.Err); got != "22023" {
+						t.Errorf("SQLSTATE %s, want 22023\n  err: %v\n  SQL: %s", got, res.Err, arm.sql)
+					}
+					if !strings.Contains(res.Err.Error(), bogus) {
+						t.Errorf("%q does not name the flag\n  SQL: %s", res.Err, arm.sql)
+					}
+				})
+			}
+		}
+	}
+
+	// THE BOUNDARY FROM THE OTHER SIDE. Every one of these is the same
+	// position with something the fold must NOT refuse, over the same empty
+	// input: a name the family knows, a name supplied by a COLUMN or by a
+	// call (not knowable before rows — the per-row refusal stands), a NULL
+	// name (a NULL mask operand, not a misspelling), and `NS`, which this
+	// family accepts as a spelling of AE.
+	for _, tc := range []struct {
+		name, sql string
+		rows      int // an ungrouped COUNT over an empty input is ONE row
+	}{
+		{"having_valid", `SELECT id AS n FROM users WHERE id < 0 GROUP BY id HAVING COUNT(*) > 0 AND tcp_flags_has_all(MIN(visits),'SYN')`, 0},
+		{"order_by_valid", `SELECT id AS n FROM users WHERE id < 0 ORDER BY tcp_flag_mask('SYN')`, 0},
+		{"union_all_arm_valid", `SELECT tcp_flag_mask('SYN') AS n FROM users WHERE id < 0 UNION ALL SELECT tcp_flag_mask('ACK') AS n FROM users WHERE id < 0`, 0},
+		{"projection_above_group_by_valid", `SELECT id AS g, tcp_flag_mask('SYN') AS n FROM users WHERE id < 0 GROUP BY id`, 0},
+		{"window_argument_valid", `SELECT SUM(tcp_flag_mask('SYN')) OVER () AS w FROM users WHERE id < 0`, 0},
+		{"derived_table_body_valid", `SELECT COUNT(*) AS n FROM (SELECT tcp_flag_mask('SYN') AS m FROM users WHERE id < 0) s`, 1},
+		{"cte_body_valid", `WITH c AS (SELECT tcp_flag_mask('SYN') AS m FROM users WHERE id < 0) SELECT COUNT(*) AS n FROM c`, 1},
+		{"exists_subquery_valid", `SELECT COUNT(*) AS n FROM users t WHERE EXISTS (SELECT 1 FROM users u WHERE u.id < 0 AND tcp_flags_has_all(u.visits,'SYN'))`, 1},
+		{"a_column_name_in_having_stays_per_row", `SELECT id AS n FROM users WHERE id < 0 GROUP BY id, name HAVING tcp_flags_has_all(MIN(visits), name)`, 0},
+		{"a_computed_name_is_not_a_constant", `SELECT tcp_flags_has_all(visits, UPPER('bogus')) AS v FROM users WHERE id < 0`, 0},
+		{"a_null_name_in_an_order_by", `SELECT id AS n FROM users WHERE id < 0 ORDER BY tcp_flags_has_all(visits, NULL)`, 0},
+		{"ns_is_a_spelling_of_ae", `SELECT id AS g, tcp_flag_mask('NS') AS n FROM users WHERE id < 0 GROUP BY id`, 0},
+	} {
+		t.Run("control/"+tc.name, func(t *testing.T) {
+			res := conn.ExecParams(context.Background(), tc.sql, nil, nil, nil, []int16{0}).Read()
+			if res.Err != nil {
+				t.Fatalf("refused a query it must answer: %v\n  SQL: %s", res.Err, tc.sql)
+			}
+			if len(res.Rows) != tc.rows {
+				t.Errorf("got %d rows, want %d\n  SQL: %s", len(res.Rows), tc.rows, tc.sql)
+			}
+		})
+	}
+}

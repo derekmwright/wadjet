@@ -513,13 +513,20 @@ PostgreSQL, which raises for the operator equivalent whatever the rows are:
 **Whatever the rows are includes NO rows.** A name written as a constant is
 folded before execution, so `WHERE id < 0 AND TCP_FLAGS_HAS_ALL(flags,'ACKK')`
 raises `22023` rather than answering zero rows — a typo in a query that
-happens to select nothing is still a typo. A name supplied by a COLUMN cannot
-be checked before the rows exist and is refused where it first appears.
+happens to select nothing is still a typo.
 
-The refusal is raised per ROW, as PostgreSQL's `DATE_TRUNC` raises its unknown
-unit, so a predicate that no row reaches answers zero rows rather than an
-error. A flag name may also be a column or any other text expression; only
-literal names are folded at plan time and pushed into the scan.
+That holds in **every position and on every plan**: a `SELECT` item, a `WHERE`
+or `JOIN ... ON` predicate, a `HAVING`, an `ORDER BY` key, a set-operation arm,
+a projection above a `GROUP BY`, a window function's argument or frame terms,
+and the body of a derived table, a CTE or an `EXISTS` / `IN` / scalar subquery
+— in one process and on a distributed query alike. A misspelling is refused
+before any stage runs, so whether it is an error depends on neither the data nor
+the shape of the plan.
+
+The one thing still checked per row is a name the query does not spell as a
+constant — a column, or any other text expression. That name is not knowable
+before the rows exist, so it is refused where it first appears; only literal
+names are folded before execution and pushed into the scan.
 
 ```sql
 -- SYN without ACK: connection attempts, the first half of a handshake

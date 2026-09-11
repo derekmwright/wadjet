@@ -33,10 +33,25 @@ import (
 // never two rules. A NULL literal is a NULL mask operand and is not a
 // misspelling: `NULL & NULL` is NULL, so it is left alone.
 //
-// It is asked at PLAN time (the binder, for a statement that is planned) and
-// again at COMPILE time (compileFuncCallNamed, for the doors that compile an
-// expression without planning it — ADR-0031's DML predicate and the subquery
-// environment). One function, so the two layers cannot disagree.
+// WHERE IT IS ASKED, AND WHICH LAYER DECIDES. At PLAN time by the BINDER —
+// physical.refuseUnknownFlagNames, over every expression position of every
+// query block, which Plan AND PlanDistributed both reach through
+// auth.ValidateStatementColumns before any stage exists. That is the layer that
+// decides whether a query is refused at all, because COMPILATION is not one
+// seam: the single-process path compiles the whole expression tree while it
+// PLANS, and a stage of the DAG compiles its own fragment only when a TASK
+// RUNS. A fold that lived at compilation alone therefore refused a misspelling
+// in one process and answered zero rows on the DAG for every position whose
+// stage received no rows — HAVING, an ORDER BY key, a set-operation arm, a
+// projection above a GROUP BY, a subquery body (#1018 round 6, B1).
+//
+// And again at COMPILE time (compileFuncCallNamed), which is now the BACKSTOP
+// for the doors the binder does not see: ADR-0031's DML predicate, which is not
+// planned at all; a recursive CTE's body, which the binder registers open and
+// does not validate; an expression it cannot re-parse (an ORDER BY item, a
+// subquery body); a policy row filter; and an entry point with no catalog,
+// where physical.ValidateColumnsUnderPolicy declines. One function, so the two
+// layers cannot disagree.
 func RefuseUnknownTCPFlagNameLiterals(fc *plansql.FuncCallNode) error {
 	if fc == nil {
 		return nil

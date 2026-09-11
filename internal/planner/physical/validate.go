@@ -598,6 +598,15 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	// star expansion add no enumerable refs the binder can reason about safely).
 	for i := range info.Columns {
 		col := info.Columns[i]
+		if col.IsWindow {
+			// The name resolution below skips a window item — its OVER terms
+			// are a different namespace — but the SCHEMA-FREE refusals apply
+			// to its arguments and frame terms exactly as to any other item,
+			// so they are asked here rather than lost with it.
+			if err := refuseUnknownFlagNames(col.ASTExpr); err != nil {
+				return err
+			}
+		}
 		if col.Star || col.IsWindow {
 			continue
 		}
@@ -679,24 +688,38 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	return nil
 }
 
-// checkExpr errors on the first column reference the scope refuses.
+// checkExpr errors on the first column reference the scope refuses, and on the
+// constants it can settle without one.
 func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
-	if expr == nil || scope == nil || scope.open {
+	if expr == nil {
 		return nil
 	}
-	var refs []*plansql.ColRef
-	walkExpr(expr, &refs, nil)
-	for _, r := range refs {
-		if pgSystemColumns[strings.ToLower(r.Column)] {
-			continue
-		}
-		if err := scope.resolveRef(r); err != nil {
-			return err
+	if scope != nil && !scope.open {
+		var refs []*plansql.ColRef
+		walkExpr(expr, &refs, nil, nil)
+		for _, r := range refs {
+			if pgSystemColumns[strings.ToLower(r.Column)] {
+				continue
+			}
+			// Names first, then the constants: a reference that resolves to
+			// nothing has no declared type to refuse a literal against, and
+			// reporting the name is the more useful of the two errors.
+			if err := scope.resolveRef(r); err != nil {
+				return err
+			}
 		}
 	}
-	// Names first, then the literals they are compared against: a reference
-	// that resolves to nothing has no declared type to refuse a literal
-	// against, and reporting the name is the more useful of the two errors.
+	// The SCHEMA-FREE refusal, which is NOT gated on a closed scope because it
+	// asks the scope nothing: a TCP flag name that names no flag is a property
+	// of the statement's text, and it has to be the same answer on the DAG —
+	// where a stage's fragment compiles when a task RUNS — as in one process
+	// (#1018 round 6, B1). See validate_flag_names.go.
+	if err := refuseUnknownFlagNames(expr); err != nil {
+		return err
+	}
+	if scope == nil || scope.open {
+		return nil
+	}
 	return checkLiteralTypes(expr, scope)
 }
 
@@ -1353,15 +1376,15 @@ func exprOperands(node plansql.Node) []plansql.Node {
 // expressions (WHERE, SELECT, HAVING, QUALIFY) for recursive validation.
 func (b *binder) blockSubqueries(info *plansql.SelectInfo) []string {
 	var subs []string
-	walkExpr(info.WhereExpr, nil, &subs)
-	walkExpr(info.HavingExpr, nil, &subs)
-	walkExpr(info.QualifyExpr, nil, &subs)
+	walkExpr(info.WhereExpr, nil, &subs, nil)
+	walkExpr(info.HavingExpr, nil, &subs, nil)
+	walkExpr(info.QualifyExpr, nil, &subs, nil)
 	for i := range info.Columns {
-		walkExpr(info.Columns[i].ASTExpr, nil, &subs)
-		walkExpr(info.Columns[i].AggArgExpr, nil, &subs)
+		walkExpr(info.Columns[i].ASTExpr, nil, &subs, nil)
+		walkExpr(info.Columns[i].AggArgExpr, nil, &subs, nil)
 	}
 	for i := range info.Joins {
-		walkExpr(info.Joins[i].CondExpr, nil, &subs)
+		walkExpr(info.Joins[i].CondExpr, nil, &subs, nil)
 	}
 	return subs
 }
@@ -1456,12 +1479,17 @@ func parseSelect(sql string) *plansql.SelectInfo {
 	return info
 }
 
-// walkExpr collects column references and/or embedded subquery SQL from an
-// expression AST. It does NOT descend into subqueries (they form their own
-// scope) — it records their SQL for separate validation. Any node type it does
-// not recognize contributes nothing (safe: an un-walked ref is a false negative,
-// never a false positive).
-func walkExpr(node plansql.Node, refs *[]*plansql.ColRef, subs *[]string) {
+// walkExpr collects column references, embedded subquery SQL and/or FUNCTION
+// CALLS from an expression AST. It does NOT descend into subqueries (they form
+// their own scope) — it records their SQL for separate validation. Any node
+// type it does not recognize contributes nothing (safe: an un-walked ref is a
+// false negative, never a false positive).
+//
+// `calls` is the collector the SCHEMA-FREE refusals read (validate_flag_names.go).
+// It is this walk and not plansql.RewriteExpr because RewriteExpr deliberately
+// stops at an AGGREGATE call, and a function whose ARGUMENT is misspelled is
+// misspelled just as much under `SUM(...)` as beside it.
+func walkExpr(node plansql.Node, refs *[]*plansql.ColRef, subs *[]string, calls *[]*plansql.FuncCallNode) {
 	switch n := node.(type) {
 	case nil:
 		return
@@ -1478,62 +1506,65 @@ func walkExpr(node plansql.Node, refs *[]*plansql.ColRef, subs *[]string) {
 			*subs = append(*subs, n.SQL)
 		}
 	case *plansql.BinaryOp:
-		walkExpr(n.Left, refs, subs)
-		walkExpr(n.Right, refs, subs)
+		walkExpr(n.Left, refs, subs, calls)
+		walkExpr(n.Right, refs, subs, calls)
 	case *plansql.UnaryOp:
-		walkExpr(n.Inner, refs, subs)
+		walkExpr(n.Inner, refs, subs, calls)
 	case *plansql.CmpExpr:
-		walkExpr(n.Left, refs, subs)
-		walkExpr(n.Right, refs, subs)
+		walkExpr(n.Left, refs, subs, calls)
+		walkExpr(n.Right, refs, subs, calls)
 	case *plansql.AndNode:
-		walkExpr(n.Left, refs, subs)
-		walkExpr(n.Right, refs, subs)
+		walkExpr(n.Left, refs, subs, calls)
+		walkExpr(n.Right, refs, subs, calls)
 	case *plansql.OrNode:
-		walkExpr(n.Left, refs, subs)
-		walkExpr(n.Right, refs, subs)
+		walkExpr(n.Left, refs, subs, calls)
+		walkExpr(n.Right, refs, subs, calls)
 	case *plansql.NotNode:
-		walkExpr(n.Inner, refs, subs)
+		walkExpr(n.Inner, refs, subs, calls)
 	case *plansql.ParenNode:
-		walkExpr(n.Inner, refs, subs)
+		walkExpr(n.Inner, refs, subs, calls)
 	case *plansql.FuncCallNode:
+		if calls != nil {
+			*calls = append(*calls, n)
+		}
 		for _, a := range n.Args {
-			walkExpr(a, refs, subs)
+			walkExpr(a, refs, subs, calls)
 		}
 	case *plansql.CastNode:
-		walkExpr(n.Inner, refs, subs)
+		walkExpr(n.Inner, refs, subs, calls)
 	case *plansql.InExpr:
-		walkExpr(n.Left, refs, subs)
+		walkExpr(n.Left, refs, subs, calls)
 		for _, v := range n.Values {
-			walkExpr(v, refs, subs)
+			walkExpr(v, refs, subs, calls)
 		}
 	case *plansql.BetweenExpr:
-		walkExpr(n.Left, refs, subs)
-		walkExpr(n.Low, refs, subs)
-		walkExpr(n.High, refs, subs)
+		walkExpr(n.Left, refs, subs, calls)
+		walkExpr(n.Low, refs, subs, calls)
+		walkExpr(n.High, refs, subs, calls)
 	case *plansql.LikeExpr:
-		walkExpr(n.Left, refs, subs)
-		walkExpr(n.Pattern, refs, subs)
+		walkExpr(n.Left, refs, subs, calls)
+		walkExpr(n.Pattern, refs, subs, calls)
 	case *plansql.IsExpr:
-		walkExpr(n.Left, refs, subs)
+		walkExpr(n.Left, refs, subs, calls)
 	case *plansql.CaseNode:
-		walkExpr(n.Subject, refs, subs)
+		walkExpr(n.Subject, refs, subs, calls)
 		for _, w := range n.Whens {
-			walkExpr(w.Cond, refs, subs)
-			walkExpr(w.Result, refs, subs)
+			walkExpr(w.Cond, refs, subs, calls)
+			walkExpr(w.Result, refs, subs, calls)
 		}
-		walkExpr(n.Else, refs, subs)
+		walkExpr(n.Else, refs, subs, calls)
 	case *plansql.ArrayLitNode:
 		for _, e := range n.Elements {
-			walkExpr(e, refs, subs)
+			walkExpr(e, refs, subs, calls)
 		}
 	case *plansql.TupleNode:
 		for _, e := range n.Elements {
-			walkExpr(e, refs, subs)
+			walkExpr(e, refs, subs, calls)
 		}
 	case *plansql.AnyAllExpr:
-		walkExpr(n.Left, refs, subs)
+		walkExpr(n.Left, refs, subs, calls)
 		for _, v := range n.Values {
-			walkExpr(v, refs, subs)
+			walkExpr(v, refs, subs, calls)
 		}
 	}
 }
