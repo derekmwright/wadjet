@@ -2361,6 +2361,16 @@ that is not a version. A NULL range is a NULL operand and answers NULL; a
 malformed one is the refusal above, and the range is read **first**, so the
 refusal does not depend on what the version argument holds.
 
+A range written as a **constant is refused before any row**:
+`WHERE id < 0 AND SEMVER_SATISFIES(v, '^^1.0')` is `22023`, not zero rows,
+because the range is the query's own text and PostgreSQL raises for a
+malformed literal under `WHERE false` too. Except for the coverage gaps the
+[TCP flag section](#tcp-flag-functions) lists — they are the same two layers —
+the refusal is the same in every expression position and on both plans. A
+range that is a **column or an expression** is not a constant and keeps the
+per-row refusal, where it first exists; a NULL literal is a NULL operand and is
+left alone.
+
 ```sql
 -- every deployed agent still on a vulnerable build
 SELECT host, agent_version

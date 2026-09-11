@@ -2919,6 +2919,24 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      memo caches the REFUSAL as well as the parse, so a malformed range raises
      the same sentence on every row rather than only on the one that missed.
 
+     **AN INVALID LITERAL RANGE IS REFUSED FROM THE DECLARATION, ROWS OR NO
+     ROWS, AND THE DECIDING LAYER IS THE BINDER.** The rule and both layers
+     are the flag family's, above: `expr.RefuseInvalidSemverRangeLiterals` is
+     asked at PLAN time by `physical.refuseInvalidSemverRanges`, which `Plan`
+     and `PlanDistributed` both reach through `auth.ValidateStatementColumns`
+     before any stage exists, and again by `expr.compileFuncCallNamed` as the
+     BACKSTOP for the doors the binder does not see (ADR-0031's DML predicate,
+     a policy row filter, a catalog-less entry point). Compilation alone is
+     not one seam, because a DAG stage compiles its fragment only when a TASK
+     RUNS. Both layers call `ParseSemverRange`, so they cannot disagree about
+     which ranges exist. Gated by
+     `physical.TestSemverRangeValidationDoors`,
+     `physical.TestTheBinderRefusesAConstantSemverRangeInEveryExpressionPosition`
+     (twelve positions over an input that reaches no rows),
+     `physical.TestTheBinderLeavesANonConstantSemverRangeAlone` and
+     `expr.TestCompilingACallWithAConstantRangeRefusesBeforeAnyRow`. Removing
+     the binder call fails thirteen of those subtests.
+
      **A ROW-RETURNING `semver_parse` IS NOT PART OF THIS FAMILY, and #1017 is
      the reason.** `physical.scalarFnDeclaredType` declines every
      ARRAY/MAP/ROW return type, so such a projection would be declared TEXT

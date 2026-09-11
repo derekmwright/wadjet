@@ -1203,6 +1203,15 @@ func compileFuncCallNamed(n *plansql.FuncCallNode, ctx *compileContext, checked 
 		return nil, err
 	}
 
+	// The same fold for a CONSTANT semver range, and the same split: the
+	// deciding site is the binder's physical.refuseInvalidSemverRanges and this
+	// one is the backstop for the doors it does not see (#967). A range that is
+	// a COLUMN or an expression is not constant and keeps the evaluator's
+	// per-row refusal.
+	if err := RefuseInvalidSemverRangeLiterals(n); err != nil {
+		return nil, err
+	}
+
 	// element_at / the x[k] subscript route MAP key lookup vs. ARRAY index
 	// from the compiled type of the first argument, which only a dedicated
 	// node can see (a MAP and map_entries()'s ARRAY are the same runtime

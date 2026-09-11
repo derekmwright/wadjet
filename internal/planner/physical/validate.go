@@ -606,6 +606,9 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 			if err := refuseUnknownFlagNames(col.ASTExpr); err != nil {
 				return err
 			}
+			if err := refuseInvalidSemverRanges(col.ASTExpr); err != nil {
+				return err
+			}
 		}
 		if col.Star || col.IsWindow {
 			continue
@@ -715,6 +718,11 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 	// where a stage's fragment compiles when a task RUNS — as in one process
 	// (#1018 round 6, B1). See validate_flag_names.go.
 	if err := refuseUnknownFlagNames(expr); err != nil {
+		return err
+	}
+	// The same refusal for a constant semver RANGE, which is a property of the
+	// statement's text for the same reason (#967). See validate_semver_ranges.go.
+	if err := refuseInvalidSemverRanges(expr); err != nil {
 		return err
 	}
 	if scope == nil || scope.open {

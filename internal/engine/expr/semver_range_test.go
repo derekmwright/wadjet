@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -318,5 +319,41 @@ func TestTheRangeMemoIsBoundedAndRemembersRefusals(t *testing.T) {
 	}
 	if n := semverRangeCache.entries(); n > semverRangeMemoCap {
 		t.Errorf("the memo holds %d entries, past its %d cap", n, semverRangeMemoCap)
+	}
+}
+
+// THE COMPILE-TIME BACKSTOP, which is the layer that answers for the doors the
+// binder does not walk — ADR-0031's DML predicate above all, which is not
+// planned at all and reaches the engine as a compiled expression.
+//
+// It is deliberately the SAME function the binder calls, so the two layers
+// cannot come to different conclusions about which ranges exist.
+func TestCompilingACallWithAConstantRangeRefusesBeforeAnyRow(t *testing.T) {
+	for _, tc := range []struct {
+		name, sql string
+		want      string
+	}{
+		{"a range that names no range", `semver_satisfies(v, '^^1.0')`, "22023"},
+		{"an empty range", `semver_satisfies(v, '')`, "22023"},
+		{"a pre-release on a partial", `semver_satisfies(v, '1.2.x-beta')`, "22023"},
+		{"a parenthesised bad range", `semver_satisfies(v, ('~~1.0'))`, "22023"},
+		{"a valid range compiles", `semver_satisfies(v, '^1.2.3')`, ""},
+		{"a column range compiles", `semver_satisfies(v, r)`, ""},
+		{"a NULL range compiles", `semver_satisfies(v, NULL)`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node, err := plansql.ParseExpression(tc.sql)
+			if err != nil {
+				t.Fatalf("parse %q: %v", tc.sql, err)
+			}
+			_, err = Compile(node)
+			if got := sqlerr.StateOf(err); got != tc.want {
+				t.Fatalf("compiling %q answered %v (%q), want SQLSTATE %q",
+					tc.sql, err, got, tc.want)
+			}
+			if tc.want == "" && err != nil {
+				t.Fatalf("compiling %q failed: %v", tc.sql, err)
+			}
+		})
 	}
 }
