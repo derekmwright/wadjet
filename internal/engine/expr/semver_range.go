@@ -144,7 +144,7 @@ type semverPartial struct {
 	major, minor, patch int64
 	xMajor, xMinor      bool
 	xPatch              bool
-	pre                 []string
+	pre                 string
 	hasPre              bool
 	build               string
 }
@@ -163,7 +163,7 @@ func (p semverPartial) exact() semverVersion {
 func semverBound(major, minor, patch int64, zeroPre bool) semverVersion {
 	v := semverVersion{major: major, minor: minor, patch: patch}
 	if zeroPre {
-		v.pre = []string{"0"}
+		v.pre = "0"
 		v.hasPre = true
 	}
 	return v
@@ -482,7 +482,7 @@ func parseSemverPartial(fn, whole, s string) (semverPartial, error) {
 		if !semverIdentifierListOK(pre, false) {
 			return semverPartial{}, errBadSemverRange(fn, whole)
 		}
-		p.pre = strings.Split(pre, ".")
+		p.pre = pre
 		p.hasPre = true
 	}
 	parts := strings.Split(s, ".")

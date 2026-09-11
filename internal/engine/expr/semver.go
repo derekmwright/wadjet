@@ -94,17 +94,41 @@ const (
 	semverKeyRelease = '~' // 0x7E, this version is a release
 )
 
-// semverVersion is a parsed version. `pre` holds the pre-release identifiers
-// in order, exactly as written; `hasPre` is carried apart from len(pre)
-// because `1.0.0-` is not a version at all and an EMPTY pre-release list is
-// never a legal parse — the two are kept separable so a reader of this struct
-// cannot mistake "no pre-release" (a release, the HIGHEST precedence at its
-// core) for "an empty one".
+// semverVersion is a parsed version.
+//
+// `pre` is the pre-release exactly as written — the RAW dot-separated string,
+// not a slice of identifiers. That is deliberate and it is what keeps
+// `semver_major(v)` over a pre-release version allocation-free: the identifiers
+// are walked lazily by semverNextField, so only the two functions that actually
+// compare or encode them ever pay for the walk, and `semver_prerelease` hands
+// the string straight back with no join.
+//
+// `hasPre` is carried apart from `pre != ""` because `1.0.0-` is not a version
+// at all: an EMPTY pre-release is never a legal parse, and the two facts are
+// kept separable so a reader cannot mistake "no pre-release" — a release, the
+// HIGHEST precedence at its core — for "an empty one".
 type semverVersion struct {
 	major, minor, patch int64
-	pre                 []string
+	pre                 string
 	hasPre              bool
 	build               string
+}
+
+// semverNextField walks a dot-separated identifier list without allocating.
+// from is the offset to read at; the returned next is the offset for the call
+// after this one, and ok is false once the list is exhausted.
+//
+// It never sees an empty field: semverIdentifierListOK has already refused a
+// list with one, so a raw pre-release never begins or ends with '.' and never
+// holds two in a row.
+func semverNextField(s string, from int) (field string, next int, ok bool) {
+	if from >= len(s) {
+		return "", from, false
+	}
+	if i := strings.IndexByte(s[from:], '.'); i >= 0 {
+		return s[from : from+i], from + i + 1, true
+	}
+	return s[from:], len(s) + 1, true
 }
 
 // parseSemver reads a version string, and is the ONLY place in this package
@@ -136,7 +160,7 @@ func parseSemver(s string) (semverVersion, bool) {
 		if !semverIdentifierListOK(pre, false) {
 			return semverVersion{}, false
 		}
-		v.pre = strings.Split(pre, ".")
+		v.pre = pre
 		v.hasPre = true
 	}
 	first := strings.IndexByte(s, '.')
@@ -273,8 +297,22 @@ func compareSemver(a, b semverVersion) int {
 	case !a.hasPre && !b.hasPre:
 		return 0
 	}
-	for i := 0; i < len(a.pre) && i < len(b.pre); i++ {
-		x, y := a.pre[i], b.pre[i]
+	ai, bi := 0, 0
+	for {
+		x, an, aok := semverNextField(a.pre, ai)
+		y, bn, bok := semverNextField(b.pre, bi)
+		switch {
+		case !aok && !bok:
+			return 0
+		case !aok:
+			// Every preceding identifier was equal and a has fewer fields:
+			// §11.4's "a larger set of pre-release fields has the higher
+			// precedence".
+			return -1
+		case !bok:
+			return 1
+		}
+		ai, bi = an, bn
 		xn, yn := semverIsNumericIdentifier(x), semverIsNumericIdentifier(y)
 		switch {
 		case xn && yn:
@@ -294,7 +332,6 @@ func compareSemver(a, b semverVersion) int {
 			}
 		}
 	}
-	return semverCompareInt(int64(len(a.pre)), int64(len(b.pre)))
 }
 
 func semverCompareInt(a, b int64) int {
@@ -344,7 +381,7 @@ func semverCompareInt(a, b int64) int {
 // original string and is not a canonical form — `semver_normalize` is.
 func semverSortKey(v semverVersion) string {
 	var b strings.Builder
-	b.Grow(3*semverMaxComponentDigits + 1 + len(v.pre)*8)
+	b.Grow(3*semverMaxComponentDigits + 1 + len(v.pre) + 2*semverMaxComponentDigits)
 	semverPadInt(&b, v.major)
 	semverPadInt(&b, v.minor)
 	semverPadInt(&b, v.patch)
@@ -353,8 +390,13 @@ func semverSortKey(v semverVersion) string {
 		return b.String()
 	}
 	b.WriteByte(semverKeyPre)
-	for i, id := range v.pre {
-		if i > 0 {
+	for i, first := 0, true; ; first = false {
+		id, next, ok := semverNextField(v.pre, i)
+		if !ok {
+			break
+		}
+		i = next
+		if !first {
 			b.WriteByte(semverKeySep)
 		}
 		if semverIsNumericIdentifier(id) {
@@ -395,7 +437,7 @@ func semverRender(v semverVersion) string {
 	b.WriteString(strconv.FormatInt(v.patch, 10))
 	if v.hasPre {
 		b.WriteByte('-')
-		b.WriteString(strings.Join(v.pre, "."))
+		b.WriteString(v.pre)
 	}
 	if v.build != "" {
 		b.WriteByte('+')
@@ -476,7 +518,7 @@ func fnSemverPrerelease(args []any) any {
 	if !v.hasPre {
 		return ""
 	}
-	return strings.Join(v.pre, ".")
+	return v.pre
 }
 
 // fnSemverBuild answers the build metadata as written, and the empty string
