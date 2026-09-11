@@ -25,6 +25,10 @@ func TestDPITCPFlagsToString(t *testing.T) {
 		{[]any{int64(0x18)}, "PSH,ACK"},
 		{[]any{int64(0xFF)}, "FIN,SYN,RST,PSH,ACK,URG,ECE,CWR"},
 		{[]any{int64(0x00)}, ""},
+		// The ninth bit. `byte(flags)` truncated it away, so a flags value
+		// with AE set rendered as though NO flag were set (#966).
+		{[]any{int64(0x100)}, "AE"},
+		{[]any{int64(0x1FF)}, "FIN,SYN,RST,PSH,ACK,URG,ECE,CWR,AE"},
 		{[]any{nil}, nil},
 	}
 	for _, tt := range tests {
@@ -47,8 +51,9 @@ func TestDPIHasTCPFlag(t *testing.T) {
 		{[]any{int64(0x02), "SYN"}, true},
 		{[]any{int64(0x02), "ACK"}, false},
 		{[]any{int64(0x04), "RST"}, true},
-		{[]any{int64(0x12), "syn"}, true},  // case-insensitive
-		{[]any{int64(0x12), "BOGUS"}, nil}, // unknown flag name
+		{[]any{int64(0x12), "syn"}, true}, // case-insensitive
+		{[]any{int64(0x12), "AE"}, false}, // the ninth bit, which the byte carrier could not hold
+		{[]any{int64(0x102), "AE"}, true},
 		{[]any{nil, "SYN"}, nil},
 		{[]any{int64(0x12), nil}, nil},
 	}
@@ -58,6 +63,17 @@ func TestDPIHasTCPFlag(t *testing.T) {
 			t.Errorf("has_tcp_flag(%v) = %v, want %v", tt.args, got, tt.want)
 		}
 	}
+	// An unknown name RAISES (#966). It answered NULL, which a caller cannot
+	// tell from "the flags value was NULL" — and 'AE' was one such name, so
+	// the two defects hid each other.
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("has_tcp_flag(f, 'BOGUS') answered where 22023 is due")
+			}
+		}()
+		fn([]any{int64(0x12), "BOGUS"})
+	}()
 }
 
 func TestDPITCPFlagsFromString(t *testing.T) {
@@ -71,6 +87,8 @@ func TestDPITCPFlagsFromString(t *testing.T) {
 		{[]any{"RST,ACK"}, int64(0x14)},
 		{[]any{"FIN"}, int64(0x01)},
 		{[]any{"syn,ack"}, int64(0x12)}, // case-insensitive
+		{[]any{"AE"}, int64(0x100)},     // the ninth bit; NS is its RFC 3540 name
+		{[]any{"NS"}, int64(0x100)},
 		{[]any{nil}, nil},
 	}
 	for _, tt := range tests {
@@ -79,6 +97,17 @@ func TestDPITCPFlagsFromString(t *testing.T) {
 			t.Errorf("tcp_flags_from_string(%v) = %v, want %v", tt.args, got, tt.want)
 		}
 	}
+	// A name it does not know RAISES. It used to be dropped, so
+	// 'SYN,ACKK' answered 2 — a silently smaller mask, and wherever the
+	// result is compared, a silently larger row set (#966).
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("tcp_flags_from_string('SYN,ACKK') answered where 22023 is due")
+			}
+		}()
+		fn([]any{"SYN,ACKK"})
+	}()
 }
 
 func TestDPIIsTCPHandshake(t *testing.T) {

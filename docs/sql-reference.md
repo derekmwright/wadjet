@@ -2119,7 +2119,7 @@ FROM flow_logs
 
 ## Built-in Functions
 
-Wadjet includes 360 built-in scalar functions across several categories.
+Wadjet includes 366 built-in scalar functions across several categories.
 
 ### String Functions
 
@@ -2183,10 +2183,10 @@ Wadjet includes 360 built-in scalar functions across several categories.
 | `SIGN(n)` | Sign of number (-1, 0, 1) | `SIGN(profit)` |
 | `GREATEST(a, b, ...)` | Largest value | `GREATEST(bytes_in, bytes_out)` |
 | `LEAST(a, b, ...)` | Smallest value | `LEAST(bytes_in, bytes_out)` |
-| `BITWISE_AND(a, b)` | Bitwise AND | `BITWISE_AND(flags, 0xFF)` |
-| `BITWISE_OR(a, b)` | Bitwise OR | `BITWISE_OR(flags, 0x01)` |
-| `BITWISE_XOR(a, b)` | Bitwise XOR | `BITWISE_XOR(a, b)` |
-| `BITWISE_NOT(a)` | Bitwise NOT | `BITWISE_NOT(mask)` |
+| `BITWISE_AND(a, b)` | Bitwise AND. Exact over the full 64-bit pattern; answers BIGINT | `BITWISE_AND(flags, 0xFF)` |
+| `BITWISE_OR(a, b)` | Bitwise OR. Answers BIGINT | `BITWISE_OR(flags, 0x01)` |
+| `BITWISE_XOR(a, b)` | Bitwise XOR. Answers BIGINT | `BITWISE_XOR(a, b)` |
+| `BITWISE_NOT(a)` | Bitwise NOT. Answers BIGINT | `BITWISE_NOT(mask)` |
 | `BITWISE_LEFT_SHIFT(a, n)` | Shift bits left by n positions | `BITWISE_LEFT_SHIFT(1, 4)` → `16` |
 | `BITWISE_RIGHT_SHIFT(a, n)` | Logical shift bits right by n positions | `BITWISE_RIGHT_SHIFT(16, 4)` → `1` |
 | `BITWISE_ARITHMETIC_SHIFT_RIGHT(a, n)` | Arithmetic right shift (sign-preserving) | `BITWISE_ARITHMETIC_SHIFT_RIGHT(-16, 2)` → `-4` |
@@ -2300,13 +2300,75 @@ Wadjet includes 360 built-in scalar functions across several categories.
 
 | Function | Description | Example |
 |----------|-------------|---------|
-| `TCP_FLAGS_TO_STRING(flags)` | Convert TCP flags bitmask to names | `TCP_FLAGS_TO_STRING(0x12)` → `'SYN,ACK'` |
-| `HAS_TCP_FLAG(flags, name)` | Test if a TCP flag is set | `HAS_TCP_FLAG(flags, 'SYN')` → `true` |
-| `TCP_FLAGS_FROM_STRING(names)` | Convert flag names to bitmask | `TCP_FLAGS_FROM_STRING('SYN,ACK')` → `18` |
+| `TCP_FLAGS_TO_STRING(flags)` | Convert TCP flags bitmask to comma-separated names | `TCP_FLAGS_TO_STRING(0x12)` → `'SYN,ACK'` |
+| `HAS_TCP_FLAG(flags, name)` | Test if a TCP flag is set. An unrecognized name is SQLSTATE `22023` | `HAS_TCP_FLAG(flags, 'SYN')` → `true` |
+| `TCP_FLAGS_FROM_STRING(names)` | Convert comma-separated flag names to a bitmask. An unrecognized name is SQLSTATE `22023` | `TCP_FLAGS_FROM_STRING('SYN,ACK')` → `18` |
 | `IS_TCP_HANDSHAKE(flags)` | Test for SYN-only (connection init) | `IS_TCP_HANDSHAKE(flags)` |
 | `IS_TCP_RESET(flags)` | Test for RST flag | `IS_TCP_RESET(flags)` |
 | `TCP_SESSION_ID(src, dst, sport, dport, proto)` | Canonical 5-tuple session key | `TCP_SESSION_ID(src_ip, dst_ip, src_port, dst_port, protocol)` |
 | `FLOW_DIRECTION(src_ip, dst_ip)` | Classify as inbound/outbound/internal/transit | `FLOW_DIRECTION(src_ip, dst_ip)` → `'outbound'` |
+
+### TCP Flag Functions
+
+A TCP flags column is an integer bitset. These name its bits, so a predicate
+says what it means instead of spelling a mask. Names are case-insensitive.
+Bits 0-7 are the control bits RFC 9293 §3.1 defines; bit 8 is the bit RFC 3540
+named `NS` (Historic per RFC 8311) which the Accurate ECN work reuses as `AE`,
+and both spellings are accepted with `AE` as the canonical rendering.
+
+An unrecognized name is SQLSTATE `22023` naming it, and NULL flags give NULL.
+The refusal is raised PER ROW, as PostgreSQL's `DATE_TRUNC` raises its unknown
+unit: a predicate no row reaches — `WHERE id < 0 AND TCP_FLAGS_HAS_ALL(f,'XX')`
+— answers zero rows rather than an error.
+
+A flag NAME may be any text expression, including a column; only literal names
+are folded at plan time and pushed into the scan.
+
+| Bit | Value | Name |
+|---|---|---|
+| 0 | 1 | `FIN` |
+| 1 | 2 | `SYN` |
+| 2 | 4 | `RST` |
+| 3 | 8 | `PSH` |
+| 4 | 16 | `ACK` |
+| 5 | 32 | `URG` |
+| 6 | 64 | `ECE` |
+| 7 | 128 | `CWR` |
+| 8 | 256 | `AE` (RFC 3540 named this bit `NS`; both accepted) |
+
+| Function | Description | PostgreSQL equivalent | Example |
+|----------|-------------|-----------------------|---------|
+| `TCP_FLAGS_HAS_ALL(flags, name, ...)` | Every named bit is set | `(flags & mask) = mask` | `TCP_FLAGS_HAS_ALL(tcp_flags, 'SYN', 'ACK')` |
+| `TCP_FLAGS_HAS_ANY(flags, name, ...)` | At least one named bit is set | `(flags & mask) <> 0` | `TCP_FLAGS_HAS_ANY(tcp_flags, 'RST', 'FIN')` |
+| `TCP_FLAGS_HAS_NONE(flags, name, ...)` | No named bit is set | `(flags & mask) = 0` | `TCP_FLAGS_HAS_NONE(tcp_flags, 'ACK')` |
+| `TCP_FLAG_MASK(name, ...)` | The integer mask the names denote | — | `TCP_FLAG_MASK('SYN', 'ACK')` → `18` |
+| `TCP_FLAGS(flags)` | The set bits as an ARRAY of names, in header bit order | — | `TCP_FLAGS(18)` → `[SYN ACK]` (see below) |
+| `TCP_FLAGS_TEXT(flags)` | The same names joined with a pipe | — | `TCP_FLAGS_TEXT(18)` → `'SYN\|ACK'` |
+
+`TCP_FLAGS` and `TCP_FLAGS_TEXT` name only the nine bits above; a bit outside
+that table is not a TCP flag and is not named. The three predicates are bit
+arithmetic over the mask and are unaffected by such a bit.
+
+A `TCP_FLAGS_HAS_*` predicate over a bare `INT32`/`INT64` column with literal
+names is evaluated inside the scan, as is the `BITWISE_AND(flags, 18) = 18`
+spelling of the same test. On a dictionary-encoded column the mask is evaluated
+once per dictionary ENTRY rather than once per row; Wadjet's own writer emits
+no dictionary pages, so that applies to Parquet written elsewhere and a table
+ingested through Wadjet is evaluated per value. Either way a flags column
+referenced only by the filter is never materialized.
+`WADJET_FLAG_DICT_PUSHDOWN=0` disables the pushdown. A flag predicate never causes a row group to be skipped — a
+min/max range cannot prove a bit.
+
+A top-level projection of `TCP_FLAGS(flags)` is declared `TEXT` rather than
+`ARRAY`, as every container-returning function's is, and renders Go's slice
+form — `[SYN ACK]`, not PostgreSQL's `{SYN,ACK}` (issue #1017). `ELEMENT_AT`
+and `ARRAY_LENGTH` read the same value as the array it is, and
+`TCP_FLAGS_TEXT` is the function to use for a rendered list.
+
+`TCP_FLAGS_FROM_STRING` reads a comma-separated list. An EMPTY string is a list
+of no names and answers `0`; an empty ELEMENT (`'SYN,'`, `'SYN,,ACK'`) is
+SQLSTATE `22023` naming the position, because a list that names something and
+then names nothing is a slip rather than an empty list.
 
 ### DNS Inspection Functions
 

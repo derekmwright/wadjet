@@ -316,6 +316,19 @@ func init() {
 		"ip_subnet":     {fnIPSubnet, RetString},
 		"ip_netmask":    {fnIPNetmask, RetString},
 
+		// TCP flag bitset semantics (#966, tcp_flags.go). The three
+		// predicates are PostgreSQL's `(flags & mask) = mask` / `<> 0` /
+		// `= 0` under the names RFC 9293 gives the bits; tcp_flag_mask
+		// hands back the integer so the arithmetic can be written by hand
+		// against the same table. The renderers answer TEXT and an ARRAY of
+		// TEXT — no new type.
+		"tcp_flags_has_all":  {fnTCPFlagsHasAll, RetBool},
+		"tcp_flags_has_any":  {fnTCPFlagsHasAny, RetBool},
+		"tcp_flags_has_none": {fnTCPFlagsHasNone, RetBool},
+		"tcp_flag_mask":      {fnTCPFlagMask, RetInt32},
+		"tcp_flags":          {fnTCPFlags, RetArray},
+		"tcp_flags_text":     {fnTCPFlagsText, RetString},
+
 		// Date/time functions
 		"now":        {fnNow, RetTimestamp},
 		"year":       {fnYear, RetFloat64},
@@ -798,24 +811,9 @@ func init() {
 	}
 }
 
-var tcpFlagNames = []struct {
-	mask byte
-	name string
-}{
-	{tcpFIN, "FIN"},
-	{tcpSYN, "SYN"},
-	{tcpRST, "RST"},
-	{tcpPSH, "PSH"},
-	{tcpACK, "ACK"},
-	{tcpURG, "URG"},
-	{tcpECE, "ECE"},
-	{tcpCWR, "CWR"},
-}
-
-var tcpFlagLookup = map[string]byte{
-	"fin": tcpFIN, "syn": tcpSYN, "rst": tcpRST, "psh": tcpPSH,
-	"ack": tcpACK, "urg": tcpURG, "ece": tcpECE, "cwr": tcpCWR,
-}
+// The name-to-bit table the TCP flag functions read lives in tcp_flags.go
+// (#966). A SECOND table stood here — eight bits wide, in a `byte` — and the
+// two would have agreed only by inspection.
 
 // --- ICMP Functions ---
 

@@ -275,7 +275,7 @@ Full analytical SQL via a custom recursive descent parser:
 - Table functions: `read_json()`, `read_csv()`, `read_parquet()` with glob patterns and named parameters
 - VECTOR(N) type for embedding storage with cosine_similarity, l2_distance, dot_product, vector_norm, vector_dims
 - `embed()` SQL function — OpenAI, Voyage AI, and Ollama embedding providers with batched API calls (one call per record batch) and LRU cache
-- 360 built-in scalar functions (string, math, trig, date/time, network, UUID, conditional, regex, hash, encoding, bitwise, JSON, URL, deep packet inspection, ICMP, IPv6, JA3 fingerprinting, payload search, GeoIP/ASN, vector distance)
+- 366 built-in scalar functions (string, math, trig, date/time, network, TCP flags, UUID, conditional, regex, hash, encoding, bitwise, JSON, URL, deep packet inspection, ICMP, IPv6, JA3 fingerprinting, payload search, GeoIP/ASN, vector distance)
 - 29 aggregate functions including approx_distinct, corr, covar, percentile_cont/disc, mode, median, min_by/max_by, and `ohlcv(ts, price, volume)` — one mergeable state that answers a whole downsampled bar as a ROW (`open`, `high`, `low`, `close`, `volume`, `vwap`), grouped by `TIME_BUCKET(INTERVAL '5' MINUTE, ts)` ([ADR-0035](docs/adr/0035-mergeable-aggregate-states.md))
 - User-defined functions (CREATE FUNCTION)
 

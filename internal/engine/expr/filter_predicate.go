@@ -52,7 +52,8 @@ func FilterPredicate(e Expr) func(b *batch.RecordBatch, row int) bool {
 // operator that gains its own EvalBool must leave this list.
 func evalBoolIsCollapse(e Expr) bool {
 	switch e.(type) {
-	case *CmpTemporalLit, *In, *Between, *Like, *Not, *IsDistinctFrom, *ColEmptyStr:
+	case *CmpTemporalLit, *In, *Between, *Like, *Not, *IsDistinctFrom, *ColEmptyStr,
+		*flagsTest:
 		return true
 	}
 	return false

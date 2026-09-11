@@ -1228,6 +1228,13 @@ func compileFuncCallNamed(n *plansql.FuncCallNode, ctx *compileContext, checked 
 	if ds := newDecimalScalarFn(fc); ds != nil {
 		return ds, nil
 	}
+	// A TCP flag predicate over a bare column with constant flag names is a
+	// mask test the column's typed slice can answer directly (tcp_flags.go).
+	// The node carries fc as its fallback and takes it for every column type
+	// and input shape it does not handle, so semantics are unchanged (#966).
+	if ft := newFlagsTest(fc); ft != nil {
+		return ft, nil
+	}
 	// A function that always returns a number is wrapped so it satisfies
 	// Float64Expr/Int64Expr and binary operators over it take the typed path.
 	// This used to be a second hand-maintained name list, which had drifted

@@ -679,6 +679,13 @@ func cloneExprWithArgs(e Expr, argsPtr *[]any) Expr {
 			Mul:      n.Mul,
 			Fallback: cloneExprWithArgs(n.Fallback, argsPtr).(*FuncCall),
 		}
+	case *flagsTest:
+		return &flagsTest{
+			Col:      &ColRef{Name: n.Col.Name},
+			Mask:     n.Mask,
+			Mode:     n.Mode,
+			Fallback: cloneExprWithArgs(n.Fallback, argsPtr).(*FuncCall),
+		}
 	case *FuncCall:
 		args := make([]Expr, len(n.Args))
 		for i, a := range n.Args {
