@@ -7,34 +7,14 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// dedupSemiAntiBuildSide wraps the build side (right child) of every SEMI
-// or ANTI join in a GroupBy on the join keys, so the hash-join build phase
-// constructs a hash table sized to NDV rather than raw row count.
-//
-// Motivation: for Q04 (orders ⨝SEMI lineitem on l_orderkey) and Q21
-// (lineitem self-joins on l_orderkey), the build side is a fact table
-// (30M-60M rows) whose join key has much lower cardinality (~15M
-// orderkeys). Without dedup the build hashtable holds 2-4× the entries
-// it needs, the dynamic-filter eligibility check rejects it as too big
-// (Q04/Q21 SF10 A/B audit, 2026-05-25), and the probe is slowed by
-// duplicate-key probe collisions for the same orderkey.
-//
-// Semantics: SEMI / ANTI joins return a subset of LEFT rows based on
-// existence in the RIGHT side. Whether RIGHT has duplicates is
-// irrelevant to the result — only the SET of right keys matters. So
-// wrapping RIGHT in GroupBy(rightKeys) is a semantics-preserving
-// rewrite that bounds build cardinality by NDV.
-//
-// This pass runs after pushdownPredicates (so filters land on the inner
-// scan before dedup) and before reorderJoins (so the dedup'd subtree's
-// cost estimate flows through the join reorderer).
-// buildDedupToggle is the #287 kill switch. This pass CHANGES THE ROW SET when
-// it is wrong, in both directions — a build side narrowed to too few columns
-// makes a semi join answer nothing and an anti join answer everything (#562) —
-// so it belongs in the registry the invariance oracle enumerates. Had it been
-// there, the oracle would have reported #562 as a divergence under
-// WADJET_SEMIANTI_BUILD_DEDUP=0 the first time a two-key correlation entered
-// any corpus, instead of the shape having to be noticed by hand.
+// dedupSemiAntiBuildSide deduplicates RIGHT join keys to bound hash-table size by NDV.
+// SEMI/ANTI return a subset of LEFT rows based only on the SET of right keys;
+// right duplicates are irrelevant. Retain EVERY compared key when narrowing.
+// Run after pushdownPredicates, before reorderJoins, so filters precede dedup
+// and the reduced cost estimate reaches reordering.
+// Keep buildDedupToggle registered for #287 invariance under WADJET_SEMIANTI_BUILD_DEDUP=0:
+// too few build columns can make SEMI return nothing and ANTI everything (#562).
+// See docs/internals/semi-anti-build-dedup-contract.md for the design.
 var buildDedupToggle = optswitch.Register("semianti-build-dedup", "WADJET_SEMIANTI_BUILD_DEDUP",
 	"narrow a semi/anti join's build side to Project(join keys) -> Distinct, so the hash table is sized to NDV")
 
@@ -104,47 +84,15 @@ func dedupSemiAntiBuildSide(n *Node) *Node {
 	return n
 }
 
-// extractRightJoinKeys reads a join condition STRUCTURALLY and returns the
-// build-side key of every one of its conjuncts, or nil when even one conjunct
-// cannot be attributed.
-//
-// All-or-nothing is the whole contract. The caller projects the build side
-// down to exactly these keys, so a key list that is short by one conjunct
-// deletes a column the join still compares and the join then matches NOTHING
-// — a semi join answers zero rows and an anti join answers every row, both
-// silently.
-//
-// This used to split the text on " and " and then on the first "=". The
-// condition a decorrelated EXISTS/IN writes is rendered with " AND "
-// (renderDecorrelatedKeys), which that split does not see: a two-key
-// correlation came through as ONE part whose right operand was the literal
-// text "b.k AND a.k2 = b.k2", and the only key that survived was the first
-// conjunct's (#562). It is the same lexical-where-the-condition-is-structural
-// defect physical.parseJoinKeys was rewritten for in #351, one layer up, so
-// this reads the same way: parse, flatten the top-level ANDs, and require
-// each conjunct to be an equality between two bare column references.
-//
-// Side membership is decided by what the build subtree's ROOT EMITS, which is
-// the schema the narrowing's own Project will read. It used to be decided by
-// collectSubtreeColumns — every column the subtree READS anywhere — and the
-// two differ exactly where a Project renames: over a derived table
-// `(SELECT c_bool AS k FROM typemx GROUP BY c_bool) b`, the read set holds
-// `c_bool` and the emitted set holds `k`, so `c_bool = k` attributed the BUILD
-// key to `c_bool` and projected a column the build root does not have —
-// `column "c_bool" does not exist in the input schema`, at build time, on
-// every arm. That was unreachable until a derived table could BE a build side
-// (#852); it is a defect in this attribution either way.
-//
-// emittedColumns needs the scan annotation, so an un-annotated subtree emits
-// nothing and the read set is the fallback — the pre-#852 behaviour, and a
-// decline at worst. A name that resolves on BOTH sides (a self-join's
-// `k = k`) is not attributable from the condition alone and bails, as it
-// always has.
-//
-// The last decline is about the narrowing's own Project rather than the
-// condition: it aliases every key to its BARE name, so a QUALIFIED key would
-// be renamed out from under the join that still asks for it. See the comment
-// at the check.
+// extractRightJoinKeys returns EVERY build key or nil if ANY conjunct cannot be
+// attributed: the caller narrows the build to this list and must lose no compared column.
+// Parse structurally, flatten top-level ANDs and require equalities between plain
+// column references; do not split condition text (#562, #351).
+// Attribute by what the build ROOT EMITS, not every column read underneath (#852).
+// Without scan annotation, fall back to the read set (pre-#852 behaviour).
+// Decline names resolving on both sides (k = k), and qualified build keys:
+// the narrowing Project aliases keys to BARE names and would invalidate the join.
+// See docs/internals/semi-anti-build-key-attribution.md for the design.
 func extractRightJoinKeys(cond string, rightSubtree *Node) []string {
 	if cond == "" || rightSubtree == nil {
 		return nil

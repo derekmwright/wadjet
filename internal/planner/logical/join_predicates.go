@@ -7,34 +7,12 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// This file holds the two analyses that decide where a join's predicates may
-// legally live: which of a join's inputs can be NULL-padded (so a WHERE
-// predicate must not be pushed below it unexamined), and which ON-clause
-// conjuncts the physical planner's key parser is able to represent at all.
-//
-// Both existed only implicitly before, and both were wrong:
-//
-//	#335 — pushFilterThroughJoin pushed a WHERE predicate to whichever join
-//	       child owned its columns, without looking at the join type. Over a
-//	       LEFT JOIN that pushed the predicate below the NULL-padding, so
-//	       `... LEFT JOIN region r ON ... WHERE r.r_regionkey = 2` filtered
-//	       region to one row and then padded every unmatched nation back in:
-//	       25 rows out of a 5-row answer, and 25 again for the IS NULL
-//	       anti-join idiom whose answer is 0.
-//
-//	#336 — an ON conjunct comparing two COLUMNS across the join
-//	       (`a.s_suppkey < b.s_suppkey`) stayed in JoinCond, where
-//	       parseJoinKeys keeps only the parts containing "=" and drops the
-//	       rest without a word. The same conjunct in WHERE is honoured, so
-//	       ON residuals and WHERE residuals were two paths with two answers.
-//
-//	#351 — the same analysis, one level finer. An ON conjunct can BE an
-//	       equality and still have no key representation, because the join
-//	       executor matches on column NAMES: `n.n_regionkey = r.r_regionkey
-//	       + 3` reached it with "r.r_regionkey + 3" as a key column, which
-//	       resolves to nothing and matches nothing — 0 rows for a 10-row
-//	       query. The residual test is therefore on the OPERANDS, not on
-//	       the operator alone.
+// Join predicate placement must account for which inputs can be NULL-padded:
+// never push WHERE below padding without checking semantics (#335).
+// ON conjuncts need a representation the physical key parser can preserve (#336).
+// Test OPERANDS, not just equality: computed operands are not column-name keys
+// and must be treated as residuals (#351).
+// See docs/internals/join-predicate-placement-contract.md for the design.
 
 // joinKind maps the many spellings a join type reaches the logical plan under
 // ("", "join", "left join", "LEFT OUTER JOIN", "full outer join") onto the
@@ -202,27 +180,13 @@ func isStrictNull(expr plansql.Node) bool {
 	return false
 }
 
-// liftInnerJoinOnResiduals moves every ON-clause conjunct that is not a
-// cross-side equality out of an inner or cross join's condition and into a
-// filter above it (#336).
-//
-// The physical planner represents a join condition as key column pairs:
-// parseJoinKeys splits JoinCond on AND, keeps the parts containing "=", and
-// discards the rest in silence. `a.s_nationkey = b.s_nationkey AND
-// a.s_suppkey < b.s_suppkey` therefore joined on the first conjunct and
-// answered as if the second had never been written — 494 rows for a 197-row
-// query, which is how self-join deduplication and band joins are spelled.
-//
-// For an inner join ON and WHERE are interchangeable, so the residual is
-// exact above the join, and it lands on the path that already carries WHERE
-// residuals correctly. pushdownPredicates, which runs next, then pushes back
-// down whatever is single-sided.
-//
-// Outer joins are left alone: their ON clause is evaluated BEFORE the
-// NULL-padding, so a residual moved above the join would delete rows the join
-// is required to preserve. There is no equivalent placement for it in the
-// current plan vocabulary — the executor has no residual predicate on an
-// outer join's probe — so that shape stays broken and is tracked separately.
+// liftInnerJoinOnResiduals moves ON conjuncts other than cross-side equalities
+// from INNER/CROSS joins to a filter above them (#336); the key parser cannot keep them.
+// ON and WHERE are interchangeable there; subsequent pushdownPredicates returns
+// single-sided conjuncts to their inputs.
+// Leave OUTER joins alone: ON runs BEFORE NULL-padding, and moving residuals above
+// would delete preserved rows. This pass does not supply outer-join residual execution.
+// See docs/internals/inner-join-on-residual-placement.md for the design.
 func liftInnerJoinOnResiduals(n *Node) *Node {
 	if n == nil {
 		return nil
@@ -302,34 +266,16 @@ func takeJoinCondResiduals(join *Node) []Predicate {
 	return residuals
 }
 
-// routeOuterJoinOnResiduals moves every ON-clause conjunct of a LEFT, RIGHT
-// or FULL OUTER join that is not a bare-column equality out of JoinCond and
-// into JoinFilter — the join's residual predicate, evaluated by the executor
-// on the combined (probe row + candidate build row) BEFORE a key match is
-// accepted (#358).
-//
-// This is the placement liftInnerJoinOnResiduals explicitly could not use:
-// an outer join's ON runs before the NULL-padding, so a residual lifted above
-// the join deletes the very rows the join preserves, and one pushed into a
-// preserved side's scan deletes the rows owed back unmatched (the
-// FullJoinOnConjunctBuildSide shape). On the probe it is exact for every
-// disposition: a probe row whose candidates all fail the residual is simply
-// unmatched — LEFT/FULL still emit it NULL-padded — and a build row counts as
-// matched only when some probe row passed key AND residual, which is what the
-// RIGHT/FULL unmatched flush consults.
-//
-// Runs AFTER pushdownPredicates so extractJoinCondPredicates has already
-// pushed the conjuncts that have a strictly better home (a LEFT join's
-// build-side conjunct filters that scan directly; same for a RIGHT join's
-// probe side). What remains is exactly what had no legal home before:
-// cross-side non-equalities, expression-operand equalities, and any single-
-// sided conjunct of a FULL join. Conjuncts that fail to parse stay in
-// JoinCond, where the physical planner's key parser still refuses them
-// loudly.
-//
-// When no conjunct survives as a key pair the join becomes keyless: JoinCond
-// empties and the executor degenerates to one all-rows candidate chain, with
-// the residual doing the whole of the work (`LEFT JOIN r ON n.x = r.y + 3`).
+// routeOuterJoinOnResiduals moves LEFT/RIGHT/FULL ON non-key conjuncts into JoinFilter,
+// evaluated on probe + candidate build row BEFORE accepting a key match (#358).
+// Never move them above NULL-padding or into a preserved-side scan: unmatched rows are owed.
+// A probe whose candidates all fail stays unmatched; LEFT/FULL emit it padded.
+// A build row matches only if key AND residual pass; RIGHT/FULL flush uses that fact.
+// Run AFTER pushdownPredicates moves legal single-side conjuncts (LEFT build, RIGHT probe).
+// Route cross-side non-equalities, computed equalities and FULL single-side conjuncts;
+// parse failures stay in JoinCond for loud physical refusal. Without key pairs,
+// JoinCond empties and one all-rows candidate chain is tested wholly by the residual.
+// See docs/internals/outer-join-residual-match-contract.md for the design.
 func routeOuterJoinOnResiduals(n *Node) *Node {
 	if n == nil {
 		return nil
@@ -375,28 +321,13 @@ func routeOuterJoinOnResiduals(n *Node) *Node {
 	return n
 }
 
-// isJoinKeyEquality reports whether a top-level ON conjunct is an equality
-// between two BARE COLUMN REFERENCES — the only shape parseJoinKeys turns
-// into a key pair, and so the only shape that survives being left in
-// JoinCond.
-//
-// The operands are what distinguishes this from "is an equality". The join
-// executor matches on column NAMES, so an operand that is not a column has no
-// representation there: `n.n_regionkey = r.r_regionkey + 3` used to reach the
-// executor with "r.r_regionkey + 3" as a key column, which resolves to
-// nothing and matches nothing — 0 rows for a 10-row query, on both execution
-// paths (#351). Lifting it into the filter above the join is exact for an
-// inner join and is the same treatment #336 gave the non-equality conjuncts.
-//
-// An equality against a LITERAL takes the same route. extractJoinCondPredicates
-// would otherwise push it to the child that owns it, which lands it in the
-// same place; running it through the residual path means the single-conjunct
-// case (`ON n.n_regionkey = 1`, which that pass declines because it has
-// nothing to split) is covered too — it was another 0-row answer.
-//
-// Which SIDE each column lives on is still decided later
-// (physical.parseJoinKeys, then FixKeyAssignment). The point here is only to
-// separate "the join can represent this" from "the join will mis-execute this".
+// isJoinKeyEquality accepts only top-level equality of two BARE COLUMN REFERENCES:
+// only these operands have a key-pair representation in parseJoinKeys (#351).
+// Computed operands and literals take the residual route, including a single ON
+// literal equality that extractJoinCondPredicates cannot split (#336).
+// This checks representability only; physical.parseJoinKeys and FixKeyAssignment
+// later decide which SIDE each column belongs to.
+// See docs/internals/join-key-equality-operand-boundary.md for the design.
 func isJoinKeyEquality(expr plansql.Node, rowFields map[string][]parquet.Column) bool {
 	if p, ok := expr.(*plansql.ParenNode); ok {
 		return isJoinKeyEquality(p.Inner, rowFields)
@@ -408,30 +339,13 @@ func isJoinKeyEquality(expr plansql.Node, rowFields map[string][]parquet.Column)
 	return isBareColRef(cmp.Left, rowFields) && isBareColRef(cmp.Right, rowFields)
 }
 
-// isBareColRef reports whether expr is a plain column reference, qualified or
-// not — the only operand physical.parseJoinKeys can turn into a key name.
-//
-// A ROW FIELD PATH is NOT one, and that is the whole of #769's join-key face.
-// `c_row.b` LOOKS like a qualified column here, so it stayed in JoinCond as a
-// key pair, and the executor — which matches on column NAMES — resolved
-// `c_row.b` to nothing: `ON c_row.b = d.b` answered ~10,000 rows of
-// `id, NULL` (every probe row against every build row, the silent cross
-// product #351 is written about) on the single, spilled and broadcast arms,
-// and `partitioned shuffle: key "c_row.b" not in schema` on the shuffled one,
-// where PostgreSQL answers ONE row. The instrument that localises it is
-// `ON c_row.b + 0 = d.b`, an EXPRESSION operand containing the same path: it
-// was already right on all four arms, because the arithmetic made this
-// function decline and the residual route materialized the path.
-//
-// Declining the bare path sends it down that same route, which is the one
-// ADR-0022 rule 1 prescribes anyway — a field path is materialized like a
-// computed expression, never passed on as a name.
-//
-// rowFields is `subtreeRowFields`, so this shares the pushdown's annotation
-// dependency: where nothing below is annotated the map is empty, no reference
-// reads as a field path, and the pre-#769 routing stands. That is the same
-// deliberate conservative answer, and
-// `TestRowFieldPathPushdownFollowsTheAnnotation` is the fixture for it.
+// isBareColRef accepts plain qualified or unqualified column references, but NOT
+// ROW FIELD PATHS (#769): a field must be materialized like a computed expression,
+// never passed as a key name (ADR-0022 rule 1; #351).
+// rowFields comes from subtreeRowFields and depends on scan annotation. Without it,
+// the empty map recognizes no field paths and retains pre-#769 routing.
+// TestRowFieldPathPushdownFollowsTheAnnotation pins that conservative boundary.
+// See docs/internals/row-field-join-key-materialization.md for the design.
 func isBareColRef(expr plansql.Node, rowFields map[string][]parquet.Column) bool {
 	if p, ok := expr.(*plansql.ParenNode); ok {
 		return isBareColRef(p.Inner, rowFields)

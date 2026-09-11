@@ -10,60 +10,16 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// The constant-arithmetic aggregate lift, decided from the column's TYPE
-// (#850).
-//
-// #841 stopped the syntactic lift from moving a per-row 22003 out of the row
-// where it belongs: `SUM(x * k)` → `SUM(x) * k` answers where the per-row form
-// must raise, and PostgreSQL raises for the input expression in every
-// position. It declined for EVERY integer literal, because the builder runs
-// before any type is known, and the ClickBench Q30 shape — 90 × `SUM(col + k)`
-// over one integer column — went 7.6 ms to 342 ms.
-//
-// The recovery is not a threshold and not a heuristic: the lift is SAFE
-// exactly when the per-row arithmetic CANNOT refuse, and that is decidable at
-// plan time from the column's declared type and the manifest's min/max. This
-// pass runs inside logical.Optimize, which every caller invokes AFTER
-// physical.AnnotateScanColumns — so `Node.ScanColTypes`, `Node.ScanColStats`
-// and `Node.ScanRowEstimate` are on the Scan by the time it looks.
-//
-// # What has to be proven, and it is BOTH forms
-//
-// The obvious half is the per-row form: `col op k` must not leave int64 for
-// any row. `+`, `-` and `*` are monotone in col for a fixed k, and |col*k| is
-// maximal at an extreme, so checking the column's MIN and MAX is exact rather
-// than conservative.
-//
-// The half that is easy to miss is the LIFTED form, which has arithmetic the
-// per-row form does not: `SUM(x) + k*COUNT(x)` multiplies the literal by the
-// row count. With k near int64's edge that product refuses where the per-row
-// `x + k` over small x does not — the same defect as #841, pointing the other
-// way. So the pass bounds `|k| × N` too (N is the manifest's row count, an
-// upper bound on COUNT since a filter only removes rows), and bounds the
-// numeric carrier the aggregate's own result rides on: SUM over an integer is
-// an exact numeric(38,0) and AVG a numeric(38,4), so the lifted expression has
-// 38 and 34 integer digits to fit in.
-//
-// # Statistics are read ONCE per column per query
-//
-// Q30's shape has ninety aggregates over a handful of columns. The decision is
-// cached per (column, scan) for the pass, because re-walking the plan to the
-// scan for each aggregate is the cost the recovery exists to remove.
-//
-// # What still declines, and why
-//
-//   - No statistics for an INT64 column: min/max is what proves the bound, and
-//     a table that has never been ANALYZEd (or a manifest with no per-column
-//     stats) has none. Right and slower.
-//   - A DECIMAL column: the engine's own 128-bit carrier can refuse where
-//     PostgreSQL answers, and the lifted and per-row forms round at different
-//     scales. Unchanged from the #841 state.
-//   - Anything below the Aggregate that can rebind a name — a Project, a join,
-//     a set operation. The walk stops there exactly as strictIntArithCols does,
-//     and for the same reason: a wrong type claim here is a wrong ANSWER.
-//
-// The kill switch is the same one: constArithAggToggle (WADJET_CONST_ARITH_AGG
-// =0), so the optimization-invariance oracle covers this pass for free.
+// The typed aggregate lift requires BOTH per-row and lifted arithmetic to be safe (#850, #841).
+// Run after AnnotateScanColumns supplies ScanColTypes, ScanColStats and ScanRowEstimate.
+// For fixed k, checking MIN/MAX proves col +, - or * k stays in int64, including negative k.
+// Also bound |k|*N using the manifest row count (filters only reduce COUNT), and bound
+// SUM's numeric(38,0) / AVG's numeric(38,4) carriers to 38 / 34 integer digits.
+// Read statistics once per (column, scan), caching the decision for this pass.
+// Decline INT64 without statistics, DECIMAL (carrier refusal and differing rounding),
+// and walks crossing a Project, join or set operation that can rebind the name.
+// constArithAggToggle (WADJET_CONST_ARITH_AGG=0) disables the pass for invariance.
+// See docs/internals/typed-constant-aggregate-lift.md for the design.
 
 // liftConstArithAggsWithTypes applies the const-arith aggregate lift to the
 // aggregates the syntactic pass declined, wherever the column's type proves the
@@ -382,29 +338,12 @@ func caaLiftIsSafe(c caaCandidate, f caaColumnFacts) bool {
 	switch f.typ {
 	case parquet.TypeInt32, parquet.TypeInt64:
 	default:
-		// EVERY non-integer column declines, and the reason is not a
-		// disposition — it is a VALUE.
-		//
-		// IEEE addition is not associative, so `SUM(f + k)` and
-		// `SUM(f) + k*COUNT(f)` are different numbers whenever the summands
-		// span enough magnitude to cancel. Over `f = 1e16, 1, 1, 1, 1`,
-		// PostgreSQL 17.11 answers 1.0000000000000008e+16 for `SUM(f+1)` and
-		// 3.0000000000000016e+16 for `SUM(f*3)`; the lifted forms answer
-		// …004e+16 and 3e+16. The first cut of this pass lifted FLOAT64 on the
-		// grounds that "float arithmetic never refuses" — true of this engine,
-		// and beside the point: the lift is an identity over VALUES or it is
-		// not applied, and over a float it is not (round-1 review, B1).
-		//
-		// FLOAT32 declines for a sharper version of the same thing: the
-		// per-row multiplication widens each value to a double before it is
-		// accumulated while `SUM(c_f32)` accumulates at float4's width, so the
-		// two forms use a different ACCUMULATOR — `SUM(c_f32 * 2)` answered
-		// 1383.1428577005863 per-row and 1383.142822265625 lifted over the
-		// type matrix's 100 rows.
-		//
-		// DECIMAL declines too, unchanged from #841: the engine's 128-bit
-		// carrier can refuse where PostgreSQL answers, and the lifted and
-		// per-row forms round at different scales.
+		// Decline EVERY non-integer column: the lift must preserve VALUES, not just avoid errors.
+		// FLOAT64 addition is not associative. FLOAT32 per-row multiplication widens to double,
+		// whereas SUM(c_f32) accumulates at float4 width, so the forms use different accumulators.
+		// DECIMAL also declines (#841): its 128-bit carrier may refuse, and the per-row
+		// and lifted forms round at different scales.
+		// See docs/internals/aggregate-lift-noninteger-value-boundary.md for the design.
 		return false
 	}
 	if f.lo == nil || f.hi == nil || f.rows == nil {
@@ -446,32 +385,12 @@ func caaLiftIsSafe(c caaCandidate, f caaColumnFacts) bool {
 		// does.
 		return true
 	case "avg":
-		// AVG over an integer is numeric(38,4) — a value ROUNDED to four
-		// decimals — so what the lift may do to it depends on the operator,
-		// and only one of the two is an identity.
-		//
-		// `AVG(col ± k)` → `AVG(col) ± k` is exact for an INTEGER k, and the
-		// reason is that rounding commutes with adding an integer:
-		// round(s/n, 4) + k = round(s/n + k, 4) for integral k, because the
-		// shift moves no digit past the fourth decimal. Measured on
-		// PostgreSQL 17.11 over 1, 2, 4: `avg(m+1)` and `avg(m)+1` are both
-		// 3.3333333333333333.
-		//
-		// `AVG(col * k)` → `AVG(col) * k` is NOT. It rounds to four decimals
-		// BEFORE the multiply, so the last digit is lost for any k that is not
-		// a power of two — and PostgreSQL itself shows the rewrite is not an
-		// identity: over the same three rows `avg(x*3)` is 7.0000000000000000
-		// and `avg(x)*3` is 6.9999999999999999. This engine answered 6.9999
-		// where the server answers 7.0000 (round-1 review, B2). The digit-count
-		// bound below never asked the question; it only asked whether the
-		// result FIT.
-		//
-		// The identity that does hold for `*` is `(k*SUM(col))/COUNT(col)` with
-		// ONE division at the end, and it is not taken here: the lifted form's
-		// DECLARED type would then be the division's rather than the AVG's, so
-		// the two arms of the invariance oracle would render the same number at
-		// two scales. Declining costs the `AVG(col * k)` shape and nothing
-		// else — Q30's shape is SUM.
+		// Integer AVG is numeric(38,4), rounded to four decimals: adding/subtracting an
+		// integer commutes with that rounding, but multiplication does NOT. Decline AVG(col * k).
+		// A digit-count bound proves only fit, not the rounding identity.
+		// (k*SUM(col))/COUNT(col) with one final division is not used either: its DECLARED
+		// type would be division's rather than AVG's, changing rendered scale across invariance arms.
+		// See docs/internals/integer-average-lift-rounding.md for the design.
 		if c.op == "*" {
 			return false
 		}

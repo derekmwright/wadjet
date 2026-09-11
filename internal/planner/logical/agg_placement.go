@@ -7,41 +7,15 @@ import (
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
-// checkAggregatePlacement enforces PostgreSQL's placement rules for aggregate
-// and grouping operations AT THIS QUERY LEVEL, before anything is planned:
-//
-//	SELECT g FROM t WHERE SUM(h) > 1 GROUP BY g
-//	  ERROR: aggregate functions are not allowed in WHERE            (42803)
-//	SELECT g FROM t WHERE GROUPING(g) = 0 GROUP BY ROLLUP(g)
-//	  ERROR: grouping operations are not allowed in WHERE            (42803)
-//	SELECT a.g FROM t a JOIN t b ON SUM(a.h) = 0 GROUP BY a.g
-//	  ERROR: aggregate functions are not allowed in JOIN conditions  (42803)
-//	SELECT SUM(GROUPING(g)) FROM t GROUP BY ROLLUP(g)
-//	  ERROR: aggregate function calls cannot be nested               (42803)
-//
-// (every message and SQLSTATE transcribed from PostgreSQL 17.11).
-//
-// WHERE runs BEFORE grouping, so no aggregate's output and no grouping-set
-// membership exists there to read; an aggregate call in that position is a
-// question the query cannot ask. Both were answered SILENTLY before this
-// check — `WHERE SUM(h) > 1` and `WHERE GROUPING(g) = 0` each returned ZERO
-// ROWS, because the reference resolved to nothing and a filter admits only
-// TRUE — and `SUM(GROUPING(g))` aggregated over a column nothing populated
-// and returned a column of NULLs. A wrong number in place of an error is the
-// regression the correctness protocol's rule 8 forbids, and #804's parser
-// widening reached two of these positions, so the rule that covers them is
-// one rule, not a GROUPING special case.
-//
-// Scope is deliberately THIS query level:
-//
-//   - A subquery is its own level and its aggregates are legal there —
-//     `WHERE h > (SELECT AVG(h) FROM t)` is ordinary SQL, and PostgreSQL
-//     accepts it. plansql.FindAllAggregates does not descend into subquery
-//     nodes, which is what makes the scan level-local.
-//   - A WINDOW column is skipped: `SUM(COUNT(*)) OVER ()` is legal in
-//     PostgreSQL (a window function OVER an aggregate), and the builder
-//     already hoists aggregates out of a window's own spec terms. Refusing
-//     it here would invent a rule PostgreSQL does not have.
+// checkAggregatePlacement enforces aggregate/grouping placement BEFORE planning,
+// at THIS query level (#804). WHERE runs before grouping and cannot read either;
+// JOIN conditions also reject aggregates, and aggregate calls cannot nest (42803).
+// Use PostgreSQL's placement messages; SUM(GROUPING(g)) is forbidden nesting.
+// A subquery is its own level: FindAllAggregates does not descend into it, so an
+// aggregate inside a WHERE subquery is legal at that subquery's level.
+// Skip WINDOW columns: SUM(COUNT(*)) OVER () is legal, and the builder already
+// hoists aggregates from the window's spec terms.
+// See docs/internals/query-level-aggregate-placement.md for the design.
 func checkAggregatePlacement(info *plansql.SelectInfo) error {
 	if info.WhereExpr != nil {
 		if found := plansql.FindAllAggregates(info.WhereExpr); len(found) > 0 {
@@ -81,36 +55,14 @@ func checkAggregatePlacement(info *plansql.SelectInfo) error {
 	return nil
 }
 
-// checkSubqueryAggregatePlacement applies the level-local rule to the
-// SUBQUERIES this level contains, at THEIR level (#809, #601).
-//
-// The scan above deliberately does not descend into a subquery, and the
-// reason it gives is right — a subquery is its own level, and `WHERE h >
-// (SELECT AVG(h) FROM t)` is ordinary SQL. What it left uncovered is the
-// subquery's OWN level, which nothing else reaches when the planner takes the
-// subquery apart rather than running it: `SELECT b.w_i32 FROM numwidth b
-// WHERE SUM(b.w_i32) > 0` is refused by PostgreSQL with 42803, and by this
-// engine too when the subquery is EXECUTED (its Runner plans it, and the scan
-// above fires at that level) — but a decorrelated IN builds the inner plan
-// straight from the parsed subquery, so the aggregate reached a Filter and
-// `a.w_i32 NOT IN (that)` answered every row of numwidth in silence. The DAG
-// half of #809 is the same gap wearing the other hat: `WHERE h > (SELECT
-// AVG(x.h) FROM collslot x WHERE SUM(x.h) > 0)` reached the worker as filter
-// TEXT and failed with "subqueries require a SubqueryRunner" and no SQLSTATE
-// at all, while the single-process arm gave PostgreSQL's 42803.
-//
-// THE BOUNDARY, and it is where PostgreSQL and this engine really differ: an
-// aggregate inside a subquery may belong to the OUTER level, and PostgreSQL
-// accepts it there — measured live, `HAVING (SELECT MAX(d.k) FROM typemx_dim
-// d WHERE d.k = SUM(typemx.g)) > 0` answers rows. This engine does not answer
-// that shape on ANY path, at this arc's base or at its tip: the subquery is
-// re-run standalone and refused at its own level with the same 42803. So the
-// test is not "does it belong to this level" — nothing here has a schema to
-// resolve a bare name with — but "does it name a relation this subquery does
-// NOT provide". An aggregate that does is left to the runner, exactly as
-// before, so nothing that could one day answer is refused earlier because of
-// this; everything else is the subquery's own and is refused HERE, where the
-// error carries PostgreSQL's SQLSTATE and reaches both distribution arms.
+// checkSubqueryAggregatePlacement applies placement rules at each contained
+// subquery's OWN level, including subqueries taken apart by decorrelation (#809, #601).
+// Refuse that level's misplaced aggregates here with 42803 on both distribution arms.
+// An aggregate naming a relation the subquery does NOT provide is left to the runner:
+// without schema, this check cannot resolve a bare name to decide query-level ownership.
+// PostgreSQL can accept outer-level aggregates; our standalone runner still refuses
+// those shapes at the subquery level. Do not turn that boundary into an earlier refusal.
+// See docs/internals/subquery-aggregate-placement-boundary.md for the design.
 func checkSubqueryAggregatePlacement(info *plansql.SelectInfo) error {
 	var sqls []string
 	collectSubquerySQL(info.WhereExpr, &sqls)

@@ -83,28 +83,15 @@ func ExpandStarProjections(n *Node) {
 	n.Projections = expanded
 }
 
-// StarSourceColumns is the ONE list a star expands from: what the relation the
-// star names PUBLISHES to the plan above it, for THIS identity. qualifier is
-// "" for a bare `*` (the star's source is the single scan below it) and the
-// relation's name for `alias.*`. nil means "not knowable here", and the caller
-// leaves the star unexpanded, which is a refusal one pass later.
-//
-// PUBLISHES, not "declares in the catalog". Where an ABAC column policy applies
-// the plan carries a SECURITY PROJECTION directly above the scan (#859,
-// ADR-0033 decision 1): it drops every DENIED column and replaces every MASKED
-// one with its mask, and it is what every consumer above the scan reads. A star
-// is such a consumer. Reading the scan's catalog-annotated ScanColumns past that
-// projection published a denied column's NAME to an identity the policy denies
-// it to — `SELECT a.* FROM e7emp a` came back with a `salary` column on the
-// embedded, pgwire and HTTP doors — and the column read NULL only because the
-// name resolved to nothing above the barrier, which is an accident of the
-// resolver and not the policy working.
-//
-// Every star spelling asks THIS function, so the answer cannot differ between
-// `*` beside an item, `a.*` alone, `a.*` beside an item, a derived table's or a
-// CTE's star, a star under a positional ORDER BY, or a star nested inside any of
-// them: a star is its source in its position, and its source is what the plan
-// below it publishes.
+// StarSourceColumns is the ONE list every star spelling asks: this identity's
+// PUBLISHED relation output, in the star's position, never a catalog bypass.
+// qualifier is empty for bare star over a single scan, or the relation name for alias.*;
+// nil means unknown: leave unexpanded for refusal in the next pass.
+// An ABAC security projection drops DENIED columns and replaces MASKED values
+// (#859, ADR-0033 decision 1); stars must read that projection, including column NAMES.
+// This applies beside items, alone, through derived/CTE scopes, under positional
+// ORDER BY and nested combinations alike.
+// See docs/internals/star-source-policy-publication.md for the design.
 func StarSourceColumns(input *Node, qualifier string) []string {
 	if input == nil {
 		return nil
@@ -146,28 +133,15 @@ func starQualifier(proj Projection) string {
 	return strings.TrimSpace(strings.TrimSuffix(e, ".*"))
 }
 
-// relationOutputColumns is what the relation called alias PUBLISHES, in order,
-// or nil when this pass cannot enumerate it — in which case the star stays
-// unexpanded and the query stays LOUD, which is what it was before this
-// expansion existed. Never a guess.
-//
-// The OUTPUT list, never a scan beneath a projection. A derived table, a CTE
-// and a VALUES list all sit above their own scans, and expanding from the scan
-// published columns the relation does not have:
-// `SELECT d.*, x.id FROM (SELECT id, customer FROM lat_ord) d` came back with
-// `total` as well, and a `d(a, b)` column-alias list was ignored entirely —
-// loud → silently wrong.
-//
-// A block that names itself (`DerivedAlias`, `CTEName`) is therefore answered
-// ONLY from its own projection, and where that projection was elided — the
-// planner drops one whose shape matches its input — there is no list here to
-// read and the answer is nil. A base-table scan is the one relation whose
-// output IS its catalog schema.
-//
-// A decorrelated LATERAL is enumerated by nobody here: `setSubtreeAlias` puts
-// its alias on its SCAN too, its own output is a projection this pass does not
-// resolve, and that projection carries the correlation slot the join is about
-// to drop — so `s.*` beside another item stays unexpanded and LOUD.
+// relationOutputColumns returns alias's PUBLISHED outputs in order, or nil:
+// leave unknown stars unexpanded and LOUD, never guess from a scan beneath a Project.
+// DerivedAlias/CTEName roots answer ONLY from their OWN projection; if elided,
+// there is no list here and the answer is nil. Respect positional column aliases.
+// Base scans publish their schema subject to the enclosing security projection.
+// Do not enumerate decorrelated LATERAL: its alias also marks the scan, but its
+// projection carries the correlation slot the join will drop; s.* beside an item
+// therefore remains unexpanded and LOUD.
+// See docs/internals/qualified-star-relation-output-list.md for the design.
 func relationOutputColumns(n *Node, alias string) []string {
 	var found []string
 	// barrier is the nearest enclosing security projection, carried down the

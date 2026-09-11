@@ -288,34 +288,13 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 				if funcName == "count" && (aggInputCol == "*" || aggInputCol == "") {
 					aggInputCol = ""
 				}
-				// Reuse an identical aggregate the SELECT list already
-				// computes, so HAVING references its output column instead
-				// of adding a second copy under a synthetic name. Match on
-				// the NORMALIZED fields rather than on rendered text: the
-				// old key rebuilt "count()" from an AggExpr whose InputCol
-				// the normalization above had already emptied, and compared
-				// it against the AST's "count(*)", so `SELECT a, COUNT(*)
-				// AS c ... HAVING COUNT(*) > 1` never matched — it counted
-				// twice and leaked the second count as __having_N.
-				//
-				// The reuse is DECLINED when that output column's name is not
-				// the aggregate's alone. An aggregate may be ALIASED like a
-				// group key — `SELECT g + 1 AS k, COUNT(*) AS "g + 1" …
-				// GROUP BY g + 1` — and then the aggregate's output batch
-				// carries TWO columns of that name, the key's and the count's.
-				// Every by-name lookup answers with the FIRST, which is the
-				// key, so the HAVING was evaluated against the key's values:
-				// `COUNT(*) > 100` became `g + 1 > 100`, false in every group,
-				// and the query returned ZERO rows for PostgreSQL's eight —
-				// on all four arms, in silence (#785, ADR-0026 §3a).
-				//
-				// The predicate reaches the aggregate through the slot it OWNS
-				// instead: the branch below mints `__having_N`, a name nothing
-				// else in the batch answers to, and the aggregate computes the
-				// value a second time under it. The SELECT list is untouched —
-				// a duplicate OUTPUT name is legal SQL that PostgreSQL answers,
-				// and the consumers that publish it tell the two apart by
-				// CLASS and POSITION rather than by name (#575).
+				// Reuse an identical SELECT-list aggregate by NORMALIZED fields, not rendered text.
+				// Decline reuse when a group key or another aggregate shares its output name:
+				// by-name lookup reads the FIRST column, not necessarily this aggregate (#785, ADR-0026 §3a).
+				// Instead compute it again under its own collision-free __having_N slot.
+				// Leave the SELECT list unchanged: duplicate output names are legal, and their
+				// publishing consumers distinguish them by CLASS and POSITION (#575).
+				// See docs/internals/having-aggregate-reuse-identity.md for the design.
 				found := false
 				if len(hAgg.Args) <= 1 {
 					for _, existing := range aggs {
@@ -1504,36 +1483,15 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 	return plan, nil
 }
 
-// scopeCTEs is the CTE list in scope INSIDE a nested query block: the items the
-// enclosing scope offers, then the block's OWN WITH items.
-//
-// A block's own WITH used to be DROPPED at every door that re-parses its SQL —
-// a derived table, a CTE body, a LATERAL subquery — because the builder was
-// handed the ENCLOSING list and the parsed SelectInfo's `CTEs` field was never
-// read. `SELECT v FROM (WITH c AS (SELECT dx FROM setopdecjb) SELECT dx AS v
-// FROM c) t` therefore planned a SCAN of a table called `c`, and since no such
-// table exists the single-process path answered NO ROWS where PostgreSQL
-// answers four, and the stage DAG failed with "stage scan-0 has no
-// dependencies and no ScanFiles" (#684). It is a wrong answer on one path and
-// a plan the other cannot run.
-//
-// The block's own items come LAST, so `resolveTableOrCTE`'s first-match walk
-// keeps the ENCLOSING scope's precedence and — the reason that walk passes
-// `ctes[:i]` down — an item can still only see the items DEFINED BEFORE IT
-// (#771: handing a CTE the whole list let one that shadows a base table read
-// ITSELF, without bound, and took the process down with a stack overflow).
-//
-// That precedence is BACKWARDS for the one shape where the two scopes collide
-// — PostgreSQL reads a block's own item where this reads the enclosing one —
-// and it is deliberately left that way here, because reversing the search
-// fixes it on the stage DAG and NOT on the single-process path, which would
-// answer one query two ways. The single-process planner materializes CTEs into
-// `Planner.cteCache` keyed by NAME over the STATEMENT's top-level list, so a
-// shadowing item's subtree, tagged with the same CTEName, reads the enclosing
-// item's materialization whatever the logical builder resolved. Correct
-// shadowing is that cache becoming scope-aware as well as this search being
-// reversed, which is a change to the CTE identity itself and not to this list.
-// TestAWithInsideASubqueryBlockIsInScopeThere pins the divergence.
+// scopeCTEs supplies enclosing CTEs followed by the nested block's OWN WITH items (#684).
+// resolveTableOrCTE's first-match walk retains enclosing precedence; ctes[:i]
+// lets each item see ONLY earlier definitions, preventing self-recursion (#771).
+// This deliberately differs from PostgreSQL when an inner WITH shadows an outer one.
+// Do not reverse the search alone: Planner.cteCache is statement-wide and keyed by NAME,
+// so the single path would still read the outer materialization while the DAG differed.
+// Correct shadowing requires scope-aware cache identity AND reversed lookup;
+// TestAWithInsideASubqueryBlockIsInScopeThere pins this divergence.
+// See docs/internals/nested-with-scope-precedence.md for the design.
 func scopeCTEs(outer, own []plansql.CTEDef) []plansql.CTEDef {
 	if len(own) == 0 {
 		return outer
@@ -1770,33 +1728,14 @@ func countScans(n *Node) int {
 	return total
 }
 
-// applyColumnAliases renames a subquery's output columns positionally, the way
-// `(SELECT …) AS b(kk, nn)` and `WITH c(kk, nn) AS (…)` do.
-//
-// PostgreSQL's arity rules, measured live on postgres:17-alpine over a
-// two-column derived table:
-//
-//	AS b(kk, nn)         → columns kk, nn
-//	AS b(kk)             → columns kk, n — FEWER aliases rename a PREFIX
-//	AS b(kk, nn, extra)  → 42P10 `table "b" has 2 columns available but
-//	                       3 columns specified`
-//
-// The CTE arm used to apply the list only when the counts matched EXACTLY and
-// drop it in silence otherwise, so both of the mismatches above answered under
-// the wrong names.
-//
-// A subquery whose SELECT list carries a `*` is left alone: the star's width
-// is a catalog question this layer cannot ask (ExpandStarProjections answers
-// it later), so neither the rename nor the arity refusal can be made
-// truthfully here. Guessing would rename the wrong columns, which is a wrong
-// answer rather than a missing one.
-//
-// It rewrites the DERIVED TABLE's own SELECT ALIASES rather than stacking a
-// rename Project above the finished plan. `AS b(kk)` means exactly what
-// `SELECT s AS kk` means, and the spelling that already worked on every path
-// is the one with the alias inside. A CTE takes applyColumnAliasProject
-// instead, because its body SQL is re-read by consumers a rewritten SELECT
-// list would be invisible to.
+// applyColumnAliases renames subquery outputs POSITIONALLY: fewer aliases rename
+// only a prefix; more aliases than columns refuse with PostgreSQL's 42P10.
+// Leave a SELECT list containing a star alone: its width needs later catalog expansion,
+// so neither renaming nor arity refusal is knowable here.
+// Rewrite the derived table's OWN SELECT aliases, not an extra rename Project.
+// CTEs use applyColumnAliasProject because consumers re-read their body SQL
+// and would not see a rewritten SELECT list.
+// See docs/internals/derived-column-alias-prefix.md for the design.
 func applyColumnAliases(info *plansql.SelectInfo, aliases []string, relName, kind string) error {
 	if len(aliases) == 0 || info == nil {
 		return nil
@@ -1925,34 +1864,13 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 		subInfo.Where = ""
 	}
 
-	// For aggregated LATERAL subqueries, add the correlated inner column
-	// to GROUP BY so the aggregate applies per-group rather than globally.
-	// e.g., SELECT COUNT(*) FROM t WHERE t.id = o.id
-	//     → SELECT t.id, COUNT(*) FROM t GROUP BY t.id
-	// A BLOCK THAT GROUPS IS AN AGGREGATE, whether or not its SELECT list
-	// calls an aggregate function (#1008).
-	//
-	// BuildFromSelect builds the Aggregate node on `hasAgg ||
-	// len(info.GroupBy) > 0`, and every decision below asks the same
-	// question of the same block — so reading the SELECT list alone made
-	// this lowering and the builder disagree about the very next node.
-	// `SELECT i.product AS p FROM item i WHERE i.order_id = o.id GROUP BY
-	// i.product` then had its correlation key MINTED into the select list
-	// (`i.order_id AS __key_0`) but NOT added to the GROUP BY, so the
-	// aggregate published one key column — the product, a STRING — under
-	// the slot the join keys on. On the single-process arms the join matched
-	// nothing and the query answered ZERO ROWS where PostgreSQL 17 answers
-	// eight (and, being a star over two joins, no columns either); on both
-	// DAG arms it was the loud `join key "s.__key_0" is STRING on the probe
-	// side and the build side took the integer key path` (#615). The LEFT
-	// spelling padded every outer row instead: three all-NULL rows for
-	// PostgreSQL's nine.
-	//
-	// `hasAgg` still names what it always did — the list calls an aggregate
-	// — because lateralEmptyInputOf's contract is about an UNGROUPED
-	// aggregate's one row over an empty input, which a GROUP BY does not
-	// have (it re-checks GroupBy itself, so either name gives the same
-	// answer there).
+	// Add correlated inner columns to GROUP BY for every aggregated LATERAL.
+	// A block that GROUPS is an aggregate even without a SELECT-list aggregate (#1008),
+	// matching BuildFromSelect's hasAgg || len(info.GroupBy) > 0 rule.
+	// Otherwise a minted key can name another group's value or type (#615).
+	// hasAgg still means the list calls an aggregate: lateralEmptyInputOf separately
+	// checks GroupBy because only an UNGROUPED aggregate yields one row on empty input.
+	// See docs/internals/lateral-grouping-classification.md for the design.
 	hasAgg := false
 	for _, col := range subInfo.Columns {
 		if col.IsAgg {
@@ -1978,52 +1896,16 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 	// of them, because no column was added.
 	var injectedSlots []string
 	if len(correlatedParts) > 0 {
-		// The key must be SELECTED — and, for an aggregated subquery, grouped.
-		// The rewrite above promotes the correlated equality into the join
-		// condition, so the join keys on the inner column — and a column the
-		// subquery's select list does not publish is not there to key on. It
-		// used to be there by accident: buildProject elided every projection
-		// over an aggregate, so the aggregate's raw output (keys first, then
-		// aggregates) reached the join and the key leaked through. Once that
-		// elision became conditional on the shapes matching (c55492d1, #591)
-		// the projection was kept, the key was genuinely gone, and
-		// exec.HashJoin resolved its build key to index -1 — which it treats
-		// as an unresolvable-but-matchable null key, so every build row
-		// serialized the same degenerate key, nothing equalled the probe's
-		// real value, and the query answered zero rows (a LEFT JOIN LATERAL
-		// answered every aggregate NULL, which is worse).
-		//
-		// That reasoning never depended on the aggregate, but the gate did:
-		// it read `hasAgg && …`, so a NON-aggregated LATERAL whose projection
-		// narrows away the correlated column got no injection and hit the
-		// identical degenerate key. `JOIN LATERAL (SELECT amount FROM item
-		// WHERE order_id = o.id)` answered ZERO rows and its LEFT twin
-		// answered every amount NULL, on the single-process path, where
-		// PostgreSQL 17 answers four rows and five (#767 part 2). It was
-		// invisible because every LATERAL test in the tree writes `SELECT *`,
-		// which publishes the key by definition — and lateralSelectsColumn
-		// still declines to inject there and where the list names the key
-		// under its own name, so the controls are unchanged.
-		//
-		// It declines in one case where it should not, and that is a stated
-		// boundary rather than an oversight: it matches the key's name
-		// against a select item's ALIAS as well as its source column, so
-		// `SELECT amount AS order_id` looks like it publishes `order_id` and
-		// gets no injection — zero rows for PostgreSQL's four, here and at
-		// this arc's base. Matching the published COLUMN instead would inject
-		// a second `order_id` beside the aliased one, and `li.order_id` would
-		// then read the KEY where PostgreSQL reads the amount: a plausible
-		// wrong number for an obvious zero, which protocol item 8 refuses.
-		// The key has to be published under a name nothing can collide with —
-		// a hidden slot — which is #785's territory (ADR-0026 §3a). Pinned as
-		// `boundary_inner_alias_shadowing_the_key_answers_nothing`.
-		//
-		// The GROUP BY half stays gated on hasAgg: a subquery with no
-		// aggregate has nothing to group.
-		// ONE allocator for this lateral, from the shared reserved-slot API:
-		// a slot is safe only when nothing else answers to it, and a per-key
-		// namer is what let two slots of one family land in one column
-		// (ADR-0026 2a). Seeded with every name the subquery itself binds.
+		// The inner correlation key must be SELECTED, for non-aggregated laterals too,
+		// and GROUPED only when the subquery aggregates (#591, #767 part 2).
+		// A key absent from the projection resolves to a degenerate join key; SELECT *
+		// or an explicitly published key needs no injection.
+		// An alias of another value cannot stand in for the key: a second same-name key
+		// would read the wrong value. Use a collision-free hidden slot (#785, ADR-0026 §3a);
+		// the earlier alias-shadowing boundary is recorded in the design.
+		// Use ONE shared reserved-slot allocator for the lateral, never a per-key namer;
+		// seed it with the subquery's bound names and the outer scope (ADR-0026 2a).
+		// See docs/internals/lateral-correlation-key-publication.md for the design.
 		alloc := plansql.NewSlotAllocator(append(lateralScopeNames(subInfo),
 			outerScopeNames(left)...)...)
 		var injected []plansql.SelectColumn
@@ -2032,45 +1914,15 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 			if innerCol == "" {
 				continue
 			}
-			// THE JOIN KEYS ON THE NAME THE SUBQUERY PUBLISHES (#767).
-			//
-			// The key may be selected under an ALIAS — `SELECT t.g AS gg,
-			// COUNT(*) FROM t WHERE t.g = d.k GROUP BY t.g`. lateralSelects-
-			// Column sees the SOURCE and declines the injection, correctly:
-			// the value IS published. But the promoted equality still names
-			// `t.g`, which the subquery's output does not carry, so
-			// exec.HashJoin resolved the build key to index -1 — the
-			// degenerate all-rows-equal key — and the join answered ZERO
-			// rows where PostgreSQL 17 answers seven. Silent, on the
-			// single-process path only: both DAG arms answered correctly,
-			// which is what made it a two-path divergence nothing gated.
-			//
-			// Recording the published name here and rewriting the equality
-			// below is the whole repair. It is deliberately NOT the mirror
-			// case: an item whose ALIAS matches the key's name while its
-			// SOURCE is something else (`SELECT amount AS order_id`)
-			// publishes a different value under that name, and pointing the
-			// join at it would answer a plausible wrong number for an
-			// obvious zero. That one stays pinned and needs a hidden slot
-			// (ADR-0026 3a).
-			// A COLLISION IS DECIDED FIRST, because it decides whether the
-			// list's own name for the key can be keyed on at all.
-			//
-			// `SELECT order_id AS oid, MAX(amount) AS order_id … GROUP BY
-			// order_id` publishes the key as `oid` and aliases its MAX to the
-			// key's own name. Stamping the aggregate's key as `__key_0` while
-			// the join kept keying on `oid` worked on the single-process path
-			// — the projection is there to rename — and answered ZERO ROWS on
-			// both DAG arms: a Project emits no stage, so the build stream is
-			// the AGGREGATE's `[__key_0, order_id]` and `oid` is not in it.
-			// exec.HashJoin resolved the build key to -1, the degenerate
-			// all-rows-equal key.
-			//
-			// So a colliding shape takes the FULL mint: the slot is injected
-			// as an output item and the join keys on the SLOT, which is the
-			// one name that survives every path — the aggregate publishes it,
-			// the projection carries it, the shuffle can spell it, and the
-			// join drops it again on the way out.
+			// The join keys on the name the subquery PUBLISHES for the key (#767).
+			// If the key's SOURCE is selected under an alias, record that published name and
+			// rewrite the equality. Another value ALIASED to the key name is not the key;
+			// that collision needs a hidden slot (ADR-0026 3a), never name-only substitution.
+			// Decide a collision FIRST, before accepting the list's own published key name.
+			// A colliding aggregate takes the FULL mint: inject the slot as an output item and
+			// key the join on that slot. The aggregate publishes it, the projection carries it,
+			// the shuffle can name it, and the join drops it on output on every path.
+			// See docs/internals/lateral-published-key-collisions.md for the design.
 			collides := aggregates && lateralKeyNameCollides(subInfo.Columns, innerCol)
 			published := false
 			if pub, ok := lateralPublishedKeyName(subInfo.Columns, innerCol); ok && !collides {
@@ -2093,45 +1945,16 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 					subInfo.GroupBy = append(subInfo.GroupBy, innerCol)
 				}
 			}
-			// THE AGGREGATE'S KEY OUTPUT IS NOT THE USER'S TO NAME (#956).
-			//
-			// The two branches below leave the key where the SELECT list put
-			// it, which is right for the JOIN — it keys on what the lateral
-			// publishes — and says nothing about what the AGGREGATE one
-			// operator lower publishes the key as. That name is the source
-			// column's stripped text, and it collides with an aggregate the
-			// list aliased the same way:
-			//
-			//   SELECT t.g AS gk, MAX(t.id) AS g … WHERE t.g = d.k GROUP BY t.g
-			//     the aggregate emits [g(key), g(max)], the projection
-			//     resolves `g` by name, ColumnIndex answers with the FIRST
-			//     match, and `s.g` read the KEY — `0,0,0…` where PostgreSQL 17
-			//     answers `0,0,4998…`, on the single-process path AND on both
-			//     DAG arms.
-			//
-			// So the slot is minted here too, and stamped onto the aggregate
-			// as the key's PUBLISHED name. Nothing is INJECTED: the list
-			// already carries the key, the join already keys on the name the
-			// list publishes, and an extra output column would be a second
-			// leak to fix. Only the aggregate's own name for the key moves.
-			//
-			// ONLY where the names really collide. Renaming the aggregate's
-			// key output when nothing answers to that name has a cost of its
-			// own: `SELECT t.g, COUNT(*) AS c` has its projection ELIDED over
-			// the aggregate (the shapes match), so what the lateral emits IS
-			// the aggregate's output, and moving the key to a slot while the
-			// join still keys on `s.g` left the shuffle with a key that is
-			// not in its schema. A rename that breaks no collision buys
-			// nothing, so it is not made.
-			//
-			// And only where the list publishes the key under ANOTHER name.
-			// Under its OWN name (`SELECT t.g, MAX(t.id) AS g`) the lateral
-			// publishes two columns called `g`, PostgreSQL refuses the outer
-			// `s.g` as ambiguous (42702), and this engine answers the key —
-			// a superset. Moving the key to a slot THERE made both DAG arms
-			// answer NO ROWS: a superset traded for an empty result, which is
-			// worse than the divergence it closes. That spelling is left
-			// where it is and recorded in the census.
+			// The aggregate's key output must not collide with a user aggregate alias (#956).
+			// The join's published key name and the aggregate's own key name are distinct
+			// contracts: a minted aggregate key must survive the projection and shuffle.
+			// A name-only mint stamps the aggregate's published key without injecting another
+			// output when the list already carries the key and the join names its publication.
+			// Do not rename without a collision: an elided projection exposes the aggregate's
+			// name directly and would leave the join/shuffle key absent.
+			// A name-only mint is safe only if the list publishes the key under ANOTHER name;
+			// same-name ambiguity (PostgreSQL 42702, engine superset) must not become missing rows.
+			// See docs/internals/lateral-aggregate-key-output-names.md for the design.
 			if published {
 				continue
 			}
@@ -2162,30 +1985,12 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 			if !ok {
 				continue
 			}
-			// THE KEY IS PUBLISHED UNDER A HIDDEN SLOT (ADR-0026 3a).
-			//
-			// Under its SOURCE COLUMN's name -- what this injected until #956
-			// -- the key is an ordinary output column of the lateral, and
-			// every consumer above resolves by name off a batch that may
-			// answer to that name twice. Two shapes did exactly that,
-			// silently, and in opposite directions:
-			//
-			//   SELECT MAX(t.id) AS g, COUNT(*) AS c ... WHERE t.g = d.k
-			//     the aggregate's output is [g(key), g(max), c] and `s.g`
-			//     read the KEY -- 0,1,2,... where PostgreSQL 17 answers
-			//     4998,4999,4993,... (#956);
-			//   SELECT amount AS order_id ... WHERE order_id = o.id
-			//     an item ALREADY answers to the key's name while holding a
-			//     different value, so the injection was skipped entirely and
-			//     the join keyed on a column its build side does not carry --
-			//     ZERO rows for PostgreSQL's four (#767's mirror).
-			//
-			// `__key_N` is in the reserved namespace (plansql/reserved_slots),
-			// so no query can spell it and no alias can shadow it: the
-			// collision is impossible rather than unlikely. The promoted
-			// equality is re-spelled to it below, and for an AGGREGATED
-			// lateral the aggregate PUBLISHES the key under it while still
-			// RESOLVING it by the source column (Node.GroupByPublish).
+			// Publish the injected key under a HIDDEN SLOT (ADR-0026 3a), not its source name:
+			// a user alias may hold another value under that name (#956, #767).
+			// __key_N belongs to plansql/reserved_slots: query text cannot mint or shadow it.
+			// Respell the promoted equality to the slot. An aggregated lateral PUBLISHES
+			// that slot while RESOLVING the source column via Node.GroupByPublish.
+			// See docs/internals/lateral-hidden-key-publication.md for the design.
 			slot, allocated := alloc.Next(plansql.SlotCorrKey)
 			if !allocated {
 				// An exhausted family has no known SQL. Publishing under the
@@ -2445,27 +2250,12 @@ func lateralKeyNameCollides(cols []plansql.SelectColumn, innerCol string) bool {
 	return false
 }
 
-// refuseDecorrelatedWindow refuses a LATERAL whose WINDOW FRAME the
-// decorrelation would silently change.
-//
-// Decorrelation moves the correlated predicate OUT of the subquery and into
-// the join condition, so the subquery runs over the WHOLE inner relation and
-// the join selects rows afterwards. For a filter that is exact. For a WINDOW
-// it is not: a window is computed over the rows the subquery sees, and after
-// the move it sees every row.
-//
-//	SELECT o.customer, s.w FROM lat_ord o JOIN LATERAL
-//	  (SELECT SUM(amount) OVER () AS w FROM lat_item WHERE order_id = o.id) s ON true
-//	-- PostgreSQL 17: 150,150,200,200 — the sum PER ORDER
-//	-- decorrelated:  350,350,350,350 — the sum over the whole table
-//
-// 350 is not a near miss, it is a different question's answer, and it was
-// given on every arm in silence. A window whose PARTITION BY carries the
-// correlation key is the one case the move preserves — each output row still
-// reads exactly its own correlated group — so that one is allowed and
-// everything else is refused. Answering it would need the window evaluated
-// per outer row, which this lowering does not express (0A000, the class for
-// "valid SQL this engine does not implement").
+// refuseDecorrelatedWindow refuses a LATERAL whose window frame decorrelation changes.
+// Moving the correlated filter into the join makes the window see the WHOLE inner relation.
+// Allow only windows whose PARTITION BY carries the correlation key, so each row
+// still reads exactly its correlated group; otherwise refuse 0A000.
+// Per-outer-row window evaluation is not expressed by this lowering.
+// See docs/internals/decorrelated-window-frame-boundary.md for the design.
 func refuseDecorrelatedWindow(info *plansql.SelectInfo, correlatedParts []string, leftAliases map[string]bool) error {
 	if info == nil || len(correlatedParts) == 0 {
 		return nil
@@ -2535,43 +2325,16 @@ func lateralBareKeyName(innerCol string) string {
 	return ref.Column
 }
 
-// respellKeyRefsToSlot points the subquery's own references to the correlation
-// key at the SLOT the aggregate publishes it under.
-//
-// Every site keeps its own text and its own position; only what it READS
-// changes, from the source column to the slot. It matters on the DAG and not
-// on the single-process path, which is what made it invisible for a round: a
-// Project emits no stage, so what a fragment above the aggregate sees is the
-// AGGREGATE's output — the key under `__key_N` and the aggregates under their
-// own names. A site still reading the SOURCE column then bound whatever
-// answered to that name in the stream, and in the colliding shape that is the
-// AGGREGATE:
-//
-//	SELECT order_id AS oid, MAX(amount) AS order_id … WHERE order_id = o.id
-//	  → aggregate emits [__key_0, order_id(max)]
-//	  → `oid` read `order_id` = the MAX. `Alice,100,100` for PostgreSQL's
-//	    `Alice,1,100`, on both DAG arms.
-//
-// IT WALKS THE BLOCK, not the select list. Round 2 rewrote select items only,
-// and a HAVING over the key — `GROUP BY order_id HAVING order_id > 1` — was
-// left reading a column the aggregate no longer publishes: `filter column
-// "order_id" does not exist in the input schema` on the single-process arm and
-// `SELECT list no stage computes` on both DAG arms, where the base answers
-// PostgreSQL's row. HAVING and the subquery's own ORDER BY read what the
-// aggregate PUBLISHES and take the slot; the WHERE and the GROUP BY are
-// resolved against its INPUT and keep the source column. `plansql.RewriteExpr`
-// reaches a reference nested in a CASE, a cast or a function call, and stops
-// at an aggregate call for the same reason the WHERE is left alone.
-//
-// A WINDOW spec is deliberately not walked: `refuseDecorrelatedWindow` reads
-// PARTITION BY as the query WROTE it to decide whether the decorrelation
-// preserves the frame, and a slot there would make the allowed spelling
-// (`PARTITION BY <the correlation key>`) look like an unrelated partition and
-// be refused.
-//
-// The planted reference carries ColRef.Slot, which is the provenance every
-// pass that has to tell a planner-planted slot reference from a user's column
-// of that name reads (ADR-0025 rule 1).
+// respellKeyRefsToSlot binds the subquery's own key references to the aggregate's
+// published SLOT, retaining each site's text identity and position.
+// Walk the block: SELECT items, HAVING and its ORDER BY read the output and take
+// the slot; WHERE and GROUP BY read the INPUT and retain the source column.
+// RewriteExpr reaches references in CASE, casts and functions, stopping at aggregates.
+// Do not walk WINDOW specs: refuseDecorrelatedWindow must read the original
+// PARTITION BY to recognize the correlation key and decide frame preservation.
+// Plant ColRef.Slot provenance to distinguish planner references from user names
+// (ADR-0025 rule 1).
+// See docs/internals/lateral-key-slot-reference-scope.md for the design.
 func respellKeyRefsToSlot(info *plansql.SelectInfo, innerCol, slot string) {
 	bare := lateralBareKeyName(innerCol)
 	if bare == "" {
@@ -2676,28 +2439,13 @@ func outerScopeNames(n *Node) []string {
 	return out
 }
 
-// lateralScopeNames lists every name a LATERAL subquery's own text binds, for
-// seeding the slot allocator that publishes its correlation key.
-//
-// It is what this layer can see without a catalog: the select items' aliases
-// and column references, and the GROUP BY terms. A STORED column named
-// `__key_0` is not in it — reading is not minting, so the reservation does not
-// refuse such a column (ADR-0012) and only the allocator's seed could step off
-// it. This layer cannot see one: it runs before AnnotateScanColumns supplies
-// the inner relation's schema.
-//
-// It does not have to. For a stored `__key_0` to reach the lateral's OUTPUT
-// and meet the minted one, the SELECT list has to carry it, and there are only
-// two ways:
-//
-//   - it NAMES the column — which puts it in the seed above, so the allocator
-//     steps to `__key_1` (verified by review over a catalog-door fixture);
-//   - it is a STAR — and `lateralSelectsColumn` reports a star as publishing
-//     the key already, so nothing is injected and no slot is minted at all.
-//
-// Any other list does not publish the stored column, so the two never share an
-// output batch. The gap is in what this function CAN SEE, not in what can
-// collide.
+// lateralScopeNames seeds the key allocator with SELECT aliases/references and GROUP BY.
+// It runs before catalog annotation and cannot see unreferenced stored __key_0 columns;
+// reading a stored reserved name is allowed (ADR-0012).
+// Such a column can share the output only if named in SELECT (then it is seeded),
+// or selected by star (then lateralSelectsColumn reports the key already published
+// and nothing is injected or minted). Other lists cannot publish the collision.
+// See docs/internals/lateral-slot-allocator-visible-names.md for the design.
 func lateralScopeNames(info *plansql.SelectInfo) []string {
 	if info == nil {
 		return nil
@@ -3083,30 +2831,13 @@ func condQualifiers(join plansql.JoinInfo) map[string]bool {
 // on both engines. Rewriting those would only re-point a resolution that
 // works.
 
-// aggOutputNameIsShared reports whether an aggregate's output column name is
-// also answered by something else in the aggregate's own output batch — a
-// GROUP BY key published under that name, or a second aggregate output.
-//
-// It is the test that decides whether a HAVING may REFERENCE that column. The
-// aggregate emits its keys and its outputs into ONE schema and
-// batch.RecordBatch.ColumnIndex returns the FIRST match, so a name two columns
-// answer to cannot say which one a predicate meant (#785).
-//
-// The keys are compared the way the RESOLVER reads them, which is the question
-// this predicate is really asking: `exec.columnIndexFallback` tries the exact
-// spelling and then the BARE part of a qualified one, so a HAVING naming `a`
-// finds a key the aggregate emits as `x.a` just as surely as one it emits as
-// `a`. Comparing `cleanExpr(gb)` alone — whitespace only, the qualifier intact
-// — answered false for every QUALIFIED key, so `SELECT x.a AS b, SUM(x.b) AS a
-// FROM decpair x GROUP BY x.a HAVING SUM(x.b) > 0` reused the SELECT list's
-// aggregate, the rewritten predicate named `a`, and the filter compared the
-// GROUP KEY (#968; the same defect ADR-0026 §3a records for the unqualified
-// spelling).
-//
-// Answering true where the operator would in fact have kept the qualifier
-// costs one extra aggregate computation under a `__having_N` slot and can
-// never be a wrong answer — which is why the bare test is the whole rule here
-// and not an approximation of `exec.PublishedGroupKeyNames`.
+// aggOutputNameIsShared detects an output name shared with a group key or another
+// aggregate; HAVING must not reuse it because ColumnIndex reads the FIRST match (#785).
+// Compare keys as the resolver does: exact spelling, then a qualified key's BARE part
+// (#968, ADR-0026 §3a). A whitespace-only cleanExpr comparison misses qualified collisions.
+// A conservative true costs one extra computation under __having_N, never wrong rows;
+// use the bare test rather than approximating exec.PublishedGroupKeyNames.
+// See docs/internals/having-shared-aggregate-name-test.md for the design.
 func aggOutputNameIsShared(out string, groupBy []string, aggs []AggExpr) bool {
 	if out == "" {
 		return false

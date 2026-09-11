@@ -6,43 +6,15 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// What an EMPTY inner input means for a LATERAL subquery — #767 part 1.
-//
-// PostgreSQL evaluates a LATERAL subquery ONCE PER OUTER ROW. An UNGROUPED
-// aggregate over an empty input still yields exactly one row, so an outer row
-// the lateral matches nothing for SURVIVES, with `COUNT` reading 0 and every
-// other aggregate reading NULL.
-//
-// buildLateralSubquery decorrelates by promoting the correlated equality into
-// the join condition and injecting the correlated inner column into the
-// subquery's GROUP BY, which turns "one row per outer row" into "one row per
-// GROUP THAT EXISTS". An outer row with no matching inner rows then has no
-// group, so an INNER join DROPS it:
-//
-//	SELECT o.customer, s.item_count, s.total_amount
-//	FROM lat_ord o JOIN LATERAL (
-//	  SELECT COUNT(*) AS item_count, SUM(amount) AS total_amount
-//	  FROM lat_item WHERE order_id = o.id) s ON true
-//
-// PostgreSQL 17 answers THREE rows over the fixture, the third being the order
-// with no items at `item_count = 0, total_amount = NULL`. This engine answered
-// two, in silence; written `LEFT JOIN LATERAL` it answered three and gave that
-// row `item_count = NULL`, which is a different wrong answer to the same
-// question.
-//
-// Two things restore it, and both are decided here rather than at the join:
-//
-//   - the join is a LEFT join whatever the query wrote, because the lateral
-//     side produces a row for every outer row and only the DECORRELATION made
-//     that conditional;
-//   - `COUNT` reads 0 on the padded rows. NULL is right for every other
-//     aggregate (`SUM` of nothing IS NULL in PostgreSQL) and the LEFT pad
-//     already gives it; COUNT is the one whose empty-input value is not NULL,
-//     so its references are wrapped in `COALESCE(…, 0)`.
-//
-// A subquery the QUERY grouped is untouched: `GROUP BY x` over an empty input
-// yields NO row in PostgreSQL either, so an outer row with no match is
-// correctly dropped by an inner join.
+// An ungrouped LATERAL aggregate yields one row PER OUTER ROW even on empty input:
+// COUNT is 0, other aggregates NULL (#767 part 1).
+// Decorrelation injects the correlation key into GROUP BY and creates only existing
+// groups; restoring empty-input semantics requires LEFT padding plus COUNT defaults.
+// Use lateralEmptyInputPlan's ON cases when choosing LEFT and default substitution;
+// a forced LEFT with unconditional defaults does not preserve every written ON.
+// A subquery the QUERY grouped is untouched: its empty input yields NO row,
+// so an INNER join correctly drops an unmatched outer row.
+// See docs/internals/lateral-ungrouped-empty-input.md for the design.
 type lateralEmptyInput struct {
 	// ungroupedAggregate is the whole trigger: the lateral's SELECT list
 	// holds an aggregate and the QUERY wrote no GROUP BY of its own.
@@ -71,47 +43,16 @@ type lateralEmptyInput struct {
 	onResidualExpr  plansql.Node
 }
 
-// lateralEmptyInputPlan is which of the three shapes this lateral join is, and
-// it exists because the join's OWN `ON` is part of the semantics rather than
-// decoration.
-//
-// PostgreSQL evaluates the lateral subquery ONCE PER OUTER ROW — an ungrouped
-// aggregate over an empty input still yields one row — and THEN applies the
-// join condition to that (outer row, lateral row) pair, with the join's kind
-// deciding what happens to a pair the condition rejects. Three cases follow:
-//
-//   - No written ON (or `ON true`): the condition rejects nothing, so making
-//     the join LEFT on the correlation and defaulting the COUNT outputs IS
-//     the semantics, for the INNER and the LEFT spelling alike.
-//     (lateralPadOnly)
-//
-//   - A written ON on an INNER join: the padded row must still be TESTED. An
-//     inner join's ON and a WHERE are the same filter, so the join becomes
-//     LEFT on the CORRELATION alone — giving every outer row its lateral row
-//     — and the ON moves into the enclosing WHERE, where the same default
-//     substitution reaches it. `ON s.n = 0` then keeps the unmatched row,
-//     which is what PostgreSQL does and what the decorrelation alone cannot.
-//     (lateralPadThenFilter)
-//
-//   - A written ON on an OUTER join: a pair the ON rejects must be KEPT with
-//     the lateral side NULL, which needs the lateral columns nulled per
-//     column rather than filtered — a CASE per output over a schema this pass
-//     does not have. NOT REPAIRED: the join is left exactly as it was written
-//     and answers what it answered before this repair existed, which for
-//     every ON that an unmatched outer row would fail is PostgreSQL's answer.
-//     The one shape it still gets wrong — an ON the DEFAULT row would pass,
-//     `LEFT JOIN LATERAL … ON s.n = 0` — is pinned in the census with
-//     PostgreSQL's answer beside it. (lateralNoRepair)
-//
-// A fourth condition cuts across all three and is checked first: if any join
-// LATER in the FROM clause is a RIGHT or a FULL join, nothing is repaired at
-// all. Such a join manufactures rows in which the lateral's columns are NULL,
-// and neither the COALESCE nor the moved ON can tell those from rows the
-// lateral produced. See the comment on that branch.
-//
-// A forced LEFT plus an unconditional default, with no case analysis at all,
-// is what turned six PostgreSQL-correct answers into wrong ones: `ON s.n > 5`
-// answered three rows for PostgreSQL's none, and printed 0 for counts of 2.
+// lateralEmptyInputCase preserves evaluation of the ungrouped lateral BEFORE ON.
+// No written ON / ON true: LEFT on correlation and default COUNT, for INNER and LEFT
+// alike (lateralPadOnly). INNER written ON: LEFT on correlation, then move ON into
+// WHERE so the same default substitution tests the padded row (lateralPadThenFilter).
+// OUTER written ON must retain rejected pairs with every lateral column NULL;
+// this pass cannot perform that per-column CASE and leaves the join (lateralNoRepair).
+// An ON rejecting the default agrees; an ON accepting it requires the separate refusal.
+// A later RIGHT/FULL join disables ALL repair first: its manufactured NULLs cannot
+// be distinguished from lateral padding by COALESCE or the moved ON.
+// See docs/internals/lateral-empty-input-on-cases.md for the design.
 type lateralEmptyInputCase int
 
 const (
@@ -125,29 +66,13 @@ func lateralEmptyInputPlan(joinType string, empty lateralEmptyInput, laterNullEx
 		return lateralNoRepair
 	}
 	if laterNullExtends {
-		// A RIGHT or FULL join further along the FROM clause MANUFACTURES
-		// rows in which the lateral's columns are NULL. Neither half of this
-		// repair can tell such a row from one the lateral itself produced:
-		// the COALESCE would read a manufactured NULL as 0, and an ON moved
-		// into the enclosing WHERE would DELETE the manufactured row instead
-		// of leaving it alone. Both are wrong, and both were measured wrong
-		// (`... JOIN LATERAL (…) s ON s.n > 1 RIGHT JOIN c ON …` lost the
-		// unmatched right row; `… ON true RIGHT JOIN …` printed n=0 where
-		// PostgreSQL prints NULL).
-		//
-		// The repair's rewrites live in the ENCLOSING query — the SELECT
-		// list, the WHERE — and so they see the whole FROM clause's result,
-		// while what they are entitled to speak about is the LATERAL's own
-		// output. While those two are the same relation the repair is sound;
-		// a later RIGHT or FULL join is exactly what separates them.
-		// Expressing it would need the default applied at the lateral's own
-		// output, before the later join sees it, which is a plan-level change
-		// rather than a SelectInfo rewrite.
-		//
-		// So: decline, and leave the query exactly as written. That is what
-		// this engine answered before the repair existed, and it is
-		// PostgreSQL's answer for every one of these shapes but the ungrouped
-		// empty-input row itself, which is pinned as the boundary.
+		// Decline repair when a later RIGHT/FULL join manufactures NULL lateral columns.
+		// Enclosing SELECT/WHERE rewrites cannot distinguish those rows from lateral padding:
+		// COALESCE would replace NULL with 0, and moved ON could delete an owed unmatched row.
+		// A sound repair needs defaults at the lateral's OWN output before that later join,
+		// which requires a plan-level change, not a SelectInfo rewrite.
+		// Leave the query as written; the ungrouped empty-input row remains the pinned boundary.
+		// See docs/internals/lateral-default-later-null-extension.md for the design.
 		return lateralNoRepair
 	}
 	if empty.onResidual == "" {
@@ -221,31 +146,15 @@ func lateralEmptyInputOf(info *plansql.SelectInfo, hasAgg, correlated bool) late
 	return out
 }
 
-// coalesceLateralCountRefs returns node with every reference to one of the
-// lateral's COUNT outputs wrapped in COALESCE(…, 0). It returns the SAME node
-// when nothing matched, so a caller can tell a rewrite from a no-op.
-//
-// The arm list is the whole contract, and a MISSING arm is silent: the
-// default case returns the node unwalked, so a reference under it keeps
-// reading the LEFT join's NULL. `WHERE s.n IN (0, 2)` dropped the unmatched
-// outer row for PostgreSQL's three, because InExpr had no arm while
-// BetweenExpr and IsExpr did.
-//
-// Every plansql node that can CONTAIN a column reference is here:
-// ColRef, ParenNode, NotNode, UnaryOp, AndNode, OrNode, BinaryOp, CmpExpr,
-// IsExpr, LikeExpr, BetweenExpr, InExpr, AnyAllExpr, CastNode, FuncCallNode,
-// CaseNode, ArrayLitNode, TupleNode and WindowFuncNode — every node type in
-// internal/planner/sql that holds another node, StarNode and the two
-// text-carrying ones excepted.
-// SubqueryNode and ExistsNode are NOT walked because they carry SQL TEXT
-// rather than a tree — and NOT because a lateral output is out of their scope.
-// It is not: PostgreSQL resolves `(SELECT … WHERE i.amount > s.n * 40)`
-// against the lateral and applies the default there, where this engine
-// substitutes the LEFT pad's NULL per row through the re-run and answers 0
-// for PostgreSQL's 4. Both spellings are pinned in the correlation census and
-// ADR-0021 §1h states the boundary positionally: every position in the
-// enclosing query's own expression trees, no position inside a subquery's
-// text.
+// coalesceLateralCountRefs wraps each lateral COUNT reference in COALESCE(…, 0),
+// returning the SAME node when unchanged. Walk every expression that can contain a ref:
+// ColRef, ParenNode, NotNode, UnaryOp, AndNode, OrNode, BinaryOp, CmpExpr, IsExpr,
+// LikeExpr, BetweenExpr, InExpr, AnyAllExpr, CastNode, FuncCallNode, CaseNode,
+// ArrayLitNode, TupleNode and WindowFuncNode. Missing an arm silently leaves pad NULLs.
+// StarNode and text-carrying SubqueryNode/ExistsNode are excluded. Lateral outputs
+// ARE in their scope, but their SQL text cannot be walked here; both are pinned.
+// ADR-0021 §1h: every enclosing expression-tree position, none inside subquery text.
+// See docs/internals/lateral-count-default-expression-walk.md for the design.
 func coalesceLateralCountRefs(node plansql.Node, alias string, names map[string]bool) plansql.Node {
 	if node == nil {
 		return nil

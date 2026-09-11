@@ -6,32 +6,14 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// Spelling a decorrelated subquery's own column references
-// ------------------------------------------------------------------
-//
-// decorrelateInSubqueries and decorrelateExists lower an IN / EXISTS to a
-// semi/anti join whose BUILD side is the subquery's own plan —
-// Scan → [Join …] → [Filter] → [Aggregate], and never a Project. That side
-// therefore carries the SOURCE column names of the relations it reads, and
-// the rewrites have to name their build-side keys the way it emits them.
-//
-// With ONE inner relation that is knowable on the spot: the bottom Scan
-// emits every column bare, so the key is the source column with any
-// qualifier stripped (#516). With a JOIN it is not knowable on the spot at
-// all. A join emits its PROBE side's columns bare and qualifies a BUILD
-// column only where the bare name collides (exec.joinOutputSchemaWithMapping),
-// and which side is which is decided by reorderJoins from estimated row
-// counts at Optimize step 73 — long after the rewrites run at steps 35/36.
-// Naming the key from write order then answers over whichever relation the
-// estimator happened to put on the probe (#526), and correlating on a
-// stripped column correlates on whichever relation the estimator put there
-// (#527). Both are silent: the physical planner splits the condition
-// literally and exec.HashJoin's key repair swaps the pair.
-//
-// So the rewrites record what they MEAN — the relation qualifier and the
-// source column, as the subquery wrote them — and repairDecorrelatedSpelling
-// settles the TEXT after reorderJoins has made the join order final, by
-// modelling what each build subtree actually emits.
+// Decorrelated IN/EXISTS build keys must name what their own build plan EMITS.
+// A single scan emits bare names (#516); joins emit probe columns bare and qualify
+// build columns only on collision (exec.joinOutputSchemaWithMapping).
+// reorderJoins chooses sides from row estimates AFTER decorrelation: write order
+// cannot determine key identity (#526, #527).
+// Record relation qualifier and source column as written, then let
+// repairDecorrelatedSpelling settle TEXT after the join order is final.
+// See docs/internals/decorrelated-key-spelling-after-reorder.md for the design.
 
 // InnerKeyRef is one reference into a decorrelated subquery's own relations,
 // recorded the way the subquery spelled it.
@@ -393,39 +375,16 @@ func repairDecorrelatedSpelling(n *Node) *Node {
 	return n
 }
 
-// innerOnlyPredicate turns one of a decorrelated subquery's own WHERE
-// conditions into a plan Predicate, and reports ok=false when the rewrite
-// must DECLINE rather than produce one.
-//
-// The decorrelations strip table qualifiers here, for the same reason they
-// strip them off a key: the inner plan is Scan → [Join …] → [Filter] and
-// carries SOURCE column names, which a single bottom Scan emits bare. Over a
-// JOINED inner that reasoning fails the same way #526's did, and worse: the
-// stripped predicate is pushed to whichever side of the join owns a column of
-// that bare name, so `WHERE c.n_nationkey < 3` over `nation c JOIN nation b`
-// filtered on b instead of c and the membership set became a different set
-// entirely — a silent wrong answer with no key involved.
-//
-// Three outcomes over a joined inner, decided by how many of its relations the
-// condition names:
-//
-//   - ONE, fully qualified: keep the qualifiers. pushFilterThroughJoin
-//     attributes it by exactly the refs collected here and lands it on that
-//     relation's own Scan, where the executor resolves the qualified name to
-//     the bare column it stores.
-//   - MORE THAN ONE: DECLINE the whole rewrite. There is no spelling that
-//     works: stripped, pushdown puts `c.x > b.x` on ONE scan as `x > x`
-//     (which evaluates against that relation's own column twice — the
-//     membership set collapses); qualified, it stays above the join, where
-//     the join emits one side's column bare and the qualified spelling names
-//     nothing. Declining leaves the IN a subquery predicate, executed as
-//     written — which the stage DAG can now do too (#524).
-//   - Unattributable — a bare reference, or a subquery inside the condition:
-//     stripped, exactly as before. A bare reference over a joined inner is
-//     ambiguous SQL unless one relation owns the name, and in that case the
-//     strip names it correctly.
-//
-// A single-relation inner is unchanged: strip, and the bottom Scan emits it.
+// innerOnlyPredicate returns ok=false to DECLINE the whole decorrelation when
+// an inner predicate cannot safely be named (#526).
+// Over a joined inner, a fully qualified predicate naming ONE relation retains its
+// qualifiers so pushFilterThroughJoin lands it on that relation's scan.
+// If it names MORE THAN ONE relation, decline: stripping can read one column twice;
+// keeping qualifiers above the join can name absent columns. The IN remains an
+// executable subquery predicate, including on the DAG (#524).
+// Unattributable bare references or subqueries retain qualifier stripping; a bare
+// reference is ambiguous unless uniquely owned. Single-relation inners also strip.
+// See docs/internals/decorrelated-inner-predicate-qualifiers.md for the design.
 func innerOnlyPredicate(node plansql.Node, joinedInner bool) (Predicate, bool) {
 	if joinedInner {
 		// A nil colToTable resolves nothing, so a bare reference reports

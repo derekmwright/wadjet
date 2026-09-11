@@ -222,55 +222,15 @@ var volatileFuncs = map[string]bool{
 	"gen_random_uuid": true,
 }
 
-// projRefs is one Project's answer to "what does this column reference
-// mean?", and it is deliberately more than the output map.
-//
-// The map alone matches on the BARE column name and ignores the qualifier,
-// which is right where a Filter sits directly on a Project (every reference
-// it can carry names that Project's output) and WRONG under a join, where the
-// walk applies each arm's map to the whole predicate in turn. A reference
-// qualified to the OTHER arm was rewritten with this arm's definition:
-// `… c JOIN typemx_dim d ON c.gg = d.k WHERE d.k > 3 OR c.gg > 100` over
-// `SELECT id AS k, g AS gg` became `id > 3 or g > 100` — 4612 rows where
-// PostgreSQL answers 1978, a silent wrong answer replacing the obviously
-// wrong 0 that came before. So the qualifier decides:
-//
-//   - names is the set of relation names this Project's scope answers to
-//     (its CTE name, the derived alias stamped on the scans below it, each
-//     scan's own alias or table name). A reference qualified by one of them
-//     names this Project's OUTPUT column.
-//   - a qualifier this scope does not answer to belongs to a sibling arm or
-//     an outer scope, and is left exactly as written.
-//   - a qualifier that names one of this Project's OUTPUTS is a ROW FIELD
-//     PATH, not a table reference (ADR-0022): `rw.b` over `c_row AS rw` is
-//     field `b` of the renamed ROW column, so the QUALIFIER is substituted
-//     and the field kept — `c_row.b`. Looking `b` up as a column, which the
-//     bare-name map does, finds nothing and leaves a name no stage emits.
-//   - ambiguous, when set, reports a bare name the SIBLING join arm can also
-//     emit. Nothing in the predicate's text says which arm is meant, so the
-//     rewrite refuses rather than picking one.
-//
-// projRefs is one Project's answer to "what does this column reference
-// mean?", and it is deliberately more than the output map.
-//
-// The map alone matches on the BARE column name and ignores the qualifier,
-// which is right where a Filter sits directly on a Project (every reference
-// it can carry names that Project's output) and WRONG under a join, where the
-// walk applies each arm's map to the whole predicate in turn. A reference
-// qualified to the OTHER arm was rewritten with this arm's definition:
-// `… c JOIN typemx_dim d ON c.gg = d.k WHERE d.k > 3 OR c.gg > 100` over
-// `SELECT id AS k, g AS gg` became `id > 3 or g > 100` — 4612 rows where
-// PostgreSQL answers 1978, a silent wrong answer replacing the obviously
-// wrong 0 that came before. So the qualifier decides:
-//
-//   - names is the set of relation names this Project's scope answers to
-//     (its CTE name, the derived alias stamped on the scans below it, each
-//     scan's own alias or table name). A reference qualified by one of them
-//     names this Project's OUTPUT column.
-//   - a qualifier that names one of this Project's OUTPUTS is a candidate ROW
-//     FIELD PATH — `rw.b` over `c_row AS rw`.
-//   - a qualifier this scope does not answer to and no output claims belongs
-//     to a sibling arm or an outer scope, and is left exactly as written.
+// projRefs resolves references against a Project's output AND its scope.
+// A bare-name map suffices directly above a Project, but not across join arms.
+// names includes the CTE name, derived aliases and scan aliases/table names;
+// a qualifier naming that scope reads its OUTPUT, never a sibling's definition.
+// A qualifier naming an output is a candidate ROW field path (ADR-0022):
+// substitute the ROW column's qualifier while preserving the field (rw.b → c_row.b).
+// Leave qualifiers claimed by neither scope nor output exactly as written.
+// A bare name also emitted by a sibling must not be assigned by guessing.
+// See docs/internals/project-reference-scope.md for the design.
 type projRefs struct {
 	outs  map[string]projOutput
 	names map[string]bool
@@ -455,28 +415,14 @@ func (p projRefs) touches(bare string) bool {
 	return ok && (o.def != nil || o.unsafe)
 }
 
-// resolve returns the replacement for one column reference, or nil to leave
-// it alone. ok=false declines the whole rewrite.
-//
-// The order is ADR-0022 §1's, which is expr.ResolveColumnRef's, which is what
-// actually resolves the name at RUN time: the spelling as written, then the
-// qualifier read as a ROW column THAT DECLARES the name as its field, and only
-// then the BARE column after dropping the qualifier. Resolving in a different
-// order describes a different column.
-//
-// The two middle steps were the other way round until 2026-09-04, and the
-// strip is a fallback for a RELATION qualifier — it exists so `t.col`
-// resolves where the stream carries only `col` — so taking it first made
-// `rw.b` over `SELECT c_row AS rw, id AS b` mean `id`. PostgreSQL 17 rejects
-// the unparenthesised form outright (`missing FROM-clause entry for table
-// "rw"`, 42P01) and reads `(rw).b` as the FIELD, which is its only anchored
-// answer and now this engine's; answering the bare spelling at all is the
-// superset ADR-0012 records (#769).
-//
-// declaresField is what keeps the field arm off an ordinary qualified
-// reference: a qualifier naming an output that is not a ROW container, or a
-// container that does not declare the field, falls through to the strip
-// exactly as before.
+// resolve returns a replacement, nil to leave the reference alone, or ok=false
+// to decline the WHOLE rewrite. Follow runtime expr.ResolveColumnRef's order:
+// exact spelling, then a ROW column DECLARING the field, then bare qualifier stripping
+// (ADR-0022 §1). Changing this order can resolve a different column.
+// declaresField rejects non-ROW outputs and undeclared fields, letting relation references
+// fall through to stripping. Unparenthesized ROW-field spelling is the deliberate
+// PostgreSQL superset recorded in ADR-0012 (#769).
+// See docs/internals/project-column-resolution-order.md for the design.
 func (p projRefs) resolve(ref *plansql.ColRef) (plansql.Node, bool) {
 	if ref.Table == "" {
 		o, ok := p.outs[strings.ToLower(ref.Column)]
@@ -651,55 +597,16 @@ func rewriteASTThroughProject(ast plansql.Node, p projRefs) (plansql.Node, bool)
 	return newAST, true
 }
 
-// ResolveFilterThroughProjects re-spells a predicate that sits ABOVE one or
-// more Projects into the names their INPUT carries. It is the stage DAG's
-// half of the question the Filter-Project swap answers for the single-process
-// pipeline, and it exists because the two paths lower a Project differently.
-//
-// pushdownPredicates SWAPS a Filter below a Project and substitutes each
-// reference to a renamed or computed output with its defining expression. It
-// DECLINES that swap for a Project tagged with a CTEName — a materialization
-// fence, because the single-process planner replays ONE cached result for
-// every reference of a CTE and a predicate pushed inside it would apply to
-// all of them — and it never applies at all when the Filter's child is a
-// JOIN, whichever kind of subquery the rename came from. Declining is right
-// in both cases: the predicate does not move.
-//
-// What is wrong on the DAG is the SPELLING. An ordinary Project emits NO
-// STAGE there (docs/internals/native-dag-execution.md §Derived-table
-// aliases), so the predicate walkStages attaches to the producing stage is
-// evaluated against a schema carrying SOURCE column names. A reference to the
-// alias resolves to nothing, `expr.ColRef.Eval` answers nil, the predicate is
-// UNKNOWN on every row, and a WHERE that admits only TRUE drops all of them —
-// silently, for every type (#653). Every other consumer of a derived name on
-// the DAG has a resolver for exactly this reason; the filter had none.
-//
-// So the predicate stays where it is and only its spelling changes, which is
-// sound whatever the Project is tagged with: substitution evaluates the exact
-// defining expression the Project would have produced, NULLs included. The
-// walk descends a join ONE ARM AT A TIME with that arm's scope names, so a
-// reference qualified to the other arm is left alone (projRefs), and it stops
-// at the first Project whose output the substitution cannot express — an
-// aggregate output, a volatile function — because a stage that emits such a
-// column emits it under the alias, which is the name the predicate already
-// carries.
-//
-// It also stops at a Sort or a LIMIT. Those DO emit stages, carrying the
-// names above them, so a predicate re-spelled past one would name a column
-// the stage below the Project has and the stage the filter lands on does not.
-//
-// AMBIGUITY is not this pass's to report. A bare name two relations in scope
-// both carry is rejected by physical.validate before any of this runs
-// ("column reference %q is ambiguous", 42702, on both paths), so a decline
-// here can only be a shape the resolver leaves alone — never a name the query
-// failed to disambiguate.
-//
-// Returns (nil, false) when nothing changed; the caller then ships the
-// predicate exactly as it did before.
-// aliases lists the OUTPUT names the rewrite substituted away, lowercased —
-// the spellings the predicate carried before this pass touched it. The DAG
-// needs them to decide whether the producing fragment carries the alias or
-// the source column (physical.resolveFilterAliasSpelling, #656).
+// ResolveFilterThroughProjects changes spelling, never predicate placement (#653).
+// Substitute exact defining expressions, NULLs included, even across a CTE Project;
+// CTE materialization forbids the single-process swap, and a JOIN child is not swapped.
+// Walk joins one arm at a time with that arm's scope; leave other-arm references alone.
+// Stop at unexpressible Project outputs (aggregates, volatile functions), Sort or LIMIT:
+// their stages carry published names, not the source spelling below the Project.
+// physical.validate owns ambiguous bare-name errors (42702) on both paths.
+// Return nil AST and ok=false if unchanged; aliases are substituted OUTPUT names,
+// lowercased, for physical.resolveFilterAliasSpelling's alias/source choice (#656).
+// See docs/internals/dag-filter-project-respelling.md for the design.
 func ResolveFilterThroughProjects(pred Predicate, child *Node) (ast plansql.Node, aliases []string, ok bool) {
 	if pred.ASTExpr == nil {
 		return nil, nil, false

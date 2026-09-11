@@ -7,50 +7,16 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// The BUILD side of a decorrelated subquery is the subquery's OWN PLAN
-// ------------------------------------------------------------------------
-//
-// decorrelateExists, decorrelateInSubqueries and decorrelateScalarSubqueries
-// lower a correlated subquery into a semi / anti / LEFT join whose build side
-// is what the subquery reads. Each of them used to assemble that side out of
-// `NewScan(info.Tables[0].Name, …)` plus one Scan per explicit JOIN, and that
-// is a model of a FROM clause with three holes in it:
-//
-//   - a DERIVED TABLE has no name a Scan can hold. The parser keeps a
-//     FROM-subquery as a table whose NAME is its own SQL text, so the build
-//     side became a scan of a table the catalog has never heard of. That scan
-//     does not fail — it yields zero batches, so `IN` answered nothing and
-//     `NOT IN` answered every row, in silence (#571).
-//   - a CTE REFERENCE has the same exposure spelled as a bare identifier
-//     (#535, #581).
-//   - a COMMA-JOINED inner drops every relation past the first outright.
-//
-// The answer up to now was to DECLINE all three (innerRelationsAreScannable),
-// which is right and slow: the subquery stays a per-row predicate and the
-// re-run reads the whole inner relation once per outer row — measured at
-// 2N+1 reads for N outer rows against a flat 3 for the spelling that lowers
-// (#852, `coordinator.TestCorrelatedRerunReadsTheInnerOncePerOuterRow`).
-//
-// The answer here is to BUILD it: `buildFromClause` is the builder's own FROM
-// assembly, so a derived table, a CTE reference, a comma list and an explicit
-// JOIN all plan exactly as they do at the top level. Two things then have to
-// follow, and they are the whole of the delicacy ADR-0021 §1 is about:
-//
-//  1. NAMES. The build side carries the names its ROOT emits, and a derived
-//     table's or a CTE's root is a Project whose columns answer to the SCOPE
-//     the enclosing query gave it — `d.k`, not `d5_inner.k`. emittedColumns
-//     learns that scope here (scopeOwnerOf), so repairDecorrelatedSpelling can
-//     resolve a key spelled `d.k` against a subtree that emits `k`.
-//  2. A COMMA inner's equalities are JOIN CONDITIONS, not filters. Built as
-//     written they are condition-less cross joins with the equalities left in
-//     the subquery's WHERE, where innerOnlyPredicate declines them for naming
-//     two relations at once. liftWhereEquiPredsIntoJoins is the pass that
-//     already fixes that shape one level up, and running it here — on an
-//     ANNOTATED subtree, so it can attribute an unqualified column to its
-//     relation — is what lets a comma-joined correlated inner lower at all
-//     (#616). Whatever it cannot lift is DECLINED rather than left above the
-//     join, because a qualified residual there names a column the join emits
-//     bare, which is a wrong answer and not an error.
+// A decorrelated semi/anti/LEFT join builds the subquery's OWN FROM plan (#852).
+// buildFromClause must handle derived tables (#571), CTEs (#535, #581), comma lists
+// and explicit joins as at top level; assembling scans cannot represent them.
+// Build-side keys name what its ROOT emits, in the enclosing scope (d.k, not the
+// base table); scopeOwnerOf/emittedColumns supply repairDecorrelatedSpelling (ADR-0021 §1).
+// A comma inner's equalities are JOIN CONDITIONS: run liftWhereEquiPredsIntoJoins
+// on an ANNOTATED subtree so unqualified columns can be attributed (#616).
+// Decline unliftable predicates rather than leave a qualified residual above a join
+// that emits bare names; the subquery remains an executable per-row predicate.
+// See docs/internals/decorrelated-subquery-own-from-plan.md for the design.
 
 // decorrelatedInnerToggle is #852's kill switch. See the check in
 // decorrelatedInnerPlan for what turning it off restores.
@@ -95,60 +61,23 @@ func decorrelatedInnerPlan(info *plansql.SelectInfo, innerOnly []plansql.Node,
 	if !innerRelationsAreBuildable(info, ctes) {
 		return nil, false
 	}
-	// A derived table or a CTE reference JOINED to another relation declines.
-	//
-	// The build side then carries TWO renamings: the join's own (probe bare,
-	// build qualified where the bare name collides, decided by reorderJoins)
-	// and the derived arm's Project, whose published name — `k` for
-	// `SELECT c.n AS k` — is a name no scan below it produces. The logical
-	// model tracks both, and the single-process arm answers correctly; the
-	// stage DAG's carried-column derivation does not, and answers a DIFFERENT
-	// number rather than failing:
-	//
-	//	SELECT COUNT(*) FROM nation a WHERE a.n_nationkey IN (
-	//	  SELECT s.k FROM (SELECT c.n_nationkey AS k, c.n_regionkey AS rk
-	//	                     FROM nation c) s
-	//	  JOIN nation b ON b.n_regionkey = s.rk WHERE s.k < 3)
-	//	-- PostgreSQL 17 and the single-process arm: 3.  Stage DAG: 10.
-	//
-	// Declining leaves it a subquery predicate, which both arms answer. The
-	// spelling that puts the derived arm on the PROBE happens to agree today,
-	// and that is the reason to decline BOTH rather than the shape that was
-	// caught: which arm the estimator puts where is `reorderJoins`' decision
-	// from row counts, so a cut drawn there would move under the fixture.
-	// This is the same boundary ADR-0021 §1 draws for the key SPELLING, one
-	// layer out; closing it is the stage model's carried columns, not this
-	// rewrite's (report deferral).
+	// Decline a derived table or CTE JOINED to another relation, on EITHER arm.
+	// Its Project publication and the join's collision renaming are two identities;
+	// the DAG carried-column model cannot safely express both (ADR-0021 §1).
+	// A probe-only exception is unsound: reorderJoins chooses sides from row estimates.
+	// Keep the executable subquery predicate on both paths. Closing this boundary
+	// requires the stage model's carried columns, not a key-spelling patch here.
+	// See docs/internals/decorrelated-derived-join-boundary.md for the design.
 	if len(info.Tables)+len(info.Joins) > 1 && fromHasDerivedOrCTE(info, ctes) {
 		return nil, false
 	}
-	// A derived table or a CTE reference that COMPUTES one of the columns it
-	// publishes declines too, and this is the #516 rule reaching one level
-	// down rather than a new one.
-	//
-	// innerSemiJoinKey already refuses a COMPUTED select item as a semi-join
-	// key, because the key would name nothing the build side emits. A derived
-	// table HIDES that: from the subquery's side `SELECT b.m FROM (SELECT
-	// n + 1 AS m FROM t) b` is a plain column reference, and the computation
-	// is a level down where the guard never looks. The single-process arm
-	// evaluates it; the stage DAG carries `m` as if it were a scan column,
-	// finds none, and the semi join builds EMPTY:
-	//
-	//	SELECT COUNT(*) FROM mk_outer a WHERE a.n IN (
-	//	  SELECT b.m FROM (SELECT n + 1 AS m FROM mk_inner) b)
-	//	-- PostgreSQL 17 and single-process: 32.  Stage DAG: 0.
-	//
-	// The same body with `n AS m` — a RENAME rather than a computation —
-	// answers 40 on both arms, which is what says the trigger is the
-	// EXPRESSION and not the published name.
-	//
-	// Declining on ANY computed published column rather than only the one the
-	// key names is deliberate: the three call sites spell their key three
-	// different ways and none of them has resolved it yet when this runs, so
-	// a rule that needed the key would have to be written three times and
-	// would be checked against the un-repaired spelling. The cost is a
-	// derived inner that computes a column the query never keys on, which
-	// stays a per-row predicate — right, and slow.
+	// Decline a derived table or CTE with ANY computed published column (#516):
+	// a plain outer reference can hide computation below the innerSemiJoinKey guard,
+	// and the DAG may treat its publication as an absent scan column and build empty.
+	// Renames alone do not trigger this boundary. Test every published column, not just
+	// the key: three call sites have different, still-unrepaired key spellings here.
+	// Even an unused computed column therefore leaves a correct per-row predicate.
+	// See docs/internals/decorrelated-computed-publication-boundary.md for the design.
 	if fromDerivedComputesAColumn(info, ctes) {
 		return nil, false
 	}

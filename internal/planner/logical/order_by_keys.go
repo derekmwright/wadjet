@@ -7,31 +7,12 @@ import (
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
-// ORDER BY over an expression, and the family it closes.
-//
-// A Sort reads columns by NAME. Everything upstream of it — the SELECT-list
-// Project, the aggregate, the scan — decides which names exist, and a sort
-// key that names none of them used to match nothing and return the input
-// untouched: right rows, arbitrary sequence, no error. #313 and #316 were two
-// spellings of that failure (an alias no stage emitted); this is the third and
-// widest one. `ORDER BY year(d)` and `ORDER BY -id` name no column at all
-// because nothing ever computed them, and `ORDER BY b` over `SELECT a` names a
-// column the Project already dropped. All three came back unsorted, and adding
-// the term to the SELECT list "fixed" each one — the tell that the sort was
-// keying on the projection's output names all along.
-//
-// Two rules close it:
-//
-//  1. A term the Sort's input does not carry is MATERIALIZED as a hidden
-//     column on the SELECT-list projection — evaluated where the expression's
-//     inputs still exist, sorted on, then dropped before the rows reach the
-//     client (Projection.Hidden).
-//
-//  2. A term that can be neither resolved nor materialized is an ERROR. Sorting
-//     is not advisory: an engine that cannot honour an ORDER BY must say so
-//     rather than hand back an arbitrary order that looks like an answer. The
-//     shapes that cannot be materialized are named explicitly in
-//     hiddenSortProjection — none of them fails quietly.
+// A Sort reads columns by NAME; a missing key must never silently leave rows unsorted
+// (#313, #316). Materialize an uncarried term on the SELECT-list projection where
+// its inputs still exist, sort on it, then drop it before the client (Projection.Hidden).
+// If the term can neither resolve nor materialize, ERROR: ORDER BY is mandatory.
+// hiddenSortProjection explicitly names the shapes that cannot be materialized.
+// See docs/internals/order-by-expression-materialization.md for the design.
 
 // hiddenSortColPrefix names a materialized ORDER BY term. The "__" marks it
 // derived, the same convention as __having_N and __gb_expr_N, and makes the
@@ -302,31 +283,14 @@ func orderExprFor(column string, ob plansql.OrderByItem) OrderExpr {
 	return OrderExpr{Column: column, Desc: ob.Desc, NullsFirst: ob.NullsFirst, SlotPos: ob.Ordinal}
 }
 
-// sortKeyCarried reports whether the Sort's input already emits key.
-//
-// With a SELECT list, the Project below the Sort narrows the schema to exactly
-// its outputs, so the select-list names are the whole of what a sort key can
-// resolve against. With `SELECT *` the Sort reads the relation itself, whose
-// column set is not known here — a bare column reference is taken at its word
-// (that is the pre-existing contract, and the catalog rejects a name that does
-// not exist), and anything computed is materialized.
-//
-// items are the SELECT-list columns outputs was derived from, index for index,
-// and they are needed for one rule: **a QUALIFIED ORDER BY term names an INPUT
-// column, never a SELECT-list alias** (#488). PostgreSQL only consults output
-// names for a bare identifier — that is what makes `SELECT s_acctbal AS
-// s_suppkey … ORDER BY s_suppkey` order by ACCTBAL — and `x.col` is resolved in
-// the FROM scope like any other expression. The two rules meet here because
-// namesSameColumn deliberately tolerates one side carrying a qualifier the
-// other omits, so `s.s_suppkey` matched the output named `s_suppkey` and the
-// sort read the alias: verified live on postgres:17-alpine, which orders that
-// query by the real key while this engine ordered it by the shadowing alias, on
-// both arms and silently.
-//
-// The match therefore has to prove the output IS that input column: the select
-// item is a bare column reference of the same name, qualified by the same
-// relation or by none. Anything else falls through and the term is
-// materialized as a hidden key over the input, where it belongs.
+// sortKeyCarried checks the SELECT-list Project's outputs; items and outputs align
+// index for index. For star-only input, trust plain columns (catalog rejects missing
+// ones) and materialize computed terms because relation width is not known here.
+// A QUALIFIED ORDER BY names an INPUT column, never a SELECT alias (#488).
+// A matching output must therefore be a bare-column select item of the same name,
+// qualified by the same relation or none; namesSameColumn alone is insufficient.
+// Otherwise materialize a hidden key over the input. Bare identifiers may name aliases.
+// See docs/internals/qualified-sort-key-input-identity.md for the design.
 func sortKeyCarried(key string, items []plansql.SelectColumn, outputs []string, starOnly bool, ast plansql.Node) bool {
 	if starOnly {
 		_, isCol := ast.(*plansql.ColRef)
@@ -469,32 +433,14 @@ func selectOutputNames(info *plansql.SelectInfo) ([]string, []plansql.SelectColu
 	return out, items
 }
 
-// aggregateBelow finds the Aggregate THIS QUERY BLOCK's SELECT-list
-// projection reads from, descending only through nodes that pass its output
-// along unchanged. Returns nil when the projection reads rows rather than
-// groups.
-//
-// A NESTED SCOPE's root ends the walk. A derived table or a CTE is another
-// query block: its aggregate is not this block's, and its output is ROWS to
-// the block above however it was computed. Descending into one made an ORDER
-// BY over a derived table answer the question "is this term spellable over MY
-// grouping" about SOMEBODY ELSE's grouping, and refused shapes PostgreSQL
-// answers on every arm:
-//
-//	SELECT d.g, d.s FROM (SELECT g, SUM(h) AS s FROM collslot GROUP BY g) d
-//	ORDER BY d.s * 2
-//	-- PostgreSQL 3 rows; wadjet 0A000, loudly, single and DAG (#787)
-//
-// The marker is the one the rest of the planner already uses for a nested
-// scope: `Node.DerivedAlias` on a derived table's root and `Node.CTEName` on
-// a CTE's (physical.subtreeNamesRelation reads the same pair). It is asked of
-// every node the walk touches, the Aggregate included — a derived table whose
-// own root IS an Aggregate is still another block.
-//
-// This is the Project rule ADR-0026 §4's shared list deliberately leaves to
-// each walk (`AggScopePreservingWrapper` omits NodeProject, because what a
-// Project does to the schema is the caller's own question). The four wrapper
-// kinds keep the shared answer; the boundary is this walk's own.
+// aggregateBelow finds THIS block's aggregate through output-preserving nodes,
+// or nil when the projection reads rows rather than groups (#787).
+// Stop at EVERY DerivedAlias/CTEName root, including an Aggregate itself:
+// a nested block's grouped output is ROWS to its parent, not the parent's grouping.
+// Project traversal and this scope boundary belong to this caller;
+// AggScopePreservingWrapper deliberately omits Project, while its four wrapper
+// kinds retain the shared answer (ADR-0026 §4).
+// See docs/internals/order-by-query-block-aggregate-scope.md for the design.
 func aggregateBelow(project *Node) *Node {
 	if project == nil {
 		return nil

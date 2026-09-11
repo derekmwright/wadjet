@@ -346,55 +346,26 @@ func computeRequiredColumns(n *Node) {
 // width (safe) if it ever reaches that path.
 const RowCountOnlyColumn = "__rowcount_only__"
 
-// ScanColSanitizeSwitch gates the DROPPING half of sanitizeScanNeeds — the
-// pollution A/B, and nothing else. It deliberately does NOT gate the
-// schema-spelling half; see the comment on that arm for why an optimization
-// switch must not decide which columns a scan reads.
-//
-// It is REGISTERED, which is what puts it under the optimization-invariance
-// oracle: the oracle runs the corpus with each switch individually disabled
-// and requires identical results, and that is exactly the property this switch
-// lacked. Until #731's follow-up it changed 30 of the CamelCase battery's 63
-// cells when disabled — a switch load-bearing for correctness, which inverts
-// the doctrine registration exists to enforce. Registering it is how the
-// property stays true rather than being true today.
-//
-// It is EXPORTED because the gate that can actually see it lives in another
-// package: the optimization-invariance oracle sweeps every registered switch
-// over TPC-H, whose columns are all lower case, and there the folded reference
-// and the schema spelling are the SAME STRING — disabling this switch on that
-// corpus cannot change a row by construction. The corpus that can see it is
-// the CamelCase invariance battery in internal/coordinator, and it drives both
-// states through this handle rather than reading the env var, so one run
-// covers both.
+// ScanColSanitizeSwitch gates ONLY dropping polluted scan needs, never schema spelling.
+// An optimization switch must not decide which columns a scan reads (#731).
+// Keep it REGISTERED for the invariance oracle, which disables each switch independently.
+// Keep it EXPORTED so the coordinator CamelCase battery drives both states directly:
+// TPC-H's all-lowercase names make folded and schema spelling identical, so that
+// corpus cannot detect this correctness boundary by construction.
+// See docs/internals/scan-sanitize-switch-gate-boundary.md for the design.
 var ScanColSanitizeSwitch = optswitch.Register("scan-col-sanitize", "WADJET_SCAN_COL_SANITIZE",
 	"drop alias-qualified and foreign-relation names from a scan's required-column list")
 
 func scanColSanitizeOn() bool { return ScanColSanitizeSwitch.On() }
 
-// sanitizeScanNeeds turns the ancestor-accumulated needs set into a clean
-// RequiredColumns list for one scan. The accumulated set carries junk the
-// scan can never produce — alias-qualified duplicates ("l1.l_receiptdate"
-// next to "l_receiptdate") and the OTHER side's join-key columns
-// ("s_suppkey" landing on a lineitem scan via "s_suppkey = l1.l_suppkey").
-// Any such name trips the worker's all-or-nothing parquet projection guard
-// (cachedFileStreamSource.projectColumns) and silently reverts the scan —
-// and every shuffle fed by it — to full width: Q21's l1 leg measured
-// 143 B/row against the 25 B/row its clean sibling leg achieves
-// (docs/design/exchange-reuse.md §2 A1).
-//
-// Rules, conservative toward keeping:
-//   - "alias.col" where alias is THIS scan (TableAlias or TableName):
-//     rewritten to bare col. Other aliases: dropped — provably another
-//     relation's column.
-//   - bare names when ScanColumns (catalog schema, AnnotateScanColumns) is
-//     known: kept iff in the schema, EXCEPT "__"-prefixed derived names
-//     (e.g. __having_0), which are kept so the worker guard's
-//     derived-column semantics are preserved exactly.
-//   - bare names when ScanColumns is empty (no catalog at plan time):
-//     kept — we cannot judge, and full width is the safe failure mode.
-//
-// Output is sorted for deterministic plans.
+// sanitizeScanNeeds produces a sorted, deterministic RequiredColumns list.
+// Strip this scan's TableAlias/TableName qualifier; drop other relation qualifiers.
+// Keep schema-known bare names only if present, except __-prefixed derived names
+// whose worker projection-guard semantics must remain unchanged.
+// Without ScanColumns, keep bare names: full width is the safe failure mode.
+// Unproducible needs trigger cachedFileStreamSource.projectColumns' all-or-nothing
+// fallback and widen scans/shuffles (docs/design/exchange-reuse.md §2 A1).
+// See docs/internals/scan-needs-sanitization-rules.md for the design.
 func sanitizeScanNeeds(n *Node, needs map[string]bool) []string {
 	// lower → canonical schema spelling. Refs arrive lowercased from
 	// collectASTColumnRefs; downstream projection (buildReadSchema and the
@@ -408,34 +379,16 @@ func sanitizeScanNeeds(n *Node, needs map[string]bool) []string {
 		inSchema[strings.ToLower(c)] = c
 	}
 	if !scanColSanitizeOn() {
-		// The switch is a POLLUTION A/B and nothing else. It restores the
-		// pre-2026-07 list — every accumulated need, junk included — but it
-		// does NOT restore the pre-2026-07 SPELLING, because the spelling is
-		// not an optimization: RequiredColumns is a scan's read set, it names
-		// columns OF THIS TABLE, and every consumer of it byte-compares
-		// against the table's schema (physical.buildReadSchema, the
-		// scan-cache projection, worker cachedFileStreamSource.projectColumns
-		// via Stage.Columns, coordinator.prunedScanColumns).
-		//
-		// Bundling the two behind one switch made an optimization knob
-		// load-bearing for CORRECTNESS, which is the one thing a kill switch
-		// must never be. The mechanism, measured on the camel-case invariance
-		// battery with WADJET_SCAN_COL_SANITIZE=0: a MIXED-case schema
-		// (`RegionID` beside an already-folded `counterid`) made the folded
-		// needs match the folded columns and miss the CamelCase ones, so
-		// buildReadSchema returned a PARTIAL projection — not the full-width
-		// fallback a TOTAL miss reaches — and the scan silently dropped the
-		// GROUP BY key, the join key and the ORDER BY key. That arm answered
-		// 30 of the battery's 63 cells differently from the identical
-		// all-lower fixture. With every downstream consumer of this list
-		// separately taught to RESOLVE rather than byte-compare, the property
-		// is now owned JOINTLY: reverting this respelling alone diverges on NO
-		// cell, because physical.buildReadSchema resolves the folded names it
-		// then receives. The respelling stays here anyway — this is where the
-		// schema's spelling is known — and the CamelCase battery drives BOTH
-		// switch states, so a consumer that stops resolving is caught with the
-		// arm and the state named rather than waiting for the next corpus that
-		// happens to carry a mixed-case schema.
+		// The disabled switch restores accumulated needs, pollution included, but STILL
+		// respells known names to the schema: RequiredColumns is this TABLE's read set.
+		// Consumers include physical.buildReadSchema, scan-cache projection, worker
+		// cachedFileStreamSource.projectColumns via Stage.Columns, and coordinator.prunedScanColumns.
+		// Mixed-case partial matches can drop keys instead of triggering full-width fallback.
+		// Correctness is now shared with downstream resolution: reverting this respelling
+		// alone may not diverge because buildReadSchema resolves folded names.
+		// Keep canonical spelling here and test BOTH states with the CamelCase battery;
+		// a consumer that stops resolving must be caught with its arm and switch state.
+		// See docs/internals/scan-sanitize-disabled-spelling-contract.md for the design.
 		cols := make([]string, 0, len(needs))
 		seen := make(map[string]bool, len(needs))
 		for col := range needs {
@@ -478,31 +431,14 @@ func sanitizeScanNeeds(n *Node, needs map[string]bool) []string {
 					keep[canon] = true
 					continue
 				}
-				// The qualifier matches this scan and the column does NOT
-				// exist in it. A derived table's alias BECOMES the scan's
-				// TableAlias, so `x.w` over `(SELECT g*3 AS w FROM t) x` is
-				// the Project's OUTPUT name arriving qualified — and keeping
-				// it wrote a column the table does not have into the scan's
-				// read set. Every "what does this stage emit" model reads
-				// that list (physical.stageEmittedColumns and, through it,
-				// emittedThroughPassThrough, gatherOutputSources,
-				// stageStreamColumns), so the phantom made the reachability
-				// check, the sort-key resolver and the window-key resolver
-				// all believe in a column no file has: the DAG then either
-				// skipped the materialization that would have created it or
-				// failed at dispatch with `column "w" does not exist in the
-				// input schema`, for queries PostgreSQL answers (#776, and
-				// ADR-0026 §4b, which named this and stopped here).
-				//
-				// It is the rule the NodeWindow arm of pushColumnNeeds
-				// already applies to `__win_N` — a node's own output is not a
-				// need of the node below it — reached from the SANITIZE side,
-				// which is where a QUALIFIED spelling arrives.
-				//
-				// Only when the schema is known: with no catalog at plan
-				// time every name is kept, and full width is the safe
-				// failure mode. A "__"-prefixed derived name keeps the
-				// worker guard's semantics the bare branch below gives it.
+				// A qualifier matching this scan does not make a missing column a scan input:
+				// a derived alias can qualify a Project OUTPUT (#776, ADR-0026 §4b).
+				// Never publish that phantom in the read set: stage-emission models would believe it
+				// exists and skip required sort/window materialization or fail at dispatch.
+				// A node's own output is not a need below it, as for NodeWindow's __win_N.
+				// Drop only with known schema; without catalog keep names and allow full-width fallback.
+				// Keep __-prefixed derived names to preserve the worker guard's bare-branch semantics.
+				// See docs/internals/qualified-derived-output-scan-needs.md for the design.
 				if len(inSchema) == 0 || strings.HasPrefix(col, "__") {
 					keep[col] = true
 				}
@@ -613,34 +549,13 @@ func pushColumnNeeds(n *Node, parentNeeds map[string]bool) {
 		return
 	}
 
-	// A SET OPERATION'S ARMS SUPPLY THE OPERATION'S RESULT COLUMNS (#961).
-	//
-	// `UNION`, `INTERSECT` and `EXCEPT` match their arms BY POSITION over the
-	// operation's whole result row: the result column list is the first arm's,
-	// every arm is projected onto it, and for every spelling but `UNION ALL`
-	// that whole row is also the DEDUP KEY. Nothing above the operation can
-	// therefore say that an arm may stop producing a column — narrowing an arm
-	// changes the operation's own schema, and for a deduplicating spelling it
-	// changes which rows survive.
-	//
-	// This walk had no set-op arm at all, so an outer need fell through the
-	// generic recursion straight into both arms.
-	// `SELECT COUNT(*) FROM (SELECT * FROM t WHERE id < 2000 UNION ALL SELECT *
-	// FROM t WHERE id >= 2000) u WHERE id < 10` pushed `{id}` into two star
-	// arms whose scans then read `[id]` alone, while the union stage's
-	// projection — built from the arms' declared output lists, which is what
-	// the operation publishes — still asked for all 22. Both DAG arms failed
-	// with `column "g" does not exist in the input schema` where PostgreSQL and
-	// the single-process path answer 10; every set-op spelling over two star
-	// arms inside a subquery had it. On the single-process path there is no
-	// name-based arm projection to fail and the narrowing landed on the DEDUP
-	// KEY instead: `INTERSECT`, `EXCEPT` and a distinct `UNION` over two star
-	// arms answered 0 on all four arms.
-	//
-	// nil is "all columns" for this walk, and it is what an arm's own SELECT
-	// list narrows again on the way down: an arm with an explicit list is a
-	// Project, which builds its own needs set from its own items, so only the
-	// STAR arm — which has no Project at all — is widened by this.
+	// UNION/INTERSECT/EXCEPT arms supply the WHOLE operation result row BY POSITION (#961).
+	// Its column list comes from the first arm, and each arm is projected onto it.
+	// Except for UNION ALL, that whole row is also the DEDUP KEY: ancestor needs must
+	// never narrow an arm and change the schema or which rows survive.
+	// Pass nil (all columns) into each arm. Explicit Project lists rebuild their own
+	// needs below; only star arms without a Project are widened.
+	// See docs/internals/set-operation-arm-column-needs.md for the design.
 	switch n.Type {
 	case NodeUnion, NodeIntersect, NodeExcept:
 		for _, child := range n.Children {
@@ -848,42 +763,15 @@ func collectSubtreeColumnsRec(n *Node, result map[string]bool) {
 	}
 }
 
-// subtreePublishedColumns is collectSubtreeColumns plus the output names the
-// subtree's own Projects MINT — a renamed or computed column, which no scan
-// stores.
-//
-// It answers a DIFFERENT question from collectSubtreeColumns, which is why it
-// is a different function rather than a widening of it. That one asks "which
-// BASE columns does this relation carry", and its other callers — semi/anti
-// dedup, join reordering, comma-join lifting — attribute a predicate to a
-// relation with it; widening it there made Q17's semi leg read wider columns
-// than its inner sibling and cost the shared-subplan dedup a whole lineitem
-// scan. This one asks "which names can this side SUPPLY to an operator above
-// the join", and a renamed or computed output is one of them.
-//
-// The gap it closes: `WITH c AS (SELECT id, a AS v FROM t) SELECT COUNT(*)
-// FROM c JOIN t x ON c.id = x.id JOIN t y ON c.id = y.id WHERE c.v > 1` needs
-// `v` above BOTH joins. No scan stores `v`, so it was in neither side's
-// available set, the partition below put it in neither probeNeeds nor
-// buildNeeds, and the INNER join's NeededColumns — which becomes its
-// OutputFilter — dropped the column the filter above the OUTER join was about
-// to read. The single-process path failed with `filter column "c.v" does not
-// exist in the input schema`, the SHUFFLED DAG answered ZERO rows in silence,
-// and the broadcast DAG answered correctly, because only the first two narrow
-// to that list (#700, #726).
-//
-// One join hid it: there the join whose needs are partitioned is the one the
-// Project feeds directly, so the alias never had to survive a SECOND
-// partition. The DERIVED-table spelling hides it too, because
-// pushdownPredicates swaps the filter below the Project and substitutes the
-// alias away — a CTE's Project is a materialization fence and declines that
-// swap, which is why the CTE spelling is the one that breaks.
-//
-// Claiming a minted name can only make a side claim MORE, so it can only push
-// down a need that used to be dropped and never withhold one. A name pushed to
-// a side that cannot supply it is already tolerated: it is dropped again at the
-// scan by sanitizeScanNeeds, and deleted at the window that mints it by
-// pushColumnNeeds' NodeWindow arm (#694 R1).
+// subtreePublishedColumns includes base columns AND names minted by Projects:
+// renamed/computed outputs must survive needs partitioning across multiple joins
+// (#700, #726), including CTE materialization fences that prevent filter substitution.
+// Keep collectSubtreeColumns unchanged: its other callers attribute predicates to
+// BASE columns for semi/anti dedup, join reordering and comma-join lifting.
+// Claiming minted names only adds needs; it must never withhold an existing need.
+// Unsupported needs are dropped by sanitizeScanNeeds, and a window-minted need
+// is deleted at pushColumnNeeds' NodeWindow arm (#694).
+// See docs/internals/join-subtree-published-needs.md for the design.
 func subtreePublishedColumns(n *Node) map[string]bool {
 	result := collectSubtreeColumns(n)
 	collectMintedNames(n, result)
@@ -1885,48 +1773,16 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 		}
 	}
 
-	// A ROW FIELD PATH as the INNER key — the mirror of the outer-key decline
-	// above, and #866.
-	//
-	// `d.b IN (SELECT c_row.b FROM typemx_nested)` names a FIELD of a ROW
-	// column. The semi join's build side is the subquery's own plan, which
-	// emits the ROW column `c_row` and no column called `b`, so
-	// exec.HashJoin resolved the build key to -1 — the degenerate
-	// all-rows-equal key — and the join answered the rows whose OUTER key is
-	// NULL while dropping the one row that matches. Measured against live
-	// PostgreSQL 17 over the same rows: PG answers `did = 6`, the
-	// single-process and spilled arms answered `8, 9` (decpair's two
-	// NULL-keyed rows, which `NULL IN (…)` must EXCLUDE), the DAG answered
-	// NOTHING, and the shuffled arm failed loudly with `partitioned shuffle:
-	// key "c_row.b" not in schema`. The NOT IN twin was wrong on all four
-	// arms: seven rows for PostgreSQL's NONE (the membership set contains
-	// NULLs, so PostgreSQL's three-valued rule admits nothing).
-	//
-	// The test is that the QUALIFIER names no relation this subquery reads.
-	// That is exactly what a field path is here — the subquery is
-	// uncorrelated by construction at this point, so a qualifier that is not
-	// a relation is a ROW column — and it needs no catalog, which the inner
-	// plan does not have annotated yet at this point in the walk.
-	//
-	// MATERIALIZING IT INTO A `__path_N` SLOT WAS BUILT IN ARC J1 AND
-	// WITHDRAWN. The projection publishes the path, the semi join keys on the
-	// slot, and the SINGLE-PROCESS and SPILLED arms then answer PostgreSQL's
-	// `did = 6` and its NOT IN's no rows — but the stage DAG answered ZERO
-	// rows and its NOT IN twin every row, SILENTLY, because no stage
-	// materializes the slot: `absorbComputedSubqueryProjection` is the pass
-	// that would, and the semi join's build side reaches it as
-	// `Distinct → Project → Project → Scan` (dedupSemiAntiBuildSide's dedup),
-	// where its own resolvability check declines. A plan-time refusal keyed
-	// on the slot was tried too and cannot fire: the join's build dep is an
-	// `exchange-replicate` whose column list is empty, so `carrierInputColumns`
-	// reports the input as UN-MODELLED and every carrier assert skips it.
-	// Closing #866 needs the stage model to describe an exchange's payload,
-	// which is its own arc — written up in J1's report.
-	//
-	// Declining leaves the IN where it was: an ordinary filter predicate,
-	// whose subquery runs as written and whose field path resolves through
-	// ADR-0022 rule 1's vectorized filters. It is the same answer #482, #516
-	// and #769 take for a shape this rewrite cannot NAME.
+	// Decline a ROW FIELD PATH as the inner IN/NOT IN key (#866): the build plan
+	// publishes the ROW column, not a separate field column, so the join key is absent.
+	// Here the subquery is uncorrelated; a qualifier naming no inner relation identifies
+	// the ROW column without catalog annotation. Leave IN as an ordinary predicate,
+	// whose subquery and vectorized field-path filters execute as written
+	// (ADR-0022 rule 1; #482, #516, #769).
+	// A minted path slot alone is insufficient: Distinct → Project → Project can block
+	// DAG materialization, and an exchange with unmodelled payload skips carrier asserts.
+	// The stage model must describe the exchange payload before this boundary can close.
+	// See docs/internals/in-subquery-inner-row-field-boundary.md for the design.
 	if ref := plainColRef(info.Columns[0].ASTExpr); ref != nil && ref.Table != "" &&
 		!innerTableSet[strings.ToLower(ref.Table)] {
 		return nil
@@ -2089,48 +1945,16 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 		return miss
 	}
 
-	// A CORRELATED NOT IN is not lowered to this join at all (#538, #578).
-	//
-	// NOT IN is three-valued: TRUE only when x differs from every y in ITS OWN
-	// correlation group, FALSE when it equals one, and UNKNOWN — so WHERE
-	// drops the row — when x is NULL and the group is non-empty, or when the
-	// group holds a NULL y that x did not otherwise match. An anti join
-	// answers the TWO-valued question "did nothing match", which is its NOT
-	// EXISTS twin: measured against live PostgreSQL 17 over the multikey
-	// fixture, three shapes answered 13 for 9, 6 and 9 — exactly what the
-	// corresponding NOT EXISTS answers, on all four arms and in silence.
-	//
-	// Node.NullAwareAnti above cannot express the correlated form and its own
-	// comment has said so since #507: the flag reads ONE fact off the WHOLE
-	// build side and empties the output when it is true, so setting it here
-	// would drop every row the moment ANY group held a NULL. The fact this
-	// predicate needs is per correlation GROUP.
-	//
-	// The identity that WOULD express it with joins this engine already has:
-	//
-	//	x NOT IN (SELECT y FROM t WHERE corr)
-	//	  ≡  NOT EXISTS (SELECT 1 FROM t WHERE corr AND y = x)
-	//	     AND NOT EXISTS (SELECT 1 FROM t WHERE corr AND (y IS NULL OR x IS NULL))
-	//
-	// — an ordinary equi-key anti join beside a second one whose residual is
-	// `(y IS NULL OR x IS NULL)`. Both hash-partition like any other join, so
-	// neither needs #539's replicated build. It was built and measured, and it
-	// does not work TODAY for a reason that is not in this package: a
-	// semi/anti join's residual is compiled by physical.BuildSemiAntiFilter,
-	// which reads the filter as TEXT — split on " and ", then find one of six
-	// comparison operators — so an OR and an IS NULL compile to NOTHING and
-	// are dropped in SILENCE, and physical.extractFilterBuildColumns narrows
-	// the stored build by the same text split and would delete the very column
-	// the residual reads. Measured with the two-join form in place: 0 rows for
-	// PostgreSQL's 9. That is #562's defect class one layer down.
-	//
-	// So the honest lowering is none: leave the IN a subquery predicate, where
-	// expr.CorrelatedInSubquery.EvalBoolNull already carries the exact rule per
-	// outer row (a NULL probe is UNKNOWN, a miss against a set containing a
-	// NULL is UNKNOWN, an empty set is TRUE). A slower right answer beats a
-	// wrong one, and the stage DAG routes such a plan to the coordinator-local
-	// pipeline — which the census asserts with CorrelatedLocalRoutes beside the
-	// rows, so the cost is recorded and not merely described.
+	// Do not lower correlated NOT IN to this join (#538, #578): NULL facts belong to
+	// EACH correlation group, while NullAwareAnti tests the WHOLE build (#507).
+	// A match is FALSE; a nonempty group with NULL probe, or an unmatched probe against
+	// a group containing NULL, is UNKNOWN; differing from every value is TRUE (empty too).
+	// Leave expr.CorrelatedInSubquery.EvalBoolNull to apply that rule per outer row.
+	// The DAG routes coordinator-local; the census must assert CorrelatedLocalRoutes
+	// beside rows. Two anti joins need OR/IS NULL residuals and their build columns;
+	// text-based residual compilation/narrowing cannot safely express that boundary
+	// (#562); the two-join design and #539 replication comparison are in the essay.
+	// See docs/internals/correlated-not-in-local-boundary.md for the design.
 	return nil
 }
 
@@ -3801,35 +3625,14 @@ func isInnerJoin(n *Node) bool {
 	return jt == "" || jt == "join" || jt == "inner" || jt == "inner join" || jt == "cross"
 }
 
-// isDependentJoin reports whether this join is one the PLANNER manufactured
-// for a decorrelated LATERAL — a dependent join, whose inner side is a plan OF
-// the outer side's rows.
-//
-// Such a join is not a free inner join and reordering it is not a cost
-// decision (#1008):
-//
-//   - `costBasedJoinReorder` REBUILDS the chain with `NewJoin`, which carries
-//     none of the rules the lowering attached to the node it built — the slot
-//     it minted and drops (`HiddenJoinCols`), the pad marker and the
-//     empty-input defaults (ADR-0026 §3c). Two LATERALs over one outer flatten
-//     to THREE relations, so `SELECT * FROM lat_ord o JOIN LATERAL (… GROUP BY
-//     i.product) s ON true JOIN LATERAL (…) s2 ON true` came back with
-//     `__key_0` and `__key_1` in the client's relation, and the re-hung
-//     conditions keyed a STRING against the integer correlation column: `join
-//     key "s.__key_0" is STRING on the probe side` on both DAG arms, and on
-//     the single-process arms a star over two joins that declares nothing —
-//     `cols=[] rows=0` where PostgreSQL 17 answers eight rows.
-//   - `flattenJoinChain` walks THROUGH the manufactured join, which makes the
-//     lateral's inner subtree and the relation it CORRELATES ON two
-//     independent relations the cost model may put in either order — the inner
-//     placed before the outer it depends on.
-//   - The two-way swap below exchanges the sides, and for a manufactured join
-//     the side order is the ANSWER: `SELECT *` publishes the outer relation's
-//     columns and then the lateral's, which is what PostgreSQL publishes.
-//
-// The marker is the lowering's own: `Node.LateralSubtree` on the side it
-// BUILT (builder.go), plus the rules it hangs on the join, so a shape that
-// mints no slot is still recognised.
+// isDependentJoin identifies planner-manufactured LATERAL joins; reordering is
+// not a cost decision (#1008). NewJoin rebuilding loses HiddenJoinCols, pad markers
+// and empty-input defaults (ADR-0026 §3c). Flattening must not separate the dependent
+// inner plan from the outer relation it reads, or place it before that relation.
+// Do not swap sides: SELECT * must publish outer columns THEN lateral columns.
+// Recognize Node.LateralSubtree on the BUILT side plus the join's attached rules,
+// including shapes that mint no slot.
+// See docs/internals/dependent-lateral-join-reorder-boundary.md for the design.
 func isDependentJoin(n *Node) bool {
 	if n == nil || n.Type != NodeJoin {
 		return false
