@@ -2286,7 +2286,8 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      The compile-time call remains a backstop **when compilation is reached**.
      It covers ADR-0031's empty-input UPDATE/DELETE predicates and UPDATE SET.
      It does not guarantee validation of an empty DAG policy filter, or an
-     empty-source MERGE SET/VALUES expression (whose compilation is lazy).
+     MERGE WHEN clause no row reaches — a MATCHED SET or AND-DELETE condition
+     over an ON that matches nothing — whose compilation is lazy (#1043).
      Catalog-less table-less plans refuse distribution and compile locally.
      An ORDER BY term the binder cannot re-parse is refused by the logical
      builder with 42601. These doors are independently pinned by

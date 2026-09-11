@@ -534,8 +534,10 @@ The expression-position guarantee above concerns supported SELECT syntax.
 Expression-valued window frame bounds, named windows, LIMIT/OFFSET and
 INSERT expressions are rejected by the parser before this check. DML runs
 locally; UPDATE/DELETE predicates and UPDATE SET compile before rows, while
-empty-source MERGE SET/VALUES clauses can return `MERGE 0` without checking
-their expressions. An injected policy filter on an empty distributed stage
+a MERGE WHEN clause no row reaches — a MATCHED UPDATE's SET or a MATCHED
+`AND … DELETE` condition over an ON that matches nothing — can return `MERGE 0`
+without checking its expressions (a NOT MATCHED VALUES tuple and a matching ON
+both refuse). An injected policy filter on an empty distributed stage
 may likewise never compile. Two further empty-input gaps remain: a shadowing CTE body can bypass the
 binder's name map, and an ORDER BY expression on a whole set operation is
 not validated. These remain coverage gaps (ADR-0012).
