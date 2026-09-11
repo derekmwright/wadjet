@@ -1,28 +1,10 @@
-// Package multikey is the fixture and query corpus for correlated subqueries
-// that correlate on MORE THAN ONE column.
-//
-// Why it exists. Every correlated-subquery entry in every other corpus here
-// correlates on exactly ONE equality. #562 is what that blind spot cost: a
-// two-column correlated EXISTS answered ZERO rows, its NOT EXISTS twin
-// answered EVERY row, and neither the type matrix, the TPC-H corpus, the
-// DuckDB fingerprint corpus, the PostgreSQL oracle nor the shape fuzzer
-// contained a single query that could show it. The defect was in the build
-// side's NDV narrowing (dedupSemiAntiBuildSide): it read the join keys out of
-// the condition TEXT with a split on " and " while a decorrelation renders
-// " AND ", so it kept the FIRST conjunct's key and projected the build side
-// down to that one column — deleting the column the second conjunct compares.
-//
-// A two-column correlated existence check is what a BI client emits for a
-// compound-key lookup, so the shape is ordinary and the failure was total and
-// silent.
-//
-// This package holds no assertions and no expected answers beyond the ones
-// PostgreSQL gave: three gates consume it.
-//
-//	wadjet.TestMultiKeyCorrelatedSubqueries      — the embedded engine
-//	coordinator.TestMultiKeyCorrelatedTwoPath    — stage DAG vs single process
-//	(PostgresSetup renders the same fixture for the container that decided
-//	every Want below.)
+// Package multikey supplies fixtures and queries correlating on MORE THAN ONE
+// column (#562), covering build-side narrowing that could drop later conjuncts.
+// Single-key corpora cannot prove compound-key retention.
+// Assertions live in wadjet.TestMultiKeyCorrelatedSubqueries and
+// coordinator.TestMultiKeyCorrelatedTwoPath; PostgresSetup renders the same
+// fixture used to establish Wants. This package supplies data, not assertions.
+// See docs/internals/multikey-correlated-corpus.md for the design.
 package multikey
 
 import (
@@ -255,33 +237,14 @@ var pins = map[string]struct {
 	// where an error is still a failure.
 	loudLike, loudLikeDAG string
 }{
-	// The three notin_* entries were pinned here under #578 and are gone: a
-	// correlated NOT IN is no longer lowered to an anti join, which answers
-	// the two-valued question, so the predicate stays a subquery and
-	// expr.CorrelatedInSubquery.EvalBoolNull carries the three-valued rule
-	// per outer row. They are gated outright now.
-	//
-	// LOUD SINCE 2026-09-02 (#734/#679/#535, the consumer half). These four
-	// used to answer a WRONG NUMBER; they now FAIL the query. The re-run
-	// their per-row predicate produced could not be executed — the dropped
-	// column-alias list makes the rebuilt SQL unparseable, and the
-	// un-decorrelated CTE reference dangles — and the evaluator that ate that
-	// failure and returned a boolean constant fails instead. The divergence
-	// from PostgreSQL is unchanged and the pins stand; what changed is that
-	// the user is told. Both harnesses ask about the DISPOSITION before the
-	// rows, so a pinned entry that errors is a logged divergence and one that
-	// starts ANSWERING PostgreSQL's number still fails the pin.
-	// derived_exists_colalias and derived_in_colalias were pinned here under
-	// #613 and are gone: a derived table's column-alias list `(…) AS b(kk,nn)`
-	// is applied on both arms now, so both answer PostgreSQL's 23 and 36. The
-	// corpus entries stay, because they are the only ones that reach the list
-	// through a CORRELATED subquery — the site it was lost at last.
-	//
-	// cte_probe_base_build and cte_referenced_twice were pinned here under
-	// #535 and are gone: a CTE reference is a named SCOPE and the four
-	// outer-scope collectors read it off the subtree root now, so a
-	// correlated EXISTS over one is decorrelated like any other. Both are
-	// gated outright.
+	// The pins map is empty: former divergences are now asserted outright.
+	// Correlated NOT IN retains three-valued subquery semantics, not two-valued
+	// anti-join lowering (#578). Derived alias lists must survive correlated
+	// rebuilds (#613); CTE scope must survive outer-scope collection (#535).
+	// The historical #734/#679/#535 consumer guards must report execution failure,
+	// never substitute a boolean. Any future loud pin must assert disposition and
+	// arm-specific error before comparing rows; a newly correct answer must fail its pin.
+	// See docs/internals/multikey-retired-divergence-pins.md for the design.
 }
 
 // Corpus is the query set. Every entry counts rows, because a count is what
