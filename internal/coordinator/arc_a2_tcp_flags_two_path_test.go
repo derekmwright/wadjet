@@ -2,10 +2,14 @@ package coordinator
 
 import (
 	"context"
+	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/scan"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -55,15 +59,49 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmetic(t *testing.T) {
 	coordM := tmdCoordinatorWithWorkers(t, ctx, infraM,
 		func(w *worker.Config) { w.MorselWorkers = 4 })
 
+	// The pressured arm runs with the DRAIN FORCED and the run floor lowered,
+	// and the reference arms disarmed — ADR-0027 §6's protocol. A 512 KiB
+	// budget alone moves NO engagement counter on any shape here (the fixture
+	// is 60 rows), so without the knob this arm was a second copy of `single`
+	// wearing a spill label: #966 round 2 P1 measured zero spill files across
+	// eighteen projections. Arming both sides would cancel a defect that lives
+	// in the drain (#790), so only this one is armed.
+	budgeted := func(name, sql string) ([]string, error) {
+		beforeDrain := exec.ForcedAggDrains.Load()
+		beforeRaw := exec.RawRowSpillFiles.Load()
+		beforeSort := exec.SortRunsWritten.Load()
+		beforeWin := exec.WindowRunsWritten.Load()
+		restoreDrain := exec.ForceAggDrainEvery(1)
+		restoreRuns := exec.ForceSmallSpillRuns(512)
+		out, err := na2Run(tmdRunSingle(ctx, spilled, sql))
+		restoreRuns()
+		exec.ForceAggDrainEvery(restoreDrain)
+		engaged := exec.ForcedAggDrains.Load() > beforeDrain ||
+			exec.RawRowSpillFiles.Load() > beforeRaw ||
+			exec.SortRunsWritten.Load() > beforeSort ||
+			exec.WindowRunsWritten.Load() > beforeWin
+		if engaged {
+			a2fSpills.Add(1)
+		}
+		a2fEngaged.Store(name, engaged)
+		return out, err
+	}
+
 	arms := []struct {
 		name string
-		run  func(string) ([]string, error)
+		// coord is the coordinator whose LOCAL-ROUTING counters this arm's
+		// dispositions are read from, and nil on the single-process arms.
+		// Rows alone cannot tell "executed on the DAG" from "refused and
+		// routed local" — #966 round 2 P1: the durable census never read a
+		// routing counter, so every DAG claim in it was unpoliced.
+		coord *Coordinator
+		run   func(name, sql string) ([]string, error)
 	}{
-		{"single", func(sql string) ([]string, error) { return na2Run(tmdRunSingle(ctx, single, sql)) }},
-		{"single+budget", func(sql string) ([]string, error) { return na2Run(tmdRunSingle(ctx, spilled, sql)) }},
-		{"dag", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coord, sql)) }},
-		{"dag-shuffled", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordB, sql)) }},
-		{"dag-morsel4", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordM, sql)) }},
+		{"single", nil, func(_, sql string) ([]string, error) { return na2Run(tmdRunSingle(ctx, single, sql)) }},
+		{"single+budget+forced-drain", nil, budgeted},
+		{"dag", coord, func(_, sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coord, sql)) }},
+		{"dag-shuffled", coordB, func(_, sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordB, sql)) }},
+		{"dag-morsel4", coordM, func(_, sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordM, sql)) }},
 	}
 
 	for _, tc := range []struct {
@@ -139,6 +177,12 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmetic(t *testing.T) {
 			[]string{"b=NULL"}},
 		{"null_flags_has_none", `SELECT COUNT(*) AS n FROM tcpflow WHERE f8 IS NULL AND tcp_flags_has_none(f8,'ACK')`,
 			[]string{"n=int64:0"}},
+		// The other side of P4: a NULL *name* is a NULL mask operand, and
+		// PostgreSQL's `NULL & NULL` is NULL — so this ANSWERS rather than
+		// refusing, on the same NULL row the refusal above fires on.
+		{"null_flag_name_is_null_not_a_refusal",
+			`SELECT has_tcp_flag(f8, CAST(NULL AS VARCHAR)) AS b FROM tcpflow WHERE id = 15`,
+			[]string{"b=NULL"}},
 
 		// ---- the predicate BESIDE a range on another column, so the flag
 		// conjunct rides in the same pushed set as a prunable one.
@@ -208,6 +252,73 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmetic(t *testing.T) {
 			`SELECT BIT_COUNT(f8) AS v FROM tcpflow WHERE id = 14`,
 			[]string{"v=int64:63"}},
 
+		// ---- SUM OVER AN INTEGER-DECLARED FUNCTION (#966 round 2 B1).
+		//
+		// PostgreSQL's `f8 & k` is BIGINT and `SUM(bigint)` is NUMERIC, so
+		// two rows of 2^62 add up to 9223372036854775808 and not to an
+		// overflow. Here BITWISE_AND had just been declared int8 while the
+		// aggregate-width walk still read an ordinary function as int4, so
+		// SUM took the BIGINT accumulator and every one of these three
+		// answered 22003 on every arm — a right value (the base answered
+		// 2^63 as a float64) turned into a refusal.
+		//
+		// The grouped and the windowed spellings share the walk, so both are
+		// here. The value is rendered VERBATIM by na2Run because it is a
+		// DECIMAL: the digits past the fifteenth are the whole point.
+		{"sum_of_a_wide_and_is_numeric",
+			`SELECT SUM(BITWISE_AND(f8,4611686018427387904)) AS v FROM tcpflow
+			 WHERE id = 10 OR id = 25`,
+			[]string{"v=9223372036854775808"}},
+		{"sum_of_a_wide_or_is_numeric",
+			`SELECT SUM(BITWISE_OR(f8,1)) AS v FROM tcpflow WHERE id = 10 OR id = 25`,
+			[]string{"v=9223372036854775846"}},
+		{"windowed_sum_of_a_wide_or_is_numeric",
+			`SELECT SUM(BITWISE_OR(f8,1)) OVER () AS v FROM tcpflow WHERE id = 10 OR id = 25`,
+			[]string{"v=9223372036854775846", "v=9223372036854775846"}},
+		// The GROUPED spelling, over the whole fixture, where the accumulator
+		// is exercised per group rather than once. PostgreSQL's own
+		// `SELECT (f8&511), SUM(f8&18), COUNT(*) … GROUP BY 1 ORDER BY 1`
+		// over the same 56 non-NULL rows. This is also the census's only
+		// shape with a pipeline breaker the forced drain can reach, so it is
+		// what makes the budgeted arm a spilled arm.
+		{"grouped_sum_of_a_mask",
+			`SELECT BITWISE_AND(f8,511) AS k, SUM(BITWISE_AND(f8,18)) AS v, COUNT(*) AS n
+			 FROM tcpflow WHERE f8 IS NOT NULL GROUP BY 1 ORDER BY 1`,
+			// na2Run sorts the RENDERED rows, so this list is in string
+			// order, not the numeric order the SQL asks for: "k=int64:20"
+			// sorts before "k=int64:2|" because '0' < '|'. The comparison is
+			// of the multiset of rows; the ORDER BY is there so the five arms
+			// produce one, not so this list asserts it.
+			[]string{
+				"k=int64:0|v=0|n=int64:8",
+				"k=int64:16|v=64|n=int64:4",
+				"k=int64:18|v=144|n=int64:8",
+				"k=int64:20|v=64|n=int64:4",
+				"k=int64:24|v=64|n=int64:4",
+				"k=int64:256|v=0|n=int64:4",
+				"k=int64:2|v=8|n=int64:4",
+				"k=int64:494|v=8|n=int64:4",
+				"k=int64:4|v=0|n=int64:4",
+				"k=int64:511|v=216|n=int64:12",
+			}},
+		// A SUM that does NOT overflow, so the only thing it can be wrong
+		// about is its TYPE. 568 is PostgreSQL's total for `SUM(f4 & 18)`
+		// over the fixture; PostgreSQL declares that bigint because `int4 &
+		// int4` is int4 there, and this engine declares every bitwise result
+		// int8 (the widening already in ADR-0012's list), so its SUM is
+		// numeric. Same digits, different box — which is why the WIRE gate,
+		// not this one, is where the OID is pinned.
+		{"sum_of_a_narrow_mask_is_the_same_number",
+			`SELECT SUM(BITWISE_AND(f4,18)) AS v FROM tcpflow`,
+			[]string{"v=568"}},
+		// The control the width rule needs from the other side: LENGTH is
+		// declared INT32, so its SUM keeps the BIGINT accumulator, exactly as
+		// PostgreSQL's `SUM(length(text))` is bigint. If the fix had made
+		// every function wide this cell would be a DECIMAL.
+		{"sum_over_an_int4_declared_function_stays_bigint",
+			`SELECT SUM(LENGTH(TO_HEX(f8))) AS v FROM tcpflow WHERE id <= 4`,
+			[]string{"v=int64:6"}},
+
 		// ---- a shape the pushdown DECLINES (computed argument): the residual
 		// exec filter must answer what the pushed spelling answers.
 		//
@@ -220,8 +331,11 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmetic(t *testing.T) {
 			[]string{"n=int64:40"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			a2fSQL[tc.name] = tc.sql
 			for _, arm := range arms {
-				got, err := arm.run(tc.sql)
+				before := a2fReadRoutes(arm.coord)
+				got, err := arm.run(tc.name+"/"+arm.name, tc.sql)
+				a2fCheckRoutes(t, arm.name, arm.coord, before, tc.sql)
 				if err != nil {
 					t.Errorf("%s arm: %v\n  SQL: %s", arm.name, err, tc.sql)
 					continue
@@ -254,10 +368,25 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmetic(t *testing.T) {
 		{"empty_name_list",
 			`SELECT COUNT(*) AS n FROM tcpflow WHERE tcp_flags_has_any(f8)`,
 			"tcp_flags_has_any requires at least one TCP flag name"},
+		// THE NAME OUTRANKS A NULL FLAGS ARGUMENT (#966 round 2, P4). id 15 is
+		// the fixture's NULL row, so the only value the evaluator sees is
+		// NULL and the refusal still has to fire — on every arm, including
+		// from inside a worker. PostgreSQL raises for the operator
+		// equivalent (`NULL::bigint & 'x'::bigint` is 22P02) whatever the rows
+		// are.
+		{"unknown_name_on_a_null_row",
+			`SELECT tcp_flags_has_all(f8,'BOGUS') AS b FROM tcpflow WHERE id = 15`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"unknown_name_on_a_null_row_legacy_spelling",
+			`SELECT has_tcp_flag(f8,'BOGUS') AS b FROM tcpflow WHERE id = 15`,
+			`TCP flag name "BOGUS" not recognized`},
 	} {
 		t.Run("refusal/"+tc.name, func(t *testing.T) {
+			a2fSQL["refusal/"+tc.name] = tc.sql
 			for _, arm := range arms {
-				got, err := arm.run(tc.sql)
+				before := a2fReadRoutes(arm.coord)
+				got, err := arm.run("refusal/"+tc.name+"/"+arm.name, tc.sql)
+				a2fCheckRoutes(t, arm.name, arm.coord, before, tc.sql)
 				if err == nil {
 					t.Errorf("%s arm ANSWERED %v; 22023 is due", arm.name, got)
 					continue
@@ -278,9 +407,12 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmetic(t *testing.T) {
 	// `abs((-9223372036854775808)::int8)`. Every arm here refuses it too, which
 	// is why the computed-argument cell above spells its wrapper COALESCE.
 	t.Run("refusal/abs_of_the_int64_minimum", func(t *testing.T) {
+		const sql = `SELECT COUNT(*) AS n FROM tcpflow WHERE tcp_flags_has_any(ABS(f8),'SYN')`
+		a2fSQL["refusal/abs_of_the_int64_minimum"] = sql
 		for _, arm := range arms {
-			got, err := arm.run(
-				`SELECT COUNT(*) AS n FROM tcpflow WHERE tcp_flags_has_any(ABS(f8),'SYN')`)
+			before := a2fReadRoutes(arm.coord)
+			got, err := arm.run("refusal/abs_of_the_int64_minimum/"+arm.name, sql)
+			a2fCheckRoutes(t, arm.name, arm.coord, before, sql)
 			if err == nil {
 				t.Errorf("%s arm ANSWERED %v; PostgreSQL raises bigint out of range",
 					arm.name, got)
@@ -291,6 +423,8 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmetic(t *testing.T) {
 			}
 		}
 	})
+
+	a2fCheckSpillEngagement(t)
 }
 
 // --- the fixture, which rides along in tmdTables() ---
@@ -342,3 +476,125 @@ func tcpfData() []map[string]any {
 	}
 	return rows
 }
+
+// ---------------------------------------------------------------------------
+// The two things rows cannot say (#966 round 2 P1).
+
+// a2fRoutes is every local-routing counter the coordinator publishes.
+//
+// A DAG arm that ANSWERS is not thereby a DAG arm that EXECUTED: the
+// coordinator refuses plans it cannot stage and runs them in-process, and the
+// rows come back identical. The round-2 review had to bring its own matrix to
+// establish that none of these cells was quietly taking that path, because
+// this file — the DURABLE census — read no counter at all. Every counter is
+// read, not the handful a shape is expected to touch: a refusal that moves to
+// a different counter is still a refusal.
+type a2fRoutes struct {
+	names  []string
+	values []int64
+}
+
+func a2fReadRoutes(c *Coordinator) a2fRoutes {
+	if c == nil {
+		return a2fRoutes{}
+	}
+	return a2fRoutes{
+		names: []string{
+			"Correlated", "Distinct", "GroupKey", "GroupingSets", "InSubquery",
+			"LateralProjection", "NullAwareAnti", "ScalarProjection",
+			"TableLess", "UnbuildableStage", "UnreachableOutput",
+		},
+		values: []int64{
+			c.CorrelatedLocalRoutes(), c.DistinctLocalRoutes(), c.GroupKeyLocalRoutes(),
+			c.GroupingSetsLocalRoutes(), c.InSubqueryLocalRoutes(),
+			c.LateralProjectionLocalRoutes(), c.NullAwareAntiLocalRoutes(),
+			c.ScalarProjectionLocalRoutes(), c.TableLessLocalRoutes(),
+			c.UnbuildableStageLocalRoutes(), c.UnreachableOutputLocalRoutes(),
+		},
+	}
+}
+
+// a2fCheckRoutes asserts that no counter moved. Every shape in this file is
+// one the DAG can stage; a nonzero delta means the arm answered from the local
+// fallback and the cell proved nothing about distributed execution.
+func a2fCheckRoutes(t *testing.T, arm string, c *Coordinator, before a2fRoutes, sql string) {
+	t.Helper()
+	after := a2fReadRoutes(c)
+	for i, name := range after.names {
+		if d := after.values[i] - before.values[i]; d != 0 {
+			t.Errorf("%s arm: %sLocalRoutes moved by %d — the query was REFUSED and run "+
+				"in-process, so its rows say nothing about the DAG\n  SQL: %s",
+				arm, name, d, sql)
+		}
+	}
+}
+
+// a2fSpills counts cells whose budgeted arm actually wrote a spill artifact,
+// and a2fEngaged records the per-cell answer. ADR-0027 §5: a spill gate proves
+// it spilled. Round 2 measured ZERO spill files across eighteen projections at
+// a 512 KiB budget, so the arm was a second in-memory run.
+var (
+	a2fSpills  atomic.Int64
+	a2fEngaged sync.Map
+)
+
+// a2fNonSpilling explains, per shape class, why a cell CANNOT engage — so a
+// cell that stops spilling is a failure rather than a shrug. The knob forces a
+// HashAggregate drain; a shape with no pipeline breaker has nothing to drain,
+// and an UNGROUPED aggregate holds one row of accumulators (ADR-0027
+// decision 4).
+func a2fNonSpilling(sql string) string {
+	u := strings.ToUpper(sql)
+	switch {
+	case strings.Contains(u, "GROUP BY"):
+		return "" // must engage
+	case strings.Contains(u, " OVER ("):
+		return "window over the whole input: one partition of two rows, and the " +
+			"window run floor is not what this knob lowers for it"
+	case strings.Contains(u, "COUNT(") || strings.Contains(u, "SUM("):
+		return "ungrouped aggregate: one row of accumulators, nothing to drain " +
+			"(ADR-0027 decision 4)"
+	default:
+		return "projection only: no pipeline breaker in the plan"
+	}
+}
+
+func a2fCheckSpillEngagement(t *testing.T) {
+	t.Helper()
+	if a2fSpills.Load() == 0 {
+		t.Error("the budgeted arm spilled on NO cell, so every one of its comparisons " +
+			"was between two in-memory runs and proves nothing (ADR-0027 §5). Either " +
+			"the forcing knob stopped reaching the aggregate or every shape lost its " +
+			"pipeline breaker.")
+	}
+	var unexplained []string
+	total, engaged := 0, 0
+	a2fEngaged.Range(func(k, v any) bool {
+		name := k.(string)
+		if !strings.HasSuffix(name, "/single+budget+forced-drain") {
+			return true
+		}
+		total++
+		if v.(bool) {
+			engaged++
+			return true
+		}
+		if why := a2fNonSpilling(a2fSQL[strings.TrimSuffix(name, "/single+budget+forced-drain")]); why == "" {
+			unexplained = append(unexplained, name)
+		}
+		return true
+	})
+	sort.Strings(unexplained)
+	if len(unexplained) > 0 {
+		t.Errorf("these cells have a GROUP BY and did NOT spill under the forced drain, "+
+			"so their budgeted arm is a second in-memory run:\n  %s",
+			strings.Join(unexplained, "\n  "))
+	}
+	t.Logf("SPILL ENGAGEMENT: %d of %d budgeted cells wrote a spill artifact; the rest "+
+		"are named non-spilling shapes (no pipeline breaker, or an ungrouped "+
+		"accumulator)", engaged, total)
+}
+
+// a2fSQL maps a cell name to its SQL so the engagement check can classify a
+// shape it did not run itself.
+var a2fSQL = map[string]string{}
