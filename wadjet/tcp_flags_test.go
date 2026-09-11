@@ -74,6 +74,15 @@ func flagFixture(t *testing.T) (*DB, context.Context) {
 		{Name: "f4", Type: parquet.TypeInt32, Nullable: true},
 		{Name: "f8", Type: parquet.TypeInt64, Nullable: true},
 		{Name: "note", Type: parquet.TypeString, Nullable: true},
+		// A MONOTONIC flag column, so the row groups' min/max ranges are
+		// DISJOINT. Without it every group of this fixture holds the same
+		// fourteen values and its bounds span the whole integer range, so a
+		// min/max prune on a flag conjunct would decline for every group —
+		// and the gate below would pass whether or not the prune layer was
+		// ever offered the predicate. It is the shape that makes "this
+		// predicate prunes nothing BEFORE it is evaluated" measurable
+		// (#1018 round 5, P1).
+		{Name: "mono", Type: parquet.TypeInt32},
 	}}
 	if err := db.CreateTable(ctx, "a2flow", schema, nil); err != nil {
 		t.Fatal(err)
@@ -86,10 +95,12 @@ func flagFixture(t *testing.T) (*DB, context.Context) {
 				"f4":   a2fValues4[i],
 				"f8":   a2fValues8[i],
 				"note": fmt.Sprintf("r%03d", rep),
+				"mono": int32(rep),
 			})
 		}
 		rows = append(rows, map[string]any{
 			"id": int32(rep*15 + 15), "f4": nil, "f8": nil, "note": nil,
+			"mono": int32(rep),
 		})
 	}
 	ing := db.NewIngester("a2flow", schema, nil, ingest.Config{
@@ -412,6 +423,39 @@ func TestAFlagPredicateDoesNoPruningBeforeItIsEvaluated(t *testing.T) {
 		if _, pruned := prune(sql); pruned != 0 {
 			t.Errorf("a flag predicate pruned %d row groups; a min/max range cannot "+
 				"prove a bit\n  SQL: %s", pruned, sql)
+		}
+	}
+
+	// AND THE SAME CLAIM WHERE THE BOUNDS COULD ACTUALLY DECIDE. `mono` rises
+	// with the row number, so each row group's [min,max] covers about fifteen
+	// consecutive values and a bound test on it would prune six of the seven
+	// groups. Both halves are asserted on the same query: the counter must
+	// not move, AND the count must be the one PostgreSQL's
+	// `count(*) FILTER (WHERE (mono & 2) = 2)` gives over the same 1500 rows
+	// — 50 of the 100 reps satisfy it, 15 rows each.
+	//
+	// The three cells above cannot state this. Every row group of this
+	// fixture holds the same fourteen flag values, so its f4/f8 bounds span
+	// the whole integer range and a min/max prune would decline for every
+	// group whether or not the predicate was ever offered to it: they pass
+	// with the prune layer armed and with a flag conjunct pushed INTO it
+	// (#1018 round 5, P1 — the recorded revert recipe did not fail).
+	for _, tc := range []struct {
+		sql  string
+		want int64
+	}{
+		{"SELECT COUNT(*) AS n FROM a2flow WHERE tcp_flags_has_all(mono, 'SYN')", 750},
+		{"SELECT COUNT(*) AS n FROM a2flow WHERE tcp_flags_has_any(mono, 'SYN', 'FIN')", 1125},
+		{"SELECT COUNT(*) AS n FROM a2flow WHERE tcp_flags_has_none(mono, 'SYN')", 750},
+	} {
+		n, pruned := prune(tc.sql)
+		if pruned != 0 {
+			t.Errorf("a flag predicate pruned %d row groups BEFORE it was evaluated; "+
+				"a min/max range cannot prove a bit\n  SQL: %s", pruned, tc.sql)
+		}
+		if n != tc.want {
+			t.Errorf("got %d rows, PostgreSQL's bit arithmetic says %d\n  SQL: %s",
+				n, tc.want, tc.sql)
 		}
 	}
 
