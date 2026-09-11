@@ -4,27 +4,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
-// Distinct-pair build for `probe.col <> build.col` semi/anti joins
-// (docs/design/semianti-distinct-pair.md).
-//
-// The decorrelated-EXISTS self-inequality class (Q21's "another supplier
-// on the same order" legs) probes with exactly one residual condition:
-// build value ≠ probe value. For that predicate, two distinct build-side
-// values per key answer the EXISTS for EVERY probe value — if a key has
-// ≥2 distinct values, at least one differs from any x; with exactly 1,
-// the answer is v1 ≠ x. So the build collapses from a row-storing hash
-// table (batches + arena + per-candidate filter closure walks) to
-// key → (v1, v2, n≤2): no batch storage, no arena, probe = one lookup
-// plus at most two integer compares.
-//
-// NULL semantics (SQL three-valued, matching the closure path):
-//   - build rows with NULL value can never satisfy `<>` — skipped at
-//     insert (a key whose every value is NULL behaves as absent: EXISTS
-//     is false).
-//   - probe rows with NULL value make every comparison UNKNOWN — EXISTS
-//     is false regardless of build content: semi drops, anti emits.
-//   - NULL probe keys keep the existing convention (semi drops, anti
-//     emits).
+// For a semi/anti join with exactly one residual probe.col <> build.col, retain
+// at most two distinct build values per key: two ensure a differing value for any
+// non-NULL probe, one answers by v1 != probe. No row batches or arena are needed.
+// Build NULL values are skipped; an all-NULL value key behaves as absent (EXISTS false).
+// Probe NULL values make EXISTS false regardless of build: semi drops, anti emits.
+// NULL probe keys also keep the semi-drop/anti-emit convention.
+// See docs/design/semianti-distinct-pair.md.
+// See docs/internals/semi-anti-distinct-pair-build.md for the design.
 
 // nePair is the per-key distinct-value state. n is 1 or 2; v2 is valid
 // only when n == 2. 24 bytes/key (padded) — a 6M-key Q21 leg is ~150 MB

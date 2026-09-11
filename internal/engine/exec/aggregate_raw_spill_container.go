@@ -6,29 +6,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// The legacy raw-row aggregate spill (memory.SpillManager.SpillRows) writes
-// one boxed value per column and has typed arms only for bool/int/float/
-// string. A container box — []any (ARRAY, and a MAP as its list of entry
-// ROWs), map[string]any (ROW) or []float32 (VECTOR) — falls to its default
-// arm, which renders it with fmt.Sprintf and stores the DISPLAY text. On the
-// way back that text is a string, and batch.FromRows refuses to write a
-// string into a container vector (#361's silent-write guard), so a GROUP BY
-// over a container column plus any non-simple aggregate — the shapes
-// canUseExternalMerge returns false for — failed outright the moment the
-// spill buffer flushed to disk (#611).
-//
-// #566/ADR-0023 already gave the PARTIAL-STATE drain a lossless container
-// VALUE codec (appendContainerKeyValue / decodeContainerKeyValue); this is
-// its sibling site. Rather than teach the memory layer about containers (it
-// imports neither batch nor this package), the raw-row path encodes a
-// container box to that codec's bytes BEFORE handing rows to SpillRows and
-// decodes it back AFTER ReadSpilledRows, so the box the row carried is
-// reconstructed EXACTLY — the same producer, one definition of a container
-// value. The encoded bytes ride as a string through SpillRows' existing
-// length-prefixed string tag, which round-trips arbitrary bytes; the emit
-// then reconstructs the value through the identical batch.FromRows the
-// un-spilled buffered drain uses, so spilled equals in-memory by
-// construction, exactly as ADR-0023 requires.
+// Raw-row aggregate spill must losslessly encode ARRAY/MAP/ROW/VECTOR boxes
+// before SpillRows and decode after ReadSpilledRows (#611, #361).
+// Reuse appendContainerKeyValue/decodeContainerKeyValue from partial-state
+// spill (#566; ADR-0023), not display formatting or a memory-layer container codec.
+// Store arbitrary codec bytes as strings through SpillRows' length-prefixed
+// string tag; emit through the same batch.FromRows as the unspilled path,
+// reconstructing exactly the original value (ADR-0023).
+// See docs/internals/raw-row-spill-container-values.md for the design.
 
 // isContainerColumn reports whether a column's declared type boxes as one of
 // the container shapes the raw-row spill cannot store directly.

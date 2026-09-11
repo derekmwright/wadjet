@@ -9,7 +9,7 @@ import (
 // annotateScanSchemas carries catalog declarations to workers through
 // Stage.ScanSchema → OpSpec.ColumnTypes → scan source. Parquet leaves alone
 // cannot declare IPv4, IPv6, MAC, UUID, BYTES, PORT, PROTOCOL, DURATION or CIDR.
-// DeclaredSchemaKey makes newer files self-describing (#396, #396), but older
+// DeclaredSchemaKey makes newer files self-describing (#396), but older
 // files need catalog types to avoid exposing raw storage representations (#423).
 // Matching declarations are a no-op; on disagreement catalog wins only if the
 // bytes can carry its type, otherwise SchemaAs/retypeFromCatalog fails the task.

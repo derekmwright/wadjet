@@ -16,7 +16,7 @@ import (
 // consumed. Unresolved types fall back to STRING; non-empty results use data flow.
 // Names match projection building: alias, unqualified column, then cleaned text.
 // subqueryDecl resolves scalar-subquery output declarations; nil means unavailable.
-// Zero-row and non-empty scalar-subquery columns must agree (#416, #416, #874).
+// Zero-row and non-empty scalar-subquery columns must agree (#416, #874).
 func declaredOutputSchema(root *logical.Node,
 	subqueryDecl func(string) (parquet.Column, bool)) []parquet.Column {
 	if cols, ok := setOpDeclaredOutputSchema(root); ok {
@@ -1142,7 +1142,7 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		// Cross JOIN with emittedColTypes itself: inputColTypes cannot type Project,
 		// Aggregate or Window arms and can discard both sides when one is nil (#697).
 		// Retain known declarations for zero-row results rather than defaulting every
-		// column to STRING (#416, #416). A nil side is tolerated: unresolved names are absent
+		// column to STRING (#416). A nil side is tolerated: unresolved names are absent
 		// and fall back to STRING. Drop bare names whose side types disagree; never
 		// arbitrarily pick one side's declaration.
 		if len(n.Children) != 2 {

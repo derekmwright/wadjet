@@ -10,157 +10,17 @@ import (
 	"github.com/derekmwright/wadjet/internal/optswitch"
 )
 
-// Two-level (bucketed) group index — G6 in
-// docs/benchmarks/high-card-aggregation-gap-2026-08-17.md.
-//
-// A flat open-addressing table grows by WHOLE-TABLE rehash: allocate 2x,
-// memset it to the empty marker, then scatter every live entry into random
-// slots of an array far larger than any cache. A 100M-group aggregate pays
-// ~8 of those, the last few touching tens of millions of entries with old
-// and new tables both live. ClickHouse converts to a 256-bucket two-level
-// table past ~100K keys and DuckDB radix-partitions for the same reason:
-// afterwards a rehash touches 1/256 of the data, stays cache-resident, and
-// the buckets are independent — merge and emit can walk them in parallel,
-// and sizing no longer needs a cardinality estimate.
-//
-// This file holds the int and packed key modes' bucketed indexes. The
-// string mode keeps its flat table for now (see "String mode" below).
-//
-// # Bit budget (the one place it is written down)
-//
-// Every group key yields ONE 64-bit hash — fibHash for single-int keys,
-// packedHash for composite keys (G5's hash-once, partitioned_agg.go). Three
-// independent consumers read DISJOINT windows of it:
-//
-//	 63                        52 51                  8 7            0
-//	+----------------------------+----------------------+-------------+
-//	| partition owner            | sub-table slot       | bucket      |
-//	| top ceil(log2 parts) bits  | log2(subcap) bits    | 8 bits      |
-//	+----------------------------+----------------------+-------------+
-//	  partitionFor(h, parts)       (h >> 8) & (cap-1)     h & 255
-//
-// PARTITION OWNER — unchanged from G5: the high half of h*parts (Lemire
-// multiply-shift), a function of the top ceil(log2(parts)) bits. parts is
-// one per worker, <= 4096 in any plausible deployment, so the window is at
-// most 12 bits.
-//
-// BUCKET — the LOW 8 bits, and the sub-table's slot is what USED to be the
-// low bits, shifted up by 8. So (bucket, slot) together are exactly the low
-// 8+log2(subcap) bits of the same hash: the identical index a FLAT table of
-// 256*subcap slots would compute. Two keys collide in the two-level table
-// iff they would have collided in that flat table
-// (TestTwoLevelMatchesFlatCollisions). Everything the flat tables' spread
-// rests on carries over unchanged, including fibHash's collision-free
-// bijection on dense integer ids.
-//
-// SLOT — bits (7+log2(subcap))..8. Disjointness with the partition window
-// holds while 8+log2(subcap) <= 52, i.e. up to 2^44 slots in a SINGLE
-// sub-table (16 PiB of entries). Enforced by construction: growSub refuses
-// past twoLevelMaxSubBits.
-//
-// WHY THE BUCKET IS THE LOW WINDOW (measured, not assumed): the obvious
-// choice — a middle window like bits 39..32, which is what ClickHouse's
-// `hash >> (32 - 8)` amounts to — is correct only for an avalanching hash.
-// fibHash is not one: it folds the key's high bits down and then multiplies
-// by phi, deliberately KEEPING the multiply's collision-free bijection on the
-// low bits for dense integer ids (see fibHash, where avalanching was measured
-// and rejected at +47% geomean). So picking keys by any high-ish window
-// selects a near-arithmetic subsequence of a dense key range. Simulated on
-// 33M dense int keys: bucket=bits 39..32 gave 6.46 average probes per insert
-// at 8M keys and degrades with scale, while bucket=low 8 bits gives exactly
-// 1.00 at every size — the flat table's own number. Random and
-// packed-composite families measure 1.50 either way. The low window is the
-// only one that inherits the flat table's guarantees instead of replacing
-// them with new ones.
-//
-// The low window is also why #306's stride collapse hit this table as hard as
-// the flat one — a key set of multiples of 2^s had constant low bits, so it
-// landed in ONE bucket on ONE chain. fibHash's fold fixed both at once.
-//
-// # Layout is decided at construction where the sink's bounds allow it
-//
-// Before any of the adaptive machinery below runs, a sink is born FLAT and
-// never converts when either construction-time bound says a conversion could
-// not be repaid. Both are properties the sink's owner knows before the first
-// row, and both are one comparison in HashAggregate.indexLayoutStaysFlat:
-//
-//   - EPOCH BYTE CAP (twoLevelBoundedMinGroups). A sink whose owner finalizes
-//     and rebuilds it on a byte cap — the shuffle sender's exchange partial
-//     aggregation, worker.cappedPartialAgg — holds at most C/s groups and its
-//     index cannot outlive one epoch, so a conversion has nothing after it to
-//     amortize against.
-//   - INPUT ROW BOUND (twoLevelAmortizeMultiple). An UNBOUNDED sink whose
-//     owner knows exactly how many rows it will read — a DAG aggregate task
-//     reading a known set of upstream shuffle partitions — will pass fewer
-//     than R* rows through the index in total, so it cannot have R* − the
-//     conversion threshold left after the earliest conversion point. This is
-//     the Q18/Q20 `final_aggregate` shape: rows ≈ groups, one probe per
-//     group, the conversion firing at the last doubling.
-//
-// Everything below applies to sinks with NEITHER bound — a standalone or
-// single-process aggregate that knows only its own live counters.
-//
-// # Adaptive conversion, not construction
-//
-// An unbounded sink starts FLAT, and converts AT THE POINT WHERE THE
-// FLAT TABLE WOULD HAVE REHASHED ITSELF ANYWAY — see convertsToTwoLevel
-// (aggregate.go) for the two tests and twoLevelConvertAt for the measured
-// curve behind the size one. The decision runs once per BATCH, never per row:
-// the consume loop hoists its table pointer for the whole batch and the
-// conversion lands at the batch's end. Aggregates whose NDV hint already
-// exceeds the threshold construct bucketed directly (resolveIndices) and never
-// pay a conversion at all. Below the threshold nothing changes: no bucket
-// indirection, no extra shift, byte-identical behavior to G5.
-//
-// The "would have rehashed anyway" half is load-bearing and was NOT true in
-// the first version of this file, which converted on the first batch-end past
-// a live-entry threshold. That point falls, on average, halfway between two
-// doublings, so the conversion's scatter REPLACED NOTHING: the flat table
-// still owed its next doubling, the bucketed table paid it as per-bucket
-// growth, and the conversion was pure additional work. Measured on SF100
-// TPC-H (release v0.16.0-correctness, merged 3-worker CPU profile) that came
-// to ~79.6 CPU-s per suite run of conversion rehash against ~7.7 CPU-s of
-// two-level probe benefit — ≈10:1 — concentrated in the shape that can never
-// veto a growth-rate test: a NEAR-UNIQUE key, where every row mints a group
-// (Q18's GROUP BY l_orderkey over 150M lineitem rows, +87% in that release).
-//
-// Converting at the load-factor crossing instead pays the conversion INSTEAD
-// OF that doubling rather than on top of it, and the destination is the flat
-// table's own slot count split 256 ways, so the doubling it displaced then
-// happens as 256 per-bucket, cache-resident rehashes rather than one more
-// whole-table scatter. A table that is not about to rehash is a table with
-// nothing to save, so it stays flat — which also retires the old growth-rate
-// heuristic: a saturated table cannot cross its load factor, so it can no
-// longer convert at all.
-//
-// Sizing the destination at the DOUBLED capacity was tried and rejected on
-// measurement. It looks like the tidier "replace grow() exactly" — the
-// bucketed table is then born at 35% load and no bucket regrows — but it
-// only moves the per-bucket doublings into the conversion's own scatter,
-// which then works over twice the bytes and is DRAM-bound instead of
-// cache-resident. Same-window A/B on the Q18 capped-epoch shape
-// (BenchmarkAggIntCappedEpochs, near-unique 16M, n=5 medians): flat
-// 2037 ms, doubled-capacity 2204 ms (+8.2%), flat-capacity 2058 ms (+1.0%).
-// The scatter is the expensive part of a rehash, and the bucketed form's
-// whole value is that its scatters are small.
-//
-// What the conversion does NOT touch: group ids stay dense global indices
-// into the same flat accumulator arrays and the same key SoAs, so emission,
-// the spill drain cursor, the partial-state run format and the merge all see
-// exactly what they saw before. Only the INDEX is two-level.
-//
-// # String mode
-//
-// strHashTable is not converted here. Its keys live in a chunked arena
-// shared by the whole table and its entries carry a 32-bit hashTag; a
-// two-level split needs either a per-bucket arena (256 chunk lists, and
-// every arenaString alias must stay valid across the split — they do, the
-// chunks are append-only and never move, so the conversion can hand each
-// bucket the SAME chunk list and only re-index) or an arena that stays
-// global while only the entry array splits (simpler: the arena is already
-// chunked, so it is not the thing that rehashes). The tag is a stored
-// value, not an index window, so the low-8-bit bucket does not disturb it.
-// Deferred to keep this change to the two modes that dominate Q33.
+// The int/packed group indexes split one hash into disjoint partition, bucket
+// and slot windows: owner uses the top ≤12 bits, bucket the low 8, slot the
+// bits above those. growSub caps sub-table bits; low buckets preserve flat
+// collision behavior, including fibHash's dense-key bijection and fold (#306).
+// Construction-time epoch/row bounds can pin flat; otherwise conversion runs
+// at batch end where flat would rehash, into the flat slot count split 256 ways.
+// Large NDV hints may build bucketed directly; below threshold stay flat.
+// Group ids remain dense global indices into unchanged accumulators/key SoAs;
+// emission, spill cursors, partial-state format and merge see the same values.
+// String mode stays flat: splitting its index must preserve arenaString aliases.
+// See docs/internals/two-level-group-index.md for the design.
 var twoLevelToggle = optswitch.Register("two-level-ht", "WADJET_TWO_LEVEL_HT",
 	"256-bucket two-level group index past twoLevelConvertAt keys (per-bucket rehash instead of whole-table)")
 
@@ -178,112 +38,24 @@ var bornFlatToggle = optswitch.Register("two-level-born-flat", "WADJET_TWO_LEVEL
 var rowBoundToggle = optswitch.Register("two-level-row-bound", "WADJET_TWO_LEVEL_ROW_BOUND",
 	"aggregates whose known input-row bound cannot amortize a flat→bucketed conversion are born flat")
 
-// twoLevelBoundedMinGroups is G* — the group count a BOUNDED sink's epoch
-// must be able to reach before the bucketed layout is allowed at all.
-//
-// A bounded sink is one whose owner finalizes it and builds a fresh one
-// every C bytes of state (worker.cappedPartialAgg, C = 128 MB). Its index
-// never outlives one epoch, so a conversion has nothing after it to
-// amortize against: the flat→bucketed rehash is paid once per epoch, in
-// full, near the epoch's end, on a table that is about to be thrown away.
-// That is not a threshold to tune — it is a property of the operator's
-// configuration, and it is known before the first row arrives.
-//
-// DERIVATION (SF100 TPC-H Q18, three same-window arms 2026-08-22,
-// scratchpad/window-analysis-2026-08-22.md §1; ClickBench 3-arm run):
-//
-//		Gmax = C / s, s = per-group state (perGroupStateBytes)
-//
-//	  - Q18's exchange partial aggregate: C = 128 MB, s ≈ 46 B
-//	    ⇒ Gmax ≈ 2.9 M. Measured groups per flush on the arm with the
-//	    bucketed layout DISABLED: 12 497 812 out_rows / 5 flushes = 2.50 M.
-//	    At that Gmax the bucketed layout costs the stage 3-4×: mean task
-//	    2.25 s (flat) → 6.96 s (old gate) → 10.13 s (load-factor gate), and
-//	    the conversion itself measures ~675 ns per live entry in production
-//	    — 22-27× the 25-30 ns the structure was calibrated on, because 8-10
-//	    tasks run the scatter concurrently against one shared L3.
-//	  - The bucketed layout's measured wins are all UNBOUNDED sinks that keep
-//	    one index for the whole input: ClickBench's high-cardinality GROUP BYs
-//	    (~6 M groups per partitioned sink on Q33) and the 16 M near-unique
-//	    arm of BenchmarkAggIntCardinalitySweep (−4.1 % vs flat). At 4 M groups
-//	    the same sweep measures the bucketed arm +31 % — a LOSS — so 4 M is a
-//	    floor on where bucketing could pay even with a full unbounded tail to
-//	    amortize against, and a bounded sink has no tail at all.
-//
-// So G* = 4 M: at or below it every measurement of the bucketed layout is a
-// loss or a wash, and only above it is there a measured win. With today's
-// 128 MB cap no bounded sink reaches it (Gmax tops out around 3.5 M for the
-// cheapest possible per-group state), which makes the rule equivalent to
-// "bounded ⇒ flat" in production while keeping the door open for a future
-// larger C. It is deliberately NOT compared against twoLevelConvertAt (1 M):
-// that is a live-count crossover for a table that will keep growing, and a
-// bounded sink's table by construction will not.
+// twoLevelBoundedMinGroups is the minimum reachable epoch group count G*
+// required before a byte-capped sink may use a bucketed index.
+// A sink rebuilt every C bytes reaches at most C/perGroupStateBytes groups;
+// its index cannot outlive the epoch, so conversion needs its own bound.
+// G* is 4 M, independent of twoLevelConvertAt's unbounded live-count threshold.
+// The production 128 MB cap keeps bounded sinks flat; larger caps may qualify.
+// See docs/internals/two-level-epoch-cap-bound.md for the design.
 const twoLevelBoundedMinGroups = 4 << 20
 
-// twoLevelAmortizeMultiple is R*, expressed in units of twoLevelConvertAt —
-// the SECOND construction-time bound, and the one that covers the UNBOUNDED
-// final aggregates twoLevelBoundedMinGroups deliberately left alone.
-//
-// A conversion is paid ONCE, in full, at the moment it fires, and is repaid
-// only by the rows that pass through the index AFTERWARDS: every later probe
-// costs less, and every later rehash is 256 cache-resident scatters instead
-// of one DRAM-wide one. The gate in convertsToTwoLevel tests when to convert
-// (at the doubling it displaces) but never whether there is anything left to
-// repay it — that quantity is not in the flat table's live/slot counters at
-// all. It is, however, exact in the coordinator: a DAG aggregate task reads a
-// known set of upstream partitions whose row counts the producing stage
-// already reported (StageOutput.PartitionRows).
-//
-// The earliest a conversion can fire is twoLevelConvertAt live entries, so a
-// sink that will read fewer than R* rows IN TOTAL cannot have R* − convertAt
-// rows left after it. Requiring the whole input to be at least 8× the
-// conversion threshold is the same statement with the arithmetic done once.
-//
-// DERIVATION — three measurements, two shapes:
-//
-//   - SF100 TPC-H Q18 `final_aggregate-7` (24 tasks, one shuffle partition
-//     each, ~6.25 M rows and ~6.25 M near-unique groups per task, merge mode
-//     so rows ≈ groups): 4.14 s with the index off against 5.16 s (old count
-//     gate) and 5.79–6.52 s (load-factor gate) — a LOSS at R = 6.25 M, and
-//     the whole of the query's residual
-//     (docs/benchmarks/sf100-window2-analysis-2026-08-22.md §1.1, §8.2 #4;
-//     …-window3-… §2.6). Q20's `final_aggregate-9` is the same shape at
-//     ~2.3 M rows per task and moves the same way (w1: −7.7 % task-seconds
-//     with the index off).
-//   - BenchmarkAggIntCardinalitySweep holds rows fixed at 16.78 M
-//     (`rows = 16 << 20` for every arm — only `groups` varies) and is NOT
-//     two near-unique arms: the "4 M" arm is 16.78 M rows over 4.19 M
-//     groups (≈4 probes/group), and only the "16 M" arm is near-unique
-//     (groups == rows == 16.78 M, ≈1 probe/group). The 4.19 M-group arm
-//     measures the bucketed layout at +25/+31 % — a LOSS — and the
-//     16.78 M-group near-unique arm at −4.1/−11 % — a WIN. In ROW units,
-//     R* = 8 M is bracketed by exactly TWO measurements: the Q18
-//     production arm above (~6.25 M rows ≈ groups, measured loss) BELOW
-//     it, and this near-unique arm (16.78 M rows ≈ groups, measured win)
-//     ABOVE it. The 4.19 M-group arm's 16.78 M rows already exceed R*, so
-//     the pure-row rule deliberately classifies that shape adaptive
-//     (bucketed) too — a measured loss (+25/+31 %) that the rule does not
-//     cover. That is a known gap, called out here rather than folded into
-//     the bracket above.
-//   - The shapes where the structure earns its keep are the ones with MANY
-//     rows per group: ClickBench Q33 is ~100 M rows over ~6 M groups per
-//     sink, i.e. ~17 probes per group, and a scan-level aggregate always
-//     reads far more rows than it holds groups. R is the row count, not the
-//     group count, precisely so those keep the adaptive path: R ≥ R* is
-//     satisfied by any high-cardinality scan long before its group count
-//     matters.
-//
-// 8 × twoLevelConvertAt = 8 M sits inside the bracket. Expressing it as a
-// multiple of the threshold rather than as a second absolute number keeps
-// the two halves of the gate calibrated together — including under the
-// WADJET_TWO_LEVEL_AT override, which exists so CI corpora exercise the
-// bucketed path at group counts nowhere near a million.
-//
-// The rule is MONOTONE: it can only take conversions away, never add one, so
-// no shape can become bucketed that was not bucketed before. And it fires
-// only where an EXACT bound exists — an estimate that reads low would pin a
-// genuinely huge aggregate flat, so estimates (the single-process planner's
-// InputRowHint / GroupNDVHint) are deliberately not accepted here.
+// twoLevelAmortizeMultiple sets the minimum total input R* to 8 times
+// twoLevelConvertAt, including under WADJET_TWO_LEVEL_AT overrides.
+// Only exact owner-supplied row bounds qualify (StageOutput.PartitionRows);
+// InputRowHint/GroupNDVHint estimates must not pin a large aggregate flat.
+// This monotone gate can only remove conversions. It bounds rows remaining
+// after the earliest conversion, independently of live-count/load-factor tests.
+// It deliberately does not cover the measured loss at 16.78 M rows / 4.19 M
+// groups: that shape passes the row gate despite losing to flat.
+// See docs/internals/two-level-input-amortization-bound.md for the design.
 const twoLevelAmortizeMultiple = 8
 
 // twoLevelMinAmortizeRows is R* in rows. A var-derived function rather than a
@@ -323,81 +95,15 @@ const (
 	twoLevelMinSubCap = 16
 )
 
-// twoLevelConvertAt is the live-entry count at which a flat group index
-// converts to the bucketed form. A var so benchmarks and tests can move it;
-// production never writes it.
-//
-// ClickHouse converts at 100K. On THIS stack that is too early, because our
-// flat table does not have the costs 100K is meant to dodge: its entries live
-// in a MAP_NORESERVE reservation (ADR-0006 amendment), so a doubling is one
-// mmap the kernel backs with huge pages, never a Go-heap allocation, and up to
-// a few million entries the whole table is still L3-resident.
-//
-// Measured through the real consume path on a 5900X
-// (BenchmarkHashAggregateHighCardTwoLevel, near-unique keys, COUNT+SUM+AVG,
-// one interleaved window, min of 5):
-//
-//	shape              groups   flat     bucketed   delta
-//	single int64          8M    783 ms    758 ms    -3.2%
-//	packed two-int64      8M   1144 ms   1170 ms    +2.2%
-//	single int64          1M     76 ms     88 ms    +16%   (see below)
-//	packed two-int64      1M     99 ms    131 ms    +33%   (see below)
-//
-// And on the index alone (BenchmarkIntIndexConvertThreshold, fill from empty,
-// off-heap backing, conversion forced at 100K so the sweep shows the
-// STRUCTURAL crossover rather than this threshold):
-//
-//	entries    256K   512K    1M     2M     4M     8M    16M    32M
-//	flat       2.81   6.93   21.6   60.6  140.6  296.7  628.6 1289.8  ms
-//	bucketed   5.16   9.66   25.3   61.2  141.2  290.6  619.0 1268.6  ms
-//
-// Two things follow. First, the crossover is a few million entries — that is
-// where the flat rehash stops being a cache-resident scatter — so converting
-// at 100K would tax every mid-cardinality GROUP BY for nothing. Second, the
-// 1M rows above are NOT the steady state: at exactly the threshold the table
-// converted on its last batch and paid a whole conversion rehash (~30 ns per
-// live entry) with nothing left to amortize it. That was the irreducible
-// worst case of a bare size threshold, and it is what
-// convertsToTwoLevel's load-factor test removes: a table that settles just
-// past the threshold never crosses its load factor, so it never converts.
-// The default stays at 1M so that everything below a million
-// groups per sink — which is every TPC-H shape and most ClickBench ones —
-// keeps the flat index unchanged. ClickBench Q33 is ~6M groups per
-// partitioned sink and converts.
-//
-// The second, harder-to-benchmark half of the case is the growth transient:
-// a flat doubling holds old+new live (1.5x the final table) at exactly the
-// moment memory is tightest, while a bucketed doubling holds one bucket extra.
-// Measured peak RSS filling 32M int keys: flat 1809 MB, bucketed 1685 MB.
-// That margin is the GOMEMLIMIT class from the Q33 postmortem, not a
-// throughput number.
-//
-// WADJET_TWO_LEVEL_AT overrides it. That is not a tuning knob for operators:
-// it exists so the invariance oracle and the differential harness can drive
-// the bucketed path on corpora whose group counts are nowhere near a
-// million, which is otherwise the only way this code stays dark in CI.
-//
-// R* (twoLevelMinAmortizeRows) scales with this override too, since it is
-// defined as a multiple of twoLevelConvertAt rather than an absolute row
-// count — so lowering WADJET_TWO_LEVEL_AT does not by itself guarantee the
-// DAG's unbounded-final-aggregate path (SetInputRowBound,
-// twoLevelAmortizeMultiple) reaches the bucketed layout: a small corpus's
-// per-task row count can still land below the scaled-down R* and get pinned
-// flat there, going dark. A DAG corpus run that wants bucketed coverage
-// under this override must also set WADJET_TWO_LEVEL_ROW_BOUND=0 to bypass
-// that pin outright.
-//
-// Overriding it also switches conversion to EAGER — the size test alone
-// decides, without convertsToTwoLevel's load-factor lookahead. Both halves
-// of the shipped gate have to relax together for the override to do its job:
-// a corpus whose tables never reach a million groups is also a corpus whose
-// tables never reach a doubling, so a low threshold on its own would leave
-// the conversion, and everything downstream of it, dark. What eager mode
-// changes is WHEN the index converts, never WHAT it holds — the conversion
-// is value-preserving, so the oracle's row sets are the same either way and
-// its coverage of the bucketed path is strictly larger. Production, with no
-// override, always takes the load-factor rule (and
-// TestTwoLevelConvertsAtTheDoubling pins it there).
+// twoLevelConvertAt is the live-entry conversion threshold, default 1 M;
+// production never writes it. Normal conversion also requires load-factor
+// lookahead so it replaces a doubling (TestTwoLevelConvertsAtTheDoubling).
+// WADJET_TWO_LEVEL_AT is a positive test/oracle override, not an operator knob:
+// it also enables eager size-only conversion to reach small-corpus coverage.
+// It scales R* too; DAG coverage must set WADJET_TWO_LEVEL_ROW_BOUND=0 to
+// bypass exact row bounds that can still pin flat. Eager conversion changes
+// when the index converts, never its values. Flat backing: ADR-0006 amendment.
+// See docs/internals/two-level-conversion-threshold.md for the design.
 var twoLevelConvertAt, twoLevelConvertEager = twoLevelConvertPolicy()
 
 // twoLevelConvertPolicy reads the conversion threshold and reports whether
@@ -409,43 +115,13 @@ func twoLevelConvertPolicy() (int, bool) {
 	return 1_000_000, false
 }
 
-// offheapSubMinBytes is the size at which an entry array moves off-heap.
-// 2 MiB, and the number is load-bearing: it is the huge-page size.
-//
-// The flat table goes off-heap unconditionally, which is right for ONE array
-// of tens of MB. Applied per bucket it is a trap: a mapping smaller than a
-// huge page is faulted in 4 KiB at a time and stays 4 KiB-paged, so a 256 MB
-// index spread over 256 sub-mappings takes ~65k faults and blows the dTLB,
-// where the same bytes in one big mapping take ~128 huge-page faults.
-// Measured (BenchmarkIntIndexOffheapSubGate, fill 8M int keys, min of 5,
-// one interleaved window):
-//
-//	flat                       306 ms
-//	buckets off-heap >= 2 MiB  281 ms   (-8%)
-//	buckets off-heap >= 64 KiB 427 ms   (+39%)
-//	buckets off-heap >= 4 KiB  407 ms   (+33%)
-//
-// Which is right, and was applied to the wrong UNIT. A bucket reaches 2 MiB
-// only when the whole index is ~33M slots — past 23M groups in one sink,
-// which nothing in TPC-H or ClickBench reaches. So in practice the gate was
-// unreachable, and converting to the bucketed form silently moved the entire
-// group index off its MAP_NORESERVE huge-page reservation onto the Go heap:
-// 470 MB of heap churn per 16M-group fill where the flat table allocates
-// 11 KB (ADR-0006's amendment, undone by the structure meant to complement
-// it). With WADJET_OFFHEAP_AGG=0 — which puts BOTH forms on the heap — the
-// same 16M near-unique fill inverts from +14.8% to -4.6% against flat: the
-// backing, not the structure, was the loss.
-//
-// The unit that wants a huge page is the TABLE, not the bucket. So the 256
-// buckets are carved out of ONE reservation whenever their total clears this
-// gate (allocIntArena / newIntTwoLevelTableSub) — one mapping, one
-// MADV_HUGEPAGE, zero Go heap, and the buckets still index and probe
-// independently because the arena is only their backing store, never their
-// addressing. A bucket that outgrows its slice allocates on its own (per
-// the per-bucket gate below, which is now the fallback rather than the
-// rule), and the arena is released as soon as the last bucket has left it.
-//
-// A var so tests can force either side of the gate.
+// offheapSubMinBytes is the 2 MiB huge-page threshold; tests may override it.
+// Apply it to total table backing: carve 256 independently addressed buckets
+// from one reservation with MADV_HUGEPAGE, not many sub-page mappings.
+// A bucket growing out allocates independently using the same per-bucket gate
+// as fallback; release the arena when its last bucket leaves.
+// The shared arena preserves off-heap backing across conversion (ADR-0006).
+// See docs/internals/two-level-shared-offheap-arena.md for the design.
 var offheapSubMinBytes = 2 << 20
 
 // bucketOf selects a sub-table from a key hash. See the bit budget above:
@@ -597,29 +273,13 @@ func allocIntSubEntries(reg *memory.OffheapRegistry, n int) ([]intHashEntry, boo
 	return make([]intHashEntry, n), false
 }
 
-// convertIntHashTableToTwoLevel rebuilds a flat int index as a bucketed one
-// and releases the flat table's entry array. The flat table is left empty
-// and must not be used afterwards.
-//
-// The destination has EXACTLY the flat table's slot count, split 256 ways.
-// Two things follow. The conversion is then a pure re-permutation into the
-// same number of slots — by the bit budget above, (bucket, slot) is
-// bit-for-bit the index the flat table of that size computes — and, called
-// where convertsToTwoLevel says (the flat table one batch from its load
-// factor), the doubling the flat table was about to perform as ONE
-// whole-table rehash instead happens as 256 per-bucket rehashes, each of
-// them cache-resident. That is the structure's whole claim, applied to the
-// one rehash that was already due.
-//
-// Sizing the destination at the DOUBLED capacity instead was measured and
-// rejected: it removes the per-bucket doublings, but only by moving them
-// into the conversion's own scatter, which then works over twice the bytes
-// and is DRAM-bound. On the Q18 capped-epoch shape that cost +7 points of
-// wall against this sizing (BenchmarkAggIntCappedEpochs, near-unique 16M).
-//
-// The insert loop is written out rather than calling GetOrInsertAt: the
-// source keys are unique by construction, so there is no duplicate to test
-// for.
+// convertIntHashTableToTwoLevel rebuilds the index and releases flat's entries;
+// the emptied flat table must not be used afterwards.
+// Split the flat slot count 256 ways, not doubled capacity, preserving the
+// (bucket, slot) hash index. At the load-factor boundary, growth then occurs
+// as cache-resident per-bucket rehashes instead of one whole-table scatter.
+// Source keys are unique, so the insertion loop needs no duplicate test.
+// See docs/internals/two-level-int-index-conversion.md for the design.
 func convertIntHashTableToTwoLevel(flat *intHashTable, reg *memory.OffheapRegistry) *intTwoLevelTable {
 	t := newIntTwoLevelTableSub(subCapForFlatSlots(len(flat.entries)), reg)
 	for i := range flat.entries {

@@ -12,29 +12,16 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// SortMergeJoin joins two large inputs by sorting both sides on the join keys
-// and streaming a two-cursor merge. Unlike HashJoin, neither side is held
-// resident: each side buffers under the shared tracker and self-spills sorted
-// columnar runs (Sort's external-merge machinery), so peak memory is
-// O(run buffer + one batch per merge cursor) regardless of input size.
-//
-// The build side (right, as in HashJoin) arrives via Build; the probe side
-// (left) arrives via Consume. Both are pipeline breakers here — inherent to
-// sort-based joins over unsorted input. After Finalize, Next streams joined
-// batches: probe columns first, then build columns, with the same
-// duplicate-name qualification and OutputFilter semantics as HashJoinProbe.
-//
-// v1 scope (docs/design/sort-merge-join.md): INNER equi-joins only, no
-// JoinFilter. Rows with a NULL in any join key are excluded at buffer time
-// (SQL equi-join semantics: NULL matches nothing — mirrors the hash paths,
-// where null keys produce no index entry). Not Cloneable: the breaker path
-// runs it single-consumer.
-// SMJCounterpartAdoptions counts key resolutions that only succeeded by
-// adopting the OTHER side's key name (swapped pair) — the sort-merge analog
-// of KeyAssignmentRepairs, and carrying the same warning: on a self-join the
-// swap can be wrong rather than corrective. Should stay 0 on
-// planner-produced plans. NOTE: unlike KeyAssignmentRepairs, no suite
-// asserts that today — this is observability, not a gate.
+// SortMergeJoin sorts build/right via Build and probe/left via Consume, then streams
+// joined batches after Finalize; both sides are breakers, single-consumer, not Cloneable.
+// With spill, shared-tracker buffering and sorted runs bound memory to run buffers
+// plus one batch per merge cursor; nil Spill buffers unbounded (see the field below).
+// Scope: INNER equi-joins only, no JoinFilter; exclude rows with any NULL key.
+// Output is probe then build with HashJoinProbe qualification/OutputFilter semantics.
+// SMJCounterpartAdoptions counts swapped-name adoption, which can be wrong on self-joins.
+// It should stay zero for planner plans; no suite asserts it, so it is observability,
+// not a gate. See docs/design/sort-merge-join.md.
+// See docs/internals/sort-merge-join-streaming-boundary.md for the design.
 var SMJCounterpartAdoptions atomic.Int64
 
 type SortMergeJoin struct {

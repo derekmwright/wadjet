@@ -96,31 +96,14 @@ func aggNeedsCount(fn AggFunc) bool {
 	return fn == AggSum || fn == AggAvg || fn == AggCount
 }
 
-// planCountArrays decides, per aggregate, which aggregate's count[] it reads.
-// Result[i] == i means "owns its own"; result[i] == j < i means "shares j's".
-//
-// Two aggregates may share a count array only when every row increments both
-// counts or neither — i.e. their count kernels run over an identical
-// predicate. That holds exactly when:
-//
-//   - both are COUNT(*) (no input column: every row with a live group index
-//     counts), or
-//   - both read the SAME input column AND both count kernels are guaranteed
-//     to fire for that column's type.
-//
-// The type guard matters: scatterFlatAggUpdate's SUM/AVG dispatch has no case
-// for e.g. Bool or String, so SUM over such a column silently increments
-// nothing while COUNT over it increments every non-null row. Restricting
-// sharing to the numeric set the SUM/AVG switches actually handle keeps the
-// two predicates identical.
-//
-// MIN/MAX never participate — they have no count at all (aggNeedsCount).
-//
-// NOT shared: aggregates over different columns, even when the data happens
-// to have no nulls in either. Null-ness is a per-batch property, so that
-// equality isn't provable at plan time. ClickBench Q33's three aggregates
-// (COUNT(*), SUM(IsRefresh), AVG(ResolutionWidth)) fall in exactly that
-// bucket and each keep their own count.
+// planCountArrays chooses each aggregate's count[] owner: i owns itself; j < i shares j.
+// Share only when both count kernels increment on exactly the same rows:
+// both are COUNT(*), or both read the same column and both kernels fire for its type.
+// SUM/AVG sharing is restricted to types handled by scatterFlatAggUpdate;
+// Bool/String SUM/AVG do not increment counts like COUNT does.
+// MIN/MAX have no counts and never participate. Different columns never share,
+// even if currently non-NULL: their null predicates cannot be proved equal at plan time.
+// See docs/internals/aggregate-count-array-sharing.md for the design.
 func (h *HashAggregate) planCountArrays(b *batch.RecordBatch) []int32 {
 	plan := make([]int32, len(h.Aggs))
 	for i := range plan {
@@ -157,34 +140,15 @@ func (h *HashAggregate) planCountArrays(b *batch.RecordBatch) []int32 {
 	return plan
 }
 
-// aggIntExact reports whether an aggregate over an INTEGER column accumulates
-// in the Int128 carrier because PostgreSQL answers it in numeric (#784).
-//
-//	SUM(int2/int4) -> bigint    exact in int64; here only when the DECLARATION
-//	                            says numeric, which is AVG's decomposed SUM leg
-//	SUM(int8)      -> numeric   an int64 sum WRAPS past 2^63
-//	AVG(int*)      -> numeric   the float64 mean loses integer digits past 2^53
-//
-// Taken from the live server (`pg_typeof(sum(c_i32))` = bigint,
-// `pg_typeof(sum(c_i64))` = numeric, `pg_typeof(avg(c_i32))` = numeric): the
-// two SUM rules differ because int4's sum has a wider integer type to grow
-// into and int8's does not. WHICH input types those rules cover is
-// IntegerAccOutputType's answer, not a list repeated here: the window
-// operator and both planner declarations ask the same function, and a list
-// that drifted from it would be a carrier disagreeing with a declaration.
-//
-// It is the ONE predicate every accumulation path consults, so the flat
-// scatter arrays, the row updaters, the batch kernels, the spill run's latched
-// encodings and the output schema cannot disagree about which carrier a value
-// is in — the disagreement class ADR-0027 decision 3 exists for.
-// The DECLARATION is the second half of the test, and it is what keeps this
-// off the plumbing. A MERGE stage re-aggregates a partial COUNT as a SUM over
-// an int64 column (buildFragmentAggregate) and declares int64 for it: that
-// column is the fold's row count, not a user's SUM(int8), and giving it the
-// numeric carrier would put the total in SumDec while the emit reads SumI64 —
-// the two-carrier disagreement in its purest form. So the carrier follows the
-// declared output type, and a planner that could not resolve the input at all
-// keeps the float64 it always had, with the accumulator agreeing.
+// aggIntExact selects Int128 only for integer SUM/AVG declared DECIMAL (#784).
+// IntegerAccOutputType owns input-type membership for execution and both planners.
+// SUM(int2/int4) normally keeps int64; its decomposed AVG sum leg declares numeric.
+// SUM(int8) and AVG(int*) require exact numeric to avoid wrap or lost digits.
+// All scatter, row, batch, spill and schema paths must use this predicate
+// so their carriers agree (ADR-0027 decision 3).
+// A merge SUM of partial COUNT declared int64 stays int64; unresolved planner
+// inputs retain the declared float64 carrier.
+// See docs/internals/integer-aggregate-carrier-selection.md for the design.
 func aggIntExact(agg AggColumn, typ batch.TypeID) bool {
 	// The INT32 class is in scope too, and only the DECLARATION lets it in. A
 	// user's SUM(int4) declares bigint and keeps its int64 array; the SUM LEG

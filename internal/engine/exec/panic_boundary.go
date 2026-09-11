@@ -9,35 +9,15 @@ import (
 	"sync/atomic"
 )
 
-// The query-scoped panic boundary.
-//
-// recoverFatalEval converts exactly one class of panic — the deliberately
-// raised fatalEval / TypeMismatchError family that expression evaluation uses
-// as its error channel — and re-panics everything else. That is the right
-// contract for THAT conversion: a runtime panic is a bug, and turning it into
-// a generic error at the point it happens would bury it.
-//
-// It is the wrong contract for PROCESS SURVIVAL. An unrecovered panic on any
-// goroutine terminates the whole Go program, so "re-panic the rest" means an
-// index-out-of-range in one connection's query kills every other connection's
-// query too — and a client can reach one with ordinary SQL (#509 needed no
-// join and no error condition). The soak found three independent instances in
-// under two minutes, which says the interesting number is not three, it is
-// "however many are left".
-//
-// So the class gets a boundary rather than a patch per instance. Every
-// goroutine a query spawns, and every entry point a query is driven through,
-// converts ANY panic into an error that carries the panic value and a
-// truncated stack, logs it at error level with the query id, and lets the
-// caller cancel and drain normally. The client gets SQLSTATE XX000. This is
-// ADDITIVE to the FatalEvalPanic contract, not a replacement: a FatalEvalPanic
-// still becomes its own precise error with its own SQLSTATE, and only what
-// recoverFatalEval declines lands here.
-//
-// Nothing is swallowed. The error reaches the client, the stack reaches the
-// log, and QueryPanicsRecovered counts the event so the process-killer gate
-// can fail CI on a query that reaches one of these — a recovered panic is
-// still a defect, it is just no longer an outage.
+// Every query entry point and spawned goroutine must contain unexpected panics
+// so one query cannot terminate other connections (#509).
+// Preserve deliberate FatalEvalPanic errors and precise SQLSTATEs;
+// recoverFatalEval re-panics other classes for this outer boundary to catch.
+// Unexpected panics become XX000 errors carrying the panic value and truncated
+// stack, logged at error level with query id; callers cancel and drain normally.
+// QueryPanicsRecovered counts each event so gates still detect the defect:
+// recovery must neither swallow the client error nor hide the stack.
+// See docs/internals/query-panic-containment.md for the design.
 
 // SQLStateInternalError is PostgreSQL's internal_error, what a client is told
 // when the server hit something it has no better code for.

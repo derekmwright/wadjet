@@ -9,28 +9,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/optswitch"
 )
 
-// Packed composite group keys (G3 in
-// docs/benchmarks/high-card-aggregation-gap-2026-08-17.md).
-//
-// The dual-int GROUP BY path stored the key across THREE per-group SoA
-// arrays (dualIntKeysA, dualIntKeysB, dualIntNextGroup) while the hash table
-// held only hash→chain-head. Verifying one candidate key therefore took
-// three dependent loads into three multi-GB arrays, a chain walk multiplied
-// that, and every insert probed twice (Get, then Put down the same chain).
-// ClickBench Q33 (GROUP BY WatchID, ClientIP at ~1:1 group:row) spends 62.8%
-// of its CPU in that loop.
-//
-// When every group column is fixed-width int-class and the widths sum to
-// <= 16 bytes, the whole key fits in one 128-bit cell that lives INSIDE the
-// hash entry (ClickHouse's keys128 method): one probe, one compare against
-// data already in the loaded cache line, no chain, no side arrays. The
-// per-group key SoA survives as a single []packedKey (16 B/group in ONE
-// off-heap array, down from 20 B across three) because emission, merge, the
-// drain cursor and the spill run format all index state by group id.
-//
-// Eligibility is decided once at Init (buildPackedLayout) and covers every
-// shape the dual-int path covered — two int columns are at most 8+8 bytes —
-// plus wider ones: (Int64, Int32), three or four narrow ints, etc.
+// Packed composite GROUP BY keys apply when every column is fixed-width int-class
+// and total width is <=16 bytes; buildPackedLayout decides eligibility once at Init.
+// Keep the full 128-bit key inside the hash entry for one-probe equality checking.
+// Retain a separate []packedKey SoA (16 bytes/group, off-heap): emission, merge,
+// the drain cursor and spill records still address state by group id.
+// All two-int shapes fit, along with wider shapes such as three/four narrow ints.
+// See packedKeysToggle for the widened-routing boundary.
+// See docs/internals/packed-composite-group-key-layout.md for the design.
 
 // packedKeysToggle gates the WIDENED routing only: shapes with three or four
 // int-class columns that previously landed on the compact/generic paths.

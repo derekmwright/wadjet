@@ -18,76 +18,27 @@ import (
 // than pre-allocating it, so a sparsely-filled partition stays small.
 const accumFlushRows = batch.DefaultBatchSize
 
-// probeRoutesByPartition reports whether every probe row consults ONLY the
-// build rows of its own grace partition. It is the precondition
-// spillOneInMemoryPartition's contract rests on, and the build dispatch
-// (Build, join.go) now CHECKS it rather than assuming it, because a build that
-// partitions and evicts is only readable by a probe that routes.
-//
-// A CROSS join is the join for which it is false, and it is false completely:
-// its probe has no key, so `computeBuildPartitionRows` sends every build row
-// to ONE partition (the empty key's), `HashJoinProbe.Execute` returns to
-// `nextCrossChunk` before the spilled-partition routing runs at all, and
-// nextCrossChunk then walks EVERY entry of h.buildBatches for every probe row.
-// One eviction therefore nils the slot it is about to read — a nil
-// dereference at `buildBatch.Len`, and, if the nil were skipped instead, a
-// silently missing row, which is worse.
-//
-// This is the shape #832 arrives as. A join whose ON clause is an equality of
-// EXPRESSIONS rather than of bare columns has no equi-key for the planner to
-// give the operator, so it is planned as a cross join with the ON as a filter
-// above — `ON CONCAT('x', a.g) = CONCAT('x', b.g)`, `ON (a.c_str || 'x') =
-// (b.c_str || 'x')`, `ON UPPER(a.c_str) = UPPER(b.c_str)`, `ON a.id + 1 =
-// b.id + 1`, a CAST key, a key computed on one side only. All of them answer
-// on the single-process, DAG and DAG-shuffled arms and panic on the spilled
-// one, and the panic is not a race: a cross join whose build evicts ALWAYS
-// reads a nil slot.
-//
-// A cross join therefore takes the flat build, which reserves per batch and
-// REFUSES when the budget cannot hold the build (ADR-0006: degrade or fail
-// loudly, never die and never answer differently). What it does not get is a
-// spill, because wadjet has no blockwise nested-loop join to spill INTO; that
-// is a distinct piece of work and it is recorded on #832 rather than faked by
-// a partitioner whose premise the operator does not meet.
+// probeRoutesByPartition requires every probe row to read only its own grace partition.
+// Build must check it before partitioning or evicting; spillOneInMemoryPartition
+// is unsafe without routing. CROSS probes read every build batch and never route.
+// Expression equalities without bare-column equi-keys also use CROSS plus a filter (#832).
+// CROSS therefore uses flat build with per-batch reservations and refuses when the
+// budget cannot hold it (ADR-0006); it must not skip evicted rows or dereference nil slots.
+// There is no blockwise nested-loop spill implementation for this path.
+// See docs/internals/join-routed-probe-spill-precondition.md for the design.
 func (h *HashJoin) probeRoutesByPartition() bool {
 	return h.JoinType != CrossJoin
 }
 
-// buildPartitioned is the partition-on-arrival build path. Instead of
-// accumulating every batch flat and reactively switching to partitioned-spill
-// on first pressure event, this path allocates spillState upfront, scatters
-// every arriving batch into its 64 hash partitions, and indexes per-partition
-// rows incrementally into the global hash table. When pool pressure rises,
-// spillOneInMemoryPartition picks the largest in-memory partition, writes its
-// batches to disk, and frees them — an O(partition_size) eviction instead of
-// the legacy path's O(total_size) "freeze, repartition everything, reset
-// hash-table, rebuild from in-memory partitions" sequence.
-//
-// This matches the Grace Hash Join shape that Spark's UnsafeShuffleSorter and
-// Trino's HashBuilderOperator implement: build is partitioned-by-default, so
-// spill is just "evict one partition," not a global state reset.
-//
-// Probe-side correctness: HashJoinProbe.Execute already routes spilled-partition
-// rows to disk before any hash lookup when spillState != nil, and within a
-// hash-bucket all chain entries share the same key (intHashTable.Get returns the
-// chain head for an exact key match) — so the chain for a probed key always
-// resolves to a single partition. If that partition is in-memory the whole
-// chain points to live batches; if it's spilled the partition routing has
-// already diverted the probe row to disk. The freed h.buildBatches[i] = nil
-// slots are therefore unreachable on the in-memory probe path.
-//
-// That argument is about a KEY-ROUTED probe, and it was written as though
-// every probe were one. A CROSS join's is not — it reads every build batch for
-// every probe row and never reaches the routing at all — so it read the nil
-// slots, which is #832. probeRoutesByPartition above is the same sentence
-// turned into a precondition this path's caller checks.
-//
-// Caller invariants:
-//   - h.MemTracker and h.Spill must both be set; otherwise the legacy path runs.
-//   - h.probeRoutesByPartition() must hold; otherwise the flat path runs.
-//   - SemiAntiKeyOnly takes its own no-storage build path before this fires.
-//   - The serial build path is the production caller; parallel-build (which
-//     merges per-worker locals) is currently key-only and not affected.
+// buildPartitioned scatters arrivals into 64 grace partitions and indexes their rows;
+// pressure evicts the largest in-memory partition in O(partition size).
+// Require h.MemTracker, h.Spill and probeRoutesByPartition; otherwise use the flat path.
+// SemiAntiKeyOnly dispatches to its own no-storage build first. The serial build is
+// the production caller; the key-only parallel-local merge path is unaffected.
+// A key's chain belongs to one partition. Probe must divert spilled keys before lookup,
+// so resident chains reference live batches and freed nil slots are unreachable.
+// CROSS does not satisfy that routed-probe proof and must never enter (#832).
+// See docs/internals/join-build-partition-on-arrival.md for the design.
 func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 	progress := ProgressReporterFromContext(ctx)
 
@@ -193,54 +144,15 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 // refusal ADR-0006 asks for, not 5,000 single-row reservations.
 const minArrivalChunkRows = 32
 
-// absorbArrivalBatch charges one arrival batch to the shared pool, scatters it
-// into its grace partitions and indexes it. Caller holds h.mu.
-//
-// Like the legacy path it Reserves and falls back to spilling on over-budget;
-// unlike the legacy path the spill is incremental - pick one partition and
-// evict it instead of repartitioning the whole flat state.
-//
-// #598 is the third fallback, after Reserve and after eviction: a batch whose
-// own columns do not fit the pool is SPLIT and absorbed in pieces. Without it
-// the build's FIRST batch had nowhere to go - largestInMemoryPartition returns
-// -1 when nothing has been stored yet, so spillUntilCanReserve frees 0 and the
-// retry fails for exactly the reason the first attempt did, and the query died
-// with `used=0, requested=7813532` while the same rows delivered in smaller
-// batches built fine. The trigger is exactly hashBuildBytes(b) > what the pool
-// can give, which the parquet ROW GROUP decides: the scan hands the build one
-// batch per row group, so a fat row group is a fat arrival batch.
-//
-// Splitting and not overcommitting is deliberate. The filing's other direction
-// - reserve past the budget for the first batch - would be another unceilinged
-// ForceReserve producer on a query tracker (ADR-0006's 2026-09-03 census
-// enumerates the ones that exist, two of them in this file's own operator), and
-// the overcommitted bytes would join the floor every DOWNSTREAM operator's
-// Reserve is measured against. Splitting adds no new overcommit.
-//
-// # The reservation is RECONCILED to what the build kept
-//
-// One arrival batch is charged ONCE, as hashBuildBytes(b). What happens to its
-// rows afterwards is one of two things: they are appended to an in-memory
-// partition (retained, and released when that partition is evicted) or written
-// straight to an already-spilled partition (retained by nobody). So the release
-// owed at the end of this call is `cost - retained`, and `retained` is the sum
-// of what partitionAndIndexBatch actually put into partMemory.
-//
-// It used to be neither of those. The spilled branch released
-// hashBuildBytes(compactBatchForRows(b, rows)) PER PARTITION — a figure
-// computed from a freshly minted batch, which pays the per-column fixed
-// overhead (null-bitmap words, a bytes column's len+1 offsets, capacity
-// rounding) once per partition against an arrival batch that paid it once.
-// Measured on this arc's fixture: an arrival batch of 256 rows charged 24,932
-// bytes released 30,372 across its 63 partitions — 1.22x, over-releasing 5,440
-// bytes EVERY BATCH. The in-memory branch was wrong in the other direction: it
-// charges partMemory the tight per-row data bytes, which is less than the
-// arrival share, so a build that never spilled leaked ~1,000 bytes per batch
-// upward. Which way a build drifted therefore followed how many partitions had
-// spilled by the time each batch arrived, i.e. pressure and timing — the
-// moving floor of #789 — and at 100,000 build rows `used` reached MINUS 867,561
-// against a 1 MiB budget, a ledger that under-reports by 1.67 MB and admits the
-// next operator against room that does not exist.
+// absorbArrivalBatch charges, partitions and indexes one arrival; caller holds h.mu.
+// Reserve hashBuildBytes(b), evict partitions on failure, then split into absorbable
+// pieces if the batch still cannot fit (#598). Do not add unbounded overcommit (ADR-0006).
+// Charge the arrival once. In-memory rows stay charged until eviction; rows written
+// to already-spilled partitions are not retained.
+// Reconcile by releasing cost-retained, where retained is partitionAndIndexBatch's
+// actual partMemory addition, not independently sized compact partition batches.
+// Per-partition fixed overhead must not over-release or leak the arrival charge (#789).
+// See docs/internals/join-arrival-reservation-reconciliation.md for the design.
 func (h *HashJoin) absorbArrivalBatch(b *batch.RecordBatch) error {
 	cost := hashBuildBytes(b)
 	if joinFloorArmed.Load() {

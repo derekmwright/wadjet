@@ -8,30 +8,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
-// A join key is built at the pair's COMMON type, not at each side's own
-// storage type (#615, #650, #663).
-//
-// ADR-0023's rule is that a key and the comparator name ONE relation: "these
-// two rows compare equal" and "these two rows key alike" have to be the same
-// statement, or the join answers something the WHERE spelling of it does not.
-// A comparison already resolves its operand pair to PostgreSQL's common type
-// before comparing; the key did not. It called appendColumnValue with
-// `v.Type` on each side independently, so `a.i = b.d` (INT64 against
-// DECIMAL) built eight little-endian bytes on one side and a canonical
-// decimal key on the other, and matched only where those byte strings
-// coincided by accident — one pair over a ten-row fixture, not zero, which is
-// why the failure reads as a wrong answer rather than as an empty one.
-//
-// The resolved type is decided at PLAN time (physical.resolveJoinKeyTypes,
-// which is where the two sides' declared types are both in hand) and carried
-// into the operator, on BOTH execution paths and into the shuffle's partition
-// hash — a repartition that routes at the column's own width sends equal
-// values to different partitions, which is the same defect one layer down.
-//
-// KeyTypeUnresolved means "this pair needs no widening": either the planner
-// could not type one of the sides, or the two sides already agree. It is the
-// value every existing caller gets, and it takes exactly the code path the
-// key had before, byte for byte.
+// Join keys use the pair's common type so comparator equality and key equality
+// are the same relation (#615, #650, #663; ADR-0023).
+// physical.resolveJoinKeyTypes decides from both declared sides at plan time;
+// carry that decision through both execution paths and the shuffle partition hash.
+// KeyTypeUnresolved keeps the column's own encoding byte-for-byte, either because
+// the planner could not type a side or because the sides already agree.
+// See docs/internals/join-common-key-type-encoding.md for the design.
 const KeyTypeUnresolved = batch.TypeID(-1)
 
 // KeyTypeAt is the type the i'th key column of `types` must be encoded at,
@@ -217,39 +200,15 @@ func keyEncodingClass(t batch.TypeID) int {
 	return 0
 }
 
-// checkProbeKeyTypes is the RUNTIME backstop under the plan-time resolution:
-// the place where both sides' ACTUAL encodings are known at the same time.
-//
-// The planner resolves a key pair from DECLARED types, and a side it cannot
-// type resolves to KeyTypeUnresolved — which is correct for every pair whose
-// two sides agree and silently wrong for one whose sides do not. Rather than
-// refuse at plan time on "cannot type" (which would refuse every join over a
-// table function, an unannotated scan or a shape the declared-type walk does
-// not cover, most of them perfectly well-typed at run time), the refusal
-// lives HERE, where the question is decidable and the answer cannot be a
-// false positive.
-//
-// Two conditions, and only these two:
-//
-//	R1 the integer fast path is on and a PROBE key column is not
-//	   integer-class. This is #615's panic: tryEnableIntKey saw only the
-//	   BUILD column, and inlineIntProbe / executeSemiAntiJoin / the bloom
-//	   then indexed the probe column's nil Int32Data / Int64Data. An error
-//	   here makes that index structurally unreachable.
-//	R2 both key columns are on the numeric ladder, their key ENCODINGS
-//	   differ, and the plan said no widening. This is #615's silent miss:
-//	   eight little-endian bytes on one side and a canonical decimal key on
-//	   the other, matching only where the byte strings coincide by accident.
-//
-// A pair the ladder does not describe is left where it was only when NEITHER
-// fast path is engaged: a DATE against a TIMESTAMP still answers no matches,
-// as it always has. An INTEGER build against a STRING, BOOL, UUID or CIDR
-// probe does NOT — R1 catches it, because the integer fast path is on and the
-// probe has no integer storage. That shape used to PANIC on a nil typed
-// slice, so the change there is a query error where there was a recovered
-// crash, and PostgreSQL refuses the same pair outright (42883, no operator).
-// Turning the remaining ill-typed pairs into errors is a separate question
-// with a separate authority.
+// checkProbeKeyTypes validates actual encodings beneath declared-type resolution (#615).
+// An integer fast path requires integer-class probe storage before any typed lookup.
+// Unresolved numeric pairs with differing key encodings must refuse instead of silently
+// missing; resolved pairs must both be encodable at their declared common target.
+// Do not reject every unresolved plan: table functions/unannotated scans may agree at runtime.
+// Without either fast path, pairs outside the numeric ladder retain their behavior
+// (e.g. DATE/TIMESTAMP misses). INTEGER build versus STRING/BOOL/UUID/CIDR is caught
+// by the storage check; broad refusal of other ill-typed pairs is separate work.
+// See docs/internals/join-runtime-key-type-backstop.md for the design.
 func (h *HashJoin) checkProbeKeyTypes(b *batch.RecordBatch) error {
 	for i, pi := range h.probeKeyIdx {
 		if pi < 0 || pi >= len(b.Columns) {

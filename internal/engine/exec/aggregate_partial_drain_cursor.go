@@ -20,30 +20,14 @@ const (
 	partialKeyModeStrOrGeneric
 )
 
-// partialGroupCursor is a streaming partialRunSource backed by a HashAggregate's
-// SoA hash state. It builds a sort-key arena + sorted index up-front (memory
-// proportional to keys, not to full partial-group records) and emits one
-// *partialGroup per Peek/Advance by reading from the flat accumulator arrays
-// at the next sorted index.
-//
-// Memory characteristics for N groups, ngc group cols, na aggs, k bytes/key:
-//   - Pre-existing SoA arrays — already live; we don't re-allocate them
-//   - Key arena       = N*k bytes  (typ. 16 B/group → 320 MB at N=20M)
-//   - Key offsets     = (N+1)*4    (~80 MB at N=20M)
-//   - Sort index      = N*4        (~80 MB at N=20M)
-//   - Reusable head   = O(ngc + na), single struct overwritten per Advance
-//
-// Compare with the prior []*partialGroup materialization: each group allocated
-// a *partialGroup (24 B) + a fresh []byte SortKey + a fresh []any KeyVals + a
-// fresh []kernel.Accumulator Accs, totaling ~150–200 B per group, or ~3–4 GB
-// at N=20M. The cursor cuts that to ~480 MB at SF100 Q17 scale.
-//
-// Lifetime: the cursor borrows references to the HashAggregate's SoA arrays
-// and group-state slices. The caller must not mutate those arrays for the
-// cursor's lifetime. finalizeViaPartialMerge transfers ownership by clearing
-// the aggregate's references after construction so the cursor is the sole
-// owner; spillPartialState consumes the cursor synchronously before its
-// resetGroupStateAfterSpill call frees the references.
+// partialGroupCursor streams one reusable partialGroup per Peek/Advance from
+// HashAggregate's SoA state, using an upfront key arena and sorted index.
+// For N groups and k bytes/key, extra memory is N*k key bytes, (N+1)*4 offsets,
+// N*4 sort indices and one O(group-cols + aggregates) head; existing arrays are reused.
+// Borrowed SoA arrays and group-state slices must remain immutable for its lifetime.
+// finalizeViaPartialMerge clears aggregate references to transfer sole ownership;
+// spillPartialState consumes synchronously before resetGroupStateAfterSpill frees them.
+// See docs/internals/partial-group-drain-cursor.md for the design.
 type partialGroupCursor struct {
 	// Source state borrowed from HashAggregate.
 	flatAccs       []flatAccumArrays
@@ -403,36 +387,15 @@ func (c *partialGroupCursor) loadHeadAccsAoS(gi int) {
 	}
 }
 
-// appendSerializedKey writes the same byte sequence as serializeKey directly
-// into buf, returning the extended buf. The two share one definition of the
-// on-the-wire format; callers track the pre-call length to recover offset
-// boundaries.
-//
-// types carries each value's declared GROUP BY column type, one per vals
-// entry, so a CIDR value re-keys into PostgreSQL's inet order
-// (kernel.CidrOrderKey) instead of its raw stored text (#520).
-// appendKeyValue's boxed `any` has no type tag of its own — a CIDR value
-// boxes as a plain Go string, indistinguishable there from a STRING
-// column's — so the re-key has to happen here, where the caller still has
-// groupColTypes in hand. Without it, this spill/merge key would disagree
-// with the in-memory hash key appendColumnValue (aggregate.go) already
-// builds, silently splitting '10.0.0.1' and '10.0.0.1/32' back into two
-// groups across a spill boundary the un-spilled path already calls one
-// value. types may be shorter than vals (or nil); a value with no
-// corresponding type serializes as before.
-//
-// meta is the same GROUP BY columns' full declared metadata, needed for a
-// CIDR value ONE LEVEL DOWN: an ARRAY, MAP or ROW whose types[i] entry is
-// batch.TypeArray/TypeMap/TypeRow carries no element type of its own, so a
-// CIDR leaf below it fell all the way through to appendKeyValue's plain-text
-// encoding — the same drift one level up that types[i] closes, and the same
-// failure mode: GROUP BY arr_cidr answers one group in memory
-// (appendColumnValue → appendNestedElem, which walks the real child vector's
-// own type) and can answer two once a cross-batch, cross-worker or spill
-// boundary routes the SAME groups through this boxed path instead. meta may
-// be shorter than vals (or nil); a value with no corresponding entry, or
-// whose declared type is not a container, serializes exactly as before via
-// appendKeyValueWithMeta's own fallback.
+// appendSerializedKey appends serializeKey's byte-identical format; callers use
+// the pre-call length for offsets. types supplies one declared type per value,
+// including CIDR's inet-order re-key so spill and in-memory grouping agree (#520).
+// A Go string alone cannot distinguish CIDR from STRING.
+// meta carries full ARRAY/MAP/ROW element/field declarations for nested CIDR re-keying;
+// cross-batch, worker and spill keys must agree with appendColumnValue's nested path.
+// types/meta may be nil or shorter than vals. Missing types use the metadata path;
+// missing metadata or noncontainers keep appendKeyValueWithMeta's fallback encoding.
+// See docs/internals/boxed-group-key-serialization.md for the design.
 func appendSerializedKey(buf []byte, vals []any, types []batch.TypeID, meta []parquet.Column) []byte {
 	for i, v := range vals {
 		if i > 0 {

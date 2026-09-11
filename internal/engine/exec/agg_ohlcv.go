@@ -12,56 +12,16 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// OHLCV — one MERGEABLE aggregate state that answers a whole bar.
-//
-//	ohlcv(ts, price, volume) -> ROW(open, high, low, close, volume, vwap)
-//
-// The pattern is ADR-0035's and this is its first instance: a state whose
-// merge is ASSOCIATIVE and COMMUTATIVE is a state that can be computed
-// per-task and combined, which is what lets one bar cross the stage DAG, the
-// spill runs and the shuffle without the operator that finishes it ever seeing
-// a raw row (ADR-0010's merge form, the shape varianceState and covarianceState
-// already take).
-//
-//	n        rows folded in; 0 means the group is EMPTY and the bar is NULL
-//	firstTS  the OPENING row's instant, epoch millis
-//	firstPx  the price at that instant
-//	lastTS   the CLOSING row's instant
-//	lastPx   the price at that instant
-//	high/low max / min price
-//	sumVol   Σ volume
-//	sumPV    Σ (price × volume)
-//
-// merge:
-//
-//	n      = a.n + b.n
-//	first  = the (ts, px) LEXICOGRAPHIC MINIMUM of the two
-//	last   = the (ts, px) LEXICOGRAPHIC MAXIMUM of the two
-//	high   = max(high)          low = min(low)
-//	sumVol = sum               sumPV = sum
-//
-// **The tiebreak is a VALUE.** Two rows sharing an instant have no order a
-// query can see: a row POSITION is not observable across the arms — the single
-// path reads one file, the DAG reads four in whatever order tasks finish — so
-// picking "the first one that arrived" would make the bar depend on the plan.
-// `open` is therefore the price of the row with the smallest (ts, price) and
-// `close` the price of the row with the largest, which is exactly PostgreSQL's
-//
-//	(array_agg(px ORDER BY ts, px))[1]        -- open
-//	(array_agg(px ORDER BY ts DESC, px DESC))[1]  -- close
-//
-// and that spelling is the value oracle for every cell of the gate.
-//
-// **NULL rule.** A row is skipped when ANY of ts, price, volume is NULL —
-// PostgreSQL's rule for a multi-argument aggregate, measured on 17.11:
-// regr_count(y,x) over (1,1),(2,NULL),(NULL,3),(4,4) is 2, not 4.
-//
-// **Domain.** Decided ONCE per aggregate from the input columns' declared
-// types, never per row. It is EXACT — Int128 at a fixed scale, so the sums
-// carry every digit — unless price or volume is approximate, in which case the
-// whole state is float64, because one float operand makes the quotient float
-// on the server too. An exact sum that leaves the 128-bit carrier is 22003,
-// never a wrapped or narrowed number (ADR-0024).
+// ohlcvState produces ROW(open, high, low, close, volume, vwap); n=0 is NULL.
+// Merge is associative and commutative across tasks, spill and shuffle (ADR-0035,
+// ADR-0010): add n, sumVol and sumPV; take price extrema for high/low.
+// Open/close take lexicographic min/max (epoch-millis ts, price), never arrival order.
+// Skip a row if any of ts, price or volume is NULL.
+// Declared input types fix the domains once, never per row; see ohlcvDomain for
+// per-field-group exactness. Exact sums keep Int128 at fixed scale; approximate
+// operands determine the corresponding float64 domain. Exact overflow is 22003,
+// never wrap or narrowing (ADR-0024).
+// See docs/internals/ohlcv-mergeable-bar-state.md for the design.
 type ohlcvState struct {
 	dom ohlcvDomain
 	// fields is the DECLARED ROW this state finishes as. It is written by the
@@ -687,32 +647,14 @@ func ohlcvOverflow() error {
 
 // --- the encoded partial state ----------------------------------------------
 
-// ohlcvStateWidth is the encoded width of a bar's partial state: 136 raw bytes
-// hex-encoded to 272 ASCII characters.
-//
-//	[0]       format version (1)
-//	[1]       flags: bit0 exact, bit1 overflow
-//	[2]       carrier price scale  [3] volume scale  [4] product scale
-//	[5:8]     the PRICE field's declared (type, precision, scale)
-//	[8:11]    the VOLUME field's declared (type, precision, scale)
-//	[11:14]   the VWAP field's declared (type, precision, scale)
-//	[14:16]   reserved, zero
-//	[16:24]   n            int64 BE
-//	[24:32]   firstTS      int64 BE
-//	[32:40]   lastTS       int64 BE
-//	[40:56]   open   [56:72] high   [72:88] low   [88:104] close
-//	[104:120] sumVolume    [120:136] sumPriceTimesVolume
-//
-// A value slot is an Int128 (Hi then Lo, big-endian) when exact, and a float64
-// in its low 8 bytes when not. The state travels as a STRING column — through
-// parquet, the .wshf shuffle format and the NATS gather — for the reason
-// varianceState.encode records: every one of those is happier with text than
-// with arbitrary bytes, and float64 bits round-trip exactly through hex.
-//
-// Both the carrier AND the declared ROW are in the header, so the
-// coordinator's fold finishes a bar with nothing but the string. Everything
-// there fits a byte: 22 type ids, and a DECIMAL's precision and scale top out
-// at 38.
+// ohlcvStateWidth is 136 raw bytes hex-encoded as 272 ASCII characters in a STRING.
+// The header carries version, carrier flags/scales and the declared ROW fields;
+// the coordinator must finish a bar using only that string.
+// Value slots hold big-endian Int128 (Hi then Lo) when exact, otherwise float64
+// in the low 8 bytes; hex must preserve float bits across parquet, .wshf and NATS.
+// Type ids and DECIMAL precision/scale fit one byte; reserved header bytes stay zero.
+// See encode/decode for the per-field carrier flags and layout.
+// See docs/internals/ohlcv-partial-state-encoding.md for the design.
 const ohlcvStateWidth = 272
 
 const ohlcvStateBytes = 136

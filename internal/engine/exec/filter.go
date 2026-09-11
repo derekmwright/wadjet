@@ -34,30 +34,14 @@ const (
 // Filter is a UnaryOperator that filters rows using a selection vector.
 type Filter struct {
 	Pred Predicate
-	// Check is the row path's half of the #147 guard, run ONCE on the first
-	// batch: a predicate whose column references name nothing in the input is
-	// a query error, never UNKNOWN on every row.
-	//
-	// KernelFilter has refused that since #147, because a filter that matches
-	// nothing is indistinguishable from genuinely empty data. The row
-	// evaluator had no equivalent — expr.ColRef.Eval simply answers nil — so
-	// every defect that handed this operator the wrong NAME came back as a
-	// silent zero-row answer (#653). The check lives here rather than inside
-	// the predicate because a Predicate returns bool and has nowhere to put
-	// an error; callers that know the predicate's references set it
-	// (expr.CheckFilterColumns), and callers that do not leave it nil.
-	//
-	// WHO sets it is the whole of its safety, and the two paths differ. The
-	// single-process planner sets it on every non-correlated row filter,
-	// because in one process each operator DECLARES its output schema and an
-	// empty join side still declares the columns it would have produced. The
-	// DAG sets it only on a filter reading a base-table SCAN
-	// (OpSpec.ScanSchemaFilter): a stage's input schema there is read back
-	// from what an upstream task WROTE, and a hash-join partition whose build
-	// side was empty writes only the join keys for the missing side — so a
-	// build column that is legitimately NULL for every row of that partition
-	// is absent from the schema, which is TPC-H Q20's
-	// `ps_availqty > 0.5 * __scalar_0` and not a defect.
+	// Check validates predicate references once on the first batch with a schema:
+	// missing columns are query errors, never UNKNOWN on every row (#147, #653).
+	// Callers knowing the references set expr.CheckFilterColumns; others leave nil.
+	// The single-process planner checks every non-correlated row filter.
+	// The DAG checks only base-table scans (OpSpec.ScanSchemaFilter): an empty join
+	// build partition may legitimately omit non-key build columns from its written
+	// schema although those values are NULL. Do not apply this guard to such stage inputs.
+	// See docs/internals/row-filter-schema-check-boundary.md for the design.
 	Check func(*batch.RecordBatch) error
 	// checked is set only once the check has actually SEEN a schema. A batch
 	// with no columns tells it nothing, and marking it done there would
@@ -853,28 +837,13 @@ func rowFieldType(parent *batch.Vector, field string) (batch.TypeID, bool) {
 	return 0, false
 }
 
-// networkConstError is decimalConstError's counterpart for the network types
-// whose kernel arm refuses a literal it cannot read as an ADDRESS: TypeCIDR
-// (kernel.CidrSortKey), TypeIPv6 (kernel.IPv6LitKey), and — since #519 closed
-// the same gap one type over — TypeIPv4 (kernel.IPv4LitKey), TypeMAC
-// (kernel.MACLitKey) and TypeUUID (kernel.UUIDLiteralToRaw).
-//
-// All five used to answer instead of refusing, and the answers were silently
-// wrong in different directions: the CIDR arm returned a match-nothing
-// kernel, so `c_cidr <> 'garbage'` dropped every row; the IPv6 arm read an
-// unparseable literal as the empty raw address, which every stored address
-// compares ABOVE; the IPv4/MAC arms read it as the encoded zero, which
-// MATCHED every row holding the address 0.0.0.0 / 00:00:00:00:00:00; the
-// UUID arm read it as the empty string, which matches nothing for `=` and
-// EVERY row for `<>`. PostgreSQL refuses `'garbage'::inet` /
-// `'garbage'::macaddr` / `'garbage'::uuid` with 22P02, and ADR-0012 item 1
-// makes PostgreSQL the authority on error-versus-not, so this is its
-// SQLSTATE and its wording.
-//
-// The row-at-a-time path raises the same error for the same literal
-// (expr.CmpNetworkLit's CIDR/IPv6 arms and expr's Cmp binding via
-// decimalLitCmp.refuseNonAddress, which covers IPv4/MAC/UUID too): one path
-// erroring while the other answers is the two-path defect class.
+// networkConstError validates CIDR/IPv6/IPv4/MAC/UUID literals with their typed
+// kernel readers (#519). Malformed addresses must refuse with PostgreSQL's 22P02
+// and wording (ADR-0012 item 1), never compare as zero, empty or match-nothing.
+// The row path (expr.CmpNetworkLit and decimalLitCmp.refuseNonAddress) must raise
+// the same error for the same literal. See the implementation's separate handling
+// of syntactically valid but unsupported network prefixes.
+// See docs/internals/network-filter-literal-refusal.md for the design.
 func networkConstError(typ batch.TypeID, value any) error {
 	if value == nil {
 		return nil
@@ -935,34 +904,14 @@ func networkPrefixUnsupported(typeName, text string) error {
 		"address alone)", typeName, text)
 }
 
-// dateConstError is decimalConstError's counterpart for a DATE value whose
-// day count does not fit the int32 the DATE column encoding stores
-// (kernel.DateLiteralDays / #451). PostgreSQL raises 22008
-// (datetime_field_overflow) for a date outside its own representable range,
-// and ADR-0012 item 1 makes PostgreSQL the authority on error-versus-not, so
-// this is its SQLSTATE.
-//
-// A DATE STRING literal reaches it three ways (#560): a well-formed date
-// whose day count does not fit int32 (#451's original case), a well-formed
-// but nonexistent calendar date ('2026-02-30', month 13, day 32), and a
-// string that is not a date at all ('not-a-date'). PostgreSQL raises 22008
-// (datetime_field_overflow) for the first two and 22007
-// (invalid_datetime_format) for the last; kernel.IsDateSyntaxError says which
-// so this picks the matching SQLSTATE, rather than the old (0, nil) that made
-// `d = '2026-02-30'` silently answer the count of 1970-01-01 rows.
-//
-// #451's own reported literal is NOT an error and never was: `d =
-// '9999-12-31'` — the common SCD-2 end-of-time sentinel — used to compare as
-// 2262-04-11 because parseDateToDays computed its day count through a
-// time.Duration, which SATURATES at ±math.MaxInt64 nanoseconds (~292 years)
-// rather than reporting an overflow. That is fixed in the arithmetic:
-// kernel.parseDateToDays counts civil days from t.Unix(), and 9999-12-31 is
-// 2,932,896 days — about 700× inside int32 — so it is simply CORRECT.
-//
-// The guard is also live for a caller that hands kernel.toDateInt32 a RAW
-// day count — an int64 or int compared against a DATE column, which no
-// parser bounds — and it is what keeps ResolveFilterKernel's "nil kernel,
-// caller raises" convention honest for the type.
+// dateConstError validates DATE literals and raw int64/int day counts through
+// kernel.DateLiteralDays against DATE's int32 storage (#451).
+// Out-of-range or nonexistent calendar dates raise 22008; invalid date syntax
+// raises 22007 via kernel.IsDateSyntaxError (#560, ADR-0012 item 1).
+// 9999-12-31 is valid (2,932,896 days), not an overflow: civil-day arithmetic
+// must avoid time.Duration's roughly 292-year saturation.
+// Keep ResolveFilterKernel's nil-kernel/caller-raises convention for raw counts too.
+// See docs/internals/date-filter-literal-refusal.md for the design.
 func dateConstError(typ batch.TypeID, value any) error {
 	if typ != batch.TypeDate || value == nil {
 		return nil
@@ -977,29 +926,14 @@ func dateConstError(typ batch.TypeID, value any) error {
 	return sqlerr.New("22008", "date/time field value out of range: %q", fmt.Sprint(value))
 }
 
-// floatConstError is decimalConstError's counterpart for the FLOAT columns
-// whose kernel arm declines a constant, and it covers the two spellings
-// separately because PostgreSQL reads them as two different literals.
-//
-// A QUOTED constant is unknown-typed and is coerced with the COLUMN's own
-// input function (#646): `real = 'abc'` is 22P02 "invalid input syntax for
-// type real", `real = '1e400'` is 22003 "\"1e400\" is out of range for type
-// real", and the message names the literal's TEXT VERBATIM — the cast that
-// fails is text->real, so there is nothing to expand. Both verified live on
-// postgres:17-alpine. Before this, kernel.toFloat64 had no string arm at all
-// and answered 0.0 for every such constant, so the predicate silently became a
-// comparison against zero.
-//
-// An UNQUOTED numeric constant is `numeric`, and the only way it fails is
-// FLOAT32's range: the #549 fix narrows each multi-element IN literal to
-// float32, and a literal that does not FIT a real narrows onto a value that
-// does — one past FLT_MAX becomes +Inf and would MATCH a genuine +Inf row, one
-// below real's smallest denormal becomes 0.0 and would match every zero row
-// (`real IN (1e-46, 3.1)` answered with the zero row before the underflow arm
-// existed). PostgreSQL raises 22003 for the whole predicate rather than
-// dropping the element, and it names the DIGITS there, because the cast that
-// fails is numeric->real and a numeric's text is its digits. A literal that is
-// itself ±Inf is a legal real value, not an overflow, and does not reach here.
+// floatConstError distinguishes quoted unknown literals from unquoted numeric ones.
+// Quoted text uses the column's own input function (#646): syntax is 22P02,
+// range is 22003, and the message keeps the literal text verbatim.
+// Unquoted numeric literals fail only FLOAT32 range narrowing (#549), including
+// underflow to zero and overflow to infinity; refuse the whole predicate, never
+// drop an IN element or let a narrowed value match a genuine zero/infinity row.
+// Numeric error messages name expanded digits. Literal ±Inf is legal, not overflow.
+// See docs/internals/float-filter-literal-refusal.md for the design.
 func floatConstError(typ batch.TypeID, value any, litText string) error {
 	if value == nil {
 		return nil

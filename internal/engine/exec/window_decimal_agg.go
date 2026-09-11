@@ -6,27 +6,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// Windowed SUM/AVG over a DECIMAL answer what the GROUPED SUM/AVG answer
-// (#586, #475, ADR-0024 item 2).
-//
-// `SUM(d) GROUP BY g` and `SUM(d) OVER (PARTITION BY g)` are the same question
-// written twice, and a BI tool flips between the two spellings freely. Until
-// this file existed they disagreed about the TYPE of the answer and about its
-// DIGITS: the grouped form kept an exact Int128 accumulator and declared
-// DECIMAL(38,s) (#455, ADR-0012 item 9), while the window accumulated in
-// float64 through vecFloat64 and declared FLOAT64, so everything past ~16
-// significant digits was gone before any consumer saw it.
-//
-// The rules here are ADR-0012 item 9's, unchanged:
-//
-//	SUM(DECIMAL(p,s)) -> DECIMAL(38, s)
-//	AVG(DECIMAL(p,s)) -> DECIMAL(38, min(s+4, 38)), exact Int128 division
-//	                     rounded half away from zero
-//	overflow          -> SQLSTATE 22003, never a wrapped total
-//
-// The declared precision is the carrier's full width rather than the input's,
-// because a sum genuinely exceeds its column's precision and a narrower
-// declaration would hand the parquet writer a leaf too small for the value.
+// Windowed DECIMAL SUM/AVG must match grouped values and declarations
+// (#586, #475, ADR-0024 item 2; #455, ADR-0012 item 9).
+// SUM(DECIMAL(p,s)) returns DECIMAL(38,s); AVG returns DECIMAL(38,min(s+4,38)),
+// using exact Int128 division rounded half away from zero.
+// Overflow raises 22003, never a wrapped total (ADR-0012 item 9).
+// Declare the carrier's full precision, not the input's: accumulated values may
+// exceed the input precision and must fit the writer's declared leaf.
+// See docs/internals/window-decimal-sum-avg-contract.md for the design.
 
 // WindowDecimalAggMeta is the (precision, scale) a windowed SUM or AVG
 // declares over a DECIMAL input of scale inScale. It is the window's copy of
@@ -53,31 +40,15 @@ func windowAccumulates(f WindowFunc) bool {
 	return f == WinSum || f == WinAvg
 }
 
-// windowDecimalSumOverflow reports a windowed DECIMAL SUM that left the
-// 128-bit range. It is aggregate.go's decimalSumOverflow one operator over,
-// with the same SQLSTATE (22003, PostgreSQL's numeric_value_out_of_range) and
-// the same position: a wrapped total is a different number wearing the right
-// type, so the query fails instead of answering it (ADR-0012 item 9,
-// ADR-0024 item 4).
-//
-// The refusal is scoped to ONE FRAME, and inside that frame it is item 9's
-// rule verbatim: the frame's own rows are added in order, and a running total
-// that leaves the range fails even if later rows would bring it back. That is
-// the same answer `SUM(d) ... GROUP BY` gives for the same set of rows, which
-// is the whole contract this file exists to keep.
-//
-// It is NOT sticky across the SLIDE, and an earlier draft of this comment
-// claiming it was described a defect rather than a rule. A sliding
-// accumulator carries state between frames, and a transient it holds while
-// moving from one frame to the next belongs to NEITHER of them: adding the
-// arriving row before subtracting the departing one made
-// `SUM(d) OVER (ROWS BETWEEN CURRENT ROW AND CURRENT ROW)` over three
-// 9x10^37 values hold 1.8x10^38 between two frames that each hold 9x10^37,
-// and refuse a query PostgreSQL and the grouped spelling both answer.
-// exactFrameAcc.slide retracts before it adds and resets outright between
-// disjoint frames; windowExactFrames RECOMPUTES any frame whose incremental
-// state flagged overflow, and refuses only if the frame's own rows overflow
-// on their own.
+// windowDecimalSumOverflow refuses exact frame overflow with SQLSTATE 22003
+// (ADR-0012 item 9, ADR-0024 item 4), never a wrapped total.
+// Within one frame, add its rows in order: a running total outside the range fails
+// even if later rows would bring it back, matching grouped SUM over those rows.
+// Overflow must not stick across slides: transition intermediates belong to neither frame.
+// exactFrameAcc.slide retracts before adding and resets between disjoint frames.
+// windowExactFrames recomputes flagged frames, refusing only when the frame's
+// own ordered accumulation overflows.
+// See docs/internals/window-frame-overflow-boundary.md for the design.
 func windowDecimalSumOverflow(col string) error {
 	if col == "" {
 		col = "sum"
@@ -98,32 +69,14 @@ func windowDecimalAvgUnrepresentable(col string) error {
 		"the range DECIMAL(38) can represent", col)
 }
 
-// windowExactCells is one input column read as EXACT Int128 cells, resolved
-// ONCE per partition (ADR-0002's typed-kernel rule: resolve the type once,
-// then dispatch to a typed reader, never per row).
-//
-// Three carriers reach it and they are the three the engine stores an exactly
-// summable number in: a DECIMAL's Int128 array, an int64 array, and an int32
-// array (INT32 and — since #953 — the int4-domain PORT and PROTOCOL). The
-// DECIMAL arm hands back the stored cell untouched, which is what keeps the
-// #586 path byte-identical; the integer arms widen at scale 0, which is
-// exactly what kernel.sumRowInt64Decimal does for the GROUPED spelling
-// (#784).
-//
-// MEASURED RESIDUAL, and it is a filing candidate for a perf arc rather than a
-// correctness question. Reading a DECIMAL cell through this struct rather than
-// indexing the slice directly costs the exact-DECIMAL window path — #586's,
-// which predates #987 — 11.6% to 19.4% on BenchmarkWindowFrameSlide's DECIMAL
-// cells (p <= 0.001, benchstat, -count=6 twice a side, quiet box), against a
-// float64 control that moves +3% to +5% with no code change of its own.
-// Allocations are unchanged: 1 alloc/op, 4 KiB, every cell, both sides.
-//
-// An earlier number is in the tree's history and is WRONG: 90f4651f's body
-// records 3.3%-9.0% from the first measurement round, and the re-measure on a
-// quiet box is the range above (#987 review, P2). The reader is what lets one
-// accumulator serve the DECIMAL and the integer arms, so removing it means
-// two accumulators again; an attempt to make it neutral in-place could not
-// show neutrality against that control and was reverted rather than shipped.
+// windowExactCells resolves one column to exact Int128 cells once per partition
+// under ADR-0002's typed-kernel rule, never resolving the type per row.
+// DECIMAL returns stored cells unchanged at its own scale (#586).
+// Int64 and int32 storage widen at scale zero, including INT32 and int4-domain
+// PORT/PROTOCOL (#953), matching grouped kernel.sumRowInt64Decimal (#784).
+// This shared reader serves DECIMAL and integer accumulators; measured overhead
+// and the performance follow-up are recorded in the design (#987).
+// See docs/internals/window-exact-cell-reader.md for the design.
 type windowExactCells struct {
 	dec   []batch.Int128
 	i64   []int64
@@ -161,32 +114,15 @@ type exactFrameAcc struct {
 	overflow bool
 }
 
-// slide advances the accumulator from its current frame to [lo, hi).
-//
-// The ORDER is the correctness-relevant part, and it is retract-then-add.
-// Adding first means the accumulator transiently holds
-// sum(previous frame + arriving rows) — a value that belongs to NEITHER
-// frame — and for an exact carrier that transient can leave the range and
-// refuse a query both spellings answer: three DECIMAL(38,0) rows of 9x10^37
-// under `ROWS BETWEEN CURRENT ROW AND CURRENT ROW` held 1.8x10^38 between two
-// frames that each hold 9x10^37. Retracting first bounds every intermediate
-// by a PREFIX of the target frame, so the only overflow left is one the
-// frame's own rows produce — which is exactly what the grouped SUM over those
-// rows reports (ADR-0012 item 9).
-//
-// DISJOINT frames reset instead of retracting to empty. When lo has passed
-// the last row this accumulator added, nothing carries over, and walking the
-// subtraction chain down to zero would re-introduce intermediates unrelated to
-// either frame (removing a large negative row from a total near the ceiling
-// overflows on the way out). Resetting is exact, cheaper, and — because every
-// frame bound is non-decreasing in the row index — costs O(sum of frame
-// widths) over the partition, which is bounded by the partition's own length:
-// a frame disjoint from its predecessor advances lo by at least its own width.
-//
-// Both directions stay CHECKED even so. A retract is a subtraction of a value
-// the accumulator already holds, and an unchecked one would let a wrapped
-// intermediate become a plausible-looking total; the flag it raises is not
-// final, since windowExactFrames recomputes the frame before refusing.
+// slide advances to [lo,hi), retracting before adding and resetting disjoint frames.
+// Do not transiently sum the previous frame plus arriving rows: that can overflow
+// when both frames fit. Disjoint frames must reset instead of subtracting to empty,
+// which can also create unrelated overflowing intermediates (ADR-0012 item 9).
+// Frame bounds move only forward, so disjoint reset work is bounded by partition length.
+// Check both subtraction and addition: neither may silently wrap.
+// An overflow flag is provisional; windowExactFrames recomputes the target frame
+// before deciding whether its own ordered sum must refuse.
+// See docs/internals/exact-window-frame-slide.md for the design.
 func (a *exactFrameAcc) slide(in *batch.Vector, cells windowExactCells, start, lo, hi int) {
 	if hi < lo {
 		hi = lo
@@ -435,38 +371,15 @@ func resolveWindowExactCells(winVec, inputVec *batch.Vector) (windowExactCells, 
 	return windowExactCells{i32: inputVec.Int32Data}, true
 }
 
-// windowAccOutputType is Window.retypeValueColumns' rule for SUM and AVG: the
-// output type is the ACCUMULATOR's, not the input's. A DECIMAL input makes it
-// DECIMAL; an INTEGER input takes PostgreSQL's own result type, which is
-// exec.IntegerAccOutputType — bigint for sum(int4), numeric for sum(int8) and
-// for avg of either; everything else keeps FLOAT64.
-//
-// The last clause is not decoration. A stage spec built before this change, or
-// a planner declaration resolved against a different scan, can declare DECIMAL
-// over an input that is not one; writing float sums into a DECIMAL vector's
-// Int128 array would produce values off by a power of ten with nothing to
-// report it, so the declaration is corrected DOWN as well as up.
-//
-// The INTEGER arm is #987 and #813: until it existed, `SUM(int8) OVER ()`
-// accumulated in float64, so past 2^53 the total depended on the ORDER the
-// rows arrived in — the same query answered 9007201419001868 or
-// 9007201419001864 on the same data — while `SUM(int8) GROUP BY` next to it
-// answered exactly. One question, two spellings, two numbers. It asks
-// IntegerAccOutputType rather than repeating the rule so that the grouped
-// declaration, this one and the planner's window declaration cannot drift.
-//
-// `declared` is the spec's own type, and it decides ONE case this correction
-// must not touch: a SUM whose plan says bigint over an int64-carried input.
-// Every integer expression in this engine computes in int64 (ADR-0024's
-// widening), so the input VECTOR of `SUM(CASE WHEN … THEN 1 ELSE 0 END)
-// OVER ()` is indistinguishable from `SUM(int8_col + 0) OVER ()`'s — while the
-// PLAN, which still has the argument's syntax, can tell them apart and says
-// bigint for the first (physical.windowComputedArgDecl and
-// physical.integerAccArgWidth, #987 review B1).
-// Widening it back to numeric here would undo that and put the window's OID
-// at 1700 where its grouped twin's is 20. Both arms accumulate in the same
-// Int128 and the bigint arm refuses a total that does not fit rather than
-// wrapping, so keeping the narrower declaration costs no exactness.
+// windowAccOutputType declares SUM/AVG's accumulator: DECIMAL for DECIMAL input,
+// IntegerAccOutputType for integers (SUM(int4) bigint, SUM(int8)/AVG numeric),
+// FLOAT64 otherwise. Correct erroneous declarations down as well as up.
+// Share integer typing with grouped aggregates and both planners (#987, #813).
+// Preserve SUM declared bigint over int64 storage: widened integer expressions
+// share that vector type, but the plan retains their syntactic width (ADR-0024;
+// physical.windowComputedArgDecl / physical.integerAccArgWidth).
+// Both integer arms accumulate in Int128; bigint refuses totals outside int64.
+// See docs/internals/window-accumulator-type-correction.md for the design.
 func windowAccOutputType(fn WindowFunc, declared, in parquet.TypeID) parquet.TypeID {
 	if in == parquet.TypeDecimal {
 		return parquet.TypeDecimal

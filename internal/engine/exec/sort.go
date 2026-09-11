@@ -1179,36 +1179,15 @@ func (h *topNHeap) Pop() any {
 	return x
 }
 
-// appendKeyValue writes a value to a byte buffer without fmt.Sprint overhead.
-//
-// This is the k-way MERGE key for drained partial aggregate runs
-// (appendSerializedKey, aggregate_partial_drain_cursor.go), so a type that
-// falls through here does not merely sort oddly — every group of that type
-// merges into ONE. The default used to be the constant string "<unknown>",
-// which did exactly that to a BYTES group key: distinct in memory, collapsed
-// into a single group the moment memory pressure forced a drain, so the same
-// query answered differently depending on how much memory it had.
-//
-// Boxed forms reaching here come from Vector.GetValue: bool, int32, int64,
-// float32, float64, string (STRING and every type that renders as text —
-// IPV6, CIDR, UUID, IPV4, MAC, DATE, DECIMAL), []byte (BYTES), []any (ARRAY),
-// map[string]any (ROW, MAP) and []float32 (VECTOR).
-//
-// The encoding must be INJECTIVE, not merely deterministic. Two group keys
-// that share bytes are one group after a drain, and the query answers
-// differently depending on how much memory it had — the same failure the
-// "<unknown>" constant caused, reached by a subtler route. `%v` is not
-// injective for any container (ARRAY["a b"] and ARRAY["a","b"] both print
-// `[a b]`; ROW{a:"b c:d"} and ROW{a:"b",c:"d"} both print `map[a:b c:d]`),
-// and a raw byte run is not injective against serializeKey's single 0x00
-// separator (BYTES "a\x00" ‖ "b" and BYTES "a" ‖ "\x00b" are the same five
-// bytes). So every variable-width form is length-prefixed and every
-// container walks its elements, mirroring appendColumnValue's framing.
-//
-// The fixed-width text forms — the integers, floats and bools — are
-// unchanged: they contain no 0x00, so the separator still delimits them, and
-// appendTypedIntKey (aggregate_partial_drain_cursor.go) writes the same bytes
-// for an int-mode key without boxing it.
+// appendKeyValue encodes Vector.GetValue boxes for partial-run merge keys;
+// unequal group values must not collapse to identical bytes after a drain.
+// Support bool, int32/int64, float32/float64, string-rendered scalars, []byte,
+// []any, map[string]any and []float32. Never use a constant unknown key or fmt rendering
+// for containers. Length-prefix every variable-width form and walk container elements
+// so embedded NULs cannot alias the top-level 0x00 separator.
+// Integer/float/bool text contains no NUL and remains separator-delimited;
+// appendTypedIntKey must write the same integer bytes without boxing.
+// See docs/internals/boxed-partial-merge-key-framing.md for the design.
 func appendKeyValue(buf []byte, v any) []byte {
 	if v == nil {
 		return append(buf, "<null>"...)
@@ -1253,30 +1232,14 @@ func appendKeyValue(buf []byte, v any) []byte {
 	}
 }
 
-// appendKeyValueWithMeta is appendKeyValue with the value's DECLARED column
-// type available, so a CIDR value re-keys through kernel.CidrOrderKey even
-// nested inside an ARRAY, MAP or ROW — where appendKeyValue's plain `any`
-// switch has no type tag to tell a CIDR string from an ordinary one, the same
-// gap appendSerializedKey already closes for a bare top-level CIDR column.
-//
-// Without this arm, GROUP BY arr_cidr agreed with the un-spilled columnar key
-// (appendColumnValue → appendListKey → appendNestedElem, which walks the real
-// *batch.Vector tree and re-keys every CIDR leaf already) only until a
-// cross-batch, cross-worker or spill-boundary MERGE went through this boxed
-// path instead: '10.0.0.1' and '10.0.0.1/32' inside the array serialized to
-// two different byte strings, so a k-way merge of otherwise-identical groups
-// answered two groups where the un-spilled path already answers one.
-//
-// Every leaf type this does not name keeps appendKeyValue's existing
-// encoding exactly — this only intercepts CIDR and recurses into a
-// container's own element/field metadata to find one.
-//
-// The recursion goes through appendKeyElemWithMeta, NOT back through this
-// function. A container's elements are framed (a kind tag, then a fixed-width
-// or length-prefixed payload) precisely because there is no separator down
-// there; recursing here instead wrote each element in the TOP-LEVEL encoding,
-// which for an int64 is bare decimal digits, and ARRAY[1,23] and ARRAY[12,3]
-// became the same key.
+// appendKeyValueWithMeta re-keys CIDR through kernel.CidrOrderKey using declared
+// metadata, including leaves nested in ARRAY/MAP/ROW, so columnar and boxed keys
+// agree across batch, worker and spill merges.
+// Other leaf types retain appendKeyValue's encoding unchanged.
+// Recurse through appendKeyElemWithMeta, never this top-level encoder: container
+// elements need kind tags and fixed-width/length-prefixed payloads without separators;
+// bare top-level digits would make ARRAY[1,23] and ARRAY[12,3] the same key.
+// See docs/internals/nested-declared-merge-key-framing.md for the design.
 func appendKeyValueWithMeta(buf []byte, v any, meta *parquet.Column) []byte {
 	if meta == nil || v == nil {
 		return appendKeyValue(buf, v)

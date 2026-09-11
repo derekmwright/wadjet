@@ -673,32 +673,15 @@ func (h *HashJoin) tryEnableIntKey(b *batch.RecordBatch) {
 	}
 }
 
-// nullBuildKey records a build row whose join key is NULL — a row the hash
-// index must NOT hold, because NULL equals nothing and no probe may match it.
-//
-// Skipping the index insert is the whole of "must not match". Skipping the
-// row is a different claim, and two consumers need it not to be made:
-//
-//   - A RIGHT / FULL OUTER / RIGHT ANTI join owes every unmatched build row a
-//     NULL-padded output row, and FlushUnmatched / FlushAntiMatched enumerate
-//     the ARENA. The integer key paths used to `continue` past the arena
-//     append as well, so those rows were invisible to the flush and vanished
-//     — while the serialized-key path appended them and answered correctly,
-//     which is why the same query was right with a TEXT key and wrong with a
-//     BIGINT one (#496). storeRows=true appends the row with arenaNext = -1:
-//     a chain of one that no hash bucket points at. arenaMatched is sized
-//     from len(arena) after every append, so the extra entries are safe.
-//
-//   - A null-aware anti join needs to know the build contained a NULL AT ALL,
-//     because that alone makes `NOT IN`'s answer UNKNOWN for every probe row
-//     it did not otherwise match (#507). That is recorded on every path,
-//     including the key-only builds that store no rows.
-//
-// buildRows counts it: it is a real build row. (nullBuildKeyOnly is the
-// key-only variant, for the builds that store no rows and already count every
-// arriving row in bulk.)
-//
-// Caller must hold h.mu on the paths that take it.
+// nullBuildKey records a real build row and increments buildRows, but never indexes it:
+// NULL equals nothing and must not match a probe.
+// RIGHT/FULL OUTER/RIGHT ANTI still owe its padded output, so retain an unindexed
+// arena entry with next=-1; matched storage must cover all arena entries (#496).
+// Every build path, including key-only, must record buildHasNullKey for NOT IN's
+// UNKNOWN result on otherwise-unmatched probes (#507).
+// nullBuildKeyOnly sets the flag without storage or recounting bulk-counted arrivals.
+// Caller must hold h.mu on paths that take it.
+// See docs/internals/join-null-build-key-retention.md for the design.
 func (h *HashJoin) nullBuildKey(ref buildRef) {
 	h.buildHasNullKey = true
 	h.buildRows++
@@ -958,33 +941,14 @@ func (h *HashJoin) intProbeKey(in *batch.RecordBatch, row int) (int64, bool) {
 // same units.
 const joinIndexBytesPerRow = 40
 
-// preSizeRowHint is how many build rows the arena and hash index may be
-// pre-allocated for, which is NOT the same question as how many rows the build
-// expects (#823).
-//
-// BuildRowHint is the planner's estimate of the WHOLE build. Pre-sizing to it
-// charges the tracker — through reconcileHashMemory's ForceReserve, which
-// cannot fail and has no ceiling — for capacity that holds nothing yet: a
-// 5,000-row hint put 191,072 bytes on the ledger on a batch of 20 rows, 36% of
-// a 512 KiB budget, before the build had stored anything. Every later Reserve
-// in the query was then measured against a floor that described a build that
-// had not happened, and the query refused for want of room the join was only
-// holding a reservation on.
-//
-// So the pre-size is bounded by the room that EXISTS when the build starts —
-// what the budget still has, less the arrival batch that is about to be
-// charged. Sizing it that way is what keeps the pre-allocation from being the
-// charge that crosses the line: it can only claim room that is free and that
-// nothing else is already committed to. The structures grow on demand past the
-// cap (both hash tables round up to a power of two on CheckGrow; the arena
-// appends), so it costs a few rehashes on a build genuinely bigger than its
-// budget's headroom, and costs nothing at all when there is room — on an
-// unbudgeted tracker, or any budget with headroom to spare, this returns the
-// hint unchanged and no pre-allocation changes.
-//
-// The other half of #823 — the index for rows that HAVE arrived being
-// unreleasable — is fixed by per-partition index state (join_index_parts.go),
-// so a build that spills does now give its index back.
+// preSizeRowHint bounds initial arena/index capacity, not estimated total build rows (#823).
+// Limit BuildRowHint to budget headroom minus the arrival's hashBuildBytes charge,
+// using joinIndexBytesPerRow; no hint returns zero, no budget or ample room keeps the hint.
+// Do not pre-charge capacity for an entire future build through unbounded ForceReserve.
+// Hash tables and arena still grow on demand beyond this cap.
+// Per-partition index ownership separately releases indexes for evicted rows
+// (join_index_parts.go).
+// See docs/internals/join-index-presizing-headroom.md for the design.
 func (h *HashJoin) preSizeRowHint(b *batch.RecordBatch) int {
 	if h.BuildRowHint <= 0 {
 		return 0
@@ -2375,30 +2339,13 @@ func (h *HashJoin) FixKeyAssignment() bool {
 
 	// Rebuild hash index if keys were swapped
 	if needsRebuild {
-		// A build that stores NO ROWS has nothing to rebuild from, and
-		// rebuilding anyway destroys what it does hold. SemiAntiKeyOnly —
-		// every unfiltered semi/anti join (physical/plan.go, "enable key-only
-		// build") — populates the key index and the bloom and leaves
-		// h.buildBatches empty by design; the distinct-pair NE build
-		// (join_semianti_ne.go) is the same shape. The rebuild below resets
-		// buildRows to 0 and buildHasNullKey to false and then recomputes
-		// them by walking h.buildBatches, which for these builds is zero
-		// iterations: both facts stay at their zero values, and the fresh
-		// empty index replaces the populated one.
-		//
-		// buildHasNullKey is not bookkeeping. It is the whole of NOT IN's
-		// three-valued rule (#507): a NULL anywhere in the build makes the
-		// answer UNKNOWN for every probe row that did not otherwise match,
-		// so losing it turns `x NOT IN (…)` from "no rows" into "every row"
-		// — silently (#572).
-		//
-		// Nothing here needs rebuilding. The key SWAP above stands, because
-		// probe-side resolution needs the corrected names, and the
-		// arrival-time index stays authoritative: the key-only builds
-		// resolve their build key through columnIndexFallback, which maps the
-		// misassigned name to the same physical build column (had it resolved
-		// to nothing, the build itself would have failed). That is the same
-		// argument the evicted-partition guard below makes.
+		// Keep the key swap for probe resolution, but never rebuild key-only or distinct-pair
+		// NE state from empty buildBatches. The arrival-time index and bloom are authoritative.
+		// Rebuilding would reset buildRows and buildHasNullKey and replace the populated index;
+		// losing the NULL flag changes NOT IN's UNKNOWN result into emitted rows (#507, #572).
+		// Arrival-time columnIndexFallback already resolved the swapped name to the same
+		// physical build column; an actual miss would have failed build.
+		// See docs/internals/key-only-join-swap-rebuild-boundary.md for the design.
 		if h.SemiAntiKeyOnly || h.neActive {
 			return true
 		}
@@ -2600,28 +2547,14 @@ func (h *HashJoin) resolveProbeKeyIdx(b *batch.RecordBatch) {
 	h.probeResolved.Store(true)
 }
 
-// buildProbeKey fills p.keyBuf with the serialized probe key for a row and
-// reports whether that key may MATCH. Uses the per-probe keyBuf to avoid races
-// when multiple cloned probes execute in parallel.
-//
-// A row holding a NULL in any key column reports false: SQL's `=` is UNKNOWN
-// against a NULL, so an equi-join must not pair it with anything — not even
-// with another NULL. The key bytes are still filled in, because the partition
-// router (probePartition, join_spill.go) needs a deterministic partition for
-// every row including that one, exactly as the integer paths return partition
-// 0 for a key they refuse to match.
-//
-// Without the flag, a NULL serialized to a lone 0x01 flag byte with no
-// payload, so two NULL rows produced IDENTICAL key bytes and the string hash
-// table — which matches keys by byte equality — joined them. The integer fast
-// paths (intProbeKey, dualIntKeyFromVectors) have always refused a NULL key,
-// so which answer a query got depended on whether its key columns happened to
-// be integers (#459).
-//
-// An UNRESOLVABLE key column (idx < 0) is deliberately NOT a NULL here: it
-// keeps its flag byte and its matchability, because folding it in would turn
-// a join whose key column is missing from the probe schema from "matches
-// everything" into "matches nothing" — a different bug, in a different place.
+// buildProbeKey fills the per-probe keyBuf, avoiding races across cloned probes,
+// and reports whether the row can match. Any NULL key column makes it unmatchable,
+// even against another NULL (#459).
+// Still encode NULL keys for deterministic spill routing, as integer paths route
+// unmatchable NULL keys to partition zero.
+// An unresolved column (idx<0) deliberately keeps its flag byte and matchability;
+// it is not treated as a SQL NULL. Changing that missing-schema behavior is separate work.
+// See docs/internals/serialized-probe-key-null-matchability.md for the design.
 func (p *HashJoinProbe) buildProbeKey(b *batch.RecordBatch, row int) bool {
 	h := p.join
 	h.resolveProbeKeyIdx(b)
@@ -2700,30 +2633,14 @@ type HashJoinProbe struct {
 	// in multi-way join pipelines.
 	OutputFilter map[string]bool
 
-	// OutputExcludeProbe and OutputExcludeBuild are the columns this join
-	// materialized FOR ITSELF and must not publish, whatever a consumer asks
-	// for — a decorrelated LATERAL's correlation key. They are keyed by the
-	// column's ORDINAL IN ITS OWN SIDE's batch, which is the identity a NAME
-	// cannot be:
-	//
-	//   - reading is not minting, so a table may already STORE a column
-	//     called `__key_0` (ADR-0012), and excluding by name dropped the
-	//     USER's column — `SELECT o.__key_0` read NULL where PostgreSQL reads
-	//     its values;
-	//   - narrowing that to "a name that is also a JOIN KEY of its own side"
-	//     is defeated by the query that CORRELATES ON the stored column,
-	//     which is exactly when it is a key.
-	//
-	// The value is the name the PLANNER expects at that ordinal, and it is a
-	// SAFETY CHECK rather than the identity: when the plan's model of a
-	// side's emitted order disagrees with the runtime, the column is KEPT.
-	// An extra column is a divergence a gate sees; a dropped one is a user's
-	// data gone.
-	//
-	// Set by the planner from logical.Node.HiddenJoinCols, whose ordinals are
-	// computed against the model of the side that is actually in force — the
-	// logical subtree on the single-process path, the STAGE's stream on the
-	// distributed one, where a Project emits no stage.
+	// OutputExcludeProbe/Build hide join-owned columns regardless of consumer requests.
+	// Identity is the ordinal in its own side, never name or join-key membership:
+	// a user may store and correlate on a column named __key_0 (ADR-0012).
+	// The map value is the planner's expected name, a safety check only: keep the column
+	// if runtime order disagrees, rather than risk dropping user data.
+	// The planner derives logical.Node.HiddenJoinCols ordinals from the actual side model:
+	// logical subtree locally, stage stream on the DAG where Project emits no stage.
+	// See docs/internals/join-hidden-column-ordinal-identity.md for the design.
 	OutputExcludeProbe map[int]string
 	OutputExcludeBuild map[int]string
 
@@ -3347,28 +3264,13 @@ func (p *HashJoinProbe) emitViewOutput(in *batch.RecordBatch, outSchema []parque
 	return out
 }
 
-// inlineIntProbe is the fast probe path for single int key inner joins.
-// It inlines the hash table lookup with typed data access, eliminating
-// per-row function call overhead from lookupBuild/intProbeKey/intKeyFromVector.
-// The probe logic is fully inlined (no closure) to avoid heap allocation of
-// the closure + captured pairs slice, which saves ~2.5GB of allocations at SF1.
-//
-// It fills at most limit-len(pairs) pairs and returns done=false when it
-// stopped short; p.res then names the probe row and the chain position to
-// resume from.
-//
-// The loops write through a pre-sized window (buf[:limit], n) rather than
-// appending, so `n >= limit` — the test that suspends the fan-out — is the
-// same compare append already made against cap. Nothing is added per probe
-// row either: a resumed chain is drained by resumeIntChain before the typed
-// loops start, so they still begin at a row boundary. What the chain walk
-// actually compiles to on amd64 is the arena/arenaNext load pair, the
-// 16-byte store, and three compares — `ref >= 0`, the suspend test, and a
-// bounds check on buf[n] that the prover does not fold into the suspend test
-// (it knows n != limit, not n < len(buf)). Measured against the unbounded
-// version: 1:1 fan-out is unchanged, 1:4 costs ~1.5% best-case, and 1:64 is
-// ~45% faster because pairsBuf stops growing. Callers guarantee
-// cap(pairs) >= limit.
+// inlineIntProbe performs typed, closure-free single-integer-key INNER probing.
+// Append at most limit-len(pairs) pairs; done=false leaves p.res at the probe row
+// and chain position to resume. Caller guarantees cap(pairs)>=limit.
+// Write through a pre-sized buf[:limit] window with the suspension limit checked.
+// Drain a resumed chain through resumeIntChain before entering typed loops,
+// so the loops always start at a row boundary.
+// See docs/internals/bounded-inline-integer-join-probe.md for the design.
 func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBatch, pairs []matchPair, limit int) ([]matchPair, bool) {
 	h := p.join
 	parts := h.parts
@@ -4476,28 +4378,13 @@ expand:
 	return out, nil
 }
 
-// residentBuildBatch returns the in-memory build batch an arena entry points
-// at, or nil when that entry's rows are no longer resident.
-//
-// Two ways an entry stops being resident, and both are answers rather than
-// errors here:
-//
-//   - Its PARTITION WAS EVICTED. spillOneInMemoryPartition writes the
-//     partition's batches to disk and nils their h.buildBatches slots, leaving
-//     the arena entries that point at them in place — its correctness argument
-//     covers the in-memory PROBE path (partition routing diverts a probe row
-//     for a spilled partition to disk before any hash lookup), and the
-//     build-side flushes are not that path. They walk the arena directly, so
-//     they used to dereference the nil slot and take the whole query down with
-//     a nil pointer panic on any spilling RIGHT/FULL/RIGHT-ANTI join (#550).
-//     Those rows are NOT lost by skipping them: NextFlush replays every
-//     spilled partition from disk through a temp join whose own flush emits
-//     them, and that replay reads the partition's COMPLETE contents — the
-//     batches evicted here plus every row that arrived for the partition
-//     afterwards, which was never indexed and has no arena entry at all.
-//     Emitting them here as well would double them.
-//   - The index outruns the slice, which nothing is expected to do; it was
-//     already tolerated by two of the three callers and is kept.
+// residentBuildBatch returns the referenced resident batch or nil for evicted
+// partitions and out-of-range indices; both are tolerated by build-side flushes (#550).
+// Flushes walk arenas directly, unlike key-routed probes, and must skip nil slots.
+// NextFlush replays each spilled partition's complete contents through a temp join,
+// including later arrivals with no arena entry; its own flush emits those rows.
+// Emitting them from the resident flush as well would duplicate them.
+// See docs/internals/resident-join-build-flush.md for the design.
 func (h *HashJoin) residentBuildBatch(ref buildRef) *batch.RecordBatch {
 	if int(ref.batchIdx) >= len(h.buildBatches) {
 		return nil
@@ -4813,30 +4700,12 @@ func (p *HashJoinProbe) outputSchemaWithMapping(leftSchema []parquet.Column) ([]
 		p.OutputFilter, p.OutputExcludeProbe, p.OutputExcludeBuild)
 }
 
-// outputFilterMatcher answers "does the consumer need this join output column"
-// under the one identity a name has: a column matches when its NAME FOLDS to a
-// name the filter asks for and the two agree on the RELATION — byte-exact when
-// both spell one, and either side may leave it off.
-//
-// The three lists this replaces compared BYTES. That is right until two
-// relations of one join carry the same column name in different cases, which
-// they may: an unquoted reference folds to lower case and a delimited one does
-// not (#731), so `rvya("MixedCol")` joined to `rvyb(mixedcol)` publishes
-// `[k mixedcol rvya.k rvya.MixedCol]` — the join qualifies the colliding build
-// column by relation, which is ADR-0026's identity, (relation, folded name).
-// The consumer asks for the bare `mixedcol` (what the pruning pass records) or
-// for `rvya.mixedcol` (what the reference itself spells), and NEITHER matched
-// `rvya.MixedCol` byte for byte. The column was dropped, the reference above
-// fell back to the bare name, and `SELECT rvya.MixedCol FROM rvyb, rvya`
-// answered rvyb's 900 where PostgreSQL says 100 — a silent wrong answer, on
-// every arm, whenever the CamelCase relation was not written first.
-//
-// The fold belongs here and not only in the reference because this list is the
-// one that decides whether the column EXISTS downstream: a reference cannot
-// resolve what the join did not ship. Keeping a column the filter did not name
-// exactly costs bytes, never an answer, so the qualifier is matched
-// permissively in both directions — the asymmetry expr.ResolveColumnRef and
-// exec.columnIndexFallback already resolve.
+// outputFilterMatcher retains a column when its folded name matches the filter
+// and relations agree byte-exactly when both are present; either qualifier may be absent.
+// Fold here, before pruning can remove the referenced column (#731, ADR-0026).
+// Permit qualified/bare matching in both directions, as reference resolvers do:
+// retaining an extra column costs bytes, but dropping it can bind a different arm.
+// See docs/internals/join-output-filter-name-identity.md for the design.
 type outputFilterMatcher struct {
 	// folded bare name -> the relations that asked for it; "" = asked bare.
 	byFoldedName map[string][]string

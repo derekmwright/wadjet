@@ -6,49 +6,16 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// Boxed comparison of Vector.GetValue values, driven by the column's
-// DECLARATION.
-//
-// # The defect this replaces (#444)
-//
-// There were two comparators for one value. The columnar one
-// (kernel.CompareValuesAt) orders a ROW's fields POSITIONALLY, which is
-// PostgreSQL's record_cmp and what ORDER BY, the sort-merge join and the
-// in-memory window all take. The boxed one (compareAny) ordered them by
-// field NAME, because Vector.GetValue renders a ROW as a map[string]any and a
-// Go map has no declaration order to read. The two therefore disagreed on
-// every ROW column whose declared field order is not alphabetical — `ROW(b
-// INT64, a STRING)` sorted on `b` down one path and on `a` down the other —
-// and the same split hit DECIMAL, which boxes as its formatted string and so
-// ordered "10.001" before "2.0002" lexicographically where the columnar path
-// orders it numerically.
-//
-// # What replaces it
-//
-// One rule, stated once: the order is the declared column's, exactly as
-// kernel/container_sort.go documents it. The boxed comparator is RESOLVED
-// FROM the declaration — a closure per column, built once, no per-value type
-// switch (the codebase's typed-kernel rule applied to the boxed path) — so a
-// ROW walks `col.Fields` in order, an ARRAY/MAP walks `col.ElementType`, and
-// a DECIMAL parses back to its unscaled Int128 and compares numerically.
-// Every production caller of the boxed path has the declaration: the
-// row-oriented window spill and its MIN/MAX deque take it from `w.schema`,
-// and the global (empty-PARTITION-BY) window evaluator from the pass schema
-// it already resolves input indices against.
-//
-// compareAny remains, as the DYNAMIC comparator for a value whose declaration
-// is not available, and this file bottoms out in it for every scalar. Its ROW
-// arm still orders by name, because the box is genuinely all there is to go
-// on there — but no production path reaches it any more, which is what makes
-// the positional rule the only one that decides a query's answer.
-//
-// # NULLs
-//
-// Two levels, the same two kernel/container_sort.go draws. A COLUMN-level
-// NULL sorts FIRST (newBoxedCompare), matching compareAny's long-standing
-// top-level rule and the nulls-first sort resolvers. An ELEMENT NULL inside a
-// container sorts LAST (boxedElemCompare), which is PostgreSQL's
-// array_cmp/record_cmp rule and what compareElemAt applies columnar-side.
+// Boxed Vector.GetValue comparison must follow the declared column's order (#444),
+// matching kernel/container_sort.go and kernel.CompareValuesAt.
+// Resolve a closure once per column: ROW fields compare positionally by col.Fields,
+// ARRAY/MAP by ElementType, DECIMAL numerically via its unscaled Int128.
+// Window spill/deque and global-window callers must supply their schema declaration.
+// compareAny remains the dynamic fallback without declaration; its ROW order is by name,
+// so production ROW comparison must use the declared comparator.
+// Column NULL sorts first (newBoxedCompare); container element NULL sorts last
+// (boxedElemCompare), matching columnar array/record comparison.
+// See docs/internals/declared-column-boxed-comparison.md for the design.
 
 // boxedCompare orders two boxed values from one column. -1, 0 or 1.
 type boxedCompare func(a, b any) int
@@ -87,36 +54,15 @@ func boxedElemCompare(col parquet.Column) boxedCompare {
 	}
 }
 
-// boxedValueCompare returns the null-blind comparator for col's declared
-// type. Only the types whose box loses information the order needs are
-// resolved here; everything else is compareAny, whose dynamic dispatch is
-// already the columnar order.
-//
-// The ADDRESS types below join the containers and DECIMAL because
-// Vector.GetValue renders them for DISPLAY and display order is not address
-// order (#569, the windowed MIN/MAX half of the split #492/#520/#565 closed
-// for the filter and the sort):
-//
-//	IPV4  "9.0.0.1" > "10.0.0.1" as text, < as an address
-//	IPV6  "2001:db8::9" > "2001:db8::10" as text, < as an address
-//	CIDR  '9.255.255.255/32' vs '10.0.0.0/8', and the /mask ranks too
-//	MAC   agrees today, and is re-keyed anyway — see boxedMACCompare
-//
-// The types NOT listed here order correctly under compareAny, and each for a
-// reason worth stating rather than re-keying at a cost:
-//
-//   - UUID renders FIXED-WIDTH LOWERCASE HEX with its dashes at fixed
-//     positions, and hex digits ascend in ASCII, so the text order IS the
-//     raw-byte order sortCompareString gives the column.
-//     TestBoxedCompareAgreesWithColumnarForEveryFlatType pins that
-//     equivalence, so a rendering change cannot quietly break it.
-//   - BYTES boxes as []byte and takes compareAny's bytes.Compare arm — the
-//     same bytewise order sortCompareString gives the column.
-//   - BOOL boxes as a bool: false < true, compareAny's bool arm.
-//   - STRING/the integer-backed types/DATE/TIMESTAMP/DURATION/PORT/PROTOCOL
-//     box as the value the kernel compares, or as a byte-ordered rendering of
-//     it (DATE's ISO form).
-//   - VECTOR boxes as []float32 and takes kernel's float order element-wise.
+// boxedValueCompare is null-blind and declaration-driven where boxing loses order:
+// ROW/ARRAY/MAP, DECIMAL and address types IPv4/IPv6/CIDR/MAC (#569, #492/#520/#565).
+// Address display order is not address order; CIDR includes mask ranking.
+// Other types use compareAny: UUID's fixed-width lowercase hex with fixed dashes
+// has raw-byte order (TestBoxedCompareAgreesWithColumnarForEveryFlatType pins it);
+// BYTES uses bytes.Compare; BOOL orders false < true; VECTOR uses kernel float order.
+// STRING, integer-backed types, DATE/TIMESTAMP/DURATION/PORT/PROTOCOL retain the
+// kernel value or a byte-ordered rendering (DATE's ISO form).
+// See docs/internals/boxed-scalar-order-equivalence.md for the design.
 func boxedValueCompare(col parquet.Column) boxedCompare {
 	switch col.Type {
 	case parquet.TypeRow:

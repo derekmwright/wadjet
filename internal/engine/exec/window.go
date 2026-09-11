@@ -140,45 +140,14 @@ func windowValueFunc(f WindowFunc) bool {
 	return false
 }
 
-// WindowMinMaxType is the output type MIN/MAX over a window declare for an
-// input column of type in, and whether they may re-declare at all.
-//
-// The output type IS the input type, for every type the engine has: MIN/MAX
-// return one of their input's values untouched, so the only declaration that
-// can hold the answer is the one the value came out of. That is
-// minMaxOutputType's rule (aggregate.go) and MIN_BY's before it (#392), and
-// the two must agree — `MIN(c) OVER (PARTITION BY g)` and `MIN(c) … GROUP BY
-// g` are the same question asked twice, and a client that reads both in one
-// result set gets two column types for one answer if they disagree.
-//
-// This used to be an ALLOW-LIST of ten types, and everything else kept the
-// planner's float64 declaration on the reasoning that the in-memory MIN/MAX
-// deque chose its answer with compareAny over Vector.GetValue's box, which
-// has no type tag to route a CIDR to kernel.CidrOrderKey. Both halves of
-// that have since stopped being true: the deque compares COLUMNAR
-// (kernel.CompareValuesAt, right here in computePartitionColumnar) and the
-// spill and global-window paths resolve newBoxedCompare from the declaration
-// (compare_boxed.go). What the declining left behind was not a safe
-// fallback but a FAILED QUERY — Vector.SetValue's #361 guard reporting
-// "cannot store string into FLOAT64 vector" for a shape BI tools generate
-// routinely, over twelve of the twenty-two types (#569): the eight scalars
-// CIDR/UUID/IPV6/IPV4/MAC/DECIMAL/BYTES/BOOL, and ARRAY/ROW/MAP/VECTOR,
-// while the plain aggregate over the identical column answered correctly.
-//
-// Two types' window output differs from the grouped aggregate's — INT32 and
-// FLOAT32. The grouped MIN/MAX widens INT32 to INT64 and FLOAT32 to FLOAT64
-// because its accumulator is the wider type; the window copies an input value
-// rather than accumulating one, so nothing forces the widening and it keeps
-// INT32 and FLOAT32. Those narrower declarations are the PostgreSQL-correct
-// ones: `min(int4)` is `int4` and `min(real)` is `real` there, both ways.
-//
-// The bool result is kept, rather than returning a bare type, because the
-// planner's caller has a second question the exec caller does not: whether
-// to leave windowOutputType's fallback standing for an input type it could
-// not resolve at all. Every type the engine has answers true.
-//
-// Exported because the physical planner declares from the catalog with this
-// same function; two lists would drift.
+// WindowMinMaxType returns the input type and true for every engine type;
+// MIN/MAX copy an input value, including INT32 and FLOAT32, without widening.
+// The bool lets the planner retain its fallback for an unresolved/unsupported type.
+// The physical planner and executor must use this shared declaration function.
+// Declared comparison must agree across columnar, spilled and global windows
+// (kernel.CompareValuesAt / newBoxedCompare), preserving input values (#392, #361, #569).
+// See minMaxOutputType for grouped-aggregate scalar mappings.
+// See docs/internals/window-min-max-result-types.md for the design.
 func WindowMinMaxType(in parquet.TypeID) (parquet.TypeID, bool) {
 	switch in {
 	case batch.TypeBool, batch.TypeInt32, batch.TypeInt64,
@@ -194,43 +163,15 @@ func WindowMinMaxType(in parquet.TypeID) (parquet.TypeID, bool) {
 	return 0, false
 }
 
-// windowOutputColumn declares one window function's output column. When the
-// output IS the input column's own type — which is the whole point of
-// retypeValueColumns below — the input's PARAMETERISATION rides along too.
-//
-// A bare TypeID is not a type for five of the twenty-two. DECIMAL without its
-// scale, VECTOR without its dimension, ARRAY/MAP without an element and ROW
-// without fields are all unusable, and unusable in SILENCE: Vector.SetValue's
-// ARRAY/MAP arm returns early on a nil Child, its ROW arm on nil Children and
-// its VECTOR arm on a zero dimension, over a vector whose null mask was
-// pre-set all-null — so `FIRST_VALUE(arr_col) OVER (...)` wrote nothing and
-// read back NULL on every row (#406). DECIMAL was the quiet one: SetValue
-// re-parses the formatted string GetValue produced against the OUTPUT
-// vector's scale, so a scale-4 column came back through a scale-0 vector as
-// 3 where the row holds 3.0003 — a wrong number, not a missing one.
-//
-// This is the aggregate's aggInputMeta rule (aggregate.go, #392) applied to
-// the window: the metadata travels with the type because it is what makes the
-// boxed value round-trip. The `col.Type != wc.OutputType` guard is the same
-// one, and for the same reason — metadata is copied only when it describes
-// the very type being declared.
-//
-// SUM and AVG are the one family whose (p,s) is NOT the input's. They
-// accumulate rather than copy, so a sum genuinely exceeds its column's
-// precision and an average carries digits the column has no room for:
-// WindowDecimalAggMeta gives them DECIMAL(38,s) and DECIMAL(38,min(s+4,38)),
-// which is what the GROUPED SUM/AVG over the same column declare (#586,
-// ADR-0012 item 9). Declaring them at the input's own (p,s) instead would
-// hand the parquet writer a leaf too small for the value, and would make the
-// two spellings of one question disagree about their answer's type.
-//
-// An INTEGER input reaches the same branch through IntegerAccOutputType: its
-// output type is not its input's either, and `SUM(int8) OVER ()` /
-// `AVG(int*) OVER ()` are DECIMAL(38,0) / DECIMAL(38,4) with no scale to read
-// off the input column at all (#987). That is why the accumulating family is
-// dispatched BEFORE the `col.Type != wc.OutputType` test the copying family
-// takes: for these two the types differ on purpose, and the old test skipped
-// the column outright, which would have declared DECIMAL(0,0).
+// windowOutputColumn carries the input's full parameterization when copying a value:
+// DECIMAL (p,s), VECTOR dimension, ARRAY/MAP element type and ROW fields (#406, #392).
+// Copy metadata only when the input and output types match.
+// Dispatch SUM/AVG before that equality guard: they declare the accumulator's type.
+// WindowDecimalAggMeta gives DECIMAL SUM (38,s), AVG (38,min(s+4,38)), matching
+// grouped aggregates rather than the input's narrower precision (#586, ADR-0012 item 9).
+// IntegerAccOutputType supplies integer aggregate metadata without reading input scale:
+// SUM(int8) is DECIMAL(38,0), AVG(int*) DECIMAL(38,4) (#987).
+// See docs/internals/window-output-column-metadata.md for the design.
 func windowOutputColumn(wc WindowColumn, schema []parquet.Column) parquet.Column {
 	out := parquet.Column{Name: wc.OutputCol, Type: wc.OutputType, Nullable: true}
 	if wc.InputCol == "" {
@@ -260,28 +201,14 @@ func windowOutputColumn(wc WindowColumn, schema []parquet.Column) parquet.Column
 	return out
 }
 
-// retypeValueColumns re-declares each input-dependent window function's
-// output type from the input vector it will actually read, the way
-// exec.Project resolves a projection's type from its input batch instead of
-// trusting the planner's declaration (project.go). It reports whether
-// anything changed.
-//
-// Three families are input-dependent: the five value functions (their output
-// IS the input's type), MIN/MAX (the same, since #569), and SUM/AVG — whose
-// output is not the input's type but their ACCUMULATOR's, DECIMAL over a
-// DECIMAL column and FLOAT64 over everything else (#586).
-//
-// Defence in depth for #345: the planner now resolves these types from the
-// catalog, but a declaration that arrives wrong — a spec built by a caller
-// with no schema to resolve against, an input type the planner had to decline
-// — is otherwise final, because Window allocates batch.NewVector(OutputType)
-// and every write of a value the vector cannot hold is dropped in silence.
-//
-// The lookup is RecordBatch.ColumnIndex's exact-name match, which is how
-// computePartitionColumnar resolves InputCol, so the type declared here is
-// always the type of the vector the compute reads. A name the input does not
-// carry leaves the declaration alone — the compute finds no input column
-// either and writes nothing but NULLs.
+// retypeValueColumns derives input-dependent output types from the actual input
+// schema and reports whether anything changed, defending unresolved/wrong specs (#345).
+// The five value functions and MIN/MAX copy input types (#569); SUM/AVG use the
+// accumulator type through windowAccOutputType, including exact DECIMAL (#586).
+// Lookup must match computePartitionColumnar's exact input-name lookup.
+// A missing name leaves the declaration unchanged; compute also finds no input
+// and writes NULLs. See project.go for the analogous projection rule.
+// See docs/internals/window-input-dependent-retyping.md for the design.
 func (w *Window) retypeValueColumns() bool {
 	changed := false
 	for i := range w.Columns {
@@ -328,47 +255,16 @@ func (w *Window) retypeValueColumns() bool {
 	return changed
 }
 
-// bindKeyNames rewrites every PARTITION BY term, window ORDER BY term and
-// input column to the spelling the input batch actually carries, and REFUSES
-// a partition or order key the input does not carry at all.
-//
-// Both halves close #585. A window key was resolved with RecordBatch.
-// ColumnIndex's exact-name match at three separate sites — the columnar
-// compute, the external partition walker and the row-oriented spill path —
-// and every one of them treated the -1 as a key to SKIP. `PARTITION BY p.g`
-// over a batch carrying `g` therefore dropped out of the key list, and a
-// window whose only key dropped out degrades to ONE partition spanning the
-// input: ROW_NUMBER() numbered straight through three groups, SUM OVER
-// answered the whole-table sum, and nothing said a word. The same silence
-// covered a key that names nothing at all (`PARTITION BY nosuchcol`).
-//
-// The qualified↔bare fallback is columnIndexFallback's, which is what every
-// other operator resolves a column with (the hash join's keys, the
-// aggregate's group keys), so a window resolves names the way the rest of the
-// engine does. Refusing what it cannot resolve is unresolvedAggColumn's rule
-// applied one operator over: an unresolvable GROUP BY key collapsing every
-// row into one group is the same defect as an unresolvable PARTITION BY key
-// collapsing every row into one partition, and the aggregate stopped
-// answering it in silence first.
-//
-// An EXPRESSION key (`PARTITION BY id % 3`) never reaches the refusal: the
-// planner materializes it as a computed column named by the expression's own
-// text before the operator sees a row (physical.windowKeyProjections), the
-// same way a GROUP BY expression is pre-projected for the hash aggregate. A
-// key that reaches here unresolved is one nothing computed.
-//
-// InputCol takes the fallback but NOT the refusal. It is not always a column:
-// COUNT(*) OVER () carries "*", and a constant argument carries its literal
-// text — the operator has no parser to tell those from a misspelled column,
-// and the planner is where an unknown one is caught. What the fallback fixes
-// is the qualified spelling after a join, whose symptom was an all-NULL
-// output column rather than a wrong one (#585's note).
-//
-// The rewrite copies before it writes: NewWindow copies the WindowColumn
-// structs but not the slices inside them, which are the planner's own — on
-// the single-process path they are the logical plan's, and a cached plan
-// re-run against a differently-spelled input would otherwise see the previous
-// run's binding.
+// bindKeyNames binds PARTITION BY, window ORDER BY and InputCol to input spellings
+// using columnIndexFallback's qualified/bare resolution (#585).
+// Refuse missing partition/order keys; never skip them and collapse partitions.
+// Expression keys must already be materialized by physical.windowKeyProjections;
+// an unresolved key is one nothing computed.
+// InputCol takes fallback without refusal: "*" and literal text are not column names,
+// and this operator has no parser; the planner must catch unknown columns.
+// Copy nested slices before rewriting: NewWindow's structs still share planner slices,
+// and cached plans must not retain a prior run's bindings.
+// See docs/internals/window-input-key-name-binding.md for the design.
 func (w *Window) bindKeyNames(b *batch.RecordBatch) error {
 	for i := range w.Columns {
 		wc := &w.Columns[i]
@@ -2036,29 +1932,11 @@ func rowMapCarries(part []map[string]any, col string) bool {
 	return false
 }
 
-// RefuseUnsupportedWindowFunc is the ONE refusal for an aggregate used in the
-// window position that this operator has no window form for. Both doors raise
-// it — the single-process planner's buildWindow and the worker's fragment
-// builder — so a client reads one sentence and one SQLSTATE whichever path
-// planned the query.
-//
-// It replaces a fallback to ROW_NUMBER that was never reached as a wrong
-// ANSWER but was reached as a crash. Census over the 28 names in
-// plansql.knownAggregates, `<agg> OVER (PARTITION BY g ORDER BY x)`, measured
-// 2026-09-08 before this function existed:
-//
-//	 5 answered right   SUM COUNT AVG MIN MAX
-//	23 panicked         everything else — "internal error in pipeline:
-//	                    runtime error: index out of range [0] with length 0",
-//	                    ADR-0019's boundary turning a nil output vector into
-//	                    a query failure with no SQLSTATE a client can act on
-//	 0 answered wrong
-//
-// PostgreSQL 17 ANSWERS all 23 (every aggregate is a window function there;
-// only GROUPING is a syntax error in the window position). So this is a loud
-// refusal of PostgreSQL-valid input, recorded in ADR-0012's divergence list,
-// and 0A000 is the class the rest of this engine's "PostgreSQL can, we cannot
-// yet" refusals carry.
+// RefuseUnsupportedWindowFunc gives unsupported aggregate window forms one message
+// and SQLSTATE 0A000 on both single-process buildWindow and the worker fragment builder.
+// Do not fall back to ROW_NUMBER or defer failure to ADR-0019's panic boundary.
+// This is a refusal of PostgreSQL-valid aggregate windows, recorded in ADR-0012's
+// divergence list; PostgreSQL accepts aggregate windows except GROUPING.
 func RefuseUnsupportedWindowFunc(name string) error {
 	return sqlerr.New("0A000",
 		"%s is not supported as a window function; the window functions are %s",
