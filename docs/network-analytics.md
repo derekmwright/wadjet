@@ -464,6 +464,114 @@ wadjet> SELECT d.hostname, d.location, d.role,
         ORDER BY total_bytes DESC;
 ```
 
+### TCP Flags
+
+A flow record's TCP flags are an integer bitset. Wadjet names the bits, so a
+predicate says what it means instead of spelling a mask. Bits 0-7 are the
+control bits RFC 9293 §3.1 defines; bit 8 is the bit RFC 3540 named `NS`
+(Historic per RFC 8311), which the Accurate ECN work reuses as `AE`:
+
+| Bit | Value | Name | Meaning |
+|---|---|---|---|
+| 0 | 1 | `FIN` | Sender has finished sending |
+| 1 | 2 | `SYN` | Synchronize sequence numbers |
+| 2 | 4 | `RST` | Reset the connection |
+| 3 | 8 | `PSH` | Push buffered data to the application |
+| 4 | 16 | `ACK` | Acknowledgement field is significant |
+| 5 | 32 | `URG` | Urgent pointer field is significant |
+| 6 | 64 | `ECE` | ECN-Echo |
+| 7 | 128 | `CWR` | Congestion window reduced |
+| 8 | 256 | `AE` | Accurate ECN — RFC 3540 named this bit `NS`; both spellings are accepted |
+
+Six functions, over any `INT32` or `INT64` column:
+
+| Function | Answers | Equivalent bit arithmetic |
+|---|---|---|
+| `TCP_FLAGS_HAS_ALL(flags, name, ...)` | `BOOLEAN` — every named bit is set | `(flags & mask) = mask` |
+| `TCP_FLAGS_HAS_ANY(flags, name, ...)` | `BOOLEAN` — at least one named bit is set | `(flags & mask) <> 0` |
+| `TCP_FLAGS_HAS_NONE(flags, name, ...)` | `BOOLEAN` — no named bit is set | `(flags & mask) = 0` |
+| `TCP_FLAG_MASK(name, ...)` | `INTEGER` — the mask those names denote | — |
+| `TCP_FLAGS(flags)` | the set bits as an array of names, in header bit order | — |
+| `TCP_FLAGS_TEXT(flags)` | the same names joined with a pipe, e.g. `SYN\|ACK` | — |
+
+Names are case-insensitive and `NS` is accepted for `AE`. **An unrecognized
+name is an error** (SQLSTATE `22023`) naming it, never a quietly smaller mask —
+`TCP_FLAGS_HAS_ALL(flags,'SYN','ACKK')` would otherwise mean
+`TCP_FLAGS_HAS_ALL(flags,'SYN')` and match a larger set of flows than the query
+asked for. An empty name list is `22023` too. NULL flags give NULL, so a flow
+with no recorded flags matches none of the three predicates — including
+`HAS_NONE`.
+
+The refusal is raised per ROW, as PostgreSQL's `DATE_TRUNC` raises its unknown
+unit, so a predicate that no row reaches answers zero rows rather than an
+error. A flag name may also be a column or any other text expression; only
+literal names are folded at plan time and pushed into the scan.
+
+```sql
+-- SYN without ACK: connection attempts, the first half of a handshake
+wadjet> SELECT src_ip, dst_ip, dst_port, COUNT(*) AS attempts
+        FROM netflow
+        WHERE day = '2026-03-15'
+          AND TCP_FLAGS_HAS_ALL(tcp_flags, 'SYN')
+          AND TCP_FLAGS_HAS_NONE(tcp_flags, 'ACK')
+        GROUP BY src_ip, dst_ip, dst_port
+        ORDER BY attempts DESC
+        LIMIT 20;
+
+-- Horizontal scan: one source, many destination ports, all SYN-only
+wadjet> SELECT src_ip, COUNT(DISTINCT dst_port) AS ports
+        FROM netflow
+        WHERE day = '2026-03-15'
+          AND TCP_FLAGS_HAS_ALL(tcp_flags, 'SYN')
+          AND TCP_FLAGS_HAS_NONE(tcp_flags, 'ACK')
+        GROUP BY src_ip
+        HAVING COUNT(DISTINCT dst_port) > 100
+        ORDER BY ports DESC;
+
+-- Resets by peer: connections refused or torn down
+wadjet> SELECT dst_ip, COUNT(*) AS resets
+        FROM netflow
+        WHERE day = '2026-03-15' AND TCP_FLAGS_HAS_ANY(tcp_flags, 'RST')
+        GROUP BY dst_ip
+        ORDER BY resets DESC
+        LIMIT 20;
+
+-- The flag combinations actually seen, as a histogram
+wadjet> SELECT TCP_FLAGS_TEXT(tcp_flags) AS flags, COUNT(*) AS flows
+        FROM netflow
+        WHERE day = '2026-03-15'
+        GROUP BY 1
+        ORDER BY flows DESC;
+
+-- Congestion signalling, which needs the bits above the first byte
+wadjet> SELECT COUNT(*) AS ecn_flows
+        FROM netflow
+        WHERE day = '2026-03-15' AND TCP_FLAGS_HAS_ANY(tcp_flags, 'ECE', 'CWR', 'AE');
+```
+
+**Pushdown.** A `TCP_FLAGS_HAS_*` predicate over a bare column with literal
+names is evaluated inside the scan, and so is the `BITWISE_AND(flags, 18) = 18`
+spelling of the same test. The flags column's values are never materialized
+when the filter is the only thing that reads them. Set
+`WADJET_FLAG_DICT_PUSHDOWN=0` to disable the pushdown.
+
+How much that saves depends on how the file was ENCODED, and the two cases are
+worth stating separately because only one of them is reachable today:
+
+- **A dictionary-encoded flags column** — what Spark, PyArrow and most Parquet
+  writers produce for a low-cardinality integer column — has the mask evaluated
+  once per DICTIONARY ENTRY and applied per run of row indices, so a row group
+  costs a handful of comparisons instead of one per row.
+- **A plain-encoded column** has it evaluated per value, which still skips the
+  materialization but not the per-row comparison.
+
+Wadjet's own writer does not emit dictionary pages today, so a table ingested
+through Wadjet takes the second path; the first applies to Parquet files
+written elsewhere and registered here.
+
+A flag predicate never causes a row group to be *skipped*: a min/max range
+cannot prove anything about a bit, so no such prune is attempted.
+
 ### Via HTTP API
 
 ```bash

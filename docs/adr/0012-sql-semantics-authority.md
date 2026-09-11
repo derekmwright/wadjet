@@ -2175,6 +2175,174 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      name in its refusal list acquires a window form, so lifting the
      divergence is a deliberate edit.
 
+   - **The TCP flag family is an EXTENSION, and each function names the
+     PostgreSQL spelling it is equivalent to.** (Added 2026-09-08, arc A2,
+     #966.) PostgreSQL has no `tcp_flags_has_all`; it has `&`. The six
+     functions are defined BY that arithmetic and gated against it, so the
+     equivalence is the specification rather than a resemblance:
+
+     | wadjet | PostgreSQL 17.11 |
+     |---|---|
+     | `tcp_flags_has_all(f, 'SYN','ACK')` | `(f & 18) = 18` |
+     | `tcp_flags_has_any(f, 'SYN','ACK')` | `(f & 18) <> 0` |
+     | `tcp_flags_has_none(f, 'SYN','ACK')` | `(f & 18) = 0` |
+     | `tcp_flag_mask('SYN','ACK')` | the literal `18` |
+     | `tcp_flags(f)` / `tcp_flags_text(f)` | no equivalent; a name↔bit join |
+
+     Measured over `f4 int` / `f8 bigint` holding 0, 2, 18, 16, 4, 511, 24,
+     NULL, 20, 256 and over the 44-row `a2_tcpflow` the arm census uses. NULL
+     flags give NULL for all three, has_none included; `(-1) & 18 = 18` on both
+     engines, so a negative flags value is a bit pattern and nothing
+     special-cases the sign.
+
+     TWO DELIBERATE DIVERGENCES from that equivalence, both refusals:
+
+     - **An empty name list is 22023 where PostgreSQL's zero mask is vacuously
+       true.** `(f & 0) = 0` is `t` and `(f & 0) <> 0` is `f` for every row
+       there; `tcp_flags_has_all(f)` raises here. A name list with nothing in
+       it is a query that meant something and did not say it, and answering
+       "every row" for it is the plausible answer, not the right one.
+     - **An unrecognized name is 22023 naming it, and listing the nine
+       spellings.** The bit spelling has no equivalent failure — a mask is a
+       number — but the alternative here is to drop the bit, which turns
+       `has_all('SYN','ACKK')` into `has_all('SYN')`: a strictly LARGER row set
+       that nothing downstream can tell from the intended one. The refusal is
+       raised PER ROW, exactly as PostgreSQL raises `date_trunc`'s unknown
+       unit, so a predicate no row reaches answers zero rows rather than an
+       error.
+
+     `tcp_flags_from_string`, which reads a COMMA-SEPARATED list rather than an
+     argument list, splits the two cases and answers the arithmetic where it
+     can (decided 2026-09-08, round 2): an EMPTY string is a list of no names
+     and answers `0` — the mask of no names, which is what it answered before
+     this arc and what a telemetry column spelling "no flags" as the empty
+     string needs — while an empty ELEMENT (`'SYN,'`, `'SYN,,ACK'`) is 22023
+     naming the POSITION, because a list that names something and then names
+     nothing is a slip, and quoting the name would quote nothing.
+
+     Names are case-insensitive; `NS` is accepted as an input alias for `AE`
+     and `AE` is the canonical rendering. RFC 9293 §3.1 defines the eight
+     control bits CWR..FIN and a four-bit reserved field; bit 8 is RFC 3540's
+     `NS` (Historic per RFC 8311), reused as `AE` by the Accurate ECN work. `tcp_flags` / `tcp_flags_text` name only those nine bits: a bit
+     outside the table is not a TCP flag and is not named, which is a rendering
+     contract and deliberately NOT a refusal — a garbage byte in one row of a
+     telemetry column must not fail the query. Gated in
+     `expr.TestTheTCPFlagPredicatesAreTheBitArithmetic`,
+     `wadjet.TestTheTCPFlagFamilyAnswersPostgresBitArithmeticEndToEnd` and
+     `coordinator.TestTheTCPFlagFamilyAnswersPostgresBitArithmetic` (five arms).
+
+   - **The bitwise family reads its argument exactly and answers an integer;
+     `bigint` where PostgreSQL answers `int4` for int4 operands.**
+     (Added 2026-09-08, arc A2, #966; extended the same day in round 2 to the
+     whole family.) `pg_typeof(2::int4 & 18::int4)` is `integer` and
+     `pg_typeof(2::int8 & 18::int8)` is `bigint`, measured on 17.11; this
+     engine declares bigint for both. A value-preserving widening.
+
+     It is recorded because the VALUE half was a real divergence and is fixed.
+     TWELVE functions carried an integer argument through a float64, so above
+     2^53 the low bits were rounded away before the operation ran:
+     `bitwise_and/or/xor/not`, the three shifts, `to_hex`, `to_base`,
+     `bit_count`, and — through their FLOAT64 declaration rather than their
+     body — `from_hex` and `from_base`. Measured against 17.11 over
+     `4611686018427387922` (2^62 | 18):
+
+     | spelling | PostgreSQL | before |
+     |---|---|---|
+     | `x & 18` | `18` | `0` |
+     | `x >> 1` | `2305843009213693961` | `2305843009213693952` |
+     | `x << 1` | `-9223372036854775772` | `-9223372036854775808` |
+     | `x >> 0` (the IDENTITY) | `4611686018427387922` | `4611686018427387904` |
+     | `to_hex(x)` | `4000000000000012` | `4000000000000000` |
+     | `bit_count(x::bit(64))` | `3` | `1`, boxed float64 |
+     | `from_hex('4000000000000012')` | — | `4.611686018427388e+18` |
+
+     The rule is now one rule: an integer argument is read exactly, and a
+     function whose answer is an integer declares one. `numericFuncCall.
+     EvalInt64` — the seam integer ARITHMETIC reads such a function through —
+     converts exactly too, because the declaration change opened it:
+     `BITWISE_OR(f8,1)` answered `4611686018427387923` and
+     `BITWISE_OR(f8,1) + 0` answered `4611686018427387904`, two spellings of
+     one value disagreeing.
+
+     FOUR RESIDUAL DIVERGENCES in that family, stated rather than glossed:
+
+     - **`BITWISE_RIGHT_SHIFT` is Trino's LOGICAL shift, not PostgreSQL's
+       `>>`.** PostgreSQL's `>>` on an integer is arithmetic (sign-preserving):
+       `(-1)::int8 >> 1` is `-1` there. That is
+       `BITWISE_ARITHMETIC_SHIFT_RIGHT` here, and it agrees with PostgreSQL
+       value for value. The name `bitwise_right_shift` comes from Trino, which
+       has both, and it keeps Trino's meaning.
+     - **A shift COUNT outside `[0,64)` answers NULL where PostgreSQL answers a
+       number.** PostgreSQL takes the count modulo the width — `1::int8 << 64`
+       is `1`, `1::int8 << 65` is `2`, `8 >> -1` is `0`. NULL is visible rather
+       than plausible, and changing it is a Trino-vs-PostgreSQL semantics
+       decision this arc did not take.
+     - **`TO_HEX` renders the SIXTY-FOUR-BIT word for every column argument.**
+       The width comes from the value's box, and an INT32 column's value
+       reaches a scalar function here as an int64, so `to_hex(int4_col)` over a
+       negative renders sixteen sign-extended digits where PostgreSQL renders
+       eight (`ffffffffffffffff` vs `ffffffff`). The NUMBER is the same two's
+       complement and a non-negative argument renders identically; only the
+       leading `f`s differ. The same applies to an untyped negative LITERAL,
+       which is `integer` in PostgreSQL and bigint here. Measured on all five
+       arms (`coordinator.…/to_hex_of_an_int32_column_*`), so a change to the
+       boxing would be noticed rather than assumed.
+     - **`TO_BASE` renders a negative value as a signed string** (`-ff`), which
+       is Trino's rendering; PostgreSQL has no `to_base`. `TO_HEX` is
+       PostgreSQL's function and renders the machine word, so the two disagree
+       on a negative argument by design.
+
+     Gated in `expr.TestABitwiseOperatorIsExactOverASixtyFourBitPattern`,
+     `expr.TestTheWholeBitwiseFamilyIsExact` (a twelve-row PostgreSQL
+     transcript × ten functions, including both int64 extremes and the identity
+     shift), `expr.TestToHexRendersTheArgumentsOwnWidth`,
+     `expr.TestTheBitwiseFamilyDeclaresIntegers`,
+     `expr.TestAnIntegerFunctionsValueSurvivesTheArithmeticAboveIt`, and the
+     `bitwise_*` cells of the five-arm census.
+
+     **The knock-on of the declaration change is PostgreSQL-correct, and is
+     recorded here because it is wider than the four functions.**
+     `BITWISE_AND(3,3)/2` was `1.5` and is `1`, which is what PostgreSQL
+     answers for integer division; `SUM(BITWISE_AND(f,18))` comes back
+     `bigint` rather than `double precision` and `AVG(...)` numeric, which is
+     ADR-0024's integer-accumulator rule reached through a function that now
+     declares an integer.
+
+   - **`tcp_flags` declares an ARRAY and a top-level projection of it is
+     TEXT.** (Added 2026-09-08, arc A2, #966; the limitation predates it.)
+     `physical.scalarFnDeclaredType` declines every ARRAY/MAP/ROW-returning
+     function — a projection has no element type to size the child vector with
+     — so `SELECT tcp_flags(f)` is declared TEXT and the client is handed Go's
+     rendering of the slice (`[SYN ACK]`) rather than a slice or PostgreSQL's
+     `{SYN,ACK}`. `map_keys`, `map_values` and `map_entries` have answered that
+     way since they were added. The value IS an ARRAY where a consumer reads it
+     as one: `element_at(tcp_flags(f), 1)` is `SYN` and `array_length` is 2.
+     On the wire it is OID 25, which is what an ARRAY column declares here
+     anyway (#992, the entry above). Pinned in
+     `wadjet.TestATopLevelTCPFlagsProjectionIsTextToday`, which FAILS when a
+     projection can carry a nested type — that failure is the reminder to move
+     the declaration for every container-returning function at once.
+
+   - **`has_tcp_flag` and `tcp_flags_from_string` now REFUSE a name they do not
+     know.** (Added 2026-09-08, arc A2, #966.) They predate the family above
+     and carried their own eight-entry name table in a `byte`. Three
+     consequences, all fixed by folding them onto the one table:
+     `tcp_flags_to_string(256)` answered the empty string for a value with the
+     AE bit set (a set flag rendered as no flag at all);
+     `has_tcp_flag(f,'AE')` answered NULL, indistinguishable from "the flags
+     value is NULL"; and `tcp_flags_from_string('SYN,ACKK')` answered 2, a
+     silently smaller mask. The first is a value fix; the other two are
+     refusals (22023) where NULL and a wrong number used to be returned.
+     `is_tcp_handshake` and `is_tcp_reset` are value-identical — their masks
+     are all below 256, so the truncation never reached them.
+
+     All five also refuse a flags argument that is not an integer (22023, with
+     the type named) where they used to read it as zero and answer "no flags
+     set" for every row — `byte(ToInt64(v))` turned a TEXT column into 0. Same
+     rule as the new family's, and the same reason: a plausible answer for an
+     argument the function cannot read is the one shape a caller cannot
+     detect.
+
    - **WITHDRAWN the same day (arc J1 round 3): the refusal of `SELECT *` over
      a LATERAL whose ungrouped COUNT can see no rows.** It fired on the SHAPE,
      and a plan-time refusal cannot know the data — it refused queries whose
