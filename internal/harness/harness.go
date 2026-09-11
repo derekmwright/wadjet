@@ -215,40 +215,14 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (RunResult, error
 		}
 	}
 
-	// ExpectSpill assertion for large slice.
-	//
-	// The primary signal is maxTrackerPeakMB: it reads the "task completed"
-	// log lines already captured under runDir/logs/*.log and finds the
-	// largest tracker_peak_mb any task logged. That value is written
-	// synchronously when a task finishes — see maxTrackerPeakMB's doc
-	// comment for why that sidesteps the heartbeat timing problem below.
-	//
-	// The threshold is 40% of sliceCfg.MemoryBudget, not "saturated at the
-	// ceiling": SpillManager.ShouldSpillFor (internal/engine/memory/
-	// spill.go) proactively evicts a partition once a task's tracked usage
-	// crosses 40% of budget (the "SpillCheap" threshold), so a task under
-	// genuine sustained pressure sawtooths just above that line rather
-	// than climbing to 100% — eviction keeps knocking it back down before
-	// it gets there. Empirically, forcing this fixture's build side over
-	// budget peaked its tracker at 62-100% of budget across several runs,
-	// comfortably over 40%; an unpressured SF0.01 TPC-H query's tiny
-	// tables shouldn't get within reach of even that.
-	//
-	// collector.RunPeakSpillBytes is a fallback for the same assertion via
-	// the worker heartbeat's SpillDiskUsed, in case a future change moves
-	// the tracker_peak_mb logging or a task's spill genuinely outlives one
-	// heartbeat tick. Workers heartbeat on a fixed 10s cadence
-	// (internal/worker/worker.go) while a single local-mode query — even
-	// one under real memory pressure — often completes in well under a
-	// second, so this fallback alone is not reliable: a per-query
-	// heartbeat window can open and close between two ticks and see
-	// nothing, and the spilling task's own spill directory is removed via
-	// `defer os.RemoveAll(...)` (executor_fragment.go) the instant the
-	// task returns, so even "wait and re-check" can lose that race. Kept
-	// as a fallback because it costs nothing when the log-based signal
-	// already passed, and needs no per-query timing luck itself —
-	// RunPeakSpillBytes tracks every heartbeat regardless of window
-	// boundaries — for whatever residual chance it adds.
+	// The large local slice accepts task-completion tracker_peak_mb >=40% of
+	// MemoryBudget as its primary pressure signal, matching static SpillCheap.
+	// Use maxTrackerPeakMB over runDir/logs, not a per-query heartbeat alone:
+	// short queries can finish and delete spill directories between 10s ticks.
+	// RunPeakSpillBytes is a run-wide fallback, including after the bounded wait.
+	// A tracker threshold is a pressure proxy, not independent proof of disk eviction;
+	// forced reservations and alternate thresholds must be considered when changing it.
+	// See docs/internals/harness-large-slice-spill-signal.md for the design.
 	if cfg.Mode == ModeLocal && cfg.Slice == SliceLarge {
 		spillProven := false
 		if peakMB, err := maxTrackerPeakMB(filepath.Join(runDir, "logs")); err == nil {
