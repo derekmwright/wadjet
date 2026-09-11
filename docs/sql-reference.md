@@ -2364,7 +2364,8 @@ rows, because the names are the mask OPERAND and its spelling is a property of
 the query. That is PostgreSQL's own rule for the arithmetic this family is
 named for — `SELECT 'x'::int FROM t WHERE false` raises there too.
 
-The refusal is the same in **every expression position and on both plans** — a
+Except for the coverage gaps listed below, the refusal is the same in
+**every expression position and on both plans** — a
 `SELECT` item, `WHERE`, `JOIN ... ON`, `HAVING`, a `GROUP BY` key, an
 `ORDER BY` key, a set-operation arm, a projection above a `GROUP BY`, a window
 function's argument, `PARTITION BY` or `ORDER BY` terms, a
