@@ -3,8 +3,10 @@ package physical
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // ErrScalarSubqueryProjectionDistributed refuses SELECT-list subqueries that
@@ -63,10 +65,68 @@ func refuseScalarSubqueryProjections(root *logical.Node, lowered map[*logical.Pr
 				}
 			}
 		}
+		// A WINDOW's ARGUMENT and its PARTITION BY / ORDER BY terms are the
+		// same claim one node over, and they are NOT Projections: a computed
+		// window term is materialized by the PHYSICAL planner
+		// (resolveWindowKeys → `__winkey_N`), so the walk above never saw it
+		// and the refusal never fired. `SUM((SELECT … )) OVER ()` therefore
+		// staged, and the worker's fragment failed compiling the key —
+		// "window key project: compile window key … : subqueries require a
+		// SubqueryRunner", three attempts, an internal message to the client
+		// (#1018 round 7, B3's window half). It is the identical condition
+		// this file exists for, so it takes the identical answer: refuse the
+		// PLAN and let the coordinator run it single-process.
+		if n.Type == logical.NodeWindow {
+			for i := range n.WindowExprs {
+				we := &n.WindowExprs[i]
+				report := func(sql, construct string) {
+					if found != nil {
+						return
+					}
+					name := we.OutputCol
+					if name == "" {
+						name = we.InputCol
+					}
+					found = fmt.Errorf("%w: window column %q contains %s"+
+						" (a worker's fragment compiles its own window keys and has no"+
+						" SubqueryRunner); the coordinator runs this query single-process",
+						ErrScalarSubqueryProjectionDistributed, name, construct)
+				}
+				visitExprSubqueries(we.InputExpr, report)
+				for _, term := range windowTermExprs(we) {
+					visitExprSubqueries(term, report)
+				}
+				if found != nil {
+					return
+				}
+			}
+		}
 		for _, c := range n.Children {
 			walk(c)
 		}
 	}
 	walk(root)
 	return found
+}
+
+// windowTermExprs parses a window's PARTITION BY / ORDER BY terms, which the
+// logical node carries as TEXT. A term that does not parse contributes nothing
+// — the physical planner would not materialize it either.
+func windowTermExprs(we *logical.WindowExpr) []plansql.Node {
+	var out []plansql.Node
+	add := func(term string) {
+		if strings.TrimSpace(term) == "" {
+			return
+		}
+		if ast, err := plansql.ParseExpression(term); err == nil {
+			out = append(out, ast)
+		}
+	}
+	for _, pb := range we.PartitionBy {
+		add(pb)
+	}
+	for _, ob := range we.OrderBy {
+		add(ob.Column)
+	}
+	return out
 }

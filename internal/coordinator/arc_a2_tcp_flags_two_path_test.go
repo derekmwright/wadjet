@@ -612,6 +612,7 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmetic(t *testing.T) {
 		{"position_join_on_empty",
 			`SELECT COUNT(*) AS n FROM tcpflow a JOIN tcpflow b ON a.id = b.id AND tcp_flags_has_all(b.f8,'BOGUS') WHERE a.id < 0`,
 			`TCP flag name "BOGUS" not recognized`},
+
 		// THE THREE POSITIONS NO WALK REACHED (#1018 round 7, B1). Round 6
 		// put the refusal at the binder and listed the positions it covered;
 		// three were not on that list because the SUBQUERY COLLECTOR did not
@@ -711,6 +712,46 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmetic(t *testing.T) {
 		{"cte_over_a_scalar_subquery_is_bigint",
 			`WITH c AS (SELECT (SELECT BITWISE_AND(f4,18) FROM tcpflow u2 WHERE u2.id = 3) AS v FROM tcpflow WHERE id <= 4)
 			 SELECT SUM(v) AS v FROM c`,
+			[]string{"v=int64:72"}},
+
+		// A SCALAR SUBQUERY WRITTEN DIRECTLY AS THE AGGREGATE'S ARGUMENT
+		// (#1018 round 7, B3). Round 6 recorded this as a DECLARATION
+		// residual — "LOUD-or-declaration rather than a wrong value" — and
+		// the review measured a WRONG VALUE: the argument had no column for
+		// emittedColDecls to read, so the synthetic pre-aggregate projection
+		// took inferProjectionDeclType's FLOAT64 fallback and the accumulator
+		// ran over a float64 vector. `wide_direct_sum_is_exact` is the cell
+		// that says so: 4611686018427387922 four times is 18446744073709551688,
+		// and a float64 accumulator answers 18446744073709551616.
+		//
+		// The stamp annotateSubqueryColumnDecls already puts on the plan is
+		// the declaration; the aggregate's own input walk now reads it.
+		{"direct_scalar_subquery_narrow_sum_is_bigint",
+			`SELECT SUM((SELECT BITWISE_AND(f4,18) FROM tcpflow u2 WHERE u2.id = 3)) AS v FROM tcpflow WHERE id <= 4`,
+			[]string{"v=int64:72"}},
+		{"direct_scalar_subquery_wide_sum_is_numeric",
+			`SELECT SUM((SELECT BITWISE_AND(f8,18) FROM tcpflow u2 WHERE u2.id = 3)) AS v FROM tcpflow WHERE id <= 4`,
+			[]string{"v=72"}},
+		{"direct_scalar_subquery_wide_sum_is_exact",
+			`SELECT SUM((SELECT f8 FROM tcpflow u2 WHERE u2.id = 10)) AS v FROM tcpflow WHERE id <= 4`,
+			[]string{"v=18446744073709551688"}},
+		{"direct_scalar_subquery_count_sum_is_numeric",
+			`SELECT SUM((SELECT COUNT(*) FROM tcpflow u2)) AS v FROM tcpflow WHERE id <= 4`,
+			[]string{"v=240"}},
+		// The WINDOW spelling of the same argument, which had its own copy of
+		// the gap one file over: resolveWindowKeys materializes a computed
+		// window argument as a `__winkey_N` column and typed it from the same
+		// walk, so a scalar subquery fell to that site's STRING fallback and
+		// the window aggregate read NULL out of a TEXT vector in every row.
+		{"direct_scalar_subquery_windowed_sum_is_bigint",
+			`SELECT SUM((SELECT BITWISE_AND(f4,18) FROM tcpflow u2 WHERE u2.id = 3)) OVER () AS w FROM tcpflow WHERE id <= 4`,
+			[]string{"w=int64:72", "w=int64:72", "w=int64:72", "w=int64:72"}},
+		{"direct_scalar_subquery_windowed_sum_is_exact",
+			`SELECT SUM((SELECT f8 FROM tcpflow u2 WHERE u2.id = 10)) OVER () AS w FROM tcpflow WHERE id <= 4`,
+			[]string{"w=18446744073709551688", "w=18446744073709551688",
+				"w=18446744073709551688", "w=18446744073709551688"}},
+		{"nested_scalar_subquery_direct_sum_is_bigint",
+			`SELECT SUM((SELECT (SELECT BITWISE_AND(f4,18) FROM tcpflow u3 WHERE u3.id = 3) FROM tcpflow u2 WHERE u2.id = 3)) AS v FROM tcpflow WHERE id <= 4`,
 			[]string{"v=int64:72"}},
 
 		// A SCALAR SUBQUERY THAT ITSELF HOLDS ONE, planned on the DAG arms
