@@ -199,6 +199,8 @@ func TestEverySemverFunctionIsStrictOnNull(t *testing.T) {
 		{"semver_normalize_strict", fnSemverNormalizeStrict, []any{nil}},
 		{"semver_cmp/left", fnSemverCmp, []any{nil, "1.0.0"}},
 		{"semver_cmp/right", fnSemverCmp, []any{"1.0.0", nil}},
+		{"semver_satisfies/version", fnSemverSatisfies, []any{nil, "^1.0.0"}},
+		{"semver_satisfies/range", fnSemverSatisfies, []any{"1.0.0", nil}},
 	} {
 		if got := fn.f(fn.args); got != nil {
 			t.Errorf("%s over NULL = %v, want NULL", fn.name, got)

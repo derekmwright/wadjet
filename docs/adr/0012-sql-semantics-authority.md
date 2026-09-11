@@ -2862,6 +2862,63 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      seeded versions, both sortings compared element by element plus 200k
      sampled pairs).
 
+     **`semver_satisfies` IMPLEMENTS node-semver's PUBLISHED RANGE GRAMMAR,
+     because the specification has none.** (Added 2026-09-11, arc A3, #967.)
+     Semantic Versioning 2.0.0 defines PRECEDENCE and no range syntax at all.
+     The syntax people actually write is node-semver's — a `package.json`
+     dependency, a Dependabot alert, a Renovate rule, an advisory's
+     affected-versions field — and its README's "Advanced Range Syntax"
+     publishes an EXPANSION for every spelling. Those expansions are the
+     oracle, transcribed into
+     `expr.TestTheRangeGrammarMatchesTheNodeSemverTable`, which checks each
+     one twice: the desugaring RENDERS to the published text, and the range
+     and its published expansion admit the same versions over a corpus. The
+     pre-release rule is the README's own sentence — a version with a
+     pre-release tag satisfies a comparator set only if some comparator of
+     that set names the same [major, minor, patch] AND itself has a
+     pre-release — gated in `expr.TestTheNodeSemverPrereleaseRule`.
+
+     The `-0` on every exclusive upper bound (`<2.0.0-0`, not `<2.0.0`) is
+     part of the published expansion and is load-bearing: `2.0.0-beta` is
+     below `2.0.0` by §11.3 and above `2.0.0-0` by §11.4, so dropping it
+     admits pre-releases of the next major into `^1.2.3`. `includePrerelease`
+     is not implemented; a query that wants pre-releases writes a comparator
+     that has one.
+
+     A RANGE THIS GRAMMAR DOES NOT KNOW IS 22023 NAMING IT, NEVER A SILENT
+     FALSE. The version argument is DATA and keeps the family's NULL; the
+     range is the QUERY AUTHOR'S OWN TEXT, so a spelling nobody implements is
+     a property of the query, and `false` for it drops every row the author
+     meant to select while looking exactly like an empty table. The range is
+     read FIRST — before a NULL or unparseable version argument is consulted —
+     which is the same ordering arc A2 settled for a flag NAME against a NULL
+     flags argument, and for the same reason: whether a typo is an error must
+     not depend on the rows. A NULL range is a NULL operand and answers NULL,
+     because a NULL is not a misspelling.
+
+     THREE DELIBERATE DIVERGENCES FROM node-semver, all refusals:
+
+     - **The EMPTY range is 22023 where node reads `''` as `*`.** Same
+       position as A2's empty flag list: a range with nothing in it is a query
+       that meant something and did not say it, and "every row" is the
+       plausible answer rather than the right one. `*` is accepted and is the
+       explicit spelling.
+     - **A pre-release or build on a PARTIAL version (`1.2.x-beta`) is
+       22023.** node's regex captures it and then silently ignores it, which
+       is the same silently-larger-set failure as dropping a misspelled flag
+       bit.
+     - **A numeric identifier past int64, and a leading zero, are refused
+       inside a range exactly as they are in a version.** One reader decides
+       what a version is on both sides of the predicate.
+
+     Gated in `expr.TestARangeOffTheGrammarIsRefused` (SQLSTATE, the function
+     named, the range quoted, and the refusal reaching the function even over
+     a NULL version), `expr.TestTheRangeSpellingsThisGrammarAccepts` (so the
+     refusal list cannot quietly grow to swallow a range people write) and
+     `expr.TestTheRangeMemoIsBoundedAndRemembersRefusals` — the compiled-range
+     memo caches the REFUSAL as well as the parse, so a malformed range raises
+     the same sentence on every row rather than only on the one that missed.
+
      **A ROW-RETURNING `semver_parse` IS NOT PART OF THIS FAMILY, and #1017 is
      the reason.** `physical.scalarFnDeclaredType` declines every
      ARRAY/MAP/ROW return type, so such a projection would be declared TEXT

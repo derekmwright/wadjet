@@ -2161,7 +2161,7 @@ FROM flow_logs
 
 ## Built-in Functions
 
-Wadjet includes 376 built-in scalar functions across several categories.
+Wadjet includes 377 built-in scalar functions across several categories.
 
 ### String Functions
 
@@ -2235,6 +2235,7 @@ Nothing here is network-specific.
 | `SEMVER_SORT_KEY(s)` | A `TEXT` key whose byte order equals precedence | `ORDER BY SEMVER_SORT_KEY(v)` |
 | `SEMVER_NORMALIZE(s)` | The canonical spelling (the `v` prefix removed) | `SEMVER_NORMALIZE('v1.2.3')` → `'1.2.3'` |
 | `SEMVER_NORMALIZE_STRICT(s)` | The same, but SQLSTATE `22023` instead of NULL | `SEMVER_NORMALIZE_STRICT('latest')` → error |
+| `SEMVER_SATISFIES(v, range)` | Whether the version is in a node-semver range | `SEMVER_SATISFIES('1.5.0','^1.2.3')` → `true` |
 
 **Data is lenient.** A string that is not a version is **NULL**, never an
 error, from every function above except the strict one — a `WHERE` over a
@@ -2299,6 +2300,73 @@ A predicate over `SEMVER_SORT_KEY(v)` is evaluated as an expression: it is not
 pushed into the scan and **never prunes a row group**, because a row group's
 recorded minimum and maximum are the column's own text bounds and say nothing
 about the key's.
+
+#### Ranges — `SEMVER_SATISFIES(version, range)`
+
+The Semantic Versioning specification defines precedence and **no range
+syntax**. The syntax people write is node-semver's — a `package.json`
+dependency, a Dependabot alert, a Renovate rule, an advisory's affected-version
+field — and that published grammar is what this function implements:
+
+| Spelling | Means |
+|---|---|
+| `*`, `x`, `X` | any release |
+| `1.2.3` | exactly `1.2.3` |
+| `>=1.2.3`, `>1.2.3`, `<=1.2.3`, `<1.2.3`, `=1.2.3` | the comparison |
+| `1.2.3 - 2.3.4` | `>=1.2.3 <=2.3.4` |
+| `1.2 - 2.3.4` | `>=1.2.0 <=2.3.4` |
+| `1.2.3 - 2.3` | `>=1.2.3 <2.4.0-0` |
+| `1.2.3 - 2` | `>=1.2.3 <3.0.0-0` |
+| `1`, `1.x`, `1.X`, `1.*` | `>=1.0.0 <2.0.0-0` |
+| `1.2`, `1.2.x`, `1.2.*` | `>=1.2.0 <1.3.0-0` |
+| `~1.2.3` | `>=1.2.3 <1.3.0-0` |
+| `~1.2` | `>=1.2.0 <1.3.0-0` |
+| `~1` | `>=1.0.0 <2.0.0-0` |
+| `~1.2.3-beta.2` | `>=1.2.3-beta.2 <1.3.0-0` |
+| `^1.2.3` | `>=1.2.3 <2.0.0-0` |
+| `^0.2.3` | `>=0.2.3 <0.3.0-0` |
+| `^0.0.3` | `>=0.0.3 <0.0.4-0` |
+| `^1.2.x` | `>=1.2.0 <2.0.0-0` |
+| `^0.0.x`, `^0.0` | `>=0.0.0 <0.1.0-0` |
+| `^0.x` | `>=0.0.0 <1.0.0-0` |
+| `A B` | both — whitespace is intersection |
+| `A \|\| B` | either — union |
+
+`~>` is accepted for `~`, a space may separate an operator from its version
+(`>= 1.2.3`), and the leading `v` concession applies inside a range too.
+
+**Pre-releases.** A version with a pre-release tag satisfies a range only if
+some comparator of the same alternative names the same `major.minor.patch`
+*and* itself carries a pre-release. So `1.2.3-beta` does **not** satisfy
+`^1.2.3`, `3.4.5-alpha.9` does **not** satisfy `>1.2.3-alpha.3` even though it
+is greater, `3.4.5` does, and `1.0.0-beta` does not satisfy `*`. That is
+node-semver's published rule; there is no `includePrerelease` option here — a
+query that wants pre-releases writes a comparator that has one.
+
+**A range this grammar does not know is SQLSTATE `22023` naming it, never a
+silent `false`.** A range is the query author's own text, so a spelling nobody
+implements is a property of the query, and answering `false` for it drops every
+row the author meant to select and looks exactly like an empty table. Three
+things are refused that node-semver accepts:
+
+- the **empty** range — node reads `''` as `*`; here `*` is the explicit
+  spelling and an empty one is a query that meant something and did not say it;
+- a pre-release or build on a **partial** version (`1.2.x-beta`) — node's
+  regex captures it and then ignores it;
+- everything else off the grammar: `>=` with nothing after it, `^^1.0.0`,
+  `1.2.3 -`, a leading zero, a number past `BIGINT`, `latest`.
+
+The **version** argument keeps the family's lenient rule: NULL for a string
+that is not a version. A NULL range is a NULL operand and answers NULL; a
+malformed one is the refusal above, and the range is read **first**, so the
+refusal does not depend on what the version argument holds.
+
+```sql
+-- every deployed agent still on a vulnerable build
+SELECT host, agent_version
+  FROM agents
+ WHERE SEMVER_SATISFIES(agent_version, '>=1.2.0 <1.2.7 || >=1.3.0 <1.3.2');
+```
 
 ### Math Functions
 
