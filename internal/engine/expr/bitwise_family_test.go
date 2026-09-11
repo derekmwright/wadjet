@@ -246,3 +246,50 @@ func TestAnIntegerFunctionsValueSurvivesTheArithmeticAboveIt(t *testing.T) {
 		t.Errorf("EvalInt64 over BITWISE_OR(2^62|18, 1) = %d (ok=%v), want %d", got, ok, wide|1)
 	}
 }
+
+// FROM_HEX REQUIRES THE WHOLE STRING, AND ANSWERS WHAT FROM_BASE ANSWERS
+// (#966 round 2, N2).
+//
+// PostgreSQL has no integer-returning from_hex, so two things adjudicate: its
+// own hexadecimal decoder, which refuses a bad digit outright
+// (`decode('12zz','hex')` is 22023, measured on 17.11), and this engine's own
+// FROM_BASE, which returns NULL for `FROM_BASE('12z',16)` because
+// strconv.ParseInt requires exhaustion.
+//
+// `fmt.Sscanf(..., "%x")` did not: it consumed the valid PREFIX and reported
+// success, so FROM_HEX('12zz') was 18 — a number derived from text that is not
+// one, and the opposite of what the sibling function said about the same
+// input. Every cell here is checked against FROM_BASE(s, 16) as well as
+// against the literal, because "the two spellings agree" is the property.
+func TestFromHexRequiresTheWholeString(t *testing.T) {
+	fromHex := DefaultRegistry.Lookup("from_hex")
+	fromBase := DefaultRegistry.Lookup("from_base")
+	for _, tc := range []struct {
+		in   string
+		want any
+	}{
+		{"ff", int64(255)},
+		{"FF", int64(255)},
+		{"4000000000000012", int64(1)<<62 | 18},
+		{"7fffffffffffffff", int64(9223372036854775807)},
+		{"0", int64(0)},
+		// A valid prefix followed by text that is not hexadecimal. 18 was the
+		// old answer for the first two.
+		{"12zz", nil},
+		{"12 34", nil},
+		{"ff!", nil},
+		{"", nil},
+		{"zz", nil},
+		// Sixteen digits with the top bit set does not fit a signed int64.
+		{"ffffffffffffffff", nil},
+		{"8000000000000000", nil},
+	} {
+		if got := fromHex([]any{tc.in}); got != tc.want {
+			t.Errorf("FROM_HEX(%q) = %#v, want %#v", tc.in, got, tc.want)
+		}
+		if got := fromBase([]any{tc.in, float64(16)}); got != tc.want {
+			t.Errorf("FROM_BASE(%q, 16) = %#v, want %#v — the two spellings of one "+
+				"operation must not disagree", tc.in, got, tc.want)
+		}
+	}
+}

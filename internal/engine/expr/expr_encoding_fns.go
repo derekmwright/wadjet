@@ -3,8 +3,8 @@ package expr
 
 import (
 	"encoding/base64"
-	"fmt"
 	"strconv"
+	"strings"
 )
 
 // --- Encoding functions ---
@@ -33,12 +33,31 @@ func fnToHex(args []any) any {
 	return strconv.FormatUint(uint64(bitIntArg(args[0])), 16)
 }
 
+// from_hex(s) is to_hex's inverse and PostgreSQL has no integer-returning
+// counterpart for it, so the contract is set by the two things that DO
+// adjudicate: PostgreSQL's own hexadecimal decoder, and this engine's own
+// FROM_BASE.
+//
+//	decode('12zz','hex')     ERROR 22023, invalid hexadecimal digit
+//	FROM_BASE('12z', 16)     NULL  (strconv.ParseInt requires exhaustion)
+//
+// It read its argument with `fmt.Sscanf(..., "%x")`, which stops at the first
+// character it cannot use and reports success for what it consumed, so
+// `FROM_HEX('12zz')` answered 18 — a number derived from text that is not a
+// number, and the opposite of what FROM_BASE answers for the same input
+// (#966 round 2, N2). Two spellings of one operation disagreeing is the
+// defect; the whole string is required now, and text that is not hexadecimal
+// is NULL, which is FROM_BASE's answer and this family's existing shape for
+// unparseable input.
+//
+// A 16-digit word with the top bit set (`ffffffffffffffff`) stays NULL: the
+// result is a signed int64 and that value does not fit one. FROM_BASE declines
+// it identically.
 func fnFromHex(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	var n int64
-	_, err := fmt.Sscanf(toString(args[0]), "%x", &n)
+	n, err := strconv.ParseInt(strings.TrimSpace(toString(args[0])), 16, 64)
 	if err != nil {
 		return nil
 	}
