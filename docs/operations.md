@@ -289,6 +289,46 @@ the profiles describe what it is doing. Any identity that does not hold
 `admin` gets `403 Forbidden`; with authentication disabled they answer without
 credentials, as before.
 
+## Object Store Costs on AWS
+
+Wadjet's request pattern against S3 is not the one a file-serving workload has, and two AWS services bill per request rather than per byte: CloudTrail data events and KMS. Both are silent until the invoice.
+
+### What a query does to the bucket
+
+A scan issues one ranged GET per file (or per row group on the row-group load path); every distributed stage materializes its output as objects under `queries/<id>/` and the next stage reads them back; a shuffle writes one object per partition per task. Measured on the SF100 TPC-H suite (22 queries, three workers, one run): roughly 16,000 ranged GETs and 7,000 PUTs per run, so about a thousand S3 requests per query at that scale, most of them on the `queries/` scratch prefix that no one audits. The full accounting per run is in `docs/benchmarks/sf100-baseline-v0.18.12-2026-09-02.md` §1.3.
+
+### CloudTrail data events are billed; management events are not
+
+CloudTrail management events (bucket-level API calls) are free for the first copy. **Data events** — every object-level GET, PUT, DELETE on a bucket you enable them for — are billed per event (about $0.10 per 100,000 events at the time of writing; check the current price). A datalake serving ten thousand queries a day at the pattern above generates on the order of ten million data events a day, and the scratch prefix is most of them.
+
+Do one of these, in order of preference:
+
+1. **Do not enable S3 data events on the wadjet buckets.** Nothing in wadjet needs them, and the scratch prefix carries no audit value.
+2. **If write auditing of table data is required**, log only writes and only the `tables/` prefix with an advanced event selector; exclude `queries/` (stage outputs and shuffle files) and any spill or cache prefix. `readOnly=false` keeps the GETs out of the log entirely:
+
+```json
+{
+  "FieldSelectors": [
+    {"Field": "eventCategory", "Equals": ["Data"]},
+    {"Field": "resources.type", "Equals": ["AWS::S3::Object"]},
+    {"Field": "readOnly", "Equals": ["false"]},
+    {"Field": "resources.ARN", "StartsWith": ["arn:aws:s3:::<bucket>/tables/"]}
+  ]
+}
+```
+
+3. **If read auditing is required**, use S3 server access logs (delivered to a bucket; you pay only for their storage) or S3 request metrics in CloudWatch scoped by prefix, not CloudTrail data events.
+
+Check the bill: Cost Explorer filtered to CloudTrail with the usage type `DataEventsRecorded`, or CloudTrail Lake's event volume by bucket, before and after the selector change.
+
+### Fewer requests in the first place
+
+`--shuffle-durability=lazy` (or `off`) removes the eager S3 PUT of every stage output; `docs/design/shuffle-durability.md` says what each setting gives up. The local fast path (`--local-fastpath-bytes`) keeps small queries off the DAG entirely, so they never touch `queries/`. Both reduce S3 request charges as well as any per-event logging.
+
+### KMS requests with SSE-KMS
+
+With SSE-KMS and S3 Bucket Keys, S3 caches the bucket-level key per requester session, so every distinct role session name pays its own KMS call per bucket per cache window. Workers must use a stable role session name (one per worker, not one per credential refresh); see issue #1032 for the default and the `--aws-role-session-name` knob it introduces, and measure with the CloudTrail `kms:Decrypt` count per requester per hour.
+
 ## Data Retention
 
 Wadjet supports `UPDATE` and `DELETE` (merge-on-read), but they rewrite whole Parquet files and are not a retention mechanism. Manage bulk data lifecycle through S3 policies:
