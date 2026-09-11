@@ -166,34 +166,15 @@ func DecimalSpecialValueError(s string) error {
 // over both rather than twice.
 type decimalTextBytes interface{ ~string | ~[]byte }
 
-// DecimalTextParts splits numeric TEXT — plain or exponent form — into its
-// sign, its digits with the decimal point removed, and the power of ten those
-// digits must be multiplied by, exactly and without ever going through a
-// float64: the value is `(-1)^neg * digits * 10^exp`.
-//
-// The exponent is read as an INTEGER and folded into the power of ten, never
-// expanded through a float64. Expanding through strconv.ParseFloat is what
-// made `1e400` unreadable — ParseFloat reports ErrRange, the old expansion
-// gave up and handed the untouched "1e400" to a parser with no exponent
-// handling, and that returned the value ZERO, which matched every row holding
-// zero (#463). Here 1e400 is simply a number with a large exponent: it
-// resolves, saturates for a comparison (#462) and is 22003 for a value.
-//
-// ok=false means the text names no number. It is deliberately NOT reported as
-// the value zero: a constant nobody can read used to compare EQUAL to every
-// stored zero (#463), and on the write path it used to be STORED as zero
-// (#647), which is the same failure one layer down.
-//
-// The grammar is PostgreSQL's numeric input MINUS digit separators and radix
-// prefixes. PostgreSQL 16 added both to numeric_in, so 17.11 accepts `1_000`,
-// `1_0.5`, `0x10`, `0b101` and `0o17` (verified live) where this refuses all
-// five with 22P02. That gap is #634 and is deferred, not decided here; it is a
-// REFUSAL of input PostgreSQL takes, never a different value for input both
-// accept, so nothing silently disagrees while it is open.
-//
-// The digit string is the only allocation in this file's parse, and it happens
-// only when a value HAS both an integer and a fraction part; the value builder
-// below never asks for it at all (decimalTextSplit).
+// DecimalTextParts parses plain/exponent text exactly as
+// (-1)^neg * digits * 10^exp, never through float64 (#463, #462).
+// Exponent magnitude does not make text invalid: comparisons can saturate,
+// while unrepresentable stored values raise 22003.
+// ok=false means no number, never zero (#647).
+// Digit separators and radix prefixes remain refused with 22P02 (#634).
+// Allocate digits only when joining integer and fraction parts;
+// the value builder uses decimalTextSplit without concatenation.
+// See docs/internals/parquet-exact-decimal-text-parts.md for the design.
 func DecimalTextParts(s string) (neg bool, digits string, exp int, ok bool) {
 	neg, ip, fp, exp, ok := decimalTextSplit(s)
 	switch {
@@ -502,29 +483,13 @@ func DecimalValueFromFloat(f float64, precision, scale int) (Decimal128, error) 
 	return decimalValueFromFloatBits(f, 64, precision, scale)
 }
 
-// decimalValueFromFloatBits is DecimalValueFromFloat with the width of the box
-// the float ARRIVED in. bitSize picks the float32 or the float64 spelling, so
-// a REAL holding 0.1 stores as 0.1 and not as the 0.10000000149011612 its
-// widening to float64 makes exact — the same rule batch.setCheckedDecimalFloat
-// follows for the row-to-batch side of the same conversion.
-//
-// A RECORDED DIVERGENCE, verified live on postgres:17-alpine: PostgreSQL's
-// float8 -> numeric cast renders the float with %.15g, so
-// `4611686018427387904::float8::numeric` is 4611686018427390000 there and
-// 4611686018427388000 here — wadjet keeps the 17 significant digits that
-// identify the float, PostgreSQL keeps 15. Shortest-round-trip is chosen
-// deliberately: it is the only rendering that names the float it came from,
-// and it is what the row-to-batch twin already does, so the two paths cannot
-// disagree about one value. Nothing in SQL reaches this today — a float box
-// arrives through the embedded/HTTP API, and `CAST(x AS DECIMAL(p,s))` is
-// still ADR-0024 item 6's declared-STRING no-op — so when the CAST evaluator
-// lands (#555) it has to decide separately whether the SQL cast follows
-// PostgreSQL's %.15g.
-//
-// The rendering goes into a STACK buffer: strconv.FormatFloat would allocate a
-// string per value, and ingest of a float-boxed decimal column is one of these
-// per row. 32 bytes covers every shortest 'g' rendering a float64 has (17
-// significant digits, a sign, a point and a four-character exponent).
+// decimalValueFromFloatBits renders at the box's original bitSize so REAL
+// 0.1 remains 0.1, matching batch.setCheckedDecimalFloat.
+// Use shortest round-trip, deliberately differing from PostgreSQL float8's
+// %.15g numeric cast (ADR-0024 item 6, #555).
+// Reject NaN and infinities; parse the finite rendering at declared (p,s).
+// Append into a 32-byte STACK buffer; FormatFloat would allocate per value.
+// See docs/internals/parquet-float-to-decimal-rendering.md for the design.
 func decimalValueFromFloatBits(f float64, bitSize, precision, scale int) (Decimal128, error) {
 	if math.IsNaN(f) {
 		return Decimal128{}, DecimalSpecialValueError("NaN")

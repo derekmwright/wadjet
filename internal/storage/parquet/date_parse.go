@@ -57,46 +57,16 @@ func IsDateParseError(err error) bool {
 	return errors.As(err, &e)
 }
 
-// ParseDateDays converts a DATE string to days since 1970-01-01, or returns a
-// classified DateParseError. It is the single string→date conversion for the
-// engine: the filter kernel (kernel.parseDateToDays), the parquet writers
-// (parseDateForWrite / the native writer's leaf), the ingest boundary
-// (ingest.checkType via ValidateDateString) and the row→batch builder
-// (batch.parseDateString) all route through it, so the accept-set and the
-// error classification are decided in exactly one place.
-//
-// The accept-set is the UNAMBIGUOUS year-first spellings a client sends —
-// those PostgreSQL's default DateStyle (ISO, MDY) parses one, deterministic
-// way, so wadjet can match its value exactly: a four-digit (or wider) leading
-// YEAR with a '-', '/' or '.' separator ("2026-01-02", "2026-1-2",
-// "2026/01/02", "2026.1.1"), the compact 8-digit form ("20260102"),
-// surrounding whitespace, and a trailing time-of-day (space- or T-separated,
-// optional 'Z'/offset, truncated to the date, matching a timestamp text cast
-// to date). It rejects — never silently reads as the epoch or a guessed year
-// — a string that is not a date at all (22007) and a well-formed but
-// nonexistent or out-of-range calendar date such as 2026-02-30, month 13 or
-// day 32 (22008).
-//
-// Two of those refusals exist because PostgreSQL refuses them and they used to
-// be SUPERSET accepts here, on the WRITE path, so wadjet STORED a date no
-// PostgreSQL client could have written (#641): YEAR ZERO in every spelling
-// (22008 — PostgreSQL's calendar puts 1 BC immediately before 1 AD), and a
-// MONTH field of exactly three digits (see threeDigitMonthKind, which is also
-// why a FOUR-digit month and a three-digit DAY are still accepted).
-//
-// The accept-set is still narrower than PostgreSQL's in the other direction,
-// and every one of those is a REFUSAL rather than a different value: the
-// two-field day-of-year form ('2026-003' is 2026-01-03 there), the BC suffix,
-// and the DateStyle-dependent spellings deferred to #639.
-//
-// Not accepted, and deliberately ERRORING rather than guessing (#639): any
-// spelling whose field ORDER PostgreSQL decides from DateStyle rather than
-// from the digits — a short leading field it reads as the MONTH ("5/6/7" is
-// 2007-05-06, "01/02/2026" is 2026-01-02, "31/1/2" is month 31 → rejected),
-// two-digit years, DMY, and month names ("Jan 2 2026"). The invariant is that
-// each ERRORS: wadjet never accept-and-stores a DATE whose value would differ
-// from PostgreSQL's, so no unsupported spelling can become 1970-01-01 or a
-// wrong year.
+// ParseDateDays is the shared string-to-DATE value/error parser for readers,
+// writers, ingest and batch construction. Accept unambiguous year-first
+// (-, /, .; year >= four digits), compact YYYYMMDD, outer whitespace and
+// validated trailing time truncated to the date. Never guess a date (#639).
+// Invalid syntax is 22007; nonexistent/out-of-range dates and year zero
+// are 22008. Exactly three-digit months use threeDigitMonthKind (#641).
+// Four-digit months and three-digit days remain legal when values fit.
+// Decline day-of-year, BC, DateStyle-dependent orders, two-digit years,
+// DMY and month names; no unsupported spelling becomes epoch or wrong year.
+// See docs/internals/parquet-date-text-accept-set.md for the design.
 func ParseDateDays(s string) (int32, error) {
 	trimmed := strings.TrimSpace(s)
 	if trimmed == "" {
@@ -224,33 +194,13 @@ func splitDateFields(s string) (y, m, d int, kind dateFieldsKind) {
 	return atoiN(parts[0]), atoiN(parts[1]), atoiN(parts[2]), dateFieldsOK
 }
 
-// threeDigitMonthKind refuses a middle field of EXACTLY three digits, which is
-// the one width PostgreSQL will not read as a month.
-//
-// The rule is PostgreSQL's DecodeNumber (datetime.c), and it is narrower than
-// "wider than two digits": a three-digit field with only the YEAR decided so
-// far, whose value is 1..366, is a DAY OF YEAR. So '2026-003' is 2026-01-03
-// there — but in a THREE-field date the day-of-year leaves the third field
-// nowhere to go and PostgreSQL answers 22007, while a three-digit value
-// OUTSIDE 1..366 is not a day of year at all, falls through to the month slot
-// and is 22008. Measured live on postgres:17-alpine:
-//
-//	'2026-003-12'   22007       '2026-012-12'   22007       '2026-366-12'  22007
-//	'2026-000-12'   22008       '2026-367-12'   22008       '2026-999-12'  22008
-//	'2026-0003-12'  2026-03-12  '2026-00003-12' 2026-03-12
-//	'2026-01-003'   2026-01-03  '2026-01-0003'  2026-01-03
-//
-// FOUR or more digits is a year-shaped token PostgreSQL accepts as the month,
-// and a three-digit DAY is accepted too — the year and the month are already
-// decided by then, so the day-of-year branch cannot fire. Both keep working
-// here unchanged, which is why this tests the width EXACTLY rather than
-// bounding it: refusing len > 2 would have refused input PostgreSQL takes,
-// which is the divergence ADR-0012 item 1 forbids, in exchange for closing one
-// it permits.
-//
-// wadjet used to read every all-digit middle field as a month, so
-// '2026-003-12' stored 2026-03-12 for a string PostgreSQL rejects (#641).
-// dateFieldsOK here means "not this case", not "valid".
+// threeDigitMonthKind checks EXACTLY three-digit middle fields (#641).
+// With only the year decided, values 1..366 mean day-of-year in PostgreSQL;
+// in a three-field date the extra field makes that 22007 (dateFieldsNone).
+// Other three-digit values are invalid months, 22008 (dateFieldsBad).
+// Do not reject four-or-more-digit months or three-digit days on width alone
+// (ADR-0012 item 1). dateFieldsOK means only "not this case", not valid.
+// See docs/internals/parquet-three-digit-month-classification.md for the design.
 func threeDigitMonthKind(month string) dateFieldsKind {
 	if len(month) != 3 {
 		return dateFieldsOK
@@ -389,31 +339,12 @@ func ValidateNestedLeaves(col Column, val any) error {
 	return nil
 }
 
-// validateNestedLeaf is the per-leaf half of ValidateNestedLeaves: one value
-// against one primitive declaration.
-//
-// It asks CheckLeafBox, which is the same function the FLAT path asks and the
-// same sequence of questions decomposeLeaf itself asks — so a leaf inside a
-// container is held to exactly the rule a top-level column of that type is
-// held to.
-//
-// It used to be a four-case switch — DATE, TIMESTAMP, DURATION, DECIMAL — with
-// `return nil` for everything else, so a container leaf got no range check, no
-// box check and no VECTOR width check. Measured over 28 column shapes x 52
-// boxes, that was 19 values the ingest door ADMITTED and the writer refuses,
-// and every one of them was a container:
-//
-//	ARRAY(INT32)     <- []any{int64(3000000000)}   writer: 22003 out of range
-//	ROW{f INT32}     <- {"f": int64(3000000000)}   writer: 22003
-//	MAP<STRING,INT32><- {"k": int64(3000000000)}   writer: 22003
-//	ARRAY(VECTOR(2)) <- []any{[]float32{1}}        writer: 1 component, want 2
-//	ARRAY(INT64)     <- []any{[]float32{1}}        writer: 42804 wrong box
-//
-// The cost is the one this whole boundary exists to prevent, and it was
-// measured: 99 good rows plus one such row through ingest.Ingester lost ALL 99
-// at the flush, with the error naming `column "element", row 99 of this write`
-// inside a partition flush rather than naming the INSERT that carried it
-// (round-2 review B1).
+// validateNestedLeaf applies CheckLeafBox to every non-NULL primitive leaf,
+// identically to flat-column validation and decomposeLeaf.
+// Include box, numeric range, temporal/DECIMAL and VECTOR width checks.
+// Ingest must reject a bad nested value before buffering, rather than fail
+// a later partition flush that also contains already-accepted good rows.
+// See docs/internals/parquet-nested-leaf-validation.md for the design.
 func validateNestedLeaf(col Column, val any) error {
 	if val == nil {
 		return nil
@@ -421,32 +352,15 @@ func validateNestedLeaf(col Column, val any) error {
 	return CheckLeafBox(col, val)
 }
 
-// normalizeTemporalBox converts a box handed to a DATE, TIMESTAMP or DURATION
-// column into the integer that column's leaf stores — days, milliseconds and
-// nanoseconds respectively — and reports whether it converted anything.
-//
-// It exists because "which boxes are acceptable" was answered in two places
-// that disagreed. ingest.checkType admits, per type:
-//
-//	DATE       time.Time, int32, int64, string
-//	TIMESTAMP  time.Time, int64, string
-//	DURATION   time.Duration, int64, string
-//
-// and of those the writer converted exactly one — a DATE string. Every other
-// non-integer box fell through toInt32/toInt64's `default: return 0` and was
-// stored as ZERO, silently: a time.Time DATE (the box the SQL literal path
-// produces, #673), a string TIMESTAMP and a string or time.Duration DURATION
-// (time.Duration is a NAMED type, so `case int64` in a Go type switch does not
-// match it). An accepted box that stores a wrong value is worse than a
-// rejected one, so this is the single conversion both boundaries use, and a
-// box it cannot convert is an error naming the column and the row rather than
-// a zero.
-//
-// A DATE takes the CALENDAR DATE as written in the time's own location, not
-// its UTC instant — a DATE is a date, and this is also the rule
-// ingest.formatPartitionValue already formats a DATE partition key by
-// (t.Format("2006-01-02")), so a partition's directory name and its stored
-// value cannot disagree.
+// normalizeTemporalBox shares temporal conversion between ingest and writer:
+// DATE stores epoch days, TIMESTAMP milliseconds and DURATION nanoseconds.
+// Normalize DATE string/time.Time, TIMESTAMP string and DURATION string/
+// time.Duration; TIMESTAMP time.Time is handled by int64LeafValue (#673).
+// A DATE time.Time uses its CALENDAR DATE in its own location, not its UTC
+// instant, matching temporal partition-key formatting.
+// Unconvertible boxes must fail the write with column/row context, never
+// fall through an integer converter to zero.
+// See docs/internals/parquet-temporal-box-normalization.md for the design.
 func normalizeTemporalBox(t TypeID, val any) (any, bool, error) {
 	switch t {
 	case TypeDate:

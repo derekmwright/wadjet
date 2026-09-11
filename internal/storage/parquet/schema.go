@@ -194,32 +194,14 @@ func KnownTypeName(s string) bool {
 	return err == nil
 }
 
-// StringTypeLength reads a PARAMETERIZED string type name — `VARCHAR(255)`,
-// `CHAR(4)`, `CHARACTER VARYING(10)` — and validates the parameter.
-//
-// It is ONE reading, and that is the whole point of it living here. The review
-// of #838's first pass found the CAST door refusing `VARCHAR(0)` with 22023
-// while the DDL door CREATED the table: one type name, two dispositions across
-// two doors, which is the defect class this arc exists to close. The refusal
-// has to be where both doors can read it, below the expression layer and below
-// the planner — the same argument `ParseDateDays` settles for dates.
-//
-// PostgreSQL 17.11's own rules and messages, measured:
-//
-//	VARCHAR(0), CHAR(0)        22023  length for type varchar|char must be at least 1
-//	VARCHAR(1e8), CHAR(1e8)    22023  length for type varchar|char cannot exceed 10485760
-//	VARCHAR(abc), VARCHAR(-1)  42601  syntax error at or near "abc"|"-"
-//	TEXT(5)                    42601  type modifier is not allowed for type "text"
-//	VARCHAR(10485760)          accepted — the exact maximum
-//
-// The type NAME in the 22023 message is PostgreSQL's internal one: `char` for
-// all of CHAR / CHARACTER / NCHAR, `varchar` for the varying spellings. TEXT
-// is deliberately NOT a length-carrying name here, because PostgreSQL allows
-// no modifier on it at all.
-//
-// ok=false means the name is not a parameterized string type and the caller's
-// own rules stand; a non-nil error is the refusal, which every caller must
-// PROPAGATE — it is the answer to the query.
+// StringTypeLength is shared by DDL and CAST; propagate every error (#838).
+// Require 1..10485760 characters for parameterized CHAR/VARCHAR families:
+// zero/oversize raise 22023; invalid or negative modifiers raise 42601.
+// Use PostgreSQL's internal char/varchar name in range errors and preserve
+// the offending token's original spelling in syntax errors.
+// TEXT modifiers raise 42601. ok=false means no parameterized string type,
+// so the caller's own rules stand.
+// See docs/internals/parquet-string-type-length-parser.md for the design.
 func StringTypeLength(name string) (n int, err error, ok bool) {
 	upper := strings.ToUpper(strings.TrimSpace(name))
 	base, isParam := stripTypeParams(upper,
@@ -349,30 +331,13 @@ func stripTypeParams(upper string, names ...string) (string, bool) {
 	return "", false
 }
 
-// ParseDecimalParams extracts precision and scale from a type string like
-// "DECIMAL(10,2)", and REFUSES a declaration this carrier cannot honour.
-// A bare DECIMAL with no parameters is (38, 0).
-//
-// The bounds are 1 <= precision <= 38 and 0 <= scale <= precision.
-//
-//   - The precision bound is a DOCUMENTED DIVERGENCE from PostgreSQL, which
-//     accepts numeric(p, s) up to p = 1000 because its numeric is unbounded.
-//     Wadjet's DECIMAL is a 128-bit unscaled integer (ADR-0024 item 1) and 38
-//     digits is its whole range, so `DECIMAL(50,2)` is a column no value can
-//     satisfy. It used to be ACCEPTED, and the writer then emitted a 16-byte
-//     FIXED_LEN_BYTE_ARRAY leaf annotated DECIMAL(50, s) — an annotation the
-//     payload cannot hold, in a file the Apache implementation refuses to open
-//     (R8/#647). Refusing the DECLARATION is the only honest answer: the
-//     alternative is a column that lies about itself in every file it writes.
-//   - The scale bound is the PARQUET FORMAT's, not wadjet's: the DECIMAL
-//     logical type requires 0 <= scale <= precision. PostgreSQL accepts scale
-//     from -1000 to 1000, and `numeric(9,10)` (a value below 0.1 with nine
-//     significant digits) is legal there; there is no parquet annotation for
-//     it, so it is refused here too.
-//
-// The SQLSTATE is 22023 invalid_parameter_value, which is what PostgreSQL
-// raises for a precision outside ITS bound ("NUMERIC precision 1001 must be
-// between 1 and 1000", verified live on postgres:17-alpine).
+// ParseDecimalParams defaults bare DECIMAL to (38,0) and enforces
+// 1 <= precision <= 38, 0 <= scale <= precision, raising 22023.
+// Precision is the finite Int128 carrier limit (ADR-0024 item 1, #647);
+// scale is the parquet annotation bound. Both deliberately differ from
+// PostgreSQL's wider numeric declarations; never write an annotation the
+// physical carrier or reference reader cannot honor.
+// See docs/internals/parquet-decimal-type-parameter-bounds.md for the design.
 func ParseDecimalParams(s string) (precision, scale int, err error) {
 	upper := strings.ToUpper(strings.TrimSpace(s))
 	precision, scale = 38, 0 // a bare DECIMAL
@@ -420,34 +385,14 @@ func ParseDecimalParams(s string) (precision, scale int, err error) {
 	return precision, scale, nil
 }
 
-// DeclaredColumn builds a Column from one DDL column declaration: the type
-// exactly as written, plus its nullability.
-//
-// It is the ONE place a declaration becomes a Column, because a DECIMAL's
-// (p, s) lives in the type TEXT and nowhere else. Three copies of "ParseTypeID
-// and fill in the name" existed — the embedded API, the HTTP server and gRPC —
-// and only the first read the parameters, so `CREATE TABLE t (d DECIMAL(9,2))`
-// over HTTP or gRPC produced a Precision 0, Scale 0 column: 12.34 stored as
-// 12, 9999999.999 stored as 10000000 with no error, and DECIMAL(50,2)
-// accepted (#647 review). Copies of a declaration parser drift toward the
-// laziest one; there is now one to drift from.
-// It resolves EVERY parameterized type, not only DECIMAL's (p, s). The first
-// version read the decimal parameters and nothing else, so `VECTOR(384)`
-// created a column with `Dimension: 0` — a table no INSERT could ever write,
-// failing at flush with an internal error and no SQLSTATE — and
-// `ARRAY(DECIMAL(9,2))`, `ROW(a INT64, d DECIMAL(9,2))` and
-// `MAP(STRING, DECIMAL(9,2))` lost their element, field and key/value
-// declarations entirely (#675). ResolveColumn already knew how to read all of
-// them and had no non-test caller; this is that caller.
-// The NAME is taken as given. It used to be lowercased here, which folded a
-// DELIMITED declaration too — `CREATE TABLE t ("WatchID" INT64)` stored
-// `watchid`, so the one spelling PostgreSQL guarantees would work was the one
-// that did not, and a DDL-created table could not hold a name a
-// parquet-registered one holds every day. Since #731 an UNQUOTED identifier
-// is already folded when it gets here (the lexer does it, once), so the only
-// declarations this changes are the delimited ones, which are exactly the
-// ones that asked to keep their bytes. Fold-uniqueness within the schema is
-// still enforced, by catalog.checkDistinctColumnNames.
+// DeclaredColumn is the shared DDL-to-Column resolver on every door (#647).
+// Use ResolveColumn for EVERY parameterized type: DECIMAL (p,s), VECTOR
+// width, ARRAY elements, ROW fields and MAP key/value declarations (#675).
+// Keep the name as given: the lexer already folded unquoted identifiers,
+// while delimited declarations retain their bytes (#731).
+// Set only top-level nullability here; nested repetition defaults remain.
+// Catalog.checkDistinctColumnNames still enforces schema fold-uniqueness.
+// See docs/internals/parquet-ddl-column-resolution.md for the design.
 func DeclaredColumn(name, typeStr string, nullable bool) (Column, error) {
 	col, err := ResolveColumn(name, typeStr)
 	if err != nil {

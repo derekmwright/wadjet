@@ -80,45 +80,14 @@ func cloneColumn(c Column) Column {
 	return out
 }
 
-// leafColumnsFromCatalog is FileReader.LeafColumn for every leaf, with the
-// CATALOG's declared type substituted at each leaf the catalog's schema reaches
-// AND the substitution is admissible.
-//
-// It is the catalog-side twin of the FILE-side overlay #589 built
-// (overlayDeclaredColumn / containerChildren, ADR-0018 §8), and it exists
-// because those two halves stopped agreeing about what a container can carry.
-//
-// Nine of wadjet's types have no parquet annotation (IPv4, IPv6, MAC, UUID,
-// Bytes, Port, Protocol, Duration) or are spelled as plain UTF8 (CIDR), so a
-// file carries them only in the `wadjet.schema` footer blob. A file written
-// BEFORE that key existed (pre-v0.18.0, #396) has no blob, and the catalog is
-// the only place its types survive. `retypeFromCatalog` restores them — but by
-// construction it stops at the top level, so a nested IPv6 or UUID in such a
-// file still read back as "" long after the file-side overlay learned to
-// recurse (#608). The bytes are on disk and undamaged; only the name of their
-// type was lost.
-//
-// Two rules, and the second is the difference from the top-level pass:
-//
-//   - The WALK is driven by the file's node TREE, through the same
-//     containerChildren alignment collectLeafColumns and overlayDeclaredColumn
-//     use, so the catalog cannot reach deeper here than the file's own schema
-//     already does and a subtree the two disagree about in SHAPE keeps the
-//     file's answer.
-//   - A leaf pairing that is not ADMISSIBLE is declined rather than refused.
-//     The top-level pass makes drift an ERROR, because there the catalog names
-//     a column a user's query asked for by that name and answering from the
-//     file's type instead would be a different answer arrived at without
-//     saying so. Inside a container the file-side overlay already declines
-//     silently on every condition it cannot meet (overlayDeclaredLeaf), and
-//     making the same disagreement fatal on the catalog side would refuse
-//     files that read correctly today — a behaviour change wider than the
-//     repair this is for. The two halves now use ONE admissibility rule at the
-//     same depths, which is what #608 is about.
-//
-// The result is seeded from the file's OWN declared columns, so a file WITH a
-// blob is unaffected: its leaves already carry their declared types and the
-// catalog agrees with them, leaf for leaf.
+// leafColumnsFromCatalog seeds from FILE leaf declarations, then restores
+// admissible catalog identities inside containers (#589, #396, #608; ADR-0018 §8).
+// Drive the walk by the file tree and containerChildren alignment; shape
+// mismatches keep the file answer. Do not reach beyond the file's schema.
+// Nested inadmissible pairings decline, unlike top-level retypeFromCatalog's
+// named drift errors; both walks use the same storage admissibility relation.
+// An agreeing file blob needs no changes.
+// See docs/internals/parquet-catalog-nested-leaf-types.md for the design.
 func leafColumnsFromCatalog(fr *FileReader, catalog []Column) []Column {
 	leaves := fr.Leaves()
 	out := make([]Column, len(leaves))
@@ -172,28 +141,14 @@ func retypeLeafFromCatalog(c *Column, n *SchemaNode, out []Column) {
 	}
 }
 
-// applyNestedLeafRetype writes the catalog's declaration over one leaf's, where
-// the substitution is admissible. It is the ONE place a nested leaf's declared
-// type changes, so the two walks above — the Column tree the caller carries
-// onward, and the per-leaf array the nested decode reads — cannot disagree.
-//
-// Two admissible substitutions, and they are different in kind:
-//
-//   - A TYPE the file cannot annotate (the nine of ADR-0018 §8) is restored
-//     from the catalog. Type identity ONLY, exactly as overlayDeclaredLeaf
-//     copies only the type: none of the nine has a precision, scale or
-//     dimension to carry, and copying those fields is how a declaration would
-//     reach the decode and allocation paths.
-//   - A DECIMAL's (p, s) is adopted when the file declares a different one.
-//     Here the parameters ARE the substitution: the type identity already
-//     matches and the disagreement is entirely in the two numbers, half of
-//     which is half of every value in the column. Round 0's B1 was exactly
-//     this pairing being declined — so a `DECIMAL(15,4)` leaf inside a ROW
-//     under a `DECIMAL(15,2)` catalog column answered 1275.00 for 12.75 while
-//     the flat column beside it, reconciled by retypeFromCatalog's top-level
-//     arm, answered 12.75. The decode moves the carrier
-//     (readLeafColumn / scan.rescaleDecimalChunk) once this has said what the
-//     leaf means.
+// applyNestedLeafRetype is the shared mutation for carried Column trees and
+// per-leaf decode declarations, so those two views cannot disagree.
+// Restore only TYPE identity for the nine unannotatable types (ADR-0018 §8);
+// never copy their precision, scale or dimension into decode/allocation state.
+// For DECIMAL with a valid file declaration, adopt catalog (p,s); the decoder
+// then moves the carrier through readLeafColumn / scan.rescaleDecimalChunk.
+// Decline nil inputs and inadmissible substitutions.
+// See docs/internals/parquet-nested-leaf-retype-contract.md for the design.
 func applyNestedLeafRetype(dst, want *Column, n *SchemaNode) {
 	if dst == nil || want == nil || n == nil {
 		return

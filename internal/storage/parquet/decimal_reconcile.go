@@ -4,39 +4,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
-// DecimalRescale moves an unscaled DECIMAL carrier from the scale the FILE
-// declares for it to the scale the CATALOG declares for the column, and holds
-// the result to the catalog's precision.
-//
-// ADR-0018 is the charter: a parquet file's own numbers are INPUT, not fact.
-// For a DECIMAL that is not a figure of speech — the column chunk carries only
-// the unscaled integer and the SCHEMA carries the scale, so half of every
-// value lives in a declaration. When two files of one table declare that half
-// differently (a foreign writer, a pre-#647 write path, an unrepaired #608
-// file), reading both under one declaration means a different NUMBER, silently:
-// 12.7500 written at scale 4 reads back as 1275.00 under a scale of 2 (#707).
-//
-// The catalog is the authority for a table's type, so the file's carrier is
-// moved to the catalog's scale rather than reinterpreted under it. PostgreSQL
-// decides what "moved" means and it is the ASSIGNMENT cast, verified live on
-// postgres:17-alpine:
-//
-//	12.7567::numeric(15,2)   -> 12.76     rounds half AWAY FROM ZERO
-//	(-12.7550)::numeric(15,2) -> -12.76
-//	12.75::numeric(15,4)     -> 12.7500   widening is exact
-//	123456789012.3456::numeric(9,2) -> 22003 numeric field overflow
-//
-// which is exactly DecimalValueFromText's contract, so this routes through it
-// rather than growing a second scaling rule beside the one ADR-0024 already
-// gates. `Text` renders the carrier at the file's scale and the resolver reads
-// it back at the catalog's; the two are inverse by construction, which is why
-// a scales-agree call is the identity and returns before either runs.
-//
-// The cost of going through text is deliberate. This fires only when a file's
-// declaration DISAGREES with the catalog's — a repair, not a read — and every
-// ordinary file takes the equal-scales exit above with no work at all. Buying
-// a second hand-rolled 128-bit divide for a path that by definition runs on
-// files this writer did not produce is the trade ADR-0018 §3 exists to refuse.
+// DecimalRescale converts FILE-scale carriers to CATALOG scale and precision
+// (ADR-0018; #647, #608, #707). Never reinterpret a carrier at another scale.
+// Use DecimalValueFromText over Text(fromScale) for assignment rounding:
+// half away from zero, exact widening, 22003 on precision overflow (ADR-0024).
+// Equal scales avoid text conversion but still enforce declared precision.
+// Reject file scales outside 0..MaxDecimalDigits.
+// Keep one shared scaling rule, not a separate Int128 divide (ADR-0018 §3).
+// See docs/internals/parquet-decimal-file-scale-reconciliation.md for the design.
 func DecimalRescale(d Decimal128, fromScale, toScale, precision int) (Decimal128, error) {
 	if fromScale < 0 || fromScale > MaxDecimalDigits {
 		return Decimal128{}, decimalFileScaleError(fromScale)
@@ -97,33 +72,13 @@ func DecimalFileScale(leaf *SchemaNode) (int, bool) {
 	return int(leaf.Scale), true
 }
 
-// DecimalRescalePlan is what one column read needs to know to reconcile a
-// file's DECIMAL declaration with the catalog's: the scale to move FROM and
-// whether any move is needed.
-//
-// need=false covers both no-op cases — the leaf is not a decimal, or it
-// declares the catalog's own (p, s) — so a caller writes one branch and the
-// ordinary file pays two integer comparisons per column chunk.
-//
-// The boundary, stated because it is a claim and the corpus attempts it from
-// both sides: this fires on a DECLARATION disagreement, and a file that agrees
-// with the catalog is read exactly as before. The two halves of the declaration
-// are treated alike and BOTH are reconciled, which is the round-0 review's P2:
-//
-//   - a SCALE disagreement moves the carrier (the file holds the right number
-//     under a different half of the declaration, so the number survives);
-//   - a PRECISION disagreement moves nothing, but the value is held to the
-//     catalog's band, because a file declaring `(38,2)` under a catalog column
-//     of `(15,2)` can carry a value that column promises not to hold. Before
-//     this, the native scan ANSWERED such a value — a 20-digit number in a
-//     column whose wire declaration says at most 15 digits, which PostgreSQL
-//     cannot reach (`…::numeric(15,2)` is 22003) — while the row reader
-//     refused the same bytes with a different message. One disposition on both
-//     paths, and it is PostgreSQL's (ADR-0013's two-path property, ADR-0024).
-//
-// The cost stays off the ordinary path: this writer writes the catalog's
-// declaration, so both halves match and the check is two comparisons per column
-// chunk. Only a file some other producer wrote pays anything per value.
+// DecimalRescalePlan reports file scale and whether DECIMAL (p,s) differs.
+// need=false for non-DECIMAL or matching declarations; ordinary chunks pay
+// only declaration comparisons, with no per-value reconciliation.
+// Scale drift moves carriers; precision drift enforces the catalog's range
+// even without a scale change. Row and native reads must agree
+// (ADR-0013 two-path property, ADR-0024).
+// See docs/internals/parquet-decimal-reconciliation-plan.md for the design.
 func DecimalRescalePlan(leaf *SchemaNode, want Column) (fromScale int, need bool) {
 	if want.Type != TypeDecimal {
 		return 0, false

@@ -2,36 +2,13 @@ package parquet
 
 import "fmt"
 
-// Record assembly for nested columns: ONE recursive descent over the FILE's
-// own schema tree, driving every leaf under a column from that leaf's own
-// definition and repetition levels.
-//
-// What it replaces (#409): three hand-written assemblers — one per container
-// kind — that resolved their leaves by a FIXED-DEPTH path and gave up when
-// the path did not land on a leaf. assembleRowColumn looked up
-// {col, field} and skipped the field when the lookup missed, so a field that
-// was itself a container (always a GROUP, never a leaf) was dropped from the
-// struct. assembleMapColumn looked up {col, "key_value", value} and abandoned
-// the WHOLE column on a miss, so a MAP of ARRAY or of ROW read back absent.
-// assembleArrayColumn had a prefix fallback, which is worse than a miss: an
-// ARRAY of MAP resolved to the MAP's FIRST leaf and answered with the array
-// of KEYS. Even with the right leaf, assembleMapColumn read the value at the
-// KEY leaf's entry index, an alignment that only holds while the value is a
-// single leaf with one entry per map entry.
-//
-// The depth assumption is the whole defect, so the replacement carries no
-// depth at all. Every shape — MAP inside ROW, ARRAY of MAP, MAP of ARRAY,
-// MAP of MAP, ARRAY of ARRAY, to any depth — is the same three cases applied
-// recursively.
-//
-// The plan is built from the SchemaNode tree rather than from the catalog's
-// Column, because the file is what the levels describe: nodeToColumn
-// (file_reader.go) derives the reported column TYPE from exactly the same
-// three patterns, so the assembled value's shape and the declared type
-// cannot drift apart. Level arithmetic is not recomputed here either —
-// BuildSchemaTree's computeLevels already stamped MaxDefLevel/MaxRepLevel on
-// every node from the footer's repetition types, and those are the numbers
-// the page levels are written against.
+// Assemble nested records by recursive descent over the FILE's schema tree,
+// using each leaf's own definition/repetition levels (#409).
+// ROW/LIST/MAP cases recurse to any depth; never resolve leaves by fixed-depth
+// paths, take a prefix leaf, or index a map value by its key leaf's position.
+// Match nodeToColumn's shape patterns and use BuildSchemaTree/computeLevels'
+// stamped levels; do not substitute catalog shape or recompute level arithmetic.
+// See docs/internals/parquet-recursive-record-assembly.md for the design.
 
 type nestedKind int
 
@@ -343,27 +320,14 @@ func (a *recordAssembler) mapKeyString(keyNode *nestedNode, k any) string {
 	return fmt.Sprint(k)
 }
 
-// checkDrained reports a leaf whose level stream still holds entries after
-// every record has been assembled.
-//
-// The count is an exact bound, not a policy one (ADR-0018 §1): assembly
-// consumes one entry from a leaf per value the record holds at that leaf,
-// and a NULL or empty container consumes exactly one placeholder from each
-// leaf beneath it, so after the row group's numRows records EVERY leaf that
-// was paged in must sit exactly at the end of its own stream. A residual
-// means the levels and the row count describe different data — the file's
-// own numbers contradicting each other, which is the one thing a reader can
-// see without a second opinion.
-//
-// It is the assembler's only cross-check. The level walk itself cannot
-// notice a wrong repetition level: it reads what the levels say, and levels
-// that close a container early simply produce a shorter value. Where the
-// mistake desynchronises SIBLING leaves — a map's key against its value, a
-// struct's fields against each other — the leftover entries are what is left
-// to see, and this is what sees them. Wadjet's own writer emitted exactly
-// that shape for a multi-entry LIST or MAP nested inside another one, before
-// #409 (see docs/adr/0018-parquet-file-numbers-are-input.md); such files are
-// refused here rather than answered from.
+// checkDrained rejects residual leaf entries after numRows records assemble
+// (ADR-0018 §1). Every value consumes one entry; NULL/empty containers consume
+// one placeholder in each descendant leaf, so every paged stream must drain.
+// The level walk alone cannot detect an early container close; desynchronized
+// siblings expose it as leftovers. This is a cross-check, not a second oracle.
+// Reject pre-#409 malformed nested files rather than answer from them
+// (docs/adr/0018-parquet-file-numbers-are-input.md).
+// See docs/internals/parquet-nested-assembly-drain-check.md for the design.
 func (a *recordAssembler) checkDrained(leaves []*SchemaNode) error {
 	for i := range a.pages {
 		lcd := &a.pages[i]

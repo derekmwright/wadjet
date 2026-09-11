@@ -73,41 +73,14 @@ type NativeWriter struct {
 	closeMu sync.Mutex
 }
 
-// ErrWriterClosed is returned by every call on a writer whose file has
-// already been finalized.
-//
-// A parquet file ends with its footer, a four-byte footer length and the
-// magic trailer, so the last byte Close writes is the end of the artifact.
-// Nothing can be appended to it and nothing can be taken back. Before this,
-// neither Writer nor NativeWriter recorded that Close had run, and a later
-// WriteRows/WriteMapRows returned nil in both of the two shapes the row-group
-// size selects (#972, measured at f415faba on a one-INT64-column file):
-//
-//   - the row fitted the open row group, so it was buffered, nothing reached
-//     the output, and the accepted row was silently LOST;
-//   - the row crossed RowGroupSize, so a whole column chunk was appended
-//     AFTER the trailer — 292 bytes became 347 and both wadjet's reader and
-//     pyarrow then refused the file ("invalid magic", "Parquet magic bytes
-//     not found in footer"). A finalized, readable file became unreadable
-//     because of a call that returned success.
-//
-// Close was not idempotent either: a second Close wrote a second footer and
-// trailer over the first, which is what a `defer w.Close()` beside an
-// explicit one would have done.
-//
-// The rule is therefore the simplest one that has no such shapes: a closed
-// writer is closed. The first Close latches it — whether it succeeded or
-// failed — and every later WriteRows, WriteMapRows and Close returns a loud
-// error having touched neither the leaf buffers nor the output. A writer
-// whose Close FAILED keeps returning that failure instead, because it is the
-// more specific answer and it is what #888's latch already promised.
-//
-// A writer is NOT safe for concurrent use: its leaf buffers, its error latch
-// and its byte count are all unsynchronized, and two goroutines writing rows
-// to one writer will corrupt the file. The single exception is this latch,
-// which is claimed atomically, so two goroutines racing to Close cannot both
-// finalize — exactly one writes the footer and the other is told the file is
-// already finalized.
+// The first Close latches closed whether finalization succeeds or fails (#972).
+// Later WriteRows/WriteMapRows/Close must touch neither buffers nor output;
+// return the latched failure if any (#888), else ErrWriterClosed.
+// Closed write refusal must precede caller-map preparation too.
+// Writers are not safe for concurrent row writes. Close is the exception:
+// closeMu serializes finalization, so a second Close waits and observes the
+// first one's result; exactly one writes the footer.
+// See docs/internals/parquet-writer-closed-lifecycle.md for the design.
 var ErrWriterClosed = errors.New("parquet: writer is closed (the file was already finalized)")
 
 // checkWritable is the one gate every write door asks before it accepts
@@ -477,28 +450,12 @@ func vectorTypeLength(dimension int) (int32, error) {
 	return int32(dimension * 4), nil
 }
 
-// checkDecimalDeclaration returns the (precision, scale) a DECIMAL column's
-// footer annotation will carry, or the reason the column cannot be written.
-//
-// `Precision <= 0` is this package's documented "unconstrained" sentinel and
-// becomes 38 (decimalEffectivePrecision), so the FILE's precision — not the
-// field — is what the scale is measured against, and it is what a foreign
-// reader will apply. Measured at f415faba, all reached through NewWriter with
-// Close returning nil (#969):
-//
-//	DECIMAL(9,-1)  a row of "1.25" read back as 0, and pyarrow refuses the
-//	               file: "Scale must be a non-negative integer that does not
-//	               exceed precision for Decimal logical type"
-//	DECIMAL(4,9)   an EMPTY file still carries the annotation, and pyarrow
-//	               refuses it the same way
-//	DECIMAL(0,40)  the file declares decimal(38,40); pyarrow refuses it
-//	DECIMAL(50,2)  the file declares decimal(38,2) — wadjet reads back its own
-//	               output as DECIMAL(38,2), not the DECIMAL(50,2) asked for
-//	DECIMAL(-3,2)  the same silent re-declaration
-//
-// ParseDecimalParams enforces 1 <= precision <= 38 and 0 <= scale <= precision
-// for DDL; a Column built in Go bypassed it entirely. Scale == precision is
-// legal and stays legal (pyarrow opens DECIMAL(38,38)).
+// checkDecimalDeclaration validates the annotation even for an empty file (#969).
+// Precision 0 means MaxDecimalDigits (38); negative precision is refused.
+// Require precision <= 38 and 0 <= scale <= effective precision, using the
+// precision the FILE will declare. Scale == precision remains legal.
+// Go-built Columns must meet the same carrier/format limits as DDL.
+// See docs/internals/parquet-writer-decimal-declaration.md for the design.
 func checkDecimalDeclaration(precision, scale int) (int32, int32, error) {
 	if precision > MaxDecimalDigits {
 		return 0, 0, fmt.Errorf("a DECIMAL precision of %d is past the %d digits a 128-bit unscaled "+
@@ -671,28 +628,13 @@ func (nw *NativeWriter) decomposeLeaf(col Column, val any, defLevel, repLevel in
 		}
 		val = conv
 	}
-	// A DATE text literal is converted HERE too, at the leaf, so a DATE
-	// nested in a ROW/ARRAY/MAP is validated on the same path a top-level
-	// one is (prepareRows only rewrites top-level columns). An unparseable
-	// or nonexistent calendar date used to reach toInt32 -> parseDateForWrite
-	// and store the epoch silently — data corruption inside a container the
-	// top-level guard never saw (#560). ParseDateDays is the one accept-set
-	// and classification the filter path shares.
-	//
-	// A time.Time for a DATE column, and a string or a time.Duration for the
-	// other two temporal types, are normalised HERE for the same reason and
-	// by the same rule: every one of them is a box ingest.checkType DECLARES
-	// acceptable, and every one of them used to reach toInt32/toInt64's
-	// default arm and store ZERO — 1970-01-01 for a DATE, 1970-01-01T00:00Z
-	// for a TIMESTAMP, a zero interval for a DURATION — with no error
-	// anywhere. That is how `INSERT INTO t VALUES (1, '2020-01-01')` stored
-	// the epoch while ingest.Ingest with the same text stored the date: the
-	// SQL path boxes a DATE as time.Time and the programmatic one boxes it as
-	// a string, and only the string had a converter (#673).
-	//
-	// The accept-set is the boxes checkType admits, so the two boundaries
-	// agree by construction, and what they cannot convert FAILS the write
-	// rather than storing a wrong instant.
+	// Normalize temporal boxes HERE at each leaf, including inside ROW/ARRAY/MAP.
+	// ParseDateDays supplies the same DATE accept-set/error classification as
+	// filters (#560); time.Time, timestamp text and duration boxes use
+	// normalizeTemporalBox, matching ingest's admitted boxes (#673).
+	// Failed conversion latches a write error naming column and row; never
+	// store the integer converters' zero as a substitute instant.
+	// See docs/internals/parquet-leaf-temporal-conversion.md for the design.
 	if norm, ok, err := normalizeTemporalBox(col.Type, val); err != nil {
 		nw.fail(fmt.Errorf("column %q, row %d of this write: %w", col.Name, nw.rowsSeen, err))
 		lb.appendEntry(defLevel, repLevel)
@@ -750,28 +692,12 @@ func (nw *NativeWriter) decomposeLeaf(col Column, val any, defLevel, repLevel in
 	}
 }
 
-// appendAbsentLeaf records that this leaf has no value at this position, or
-// refuses when the position cannot say so.
-//
-// A definition level says how many of a leaf's optional ancestors are present;
-// the leaf's own maxDefLevel is the level at which the VALUE itself is
-// present. A REQUIRED leaf has no level below that to spend on absence, so
-// appending one for a nil wrote the PRESENT level and advanced the count with
-// nothing behind it: every later value in that column shifted by one. For a
-// required BOOLEAN, `[nil, true]` read back as `[true, false]` — the bit
-// padding hid the mismatch — and for a required INT64, `[nil, 42]` produced a
-// file the decoder could not finish, two values declared over eight data bytes
-// (#887).
-//
-// The test is the LEVEL, not the column's Nullable flag, and that is what makes
-// it right at depth: a required field of a PRESENT optional struct has
-// defLevel == maxDefLevel here and is refused, while the same field under an
-// ABSENT optional ancestor never reaches this function at all (its subtree goes
-// through emitNullForSubtree at the ancestor's own lower level), which is
-// exactly the case that must stay legal.
-//
-// The SQLSTATE is PostgreSQL's 23502 not_null_violation, the one
-// ingest.validateRow already raises for a missing non-nullable column.
+// appendAbsentLeaf records absence only below lb.maxDefLevel; otherwise
+// latch 23502 not_null_violation, never declare a present value without bytes (#887).
+// Check definition LEVEL, not Nullable: a required leaf of a PRESENT optional
+// struct cannot be NULL. Under an ABSENT optional ancestor the whole subtree
+// uses emitNullForSubtree at that ancestor's lower level and remains legal.
+// See docs/internals/parquet-absent-required-leaf.md for the design.
 func (nw *NativeWriter) appendAbsentLeaf(lb *leafBuffer, col Column, defLevel, repLevel int32) {
 	if defLevel >= lb.maxDefLevel {
 		nw.fail(sqlerr.New("23502",
@@ -791,36 +717,13 @@ func hasNetworkLiteralForm(t TypeID) bool {
 	return false
 }
 
-// convertNetworkLiteral turns a text literal into the binary form its column
-// is defined to hold: an int64 for IPV4 and MAC, sixteen bytes for IPV6 and
-// UUID. It has three outcomes, and the two that are not "it converted" are
-// the point.
-//
-// There used to be one. Every converter answered garbage with a zero value:
-// ipv4StringToInt64 and macStringToInt64 returned 0, so "zz" landed in a MAC
-// column as 00:00:00:00:00:00, indistinguishable from an address somebody
-// meant; ipv6StringToBytes returned nothing; and convertStringToBytes stored
-// an unparseable UUID as THE RAW STRING BYTES, so "not-a-uuid" became ten
-// bytes in a column whose entries are sixteen. That last one produced a file
-// wadjet WROTE that wadjet's own row reader then refused — "UUID is 16 bytes
-// per value but row 2 holds 10" — while the native columnar reader read it.
-// One file, two paths, two answers, and the row path is the one compaction
-// and ANALYZE run on.
-//
-// PostgreSQL decides what a bad literal means (ADR-0012) and there it is an
-// error: `invalid input syntax for type uuid`. So a literal that parses
-// converts, and anything else is an error naming the column, the row and the
-// literal.
-//
-// The empty literal is the third outcome: it is an absence, and it is written
-// as NULL. "" is the one input for which "a value" has no stable meaning here
-// — stored as a value it is a zero-length entry in a fixed-width column,
-// which the row reader called an error and the columnar reader called a
-// value, and which answers false to IS NULL and equal to the empty string
-// when what was meant was that there is no address. The readers hold the
-// other end of this contract: a zero-length entry in an IPV6 or UUID column
-// reads back as NULL on both paths (reader.go unpackAllPresent /
-// unpackWithNulls, scan/columnar_native.go).
+// convertNetworkLiteral parses IPv4/MAC text to int64 and IPv6/UUID to 16 bytes.
+// Malformed nonempty text fails with column/row/literal context at the caller
+// (ADR-0012); never substitute zero or store malformed raw bytes.
+// Empty text is absence and becomes NULL, not a zero-length fixed-width value.
+// Both row and native readers likewise read zero-length IPv6/UUID entries as
+// NULL; keep the two ends of this contract aligned.
+// See docs/internals/parquet-network-literal-write-contract.md for the design.
 func convertNetworkLiteral(colType TypeID, s string) (any, error) {
 	if s == "" {
 		return nil, nil
@@ -1119,31 +1022,12 @@ func (nw *NativeWriter) emitNullForSubtree(col Column, defLevel, repLevel int32,
 	}
 }
 
-// sortedMapKeys returns m's keys in byte order.
-//
-// Go map iteration is randomized, so ranging over the map wrote the same
-// MAP value's entries in a different order on every call, and the file was
-// therefore not a function of its input: two writes of identical rows
-// produced different bytes. Nothing that compares files can work against
-// that — no golden file, no content hash, no byte-for-byte check that a
-// rewrite changed nothing. (Row-group min/max survive it, being
-// commutative; the bytes and the entry order do not.)
-//
-// The order is also observable downstream: it is the order the entries are
-// laid out in, and the vector side turns exactly that into the order
-// GetValue hands back. batch.mapEntryRows sorts on the same rule, because
-// this writer and that vector are the two ways the same map reaches disk
-// and they have to agree.
-// mapFromStorageShapeEntries converts a MAP's storage-shape value — []any of
-// {keyName: k, valName: v} entry maps, the shape batch.Vector.GetValue's
-// TypeMap arm produces (and batch.mapEntryRows builds from a native map on
-// the way in) — back into the native map[string]any this writer expects.
-// Returns ok=false for anything else, so the caller's existing
-// malformed-input handling is unchanged.
-//
-// MAP keys are always Go strings at this boundary (mapKeyValue's own
-// comment: "Row-level keys are always strings"), so a non-string key entry
-// is exactly as malformed as any other shape val could have been.
+// mapFromStorageShapeEntries converts []any entry maps keyed by keyName /
+// valName into map[string]any. Require string keys; malformed shapes return
+// ok=false to retain the caller's existing refusal handling.
+// The writer's sortedMapKeys must emit byte order, matching batch.mapEntryRows,
+// so identical maps have identical bytes and observable entry order.
+// See docs/internals/parquet-map-storage-shape-and-order.md for the design.
 func mapFromStorageShapeEntries(val any, keyName, valName string) (map[string]any, bool) {
 	entries, ok := val.([]any)
 	if !ok {
@@ -1578,28 +1462,12 @@ func (nw *NativeWriter) writeDataPage(lb *leafBuffer, pr pageRange, single bool)
 	return totalUncompressed, totalCompressed, nil
 }
 
-// footerTrailerLength is the value a file's four-byte trailer carries for a
-// footer of n bytes — and the ONLY way to obtain one, so the narrowing cannot
-// happen anywhere else.
-//
-// The trailer is a fixed four-byte unsigned length, so a footer past
-// math.MaxUint32 has no honest position to point at. writeFooter used to
-// encode the metadata, WRITE IT, and only then narrow the length with a bare
-// uint32() conversion: 2^32 bytes of footer became a trailer of 0 and 2^32+4
-// became 4, so Close appended PAR1 over a location pointing into the data and
-// returned nil. Readers seek there and interpret whatever they find as
-// metadata. It is reachable from row-group metadata alone — one RowGroup plus
-// one ColumnChunk per column accumulates per flush and is retained to Close —
-// not only from huge values (#974).
-//
-// Two bounds, in the order that names the failure most precisely:
-//
-//   - The FORMAT's width. Structural, not policy: nothing can carry it.
-//   - This package's own READ ceiling, footerMaxSize. ADR-0018 §2's corollary
-//     binds the writer to the reader's ceilings, and a 64 MiB footer is a file
-//     wadjet itself refuses to open — writing one produces an artifact that is
-//     unreadable here and merely pathological elsewhere. Refusing at Close
-//     says so while the caller still has the rows.
+// footerTrailerLength is the ONLY narrowing of encoded footer length (#974).
+// Validate before writing metadata: first the format's uint32 bound, then
+// footerMaxSize, then a positive length. Never wrap the trailer's address.
+// The writer must honor its reader's ceiling (ADR-0018 §2), including footers
+// made huge by accumulated row-group metadata rather than large values.
+// See docs/internals/parquet-footer-trailer-bound.md for the design.
 func footerTrailerLength(n int64) (uint32, error) {
 	if n > math.MaxUint32 {
 		return 0, fmt.Errorf("parquet: refusing to finalize the file: its footer is %d bytes, which the "+

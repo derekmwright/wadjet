@@ -129,27 +129,13 @@ func ReadFileMetaData(r io.ReaderAt, fileSize int64) (*FileMetaData, error) {
 	return md, nil
 }
 
-// ValidateColumnChunkPaths binds each row group's column chunks to the schema
-// leaves by FULL path, refusing a footer whose column metadata contradicts the
-// schema it belongs to.
-//
-// The reader resolves a leaf to its chunk by SLICE POSITION: FileReader.ColumnPages
-// reads rg.Columns[leafIdx] for schema leaf leafIdx, and every read path (the
-// row reader, the native scan) resolves a column NAME to that leafIdx first.
-// That is correct only while rg.Columns[j].PathInSchema names schema leaf j —
-// which the format requires (a row group lists one column chunk per leaf, in
-// schema-leaf order) and every writer honours. Nothing checked it. Swapping two
-// ColumnChunk entries in the footer therefore handed each leaf its neighbour's
-// chunk; for two columns of the same physical type the decode met no mismatch
-// and ReadRows returned the values under the wrong names, nil error (#927).
-// ValidateChunkLayout cannot catch it — it sorts extents by byte offset, so a
-// swap that keeps every byte range valid passes. The binding is checked here, at
-// open, by full path: a position whose chunk names a different leaf than the
-// schema puts there — a swap, a duplicate, or a foreign path — is refused by
-// name. A row group SHORT a chunk keeps its existing per-column refusal
-// ("carries no chunk for it", column_completeness.go), which names the absent
-// column; every position this file DOES carry is validated here, so a middle
-// drop that shifts the survivors is caught as a contradicting path.
+// ValidateColumnChunkPaths checks each carried chunk's FULL schema path at
+// open against its leaf position; slice-index decoding depends on that (#927).
+// Refuse swapped, duplicate, foreign or shifted paths by name.
+// ValidateChunkLayout cannot catch a swap with valid byte ranges.
+// A missing chunk retains column_completeness.go's per-column refusal;
+// validate every carried position that has metadata and a schema leaf.
+// See docs/internals/parquet-column-chunk-path-binding.md for the design.
 func ValidateColumnChunkPaths(md *FileMetaData) error {
 	if md == nil {
 		return nil
@@ -195,31 +181,13 @@ func pathsEqual(a, b []string) bool {
 	return true
 }
 
-// ValidateFileMetaData holds a decoded footer to the claims it makes about
-// itself, before any of its numbers is used to size something.
-//
-// A row group's num_rows is the size EVERY destination vector in a scan is
-// allocated for (batch.NewRecordBatch(schema, numRows)), and it is a signed
-// 64-bit thrift field nothing had checked. The whole-file mutation fuzz
-// reached a negative one in seconds: "makeslice: len out of range", raised
-// while building the batch, before a single page was read.
-//
-// Refusing negatives was not enough, and neither was holding each row group
-// to the FILE's total: the file's total is a varint out of the same footer.
-// num_rows = 2^40 on a two-row file reached makeslice with 128 GiB and died
-// as "fatal error: runtime: out of memory" — unrecoverable, so in a worker
-// process it is the worker; 2^30 was accepted outright and decoded after
-// allocating gibibytes. Three bounds close that, in the order they cost:
-//
-//  1. Nothing is negative.
-//  2. Every row group is within MaxRowsPerRowGroup, and within what the
-//     file's own BYTES can carry (rowCeiling). Both are policy ceilings,
-//     documented at their constants.
-//  3. The file's total is exactly the sum of its row groups'. The format
-//     requires that, every writer in the corpus honours it (244 files,
-//     wadjet's own and pyarrow's, checked), and it is the only check here
-//     that is exact rather than generous — which makes it the one that
-//     catches a single flipped varint wherever it landed.
+// ValidateFileMetaData checks footer numbers before allocation.
+// Reject missing metadata and negative counts; bound row groups by both
+// MaxRowsPerRowGroup and the file-byte-derived rowCeiling, and file totals
+// by rowCeiling. These are policy bounds, not proof from footer totals.
+// Require the file total to equal the sum of row-group counts exactly.
+// Never let a claimed count size unbounded allocations before decoding.
+// See docs/internals/parquet-footer-row-count-bounds.md for the design.
 func ValidateFileMetaData(md *FileMetaData, fileSize int64) error {
 	if md == nil {
 		return fmt.Errorf("footer decoded to nothing")
@@ -301,28 +269,13 @@ func CheckRowGroupRowCount(rgIdx int, numRows int64) error {
 	return nil
 }
 
-// ValidateChunkLayout holds the file's column chunks to the one thing a
-// single chunk's metadata cannot check about itself: where its neighbours
-// are.
-//
-// A chunk's extent is [offset, offset+total_compressed_size). chunkRange
-// refuses one that runs past the end of the FILE, but the far more damaging
-// overstatement is the small one — a chunk that reaches a few hundred bytes
-// into the NEXT column's pages. The page loop reads those bytes as more pages
-// of this column and returns them as values, so a 128-row chunk comes back
-// holding 64 of its own values and 64 of a neighbour's, with err == nil. That
-// is the silent-wrong-answer shape, and nothing downstream can see it.
-//
-// The rule is that the chunks tile the data region without overlapping and
-// without crossing into the footer. Measured, not assumed: across 44 files
-// from pyarrow (four codecs, format 1.0 and 2.6, with and without the page
-// index, one and many row groups), parquet-go and wadjet's own writer, every
-// adjacent pair of chunks is exactly contiguous — worst gap zero, worst
-// overlap zero — and the last chunk ends at or before the footer. No writer
-// overstates, so an overstatement is a corrupt file and is named as one.
-//
-// Empty chunks are skipped: a zero-byte extent has no bytes to collide over,
-// and its offset is whatever the writer happened to leave behind.
+// ValidateChunkLayout rejects chunk extents that overlap neighbours or cross
+// into the footer. A chunkRange file-bound check alone cannot detect a chunk
+// stealing a neighbour's pages as its own values.
+// Check in file order without allocation, sorting only when needed.
+// Skip zero-byte chunks: they cannot overlap and their offsets are immaterial.
+// Gaps are permitted; do not require the observed writers' exact contiguity.
+// See docs/internals/parquet-column-chunk-layout.md for the design.
 func ValidateChunkLayout(md *FileMetaData, dataEnd int64) error {
 	if md == nil {
 		return nil

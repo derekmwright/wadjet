@@ -319,28 +319,13 @@ func (r *ColumnPageReader) TakeScratch() (def, idx []int32) {
 // the process before the read fails.
 const maxPageBodyBytes = 1 << 30
 
-// chunkRange turns a column chunk's footer offsets into a byte range inside
-// the file, refusing every claim the file cannot back.
-//
-// Nothing validated these before. DataPageOffset and DictionaryPageOffset are
-// signed 64-bit thrift fields read straight out of the footer, and a negative
-// one became a negative slice index at the very first read: `r.data[r.off:]`
-// with r.off = -9025. Five of the six crashers the whole-file mutation fuzz
-// found were exactly that, and the file only has to be off by one flipped
-// byte in a varint to get there.
-//
-// The END used to be CLAMPED to the file rather than refused, on the belief
-// that writers round TotalCompressedSize up. They do not. Every column chunk
-// in 44 files written by pyarrow (four codecs, both format versions, with and
-// without the page index), by parquet-go and by wadjet's own writer ends
-// EXACTLY where the next one begins — worst inter-chunk gap zero, worst
-// overlap zero — because the field is the sum of the chunk's page sizes,
-// headers included. Clamping therefore bought nothing and cost a silent wrong
-// answer: an overstated size reaches into the NEXT column's bytes, the page
-// loop decodes them as this column's, and a 128-row chunk comes back with 64
-// of its own values and 64 belonging to a neighbour, err == nil. An
-// overstatement is now refused, here and (against its neighbours, which one
-// chunk's metadata cannot see) in ValidateChunkLayout at open.
+// chunkRange validates footer offsets and compressed size before slicing.
+// Start at an earlier positive dictionary offset, else DataPageOffset.
+// Reject negative file/offset/size, overflowing ranges and ends beyond the file;
+// never clamp an overstated size into a plausible shorter chunk.
+// ValidateChunkLayout separately checks neighbours and footer boundaries,
+// which one chunk's metadata cannot establish.
+// See docs/internals/parquet-column-chunk-byte-range.md for the design.
 func chunkRange(cm *ColumnMetaData, fileSize int64) (start, end int64, err error) {
 	start = cm.DataPageOffset
 	if cm.DictionaryPageOffset > 0 && cm.DictionaryPageOffset < cm.DataPageOffset {
@@ -409,30 +394,15 @@ func (r *ColumnPageReader) columnLabel() string {
 	return strings.Join(r.path, ".")
 }
 
-// verifyPageCRC holds a page body to the checksum its own header carries.
-//
-// parquet.thrift makes PageHeader.crc a CRC-32 over the page's serialized
-// body EXACTLY as stored — after compression, the header excluded, and for
-// a v2 page the uncompressed level sections included — using the standard
-// (IEEE, GZip) polynomial. A file that carries one has told the reader how
-// to know its own bytes are intact; decoding the body anyway answers the
-// query out of data the file itself says is wrong. That is what happened:
-// a single flipped payload bit in a parquet-go-written INT64 page turned
-// [42, 43] into [43, 43] with a nil error, while parquet-go refused the
-// identical bytes (#891).
-//
-// PRESENCE, not value: ph.CRCSet. See PageHeader.CRCSet for why zero is not
-// the absence test.
-//
-// The check runs on every body this reader DECODES — data pages v1 and v2,
-// the dictionary page, in both the row reader's and the native scan's
-// walks, and on the dictionary page DictionaryIfPure prunes a row group
-// from. It deliberately does not run on a page NextPageMaybeSkip skips: no
-// value comes out of those bytes, so nothing the reader returns can depend
-// on them, and paying a full-body checksum for a payload the skip exists to
-// avoid touching would spend the optimization. A skipped page whose bytes
-// are corrupt reads clean; the same file read whole refuses. Both halves
-// are gated.
+// verifyPageCRC checks CRCSet PRESENCE, including checksum zero (#891).
+// Use IEEE CRC-32 over stored compressed body bytes, excluding the header
+// and including uncompressed v2 level sections.
+// Check every decoded v1/v2/dictionary body on both read paths, including
+// dictionaries used by DictionaryIfPure pruning.
+// Do not touch/check NextPageMaybeSkip payloads: they produce no values.
+// A corrupt skipped page may read clean while a whole-file read refuses;
+// gates must cover both sides.
+// See docs/internals/parquet-page-crc-check-boundary.md for the design.
 func (r *ColumnPageReader) verifyPageCRC(off int, ph *PageHeader, body []byte) error {
 	if !ph.CRCSet {
 		return nil

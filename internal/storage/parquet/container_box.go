@@ -6,28 +6,12 @@ import (
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
-// arrayElements and rowFields resolve a caller's box for a CONTAINER column,
-// or refuse it.
-//
-// decomposeArray, decomposeRow and decomposeMap each asserted one Go shape and
-// treated the failure as an ABSENT SUBTREE — the value became NULL, with no
-// error from WriteRows, from Close or from the read. A nullable
-// ARRAY(INT64) handed []int64{1,2,3} read back as NULL (#889), and
-// ValidateNestedLeaves could not see it either: it walks only the shapes that
-// assert successfully, so a box it does not recognise is a box it says nothing
-// about.
-//
-// Two changes, and the order matters. First, a slice or map of ANY element
-// type is normalised — []int64, []string, []float64, map[string]int and the
-// rest are unambiguous spellings of the same value, and refusing them would
-// make an obvious call an error where it used to be silently wrong. Second,
-// what is left — a scalar, a string, a struct — has no reading as a container
-// at all and is 42804 datatype_mismatch, LATCHED, so the write fails rather
-// than storing a NULL nobody asked for.
-//
-// reflect rather than a list of element types: the list would be the thing
-// that goes out of date, and this runs once per container VALUE on the write
-// path, not per leaf.
+// Container boxes must normalize or refuse, never silently become NULL (#889).
+// arrayElements accepts slices/arrays of any element type; rowFields accepts
+// string-keyed maps of any value type, using reflection once per container.
+// Scalars, strings and structs have no container reading and raise a latched
+// 42804. ValidateNestedLeaves and writer decomposition share this boundary.
+// See docs/internals/parquet-container-box-normalization.md for the design.
 func arrayElements(col Column, val any) ([]any, error) {
 	if arr, ok := val.([]any); ok {
 		return arr, nil

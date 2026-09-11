@@ -804,27 +804,12 @@ var declaredOverlayTypes = map[TypeID]bool{
 	TypeDuration: true,
 }
 
-// declaredOverlayUTF8Types is the one exception to "an annotated leaf is
-// immune", and it holds exactly one type.
-//
-// CIDR has no parquet annotation of its own either, so buildLeafSchemaElement
-// writes it as UTF8 STRING — the annotation describes the STORAGE truthfully
-// and loses only the name. Restoring the name over a UTF8 leaf changes
-// nothing about how the page is decoded (BYTE_ARRAY either way) and nothing
-// about how a value renders (Vector.GetValue returns the same text for both
-// STRING and CIDR), which is what makes this safe where STRING→IPv6 is not:
-// IPv6's storage contract is exactly 16 bytes and GetValue renders anything
-// else as "".
-//
-// It is not cosmetic. The engine dispatches on the TYPE, and CIDR and STRING
-// do not behave identically everywhere: with CIDR reverting to STRING, the
-// stage DAG and the single-process engine started answering
-// `SELECT MIN(c_cidr), MAX(c_cidr)` differently — the DAG correctly, the
-// single-process arm with NULLs — because one saw a STRING column and the
-// other the catalog's CIDR (TestTypeMatrixTwoPath/minmax_c_cidr; the
-// single-process NULL is a separate defect, and #392's MIN_BY switch is
-// another). Restoring the declared name is what keeps the two paths reading
-// the same column as the same type.
+// CIDR is the sole declared-overlay exception for an annotated UTF8 leaf.
+// It preserves BYTE_ARRAY decoding and text rendering while restoring the
+// identity needed by type-dispatched operators (#392).
+// Do not apply this exception to IPv6 or other types: IPv6 requires exactly
+// 16 bytes and a UTF8 string's bytes do not establish that contract.
+// See docs/internals/parquet-cidr-utf8-overlay.md for the design.
 var declaredOverlayUTF8Types = map[TypeID]bool{
 	TypeCIDR: true,
 }
@@ -845,40 +830,15 @@ func leafIsUTF8String(n *SchemaNode) bool {
 	return false
 }
 
-// overlayDeclaredSchema restores the declared TYPE IDENTITY of every leaf in
-// the schema — top-level columns and the leaves inside ROW, ARRAY and MAP
-// alike — from the footer's declared-schema blob. Nothing else is taken:
-// name, nullability, precision, scale, dimension and nested structure all
-// stay as the parquet tree described them, because those the tree CAN express
-// and the tree is what the page decoders are driven by.
-//
-// A file written before this key existed, or by any other producer, has no
-// blob and keeps the inferred schema — the behaviour this replaces.
-//
-// The blob is UNTRUSTED INPUT: it is bytes in a file, and a reader that lets
-// it choose how pages are interpreted has handed a file the power to make the
-// engine misread its own data. Five conditions must all hold before a single
-// leaf is touched, and any failure leaves that leaf — or that subtree, or the
-// whole schema — exactly as the tree described it:
-//
-//  1. the blob is under maxDeclaredSchemaBytes and decodes as JSON;
-//  2. it describes the same number of top-level columns, with the same names
-//     in the same order (inside a container: the same structural shape, and
-//     ROW fields matched by exact name — see overlayDeclaredContainer);
-//  3. the leaf carries NO LogicalType and NO ConvertedType — the file itself
-//     said nothing about what the column means, which is the only situation
-//     the blob is here to fix — or it is annotated UTF8 text, the single
-//     exception below;
-//  4. the declared type is one of declaredOverlayTypes (the eight types
-//     parquet cannot annotate) on an unannotated leaf, or CIDR on a UTF8 one
-//     (declaredOverlayUTF8Types: same storage, same rendering, name only);
-//  5. the physical parquet type of that declared type is the physical type
-//     the leaf ACTUALLY has in the file.
-//
-// Together those make a stale or mismatched blob inert rather than a source
-// of misread pages, and they bound the blast radius of a hostile one to
-// relabelling an unannotated INT32/INT64/BYTE_ARRAY column as another type
-// with the identical storage.
+// overlayDeclaredSchema restores only leaf TYPE IDENTITY from the untrusted
+// footer blob, recursively; tree names, nullability, parameters and shape stay.
+// Absent/oversized/invalid JSON blobs leave inference unchanged. Require
+// matching top-level count, exact names/order and matching container shape.
+// Overlay only unannotated leaves in declaredOverlayTypes, or UTF8 CIDR
+// in declaredOverlayUTF8Types, with the leaf's ACTUAL physical type matching.
+// Every failed condition leaves the affected leaf/subtree/schema unchanged;
+// the blob must never choose a different page decoder or allocation shape.
+// See docs/internals/parquet-declared-schema-overlay-trust.md for the design.
 func overlayDeclaredSchema(inferred Schema, nodes []*SchemaNode, kv []KeyValue) Schema {
 	var raw string
 	for i := range kv {
@@ -925,33 +885,13 @@ func overlayDeclaredColumn(ic, dc *Column, n *SchemaNode) {
 	overlayDeclaredContainer(ic, dc, n)
 }
 
-// overlayDeclaredContainer walks a ROW, ARRAY or MAP and overlays what is
-// underneath it.
-//
-// The container's own structure is NOT taken from the blob — parquet's LIST,
-// MAP and STRUCT annotations express it and the tree already carries it. What
-// parquet cannot express is the same thing one level down that it cannot
-// express at the top: an IPv6, a UUID or a BYTES leaf is an unannotated
-// BYTE_ARRAY wherever it sits, so the reader read one back as TypeString and
-// the row assembler boxed sixteen intact bytes as a Go string, which
-// Vector.SetValue then handed to net.ParseIP and dropped — the value read
-// back as "" (#589). The blob is the only place the declared type survives,
-// at every depth.
-//
-// Alignment is re-derived from the shape nodeToColumn itself read, so the
-// inferred column and the tree cannot drift apart here:
-//
-//   - ARRAY: one repeated child holding one element node;
-//   - MAP: one repeated child holding the key and the value, which the
-//     inferred column presents as the synthesized "entry" ROW's two fields —
-//     so the ROW arm aligns them against that same repeated group;
-//   - ROW: fields positionally aligned with the group's children (that is how
-//     nodeToColumn built them), each matched to a DECLARED field by exact
-//     name.
-//
-// Any disagreement — the blob calling a container something the tree does
-// not, a field the blob does not name, a field name it repeats — leaves that
-// subtree exactly as the tree described it.
+// overlayDeclaredContainer restores leaf identity without replacing the
+// FILE's LIST/MAP/STRUCT shape (#589).
+// Align through containerChildren: ARRAY's repeated element, MAP's repeated
+// key/value entry ROW, and ROW fields in the file tree's order.
+// Declared type, child count and exact names/order must agree; any mismatch
+// leaves the subtree's inferred declaration unchanged.
+// See docs/internals/parquet-container-overlay-alignment.md for the design.
 func overlayDeclaredContainer(ic, dc *Column, n *SchemaNode) {
 	if ic.Type != dc.Type {
 		return

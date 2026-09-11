@@ -24,37 +24,14 @@ type ColumnStats struct {
 	NullCount int64
 }
 
-// CidrInetBound is a CIDR row-group MinValue/MaxValue RowGroupStats has
-// CONFIRMED is orderable in PostgreSQL's inet order (#523). It is a distinct
-// type, not a plain string, specifically so a consumer's comparison cannot
-// mix the two by accident: kernel.StatsDomainValue's CIDR literal converts
-// to this same type, and a generic string comparator that special-cases it
-// (see scan.compareValuesOK) refuses to compare one against an ordinary
-// string — which is what an UNCONFIRMED file's untouched TEXT bound still
-// is. That refusal is what keeps kernel.StatsDomainValue's conversion
-// unconditional (every valid CIDR literal converts) safe even for a row
-// group whose file this reader cannot confirm is CIDR at all, or is CIDR but
-// pre-#523: the type system, not a per-file heuristic, is what stops the
-// comparison.
-//
-// It carries BOTH representations because its two consumers need different
-// ones and neither can be derived from the other without loss:
-//
-//   - Key is the comparison domain — kernel.CidrSortKey's encoding,
-//     duplicated in this package as CidrStatsSortKey. It is a BINARY string
-//     (a family byte, the masked address bytes, the mask length, the full
-//     address bytes), so it is not valid UTF-8 and must never reach a JSON
-//     or text encoder.
-//   - Text is the winning row's address text exactly as the file stores it,
-//     which is what a CATALOG stat has to hold: catalog.FileColumnStats is
-//     JSON-tagged and persisted in NATS KV, and encoding/json rewrites every
-//     byte a Key holds above 0x7F as U+FFFD, irreversibly. Both
-//     extractColumnStats sites (storage/ingest, storage/compaction) unbox to
-//     this before the stats leave for the catalog.
-//
-// Text is empty on the LITERAL side (kernel.StatsDomainValue has a predicate
-// constant, not a row), which is sound because a literal-side bound is only
-// ever compared, never persisted.
+// CidrInetBound marks stats confirmed in PostgreSQL inet order (#523).
+// Compare only with the same bound type; unconfirmed/pre-#523 plain TEXT
+// bounds must not mix with unconditional converted literal keys.
+// Key is the binary CidrSortKey/CidrStatsSortKey domain and must NEVER reach
+// JSON/text encoding. Text preserves the winning row's stored address for
+// catalog.FileColumnStats persistence; ingest/compaction must unbox to it.
+// Literal bounds have empty Text: they are compared, never persisted.
+// See docs/internals/parquet-cidr-stat-bound-representations.md for the design.
 type CidrInetBound struct {
 	Key  string
 	Text string
@@ -656,27 +633,13 @@ func PhysicalReadableAs(t TypeID, pt PhysicalType) bool {
 	}
 }
 
-// MapKeyCarrierText renders a decoded map-KEY leaf CARRIER into a canonical,
-// PARSEABLE text — the string a Go map's key must be, from which the key child
-// (batch.Vector.SetValue) or a re-write (decomposeMap) reconstructs the exact
-// value.
-//
-// The nested leaf decode hands back CARRIERS, not display values
-// (StorageClassOf's classes: IPv4/MAC as int64, IPv6/UUID as raw 16-byte
-// slices, DECIMAL as the unscaled integer, DATE as the day count). fmt.Sprint
-// of those is a lossy carrier print — "3232235786", "[10 0 0 5]", "127500" —
-// that the key child cannot re-parse, so EVERY family whose carrier is not
-// already its own text (issue #883's title) was corrupted or lost on the round
-// trip: DECIMAL re-scaled, DATE/IPv4/MAC/IPv6/UUID lost to a zero value. A map
-// VALUE is unaffected because it stays the typed box and SetValue reads it
-// directly; only the key is forced through text because a Go map's key must be
-// a string.
-//
-// The final user-visible key is re-rendered by GetValue from the RECONSTRUCTED
-// carrier, so this text need only PARSE to the right carrier — it is not the
-// display spelling. IPv6 is emitted as the uncompressed eight-group form so it
-// round-trips to the exact sixteen bytes (net.ParseIP of a v4-mapped display
-// form would not), and GetValue re-compresses it on the way out.
+// MapKeyCarrierText renders decoded KEY carriers to text that reparses to
+// the exact value through batch.Vector.SetValue or decomposeMap (#883).
+// Do not fmt.Sprint raw network bytes, DECIMAL unscaled integers or DATE days.
+// MAP values retain typed boxes and need no key-string round trip.
+// This is parseable carrier text, not display text: emit IPv6 as all eight
+// uncompressed groups to preserve v4-mapped bytes; GetValue re-renders it.
+// See docs/internals/parquet-map-key-carrier-text.md for the design.
 func MapKeyCarrierText(typeID TypeID, decScale int32, k any) string {
 	// EXHAUSTIVE over the 22 TypeIDs by design: the previous per-type switch
 	// with a `default: fmt.Sprint` silently mangled every carrier the switch
@@ -850,43 +813,14 @@ func DecodeCompatible(fileType, catalogType TypeID) bool {
 	return StorageClassOf(fileType) == StorageClassOf(catalogType)
 }
 
-// CoercibleTo reports whether values decoded as the type the FILE stores can
-// be converted, after decode, to the type the CATALOG declares.
-//
-// This set is the contract between the two read paths. Which one runs is
-// decided by the SHAPE of the schema — a table one column of ARRAY/MAP away
-// from the row reader sends every query on it down that path (#393) — not by
-// the query, so a pairing one path converts and the other refuses is a
-// two-path divergence waiting for a schema change to expose it. The native
-// scan implements exactly this set in copyNativeCoercedDirect /
-// copyNativeCoercedScatter; readColumnToAny implements it here.
-//
-// Anything outside the set stays an error on both paths.
-//
-// LOSSLESS WIDENING is in the set, and is the one class here that cannot
-// change a value: every INT32 is an INT64 and every FLOAT32 is a FLOAT64,
-// exactly. It was left out on the reasoning that a widening drift is
-// indistinguishable from catalog/file drift — true, and the wrong conclusion,
-// because it is a drift whose repair is exact. #428 made compaction read
-// through this gate, so refusing it stopped the partition compacting AT ALL
-// (#440): every pass failed the merge, the failure was a log line, and the
-// partition accumulated small files forever. Before that the compactor read
-// the file's own types and the writer widened on the way out, which is to say
-// the system already performed this coercion — just without anything vetting
-// it.
-//
-// The NARROWING pairings are a different matter and stay for their own
-// reasons: INT64→INT32 truncates and INT64→FLOAT64 loses precision past 2^53,
-// and both are admitted because a file that predates a narrowing catalog
-// change is otherwise unreadable. They are not evidence that any conversion
-// belongs here — and #439 is the proof, from the other direction:
-//
-// TypeInt32 → TypeString was admitted here until then. A bare INT32 leaf
-// carries no evidence its values are day counts, only a leaf the file itself
-// ANNOTATED as DATE does. Admitting it rendered arbitrary integers as ISO
-// dates (100 became "1970-04-11") on any table where a plain INT32 column
-// landed under a catalog STRING column, and once compaction started taking
-// this same coercion (#428) it wrote the fabricated dates over the inputs.
+// CoercibleTo is the shared post-decode set for row and native reads (#393).
+// Allow exact INT32→INT64 and FLOAT32→FLOAT64 widening (#440, #428), plus
+// legacy INT64→INT32 truncation and INT64→FLOAT64 precision loss past 2^53.
+// Allow annotated DATE→STRING, never plain INT32→STRING (#439): an integer
+// leaf alone does not establish day-count meaning.
+// Decode as the FILE type before conversion; all other cross-class pairs
+// remain errors on both paths, including compaction.
+// See docs/internals/parquet-read-path-coercion-set.md for the design.
 func CoercibleTo(file, want TypeID) bool {
 	switch {
 	case file == TypeInt32 && want == TypeInt64:
@@ -926,63 +860,16 @@ func fixedByteWidth(c Column) int {
 	return 0
 }
 
-// retypeFromCatalog replaces each read column's type with the catalog's,
-// where the catalog names it, both sides are leaves, and the two types are
-// carried by the same physical bytes.
-//
-// Leaves only, deliberately: a nested column's read plan is built from the
-// FILE's shape (the assembly plan is built from the file's schema tree), and
-// substituting a catalog Column whose children were resolved differently
-// would look up leaves that do not exist. A lossy leaf INSIDE a container
-// stays lossy — that is the same annotation gap, one level down, and it
-// needs the annotations, not a substitution.
-//
-// Same physical bytes, non-negotiably: this substitution exists so that a
-// column the file cannot ANNOTATE (IPv4, IPv6, MAC, PORT, PROTOCOL,
-// DURATION, BYTES, UUID) is decoded as what it is, and every one of those
-// eight has the same physical type as the type the file recovered for it.
-// A catalog type of a DIFFERENT width is not a lost annotation, it is
-// catalog/file drift, and honouring it means decoding the file's bytes as
-// a wider element: unpackAllPresent would ask Values.Int64() for one int64
-// per INT32 in the page, an unsafe.Slice twice as long as its backing array
-// — megabytes of adjacent heap returned as query results.
-//
-// The comparison is against the FILE LEAF's RECOVERED TYPE — physical type
-// plus the logical/converted annotations that TypeIDFromSchemaNode reads —
-// not against a physical type alone and not against what our writer would
-// have chosen. Each of those weaker questions admits pairings that decode to
-// nonsense:
-//
-//   - Our writer's mapping on both sides compares what WE would have written,
-//     so a pyarrow DECIMAL(9,2) (physically INT32) sitting under a catalog
-//     INT64 compared INT64 to INT64 and passed, then read eight bytes per
-//     four-byte value.
-//   - The physical type alone cannot tell a DECIMAL from the INT32, INT64,
-//     BYTE_ARRAY or FIXED_LEN_BYTE_ARRAY it is stored in — the format allows
-//     all four, and only the annotation says which one this is. Asking
-//     "is DECIMAL readable from this physical?" therefore answered yes for
-//     every leaf in the file, so a catalog DECIMAL(18,2) over a STRING column
-//     was admitted and read ("hello","world") back as two integers made of
-//     the letters. Same width, different meaning: the decode does not fault,
-//     it just answers something else.
-//
-// The question that is actually being asked is whether the values the file's
-// own type decodes to can be STORED as the catalog's type without converting
-// them, and StorageClassOf is exactly that relation. DECIMAL and VECTOR are
-// classes of their own, so a catalog DECIMAL is admissible only over a leaf
-// the annotations already recovered AS a decimal — at which point there is
-// nothing to substitute and the loop has already skipped it. The eight
-// inexpressible types share a class with the plain INT32/INT64/BYTE_ARRAY
-// their annotation-free leaves recover as, which is the whole mechanism.
-// CoercibleTo names the only pairings admitted ACROSS classes, and those are
-// decoded as the file's type and converted afterwards.
-//
-// Drift is an ERROR rather than a silent skip. Skipping would answer the
-// query from the file's own type, which is a different answer from the one
-// the catalog promised, arrived at without saying so; the caller cannot tell
-// that from a correct read. A named error says which column, what the
-// catalog claims and what the file actually holds — which is the whole
-// diagnosis.
+// retypeFromCatalog binds catalog-named top-level leaves using the FILE's
+// recovered type, including logical/converted annotations, not physical width
+// alone or our writer's mapping. Container shape stays the file's.
+// StorageClassOf decides whether decoded values can be stored unchanged;
+// DECIMAL and VECTOR are distinct classes, never inferred from bare bytes.
+// Only CoercibleTo pairs may cross classes, decoded as file type then converted.
+// Validate fixed byte widths; a larger unsafe view would expose adjacent heap.
+// Drift raises a named column/catalog/file error, never silently uses file type.
+// Nested catalog restoration is handled separately in nested_retype.go.
+// See docs/internals/parquet-catalog-leaf-retyping.md for the design.
 func retypeFromCatalog(readCols, catalog []Column, root *SchemaNode, leaves []*SchemaNode) ([]Column, error) {
 	if len(catalog) == 0 || len(readCols) == 0 {
 		return readCols, nil
