@@ -10,35 +10,14 @@ import (
 	"strings"
 )
 
-// Fingerprint is a stored-comparable digest of a whole result: the row
-// count plus one digest per precision of the canonical row rendering. It
-// exists so a reference engine's answer can be committed to a file and
-// compared later without that engine on the machine — the shape the
-// DuckDB ground-truth gate needs.
-//
-// Three properties the gate depends on, in the order they were learned the
-// hard way:
-//
-//   - Every column is covered, strings and NULLs included. A per-column
-//     numeric sum (internal/harness's value signature) skips string columns
-//     entirely, which is how a NULLed name column (#314) shipped green.
-//     Here a NULL renders "<null>", distinct from the empty string, and a
-//     string cell contributes its bytes.
-//
-//   - Order sensitivity is the CALLER's decision, per query. With ordered
-//     set, the row sequence is part of the digest, so a dropped ORDER BY
-//     (#313/#316/#320) changes it; without, rows are sorted first, so an
-//     engine free to return them in any order is not held to one. Passing
-//     ordered for a query with no top-level ORDER BY would manufacture
-//     failures; passing it false for one that has an ORDER BY is the blind
-//     spot those three bugs walked through.
-//
-//   - Float summation order does not move it. The rows are rendered at two
-//     precisions and a match at EITHER counts, which is the same
-//     dual-precision policy Canon.Diff applies and for the same reason (see
-//     the Canon doc comment): one ULP of accumulation noise can flip a
-//     rendered digit at a rounding boundary, but not at two independent
-//     quanta at once.
+// Fingerprint stores row count and canonical-row digests for offline references.
+// Cover EVERY column, strings and NULLs; NULL is distinct from empty (#314).
+// Caller chooses ordering per query: ordered preserves sequence, unordered sorts
+// rows before digesting. Wrong selection invents failures or hides dropped
+// ORDER BY (#313/#316/#320); follow the query's determinism boundary.
+// Match either fine or coarse float precision, as Canon.Diff does, to tolerate
+// small accumulation noise. This is an approximate comparison policy.
+// See docs/internals/oracle-stored-result-fingerprints.md for the design.
 type Fingerprint struct {
 	// Rows is the row count; it is part of the identity, so a fingerprint
 	// never matches a result of a different size.
@@ -211,28 +190,13 @@ func TextCell(s, null string) any {
 	return f
 }
 
-// canonicalDecimalCell renders a DECIMAL's text cell in the one spelling both
-// sides of a comparison reach it in: trailing FRACTION zeros removed, and no
-// decimal point at all when nothing is left after them.
-//
-// A wadjet DECIMAL boxes as its rendered text at the column's DECLARED scale,
-// so a set operation whose common type is DECIMAL(12,1) renders 100.0 where
-// the value is a whole 100. The reference engine's cell has already been
-// through TextCell, which reads numeric-looking text as a float64 — and
-// fingerprintFloat renders a whole number as its digits, "100". The two are
-// the same number hashed to different digests, which is a fingerprint
-// artifact rather than an answer: it is the seam the exact literal arms of
-// #555 met, where `SELECT n_regionkey + 100 INTERSECT SELECT r_regionkey +
-// 100.0` matches live DuckDB cell for cell and missed the stored digest.
-//
-// Trimming, not floating: a wide DECIMAL keeps every digit it holds, so this
-// cannot weaken the exactness #455 established — 493827160549382.7160549350
-// is untouched, where reading it as a float64 would quantize it to six
-// significant digits.
-//
-// A genuine TEXT column holding "1.50" now hashes with one holding "1.5".
-// That is narrow, and it is an ASYMMETRY being removed rather than a new
-// blind spot: TextCell already collapses both on the reference side.
+// canonicalDecimalCell removes trailing FRACTION zeros and then an empty point,
+// so 100.0 and 100 hash alike across engine text conventions (#555).
+// Trim text, never round through float64: preserve every significant digit
+// of wide DECIMAL values (#455).
+// This also equates genuine TEXT '1.50' and '1.5'; TextCell already collapses
+// those reference-side values, so the fingerprint does not distinguish them.
+// See docs/internals/oracle-decimal-text-canonicalization.md for the design.
 func canonicalDecimalCell(s string) string {
 	dot := strings.IndexByte(s, '.')
 	if dot < 0 {
