@@ -179,7 +179,17 @@ func withSubqueryDecls(decls colDecls, n *logical.Node) colDecls {
 // this pass over the INNER plan too — so without the memo a query with nested
 // subqueries would re-plan the same text once per level. The in-flight sentinel
 // stops a self-referencing text from recursing.
-func (p *Planner) scalarSubqueryColumnDecl(sql string) (logical.SubqueryColumnDecl, bool) {
+func (p *Planner) scalarSubqueryColumnDecl(sql string) (decl logical.SubqueryColumnDecl, ok bool) {
+	// The same guard subqueryOutputColumn carries, and for the same reason:
+	// resolving a declaration plans a SECOND QUERY, and a declaration nobody
+	// can compute is a missing entry — never a crashed statement. The WIDTH
+	// half walks a tree the type half does not (emittedColIntWidth over the
+	// subquery's own plan), so it needs the guard too.
+	defer func() {
+		if r := recover(); r != nil {
+			decl, ok = logical.SubqueryColumnDecl{}, false
+		}
+	}()
 	if p.subqueryDeclCache == nil {
 		p.subqueryDeclCache = map[string]*subqueryDeclEntry{}
 	}
