@@ -2161,7 +2161,7 @@ FROM flow_logs
 
 ## Built-in Functions
 
-Wadjet includes 366 built-in scalar functions across several categories.
+Wadjet includes 376 built-in scalar functions across several categories.
 
 ### String Functions
 
@@ -2207,6 +2207,98 @@ Wadjet includes 366 built-in scalar functions across several categories.
 | `LCASE(s)` / `UCASE(s)` | Aliases for LOWER/UPPER | `LCASE(name)` |
 | `TO_UTF8(s)` | String to its raw UTF-8 bytes (BYTES) | `TO_UTF8('hello')` |
 | `FROM_UTF8(b)` | BYTES back to a string; NULL when the bytes are not valid UTF-8 | `FROM_UTF8(data)` |
+
+### Version String Functions
+
+A software version is a `STRING` in every table that holds one — a package
+inventory, an agent or firmware roster, a container image tag, a CVE feed's
+"affected versions" column. Ordering or filtering it **as text is wrong in a
+way that looks right**: `'1.10.0' < '1.2.3'` and `'1.2.10' < '1.2.3'` are both
+true as bytes and both false as versions. These functions give the string the
+ordering [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html)
+gives it. There is no new type — a version is text, and `SEMVER_SORT_KEY` is
+the text whose **byte order is precedence**, so `ORDER BY`, `MIN`/`MAX`, a
+distributed merge and a spilled sort all order versions correctly with nothing
+new to learn.
+
+Nothing here is network-specific.
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `SEMVER_VALID(s)` | Whether the string is a version | `SEMVER_VALID('1.2.3')` → `true` |
+| `SEMVER_MAJOR(s)` | The major number, `BIGINT` | `SEMVER_MAJOR('v1.2.3')` → `1` |
+| `SEMVER_MINOR(s)` | The minor number, `BIGINT` | `SEMVER_MINOR('1.2.3')` → `2` |
+| `SEMVER_PATCH(s)` | The patch number, `BIGINT` | `SEMVER_PATCH('1.2.3')` → `3` |
+| `SEMVER_PRERELEASE(s)` | The pre-release, or `''` when there is none | `SEMVER_PRERELEASE('1.0.0-rc.1')` → `'rc.1'` |
+| `SEMVER_BUILD(s)` | The build metadata, or `''` when there is none | `SEMVER_BUILD('1.0.0+exp.5114f85')` → `'exp.5114f85'` |
+| `SEMVER_CMP(a, b)` | `-1`, `0` or `1` by the specification's precedence, `INTEGER` | `SEMVER_CMP('1.2.3','1.10.0')` → `-1` |
+| `SEMVER_SORT_KEY(s)` | A `TEXT` key whose byte order equals precedence | `ORDER BY SEMVER_SORT_KEY(v)` |
+| `SEMVER_NORMALIZE(s)` | The canonical spelling (the `v` prefix removed) | `SEMVER_NORMALIZE('v1.2.3')` → `'1.2.3'` |
+| `SEMVER_NORMALIZE_STRICT(s)` | The same, but SQLSTATE `22023` instead of NULL | `SEMVER_NORMALIZE_STRICT('latest')` → error |
+
+**Data is lenient.** A string that is not a version is **NULL**, never an
+error, from every function above except the strict one — a `WHERE` over a
+version column collected from the wild must filter rather than abort, and such
+a column always holds junk. `SEMVER_NORMALIZE_STRICT` is the loud twin for a
+job that asserts rather than filters: the same canonical string, and SQLSTATE
+`22023` naming the value when it is not a version. A NULL argument is NULL
+everywhere, the strict form included.
+
+**`SEMVER_PRERELEASE` and `SEMVER_BUILD` answer `''`, not NULL, for a version
+that has none.** A release *is* a version without a pre-release; returning NULL
+for it would make `SEMVER_PRERELEASE(v) IS NULL` true for both `1.0.0` and
+`not-a-version`. NULL means "not a version" throughout the family.
+
+#### What is a version here
+
+The specification's grammar, with **one** documented concession: a leading `v`
+or `V` is accepted, because every real dataset has it (git tags, GitHub
+releases, Go module versions) and `v1.2.3` and `1.2.3` are the same version.
+Everything else is the grammar as written:
+
+- all three components are required — `1.2` is not a version;
+- **no leading zeroes** in the core or in a numeric pre-release identifier, so
+  `01.2.3` and `1.0.0-01` are NULL (otherwise two spellings of one version
+  would make `GROUP BY` and `DISTINCT` answer two different numbers);
+- identifiers are `[0-9A-Za-z-]` and may not be empty, so `1.0.0-alpha..1`,
+  `1.0.0-` and `1.0.0-alpha_1` are NULL;
+- surrounding whitespace is not trimmed — `' 1.2.3'` is NULL;
+- build identifiers **may** carry leading zeroes (`1.0.0+001`), because build
+  metadata has no precedence at all;
+- a numeric identifier past `BIGINT` (`99999999999999999999.0.0`) is NULL. The
+  specification sets no upper bound; this engine's is `int64`, which is also
+  the width `SEMVER_MAJOR`/`MINOR`/`PATCH` declare.
+
+#### Ordering
+
+`SEMVER_CMP` and `SEMVER_SORT_KEY` implement §11 exactly: the three numbers
+compare numerically; a version **with** a pre-release ranks below the same core
+**without** one; pre-release identifiers compare left to right, numerically
+when both are all digits, by ASCII bytes otherwise, with a numeric identifier
+always below an alphanumeric one and a longer list winning when every preceding
+identifier is equal; **build metadata is ignored**.
+
+```sql
+-- The specification's own example, in order:
+--   1.0.0-alpha < 1.0.0-alpha.1 < 1.0.0-alpha.beta < 1.0.0-beta
+--             < 1.0.0-beta.2 < 1.0.0-beta.11 < 1.0.0-rc.1 < 1.0.0
+SELECT version FROM packages ORDER BY SEMVER_SORT_KEY(version);
+
+-- The newest version per package, on one path or a hundred:
+SELECT name, MAX(SEMVER_SORT_KEY(version)) AS newest_key
+  FROM packages GROUP BY name;
+```
+
+`SEMVER_SORT_KEY` is not a canonical form and is not reversible:
+`1.0.0+a` and `1.0.0+b` produce the **same** key, because they have the same
+precedence. `SEMVER_NORMALIZE` is the canonical spelling. The key is printable
+ASCII, 58 characters for a release and longer for a pre-release; its exact
+bytes are an implementation detail and only its ORDER is a contract.
+
+A predicate over `SEMVER_SORT_KEY(v)` is evaluated as an expression: it is not
+pushed into the scan and **never prunes a row group**, because a row group's
+recorded minimum and maximum are the column's own text bounds and say nothing
+about the key's.
 
 ### Math Functions
 

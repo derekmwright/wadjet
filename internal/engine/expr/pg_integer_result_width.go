@@ -164,6 +164,10 @@ var pgIntegerResultWidths = map[string]PGIntegerResult{
 	"protocol_number":       {Width: PGIntWidth4}, // 8-bit
 	"tcp_flag_mask":         {Width: PGIntWidth4}, // 9-bit mask
 	"tcp_flags_from_string": {Width: PGIntWidth4}, // 9-bit mask
+	// A three-way comparison's domain is exactly {-1, 0, 1}. PostgreSQL has
+	// no semver at all (`pg_proc` names nothing matching `%semver%` on
+	// 17.11), so rule 2 decides, and int4 holds it with room to spare.
+	"semver_cmp": {Width: PGIntWidth4},
 	// A UTC offset in hours (-14..+14) and its minute part (0..59).
 	// PostgreSQL's own `extract(timezone_hour from …)` is NUMERIC, so its
 	// sum is numeric there and neither width is PostgreSQL's answer; the
@@ -185,6 +189,19 @@ var pgIntegerResultWidths = map[string]PGIntegerResult{
 	"ip_diff":                {Width: PGIntWidth8}, // ±(2^32-1)
 	"parse_bytes":            {Width: PGIntWidth8}, // '4TB' is 4398046511104
 	"parse_rate":             {Width: PGIntWidth8}, // '10Gbps' is 10000000000
+	// A semver numeric identifier. Semantic Versioning 2.0.0 bounds it at
+	// nothing — §9's only constraint on a numeric identifier is that it carry
+	// no leading zeroes — so `4294967296.0.0` is a valid version and int4 does
+	// not hold this domain. This engine's acceptance bound IS int64 (past it
+	// the string is not a version here, a divergence ADR-0012 records), so the
+	// declaration and the bound are one number. int4 was the width the
+	// 2026-09-11 amendment named as the default FOR A COMPONENT, and it is not
+	// taken here for that reason: summing an int8-domain column through an
+	// int64 accumulator refuses where the true total is representable, which
+	// is exactly why PostgreSQL's own `sum(int8)` is numeric.
+	"semver_major": {Width: PGIntWidth8},
+	"semver_minor": {Width: PGIntWidth8},
+	"semver_patch": {Width: PGIntWidth8},
 }
 
 // PGIntegerResultWidth answers the table for a function name, and ok=false for

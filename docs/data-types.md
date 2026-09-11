@@ -195,6 +195,29 @@ PostgreSQL — a wrong row set in exchange for a right rendering — and declari
 As it stands those three consumers agree with the server exactly. Recorded in
 ADR-0012's divergence list.
 
+#### A version string is a `String`
+
+Wadjet adds no semantic-version type: a version is text, and the
+`SEMVER_*` function family (see
+[SQL Reference](sql-reference.md#version-string-functions)) gives that text the
+ordering the Semantic Versioning 2.0.0 specification gives it. This is
+general-purpose rather than network-specific — a package inventory, an agent or
+firmware roster, a container image tag, a CVE feed's affected-versions column.
+
+The reason it is a function family and not a type is that the ordering can be
+carried by a `String`. `SEMVER_SORT_KEY(v)` is a `String` whose **byte order is
+precedence**, so every consumer that already orders strings — `ORDER BY`,
+`MIN`/`MAX`, a `GROUP BY` key, a distributed merge, a spilled external sort, a
+window frame — orders versions correctly with no comparator of its own:
+
+```sql
+SELECT name, MAX(SEMVER_SORT_KEY(version)) AS newest
+  FROM packages GROUP BY name;
+```
+
+A string that is not a version is NULL through the whole family, so a column of
+mixed junk filters rather than failing.
+
 ### Network Types
 
 | Type | Go Backing | Size | Format | Use Cases |

@@ -329,6 +329,26 @@ func init() {
 		"tcp_flags":          {fnTCPFlags, RetArray},
 		"tcp_flags_text":     {fnTCPFlagsText, RetString},
 
+		// Semantic Versioning 2.0.0 over STRING (#967, semver.go). No new
+		// type: a version is text, and `semver_sort_key` is the text whose
+		// BYTE ORDER is the specification's precedence, so ORDER BY, MIN/MAX,
+		// the DAG's merge and an external sort run all order versions
+		// correctly with no comparator of their own. The three components
+		// declare INT64 because the specification puts no upper bound on a
+		// numeric identifier; `semver_cmp` declares INT32 because its domain
+		// is exactly {-1,0,1}. Both widths are the ones
+		// pgIntegerResultWidths records for them.
+		"semver_valid":            {fnSemverValid, RetBool},
+		"semver_major":            {fnSemverMajor, RetInt64},
+		"semver_minor":            {fnSemverMinor, RetInt64},
+		"semver_patch":            {fnSemverPatch, RetInt64},
+		"semver_prerelease":       {fnSemverPrerelease, RetString},
+		"semver_build":            {fnSemverBuild, RetString},
+		"semver_cmp":              {fnSemverCmp, RetInt32},
+		"semver_sort_key":         {fnSemverSortKey, RetString},
+		"semver_normalize":        {fnSemverNormalize, RetString},
+		"semver_normalize_strict": {fnSemverNormalizeStrict, RetString},
+
 		// Date/time functions
 		"now":        {fnNow, RetTimestamp},
 		"year":       {fnYear, RetFloat64},

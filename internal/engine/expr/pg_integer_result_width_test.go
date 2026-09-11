@@ -135,6 +135,18 @@ func TestThePostgresResultWidthTableMatchesTheMeasuredTranscript(t *testing.T) {
 		{fn: "geoip_asn", want: PGIntWidth8},
 		{fn: "hosts_in_cidr", want: PGIntWidth8},
 		{fn: "parse_bytes", want: PGIntWidth8},
+		// The semver components: PostgreSQL names no width of its own for
+		// one (`split_part(v,'.',1)::int` is integer and `::bigint` is
+		// bigint — the user's cast decides), so the DOMAIN decides, and
+		// Semantic Versioning 2.0.0 §9 bounds a numeric identifier at
+		// nothing. int4 was the amendment's default for "a component" and
+		// is not taken, because a SUM over an int8 domain in an int64
+		// accumulator refuses where the true total is representable.
+		{fn: "semver_major", want: PGIntWidth8},
+		{fn: "semver_minor", want: PGIntWidth8},
+		{fn: "semver_patch", want: PGIntWidth8},
+		// A three-way comparison's domain is exactly {-1, 0, 1}.
+		{fn: "semver_cmp", want: PGIntWidth4},
 		// The bitwise family follows its operands, and a shift follows the
 		// value it shifts rather than the count.
 		{fn: "bitwise_and", want: PGIntWidthOperands},

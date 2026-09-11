@@ -2765,6 +2765,112 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      argument the function cannot read is the one shape a caller cannot
      detect.
 
+   - **The semver family is an EXTENSION, and the SPECIFICATION is its
+     oracle because PostgreSQL has no semver at all.** (Added 2026-09-11, arc
+     A3, #967.) `SELECT count(*) FROM pg_proc WHERE proname ILIKE '%semver%'`
+     is **0** on 17.11, measured. There is a third-party `semver` extension;
+     it is not core, and this ADR's authority rule is about the PostgreSQL a
+     client connects to. So Semantic Versioning 2.0.0 §11 decides precedence.
+
+     Where a PURE-SQL SPELLING exists it is the value oracle and was measured
+     as one. The version CORE is an integer tuple and PostgreSQL compares
+     integer arrays element-wise:
+
+     | wadjet | PostgreSQL 17.11 |
+     |---|---|
+     | `semver_major/minor/patch(v)` | `(string_to_array(v,'.')::int[])[1..3]` |
+     | `semver_cmp(a,b) < 0` (core only) | `string_to_array(a,'.')::int[] < string_to_array(b,'.')::int[]` |
+     | `semver_valid`, `semver_prerelease`, `semver_build` | no equivalent |
+     | `semver_sort_key`, `semver_normalize` | no equivalent |
+
+     `(string_to_array('1.2.3','.')::int[]) < (string_to_array('1.10.0','.')::int[])`
+     is `t` there, and so is the `1.2.10` pair — the two rows a TEXT sort gets
+     backwards, and the reason this family exists. PostgreSQL has no spelling
+     at all for §11.3 (a pre-release ranks below its release) or §11.4
+     (identifier-by-identifier comparison), so the specification decides those
+     and the gates quote its own example chain.
+
+     **NULL FOR DATA, LOUD FOR THE QUERY'S OWN TEXT.** Every function answers
+     NULL for a string that is not a version — a `WHERE` over a version column
+     collected from the wild must filter rather than abort, and such a column
+     always holds junk. `semver_normalize_strict` is the loud twin, 22023 with
+     the string quoted, for a job that asserts instead of filtering. A NULL
+     argument is NULL in both, because a NULL is an absent value and not a
+     malformed one, which is what every strict function in PostgreSQL does.
+     `semver_prerelease` and `semver_build` answer the EMPTY STRING for a
+     valid version that has none, so `IS NULL` keeps its one meaning: not a
+     version.
+
+     TWO DELIBERATE DIVERGENCES FROM THE SPECIFICATION, both recorded rather
+     than hidden:
+
+     - **A leading `v` or `V` is accepted.** The specification says the `v`
+       prefix is not part of a semantic version. Every real dataset has it —
+       git tags, GitHub releases, Go module versions — and accepting it cannot
+       produce a wrong value, because `v1.2.3` and `1.2.3` ARE the same
+       version and `semver_normalize` renders the specification's spelling.
+       It is the only concession: `' 1.2.3'`, `'1.2'` and `'01.2.3'` are NULL.
+     - **A numeric identifier past `int64` is not a version here.** §9 bounds
+       a numeric identifier at nothing, so `99999999999999999999.0.0` is valid
+       there and NULL here (22023 in the strict form). The alternative is to
+       carry it as text and compare it as text, which is the defect the family
+       exists to fix. That bound is also the WIDTH `semver_major`,
+       `semver_minor` and `semver_patch` declare, so the acceptance rule and
+       the declaration are one number.
+
+     **THE THREE COMPONENT FUNCTIONS DECLARE int8, NOT int4** — and the choice
+     is recorded because int4 was the default named for "a component" when
+     this arc was briefed. `expr.PGIntegerResultWidth` decides an entry by
+     PostgreSQL's measured `pg_typeof` where PostgreSQL has the function and
+     otherwise by the width that HOLDS THE FUNCTION'S WHOLE DOMAIN. PostgreSQL
+     names no width of its own here — `split_part(v,'.',1)::int` is `integer`
+     and `::bigint` is `bigint`, the user's own cast deciding — and the domain
+     is the int64 one above, so int4 does not hold it. Declaring int4 over an
+     int8 domain puts `SUM(semver_major(v))` in an int64 accumulator that
+     refuses with 22003 where the true total is representable, which is
+     exactly why PostgreSQL's own `sum(int8)` is `numeric`. `semver_cmp`
+     declares **int4**: its domain is exactly {-1, 0, 1}.
+
+     **`semver_sort_key` IS THE ORDERING, AS BYTES.** It renders a version as
+     printable ASCII whose byte order equals §11 precedence, so `ORDER BY`,
+     `MIN`/`MAX`, a `GROUP BY` key, the DAG's merge and a spilled external
+     sort all order versions with no comparator of their own and nothing new
+     for the distributed path to learn. Two consequences are contracts:
+     build metadata is NOT in the key (§10 gives it no precedence, so
+     `1.0.0+a` and `1.0.0+b` produce the same key and compare equal), and the
+     key is therefore not a canonical form — `semver_normalize` is. Only the
+     key's ORDER is a contract; its bytes are not.
+
+     The one property the key rests on is an ordering between its structural
+     bytes and the identifier alphabet `[0-9A-Za-z-]`, whose minimum byte is
+     `-` (0x2D): the identifier SEPARATOR must sort BELOW it, and `,` (0x2C)
+     is the one used. A key that joins identifiers with `.` (0x2E) instead is
+     right on almost every pair and inverts `1.0.0-alpha.1` against
+     `1.0.0-alpha-x`, because `-` sorts under `.` as bytes while §11.4
+     compares identifier by identifier. PostgreSQL confirms the trap under
+     the `C` collation the oracle database uses: `'alpha-x' > 'alpha.1'` is
+     `f` there, and `1.0.0-alpha.1 < 1.0.0-alpha-x` by the specification.
+
+     Gated in `expr.TestSemverPrecedenceIsTheSpecificationsOwnExample` (the
+     §11.4 chain, every ordered pair and the equality diagonal),
+     `expr.TestBuildMetadataHasNoPrecedence`,
+     `expr.TestSemverParseAcceptsTheGrammarAndRefusesEverythingElse` (the
+     boundary from both sides), `expr.TestEverySemverFunctionIsStrictOnNull`,
+     `expr.TestTheStrictTwinRaisesWhereTheLenientOneAnswersNull`,
+     `expr.TestTheSortKeysStructuralBytesOrderBelowEveryIdentifierByte` and
+     `expr.TestTheSortKeysByteOrderIsPrecedenceOverAGeneratedCorpus` (5000
+     seeded versions, both sortings compared element by element plus 200k
+     sampled pairs).
+
+     **A ROW-RETURNING `semver_parse` IS NOT PART OF THIS FAMILY, and #1017 is
+     the reason.** `physical.scalarFnDeclaredType` declines every
+     ARRAY/MAP/ROW return type, so such a projection would be declared TEXT
+     and rendered Go-style at the top level — the entry above records that for
+     `tcp_flags`. #1017 is a CLASS with a gate over the whole registry, and a
+     ROW-only patch inside this arc would be a bounded model over a structural
+     gap. The parts are separate scalar functions instead, which is the shape
+     #967 itself asks for, and the ROW form waits for #1017's own arc.
+
    - **WITHDRAWN the same day (arc J1 round 3): the refusal of `SELECT *` over
      a LATERAL whose ungrouped COUNT can see no rows.** It fired on the SHAPE,
      and a plan-time refusal cannot know the data — it refused queries whose
