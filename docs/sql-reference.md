@@ -1381,7 +1381,12 @@ SELECT a, b FROM t ORDER BY a          -- 1,10 | 2,100 | 3,10000
 
 A recursive CTE is answered by the single-process engine; the distributed
 engine has no stage lowering for one and refuses such a query rather than
-answering it differently.
+answering it differently. The refusal is LOUD but it is not yet a SQLSTATE:
+a query that reads a recursive CTE fails on a distributed plan with the stage
+builder's own message, `stage scan-0 has no dependencies and no ScanFiles`.
+A misspelt constant in the CTE's body is refused before that, at plan time, on
+every plan — the seed and the recursive term alike, and whether or not the
+outer query reads the CTE at all.
 
 A `WITH` may also be written INSIDE a nested query block — a derived table, a
 CTE body, a `LATERAL` subquery — and its items are in scope for that block; the
