@@ -168,9 +168,18 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 						typed = r
 					}
 				}
+				// …and a SCALAR SUBQUERY term takes the CATALOG declaration
+				// annotateSubqueryColumnDecls stamped on the plan, for the
+				// same reason the aggregate's pre-projection does. Without it
+				// `SUM((SELECT MAX(id) FROM t)) OVER ()` fell to the STRING
+				// fallback on the line above, materialized the argument into a
+				// TEXT vector, and the window aggregate read NULL out of it in
+				// every row where PostgreSQL answers 9 — while `MAX` of the
+				// same argument answered the right digits under OID 25
+				// (#1018 round 7, B3's window half).
 				k.Type, k.Precision, k.Scale = declTypeParts(
 					inferProjectionDeclType(typed, parquet.TypeString, strictInt,
-						colDecls{types: typeCols, dec: typeDec}))
+						withSubqueryDecls(colDecls{types: typeCols, dec: typeDec}, node)))
 			}
 		}
 		out[term] = k

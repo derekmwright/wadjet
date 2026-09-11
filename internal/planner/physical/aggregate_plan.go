@@ -58,6 +58,19 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	// type (#568). Derived computed arguments must retain their types through
 	// CASE rather than taking an ELSE type that fails the #361 store guard.
 	aggInputDecls := emittedColDecls(node.Children[0])
+	// A SCALAR SUBQUERY written DIRECTLY as the argument — `SUM((SELECT …))` —
+	// has no column for that walk to read: its declaration is the CATALOG fact
+	// annotateSubqueryColumnDecls stamps on the plan. Without it
+	// inferProjectionDeclType below fell to its FLOAT64 fallback, so the
+	// synthetic column this aggregate accumulates over was materialized as a
+	// float64 vector and `SUM((SELECT CAST(9007199254740993 AS BIGINT)))` over
+	// three rows answered 27021597764222976 for PostgreSQL 17.11's exact
+	// 27021597764222979 — a WRONG VALUE past 2^53, the class ADR-0024 exists
+	// to prevent, not the declaration residual round 6 recorded (#1018 round 7,
+	// B3). The derived spelling of the same query — `SUM(v) FROM (SELECT
+	// (SELECT …) AS v …)` — was already exact, because there the stamp reaches
+	// the column through the Project.
+	aggInputDecls = withSubqueryDecls(aggInputDecls, node)
 
 	for i, agg := range node.AggExprs {
 		if agg.InputExpr != nil && (!isSimpleColRef(agg.InputExpr) || astIsFieldPath(agg.InputExpr, aggInputDecls)) {

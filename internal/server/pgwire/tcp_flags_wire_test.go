@@ -778,6 +778,39 @@ func TestPGWireDeclaresSumOverAScalarSubqueryColumn(t *testing.T) {
 		{"windowed_sum_over_a_scalar_subquery_column",
 			`SELECT SUM(v) OVER () AS v FROM (SELECT (SELECT BITWISE_AND(id,3) FROM users u2 WHERE u2.id=1) AS v FROM users) s LIMIT 1`,
 			20, "3"},
+
+		// THE SCALAR SUBQUERY WRITTEN DIRECTLY AS THE AGGREGATE'S ARGUMENT
+		// (#1018 round 7, B3). Round 6 left this as a residual and described
+		// it as "LOUD-or-declaration rather than a wrong value"; it was a
+		// WRONG VALUE. The synthetic pre-aggregate projection typed the
+		// argument with a walk that had no subquery resolver, took its
+		// FLOAT64 fallback, and the accumulator ran over a float64 vector —
+		// so `direct_scalar_subquery_wide_is_exact` answered
+		// 27021597764223276 for PostgreSQL's 27021597764223279. The window
+		// spelling had its own copy of the same gap in resolveWindowKeys,
+		// where the fallback is STRING: the materialized argument was a TEXT
+		// vector and the window aggregate read NULL out of it in every row.
+		{"direct_scalar_subquery_narrow",
+			`SELECT SUM((SELECT BITWISE_AND(id,3) FROM users u2 WHERE u2.id=1)) AS v FROM users`,
+			20, "3"},
+		{"direct_scalar_subquery_wide",
+			`SELECT SUM((SELECT BITWISE_AND(visits,18) FROM users u2 WHERE u2.id=1)) AS v FROM users`,
+			1700, "0"},
+		{"direct_scalar_subquery_wide_is_exact",
+			`SELECT SUM((SELECT visits+9007199254740993 FROM users u2 WHERE u2.id=1)) AS v FROM users`,
+			1700, "27021597764223279"},
+		{"direct_scalar_subquery_count",
+			`SELECT SUM((SELECT COUNT(*) FROM users u2)) AS v FROM users`,
+			1700, "9"},
+		{"direct_scalar_subquery_nested",
+			`SELECT SUM((SELECT (SELECT BITWISE_AND(id,3) FROM users u3 WHERE u3.id=1) FROM users u2 WHERE u2.id=1)) AS v FROM users`,
+			20, "3"},
+		{"windowed_direct_scalar_subquery_narrow",
+			`SELECT SUM((SELECT BITWISE_AND(id,3) FROM users u2 WHERE u2.id=1)) OVER () AS v FROM users LIMIT 1`,
+			20, "3"},
+		{"windowed_direct_scalar_subquery_is_exact",
+			`SELECT SUM((SELECT visits+9007199254740993 FROM users u2 WHERE u2.id=1)) OVER () AS v FROM users LIMIT 1`,
+			1700, "27021597764223279"},
 	} {
 		for _, format := range []int16{0, 1} {
 			t.Run(fmt.Sprintf("%s/format=%d", tc.name, format), func(t *testing.T) {

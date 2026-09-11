@@ -2627,14 +2627,50 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      five census cells on all five arms ("v=float:72" for PostgreSQL's
      "v=int64:72").
 
-     NOT closed, and recorded rather than quietly dropped: a subquery written
-     DIRECTLY as an aggregate's argument — `SUM((SELECT …))` — still declares
-     701, on every aggregate and over an empty input, because the aggregate's
-     own declared output does not reach the output schema by this route; and a
-     SET-OPERATION ARM holding a scalar subquery is still declared TEXT beside
-     a bigint arm, so that UNION is refused 42804 where PostgreSQL answers.
-     Both are pre-existing, both are LOUD-or-declaration rather than a wrong
-     value, and both belong to #874's family.
+     **AND WRITTEN DIRECTLY AS THE AGGREGATE'S ARGUMENT** (added 2026-09-11,
+     round 7, B3). Round 6 left `SUM((SELECT …))` as a residual and described
+     it as "LOUD-or-declaration rather than a wrong value". That description
+     was FALSE, and the round-6 review measured it: over three rows
+     `SELECT SUM((SELECT CAST(9007199254740993 AS BIGINT))) AS v FROM users`
+     answered **27021597764222976** as float8 where PostgreSQL 17.11 answers
+     the exact **27021597764222979** as numeric — a WRONG VALUE past 2^53,
+     the class this ADR's numeric rules exist to prevent, in both wire
+     formats. The mechanism was one line short of the stamp above: an
+     aggregate whose argument is an expression is materialized into a
+     synthetic pre-aggregate column, and `physical.buildAggregate` typed that
+     column with `emittedColDecls` alone — no subquery resolver — so a bare
+     `SubqueryNode` argument took `inferProjectionDeclType`'s FLOAT64 fallback
+     and the accumulator ran over a float64 vector. The DERIVED spelling of
+     the same query was already exact, because there the stamp reaches the
+     column through the Project.
+
+     The WINDOW spelling had a second copy of the same gap, with a different
+     fallback: `physical.resolveWindowKeys` materializes a computed window
+     ARGUMENT as a `__winkey_N` column and typed it from a walk with no
+     subquery resolver either, whose fallback is STRING — so
+     `SUM((SELECT MAX(id) FROM t)) OVER ()` materialized a TEXT vector and the
+     window aggregate read NULL out of it in every row where PostgreSQL
+     answers 9, while `MAX` of the same argument answered the right digits
+     under OID 25. Both sites now read the stamp. On the stage DAG that shape
+     additionally staged a window key a worker cannot compile — a worker's
+     fragment has no SubqueryRunner — and handed the client
+     "compile window key …: subqueries require a SubqueryRunner" after three
+     attempts; `refuseScalarSubqueryProjections` now refuses the PLAN for a
+     window term holding a subquery, the same answer and the same local route
+     it has always given a SELECT-list item holding one.
+
+     Gated by `pgwire.TestPGWireDeclaresSumOverAScalarSubqueryColumn`'s seven
+     `direct_*` / `windowed_direct_*` cells in both formats and by the
+     census's `scalar_subquery/direct_*` and `nested_scalar_subquery_*` cells
+     on five arms. Disabling the two reads fails 14 wire subtests and seven
+     census cells; disabling the window staging refusal alone fails the two
+     windowed census cells on the three DAG arms.
+     NOT closed, and recorded rather than quietly dropped: a SET-OPERATION ARM
+     holding a scalar subquery is still declared TEXT beside a bigint arm, so
+     that UNION is refused 42804 where PostgreSQL answers. It is pre-existing,
+     it is a LOUD refusal rather than a wrong value, its declaration comes from
+     a walk the stamp does not reach (`setOpArmSchemas`), and it belongs to
+     #874's family.
 
      The SCALAR declaration is a separate, pre-existing divergence and this
      entry does not close it: `SELECT REGEXP_COUNT('abab','a')` still declares
