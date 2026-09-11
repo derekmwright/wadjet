@@ -416,6 +416,13 @@ func tmdTables() []tmdTable {
 		// operators over it answer correctly through a float64 by luck, which is
 		// exactly the defect this arc's Round 0 found.
 		{tcpfTable, tcpfSchema(), tcpfData()},
+		// The SEMVER fixture (#967). Rides along for the same reason as the
+		// fixtures above: only TestTheSemverFamilyOrdersByTheSpecificationOnEveryArm
+		// names it, and no type-matrix corpus entry does. The type matrix
+		// cannot stand in for it — its c_str column holds no version strings
+		// at all, and the whole claim is about an ORDER over 5000 of them
+		// spread across four files.
+		{svTable, svSchema(), svData()},
 		// The RESERVED-NAME fixture (#694). A table that already stores a
 		// column in a hidden-slot family, as one written before the namespace
 		// was reserved does.

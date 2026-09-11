@@ -798,6 +798,15 @@ func pmCells() []pmCell {
 		{name: "flags_projection_on_denied_column",
 			sql:        `SELECT tcp_flags_text(salary) AS s FROM e7emp`,
 			deniedLike: "salary"},
+		// And a semver function, for the same reason and by the same rule
+		// (#967): a family added to the registry reads a relation's columns
+		// through the policed list or it does not read them at all.
+		{name: "semver_predicate_on_denied_column",
+			sql:        `SELECT COUNT(*) AS c FROM e7emp WHERE semver_valid(salary)`,
+			deniedLike: "salary"},
+		{name: "semver_projection_on_denied_column",
+			sql:        `SELECT semver_sort_key(salary) AS s FROM e7emp`,
+			deniedLike: "salary"},
 		{name: "qualified_denied_column", sql: `SELECT a.salary FROM e7emp a`, deniedLike: "salary"},
 		{name: "denied_column_in_a_derived_table",
 			sql: `SELECT d.salary AS s FROM (SELECT salary FROM e7emp) d`, deniedLike: "salary"},

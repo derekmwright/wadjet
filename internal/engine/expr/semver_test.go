@@ -1,12 +1,12 @@
 package expr
 
 import (
-	"fmt"
 	"math/rand"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/oracle/semvergen"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -308,7 +308,7 @@ func TestTheSortKeysStructuralBytesOrderBelowEveryIdentifierByte(t *testing.T) {
 // grammar rather than listed, because the pairs that break a key are the ones
 // nobody thinks to list.
 func TestTheSortKeysByteOrderIsPrecedenceOverAGeneratedCorpus(t *testing.T) {
-	corpus := semverCorpus(967, 5000)
+	corpus := semvergen.Corpus(967, 5000)
 	if len(corpus) < 5000 {
 		t.Fatalf("the corpus generator produced %d versions, not 5000", len(corpus))
 	}
@@ -360,54 +360,6 @@ func seq(n int) []int {
 	out := make([]int, n)
 	for i := range out {
 		out[i] = i
-	}
-	return out
-}
-
-// semverCorpus generates versions from the specification's grammar with a
-// fixed seed, concentrated on the shapes that break a sort key: equal cores
-// with different pre-releases, numeric identifiers beside alphanumeric ones,
-// identifiers containing '-' beside deeper identifier lists, and wide numbers.
-func semverCorpus(seed int64, n int) []string {
-	rng := rand.New(rand.NewSource(seed))
-	alnum := []string{
-		"alpha", "beta", "rc", "x", "z", "a-b", "alpha-x", "alphax",
-		"alpha-", "b", "beta-1", "SNAPSHOT", "Alpha", "0a", "a0",
-	}
-	num := []string{"0", "1", "2", "9", "10", "11", "100", "9223372036854775807"}
-	cores := []int64{0, 1, 2, 9, 10, 11, 100, 2147483647, 4294967296, 9223372036854775807}
-	out := make([]string, 0, n)
-	seen := make(map[string]bool, n)
-	for len(out) < n {
-		maj := cores[rng.Intn(len(cores))]
-		min := cores[rng.Intn(len(cores))]
-		pat := cores[rng.Intn(len(cores))]
-		var b strings.Builder
-		fmt.Fprintf(&b, "%d.%d.%d", maj, min, pat)
-		if rng.Intn(100) < 70 {
-			fields := 1 + rng.Intn(4)
-			b.WriteByte('-')
-			for f := 0; f < fields; f++ {
-				if f > 0 {
-					b.WriteByte('.')
-				}
-				if rng.Intn(2) == 0 {
-					b.WriteString(num[rng.Intn(len(num))])
-				} else {
-					b.WriteString(alnum[rng.Intn(len(alnum))])
-				}
-			}
-		}
-		if rng.Intn(100) < 15 {
-			b.WriteString("+build.")
-			b.WriteString(num[rng.Intn(len(num))])
-		}
-		s := b.String()
-		if seen[s] {
-			continue
-		}
-		seen[s] = true
-		out = append(out, s)
 	}
 	return out
 }
