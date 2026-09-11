@@ -2559,6 +2559,53 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      x 2 formats). Reverting the ColRef arm to the carrier fails the derived
      cells while the direct cells still pass.
 
+     **A SCALAR SUBQUERY'S COLUMN CARRIES ITS DECLARATION THROUGH A
+     MATERIALIZATION TOO** (added 2026-09-11, round 6, P2). A subquery is a
+     whole second query whose type lives in the CATALOG, so only a Planner can
+     answer it — and the declaration walks are free functions over the logical
+     tree that hold none. `colDecls.subqueryDecl` was nil in every one of them
+     and the only caller that passed a resolver was `declaredOutputSchema` at
+     the OUTPUT projection, so a scalar-subquery column MATERIALIZED one level
+     down — by a derived table, a CTE, a window slot — was declared STRING and
+     every reader above it fell to float8. `SELECT SUM(v) FROM (SELECT (SELECT
+     c & 3 FROM u) AS v FROM t) s` declared OID 701 on all five arms and in
+     BOTH wire formats where PostgreSQL declares bigint, and the int8, bare
+     int8 column and `COUNT(*)` forms declared 701 where PostgreSQL declares
+     numeric. The binary rendering confirmed a real float8 on the wire, and a
+     float64 accumulator over a wide bigint drops digits past 2^53 — the class
+     this ADR's numeric rules exist to prevent.
+
+     The declaration is now STAMPED on the plan: `physical.
+     annotateSubqueryColumnDecls` runs once, beside the pass that puts
+     ScanColTypes on a Scan, resolves every scalar subquery's output column
+     with the SAME `subqueryOutputColumn` the boxed comparison already uses,
+     and shares ONE map — keyed by the subquery's SQL, carrying type, (p,s) and
+     the INTEGER WIDTH — with every node of the plan, so whichever node a walk
+     holds can ask. Threading a resolver through the walks instead would make
+     each of them plan a second query at every level of a nested derived table,
+     which is the cost #1034 records against them; the stamp adds no walk, and
+     the resolution is memoized per Planner by SQL text with an in-flight
+     sentinel, since resolving a subquery plans it and planning it annotates
+     ITS projections in turn.
+
+     Gated in both wire formats by
+     `pgwire.TestPGWireDeclaresSumOverAScalarSubqueryColumn` and on five arms
+     by the census's `scalar_subquery/*` cells, which assert the ROUTE beside
+     the rows (`ScalarProjectionLocalRoutes`, and nothing else, moves: the DAG
+     refuses to stage this shape and runs it in process, and rows alone cannot
+     tell that from execution). Disabling the stamp fails 14 wire subtests and
+     five census cells on all five arms ("v=float:72" for PostgreSQL's
+     "v=int64:72").
+
+     NOT closed, and recorded rather than quietly dropped: a subquery written
+     DIRECTLY as an aggregate's argument — `SUM((SELECT …))` — still declares
+     701, on every aggregate and over an empty input, because the aggregate's
+     own declared output does not reach the output schema by this route; and a
+     SET-OPERATION ARM holding a scalar subquery is still declared TEXT beside
+     a bigint arm, so that UNION is refused 42804 where PostgreSQL answers.
+     Both are pre-existing, both are LOUD-or-declaration rather than a wrong
+     value, and both belong to #874's family.
+
      The SCALAR declaration is a separate, pre-existing divergence and this
      entry does not close it: `SELECT REGEXP_COUNT('abab','a')` still declares
      OID 20 where PostgreSQL declares OID 23, because the engine has no int4

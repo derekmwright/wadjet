@@ -46,11 +46,16 @@ type Planner struct {
 	// falls back to creating a per-query pool as before.
 	SharedTracker  *memory.Tracker
 	SharedSpillMgr *memory.SpillManager
-	QueryLimits    *config.QueryLimits         // cost-based query guard (nil = no limits)
-	cteCache       map[string]*cteMaterialized // materialized CTE results
-	scanCache      map[string]*scanCached      // cached scan results for duplicate table scans
-	res            *queryResources             // per-query spill manager + memory tracker (lazy, shared with child planners)
-	WorkerCount    int                         // number of distributed workers (for shuffle partitioning)
+	QueryLimits    *config.QueryLimits // cost-based query guard (nil = no limits)
+	// subqueryDeclCache memoizes a scalar subquery's declared output column
+	// by its SQL text, for annotateSubqueryColumnDecls. A nil slot means "in
+	// flight" and breaks a recursion: resolving one subquery plans it, and
+	// planning it annotates ITS projections in turn.
+	subqueryDeclCache map[string]*subqueryDeclEntry
+	cteCache          map[string]*cteMaterialized // materialized CTE results
+	scanCache         map[string]*scanCached      // cached scan results for duplicate table scans
+	res               *queryResources             // per-query spill manager + memory tracker (lazy, shared with child planners)
+	WorkerCount       int                         // number of distributed workers (for shuffle partitioning)
 
 	// builtJoins are the HashJoins this plan owns. HashJoin.Close is the
 	// only thing that returns the build's tracker reservation and removes

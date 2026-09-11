@@ -680,3 +680,84 @@ func TestPGWireRefusesAnInvalidFlagNameInEveryExpressionPosition(t *testing.T) {
 		})
 	}
 }
+
+// A SCALAR SUBQUERY'S COLUMN DECLARES WHAT THE SUBQUERY DECLARES, AND THAT
+// SURVIVES MATERIALIZATION (#1018 round 5 review, P2).
+//
+// A subquery is a whole second query whose type lives in the CATALOG, so only
+// a Planner can answer it — and the declaration walks are free functions over
+// the logical tree that hold none. `colDecls.subqueryDecl` was nil in every one
+// of them and the only caller that passed a resolver was `declaredOutputSchema`
+// at the OUTPUT projection, so a scalar-subquery column MATERIALIZED one level
+// down (a derived table, a CTE, a set-operation arm) was declared STRING and
+// every reader above it fell to float8: all six shapes below declared OID 701
+// in BOTH wire formats, with the binary rendering confirming a real float8 on
+// the wire. A float64 accumulator over a wide bigint drops digits past 2^53,
+// which is the class ADR-0024 exists to prevent.
+//
+// Every OID and value is live PostgreSQL 17.11's over the same three rows.
+func TestPGWireDeclaresSumOverAScalarSubqueryColumn(t *testing.T) {
+	_, srv := setupRealDB(t)
+	conn := connectPgconn(t, srv.Addr())
+
+	for _, tc := range []struct {
+		name, sql string
+		oid       uint32
+		want      string
+	}{
+		{"derived_scalar_subquery_narrow",
+			`SELECT SUM(v) AS v FROM (SELECT (SELECT BITWISE_AND(id,3) FROM users u2 WHERE u2.id=1) AS v FROM users) s`,
+			20, "3"},
+		{"derived_scalar_subquery_wide",
+			`SELECT SUM(v) AS v FROM (SELECT (SELECT BITWISE_AND(visits,18) FROM users u2 WHERE u2.id=1) AS v FROM users) s`,
+			1700, "0"},
+		{"derived_scalar_subquery_bare_int4_column",
+			`SELECT SUM(v) AS v FROM (SELECT (SELECT id FROM users u2 WHERE u2.id=1) AS v FROM users) s`,
+			20, "3"},
+		{"derived_scalar_subquery_bare_int8_column",
+			`SELECT SUM(v) AS v FROM (SELECT (SELECT visits FROM users u2 WHERE u2.id=1) AS v FROM users) s`,
+			1700, "300"},
+		{"derived_scalar_subquery_count",
+			`SELECT SUM(v) AS v FROM (SELECT (SELECT COUNT(*) FROM users u2) AS v FROM users) s`,
+			1700, "9"},
+		{"cte_over_a_scalar_subquery",
+			`WITH c AS (SELECT (SELECT BITWISE_AND(id,3) FROM users u2 WHERE u2.id=1) AS v FROM users)
+			 SELECT SUM(v) AS v FROM c`, 20, "3"},
+		// NOT HERE, and recorded rather than quietly dropped: a
+		// set-operation ARM holding a scalar subquery is still declared TEXT
+		// beside a bigint arm, so `… (SELECT (SELECT id & 3 …) AS v FROM t
+		// UNION ALL SELECT id & 3 FROM t)` is refused 42804 where PostgreSQL
+		// answers bigint 9. That arm's declaration comes from a walk this
+		// stamp does not reach (setOpArmSchemas), and the disposition is a
+		// LOUD refusal, not a wrong value — pre-existing, and the same before
+		// this round. See a2_landing_notes_r3.md round 6 §5.
+		{"min_over_a_scalar_subquery_column",
+			`SELECT SUM(m) AS v FROM (SELECT MIN(v) AS m FROM (SELECT (SELECT BITWISE_AND(id,3) FROM users u2 WHERE u2.id=1) AS v FROM users) s0) s`,
+			20, "1"},
+		{"windowed_sum_over_a_scalar_subquery_column",
+			`SELECT SUM(v) OVER () AS v FROM (SELECT (SELECT BITWISE_AND(id,3) FROM users u2 WHERE u2.id=1) AS v FROM users) s LIMIT 1`,
+			20, "3"},
+	} {
+		for _, format := range []int16{0, 1} {
+			t.Run(fmt.Sprintf("%s/format=%d", tc.name, format), func(t *testing.T) {
+				res := conn.ExecParams(context.Background(), tc.sql, nil, nil, nil,
+					[]int16{format}).Read()
+				if res.Err != nil {
+					t.Fatalf("ExecParams: %v\n  SQL: %s", res.Err, tc.sql)
+				}
+				if got := res.FieldDescriptions[0].DataTypeOID; got != tc.oid {
+					t.Errorf("declared OID %d, PostgreSQL declares %d\n  SQL: %s",
+						got, tc.oid, tc.sql)
+				}
+				if len(res.Rows) != 1 {
+					t.Fatalf("got %d rows, want 1\n  SQL: %s", len(res.Rows), tc.sql)
+				}
+				if format == 0 {
+					if got := string(res.Rows[0][0]); got != tc.want {
+						t.Errorf("rendered %q, want %q\n  SQL: %s", got, tc.want, tc.sql)
+					}
+				}
+			})
+		}
+	}
+}

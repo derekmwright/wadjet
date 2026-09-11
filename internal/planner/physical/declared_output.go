@@ -699,6 +699,12 @@ type colDecls struct {
 	// where PostgreSQL declares int8 (#874) — and the const-arith fold saw an
 	// Undecided operand and folded `+ 1` on the FLOAT rung (#714's third box).
 	subqueryDecl func(sql string) (parquet.Column, bool)
+	// subqueryIntWidth is subqueryDecl's WIDTH half, for the same reason
+	// intWidth exists beside types: the subquery's declared column comes back
+	// in the INT64 carrier every integer materializes in, which cannot say
+	// whether SUM over it is bigint or numeric. Set together with
+	// subqueryDecl (withSubqueryDecls) so the two describe one column.
+	subqueryIntWidth func(sql string) (intWidth, bool)
 	// placeholderTypes is the declared type of each `:scalar_N` deferred
 	// literal, keyed by the placeholder's NAME.
 	//

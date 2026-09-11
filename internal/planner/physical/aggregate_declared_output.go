@@ -183,6 +183,10 @@ func aggComputedInputDecl(node *logical.Node, agg logical.AggExpr) (parquet.Type
 	if len(decls.types) == 0 {
 		decls = emittedColDecls(node.Children[0])
 	}
+	// A SCALAR SUBQUERY written AS the aggregate's argument — `SUM((SELECT
+	// … ))` — has no column for the walk to read; its declaration is the
+	// stamp on the plan (subquery_decl_annotation.go).
+	decls = withSubqueryDecls(decls, node)
 	d, c := nodeDeclaredType(agg.InputExpr, decls)
 	if c == expr.Undecided {
 		return 0, 0, 0, false
@@ -209,6 +213,10 @@ func aggComputedInputExprDecl(node *logical.Node, agg logical.AggExpr) (parquet.
 	if len(decls.types) == 0 {
 		decls = emittedColDecls(node.Children[0])
 	}
+	// A SCALAR SUBQUERY written AS the aggregate's argument — `SUM((SELECT
+	// … ))` — has no column for the walk to read; its declaration is the
+	// stamp on the plan (subquery_decl_annotation.go).
+	decls = withSubqueryDecls(decls, node)
 	d, c := nodeDeclaredType(agg.InputExpr, decls)
 	if c == expr.Undecided {
 		return 0, 0, 0, false

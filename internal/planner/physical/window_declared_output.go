@@ -63,9 +63,9 @@ func windowComputedArgDecl(node *logical.Node, we logical.WindowExpr) (expr.Decl
 	if cleanExpr(we.InputExpr.String()) != cleanExpr(we.InputCol) {
 		return expr.DeclType{}, false, false
 	}
-	decls := inputColDecls(node.Children[0])
+	decls := withSubqueryDecls(inputColDecls(node.Children[0]), node)
 	if len(decls.types) == 0 {
-		decls = emittedColDecls(node.Children[0])
+		decls = withSubqueryDecls(emittedColDecls(node.Children[0]), node)
 	}
 	d, c := nodeDeclaredType(we.InputExpr, decls)
 	if c == expr.Undecided {

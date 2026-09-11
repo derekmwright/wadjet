@@ -95,6 +95,19 @@ func aggInputIsWideInteger(node plansql.Node, decls colDecls) bool {
 // from the carrier.
 func declaredIntWidth(node plansql.Node, decls colDecls) intWidth {
 	switch n := node.(type) {
+	case *plansql.SubqueryNode:
+		// A SCALAR SUBQUERY's width is a CATALOG fact, stamped on the plan by
+		// annotateSubqueryColumnDecls and installed beside subqueryDecl. The
+		// carrier it comes back in cannot say it: `(SELECT c & 3 FROM u)` is
+		// an int4-domain value in an int64 box, and SUM over it is bigint
+		// where SUM over an int8 one is numeric (#1018 round 5 review, P2).
+		if decls.subqueryIntWidth == nil {
+			return intWidthUnknown
+		}
+		if w, ok := decls.subqueryIntWidth(n.SQL); ok {
+			return w
+		}
+		return intWidthUnknown
 	case *plansql.ParenNode:
 		return declaredIntWidth(n.Inner, decls)
 	case *plansql.UnaryOp:

@@ -20,6 +20,10 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 	// with, and a stored `__win_0` beside a window is a #694 collision with
 	// the planner on the other side of it (slot_collision.go).
 	renameCollidingSlots(node)
+	// A SCALAR SUBQUERY's declared output is a CATALOG fact the declaration
+	// walks cannot ask for — they hold no Planner — so it is stamped on the
+	// Project that publishes it, here, once per plan (subquery_decl_annotation.go).
+	p.annotateSubqueryColumnDecls(node)
 }
 
 func (p *Planner) annotateScanColumns(ctx context.Context, node *logical.Node) {

@@ -16,6 +16,21 @@ type DecimalMeta struct {
 	Scale     int
 }
 
+// SubqueryColumnDecl is the declared output of one scalar-subquery projection:
+// the type, a DECIMAL's (precision, scale), and PostgreSQL's INTEGER WIDTH of
+// an integer carrier — the three facts colDecls carries per column, because a
+// declaration that gives only the TypeID reads a DECIMAL at the wrong power of
+// ten and makes SUM over an int4-domain column numeric.
+//
+// IntWidth is 4, 8, or 0 for "this declaration says nothing", which is not
+// int4: the reader then falls back to the carrier, exactly as an absent
+// colDecls.intWidth entry does.
+type SubqueryColumnDecl struct {
+	Type             parquet.TypeID
+	Precision, Scale int
+	IntWidth         int
+}
+
 // ScanColumnStats holds aggregated column statistics from the catalog.
 type ScanColumnStats struct {
 	MinValue  any
@@ -143,7 +158,29 @@ type Node struct {
 	// `ORDER BY rw.c` sorted a CIDR field by its stored text, and the wire
 	// reported OID 25 for both (#568). Populated by
 	// physical.AnnotateScanColumns alongside ScanColTypes.
-	ScanColFields     map[string][]parquet.Column
+	ScanColFields map[string][]parquet.Column
+	// SubqueryColDecls is the declared output column of every SCALAR
+	// SUBQUERY this plan contains, keyed by the subquery's own SQL TEXT —
+	// the key nodeDeclaredType already resolves a subquery by. ONE map is
+	// built per plan and shared by every node in it, so any walk that holds
+	// a node can ask.
+	//
+	// A subquery is a WHOLE SECOND QUERY whose type lives in the CATALOG, so
+	// the declaration walks — which are free functions over the logical tree
+	// and hold no Planner — cannot ask for it: `colDecls.subqueryDecl` is nil
+	// in every one of them, and the only caller that passes a resolver is
+	// declaredOutputSchema at the OUTPUT projection. So a scalar-subquery
+	// column MATERIALIZED by a derived table, a CTE or a set-operation arm
+	// was declared STRING, and every reader above it fell to float64:
+	// `SELECT SUM(v) FROM (SELECT (SELECT c & 3 FROM u) AS v FROM t) s`
+	// declared OID 701 on all five arms where PostgreSQL declares bigint
+	// (#1018 round 5 review, P2).
+	//
+	// It is stamped ONCE per plan by physical.AnnotateScanColumns, the same
+	// pass that puts ScanColTypes on a Scan, so the walks read a FACT off the
+	// tree instead of planning a second query while they walk (the planning
+	// cost of the declaration walks is #1034's subject; this adds no walk).
+	SubqueryColDecls  map[string]SubqueryColumnDecl
 	FilterOnlyColumns []string // columns needed ONLY by the filter directly above this scan (candidates for scan-level filter evaluation without materialization)
 	ShapeOnlyColumns  []string // byte-array columns whose EVERY use in the plan reads shape, not contents (LENGTH/IS NULL/= ''/COUNT) — the scan decodes them as lengths, see shape_only_columns.go
 	SampleMethod      string   // TABLESAMPLE method: BERNOULLI, SYSTEM

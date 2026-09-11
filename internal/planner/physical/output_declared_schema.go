@@ -19,6 +19,15 @@ import (
 // Zero-row and non-empty scalar-subquery columns must agree (#416, #874).
 func declaredOutputSchema(root *logical.Node,
 	subqueryDecl func(string) (parquet.Column, bool)) []parquet.Column {
+	// A caller with no Planner passes nil — the set-operation arm walk and
+	// emittedColIntWidth's do. The STAMP answers for them: it is the same
+	// declaration the Planner resolved, already on the tree
+	// (subquery_decl_annotation.go). Without it a set-operation arm holding a
+	// scalar subquery was declared TEXT beside a bigint arm and the query was
+	// refused 42804 where PostgreSQL answers (#1018 round 5 review, P2).
+	if subqueryDecl == nil {
+		subqueryDecl, _ = subqueryDeclsOf(root)
+	}
 	if cols, ok := setOpDeclaredOutputSchema(root); ok {
 		return cols
 	}
@@ -1077,7 +1086,12 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		}
 		in := emittedColTypes(n.Children[0])
 		strictInt := strictIntArithCols(n.Children[0])
-		decls := colDecls{types: in, dec: emittedColDecimal(n.Children[0])}
+		// A SCALAR SUBQUERY's type is a CATALOG fact this walk cannot ask
+		// for — it holds no Planner — so it is stamped on the plan's nodes
+		// by annotateSubqueryColumnDecls and installed here as the resolver
+		// nodeDeclaredType's SubqueryNode arm already reads.
+		decls := withSubqueryDecls(
+			colDecls{types: in, dec: emittedColDecimal(n.Children[0])}, n)
 		out := make(map[string]parquet.TypeID, len(n.Projections))
 		for _, proj := range n.Projections {
 			name := declaredProjectionName(proj)
@@ -1344,8 +1358,8 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 			return nil
 		}
 		in := emittedColDecimal(n.Children[0])
-		fieldDecls := colDecls{types: emittedColTypes(n.Children[0]),
-			fields: inputColFields(n.Children[0]), dec: in}
+		fieldDecls := withSubqueryDecls(colDecls{types: emittedColTypes(n.Children[0]),
+			fields: inputColFields(n.Children[0]), dec: in}, n)
 		out := make(map[string]logical.DecimalMeta, len(n.Projections))
 		for _, proj := range n.Projections {
 			name := declaredProjectionName(proj)

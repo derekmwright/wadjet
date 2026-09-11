@@ -38,12 +38,12 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 			return nil
 		}
 		child := n.Children[0]
-		in := colDecls{
+		in := withSubqueryDecls(colDecls{
 			types:    emittedColTypes(child),
 			fields:   inputColFields(child),
 			dec:      emittedColDecimal(child),
 			intWidth: emittedColIntWidth(child),
-		}
+		}, n)
 		out := make(map[string]intWidth, len(n.GroupBy)+len(n.AggExprs))
 		// A GROUP KEY is the value the input carried, so it keeps the input's
 		// width — including a DERIVED key, which is emitted under its
@@ -101,12 +101,12 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 		}
 		child := n.Children[0]
 		strictInt := strictIntArithCols(child)
-		decls := colDecls{
+		decls := withSubqueryDecls(colDecls{
 			types:    emittedColTypes(child),
 			fields:   inputColFields(child),
 			dec:      emittedColDecimal(child),
 			intWidth: emittedColIntWidth(child),
-		}
+		}, n)
 		out := make(map[string]intWidth, len(n.Projections))
 		for _, proj := range n.Projections {
 			name := declaredProjectionName(proj)

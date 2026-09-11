@@ -173,28 +173,10 @@ func (p *Planner) subqueryOutputColumn(sql string) (col parquet.Column, ok bool)
 			col, ok = parquet.Column{}, false
 		}
 	}()
-	ctx := p.planCtx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	pq, err := plansql.Parse(sql)
-	if err != nil {
+	plan := p.subqueryLogicalPlan(sql)
+	if plan == nil {
 		return parquet.Column{}, false
 	}
-	info, err := plansql.ExtractSelect(pq)
-	if err != nil {
-		return parquet.Column{}, false
-	}
-	var plan *logical.Node
-	if len(p.ctes) > 0 {
-		plan, err = logical.BuildFromSelectWithCTEs(info, append(append([]plansql.CTEDef(nil), p.ctes...), info.CTEs...))
-	} else {
-		plan, err = logical.BuildFromSelect(info)
-	}
-	if err != nil || plan == nil {
-		return parquet.Column{}, false
-	}
-	p.AnnotateScanColumns(ctx, plan)
 	schema := declaredOutputSchema(plan, p.subqueryOutputColumn)
 	if len(schema) != 1 {
 		// Not a scalar subquery's shape. Declining is the honest answer: a
@@ -203,6 +185,35 @@ func (p *Planner) subqueryOutputColumn(sql string) (col parquet.Column, ok bool)
 		return parquet.Column{}, false
 	}
 	return schema[0], true
+}
+
+// subqueryLogicalPlan is the parse-build-annotate half of subqueryOutputColumn,
+// named so the WIDTH half (subqueryOutputIntWidth) asks the same tree the TYPE
+// half does rather than building a second one that could differ.
+func (p *Planner) subqueryLogicalPlan(sql string) *logical.Node {
+	ctx := p.planCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	pq, err := plansql.Parse(sql)
+	if err != nil {
+		return nil
+	}
+	info, err := plansql.ExtractSelect(pq)
+	if err != nil {
+		return nil
+	}
+	var plan *logical.Node
+	if len(p.ctes) > 0 {
+		plan, err = logical.BuildFromSelectWithCTEs(info, append(append([]plansql.CTEDef(nil), p.ctes...), info.CTEs...))
+	} else {
+		plan, err = logical.BuildFromSelect(info)
+	}
+	if err != nil || plan == nil {
+		return nil
+	}
+	p.AnnotateScanColumns(ctx, plan)
+	return plan
 }
 
 // buildSubqueryPipelineScoped is buildSubqueryPipeline with the enclosing WITH

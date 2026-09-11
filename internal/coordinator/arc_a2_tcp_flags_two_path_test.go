@@ -634,6 +634,70 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmetic(t *testing.T) {
 		})
 	}
 
+	// A SCALAR SUBQUERY'S COLUMN DECLARES WHAT THE SUBQUERY DECLARES (#1018
+	// round 5 review, P2). A subquery is a whole second query whose type lives
+	// in the CATALOG, and the declaration walks hold no Planner — so a
+	// scalar-subquery column MATERIALIZED by a derived table or a CTE was
+	// declared STRING and every reader above it fell to float8. These rendered
+	// `v=float:72` on all five arms where PostgreSQL renders a bigint or a
+	// numeric. The subquery reads id=3, whose f4/f8 is 18, over the four rows
+	// id<=4: PostgreSQL 17.11 says bigint 72 / numeric 72 / bigint 72 /
+	// numeric 72, and numeric for the COUNT(*) form (60 rows, four times).
+	//
+	// THE ROUTE IS ASSERTED, NOT ASSUMED. A scalar-subquery projection is a
+	// shape the DAG refuses to stage, so every one of these runs in-process
+	// and moves ScalarProjectionLocalRoutes. Rows alone cannot tell "executed
+	// on the DAG" from "refused and routed local", and a cell that claimed the
+	// former here would be claiming something false.
+	for _, tc := range []struct {
+		name, sql string
+		want      []string
+	}{
+		{"derived_scalar_subquery_narrow_is_bigint",
+			`SELECT SUM(v) AS v FROM (SELECT (SELECT BITWISE_AND(f4,18) FROM tcpflow u2 WHERE u2.id = 3) AS v FROM tcpflow WHERE id <= 4) s`,
+			[]string{"v=int64:72"}},
+		{"derived_scalar_subquery_wide_is_numeric",
+			`SELECT SUM(v) AS v FROM (SELECT (SELECT BITWISE_AND(f8,18) FROM tcpflow u2 WHERE u2.id = 3) AS v FROM tcpflow WHERE id <= 4) s`,
+			[]string{"v=72"}},
+		{"derived_scalar_subquery_bare_int4_column_is_bigint",
+			`SELECT SUM(v) AS v FROM (SELECT (SELECT f4 FROM tcpflow u2 WHERE u2.id = 3) AS v FROM tcpflow WHERE id <= 4) s`,
+			[]string{"v=int64:72"}},
+		{"derived_scalar_subquery_bare_int8_column_is_numeric",
+			`SELECT SUM(v) AS v FROM (SELECT (SELECT f8 FROM tcpflow u2 WHERE u2.id = 3) AS v FROM tcpflow WHERE id <= 4) s`,
+			[]string{"v=72"}},
+		{"derived_scalar_subquery_count_is_numeric",
+			`SELECT SUM(v) AS v FROM (SELECT (SELECT COUNT(*) FROM tcpflow u2) AS v FROM tcpflow WHERE id <= 4) s`,
+			[]string{"v=240"}},
+		{"cte_over_a_scalar_subquery_is_bigint",
+			`WITH c AS (SELECT (SELECT BITWISE_AND(f4,18) FROM tcpflow u2 WHERE u2.id = 3) AS v FROM tcpflow WHERE id <= 4)
+			 SELECT SUM(v) AS v FROM c`,
+			[]string{"v=int64:72"}},
+	} {
+		t.Run("scalar_subquery/"+tc.name, func(t *testing.T) {
+			a2fSQL["scalar_subquery/"+tc.name] = tc.sql
+			for _, arm := range arms {
+				before := a2fReadRoutes(arm.coord)
+				got, err := arm.run("scalar_subquery/"+tc.name+"/"+arm.name, tc.sql)
+				if err != nil {
+					t.Errorf("%s arm: %v\n  SQL: %s", arm.name, err, tc.sql)
+					continue
+				}
+				a2fCheckScalarRoute(t, arm.name, arm.coord, before, tc.sql)
+				if len(got) != len(tc.want) {
+					t.Errorf("%s arm: %d rows %v, want %d %v\n  SQL: %s",
+						arm.name, len(got), got, len(tc.want), tc.want, tc.sql)
+					continue
+				}
+				for i := range tc.want {
+					if got[i] != tc.want[i] {
+						t.Errorf("%s arm row %d: %q, PostgreSQL says %q\n  SQL: %s",
+							arm.name, i, got[i], tc.want[i], tc.sql)
+					}
+				}
+			}
+		})
+	}
+
 	// THE BOUNDARY OF THE POSITION REFUSAL, FROM THE OTHER SIDE. The same
 	// positions with a name the family KNOWS answer over the same empty input
 	// on every arm: a plan-time fold that fired on one of these would be the
@@ -804,6 +868,36 @@ func a2fCheckRoutes(t *testing.T, arm string, c *Coordinator, before a2fRoutes, 
 				"in-process, so its rows say nothing about the DAG\n  SQL: %s",
 				arm, name, d, sql)
 		}
+	}
+}
+
+// a2fCheckScalarRoute is a2fCheckRoutes for a shape the DAG deliberately
+// REFUSES to stage: the SCALAR-SUBQUERY projection, which the coordinator runs
+// in-process instead. The claim is the route, so it is asserted — exactly one
+// counter moves, and it is that one. Every other counter must stay flat, which
+// is what tells "refused for the reason we think" from "refused for another".
+func a2fCheckScalarRoute(t *testing.T, arm string, c *Coordinator, before a2fRoutes, sql string) {
+	t.Helper()
+	if c == nil {
+		return // a single-process arm has no coordinator to route
+	}
+	after := a2fReadRoutes(c)
+	moved := 0
+	for i, name := range after.names {
+		d := after.values[i] - before.values[i]
+		if d == 0 {
+			continue
+		}
+		moved++
+		if name != "ScalarProjection" {
+			t.Errorf("%s arm: %sLocalRoutes moved by %d; this shape routes local "+
+				"through ScalarProjection and nothing else\n  SQL: %s", arm, name, d, sql)
+		}
+	}
+	if moved == 0 {
+		t.Errorf("%s arm: no local-routing counter moved, so this cell's rows do not "+
+			"come from the route it claims. If the DAG can now stage a scalar-subquery "+
+			"projection, this gate is the place that says so.\n  SQL: %s", arm, sql)
 	}
 }
 

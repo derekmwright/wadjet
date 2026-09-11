@@ -2042,6 +2042,12 @@ its width — a column's or a computed expression's alike, so
 while `SUM` and `COUNT` answer `bigint`, so a `SUM` over a `SUM` is
 `NUMERIC`.
 
+A **scalar subquery's column keeps the subquery's own declaration** through a
+derived table, a CTE or a window slot, so `SELECT SUM(v) FROM (SELECT (SELECT
+a & 3 FROM u) AS v FROM t) s` is `BIGINT` and the `bigint` form is `NUMERIC`,
+as PostgreSQL declares them. Written DIRECTLY as an aggregate's argument —
+`SUM((SELECT …))` — it is still `DOUBLE PRECISION`.
+
 A **`CAST` answers in its target's width**, whatever the operand's was, as
 PostgreSQL does: `SUM(bigint_col::BIGINT)` and `SUM(int_col::BIGINT)` are
 `NUMERIC`, `SUM(bigint_col::INTEGER)` is `BIGINT`, and a cast to a
