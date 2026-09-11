@@ -7,33 +7,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
-// The integer DOMAIN of an expression is a property of its TYPE, not of the
-// SYNTAX that produced its operands (#849, ADR-0024 item 2).
-//
-// `c_i64 * <int8 max>` raises 22003 here and on PostgreSQL 17.11. Put ANY of
-// CAST, a function or a choice construct around the same column and the
-// expression used to answer 9.223399706970886e+24 as a float64 — the same
-// wrong value projected, filtered, grouped and summed, where the server raises
-// `bigint out of range` in every one of those positions. The shapes that do
-// NOT overflow were wrong in the same way with the defect invisible:
-// `CAST(v AS BIGINT) * 2` answered 200 under OID 701 where PostgreSQL declares
-// bigint (measured on the wire, round 0).
-//
-// The mechanism was the NODE CHOICE. compileBinOp builds the typed
-// BinOpNumeric only when both operands satisfy Float64Expr AND Int64Expr;
-// *Cast, *Case, *Coalesce, *decimalScalarFn and a polymorphic *FuncCall
-// satisfy neither, so every one of those pairs fell to the generic BinOp,
-// whose `+ - * %` arms read both sides through ToFloat64. Only `/` had an
-// integer arm, added by #369 for exactly this node and exactly these operands.
-//
-// The predicates below are the RUNTIME MIRROR of physical.intArithAllInt's
-// declared-type tail: the planner declares INT64 for what these accept, so the
-// two must recognise the same trees or a declaration promises an integer the
-// kernel does not produce — which is not a theoretical worry. The first cut of
-// this fix moved only the planner, and `ABS(i) * <int8 max>` then computed
-// 9.2e24 in float64 and STORED it into the INT64 vector the declaration had
-// asked for, answering MinInt64: a wrapped number wearing the right type,
-// which is worse than the float it replaced.
+// Integer arithmetic domain follows expression TYPE, not operand syntax
+// (#849, ADR-0024 item 2), including casts, functions and choices.
+// Runtime predicates mirror physical.intArithAllInt's declared-type tail;
+// they must recognize the same trees so an INT64 vector receives integer
+// kernel output, never a float computation that truncates or wraps on store.
+// Checked arithmetic retains overflow refusal through wrappers; division
+// retains its integer arm (#369).
+// See docs/internals/integer-expression-domain-contract.md for the design.
 
 // castIsInt reports whether a CAST produces an int64 box.
 //
@@ -190,32 +171,13 @@ func (e *BinOp) intMode(b *batch.RecordBatch) bool {
 	return e.ints.resolve(e.Op, e.Left, e.Right, b)
 }
 
-// StampArithMode tells a compiled arithmetic node what the PLANNER decided its
-// output type is, so the runtime does not decide it a second time.
-//
-// The two decisions are `physical.intArithAllInt` (which picks the output
-// VECTOR) and `expr.operandIsInt` (which picks the KERNEL), and they were two
-// hand-maintained walks over two representations of one expression. When they
-// disagree the value is not merely mislabelled: a float computed under an INT64
-// declaration is TRUNCATED into the vector, and at the edge it WRAPS. That is
-// how `LEAST(c_i64, 1.5) * 3` answered 4 for PostgreSQL's 4.5 and
-// `(CASE … ELSE 1.5 END) * <int8 max>` answered MinInt64 (round-1 review, B3).
-//
-// So the planner stamps, and `intArm.resolve` returns the stamped answer
-// instead of re-deriving one. `integer` is the planner's claim that the output
-// vector is INT64.
-//
-// The stamp cannot manufacture an integer out of a value that is not one:
-// `BinOp.intArith` still reads both boxes through `toInt64Safe` and returns
-// ok=false for anything else, so a stamp of `true` over a decimal or a float
-// box falls through to the float arm exactly as an unstamped node would. What
-// it removes is the case where the runtime says integer and the planner did
-// not — the direction that used to leave a right value under a declaration
-// nothing enforced.
-//
-// Only the TOP node of a projection is stamped, which is the only one whose
-// answer meets a materialized vector; a nested node is an input to this
-// decision and keeps deriving its own.
+// StampArithMode gives a compiled arithmetic node the planner's output
+// claim: integer means the materialized vector is INT64.
+// intArm.resolve uses the stamp instead of repeating the planner's decision.
+// A true stamp cannot turn a float/decimal box into an integer: intArith
+// still requires toInt64Safe on both boxes, else falls through to float.
+// Only the top projection node is stamped; nested nodes derive their mode.
+// See docs/internals/planner-arithmetic-mode-stamp.md for the design.
 func StampArithMode(e Expr, integer bool) {
 	bo, ok := e.(*BinOp)
 	if !ok {

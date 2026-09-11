@@ -122,32 +122,13 @@ func fnEpoch(args []any) any {
 	return float64(t.Unix())
 }
 
-// fnTimezone implements PostgreSQL's timezone(zone, timestamp), the canonical
-// form of the `<timestamp> AT TIME ZONE <zone>` operator that the parser
-// rewrites to this call.
-//
-// PostgreSQL gives the operator two directions, chosen by the input type:
-//
-//	timestamptz AT TIME ZONE zone → timestamp   (absolute instant → wall clock in zone)
-//	timestamp   AT TIME ZONE zone → timestamptz (wall clock in zone → absolute instant)
-//
-// Wadjet has one timestamp type and its values are absolute instants
-// (vectors hold epoch seconds, the scalar layer passes RFC3339 text), so only
-// the first direction has a meaning here. But PostgreSQL's result for that
-// direction is a *naive* timestamp, which this type system cannot represent.
-// Rendering the instant in the zone instead — keeping the offset, so the
-// instant is preserved — disagrees with PostgreSQL for everything downstream
-// that reads the naive result as UTC: PostgreSQL's EXTRACT(EPOCH FROM ts AT
-// TIME ZONE 'America/New_York') is the zone's offset away from EXTRACT(EPOCH
-// FROM ts), while an instant-preserving conversion leaves it equal.
-//
-// So the zone is restricted to UTC, the case where the two readings coincide:
-// an instant and its UTC wall clock are the same count of seconds since the
-// epoch, and the EXTRACT(EPOCH FROM …) round trip is exact. Every other zone
-// is rejected rather than converted with a wrong sign — as a compile-time
-// error when the zone is a literal (see compileFuncCallNode) and as NULL here
-// when it is not. Widening this means giving the type system a naive-timestamp
-// type first.
+// fnTimezone implements the parser's AT TIME ZONE rewrite for UTC only.
+// The engine represents absolute instants and has no naive timestamp type;
+// UTC is where wall-clock and instant epoch readings coincide.
+// Reject non-UTC literal zones at compile time; dynamic non-UTC zones return
+// NULL here. NULL/invalid input returns NULL.
+// Supporting other zones requires a naive timestamp type first.
+// See docs/internals/timezone-utc-only-boundary.md for the design.
 func fnTimezone(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil

@@ -116,59 +116,21 @@ func ResolveColumnRef(b *batch.RecordBatch, name string) (idx int, structField s
 	if parentIdx >= 0 && b.Columns[parentIdx].Type == batch.TypeRow {
 		return parentIdx, parts[1]
 	}
-	// A reference whose QUALIFIER names a ROW column of this batch is a FIELD
-	// PATH and nothing else (ADR-0022): if the field is not one of that
-	// container's children the answer is "no such thing", never some other
-	// column that happens to share the field's name. rowColumnNamed is the
-	// whole of that test — it finds a ROW spelled `parts[0]` or
-	// `<qualifier>.parts[0]`, including the AMBIGUOUS case the lookup above
-	// declines.
-	//
-	// Asking `parentIdx >= 0` here instead was INVERTED: the ROW arm above
-	// has already returned, so this point is reached only when the qualifier
-	// names a column that is NOT a ROW — an ordinary scalar an arm happens to
-	// have called `c` — and the refusal then swallowed every qualified
-	// reference whose qualifier collided with such a name:
-	//
-	//	WITH c AS (SELECT id, a * 2 AS dv FROM decpair)
-	//	SELECT COUNT(*) FROM decpair t
-	//	JOIN (SELECT id, b AS c FROM decpair) z ON z.id = t.id
-	//	JOIN c ON c.id = t.id WHERE c.dv > 1
-	//	-- PostgreSQL 5 · single 5 · DAG broadcast 5 · DAG shuffled 0
-	//
-	// The same query with the arm publishing `zz` answered 5, which is what
-	// says the collision was the whole of it.
+	// A qualifier naming a ROW column denotes a FIELD PATH only (ADR-0022):
+	// an absent child means no such field, never a same-named unrelated column.
+	// rowColumnNamed checks both parts[0] and <qualifier>.parts[0], including ambiguous ROWs.
+	// Do not substitute parentIdx >= 0: the ROW lookup already returned; a scalar column
+	// sharing a relation qualifier must not swallow an ordinary qualified reference.
+	// See docs/internals/row-qualifier-field-refusal.md for the design.
 	if rowColumnNamed(b, parts[0]) {
 		return -1, ""
 	}
-	// A QUALIFIED reference the stream spells under a DIFFERENT qualifier.
-	//
-	// The mirror of the bare branch above, and the same disagreement one
-	// spelling over. `QualifyAllBuildCols` renames every build column to the
-	// build's TABLE alias, so a CTE or derived table on the build side of a
-	// self-join publishes `decpair.dv` while every consumer above the join
-	// spells it with the arm's own alias:
-	//
-	//	WITH c AS (SELECT id, SUM(f) * 2 AS dv FROM t GROUP BY id)
-	//	SELECT COUNT(*) FROM t x JOIN c ON c.id = x.id JOIN t y ON c.id = y.id
-	//	WHERE c.dv > 1
-	//	-- PostgreSQL 6 · single 6 · both DAG arms 0, in silence (#762)
-	//
-	// The BARE spelling of that same predicate (`WHERE dv > 1`) already
-	// answered 6, through the branch above — which is what says the
-	// qualifier is the whole of it and not the carrying.
-	//
-	// physical.columnResolves has accepted this direction since #656 (its
-	// last loop compares the two names by their bare parts), so the
-	// planner's checker believed in a resolution the evaluator did not
-	// implement, and every check waved the plan through. Implementing it
-	// removes that disagreement rather than adding a special case — the same
-	// argument the bare branch above was added under.
-	//
-	// Last resort and UNAMBIGUOUS ONLY: two arms that both spell it
-	// (`p.w` and `q.w` on one stream, with `x.w` asked for) decline and keep
-	// the loud failure rather than guessing an arm, which is the direction
-	// #742 is about.
+	// Last resort: resolve a qualified reference under a different stream
+	// qualifier only when its bare part identifies ONE qualified column (#762).
+	// Keep evaluator resolution aligned with physical.columnResolves (#656).
+	// Multiple matching arms decline and keep the loud failure; never guess
+	// which arm an unmatched qualifier meant (#742).
+	// See docs/internals/qualified-column-last-resort-resolution.md for the design.
 	if idx = uniqueQualifiedColumn(b, parts[1]); idx >= 0 {
 		return idx, ""
 	}

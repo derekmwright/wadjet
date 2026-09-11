@@ -139,29 +139,15 @@ func WithSubqueryScope(resolve plansql.TableColumns) CompileOption {
 	return func(c *compileContext) { c.subqueryScope = resolve }
 }
 
-// WithBudget charges an uncorrelated InSubquery's membership set to the
-// caller's memory tracker (ADR-0006, #528, #531), and hands the caller each
-// such node so it can Release the charge when the compiled tree's life ends.
-//
-// It is an OPTION rather than a seventh CompileWith* function because the
-// options carry things a compile site already needs: swapping a call site to
-// an entry point that takes a budget and nothing else silently drops
-// WithSubqueryDeclTypes, and a scalar subquery then compares by the bytes of
-// its box again (#696). Every existing entry point takes opts; this composes
-// with them.
-//
-// release is REQUIRED and the option refuses a nil one, because the failure it
-// prevents is worse than the bug it fixes: an InSubquery holds its membership
-// map for the life of the compiled tree, so charging without a teardown turns
-// an unaccounted map into a permanently-charged one, and a task that plans
-// several of them runs out of budget for work that has already finished.
-// InSubquery.Release is idempotent and safe on a node that never resolved.
-//
-// What this does NOT do is bound the ALLOCATION. chargeMemory runs after
-// resolveSlow has built the map, so it makes the set visible to the budget and
-// turns a set that is over budget on its own into a query error; it does not
-// stop a subquery large enough to exhaust the machine from doing so. See
-// chargeMemory's doc.
+// WithBudget charges uncorrelated InSubquery sets and hands nodes to the caller for
+// Release at compiled-tree teardown (ADR-0006, #528, #531). release is REQUIRED;
+// a nil callback refuses the option. Release is idempotent, including unresolved nodes.
+// Compose this option with existing compile entry points; never lose WithSubqueryDeclTypes
+// when adding a budget or scalar subqueries can compare boxed bytes again (#696).
+// This accounts memory, NOT allocation: chargeMemory runs AFTER resolveSlow builds the map.
+// An individually over-budget set becomes an error, but a large allocation can still
+// exhaust the machine before charging; see chargeMemory.
+// See docs/internals/in-subquery-budget-lifetime-boundary.md for the design.
 func WithBudget(budget MemoryAccountant, release func(*InSubquery)) CompileOption {
 	if budget == nil || release == nil {
 		return nil
@@ -891,40 +877,15 @@ func tryTemporalLit(col *ColRef, other Expr, op CmpOp, flip bool) *CmpTemporalLi
 	return &CmpTemporalLit{Col: col, Lit: s, Op: op, Flip: flip, days: days, ms: ms}
 }
 
-// tryNetworkLit builds a CmpNetworkLit when other is a string literal that
-// parses as an IPv4 address, a MAC address, an IPv6 address, or a CIDR
-// network; nil otherwise. Mirrors tryTemporalLit for the network-typed
-// columns: see CmpNetworkLit for why they need it. UUID does not go through
-// this path: ColRef.Eval already renders it as its zero-padded hex TEXT
-// (Vector.GetValue's default case), and lexical order of that fixed-width
-// text happens to equal the UUID's own byte order, which is enough for
-// ordering too, not just equality — an accident that does NOT generalize to
-// IPv6 (variable-width `::`-compressed hex) or CIDR (variable-width prefix
-// notation), which is why those two DO need a typed comparator (#492): the
-// column renders as text there too, but comparing that text lexically (<, >,
-// <=, >=) is not the address's numeric/structural order, is not even
-// consistent between this expr path's WHERE and SELECT evaluation, and used
-// to disagree outright with the stage DAG for IPv6 (both compile predicates
-// through this same function; before this fix, an IPv6/CIDR literal made
-// tryNetworkLit return nil, so the predicate fell to a plain *expr.Cmp and
-// its generic per-row path, which is where the lexical comparison happened).
-//
-// Column type is unknown at compile time (see tryTemporalLit's own comment),
-// so this cannot be, and does not need to be, restricted to columns that are
-// ACTUALLY network-typed: a STRING column whose literal happens to parse as
-// an address (`s = '10.1.2.3'`) gets wrapped the same way, but
-// extractFilterOps' *expr.CmpNetworkLit case (internal/planner/physical/
-// plan.go) and CmpNetworkLit.EvalBoolNull's genericFallback both defer
-// entirely to the column's REAL type at kernel-build/eval time — a STRING
-// column takes its ordinary compareFilterString/lexical-compare path either
-// way, never one of the typed branches.
-// The IPv6 key comes from kernel.IPv6LitKey, which — unlike the local parse
-// this used to do — accepts a v4 literal too, keying it BELOW every v6 row
-// (PostgreSQL compares the address FAMILY first). The two encodings no longer
-// have to be mutually exclusive because the branch is chosen by the COLUMN's
-// resolved type, never by which parses the literal accepted: a v4 literal
-// legitimately keys as an IPv4 int64, as a v6 family sentinel, and as a /32
-// CIDR key all at once, and exactly one of those is read.
+// tryNetworkLit pre-parses string literals as IPv4, MAC, IPv6 and CIDR;
+// return nil when none applies. UUID uses fixed-width text's byte order.
+// IPv6/CIDR need typed ordering, not their variable-width rendered text (#492).
+// Column type is unknown here: kernel construction and EvalBoolNull choose
+// by the resolved type, so STRING retains ordinary lexical comparison.
+// Use kernel.IPv6LitKey, including its v4-before-v6 family sentinel.
+// A literal may have IPv4, IPv6 and CIDR encodings simultaneously; read only
+// the encoding selected by the column's type.
+// See docs/internals/network-literal-binding-and-fallback.md for the design.
 func tryNetworkLit(col *ColRef, other Expr, op CmpOp, flip bool) *CmpNetworkLit {
 	lit, ok := other.(*Lit)
 	if !ok {

@@ -8,59 +8,20 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// The CAST refusals that used to be a NULL.
-//
-// ADR-0012 item 1 makes PostgreSQL the authority on error-versus-not, and
-// protocol rule 8 states the consequence: when a value cannot be produced,
-// the ERROR is the answer. A CAST that answers NULL for text naming no value
-// of the destination type is indistinguishable, at every consumer, from a
-// CAST over a NULL input — so `WHERE CAST(s AS DATE) IS NULL` counted 5000
-// rows of unparseable text as if the column had been empty (#836, #840).
-//
-// The per-row error channel these ride is `fatalEval`, the same one the
-// numeric casts have used since #367; #836 is the issue that noticed
-// ADR-0012's residual text ("the CAST path has no per-row error channel for
-// a temporal conversion") was contradicted by the tree.
-//
-// The classification is the parquet package's, not a second copy:
-// `parquet.ParseDateDays` / `parquet.ParseTimestampMillis` already separate
-// PostgreSQL's two temporal SQLSTATEs — 22008 (datetime_field_overflow) for
-// a well-formed date naming no day, 22007 (invalid_datetime_format) for text
-// that is not a date at all — and carry PostgreSQL's own message. Measured
-// live on postgres:17.11:
-//
-//	CAST('not-a-date' AS DATE)              22007  invalid input syntax for type date: "not-a-date"
-//	CAST('2020-02-30' AS DATE)              22008  date/time field value out of range: "2020-02-30"
-//	CAST('not-a-ts' AS TIMESTAMP)           22007  invalid input syntax for type timestamp: "not-a-ts"
-//	CAST('2020-02-30 12:00:00' AS TIMESTAMP) 22008 date/time field value out of range: "2020-02-30 12:00:00"
+// An invalid temporal TEXT cast raises through fatalEval, never answers
+// SQL NULL (ADR-0012 item 1; #836, #840, #367).
+// Use parquet.ParseDateDays / ParseTimestampMillis for both value and error:
+// 22008 for a well-formed date naming no day, 22007 for invalid syntax,
+// with the parser's PostgreSQL-compatible message.
+// See docs/internals/temporal-cast-refusal-classification.md for the design.
 
-// castTemporalText converts TEXT to a DATE's epoch days or a TIMESTAMP's epoch
-// milliseconds through the ENGINE'S ONE temporal accept-set, raising its
-// classified refusal when the text names no instant.
-//
-// It is the VALUE and the CODE from the same function, and that pairing is the
-// point. `parquet.ParseDateDays` / `ParseTimestampMillis` is what the ingest
-// boundary, the parquet writers, the row→batch builder and the filter kernel
-// all read, so a literal that STORES is a literal a predicate over the same
-// column reads the same way — and now a literal a CAST reads the same way too.
-//
-// #836's first pass took only the CODE from here and left `parseDateArg` as
-// the value source, which made the two accept-sets visible as a DIVERGENCE
-// rather than as one rule: `CAST('20240101' AS DATE)` is 2024-01-01 on the
-// live server and in this classifier, and the mismatch turned it into a
-// refusal. One function answers both halves now, so a spelling the engine
-// accepts anywhere is accepted here, and a spelling it refuses anywhere is
-// refused here with that refusal's own SQLSTATE.
-//
-// The BOUNDARY is deliberate and the corpus attempts it from both sides: only
-// a TEXT operand comes here. Every other Go box that fails to parse — a
-// boolean, a container, a value type with no temporal reading at all — is a
-// TYPE-PAIR failure, which PostgreSQL answers at PARSE time with 42846
-// (`cannot cast type boolean to date`) and not with a data exception. Minting
-// 22007 for those would put a data-exception code on a type error, so they
-// keep the NULL they have and are recorded in ADR-0012's divergence list.
-//
-// A NULL operand never reaches here: Cast.Eval returns before the conversion.
+// castTemporalText reads TEXT into epoch days or epoch milliseconds using
+// parquet.ParseDateDays / ParseTimestampMillis for BOTH value and refusal.
+// The accept-set must agree with ingestion, storage and filter kernels (#836).
+// Non-text boxes decline; unparseable non-text casts keep their NULL rather
+// than mislabel a type-pair failure as 22007 (ADR-0012 divergence list).
+// NULL never reaches here: Cast.Eval returns before conversion.
+// See docs/internals/temporal-text-cast-shared-parser.md for the design.
 func castTemporalText(src any, kind castTemporalKindT) (any, bool) {
 	text, ok := stringOperand(src)
 	if !ok {

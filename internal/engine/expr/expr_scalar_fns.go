@@ -163,27 +163,14 @@ func (e *FuncCall) formatTemporalArgs(args []any) {
 	}
 }
 
-// formatNetworkArgs rewrites boxed TypeIPv4/TypeMAC ColRef argument values
-// to their canonical text form (dotted-quad / colon-hex) for
-// networkTextFuncs AND stringInputFuncs. Reads through the column directly —
-// like resolveTemporalArgs's columnInstant, and unlike formatTemporalArgs
-// above — because formatIPv4/formatMAC are batch-package-internal;
-// Vector.GetValue is the exported boundary that already renders them
-// correctly (it is what a bare `SELECT ip_col` reads through, via
-// exec.ColumnRef). Only direct column references are covered, matching
-// formatTemporalArgs: a nested expression's output type isn't known here.
-//
-// stringInputFuncs (length/concat/upper/starts_with/...) went unfixed by
-// #484, which only taught networkTextFuncs (ip_to_string, cidr_contains, ...)
-// this rewrite: a SEPARATE registry, so `length(ipv4_col)` kept reading the
-// raw encoded int64 and answering the DIGIT COUNT of the address's number
-// instead of its text (#500). TypeIPv6/TypeCIDR/TypeUUID need no entry here:
-// ColRef.Eval already falls through to Vector.GetValue's default case for
-// those three (see the type switch there), which is the correct rendering
-// for a function argument same as it is for CAST — only TypeIPv4/TypeMAC
-// take the raw-int64 fast path that needs unwinding. TypePort/TypeProtocol
-// need none either: their canonical text IS their raw number, so the box
-// ColRef.Eval already returns is already the right string.
+// formatNetworkArgs renders TypeIPv4/TypeMAC ColRef arguments canonically as
+// dotted-quad/colon-hex for BOTH networkTextFuncs and stringInputFuncs (#484, #500).
+// Read the column through Vector.GetValue's exported rendering boundary because
+// formatIPv4/formatMAC are batch-internal; raw int64 boxes are not their text.
+// Only direct ColRefs are covered: nested expression output types are unknown here.
+// IPv6/CIDR/UUID already use GetValue rendering in ColRef.Eval; PORT/PROTOCOL
+// already box their canonical numeric text value and need no rewrite.
+// See docs/internals/network-function-argument-rendering.md for the design.
 func (e *FuncCall) formatNetworkArgs(b *batch.RecordBatch, row int, args []any) {
 	for i, a := range e.Args {
 		cr, ok := a.(*ColRef)
@@ -278,31 +265,14 @@ func (e *FuncCall) resolveTemporalArgs(b *batch.RecordBatch, row int, args []any
 	}
 }
 
-// temporalOperand resolves the date side of `date ± interval` to a value
-// intervalShift can read, and reports whether the operand is a date at all.
-//
-// It is resolveTemporalArgs for the binary-operator path, and it exists for
-// the same reason: ColRef.Eval boxes a DATE column as its epoch-DAY number and
-// a TIMESTAMP column as its epoch-MILLISECOND number, and a bare number has
-// lost the unit that says which. Recovering it here — where the operand is
-// still a column reference whose vector knows its declared type — is what
-// #322 did for date_add/date_sub arguments; the operator never got it, so
-// `o_orderdate - INTERVAL '90' DAY` fell through to the numeric path and
-// projected the raw day number (issue #332). A resolved DATE is tagged
-// civilDate for the same reason it is there: the result renders, and a whole
-// day must render as a calendar date.
-//
-// A CAST to a temporal type is resolved the same way and for the same reason:
-// it now BOXES its result the way the matching column type does (epoch days /
-// epoch milliseconds, see castTemporal), so the unit lives in the destination
-// type rather than in the number. Without this case `DATE '1998-12-01' -
-// INTERVAL '90' DAY` — TPC-H Q1's filter, and every typed date literal, which
-// the parser lowers to a CAST — would have fallen straight through to numeric
-// arithmetic once #340 stopped the cast passing its text along.
-//
-// Text passes through as text, keeping the string path's own rendering.
-// Everything else — a bare integer, a computed expression, a column of any
-// other type — declines, and the caller's numeric arithmetic runs unchanged.
+// temporalOperand recovers the declared unit for date ± interval:
+// DATE columns/fields become civilDate from epoch days; TIMESTAMP columns
+// become time.Time from epoch milliseconds (#322, #332).
+// Temporal CAST destinations supply the same unit as the matching column,
+// including typed date literals lowered to CAST (#340).
+// Text passes through with its own rendering. Bare numbers, other column
+// types and unsupported expressions decline to unchanged numeric arithmetic.
+// See docs/internals/temporal-arithmetic-operand-units.md for the design.
 func temporalOperand(b *batch.RecordBatch, row int, e Expr, v any) (any, bool) {
 	if s, ok := v.(string); ok {
 		return s, true
@@ -754,29 +724,15 @@ func vecOutputHolds(out *batch.Vector, t batch.TypeID, ok bool, n int) bool {
 	return out.Type == t
 }
 
-// tryEvalMemoized runs the per-row fallback with a per-batch input memo.
-// Returns false when the call shape doesn't qualify (caller falls through
-// to the plain per-row loop).
-//
-// Memo ownership (load-bearing for the zero-copy keys below): the map is a
-// local of this call. One evaluation of one batch, by one goroutine, owns
-// it exclusively and it dies at return — parallel pipeline clones share
-// the *FuncCall but never the memo. Keys are therefore zero-copy views
-// into the input column's arena (map assign stores the string header, it
-// does not copy the bytes), which is sound on two invariants:
-//
-//   - the input batch outlives this call — it is the caller's live batch;
-//   - nothing mutates the input column while the call runs. The output
-//     vector is a separate pooled batch's column (project.go / plan.go
-//     both write into out.Columns[j] of a freshly-obtained batch); an
-//     output aliasing the input would already corrupt the pre-existing
-//     zero-copy probe and the sequential offset writes, so no-alias is a
-//     precondition of this path, not a new one.
-//
-// Values live under the same rule and can also be views into the input
-// (replaceAll returns its argument when nothing matches, and a whole-match
-// single-group replacement returns a substring); they are copied into the
-// output arena on the way out.
+// tryEvalMemoized returns false for ineligible shapes so the caller uses its per-row loop.
+// The memo belongs exclusively to ONE evaluation of ONE batch by ONE goroutine,
+// and dies at return; parallel FuncCall clones share no memo.
+// Zero-copy string keys require the input batch to outlive this call and its column
+// to remain immutable. Output must be a separate pooled batch column, never alias input;
+// that is also required by existing zero-copy probing and sequential offset writes.
+// Memo values may also view input bytes (replaceAll/no match or substring replacement);
+// copy them into the output arena on emission.
+// See docs/internals/scalar-function-memo-arena-lifetime.md for the design.
 func (e *FuncCall) tryEvalMemoized(b *batch.RecordBatch, out *batch.Vector, n int) bool {
 	if len(e.Args) == 0 || !memoizableFuncs[strings.ToLower(e.Name)] {
 		return false

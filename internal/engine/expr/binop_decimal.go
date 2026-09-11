@@ -12,32 +12,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// The DECIMAL mode of BinOpNumeric: `+ - * / %` computed EXACTLY on the Int128
-// carrier instead of through float64 (ADR-0024 items 3 and 4, #555).
-//
-// Before this, every arithmetic expression with a DECIMAL operand resolved
-// float mode — `operandIsInt` accepts only INT32/INT64 — so `d_2 - d_4` over
-// 12.75 and 12.7500 answered -9.999999999976694e-05 where the exact difference
-// is 0, and `d / d` answered 1 where PostgreSQL answers 0.99999215690465.
-//
-// The mode is resolved once per node against the first batch, beside the int
-// and float ones and for the same reason: a column's type does not exist until
-// a batch arrives. What it needs beyond the type is the operands' (p,s), and
-// that comes from two places — the vector carries the SCALE and the batch
-// SCHEMA carries the precision.
-//
-// Two execution paths, both exact and both required to agree (the two-path
-// rule of ADR-0018 §3):
-//
-//   - the BOXED path (Eval), which every row-at-a-time consumer takes and
-//     which the stage DAG takes for every projection. It answers the value's
-//     rendered TEXT, exactly as a DECIMAL COLUMN's box is — so every consumer
-//     that already knows how to read a decimal box (the comparison layer, the
-//     group-key encoder, Vector.SetValueChecked) reads a computed decimal the
-//     same way, with no new box type to teach them.
-//   - the VECTORIZED path (EvalDecimalVec), which writes unscaled carriers
-//     straight into the projection's DECIMAL vector with no boxing and no
-//     allocation.
+// BinOpNumeric computes DECIMAL + - * / % exactly on Int128.
+// Resolve mode once against the first batch; vectors supply scale and the
+// batch schema supplies precision (ADR-0024 items 3 and 4, #555).
+// Boxed Eval returns rendered decimal TEXT, as a DECIMAL column does;
+// EvalDecimalVec writes unscaled carriers directly without boxing/allocation.
+// Both paths must agree (ADR-0018 §3).
+// See docs/internals/decimal-arithmetic-execution-paths.md for the design.
 
 // decimalOperand is an operand that can produce EXACT fixed-point values: a
 // DECIMAL or integer column, a numeric literal, or nested decimal arithmetic.
@@ -1183,27 +1164,14 @@ func caseResultArms(v *Case) []Expr {
 	return arms
 }
 
-// decimalArmFold is the common DECIMAL type of a set of alternatives one value
-// is chosen from — ADR-0024 item 2's rule, applied to a compiled tree.
-//
-// Every arm that can PRODUCE a value must have an exact fixed-point form, and
-// at least one must be a genuine DECIMAL. An arm that has no such form — a
-// float, a string, an expression this layer cannot type — makes the result a
-// different type or arrives at its own scale and would be read at the fold's,
-// so it declines the whole fold. An INTEGER arm participates: an integer is
-// DECIMAL(10,0)/(19,0) and a numeric literal its own spelling (ADR-0024
-// item 2), which is what makes `COALESCE(d, 0)` numeric here as it is in
-// PostgreSQL (#695). A NULL literal is skipped, for the reason CommonDeclType
-// skips it — it names no type and produces no value.
-//
-// expr.CommonDeclType folds the same alternatives over their DECLARED types,
-// and the two must agree: a plan that declares DECIMAL for an expression the
-// runtime boxes as an integer hands the store a carrier instead of a value.
-// fracLitArmTriggersFold is expr.CommonDeclType's fractionalLitTriggersFold
-// over the COMPILED arms: a numeric literal whose spelling has a non-zero
-// scale, beside at least one arm that is not a constant, puts the choice on
-// the DECIMAL rung. See that function for why this one exception to
-// ADR-0024's "a constant never triggers the fold" exists.
+// A DECIMAL choice fold requires exact fixed-point forms for EVERY value-producing arm
+// and at least one genuine DECIMAL; floats, strings and untyped expressions decline it.
+// Integers contribute DECIMAL(10,0)/(19,0), numeric literals their spelling; skip NULL
+// (ADR-0024 item 2, #695). Runtime boxes must agree with CommonDeclType's declaration.
+// fracLitArmTriggersFold mirrors fractionalLitTriggersFold: a nonzero-scale numeric
+// literal beside a nonconstant arm triggers DECIMAL, the documented exception to
+// ADR-0024's rule that a constant alone never triggers the fold.
+// See docs/internals/compiled-decimal-choice-fold.md for the design.
 func fracLitArmTriggersFold(arms []Expr) bool {
 	frac, nonConst := false, false
 	for _, a := range arms {

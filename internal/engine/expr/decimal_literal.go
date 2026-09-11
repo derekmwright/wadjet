@@ -10,27 +10,12 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 )
 
-// decimalLitCmp binds a bare column reference to the numeric literals it is
-// compared against, so that when the column turns out to be a DECIMAL the
-// comparison is answered in the column's own domain — the unscaled integer at
-// the column's scale — instead of through float64 on both sides.
-//
-// Two separate losses live on that float64 path, and this closes both (#452):
-//
-//   - the LITERAL: a float64 holds ~15-16 significant decimal digits, so
-//     `= 493827160549382.7160549350` became `= 493827160549382.6875` and
-//     matched nothing, while `>` gained the row it should have excluded.
-//   - the COLUMN: ColRef.Eval boxes a DECIMAL as its rendered text, and
-//     compare() has no numeric reading of text against a float64, so it fell
-//     through to a LEXICOGRAPHIC comparison — "1339815.97" against
-//     "1.33981597e+06" — which is not the same order and not the same
-//     equality.
-//
-// The binding is decided at COMPILE time (the operand shapes) and applied per
-// BATCH (the column's type and scale), because a column's type is not known
-// until a batch arrives. Anything that is not a materialized DECIMAL column
-// falls through to the generic path untouched, which is what keeps every
-// other type answering exactly as before.
+// decimalLitCmp binds bare-column comparisons to numeric literals at COMPILE time,
+// then applies the column's DECIMAL type/scale per BATCH, when they become known.
+// Compare in the column's unscaled-integer domain, preserving literal digits and
+// numeric order instead of float64 rounding or lexicographic decimal-text order (#452).
+// Anything other than a materialized DECIMAL column takes the generic path unchanged.
+// See docs/internals/decimal-column-literal-domain.md for the design.
 type decimalLitCmp struct {
 	col  *ColRef
 	lits []*kernel.DecimalLiteral // one per literal operand, in operand order
@@ -126,36 +111,14 @@ func bareCol(e Expr) (*ColRef, bool) {
 	return col, true
 }
 
-// refuseArm is the plan-shaped half of #463's refusal — SQLSTATE 22P02, never
-// a value — for ONE operand pair: the bare-column operand, and the other
-// operand's source text when that text does not name a number. A nil col
-// means no refusal is possible for this pair whatever the column turns out to
-// be, which is the overwhelmingly common case and the one that has to be free.
-//
-// It exists because the refusal's two questions have very different lifetimes.
-// "Is the literal a number?" is fixed for the query — `kernel.DecimalLiteral.
-// Numeric()` walks the digits from scratch — and "is the column a DECIMAL?" is
-// fixed for the query too, once one batch has answered it. Asking both PER ROW
-// is what the first #505 fix did, and it cost a `NewDecimalLiteral` allocation
-// plus a full text parse on every row of every batch at three sites that are
-// otherwise allocation-free: +35% on a simple CASE over a DECIMAL column, +25%
-// on IS DISTINCT FROM, and +200% with 7x the bytes on an exponent-form literal
-// — reintroducing exactly the regression `decimal_order_bench_test.go` was
-// written to hold shut (it is why `decimalLitCmp.numeric` is a cached slice
-// rather than a per-row `Numeric()` call).
-//
-// This is the refusal half of the boxed comparison's job, for the three sites
-// (#465) that carry a literal's exact text into that comparison but never call
-// Numeric() on it: Case's simple-CASE arm, IsDistinctFrom, and pickExtremum
-// (GREATEST/LEAST). boxedPair's literal arm only fires for a literal ALREADY
-// known to be numeric (compileLit sets Lit.Text for exactly that shape) — a
-// non-numeric string like 'abc' carries no Text, so no arm matches it and the
-// comparison falls through to compare()'s ordinary string comparison instead
-// of refusing, which is #463's exact failure mode on the boxed path (#505).
-//
-// bindDecimalCmp's `d op lit` shape does not need this: NewCmp binds it at
-// construction time and decimalLitCmp.order already refuses there. This is
-// for the three sites that reach a DECIMAL column with no such binding.
+// refuseArm binds a bare column and the other operand's literal text to a
+// cached refusal mask; nil col means no refusal and must remain free.
+// Parse literal validity once, and settle the column type once a batch can
+// answer; never allocate or reparse per row (#463, #505).
+// This covers simple CASE, IS DISTINCT FROM and GREATEST/LEAST (#465),
+// whose boxed literal comparison otherwise misses invalid quoted text.
+// NewCmp's bound decimalLitCmp already refuses its own column/literal pair.
+// See docs/internals/boxed-literal-refusal-lifetime.md for the design.
 type refuseArm struct {
 	col  *ColRef
 	text string
@@ -672,37 +635,15 @@ func QuotedLitDecimalType(text string) (batch.DecimalType, bool) {
 	return t, ok
 }
 
-// check is refuseArm.check for the WHOLE call, not for one (best, candidate)
-// pair — because that is what PostgreSQL asks.
-//
-// GREATEST/LEAST resolve ONE common type over EVERY argument
-// (select_common_type) and coerce the unknown-typed literal to THAT, so the
-// type in the message is not a property of whichever pair the values selected.
-// Verified live on postgres:17-alpine over a table with a bigint, a real and a
-// double column:
-//
-//	GREATEST(bigint, 'abc')                -> ... for type bigint
-//	GREATEST(bigint, 'abc', double)        -> ... for type double precision
-//	GREATEST(real,   'abc', bigint)        -> ... for type real
-//
-// Refusing against the pair's column instead named bigint for the second and
-// third, which is a different type in the message for the same query — and it
-// re-introduced #517's own finding one level down: a refusal that depends on
-// which operand won a comparison is not a type rule.
-// folded is the CALL's common type when the arms could fold one
-// (extremumArms.commonKind), and foldedOK=false when they could not — an
-// argument whose declaration this layer cannot read. Only the first case can
-// refuse a literal that SOME numeric type accepts, because a fold that missed
-// an argument is a LOWER BOUND on PostgreSQL's: `GREATEST(k, '3.1', d_val)`
-// folds to double there and ANSWERS, and refusing it against the columns this
-// layer happened to see was a PG-superset regression.
-//
-// Where the fold failed, only a literal EVERY numeric type refuses is safe to
-// raise on — `GREATEST(k, 'abc', <a subquery>)` refuses whatever the subquery
-// turns out to be — and the type NAMED in that message is the column-only
-// fold, which can differ from PostgreSQL's when the unreadable argument would
-// have widened it. A missed refusal is the conservative side; the plan-time
-// binder catches the shapes it can prove.
+// check coerces quoted literals against the WHOLE call's common type,
+// never the pair that happens to win GREATEST/LEAST (#517).
+// Use extremumArms.commonKind when foldedOK; a fold missing an unreadable
+// argument is only a lower bound and cannot safely reject a literal that
+// some numeric type accepts.
+// Without a complete fold, refuse only literals every numeric type rejects.
+// The fallback message names the column-only fold and may differ from
+// PostgreSQL's wider type; plan-time binding catches shapes it can prove.
+// See docs/internals/extremum-whole-call-literal-refusal.md for the design.
 func (r *extremumRefusal) check(b *batch.RecordBatch, folded batch.TypeID, foldedOK bool) {
 	if r == nil {
 		return

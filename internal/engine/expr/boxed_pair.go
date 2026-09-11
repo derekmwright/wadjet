@@ -10,37 +10,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 )
 
-// This file is the declaration-driven half of the boxed comparison path.
-//
-// ADR-0012 item 8's rule is that a boxed value's comparison order follows the
-// COLUMN'S DECLARATION, not the Go type its box happens to be. Two shapes make
-// that rule impossible to follow from the box alone, because both arrive as a
-// plain Go `string`:
-//
-//   - a DECIMAL column, which Vector.GetValue renders as its decimal TEXT, and
-//   - a STRING column, whose value may look exactly like that text.
-//
-// `expr.decimalColCmp` already answers one of those pairs from the two
-// columns' declarations — but it is bound in `NewCmp` alone, so the SAME two
-// DECIMAL columns at a BOXED site (a simple `CASE d1 WHEN d2`, `d1 IS DISTINCT
-// FROM d2`, `GREATEST(d1, d2)`) fell through `compare()`'s two-rendered-strings
-// path and compared LEXICOGRAPHICALLY, where "10.001" sorts below "2.0002"
-// (#506).
-//
-// The other direction was worse. `compare()` used to tell the two apart by
-// SNIFFING: any string operand that PARSED as a number was read numerically
-// against the other side. That made a genuine STRING column compare
-// NUMERICALLY on the row path — `WHERE s = 1.5` found the row holding "1.50" —
-// while the vectorized kernel compared the same predicate as text, so one
-// query had two answers depending on which path it took (#504). The sniff is
-// gone: a STRING column is classified from its declaration and compares as
-// text on both paths.
-//
-// A boxedPair is armed from the operand EXPRESSIONS at construction, resolves
-// each operand's DECLARED kind on the first batch that can answer it, and then
-// applies one rule per kind pair. Nothing here reads a value's box to decide
-// which RULE applies — only to decide whether the rule's text arm or its
-// numeric arm is the one holding this row's value.
+// Boxed comparison order follows the COLUMN DECLARATION, never numeric
+// sniffing of a string box (ADR-0012 item 8, #506, #504).
+// DECIMAL text and genuine STRING values share a Go string representation;
+// STRING compares as text on both boxed and vectorized paths.
+// Arm boxedPair from operand expressions, resolve each declared kind on the
+// first batch able to answer, and apply that kind pair's rule.
+// Inspect boxes only to read the selected rule's text or numeric value arm.
+// See docs/internals/boxed-comparison-declaration-rules.md for the design.
 
 // boxKind is what an operand's declaration says its values are, independent of
 // the Go box a particular row produces.
@@ -560,29 +537,13 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 		}
 		return boxNumber, true
 	case *BinOp:
-		// The GENERIC arithmetic node answers from its resolved mode for the
-		// same reason its typed sibling above does — and it is the node that
-		// NEEDS it, because it is where every operand with no typed protocol
-		// arrives: a negated column, a CAST, a scalar function, and a
-		// CHOOSING construct (`COALESCE(a, 0) + 1`), none of which satisfy
-		// Float64Expr for compileBinOp to build the typed node from.
-		//
-		// Its exact arm boxes the result as a DECIMAL COLUMN's value is boxed
-		// — the rendered text, decArm.evalDecimalBox — so leaving it
-		// unclassified sent every comparison above it to compare()'s byte
-		// order: `(COALESCE(a,0) + 1) > 1` answered TRUE on the rows holding
-		// 1.00, because "1.00" sorts above "1", and `GREATEST(COALESCE(a,0)
-		// + 1, 2)` picked 2 over 13.75. The arm existed before the choosing
-		// constructs reached it (`-a + 1`, `CAST(a AS DECIMAL(9,2)) + 1`,
-		// `ABS(a) + 1`); giving them the exact kernel is what made the whole
-		// class visible.
-		//
-		// The int mode boxes a real int64 and answers boxNumber, exactly as
-		// BinOpNumeric's does. Everything else — float arithmetic, and the
-		// date/interval shifts this node also evaluates — keeps the
-		// unclassified answer, because a temporal value is not a number and
-		// declaring one here would be the wrong declaration rather than a
-		// missing one.
+		// Classify generic BinOp by its resolved mode, including negated/cast/function/choice
+		// operands that cannot satisfy Float64Expr for the typed sibling.
+		// The exact arm returns DECIMAL rendered TEXT via decArm.evalDecimalBox and must
+		// report boxDecimal so comparisons use numeric order, not compare()'s byte order.
+		// Integer mode returns a real int64 and boxNumber. Leave other modes unclassified:
+		// this node also evaluates date/interval shifts, and temporal values are not numbers.
+		// See docs/internals/generic-arithmetic-box-classification.md for the design.
 		if _, on := v.dec.resolve(v.Op, v.Left, v.Right, b); on {
 			return boxDecimal, true
 		}
@@ -730,27 +691,14 @@ func foldKind(e Expr, k boxKind) boxKind {
 	return numberKindOf(t)
 }
 
-// joinOperandKinds is classifyOperand over a set of alternatives that one
-// value is chosen from.
-//
-// The join folds the alternatives through PostgreSQL's own numeric ladder for
-// every pair EXCEPT one: a DECIMAL arm keeps the kind decimal, because the
-// kind's claim is about the BOX ("a string from here is decimal text") and
-// that stays true however wide the fold's TYPE is. The TYPE question — which
-// PostgreSQL answers float8 for `numeric ∪ float8` — is
-// extremumArms.commonKind's, and it is what the LITERAL is coerced to; the two
-// are deliberately separate answers to separate questions. A QUOTED literal
-// alternative contributes
-// nothing and takes the others' type, the way PostgreSQL resolves an
-// unknown-typed literal from its context — `COALESCE(d, 'text')` is a numeric
-// expression there, not an ambiguous one. Any other disagreement leaves the
-// box ambiguous again and yields boxUnknown.
-//
-// A NULL alternative is SKIPPED outright. `COALESCE(d, NULL)` is a DECIMAL
-// expression, and reading the NULL literal as its own kind poisoned the join
-// to boxUnknown — which is how a DECIMAL column wrapped in a COALESCE started
-// comparing as rendered text (#504 review, B2). NULL never reaches a
-// comparison anyway: every caller short-circuits a nil operand first.
+// joinOperandKinds classifies alternatives using PostgreSQL's numeric ladder, except
+// that a DECIMAL arm retains decimal BOX kind even if the folded TYPE is wider.
+// The kind means a string is decimal text; extremumArms.commonKind separately decides
+// the comparison TYPE and literal coercion (numeric with float8 has float8 type).
+// Quoted unknown literals contribute no kind and take context; other incompatible
+// kinds yield boxUnknown. Skip NULL alternatives outright (#504): they produce no
+// comparison operand because every caller short-circuits nil first.
+// See docs/internals/choice-operand-box-kind-fold.md for the design.
 func joinOperandKinds(args []Expr, b *batch.RecordBatch) (boxKind, bool) {
 	kind, have, settled := boxUnknown, false, true
 	for _, a := range args {
@@ -1210,33 +1158,14 @@ func ipv4Order(lv, rv any) (c int, ok, unknown bool) {
 	return strings.Compare(lk, rk), true, false
 }
 
-// order compares two boxed values under the rule their DECLARATIONS select,
-// returning -1, 0 or +1, or ok=false when no such rule applies and the caller
-// must fall through to compare().
-//
-// The rules, each PostgreSQL's:
-//
-//   - DECIMAL against DECIMAL: the two exact decimals, at whatever scales the
-//     columns declare — "1.50" and "1.5000" are one number (#477, #506).
-//   - DECIMAL against a numeric LITERAL: the literal's exact source text
-//     against the column's, because PostgreSQL types an unsuffixed decimal
-//     literal as `numeric` and compares it at full precision (#452, #465).
-//   - DECIMAL against a non-DECIMAL number: exact against an integer, float64
-//     against a float, which is what `numeric <op> double precision` does —
-//     it casts the numeric (#476).
-//   - TEXT against a numeric LITERAL: the literal's source TEXT against the
-//     column's value, bytewise. PostgreSQL refuses this pair outright —
-//     verified live, `WHERE s = 1.5` over a text column is 42883 "operator
-//     does not exist: text = numeric" — but that is an OVERLOAD RESOLUTION
-//     failure, and wadjet has one generic comparison operator with no
-//     overload set to fail resolution against, exactly the situation
-//     ADR-0012 item 5 already records for unary minus over a quoted string.
-//     So the pair gets the STRING column's own rule instead of a reading of
-//     its digits, which is also what the vectorized kernel answers (#504).
-//   - A NUMBER against a QUOTED literal: the NUMBER's rule, because
-//     PostgreSQL types an unknown-typed literal from the operand it meets.
-//     `k > '2'` over a BIGINT column is `k > 2` there, not a text comparison
-//     and not a comparison against zero.
+// order returns -1/0/+1 under the declarations' rule; ok=false delegates
+// to compare(). DECIMAL/DECIMAL compares exactly across scales (#477, #506).
+// DECIMAL/numeric literal uses exact source text (#452, #465).
+// DECIMAL/integer is exact; DECIMAL/float casts to float64 (#476).
+// TEXT/numeric literal compares source text bytewise on both paths (#504),
+// a supported pair PostgreSQL refuses (ADR-0012 item 5).
+// NUMBER/quoted literal resolves the unknown literal from the NUMBER's type.
+// See docs/internals/boxed-pair-order-table.md for the design.
 func (p *boxedPair) order(b *batch.RecordBatch, lv, rv any) (c int, ok, unknown bool) {
 	if p == nil || p.disarmed.Load() {
 		return 0, false, false

@@ -6,28 +6,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
-// Offsets-shape evaluation.
-//
-// A consumer of a variable-length column's SHAPE rather than its CONTENTS
-// can answer off the offsets array with zero byte access: LENGTH() /
-// octet_length() / bit_length(), IS NULL / IS NOT NULL, and = '' / <> ''
-// comparisons. The generic paths all funnel through ColRef.Eval, which
-// for a TypeString column calls Vector.GetString -> BytesColumn.StringValue
-// -> string(bc.Value(i)) — a full copy of every value, discarded one line
-// later. ClickBench Q28 (AVG(LENGTH(URL)) ... GROUP BY CounterID) copies
-// ~9 GB of URL bytes to compute lengths that are offsets[i+1]-offsets[i].
-//
-// SEMANTICS NOTE (verified, deliberately preserved): our length() is a
-// BYTE count, not PostgreSQL's character count. fnLength is
-// float64(len(toString(v))) and vecLength was already an offsets
-// subtraction. octet_length is therefore an exact alias, bit_length is
-// 8x, and char_length/character_length keep the rune-counting
-// implementation (fnCharLength) — those must decode bytes and get no
-// offsets fast path.
-//
-// Every node here carries a generic fallback and takes it whenever the
-// resolved column is not a flat byte-array column, so semantics stay
-// bit-identical with the path it replaces.
+// Offsets-only evaluation is valid only for consumers of byte-array SHAPE:
+// byte/bit length, NULL tests and empty-string comparisons need no value copy.
+// Rune-count functions must decode bytes and get no offsets fast path.
+// Each node carries a generic fallback and uses it unless the resolved column is
+// a flat byte array whose offsets represent the value's length; fallback semantics
+// must remain bit-identical to the replaced path.
+// See docs/internals/offsets-shape-expression-evaluation.md for the design.
 
 // byteArrayShaped reports whether v's values are stored as a plain
 // BytesColumn whose byte length equals the length of the value ColRef.Eval

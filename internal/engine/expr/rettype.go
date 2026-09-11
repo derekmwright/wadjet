@@ -261,47 +261,14 @@ func (r Ret) typeFromNonCandidates(d DeclType, seen []DeclType, conf []Confidenc
 	return out, true
 }
 
-// operatorResolvedType is NULLIF's own rule, and it is not select_common_type
-// (#757).
-//
-// PostgreSQL types NULLIF from the `=` OPERATOR its two arguments select, and
-// the answer is that operator's LEFT input type. Measured live on 17, every
-// row of it:
-//
-//	NULLIF(int4,  int8)     integer            <- argument 0, not the common type
-//	NULLIF(int8,  int4)     bigint
-//	NULLIF(int2,  int8)     smallint
-//	NULLIF(float4,float8)   real               <- argument 0 again
-//	NULLIF(float4,int4)     real
-//	NULLIF(float4,numeric)  real
-//	NULLIF(numeric,int4)    numeric
-//	NULLIF(int4,  numeric)  numeric
-//	NULLIF(int8,  numeric)  numeric
-//	NULLIF(int4,  float4)   double precision   <- NOT real, and NOT argument 0
-//	NULLIF(int4,  float8)   double precision
-//	NULLIF(numeric,float4)  double precision   <- NOT real
-//
-// The last three are what makes this a separate rule rather than a fold:
-// GREATEST and COALESCE over `(numeric, float4)` are BOTH `real` on the same
-// server, because they run select_common_type and float4 wins that ladder.
-// NULLIF has to find an operator, there is no `int4 = float4` or
-// `numeric = float4`, so both sides coerce to the preferred type in the
-// category — float8 — and the operator's left input is float8.
-//
-// So: within the integer family and within the float family, and whenever
-// argument 0 is itself a float, the cross-type operator exists and argument 0's
-// own width is the answer. An integer or a numeric compared against a FLOAT
-// resolves to float8. Everything else is the ordinary ladder.
-//
-// Wadjet answered argument 0's type for ALL of these, because NULLIF's
-// candidate list is [0]. The values agree on the census fixture, so this is an
-// OID and typmod divergence today — and a wrong answer waiting, since a value
-// only representable at the wider type would be narrowed into the output
-// vector on the way out.
-//
-// It fires only for a declaration that names an operator-resolved pair
-// (Ret.opResolved, set by NULLIF's registration alone) with exactly two
-// arguments, both Decided, both numeric.
+// operatorResolvedType types NULLIF from its equality operator's LEFT input,
+// not select_common_type (#757).
+// Within integers, or with a float argument 0, retain argument 0's width.
+// An integer/DECIMAL argument 0 against a FLOAT resolves to float8;
+// otherwise use the ordinary ladder.
+// Apply only to opResolved calls of arity two with both arguments Decided,
+// numeric and unquoted; exact numeric literals decline to the ordinary fold.
+// See docs/internals/nullif-operator-resolved-declaration.md for the design.
 func (r Ret) operatorResolvedType(d DeclType, seen []DeclType, conf []Confidence, nargs int) (DeclType, bool) {
 	if !r.opResolved || nargs != 2 || len(seen) < 2 {
 		return DeclType{}, false
@@ -362,28 +329,13 @@ func (r Ret) OperatorResolved() Ret {
 	return r
 }
 
-// widenToDecimalBeyondCandidates is the NULLIF correction, and it is
-// deliberately the narrowest form of it.
-//
-// PostgreSQL resolves NULLIF's TYPE with select_common_type over BOTH
-// arguments — they have to be comparable — while the RESULT is argument 0's
-// value and the TYPMOD is argument 0's. Wadjet folded the type over the
-// candidate list alone, so `NULLIF(0, numeric(9,2))` declared INT64 where
-// PostgreSQL says numeric, and the integer 0 went out as an integer column.
-//
-// Folding EVERY argument into the type instead would be the general rule and
-// it is not taken here, for two reasons that both cost answers. It would widen
-// `NULLIF(numeric(9,2), numeric(18,4))` to (18,4), where the result is
-// argument 0's value and (9,2) holds it exactly — a rendering of 12.7500 for a
-// column that holds 12.75, which the corpus pins the other way. And it would
-// re-open the Guessed/Decided contract of #331/#333, where a non-candidate
-// argument deciding a type is exactly what must NOT displace the candidate's
-// answer.
-//
-// So the widening fires only when the candidates produced a NON-DECIMAL type
-// and some other evaluated argument DECIDED a DECIMAL: that is the one case
-// where the candidate answer cannot represent the value the pair is compared
-// at, and it is the case PostgreSQL's numeric ladder is about.
+// widenToDecimalBeyondCandidates corrects NULLIF only when candidates yield a
+// NON-DECIMAL type and another evaluated argument DECIDED a DECIMAL.
+// The comparison type sees both arguments, but RESULT and TYPMOD belong to argument 0.
+// Do not fold every argument: that would widen numeric(9,2) to another arm's (18,4)
+// and change rendering, or let noncandidate decisions displace candidate answers
+// under the Guessed/Decided contract (#331, #333).
+// See docs/internals/nullif-noncandidate-decimal-widening.md for the design.
 func (r Ret) widenToDecimalBeyondCandidates(d DeclType, seen []DeclType, conf []Confidence, nargs int) (DeclType, bool) {
 	if !r.typeAll || d.ID == batch.TypeDecimal {
 		return DeclType{}, false
@@ -655,72 +607,16 @@ func (r Ret) Resolve(nargs int, argType func(i int) (DeclType, Confidence)) (Dec
 	return DeclType{ID: batch.TypeString}, Undecided
 }
 
-// CommonDeclType answers a polymorphic declaration from the argument types
-// that DECIDED one. It is the shared rule for every construct that CHOOSES
-// BETWEEN operands — COALESCE/NULLIF/IFNULL/IF/GREATEST/LEAST here, and
-// CASE's branches in the physical planner, which calls this so the two can
-// never disagree.
-//
-// ok=false means DECLINE: the caller must answer as if nothing had decided,
-// which is what it did before a DECIMAL operand could decide anything.
-//
-// The NUMERIC deciders fold through PostgreSQL's select_common_type ladder —
-// INT32 → INT64 → DECIMAL → FLOAT32 → FLOAT64 — and not through "the first
-// decider wins", which is what this did until #724. The difference is a VALUE,
-// not an OID: `GREATEST(bigint, real, double)` is double precision in
-// PostgreSQL, and declaring it bigint from argument 0 does not narrow the
-// double the call produces, it WRAPS it — 1e39 stored into an int64 vector is
-// int64's MINIMUM, #462's failure mode. The ladder is verified live on
-// postgres:17-alpine for every ordered pair of the six numeric widths and is
-// the same one setOpWiden pins for set operations and joinFoldKinds runs over
-// the compiled tree.
-//
-// A DECIMAL is not a type on its own: COALESCE over DECIMAL(9,2) and
-// DECIMAL(18,4) has to answer a type that holds BOTH, or the narrower
-// declaration truncates the wider argument's digits on the way into the output
-// vector. So when the ladder lands on DECIMAL, every decider's fixed-point
-// contribution is folded through batch.DecimalCommon — the same rule a set
-// operation reconciles its arms with (ADR-0024 item 2).
-//
-// A QUOTED literal contributes NO rung. PostgreSQL types one `unknown` and
-// resolves it from the other operands, which is exactly what DeclType.Quoted
-// says here; a composite whose every argument is quoted is `text` there and
-// answers TypeString here.
-//
-// sawUnknown is the safety clause and it is not optional. A branch that
-// decided nothing still PRODUCES a value at runtime — a scalar subquery, a
-// container element, anything this layer cannot type — and a DECIMAL one
-// arrives as text at ITS OWN scale, not at the fold's. Folding only the
-// branches that spoke declared DECIMAL(9,2) for
-// `COALESCE(a, (SELECT MAX(b) FROM t))`, which then TRUNCATED the subquery's
-// 12.7501 to 12.75 and, at the comparison sites, left the operand
-// unclassifiable so the extremum was picked by BYTE order. A declined fold
-// answers exactly what it answered before ADR-0024 — a loud mismatch or the
-// STRING fallback — which is the only honest answer while the operand has no
-// declaration to fold in.
-//
-// A DECIMAL beside an INTEGER — a column, or a numeric literal — resolves to
-// numeric in PostgreSQL, and does here (#695, verified live on 17.11:
-// `pg_typeof(CASE WHEN true THEN 1.5::numeric(15,2) ELSE 0 END)` is numeric,
-// and so are COALESCE/GREATEST/LEAST/NULLIF over the same pair). The integer
-// contributes its fixed-point form to the fold — its whole range at scale 0
-// for a COLUMN, its own spelling for a LITERAL (DeclType.Exact) — and the
-// value materializes through the exact-TEXT box every DECIMAL producer here
-// answers with, never as the already-scaled carrier an integer box means to
-// SetValue (ADR-0018 §4). That was the deferral this function carried until
-// #695: `GREATEST(dec_col, 100)` declared INT64, answered 100 on every row the
-// integer won, and failed at the #361 store guard on the first row the decimal
-// won — data-dependent, which is why it could not stand.
-//
-// A DECIMAL beside a FLOAT is the float, which is PostgreSQL's rule (both
-// float types are preferred in the numeric category, and only float8 beats
-// float4) — in EITHER argument order now. `COALESCE(numeric, real)` answered
-// real before #724 and `COALESCE(real, numeric)` answered real too, but
-// `GREATEST(numeric(15,2), c_i64, real)` answered bigint, because the first
-// non-DECIMAL decider was the bigint. The rows the DECIMAL arm wins hand over
-// that branch's TEXT, which the float vector then has to read: choice_decimal.go
-// does that at the box, so the declaration and the value agree (#555's float
-// half).
+// CommonDeclType is shared by choice functions and planner CASE branches;
+// ok=false declines the declaration. Numeric deciders fold INT32 → INT64 →
+// DECIMAL → FLOAT32 → FLOAT64; never first-decider narrowing (#724, #462).
+// Quoted literals add no rung; all-quoted is text. Preserve all-constant typing.
+// On DECIMAL, fold fixed-point contributions through DecimalCommon
+// (ADR-0024 item 2); integer columns contribute whole range at scale 0,
+// literals their spelling (#695). Unknown arms forbid the decimal fold.
+// Materialize decimal winners as exact TEXT, never scaled integer boxes
+// (ADR-0018 §4, #361); float winners convert decimal text at the box (#555).
+// See docs/internals/choice-common-declaration-fold.md for the design.
 func CommonDeclType(decided []DeclType, sawUnknown bool) (DeclType, bool) {
 	if len(decided) == 0 {
 		return DeclType{}, false
@@ -808,32 +704,13 @@ func CommonDeclType(decided []DeclType, sawUnknown bool) (DeclType, bool) {
 	return DeclDecimal(m.Precision, m.Scale), true
 }
 
-// fractionalLitTriggersFold reports whether a numeric literal with a
-// FRACTIONAL spelling, beside at least one arm that is not a constant, must
-// put a choice construct on the DECIMAL rung.
-//
-// It is the one exception to "a constant contributes to the fold and never
-// triggers it" (ADR-0024), and it is here because the alternative is a wrong
-// VALUE rather than a wrong type. `LEAST(c_i64, 1.5)` is `numeric` on
-// PostgreSQL 17.11 and answers 1.5; declaring it INT64 — which the integer
-// rung's `typed[0]` did — builds an int64 vector, and the 1.5 the evaluator
-// produces is TRUNCATED into it. Arithmetic over it then made the truncation
-// worse: `LEAST(c_i64, 1.5) * 3` was 4 for the server's 4.5, and
-// `(CASE … ELSE 1.5 END) * <int8 max>` was MinInt64 for an exact numeric
-// (round-1 review, B3).
-//
-// Two conditions, and the second is what keeps the deferral this narrows:
-//
-//   - the literal's SPELLING has a non-zero scale. `COALESCE(i32, 2)` is
-//     integer in PostgreSQL too and is untouched.
-//   - at least one arm is NOT a constant. With every arm constant there is
-//     nothing to resolve the literal against, and `GREATEST(-2.5, -7.5)` keeps
-//     the FLOAT64 a bare numeric literal declares — ADR-0024's literal
-//     deferral, unchanged, and the case CommonDeclType's allLiterals clause
-//     returns before reaching here anyway.
-//
-// expr.decimalArmFold makes the identical call over the COMPILED arms, so the
-// vector the plan builds and the box the runtime hands it stay one decision.
+// fractionalLitTriggersFold promotes a choice to DECIMAL only when a
+// literal's spelling has nonzero scale AND at least one arm is nonconstant.
+// Whole integer literals do not trigger the fold; all-constant choices retain
+// the bare-literal FLOAT64 deferral (ADR-0024).
+// expr.decimalArmFold makes the identical decision over compiled arms,
+// so runtime boxes and planned vectors agree.
+// See docs/internals/fractional-choice-literal-trigger.md for the design.
 func fractionalLitTriggersFold(decided []DeclType) bool {
 	frac, nonConst := false, false
 	for _, d := range decided {

@@ -40,31 +40,14 @@ func castTemporalKindLower(dest string) castTemporalKindT {
 	return castNotTemporal
 }
 
-// castTemporal is CAST(x AS DATE) / CAST(x AS TIMESTAMP).
-//
-// Both produce the box the corresponding COLUMN type produces: epoch DAYS for
-// DATE, epoch MILLISECONDS for TIMESTAMP, both int64 — the same values
-// ColRef.Eval hands out for a batch.TypeDate / batch.TypeTimestamp column, and
-// the same values batch.Vector.SetValue stores back into one. That identity is
-// the whole point of the fix (#340): until now the cast returned its argument
-// unchanged, so `CAST('1996-01-10' AS DATE) - 1` subtracted 1 from the number
-// ToFloat64 read out of the TEXT's leading digits and answered 1995.
-//
-// The operand resolves through temporalOperand — the #332 helper — so a DATE
-// column arrives as a civilDate and a TIMESTAMP column as a time.Time, with
-// the unit their bare int64 box has lost recovered from the declared column
-// type; parseDateArg (#322) then reads whichever form arrived. Nothing here
-// parses a column value itself, so the cast cannot disagree with date_add,
-// date_diff or `date ± INTERVAL` about what a column means.
-//
-// TEXT that resolves to no instant at all RAISES — 22007 for text that is not
-// a date, 22008 for a well-formed date naming no day — which is what
-// PostgreSQL answers and what #836 and #840 are. #340 chose NULL because the
-// expression layer had no per-row error channel; it has one (FatalEvalPanic,
-// #347), the numeric casts have used it since #367, and #836 is the issue
-// that noticed ADR-0012's residual text still said otherwise. Every non-text
-// box that fails to parse keeps its NULL — see raiseTemporalCastRefusal for
-// why that boundary is where PostgreSQL puts it.
+// castTemporal returns int64 epoch DAYS for DATE and MILLISECONDS for
+// TIMESTAMP, identical to corresponding column boxes (#340).
+// temporalOperand recovers declared units (#332); parseDateArg supplies the
+// shared non-text reading (#322), so date arithmetic and casts agree.
+// Text uses castTemporalText's shared parser: invalid syntax raises 22007,
+// nonexistent dates 22008 (#836, #840). Use fatalEval's error channel
+// (#347, #367, ADR-0012); unparseable non-text boxes keep their NULL.
+// See docs/internals/temporal-cast-box-and-error-contract.md for the design.
 func castTemporal(b *batch.RecordBatch, row int, operand Expr, v any, kind castTemporalKindT) any {
 	src, ok := temporalOperand(b, row, operand, v)
 	if !ok {
@@ -148,28 +131,14 @@ func epochDaysOf(t time.Time) int64 {
 	return days
 }
 
-// dateArith is `date - date` and `date ± n`, the two shapes BinOp.Eval must
-// recognize once CAST produces a real date (#340).
-//
-// Operands resolve through temporalOperand, so every form the engine has for a
-// date is accepted on equal terms: a DATE/TIMESTAMP column, a CAST to one, and
-// a date-shaped string — which is what a DATE column looks like when the
-// catalog declares it VARCHAR, as the TPC-H fixtures do. `l_receiptdate -
-// l_shipdate` is exactly that shape, and it answered NULL on every row.
-//
-//	date - date → the whole number of days between them (DuckDB: BIGINT)
-//	date ± n    → the date n days away, as epoch days (DuckDB: DATE)
-//
-// Both are gated on the operands being whole DAYS. An instant carrying a clock
-// declines and falls through to the arithmetic below, because
-// timestamp-minus-timestamp is an INTERVAL in SQL and this engine has no
-// interval column type to answer with — inventing a unit here is the mistake
-// #319 and #322 were about. `date ± INTERVAL` is not handled here either: that
-// is intervalShift, which keeps the rendered-string result #322 pinned for it.
-//
-// ok=false means "not date arithmetic" and leaves the caller's numeric path
-// untouched — including the case where an operand is a string that does not
-// parse as a date, which is how `'BUILDING' - 1` keeps its old answer.
+// dateArith handles date-date as whole days and date±n as epoch days (#340).
+// temporalOperand treats DATE/TIMESTAMP columns, casts and date-shaped strings alike.
+// Require WHOLE DAYS: instants with clocks decline to the caller's arithmetic path;
+// timestamp subtraction needs INTERVAL, not an invented unit (#319, #322).
+// date±INTERVAL belongs to intervalShift with its pinned rendered-string result (#322).
+// ok=false means not date arithmetic; leave numeric fallback unchanged, including
+// strings that do not parse as dates.
+// See docs/internals/whole-day-date-arithmetic-boundary.md for the design.
 func (e *BinOp) dateArith(b *batch.RecordBatch, row int, lv, rv any) (any, bool) {
 	ld, lok := temporalOperand(b, row, e.Left, lv)
 	if !lok {

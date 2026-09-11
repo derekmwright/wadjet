@@ -199,29 +199,13 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		// answers and why the box cannot decide it.
 		return e.castToBool(b, v)
 	case "char", "varchar", "text", "string":
-		// A BYTES operand boxes as a raw []byte — both here and from
-		// GetValue, since ColRef.Eval has no divergent fast path for
-		// TypeBytes the way it does for the four types boxedTextOperand
-		// resolves — and PostgreSQL's `bytea::text` is `\x` followed by
-		// LOWERCASE hex, under the default bytea_output = hex. That is the
-		// rendering, per ADR-0012 item 1: PostgreSQL gives BYTES a printed
-		// form, so wadjet does not invent a second one.
-		//
-		// Two earlier answers were both wrong. fmt.Sprint's default verb
-		// printed Go's slice-of-decimal-bytes debug notation
-		// ("[98 121 116 ...]"), and the raw bytes as a Go string — which
-		// agreed with kernel.likeTextRenderer but not with PostgreSQL —
-		// produced, for 0xff 0xfe 0x00 0x41, a string that is invalid UTF-8
-		// and holds an embedded NUL. No PostgreSQL server can put a NUL in
-		// a text-format DataRow field, and libpq TRUNCATES at one, so the
-		// same query answered four bytes to pgx and two to psql. The hex
-		// form is pure ASCII and has neither problem (#570).
-		//
-		// LIKE deliberately does NOT follow it here: PostgreSQL's `~~` over
-		// bytea is BYTEWISE (verified live — `'\xfffe0041'::bytea LIKE
-		// '%A%'` is true, matching the 0x41 byte, not the letter in a hex
-		// spelling), so kernel.likeTextRenderer keeps matching the raw
-		// bytes. The two disagree in PostgreSQL, so they disagree here.
+		// BYTES boxes as raw []byte; casting to text must produce PostgreSQL's default
+		// bytea_output=hex form: backslash-x followed by LOWERCASE hex (ADR-0012 item 1).
+		// Raw-string or Go slice rendering is wrong; hex is ASCII without embedded NUL,
+		// so pgx and libpq/psql read the same value (#570).
+		// LIKE deliberately differs: bytea ~~ is BYTEWISE, so kernel.likeTextRenderer
+		// must continue matching raw bytes, not the hex text rendering.
+		// See docs/internals/bytes-cast-text-versus-like.md for the design.
 		return castStringRender(b, row, e.Operand, v)
 	default:
 		return v
@@ -282,44 +266,14 @@ func castStringRender(b *batch.RecordBatch, row int, operand Expr, v any) string
 	return fmt.Sprint(text)
 }
 
-// boxedTextOperand renders a bare-column operand as the text the column's
-// own value PRINTS as — which is, by construction, the text the vectorized
-// kernel matches/renders against (kernel.likeTextRenderer's default arm is
-// fmt.Sprint(Vector.GetValue(i)), and its per-type arms were written to agree
-// with that rendering; CAST AS STRING's other arms and every scalar function
-// argument already use the same GetValue rendering for every OTHER type,
-// via ColRef.Eval's own default case). Mirrors temporalOperand's contract:
-// only a bare column reference is resolved, and every other operand shape
-// (an already-string value, a nested expression, a literal) passes v through
-// unchanged.
-//
-// ColRef.Eval boxes four types differently from GetValue, for speed on the
-// numeric paths that dominate it, and all four made a caller here match or
-// render a DIFFERENT STRING from the one the scan's kernel or the plain
-// projection would — the same query answering two ways depending on which
-// evaluator reached the column:
-//
-//	IPv4, MAC  the raw encoded int64, so `ipv4_col LIKE '10.%'` matched the
-//	           digits of that integer instead of the address text, and
-//	           `CAST(ipv4_col AS STRING)` stringified the number
-//	DATE       the epoch DAY, so `c_date LIKE '20%'` was false for
-//	           2011-02-02 and true for the day number 20123, and
-//	           `CAST(c_date AS STRING)` answered "15007" instead of the date
-//	FLOAT32    widened to float64, so 1/7 printed 0.1428571492433548 here and
-//	           0.14285715 through the kernel or a bare projection
-//
-// The IPv4/MAC LIKE pair was fixed with #497; DATE and FLOAT32's LIKE
-// rendering were found by the review of it. This function used to be two
-// near-identical copies — likeOperand (LIKE's call site, all four types) and
-// networkOperand (Cast's, IPv4/MAC only) — which is exactly the two-
-// implementation drift ADR-0012 keeps calling out elsewhere (CidrSortKey,
-// appendColumnValue): CAST(date_col AS STRING) and CAST(f32_col AS STRING)
-// were still wrong through networkOperand's narrower list (#521) after LIKE
-// had already been fixed for the identical types. One function, every
-// caller, closes both at once: `wadjet.TestLikeAnswersTheSameAtBothSites`
-// sweeps every flat type through the LIKE call site so a fifth type that
-// starts boxing differently is a failing test rather than another quiet
-// divergence.
+// boxedTextOperand restores the column's display text so LIKE, CAST and
+// scalar rendering agree with Vector.GetValue / likeTextRenderer.
+// IPv4/MAC integer encodings, DATE day counts and widened FLOAT32 boxes
+// must render as their declared values (#497, #521, ADR-0012).
+// Resolve column references (including ROW fields) and temporal CASTs;
+// other operand shapes pass v through unchanged.
+// TestLikeAnswersTheSameAtBothSites sweeps flat types for rendering drift.
+// See docs/internals/boxed-text-operand-rendering.md for the design.
 func boxedTextOperand(b *batch.RecordBatch, row int, operand Expr, v any) any {
 	// A CAST to a temporal type boxes its result exactly as the matching
 	// COLUMN does (#340), so it needs the same undoing — and it did not get

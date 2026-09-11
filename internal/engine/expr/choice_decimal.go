@@ -10,50 +10,22 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 )
 
-// The DECIMAL mode of the constructs that CHOOSE BETWEEN their operands —
-// CASE, COALESCE, NULLIF, IFNULL, IF, GREATEST, LEAST (ADR-0024 item 2, #695).
-//
-// It is the runtime half of what expr.CommonDeclType decides at plan time, and
-// it exists for one reason: a choice whose arms are a DECIMAL and an INTEGER
-// answers, on the rows the integer wins, with an INTEGER BOX. That box means
-// something else entirely to a DECIMAL vector — ADR-0018 §4 makes a DECIMAL
-// value an unscaled integer at the column's scale, so SetValue would store the
-// integer 100 as 1.00 and SetValueChecked refuses it outright (22003). Neither
-// is the value PostgreSQL answers.
-//
-// So the construct rewrites its chosen box into the spelling every DECIMAL
-// producer here already answers with: the value's rendered TEXT, the same box
-// a DECIMAL COLUMN and exact arithmetic (binop_decimal.go) hand over. No
-// consumer of a boxed value needs teaching, and the store resolves the text at
-// the output vector's own scale through ParseDecimalStringChecked — exact, or
-// a loud 22003.
-//
-// The mode is resolved once per node from the first batch, beside
-// BinOpNumeric's and for the same reason: an operand's type does not exist
-// until a batch arrives.
+// CASE/COALESCE/NULLIF/IFNULL/IF/GREATEST/LEAST must box a DECIMAL choice consistently
+// with CommonDeclType (ADR-0024 item 2, #695), including rows selecting INTEGER arms.
+// Convert the chosen value to rendered TEXT, as DECIMAL columns and exact arithmetic do.
+// An integer box means an UNSCALED carrier to a DECIMAL vector (ADR-0018 §4), not its value;
+// ParseDecimalStringChecked resolves text at output scale exactly or refuses 22003.
+// Resolve mode once per node from the first batch, when operand types become known.
+// See docs/internals/decimal-choice-runtime-boxing.md for the design.
 
-// choiceBoxMode is what a choice construct must do to the box its winning arm
-// produced so the value survives the vector the PLAN declared for it.
-//
-// The two directions are the two halves of one rule, and each exists because a
-// box means something else to the other type's vector:
-//
-//   - choiceBoxDecimal: the arms fold to a DECIMAL, so an INTEGER box becomes
-//     the value's TEXT. An integer written into a DECIMAL vector is the
-//     already-scaled carrier of ADR-0018 §4 — 100 would read back as 1.00 —
-//     and SetValueChecked refuses it outright (#695).
-//   - choiceBoxInt64/choiceBoxFloat32/choiceBoxFloat64: the arms fold to a
-//     non-DECIMAL number, so a STRING box becomes that number. Two arms can
-//     produce one: a DECIMAL column, whose value IS its rendered text, and a
-//     QUOTED literal, which arrives as the characters the query spelled.
-//     `COALESCE(numeric, float8)` is double precision in PostgreSQL and
-//     declares double precision here, and on the rows the DECIMAL wins the box
-//     was its text — which the #361 store guard refused, loudly, for as long as
-//     nothing converted it (#555's float half); `COALESCE(bigint, '16777217')`
-//     is bigint there and the literal's four characters had nowhere to go
-//     (#724). GREATEST/LEAST already answered both, through
-//     extremumArms.materialize, which is why the defect was invisible to every
-//     gate written over those two.
+// choiceBoxMode converts a winning arm's box to the PLAN's declared vector type.
+// choiceBoxDecimal converts INTEGER to rendered TEXT: integer boxes are already-scaled
+// DECIMAL carriers under ADR-0018 §4 and SetValueChecked refuses them (#695).
+// choiceBoxInt64/Float32/Float64 convert STRING to that number, whether the string
+// came from a DECIMAL column or a quoted literal (#361, #555, #724).
+// GREATEST/LEAST already materialize both directions via extremumArms.materialize;
+// gates limited to those constructs cannot detect missing conversion in other choices.
+// See docs/internals/choice-winning-box-conversion.md for the design.
 type choiceBoxMode uint8
 
 const (
@@ -273,30 +245,13 @@ func decimalChoiceBox(v any) any {
 	return v
 }
 
-// foldDecimalMetas resolves a choice's DECIMAL (p,s) from its arms'
-// contributions, and DROPS the CONSTANTS when the whole set does not fit.
-//
-// The scale is max over the arms — ADR-0012 item 12's rule, and the only
-// choice that moves no value, since a narrower one drops digits a wider arm
-// holds. A LITERAL is an arm like any other for that purpose: `CASE … THEN
-// numeric(9,2) ELSE 0.125 END` needs scale 3 or the 0.125 has nowhere to go,
-// and PostgreSQL answers 0.125 there.
-//
-// The cost, and it is recorded rather than hidden: PostgreSQL's fold carries
-// typmod -1, so its columns' rows keep their OWN scale (1.0001) while a
-// single-scale vector renders them at the fold's (1.00010). Same number, extra
-// zeros. The alternative — taking the scale from the declared operands alone —
-// keeps those rows byte-identical and REFUSES the literal, which turns queries
-// PostgreSQL and this engine both answer into 22003. A trailing zero is not a
-// wrong number; a refused query is no answer at all.
-//
-// `constrained` is the fallback that makes an UNSELECTED literal free: when
-// the full fold does not fit the carrier, the constants are dropped and the
-// DECLARED operands decide alone. Without it `COALESCE(numeric(15,2),
-// numeric(38,10), '<forty digits>')` fell back to the FIRST arm's (15,2) and
-// then failed on the rows the numeric(38,10) column supplied — an arm no row
-// selects costing the query its answer, which is the one thing this fold must
-// never do.
+// foldDecimalMetas chooses max arm scale, including literal spelling, so no arm
+// loses digits (ADR-0012 item 12). A single-scale vector may add trailing zeros
+// where PostgreSQL's unconstrained typmod preserves each row's own scale.
+// If the full fold cannot fit the carrier, drop CONSTANT contributions and let
+// constrained DECLARED operands decide alone; never fall back to only the first arm.
+// An UNSELECTED literal must not force a refusal for values from a wider declared arm.
+// See docs/internals/decimal-choice-scale-and-constant-fallback.md for the design.
 func foldDecimalMetas(all, constrained []batch.DecimalType) (batch.DecimalType, bool) {
 	if m, ok := batch.DecimalCommon(all); ok {
 		return m, true
