@@ -672,6 +672,16 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmetic(t *testing.T) {
 			`WITH c AS (SELECT (SELECT BITWISE_AND(f4,18) FROM tcpflow u2 WHERE u2.id = 3) AS v FROM tcpflow WHERE id <= 4)
 			 SELECT SUM(v) AS v FROM c`,
 			[]string{"v=int64:72"}},
+
+		// A SCALAR SUBQUERY THAT ITSELF HOLDS ONE, planned on the DAG arms
+		// (#1018 round 6 review, B2). Resolving the outer declaration plans
+		// the outer subquery, whose own annotation pass resolves the inner
+		// one — through a CHILD planner. Before the ownership rule was
+		// stated, that child wrote the PARENT's memo, and the same runner is
+		// reached from every parallel pipeline goroutine.
+		{"nested_scalar_subquery_sum_is_bigint",
+			`SELECT SUM(v) AS v FROM (SELECT (SELECT (SELECT BITWISE_AND(f4,18) FROM tcpflow u3 WHERE u3.id = 3) FROM tcpflow u2 WHERE u2.id = 3) AS v FROM tcpflow WHERE id <= 4) s`,
+			[]string{"v=int64:72"}},
 	} {
 		t.Run("scalar_subquery/"+tc.name, func(t *testing.T) {
 			a2fSQL["scalar_subquery/"+tc.name] = tc.sql

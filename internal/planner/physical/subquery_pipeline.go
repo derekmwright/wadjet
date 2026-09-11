@@ -46,6 +46,15 @@ func (p *Planner) forSubquery() *Planner {
 	sub.scanCounter = nil
 	sub.ctePlannedTerminal = nil
 	sub.scanDeletes = nil
+	// The scalar-subquery DECLARATION memo is per-BUILD, like the fields
+	// above it. It is a plain map with no lock, `sub := *p` copies the map
+	// HEADER, and this runner is reached from every parallel pipeline
+	// goroutine — so an inherited map is one map that N child planners write
+	// at once, which the race detector reports and which Go's runtime can
+	// turn into a fatal concurrent map write no recover() can catch (#1018
+	// round 6 review, B2). A child gets its own; memoization is a
+	// within-one-build economy, never a promise across builds.
+	sub.subqueryDeclCache = nil
 	sub.scalarPlaceholderSeq = 0
 	sub.MaterializedInputs = nil
 	sub.StreamingSources = nil

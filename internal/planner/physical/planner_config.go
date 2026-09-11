@@ -51,6 +51,17 @@ type Planner struct {
 	// by its SQL text, for annotateSubqueryColumnDecls. A nil slot means "in
 	// flight" and breaks a recursion: resolving one subquery plans it, and
 	// planning it annotates ITS projections in turn.
+	//
+	// OWNED PER BUILD, and forSubquery resets it for that reason. This map is
+	// unsynchronized and `sub := *p` copies only its header, while the
+	// subquery runner baked into a compiled expression is reached once per row
+	// from every parallel pipeline goroutine — so an INHERITED map is N child
+	// planners writing one map concurrently, which `-race` reports inside
+	// scalarSubqueryColumnDecl and which the Go runtime may turn into a fatal
+	// concurrent map write that no recover() can catch (#1018 round 6 review,
+	// B2). Sharing it across builds bought nothing the memo promises: the
+	// saving it exists for is a subquery text written TWICE IN ONE PLAN, and
+	// that is a within-build question.
 	subqueryDeclCache map[string]*subqueryDeclEntry
 	cteCache          map[string]*cteMaterialized // materialized CTE results
 	scanCache         map[string]*scanCached      // cached scan results for duplicate table scans
