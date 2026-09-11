@@ -10,35 +10,16 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// buildAggregateFragment translates a final_aggregate / merge_aggregate
-// stage's task into a fragment Operators[] pipeline:
-//
-//	[OpShuffleSource, OpHashAggregate(MergeMode=true), OpFilter?(HAVING),
-//	 OpSort?, OpUnpartitionedSink | OpGatherSink]
-//
-// FoldAvg is set only for "final_aggregate" — intermediate "merge_aggregate"
-// tasks must keep __avg_sum#X / __avg_count#X synthetics intact for the
-// downstream final to fold (see executor_stage.go for the same gate on the
-// legacy path). Mirror behavior is byte-equivalent to the legacy
-// executeStageAggregate path including the post-aggregate sort folded in
-// by fuseSortIntoPredecessor.
-//
-// OpSort is appended only when the stage carries SortKeys (the planner's
-// fuseSortIntoPredecessor pass set them by absorbing a downstream Singleton
-// Sort). Stage.Limit propagates through as SortLimit so the Sort operator's
-// post-Finalize Truncate fires for top-N. The multi-breaker runner chains
-// HashAggregate's drain into Sort's consume in-process — no S3 hop between
-// the two breakers.
-//
-// When gatherReplySubject is non-empty, the terminal sink is OpGatherSink
-// streaming directly to the coordinator's NATS reply subscription instead
-// of an unpartitioned .wshf upload — fuses the downstream gather stage
-// into this fragment, eliminating one S3 PUT/GET hop and one coord round-
-// trip. Each task publishes its own terminal marker; coord pre-subscribes
-// with expectedTerminals = numTasks.
-// inputRowBound is the exact upper bound on the rows this task will read
-// (aggregateInputRowBound), or 0 when no exact bound exists. It rides the
-// OpHashAggregate spec and decides the group-index layout on the worker.
+// buildAggregateFragment emits ShuffleSource, HashAggregate, HAVING Filter?, Sort?, Sink.
+// FoldAvg only for final_aggregate; intermediate merges preserve __avg_sum#X /
+// __avg_count#X for the final fold, matching legacy executeStageAggregate.
+// Append OpSort only for SortKeys; pass Limit as SortLimit for post-Finalize top-N.
+// Chain aggregate drain into sort consume in-process without an S3 hop.
+// Nonempty gatherReplySubject selects NATS OpGatherSink over an unpartitioned .wshf;
+// each task publishes a terminal marker, with coordinator pre-subscribed for numTasks.
+// inputRowBound is an EXACT row upper bound or 0 when unknown; pass it through
+// OpHashAggregate to choose the worker group-index layout.
+// See docs/internals/aggregate-fragment-fold-and-gather.md for the design.
 func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, aggs []distributed.AggSpec, sorts []distributed.SortKeySpec, gatherReplySubject string, inputRowBound int64) ([]distributed.OpSpec, error) {
 	if len(taskInputs) != 1 {
 		return nil, fmt.Errorf("aggregate fragment: expected 1 input alias, got %d", len(taskInputs))
@@ -402,27 +383,14 @@ func buildLimitFragment(stage physical.Stage, t *distributed.Task, taskInputs ma
 	return ops, nil
 }
 
-// buildProjectFragment translates a project stage's task into a fragment:
-//
-//	[OpShuffleSource, OpFilter?, OpProject?, <sink>]
-//
-// The stage exists for the shapes where a Project or a Filter has nowhere
-// else to go: a predicate above a projection that was itself materialized
-// onto the producing fragment (so the producer's own filter slot runs
-// UNDERNEATH it), a predicate above a deduped `cte-alias` whose target is
-// shared with another reference of the same CTE, and a predicate above a CTE
-// body's terminal that other references also read (#656).
-//
-// Filter BEFORE project, the scan fragment's order: the predicate is written
-// against this stage's INPUT — the producer's output columns — and a SELECT
-// list attached here is written over that same input and must not narrow it
-// away before the filter has run. `WITH c AS (… GROUP BY g+1) SELECT gk*10 AS
-// gk10 FROM c WHERE gk > 3` needs exactly that order.
-//
-// One task, reading every partition of its input: a projection and a filter
-// are per-row, so any partitioning would be exact, and Singleton is the
-// simple answer for a stage the planner emits only where nothing ran at all
-// before.
+// buildProjectFragment emits ShuffleSource, Filter?, Project?, Sink (#656).
+// Filter BEFORE Project: both read the producer's output, which SELECT must not
+// narrow before the predicate runs.
+// This stage hosts predicates above materialized projections, shared deduped
+// cte-alias targets and shared CTE-body terminals when no producer slot is suitable.
+// One Singleton task reads every input partition; filter/project are per-row,
+// so partitioning would also be exact.
+// See docs/internals/project-fragment-input-filter-order.md for the design.
 func buildProjectFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, gatherReplySubject string) ([]distributed.OpSpec, error) {
 	if len(taskInputs) != 1 {
 		return nil, fmt.Errorf("project fragment: expected 1 input alias, got %d", len(taskInputs))
@@ -494,27 +462,14 @@ func projectOpFromSpecs(specs []physical.ProjectExprSpec) (distributed.OpSpec, b
 	return distributed.OpSpec{Type: distributed.OpProject, Projections: projections}, true
 }
 
-// buildScanAggregateFragment translates a fused scan + partial-aggregate
-// stage's task into a fragment Operators[] pipeline:
-//
-//	[OpScan, OpFilter?(scan-pushed WHERE), OpHashAggregate(partial, BuildProject), terminalSink]
-//
-// terminalSink is the caller-supplied sink — OpExchangeSender for the
-// fuseScanAggregateShuffle case (each task hash-partitions its K aggregate
-// rows by group key directly, skipping the standalone exchange-repartition
-// stage), OpUnpartitionedSink otherwise (one .wshf per task; downstream
-// Singleton final_aggregate reads them all). Output shape under the
-// unpartitioned terminal is byte-equivalent to the legacy
-// executeStageAggregate path.
-//
-// BuildProject=true asks the worker's buildAggInputProjection to construct a
-// derived-input Project for AggSpecs whose InputCol references an expression
-// (e.g. SUM(l_extendedprice * (1 - l_discount))). The worker prepends the
-// project to the unary chain ahead of HashAggregate's consume phase.
-//
-// ScanShardIndex/Count propagate single-file row-group sharding for fused
-// scan-aggregate over a single compacted parquet file (e.g. SF10 lineitem
-// at 5GB).
+// buildScanAggregateFragment emits Scan, scan-pushed WHERE Filter?, partial HashAggregate, sink.
+// The supplied OpExchangeSender hash-partitions aggregate rows by group key directly;
+// otherwise OpUnpartitionedSink emits one .wshf per task for Singleton final_aggregate.
+// The unpartitioned shape matches legacy executeStageAggregate byte-for-byte.
+// BuildProject=true asks buildAggInputProjection to materialize expression-valued
+// AggSpec.InputCol in a derived-input Project before HashAggregate consumes.
+// ScanShardIndex/Count carry row-group sharding over a single compacted parquet file.
+// See docs/internals/scan-aggregate-fragment-input-projection.md for the design.
 func buildScanAggregateFragment(stage physical.Stage, t *distributed.Task, files []string, aggs []distributed.AggSpec, shardIdx, shardCount int, terminalSink distributed.OpSpec) ([]distributed.OpSpec, error) {
 	if len(files) == 0 {
 		return nil, fmt.Errorf("scan-aggregate fragment: empty file list")
@@ -576,33 +531,15 @@ func buildScanAggregateFragment(stage physical.Stage, t *distributed.Task, files
 	return ops, nil
 }
 
-// buildSortFragment translates a sort / merge_sort stage's task into a
-// fragment Operators[] pipeline:
-//
-//	[OpShuffleSource, OpSort, OpFilter?, OpProject?, OpUnpartitionedSink | OpGatherSink]
-//
-// The filter and the projection run ABOVE the sort, which is what makes them
-// correct for the shapes that put them there: a WHERE above an `ORDER BY …
-// LIMIT` inside a CTE or derived table must see the LIMIT's rows, not the
-// pre-limit ones, and OpSort applies its SortLimit truncation in Finalize —
-// before any of its output reaches the next operator. Until #656 this builder
-// was the only one that dropped `t.PostFilterExprs` on the floor, so the
-// predicate walkStages had attached to the stage was never evaluated and the
-// query answered as if the WHERE were not there.
-//
-// Same one-output-file-per-task shape the legacy executeStageSort emitted
-// when the terminal sink is OpUnpartitionedSink; downstream consumers
-// (gather, further merges) read it identically. Limit is forwarded as
-// SortLimit so the sort operator's Truncate fires after Finalize for
-// top-N optimization.
-//
-// When gatherReplySubject is non-empty, the terminal sink is OpGatherSink
-// streaming the (single, ordered) sorted output directly to the
-// coordinator's NATS reply subscription instead of an unpartitioned .wshf
-// upload — fuses the downstream gather stage into this fragment,
-// eliminating one S3 PUT/GET hop and one coord round-trip. Only safe
-// when the upstream stage is DistSingleton (one task → one ordered
-// stream); canFuseGather enforces that.
+// buildSortFragment emits ShuffleSource, Sort, Filter?, Project?, then a sink.
+// Filter and projection run ABOVE Sort: a WHERE over ORDER BY/LIMIT must see
+// only the LIMIT rows; SortLimit truncates after Finalize, before downstream output (#656).
+// The unpartitioned sink emits one file per task, matching legacy consumers.
+// A nonempty gatherReplySubject selects OpGatherSink and streams the ordered
+// output directly to NATS instead of uploading .wshf.
+// Gather fusion is safe only with DistSingleton (one task, one ordered stream);
+// canFuseGather enforces that boundary.
+// See docs/internals/sort-fragment-filter-and-gather-order.md for the design.
 func buildSortFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, sorts []distributed.SortKeySpec, gatherReplySubject string) ([]distributed.OpSpec, error) {
 	if len(taskInputs) != 1 {
 		return nil, fmt.Errorf("sort fragment: expected 1 input alias, got %d", len(taskInputs))

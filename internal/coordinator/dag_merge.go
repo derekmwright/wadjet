@@ -137,48 +137,15 @@ func newBatchRenamer(renames []physical.OutputRename, columns []string) *batchRe
 	return br
 }
 
-// renameSourceIndices resolves every rename to the source column it reads,
-// as INDICES, so that two renames can never be handed the same column.
-//
-// A name is not a key here. The SELECT list may legally carry two output
-// columns of one name — PostgreSQL answers `SELECT upper(a), upper(b)` with
-// two columns called `upper`, and #513 made this engine agree — and when the
-// producing fragment MATERIALIZES that list (attachScanSelectProjections does,
-// whenever an ORDER BY term forces a projection below the sort) the gather is
-// handed two columns both named `upper` and two renames both spelled
-// From:"upper". Resolving each by name gave both column 0, so the second
-// output carried the first one's values: 25 rows of `ALGERIA | ALGERIA` where
-// PostgreSQL answers `ALGERIA | NATION ALGERIA COMMENT`.
-//
-// Duplicates are assigned ORDINALLY — the k-th rename spelled X takes the
-// k-th column spelled X — and the correspondence is exact because the
-// matching is NAME-SCOPED. The two lists are not the same list: the rename
-// list is the VISIBLE select items (extractOutputRenames walks
-// VisibleProjections) while the producer's projection carries the hidden ones
-// too (attachScanSelectProjections walks Projections, hidden ORDER BY terms
-// included). What makes the k-th ↔ k-th correspondence hold anyway is that
-// only columns SPELLED LIKE THE GROUP are counted, and a hidden term is named
-// __sortkey_N — a spelling no user alias can collide with — so it can neither
-// join a group nor shift one. Within one name, both lists are that name's
-// select items in select order.
-//
-// A group of N renames over M columns of that name resolves by counting, and
-// the three cases are different questions rather than degrees of confidence:
-//
-//	M >= N  ordinal. Each output has its own column, which is what the
-//	        producer emits when it MATERIALIZED the select list.
-//	M == 1  every rename reads it. The producer did NOT materialize, so the
-//	        streams carry SOURCE columns and N select items reading ONE
-//	        source share ONE column — `SELECT DISTINCT k AS u, k AS u` really
-//	        is that column twice, and PostgreSQL answers it that way.
-//	else    NOTHING (-1). 1 < M < N means the producer emitted several
-//	        columns of the name but fewer than the outputs asking for it, and
-//	        no counting rule maps them; handing each the same first match is
-//	        precisely the defect this function exists to end. -1 makes the
-//	        caller degrade to a rename-only pass, which returns a WIDER
-//	        result than the select list — visibly wrong rather than silently
-//	        wrong, and the degradation the projection has always taken when a
-//	        source does not resolve.
+// renameSourceIndices binds renames by source index; duplicate names are not keys (#513).
+// Within one name, the k-th rename takes the k-th matching column in SELECT order.
+// Count only that name: renames are visible items; producer projections also
+// include hidden __sortkey_N terms, which must not collide with user aliases.
+// For N renames and M matching columns: M >= N binds ordinally; M == 1 shares
+// that source (an unmaterialized SELECT may read it repeatedly).
+// Otherwise return -1: 1 < M < N has no valid counting rule, never reuse a first match.
+// The caller then degrades to a rename-only pass, exposing a wider result.
+// See docs/internals/gather-rename-source-ordinals.md for the design.
 func renameSourceIndices(names []string, renames []physical.OutputRename) []int {
 	out := make([]int, len(renames))
 	groups := make(map[string][]int, len(renames))
@@ -308,27 +275,12 @@ func classScopedMatch(names []string, r physical.OutputRename) (int, bool) {
 	key := strings.ToLower(strings.TrimSpace(r.From))
 	matches := matchesOf(key)
 	if len(matches) == 0 {
-		// The same qualified→bare fallback resolveRenameSource applies, and
-		// for the same reason: a SELECT item written through a derived
-		// table's alias arrives spelled `u.g` while the stream carries the
-		// bare `g` twice. Counting only the exact spelling found NO duplicate
-		// and handed the item the first `g`, which is the KEY (#785 round 2).
-		//
-		// ONLY when the exact spelling matched NOTHING. The rescan used to run
-		// whenever the exact spelling matched fewer than TWO columns, so an
-		// item whose QUALIFIED name resolved uniquely was thrown away in
-		// favour of the first column of its BARE name — and where the producer
-		// publishes a name twice, two different items then bound one column.
-		// `SELECT a.order_id, a.amount, b.amount FROM lat_item a JOIN lat_item
-		// b ON b.order_id = a.order_id GROUP BY a.order_id, a.amount,
-		// b.amount` reaches this over the stream `[order_id amount amount
-		// a.order_id a.amount b.amount]`: `a.amount` and `b.amount` each
-		// matched ONE column exactly and both were re-bound to the first bare
-		// `amount`, so the third output carried the second's value on both DAG
-		// arms while the single-process arms and PostgreSQL 17 answered eight
-		// distinct rows. Exact first, then the fallback, is
-		// `exec.ColumnIndexFallback`'s own order and the rule the rest of the
-		// engine binds by.
+		// Use resolveRenameSource's qualified→bare fallback when counting duplicates (#785).
+		// ONLY rescan when the exact spelling matched NOTHING: a unique qualified match
+		// must never be replaced by its bare spelling, which may bind another output's column.
+		// A derived u.g may read a stream with duplicate bare g columns; count that group
+		// only after the exact miss. Exact first is exec.ColumnIndexFallback's order.
+		// See docs/internals/gather-duplicate-qualified-fallback.md for the design.
 		if dot := strings.IndexByte(key, '.'); dot >= 0 && dot < len(key)-1 {
 			matches = matchesOf(key[dot+1:])
 		}

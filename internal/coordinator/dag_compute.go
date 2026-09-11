@@ -436,33 +436,16 @@ func (c *Coordinator) dispatchComputeStage(
 			}
 			t.EagerInputs[eagerAliasForDep(stage, depID)] = in.eager.eagerInputForTask(w, numTasks)
 		}
-		// Fused join + downstream exchange-sender: emit a fragment task
-		// pipeline that runs the entire chain in one worker call without
-		// writing the join output to S3 only to immediately re-read+hash
-		// it in a separate shuffle task. Worker dispatches via
-		// executeFragment (executor_fragment.go); the legacy single-op
-		// task fields above still populate so the wire format stays
-		// stable for any downstream consumer that hasn't yet learned
-		// about Operators[].
-		//
-		// Hash-join / broadcast_join migration: every join stage routes
-		// through the multi-op fragment runner. Three terminal sink shapes:
-		//   - downstream Repartition Exchange → OpExchangeSender
-		//     (the fuseJoinShuffle case)
-		//   - downstream is anything else → OpUnpartitionedSink
-		//   - GroupByCols on a join stage isn't an emitted shape (joins
-		//     and aggregates are separate stages in the planner today),
-		//     so we don't model it.
-		//
-		// SortKeys after fuseSortIntoPredecessor: legacy applyPostSort ran
-		// in-process; the fragment runner uses OpSort as a multi-breaker
-		// chain element. probeSplit's task input slicing flows through
-		// taskInputs unchanged; the fragment source op is a uniform
-		// sourceForAliasWithProjection (auto-detects parquet vs WSHF).
-		// probeSplit migration depends on the fragment runner's spilled-
-		// partition flush phase (worker/executor_fragment.go); without it,
-		// Q05 SF100 build-cache chains return 0 rows when the primary's
-		// only build partition spills under cumulative chain pressure.
+		// Join fragments execute fused downstream exchanges without an intermediate S3 hop;
+		// keep legacy single-op fields populated for wire compatibility.
+		// Hash/broadcast joins use OpExchangeSender for a downstream repartition,
+		// OpUnpartitionedSink otherwise; GroupByCols joins are not an emitted shape.
+		// Fused SortKeys become an OpSort breaker in the fragment chain.
+		// Probe-split taskInputs retain their slicing; sourceForAliasWithProjection
+		// uniformly detects parquet versus WSHF.
+		// Probe-split requires the fragment runner's spilled-partition flush: without it,
+		// a primary build partition spilled under chain pressure can yield zero rows.
+		// See docs/internals/join-fragment-dispatch-contract.md for the design.
 		canMigrateJoin := t.Operators == nil &&
 			(stage.Type == physical.StageHashJoin || stage.Type == physical.StageBroadcastJoin) &&
 			len(stage.GroupByCols) == 0
@@ -502,31 +485,16 @@ func (c *Coordinator) dispatchComputeStage(
 			}
 			t.Operators = ops
 		}
-		// Final/merge aggregate migration: dispatch via the fragment path
-		// when the stage has no fused sort/limit. The fragment runs:
-		//   [OpShuffleSource, OpHashAggregate(MergeMode), OpFilter? (HAVING),
-		//    OpUnpartitionedSink]
-		// Output shape (one .wshf per task) matches the legacy
-		// executeStageAggregate path — same downstream consumers (gather,
-		// further merge stages) read it identically. No file-count
-		// amplification because the aggregate output is one row per group
-		// per task and the sink is unpartitioned.
-		//
-		// Eligibility: skipped when SortKeys/Limit are set (post-aggregate
-		// sort needs an OpSort breaker not yet in the fragment runner) or
-		// when ReplySubject is set (gather output — handled by the legacy
-		// gather-task path today; gather fusion is a follow-up).
-		// Aggregate-fragment migration. SortKeys / Limit on a final_aggregate
-		// stage come from fuseSortIntoPredecessor folding a downstream
-		// Singleton sort into this aggregate; the multi-breaker fragment
-		// runner handles the resulting `[ShuffleSource, HashAggregate,
-		// Filter?(HAVING), Sort?, Sink]` chain in one task.
-		//
-		// "aggregate" (partial, MergeMode=false) is a standalone aggregate
-		// stage consuming non-scan upstream input (e.g. join output);
-		// "merge_aggregate" / "final_aggregate" (MergeMode=true) re-aggregate
-		// partial outputs. buildAggregateFragment derives the mode from
-		// stage.Type.
+		// Aggregate fragments run ShuffleSource, HashAggregate, Filter?(HAVING), Sort?, Sink.
+		// An unpartitioned sink emits one .wshf per task, one row per group per task,
+		// matching legacy aggregate consumers without file-count amplification.
+		// SortKeys / Limit folded from a downstream Singleton sort are handled by the
+		// multi-breaker runner in the same task.
+		// Only migrate tasks with no existing Operators and no ReplySubject.
+		// Standalone aggregate stages consume non-scan upstream input with MergeMode=false;
+		// merge_aggregate / final_aggregate merge partials with MergeMode=true.
+		// buildAggregateFragment derives the mode from stage.Type.
+		// See docs/internals/aggregate-fragment-dispatch-modes.md for the design.
 		canMigrateAggregate := t.Operators == nil &&
 			(stage.Type == "aggregate" || stage.Type == "final_aggregate" || stage.Type == "merge_aggregate") &&
 			t.ReplySubject == ""

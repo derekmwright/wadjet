@@ -9,30 +9,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
-// Merge-on-read deletes on the stage DAG: one stamp, every carrier.
-//
-// A DELETE marks file-absolute row indices in the manifest instead of
-// rewriting parquet, and every scan of the marked file has to skip them.
-// The single-process engine reads the manifest at scan Init; the DAG's
-// workers must be TOLD, because a worker reading the catalog itself would
-// let two tasks of one stage see different revisions — a join would then
-// find a row on one side and not the other.
-//
-// Where the declaration is attached is the whole design question. #423's
-// declared-schema fix needed THREE carriers (OpSpec.ColumnTypes,
-// OpSpec.BuildColumnTypes, Task.ColumnTypes) because a type belongs to an
-// ALIAS, and every dispatcher that invents a new way to reach a base table
-// has to pick one — a standing trap the internals map documents. A delete
-// marker belongs to the FILE, not the alias, so it needs none of that:
-// stampTaskDeleteMarkers walks every file list a task can carry and emits
-// one task-level list. That is why it can live at the single choke point
-// every dispatcher and every retry already passes through
-// (Scheduler.PublishTasks), and why a future dispatcher gets it for free.
-//
-// The map itself is the plan's, not a fresh catalog read: executeStageDAG
-// unions the stages' ScanDeletes (annotated at plan time from the same
-// manifest object that produced their file lists) and parks it on the
-// context for the dispatch subtree.
+// Every DAG scan must skip the manifest's file-absolute deleted row indices.
+// Use the plan-time manifest, never worker catalog rereads that could split revisions.
+// executeStageDAG unions ScanDeletes from the same manifests as the file lists
+// and carries the map on the dispatch context.
+// Delete identity belongs to the FILE, not the alias (unlike #423's type carriers).
+// stampTaskDeleteMarkers walks every task file list at Scheduler.PublishTasks,
+// so every dispatcher and every retry gets one task-level stamp.
+// See docs/internals/dag-plan-time-delete-marker-stamp.md for the design.
 
 // queryDeleteMarkersKey is the context key for a query's plan-time delete
 // state, keyed by data-file path.

@@ -2311,32 +2311,14 @@ func compareAnyValues(a, b any, typ parquet.TypeID) int {
 	return 0
 }
 
-// mergeColIdx maps a partial result's column names to their positions for the
-// coordinator's merge stages (re-aggregation, scalar-aggregate folding, sort
-// and top-N), and adds the FOLDED spelling of each name as an alias.
-//
-// The two spellings are two different strings for one column. `columns` comes
-// off the WIRE, so it carries the catalog's own spelling (`RegionID` for a
-// parquet-registered table); every lookup into this map is a name off the
-// LOGICAL plan's MergeInfo — a GROUP BY key, an aggregate's output column, an
-// ORDER BY key — which arrives folded from the lexer (#731). A byte-exact map
-// alone therefore missed, and each of the three consumers failed its own
-// silent way: reAggregatePartials REFUSES the query on a GROUP BY miss
-// (loud), drops the aggregate from the merge on an agg miss (partials
-// returned unmerged, so a group appears once per worker), and compareBatchRows
-// SKIPS an unresolvable ORDER BY key (rows come back in arrival order under an
-// ORDER BY the client asked for).
-//
-// The alias is added only when batch.ResolveSchemaIndex — the one resolver
-// that owns this rule, see internal/engine/batch/schema.go — agrees the
-// folded spelling names THIS column and no other, so an ambiguous fold and a
-// qualifier whose case differs both keep the byte-exact miss.
-//
-// The camel-case invariance battery does not yet distinguish this site:
-// measured with every other fix in place and this one reverted, it owns 0 of
-// its cells, because its probe-split shapes reach the merge with names the
-// scan already spelled the schema's way. The alias is the hazard closed, not
-// a cell recovered.
+// mergeColIdx maps wire column names to positions and adds folded aliases
+// for logical MergeInfo lookups in re-aggregation, scalar folding, sort and top-N (#731).
+// Add an alias only when batch.ResolveSchemaIndex agrees it names THIS column
+// uniquely; ambiguous folds and differently cased qualifiers retain the exact miss.
+// The camel-case invariance battery does not distinguish this site: probe-split
+// fixtures reach the merge with schema-spelled names, so reverting this alone
+// loses no cells. Passing that battery does not prove this alias rule.
+// See docs/internals/merge-column-folded-name-aliases.md for the design.
 func mergeColIdx(columns []string) map[string]int {
 	m := make(map[string]int, len(columns)*2)
 	for i, col := range columns {
@@ -2822,27 +2804,13 @@ func copyVectorValue(dst *batch.Vector, dstRow int, src *batch.Vector, srcRow in
 	}
 }
 
-// sortBatches performs a simple in-memory sort of batches by the given order keys.
-// Used for merging probe-split partial results (typically <100K rows).
-//
-// It COALESCES first, and that is the whole of #480's round-1 review. A
-// selection vector reorders rows WITHIN one batch and cannot express an order
-// that crosses two, so this function used to return outright on a multi-batch
-// input — with the comment "reAggregatePartials produces a single batch",
-// true of the re-aggregating path and of no other. Every distributed result
-// whose ORDER BY is applied ONLY at this merge — no sort stage in the plan,
-// no aggregate and no DISTINCT to collapse the input — therefore came back in
-// whatever order the tasks happened to finish in, silently. The shape
-// measured to do that is a KEYLESS join whose probe is split across tasks —
-// which is how the arc that made those plans runnable exposed it, and it is
-// the shape the gates carry (`TestF1AKeylessJoinAsksForWhatItNeeds`,
-// `TestMergeOrdersAcrossBatches`). Which other plans reach this function with
-// more than one batch has not been enumerated; do not read the sentence above
-// as a claim about any particular join or scan, only about what this function
-// must do when it is handed more than one.
-//
-// Returns the batch slice to use, which is a NEW single-batch slice whenever
-// it had to coalesce.
+// sortBatches sorts probe-split partial results in memory (typically <100K rows).
+// Coalesce FIRST: selection vectors cannot order rows across batches (#480).
+// Return a new single-batch slice whenever coalescing was necessary.
+// TestF1AKeylessJoinAsksForWhatItNeeds and TestMergeOrdersAcrossBatches gate the
+// multi-batch keyless-join case; other multi-batch callers have not been enumerated.
+// That coverage limit does not weaken the requirement to sort every batch supplied.
+// See docs/internals/merge-ordering-across-batches.md for the design.
 func (c *Coordinator) sortBatches(batches []*batch.RecordBatch, orderBy []logical.OrderExpr) ([]*batch.RecordBatch, error) {
 	batches = coalesceForOrdering(batches)
 	if len(batches) != 1 {
@@ -3734,35 +3702,16 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		queryTimeout = 30 * time.Minute
 	}
 	asyncCtx, asyncCancel := context.WithTimeout(context.Background(), queryTimeout)
-	// No withQueryDeleteMarkers stamp here, unlike executeStageDAG (#491).
-	// physStages was already overwritten above (:2918/:2927) with a
-	// synthetic single "pipeline" stage that carries no ScanDeletes, so a
-	// stamp built from it would always be empty — but that emptiness is
-	// also the right answer, not just a consequence of the reassignment:
-	// every TaskTypePipeline task (the only kind createPipelineTasks and
-	// preScanBuildTables ever produce) re-parses SQLText and re-plans on
-	// the WORKER against a live catalog (executor.go's executePipeline →
-	// planner.Plan, not PlanDistributed), and that planner's buildScan
-	// goes through the same newScanner/catalogScanSource the embedded
-	// single-process engine uses — which reads the manifest's
-	// DeleteMarkers itself at scan Init (engine/scan/scanner.go). A
-	// probe-split task's ScanFileFilter only narrows which of those
-	// catalog-read files a scan opens; it does not change how deletes are
-	// applied. And the only other file lists a pipeline task carries
-	// (PreScannedInputs, PreComputedAggregates' CacheFiles) are never base
-	// parquet — they are the query-scoped .wshf output of an earlier
-	// pipeline sub-query that already went through this same live-catalog
-	// scan when IT was written (see build_cache.go's preScanOneTable and
-	// aggregate_shuffle.go's preComputeDerivedAggregate, both of which
-	// dispatch a TaskTypePipeline task and inherit the same guarantee).
-	// So this path was already correct for #491 before that fix landed,
-	// through a different mechanism than the DAG's wire-level markers;
-	// TestDistributedScanHonorsDeleteMarkersOnThePipelinePath (this
-	// package) asserts it end-to-end. See #491 discussion for the
-	// evidence trail (worker plumbing that would have consumed a stamp
-	// here — executor.go's PreScannedInputs/PreComputedAggregates
-	// SetDeleteMarkers calls — was removed for being provably dead by the
-	// same argument, not merely unreached).
+	// No withQueryDeleteMarkers stamp here (#491): the synthetic pipeline stage has no ScanDeletes.
+	// TaskTypePipeline tasks reparse SQLText and run planner.Plan on the worker;
+	// newScanner/catalogScanSource reads live manifest DeleteMarkers at scan Init.
+	// ScanFileFilter narrows files only; it does not change delete application.
+	// PreScannedInputs and PreComputedAggregates CacheFiles are query-scoped .wshf,
+	// never base parquet: their earlier pipeline subqueries already applied deletes.
+	// This covers createPipelineTasks, preScanOneTable and preComputeDerivedAggregate.
+	// TestDistributedScanHonorsDeleteMarkersOnThePipelinePath asserts this end to end.
+	// The removed cache-input SetDeleteMarkers plumbing was therefore dead.
+	// See docs/internals/pipeline-delete-marker-ownership.md for the design.
 
 	// Subscribe for results (non-blocking callback)
 	doneCh := make(chan struct{}, 1)
@@ -3821,30 +3770,14 @@ type StageStatus struct {
 	FailedTasks int    `json:"failed_tasks"`
 }
 
-// authorizeQueryAccess is the ONE owner-or-admin decision for a tracked
-// query, and every door asks it here rather than at its own handler: the
-// lifecycle methods below take a context so a door cannot reach a query
-// without the question being asked (#936, ADR-0034).
-//
-// The rule:
-//
-//   - No provider, or auth disabled: nil. Owners are empty and every caller
-//     may act, which is what the embedded and dev paths have always done.
-//   - No identity in the context under auth enabled: refused. Every door
-//     that reaches here has authenticated its caller.
-//   - The identity's NAME equals the recorded owner's: allowed. The name is
-//     the principal the authenticator resolved; how they proved it (an API
-//     key on one call, a JWT on the next) is not an ownership property, and
-//     PostgreSQL's own rule for cancelling a backend is the same one.
-//   - Otherwise the `admin` permission: allowed.
-//   - An UNOWNED entry (the zero snapshot under auth enabled — a query
-//     registered before this arc, or an internal entry reached by its id) is
-//     therefore administrator-only. That is the fail-closed reading: nobody
-//     can claim what nobody owns.
-//
-// The refusal is a `sqlerr` 42501 so each door renders it in its own class:
-// HTTP 403, gRPC PermissionDenied, pgwire SQLSTATE 42501 — never 404, which
-// would answer a different question than the one that was asked.
+// authorizeQueryAccess is the shared owner-or-admin decision on every query door (#936, ADR-0034).
+// No provider or disabled auth permits every caller; enabled auth refuses nil identity.
+// Allow the authenticated identity's nonempty NAME to match the recorded owner,
+// regardless of authentication method; otherwise require admin permission.
+// An unowned entry under enabled auth is administrator-only: nobody may claim it.
+// Refuse with sqlerr 42501: HTTP 403, gRPC PermissionDenied, pgwire 42501,
+// never 404. Lifecycle contexts ensure every door asks this decision.
+// See docs/internals/tracked-query-owner-authorization.md for the design.
 func (c *Coordinator) authorizeQueryAccess(ctx context.Context, info *QueryInfo) error {
 	if c.authProvider == nil || !c.authProvider.Enabled() {
 		return nil

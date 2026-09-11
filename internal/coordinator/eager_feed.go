@@ -181,27 +181,14 @@ func (f *eagerFeed) projectedPartitionBytes() []int64 {
 	return out
 }
 
-// projectedTailSeconds estimates the wall remaining until the producer's
-// last task completes, from the completions observed so far: mean
-// inter-arrival × tasks remaining. Called at consumer clearance time
-// (after decisionReady, so at least a full wave of completions exists).
-// Returns 0 when nothing remains or when fewer than two completions have
-// landed (single-task producers, threshold==1) — no measurable tail means
-// nothing worth overlapping, so the gate declines toward the barrier,
-// never toward a wrong clearance.
-//
-// Calibration history (eager-consumer-dispatch.md §10, §15): the July C3
-// SF100 pair put the envelope at ~12s — every edge with producer spread
-// ≥ ~12s converted under eager clearance (Q05 −29%, Q21, Q18, Q04, Q03),
-// every edge below ~10s paid a slot-occupancy tax. That world's long
-// tails were straggler-driven; after the 2026-08 producer speedups
-// (morsel-collapse fix dde1f02, decoded cache, scan levers) SF100 tails
-// compressed to 0–2.7s, making a 12s (or 3s) floor inert — the
-// 2026-08-13 floor=3 arm declined 17/17 clearances, 11 of them with
-// tails ≤ 0.33s (nothing to overlap) and 6 in the 1.0–2.7s band. The
-// 1.0 floor separates those two populations on the current config.
-// WADJET_EAGER_MIN_TAIL_SECONDS overrides it (0 = gate off, restoring
-// the ungated C3 behavior for A/B).
+// projectedTailSeconds estimates remaining wall time as mean completion gap times
+// remaining tasks, at consumer clearance after decisionReady's full completion wave.
+// Return 0 with no remaining tasks or fewer than two completions: no measurable
+// tail declines toward the barrier, never toward an unsupported clearance.
+// The default floor is 1.0 seconds; WADJET_EAGER_MIN_TAIL_SECONDS overrides it,
+// with 0 disabling the gate for A/B (ungated C3 behavior).
+// See eager-consumer-dispatch.md §10, §15 for calibration.
+// See docs/internals/eager-producer-tail-estimate.md for the design.
 func (f *eagerFeed) projectedTailSeconds() float64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -482,31 +469,16 @@ func eagerFeedableDep(d physical.Stage) bool {
 	return eagerCapableComputeProducer(d)
 }
 
-// eagerEligibleJoinConsumer reports whether join stage s may clear
-// dispatch on its two producers' eager feeds (memo §3.3/§6, Phase C2
-// scope). Requires:
-//   - a hash_join on the fragment path (no GroupByCols — those take the
-//     legacy task path, which reads frozen Task.Inputs). broadcast_join is
-//     out of scope (broadcast edges stay S3+KV per memo §7);
-//     sort_merge_join is dormant (gate off) and excluded from slice 1.
-//   - both primary deps are standalone exchange-repartitions (the feeds'
-//     producers); fused-build and chained-build deps keep the barrier
-//     (their real outputs ride task.FusedJoins[i].BuildFiles /
-//     task.Operators[i].BuildFiles — the dependency wait loop completes
-//     them before the clearance decision runs, so an eager dispatch sees
-//     real outputs for every non-primary dep).
-//   - not the gather-fused stage, no scalar deps (joins never carry
-//     dynamic-filter emits/consumes; checked defensively).
-//
-// Stage-chain fusion (§13, docs/design/stage-chain-fusion.md) grows
-// Dependencies by exactly one per ChainedJoinSpec; a fused chain is
-// eligible like any other hash join — only the primary probe/build feed
-// eagerly, the chain's builds are complete by clearance time. A chain
-// with an absorbed partial aggregate carries ChainedAgg* fields, not
-// GroupByCols, so the fragment-path restriction above is unaffected.
-//
-// The skew decision itself happens later, at the feed threshold
-// (eagerJoinWouldSplit) — this gate is structural only.
+// eagerEligibleJoinConsumer is structural; eagerJoinWouldSplit decides skew at the feed threshold.
+// Require fragment hash_join without GroupByCols; exclude broadcast and sort-merge joins.
+// Only primary probe/build deps feed eagerly; fused/chained builds keep the done
+// barrier so FusedJoins/Operators BuildFiles are complete before clearance.
+// Primary deps must be eagerFeedableDep producers; exclude gather fusion, scalar deps
+// and dynamic-filter emits/consumes (memo §3.3/§6/§7).
+// Stage-chain fusion adds one dependency per ChainedJoinSpec; absorbed partial
+// aggregates use ChainedAgg*, not GroupByCols, and remain eligible.
+// See docs/design/stage-chain-fusion.md §13.
+// See docs/internals/eager-join-consumer-boundary.md for the design.
 func eagerEligibleJoinConsumer(s physical.Stage, stageByID map[string]physical.Stage, fuseStageID string) bool {
 	if s.Type != physical.StageHashJoin {
 		return false
@@ -667,30 +639,16 @@ func (g *eagerPublishGovernor) noteTerminal(taskID string) {
 	g.publish(next)
 }
 
-// eagerEligibleConsumer reports whether stage s may clear dispatch on its
-// dependency's eager feed instead of the done barrier (memo §3.3, Phase C1
-// scope: non-join consumers only).
-//
-// The gate requires:
-//   - exactly one dependency and no scalar-substitution deps (those keep
-//     the barrier: their values are extracted from completed outputs);
-//   - a fragment-migrated single-input stage type: aggregate variants, or
-//     sort variants with SortKeys (a keyless "sort" would fall to the
-//     legacy task path, which reads Task.Inputs and cannot feed eagerly);
-//   - the dependency backs an eager feed: a standalone
-//     exchange-repartition, or an A3 compute producer
-//     (eagerFeedableDep);
-//   - not the gather-fused stage (fusion disables task retry, and retry is
-//     the fencing recovery path — memo §5);
-//   - no dynamic-filter participation (provisional outputs carry no
-//     BuildStats);
-//   - a task count no larger than workerCount, so with the scheduler's
-//     eager-spread placement each worker holds at most one manifest-blocked
-//     task and keeps ≥ MaxConcurrent−1 lanes for producer progress (the
-//     §3.3 producer-lane reservation, v1 form).
-//
-// Join edges (56 of the 57 repartition edges in TPC-H plans) are Phase C2:
-// they need the early skew decision before clearance.
+// eagerEligibleConsumer clears non-join stages on feeds instead of done (memo §3.3).
+// Require one dependency and no scalar deps: scalar values need completed output.
+// Allow fragment aggregates or sorts with SortKeys; keyless sorts use frozen Task.Inputs.
+// The dependency must be eagerFeedableDep: exchange-repartition or A3 compute.
+// Exclude gather fusion (retry is required for fencing recovery, memo §5) and
+// dynamic-filter participation (provisional outputs have no BuildStats).
+// Task count <= workerCount lets eager-spread placement leave each worker at least
+// MaxConcurrent−1 producer lanes, with at most one manifest-blocked task.
+// Join clearance additionally needs the early skew decision.
+// See docs/internals/eager-single-input-consumer-boundary.md for the design.
 func eagerEligibleConsumer(s physical.Stage, stageByID map[string]physical.Stage, fuseStageID string, workerCount int) bool {
 	if len(s.Dependencies) != 1 || len(s.ScalarDependencies) > 0 {
 		return false

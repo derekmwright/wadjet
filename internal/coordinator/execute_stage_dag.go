@@ -11,32 +11,16 @@ import (
 // aggregation stages don't falsely time out.
 const gatherReceiveTimeout = 10 * time.Minute
 
-// eagerDispatchStageCompletionHook, when non-nil, runs synchronously right
-// before a stage's `done` channel closes, with the coordinator and IDs
-// needed to inspect that stage's own eager feed. Test-only seam: nil in
-// production (zero cost, one nil check), so it changes no behavior there.
-//
-// Eager consumer dispatch (docs/design/eager-consumer-dispatch.md §3.3)
-// races a producer's `done` (full completion) against its `f.dispatched`
-// (task layout fixed) — real work, so `dispatched` almost always wins. At
-// small scale (SF001, a handful of milliseconds of real work per task)
-// under CPU contention, the consumer's own per-dependency loop can be
-// scheduled late enough that BOTH channels are already closed by the time
-// it checks: Go's select then picks between them at random, so the eager
-// path can lose even though nothing was actually wrong. A test asserting
-// engagement needs the race decided every time, not most times.
-//
-// The hook lets a test hold `done` open past that window — but only for
-// stages that are actually eager-feed producers, identified by their own
-// f.dispatched already being closed (runShuffleSide and the A3 compute
-// path always call feed.dispatch before returning, whether or not any
-// consumer ever registers as eager, so this reads true for exactly the
-// stage types that race a consumer and false for everything else, e.g.
-// scans and non-shuffle joins). Delaying only those, instead of every
-// stage in the DAG uniformly, avoids also delaying the consumer's own walk
-// through its OTHER (non-eager) dependencies, which would just push the
-// race back by the same amount instead of resolving it.
-// Package var so tests can pin it. See eager_dispatch_e2e_test.go.
+// eagerDispatchStageCompletionHook runs synchronously immediately before done closes,
+// with the coordinator/query/stage IDs to inspect that stage's own eager feed.
+// Test-only package var, nil in production (one nil check); see eager_dispatch_e2e_test.go.
+// Tests hold done open only for eager producers whose own f.dispatched is closed:
+// runShuffleSide and A3 compute always dispatch before returning, even without consumers.
+// Delaying every stage also delays non-eager dependencies and recreates the race.
+// At small scale both channels can already be closed; select chooses randomly,
+// so an engagement gate must force dispatched to win, not rely on timing.
+// See docs/design/eager-consumer-dispatch.md §3.3.
+// See docs/internals/eager-stage-completion-test-seam.md for the design.
 var eagerDispatchStageCompletionHook func(c *Coordinator, queryID, stageID string)
 
 // wshfShufflePrune gates the WSHF-input shuffle projection (fix 2 of the
@@ -76,55 +60,15 @@ var replicateMaterialize = (*Coordinator).materializeReplicate
 // on small fixtures.
 var singleFileShardThresholdBytes int64 = 64 * 1024 * 1024
 
-// aggregatePartialSplit reports whether a partial "aggregate" stage
-// qualifies for round-robin fan-out, returning the dep ID and per-task
-// input file groups when it does.
-//
-// The planner labels grouped partial aggregates DistRoundRobin when
-// workerCount > 1 (OutputDistribution, StageAggregate case) so the
-// property algebra forces a hash-shuffle ahead of the grouped final. The
-// dispatcher's task-count switch, however, had no DistRoundRobin arm — the
-// correctness-first default ran the partial as ONE task reading the entire
-// upstream (e.g. a 24-partition join output) while the rest of the cluster
-// idled. The 2026-07-19 arrival-waits evidence pass measured this as the
-// exclusive serial leg on Q10 (12.9s partial + downstream effects) and
-// Q13/Q02/Q03 at SF100. Partial aggregation is valid over any disjoint
-// cover of its input, so the fix is the same shape as the scan-fused
-// fan-out (dispatchScanAggregateStage): aggregate disjoint slices in
-// parallel, let the existing downstream machinery (exchange-repartition
-// from EnsureDistribution, or dispatchFinalAggregateFanout for Singleton
-// finals) merge the partials.
-//
-// Slicing: an even split of the flattened upstream file list across at
-// most workerCount tasks — the same shape as probe-split. The first cut
-// of this fan-out used one task PER upstream partition (24-way at SF100)
-// with no size gate; the 2026-07-19 SF100 validation run showed why the
-// probe-split precedent caps at workerCount: small aggregates became
-// swarms of ~2ms tasks whose per-task dispatch/result overhead (~0.5-1s)
-// dwarfed the work, serialized through max_concurrent worker slots, and
-// queued the NEXT query's scan tasks behind the swarm (+18% suite task
-// count, steady pass +28% — slower than its own cold pass). Chunky
-// tasks or no split.
-//
-// aggSplitMinBytes is the same "fanout only wins when each task performs
-// non-trivial work" reasoning as finalAggregateFanoutCandidate's
-// K > workerCount gate: below it, the single-task partial is already
-// cheap and the split is pure scheduling overhead. Bytes are the
-// worker-reported on-disk size of the upstream output; 0 (unknown,
-// legacy worker) declines the split — degrade to the pre-split shape,
-// never to a regression.
-//
-// Guards: SortKeys/Limit/FilterExprs never appear on a partial today
-// (fuseSortIntoPredecessor folds into finals only; HAVING lands on the
-// final) — the guard keeps the split sound if that ever changes, since a
-// sort, limit, or post-filter applied per-slice would be wrong before the
-// merge has seen all partials. Eager provisional inputs are excluded the
-// same way probe-split/skew slicing is: their manifest-fed partition-range
-// convention does not match custom file groups.
-//
-// WADJET_AGG_SPLIT_MIN_BYTES overrides the floor (small-scale harness runs
-// force the split path everywhere with =1 so the correctness gate actually
-// exercises it; SF1 upstreams are all under the production floor).
+// Partial aggregate fan-out must cover disjoint input slices; downstream
+// exchange-repartition or final-aggregate fan-out merges the partials.
+// Split the flattened upstream file list evenly into at most workerCount tasks.
+// Below aggSplitMinBytes, or with unknown (zero) reported bytes, decline splitting.
+// SortKeys, Limit and FilterExprs prohibit splitting: per-slice application
+// would be wrong before all partials merge. Exclude eager provisional inputs,
+// whose manifest partition ranges do not match custom file groups.
+// WADJET_AGG_SPLIT_MIN_BYTES overrides the floor; harnesses use =1 to force it.
+// See docs/internals/partial-aggregate-file-fanout.md for the design.
 var aggSplitMinBytes = func() int64 {
 	if v := os.Getenv("WADJET_AGG_SPLIT_MIN_BYTES"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {

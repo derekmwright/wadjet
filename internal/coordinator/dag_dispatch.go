@@ -29,39 +29,15 @@ type gatherFusion struct {
 	replySubject string
 }
 
-// canFuseGather reports whether a gather stage can be absorbed into its
-// upstream stage. Returns the upstream stage ID when fusion is eligible.
-//
-// Two upstream-shape cases are eligible:
-//
-//  1. Aggregate (final_aggregate / merge_aggregate). The upstream emits
-//     unordered groups (or pre-sorted groups when SortKeys are set via
-//     fuseSortIntoPredecessor). Reject Ordering on the gather Exchange in
-//     this case: ordered gather is the coordinator-side sort-merge of
-//     pre-sorted streams; when the upstream agg already absorbs the sort
-//     and runs single-task, the gather Ordering is redundant — but we
-//     still require it to be unset to avoid silent semantic changes for
-//     any caller relying on it.
-//
-//  2. Sort (sort / merge_sort). The upstream produces a single ordered
-//     stream. Ordering on the gather Exchange is permitted IFF the
-//     upstream SortKeys equal it (i.e., the legacy gather's coord-side
-//     re-sort would be redundant). Otherwise the keys differ and fusion
-//     would silently corrupt order.
-//
-// Common requirements for both cases:
-//   - Exactly one upstream dependency.
-//   - Upstream is in the pending dispatch set (not a leaf scan or pre-
-//     computed input).
-//   - Distribution.Kind == DistSingleton when the upstream emits ordered
-//     output (sort, merge_sort, or sort-bearing aggregate). Multi-task
-//     ordered upstreams sort their partition independently — streaming N
-//     partial-sorted streams to gather concatenates them in arrival
-//     order, losing global order.
-//
-// Amplification-safe: the gather sink publishes via NATS, not S3, so
-// per-task fan-out doesn't multiply S3 GETs the way scan/join fragment
-// fusion does.
+// canFuseGather returns the upstream stage ID when a gather can be absorbed.
+// Require exactly one dependency in pending, not a leaf or precomputed input.
+// For final_aggregate / merge_aggregate, gather Ordering must be unset,
+// even if a singleton sort-bearing aggregate makes it redundant.
+// For sort / merge_sort, gather Ordering is allowed only if SortKeys match.
+// Ordered upstream output (sort or sort-bearing aggregate) must be DistSingleton:
+// concatenating independently sorted task streams loses global order.
+// The gather sink publishes via NATS, so fan-out does not amplify S3 GETs.
+// See docs/internals/gather-fusion-order-boundary.md for the design.
 func canFuseGather(gatherStage physical.Stage, pending map[string]physical.Stage) (depID string, ok bool) {
 	if len(gatherStage.Dependencies) != 1 {
 		return "", false
@@ -387,28 +363,13 @@ func (c *Coordinator) executeStageDAG(
 	for id := range pending {
 		done[id] = make(chan struct{})
 	}
-	// Cap how many stages can be dispatching concurrently to keep coord-side
-	// result-collection state (NATS subscriptions, in-flight task batches,
-	// per-stage buffers) bounded. Without this, every "ready" stage in a
-	// wave dispatches simultaneously — for Q18 SF10 (17 stages, multiple
-	// fan-outs ready at once) the resulting coord+worker total RSS routinely
-	// overshoots the host's physical memory and the OS OOM-kills a process.
-	//
-	// 2 * workerCount keeps workers saturated (each worker has typically
-	// max_concurrent>=2 tasks) while bounding the number of in-flight stage
-	// pipelines coord must track to a small multiple of the cluster size.
-	// The semaphore is acquired AFTER all upstream dependencies are
-	// satisfied, so it can never deadlock waiting on a producer that itself
-	// can't acquire a slot.
-	// Source the slot count from the actual cluster capacity (sum of each
-	// worker's auto-tuned max_concurrent reported in heartbeats) when
-	// available. Workers downscale max_concurrent under memory pressure
-	// (auto-detected memory budget logic in cmd/wadjet), so this gives the
-	// dispatcher a memory-aware backpressure signal: if every worker has
-	// shrunk to max_concurrent=2 because the box is tight, dispatch only
-	// queues that many stages at a time instead of stampeding 8+ in a wave.
-	// Falls back to 2 * workerCount when no worker has reported
-	// MaxConcurrent yet (cluster startup, legacy workers).
+	// Bound concurrent stage dispatch to cap subscriptions, in-flight batches and buffers.
+	// Acquire the semaphore AFTER upstream dependencies are satisfied, so waiting
+	// consumers cannot hold slots their producers need.
+	// Use ClusterCapacity (sum of heartbeat MaxConcurrent), reflecting workers'
+	// memory-pressure downscaling; absent reports, fall back to 2 * workerCount.
+	// This bounds coordinator state while keeping worker task lanes supplied.
+	// See docs/internals/dag-dispatch-capacity-semaphore.md for the design.
 	dispatchSlots := c.workers.ClusterCapacity()
 	dispatchSource := "cluster_capacity"
 	if dispatchSlots <= 0 {

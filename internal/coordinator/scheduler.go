@@ -323,55 +323,28 @@ func formatCounts(m map[string]int) string {
 	return b.String()
 }
 
-// affinityBeforeLocality gates the tier order in pickWorkerFor between
-// base-table cache affinity and input locality
-// (docs/adr/0008-task-placement-policy.md). A task whose base-table files
-// rendezvous-hash to one worker's NVMe cache carries Task.AffinityWorkerID;
-// a task whose streaming-exchange hints all point at one connected worker
-// qualifies for locality. Until 2026-08-22 locality ran first, which was
-// wrong for probe-split broadcast-join tasks: their InputLocations hints
-// point only at their (small, replicated) broadcast build's single
-// producer — never at their base-table probe files, which are never
-// hinted — so locality placed the whole task on the build producer, off
-// the cache that actually holds its bytes (the SF100 "straggler tier",
-// docs/design/scan-affinity.md §Probe-split affinity).
-//
-// DEFAULT ON: affinity ahead of locality (the 2026-08-22 order). OFF
-// restores the pre-2026-08-22 order (locality, then affinity).
-//
-// Both tiers are placement preferences over the same connected/live
-// worker set under the identical same-batch cap — a fallback placement
-// just misses the cache or the local mmap, exactly as before either tier
-// existed — so reordering them cannot change a row set. Registered as a
-// kill switch anyway: it is enumerated by the optimization-invariance
-// oracle and lets EC2 bisect this reorder independently of the same-
-// commit worker-side prefetch change (prefetchCacheSkip).
+// affinityBeforeLocality defaults on: base-table affinity precedes input locality;
+// WADJET_AFFINITY_BEFORE_LOCALITY disables that order (locality first).
+// Affinity uses Task.AffinityWorkerID; locality requires exchange hints to one connected worker.
+// Probe-split broadcast hints name only the replicated build producer, not base-table
+// probe files, so those hints do not identify the probe's cache owner.
+// Both tiers prefer the same live/connected workers under the same batch cap;
+// fallback only misses cache/local mmap and must not change rows.
+// The optimization-invariance oracle enumerates this switch independently of prefetchCacheSkip.
+// See docs/adr/0008-task-placement-policy.md and docs/design/scan-affinity.md §Probe-split affinity.
+// See docs/internals/scheduler-affinity-before-locality.md for the design.
 var affinityBeforeLocality = optswitch.Register("affinity-before-locality", "WADJET_AFFINITY_BEFORE_LOCALITY",
 	"place a task on its base-table cache-affinity worker ahead of input locality; off = the pre-2026-08-22 order (locality, then affinity)")
 
-// pickWorkerFor selects a worker for one task. Memory-aware bin-packing
-// applies only when the task carries an estimate AND heartbeat pool stats
-// exist — otherwise placement is the pre-existing round-robin. Estimates
-// of 0 deliberately round-robin: with no per-task charge, "most free"
-// would be static between heartbeats and pile every task of a fan-out
-// onto one worker.
-//
-// batchAssigned carries this publish call's placements so far: bin-packed
-// tasks are restricted to the workers with the fewest same-batch tasks
-// before "most free pool" ranks them. Without that restriction the same
-// staleness pathology hits estimated tasks — heartbeats lag 10s and the
-// per-task in-flight charge is small, so an entire fan-out lands on
-// whichever worker last reported the most free pool.
-//
-// Eager consumer tasks take their own placement path first: they can
-// block on producer manifests for the whole producer stage, so stacking
-// them on one worker starves that worker's producer lanes (targeted gRPC
-// dispatch has no work stealing).
-//
-// The returned method ("eager" | "affine" | "local" | "binpack" | "rr")
-// feeds the placement attr on the "published tasks" line. The affinity
-// and locality tiers' relative order is controlled by
-// affinityBeforeLocality; see its doc for the rationale.
+// pickWorkerFor first spreads eager tasks: manifest-blocked consumers must not
+// starve producer lanes, and targeted gRPC dispatch has no work stealing.
+// Memory bin-packing requires a nonzero estimate and heartbeat pool stats;
+// otherwise round-robin, since uncharged tasks would pile on stale most-free reports.
+// Restrict bin-packing to workers with the fewest batchAssigned tasks before
+// ranking free pool, so heartbeat lag cannot concentrate an entire fan-out.
+// affinityBeforeLocality controls those preference tiers' relative order.
+// Return eager | affine | local | binpack | rr as the published-task placement attribute.
+// See docs/internals/scheduler-eager-lane-reservation.md for the design.
 func (s *Scheduler) pickWorkerFor(t distributed.Task, batchAssigned map[string]int, batchLen int) (workerID, method string, ok bool) {
 	connected := s.liveConnectedWorkers()
 	if len(t.EagerInputs) > 0 {

@@ -68,31 +68,16 @@ type skewTaskAssignment struct {
 	estBytes int64 // per-task admission estimate; 0 = use the stage-wide default
 }
 
-// planSkewSplitTasks decides the skew-aware task layout for a shuffled
-// hash-join stage. Returns nil (dispatcher keeps the standard layout) when
-// the stage is ineligible or no group crosses the hot threshold; otherwise
-// one assignment per task, in group order.
-//
-// Eligibility:
-//   - hash_join with hash-partitioned distribution (broadcast_join has
-//     probe-split; sort-merge-join needs aligned sorted runs — excluded v1)
-//   - probe-side join semantics only (inner/left/semi/anti). right/full
-//     emit unmatched BUILD rows, which a replicated build would duplicate
-//     k times.
-//   - both primary deps are OutputPartitioned with the same partition count
-//     and reported PartitionBytes (nil vectors = legacy workers → off).
-//
-// A group is hot when it crosses the absolute floor (skewSplitMinGroupBytes)
-// AND carries at least skewSplitMinRatio× the mean group's probe bytes —
-// heavy-but-uniform stages (every group over the floor, ratio ≈ 1) keep the
-// standard layout. A hot group splits into k = ceil(probeBytes/skewSplitTargetBytes)
-// sub-tasks, capped by workerCount and by the group's probe file count
-// (v1 splits at file granularity; a hot partition written by T shuffle
-// tasks has up to T files). Each sub-task reads 1/k of the probe files and
-// the group's FULL build files — a probe row for key k needs the complete
-// build side for k, which replication preserves. Fused builds are already
-// replicated to every task by the dispatcher (task.FusedJoins[i].BuildFiles)
-// and need no handling here.
+// planSkewSplitTasks returns nil for ineligible/non-hot stages, else assignments in group order.
+// Require hash-partitioned hash_join with inner/left/semi/anti semantics;
+// exclude broadcast, sort-merge and right/full (replicated unmatched builds duplicate rows).
+// Both primary deps must be OutputPartitioned with equal counts and PartitionBytes.
+// Hot means above skewSplitMinGroupBytes AND at least skewSplitMinRatio times mean
+// probe bytes: uniform-heavy groups keep standard layout.
+// Split into ceil(probeBytes/skewSplitTargetBytes), capped by workerCount and probe files.
+// Each task takes its probe-file slice and the FULL group build, preserving every key's matches.
+// Fused builds are already replicated by dispatch; splitting is at file granularity.
+// See docs/internals/skew-split-probe-cover.md for the design.
 func (c *Coordinator) planSkewSplitTasks(
 	stage physical.Stage,
 	inputs map[string]StageOutput,
