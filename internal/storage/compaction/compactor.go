@@ -34,27 +34,12 @@ func compactedFilePath(tableName, partPath string) string {
 	return partitionedOutputPath(tableName, partPath, "compacted")
 }
 
-// partitionedOutputPath builds "<base>_<uuidv7>.parquet" under the
-// partition's directory. Some writers store the partition path already
-// table-prefixed (the harness datagen primes "tables/<name>/"); blindly
-// joining prefix+partPath then yields "tables/orders/tables/orders//compacted_*"
-// — consistent (write, manifest, and read all use it) but wrong. A prefixed
-// partPath is treated as the full base.
-//
-// The suffix used to be a nanosecond timestamp (see #494): the only thing
-// separating two output paths in the same partition directory, and
-// RewriteTable emits them back to back — one per memory-bounded group —
-// where compaction emitted at most one per pass, and ForceCompactFile's
-// delete-marker rewrites run from independent workers entirely. A repeated
-// value is not a name clash the store reports: the second Put OVERWRITES the
-// first, and the first group's manifest entry then points at the second
-// group's bytes, so those rows are gone with no error anywhere. Wall-clock
-// resolution — worse, a process-local monotonic counter racing OTHER
-// processes' clocks — is not a property to bet that on. A UUIDv7 carries
-// enough random bits to make a collision astronomically unlikely across
-// every writer in the cluster, and its leading 48-bit millisecond timestamp
-// keeps outputs roughly sorted by creation order, same as the counter did
-// within one process.
+// partitionedOutputPath builds <base>_<uuidv7>.parquet under the partition.
+// Treat already table-prefixed partPath as the full base, never duplicate it.
+// Use cluster-safe randomized identities, not wall-clock or process counters:
+// an output-path collision overwrites bytes already named by the manifest (#494).
+// UUIDv7 also keeps approximate creation order.
+// See docs/internals/compaction-output-path-identity.md for the design.
 func partitionedOutputPath(tableName, partPath, base string) string {
 	prefix := partition.TablePrefix(tableName)
 	dir := prefix
@@ -221,32 +206,13 @@ type Result struct {
 	PassLimitReached bool
 }
 
-// Summary renders the lines a caller reports to an operator, in order. It is
-// the one place that decides what a compaction run SAYS about itself, so the
-// CLI cannot print a subset of it by omission.
-//
-// It exists because PublicationConflicts was unreportable without it. A
-// `wadjet compact --rewrite` whose only group lost a publication race returns
-// a nil error, an empty Failed, PassLimitReached false and
-// PartitionsCompacted zero — so the CLI printed
-//
-//	table events: 0 merges, 0 files removed, 0 created, 0 rows, 0 -> 0 bytes
-//
-// which is character for character what an already-migrated table prints. The
-// operator concludes the format migration is done. It is not: RewriteTable
-// reads its file list exactly once, by construction, so a skipped group is not
-// retried inside the call and only a re-run picks it up. That is the same
-// reason PassLimitReached earns a line — a counter nobody prints cannot tell
-// an operator anything, which is precisely the argument ADR-0020's amendment
-// makes for having the counter at all.
-//
-// The "run again" half is conditioned on this run having published NOTHING,
-// rather than on the conflict count alone: CompactTable replans after a
-// refusal, so a run that conflicted once and then compacted the partition has
-// finished its work and must not be reported as unfinished.
-//
-// Failed is deliberately not here. Those go to stderr, one per partition, and
-// mixing streams in one list would decide that for the caller.
+// Summary is the ordered operator report shared by callers (ADR-0020 amendment).
+// Report publication conflicts and pass-limit exhaustion so unfinished rewrites
+// cannot look like an already-migrated table.
+// Say conflict-driven "run again" only when nothing was published: CompactTable
+// may replan and finish after a conflict, while RewriteTable does not retry groups.
+// Failed stays separate for per-partition stderr; do not mix output streams here.
+// See docs/internals/compaction-operator-summary.md for the design.
 func (r *Result) Summary() []string {
 	out := []string{fmt.Sprintf(
 		"table %s: %d merges, %d files removed, %d created, %d rows, %d -> %d bytes",
@@ -463,32 +429,15 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 	return result, nil
 }
 
-// RewriteTable rewrites EVERY file of every partition of a table exactly once,
-// through the current writer, and replaces the originals.
-//
-// This is the format-migration mode, and it is deliberately not compaction.
-// shouldCompact's floors — two files, MinFiles, an average size under
-// MaxFileSizeBytes — all answer "is this partition worth merging", which is
-// the right question for a background sweep and the wrong one for a
-// migration: a partition holding ONE 512 MB file is exactly the file that has
-// to be rewritten, and it is the one shape compaction will never touch. So a
-// rewrite is exempt from the floors and admits a 1 -> 1 pass.
-//
-// It terminates structurally rather than by CompactTable's progress rule. The
-// file list is read from the manifest ONCE, split into memory-bounded groups,
-// and each group is written once; nothing re-reads the manifest, so no output
-// of this call can become an input to it. "1 removed, 1 created" is progress
-// here, which is precisely why the progress rule cannot apply.
-//
-// Its use is ADR-0018's DECIMAL(p > 18) migration: files written before #429
-// annotate a wide DECIMAL over an INT64 leaf, and no reader outside wadjet can
-// open them. One rewrite through the current writer produces a FLBA(16) leaf
-// with byte-identical unscaled values. Every other type round-trips unchanged
-// (that is the compaction gate's property), so running it over a table that
-// needs nothing costs the rewrite and changes no value.
-//
-// Like CompactTable, a partition whose merge fails does not stop the others;
-// the aggregate is *CompactionFailed.
+// RewriteTable visits every file in one captured manifest, grouped by memory
+// bound, through the current writer; bypass MinFiles/size/two-file floors.
+// A 1-to-1 rewrite is valid progress. Never select this call's outputs as inputs;
+// publication still validates the captured input/delete state.
+// ADR-0018's pre-#429 wide-DECIMAL migration must preserve unscaled values while
+// writing FLBA(16) instead of invalid wide INT64 annotation; other types preserve values.
+// Continue other partitions after merge failures and return *CompactionFailed.
+// Publication-conflicted groups require a later rerun.
+// See docs/internals/compaction-one-pass-format-rewrite.md for the design.
 func (c *Compactor) RewriteTable(ctx context.Context, tableName string) (*Result, error) {
 	tableMeta, err := c.catalog.GetTable(ctx, tableName)
 	if err != nil {
@@ -564,31 +513,14 @@ func (c *Compactor) RewriteTable(ctx context.Context, tableName string) (*Result
 	return result, nil
 }
 
-// mergeGroup merges one group of a partition's files into a single new file
-// and publishes the replacement, folding the outcome into result.
-//
-// The publication is ONE conditional manifest transaction
-// (catalog.CommitCompaction): the inputs leave, their delete markers leave
-// with them, and the replacement arrives — or none of it does, and the
-// snapshot the table already had is exactly the one it keeps. It used to be
-// RemoveFiles followed by AddNewFiles, two CAS writes whose PAIR was not
-// atomic: a failure between them emptied the table irrecoverably (#893), and
-// neither call checked that the inputs were still the table's or that the
-// delete markers were still the ones the output applied (#894, #895).
-//
-// The caller classifies the error rather than the position:
-//
-//   - *mergeError is the read-and-rewrite step failing on THIS partition's
-//     bytes, with its inputs untouched.
-//   - catalog.ErrCompactionConflict is another writer having moved this
-//     partition's files or its delete markers since the manifest was read.
-//     Nothing was written; the output object is deleted here, because a
-//     conflict is decided BEFORE the CAS and so is proof that no publication
-//     happened. The caller replans from the manifest that replaced ours.
-//   - anything else is the manifest or the object store — not a per-partition
-//     condition, and the output object is KEPT, because a publication error
-//     says nothing about whether the write landed and deleting the bytes on a
-//     maybe is the one mistake that is not recoverable.
+// mergeGroup publishes inputs/removal of their markers/output in ONE validated
+// CommitCompaction transaction (#893, #894, #895), folding results into result.
+// *mergeError means this partition's read/rewrite failed with inputs untouched.
+// ErrCompactionConflict is detected BEFORE CAS: discard the unpublished output
+// and let the caller replan from the current manifest.
+// Other store/manifest errors do not prove whether publication landed: KEEP
+// output bytes rather than delete a possibly live replacement.
+// See docs/internals/compaction-merge-publication-outcomes.md for the design.
 func (c *Compactor) mergeGroup(ctx context.Context, tableName string, schema parquet.Schema,
 	part catalog.PartitionEntry, files []catalog.FileEntry,
 	deleteSet map[string]map[int64]bool, result *Result) error {
@@ -1059,39 +991,16 @@ func filePaths(files []catalog.FileEntry) []string {
 	return paths
 }
 
-// ForceCompactFile rewrites a single data file, applying the delete markers
-// the manifest holds for it. Used by delete-marker GC to physically purge
-// deleted rows from files whose markers have aged out.
-//
-// Safety invariants:
-//   - Write-before-delete: the new file is written to the object store before
-//     the old file leaves the manifest. On partial failure the new file may
-//     become an orphan in S3, but data is never lost.
-//   - ALL of the file's markers or none. The rewrite applies exactly the
-//     marker set the manifest held when it was read, and the publication
-//     (catalog.CommitCompaction, via SwapFileForGC) refuses if that set has
-//     moved since. The old contract — apply the GC-scanned indices, leave any
-//     that arrived since — was #894: a surviving marker names a row in a file
-//     that no longer exists, so no reader can apply it, the next sweep drops
-//     it as an orphan, and the replacement carries the deleted row for good.
-//     Removing a marker cannot remove a row from a file that already has it.
-//   - One conditional publication: the old file's removal, the replacement's
-//     addition, and the marker cleanup are a single validated CAS.
-//   - Per-file lock: prevents a double GC rewrite when two sweeps of THIS
-//     compactor overlap. It cannot exclude an independent compactor — that is
-//     what the commit-time input check is for (#895).
-//
-// gcIndices is the GC scan's trigger, not the authority: it says this file has
-// aged markers worth rewriting. What actually gets applied is the manifest's
-// current marker set for the file, which is a superset when a DELETE landed
-// since the scan — and applying that newer delete is the right answer, not a
-// TOCTOU hazard.
-//
-// A conflict is not an error to the caller: another writer got to this file
-// first, or a DELETE committed while the rewrite was being written. The
-// output is discarded and the rewrite is retried against the newer snapshot;
-// past maxGCRewriteAttempts it is left for the next GC sweep, which re-scans
-// from scratch. Compactor.PublicationConflicts counts those.
+// ForceCompactFile writes before removing old input and atomically publishes
+// replacement plus marker cleanup. Apply ALL current manifest markers or none;
+// changed marker sets refuse publication (#894).
+// gcIndices triggers work, never defines applied rows; newer current deletes
+// must be included. Per-file lock prevents same-compactor duplicates only;
+// commit input validation handles independent compactors (#895).
+// Conflicts discard output and retry fresh snapshots, then defer after
+// maxGCRewriteAttempts without failing the caller; count PublicationConflicts.
+// Partial failure may orphan new bytes, never justify deleting uncertain output.
+// See docs/internals/compaction-gc-rewrite-publication.md for the design.
 func (c *Compactor) ForceCompactFile(ctx context.Context, tableName string, filePath string, gcIndices map[int64]bool) error {
 	if !c.tryAcquireGCLock(filePath) {
 		c.logger.Info("force compact: skipping, GC already in progress",
