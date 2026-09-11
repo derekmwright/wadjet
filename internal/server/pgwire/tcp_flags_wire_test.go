@@ -23,8 +23,12 @@ package pgwire
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestPGWireDeclaresTheTCPFlagFamily(t *testing.T) {
@@ -407,4 +411,95 @@ func TestPGWireDeclaresSumOverAMaterializedIntegerColumn(t *testing.T) {
 			})
 		}
 	}
+}
+
+// AN INVALID LITERAL FLAG NAME IS REFUSED WITH NO ROWS AT ALL (#1018 round 5,
+// B2).
+//
+// A flag NAME is a MASK OPERAND, and its spelling is a property of the QUERY
+// rather than of the data. PostgreSQL settles it for the arithmetic this
+// family is named for: `SELECT 'x'::int FROM (VALUES (1)) t WHERE false` is
+// 22P02 there, because the coercion happens at parse analysis and does not
+// wait for rows. Here the fold was per row, so an empty input answered zero
+// rows and no error while the same typo over a reached row was 22023 —
+// whether a typo is an error depended on the data.
+//
+// The wire arm is the one that sees this: a value oracle has no row to
+// compare, and the SQLSTATE is the whole answer.
+func TestPGWireRefusesAnInvalidFlagNameWithNoRows(t *testing.T) {
+	_, srv := setupRealDB(t)
+	conn := connectPgconn(t, srv.Addr())
+
+	for _, tc := range []struct {
+		name, sql, msg string
+	}{
+		{"has_all", `SELECT tcp_flags_has_all(visits,'BOGUS') AS v FROM users WHERE id < 0`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"has_any", `SELECT tcp_flags_has_any(visits,'BOGUS') AS v FROM users WHERE id < 0`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"has_none", `SELECT tcp_flags_has_none(visits,'BOGUS') AS v FROM users WHERE id < 0`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"has_tcp_flag", `SELECT has_tcp_flag(visits,'BOGUS') AS v FROM users WHERE id < 0`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"tcp_flag_mask", `SELECT tcp_flag_mask('BOGUS') AS v FROM users WHERE id < 0`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"tcp_flags_from_string", `SELECT tcp_flags_from_string('SYN,BOGUS') AS v FROM users WHERE id < 0`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"in_a_predicate", `SELECT COUNT(*) AS n FROM users WHERE tcp_flags_has_all(visits,'BOGUS') AND id < 0`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"empty_list", `SELECT tcp_flags_has_any(visits) AS v FROM users WHERE id < 0`,
+			"tcp_flags_has_any requires at least one TCP flag name"},
+		{"empty_element", `SELECT tcp_flags_from_string('SYN,') AS v FROM users WHERE id < 0`,
+			`empty TCP flag name at position 2`},
+		// The reached-row shape is the SAME refusal, so the two layers say
+		// one thing.
+		{"the_reached_row_shape", `SELECT tcp_flags_has_all(visits,'BOGUS') AS v FROM users`,
+			`TCP flag name "BOGUS" not recognized`},
+	} {
+		for _, format := range []int16{0, 1} {
+			t.Run(fmt.Sprintf("%s/format=%d", tc.name, format), func(t *testing.T) {
+				res := conn.ExecParams(context.Background(), tc.sql, nil, nil, nil,
+					[]int16{format}).Read()
+				if res.Err == nil {
+					t.Fatalf("ANSWERED %d rows; 22023 is due\n  SQL: %s", len(res.Rows), tc.sql)
+				}
+				if got := pgErrCode(res.Err); got != "22023" {
+					t.Errorf("SQLSTATE %s, want 22023\n  err: %v", got, res.Err)
+				}
+				if !strings.Contains(res.Err.Error(), tc.msg) {
+					t.Errorf("%q does not carry %q", res.Err, tc.msg)
+				}
+			})
+		}
+	}
+
+	// AND THE OTHER SIDE. A name the family DOES know, and a name supplied by
+	// a COLUMN rather than written as a constant, still answer over an empty
+	// input: a plan-time refusal that fired on either would be the false
+	// positive the binder's standing contract forbids, and a non-constant
+	// name is not knowable before rows at all.
+	for _, tc := range []struct{ name, sql string }{
+		{"valid_names_answer", `SELECT tcp_flags_has_all(visits,'SYN','ACK') AS v FROM users WHERE id < 0`},
+		{"a_column_name_stays_per_row", `SELECT tcp_flags_has_all(visits, name) AS v FROM users WHERE id < 0`},
+		{"a_null_name_is_a_null_mask", `SELECT tcp_flags_has_all(visits, NULL) AS v FROM users WHERE id < 0`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := conn.ExecParams(context.Background(), tc.sql, nil, nil, nil, []int16{0}).Read()
+			if res.Err != nil {
+				t.Fatalf("refused a query it must answer: %v\n  SQL: %s", res.Err, tc.sql)
+			}
+			if len(res.Rows) != 0 {
+				t.Errorf("got %d rows, want 0", len(res.Rows))
+			}
+		})
+	}
+}
+
+// pgErrCode is the SQLSTATE a pgconn error carries.
+func pgErrCode(err error) string {
+	var pge *pgconn.PgError
+	if errors.As(err, &pge) {
+		return pge.Code
+	}
+	return ""
 }

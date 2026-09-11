@@ -2347,13 +2347,17 @@ and both spellings are accepted with `AE` as the canonical rendering.
 An unrecognized name is SQLSTATE `22023` naming it, and NULL flags give NULL.
 Where both apply the NAME wins — `TCP_FLAGS_HAS_ALL(f,'ACKK')` is `22023` on a
 row whose `f` is NULL — so whether a typo is an error never depends on the
-data; a NULL *name* is a NULL mask and gives NULL. The refusal is raised PER
-ROW, as PostgreSQL's `DATE_TRUNC` raises its unknown unit: a predicate no row
-reaches — `WHERE id < 0 AND TCP_FLAGS_HAS_ALL(f,'XX')` — answers zero rows
-rather than an error.
+data; a NULL *name* is a NULL mask and gives NULL.
 
-A flag NAME may be any text expression, including a column; only literal names
-are folded at plan time and pushed into the scan.
+A name written as a **constant is refused before any row**, and an empty name
+list with it: `WHERE id < 0 AND TCP_FLAGS_HAS_ALL(f,'XX')` is `22023`, not zero
+rows, because the names are the mask OPERAND and its spelling is a property of
+the query. That is PostgreSQL's own rule for the arithmetic this family is
+named for — `SELECT 'x'::int FROM t WHERE false` raises there too.
+
+A flag NAME may be any text expression, including a column. A name that is not
+a constant is refused where it first exists, per row; only literal names are
+folded before execution and pushed into the scan.
 
 | Bit | Value | Name |
 |---|---|---|

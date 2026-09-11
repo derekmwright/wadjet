@@ -2206,10 +2206,10 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        spellings.** The bit spelling has no equivalent failure — a mask is a
        number — but the alternative here is to drop the bit, which turns
        `has_all('SYN','ACKK')` into `has_all('SYN')`: a strictly LARGER row set
-       that nothing downstream can tell from the intended one. The refusal is
-       raised PER ROW, exactly as PostgreSQL raises `date_trunc`'s unknown
-       unit, so a predicate no row reaches answers zero rows rather than an
-       error.
+       that nothing downstream can tell from the intended one. A name written
+       as a CONSTANT is refused BEFORE ANY ROW (see "an invalid literal name is
+       refused from the declaration" below); a name supplied by a column or an
+       expression is refused per row, where it first exists.
 
      **A NAME THE TABLE DOES NOT KNOW OUTRANKS A NULL FLAGS ARGUMENT**
      (decided 2026-09-08, round 3, #966 P4). The family says both "NULL flags
@@ -2234,6 +2234,40 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      NULL *name* — a NULL mask operand, `NULL & NULL` — still answers NULL.
      Gated in `expr.TestAnUnknownFlagNameOutranksANullFlagsArgument` and on
      five arms by the census's `unknown_name_on_a_null_row` cells.
+
+     **AN INVALID LITERAL NAME IS REFUSED FROM THE DECLARATION, ROWS OR NO
+     ROWS** (decided 2026-09-11, round 5, #1018 B2). The paragraph above was
+     written for the NULL case and stated the whole rule — "neither a NULL
+     operand nor an empty row set excuses it" — while the code folded the
+     names per row and the entry's own preceding sentence said so. The two
+     sentences contradicted each other, and the CODE was the weaker one:
+     `SELECT tcp_flags_has_all(f8,'BOGUS') FROM tcpflow WHERE id < 0` returned
+     zero rows and no error on all five arms and in both wire formats, while
+     the same typo over a reached row was 22023. Whether a typo was an ERROR
+     depended on the data — which is the same defect P4 fixed for a NULL row,
+     one step earlier.
+
+     The rule is the binder's existing one (ADR-0012 item 1, #517/#631): a
+     literal that names no value of the type its context demands is refused
+     from the DECLARATION, before any row exists. So a flag-NAME argument
+     written as a STRING LITERAL — to `tcp_flags_has_all/any/none`,
+     `has_tcp_flag`, `tcp_flag_mask` and `tcp_flags_from_string` — is folded
+     at COMPILATION, which is the seam every door goes through whether or not
+     it plans (ADR-0031's DML predicate and the subquery environment compile
+     without planning). The same fold, the same SQLSTATE and the same sentence
+     as the evaluator's, from `expr.RefuseUnknownTCPFlagNameLiterals` and
+     `expr.errUnknownTCPFlagName`: one refusal, two layers, never two rules.
+     An EMPTY name list is refused there too, for the same reason — an arity
+     is known without rows.
+
+     What stays per row is what is not knowable from the declaration: a name
+     supplied by a COLUMN or by an expression, which is not a constant, and a
+     NULL name, which is a NULL mask operand rather than a misspelling. Gated
+     on five arms by the census's `unknown_name_with_no_rows_at_all*` cells
+     and their `valid_names_over_an_empty_input_answer_no_rows` /
+     `a_column_supplied_name_over_an_empty_input_answers_no_rows` controls,
+     and on the wire in both formats by
+     `pgwire.TestPGWireRefusesAnInvalidFlagNameWithNoRows`.
 
      `tcp_flags_from_string`, which reads a COMMA-SEPARATED list rather than an
      argument list, splits the two cases and answers the arithmetic where it

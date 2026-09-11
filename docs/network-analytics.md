@@ -510,6 +510,12 @@ PostgreSQL, which raises for the operator equivalent whatever the rows are:
 `SELECT NULL::bigint & 'x'::bigint` is `22P02`, and so is `'x'::int` under
 `WHERE false`.
 
+**Whatever the rows are includes NO rows.** A name written as a constant is
+folded before execution, so `WHERE id < 0 AND TCP_FLAGS_HAS_ALL(flags,'ACKK')`
+raises `22023` rather than answering zero rows — a typo in a query that
+happens to select nothing is still a typo. A name supplied by a COLUMN cannot
+be checked before the rows exist and is refused where it first appears.
+
 The refusal is raised per ROW, as PostgreSQL's `DATE_TRUNC` raises its unknown
 unit, so a predicate that no row reaches answers zero rows rather than an
 error. A flag name may also be a column or any other text expression; only

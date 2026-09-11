@@ -1188,6 +1188,18 @@ func compileFuncCallNamed(n *plansql.FuncCallNode, ctx *compileContext, checked 
 		}
 	}
 
+	// A CONSTANT flag-name list is folded HERE, before any row exists, and a
+	// name that names no flag is 22023 from the declaration — the rule
+	// PostgreSQL applies to the mask operand this family is named for
+	// (`'x'::bigint` is 22P02 under `WHERE false`). Compilation is the seam
+	// every door goes through, planned or not (ADR-0031's DML predicate and
+	// the subquery environment compile without planning), so one site here is
+	// one rule everywhere. A name that is a COLUMN or an expression is not
+	// constant and keeps the evaluator's per-row refusal (#1018 round 5, B2).
+	if err := RefuseUnknownTCPFlagNameLiterals(n); err != nil {
+		return nil, err
+	}
+
 	// element_at / the x[k] subscript route MAP key lookup vs. ARRAY index
 	// from the compiled type of the first argument, which only a dedicated
 	// node can see (a MAP and map_entries()'s ARRAY are the same runtime

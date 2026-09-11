@@ -307,22 +307,37 @@ func fnTCPFlagsText(args []any) any {
 // unit it does not know, with the offending name quoted and the nine accepted
 // spellings listed.
 func raiseUnknownTCPFlagName(fn, name string) {
-	panic(fatalEval{sqlerr.New("22023",
+	panic(fatalEval{errUnknownTCPFlagName(fn, name)})
+}
+
+// errUnknownTCPFlagName is the refusal as a VALUE, so the plan-time check and
+// the per-row evaluator raise the same sentence under the same SQLSTATE. Two
+// spellings of one refusal is how a query comes to fail differently depending
+// on which layer noticed (ADR-0012 item 1).
+func errUnknownTCPFlagName(fn, name string) error {
+	return sqlerr.New("22023",
 		"%s: TCP flag name %s not recognized; the names are %s (NS is accepted for AE)",
-		fn, sqlerr.Quote(name), tcpFlagNamesList)})
+		fn, sqlerr.Quote(name), tcpFlagNamesList)
 }
 
 // raiseEmptyTCPFlagNameAt names the POSITION of an empty element in a
 // comma-separated list, which is the one thing a caller cannot see from the
 // value: quoting the name would quote nothing at all.
 func raiseEmptyTCPFlagNameAt(fn string, pos int, text string) {
-	panic(fatalEval{sqlerr.New("22023",
-		"%s: empty TCP flag name at position %d of %s", fn, pos, sqlerr.Quote(text))})
+	panic(fatalEval{errEmptyTCPFlagNameAt(fn, pos, text)})
+}
+
+func errEmptyTCPFlagNameAt(fn string, pos int, text string) error {
+	return sqlerr.New("22023",
+		"%s: empty TCP flag name at position %d of %s", fn, pos, sqlerr.Quote(text))
 }
 
 func raiseTCPFlagListEmpty(fn string) {
-	panic(fatalEval{sqlerr.New("22023",
-		"%s requires at least one TCP flag name", fn)})
+	panic(fatalEval{errTCPFlagListEmpty(fn)})
+}
+
+func errTCPFlagListEmpty(fn string) error {
+	return sqlerr.New("22023", "%s requires at least one TCP flag name", fn)
 }
 
 func raiseTCPFlagsNotInteger(fn string, v any) {

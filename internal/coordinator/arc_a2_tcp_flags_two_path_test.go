@@ -403,6 +403,17 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmetic(t *testing.T) {
 			`SELECT SUM(v) OVER () AS v FROM (SELECT BITWISE_AND(f8,18) AS v FROM tcpflow WHERE id <= 4) s`,
 			[]string{"v=36", "v=36", "v=36", "v=36"}},
 
+		// ---- THE VALID NAMES STILL ANSWER OVER AN EMPTY INPUT (#1018 round
+		// 5, B2's other side). A plan-time refusal that fired on a spelling
+		// the family DOES know would be the false positive the binder's
+		// standing contract forbids.
+		{"valid_names_over_an_empty_input_answer_no_rows",
+			`SELECT tcp_flags_has_all(f8,'SYN','ACK') AS b FROM tcpflow WHERE id < 0`,
+			nil},
+		{"a_column_supplied_name_over_an_empty_input_answers_no_rows",
+			`SELECT tcp_flags_has_all(f8, TO_HEX(f4)) AS b FROM tcpflow WHERE id < 0`,
+			nil},
+
 		// ---- a shape the pushdown DECLINES (computed argument): the residual
 		// exec filter must answer what the pushed spelling answers.
 		//
@@ -461,6 +472,41 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmetic(t *testing.T) {
 		{"unknown_name_on_a_null_row",
 			`SELECT tcp_flags_has_all(f8,'BOGUS') AS b FROM tcpflow WHERE id = 15`,
 			`TCP flag name "BOGUS" not recognized`},
+		// AN INVALID LITERAL NAME IS REFUSED WITH NO ROWS AT ALL (#1018
+		// round 5, B2). A flag name is a MASK OPERAND and its spelling is a
+		// property of the QUERY: PostgreSQL raises 22P02 for `'x'::int`
+		// under `WHERE false`, because the coercion happens at parse
+		// analysis and does not wait for data. These six answered ZERO ROWS
+		// AND NO ERROR on all five arms and both wire formats, while the
+		// same typo over a reached row was 22023 — whether a typo is an
+		// error depended on the data.
+		{"unknown_name_with_no_rows_at_all",
+			`SELECT tcp_flags_has_all(f8,'BOGUS') AS b FROM tcpflow WHERE id < 0`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"unknown_name_with_no_rows_at_all_any",
+			`SELECT tcp_flags_has_any(f8,'BOGUS') AS b FROM tcpflow WHERE id < 0`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"unknown_name_with_no_rows_at_all_none",
+			`SELECT tcp_flags_has_none(f8,'BOGUS') AS b FROM tcpflow WHERE id < 0`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"unknown_name_with_no_rows_at_all_legacy",
+			`SELECT has_tcp_flag(f8,'BOGUS') AS b FROM tcpflow WHERE id < 0`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"unknown_name_with_no_rows_at_all_mask",
+			`SELECT tcp_flag_mask('BOGUS') AS m FROM tcpflow WHERE id < 0`,
+			`TCP flag name "BOGUS" not recognized`},
+		{"unknown_name_with_no_rows_at_all_from_string",
+			`SELECT tcp_flags_from_string('SYN,BOGUS') AS m FROM tcpflow WHERE id < 0`,
+			`TCP flag name "BOGUS" not recognized`},
+		// The same thing in a PREDICATE, where the conjunct that empties the
+		// input sits beside the one that is misspelled.
+		{"unknown_name_in_a_predicate_with_no_rows_at_all",
+			`SELECT COUNT(*) AS n FROM tcpflow WHERE tcp_flags_has_all(f8,'BOGUS') AND id < 0`,
+			`TCP flag name "BOGUS" not recognized`},
+		// And the EMPTY LIST, which is the same fold answering the same way.
+		{"empty_name_list_with_no_rows_at_all",
+			`SELECT COUNT(*) AS n FROM tcpflow WHERE tcp_flags_has_any(f8) AND id < 0`,
+			"tcp_flags_has_any requires at least one TCP flag name"},
 		{"unknown_name_on_a_null_row_legacy_spelling",
 			`SELECT has_tcp_flag(f8,'BOGUS') AS b FROM tcpflow WHERE id = 15`,
 			`TCP flag name "BOGUS" not recognized`},
