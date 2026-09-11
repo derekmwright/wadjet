@@ -24,13 +24,21 @@ import (
 // path, the null handling, the bitmap and the filter-only column elision all
 // apply here without a line of new machinery.
 //
-// WHAT IS *NOT* DONE HERE, deliberately: a flag predicate never prunes a row
-// group from its statistics. A min/max bound cannot prove anything about a
-// BIT — `min=0, max=511` admits every mask, and even `min=2, max=16` admits a
-// row holding 18. Nor does it join the dictionary-PROBE prune (dict_prune.go),
+// WHAT IS *NOT* DONE HERE, deliberately: a flag predicate prunes nothing
+// BEFORE it is evaluated. A min/max bound cannot prove anything about a BIT —
+// `min=0, max=511` admits every mask, and even `min=2, max=16` admits a row
+// holding 18. Nor does it join the dictionary-PROBE prune (dict_prune.go),
 // which answers "is this exact value absent" and says nothing about a mask.
-// A prune that cannot be proven is a dropped row, so there is none;
-// TestAFlagPredicateNeverPrunesARowGroup is that position as a measurement.
+// A prune that cannot be proven is a dropped row, so there is none.
+//
+// It is NOT the claim that a row group is never skipped, and the two were
+// conflated in the docs until #966 round 2 B2. Once the predicate HAS been
+// evaluated over a group and matched nothing, EvalRowGroupPreds answers
+// FilterNone and the group is dropped whole — `scanFilterSkipped` moves, and
+// on the three-group dictionary fixture it moves by two. A prune decides
+// without reading the values; a skip decides after reading them.
+// TestAFlagPredicateDoesNoPruningBeforeItIsEvaluated holds both halves:
+// StatsPruned +0 while ScanFilterSkipped is free to move.
 
 // RowPred.Op values for flag-mask predicates. Value carries the folded mask as
 // an int64.

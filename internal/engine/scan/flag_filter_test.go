@@ -70,7 +70,7 @@ func TestTheScanAndTheExpressionAgreeOnEveryMask(t *testing.T) {
 //
 // The end-to-end half — that turning pruning on and off leaves a flag query's
 // answer and the pruned-row-group counter unchanged — is
-// wadjet.TestAFlagPredicateNeverPrunesARowGroup.
+// wadjet.TestAFlagPredicateDoesNoPruningBeforeItIsEvaluated.
 func TestAFlagOpIsNotAComparison(t *testing.T) {
 	for _, op := range []string{OpFlagsAll, OpFlagsAny, OpFlagsNone} {
 		if isLikeOp(op) {

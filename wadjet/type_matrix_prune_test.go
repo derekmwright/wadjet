@@ -202,7 +202,7 @@ func TestTypeMatrixPruningNeverChangesTheAnswer(t *testing.T) {
 		// to decide the row itself.
 		//
 		// A flag predicate must NOT prune — the cells above have the counter
-		// for that (wadjet.TestAFlagPredicateNeverPrunesARowGroup); here the
+		// for that (wadjet.TestAFlagPredicateDoesNoPruningBeforeItIsEvaluated); here the
 		// property is the ANSWER, over both widths, all three tests, and the
 		// BITWISE_AND spelling that pushes to the same place.
 		{"FlagsHasAllInt32",
