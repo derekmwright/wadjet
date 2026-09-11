@@ -213,7 +213,8 @@ func TestTheSemverFamilyOrdersByTheSpecificationOnEveryArm(t *testing.T) {
 
 		// A range from a COLUMN, which no literal fold can see.
 		{name: "a_range_from_a_column",
-			sql:  `SELECT COUNT(*) AS n FROM semverpkg WHERE semver_satisfies(v, rng)`,
+			sql: `SELECT COUNT(*) AS n FROM semverpkg
+			       WHERE id <> 4 AND semver_satisfies(v, rng)`,
 			want: []string{"n=int64:" + fmt.Sprint(svColumnRangeMatches)}},
 
 		// THE BOUND AT THE TOP OF THE DOMAIN (#967, round-1 review B1). A
@@ -280,6 +281,29 @@ func TestTheSemverFamilyOrdersByTheSpecificationOnEveryArm(t *testing.T) {
 					t.Errorf("%s arm: %v (SQLSTATE %q), want 22023 naming the range\n  SQL: %s",
 						arm.name, err, sqlerr.StateOf(err), sql)
 				}
+			}
+		}
+	})
+
+	// A range from a COLUMN that names no range is refused too — the one path
+	// no plan-time fold can cover, since the range does not exist until a row
+	// does. On the DAG arms the 22023 is relayed out of a worker.
+	t.Run("a_range_from_a_column_that_names_no_range_is_refused_on_every_arm", func(t *testing.T) {
+		const sql = `SELECT COUNT(*) AS n FROM semverpkg WHERE semver_satisfies(v, rng)`
+		for _, arm := range arms {
+			_, err := arm.run("columnrefusal/"+arm.name, sql)
+			if err == nil {
+				t.Errorf("%s arm counted rows over a column holding a range that names no range",
+					arm.name)
+				continue
+			}
+			if !a3sIsRangeRefusal(err) {
+				t.Errorf("%s arm: %v (SQLSTATE %q), want 22023 naming the range",
+					arm.name, err, sqlerr.StateOf(err))
+			}
+			if !strings.Contains(err.Error(), svBadRange) {
+				t.Errorf("%s arm: the refusal does not name the range %q: %v",
+					arm.name, svBadRange, err)
 			}
 		}
 	})
@@ -402,8 +426,25 @@ const svTextInversions = 1538
 
 // svColumnRangeMatches is `semver_satisfies(v, rng)` over the whole fixture,
 // with the range coming from a COLUMN — the path no literal fold can see.
-// Measured on the single-process arm; every other arm must agree.
+// Measured on the single-process arm; every other arm must agree. The one row
+// whose range names no range is excluded by id, since asking it is the
+// REFUSAL cell rather than a counting one.
 const svColumnRangeMatches = 279
+
+// svBadRangeID is the one fixture row whose `rng` names NO range, and
+// svBadRange is what it holds.
+//
+// The per-row refusal is the one path a plan-time literal fold cannot cover by
+// construction — the range is a COLUMN, so nothing can be decided before a row
+// exists — and until this row arrived the census asked that path only VALID
+// ranges, which left the relay of a per-row 22023 out of a worker unmeasured.
+// The id is an edge row's, so a cell can name it, and the value it displaces
+// was the cycle's NULL, which matched nothing: the counting cell beside it
+// counts exactly what it counted before.
+const (
+	svBadRangeID = 4
+	svBadRange   = "^^1.0"
+)
 
 // --- the fixture, which rides along in tmdTables() ---
 
@@ -430,7 +471,8 @@ const svRows = 5000
 //
 // `rng` cycles four ranges so `semver_satisfies(v, rng)` exercises the per-row
 // path no literal fold can see. A NULL range rides in the cycle because a NULL
-// operand answering NULL is part of the contract.
+// operand answering NULL is part of the contract, and ONE row carries a range
+// that names no range at all — see svBadRangeID.
 func svData() []map[string]any {
 	edge := semvergen.Edge()
 	corpus := semvergen.Corpus(967, svRows)
@@ -438,9 +480,11 @@ func svData() []map[string]any {
 	rows := make([]map[string]any, 0, len(edge)+len(corpus)+1)
 	id := int32(1)
 	add := func(v any) {
-		rows = append(rows, map[string]any{
-			"id": id, "v": v, "rng": ranges[int(id-1)%len(ranges)],
-		})
+		rng := ranges[int(id-1)%len(ranges)]
+		if id == svBadRangeID {
+			rng = svBadRange
+		}
+		rows = append(rows, map[string]any{"id": id, "v": v, "rng": rng})
 		id++
 	}
 	for _, v := range edge {

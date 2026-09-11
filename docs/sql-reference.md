@@ -2268,7 +2268,10 @@ Everything else is the grammar as written:
   metadata has no precedence at all;
 - a numeric identifier past `BIGINT` (`99999999999999999999.0.0`) is NULL. The
   specification sets no upper bound; this engine's is `int64`, which is also
-  the width `SEMVER_MAJOR`/`MINOR`/`PATCH` declare.
+  the width `SEMVER_MAJOR`/`MINOR`/`PATCH` declare. Everything below that bound
+  is exact, including the band from `2^53` to `2^63-1` that node-semver — being
+  JavaScript — refuses outright, so `9007199254740993.0.0` is its own version
+  here and compares exactly.
 
 #### Ordering
 
@@ -2355,6 +2358,20 @@ things are refused that node-semver accepts:
   regex captures it and then ignores it;
 - everything else off the grammar: `>=` with nothing after it, `^^1.0.0`,
   `1.2.3 -`, a leading zero, a number past `BIGINT`, `latest`.
+
+**A bound at the top of the domain is saturated, not wrapped.** Every spelling
+above except an exact version closes its band by raising one component by one,
+and a component is accepted all the way to `BIGINT`'s maximum — so
+`^9223372036854775807.0.0` asks for a bound one past a number this engine can
+spell. That bound is rewritten to the comparator it means over the versions
+that exist rather than wrapping into a negative one: `<X.(Y+1).0-0` becomes
+`<=X.Y.9223372036854775807` and `>=X.(Y+1).0` becomes
+`>X.Y.9223372036854775807`. Nothing is lost by the rewrite, because no version
+exists between them. So `^9223372036854775807.0.0` still names the versions
+whose major is the maximum, `>9223372036854775807.x` matches nothing — there is
+nothing above the top of the domain — and `1.9223372036854775807.x` still
+excludes `2.0.0`. node-semver refuses any component past `2^53-1` instead; this
+engine accepts the version, so it accepts the range over it.
 
 The **version** argument keeps the family's lenient rule: NULL for a string
 that is not a version. A NULL range is a NULL operand and answers NULL; a
