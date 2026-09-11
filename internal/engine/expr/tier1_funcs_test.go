@@ -157,9 +157,11 @@ func TestFromHex(t *testing.T) {
 		args []any
 		want any
 	}{
-		{[]any{"ff"}, float64(255)},
-		{[]any{"10"}, float64(16)},
-		{[]any{"0"}, float64(0)},
+		{[]any{"ff"}, int64(255)},
+		{[]any{"10"}, int64(16)},
+		{[]any{"0"}, int64(0)},
+		// The word a double cannot hold, which is why this answers an int64.
+		{[]any{"4000000000000012"}, int64(1)<<62 | 18},
 		{[]any{nil}, nil},
 	}
 	for _, tt := range tests {
@@ -286,31 +288,31 @@ func TestSHA512(t *testing.T) {
 func TestBitwiseAnd(t *testing.T) {
 	fn := DefaultRegistry.Lookup("bitwise_and")
 	got := fn([]any{float64(0xFF), float64(0x0F)})
-	if got != float64(0x0F) {
-		t.Errorf("bitwise_and(0xFF, 0x0F) = %v, want %v", got, float64(0x0F))
+	if got != int64(0x0F) {
+		t.Errorf("bitwise_and(0xFF, 0x0F) = %v, want %v", got, int64(0x0F))
 	}
 }
 
 func TestBitwiseOr(t *testing.T) {
 	fn := DefaultRegistry.Lookup("bitwise_or")
 	got := fn([]any{float64(0xF0), float64(0x0F)})
-	if got != float64(0xFF) {
-		t.Errorf("bitwise_or(0xF0, 0x0F) = %v, want %v", got, float64(0xFF))
+	if got != int64(0xFF) {
+		t.Errorf("bitwise_or(0xF0, 0x0F) = %v, want %v", got, int64(0xFF))
 	}
 }
 
 func TestBitwiseXor(t *testing.T) {
 	fn := DefaultRegistry.Lookup("bitwise_xor")
 	got := fn([]any{float64(0xFF), float64(0x0F)})
-	if got != float64(0xF0) {
-		t.Errorf("bitwise_xor(0xFF, 0x0F) = %v, want %v", got, float64(0xF0))
+	if got != int64(0xF0) {
+		t.Errorf("bitwise_xor(0xFF, 0x0F) = %v, want %v", got, int64(0xF0))
 	}
 }
 
 func TestBitwiseNot(t *testing.T) {
 	fn := DefaultRegistry.Lookup("bitwise_not")
 	got := fn([]any{float64(0)})
-	if got != float64(-1) {
+	if got != int64(-1) {
 		t.Errorf("bitwise_not(0) = %v, want -1", got)
 	}
 }
@@ -338,12 +340,18 @@ func TestTier1FunctionsRegistered(t *testing.T) {
 func TestHexRoundTrip(t *testing.T) {
 	toHex := DefaultRegistry.Lookup("to_hex")
 	fromHex := DefaultRegistry.Lookup("from_hex")
-	values := []float64{0, 1, 255, 1024, 65535}
+	// Non-negative values only: PostgreSQL's TO_HEX renders a NEGATIVE
+	// argument as its two's complement (`to_hex((-1)::int8)` is
+	// `ffffffffffffffff`), and FROM_HEX — which PostgreSQL does not have —
+	// parses into a signed int64 and declines a 16-digit word with the top bit
+	// set. The round trip is claimed for non-negative values, and 2^62|18 is
+	// the one that fails when either side goes through a double.
+	values := []int64{0, 1, 255, 1024, 65535, 1<<62 | 18, 1 << 62, (1 << 62) - 1}
 	for _, v := range values {
 		encoded := toHex([]any{v})
 		decoded := fromHex([]any{encoded})
 		if decoded != v {
-			t.Errorf("hex round-trip failed for %v: encoded=%v, decoded=%v", v, encoded, decoded)
+			t.Errorf("hex round-trip failed for %v: encoded=%v, decoded=%#v", v, encoded, decoded)
 		}
 	}
 }
@@ -355,8 +363,8 @@ func TestBitwiseIdentities(t *testing.T) {
 	or := DefaultRegistry.Lookup("bitwise_or")
 	xor := DefaultRegistry.Lookup("bitwise_xor")
 
-	a := float64(42)
-	b := float64(73)
+	a := int64(42)
+	b := int64(73)
 
 	// a & a == a
 	if and([]any{a, a}) != a {
@@ -367,13 +375,13 @@ func TestBitwiseIdentities(t *testing.T) {
 		t.Error("a | a should equal a")
 	}
 	// a ^ a == 0
-	if xor([]any{a, a}) != float64(0) {
+	if xor([]any{a, a}) != int64(0) {
 		t.Error("a ^ a should equal 0")
 	}
 	// (a & b) | (a ^ b) == a | b
-	ab_and := and([]any{a, b}).(float64)
-	ab_xor := xor([]any{a, b}).(float64)
-	ab_or := or([]any{a, b}).(float64)
+	ab_and := and([]any{a, b}).(int64)
+	ab_xor := xor([]any{a, b}).(int64)
+	ab_or := or([]any{a, b}).(int64)
 	if or([]any{ab_and, ab_xor}) != ab_or {
 		t.Error("(a&b) | (a^b) should equal a|b")
 	}

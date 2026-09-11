@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"hash/crc32"
 	"math"
-	"math/bits"
 	"strings"
 	"testing"
 )
@@ -318,7 +317,7 @@ func TestTier3FromBaseToBase(t *testing.T) {
 	toBase := DefaultRegistry.Lookup("to_base")
 
 	// Binary
-	if fromBase([]any{"1010", float64(2)}) != float64(10) {
+	if fromBase([]any{"1010", float64(2)}) != int64(10) {
 		t.Errorf("from_base('1010', 2) = %v, want 10", fromBase([]any{"1010", float64(2)}))
 	}
 	if toBase([]any{float64(10), float64(2)}) != "1010" {
@@ -326,7 +325,7 @@ func TestTier3FromBaseToBase(t *testing.T) {
 	}
 
 	// Octal
-	if fromBase([]any{"17", float64(8)}) != float64(15) {
+	if fromBase([]any{"17", float64(8)}) != int64(15) {
 		t.Errorf("from_base('17', 8) = %v, want 15", fromBase([]any{"17", float64(8)}))
 	}
 	if toBase([]any{float64(15), float64(8)}) != "17" {
@@ -334,7 +333,7 @@ func TestTier3FromBaseToBase(t *testing.T) {
 	}
 
 	// Hexadecimal
-	if fromBase([]any{"ff", float64(16)}) != float64(255) {
+	if fromBase([]any{"ff", float64(16)}) != int64(255) {
 		t.Errorf("from_base('ff', 16) = %v, want 255", fromBase([]any{"ff", float64(16)}))
 	}
 	if toBase([]any{float64(255), float64(16)}) != "ff" {
@@ -342,7 +341,7 @@ func TestTier3FromBaseToBase(t *testing.T) {
 	}
 
 	// Round-trip: base 36
-	original := float64(123456)
+	original := int64(123456)
 	encoded := toBase([]any{original, float64(36)})
 	decoded := fromBase([]any{encoded, float64(36)})
 	if decoded != original {
@@ -368,21 +367,28 @@ func TestTier3FromBaseToBase(t *testing.T) {
 
 func TestTier3BitCount(t *testing.T) {
 	fn := DefaultRegistry.Lookup("bit_count")
+	// BIT_COUNT answers an INTEGER, as PostgreSQL's bit_count does (bigint,
+	// measured 17.11), and counts over the exact 64-bit pattern: the wide values
+	// below count 1 instead of 3 and 63 through a double (#966 round 2).
 	tests := []struct {
-		arg  float64
-		want float64
+		arg  any
+		want int64
 	}{
-		{float64(0), float64(0)},
-		{float64(1), float64(1)},
-		{float64(7), float64(3)},
-		{float64(255), float64(8)},
-		{float64(1023), float64(10)},
+		{int64(0), 0},
+		{int64(1), 1},
+		{int64(7), 3},
+		{int64(255), 8},
+		{int64(1023), 10},
+		{int32(511), 9},
+		{int64(1)<<62 | 18, 3},
+		{int64(-1), 64},
+		{int64(9223372036854775807), 63},
+		{float64(255), 8},
 	}
 	for _, tt := range tests {
 		got := fn([]any{tt.arg})
-		expected := float64(bits.OnesCount64(uint64(int64(tt.arg))))
-		if got != expected {
-			t.Errorf("bit_count(%v) = %v, want %v", tt.arg, got, expected)
+		if got != tt.want {
+			t.Errorf("bit_count(%v) = %#v, want int64 %d", tt.arg, got, tt.want)
 		}
 	}
 	if fn([]any{nil}) != nil {
@@ -793,15 +799,18 @@ func TestTier3BaseRoundTrips(t *testing.T) {
 	fromBase := DefaultRegistry.Lookup("from_base")
 	toBase := DefaultRegistry.Lookup("to_base")
 
-	// Round-trip across multiple bases
+	// Round-trip across multiple bases. The values are int64 and so is the
+	// answer: FROM_BASE returned float64(n), which is not a round trip past
+	// 2^53 — the last two values are the ones that fail through a double
+	// (#966 round 2).
 	bases := []float64{2, 8, 10, 16, 36}
-	values := []float64{0, 1, 42, 255, 1000, 65535}
+	values := []int64{0, 1, 42, 255, 1000, 65535, 1<<62 | 18, 9223372036854775807}
 	for _, base := range bases {
 		for _, v := range values {
 			encoded := toBase([]any{v, base})
 			decoded := fromBase([]any{encoded, base})
 			if decoded != v {
-				t.Errorf("base %.0f round-trip failed for %.0f: encoded=%v, decoded=%v",
+				t.Errorf("base %.0f round-trip failed for %d: encoded=%v, decoded=%#v",
 					base, v, encoded, decoded)
 			}
 		}

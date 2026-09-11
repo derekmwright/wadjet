@@ -148,8 +148,8 @@ func fnBitwiseLeftShift(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	v := int64(ToFloat64(args[0]))
-	shift := int64(ToFloat64(args[1]))
+	v := bitIntArg(args[0])
+	shift := bitIntArg(args[1])
 	if shift < 0 || shift >= 64 {
 		return nil
 	}
@@ -160,8 +160,8 @@ func fnBitwiseRightShift(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	v := int64(ToFloat64(args[0]))
-	shift := int64(ToFloat64(args[1]))
+	v := bitIntArg(args[0])
+	shift := bitIntArg(args[1])
 	if shift < 0 || shift >= 64 {
 		return nil
 	}
@@ -173,8 +173,8 @@ func fnBitwiseArithmeticShiftRight(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	v := int64(ToFloat64(args[0]))
-	shift := int64(ToFloat64(args[1]))
+	v := bitIntArg(args[0])
+	shift := bitIntArg(args[1])
 	if shift < 0 || shift >= 64 {
 		return nil
 	}

@@ -916,10 +916,21 @@ func (e *numericFuncCall) EvalFloat64(b *batch.RecordBatch, row int) (float64, b
 	return ToFloat64(v), true
 }
 
+// EvalInt64 is the seam integer arithmetic reads a numeric function through
+// (isIntNative routes `f(x) + 1` here when f is DECLARED integer). It converted
+// through a float64, so a function that answers an exact int64 lost its low
+// bits on the way into the operator: with BITWISE_OR declared INT64 (#966),
+// `BITWISE_OR(f8, 1)` answered 4611686018427387923 and
+// `BITWISE_OR(f8, 1) + 0` answered 4611686018427387904 — two spellings of one
+// value disagreeing, which is worse than both being wrong. An integer box is
+// taken as itself; anything else keeps the old conversion.
 func (e *numericFuncCall) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
 	v := e.Eval(b, row)
 	if v == nil {
 		return 0, false
+	}
+	if i, ok := toInt64Safe(v); ok {
+		return i, true
 	}
 	return int64(ToFloat64(v)), true
 }

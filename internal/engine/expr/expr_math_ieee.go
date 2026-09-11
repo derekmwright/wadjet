@@ -99,14 +99,14 @@ func fnFromBase(args []any) any {
 	if err != nil {
 		return nil
 	}
-	return float64(n)
+	return n // exact; float64(n) lost the low bits above 2^53 (#966 round 2)
 }
 
 func fnToBase(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	n := int64(ToFloat64(args[0]))
+	n := bitIntArg(args[0])
 	base := int(ToFloat64(args[1]))
 	if base < 2 || base > 36 {
 		return nil
@@ -114,10 +114,15 @@ func fnToBase(args []any) any {
 	return strconv.FormatInt(n, base)
 }
 
+// bit_count(n) counts the set bits of the 64-bit pattern. PostgreSQL has no
+// integer overload — `bit_count` there takes a `bit` or a `bytea` — but it
+// answers BIGINT for both, and over `n::int8::bit(64)` it agrees with this
+// function value for value (measured 17.11: 2^62|18 -> 3, 511 -> 9, -1 -> 64).
+// It read its argument through a float64 and answered a float64, so the wide
+// value counted ONE bit instead of three (#966 round 2).
 func fnBitCount(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	n := int64(ToFloat64(args[0]))
-	return float64(bits.OnesCount64(uint64(n)))
+	return int64(bits.OnesCount64(uint64(bitIntArg(args[0]))))
 }

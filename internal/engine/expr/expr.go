@@ -376,7 +376,7 @@ func init() {
 
 		// Encoding
 		"to_hex":      {fnToHex, RetString},
-		"from_hex":    {fnFromHex, RetFloat64},
+		"from_hex":    {fnFromHex, RetInt64},
 		"to_base64":   {fnToBase64, RetString},
 		"from_base64": {fnFromBase64, RetString},
 
@@ -392,10 +392,15 @@ func init() {
 		"sha512": {fnSHA512, RetString},
 
 		// Bitwise
-		"bitwise_and": {fnBitwiseAnd, RetFloat64},
-		"bitwise_or":  {fnBitwiseOr, RetFloat64},
-		"bitwise_xor": {fnBitwiseXor, RetFloat64},
-		"bitwise_not": {fnBitwiseNot, RetFloat64},
+		// The bitwise operators answer an INTEGER, as PostgreSQL's do, and
+		// read their arguments as 64-bit patterns rather than through a
+		// double (bitwise_exact.go). The three shifts below already declared
+		// RetInt64; these four did not, and a BIGINT lost its low bits on the
+		// way in and its high ones on the way out.
+		"bitwise_and": {fnBitwiseAnd, RetInt64},
+		"bitwise_or":  {fnBitwiseOr, RetInt64},
+		"bitwise_xor": {fnBitwiseXor, RetInt64},
+		"bitwise_not": {fnBitwiseNot, RetInt64},
 
 		// String: padding and character
 		"lpad":             {fnLPad, RetString},
@@ -461,9 +466,13 @@ func init() {
 		"is_finite":    {fnIsFinite, RetBool},
 		"is_infinite":  {fnIsInfinite, RetBool},
 		"width_bucket": {fnWidthBucket, RetInt32},
-		"from_base":    {fnFromBase, RetFloat64},
-		"to_base":      {fnToBase, RetString},
-		"bit_count":    {fnBitCount, RetFloat64},
+		// from_base and bit_count answer INTEGERS. Declaring them FLOAT64
+		// coerced an exact int64 through a double on the way out, so
+		// FROM_BASE('4000000000000012', 16) came back 4.611686018427388e+18
+		// (#966 round 2). PostgreSQL's own bit_count answers bigint.
+		"from_base": {fnFromBase, RetInt64},
+		"to_base":   {fnToBase, RetString},
+		"bit_count": {fnBitCount, RetInt64},
 
 		// Hash: additional
 		"sha1":        {fnSHA1, RetString},
