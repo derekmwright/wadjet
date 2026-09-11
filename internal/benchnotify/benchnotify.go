@@ -4,7 +4,7 @@
 // Standard SQS may duplicate and reorder events. Stateful consumers MUST dedupe
 // full logical event identity, including Query/Try and RunIndex for repeated runs;
 // a print-only watcher needs no dedupe. FIFO is needed for transport ordering.
-// Send outside timed regions with a short timeout (default2s), SDK retries only,
+// Send outside timed regions with a short timeout (default 2s), SDK retries only,
 // warn on failure and disable after consecutive failures; never fail a benchmark.
 // A nil *Notifier is disabled and every method is a no-op.
 // See docs/internals/benchnotify-event-delivery-contract.md for the design.

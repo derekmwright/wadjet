@@ -570,8 +570,8 @@ func (g *GRPCServer) CreateTable(ctx context.Context, req *wadjetv1.CreateTableR
 }
 
 // grpcQueryError maps carried authorization classes to codes.PermissionDenied,
-// not Internal: SQLSTATE42501 or auth.ErrUnauthorized, never message matching.
-// Keep parity with HTTP403/pgwire42501 (SECURITY ADDENDUM 6).
+// not Internal: SQLSTATE 42501 or auth.ErrUnauthorized, never message matching.
+// Keep parity with HTTP 403/pgwire 42501 (SECURITY ADDENDUM 6).
 // Other errors retain the caller's Internal prefix; shared grpcResultError
 // handles up-front and result-drain refusals with the same classification.
 // See docs/internals/server-grpc-query-error-class.md for the design.

@@ -14,7 +14,9 @@ import (
 // FileRGMeta preserves per-file row counts and min/max/null stats for pruning.
 // AnalyzeTable stores one table blob; uncovered files fall back to footers.
 // Path-keyed entries assume IMMUTABLE objects, so stale entries may be missing
-// or superfluous but must still describe the same bytes; overwrite violates this.
+// or superfluous but must still describe the same bytes. Rewriting a data object
+// in place under the same path violates this premise; fixed-key atomic overwrite
+// of the metadata blob is safe.
 // Binary WRGM v1 preserves native bounds, including CIDR's sort key AND text;
 // JSON numeric/string coercions are unsafe for pruning.
 // Unknown tags are errors; TableRGMeta treats decode failure as no blob and

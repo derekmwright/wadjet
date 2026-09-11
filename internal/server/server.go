@@ -1027,8 +1027,8 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 
 // writeSQLError is the shared HTTP SQLSTATE mapping via sqlerr.StateOf
 // (#647, #848); classified errors carry err.Error() verbatim, matching pgwire.
-// 42501 always maps to403. For other states, promote only caller-chosen 5xx
-// for classes0A/22/23/42 to400; retain resource statuses such as404/409.
+// 42501 always maps to 403. For other states, promote only caller-chosen 5xx
+// for classes 0A/22/23/42 to 400; retain resource statuses such as 404/409.
 // Unmapped classes (including XX/58) retain caller status.
 // Unclassified request/errors keep writeError and the contextual msg prefix.
 // Route query/DML/EXPLAIN/DDL statement refusals here; docs/api-reference.md
