@@ -10,7 +10,8 @@ import (
 )
 
 // aggInputIsWideInteger answers wide only for a provable int8-domain operand
-// from the AST and column declarations; other shapes keep the int4 reading.
+// from the AST and the column and FUNCTION declarations (#966); other shapes
+// keep the int4 reading.
 // Grouped aggComputedInputDecl and windowComputedArgDecl share this walk:
 // SUM(int2|int4-domain) is bigint; SUM(int8-domain) is numeric.
 // Expression declarations alone cannot recover width (ADR-0024).
@@ -58,11 +59,30 @@ func aggInputIsWideInteger(node plansql.Node, decls colDecls) bool {
 			return false
 		}
 		// COALESCE / GREATEST / LEAST / NULLIF / IF choose between their
-		// arguments and are as wide as the widest. Every other function
-		// declines: an unrecognized return width keeps today's reading, which
-		// is the conservative side — it leaves the declaration where it is.
+		// arguments and are as wide as the widest.
 		if _, poly := expr.DefaultRegistry.ReturnType(n.Name).SameAsArgs(len(n.Args)); !poly {
-			return false
+			// Everything else is as wide as it DECLARES. A function with a
+			// fixed RetInt64 is an int8-domain operand — it is exactly what
+			// `f8 & 18` is on PostgreSQL, whose type is bigint and whose SUM
+			// is therefore numeric — and a fixed RetInt32 is an int4-domain
+			// one, whose SUM is bigint (`SUM(length(s))`, PostgreSQL's own).
+			// Reading the declaration is what the CastNode arm already does
+			// with a target name, and what the ColRef arm does with a column.
+			//
+			// Not reading it was #966 round 2 B1: BITWISE_AND had just been
+			// declared int8, the walk did not follow an ordinary function, so
+			// SUM over it took the BIGINT accumulator and
+			// `SUM(BITWISE_AND(f8, 4611686018427387904))` over two rows of
+			// 2^62 answered 22003 where PostgreSQL answers
+			// 9223372036854775808 — a right value turned into a refusal, on
+			// all four arms and both the grouped and the windowed spelling,
+			// which share this walk.
+			//
+			// A declaration that is not a fixed integer (float, text, a
+			// container, DYNAMIC) answers false, which is the conservative
+			// side: a non-integer operand leaves the integer accumulator
+			// table for its own declaration anyway.
+			return expr.FuncDeclaresInt64(n.Name)
 		}
 		for _, a := range n.Args {
 			if aggInputIsWideInteger(a, decls) {

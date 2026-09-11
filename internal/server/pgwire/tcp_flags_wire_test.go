@@ -186,3 +186,57 @@ func TestPGWireRefusesAnUnknownFlagName(t *testing.T) {
 		t.Errorf("error %q does not name the unrecognized flag", msg)
 	}
 }
+
+// SUM OVER AN INTEGER-DECLARED FUNCTION DECLARES NUMERIC (#966 round 2 B1).
+//
+// This is the half no value oracle can see. PostgreSQL's `f & k` over a BIGINT
+// operand is bigint and `SUM(bigint)` is NUMERIC — OID 1700 — so a wide sum
+// does not overflow; over an int4 operand `f & k` is int4 and its SUM is
+// bigint. Every bitwise result is declared int8 here (the value-preserving
+// widening already in ADR-0012's list), so BOTH spellings' SUM is numeric,
+// and the second cell below is where that divergence is visible: the VALUE is
+// 2 on both engines, and only the OID differs.
+//
+// Before the fix the aggregate-width walk did not follow an ordinary function,
+// so SUM took the BIGINT accumulator: the first cell answered 22003 where
+// PostgreSQL answers 9223372036854775846, and the second carried a right value
+// under OID 20.
+//
+// The LENGTH cell is the control from the other side — an INT32-declared
+// function keeps the bigint accumulator, exactly as PostgreSQL's
+// `SUM(length(text))` is bigint.
+func TestPGWireDeclaresSumOverAnIntegerFunction(t *testing.T) {
+	_, srv := setupRealDB(t)
+	conn := connectPgconn(t, srv.Addr())
+
+	for _, tc := range []struct {
+		name, sql string
+		oid       uint32
+		want      string
+	}{
+		{"wide_or", `SELECT SUM(BITWISE_OR(4611686018427387922, 1)) AS v FROM users WHERE id < 3`,
+			1700, "9223372036854775846"},
+		{"narrow_and", `SELECT SUM(BITWISE_AND(visits, 18)) AS v FROM users`, 1700, "2"},
+		{"windowed_or", `SELECT SUM(BITWISE_OR(4611686018427387922, 1)) OVER () AS v
+		                 FROM users WHERE id = 1`, 1700, "4611686018427387923"},
+		{"bit_count", `SELECT SUM(BIT_COUNT(4611686018427387922)) AS v FROM users WHERE id = 1`,
+			1700, "3"},
+		{"length_control", `SELECT SUM(LENGTH(name)) AS v FROM users WHERE id = 1`, 20, "5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := conn.ExecParams(context.Background(), tc.sql, nil, nil, nil, []int16{0}).Read()
+			if res.Err != nil {
+				t.Fatalf("ExecParams: %v", res.Err)
+			}
+			if got := res.FieldDescriptions[0].DataTypeOID; got != tc.oid {
+				t.Errorf("declared OID %d, want %d\n  SQL: %s", got, tc.oid, tc.sql)
+			}
+			if len(res.Rows) != 1 {
+				t.Fatalf("got %d rows, want 1", len(res.Rows))
+			}
+			if got := string(res.Rows[0][0]); got != tc.want {
+				t.Errorf("rendered %q, want %q\n  SQL: %s", got, tc.want, tc.sql)
+			}
+		})
+	}
+}
