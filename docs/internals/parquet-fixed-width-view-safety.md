@@ -1,6 +1,6 @@
 # Parquet fixed width view safety
 
-Source: internal/storage/parquet/values.go — func typedValues[T any](v Values, want PhysicalType, width int) []T {, moved 2026-09-11 (#1026)
+Source: internal/storage/parquet/values.go — func typedValues (the generic fixed-width view over Values), moved 2026-09-11 (#1026)
 Superseded: INT32 file to INT64 catalog is now admitted by CoercibleTo as a post-decode widening; it still must never read the INT32 buffer directly as INT64.
 
 typedValues reinterprets v.data as a []T of width-byte elements — the
