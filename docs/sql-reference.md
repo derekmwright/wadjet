@@ -2317,9 +2317,12 @@ named `NS` (Historic per RFC 8311) which the Accurate ECN work reuses as `AE`,
 and both spellings are accepted with `AE` as the canonical rendering.
 
 An unrecognized name is SQLSTATE `22023` naming it, and NULL flags give NULL.
-The refusal is raised PER ROW, as PostgreSQL's `DATE_TRUNC` raises its unknown
-unit: a predicate no row reaches — `WHERE id < 0 AND TCP_FLAGS_HAS_ALL(f,'XX')`
-— answers zero rows rather than an error.
+Where both apply the NAME wins — `TCP_FLAGS_HAS_ALL(f,'ACKK')` is `22023` on a
+row whose `f` is NULL — so whether a typo is an error never depends on the
+data; a NULL *name* is a NULL mask and gives NULL. The refusal is raised PER
+ROW, as PostgreSQL's `DATE_TRUNC` raises its unknown unit: a predicate no row
+reaches — `WHERE id < 0 AND TCP_FLAGS_HAS_ALL(f,'XX')` — answers zero rows
+rather than an error.
 
 A flag NAME may be any text expression, including a column; only literal names
 are folded at plan time and pushed into the scan.
@@ -2356,8 +2359,12 @@ once per dictionary ENTRY rather than once per row; Wadjet's own writer emits
 no dictionary pages, so that applies to Parquet written elsewhere and a table
 ingested through Wadjet is evaluated per value. Either way a flags column
 referenced only by the filter is never materialized.
-`WADJET_FLAG_DICT_PUSHDOWN=0` disables the pushdown. A flag predicate never causes a row group to be skipped — a
-min/max range cannot prove a bit.
+`WADJET_FLAG_DICT_PUSHDOWN=0` disables the pushdown. A flag predicate prunes
+nothing BEFORE it is evaluated — a min/max range cannot prove a bit, and the
+dictionary-probe prune answers only "is this exact value absent" — so no
+statistics prune is ever attributed to one. A row group whose values the scan
+has already read and found unmatching is still skipped, which is the ordinary
+post-evaluation skip and a different counter.
 
 A top-level projection of `TCP_FLAGS(flags)` is declared `TEXT` rather than
 `ARRAY`, as every container-returning function's is, and renders Go's slice
@@ -2657,7 +2664,7 @@ See [data-types.md](data-types.md) §Timestamp, "One rendering".
 | Function | Description | Example |
 |----------|-------------|---------|
 | `TO_HEX(n)` | Convert integer to hex string | `TO_HEX(255)` → `'ff'` |
-| `FROM_HEX(s)` | Convert hex string to integer | `FROM_HEX('ff')` → `255` |
+| `FROM_HEX(s)` | Convert a hex string to a BIGINT. The WHOLE string must be hexadecimal and fit a signed 64-bit integer; anything else is NULL, as `FROM_BASE(s,16)` answers | `FROM_HEX('ff')` → `255`, `FROM_HEX('12zz')` → NULL |
 | `TO_BASE64(s)` | Encode string to Base64 | `TO_BASE64('hello')` |
 | `FROM_BASE64(s)` | Decode Base64 string | `FROM_BASE64('aGVsbG8=')` |
 | `FROM_BASE(s, base)` | Convert string in given base to int | `FROM_BASE('ff', 16)` → `255` |

@@ -2211,6 +2211,30 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        unit, so a predicate no row reaches answers zero rows rather than an
        error.
 
+     **A NAME THE TABLE DOES NOT KNOW OUTRANKS A NULL FLAGS ARGUMENT**
+     (decided 2026-09-08, round 3, #966 P4). The family says both "NULL flags
+     give NULL" and "an unknown name is 22023", and did not say which wins:
+     the three predicates folded the mask first and raised, while the legacy
+     `has_tcp_flag` checked both arguments for NULL first and answered NULL, so
+     whether a typo was an ERROR depended on the row the evaluator was on.
+     PostgreSQL decides it for the operator equivalent — a malformed mask
+     operand, measured on 17.11:
+
+     | probe | PostgreSQL 17.11 |
+     |---|---|
+     | `SELECT NULL::bigint & 'x'::bigint` | `ERROR 22P02 invalid input syntax` |
+     | `SELECT 'x'::int FROM (VALUES (1)) t WHERE false` | the same ERROR |
+     | `SELECT date_trunc('BOGUS', NULL::timestamp)` | `NULL` |
+
+     The first two are the shape here: the names are CONVERTED into the mask
+     operand, and neither a NULL other operand nor an empty row set excuses a
+     spelling that cannot be converted. (`date_trunc` is the strict-function
+     shape, where the bad thing is an argument to a function that is never
+     called; it is not this.) So the names are folded first everywhere, and a
+     NULL *name* — a NULL mask operand, `NULL & NULL` — still answers NULL.
+     Gated in `expr.TestAnUnknownFlagNameOutranksANullFlagsArgument` and on
+     five arms by the census's `unknown_name_on_a_null_row` cells.
+
      `tcp_flags_from_string`, which reads a COMMA-SEPARATED list rather than an
      argument list, splits the two cases and answers the arithmetic where it
      can (decided 2026-09-08, round 2): an EMPTY string is a list of no names
@@ -2264,7 +2288,11 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `BITWISE_OR(f8,1) + 0` answered `4611686018427387904`, two spellings of
      one value disagreeing.
 
-     FOUR RESIDUAL DIVERGENCES in that family, stated rather than glossed:
+     FIVE RESIDUAL DIVERGENCES in that family, stated rather than glossed.
+     They are LIMITATIONS, not cells where this engine was measured to agree
+     with PostgreSQL: no gate counts any of them as agreement, and the arm
+     census normalizes or labels each one where it appears (#966 round 2, N3).
+     The int4-operand widening at the head of this entry is filed as #1018.
 
      - **`BITWISE_RIGHT_SHIFT` is Trino's LOGICAL shift, not PostgreSQL's
        `>>`.** PostgreSQL's `>>` on an integer is arithmetic (sign-preserving):
@@ -2291,6 +2319,19 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        is Trino's rendering; PostgreSQL has no `to_base`. `TO_HEX` is
        PostgreSQL's function and renders the machine word, so the two disagree
        on a negative argument by design.
+     - **`FROM_HEX` answers NULL for text that is not hexadecimal, where
+       PostgreSQL's decoder RAISES.** (Decided 2026-09-08, round 3, #966 N2.)
+       `decode('12zz','hex')` is 22023 on 17.11; `FROM_HEX('12zz')` is NULL
+       here, which is what this engine's own `FROM_BASE('12z',16)` answers and
+       what the rest of its parse-or-NULL family does. What it must NOT do is
+       what it did: `fmt.Sscanf(..., "%x")` consumed the valid PREFIX and
+       reported success, so `FROM_HEX('12zz')` was 18 — a number derived from
+       text that is not a number, and the opposite of the sibling function's
+       answer for the same input. The whole string is required now. A 16-digit
+       word with the top bit set stays NULL: the result is a signed int64 and
+       the value does not fit one, which is also FROM_BASE's answer. Gated in
+       `expr.TestFromHexRequiresTheWholeString`, which checks both spellings on
+       every cell.
 
      Gated in `expr.TestABitwiseOperatorIsExactOverASixtyFourBitPattern`,
      `expr.TestTheWholeBitwiseFamilyIsExact` (a twelve-row PostgreSQL
@@ -2300,13 +2341,38 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `expr.TestAnIntegerFunctionsValueSurvivesTheArithmeticAboveIt`, and the
      `bitwise_*` cells of the five-arm census.
 
-     **The knock-on of the declaration change is PostgreSQL-correct, and is
-     recorded here because it is wider than the four functions.**
-     `BITWISE_AND(3,3)/2` was `1.5` and is `1`, which is what PostgreSQL
-     answers for integer division; `SUM(BITWISE_AND(f,18))` comes back
-     `bigint` rather than `double precision` and `AVG(...)` numeric, which is
-     ADR-0024's integer-accumulator rule reached through a function that now
-     declares an integer.
+     **The knock-on of the declaration change is wider than the four
+     functions, and the aggregate half of it was WRONG when it was first
+     written here.** `BITWISE_AND(3,3)/2` was `1.5` and is `1`, which is what
+     PostgreSQL answers for integer division; that half was right.
+
+     The aggregate half said `SUM(BITWISE_AND(f,18))` comes back `bigint` and
+     called that PostgreSQL-correct. It is not. PostgreSQL's rule is by the
+     OPERAND'S WIDTH — `sum(int4)` is bigint, `sum(int8)` is numeric — and
+     `f8 & 18` is bigint there, so its SUM is NUMERIC (measured on 17.11:
+     `pg_typeof(sum(f8 & 18))` is `numeric`, `pg_typeof(sum(f4 & 18))` is
+     `bigint`). Taking the bigint accumulator for an int8-domain operand does
+     not merely mislabel the answer: over two rows of 2^62 it REFUSES with
+     22003 where PostgreSQL answers 9223372036854775808, and the same
+     expression answered 2^63 as a float64 before the declaration changed — a
+     right value turned into an error (#966 round 2, B1).
+
+     The rule is now the declaration's own width, read through
+     `physical.aggInputIsWideInteger`'s function arm: a function with a fixed
+     `RetInt64` declaration is an int8-domain operand, so SUM over it is
+     numeric, and one with a fixed `RetInt32` is an int4-domain one, so SUM
+     over it is bigint (`SUM(LENGTH(s))` is bigint here and on PostgreSQL).
+     The grouped and the windowed spellings share that walk and move together.
+
+     Because every bitwise result is declared int8 here, `SUM(BITWISE_AND(
+     int4_col, 18))` is NUMERIC where PostgreSQL's `sum(int4_col & 18)` is
+     bigint — the same digits under a different OID, and a consequence of the
+     widening recorded at the top of this entry rather than a second decision.
+     Pinned on the wire in
+     `pgwire.TestPGWireDeclaresSumOverAnIntegerFunction` (OID 1700 for the
+     bitwise spellings, OID 20 for the LENGTH control) and on five arms in
+     `coordinator.TestTheTCPFlagFamilyAnswersPostgresBitArithmetic`'s
+     `sum_*` cells.
 
    - **`tcp_flags` declares an ARRAY and a top-level projection of it is
      TEXT.** (Added 2026-09-08, arc A2, #966; the limitation predates it.)

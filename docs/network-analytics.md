@@ -502,6 +502,14 @@ asked for. An empty name list is `22023` too. NULL flags give NULL, so a flow
 with no recorded flags matches none of the three predicates — including
 `HAS_NONE`.
 
+When the two meet, **the name wins**: `TCP_FLAGS_HAS_ALL(flags,'ACKK')` is
+`22023` even on a row whose `flags` is NULL, so a typo is an error whatever the
+data holds rather than an error on some rows and a NULL on others. A NULL
+*name* is different — that is a NULL mask, and the call is NULL. This follows
+PostgreSQL, which raises for the operator equivalent whatever the rows are:
+`SELECT NULL::bigint & 'x'::bigint` is `22P02`, and so is `'x'::int` under
+`WHERE false`.
+
 The refusal is raised per ROW, as PostgreSQL's `DATE_TRUNC` raises its unknown
 unit, so a predicate that no row reaches answers zero rows rather than an
 error. A flag name may also be a column or any other text expression; only
@@ -569,8 +577,18 @@ Wadjet's own writer does not emit dictionary pages today, so a table ingested
 through Wadjet takes the second path; the first applies to Parquet files
 written elsewhere and registered here.
 
-A flag predicate never causes a row group to be *skipped*: a min/max range
-cannot prove anything about a bit, so no such prune is attempted.
+A flag predicate does no *pruning before it is evaluated*: a min/max range
+cannot prove anything about a bit (`min=2, max=16` still admits a row holding
+18), and the dictionary-probe prune answers "is this exact value absent",
+which says nothing about a mask — so neither is attempted and
+`StatsPrunedRowGroupsSnapshot` never moves for a flag conjunct.
+
+A row group can still be skipped *after* the predicate has run: once the scan
+has evaluated the flag column over a group and found no matching row, it drops
+the whole group and counts it in the scan filter's own `skipped` counter. That
+is the ordinary post-evaluation skip every pushed predicate gets, and it is a
+different claim from a prune — a prune decides without reading the values,
+which is what a bit test cannot do.
 
 ### Via HTTP API
 
