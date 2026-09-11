@@ -2028,6 +2028,17 @@ The **bitwise family follows its operands**, exactly as arithmetic does:
 `sum(int_col & 18)` and `sum(bigint_col & 18)`. A shift follows the value it
 shifts, not the count.
 
+The width **survives a derived table, a CTE, a set operation and a window
+slot**. It is part of the column's declaration, the way a `DECIMAL`'s
+precision and scale are, so `SELECT SUM(v) FROM (SELECT BITWISE_AND(id,3) AS v
+FROM flows) s` is `BIGINT` exactly as the direct `SUM(BITWISE_AND(id,3))` is,
+and `SUM(v) OVER ()` over the same derived table agrees with both. A set
+operation takes the WIDER arm, as PostgreSQL's common-type rule does: a
+`UNION ALL` of two `int4` arms is `BIGINT` summed and one with a `bigint` arm
+is `NUMERIC`. `MIN` and `MAX` hand back a value the column held and keep its
+width; `SUM` and `COUNT` answer `bigint`, so a `SUM` over a `SUM` is
+`NUMERIC`.
+
 A **`CAST` answers in its target's width**, whatever the operand's was, as
 PostgreSQL does: `SUM(bigint_col::BIGINT)` and `SUM(int_col::BIGINT)` are
 `NUMERIC`, `SUM(bigint_col::INTEGER)` is `BIGINT`, and a cast to a

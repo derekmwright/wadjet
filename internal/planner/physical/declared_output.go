@@ -670,6 +670,22 @@ type colDecls struct {
 	// value back at the wrong power of ten — which is why colRefDeclaredType
 	// used to decline the type outright (ADR-0024 item 2, #529/#555/#587).
 	dec map[string]logical.DecimalMeta
+	// intWidth carries PostgreSQL's INTEGER WIDTH of the integer entries in
+	// types — the fact that decides what SUM over the column declares, and
+	// the one thing the carrier cannot say.
+	//
+	// It exists for the same reason dec does, one type family over. Every
+	// integer computes and materializes in an int64 (ADR-0024's recorded
+	// widening), so `BITWISE_AND(id, 3)` published by a derived table is an
+	// INT64 column whose PostgreSQL type is integer — and the reader that
+	// had only the carrier declared `SUM(v)` numeric where PostgreSQL
+	// declares bigint, on every arm and both wire formats, while the DIRECT
+	// call one level down declared it right (#1018 round 5, B1).
+	//
+	// An absent entry is "this declaration says nothing", not int4: the
+	// reader then falls back to the carrier, which for a base column IS the
+	// catalog's storage width.
+	intWidth map[string]intWidth
 	// subqueryDecl resolves a SCALAR SUBQUERY's single declared output
 	// column, and nil means "this caller cannot ask" — which is what every
 	// construction site that has no Planner leaves it at, and what
@@ -753,6 +769,30 @@ func (d colDecls) colDecl(n *plansql.ColRef) (parquet.Column, bool) {
 		return c, true
 	}
 	return parquet.Column{}, false
+}
+
+// colIntWidth resolves a column reference to the PostgreSQL INTEGER WIDTH its
+// declaration carries, in exactly the order colDecl resolves the type — so the
+// width and the type can never describe two different columns, which is the
+// rule ADR-0022 item 1 states for every half of a declaration.
+//
+// ok=false means the declaration is silent, and the caller falls back to the
+// carrier. A ROW FIELD is deliberately not answered here: a field's width is
+// its own declared type's, which colDecls.field already carries.
+func (d colDecls) colIntWidth(n *plansql.ColRef) (intWidth, bool) {
+	if n == nil || len(d.intWidth) == 0 {
+		return intWidthUnknown, false
+	}
+	if n.Table != "" {
+		if w, ok := d.intWidth[strings.ToLower(n.Table+"."+n.Column)]; ok {
+			return w, true
+		}
+	}
+	if d.isFieldPath(n) {
+		return intWidthUnknown, false
+	}
+	w, ok := d.intWidth[strings.ToLower(n.Column)]
+	return w, ok
 }
 
 // field resolves n as a ROW field path and returns the field's full
@@ -898,9 +938,10 @@ func declTypeParts(d expr.DeclType) (parquet.TypeID, int, int) {
 // SELECT list and the plan-declared schema now answer from one map.
 func emittedColDecls(n *logical.Node) colDecls {
 	return colDecls{
-		types:  emittedColTypes(n),
-		fields: inputColFields(n),
-		dec:    emittedColDecimal(n),
+		types:    emittedColTypes(n),
+		fields:   inputColFields(n),
+		dec:      emittedColDecimal(n),
+		intWidth: emittedColIntWidth(n),
 	}
 }
 

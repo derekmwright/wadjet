@@ -140,7 +140,7 @@ func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID,
 			// agree between the two paths at plan time.
 			return parquet.TypeDecimal, true
 		}
-		if t, ok := aggIntegerOutputType(fn, in); ok {
+		if t, ok := aggIntegerOutputType(fn, aggIntegerInputWidth(node, agg.InputCol, in)); ok {
 			return t, true
 		}
 		if fn == "sum" && in == parquet.TypeFloat32 {
@@ -264,7 +264,7 @@ func aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.Deci
 	// #784. It is asked BEFORE the DECIMAL lookup because the input is not a
 	// DECIMAL column at all and aggInputColumnDecimal would decline it.
 	if t, ok := aggInputColumnType(node, agg.InputCol); ok {
-		if m, ok := aggIntegerOutputDecimal(fn, t); ok {
+		if m, ok := aggIntegerOutputDecimal(fn, aggIntegerInputWidth(node, agg.InputCol, t)); ok {
 			return m, true
 		}
 	}
@@ -386,6 +386,57 @@ func aggInputColumnDecimal(node *logical.Node, col string) (logical.DecimalMeta,
 		}
 	}
 	return logical.DecimalMeta{}, false
+}
+
+// aggIntegerInputWidth is the type exec.IntegerAccOutputType must be asked
+// about for a BARE aggregate argument: the column's declared PostgreSQL WIDTH,
+// not the INT64 carrier it happens to be stored in.
+//
+// For a base column the two are the same fact, because the carrier IS the
+// catalog's storage type. For a MATERIALIZED column they are not: every
+// integer expression materializes as INT64 (ADR-0024's recorded widening), so
+// `SELECT SUM(v) FROM (SELECT BITWISE_AND(id, 3) AS v FROM users) s` asked
+// about INT64 and declared numeric, where the identical DIRECT call one level
+// down declared bigint and PostgreSQL declares bigint. Same number, two boxes,
+// on every arm and both wire formats (#1018 round 5, B1).
+//
+// This is the ONE reader of the declared width for a bare argument, and it is
+// deliberately narrow: only an INT64 carrier can be hiding an int4 width, and
+// only a declaration that SAYS int4 narrows it. Silence leaves the carrier
+// alone.
+func aggIntegerInputWidth(node *logical.Node, col string, carrier parquet.TypeID) parquet.TypeID {
+	if carrier != parquet.TypeInt64 {
+		return carrier
+	}
+	if w, ok := aggInputColumnIntWidth(node, col); ok && w == intWidth4 {
+		return parquet.TypeInt32
+	}
+	return carrier
+}
+
+// aggInputColumnIntWidth resolves a bare aggregate argument's declared integer
+// width, in exactly the order aggInputColumnType resolves its TYPE — the SCANS
+// first, then the naming scope below the aggregate — because the two answer one
+// question about one column and must not describe different ones.
+//
+// A name a SCAN carries is answered from the catalog and never from a derived
+// table that shadows it, which is the same ADR-0026 rule that ordering exists
+// for: the worker reads the scan's column.
+func aggInputColumnIntWidth(node *logical.Node, col string) (intWidth, bool) {
+	if t, ok := scanColumnType(node, col); ok {
+		return catalogIntWidth(t), true
+	}
+	if node != nil && len(node.Children) == 1 {
+		if decls, _, ok := namingScopeDecls(&plansql.ColRef{Column: col}, node.Children[0]); ok {
+			if w, ok := decls.colIntWidth(&plansql.ColRef{Column: col}); ok {
+				return w, true
+			}
+			if t, c := colRefDeclaredType(&plansql.ColRef{Column: col}, decls); c == expr.Decided {
+				return catalogIntWidth(t.ID), true
+			}
+		}
+	}
+	return intWidthUnknown, false
 }
 
 // aggOutputFromInputDecl derives a computed argument's aggregate output from

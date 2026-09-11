@@ -359,6 +359,43 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmetic(t *testing.T) {
 			`SELECT SUM(BIT_COUNT(4611686018427387922)) AS v FROM tcpflow WHERE id <= 2`,
 			[]string{"v=6"}},
 
+		// ---- THE WIDTH SURVIVES MATERIALIZATION (#1018 round 5, B1).
+		//
+		// PostgreSQL's integer width is a property of a column's
+		// DECLARATION, and it rides every derived table, CTE and
+		// set-operation arm the way a DECIMAL's (p,s) does. Here every
+		// integer expression materializes as an INT64 carrier (ADR-0024's
+		// recorded widening), so before this the DIRECT call declared bigint
+		// and the SAME call one level down declared numeric — the same
+		// number in two boxes, on all five arms.
+		//
+		// The RENDERING is the claim: `v=int64:36` is PostgreSQL's bigint and
+		// a bare `v=36` is its numeric. Every number below is live
+		// PostgreSQL 17.11's over `(0,2,18,16)` at each width.
+		{"derived_narrow_mask_sum_is_bigint",
+			`SELECT SUM(v) AS v FROM (SELECT BITWISE_AND(f4,18) AS v FROM tcpflow WHERE id <= 4) s`,
+			[]string{"v=int64:36"}},
+		{"derived_wide_mask_sum_is_numeric",
+			`SELECT SUM(v) AS v FROM (SELECT BITWISE_AND(f8,18) AS v FROM tcpflow WHERE id <= 4) s`,
+			[]string{"v=36"}},
+		{"derived_int4_result_function_sum_is_bigint",
+			`SELECT SUM(v) AS v FROM (SELECT REGEXP_COUNT('abab','a') AS v FROM tcpflow WHERE id <= 2) s`,
+			[]string{"v=int64:4"}},
+		{"derived_int8_result_function_sum_is_numeric",
+			`SELECT SUM(v) AS v FROM (SELECT BIT_COUNT(4611686018427387922) AS v FROM tcpflow WHERE id <= 2) s`,
+			[]string{"v=6"}},
+		{"cte_over_a_derived_narrow_mask_is_bigint",
+			`WITH c AS (SELECT v FROM (SELECT BITWISE_AND(f4,18) AS v FROM tcpflow WHERE id <= 4) s)
+			 SELECT SUM(v) AS v FROM c`,
+			[]string{"v=int64:36"}},
+		{"a_union_all_of_two_narrow_arms_is_bigint",
+			`SELECT SUM(v) AS v FROM (SELECT BITWISE_AND(f4,18) AS v FROM tcpflow WHERE id <= 4
+			  UNION ALL SELECT BITWISE_AND(f4,3) AS v FROM tcpflow WHERE id <= 4) s`,
+			[]string{"v=int64:40"}},
+		{"a_union_all_with_one_wide_arm_is_numeric",
+			`SELECT SUM(v) AS v FROM (SELECT BITWISE_AND(f4,18) AS v FROM tcpflow WHERE id <= 4
+			  UNION ALL SELECT BITWISE_AND(f8,18) AS v FROM tcpflow WHERE id <= 4) s`,
+			[]string{"v=72"}},
 		// ---- a shape the pushdown DECLINES (computed argument): the residual
 		// exec filter must answer what the pushed spelling answers.
 		//

@@ -23,6 +23,7 @@ package pgwire
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
@@ -281,5 +282,129 @@ func TestPGWireDeclaresSumOverAnIntegerFunction(t *testing.T) {
 				t.Errorf("rendered %q, want %q\n  SQL: %s", got, tc.want, tc.sql)
 			}
 		})
+	}
+}
+
+// WHAT A MATERIALIZED INTEGER COLUMN DECLARES (#1018 round 5, B1).
+//
+// PostgreSQL's integer WIDTH is a property of a column's DECLARATION, and it
+// survives materialization: `SELECT SUM(v) FROM (SELECT id & 3 AS v FROM t) s`
+// is bigint there, exactly as the direct `SUM(id & 3)` is. Here every integer
+// expression materializes as an INT64 carrier (ADR-0024's recorded widening),
+// so a reader that had only the carrier declared numeric for the derived
+// spelling and bigint for the direct one — the same number in two boxes,
+// depending only on whether the CALL was still visible in the AST.
+//
+// Every OID below is live PostgreSQL 17.11's, measured over the same three
+// rows (id 1..3 integer, visits 100/42/200 bigint, name alice/bob/carol). The
+// AVG cells are the control that says a cell moved because of the WIDTH rule
+// and not because the aggregate's whole typing moved: AVG is numeric on both
+// sides in PostgreSQL. Their DIGITS are this engine's fixed +4 scale, which is
+// ADR-0024 item 2's recorded divergence and not this gate's claim.
+func TestPGWireDeclaresSumOverAMaterializedIntegerColumn(t *testing.T) {
+	_, srv := setupRealDB(t)
+	conn := connectPgconn(t, srv.Addr())
+
+	for _, tc := range []struct {
+		name, sql string
+		oid       uint32
+		want      string
+	}{
+		// ---- one derived level, each class.
+		{"derived_narrow_and", `SELECT SUM(v) AS v FROM (SELECT BITWISE_AND(id,3) AS v FROM users) s`,
+			20, "6"},
+		{"derived_wide_and", `SELECT SUM(v) AS v FROM (SELECT BITWISE_AND(visits,18) AS v FROM users) s`,
+			1700, "2"},
+		{"derived_regexp_count", `SELECT SUM(v) AS v FROM (SELECT REGEXP_COUNT(name,'a') AS v FROM users) s`,
+			20, "2"},
+		{"derived_payload_length", `SELECT SUM(v) AS v FROM (SELECT PAYLOAD_LENGTH(name) AS v FROM users) s`,
+			20, "13"},
+		// An int8-RESULT function through the same shape stays numeric:
+		// PostgreSQL declares bit_count BIGINT and its SUM is numeric.
+		{"derived_bit_count", `SELECT SUM(v) AS v FROM (SELECT BIT_COUNT(visits) AS v FROM users) s`,
+			1700, "9"},
+
+		// ---- two levels: a CTE over a derived table, and a derived table
+		// over a derived table. The width has to ride EVERY boundary, not the
+		// first one.
+		{"cte_over_derived_narrow",
+			`WITH c AS (SELECT v FROM (SELECT BITWISE_AND(id,3) AS v FROM users) s) SELECT SUM(v) AS v FROM c`,
+			20, "6"},
+		{"cte_over_derived_wide",
+			`WITH c AS (SELECT v FROM (SELECT BITWISE_AND(visits,18) AS v FROM users) s) SELECT SUM(v) AS v FROM c`,
+			1700, "2"},
+		{"two_derived_levels",
+			`SELECT SUM(v) AS v FROM (SELECT v FROM (SELECT BITWISE_AND(id,3) AS v FROM users) s1) s2`,
+			20, "6"},
+
+		// ---- a SET OPERATION resolves to the COMMON type of its arms, which
+		// for two integers is the wider one (both measured on PostgreSQL).
+		{"union_all_narrow",
+			`SELECT SUM(v) AS v FROM (SELECT BITWISE_AND(id,3) AS v FROM users
+			  UNION ALL SELECT BITWISE_AND(id,7) AS v FROM users) s`, 20, "12"},
+		{"union_all_mixed_widths",
+			`SELECT SUM(v) AS v FROM (SELECT BITWISE_AND(id,3) AS v FROM users
+			  UNION ALL SELECT BITWISE_AND(visits,18) AS v FROM users) s`, 1700, "8"},
+
+		// ---- the other producers of a materialized integer column.
+		{"derived_arith", `SELECT SUM(v) AS v FROM (SELECT id*2 AS v FROM users) s`, 20, "12"},
+		{"derived_cast_to_bigint", `SELECT SUM(v) AS v FROM (SELECT CAST(id AS BIGINT) AS v FROM users) s`,
+			1700, "6"},
+		{"derived_bare_int4_column", `SELECT SUM(v) AS v FROM (SELECT id AS v FROM users) s`, 20, "6"},
+		{"derived_bare_int8_column", `SELECT SUM(v) AS v FROM (SELECT visits AS v FROM users) s`,
+			1700, "342"},
+		{"derived_group_key",
+			`SELECT SUM(k) AS v FROM (SELECT BITWISE_AND(id,3) AS k, COUNT(*) AS c
+			  FROM users GROUP BY BITWISE_AND(id,3)) s`, 20, "6"},
+		// MIN hands back a value the column HELD, so it keeps the column's
+		// width; SUM ANSWERS in bigint, so a SUM of a SUM is numeric.
+		{"derived_min_keeps_the_width",
+			`SELECT SUM(m) AS v FROM (SELECT MIN(v) AS m FROM (SELECT BITWISE_AND(id,3) AS v FROM users) s1) s2`,
+			20, "1"},
+		{"derived_sum_of_a_sum_is_numeric",
+			`SELECT SUM(s1) AS v FROM (SELECT SUM(v) AS s1 FROM (SELECT BITWISE_AND(id,3) AS v FROM users) s0) s`,
+			1700, "6"},
+
+		// ---- the WINDOW slot reads the same declaration as the grouped one.
+		{"windowed_derived_narrow_and",
+			`SELECT SUM(v) OVER () AS v FROM (SELECT BITWISE_AND(id,3) AS v FROM users) s LIMIT 1`, 20, "6"},
+		{"windowed_derived_wide_and",
+			`SELECT SUM(v) OVER () AS v FROM (SELECT BITWISE_AND(visits,18) AS v FROM users) s LIMIT 1`,
+			1700, "2"},
+		{"windowed_derived_regexp_count",
+			`SELECT SUM(v) OVER () AS v FROM (SELECT REGEXP_COUNT(name,'a') AS v FROM users) s LIMIT 1`,
+			20, "2"},
+
+		// ---- AVG is numeric on BOTH sides in PostgreSQL: the control.
+		{"avg_derived_narrow_is_numeric",
+			`SELECT AVG(v) AS v FROM (SELECT BITWISE_AND(id,3) AS v FROM users) s`, 1700, "2.0000"},
+		{"windowed_avg_derived_narrow_is_numeric",
+			`SELECT AVG(v) OVER () AS v FROM (SELECT BITWISE_AND(id,3) AS v FROM users) s LIMIT 1`,
+			1700, "2.0000"},
+	} {
+		// Both wire FORMATS. A value oracle cannot see a right value under a
+		// wrong OID, and a text-only gate cannot see a binary renderer that
+		// disagrees with the declaration it was handed.
+		for _, format := range []int16{0, 1} {
+			t.Run(fmt.Sprintf("%s/format=%d", tc.name, format), func(t *testing.T) {
+				res := conn.ExecParams(context.Background(), tc.sql, nil, nil, nil,
+					[]int16{format}).Read()
+				if res.Err != nil {
+					t.Fatalf("ExecParams: %v\n  SQL: %s", res.Err, tc.sql)
+				}
+				if got := res.FieldDescriptions[0].DataTypeOID; got != tc.oid {
+					t.Errorf("declared OID %d, PostgreSQL declares %d\n  SQL: %s",
+						got, tc.oid, tc.sql)
+				}
+				if len(res.Rows) != 1 {
+					t.Fatalf("got %d rows, want 1\n  SQL: %s", len(res.Rows), tc.sql)
+				}
+				if format == 0 {
+					if got := string(res.Rows[0][0]); got != tc.want {
+						t.Errorf("rendered %q, want %q\n  SQL: %s", got, tc.want, tc.sql)
+					}
+				}
+			})
+		}
 	}
 }

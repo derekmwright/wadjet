@@ -2415,6 +2415,63 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `coordinator.TestTheTCPFlagFamilyAnswersPostgresBitArithmetic`'s `sum_*`
      cells.
 
+     **THE WIDTH IS A PROPERTY OF THE COLUMN'S DECLARATION AND SURVIVES
+     MATERIALIZATION** (decided 2026-09-11, round 5, #1018 B1). The repair
+     above reads the table while the CALL is still visible in the AST, and
+     that is not everywhere the width is needed: a derived table, a CTE, a
+     set-operation arm and a window slot MATERIALIZE the expression into a
+     column, and every integer materializes as INT64 (ADR-0024's recorded
+     widening). So the direct `SUM(BITWISE_AND(id,3))` declared bigint and
+     `SELECT SUM(v) FROM (SELECT BITWISE_AND(id,3) AS v FROM users) s`
+     declared numeric — the same number in two boxes, depending only on
+     whether the call had been materialized. Measured against 17.11:
+
+     | shape | PostgreSQL | before | now |
+     |---|---|---|---|
+     | `SUM(id & 3)` | `bigint` | `bigint` | `bigint` |
+     | `SUM(v)` over `(SELECT id & 3 AS v)` | `bigint` | **`numeric`** | `bigint` |
+     | `SUM(v) OVER ()` over the same | `bigint` | **`numeric`** | `bigint` |
+     | `SUM(v)` over `(SELECT regexp_count(name,'a') AS v)` | `bigint` | **`numeric`** | `bigint` |
+     | `SUM(v)` over `(SELECT id * 2 AS v)` | `bigint` | **`numeric`** | `bigint` |
+     | a CTE over that derived table | `bigint` | **`numeric`** | `bigint` |
+     | a UNION ALL of two int4 arms | `bigint` | **`numeric`** | `bigint` |
+     | `SUM(v)` over `(SELECT visits & 18 AS v)` | `numeric` | `numeric` | `numeric` |
+     | a UNION ALL with ONE int8 arm | `numeric` | `numeric` | `numeric` |
+     | `SUM(v)` over `(SELECT CAST(id AS BIGINT) AS v)` | `numeric` | `numeric` | `numeric` |
+
+     **DECLARED WIDTH**, precisely, is the int4/int8 domain an output column
+     carries BESIDE its carrier, exactly as a DECIMAL's (p,s) rides beside
+     `TypeDecimal`: `physical.colDecls.intWidth`, filled by
+     `physical.emittedColIntWidth` for every node kind `emittedColTypes`
+     walks, and read by `declaredIntWidth`'s ColRef arm and by
+     `aggIntegerInputWidth` / `windowBareArgWidth` for a bare argument. It is
+     THREE-valued — int4, int8, and UNKNOWN — and unknown is not int4: a
+     declaration that says nothing leaves the reader on the carrier, which
+     for a base column IS the catalog's storage width. The rules, one per
+     producer: a CALL takes `expr.PGIntegerResultWidth`'s row; arithmetic and
+     the bitwise family take the WIDEST integer operand; a bare column takes
+     its catalog type (INT32/PORT/PROTOCOL are int4, INT64/DURATION int8); a
+     CAST takes its TARGET NAME; an integer literal is int4 unless it does not
+     fit; an aggregate takes its own declared result's width, except
+     MIN/MAX/MIN_BY/MAX_BY, which hand back a value the input HELD and keep
+     its width; a set operation takes the WIDEST arm and records nothing at
+     all if any arm is silent, because narrowing on incomplete information is
+     how a SUM that should be numeric comes back as a bigint that can
+     overflow.
+
+     What it is NOT is an INT32 vector. The engine computes every integer
+     expression in an int64, and declaring the narrow carrier for it would put
+     every such value in front of the #361 store guard. The width is metadata
+     beside the carrier and never the carrier.
+
+     Gated on all five arms by
+     `coordinator.TestTheTCPFlagFamilyAnswersPostgresBitArithmetic`'s
+     `derived_*`, `cte_over_*`, `a_union_all_*` and `windowed_sum_over_*`
+     cells, and on the wire in both formats by
+     `pgwire.TestPGWireDeclaresSumOverAMaterializedIntegerColumn` (22 cells
+     x 2 formats). Reverting the ColRef arm to the carrier fails the derived
+     cells while the direct cells still pass.
+
      The SCALAR declaration is a separate, pre-existing divergence and this
      entry does not close it: `SELECT REGEXP_COUNT('abab','a')` still declares
      OID 20 where PostgreSQL declares OID 23, because the engine has no int4

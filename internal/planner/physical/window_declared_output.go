@@ -85,6 +85,20 @@ func integerAccArgWidth(declared parquet.TypeID, wide bool) parquet.TypeID {
 	return declared
 }
 
+// windowBareArgWidth is aggIntegerInputWidth for the WINDOW spelling: the
+// width exec.IntegerAccOutputType is asked about for a BARE argument column,
+// read off the declaration the input publishes rather than off the INT64
+// carrier every integer expression materializes in.
+func windowBareArgWidth(decls colDecls, col string, carrier parquet.TypeID) parquet.TypeID {
+	if carrier != parquet.TypeInt64 {
+		return carrier
+	}
+	if w, ok := decls.colIntWidth(&plansql.ColRef{Column: col}); ok && w == intWidth4 {
+		return parquet.TypeInt32
+	}
+	return carrier
+}
+
 func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclType {
 	fn := strings.ToLower(strings.TrimSpace(we.Func))
 	minMax := fn == "min" || fn == "max"
@@ -106,7 +120,8 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 	// Zero-row results have no vector and depend solely on this declaration (#587);
 	// projection callers cannot rely on window runtime correction.
 	// See docs/internals/window-input-declaration-through-derived-plans.md for the design.
-	t, conf := colRefDeclaredType(&plansql.ColRef{Column: col}, emittedColDecls(node.Children[0]))
+	inDecls := emittedColDecls(node.Children[0])
+	t, conf := colRefDeclaredType(&plansql.ColRef{Column: col}, inDecls)
 	if conf != expr.Decided {
 		// A COMPUTED argument has no column declaration to read: the
 		// pre-window projection materializes `w_i32 * 1` under that name and
@@ -143,7 +158,13 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 			// t is a COLUMN's declaration here — a computed argument does
 			// not resolve through colRefDeclaredType and is typed in the
 			// undecided arm above, by windowComputedArgDecl.
-			out, prec, scale, ok := exec.IntegerAccOutputType(fn == "avg", t.ID)
+			// The DECLARED width, not the INT64 carrier: a derived table's
+			// `BITWISE_AND(id, 3) AS v` is an int4 column in an int64 box,
+			// and `SUM(v) OVER ()` over it declares bigint in PostgreSQL.
+			// The grouped spelling asks aggIntegerInputWidth for the same
+			// fact, from the same map (#1018 round 5, B1).
+			out, prec, scale, ok := exec.IntegerAccOutputType(fn == "avg",
+				windowBareArgWidth(inDecls, col, t.ID))
 			if !ok {
 				return expr.Decl(windowOutputType(fn))
 			}
