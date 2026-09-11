@@ -113,36 +113,14 @@ func (db *DB) ExecuteParsed(ctx context.Context, parsed *plansql.ParsedQuery) (r
 	}
 }
 
-// resolveInsertColumns turns an INSERT's column list into the columns it
-// names, refusing one the table does not have.
-//
-// It returns the STORED name for each position (so the row map is keyed the
-// way the schema is) beside the whole parquet.Column (so a DECIMAL literal is
-// judged against the declared (p, s) here rather than at the flush, which is
-// what names the row that carried it — #647).
-//
-// The message and the class are PostgreSQL's, and the reference RESOLVES for
-// the same reason ResolveDMLSetClauses' does: INSERT was the one DML clause
-// that resolved case-SENSITIVELY, so `INSERT INTO t (ID)` failed on a table
-// whose column is `id` while `UPDATE t SET ID = …` succeeded.
-//
-// Through batch.ResolveSchemaIndex, though, not through a map keyed by the
-// fold. This was the FIFTH site of the class ResolveDMLSetClauses, checkOnKeys
-// and checkDMLColumns were rewritten out of: `strings.ToLower(raw)` into a
-// fold-keyed map throws away the only evidence there is. The lexer has already
-// preserved the distinction here — `parseInsert` stores `colTok.val`, so an
-// unquoted name arrives FOLDED and a delimited one keeps its bytes — and
-// lowercasing both answers them the same. Measured over
-// `hits(WatchID, counterid, UserAgent)`:
-//
-//	INSERT INTO hits ("WATCHID", counterid, "USERAGENT") VALUES (9, 9, 'x')
-//	  before: INSERT 1, the row STORED     after: 42703   (PostgreSQL: 42703)
-//	INSERT INTO hits ("WatchID", counterid, "UserAgent") VALUES (9, 9, 'x')
-//	  before: INSERT 1                     after: INSERT 1   (PostgreSQL: ok)
-//
-// The write LANDED under a name PostgreSQL says does not exist — the same
-// disposition `SET "USERAGENT" = 'X'` had one door over. A FOLDED
-// `(watchid, counterid, useragent)` still resolves.
+// resolveInsertColumns returns each INSERT position's STORED column name
+// and full parquet.Column, so values are checked against declared (p,s) (#647).
+// Resolve through batch.ResolveSchemaIndex, never a fold-keyed map:
+// unquoted names arrive folded; delimited names retain their bytes.
+// Missing columns raise 42703 with the relation and reference named.
+// No list means every column in schema order; duplicate resolved columns
+// raise 42701 rather than overwrite one row-map key.
+// See docs/internals/insert-column-resolved-spelling.md for the design.
 func resolveInsertColumns(named []string, table string, schema []parquet.Column) ([]string, []parquet.Column, error) {
 	if len(named) == 0 {
 		// No explicit list: schema order, every column.
@@ -178,27 +156,12 @@ func resolveInsertColumns(named []string, table string, schema []parquet.Column)
 	return names, cols, nil
 }
 
-// dmlRelationError is a DML door's table lookup reported the way the SELECT
-// door already reports it.
-//
-// #719: all four doors wrapped catalog.GetTable's miss with %w and handed the
-// client `table "x": table "x" not found` and NO SQLSTATE, while
-// `MERGE ... USING nosuchtable` — which reaches the relation through db.Query
-// and therefore through the planner — answered 42P01 with PostgreSQL's own
-// wording. One statement class, two dispositions, and they disagreed on the
-// MESSAGE as well as the class. PostgreSQL 17 says
-// `relation "nosuchtable" does not exist`; so does this now, on every door.
-//
-// A transport failure is deliberately NOT 42P01: the table's existence is
-// unknown then, which is the same distinction physical.validate makes on the
-// read path.
-//
-// AMBIGUITY is part of the same message. A reference matching two registered
-// tables case-insensitively and neither byte-exact is one ResolveTableName
-// declines to answer, so GetTable reports the plain miss — and the writer got
-// `relation "mytab" does not exist` while the reader got that plus the two
-// candidates and how to disambiguate. One statement class, two messages again.
-// catalog.AmbiguousTableError is the ONE builder both doors raise now (#858).
+// dmlRelationError gives DML the SELECT door's lookup disposition (#719):
+// a missing table is 42P01, "relation ... does not exist".
+// A transport error must retain its cause, never claim nonexistence.
+// If no byte-exact match exists and multiple case-insensitive names match,
+// use catalog.AmbiguousTableError, shared with readers (#858).
+// See docs/internals/dml-relation-lookup-errors.md for the design.
 func (db *DB) dmlRelationError(name string, err error) error {
 	if errors.Is(err, catalog.ErrTableNotFound) {
 		if cands := db.catalog.AmbiguousTableNames(name); len(cands) > 1 {
@@ -464,30 +427,14 @@ func (db *DB) updateOnce(ctx context.Context, info *plansql.UpdateInfo) (*ExecRe
 		return nil, err
 	}
 
-	// Per-file streaming: box only the matched rows, hand them to the
-	// ingester, then commit that file's delete markers. The previous shape
-	// boxed every row of every file (even at zero WHERE selectivity) and
-	// accumulated all updated rows table-wide before one Ingest — a broad
-	// UPDATE held the whole table as boxed maps.
-	//
-	// EVERY REPLACEMENT ROW IS DURABLE BEFORE ANY MARKER IS COMMITTED. The
-	// markers accumulate across the whole statement, one FlushAll follows the
-	// loop, and only then does a single CommitDML commit them.
-	//
-	// Committing a file's marker inside the loop is what made this per-FILE
-	// rather than per-STATEMENT. Ingest only BUFFERS, so with the marker for
-	// file 1 already durable and its replacement rows still in RAM, a failure
-	// on file 2 — a legacy value past the column's precision, or an
-	// object-store error inside the auto-flush that bounds memory — returned
-	// without ever flushing, and file 1's matched rows were simply gone
-	// (#647 re-review). Marker-first, the shape before that, lost them on the
-	// FIRST file.
-	//
-	// The remaining duplication is closed by DeferManifestCommit: the
-	// ingester holds its flushed files OUT of the manifest and they land in
-	// the SAME CAS as the markers, so a refused commit has published nothing
-	// and the statement is simply redone (#691). What an interrupted attempt
-	// leaves behind is unreferenced objects in the store, never a row.
+	// Stream files and box only matched rows into the ingester.
+	// Every replacement row must be durable before any marker is committed:
+	// accumulate markers, FlushAll once after the loop, then one CommitDML (#647).
+	// DeferManifestCommit keeps flushed files out of the manifest until the SAME
+	// CAS publishes replacement files and markers (#691).
+	// A refused commit publishes nothing and can be redone; interruption may
+	// leave unreferenced objects, never published partial rows.
+	// See docs/internals/update-replacement-and-marker-commit.md for the design.
 	var totalUpdated int64
 	var ing *ingest.Ingester
 	var markers []catalog.DeleteMarker
@@ -791,28 +738,14 @@ func (db *DB) mergeOnce(ctx context.Context, info *plansql.MergeInfo) (*ExecResu
 	}, nil
 }
 
-// mergeExposedNames returns the names a MERGE's ON condition and its SET /
-// VALUES expressions resolve against — the alias where one is written, the
-// relation's own name otherwise — and refuses the statement when they are the
-// same name.
-//
-// PostgreSQL: 42712, `name "t" specified more than once`, DETAIL "The name is
-// used both as MERGE target table and data source", raised in
-// transformMergeStmt BEFORE anything is written. Wadjet answered `MERGE 1` and
-// WROTE, and the self-merge spelling `MERGE INTO t USING t ON t.id = t.id`
-// EMPTIED the table where PostgreSQL refuses the statement (#837).
-//
-// The mechanism is buildMergedRow: it writes both relations' columns into one
-// map under `exposedName + "." + column`, so when the two exposed names
-// collide the source's values overwrite the target's at every qualified key.
-// `ON t.id = t.id` then compares a source column with itself — a tautology
-// that matches every pair of rows — instead of resolving to the ambiguity
-// PostgreSQL reports. Same family as #689's `sourceNamed`.
-//
-// The rule is over EXPOSED names, which is not the same as "the source is not
-// the target table". `MERGE INTO t AS x USING t AS y` is legal and wadjet
-// already answers it correctly, and so is `MERGE INTO t AS x USING s AS t` —
-// PostgreSQL accepts both, measured.
+// mergeExposedNames uses aliases when present, relation names otherwise.
+// Target and source exposed names must differ; collide before writing with
+// 42712, naming their use as both MERGE target and source (#837).
+// Otherwise buildMergedRow would overwrite qualified keys (#689).
+// The rule concerns exposed names, not table identity: self-MERGE with
+// distinct aliases and an alias equal to the other relation's hidden name
+// are valid.
+// See docs/internals/merge-exposed-name-collision.md for the design.
 func mergeExposedNames(info *plansql.MergeInfo) (target, source string, err error) {
 	target = info.TargetAlias
 	if target == "" {
@@ -1060,27 +993,11 @@ func applySetClauses(row map[string]any, setSQL string, merged map[string]any, e
 		if err != nil {
 			return fmt.Errorf("SET %s: %w", col, err)
 		}
-		// Under the SCHEMA's spelling, which is what `target` carries — not
-		// under the reference's. `row` is a copy of `readMergeTarget`'s
-		// `batch.RecordBatch.RowAt`, keyed by the catalog schema, while `col`
-		// is the name the statement wrote, and an unquoted identifier reaches
-		// a SET list FOLDED (#731) where a parquet-born schema keeps
-		// `UserAgent`. Writing `row[col]` added a SECOND key `useragent`
-		// beside an untouched `UserAgent`; the ingester's byte-exact
-		// `row[col.Name]` then re-wrote the OLD value while the delete marker
-		// and the replacement row were committed anyway. Measured over
-		// `hits(WatchID, counterid, UserAgent)`:
-		//
-		//	MERGE INTO hits USING (SELECT 1 AS k) s ON hits.WatchID = s.k
-		//	  WHEN MATCHED THEN UPDATE SET useragent = 'MERGED'
-		//	before: MERGE 1, table [1 10 old-1] [2 20 old-2] [3 30 old-3]
-		//	after:  MERGE 1, table [1 10 MERGED] [2 20 old-2] [3 30 old-3]
-		//
-		// The COUNT was the lie: the MATCHED branch ran, the statement
-		// reported one affected row, and nothing changed. This is
-		// ResolveDMLSetClauses' fix one door over — UPDATE already carries
-		// `col.Name`, and the two statements have to agree about what one
-		// assignment does.
+		// Write under the resolved SCHEMA spelling in target.Name, as UPDATE does.
+		// row is keyed by catalog names, while SET references arrive folded (#731).
+		// Writing the reference spelling can add an unread key and report an
+		// assignment while the writer re-emits the unchanged stored column.
+		// See docs/internals/merge-assignment-stored-column-key.md for the design.
 		row[target.Name] = val
 	}
 	return nil
@@ -1117,37 +1034,13 @@ func splitSetClauses(s string) []string {
 	return parts
 }
 
-// dmlIdent is the lexer's identifier step, applied to a name that never went
-// through the lexer — pgwire's `copyIdent` for the same reason, at the other
-// hand-split site. An unquoted name FOLDS; a delimited one keeps its bytes and
-// loses only its quotes, `""` inside meaning one quote.
-//
-// A MERGE's SET list and its NOT-MATCHED INSERT column list are raw SQL TEXT:
-// `scanMergeClauseUntil` returns `l.input[start:l.pos]`. So the target reached
-// `ev.targetColumn` with the double quotes still ATTACHED and they became part
-// of the name. Measured over `hits(WatchID, counterid, UserAgent)`:
-//
-//	MERGE ... WHEN MATCHED THEN UPDATE SET "UserAgent" = 'X'
-//	  before: applying SET: column "\"UserAgent\"" of relation "hits"
-//	          does not exist
-//	  after:  MERGE 1, the value written
-//	MERGE ... WHEN NOT MATCHED THEN INSERT ("WATCHID", ...)
-//	  before: building INSERT row: column "\"WATCHID\"" of relation "hits"
-//	          does not exist
-//	  after:  42703, naming WATCHID
-//
-// The first was a WRONG REFUSAL and the loud kind: PostgreSQL accepts
-// `SET "UserAgent"` for a column named `UserAgent`, and `UPDATE hits SET
-// "UserAgent" = 'X'` succeeds ONE DOOR OVER — the two statements disagreed
-// about the same assignment, which is the asymmetry ResolveDMLSetClauses'
-// rewrite exists to remove.
-//
-// Doing this BEFORE `batch.ResolveSchemaIndex` rather than instead of it is
-// the load-bearing order. The resolver's rule keys on whether the reference is
-// itself folded, and a raw `SET UserAgent` is not — it would be read as a
-// DELIMITED name and refused against a schema column `UserAgent`… which it
-// happens to byte-match, but `SET USERAGENT` would not, and that form is
-// ordinary SQL. Fold first, then resolve.
+// dmlIdent applies lexer identifier rules to raw MERGE SET/INSERT names.
+// Trim outer whitespace; unquoted names fold, delimited names retain bytes
+// with outer quotes removed and doubled quotes decoded.
+// Do this BEFORE batch.ResolveSchemaIndex: the resolver relies on the
+// reference already carrying the lexer's folded-versus-delimited reading.
+// Do not replace schema resolution with this normalization.
+// See docs/internals/raw-dml-identifier-folding.md for the design.
 func dmlIdent(s string) string {
 	s = strings.TrimSpace(s)
 	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
@@ -1276,34 +1169,15 @@ func (db *DB) buildMergeEvaluator(ctx context.Context, info *plansql.MergeInfo,
 	return ev
 }
 
-// checkOnKeys resolves the ON condition's key columns against the two tables.
-//
-// parseOnKeys already refuses a qualifier that is neither alias; what it never
-// did was ask whether the COLUMN exists. `ON t.nosuchcol = s.id` matched
-// nothing and the MERGE reported success with zero rows affected — a wrong
-// answer dressed as a no-op, where PostgreSQL raises 42703 naming
-// `t.nosuchcol` (#678 review, residual 3).
-// It also REWRITES each key to the spelling its relation stores, which is
-// what makes `matchByKeys` able to find the value. The ON condition is parsed
-// as an expression, so its column names arrive FOLDED — an unquoted
-// identifier lower-cases at the lexer (#731) — while the target row is
-// `readMergeTarget`'s `batch.RecordBatch.RowAt`, keyed by the catalog
-// schema's spelling, and CamelCase column names are ordinary there. Comparing
-// the folded name against that map read nil for every row, so
-// `ON hits.WatchID = s.k` matched NOTHING: every WHEN MATCHED clause was
-// skipped and the source row fell through to WHEN NOT MATCHED, which
-// INSERTED a duplicate instead of updating the row that was already there.
-//
-// The rewrite goes through batch.ResolveSchemaIndex rather than through a map
-// keyed by the fold, because the fold is only half the rule. A key column
-// arrives here from the ON condition's PARSE, so it carries the lexer's
-// verdict: unquoted names are already folded, and a name still carrying an
-// upper-case letter can only have been DELIMITED. A lowercasing lookup
-// resolves both alike, so `ON hits."WATCHID" = s.k` bound to `WatchID` and
-// the MATCHED branch fired, where PostgreSQL raises 42703 for a delimited
-// name that is not the column's own bytes. It is 42703 here now, and a
-// FOLDED `hits.watchid` still resolves — the concession a parquet-born
-// CamelCase schema needs, and the only one (batch/schema.go items 1-4).
+// checkOnKeys validates MERGE ON key columns and rewrites them to STORED
+// schema spellings, so matchByKeys can read catalog-keyed rows (#678).
+// parseOnKeys has already checked qualifiers. Missing columns raise 42703.
+// Use batch.ResolveSchemaIndex, never a fold-keyed map: unquoted references
+// arrive folded (#731), delimited references retain their bytes.
+// Resolve target keys always; resolve source keys when sourceKnown or
+// sourceNamed, preserving a nonempty published source spelling.
+// See batch/schema.go items 1–4 for the name-resolution rule.
+// See docs/internals/merge-on-key-schema-resolution.md for the design.
 func (ev *mergeEvaluator) checkOnKeys(keys []onKeyPair) error {
 	for i := range keys {
 		k := &keys[i]
@@ -1824,30 +1698,14 @@ func lowercaseKeys(m map[string]any) map[string]any {
 	return out
 }
 
-// assignEvaluatedValue applies PostgreSQL's ASSIGNMENT CAST to a value the
-// expression engine produced, turning it into the box the target column's
-// writer stores.
-//
-// The rule it exists to enforce, and the one whose absence was a silent wrong
-// answer: **an evaluated value is a VALUE, never a carrier.** ADR-0018 §4
-// defines a STORED integer box in a DECIMAL column as the already-unscaled
-// carrier — the int64 325 in a DECIMAL(9,2) column is 3.25 — and an evaluated
-// int64 is nothing of the sort, it is the number itself at scale 0. Handing
-// one straight to DecimalValueFromBox reopened exactly the trap the #647 arc
-// closed: `UPDATE t SET d = n` with n = 10 stored 0.10, `SET d = 1 + 1` stored
-// 0.02, and both returned success (#678 review R1).
-//
-// The whole matrix below was read off postgres:17-alpine rather than
-// remembered; each arm names the rows it implements.
-//
-//	target INT64      5 -> 5    2.4 -> 2    2.5 -> 3    -2.5 -> -3
-//	                  d (numeric 1.50) -> 2    1 + 1.4 -> 2    ABS(0-3) -> 3
-//	                  3000000000 into INT32 -> 22003
-//	target NUMERIC    5 -> 5.00    2.567 -> 2.57    n (bigint 10) -> 10.00
-//	                  1 + 1 -> 2.00    d * 2 -> 3.00    n + 1 -> 11.00
-//	                  99999999.99 into (9,2) -> 22003
-//	target FLOAT8     n -> 10    d -> 1.5    1 + 1 -> 2
-//	target TEXT       5 -> '5'   n -> '10'   d -> '1.50'   UPPER(s) -> 'X'
+// assignEvaluatedValue applies assignment casts to VALUES, never carriers
+// (ADR-0018 §4; #647, #678). An evaluated integer contributes at scale 0;
+// never hand it to DECIMAL storage as an already-unscaled integer.
+// DECIMAL assignments round to declared scale and enforce precision;
+// integer assignments round by source domain and enforce target range.
+// FLOAT targets receive numeric values; TEXT receives rendered values.
+// NULL remains NULL; unsupported target families keep the original box.
+// See docs/internals/dml-evaluated-assignment-value-domain.md for the design.
 func assignEvaluatedValue(v any, col parquet.Column, srcFloat bool) (any, error) {
 	if v == nil {
 		return nil, nil
@@ -1934,30 +1792,14 @@ func dmlBoxTypeName(v any) string {
 	return fmt.Sprintf("%T", v)
 }
 
-// assignIntegerValue rounds, ranges and narrows a value into an integer
-// column.
-//
-// A fractional value ROUNDS the way PostgreSQL's assignment cast rounds, and
-// which way that is depends on the SOURCE's declared type: a float8 rounds
-// half to EVEN (C's rint) and a numeric half AWAY FROM ZERO. Only a value
-// outside the column's range (NaN and the infinities included) is 22003.
-//
-// This engine boxes both families as float64, so the BOX cannot decide it:
-// `SET n = f` over a FLOAT64 column and `SET n = 0 - 2.5` arrive here as the
-// same Go type and want opposite answers — 2 and -3. One rule served both, and
-// it was the numeric one, so `UPDATE fl SET n = f` over 2.5, -2.5, 0.5, 3.5,
-// 1.5 stored 3, -3, 1, 4, 2 where PostgreSQL stores 2, -2, 0, 4, 2 — three of
-// five rows wrong, silently (#699).
-//
-// srcFloat is the DECLARATION, resolved once per SET clause through
-// physical.DeclaredTypeOfNode — the same declared-type layer the query path
-// reads, not a private approximation of it. An expression whose type the layer
-// declines to decide keeps the numeric rule, which is what it had.
-//
-// The range check reaches PORT (uint16) and PROTOCOL (uint8) too, because
-// nothing below this line re-checks either — convertValue does, but only for
-// literals — so an out-of-range computed value would truncate into a port no
-// real port can be.
+// assignIntegerValue rounds, range-checks and narrows to the target integer.
+// Float sources round half to EVEN, numeric sources half AWAY FROM ZERO
+// (#699); srcFloat is the declaration from physical.DeclaredTypeOfNode,
+// not a guess from the Go box. Undecided sources retain numeric rounding.
+// Out-of-range values, NaN and infinities must raise 22003.
+// Enforce PORT uint16 and PROTOCOL uint8 ranges here too: computed values
+// bypass the literal converter and no later writer rechecks those widths.
+// See docs/internals/dml-integer-assignment-rounding.md for the design.
 func assignIntegerValue(v any, col parquet.Column, srcFloat bool) (any, error) {
 	var n int64
 	switch t := v.(type) {
@@ -2431,50 +2273,16 @@ func dmlSubquerySQLs(n plansql.Node) []string {
 	return out
 }
 
-// refuseDMLLiteralPairs raises, BEFORE any row is read, for a comparison whose
-// operand pair PostgreSQL's overload resolution refuses.
-//
-// A QUALIFYING PREDICATE IS NOT A PROJECTION. ADR-0012 item 12 records a
-// deliberate divergence: PostgreSQL refuses `text = numeric` outright (42883),
-// and wadjet — having one generic comparison operator and no overload set to
-// fail resolution against — gives the pair the column's own rule, comparing
-// the STRING column's bytes against the literal's source text. Every answer
-// that produces is PostgreSQL's answer to the QUOTED spelling of the same
-// predicate, which is a defensible concession when the consequence is a
-// COUNT. It is not one when the consequence is a WRITE:
-//
-//	DELETE FROM pr WHERE name > 5     PG: 42883.  wadjet: DELETE 3, table EMPTIED
-//
-// `"a" > "5"` is true for every row because 0x61 > 0x35, so wadjet answered
-// PostgreSQL's answer to a DIFFERENT predicate and destroyed a three-row
-// table (#721). Nobody wrote that consequence down because no fixture
-// attempted it: the ADR entry was reasoned entirely about the read path.
-//
-// So the divergence stays where its reasoning holds — a SELECT still gets the
-// byte rule — and a DML statement's qualifying predicate refuses the pair.
-// The asymmetry is recorded in ADR-0012 item 12 rather than left implicit.
-//
-// Three pairs, and the bound is deliberate:
-//
-//   - a STRING or BYTES column against an unquoted NUMBER literal (42883).
-//     This is the shape above, and the one that loses rows.
-//   - any non-BOOL column against a BOOLEAN literal (42883). `id = true` is
-//     PostgreSQL's `bigint = boolean`; wadjet answered `DELETE 0` on the DML
-//     door and 22P02 on the SELECT door — two doors disagreeing about one
-//     predicate.
-//   - a numeric column against a QUOTED literal naming no value of it. The
-//     runtime already refuses this (22P02, #536/#646), but the refusal needs
-//     a ROW to reach it, so `DELETE FROM empty WHERE id = 'abc'` answered
-//     `DELETE 0` where PostgreSQL raises. The test is
-//     expr.RefuseNumericLiteral — the SAME predicate the runtime uses, so the
-//     two cannot disagree about which strings name a value.
-//
-// Temporal and network columns against a number are deliberately NOT refused
-// here: those pairs have their own accept-sets (parquet.ParseTimestampMillis
-// and friends), wadjet's network literal parsers are STRICTER than
-// PostgreSQL's input grammar, and refusing on them would reject input
-// PostgreSQL accepts — the one thing ADR-0012 item 1 forbids. The boundary
-// carries fixtures either way.
+// refuseDMLLiteralPairs rejects unsupported qualifying pairs before any row
+// is read (#721, ADR-0012 item 12): STRING/BYTES versus unquoted NUMBER,
+// and non-BOOL versus BOOLEAN, raise 42883.
+// Numeric versus invalid QUOTED literals uses expr.RefuseNumericLiteral,
+// the runtime's same predicate, even on empty tables (#536, #646).
+// SELECT retains its byte-comparison concession; writes refuse these pairs.
+// Temporal/network versus NUMBER is outside this guard: their accept-sets
+// differ, and stricter local parsers must not reject server-accepted input
+// (ADR-0012 item 1). Fixtures must probe both sides of that boundary.
+// See docs/internals/dml-literal-comparison-refusal-boundary.md for the design.
 func refuseDMLLiteralPairs(node plansql.Node, schema []parquet.Column) error {
 	byName := make(map[string]parquet.Column, len(schema))
 	for _, c := range schema {
@@ -2657,71 +2465,16 @@ type DMLSubqueryEnv struct {
 	Opts      []expr.CompileOption
 }
 
-// BuildDMLPredicate compiles a DML WHERE clause against a table's schema. An
-// empty clause compiles to nil — "every row".
-//
-// The SCHEMA is a parameter, not an optional extra, because the DML doors do
-// not go through the planner and so had no name-resolution step at all:
-// `UPDATE t SET n = 1 WHERE nosuchcol = 1` compiled fine, evaluated to NULL on
-// every row and reported "UPDATE 0", where PostgreSQL raises 42703 (#678).
-// Every column the clause names is resolved here, before anything executes.
-//
-// It is exported because MatchDMLRows is the other half of the contract and
-// is the one that must be used to RUN a predicate. (The HTTP door is no longer
-// a second caller: since #815 it reaches the executors through
-// DB.ExecuteParsed like everything else.)
-//
-// A SUBQUERY IN A DML PREDICATE (#688).
-//
-// `DELETE … WHERE id IN (SELECT …)`, `NOT IN (SELECT …)`, a scalar subquery
-// and a correlated `EXISTS` were all 0A000 here. The reason was structural:
-// this function is not a planner. It parsed, resolved the column names against
-// the target's schema, and called `expr.Compile` with a NIL runner and no
-// outer scope, so every planner-resident guarantee was absent on this door.
-//
-// It is answered now, and the shape of the answer is what makes it not the
-// bounded repair ADR-0031 forbade. That one was `expr.CompileWithRunner` — a
-// runner and nothing else — which closes `IN`, `NOT IN` and the scalar
-// subquery and leaves CORRELATED `EXISTS` refused, because a compile site with
-// no outer scope cannot classify a subquery as correlated in the first place.
-// The scope is the missing half, and a DML statement has the simplest one
-// there is: exactly ONE relation, the target, under its alias when it has one
-// and its own name when it does not, with the columns of the schema this
-// function was already handed. Given that scope,
-// `expr.CompileWithScopeResolver` builds the same correlated evaluators the
-// query path builds, and `EXISTS (SELECT 1 FROM s WHERE s.id = t.id)` — the
-// shape #688's own body names first — answers.
-//
-// THE PREDICATE IS STILL COMPILED AND NOT PLANNED, which is ADR-0031's
-// position and is unchanged: the door still walks its files and evaluates the
-// clause per row, and the structural DELETE-as-a-planned-SELECT design that
-// record blocks on a projectable row identity is still blocked and still
-// unnecessary here. What is planned is the SUBQUERY, through the ordinary
-// SELECT path.
-//
-// TWO CONSEQUENCES ARE THE QUERY PATH'S, INHERITED RATHER THAN INVENTED.
-// An uncorrelated subquery is executed ONCE and memoized; a correlated one is
-// re-run per outer row with the outer values substituted as typed literals
-// (ADR-0021 §1e), so an outer value with no literal spelling is 0A000 there as
-// it is in a SELECT. And a subquery that cannot be RUN fails the statement
-// rather than deciding it (§1c) — which on a WRITE door is the difference
-// between refusing and deleting the wrong rows.
-//
-// THE SNAPSHOT. The subquery runs against the manifest the catalog holds while
-// the statement is scanning, and a DML statement commits its markers at the
-// end (ADR-0030), so a subquery over the TARGET TABLE reads the pre-statement
-// state — which is what PostgreSQL does. `DELETE FROM t WHERE id IN (SELECT id
-// FROM t WHERE …)` is in the census with PostgreSQL's answer beside it.
-//
-// THE EMPTY-PREDICATE BACKSTOP. A nil predicate is the widest answer this
-// function can give — every row of the table — so "the statement had no
-// WHERE" and "the parser dropped the statement's WHERE" must not look the
-// same here. They did, and the second one emptied tables: a DELETE with an
-// aliased table returned an empty WhereSQL and deleted everything (#686). The
-// check below is not about that spelling, which the parser now reads; it
-// makes the CLASS unreachable, so the next clause any parser path fails to
-// carry fails the STATEMENT instead of widening it (ADR-0019, correctness-fix
-// protocol item 8: loud beats plausible).
+// BuildDMLPredicate resolves every name against schema before execution
+// (#678); run it only through MatchDMLRows, on all doors (#815).
+// Empty WHERE means all rows only if StmtSQL has no top-level WHERE token;
+// a dropped WHERE must fail, never widen a write (#686, ADR-0019 item 8).
+// Predicates are compiled per-row, not planned (ADR-0031); subqueries use
+// ordinary SELECT planning and target/alias scope (#688).
+// Uncorrelated subqueries memoize; correlated ones rerun with typed outer
+// literals, refuse unrenderable values and propagate failures (ADR-0021 §1e, §1c).
+// Target-table subqueries precede this statement's marker commit (ADR-0030).
+// See docs/internals/dml-predicate-compilation-and-subqueries.md for the design.
 func BuildDMLPredicate(target plansql.DMLTarget, schema []parquet.Column, sub *DMLSubqueryEnv) (DMLPredicate, error) {
 	whereSQL := strings.TrimSpace(target.WhereSQL)
 	if whereSQL == "" {
@@ -2842,59 +2595,25 @@ type DMLAssignment struct {
 	srcFloat bool
 }
 
-// ResolveDMLSetClauses resolves an UPDATE's SET list against the table's
-// schema, before anything executes.
-//
-// Two defects met here (#678). `UPDATE t SET nosuchcol = 1` reported
-// "UPDATE 1": the assignment was dropped into a map nothing read and the
-// matched rows were rewritten unchanged, where PostgreSQL raises 42703. And
-// the value was read ONLY as a literal, through a converter whose STRING arm
-// cannot fail — so `SET s = UPPER(s)` stored the seven characters "UPPER(s)"
-// into the column. PostgreSQL evaluates it, and so does this now.
-//
-// Whether a SET value is a literal is decided from its PARSE, not from
-// whether a conversion succeeded, because for a STRING column the conversion
-// always succeeds and the literal path always won. A `*plansql.Lit` takes the
-// constant path — which is what keeps #647's declaration checks
-// (ConvertValueForColumn's DECIMAL precision, the temporal accept-sets)
-// running on the values that have them; anything else is compiled and
-// evaluated per row against the file's own batch, which carries the table's
-// declared types.
-//
-// A SET VALUE resolves against the same relation name the WHERE does, so
-// `UPDATE pr AS a SET n = a.n + 1` reads a.n and `SET n = pr.n` under that
-// alias is 42P01 — PostgreSQL's answer for both (#686).
+// ResolveDMLSetClauses resolves targets against schema before execution;
+// missing columns raise 42703 and expressions must be evaluated (#678).
+// Choose the constant path by parsed literal shape, never successful string
+// conversion; preserve declared DECIMAL/temporal checks there (#647).
+// Compile other values against the file batch's declared types.
+// SET expressions use the same target/alias scope as WHERE: under alias a,
+// a.n resolves and the hidden relation name does not (42P01; #686).
+// See docs/internals/update-set-resolution-and-evaluation.md for the design.
 func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget, schema []parquet.Column) ([]DMLAssignment, error) {
 	out := make([]DMLAssignment, 0, len(clauses))
 	for _, sc := range clauses {
-		// A QUALIFIED target (`SET t.n = 1`) never arrives here: the UPDATE
-		// parser requires `=` after the column name and refuses the dot.
-		// PostgreSQL refuses it too, reading the qualifier as a column of the
-		// relation and raising 42703 where this raises 42601; both refuse,
-		// and the statement writes nothing either way. MERGE spells its own
-		// qualified targets and strips them in applySetClauses.
-		// The reference is FOLDED and the schema is not: an unquoted
-		// identifier lower-cases at the lexer (#731) while a catalog schema
-		// keeps the spelling the parquet file gave it, and CamelCase column
-		// names are ordinary there. `byName` already concedes that on the
-		// LOOKUP — but the assignment carried the FOLDED name forward, and
-		// the row it writes into is `batch.RecordBatch.RowAt`, keyed by the
-		// SCHEMA's spelling. So `SET UserAgent = 'x'` added a second key
-		// `useragent` beside the untouched `UserAgent`, the writer's
-		// byte-exact `row[col.Name]` read the OLD value, and the statement
-		// reported `UPDATE 1` having changed nothing. Carry the schema's
-		// spelling, the way the statistics path does (#881).
-		//
-		// And RESOLVE, rather than lowercase-and-look-up. The two halves of
-		// the rule are separable only at the reference: `sc.Column` comes
-		// from the UPDATE parser, so an unquoted name is already folded and a
-		// name still carrying an upper-case letter can only have been
-		// DELIMITED. A map keyed by the fold answers both the same, so
-		// `SET "USERAGENT" = 'X'` WROTE to `UserAgent` — the write landed,
-		// `UPDATE 1`, the value changed — where PostgreSQL raises 42703 for a
-		// delimited name that is not the column's own bytes. The refusal is
-		// the one a genuinely absent column already gets, same class and same
-		// wording, and `SET useragent = 'X'` still resolves.
+		// UPDATE's parser rejects qualified SET targets before this point (42601;
+		// PostgreSQL reports 42703). MERGE strips its own qualified targets.
+		// Resolve the lexer-folded reference against the UNFOLDED schema (#731).
+		// Carry col.Name into assignments so the writer reads the key actually
+		// updated (#881); never write a second folded key beside the stored name.
+		// Use batch.ResolveSchemaIndex, not a lowercase map, so delimited names
+		// must resolve under their own bytes and missing targets raise 42703.
+		// See docs/internals/update-set-target-identity.md for the design.
 		name := strings.TrimSpace(sc.Column)
 		idx := batch.ResolveSchemaIndex(schema, name)
 		if idx < 0 {
@@ -3044,36 +2763,15 @@ func BuildUpdatedRows(ctx context.Context, b *batch.RecordBatch, matched []int64
 	return rows, nil
 }
 
-// MatchDMLRows returns the indices of b's rows the statement matches, and is
-// the ONLY place a DMLPredicate is allowed to be called.
-//
-// deleted is the set of row positions in THIS file that a delete marker has
-// already removed (catalog.DeletedRowsByFile), and passing it is not optional
-// — a nil map means "this file has no markers", not "do not check". The
-// parameter exists rather than a second entry point precisely because the
-// defect was that every DML match scan simply did not look: an UPDATE matched
-// rows its own earlier UPDATEs had superseded, re-ingested them beside the
-// live copy and marked the source file again, so re-updating one row produced
-// 1, then 2, then 4 rows — silently, on plain INT64 columns (#674). The
-// SELECT path has applied this filter all along (scan.Scanner), which is why
-// the row COUNT a client saw was wrong and the DML's own view was internally
-// consistent.
-//
-// Expression evaluation has no error return (ADR-0019): the one class of
-// condition that cannot answer with a value and must not answer with NULL —
-// a division by zero, an invalid cast — raises a panic carrying a
-// FatalEvalPanic, and a driver converts it back into an error with
-// PostgreSQL's SQLSTATE. Every DML match scan called Eval with NO such
-// boundary, so `DELETE FROM t WHERE 1/0 = 1` over HTTP returned a transport
-// EOF and a goroutine dump instead of 22012 — net/http's own recover, which
-// drops the connection (#677). The embedded and pgwire doors survived only
-// because DB.Execute's own boundary caught it several frames up, and the
-// error a caller got there named the statement rather than the predicate.
-//
-// The boundary is per FILE SCAN, not per row: one deferred call for a whole
-// batch, no per-row cost. It owns nothing — no lock, no channel, no
-// reservation — so discharging its obligations (ADR-0019 §2a) is exactly
-// returning the error.
+// MatchDMLRows is the ONLY caller of a DMLPredicate and returns matched
+// positions after excluding this file's deleted rows (#674).
+// Passing deleted is mandatory; nil means this file has no delete markers.
+// Check visibility before evaluating even a nil/all-rows predicate.
+// Recover FatalEvalPanic once per file scan into a SQLSTATE-bearing error,
+// never NULL or a transport failure (#677, ADR-0019).
+// The boundary owns no locks/channels/reservations, so returning the error
+// fully discharges its obligations (ADR-0019 §2a).
+// See docs/internals/dml-row-visibility-and-panic-boundary.md for the design.
 func MatchDMLRows(ctx context.Context, b *batch.RecordBatch, predicate DMLPredicate, deleted map[int64]bool) (matched []int64, err error) {
 	if predicate == nil {
 		matched = make([]int64, 0, b.Len)
@@ -3215,62 +2913,16 @@ func columnChecked(v any, err error) func(parquet.Column) (any, error) {
 	}
 }
 
-// convertValue's default case (return the trimmed, unquoted string as-is)
-// is exactly right for six of the fourteen types that have no explicit case
-// below, so they are deliberately left to it rather than given a
-// pass-through case that would say nothing extra:
-//
-//   - TypeBytes: ingest.checkType accepts a string for BYTES, and the
-//     writer's toBytes/convertStringToBytes takes the string's raw bytes.
-//   - TypeIPv4, TypeIPv6, TypeMAC, TypeCIDR, TypeUUID: the writer's
-//     decomposeLeaf/convertNetworkLiteral (file_writer.go) is the
-//     authoritative text→binary conversion for these — it already runs on
-//     whatever string reaches it, validates the literal, and raises a
-//     descriptive error for a bad one (ADR-0012: PostgreSQL decides what an
-//     invalid literal means, and there it is an error). Converting here too
-//     would either duplicate that logic or race two different validators
-//     over the same literal; TypeCIDR stores its text form directly and
-//     needs no conversion either way.
-//   - TypeDecimal: the literal's TEXT is the exact carrier and is passed
-//     through unchanged. Reading it into a number here would be wrong twice
-//     over: this function is handed the column's TypeID and nothing else, so
-//     it does not know the (p, s) the value has to land at, and an integer
-//     literal converted to an int64 box would then be read as the ALREADY-
-//     UNSCALED value ADR-0018 §4 defines (INSERT 5 into DECIMAL(9,2) would
-//     store 0.05, not 5.00). parquet.DecimalValueFromBox, at the leaf where
-//     the declared (p, s) is known, is the one checked converter — it parses
-//     the text exactly, rounds to the column's scale as PostgreSQL does on
-//     assignment, and raises 22003/22P02 rather than storing a wrapped int64
-//     or a zero (#647).
-//
-// TypePort and TypeProtocol (BUG: INSERT into either always failed) and
-// TypeDuration (BUG: silently wrote 0 — see below) are NOT in that set:
-// their writer-side converters only accept already-numeric Go values
-// (writer.go's prepareRows int/int32/float64 switch has no string case for
-// any of the three, and file_writer.go's convertStringToInt64 — the network
-// string→int64 path decomposeLeaf delegates to — only knows TypeIPv4 and
-// TypeMAC), so a bare string reaching them is silently read as int64(0) by
-// toInt64's default arm. There is also no established literal syntax
-// anywhere in the system (parser, ingest, or a named-form registration like
-// Port/Protocol never got) beyond a plain integer for these three, so that
-// is the form parsed here — matching checkType's accepted Go types
-// (int/int32/int64/...) and TypeDuration's schema.go contract ("nanoseconds,
-// stored as int64").
-//
-// TypeArray, TypeRow and TypeMap have no case: the INSERT VALUES parser
-// itself (dml_parser.go's insertValueText) accepts only a single literal
-// token per value — an array/row/map literal is a composite expression it
-// explicitly refuses ("Anything else is an EXPRESSION, and this path has no
-// evaluator"), so convertValue never receives one. Supporting them would
-// start at the parser grammar, not here.
-//
-// TypeVector was in that list and did not belong: a vector literal's text
-// form is `'[1,2]'`, a single QUOTED STRING token, which the parser accepts
-// like any other. So convertValue did receive one, the default arm passed the
-// text through, and the writer wrote the string's bytes into a fixed-width
-// leaf — a corrupt page for every VECTOR insert, right width or wrong. It has
-// a case now (parseVectorLiteral), and the width is checked in
-// columnChecked where the declaration is.
+// convertValue decodes literal text, then convertUnquoted selects its type.
+// BYTES passes raw string bytes; network/UUID text uses the authoritative
+// writer conversion. DECIMAL stays exact TEXT until declared (p,s) is known;
+// an integer box would mean an unscaled carrier (ADR-0018 §4; #647).
+// The checked leaf converter rounds scale and refuses 22003/22P02, never
+// wraps or substitutes zero (ADR-0012).
+// PORT/PROTOCOL parse and range-check integers; temporal types use shared
+// parsers, DURATION as nanoseconds. ARRAY/ROW/MAP lack this literal path.
+// VECTOR parses quoted [1,2] text; columnChecked enforces declared width.
+// See docs/internals/dml-literal-conversion-type-boundary.md for the design.
 func convertValue(s string, typ parquet.TypeID) (any, error) {
 	s = strings.TrimSpace(s)
 
