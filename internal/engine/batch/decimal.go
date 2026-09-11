@@ -372,34 +372,13 @@ func fitsInt128(b *big.Int) bool {
 		b.CmpAbs(new(big.Int).Lsh(big.NewInt(1), 127)) == 0)
 }
 
-// FormatDecimal renders the unscaled value as a decimal string at the given
-// scale — the text form of a DECIMAL column, and so what GetValue hands the
-// row map, ToRows, the JSON encoder and the pgwire text protocol.
-//
-// The fraction is EXACTLY scale digits, never fewer. It used to be trimmed of
-// trailing zeros, so a numeric(9,2) holding -24.50 reached a client as
-// "-24.5" and a numeric(38,10) zero as "0.0" (#453). PostgreSQL renders a
-// numeric(p,s) at its DECLARED scale always, and ADR-0012 makes PostgreSQL
-// the authority — but the deeper reason is that a DECIMAL column exists
-// BECAUSE its scale is part of the value's meaning. A currency column that
-// spells itself "-24.5" is one a BI tool displays wrong, and any client that
-// string-compares or formats from the text gets a different answer than it
-// gets from PostgreSQL. The trim also reached the wire's binary form, whose
-// dscale header pgNumericDigits counts off this very string.
-//
-// scale <= 0 renders no point at all — "12345", not "12345." — which is
-// PostgreSQL's numeric(p,0) too.
-//
-// It formats the whole 128 bits. It used to read only Lo, through
-// `v := int64(abs.Lo)` and an int64 divmod, which was wrong twice over: a
-// value past 64 bits rendered as its low half (Int128{Hi:5, Lo:0x112210f4-
-// 7de98115} at scale 10 came out 123456789.0123456789 instead of
-// 9346828825.8671214869), and any magnitude with Lo >= 2^63 made that int64
-// negative, so the sign leaked into both halves and produced text that is not
-// a number at all — "--922337203.-6854775808" for unscaled Int64Min (#434).
-//
-// Splitting the digit STRING at the scale is also what makes the result exact
-// for every scale: math.Pow10 is a float64, and 10^23 has no exact one.
+// FormatDecimal renders all 128 bits exactly at the declared scale (#434).
+// For scale > 0, emit EXACTLY scale fractional digits, including trailing zeros
+// (#453, ADR-0012); scale <= 0 emits no decimal point.
+// This text feeds row/JSON/pgwire output and the binary numeric dscale.
+// Split decimal digit text at the scale; float powers or int64 truncation
+// cannot preserve the full carrier.
+// See docs/internals/batch-decimal-full-width-rendering.md for the design.
 func (d Int128) FormatDecimal(scale int) string {
 	if scale <= 0 {
 		return d.String()
@@ -490,27 +469,13 @@ func saturatedDecimal(neg bool) ScaledDecimal {
 	return ScaledDecimal{Unscaled: Int128Max, Sat: 1}
 }
 
-// DecimalSpecialKind names one of the three values PostgreSQL's `numeric` has
-// and this carrier does not: NaN and, since PostgreSQL 14, ±Infinity. An
-// Int128 at a fixed scale has no bit pattern for any of them and the parquet
-// DECIMAL annotation has none either (ADR-0024 items 1 and 6).
-//
-// The constants ARE their rank in PostgreSQL's numeric order, which is a total
-// order rather than IEEE754's: -Infinity below every finite value, Infinity
-// above every finite value, and NaN above Infinity and equal only to itself.
-// So an int comparison of two kinds orders them, and the sign of a non-finite
-// kind says which end of a column's range it sits past.
-//
-// DecimalSpecialKind, DecimalSpecialText and the numeric-text grammar below
-// live in internal/storage/parquet and are read through from here.
-//
-// This package IMPORTS that one (batch.Vector is built from parquet.Column),
-// so the lower package is the only place a SINGLE accept-set can sit — the
-// same reason ParseDateDays lives there. The file writer has to classify the
-// text it is about to store exactly as the comparison path classifies the text
-// it is about to compare, or 'NaN' is 22003 on one path and 22P02 on the other
-// and a client branching on the code cannot see past the difference
-// (ADR-0024 items 4 and 6, #647).
+// DecimalSpecialKind ranks -Infinity < finite < Infinity < NaN, with NaN
+// equal only to itself; non-finite kind signs locate the column-range end.
+// Int128 and parquet DECIMAL have no stored special values (ADR-0024 items 1, 6).
+// Read the shared grammar and classification from internal/storage/parquet:
+// writers and comparisons must agree on 22003 versus 22P02 for the same text
+// (ADR-0024 items 4, 6; #647).
+// See docs/internals/batch-decimal-special-value-classification.md for the design.
 type DecimalSpecialKind = parquet.DecimalSpecialKind
 
 const (
@@ -972,31 +937,13 @@ func int128FromBig(b *big.Int) Int128 {
 	return out
 }
 
-// --- Canonical DECIMAL key encoding ---
-//
-// A DECIMAL group / DISTINCT / join / bloom key used to be
-// `math.Float64bits(v.ToFloat64(scale))`. A float64 carries ~16 significant
-// decimal digits and a DECIMAL(38,10) carries 38, so every pair of values that
-// agrees to 16 digits shared one key: GROUP BY collapsed them into one group,
-// COUNT(DISTINCT) counted them once, and a hash join matched each against the
-// other (#474).
-//
-// Keying on the raw 16 bytes of the unscaled Int128 is the wrong repair: it
-// makes the key depend on the SCALE, so 12.75 stored in a DECIMAL(9,2)
-// (unscaled 1275) would stop matching 12.75 stored in a DECIMAL(18,4)
-// (unscaled 127500) — and a join between two tables that declare the same
-// quantity at different scales is exactly the shape that breaks. The
-// comparator (kernel.CompareDecimalAt) calls those two equal, and ADR-0012
-// item 8's invariant is that two values the comparator calls equal must also
-// SERIALIZE alike.
-//
-// So the key is the value's canonical form: the unique (unscaled, scale) pair
-// with scale >= 0 minimal, i.e. trailing zero digits stripped from the
-// fraction. 12.75 is (1275, 2) from either column; 12.7500 normalizes to it;
-// 1200 at scale 2 (unscaled 120000) and 1200 at scale 0 both normalize to
-// (1200, 0); zero is (0, 0) at every scale. That form is unique per VALUE, so
-// the encoding is injective by construction — different values cannot collide,
-// whatever their declared precision.
+// DECIMAL group/DISTINCT/join/bloom keys must be injective over exact values
+// (#474), and comparator equality must imply identical serialized keys
+// (ADR-0012 item 8). Neither float64 nor raw unscaled bytes meet that rule.
+// Canonicalize to (unscaled, scale) with minimal nonnegative scale by stripping
+// fractional trailing zeros; zero always becomes (0, 0).
+// Equal values at different declared scales therefore share one key.
+// See docs/internals/batch-canonical-decimal-keys.md for the design.
 
 // decimalKeyNegative is the sign bit in a canonical DECIMAL key's second byte.
 const decimalKeyNegative = 0x80

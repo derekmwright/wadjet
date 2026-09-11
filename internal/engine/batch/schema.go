@@ -2,38 +2,15 @@ package batch
 
 import "github.com/derekmwright/wadjet/internal/storage/parquet"
 
-// Column-name resolution against a batch schema.
-//
-// The SCHEMA is byte-exact — `ColumnIndex` compares `col.Name == name` and
-// nothing here changes that. A column called `WatchID` is called `WatchID`,
-// and every producer that writes a batch, a shuffle file or a parquet file
-// writes the name it was given. What folds is the RESOLVER: the step that
-// takes a reference the user wrote and decides which column of this batch it
-// names.
-//
-// The rule is PostgreSQL's, plus one recorded divergence (ADR-0012):
-//
-//  1. An UNQUOTED identifier folds to lower case at the lexer
-//     (`plansql.FoldIdent`), so by the time a reference reaches a batch it is
-//     already the folded spelling. A DELIMITED identifier keeps its bytes.
-//     The two are therefore distinguishable from the name alone: a reference
-//     carrying an ASCII upper-case letter can only have been delimited (or
-//     minted by the planner from a schema, which byte-matches anyway).
-//  2. PostgreSQL then matches the folded name EXACTLY against the catalog, so
-//     a column stored as `"WatchID"` is unreachable as `watchid`. Wadjet's
-//     tables come from parquet and ingest, where CamelCase column names are
-//     ordinary — ClickBench's `hits` has `WatchID`, `UserID`, `EventTime` —
-//     and refusing to resolve them would make those tables unqueryable
-//     without quoting every reference. So a FOLDED reference that misses
-//     byte-exact resolves case-insensitively when exactly one column matches.
-//  3. Two columns matching is ambiguous and resolves to nothing, which the
-//     caller reports as the miss it is. Within one table this cannot happen:
-//     `catalog.checkDistinctColumnNames` already refuses a schema whose
-//     columns collide under `parquet.FoldName`. Across relations it can, and
-//     the planner refuses it earlier with 42702.
-//  4. A reference carrying an upper-case letter is delimited and resolves
-//     byte-exact ONLY. That is what keeps `SELECT "G"` over a column `g` a
-//     miss — PostgreSQL's 42703 — rather than a silent read of `g`.
+// Schema names and ColumnIndex remain byte-exact; producers preserve names.
+// The resolver follows lexer ASCII folding (ADR-0012): uppercase in a reference
+// means delimited/schema-minted and permits only a byte-exact match.
+// A folded name first matches exactly, then uniquely case-insensitively; this
+// fallback for parquet/ingest CamelCase is a recorded PostgreSQL divergence.
+// Multiple folded matches resolve to nothing. Catalog checks forbid within-table
+// fold collisions; the planner rejects cross-relation ambiguity with 42702.
+// An uppercase delimited miss remains a miss (42703), never a folded read.
+// See docs/internals/batch-column-name-resolution.md for the design.
 
 // FoldIdent is the identifier fold, ASCII A-Z only — the same rule
 // `plansql.FoldIdent` applies at the lexer, restated here because the engine
@@ -202,42 +179,14 @@ func splitQualifier(name string) (qualifier, column string) {
 	return "", name
 }
 
-// RowFieldPath answers ADR-0022's question for one dotted reference, and it
-// is the ONE place the question is asked: does the reference's QUALIFIER name
-// a ROW column of this batch that DECLARES the field? It returns the parent
-// column's index and the field's position among that container's children.
-//
-// Every consumer of a column reference asks this BEFORE stripping the
-// qualifier, because stripping first answers with whatever OTHER relation in
-// the stream publishes a column of the FIELD's name:
-//
-//	SELECT n.id, c_row.b FROM typemx_nested n JOIN decpair d ON n.id = d.id
-//	-- PostgreSQL 17 (spelled `(n.c_row).b`) answers the field: 11, NULL,
-//	--   NULL, 44, 55, 66, 77, 88, NULL. wadjet answered decpair.b's DECIMALs
-//	--   on all four arms, in silence (#769).
-//
-// Four resolvers had to agree about which value `c_row.b` denotes — the
-// single-process evaluator (expr.ColRef), the stage DAG's projection
-// (exec.lazyFieldIdx), the DECLARATION half that types it
-// (exec.fieldPathColumn) and the vectorized filters' ROW delegation — and
-// each spelled the order for itself. That is the shape ADR-0022 was written
-// about, one level down: a field path LOOKS like a qualified column
-// reference, so every site invents the same three-way order and one of them
-// gets it wrong.
-//
-// The container must DECLARE the field. Without that test the reorder would
-// capture an ordinary qualified reference whose qualifier happens to name a
-// ROW column of the stream, and a field path naming NO field would stop
-// answering the way it does today (#604).
-//
-// The parent is looked up the way every other reference is: byte-exact under
-// the fold, then the ONE column spelled `<qualifier>.<name>` — a join
-// qualifies a colliding container, so `c_row.b` has to find `x.c_row`. Two
-// arms spelling it decline HERE, and this function declining is not by itself
-// the refusal: the caller's later branches would still bind one of them. What
-// makes the ambiguity loud is the BINDER, which raises PostgreSQL's own
-// `column reference "c_row" is ambiguous` (42702) at plan time when two of a
-// block's sources publish the container (physical.colScope.check).
+// RowFieldPath resolves a qualifier naming a ROW that DECLARES the field
+// (ADR-0022, #769). Consumers ask before stripping the qualifier, so another
+// relation's same-named column cannot replace the ROW field.
+// A literal flat dotted column wins first; undeclared fields decline (#604).
+// Resolve the parent normally, then as the ONE <qualifier>.<name> suffix;
+// two matching parents decline. Declining alone does not refuse ambiguity:
+// physical.colScope.check must raise 42702 before later resolver fallbacks bind.
+// See docs/internals/batch-row-field-path-precedence.md for the design.
 func (b *RecordBatch) RowFieldPath(name string) (parent, field int, ok bool) {
 	dot := -1
 	for i := 0; i < len(name); i++ {

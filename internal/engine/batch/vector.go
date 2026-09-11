@@ -57,30 +57,13 @@ func putIPv4(dst []byte, v uint32) int {
 	return n
 }
 
-// FormatIPv6 renders a 16-byte IPv6 address the way PostgreSQL's inet output
-// function does, which is NOT what net.IP.String() does for two families:
-//
-//	::ffff:10.0.0.1   Go collapses a v4-MAPPED address to its bare dotted quad
-//	                  (`10.0.0.1`), a value the engine itself says the column
-//	                  does not equal — `a = '10.0.0.1'` is false and
-//	                  `a = '::ffff:10.0.0.1'` is true, both correctly (#580).
-//	::1.2.3.4         Go renders a v4-COMPATIBLE address in hex (`::102:304`)
-//	                  where the server prints the embedded quad.
-//
-// PostgreSQL's rule, measured on 17.11 rather than remembered: take the FIRST
-// longest run of zero 16-bit words of length >= 2 and write it `::`; render
-// the trailing four bytes as a dotted quad when that run starts at word 0 and
-// is either six words long (`::a.b.c.d`) or five words long with word 5 equal
-// to 0xffff (`::ffff:a.b.c.d`). Everything else is lower-case hex groups. The
-// zero-run choice is Go's too, so only the dotted-quad rule differs.
-//
-// Measured cells (`SELECT '<lit>'::inet` on 17.11): `::ffff:10.0.0.1`,
-// `::ffff:0.0.0.0`, `::ffff:255.255.255.255`, `::1.2.3.4`, `::2`, `::1`, `::`,
-// `0:1::`, `1::`, `2001:db8::1:0:0:1`, `::ffff:0:102:304`, `64:ff9b::102:304`.
-//
-// The comparison and ordering value is untouched: this is the printed form
-// only, and `net.ParseIP` reads the text back to the same sixteen bytes, which
-// is what kernel.IPv6RowKey and exec.boxedIPv6Compare rely on.
+// FormatIPv6 renders 16 bytes using the FIRST longest zero-word run of length
+// >= 2 as ::. Use a trailing dotted quad only when that run starts at word 0
+// and spans six words, or five words with word 5 == 0xffff (#580).
+// All other groups are lowercase hex; never collapse mapped v6 to bare v4.
+// This changes display only. net.ParseIP must recover the same sixteen bytes
+// for kernel.IPv6RowKey and exec.boxedIPv6Compare.
+// See docs/internals/batch-postgres-ipv6-rendering.md for the design.
 func FormatIPv6(raw []byte) string {
 	if len(raw) != 16 {
 		return ""
@@ -438,31 +421,12 @@ func (v *Vector) setShapeOnlyLen(i, n int) {
 	bc.Offsets[i+1] = bc.Offsets[i] + uint32(n)
 }
 
-// ShapeOnlyLen is what the boxing boundary hands back for a row of a
-// SHAPE-ONLY column: the value is NOT AVAILABLE, and this is its byte length.
-//
-// It exists because a shape-only column has to survive a ROW-SHAPED detour.
-// The scan decodes lengths and no bytes when the planner proves every use of
-// the column reads its shape (COUNT, LENGTH, IS NULL, empty-string), and the
-// vector paths carry that faithfully — copyShapeRange propagates the mark
-// rather than moving bytes that do not exist. The row paths could not: a
-// grouped aggregate under memory pressure buffers its input through
-// RecordBatch.ToRows, whose per-row box comes from Vector.GetValue, and the
-// only thing GetValue could produce for such a row was the panic that says a
-// value was read (#791).
-//
-// So the box is neither the value nor a rendering of it. It is a REFUSAL that
-// carries the length: LengthAt's answer, and nothing else. Written back
-// through SetValue it reconstructs a shape-only column with the same
-// per-row lengths, so what comes out of the detour is what went in — and a
-// consumer that then wants the bytes raises the same guard it always did,
-// at the same place, saying the same thing.
-//
-// A type of its own rather than an int: an int would be indistinguishable
-// from a value at every `switch v := x.(type)` in the tree, which is exactly
-// how a lossy encoding gets written by accident (#632, ADR-0023 item 6 — an
-// encoder must never write bytes its own reader refuses, and a renderer is
-// not a value).
+// ShapeOnlyLen boxes a shape-only row's BYTE length, never its unavailable
+// value or a rendering (#791). SetValue reconstructs the same per-row lengths
+// after ToRows detours; consumers demanding bytes still raise the shape guard.
+// Keep a distinct type, not int: value-shaped encoders must not mistake length
+// for data (#632, ADR-0023 item 6). Rune-count functions require actual bytes.
+// See docs/internals/batch-shape-only-row-box.md for the design.
 type ShapeOnlyLen int
 
 // LengthAt returns the byte length of row i without reading the value. It
@@ -1501,38 +1465,15 @@ func (v *Vector) arrayElements(val any) []any {
 	return nil
 }
 
-// SetValueChecked is SetValue for a caller producing a stored VALUE rather
-// than ingesting an already-encoded one.
-//
-// SetValue's DECIMAL arms answer a conversion they cannot make exactly with
-// the nearest thing they can store — the saturated end of the Int128 range
-// for text too wide at this scale, zero for text that is not a number, the
-// raw carrier for an integer box, and a float64 round trip for a float box.
-// Each is right for the caller it was built for (a comparison bound, #462;
-// ingest's already-scaled carrier, ADR-0018 §4) and each is a silently wrong
-// ROW anywhere else: a 10^30 union arm came back as
-// 17014118346046923173168730371.5884105727 (#553) and an integer arm came
-// back divided by 10^scale (#547/#541).
-//
-// So this sibling exists rather than a signature change on SetValue: the
-// unchecked writer keeps its callers and its cost, and every value-producing
-// row→batch path (FromRowsChecked, and through it the single-process
-// set-operation adapter) takes this one. Every DECIMAL box is exact-or-error
-// here — text through the checked parser, a float through its shortest
-// round-trip spelling, an integer refused outright — and the errors carry
-// PostgreSQL's SQLSTATEs: 22003 for a value with no carrier, 22P02 for text
-// that names no number (ADR-0024 item 4).
-//
-// Every other type, and every other box, delegates to SetValue unchanged.
-//
-// "Every other type" once included the CONTAINERS, and that was #898: a
-// DECIMAL leaf inside a ROW, an ARRAY or a MAP was written by SetValue's
-// recursion (child.SetValue, appendToVector) and got the unchecked contract
-// back — `not-a-number` stored 0.00, an integer 42 stored 0.42, a 53-digit
-// decimal stored a saturated Int128 — with no error, in the same call whose
-// scalar form refuses all three. So the walk descends: a container is
-// traversed HERE and every leaf takes the checked writer, with the field and
-// element path carried into the message so the refusal names WHICH leaf.
+// SetValueChecked writes stored VALUES, distinct from SetValue's carrier and
+// comparison-bound conversions (#462, ADR-0018 §4; #553, #547/#541).
+// DECIMAL text uses checked parsing; floats use shortest round-trip text;
+// integer boxes are refused. Return 22003 for no carrier and 22P02 for invalid
+// numeric text (ADR-0024 item 4); never saturate or silently store zero.
+// Descend ROW/ARRAY/MAP containers and check every leaf, preserving its field/
+// element path in errors (#898). Other types/boxes delegate to SetValue;
+// ShapeOnlyLen retains its separate shape-preserving path.
+// See docs/internals/batch-checked-value-writes.md for the design.
 func (v *Vector) SetValueChecked(i int, val any) error {
 	return v.setValueChecked(i, val, "")
 }
@@ -2160,29 +2101,13 @@ func IntStorageType(t TypeID) bool {
 	return false
 }
 
-// KeyStorageInt is the inverse of GetValue's boxing for the types
-// IntStorageType names: it answers the int64 a column of type t STORES for
-// the boxed value v, whichever of that type's legal boxes v happens to be.
-//
-// It exists because one value of such a type has more than one box in this
-// engine and they are not interchangeable as bytes. GetValue FORMATS the
-// three whose storage is not their text — DATE to "2006-01-02", IPv4 to its
-// dotted quad, MAC to its colon form — while the aggregate's int-keyed SoA
-// path, its migration to the generic map (migrateToGenericMap) and the
-// packed-key unpacking all hand back the raw integer. A group key that
-// serializes whichever box it is given therefore has TWO identities for one
-// value, which is #788: a k-way merge compares bytes, so "14610" and
-// "\n2010-01-01" never combined and every DATE group came out twice with the
-// right total and the wrong grouping.
-//
-// The answer is a function of (t, value) and of nothing else, so it lives
-// beside GetValue and SetValue — the two boxings it has to agree with — and
-// its parses are literally theirs (parseDateString, net.ParseIP, net.ParseMAC).
-//
-// ok is false for a box that no column of type t can produce (a string that
-// is not a date/address, a float where an integer is stored). The caller
-// decides what an impossible box means; this never guesses an integer for it,
-// because a wrong integer is a wrong GROUP.
+// KeyStorageInt inverts GetValue for IntStorageType: key identity depends on
+// (t, value), never on whether the box is rendered text or a raw integer (#788).
+// DATE, IPv4 and MAC text must parse with the same parseDateString/net.ParseIP/
+// net.ParseMAC rules as the writers; aggregation and packed keys may carry ints.
+// Impossible boxes return ok=false, never a guessed integer; the caller decides
+// the refusal. All legal boxings must serialize to one GROUP identity.
+// See docs/internals/batch-integer-storage-key-boxes.md for the design.
 func KeyStorageInt(v any, t TypeID) (int64, bool) {
 	switch tv := v.(type) {
 	case int64:
@@ -2533,47 +2458,16 @@ func (v *Vector) WriteNullAt(di int) {
 	}
 }
 
-// SetComputedChecked is SetValueChecked for a caller whose value came out of an
-// EXPRESSION rather than off a wire or a file.
-//
-// The two differ over exactly one box: an INTEGER. SetValueChecked refuses one
-// into a DECIMAL column because its callers are row→batch adapters, where an
-// integer box is the ALREADY-SCALED carrier of ADR-0018 §4 and storing it as a
-// value would divide it by 10^scale (#547/#541). An expression has no such
-// spelling: `expr.ColRef` over a DECIMAL column boxes the value's rendered
-// TEXT, exact arithmetic boxes text, and the only way an integer reaches a
-// DECIMAL output vector is as a genuine value at scale 0 — the integer branch
-// of a choice construct PostgreSQL types numeric (#695).
-//
-// So this sibling exists rather than a widening of SetValueChecked: the row
-// adapter keeps its refusal, and the expression sites (exec.Project,
-// physical.aggPreProject and expr.EvalDecimalInto) take this one. It is also
-// what makes the box rule DRIFT-PROOF. expr.decimalChoiceArm classifies arms
-// by node kind to compute the result TYPE, and a kind it has not learned yet
-// makes the fold decline — which used to mean the integer box met the DECIMAL
-// vector the PLAN had already allocated and the query died with a 22003 for a
-// value PostgreSQL answers (`CASE WHEN … THEN d ELSE CAST(i AS BIGINT) END`).
-// The store no longer depends on that classification being complete.
-//
-// The scaling is checked: an integer too large to carry at this scale is
-// 22003, never a wrapped number.
-//
-// Two limits it shares with SetValueChecked, both recorded rather than fixed
-// because no SQL surface reaches either today:
-//
-//   - A box of a type a DECIMAL column cannot take at all — a bool, a []byte —
-//     falls through to SetValue, whose mismatch() PANICS. The query boundary
-//     recovers it, so a client sees an internal error rather than PostgreSQL's
-//     42804 datatype_mismatch. Nothing in the SQL layer produces such a box for
-//     a DECIMAL output: the type fold declines for every non-numeric arm, so
-//     the vector would not be a DECIMAL one.
-//   - Neither writer enforces the DECLARED PRECISION, only the scale, because
-//     batch.DecimalColumn carries Scale and no precision. So a value inside the
-//     Int128 but past the type's own 10^p band is stored:
-//     `GREATEST(numeric(38,30), 100000000::bigint)` writes 39 digits under a
-//     type capped at 38. ADR-0024 item 4 makes the declared precision the bound
-//     that matters, and the set-operation coercion is the only door that
-//     currently enforces it (physical.setOpCheckedDecimalText).
+// SetComputedChecked accepts expression integers as genuine scale-0 values,
+// unlike SetValueChecked's row-adapter refusal of ambiguous carriers
+// (ADR-0018 §4; #547/#541, #695). Multiply by 10^scale with checked Int128
+// arithmetic; overflow is 22003, never wrap. Other boxes use SetValueChecked.
+// Expression stores must not depend on decimalChoiceArm recognizing every node.
+// Unsupported DECIMAL boxes still panic mismatch for query-boundary recovery,
+// not 42804; the SQL type fold excludes them.
+// Neither writer enforces declared precision: DecimalColumn holds only Scale.
+// Callers must enforce the declared bound required by ADR-0024 item 4.
+// See docs/internals/batch-computed-decimal-write-boundary.md for the design.
 func (v *Vector) SetComputedChecked(i int, val any) error {
 	if v == nil || v.Type != TypeDecimal || val == nil {
 		return v.SetValueChecked(i, val)

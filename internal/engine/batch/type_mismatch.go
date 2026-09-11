@@ -5,31 +5,15 @@ import (
 	"math"
 )
 
-// TypeMismatchError reports a write of a value a vector has nowhere to put:
-// SetValue was handed a Go value whose type has no conversion into the
-// vector's storage.
-//
-// Until #361 such a write VANISHED — the slot kept its zero value and was
-// marked valid — which is the mechanism behind an entire bug family
-// (#310, #327, #331, #333, #345, #353, #361, #371, #372): some declaration
-// upstream picks the wrong vector type, and instead of an error the query
-// answers 0 on every row. The write site is the one seam every one of those
-// defects must cross, so it now panics with this typed value.
-//
-// The panic carries a query ERROR, not a crash: it implements the
-// exec.FatalEvalPanic contract (Error + FatalEvalError), the same route the
-// expression evaluator uses for a condition with no error return (#347).
-// The pipeline drivers, the worker's task-level recover, the coordinator's
-// and the embedded API's query entries all convert it back into an error —
-// "a wrong type may cost a wrong answer, never the server" (#310) still
-// holds, with the improvement that it now costs an ERROR instead of a wrong
-// answer.
-//
-// The deliberate non-panics: a nil value is a NULL (WriteNullAt); STRING and
-// BYTES destinations coerce any value through its string form, which is a
-// documented rendering (group keys rely on it); and a PARSE failure of a
-// value-level string (an unparseable IPv4, MAC, UUID) keeps its historical
-// null-ish result — the type was right, the value was not.
+// TypeMismatchError panics when a writer's Go type has no storage conversion
+// (#361; #310, #327, #331, #333, #345, #353, #371, #372).
+// It implements FatalEvalPanic (Error + FatalEvalError): drivers, worker recover,
+// coordinator and embedded query entries return a query error, never kill the
+// server or silently leave a valid zero slot (#347).
+// Nil is NULL; STRING/BYTES render any value, as group keys require.
+// Value-level parse failures for IPv4/MAC/UUID retain their null-ish result:
+// the type was accepted, so these do not raise this mismatch guard.
+// See docs/internals/batch-vector-type-mismatch-boundary.md for the design.
 type TypeMismatchError struct {
 	Dst TypeID // the vector's type
 	Val any    // the value that had nowhere to go
