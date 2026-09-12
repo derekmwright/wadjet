@@ -728,7 +728,7 @@ func rerunSQL(kind string, b *batch.RecordBatch, row int, refs []plansql.OuterRe
 	// The two clauses the rebuild re-emits as recorded TEXT, asked directly of
 	// their own trees: an outer reference there did not move, and running the
 	// statement with it still in place is the silent answer §1c refuses.
-	if left := plansql.OuterRefsInUnsubstitutedClauses(info, outerTables); len(left) > 0 {
+	if left := plansql.OuterRefsInUnsubstitutedClauses(info, outerTables, rewrite); len(left) > 0 {
 		return "", &UnsubstitutedOuterRefError{Kind: kind, SQL: sql, Refs: left}
 	}
 	// And the belt: a rebuilt statement that still names a relation it does

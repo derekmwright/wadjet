@@ -139,7 +139,18 @@ func unfoldFromlessScalars(info *SelectInfo) {
 			continue
 		}
 		before := info.GroupByExprs[i].String()
-		info.GroupByExprs[i] = rw(info.GroupByExprs[i])
+		rewritten := rw(info.GroupByExprs[i])
+		// A GROUP BY term reads a bare numeric literal as a select-list
+		// POSITION exactly as an ORDER BY term does, and the consequence is
+		// worse: `SELECT visits FROM t GROUP BY (SELECT 1)` passed the
+		// ungrouped-column validator as "group by item #1" and projected a
+		// fabricated NULL row where PostgreSQL 17.11 and main both raise
+		// 42803 (round-3 review, B2). The decline is the ORDER BY one, in the
+		// clause its own comment always claimed.
+		if isBareNumericLit(rewritten) && !isBareNumericLit(info.GroupByExprs[i]) {
+			continue
+		}
+		info.GroupByExprs[i] = rewritten
 		if info.GroupByExprs[i].String() != before && i < len(info.GroupBy) {
 			info.GroupBy[i] = info.GroupByExprs[i].String()
 		}
@@ -531,8 +542,11 @@ func refuseStarWithNoRelation(info *SelectInfo) error {
 
 // isBareNumericLit reports whether a node renders as a NUMERIC LITERAL and
 // nothing else — the one shape an ORDER BY or GROUP BY term must not acquire,
-// because both engines read it there as a select-list POSITION. Parentheses
-// are transparent to that reading in this engine's own planner
+// because both engines read it there as a select-list POSITION. It is asked in
+// BOTH clauses, and of a SUBSTITUTED term as well as a rewritten one: the
+// per-row re-run renders the outer row's value as a literal, and a literal in
+// those two clauses is a position rather than a value. Parentheses are
+// transparent to that reading in this engine's own planner
 // (logical.unwrapParens), so they are unwrapped here too.
 func isBareNumericLit(n Node) bool {
 	for {

@@ -403,16 +403,19 @@ func c2Cells() []c2Cell {
 				`FROM c2users u ORDER BY id`,
 			want:   `id,v | 1,100 | 2,42 | 3,200`,
 			routes: a2Routes{Correlated: 1}},
-		// The two positions the rebuild does NOT substitute, because a term
-		// substituted there renders as a bare literal and both engines read
-		// `ORDER BY 1` / `GROUP BY 1` as a select-list POSITION. Loud, and
-		// PostgreSQL's value is beside each so the day they are substitutable
-		// the cell fails and is rewritten to it.
-		{name: "52_in_an_ORDER_BY_term_is_refused", // PostgreSQL: 100, 100, 100
-			sql: `SELECT id, (SELECT x.visits FROM c2users x ORDER BY (SELECT u.id) LIMIT 1) AS v ` +
+		// The two positions whose substitution is CONDITIONAL. The rebuild
+		// writes an ORDER BY or GROUP BY term like any other, and only a term
+		// whose SUBSTITUTED rendering is a bare numeric literal is refused,
+		// because that is the one rendering both engines read as a
+		// select-list POSITION rather than as a value (round-3 review, P4).
+		// A constant sort under a LIMIT picks an ARBITRARY row (ADR-0013), so
+		// the cell carries a real tiebreak; what it asserts is that the term
+		// is written into the rebuild rather than refused.
+		{name: "52_an_ORDER_BY_term_the_rebuild_can_write",
+			sql: `SELECT id, (SELECT x.visits FROM c2users x ORDER BY (SELECT u.id), x.id LIMIT 1) AS v ` +
 				`FROM c2users u ORDER BY id`,
-			wantErr: `correlated on u.id`,
-			routes:  a2Routes{Correlated: 1}},
+			want:   `id,v | 1,100 | 2,100 | 3,100`,
+			routes: a2Routes{Correlated: 1}},
 		// The DIRECT spelling of the same two positions — an outer reference
 		// written straight into the clause rather than through a nested
 		// subquery — with the discriminator that says why refusing it is not
@@ -421,11 +424,15 @@ func c2Cells() []c2Cell {
 		// constant does not change an order; with a factor that is negative
 		// for the first outer row the same mechanism answers 100 where
 		// PostgreSQL answers 200.
-		{name: "52a_an_outer_reference_in_an_ORDER_BY_beside_one_in_the_WHERE", // PostgreSQL: 100, 100, 100
+		{name: "52a_an_outer_reference_in_an_ORDER_BY_beside_one_in_the_WHERE",
+			// For the middle row the factor is zero, so the sort key is
+			// constant and LIMIT 1 would pick an arbitrary row (ADR-0013);
+			// the tiebreak makes the cell decide the substitution rather than
+			// the arm's row order.
 			sql: `SELECT id, (SELECT x.visits FROM c2users x WHERE x.id <= u.id ` +
-				`ORDER BY x.id * (u.id - 2) LIMIT 1) AS v FROM c2users u ORDER BY id`,
-			wantErr: `cannot substitute`,
-			routes:  a2Routes{Correlated: 1}},
+				`ORDER BY x.id * (u.id - 2), x.id LIMIT 1) AS v FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,100 | 2,100 | 3,100`,
+			routes: a2Routes{Correlated: 1}},
 		{name: "52b_the_same_in_a_GROUP_BY", // PostgreSQL: 100, 142, 342
 			sql: `SELECT id, (SELECT SUM(x.visits) FROM c2users x WHERE x.id <= u.id ` +
 				`GROUP BY u.id) AS v FROM c2users u ORDER BY id`,
@@ -598,23 +605,40 @@ func c2Cells() []c2Cell {
 			sql:    `SELECT COUNT(*) AS n FROM (SELECT visits FROM c2users u ORDER BY (SELECT 1)) z`,
 			want:   `n | 3`,
 			routes: a2Routes{ScalarProjection: 1}},
-		{name: "81_boundary_GROUP_BY_is_unaffected",
+		{name: "81_boundary_a_GROUP_BY_subquery_keeps_its_node",
 			sql:  `SELECT visits, COUNT(*) AS n FROM c2users u GROUP BY visits, (SELECT 2) ORDER BY 1`,
-			want: `visits,n | 42,1 | 100,1 | 200,1`},
+			want: `visits,n | 42,1 | 100,1 | 200,1`,
+			pinArms: map[string]string{
+				// The three DAG arms cannot compile a subquery in a GROUP BY
+				// term at all — the scan-agg fragment builds its group-by
+				// projection without a SubqueryRunner. Keeping the node (which
+				// is what B2 requires, and what main does) is what exposes it;
+				// round 3 hid it by rewriting the term to an ordinal, which
+				// silently grouped by a select-list position instead.
+				"dag":          `subqueries require a SubqueryRunner`,
+				"dag-shuffled": `subqueries require a SubqueryRunner`,
+				"dag-morsel4":  `subqueries require a SubqueryRunner`,
+			},
+			pinWhy: "a subquery in a GROUP BY term has no lowering in the DAG's scan-agg " +
+				"fragment; the single-process arms answer PostgreSQL's rows"},
 
 		// --- AN OUTER REFERENCE WHOSE ONLY POSITION IS THE SUBQUERY'S ORDER
 		// BY is seen by the classifier now, so it reaches the re-run and is
 		// refused there instead of answering a constant (round-2 review, P1).
-		{name: "82_an_outer_reference_only_in_the_subquerys_ORDER_BY", // PostgreSQL: 200, 100, 100
-			sql: `SELECT id, (SELECT x.visits FROM c2users x ORDER BY x.id * (u.id - 2) LIMIT 1) AS v ` +
+		// The `, x.id` tiebreak is load-bearing: for the middle outer row the
+		// factor is zero, so without it the sort key is constant and LIMIT 1
+		// picks an arbitrary row (ADR-0013). The cell decides the
+		// substitution, not the arm's row order.
+		{name: "82_an_outer_reference_only_in_the_subquerys_ORDER_BY",
+			sql: `SELECT id, (SELECT x.visits FROM c2users x ORDER BY x.id * (u.id - 2), x.id LIMIT 1) AS v ` +
 				`FROM c2users u ORDER BY id`,
-			wantErr: `cannot substitute`,
-			routes:  a2Routes{Correlated: 1}},
-		{name: "83_the_same_projecting_the_sort_key", // PostgreSQL: 3, 1, 1
-			sql: `SELECT id, (SELECT x.id FROM c2users x ORDER BY x.id * (u.id - 2) LIMIT 1) AS v ` +
+			want:   `id,v | 1,200 | 2,100 | 3,100`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "83_the_same_projecting_the_sort_key",
+			sql: `SELECT id, (SELECT x.id FROM c2users x ORDER BY x.id * (u.id - 2), x.id LIMIT 1) AS v ` +
 				`FROM c2users u ORDER BY id`,
-			wantErr: `cannot substitute`,
-			routes:  a2Routes{Correlated: 1}},
+			want:   `id,v | 1,3 | 2,1 | 3,1`,
+			routes: a2Routes{Correlated: 1}},
 
 		// --- A CORRELATED BODY THAT IS A SET OPERATION has no rendering in
 		// the rebuild, and its arms were invisible to the classifier
@@ -722,6 +746,68 @@ func c2Cells() []c2Cell {
 			wantErr: `aggregate beside a nested subquery`,
 			routes:  a2Routes{Correlated: 1}},
 
+		// --- A GROUP BY TERM IS NEVER REWRITTEN INTO A SELECT-LIST POSITION
+		// (round-3 review, B2). `GROUP BY (SELECT 1)` rewritten to `1` passed
+		// the ungrouped-column validator as "group by item #1" and projected a
+		// fabricated NULL row where PostgreSQL 17.11 and main both raise
+		// 42803 — a row of NULLs beside a real aggregate.
+		{name: "101_group_by_a_constant_subquery_is_42803",
+			sql:     `SELECT visits FROM c2users u GROUP BY (SELECT 1)`,
+			wantErr: `must appear in the GROUP BY clause`},
+		{name: "102_the_same_beside_an_aggregate",
+			sql:     `SELECT visits, COUNT(*) AS n FROM c2users u GROUP BY (SELECT 1)`,
+			wantErr: `must appear in the GROUP BY clause`},
+		{name: "103_the_same_with_an_alias",
+			sql:     `SELECT visits AS vv FROM c2users u GROUP BY (SELECT 1)`,
+			wantErr: `must appear in the GROUP BY clause`},
+		{name: "104_two_constant_terms",
+			sql:     `SELECT visits, name FROM c2users u GROUP BY (SELECT 1), (SELECT 2)`,
+			wantErr: `must appear in the GROUP BY clause`},
+		{name: "105_the_same_with_an_ORDER_BY",
+			sql:     `SELECT visits FROM c2users u GROUP BY (SELECT 1) ORDER BY visits`,
+			wantErr: `must appear in the GROUP BY clause`},
+		{name: "106_the_same_with_a_SUM",
+			sql:     `SELECT visits, SUM(id) AS s FROM c2users u GROUP BY (SELECT 1) ORDER BY visits`,
+			wantErr: `must appear in the GROUP BY clause`},
+		// The boundary: a select list that is entirely aggregates has nothing
+		// to ungroup, and PostgreSQL answers it.
+		{name: "107_boundary_an_all_aggregate_select_list_answers",
+			sql:  `SELECT MAX(x.id) AS m FROM c2users x GROUP BY (SELECT 1)`,
+			want: `m | 3`,
+			pinArms: map[string]string{
+				"dag":          `subqueries require a SubqueryRunner`,
+				"dag-shuffled": `subqueries require a SubqueryRunner`,
+				"dag-morsel4":  `subqueries require a SubqueryRunner`,
+			},
+			pinWhy: "cell 81's gap: a subquery in a GROUP BY term has no lowering in the DAG's " +
+				"scan-agg fragment"},
+
+		// --- THE ORDER BY REFUSAL IS THE ORDINAL TRAP AND NOTHING WIDER
+		// (round-3 review, P4). A sort with no slice cannot change which rows
+		// a scalar subquery, an EXISTS or an IN set reads, so its term is left
+		// as written; a term that SUBSTITUTES to an expression is written into
+		// the rebuild; only a term that substitutes to a bare numeric literal
+		// is refused, because both engines read that as a position.
+		{name: "109_an_EXISTS_whose_ORDER_BY_names_the_outer_row",
+			sql: `SELECT id FROM c2users u WHERE EXISTS ` +
+				`(SELECT 1 FROM c2users x ORDER BY u.id) ORDER BY id`,
+			want:   `id | 1 | 2 | 3`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "110_a_one_row_subquery_whose_ORDER_BY_names_the_outer_row",
+			sql: `SELECT id, (SELECT x.visits FROM c2users x WHERE x.id = 1 ` +
+				`ORDER BY x.id * (u.id - 2)) AS v FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,100 | 2,100 | 3,100`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "111_the_term_that_really_is_an_ordinal_is_refused", // PostgreSQL: an arbitrary row
+			sql: `SELECT id, (SELECT x.visits FROM c2users x ORDER BY u.id LIMIT 1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			wantErr: `cannot substitute`,
+			routes:  a2Routes{Correlated: 1}},
+		{name: "112_a_GROUP_BY_term_that_substitutes_to_an_ordinal_is_refused", // PostgreSQL: 1, 1, 1
+			sql: `SELECT id, (SELECT COUNT(*) FROM c2users x GROUP BY u.id, x.id ` +
+				`ORDER BY x.id LIMIT 1) AS v FROM c2users u ORDER BY id`,
+			wantErr: `cannot substitute`,
+			routes:  a2Routes{Correlated: 1}},
 	}
 }
 
@@ -743,6 +829,27 @@ func TestArcC2ASubqueryReadsTheRowItIsCorrelatedOn(t *testing.T) {
 				got, err := c2Run(ctx, arm, tc.sql)
 				if arm.coord != nil {
 					a2CheckRoutes(t, arm.name, before, a2ReadRoutes(arm.coord), tc.routes, tc.sql)
+				}
+				// A PER-ARM PIN is checked first, and it is checked whether or
+				// not the cell carries a whole-cell pin: an arm may DIVERGE by
+				// a refusal where the others answer, which is what a shape the
+				// DAG cannot lower looks like.
+				if pinned, ok := tc.pinArms[arm.name]; ok && tc.pin == "" {
+					switch {
+					case err != nil && strings.Contains(err.Error(), pinned):
+						// The recorded per-arm refusal, unchanged.
+					case err == nil && got == pinned:
+						// The recorded per-arm value, unchanged.
+					case err == nil && got == tc.want:
+						t.Errorf("%s arm now AGREES with PostgreSQL (%s), so this per-arm pin "+
+							"is FIXED: delete it from c2Cells.\n  pinned reason: %s\n  SQL: %s",
+							arm.name, tc.want, tc.pinWhy, tc.sql)
+					default:
+						t.Errorf("%s arm answers %s%s, which is neither PostgreSQL's %s nor the "+
+							"pinned %q\n  SQL: %s", arm.name, got, c2ErrText(err), tc.want,
+							pinned, tc.sql)
+					}
+					continue
 				}
 				switch {
 				case tc.pinErr != "":

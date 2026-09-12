@@ -1053,19 +1053,20 @@ func anyToLit(v any) *Lit {
 // (SELECT id AS x FROM c2users) u` — the shape #1044 is titled for — answered
 // NULL, NULL, NULL for PostgreSQL 17.11's 1, 2, 3.
 //
-// GROUP BY and ORDER BY are NOT substituted, and the reason is the ORDINAL
-// TRAP rather than reach: `GROUP BY u.id` with the outer row's 1 substituted
-// renders `GROUP BY 1`, which both engines read as the FIRST SELECT ITEM.
-// Rendering a substituted sort or group term so that it cannot read as a
-// position is what closing that half needs; until then an outer reference in
-// those two clauses keeps the answer it had (ADR-0021 §1l).
+// GROUP BY, ORDER BY and a JOIN's ON condition are substituted too, and the
+// ORDINAL TRAP costs exactly one rendering rather than two whole clauses:
+// `GROUP BY u.id` with the outer row's 1 substituted renders `GROUP BY 1`,
+// which both engines read as the FIRST SELECT ITEM, so a term whose
+// substituted rendering is a BARE NUMERIC LITERAL is skipped here and refused
+// by the caller (`OuterRefsInUnsubstitutedClauses`). `ORDER BY x.id * (u.id -
+// 2)` renders an expression and is written (ADR-0021 §1l).
 
 // RebuildSQLForRerun reconstructs a SELECT for a per-row re-run, applying
 // rewrite to every clause the rebuild re-emits from an AST — the SELECT list,
-// the WHERE and the HAVING. A clause the rewrite does not change keeps the
-// text the parser recorded, so a subquery that needs no substitution is
-// byte-for-byte what the user wrote. The second result says whether anything
-// changed.
+// the WHERE, the HAVING, the GROUP BY, the ORDER BY and each JOIN's ON
+// condition. A clause the rewrite does not change keeps the text the parser
+// recorded, so a subquery that needs no substitution is byte-for-byte what the
+// user wrote. The second result says whether anything changed.
 func RebuildSQLForRerun(info *SelectInfo, rewrite func(Node) Node) (string, bool) {
 	if info == nil {
 		return "", false
@@ -1096,7 +1097,36 @@ func RebuildSQLForRerun(info *SelectInfo, rewrite func(Node) Node) (string, bool
 		where = info.WhereExpr
 	}
 	having := subst(info.HavingExpr, info.Having)
-	return rebuildSQL(info, cols, where, having), changed
+	// GROUP BY, ORDER BY and a JOIN's ON are substituted too. The only term
+	// that cannot be is one whose substituted rendering is a BARE NUMERIC
+	// LITERAL, because both engines read a literal in GROUP BY or ORDER BY as
+	// a select-list POSITION; such a term keeps its text and is reported by
+	// OuterRefsInUnsubstitutedClauses, which refuses the query.
+	groupBy := make([]string, len(info.GroupBy))
+	copy(groupBy, info.GroupBy)
+	for i := range info.GroupByExprs {
+		if i >= len(groupBy) || info.GroupByExprs[i] == nil {
+			continue
+		}
+		if out := subst(info.GroupByExprs[i], groupBy[i]); !isBareNumericLitText(out) {
+			groupBy[i] = out
+		}
+	}
+	orderBy := make([]string, len(info.OrderBy))
+	for i := range info.OrderBy {
+		orderBy[i] = info.OrderBy[i].Column
+		if info.OrderBy[i].Ordinal != 0 || info.OrderBy[i].Expr == nil {
+			continue
+		}
+		if out := subst(info.OrderBy[i].Expr, orderBy[i]); !isBareNumericLitText(out) {
+			orderBy[i] = out
+		}
+	}
+	joins := make([]string, len(info.Joins))
+	for i := range info.Joins {
+		joins[i] = subst(info.Joins[i].CondExpr, info.Joins[i].Condition)
+	}
+	return rebuildSQLFull(info, cols, where, having, groupBy, orderBy, joins), changed
 }
 
 // RebuildSQL reconstructs a full SELECT SQL string from a SelectInfo,
@@ -1116,6 +1146,13 @@ func RebuildSQL(info *SelectInfo, rewrittenWhere Node) string {
 // (a star item ignores it), rewrittenWhere the WHERE expression, having the
 // HAVING text.
 func rebuildSQL(info *SelectInfo, cols []string, rewrittenWhere Node, having string) string {
+	return rebuildSQLFull(info, cols, rewrittenWhere, having, info.GroupBy, nil, nil)
+}
+
+// rebuildSQLFull is rebuildSQL with the GROUP BY, ORDER BY and JOIN-ON texts
+// supplied as well; a nil slice keeps what the parser recorded.
+func rebuildSQLFull(info *SelectInfo, cols []string, rewrittenWhere Node, having string,
+	groupBy, orderBy, joins []string) string {
 	var sb strings.Builder
 	sb.WriteString("SELECT ")
 	if info.Distinct {
@@ -1179,7 +1216,7 @@ func rebuildSQL(info *SelectInfo, cols []string, rewrittenWhere Node, having str
 	}
 
 	// JOINs
-	for _, j := range info.Joins {
+	for i, j := range info.Joins {
 		sb.WriteString(" ")
 		sb.WriteString(strings.ToUpper(j.Type))
 		sb.WriteString(" ")
@@ -1188,9 +1225,13 @@ func rebuildSQL(info *SelectInfo, cols []string, rewrittenWhere Node, having str
 			sb.WriteString(" ")
 			sb.WriteString(j.RightAlias)
 		}
-		if j.Condition != "" {
+		cond := j.Condition
+		if i < len(joins) && joins[i] != "" {
+			cond = joins[i]
+		}
+		if cond != "" {
 			sb.WriteString(" ON ")
-			sb.WriteString(j.Condition)
+			sb.WriteString(cond)
 		}
 	}
 
@@ -1201,9 +1242,13 @@ func rebuildSQL(info *SelectInfo, cols []string, rewrittenWhere Node, having str
 	}
 
 	// GROUP BY
-	if len(info.GroupBy) > 0 {
+	gb := info.GroupBy
+	if groupBy != nil {
+		gb = groupBy
+	}
+	if len(gb) > 0 {
 		sb.WriteString(" GROUP BY ")
-		sb.WriteString(strings.Join(info.GroupBy, ", "))
+		sb.WriteString(strings.Join(gb, ", "))
 	}
 
 	// HAVING
@@ -1223,9 +1268,12 @@ func rebuildSQL(info *SelectInfo, cols []string, rewrittenWhere Node, having str
 		// rewrote `ORDER BY 1` into the SELECT item's text at parse time, and
 		// re-emitting THAT would hand the re-run a term naming a relation the
 		// rebuilt SELECT list has already substituted away.
-		if ob.Ordinal != 0 {
+		switch {
+		case ob.Ordinal != 0:
 			fmt.Fprintf(&sb, "%d", ob.Ordinal)
-		} else {
+		case i < len(orderBy) && orderBy[i] != "":
+			sb.WriteString(orderBy[i])
+		default:
 			sb.WriteString(ob.Column)
 		}
 		if ob.Desc {
@@ -1550,13 +1598,24 @@ func aggArgRefs(n Node, outerTables, inner map[string]bool) (outer []OuterRef, h
 // multiplying by a positive constant does not change the order — and
 // `ORDER BY x.id * (u.id - 2)`, whose factor is negative for the first outer
 // row, answers 200 there where the strip's ordering answers 100.
-func OuterRefsInUnsubstitutedClauses(info *SelectInfo, outerTables map[string]bool) []OuterRef {
+func OuterRefsInUnsubstitutedClauses(info *SelectInfo, outerTables map[string]bool,
+	rewrite func(Node) Node) []OuterRef {
 	if info == nil || len(outerTables) == 0 {
 		return nil
 	}
 	inner := collectInnerTables(info)
 	var out []OuterRef
+	// A term is only unsubstitutable when its SUBSTITUTED rendering is a bare
+	// numeric literal — the one thing a GROUP BY or ORDER BY reads as a
+	// select-list position. `ORDER BY x.id * (u.id - 2)` substitutes to
+	// `x.id * (1 - 2)`, an expression, and the rebuild writes it.
 	collect := func(n Node) {
+		if n == nil {
+			return
+		}
+		if rewrite != nil && !isBareNumericLitText(rewrite(n).String()) {
+			return
+		}
 		walkColRefs(n, func(c *ColRef) {
 			if c.Table == "" {
 				return
@@ -1571,13 +1630,21 @@ func OuterRefsInUnsubstitutedClauses(info *SelectInfo, outerTables map[string]bo
 	for _, n := range info.GroupByExprs {
 		collect(n)
 	}
-	for i := range info.OrderBy {
-		// A POSITIONAL term is re-emitted as its position, so whatever
-		// resolvePositionalRefs put in its tree never reaches the re-run.
-		if info.OrderBy[i].Ordinal != 0 {
-			continue
+	// A SORT WITH NO SLICE CANNOT CHANGE THE ANSWER. Without a LIMIT or an
+	// OFFSET the block returns the same rows in any order, and a scalar
+	// subquery, an EXISTS and an IN set all read a set rather than a
+	// sequence — `EXISTS (SELECT 1 FROM x ORDER BY u.id)` is 1, 2, 3 on
+	// PostgreSQL 17.11 whatever the sort does. Such a term is left as the
+	// parser recorded it, which is what main did and answered.
+	if info.Limit != "" || info.Offset != "" {
+		for i := range info.OrderBy {
+			// A POSITIONAL term is re-emitted as its position, so whatever
+			// resolvePositionalRefs put in its tree never reaches the re-run.
+			if info.OrderBy[i].Ordinal != 0 {
+				continue
+			}
+			collect(info.OrderBy[i].Expr)
 		}
-		collect(info.OrderBy[i].Expr)
 	}
 	return dedup(out)
 }
@@ -1761,4 +1828,32 @@ func collectSubqueryNode(n Node, f func(*SubqueryNode)) {
 		}
 	}
 	walk(n)
+}
+
+// isBareNumericLitText reports whether a rendered clause term is a bare numeric
+// literal, which is what a GROUP BY or ORDER BY reads as a select-list
+// POSITION. The rebuild works in TEXT at this point, so the question is asked
+// of the rendering rather than of a tree.
+func isBareNumericLitText(s string) bool {
+	t := strings.TrimSpace(s)
+	for len(t) > 1 && t[0] == '(' && t[len(t)-1] == ')' {
+		t = strings.TrimSpace(t[1 : len(t)-1])
+	}
+	if t == "" {
+		return false
+	}
+	if t[0] == '+' || t[0] == '-' {
+		t = t[1:]
+	}
+	dot := false
+	for i := 0; i < len(t); i++ {
+		switch {
+		case t[i] >= '0' && t[i] <= '9':
+		case t[i] == '.' && !dot:
+			dot = true
+		default:
+			return false
+		}
+	}
+	return t != "" && t != "."
 }
