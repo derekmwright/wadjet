@@ -503,18 +503,32 @@ func refuseLateralAliasListOverStar(outer *plansql.SelectInfo,
 //   - A LATER FROM ITEM'S BODY. A second lateral may read the first one's
 //     renamed column (`…, LATERAL (SELECT l.w + 100 AS z) m`), and that body is
 //     parsed text hanging off the join rather than an expression of this block.
+//     A reference there counts when it RESOLVES to this lateral: qualified with
+//     this alias, or BARE in a sibling that is itself table-less and publishes
+//     no such name of its own — a bare `w` has nowhere else to come from then.
+//     A sibling that publishes its own `w` is reading its own (round-5 review,
+//     B1), and a sibling with a FROM clause may be reading that (round-6 review,
+//     B1: requiring qualification dropped `…, LATERAL (SELECT w + 100 AS z) m`
+//     and answered four NULLs for PostgreSQL's 101..104). The sibling's OWN sort
+//     term is not asked, for the reason walkBlockValueExprs gives — a one-row
+//     body's sort is the identity (round-6 review, B2).
 //   - ONE BLOCK UP, through a STAR. When the enclosing block itself selects a
 //     star, every name it holds — the renamed ones included — is republished to
 //     whatever reads that block, which this layer cannot see. A star is
 //     therefore treated as a read of every name the list introduces: the
 //     alternative is `SELECT x.w FROM (SELECT * … l(w)) x` answering NULL.
 //
-// A SORT TERM IS ASKED. The term decides the order and not the values, but with
-// the rename dropped it binds NOTHING — measured: `ORDER BY l.w DESC` answered
-// the ascending order, and a permuted list sorted by a different column. The
-// rename cannot be applied here (the star's width is not knowable in the
-// builder, which is the whole reason this refusal exists), so the disposition is
-// the refusal, never a sort that binds nothing (round-5 review, B2).
+// THE ENCLOSING BLOCK'S SORT TERM IS ASKED, with PostgreSQL's binding rule. The
+// term decides the order and not the values, but with the rename dropped it
+// binds NOTHING — measured: `ORDER BY l.w DESC` answered the ascending order,
+// and a permuted list sorted by a different column. The rename cannot be applied
+// here (the star's width is not knowable in the builder, which is the whole
+// reason this refusal exists), so the disposition is the refusal, never a sort
+// that binds nothing (round-5 review, B2). But an UNQUALIFIED sort term binds to
+// the SELECT list's OUTPUT columns first, so `SELECT u.total AS w … l(w) ORDER
+// BY w DESC` names that output column and never the list: it is skipped, and
+// refusing it was five shapes right → refused in BOTH directions (round-6
+// review, B3).
 //
 // A reference qualified by the lateral's own alias is certainly a read; a BARE
 // reference of the same name is treated as one too, because the alternative is
@@ -554,15 +568,29 @@ func lateralAliasNameRead(outer *plansql.SelectInfo, join plansql.JoinInfo) stri
 			hit = a
 		}
 	}
-	// THE ENCLOSING ORDER BY IS ASKED. A sort term decides the order and not the
-	// values, but the LIST is what the term names: with the rename dropped and
-	// no refusal, `… l(w) ORDER BY l.w DESC` bound nothing and answered
-	// PostgreSQL's rows in the opposite order, and a PERMUTED list sorted by a
-	// different column entirely (round-5 review, B2). Excluding it was this
-	// author's round-5 instruction and it was wrong: the ascending case that
-	// justified it agreed with PostgreSQL by accident, because the column the
-	// expansion puts first is the order the rows already have.
-	walkBlockExprs(outer, see)
+	// THE ENCLOSING ORDER BY IS ASKED SEPARATELY, because one spelling of a sort
+	// term does not name the list at all. A sort term decides the order and not
+	// the values, but with the rename dropped and no refusal it bound nothing:
+	// `… l(w) ORDER BY l.w DESC` answered PostgreSQL's rows in the opposite
+	// order and a PERMUTED list sorted by a different column (round-5 review,
+	// B2). An UNQUALIFIED term the block publishes as an OUTPUT ALIAS is where
+	// PostgreSQL binds it — `SELECT u.total AS w … ORDER BY w` is `u.total` —
+	// so that one is skipped (round-6 review, B3).
+	walkBlockValueExprs(outer, see)
+	if hit == "" {
+		outerOwn := lateralBodyOwnNames(outer)
+		for _, o := range outer.OrderBy {
+			walkExprNodes(o.Expr, func(n plansql.Node) {
+				if hit != "" {
+					return
+				}
+				if ref, ok := n.(*plansql.ColRef); ok && isOwnName(ref, outerOwn) {
+					return
+				}
+				see(n)
+			})
+		}
+	}
 	if hit != "" {
 		return hit
 	}
@@ -580,9 +608,12 @@ func lateralAliasNameRead(outer *plansql.SelectInfo, join plansql.JoinInfo) stri
 			return first
 		}
 	}
-	// A LATER FROM item's body, and only a reference in it that resolves to
-	// THIS lateral. A sibling whose OWN output column is called `w` reads its
-	// own `w`, not this list's, so the bare spelling is not enough there.
+	// A LATER FROM item's body, and only a reference in it that RESOLVES to THIS
+	// lateral: qualified with this alias, or bare in a sibling that is itself
+	// table-less and publishes no such name. A sibling that publishes its own
+	// `w` reads its own; a sibling with a FROM clause may be reading that; and a
+	// bare name in a table-less sibling can come from nowhere else. The
+	// sibling's own ORDER BY is not asked (round-6 review, B1 and B2).
 	for i := range outer.Joins {
 		other := outer.Joins[i]
 		if !other.Lateral || other.RightTable == join.RightTable || alias == "" {
@@ -592,12 +623,21 @@ func lateralAliasNameRead(outer *plansql.SelectInfo, join plansql.JoinInfo) stri
 		if err != nil || body == nil {
 			continue
 		}
-		walkBlockExprs(body, func(n plansql.Node) {
+		sibOwn := lateralBodyOwnNames(body)
+		sibTableLess := len(body.Tables) == 0 && len(body.Joins) == 0
+		walkBlockValueExprs(body, func(n plansql.Node) {
 			if hit != "" {
 				return
 			}
 			ref, ok := n.(*plansql.ColRef)
-			if !ok || !strings.EqualFold(strings.TrimSpace(ref.Table), join.RightAlias) {
+			if !ok {
+				return
+			}
+			t := strings.ToLower(strings.TrimSpace(ref.Table))
+			if t != "" && t != alias {
+				return
+			}
+			if t == "" && (!sibTableLess || isOwnName(ref, sibOwn)) {
 				return
 			}
 			if a, ok := want[strings.ToLower(strings.TrimSpace(ref.Column))]; ok {
