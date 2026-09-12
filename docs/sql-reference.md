@@ -873,10 +873,13 @@ with this lateral's alias, or bare in a sibling that is itself table-less and
 publishes no such name — a bare name has nowhere else to come from there; a
 sibling that publishes its own column of that name is reading its own. That
 sibling's OWN `ORDER BY` is not asked: a one-row body's sort is the identity
-whatever it names. In the enclosing `ORDER BY`, an unqualified term that the
-block publishes as an OUTPUT alias binds to that output column and never to the
-list, as it does in PostgreSQL, so `SELECT u.total AS w … l(w) ORDER BY w`
-answers. The body's own `WHERE`, and a written `ON`, are predicates over the
+whatever it names. In the enclosing `ORDER BY`, an unqualified term that IS a name
+the block publishes as an OUTPUT alias binds to that output column and never to
+the list, as it does in PostgreSQL, so `SELECT u.total AS w … l(w) ORDER BY w`
+answers. The same name INSIDE an expression is an input column — PostgreSQL
+requires an output name to stand alone — so `ORDER BY w + 0` names the list and
+is refused, as is `ORDER BY (w)`, which this layer cannot tell from an
+expression. The body's own `WHERE`, and a written `ON`, are predicates over the
 outer row and are applied above the projection.
 
 Such a body is computed as a projection or it is REFUSED (`0A000`) naming the

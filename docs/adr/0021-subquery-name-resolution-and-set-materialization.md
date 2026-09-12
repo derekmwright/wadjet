@@ -1499,10 +1499,20 @@ code asks them:
   101..104, and `CASE WHEN w > 2 …` answered `0,0,0,0` for `0,0,1,1` — a wrong
   VALUE, not a NULL. That sibling's OWN sort term is NOT asked: a one-row body's
   sort is the identity whatever it names;
-* AN UNQUALIFIED SORT TERM in the enclosing block binds to the SELECT list's
-  OUTPUT columns first, as PostgreSQL binds it, so `SELECT u.total AS w … l(w)
-  ORDER BY w DESC` names that output column and never the list. Refusing it was
-  five shapes right → refused in BOTH sort directions over three outer columns.
+* AN UNQUALIFIED SORT TERM THAT STANDS ALONE in the enclosing block binds to the
+  SELECT list's OUTPUT columns first, as PostgreSQL binds it, so
+  `SELECT u.total AS w … l(w) ORDER BY w DESC` names that output column and never
+  the list. Refusing it was five shapes right → refused in BOTH sort directions
+  over three outer columns. INSIDE AN EXPRESSION the same name is an INPUT
+  column — PostgreSQL: "an output column name has to stand alone, that is, it
+  cannot be used in an expression" — so `ORDER BY w + 0`, `w * -1` and
+  `CASE WHEN w > 2 …` name the alias list and ARE reads. Applying the skip per
+  NODE rather than per TERM made those sorts bind nothing and answer the wrong
+  order where the previous tip refused; the fixture that separates the two
+  bindings is `SELECT -u.total AS w`, whose two candidate orders differ, and it
+  is a gate row (round-7 review, B1). A PARENTHESISED bare name PostgreSQL still
+  binds to the output column; this layer cannot tell it from an expression once
+  the term is a ParenNode, so it takes the refusal.
 
 Keyed on the name alone, the star and sibling positions refused twenty cells
 that PostgreSQL, main and the previous tip all answer; keyed on qualification,
@@ -1522,8 +1532,8 @@ spelling agreed with PostgreSQL by coincidence — an unbound sort term leaves t
 scan's order, which over this fixture is ascending — and that coincidence is
 what made the exclusion look measured for a round. The rename cannot be applied
 for a sort term for the same reason it cannot be applied in the SELECT list (the
-paragraph below), so the disposition is the refusal: never a sort that binds
-nothing.
+paragraph below), so the disposition is the refusal wherever the term names the
+list — and a spelling that would bind nothing is refused rather than answered.
 
 The earlier sentence said such a list was left to
 `RefuseUnappliedColumnAliasLists` — and nothing on either lateral path called

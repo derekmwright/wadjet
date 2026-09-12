@@ -153,6 +153,61 @@ func TestC1FTheReadTestSeam(t *testing.T) {
 			want: "cols=[w:FLOAT64] rows=4 | 200 | 200 | 150 | 150",
 		},
 		{
+			// THE OTHER HALF OF PostgreSQL'S RULE (round-7 review, B1): "an
+			// output column name has to stand alone, that is, it cannot be
+			// used in an expression". Inside one the name is an INPUT column —
+			// this alias list's — so the read test must see it. Skipping it
+			// per NODE rather than per TERM dropped the rename and sorted on
+			// nothing, which is the failure the whole refusal exists for.
+			name: "sort term, the output alias INSIDE an expression -> the INPUT column -> LOUD",
+			sql:  "SELECT u.total AS w " + lat + "ORDER BY w + 0 DESC",
+			want: reads,
+			why:  "PostgreSQL answers 200,200,150,150 — it binds the list's column here; the round-7 tip answered 150,150,200,200",
+		},
+		{
+			name: "sort term, the output alias inside a NEGATION -> the INPUT column -> LOUD",
+			sql:  "SELECT u.total AS w " + lat + "ORDER BY w * -1",
+			want: reads,
+			why:  "PostgreSQL answers 200,200,150,150; the round-7 tip answered 150,150,200,200",
+		},
+		{
+			name: "sort term, the output alias inside a CASE -> the INPUT column -> LOUD",
+			sql: "SELECT u.total AS w " + lat +
+				"ORDER BY CASE WHEN w > 2 THEN 0 ELSE 1 END, u.id",
+			want: reads,
+			why:  "PostgreSQL answers 200,200,150,150; the round-7 tip answered 150,150,200,200",
+		},
+		{
+			// PostgreSQL treats a parenthesised bare name as standing alone
+			// and binds the OUTPUT column (measured: same rows as the bare
+			// spelling). This layer cannot tell the two apart once the term is
+			// a ParenNode, so it takes the refusal — loud, not a sort that
+			// binds nothing, which is the disposition everywhere the rename
+			// cannot be applied.
+			name: "sort term, the output alias PARENTHESISED -> LOUD rather than a sort binding nothing",
+			sql:  "SELECT u.total AS w " + lat + "ORDER BY (w) DESC",
+			want: reads,
+			why:  "PostgreSQL answers 200,200,150,150 by binding the output column; refusing is the conservative half",
+		},
+		{
+			// THE DISCRIMINATING FIXTURE. `u.total` and `l.w` order these rows
+			// the same way, so the corpus could not say which column a sort
+			// term bound until the outer column was NEGATED: the output alias
+			// descends -150,-200 and the list's column descends 4,3,2,1.
+			name: "DISCRIMINATOR: a negated outer alias, the name inside an expression -> the INPUT column -> LOUD",
+			sql: "SELECT -u.total AS w FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
+				"WHERE i.order_id = u.id) l(w) ORDER BY w + 0 DESC",
+			want: reads,
+			why:  "PostgreSQL answers -200,-200,-150,-150 (the list's column); the round-7 tip answered -150,-150,-200,-200",
+		},
+		{
+			name: "DISCRIMINATOR: a negated outer alias, the name STANDING ALONE -> the output column -> ANSWERS",
+			sql: "SELECT -u.total AS w FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
+				"WHERE i.order_id = u.id) l(w) ORDER BY w DESC",
+			want: "cols=[w:FLOAT64] rows=4 | -150 | -150 | -200 | -200",
+			why:  "PostgreSQL answers -150,-150,-200,-200 — the output column, which is the half this branch applies",
+		},
+		{
 			name: "sort term, bare, an output alias the list does not introduce -> the output column -> ANSWERS",
 			sql: "SELECT u.id AS w FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
 				"WHERE i.order_id = u.id) l(x) ORDER BY w DESC",

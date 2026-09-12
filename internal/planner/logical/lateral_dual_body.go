@@ -523,12 +523,16 @@ func refuseLateralAliasListOverStar(outer *plansql.SelectInfo,
 // binds NOTHING — measured: `ORDER BY l.w DESC` answered the ascending order,
 // and a permuted list sorted by a different column. The rename cannot be applied
 // here (the star's width is not knowable in the builder, which is the whole
-// reason this refusal exists), so the disposition is the refusal, never a sort
-// that binds nothing (round-5 review, B2). But an UNQUALIFIED sort term binds to
-// the SELECT list's OUTPUT columns first, so `SELECT u.total AS w … l(w) ORDER
-// BY w DESC` names that output column and never the list: it is skipped, and
-// refusing it was five shapes right → refused in BOTH directions (round-6
-// review, B3).
+// reason this refusal exists), so the disposition is the refusal rather than a
+// sort that binds nothing (round-5 review, B2). But an UNQUALIFIED sort term
+// that STANDS ALONE binds to the SELECT list's OUTPUT columns first, so
+// `SELECT u.total AS w … l(w) ORDER BY w DESC` names that output column and
+// never the list: that one term is skipped, and refusing it was five shapes
+// right → refused in BOTH directions (round-6 review, B3). The skip is per
+// TERM, never per node inside one: PostgreSQL resolves an output name only when
+// it stands alone, so `ORDER BY w + 0` names the alias list and IS a read —
+// skipping it per node answered the wrong order on five arms (round-7 review,
+// B1).
 //
 // A reference qualified by the lateral's own alias is certainly a read; a BARE
 // reference of the same name is treated as one too, because the alternative is
@@ -580,11 +584,16 @@ func lateralAliasNameRead(outer *plansql.SelectInfo, join plansql.JoinInfo) stri
 	if hit == "" {
 		outerOwn := lateralBodyOwnNames(outer)
 		for _, o := range outer.OrderBy {
+			// PostgreSQL binds an output-alias name in ORDER BY only when the
+			// term IS that name: "an output column name has to stand alone,
+			// that is, it cannot be used in an expression". Inside one, the
+			// name is an INPUT column — so `ORDER BY w + 0` names the alias
+			// list and is a read.
+			if ref, ok := o.Expr.(*plansql.ColRef); ok && isOwnName(ref, outerOwn) {
+				continue
+			}
 			walkExprNodes(o.Expr, func(n plansql.Node) {
 				if hit != "" {
-					return
-				}
-				if ref, ok := n.(*plansql.ColRef); ok && isOwnName(ref, outerOwn) {
 					return
 				}
 				see(n)
