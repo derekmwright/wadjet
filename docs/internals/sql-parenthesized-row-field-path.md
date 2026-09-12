@@ -20,7 +20,11 @@ still a syntax error, which is ADR-0022's position and matches
 PostgreSQL's own reading of the unparenthesised three-part form
 (it takes the parts as catalog.schema.column and refuses).
 
-The container itself must be a BARE name. `(x.c_row).b` parses
+The container may be a bare name or a parenthesized call. A call is lowered
+to `row_field`; the binder checks its resolved type, including polymorphic
+calls over ROW inputs. Non-ROW containers are refused with 42809 naming the
+resolved type, and absent ROW fields with 42703, before any row is read.
+The compiler repeats the check with its available declarations. `(x.c_row).b` parses
 and is REFUSED (0A000) rather than answered, because a
 three-part identity is not something this engine's ColRef can
 carry — see below.

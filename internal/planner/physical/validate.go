@@ -90,10 +90,12 @@ func outerDiagScope(prev, outer *colScope) *colScope {
 // `open` means an unenumerable source is present, so no reference can be proven
 // absent.
 type colScope struct {
-	open     bool
-	cols     map[string]bool
-	quals    map[string]map[string]bool
-	srcCount map[string]int
+	// fieldDecls retains complete derived declarations for postfix binding.
+	fieldDecls map[string]expr.DeclType
+	open       bool
+	cols       map[string]bool
+	quals      map[string]map[string]bool
+	srcCount   map[string]int
 	// colTypes / qualColTypes record the declared parquet.TypeID of the
 	// columns a BASE TABLE provides, for the plan-time literal refusal
 	// (validate_literal.go). A bare name two sources declare with DIFFERENT
@@ -272,6 +274,14 @@ func (s *colScope) merge(o *colScope) {
 		}
 		for c := range cs {
 			s.quals[q][c] = true
+		}
+	}
+	if s.fieldDecls == nil {
+		s.fieldDecls = map[string]expr.DeclType{}
+	}
+	for k, d := range o.fieldDecls {
+		if _, exists := s.fieldDecls[k]; !exists {
+			s.fieldDecls[k] = d
 		}
 	}
 	for c, typ := range o.colTypes {
@@ -472,13 +482,15 @@ func (s *colScope) available() []string {
 }
 
 type cteEntry struct {
-	cols []string
-	open bool
+	decls []expr.DeclType
+	cols  []string
+	open  bool
 }
 
 type binder struct {
-	src  tableColumnSource
-	ctes map[string]cteEntry
+	outputDecls map[*plansql.SelectInfo][]expr.DeclType
+	src         tableColumnSource
+	ctes        map[string]cteEntry
 	// outerDiag is the enclosing query levels a DERIVED TABLE's body sits
 	// under, carried for DIAGNOSIS and never for resolution (#614). See
 	// outerDiagScope. Nil everywhere but inside a plain derived table's block.
@@ -521,7 +533,18 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		if err := b.validateBlock(ctx, info.Union.Left, outer); err != nil {
 			return err
 		}
-		return b.validateBlock(ctx, info.Union.Right, outer)
+		if err := b.validateBlock(ctx, info.Union.Right, outer); err != nil {
+			return err
+		}
+		left, right := b.outputDecls[info.Union.Left], b.outputDecls[info.Union.Right]
+		out := append([]expr.DeclType(nil), left...)
+		for i := range out {
+			if out[i].Untyped && i < len(right) {
+				out[i] = right[i]
+			}
+		}
+		b.outputDecls[info] = out
+		return nil
 	}
 
 	// Build the FROM scope from base tables, joins, derived tables and CTE refs.
@@ -559,6 +582,34 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	if err != nil {
 		return err
 	}
+
+	if b.outputDecls == nil {
+		b.outputDecls = map[*plansql.SelectInfo][]expr.DeclType{}
+	}
+	declarations := make([]expr.DeclType, len(info.Columns))
+	fieldInputs := rowFieldScopeDecls(from)
+	for i, col := range info.Columns {
+		if d, c := expr.FieldContainerType(col.ASTExpr, func(n plansql.Node) (expr.DeclType, expr.Confidence) {
+			return fieldContainerDeclaredType(n, fieldInputs)
+		}); c == expr.Decided {
+			declarations[i] = d
+		} else {
+			declarations[i] = expr.DeclType{Untyped: true}
+		}
+	}
+	if _, star := blockOutputs(info); star {
+		declarations = nil
+		if names, known := b.blockColumns(ctx, info); known && len(info.Columns) == 1 {
+			for _, name := range names {
+				d, c := nodeDeclaredType(&plansql.ColRef{Column: name}, fieldInputs)
+				if c != expr.Decided {
+					d = expr.DeclType{Untyped: true}
+				}
+				declarations = append(declarations, d)
+			}
+		}
+	}
+	b.outputDecls[info] = declarations
 
 	// Resolution scope for WHERE and SELECT: FROM sources plus any outer scope
 	// (correlated subqueries). Output aliases are NOT visible here — a SELECT
@@ -599,11 +650,9 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	for i := range info.Columns {
 		col := info.Columns[i]
 		if col.IsWindow {
-			// The name resolution below skips a window item — its OVER terms
-			// are a different namespace — but the SCHEMA-FREE refusals apply
-			// to its arguments and frame terms exactly as to any other item,
-			// so they are asked here rather than lost with it.
-			if err := refuseInvalidRowFields(col.ASTExpr); err != nil {
+			// Window arguments and frame terms still require declaration checks
+			// against the input scope, before any window rows are evaluated.
+			if err := refuseInvalidRowFields(col.ASTExpr, resolve); err != nil {
 				return err
 			}
 			if err := refuseUnknownFlagNames(col.ASTExpr); err != nil {
@@ -715,14 +764,14 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 			}
 		}
 	}
+	if err := refuseInvalidRowFields(expr, scope); err != nil {
+		return err
+	}
 	// The SCHEMA-FREE refusal, which is NOT gated on a closed scope because it
 	// asks the scope nothing: a TCP flag name that names no flag is a property
 	// of the statement's text, and it has to be the same answer on the DAG —
 	// where a stage's fragment compiles when a task RUNS — as in one process
 	// (#1018 round 6, B1). See validate_flag_names.go.
-	if err := refuseInvalidRowFields(expr); err != nil {
-		return err
-	}
 	if err := refuseUnknownFlagNames(expr); err != nil {
 		return err
 	}
@@ -794,8 +843,11 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 			names = append([]string(nil), names...)
 			copy(names, tr.ColumnAliases)
 		}
-		for _, n := range names {
+		for i, n := range names {
 			into.addQualified(qual, n)
+			if ds := b.outputDecls[inner]; i < len(ds) && !ds[i].Untyped {
+				into.addFieldDecl(qual, n, ds[i])
+			}
 		}
 		return nil
 	}
@@ -806,8 +858,11 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 			into.open = true
 			return nil
 		}
-		for _, n := range e.cols {
+		for i, n := range e.cols {
 			into.addQualified(qual, n)
+			if i < len(e.decls) && !e.decls[i].Untyped {
+				into.addFieldDecl(qual, n, e.decls[i])
+			}
 		}
 		return nil
 	}
@@ -856,6 +911,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 		// (renameCollidingSlots) so the two can coexist in one query.
 		into.addQualifiedTyped(qual, c.Name, c.Type)
 		into.addRowColumn(c)
+		into.addFieldDecl(qual, c.Name, expr.DeclType{ID: c.Type, Schema: &c})
 	}
 	return nil
 }
@@ -951,6 +1007,9 @@ func (b *binder) registerCTE(ctx context.Context, cte *plansql.CTEDef) error {
 		// answered a wrong number (#958).
 		b.ctes[name] = cteEntry{cols: plansql.OverlayColumnAliases(cte.Columns, names)}
 	}
+	e := b.ctes[name]
+	e.decls = b.outputDecls[body]
+	b.ctes[name] = e
 	return nil
 }
 

@@ -1888,7 +1888,8 @@ func (p *selectParser) parsePostfix() (Node, error) {
 		case TokenDot:
 			// Only parenthesized expressions take this field-access dot: (container).field.
 			// Redundant parentheses are allowed; unparenthesized a.b.c stays invalid
-			// (ADR-0022). The supported container is a BARE name.
+			// (ADR-0022). The container may be a bare name or a call. Calls use row_field;
+			// binding refuses non-ROW resolved types (42809) and absent ROW fields (42703).
 			// (x.c_row).b can disambiguate relations in PostgreSQL, but this engine's
 			// two-part ColRef cannot carry that three-part identity: parse then refuse
 			// 0A000, never bind an ambiguous parent (42702) or silently return NULL.

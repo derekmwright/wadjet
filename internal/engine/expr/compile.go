@@ -1163,7 +1163,17 @@ func compileFuncCallNode(n *plansql.FuncCallNode, ctx *compileContext) (Expr, er
 // refuse the operator it implements.
 func compileFuncCallNamed(n *plansql.FuncCallNode, ctx *compileContext, checked bool) (Expr, error) {
 	name := strings.ToLower(n.Name)
-	if err := RefuseInvalidFixedRowField(n); err != nil {
+	if err := RefuseInvalidFixedRowField(n, func(node plansql.Node) (DeclType, Confidence) {
+		if ref, ok := node.(*plansql.ColRef); ok && ctx != nil {
+			if t, ok := ctx.colTypes[strings.ToLower(ref.String())]; ok {
+				return Decl(t), Decided
+			}
+			if t, ok := ctx.colTypes[strings.ToLower(ref.Column)]; ok {
+				return Decl(t), Decided
+			}
+		}
+		return DeclType{}, Undecided
+	}); err != nil {
 		return nil, err
 	}
 

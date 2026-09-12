@@ -390,6 +390,9 @@ type FuncCallNode struct {
 
 func (*FuncCallNode) nodeTag() {}
 func (f *FuncCallNode) String() string {
+	if f.OutputLabel != "" && strings.EqualFold(f.Name, "row_field") && len(f.Args) == 2 {
+		return "(" + f.Args[0].String() + ").\"" + strings.ReplaceAll(f.OutputLabel, "\"", "\"\"") + "\""
+	}
 	if f.Star {
 		return f.Name + "(*)"
 	}
