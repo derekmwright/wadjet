@@ -269,6 +269,53 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 			why:    "the TOP operator is UNION ALL, so PostgreSQL keeps duplicates; #1042 fires first on the DAG arms",
 			routed: c1RecRoutes,
 		},
+
+		// ---- THE SPLIT IS LEXICAL (round-3 review, B1). The arm text the
+		// iteration re-plans comes from `plansql.SplitLastTopLevelUnionAll`,
+		// which runs the LEXER, so it cannot match the letters `union all`
+		// inside an identifier, a delimited name, a string literal or a
+		// comment. A second scanner that disagrees with the parse can only
+		// ever be wrong, and this one was: four cells right -> refused.
+		{
+			name:   "lexical split: the letters `unionall` in an identifier after the last operator",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT v+1 AS unionall FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
+			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			pin:    c1RecDAGPins(),
+			why:    "a hand-rolled text scan matched the letters and split there, so the halves disagreed with the parse and the body was refused 42P19 where both bases answer (round-3 review, B1); #1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "lexical split: a comment naming UNION ALL after the last operator",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT v+1 FROM r WHERE v<3 /* UNION ALL */) SELECT v FROM r ORDER BY 1",
+			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			pin:    c1RecDAGPins(),
+			why:    "the scan did not skip comments; #1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "lexical split: a string literal 'UNION ALL' in the recursive term",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT v+1 FROM r WHERE v<3 AND 'UNION ALL' <> 'z') SELECT v FROM r ORDER BY 1",
+			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "lexical split: a delimited identifier \"union all\" in the recursive term",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT v+1 AS \"union all\" FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
+			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "lexical split: control: the same letters BEFORE the operator",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS unionall, 1 AS v UNION ALL SELECT v+1, v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
+			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
 	})
 }
 

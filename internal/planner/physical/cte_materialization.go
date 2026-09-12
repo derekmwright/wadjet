@@ -578,7 +578,7 @@ func classifyRecursiveBody(cte plansql.CTEDef) (recursiveForm, string, string, e
 				"engine has no fixed-point form for that. Write UNION ALL, or remove the "+
 				"duplicates in the query that reads it", cte.Name)
 	}
-	anchorSQL, recursiveSQL, ok := splitLastTopLevelUnion(cte.SQL)
+	anchorSQL, recursiveSQL, ok := plansql.SplitLastTopLevelUnionAll(cte.SQL)
 	if !ok ||
 		selectTextNamesRelation(anchorSQL, name) ||
 		!selectTextNamesRelation(recursiveSQL, name) {
@@ -587,71 +587,6 @@ func classifyRecursiveBody(cte plansql.CTEDef) (recursiveForm, string, string, e
 		return recursiveFormNotRecursive, "", "", notTheForm
 	}
 	return recursiveFormUnionAll, anchorSQL, recursiveSQL, nil
-}
-
-// splitLastTopLevelUnion splits a body's TEXT at the LAST top-level `UNION ALL`
-// — the operator the left-associative parse puts at the root — into the
-// non-recursive term and the recursive term.
-//
-// Splitting at the FIRST one is what made a three-arm body's "recursive term"
-// two arms (round-2 review, B3). The caller VERIFIES the halves against the
-// parse; this function only finds the position.
-func splitLastTopLevelUnion(sql string) (anchor, recursive string, ok bool) {
-	upper := strings.ToUpper(sql)
-	depth := 0
-	inStr := false
-	for i := 0; i < len(sql); i++ {
-		ch := sql[i]
-		if inStr {
-			if ch == '\'' {
-				if i+1 < len(sql) && sql[i+1] == '\'' {
-					i++ // escaped quote
-				} else {
-					inStr = false
-				}
-			}
-			continue
-		}
-		switch ch {
-		case '\'':
-			inStr = true
-			continue
-		case '(':
-			depth++
-		case ')':
-			depth--
-		}
-		if depth != 0 || i+5 > len(upper) || upper[i:i+5] != "UNION" {
-			continue
-		}
-		if i > 0 && !isSQLBreak(sql[i-1]) {
-			continue // inside a longer identifier
-		}
-		rest := strings.TrimLeft(upper[i+5:], " \t\n\r")
-		if !strings.HasPrefix(rest, "ALL") {
-			continue
-		}
-		end := i + 5
-		for end < len(sql) && isSQLSpace(sql[end]) {
-			end++
-		}
-		end += 3 // skip ALL
-		// Keep scanning: the LAST top-level one is the root of the parse.
-		anchor, recursive, ok = strings.TrimSpace(sql[:i]), strings.TrimSpace(sql[end:]), true
-	}
-	return anchor, recursive, ok
-}
-
-func isSQLSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' }
-
-// isSQLBreak reports whether c cannot be part of an identifier, so a keyword
-// that starts after it really is a keyword.
-func isSQLBreak(c byte) bool {
-	switch {
-	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_':
-		return false
-	}
-	return true
 }
 
 // selectTextNamesRelation is selectNamesRelation over one arm's TEXT, for the
