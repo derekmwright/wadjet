@@ -1058,6 +1058,103 @@ columns ADR-0012's #810 entry names. wrong → right on two arms and loud on two
 or wrong → loud on four, is within doctrine; each pin fails the day its gap
 closes.
 
+### 1l. A FROM-less scalar subquery IS its SELECT expression
+
+(Added 2026-09-12, #1044.)
+
+§1c settled what a subquery this engine cannot RUN answers: it fails the query.
+This shape never needed to be run at all.
+
+`(SELECT u.x)` produces one row whose one column is `u.x` evaluated in the
+ENCLOSING scope — PostgreSQL plans it as a Result node under the SubLink with
+the outer reference as a parameter. This engine ran the block as a STATEMENT,
+where `u` names no relation the block provides; `expr.ResolveColumnRef`
+stripped the qualifier, found no bare `x` either, and every row read the EMPTY
+BOX under a text declaration. The filing's own shape,
+
+```sql
+SELECT SUM(a.v) AS a, SUM(b.v) AS b
+FROM (SELECT (SELECT u.x) AS v FROM (SELECT id AS x FROM users) u) a
+CROSS JOIN (SELECT (SELECT u.x) AS v FROM (SELECT visits AS x FROM users) u) b
+```
+
+answered `""` and `""` under OID 701 where PostgreSQL 17.11 answers 18 (bigint,
+OID 20) and 1026 (numeric, OID 1700). The unresolved name does not have to be a
+derived table's output alias to reach it — `SELECT (SELECT u.id) FROM users u`
+answered the empty box too — so the rule is stated about the MISSING FROM
+CLAUSE and not about derived tables.
+
+The rewrite is done once, at the PARSER, at the single site that builds a
+`SubqueryNode` for a subquery in an expression position
+(`plansql.fromlessScalarExpr`). Doing it there rather than at each reader is
+what makes the whole answer right at once: the classifier, the binder, the
+logical builder, the declaration walk, the DAG's stage emission and the per-row
+re-run all see an expression. The DECLARATION follows for free — the item is
+typed like any other expression over the outer row, so `(SELECT u.x)` over an
+INT32 column declares int4 and its SUM declares bigint instead of falling to
+the string fallback and summing on the float rung — and so does the OUTPUT
+NAME, which PostgreSQL already takes from the subquery's own output column
+(`x` for `(SELECT u.x)`, `?column?` for `(SELECT 1)`).
+
+The boundary is every clause that can still make such a block produce no row or
+more than one column, and each was measured: `(SELECT u.id WHERE 1=0)`,
+`(SELECT u.id LIMIT 0)` and `(SELECT u.id OFFSET 1)` are NULL, and `(SELECT
+u.id, u.visits)` is 42601. Those keep the subquery. `DISTINCT` and `ORDER BY`
+keep it too: over one row they are provably no-ops, but "provably" is a claim
+about clauses this rewrite would have to interpret, and declining them costs
+only shapes nobody writes.
+
+An AGGREGATE or a WINDOW CALL in the item is excluded for a different reason,
+and the measurement is the reason. PostgreSQL decides which query an aggregate
+belongs to by whether its ARGUMENT names the enclosing one: `SELECT (SELECT
+MAX(u.id)) FROM users u` is the ENCLOSING query's aggregate and answers ONE
+row, 3, while `SELECT (SELECT MAX(1)) FROM users u` and `SELECT (SELECT
+COUNT(*)) FROM users u` are the BLOCK's own, over the single row it produces,
+and answer 1 for every outer row. Substituting the expression would make it the
+enclosing query's UNCONDITIONALLY, turning the second pair from three rows into
+one — so an aggregate here is a rule about aggregate LEVELS rather than about
+one item, and this section does not state it. A window call splits the same way
+(`(SELECT SUM(u.id) OVER ())` is 1,2,3 and `(SELECT COUNT(*) OVER ())` is
+1,1,1) and is §1m's subject.
+
+An OPERATOR expression is wrapped in a `ParenNode` and nothing else is, and
+that half is not cosmetic. `SelectColumn.Expr` is the AST's own rendering and
+`BinaryOp.String()` does not bracket its operands, so an unwrapped
+`(SELECT u.x + 1) * 2` renders as `u.x + 1 * 2`; but `(u.x)` and `u.x` are one
+expression to the compiler and NOT to the stage emission, which reads a
+projection's node to decide whether a stage passes a column through. With the
+wrapper on a bare column reference the filing's own shape routed to the
+coordinator-local pipeline on all three DAG arms, and its aggregate spelling
+reached the worker as a schemaless batch (#277). The control that named it is
+the same query with the subquery spelled out (`SELECT u.x AS v …`), which was
+right throughout and is cell 00 of the census.
+
+Measured against live PostgreSQL 17.11 over the three-row `c2users` fixture,
+before → after, on all five arms:
+
+| shape | before | after | PG |
+|---|---|---|---|
+| the filing shape, derived and CTE spellings | `"",""` OID 701 | 18, 1026 OID 20/1700 | 18, 1026 |
+| `(SELECT u.x)` over a derived alias, a CTE, a column-alias list, a set-operation body | empty box | 1,2,3 | 1,2,3 |
+| the same name UNQUALIFIED, and nested two deep | empty box / loud | 1,2,3 | 1,2,3 |
+| the same over a BASE table's alias | empty box | 1,2,3 | 1,2,3 |
+| in WHERE / HAVING / ORDER BY / GROUP BY | 0 rows / 0 rows / unsorted / NULL | PostgreSQL's | — |
+| a CASE, a CAST, arithmetic over two outer scopes | empty box | PostgreSQL's | — |
+| `(SELECT u.id WHERE 1=0)`, `LIMIT 0`, `OFFSET 1` | NULL | NULL | NULL |
+| two columns; an unknown name | 42601; 42703 | 42601; 42703 | 42601; 42703 |
+| a subquery with its OWN FROM, and the WHERE-clause substitution | right | right | right |
+
+All three DAG arms EXECUTE the rewritten shapes as stages — the routing
+counters are zero beside the rows — where every one of them routed to the
+coordinator-local pipeline before.
+
+**What this does NOT close.** A FROM-less subquery in a LATERAL body
+(`CROSS JOIN LATERAL (SELECT u.id AS v) l`) and one as an `IN` list's set
+(`u.id IN (SELECT u.id)`) are the same missing scope at two other sites and
+still answer the empty box and no rows; they are #1033's family, reached
+through the FROM parser and the IN path rather than through the expression
+position this rewrite stands at.
+
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
 `resolveSubqueryAST` gains an `InExpr` case. An uncorrelated IN-subquery is

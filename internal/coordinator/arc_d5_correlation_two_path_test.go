@@ -1184,22 +1184,27 @@ func arcD5MeasuredCells() []arcD5Cell {
 
 		// #714 — an aggregate argument containing a SCALAR SUBQUERY. The
 		// issue's headline is "refused on the stage DAG (subqueries require a
-		// SubqueryRunner)"; that tree is gone. It ANSWERS on all four arms,
-		// with the DAG routing the plan to the coordinator-local pipeline for
-		// its SELECT-list subquery (#659's route), and the VALUE is
-		// PostgreSQL's.
+		// SubqueryRunner)"; that tree is gone. It ANSWERS on all four arms and
+		// the VALUE is PostgreSQL's.
 		//
-		// What is still divergent is the TYPE: `SUM(a + (SELECT 1))` over a
-		// DECIMAL column comes back FLOAT8 where PostgreSQL says numeric, and
-		// the control one line down shows the same SUM without the subquery
-		// staying exact. That is a numeric-typing residual (ADR-0024's
-		// literal/declaration rung), not a correlation one, and it is pinned
-		// with the box each renders.
+		// The TYPE used to diverge too — `SUM(a + (SELECT 1))` over a DECIMAL
+		// column came back FLOAT8 where PostgreSQL says numeric, while the
+		// control two lines down showed the same SUM without the subquery
+		// staying exact — and that pin is DELETED here as #1044's proof
+		// (ADR-0021 §1l). A scalar subquery with no FROM clause is its SELECT
+		// expression now, so this item is `a + 1`: it declares what that
+		// expression declares, the sum stays exact, and the DAG executes the
+		// shape as stages instead of routing it to the coordinator-local
+		// pipeline for a SELECT-list subquery it no longer has (#659's route,
+		// hence wantScalarProjRoutes 0).
+		//
+		// The cell one line down is the boundary and keeps BOTH divergences:
+		// its subquery has a FROM clause, so it stays a subquery, stays
+		// FLOAT8, and stays routed.
 		{issue: "#714", name: "scalar_subquery_in_an_aggregate_argument_answers",
-			sql:                  `SELECT SUM(a + (SELECT 1)) AS s FROM decpair`,
-			want:                 []string{"s=float:59.99"},
-			wantScalarProjRoutes: 1,
-			pgSays:               "numeric 59.99 — the VALUE agrees, the TYPE does not"},
+			sql:    `SELECT SUM(a + (SELECT 1)) AS s FROM decpair`,
+			want:   []string{"s=59.99"},
+			pgSays: "numeric 59.99 — the VALUE and the TYPE agree since #1044"},
 		{issue: "#714", name: "scalar_aggregate_subquery_in_an_aggregate_argument_answers",
 			sql:                  `SELECT SUM(a + (SELECT MAX(id) FROM decpair)) AS s FROM decpair`,
 			want:                 []string{"s=float:115.99"},

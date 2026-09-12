@@ -621,6 +621,31 @@ arithmetic above it, exactly as the plain `SELECT MAX(bigint_col) FROM t` is —
 the two spellings answer the same value at the same type. An `ORDER BY` term
 the SELECT list does not carry is engine scaffolding and is never the value.
 
+A scalar subquery with **no `FROM` clause is its SELECT expression**, evaluated
+in the enclosing query's scope — which is what lets it read the row around it:
+
+```sql
+SELECT (SELECT u.x) AS v FROM (SELECT id AS x FROM users) u   -- the row's x
+SELECT SUM((SELECT u.id)) FROM users u                        -- SUM(u.id)
+```
+
+The name it reads may be a derived table's or a CTE's own output alias, a
+column-alias list's name, or a base table's column, and the item declares the
+type that expression declares (`int4` above, so its `SUM` is `bigint`) and
+publishes the name PostgreSQL publishes (`x`; `?column?` for `(SELECT 1)`).
+
+A clause that can make such a block produce no row keeps its own meaning:
+`(SELECT u.id WHERE 1=0)`, `(SELECT u.id LIMIT 0)` and `(SELECT u.id OFFSET 1)`
+are `NULL`.
+
+An AGGREGATE or a WINDOW call in such a block is not supported here.
+PostgreSQL decides which query one belongs to by whether its argument names the
+enclosing query — `(SELECT MAX(u.id))` is the ENCLOSING query's aggregate and
+collapses the whole statement to one row, while `(SELECT MAX(1))` and
+`(SELECT COUNT(*))` are the block's own and answer 1 for every outer row — and
+this engine does not make that distinction. Write the aggregate or the window
+call in the enclosing query instead.
+
 A `ROW` field path may be an `IN` subquery's SELECT list: `x IN (SELECT c_row.b
 FROM t)` answers what PostgreSQL's `x IN (SELECT (c_row).b FROM t)` answers,
 including through `NOT IN`, whose result is empty when the field is NULL on any

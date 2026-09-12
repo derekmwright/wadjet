@@ -417,6 +417,15 @@ func tmdTables() []tmdTable {
 		// operators over it answer correctly through a float64 by luck, which is
 		// exactly the defect this arc's Round 0 found.
 		{tcpfTable, tcpfSchema(), tcpfData()},
+		// The SUBQUERY-CORRELATION fixture (#1044, #1045). Rides along for the
+		// same reason as the fixtures above: only
+		// TestArcC2ASubqueryReadsTheRowItIsCorrelatedOn names it, and no
+		// type-matrix corpus entry does. The type matrix cannot stand in for
+		// it — every cell here is a THREE-ROW relation whose id, name and
+		// visits are the rows both issues were measured over on live
+		// PostgreSQL 17.11, and a 5000-row table re-runs a correlated subquery
+		// 5000 times per cell.
+		{c2uTable, c2uSchema(), c2uData()},
 		// The SEMVER fixture (#967). Rides along for the same reason as the
 		// fixtures above: only TestTheSemverFamilyOrdersByTheSpecificationOnEveryArm
 		// names it, and no type-matrix corpus entry does. The type matrix

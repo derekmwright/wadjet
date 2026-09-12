@@ -2062,6 +2062,15 @@ func (p *selectParser) parsePrimary() (Node, error) {
 			if _, err := p.expect(TokenRParen); err != nil {
 				return nil, fmt.Errorf("expected ) after subquery")
 			}
+			// A scalar subquery with NO FROM clause IS its SELECT
+			// expression, evaluated in THIS scope (#1044). See
+			// fromless_scalar.go: this is the one site that builds a
+			// SubqueryNode for a subquery in an expression position, so
+			// rewriting here is what lets every reader of the tree see the
+			// expression instead of unfolding it again for itself.
+			if e, ok := fromlessScalarExpr(subSQL); ok {
+				return e, nil
+			}
 			return &SubqueryNode{SQL: subSQL}, nil
 		}
 		inner, err := p.parseExpr()
