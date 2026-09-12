@@ -199,7 +199,8 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 	// PlanRefused is the same argument without the panic: the worker
 	// declined the task on the strength of the plan it was handed (#503's
 	// declared-schema guard), and the plan is what every retry carries.
-	fatalNow := r.Panicked || r.PlanRefused || (tr.fatal != nil && tr.fatal(r))
+	fatalNow := r.Panicked || r.PlanRefused || isDeterministicRefusal(r) ||
+		(tr.fatal != nil && tr.fatal(r))
 	if !fatalNow && tr.retryEnabled && st.attempts < maxTaskAttempts {
 		st.attempts++
 		task := tr.growEstimateLocked(r.TaskID)
@@ -236,6 +237,32 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 	}
 	return done
 }
+
+// isDeterministicRefusal reports whether a worker's failure is one the QUERY
+// earned rather than one the machine did.
+//
+// 22023 (invalid_parameter_value) is this engine's class for "the statement
+// said something no implementation knows" — a version range that names no
+// range, a flag name nobody defines, a `date_trunc` unit that does not exist.
+// The statement is what EVERY retry carries, so the second and third attempts
+// cannot answer differently: they cost the stage its whole retry budget and
+// two more fragment runs to reach the same refusal. That is the PlanRefused
+// argument above, one layer later — the refusal is earned at execution because
+// the offending value arrived in a ROW (a range from a column), which is
+// exactly the case a plan-time check cannot cover.
+//
+// ONE CLASS, deliberately. A data exception such as 22003 or 22012 is also
+// deterministic for the same input, and widening this to the family is a
+// change to every arc's refusals rather than to this one — recorded as a
+// filing candidate instead. A failure carrying a MISSING INPUT is excluded
+// whatever its class: that one CAN succeed on a retry, once the producer's
+// output is durable.
+func isDeterministicRefusal(r distributed.ResultNotification) bool {
+	return r.SQLState == invalidParameterValue && r.MissingInputKey == ""
+}
+
+// invalidParameterValue is PostgreSQL's 22023, the class above.
+const invalidParameterValue = "22023"
 
 // growEstimateLocked doubles the task's admission size estimate and returns
 // the updated task (grow-on-retry, the Trino FTE pattern). A failure or a

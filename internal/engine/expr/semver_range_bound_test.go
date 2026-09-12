@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -138,17 +139,23 @@ func TestEveryGeneratedBoundSaturatesAtTheAcceptanceBound(t *testing.T) {
 	}
 }
 
-// TestTheBoundTableCoversEveryRaiseSite reads semver_range.go and counts the
-// places that raise a component, so a site added later cannot arrive without a
-// row in the table above. The raise is greppable ON PURPOSE: it happens only
-// inside the five bound constructors, and every desugaring reaches it by
-// calling one of them.
+// TestTheBoundTableCoversEveryRaiseSite reads semver_range.go and says two
+// things about the seam: every call to a bound constructor has a row in the
+// table above, and NOTHING raises a version component anywhere else.
+//
+// The second half is written against the SPELLINGS a raise can take, because
+// the round-2 review measured two it used to miss: a raise spread over two
+// statements (`nm := hi.minor` then `nm++`) and a raise on a line carrying a
+// trailing `//` comment, which an earlier version skipped wholesale. Comments
+// are therefore STRIPPED rather than skipped, and an identifier that ever
+// takes a component's value is tracked, so `nm++` is a raise and the loop
+// index's `i++` is not. Both of those still WRAP, so the corpus sweep below
+// catches them too — what this closes is the case where a new site is spelled
+// past the scan AND saturates wrongly rather than wrapping.
 func TestTheBoundTableCoversEveryRaiseSite(t *testing.T) {
-	src := readSemverRangeSource(t)
+	src := stripGoLineComments(readSemverRangeSource(t))
 	calls := 0
 	for _, name := range []string{"semverUpperMajor(", "semverUpperMinor(", "semverUpperPatch(", "semverLowerMajor(", "semverLowerMinor("} {
-		// One declaration and one doc-comment mention each; the rest are call
-		// sites in the desugaring rules.
 		calls += strings.Count(src, name) - strings.Count(src, "func "+name)
 	}
 	if calls != svRaiseSites {
@@ -156,18 +163,61 @@ func TestTheBoundTableCoversEveryRaiseSite(t *testing.T) {
 			"a desugaring that closes a band has to have a cell at the acceptance bound",
 			calls, svRaiseSites)
 	}
-	// And nothing raises a component any other way.
-	for _, bad := range []string{"major+1", "minor+1", "patch+1", "major + 1", "minor + 1", "patch + 1"} {
-		for _, line := range strings.Split(src, "\n") {
-			if !strings.Contains(line, bad) || strings.Contains(line, "//") {
-				continue
-			}
-			if strings.Contains(line, "math.MaxInt64") || strings.HasPrefix(strings.TrimSpace(line), "return semverComp{") {
-				continue // the constructors' own arithmetic, guarded above it
-			}
-			t.Errorf("a bound is raised outside the five constructors: %s", strings.TrimSpace(line))
+
+	// Every identifier that ever takes a component's value, so a raise on a
+	// COPY of one is a raise.
+	lines := strings.Split(src, "\n")
+	alias := map[string]bool{"major": true, "minor": true, "patch": true}
+	takes := regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\s*:?=\s*[^=]*\b(?:major|minor|patch)\b`)
+	for _, line := range lines {
+		if m := takes.FindStringSubmatch(line); m != nil {
+			alias[m[1]] = true
 		}
 	}
+	raise := regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_.]*)\s*(?:\+\+|\+\s*1\b)`)
+	// The five constructors are where the raise is SUPPOSED to be, and they
+	// are skipped by brace depth rather than by a line pattern: their own
+	// bodies hold the only guarded `+1` in the file.
+	depth := 0
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if depth == 0 && (strings.HasPrefix(trimmed, "func semverUpper") || strings.HasPrefix(trimmed, "func semverLower")) {
+			depth = strings.Count(line, "{") - strings.Count(line, "}")
+			continue
+		}
+		if depth > 0 {
+			depth += strings.Count(line, "{") - strings.Count(line, "}")
+			continue
+		}
+		for _, m := range raise.FindAllStringSubmatch(line, -1) {
+			name := m[1]
+			if i := strings.LastIndexByte(name, '.'); i >= 0 {
+				name = name[i+1:]
+			}
+			if !alias[name] {
+				continue // an index, a counter, an offset — not a component
+			}
+			t.Errorf("a version component is raised outside the five bound constructors, "+
+				"so it has no cell at the acceptance bound and can wrap: %s", trimmed)
+		}
+	}
+}
+
+// stripGoLineComments removes `//` comments so a raise cannot hide behind one.
+//
+// It is naive on purpose — the file it reads has no `//` inside a string
+// literal, and asserting that is cheaper than a Go parser for a gate whose
+// whole job is to read six spellings out of one file.
+func stripGoLineComments(src string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(src, "\n") {
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = line[:i]
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // NO RANGE BUILT OUT OF A CORPUS VERSION RENDERS A NEGATIVE COMPONENT.

@@ -228,7 +228,7 @@ func TestTheSemverFamilyOrdersByTheSpecificationOnEveryArm(t *testing.T) {
 		{name: "a_band_whose_major_is_the_acceptance_bound",
 			sql: `SELECT COUNT(*) AS n FROM semverpkg
 			       WHERE semver_satisfies(v, '^9223372036854775807.0.0')`,
-			want: []string{"n=int64:" + fmt.Sprint(svBandReleases("9223372036854775807"))}},
+			want: []string{"n=int64:" + fmt.Sprint(svBandReleases(t, "9223372036854775807"))}},
 		{name: "nothing_is_above_the_acceptance_bound",
 			sql: `SELECT COUNT(*) AS n FROM semverpkg
 			       WHERE semver_satisfies(v, '>9223372036854775807.x')`,
@@ -236,7 +236,7 @@ func TestTheSemverFamilyOrdersByTheSpecificationOnEveryArm(t *testing.T) {
 		{name: "a_band_whose_minor_is_the_acceptance_bound_still_bounds",
 			sql: `SELECT COUNT(*) AS n FROM semverpkg
 			       WHERE semver_satisfies(v, '1.9223372036854775807.x')`,
-			want: []string{"n=int64:" + fmt.Sprint(svBandReleases("1", "9223372036854775807"))}},
+			want: []string{"n=int64:" + fmt.Sprint(svBandReleases(t, "1", "9223372036854775807"))}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {
@@ -327,15 +327,16 @@ func TestTheSemverFamilyOrdersByTheSpecificationOnEveryArm(t *testing.T) {
 }
 
 // a3sIsRangeRefusal reports whether an error is the range refusal, whichever
-// layer raised it. A worker hands the coordinator a message rather than a typed
-// error, so the SQLSTATE and the sentence are both accepted — what must never
-// be accepted is a nil error.
+// layer raised it: the SQLSTATE, and nothing else.
+//
+// It used to accept the SENTENCE as a substitute — a message containing
+// "22023" or "is not a version range" — which meant a relay that lost the
+// class entirely would still pass the cell, and the class is half of what
+// these cells are for. A worker's failure carries the SQLSTATE as a TYPED
+// FIELD across the DAG (#649), so there is nothing to fall back to: measured
+// on all five arms, `sqlerr.StateOf` is "22023" on every one of them.
 func a3sIsRangeRefusal(err error) bool {
-	if sqlerr.StateOf(err) == "22023" {
-		return true
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "22023") || strings.Contains(msg, "is not a version range")
+	return sqlerr.StateOf(err) == "22023"
 }
 
 // a3sRender renders a result the way na2Run does — the Go TYPE beside every
@@ -505,21 +506,32 @@ func svData() []map[string]any {
 // expectation. The pre-release exclusion is the published rule — an
 // intersection whose comparators name no pre-release admits no pre-release
 // version — and every band cell here is spelled with release bounds only.
-func svBandReleases(want ...string) int {
-	n := 0
-	for _, row := range svData() {
+func svBandReleases(t *testing.T, want ...string) int {
+	t.Helper()
+	if len(want) == 0 || len(want) > 3 {
+		t.Fatalf("svBandReleases takes one to three leading core fields, got %d", len(want))
+	}
+	rows := svData()
+	n, cores := 0, 0
+	for _, row := range rows {
 		s, ok := row["v"].(string)
 		if !ok {
 			continue
 		}
+		core, prerelease := s, false
 		if i := strings.IndexAny(s, "-+"); i >= 0 {
-			if s[i] == '-' {
-				continue
-			}
-			s = s[:i]
+			prerelease = s[i] == '-'
+			core = s[:i]
 		}
-		fields := strings.Split(s, ".")
-		if len(fields) != 3 || len(want) > 3 {
+		fields := strings.Split(core, ".")
+		if len(fields) != 3 {
+			continue // not a version at all: `not-a-version` is in the fixture on purpose
+		}
+		cores++
+		if prerelease {
+			// A band spelled with RELEASE bounds admits no pre-release —
+			// the published rule — so these rows are counted as versions and
+			// excluded from the band.
 			continue
 		}
 		match := true
@@ -531,6 +543,18 @@ func svBandReleases(want ...string) int {
 		if match {
 			n++
 		}
+	}
+	// Both silent-zero paths are loud instead: an expectation of 0 computed
+	// because the fixture stopped parsing, or because the band names nothing,
+	// would make the cell that uses it pass vacuously.
+	if cores < len(rows)/2 {
+		t.Fatalf("only %d of %d fixture rows split into three core fields; this expectation "+
+			"would be 0 because the fixture stopped parsing, not because the band is empty",
+			cores, len(rows))
+	}
+	if n == 0 {
+		t.Fatalf("no fixture row is a release in the band %v, so the cell using this "+
+			"expectation would pass vacuously", want)
 	}
 	return n
 }

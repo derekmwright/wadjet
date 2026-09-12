@@ -544,3 +544,67 @@ func TestTaskRetrier_StaleInputAttemptRetries(t *testing.T) {
 		t.Fatal("stale-attempt retry must recover cleanly")
 	}
 }
+
+// A DETERMINISTIC REFUSAL IS TERMINAL ON ITS FIRST FAILURE (#967, round-2
+// review N3).
+//
+// A per-row 22023 — a version range that names no range, arriving in a COLUMN
+// so no plan-time check can see it — is a property of the STATEMENT, and the
+// statement is what every retry carries. Before this it was unclassified, so
+// the stage spent its whole 3-attempt budget and two more fragment runs on two
+// workers to reach the same refusal, which the round-2 review measured in a
+// worker log (`fatal_classified=false`, attempts 2 and 3 on a second worker).
+func TestTaskRetrier_ADeterministicRefusalIsTerminalImmediately(t *testing.T) {
+	rep := &collectingRepublisher{}
+	tr := newTaskRetrier(retryTestTasks(1), true, rep.republish, slog.Default(), "s", nil)
+
+	r := failResult("a", `fragment task a: semver_satisfies: "^^1.0" is not a version range`)
+	r.SQLState = "22023"
+	if !tr.Observe(r) {
+		t.Fatal("a 22023 was retried; the statement that earned it is what every retry carries")
+	}
+	if n := len(rep.snapshot()); n != 0 {
+		t.Fatalf("republished %d times after a deterministic refusal, want 0", n)
+	}
+	f, failed := tr.FirstError()
+	if !failed || f.TaskID != "a" || f.Message != r.Error {
+		t.Fatalf("FirstError = (%s,%s,%v), want (a,%q,true)", f.TaskID, f.Message, failed, r.Error)
+	}
+	if f.SQLState != "22023" {
+		t.Errorf("the refusal reached the client as SQLSTATE %q, want 22023", f.SQLState)
+	}
+
+	// The control: the identical failure with NO class still gets its
+	// retries, so what changed is the classification and not the budget.
+	rep2 := &collectingRepublisher{}
+	tr2 := newTaskRetrier(retryTestTasks(1), true, rep2.republish, slog.Default(), "s", nil)
+	if tr2.Observe(failResult("a", r.Error)) {
+		t.Fatal("an unclassified failure went terminal on its first attempt")
+	}
+	waitRepublished(t, rep2, 1)
+
+	// And a failure that CAN succeed on a retry is still retried whatever its
+	// class: a missing input becomes readable once its producer's output is
+	// durable.
+	rep3 := &collectingRepublisher{}
+	tr3 := newTaskRetrier(retryTestTasks(1), true, rep3.republish, slog.Default(), "s", nil)
+	r3 := failResult("a", "input lost")
+	r3.SQLState = "22023"
+	r3.MissingInputKey = "queries/q/stage-1/part-0"
+	if tr3.Observe(r3) {
+		t.Fatal("a missing-input failure went terminal on its first attempt")
+	}
+	waitRepublished(t, rep3, 1)
+
+	// A 22012 is deterministic too but is NOT in this class today; the
+	// narrowing is deliberate (see isDeterministicRefusal) and asserting it
+	// keeps a later widening from being accidental.
+	rep4 := &collectingRepublisher{}
+	tr4 := newTaskRetrier(retryTestTasks(1), true, rep4.republish, slog.Default(), "s", nil)
+	r4 := failResult("a", "division by zero")
+	r4.SQLState = "22012"
+	if tr4.Observe(r4) {
+		t.Fatal("22012 went terminal; only 22023 is classified here")
+	}
+	waitRepublished(t, rep4, 1)
+}
