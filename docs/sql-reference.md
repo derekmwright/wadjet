@@ -2373,6 +2373,27 @@ nothing above the top of the domain — and `1.9223372036854775807.x` still
 excludes `2.0.0`. node-semver refuses any component past `2^53-1` instead; this
 engine accepts the version, so it accepts the range over it.
 
+**The trivial lower bound `>=0.0.0` is dropped from every comparator set**,
+because node-semver drops it — its README publishes the identity `*` :=
+`>=0.0.0`, and its parser deletes a comparator whose text is exactly that. It
+is not housekeeping: `>=0.0.0` is false for precisely the **pre-releases of
+`0.0.0`**, which sort below `0.0.0`, so keeping it made a range whose author
+opted IN to those pre-releases name nothing at all. Go module pseudo-versions
+are literally `v0.0.0-<timestamp>-<hash>`, so over a `go.sum` or an SBOM
+
+```sql
+-- every pseudo-version built before 2022
+SELECT module, version FROM deps
+ WHERE SEMVER_SATISFIES(version, '>=0.0.0 <0.0.0-20220101000000-000000000000');
+```
+
+answers rows, where the arithmetic reading answered none. `~0`, `^0.0`,
+`^0.0.x`, `^0.x`, `0 - X` and `>=0` all reach the same deletion. Only the
+**opt-in** shape changes: a range that names no pre-release still admits none,
+so `SEMVER_SATISFIES('0.0.0-alpha','*')` and
+`SEMVER_SATISFIES('0.0.0-alpha','>=0.0.0')` are both still `false`.
+`>=0.0.0-0` is a different comparator and is kept.
+
 The **version** argument keeps the family's lenient rule: NULL for a string
 that is not a version. A NULL range is a NULL operand and answers NULL; a
 malformed one is the refusal above, and the range is read **first**, so the

@@ -44,6 +44,20 @@ import (
 //	A B                 both (intersection; any whitespace separates)
 //	A || B              either (union)
 //
+// THE TRIVIAL LOWER BOUND IS DROPPED FROM EVERY SET, as node's own parser
+// drops it: a comparator whose text is exactly `>=0.0.0` is deleted
+// (`replaceGTE0`), so `^0.x` is `<1.0.0-0` rather than `>=0.0.0 <1.0.0-0` and
+// `0.0.0 - 0.0.0-alpha` is `<=0.0.0-alpha`. The published expansions above are
+// the README's and still describe the same set of RELEASES; what the deletion
+// changes is a PRE-RELEASE of 0.0.0, which sorts below 0.0.0 and which the
+// surviving comparators may admit. See semverStripTrivialLowerBound.
+//
+// The `v` concession reaches the strip too, and node's does not: node deletes
+// on the comparator's TEXT before the prefix is normalized away, so
+// `>=v0.0.0` survives there and `>=0.0.0` does not. Here the prefix carries no
+// meaning at all — that is what the concession says — so both are the same
+// comparator and both are deleted. Recorded in ADR-0012 beside the concession.
+//
 // THE `-0` ON EVERY UPPER BOUND IS NOT DECORATION. `<2.0.0-0` and `<2.0.0` are
 // different sets: `2.0.0-beta` is below `2.0.0` by §11.3 and ABOVE `2.0.0-0`
 // by §11.4 (a numeric identifier sorts under an alphanumeric one), so the
@@ -275,9 +289,95 @@ func ParseSemverRange(fn, text string) (semverRange, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, set)
+		out = append(out, semverStripTrivialLowerBound(set))
 	}
-	return out, nil
+	return semverCollapseAnAnyAlternative(out), nil
+}
+
+// THE TRIVIAL LOWER BOUND IS DROPPED, EXACTLY WHERE AND EXACTLY AS node-semver
+// DROPS IT (#967, round-2 review).
+//
+// node maps every comparator of a set through `replaceGTE0`
+// (`classes/range.js:139`), which deletes a comparator whose text is exactly
+// `>=0.0.0` when `includePrerelease` is off — which is this engine's only
+// mode. `new Range('0.0.0 - 0.0.0-alpha').range` is therefore `<=0.0.0-alpha`
+// there, not `>=0.0.0 <=0.0.0-alpha`.
+//
+// THE COMPARATOR IS NOT REDUNDANT, WHICH IS WHY THIS IS A VALUE AND NOT A
+// TIDY-UP. `>=0.0.0` is false for exactly one family of versions — the
+// PRE-RELEASES of 0.0.0, which sort below 0.0.0 by §11.3 — so keeping it drops
+// a row the rest of the set admits: `0.0.0-alpha` satisfies `0.0.0 -
+// 0.0.0-alpha` in node (the surviving `<=0.0.0-alpha` names its tuple and
+// carries a pre-release, so the pre-release rule lets it through) and did not
+// here. A silent FALSE against the oracle this function's own header names.
+//
+// IT IS DONE AFTER DESUGARING AND PER ALTERNATIVE, where node does it, so
+// every spelling that DESUGARS to `>=0.0.0` is affected and no spelling that
+// merely looks like one is: `0 - X`, `0.x - X`, `0.0 - X`, `0.0.x - X`,
+// `0.0.0 - X`, `>=0`, `>=0.x`, `>=0.0.0`, `0.x`, `^0.x`, `^0.0.x`, `^0.0.0`,
+// `~0`, `~0.0` all reach it, while `0.0.0` (an EQUALITY, whose text is
+// `0.0.0`) and `>=0.0.0-0` (a different text, and node's own
+// GTE0PRE/includePrerelease case) do not.
+// semverIsTrivialLowerBound is the comparator node deletes, decided on the
+// PARSED comparator rather than on its text.
+//
+// Structural rather than textual on purpose. node's rule is a regex over the
+// desugared text, which it has had to tighten once — `>=09090` matched an
+// unescaped `>=0.0.0` pattern until 2022 (node-semver 11494f14, #432) — and a
+// pattern is the wrong shape for a question about a VERSION. Here the leading
+// zero that made that bug possible is refused before a comparator exists, so
+// the boundary is unreachable rather than guarded.
+//
+// BUILD METADATA IS IGNORED, which §10 requires and node agrees with:
+// `>=0.0.0+b` renders as the empty comparator there (measured on 7.7.3), and a
+// build that changed a comparator's meaning would contradict the rule that it
+// has no precedence. A PRE-RELEASE is not ignored: `>=0.0.0-0` is a different
+// comparator, is kept here, and is node's own `includePrerelease` case.
+func semverIsTrivialLowerBound(c semverComp) bool {
+	return c.op == semverOpGTE && c.ver.major == 0 && c.ver.minor == 0 &&
+		c.ver.patch == 0 && !c.ver.hasPre
+}
+
+func semverStripTrivialLowerBound(set []semverComp) []semverComp {
+	kept := make([]semverComp, 0, len(set))
+	for _, c := range set {
+		if semverIsTrivialLowerBound(c) {
+			continue
+		}
+		kept = append(kept, c)
+	}
+	if len(kept) == 0 {
+		// node's stripped comparator becomes the EMPTY one, which is its ANY:
+		// `>=0.0.0` alone is `*`. Carrying it explicitly keeps an alternative
+		// from being the empty intersection, which reads as "no constraints"
+		// and renders as nothing.
+		return []semverComp{{op: semverOpAny}}
+	}
+	return kept
+}
+
+// semverCollapseAnAnyAlternative is node's other half of the same rule: an
+// alternative that is a lone ANY comparator makes the WHOLE range that
+// alternative (`classes/range.js`, the `if we have any that are *, then the
+// range is just *` loop in the Range constructor).
+//
+// It only ever removes rows, and only pre-releases: an ANY alternative is true
+// for every release anyway, so collapsing changes nothing there, while for a
+// PRE-RELEASE the ANY set names no tuple and the pre-release rule refuses it.
+// `>=0.0.0 || <=0.0.0-alpha` is `*` in node and answers FALSE for
+// `0.0.0-alpha`; without this half it would answer TRUE here through its
+// second alternative. `* || <=0.0.0-alpha` is the same shape written without
+// a strip, and is the neighbour that would otherwise be left diverging.
+func semverCollapseAnAnyAlternative(r semverRange) semverRange {
+	if len(r) < 2 {
+		return r
+	}
+	for _, set := range r {
+		if len(set) == 1 && set[0].op == semverOpAny {
+			return semverRange{set}
+		}
+	}
+	return r
 }
 
 // parseSemverRangeSet parses one `||`-separated alternative: an intersection

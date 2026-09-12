@@ -29,10 +29,18 @@ func TestTheRangeGrammarMatchesTheNodeSemverTable(t *testing.T) {
 		rng, expansion string
 		// sameAs is the expansion to compare MEMBERSHIP against when it is
 		// not the rendered text — only `*`, whose published expansion
-		// `>=0.0.0` admits exactly the same versions as the ANY comparator
-		// node itself produces (a pre-release is excluded by the pre-release
-		// rule in one and by the comparison in the other).
+		// `>=0.0.0` is the ANY comparator here for the same reason it is one
+		// in node: the trivial lower bound is deleted from every set
+		// (`replaceGTE0`), so both spellings parse to the same thing.
 		sameAs string
+		// renders is what the desugaring RENDERS when node's own parser
+		// renders something other than the README's published expansion —
+		// which happens for exactly one reason, and it is the same deletion:
+		// `new Range('^0.x').range` is `<1.0.0-0` on node-semver 7.7.3
+		// (measured), not the README's `>=0.0.0 <1.0.0-0`. The published text
+		// stays the MEMBERSHIP oracle and parses to the same set here,
+		// because the rule applies to it too.
+		renders string
 	}{
 		{rng: "1.2.3 - 2.3.4", expansion: ">=1.2.3 <=2.3.4"},
 		{rng: "1.2 - 2.3.4", expansion: ">=1.2.0 <=2.3.4"},
@@ -52,7 +60,7 @@ func TestTheRangeGrammarMatchesTheNodeSemverTable(t *testing.T) {
 		{rng: "~1", expansion: ">=1.0.0 <2.0.0-0"},
 		{rng: "~0.2.3", expansion: ">=0.2.3 <0.3.0-0"},
 		{rng: "~0.2", expansion: ">=0.2.0 <0.3.0-0"},
-		{rng: "~0", expansion: ">=0.0.0 <1.0.0-0"},
+		{rng: "~0", expansion: ">=0.0.0 <1.0.0-0", renders: "<1.0.0-0"},
 		{rng: "~1.2.3-beta.2", expansion: ">=1.2.3-beta.2 <1.3.0-0"},
 		{rng: "^1.2.3", expansion: ">=1.2.3 <2.0.0-0"},
 		{rng: "^0.2.3", expansion: ">=0.2.3 <0.3.0-0"},
@@ -60,10 +68,10 @@ func TestTheRangeGrammarMatchesTheNodeSemverTable(t *testing.T) {
 		{rng: "^1.2.3-beta.2", expansion: ">=1.2.3-beta.2 <2.0.0-0"},
 		{rng: "^0.0.3-beta", expansion: ">=0.0.3-beta <0.0.4-0"},
 		{rng: "^1.2.x", expansion: ">=1.2.0 <2.0.0-0"},
-		{rng: "^0.0.x", expansion: ">=0.0.0 <0.1.0-0"},
-		{rng: "^0.0", expansion: ">=0.0.0 <0.1.0-0"},
+		{rng: "^0.0.x", expansion: ">=0.0.0 <0.1.0-0", renders: "<0.1.0-0"},
+		{rng: "^0.0", expansion: ">=0.0.0 <0.1.0-0", renders: "<0.1.0-0"},
 		{rng: "^1.x", expansion: ">=1.0.0 <2.0.0-0"},
-		{rng: "^0.x", expansion: ">=0.0.0 <1.0.0-0"},
+		{rng: "^0.x", expansion: ">=0.0.0 <1.0.0-0", renders: "<1.0.0-0"},
 		// The exact and the explicit comparators, which the same code path
 		// has to leave alone.
 		{rng: "1.2.3", expansion: "1.2.3"},
@@ -88,8 +96,13 @@ func TestTheRangeGrammarMatchesTheNodeSemverTable(t *testing.T) {
 			t.Errorf("%q: %v", row.rng, err)
 			continue
 		}
-		if got := r.String(); got != row.expansion {
-			t.Errorf("%q desugars to %q; the published expansion is %q", row.rng, got, row.expansion)
+		wantRender := row.renders
+		if wantRender == "" {
+			wantRender = row.expansion
+		}
+		if got := r.String(); got != wantRender {
+			t.Errorf("%q desugars to %q, want %q (the published expansion is %q)",
+				row.rng, got, wantRender, row.expansion)
 		}
 		want := row.sameAs
 		if want == "" {

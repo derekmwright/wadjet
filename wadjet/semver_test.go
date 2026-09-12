@@ -428,3 +428,65 @@ func TestARangeAtTheAcceptanceBoundKeepsTheRowsItNames(t *testing.T) {
 		}
 	}
 }
+
+// THE TRIVIAL LOWER BOUND THROUGH THE SQL DOOR (#967, round-2 review B1).
+//
+// node-semver deletes a comparator whose text is exactly `>=0.0.0` from every
+// comparator set (`replaceGTE0`), and the deletion is a VALUE: `>=0.0.0` is
+// false for exactly the pre-releases of 0.0.0, so keeping it dropped a row the
+// rest of the set admits. The cell-by-cell agreement with the library is the
+// expr gate's 2,970 cells; this is the same claim asked through SQL, with the
+// two CONTROLS that say the change is confined to the one comparator — the
+// same shapes over any other core still answer false.
+//
+// The expectations are node-semver 7.7.3's own answers, measured.
+func TestARangeWithATrivialLowerBoundAnswersWhatNodeSemverAnswers(t *testing.T) {
+	db, ctx := svtFixture(t)
+	for _, tc := range []struct {
+		expr string
+		want bool
+		why  string
+	}{
+		{`semver_satisfies('0.0.0-alpha','0.0.0 - 0.0.0-alpha')`, true,
+			"the hyphen range's low end desugars to the trivial bound"},
+		{`semver_satisfies('0.0.0-alpha','0 - 0.0.0-alpha')`, true, "the same, spelled as a major"},
+		{`semver_satisfies('0.0.0-alpha','0.x - 0.0.0-alpha')`, true, "the same, spelled as an X-range"},
+		{`semver_satisfies('0.0.0-0','>=0.0.0 <=0.0.0-alpha')`, true, "written out as comparators"},
+		{`semver_satisfies('0.0.0-beta','>=0.0.0 >=0.0.0-alpha')`, true, "two lower bounds, one trivial"},
+		{`semver_satisfies('0.0.0-alpha','>=0.0.0 || <=0.0.0-alpha')`, false,
+			"an ANY alternative makes the whole range ANY, which admits no pre-release"},
+		{`semver_satisfies('0.0.0-alpha','* || <=0.0.0-alpha')`, false,
+			"the same rule reached without a strip"},
+		// The controls: any other core is untouched, and the equality and the
+		// `-0` spelling are not the comparator node deletes.
+		{`semver_satisfies('1.0.0-alpha','1.0.0 - 1.0.0-alpha')`, false, "control: a different core"},
+		{`semver_satisfies('0.0.1-alpha','>=0.0.1 <=0.0.1-alpha')`, false, "control: a different core"},
+		{`semver_satisfies('0.0.0-alpha','>=0.0.0-0 <=0.0.0-alpha')`, true,
+			"control: >=0.0.0-0 is a different comparator and is kept"},
+		{`semver_satisfies('0.0.0','0.0.0 - 0.0.0-alpha')`, false,
+			"control: the release itself is above the upper bound"},
+		{`semver_satisfies('0.0.0','^0.x')`, true, "control: a release still satisfies the band"},
+		{`semver_satisfies('1.0.0','^0.x')`, false, "control: the upper bound still bounds"},
+		{`semver_satisfies('0.0.0-alpha','*')`, false,
+			"control: a range that names no pre-release admits none"},
+		{`semver_satisfies('0.0.0-alpha','>=0.0.0')`, false, "control: the same, alone"},
+		// The reachable shape: Go module pseudo-versions are literally
+		// v0.0.0-<timestamp>-<hash>, so "every pseudo-version built before
+		// 2022" is a range people write over a go.sum or an SBOM — and the
+		// numeric reading made it name nothing at all.
+		{`semver_satisfies('v0.0.0-20210101000000-abcdef123456',
+		                   '>=0.0.0 <0.0.0-20220101000000-000000000000')`, true,
+			"a pseudo-version below the cutoff"},
+		{`semver_satisfies('v0.0.0-20230101000000-abcdef123456',
+		                   '>=0.0.0 <0.0.0-20220101000000-000000000000')`, false,
+			"and one above it"},
+	} {
+		res, err := db.Query(ctx, `SELECT `+tc.expr+` AS s FROM a3pkg WHERE id = 0`)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.expr, err)
+		}
+		if got := res.Rows[0]["s"]; got != tc.want {
+			t.Errorf("%s = %v, want %v (%s)", tc.expr, got, tc.want, tc.why)
+		}
+	}
+}

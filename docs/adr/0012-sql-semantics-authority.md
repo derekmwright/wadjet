@@ -2937,6 +2937,91 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `expr.TestCompilingACallWithAConstantRangeRefusesBeforeAnyRow`. Removing
      the binder call fails thirteen of those subtests.
 
+     **THE TRIVIAL LOWER BOUND `>=0.0.0` IS DELETED FROM EVERY COMPARATOR
+     SET, AS node-semver DELETES IT.** (Added 2026-09-11, arc A3 round 3,
+     #967.) Three facts decide this, and they are worth separating because the
+     first is not in play at all:
+
+     1. **The SPECIFICATION defines precedence and no range syntax.** §9 puts
+        every pre-release of `0.0.0` BELOW `0.0.0`, and §4 makes `0.y.z` the
+        initial-development band. `semver_cmp` and `semver_sort_key` implement
+        that exactly and are untouched by this entry — `0.0.0-alpha < 0.0.0`
+        here, before and after.
+     2. **RANGE semantics are node-semver's policy**, which this function
+        implements by the arc's own choice, because the specification has none
+        and node's is what a `package.json`, a Dependabot alert and an
+        advisory's affected-versions field are written in. Two published rules
+        of that policy meet here: the README's identity `*` := `>=0.0.0` (and
+        `""` := `*` := `>=0.0.0`), and the per-tuple pre-release OPT-IN — a
+        comparator that carries a pre-release admits that tuple's
+        pre-releases.
+     3. **The two readings disagree on exactly one shape**: a set that
+        contains BOTH `>=0.0.0` and a comparator carrying a pre-release of
+        `0.0.0`. Read numerically, `>=0.0.0` is false for every pre-release of
+        `0.0.0`, so the set is EMPTY — no version is both at least `0.0.0` and
+        at most `0.0.0-alpha` — and a range whose author explicitly opted in
+        answers zero rows with no refusal. Read as node reads it, the trivial
+        bound is not there and the opted-in pre-releases are admitted.
+
+     THE PROVENANCE IS A DECISION, NOT A QUIRK. node's `replaceGTE0`
+     (`classes/range.js:139`) arrived in commit `100f07aa` (isaacs,
+     2020-04-10, shipped in 7.3.0) whose message says it "removes `>=0.0.0`
+     (or `>=0.0.0-0` in `includePrerelease` mode) from the comparators in a
+     range set, because that is equivalent to a `*`", over a token commented
+     `// >=0.0.0 is like a star`. It was a side change of the `subset()` work
+     and it states the README's identity. The pre-release consequence is
+     EMERGENT rather than designed: `testSet` skips the ANY comparator when it
+     looks for the per-tuple opt-in, so deleting `>=0.0.0` leaves the opt-in
+     comparator (`<=0.0.0-alpha`) as the one that decides.
+
+     WHAT IT LOOKS LIKE TO A USER. Go module pseudo-versions are literally
+     `v0.0.0-yyyymmddhhmmss-hash` and fill a `go.sum` and every SBOM built
+     from one, so `>=0.0.0 <0.0.0-20220101000000-000000000000` — "every
+     pseudo-version built before 2022" — is a range a person writes. node
+     answers it; the numeric reading answered nothing at all, silently.
+
+     THE DELETION IS DECIDED ON THE PARSED COMPARATOR, not on its text, and
+     the difference is recorded: node's rule is a regex over the desugared
+     text and has been tightened once, because unescaped dots made `>=09090`
+     match the `>=0.0.0` pattern (node-semver `11494f14`, #432). Here a
+     leading zero is not a numeric identifier, so that spelling is refused
+     before a comparator exists and the boundary is unreachable rather than
+     guarded. BUILD METADATA is ignored (`>=0.0.0+b` is deleted, as it is
+     there), because §10 gives it no precedence; a PRE-RELEASE is not
+     (`>=0.0.0-0` is a different comparator and is kept, which is node's
+     `includePrerelease` case).
+
+     ONE CONSEQUENCE OF THE `v` CONCESSION, recorded beside it: node deletes on
+     the comparator's TEXT before the prefix is normalized away, so `>=v0.0.0`
+     survives there and `>=0.0.0` does not. Here the prefix carries no meaning
+     at all — that is what the concession says — so both are the same
+     comparator and both are deleted. Measured: `new Range('>=v0.0.0').range`
+     is `>=0.0.0` on 7.7.3, which is the same comparator it declines to
+     delete.
+
+     The published expansions in `docs/sql-reference.md` stay the README's and
+     still describe the same set of RELEASES; what the deletion changes is a
+     PRE-RELEASE of `0.0.0`. node's own parser renders four of those rows
+     without the trivial bound (`~0`, `^0.0`, `^0.0.x`, `^0.x` are
+     `<1.0.0-0` / `<0.1.0-0`), which is why
+     `expr.TestTheRangeGrammarMatchesTheNodeSemverTable` carries a `renders`
+     column beside the published `expansion` and compares MEMBERSHIP against
+     the published text.
+
+     Gated against the LIBRARY rather than the README, because this is where
+     the two differ: `expr.TestTheTrivialLowerBoundAnswersWhatNodeSemverAnswers`
+     compares 2,970 cells (99 ranges × 30 versions) against
+     `testdata/node_semver_gte0.tsv`, captured from node-semver 7.7.3 by
+     `testdata/node_semver_gte0.js`, whose range and version lists the gate
+     rebuilds and asserts position by position;
+     `expr.TestNoAlternativeKeepsATrivialLowerBound` reads the parsed sets;
+     `expr.TestOnlyTheComparatorNodeDeletesIsDeleted` is the boundary from both
+     sides; `expr.TestARangeOverGoModulePseudoVersions` is the reachable shape,
+     with the no-opt-in control that `*` and `>=0.0.0` alone still admit no
+     pre-release; and `wadjet.TestARangeWithATrivialLowerBoundAnswersWhatNodeSemverAnswers`
+     is the SQL door. Removing the strip fails 40 of the 2,970 cells — 38 that
+     answer false here and true there, 2 the other way through the `||` rule.
+
      **A GENERATED BOUND AT THE TOP OF THE DOMAIN IS SATURATED, NOT WRAPPED
      AND NOT REFUSED.** (Added 2026-09-11, arc A3 round 2, #967.) Every range
      spelling except an exact version closes its band by raising ONE component
