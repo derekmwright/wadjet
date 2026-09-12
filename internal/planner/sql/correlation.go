@@ -1108,20 +1108,16 @@ func RebuildSQLForRerun(info *SelectInfo, rewrite func(Node) Node) (string, bool
 		where = info.WhereExpr
 	}
 	having := subst(info.HavingExpr, info.Having)
-	// GROUP BY, ORDER BY and a JOIN's ON are substituted too. The only term
-	// that cannot be is one whose substituted rendering is a BARE NUMERIC
-	// LITERAL, because both engines read a literal in GROUP BY or ORDER BY as
-	// a select-list POSITION; such a term keeps its text and is reported by
-	// OuterRefsInUnsubstitutedClauses, which refuses the query.
+	// GROUP BY, ORDER BY and a JOIN's ON are substituted too, and a term whose
+	// substituted rendering would be a BARE NUMERIC LITERAL is WRAPPED rather
+	// than declined — see ClauseTermText.
 	groupBy := make([]string, len(info.GroupBy))
 	copy(groupBy, info.GroupBy)
 	for i := range info.GroupByExprs {
 		if i >= len(groupBy) || info.GroupByExprs[i] == nil {
 			continue
 		}
-		if out := subst(info.GroupByExprs[i], groupBy[i]); !isBareNumericLitText(out) {
-			groupBy[i] = out
-		}
+		groupBy[i] = ClauseTermText(subst(info.GroupByExprs[i], groupBy[i]))
 	}
 	orderBy := make([]string, len(info.OrderBy))
 	for i := range info.OrderBy {
@@ -1129,9 +1125,7 @@ func RebuildSQLForRerun(info *SelectInfo, rewrite func(Node) Node) (string, bool
 		if info.OrderBy[i].Ordinal != 0 || info.OrderBy[i].Expr == nil {
 			continue
 		}
-		if out := subst(info.OrderBy[i].Expr, orderBy[i]); !isBareNumericLitText(out) {
-			orderBy[i] = out
-		}
+		orderBy[i] = ClauseTermText(subst(info.OrderBy[i].Expr, orderBy[i]))
 	}
 	joins := make([]string, len(info.Joins))
 	for i := range info.Joins {
@@ -1656,15 +1650,18 @@ func OuterRefsInUnsubstitutedClauses(info *SelectInfo, outerTables map[string]bo
 	}
 	inner := collectInnerTables(info)
 	var out []OuterRef
-	// A term is only unsubstitutable when its SUBSTITUTED rendering is a bare
-	// numeric literal — the one thing a GROUP BY or ORDER BY reads as a
-	// select-list position. `ORDER BY x.id * (u.id - 2)` substitutes to
-	// `x.id * (1 - 2)`, an expression, and the rebuild writes it.
+	// THE POST-CONDITION OF ClauseTermText, asked of the same rendering the
+	// rebuild writes. A term is unsubstitutable only when what the re-run
+	// would write is a bare numeric literal — the one thing a GROUP BY or an
+	// ORDER BY reads as a select-list position — and ClauseTermText wraps such
+	// a rendering in a CAST, so no shape reaches this today. It stays as the
+	// guard: a rendering that becomes bare again is refused loudly rather than
+	// read as a position, which is the silent answer §1c refuses elsewhere.
 	collect := func(n Node) {
 		if n == nil {
 			return
 		}
-		if rewrite != nil && !isBareNumericLitText(rewrite(n).String()) {
+		if rewrite != nil && !isBareNumericLitText(ClauseTermText(rewrite(n).String())) {
 			return
 		}
 		walkColRefs(n, func(c *ColRef) {
@@ -1879,6 +1876,37 @@ func collectSubqueryNode(n Node, f func(*SubqueryNode)) {
 		}
 	}
 	walk(n)
+}
+
+// ClauseTermText renders one substituted GROUP BY or ORDER BY term for the
+// per-row re-run.
+//
+// THE ORDINAL TRAP IS A RENDERING PROBLEM, AND THE RENDERING IS OURS TO
+// CHOOSE. A term that substitutes to a bare numeric literal — `GROUP BY u.id`
+// with the outer row's 1 in it renders `GROUP BY 1` — is read by both engines
+// as the FIRST SELECT ITEM rather than as the number one, so such a term used
+// to be declined and the query refused (0A000) on shapes `bf99c56c` answers
+// exactly as PostgreSQL 17.11 does: `(SELECT COUNT(*) FROM x GROUP BY u.id,
+// x.id ORDER BY x.id LIMIT 1)` is 1, 1, 1 there and was refused here
+// (round-4 review, P2). A CAST is the same constant and is not a position —
+// measured on PostgreSQL 17.11 and on this engine, statement for statement:
+// `GROUP BY CAST(1 AS BIGINT)` and `ORDER BY CAST(1 AS BIGINT)` are constant
+// expressions on both, where `(1)` is a position on both and so is no repair.
+//
+// The wrapper is applied to the RENDERED text, which is the only thing the
+// re-parse sees, and only when that text would be bare: an expression
+// (`x.id * (1 - 2)`), a quoted string and a rendered DECIMAL are written as
+// they are.
+func ClauseTermText(s string) string {
+	if !isBareNumericLitText(s) {
+		return s
+	}
+	t := strings.TrimSpace(s)
+	typ := "BIGINT"
+	if strings.ContainsRune(t, '.') {
+		typ = "DOUBLE PRECISION"
+	}
+	return "CAST(" + t + " AS " + typ + ")"
 }
 
 // isBareNumericLitText reports whether a rendered clause term is a bare numeric

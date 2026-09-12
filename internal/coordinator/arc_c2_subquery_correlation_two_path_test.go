@@ -454,16 +454,16 @@ func c2Cells() []c2Cell {
 				`ORDER BY x.id * (u.id - 2), x.id LIMIT 1) AS v FROM c2users u ORDER BY id`,
 			want:   `id,v | 1,100 | 2,100 | 3,100`,
 			routes: a2Routes{Correlated: 1}},
-		{name: "52b_the_same_in_a_GROUP_BY", // PostgreSQL: 100, 142, 342
+		{name: "52b_the_same_in_a_GROUP_BY",
 			sql: `SELECT id, (SELECT SUM(x.visits) FROM c2users x WHERE x.id <= u.id ` +
 				`GROUP BY u.id) AS v FROM c2users u ORDER BY id`,
-			wantErr: `cannot substitute`,
-			routes:  a2Routes{Correlated: 1}},
-		{name: "53_in_a_GROUP_BY_term_is_refused", // PostgreSQL: 342, 342, 342
+			want:   `id,v | 1,100 | 2,142 | 3,342`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "53_a_GROUP_BY_term_that_substitutes_to_a_constant",
 			sql: `SELECT id, (SELECT SUM(x.visits) FROM c2users x GROUP BY u.id) AS v ` +
 				`FROM c2users u ORDER BY id`,
-			wantErr: `cannot substitute`,
-			routes:  a2Routes{Correlated: 1}},
+			want:   `id,v | 1,342 | 2,342 | 3,342`,
+			routes: a2Routes{Correlated: 1}},
 		{name: "54_in_a_LATERAL_body_is_refused", // PostgreSQL: 1, 2, 3
 			sql: `SELECT u.id, l.v FROM c2users u CROSS JOIN LATERAL ` +
 				`(SELECT (SELECT u.id) AS v FROM c2users x WHERE x.id=1) l ORDER BY 1`,
@@ -864,16 +864,32 @@ func c2Cells() []c2Cell {
 				`ORDER BY x.id * (u.id - 2)) AS v FROM c2users u ORDER BY id`,
 			want:   `id,v | 1,100 | 2,100 | 3,100`,
 			routes: a2Routes{Correlated: 1}},
-		{name: "111_the_term_that_really_is_an_ordinal_is_refused", // PostgreSQL: an arbitrary row
-			sql: `SELECT id, (SELECT x.visits FROM c2users x ORDER BY u.id LIMIT 1) AS v ` +
+		// A term that substitutes to a bare numeric literal is WRAPPED, not
+		// declined (round-4 review, P2): `ORDER BY u.id` renders `ORDER BY
+		// CAST(1 AS BIGINT)`, which is a constant expression on PostgreSQL
+		// 17.11 and here and a select-list POSITION on neither. The `, x.id`
+		// tiebreak is the cell's, not the repair's: a constant sort under a
+		// LIMIT picks an arbitrary row on both engines (ADR-0013).
+		{name: "111_an_ORDER_BY_term_that_substitutes_to_a_constant",
+			sql: `SELECT id, (SELECT x.visits FROM c2users x ORDER BY u.id, x.id LIMIT 1) AS v ` +
 				`FROM c2users u ORDER BY id`,
-			wantErr: `cannot substitute`,
-			routes:  a2Routes{Correlated: 1}},
-		{name: "112_a_GROUP_BY_term_that_substitutes_to_an_ordinal_is_refused", // PostgreSQL: 1, 1, 1
+			want:   `id,v | 1,100 | 2,100 | 3,100`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "112_a_GROUP_BY_term_that_substitutes_to_a_constant_in_a_list",
 			sql: `SELECT id, (SELECT COUNT(*) FROM c2users x GROUP BY u.id, x.id ` +
 				`ORDER BY x.id LIMIT 1) AS v FROM c2users u ORDER BY id`,
-			wantErr: `cannot substitute`,
-			routes:  a2Routes{Correlated: 1}},
+			want:   `id,v | 1,1 | 2,1 | 3,1`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "112a_an_ORDER_BY_naming_an_unprojected_column_substitutes_too",
+			sql: `SELECT id, (SELECT x.visits FROM c2users x ORDER BY u.visits, x.id LIMIT 1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,100 | 2,100 | 3,100`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "112b_a_GROUP_BY_term_that_substitutes_to_a_string",
+			sql: `SELECT id, (SELECT SUM(x.visits) AS s FROM c2users x GROUP BY u.name) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,342 | 2,342 | 3,342`,
+			routes: a2Routes{Correlated: 1}},
 
 		// --- THE OUTER PROJECTION CARRIES EVERY COLUMN ITS SUBQUERIES
 		// CORRELATE ON, WHICHEVER CLAUSE NAMES IT (round-4 review, P1). The
