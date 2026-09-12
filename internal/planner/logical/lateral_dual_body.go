@@ -555,23 +555,44 @@ func lateralAliasNameRead(outer *plansql.SelectInfo, join plansql.JoinInfo) stri
 	if hit != "" {
 		return hit
 	}
-	// A STAR in the enclosing block republishes every name it holds.
+	// A STAR in the enclosing block republishes this lateral's names — but only
+	// a star that COVERS this lateral. `SelectColumn.Star` is set for a
+	// QUALIFIED star too, and `SELECT u.*` republishes the OUTER relation's
+	// columns and never `l`'s: keying on the flag alone refused a query that
+	// reads no name the list introduces (round-5 review, B1).
 	for i := range outer.Columns {
-		if outer.Columns[i].Star {
+		if !outer.Columns[i].Star {
+			continue
+		}
+		q := strings.ToLower(strings.TrimSpace(outer.Columns[i].TableRef))
+		if q == "" || q == alias {
 			return first
 		}
 	}
-	// A LATER FROM item's own body.
+	// A LATER FROM item's body, and only a reference in it that resolves to
+	// THIS lateral. A sibling whose OWN output column is called `w` reads its
+	// own `w`, not this list's, so the bare spelling is not enough there.
 	for i := range outer.Joins {
 		other := outer.Joins[i]
-		if !other.Lateral || other.RightTable == join.RightTable {
+		if !other.Lateral || other.RightTable == join.RightTable || alias == "" {
 			continue
 		}
 		body, err := lateralBodySelect(other)
 		if err != nil || body == nil {
 			continue
 		}
-		walkBlockValueExprs(body, see)
+		walkBlockExprs(body, func(n plansql.Node) {
+			if hit != "" {
+				return
+			}
+			ref, ok := n.(*plansql.ColRef)
+			if !ok || !strings.EqualFold(strings.TrimSpace(ref.Table), join.RightAlias) {
+				return
+			}
+			if a, ok := want[strings.ToLower(strings.TrimSpace(ref.Column))]; ok {
+				hit = a
+			}
+		})
 		if hit != "" {
 			return hit
 		}

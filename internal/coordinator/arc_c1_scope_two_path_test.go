@@ -488,11 +488,59 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			routed: map[string]string{},
 		},
 		{
+			// CONTROL, and the boundary of the cell above (round-5 review, B1):
+			// a LATER lateral that publishes its OWN column called `w` and
+			// reads it as `b.w` is reading ITS name, not this lateral's. Keyed
+			// on the name alone the position fired here too.
+			name: "control: a sibling lateral's own name equal to the list name",
+			sql: "SELECT b.w, u.id FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
+				"WHERE i.order_id = u.id) l(w), LATERAL (SELECT w FROM (SELECT 2 AS w) y) b ORDER BY 2, 1",
+			want: "cols=[w:INT64 id:INT64] rows=4 | 2,1 | 2,1 | 2,2 | 2,2",
+			// The sibling's own body is table-less under its derived table, so
+			// the DAG arms take #806's local route — the existing disposition
+			// of a table-less item, not this cell's subject.
+			routed: c1TableLess,
+		},
+		{
+			// CONTROL: the same, with the sibling EARLIER in the FROM clause —
+			// a position the walk reaches from the other side.
+			name: "control: an earlier sibling lateral's own name equal to the list name",
+			sql: "SELECT a.w, u.id FROM lat_ord u, LATERAL (SELECT w FROM (SELECT 1 AS w) x) a, " +
+				"LATERAL (SELECT * FROM lat_item i WHERE i.order_id = u.id) l(w) ORDER BY 2",
+			want:   "cols=[w:INT64 id:INT64] rows=4 | 1,1 | 1,1 | 1,2 | 1,2",
+			routed: c1TableLess,
+		},
+		{
 			name:   "a read ONE BLOCK UP through a star",
 			sql:    "SELECT x.w FROM (SELECT * FROM lat_ord u, LATERAL (SELECT * FROM lat_item i WHERE i.order_id = u.id) l(w)) x ORDER BY 1",
 			want:   "ERR the query reads",
 			why:    "PostgreSQL answers 1,2,3,4; a star in the enclosing block republishes every name it holds",
 			routed: map[string]string{},
+		},
+		{
+			// CONTROL, and the boundary of the cell above (round-5 review, B1):
+			// a star QUALIFIED with the outer relation republishes the OUTER
+			// relation's names, not this lateral's. Keyed on the name alone the
+			// position fired here and refused a query PostgreSQL, main and the
+			// round-4 tip all answer.
+			name:   "control: a star qualified with the OUTER relation is not a read",
+			sql:    "SELECT u.* FROM lat_ord u, LATERAL (SELECT * FROM lat_item i WHERE i.order_id = u.id) l(w) ORDER BY 1",
+			want:   "cols=[id:INT64 customer:STRING total:FLOAT64] rows=4 | 1,Alice,150 | 1,Alice,150 | 2,Bob,200 | 2,Bob,200",
+			routed: map[string]string{},
+		},
+		{
+			// CONTROL: the same qualified star beside a named outer column, so
+			// the block holds both a star and a plain column reference.
+			name: "control: a qualified star beside a named outer column",
+			sql:  "SELECT u.*, u.id AS again FROM lat_ord u, LATERAL (SELECT * FROM lat_item i WHERE i.order_id = u.id) l(w) ORDER BY 1",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 again:INT64] rows=4 | 1,Alice,150,1 | 1,Alice,150,1 | 2,Bob,200,2 | 2,Bob,200,2",
+			// The star expanded beside the same column under another name is a
+			// DAG-unbuildable output, so the DAG arms answer it in-process —
+			// again an existing disposition, and the VALUES are the same.
+			routed: map[string]string{
+				"dag": "UnreachableOutput +1", "dag-shuffled": "UnreachableOutput +1",
+				"dag-morsel4": "UnreachableOutput +1",
+			},
 		},
 		{
 			name:   "a read inside COALESCE",
