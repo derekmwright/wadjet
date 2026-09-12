@@ -631,8 +631,31 @@ SELECT SUM((SELECT u.id)) FROM users u                        -- SUM(u.id)
 
 The name it reads may be a derived table's or a CTE's own output alias, a
 column-alias list's name, or a base table's column, and the item declares the
-type that expression declares (`int4` above, so its `SUM` is `bigint`) and
-publishes the name PostgreSQL publishes (`x`; `?column?` for `(SELECT 1)`).
+type that expression declares (`int4` above, so its `SUM` is `bigint`). The
+column is published under the name PostgreSQL gives it — the subquery's own
+output column, ALIAS INCLUDED: `(SELECT 1 AS zzz)` publishes `zzz`, `(SELECT
+u.x)` publishes `x`, `(SELECT 1)` publishes `?column?`.
+
+A subquery WITH a `FROM` clause reads the outer row too, in its `SELECT` list
+and its `HAVING` as well as its `WHERE`:
+
+```sql
+-- 1, 2, 3: the outer row's x, per row
+SELECT (SELECT u.x FROM other y WHERE y.id = 1) FROM (SELECT id AS x FROM t) u
+```
+
+An outer reference in such a subquery's `GROUP BY` or `ORDER BY`, or in a
+`LATERAL` body, is refused (`0A000`) instead: the per-row substitution renders
+the outer value as a literal, and a literal in those two clauses reads as a
+select-list POSITION rather than as a value.
+
+An AGGREGATE whose argument names ONLY the enclosing query is refused
+(`0A000`) as well. PostgreSQL puts such an aggregate at the enclosing query's
+level — `SELECT MAX((SELECT u.id)) FROM t u` is one row there, and `SELECT id,
+(SELECT MAX(u.id) FROM x) FROM t u` is an error — and this engine has no
+lowering for an aggregate level above the block it is written in. An aggregate
+that also names a column of its own block (`SUM(x.visits + u.id)`) is that
+block's and answers.
 
 A clause that can make such a block produce no row keeps its own meaning:
 `(SELECT u.id WHERE 1=0)`, `(SELECT u.id LIMIT 0)` and `(SELECT u.id OFFSET 1)`
@@ -943,10 +966,12 @@ lateral. An UNcorrelated lateral's window is unaffected.
 A WINDOW FUNCTION inside a CORRELATED SUBQUERY is refused (`0A000`) for a
 different reason than the lateral above: a correlated subquery that is not
 decorrelated is re-run per outer row by substituting the outer values into its
-`WHERE` clause and rebuilding the statement, and a window call's `OVER` clause
-does not survive that rebuild. It applies to a scalar subquery, an `IN` set and
-an `EXISTS`, and to any window in the body — not only one that reads the outer
-row:
+text and rebuilding the statement, and a window call's `OVER` clause does not
+survive that rebuild. It applies to a scalar subquery, an `IN` set and an
+`EXISTS`, and to a window in the subquery's own SELECT list, `HAVING`,
+`QUALIFY` or set-operation arms — whether or not it reads the outer row. A
+window in the body's `ORDER BY`, one inside a derived table the body reads, and
+one in a decorrelated `EXISTS` are re-emitted as written and answer normally:
 
 ```sql
 -- refused: the window reads the outer row

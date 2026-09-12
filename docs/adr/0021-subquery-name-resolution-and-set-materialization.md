@@ -1058,12 +1058,14 @@ columns ADR-0012's #810 entry names. wrong → right on two arms and loud on two
 or wrong → loud on four, is within doctrine; each pin fails the day its gap
 closes.
 
-### 1l. A FROM-less scalar subquery IS its SELECT expression
+### 1l. A FROM-less scalar subquery IS its SELECT expression, in the block that supplies the row — and a per-row re-run substitutes into every clause it rebuilds
 
-(Added 2026-09-12, #1044.)
+(Added 2026-09-12, #1044. Rewritten the same day after round 2 moved the
+decision and completed the substitution.)
 
 §1c settled what a subquery this engine cannot RUN answers: it fails the query.
-This shape never needed to be run at all.
+This section is about the two shapes that reach the per-row re-run from
+somewhere other than a WHERE clause, and about where the decision belongs.
 
 `(SELECT u.x)` produces one row whose one column is `u.x` evaluated in the
 ENCLOSING scope — PostgreSQL plans it as a Result node under the SubLink with
@@ -1084,76 +1086,122 @@ derived table's output alias to reach it — `SELECT (SELECT u.id) FROM users u`
 answered the empty box too — so the rule is stated about the MISSING FROM
 CLAUSE and not about derived tables.
 
-The rewrite is done once, at the PARSER, at the single site that builds a
-`SubqueryNode` for a subquery in an expression position
-(`plansql.fromlessScalarExpr`). Doing it there rather than at each reader is
-what makes the whole answer right at once: the classifier, the binder, the
-logical builder, the declaration walk, the DAG's stage emission and the per-row
-re-run all see an expression. The DECLARATION follows for free — the item is
-typed like any other expression over the outer row, so `(SELECT u.x)` over an
-INT32 column declares int4 and its SUM declares bigint instead of falling to
-the string fallback and summing on the float rung — and so does the OUTPUT
-NAME, which PostgreSQL already takes from the subquery's own output column
-(`x` for `(SELECT u.x)`, `?column?` for `(SELECT 1)`).
+**THE REWRITE IS A SCOPE DECISION, SO IT IS MADE WHERE THE SCOPE IS KNOWN.**
+The first form of it ran at the PARSER, at the site that builds a
+`SubqueryNode`, and a parser standing on `(SELECT u.id)` cannot see which block
+will supply `u`. Written there it fired inside a subquery that HAS a FROM
+clause too — and such a block's text is REBUILT by the per-row re-run, so a
+bare `u.id` left in its SELECT list survived into the rebuilt statement, where
+the qualifier strip bound it to the INNER relation's own `id`. Nine shapes that
+§1c's dangling guard had refused by name started answering one constant per
+outer row instead. **A rewrite whose correctness depends on a scope must not be
+written where the scope is absent**; the pass runs after the block is parsed,
+with the block's own FROM list in hand (`plansql.unfoldFromlessScalars`), and
+rewrites only where the reference RESOLVES THERE:
 
-The boundary is every clause that can still make such a block produce no row or
-more than one column, and each was measured: `(SELECT u.id WHERE 1=0)`,
-`(SELECT u.id LIMIT 0)` and `(SELECT u.id OFFSET 1)` are NULL, and `(SELECT
-u.id, u.visits)` is 42601. Those keep the subquery. `DISTINCT` and `ORDER BY`
-keep it too: over one row they are provably no-ops, but "provably" is a claim
-about clauses this rewrite would have to interpret, and declining them costs
-only shapes nobody writes.
+- a QUALIFIED reference whose qualifier is one of the block's own FROM
+  identifiers (the alias where there is one, else the name);
+- an UNQUALIFIED reference, when the block has a FROM item at all — SQL scopes
+  innermost-first and a FROM-less subquery has no scope of its own;
+- a subquery with no column reference at all (`(SELECT 1)`).
 
-An AGGREGATE or a WINDOW CALL in the item is excluded for a different reason,
-and the measurement is the reason. PostgreSQL decides which query an aggregate
-belongs to by whether its ARGUMENT names the enclosing one: `SELECT (SELECT
-MAX(u.id)) FROM users u` is the ENCLOSING query's aggregate and answers ONE
-row, 3, while `SELECT (SELECT MAX(1)) FROM users u` and `SELECT (SELECT
-COUNT(*)) FROM users u` are the BLOCK's own, over the single row it produces,
-and answer 1 for every outer row. Substituting the expression would make it the
-enclosing query's UNCONDITIONALLY, turning the second pair from three rows into
-one — so an aggregate here is a rule about aggregate LEVELS rather than about
-one item, and this section does not state it. A window call splits the same way
-(`(SELECT SUM(u.id) OVER ())` is 1,2,3 and `(SELECT COUNT(*) OVER ())` is
-1,1,1) and is §1m's subject.
+Running after the parse is also what keeps the PUBLISHED NAME right.
+`SelectColumn.PublishedName` is stamped on the item AS WRITTEN, and PostgreSQL
+names a scalar subquery's column after the subquery's own target list, ALIAS
+INCLUDED: `SELECT (SELECT 1 AS zzz) FROM u` publishes `zzz`, `(SELECT u.name AS
+nm)` publishes `nm`. The parser-time form returned the inner expression and
+dropped the alias, so those became `?column?` and `name` — a name a BI client
+binds a result set to (#732's territory), on the wire in both result formats.
 
-An OPERATOR expression is wrapped in a `ParenNode` and nothing else is, and
-that half is not cosmetic. `SelectColumn.Expr` is the AST's own rendering and
-`BinaryOp.String()` does not bracket its operands, so an unwrapped
-`(SELECT u.x + 1) * 2` renders as `u.x + 1 * 2`; but `(u.x)` and `u.x` are one
-expression to the compiler and NOT to the stage emission, which reads a
-projection's node to decide whether a stage passes a column through. With the
-wrapper on a bare column reference the filing's own shape routed to the
-coordinator-local pipeline on all three DAG arms, and its aggregate spelling
-reached the worker as a schemaless batch (#277). The control that named it is
-the same query with the subquery spelled out (`SELECT u.x AS v …`), which was
-right throughout and is cell 00 of the census.
+**AND THE RE-RUN SUBSTITUTES INTO EVERY CLAUSE IT REBUILDS FROM AN AST.** The
+other half of the same fact: `plansql.RebuildSQL` re-emitted every clause but
+the WHERE as the text the parser recorded, so an outer reference in a SELECT
+list or a HAVING survived the rebuild whether or not this rewrite put it there.
+`SELECT (SELECT u.x FROM users y WHERE y.id = 1) FROM (SELECT id AS x FROM
+users) u` — the spelling #1044 is TITLED for — answered NULL, NULL, NULL for
+PostgreSQL's 1, 2, 3, on all five arms, before and after the rewrite alike.
+`plansql.RebuildSQLForRerun` now rewrites the SELECT list, the WHERE and the
+HAVING from their own trees, each item keeping its recorded text when the
+rewrite does not change it.
+
+GROUP BY and ORDER BY are NOT substituted, and the reason is the ORDINAL TRAP
+rather than reach: `ORDER BY u.id` with the outer row's 1 in it renders
+`ORDER BY 1`, which both engines read as the FIRST SELECT ITEM. A reference
+left in either clause is refused rather than run —
+`expr.UnsubstitutedOuterRefError`, 0A000 — because running it is the silent
+answer §1c refuses at the uncorrelated evaluators. Rendering a substituted sort
+or group term so that it cannot read as a position is what closing that half
+needs.
+
+**AN AGGREGATE BELONGS TO THE LEVEL OF THE DEEPEST VARIABLE IN ITS ARGUMENTS,
+and this engine does not implement levels**, so a subquery holding an aggregate
+whose argument names ONLY the enclosing query is refused
+(`expr.OuterLevelAggregateError`, 0A000). PostgreSQL 17.11, measured: `SELECT
+MAX((SELECT u.id)) FROM users u` is the ENCLOSING query's aggregate and answers
+one row, 3; `SELECT id, (SELECT MAX(u.id) FROM x) FROM users u` is 42803,
+because promoted to the outer query it leaves `id` ungrouped; `(SELECT
+SUM(x.visits + u.id) FROM x)` names an inner variable too and is the inner
+block's, answering 345, 348, 351; `(SELECT MAX(1) FROM x)` has no variable and
+is the block's own, 1, 1, 1. Substituting the outer value and computing at the
+inner level would answer a number PostgreSQL does not give.
+
+**The boundary, as a table.** Every syntactic position a FROM-less scalar
+subquery can occupy relative to the scope that owns its references, and what
+each one does. The cell numbers are
+`coordinator.TestArcC2ASubqueryReadsTheRowItIsCorrelatedOn`'s.
+
+| the block enclosing the subquery | scope owning its references | disposition | cells |
+|---|---|---|---|
+| the statement's own SELECT list, WHERE, HAVING, GROUP BY or ORDER BY — over a base table, a derived table, a CTE, a set-operation body or a column-alias list | that block | REWRITTEN: value, declared type and published name are the expression's | 03–21, 27 |
+| a derived table's or a CTE's body | that body's own FROM | REWRITTEN — such a body's text is never rebuilt | 01, 02 |
+| an aggregate ARGUMENT of such a block | that block | REWRITTEN | 07 |
+| a correlated subquery's SELECT list | the enclosing query | kept; the re-run substitutes the SELECT list | 45, 48, 49, 50 |
+| a correlated subquery's WHERE | the enclosing query | kept; the re-run substitutes the WHERE | 51 |
+| a correlated subquery's HAVING | the enclosing query | kept; the re-run substitutes the HAVING | 47 |
+| a correlated IN set's SELECT list | the enclosing query | kept; substituted | 46, 69 |
+| a correlated subquery's ORDER BY | the enclosing query | kept; REFUSED 0A000 — a substituted term reads as an ordinal | 52 |
+| a correlated subquery's GROUP BY | the enclosing query | kept; loud (21000) for the same reason | 53 |
+| a LATERAL body | the enclosing query | kept; REFUSED 0A000 | 54 |
+| an aggregate argument naming ONLY the enclosing query | the enclosing query, by PostgreSQL's level rule | REFUSED 0A000 | 60, 61 |
+| a window call's argument or OVER terms | the enclosing query | REFUSED 0A000 (§1m) | 30–40 |
+| a clause the rewrite DECLINES (ORDER BY, LIMIT, a non-constant WHERE) on the FROM-less body itself | the enclosing query | kept; answered through the re-run | 65–67 |
+| a star with no relation | — | REFUSED 42601, PostgreSQL's own | 68 |
 
 Measured against live PostgreSQL 17.11 over the three-row `c2users` fixture,
 before → after, on all five arms:
 
-| shape | before | after | PG |
+| shape | at `bf99c56c` | at the tip | PG |
 |---|---|---|---|
 | the filing shape, derived and CTE spellings | `"",""` OID 701 | 18, 1026 OID 20/1700 | 18, 1026 |
-| `(SELECT u.x)` over a derived alias, a CTE, a column-alias list, a set-operation body | empty box | 1,2,3 | 1,2,3 |
-| the same name UNQUALIFIED, and nested two deep | empty box / loud | 1,2,3 | 1,2,3 |
-| the same over a BASE table's alias | empty box | 1,2,3 | 1,2,3 |
-| in WHERE / HAVING / ORDER BY / GROUP BY | 0 rows / 0 rows / unsorted / NULL | PostgreSQL's | — |
-| a CASE, a CAST, arithmetic over two outer scopes | empty box | PostgreSQL's | — |
-| `(SELECT u.id WHERE 1=0)`, `LIMIT 0`, `OFFSET 1` | NULL | NULL | NULL |
-| two columns; an unknown name | 42601; 42703 | 42601; 42703 | 42601; 42703 |
-| a subquery with its OWN FROM, and the WHERE-clause substitution | right | right | right |
+| `(SELECT u.x)` over a derived alias, a CTE, a column-alias list, a set-operation body, a base-table alias | empty box | 1,2,3 | 1,2,3 |
+| the same in WHERE / HAVING / ORDER BY / GROUP BY, and aggregated | 0 rows / 0 rows / unsorted / NULL / empty | PostgreSQL's | — |
+| `(SELECT 1 AS zzz)`, `(SELECT u.name AS nm)` — the NAME | `zzz`, `nm` | `zzz`, `nm` | `zzz`, `nm` |
+| the issue's titled shape WITH a FROM clause, over a derived table / CTE / base-table alias | NULL,NULL,NULL | 1,2,3 | 1,2,3 |
+| an outer reference in a correlated subquery's HAVING | NULL | 342 | 342 |
+| a FROM-less subquery nested in a correlated subquery's SELECT list / IN set / HAVING / expression, two and three deep, over a CTE | 0A000 | PostgreSQL's | — |
+| the same in an ORDER BY term, a GROUP BY term, a LATERAL body | 0A000 | 0A000 | answers |
+| an aggregate whose argument names only the enclosing query | 0A000 / `#277 schemaless batch` | 0A000 | 42803 |
+| a declined clause on a FROM-less body (ORDER BY, LIMIT 1, a true WHERE) | NULL | 1,2,3 / 1,2,3 / NULL,2,3 | same |
+| `(SELECT *)` with no relation | NULL | 42601 | 42601 |
+| `(SELECT u.id WHERE 1=0)`, `LIMIT 0`, `OFFSET 1`; two columns | NULL; 42601 | NULL; 42601 | NULL; 42601 |
 
 All three DAG arms EXECUTE the rewritten shapes as stages — the routing
 counters are zero beside the rows — where every one of them routed to the
 coordinator-local pipeline before.
 
-**What this does NOT close.** A FROM-less subquery in a LATERAL body
-(`CROSS JOIN LATERAL (SELECT u.id AS v) l`) and one as an `IN` list's set
-(`u.id IN (SELECT u.id)`) are the same missing scope at two other sites and
-still answer the empty box and no rows; they are #1033's family, reached
-through the FROM parser and the IN path rather than through the expression
-position this rewrite stands at.
+**What this does NOT close.** Two positions, each pinned as a cell that fails
+the day it closes:
+
+- an AGGREGATE ARGUMENT whose subquery HAS a FROM clause (`SUM((SELECT u.x FROM
+  y WHERE y.id=1))` over a derived table, cell 59) answers NULL. That compile
+  site resolves its outer scope from the SCAN ALIASES below it
+  (`physical.collectTableAliases`), which do not carry a derived table's alias,
+  so the subquery is planned uncorrelated — §1c's named gap, identical at
+  `bf99c56c`. The same subquery one position out, in the SELECT list, is cell
+  55 and answers.
+- a LATERAL body that PROJECTS an outer column rather than joining on it (cell
+  70) answers the first row's value, and on the three DAG arms publishes the
+  item under the inner expression's name. §1h's territory.
 
 ### 1m. A correlated subquery this engine cannot REBUILD is refused, and a WINDOW CALL is a position an outer reference can sit in
 

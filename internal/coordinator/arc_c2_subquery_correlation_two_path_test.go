@@ -125,8 +125,11 @@ type c2Cell struct {
 	// pin, when set, says this cell DIVERGES from PostgreSQL on EVERY arm and
 	// records what this engine answers instead. A pinned cell that starts
 	// agreeing FAILS, which is how the pin gets deleted.
-	pin    string
-	pinWhy string
+	pin string
+	// pinArms is pin per ARM, for a shape the arms answer DIFFERENTLY. An arm
+	// absent from it is held to pin (or to want when there is none).
+	pinArms map[string]string
+	pinWhy  string
 	// pinErr is pin for a cell whose divergence is a REFUSAL rather than a
 	// value: the substring the refusal must contain.
 	pinErr string
@@ -358,6 +361,59 @@ func c2Cells() []c2Cell {
 		{name: "44_ctl_a_window_over_the_query_itself",
 			sql:  `SELECT id, SUM(id) OVER () AS v FROM c2users u ORDER BY id`,
 			want: `id,v | 1,6 | 2,6 | 3,6`},
+		// --- THE REWRITE'S REACH: the positions whose disposition the SITE
+		// alone settles (round-2 review, B1). Where the enclosing block is a
+		// subquery whose own text a per-row re-run rebuilds, the node stays
+		// and ADR-0021 §1c's refusal is kept.
+		{name: "52_in_an_ORDER_BY_term_is_refused", // PostgreSQL: 100, 100, 100
+			sql: `SELECT id, (SELECT x.visits FROM c2users x ORDER BY (SELECT u.id) LIMIT 1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			wantErr: `correlated on u.id`,
+			routes:  a2Routes{ScalarProjection: 1}},
+		// The DIRECT spelling of the same two positions — an outer reference
+		// written straight into the clause rather than through a nested
+		// subquery — with the discriminator that says why refusing it is not
+		// a right answer traded for a loud one. `ORDER BY x.id * u.id`
+		// answered PostgreSQL's rows because multiplying by a POSITIVE
+		// constant does not change an order; with a factor that is negative
+		// for the first outer row the same mechanism answers 100 where
+		// PostgreSQL answers 200.
+		{name: "53_in_a_GROUP_BY_term_is_refused", // PostgreSQL: 342, 342, 342
+			sql: `SELECT id, (SELECT SUM(x.visits) FROM c2users x GROUP BY u.id) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			wantErr: `more than one row`,
+			routes:  a2Routes{ScalarProjection: 1}},
+		{name: "54_in_a_LATERAL_body_is_refused", // PostgreSQL: 1, 2, 3
+			sql: `SELECT u.id, l.v FROM c2users u CROSS JOIN LATERAL ` +
+				`(SELECT (SELECT u.id) AS v FROM c2users x WHERE x.id=1) l ORDER BY 1`,
+			wantErr: `correlated on u.id`,
+			routes:  a2Routes{ScalarProjection: 1}},
+
+		// --- #1044's own shape WITH a FROM clause (round-2 review, P1).
+		// The re-run substitutes the outer row into the SELECT list and the
+		// HAVING now, not only the WHERE.
+		{name: "68_a_star_with_no_relation_is_refused",
+			sql:     `SELECT id, (SELECT *) AS v FROM c2users u ORDER BY id`,
+			wantErr: `no tables specified`,
+			routes:  a2Routes{ScalarProjection: 1}},
+		{name: "70_a_LATERAL_body_that_projects_an_outer_column_is_the_residual",
+			sql: `SELECT u.id, l.v FROM c2users u CROSS JOIN LATERAL ` +
+				`(SELECT u.id AS v FROM c2users x WHERE x.id=1) l ORDER BY 1`,
+			want: `id,v | 1,1 | 2,2 | 3,3`,
+			pin:  `id,v | 1,1 | 2,1 | 3,1`,
+			pinArms: map[string]string{
+				// The three DAG arms also publish the item under the inner
+				// expression's name rather than the lateral's alias — a
+				// second, separate defect in the same shape (round-2 review,
+				// N7), pinned here so this cell asserts what each arm does.
+				"dag":          `id,x.id | 1,1 | 2,1 | 3,1`,
+				"dag-shuffled": `id,x.id | 1,1 | 2,1 | 3,1`,
+				"dag-morsel4":  `id,x.id | 1,1 | 2,1 | 3,1`,
+			},
+			pinWhy: "a LATERAL is decorrelated into a JOIN, and a body that PROJECTS an outer " +
+				"column rather than joining on it has nothing for the lowering to respell — " +
+				"J1's territory (ADR-0021 §1h), unchanged by this arc and identical at " +
+				"bf99c56c"},
 	}
 }
 
@@ -395,17 +451,21 @@ func TestArcC2ASubqueryReadsTheRowItIsCorrelatedOn(t *testing.T) {
 							arm.name, got, c2ErrText(err), tc.want, tc.pinErr, tc.sql)
 					}
 				case tc.pin != "":
+					pinned := tc.pin
+					if p, ok := tc.pinArms[arm.name]; ok {
+						pinned = p
+					}
 					switch {
 					case err != nil:
 						t.Errorf("%s arm: %v\n  SQL: %s\n  the pinned answer is %s",
-							arm.name, err, tc.sql, tc.pin)
+							arm.name, err, tc.sql, pinned)
 					case got == tc.want:
 						t.Errorf("%s arm now AGREES with PostgreSQL (%s), so this pin is FIXED: "+
 							"delete it from c2Cells.\n  pinned reason: %s\n  SQL: %s",
 							arm.name, tc.want, tc.pinWhy, tc.sql)
-					case got != tc.pin:
+					case got != pinned:
 						t.Errorf("%s arm answers %s, which is neither PostgreSQL's %s nor the "+
-							"pinned %s\n  SQL: %s", arm.name, got, tc.want, tc.pin, tc.sql)
+							"pinned %s\n  SQL: %s", arm.name, got, tc.want, pinned, tc.sql)
 					}
 				case tc.wantErr != "":
 					switch {

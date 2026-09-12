@@ -412,6 +412,22 @@ func parseDispatch(sql string) (*ParsedQuery, error) {
 		return nil, fmt.Errorf("resolving positional refs: %w", err)
 	}
 
+	// A STAR NEEDS A RELATION. `SELECT *` with no FROM clause is
+	// `SELECT * with no tables specified is not valid` on PostgreSQL 17.11,
+	// SQLSTATE 42601; this engine answered NULL for it, in the SELECT list and
+	// as a scalar subquery alike (`SELECT (SELECT *) FROM t`) — round-2
+	// review, N3.
+	if err := refuseStarWithNoRelation(info); err != nil {
+		return nil, err
+	}
+
+	// A scalar subquery with NO FROM clause IS its SELECT expression, when
+	// the block just parsed is the one that supplies the row (#1044). It runs
+	// HERE, after the block's FROM list exists to ask — see
+	// fromless_scalar.go for why a parser standing on the subquery cannot
+	// decide it, and what happened when it tried.
+	unfoldFromlessScalars(info)
+
 	// An UNKNOWN-typed literal used as a truth value becomes the boolean it
 	// names, or is refused with PostgreSQL's own 22P02 (#599).
 	if err := CoerceBooleanLiterals(info); err != nil {

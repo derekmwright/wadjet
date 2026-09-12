@@ -38,6 +38,10 @@ func TestASubqueryReadsTheRowItIsCorrelatedOnOnTheWire(t *testing.T) {
 		text string
 		// wantErr names a substring of the refusal every format must raise.
 		wantErr string
+		// names is PostgreSQL 17.11's RowDescription NAME per column, where
+		// the cell is about the name. Empty asserts nothing — most cells here
+		// alias their item `AS v`, which decides the name outright.
+		names []string
 		// pinOIDs records a DECLARATION this engine gets wrong, where the
 		// VALUE is right. The cell then asserts the divergence: the day it
 		// declares oids this FAILS and the pin is deleted.
@@ -65,6 +69,29 @@ func TestASubqueryReadsTheRowItIsCorrelatedOnOnTheWire(t *testing.T) {
 		{name: "a_string_column_declares_text",
 			sql:  `SELECT (SELECT u.nm) AS v FROM (SELECT name AS nm FROM users) u ORDER BY 1`,
 			oids: []uint32{25}, text: `alice|bob|carol`},
+		// THE PUBLISHED NAME, ALIAS INCLUDED (round-2 review, B2). PostgreSQL
+		// names a scalar subquery's column after the subquery's own target
+		// list, and a BI client binds a result set to that name (#732). Every
+		// other cell here is written `AS v`, which is exactly what hid this:
+		// an alias on the ITEM masks the name the item would otherwise carry.
+		{name: "the_subquerys_own_alias_is_the_published_name",
+			sql:  `SELECT (SELECT 1 AS zzz) FROM users u`,
+			oids: []uint32{20}, text: `1|1|1`, names: []string{"zzz"}},
+		{name: "an_aliased_column_reference_keeps_the_alias",
+			sql:  `SELECT (SELECT u.id AS zzz) FROM users u ORDER BY 1`,
+			oids: []uint32{23}, text: `1|2|3`, names: []string{"zzz"}},
+		{name: "an_aliased_string_column_keeps_the_alias",
+			sql:  `SELECT (SELECT u.name AS nm) FROM users u ORDER BY 1`,
+			oids: []uint32{25}, text: `alice|bob|carol`, names: []string{"nm"}},
+		{name: "an_aliased_expression_keeps_the_alias",
+			sql:  `SELECT (SELECT u.id + 1 AS zzz) FROM users u ORDER BY 1`,
+			oids: []uint32{20}, text: `2|3|4`, names: []string{"zzz"}},
+		{name: "an_unaliased_subquery_publishes_its_columns_name",
+			sql:  `SELECT (SELECT u.id) FROM users u ORDER BY 1`,
+			oids: []uint32{23}, text: `1|2|3`, names: []string{"id"}},
+		{name: "an_unaliased_constant_publishes_question_column",
+			sql:  `SELECT (SELECT 1) FROM users u`,
+			oids: []uint32{20}, text: `1|1|1`, names: []string{"?column?"}},
 		{name: "aggregated_over_the_alias",
 			sql:  `SELECT SUM((SELECT u.x)) AS v FROM (SELECT id AS x FROM users) u`,
 			oids: []uint32{20}, text: `6`},
@@ -125,8 +152,14 @@ func TestASubqueryReadsTheRowItIsCorrelatedOnOnTheWire(t *testing.T) {
 					t.Fatalf("%v\n  SQL: %s\n  PostgreSQL 17.11 answers %s", res.Err, tc.sql, tc.text)
 				}
 				var oids []uint32
+				var names []string
 				for _, f := range res.FieldDescriptions {
 					oids = append(oids, f.DataTypeOID)
+					names = append(names, string(f.Name))
+				}
+				if len(tc.names) > 0 && !sameNames(names, tc.names) {
+					t.Errorf("RowDescription publishes %q, want %q (PostgreSQL 17.11)\n  SQL: %s",
+						names, tc.names, tc.sql)
 				}
 				switch {
 				case tc.pinOIDs != nil && sameOIDs(oids, tc.oids):
@@ -210,4 +243,16 @@ func renderTextRows(rows [][][]byte) string {
 		out = append(out, strings.Join(cols, ","))
 	}
 	return strings.Join(out, "|")
+}
+
+func sameNames(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
