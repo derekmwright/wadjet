@@ -149,7 +149,21 @@ func unfoldFromlessScalars(info *SelectInfo) {
 			continue
 		}
 		before := info.OrderBy[i].Expr.String()
-		info.OrderBy[i].Expr = rw(info.OrderBy[i].Expr)
+		rewritten := rw(info.OrderBy[i].Expr)
+		// AN ORDER BY TERM THAT WOULD BECOME A BARE NUMERIC LITERAL KEEPS ITS
+		// SUBQUERY. PostgreSQL reads only an integer literal WRITTEN IN THE
+		// CLAUSE as a select-list position, never one a subquery evaluates to:
+		// `ORDER BY (SELECT 1)` is a constant sort and answers the table's own
+		// order. Rewritten to `1` — and this pass runs AFTER
+		// resolvePositionalRefs, so nothing resolves it again — the term
+		// reaches the logical planner as an ordinal that names no item, and
+		// ten shapes main answers exactly as PostgreSQL were refused 42P10
+		// (round-2 review, B1). A constant sort is what the subquery is
+		// either way, so declining costs the shape nothing.
+		if isBareNumericLit(rewritten) && !isBareNumericLit(info.OrderBy[i].Expr) {
+			continue
+		}
+		info.OrderBy[i].Expr = rewritten
 		if info.OrderBy[i].Expr.String() != before {
 			info.OrderBy[i].Column = info.OrderBy[i].Expr.String()
 		}
@@ -513,4 +527,21 @@ func refuseStarWithNoRelation(info *SelectInfo) error {
 		}
 	}
 	return nil
+}
+
+// isBareNumericLit reports whether a node renders as a NUMERIC LITERAL and
+// nothing else — the one shape an ORDER BY or GROUP BY term must not acquire,
+// because both engines read it there as a select-list POSITION. Parentheses
+// are transparent to that reading in this engine's own planner
+// (logical.unwrapParens), so they are unwrapped here too.
+func isBareNumericLit(n Node) bool {
+	for {
+		p, ok := n.(*ParenNode)
+		if !ok {
+			break
+		}
+		n = p.Inner
+	}
+	lit, ok := n.(*Lit)
+	return ok && lit.Kind == LitNumber
 }

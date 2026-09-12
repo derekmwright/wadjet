@@ -1133,6 +1133,19 @@ answer §1c refuses at the uncorrelated evaluators. Rendering a substituted sort
 or group term so that it cannot read as a position is what closing that half
 needs.
 
+**A REWRITE MUST NOT PUT A BARE NUMERIC LITERAL IN AN ORDER BY TERM.** The same
+ordinal trap caught the FROM-less rewrite itself. It ran after
+`resolvePositionalRefs`, so a term written `(SELECT 1)` became the bare `1`
+with nothing left to resolve it, and the planner refused it 42P10 as a position
+naming no item — on ten shapes main answers exactly as PostgreSQL does, because
+PostgreSQL reads only an integer literal WRITTEN IN THE CLAUSE as an ordinal,
+never one a subquery evaluates to (round-2 review, B1). `ORDER BY (SELECT 1)`
+is the generated-SQL idiom for a sort a query does not care about. The rewrite
+declines any ORDER BY term whose replacement would render as a bare numeric
+literal; a constant sort is what the subquery is either way, so declining costs
+the shape nothing, and `SELECT DISTINCT … ORDER BY (SELECT 1)` keeps
+PostgreSQL's own message rather than the ordinal one.
+
 **AN AGGREGATE BELONGS TO THE LEVEL OF THE DEEPEST VARIABLE IN ITS ARGUMENTS,
 and this engine does not implement levels**, so a subquery holding an aggregate
 whose argument names ONLY the enclosing query is refused
@@ -1160,6 +1173,7 @@ each one does. The cell numbers are
 | a correlated subquery's HAVING | the enclosing query | kept; the re-run substitutes the HAVING | 47 |
 | a correlated IN set's SELECT list | the enclosing query | kept; substituted | 46, 69 |
 | a correlated subquery's ORDER BY | the enclosing query | kept; REFUSED 0A000 — a substituted term reads as an ordinal | 52 |
+| an ORDER BY term of the ENCLOSING statement, `ORDER BY (SELECT 1)` | nothing — a constant sort | kept: only a literal WRITTEN in the clause is an ordinal | 71–81, 80a |
 | a correlated subquery's GROUP BY | the enclosing query | kept; loud (21000) for the same reason | 53 |
 | a LATERAL body | the enclosing query | kept; REFUSED 0A000 | 54 |
 | an aggregate argument naming ONLY the enclosing query | the enclosing query, by PostgreSQL's level rule | REFUSED 0A000 | 60, 61 |

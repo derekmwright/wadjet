@@ -541,6 +541,66 @@ func c2Cells() []c2Cell {
 				"column rather than joining on it has nothing for the lowering to respell — " +
 				"J1's territory (ADR-0021 §1h), unchanged by this arc and identical at " +
 				"bf99c56c"},
+		// --- AN ORDER BY TERM IS NEVER REWRITTEN INTO AN ORDINAL (round-2
+		// review, B1). PostgreSQL reads only an integer literal WRITTEN IN
+		// THE CLAUSE as a select-list position, never one a subquery
+		// evaluates to, so `ORDER BY (SELECT 1)` is a constant sort. The
+		// rewrite turned it into the bare `1` — after resolvePositionalRefs,
+		// with nothing left to resolve it — and the planner refused 42P10 on
+		// ten shapes main answers exactly as PostgreSQL does.
+		{name: "71_order_by_a_constant_subquery",
+			sql:    `SELECT visits, id FROM c2users u ORDER BY (SELECT 1), id`,
+			want:   `visits,id | 100,1 | 42,2 | 200,3`,
+			routes: a2Routes{ScalarProjection: 1}},
+		{name: "72_order_by_a_constant_subquery_naming_no_position",
+			sql:    `SELECT visits, id FROM c2users u ORDER BY (SELECT 5), id`,
+			want:   `visits,id | 100,1 | 42,2 | 200,3`,
+			routes: a2Routes{ScalarProjection: 1}},
+		{name: "73_the_same_descending",
+			sql:    `SELECT visits, id FROM c2users u ORDER BY (SELECT 1) DESC, id`,
+			want:   `visits,id | 100,1 | 42,2 | 200,3`,
+			routes: a2Routes{ScalarProjection: 1}},
+		{name: "74_the_same_with_nulls_first",
+			sql:    `SELECT visits, id FROM c2users u ORDER BY (SELECT 1) NULLS FIRST, id`,
+			want:   `visits,id | 100,1 | 42,2 | 200,3`,
+			routes: a2Routes{ScalarProjection: 1}},
+		{name: "75_beside_a_real_sort_key",
+			sql:    `SELECT visits, id FROM c2users u ORDER BY id, (SELECT 1)`,
+			want:   `visits,id | 100,1 | 42,2 | 200,3`,
+			routes: a2Routes{ScalarProjection: 1}},
+		{name: "76_over_an_aliased_item",
+			sql:    `SELECT visits AS v FROM c2users u ORDER BY (SELECT 1), id`,
+			want:   `v | 100 | 42 | 200`,
+			routes: a2Routes{ScalarProjection: 1}},
+		{name: "77_inside_a_subquerys_own_ORDER_BY",
+			sql: `SELECT id, (SELECT x.id FROM c2users x ORDER BY (SELECT 1), x.id LIMIT 1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,1 | 2,1 | 3,1`,
+			routes: a2Routes{ScalarProjection: 1}},
+		// SELECT DISTINCT keeps PostgreSQL's OWN message, which the rewrite
+		// had replaced with the ordinal one.
+		{name: "78_select_distinct_keeps_postgres_message",
+			sql:     `SELECT DISTINCT visits FROM c2users u ORDER BY (SELECT 1)`,
+			wantErr: `for SELECT DISTINCT, ORDER BY expressions must appear in select list`},
+		// The boundary: a term that does NOT render as a bare numeric literal
+		// is rewritten as before, and answers.
+		{name: "79_boundary_an_operator_expression_still_rewrites",
+			sql:  `SELECT visits, id FROM c2users u ORDER BY (SELECT 1 + 1), id`,
+			want: `visits,id | 100,1 | 42,2 | 200,3`},
+		{name: "80_boundary_a_null_and_a_column_still_rewrite",
+			sql:  `SELECT visits, id FROM c2users u ORDER BY (SELECT NULL), (SELECT u.id)`,
+			want: `visits,id | 100,1 | 42,2 | 200,3`},
+		// A CONSTANT SORT leaves the row order unspecified (ADR-0013), so
+		// every cell above carries a real final key; this one asserts that
+		// the term is still THERE and still a constant sort, by the only
+		// thing that is deterministic about it — that it answers at all.
+		{name: "80a_a_constant_sort_alone_answers_three_rows",
+			sql:    `SELECT COUNT(*) AS n FROM (SELECT visits FROM c2users u ORDER BY (SELECT 1)) z`,
+			want:   `n | 3`,
+			routes: a2Routes{ScalarProjection: 1}},
+		{name: "81_boundary_GROUP_BY_is_unaffected",
+			sql:  `SELECT visits, COUNT(*) AS n FROM c2users u GROUP BY visits, (SELECT 2) ORDER BY 1`,
+			want: `visits,n | 42,1 | 100,1 | 200,1`},
 	}
 }
 
