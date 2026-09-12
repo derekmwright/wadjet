@@ -112,6 +112,7 @@ func setOpDeclaredOutputSchema(root *logical.Node) ([]parquet.Column, bool) {
 			for a := range arms {
 				if (unknown[a] == nil || i >= len(unknown[a]) || !unknown[a][i]) && i < len(arms[a]) {
 					out[i].Type = arms[a][i].Type
+					out[i].Fields = arms[a][i].Fields
 					out[i].Precision, out[i].Scale = arms[a][i].Precision, arms[a][i].Scale
 					break
 				}

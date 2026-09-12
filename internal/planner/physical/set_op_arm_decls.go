@@ -425,6 +425,9 @@ func lookupColKey(colTypes map[string]parquet.TypeID, name string) (string, bool
 // declFromKey reads one resolved key's full declaration.
 func declFromKey(decls colDecls, key string) expr.DeclType {
 	t := decls.types[key]
+	if t == parquet.TypeRow {
+		return expr.DeclType{ID: t, Schema: &parquet.Column{Type: t, Fields: decls.fields[key]}}
+	}
 	if t != parquet.TypeDecimal {
 		return expr.Decl(t)
 	}

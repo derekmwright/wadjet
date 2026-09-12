@@ -10,7 +10,8 @@ The synthetic aggregate key's parallel metadata declaration carries them too.
 A derived ROW field binds its parent through the aggregate input rename
 resolver before extracting the field. This repairs #1055 for stored and
 computed ROWs. `(function(arg)).field` uses the existing `row_field` evaluator
-and resolves the field's declaration from the function's fixed schema.
+and resolves the field's declaration from the container's resolved ROW schema,
+including coalesce/nullif and CASE inputs over ROWs.
 
 `TestFixedRowScalarInEveryPosition` and its wire twin cover stored and computed
 ROWs across five configurations, checking values, five declared fields, and
@@ -33,6 +34,7 @@ convention remains text OID 25 (PostgreSQL uses record OID 2249).
 `TestFixedRowDeclarationMaterializationConsumers` separately checks the security
 projection and aggregate-input metadata: COUNT may inspect a ROW's parent NULL
 bit without reading its children, so a value-only count cannot prove that schema.
-A fixed function declaration rejects an unknown field with 42703 and field
-notation on a fixed scalar result with 42809, including over empty inputs. The
-binder and compiler share that declaration check.
+Postfix notation rejects an unknown declared ROW field with 42703 and a
+non-ROW resolved container with 42809 naming its SQL type, including over empty
+inputs. The binder and compiler share that declaration check. UNKNOWN NULL
+set-operation arms adopt the resolved ROW declaration with all its fields.

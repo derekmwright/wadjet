@@ -425,6 +425,10 @@ func tmdTables() []tmdTable {
 		// spread across four files.
 		{svTable, svSchema(), svData()},
 		{"a3b_rows", rowdecl.Schema(), rowdecl.Data()},
+		{"a3b_nullable_rows", parquet.Schema{Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+			{Name: "c_row", Type: parquet.TypeRow, Nullable: true, Fields: []parquet.Column{{Name: "a", Type: parquet.TypeInt64, Nullable: true}, {Name: "b", Type: parquet.TypeInt64}}},
+		}}, []map[string]any{{"id": int64(1), "c_row": map[string]any{"a": nil, "b": int64(11)}}, {"id": int64(2), "c_row": nil}}},
 		// The RESERVED-NAME fixture (#694). A table that already stores a
 		// column in a hidden-slot family, as one written before the namespace
 		// was reserved does.

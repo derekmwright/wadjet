@@ -38,6 +38,7 @@ func setOpResolveUnknownLiteralArms(left, right []parquet.Column,
 				l2 = append(l2, left...)
 			}
 			l2[i].Type = right[i].Type
+			l2[i].Fields = right[i].Fields
 			l2[i].Precision, l2[i].Scale = right[i].Precision, right[i].Scale
 			// A bare NULL is one of the two unknown spellings, so the column
 			// this arm contributes is nullable whatever the other arm declares.
@@ -48,6 +49,7 @@ func setOpResolveUnknownLiteralArms(left, right []parquet.Column,
 			r2 = append(r2, right...)
 		}
 		r2[i].Type = left[i].Type
+		r2[i].Fields = left[i].Fields
 		r2[i].Precision, r2[i].Scale = left[i].Precision, left[i].Scale
 		r2[i].Nullable = true
 	}

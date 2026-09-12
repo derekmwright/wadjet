@@ -704,7 +704,7 @@ func setOpArmTypeConflict(node *logical.Node) error {
 				// depends on column ORDER is not a rule.
 				break
 			}
-			want = setOpColType{typ: widened, known: true}
+			want = setOpColType{typ: widened, known: true, fields: want.fields}
 		}
 		// A QUOTED literal whose resolved type cannot be built from text.
 		// Deferred like the carrier gap and for the same reason: it is a fact
@@ -823,8 +823,9 @@ type setOpArmPlan struct {
 // spare TypeID to mean "unknown" — TypeBool is the zero value — so the flag
 // carries it.
 type setOpColType struct {
-	typ   parquet.TypeID
-	known bool
+	fields []parquet.Column
+	typ    parquet.TypeID
+	known  bool
 	// dec is a DECIMAL column's declared precision and scale: the two facts
 	// a bare TypeID cannot express, and the ones two DECIMAL arms can
 	// DISAGREE on while looking identical to a TypeID comparison. That is
@@ -895,7 +896,7 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 			lc := strings.ToLower(c)
 			plan.specs[i] = ProjectExprSpec{Expr: lc, Name: outNames[i]}
 			if t, ok := inner.ScanColTypes[lc]; ok {
-				plan.types[i] = setOpColType{typ: t, known: true}
+				plan.types[i] = setOpColType{typ: t, known: true, fields: inner.ScanColFields[lc]}
 				if t == parquet.TypeDecimal {
 					plan.types[i].dec, plan.types[i].decKnown = setOpColDecimalMeta(inner.ScanColDecimal, lc)
 				}
@@ -1019,7 +1020,7 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 			materialized := declTypeParts(decl)
 			spec.Type, spec.Precision, spec.Scale, spec.Fields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
 			spec.TypeKnown = true
-			ct = setOpColType{typ: spec.Type, known: true}
+			ct = setOpColType{typ: spec.Type, known: true, fields: materialized.Fields}
 			if decl.ID == parquet.TypeDecimal && decl.DecKnown {
 				// A computed DECIMAL arm now knows its own (p,s), so the
 				// arms reconcile through the ordinary rule instead of
@@ -1038,6 +1039,7 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 			ct = c
 			if forwardedComputed {
 				spec.Type = ct.typ
+				spec.Fields = ct.fields
 				spec.TypeKnown = true
 				if ct.decKnown {
 					spec.Precision, spec.Scale = ct.dec.Precision, ct.dec.Scale
@@ -1053,8 +1055,9 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 			// type because nothing downstream resolves a field path by name:
 			// it is MATERIALIZED the way a computed expression is.
 			if fc, ok := colTypes.field(cr); ok {
-				ct = setOpColType{typ: fc.Type, known: true}
+				ct = setOpColType{typ: fc.Type, known: true, fields: fc.Fields}
 				spec.Type = fc.Type
+				spec.Fields = fc.Fields
 				spec.TypeKnown = true
 				if fc.Type == parquet.TypeDecimal && fc.Precision > 0 {
 					ct.dec = logical.DecimalMeta{Precision: fc.Precision, Scale: fc.Scale}
@@ -1085,7 +1088,7 @@ func setOpRefDecl(decls colDecls, resolved string, pr logical.Projection) (setOp
 			continue
 		}
 		d := declFromKey(decls, key)
-		ct := setOpColType{typ: d.ID, known: true}
+		ct := setOpColType{typ: d.ID, known: true, fields: declTypeParts(d).Fields}
 		if d.ID == parquet.TypeDecimal && d.DecKnown && d.Precision > 0 {
 			ct.dec = logical.DecimalMeta{Precision: d.Precision, Scale: d.Scale}
 			ct.decKnown = true
@@ -1165,6 +1168,7 @@ func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string, op string, 
 					// literal left declared STRING wrote a STRING column into a
 					// file the next stage reads beside a DECIMAL one.
 					plans[i].specs[col].Type = want.typ
+					plans[i].specs[col].Fields = want.fields
 					plans[i].specs[col].TypeKnown = true
 					plans[i].specs[col].Precision = want.dec.Precision
 					plans[i].specs[col].Scale = want.dec.Scale
@@ -1207,6 +1211,7 @@ func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string, op string, 
 				// an earlier file of the same stage input` (ADR-0010) — after
 				// doing the work, where the single-process path answered.
 				plans[i].specs[col].Type = want.typ
+				plans[i].specs[col].Fields = want.fields
 				plans[i].specs[col].TypeKnown = true
 				plans[i].types[col] = want
 				continue
@@ -1221,6 +1226,7 @@ func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string, op string, 
 			}
 			plans[i].specs[col].Expr = cast
 			plans[i].specs[col].Type = want.typ
+			plans[i].specs[col].Fields = want.fields
 			plans[i].specs[col].TypeKnown = true
 			plans[i].types[col] = setOpColType{typ: want.typ, known: true}
 		}
@@ -1320,7 +1326,7 @@ func setOpTargetType(plans []setOpArmPlan, col int, name, op string, unknown [][
 			// shape that reaches here without it.
 			return setOpColType{}, false, setOpCarrierGap(name, want.typ, ct.typ)
 		}
-		want = setOpColType{typ: widened, known: true}
+		want = setOpColType{typ: widened, known: true, fields: want.fields}
 	}
 	if want.known && want.typ == parquet.TypeDecimal && allKnown {
 		arms := make([]setOpColType, 0, len(plans))
