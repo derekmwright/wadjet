@@ -1155,6 +1155,80 @@ still answer the empty box and no rows; they are #1033's family, reached
 through the FROM parser and the IN path rather than through the expression
 position this rewrite stands at.
 
+### 1m. A correlated subquery this engine cannot REBUILD is refused, and a WINDOW CALL is a position an outer reference can sit in
+
+(Added 2026-09-12, #1045.)
+
+The re-run of a correlated subquery substitutes the outer row's values into the
+subquery's WHERE and REBUILDS the statement around it (`plansql.RebuildSQL`),
+re-emitting every other clause as the text the parser recorded. A window call's
+recorded text is `<func>(<args>) OVER (...)` — `WindowFuncNode.String()`
+collapses the OVER clause deliberately, which is why
+`plansql.ReplaceWindowFuncs` matches window nodes by POINTER and not by text —
+so the rebuilt statement does not parse. That was already live and loud:
+`(SELECT SUM(x.id) OVER () FROM users x WHERE x.id = u.id)`, correlated by its
+WHERE and answered by PostgreSQL, died with `expected ')' after OVER clause`
+from a runner re-reading a statement nobody wrote.
+
+**#1045 is the SILENT half of the same fact.** `walkForOuterRefs` had no case
+for a window node, so the whole call was a leaf and an outer reference inside
+it was invisible — to the CLASSIFIER, which planned `(SELECT 1+SUM(u.id) OVER
+() FROM users x WHERE x.id=1)` UNCORRELATED and ran it once, and to
+`DanglingTableRefs`, which walks the same function with `anyOuter` set and is
+what makes the three `window_*_correlated` shapes LOUD. That shared walk is the
+entire difference between this shape and its siblings. With the case missing,
+the qualifier strip rebound `u.id` to the inner relation's own `id` and every
+outer row got one constant: 2, 2, 2 for PostgreSQL 17.11's 2, 3, 4.
+
+The walk now descends into all four expression positions a window call has —
+the ARGUMENTS, `PARTITION BY`, `ORDER BY` and the frame OFFSETS — and so does
+the pruning collector `OuterColumnCandidates`, because a column only a window
+reads still has to be projected by the outer query. The frame offsets cannot
+carry a reference through this parser today (a non-literal frame bound is a
+parse error) and are walked anyway, with the claim attempted against a
+hand-built AST rather than left as untested code on the default path.
+
+**The disposition is 0A000, PostgreSQL's feature_not_supported.**
+`plansql.HoldsWindowCall` is what all three correlated constructs — a scalar
+subquery, an `IN` set and an `EXISTS` — ask before building an evaluator that
+would rebuild the text, and the refusal names the reference and the mechanism.
+It is raised at COMPILE time, once per query, because it is a property of the
+plan and not of a row.
+
+Measured against live PostgreSQL 17.11 over the three-row `c2users` fixture,
+before → after, on all five arms:
+
+| shape | before | after | PG |
+|---|---|---|---|
+| `(SELECT 1+SUM(u.id) OVER () FROM x WHERE x.id=1)` | 2,2,2 silent | 0A000 | 2,3,4 |
+| the window call alone; a BIGINT outer column; two outer columns in one argument | one constant, silent | 0A000 | 1,2,3 / 101,43,201 / 101,44,203 |
+| the same subquery in a WHERE clause; over a CTE | 0 rows / empty box, silent | 0A000 | 2,3 / 2,3,4 |
+| `PARTITION BY u.id`, `ORDER BY u.id`, `COUNT(*) OVER (PARTITION BY u.id)` over a ONE-row inner | right | 0A000 | right |
+| the same two over a TWO-row inner | 1,1,1 silent | 0A000 | 3,3,3 / 2,2,2 |
+| a correlated subquery holding an UNCORRELATED window | `expected ')' after OVER clause` | 0A000 | answers |
+| an uncorrelated window in a subquery; a bare name the inner relation supplies; `PARTITION BY` the inner relation; a window over the query itself | right | right | right |
+
+The one-row/two-row pair is the discriminator, and it is why the refusal is not
+a right answer traded for a loud one. `SUM(x.id) OVER (PARTITION BY u.id)` over
+a ONE-row inner relation is right whatever the engine partitions by; the same
+shape over two rows answered 1, 1, 1 for PostgreSQL's 3, 3, 3. Both are cells
+of the census, and the right one moves to loud because its rightness was the
+fixture's and not the engine's.
+
+**What this does NOT close.** The re-run still substitutes into the WHERE
+clause ALONE. An outer reference in a correlated subquery's SELECT list, its
+HAVING or its GROUP BY survives into the re-run's text, where the qualifier
+strip answers a confident constant — `SELECT (SELECT u.id FROM users x WHERE
+x.id=1) FROM users u` is 1, 1, 1 for PostgreSQL's 1, 2, 3, and the HAVING
+spelling is NULL for its 342. This section refuses only the WINDOW case,
+because for a window the substitution cannot be made to work without a faithful
+`OVER` renderer, while for every other position it can: the repair is
+`RewriteOuterRefs` over each item's AST and a `RebuildSQL` that renders the
+rewritten items instead of their recorded text. That is a FIX and not a
+refusal, so it is filed as one rather than traded for a 0A000 that would also
+take the shapes this engine answers correctly today. `RebuildSQL` dropping a
+`QUALIFY` clause outright is the same gap's neighbour.
+
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
 `resolveSubqueryAST` gains an `InExpr` case. An uncorrelated IN-subquery is

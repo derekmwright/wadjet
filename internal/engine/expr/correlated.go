@@ -632,3 +632,69 @@ func refuseDanglingSubquery(kind, sql string, scope plansql.TableColumns) {
 		failEval(&DanglingSubqueryError{Kind: kind, SQL: sql, Refs: refs})
 	}
 }
+
+// WindowBorneCorrelationError reports a CORRELATED subquery whose body holds a
+// WINDOW CALL.
+//
+// The per-row re-run substitutes the outer row's values into the subquery's
+// WHERE clause and REBUILDS the statement around it (plansql.RebuildSQL),
+// re-emitting every other clause as the text the parser recorded. A window
+// call's recorded text is `<func>(<args>) OVER (...)` — WindowFuncNode.String
+// collapses the OVER clause deliberately, which is why
+// plansql.ReplaceWindowFuncs matches window nodes by POINTER and not by text —
+// so the rebuilt statement does not parse, and the query died with
+// `expected ')' after OVER clause` from a runner re-reading a statement nobody
+// wrote. That is what a correlated subquery with a window in its SELECT list
+// has always done here.
+//
+// #1045 is the SILENT half of the same fact. An outer reference inside a
+// window call was invisible to the correlation walk, so
+// `(SELECT 1+SUM(u.id) OVER () FROM users x WHERE x.id=1)` was planned
+// UNCORRELATED, ran once, and `expr.ResolveColumnRef`'s qualifier strip
+// rebound `u.id` to the inner relation's own `id`: 2, 2, 2 for
+// PostgreSQL 17.11's 2, 3, 4. With the walk repaired the shape is correlated,
+// and this is what a correlated subquery it cannot rebuild now answers.
+//
+// Raised at COMPILE time, once per query, because it is a property of the plan
+// and not of a row. All three correlated constructs raise it: the rebuild is
+// the same for a scalar subquery, an IN set and an EXISTS.
+type WindowBorneCorrelationError struct {
+	Kind string
+	SQL  string
+	Refs []plansql.OuterRef
+}
+
+func (e *WindowBorneCorrelationError) Error() string {
+	names := make([]string, 0, len(e.Refs))
+	for _, r := range e.Refs {
+		names = append(names, r.Table+"."+r.Column)
+	}
+	return fmt.Sprintf("%s subquery is correlated on %s and holds a window function; the "+
+		"per-row re-run rebuilds the subquery's text and a window call's OVER clause has no "+
+		"rendering that survives that rebuild, so this query has no distributed or "+
+		"single-process lowering for that correlation\n  subquery: %s",
+		e.Kind, strings.Join(names, ", "), e.SQL)
+}
+
+// FatalEvalError satisfies the marker the pipeline drivers recover on.
+func (e *WindowBorneCorrelationError) FatalEvalError() error { return e }
+
+// SQLState is PostgreSQL's feature_not_supported, the code the three
+// `window_*_correlated` shapes already answer with: the query is legal SQL
+// this engine cannot lower.
+func (e *WindowBorneCorrelationError) SQLState() string { return "0A000" }
+
+// refuseWindowBorneCorrelation answers the error when a correlated subquery's
+// body holds a window call, and nil otherwise. Every correlated construct asks
+// it, because every one of them re-runs by rebuilding the same text.
+//
+// It takes the PARSED body rather than the text, so the three call sites pass
+// the SelectInfo they are already holding to build their evaluator instead of
+// parsing the same statement a second time.
+func refuseWindowBorneCorrelation(kind, sql string, info *plansql.SelectInfo,
+	refs []plansql.OuterRef) error {
+	if len(refs) == 0 || info == nil || !plansql.HoldsWindowCall(info) {
+		return nil
+	}
+	return &WindowBorneCorrelationError{Kind: kind, SQL: sql, Refs: refs}
+}

@@ -2075,6 +2075,38 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      option. Gated in
      `coordinator.TestArcJ1AnOnConditionOverADefaultedColumnIsRightOrLoud`.
 
+   - **A CORRELATED subquery holding a WINDOW CALL is REFUSED (0A000) where
+     PostgreSQL answers.** (Added 2026-09-12, arc C2, #1045.) A correlated
+     subquery this engine does not decorrelate is re-run per outer row by
+     substituting the outer values into its WHERE clause and REBUILDING the
+     statement around them (`plansql.RebuildSQL`), re-emitting every other
+     clause as the text the parser recorded. A window call's recorded text is
+     `<func>(<args>) OVER (...)` — `WindowFuncNode.String()` collapses the OVER
+     clause deliberately, which is why `plansql.ReplaceWindowFuncs` matches
+     window nodes by pointer — so the rebuilt statement does not parse. That
+     was already the answer, as `expected ')' after OVER clause` from a runner
+     re-reading a statement nobody wrote; it is a named refusal now, raised at
+     compile time by all three correlated constructs through
+     `plansql.HoldsWindowCall`.
+
+     What made it a DIVERGENCE to record rather than a message improvement is
+     the silent half. `walkForOuterRefs` had no case for a window node, so an
+     outer reference inside one was invisible to the classifier and to
+     `DanglingTableRefs` alike, and `SELECT id, (SELECT 1+SUM(u.id) OVER ()
+     FROM users x WHERE x.id=1) FROM users u` was planned UNCORRELATED, ran
+     once, and answered 2, 2, 2 for PostgreSQL 17.11's 2, 3, 4 — the qualifier
+     strip rebinding `u.id` to the inner relation's own `id`. Two shapes that
+     were RIGHT before the walk was repaired move to the refusal with it
+     (`PARTITION BY u.id` and `ORDER BY u.id` over a ONE-row inner relation),
+     and they were right because one row makes any partitioning of it the same
+     partition: the same shapes over a TWO-row inner answered 1, 1, 1 for
+     PostgreSQL's 3, 3, 3. Both pairs are cells of
+     `coordinator.TestArcC2ASubqueryReadsTheRowItIsCorrelatedOn`, which carries
+     PostgreSQL's value beside each refusal so the day the shape is executable
+     the cell fails and is rewritten to that value. Executing it needs the
+     re-run to substitute OUTSIDE the WHERE clause, which needs a faithful
+     rendering of the OVER clause; ADR-0021 §1m states what that costs.
+
    - **`OHLCV` and `TIME_BUCKET` are EXTENSIONS, and their oracle is
      PostgreSQL spelled out.** (Added 2026-09-08, arc A1, #965, ADR-0035.)
 

@@ -11,14 +11,25 @@ import (
 	"github.com/derekmwright/wadjet/wadjet"
 )
 
-// A SUBQUERY READS THE ROW IT IS CORRELATED ON — #1044, on FIVE arms with the
-// routing counters.
+// A SUBQUERY READS THE ROW IT IS CORRELATED ON — #1044 and #1045, on FIVE arms
+// with the routing counters.
 //
-// `(SELECT u.x)` has NO FROM clause. PostgreSQL evaluates its SELECT
-// expression in the ENCLOSING scope and answers `u.x`; this engine ran the
-// block as a statement, where `u` names no relation, and every row read the
-// EMPTY BOX under a text declaration — 18 and 1026 became "" and "" under OID
-// 701 in the filing's own shape.
+// Two shapes, one question: where does the outer row's value enter a subquery?
+//
+//   - #1044. `(SELECT u.x)` has NO FROM clause. PostgreSQL evaluates its
+//     SELECT expression in the ENCLOSING scope and answers `u.x`; this engine
+//     ran the block as a statement, where `u` names no relation, and every row
+//     read the EMPTY BOX under a text declaration — 18 and 1026 became "" and
+//     "" under OID 701 in the filing's own shape.
+//   - #1045. A correlated re-run substitutes the outer row's values into the
+//     subquery's WHERE clause and REBUILDS the statement around it, re-emitting
+//     every other clause as the text the parser recorded. A window call's
+//     recorded text collapses its OVER clause, so a correlated subquery holding
+//     one cannot be rebuilt at all — and the walk that finds correlated
+//     references had no case for a window node, so
+//     `(SELECT 1+SUM(u.id) OVER () FROM users x WHERE x.id=1)` was planned
+//     UNCORRELATED, ran once, and the qualifier strip rebound `u.id` to the
+//     inner relation's own `id`: 2, 2, 2 for PostgreSQL's 2, 3, 4.
 //
 // Every want is live PostgreSQL 17.11 over the three rows c2uData writes
 // (this arc's ROUND0, measured before any code changed).
@@ -253,6 +264,100 @@ func c2Cells() []c2Cell {
 				`FROM c2users u ORDER BY id`,
 			want:   `id,v | 1,100 | 2,42 | 3,200`,
 			routes: a2Routes{Correlated: 1}},
+		// --- #1045: an outer reference inside a WINDOW function ------------
+		//
+		// Every cell below is a shape PostgreSQL 17.11 ANSWERS and this engine
+		// REFUSES: the per-row re-run substitutes the outer value into the
+		// subquery's WHERE and rebuilds the statement around it, and a window
+		// call has no faithful rendering to rebuild (WindowFuncNode.String
+		// collapses the OVER clause on purpose — see plansql.ReplaceWindowFuncs).
+		// The refusal is 0A000, the sentence the three `window_*_correlated`
+		// siblings already carry. The values PostgreSQL answers are written
+		// beside each cell so the day the shape is executable this gate says
+		// what to assert instead.
+		{name: "30_the_filing_shape_window_over_the_outer_row", // PG: 2, 3, 4
+			sql: `SELECT id,(SELECT 1+SUM(u.id) OVER () FROM c2users x WHERE x.id=1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			wantErr: `correlated on u.id`,
+			routes:  a2Routes{Correlated: 1}},
+		{name: "31_the_window_call_alone", // PG: 1, 2, 3
+			sql: `SELECT id,(SELECT SUM(u.id) OVER () FROM c2users x WHERE x.id=1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			wantErr: `correlated on u.id`,
+			routes:  a2Routes{Correlated: 1}},
+		{name: "32_a_bigint_outer_column", // PG: 101, 43, 201
+			sql: `SELECT id,(SELECT 1+SUM(u.visits) OVER () FROM c2users x WHERE x.id=1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			wantErr: `correlated on u.visits`,
+			routes:  a2Routes{Correlated: 1}},
+		{name: "33_two_outer_columns_in_one_argument", // PG: 101, 44, 203
+			sql: `SELECT id,(SELECT SUM(u.id + u.visits) OVER () FROM c2users x WHERE x.id=1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			wantErr: `correlated on u.`,
+			routes:  a2Routes{Correlated: 1}},
+		{name: "34_in_a_where_clause", // PG: 2, 3
+			sql: `SELECT id FROM c2users u ` +
+				`WHERE (SELECT 1+SUM(u.id) OVER () FROM c2users x WHERE x.id=1) > 2 ORDER BY id`,
+			wantErr: `correlated on u.id`,
+			routes:  a2Routes{Correlated: 1}},
+		{name: "35_over_a_cte", // PG: 2, 3, 4
+			sql: `WITH a AS (SELECT id AS x FROM c2users) ` +
+				`SELECT x,(SELECT 1+SUM(u.x) OVER () FROM c2users y WHERE y.id=1) AS v ` +
+				`FROM a u ORDER BY x`,
+			wantErr: `correlated on u.x`,
+			routes:  a2Routes{Correlated: 1}},
+		{name: "36_partition_by_the_outer_row", // PG: 1, 1, 1
+			sql: `SELECT id,(SELECT SUM(x.id) OVER (PARTITION BY u.id) FROM c2users x WHERE x.id=1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			wantErr: `correlated on u.id`,
+			routes:  a2Routes{Correlated: 1}},
+		{name: "37_order_by_the_outer_row", // PG: 1, 1, 1
+			sql: `SELECT id,(SELECT ROW_NUMBER() OVER (ORDER BY u.id) FROM c2users x WHERE x.id=1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			wantErr: `correlated on u.id`,
+			routes:  a2Routes{Correlated: 1}},
+		{name: "38_count_star_partitioned_by_the_outer_row", // PG: 1, 1, 1
+			sql: `SELECT id,(SELECT COUNT(*) OVER (PARTITION BY u.id) FROM c2users x WHERE x.id=1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			wantErr: `correlated on u.id`,
+			routes:  a2Routes{Correlated: 1}},
+		// THE DISCRIMINATORS. Cells 36-38 are shapes this engine answered
+		// CORRECTLY before the refusal — and only because the inner relation
+		// has ONE row, which makes any partitioning and any ordering of it the
+		// same partition in the same order. Two inner rows and the same shapes
+		// are silently wrong: PostgreSQL partitions by a constant and sums
+		// BOTH rows, this engine strips the qualifier, partitions by the
+		// inner `x.id`, and sums one. The refusal is therefore not a right
+		// answer traded for a loud one; it is the same defect, seen.
+		{name: "39_discriminator_partition_over_two_inner_rows", // PG: 3, 3, 3
+			sql: `SELECT id,(SELECT SUM(x.id) OVER (PARTITION BY u.id) FROM c2users x ` +
+				`WHERE x.id<3 LIMIT 1) AS v FROM c2users u ORDER BY id`,
+			wantErr: `correlated on u.id`,
+			routes:  a2Routes{Correlated: 1}},
+		{name: "40_discriminator_count_over_two_inner_rows", // PG: 2, 2, 2
+			sql: `SELECT id,(SELECT COUNT(*) OVER (PARTITION BY u.id) FROM c2users x ` +
+				`WHERE x.id<3 LIMIT 1) AS v FROM c2users u ORDER BY id`,
+			wantErr: `correlated on u.id`,
+			routes:  a2Routes{Correlated: 1}},
+		// --- #1045's controls: a window that reads NO outer row ------------
+		{name: "41_ctl_an_uncorrelated_window_in_a_subquery",
+			sql: `SELECT id,(SELECT 1+SUM(x.id) OVER () FROM c2users x WHERE x.id=1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,2 | 2,2 | 3,2`,
+			routes: a2Routes{ScalarProjection: 1}},
+		{name: "42_ctl_an_unqualified_name_the_inner_relation_supplies",
+			sql: `SELECT id,(SELECT 1+SUM(visits) OVER () FROM c2users x WHERE x.id=1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,101 | 2,101 | 3,101`,
+			routes: a2Routes{ScalarProjection: 1}},
+		{name: "43_ctl_partition_by_the_inner_relation",
+			sql: `SELECT id,(SELECT SUM(x.id) OVER (PARTITION BY x.id) FROM c2users x WHERE x.id=1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,1 | 2,1 | 3,1`,
+			routes: a2Routes{ScalarProjection: 1}},
+		{name: "44_ctl_a_window_over_the_query_itself",
+			sql:  `SELECT id, SUM(id) OVER () AS v FROM c2users u ORDER BY id`,
+			want: `id,v | 1,6 | 2,6 | 3,6`},
 	}
 }
 

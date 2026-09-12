@@ -639,6 +639,40 @@ func walkForOuterRefs(node Node, s *outerRefScope, refs *[]OuterRef) {
 		for _, arg := range n.Args {
 			walkForOuterRefs(arg, s, refs)
 		}
+	// A WINDOW CALL IS A POSITION AN OUTER REFERENCE CAN SIT IN (#1045).
+	//
+	// There was no case for a window node at all, so the whole call was a
+	// leaf: `(SELECT 1+SUM(u.id) OVER () FROM users x WHERE x.id=1)` reported
+	// NO correlated reference and was planned UNCORRELATED — run once,
+	// memoized, with `u.id` stripped to the inner relation's own `id` — and
+	// answered 2, 2, 2 for PostgreSQL 17.11's 2, 3, 4. The same blindness hid
+	// it from DanglingTableRefs, which walks this function with anyOuter set
+	// and is what makes the three `window_*_correlated` siblings LOUD; that is
+	// the whole difference between this shape and theirs.
+	//
+	// All four positions are walked, because all four take expressions and an
+	// outer reference in any of them changes the window's answer per outer
+	// row: the ARGUMENTS, PARTITION BY, ORDER BY and the frame OFFSETS. The
+	// frame offsets cannot carry one through this parser today — a non-literal
+	// frame bound is a parse error — and are walked anyway, because the walk
+	// must not become wrong the day the parser accepts one
+	// (TestAWindowFrameOffsetIsAPositionToo builds that AST directly).
+	case *WindowFuncNode:
+		if n.Func != nil {
+			walkForOuterRefs(n.Func, s, refs)
+		}
+		for _, p := range n.PartitionBy {
+			walkForOuterRefs(p, s, refs)
+		}
+		for _, o := range n.OrderBy {
+			walkForOuterRefs(o.Expr, s, refs)
+		}
+		if n.Frame != nil {
+			walkForOuterRefs(n.Frame.Start.Offset, s, refs)
+			if n.Frame.End != nil {
+				walkForOuterRefs(n.Frame.End.Offset, s, refs)
+			}
+		}
 	case *InExpr:
 		walkForOuterRefs(n.Left, s, refs)
 		for _, v := range n.Values {
@@ -1178,6 +1212,27 @@ func walkOuterCandidates(node Node, inner map[string]bool, out map[string]bool) 
 		for _, arg := range n.Args {
 			walkOuterCandidates(arg, inner, out)
 		}
+	// A window call's four expression positions, for the reason
+	// walkForOuterRefs walks them (#1045). Here the cost of missing one is
+	// that the outer query does not PROJECT a column its subquery reads, and
+	// readOuterValues then fails loudly; an extra candidate costs a
+	// schema-filtered name, so over-inclusion is the safe direction.
+	case *WindowFuncNode:
+		if n.Func != nil {
+			walkOuterCandidates(n.Func, inner, out)
+		}
+		for _, p := range n.PartitionBy {
+			walkOuterCandidates(p, inner, out)
+		}
+		for _, o := range n.OrderBy {
+			walkOuterCandidates(o.Expr, inner, out)
+		}
+		if n.Frame != nil {
+			walkOuterCandidates(n.Frame.Start.Offset, inner, out)
+			if n.Frame.End != nil {
+				walkOuterCandidates(n.Frame.End.Offset, inner, out)
+			}
+		}
 	case *InExpr:
 		walkOuterCandidates(n.Left, inner, out)
 		for _, v := range n.Values {
@@ -1206,4 +1261,46 @@ func walkOuterCandidates(node Node, inner map[string]bool, out map[string]bool) 
 	case *CastNode:
 		walkOuterCandidates(n.Inner, inner, out)
 	}
+}
+
+// HoldsWindowCall reports whether a subquery's body contains a WINDOW CALL
+// anywhere the per-row re-run's rebuild would have to re-emit it.
+//
+// It exists because RebuildSQL reconstructs the statement from its PARTS —
+// the WHERE from the rewritten AST, every other clause from the text the
+// parser recorded — and a window call's recorded text is
+// `<func>(<args>) OVER (...)`: WindowFuncNode.String() collapses the OVER
+// clause deliberately, which is why ReplaceWindowFuncs matches window nodes by
+// POINTER rather than by text. Rebuilt and handed back to the parser, that
+// text does not parse (`expected ')' after OVER clause`), so a correlated
+// subquery holding a window call cannot be re-run at all. Its callers refuse
+// it with PostgreSQL's 0A000 rather than letting the rebuild produce a
+// statement nobody wrote (#1045).
+func HoldsWindowCall(info *SelectInfo) bool {
+	if info == nil {
+		return false
+	}
+	if len(info.Windows) > 0 {
+		return true
+	}
+	for i := range info.Columns {
+		c := &info.Columns[i]
+		if c.IsWindow {
+			return true
+		}
+		if len(FindAllWindowFuncs(c.ASTExpr)) > 0 {
+			return true
+		}
+		if len(FindAllWindowFuncs(c.AggArgExpr)) > 0 {
+			return true
+		}
+	}
+	if len(FindAllWindowFuncs(info.HavingExpr)) > 0 ||
+		len(FindAllWindowFuncs(info.QualifyExpr)) > 0 {
+		return true
+	}
+	if info.Union != nil {
+		return HoldsWindowCall(info.Union.Left) || HoldsWindowCall(info.Union.Right)
+	}
+	return false
 }

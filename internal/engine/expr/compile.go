@@ -502,6 +502,10 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 					if err == nil && len(refs) > 0 {
 						parsed, _ := plansql.Parse(sq.SQL)
 						info, _ := plansql.ExtractSelect(parsed)
+						// The same rebuild, the same refusal (#1045).
+						if refusal := refuseWindowBorneCorrelation("IN", sq.SQL, info, refs); refusal != nil {
+							return nil, refusal
+						}
 						if info != nil {
 							return &CorrelatedInSubquery{
 								Cols:            ctx.subqueryCols,
@@ -660,6 +664,11 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 			if err == nil && len(refs) > 0 {
 				parsed, _ := plansql.Parse(n.SQL)
 				info, _ := plansql.ExtractSelect(parsed)
+				// The per-row re-run rebuilds the subquery's text, and a
+				// window call does not survive the rebuild (#1045).
+				if refusal := refuseWindowBorneCorrelation("scalar", n.SQL, info, refs); refusal != nil {
+					return nil, refusal
+				}
 				if info != nil {
 					cs := &CorrelatedScalarSubquery{
 						Cols:            ctx.subqueryCols,
@@ -712,6 +721,10 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 			if err == nil && len(refs) > 0 {
 				parsed, _ := plansql.Parse(n.SQL)
 				info, _ := plansql.ExtractSelect(parsed)
+				// The same rebuild, the same refusal (#1045).
+				if refusal := refuseWindowBorneCorrelation("EXISTS", n.SQL, info, refs); refusal != nil {
+					return nil, refusal
+				}
 				if info != nil {
 					return &CorrelatedExistsSubquery{
 						Runner:          ctx.runner,

@@ -940,6 +940,25 @@ answer, not a near miss. Add the correlation column to the window's
 `WHERE order_id = o.id`), which answers, or compute the window outside the
 lateral. An UNcorrelated lateral's window is unaffected.
 
+A WINDOW FUNCTION inside a CORRELATED SUBQUERY is refused (`0A000`) for a
+different reason than the lateral above: a correlated subquery that is not
+decorrelated is re-run per outer row by substituting the outer values into its
+`WHERE` clause and rebuilding the statement, and a window call's `OVER` clause
+does not survive that rebuild. It applies to a scalar subquery, an `IN` set and
+an `EXISTS`, and to any window in the body — not only one that reads the outer
+row:
+
+```sql
+-- refused: the window reads the outer row
+SELECT id, (SELECT 1 + SUM(u.id) OVER () FROM users x WHERE x.id = 1) FROM users u
+-- refused: the window is uncorrelated but the subquery is not
+SELECT id, (SELECT SUM(x.id) OVER () FROM users x WHERE x.id = u.id) FROM users u
+```
+
+Compute the window outside the subquery, or make the subquery uncorrelated — an
+UNcorrelated subquery's window is unaffected, and so is a window over the query
+itself.
+
 ## Aggregate Functions
 
 | Function | Description | Null Handling |
