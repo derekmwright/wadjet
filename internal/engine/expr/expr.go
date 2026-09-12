@@ -348,6 +348,8 @@ func init() {
 		"semver_sort_key":         {fnSemverSortKey, RetString},
 		"semver_normalize":        {fnSemverNormalize, RetString},
 		"semver_normalize_strict": {fnSemverNormalizeStrict, RetString},
+		"semver_parse":            {fnSemverParse, RetRow(semverRowFields())},
+		"semver_parse_strict":     {fnSemverParseStrict, RetRow(semverRowFields())},
 		"semver_satisfies":        {fnSemverSatisfies, RetBool},
 
 		// Date/time functions

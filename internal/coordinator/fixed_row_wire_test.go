@@ -39,7 +39,7 @@ func TestFixedRowScalarInEveryPositionWire(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer conn.Close(ctx)
-			for _, producer := range []string{"r", "a3b_fixed(id)"} {
+			for _, producer := range []string{"r", "a3b_fixed(id)", "semver_parse(v)"} {
 				for _, cell := range rowdecl.Cells(producer) {
 					for _, format := range []int16{0, 1} {
 						t.Run(fmt.Sprintf("%s/%s/%d", producer, cell.Name, format), func(t *testing.T) {

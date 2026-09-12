@@ -2161,7 +2161,7 @@ FROM flow_logs
 
 ## Built-in Functions
 
-Wadjet includes 377 built-in scalar functions across several categories.
+Wadjet includes 379 built-in scalar functions across several categories.
 
 ### String Functions
 
@@ -2225,6 +2225,8 @@ Nothing here is network-specific.
 
 | Function | Description | Example |
 |----------|-------------|---------|
+| `SEMVER_PARSE(s)` | Parse once into ROW `(major bigint, minor bigint, patch bigint, prerelease text, build text)`; invalid strings return NULL | `(SEMVER_PARSE('1.2.3')).major` → `1` |
+| `SEMVER_PARSE_STRICT(s)` | The same ROW, but invalid strings raise `22023` naming the input | `SEMVER_PARSE_STRICT('latest')` → error |
 | `SEMVER_VALID(s)` | Whether the string is a version | `SEMVER_VALID('1.2.3')` → `true` |
 | `SEMVER_MAJOR(s)` | The major number, `BIGINT` | `SEMVER_MAJOR('v1.2.3')` → `1` |
 | `SEMVER_MINOR(s)` | The minor number, `BIGINT` | `SEMVER_MINOR('1.2.3')` → `2` |
@@ -2238,12 +2240,12 @@ Nothing here is network-specific.
 | `SEMVER_SATISFIES(v, range)` | Whether the version is in a node-semver range | `SEMVER_SATISFIES('1.5.0','^1.2.3')` → `true` |
 
 **Data is lenient.** A string that is not a version is **NULL**, never an
-error, from every function above except the strict one — a `WHERE` over a
+error, from every function above except the strict forms — a `WHERE` over a
 version column collected from the wild must filter rather than abort, and such
 a column always holds junk. `SEMVER_NORMALIZE_STRICT` is the loud twin for a
 job that asserts rather than filters: the same canonical string, and SQLSTATE
-`22023` naming the value when it is not a version. A NULL argument is NULL
-everywhere, the strict form included.
+`22023` naming the value when it is not a version. `SEMVER_PARSE_STRICT` applies the same refusal to the ROW form. A NULL argument
+is NULL everywhere, both strict forms included.
 
 **`SEMVER_PRERELEASE` and `SEMVER_BUILD` answer `''`, not NULL, for a version
 that has none.** A release *is* a version without a pre-release; returning NULL

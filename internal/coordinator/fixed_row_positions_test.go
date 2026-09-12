@@ -48,7 +48,7 @@ func TestFixedRowScalarInEveryPosition(t *testing.T) {
 					})
 				}
 			}
-			for _, producer := range []string{"r", "a3b_fixed(id)", "a3b_untyped(id)"} {
+			for _, producer := range []string{"r", "a3b_fixed(id)", "a3b_untyped(id)", "semver_parse(v)"} {
 				for _, cell := range rowdecl.Cells(producer) {
 					// The review's RetRow(nil) control covers whole values, whose TEXT
 					// disposition can preserve a box but cannot publish typed child fields.

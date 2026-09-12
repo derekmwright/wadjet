@@ -3086,14 +3086,18 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      are computed from the fixture's strings. Reverting the five bound
      constructors to the wrapping form fails all sixteen site cells.
 
-     **The fixed ROW declaration mechanism is available for the ROW parse.**
-     A3b carries a registry's `RetRow(fields)` schema through the complete
-     declared-output seam, including group keys, set-operation arms, window
-     keys and worker/gather projections. Derived ROW field grouping uses the
-     same parent binding, covering #1055. The semver ROW functions are added
-     on top of this mechanism; the component family here remains available.
-     ARRAY/MAP scalar declarations remain on their existing #1017 disposition.
-     See [fixed ROW declarations](../internals/scalar-row-declarations.md).
+     **`semver_parse` and `semver_parse_strict` return a fixed ROW**
+     `(major bigint, minor bigint, patch bigint, prerelease text, build text)`.
+     A3b carries its schema inside the declared-output seam, through aggregate
+     keys, set-operation arms, window keys and worker/gather projections.
+     The parser builds the ROW once per input value; absent pre-release/build
+     are empty strings. Invalid strings return NULL, or 22023 naming the string
+     in the strict form. NULL remains NULL in either form.
+     This covers #1017's fixed-schema ROW case and #1055's derived stored-field
+     grouping. ARRAY/MAP scalar declarations remain on their existing #1017
+     disposition. Composite scalar-subquery transport retains its existing
+     local route; declarations and values now survive it. See
+     [fixed ROW declarations](../internals/scalar-row-declarations.md).
 
    - **WITHDRAWN the same day (arc J1 round 3): the refusal of `SELECT *` over
      a LATERAL whose ungrouped COUNT can see no rows.** It fired on the SHAPE,
