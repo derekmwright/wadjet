@@ -2425,7 +2425,7 @@ therefore not an address, and it was the only one in use in three places:
 | `coordinator.TestN1AGroupedLateralAnswersItsRows` | 8e's VALUES — a lateral whose inner GROUPS, seven shapes incl. LEFT, nested and different tables |
 | `coordinator.TestN1ATwoGroupedLateralsPublishTheirOwnColumns` | 8e's COLUMN LIST and its order, with three controls (an ordinary two- and three-way join, #988's ungrouped laterals) |
 | `coordinator.TestN1AnOrdinalSortKeyBindsItsSlot` | 8f — eight cells, both keys DESC in turn, the ordinals swapped, 5000 rows, two controls |
-| `coordinator.TestC3AWrittenSortKeyBindsItsOwnColumn` | 8g — ten cells on five arms: the written term leading, alone, DESC, beside an ordinal, both keys written, 5000 rows under a LIMIT, ADR-0012's ambiguous-name divergence, and the bare cross join the measurement must decline |
+| `coordinator.TestC3AWrittenSortKeyBindsItsOwnColumn` | 8g — thirteen cells on five arms: the written term leading, alone, DESC, beside an ordinal, both keys written, the CTE spelling, the GROUP BY twin in both spellings, 5000 rows under a LIMIT, ADR-0012's ambiguous-name divergence, and the bare cross join the measurement must decline |
 | `coordinator.TestC3ASetOperationOrdinalsBindTheirOwnSlots` | 8h — twenty-five cells on five arms: UNION / UNION ALL / INTERSECT / EXCEPT × four orderings × a duplicated-name list, a star, the ALL spellings, a THREE-ARM chain and a 5000-row pair, plus the row COUNTS, which is the half with no sort key in it |
 | `coordinator.TestC3ANullGroupKeyIsItsOwnGroupOnEveryArm` | a NULL group key is its own group on every arm — the NULL-arm UNION over every flat type, eight repetitions per arm, with the morsel-parallel engagement counter asserted (#1058) |
 | `coordinator.TestN1AResultWithNoColumnsIsRefused` | an empty column list is never an answer (ADR-0012's divergence list) |
@@ -2449,9 +2449,25 @@ no rows (a star over a bushy join, a star over a query carrying a decorrelated
 LATERAL); ADR-0012's divergence list records that they are refused rather than
 answered until the declaration reaches them.
 
-§8f leaves one of its own: a WRITTEN qualified ORDER BY term beside a duplicate
-output name is rewritten onto the select-list alias and binds the first column
-of it. Pinned in `coordinator.TestN1AnOrdinalSortKeyBindsItsSlot`.
+§8f left one of its own — a WRITTEN qualified ORDER BY term beside a duplicate
+output name bound the first column of the name it was rewritten onto — and
+**§8g settles it** (2026-09-12, #1014): both engines resolve a written term's
+slot through `sortKeyWrittenSlotPos`, the DAG under §8f's own measurement. The
+pin this paragraph used to name in
+`coordinator.TestN1AnOrdinalSortKeyBindsItsSlot` is deleted; the family's gate
+is `coordinator.TestC3AWrittenSortKeyBindsItsOwnColumn`.
+
+What is still open in that family is the DERIVED-TABLE spelling, and it is a
+different bound: `SELECT * FROM (SELECT a.order_id AS amount, b.amount FROM
+lat_item a JOIN lat_item b ON b.order_id = a.order_id) x ORDER BY 1, 2 DESC`
+answers PostgreSQL's sequence on the single-process arms and not on the three
+distributed ones. `producerPublishesSelectList` compares each visible item's
+SOURCE EXPRESSION against the producing stage's `ProjectExprs`, and through a
+derived table's RENAME those differ by construction — the outer item reads
+`x.amount` where the stage computes it from `a.order_id` — so the measurement
+declines and the key falls back to a name the block publishes twice. Teaching
+it to follow a derived block's rename is the star-identity territory the
+paragraph above names, not a bound §8g can move at its seam.
 
 
 ### Fixed ROW consumers and computed aliases (A3b)

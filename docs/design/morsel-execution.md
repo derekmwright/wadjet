@@ -501,7 +501,19 @@ made the omission a wrong ANSWER is unrepresentable.
 `worker.MorselParallelBreakerRuns` counts the phases that take this branch,
 which is the engagement signal a gate for a condition-triggered defect needs
 (ADR-0027); the census is
-`coordinator.TestC3ANullGroupKeyIsItsOwnGroupOnEveryArm`.
+`coordinator.TestC3ANullGroupKeyIsItsOwnGroupOnEveryArm`, and
+`worker.TestBothBranchesOfTheBreakerDecisionInitializeTheirSink` holds the call
+itself, since with the constructor sentinel in place the answer no longer
+depends on it.
+
+One sibling site is left as it was and named here so the next reader does not
+have to find it: `drainThroughBreaker` — the driver for the breakers at index
+> 0 of a MULTI-breaker fragment — does not Init its sink either. The planner
+emits no such fragment today (`runFragmentWithBreakers`' own comment: "the
+planner emits at most one breaker per fragment; the multi-breaker path is
+exercised by tests"), and what covers a `HashAggregate` reached that way is
+`NewHashAggregate`'s sentinel rather than an Init call. If the planner ever
+emits that shape, that site needs the same call.
 
 ## 10. Kickoff open questions — answers
 

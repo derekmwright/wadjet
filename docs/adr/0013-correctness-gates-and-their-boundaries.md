@@ -112,12 +112,21 @@ named mechanism.
     is the replacement, run with the scan forced wide so the reordering
     actually happens rather than holding vacuously.
 
-### Amendment 2026-09-12: a per-RUN difference in the ROW SET is never one of these classes, and the ARMS have to be separable (#1058)
+### Amendment 2026-09-12: a per-RUN difference in the ROW SET under a TOTAL key is never one of these classes, and the ARMS have to be separable (#1058)
 
-Every class above varies the ORDER or the ARRIVAL of rows. None of them varies
-which rows, or which GROUPS, come back. So a shape that answers two rows on
-some runs and one on others is a defect however it is dressed, and the first
-job is to make it reproducible rather than to widen the tolerance.
+Where a query's answer is a SET — every row that satisfies it, with no LIMIT
+and no partial key deciding which of a tie group survives — none of the classes
+above varies which rows, or which GROUPS, come back. They vary the ORDER and
+the ARRIVAL. So a shape of that kind answering two rows on some runs and one on
+others is a defect however it is dressed, and the first job is to make it
+reproducible rather than to widen the tolerance.
+
+**Class 3 is the exception and it stays one.** `ORDER BY <partial key> LIMIT n`
+really does return different rows run to run — measured on one binary, one
+process, consecutive repetitions of `SELECT id FROM typemx ORDER BY g LIMIT 5`
+on the single-process arm — because WHICH members of a tie group survive the
+LIMIT is arbitrary. That is gated by count, or by comparing the LIMIT-stripped
+result, exactly as class 3 says; it is not what this amendment is about.
 
 #1058 was filed as "a UNION with a NULL arm over a STRING column drops the NULL
 row on some runs of the DAG arms", measured 6/8 on one distributed arm and 2/8

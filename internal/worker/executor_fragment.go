@@ -1998,6 +1998,14 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 // next iteration's Filter execution would overwrite the same selBuf and
 // corrupt the previously-stored batch's Sel — a Q07-style bug documented
 // at executor_stage.go:applyPostFilter.
+//
+// LIKE runBreakerConsumeParallel BEFORE #1058, this consumes into a sink it
+// does not Init: it drives the breakers at index > 0 of a multi-breaker
+// fragment, which the planner emits for no query today (see
+// runFragmentWithBreakers) and only tests reach. A `HashAggregate` here would
+// hold exactly #1058's state, and what covers it is `NewHashAggregate`'s
+// `strNullGroupIdx: -1` — the representation, not the call. Give this site the
+// Init too if the planner ever emits that shape.
 func drainThroughBreaker(ctx context.Context, src exec.Source, xform func(*batch.RecordBatch) (*batch.RecordBatch, error), ops []exec.UnaryOperator, sink exec.Sink) error {
 	consume := func(ctx context.Context, b *batch.RecordBatch) error {
 		if b.Sel != nil {

@@ -1303,7 +1303,7 @@ first column of that bare name: the trailing key was never applied and the
 rows came back in the join's emission order. Both distributed paths were
 already correct.
 
-Through v0.18.64 the distributed paths had the mirror of that defect for a
+Through v0.18.68 the distributed paths had the mirror of that defect for a
 QUALIFIED term beside a duplicated output name: only the single-process
 engines resolved such a term to a select-list POSITION, so on the stage DAG
 `SELECT DISTINCT a.order_id AS amount, b.amount FROM items a JOIN items b ON
@@ -1327,7 +1327,7 @@ ORDER BY 1, 2 DESC
 SELECT * FROM orders UNION SELECT * FROM orders WHERE id < 3 ORDER BY 3 DESC, 1
 ```
 
-Through v0.18.64 a set operation lost those positions and the result column
+Through v0.18.68 a set operation lost those positions and the result column
 names were the only address left. Where two of them were the same string the
 consequences were a wrong ORDER on every path (the trailing key silently
 unapplied) and, on the distributed paths, a wrong ROW COUNT and wrong VALUES:
