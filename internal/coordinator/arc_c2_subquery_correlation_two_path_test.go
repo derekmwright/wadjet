@@ -678,6 +678,50 @@ func c2Cells() []c2Cell {
 			sql:    `SELECT id, (SELECT COUNT(*) OVER ()) AS v FROM c2users u ORDER BY id`,
 			want:   `id,v | 1,1 | 2,1 | 3,1`,
 			routes: a2Routes{ScalarProjection: 1}},
+		// --- AN UNCORRELATED NESTED SUBQUERY BESIDE AN AGGREGATE TYPES FINE
+		// (round-3 review, B1). The refusal exists for a nested subquery whose
+		// own body names the ENCLOSING query — that one has no plan-time type.
+		// An ordinary one does, and the correlation is in the WHERE, which the
+		// re-run substitutes.
+		{name: "94_an_aggregate_beside_an_uncorrelated_nested_subquery",
+			sql: `SELECT id, (SELECT SUM(x.visits) + (SELECT MAX(y.id) FROM c2users y) ` +
+				`FROM c2users x WHERE x.id <= u.id) AS v FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,103 | 2,145 | 3,345`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "95_the_same_with_the_nested_subquery_inside_the_aggregate",
+			sql: `SELECT id, (SELECT SUM(x.visits + (SELECT MAX(y.id) FROM c2users y)) ` +
+				`FROM c2users x WHERE x.id <= u.id) AS v FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,103 | 2,148 | 3,351`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "96_the_int32_spelling",
+			sql: `SELECT id, (SELECT SUM(x.id) + (SELECT MAX(y.id) FROM c2users y) ` +
+				`FROM c2users x WHERE x.id <= u.id) AS v FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,4 | 2,6 | 3,9`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "97_the_EXISTS_position",
+			sql: `SELECT id FROM c2users u WHERE EXISTS (SELECT SUM(x.visits) + ` +
+				`(SELECT MAX(y.id) FROM c2users y) FROM c2users x WHERE x.id <= u.id) ORDER BY id`,
+			want:   `id | 1 | 2 | 3`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "98_a_MAX_beside_a_MIN",
+			sql: `SELECT id, (SELECT MAX(x.visits) + (SELECT MIN(y.id) FROM c2users y) ` +
+				`FROM c2users x WHERE x.visits <= u.visits) AS v FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,101 | 2,43 | 3,201`,
+			routes: a2Routes{Correlated: 1}},
+		// The discriminator: the nested subquery NAMES the enclosing query, so
+		// the item has no type until the outer row is known and the refusal
+		// stands (round-2 review, P4's shapes).
+		{name: "99_the_nested_subquery_names_the_enclosing_query", // PostgreSQL: 343, 344, 345
+			sql: `SELECT id, (SELECT SUM(x.visits) + (SELECT u.id) FROM c2users x) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			wantErr: `aggregate beside a nested subquery`,
+			routes:  a2Routes{Correlated: 1}},
+		{name: "100_the_same_inside_the_aggregate", // PostgreSQL: 642, 468, 942
+			sql: `SELECT id, (SELECT SUM(x.visits + (SELECT u.visits)) FROM c2users x) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			wantErr: `aggregate beside a nested subquery`,
+			routes:  a2Routes{Correlated: 1}},
+
 	}
 }
 

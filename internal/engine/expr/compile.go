@@ -511,7 +511,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 							return nil, refusal
 						}
 						// A body the rebuild cannot write back out (#1044 round 3).
-						if refusal := refuseUnrebuildableBody("IN", sq.SQL, info, refs); refusal != nil {
+						if refusal := refuseUnrebuildableBody("IN", sq.SQL, info, refs, ctx.outerTables); refusal != nil {
 							return nil, refusal
 						}
 						if info != nil {
@@ -683,7 +683,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 					return nil, refusal
 				}
 				// A body the rebuild cannot write back out (#1044 round 3).
-				if refusal := refuseUnrebuildableBody("scalar", n.SQL, info, refs); refusal != nil {
+				if refusal := refuseUnrebuildableBody("scalar", n.SQL, info, refs, ctx.outerTables); refusal != nil {
 					return nil, refusal
 				}
 				if info != nil {
@@ -748,7 +748,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 					return nil, refusal
 				}
 				// A body the rebuild cannot write back out (#1044 round 3).
-				if refusal := refuseUnrebuildableBody("EXISTS", n.SQL, info, refs); refusal != nil {
+				if refusal := refuseUnrebuildableBody("EXISTS", n.SQL, info, refs, ctx.outerTables); refusal != nil {
 					return nil, refusal
 				}
 				if info != nil {

@@ -835,12 +835,13 @@ func refuseOuterLevelAggregate(kind, sql string, outerTables map[string]bool) er
 //
 //   - a SET OPERATION: RebuildSQL has no arm for info.Union, so the rebuilt
 //     text is not the statement the user wrote.
-//   - a SELECT ITEM holding an AGGREGATE beside a nested scalar SUBQUERY: the
-//     item has no plan-time type, because the nested subquery's type is the
-//     enclosing row's, so the declaration falls to FLOAT64 and an exact
-//     accumulator's DECIMAL cannot be stored in it — the #361 silent-write
-//     guard, reaching the client as a generic 42000 naming no subquery.
-//     See plansql.AggregateBesideANestedSubquery for the measurements.
+//   - a SELECT ITEM holding an AGGREGATE beside a nested scalar SUBQUERY THAT
+//     NAMES THE ENCLOSING QUERY: the nested subquery's value is the outer
+//     row's, so the item has no plan-time type. The refusal is on that SHAPE
+//     and not on the declaration the item would get — a COUNT would fit the
+//     default and answer, and is refused with the accumulators that cannot be
+//     stored in it. See plansql.AggregateBesideANestedSubquery, which carries
+//     the per-accumulator measurements and the uncorrelated case it excludes.
 type UnrebuildableBodyError struct {
 	Kind   string
 	Reason string
@@ -868,7 +869,7 @@ func (e *UnrebuildableBodyError) SQLState() string { return "0A000" }
 // refuseUnrebuildableBody answers the error when a correlated subquery's body
 // is one the rebuild cannot render, and nil otherwise.
 func refuseUnrebuildableBody(kind, sql string, info *plansql.SelectInfo,
-	refs []plansql.OuterRef) error {
+	refs []plansql.OuterRef, outerTables map[string]bool) error {
 	if len(refs) == 0 {
 		return nil
 	}
@@ -876,10 +877,10 @@ func refuseUnrebuildableBody(kind, sql string, info *plansql.SelectInfo,
 	case plansql.HoldsSetOperation(info):
 		return &UnrebuildableBodyError{Kind: kind, SQL: sql, Refs: refs,
 			Reason: "its body is a SET OPERATION, which the rebuild renders no arm for"}
-	case plansql.AggregateBesideANestedSubquery(sql):
+	case plansql.AggregateBesideANestedSubquery(sql, outerTables):
 		return &UnrebuildableBodyError{Kind: kind, SQL: sql, Refs: refs,
-			Reason: "a SELECT item holds an aggregate beside a nested subquery, which leaves " +
-				"the item with no type until the outer row is known"}
+			Reason: "a SELECT item holds an aggregate beside a nested subquery that names the " +
+				"enclosing query, which leaves the item with no type until the outer row is known"}
 	}
 	return nil
 }

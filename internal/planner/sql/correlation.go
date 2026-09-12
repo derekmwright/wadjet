@@ -1600,14 +1600,23 @@ func HoldsSetOperation(info *SelectInfo) bool {
 // review, P4).
 //
 // AggregateBesideANestedSubquery reports whether any SELECT ITEM of a
-// subquery's body holds BOTH an aggregate call and a nested scalar subquery.
-// Such an item cannot be typed when the plan is made: the nested subquery's
-// own type is the enclosing row's, which the declaration walk cannot see, so
-// the item falls to the FLOAT64 default — and a per-row re-run then computes
-// an EXACT accumulator, whose DECIMAL is a rendered string the FLOAT64 vector
-// refuses (`batch: cannot store string into FLOAT64 vector`, the #361
-// silent-write guard, reaching the client as SQLSTATE 42000 with no mention of
-// the subquery).
+// subquery's body holds BOTH an aggregate call and a nested scalar subquery
+// THAT NAMES THE ENCLOSING QUERY. Such an item cannot be typed when the plan
+// is made: the nested subquery's own type is the enclosing row's, which the
+// declaration walk cannot see, so the item falls to the FLOAT64 default — and
+// a per-row re-run then computes an EXACT accumulator, whose DECIMAL is a
+// rendered string the FLOAT64 vector refuses (`batch: cannot store string into
+// FLOAT64 vector`, the #361 silent-write guard, reaching the client as
+// SQLSTATE 42000 with no mention of the subquery).
+//
+// THE OUTER REFERENCE IS THE WHOLE CONDITION, and asking only "an aggregate
+// beside any nested subquery" took seven shapes main answers exactly as
+// PostgreSQL 17.11 (round-3 review, B1). An UNCORRELATED nested subquery types
+// perfectly well — `(SELECT SUM(x.visits) + (SELECT MAX(y.id) FROM c2users y)
+// FROM c2users x WHERE x.id <= u.id)` is 103, 145, 345 on both engines — and
+// the correlation there sits in the WHERE, which the re-run substitutes. Only
+// a nested subquery whose own body names the enclosing query leaves the item
+// without a type.
 //
 // Measured on PostgreSQL 17.11 and this engine: `(SELECT SUM(x.visits +
 // (SELECT u.id)) FROM x)` is 345, 348, 351 there and the guard here, while
@@ -1617,10 +1626,19 @@ func HoldsSetOperation(info *SelectInfo) bool {
 // gap; both are refused, by name, rather than one silently mistyped and the
 // other failing on an internal invariant.
 //
+// THE PREDICATE IS THE SHAPE, NOT THE DECLARATION, and saying otherwise
+// described only part of what it takes (round-3 review, P3). `COUNT(x.id +
+// (SELECT u.id))` accumulates an int64 the FLOAT64 box holds, and `MIN(x.name
+// || (SELECT u.name))` has no numeric declaration at all: both would answer
+// PostgreSQL's values, and both are refused beside the accumulators that
+// cannot be stored. Typing the item per accumulator is what would let them
+// through; until then the untyped item is refused whatever it holds. All four
+// are 0A000 at `bf99c56c` too, so nothing right is lost relative to main.
+//
 // Only SELECT items are asked: the declaration that matters is the block's
 // OUTPUT, and an aggregate in a HAVING beside a subquery (`HAVING SUM(x.v) >
 // (SELECT u.id)`) types nothing the caller reads and answers today.
-func AggregateBesideANestedSubquery(subquerySQL string) bool {
+func AggregateBesideANestedSubquery(subquerySQL string, outerTables map[string]bool) bool {
 	parsed, err := Parse(subquerySQL)
 	if err != nil {
 		return false
@@ -1634,23 +1652,41 @@ func AggregateBesideANestedSubquery(subquerySQL string) bool {
 		if n == nil {
 			continue
 		}
-		if len(FindAllAggregates(n)) > 0 && holdsSubqueryNode(n) {
-			return true
+		if len(FindAllAggregates(n)) == 0 {
+			continue
+		}
+		for _, sub := range nestedSubqueries(n) {
+			if refs, err := FindCorrelatedRefs(sub, outerTables); err == nil && len(refs) > 0 {
+				return true
+			}
 		}
 	}
 	return false
 }
 
+// nestedSubqueries lists the SQL of every scalar subquery under n.
+func nestedSubqueries(n Node) []string {
+	var out []string
+	collectSubqueryNode(n, func(sq *SubqueryNode) { out = append(out, sq.SQL) })
+	return out
+}
+
 // holdsSubqueryNode reports whether a scalar subquery appears anywhere under n.
 func holdsSubqueryNode(n Node) bool {
 	found := false
+	collectSubqueryNode(n, func(*SubqueryNode) { found = true })
+	return found
+}
+
+// collectSubqueryNode calls f for every scalar subquery under n.
+func collectSubqueryNode(n Node, f func(*SubqueryNode)) {
 	var walk func(Node)
 	walk = func(x Node) {
-		if found || x == nil {
+		if x == nil {
 			return
 		}
-		if _, ok := x.(*SubqueryNode); ok {
-			found = true
+		if sq, ok := x.(*SubqueryNode); ok {
+			f(sq)
 			return
 		}
 		switch e := x.(type) {
@@ -1725,5 +1761,4 @@ func holdsSubqueryNode(n Node) bool {
 		}
 	}
 	walk(n)
-	return found
 }
