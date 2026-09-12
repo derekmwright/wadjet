@@ -645,17 +645,19 @@ well as its `WHERE`:
 SELECT (SELECT u.x FROM other y WHERE y.id = 1) FROM (SELECT id AS x FROM t) u
 ```
 
-Four shapes are refused (`0A000`) instead. A `GROUP BY` or `ORDER BY` term
-whose SUBSTITUTED rendering is a bare numeric literal — `GROUP BY u.id` with
-the outer row's 1 in it — would read as a select-list POSITION rather than as
-a value; every other term in those two clauses is written into the re-run and
-answers. A body that is a SET OPERATION has no arm in the rebuild, and neither
-has a `LATERAL` body's outer reference, which is decorrelated into a join with
-nothing left to respell. A SELECT item holding an aggregate beside a nested
-subquery THAT NAMES THE ENCLOSING QUERY is refused for a third reason — the
-nested subquery's value is the outer row's, so the item has no type until that
-row is known; a nested subquery naming nothing outside its own block types
-normally and answers.
+A `GROUP BY` or `ORDER BY` term that substitutes to a plain number is written
+as a CAST — `GROUP BY u.id` with the outer row's 1 in it becomes `GROUP BY
+CAST(1 AS BIGINT)` — because a bare number in those two clauses is a
+select-list POSITION and not a value.
+
+Three shapes are refused (`0A000`) instead. A body that is a SET OPERATION has
+no arm in the rebuild, and neither has a `LATERAL` body's outer reference,
+which is decorrelated into a join with nothing left to respell. A SELECT item
+holding an aggregate beside a nested subquery THAT NAMES THE ENCLOSING QUERY
+is the third — the nested subquery's value is the outer row's, so the item has
+no type until that row is known. A nested subquery naming nothing outside its
+own block answers; its item's declared TYPE is still the engine's default
+where PostgreSQL declares `numeric`, which is a separate gap.
 
 A term written `ORDER BY (SELECT 1)` is unaffected by any of this: only an
 integer literal WRITTEN IN THE CLAUSE is a select-list position, so a subquery

@@ -1125,20 +1125,26 @@ PostgreSQL's 1, 2, 3, on all five arms, before and after the rewrite alike.
 HAVING from their own trees, each item keeping its recorded text when the
 rewrite does not change it.
 
-GROUP BY, ORDER BY and a JOIN's ON condition are substituted too, and what is
-refused there is the ORDINAL TRAP and nothing wider. `ORDER BY u.id` with the
-outer row's 1 in it renders `ORDER BY 1`, which both engines read as the FIRST
-SELECT ITEM — so a term whose SUBSTITUTED rendering is a BARE NUMERIC LITERAL
-is refused (`expr.UnsubstitutedOuterRefError`, 0A000), because running it is
-the silent answer §1c refuses at the uncorrelated evaluators. Every other term
-is written into the rebuild and answers: `ORDER BY x.id * (u.id - 2)` renders
-`x.id * (1 - 2)`, an expression no engine reads as a position. Refusing on the
-PRESENCE of an outer reference instead took four shapes main answers exactly
-as PostgreSQL does (round-3 review, P4), and the trap the refusal names was
-never about presence. A sort with NO SLICE is immaterial for the same reason:
-without a LIMIT or an OFFSET the block returns the same rows in any order, and
-a scalar subquery, an EXISTS and an IN set all read a set rather than a
-sequence, so such a term is left as the parser recorded it.
+GROUP BY, ORDER BY and a JOIN's ON condition are substituted too — SIX clauses
+in all, and every one of them is written from its own tree. **THE ORDINAL TRAP
+IS A RENDERING PROBLEM, AND THE RENDERING IS OURS TO CHOOSE.** `ORDER BY u.id`
+with the outer row's 1 in it would render `ORDER BY 1`, which both engines read
+as the FIRST SELECT ITEM, so `plansql.ClauseTermText` writes that value as
+`CAST(1 AS BIGINT)` instead: measured statement for statement on PostgreSQL
+17.11 and on this engine, a cast is a constant expression on both and a
+select-list position on neither, where `(1)` is a position on both and is
+therefore no repair. A rendering that is already an expression (`x.id * (1 -
+2)`), a quoted string or a rendered DECIMAL is written as it is.
+
+Two narrower dispositions were tried first and are recorded because each was
+wider than the trap: refusing on the PRESENCE of an outer reference in those
+clauses took four shapes main answers exactly as PostgreSQL does (round-3
+review, P4), and refusing on the RENDERING took three more (round-4 review,
+P2 — `(SELECT COUNT(*) FROM x GROUP BY u.id, x.id ORDER BY x.id LIMIT 1)` is
+1, 1, 1 on PostgreSQL and at main). `expr.UnsubstitutedOuterRefError` (0A000)
+survives as the POST-CONDITION of the rendering: it asks its question of the
+text the rebuild writes, reports nothing today, and refuses loudly rather than
+silently reading a position if a rendering ever becomes bare again.
 
 **The refusal is only as wide as the walk that FINDS the reference**, and for
 one round it was narrower than this paragraph said. `findCorrelatedRefs` read
@@ -1208,7 +1214,7 @@ each one does. The cell numbers are
 | a JOIN's ON condition inside a correlated subquery | the enclosing query | kept; walked and substituted | 108 |
 | a correlated subquery whose BODY is a SET OPERATION | the enclosing query | REFUSED 0A000 — `RebuildSQL` renders one select and has no arm for a union | 84, 85 |
 | a SELECT item holding an AGGREGATE beside a nested subquery that NAMES THE ENCLOSING QUERY | the enclosing query | REFUSED 0A000 — the item has no type until the outer row is known | 86, 87, 88 |
-| a SELECT item holding an AGGREGATE beside an UNCORRELATED nested subquery | the nested block itself | answers — the item types normally | 94–98 |
+| a SELECT item holding an AGGREGATE beside an UNCORRELATED nested subquery | the nested block itself | answers, as main answers it — the item's DECLARATION is still the FLOAT64 default where PostgreSQL says `numeric` (#1018, pinned on the wire) | 94–98 |
 | an ORDER BY term of the ENCLOSING statement, `ORDER BY (SELECT 1)` | nothing — a constant sort | kept: only a literal WRITTEN in the clause is an ordinal | 71–80a |
 | a GROUP BY term of the ENCLOSING statement, `GROUP BY (SELECT 1)` | nothing — a constant grouping | kept: PostgreSQL's 42803 on the ungrouped column, and its answer where the list is all aggregates | 101–107 |
 | a LATERAL body | the enclosing query | kept; REFUSED 0A000 | 54 |
@@ -1230,7 +1236,7 @@ before → after, on all five arms:
 | an outer reference in a correlated subquery's HAVING | NULL | 342 | 342 |
 | a FROM-less subquery nested in a correlated subquery's SELECT list / IN set / HAVING / expression, two and three deep, over a CTE | 0A000 | PostgreSQL's | — |
 | the same in an ORDER BY term, a GROUP BY term, a LATERAL body | 0A000 | substituted / 0A000 on the ordinal rendering / 0A000 | answers |
-| an aggregate beside an UNCORRELATED nested subquery, 7 spellings | answers | answers | same |
+| an aggregate beside an UNCORRELATED nested subquery, 7 spellings | answers, OID 701 | answers, OID 701 | answers, `numeric` |
 | `GROUP BY (SELECT 1)`, 7 spellings | 42803 | 42803 | 42803 |
 | an aggregate whose argument names only the enclosing query | 0A000 / `#277 schemaless batch` | 0A000 | 42803 |
 | a declined clause on a FROM-less body (ORDER BY, LIMIT 1, a true WHERE) | NULL | 1,2,3 / 1,2,3 / NULL,2,3 | same |

@@ -1627,22 +1627,30 @@ func aggArgRefs(n Node, outerTables, inner map[string]bool) (outer []OuterRef, h
 }
 
 // OuterRefsInUnsubstitutedClauses reports the outer references a per-row
-// re-run leaves in place: those in a GROUP BY or an ORDER BY term.
+// re-run leaves in place: those in a GROUP BY or an ORDER BY term whose
+// SUBSTITUTED rendering is still a bare numeric literal.
 //
-// RebuildSQLForRerun renders the SELECT list, the WHERE and the HAVING from
-// their own trees and re-emits everything else as the text the parser
-// recorded. GROUP BY and ORDER BY are deliberately left there — a term with
-// the outer row's value substituted renders as a bare literal, and both
-// engines read `ORDER BY 1` as the FIRST SELECT ITEM rather than as the number
-// one — so a reference in either clause survives the rebuild and would be
-// bound by the qualifier strip to the inner relation's own column of that
-// name. The callers refuse instead.
+// RebuildSQLForRerun renders SIX clauses from their own trees — the SELECT
+// list, the WHERE, the HAVING, the GROUP BY, the ORDER BY and each JOIN's ON
+// condition — and re-emits the rest as the text the parser recorded. The one
+// rendering a GROUP BY or an ORDER BY cannot carry is a bare numeric literal,
+// because both engines read `ORDER BY 1` as the FIRST SELECT ITEM rather than
+// as the number one; ClauseTermText writes such a value as a CAST instead, so
+// this function is that rendering's POST-CONDITION and reports nothing today.
+// It stays because a term it did report would otherwise be bound by the
+// qualifier strip to the inner relation's own column of that name, which is
+// the silent answer §1c refuses at the uncorrelated evaluators.
 //
-// `ORDER BY x.id * u.id` is the shape that makes it worth refusing rather than
-// running: over this arc's fixture it answers PostgreSQL's rows, because
-// multiplying by a positive constant does not change the order — and
-// `ORDER BY x.id * (u.id - 2)`, whose factor is negative for the first outer
-// row, answers 200 there where the strip's ordering answers 100.
+// An ORDER BY term is read only when the block has a LIMIT or an OFFSET: a
+// sort with no slice cannot change which rows a scalar subquery, an EXISTS or
+// an IN set reads.
+//
+// `ORDER BY x.id * u.id` is the shape that makes the question worth asking of
+// the RENDERING rather than of the reference: over this arc's fixture it
+// answers PostgreSQL's rows, because multiplying by a positive constant does
+// not change the order — and `ORDER BY x.id * (u.id - 2)`, whose factor is
+// negative for the first outer row, answers 200 there where the strip's
+// ordering answers 100.
 func OuterRefsInUnsubstitutedClauses(info *SelectInfo, outerTables map[string]bool,
 	rewrite func(Node) Node) []OuterRef {
 	if info == nil || len(outerTables) == 0 {
@@ -1726,12 +1734,21 @@ func HoldsSetOperation(info *SelectInfo) bool {
 //
 // THE OUTER REFERENCE IS THE WHOLE CONDITION, and asking only "an aggregate
 // beside any nested subquery" took seven shapes main answers exactly as
-// PostgreSQL 17.11 (round-3 review, B1). An UNCORRELATED nested subquery types
-// perfectly well — `(SELECT SUM(x.visits) + (SELECT MAX(y.id) FROM c2users y)
-// FROM c2users x WHERE x.id <= u.id)` is 103, 145, 345 on both engines — and
-// the correlation there sits in the WHERE, which the re-run substitutes. Only
-// a nested subquery whose own body names the enclosing query leaves the item
-// without a type.
+// PostgreSQL 17.11 (round-3 review, B1). `(SELECT SUM(x.visits) + (SELECT
+// MAX(y.id) FROM c2users y) FROM c2users x WHERE x.id <= u.id)` is 103, 145,
+// 345 on both engines, with the correlation in the WHERE, which the re-run
+// substitutes — so the shape is ANSWERED AS MAIN ANSWERS IT.
+//
+// That is not the same as saying the item is typed. It is not: the
+// declaration walk sees through neither the aggregate nor the nested
+// subquery, so the item takes the FLOAT64 default where PostgreSQL 17.11
+// declares `numeric`, and past 2^53 the float64 arithmetic answers
+// 1.0000000000000004e+16 for PostgreSQL's 10000000000000003 — identically at
+// `bf99c56c`, and the same statement with NO nested subquery is exact
+// (round-4 review, B2). The declaration is #1018 / ADR-0024's family, pinned
+// fail-on-agree in pgwire's wire cell, and it is not what this predicate is
+// about: only a nested subquery whose own body NAMES THE ENCLOSING QUERY
+// makes the item unwritable, because its value is the outer row's.
 //
 // Measured on PostgreSQL 17.11 and this engine: `(SELECT SUM(x.visits +
 // (SELECT u.id)) FROM x)` is 345, 348, 351 there and the guard here, while

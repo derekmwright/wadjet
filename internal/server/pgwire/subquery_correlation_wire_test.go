@@ -132,6 +132,24 @@ func TestASubqueryReadsTheRowItIsCorrelatedOnOnTheWire(t *testing.T) {
 			sql: `SELECT id, (SELECT t.visits FROM users x JOIN users t ON t.name = u.name ` +
 				`WHERE x.id = 1) AS v FROM users u ORDER BY id`,
 			oids: []uint32{23, 20}, text: `1,100|2,42|3,200`},
+		// The item an UNCORRELATED nested subquery sits in is NOT typed: the
+		// declaration walk cannot see through the nested subquery, so the
+		// item falls to the FLOAT64 default where PostgreSQL 17.11 declares
+		// `numeric` — identical at main, and the same statement with no
+		// nested subquery is exact. Pinned fail-on-agree: the day the
+		// declaration walk types it, this cell fails and the pin is deleted.
+		{name: "an_aggregate_beside_an_uncorrelated_nested_subquery",
+			sql: `SELECT id, (SELECT SUM(x.visits) + (SELECT MAX(y.id) FROM users y) ` +
+				`FROM users x WHERE x.id <= u.id) AS v FROM users u ORDER BY id`,
+			oids: []uint32{23, 1700}, text: `1,103|2,145|3,345`,
+			pinOIDs: []uint32{23, 701},
+			pinWhy: "the item holds an aggregate beside a nested scalar subquery, and the " +
+				"declaration walk types neither through the other, so the item takes the " +
+				"FLOAT64 default where PostgreSQL declares numeric (#1018 / ADR-0024's " +
+				"family). Identical at main; past 2^53 the float64 arithmetic answers " +
+				"1.0000000000000004e+16 for PostgreSQL's 10000000000000003, and the same " +
+				"statement with NO nested subquery is exact",
+		},
 		// --- the controls -------------------------------------------------
 		{name: "ctl_an_uncorrelated_window_in_a_subquery",
 			sql: `SELECT id,(SELECT 1+SUM(x.id) OVER () FROM users x WHERE x.id=1) AS v ` +

@@ -194,3 +194,40 @@ func TestAStarWithNoRelationIsRefused(t *testing.T) {
 		t.Errorf("SELECT * FROM t: %v", err)
 	}
 }
+
+// A SUBSTITUTED GROUP BY OR ORDER BY TERM NEVER RENDERS AS AN ORDINAL
+// (round-4 review, P2). The per-row re-run writes the outer row's value into
+// those two clauses, and a bare numeric literal there is a select-list
+// POSITION to this engine and to PostgreSQL 17.11 alike. ClauseTermText is the
+// one place that rendering is chosen, and a CAST is the rendering that is a
+// constant on both engines and a position on neither — `(1)` is a position on
+// both, which is why parenthesising is not the repair.
+func TestAClauseTermNeverRendersAsAnOrdinal(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"1", "CAST(1 AS BIGINT)"},
+		{"0", "CAST(0 AS BIGINT)"},
+		{"-1", "CAST(-1 AS BIGINT)"},
+		{"+2", "CAST(+2 AS BIGINT)"},
+		{"100", "CAST(100 AS BIGINT)"},
+		{"(1)", "CAST((1) AS BIGINT)"},
+		{" 1 ", "CAST(1 AS BIGINT)"},
+		{"1.5", "CAST(1.5 AS DOUBLE PRECISION)"},
+		{"-0.25", "CAST(-0.25 AS DOUBLE PRECISION)"},
+		// Everything else is written as it is: an expression, a quoted string,
+		// a rendered DECIMAL, a column, a cast that is already one.
+		{"x.id * (1 - 2)", "x.id * (1 - 2)"},
+		{"'alice'", "'alice'"},
+		{"'5.25'", "'5.25'"},
+		{"x.id", "x.id"},
+		{"CAST(1 AS BIGINT)", "CAST(1 AS BIGINT)"},
+		{"1 + 0", "1 + 0"},
+		{"", ""},
+	} {
+		if got := ClauseTermText(tc.in); got != tc.want {
+			t.Errorf("ClauseTermText(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		if isBareNumericLitText(ClauseTermText(tc.in)) {
+			t.Errorf("ClauseTermText(%q) still renders as a select-list position", tc.in)
+		}
+	}
+}

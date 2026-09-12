@@ -2107,25 +2107,25 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      re-run to substitute OUTSIDE the WHERE clause, which needs a faithful
      rendering of the OVER clause; ADR-0021 §1m states what that costs.
 
-   - **A correlated subquery whose GROUP BY or ORDER BY term SUBSTITUTES TO A
-     BARE NUMERIC LITERAL, one whose body is a SET OPERATION or a LATERAL
-     body, and one holding an aggregate the ENCLOSING query owns, are REFUSED
+   - **A correlated subquery whose body is a SET OPERATION or a LATERAL body,
+     and one holding an aggregate the ENCLOSING query owns, are REFUSED
      (0A000) where PostgreSQL answers.** (Added 2026-09-12, arc C2 round 2,
-     #1044; narrowed in round 4.) A correlated subquery this engine does not
+     #1044; narrowed in rounds 4 and 5, which left the GROUP BY / ORDER BY
+     half with no members.) A correlated subquery this engine does not
      decorrelate is re-run per outer row by substituting the outer values into
      its text. The substitution reaches the SELECT list, the WHERE, the
      HAVING, the GROUP BY, the ORDER BY and each JOIN's ON condition, every
      one of which the rebuild renders from its own tree. In a GROUP BY or an
-     ORDER BY it declines exactly one rendering: a term that substitutes to a
-     BARE NUMERIC LITERAL, because both engines read `ORDER BY 1` as the FIRST
-     SELECT ITEM rather than as the number one. `ORDER BY x.id * (u.id - 2)`
-     renders `x.id * (1 - 2)` and answers; `ORDER BY u.id` under a `LIMIT`
-     renders `ORDER BY 1` and is refused. Refusing on the PRESENCE of an outer
-     reference in those clauses instead was wider than the trap and took four
-     shapes main answers exactly as PostgreSQL does. A term in an ORDER BY
-     with no LIMIT or OFFSET is left as written: a scalar subquery, an EXISTS
-     and an IN set read a set rather than a sequence, so the sort cannot
-     change the answer. The rebuild has no arm at all for a body that is a SET
+     ORDER BY one RENDERING cannot be written — a bare numeric literal, which
+     both engines read as the FIRST SELECT ITEM rather than as the number one
+     — and the value is written as a CAST instead (`ORDER BY CAST(1 AS
+     BIGINT)`), which is a constant expression on PostgreSQL 17.11 and here
+     and a position on neither. Nothing in those two clauses is refused for
+     that reason any more: refusing on the PRESENCE of an outer reference took
+     four shapes main answers exactly as PostgreSQL does, and refusing on the
+     rendering took three more (`(SELECT COUNT(*) FROM x GROUP BY u.id, x.id
+     ORDER BY x.id LIMIT 1)` is 1, 1, 1 on both). The refusal survives as the
+     rendering's post-condition. The rebuild has no arm at all for a body that is a SET
      OPERATION (`(SELECT u.id FROM x WHERE x.id=1 UNION ALL SELECT u.id FROM y
      WHERE y.id=99)` is 0A000 where PostgreSQL answers 1, 2, 3). A SELECT item
      holding an aggregate beside a NESTED subquery THAT NAMES THE ENCLOSING

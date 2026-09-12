@@ -692,18 +692,23 @@ func refuseWindowBorneCorrelation(kind, sql string, info *plansql.SelectInfo,
 //
 // rerunSQL is the ONE text a correlated re-run runs, for all three constructs.
 // It reads the outer row's values, rewrites them into every clause
-// plansql.RebuildSQLForRerun re-emits from an AST — the SELECT list, the WHERE
-// and the HAVING — and then asks whether the rebuilt statement still names a
+// plansql.RebuildSQLForRerun re-emits from an AST — the SELECT list, the
+// WHERE, the HAVING, the GROUP BY, the ORDER BY and each JOIN's ON condition,
+// six of them — and then asks whether the rebuilt statement still names a
 // relation it does not read.
 //
 // That last question is ADR-0021 §1c's own guard, applied at the site §1c did
 // not cover. §1c put it on the UNCORRELATED evaluators, because a subquery
 // misclassified as uncorrelated runs text that still names the outer relation
 // and the qualifier strip then answers a confident constant. A CORRELATED
-// re-run can reach the same place from the other direction: a reference in a
-// clause the substitution does not rewrite — GROUP BY and ORDER BY, whose
-// substituted terms would read as ORDINALS — survives the rebuild, and running
-// it would be the same silent wrong answer. It is refused instead.
+// re-run can reach the same place from the other direction: a reference the
+// substitution does not rewrite survives the rebuild, and running it would be
+// the same silent wrong answer. It is refused instead. Every clause the
+// rebuild renders from an AST is now substituted, and a GROUP BY or ORDER BY
+// term whose rendering would be a bare numeric literal — the one thing those
+// two clauses read as a select-list POSITION — is written as a CAST
+// (plansql.ClauseTermText) rather than left behind, so what remains for that
+// refusal is the post-condition of the rendering.
 //
 // scope tells a ROW FIELD PATH from a lost correlation, exactly as it does for
 // the uncorrelated guard: `c_row.b` is a qualified reference whose qualifier
@@ -743,12 +748,15 @@ func rerunSQL(kind string, b *batch.RecordBatch, row int, refs []plansql.OuterRe
 // still names a relation it does not read — an outer reference the per-row
 // substitution could not reach.
 //
-// The reachable clauses are the SELECT list, the WHERE and the HAVING, each of
-// which the rebuild renders from its own AST. GROUP BY and ORDER BY are not,
-// because a substituted term there renders as a bare literal and both engines
-// read `GROUP BY 1` as the first SELECT ITEM rather than as the number one.
-// Running the statement anyway is the silent answer ADR-0021 §1c refuses at
-// the uncorrelated evaluators, so it is refused here too.
+// The reachable clauses are SIX: the SELECT list, the WHERE, the HAVING, the
+// GROUP BY, the ORDER BY and each JOIN's ON condition, each of which the
+// rebuild renders from its own AST. What a GROUP BY or ORDER BY term cannot
+// carry is one RENDERING — a bare numeric literal, which both engines read as
+// the first SELECT ITEM rather than as the number one — and
+// plansql.ClauseTermText writes such a value as a CAST instead, so this
+// reports only a rendering that is bare in spite of it. Running the statement
+// anyway is the silent answer ADR-0021 §1c refuses at the uncorrelated
+// evaluators, so it is refused here too.
 type UnsubstitutedOuterRefError struct {
 	Kind string
 	SQL  string
@@ -761,10 +769,11 @@ func (e *UnsubstitutedOuterRefError) Error() string {
 		names = append(names, r.Table+"."+r.Column)
 	}
 	return fmt.Sprintf("%s subquery is correlated on %s in a clause its per-row re-run "+
-		"cannot substitute — the rebuild renders the SELECT list, the WHERE and the HAVING "+
-		"from their own trees, and a GROUP BY or ORDER BY term substituted there would read "+
-		"as a select-list POSITION; this query has no distributed or single-process lowering "+
-		"for that correlation\n  subquery: %s",
+		"cannot substitute — the rebuild renders the SELECT list, the WHERE, the HAVING, "+
+		"the GROUP BY, the ORDER BY and each JOIN's ON condition from their own trees, and "+
+		"the substituted term still renders as a bare numeric literal, which a GROUP BY or "+
+		"an ORDER BY reads as a select-list POSITION; this query has no distributed or "+
+		"single-process lowering for that correlation\n  subquery: %s",
 		e.Kind, strings.Join(names, ", "), e.SQL)
 }
 
