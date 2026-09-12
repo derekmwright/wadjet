@@ -1476,21 +1476,43 @@ unaffected by the rename, and refusing on the PRESENCE of the list was ten cells
 right → refused.
 
 WHAT COUNTS AS A READ is the one walk's answer, not a second scan: a reference
-inside an AGGREGATE (`HAVING MAX(l.w) > 2`) or inside a WINDOW call
-(`SUM(l.w) OVER ()`), one in a LATER FROM item's body, one in the enclosing
-block's ORDER BY, and — through a star in the enclosing block — one block up.
+inside an AGGREGATE (`HAVING MAX(l.w) > 2`), inside a WINDOW call (its argument,
+PARTITION BY or ORDER BY), in a WHERE, a GROUP BY, a QUALIFY or a written ON,
+one in a LATER FROM item's body, one in the enclosing block's ORDER BY, and —
+through a star in the enclosing block — one block up.
 
 EACH POSITION IS KEYED ON WHAT THE REFERENCE RESOLVES TO, never on the name
-alone (amended 2026-09-12, round-5 review B1). A star republishes THIS lateral's
-names only when it is unqualified or qualified with this lateral's alias, so
-`SELECT u.*` over the outer relation is not a read of `l`'s list; and a sibling
-lateral that publishes its OWN column called `w` and reads it as `b.w` is
-reading its name, not this one's. Keyed on the name alone, those two positions
-refused twenty cells that PostgreSQL, main and the previous tip all answer — the
-same too-wide/too-narrow oscillation one walk was meant to end, one level down.
+alone and never on how it is QUALIFIED (amended 2026-09-12, round-5 review B1;
+corrected 2026-09-12, round-6 review B1/B2/B3 — the first correction swung to
+qualification, which is a different wrong answer). The three positions, as the
+code asks them:
 
-A SORT TERM IS A READ (amended 2026-09-12, round-5 review B2, reversing this
-section's round-5 sentence). The reasoning for excluding it — a sort term
+* A STAR republishes THIS lateral's names only when it is unqualified or
+  qualified with this lateral's alias, so `SELECT u.*` over the outer relation
+  is not a read of `l`'s list;
+* A SIBLING FROM ITEM's reference counts when it is QUALIFIED with this
+  lateral's alias, or BARE in a sibling that is itself TABLE-LESS and publishes
+  no such name of its own — a bare name there can resolve to nothing else. A
+  sibling that publishes its own `w` is reading its own; a sibling with a FROM
+  clause may be reading that. Requiring qualification dropped
+  `…, LATERAL (SELECT w + 100 AS z) m` and answered four NULLs for PostgreSQL's
+  101..104, and `CASE WHEN w > 2 …` answered `0,0,0,0` for `0,0,1,1` — a wrong
+  VALUE, not a NULL. That sibling's OWN sort term is NOT asked: a one-row body's
+  sort is the identity whatever it names;
+* AN UNQUALIFIED SORT TERM in the enclosing block binds to the SELECT list's
+  OUTPUT columns first, as PostgreSQL binds it, so `SELECT u.total AS w … l(w)
+  ORDER BY w DESC` names that output column and never the list. Refusing it was
+  five shapes right → refused in BOTH sort directions over three outer columns.
+
+Keyed on the name alone, the star and sibling positions refused twenty cells
+that PostgreSQL, main and the previous tip all answer; keyed on qualification,
+the sibling position dropped three more. Every row of the seam — each position
+crossed with what a reference there can resolve to — is one cell of
+`TestC1FTheReadTestSeam` (`internal/coordinator/arc_c1_read_seam_two_path_test.go`),
+on five arms, so a new position is a row rather than a round.
+
+A SORT TERM THAT NAMES THE LIST IS A READ (amended 2026-09-12, round-5 review
+B2, reversing this section's round-5 sentence). The reasoning for excluding it — a sort term
 decides the order and never the values — holds only for a sort term that BINDS.
 This one does not bind: the rename is dropped on the lowered path, so
 `… l(w) ORDER BY l.w DESC` sorted on nothing and answered `1,1,2,2` for

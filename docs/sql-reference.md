@@ -859,13 +859,25 @@ longer than the body is SQLSTATE `42P10`; a list over a body whose SELECT list
 holds a `*` is `0A000` WHEN the query reads a name that list introduces, because
 the star's width is not known where the rename must be made and a LATERAL is run
 as a join on the column its correlated predicate names; a query that never
-mentions a renamed name is unaffected and answers. A read inside an aggregate or
-a window call counts, as does one in the enclosing `ORDER BY`, one in a later
-`LATERAL`'s body and one a star in the enclosing block republishes to the query
-above it. Each is keyed on what the reference RESOLVES to: `SELECT u.*` over the
-outer relation republishes that relation's names, not the list's, and a sibling
-`LATERAL` that publishes its own column of the same name is reading its own. The body's own `WHERE`, and a written `ON`, are predicates
-over the outer row and are applied above the projection.
+mentions a renamed name is unaffected and answers. A read inside an aggregate,
+a window call (its argument, `PARTITION BY` or `ORDER BY`), a `WHERE`, a
+`HAVING`, a `GROUP BY`, a `QUALIFY` or a written `ON` counts, as does one in the
+enclosing `ORDER BY`, one in a later `LATERAL`'s body and one a star in the
+enclosing block republishes to the query above it.
+
+Each position is keyed on what the reference RESOLVES to, not on how it is
+spelled. A star republishes this lateral's names only when it is unqualified or
+qualified with this lateral's alias, so `SELECT u.*` over the outer relation
+answers. In a later `LATERAL`'s body, a reference counts when it is qualified
+with this lateral's alias, or bare in a sibling that is itself table-less and
+publishes no such name — a bare name has nowhere else to come from there; a
+sibling that publishes its own column of that name is reading its own. That
+sibling's OWN `ORDER BY` is not asked: a one-row body's sort is the identity
+whatever it names. In the enclosing `ORDER BY`, an unqualified term that the
+block publishes as an OUTPUT alias binds to that output column and never to the
+list, as it does in PostgreSQL, so `SELECT u.total AS w … l(w) ORDER BY w`
+answers. The body's own `WHERE`, and a written `ON`, are predicates over the
+outer row and are applied above the projection.
 
 Such a body is computed as a projection or it is REFUSED (`0A000`) naming the
 reason. The classes that are refused are an aggregate, a `GROUP BY`, a
