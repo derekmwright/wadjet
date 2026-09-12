@@ -838,9 +838,10 @@ JOIN LATERAL (
 `SELECT *` over a lateral join publishes the OUTER relation's columns first
 and the lateral's after them, which is PostgreSQL's order.
 
-**A LATERAL body with NO FROM clause is a projection over the outer row.**
-It yields exactly one row per outer row whose columns are functions of that
-row, so it is computed as a projection and there is no join to run:
+**A LATERAL body with NO FROM clause that READS THE OUTER ROW is a projection
+over the outer row.** It yields exactly one row per outer row whose columns are
+functions of that row, so it is computed as a projection and there is no join
+to run:
 
 ```sql
 SELECT l.v FROM users u, LATERAL (SELECT u.id AS v) l          -- 1 | 2 | 3, bigint
@@ -853,12 +854,20 @@ own type, not text. The body's own `WHERE`, and a written `ON`, are predicates
 over the outer row and are applied above the projection.
 
 Such a body is computed as a projection or it is REFUSED (`0A000`) naming the
-reason; it is never answered approximately. The classes that are refused are an
-aggregate, a `GROUP BY`, a `HAVING`, a window function, `DISTINCT`, an
-`ORDER BY`, a `LIMIT`/`OFFSET`, a set operation, a `WITH` clause, a star, a
-subquery in the SELECT list — and, on an OUTER join, a body with a `WHERE` or
-an `ON` condition that does not fold to true, because those pad rows a
-projection cannot manufacture.
+reason. The classes that are refused are an aggregate, a `GROUP BY`, a
+`HAVING`, a window function, `DISTINCT`, an `ORDER BY`, a `LIMIT`/`OFFSET`, a
+set operation, a `WITH` clause, a star, a subquery in the SELECT list — and, on
+an OUTER join, a body with a `WHERE` or an `ON` condition that does not fold to
+true, because those pad rows a projection cannot manufacture.
+
+**A table-less body that reads NO column is not correlated**, whatever else it
+writes: nothing about it depends on the outer row, so it is answered as the
+one-row relation it is and none of the refusals above applies to it.
+`LATERAL (SELECT 7 AS v LIMIT 1)`, `LATERAL (SELECT DISTINCT 7 AS v)`,
+`LATERAL (SELECT COUNT(*) AS c)` and `LATERAL (SELECT ROW_NUMBER() OVER () AS v)`
+all answer. Inside such a body every column reference IS an outer reference —
+there is no relation of its own for a name to resolve to — except the body's
+own output names, which a sort or group term may spell.
 
 A query whose plan contains such a body is answered by the single-process
 engine: a table-less SELECT has no distributed stage, so the coordinator runs

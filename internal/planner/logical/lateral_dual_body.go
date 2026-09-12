@@ -27,10 +27,138 @@ import (
 // COUNT(*) was right throughout: the ROWS were produced and only the VALUES
 // were lost. The position is ADR-0021 §1l.
 
-// lateralDualBody reports whether a LATERAL body has no FROM clause at all —
-// the `NodeDual` shape BuildFromSelect gives a table-less SELECT.
+// lateralDualBody reports whether a LATERAL body is one this lowering owns: no
+// FROM clause at all — the `NodeDual` shape BuildFromSelect gives a table-less
+// SELECT — AND a body that actually READS THE OUTER ROW.
+//
+// BOTH HALVES ARE LOAD-BEARING. A table-less body that names no column is not
+// correlated at all: nothing about it depends on the outer row, the ordinary
+// build produces `Project(Dual, …)`, the cross join with its one row is exactly
+// PostgreSQL's answer, and it needs no lowering. Classifying by the FROM clause
+// alone took twelve such shapes — `(SELECT 7 AS v LIMIT 1)`, `(SELECT DISTINCT
+// 7 AS v)`, `(SELECT COUNT(*) AS c)`, `(SELECT ROW_NUMBER() OVER () AS v)`,
+// `(SELECT 1 AS v UNION ALL SELECT 2)`, `LEFT JOIN … ON false`, and the rest —
+// from PostgreSQL's own rows to a 0A000 refusal, 60 cells across five arms
+// (round-2 review, B1). The refusals are right for a CORRELATED body, where the
+// base answered NULLs; they are a loss of working SQL for an uncorrelated one.
+// The whole table is `arc_c1_body_class_two_path_test.go`.
 func lateralDualBody(info *plansql.SelectInfo) bool {
-	return info != nil && len(info.Tables) == 0 && len(info.Joins) == 0
+	return info != nil && len(info.Tables) == 0 && len(info.Joins) == 0 &&
+		lateralBodyReadsOuterRow(info)
+}
+
+// lateralBodyReadsOuterRow reports whether a TABLE-LESS body names any column.
+//
+// In such a body every column reference IS an outer reference: the body has no
+// relation of its own, so there is nothing else a name could resolve to. That
+// is what makes this test exact rather than a heuristic — it does not have to
+// know which relations are outside, only that a name is read at all.
+//
+// A SUBQUERY is opaque: its own column references belong to its own FROM.
+// `(SELECT (SELECT MAX(id) FROM t) AS v)` reads no outer column, and walking
+// into it would have said it does.
+//
+// The join's written ON is deliberately NOT part of this: `LEFT JOIN LATERAL
+// (SELECT 7 AS v) l ON u.id > 1` names the outer row in the JOIN, not in the
+// body, and PostgreSQL evaluates the body once per outer row regardless.
+func lateralBodyReadsOuterRow(info *plansql.SelectInfo) bool {
+	if info == nil {
+		return false
+	}
+	if info.Union != nil {
+		return lateralBodyReadsOuterRow(info.Union.Left) ||
+			lateralBodyReadsOuterRow(info.Union.Right)
+	}
+	// The body's OWN output names are not outer columns. A sort or a group term
+	// may name one — this parser resolves `ORDER BY 1` to the item's alias —
+	// and `(SELECT 7 AS v ORDER BY 1)` reads nothing at all.
+	own := map[string]bool{}
+	for i := range info.Columns {
+		if a := strings.ToLower(strings.TrimSpace(info.Columns[i].Alias)); a != "" {
+			own[a] = true
+		}
+	}
+	reads := func(n plansql.Node) bool { return exprReadsAColumnOutside(n, own) }
+	for i := range info.Columns {
+		c := &info.Columns[i]
+		if reads(c.ASTExpr) || reads(c.AggArgExpr) {
+			return true
+		}
+		for _, a := range c.AggArgs {
+			if reads(a) {
+				return true
+			}
+		}
+		if c.WindowSpec != nil && windowSpecReadsAColumn(c.WindowSpec, own) {
+			return true
+		}
+	}
+	if reads(info.WhereExpr) || reads(info.HavingExpr) || reads(info.QualifyExpr) {
+		return true
+	}
+	for _, g := range info.GroupByExprs {
+		if reads(g) {
+			return true
+		}
+	}
+	for _, o := range info.OrderBy {
+		if reads(o.Expr) {
+			return true
+		}
+	}
+	return false
+}
+
+// windowSpecReadsAColumn is lateralBodyReadsOuterRow over a window's own
+// partition and order terms, which are carried as TEXT rather than as an AST.
+// A term that names anything at all other than the body's own output is
+// treated as a column read: over a table-less body the only thing it could name
+// is the outer row, and a false positive costs the projection lowering rather
+// than a wrong answer.
+func windowSpecReadsAColumn(w *plansql.WindowSpec, own map[string]bool) bool {
+	if w == nil {
+		return false
+	}
+	names := func(s string) bool {
+		s = strings.ToLower(strings.TrimSpace(s))
+		return s != "" && !own[s]
+	}
+	for _, pb := range w.PartitionBy {
+		if names(pb) {
+			return true
+		}
+	}
+	for _, ob := range w.OrderBy {
+		if names(ob.Column) {
+			return true
+		}
+	}
+	return false
+}
+
+// exprReadsAColumnOutside reports whether an expression tree holds a column
+// reference to something OTHER than the body's own output names.
+//
+// A subquery is OPAQUE — its references are its own FROM's — and it needs no
+// special case here: `plansql.SubqueryNode` carries its body as TEXT rather
+// than as child nodes, so the walk cannot enter one.
+func exprReadsAColumnOutside(n plansql.Node, own map[string]bool) bool {
+	if n == nil {
+		return false
+	}
+	found := false
+	plansql.RewriteExpr(n, func(x plansql.Node) (plansql.Node, bool) {
+		ref, ok := x.(*plansql.ColRef)
+		if !ok {
+			return nil, false
+		}
+		if ref.Table == "" && own[strings.ToLower(strings.TrimSpace(ref.Column))] {
+			return nil, false
+		}
+		found = true
+		return nil, false
+	})
+	return found
 }
 
 // refuseUnloweredTableLessLateral names the one body class or join shape that

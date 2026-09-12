@@ -1395,12 +1395,35 @@ five execution arms answer through this one lowering rather than needing the
 distributed single-row source that refusal exists for. The DAG cells assert
 `TableLessLocalRoutes` beside their rows.
 
-**THE BOUNDARY IS A REFUSAL, NOT AN APPROXIMATION.** A body that is not a
-projection over the outer row — an aggregate, a GROUP BY, a HAVING, a window
-function, DISTINCT, an ORDER BY, a LIMIT/OFFSET, a set operation, a WITH
-clause, a star, a subquery in an item — and an OUTER join that would have to
-PAD (a non-trivial ON, or a body WHERE) are refused `0A000` naming the class.
-Each of them answered plausible NULLs before; loud beats plausible.
+**THE CLASSIFIER ASKS TWO QUESTIONS, NOT ONE** (amended 2026-09-12, round-2
+review B1). A table-less body that names NO column is not correlated at all:
+nothing about it depends on the outer row, the ordinary build already produced
+`Project(Dual, …)`, and the cross join with its one row is exactly PostgreSQL's
+answer. Classifying by the FROM clause alone took twelve such shapes —
+`(SELECT 7 AS v LIMIT 1)`, `(SELECT DISTINCT 7 AS v)`, `(SELECT COUNT(*) AS c)`,
+`(SELECT ROW_NUMBER() OVER () AS v)`, `LEFT JOIN … ON false`, and the rest —
+from PostgreSQL's own rows to a refusal, 60 cells across five arms. So:
+
+    body reads the outer row?    disposition
+      no                         the BASE path, every clause class
+      yes, and a projection      LOWERED
+      yes, and not a projection  REFUSED 0A000 naming the class
+
+In a table-less body every column reference IS an outer reference, which makes
+the question exact rather than a heuristic: there is no relation of its own for
+a name to resolve to. A SUBQUERY is opaque (its references are its own FROM's),
+and the body's OWN output names are not outer columns — this parser resolves
+`ORDER BY 1` to the item's alias, and `(SELECT 7 AS v ORDER BY 1)` reads
+nothing. The table is enumerated once, in
+`internal/coordinator/arc_c1_body_class_two_path_test.go`, one cell per class
+per side on five arms.
+
+**THE BOUNDARY IS A REFUSAL, NOT AN APPROXIMATION.** A CORRELATED body that is
+not a projection over the outer row — an aggregate, a GROUP BY, a HAVING, a
+window function, DISTINCT, an ORDER BY, a LIMIT/OFFSET, a set operation, a WITH
+clause, a star, a subquery in an item — and an OUTER join over one that would
+have to PAD (a non-trivial ON, or a body WHERE) are refused `0A000` naming the
+class. Each of THOSE answered plausible NULLs before; loud beats plausible.
 
 **NOT SETTLED, and recorded rather than repaired here:** an accumulating
 aggregate OVER such a column declares float8 where PostgreSQL declares numeric
