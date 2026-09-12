@@ -1411,10 +1411,24 @@ from PostgreSQL's own rows to a refusal, 60 cells across five arms. So:
 
 In a table-less body every column reference IS an outer reference, which makes
 the question exact rather than a heuristic: there is no relation of its own for
-a name to resolve to. A SUBQUERY is opaque (its references are its own FROM's),
-and the body's OWN output names are not outer columns — this parser resolves
-`ORDER BY 1` to the item's alias, and `(SELECT 7 AS v ORDER BY 1)` reads
-nothing. The table is enumerated once, in
+a name to resolve to. Three exclusions, each with a cell:
+
+* a SUBQUERY is opaque — its references are its own FROM's;
+* the body's OWN output names are not outer columns (this parser resolves
+  `ORDER BY 1` to the item's alias);
+* **every term is RESOLVED, not read as text.** `plansql.WindowSpec` carries a
+  window's PARTITION BY / ORDER BY terms as strings, and counting any non-empty
+  one as a column read made `OVER (ORDER BY 1)` and `OVER (PARTITION BY 1)` —
+  integer literals — "reads the outer row"; a window body is not a projection,
+  so the shape was refused where the base answered PostgreSQL's rows (round-2
+  review, B1). A false positive here is not a lost optimization: the predicate
+  is what ARMS the refusal.
+
+And a SORT TERM IS NOT ASKED AT ALL. A table-less body yields at most one row,
+so its ORDER BY is the identity whatever it names; it is dropped rather than
+refused, and `(SELECT 7 AS v ORDER BY u.id)` is the base's answer and
+PostgreSQL's. The whole enumeration — every clause that can hold a term × what
+the term is made of — is `TestC1EBThePredicateInputTable`. The table is enumerated once, in
 `internal/coordinator/arc_c1_body_class_two_path_test.go`, one cell per class
 per side on five arms.
 

@@ -101,39 +101,65 @@ func lateralBodyReadsOuterRow(info *plansql.SelectInfo) bool {
 			return true
 		}
 	}
-	for _, o := range info.OrderBy {
-		if reads(o.Expr) {
+	// A SORT TERM IS DELIBERATELY NOT ASKED. A table-less body yields at most
+	// one row, so its ORDER BY is the identity whatever it names — and
+	// `(SELECT 7 AS v ORDER BY u.id)` is a shape the base answered exactly as
+	// PostgreSQL does (round-2 review, B1). Counting the term made the body
+	// "correlated", and a sort is not a projection, so it was refused.
+	return false
+}
+
+// windowSpecReadsAColumn is lateralBodyReadsOuterRow over a window's own
+// partition, order and frame terms, which `plansql.WindowSpec` carries as TEXT
+// rather than as an AST.
+//
+// EACH TERM IS PARSED AND RESOLVED, not tested for being non-empty. Treating
+// any non-empty term as a column read made `OVER (ORDER BY 1)` and
+// `OVER (PARTITION BY 1)` "reads the outer row" — an integer LITERAL — and a
+// window body is not a projection, so the shape was refused where the base
+// answered PostgreSQL's own rows (round-2 review, B1). A false positive here is
+// not a lost optimization: `lateralDualBody` returning true is what ARMS the
+// refusal, so it costs the answer.
+func windowSpecReadsAColumn(w *plansql.WindowSpec, own map[string]bool) bool {
+	if w == nil {
+		return false
+	}
+	for _, pb := range w.PartitionBy {
+		if termReadsAColumnOutside(pb, own) {
+			return true
+		}
+	}
+	for _, ob := range w.OrderBy {
+		if termReadsAColumnOutside(ob.Column, own) {
+			return true
+		}
+	}
+	if w.Frame != nil {
+		if exprReadsAColumnOutside(w.Frame.Start.Offset, own) {
+			return true
+		}
+		if w.Frame.End != nil && exprReadsAColumnOutside(w.Frame.End.Offset, own) {
 			return true
 		}
 	}
 	return false
 }
 
-// windowSpecReadsAColumn is lateralBodyReadsOuterRow over a window's own
-// partition and order terms, which are carried as TEXT rather than as an AST.
-// A term that names anything at all other than the body's own output is
-// treated as a column read: over a table-less body the only thing it could name
-// is the outer row, and a false positive costs the projection lowering rather
-// than a wrong answer.
-func windowSpecReadsAColumn(w *plansql.WindowSpec, own map[string]bool) bool {
-	if w == nil {
+// termReadsAColumnOutside parses one TEXT term and asks the AST whether it
+// reads a column that is not the body's own output.
+//
+// A term this cannot parse is treated as a read, which is the safe side for a
+// term whose shape is unknown: the lowering declines and the base path answers.
+func termReadsAColumnOutside(term string, own map[string]bool) bool {
+	term = strings.TrimSpace(term)
+	if term == "" {
 		return false
 	}
-	names := func(s string) bool {
-		s = strings.ToLower(strings.TrimSpace(s))
-		return s != "" && !own[s]
+	node, err := plansql.ParseExpression(term)
+	if err != nil {
+		return true
 	}
-	for _, pb := range w.PartitionBy {
-		if names(pb) {
-			return true
-		}
-	}
-	for _, ob := range w.OrderBy {
-		if names(ob.Column) {
-			return true
-		}
-	}
-	return false
+	return exprReadsAColumnOutside(node, own)
 }
 
 // exprReadsAColumnOutside reports whether an expression tree holds a column
@@ -195,9 +221,6 @@ func refuseUnloweredTableLessLateral(info *plansql.SelectInfo, join plansql.Join
 	}
 	if info.Qualify != "" || info.QualifyExpr != nil {
 		return refuse("a QUALIFY clause")
-	}
-	if len(info.OrderBy) > 0 {
-		return refuse("an ORDER BY")
 	}
 	if info.Limit != "" || info.Offset != "" {
 		return refuse("a LIMIT or OFFSET")
@@ -322,6 +345,12 @@ func buildTableLessLateralJoin(info *plansql.SelectInfo, left *Node,
 	if err := applyLateralItemAliases(subInfo, join); err != nil {
 		return nil, err
 	}
+	// A ONE-ROW SORT IS THE IDENTITY. The body has no FROM clause, so it yields
+	// at most one row and its ORDER BY cannot reorder anything; dropping it is
+	// what keeps the body's root a Project, which is what this lowering reads
+	// its items from. (A LIMIT or OFFSET, where the order WOULD matter, is
+	// refused above.)
+	subInfo.OrderBy = nil
 
 	right, err := BuildFromSelectWithCTEs(subInfo, ctes)
 	if err != nil {

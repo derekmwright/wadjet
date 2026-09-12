@@ -859,10 +859,17 @@ are applied above the projection.
 
 Such a body is computed as a projection or it is REFUSED (`0A000`) naming the
 reason. The classes that are refused are an aggregate, a `GROUP BY`, a
-`HAVING`, a window function, `DISTINCT`, an `ORDER BY`, a `LIMIT`/`OFFSET`, a
-set operation, a `WITH` clause, a star, a subquery in the SELECT list — and, on
-an OUTER join, a body with a `WHERE` or an `ON` condition that does not fold to
-true, because those pad rows a projection cannot manufacture.
+`HAVING`, a window function, `DISTINCT`, a `LIMIT`/`OFFSET`, a set operation, a
+`WITH` clause, a star, a subquery in the SELECT list — and, on an OUTER join, a
+body with a `WHERE` or an `ON` condition that does not fold to true, because
+those pad rows a projection cannot manufacture. An `ORDER BY` is not among
+them: a body with no `FROM` clause yields at most one row, so its sort is the
+identity and is dropped.
+
+Whether a body reads the outer row is decided by RESOLVING each term, not by
+reading it as text: a literal, an ordinal, a constant expression and a name that
+resolves to the body's own output are not outer reads, in a window's
+`PARTITION BY` and `ORDER BY` and frame bounds as much as in the SELECT list.
 
 **A table-less body that reads NO column is not correlated**, whatever else it
 writes: nothing about it depends on the outer row, so it is answered as the
