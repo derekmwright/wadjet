@@ -1545,13 +1545,23 @@ SELECT a, b FROM t ORDER BY a          -- 1,10 | 2,100 | 3,10000
 ```
 
 A recursive CTE's body must be `non-recursive-term UNION ALL recursive-term`.
-A body that names itself in any other form is refused rather than iterated: a
-body with no set operation, or a self-reference in the non-recursive term, is
-SQLSTATE `42P19` with PostgreSQL's own sentence, and a body written with
-`UNION` rather than `UNION ALL` — which PostgreSQL answers by removing
-duplicates at every step — is `0A000`. A `WITH RECURSIVE` whose body does NOT
-name itself is not recursive at all and is answered as the ordinary query it
-is, including a plain `UNION` between its arms.
+The form is read from the PARSED set operation, which is left-associative as it
+is in PostgreSQL: in `A UNION ALL B UNION ALL C` the recursive term is `C` and
+everything to its left is the non-recursive term, so a body may have any number
+of arms as long as only the LAST one names the CTE.
+
+A body that names itself in any other form is refused rather than iterated. A
+self-reference in any arm but the last — and a body with no set operation at
+all — is SQLSTATE `42P19` with PostgreSQL's own sentence. A body whose last arm
+names the CTE under a top-level `UNION` rather than `UNION ALL` is `0A000`:
+PostgreSQL answers it by removing duplicates at every step, and this engine has
+no fixed-point form for that. The TOP-LEVEL operator is what decides, so
+`A UNION ALL B UNION C` is the `UNION` case and `A UNION B UNION ALL C` is the
+`UNION ALL` case, exactly as PostgreSQL reads them.
+
+A `WITH RECURSIVE` whose body does NOT name itself is not recursive at all and
+is answered as the ordinary query it is, including a plain `UNION` between its
+arms.
 
 A recursive CTE is answered by the single-process engine; the distributed
 engine has no stage lowering for one and refuses such a query rather than

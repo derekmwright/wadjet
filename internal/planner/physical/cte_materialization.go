@@ -231,6 +231,16 @@ func (p *Planner) inferCTESchema(sql string, rows []map[string]any) []parquet.Co
 	if err != nil {
 		return nil
 	}
+	// A SET OPERATION publishes its LEFT arm's names, which is PostgreSQL's
+	// rule and the one `plansql.BlockOutputColumns` already states. The union
+	// node itself carries no SELECT list, so a multi-arm anchor —
+	// `SELECT 1 AS v UNION ALL SELECT 2`, which the left-associative form test
+	// makes the non-recursive term of a three-arm body — gave a schema of
+	// ZERO columns and the reference answered "the result has no columns"
+	// (round-2 review, B3).
+	for info.Union != nil && info.Union.Left != nil {
+		info = info.Union.Left
+	}
 	schema := make([]parquet.Column, len(info.Columns))
 	names := make([]string, len(info.Columns))
 	for i, col := range info.Columns {
@@ -331,36 +341,13 @@ func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDe
 	p.cteInProgress[name] = true
 	defer delete(p.cteInProgress, name)
 
-	anchorSQL, recursiveSQL, ok := splitRecursiveUnion(cte.SQL)
-	if !ok {
-		// Nothing to iterate: either the body has no top-level UNION ALL at
-		// all, or it has a UNION without ALL, which this engine has no
-		// fixed-point form for.
-		//
-		// A body that does NOT name itself is not recursive — `WITH RECURSIVE
-		// r AS (SELECT 1 UNION SELECT 2)` is legal SQL and PostgreSQL answers
-		// it — so it takes the ordinary columnar materialization, exactly as
-		// it did before. A body that DOES name itself is refused by SPELLING
-		// rather than planned: planning it is what re-entered.
-		if cteBodyNamesItself(cte) {
-			// PostgreSQL's own two answers, kept apart because they are two
-			// different facts about the query (ADR-0012).
-			if recursiveBodyIsUnionDistinct(cte.SQL) {
-				// PostgreSQL ANSWERS this one — it iterates and removes
-				// duplicates at every step — so it is a feature this engine
-				// lacks, which is 0A000 and not a syntax class.
-				return sqlerr.New("0A000",
-					"a recursive CTE written with UNION rather than UNION ALL is not "+
-						"supported: PostgreSQL answers %q by removing duplicates at every "+
-						"step, and this engine has no fixed-point form for that. Write "+
-						"UNION ALL, or remove the duplicates in the query that reads it",
-					cte.Name)
-			}
-			// PostgreSQL REFUSES this one, with this sentence and this class.
-			return sqlerr.New("42P19",
-				"recursive query %q does not have the form "+
-					"non-recursive-term UNION [ALL] recursive-term", cte.Name)
-		}
+	// THE FORM IS DECIDED FROM THE PARSED SET-OPERATION TREE, which is
+	// PostgreSQL's own rule and not a property of the body's text.
+	form, anchorSQL, recursiveSQL, err := classifyRecursiveBody(cte)
+	if err != nil {
+		return err
+	}
+	if form == recursiveFormNotRecursive {
 		// A RECURSIVE CTE's name IS in scope inside its own body, which is
 		// what makes it recursive, so this one keeps the whole list.
 		coll, schema, err := p.materializeCTEColumnar(ctx, cte.SQL, nil, p.ctes)
@@ -375,30 +362,10 @@ func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDe
 		return nil
 	}
 
-	// A UNION ALL whose SECOND arm does not name the CTE is not a recursive
-	// term at all — `WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT 1)` is
-	// an ordinary set operation, which PostgreSQL answers with two rows. The
-	// iteration below re-runs that arm until it returns nothing, and an arm
-	// that reads no table returns the same row every time: 1001 rows for
-	// PostgreSQL's 2, bounded only by maxRecursiveIterations. The self-
-	// reference is what makes a term recursive, so ask.
-	if !selectTextNamesRelation(recursiveSQL, name) {
-		coll, schema, err := p.materializeCTEColumnar(ctx, cte.SQL, nil, p.ctes)
-		if err != nil {
-			return err
-		}
-		if schema == nil {
-			coll.Release()
-			return errNoCTESchema(cte.Name)
-		}
-		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: coll}
-		return nil
-	}
-
 	// Step 1: Execute anchor query
-	anchorRows, err := p.executeSubquery(ctx, anchorSQL)
-	if err != nil {
-		return err
+	anchorRows, err2 := p.executeSubquery(ctx, anchorSQL)
+	if err2 != nil {
+		return err2
 	}
 	if len(anchorRows) == 0 {
 		schema := p.inferCTESchema(anchorSQL, nil)
@@ -529,45 +496,162 @@ func errNoCTESchema(name string) error {
 		name)
 }
 
-// cteBodyNamesItself reports whether a RECURSIVE CTE's body reads its OWN name
-// — the one fact that separates a body this engine must iterate from one the
-// RECURSIVE keyword merely decorates.
+// recursiveForm is what a RECURSIVE CTE's body IS, decided from the parsed
+// set-operation tree.
+type recursiveForm int
+
+const (
+	// recursiveFormNotRecursive: the body does not name itself. The RECURSIVE
+	// keyword decorates an ordinary query, which PostgreSQL answers as one.
+	recursiveFormNotRecursive recursiveForm = iota
+	// recursiveFormUnionAll: `non-recursive-term UNION ALL recursive-term`,
+	// the one form this engine iterates.
+	recursiveFormUnionAll
+)
+
+// classifyRecursiveBody decides a recursive CTE's FORM from the PARSED
+// set-operation tree, and returns the anchor and recursive-term TEXT the
+// fixed-point iteration re-plans.
 //
-// `WITH RECURSIVE r AS (SELECT 1 UNION SELECT 2)` names nothing and is answered
-// by the ordinary materialization, as PostgreSQL answers it. A body that DOES
-// name itself and cannot be split into an anchor and a recursive term is
-// refused by SPELLING here, because the alternative — planning it to find out —
-// is what re-entered without bound.
+// PostgreSQL parses `A UNION ALL B UNION ALL C` LEFT-ASSOCIATIVELY, so the
+// non-recursive term is `A UNION ALL B` and the recursive term is `C`; this
+// parser does the same. Deciding the form from the body's TEXT instead — a
+// split at the FIRST top-level UNION ALL — put an arm that names the CTE and
+// an arm that does not into one "recursive term", and the iteration re-ran the
+// constant arm every round: 1002 rows (one, then 1001 NULLs) where PostgreSQL
+// answers five (round-2 review, B3).
 //
-// It walks the FROM at every nesting, through derived tables and through both
-// arms of a set operation, which is where the self-reference of a `UNION`
-// recursion lives; sqlReadsRecursiveCTE's own walk stops at the arms because
-// its question (does an IN-subquery READ a recursive CTE) is answered by the
-// left arm's tables.
-func cteBodyNamesItself(cte plansql.CTEDef) bool {
+// Three answers, and each is PostgreSQL's own:
+//
+//   - a self-reference ANYWHERE but the last arm is 42P19, "recursive
+//     reference to query %q must not appear within its non-recursive term" —
+//     measured for a two-, three- and four-arm body with the reference in each
+//     position, UNION and UNION ALL alike;
+//   - the last arm names the CTE and the TOP operator is UNION without ALL:
+//     PostgreSQL iterates and removes duplicates at every step, which this
+//     engine has no fixed-point form for, so 0A000 (a feature gap, not a
+//     syntax class — ADR-0012);
+//   - no arm names the CTE: not recursive, and answered as the ordinary set
+//     operation it is.
+//
+// The TEXT split is verified against the parse rather than trusted: the two
+// halves are re-parsed and must name the CTE exactly as the tree said, or the
+// body is refused. A split that disagrees with the form is what produced the
+// 1002 rows.
+func classifyRecursiveBody(cte plansql.CTEDef) (recursiveForm, string, string, error) {
+	name := strings.ToLower(strings.TrimSpace(cte.Name))
 	body, err := cte.BodySelect()
 	if err != nil || body == nil {
-		// A body that does not parse cannot be shown to name itself, and the
-		// parse error is reported by whoever plans it.
-		return false
+		// A body that does not parse is reported by whoever plans it; this
+		// pass says nothing about a tree it cannot read.
+		return recursiveFormNotRecursive, "", "", nil
 	}
-	return selectNamesRelation(body, strings.ToLower(strings.TrimSpace(cte.Name)))
+	notTheForm := sqlerr.New("42P19",
+		"recursive query %q does not have the form "+
+			"non-recursive-term UNION [ALL] recursive-term", cte.Name)
+	inNonRecursiveTerm := sqlerr.New("42P19",
+		"recursive reference to query %q must not appear within its non-recursive term",
+		cte.Name)
+
+	if body.Union == nil {
+		if selectNamesRelation(body, name) {
+			return recursiveFormNotRecursive, "", "", notTheForm
+		}
+		return recursiveFormNotRecursive, "", "", nil
+	}
+	// THE TOP NODE IS THE LAST OPERATOR, because the parse is left-associative:
+	// its Left is every earlier arm together and its Right is the last one.
+	top := body.Union
+	if selectNamesRelation(top.Left, name) {
+		return recursiveFormNotRecursive, "", "", inNonRecursiveTerm
+	}
+	if !selectNamesRelation(top.Right, name) {
+		return recursiveFormNotRecursive, "", "", nil
+	}
+	if top.Op != plansql.SetOpUnion {
+		return recursiveFormNotRecursive, "", "", notTheForm
+	}
+	if !top.All {
+		return recursiveFormNotRecursive, "", "", sqlerr.New("0A000",
+			"a recursive CTE written with UNION rather than UNION ALL is not supported: "+
+				"PostgreSQL answers %q by removing duplicates at every step, and this "+
+				"engine has no fixed-point form for that. Write UNION ALL, or remove the "+
+				"duplicates in the query that reads it", cte.Name)
+	}
+	anchorSQL, recursiveSQL, ok := splitLastTopLevelUnion(cte.SQL)
+	if !ok ||
+		selectTextNamesRelation(anchorSQL, name) ||
+		!selectTextNamesRelation(recursiveSQL, name) {
+		// The text split and the parse disagree about which arm is which.
+		// Iterating on a split nobody verified is what answered 1002 rows.
+		return recursiveFormNotRecursive, "", "", notTheForm
+	}
+	return recursiveFormUnionAll, anchorSQL, recursiveSQL, nil
 }
 
-// recursiveBodyIsUnionDistinct reports whether a recursive body's TOP-LEVEL set
-// operation is a UNION without ALL — the spelling PostgreSQL answers and this
-// engine cannot iterate. It reads the parsed form, not the text, so a `UNION`
-// inside a derived table or a string literal is not mistaken for the top one.
-func recursiveBodyIsUnionDistinct(sql string) bool {
-	parsed, err := plansql.Parse(sql)
-	if err != nil {
+// splitLastTopLevelUnion splits a body's TEXT at the LAST top-level `UNION ALL`
+// — the operator the left-associative parse puts at the root — into the
+// non-recursive term and the recursive term.
+//
+// Splitting at the FIRST one is what made a three-arm body's "recursive term"
+// two arms (round-2 review, B3). The caller VERIFIES the halves against the
+// parse; this function only finds the position.
+func splitLastTopLevelUnion(sql string) (anchor, recursive string, ok bool) {
+	upper := strings.ToUpper(sql)
+	depth := 0
+	inStr := false
+	for i := 0; i < len(sql); i++ {
+		ch := sql[i]
+		if inStr {
+			if ch == '\'' {
+				if i+1 < len(sql) && sql[i+1] == '\'' {
+					i++ // escaped quote
+				} else {
+					inStr = false
+				}
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inStr = true
+			continue
+		case '(':
+			depth++
+		case ')':
+			depth--
+		}
+		if depth != 0 || i+5 > len(upper) || upper[i:i+5] != "UNION" {
+			continue
+		}
+		if i > 0 && !isSQLBreak(sql[i-1]) {
+			continue // inside a longer identifier
+		}
+		rest := strings.TrimLeft(upper[i+5:], " \t\n\r")
+		if !strings.HasPrefix(rest, "ALL") {
+			continue
+		}
+		end := i + 5
+		for end < len(sql) && isSQLSpace(sql[end]) {
+			end++
+		}
+		end += 3 // skip ALL
+		// Keep scanning: the LAST top-level one is the root of the parse.
+		anchor, recursive, ok = strings.TrimSpace(sql[:i]), strings.TrimSpace(sql[end:]), true
+	}
+	return anchor, recursive, ok
+}
+
+func isSQLSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' }
+
+// isSQLBreak reports whether c cannot be part of an identifier, so a keyword
+// that starts after it really is a keyword.
+func isSQLBreak(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_':
 		return false
 	}
-	info, err := plansql.ExtractSelect(parsed)
-	if err != nil || info == nil || info.Union == nil {
-		return false
-	}
-	return info.Union.Op == plansql.SetOpUnion && !info.Union.All
+	return true
 }
 
 // selectTextNamesRelation is selectNamesRelation over one arm's TEXT, for the
@@ -768,54 +852,6 @@ func hashLogicalNode(h io.Writer, n *logical.Node) {
 		hashLogicalNode(h, c)
 	}
 	_, _ = io.WriteString(h, "]|")
-}
-
-// splitRecursiveUnion splits a recursive CTE body at the top-level UNION ALL.
-// Returns (anchor, recursive, true) or ("", "", false) if no UNION ALL found.
-func splitRecursiveUnion(sql string) (anchor, recursive string, ok bool) {
-	upper := strings.ToUpper(sql)
-	depth := 0
-	inStr := false
-	for i := 0; i < len(sql); i++ {
-		ch := sql[i]
-		if inStr {
-			if ch == '\'' {
-				if i+1 < len(sql) && sql[i+1] == '\'' {
-					i++ // escaped quote
-				} else {
-					inStr = false
-				}
-			}
-			continue
-		}
-		if ch == '\'' {
-			inStr = true
-			continue
-		}
-		if ch == '(' {
-			depth++
-		} else if ch == ')' {
-			depth--
-		}
-		// Only match UNION ALL at depth 0 (not inside subqueries)
-		if depth == 0 && i+9 < len(upper) {
-			if upper[i:i+5] == "UNION" {
-				rest := strings.TrimSpace(upper[i+5:])
-				if strings.HasPrefix(rest, "ALL") {
-					// Find the exact position after "UNION ALL"
-					unionEnd := i + 5
-					for unionEnd < len(sql) && (sql[unionEnd] == ' ' || sql[unionEnd] == '\t' || sql[unionEnd] == '\n' || sql[unionEnd] == '\r') {
-						unionEnd++
-					}
-					unionEnd += 3 // skip "ALL"
-					anchor = strings.TrimSpace(sql[:i])
-					recursive = strings.TrimSpace(sql[unionEnd:])
-					return anchor, recursive, true
-				}
-			}
-		}
-	}
-	return "", "", false
 }
 
 // renameRowColumnsFromTo remaps row keys from srcNames[i] to dstNames[i].

@@ -1516,12 +1516,27 @@ different defect in kind.
   iteration has seeded one, and REFUSED otherwise — PostgreSQL's 42P19,
   "recursive reference to query %q must not appear within its non-recursive
   term". Re-entry is impossible by construction rather than by depth counting.
-* **The FORM is decided from the PARSED body before anything is planned.** A
-  body that names itself and is not `non-recursive-term UNION ALL
-  recursive-term` is refused by spelling: `UNION` without `ALL` is `0A000`
-  (PostgreSQL ANSWERS it — a feature gap is not a syntax error, ADR-0012), and
-  every other shape is PostgreSQL's own 42P19 sentence. Discovering the form by
-  planning the body is what re-entered.
+* **The FORM is decided from the PARSED SET-OPERATION TREE before anything is
+  planned**, and the tree is left-associative exactly as PostgreSQL's is: the
+  TOP node's Right is the last arm and its Left is every earlier arm together.
+  So the questions are asked in PostgreSQL's own order — does any arm but the
+  last name the CTE (42P19, "must not appear within its non-recursive term"),
+  does the last arm name it at all (if not, the body is not recursive), and is
+  the TOP operator `UNION ALL` (if it is a plain `UNION`, 0A000: PostgreSQL
+  answers it by removing duplicates at every step, which is a feature gap and
+  not a syntax error, ADR-0012). Asking the ALL-ness BEFORE the arm position
+  gave a first-arm self-reference 0A000 where PostgreSQL raises 42P19 (round-2
+  review, P1).
+
+  Deciding it from the body's TEXT instead — a split at the FIRST top-level
+  `UNION ALL` — put an arm that names the CTE and an arm that does not into one
+  "recursive term", and the iteration re-ran the constant arm every round: 1002
+  rows, one then 1001 NULLs, where PostgreSQL answers five (round-2 review,
+  B3). The text split that feeds the iteration now takes the LAST top-level
+  `UNION ALL` and is VERIFIED against the parse — the two halves are re-parsed
+  and must name the CTE exactly as the tree said, or the body is refused.
+  A set-operation anchor publishes its LEFT arm's names, which is what
+  `inferCTESchema` reads for a multi-arm non-recursive term.
 
 Two consequences fall out of asking the self-reference question at all. A
 `WITH RECURSIVE` whose body does NOT name itself is not recursive — PostgreSQL

@@ -148,6 +148,127 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 			why:    "#1042: the DAG cannot run any recursive CTE",
 			routed: c1RecRoutes,
 		},
+
+		// ---- THE ARM TABLE (round-2 review, B3). PostgreSQL parses
+		// `A UNION ALL B UNION ALL C` LEFT-ASSOCIATIVELY, so the LAST arm is
+		// the recursive term and a self-reference anywhere else is 42P19.
+		// Splitting the body's TEXT at the FIRST top-level UNION ALL put an
+		// arm that names the CTE and an arm that does not into one "recursive
+		// term": the iteration re-ran the constant arm every round and
+		// answered 1002 rows. Every PostgreSQL answer here was measured live
+		// on 17.11 before the code changed.
+		{
+			name:   "multi-arm: 2 arms, self-reference LAST, UNION ALL",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
+			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "multi-arm: 2 arms, self-reference FIRST, UNION ALL",
+			sql:    "WITH RECURSIVE r AS (SELECT v+1 AS v FROM r WHERE v<3 UNION ALL SELECT 1) SELECT v FROM r ORDER BY 1",
+			want:   inNonRecursiveTerm,
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "multi-arm: 3 arms, self-reference LAST, UNION ALL",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT 2 UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
+			want:   "cols=[v:INT64] rows=5 | 1 | 2 | 2 | 3 | 3",
+			pin:    c1RecDAGPins(),
+			why:    "the text split answered 1002 rows — one, then 1001 NULLs; #1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "multi-arm: 3 arms, self-reference MIDDLE, UNION ALL",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT v+1 FROM r WHERE v<3 UNION ALL SELECT 9) SELECT v FROM r ORDER BY 1",
+			want:   inNonRecursiveTerm,
+			pin:    c1RecDAGPins(),
+			why:    "the text split answered 1002 rows; #1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "multi-arm: 3 arms, self-reference FIRST, UNION ALL",
+			sql:    "WITH RECURSIVE r AS (SELECT v+1 AS v FROM r WHERE v<3 UNION ALL SELECT 1 UNION ALL SELECT 2) SELECT v FROM r ORDER BY 1",
+			want:   inNonRecursiveTerm,
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "multi-arm: 3 arms, NO self-reference, UNION ALL",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT 2 UNION ALL SELECT 3) SELECT v FROM r ORDER BY 1",
+			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "multi-arm: 4 arms, self-reference LAST, UNION ALL",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
+			want:   "cols=[v:INT64] rows=6 | 1 | 2 | 2 | 3 | 3 | 3",
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "multi-arm: 4 arms, self-reference THIRD, UNION ALL",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT 2 UNION ALL SELECT v+1 FROM r WHERE v<3 UNION ALL SELECT 9) SELECT v FROM r ORDER BY 1",
+			want:   inNonRecursiveTerm,
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "multi-arm: 2 arms, self-reference LAST, UNION distinct",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
+			want:   unionDistinct,
+			pin:    c1RecDAGPins(),
+			why:    "PostgreSQL answers 1,2,3 by removing duplicates at every step; #1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "multi-arm: 2 arms, self-reference FIRST, UNION distinct",
+			sql:    "WITH RECURSIVE r AS (SELECT v+1 AS v FROM r WHERE v<3 UNION SELECT 1) SELECT v FROM r ORDER BY 1",
+			want:   inNonRecursiveTerm,
+			pin:    c1RecDAGPins(),
+			why:    "PostgreSQL REFUSES this one — the anchor position is asked BEFORE the ALL-ness (round-2 review, P1); #1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "multi-arm: 3 arms, self-reference LAST, UNION distinct",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION SELECT 2 UNION SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
+			want:   unionDistinct,
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "multi-arm: 3 arms, self-reference MIDDLE, UNION distinct",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION SELECT v+1 FROM r WHERE v<3 UNION SELECT 9) SELECT v FROM r ORDER BY 1",
+			want:   inNonRecursiveTerm,
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "multi-arm: 3 arms, UNION ALL then UNION, self-reference LAST",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT 2 UNION SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
+			want:   unionDistinct,
+			pin:    c1RecDAGPins(),
+			why:    "the TOP operator decides: PostgreSQL dedups every step and answers 1,2,3; #1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "multi-arm: 3 arms, UNION then UNION ALL, self-reference LAST",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION SELECT 2 UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
+			want:   "cols=[v:INT64] rows=5 | 1 | 2 | 2 | 3 | 3",
+			pin:    c1RecDAGPins(),
+			why:    "the TOP operator is UNION ALL, so PostgreSQL keeps duplicates; #1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
 	})
 }
 
