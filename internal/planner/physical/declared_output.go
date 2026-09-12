@@ -244,6 +244,11 @@ func inputColTypes(n *logical.Node) map[string]parquet.TypeID {
 	switch n.Type {
 	case logical.NodeScan:
 		return n.ScanColTypes
+	case logical.NodeDual:
+		// The row a table-less LATERAL body sees IS the outer row, so the
+		// columns its SELECT list may name are the outer subtree's (#1033).
+		// Nil on every other Dual, which names nothing.
+		return inputColTypes(n.LateralOuterScope)
 	case logical.NodeFilter, logical.NodeLimit, logical.NodeSort, logical.NodeDistinct:
 		if len(n.Children) != 1 {
 			return nil
@@ -269,6 +274,19 @@ func inputColTypes(n *logical.Node) map[string]parquet.TypeID {
 	case logical.NodeJoin:
 		if len(n.Children) != 2 {
 			return nil
+		}
+		if items := lateralDualItemDecls(n); items != nil {
+			// A table-less LATERAL body publishes its items and nothing else,
+			// and its Project over the Dual is a stop this walk cannot see
+			// through (#1033). Answer from the ONE derivation instead.
+			merged := make(map[string]parquet.TypeID, len(items))
+			for c, t := range inputColTypes(n.Children[0]) {
+				merged[c] = t
+			}
+			for name, d := range items {
+				merged[name] = d.ID
+			}
+			return merged
 		}
 		left, right := inputColTypes(n.Children[0]), inputColTypes(n.Children[1])
 		if left == nil || right == nil {
@@ -334,6 +352,8 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 	switch n.Type {
 	case logical.NodeScan:
 		return n.ScanColFields
+	case logical.NodeDual:
+		return inputColFields(n.LateralOuterScope)
 	case logical.NodeFilter, logical.NodeLimit, logical.NodeSort, logical.NodeDistinct:
 		if len(n.Children) != 1 {
 			return nil
@@ -480,6 +500,20 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 		if len(n.Children) != 2 {
 			return nil
 		}
+		if items := lateralDualItemDecls(n); items != nil {
+			merged := make(map[string][]parquet.Column, len(items))
+			for c, f := range inputColFields(n.Children[0]) {
+				merged[c] = f
+			}
+			for name, d := range items {
+				if f := d.RowFields(); len(f) > 0 {
+					merged[name] = f
+					continue
+				}
+				delete(merged, name)
+			}
+			return merged
+		}
 		left, right := inputColFields(n.Children[0]), inputColFields(n.Children[1])
 		if left == nil {
 			return right
@@ -593,6 +627,8 @@ func inputColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 	switch n.Type {
 	case logical.NodeScan:
 		return n.ScanColDecimal
+	case logical.NodeDual:
+		return inputColDecimal(n.LateralOuterScope)
 	case logical.NodeFilter, logical.NodeLimit, logical.NodeSort, logical.NodeDistinct:
 		if len(n.Children) != 1 {
 			return nil
@@ -611,6 +647,20 @@ func inputColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 	case logical.NodeJoin:
 		if len(n.Children) != 2 {
 			return nil
+		}
+		if items := lateralDualItemDecls(n); items != nil {
+			merged := make(map[string]logical.DecimalMeta, len(items))
+			for c, m := range inputColDecimal(n.Children[0]) {
+				merged[c] = m
+			}
+			for name, d := range items {
+				if d.ID != parquet.TypeDecimal || !d.DecKnown {
+					delete(merged, name)
+					continue
+				}
+				merged[name] = logical.DecimalMeta{Precision: d.Precision, Scale: d.Scale}
+			}
+			return merged
 		}
 		left, right := inputColDecimal(n.Children[0]), inputColDecimal(n.Children[1])
 		if left == nil || right == nil {

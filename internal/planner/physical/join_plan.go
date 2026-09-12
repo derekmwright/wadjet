@@ -228,6 +228,11 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	if len(node.Children) < 2 {
 		return nil, nil, nil, fmt.Errorf("join requires two children")
 	}
+	// A LATERAL body with NO FROM clause is a projection over the outer row,
+	// not a join (#1033). See buildTableLessLateralJoin.
+	if len(node.LateralDualItems) > 0 {
+		return p.buildTableLessLateralJoin(ctx, node)
+	}
 
 	jt := mapJoinType(node.JoinType)
 	// An inner join with no condition at all IS a cross join (#376): the

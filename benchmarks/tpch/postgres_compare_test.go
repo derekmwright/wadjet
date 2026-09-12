@@ -476,12 +476,61 @@ func postgresCorpus() []pgCase {
 	out = append(out, postgresSemanticsCases()...)
 	out = append(out, postgresConstArgAggCases()...)
 	out = append(out, postgresJoinArmCases()...)
+	out = append(out, postgresTableLessLateralCases()...)
 
 	for i := range out {
 		if !out[i].countOnly {
 			out[i].ordered = hasTopLevelOrderBy(out[i].sql)
 		}
 	}
+	return out
+}
+
+// postgresTableLessLateralCases asks PostgreSQL what a LATERAL body with NO
+// FROM clause means (#1033).
+//
+// Such a body yields exactly one row per outer row whose columns are functions
+// of that row, so it is a PROJECTION over the outer row. The decorrelation
+// reads the body's WHERE for correlated equalities to promote into join keys;
+// a body with no WHERE has none, so the outer reference in its SELECT list was
+// promoted nowhere and every projected value came back NULL under the STRING
+// default — which is why these entries belong in BOTH arms. A value oracle
+// alone cannot see a right value under a wrong OID, and the declaration was
+// half the defect.
+func postgresTableLessLateralCases() []pgCase {
+	var out []pgCase
+	add := func(name, sql string) {
+		out = append(out, pgCase{name: name, sql: sql})
+	}
+	add("TableLessLateralBareColumn",
+		`SELECT l.v FROM nation u, LATERAL (SELECT u.n_nationkey AS v) l ORDER BY 1`)
+	add("TableLessLateralArithmetic",
+		`SELECT l.v FROM nation u, LATERAL (SELECT u.n_nationkey + 1 AS v) l ORDER BY 1`)
+	add("TableLessLateralTwoTypes",
+		`SELECT l.k, l.nm FROM nation u,
+		   LATERAL (SELECT u.n_regionkey AS k, u.n_name AS nm) l ORDER BY 1, 2`)
+	add("TableLessLateralCount",
+		`SELECT COUNT(*) AS n FROM nation u, LATERAL (SELECT u.n_nationkey AS v) l`)
+	add("TableLessLateralFiltered",
+		`SELECT l.v FROM nation u, LATERAL (SELECT u.n_nationkey AS v) l WHERE l.v > 20 ORDER BY 1`)
+	add("TableLessLateralGroupedByOuter",
+		`SELECT u.n_regionkey AS r, COUNT(*) AS n FROM nation u,
+		   LATERAL (SELECT u.n_nationkey * 2 AS v) l GROUP BY u.n_regionkey ORDER BY 1`)
+	add("TableLessLateralGroupedByTheLateralColumn",
+		`SELECT l.v AS v, COUNT(*) AS n FROM nation u,
+		   LATERAL (SELECT u.n_regionkey AS v) l GROUP BY l.v ORDER BY 1`)
+	add("TableLessLateralBodyWhere",
+		`SELECT l.v FROM nation u, LATERAL (SELECT u.n_nationkey AS v WHERE u.n_nationkey < 3) l ORDER BY 1`)
+	add("TableLessLateralOnCondition",
+		`SELECT l.v FROM nation u JOIN LATERAL (SELECT u.n_nationkey AS v) l ON l.v < 3 ORDER BY 1`)
+	add("TableLessLateralLeftJoinOnTrue",
+		`SELECT u.n_nationkey AS k, l.v FROM nation u
+		   LEFT JOIN LATERAL (SELECT u.n_nationkey AS v) l ON true ORDER BY 1`)
+	add("TableLessLateralChained",
+		`SELECT m.w FROM nation u, LATERAL (SELECT u.n_nationkey AS v) l,
+		   LATERAL (SELECT l.v AS w) m ORDER BY 1`)
+	add("TableLessLateralConstantBody",
+		`SELECT l.v FROM nation u, LATERAL (SELECT 7 AS v) l ORDER BY 1`)
 	return out
 }
 

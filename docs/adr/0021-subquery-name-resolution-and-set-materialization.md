@@ -1352,6 +1352,66 @@ one: there is no faithful rendering of an `OVER` clause to rebuild, and
 `WindowFuncNode.String()` emitting `OVER (...)` — three literal dots — is a
 defect of its own worth closing before anything here can.
 
+### 1n. A LATERAL body with NO FROM clause is a projection over the outer row
+
+(Added 2026-09-12, #1033.)
+
+§1h settles what a LATERAL means when it HAS a FROM clause: it runs per outer
+row, the correlation in its WHERE is promoted to a join key, and an empty input
+still answers. A body with NO FROM clause is a different relation and the
+correlation machinery cannot see it at all: there are no equalities in a WHERE
+to promote, so an outer reference in the body's SELECT LIST was promoted
+nowhere. `BuildFromSelect` built `Project(Dual, [u.id AS v])`, the Dual carries
+no `u`, and every projected value came back NULL under the STRING default an
+unresolvable reference falls to — `SELECT l.v FROM users u, LATERAL (SELECT
+u.id AS v) l` answered three NULLs with OID 25 where PostgreSQL 17.11 answers
+1, 2, 3 as bigint, and `COUNT(*)` was right throughout. The rows were produced;
+only the values were lost.
+
+**THE POSITION.** Such a body yields exactly one row per outer row whose
+columns are functions of that row, so the relation it ranges over IS the outer
+row and
+
+    left CROSS JOIN LATERAL (SELECT e(u) AS v)   ==   π(u.*, e(u) AS v)(left)
+
+There is no dependent join, no correlation key and nothing to decorrelate. The
+lowering records the body's items on the join node
+(`logical.Node.LateralDualItems`), the single-process builder computes them
+above the OUTER stream through the engine's own compiled expressions
+(`exec.LateralOuterProject`, resolved from the first batch the way
+`exec.LateralEmptyDefault` already is), and the body's WHERE and the written ON
+move into the ENCLOSING query's WHERE — which for an inner join is exactly
+where they already applied, and is the same move §1h's `lateralPadThenFilter`
+makes.
+
+**THE JOIN NODE AND THE DUAL STAY IN THE TREE**, for two reasons that are one
+decision. The declaration walks ask a node what its CHILD publishes, and the
+child of such a body's Project is the Dual — so the Dual records the OUTER
+subtree (`logical.Node.LateralOuterScope`) and `inputColDecls` answers with the
+outer row's columns, which is what types `u.id` in the body's SELECT list at
+every walk at once. And a plan containing a Dual is handed to the coordinator's
+in-process pipeline (`physical.ErrTableLessSelectDistributed`, #806), so all
+five execution arms answer through this one lowering rather than needing the
+distributed single-row source that refusal exists for. The DAG cells assert
+`TableLessLocalRoutes` beside their rows.
+
+**THE BOUNDARY IS A REFUSAL, NOT AN APPROXIMATION.** A body that is not a
+projection over the outer row — an aggregate, a GROUP BY, a HAVING, a window
+function, DISTINCT, an ORDER BY, a LIMIT/OFFSET, a set operation, a WITH
+clause, a star, a subquery in an item — and an OUTER join that would have to
+PAD (a non-trivial ON, or a body WHERE) are refused `0A000` naming the class.
+Each of them answered plausible NULLs before; loud beats plausible.
+
+**NOT SETTLED, and recorded rather than repaired here:** an accumulating
+aggregate OVER such a column declares float8 where PostgreSQL declares numeric
+(`SELECT SUM(l.v) …` is 6, correctly, under OID 701). The same shape over a
+plain derived table diverges identically with no LATERAL in it —
+`aggInputColumnType` stops at a JOIN because `emittedColTypes` has no arm for
+one — so it is the "a declaration has to RIDE through every materialization"
+gap ADR-0024 and #1018 name, one level up, and it is pinned in
+`internal/coordinator/arc_c1_scope_two_path_test.go` with the derived-table
+twin beside it as the proof.
+
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
 `resolveSubqueryAST` gains an `InExpr` case. An uncorrelated IN-subquery is

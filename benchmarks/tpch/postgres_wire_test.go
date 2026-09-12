@@ -725,6 +725,23 @@ const networkAsTextOIDPin = "DELIBERATE (network-as-text on the wire, like VECTO
 
 func wireCorpus() []wireCase {
 	base := []wireCase{
+		// A LATERAL BODY WITH NO FROM CLAUSE, on the wire (#1033). The values
+		// were NULL and the DECLARATION fell to OID 25 (text) for a bigint
+		// column — a wrong OID under right-looking rows is exactly what only
+		// this arm can see, and `case_probe.k` is a bigint, so the entry
+		// asserts OID 20 against PostgreSQL's own.
+		{name: "TableLessLateralBareColumn",
+			sql: `SELECT l.v FROM case_probe u, LATERAL (SELECT u.k AS v) l ORDER BY 1 LIMIT 3`},
+		{name: "TableLessLateralTwoTypes",
+			sql: `SELECT l.a, l.b FROM case_probe u,
+			        LATERAL (SELECT u.k AS a, u."UserAgent" AS b) l ORDER BY 1 LIMIT 3`},
+		{name: "TableLessLateralIntColumn",
+			sql: `SELECT l.v FROM nation u, LATERAL (SELECT u.n_nationkey AS v) l ORDER BY 1 LIMIT 3`},
+		// A CONSTANT body is deliberately NOT here: its column is a bare
+		// integer literal, which declares int8 where PostgreSQL declares int4
+		// on every shape (the pin on `SELECT 1 FROM supplier` below), so the
+		// entry would only re-pin a divergence that has nothing to do with
+		// LATERAL. Its VALUES are gated in the semantics arm.
 		// The shape that broke DataGrip: a plain projection of an int, a text
 		// and an int. Every column used to be declared OID 25; the OIDs are
 		// right now, and this entry is what keeps them right.

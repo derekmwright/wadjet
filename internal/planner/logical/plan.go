@@ -297,6 +297,30 @@ type Node struct {
 	// over a matched row that counted 2 is legitimately NULL, and stamping it
 	// turned right rows into wrong ones.
 	LateralPadMarker string
+	// LateralDualItems, on a JOIN node, is the SELECT list of a LATERAL body
+	// that has NO FROM clause — the PROJECTION OVER THE OUTER ROW that such a
+	// body is (lateral_dual_body.go, #1033). The join's right child still
+	// holds the same items over a Dual, which is what the declaration walks
+	// read and what keeps the stage DAG routing the plan to the in-process
+	// pipeline; this copy is what the single-process join builder computes
+	// above the outer stream, so a later rewrite of the right subtree cannot
+	// silently change which expressions are evaluated.
+	LateralDualItems []Projection
+	// LateralDualAlias is the name the enclosing query spells that body's
+	// columns with. An item whose name the OUTER row already carries is two
+	// columns and not one — `LATERAL (SELECT u.id AS customer)` beside a
+	// `customer` column — so it is emitted qualified by this, the spelling the
+	// join already uses for a build column that collides with a probe column.
+	LateralDualAlias string
+	// LateralOuterScope, on a DUAL node, is the OUTER subtree a table-less
+	// LATERAL body ranges over. `inputColDecls` asks a node what its child
+	// publishes, and the child of such a body's Project is the Dual — so this
+	// is where "the row this body sees is the outer row" has to be recorded
+	// for `u.id` in the body's SELECT list to declare bigint rather than fall
+	// to the STRING default (#1033). It points at the join's own left child,
+	// not a copy, so physical.AnnotateScanColumns' stamp is visible through
+	// it without a second pass.
+	LateralOuterScope *Node
 	// LateralAggregate marks the aggregate a DECORRELATED LATERAL's lowering
 	// built — the one whose group key IS the correlation key, whatever name
 	// it publishes it under.

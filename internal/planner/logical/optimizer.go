@@ -919,6 +919,21 @@ func collectNodeColumnRefs(n *Node, refs map[string]bool) {
 		if n.JoinFilter != "" {
 			extractJoinColumnRefs(n.JoinFilter, refs)
 		}
+		// A table-less LATERAL body's items are expressions over the OUTER
+		// row, and they live on this join rather than under a scan of their
+		// own — so nothing else in this walk asks the outer scan to read what
+		// they name (#1033). Without them `SELECT u.customer, l.v FROM u,
+		// LATERAL (SELECT u.id * 2 AS v) l` pruned `id` off the scan and every
+		// lateral value came back NULL in silence, while the same query
+		// SELECTing only `l.v` answered — the pruning decided the values.
+		for _, item := range n.LateralDualItems {
+			if item.ASTExpr != nil {
+				collectASTColumnRefs(item.ASTExpr, refs)
+			}
+			if item.Column != "" {
+				refs[strings.ToLower(item.Column)] = true
+			}
+		}
 	case NodeSort:
 		for _, ob := range n.OrderBy {
 			// A materialized ORDER BY term (#320) names a column the Project

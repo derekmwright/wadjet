@@ -1358,6 +1358,17 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 				// LATERAL subquery: decorrelate by extracting correlated
 				// WHERE predicates and moving them to the join condition.
 				left := crossFold(idx)
+				// A body with NO FROM clause has no relation to decorrelate
+				// against: it is a PROJECTION OVER THE OUTER ROW and is
+				// lowered as one (lateral_dual_body.go, #1033).
+				if body, perr := lateralBodySelect(join); perr == nil && lateralDualBody(body) {
+					lowered, lerr := buildTableLessLateralJoin(info, left, join, ctes)
+					if lerr != nil {
+						return nil, lerr
+					}
+					items[idx] = lowered
+					continue
+				}
 				right, joinCond, empty, hiddenCols, err := buildLateralSubquery(left, join, ctes)
 				if err != nil {
 					return nil, err
