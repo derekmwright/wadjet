@@ -126,6 +126,17 @@ func declaredIntWidth(node plansql.Node, decls colDecls) intWidth {
 		}
 		return w
 	case *plansql.FuncCallNode:
+		if strings.EqualFold(n.Name, "row_field") {
+			d, c := funcReturnType(n, decls)
+			if c == expr.Decided {
+				if d.ID == parquet.TypeInt64 {
+					return intWidth8
+				}
+				if d.ID == parquet.TypeInt32 {
+					return intWidth4
+				}
+			}
+		}
 		// ABS and MOD answer in their ARGUMENT's own numeric domain — that is
 		// expr.NumericDomainScalarFn's set, measured against PostgreSQL for
 		// every width by #768, and it is the same predicate that makes a

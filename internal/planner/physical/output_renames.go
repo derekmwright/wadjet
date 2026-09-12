@@ -148,7 +148,7 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 		renames = append(renames, OutputRename{
 			From: src, To: target, Expr: astExpr, IsAgg: isAgg,
 			Type: declType.ID, TypeKnown: declKnown,
-			Precision: declType.Precision, Scale: declType.Scale,
+			Precision: declType.Precision, Scale: declType.Scale, Fields: declType.RowFields(),
 		})
 	}
 	return renames

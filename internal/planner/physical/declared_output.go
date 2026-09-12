@@ -339,6 +339,22 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 			return nil
 		}
 		return inputColFields(n.Children[0])
+
+	case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
+		cols, ok := setOpDeclaredOutputSchema(n)
+		if !ok {
+			return nil
+		}
+		var fields map[string][]parquet.Column
+		for _, c := range cols {
+			if len(c.Fields) > 0 {
+				if fields == nil {
+					fields = map[string][]parquet.Column{}
+				}
+				fields[strings.ToLower(c.Name)] = c.Fields
+			}
+		}
+		return fields
 	case logical.NodeProject:
 		// inputColTypes STOPS at a Project because a rename can bind a name
 		// to a different value. The FIELDS walk does not have to: a
@@ -357,9 +373,6 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 			return nil
 		}
 		below := inputColFields(n.Children[0])
-		if below == nil {
-			return nil
-		}
 		var out map[string][]parquet.Column
 		for _, p := range n.Projections {
 			if p.IsAgg {
@@ -408,7 +421,8 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 				if out == nil {
 					out = make(map[string][]parquet.Column)
 				}
-				out[name] = nil
+				d, _ := nodeDeclaredType(p.ASTExpr, colDecls{types: inputColTypes(n.Children[0]), fields: below, dec: inputColDecimal(n.Children[0])})
+				out[name] = d.RowFields()
 				continue
 			}
 			f, ok := below[strings.ToLower(cleanExpr(p.Column))]
@@ -433,6 +447,24 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 		// second kind can declare a ROW today — the bar — and it declares it
 		// through the one derivation ADR-0035 item 5 names.
 		var out map[string][]parquet.Column
+		if len(n.Children) == 1 {
+			for i, k := range groupKeyOutputs(n) {
+				var ast plansql.Node
+				if i < len(n.GroupByExprs) {
+					ast = n.GroupByExprs[i]
+				}
+				if ast == nil {
+					ast, _ = plansql.ParseExpression(n.GroupBy[i])
+				}
+				d := derivedGroupKeyDecl(n.GroupBy[i], ast, n.Children[0])
+				if len(d.RowFields()) > 0 {
+					if out == nil {
+						out = map[string][]parquet.Column{}
+					}
+					out[strings.ToLower(cleanExpr(k.Name))] = d.RowFields()
+				}
+			}
+		}
 		for i := range n.AggExprs {
 			f, ok := aggOhlcvOutputFields(n, n.AggExprs[i])
 			if !ok {
@@ -746,7 +778,7 @@ func (d colDecls) colDecl(n *plansql.ColRef) (parquet.Column, bool) {
 		if !ok {
 			return parquet.Column{}, false
 		}
-		col := parquet.Column{Name: key, Type: t}
+		col := parquet.Column{Name: key, Type: t, Fields: d.fields[key]}
 		if t == parquet.TypeDecimal {
 			if m, ok := lookupColDecimal(d.dec, key); ok {
 				col.Precision, col.Scale = m.Precision, m.Scale
@@ -908,7 +940,12 @@ func colRefDeclaredType(n *plansql.ColRef, decls colDecls) (expr.DeclType, expr.
 			return expr.DeclType{}, expr.Undecided
 		}
 		return expr.DeclDecimal(c.Precision, c.Scale), expr.Decided
-	case parquet.TypeVector, parquet.TypeArray, parquet.TypeMap, parquet.TypeRow:
+	case parquet.TypeRow:
+		if len(c.Fields) > 0 {
+			return expr.DeclType{ID: c.Type, Schema: &c}, expr.Decided
+		}
+		return expr.DeclType{}, expr.Undecided
+	case parquet.TypeVector, parquet.TypeArray, parquet.TypeMap:
 		// The other parameterized types: the catalog map carries the TypeID
 		// and nothing else, and a projection declared VECTOR without its
 		// dimension or ARRAY without its element type builds an output
@@ -923,11 +960,10 @@ func colRefDeclaredType(n *plansql.ColRef, decls colDecls) (expr.DeclType, expr.
 	return expr.Decl(c.Type), expr.Decided
 }
 
-// declTypeParts splits a resolved declaration into the three fields the
-// projection specs carry it in. One call site's worth of sugar, so a spec
-// assignment stays one statement.
-func declTypeParts(d expr.DeclType) (parquet.TypeID, int, int) {
-	return d.ID, d.Precision, d.Scale
+// declTypeParts carries the complete allocation declaration across every
+// materialization boundary, including a fixed ROW's child fields.
+func declTypeParts(d expr.DeclType) parquet.Column {
+	return parquet.Column{Type: d.ID, Precision: d.Precision, Scale: d.Scale, Fields: d.RowFields()}
 }
 
 // emittedColDecls is inputColDecls over what a node EMITS rather than what it
@@ -1142,7 +1178,7 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 			}
 			return expr.DeclDecimal(col.Precision, col.Scale), expr.Decided
 		}
-		return expr.Decl(col.Type), expr.Decided
+		return expr.DeclType{ID: col.Type, Schema: &col}, expr.Decided
 	case *plansql.CmpExpr, *plansql.AndNode, *plansql.OrNode, *plansql.NotNode,
 		*plansql.IsExpr, *plansql.LikeExpr, *plansql.BetweenExpr,
 		*plansql.InExpr, *plansql.ExistsNode, *plansql.AnyAllExpr:
@@ -1312,6 +1348,25 @@ func bytesPreservingReturn(n *plansql.FuncCallNode, decls colDecls) (expr.DeclTy
 }
 
 func funcReturnType(n *plansql.FuncCallNode, decls colDecls) (expr.DeclType, expr.Confidence) {
+	if strings.EqualFold(n.Name, "row_field") && len(n.Args) == 2 {
+		parent, confidence := nodeDeclaredType(n.Args[0], decls)
+		if field, ok := n.Args[1].(*plansql.Lit); ok && parent.Schema != nil {
+			if c, found := parent.Schema.Field(field.Value); found {
+				// Extracting a parameterized non-ROW value remains on the
+				// existing scalar disposition (#1017); only fixed ROW
+				// declarations are carried by this arc.
+				switch c.Type {
+				case parquet.TypeArray, parquet.TypeMap, parquet.TypeVector:
+					return expr.DeclType{}, expr.Undecided
+				}
+				if c.Type == parquet.TypeDecimal {
+					return expr.DeclDecimal(c.Precision, c.Scale), confidence
+				}
+				return expr.DeclType{ID: c.Type, Schema: &c}, confidence
+			}
+		}
+	}
+
 	// The scalar math functions that answer in their argument's OWN domain
 	// take their type from that argument, which the registry's fixed
 	// RetFloat64 declaration cannot express (ADR-0024 items 2 and 3, #668).
@@ -1347,7 +1402,12 @@ func funcReturnType(n *plansql.FuncCallNode, decls colDecls) (expr.DeclType, exp
 		return expr.DeclType{}, expr.Undecided
 	}
 	switch t.ID {
-	case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow:
+	case parquet.TypeRow:
+		if len(t.RowFields()) > 0 {
+			return t, c
+		}
+		return expr.DeclType{}, expr.Undecided
+	case parquet.TypeArray, parquet.TypeMap:
 		// map_keys() really does return an ARRAY, and the declaration says
 		// so, but a projection has no element type to size the child vector
 		// with and an ARRAY column built without one reads back empty. Keep

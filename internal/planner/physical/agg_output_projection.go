@@ -121,10 +121,11 @@ func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) map[st
 				return nil
 			}
 			decl := inferProjectionDeclType(p.ASTExpr, parquet.TypeString, nil, aggDecls)
-			typ, prec, scale := declTypeParts(decl)
+			materialized := declTypeParts(decl)
+			typ, prec, scale, fields := materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
 			specs = append(specs, ProjectExprSpec{
 				Expr: src, Name: strings.ToLower(alias),
-				Type: typ, TypeKnown: true, Precision: prec, Scale: scale,
+				Type: typ, TypeKnown: true, Precision: prec, Scale: scale, Fields: fields,
 			})
 			needed = true
 		case !nameIsPlainColumn(src):
@@ -548,6 +549,7 @@ func declareGroupKeySpec(sp *ProjectExprSpec, name string, decls colDecls) {
 		return
 	}
 	sp.Type, sp.TypeKnown = t, true
+	sp.Fields = decls.fields[strings.ToLower(name)]
 	if d, ok := decls.dec[strings.ToLower(name)]; ok {
 		sp.Precision, sp.Scale = d.Precision, d.Scale
 	}

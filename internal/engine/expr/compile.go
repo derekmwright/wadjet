@@ -1163,6 +1163,9 @@ func compileFuncCallNode(n *plansql.FuncCallNode, ctx *compileContext) (Expr, er
 // refuse the operator it implements.
 func compileFuncCallNamed(n *plansql.FuncCallNode, ctx *compileContext, checked bool) (Expr, error) {
 	name := strings.ToLower(n.Name)
+	if err := RefuseInvalidFixedRowField(n); err != nil {
+		return nil, err
+	}
 
 	var args []Expr
 	if n.Star {

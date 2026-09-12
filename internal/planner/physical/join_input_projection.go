@@ -186,6 +186,7 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 		decl := inferProjectionDeclType(ast, parquet.TypeString, declStrict, declTypes)
 		spec.Type, spec.TypeKnown = decl.ID, true
 		spec.Precision, spec.Scale = decl.Precision, decl.Scale
+		spec.Fields = declTypeParts(decl).Fields
 		computed = append(computed, spec)
 		collectASTCols(ast, needCols)
 	}

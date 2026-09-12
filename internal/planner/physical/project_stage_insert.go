@@ -77,6 +77,11 @@ func insertProjectStageAbove(stages []Stage, targetIdx int, specs []ProjectExprS
 // rather than its input's — so a SELECT list written over that output cannot
 // be evaluated anywhere below it, and cannot be fused into the stage either.
 func stageCollapsesItsInput(s *Stage) bool {
+	// An attached projection publishes a new column set just as an aggregate
+	// does; a consumer of that set must materialize above it.
+	if len(s.ProjectExprs) > 0 {
+		return true
+	}
 	switch s.Type {
 	case StageAggregate, StageFinalAggregate, StageMergeAggregate, StageUnion:
 		return true

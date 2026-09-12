@@ -17,6 +17,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/oracle"
 	"github.com/derekmwright/wadjet/internal/oracle/collide"
 	"github.com/derekmwright/wadjet/internal/oracle/multikey"
+	"github.com/derekmwright/wadjet/internal/oracle/rowdecl"
 	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
@@ -423,6 +424,7 @@ func tmdTables() []tmdTable {
 		// at all, and the whole claim is about an ORDER over 5000 of them
 		// spread across four files.
 		{svTable, svSchema(), svData()},
+		{"a3b_rows", rowdecl.Schema(), rowdecl.Data()},
 		// The RESERVED-NAME fixture (#694). A table that already stores a
 		// column in a hidden-slot family, as one written before the namespace
 		// was reserved does.

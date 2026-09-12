@@ -1016,7 +1016,8 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 				e = "'" + d.text + "'"
 				spec.Expr = e
 			}
-			spec.Type, spec.Precision, spec.Scale = declTypeParts(decl)
+			materialized := declTypeParts(decl)
+			spec.Type, spec.Precision, spec.Scale, spec.Fields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
 			spec.TypeKnown = true
 			ct = setOpColType{typ: spec.Type, known: true}
 			if decl.ID == parquet.TypeDecimal && decl.DecKnown {

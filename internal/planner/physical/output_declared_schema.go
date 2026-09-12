@@ -53,6 +53,7 @@ func declaredOutputSchema(root *logical.Node,
 		col := parquet.Column{
 			Name:     name,
 			Type:     d.ID,
+			Fields:   d.RowFields(),
 			Nullable: true,
 		}
 		if d.ID == parquet.TypeDecimal && d.DecKnown {
@@ -858,7 +859,7 @@ func declaredProjectionDecl(proj logical.Projection, decls colDecls, strictInt m
 			}
 			return expr.Decl(parquet.TypeDecimal)
 		}
-		return expr.Decl(t)
+		return expr.DeclType{ID: t, Schema: &parquet.Column{Type: t, Fields: decls.fields[strings.ToLower(name)]}}
 	}
 	// A ROW FIELD PATH is not the bare reference it looks like: the name
 	// resolution below strips the qualifier and then finds no column, so
@@ -878,7 +879,7 @@ func declaredProjectionDecl(proj logical.Projection, decls colDecls, strictInt m
 		if fc.Type == parquet.TypeDecimal && fc.Precision > 0 {
 			return expr.DeclDecimal(fc.Precision, fc.Scale)
 		}
-		return expr.Decl(fc.Type)
+		return expr.DeclType{ID: fc.Type, Schema: &fc}
 	}
 	if proj.ASTExpr != nil && !isSimpleColRefForRename(proj.ASTExpr) {
 		// The producer may PUBLISH this expression as a column, under its own
@@ -904,7 +905,7 @@ func declaredProjectionDecl(proj logical.Projection, decls colDecls, strictInt m
 						return expr.DeclDecimal(m.Precision, m.Scale)
 					}
 				}
-				return expr.Decl(t)
+				return expr.DeclType{ID: t, Schema: &parquet.Column{Type: t, Fields: decls.fields[strings.ToLower(name)]}}
 			}
 		}
 		return inferProjectionDeclType(proj.ASTExpr, parquet.TypeString, strictInt, decls)
@@ -920,7 +921,7 @@ func declaredProjectionDecl(proj logical.Projection, decls colDecls, strictInt m
 			if c.Type == parquet.TypeDecimal && c.Precision > 0 {
 				return expr.DeclDecimal(c.Precision, c.Scale)
 			}
-			return expr.Decl(c.Type)
+			return expr.DeclType{ID: c.Type, Schema: &c}
 		}
 	}
 	ref := proj.Column
@@ -937,7 +938,7 @@ func declaredProjectionDecl(proj logical.Projection, decls colDecls, strictInt m
 		}
 		return expr.Decl(parquet.TypeDecimal)
 	}
-	return expr.Decl(t)
+	return expr.DeclType{ID: t, Schema: &parquet.Column{Type: t, Fields: decls.fields[strings.ToLower(ref)]}}
 }
 
 // declaredProjectionDecimal is the DECIMAL half of declaredProjectionDecl,

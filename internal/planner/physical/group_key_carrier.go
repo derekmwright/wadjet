@@ -318,6 +318,7 @@ func stageGroupKeyDecls(published []string, resolve []GroupKeyResolution,
 		if d.ID == 0 && !d.DecKnown {
 			d = derivedGroupKeyDecl(r.Expr, node, child)
 		}
+		resolve[i].Decl = d
 		out[published[i]] = d.ID
 		if d.ID == parquet.TypeDecimal && d.DecKnown {
 			// The (p,s) beside the TypeID: the worker builds the key vector

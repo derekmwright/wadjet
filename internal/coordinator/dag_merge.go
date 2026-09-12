@@ -116,7 +116,7 @@ func newBatchRenamer(renames []physical.OutputRename, columns []string) *batchRe
 			// over a window, on both DAG arms, for every type (#831, #645).
 			br.exprType[i] = r.Type
 			br.exprDecl[i] = parquet.Column{
-				Type: r.Type, Precision: r.Precision, Scale: r.Scale,
+				Type: r.Type, Precision: r.Precision, Scale: r.Scale, Fields: r.Fields,
 			}
 		}
 	}

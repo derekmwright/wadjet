@@ -2378,3 +2378,26 @@ answered until the declaration reaches them.
 §8f leaves one of its own: a WRITTEN qualified ORDER BY term beside a duplicate
 output name is rewritten onto the select-list alias and binds the first column
 of it. Pinned in `coordinator.TestN1AnOrdinalSortKeyBindsItsSlot`.
+
+
+### Fixed ROW consumers and computed aliases (A3b)
+
+The complete column declaration, including fixed ROW fields, crosses every
+projection and materialization boundary (`declTypeParts`). A projected stream
+publishes a new column set: a further projection materializes above it through
+`StageProject`, instead of overwriting its producer. Derived ROW field parents
+bind through the aggregate rename resolver; set-operation outputs publish their
+resolved child fields to that same declaration walk.
+
+This also makes the two-computed-alias #807 control execute without the former
+local route and repairs #851's computed alias values when an outer SELECT reads
+an alias that shadows a stored column. The old value pins now assert PostgreSQL's
+values. An outer SELECT without ORDER BY compares a multiset (ADR-0013 class 1);
+an explicitly ordered twin checks the sequence. The gather-owned wrapped-window
+refusal remains unchanged. See the A3b position corpus and alias-key controls.
+
+An expression already published as a GROUP BY key remains a reference:
+`aggregateGroupKeyName` checks its identity before alias materialization.
+Recomputing it above an aggregate would read arguments that the stream no longer
+contains. ROW parent rewrites similarly stop at a join's published identities;
+they may resolve a rename owned by the current unary scope, not another arm's.

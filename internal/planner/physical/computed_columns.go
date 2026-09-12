@@ -27,14 +27,9 @@ func NewComputedColumnsOp(cols []exec.ProjectColumn) exec.UnaryOperator {
 // NewComputedColumnsOpWithMeta is NewComputedColumnsOp plus the full
 // declaration of each computed column, for a caller that has one.
 //
-// exec.ProjectColumn carries a bare TypeID plus (p,s) and a VECTOR dimension,
-// which is enough for the arithmetic these columns were built for and not
-// enough for a ROW FIELD PATH of a container type: without Fields/ElementType
-// the computed vector is minted with nil Children/Child and every value
-// written into it is dropped (#568 for the aggregate's pre-projection, #618
-// for the window's keys). A nil meta is the pre-#568 contract — "Name/Type is
-// the whole declaration" — and is what NewComputedColumnsOp's other caller,
-// the worker's fragment builder, passes.
+// ProjectColumn carries fixed ROW fields directly. Explicit metadata also
+// carries ARRAY/MAP element declarations and nested field shapes recovered
+// from an input column (#568, #618).
 func NewComputedColumnsOpWithMeta(cols []exec.ProjectColumn, meta []parquet.Column) exec.UnaryOperator {
 	// shareOutputs, which here means per-CALL computed vectors rather than
 	// the pooled ones. The aggregate consumes each batch's values before the
@@ -119,7 +114,7 @@ func (a *aggPreProject) columnMeta(in *batch.RecordBatch, k int, c exec.ProjectC
 			return fc
 		}
 	}
-	col := parquet.Column{Name: c.Name, Type: c.Type, Nullable: true}
+	col := parquet.Column{Name: c.Name, Type: c.Type, Nullable: true, Fields: c.Fields}
 	if c.Type == parquet.TypeVector {
 		col.Dimension = c.Dimension
 	}

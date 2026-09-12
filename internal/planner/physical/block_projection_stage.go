@@ -316,12 +316,13 @@ func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool,
 			// reaches it with its own (20, through `subqueryDecl`). Whatever
 			// that walk answers is what this stage publishes, so the two paths
 			// describe one relation by construction.
-			t, prec, scale := declTypeParts(
+			materialized := declTypeParts(
 				inferProjectionDeclType(pr.ASTExpr, parquet.TypeString, strictInt, decls))
+			t, prec, scale, fields := materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
 			out = append(out, blockColumn{
 				Name: name, Expr: pr.ASTExpr.String(),
 				Decl: parquet.Column{
-					Name: name, Type: t, Precision: prec, Scale: scale, Nullable: true,
+					Name: name, Type: t, Precision: prec, Scale: scale, Fields: fields, Nullable: true,
 				},
 				DeclKnown: true,
 			})
@@ -382,7 +383,7 @@ func publishBlockProjection(node *logical.Node, stages *[]Stage, from int,
 	for i, c := range cols {
 		specs[i] = ProjectExprSpec{
 			Expr: c.Expr, Name: c.Name, Type: c.Decl.Type, TypeKnown: c.DeclKnown,
-			Precision: c.Decl.Precision, Scale: c.Decl.Scale,
+			Precision: c.Decl.Precision, Scale: c.Decl.Scale, Fields: c.Decl.Fields,
 		}
 	}
 	respelled, ok := respellSpecsOverProducerOutput(*stages, target, specs)

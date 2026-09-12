@@ -499,9 +499,10 @@ type Stage struct {
 // synthetic OutputCol). From is the primary input column (used as the
 // existence check); other column refs in Expr resolve via ColumnIndexFallback.
 type OutputRename struct {
-	From string
-	To   string
-	Expr plansql.Node
+	Fields []parquet.Column
+	From   string
+	To     string
+	Expr   plansql.Node
 	// IsAgg marks a rename whose source is an AGGREGATE output column rather
 	// than a group key. The producer emits all group keys before all
 	// aggregates, so when an aggregate shares a name with a group key their
@@ -536,9 +537,10 @@ type OutputRename struct {
 // value and the worker never consults it there (a ColRef resolves by
 // DirectCopy instead).
 type ProjectExprSpec struct {
-	Expr string
-	Name string
-	Type parquet.TypeID
+	Fields []parquet.Column
+	Expr   string
+	Name   string
+	Type   parquet.TypeID
 	// TypeKnown distinguishes a DECLARED Type from the zero value, which
 	// TypeBool shares — the same shape as AggSpec.OutputTypeKnown (#354,
 	// #371). A computed BOOLEAN expression (a comparison, LIKE, IS NULL, a
@@ -761,6 +763,7 @@ type AggSpec struct {
 	// InputPrecision/InputScale carry a DECIMAL InputType's (p,s), for
 	// Stage.GroupByDecimal's reason: the materialized input vector is built
 	// from the declaration alone.
+	InputFields    []parquet.Column
 	InputPrecision int
 	InputScale     int
 	// InputCol2, Separator and Percentile carry the aggregate arguments
@@ -866,6 +869,7 @@ type SortKeySpec struct {
 	// which SourceType alone cannot: the fragment builds the key's vector
 	// from this declaration and a DECIMAL one with no scale reads every
 	// value back at 10^0 (ADR-0024 item 2).
+	SourceFields    []parquet.Column
 	SourcePrecision int
 	SourceScale     int
 
@@ -889,6 +893,7 @@ type SortKeySpec struct {
 	AliasExpr          string
 	AliasExprType      parquet.TypeID
 	AliasExprTypeKnown bool
+	AliasExprFields    []parquet.Column
 	AliasExprPrecision int
 	AliasExprScale     int
 

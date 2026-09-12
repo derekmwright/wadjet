@@ -440,7 +440,7 @@ func projectOpFromSpecs(specs []physical.ProjectExprSpec) (distributed.OpSpec, b
 	}
 	projections := make([]distributed.ProjectSpec, len(specs))
 	for i, p := range specs {
-		projections[i] = distributed.ProjectSpec{Expr: p.Expr, Name: p.Name}
+		projections[i] = distributed.ProjectSpec{Expr: p.Expr, Name: p.Name, Fields: p.Fields}
 		// TypeKnown || Type != 0 mirrors wireAggSpecs' "declared" check
 		// (agg_wire.go): a nonzero Type reaches the wire exactly as before
 		// even from a caller that never learned about TypeKnown, and a

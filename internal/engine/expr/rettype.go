@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // DeclType is a resolved declared type: the vector type a value can be stored
@@ -26,6 +27,8 @@ import (
 // same reason: precision 0 is a sentinel a caller must not take at face
 // value.
 type DeclType struct {
+	// Schema carries a fixed ROW declaration through the same inference as its TypeID.
+	Schema    *parquet.Column
 	ID        batch.TypeID
 	Precision int
 	Scale     int
@@ -183,8 +186,9 @@ func (d DeclType) String() string {
 // signature makes a missing declaration a compile error, and the zero value
 // makes a field-named literal that skips it a panic at init.
 type Ret struct {
-	kind retKind
-	typ  batch.TypeID
+	schema *parquet.Column
+	kind   retKind
+	typ    batch.TypeID
 	// args lists the candidate argument positions a polymorphic return
 	// mirrors, in preference order. Empty means every argument.
 	args []int
@@ -529,7 +533,7 @@ func (r Ret) Declared() bool { return r.kind != retUndeclared }
 func (r Ret) Resolve(nargs int, argType func(i int) (DeclType, Confidence)) (DeclType, Confidence) {
 	switch r.kind {
 	case retFixed:
-		return DeclType{ID: r.typ}, Decided
+		return DeclType{ID: r.typ, Schema: r.schema}, Decided
 	case retSameAsArg:
 		if argType != nil {
 			// ONE pass, and one argType call per argument. argType is a
@@ -882,4 +886,17 @@ func (r Ret) Boolean() bool {
 // the INT64 the runtime actually produces (#636).
 func FuncReturnsInteger(name string) bool {
 	return DefaultRegistry.ReturnType(name).Integer()
+}
+
+// RetRow declares the complete child schema needed to allocate a ROW result.
+func RetRow(fields []parquet.Column) Ret {
+	return Ret{kind: retFixed, typ: batch.TypeRow, schema: &parquet.Column{Type: parquet.TypeRow, Fields: fields}}
+}
+
+// RowFields returns the fixed child schema retained by this declaration.
+func (d DeclType) RowFields() []parquet.Column {
+	if d.Schema == nil {
+		return nil
+	}
+	return d.Schema.Fields
 }

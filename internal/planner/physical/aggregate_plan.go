@@ -122,6 +122,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 					// materialized vector truncates at scale 0 (ADR-0024
 					// item 2).
 					Type:      aggDecl.ID,
+					Fields:    declTypeParts(aggDecl).Fields,
 					Precision: aggDecl.Precision,
 					Scale:     aggDecl.Scale,
 					Expr:      wrapExpr(compiled),
@@ -203,7 +204,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				// Float64 default and a container field to Float64 outright
 				// (#568).
 				meta := parquet.Column{Name: synName, Type: pc.Type, Nullable: true,
-					Precision: pc.Precision, Scale: pc.Scale}
+					Precision: pc.Precision, Scale: pc.Scale, Fields: pc.Fields}
 				if fc, ok := aggInputDecls.field(fieldPathColRef(agg.InputExpr)); ok {
 					meta = fc
 					meta.Name, meta.Nullable = synName, true
@@ -427,6 +428,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 						// item 2).
 						Precision: gbDecl.Precision,
 						Scale:     gbDecl.Scale,
+						Fields:    declTypeParts(gbDecl).Fields,
 						Expr:      wrapExpr(compiled),
 					}
 					// Batched evaluation when available — beyond the vec
@@ -442,7 +444,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 					// written through the boxed route so a NULL field stays
 					// NULL (#568).
 					meta := parquet.Column{Name: synName, Type: pc.Type, Nullable: true,
-						Precision: pc.Precision, Scale: pc.Scale}
+						Precision: pc.Precision, Scale: pc.Scale, Fields: pc.Fields}
 					if fc, ok := aggChildColTypes.field(fieldPathColRef(gbExpr)); ok {
 						meta = fc
 						meta.Name, meta.Nullable = synName, true

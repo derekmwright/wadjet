@@ -162,6 +162,7 @@ func (p *Planner) attachScanSelectProjections(root *logical.Node, stages []Stage
 		var typ parquet.TypeID
 		var typeKnown bool
 		var prec, scale int
+		var fields []parquet.Column
 		// A ROW FIELD PATH looks like a simple column reference and is not
 		// one: no stage carries a column by that name, so the fragment has
 		// to COMPUTE it, and its type has to be declared here — nothing
@@ -207,16 +208,17 @@ func (p *Planner) attachScanSelectProjections(root *logical.Node, stages []Stage
 				p.loweredScalarProjExprs[&proj[j]] = true
 				specs = append(specs, ProjectExprSpec{Expr: lowered, Name: name,
 					Type: ldecl.ID, TypeKnown: ldeclKnown,
-					Precision: ldecl.Precision, Scale: ldecl.Scale})
+					Precision: ldecl.Precision, Scale: ldecl.Scale, Fields: declTypeParts(ldecl).Fields})
 				continue
 			}
 			decl := inferProjectionDeclType(it.ASTExpr, parquet.TypeString, strictInt, colTypes)
 			typ = decl.ID
 			prec, scale = decl.Precision, decl.Scale
+			fields = declTypeParts(decl).Fields
 			typeKnown = true
 		}
 		specs = append(specs, ProjectExprSpec{Expr: itemExpr, Name: name, Type: typ,
-			TypeKnown: typeKnown, Precision: prec, Scale: scale})
+			TypeKnown: typeKnown, Precision: prec, Scale: scale, Fields: fields})
 	}
 	// A wrapped item reading TWO slots needs both on the stream, and only the
 	// first could take its own position. The rest ride at the END, past the
@@ -259,7 +261,7 @@ func (p *Planner) attachScanSelectProjections(root *logical.Node, stages []Stage
 			// outright (#776).
 			continue
 		}
-		if proj[j].ASTExpr != nil && !isSimpleColRefForRename(proj[j].ASTExpr) {
+		if proj[j].ASTExpr != nil && (!isSimpleColRefForRename(proj[j].ASTExpr) || astIsFieldPath(proj[j].ASTExpr, colTypes)) {
 			// #387: an EXPRESSION referencing a nested rename (`k + 1` over
 			// `r_regionkey AS k`) was attached verbatim, so the fragment
 			// compiled it against a schema with no `k` and the task
@@ -279,14 +281,34 @@ func (p *Planner) attachScanSelectProjections(root *logical.Node, stages []Stage
 				// just below it: the rewritten expression names only SOURCE
 				// columns, so the strict-int set to check it against is the
 				// one visible BELOW the rename chain, same as #445 above.
-				specs[j].Type, specs[j].Precision, specs[j].Scale = declTypeParts(
+				materialized := declTypeParts(
 					inferProjectionDeclType(rewritten, parquet.TypeString,
 						strictIntArithColsThroughRenames(renameChild),
 						sourceColDeclsThroughRenames(renameChild)))
+				specs[j].Type, specs[j].Precision, specs[j].Scale, specs[j].Fields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
 				specs[j].TypeKnown = true
 				anyNestedRename = true
 			}
 			continue
+		}
+		if def, owner := derivedAliasDefinition(specs[j].Name, renameChild); def != nil && owner != nil && len(owner.Children) == 1 {
+			// A GROUP BY expression is already a published column. Its
+			// identity, not its text, decides whether it needs evaluation.
+			_, published := aggregateGroupKeyName(&logical.Projection{Expr: def.String(), ASTExpr: def}, owner)
+			if !published {
+
+				// Gather-owned aggregate/window slots cannot be materialized by a fragment.
+				if referencesSyntheticAgg(def) || referencesSyntheticWindow(def) || exprCarriesSubquery(def) {
+					continue
+				}
+				d := declTypeParts(inferProjectionDeclType(def, parquet.TypeString, strictIntArithCols(owner.Children[0]), emittedColDecls(owner.Children[0])))
+				specs[j].Expr = def.String()
+				specs[j].Type, specs[j].Precision, specs[j].Scale, specs[j].Fields = d.Type, d.Precision, d.Scale, d.Fields
+				specs[j].TypeKnown = true
+				hasExpr = true
+				anyNestedRename = true
+				continue
+			}
 		}
 		src := resolveOutputRenameSource(specs[j].Name, renameChild)
 		if strings.EqualFold(src, specs[j].Name) && strings.Contains(specs[j].Name, ".") {

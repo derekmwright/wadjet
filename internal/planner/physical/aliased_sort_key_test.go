@@ -121,7 +121,7 @@ func TestAliasedSortKeyResolvesToGroupedColumn(t *testing.T) {
 				// which is what #313's invariant is about.
 				a, b := got[i], ctrl[i]
 				a.WrittenTerm, b.WrittenTerm = "", ""
-				if a != b {
+				if !reflect.DeepEqual(a, b) {
 					t.Errorf("sort key %d differs from the un-aliased control: got %+v, control %+v", i, a, b)
 				}
 			}

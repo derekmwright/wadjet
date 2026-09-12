@@ -131,6 +131,7 @@ type VecDecimalExpression func(b *batch.RecordBatch, out *batch.Vector, n int) b
 
 // ProjectColumn defines an output column of a projection.
 type ProjectColumn struct {
+	Fields          []parquet.Column
 	Name            string
 	Type            parquet.TypeID
 	Expr            Expression
@@ -352,6 +353,7 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 			}
 			col := parquet.Column{
 				Name:     proj.Name,
+				Fields:   proj.Fields,
 				Type:     typ,
 				Nullable: true,
 			}

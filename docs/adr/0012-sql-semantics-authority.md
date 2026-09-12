@@ -2733,7 +2733,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
    - **`tcp_flags` declares an ARRAY and a top-level projection of it is
      TEXT.** (Added 2026-09-08, arc A2, #966; the limitation predates it.)
      `physical.funcReturnType` (unexported, `internal/planner/physical/
-     declared_output.go`) declines every ARRAY/MAP/ROW-returning function — a projection has no element type to size the child vector with
+     declared_output.go`) declines ARRAY/MAP-returning functions and ROW functions without fixed fields — a projection has no element type to size the child vector with
      — so `SELECT tcp_flags(f)` is declared TEXT and the client is handed Go's
      rendering of the slice (`[SYN ACK]`) rather than a slice or PostgreSQL's
      `{SYN,ACK}`. `map_keys`, `map_values` and `map_entries` have answered that
@@ -2742,8 +2742,9 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      On the wire it is OID 25, which is what an ARRAY column declares here
      anyway (#992, the entry above). Pinned in
      `wadjet.TestATopLevelTCPFlagsProjectionIsTextToday`, which FAILS when a
-     projection can carry a nested type — that failure is the reminder to move
-     the declaration for every container-returning function at once.
+     projection can carry an ARRAY declaration. Fixed-schema ROW declarations
+     travel through the complete column declaration independently (A3b);
+     ARRAY/MAP element declarations remain #1017's open class.
 
    - **`has_tcp_flag` and `tcp_flags_from_string` now REFUSE a name they do not
      know.** (Added 2026-09-08, arc A2, #966.) They predate the family above
@@ -3085,15 +3086,14 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      are computed from the fixture's strings. Reverting the five bound
      constructors to the wrapping form fails all sixteen site cells.
 
-     **A ROW-RETURNING `semver_parse` IS NOT PART OF THIS FAMILY, and #1017 is
-     the reason.** `physical.funcReturnType` (unexported,
-     `internal/planner/physical/declared_output.go`) declines every
-     ARRAY/MAP/ROW return type, so such a projection would be declared TEXT
-     and rendered Go-style at the top level — the entry above records that for
-     `tcp_flags`. #1017 is a CLASS with a gate over the whole registry, and a
-     ROW-only patch inside this arc would be a bounded model over a structural
-     gap. The parts are separate scalar functions instead, which is the shape
-     #967 itself asks for, and the ROW form waits for #1017's own arc.
+     **The fixed ROW declaration mechanism is available for the ROW parse.**
+     A3b carries a registry's `RetRow(fields)` schema through the complete
+     declared-output seam, including group keys, set-operation arms, window
+     keys and worker/gather projections. Derived ROW field grouping uses the
+     same parent binding, covering #1055. The semver ROW functions are added
+     on top of this mechanism; the component family here remains available.
+     ARRAY/MAP scalar declarations remain on their existing #1017 disposition.
+     See [fixed ROW declarations](../internals/scalar-row-declarations.md).
 
    - **WITHDRAWN the same day (arc J1 round 3): the refusal of `SELECT *` over
      a LATERAL whose ungrouped COUNT can see no rows.** It fired on the SHAPE,

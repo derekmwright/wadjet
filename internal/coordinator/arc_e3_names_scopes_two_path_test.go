@@ -225,10 +225,11 @@ var e3RouteCounters = []struct {
 }
 
 type e3Case struct {
-	name  string
-	sql   string
-	want  string
-	route func(*Coordinator) int64 // nil = the DAG must EXECUTE it
+	unordered bool // No outer ORDER BY: compare the multiset (ADR-0013 class 1).
+	name      string
+	sql       string
+	want      string
+	route     func(*Coordinator) int64 // nil = the DAG must EXECUTE it
 	// pin records what an arm answers TODAY where that is not PostgreSQL's
 	// answer, keyed by arm name. Each entry names a defect OUTSIDE this arc's
 	// mechanisms, reached by a shape this arc's own cell needs; the comment
@@ -331,15 +332,16 @@ func TestArcE3NamesAndScopesTwoPath(t *testing.T) {
 		// -5..0 — so the alias is resolved against the scan instead of
 		// against the projection. The single-process path answers
 		// PostgreSQL's rows. The shape is here because the ORDER BY half of
-		// #851's rule needs a derived spelling; the wrong VALUES are a
-		// separate mechanism in the DAG's derived-alias resolution.
+
+		// The outer query without ORDER BY promises a multiset; an explicit
+		// outer ordering below independently verifies the sequence.
 		{name: "851/order-by-prefers-the-output-alias-in-a-derived-table",
 			sql:  "SELECT x.g FROM (SELECT -g AS g FROM typemx WHERE id < 6 ORDER BY g) x",
-			want: "g | -5 | -4 | -3 | -2 | -1 | 0",
-			pin: map[string]string{
-				"dag":     "g | 0 | 1 | 2 | 3 | 4 | 5",
-				"dagshuf": "g | 0 | 1 | 2 | 3 | 4 | 5",
-			}},
+			want: "g | -5 | -4 | -3 | -2 | -1 | 0", unordered: true},
+		{name: "851/derived-shadowing-alias-with-explicit-outer-order",
+			sql:  "SELECT x.g FROM (SELECT -g AS g FROM typemx WHERE id < 6 ORDER BY g) x ORDER BY x.g",
+			want: "g | -5 | -4 | -3 | -2 | -1 | 0"},
+
 		// HAVING binds the INPUT column, like GROUP BY and unlike ORDER BY:
 		// `HAVING g > 2` keeps the groups whose INPUT g is 3, 4, 5.
 		{name: "851/having-binds-the-input-column",
@@ -726,6 +728,13 @@ func TestArcE3NamesAndScopesTwoPath(t *testing.T) {
 							"PostgreSQL 17 answers\n  %s\nThe answer MOVED without becoming "+
 							"right, which is a change the next fix has to account "+
 							"for\n  SQL: %s", arm.name, got, pinned, c.want, c.sql)
+					}
+					checkRoutes()
+					continue
+				}
+				if c.unordered {
+					if e3SortedRender(cols, rows) != e3SortLines(c.want) {
+						t.Errorf("%s multiset %s want %s", arm.name, got, c.want)
 					}
 					checkRoutes()
 					continue

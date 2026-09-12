@@ -353,8 +353,9 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 					// vector from the text alone, and the branch's DECIMAL box
 					// was DROPPED: the DAG answered 0 where the single-process
 					// path refused the store outright. Two paths, one walk.
-					spec.InputType, spec.InputPrecision, spec.InputScale = declTypeParts(
+					materialized := declTypeParts(
 						inferProjectionDeclType(agg.InputExpr, parquet.TypeFloat64, nil, emittedColDecls(exprCols)))
+					spec.InputType, spec.InputPrecision, spec.InputScale, spec.InputFields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
 					// And the OUTPUT declaration from that same triple. The
 					// worker materializes this projection from it, so the
 					// vector every partial that sees a row observes IS this
@@ -1546,15 +1547,17 @@ func absorbSecurityBarrier(node, scan *logical.Node, stages *[]Stage) {
 		}
 		var typ parquet.TypeID
 		var prec, scale int
+		var fields []parquet.Column
 		if isExpr {
 			// Same integer-preserving-arithmetic hint as
 			// attachScanSelectProjections (#297, #445).
-			typ, prec, scale = declTypeParts(inferProjectionDeclType(pr.ASTExpr, parquet.TypeString,
+			materialized := declTypeParts(inferProjectionDeclType(pr.ASTExpr, parquet.TypeString,
 				strictIntArithCols(scan),
 				colDecls{types: scan.ScanColTypes, fields: scan.ScanColFields, dec: scan.ScanColDecimal}))
+			typ, prec, scale, fields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
 		}
 		specs = append(specs, ProjectExprSpec{Expr: expr, Name: name, Type: typ,
-			TypeKnown: isExpr, Precision: prec, Scale: scale})
+			TypeKnown: isExpr, Precision: prec, Scale: scale, Fields: fields})
 	}
 	if len(specs) > 0 {
 		target.SecurityProjectExprs = specs

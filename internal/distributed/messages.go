@@ -5,6 +5,8 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"time"
+
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // TaskType identifies the kind of work a task performs.
@@ -770,9 +772,10 @@ type ColumnSpec struct {
 // wire (#445). nil means "resolve from the source column" (a bare passthrough,
 // which the worker resolves by DirectCopy and never consults this for).
 type ProjectSpec struct {
-	Expr string `json:"expr"`
-	Name string `json:"name"`
-	Type *int   `json:"type,omitempty"`
+	Fields []parquet.Column `json:"fields,omitempty"`
+	Expr   string           `json:"expr"`
+	Name   string           `json:"name"`
+	Type   *int             `json:"type,omitempty"`
 	// Precision and Scale carry a computed DECIMAL's declaration. A bare
 	// TypeID is not a type for a DECIMAL: the worker builds the output
 	// vector from Type alone, and a DECIMAL vector with no scale reads every
@@ -810,8 +813,9 @@ type DecimalMeta struct {
 // this fragment materialize the value", which no reader may re-derive from the
 // text (§2c).
 type GroupKeyResolveSpec struct {
-	Expr     string `json:"expr,omitempty"`
-	Computed bool   `json:"computed,omitempty"`
+	Fields   []parquet.Column `json:"fields,omitempty"`
+	Expr     string           `json:"expr,omitempty"`
+	Computed bool             `json:"computed,omitempty"`
 }
 
 // AggSpec defines an aggregation in a task.
@@ -873,8 +877,9 @@ type AggSpec struct {
 	// vector is built from the declaration and one with no scale truncates
 	// every value — MAX(COALESCE(a, b)) over two DECIMAL columns answered
 	// 12 for 12.75 on the DAG (ADR-0024 item 2). Zero for every other type.
-	InputPrecision int `json:"input_precision,omitempty"`
-	InputScale     int `json:"input_scale,omitempty"`
+	InputFields    []parquet.Column `json:"input_fields,omitempty"`
+	InputPrecision int              `json:"input_precision,omitempty"`
+	InputScale     int              `json:"input_scale,omitempty"`
 	// InputCol2 is the second column argument of a two-column aggregate:
 	// CORR(x, y), COVAR_SAMP/POP(x, y) and MIN_BY/MAX_BY(value, ordering).
 	// Empty for every other function.

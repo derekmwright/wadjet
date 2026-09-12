@@ -59,7 +59,7 @@ func wireGroupKeyResolve(resolve []physical.GroupKeyResolution) []distributed.Gr
 	}
 	out := make([]distributed.GroupKeyResolveSpec, len(resolve))
 	for i, r := range resolve {
-		out[i] = distributed.GroupKeyResolveSpec{Expr: r.Expr, Computed: r.Computed}
+		out[i] = distributed.GroupKeyResolveSpec{Expr: r.Expr, Computed: r.Computed, Fields: r.Decl.RowFields()}
 	}
 	return out
 }
@@ -150,6 +150,7 @@ func wireAggSpecs(specs []physical.AggSpec) []distributed.AggSpec {
 		// column to declare the SUM leg AVG is split into (#685). Zero for
 		// every non-DECIMAL input, so carrying it unconditionally says nothing
 		// new about the ones that had it before.
+		spec.InputFields = a.InputFields
 		spec.InputPrecision, spec.InputScale = a.InputPrecision, a.InputScale
 		out = append(out, spec)
 	}

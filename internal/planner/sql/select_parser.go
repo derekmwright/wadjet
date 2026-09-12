@@ -1911,6 +1911,15 @@ func (p *selectParser) parsePostfix() (Node, error) {
 				node = inner.Inner
 			}
 			inner, ok := node.(*ColRef)
+			if _, computed := node.(*FuncCallNode); computed {
+				p.advance()
+				fieldTok, err := p.expect(TokenIdent)
+				if err != nil {
+					return nil, fmt.Errorf("expected field name after '.'")
+				}
+				expr = &FuncCallNode{Name: "row_field", OutputLabel: fieldTok.val, Args: []Node{node, &Lit{Value: fieldTok.val, Kind: LitString}}}
+				continue
+			}
 			if !ok {
 				// PostgreSQL's own sentence, with the one substitution this
 				// layer can make: the parser knows the EXPRESSION but not its

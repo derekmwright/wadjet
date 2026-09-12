@@ -603,6 +603,9 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 			// are a different namespace — but the SCHEMA-FREE refusals apply
 			// to its arguments and frame terms exactly as to any other item,
 			// so they are asked here rather than lost with it.
+			if err := refuseInvalidRowFields(col.ASTExpr); err != nil {
+				return err
+			}
 			if err := refuseUnknownFlagNames(col.ASTExpr); err != nil {
 				return err
 			}
@@ -717,6 +720,9 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 	// of the statement's text, and it has to be the same answer on the DAG —
 	// where a stage's fragment compiles when a task RUNS — as in one process
 	// (#1018 round 6, B1). See validate_flag_names.go.
+	if err := refuseInvalidRowFields(expr); err != nil {
+		return err
+	}
 	if err := refuseUnknownFlagNames(expr); err != nil {
 		return err
 	}

@@ -104,6 +104,36 @@ func projectsAMintedGroupKey(project *logical.Node, name string) bool {
 // See docs/internals/aggregate-input-name-resolution.md for the design.
 func resolveAggInputName(name string, child *logical.Node) (resolved string, expr plansql.Node, exprInput *logical.Node, alias bool) {
 	resolved = name
+	if ref, err := plansql.ParseExpression(name); err == nil {
+		if field, ok := ref.(*plansql.ColRef); ok && emittedColDecls(child).isFieldPath(field) {
+			// A join publishes its own container identities. Resolve only an
+			// alias owned by this unary scope, never a rename inside another
+			// join arm (where the source may collide with the other arm).
+			ownsParent := false
+			for scope := child; scope != nil; {
+				if scope.Type == logical.NodeProject && projectionForName(scope.Projections, field.Table, derivedScopeBareName(field.Table, scope)) != nil {
+					ownsParent = true
+					break
+				}
+				if len(scope.Children) != 1 {
+					break
+				}
+				scope = scope.Children[0]
+			}
+			if !ownsParent {
+				return name, nil, nil, false
+			}
+
+			parent, def, scope, renamed := resolveAggInputName(field.Table, child)
+			if renamed {
+				if def == nil {
+					def = &plansql.ColRef{Column: parent}
+					_, scope, _ = namingScopeDecls(def, child)
+				}
+				return name, &plansql.FuncCallNode{Name: "row_field", Args: []plansql.Node{def, &plansql.Lit{Kind: plansql.LitString, Value: field.Column}}}, scope, true
+			}
+		}
+	}
 	if child == nil || name == "" {
 		return resolved, nil, nil, false
 	}
@@ -351,14 +381,23 @@ func aggStageDerivedKey(key string, child *logical.Node) (string, bool) {
 	if err != nil {
 		return key, false
 	}
-	if _, bare := node.(*plansql.ColRef); bare {
-		return key, false // aggStageGroupKey's own case, already answered
+	if ref, bare := node.(*plansql.ColRef); bare && !emittedColDecls(child).isFieldPath(ref) {
+		return key, false
 	}
 	changed := false
 	out := plansql.RewriteExpr(node, func(n plansql.Node) (plansql.Node, bool) {
 		ref, isRef := n.(*plansql.ColRef)
 		if !isRef {
 			return nil, false
+		}
+
+		if emittedColDecls(child).isFieldPath(ref) {
+			_, def, _, renamed := resolveAggInputName(qualifiedColumn(ref), child)
+			if !renamed || def == nil {
+				return nil, false
+			}
+			changed = true
+			return def, true
 		}
 		resolved, expr, _, renamed := resolveAggInputName(qualifiedColumn(ref), child)
 		if !renamed {

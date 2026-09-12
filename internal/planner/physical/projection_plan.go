@@ -420,6 +420,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			// input schema, so exec.Project has nothing to read the scale
 			// off and a scale-0 vector reads every value back a hundredfold
 			// out (ADR-0024 item 2; #529, #555).
+			Fields:    outDecl.RowFields(),
 			Precision: outDecl.Precision,
 			Scale:     outDecl.Scale,
 		}
