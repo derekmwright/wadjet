@@ -21,6 +21,13 @@ import (
 // See docs/internals/dag-sort-select-list-positions.md for the design.
 func sortKeySlotPosStage(ob logical.OrderExpr, sortNode *logical.Node, produced []Stage) int {
 	if pos := sortKeySlotPos(ob, sortNode); pos != 0 {
+		// A set operation carries its own proof (sortInputSetOpWidth): its
+		// stage publishes the result column list and nothing else, so the
+		// subtree bound below — which exists because a JOIN stage emits both
+		// arms' whole schemas — has nothing to say about it (#1022).
+		if _, ok := sortInputSetOpWidth(sortNode.Children[0]); ok {
+			return pos
+		}
 		if !subtreeJoinsRelations(sortNode) {
 			return pos
 		}
@@ -173,6 +180,12 @@ func sortKeySlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 		return 0
 	}
 	child := sortNode.Children[0]
+	if width, ok := sortInputSetOpWidth(child); ok {
+		if ob.SlotPos > width {
+			return 0
+		}
+		return ob.SlotPos
+	}
 	if child == nil || child.Type != logical.NodeProject || logical.HasStarProjection(child) {
 		return 0
 	}
@@ -190,6 +203,31 @@ func sortKeySlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 		}
 	}
 	return ob.SlotPos
+}
+
+// sortInputSetOpWidth reports the number of result columns when a Sort reads a
+// SET OPERATION directly, and false otherwise.
+//
+// A set operation needs no proof that a position addresses its stream: its
+// output IS its result column list, in order, on both engines. Every arm is
+// projected onto that list — `setOpArmProjection` builds the DAG union stage's
+// per-arm projection from it and `alignSetOpRows` re-keys the in-process rows
+// onto it — precisely so the arms are one schema and the concatenation is well
+// defined. Position i of the list is therefore column i of the sort's input by
+// construction.
+//
+// The list is the operation's leftmost arm's names and two of them may be the
+// SAME string: `SELECT order_id AS amount, amount FROM lat_item UNION SELECT
+// id, total FROM lat_ord ORDER BY 1, 2 DESC` publishes `amount` twice, so with
+// no position both keys resolved to the first column and key 2 was never
+// applied — on every arm, 7 rows in PostgreSQL's key-1 order with key 2
+// ignored (#1022).
+func sortInputSetOpWidth(child *logical.Node) (int, bool) {
+	if !isSetOpNode(setOpUnwrap(child)) {
+		return 0, false
+	}
+	n := len(setOpOutputNames(child))
+	return n, n > 0
 }
 
 // sortKeyLocalSlotPos tries an ordinal first, then the visible SELECT-list

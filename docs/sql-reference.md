@@ -399,7 +399,10 @@ EXCEPT ALL
 SELECT ip_address FROM blocklist
 ```
 
-All set operations support ORDER BY and LIMIT on the combined result. Operations are left-associative when chained (e.g., `A UNION B EXCEPT C` is `(A UNION B) EXCEPT C`).
+All set operations support ORDER BY and LIMIT on the combined result, including
+positional `ORDER BY` terms, which address the result columns the leftmost arm
+names — see "ORDER BY over a set operation". Operations are left-associative
+when chained (e.g., `A UNION B EXCEPT C` is `(A UNION B) EXCEPT C`).
 
 A set operation's arms always produce the operation's whole result row, whatever
 the query above it reads. Before this release a filter or an aggregate above a set
@@ -1299,6 +1302,43 @@ from every sort key, so the two spellings became one key and both bound the
 first column of that bare name: the trailing key was never applied and the
 rows came back in the join's emission order. Both distributed paths were
 already correct.
+
+Through v0.18.64 the distributed paths had the mirror of that defect for a
+QUALIFIED term beside a duplicated output name: only the single-process
+engines resolved such a term to a select-list POSITION, so on the stage DAG
+`SELECT DISTINCT a.order_id AS amount, b.amount FROM items a JOIN items b ON
+b.order_id = a.order_id ORDER BY 1, b.amount DESC` — whose output list carries
+`amount` twice — bound both keys to the first of them and returned the right
+rows in a sequence the client did not ask for. Both spellings now bind by slot
+on every path.
+
+### ORDER BY over a set operation
+
+A set operation's result columns are named by its **leftmost arm**, and a
+positional `ORDER BY` term addresses those columns:
+
+```sql
+-- Two result columns called `amount`; key 2 is the SECOND one
+SELECT order_id AS amount, amount FROM items
+UNION SELECT id, total FROM orders
+ORDER BY 1, 2 DESC
+
+-- A position over star arms counts the expanded columns, in schema order
+SELECT * FROM orders UNION SELECT * FROM orders WHERE id < 3 ORDER BY 3 DESC, 1
+```
+
+Through v0.18.64 a set operation lost those positions and the result column
+names were the only address left. Where two of them were the same string the
+consequences were a wrong ORDER on every path (the trailing key silently
+unapplied) and, on the distributed paths, a wrong ROW COUNT and wrong VALUES:
+the deduplication key bound one column twice, so the `UNION` above answered
+three rows whose second column carried the first's values, and the
+`INTERSECT`/`EXCEPT` spellings answered none. A position at or past a star in
+the leftmost arm was refused outright — `ORDER BY position 3 is out of range
+(1-1)`, counting the star as one column — for a query PostgreSQL answers. And a
+chain of three or more operations whose result columns repeat a name failed the
+query on the distributed paths with a column-type disagreement between the
+operation's own output files. All of these answer now.
 
 ### ORDER BY an aggregate the SELECT list does not carry
 

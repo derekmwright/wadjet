@@ -56,6 +56,9 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 	ops = append(ops, distributed.OpSpec{
 		Type:        distributed.OpHashAggregate,
 		GroupByCols: append([]string(nil), stage.GroupByCols...),
+		// The POSITIONS, where the planner knows them by construction and the
+		// names are not addresses (#1022).
+		GroupByColIdx: append([]int(nil), stage.GroupByColIdx...),
 		// Only where this fragment COMPUTES the keys. A merge reads a
 		// partial's output, where the key is already a column under its
 		// published name — so the two names are one there by construction,

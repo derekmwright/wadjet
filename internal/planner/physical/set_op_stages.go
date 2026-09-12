@@ -175,6 +175,13 @@ func (p *Planner) emitSetOpCountingStage(stages *[]Stage, unionID string, node *
 		Type:        "final_aggregate",
 		Tasks:       1,
 		GroupByCols: append([]string(nil), outNames...),
+		// The result columns are positions 0..n-1 of the union stage's output
+		// by construction — setOpArmProjection emits exactly them, in order,
+		// with the two tag columns appended AFTER. Two of those names may be
+		// the same string, and then the name is not an address: both keys
+		// resolved to column one and `EXCEPT` answered 0 rows where
+		// PostgreSQL answers 4 (#1022, ADR-0026 §3a).
+		GroupByColIdx: setOpKeyPositions(len(outNames)),
 		// A RawInputAggregate reads the union's RAW rows, so it computes its
 		// keys and carries a resolution list. Here the two names are the same
 		// string — the set operation's result columns are what every arm's
@@ -223,6 +230,16 @@ func (p *Planner) refuseSetOp(err error) {
 	if p.setOpErr == nil {
 		p.setOpErr = err
 	}
+}
+
+// setOpKeyPositions is the identity position list for a set operation's n
+// result columns, the group-key twin of identityGroupKeyResolutions above.
+func setOpKeyPositions(n int) []int {
+	out := make([]int, n)
+	for i := range out {
+		out[i] = i
+	}
+	return out
 }
 
 func setOpName(node *logical.Node) string {
@@ -865,7 +882,22 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 			types: make([]setOpColType, len(outNames)),
 		}
 		for i, n := range innerNames {
-			plan.specs[i] = ProjectExprSpec{Expr: n, Name: outNames[i]}
+			plan.specs[i] = ProjectExprSpec{
+				Expr: n, Name: outNames[i],
+				// The SLOT, because a nested operation's result columns may
+				// repeat a NAME and the enclosing arm reads them from its
+				// stream: `A UNION B UNION C` parses left-deep, so arm 1 of
+				// the outer operation IS a set operation, and where its result
+				// list carries `amount` twice both specs read the first of
+				// them. The file then declared column two FLOAT64 and carried
+				// the INT64 column one, which the consumer refuses loudly
+				// (ADR-0010) — the same "a name is not a handle" as #1022,
+				// one nesting level up. The positions are the inner
+				// operation's own, by the construction this function relies
+				// on everywhere else: every arm is projected onto the result
+				// column list, in order.
+				SourceSlot: i, SourceSlotSet: true,
+			}
 		}
 		// The nested operation's OWN reconciliation decides what this arm
 		// actually emits, so ask for it rather than reporting "unknown".

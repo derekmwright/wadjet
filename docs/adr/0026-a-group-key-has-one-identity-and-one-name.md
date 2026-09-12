@@ -2331,11 +2331,82 @@ projection is not materialized — `SELECT clt1.c2, clt2.c1 FROM clt1, clt2
 ORDER BY 2`, whose join stage carries no `ProjectExprs` — the key resolves by
 name exactly as before, which is the bound this replaces the guess with.
 
-A WRITTEN qualified term beside a duplicate output name is NOT closed by this:
-`resolveSortKeyColumn` rewrites it onto the select-list alias, which the
-producer publishes twice, so `ORDER BY 1, b.amount DESC` still binds the first
-column on both DAG arms. It is pinned in `TestN1AnOrdinalSortKeyBindsItsSlot`
-with its mechanism, and it belongs to the same arc as §6a's remaining half.
+A WRITTEN qualified term beside a duplicate output name was NOT closed by
+this, and is now — see §8g.
+
+### 8g. A WRITTEN term binds the same slot, under the same measurement (#1014)
+
+An ordinal and a written qualified term address the SAME list, so §8f's rule
+covers both; only the ordinal half was implemented. `resolveSortKeyColumn`
+rewrites a written term onto the select-list item that carries it, so
+`ORDER BY 1, b.amount DESC` over an output list that publishes `amount` twice
+reached the stage spelled `amount` and bound the first of them — the very
+answer §8f exists to prevent, one spelling over, and at 5000 rows under a
+LIMIT a wrong ROW SET as well as a wrong sequence.
+
+**Both engines resolve a written term's slot through ONE function**
+(`sortKeyWrittenSlotPos`, extracted unchanged from `sortKeyLocalSlotPos`):
+exactly one visible item must answer to the term, by its alias or by the
+expression it was written as; two is the ambiguity ADR-0012 records as a
+superset, and a position there would change WHICH one on one arm and not the
+others. **The PROOF is not shared.** On the DAG a written term takes a
+position ONLY under §8f's measurement (`producerPublishesSelectList`), never
+under the subtree-shape bound an ordinal may also use: a written term is
+resolvable on far more queries than an ordinal is, and a position handed out
+where this layer has not looked at the producer is the defect rather than the
+fix.
+
+### 8h. A SET OPERATION's result columns are addressed by POSITION (#1022)
+
+A set operation's result columns are named by its LEFTMOST arm, and two of
+them may be the SAME string: `SELECT order_id AS amount, amount FROM lat_item
+UNION SELECT id, total FROM lat_ord` publishes `amount` twice. The name is
+therefore not an address, and it was the only one in use in three places:
+
+1. **The DEDUP KEY.** A distinct `UNION`'s dedup is a `GroupByAll` hash
+   aggregate, which resolves its key set from the live schema and then looked
+   each key back up BY NAME, so both keys bound column one: the operation
+   deduplicated `(order_id, order_id)` and the two DAG arms answered THREE
+   rows whose second column carried the first's values under the first's
+   declared type, for PostgreSQL's seven. `INTERSECT` and `EXCEPT` take the
+   same shape through `emitSetOpCountingStage`'s key list and answered ZERO
+   rows for PostgreSQL's four. The key is now addressed by POSITION —
+   `exec.HashAggregate.GroupByColIdx`, the group-key twin of
+   `AggColumn.InputColIdx` (#575), carried on `Stage.GroupByColIdx` and
+   `distributed.OpSpec.GroupByColIdx` — which is what the positions ARE by
+   construction: every arm is projected onto the result column list, in order,
+   so that the arms are one schema (§8b). `GroupByAll` needs no wire field at
+   all: "group by every input column" means key i IS column i.
+
+2. **The ORDINAL sort key, twice on one path.** `resolveSetOpOrderBy` rewrites
+   `ORDER BY <n>` to the leftmost arm's name for item n but, unlike
+   `resolveOrderBy` beside it, recorded no `OrderByItem.Ordinal`; and
+   `buildSetOpPlan` built its Sort's keys by hand rather than through
+   `orderExprFor`, so even a recorded position would not have reached
+   `OrderExpr.SlotPos`. Both keys of `ORDER BY 1, 2 DESC` therefore reached
+   the sort spelled `amount` and bound the first — seven right rows with key 2
+   never applied, on EVERY arm. A position over a set operation needs no
+   further proof at the stage layer (`sortInputSetOpWidth`): the operation's
+   output IS its result column list, which is exactly what §8b makes true.
+
+3. **A position at or past a STAR in the leftmost arm** was refused outright,
+   `ORDER BY position 3 is out of range (1-1)` — the star counted as one
+   column — for a query PostgreSQL answers. It is now DEFERRED to
+   `logical.ResolveOrdinalSortKeys` exactly as the non-set-op spelling is
+   (#810, #982), and that pass now records `SlotPos` when it resolves, so a
+   deferred position is a position rather than a name.
+
+4. **A NESTED operation's arm projection read its result columns by name.**
+   `A UNION B UNION C` parses left-deep, so arm 1 of the outer operation IS a
+   set operation, and `setOpArmProjection`'s nested branch spelled each outer
+   spec `ProjectExprSpec{Expr: innerNames[i]}`. Where the inner result list
+   carries one name twice both specs read the FIRST column, so the union
+   stage's file declared column two FLOAT64 and carried column one's INT64 —
+   which the next stage refuses loudly with the ADR-0010 type-disagreement
+   message rather than answering. The specs carry `SourceSlot` now, the field
+   that already exists for exactly this ("a name is not a handle when two
+   columns answer to it", §3a), and the positions are the inner operation's
+   own by the same construction the rest of this item rests on.
 
 ### Gates
 
@@ -2354,6 +2425,9 @@ with its mechanism, and it belongs to the same arc as §6a's remaining half.
 | `coordinator.TestN1AGroupedLateralAnswersItsRows` | 8e's VALUES — a lateral whose inner GROUPS, seven shapes incl. LEFT, nested and different tables |
 | `coordinator.TestN1ATwoGroupedLateralsPublishTheirOwnColumns` | 8e's COLUMN LIST and its order, with three controls (an ordinary two- and three-way join, #988's ungrouped laterals) |
 | `coordinator.TestN1AnOrdinalSortKeyBindsItsSlot` | 8f — eight cells, both keys DESC in turn, the ordinals swapped, 5000 rows, two controls |
+| `coordinator.TestC3AWrittenSortKeyBindsItsOwnColumn` | 8g — ten cells on five arms: the written term leading, alone, DESC, beside an ordinal, both keys written, 5000 rows under a LIMIT, ADR-0012's ambiguous-name divergence, and the bare cross join the measurement must decline |
+| `coordinator.TestC3ASetOperationOrdinalsBindTheirOwnSlots` | 8h — twenty-five cells on five arms: UNION / UNION ALL / INTERSECT / EXCEPT × four orderings × a duplicated-name list, a star, the ALL spellings, a THREE-ARM chain and a 5000-row pair, plus the row COUNTS, which is the half with no sort key in it |
+| `coordinator.TestC3ANullGroupKeyIsItsOwnGroupOnEveryArm` | a NULL group key is its own group on every arm — the NULL-arm UNION over every flat type, eight repetitions per arm, with the morsel-parallel engagement counter asserted (#1058) |
 | `coordinator.TestN1AResultWithNoColumnsIsRefused` | an empty column list is never an answer (ADR-0012's divergence list) |
 
 ### Not settled

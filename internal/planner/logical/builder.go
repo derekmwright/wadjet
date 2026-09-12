@@ -1208,14 +1208,35 @@ func buildSetOpPlan(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, err
 	// SELECT list to resolve a term against and no projection to materialize
 	// one onto. A term that names something the union does not emit still
 	// reaches the sort as written.
+	//
+	// The POSITION an ordinal was written as rides along, through the same
+	// orderExprFor every other sort key is built by. A set operation's result
+	// columns are its leftmost arm's names and two of them may be the SAME
+	// string — `SELECT order_id AS amount, amount FROM lat_item UNION SELECT
+	// id, total FROM lat_ord ORDER BY 1, 2 DESC` publishes `amount` twice —
+	// so with the position dropped both keys reached the sort spelled
+	// `amount`, bound the first of them, and key 2 was never applied on any
+	// arm (#1022).
 	if len(info.OrderBy) > 0 {
+		leftmost := info
+		for leftmost.Union != nil {
+			leftmost = leftmost.Union.Left
+		}
 		var orderExprs []OrderExpr
 		for _, ob := range info.OrderBy {
-			orderExprs = append(orderExprs, OrderExpr{
-				Column:     cleanExpr(ob.Column),
-				Desc:       ob.Desc,
-				NullsFirst: ob.NullsFirst,
-			})
+			// A position the PARSER could not count, because the leftmost
+			// arm's list carries a `*`: ResolveOrdinalSortKeys names it once
+			// the star has expanded, against the set operation's own result
+			// columns (projectOutputNamesBelow descends a set-op node to its
+			// leftmost arm — #982).
+			if pos, ok := deferredOrdinal(ob, leftmost.Columns); ok {
+				orderExprs = append(orderExprs, OrderExpr{
+					Column: cleanExpr(ob.Column), Position: pos,
+					Desc: ob.Desc, NullsFirst: ob.NullsFirst,
+				})
+				continue
+			}
+			orderExprs = append(orderExprs, orderExprFor(cleanExpr(ob.Column), ob))
 		}
 		plan = NewSort(plan, orderExprs)
 	}

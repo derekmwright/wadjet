@@ -634,11 +634,17 @@ type OpSpec struct {
 	// collapsed 12.7500 and 12.7501 into one group holding 12, on the DAG
 	// only. Exactly #379's shape, one type over (ADR-0024 item 2).
 	GroupByDecimal map[string]DecimalMeta `json:"group_by_decimal,omitempty"`
-	Aggregates     []AggSpec              `json:"aggregates,omitempty"`    // per-column aggregations
-	GroupByAll     bool                   `json:"group_by_all,omitempty"`  // DISTINCT: group by every input column, key set resolved at runtime
-	MergeMode      bool                   `json:"merge_mode,omitempty"`    // input is already partial-aggregated; rewrite InputCol → OutputCol and COUNT → SUM
-	FoldAvg        bool                   `json:"fold_avg,omitempty"`      // collapse __avg_sum#X / __avg_count#X synthetics into AVG output (final aggregate only)
-	BuildProject   bool                   `json:"build_project,omitempty"` // construct a derived-input projection before the aggregate (skipped in merge mode — partial output already has OutputCol)
+	Aggregates     []AggSpec              `json:"aggregates,omitempty"`   // per-column aggregations
+	GroupByAll     bool                   `json:"group_by_all,omitempty"` // DISTINCT: group by every input column, key set resolved at runtime
+	// GroupByColIdx pins each GroupByCols entry to a POSITION in this
+	// fragment's input. Absent on every path but a set operation's
+	// INTERSECT/EXCEPT counting aggregate, whose result columns are positions
+	// 0..n-1 of the concatenation and two of which may carry one name — the
+	// group-key twin of AggSpec.InputColIdx (#575, #1022; ADR-0026 §3a).
+	GroupByColIdx []int `json:"group_by_col_idx,omitempty"`
+	MergeMode     bool  `json:"merge_mode,omitempty"`    // input is already partial-aggregated; rewrite InputCol → OutputCol and COUNT → SUM
+	FoldAvg       bool  `json:"fold_avg,omitempty"`      // collapse __avg_sum#X / __avg_count#X synthetics into AVG output (final aggregate only)
+	BuildProject  bool  `json:"build_project,omitempty"` // construct a derived-input projection before the aggregate (skipped in merge mode — partial output already has OutputCol)
 	// EmitEmptyIdentity marks THE aggregate whose one row is the query's
 	// answer for these aggregates: the ungrouped final. SQL gives an
 	// ungrouped aggregate exactly one row over any input including none

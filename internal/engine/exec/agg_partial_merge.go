@@ -17,6 +17,7 @@ func (h *HashAggregate) CloneSink() SinkSource {
 		// and every consumer above would read NULL.
 		GroupByOutNames: h.GroupByOutNames,
 		GroupByAll:      h.GroupByAll, // clones must resolve the same key set, not fall into the scalar path
+		GroupByColIdx:   h.GroupByColIdx,
 		Aggs:            h.Aggs,
 		NullGroupCols:   h.NullGroupCols,
 		GroupingSets:    h.GroupingSets,
@@ -163,6 +164,8 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 		// while the merged states hold full key tuples (index panic).
 		if len(h.GroupByCols) == 0 && len(o.GroupByCols) > 0 {
 			h.GroupByCols = o.GroupByCols
+			// The key POSITIONS travel with the list they address (#1022).
+			h.GroupByColIdx = o.GroupByColIdx
 		}
 	}
 	// Same inheritance for the aggregate inputs, and for the same reason:

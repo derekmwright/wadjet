@@ -2515,6 +2515,15 @@ func (e *Executor) buildFragmentHashAggregate(ctx context.Context, spec distribu
 	hashAgg := exec.NewHashAggregate(groupCols, aggCols)
 	hashAgg.GroupByOutNames = outNames
 	hashAgg.GroupByAll = spec.GroupByAll
+	// The key POSITIONS, where the planner pinned them because the names are
+	// not addresses — a set operation's result columns, two of which may carry
+	// one name (#1022, ADR-0026 §3a). Carried only when it aligns with the key
+	// list this aggregate really resolves: `groupCols` may be the derived
+	// SLOTS rather than spec.GroupByCols, and a position list that names a
+	// different list is worse than no position list at all.
+	if len(spec.GroupByColIdx) == len(groupCols) {
+		hashAgg.GroupByColIdx = append([]int(nil), spec.GroupByColIdx...)
+	}
 	// The coordinator's exact per-partition row accounting, when it had one:
 	// the group-index layout is decided from it before the first batch (a
 	// flat→bucketed conversion is repaid only by the rows that follow it —

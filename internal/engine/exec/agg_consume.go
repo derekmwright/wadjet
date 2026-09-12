@@ -442,12 +442,33 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 			names[i] = c.Name
 		}
 		h.GroupByCols = names
+		// GROUP BY EVERY INPUT COLUMN means key i IS column i. Resolving
+		// those names BACK through columnIndexFallback is what made a
+		// distinct UNION whose result columns share a name dedup on the wrong
+		// tuple: `SELECT order_id AS amount, amount FROM lat_item UNION
+		// SELECT id, total FROM lat_ord` publishes `amount` twice, both keys
+		// bound column one, and the DAG answered three rows whose second
+		// column carried the first's values under the first's declared type,
+		// for PostgreSQL's seven (#1022). The list this branch just built is
+		// the schema in order; its positions are the addresses (ADR-0026 §3a).
+		h.GroupByColIdx = make([]int, len(names))
+		for i := range names {
+			h.GroupByColIdx[i] = i
+		}
 	}
 	h.groupColIdx = make([]int, len(h.GroupByCols))
 	h.groupColTypes = make([]batch.TypeID, len(h.GroupByCols))
 	h.groupColMeta = make([]parquet.Column, len(h.GroupByCols))
 	for i, col := range h.GroupByCols {
-		idx := columnIndexFallback(b, col)
+		// A PINNED position wins outright, for AggColumn.InputColIdx's reason
+		// (#575): it is the only way to tell two same-named columns apart,
+		// which the name lookup below cannot.
+		idx := -1
+		if i < len(h.GroupByColIdx) && h.GroupByColIdx[i] >= 0 && h.GroupByColIdx[i] < len(b.Columns) {
+			idx = h.GroupByColIdx[i]
+		} else {
+			idx = columnIndexFallback(b, col)
+		}
 		h.groupColIdx[i] = idx
 		if idx < 0 {
 			return unresolvedAggColumn("GROUP BY key", col, b)

@@ -161,8 +161,19 @@ type HashAggregate struct {
 	// without bound or tracking. With no Aggs the output is exactly the
 	// distinct key tuples, in input column order.
 	GroupByAll bool
-	Aggs       []AggColumn
-	Spill      *memory.SpillManager // optional: enables spill-to-disk
+	// GroupByColIdx pins each key to a POSITION in the input schema, and is
+	// how a key whose NAME two input columns answer to is addressed at all
+	// (ADR-0026 §3a — "a name is not a handle when two columns answer to
+	// it"). It is the group-key twin of AggColumn.InputColIdx (#575) and it
+	// is set by the planner only where the positions are known by
+	// construction: a set operation's result columns are positions 0..n-1 of
+	// the concatenation its arms are projected onto, and two of those columns
+	// may carry one name, so an INTERSECT or EXCEPT over `SELECT order_id AS
+	// amount, amount …` grouped on column one TWICE and answered zero rows
+	// (#1022). Empty, or an out-of-range entry, falls back to the name.
+	GroupByColIdx []int
+	Aggs          []AggColumn
+	Spill         *memory.SpillManager // optional: enables spill-to-disk
 	// PartialDrainBytes bounds this aggregate's in-memory state when it is a
 	// morsel-parallel CLONE partial: past the threshold, Consume drains the
 	// whole state to canonical partial-state run files (drainedRuns) that

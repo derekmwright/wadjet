@@ -44,6 +44,13 @@ func ResolveOrdinalSortKeys(n *Node) {
 			continue
 		}
 		n.OrderBy[i].Column = names[k.Position-1]
+		// The POSITION survives the rewrite, exactly as it does for an
+		// ordinal the parser could count (`OrderByItem.Ordinal` →
+		// orderExprFor). A name addresses one column only while it is unique,
+		// and the list a star expands to is free to repeat one — a set
+		// operation over two star arms publishes its leftmost arm's names and
+		// `SELECT g AS id, id …` publishes `id` twice (#557, #1022).
+		n.OrderBy[i].SlotPos = k.Position
 		n.OrderBy[i].Position = 0
 	}
 }

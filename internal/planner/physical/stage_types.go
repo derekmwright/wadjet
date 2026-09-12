@@ -144,6 +144,15 @@ type Stage struct {
 	// schema (no plan-time column list), matching exec.HashAggregate.GroupByAll
 	// and the single-process buildDistinct path.
 	GroupByAll bool
+	// GroupByColIdx pins each GroupByCols entry to a POSITION in this
+	// fragment's input, for the keys whose positions are known by
+	// construction and whose NAMES are not addresses. A set operation's
+	// result columns are positions 0..n-1 of the concatenation its arms are
+	// projected onto and two of them may carry ONE name, so an INTERSECT or
+	// EXCEPT over `SELECT order_id AS amount, amount …` grouped on column one
+	// twice (#1022). Empty everywhere else: the name is the address it always
+	// was (ADR-0026 §3a).
+	GroupByColIdx []int
 
 	// Sort metadata
 	SortKeys []SortKeySpec

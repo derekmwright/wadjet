@@ -1233,12 +1233,34 @@ func resolveSetOpOrderBy(info *SelectInfo) error {
 	for cols.Union != nil {
 		cols = cols.Union.Left
 	}
+	// Where the leftmost arm's list carries a `*`, counting stops being
+	// possible for the same reason resolveOrderBy's firstStar says: a star
+	// stands for however many columns its source has, which is a catalog
+	// question this layer cannot ask. Such a position is LEFT AS WRITTEN for
+	// logical.ResolveOrdinalSortKeys to answer after star expansion (#810,
+	// #982), not refused — `SELECT * FROM lat_ord UNION SELECT * FROM lat_ord
+	// WHERE id < 3 ORDER BY 3 DESC, 1` came back `ORDER BY position 3 is out
+	// of range (1-1)`, counting the star as ONE column, for a query
+	// PostgreSQL answers.
+	firstStar := -1
+	for i, c := range cols.Columns {
+		if c.Star {
+			firstStar = i
+			break
+		}
+	}
 	for i, ob := range info.OrderBy {
 		pos, err := strconv.Atoi(strings.TrimSpace(ob.Column))
 		if err != nil {
 			continue // not an ordinal, leave as written
 		}
-		if pos < 1 || pos > len(cols.Columns) {
+		if pos < 1 {
+			return fmt.Errorf("ORDER BY position %d is out of range (1-%d)", pos, len(cols.Columns))
+		}
+		if firstStar >= 0 && pos > firstStar {
+			continue // not countable here; resolved after the star expands
+		}
+		if pos > len(cols.Columns) {
 			return fmt.Errorf("ORDER BY position %d is out of range (1-%d)", pos, len(cols.Columns))
 		}
 		col := cols.Columns[pos-1]
@@ -1249,6 +1271,16 @@ func resolveSetOpOrderBy(info *SelectInfo) error {
 		} else {
 			info.OrderBy[i].Column = col.Expr
 		}
+		// The POSITION rides along with the name it was rewritten to, exactly
+		// as resolveOrderBy records it for a block with a SELECT list of its
+		// own (#557). A set operation's result columns are its leftmost arm's
+		// names and two of them may be the SAME string — `SELECT order_id AS
+		// amount, amount FROM lat_item UNION SELECT id, total FROM lat_ord`
+		// publishes `amount` twice — so without the position both keys of
+		// `ORDER BY 1, 2 DESC` reached the sort spelled `amount`, bound the
+		// first of them, and the query came back with key 2 unapplied on every
+		// arm (#1022).
+		info.OrderBy[i].Ordinal = pos
 	}
 	return nil
 }
