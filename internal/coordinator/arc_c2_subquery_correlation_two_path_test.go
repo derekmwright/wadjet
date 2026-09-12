@@ -782,6 +782,15 @@ func c2Cells() []c2Cell {
 			pinWhy: "cell 81's gap: a subquery in a GROUP BY term has no lowering in the DAG's " +
 				"scan-agg fragment"},
 
+		// --- A JOIN'S ON CONDITION IS A CLAUSE THE WALK READS (round-3
+		// review, P1). It was the seventh clause, unread, and the shape was
+		// planned uncorrelated and silently wrong at main too.
+		{name: "108_an_outer_reference_in_a_JOINs_ON_condition",
+			sql: `SELECT id, (SELECT t.visits FROM c2users x JOIN c2users t ON t.id = u.id ` +
+				`WHERE x.id = 1) AS v FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,100 | 2,42 | 3,200`,
+			routes: a2Routes{Correlated: 1}},
+
 		// --- THE ORDER BY REFUSAL IS THE ORDINAL TRAP AND NOTHING WIDER
 		// (round-3 review, P4). A sort with no slice cannot change which rows
 		// a scalar subquery, an EXISTS or an IN set reads, so its term is left

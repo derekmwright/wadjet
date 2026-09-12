@@ -2107,30 +2107,39 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      re-run to substitute OUTSIDE the WHERE clause, which needs a faithful
      rendering of the OVER clause; ADR-0021 §1m states what that costs.
 
-   - **A correlated subquery whose outer reference sits in a GROUP BY, an
-     ORDER BY or a LATERAL body, and one holding an aggregate the ENCLOSING
-     query owns, are REFUSED (0A000) where PostgreSQL answers.** (Added
-     2026-09-12, arc C2 round 2, #1044.) A correlated subquery this engine does
-     not decorrelate is re-run per outer row by substituting the outer values
-     into its text. The substitution reaches the SELECT list, the WHERE and the
-     HAVING, each of which the rebuild renders from its own tree; it does not
-     reach GROUP BY or ORDER BY, because a term substituted there renders as a
-     bare literal and both engines read `ORDER BY 1` as the FIRST SELECT ITEM
-     rather than as the number one, and it has no arm at all for a body that is
-     a SET OPERATION (`(SELECT u.id FROM x WHERE x.id=1 UNION ALL SELECT u.id
-     FROM y WHERE y.id=99)` is 0A000 where PostgreSQL answers 1, 2, 3). A
-     SELECT item holding an aggregate beside a NESTED subquery is refused for a
-     third reason: the item has no plan-time type, because the nested
-     subquery's type is the enclosing row's, so an exact accumulator's DECIMAL
-     does not fit the declaration the plan allocated. Running the statement
-     with the reference still in it is the silent answer §1c refuses at the
-     uncorrelated evaluators, so it is refused here: `(SELECT x.visits FROM x
-     ORDER BY (SELECT u.id) LIMIT 1)` is 0A000 where PostgreSQL answers 100,
-     100, 100, and the GROUP BY spelling is refused for the same reason. Since
-     round 3 the classifier reads those clauses and a set operation's arms, so
-     the refusal reaches a subquery whose ONLY outer reference is in one of
-     them — which before answered the qualifier strip's constant in silence. A LATERAL body is
-     refused on the same ground — it is decorrelated into a join and the
+   - **A correlated subquery whose GROUP BY or ORDER BY term SUBSTITUTES TO A
+     BARE NUMERIC LITERAL, one whose body is a SET OPERATION or a LATERAL
+     body, and one holding an aggregate the ENCLOSING query owns, are REFUSED
+     (0A000) where PostgreSQL answers.** (Added 2026-09-12, arc C2 round 2,
+     #1044; narrowed in round 4.) A correlated subquery this engine does not
+     decorrelate is re-run per outer row by substituting the outer values into
+     its text. The substitution reaches the SELECT list, the WHERE, the
+     HAVING, the GROUP BY, the ORDER BY and each JOIN's ON condition, every
+     one of which the rebuild renders from its own tree. In a GROUP BY or an
+     ORDER BY it declines exactly one rendering: a term that substitutes to a
+     BARE NUMERIC LITERAL, because both engines read `ORDER BY 1` as the FIRST
+     SELECT ITEM rather than as the number one. `ORDER BY x.id * (u.id - 2)`
+     renders `x.id * (1 - 2)` and answers; `ORDER BY u.id` under a `LIMIT`
+     renders `ORDER BY 1` and is refused. Refusing on the PRESENCE of an outer
+     reference in those clauses instead was wider than the trap and took four
+     shapes main answers exactly as PostgreSQL does. A term in an ORDER BY
+     with no LIMIT or OFFSET is left as written: a scalar subquery, an EXISTS
+     and an IN set read a set rather than a sequence, so the sort cannot
+     change the answer. The rebuild has no arm at all for a body that is a SET
+     OPERATION (`(SELECT u.id FROM x WHERE x.id=1 UNION ALL SELECT u.id FROM y
+     WHERE y.id=99)` is 0A000 where PostgreSQL answers 1, 2, 3). A SELECT item
+     holding an aggregate beside a NESTED subquery THAT NAMES THE ENCLOSING
+     QUERY is refused for a third reason: the nested subquery's value is the
+     outer row's, so the item has no plan-time type. That refusal is on the
+     SHAPE and not on the declaration the item would get — an exact
+     accumulator's DECIMAL and a string MIN cannot be stored in the FLOAT64
+     the plan allocated, a COUNT would fit and answer, and all of them are
+     refused together; an UNCORRELATED nested subquery beside an aggregate
+     types normally and is NOT refused. Since round 3 the classifier reads
+     every clause of the block and a set operation's arms, so the refusal
+     reaches a subquery whose ONLY outer reference is in one of them — which
+     before answered the qualifier strip's constant in silence. A LATERAL body
+     is refused on the same ground — it is decorrelated into a join and the
      projection has nothing to respell.
 
      The aggregate half is PostgreSQL's LEVEL rule, measured on 17.11: an

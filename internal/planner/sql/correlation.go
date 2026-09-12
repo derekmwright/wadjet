@@ -229,7 +229,10 @@ func findCorrelatedRefs(subquerySQL string, outerTables map[string]bool, outerCo
 // walkBlockForOuterRefs walks EVERY clause of one block that can carry a
 // column reference, and every arm of a set operation.
 //
-// It used to walk the WHERE, the HAVING and the SELECT list and nothing else,
+// It reads the WHERE, the HAVING, the QUALIFY, the SELECT list, a JOIN's ON
+// condition, the GROUP BY terms and the non-positional ORDER BY terms, and
+// recurses through a set operation's arms. It used to walk the WHERE, the
+// HAVING and the SELECT list and nothing else,
 // so two positions were invisible to the classifier — and a subquery whose
 // ONLY outer reference sits in one of them was planned UNCORRELATED, ran
 // standalone, and `expr.ResolveColumnRef`'s qualifier strip bound the
@@ -272,6 +275,14 @@ func walkBlockForOuterRefs(info *SelectInfo, scope *outerRefScope, refs *[]Outer
 		if col.ASTExpr != nil {
 			walkForOuterRefs(col.ASTExpr, scope, refs)
 		}
+	}
+	for i := range info.Joins {
+		// A JOIN's ON condition is a clause like any other, and the one this
+		// walk missed: `(SELECT t.visits FROM x JOIN t ON t.id = u.id WHERE
+		// x.id = 1)` was planned UNCORRELATED and answered 100, 100, 100 for
+		// PostgreSQL 17.11's 100, 42, 200 (round-3 review, P1). The rebuild
+		// renders it from this tree, so seeing it is enough to answer it.
+		walkForOuterRefs(info.Joins[i].CondExpr, scope, refs)
 	}
 	for _, n := range info.GroupByExprs {
 		walkForOuterRefs(n, scope, refs)

@@ -636,33 +636,38 @@ column is published under the name PostgreSQL gives it — the subquery's own
 output column, ALIAS INCLUDED: `(SELECT 1 AS zzz)` publishes `zzz`, `(SELECT
 u.x)` publishes `x`, `(SELECT 1)` publishes `?column?`.
 
-A subquery WITH a `FROM` clause reads the outer row too, in its `SELECT` list
-and its `HAVING` as well as its `WHERE`:
+A subquery WITH a `FROM` clause reads the outer row too — in its `SELECT` list,
+its `GROUP BY`, its `ORDER BY`, a join's `ON` condition and its `HAVING` as
+well as its `WHERE`:
 
 ```sql
 -- 1, 2, 3: the outer row's x, per row
 SELECT (SELECT u.x FROM other y WHERE y.id = 1) FROM (SELECT id AS x FROM t) u
 ```
 
-An outer reference in such a subquery's `GROUP BY` or `ORDER BY`, in a body
-that is a SET OPERATION, or in a `LATERAL` body, is refused (`0A000`) instead.
-For the first two the per-row substitution would render the outer value as a
-literal, and a literal in those clauses reads as a select-list POSITION rather
-than as a value; for a set operation the rebuild has no arm to write. A SELECT
-item that holds an aggregate beside a nested subquery is refused for a third
-reason — the item has no type until the outer row is known.
+Four shapes are refused (`0A000`) instead. A `GROUP BY` or `ORDER BY` term
+whose SUBSTITUTED rendering is a bare numeric literal — `GROUP BY u.id` with
+the outer row's 1 in it — would read as a select-list POSITION rather than as
+a value; every other term in those two clauses is written into the re-run and
+answers. A body that is a SET OPERATION has no arm in the rebuild, and neither
+has a `LATERAL` body's outer reference, which is decorrelated into a join with
+nothing left to respell. A SELECT item holding an aggregate beside a nested
+subquery THAT NAMES THE ENCLOSING QUERY is refused for a third reason — the
+nested subquery's value is the outer row's, so the item has no type until that
+row is known; a nested subquery naming nothing outside its own block types
+normally and answers.
 
 A term written `ORDER BY (SELECT 1)` is unaffected by any of this: only an
 integer literal WRITTEN IN THE CLAUSE is a select-list position, so a subquery
 that evaluates to one is an ordinary constant sort and answers.
 
-An AGGREGATE whose argument names ONLY the enclosing query is refused
-(`0A000`) as well. PostgreSQL puts such an aggregate at the enclosing query's
-level — `SELECT MAX((SELECT u.id)) FROM t u` is one row there, and `SELECT id,
-(SELECT MAX(u.id) FROM x) FROM t u` is an error — and this engine has no
-lowering for an aggregate level above the block it is written in. An aggregate
-that also names a column of its own block (`SUM(x.visits + u.id)`) is that
-block's and answers.
+An AGGREGATE inside such a subquery whose argument names ONLY the enclosing
+query is refused (`0A000`) as well: `SELECT id, (SELECT MAX(u.id) FROM x) FROM
+t u`. PostgreSQL puts such an aggregate at the ENCLOSING query's level, where
+it is an error because `id` is then ungrouped, and this engine has no lowering
+for an aggregate level above the block it is written in. An aggregate that
+also names a column of its own block (`SUM(x.visits + u.id)`) is that block's
+and answers.
 
 A clause that can make such a block produce no row keeps its own meaning:
 `(SELECT u.id WHERE 1=0)`, `(SELECT u.id LIMIT 0)` and `(SELECT u.id OFFSET 1)`
@@ -672,11 +677,12 @@ An AGGREGATE or a WINDOW call in such a block belongs to whichever query its
 ARGUMENT names, which is PostgreSQL's rule. One that names NOTHING is the
 block's own, over the single row the block produces, and answers here:
 `(SELECT MAX(1))`, `(SELECT COUNT(*))` and `(SELECT COUNT(*) OVER ())` are all
-1 for every outer row. One whose argument names the ENCLOSING query is the
-enclosing query's aggregate — `SELECT MAX((SELECT u.id)) FROM t u` is one row
-on PostgreSQL — and this engine has no lowering for an aggregate level above
-the block it is written in, so that spelling is refused (`0A000`). Write it in
-the enclosing query instead.
+1 for every outer row. One whose argument names the ENCLOSING query belongs to
+that query, and a subquery cannot hold it: `SELECT id, (SELECT MAX((SELECT
+u.id)) FROM x) FROM t u` and `SELECT id, (SELECT MAX(u.id) FROM x) FROM t u`
+are both refused (`0A000`), where PostgreSQL raises 42803 on the promoted
+aggregate. Written in the enclosing query itself the same aggregate answers:
+`SELECT MAX((SELECT u.id)) FROM t u` is one row, 3, on PostgreSQL and here.
 
 A `ROW` field path may be an `IN` subquery's SELECT list: `x IN (SELECT c_row.b
 FROM t)` answers what PostgreSQL's `x IN (SELECT (c_row).b FROM t)` answers,

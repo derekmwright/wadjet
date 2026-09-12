@@ -1061,7 +1061,8 @@ closes.
 ### 1l. A FROM-less scalar subquery IS its SELECT expression, in the block that supplies the row — and a per-row re-run substitutes into every clause it rebuilds
 
 (Added 2026-09-12, #1044. Rewritten the same day after round 2 moved the
-decision and completed the substitution.)
+decision and completed the substitution, and amended after rounds 3 and 4
+narrowed the two refusals to the shapes that actually need them.)
 
 §1c settled what a subquery this engine cannot RUN answers: it fails the query.
 This section is about the two shapes that reach the per-row re-run from
@@ -1124,14 +1125,20 @@ PostgreSQL's 1, 2, 3, on all five arms, before and after the rewrite alike.
 HAVING from their own trees, each item keeping its recorded text when the
 rewrite does not change it.
 
-GROUP BY and ORDER BY are NOT substituted, and the reason is the ORDINAL TRAP
-rather than reach: `ORDER BY u.id` with the outer row's 1 in it renders
-`ORDER BY 1`, which both engines read as the FIRST SELECT ITEM. A reference
-left in either clause is refused rather than run —
-`expr.UnsubstitutedOuterRefError`, 0A000 — because running it is the silent
-answer §1c refuses at the uncorrelated evaluators. Rendering a substituted sort
-or group term so that it cannot read as a position is what closing that half
-needs.
+GROUP BY, ORDER BY and a JOIN's ON condition are substituted too, and what is
+refused there is the ORDINAL TRAP and nothing wider. `ORDER BY u.id` with the
+outer row's 1 in it renders `ORDER BY 1`, which both engines read as the FIRST
+SELECT ITEM — so a term whose SUBSTITUTED rendering is a BARE NUMERIC LITERAL
+is refused (`expr.UnsubstitutedOuterRefError`, 0A000), because running it is
+the silent answer §1c refuses at the uncorrelated evaluators. Every other term
+is written into the rebuild and answers: `ORDER BY x.id * (u.id - 2)` renders
+`x.id * (1 - 2)`, an expression no engine reads as a position. Refusing on the
+PRESENCE of an outer reference instead took four shapes main answers exactly
+as PostgreSQL does (round-3 review, P4), and the trap the refusal names was
+never about presence. A sort with NO SLICE is immaterial for the same reason:
+without a LIMIT or an OFFSET the block returns the same rows in any order, and
+a scalar subquery, an EXISTS and an IN set all read a set rather than a
+sequence, so such a term is left as the parser recorded it.
 
 **The refusal is only as wide as the walk that FINDS the reference**, and for
 one round it was narrower than this paragraph said. `findCorrelatedRefs` read
@@ -1141,8 +1148,13 @@ reached the re-run, and answered the qualifier strip's constant — `(SELECT
 x.visits FROM c2users x ORDER BY x.id * (u.id - 2) LIMIT 1)` was 100, 100, 100
 for PostgreSQL 17.11's 200, 100, 100 (round-2 review, P1). `walkBlockForOuterRefs`
 now reads every clause of the block that can carry a column reference — the
-WHERE, the HAVING, the QUALIFY, the SELECT list, the GROUP BY terms and the
-non-positional ORDER BY terms — and every arm of a set operation. Seeing the
+WHERE, the HAVING, the QUALIFY, the SELECT list, the GROUP BY terms, the
+non-positional ORDER BY terms and each JOIN's ON condition — and every arm of
+a set operation. The ON condition was the last one missing, and a reference
+there was planned uncorrelated on all five arms (round-3 review, P1); LIMIT
+and OFFSET carry no reference this parser will accept (`OFFSET u.id - 1` is
+*expected number after OFFSET*), which is why the walk's silence about those
+two clauses costs nothing today. Seeing the
 reference is what lets it be substituted where the rebuild can and refused
 where it cannot; neither is possible for a reference nobody looks for.
 
@@ -1154,10 +1166,15 @@ naming no item — on ten shapes main answers exactly as PostgreSQL does, becaus
 PostgreSQL reads only an integer literal WRITTEN IN THE CLAUSE as an ordinal,
 never one a subquery evaluates to (round-2 review, B1). `ORDER BY (SELECT 1)`
 is the generated-SQL idiom for a sort a query does not care about. The rewrite
-declines any ORDER BY term whose replacement would render as a bare numeric
-literal; a constant sort is what the subquery is either way, so declining costs
-the shape nothing, and `SELECT DISTINCT … ORDER BY (SELECT 1)` keeps
-PostgreSQL's own message rather than the ordinal one.
+declines any ORDER BY **or GROUP BY** term whose replacement would render as a
+bare numeric literal; a constant sort or a constant grouping is what the
+subquery is either way, so declining costs the shape nothing, and `SELECT
+DISTINCT … ORDER BY (SELECT 1)` keeps PostgreSQL's own message rather than the
+ordinal one. The decline was written in one of the two loops for a round, and
+the other one turned `GROUP BY (SELECT 1)` into the ordinal `1`: seven
+statements PostgreSQL and main both raise 42803 on answered a fabricated row
+(`visits, n` = `NULL, 3` under OID 25) on all five arms instead (round-3
+review, B2). One decline, both clauses.
 
 **AN AGGREGATE BELONGS TO THE LEVEL OF THE DEEPEST VARIABLE IN ITS ARGUMENTS,
 and this engine does not implement levels**, so a subquery holding an aggregate
@@ -1185,11 +1202,15 @@ each one does. The cell numbers are
 | a correlated subquery's WHERE | the enclosing query | kept; the re-run substitutes the WHERE | 51 |
 | a correlated subquery's HAVING | the enclosing query | kept; the re-run substitutes the HAVING | 47 |
 | a correlated IN set's SELECT list | the enclosing query | kept; substituted | 46, 69 |
-| a correlated subquery's ORDER BY — whether or not another clause also names the row | the enclosing query | kept; REFUSED 0A000 — a substituted term reads as an ordinal | 52, 82, 83 |
-| a correlated subquery's GROUP BY | the enclosing query | kept; REFUSED 0A000 for the same reason | 53 |
+| a correlated subquery's ORDER BY or GROUP BY, where the SUBSTITUTED term is an expression | the enclosing query | kept; substituted and answered | 52, 52a, 82, 83, 110 |
+| a correlated subquery's ORDER BY or GROUP BY, where the SUBSTITUTED term renders as a BARE NUMERIC LITERAL | the enclosing query | kept; REFUSED 0A000 — that rendering reads as an ordinal | 52b, 53, 111, 112 |
+| a correlated subquery's ORDER BY with NO LIMIT or OFFSET | the enclosing query | kept as written — a sort with no slice cannot change the answer | 109 |
+| a JOIN's ON condition inside a correlated subquery | the enclosing query | kept; walked and substituted | 108 |
 | a correlated subquery whose BODY is a SET OPERATION | the enclosing query | REFUSED 0A000 — `RebuildSQL` renders one select and has no arm for a union | 84, 85 |
-| a SELECT item holding an AGGREGATE beside a nested subquery | the enclosing query | REFUSED 0A000 — the item has no type until the outer row is known | 86, 87, 88 |
+| a SELECT item holding an AGGREGATE beside a nested subquery that NAMES THE ENCLOSING QUERY | the enclosing query | REFUSED 0A000 — the item has no type until the outer row is known | 86, 87, 88 |
+| a SELECT item holding an AGGREGATE beside an UNCORRELATED nested subquery | the nested block itself | answers — the item types normally | 94–98 |
 | an ORDER BY term of the ENCLOSING statement, `ORDER BY (SELECT 1)` | nothing — a constant sort | kept: only a literal WRITTEN in the clause is an ordinal | 71–80a |
+| a GROUP BY term of the ENCLOSING statement, `GROUP BY (SELECT 1)` | nothing — a constant grouping | kept: PostgreSQL's 42803 on the ungrouped column, and its answer where the list is all aggregates | 101–107 |
 | a LATERAL body | the enclosing query | kept; REFUSED 0A000 | 54 |
 | an aggregate argument naming ONLY the enclosing query | the enclosing query, by PostgreSQL's level rule | REFUSED 0A000 | 60, 61 |
 | a window call's argument or OVER terms | the enclosing query | REFUSED 0A000 (§1m) | 30–40 |
@@ -1208,7 +1229,9 @@ before → after, on all five arms:
 | the issue's titled shape WITH a FROM clause, over a derived table / CTE / base-table alias | NULL,NULL,NULL | 1,2,3 | 1,2,3 |
 | an outer reference in a correlated subquery's HAVING | NULL | 342 | 342 |
 | a FROM-less subquery nested in a correlated subquery's SELECT list / IN set / HAVING / expression, two and three deep, over a CTE | 0A000 | PostgreSQL's | — |
-| the same in an ORDER BY term, a GROUP BY term, a LATERAL body | 0A000 | 0A000 | answers |
+| the same in an ORDER BY term, a GROUP BY term, a LATERAL body | 0A000 | substituted / 0A000 on the ordinal rendering / 0A000 | answers |
+| an aggregate beside an UNCORRELATED nested subquery, 7 spellings | answers | answers | same |
+| `GROUP BY (SELECT 1)`, 7 spellings | 42803 | 42803 | 42803 |
 | an aggregate whose argument names only the enclosing query | 0A000 / `#277 schemaless batch` | 0A000 | 42803 |
 | a declined clause on a FROM-less body (ORDER BY, LIMIT 1, a true WHERE) | NULL | 1,2,3 / 1,2,3 / NULL,2,3 | same |
 | `(SELECT *)` with no relation | NULL | 42601 | 42601 |
