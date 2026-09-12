@@ -1369,7 +1369,7 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 					items[idx] = lowered
 					continue
 				}
-				right, joinCond, empty, hiddenCols, err := buildLateralSubquery(left, join, ctes)
+				right, joinCond, empty, hiddenCols, err := buildLateralSubquery(info, left, join, ctes)
 				if err != nil {
 					return nil, err
 				}
@@ -1862,7 +1862,7 @@ func getOutputColNames(info *plansql.SelectInfo) []string {
 // 2. Parsing the subquery and splitting WHERE into correlated vs local predicates
 // 3. Building the inner plan with only local predicates
 // 4. Returning the inner plan and the combined join condition
-func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTEDef) (*Node, string, lateralEmptyInput, []string, error) {
+func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.JoinInfo, ctes []plansql.CTEDef) (*Node, string, lateralEmptyInput, []string, error) {
 	// Collect left-side table aliases to detect correlated references
 	leftAliases := collectLogicalAliases(left)
 
@@ -2130,7 +2130,7 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 	// names: the list renames that column's POSITION like any other, and the
 	// join would then key on a name nothing carries and answer no rows. Loud
 	// beats plausible, and the sentence now describes the code.
-	if err := refuseLateralAliasListOverStar(subInfo, join); err != nil {
+	if err := refuseLateralAliasListOverStar(outer, subInfo, join); err != nil {
 		return nil, "", lateralEmptyInput{}, nil, err
 	}
 	if join.RightAlias != "" {

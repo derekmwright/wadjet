@@ -405,38 +405,59 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			routed: map[string]string{},
 		},
 		{
-			// A COLUMN-ALIAS LIST OVER A `SELECT *` BODY is REFUSED, which is
-			// what the documentation and ADR-0021 §1l already said and what the
-			// code did not do: the list was DROPPED, so this answered four
-			// NULLs for PostgreSQL's 1,2,3,4 — the exact failure
-			// `column_alias_defer.go` exists to prevent, on the one FROM item
-			// never wired into it (round-2 review, B2).
-			//
-			// Refused rather than deferred, unlike a CTE's and a derived
-			// table's list: a decorrelated LATERAL JOINS on the column its
-			// correlated predicate names, and a positional rename over an
-			// uncounted star could take that column and leave the join with no
-			// key. Wrong → loud.
-			name: "a column-alias list over a star body",
+			// A COLUMN-ALIAS LIST OVER A `SELECT *` BODY is refused only when
+			// the enclosing query READS a name the list introduces. PostgreSQL
+			// applies a SHORT list to the first k columns of the expansion and
+			// leaves the rest under their own names, so a query that never
+			// mentions a renamed name is unaffected — refusing on the PRESENCE
+			// of the list was ten cells right → refused (round-3 review, B2).
+			name: "a star body whose alias list the query never reads",
+			sql: "SELECT u.id FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
+				"WHERE i.order_id = u.id) l(w) ORDER BY 1",
+			want: "cols=[id:INT64] rows=4 | 1 | 1 | 2 | 2",
+			// It EXECUTES as stages on all three DAG arms.
+			routed: map[string]string{},
+		},
+		{
+			name: "a star body, reading a column the list does NOT rename",
+			sql: "SELECT l.amount FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
+				"WHERE i.order_id = u.id) l(w) ORDER BY 1",
+			want:   "cols=[amount:FLOAT64] rows=4 | 50 | 75 | 100 | 125",
+			routed: map[string]string{},
+		},
+		{
+			// READ, and therefore refused: the width the rename needs is not
+			// knowable here, and a positional rename over an uncounted star can
+			// take the column the decorrelation keys on. Wrong → loud.
+			name: "a star body whose alias list the query READS",
 			sql: "SELECT l.w FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
 				"WHERE i.order_id = u.id) l(w) ORDER BY 1",
-			want:   "ERR renames the columns of a LATERAL subquery whose SELECT list holds a `*`",
-			why:    "PostgreSQL answers 1,2,3,4; the base answered four NULLs",
+			want:   "ERR the query reads \"w\", a name the column-alias list on table \"l\" introduces",
+			why:    "PostgreSQL answers 1,2,3,4; both bases answered four NULLs",
 			routed: map[string]string{},
 		},
 		{
-			name: "a column-alias list over a star body, n aliases",
+			name: "a star body whose alias list the query READS, two names",
 			sql: "SELECT l.w, l.x FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
 				"WHERE i.order_id = u.id) l(w,x) ORDER BY 1",
-			want:   "ERR renames the columns of a LATERAL subquery whose SELECT list holds a `*`",
-			why:    "PostgreSQL answers 1|1, 2|1, 3|2, 4|2; the base answered four NULL,NULL",
+			want:   "ERR the query reads",
+			why:    "PostgreSQL answers 1|1, 2|1, 3|2, 4|2; both bases answered four NULL,NULL",
 			routed: map[string]string{},
 		},
 		{
-			name: "a column-alias list over a QUALIFIED star body",
-			sql: "SELECT l.w FROM lat_ord u, LATERAL (SELECT i.* FROM lat_item i " +
-				"WHERE i.order_id = u.id) l(w) ORDER BY 1",
-			want:   "ERR renames the columns of a LATERAL subquery whose SELECT list holds a `*`",
+			// An over-long list is PostgreSQL's 42P10 whether or not it is read.
+			name: "a column-alias list longer than a star body",
+			sql: "SELECT l.w FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
+				"WHERE i.order_id = u.id) l(w,x,y,z,zz) ORDER BY 1",
+			want:   "ERR table \"l\" has 4 columns available but 5 columns specified",
+			routed: map[string]string{},
+		},
+		{
+			// CONTROL: no list at all.
+			name: "control: a star body with no alias list",
+			sql: "SELECT l.amount FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
+				"WHERE i.order_id = u.id) l ORDER BY 1",
+			want:   "cols=[amount:FLOAT64] rows=4 | 50 | 75 | 100 | 125",
 			routed: map[string]string{},
 		},
 		{

@@ -452,17 +452,28 @@ func applyLateralItemAliases(info *plansql.SelectInfo, join plansql.JoinInfo) er
 }
 
 // refuseLateralAliasListOverStar refuses a LATERAL FROM item's column-alias
-// list over a body whose SELECT list holds a STAR.
+// list over a body whose SELECT list holds a STAR — but ONLY when the enclosing
+// query READS a name the list introduces.
 //
 // The width of a star is not knowable in the builder, and the two other FROM
 // items that carry a list — a CTE and a derived table — DEFER the rename to the
 // pass that knows it. A LATERAL cannot: the decorrelation JOINS on the column
-// its correlated predicate names, and the list renames that column's POSITION
-// like any other, so the deferred rename would leave the join keying on a name
-// nothing carries — zero rows, silently, for a query PostgreSQL answers. The
-// refusal is what the documentation and ADR-0021 §1l already claimed; this is
-// the code that makes it true.
-func refuseLateralAliasListOverStar(info *plansql.SelectInfo, join plansql.JoinInfo) error {
+// its correlated predicate names, and a deferred positional rename could take
+// that column and leave the join keying on a name nothing carries — measured as
+// ZERO ROWS for the two-alias spelling, which is a silent wrong answer traded
+// for a silent wrong answer.
+//
+// THE TRIGGER IS THE READ, NOT THE LIST. PostgreSQL applies a SHORT list to the
+// first k columns of the star's expansion and leaves the rest under their own
+// names, so a query that never mentions a renamed name is unaffected by the
+// rename: `SELECT u.id … l(w)` and `SELECT l.amount … l(w)` answer PostgreSQL's
+// rows at every base, and refusing them on the PRESENCE of the list was ten
+// cells right → refused (round-3 review, B2). Only a query that reads `l.w` —
+// the name the list introduces and the expansion cannot be counted to produce —
+// is refused.
+func refuseLateralAliasListOverStar(outer *plansql.SelectInfo,
+	info *plansql.SelectInfo, join plansql.JoinInfo) error {
+
 	if info == nil || join.RightTableRef == nil || len(join.RightTableRef.ColumnAliases) == 0 {
 		return nil
 	}
@@ -470,20 +481,91 @@ func refuseLateralAliasListOverStar(info *plansql.SelectInfo, join plansql.JoinI
 	for cols.Union != nil && cols.Union.Left != nil {
 		cols = cols.Union.Left
 	}
+	star := false
 	for i := range cols.Columns {
-		if !cols.Columns[i].Star {
-			continue
+		if cols.Columns[i].Star {
+			star = true
+			break
 		}
-		name := join.RightAlias
-		if name == "" {
-			name = "subquery"
-		}
-		return sqlerr.New("0A000",
-			"table %q renames the columns of a LATERAL subquery whose SELECT list holds "+
-				"a `*`: the width of the star is not known where the rename must be made, "+
-				"and a LATERAL is run as a join on the column its correlated predicate "+
-				"names, so a positional rename could take that column and leave the join "+
-				"with no key. Name the subquery's columns instead", name)
 	}
-	return nil
+	if !star {
+		return nil
+	}
+	read := lateralAliasNameRead(outer, join)
+	if read == "" {
+		return nil
+	}
+	name := join.RightAlias
+	if name == "" {
+		name = "subquery"
+	}
+	return sqlerr.New("0A000",
+		"the query reads %q, a name the column-alias list on table %q introduces over a "+
+			"LATERAL subquery whose SELECT list holds a `*`: the width of the star is not "+
+			"known where the rename must be made, and a LATERAL is run as a join on the "+
+			"column its correlated predicate names, so a positional rename could take that "+
+			"column and leave the join with no key. Name the subquery's columns instead",
+		read, name)
+}
+
+// lateralAliasNameRead is the first name the FROM item's column-alias list
+// introduces that the ENCLOSING query actually reads, or "" when it reads none.
+//
+// A reference qualified by the lateral's own alias is certainly one; a BARE
+// reference of the same name is treated as one too, because the alternative is
+// to answer it from a column the rename was supposed to have replaced.
+func lateralAliasNameRead(outer *plansql.SelectInfo, join plansql.JoinInfo) string {
+	if outer == nil || join.RightTableRef == nil {
+		return ""
+	}
+	want := map[string]string{}
+	for _, a := range join.RightTableRef.ColumnAliases {
+		if a = strings.TrimSpace(a); a != "" {
+			want[strings.ToLower(a)] = a
+		}
+	}
+	if len(want) == 0 {
+		return ""
+	}
+	alias := strings.ToLower(strings.TrimSpace(join.RightAlias))
+	hit := ""
+	look := func(n plansql.Node) {
+		if n == nil || hit != "" {
+			return
+		}
+		plansql.RewriteExpr(n, func(x plansql.Node) (plansql.Node, bool) {
+			ref, ok := x.(*plansql.ColRef)
+			if !ok || hit != "" {
+				return nil, false
+			}
+			t := strings.ToLower(strings.TrimSpace(ref.Table))
+			if t != "" && t != alias {
+				return nil, false
+			}
+			if a, ok := want[strings.ToLower(strings.TrimSpace(ref.Column))]; ok {
+				hit = a
+			}
+			return nil, false
+		})
+	}
+	for i := range outer.Columns {
+		look(outer.Columns[i].ASTExpr)
+		look(outer.Columns[i].AggArgExpr)
+		for _, a := range outer.Columns[i].AggArgs {
+			look(a)
+		}
+	}
+	look(outer.WhereExpr)
+	look(outer.HavingExpr)
+	look(outer.QualifyExpr)
+	for _, g := range outer.GroupByExprs {
+		look(g)
+	}
+	for _, o := range outer.OrderBy {
+		look(o.Expr)
+	}
+	for _, j := range outer.Joins {
+		look(j.CondExpr)
+	}
+	return hit
 }
