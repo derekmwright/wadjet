@@ -803,6 +803,59 @@ func c2Cells() []c2Cell {
 			pinWhy: "cell 81's gap: a subquery in a GROUP BY term has no lowering in the DAG's " +
 				"scan-agg fragment"},
 
+		// --- AN ARM OF A SET OPERATION IS A BLOCK WITH ITS OWN FROM, AND THE
+		// SCOPE HAS TO SAY SO (round-5 review, B2). A union node has no FROM,
+		// so walking an arm with the union's scope left the arm's relations
+		// out of the inner namespace and every BARE column in an arm was read
+		// as a reference to the enclosing query: an ordinary uncorrelated
+		// `IN (… UNION ALL …)` over a relation the outer query also reads was
+		// classified correlated, refused 0A000 for a body the rebuild cannot
+		// write, and answers on PostgreSQL 17.11 and at bf99c56c. The
+		// QUALIFIED spelling (cell 140) is the discriminator: a qualifier the
+		// arm's FROM supplies was recognised where a bare name was not.
+		{name: "134_an_uncorrelated_IN_over_a_UNION_ALL_of_the_outer_relation",
+			sql: `SELECT d.id FROM c2users d WHERE d.id IN (SELECT id FROM c2users WHERE visits > 50 ` +
+				`UNION ALL SELECT id FROM c2users WHERE visits > 150) ORDER BY d.id`,
+			want: `id | 1 | 3`},
+		{name: "135_the_UNION_distinct_spelling",
+			sql: `SELECT d.id FROM c2users d WHERE d.id IN (SELECT id FROM c2users WHERE visits > 50 ` +
+				`UNION SELECT id FROM c2users WHERE visits > 150) ORDER BY d.id`,
+			want: `id | 1 | 3`},
+		{name: "136_the_EXCEPT_spelling",
+			sql: `SELECT d.id FROM c2users d WHERE d.id IN (SELECT id FROM c2users WHERE visits > 50 ` +
+				`EXCEPT SELECT id FROM c2users WHERE visits > 150) ORDER BY d.id`,
+			want: `id | 1`},
+		{name: "137_the_INTERSECT_spelling",
+			sql: `SELECT d.id FROM c2users d WHERE d.id IN (SELECT id FROM c2users WHERE visits > 50 ` +
+				`INTERSECT SELECT id FROM c2users WHERE visits > 150) ORDER BY d.id`,
+			want: `id | 3`},
+		{name: "138_a_derived_table_in_one_arm_and_bare_names_in_the_other",
+			sql: `SELECT d.id FROM c2users d WHERE d.id IN (SELECT t.id FROM ` +
+				`(SELECT id, visits FROM c2users) t WHERE t.visits > 50 ` +
+				`UNION ALL SELECT id FROM c2users WHERE visits > 150) ORDER BY d.id`,
+			want: `id | 1 | 3`},
+		{name: "139_the_EXISTS_spelling",
+			sql: `SELECT d.id FROM c2users d WHERE EXISTS (SELECT 1 FROM c2users WHERE visits > 50 ` +
+				`UNION ALL SELECT 1 FROM c2users WHERE visits > 150) ORDER BY d.id`,
+			want: `id | 1 | 2 | 3`},
+		{name: "140_ctl_the_qualified_spelling_the_discriminator",
+			sql: `SELECT d.id FROM c2users d WHERE d.id IN (SELECT x.id FROM c2users x ` +
+				`WHERE x.visits > 50 UNION ALL SELECT y.id FROM c2users y WHERE y.visits > 150) ` +
+				`ORDER BY d.id`,
+			want: `id | 1 | 3`},
+		{name: "141_ctl_the_same_with_no_set_operation",
+			sql: `SELECT d.id FROM c2users d WHERE d.id IN (SELECT id FROM c2users WHERE visits > 50) ` +
+				`ORDER BY d.id`,
+			want: `id | 1 | 3`},
+		// The boundary the nesting must NOT move: a QUALIFIED reference to the
+		// enclosing query inside an arm is still an outer reference, and a
+		// body that is a set operation still has no re-run.
+		{name: "142_boundary_a_real_outer_reference_in_an_arm_is_still_refused", // PostgreSQL: 1, 2, 3
+			sql: `SELECT id FROM c2users u WHERE EXISTS (SELECT 1 FROM c2users x WHERE x.id = u.id ` +
+				`UNION ALL SELECT 1 FROM c2users y WHERE y.id = 99) ORDER BY id`,
+			wantErr: `body is a SET OPERATION`,
+			routes:  a2Routes{Correlated: 1}},
+
 		// --- A GROUP BY TERM COVERS THE SELECT ITEM WRITTEN THE SAME WAY,
 		// AND NOTHING ELSE (round-5 addendum, round-3's c16). PostgreSQL
 		// matches a SELECT item against a GROUP BY term AS WRITTEN: `GROUP BY

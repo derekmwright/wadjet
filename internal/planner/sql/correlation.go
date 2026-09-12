@@ -258,8 +258,20 @@ func walkBlockForOuterRefs(info *SelectInfo, scope *outerRefScope, refs *[]Outer
 		return
 	}
 	if info.Union != nil {
-		walkBlockForOuterRefs(info.Union.Left, scope, refs)
-		walkBlockForOuterRefs(info.Union.Right, scope, refs)
+		// EACH ARM IS A BLOCK WITH ITS OWN FROM, AND THE SCOPE HAS TO SAY SO.
+		// A union node has no FROM of its own, so walking an arm with the
+		// union's scope leaves the arm's own relations out of the inner
+		// namespace and every BARE column in it falls through to outerCols:
+		// `d.id IN (SELECT id FROM t WHERE … UNION ALL SELECT id FROM t WHERE
+		// …)` was classified CORRELATED on `d.id, d.visits`, refused 0A000
+		// because its body is a set operation, and answers 1, 3 on PostgreSQL
+		// 17.11 and at bf99c56c (round-5 review, B2 — the qualified spelling
+		// was the discriminator, because a qualifier the arm's FROM supplies
+		// is recognised where a bare name was not). nest accumulates: a
+		// reference the arm resolves against its own FROM is the arm's,
+		// anything else is still the enclosing query's.
+		walkBlockForOuterRefs(info.Union.Left, scope.nest(info.Union.Left), refs)
+		walkBlockForOuterRefs(info.Union.Right, scope.nest(info.Union.Right), refs)
 		return
 	}
 	if info.WhereExpr != nil {
@@ -1330,8 +1342,7 @@ func collectOuterCandidates(subquerySQL string, out map[string]bool) {
 	collectOuterCandidatesBlock(info, out)
 }
 
-// collectOuterCandidatesBlock reads one parsed block. A set operation's arms
-// are blocks of their own and are read through it directly.
+// collectOuterCandidatesBlock reads one parsed block.
 func collectOuterCandidatesBlock(info *SelectInfo, out map[string]bool) {
 	if info == nil {
 		return
@@ -1373,12 +1384,19 @@ func collectOuterCandidatesBlock(info *SelectInfo, out map[string]bool) {
 		}
 		walkOuterCandidates(info.OrderBy[i].Expr, inner, out)
 	}
-	// A SET OPERATION's arms are blocks of their own, and an outer reference
-	// in one of them correlates the whole subquery (round-2 review, P3).
-	if info.Union != nil {
-		collectOuterCandidatesBlock(info.Union.Left, out)
-		collectOuterCandidatesBlock(info.Union.Right, out)
-	}
+	// A SET OPERATION's arms are NOT read here, and that is deliberate. The
+	// correlation WALK reads them, because a reference in an arm has to be
+	// SEEN; but a subquery whose body is a set operation has no per-row re-run
+	// at all — RebuildSQLForRerun renders one select and has no arm for
+	// info.Union — so such a reference is refused (expr.UnrebuildableBodyError,
+	// 0A000) before any outer column is read. A candidate collected from an
+	// arm can therefore never be needed, and collecting it is not free: these
+	// names widen the ENCLOSING query's projection, and over a policed
+	// relation that is a plan the ABAC order invariant no longer trips on —
+	// `SELECT id FROM e7bal WHERE id IN (SELECT id FROM e7bal WHERE bal > 300
+	// UNION ALL …)` answered the masked reading where
+	// server.TestPolicyMaskingIsPlanTimeOnEveryDoor requires the refusal
+	// (round-5 review, B2). Cell 122 is the shape this omission is safe for.
 }
 
 // walkOuterCandidates collects every column reference under node that is not
