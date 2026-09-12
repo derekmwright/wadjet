@@ -50,186 +50,112 @@ func lateralDualBody(info *plansql.SelectInfo) bool {
 // lateralBodyReadsOuterRow reports whether a TABLE-LESS body names any column.
 //
 // In such a body every column reference IS an outer reference: the body has no
-// relation of its own, so there is nothing else a name could resolve to. That
-// is what makes this test exact rather than a heuristic — it does not have to
-// know which relations are outside, only that a name is read at all.
+// relation of its own, so there is nothing else a name could resolve to — except
+// the body's OWN output names, which a group or sort term may spell.
 //
-// A SUBQUERY is opaque: its own column references belong to its own FROM.
-// `(SELECT (SELECT MAX(id) FROM t) AS v)` reads no outer column, and walking
-// into it would have said it does.
-//
-// The join's written ON is deliberately NOT part of this: `LEFT JOIN LATERAL
-// (SELECT 7 AS v) l ON u.id > 1` names the outer row in the JOIN, not in the
-// body, and PostgreSQL evaluates the body once per outer row regardless.
+// It asks THE ONE WALK (lateral_scope_walk.go), which descends into an
+// aggregate's arguments, a window call's arguments and parts, a CASE and every
+// operator, and stops at a subquery. Three sites used to ask this question three
+// different ways and disagree; that is what four review rounds of oscillation
+// between a too-wide and a too-narrow refusal were made of.
 func lateralBodyReadsOuterRow(info *plansql.SelectInfo) bool {
 	if info == nil {
 		return false
 	}
-	if info.Union != nil {
-		return lateralBodyReadsOuterRow(info.Union.Left) ||
-			lateralBodyReadsOuterRow(info.Union.Right)
+	own := lateralBodyOwnNames(info)
+	found := false
+	walkLateralBodyTerms(info, func(n plansql.Node) {
+		if ref, ok := n.(*plansql.ColRef); ok && !isOwnName(ref, own) {
+			found = true
+		}
+	})
+	return found
+}
+
+// walkLateralBodyTerms visits every expression of a table-less LATERAL body that
+// decides what the body READS — `walkBlockExprs` minus the ORDER BY.
+//
+// A SORT TERM IS DELIBERATELY NOT ASKED. A table-less body yields at most one
+// row, so its ORDER BY is the identity whatever it names, and
+// `(SELECT 7 AS v ORDER BY u.id)` is a shape the base answers exactly as
+// PostgreSQL does. The lowering drops the sort rather than refusing the body.
+func walkLateralBodyTerms(info *plansql.SelectInfo, visit func(plansql.Node)) {
+	if info == nil {
+		return
 	}
-	// The body's OWN output names are not outer columns. A sort or a group term
-	// may name one — this parser resolves `ORDER BY 1` to the item's alias —
-	// and `(SELECT 7 AS v ORDER BY 1)` reads nothing at all.
+	if info.Union != nil {
+		walkLateralBodyTerms(info.Union.Left, visit)
+		walkLateralBodyTerms(info.Union.Right, visit)
+	}
+	for i := range info.Columns {
+		c := &info.Columns[i]
+		walkExprNodes(c.ASTExpr, visit)
+		walkExprNodes(c.AggArgExpr, visit)
+		for _, a := range c.AggArgs {
+			walkExprNodes(a, visit)
+		}
+		if c.WindowSpec != nil {
+			walkWindowSpecTerms(c.WindowSpec, visit)
+		}
+	}
+	walkExprNodes(info.WhereExpr, visit)
+	walkExprNodes(info.HavingExpr, visit)
+	walkExprNodes(info.QualifyExpr, visit)
+	for _, g := range info.GroupByExprs {
+		walkExprNodes(g, visit)
+	}
+}
+
+// lateralBodyOwnNames is the set of output names a body publishes; they are not
+// outer columns however a term spells them.
+func lateralBodyOwnNames(info *plansql.SelectInfo) map[string]bool {
 	own := map[string]bool{}
 	for i := range info.Columns {
 		if a := strings.ToLower(strings.TrimSpace(info.Columns[i].Alias)); a != "" {
 			own[a] = true
 		}
 	}
-	reads := func(n plansql.Node) bool { return exprReadsAColumnOutside(n, own) }
-	for i := range info.Columns {
-		c := &info.Columns[i]
-		if reads(c.ASTExpr) || reads(c.AggArgExpr) {
-			return true
-		}
-		for _, a := range c.AggArgs {
-			if reads(a) {
-				return true
-			}
-		}
-		if c.WindowSpec != nil && windowSpecReadsAColumn(c.WindowSpec, own) {
-			return true
-		}
-	}
-	if reads(info.WhereExpr) || reads(info.HavingExpr) || reads(info.QualifyExpr) {
-		return true
-	}
-	for _, g := range info.GroupByExprs {
-		if reads(g) {
-			return true
-		}
-	}
-	// A SORT TERM IS DELIBERATELY NOT ASKED. A table-less body yields at most
-	// one row, so its ORDER BY is the identity whatever it names — and
-	// `(SELECT 7 AS v ORDER BY u.id)` is a shape the base answered exactly as
-	// PostgreSQL does (round-2 review, B1). Counting the term made the body
-	// "correlated", and a sort is not a projection, so it was refused.
-	return false
+	return own
 }
 
-// windowSpecReadsAColumn is lateralBodyReadsOuterRow over a window's own
-// partition, order and frame terms, which `plansql.WindowSpec` carries as TEXT
-// rather than as an AST.
-//
-// EACH TERM IS PARSED AND RESOLVED, not tested for being non-empty. Treating
-// any non-empty term as a column read made `OVER (ORDER BY 1)` and
-// `OVER (PARTITION BY 1)` "reads the outer row" — an integer LITERAL — and a
-// window body is not a projection, so the shape was refused where the base
-// answered PostgreSQL's own rows (round-2 review, B1). A false positive here is
-// not a lost optimization: `lateralDualBody` returning true is what ARMS the
-// refusal, so it costs the answer.
-func windowSpecReadsAColumn(w *plansql.WindowSpec, own map[string]bool) bool {
-	if w == nil {
-		return false
-	}
-	for _, pb := range w.PartitionBy {
-		if termReadsAColumnOutside(pb, own) {
-			return true
-		}
-	}
-	for _, ob := range w.OrderBy {
-		if termReadsAColumnOutside(ob.Column, own) {
-			return true
-		}
-	}
-	if w.Frame != nil {
-		if exprReadsAColumnOutside(w.Frame.Start.Offset, own) {
-			return true
-		}
-		if w.Frame.End != nil && exprReadsAColumnOutside(w.Frame.End.Offset, own) {
-			return true
-		}
-	}
-	return false
+// isOwnName reports whether a reference names the body's own output rather than
+// anything outside it. Only a BARE reference can: a qualified one names a
+// relation, and a table-less body is not one.
+func isOwnName(ref *plansql.ColRef, own map[string]bool) bool {
+	return ref.Table == "" && own[strings.ToLower(strings.TrimSpace(ref.Column))]
 }
 
-// termReadsAColumnOutside parses one TEXT term and asks the AST whether it
-// reads a column that is not the body's own output.
+// lateralBodyHasOuterWindow reports whether ANY window call in a table-less body
+// — the whole item, or one nested in an expression or a CASE — reads the outer
+// row.
 //
-// A term this cannot parse is treated as a read, which is the safe side for a
-// term whose shape is unknown: the lowering declines and the base path answers.
-func termReadsAColumnOutside(term string, own map[string]bool) bool {
-	term = strings.TrimSpace(term)
-	if term == "" {
+// It replaces the `SelectColumn.IsWindow` flag the refusal used to switch on.
+// The parser sets that only when the item IS a window call, so
+// `(SELECT (SUM(u.id) OVER ()) + 1 AS v)` and a window inside a CASE were judged
+// ordinary projections and lowered — and a window call evaluated in a projection
+// has no frame to evaluate over, so every value came back NULL (round-4 review,
+// B3).
+func lateralBodyHasOuterWindow(info *plansql.SelectInfo) bool {
+	if info == nil {
 		return false
 	}
-	node, err := plansql.ParseExpression(term)
-	if err != nil {
-		return true
-	}
-	return exprReadsAColumnOutside(node, own)
-}
-
-// exprReadsAColumnOutside reports whether an expression tree holds a column
-// reference to something OTHER than the body's own output names.
-//
-// A subquery is OPAQUE — its references are its own FROM's — and it needs no
-// special case here: `plansql.SubqueryNode` carries its body as TEXT rather
-// than as child nodes, so the walk cannot enter one.
-func exprReadsAColumnOutside(n plansql.Node, own map[string]bool) bool {
-	if n == nil {
-		return false
-	}
+	own := lateralBodyOwnNames(info)
 	found := false
-	plansql.RewriteExpr(n, func(x plansql.Node) (plansql.Node, bool) {
-		switch t := x.(type) {
-		case *plansql.ColRef:
-			if t.Table == "" && own[strings.ToLower(strings.TrimSpace(t.Column))] {
-				return nil, false
-			}
-			found = true
-		case *plansql.WindowFuncNode:
-			// A WINDOW CALL HAS ITS OWN SCOPE to `RewriteExpr`, which leaves it
-			// exactly as it stands — so the walk never reached its ARGUMENTS,
-			// and `(SELECT SUM(u.id) OVER () AS v)` read "no column" and took
-			// the base path, where every value came back NULL: #1033's own
-			// symptom, under a sentence promising a value or a refusal
-			// (round-3 review, B4). Its parts are asked here rather than by
-			// changing the shared rewriter's contract.
-			if windowCallReadsAColumnOutside(t, own) {
+	walkLateralBodyTerms(info, func(n plansql.Node) {
+		if found {
+			return
+		}
+		w, ok := n.(*plansql.WindowFuncNode)
+		if !ok {
+			return
+		}
+		walkExprNodes(w, func(x plansql.Node) {
+			if ref, ok := x.(*plansql.ColRef); ok && !isOwnName(ref, own) {
 				found = true
 			}
-		}
-		return nil, false
+		})
 	})
 	return found
-}
-
-// windowCallReadsAColumnOutside asks a window call's own parts — the function's
-// arguments, PARTITION BY, ORDER BY and the frame's offsets — the same question
-// its enclosing expression was asked.
-func windowCallReadsAColumnOutside(w *plansql.WindowFuncNode, own map[string]bool) bool {
-	if w == nil {
-		return false
-	}
-	if w.Func != nil {
-		for _, a := range w.Func.Args {
-			if exprReadsAColumnOutside(a, own) {
-				return true
-			}
-		}
-	}
-	for _, pb := range w.PartitionBy {
-		if exprReadsAColumnOutside(pb, own) {
-			return true
-		}
-	}
-	for _, ob := range w.OrderBy {
-		if exprReadsAColumnOutside(ob.Expr, own) {
-			return true
-		}
-	}
-	if w.Frame != nil {
-		if exprReadsAColumnOutside(w.Frame.Start.Offset, own) {
-			return true
-		}
-		if w.Frame.End != nil && exprReadsAColumnOutside(w.Frame.End.Offset, own) {
-			return true
-		}
-	}
-	return false
 }
 
 // refuseUnloweredTableLessLateral names the one body class or join shape that
@@ -275,6 +201,15 @@ func refuseUnloweredTableLessLateral(info *plansql.SelectInfo, join plansql.Join
 	}
 	if len(info.Columns) == 0 {
 		return refuse("an empty SELECT list")
+	}
+	// A WINDOW CALL ANYWHERE IN AN ITEM, not just as the whole item: the one
+	// walk finds it inside an expression, inside a CASE, inside another call.
+	// Switching on `SelectColumn.IsWindow` — a flag the parser sets only when
+	// the item IS a window call — lowered `(SUM(u.id) OVER ()) + 1` as an
+	// ordinary projection, where a window has no frame to evaluate over and
+	// every value came back NULL (round-4 review, B3).
+	if lateralBodyHasOuterWindow(info) {
+		return refuse("a window function")
 	}
 	for _, col := range info.Columns {
 		switch {
@@ -556,7 +491,29 @@ func refuseLateralAliasListOverStar(outer *plansql.SelectInfo,
 // lateralAliasNameRead is the first name the FROM item's column-alias list
 // introduces that the ENCLOSING query actually reads, or "" when it reads none.
 //
-// A reference qualified by the lateral's own alias is certainly one; a BARE
+// It asks THE ONE WALK (lateral_scope_walk.go) over every expression the
+// enclosing block evaluates, so a read inside an AGGREGATE (`HAVING MAX(l.w) >
+// 2`) or inside a WINDOW call (`SUM(l.w) OVER ()`) is seen — `RewriteExpr`
+// enters neither, and four spellings of "the query reads w" were invisible, so
+// the rename was dropped and the query answered plausible NULLs under a
+// sentence promising a refusal (round-4 review, B2).
+//
+// Two more positions the block's own expressions do not hold:
+//
+//   - A LATER FROM ITEM'S BODY. A second lateral may read the first one's
+//     renamed column (`…, LATERAL (SELECT l.w + 100 AS z) m`), and that body is
+//     parsed text hanging off the join rather than an expression of this block.
+//   - ONE BLOCK UP, through a STAR. When the enclosing block itself selects a
+//     star, every name it holds — the renamed ones included — is republished to
+//     whatever reads that block, which this layer cannot see. A star is
+//     therefore treated as a read of every name the list introduces: the
+//     alternative is `SELECT x.w FROM (SELECT * … l(w)) x` answering NULL.
+//
+// A SORT TERM IS NOT ASKED, for the reason walkBlockValueExprs gives: it decides
+// the order and never the values, and `… l(w) ORDER BY l.w` answers at main
+// because the base path applies the rename before the sort. It keeps answering.
+//
+// A reference qualified by the lateral's own alias is certainly a read; a BARE
 // reference of the same name is treated as one too, because the alternative is
 // to answer it from a column the rename was supposed to have replaced.
 func lateralAliasNameRead(outer *plansql.SelectInfo, join plansql.JoinInfo) string {
@@ -564,9 +521,13 @@ func lateralAliasNameRead(outer *plansql.SelectInfo, join plansql.JoinInfo) stri
 		return ""
 	}
 	want := map[string]string{}
+	var first string
 	for _, a := range join.RightTableRef.ColumnAliases {
 		if a = strings.TrimSpace(a); a != "" {
 			want[strings.ToLower(a)] = a
+			if first == "" {
+				first = a
+			}
 		}
 	}
 	if len(want) == 0 {
@@ -574,43 +535,46 @@ func lateralAliasNameRead(outer *plansql.SelectInfo, join plansql.JoinInfo) stri
 	}
 	alias := strings.ToLower(strings.TrimSpace(join.RightAlias))
 	hit := ""
-	look := func(n plansql.Node) {
-		if n == nil || hit != "" {
+	see := func(n plansql.Node) {
+		if hit != "" {
 			return
 		}
-		plansql.RewriteExpr(n, func(x plansql.Node) (plansql.Node, bool) {
-			ref, ok := x.(*plansql.ColRef)
-			if !ok || hit != "" {
-				return nil, false
-			}
-			t := strings.ToLower(strings.TrimSpace(ref.Table))
-			if t != "" && t != alias {
-				return nil, false
-			}
-			if a, ok := want[strings.ToLower(strings.TrimSpace(ref.Column))]; ok {
-				hit = a
-			}
-			return nil, false
-		})
-	}
-	for i := range outer.Columns {
-		look(outer.Columns[i].ASTExpr)
-		look(outer.Columns[i].AggArgExpr)
-		for _, a := range outer.Columns[i].AggArgs {
-			look(a)
+		ref, ok := n.(*plansql.ColRef)
+		if !ok {
+			return
+		}
+		t := strings.ToLower(strings.TrimSpace(ref.Table))
+		if t != "" && t != alias {
+			return
+		}
+		if a, ok := want[strings.ToLower(strings.TrimSpace(ref.Column))]; ok {
+			hit = a
 		}
 	}
-	look(outer.WhereExpr)
-	look(outer.HavingExpr)
-	look(outer.QualifyExpr)
-	for _, g := range outer.GroupByExprs {
-		look(g)
+	walkBlockValueExprs(outer, see)
+	if hit != "" {
+		return hit
 	}
-	for _, o := range outer.OrderBy {
-		look(o.Expr)
+	// A STAR in the enclosing block republishes every name it holds.
+	for i := range outer.Columns {
+		if outer.Columns[i].Star {
+			return first
+		}
 	}
-	for _, j := range outer.Joins {
-		look(j.CondExpr)
+	// A LATER FROM item's own body.
+	for i := range outer.Joins {
+		other := outer.Joins[i]
+		if !other.Lateral || other.RightTable == join.RightTable {
+			continue
+		}
+		body, err := lateralBodySelect(other)
+		if err != nil || body == nil {
+			continue
+		}
+		walkBlockValueExprs(body, see)
+		if hit != "" {
+			return hit
+		}
 	}
-	return hit
+	return ""
 }

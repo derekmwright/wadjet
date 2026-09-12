@@ -567,6 +567,47 @@ func TestC1EBThePredicateInputTable(t *testing.T) {
 			routed: map[string]string{},
 		},
 		{
+			// A WINDOW CALL THAT IS NOT THE WHOLE ITEM. The refusal used to
+			// switch on `SelectColumn.IsWindow`, a flag the parser sets only
+			// when the item IS a window call, so these two were judged ordinary
+			// projections and lowered — and a window evaluated in a projection
+			// has no frame, so every value came back NULL (round-4 review, B3).
+			// The one walk finds a window anywhere in an item.
+			name:   "a window nested in an expression",
+			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT (SUM(u.id) OVER ()) + 1 AS v) l ORDER BY 1",
+			want:   refused,
+			why:    "PostgreSQL answers 2,3,4; both bases answered three NULLs",
+			routed: map[string]string{},
+		},
+		{
+			name: "a window nested in a CASE",
+			sql: "SELECT l.v FROM lat_ord u, LATERAL (SELECT CASE WHEN 1=1 THEN " +
+				"SUM(u.id) OVER () ELSE 0 END AS v) l ORDER BY 1",
+			want:   refused,
+			why:    "PostgreSQL answers 1,2,3; both bases answered three NULLs",
+			routed: map[string]string{},
+		},
+		{
+			// DOCTRINE (the coordinator's round-5 call): main answers 1,1,1 by
+			// ACCIDENT — COUNT over a one-row projection is 1 whatever its
+			// argument resolves to, so the NULL never reaches the result. A
+			// loud refusal over an accidental right answer is the disposition.
+			name:   "COUNT over the outer row in a window",
+			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT COUNT(u.id) OVER () AS v) l ORDER BY 1",
+			want:   refused,
+			why:    "PostgreSQL answers 1,1,1 and so does main — by accident, not by resolving u.id",
+			routed: map[string]string{},
+		},
+		{
+			// CONTROL: a window nested in an expression that reads NOTHING is
+			// lowered and answers, which is what says the walk got precise
+			// rather than wide.
+			name:   "control: a nested window with no outer read",
+			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT (ROW_NUMBER() OVER ()) + 1 AS v) l ORDER BY 1",
+			want:   "cols=[v:INT64] rows=3 | 2 | 2 | 2",
+			routed: c1TableLess,
+		},
+		{
 			// CONTROL: a window whose argument reads NOTHING is unchanged.
 			name:   "control: a window with no outer read",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT ROW_NUMBER() OVER () AS v) l ORDER BY 1",

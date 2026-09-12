@@ -461,6 +461,69 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			routed: map[string]string{},
 		},
 		{
+			// THE READ IS FOUND BY THE ONE WALK (round-4 review, B2). The old
+			// test was a second `RewriteExpr` scan over the enclosing block
+			// only, and `RewriteExpr` enters neither an aggregate call nor a
+			// window call — so four spellings of "the query reads w" were
+			// invisible and the query answered plausible NULLs under a sentence
+			// promising a refusal.
+			name:   "a read inside a WINDOW call",
+			sql:    "SELECT SUM(l.w) OVER () AS s FROM lat_ord u, LATERAL (SELECT * FROM lat_item i WHERE i.order_id = u.id) l(w) ORDER BY 1",
+			want:   "ERR the query reads",
+			why:    "PostgreSQL answers 10,10,10,10; RewriteExpr enters no window call, so this answered four NULLs",
+			routed: map[string]string{},
+		},
+		{
+			name:   "a read inside an AGGREGATE in HAVING",
+			sql:    "SELECT u.id, MAX(l.w) AS mx FROM lat_ord u, LATERAL (SELECT * FROM lat_item i WHERE i.order_id = u.id) l(w) GROUP BY u.id HAVING MAX(l.w) > 2 ORDER BY 1",
+			want:   "ERR the query reads",
+			why:    "PostgreSQL answers one row; RewriteExpr enters no aggregate, so this answered zero",
+			routed: map[string]string{},
+		},
+		{
+			name:   "a read in a SECOND lateral's body",
+			sql:    "SELECT m.z FROM lat_ord u, LATERAL (SELECT * FROM lat_item i WHERE i.order_id = u.id) l(w), LATERAL (SELECT l.w + 100 AS z) m ORDER BY 1",
+			want:   "ERR the query reads",
+			why:    "PostgreSQL answers 101..104; a later FROM item's body is not an expression of this block",
+			routed: map[string]string{},
+		},
+		{
+			name:   "a read ONE BLOCK UP through a star",
+			sql:    "SELECT x.w FROM (SELECT * FROM lat_ord u, LATERAL (SELECT * FROM lat_item i WHERE i.order_id = u.id) l(w)) x ORDER BY 1",
+			want:   "ERR the query reads",
+			why:    "PostgreSQL answers 1,2,3,4; a star in the enclosing block republishes every name it holds",
+			routed: map[string]string{},
+		},
+		{
+			name:   "a read inside COALESCE",
+			sql:    "SELECT COALESCE(l.w, 0) AS c FROM lat_ord u, LATERAL (SELECT * FROM lat_item i WHERE i.order_id = u.id) l(w) ORDER BY 1",
+			want:   "ERR the query reads",
+			why:    "PostgreSQL answers 1,2,3,4",
+			routed: map[string]string{},
+		},
+		{
+			// PINNED, and the coordinator's round-5 doctrine: a read only in
+			// the ORDER BY keeps ANSWERING, because a sort term decides the
+			// order and never the values. The rename is dropped, so the sort
+			// term binds nothing and the order is the scan's — identical to
+			// main, which is the bar this cell is held to.
+			name: "a read only in the ORDER BY still answers",
+			// The second sort key is what makes the cell deterministic: the
+			// rename is dropped, so `l.w` binds nothing and orders nothing, and
+			// without a key that does bind, the order is whatever the scan
+			// hands over — which differs per arm and is not what this cell is
+			// about. `l.amount` is co-monotonic with `l.w` over this fixture, so
+			// PostgreSQL's answer is the same either way.
+			sql: "SELECT l.amount FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
+				"WHERE i.order_id = u.id) l(w) ORDER BY l.w, l.amount",
+			want: "cols=[amount:FLOAT64] rows=4 | 50 | 75 | 100 | 125",
+			routed: map[string]string{
+				"dag": "UnreachableOutput +1", "dag-shuffled": "UnreachableOutput +1",
+				"dag-morsel4": "UnreachableOutput +1",
+			},
+		},
+		{
+
 			// CONTROL: the two FROM items the deferral IS wired into keep
 			// applying the list, which is what makes this a lateral-only
 			// disposition rather than a lost feature.
