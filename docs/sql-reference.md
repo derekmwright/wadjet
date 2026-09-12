@@ -859,7 +859,10 @@ longer than the body is SQLSTATE `42P10`; a list over a body whose SELECT list
 holds a `*` is `0A000` WHEN the query reads a name that list introduces, because
 the star's width is not known where the rename must be made and a LATERAL is run
 as a join on the column its correlated predicate names; a query that never
-mentions a renamed name is unaffected and answers. The body's own `WHERE`, and a written `ON`, are predicates
+mentions a renamed name is unaffected and answers. A read inside an aggregate or
+a window call counts, as does one in a later `LATERAL`'s body and one a star in
+the enclosing block republishes to the query above it; an `ORDER BY` term does
+not, because it decides the order and never the values. The body's own `WHERE`, and a written `ON`, are predicates
 over the outer row and are applied above the projection.
 
 Such a body is computed as a projection or it is REFUSED (`0A000`) naming the
@@ -874,9 +877,11 @@ identity and is dropped.
 Whether a body reads the outer row is decided by RESOLVING each term, not by
 reading it as text: a literal, an ordinal, a constant expression and a name that
 resolves to the body's own output are not outer reads, in a window's
-`PARTITION BY` and `ORDER BY` and frame bounds — and in a window function's own
-ARGUMENTS — as much as in the SELECT list. `LATERAL (SELECT SUM(u.id) OVER () AS
-v)` is therefore refused, like every other window function over the outer row.
+`PARTITION BY` and `ORDER BY` and frame bounds, in a window function's own
+ARGUMENTS and in an aggregate's, as much as in the SELECT list. A window call
+ANYWHERE in an item makes the body one — `LATERAL (SELECT (SUM(u.id) OVER ()) +
+1 AS v)` and a window inside a `CASE` are refused exactly as
+`LATERAL (SELECT SUM(u.id) OVER () AS v)` is.
 
 **A table-less body that reads NO column is not correlated**, whatever else it
 writes: nothing about it depends on the outer row, so it is answered as the

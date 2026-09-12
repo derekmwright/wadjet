@@ -1413,6 +1413,16 @@ In a table-less body every column reference IS an outer reference, which makes
 the question exact rather than a heuristic: there is no relation of its own for
 a name to resolve to. Three exclusions, each with a cell:
 
+* **ONE WALK, not three.** `walkExprNodes` (lateral_scope_walk.go) is what the
+  body's outer-read test, the star-list read test and the window refusal all
+  ask. They used to be three tests — two `plansql.RewriteExpr` walks and a
+  per-item `SelectColumn.IsWindow` flag — and `RewriteExpr` enters neither an
+  AGGREGATE call nor a WINDOW call, so each lost a different piece: a read
+  inside `SUM(l.w) OVER ()` or `HAVING MAX(l.w) > 2` was invisible to the
+  star-list test (round-4 review, B2), and `(SUM(u.id) OVER ()) + 1` was not a
+  window body to the flag (B3). The disagreement between them is what four
+  rounds of oscillation between a too-wide and a too-narrow refusal were made
+  of;
 * a SUBQUERY is opaque — its references are its own FROM's;
 * the body's OWN output names are not outer columns (this parser resolves
   `ORDER BY 1` to the item's alias);
@@ -1454,8 +1464,23 @@ the decorrelating one injects correlation keys into it. Without that,
 answered NULL — the headline shape under a second spelling. A list longer than
 the body is PostgreSQL's 42P10.
 
-A list over a body carrying a STAR is REFUSED 0A000 (amended 2026-09-12,
-round-2 review B2). The earlier sentence said such a list was left to
+**A list over a body carrying a STAR is REFUSED 0A000 WHEN — and only when —
+the enclosing query READS a name the list introduces** (amended 2026-09-12,
+round-2 review B2; narrowed by round-3 review B2 and stated here in round 5,
+where the review found this paragraph still unconditional). PostgreSQL applies a
+SHORT list to the first k columns of the star's expansion and leaves the rest
+under their own names, so a query that never mentions a renamed name is
+unaffected by the rename, and refusing on the PRESENCE of the list was ten cells
+right → refused.
+
+WHAT COUNTS AS A READ is the one walk's answer, not a second scan: a reference
+inside an AGGREGATE (`HAVING MAX(l.w) > 2`) or inside a WINDOW call
+(`SUM(l.w) OVER ()`), one in a LATER FROM item's body, and — through a star in
+the enclosing block, which republishes every name it holds — one block up. A
+SORT term is not a read: it decides the order and never the values, and
+`… l(w) ORDER BY l.w` keeps answering what it answers at main.
+
+The earlier sentence said such a list was left to
 `RefuseUnappliedColumnAliasLists` — and nothing on either lateral path called
 `deferColumnAliasesOverStar`, so that refusal could never be reached and the
 list was DROPPED: `LATERAL (SELECT * FROM i WHERE i.order_id = u.id) l(w)`
