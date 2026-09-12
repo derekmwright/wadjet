@@ -140,13 +140,18 @@ func walkBlockExprs(info *plansql.SelectInfo, visit func(plansql.Node)) {
 
 // walkBlockValueExprs is walkBlockExprs WITHOUT the ORDER BY.
 //
-// A sort term decides the ORDER of a block's rows and never which VALUES they
-// carry, so the two questions this arc asks about a name — "is this body
-// correlated" and "does the query read a name the alias list introduces" —
-// both exclude it. `LATERAL (SELECT 7 AS v ORDER BY u.id)` is not correlated (a
-// one-row sort is the identity), and `… l(w) ORDER BY l.w` keeps answering
-// exactly what it answers at main, where the base path applies the rename
-// before the sort.
+// ONE of this arc's two questions excludes a sort term, and only one. "Is this
+// body CORRELATED" does: `LATERAL (SELECT 7 AS v ORDER BY u.id)` yields at most
+// one row, so its sort is the identity whatever it names, and the same holds
+// for a SIBLING lateral's own sort term, which is why the alias-list read test
+// asks a sibling body through this function too.
+//
+// "Does the query read a name the alias list introduces" does NOT exclude it
+// any more (f5b0c8f5, round-5 review B2): the rename is dropped on the lowered
+// path, so `… l(w) ORDER BY l.w DESC` bound nothing and answered PostgreSQL's
+// rows in the opposite order. lateralAliasNameRead therefore asks the ENCLOSING
+// block's OrderBy in a second loop of its own, where PostgreSQL's binding rule
+// for an output alias can be applied to the whole term.
 func walkBlockValueExprs(info *plansql.SelectInfo, visit func(plansql.Node)) {
 	if info == nil {
 		return
