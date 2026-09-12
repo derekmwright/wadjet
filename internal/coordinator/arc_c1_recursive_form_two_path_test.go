@@ -316,6 +316,61 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 			why:    "#1042 fires first on the DAG arms",
 			routed: c1RecRoutes,
 		},
+
+		// ---- A PARENTHESISED ARM (round-4 review, B1). The lexer-driven
+		// split CONSUMES the token after a top-level UNION as its lookahead,
+		// and not counting a `(` there left the depth at 0 through the whole
+		// parenthesised arm: every later top-level UNION ALL was invisible,
+		// the halves disagreed with the parse, and five bodies that answer
+		// PostgreSQL's rows were refused 42P19.
+		{
+			name:   "parenthesised arm: a parenthesised arm after UNION",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION (SELECT 2) UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
+			want:   "cols=[v:INT64] rows=5 | 1 | 2 | 2 | 3 | 3",
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "parenthesised arm: a parenthesised arm with its own LIMIT",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION (SELECT id FROM lat_ord LIMIT 1) UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
+			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "parenthesised arm: a parenthesised arm holding its own UNION ALL",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION (SELECT 2 UNION ALL SELECT 9) UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
+			want:   "cols=[v:INT64] rows=6 | 1 | 2 | 2 | 3 | 3 | 9",
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "parenthesised arm: a doubly parenthesised arm",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ((SELECT 2)) UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
+			want:   "cols=[v:INT64] rows=5 | 1 | 2 | 2 | 3 | 3",
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "parenthesised arm: two parenthesised arms",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION (SELECT 2) UNION (SELECT 3) UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
+			want:   "cols=[v:INT64] rows=6 | 1 | 2 | 2 | 3 | 3 | 3",
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "parenthesised arm: control: a parenthesised arm after UNION ALL",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL (SELECT 2) UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
+			want:   "cols=[v:INT64] rows=5 | 1 | 2 | 2 | 3 | 3",
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
 	})
 }
 

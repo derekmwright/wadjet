@@ -40,8 +40,24 @@ func SplitLastTopLevelUnionAll(sql string) (left, right string, ok bool) {
 		}
 		// A top-level UNION: the NEXT token decides whether it is UNION ALL,
 		// and where the right arm starts.
+		//
+		// THE LOOKAHEAD IS CONSUMED, so its own effect on the nesting depth has
+		// to be applied here. Reading a `(` and not counting it left depth at 0
+		// through the whole parenthesised arm and at −1 after it, so every later
+		// top-level `UNION ALL` was invisible and a body like
+		// `SELECT 1 AS v UNION (SELECT 2) UNION ALL SELECT v+1 FROM r WHERE v<3`
+		// was refused as "not the form" where PostgreSQL answers rows (arc C1
+		// round-4 review, B1).
 		start := t.pos
 		next := lx.nextToken()
+		switch next.typ {
+		case TokenLParen:
+			depth++
+		case TokenRParen:
+			depth--
+		case TokenEOF, TokenError:
+			return left, right, ok
+		}
 		if next.typ != TokenKWAll {
 			continue
 		}
