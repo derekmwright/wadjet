@@ -136,6 +136,7 @@ func unfoldFromlessScalars(info *SelectInfo) {
 		info.HavingExpr = rw(info.HavingExpr)
 		if info.HavingExpr.String() != before {
 			info.Having = info.HavingExpr.String()
+			info.HavingUnfoldedFrom = before
 		}
 	}
 	for i := range info.GroupByExprs {
@@ -190,6 +191,7 @@ func unfoldFromlessScalars(info *SelectInfo) {
 		info.OrderBy[i].Expr = rewritten
 		if info.OrderBy[i].Expr.String() != before {
 			info.OrderBy[i].Column = info.OrderBy[i].Expr.String()
+			info.OrderBy[i].UnfoldedFrom = before
 		}
 	}
 }

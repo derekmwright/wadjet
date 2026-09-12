@@ -472,3 +472,64 @@ func RewriteExpr(node Node, fn func(Node) (Node, bool)) Node {
 	// scope and is left exactly as it stands.
 	return node
 }
+
+// CanonicalSubqueryTerms returns n with every scalar subquery re-rendered from
+// its own PARSE rather than from the text the user typed.
+//
+// A SubqueryNode's identity is its raw SQL — `canonicalExpr` cannot normalise
+// inside an opaque text node — so `( SELECT u.v )`, `(select u.v)` and
+// `(SELECT u.v)` are three identities where PostgreSQL 17.11 has one: it
+// matches the PARSED expression, which is why whitespace, keyword case and
+// (in a single-relation block) the qualified spelling of the inner column are
+// all immaterial there. This is what makes them immaterial here.
+//
+// unqualify erases table qualifiers INSIDE the subquery as well, and is the
+// caller's decision for the same reason ExprIdentityUnqualified is: `t.x` and
+// `x` are one expression in a single-relation block and two over a join.
+//
+// A body this cannot parse, or one that is more than a single FROM-less
+// SELECT item, keeps its text with whitespace collapsed: a canonical form
+// that guessed at such a body would make two different expressions one
+// identity, which is the dangerous direction this file's header names.
+func CanonicalSubqueryTerms(n Node, unqualify bool) Node {
+	if n == nil {
+		return nil
+	}
+	return RewriteExpr(n, func(x Node) (Node, bool) {
+		sq, ok := x.(*SubqueryNode)
+		if !ok {
+			return nil, false
+		}
+		return &SubqueryNode{SQL: canonicalSubquerySQL(sq.SQL, unqualify)}, true
+	})
+}
+
+// canonicalSubquerySQL renders one FROM-less scalar subquery's body from its
+// parse. Anything else comes back with its whitespace collapsed and nothing
+// else changed.
+func canonicalSubquerySQL(sql string, unqualify bool) string {
+	collapsed := strings.Join(strings.Fields(sql), " ")
+	parsed, err := Parse(sql)
+	if err != nil {
+		return collapsed
+	}
+	info, err := ExtractSelect(parsed)
+	if err != nil || info == nil || info.Union != nil || len(info.Columns) != 1 {
+		return collapsed
+	}
+	col := info.Columns[0]
+	if col.Star || col.ASTExpr == nil {
+		return collapsed
+	}
+	if len(info.Tables) > 0 || len(info.Joins) > 0 || info.WhereExpr != nil ||
+		info.HavingExpr != nil || info.QualifyExpr != nil || len(info.GroupBy) > 0 ||
+		len(info.OrderBy) > 0 || info.Limit != "" || info.Offset != "" ||
+		info.Distinct || len(info.CTEs) > 0 {
+		return collapsed
+	}
+	inner := CanonicalSubqueryTerms(col.ASTExpr, unqualify)
+	if unqualify {
+		return "SELECT " + ExprIdentityUnqualified(inner)
+	}
+	return "SELECT " + ExprIdentity(inner)
+}

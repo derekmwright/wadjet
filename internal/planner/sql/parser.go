@@ -537,15 +537,20 @@ type SelectInfo struct {
 	GroupBySubqueryOrigin []string
 	Having                string
 	HavingExpr            Node
-	Distinct              bool
-	Qualify               string
-	QualifyExpr           Node
-	OrderBy               []OrderByItem
-	Limit                 string
-	Offset                string
-	Windows               []WindowSpec // window function specs extracted during pre-parse
-	CTEs                  []CTEDef     // CTE definitions extracted during pre-parse
-	Union                 *UnionInfo   // non-nil if this is a UNION query
+	// HavingUnfoldedFrom is the HAVING clause's text BEFORE the unfold
+	// rewrote a FROM-less scalar subquery in it — "" where it did not. See
+	// SelectColumn.UnfoldedFrom: the grouping-coverage rule reads a HAVING
+	// as written, exactly as it reads a SELECT item.
+	HavingUnfoldedFrom string
+	Distinct           bool
+	Qualify            string
+	QualifyExpr        Node
+	OrderBy            []OrderByItem
+	Limit              string
+	Offset             string
+	Windows            []WindowSpec // window function specs extracted during pre-parse
+	CTEs               []CTEDef     // CTE definitions extracted during pre-parse
+	Union              *UnionInfo   // non-nil if this is a UNION query
 }
 
 // TableRef is a reference to a table or table-producing function.
@@ -662,6 +667,11 @@ type OrderByItem struct {
 	// `u`. The position is known exactly at the rewrite and was thrown away
 	// there (#557).
 	Ordinal int
+	// UnfoldedFrom is the term's text BEFORE unfoldFromlessScalars rewrote a
+	// FROM-less scalar subquery in it — "" where it did not. See
+	// SelectColumn.UnfoldedFrom; the grouping-coverage rule reads an ORDER BY
+	// term as written, exactly as it reads a SELECT item.
+	UnfoldedFrom string
 }
 
 // --- Lexer-based pre-parse functions ---

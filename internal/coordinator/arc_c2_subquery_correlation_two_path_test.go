@@ -887,6 +887,46 @@ func c2Cells() []c2Cell {
 		{name: "132_boundary_an_ordinary_GROUP_BY_still_covers_the_subquery_item",
 			sql:  `SELECT (SELECT u.visits) AS v FROM c2users u GROUP BY visits ORDER BY v`,
 			want: `v | 42 | 100 | 200`},
+		// The rule reads the PARSE, not the text (round-5 review, P1).
+		// PostgreSQL matches the parsed expression, so whitespace, keyword
+		// case and — in a single-relation block — the qualified spelling of
+		// the inner column are immaterial there; keying on the raw SQL of a
+		// SubqueryNode made each of them a second key and judged the item
+		// ungrouped. The same rule reaches the HAVING and the ORDER BY, which
+		// `checkUngrouped` judges beside the SELECT list.
+		{name: "133a_whitespace_is_not_part_of_the_term",
+			sql: `SELECT ( SELECT u.visits ) AS v FROM c2users u ` +
+				`GROUP BY (SELECT   u.visits) ORDER BY v`,
+			want: `v | 42 | 100 | 200`},
+		{name: "133b_keyword_case_is_not_either",
+			sql: `SELECT (SELECT U.VISITS) AS v FROM c2users u ` +
+				`GROUP BY (select u.visits) ORDER BY v`,
+			want: `v | 42 | 100 | 200`},
+		{name: "133c_the_qualifier_of_the_inner_column_over_one_relation",
+			sql: `SELECT (SELECT u.visits) AS v FROM c2users u ` +
+				`GROUP BY (SELECT visits) ORDER BY v`,
+			want: `v | 42 | 100 | 200`},
+		{name: "133d_and_the_mirror_spelling",
+			sql: `SELECT (SELECT visits) AS v FROM c2users u ` +
+				`GROUP BY (SELECT u.visits) ORDER BY v`,
+			want: `v | 42 | 100 | 200`},
+		{name: "133e_a_HAVING_naming_the_same_term",
+			sql: `SELECT (SELECT u.visits) AS v FROM c2users u ` +
+				`GROUP BY (SELECT u.visits) HAVING (SELECT u.visits) > 50 ORDER BY v`,
+			want: `v | 100 | 200`},
+		{name: "133f_an_ORDER_BY_naming_the_same_term",
+			sql: `SELECT (SELECT u.visits) AS v FROM c2users u ` +
+				`GROUP BY (SELECT u.visits) ORDER BY (SELECT u.visits)`,
+			want: `v | 42 | 100 | 200`},
+		// The boundary the canonical key must NOT cross: a NESTED subquery is
+		// a different parse, and PostgreSQL raises on it.
+		{name: "133g_boundary_a_nested_subquery_is_a_different_term", // PostgreSQL: 42803
+			sql: `SELECT (SELECT (SELECT u.visits)) AS v FROM c2users u ` +
+				`GROUP BY (SELECT u.visits) ORDER BY v`,
+			wantErr: `must appear in the GROUP BY clause`},
+		{name: "133h_boundary_the_bare_item_over_a_bare_term_is_still_42803",
+			sql:     `SELECT visits FROM c2users u GROUP BY (SELECT visits) ORDER BY visits`,
+			wantErr: `must appear in the GROUP BY clause`},
 		{name: "133_boundary_the_term_beside_a_real_key",
 			sql: `SELECT visits, COUNT(*) AS n FROM c2users u ` +
 				`GROUP BY visits, (SELECT u.visits) ORDER BY visits`,

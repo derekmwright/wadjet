@@ -2134,8 +2134,11 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      SHAPE and not on the declaration the item would get — an exact
      accumulator's DECIMAL and a string MIN cannot be stored in the FLOAT64
      the plan allocated, a COUNT would fit and answer, and all of them are
-     refused together; an UNCORRELATED nested subquery beside an aggregate
-     types normally and is NOT refused. Since round 3 the classifier reads
+     refused together; an UNCORRELATED nested subquery beside an aggregate is
+     NOT refused and is answered as `bf99c56c` answers it, under a
+     declaration that is the FLOAT64 default where PostgreSQL 17.11 declares
+     `numeric` (#1018 / ADR-0024's family, pinned fail-on-agree on the wire).
+     Since round 3 the classifier reads
      every clause of the block and a set operation's arms, so the refusal
      reaches a subquery whose ONLY outer reference is in one of them — which
      before answered the qualifier strip's constant in silence. A LATERAL body

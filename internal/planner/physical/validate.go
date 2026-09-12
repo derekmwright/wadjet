@@ -1081,14 +1081,7 @@ func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
 		// DIFFERENT subquery (`SELECT (SELECT u.id) … GROUP BY (SELECT u.v)`)
 		// is not, and is judged on what the unfold made of it, which is the
 		// 42803 PostgreSQL raises there too.
-		checked := col.ASTExpr
-		if col.UnfoldedFrom != "" {
-			if orig, err := plansql.ParseExpression(col.UnfoldedFrom); err == nil &&
-				g.holdsGroupedOrigin(orig) {
-				checked = orig
-			}
-		}
-		if err := g.check(checked); err != nil {
+		if err := g.check(g.asWritten(col.ASTExpr, col.UnfoldedFrom)); err != nil {
 			return err
 		}
 	}
@@ -1103,7 +1096,13 @@ func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
 			g.keys[a] = true
 		}
 	}
-	if err := g.check(info.HavingExpr); err != nil {
+	// A HAVING and an ORDER BY term are read AS WRITTEN too — the same rule
+	// the SELECT list gets above, in the two clauses `checkUngrouped` also
+	// judges. Without it `… GROUP BY (SELECT u.v) HAVING (SELECT u.v) > 50`
+	// was 42803 where PostgreSQL answers, because the clause reached the check
+	// in its unfolded spelling while the unfolded key is deliberately not
+	// registered (round-5 review, P1).
+	if err := g.check(g.asWritten(info.HavingExpr, info.HavingUnfoldedFrom)); err != nil {
 		return err
 	}
 	for _, ob := range info.OrderBy {
@@ -1111,7 +1110,7 @@ func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
 		if err != nil {
 			continue
 		}
-		if err := g.check(expr); err != nil {
+		if err := g.check(g.asWritten(expr, ob.UnfoldedFrom)); err != nil {
 			return err
 		}
 	}
@@ -1251,7 +1250,7 @@ func (g *groupCheck) addGroupTerms(info *plansql.SelectInfo) {
 		// column identity, which would re-admit `visits`.
 		if i < len(info.GroupBySubqueryOrigin) && info.GroupBySubqueryOrigin[i] != "" {
 			if orig, err := plansql.ParseExpression(info.GroupBySubqueryOrigin[i]); err == nil {
-				if k := groupTermKey(orig); k != "" {
+				if k := g.originKey(orig); k != "" {
 					g.keys[k] = true
 					g.originKeys[k] = true
 				}
@@ -1416,6 +1415,35 @@ func (g *groupCheck) check(node plansql.Node) error {
 	return nil
 }
 
+// asWritten answers the PRE-UNFOLD spelling of a clause when that spelling
+// holds a term this block groups by, and the unfolded node otherwise. It is
+// the SELECT list's rule, shared with the HAVING and the ORDER BY.
+func (g *groupCheck) asWritten(unfolded plansql.Node, origin string) plansql.Node {
+	if origin == "" {
+		return unfolded
+	}
+	orig, err := plansql.ParseExpression(origin)
+	if err != nil || !g.holdsGroupedOrigin(orig) {
+		return unfolded
+	}
+	return orig
+}
+
+// originKey renders a term written as a FROM-less scalar subquery for
+// comparison with another such term. It is groupTermKey with every subquery
+// re-rendered from its own parse (plansql.CanonicalSubqueryTerms), because
+// PostgreSQL matches the PARSED expression: `( SELECT u.v )`, `(select u.v)`
+// and — in a single-relation block — `(SELECT v)` are one term there, and
+// keying on the raw text made them three and judged the item ungrouped
+// (round-5 review, P1).
+func (g *groupCheck) originKey(n plansql.Node) string {
+	c := plansql.CanonicalSubqueryTerms(n, g.unqualify)
+	if g.unqualify {
+		return plansql.ExprIdentityUnqualified(c)
+	}
+	return groupTermKey(c)
+}
+
 // holdsGroupedOrigin reports whether node, or any sub-expression of it, is a
 // term this block groups by AS WRITTEN (plansql.SelectInfo's
 // GroupBySubqueryOrigin). It is asked of a SELECT item's pre-unfold spelling.
@@ -1423,7 +1451,7 @@ func (g *groupCheck) holdsGroupedOrigin(node plansql.Node) bool {
 	if node == nil || len(g.originKeys) == 0 {
 		return false
 	}
-	if k := groupTermKey(node); k != "" && g.originKeys[k] {
+	if k := g.originKey(node); k != "" && g.originKeys[k] {
 		return true
 	}
 	for _, child := range exprOperands(node) {
