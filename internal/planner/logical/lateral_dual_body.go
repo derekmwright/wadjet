@@ -509,9 +509,12 @@ func refuseLateralAliasListOverStar(outer *plansql.SelectInfo,
 //     therefore treated as a read of every name the list introduces: the
 //     alternative is `SELECT x.w FROM (SELECT * … l(w)) x` answering NULL.
 //
-// A SORT TERM IS NOT ASKED, for the reason walkBlockValueExprs gives: it decides
-// the order and never the values, and `… l(w) ORDER BY l.w` answers at main
-// because the base path applies the rename before the sort. It keeps answering.
+// A SORT TERM IS ASKED. The term decides the order and not the values, but with
+// the rename dropped it binds NOTHING — measured: `ORDER BY l.w DESC` answered
+// the ascending order, and a permuted list sorted by a different column. The
+// rename cannot be applied here (the star's width is not knowable in the
+// builder, which is the whole reason this refusal exists), so the disposition is
+// the refusal, never a sort that binds nothing (round-5 review, B2).
 //
 // A reference qualified by the lateral's own alias is certainly a read; a BARE
 // reference of the same name is treated as one too, because the alternative is
@@ -551,7 +554,15 @@ func lateralAliasNameRead(outer *plansql.SelectInfo, join plansql.JoinInfo) stri
 			hit = a
 		}
 	}
-	walkBlockValueExprs(outer, see)
+	// THE ENCLOSING ORDER BY IS ASKED. A sort term decides the order and not the
+	// values, but the LIST is what the term names: with the rename dropped and
+	// no refusal, `… l(w) ORDER BY l.w DESC` bound nothing and answered
+	// PostgreSQL's rows in the opposite order, and a PERMUTED list sorted by a
+	// different column entirely (round-5 review, B2). Excluding it was this
+	// author's round-5 instruction and it was wrong: the ascending case that
+	// justified it agreed with PostgreSQL by accident, because the column the
+	// expansion puts first is the order the rows already have.
+	walkBlockExprs(outer, see)
 	if hit != "" {
 		return hit
 	}

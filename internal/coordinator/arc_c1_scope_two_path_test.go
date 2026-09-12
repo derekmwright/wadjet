@@ -550,25 +550,45 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			routed: map[string]string{},
 		},
 		{
-			// PINNED, and the coordinator's round-5 doctrine: a read only in
-			// the ORDER BY keeps ANSWERING, because a sort term decides the
-			// order and never the values. The rename is dropped, so the sort
-			// term binds nothing and the order is the scan's — identical to
-			// main, which is the bar this cell is held to.
-			name: "a read only in the ORDER BY still answers",
-			// The second sort key is what makes the cell deterministic: the
-			// rename is dropped, so `l.w` binds nothing and orders nothing, and
-			// without a key that does bind, the order is whatever the scan
-			// hands over — which differs per arm and is not what this cell is
-			// about. `l.amount` is co-monotonic with `l.w` over this fixture, so
-			// PostgreSQL's answer is the same either way.
+			// A SORT TERM IS A READ (round-5 review, B2). Round 5 excluded the
+			// enclosing ORDER BY on the reasoning that a sort term decides the
+			// ORDER and never the values — but on the lowered path the rename
+			// is dropped, so the sort term binds NOTHING and the order is
+			// whatever the scan hands over. That is a wrong ORDER under no
+			// refusal, which the two cells below make visible. The rename
+			// cannot be applied here for the same reason it cannot be applied
+			// in the SELECT list — the star's width is not known where the
+			// rename must be made (round-3 measured the alternative: deferring
+			// the list past the star answered ZERO ROWS, because the join keyed
+			// on a renamed column) — so the disposition is the refusal.
+			name: "a read only in the ORDER BY refuses",
 			sql: "SELECT l.amount FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
 				"WHERE i.order_id = u.id) l(w) ORDER BY l.w, l.amount",
-			want: "cols=[amount:FLOAT64] rows=4 | 50 | 75 | 100 | 125",
-			routed: map[string]string{
-				"dag": "UnreachableOutput +1", "dag-shuffled": "UnreachableOutput +1",
-				"dag-morsel4": "UnreachableOutput +1",
-			},
+			want:   "ERR the query reads",
+			why:    "PostgreSQL sorts by l.w; the round-5 tip sorted by nothing and called it an answer",
+			routed: map[string]string{},
+		},
+		{
+			// THE CELL THAT MAKES THE WRONG ORDER VISIBLE: the same shape with
+			// DESC. An unbound sort term coincides with PostgreSQL's answer
+			// ascending and disagrees with it descending — which is why the
+			// ascending spelling looked like an agreement for five rounds.
+			name:   "a DESC sort term over an alias-list name refuses",
+			sql:    "SELECT u.id FROM lat_ord u, LATERAL (SELECT * FROM lat_item i WHERE i.order_id = u.id) l(w) ORDER BY l.w DESC",
+			want:   "ERR the query reads",
+			why:    "PostgreSQL answers 2,2,1,1; main and the round-5 tip answered 1,1,2,2",
+			routed: map[string]string{},
+		},
+		{
+			// A PERMUTED FULL LIST: every name is the list's, and the sort term
+			// names the list's fourth column. Sorting on the body's own fourth
+			// column instead is a different order over the same rows.
+			name: "a permuted alias list read only by the sort term refuses",
+			sql: "SELECT u.customer FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
+				"WHERE i.order_id = u.id) l(order_id, id, amount, product) ORDER BY l.product",
+			want:   "ERR the query reads",
+			why:    "PostgreSQL answers Alice,Bob,Alice,Bob; main sorted by a different column",
+			routed: map[string]string{},
 		},
 		{
 
