@@ -3015,7 +3015,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `testdata/node_semver_gte0.js`, whose range and version lists the gate
      rebuilds and asserts position by position;
      `expr.TestNoAlternativeKeepsATrivialLowerBound` reads the parsed sets;
-     `expr.TestOnlyTheComparatorNodeDeletesIsDeleted` is the boundary from both
+     `expr.TestTheStripAppliesToTheParsedComparator` is the boundary from both
      sides; `expr.TestARangeOverGoModulePseudoVersions` is the reachable shape,
      with the no-opt-in control that `*` and `>=0.0.0` alone still admit no
      pre-release; and `wadjet.TestARangeWithATrivialLowerBoundAnswersWhatNodeSemverAnswers`

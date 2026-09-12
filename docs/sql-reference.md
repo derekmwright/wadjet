@@ -2394,6 +2394,14 @@ so `SEMVER_SATISFIES('0.0.0-alpha','*')` and
 `SEMVER_SATISFIES('0.0.0-alpha','>=0.0.0')` are both still `false`.
 `>=0.0.0-0` is a different comparator and is kept.
 
+The deletion is applied to the comparator **after** the leading-`v`
+concession, so `>=v0.0.0` is the same comparator as `>=0.0.0` and is dropped
+too. node-semver deletes by matching the comparator's text before it
+normalizes the prefix away, so it keeps that one spelling:
+`SEMVER_SATISFIES('0.0.0-alpha','>=v0.0.0 <=0.0.0-alpha')` is `true` here and
+`false` there. Since `v1.2.3` and `1.2.3` are the same version everywhere else
+in this family, they are the same comparator here as well.
+
 The **version** argument keeps the family's lenient rule: NULL for a string
 that is not a version. A NULL range is a NULL operand and answers NULL; a
 malformed one is the refusal above, and the range is read **first**, so the

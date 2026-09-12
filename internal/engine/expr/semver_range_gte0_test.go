@@ -181,23 +181,37 @@ func readNodeSemverGTE0Golden(t *testing.T) []string {
 	return out
 }
 
-// THE BOUNDARY OF THE DELETION, which is where node has had to correct itself.
+// THE DELETION APPLIES TO THE PARSED COMPARATOR, `v` INCLUDED.
 //
-// node's rule is a REGEX over the desugared text, and until 2022 its dots were
+// node's rule is a REGEX over the desugared TEXT, and that has two visible
+// consequences. It has had to be corrected once — until 2022 its dots were
 // unescaped, so `>=09090` matched the `>=0.0.0` pattern and was deleted
-// (node-semver 11494f14, #432). This engine decides on the PARSED comparator,
-// and the spelling that made that bug possible is refused before a comparator
-// exists — a leading zero is not a numeric identifier (§9). The rows below are
-// the boundary from both sides: what is deleted, what is kept, and what never
-// reaches the question.
-func TestOnlyTheComparatorNodeDeletesIsDeleted(t *testing.T) {
+// (node-semver 11494f14, #432) — and it still sees a spelling rather than a
+// version, so `>=v0.0.0` survives there while `>=0.0.0` does not.
+//
+// This engine decides on the comparator the parser built, which puts both of
+// those on the other side of the line: `>=09090` never reaches the question,
+// because a leading zero is not a numeric identifier (§9), and `>=v0.0.0` IS
+// the same comparator as `>=0.0.0`, because the `v` concession says the prefix
+// carries no meaning. The second is a DIVERGENCE from node and is recorded in
+// ADR-0012 beside the concession that causes it, not hidden here.
+//
+// The rows below are the boundary from both sides: what is deleted, what is
+// kept, and what never reaches the question at all.
+func TestTheStripAppliesToTheParsedComparator(t *testing.T) {
 	for _, tc := range []struct {
 		rng, renders, why string
 	}{
 		{">=0.0.0", "*", "the comparator itself: the whole set becomes ANY"},
 		{">= 0.0.0", "*", "a space between the operator and the version is the same comparator"},
 		{">=0.0.0+b", "*", "build metadata has no precedence (§10), and node deletes this too"},
-		{">=v0.0.0", "*", "the v concession: the prefix carries no meaning here"},
+		// The one row that DIVERGES from node-semver 7.7.3, deliberately and
+		// for a reason this arc already settled: node's regex sees the `v`
+		// and keeps `>=v0.0.0` (it renders the comparator as `>=0.0.0` a
+		// moment later, measured), while here the prefix carries no meaning
+		// at all, so it is the same comparator and is deleted. ADR-0012
+		// records it beside the concession.
+		{">=v0.0.0", "*", "the v concession reaches the strip; node keeps this spelling"},
 		{">=0.0.0-0", ">=0.0.0-0", "a pre-release bound is a DIFFERENT comparator and is kept"},
 		{">=0.0.1", ">=0.0.1", "a lower bound that excludes something is kept"},
 		{">=1.0.0", ">=1.0.0", "and so is any other"},
