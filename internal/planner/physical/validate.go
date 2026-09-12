@@ -1060,6 +1060,7 @@ func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
 	}
 
 	g := &groupCheck{from: from, keys: map[string]bool{}, idents: map[string]bool{}, bare: map[string]bool{},
+		originKeys: map[string]bool{},
 		// One source in the FROM: a qualifier then names that source and
 		// nothing else, so it is spelling (#738).
 		unqualify: len(from.quals) == 1}
@@ -1073,7 +1074,21 @@ func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
 		if col.Star || col.IsWindow || col.ASTExpr == nil {
 			continue
 		}
-		if err := g.check(col.ASTExpr); err != nil {
+		// THE ITEM AS WRITTEN, when its spelling contains a term this block
+		// GROUPS BY as written — the other half of the rule above. `SELECT
+		// (SELECT u.v) … GROUP BY (SELECT u.v)` is covered on PostgreSQL and
+		// so is `SELECT (SELECT u.v) + 0 …`; an item whose spelling holds a
+		// DIFFERENT subquery (`SELECT (SELECT u.id) … GROUP BY (SELECT u.v)`)
+		// is not, and is judged on what the unfold made of it, which is the
+		// 42803 PostgreSQL raises there too.
+		checked := col.ASTExpr
+		if col.UnfoldedFrom != "" {
+			if orig, err := plansql.ParseExpression(col.UnfoldedFrom); err == nil &&
+				g.holdsGroupedOrigin(orig) {
+				checked = orig
+			}
+		}
+		if err := g.check(checked); err != nil {
 			return err
 		}
 	}
@@ -1127,6 +1142,10 @@ type groupCheck struct {
 	keys   map[string]bool
 	idents map[string]bool
 	bare   map[string]bool
+	// originKeys are the keys of GROUP BY terms recorded as written before
+	// the FROM-less unfold rewrote them; a SELECT item is covered by one only
+	// when its OWN written spelling holds it.
+	originKeys map[string]bool
 	// unqualify erases TABLE QUALIFIERS from every expression identity this
 	// check renders, so `SELECT typemx.g + 1 ... GROUP BY g + 1` matches
 	// (#738). It is set only when the block's FROM provides exactly ONE
@@ -1218,6 +1237,25 @@ func (g *groupCheck) addGroupTerms(info *plansql.SelectInfo) {
 	for i := range info.GroupByExprs {
 		gbExpr := info.GroupByExprs[i]
 		if gbExpr == nil {
+			continue
+		}
+		// A TERM THE FROM-LESS UNFOLD REWROTE IS THE SPELLING IT WAS WRITTEN
+		// AS. PostgreSQL matches a SELECT item against a GROUP BY term as
+		// WRITTEN, so `GROUP BY (SELECT u.visits)` covers the item `(SELECT
+		// u.visits)` and does NOT cover the item `visits` — it raises 42803 on
+		// the second, and so did bf99c56c. The unfold rewrites both sides to
+		// `u.visits`, which made them one term; recording the term's origin
+		// (plansql.SelectInfo.GroupBySubqueryOrigin) keeps them two. The
+		// unfolded form registers NOTHING here: not the expression key, which
+		// would re-admit the item written `u.visits` directly, and not the
+		// column identity, which would re-admit `visits`.
+		if i < len(info.GroupBySubqueryOrigin) && info.GroupBySubqueryOrigin[i] != "" {
+			if orig, err := plansql.ParseExpression(info.GroupBySubqueryOrigin[i]); err == nil {
+				if k := groupTermKey(orig); k != "" {
+					g.keys[k] = true
+					g.originKeys[k] = true
+				}
+			}
 			continue
 		}
 		add(gbExpr)
@@ -1376,6 +1414,24 @@ func (g *groupCheck) check(node plansql.Node) error {
 		}
 	}
 	return nil
+}
+
+// holdsGroupedOrigin reports whether node, or any sub-expression of it, is a
+// term this block groups by AS WRITTEN (plansql.SelectInfo's
+// GroupBySubqueryOrigin). It is asked of a SELECT item's pre-unfold spelling.
+func (g *groupCheck) holdsGroupedOrigin(node plansql.Node) bool {
+	if node == nil || len(g.originKeys) == 0 {
+		return false
+	}
+	if k := groupTermKey(node); k != "" && g.originKeys[k] {
+		return true
+	}
+	for _, child := range exprOperands(node) {
+		if g.holdsGroupedOrigin(child) {
+			return true
+		}
+	}
+	return false
 }
 
 // groupTermKey renders an expression for comparison against the grouped

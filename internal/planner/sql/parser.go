@@ -530,17 +530,22 @@ type SelectInfo struct {
 	// had before the rule existed, instead of losing the substitution
 	// entirely (#739).
 	GroupByAliasOrigin []string
-	Having             string
-	HavingExpr         Node
-	Distinct           bool
-	Qualify            string
-	QualifyExpr        Node
-	OrderBy            []OrderByItem
-	Limit              string
-	Offset             string
-	Windows            []WindowSpec // window function specs extracted during pre-parse
-	CTEs               []CTEDef     // CTE definitions extracted during pre-parse
-	Union              *UnionInfo   // non-nil if this is a UNION query
+	// GroupBySubqueryOrigin records, per GROUP BY entry, the term's text
+	// BEFORE unfoldFromlessScalars rewrote a FROM-less scalar subquery into
+	// the expression it stands for — "" where it did not. See
+	// SelectColumn.UnfoldedFrom for why the layer above needs it.
+	GroupBySubqueryOrigin []string
+	Having                string
+	HavingExpr            Node
+	Distinct              bool
+	Qualify               string
+	QualifyExpr           Node
+	OrderBy               []OrderByItem
+	Limit                 string
+	Offset                string
+	Windows               []WindowSpec // window function specs extracted during pre-parse
+	CTEs                  []CTEDef     // CTE definitions extracted during pre-parse
+	Union                 *UnionInfo   // non-nil if this is a UNION query
 }
 
 // TableRef is a reference to a table or table-producing function.
@@ -589,6 +594,17 @@ type SelectColumn struct {
 	// Empty for a synthetically built column, where OutputColumnName derives
 	// it from the AST instead.
 	PublishedName string
+	// UnfoldedFrom is the item's text BEFORE unfoldFromlessScalars rewrote a
+	// FROM-less scalar subquery inside it — "" where it did not. Recorded for
+	// the same reason as GroupByAliasOrigin: the rewrite is a parser
+	// substitution a LATER layer has to be able to undo the effect of.
+	//
+	// PostgreSQL's grouping-coverage rule matches a SELECT item against a
+	// GROUP BY term AS WRITTEN, so `SELECT (SELECT u.v) … GROUP BY (SELECT
+	// u.v)` is covered and `SELECT v … GROUP BY (SELECT u.v)` is 42803 — two
+	// verdicts the unfold collapses into one by making both sides read `u.v`
+	// (round-5 addendum, round-3's c16).
+	UnfoldedFrom string
 }
 
 // JoinInfo describes a JOIN clause.

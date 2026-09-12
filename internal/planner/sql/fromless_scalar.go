@@ -75,6 +75,10 @@ func unfoldFromlessScalars(info *SelectInfo) {
 			before := col.ASTExpr.String()
 			col.ASTExpr = rw(col.ASTExpr)
 			if col.ASTExpr.String() != before {
+				// The item AS WRITTEN, for the grouping-coverage rule, which
+				// PostgreSQL applies to the spelling and not to what the
+				// spelling stands for (SelectColumn.UnfoldedFrom).
+				col.UnfoldedFrom = before
 				// The item's own rendering is its text, and an item that is
 				// now a plain COLUMN REFERENCE says so — parseSelectColumn
 				// stamps ColumnRef/TableRef for an item written that way, and
@@ -153,6 +157,15 @@ func unfoldFromlessScalars(info *SelectInfo) {
 		info.GroupByExprs[i] = rewritten
 		if info.GroupByExprs[i].String() != before && i < len(info.GroupBy) {
 			info.GroupBy[i] = info.GroupByExprs[i].String()
+			// The term AS WRITTEN. A GROUP BY term that stood for a subquery
+			// covers a SELECT item spelled the SAME way and nothing else —
+			// `SELECT visits … GROUP BY (SELECT u.visits)` is 42803 on
+			// PostgreSQL 17.11 and at bf99c56c, and answered three rows here
+			// once the unfold made both sides read `u.visits`.
+			for len(info.GroupBySubqueryOrigin) <= i {
+				info.GroupBySubqueryOrigin = append(info.GroupBySubqueryOrigin, "")
+			}
+			info.GroupBySubqueryOrigin[i] = before
 		}
 	}
 	for i := range info.OrderBy {

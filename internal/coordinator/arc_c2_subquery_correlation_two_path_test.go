@@ -803,6 +803,42 @@ func c2Cells() []c2Cell {
 			pinWhy: "cell 81's gap: a subquery in a GROUP BY term has no lowering in the DAG's " +
 				"scan-agg fragment"},
 
+		// --- A GROUP BY TERM COVERS THE SELECT ITEM WRITTEN THE SAME WAY,
+		// AND NOTHING ELSE (round-5 addendum, round-3's c16). PostgreSQL
+		// matches a SELECT item against a GROUP BY term AS WRITTEN: `GROUP BY
+		// (SELECT u.visits)` covers `(SELECT u.visits)` and raises 42803 on
+		// `visits`. The FROM-less unfold rewrote both sides to `u.visits`,
+		// which made the second answer three plausible rows where PostgreSQL
+		// 17.11 and bf99c56c both raise.
+		{name: "126_a_subquery_GROUP_BY_term_does_not_cover_a_bare_column",
+			sql:     `SELECT visits FROM c2users u GROUP BY (SELECT u.visits) ORDER BY visits`,
+			wantErr: `must appear in the GROUP BY clause`},
+		{name: "127_nor_the_qualified_spelling_of_the_same_column",
+			sql:     `SELECT u.visits FROM c2users u GROUP BY (SELECT u.visits) ORDER BY 1`,
+			wantErr: `must appear in the GROUP BY clause`},
+		{name: "128_nor_a_string_column",
+			sql:     `SELECT name FROM c2users u GROUP BY (SELECT u.name) ORDER BY name`,
+			wantErr: `must appear in the GROUP BY clause`},
+		{name: "129_it_covers_the_item_written_the_same_way",
+			sql: `SELECT (SELECT u.visits) AS v FROM c2users u ` +
+				`GROUP BY (SELECT u.visits) ORDER BY v`,
+			want: `v | 42 | 100 | 200`},
+		{name: "130_and_the_same_item_inside_arithmetic",
+			sql: `SELECT (SELECT u.visits) + 0 AS v FROM c2users u ` +
+				`GROUP BY (SELECT u.visits) ORDER BY v`,
+			want: `v | 42 | 100 | 200`},
+		{name: "131_a_DIFFERENT_subquery_in_the_item_is_not_covered", // PostgreSQL: 42803
+			sql: `SELECT (SELECT u.id) AS v FROM c2users u ` +
+				`GROUP BY (SELECT u.visits) ORDER BY v`,
+			wantErr: `must appear in the GROUP BY clause`},
+		{name: "132_boundary_an_ordinary_GROUP_BY_still_covers_the_subquery_item",
+			sql:  `SELECT (SELECT u.visits) AS v FROM c2users u GROUP BY visits ORDER BY v`,
+			want: `v | 42 | 100 | 200`},
+		{name: "133_boundary_the_term_beside_a_real_key",
+			sql: `SELECT visits, COUNT(*) AS n FROM c2users u ` +
+				`GROUP BY visits, (SELECT u.visits) ORDER BY visits`,
+			want: `visits,n | 42,1 | 100,1 | 200,1`},
+
 		// --- A JOIN'S ON CONDITION IS A CLAUSE THE WALK READS (round-3
 		// review, P1). It was the seventh clause, unread, and the shape was
 		// planned uncorrelated and silently wrong at main too.
