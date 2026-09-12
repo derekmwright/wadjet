@@ -518,6 +518,68 @@ func TestC1EBThePredicateInputTable(t *testing.T) {
 			routed: c1TableLess,
 		},
 		{
+			// A WINDOW CALL'S ARGUMENT reads the outer row, and
+			// `plansql.RewriteExpr` leaves a window call alone ("it has its own
+			// scope"), so the walk never reached the arguments: the body read
+			// "no column", took the base path, and every value came back NULL —
+			// #1033's own symptom, under a sentence promising a value or a
+			// refusal (round-3 review, B4). The walk asks a window call's parts
+			// itself now, and the body is refused as the window function it is.
+			name:   "window ARGUMENT reads the outer row: SUM(u.id) OVER ()",
+			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT SUM(u.id) OVER () AS v) l ORDER BY 1",
+			want:   refused,
+			why:    "PostgreSQL answers 1,2,3; both bases answered three NULLs",
+			routed: map[string]string{},
+		},
+		{
+			name:   "window ARGUMENT reads the outer row: MAX(u.total) OVER ()",
+			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT MAX(u.total) OVER () AS v) l ORDER BY 1",
+			want:   refused,
+			why:    "PostgreSQL answers 0,150,200",
+			routed: map[string]string{},
+		},
+		{
+			name:   "window ARGUMENT reads the outer row: FIRST_VALUE(u.id) OVER ()",
+			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT FIRST_VALUE(u.id) OVER () AS v) l ORDER BY 1",
+			want:   refused,
+			why:    "PostgreSQL answers 1,2,3",
+			routed: map[string]string{},
+		},
+		{
+			name:   "window ARGUMENT reads the outer row: SUM(u.id) OVER (PARTITION BY 1)",
+			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT SUM(u.id) OVER (PARTITION BY 1) AS v) l ORDER BY 1",
+			want:   refused,
+			why:    "PostgreSQL answers 1,2,3 — the PARTITION term is a literal, so only the ARGUMENT reads the outer row",
+			routed: map[string]string{},
+		},
+		{
+			name:   "window ARGUMENT reads the outer row: SUM(u.id + 1) OVER ()",
+			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT SUM(u.id + 1) OVER () AS v) l ORDER BY 1",
+			want:   refused,
+			why:    "PostgreSQL answers 2,3,4",
+			routed: map[string]string{},
+		},
+		{
+			name:   "window ARGUMENT reads the outer row: a window beside a constant item",
+			sql:    "SELECT l.a, l.v FROM lat_ord u, LATERAL (SELECT 7 AS a, SUM(u.id) OVER () AS v) l ORDER BY 1",
+			want:   refused,
+			why:    "PostgreSQL answers 7|1, 7|2, 7|3",
+			routed: map[string]string{},
+		},
+		{
+			// CONTROL: a window whose argument reads NOTHING is unchanged.
+			name:   "control: a window with no outer read",
+			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT ROW_NUMBER() OVER () AS v) l ORDER BY 1",
+			want:   "cols=[v:INT64] rows=3 | 1 | 1 | 1",
+			routed: c1TableLess,
+		},
+		{
+			name:   "control: a window whose ORDER BY term is a literal",
+			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT ROW_NUMBER() OVER (ORDER BY 1) AS v) l ORDER BY 1",
+			want:   "cols=[v:INT64] rows=3 | 1 | 1 | 1",
+			routed: c1TableLess,
+		},
+		{
 			// limit / predicate inputs: outer name
 			name:   "limit_outer (outer name)",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v LIMIT u.id) l ORDER BY 1",

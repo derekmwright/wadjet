@@ -174,17 +174,62 @@ func exprReadsAColumnOutside(n plansql.Node, own map[string]bool) bool {
 	}
 	found := false
 	plansql.RewriteExpr(n, func(x plansql.Node) (plansql.Node, bool) {
-		ref, ok := x.(*plansql.ColRef)
-		if !ok {
-			return nil, false
+		switch t := x.(type) {
+		case *plansql.ColRef:
+			if t.Table == "" && own[strings.ToLower(strings.TrimSpace(t.Column))] {
+				return nil, false
+			}
+			found = true
+		case *plansql.WindowFuncNode:
+			// A WINDOW CALL HAS ITS OWN SCOPE to `RewriteExpr`, which leaves it
+			// exactly as it stands — so the walk never reached its ARGUMENTS,
+			// and `(SELECT SUM(u.id) OVER () AS v)` read "no column" and took
+			// the base path, where every value came back NULL: #1033's own
+			// symptom, under a sentence promising a value or a refusal
+			// (round-3 review, B4). Its parts are asked here rather than by
+			// changing the shared rewriter's contract.
+			if windowCallReadsAColumnOutside(t, own) {
+				found = true
+			}
 		}
-		if ref.Table == "" && own[strings.ToLower(strings.TrimSpace(ref.Column))] {
-			return nil, false
-		}
-		found = true
 		return nil, false
 	})
 	return found
+}
+
+// windowCallReadsAColumnOutside asks a window call's own parts — the function's
+// arguments, PARTITION BY, ORDER BY and the frame's offsets — the same question
+// its enclosing expression was asked.
+func windowCallReadsAColumnOutside(w *plansql.WindowFuncNode, own map[string]bool) bool {
+	if w == nil {
+		return false
+	}
+	if w.Func != nil {
+		for _, a := range w.Func.Args {
+			if exprReadsAColumnOutside(a, own) {
+				return true
+			}
+		}
+	}
+	for _, pb := range w.PartitionBy {
+		if exprReadsAColumnOutside(pb, own) {
+			return true
+		}
+	}
+	for _, ob := range w.OrderBy {
+		if exprReadsAColumnOutside(ob.Expr, own) {
+			return true
+		}
+	}
+	if w.Frame != nil {
+		if exprReadsAColumnOutside(w.Frame.Start.Offset, own) {
+			return true
+		}
+		if w.Frame.End != nil && exprReadsAColumnOutside(w.Frame.End.Offset, own) {
+			return true
+		}
+	}
+	return false
 }
 
 // refuseUnloweredTableLessLateral names the one body class or join shape that
