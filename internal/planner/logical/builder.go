@@ -1877,6 +1877,19 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 		return nil, "", lateralEmptyInput{}, nil, fmt.Errorf("extracting SELECT from LATERAL subquery: %w", err)
 	}
 
+	// THE FROM ITEM'S COLUMN-ALIAS LIST renames the body's items POSITIONALLY,
+	// before anything else reads them — the correlation lowering below INJECTS
+	// items into this list, and a rename applied after that would rename the
+	// wrong positions. It is PostgreSQL's rule and the one
+	// `plansql.OverlayColumnAliases` states for a derived table; without it
+	// `LATERAL (…) l(w)` renamed a column nothing carried and `l.w` answered
+	// NULL (round-2 review, P2). A list over a body whose width is not knowable
+	// — one with a star — is left alone, and `RefuseUnappliedColumnAliasLists`
+	// raises PostgreSQL's 42P10 for it.
+	if err := applyLateralItemAliases(subInfo, join); err != nil {
+		return nil, "", lateralEmptyInput{}, nil, err
+	}
+
 	// Split WHERE clause into correlated and local predicates
 	var correlatedParts []string
 	var localParts []string

@@ -83,6 +83,12 @@ func (p *Planner) buildNestedRecursiveCTE(ctx context.Context, node *logical.Nod
 		return nil, nil, nil, materr, true
 	}
 	if !ok {
+		// The INVARIANT's guard, not a path any SQL reaches: every failure
+		// materializeRecursiveCTE knows about now returns an error, which the
+		// branch above surfaces, and the six refusal cells of
+		// TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned take exactly
+		// that route. If the contract is ever broken, the answer is still a
+		// refusal rather than a scan of a relation that does not exist.
 		return nil, nil, nil, sqlerr.New("0A000",
 			"the recursive CTE %q could not be materialized, and there is no relation "+
 				"of that name to read instead", node.CTEName), true

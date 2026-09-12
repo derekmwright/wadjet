@@ -369,7 +369,7 @@ func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDe
 		}
 		if schema == nil {
 			coll.Release()
-			return nil
+			return errNoCTESchema(cte.Name)
 		}
 		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: coll}
 		return nil
@@ -389,7 +389,7 @@ func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDe
 		}
 		if schema == nil {
 			coll.Release()
-			return nil
+			return errNoCTESchema(cte.Name)
 		}
 		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: coll}
 		return nil
@@ -402,16 +402,17 @@ func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDe
 	}
 	if len(anchorRows) == 0 {
 		schema := p.inferCTESchema(anchorSQL, nil)
-		if schema != nil {
-			p.cteCache[cte.Name] = &cteMaterialized{schema: schema, rows: nil}
+		if schema == nil {
+			return errNoCTESchema(cte.Name)
 		}
+		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, rows: nil}
 		return nil
 	}
 
 	// Infer schema from anchor results
 	schema := p.inferCTESchema(anchorSQL, anchorRows)
 	if schema == nil {
-		return nil
+		return errNoCTESchema(cte.Name)
 	}
 
 	// Apply column aliases if specified: WITH t(a, b) AS (...)
@@ -514,6 +515,18 @@ func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDe
 	// Store final accumulated results (columnar; replayed per reference).
 	p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: coll}
 	return nil
+}
+
+// errNoCTESchema is what a materialization that produced NO column list says.
+//
+// It exists so that `materializeRecursiveCTE` keeps ONE contract — either a
+// cache entry or an error — which is what lets the reference refuse instead of
+// falling through to a scan of a relation that does not exist (#1041's door).
+// Every path that used to leave silently now names itself.
+func errNoCTESchema(name string) error {
+	return sqlerr.New("0A000",
+		"the recursive CTE %q produced no column list, so there is nothing to read it as",
+		name)
 }
 
 // cteBodyNamesItself reports whether a RECURSIVE CTE's body reads its OWN name

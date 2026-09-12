@@ -311,6 +311,18 @@ func buildTableLessLateralJoin(info *plansql.SelectInfo, left *Node,
 		andIntoWhere(info, join.Condition, join.CondExpr)
 	}
 
+	// THE FROM ITEM'S COLUMN-ALIAS LIST renames the body's items POSITIONALLY,
+	// which is PostgreSQL's rule and the one `plansql.OverlayColumnAliases`
+	// already states for a derived table. The lowering publishes each item
+	// under its OWN alias, so without this `LATERAL (SELECT u.id AS v) l(w)`
+	// renamed a column nothing carried and `l.w` answered NULL — #1033's own
+	// headline shape under a second spelling (round-2 review, P2/B2ii). A list
+	// LONGER than the body is PostgreSQL's 42P10 and is raised by
+	// RefuseUnappliedColumnAliasLists, which sees the unapplied list.
+	if err := applyLateralItemAliases(subInfo, join); err != nil {
+		return nil, err
+	}
+
 	right, err := BuildFromSelectWithCTEs(subInfo, ctes)
 	if err != nil {
 		return nil, fmt.Errorf("building LATERAL subquery plan: %w", err)
@@ -368,3 +380,44 @@ func lateralBodySelect(join plansql.JoinInfo) (*plansql.SelectInfo, error) {
 // errNotALateralBody says the right side of this join is not a parenthesised
 // SELECT, so there is no body to classify.
 var errNotALateralBody = errors.New("lateral right side is not a subquery")
+
+// applyLateralItemAliases renames a LATERAL body's items to the FROM item's
+// COLUMN-ALIAS LIST — `LATERAL (…) l(w, x)` — POSITIONALLY, which is
+// PostgreSQL's rule and the one `plansql.OverlayColumnAliases` already states
+// for a derived table.
+//
+// Both lateral lowerings call it, and both call it FIRST: the decorrelating one
+// injects correlation keys into the same list, and a rename applied after that
+// would rename the wrong positions. Without it the lowering published each item
+// under its own alias and the list renamed a column nothing carried, so
+// `SELECT l.w FROM … LATERAL (SELECT u.id AS v) l(w)` answered three NULLs —
+// #1033's own headline shape under a second spelling (round-2 review, P2).
+//
+// A body whose width is not knowable — one carrying a star — is left alone:
+// `RefuseUnappliedColumnAliasLists` raises PostgreSQL's 42P10 for a list the
+// expansion could not apply, and guessing the width here is what that refusal
+// exists to prevent.
+func applyLateralItemAliases(info *plansql.SelectInfo, join plansql.JoinInfo) error {
+	if info == nil || join.RightTableRef == nil {
+		return nil
+	}
+	aliases := join.RightTableRef.ColumnAliases
+	if len(aliases) == 0 {
+		return nil
+	}
+	for i := range info.Columns {
+		if info.Columns[i].Star {
+			return nil
+		}
+	}
+	if len(aliases) > len(info.Columns) {
+		return sqlerr.New("42P10",
+			"table %q has %d columns available but %d columns specified",
+			join.RightAlias, len(info.Columns), len(aliases))
+	}
+	for i, name := range aliases {
+		info.Columns[i].Alias = name
+		info.Columns[i].PublishedName = name
+	}
+	return nil
+}

@@ -348,6 +348,85 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			routed: map[string]string{},
 		},
 		{
+			// THE OUTER SIDE NEED NOT BE A SCAN. `inputColDecls` stops at a
+			// Project, so a derived-table, CTE, sorted or aggregated outer gave
+			// every item the STRING default — the right VALUES under OID 25,
+			// which is the half of #1033 the issue was filed for, one position
+			// over (round-2 review, P1/B2i). The item is typed against what the
+			// outer side PUBLISHES.
+			name:   "an item over a DERIVED outer side declares the column's type",
+			sql:    "SELECT l.v FROM (SELECT id FROM lat_ord) u, LATERAL (SELECT u.id AS v) l ORDER BY 1",
+			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			routed: c1TableLess,
+		},
+		{
+			name:   "an item over a CTE outer side declares the column's type",
+			sql:    "WITH z AS (SELECT id FROM lat_ord) SELECT l.v FROM z u, LATERAL (SELECT u.id AS v) l ORDER BY 1",
+			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			routed: c1TableLess,
+		},
+		{
+			name:   "an item over a SORTED outer side declares the column's type",
+			sql:    "SELECT l.v FROM (SELECT id FROM lat_ord ORDER BY id LIMIT 2) u, LATERAL (SELECT u.id AS v) l ORDER BY 1",
+			want:   "cols=[v:INT64] rows=2 | 1 | 2",
+			routed: c1TableLess,
+		},
+		{
+			// THE FROM ITEM'S COLUMN-ALIAS LIST renames the body's items
+			// positionally. The lowering published each item under its own
+			// alias, so the list renamed a column nothing carried and `l.w`
+			// answered NULL — #1033's headline shape under a second spelling
+			// (round-2 review, P2/B2ii).
+			name:   "a column-alias list renames the item",
+			sql:    "SELECT l.w FROM lat_ord u, LATERAL (SELECT u.id AS v) l(w) ORDER BY 1",
+			want:   "cols=[w:INT64] rows=3 | 1 | 2 | 3",
+			routed: c1TableLess,
+		},
+		{
+			name: "a column-alias list renames two items of two types",
+			sql: "SELECT l.w, l.x FROM lat_ord u, LATERAL (SELECT u.id AS v, u.customer AS c) l(w,x) " +
+				"ORDER BY 1",
+			want:   "cols=[w:INT64 x:STRING] rows=3 | 1,Alice | 2,Bob | 3,Carol",
+			routed: c1TableLess,
+		},
+		{
+			// …and on the UNCORRELATED body too, which takes the base path.
+			name:   "a column-alias list over an uncorrelated body",
+			sql:    "SELECT l.w FROM lat_ord u, LATERAL (SELECT 7 AS v) l(w) ORDER BY 1",
+			want:   "cols=[w:INT64] rows=3 | 7 | 7 | 7",
+			routed: c1TableLess,
+		},
+		{
+			// A list LONGER than the body is PostgreSQL's 42P10, with its own
+			// sentence.
+			name:   "a column-alias list longer than the body is 42P10",
+			sql:    "SELECT l.w FROM lat_ord u, LATERAL (SELECT u.id AS v) l(w,x) ORDER BY 1",
+			want:   "ERR table \"l\" has 1 columns available but 2 columns specified",
+			routed: map[string]string{},
+		},
+		{
+			// PINNED, and NOT the lateral's: an ARRAY literal declares STRING
+			// wherever it is written. `SELECT ARRAY[id, id] AS v FROM lat_ord`
+			// declares STRING too, with no LATERAL in the query. The VALUES are
+			// right on both.
+			name:   "an ARRAY item carries its values under a pinned declaration",
+			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT ARRAY[u.id, u.id] AS v) l ORDER BY 1",
+			want:   "cols=[v:STRING] rows=3 | [1 1] | [2 2] | [3 3]",
+			why:    "PostgreSQL declares bigint[]; an ARRAY literal declares STRING engine-wide, with or without a LATERAL",
+			routed: c1TableLess,
+		},
+		{
+			// PINNED: a derived outer side that is EMPTY declares STRING where
+			// the same shape with rows declares INT64. A zero-row declaration
+			// is described from the plan alone, and this one is not — the same
+			// family as the SUM pin below.
+			name:   "an item over an EMPTY derived outer side is pinned",
+			sql:    "SELECT l.v FROM (SELECT id FROM lat_ord WHERE id > 99) u, LATERAL (SELECT u.id AS v) l ORDER BY 1",
+			want:   "cols=[v:STRING] rows=0",
+			why:    "PostgreSQL declares bigint on a zero-row result; the non-empty twin above declares INT64",
+			routed: c1TableLess,
+		},
+		{
 			// CONTROL + PIN: the SUM declaration divergence with no LATERAL in
 			// the query. It is the proof that the pinned cells above are not
 			// this lowering's, and it FAILS when it starts agreeing — at which

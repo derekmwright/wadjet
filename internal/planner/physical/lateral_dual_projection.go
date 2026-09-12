@@ -62,7 +62,7 @@ func (p *Planner) buildTableLessLateralJoin(ctx context.Context, node *logical.N
 func compileLateralDualItems(items []logical.Projection, outer *logical.Node) (
 	[]exec.LateralOuterColumn, error) {
 
-	decls := inputColDecls(outer)
+	decls := lateralOuterDecls(outer)
 	strictInt := strictIntArithCols(outer)
 	out := make([]exec.LateralOuterColumn, 0, len(items))
 	for _, item := range items {
@@ -129,7 +129,7 @@ func lateralDualItemDecls(join *logical.Node) map[string]expr.DeclType {
 		return nil
 	}
 	outer := join.Children[0]
-	decls := inputColDecls(outer)
+	decls := lateralOuterDecls(outer)
 	strictInt := strictIntArithCols(outer)
 	out := make(map[string]expr.DeclType, len(join.LateralDualItems))
 	for _, item := range join.LateralDualItems {
@@ -151,4 +151,53 @@ func lateralDualItemDecls(join *logical.Node) map[string]expr.DeclType {
 		out[name] = lateralDualItemDecl(item, decls, strictInt)
 	}
 	return out
+}
+
+// lateralOuterDecls is what the OUTER side of a table-less LATERAL PUBLISHES,
+// which is the scope the body's items are typed against.
+//
+// `inputColDecls` walks to the scan annotation and STOPS at a Project, because
+// a rename may bind a name to a different value — so an outer side that is a
+// derived table, a CTE, a sort or an aggregate answered nothing and every item
+// took the STRING default. `SELECT l.v FROM (SELECT id FROM lat_ord) u, LATERAL
+// (SELECT u.id AS v) l` carried the right values under OID 25, which is the
+// half of #1033 the issue was filed for, one position over (round-2 review,
+// P1/B2i).
+//
+// `emittedColDecls` is the walk that answers for a Project — it types each
+// projection through the same `declaredProjectionDecl` the output schema uses —
+// so the emitted answer is preferred and the input walk is the fallback for
+// the shapes it does not cover. Merged rather than chosen so neither can lose a
+// name the other has.
+func lateralOuterDecls(outer *logical.Node) colDecls {
+	in := inputColDecls(outer)
+	emitted := emittedColDecls(outer)
+	if len(emitted.types) == 0 {
+		return in
+	}
+	if len(in.types) == 0 {
+		return emitted
+	}
+	merged := colDecls{
+		types:    make(map[string]parquet.TypeID, len(in.types)+len(emitted.types)),
+		fields:   emitted.fields,
+		dec:      emitted.dec,
+		intWidth: emitted.intWidth,
+	}
+	for k, v := range in.types {
+		merged.types[k] = v
+	}
+	for k, v := range emitted.types {
+		merged.types[k] = v
+	}
+	if merged.fields == nil {
+		merged.fields = in.fields
+	}
+	if merged.dec == nil {
+		merged.dec = in.dec
+	}
+	if merged.intWidth == nil {
+		merged.intWidth = in.intWidth
+	}
+	return merged
 }

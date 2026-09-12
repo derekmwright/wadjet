@@ -1425,6 +1425,23 @@ clause, a star, a subquery in an item — and an OUTER join over one that would
 have to PAD (a non-trivial ON, or a body WHERE) are refused `0A000` naming the
 class. Each of THOSE answered plausible NULLs before; loud beats plausible.
 
+**THE ITEM IS TYPED AGAINST WHAT THE OUTER SIDE PUBLISHES** (amended
+2026-09-12, round-2 review P1). `inputColDecls` walks to the scan annotation and
+STOPS at a Project, so an outer side that is a derived table, a CTE, a sort or
+an aggregate answered nothing and every item took the STRING default — the
+right VALUES under OID 25, which is the half of #1033 the issue was filed for,
+one position over. The declaration now merges the EMITTED walk, which types a
+Project through the same `declaredProjectionDecl` the output schema uses.
+
+**THE FROM ITEM'S COLUMN-ALIAS LIST RENAMES THE ITEMS POSITIONALLY** (round-2
+review P2), on BOTH lateral lowerings and before either reads the list, because
+the decorrelating one injects correlation keys into it. Without that,
+`LATERAL (SELECT u.id AS v) l(w)` renamed a column nothing carried and `l.w`
+answered NULL — the headline shape under a second spelling. A list longer than
+the body is PostgreSQL's 42P10; a body carrying a star is left to
+`RefuseUnappliedColumnAliasLists`, because guessing its width is what that
+refusal exists to prevent.
+
 **NOT SETTLED, and recorded rather than repaired here:** an accumulating
 aggregate OVER such a column declares float8 where PostgreSQL declares numeric
 (`SELECT SUM(l.v) …` is 6, correctly, under OID 701). The same shape over a
@@ -1469,8 +1486,12 @@ where the block is planned. Three consequences are part of the position:
   is kept under the definition's identity (`Planner.nestedCTECache`).
 * **A reference that cannot be served is a REFUSAL.** The name belongs to the
   CTE and to nothing else in scope, so reading it as a table is reading a
-  relation that does not exist. `0A000` naming the CTE, never an empty
-  relation.
+  relation that does not exist. `materializeRecursiveCTE` keeps ONE contract —
+  either a cache entry or an error — and the reference surfaces that error;
+  every path that used to return silently now names itself. The six refusal
+  cells of §1m-a's gate take exactly that route, which is what makes this a
+  reachable position rather than a claim about a branch nothing reaches
+  (round-2 review, P3).
 
 ### 1m-a. The FORM is decided before the body is planned
 

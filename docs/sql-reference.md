@@ -849,9 +849,13 @@ SELECT SUM(l.v) FROM users u, LATERAL (SELECT u.id * 2 AS v) l
 SELECT l.v FROM users u, LATERAL (SELECT u.id AS v) l WHERE l.v > 1
 ```
 
-Each item declares what its expression declares — `u.id AS v` is the column's
-own type, not text. The body's own `WHERE`, and a written `ON`, are predicates
-over the outer row and are applied above the projection.
+Each item declares what its expression declares, against what the OUTER side
+publishes — `u.id AS v` is the column's own type, not text, whether the outer
+side is a table, a derived table, a CTE or a sorted block. The FROM item's
+column-alias list renames the items positionally (`LATERAL (SELECT u.id AS v)
+l(w)` publishes `w`), and a list longer than the body is SQLSTATE `42P10`. The
+body's own `WHERE`, and a written `ON`, are predicates over the outer row and
+are applied above the projection.
 
 Such a body is computed as a projection or it is REFUSED (`0A000`) naming the
 reason. The classes that are refused are an aggregate, a `GROUP BY`, a
