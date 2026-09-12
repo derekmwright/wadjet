@@ -270,6 +270,15 @@ func TestMemoizedStringsConcurrentBatches(t *testing.T) {
 // interface box plus a cloned key, a row no longer costs a string→[]byte
 // conversion inside SetValue, and the map storage is recycled.
 func TestMemoizedStringsAllocationsScaleWithDistinctValues(t *testing.T) {
+	if raceEnabled {
+		// The race detector's shadow-memory bookkeeping allocates in
+		// proportion to the work done, so the count is not the number this
+		// test is about, and under a whole-tree -race run the drift exceeded
+		// the +4 slack (17 vs 22, 2026-09-12 pre-push hook). The invariant
+		// is proven without the detector; the per-row allocation this
+		// guards against would show without it too.
+		t.Skip("allocation counts are not stable under the race detector")
+	}
 	fc := &FuncCall{Name: "regexp_replace", Args: []Expr{
 		&ColRef{Name: "s"}, &Lit{Val: `^https?://(?:www\.)?([^/]+)/.*$`}, &Lit{Val: `\1`}}}
 	allocsFor := func(n int) float64 {
