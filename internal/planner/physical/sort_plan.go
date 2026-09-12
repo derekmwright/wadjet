@@ -15,22 +15,47 @@ import (
 // the producer's actual stream. Ordinary DAG Projects emit no stage; a single
 // narrowed relation supplies the list, but joins/set operations need stronger proof.
 // OutputColumns is populated only after walkStages; shape is the initial bound.
+// A WRITTEN term takes a position only under the MEASURED proof, never the shape
+// bound, because it is resolvable on far more queries than an ordinal (#1014).
 // The duplicate_name_dag and collide_two_path gates test both sides of it.
 // See docs/internals/dag-sort-select-list-positions.md for the design.
 func sortKeySlotPosStage(ob logical.OrderExpr, sortNode *logical.Node, produced []Stage) int {
-	pos := sortKeySlotPos(ob, sortNode)
-	if pos == 0 {
+	if pos := sortKeySlotPos(ob, sortNode); pos != 0 {
+		if !subtreeJoinsRelations(sortNode) {
+			return pos
+		}
+		// …unless the producer MATERIALIZED the select list, which is the one
+		// case where the stream and the select list are the same list (#1003).
+		if producerPublishesSelectList(produced, sortNode) {
+			return pos
+		}
 		return 0
 	}
-	if !subtreeJoinsRelations(sortNode) {
-		return pos
+	// A WRITTEN term binds the same SLOT an ordinal does (#1014). It is the
+	// spelling one step over from #1003's, and it was the cell that arc PINNED:
+	// `SELECT DISTINCT a.order_id AS amount, b.amount … ORDER BY 1, b.amount
+	// DESC` publishes `amount` TWICE, so once the position is dropped the key
+	// resolves by that name and `ColumnIndexFallback` answers with the FIRST
+	// match — both keys bound column one and the DAG arms returned
+	// `1,50 | 1,100 | …` where PostgreSQL 17 and both single-process arms
+	// return `1,100 | 1,50 | …`. A total order is not one of ADR-0013's
+	// nondeterminism classes.
+	//
+	// Only under the MEASURED proof, on both sides of the shape bound. An
+	// ordinal may take the position on a subtree that joins no relations
+	// because a single narrowed relation's stage carries the select list as
+	// its ProjectExprs; a written term is resolvable on far more queries than
+	// an ordinal is, so widening it by the same shape argument would put a
+	// position on keys whose producer this layer has not looked at. What the
+	// measurement answers is exactly the question the position needs —
+	// does the producing stage publish the select list as the ordered prefix
+	// of its own output — and it answers it the same way for both spellings
+	// (ADR-0026 §8).
+	pos := sortKeyWrittenSlotPos(ob, sortNode)
+	if pos == 0 || !producerPublishesSelectList(produced, sortNode) {
+		return 0
 	}
-	// …unless the producer MATERIALIZED the select list, which is the one
-	// case where the stream and the select list are the same list (#1003).
-	if producerPublishesSelectList(produced, sortNode) {
-		return pos
-	}
-	return 0
+	return pos
 }
 
 // producerPublishesSelectList proves the whole visible SELECT list is an ordered
@@ -179,6 +204,26 @@ func sortKeyLocalSlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 	if pos := sortKeySlotPos(ob, sortNode); pos > 0 {
 		return pos
 	}
+	return sortKeyWrittenSlotPos(ob, sortNode)
+}
+
+// sortKeyWrittenSlotPos is the visible SELECT-list position a WRITTEN sort term
+// names — by its alias, else by the expression the item was written as — or 0
+// where no position is provable.
+//
+// Exactly one visible item must answer to the term: two is the ambiguity
+// PostgreSQL raises 42702 for and wadjet answers by binding the first
+// (ADR-0012's divergence list), and taking a position there would change
+// WHICH one, on one arm and not the others.
+//
+// Extracted from sortKeyLocalSlotPos so both engines resolve a written term's
+// slot through ONE function: the single-process path had it and the DAG did
+// not, which is #1014 — `ORDER BY b.amount` beside an output column also
+// called `amount` sorted by the other one on the distributed arms alone. What
+// the two callers do NOT share is the PROOF that the position addresses their
+// stream; each still makes its own (sortKeySlotPosStage's is measured against
+// the producing stage).
+func sortKeyWrittenSlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 	term := strings.TrimSpace(ob.Column)
 	if term == "" || sortNode == nil || len(sortNode.Children) == 0 {
 		return 0

@@ -88,31 +88,23 @@ func TestN1AnOrdinalSortKeyBindsItsSlot(t *testing.T) {
 				"2,75 | 2,125 | 1,50 | 1,100",
 		},
 		{
-			// An ordinal MIXED with a WRITTEN term. The ordinal is right on
-			// every arm now; the written `b.amount` is not, and the two DAG
-			// arms are PINNED at the divergence with the mechanism.
-			//
-			// `resolveSortKeyColumn` maps a written term onto the select-list
-			// item that carries it, so this key reaches the stage spelled
-			// `amount` — the name the producer publishes TWICE — and binds
-			// the first of them. The stream does carry `b.amount` (the
-			// aggregate publishes the group key under its own spelling too),
-			// so the value is reachable and the rewrite is what loses it.
-			// That is a WRITTEN key's resolution, not an ordinal's: the same
-			// family as #968's pinned consumers, one spelling over, and it is
-			// recorded here rather than widened into this arc.
+			// An ordinal MIXED with a WRITTEN term. This cell was PINNED at
+			// the two DAG arms when this gate landed — a written term reached
+			// the stage spelled `amount`, the name the producer publishes
+			// TWICE, and bound the first of them — and the pin is deleted
+			// here because #1014 closed it: a written term now resolves to
+			// its SLOT through the same function the single-process engines
+			// use, under the DAG's own measured proof
+			// (`sortKeyWrittenSlotPos`, `sortKeySlotPosStage`). The whole
+			// written-key family is
+			// TestC3AWrittenSortKeyBindsItsOwnColumn; this cell stays because
+			// it is the MIXED list, which that gate reaches from the ordinal
+			// side.
 			name: "1003 an ordinal beside a written key",
 			sql: "SELECT DISTINCT a.order_id AS amount, b.amount " + selfJoin +
 				"ORDER BY 1, b.amount DESC",
 			want: "cols=[amount:INT64 amount:FLOAT64] rows=4 | " +
 				"1,100 | 1,50 | 2,125 | 2,75",
-			wantDag: "cols=[amount:INT64 amount:FLOAT64] rows=4 | " +
-				"1,50 | 1,100 | 2,125 | 2,75",
-			wantDagshuf: "cols=[amount:INT64 amount:FLOAT64] rows=4 | " +
-				"1,50 | 1,100 | 2,125 | 2,75",
-			why: "a WRITTEN ORDER BY term is rewritten to the select-list " +
-				"alias, which two output columns carry; the ordinal half of " +
-				"this key list is right on every arm",
 		},
 		{
 			// AT SCALE: 5000 rows, so the coordinator's merge has to coalesce

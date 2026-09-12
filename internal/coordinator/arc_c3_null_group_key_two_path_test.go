@@ -216,8 +216,14 @@ const c3Reps = 8
 // sorted row strings, and the coordinator whose local-route counters say
 // whether the DAG executed the query or refused it and answered in process.
 type c3Arm struct {
-	name  string
-	run   func(sql string) ([]string, error)
+	name string
+	run  func(sql string) ([]string, error)
+	// decl renders the same answer the way f1Render does — the DECLARED
+	// column list and type beside the rows, in the query's own order. A gate
+	// about an ORDER BY needs the sequence as written and a gate about two
+	// output columns of one name needs their declarations, which the sorted
+	// row rendering above deliberately drops (#1014).
+	decl  func(sql string) (string, error)
 	coord *Coordinator
 }
 
@@ -247,12 +253,18 @@ func c3Arms(t *testing.T, ctx context.Context) []c3Arm {
 	dag := func(c *Coordinator) func(string) ([]string, error) {
 		return func(sql string) ([]string, error) { return c3RenderDAG(ctx, c, sql) }
 	}
+	localDecl := func(db *wadjet.DB) func(string) (string, error) {
+		return func(sql string) (string, error) { return f1RenderSingle(ctx, db, sql) }
+	}
+	dagDecl := func(c *Coordinator) func(string) (string, error) {
+		return func(sql string) (string, error) { return f1RenderDAG(ctx, c, sql) }
+	}
 	return []c3Arm{
-		{"single", local(single), nil},
-		{spilledArm, local(spilled), nil},
-		{"dag", dag(coord), coord},
-		{"dag-shuffled", dag(coordB), coordB},
-		{"dag-morsel4", dag(coordM), coordM},
+		{"single", local(single), localDecl(single), nil},
+		{spilledArm, local(spilled), localDecl(spilled), nil},
+		{"dag", dag(coord), dagDecl(coord), coord},
+		{"dag-shuffled", dag(coordB), dagDecl(coordB), coordB},
+		{"dag-morsel4", dag(coordM), dagDecl(coordM), coordM},
 	}
 }
 
@@ -264,6 +276,10 @@ type c3Case struct {
 	want string
 	pin  map[string]string
 	why  string
+	// routed is the local-route counter delta each DAG arm is expected to
+	// move, keyed by arm name — "" or absent meaning the arm EXECUTED the
+	// query as stages. Rows alone cannot tell those apart (COMMON.md).
+	routed map[string]string
 }
 
 // c3Run asserts every case on every arm, and asserts the DISPOSITION beside
@@ -294,9 +310,10 @@ func c3Run(t *testing.T, arms []c3Arm, cases []c3Case) {
 						tc.sql, arm.name, got, want, why)
 				}
 				if arm.coord != nil {
-					if moved := f1CounterDelta(before, f1Counters(arm.coord)); moved != "" {
-						t.Errorf("%s\n  arm %s routed local (%s), so its rows say nothing "+
-							"about the distributed path", tc.sql, arm.name, moved)
+					moved := f1CounterDelta(before, f1Counters(arm.coord))
+					if moved != tc.routed[arm.name] {
+						t.Errorf("%s\n  arm %s disposition: got %q, want %q",
+							tc.sql, arm.name, moved, tc.routed[arm.name])
 					}
 				}
 			}

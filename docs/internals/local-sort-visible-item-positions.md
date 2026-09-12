@@ -31,3 +31,15 @@ Source: internal/planner/physical/sort_plan.go — sortKeyLocalSlotPos, moved 20
 // addresses the PRODUCING STAGE's output, which is the select list only for a
 // single narrowed relation (see that function), and the DAG does not need it.
 ```
+
+## Amendment, 2026-09-12 (#1014)
+
+The by-name half of this function is now `sortKeyWrittenSlotPos`, and it is
+SHARED with the DAG: `sortKeySlotPosStage` calls it too, under its own
+measured proof that the position addresses the producing stage's stream
+(`producerPublishesSelectList`). The paragraph above saying it is "deliberately
+NOT wired into sortKeySlotPosStage" described the state in which #1014 lived —
+`ORDER BY b.amount` beside an output column also called `amount` sorted by the
+other one on the distributed arms and by the right one in process. What the
+two callers still do not share is the PROOF; what they now share is the
+resolution.
