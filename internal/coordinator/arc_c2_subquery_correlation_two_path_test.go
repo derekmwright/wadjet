@@ -412,7 +412,7 @@ func c2Cells() []c2Cell {
 			sql: `SELECT id, (SELECT x.visits FROM c2users x ORDER BY (SELECT u.id) LIMIT 1) AS v ` +
 				`FROM c2users u ORDER BY id`,
 			wantErr: `correlated on u.id`,
-			routes:  a2Routes{ScalarProjection: 1}},
+			routes:  a2Routes{Correlated: 1}},
 		// The DIRECT spelling of the same two positions — an outer reference
 		// written straight into the clause rather than through a nested
 		// subquery — with the discriminator that says why refusing it is not
@@ -434,8 +434,8 @@ func c2Cells() []c2Cell {
 		{name: "53_in_a_GROUP_BY_term_is_refused", // PostgreSQL: 342, 342, 342
 			sql: `SELECT id, (SELECT SUM(x.visits) FROM c2users x GROUP BY u.id) AS v ` +
 				`FROM c2users u ORDER BY id`,
-			wantErr: `more than one row`,
-			routes:  a2Routes{ScalarProjection: 1}},
+			wantErr: `cannot substitute`,
+			routes:  a2Routes{Correlated: 1}},
 		{name: "54_in_a_LATERAL_body_is_refused", // PostgreSQL: 1, 2, 3
 			sql: `SELECT u.id, l.v FROM c2users u CROSS JOIN LATERAL ` +
 				`(SELECT (SELECT u.id) AS v FROM c2users x WHERE x.id=1) l ORDER BY 1`,
@@ -601,6 +601,83 @@ func c2Cells() []c2Cell {
 		{name: "81_boundary_GROUP_BY_is_unaffected",
 			sql:  `SELECT visits, COUNT(*) AS n FROM c2users u GROUP BY visits, (SELECT 2) ORDER BY 1`,
 			want: `visits,n | 42,1 | 100,1 | 200,1`},
+
+		// --- AN OUTER REFERENCE WHOSE ONLY POSITION IS THE SUBQUERY'S ORDER
+		// BY is seen by the classifier now, so it reaches the re-run and is
+		// refused there instead of answering a constant (round-2 review, P1).
+		{name: "82_an_outer_reference_only_in_the_subquerys_ORDER_BY", // PostgreSQL: 200, 100, 100
+			sql: `SELECT id, (SELECT x.visits FROM c2users x ORDER BY x.id * (u.id - 2) LIMIT 1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			wantErr: `cannot substitute`,
+			routes:  a2Routes{Correlated: 1}},
+		{name: "83_the_same_projecting_the_sort_key", // PostgreSQL: 3, 1, 1
+			sql: `SELECT id, (SELECT x.id FROM c2users x ORDER BY x.id * (u.id - 2) LIMIT 1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			wantErr: `cannot substitute`,
+			routes:  a2Routes{Correlated: 1}},
+
+		// --- A CORRELATED BODY THAT IS A SET OPERATION has no rendering in
+		// the rebuild, and its arms were invisible to the classifier
+		// (round-2 review, P3).
+		{name: "84_a_correlated_set_operation_body", // PostgreSQL: 1, 2, 3
+			sql: `SELECT id, (SELECT u.id FROM c2users x WHERE x.id=1 ` +
+				`UNION ALL SELECT u.id FROM c2users y WHERE y.id=99) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			wantErr: `SET OPERATION`,
+			routes:  a2Routes{Correlated: 1}},
+		{name: "85_the_same_with_the_correlation_in_an_arms_WHERE", // PostgreSQL: 1, 2, 3
+			sql: `SELECT id, (SELECT x.id FROM c2users x WHERE x.id=u.id ` +
+				`UNION ALL SELECT y.id FROM c2users y WHERE y.id=99) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			wantErr: `SET OPERATION`,
+			routes:  a2Routes{Correlated: 1}},
+
+		// --- AN AGGREGATE BESIDE A NESTED SUBQUERY has no plan-time type, so
+		// the item fell to FLOAT64 and an exact accumulator's DECIMAL reached
+		// the client as the #361 silent-write guard's message (round-2
+		// review, P4). It is one shape whether the accumulator is exact or
+		// not: the int32 twins answered under OID 701 where PostgreSQL
+		// declares bigint.
+		{name: "86_an_aggregate_beside_a_nested_subquery_bigint", // PostgreSQL: 345, 348, 351
+			sql: `SELECT id, (SELECT SUM(x.visits + (SELECT u.id)) FROM c2users x) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			wantErr: `aggregate beside a nested subquery`,
+			routes:  a2Routes{Correlated: 1}},
+		{name: "87_the_subquery_beside_rather_than_inside_the_aggregate", // PostgreSQL: 343, 344, 345
+			sql: `SELECT id, (SELECT SUM(x.visits) + (SELECT u.id) FROM c2users x) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			wantErr: `aggregate beside a nested subquery`,
+			routes:  a2Routes{Correlated: 1}},
+		{name: "88_the_int32_twin_that_answered_under_the_wrong_type", // PostgreSQL: 9, 12, 15 as bigint
+			sql: `SELECT id, (SELECT SUM(x.id + (SELECT u.id)) FROM c2users x) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			wantErr: `aggregate beside a nested subquery`,
+			routes:  a2Routes{Correlated: 1}},
+		{name: "89_ctl_the_same_aggregate_with_the_reference_written_directly",
+			sql: `SELECT id, (SELECT SUM(x.visits + u.id) FROM c2users x) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,345 | 2,348 | 3,351`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "90_ctl_an_aggregate_beside_a_subquery_in_a_HAVING_still_answers",
+			sql: `SELECT id, (SELECT SUM(x.visits) FROM c2users x ` +
+				`HAVING SUM(x.visits) > (SELECT u.id)) AS v FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,342 | 2,342 | 3,342`,
+			routes: a2Routes{Correlated: 1}},
+
+		// --- a FROM-less block's OWN aggregate or window call is the block's,
+		// and answers (round-2 review, P2 — the docs said otherwise).
+		{name: "91_a_fromless_blocks_own_aggregate_answers",
+			sql:    `SELECT id, (SELECT MAX(1)) AS v FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,1 | 2,1 | 3,1`,
+			routes: a2Routes{UnbuildableStage: 1}},
+		{name: "92_a_fromless_blocks_own_count_answers",
+			sql:    `SELECT id, (SELECT COUNT(*)) AS v FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,1 | 2,1 | 3,1`,
+			routes: a2Routes{UnbuildableStage: 1}},
+		{name: "93_a_fromless_blocks_own_window_call_answers",
+			sql:    `SELECT id, (SELECT COUNT(*) OVER ()) AS v FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,1 | 2,1 | 3,1`,
+			routes: a2Routes{ScalarProjection: 1}},
 	}
 }
 

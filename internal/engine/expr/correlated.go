@@ -820,3 +820,66 @@ func refuseOuterLevelAggregate(kind, sql string, outerTables map[string]bool) er
 	}
 	return &OuterLevelAggregateError{Kind: kind, SQL: sql, Refs: refs}
 }
+
+// UnrebuildableBodyError reports a correlated subquery whose body the per-row
+// re-run cannot write back out.
+//
+// The re-run substitutes the outer row's values and rebuilds the statement
+// from its parts (plansql.RebuildSQLForRerun), which renders ONE select. Two
+// bodies have no rendering there, and both used to be invisible rather than
+// refused — the classifier read the top-level block's WHERE, HAVING and SELECT
+// list only, so a reference written in a set-operation ARM was never seen and
+// the subquery ran standalone, where the qualifier strip answered one constant
+// per outer row (`(SELECT u.id FROM x WHERE x.id=1 UNION ALL SELECT u.id FROM
+// y WHERE y.id=99)` was 1, 1, 1 for PostgreSQL 17.11's 1, 2, 3).
+//
+//   - a SET OPERATION: RebuildSQL has no arm for info.Union, so the rebuilt
+//     text is not the statement the user wrote.
+//   - a SELECT ITEM holding an AGGREGATE beside a nested scalar SUBQUERY: the
+//     item has no plan-time type, because the nested subquery's type is the
+//     enclosing row's, so the declaration falls to FLOAT64 and an exact
+//     accumulator's DECIMAL cannot be stored in it — the #361 silent-write
+//     guard, reaching the client as a generic 42000 naming no subquery.
+//     See plansql.AggregateBesideANestedSubquery for the measurements.
+type UnrebuildableBodyError struct {
+	Kind   string
+	Reason string
+	SQL    string
+	Refs   []plansql.OuterRef
+}
+
+func (e *UnrebuildableBodyError) Error() string {
+	names := make([]string, 0, len(e.Refs))
+	for _, r := range e.Refs {
+		names = append(names, r.Table+"."+r.Column)
+	}
+	return fmt.Sprintf("%s subquery is correlated on %s and %s, so its per-row re-run cannot "+
+		"be written back out; this query has no distributed or single-process lowering for "+
+		"that correlation\n  subquery: %s",
+		e.Kind, strings.Join(names, ", "), e.Reason, e.SQL)
+}
+
+// FatalEvalError satisfies the marker the pipeline drivers recover on.
+func (e *UnrebuildableBodyError) FatalEvalError() error { return e }
+
+// SQLState is PostgreSQL's feature_not_supported.
+func (e *UnrebuildableBodyError) SQLState() string { return "0A000" }
+
+// refuseUnrebuildableBody answers the error when a correlated subquery's body
+// is one the rebuild cannot render, and nil otherwise.
+func refuseUnrebuildableBody(kind, sql string, info *plansql.SelectInfo,
+	refs []plansql.OuterRef) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	switch {
+	case plansql.HoldsSetOperation(info):
+		return &UnrebuildableBodyError{Kind: kind, SQL: sql, Refs: refs,
+			Reason: "its body is a SET OPERATION, which the rebuild renders no arm for"}
+	case plansql.AggregateBesideANestedSubquery(sql):
+		return &UnrebuildableBodyError{Kind: kind, SQL: sql, Refs: refs,
+			Reason: "a SELECT item holds an aggregate beside a nested subquery, which leaves " +
+				"the item with no type until the outer row is known"}
+	}
+	return nil
+}

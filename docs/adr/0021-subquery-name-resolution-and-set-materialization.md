@@ -1133,6 +1133,19 @@ answer §1c refuses at the uncorrelated evaluators. Rendering a substituted sort
 or group term so that it cannot read as a position is what closing that half
 needs.
 
+**The refusal is only as wide as the walk that FINDS the reference**, and for
+one round it was narrower than this paragraph said. `findCorrelatedRefs` read
+the body's WHERE, HAVING and SELECT list and nothing else, so a subquery whose
+ONLY outer reference sat in an ORDER BY term was never called correlated, never
+reached the re-run, and answered the qualifier strip's constant — `(SELECT
+x.visits FROM c2users x ORDER BY x.id * (u.id - 2) LIMIT 1)` was 100, 100, 100
+for PostgreSQL 17.11's 200, 100, 100 (round-2 review, P1). `walkBlockForOuterRefs`
+now reads every clause of the block that can carry a column reference — the
+WHERE, the HAVING, the QUALIFY, the SELECT list, the GROUP BY terms and the
+non-positional ORDER BY terms — and every arm of a set operation. Seeing the
+reference is what lets it be substituted where the rebuild can and refused
+where it cannot; neither is possible for a reference nobody looks for.
+
 **A REWRITE MUST NOT PUT A BARE NUMERIC LITERAL IN AN ORDER BY TERM.** The same
 ordinal trap caught the FROM-less rewrite itself. It ran after
 `resolvePositionalRefs`, so a term written `(SELECT 1)` became the bare `1`
@@ -1172,9 +1185,11 @@ each one does. The cell numbers are
 | a correlated subquery's WHERE | the enclosing query | kept; the re-run substitutes the WHERE | 51 |
 | a correlated subquery's HAVING | the enclosing query | kept; the re-run substitutes the HAVING | 47 |
 | a correlated IN set's SELECT list | the enclosing query | kept; substituted | 46, 69 |
-| a correlated subquery's ORDER BY | the enclosing query | kept; REFUSED 0A000 — a substituted term reads as an ordinal | 52 |
-| an ORDER BY term of the ENCLOSING statement, `ORDER BY (SELECT 1)` | nothing — a constant sort | kept: only a literal WRITTEN in the clause is an ordinal | 71–81, 80a |
-| a correlated subquery's GROUP BY | the enclosing query | kept; loud (21000) for the same reason | 53 |
+| a correlated subquery's ORDER BY — whether or not another clause also names the row | the enclosing query | kept; REFUSED 0A000 — a substituted term reads as an ordinal | 52, 82, 83 |
+| a correlated subquery's GROUP BY | the enclosing query | kept; REFUSED 0A000 for the same reason | 53 |
+| a correlated subquery whose BODY is a SET OPERATION | the enclosing query | REFUSED 0A000 — `RebuildSQL` renders one select and has no arm for a union | 84, 85 |
+| a SELECT item holding an AGGREGATE beside a nested subquery | the enclosing query | REFUSED 0A000 — the item has no type until the outer row is known | 86, 87, 88 |
+| an ORDER BY term of the ENCLOSING statement, `ORDER BY (SELECT 1)` | nothing — a constant sort | kept: only a literal WRITTEN in the clause is an ordinal | 71–80a |
 | a LATERAL body | the enclosing query | kept; REFUSED 0A000 | 54 |
 | an aggregate argument naming ONLY the enclosing query | the enclosing query, by PostgreSQL's level rule | REFUSED 0A000 | 60, 61 |
 | a window call's argument or OVER terms | the enclosing query | REFUSED 0A000 (§1m) | 30–40 |
@@ -1302,7 +1317,8 @@ fixture's and not the engine's.
 substituted now (§1l); `GROUP BY` and `ORDER BY` are not, because a substituted
 term there renders as a bare literal and reads as a select-list POSITION, and
 `RebuildSQL` drops a `QUALIFY` clause outright. All three are refused rather
-than run. The WINDOW case stays refused for a different reason and a harder
+than run, and since round 3 the classifier reads those clauses, so the refusal
+reaches a subquery whose ONLY outer reference is in one of them. The WINDOW case stays refused for a different reason and a harder
 one: there is no faithful rendering of an `OVER` clause to rebuild, and
 `WindowFuncNode.String()` emitting `OVER (...)` — three literal dots — is a
 defect of its own worth closing before anything here can.

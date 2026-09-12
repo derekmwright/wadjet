@@ -2116,11 +2116,20 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      HAVING, each of which the rebuild renders from its own tree; it does not
      reach GROUP BY or ORDER BY, because a term substituted there renders as a
      bare literal and both engines read `ORDER BY 1` as the FIRST SELECT ITEM
-     rather than as the number one. Running the statement with the reference
-     still in it is the silent answer §1c refuses at the uncorrelated
-     evaluators, so it is refused here: `(SELECT x.visits FROM x ORDER BY
-     (SELECT u.id) LIMIT 1)` is 0A000 where PostgreSQL answers 100, 100, 100,
-     and the GROUP BY spelling is loud for the same reason. A LATERAL body is
+     rather than as the number one, and it has no arm at all for a body that is
+     a SET OPERATION (`(SELECT u.id FROM x WHERE x.id=1 UNION ALL SELECT u.id
+     FROM y WHERE y.id=99)` is 0A000 where PostgreSQL answers 1, 2, 3). A
+     SELECT item holding an aggregate beside a NESTED subquery is refused for a
+     third reason: the item has no plan-time type, because the nested
+     subquery's type is the enclosing row's, so an exact accumulator's DECIMAL
+     does not fit the declaration the plan allocated. Running the statement
+     with the reference still in it is the silent answer §1c refuses at the
+     uncorrelated evaluators, so it is refused here: `(SELECT x.visits FROM x
+     ORDER BY (SELECT u.id) LIMIT 1)` is 0A000 where PostgreSQL answers 100,
+     100, 100, and the GROUP BY spelling is refused for the same reason. Since
+     round 3 the classifier reads those clauses and a set operation's arms, so
+     the refusal reaches a subquery whose ONLY outer reference is in one of
+     them — which before answered the qualifier strip's constant in silence. A LATERAL body is
      refused on the same ground — it is decorrelated into a join and the
      projection has nothing to respell.
 

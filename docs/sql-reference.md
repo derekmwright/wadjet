@@ -644,10 +644,17 @@ and its `HAVING` as well as its `WHERE`:
 SELECT (SELECT u.x FROM other y WHERE y.id = 1) FROM (SELECT id AS x FROM t) u
 ```
 
-An outer reference in such a subquery's `GROUP BY` or `ORDER BY`, or in a
-`LATERAL` body, is refused (`0A000`) instead: the per-row substitution renders
-the outer value as a literal, and a literal in those two clauses reads as a
-select-list POSITION rather than as a value.
+An outer reference in such a subquery's `GROUP BY` or `ORDER BY`, in a body
+that is a SET OPERATION, or in a `LATERAL` body, is refused (`0A000`) instead.
+For the first two the per-row substitution would render the outer value as a
+literal, and a literal in those clauses reads as a select-list POSITION rather
+than as a value; for a set operation the rebuild has no arm to write. A SELECT
+item that holds an aggregate beside a nested subquery is refused for a third
+reason — the item has no type until the outer row is known.
+
+A term written `ORDER BY (SELECT 1)` is unaffected by any of this: only an
+integer literal WRITTEN IN THE CLAUSE is a select-list position, so a subquery
+that evaluates to one is an ordinary constant sort and answers.
 
 An AGGREGATE whose argument names ONLY the enclosing query is refused
 (`0A000`) as well. PostgreSQL puts such an aggregate at the enclosing query's
@@ -661,13 +668,15 @@ A clause that can make such a block produce no row keeps its own meaning:
 `(SELECT u.id WHERE 1=0)`, `(SELECT u.id LIMIT 0)` and `(SELECT u.id OFFSET 1)`
 are `NULL`.
 
-An AGGREGATE or a WINDOW call in such a block is not supported here.
-PostgreSQL decides which query one belongs to by whether its argument names the
-enclosing query — `(SELECT MAX(u.id))` is the ENCLOSING query's aggregate and
-collapses the whole statement to one row, while `(SELECT MAX(1))` and
-`(SELECT COUNT(*))` are the block's own and answer 1 for every outer row — and
-this engine does not make that distinction. Write the aggregate or the window
-call in the enclosing query instead.
+An AGGREGATE or a WINDOW call in such a block belongs to whichever query its
+ARGUMENT names, which is PostgreSQL's rule. One that names NOTHING is the
+block's own, over the single row the block produces, and answers here:
+`(SELECT MAX(1))`, `(SELECT COUNT(*))` and `(SELECT COUNT(*) OVER ())` are all
+1 for every outer row. One whose argument names the ENCLOSING query is the
+enclosing query's aggregate — `SELECT MAX((SELECT u.id)) FROM t u` is one row
+on PostgreSQL — and this engine has no lowering for an aggregate level above
+the block it is written in, so that spelling is refused (`0A000`). Write it in
+the enclosing query instead.
 
 A `ROW` field path may be an `IN` subquery's SELECT list: `x IN (SELECT c_row.b
 FROM t)` answers what PostgreSQL's `x IN (SELECT (c_row).b FROM t)` answers,

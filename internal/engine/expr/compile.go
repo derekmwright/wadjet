@@ -510,6 +510,10 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 						if refusal := refuseOuterLevelAggregate("IN", sq.SQL, ctx.outerTables); refusal != nil {
 							return nil, refusal
 						}
+						// A body the rebuild cannot write back out (#1044 round 3).
+						if refusal := refuseUnrebuildableBody("IN", sq.SQL, info, refs); refusal != nil {
+							return nil, refusal
+						}
 						if info != nil {
 							return &CorrelatedInSubquery{
 								Scope:           ctx.subqueryScope,
@@ -678,6 +682,10 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 				if refusal := refuseOuterLevelAggregate("scalar", n.SQL, ctx.outerTables); refusal != nil {
 					return nil, refusal
 				}
+				// A body the rebuild cannot write back out (#1044 round 3).
+				if refusal := refuseUnrebuildableBody("scalar", n.SQL, info, refs); refusal != nil {
+					return nil, refusal
+				}
 				if info != nil {
 					cs := &CorrelatedScalarSubquery{
 						Scope:           ctx.subqueryScope,
@@ -737,6 +745,10 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 				}
 				// An aggregate the ENCLOSING query owns (#1044 round 2).
 				if refusal := refuseOuterLevelAggregate("EXISTS", n.SQL, ctx.outerTables); refusal != nil {
+					return nil, refusal
+				}
+				// A body the rebuild cannot write back out (#1044 round 3).
+				if refusal := refuseUnrebuildableBody("EXISTS", n.SQL, info, refs); refusal != nil {
 					return nil, refusal
 				}
 				if info != nil {

@@ -222,22 +222,66 @@ func findCorrelatedRefs(subquerySQL string, outerTables map[string]bool, outerCo
 	}
 
 	var refs []OuterRef
-	// Walk WHERE
+	walkBlockForOuterRefs(info, scope, &refs)
+	return dedup(refs), nil
+}
+
+// walkBlockForOuterRefs walks EVERY clause of one block that can carry a
+// column reference, and every arm of a set operation.
+//
+// It used to walk the WHERE, the HAVING and the SELECT list and nothing else,
+// so two positions were invisible to the classifier — and a subquery whose
+// ONLY outer reference sits in one of them was planned UNCORRELATED, ran
+// standalone, and `expr.ResolveColumnRef`'s qualifier strip bound the
+// reference to the inner relation's own column of that name:
+//
+//	(SELECT x.visits FROM c2users x ORDER BY x.id * (u.id - 2) LIMIT 1)
+//	    100, 100, 100 for PostgreSQL 17.11's 200, 100, 100
+//	(SELECT u.id FROM c2users x WHERE x.id=1
+//	     UNION ALL SELECT u.id FROM c2users y WHERE y.id=99)
+//	    1, 1, 1 for its 1, 2, 3
+//
+// Four documents said the first was REFUSED, and it was — but only when the
+// subquery was correlated through some OTHER clause (round-2 review, P1/P3).
+// Seeing the reference is what lets the re-run substitute it where it can and
+// refuse it where it cannot; neither is possible for a reference nobody looks
+// for.
+//
+// A POSITIONAL sort term is skipped: resolvePositionalRefs rewrote it into the
+// SELECT item's own tree, which this walk has already read, and the rebuild
+// re-emits it as its position.
+func walkBlockForOuterRefs(info *SelectInfo, scope *outerRefScope, refs *[]OuterRef) {
+	if info == nil {
+		return
+	}
+	if info.Union != nil {
+		walkBlockForOuterRefs(info.Union.Left, scope, refs)
+		walkBlockForOuterRefs(info.Union.Right, scope, refs)
+		return
+	}
 	if info.WhereExpr != nil {
-		walkForOuterRefs(info.WhereExpr, scope, &refs)
+		walkForOuterRefs(info.WhereExpr, scope, refs)
 	}
-	// Walk HAVING
 	if info.HavingExpr != nil {
-		walkForOuterRefs(info.HavingExpr, scope, &refs)
+		walkForOuterRefs(info.HavingExpr, scope, refs)
 	}
-	// Walk SELECT columns
+	if info.QualifyExpr != nil {
+		walkForOuterRefs(info.QualifyExpr, scope, refs)
+	}
 	for _, col := range info.Columns {
 		if col.ASTExpr != nil {
-			walkForOuterRefs(col.ASTExpr, scope, &refs)
+			walkForOuterRefs(col.ASTExpr, scope, refs)
 		}
 	}
-
-	return dedup(refs), nil
+	for _, n := range info.GroupByExprs {
+		walkForOuterRefs(n, scope, refs)
+	}
+	for i := range info.OrderBy {
+		if info.OrderBy[i].Ordinal != 0 {
+			continue
+		}
+		walkForOuterRefs(info.OrderBy[i].Expr, scope, refs)
+	}
 }
 
 // collectInnerTables returns all table names and aliases from a SelectInfo.
@@ -1536,4 +1580,150 @@ func OuterRefsInUnsubstitutedClauses(info *SelectInfo, outerTables map[string]bo
 		collect(info.OrderBy[i].Expr)
 	}
 	return dedup(out)
+}
+
+// A SET OPERATION IS A BODY THE REBUILD CANNOT WRITE (round-2 review, P3).
+//
+// HoldsSetOperation reports whether a subquery's body is a set operation.
+// RebuildSQL renders ONE select — its SELECT list, FROM, joins, WHERE, GROUP
+// BY, HAVING, ORDER BY, LIMIT and OFFSET — and has no arm for `info.Union`, so
+// a per-row re-run over such a body produces a statement that is not the one
+// the user wrote. Until the walk below existed the question never came up: the
+// classifier read the top-level block only, so an outer reference written in
+// an ARM was invisible and the subquery ran standalone, where the qualifier
+// strip answered one constant per outer row. Seen, it has to be refused.
+func HoldsSetOperation(info *SelectInfo) bool {
+	return info != nil && info.Union != nil
+}
+
+// AN AGGREGATE BESIDE A NESTED SUBQUERY HAS NO PLAN-TIME TYPE (round-2
+// review, P4).
+//
+// AggregateBesideANestedSubquery reports whether any SELECT ITEM of a
+// subquery's body holds BOTH an aggregate call and a nested scalar subquery.
+// Such an item cannot be typed when the plan is made: the nested subquery's
+// own type is the enclosing row's, which the declaration walk cannot see, so
+// the item falls to the FLOAT64 default — and a per-row re-run then computes
+// an EXACT accumulator, whose DECIMAL is a rendered string the FLOAT64 vector
+// refuses (`batch: cannot store string into FLOAT64 vector`, the #361
+// silent-write guard, reaching the client as SQLSTATE 42000 with no mention of
+// the subquery).
+//
+// Measured on PostgreSQL 17.11 and this engine: `(SELECT SUM(x.visits +
+// (SELECT u.id)) FROM x)` is 345, 348, 351 there and the guard here, while
+// `(SELECT SUM(x.id + (SELECT u.id)) FROM x)` answers 9, 12, 15 — under OID
+// 701 where PostgreSQL declares bigint, because the same unresolved
+// declaration happened to fit an int64 box. The two are one shape and one
+// gap; both are refused, by name, rather than one silently mistyped and the
+// other failing on an internal invariant.
+//
+// Only SELECT items are asked: the declaration that matters is the block's
+// OUTPUT, and an aggregate in a HAVING beside a subquery (`HAVING SUM(x.v) >
+// (SELECT u.id)`) types nothing the caller reads and answers today.
+func AggregateBesideANestedSubquery(subquerySQL string) bool {
+	parsed, err := Parse(subquerySQL)
+	if err != nil {
+		return false
+	}
+	info, err := ExtractSelect(parsed)
+	if err != nil || info == nil {
+		return false
+	}
+	for i := range info.Columns {
+		n := info.Columns[i].ASTExpr
+		if n == nil {
+			continue
+		}
+		if len(FindAllAggregates(n)) > 0 && holdsSubqueryNode(n) {
+			return true
+		}
+	}
+	return false
+}
+
+// holdsSubqueryNode reports whether a scalar subquery appears anywhere under n.
+func holdsSubqueryNode(n Node) bool {
+	found := false
+	var walk func(Node)
+	walk = func(x Node) {
+		if found || x == nil {
+			return
+		}
+		if _, ok := x.(*SubqueryNode); ok {
+			found = true
+			return
+		}
+		switch e := x.(type) {
+		case *ParenNode:
+			walk(e.Inner)
+		case *BinaryOp:
+			walk(e.Left)
+			walk(e.Right)
+		case *UnaryOp:
+			walk(e.Inner)
+		case *CmpExpr:
+			walk(e.Left)
+			walk(e.Right)
+		case *AndNode:
+			walk(e.Left)
+			walk(e.Right)
+		case *OrNode:
+			walk(e.Left)
+			walk(e.Right)
+		case *NotNode:
+			walk(e.Inner)
+		case *IsExpr:
+			walk(e.Left)
+		case *LikeExpr:
+			walk(e.Left)
+			walk(e.Pattern)
+		case *BetweenExpr:
+			walk(e.Left)
+			walk(e.Low)
+			walk(e.High)
+		case *InExpr:
+			walk(e.Left)
+			for _, v := range e.Values {
+				walk(v)
+			}
+		case *AnyAllExpr:
+			walk(e.Left)
+			for _, v := range e.Values {
+				walk(v)
+			}
+		case *FuncCallNode:
+			for _, a := range e.Args {
+				walk(a)
+			}
+		case *CaseNode:
+			walk(e.Subject)
+			for _, w := range e.Whens {
+				walk(w.Cond)
+				walk(w.Result)
+			}
+			walk(e.Else)
+		case *CastNode:
+			walk(e.Inner)
+		case *ArrayLitNode:
+			for _, el := range e.Elements {
+				walk(el)
+			}
+		case *TupleNode:
+			for _, el := range e.Elements {
+				walk(el)
+			}
+		case *WindowFuncNode:
+			if e.Func != nil {
+				walk(e.Func)
+			}
+			for _, pb := range e.PartitionBy {
+				walk(pb)
+			}
+			for _, ob := range e.OrderBy {
+				walk(ob.Expr)
+			}
+		}
+	}
+	walk(n)
+	return found
 }
