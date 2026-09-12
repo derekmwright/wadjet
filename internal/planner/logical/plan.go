@@ -114,6 +114,26 @@ type Node struct {
 	// Scan
 	TableName  string
 	TableAlias string
+	// RecursiveCTE is the definition a RECURSIVE CTE reference stands for.
+	//
+	// A recursive CTE is not expanded into the plan — that would re-enter its
+	// own body without bound — so the builder leaves a tagged Scan here and
+	// the physical planner serves it from `cteCache`. The cache was filled
+	// from `root.CTEs` ALONE, so a recursive CTE declared in a NESTED block
+	// (a derived table, another CTE's body, a LATERAL) was materialized by
+	// nobody, the lookup missed, and the tagged scan fell through to a scan of
+	// a relation that does not exist — which answers zero rows instead of
+	// failing (#1047, the same door as #1041 one level up).
+	//
+	// Carrying the definition ON THE REFERENCE is what makes the
+	// materialization happen WHERE THE BLOCK IS PLANNED rather than only at
+	// the root: the physical planner materializes a miss from this, and a miss
+	// it cannot serve is a loud refusal rather than an empty relation.
+	//
+	// It is a POINTER into the parser's own AST for ADR-0032's reason — the
+	// body is parsed once and the memo lives on the definition, so a copy
+	// would parse it a second time.
+	RecursiveCTE *plansql.CTEDef
 	// DerivedAliases are the DERIVED TABLE aliases whose scope this scan sits
 	// inside, outermost last — `x` for the supplier scan in `(SELECT
 	// s_suppkey AS k FROM supplier s1) x`. They are recorded ALONGSIDE

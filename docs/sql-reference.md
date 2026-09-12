@@ -1541,8 +1541,11 @@ every plan — the seed and the recursive term alike, and whether or not the
 outer query reads the CTE at all.
 
 A `WITH` may also be written INSIDE a nested query block — a derived table, a
-CTE body, a `LATERAL` subquery — and its items are in scope for that block; the
-enclosing query's items stay visible there too:
+CTE body, a `LATERAL` subquery, a set-operation arm — and its items are in
+scope for that block, recursive or not; the enclosing query's items stay
+visible there too. A nested `WITH RECURSIVE` is materialized where its block is
+planned, and two sibling blocks may each declare one of the same name without
+reading each other's rows:
 
 ```sql
 WITH o AS (SELECT id, dx FROM b)

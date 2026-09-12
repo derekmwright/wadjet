@@ -158,12 +158,26 @@ func (p *Planner) releaseCTECache() {
 		}
 	}
 	p.cteCache = nil
+	// The per-block recursive materializations are a SECOND set of collectors
+	// with the same lifetime: a nested entry is moved OUT of cteCache when it
+	// is built (nested_recursive_cte.go), so nothing here is released twice.
+	for _, mat := range p.nestedCTECache {
+		if mat.coll != nil {
+			mat.coll.Release()
+		}
+	}
+	p.nestedCTECache = nil
 }
 
 // cteCacheHasCollectors reports whether any cached CTE holds spill-backed
 // state that requires an explicit release at query end.
 func (p *Planner) cteCacheHasCollectors() bool {
 	for _, mat := range p.cteCache {
+		if mat.coll != nil {
+			return true
+		}
+	}
+	for _, mat := range p.nestedCTECache {
 		if mat.coll != nil {
 			return true
 		}

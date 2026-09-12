@@ -1554,6 +1554,11 @@ func resolveTableOrCTE(table *plansql.TableRef, ctes []plansql.CTEDef) (*Node, e
 			if cte.Recursive {
 				node := NewScan(cte.Name, table.Alias)
 				node.CTEName = cte.Name
+				// The DEFINITION rides on the reference, so the block this
+				// reference sits in can be materialized where it is planned
+				// rather than only at the statement root (#1047). See
+				// Node.RecursiveCTE.
+				node.RecursiveCTE = cte
 				return node, nil
 			}
 

@@ -64,9 +64,18 @@ type Planner struct {
 	// that is a within-build question.
 	subqueryDeclCache map[string]*subqueryDeclEntry
 	cteCache          map[string]*cteMaterialized // materialized CTE results
-	scanCache         map[string]*scanCached      // cached scan results for duplicate table scans
-	res               *queryResources             // per-query spill manager + memory tracker (lazy, shared with child planners)
-	WorkerCount       int                         // number of distributed workers (for shuffle partitioning)
+	// nestedCTECache is a recursive CTE declared in a NESTED block, keyed by
+	// the DEFINITION rather than by the name. Two sibling blocks may each
+	// declare `WITH RECURSIVE r`, and they are two relations: keying the
+	// statement-wide cteCache by name alone let the second materialization
+	// overwrite the first and BOTH references read the second one's rows
+	// (#1047 round 1). The name key is still what the fixed-point iteration
+	// seeds for the self-reference, and is restored to whatever it held when
+	// the materialization is done.
+	nestedCTECache map[*plansql.CTEDef]*cteMaterialized
+	scanCache      map[string]*scanCached // cached scan results for duplicate table scans
+	res            *queryResources        // per-query spill manager + memory tracker (lazy, shared with child planners)
+	WorkerCount    int                    // number of distributed workers (for shuffle partitioning)
 
 	// builtJoins are the HashJoins this plan owns. HashJoin.Close is the
 	// only thing that returns the build's tracker reservation and removes

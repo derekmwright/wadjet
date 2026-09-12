@@ -16,13 +16,26 @@ func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.S
 	// collector (disk-backed past budget) without consuming it, so every
 	// reference — main pipeline, subqueries, recursive steps — streams the
 	// same data; the boxed form (recursive work table) keeps SliceSource.
-	if node.CTEName != "" && p.cteCache != nil {
+	if node.CTEName != "" {
 		if mat, ok := p.cteCache[node.CTEName]; ok {
 			if mat.coll != nil {
 				return mat.coll.NewReplaySource(), nil, &exec.CollectSink{}, nil
 			}
 			source := exec.NewSliceSource(mat.schema, mat.rows)
 			return source, nil, &exec.CollectSink{}, nil
+		}
+		// A RECURSIVE reference the cache does not hold: materialize it HERE,
+		// where this block is planned. materializeCTEs fills the cache from
+		// `root.CTEs` alone, so a recursive CTE declared in a derived table,
+		// in another CTE's body or in a LATERAL was materialized by nobody and
+		// this tagged scan fell through to a scan of a relation that does not
+		// exist — zero rows where PostgreSQL 17.11 answers rows (#1047).
+		//
+		// A reference that still cannot be served is a REFUSAL and never that
+		// scan: the relation is the CTE and there is no other one by the name
+		// (rule 8, and the door #1041 names).
+		if source, ops, sink, err, handled := p.buildNestedRecursiveCTE(ctx, node); handled {
+			return source, ops, sink, err
 		}
 	}
 

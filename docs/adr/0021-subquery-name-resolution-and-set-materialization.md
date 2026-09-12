@@ -1412,6 +1412,50 @@ gap ADR-0024 and #1018 name, one level up, and it is pinned in
 `internal/coordinator/arc_c1_scope_two_path_test.go` with the derived-table
 twin beside it as the proof.
 
+### 1m. A recursive CTE is materialized where its BLOCK is planned
+
+(Added 2026-09-12, #1047.)
+
+§1b settles what a recursive CTE reference IS: a tagged `NewScan(cteName)` the
+builder deliberately does not expand, served by the physical planner from
+`cteCache`. What it did not say is WHERE that cache is filled, and the answer
+was "from `root.CTEs`, once, at the statement root". A recursive CTE declared
+in a NESTED block — a derived table, another CTE's body, a LATERAL, a
+set-operation arm — is in no such list, so the lookup missed and the tagged
+scan fell through to a scan of A RELATION THAT DOES NOT EXIST, which answers
+ZERO ROWS instead of failing. That is #1041's "a missing cache entry reads as
+an empty CTE" door, one level up, and it is silent.
+
+**THE POSITION.** The DEFINITION rides on the REFERENCE
+(`logical.Node.RecursiveCTE`, a pointer into the parser's own memoized tree for
+ADR-0032's reason), and the physical planner materializes a cache miss from it
+where the block is planned. Three consequences are part of the position:
+
+* **The CTE's own name is in scope for its own iteration.** The fixed-point
+  iteration re-plans the recursive term as a whole statement, which resolves
+  names against `Planner.ctes`; at the root that list already held the
+  definition, and inside a nested block it held the enclosing scope's — so the
+  self-reference resolved as a TABLE, read nothing, and the iteration stopped
+  after the anchor. The definition is APPENDED to the enclosing scope, not
+  substituted for it, because the body may name an enclosing CTE too.
+* **The materialization is keyed by the DEFINITION, not by the name.** Two
+  sibling blocks may each declare `WITH RECURSIVE r` and they are two
+  relations. `cteCache` is statement-wide and keyed by name — which the
+  iteration needs, because the self-reference resolves by name — so the name
+  binding is borrowed for the materialization and handed back, and the result
+  is kept under the definition's identity (`Planner.nestedCTECache`).
+* **A reference that cannot be served is a REFUSAL.** The name belongs to the
+  CTE and to nothing else in scope, so reading it as a table is reading a
+  relation that does not exist. `0A000` naming the CTE, never an empty
+  relation.
+
+**NOT SETTLED:** the DAG still cannot run any recursive CTE, at the root or
+nested (#1042) — the tagged scan becomes a stage with no scan files and no
+dependencies and the dispatcher fails it, loudly. The census pins that on the
+three distributed arms with the ROOT shape beside them as the proof it is not
+this position's. A `WITH` written inside a scalar or `IN` subquery is still not
+PARSED at all (`42601`), which is a parser gap and not a materialization one.
+
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
 `resolveSubqueryAST` gains an `InExpr` case. An uncorrelated IN-subquery is
