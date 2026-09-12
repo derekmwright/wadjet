@@ -1434,7 +1434,7 @@ per side on five arms.
 
 **THE BOUNDARY IS A REFUSAL, NOT AN APPROXIMATION.** A CORRELATED body that is
 not a projection over the outer row — an aggregate, a GROUP BY, a HAVING, a
-window function, DISTINCT, an ORDER BY, a LIMIT/OFFSET, a set operation, a WITH
+window function, DISTINCT, a LIMIT/OFFSET, a set operation, a WITH
 clause, a star, a subquery in an item — and an OUTER join over one that would
 have to PAD (a non-trivial ON, or a body WHERE) are refused `0A000` naming the
 class. Each of THOSE answered plausible NULLs before; loud beats plausible.
@@ -1467,8 +1467,10 @@ star could take that column and leave the join keying on a name nothing carries
 — zero rows, in silence. Wrong → loud, and the sentence now describes the code.
 
 **NOT SETTLED:** a zero-row outer side and a lateral inside a scalar subquery's
-own block still declare STRING with the right values (round-2 review, P2); both
-are pinned.
+own block still declare STRING with the right values (round-2 review, P2). Both
+carry a fail-on-agree cell in
+`internal/coordinator/arc_c1_scope_two_path_test.go`; the second was added in
+round 4 after the review found the claim named one pin and only one existed.
 
 **NOT SETTLED, and recorded rather than repaired here:** an accumulating
 aggregate OVER such a column declares float8 where PostgreSQL declares numeric

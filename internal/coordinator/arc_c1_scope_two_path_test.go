@@ -497,6 +497,22 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			routed: c1TableLess,
 		},
 		{
+			// PINNED, the second of the two the declaration sentence names: a
+			// table-less lateral inside a SCALAR SUBQUERY's own block declares
+			// STRING with the right value, where the same MAX written at the
+			// top level declares INT64. The sentence said "both are pinned" and
+			// only one cell existed (round-3 review, P1); this is the other.
+			name: "an item inside a scalar subquery's block is pinned",
+			sql: "SELECT u.id, (SELECT MAX(l.v) FROM lat_ord z, " +
+				"LATERAL (SELECT z.id AS v) l) AS m FROM lat_ord u ORDER BY 1",
+			want: "cols=[id:INT64 m:STRING] rows=3 | 1,3 | 2,3 | 3,3",
+			why:  "PostgreSQL declares bigint; the values are right on both",
+			routed: map[string]string{
+				"dag": "UnbuildableStage +1", "dag-shuffled": "UnbuildableStage +1",
+				"dag-morsel4": "UnbuildableStage +1",
+			},
+		},
+		{
 			// PINNED: a derived outer side that is EMPTY declares STRING where
 			// the same shape with rows declares INT64. A zero-row declaration
 			// is described from the plan alone, and this one is not — the same
