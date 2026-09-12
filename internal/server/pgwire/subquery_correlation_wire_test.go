@@ -120,6 +120,18 @@ func TestASubqueryReadsTheRowItIsCorrelatedOnOnTheWire(t *testing.T) {
 			sql: `SELECT id,(SELECT SUM(x.id) OVER () FROM users x WHERE x.id = u.id) AS v ` +
 				`FROM users u ORDER BY id`,
 			wantErr: `holds a window function`},
+		// --- the outer projection carries every column its subqueries
+		// correlate on, WHICHEVER clause names it (round-4 review, P1). On the
+		// wire because the message a client got was an internal one about
+		// batch columns, in both result formats.
+		{name: "an_ORDER_BY_names_a_column_the_outer_list_omits",
+			sql: `SELECT id, (SELECT x.visits FROM users x ORDER BY u.name, x.id LIMIT 1) AS v ` +
+				`FROM users u ORDER BY id`,
+			oids: []uint32{23, 20}, text: `1,100|2,100|3,100`},
+		{name: "a_JOIN_ON_names_a_column_the_outer_list_omits",
+			sql: `SELECT id, (SELECT t.visits FROM users x JOIN users t ON t.name = u.name ` +
+				`WHERE x.id = 1) AS v FROM users u ORDER BY id`,
+			oids: []uint32{23, 20}, text: `1,100|2,42|3,200`},
 		// --- the controls -------------------------------------------------
 		{name: "ctl_an_uncorrelated_window_in_a_subquery",
 			sql: `SELECT id,(SELECT 1+SUM(x.id) OVER () FROM users x WHERE x.id=1) AS v ` +

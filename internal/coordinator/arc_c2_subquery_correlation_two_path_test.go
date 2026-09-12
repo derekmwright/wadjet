@@ -67,6 +67,27 @@ func c2uData() []map[string]any {
 	}
 }
 
+// c2t2 is a SECOND relation whose columns do not overlap c2users'. It exists
+// for ONE claim: an UNQUALIFIED name inside a subquery binds the inner
+// relation when the inner supplies it, and the ENCLOSING row when it does not
+// (ADR-0021 §1k). A bare outer reference is only reachable when the inner
+// relation lacks the column, which a self-join of c2users can never arrange.
+const c2t2Table = "c2t2"
+
+func c2t2Schema() parquet.Schema {
+	return parquet.Schema{Columns: []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt32},
+		{Name: "w", Type: parquet.TypeInt64},
+	}}
+}
+
+func c2t2Data() []map[string]any {
+	return []map[string]any{
+		{"k": int32(1), "w": int64(10)},
+		{"k": int32(2), "w": int64(20)},
+	}
+}
+
 type c2Arm struct {
 	name  string
 	run   func(ctx context.Context, sql string) ([]string, [][]any, error)
@@ -816,6 +837,95 @@ func c2Cells() []c2Cell {
 			sql: `SELECT id, (SELECT COUNT(*) FROM c2users x GROUP BY u.id, x.id ` +
 				`ORDER BY x.id LIMIT 1) AS v FROM c2users u ORDER BY id`,
 			wantErr: `cannot substitute`,
+			routes:  a2Routes{Correlated: 1}},
+
+		// --- THE OUTER PROJECTION CARRIES EVERY COLUMN ITS SUBQUERIES
+		// CORRELATE ON, WHICHEVER CLAUSE NAMES IT (round-4 review, P1). The
+		// walk reads seven clauses; the pruning collector read three, so a
+		// column named ONLY in a GROUP BY, an ORDER BY or a JOIN's ON was
+		// pruned out of the enclosing projection and the per-row re-run then
+		// read it out of a batch that does not carry it — 42703 `correlated
+		// subquery references outer column u.name, which the outer query does
+		// not carry (batch columns: id)`, on all five arms, for shapes main
+		// answers exactly as PostgreSQL 17.11 does. The two lists are one
+		// claim: whatever position can make a subquery CORRELATED can make the
+		// enclosing query need the column.
+		{name: "113_an_ORDER_BY_names_a_column_the_outer_list_omits",
+			sql: `SELECT id, (SELECT x.visits FROM c2users x ORDER BY u.name, x.id LIMIT 1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,100 | 2,100 | 3,100`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "114_a_GROUP_BY_names_a_column_the_outer_list_omits",
+			sql: `SELECT id, (SELECT SUM(x.visits) AS s FROM c2users x ` +
+				`GROUP BY u.name, x.visits ORDER BY x.visits LIMIT 1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,42 | 2,42 | 3,42`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "115_an_EXISTS_whose_ORDER_BY_names_an_omitted_column",
+			sql: `SELECT id FROM c2users u WHERE EXISTS ` +
+				`(SELECT 1 FROM c2users x ORDER BY u.visits) ORDER BY id`,
+			want:   `id | 1 | 2 | 3`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "116_the_same_naming_a_string_column",
+			sql: `SELECT id FROM c2users u WHERE EXISTS ` +
+				`(SELECT 1 FROM c2users x ORDER BY u.name) ORDER BY id`,
+			want:   `id | 1 | 2 | 3`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "117_a_JOIN_ON_names_a_column_the_outer_list_omits",
+			sql: `SELECT id, (SELECT t.visits FROM c2users x JOIN c2users t ON t.name = u.name ` +
+				`WHERE x.id = 1) AS v FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,100 | 2,42 | 3,200`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "118_the_LEFT_JOIN_twin",
+			sql: `SELECT id, (SELECT t.visits FROM c2users x LEFT JOIN c2users t ` +
+				`ON t.name = u.name WHERE x.id = 1) AS v FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,100 | 2,42 | 3,200`,
+			routes: a2Routes{Correlated: 1}},
+		// The RIGHT JOIN twin is LOUD for a reason that is not this arc's: a
+		// substituted ON condition is `t.name = 'alice'`, which is not an
+		// equality between two bare columns, and this engine lifts such a
+		// condition into a filter above the join — legal for an INNER join
+		// only. PostgreSQL answers 100, 42, 200; main answered 100, 100, 100,
+		// the qualifier strip's constant, because the ON clause was not walked
+		// at all. Wrong to loud, with PostgreSQL's value beside it.
+		{name: "119_the_RIGHT_JOIN_twin_is_loud", // PostgreSQL: 100, 42, 200
+			sql: `SELECT id, (SELECT t.visits FROM c2users x RIGHT JOIN c2users t ` +
+				`ON t.name = u.name WHERE x.id = 1) AS v FROM c2users u ORDER BY id`,
+			wantErr: `cannot be represented as an equi-join key`,
+			routes:  a2Routes{Correlated: 1}},
+		{name: "120_ctl_the_same_ORDER_BY_with_the_column_projected",
+			sql: `SELECT id, name, (SELECT x.visits FROM c2users x ORDER BY u.name, x.id LIMIT 1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			want:   `id,name,v | 1,alice,100 | 2,bob,100 | 3,carol,100`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "121_a_QUALIFY_names_an_omitted_column", // PostgreSQL: no QUALIFY
+			sql: `SELECT id FROM c2users u WHERE EXISTS (SELECT 1 FROM c2users x ` +
+				`QUALIFY ROW_NUMBER() OVER (ORDER BY x.id) <= u.id) ORDER BY id`,
+			wantErr: `holds a window function`,
+			routes:  a2Routes{Correlated: 1}},
+		// A BARE outer name in one of the three clauses is the same claim one
+		// scope down: `c2t2` has no `name` and no `visits`, so an unqualified
+		// one there is the ENCLOSING row's (ADR-0021 §1k), and the outer
+		// projection has to carry it just the same.
+		{name: "123_a_bare_outer_name_in_a_GROUP_BY",
+			sql: `SELECT id, (SELECT SUM(x.w) AS s FROM c2t2 x GROUP BY name) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,30 | 2,30 | 3,30`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "124_a_bare_outer_name_in_an_ORDER_BY",
+			sql: `SELECT id, (SELECT x.w FROM c2t2 x ORDER BY name, x.k LIMIT 1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,10 | 2,10 | 3,10`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "125_a_bare_outer_name_in_a_JOIN_ON",
+			sql: `SELECT id, (SELECT y.w FROM c2t2 x JOIN c2t2 y ON y.k = x.k ` +
+				`AND x.k = visits - 99 ORDER BY y.k LIMIT 1) AS v FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,10 | 2,NULL | 3,NULL`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "122_a_set_operation_arm_names_an_omitted_column", // PostgreSQL: 1, 2, 3
+			sql: `SELECT id FROM c2users u WHERE EXISTS (SELECT 1 FROM c2users x ` +
+				`WHERE x.name = u.name UNION ALL SELECT 1 FROM c2users y WHERE y.id = 99) ORDER BY id`,
+			wantErr: `body is a SET OPERATION`,
 			routes:  a2Routes{Correlated: 1}},
 	}
 }

@@ -426,6 +426,7 @@ func tmdTables() []tmdTable {
 		// PostgreSQL 17.11, and a 5000-row table re-runs a correlated subquery
 		// 5000 times per cell.
 		{c2uTable, c2uSchema(), c2uData()},
+		{c2t2Table, c2t2Schema(), c2t2Data()},
 		// The SEMVER fixture (#967). Rides along for the same reason as the
 		// fixtures above: only TestTheSemverFamilyOrdersByTheSpecificationOnEveryArm
 		// names it, and no type-matrix corpus entry does. The type matrix

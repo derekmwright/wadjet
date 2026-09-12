@@ -1333,6 +1333,15 @@ func collectOuterCandidates(subquerySQL string, out map[string]bool) {
 	if err != nil || info == nil {
 		return
 	}
+	collectOuterCandidatesBlock(info, out)
+}
+
+// collectOuterCandidatesBlock reads one parsed block. A set operation's arms
+// are blocks of their own and are read through it directly.
+func collectOuterCandidatesBlock(info *SelectInfo, out map[string]bool) {
+	if info == nil {
+		return
+	}
 	inner := collectInnerTables(info)
 	if info.WhereExpr != nil {
 		walkOuterCandidates(info.WhereExpr, inner, out)
@@ -1340,10 +1349,41 @@ func collectOuterCandidates(subquerySQL string, out map[string]bool) {
 	if info.HavingExpr != nil {
 		walkOuterCandidates(info.HavingExpr, inner, out)
 	}
+	if info.QualifyExpr != nil {
+		walkOuterCandidates(info.QualifyExpr, inner, out)
+	}
 	for _, col := range info.Columns {
 		if col.ASTExpr != nil {
 			walkOuterCandidates(col.ASTExpr, inner, out)
 		}
+	}
+	// THE SAME CLAUSES walkBlockForOuterRefs READS. A column this list omits
+	// is pruned out of the enclosing projection, and the per-row re-run then
+	// reads it out of a batch that does not carry it: `SELECT id, (SELECT
+	// x.visits FROM c2users x ORDER BY u.name, x.id LIMIT 1) FROM c2users u`
+	// was `correlated subquery references outer column u.name, which the outer
+	// query does not carry (batch columns: id)` — 42703, on all five arms —
+	// for PostgreSQL 17.11's 100, 100, 100 (round-4 review, P1). The two lists
+	// are one claim: whatever position can make a subquery CORRELATED can make
+	// the enclosing query need the column.
+	for i := range info.Joins {
+		walkOuterCandidates(info.Joins[i].CondExpr, inner, out)
+	}
+	for _, n := range info.GroupByExprs {
+		walkOuterCandidates(n, inner, out)
+	}
+	for i := range info.OrderBy {
+		// A POSITIONAL term names a select item this block already carries.
+		if info.OrderBy[i].Ordinal != 0 {
+			continue
+		}
+		walkOuterCandidates(info.OrderBy[i].Expr, inner, out)
+	}
+	// A SET OPERATION's arms are blocks of their own, and an outer reference
+	// in one of them correlates the whole subquery (round-2 review, P3).
+	if info.Union != nil {
+		collectOuterCandidatesBlock(info.Union.Left, out)
+		collectOuterCandidatesBlock(info.Union.Right, out)
 	}
 }
 

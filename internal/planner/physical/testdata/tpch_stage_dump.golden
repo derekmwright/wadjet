@@ -119,7 +119,7 @@ Q10	exchange-gather-sort-13	exchange-gather	scanfiles=0	cols=[]	out=[]	deps=[sor
 Q11	scan-0	scan	scanfiles=80	cols=[ps_availqty ps_partkey ps_suppkey ps_supplycost]	out=[]	deps=[]	builds=[]	chaincols=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
 Q11	scan-1	scan	scanfiles=1	cols=[s_nationkey s_suppkey]	out=[]	deps=[]	builds=[]	chaincols=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
 Q11	scan-3	scan	scanfiles=1	cols=[n_name n_nationkey]	out=[]	deps=[]	builds=[]	chaincols=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
-Q11	join-4	broadcast_join	scanfiles=0	cols=[n_name n_nationkey ps_availqty ps_partkey ps_supplycost ps_supplycost * ps_availqty s_nationkey value]	out=[]	deps=[exchange-replicate-join-4-3 scan-0 scan-1]	builds=[fj:scan-1]	chaincols=[]	ops=f0/p0/a0/w0/fj1/cj0/sk0
+Q11	join-4	broadcast_join	scanfiles=0	cols=[n_name n_nationkey ps_availqty ps_partkey ps_suppkey ps_supplycost ps_supplycost * ps_availqty s_nationkey s_suppkey value]	out=[]	deps=[exchange-replicate-join-4-3 scan-0 scan-1]	builds=[fj:scan-1]	chaincols=[]	ops=f0/p0/a0/w0/fj1/cj0/sk0
 Q11	aggregate-5	aggregate	scanfiles=0	cols=[]	out=[]	deps=[join-4]	builds=[]	chaincols=[]	ops=f0/p0/a1/w0/fj0/cj0/sk0
 Q11	final_aggregate-6	final_aggregate	scanfiles=0	cols=[]	out=[]	deps=[aggregate-5]	builds=[]	chaincols=[]	ops=f1/p0/a1/w0/fj0/cj0/sk1
 Q11	aggregate-12	aggregate	scanfiles=0	cols=[]	out=[]	deps=[join-4]	builds=[]	chaincols=[]	ops=f0/p0/a1/w0/fj0/cj0/sk0
