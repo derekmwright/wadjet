@@ -860,9 +860,11 @@ holds a `*` is `0A000` WHEN the query reads a name that list introduces, because
 the star's width is not known where the rename must be made and a LATERAL is run
 as a join on the column its correlated predicate names; a query that never
 mentions a renamed name is unaffected and answers. A read inside an aggregate or
-a window call counts, as does one in a later `LATERAL`'s body and one a star in
-the enclosing block republishes to the query above it; an `ORDER BY` term does
-not, because it decides the order and never the values. The body's own `WHERE`, and a written `ON`, are predicates
+a window call counts, as does one in the enclosing `ORDER BY`, one in a later
+`LATERAL`'s body and one a star in the enclosing block republishes to the query
+above it. Each is keyed on what the reference RESOLVES to: `SELECT u.*` over the
+outer relation republishes that relation's names, not the list's, and a sibling
+`LATERAL` that publishes its own column of the same name is reading its own. The body's own `WHERE`, and a written `ON`, are predicates
 over the outer row and are applied above the projection.
 
 Such a body is computed as a projection or it is REFUSED (`0A000`) naming the

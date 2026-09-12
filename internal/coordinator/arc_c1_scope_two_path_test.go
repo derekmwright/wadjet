@@ -474,10 +474,15 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			routed: map[string]string{},
 		},
 		{
-			name:   "a read inside an AGGREGATE in HAVING",
-			sql:    "SELECT u.id, MAX(l.w) AS mx FROM lat_ord u, LATERAL (SELECT * FROM lat_item i WHERE i.order_id = u.id) l(w) GROUP BY u.id HAVING MAX(l.w) > 2 ORDER BY 1",
+			// THE HAVING POSITION, and ONLY it (round-5 review, P1). The cell
+			// this replaces also held `MAX(l.w)` in its SELECT LIST, so the
+			// SELECT-list aggregate found the read and the cell passed at the
+			// round-4 tip too — it gated the aggregate, never the HAVING
+			// clause. Here HAVING is the only place the name appears.
+			name:   "a read ONLY inside an aggregate in HAVING",
+			sql:    "SELECT u.id, COUNT(*) AS c FROM lat_ord u, LATERAL (SELECT * FROM lat_item i WHERE i.order_id = u.id) l(w) GROUP BY u.id HAVING MAX(l.w) > 2 ORDER BY 1",
 			want:   "ERR the query reads",
-			why:    "PostgreSQL answers one row; RewriteExpr enters no aggregate, so this answered zero",
+			why:    "PostgreSQL answers one row, 2,2; the round-4 tip answered ZERO rows under no refusal",
 			routed: map[string]string{},
 		},
 		{

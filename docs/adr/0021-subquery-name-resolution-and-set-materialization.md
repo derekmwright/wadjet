@@ -1434,7 +1434,9 @@ a name to resolve to. Three exclusions, each with a cell:
   review, B1). A false positive here is not a lost optimization: the predicate
   is what ARMS the refusal.
 
-And a SORT TERM IS NOT ASKED AT ALL. A table-less body yields at most one row,
+And THE BODY'S OWN SORT TERM IS NOT ASKED AT ALL — a different question from
+the enclosing query's ORDER BY over a column-alias list, which IS a read (see
+the star-list paragraph below). A table-less body yields at most one row,
 so its ORDER BY is the identity whatever it names; it is dropped rather than
 refused, and `(SELECT 7 AS v ORDER BY u.id)` is the base's answer and
 PostgreSQL's. The whole enumeration — every clause that can hold a term × what
@@ -1475,10 +1477,31 @@ right → refused.
 
 WHAT COUNTS AS A READ is the one walk's answer, not a second scan: a reference
 inside an AGGREGATE (`HAVING MAX(l.w) > 2`) or inside a WINDOW call
-(`SUM(l.w) OVER ()`), one in a LATER FROM item's body, and — through a star in
-the enclosing block, which republishes every name it holds — one block up. A
-SORT term is not a read: it decides the order and never the values, and
-`… l(w) ORDER BY l.w` keeps answering what it answers at main.
+(`SUM(l.w) OVER ()`), one in a LATER FROM item's body, one in the enclosing
+block's ORDER BY, and — through a star in the enclosing block — one block up.
+
+EACH POSITION IS KEYED ON WHAT THE REFERENCE RESOLVES TO, never on the name
+alone (amended 2026-09-12, round-5 review B1). A star republishes THIS lateral's
+names only when it is unqualified or qualified with this lateral's alias, so
+`SELECT u.*` over the outer relation is not a read of `l`'s list; and a sibling
+lateral that publishes its OWN column called `w` and reads it as `b.w` is
+reading its name, not this one's. Keyed on the name alone, those two positions
+refused twenty cells that PostgreSQL, main and the previous tip all answer — the
+same too-wide/too-narrow oscillation one walk was meant to end, one level down.
+
+A SORT TERM IS A READ (amended 2026-09-12, round-5 review B2, reversing this
+section's round-5 sentence). The reasoning for excluding it — a sort term
+decides the order and never the values — holds only for a sort term that BINDS.
+This one does not bind: the rename is dropped on the lowered path, so
+`… l(w) ORDER BY l.w DESC` sorted on nothing and answered `1,1,2,2` for
+PostgreSQL's `2,2,1,1`, and a permuted list `l(order_id, id, amount, product)
+ORDER BY l.product` sorted by a different column of the same rows. The ASCENDING
+spelling agreed with PostgreSQL by coincidence — an unbound sort term leaves the
+scan's order, which over this fixture is ascending — and that coincidence is
+what made the exclusion look measured for a round. The rename cannot be applied
+for a sort term for the same reason it cannot be applied in the SELECT list (the
+paragraph below), so the disposition is the refusal: never a sort that binds
+nothing.
 
 The earlier sentence said such a list was left to
 `RefuseUnappliedColumnAliasLists` — and nothing on either lateral path called
