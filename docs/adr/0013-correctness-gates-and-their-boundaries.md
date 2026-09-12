@@ -112,6 +112,30 @@ named mechanism.
     is the replacement, run with the scan forced wide so the reordering
     actually happens rather than holding vacuously.
 
+### Amendment 2026-09-12: a per-RUN difference in the ROW SET is never one of these classes, and the ARMS have to be separable (#1058)
+
+Every class above varies the ORDER or the ARRIVAL of rows. None of them varies
+which rows, or which GROUPS, come back. So a shape that answers two rows on
+some runs and one on others is a defect however it is dressed, and the first
+job is to make it reproducible rather than to widen the tolerance.
+
+#1058 was filed as "a UNION with a NULL arm over a STRING column drops the NULL
+row on some runs of the DAG arms", measured 6/8 on one distributed arm and 2/8
+on another. The coin toss was in the MEASUREMENT, not in the engine: the probe
+gave the plain coordinator and the morsel-parallel coordinator ONE embedded
+NATS, so either kind of worker could pick up either coordinator's tasks. With
+an infra per arm the defect is 8/8 on the morsel arm and 0/8 on the other two —
+deterministic, and then localizable in one stack trace.
+
+**A census arm is only an arm if nothing else can execute its tasks.** Stand up
+one `tmdInfra` per distributed arm; sharing one is sharing the worker pool.
+
+**And a gate over a condition asserts that the condition fired** (ADR-0027,
+applied here to a BRANCH rather than to a spill): whether a fragment runs its
+breaker morsel-parallel is decided by width and shape, so
+`worker.MorselParallelBreakerRuns` is read before and after and a census that
+moved it by zero fails rather than passes.
+
 ### Pins
 
 A known divergence is recorded with `knownBug` / `knownBugArm` naming the
