@@ -480,6 +480,29 @@ utilization data says where the next bottleneck is.
   spill path instead of inventing a concurrent one.
 - **NUMA awareness** — single-socket cloud VMs; not applicable.
 
+**v1.9 amendment — the parallel branch initializes the primary sink
+(#1058).** `runBreakerConsumeParallel` is one of two branches of the same
+decision: at k == 1 the phase runs through `exec.Pipeline.Run`, which
+initializes source, ops and sink; at k > 1 it runs this function, which
+initialized the CLONED sinks and the cloned op chains and left the primary
+with whatever its constructor had set. A `HashAggregate` built by the
+fragment builder is initialized nowhere else, so on the parallel branch it
+consumed un-initialized — and `HashAggregate.strNullGroupIdx`, the slot the
+single-STRING and single-BYTES key path keeps its NULL group in (deliberately
+outside the key table, so a real one-byte key cannot collide with the binary
+null sentinel), has the valid slot **0** as its zero value. Every NULL key in
+the primary's share of the morsels therefore bound whichever group the primary
+minted first: a `GROUP BY` over a nullable STRING counted the NULL rows into
+another group, a `SELECT DISTINCT` dropped them, and where the NULL arrived
+before any group existed the task failed loud in `scatterCountStar`. The
+branch now runs `sink.Init` at the same point in the phase that the serial
+branch does, and `NewHashAggregate` sets the sentinel too so the state that
+made the omission a wrong ANSWER is unrepresentable.
+`worker.MorselParallelBreakerRuns` counts the phases that take this branch,
+which is the engagement signal a gate for a condition-triggered defect needs
+(ADR-0027); the census is
+`coordinator.TestC3ANullGroupKeyIsItsOwnGroupOnEveryArm`.
+
 ## 10. Kickoff open questions — answers
 
 1. **Morsel granularity:** one `RecordBatch` via a bounded-channel

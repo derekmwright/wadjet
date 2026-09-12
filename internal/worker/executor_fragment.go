@@ -1425,6 +1425,16 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 	return nil
 }
 
+// MorselParallelBreakerRuns counts breaker-consume phases that ran
+// morsel-parallel rather than through the serial exec.Pipeline.
+//
+// Observability, and the ENGAGEMENT signal a gate for a condition-triggered
+// defect needs (ADR-0027): whether a fragment takes this branch is decided by
+// morselFragmentWorkers from the worker's configured width and the task's
+// shape, so a suite that asserts an answer on a "morsel" arm cannot otherwise
+// tell a fixed defect from a branch that never ran (#1058).
+var MorselParallelBreakerRuns atomic.Int64
+
 // runBreakerConsumeParallel uses a bounded producer and cloned op/sink partials,
 // merging into the primary at the barrier (memo §4.3).
 // Clones reserve accumulated state through tracking-only SpillManager views;
@@ -1487,6 +1497,24 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 			}
 		}
 		return nil
+	}
+
+	MorselParallelBreakerRuns.Add(1)
+
+	// THE PRIMARY SINK IS INITIALIZED HERE, exactly as the k == 1 branch's
+	// exec.Pipeline.Run initializes it (#1058). The two branches of one
+	// decision have to set the operator up identically; this one initialized
+	// the CLONED sinks and left the primary as its constructor made it, and a
+	// HashAggregate built by buildHashAggregate is initialized nowhere else.
+	// Its strNullGroupIdx then held the ZERO VALUE, which is the VALID slot 0,
+	// and every NULL key of a single STRING or BYTES GROUP BY in the primary's
+	// morsel share bound whichever group the primary minted first.
+	// Init is idempotent, and the serial branch already re-runs it over a Sort
+	// or a Window the fragment builder initialized at construction, so this is
+	// the same call at the same point in the same phase.
+	// See docs/design/morsel-execution.md, the v1.9 amendment.
+	if err := sink.Init(ctx); err != nil {
+		return fmt.Errorf("sink init: %w", err)
 	}
 
 	// Resolve (and thereby ARM) the source's backing-release hook before the

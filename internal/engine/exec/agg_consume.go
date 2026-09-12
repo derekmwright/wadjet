@@ -14,10 +14,20 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
+// NewHashAggregate builds a hash aggregate over groupByCols and aggs.
+//
+// strNullGroupIdx is set here as well as in Init and CloneSink because its
+// zero value is the VALID slot 0: an aggregate that consumes before Init would
+// otherwise bind every NULL key of a single STRING or BYTES GROUP BY to
+// whichever group it minted first, silently (#1058). Init is still the
+// contract — the worker's morsel-parallel branch skipping it is what made that
+// reachable — and this is the representation refusing to hold the state that
+// made the omission a wrong ANSWER rather than a loud failure.
 func NewHashAggregate(groupByCols []string, aggs []AggColumn) *HashAggregate {
 	return &HashAggregate{
-		GroupByCols: groupByCols,
-		Aggs:        aggs,
+		GroupByCols:     groupByCols,
+		Aggs:            aggs,
+		strNullGroupIdx: -1,
 	}
 }
 
