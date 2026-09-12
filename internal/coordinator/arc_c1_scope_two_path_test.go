@@ -405,6 +405,66 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			routed: map[string]string{},
 		},
 		{
+			// A COLUMN-ALIAS LIST OVER A `SELECT *` BODY is REFUSED, which is
+			// what the documentation and ADR-0021 §1l already said and what the
+			// code did not do: the list was DROPPED, so this answered four
+			// NULLs for PostgreSQL's 1,2,3,4 — the exact failure
+			// `column_alias_defer.go` exists to prevent, on the one FROM item
+			// never wired into it (round-2 review, B2).
+			//
+			// Refused rather than deferred, unlike a CTE's and a derived
+			// table's list: a decorrelated LATERAL JOINS on the column its
+			// correlated predicate names, and a positional rename over an
+			// uncounted star could take that column and leave the join with no
+			// key. Wrong → loud.
+			name: "a column-alias list over a star body",
+			sql: "SELECT l.w FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
+				"WHERE i.order_id = u.id) l(w) ORDER BY 1",
+			want:   "ERR renames the columns of a LATERAL subquery whose SELECT list holds a `*`",
+			why:    "PostgreSQL answers 1,2,3,4; the base answered four NULLs",
+			routed: map[string]string{},
+		},
+		{
+			name: "a column-alias list over a star body, n aliases",
+			sql: "SELECT l.w, l.x FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
+				"WHERE i.order_id = u.id) l(w,x) ORDER BY 1",
+			want:   "ERR renames the columns of a LATERAL subquery whose SELECT list holds a `*`",
+			why:    "PostgreSQL answers 1|1, 2|1, 3|2, 4|2; the base answered four NULL,NULL",
+			routed: map[string]string{},
+		},
+		{
+			name: "a column-alias list over a QUALIFIED star body",
+			sql: "SELECT l.w FROM lat_ord u, LATERAL (SELECT i.* FROM lat_item i " +
+				"WHERE i.order_id = u.id) l(w) ORDER BY 1",
+			want:   "ERR renames the columns of a LATERAL subquery whose SELECT list holds a `*`",
+			routed: map[string]string{},
+		},
+		{
+			// CONTROL: the two FROM items the deferral IS wired into keep
+			// applying the list, which is what makes this a lateral-only
+			// disposition rather than a lost feature.
+			name:   "control: a derived table's alias list over a star",
+			sql:    "SELECT q.w FROM (SELECT * FROM lat_item) q(w) ORDER BY 1",
+			want:   "cols=[w:INT64] rows=4 | 1 | 2 | 3 | 4",
+			routed: map[string]string{},
+		},
+		{
+			name:   "control: a CTE's alias list over a star",
+			sql:    "WITH q(w) AS (SELECT * FROM lat_item) SELECT w FROM q ORDER BY 1",
+			want:   "cols=[w:INT64] rows=4 | 1 | 2 | 3 | 4",
+			routed: map[string]string{},
+		},
+		{
+			// CONTROL: a NAMED list over a lateral is unaffected — it is the
+			// round-2 repair and it still applies.
+			name: "control: a named list over a lateral still renames",
+			sql: "SELECT l.w FROM lat_ord u, LATERAL (SELECT i.id AS z FROM lat_item i " +
+				"WHERE i.order_id = u.id) l(w) ORDER BY 1",
+			want: "cols=[w:INT64] rows=4 | 1 | 2 | 3 | 4",
+			// It EXECUTES as stages on all three DAG arms.
+			routed: map[string]string{},
+		},
+		{
 			// PINNED, and NOT the lateral's: an ARRAY literal declares STRING
 			// wherever it is written. `SELECT ARRAY[id, id] AS v FROM lat_ord`
 			// declares STRING too, with no LATERAL in the query. The VALUES are
@@ -477,9 +537,9 @@ func TestC1BTableLessLateralRefusesWhatItCannotProject(t *testing.T) {
 		{name: "a DISTINCT body", routed: noRoute,
 			sql:  "SELECT l.v FROM lat_ord u, LATERAL (SELECT DISTINCT u.id AS v) l",
 			want: refusal},
-		{name: "an ORDER BY body", routed: noRoute,
-			sql:  "SELECT l.v FROM lat_ord u, LATERAL (SELECT u.id AS v ORDER BY 1) l",
-			want: refusal},
+		// An ORDER BY is NOT here: a table-less body yields at most one row, so
+		// its sort is the identity and is dropped rather than refused (round-3
+		// brief, B1). The lowered answer is a cell of TestC1EATheBodyClassTable.
 		{name: "a LIMIT body", routed: noRoute,
 			sql:  "SELECT l.v FROM lat_ord u, LATERAL (SELECT u.id AS v LIMIT 1) l",
 			want: refusal},

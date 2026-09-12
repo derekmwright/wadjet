@@ -1452,9 +1452,23 @@ review P2), on BOTH lateral lowerings and before either reads the list, because
 the decorrelating one injects correlation keys into it. Without that,
 `LATERAL (SELECT u.id AS v) l(w)` renamed a column nothing carried and `l.w`
 answered NULL — the headline shape under a second spelling. A list longer than
-the body is PostgreSQL's 42P10; a body carrying a star is left to
-`RefuseUnappliedColumnAliasLists`, because guessing its width is what that
-refusal exists to prevent.
+the body is PostgreSQL's 42P10.
+
+A list over a body carrying a STAR is REFUSED 0A000 (amended 2026-09-12,
+round-2 review B2). The earlier sentence said such a list was left to
+`RefuseUnappliedColumnAliasLists` — and nothing on either lateral path called
+`deferColumnAliasesOverStar`, so that refusal could never be reached and the
+list was DROPPED: `LATERAL (SELECT * FROM i WHERE i.order_id = u.id) l(w)`
+answered four NULLs for PostgreSQL's 1,2,3,4, which is the exact failure the
+deferral mechanism exists to prevent. A LATERAL is refused rather than deferred,
+unlike a CTE's and a derived table's list, because the decorrelation JOINS on
+the column its correlated predicate names: a positional rename over an uncounted
+star could take that column and leave the join keying on a name nothing carries
+— zero rows, in silence. Wrong → loud, and the sentence now describes the code.
+
+**NOT SETTLED:** a zero-row outer side and a lateral inside a scalar subquery's
+own block still declare STRING with the right values (round-2 review, P2); both
+are pinned.
 
 **NOT SETTLED, and recorded rather than repaired here:** an accumulating
 aggregate OVER such a column declares float8 where PostgreSQL declares numeric

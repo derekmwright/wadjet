@@ -450,3 +450,40 @@ func applyLateralItemAliases(info *plansql.SelectInfo, join plansql.JoinInfo) er
 	}
 	return nil
 }
+
+// refuseLateralAliasListOverStar refuses a LATERAL FROM item's column-alias
+// list over a body whose SELECT list holds a STAR.
+//
+// The width of a star is not knowable in the builder, and the two other FROM
+// items that carry a list — a CTE and a derived table — DEFER the rename to the
+// pass that knows it. A LATERAL cannot: the decorrelation JOINS on the column
+// its correlated predicate names, and the list renames that column's POSITION
+// like any other, so the deferred rename would leave the join keying on a name
+// nothing carries — zero rows, silently, for a query PostgreSQL answers. The
+// refusal is what the documentation and ADR-0021 §1l already claimed; this is
+// the code that makes it true.
+func refuseLateralAliasListOverStar(info *plansql.SelectInfo, join plansql.JoinInfo) error {
+	if info == nil || join.RightTableRef == nil || len(join.RightTableRef.ColumnAliases) == 0 {
+		return nil
+	}
+	cols := info
+	for cols.Union != nil && cols.Union.Left != nil {
+		cols = cols.Union.Left
+	}
+	for i := range cols.Columns {
+		if !cols.Columns[i].Star {
+			continue
+		}
+		name := join.RightAlias
+		if name == "" {
+			name = "subquery"
+		}
+		return sqlerr.New("0A000",
+			"table %q renames the columns of a LATERAL subquery whose SELECT list holds "+
+				"a `*`: the width of the star is not known where the rename must be made, "+
+				"and a LATERAL is run as a join on the column its correlated predicate "+
+				"names, so a positional rename could take that column and leave the join "+
+				"with no key. Name the subquery's columns instead", name)
+	}
+	return nil
+}

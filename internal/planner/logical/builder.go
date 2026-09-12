@@ -2117,6 +2117,22 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 	// exists to avoid, one operator lower. Record the slot as the key's
 	// PUBLISHED name; the aggregate keeps RESOLVING it by the source column.
 	markLateralAggregate(right, mintedKeys)
+	// A COLUMN-ALIAS LIST over a `SELECT *` BODY is REFUSED, which is what the
+	// documentation and ADR-0021 §1l already said and what the code did not do:
+	// `applyLateralItemAliases` declined a star body because this layer cannot
+	// count it, and DROPPED the list, so `LATERAL (SELECT * FROM i WHERE
+	// i.order_id = u.id) l(w)` answered four NULLs for PostgreSQL's 1,2,3,4 —
+	// the exact failure `column_alias_defer.go` exists to prevent, on the one
+	// FROM item never wired into it (round-2 review, B2).
+	//
+	// REFUSED and not deferred, unlike the CTE and derived-table arms, because
+	// a decorrelated LATERAL JOINS on the column its correlated predicate
+	// names: the list renames that column's POSITION like any other, and the
+	// join would then key on a name nothing carries and answer no rows. Loud
+	// beats plausible, and the sentence now describes the code.
+	if err := refuseLateralAliasListOverStar(subInfo, join); err != nil {
+		return nil, "", lateralEmptyInput{}, nil, err
+	}
 	if join.RightAlias != "" {
 		setSubtreeAlias(right, join.RightAlias)
 	}
