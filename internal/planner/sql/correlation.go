@@ -730,28 +730,28 @@ func walkNestedForOuterRefs(sql string, s *outerRefScope, refs *[]OuterRef) {
 	}
 }
 
-// rewriteNestedSubquery substitutes outer values inside a nested subquery's
-// own WHERE clause and returns its rebuilt SQL text.
+// rewriteNestedSubquery substitutes outer values inside a nested subquery and
+// returns its rebuilt SQL text.
 //
 // The second result is false when nothing changed — an unparseable subquery,
-// one with no WHERE, or one whose WHERE holds no reference this substitution
-// resolves. The caller then returns the ORIGINAL node untouched, so a
-// subquery that needs no substitution never round-trips through RebuildSQL
-// and its text is byte-for-byte what the user wrote.
+// or one holding no reference this substitution resolves. The caller then
+// returns the ORIGINAL node untouched, so a subquery that needs no
+// substitution never round-trips through RebuildSQL and its text is
+// byte-for-byte what the user wrote.
 func rewriteNestedSubquery(sql string, rewrite func(Node) Node) (string, bool) {
 	parsed, err := Parse(sql)
 	if err != nil {
 		return "", false
 	}
 	info, err := ExtractSelect(parsed)
-	if err != nil || info == nil || info.WhereExpr == nil {
+	if err != nil || info == nil {
 		return "", false
 	}
-	rewritten := rewrite(info.WhereExpr)
-	if rewritten == nil || rewritten.String() == info.WhereExpr.String() {
+	out, changed := RebuildSQLForRerun(info, rewrite)
+	if !changed {
 		return "", false
 	}
-	return RebuildSQL(info, rewritten), true
+	return out, true
 }
 
 // RewriteOuterRefs returns a deep copy of the AST with correlated ColRef
@@ -996,10 +996,82 @@ func anyToLit(v any) *Lit {
 	}
 }
 
+// A PER-ROW RE-RUN SUBSTITUTES INTO EVERY CLAUSE IT REBUILDS FROM AN AST, NOT
+// ONLY THE WHERE (#1044 round 2, P1).
+//
+// The re-run rewrites the outer row's values into the subquery's text and
+// hands the result back to the runner. Until this, only the WHERE clause was
+// rewritten and every other clause was re-emitted as the text the parser
+// recorded — so an outer reference in the SELECT list or the HAVING survived
+// into the rebuilt statement, where `expr.ResolveColumnRef`'s qualifier strip
+// bound it to the INNER relation's own column of that name and every outer row
+// got one constant. `SELECT (SELECT u.x FROM c2users y WHERE y.id = 1) FROM
+// (SELECT id AS x FROM c2users) u` — the shape #1044 is titled for — answered
+// NULL, NULL, NULL for PostgreSQL 17.11's 1, 2, 3.
+//
+// GROUP BY and ORDER BY are NOT substituted, and the reason is the ORDINAL
+// TRAP rather than reach: `GROUP BY u.id` with the outer row's 1 substituted
+// renders `GROUP BY 1`, which both engines read as the FIRST SELECT ITEM.
+// Rendering a substituted sort or group term so that it cannot read as a
+// position is what closing that half needs; until then an outer reference in
+// those two clauses keeps the answer it had (ADR-0021 §1l).
+
+// RebuildSQLForRerun reconstructs a SELECT for a per-row re-run, applying
+// rewrite to every clause the rebuild re-emits from an AST — the SELECT list,
+// the WHERE and the HAVING. A clause the rewrite does not change keeps the
+// text the parser recorded, so a subquery that needs no substitution is
+// byte-for-byte what the user wrote. The second result says whether anything
+// changed.
+func RebuildSQLForRerun(info *SelectInfo, rewrite func(Node) Node) (string, bool) {
+	if info == nil {
+		return "", false
+	}
+	changed := false
+	subst := func(n Node, orig string) string {
+		if n == nil || rewrite == nil {
+			return orig
+		}
+		out := rewrite(n)
+		if out == nil || out.String() == n.String() {
+			return orig
+		}
+		changed = true
+		return out.String()
+	}
+	cols := make([]string, len(info.Columns))
+	for i := range info.Columns {
+		cols[i] = subst(info.Columns[i].ASTExpr, info.Columns[i].Expr)
+	}
+	var where Node
+	if info.WhereExpr != nil && rewrite != nil {
+		where = rewrite(info.WhereExpr)
+		if where != nil && where.String() != info.WhereExpr.String() {
+			changed = true
+		}
+	} else {
+		where = info.WhereExpr
+	}
+	having := subst(info.HavingExpr, info.Having)
+	return rebuildSQL(info, cols, where, having), changed
+}
+
 // RebuildSQL reconstructs a full SELECT SQL string from a SelectInfo,
 // using the provided expression as the WHERE clause instead of the original.
-// This is used by the correlated subquery evaluator to substitute outer values.
+// Every other clause is the text the parser recorded; RebuildSQLForRerun is
+// the form a per-row re-run uses, which substitutes into the SELECT list and
+// the HAVING as well.
 func RebuildSQL(info *SelectInfo, rewrittenWhere Node) string {
+	cols := make([]string, len(info.Columns))
+	for i := range info.Columns {
+		cols[i] = info.Columns[i].Expr
+	}
+	return rebuildSQL(info, cols, rewrittenWhere, info.Having)
+}
+
+// rebuildSQL renders one SELECT from its parts: cols[i] is the text of item i
+// (a star item ignores it), rewrittenWhere the WHERE expression, having the
+// HAVING text.
+func rebuildSQL(info *SelectInfo, cols []string, rewrittenWhere Node, having string) string {
 	var sb strings.Builder
 	sb.WriteString("SELECT ")
 	if info.Distinct {
@@ -1019,8 +1091,12 @@ func RebuildSQL(info *SelectInfo, rewrittenWhere Node) string {
 				sb.WriteString("*")
 			}
 		} else {
-			sb.WriteString(col.Expr)
-			if col.Alias != "" && col.Alias != col.Expr {
+			text := col.Expr
+			if i < len(cols) {
+				text = cols[i]
+			}
+			sb.WriteString(text)
+			if col.Alias != "" && col.Alias != text {
 				sb.WriteString(" AS ")
 				sb.WriteString(col.Alias)
 			}
@@ -1087,9 +1163,9 @@ func RebuildSQL(info *SelectInfo, rewrittenWhere Node) string {
 	}
 
 	// HAVING
-	if info.Having != "" {
+	if having != "" {
 		sb.WriteString(" HAVING ")
-		sb.WriteString(info.Having)
+		sb.WriteString(having)
 	}
 
 	// ORDER BY
@@ -1099,7 +1175,15 @@ func RebuildSQL(info *SelectInfo, rewrittenWhere Node) string {
 		} else {
 			sb.WriteString(", ")
 		}
-		sb.WriteString(ob.Column)
+		// A POSITIONAL term is re-emitted as its position. resolvePositionalRefs
+		// rewrote `ORDER BY 1` into the SELECT item's text at parse time, and
+		// re-emitting THAT would hand the re-run a term naming a relation the
+		// rebuilt SELECT list has already substituted away.
+		if ob.Ordinal != 0 {
+			fmt.Fprintf(&sb, "%d", ob.Ordinal)
+		} else {
+			sb.WriteString(ob.Column)
+		}
 		if ob.Desc {
 			sb.WriteString(" DESC")
 		}
@@ -1303,4 +1387,153 @@ func HoldsWindowCall(info *SelectInfo) bool {
 		return HoldsWindowCall(info.Union.Left) || HoldsWindowCall(info.Union.Right)
 	}
 	return false
+}
+
+// AN AGGREGATE BELONGS TO THE LEVEL OF THE DEEPEST VARIABLE IN ITS ARGUMENTS,
+// AND THIS ENGINE DOES NOT IMPLEMENT LEVELS (#1044 round 2).
+//
+// AggregatesOverOnlyOuterRefs reports the outer references that make an
+// aggregate inside subquerySQL the ENCLOSING query's rather than this block's:
+// an aggregate whose argument names the outer query and nothing this block
+// reads. PostgreSQL 17.11, measured:
+//
+//	SELECT MAX((SELECT u.id)) FROM c2users u                        3 — one row,
+//	                                     the OUTER query's aggregate
+//	SELECT id, (SELECT MAX(u.id) FROM c2users x) FROM c2users u     42803
+//	SELECT id, (SELECT MAX((SELECT u.id)) FROM c2users x) …         42803
+//	SELECT id, (SELECT SUM(x.visits + u.id) FROM c2users x) …       345, 348, 351
+//	                                     — an INNER var, so the inner block's
+//	SELECT id, (SELECT MAX(1) FROM c2users x) …                     1, 1, 1
+//
+// The 42803 is not about the aggregate itself: promoted to the outer query it
+// leaves the outer `id` ungrouped. Either way the statement means something
+// this engine's per-row re-run cannot express — the re-run would substitute
+// the outer row's value and compute the aggregate at the INNER level — so the
+// callers refuse rather than answer a number PostgreSQL will not.
+//
+// The two cases that must NOT be reported are the two measured above: an
+// argument that also names the block's own relation (the aggregate is the
+// block's), and one that names no relation at all.
+func AggregatesOverOnlyOuterRefs(subquerySQL string, outerTables map[string]bool) []OuterRef {
+	parsed, err := Parse(subquerySQL)
+	if err != nil {
+		return nil
+	}
+	info, err := ExtractSelect(parsed)
+	if err != nil || info == nil {
+		return nil
+	}
+	inner := collectInnerTables(info)
+	var out []OuterRef
+	check := func(n Node) {
+		for _, agg := range FindAllAggregates(n) {
+			var outer []OuterRef
+			hasInner := false
+			for _, arg := range agg.Args {
+				o, i := aggArgRefs(arg, outerTables, inner)
+				outer = append(outer, o...)
+				hasInner = hasInner || i
+			}
+			if len(outer) > 0 && !hasInner {
+				out = append(out, outer...)
+			}
+		}
+	}
+	for i := range info.Columns {
+		check(info.Columns[i].ASTExpr)
+	}
+	check(info.HavingExpr)
+	return dedup(out)
+}
+
+// aggArgRefs splits one aggregate argument's column references into those the
+// ENCLOSING query supplies and whether any reference belongs to this block. A
+// nested subquery IS descended into, because `MAX((SELECT u.id))` hides its
+// reference one level down and PostgreSQL reads the level through it.
+func aggArgRefs(n Node, outerTables, inner map[string]bool) (outer []OuterRef, hasInner bool) {
+	switch e := n.(type) {
+	case *SubqueryNode:
+		parsed, err := Parse(e.SQL)
+		if err != nil {
+			return nil, true
+		}
+		nested, err := ExtractSelect(parsed)
+		if err != nil || nested == nil {
+			return nil, true
+		}
+		nestedInner := collectInnerTables(nested)
+		for k := range nestedInner {
+			inner[k] = true
+		}
+		for i := range nested.Columns {
+			o, hi := aggArgRefs(nested.Columns[i].ASTExpr, outerTables, inner)
+			outer = append(outer, o...)
+			hasInner = hasInner || hi
+		}
+		return outer, hasInner
+	case *ExistsNode:
+		return nil, true
+	}
+	walkColRefs(n, func(c *ColRef) {
+		if c.Table == "" {
+			hasInner = true
+			return
+		}
+		tbl := strings.ToLower(c.Table)
+		if inner[tbl] || !outerTables[tbl] {
+			hasInner = true
+			return
+		}
+		outer = append(outer, OuterRef{Table: tbl, Column: strings.ToLower(c.Column)})
+	})
+	return outer, hasInner
+}
+
+// OuterRefsInUnsubstitutedClauses reports the outer references a per-row
+// re-run leaves in place: those in a GROUP BY or an ORDER BY term.
+//
+// RebuildSQLForRerun renders the SELECT list, the WHERE and the HAVING from
+// their own trees and re-emits everything else as the text the parser
+// recorded. GROUP BY and ORDER BY are deliberately left there — a term with
+// the outer row's value substituted renders as a bare literal, and both
+// engines read `ORDER BY 1` as the FIRST SELECT ITEM rather than as the number
+// one — so a reference in either clause survives the rebuild and would be
+// bound by the qualifier strip to the inner relation's own column of that
+// name. The callers refuse instead.
+//
+// `ORDER BY x.id * u.id` is the shape that makes it worth refusing rather than
+// running: over this arc's fixture it answers PostgreSQL's rows, because
+// multiplying by a positive constant does not change the order — and
+// `ORDER BY x.id * (u.id - 2)`, whose factor is negative for the first outer
+// row, answers 200 there where the strip's ordering answers 100.
+func OuterRefsInUnsubstitutedClauses(info *SelectInfo, outerTables map[string]bool) []OuterRef {
+	if info == nil || len(outerTables) == 0 {
+		return nil
+	}
+	inner := collectInnerTables(info)
+	var out []OuterRef
+	collect := func(n Node) {
+		walkColRefs(n, func(c *ColRef) {
+			if c.Table == "" {
+				return
+			}
+			tbl := strings.ToLower(c.Table)
+			if inner[tbl] || !outerTables[tbl] {
+				return
+			}
+			out = append(out, OuterRef{Table: tbl, Column: strings.ToLower(c.Column)})
+		})
+	}
+	for _, n := range info.GroupByExprs {
+		collect(n)
+	}
+	for i := range info.OrderBy {
+		// A POSITIONAL term is re-emitted as its position, so whatever
+		// resolvePositionalRefs put in its tree never reaches the re-run.
+		if info.OrderBy[i].Ordinal != 0 {
+			continue
+		}
+		collect(info.OrderBy[i].Expr)
+	}
+	return dedup(out)
 }

@@ -506,8 +506,13 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 						if refusal := refuseWindowBorneCorrelation("IN", sq.SQL, info, refs); refusal != nil {
 							return nil, refusal
 						}
+						// An aggregate the ENCLOSING query owns (#1044 round 2).
+						if refusal := refuseOuterLevelAggregate("IN", sq.SQL, ctx.outerTables); refusal != nil {
+							return nil, refusal
+						}
 						if info != nil {
 							return &CorrelatedInSubquery{
+								Scope:           ctx.subqueryScope,
 								Cols:            ctx.subqueryCols,
 								Expr:            left,
 								Runner:          ctx.runner,
@@ -669,8 +674,13 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 				if refusal := refuseWindowBorneCorrelation("scalar", n.SQL, info, refs); refusal != nil {
 					return nil, refusal
 				}
+				// An aggregate the ENCLOSING query owns (#1044 round 2).
+				if refusal := refuseOuterLevelAggregate("scalar", n.SQL, ctx.outerTables); refusal != nil {
+					return nil, refusal
+				}
 				if info != nil {
 					cs := &CorrelatedScalarSubquery{
+						Scope:           ctx.subqueryScope,
 						Cols:            ctx.subqueryCols,
 						Runner:          ctx.runner,
 						OuterRefs:       refs,
@@ -725,8 +735,13 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 				if refusal := refuseWindowBorneCorrelation("EXISTS", n.SQL, info, refs); refusal != nil {
 					return nil, refusal
 				}
+				// An aggregate the ENCLOSING query owns (#1044 round 2).
+				if refusal := refuseOuterLevelAggregate("EXISTS", n.SQL, ctx.outerTables); refusal != nil {
+					return nil, refusal
+				}
 				if info != nil {
 					return &CorrelatedExistsSubquery{
+						Scope:           ctx.subqueryScope,
 						Runner:          ctx.runner,
 						Not:             n.Not,
 						OuterRefs:       refs,

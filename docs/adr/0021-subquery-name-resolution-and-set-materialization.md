@@ -1243,6 +1243,17 @@ would rebuild the text, and the refusal names the reference and the mechanism.
 It is raised at COMPILE time, once per query, because it is a property of the
 plan and not of a row.
 
+**Its reach is exactly what that function reads**, and stating it loosely
+overstates the engine. `HoldsWindowCall` asks the block's own window columns
+(`collectWindowSpecs`), its SELECT items, its `HAVING`, its `QUALIFY` and its
+set-operation arms. It does NOT read an `ORDER BY` term, and it does not
+descend into a nested block — so a window in a correlated body's `ORDER BY`
+(`EXISTS (SELECT 1 FROM x WHERE x.id=u.id ORDER BY ROW_NUMBER() OVER ())`), a
+window inside a derived table in that body, and a window in a decorrelated
+`EXISTS` are not refused, and answer PostgreSQL's rows. Those three clauses are
+re-emitted as the text the parser recorded rather than rendered from a window
+node, which is why they survive the rebuild.
+
 Measured against live PostgreSQL 17.11 over the three-row `c2users` fixture,
 before → after, on all five arms:
 
@@ -1256,6 +1267,16 @@ before → after, on all five arms:
 | a correlated subquery holding an UNCORRELATED window | `expected ')' after OVER clause` | 0A000 | answers |
 | an uncorrelated window in a subquery; a bare name the inner relation supplies; `PARTITION BY` the inner relation; a window over the query itself | right | right | right |
 
+A FOURTH shape moves right → loud and belongs in the census beside them: a
+correlated subquery with a `QUALIFY` that happens to be a no-op (`WHERE
+x.id=u.id QUALIFY ROW_NUMBER() OVER () = 1`) answered 1, 2, 3 at `bf99c56c` and
+is refused at the tip. Its rightness was the same kind of accident —
+`RebuildSQL` drops a `QUALIFY` clause outright (this section's own residual
+list), and dropping it changes nothing when the WHERE already leaves one row.
+With a `QUALIFY` that MATTERS the engine was loud at `bf99c56c` too ("more than
+one row returned by a subquery used as an expression"), so the pair is
+loud → loud on the shape the clause decides.
+
 The one-row/two-row pair is the discriminator, and it is why the refusal is not
 a right answer traded for a loud one. `SUM(x.id) OVER (PARTITION BY u.id)` over
 a ONE-row inner relation is right whatever the engine partitions by; the same
@@ -1263,19 +1284,14 @@ shape over two rows answered 1, 1, 1 for PostgreSQL's 3, 3, 3. Both are cells
 of the census, and the right one moves to loud because its rightness was the
 fixture's and not the engine's.
 
-**What this does NOT close.** The re-run still substitutes into the WHERE
-clause ALONE. An outer reference in a correlated subquery's SELECT list, its
-HAVING or its GROUP BY survives into the re-run's text, where the qualifier
-strip answers a confident constant — `SELECT (SELECT u.id FROM users x WHERE
-x.id=1) FROM users u` is 1, 1, 1 for PostgreSQL's 1, 2, 3, and the HAVING
-spelling is NULL for its 342. This section refuses only the WINDOW case,
-because for a window the substitution cannot be made to work without a faithful
-`OVER` renderer, while for every other position it can: the repair is
-`RewriteOuterRefs` over each item's AST and a `RebuildSQL` that renders the
-rewritten items instead of their recorded text. That is a FIX and not a
-refusal, so it is filed as one rather than traded for a 0A000 that would also
-take the shapes this engine answers correctly today. `RebuildSQL` dropping a
-`QUALIFY` clause outright is the same gap's neighbour.
+**What this does NOT close.** The SELECT list, the WHERE and the HAVING are
+substituted now (§1l); `GROUP BY` and `ORDER BY` are not, because a substituted
+term there renders as a bare literal and reads as a select-list POSITION, and
+`RebuildSQL` drops a `QUALIFY` clause outright. All three are refused rather
+than run. The WINDOW case stays refused for a different reason and a harder
+one: there is no faithful rendering of an `OVER` clause to rebuild, and
+`WindowFuncNode.String()` emitting `OVER (...)` — three literal dots — is a
+defect of its own worth closing before anything here can.
 
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 

@@ -22,6 +22,9 @@ type CorrelatedScalarSubquery struct {
 	OuterTables     map[string]bool    // outer table aliases
 	ParsedInfo      *plansql.SelectInfo
 	UnqualOuterCols map[string]string // unqualified column → table mapping for outer refs
+	// Scope resolves a relation's COMPLETE column list, so the rebuilt text's
+	// guard can tell a ROW FIELD PATH from a lost correlation (#866).
+	Scope plansql.TableColumns
 	// Decl is the DECLARED type of the subquery's single output column, and
 	// DeclKnown says whether anything resolved it — ScalarSubquery's fields,
 	// for the same reason and read by the same classifyOperand arm (#696,
@@ -74,15 +77,8 @@ func (e *CorrelatedScalarSubquery) Eval(b *batch.RecordBatch, row int) any {
 }
 
 func (e *CorrelatedScalarSubquery) buildSQL(b *batch.RecordBatch, row int) (string, error) {
-	vals, err := readOuterValues(b, row, e.OuterRefs)
-	if err != nil {
-		return "", err
-	}
-	rewrittenWhere := plansql.RewriteOuterRefs(e.ParsedInfo.WhereExpr, e.OuterTables, vals)
-	if len(e.UnqualOuterCols) > 0 {
-		rewrittenWhere = plansql.RewriteUnqualifiedOuterRefs(rewrittenWhere, e.UnqualOuterCols, vals)
-	}
-	return plansql.RebuildSQL(e.ParsedInfo, rewrittenWhere), nil
+	return rerunSQL("scalar", b, row, e.OuterRefs, e.OuterTables, e.UnqualOuterCols,
+		e.ParsedInfo, e.Scope)
 }
 
 // CorrelatedInSubquery checks if a value is in the result set of a correlated subquery.
@@ -97,6 +93,9 @@ type CorrelatedInSubquery struct {
 	OuterTables     map[string]bool
 	ParsedInfo      *plansql.SelectInfo
 	UnqualOuterCols map[string]string
+	// Scope resolves a relation's COMPLETE column list, so the rebuilt text's
+	// guard can tell a ROW FIELD PATH from a lost correlation (#866).
+	Scope plansql.TableColumns
 	// SetBound bounds the membership set in ROWS, refusing past it rather
 	// than truncating — a set short by one row is a different answer, and on
 	// a write door it deletes the wrong rows. Zero is unbounded.
@@ -184,15 +183,8 @@ func (e *CorrelatedInSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool
 }
 
 func (e *CorrelatedInSubquery) buildSQL(b *batch.RecordBatch, row int) (string, error) {
-	vals, err := readOuterValues(b, row, e.OuterRefs)
-	if err != nil {
-		return "", err
-	}
-	rewrittenWhere := plansql.RewriteOuterRefs(e.ParsedInfo.WhereExpr, e.OuterTables, vals)
-	if len(e.UnqualOuterCols) > 0 {
-		rewrittenWhere = plansql.RewriteUnqualifiedOuterRefs(rewrittenWhere, e.UnqualOuterCols, vals)
-	}
-	return plansql.RebuildSQL(e.ParsedInfo, rewrittenWhere), nil
+	return rerunSQL("IN", b, row, e.OuterRefs, e.OuterTables, e.UnqualOuterCols,
+		e.ParsedInfo, e.Scope)
 }
 
 // CorrelatedExistsSubquery evaluates a correlated EXISTS subquery per-row.
@@ -203,6 +195,9 @@ type CorrelatedExistsSubquery struct {
 	OuterTables     map[string]bool
 	ParsedInfo      *plansql.SelectInfo
 	UnqualOuterCols map[string]string
+	// Scope resolves a relation's COMPLETE column list, so the rebuilt text's
+	// guard can tell a ROW FIELD PATH from a lost correlation (#866).
+	Scope plansql.TableColumns
 }
 
 func (e *CorrelatedExistsSubquery) Eval(b *batch.RecordBatch, row int) any {
@@ -232,15 +227,8 @@ func (e *CorrelatedExistsSubquery) EvalBool(b *batch.RecordBatch, row int) bool 
 }
 
 func (e *CorrelatedExistsSubquery) buildSQL(b *batch.RecordBatch, row int) (string, error) {
-	vals, err := readOuterValues(b, row, e.OuterRefs)
-	if err != nil {
-		return "", err
-	}
-	rewrittenWhere := plansql.RewriteOuterRefs(e.ParsedInfo.WhereExpr, e.OuterTables, vals)
-	if len(e.UnqualOuterCols) > 0 {
-		rewrittenWhere = plansql.RewriteUnqualifiedOuterRefs(rewrittenWhere, e.UnqualOuterCols, vals)
-	}
-	return plansql.RebuildSQL(e.ParsedInfo, rewrittenWhere), nil
+	return rerunSQL("EXISTS", b, row, e.OuterRefs, e.OuterTables, e.UnqualOuterCols,
+		e.ParsedInfo, e.Scope)
 }
 
 // readOuterValues reads correlated outer column values from the current batch row.
@@ -697,4 +685,138 @@ func refuseWindowBorneCorrelation(kind, sql string, info *plansql.SelectInfo,
 		return nil
 	}
 	return &WindowBorneCorrelationError{Kind: kind, SQL: sql, Refs: refs}
+}
+
+// A PER-ROW RE-RUN SUBSTITUTES INTO EVERY CLAUSE IT REBUILDS, AND REFUSES WHAT
+// IT COULD NOT REACH (#1044 round 2).
+//
+// rerunSQL is the ONE text a correlated re-run runs, for all three constructs.
+// It reads the outer row's values, rewrites them into every clause
+// plansql.RebuildSQLForRerun re-emits from an AST — the SELECT list, the WHERE
+// and the HAVING — and then asks whether the rebuilt statement still names a
+// relation it does not read.
+//
+// That last question is ADR-0021 §1c's own guard, applied at the site §1c did
+// not cover. §1c put it on the UNCORRELATED evaluators, because a subquery
+// misclassified as uncorrelated runs text that still names the outer relation
+// and the qualifier strip then answers a confident constant. A CORRELATED
+// re-run can reach the same place from the other direction: a reference in a
+// clause the substitution does not rewrite — GROUP BY and ORDER BY, whose
+// substituted terms would read as ORDINALS — survives the rebuild, and running
+// it would be the same silent wrong answer. It is refused instead.
+//
+// scope tells a ROW FIELD PATH from a lost correlation, exactly as it does for
+// the uncorrelated guard: `c_row.b` is a qualified reference whose qualifier
+// is a COLUMN of the relation the subquery reads, so the subquery is
+// self-contained and answers (#866, ADR-0022). A nil resolver leaves such a
+// reference dangling, which is the safe direction and what this had before.
+func rerunSQL(kind string, b *batch.RecordBatch, row int, refs []plansql.OuterRef,
+	outerTables map[string]bool, unqual map[string]string,
+	info *plansql.SelectInfo, scope plansql.TableColumns) (string, error) {
+	vals, err := readOuterValues(b, row, refs)
+	if err != nil {
+		return "", err
+	}
+	rewrite := func(n plansql.Node) plansql.Node {
+		out := plansql.RewriteOuterRefs(n, outerTables, vals)
+		if len(unqual) > 0 {
+			out = plansql.RewriteUnqualifiedOuterRefs(out, unqual, vals)
+		}
+		return out
+	}
+	sql, _ := plansql.RebuildSQLForRerun(info, rewrite)
+	// The two clauses the rebuild re-emits as recorded TEXT, asked directly of
+	// their own trees: an outer reference there did not move, and running the
+	// statement with it still in place is the silent answer §1c refuses.
+	if left := plansql.OuterRefsInUnsubstitutedClauses(info, outerTables); len(left) > 0 {
+		return "", &UnsubstitutedOuterRefError{Kind: kind, SQL: sql, Refs: left}
+	}
+	// And the belt: a rebuilt statement that still names a relation it does
+	// not read is one this engine cannot run, whatever put the name there.
+	if left := plansql.DanglingTableRefsWithScope(sql, scope); len(left) > 0 {
+		return "", &UnsubstitutedOuterRefError{Kind: kind, SQL: sql, Refs: left}
+	}
+	return sql, nil
+}
+
+// UnsubstitutedOuterRefError reports a correlated subquery whose rebuilt text
+// still names a relation it does not read — an outer reference the per-row
+// substitution could not reach.
+//
+// The reachable clauses are the SELECT list, the WHERE and the HAVING, each of
+// which the rebuild renders from its own AST. GROUP BY and ORDER BY are not,
+// because a substituted term there renders as a bare literal and both engines
+// read `GROUP BY 1` as the first SELECT ITEM rather than as the number one.
+// Running the statement anyway is the silent answer ADR-0021 §1c refuses at
+// the uncorrelated evaluators, so it is refused here too.
+type UnsubstitutedOuterRefError struct {
+	Kind string
+	SQL  string
+	Refs []plansql.OuterRef
+}
+
+func (e *UnsubstitutedOuterRefError) Error() string {
+	names := make([]string, 0, len(e.Refs))
+	for _, r := range e.Refs {
+		names = append(names, r.Table+"."+r.Column)
+	}
+	return fmt.Sprintf("%s subquery is correlated on %s in a clause its per-row re-run "+
+		"cannot substitute — the rebuild renders the SELECT list, the WHERE and the HAVING "+
+		"from their own trees, and a GROUP BY or ORDER BY term substituted there would read "+
+		"as a select-list POSITION; this query has no distributed or single-process lowering "+
+		"for that correlation\n  subquery: %s",
+		e.Kind, strings.Join(names, ", "), e.SQL)
+}
+
+// FatalEvalError satisfies the marker the pipeline drivers recover on.
+func (e *UnsubstitutedOuterRefError) FatalEvalError() error { return e }
+
+// SQLState is PostgreSQL's feature_not_supported: the query is legal SQL this
+// engine cannot lower.
+func (e *UnsubstitutedOuterRefError) SQLState() string { return "0A000" }
+
+// OuterLevelAggregateError reports a subquery holding an aggregate whose
+// argument names ONLY the enclosing query.
+//
+// PostgreSQL puts an aggregate at the level of the deepest variable in its
+// arguments, so `(SELECT MAX(u.id) FROM x)` and `(SELECT MAX((SELECT u.id))
+// FROM x)` are the ENCLOSING query's aggregate — and 42803 there, because the
+// enclosing SELECT list then carries an ungrouped column. This engine's
+// per-row re-run would substitute the outer row's value and compute the
+// aggregate at the INNER level instead, answering a number PostgreSQL does not
+// give, so the shape is refused. `(SELECT SUM(x.visits + u.id) FROM x)` names
+// an inner variable too and is the inner block's aggregate: it answers, and is
+// not reported here.
+type OuterLevelAggregateError struct {
+	Kind string
+	SQL  string
+	Refs []plansql.OuterRef
+}
+
+func (e *OuterLevelAggregateError) Error() string {
+	names := make([]string, 0, len(e.Refs))
+	for _, r := range e.Refs {
+		names = append(names, r.Table+"."+r.Column)
+	}
+	return fmt.Sprintf("%s subquery holds an aggregate whose argument names only the "+
+		"enclosing query (%s); PostgreSQL puts such an aggregate at the ENCLOSING query's "+
+		"level, and this engine has no lowering for an aggregate level above the block it is "+
+		"written in\n  subquery: %s",
+		e.Kind, strings.Join(names, ", "), e.SQL)
+}
+
+// FatalEvalError satisfies the marker the pipeline drivers recover on.
+func (e *OuterLevelAggregateError) FatalEvalError() error { return e }
+
+// SQLState is PostgreSQL's feature_not_supported.
+func (e *OuterLevelAggregateError) SQLState() string { return "0A000" }
+
+// refuseOuterLevelAggregate answers the error when a correlated subquery holds
+// an aggregate the ENCLOSING query owns, and nil otherwise.
+func refuseOuterLevelAggregate(kind, sql string, outerTables map[string]bool) error {
+	refs := plansql.AggregatesOverOnlyOuterRefs(sql, outerTables)
+	if len(refs) == 0 {
+		return nil
+	}
+	return &OuterLevelAggregateError{Kind: kind, SQL: sql, Refs: refs}
 }

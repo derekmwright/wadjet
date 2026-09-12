@@ -2107,6 +2107,38 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      re-run to substitute OUTSIDE the WHERE clause, which needs a faithful
      rendering of the OVER clause; ADR-0021 §1m states what that costs.
 
+   - **A correlated subquery whose outer reference sits in a GROUP BY, an
+     ORDER BY or a LATERAL body, and one holding an aggregate the ENCLOSING
+     query owns, are REFUSED (0A000) where PostgreSQL answers.** (Added
+     2026-09-12, arc C2 round 2, #1044.) A correlated subquery this engine does
+     not decorrelate is re-run per outer row by substituting the outer values
+     into its text. The substitution reaches the SELECT list, the WHERE and the
+     HAVING, each of which the rebuild renders from its own tree; it does not
+     reach GROUP BY or ORDER BY, because a term substituted there renders as a
+     bare literal and both engines read `ORDER BY 1` as the FIRST SELECT ITEM
+     rather than as the number one. Running the statement with the reference
+     still in it is the silent answer §1c refuses at the uncorrelated
+     evaluators, so it is refused here: `(SELECT x.visits FROM x ORDER BY
+     (SELECT u.id) LIMIT 1)` is 0A000 where PostgreSQL answers 100, 100, 100,
+     and the GROUP BY spelling is loud for the same reason. A LATERAL body is
+     refused on the same ground — it is decorrelated into a join and the
+     projection has nothing to respell.
+
+     The aggregate half is PostgreSQL's LEVEL rule, measured on 17.11: an
+     aggregate belongs to the level of the deepest variable in its arguments,
+     so `SELECT MAX((SELECT u.id)) FROM users u` is the ENCLOSING query's and
+     answers one row (3), while `SELECT id, (SELECT MAX(u.id) FROM x) FROM
+     users u` is 42803 because promoted to the outer query it leaves `id`
+     ungrouped. `(SELECT SUM(x.visits + u.id) FROM x)` names an inner variable
+     too and is the inner block's — 345, 348, 351 — and is not refused. This
+     engine has no lowering for an aggregate level above the block it is
+     written in, and a per-row re-run would compute it at the INNER level and
+     answer a number PostgreSQL does not give, so the shape is refused rather
+     than answered. Every refusing cell carries PostgreSQL's value beside it in
+     `coordinator.TestArcC2ASubqueryReadsTheRowItIsCorrelatedOn`, so the day a
+     shape becomes executable the cell fails and is rewritten to that value.
+     ADR-0021 §1l states what closing each one costs.
+
    - **`OHLCV` and `TIME_BUCKET` are EXTENSIONS, and their oracle is
      PostgreSQL spelled out.** (Added 2026-09-08, arc A1, #965, ADR-0035.)
 

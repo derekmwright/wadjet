@@ -361,10 +361,53 @@ func c2Cells() []c2Cell {
 		{name: "44_ctl_a_window_over_the_query_itself",
 			sql:  `SELECT id, SUM(id) OVER () AS v FROM c2users u ORDER BY id`,
 			want: `id,v | 1,6 | 2,6 | 3,6`},
-		// --- THE REWRITE'S REACH: the positions whose disposition the SITE
-		// alone settles (round-2 review, B1). Where the enclosing block is a
-		// subquery whose own text a per-row re-run rebuilds, the node stays
-		// and ADR-0021 §1c's refusal is kept.
+		// --- THE REWRITE'S REACH: every position a FROM-less scalar subquery
+		// can occupy relative to the scope that owns its references
+		// (round-2 review, B1). The rewrite fires where the ENCLOSING BLOCK
+		// supplies the row; where the enclosing block is a subquery whose own
+		// text a per-row re-run rebuilds, the node stays and the outer value
+		// arrives through that rebuild instead — or the shape is refused.
+		{name: "45_nested_in_a_correlated_subquerys_select_list",
+			sql: `SELECT id, (SELECT (SELECT u.id) FROM c2users x WHERE x.id=1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,1 | 2,2 | 3,3`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "46_the_same_in_an_IN_set",
+			sql: `SELECT id FROM c2users u ` +
+				`WHERE u.id IN (SELECT (SELECT u.id) FROM c2users x WHERE x.id=1) ORDER BY id`,
+			want:   `id | 1 | 2 | 3`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "47_the_same_in_a_HAVING",
+			sql: `SELECT id, (SELECT SUM(x.visits) FROM c2users x ` +
+				`HAVING SUM(x.visits) > (SELECT u.id)) AS v FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,342 | 2,342 | 3,342`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "48_the_same_over_a_CTE",
+			sql: `WITH c AS (SELECT id FROM c2users) ` +
+				`SELECT id, (SELECT (SELECT u.id) FROM c x WHERE x.id=1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,1 | 2,2 | 3,3`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "49_nested_three_deep",
+			sql: `SELECT id, (SELECT (SELECT (SELECT u.id)) FROM c2users x WHERE x.id=1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,1 | 2,2 | 3,3`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "50_under_arithmetic_beside_an_inner_column",
+			sql: `SELECT id, (SELECT (SELECT u.id) + x.visits FROM c2users x WHERE x.id=1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,101 | 2,102 | 3,103`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "51_in_the_enclosing_subquerys_own_WHERE",
+			sql: `SELECT id, (SELECT x.visits FROM c2users x WHERE x.id = (SELECT u.id)) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,100 | 2,42 | 3,200`,
+			routes: a2Routes{Correlated: 1}},
+		// The two positions the rebuild does NOT substitute, because a term
+		// substituted there renders as a bare literal and both engines read
+		// `ORDER BY 1` / `GROUP BY 1` as a select-list POSITION. Loud, and
+		// PostgreSQL's value is beside each so the day they are substitutable
+		// the cell fails and is rewritten to it.
 		{name: "52_in_an_ORDER_BY_term_is_refused", // PostgreSQL: 100, 100, 100
 			sql: `SELECT id, (SELECT x.visits FROM c2users x ORDER BY (SELECT u.id) LIMIT 1) AS v ` +
 				`FROM c2users u ORDER BY id`,
@@ -378,6 +421,16 @@ func c2Cells() []c2Cell {
 		// constant does not change an order; with a factor that is negative
 		// for the first outer row the same mechanism answers 100 where
 		// PostgreSQL answers 200.
+		{name: "52a_an_outer_reference_in_an_ORDER_BY_beside_one_in_the_WHERE", // PostgreSQL: 100, 100, 100
+			sql: `SELECT id, (SELECT x.visits FROM c2users x WHERE x.id <= u.id ` +
+				`ORDER BY x.id * (u.id - 2) LIMIT 1) AS v FROM c2users u ORDER BY id`,
+			wantErr: `cannot substitute`,
+			routes:  a2Routes{Correlated: 1}},
+		{name: "52b_the_same_in_a_GROUP_BY", // PostgreSQL: 100, 142, 342
+			sql: `SELECT id, (SELECT SUM(x.visits) FROM c2users x WHERE x.id <= u.id ` +
+				`GROUP BY u.id) AS v FROM c2users u ORDER BY id`,
+			wantErr: `cannot substitute`,
+			routes:  a2Routes{Correlated: 1}},
 		{name: "53_in_a_GROUP_BY_term_is_refused", // PostgreSQL: 342, 342, 342
 			sql: `SELECT id, (SELECT SUM(x.visits) FROM c2users x GROUP BY u.id) AS v ` +
 				`FROM c2users u ORDER BY id`,
@@ -392,10 +445,84 @@ func c2Cells() []c2Cell {
 		// --- #1044's own shape WITH a FROM clause (round-2 review, P1).
 		// The re-run substitutes the outer row into the SELECT list and the
 		// HAVING now, not only the WHERE.
+		{name: "55_the_issue_shape_with_a_from_clause",
+			sql: `SELECT (SELECT u.x FROM c2users y WHERE y.id = 1) AS v ` +
+				`FROM (SELECT id AS x FROM c2users) u ORDER BY 1`,
+			want:   `v | 1 | 2 | 3`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "56_the_same_over_a_CTE",
+			sql: `WITH a AS (SELECT id AS x FROM c2users) ` +
+				`SELECT (SELECT u.x FROM c2users y WHERE y.id = 1) AS v FROM a u ORDER BY 1`,
+			want:   `v | 1 | 2 | 3`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "57_the_same_on_a_base_tables_alias",
+			sql: `SELECT id, (SELECT u.id FROM c2users x WHERE x.id=1) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,1 | 2,2 | 3,3`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "58_an_outer_reference_in_a_HAVING",
+			sql: `SELECT id, (SELECT SUM(x.visits) FROM c2users x ` +
+				`HAVING SUM(x.visits) > u.id) AS v FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,342 | 2,342 | 3,342`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "59_the_aggregate_ARGUMENT_spelling_is_the_residual",
+			sql: `SELECT SUM((SELECT u.x FROM c2users y WHERE y.id = 1)) AS v ` +
+				`FROM (SELECT id AS x FROM c2users) u`,
+			want: `v | 6`,
+			pin:  `v | NULL`,
+			pinWhy: "the AGGREGATE-ARGUMENT compile site resolves its outer scope from the " +
+				"scan aliases below it (physical.collectTableAliases), which do not carry a " +
+				"DERIVED TABLE's alias, so this subquery is planned UNCORRELATED and the " +
+				"qualifier strip finds no `x` — ADR-0021 §1c's named gap, unchanged by this " +
+				"arc and identical at bf99c56c. The same subquery one position out, in the " +
+				"SELECT list, is cell 55",
+			routes: a2Routes{Correlated: 1}},
+
+		// --- an aggregate belongs to the level of the deepest variable in
+		// its arguments, and this engine does not implement levels.
+		{name: "60_an_aggregate_over_only_outer_refs_is_refused", // PostgreSQL: 42803
+			sql:     `SELECT id, (SELECT MAX(u.id) FROM c2users x) AS v FROM c2users u ORDER BY id`,
+			wantErr: `names only the enclosing query`,
+			routes:  a2Routes{Correlated: 1}},
+		{name: "61_the_same_through_a_nested_subquery", // PostgreSQL: 42803
+			sql: `SELECT id, (SELECT MAX((SELECT u.id)) FROM c2users x) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			wantErr: `names only the enclosing query`,
+			routes:  a2Routes{Correlated: 1}},
+		{name: "62_ctl_an_aggregate_that_also_names_an_inner_column",
+			sql: `SELECT id, (SELECT SUM(x.visits + u.id) FROM c2users x) AS v ` +
+				`FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,345 | 2,348 | 3,351`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "63_ctl_an_aggregate_over_no_column_at_all",
+			sql:  `SELECT id, (SELECT MAX(1) FROM c2users x) AS v FROM c2users u ORDER BY id`,
+			want: `id,v | 1,1 | 2,1 | 3,1`},
+		{name: "64_ctl_the_enclosing_querys_own_aggregate",
+			sql:  `SELECT MAX((SELECT u.id)) AS v FROM c2users u`,
+			want: `v | 3`},
+
+		// --- the clauses the rewrite DECLINES now answer through the re-run
+		// instead of a silent NULL (round-2 review, N1), and a star with no
+		// relation is PostgreSQL's 42601 (N3).
+		{name: "65_a_declined_ORDER_BY_answers_through_the_rerun",
+			sql:    `SELECT id, (SELECT u.id ORDER BY 1) AS v FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,1 | 2,2 | 3,3`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "66_a_declined_LIMIT_one_answers_through_the_rerun",
+			sql:    `SELECT id, (SELECT u.id LIMIT 1) AS v FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,1 | 2,2 | 3,3`,
+			routes: a2Routes{Correlated: 1}},
+		{name: "67_a_declined_WHERE_that_is_not_constant_false",
+			sql:    `SELECT id, (SELECT u.id WHERE u.id > 1) AS v FROM c2users u ORDER BY id`,
+			want:   `id,v | 1,NULL | 2,2 | 3,3`,
+			routes: a2Routes{Correlated: 1}},
 		{name: "68_a_star_with_no_relation_is_refused",
 			sql:     `SELECT id, (SELECT *) AS v FROM c2users u ORDER BY id`,
 			wantErr: `no tables specified`,
 			routes:  a2Routes{ScalarProjection: 1}},
+		{name: "69_a_fromless_subquery_as_an_IN_set",
+			sql:  `SELECT id FROM c2users u WHERE u.id IN (SELECT u.id) ORDER BY id`,
+			want: `id | 1 | 2 | 3`},
 		{name: "70_a_LATERAL_body_that_projects_an_outer_column_is_the_residual",
 			sql: `SELECT u.id, l.v FROM c2users u CROSS JOIN LATERAL ` +
 				`(SELECT u.id AS v FROM c2users x WHERE x.id=1) l ORDER BY 1`,
