@@ -73,9 +73,23 @@ type Planner struct {
 	// seeds for the self-reference, and is restored to whatever it held when
 	// the materialization is done.
 	nestedCTECache map[*plansql.CTEDef]*cteMaterialized
-	scanCache      map[string]*scanCached // cached scan results for duplicate table scans
-	res            *queryResources        // per-query spill manager + memory tracker (lazy, shared with child planners)
-	WorkerCount    int                    // number of distributed workers (for shuffle partitioning)
+	// cteInProgress names the recursive CTEs whose materialization is RUNNING.
+	//
+	// Materializing one PLANS its body, and the body's self-reference is a
+	// tagged scan whose cache lookup misses until the first iteration seeds the
+	// work table — so a spelling the anchor/recursive split does not recognise
+	// re-materialized the same definition from inside its own materialization,
+	// without bound, until the process ran out of memory. It is keyed by NAME
+	// because the name is what a self-reference resolves by.
+	cteInProgress map[string]bool
+	// cteMaterializeErr is why a recursive CTE has no cache entry, keyed by
+	// name. A materialization that fails must REFUSE at the reference rather
+	// than leave an empty relation behind (#1041's door), and the root
+	// materialization pass runs long before the reference is built.
+	cteMaterializeErr map[string]error
+	scanCache         map[string]*scanCached // cached scan results for duplicate table scans
+	res               *queryResources        // per-query spill manager + memory tracker (lazy, shared with child planners)
+	WorkerCount       int                    // number of distributed workers (for shuffle partitioning)
 
 	// builtJoins are the HashJoins this plan owns. HashJoin.Close is the
 	// only thing that returns the build's tracker reservation and removes

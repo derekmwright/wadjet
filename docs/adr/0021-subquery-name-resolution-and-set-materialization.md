@@ -1449,6 +1449,43 @@ where the block is planned. Three consequences are part of the position:
   relation that does not exist. `0A000` naming the CTE, never an empty
   relation.
 
+### 1m-a. The FORM is decided before the body is planned
+
+(Added 2026-09-12, round-2 review B3.)
+
+§1m's materialization PLANS the body, and the body's self-reference is a tagged
+scan whose cache lookup misses until the first iteration seeds the work table.
+`splitRecursiveUnion` recognises only `UNION ALL`, so a recursive CTE written
+with plain `UNION` — PostgreSQL's cycle-safe spelling, and standard SQL — fell
+to the columnar materialization, which planned the body, whose self-reference
+re-materialized THE SAME DEFINITION from inside its own materialization. At the
+statement ROOT, reachable by any client, the query never returned and took 25 GB
+of RSS in 45 seconds. §1m made a bounded wrong answer unbounded, which is a
+different defect in kind.
+
+**The position has two halves and needs both.**
+
+* **A definition under materialization carries an IN-PROGRESS marker**
+  (`Planner.cteInProgress`, keyed by NAME because the name is what a
+  self-reference resolves by). A self-reference that reaches the planner from
+  inside its own materialization is served by the work table where the
+  iteration has seeded one, and REFUSED otherwise — PostgreSQL's 42P19,
+  "recursive reference to query %q must not appear within its non-recursive
+  term". Re-entry is impossible by construction rather than by depth counting.
+* **The FORM is decided from the PARSED body before anything is planned.** A
+  body that names itself and is not `non-recursive-term UNION ALL
+  recursive-term` is refused by spelling: `UNION` without `ALL` is `0A000`
+  (PostgreSQL ANSWERS it — a feature gap is not a syntax error, ADR-0012), and
+  every other shape is PostgreSQL's own 42P19 sentence. Discovering the form by
+  planning the body is what re-entered.
+
+Two consequences fall out of asking the self-reference question at all. A
+`WITH RECURSIVE` whose body does NOT name itself is not recursive — PostgreSQL
+answers `WITH RECURSIVE r AS (SELECT 1 UNION SELECT 2)` — and keeps the ordinary
+materialization. And a `UNION ALL` whose second arm names no CTE is not a
+recursive TERM: the iteration re-ran it until `maxRecursiveIterations` and
+answered 1001 rows where PostgreSQL answers 2.
+
 **NOT SETTLED:** the DAG still cannot run any recursive CTE, at the root or
 nested (#1042) — the tagged scan becomes a stage with no scan files and no
 dependencies and the dispatcher fails it, loudly. The census pins that on the

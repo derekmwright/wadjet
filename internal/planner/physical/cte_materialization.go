@@ -14,6 +14,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -61,7 +62,15 @@ func (p *Planner) materializeCTEs(ctx context.Context, root *logical.Node) {
 	for i := range root.CTEs {
 		cte := &root.CTEs[i]
 		if cte.Recursive {
-			p.materializeRecursiveCTE(ctx, *cte)
+			// The error is RECORDED, not dropped: this pass runs long before
+			// the reference is built, and a reference with no cache entry must
+			// refuse rather than read a relation that does not exist.
+			if err := p.materializeRecursiveCTE(ctx, *cte); err != nil {
+				if p.cteMaterializeErr == nil {
+					p.cteMaterializeErr = map[string]error{}
+				}
+				p.cteMaterializeErr[strings.ToLower(strings.TrimSpace(cte.Name))] = err
+			}
 			continue
 		}
 		if refCounts[cte.Name] < 2 {
@@ -167,6 +176,11 @@ func (p *Planner) releaseCTECache() {
 		}
 	}
 	p.nestedCTECache = nil
+	// Both are per-STATEMENT facts and must not outlive it: a name left marked
+	// in progress would refuse the next statement's legal recursion, and a
+	// recorded failure would refuse a query that has not been tried.
+	p.cteInProgress = nil
+	p.cteMaterializeErr = nil
 }
 
 // cteCacheHasCollectors reports whether any cached CTE holds spill-backed
@@ -284,42 +298,120 @@ const maxRecursiveIterations = 1000
 // materializeRecursiveCTE executes a recursive CTE using fixed-point iteration.
 // The CTE body must contain UNION ALL separating the anchor query from the
 // recursive query. The recursive query references the CTE name itself.
-func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDef) {
+//
+// IT MARKS THE NAME IN PROGRESS FOR THE WHOLE MATERIALIZATION, and that marker
+// is the termination guarantee. Everything below PLANS the body, and the body's
+// self-reference is a tagged scan whose cache lookup misses until the first
+// iteration seeds it — so without a marker a spelling this cannot split
+// re-materialized the SAME definition from inside its own materialization,
+// without bound: `WITH RECURSIVE r AS (SELECT 1 AS v UNION SELECT v+1 FROM r
+// WHERE v<3)` never returned and took 25 GB of RSS in 45 seconds, reachable by
+// any client at the statement ROOT (the round-2 review's B3). The builder's own
+// comment says why the body is not expanded there; this is the same door one
+// layer down.
+//
+// The error is RETURNED rather than swallowed: a reference that cannot be
+// served must refuse, and the caller is the only place that knows which
+// reference asked.
+func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDef) error {
+	name := strings.ToLower(strings.TrimSpace(cte.Name))
+	if p.cteInProgress[name] {
+		// A self-reference reached here from INSIDE this CTE's own
+		// materialization, in a position the iteration has not seeded the work
+		// table for — PostgreSQL's "recursive reference to query %q must not
+		// appear within its non-recursive term". Refusing is the whole of the
+		// termination guarantee.
+		return sqlerr.New("42P19",
+			"recursive reference to query %q must not appear within its non-recursive term",
+			cte.Name)
+	}
+	if p.cteInProgress == nil {
+		p.cteInProgress = map[string]bool{}
+	}
+	p.cteInProgress[name] = true
+	defer delete(p.cteInProgress, name)
+
 	anchorSQL, recursiveSQL, ok := splitRecursiveUnion(cte.SQL)
 	if !ok {
-		// No UNION ALL found — fall back to non-recursive (columnar)
-		// materialization.
+		// Nothing to iterate: either the body has no top-level UNION ALL at
+		// all, or it has a UNION without ALL, which this engine has no
+		// fixed-point form for.
+		//
+		// A body that does NOT name itself is not recursive — `WITH RECURSIVE
+		// r AS (SELECT 1 UNION SELECT 2)` is legal SQL and PostgreSQL answers
+		// it — so it takes the ordinary columnar materialization, exactly as
+		// it did before. A body that DOES name itself is refused by SPELLING
+		// rather than planned: planning it is what re-entered.
+		if cteBodyNamesItself(cte) {
+			// PostgreSQL's own two answers, kept apart because they are two
+			// different facts about the query (ADR-0012).
+			if recursiveBodyIsUnionDistinct(cte.SQL) {
+				// PostgreSQL ANSWERS this one — it iterates and removes
+				// duplicates at every step — so it is a feature this engine
+				// lacks, which is 0A000 and not a syntax class.
+				return sqlerr.New("0A000",
+					"a recursive CTE written with UNION rather than UNION ALL is not "+
+						"supported: PostgreSQL answers %q by removing duplicates at every "+
+						"step, and this engine has no fixed-point form for that. Write "+
+						"UNION ALL, or remove the duplicates in the query that reads it",
+					cte.Name)
+			}
+			// PostgreSQL REFUSES this one, with this sentence and this class.
+			return sqlerr.New("42P19",
+				"recursive query %q does not have the form "+
+					"non-recursive-term UNION [ALL] recursive-term", cte.Name)
+		}
 		// A RECURSIVE CTE's name IS in scope inside its own body, which is
 		// what makes it recursive, so this one keeps the whole list.
 		coll, schema, err := p.materializeCTEColumnar(ctx, cte.SQL, nil, p.ctes)
 		if err != nil {
-			return
+			return err
 		}
 		if schema == nil {
 			coll.Release()
-			return
+			return nil
 		}
 		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: coll}
-		return
+		return nil
+	}
+
+	// A UNION ALL whose SECOND arm does not name the CTE is not a recursive
+	// term at all — `WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT 1)` is
+	// an ordinary set operation, which PostgreSQL answers with two rows. The
+	// iteration below re-runs that arm until it returns nothing, and an arm
+	// that reads no table returns the same row every time: 1001 rows for
+	// PostgreSQL's 2, bounded only by maxRecursiveIterations. The self-
+	// reference is what makes a term recursive, so ask.
+	if !selectTextNamesRelation(recursiveSQL, name) {
+		coll, schema, err := p.materializeCTEColumnar(ctx, cte.SQL, nil, p.ctes)
+		if err != nil {
+			return err
+		}
+		if schema == nil {
+			coll.Release()
+			return nil
+		}
+		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: coll}
+		return nil
 	}
 
 	// Step 1: Execute anchor query
 	anchorRows, err := p.executeSubquery(ctx, anchorSQL)
 	if err != nil {
-		return
+		return err
 	}
 	if len(anchorRows) == 0 {
 		schema := p.inferCTESchema(anchorSQL, nil)
 		if schema != nil {
 			p.cteCache[cte.Name] = &cteMaterialized{schema: schema, rows: nil}
 		}
-		return
+		return nil
 	}
 
 	// Infer schema from anchor results
 	schema := p.inferCTESchema(anchorSQL, anchorRows)
 	if schema == nil {
-		return
+		return nil
 	}
 
 	// Apply column aliases if specified: WITH t(a, b) AS (...)
@@ -360,7 +452,7 @@ func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDe
 	}
 	if err := appendRowsColumnar(anchorRows); err != nil {
 		coll.Release()
-		return
+		return err
 	}
 
 	// Derive the expected column names from the schema (aliases already applied).
@@ -414,13 +506,119 @@ func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDe
 			// and the query errors — same failure mode as an anchor error.
 			coll.Release()
 			delete(p.cteCache, cte.Name)
-			return
+			return err
 		}
 		workTable = newRows
 	}
 
 	// Store final accumulated results (columnar; replayed per reference).
 	p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: coll}
+	return nil
+}
+
+// cteBodyNamesItself reports whether a RECURSIVE CTE's body reads its OWN name
+// — the one fact that separates a body this engine must iterate from one the
+// RECURSIVE keyword merely decorates.
+//
+// `WITH RECURSIVE r AS (SELECT 1 UNION SELECT 2)` names nothing and is answered
+// by the ordinary materialization, as PostgreSQL answers it. A body that DOES
+// name itself and cannot be split into an anchor and a recursive term is
+// refused by SPELLING here, because the alternative — planning it to find out —
+// is what re-entered without bound.
+//
+// It walks the FROM at every nesting, through derived tables and through both
+// arms of a set operation, which is where the self-reference of a `UNION`
+// recursion lives; sqlReadsRecursiveCTE's own walk stops at the arms because
+// its question (does an IN-subquery READ a recursive CTE) is answered by the
+// left arm's tables.
+func cteBodyNamesItself(cte plansql.CTEDef) bool {
+	body, err := cte.BodySelect()
+	if err != nil || body == nil {
+		// A body that does not parse cannot be shown to name itself, and the
+		// parse error is reported by whoever plans it.
+		return false
+	}
+	return selectNamesRelation(body, strings.ToLower(strings.TrimSpace(cte.Name)))
+}
+
+// recursiveBodyIsUnionDistinct reports whether a recursive body's TOP-LEVEL set
+// operation is a UNION without ALL — the spelling PostgreSQL answers and this
+// engine cannot iterate. It reads the parsed form, not the text, so a `UNION`
+// inside a derived table or a string literal is not mistaken for the top one.
+func recursiveBodyIsUnionDistinct(sql string) bool {
+	parsed, err := plansql.Parse(sql)
+	if err != nil {
+		return false
+	}
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil || info == nil || info.Union == nil {
+		return false
+	}
+	return info.Union.Op == plansql.SetOpUnion && !info.Union.All
+}
+
+// selectTextNamesRelation is selectNamesRelation over one arm's TEXT, for the
+// caller that holds the split halves rather than the parsed body.
+func selectTextNamesRelation(sql, want string) bool {
+	parsed, err := plansql.Parse(sql)
+	if err != nil {
+		// Unparseable: assume it names the CTE, so the iteration keeps the
+		// behaviour it had rather than silently taking the other path.
+		return true
+	}
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil || info == nil {
+		return true
+	}
+	return selectNamesRelation(info, want)
+}
+
+// selectNamesRelation reports whether info's FROM — at any nesting, through a
+// derived table and through both arms of a set operation — names `want`.
+func selectNamesRelation(info *plansql.SelectInfo, want string) bool {
+	if info == nil {
+		return false
+	}
+	if info.Union != nil {
+		if selectNamesRelation(info.Union.Left, want) || selectNamesRelation(info.Union.Right, want) {
+			return true
+		}
+	}
+	refNames := func(t plansql.TableRef) bool {
+		if strings.HasPrefix(t.Name, "(") {
+			sub, err := t.SubSelect()
+			if err != nil {
+				return false
+			}
+			return selectNamesRelation(sub, want)
+		}
+		return strings.EqualFold(strings.TrimSpace(t.Name), want)
+	}
+	for i := range info.Tables {
+		if refNames(info.Tables[i]) {
+			return true
+		}
+	}
+	for i := range info.Joins {
+		ref := plansql.TableRef{Name: info.Joins[i].RightTable}
+		if info.Joins[i].RightTableRef != nil {
+			ref = *info.Joins[i].RightTableRef
+		}
+		if refNames(ref) {
+			return true
+		}
+	}
+	// A nested block's OWN `WITH` may shadow the name; this walk deliberately
+	// does not, because a shadowing item is answered from the enclosing scope
+	// here anyway (docs/internals/nested-with-scope-precedence.md) and a
+	// false positive costs a refusal where a wrong answer would otherwise
+	// stand.
+	for i := range info.CTEs {
+		if b, err := info.CTEs[i].BodySelect(); err == nil && selectNamesRelation(b, want) {
+			return true
+		}
+	}
+	return false
 }
 
 // stageTypeCTEAlias marks a phantom stage that walkStages emits in place of

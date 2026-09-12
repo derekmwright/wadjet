@@ -3,6 +3,7 @@ package physical
 
 import (
 	"context"
+	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
@@ -52,6 +53,13 @@ func (p *Planner) buildNestedRecursiveCTE(ctx context.Context, node *logical.Nod
 	//
 	// APPENDED and not substituted: the body may name an enclosing CTE too,
 	// and PostgreSQL has both in scope there.
+	// A materialization this statement already attempted and that FAILED is
+	// answered with its own error, not attempted again: the root pass runs
+	// before any reference is built, and retrying would hide why.
+	name := strings.ToLower(strings.TrimSpace(node.CTEName))
+	if err, failed := p.cteMaterializeErr[name]; failed {
+		return nil, nil, nil, err, true
+	}
 	savedCTEs := p.ctes
 	p.ctes = append(append([]plansql.CTEDef(nil), p.ctes...), *def)
 	// The NAME binding is what the iteration seeds and reads for the
@@ -59,7 +67,7 @@ func (p *Planner) buildNestedRecursiveCTE(ctx context.Context, node *logical.Nod
 	// afterwards, because the name may belong to a different relation in the
 	// enclosing scope.
 	savedEntry, hadEntry := p.cteCache[node.CTEName]
-	p.materializeRecursiveCTE(ctx, *def)
+	materr := p.materializeRecursiveCTE(ctx, *def)
 	mat, ok := p.cteCache[node.CTEName]
 	if hadEntry {
 		p.cteCache[node.CTEName] = savedEntry
@@ -67,6 +75,13 @@ func (p *Planner) buildNestedRecursiveCTE(ctx context.Context, node *logical.Nod
 		delete(p.cteCache, node.CTEName)
 	}
 	p.ctes = savedCTEs
+	if materr != nil {
+		if p.cteMaterializeErr == nil {
+			p.cteMaterializeErr = map[string]error{}
+		}
+		p.cteMaterializeErr[name] = materr
+		return nil, nil, nil, materr, true
+	}
 	if !ok {
 		return nil, nil, nil, sqlerr.New("0A000",
 			"the recursive CTE %q could not be materialized, and there is no relation "+

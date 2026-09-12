@@ -1531,6 +1531,15 @@ WITH RECURSIVE t(a, b) AS (SELECT 1 AS x, 10 AS x UNION ALL
 SELECT a, b FROM t ORDER BY a          -- 1,10 | 2,100 | 3,10000
 ```
 
+A recursive CTE's body must be `non-recursive-term UNION ALL recursive-term`.
+A body that names itself in any other form is refused rather than iterated: a
+body with no set operation, or a self-reference in the non-recursive term, is
+SQLSTATE `42P19` with PostgreSQL's own sentence, and a body written with
+`UNION` rather than `UNION ALL` — which PostgreSQL answers by removing
+duplicates at every step — is `0A000`. A `WITH RECURSIVE` whose body does NOT
+name itself is not recursive at all and is answered as the ordinary query it
+is, including a plain `UNION` between its arms.
+
 A recursive CTE is answered by the single-process engine; the distributed
 engine has no stage lowering for one and refuses such a query rather than
 answering it differently. The refusal is LOUD but it is not yet a SQLSTATE:

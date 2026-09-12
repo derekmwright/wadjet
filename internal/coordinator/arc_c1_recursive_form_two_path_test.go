@@ -1,0 +1,184 @@
+package coordinator
+
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+// A RECURSIVE CTE'S FORM IS DECIDED BEFORE ITS BODY IS PLANNED — five arms,
+// every cell under a wall-clock bound.
+//
+// Materializing a recursive CTE PLANS its body, and the body's self-reference
+// is a tagged scan whose cache lookup misses until the first iteration seeds
+// the work table. `splitRecursiveUnion` recognises only `UNION ALL`, so a
+// recursive CTE written with plain `UNION` — PostgreSQL's cycle-safe spelling,
+// and standard SQL — fell to the columnar materialization, which planned the
+// body, whose self-reference re-materialized THE SAME DEFINITION from inside
+// its own materialization. Nothing terminated it: at the STATEMENT ROOT,
+// reachable by any pgwire client, the query never returned and took 25 GB of
+// RSS in 45 seconds (round-2 review, B3). At the base it answered one row where
+// PostgreSQL answers three — wrong, but bounded.
+//
+// Two things close it, and both are asserted here:
+//
+//   - the name is marked IN PROGRESS for the whole materialization, so a
+//     self-reference that reaches the planner from inside it refuses instead of
+//     re-entering (`Planner.cteInProgress`);
+//   - the FORM is decided from the parsed body before anything is planned, so
+//     the spellings this engine cannot iterate are refused by name rather than
+//     discovered by recursing into them.
+//
+// EVERY CELL HAS A DEADLINE. A gate for a non-termination defect that waits
+// forever is the defect; `c1FormRun` fails the cell at 60s and says so.
+func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up three embedded NATS clusters")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	t.Cleanup(cancel)
+	arms := c1Arms(t, ctx)
+
+	// PostgreSQL 17.11's own class and sentence for a body that is not a valid
+	// recursive form (42P19), and 0A000 for the one it ANSWERS and this engine
+	// cannot — a feature gap is not a syntax error (ADR-0012).
+	const notTheForm = "ERR recursive query \"r\" does not have the form " +
+		"non-recursive-term UNION [ALL] recursive-term"
+	const inNonRecursiveTerm = "ERR recursive reference to query \"r\" must not appear " +
+		"within its non-recursive term"
+	const unionDistinct = "ERR a recursive CTE written with UNION rather than UNION ALL is not supported"
+
+	c1FormRun(t, arms, []c1Case{
+		{
+			// THE HEADLINE: at the STATEMENT ROOT, no nesting involved. The
+			// tip before this fix never returned.
+			name: "B3 UNION without ALL at the statement root",
+			sql:  "WITH RECURSIVE r AS (SELECT 1 AS v UNION SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
+			want: unionDistinct,
+			pin:  c1RecDAGPins(),
+			why: "PostgreSQL answers 1,2,3; this engine has no dedup-per-step fixed point and says so. " +
+				"On the DAG arms #1042 fires FIRST — a recursive CTE has no distributed stage at all — " +
+				"so the form refusal is a single-process claim and the pin says so",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "B3 UNION without ALL nested in a derived table",
+			sql:    "SELECT q.v FROM (WITH RECURSIVE r AS (SELECT 1 AS v UNION SELECT v+1 FROM r WHERE v<3) SELECT v FROM r) q ORDER BY 1",
+			want:   unionDistinct,
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "B3 UNION without ALL inside another CTE's body",
+			sql:    "WITH o AS (WITH RECURSIVE r AS (SELECT 1 AS v UNION SELECT v+1 FROM r WHERE v<3) SELECT v FROM r) SELECT v FROM o ORDER BY 1",
+			want:   unionDistinct,
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			// A self-reference with NO set operation at all: PostgreSQL's
+			// 42P19, its sentence.
+			name:   "a self-reference with no UNION is 42P19",
+			sql:    "WITH RECURSIVE r AS (SELECT v FROM r) SELECT v FROM r",
+			want:   notTheForm,
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			// The self-reference in the NON-RECURSIVE term, which is the
+			// position the in-progress marker catches.
+			name:   "a self-reference in the anchor is 42P19",
+			sql:    "WITH RECURSIVE r AS (SELECT v FROM r UNION ALL SELECT 1 AS v) SELECT v FROM r",
+			want:   inNonRecursiveTerm,
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "a self-reference in the anchor, nested",
+			sql:    "SELECT q.v FROM (WITH RECURSIVE r AS (SELECT v FROM r UNION ALL SELECT 1 AS v) SELECT v FROM r) q",
+			want:   inNonRecursiveTerm,
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+
+		// ---- the shapes the form test must NOT touch.
+		{
+			// RECURSIVE with a UNION and NO self-reference is not recursive at
+			// all, and PostgreSQL answers it. It must keep answering.
+			name:   "control: UNION without ALL and no self-reference answers",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION SELECT 2) SELECT v FROM r ORDER BY 1",
+			want:   "cols=[v:INT64] rows=2 | 1 | 2",
+			pin:    c1RecDAGPins(),
+			why:    "#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			// A UNION ALL whose second arm names no CTE is an ordinary set
+			// operation. PostgreSQL answers two rows; the iteration re-ran
+			// that arm until `maxRecursiveIterations` and answered 1001.
+			name: "a UNION ALL arm that names no CTE is not a recursive term",
+			sql:  "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT 1) SELECT v FROM r ORDER BY 1",
+			want: "cols=[v:INT64] rows=2 | 1 | 1",
+			pin:  c1RecDAGPins(),
+			why: "PostgreSQL 17.11: two rows; the fixed-point loop answered 1001 before the form test. " +
+				"#1042 fires first on the DAG arms",
+			routed: c1RecRoutes,
+		},
+		{
+			// CONTROL: the ordinary UNION ALL recursion, at the root and
+			// nested, still answers. This is the gate the form test could
+			// break and does not.
+			name:   "control: UNION ALL recursion at the root",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
+			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			pin:    c1RecDAGPins(),
+			why:    "#1042: the DAG cannot run any recursive CTE",
+			routed: c1RecRoutes,
+		},
+		{
+			name:   "control: UNION ALL recursion nested in a derived table",
+			sql:    "SELECT q.v FROM (WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r) q ORDER BY 1",
+			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			pin:    c1RecDAGPins(),
+			why:    "#1042: the DAG cannot run any recursive CTE",
+			routed: c1RecRoutes,
+		},
+	})
+}
+
+// c1FormRun is c1Run with a WALL-CLOCK BOUND per cell. The family it gates is a
+// non-termination defect, and a gate that waits for it forever reproduces it
+// rather than catching it: 60 seconds is four orders of magnitude above every
+// cell's measured time (all ten answer in under 30 ms on the single arm).
+func c1FormRun(t *testing.T, arms []c1Arm, cases []c1Case) {
+	t.Helper()
+	for _, tc := range cases {
+		bounded := make([]c1Arm, len(arms))
+		for i, arm := range arms {
+			run := arm.run
+			bounded[i] = c1Arm{name: arm.name, coord: arm.coord, run: func(sql string) (string, error) {
+				type result struct {
+					out string
+					err error
+				}
+				done := make(chan result, 1)
+				go func() {
+					out, err := run(sql)
+					done <- result{out, err}
+				}()
+				select {
+				case r := <-done:
+					return r.out, r.err
+				case <-time.After(60 * time.Second):
+					return "DID NOT TERMINATE within 60s", nil
+				}
+			}}
+		}
+		c1Run(t, bounded, []c1Case{tc})
+	}
+}
