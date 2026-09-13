@@ -61,6 +61,24 @@ func TestArcO2ADerivedBlockPublishesItsVisibleList(t *testing.T) {
 						got += "  KEYS " + o2KeySeq(arm.run, tc)
 					}
 				}
+				// A cell this engine REFUSES where PostgreSQL answers is a
+				// recorded disposition, not a pinned value: the refusal is
+				// the stand-in a deferred structural defect gets, and it is
+				// asserted on EVERY arm so a spelling that starts answering
+				// wrongly cannot hide behind one that does not.
+				if want, has := o2Refuses[tc.name]; has {
+					if !strings.HasPrefix(got, "ERR:") {
+						t.Fatalf("%s arm ANSWERED where this shape is REFUSED: %s\n"+
+							"  the refusal is the disposition; a shape that starts answering "+
+							"needs PostgreSQL's answer, not a new refusal\n  SQL: %s",
+							arm.name, got, tc.sql)
+					}
+					if !strings.Contains(got, want) {
+						t.Fatalf("%s arm refused with %s\n  want a refusal containing %q\n  SQL: %s",
+							arm.name, got, want, tc.sql)
+					}
+					continue
+				}
 				armWant := want
 				pinned := false
 				if p, has := o2Pin[tc.name][arm.name]; has {

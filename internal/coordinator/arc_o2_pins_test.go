@@ -1,10 +1,16 @@
 package coordinator
 
 // o2Pin is the RESIDUE: every cell this table measures that does not agree
-// with PostgreSQL 17.11 on some arm, pinned per arm with the mechanism that
-// keeps it open. A pin that starts agreeing FAILS, and deleting it is the
-// proof of the fix. Nothing is exempted: a position with no pin and no
-// PostgreSQL answer cannot be reached at all.
+// with PostgreSQL 17.11 on some arm and is not a recorded REFUSAL
+// (o2Refuses), pinned per arm with the mechanism that keeps it open.
+//
+// EVERY ONE of these was re-measured at base 0193c4e9 through a source
+// overlay of this same table: 23 of 23 are byte-identical there on all five
+// arms, so "PRE-EXISTING" is a measurement rather than a label. A pin that
+// starts agreeing FAILS, and deleting it is the proof of the fix; a pin never
+// records a value this arc made worse — the four shapes that moved from a
+// wrong answer to a refusal are in o2Refuses with their mechanism, and the
+// two that moved from a refusal to a wrong row count are refused again.
 var o2Pin = map[string]map[string]string{
 	// THE PUBLISHED NAME OF AN UNALIASED ITEM inside a block a JOIN reads.
 	// PostgreSQL calls it `?column?`; wadjet publishes the spelling the block's
@@ -19,6 +25,8 @@ var o2Pin = map[string]map[string]string{
 	// means the block's published names travelling BESIDE its stream, addressed
 	// by POSITION, which is `ProjectExprSpec.SourceSlot` one relation out.
 	// Values and positions agree on every arm; the NAME is the divergence.
+	// Recorded in ADR-0012's divergence list. PRE-EXISTING: measured
+	// byte-identical at base 0193c4e9 on all five arms.
 	"lateral/unaliased/star": {
 		"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.amount + 1:FLOAT64] rows=4 | 1,Alice,150,1,101 | 1,Alice,150,1,51 | 2,Bob,200,2,126 | 2,Bob,200,2,76",
 		"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.amount + 1:FLOAT64] rows=4 | 1,Alice,150,1,101 | 1,Alice,150,1,51 | 2,Bob,200,2,126 | 2,Bob,200,2,76",
@@ -104,97 +112,48 @@ var o2Pin = map[string]map[string]string{
 		"dag-morsel4":  "cols=[product:STRING count(*) + 1:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,2,1,Alice,150 | Doohickey,2,2,Bob,200 | Doohickey,2,3,Carol,0 | Gadget,2,1,Alice,150 | Gadget,2,2,Bob,200 | Gadget,2,3,Carol,0 | Widget,3,1,Alice,150 | Widget,3,2,Bob,200 | Widget,3,3,Carol,0",
 	},
 
-	// A LATERAL'S OWN `LIMIT` IS NOT PER OUTER ROW. PostgreSQL evaluates a
-	// LATERAL once per outer row, so its LIMIT bounds each evaluation; the
-	// decorrelation makes the body ONE relation joined once, and the bound
-	// applies to the whole of it. Pre-existing, on every arm, DEFERRED with its
-	// mechanism by arc N1 (`1008 boundary: a grouped lateral's own LIMIT is not
-	// per outer row`): the bound has to travel with the correlation key as a
-	// per-key top-N, which is ADR-0021's territory.
-	"lateral/inner-order-pub-limit/star": {
-		"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Doohickey",
-		"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Doohickey",
-		"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Doohickey",
-		"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Doohickey",
-		"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Doohickey",
+	// A NESTED BLOCK'S RENAME is lost on the DAG: the inner block publishes
+	// `product AS p` and the outer one republishes `z.p`, and the three DAG
+	// arms publish the SOURCE name `product` where the single-process arms and
+	// PostgreSQL publish `p`. The values, the positions and the row count all
+	// agree; only the name of the first column differs, and only where the
+	// inner block also materialized its own ORDER BY key.
+	//
+	// PRE-EXISTING: measured byte-identical at base 0193c4e9 on all five arms
+	// (and independently with this arc's own depth walk reverted), so neither
+	// #991's repair nor its depth extension causes it. It is the same
+	// mechanism as the entry above one relation in — a name the block
+	// publishes that the stream it reads does not carry — and it is recorded
+	// with it.
+	"nested/grouped-hidden-key/depth2/join-star": {
+		"dag":          "cols=[product:STRING n:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,1,1,Alice,150 | Doohickey,1,2,Bob,200 | Doohickey,1,3,Carol,0 | Gadget,1,1,Alice,150 | Gadget,1,2,Bob,200 | Gadget,1,3,Carol,0 | Widget,2,1,Alice,150 | Widget,2,2,Bob,200 | Widget,2,3,Carol,0",
+		"dag-shuffled": "cols=[product:STRING n:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,1,1,Alice,150 | Doohickey,1,2,Bob,200 | Doohickey,1,3,Carol,0 | Gadget,1,1,Alice,150 | Gadget,1,2,Bob,200 | Gadget,1,3,Carol,0 | Widget,2,1,Alice,150 | Widget,2,2,Bob,200 | Widget,2,3,Carol,0",
+		"dag-morsel4":  "cols=[product:STRING n:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,1,1,Alice,150 | Doohickey,1,2,Bob,200 | Doohickey,1,3,Carol,0 | Gadget,1,1,Alice,150 | Gadget,1,2,Bob,200 | Gadget,1,3,Carol,0 | Widget,2,1,Alice,150 | Widget,2,2,Bob,200 | Widget,2,3,Carol,0",
 	},
-	"lateral/inner-order-pub-limit/qstar": {
-		"single":       "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Doohickey",
-		"spilled512k":  "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Doohickey",
-		"dag":          "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Doohickey",
-		"dag-shuffled": "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Doohickey",
-		"dag-morsel4":  "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Doohickey",
-	},
-	"lateral/inner-order-pub-limit/list": {
-		"single":       "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Doohickey",
-		"spilled512k":  "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Doohickey",
-		"dag":          "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Doohickey",
-		"dag-shuffled": "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Doohickey",
-		"dag-morsel4":  "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Doohickey",
-	},
-	"lateral/inner-order-hidden-limit/star": {
-		"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Widget",
-		"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Widget",
-		"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Widget",
-		"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Widget",
-		"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Widget",
-	},
-	"lateral/inner-order-hidden-limit/qstar": {
-		"single":       "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Widget",
-		"spilled512k":  "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Widget",
-		"dag":          "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Widget",
-		"dag-shuffled": "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Widget",
-		"dag-morsel4":  "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Widget",
-	},
-	"lateral/inner-order-hidden-limit/list": {
-		"single":       "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Widget",
-		"spilled512k":  "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Widget",
-		"dag":          "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Widget",
-		"dag-shuffled": "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Widget",
-		"dag-morsel4":  "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Widget",
+	"nested/grouped-hidden-key/depth3/join-star": {
+		"dag":          "cols=[product:STRING n:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,1,1,Alice,150 | Doohickey,1,2,Bob,200 | Doohickey,1,3,Carol,0 | Gadget,1,1,Alice,150 | Gadget,1,2,Bob,200 | Gadget,1,3,Carol,0 | Widget,2,1,Alice,150 | Widget,2,2,Bob,200 | Widget,2,3,Carol,0",
+		"dag-shuffled": "cols=[product:STRING n:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,1,1,Alice,150 | Doohickey,1,2,Bob,200 | Doohickey,1,3,Carol,0 | Gadget,1,1,Alice,150 | Gadget,1,2,Bob,200 | Gadget,1,3,Carol,0 | Widget,2,1,Alice,150 | Widget,2,2,Bob,200 | Widget,2,3,Carol,0",
+		"dag-morsel4":  "cols=[product:STRING n:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,1,1,Alice,150 | Doohickey,1,2,Bob,200 | Doohickey,1,3,Carol,0 | Gadget,1,1,Alice,150 | Gadget,1,2,Bob,200 | Gadget,1,3,Carol,0 | Widget,2,1,Alice,150 | Widget,2,2,Bob,200 | Widget,2,3,Carol,0",
 	},
 
-	// AN AGGREGATE ALIASED LIKE ITS OWN GROUP KEY'S SOURCE COLUMN, on the DAG
-	// arms. `SELECT COUNT(*) AS product … GROUP BY i.product` makes the
-	// aggregate publish TWO columns called `product`: the key, whose qualifier
-	// `exec.PublishedGroupKeyNames` strips because no other KEY collides with
-	// it, and the aggregate's own output. Every consumer above resolves the name
-	// through `batch.RecordBatch.ColumnIndex`, which answers the FIRST — the
-	// key — so the gather's rename reads product NAMES where PostgreSQL and the
-	// single-process arms answer a count.
+	// AN AGGREGATE ALIASED LIKE ITS OWN GROUP KEY'S SOURCE COLUMN — the VALUE
+	// half is closed (#1078: the aggregate's output names now occupy their
+	// names before a key's qualifier is stripped, so the two are never one
+	// column twice), and what remains is an ORDER on the three DAG arms: the
+	// statement's own `ORDER BY x.product, o.id` over the JOIN above the block
+	// sorts by the group KEY's value (a product name) while the projection
+	// reads the count, so the key sequence comes back as two concatenated runs
+	// where PostgreSQL's is non-decreasing.
 	//
-	// PRE-EXISTING: identical at v0.19.0 before this arc's first commit, and
-	// this arc neither creates nor closes it. DEFERRED with the mechanism: the
-	// ambiguity rule that keeps a qualifier counts only KEYS, and it has to
-	// count the aggregate's OUTPUT names too — one rule, read by
-	// `exec.PublishedGroupKeyNames`, mirrored at seven `stageEmittedKeyNames`
-	// call sites and in the worker's fragment plan, so the two engines cannot
-	// drift (ADR-0026 §2b). Recorded as a filing candidate in
-	// o2_landing_notes.md.
-	"lateral/group-alias-src/qstar": {
-		"dag":          "cols=[product:STRING] rows=4 | Doohickey | Gadget | Widget | Widget",
-		"dag-shuffled": "cols=[product:STRING] rows=4 | Doohickey | Gadget | Widget | Widget",
-		"dag-morsel4":  "cols=[product:STRING] rows=4 | Doohickey | Gadget | Widget | Widget",
-	},
-	"lateral/group-alias-src/list": {
-		"dag":          "cols=[product:STRING] rows=4 | Doohickey | Gadget | Widget | Widget",
-		"dag-shuffled": "cols=[product:STRING] rows=4 | Doohickey | Gadget | Widget | Widget",
-		"dag-morsel4":  "cols=[product:STRING] rows=4 | Doohickey | Gadget | Widget | Widget",
-	},
-	"lateral/group-alias-src/ordkeys": {
-		"dag":          "cols=[product:STRING id:INT64] rows=4 | Doohickey,2 | Gadget,1 | Widget,1 | Widget,2",
-		"dag-shuffled": "cols=[product:STRING id:INT64] rows=4 | Doohickey,2 | Gadget,1 | Widget,1 | Widget,2",
-		"dag-morsel4":  "cols=[product:STRING id:INT64] rows=4 | Doohickey,2 | Gadget,1 | Widget,1 | Widget,2",
-	},
+	// The binder that still reaches the key is not the one #1078 moved: the
+	// sort sits above a JOIN, so `resolveSortKeyColumn`'s walk does not reach
+	// the aggregate through it and the gather's merge orders on what the stage
+	// emitted. That is ADR-0026 §8a's territory. PRE-EXISTING: byte-identical
+	// at base 0193c4e9 on all five arms.
 	"joined/group-alias-src/ordkeys": {
 		"dag":          "cols=[product:INT64 id:INT64] rows=9 | 1,1 | 1,2 | 1,3 | 1,1 | 1,2 | 1,3 | 2,1 | 2,2 | 2,3",
 		"dag-shuffled": "cols=[product:INT64 id:INT64] rows=9 | 1,1 | 1,2 | 1,3 | 1,1 | 1,2 | 1,3 | 2,1 | 2,2 | 2,3",
 		"dag-morsel4":  "cols=[product:INT64 id:INT64] rows=9 | 1,1 | 1,2 | 1,3 | 1,1 | 1,2 | 1,3 | 2,1 | 2,2 | 2,3",
-	},
-	"issue/968-lateral-alias-equals-the-key-source": {
-		"dag":          "cols=[id:INT64 product:STRING] rows=4 | 1,Gadget | 1,Widget | 2,Doohickey | 2,Widget",
-		"dag-shuffled": "cols=[id:INT64 product:STRING] rows=4 | 1,Gadget | 1,Widget | 2,Doohickey | 2,Widget",
-		"dag-morsel4":  "cols=[id:INT64 product:STRING] rows=4 | 1,Gadget | 1,Widget | 2,Doohickey | 2,Widget",
 	},
 
 	// THE COLUMN ORDER OF A STAR OVER A JOIN follows the side the planner
@@ -203,6 +162,7 @@ var o2Pin = map[string]map[string]string{
 	// PostgreSQL's order for this spelling. ADR-0026 §7's own note: which side
 	// builds is a cost decision and must not decide a name or a position — it
 	// rides arc O1 (#997), whose lane `exec.JoinOutputSchema` is.
+	// PRE-EXISTING: byte-identical at base 0193c4e9 on all five arms.
 	"joined/group/star": {
 		"single":      "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 n:INT64] rows=6 | 1,Alice,150,1,2 | 1,Alice,150,2,2 | 2,Bob,200,1,2 | 2,Bob,200,2,2 | 3,Carol,0,1,2 | 3,Carol,0,2,2",
 		"spilled512k": "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 n:INT64] rows=6 | 1,Alice,150,1,2 | 1,Alice,150,2,2 | 2,Bob,200,1,2 | 2,Bob,200,2,2 | 3,Carol,0,1,2 | 3,Carol,0,2,2",
@@ -218,6 +178,7 @@ var o2Pin = map[string]map[string]string{
 	// a 128-bit carrier has to state a precision (ADR-0024). ADR-0012 records
 	// it. These cells are here because #968 was REPORTED over this statement:
 	// they are its measurement, and they say the report no longer reproduces.
+	// PRE-EXISTING: byte-identical at base 0193c4e9 on all five arms.
 	"outputslot/968-alias-swap-order-limit": {
 		"single":       "cols=[b:DECIMAL(9,2) a:DECIMAL(38,4)] rows=3 | -0.01,-0.0100 | 0.00,0.0000 | NULL,1.0000",
 		"spilled512k":  "cols=[b:DECIMAL(9,2) a:DECIMAL(38,4)] rows=3 | -0.01,-0.0100 | 0.00,0.0000 | NULL,1.0000",

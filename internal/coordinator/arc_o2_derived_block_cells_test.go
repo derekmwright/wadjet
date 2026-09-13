@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -297,7 +298,141 @@ func o2Table() []o2Cell {
 		}
 	}
 	out = append(out, o2OutputSlotCells()...)
+	out = append(out, o2SetOpCells()...)
+	out = append(out, o2NestedCells()...)
+	out = append(out, o2DupNameCells()...)
 	return append(out, o2IssueCells()...)
+}
+
+// o2SetOpCells is the consumer the first cut of this table did not cross: a
+// SET OPERATION above a derived block. A set operation composes a new relation
+// out of what its arms EMIT, exactly as a join does out of its sides, so a key
+// the block materialized for its own ORDER BY reaches the client there too —
+// and worse than under a join, because the two arms then disagree on column
+// COUNT: the three DAG arms REFUSED a query PostgreSQL answers, `INTERSECT`
+// answered zero rows for PostgreSQL's three, and `CREATE TABLE AS` refused
+// naming the slot (#1075).
+//
+// Four operations × two blocks (sorted, sorted with a LIMIT) × two second
+// arms — one that shares rows with the block and one that does not, so
+// `INTERSECT` and `EXCEPT` each have a cell with rows and a cell without.
+func o2SetOpCells() []o2Cell {
+	blocks := []struct{ key, sql string }{
+		{"sorted", "SELECT order_id, product FROM lat_item ORDER BY amount"},
+		{"sorted-limit", "SELECT order_id, product FROM lat_item ORDER BY amount LIMIT 3"},
+	}
+	arms := []struct{ key, sql string }{
+		{"other", "SELECT id, customer FROM lat_ord"},
+		{"same", "SELECT order_id, product FROM lat_item"},
+	}
+	ops := []string{"UNION ALL", "UNION", "INTERSECT", "EXCEPT"}
+	var out []o2Cell
+	for _, op := range ops {
+		for _, b := range blocks {
+			for _, a := range arms {
+				name := strings.ToLower(strings.ReplaceAll(op, " ", "-"))
+				out = append(out, o2Cell{
+					name:   "setop/" + name + "/" + b.key + "/" + a.key,
+					sorted: true,
+					sql:    "SELECT * FROM (" + b.sql + ") x " + op + " " + a.sql,
+				})
+			}
+		}
+	}
+	return append(out,
+		// The CTE spelling of the same block, and BOTH arms sorted blocks —
+		// the shape where the leak is on every arm rather than only where the
+		// arms' widths disagree.
+		o2Cell{name: "setop/cte-arm-is-a-sorted-block", sorted: true,
+			sql: "WITH s AS (SELECT order_id, product FROM lat_item ORDER BY amount LIMIT 3) " +
+				"SELECT * FROM s UNION ALL SELECT id, customer FROM lat_ord"},
+		o2Cell{name: "setop/both-arms-sorted-blocks", sorted: true,
+			sql: "SELECT * FROM (SELECT order_id, product FROM lat_item ORDER BY amount LIMIT 2) x " +
+				"UNION ALL SELECT * FROM (SELECT order_id, product FROM lat_item ORDER BY id LIMIT 2) y"},
+		// The CONTROL: a set operation over a block that materialized NOTHING
+		// is untouched by the re-projection.
+		o2Cell{name: "setop/ctl-unsorted-block", sorted: true,
+			sql: "SELECT * FROM (SELECT order_id, product FROM lat_item) x " +
+				"UNION ALL SELECT id, customer FROM lat_ord"},
+	)
+}
+
+// o2NestedCells is the depth the first cut of this table did not cross: a
+// derived block whose own body is another derived block, with the SORTED one
+// at the bottom. #991's repair reaches the block it is applied to; the DAG's
+// publication walk stopped at the first Project below it, so at depth 2 and 3
+// the stage still carried the inner sort key's SOURCE column and the star
+// published six columns where the single-process arms publish five (#1076).
+func o2NestedCells() []o2Cell {
+	inner := []struct{ key, sql string }{
+		{"hidden-key", "SELECT order_id, product FROM lat_item ORDER BY amount LIMIT 3"},
+		{"hidden-key-nolimit", "SELECT order_id, product FROM lat_item ORDER BY amount"},
+		{"published-key", "SELECT order_id, product FROM lat_item ORDER BY product LIMIT 3"},
+		{"grouped-hidden-key", "SELECT product AS p, COUNT(*) AS n FROM lat_item " +
+			"GROUP BY product ORDER BY COUNT(*)"},
+	}
+	var out []o2Cell
+	for _, in := range inner {
+		cols := "z.order_id, z.product"
+		outer := "y.order_id, y.product"
+		if strings.HasPrefix(in.key, "grouped") {
+			cols, outer = "z.p, z.n", "y.p, y.n"
+		}
+		d2 := "SELECT " + cols + " FROM (" + in.sql + ") z"
+		d3 := "SELECT " + outer + " FROM (" + d2 + ") y"
+		for depth, body := range map[string]string{"depth2": d2, "depth3": d3} {
+			out = append(out,
+				// The block is written FIRST for the reason the `joined` class
+				// gives: `SELECT *` publishes the FROM order and wadjet
+				// publishes the BUILD side first, which is arc O1's lane
+				// (#997). Writing it first makes the two agree, so a
+				// divergence here is the sort key and not that.
+				o2Cell{name: "nested/" + in.key + "/" + depth + "/join-star", sorted: true,
+					sql: "SELECT * FROM (" + body + ") s JOIN lat_ord o ON true"},
+				o2Cell{name: "nested/" + in.key + "/" + depth + "/join-qstar", sorted: true,
+					sql: "SELECT s.* FROM (" + body + ") s JOIN lat_ord o ON true"},
+				o2Cell{name: "nested/" + in.key + "/" + depth + "/setop", sorted: true,
+					sql: "SELECT * FROM (" + body + ") s UNION ALL SELECT * FROM (" + body + ") t"},
+			)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out
+}
+
+// o2DupNameCells is the block whose PUBLISHED list carries two columns of one
+// name — legal SQL, and legal in PostgreSQL's answer, which publishes the pair.
+// A star expansion that emits one reference per column by NAME cannot state
+// it: both references bind the FIRST column of that name, which was a wrong
+// VALUE on the single-process arms and a wrong TYPE where the two items differ
+// (#1076). The list is answered nil now and the star is REFUSED; the BARE star
+// over the same blocks reads the relation positionally and is right, which is
+// what makes the refusal the qualified spelling's own.
+func o2DupNameCells() []o2Cell {
+	return []o2Cell{
+		{name: "dupname/qstar-join-body", sorted: true,
+			sql: "SELECT x.* FROM (SELECT a.id, b.id FROM lat_item a " +
+				"JOIN lat_item b ON b.order_id = a.order_id) x"},
+		{name: "dupname/qstar-two-tables", sorted: true,
+			sql: "SELECT x.* FROM (SELECT o.id, i.id FROM lat_ord o " +
+				"JOIN lat_item i ON i.order_id = o.id) x"},
+		{name: "dupname/qstar-two-aliases", sorted: true,
+			sql: "SELECT x.* FROM (SELECT order_id AS k, amount AS k FROM lat_item) x"},
+		{name: "dupname/qstar-cte", sorted: true,
+			sql: "WITH x AS (SELECT a.id, b.id FROM lat_item a " +
+				"JOIN lat_item b ON b.order_id = a.order_id) SELECT x.* FROM x"},
+		// The BARE star over the same block, which reads the relation by
+		// POSITION and has always been right.
+		{name: "dupname/ctl-bare-star", sorted: true,
+			sql: "SELECT * FROM (SELECT order_id AS k, amount AS k FROM lat_item) x"},
+		{name: "dupname/ctl-bare-star-join-body", sorted: true,
+			sql: "SELECT * FROM (SELECT a.id, b.id FROM lat_item a " +
+				"JOIN lat_item b ON b.order_id = a.order_id) x"},
+		// The CONTROL from the other side: one name once, which the star still
+		// enumerates.
+		{name: "dupname/ctl-distinct-names", sorted: true,
+			sql: "SELECT x.* FROM (SELECT order_id AS k, amount AS m FROM lat_item) x"},
+	}
 }
 
 // o2IssueCells are the five issues in the spelling each was REPORTED in, kept
