@@ -1915,18 +1915,20 @@ ORDINAL (#557), the SELECT-list POSITION of the item the term names
 (`sortKeyLocalSlotPos`, #905 — available only where the Sort's child is a
 Project), and the WRITTEN SPELLING (#989 — what a star-only query has left).
 
-NOT settled by this section, and its lead: the join's PUBLISHED name list is
-itself a plan artifact (#997). `logical.reorderJoins` expresses "which side
-builds" by SWAPPING the join node's children, and `physical.buildJoin` reads
-`Children[0]` as probe and `Children[1]` as build — so the star's column ORDER
-and WHICH side gets qualified both move with a cost estimate. `SELECT * FROM t
-a JOIN t b ON a.id = b.id` publishes `b.*` qualified with no predicate and
-`a.*` qualified under `WHERE a.id < 100`, on all four arms. The fix is to make
-the build side a PROPERTY of the join node and leave the children in the
-query's written order, with `repairDecorrelatedSpelling`,
-`inner_key_spelling.go`, `dedupSemiAntiBuildSide`, `physical.buildJoin`,
-`walkStages` and `exec.joinOutputSchemaWithMapping` all reading that property;
-it is an arc, not a hunk, and it is deferred as one. The census is pinned in
+SETTLED 2026-09-13 by arc O1 (#997, #1012, #993) — §9. The lead this
+paragraph recorded was that the join's PUBLISHED name list is itself a plan
+artifact: `logical.reorderJoins` expresses "which side builds" by SWAPPING the
+join node's children and `physical.buildJoin` reads `Children[0]` as probe, so
+the star's column ORDER and WHICH side gets qualified both moved with a cost
+estimate — `SELECT * FROM t a JOIN t b ON a.id = b.id` published `b.*`
+qualified with no predicate and `a.*` qualified under `WHERE a.id < 100`, on
+all four arms. The fix is NOT the build-side mark this paragraph proposed:
+`reorderJoins` only swaps a TWO-relation chain, and `costBasedJoinReorder`
+REBUILDS a longer one, so there is no node whose children a mark could be
+relative to. §9 records the star's list where it is still written down — the
+FROM clause — and leaves this section's own rule untouched: the ORDER BY term
+still carries the spelling the query wrote, and it still reads the join's
+stream, because the projection §9 mints sits ABOVE the sort. The census is in
 `internal/coordinator/arc_l1_order_by_qualifier_two_path_test.go`.
 
 ## §7 A derived block a STAR reads is a relation, and a stage publishes it
@@ -2629,22 +2631,19 @@ still `42703`. `server.TestPolicyMaskingIsPlanTimeOnEveryDoor`'s three
 
 ### Not settled
 
-The star's column ORDER and its qualified side are still the PLAN's — §6a's
-"NOT settled" paragraph, #997 — and arc M1 adds a SECOND producer of the same
-class: `markCoPathingSelfJoinBuilds` decides `Stage.QualifyAllBuildCols` from
-the ARM's stage DAG, so the broadcast and shuffle arms publish different names
-for one statement (§7's boundary paragraph carries the measurement). Both belong
-to the arc that makes a join's published names a property of the query.
+CLOSED 2026-09-13 by arc O1 (§9): the star's column ORDER and its qualified
+side were the PLAN's, from THREE producers of one class — `reorderJoins`
+swapping an ordinary inner join's sides, `costBasedJoinReorder` rebuilding a
+longer chain, and `markCoPathingSelfJoinBuilds` deciding
+`Stage.QualifyAllBuildCols` from the ARM's stage DAG (so the two DAG arms
+published different names for one statement). None of them decides a published
+name any more, because none of them is asked: the star's list is read off the
+FROM clause before any of them runs.
 
-Arc N1 adds a THIRD producer of that class and closes it only for manufactured
-joins (§8e): `reorderJoins` swaps an ORDINARY inner join's sides by estimated
-rows, so `SELECT * FROM lat_ord o JOIN lat_item i ON i.order_id = o.id`
-publishes `i`'s columns and then `o`'s where PostgreSQL publishes `o`'s first —
-a COST decision changing what the star means, on all four arms and at every
-tip measured. And two shapes still declare NO columns at all when they return
-no rows (a star over a bushy join, a star over a query carrying a decorrelated
-LATERAL); ADR-0012's divergence list records that they are refused rather than
-answered until the declaration reaches them.
+What is still open in this family: two shapes declare NO columns when they
+return no rows (a star over a bushy join, a star over a query carrying a
+decorrelated LATERAL); ADR-0012's divergence list records that they are
+refused rather than answered until the declaration reaches them.
 
 §8f left one of its own — a WRITTEN qualified ORDER BY term beside a duplicate
 output name bound the first column of the name it was rewritten onto — and
@@ -2688,3 +2687,95 @@ An expression already published as a GROUP BY key remains a reference:
 Recomputing it above an aggregate would read arguments that the stream no longer
 contains. ROW parent rewrites similarly stop at a join's published identities;
 they may resolve a rename owned by the current unary scope, not another arm's.
+
+## §9 A star over a join is the FROM clause's arms, in written order
+
+Added 2026-09-13 by arc O1 (#997, #1012, #993).
+
+§2 gave a key two names; §6 generalized it to every consumer; §7 gave the
+consumer with no name of its own — a star — a relation to read. §9 is the same
+rule for the relation a star reads when that relation is a JOIN.
+
+**The rule.** `SELECT *` over a join publishes every FROM arm's own output
+list, LEFT ARM FIRST in the clause's written order, duplicate names kept BY
+POSITION and never qualified. It is a property of the QUERY. Nothing in the
+plan decides it: not which side builds, not which arm the cost model puts
+first, not which arm a particular stage DAG happens to build over.
+
+Three producers used to decide it, and all three are the same defect — a cost
+decision changing what a statement MEANS:
+
+| producer | what it decided | measured |
+|---|---|---|
+| `logical.reorderJoins` | swapped a two-relation chain's children by estimated rows, so the probe side's columns came first and the build side's were qualified | `SELECT * FROM lat_ord o JOIN lat_item i …` published `i`'s four columns then `o`'s three (#1012); `SELECT * FROM t a JOIN t b ON a.id = b.id` qualified `b` with no predicate and `a` under `WHERE a.id < 100` (#997) |
+| `logical.costBasedJoinReorder` | REBUILT a three-or-more chain, so there is no swap to record | the three-relation shapes, on every arm |
+| `physical.markCoPathingSelfJoinBuilds` | set `Stage.QualifyAllBuildCols` from the ARM's stage DAG | `dagshuf` published `o.customer, o.total` where `single`, `spilled` and `dag` published them bare (#993) |
+
+**Where the list is recorded.** In the star's own expansion, at Optimize step
+1, before any of the three runs. `logical.joinStarColumns` walks the join chain
+in written order and asks each arm what it publishes — the SAME two list
+functions a qualified star already asks (`projectionOutputNames` for a named
+block, `StarSourceColumns` for a base relation, so an ABAC security projection
+is what publishes where one stands). Each column becomes a QUALIFIED reference
+published under the column's own name, which is what makes the item
+plan-independent: `expr.ResolveColumnRef` binds `b.id` exactly when the join
+qualified b's side and through the qualifier-stripping fallback when it
+qualified a's instead. The join operator's qualification is thereby demoted to
+what §2 calls a RESOLUTION spelling, and the published name is the column's
+own.
+
+**Why not a build-side mark on the join node.** Both filings proposed it. It
+cannot express the multi-way case: `reorderJoins` swaps only a two-relation
+chain, and `costBasedJoinReorder` rebuilds the tree for three or more, so the
+written FROM order is not a permutation of one node's children but a SHAPE that
+no longer exists in the plan. A mark has nothing to be relative to. The order
+has to be recorded where it is still written down.
+
+**The projection is minted on a HYPOTHESIS.** `isStarOnly` builds no Project
+for a bare star, on the claim that the star selects its input unchanged — true
+for a scan, false for a join. `BuildFromSelect` mints one when the FROM is a
+join, on SHAPE alone (no scan is annotated yet), and `ElideUnstatedJoinStar`
+takes it back out when the expansion could not state the arms, restoring the
+tree the builder would have built — including the DerivedAlias / CTEName /
+CTERefAlias and the WITH list the enclosing query stamped on a block's root.
+Without the elision a shape whose arms cannot be enumerated would be REFUSED
+where it used to answer.
+
+**The projection sits ABOVE the ORDER BY and the LIMIT**, because it is an
+OUTPUT permutation. The Sort therefore reads the FROM clause's own namespace,
+where `i.id` names one column, and every sort-key resolver below it sees the
+tree it saw before: §6a's rule (the term keeps the qualifier the query wrote)
+and §8f/§8g's (an ordinal and a written term bind the slot the producer
+published) are untouched. Placed BELOW the sort instead — measured — a written
+`i.id` resolved against the star's own published list through
+`derivedAliasSourceColumn`, bound the FIRST `id`, and the broadcast arms tied
+every row. The one term that addresses the OUTPUT list is a POSITIONAL one, and
+`ResolveStarJoinOrdinalSortKeys` answers it from the expanded list in the
+item's SOURCE spelling; `ORDER BY 4` over a star join was refused with 42P10
+before this arc, for a statement PostgreSQL answers.
+
+**What declines, and why the boundary is there.** An arm that publishes one
+name TWICE is the load-bearing one: every item is a qualified reference, so
+`s.id` over a block publishing two `id`s binds the first and the second column
+would carry the first's VALUES — a wrong value where leaving the star alone is
+only a wrong name. Also declined: two arms of one name, a LATERAL arm or a
+manufactured lateral's join, a SEMI/ANTI join, a table function, an arm whose
+output is its own (an aggregate, a set operation, a sorted or limited block
+with no projection), and an Aggregate, Window or set operation between the star
+and the join. Each keeps the answer it had, and a PARTIAL expansion is never
+returned. Closing the duplicate-name arm needs a block's column addressed by
+POSITION, which is §7's slot territory rather than this section's.
+
+The design, with every measurement, is
+`docs/internals/bare-star-over-a-join-arms.md`.
+
+### Gates
+
+| gate | what it holds |
+|---|---|
+| `coordinator.TestO1AStarOverAJoinPublishesTheQueryNotThePlan` | the seam: 47 shapes — inner / left / right / full / cross / comma / self / three-way / derived block / CTE × no, selective and zero-row predicates × both FROM orders × `*`, `t.*`, `*` beside an item × no sort, a written key, a positional key, DISTINCT, LIMIT — on FIVE arms against PostgreSQL 17.11 |
+| `pgwire.TestO1TheWireDeclaresAStarJoinsOwnArms` | the same rule on the wire: RowDescription names AND type OIDs, including the three #997 predicates and the zero-row declaration |
+| `logical.TestABareStarOverAJoinExpandsToTheFromClausesArms` | the list per shape, and that every item keeps its qualifier |
+| `logical.TestABareStarOverAJoinDeclinesWhatItCannotState` | the seven declines |
+| `logical.TestAnUnstatedStarProjectionIsTakenBackOut` | the hypothesis, and the naming that travels back with it |
+| `logical.TestAPositionalSortKeyOverAStarJoinBindsItsItemsSource` | the ordinal, in the input's spelling |

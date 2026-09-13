@@ -65,13 +65,23 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      produces a result set, whether or not it returns rows, and clients depend
      on it. Wadjet derives a `SELECT *`'s columns from the DATA and falls back
      to a plan-time declaration (`physical.declaredOutputSchema`, #416, #846,
-     #978) — and three shapes are past its bound: a star over a join whose
-     SIDES contain a join (`starJoinDeclaredOutputSchema` declines there, which
+     #978) — and three shapes were past its bound: a star over a join whose
+     SIDES contain a join (`starJoinDeclaredOutputSchema` declined there, which
      is three or more relations and equally TWO or more LATERALs), a star over
      a LATERAL whose subquery is an UNGROUPED AGGREGATE — whose join carries
      the pad marker the declaration will not publish — and a star over a
      RECURSIVE CTE. With no rows to read a schema off, those returned a result
      with zero columns and no error.
+
+     **The first of the three is CLOSED (2026-09-13, arc O1, #997/#1012).** A
+     star over a join is now EXPANDED into the FROM clause's arms in written
+     order (ADR-0026 §9), so it is an ordinary SELECT list and the ordinary
+     projection walk declares it — at any join depth, because the expansion is
+     per ARM rather than per operator. `SELECT * FROM a JOIN b JOIN c WHERE
+     false` declares its columns on every arm and on the async door
+     (`coordinator.TestN1AnAsyncResultDeclaresItsColumns`,
+     `TestN1AResultWithNoColumnsIsRefused`). The other two shapes are
+     unchanged and the refusal still stands for them.
 
      A SINGLE LATERAL that is not an ungrouped aggregate is not among them and
      answers with its columns, in the plain, `GROUP BY` and `LEFT JOIN LATERAL`
@@ -601,6 +611,20 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      match there. The POSITIONAL spelling, which is the one that was WRONG
      (`ORDER BY 2` sorted by column 1 on every arm), is PostgreSQL's answer
      now.
+
+   - **A QUALIFIED reference into a block that publishes the name TWICE binds
+     the first, where PostgreSQL refuses it.** (Added 2026-09-13, arc O1.)
+     `SELECT d.*, x.id FROM (SELECT * FROM lat_ord o JOIN lat_item li ON …) d
+     JOIN lat_ord x ON x.id = d.id` is 42702 `column reference "id" is
+     ambiguous` on postgres:17 — `d` publishes `id` twice, because a star over
+     a join publishes every arm's own list (ADR-0026 §9) — and this binder
+     resolves `d.id` to the FIRST of the two and answers. It is the same
+     superset as the two entries below and it became REACHABLE with §9: before
+     it, such a block published the join's stream and the reference resolved
+     against that instead. Recorded in
+     `coordinator.TestArcJ1AQualifiedStarExpandsFromTheRelationsOutput`, whose
+     cell uses the unambiguous key so the gate asserts values rather than the
+     divergence.
 
    - **`PARTITION BY <bare name>` over two join arms that both publish it is
      answered, not refused.** (Added 2026-09-07, #975.) PostgreSQL raises
@@ -1326,6 +1350,19 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      Lifting them needs an ORDERED model of a join's emitted columns; they
      should be lifted together.
 
+     **The FIRST of the three is CLOSED (2026-09-13, arc O1, #997/#1012): a
+     star over a join IS expanded now**, into the FROM clause's arms in
+     written order (ADR-0026 §9), so a positional ORDER BY has a list to count
+     and `ResolveStarJoinOrdinalSortKeys` answers it in the item's SOURCE
+     spelling (the sort reads the join's stream, where a qualified reference
+     names one column and the published name may name two). Gated by
+     `coordinator.TestOrderByResolvesAPositionAfterTheStarExpands`'s
+     `boundary_star_over_join` cell, which used to pin the refusal, and by the
+     O1 gate's positional cells on five arms. The two USING refusals are
+     unchanged: USING MERGES the joined column into one output column, which
+     is a different rule from the arms' concatenation and not something the
+     expansion decides.
+
      **The bound is narrower than "not a single base-table scan", and the
      record said the wider thing.** Measured on all three arms, `routed=none`:
      a positional reference over a star whose FROM is a DERIVED TABLE answers —
@@ -2002,9 +2039,32 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      two schemas for one query. PostgreSQL publishes the FROM clause's arms in
      written order and keeps duplicate names by POSITION, never qualified.
 
-     Deferred as an arc, with the mechanism in ADR-0026 §6a's "NOT settled"
-     paragraph: the build side has to become a PROPERTY of the join node, with
-     the children left in the query's written order and
+     CLOSED 2026-09-13 by arc O1 (#997, #1012, #993), and NOT by the
+     build-side mark this paragraph proposed — `reorderJoins` swaps only a
+     TWO-relation chain and `costBasedJoinReorder` REBUILDS a longer one, so
+     there is no node whose children a mark could be relative to. The star is
+     EXPANDED into the FROM clause's arms in written order at Optimize step 1,
+     before any pass that reorders a join, each item a qualified reference
+     published under the column's own name (ADR-0026 §9): the order and the
+     names are the QUERY's on all five arms and on the wire, duplicates kept
+     by position, and `markCoPathingSelfJoinBuilds`'s arm-specific
+     qualification is no longer a published name either. The census that
+     pinned it is deleted; the rule is gated by
+     `coordinator.TestO1AStarOverAJoinPublishesTheQueryNotThePlan` (47 shapes
+     × five arms) and `pgwire.TestO1TheWireDeclaresAStarJoinsOwnArms`.
+
+     ONE shape still publishes the plan's order, with its mechanism: a derived
+     block whose OWN body is a star over a join publishes two columns named
+     `id`, and an expanded star addresses an arm's columns by QUALIFIED
+     REFERENCE — `s.id` binds the first of the two, so the second column would
+     carry the first's values. A wrong value is worse than a wrong name, so
+     that star is left to read the stream (pinned in
+     `coordinator.TestArcAEverydaySQLMatchesPostgres`'s #993 cell and in the
+     O1 gate). Closing it needs a block's column addressed by POSITION.
+
+     The deferral this paragraph recorded read: the build side has to become a
+     PROPERTY of the join node, with the children left in the query's written
+     order and
      `repairDecorrelatedSpelling`, `inner_key_spelling.go`,
      `dedupSemiAntiBuildSide`, `physical.buildJoin`, `walkStages`, the worker
      fragment builder and `exec.joinOutputSchemaWithMapping` all reading that
@@ -5074,24 +5134,23 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     VALUES pair by pair, against each other and against PostgreSQL's measured
     answer.
 
-  - **A CTAS over a star of a self join answers where PostgreSQL refuses.**
-    (Added 2026-09-12, #1024.) `CREATE TABLE t AS SELECT * FROM s a JOIN s b
-    ON b.id = a.id` is `42701` on PostgreSQL 17.11 — `column "id" specified
-    more than once` — because both sides publish `id` and a relation cannot
-    hold two columns of one name. A join in this engine publishes the probe's
-    columns bare and every DUPLICATE build column QUALIFIED by its owning
-    alias (ADR-0026 §8d), so the declared output has no duplicate at all and
-    the table is created, with `b.id` as a column name.
+  - **A CTAS over a star of a self join answered where PostgreSQL refuses —
+    CLOSED 2026-09-13 by arc O1 (#997, #1012).** (Added 2026-09-12, #1024.)
+    `CREATE TABLE t AS SELECT * FROM s a JOIN s b ON b.id = a.id` is `42701`
+    on PostgreSQL 17.11 — `column "id" specified more than once` — because
+    both sides publish `id` and a relation cannot hold two columns of one
+    name. This engine's join published the probe's columns bare and every
+    DUPLICATE build column QUALIFIED by its owning alias, so the declared
+    output had no duplicate at all and the table was created with `b.id` as a
+    column name: a strict superset, allowed by rule 5.
 
-    A strict SUPERSET, allowed by rule 5: PostgreSQL refuses, this answers,
-    and no value differs. The created table is fully usable — `SELECT *` reads
-    it and `SELECT "b.id"` addresses the qualified column by its delimited
-    spelling, while the unqualified `b.id` is PostgreSQL's own "missing
-    FROM-clause entry" — and the column-list form gives every column an
-    ordinary name, which is the spelling PostgreSQL accepts for the same query.
-    `wadjet.TestAQuerySourcedWriteRefusesWhatPostgresRefuses/StarOverASelfJoinIsASuperset`
-    carries the fixture, including the read-back: a superset that cannot be
-    read back is not a superset.
+    A star over a join now publishes the FROM clause's arms with duplicates
+    kept BY POSITION (ADR-0026 §9), so the duplicate is real, and the door
+    that already refuses a repeated name refuses this one — same SQLSTATE,
+    same sentence, same shape as PostgreSQL.
+    `wadjet.TestAQuerySourcedWriteRefusesWhatPostgresRefuses/StarOverASelfJoinIsPostgresRefusal`
+    asserts the refusal and keeps the column-list spelling, which both engines
+    accept, beside it.
 
   - **A CTAS column that PostgreSQL declares UNCONSTRAINED `numeric` is
     declared `DECIMAL(p,s)` here.** (Added 2026-09-13, #1024.)

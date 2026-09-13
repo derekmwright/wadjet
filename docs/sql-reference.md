@@ -889,6 +889,32 @@ QUALIFIED star publishes only the source it names — `SELECT dim.* FROM dim JOI
 t ON …` publishes `dim`'s columns, so a name only `t` carries is still the
 enclosing query's — while a bare `*` publishes every `FROM` item.
 
+### What `SELECT *` over a join publishes
+
+Every `FROM` arm's own column list, **left arm first in the clause's written
+order**, with duplicate names kept BY POSITION and never qualified —
+PostgreSQL's rule exactly:
+
+```sql
+SELECT * FROM items a JOIN items b ON a.id = b.id
+-- id, order_id, product, amount, id, order_id, product, amount
+SELECT * FROM orders o JOIN items i ON i.order_id = o.id
+-- id, customer, total, id, order_id, product, amount
+```
+
+It is a property of the QUERY: neither the order nor the names move with the
+data, the predicate, the join type, the execution path or which side the
+planner builds. The same holds through a derived table or a CTE whose body is
+that star, for `INNER`, `LEFT`, `RIGHT`, `FULL`, `CROSS` and comma joins, and
+for a star beside other items (`SELECT *, o.id FROM …`).
+
+One shape publishes the join operator's own order instead, and it is the one
+where a name cannot address a column: a derived block whose own body is a star
+over a join publishes two columns of the same name (`(SELECT * FROM a JOIN b)
+s` publishes `s`'s two `id`s), and an outer star would have to address the
+second one by a name that binds the first. The rows and the values are the
+same; the column order is the plan's. Name the block's columns to pin it.
+
 Subqueries that reference columns from the outer query. The optimizer decorrelates them where it can — EXISTS / NOT EXISTS and IN become semi/anti joins, and a correlated scalar subquery becomes a join against a grouped aggregate — so they are not re-executed per outer row. Either side may be a CTE, a derived table, a comma-joined list or a base table: the subquery's own FROM clause is planned the way a top-level FROM clause is.
 
 ```sql
@@ -1675,16 +1701,15 @@ carries it, as PostgreSQL does. An expression COMPUTED from an aggregate's
 output (`ORDER BY COUNT(*) * 2`) is refused with SQLSTATE `0A000`: select the
 expression and order by its alias.
 
-One shape is refused that PostgreSQL answers: a positional reference over a
-`SELECT *` whose FROM clause is a **join**, or a derived table whose **own**
-FROM is a join, where the star is left unexpanded because its column set is not
-resolvable from the catalog alone. That is `42P10` with a message saying so;
-name the columns, or sort by the column itself. Every other relation kind
-answers: a base table, an ordinary derived table
-(`SELECT * FROM (SELECT * FROM t) x ORDER BY 1`), a CTE, a SET OPERATION
+A positional reference over a `SELECT *` answers for every relation kind: a
+base table, a **join** (`SELECT * FROM a JOIN b ON … ORDER BY 4` counts the
+arms' columns in the FROM clause's order), a derived table
+(`SELECT * FROM (SELECT * FROM t) x ORDER BY 1`), a derived table whose own
+FROM is a join, a CTE, a SET OPERATION
 (`SELECT * FROM (SELECT … UNION ALL SELECT …) u ORDER BY 2`) and a `VALUES`
 derived table, as do an explicit column list, aliased columns, and a nested
-derived table inside one.
+derived table inside one. A position past the end is `42P10`, as PostgreSQL
+raises it.
 
 ## Derived tables and CTE column lists
 
