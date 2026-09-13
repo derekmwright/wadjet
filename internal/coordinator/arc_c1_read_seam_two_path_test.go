@@ -180,14 +180,32 @@ func TestC1FTheReadTestSeam(t *testing.T) {
 		{
 			// PostgreSQL treats a parenthesised bare name as standing alone
 			// and binds the OUTPUT column (measured: same rows as the bare
-			// spelling). This layer cannot tell the two apart once the term is
-			// a ParenNode, so it takes the refusal — loud, not a sort that
-			// binds nothing, which is the disposition everywhere the rename
-			// cannot be applied.
+			// spelling). The AST does show the ParenNode — what forbids the
+			// skip is what taking it produces: peeled, the sort binds nothing
+			// and `SELECT u.total AS w … ORDER BY (w) DESC` answers
+			// 150,150,200,200 for PostgreSQL's 200,200,150,150 (round-8
+			// review, P2). Loud, not a sort that binds nothing.
 			name: "sort term, the output alias PARENTHESISED -> LOUD rather than a sort binding nothing",
 			sql:  "SELECT u.total AS w " + lat + "ORDER BY (w) DESC",
 			want: reads,
 			why:  "PostgreSQL answers 200,200,150,150 by binding the output column; refusing is the conservative half",
+		},
+		{
+			// A MIXED SORT LIST, and the DOCTRINE'S COST recorded with
+			// PostgreSQL's value beside it (round-8 review, P1). One term names
+			// the alias list through an expression and the other is the
+			// standalone output alias, so the first term is a read and the
+			// query is refused — where PostgreSQL, and this branch before the
+			// sort term became a read, answer 200,200,150,150. Its neighbour
+			// with a QUALIFIED `l.w` second term has been refused since the
+			// position was added. Answering either needs the rename the star's
+			// width makes impossible; the day it does, this cell fails and is
+			// rewritten to PostgreSQL's rows.
+			name: "a MIXED sort list, one term over the list and one standalone alias -> LOUD",
+			sql: "SELECT u.total AS w " + lat +
+				"ORDER BY CASE WHEN w > 100 THEN 0 ELSE 1 END, w DESC",
+			want: reads,
+			why:  "PostgreSQL answers 200,200,150,150 — a right answer traded for a loud one, which is this refusal's cost",
 		},
 		{
 			// THE DISCRIMINATING FIXTURE. `u.total` and `l.w` order these rows
@@ -371,14 +389,17 @@ func TestC1FTheReadTestSeam(t *testing.T) {
 			routed: map[string]string{},
 		},
 		{
-			name: "a correlated reference inside a SCALAR subquery -> refused by the correlation layer",
-			sql:  "SELECT u.id, (SELECT l.w) AS z " + lat + "ORDER BY 1, 2",
-			want: "ERR correlated subquery references outer column l.w",
-			why:  "PostgreSQL answers 1,1 | 1,2 | 2,3 | 2,4; loud at main too, in the same words",
-			routed: map[string]string{
-				"dag": "Correlated +1", "dag-shuffled": "Correlated +1",
-				"dag-morsel4": "Correlated +1",
-			},
+			// Since arc C2 landed (ADR-0021 §1l), a FROM-less scalar subquery
+			// IS its SELECT expression in the block that supplies the row — so
+			// `l.w` is an expression of THIS block and the read test sees it,
+			// where before it reached the correlation layer and failed at
+			// execution. Loud → loud, earlier and better named, and no route
+			// is taken because the refusal is now plan-time.
+			name:   "a correlated reference inside a SCALAR subquery -> substituted into the block -> LOUD",
+			sql:    "SELECT u.id, (SELECT l.w) AS z " + lat + "ORDER BY 1, 2",
+			want:   reads,
+			why:    "PostgreSQL answers 1,1 | 1,2 | 2,3 | 2,4; loud at main too, in the correlation layer's words",
+			routed: map[string]string{},
 		},
 
 		// ── THE REFUSAL IS NOT ARMED WITHOUT BOTH HALVES ────────────────

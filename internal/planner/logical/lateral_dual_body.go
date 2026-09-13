@@ -25,7 +25,7 @@ import (
 // under the STRING default an unresolvable reference falls to — three NULLs
 // and OID 25 where PostgreSQL 17.11 answers 1, 2, 3 as bigint (#1033).
 // COUNT(*) was right throughout: the ROWS were produced and only the VALUES
-// were lost. The position is ADR-0021 §1l.
+// were lost. The position is ADR-0021 §1n.
 
 // lateralDualBody reports whether a LATERAL body is one this lowering owns: no
 // FROM clause at all — the `NodeDual` shape BuildFromSelect gives a table-less

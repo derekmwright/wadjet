@@ -878,8 +878,11 @@ the block publishes as an OUTPUT alias binds to that output column and never to
 the list, as it does in PostgreSQL, so `SELECT u.total AS w … l(w) ORDER BY w`
 answers. The same name INSIDE an expression is an input column — PostgreSQL
 requires an output name to stand alone — so `ORDER BY w + 0` names the list and
-is refused, as is `ORDER BY (w)`, which this layer cannot tell from an
-expression. The body's own `WHERE`, and a written `ON`, are predicates over the
+is refused. `ORDER BY (w)` is refused too, although PostgreSQL binds it to the
+output column: skipping a parenthesised term leaves the sort binding nothing,
+which is a wrong order rather than an answer. A sort LIST that names the list in
+one term and an output alias in another is refused for the first term, as any
+other read is. The body's own `WHERE`, and a written `ON`, are predicates over the
 outer row and are applied above the projection.
 
 Such a body is computed as a projection or it is REFUSED (`0A000`) naming the

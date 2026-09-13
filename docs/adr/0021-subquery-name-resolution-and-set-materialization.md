@@ -1511,8 +1511,20 @@ code asks them:
   order where the previous tip refused; the fixture that separates the two
   bindings is `SELECT -u.total AS w`, whose two candidate orders differ, and it
   is a gate row (round-7 review, B1). A PARENTHESISED bare name PostgreSQL still
-  binds to the output column; this layer cannot tell it from an expression once
-  the term is a ParenNode, so it takes the refusal.
+  binds to the output column, and this layer CAN see the `ParenNode`: the
+  refusal is forced by what skipping it would PRODUCE, not by what the AST
+  shows. Peel the parentheses and take the skip, and the sort binds nothing —
+  `SELECT u.total AS w … ORDER BY (w) DESC` then answers `150,150,200,200` for
+  PostgreSQL's `200,200,150,150` (measured, round-8 review P2). That is round-5
+  B2 again, and loud beats it.
+
+  THE COST IS A MIXED SORT LIST, recorded rather than wished away: a list whose
+  terms are `CASE WHEN w > 100 THEN 0 ELSE 1 END, w DESC` names the alias list
+  in one term and the output column in the other, so it is refused where
+  PostgreSQL answers `200,200,150,150` — as is its neighbour whose second term
+  is a qualified `l.w`. Answering either needs the rename the star's width makes
+  impossible. Both are gate rows carrying PostgreSQL's value, so the day the
+  rename becomes possible the cells fail and are rewritten to it.
 
 Keyed on the name alone, the star and sibling positions refused twenty cells
 that PostgreSQL, main and the previous tip all answer; keyed on qualification,
@@ -1562,7 +1574,7 @@ gap ADR-0024 and #1018 name, one level up, and it is pinned in
 `internal/coordinator/arc_c1_scope_two_path_test.go` with the derived-table
 twin beside it as the proof.
 
-### 1m. A recursive CTE is materialized where its BLOCK is planned
+### 1o. A recursive CTE is materialized where its BLOCK is planned
 
 (Added 2026-09-12, #1047.)
 
@@ -1599,22 +1611,22 @@ where the block is planned. Three consequences are part of the position:
   relation that does not exist. `materializeRecursiveCTE` keeps ONE contract —
   either a cache entry or an error — and the reference surfaces that error;
   every path that used to return silently now names itself. The six refusal
-  cells of §1m-a's gate take exactly that route, which is what makes this a
+  cells of §1o-a's gate take exactly that route, which is what makes this a
   reachable position rather than a claim about a branch nothing reaches
   (round-2 review, P3).
 
-### 1m-a. The FORM is decided before the body is planned
+### 1o-a. The FORM is decided before the body is planned
 
 (Added 2026-09-12, round-2 review B3.)
 
-§1m's materialization PLANS the body, and the body's self-reference is a tagged
+§1o's materialization PLANS the body, and the body's self-reference is a tagged
 scan whose cache lookup misses until the first iteration seeds the work table.
 `splitRecursiveUnion` recognises only `UNION ALL`, so a recursive CTE written
 with plain `UNION` — PostgreSQL's cycle-safe spelling, and standard SQL — fell
 to the columnar materialization, which planned the body, whose self-reference
 re-materialized THE SAME DEFINITION from inside its own materialization. At the
 statement ROOT, reachable by any client, the query never returned and took 25 GB
-of RSS in 45 seconds. §1m made a bounded wrong answer unbounded, which is a
+of RSS in 45 seconds. §1o made a bounded wrong answer unbounded, which is a
 different defect in kind.
 
 **The position has two halves and needs both.**
