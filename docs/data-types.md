@@ -215,8 +215,11 @@ SELECT name, MAX(SEMVER_SORT_KEY(version)) AS newest
   FROM packages GROUP BY name;
 ```
 
-A string that is not a version is NULL through the whole family, so a column of
-mixed junk filters rather than failing.
+A string that is not a version is NULL through the family's lenient forms, so
+a column of mixed junk filters rather than failing — `SEMVER_VALID` answers
+`false` for one, being the question, and the `_STRICT` twins
+(`SEMVER_NORMALIZE_STRICT`, `SEMVER_PARSE_STRICT`) raise SQLSTATE `22023`
+naming the string instead.
 
 ### Network Types
 

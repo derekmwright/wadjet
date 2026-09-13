@@ -91,7 +91,7 @@ github.com/derekmwright/wadjet/
 │   ├── config/             # YAML config with hot-reload
 │   ├── server/             # HTTP API (net/http) + gRPC API + pgwire + MCP
 │   ├── metrics/            # Prometheus metrics
-│   ├── optswitch/          # Kill-switch registry (38 toggles, WADJET_<NAME>=0)
+│   ├── optswitch/          # Kill-switch registry (44 toggles, WADJET_<NAME>=0)
 │   ├── alerts/             # CREATE ALERT runtime: scheduler, webhook + table sinks
 │   ├── telemetry/          # OpenTelemetry OTLP trace export
 │   ├── embedding/          # embed() providers (OpenAI, Voyage AI, Ollama)

@@ -887,7 +887,7 @@ outer row and are applied above the projection.
 
 Such a body is computed as a projection or it is REFUSED (`0A000`) naming the
 reason. The classes that are refused are an aggregate, a `GROUP BY`, a
-`HAVING`, a window function, `DISTINCT`, a `LIMIT`/`OFFSET`, a set operation, a
+`HAVING`, a `QUALIFY`, a window function, `DISTINCT`, a `LIMIT`/`OFFSET`, a set operation, a
 `WITH` clause, a star, a subquery in the SELECT list — and, on an OUTER join, a
 body with a `WHERE` or an `ON` condition that does not fold to true, because
 those pad rows a projection cannot manufacture. An `ORDER BY` is not among
@@ -1602,6 +1602,12 @@ A `WITH RECURSIVE` whose body does NOT name itself is not recursive at all and
 is answered as the ordinary query it is, including a plain `UNION` between its
 arms.
 
+The fixed point runs at most **1000 iterations**. A body that has not reached
+one by then stops there and the CTE holds the rows produced so far — a
+truncation, not an error — so a recursion written without a terminating
+predicate answers a prefix rather than running forever. Write the termination
+into the recursive arm's `WHERE`.
+
 A recursive CTE is answered by the single-process engine; the distributed
 engine has no stage lowering for one and refuses such a query rather than
 answering it differently. The refusal is LOUD but it is not yet a SQLSTATE:
@@ -2267,17 +2273,22 @@ and `SUM(v) OVER ()` over the same derived table agrees with both. A set
 operation takes the WIDER arm, as PostgreSQL's common-type rule does: a
 `UNION ALL` of two `int4` arms is `BIGINT` summed and one with a `bigint` arm
 is `NUMERIC`. `MIN` and `MAX` hand back a value their ARGUMENT held and keep
-its width — a column's or a computed expression's alike, so
-`SUM(MIN(BITWISE_AND(id,3)))` is `BIGINT` and
-`SUM(MIN(BITWISE_AND(bigint_col,18)))` is `NUMERIC`, grouped and `OVER ()` —
-while `SUM` and `COUNT` answer `bigint`, so a `SUM` over a `SUM` is
-`NUMERIC`.
+its width — a column's or a computed expression's alike. An aggregate cannot
+be written inside another (`SUM(MIN(x))` is `42803`, as in PostgreSQL), so the
+spelling is a derived table:
+`SELECT SUM(m) FROM (SELECT MIN(BITWISE_AND(id,3)) AS m FROM flows) s` is
+`BIGINT` and `SELECT SUM(m) FROM (SELECT MIN(BITWISE_AND(bigint_col,18)) AS m
+FROM flows) s` is `NUMERIC`, grouped, ungrouped and `OVER ()` alike — while
+`SUM` and `COUNT` answer `bigint`, so a `SUM` over a `SUM` is `NUMERIC`.
 
 A **scalar subquery's column keeps the subquery's own declaration** through a
 derived table, a CTE or a window slot, so `SELECT SUM(v) FROM (SELECT (SELECT
 a & 3 FROM u) AS v FROM t) s` is `BIGINT` and the `bigint` form is `NUMERIC`,
 as PostgreSQL declares them. Written DIRECTLY as an aggregate's argument —
-`SUM((SELECT …))` — it is still `DOUBLE PRECISION`.
+`SUM((SELECT …))` — it takes the same declaration, grouped and `OVER ()`
+alike, and accumulates exactly:
+`SUM((SELECT CAST(9007199254740993 AS BIGINT)))` over three rows is
+`27021597764222979` as `NUMERIC`, not a rounded double.
 
 A **`CAST` answers in its target's width**, whatever the operand's was, as
 PostgreSQL does: `SUM(bigint_col::BIGINT)` and `SUM(int_col::BIGINT)` are
@@ -2466,7 +2477,8 @@ Nothing here is network-specific.
 | `SEMVER_SATISFIES(v, range)` | Whether the version is in a node-semver range | `SEMVER_SATISFIES('1.5.0','^1.2.3')` → `true` |
 
 **Data is lenient.** A string that is not a version is **NULL**, never an
-error, from every function above except the strict forms — a `WHERE` over a
+error, from every function above except `SEMVER_VALID` — which answers
+`false`, being the question — and the strict forms — a `WHERE` over a
 version column collected from the wild must filter rather than abort, and such
 a column always holds junk. `SEMVER_NORMALIZE_STRICT` is the loud twin for a
 job that asserts rather than filters: the same canonical string, and SQLSTATE
@@ -2673,9 +2685,9 @@ SELECT host, agent_version
 | `BITWISE_OR(a, b)` | Bitwise OR. Answers BIGINT | `BITWISE_OR(flags, 0x01)` |
 | `BITWISE_XOR(a, b)` | Bitwise XOR. Answers BIGINT | `BITWISE_XOR(a, b)` |
 | `BITWISE_NOT(a)` | Bitwise NOT. Answers BIGINT | `BITWISE_NOT(mask)` |
-| `BITWISE_LEFT_SHIFT(a, n)` | Shift bits left by n positions | `BITWISE_LEFT_SHIFT(1, 4)` → `16` |
-| `BITWISE_RIGHT_SHIFT(a, n)` | Logical shift bits right by n positions | `BITWISE_RIGHT_SHIFT(16, 4)` → `1` |
-| `BITWISE_ARITHMETIC_SHIFT_RIGHT(a, n)` | Arithmetic right shift (sign-preserving) | `BITWISE_ARITHMETIC_SHIFT_RIGHT(-16, 2)` → `-4` |
+| `BITWISE_LEFT_SHIFT(a, n)` | Shift bits left by n positions. A count outside `[0, 64)` is NULL | `BITWISE_LEFT_SHIFT(1, 4)` → `16` |
+| `BITWISE_RIGHT_SHIFT(a, n)` | Logical shift bits right by n positions. A count outside `[0, 64)` is NULL | `BITWISE_RIGHT_SHIFT(16, 4)` → `1` |
+| `BITWISE_ARITHMETIC_SHIFT_RIGHT(a, n)` | Arithmetic right shift (sign-preserving). A count outside `[0, 64)` is NULL | `BITWISE_ARITHMETIC_SHIFT_RIGHT(-16, 2)` → `-4` |
 | `PI()` | Pi constant | `PI()` → `3.14159...` |
 | `DEGREES(rad)` | Radians to degrees | `DEGREES(PI())` → `180` |
 | `RADIANS(deg)` | Degrees to radians | `RADIANS(180)` → `3.14159...` |
@@ -2698,9 +2710,9 @@ SELECT host, agent_version
 | `IS_FINITE(n)` | Test if value is finite | `IS_FINITE(result)` |
 | `IS_INFINITE(n)` | Test if value is infinite | `IS_INFINITE(result)` |
 | `WIDTH_BUCKET(val, min, max, buckets)` | Assign value to histogram bucket. A bucket count of zero or less, and equal bounds, are SQLSTATE 2201G | `WIDTH_BUCKET(latency, 0, 100, 10)` |
-| `FROM_BASE(s, base)` | Convert string in given base to int | `FROM_BASE('ff', 16)` → `255` |
-| `TO_BASE(n, base)` | Convert int to string in given base | `TO_BASE(255, 16)` → `'ff'` |
-| `BIT_COUNT(n)` | Count set bits (popcount) | `BIT_COUNT(255)` → `8` |
+| `FROM_BASE(s, base)` | Convert string in given base to BIGINT. The WHOLE string must parse and fit a signed 64-bit integer, and `base` must be in `[2, 36]`; anything else is NULL | `FROM_BASE('ff', 16)` → `255`, `FROM_BASE('12zz', 16)` → NULL |
+| `TO_BASE(n, base)` | Convert int to string in given base, SIGNED. `base` outside `[2, 36]` is NULL | `TO_BASE(255, 16)` → `'ff'`, `TO_BASE(-255, 16)` → `'-ff'` |
+| `BIT_COUNT(n)` | Count set bits over the 64-bit two's-complement pattern | `BIT_COUNT(255)` → `8`, `BIT_COUNT(-1)` → `64` |
 
 ### Conditional Functions
 
@@ -2789,7 +2801,7 @@ SELECT host, agent_version
 | `TCP_FLAGS_TO_STRING(flags)` | Convert TCP flags bitmask to comma-separated names | `TCP_FLAGS_TO_STRING(0x12)` → `'SYN,ACK'` |
 | `HAS_TCP_FLAG(flags, name)` | Test if a TCP flag is set. An unrecognized name is SQLSTATE `22023` | `HAS_TCP_FLAG(flags, 'SYN')` → `true` |
 | `TCP_FLAGS_FROM_STRING(names)` | Convert comma-separated flag names to a bitmask. An unrecognized name is SQLSTATE `22023` | `TCP_FLAGS_FROM_STRING('SYN,ACK')` → `18` |
-| `IS_TCP_HANDSHAKE(flags)` | Test for SYN-only (connection init) | `IS_TCP_HANDSHAKE(flags)` |
+| `IS_TCP_HANDSHAKE(flags)` | SYN set and ACK clear (connection init). No other bit is consulted, so SYN+PSH is one | `IS_TCP_HANDSHAKE(flags)` |
 | `IS_TCP_RESET(flags)` | Test for RST flag | `IS_TCP_RESET(flags)` |
 | `TCP_SESSION_ID(src, dst, sport, dport, proto)` | Canonical 5-tuple session key | `TCP_SESSION_ID(src_ip, dst_ip, src_port, dst_port, protocol)` |
 | `FLOW_DIRECTION(src_ip, dst_ip)` | Classify as inbound/outbound/internal/transit | `FLOW_DIRECTION(src_ip, dst_ip)` → `'outbound'` |
@@ -2801,6 +2813,10 @@ says what it means instead of spelling a mask. Names are case-insensitive.
 Bits 0-7 are the control bits RFC 9293 §3.1 defines; bit 8 is the bit RFC 3540
 named `NS` (Historic per RFC 8311) which the Accurate ECN work reuses as `AE`,
 and both spellings are accepted with `AE` as the canonical rendering.
+
+A flags argument that is not an integer is SQLSTATE `22023` naming the type
+it was given, in this family and in the legacy one below alike; a float is
+accepted only when it holds an exact integer.
 
 An unrecognized name is SQLSTATE `22023` naming it, and NULL flags give NULL.
 Where both apply the NAME wins — `TCP_FLAGS_HAS_ALL(f,'ACKK')` is `22023` on a
@@ -2870,7 +2886,10 @@ arithmetic over the mask and are unaffected by such a bit.
 
 A `TCP_FLAGS_HAS_*` predicate over a bare `INT32`/`INT64` column with literal
 names is evaluated inside the scan, as is the `BITWISE_AND(flags, 18) = 18`
-spelling of the same test. On a dictionary-encoded column the mask is evaluated
+spelling of the same test — that spelling in its `= mask`, `= 0` and `<> 0`
+forms only; `BITWISE_AND(flags, 18) = 16` is answered by the filter above the
+scan. A table carrying any ARRAY, MAP or ROW column takes the row-based scan,
+which evaluates no pushed predicate, so nothing is pushed there either. On a dictionary-encoded column the mask is evaluated
 once per dictionary ENTRY rather than once per row; Wadjet's own writer emits
 no dictionary pages, so that applies to Parquet written elsewhere and a table
 ingested through Wadjet is evaluated per value. Either way a flags column
@@ -3179,12 +3198,12 @@ See [data-types.md](data-types.md) §Timestamp, "One rendering".
 
 | Function | Description | Example |
 |----------|-------------|---------|
-| `TO_HEX(n)` | Convert integer to hex string | `TO_HEX(255)` → `'ff'` |
+| `TO_HEX(n)` | Convert integer to an UNSIGNED two's-complement hex string, as wide as the argument's own type — eight digits for an INT32, sixteen for a BIGINT | `TO_HEX(255)` → `'ff'`, `TO_HEX(CAST(-1 AS BIGINT))` → `'ffffffffffffffff'` |
 | `FROM_HEX(s)` | Convert a hex string to a BIGINT. The WHOLE string must be hexadecimal and fit a signed 64-bit integer; anything else is NULL, as `FROM_BASE(s,16)` answers | `FROM_HEX('ff')` → `255`, `FROM_HEX('12zz')` → NULL |
 | `TO_BASE64(s)` | Encode string to Base64 | `TO_BASE64('hello')` |
 | `FROM_BASE64(s)` | Decode Base64 string | `FROM_BASE64('aGVsbG8=')` |
-| `FROM_BASE(s, base)` | Convert string in given base to int | `FROM_BASE('ff', 16)` → `255` |
-| `TO_BASE(n, base)` | Convert int to string in given base | `TO_BASE(255, 16)` → `'ff'` |
+| `FROM_BASE(s, base)` | Convert string in given base to BIGINT. The WHOLE string must parse and fit a signed 64-bit integer, and `base` must be in `[2, 36]`; anything else is NULL | `FROM_BASE('ff', 16)` → `255`, `FROM_BASE('12zz', 16)` → NULL |
+| `TO_BASE(n, base)` | Convert int to string in given base, SIGNED — unlike `TO_HEX`, which renders the unsigned pattern. `base` outside `[2, 36]` is NULL | `TO_BASE(255, 16)` → `'ff'`, `TO_BASE(-255, 16)` → `'-ff'` |
 | `TO_BASE32(s)` | Encode string to Base32 | `TO_BASE32('hello')` → `'NBSWY3DP'` |
 | `FROM_BASE32(s)` | Decode Base32 string | `FROM_BASE32('NBSWY3DP')` → `'hello'` |
 

@@ -494,6 +494,10 @@ Six functions, over any `INT32` or `INT64` column:
 | `TCP_FLAGS(flags)` | the set bits as an array of names, in header bit order | — |
 | `TCP_FLAGS_TEXT(flags)` | the same names joined with a pipe, e.g. `SYN\|ACK` | — |
 
+The flags argument must be an integer: anything else — text, bytea, boolean,
+a fractional number — is SQLSTATE `22023` naming the type, in this family and
+in the legacy one below alike.
+
 Names are case-insensitive and `NS` is accepted for `AE`. **An unrecognized
 name is an error** (SQLSTATE `22023`) naming it, never a quietly smaller mask —
 `TCP_FLAGS_HAS_ALL(flags,'SYN','ACKK')` would otherwise mean
@@ -591,7 +595,9 @@ wadjet> SELECT COUNT(*) AS ecn_flows
 
 **Pushdown.** A `TCP_FLAGS_HAS_*` predicate over a bare column with literal
 names is evaluated inside the scan, and so is the `BITWISE_AND(flags, 18) = 18`
-spelling of the same test. The flags column's values are never materialized
+spelling of the same test — that spelling in its `= mask`, `= 0` and `<> 0`
+forms only. A table carrying any ARRAY, MAP or ROW column takes the row-based
+scan, which evaluates no pushed predicate, so nothing is pushed there. The flags column's values are never materialized
 when the filter is the only thing that reads them. Set
 `WADJET_FLAG_DICT_PUSHDOWN=0` to disable the pushdown.
 
