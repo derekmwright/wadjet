@@ -1911,18 +1911,23 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      planner renumbers its own slot around it.
 
    - **A QUALIFIED star over a LATERAL join publishes the whole join.**
-     (Added 2026-09-07, arc J1; PRE-EXISTING, measured, not closed here.)
+     (Added 2026-09-07, arc J1; PRE-EXISTING, measured, not closed there.
+     **CLOSED 2026-09-07 by arc K1, #979** — see the entry below.)
      `SELECT o.*` and `SELECT s.*` over `j1ord o JOIN LATERAL (…) s` both
-     publish every column of the join — four where PostgreSQL sends three and
-     one. The unqualified `SELECT *` agrees with PostgreSQL as of this arc
+     published every column of the join — four where PostgreSQL sends three
+     and one. The unqualified `SELECT *` agrees with PostgreSQL as of this arc
      (the correlation key is dropped at the join, ADR-0026 §3c); the
-     QUALIFIED spelling is not narrowed to its named relation at all, which is
-     older and independent of the lateral. Pinned with PostgreSQL's list
-     beside it in `pgwire.TestArcJ1AHiddenSlotIsNotInTheRowDescription`.
+     QUALIFIED spelling was not narrowed to its named relation at all, which
+     is older and independent of the lateral. `SELECT o.*` publishes
+     PostgreSQL's three columns now and `SELECT s.*` is a refusal;
+     `pgwire.TestArcJ1AHiddenSlotIsNotInTheRowDescription` holds both, with no
+     divergence recorded for either.
 
    - **On the DISTRIBUTED arms, a star over a NON-aggregated LATERAL still
      publishes the inner correlation column under its SOURCE name.** (Added
-     2026-09-07, arc J1; PRE-EXISTING, not closed here.) A lateral whose
+     2026-09-07, arc J1; PRE-EXISTING, not closed there. **CLOSED
+     2026-09-07 by arc K3, #984** — the next entry is that closure, and the
+     `wantDAG` that pinned this leak is deleted.) A lateral whose
      SELECT list is a bare projection emits no stage of its own, so the
      stage's stream carries the SCAN's column names and the materialized
      key's alias never lands — `order_id, amount, id, customer, total` on
@@ -2184,12 +2189,18 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `OHLCV(DISTINCT …)` (0A000 — the server dedupes on the whole argument
      tuple and this engine's distinct set for a multi-argument aggregate is
      keyed on two columns), `OHLCV(…) OVER (…)` (0A000, with every other
-     aggregate that has no window arm — see the entry below), and
-     `(OHLCV(…)).open` inside one query block (42809 at the parser, which is
-     ADR-0022's "a field path's container is a bare column reference" and
-     applies to every composite-returning expression, not to this one). The
-     supported spelling for the last is a derived table or CTE, and it is
-     gated.
+     aggregate that has no window arm — see the entry below).
+
+     `(OHLCV(…)).open` inside ONE query block was refused 42809 at the
+     parser when this entry was written. It ANSWERS since the A3b fixed-ROW
+     seam (2026-09-12): the parser rewrites `(call).field` into
+     `row_field(call,'field')` rather than refusing it, and the binder
+     refuses only a container whose resolved type is decided and is not ROW
+     — `aggOutputType("ohlcv")` is `TypeRow`. Measured at that revision,
+     `SELECT (OHLCV(ts, price, size)).open FROM trades` answers the bar's
+     open. Nothing gates the one-block spelling for an AGGREGATE container
+     (the A3b gates cover a scalar one), so the derived table or CTE remains
+     the spelling this ADR recommends.
 
      One SUPERSET: a bar whose total volume is ZERO answers a NULL `vwap`
      and keeps its four prices, where PostgreSQL's `SUM(px*vol)/SUM(vol)`
@@ -3220,14 +3231,17 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `pgwire.TestArcJ1AHiddenSlotIsNotInTheRowDescription`.
 
    - **A star over a NON-aggregated LATERAL publishes PostgreSQL's columns in
-     a different ORDER.** (Added 2026-09-07, arc J1 round 2; PRE-EXISTING.)
-     `SELECT * FROM o JOIN LATERAL (SELECT amount …) li` publishes
-     `amount, id, customer, total` on the single-process arms where PostgreSQL
-     publishes `id, customer, total, amount`: a join emits its PROBE side
-     first, and the planner may make the lateral the probe. The column SET is
-     PostgreSQL's; the sequence is not, and a `SELECT *` has no ORDER BY to
-     make it stable either way. Pinned in
-     `pgwire.TestArcJ1AHiddenSlotIsNotInTheRowDescription`.
+     a different ORDER.** (Added 2026-09-07, arc J1 round 2; PRE-EXISTING.
+     **CLOSED by #1008.**) `SELECT * FROM o JOIN LATERAL (SELECT amount …) li`
+     published `amount, id, customer, total` on the single-process arms where
+     PostgreSQL publishes `id, customer, total, amount`: a join emits its
+     PROBE side first, and `reorderJoins` was making the lateral the probe on
+     an estimated row count — a cost decision changing what a star publishes.
+     A DEPENDENT join is not reorderable (ADR-0026 §8e), so every arm now
+     publishes PostgreSQL's sequence and the divergence is GONE rather than
+     pinned: `pgwire.TestArcJ1AHiddenSlotIsNotInTheRowDescription`'s
+     `star_over_a_non_aggregated_lateral` cell wants
+     `{id, customer, total, amount}` with no divergence beside it.
 
 6. **A numeric literal's carrier is its TEXT, not a float64.** (Added
    2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as
@@ -3960,17 +3974,22 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
       the projection keeps its STRING default and `ResolveSortCompare` is
       handed a STRING column. It is not a CIDR defect — `ORDER BY rw.n`
       sorts an INT64 field as text by the same mechanism — which is why it
-      is its own issue rather than a line in this list.
-      `wadjet.TestRowFieldPathLosesTheFieldsDeclaredType` pins it.
+      is its own issue rather than a line in this list. **CLOSED** (#568): a
+      field path carries the field's declared type now, and the pin that
+      recorded the wrong answer is replaced by
+      `wadjet.TestRowFieldPathCarriesTheFieldsDeclaredType`, which compares
+      each field against a sibling FLAT column of the same type.
     - **#569: windowed MIN/MAX declares FLOAT64 and fails the query** for
       CIDR and seven other types, where the plain aggregate answers
       correctly. `exec.WindowMinMaxType`'s allow-list is deliberate — the
       window picks its answer with `compareAny`, which dispatches on the Go
       box and has no type tag to route a CIDR to `CidrOrderKey`, so the
       FLOAT64 declaration turns a silently wrong ordering into a loud
-      failure. Widening it means giving that comparison the declaration
+      failure. **CLOSED** (#569): the comparison was given the declaration
       (`exec.newBoxedCompare`), which is this item's rule again at a site
-      that never had it.
+      that never had it, and `exec.WindowMinMaxType` now names every one of
+      the 22 types — exactly as `exec.minMaxOutputType` does for the grouped
+      form, which is what this ADR's item 9 already says of it.
     - **#523: the row-group PRUNE**, unchanged and recorded above.
 
     The two-path divergence this item closes was reproducible directly: the
@@ -4914,14 +4933,15 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     CASE take their value from ONE arm and did not. Both, and an empty range,
     are gated now.
 
-    **The DECLARED type of such a call is still `decided[0]`, not the fold**
+    **The DECLARED type of such a call was `decided[0]`, not the fold**
     (`expr.CommonDeclType`), so a projection of `GREATEST(real, …, double)`
-    narrows the double answer back into a real vector. The cause is one line
-    further up: `physical.nodeDeclaredType` types a QUOTED string literal as
-    `Decl(TypeString), Decided`, so a call holding one has a NON-NUMERIC
-    decider and `CommonDeclType` falls back to `decided[0]` instead of folding.
+    narrowed the double answer back into a real vector. The cause was one line
+    further up: `physical.nodeDeclaredType` typed a QUOTED string literal as
+    `Decl(TypeString), Decided`, so a call holding one had a NON-NUMERIC
+    decider and `CommonDeclType` fell back to `decided[0]` instead of folding.
     PostgreSQL types that literal `unknown` and resolves the call from the
-    other arguments.
+    other arguments. **CLOSED by #724**: the declaration moved, and the six
+    cells below answer PostgreSQL's own text on every arm.
 
     That deferral does not merely narrow — it WRAPS. A folded double `1e39`
     stored into an INT64 vector is int64's MINIMUM, and so is a NaN: #462's
@@ -4929,11 +4949,13 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     it reaches GROUP BY keys built from the same projection. It cannot be
     fixed from the comparison layer — the materialized value feeds the
     COMPARISON as often as it feeds a store, so narrowing or refusing there
-    answers a different predicate than PostgreSQL's — so the six shapes are
-    pinned LOUDLY in
-    `coordinator.TestExtremumWinnerIsMaterializedAtTheCallsType`, with
-    PostgreSQL's answer recorded beside each, and filed as #724. Deleting
-    those pins is the declaration fix's proof.
+    answers a different predicate than PostgreSQL's — so the six shapes were
+    pinned LOUDLY, with PostgreSQL's answer recorded beside each, and filed as
+    #724. Deleting those pins was the declaration fix's proof, and it is done:
+    the six cells live in `coordinator.TestRealComparisonWidthTwoPath`'s
+    `runExtremumWinnerMaterialization` block
+    (`internal/coordinator/real_width_two_path_test.go`) and every `want` is
+    now PostgreSQL 17.11's own text rather than this engine's wrong answer.
 
     **The boxed layer resolves the column's WIDTH from its DECLARATION.**
     `expr.ColRef.Eval` widens on the way out — a FLOAT32 column boxes as
@@ -5029,17 +5051,19 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
   `internal/engine/exec/kernel/compare.go` (`IPv6RowKey`,
   `colColFilterCidr`), `internal/coordinator/cidr_col_col_two_path_test.go`,
   `internal/engine/expr/network_col_col_test.go`
-- #568 (a ROW field path is declared STRING, so `ORDER BY rw.c` sorts CIDR by
-  text and `ORDER BY rw.n` sorts an INT64 by text, while `ORDER BY rw` is
-  correct — open, pinned by
-  `wadjet.TestRowFieldPathLosesTheFieldsDeclaredType`), #569 (windowed
-  MIN/MAX declares FLOAT64 for eight types and fails the query where the
-  plain aggregate answers — open), #570 (BYTES is not `bytea` on the wire,
-  and `CAST AS STRING` yields an invalid-UTF-8 string with an embedded NUL
-  that libpq truncates — open) — items 10 and 11's open residual lists
-- #566 (a GROUP BY over an ARRAY/ROW/MAP/VECTOR column fails the query past a
-  partial-aggregate spill — open, pinned by
-  `exec.TestContainerGroupByPastASpillFails`), and the merge key underneath
+- #568 (a ROW field path was declared STRING, so `ORDER BY rw.c` sorted CIDR
+  by text and `ORDER BY rw.n` sorted an INT64 by text, while `ORDER BY rw` was
+  correct — CLOSED, gated by
+  `wadjet.TestRowFieldPathCarriesTheFieldsDeclaredType`), #569 (windowed
+  MIN/MAX declared FLOAT64 for eight types and failed the query where the
+  plain aggregate answers — CLOSED, `exec.WindowMinMaxType` names all 22
+  types), #570 (BYTES was not `bytea` on the wire — CLOSED the same day it
+  was recorded, `pgTypeOID` answers 17; see item 11) — items 10 and 11's
+  residual lists, now all closed
+- #566 (a GROUP BY over an ARRAY/ROW/MAP/VECTOR column failed the query past a
+  partial-aggregate spill — CLOSED, and the pin that recorded the failure is
+  replaced by `exec.TestContainerGroupByAcrossASpillMatchesMemory`), and the
+  merge key underneath
   it: `internal/engine/exec/sort.go` (`appendKeyElemWithMeta` — a container's
   elements were written in the TOP-LEVEL encoding on the meta path, so
   ARRAY[1,23] and ARRAY[12,3] were one key)

@@ -1327,7 +1327,7 @@ adds a node kind between a SELECT list and a join adds it to that corpus.
   `physical.TestFuseScanShuffleDeclinesAUnionArmsExchange` pins the decline and
   its reason, so a future widening of condition 4 that admits a union fails
   there rather than relying on a rewire nothing ever ran; and
-  `physical.TestElideCoPartitionedExchangeRewiresAUnionArm` constructs the
+  `physical.TestElideCoPartitionedExchangeMovesAUnionArmsProducer` constructs the
   reachable shape and asserts the arm moved with its dependency — removing the
   rewiring fails it. An SQL test that attempts nothing is worse than no test,
   and the first version of this fixture was one.
@@ -1460,7 +1460,7 @@ arc touches — thirteen of them, `internal/coordinator/coordinator.go`,
 `internal/planner/physical/` — reverted to its `376b2cac` content with this
 tip's TESTS in place (these are historical paths; R1 moved aggregate
 and expression declarations to `agg_*.go` and `expr_*.go` siblings): **70 leaf subtests fail, across ten coordinator tests
-plus `physical.TestElideCoPartitionedExchangeRewiresAUnionArm`** (which fails
+plus `physical.TestElideCoPartitionedExchangeMovesAUnionArmsProducer`** (which fails
 at its top level and has no subtests). Zero fail on the tip. Counted with
 `grep -c '^    --- FAIL'` on `go test -v`; per test:
 `BothArmsPublishOneAlias…` 15, `CTEChainPositionCarriesItsFilter…` 13,

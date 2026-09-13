@@ -386,8 +386,9 @@ cannot free negative memory — so the wait buys the `ForceReserve` that was
 inevitable on entry. It costs any query whose scan touches a file larger than
 its budget, with no subquery involved; the re-run only multiplies it by the
 outer row count. Both are pinned in
-`coordinator.TestCorrelatedRerunReadsTheInnerOncePerOuterRow` and
-`…PaysTheFullReserveWaitPerOuterRow`, and the memory half belongs to
+`coordinator.TestEveryCorrelatedInnerIsReadOnce` and
+`coordinator.TestCorrelatedRerunPaysTheFullReserveWaitPerOuterRow`, and the
+memory half belongs to
 ADR-0006's territory, not to the correlation model.
 
 ### 1f. A correlated NOT IN is not an anti join

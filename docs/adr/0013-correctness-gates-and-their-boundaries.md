@@ -31,6 +31,20 @@ those as bugs wastes the same time in the other direction.
 | Two-path invariance (`two_path_invariance_test.go`) | Do the fast path and stage DAG AGREE? | both-arms-wrong |
 | Differential fuzzer (`shape_fuzz_test.go`, `internal/oracle/shapegen`) | What shapes have we never tried? | whatever the generator cannot express |
 
+Amendment 2026-09-12: a FOURTH kind joined them, and it is not a comparison
+against another engine at all — a **published specification plus a captured
+transcript of its reference implementation**. `internal/oracle/semvergen`
+generates the version corpus every semver gate runs over, and
+`internal/engine/expr/testdata/node_semver_gte0.tsv` holds 2,970 cells
+captured from node-semver 7.7.3 with the script that produced them beside it.
+It answers "does this agree with the thing users actually compare against"
+where neither PostgreSQL nor DuckDB implements the function at all, and it is
+blind to anything the reference implementation itself gets wrong. A fifth
+corpus, `internal/oracle/rowdecl`, supplies the fixed-ROW declaration
+positions that `coordinator.TestFixedRowFieldRefusals` and its wire twin run
+(five execution arms × both wire encodings); it is a POSITION corpus, so it is
+blind to values.
+
 A fingerprint is a row count plus two truncated SHA-256 digests at 6 and 4
 significant float digits. It is **opaque by construction**: an answer can be
 verified against it and cannot be read out of it. That is deliberate — a
@@ -288,6 +302,9 @@ question. A gate that runs at reduced replication in some arm — `-short`,
 
 - ADR-0012 (semantics authority), ADR-0011 (performance measurement)
 - `internal/oracle/fingerprint.go`, `benchmarks/tpch/oracle_semantics_test.go`
+- `internal/oracle/semvergen`, `internal/oracle/rowdecl`,
+  `internal/engine/expr/testdata/node_semver_gte0.tsv` (and the
+  `node_semver_gte0.js` that captured it)
 - `internal/oracle/typematrix`, `wadjet/type_matrix_test.go`,
   `wadjet/type_matrix_fuzz_test.go`, `wadjet/type_matrix_crash_test.go`,
   `internal/coordinator/type_matrix_distributed_test.go`,

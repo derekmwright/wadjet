@@ -155,3 +155,32 @@ refusing everything fails the gate rather than passing it.
 - **Reopening this requires new evidence.** "A blanket recover hides bugs" is
   the argument this ADR answers: it hides nothing that the counter and the two
   gates do not surface, and the alternative was measured in dead servers.
+
+## Amendment 2026-09-12: a deterministic REFUSAL is terminal for the same reason a panic is
+
+The consequence above — "a recovered panic is not retryable; it is
+deterministic, so the stage retrier marks it terminal on the first failure" —
+is a rule about DETERMINISM, not about panics. A per-row refusal the statement
+earned has exactly the same shape, and until this amendment the retrier spent
+the whole budget on one.
+
+**A worker failure carrying SQLSTATE 22023 is terminal on the first attempt.**
+22023 (`invalid_parameter_value`) is this engine's class for "the statement
+said something no implementation knows": a version range that names no range,
+a TCP flag name nobody defines, a `date_trunc` unit that does not exist. The
+statement is what every retry carries, so the second and third attempts cannot
+answer differently — they cost the stage its retry budget and two more fragment
+runs to reach the same refusal. It is the plan-time refusal argument one layer
+later: the refusal is earned at EXECUTION because the offending value arrived
+in a row (a range read from a column), which is exactly the case a plan-time
+check cannot cover.
+
+**One class, deliberately.** A data exception such as 22003 or 22012 is also
+deterministic for the same input, and widening this to the whole family changes
+every arc's refusals rather than this one; it is a filing candidate, not part
+of this amendment. A failure carrying a MISSING INPUT key is excluded whatever
+its SQLSTATE — that one CAN succeed on a retry, once the producer's output is
+durable.
+
+`coordinator.isDeterministicRefusal` (`internal/coordinator/task_retry.go`) is
+the rule, and it sits beside the panic decision it generalises.

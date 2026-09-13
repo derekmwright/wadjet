@@ -251,14 +251,16 @@ int8, DECIMAL(9,2), DECIMAL(18,4) and DECIMAL(38,10) prices).
 
 ## Not settled here
 
-- **`(ohlcv(…)).open` inside ONE query block.** A field path's container must be
-  a bare column reference (ADR-0022 rule 1, enforced at the parser), so a field
-  path over any composite-returning EXPRESSION is refused 42809 — for every
-  such expression, not only this one, and PostgreSQL answers the shape. The
-  supported spelling is the derived block or CTE, which is gated. Closing it
-  needs a `FieldAccess` AST node over an arbitrary expression plus a hoist that
-  materializes the aggregate into a hidden slot; that is J1's machinery and an
-  arc of its own.
+- **`(ohlcv(…)).open` inside ONE query block.** Refused 42809 at the parser
+  when this ADR was written: a field path's container had to be a bare column
+  reference (ADR-0022 rule 1), for every composite-returning EXPRESSION and not
+  only this one. The A3b fixed-ROW seam (2026-09-12) changed that — the parser
+  rewrites `(call).field` into `row_field(call,'field')`, and the binder refuses
+  only a container whose resolved type is decided and is not ROW, which
+  `ohlcv`'s is not. Measured at that revision the shape ANSWERS. It is still not
+  gated for an aggregate container, so the derived block or CTE stays the
+  recommended spelling and this remains unsettled in the sense that matters: no
+  test holds the behaviour either way.
 - **`ohlcv(DISTINCT …)`.** PostgreSQL dedupes a multi-argument aggregate on the
   whole argument TUPLE; this engine's distinct set for one is keyed on the
   first TWO columns (`distinctFirstSighting`), so a bar would dedupe ignoring

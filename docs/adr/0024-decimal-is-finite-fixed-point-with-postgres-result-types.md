@@ -7,7 +7,10 @@ halves of this question piecemeal; this record settles the whole type. Amended
 band: every door where the `(p, s)` is a DECLARATION already enforces it and
 agrees with PostgreSQL, the shapes the issue named as unguarded are the ones
 PostgreSQL leaves UNCONSTRAINED, and the real residual is the opposite
-divergence — see "The second of those two, measured 2026-09-03".
+divergence — see "The second of those two, measured 2026-09-03". Amended
+2026-09-12 (arc A2) with §2a: how an INTEGER expression's PostgreSQL width is
+DECIDED, which the `SUM(int2/int4) → bigint ; SUM(int8) → numeric` line above
+assumes and never states.
 
 ## Context
 
@@ -84,6 +87,42 @@ declaration, the window declaration and the operator's runtime correction all
 read, and `exec.windowExactFrames` runs the integer arms on the same Int128
 carrier as the grouped path, in every frame form and in both spilled
 evaluators. A total the declaration cannot hold is item 4's 22003.
+
+#### 2a. An integer's PostgreSQL WIDTH is a DECLARATION, and it rides the column (2026-09-12, arc A2)
+
+The rule table's `SUM(int2/int4) → bigint ; SUM(int8) → numeric` presumes the
+argument's width is known. For a bare column it is the schema's. For a
+COMPUTED expression it was the int64 CARRIER's, which is not the same thing:
+every integer this engine computes is carried in an int64, so `BITWISE_AND`,
+`REGEXP_COUNT` and `LENGTH` alike looked like `int8` and every `SUM` over one
+declared `numeric` — or, where the declaration was lost entirely, `float8`.
+
+Three rules settle it:
+
+1. **Each function declares its own width**, once, in
+   `expr.PGIntegerResultWidth`: `PGIntWidth4` for a function PostgreSQL
+   declares `integer` (`LENGTH`, `REGEXP_COUNT`, `PREFIX_LENGTH`,
+   `PAYLOAD_LENGTH`, `IP_TTL`), `PGIntWidth8` for one it declares `bigint`
+   (`BIT_COUNT`, `FROM_HEX`, `FROM_BASE`, `PARSE_BYTES`, `IP_DIFF`). The
+   bitwise family and the shifts declare nothing of their own: they FOLLOW
+   their operands, the shifts following argument 0.
+2. **The width is three-valued, and "unknown" is not "int4".**
+   `physical.colDecls.intWidth` carries int4, int8 or unknown; an unknown
+   width leaves the result to the accumulator rather than declaring a narrow
+   one, because guessing narrow is how an exact `bigint` total becomes a
+   wrapped `integer`.
+3. **MIN and MAX keep their ARGUMENT's width**, a column's and a computed
+   expression's alike — the general form of the "MIN/MAX keep the input's
+   (p,s)" line above, applied to the integer domain. An aggregate cannot be
+   written inside another, so the spelling that exercises this is a derived
+   table: `SELECT SUM(m) FROM (SELECT MIN(BITWISE_AND(id,3)) AS m FROM t) s`.
+
+The declaration travels with the column, so it survives a derived table, a
+CTE, a set operation (which takes the WIDER arm, PostgreSQL's common-type
+rule) and a window slot, and a scalar subquery's column carries its own. The
+divergence entry that recorded the arc's measurements, function by function
+and position by position, is ADR-0012's bitwise-family item; this is where the
+RULE lives.
 
 **The INTEGER half of the choice rule landed 2026-08-29 (#695), and the BOX is
 what it took.** The type fold was the easy half: an integer contributes its
