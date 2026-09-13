@@ -411,7 +411,21 @@ func (r *QueryResult) Cells(i int) []any {
 }
 
 // Query executes a SQL query and returns the results.
-func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err error) {
+func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
+	return db.query(ctx, sql, 0)
+}
+
+// query is Query with a GATHER BUDGET.
+//
+// gatherBytes > 0 bounds the bytes the result sink accumulates, and the sink
+// then refuses with exec.ErrCollectBudget rather than growing the heap. Only
+// one caller passes one: a statement whose source is a query and whose
+// destination is a TABLE (#1024), which reads the whole result before it writes
+// and is the one caller here that can say what "too big" means. Every ordinary
+// SELECT passes zero, which is the behaviour this door has always had — a
+// client that asked for a billion rows gets them, and the memory model's own
+// operators are what bound the work below the sink.
+func (db *DB) query(ctx context.Context, sql string, gatherBytes int64) (res *QueryResult, err error) {
 	// The embedded API's query boundary. Panics that carry a query ERROR
 	// (exec.FatalEvalPanic — including batch.TypeMismatchError, #361's
 	// silent-write guard) become that error here: this entry reaches
@@ -532,6 +546,15 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 	}
 
 	pipeline := physPlan.Pipeline
+	if gatherBytes > 0 {
+		// The same field and the same refusal the coordinator's local fast
+		// path uses to bound a gathered result (local_fastpath.go). It is set
+		// HERE, after planning, because the sink is what the planner built and
+		// nothing below it needs to know.
+		if cs, ok := pipeline.Sink.(*exec.CollectSink); ok {
+			cs.MaxBytes = gatherBytes
+		}
+	}
 	// The defer is registered BEFORE Run, not after: a cancelled or failing
 	// Run returns from this function, and a `defer` STATEMENT placed below
 	// the error check never executes at all. That is how a cancelled query
@@ -1261,6 +1284,25 @@ func (db *DB) ShowFunctions(ctx context.Context) (*QueryResult, error) {
 func (db *DB) createTableSQL(ctx context.Context, ct *plansql.CreateTableInfo) (*QueryResult, error) {
 	if err := auth.RequirePermission(db.authProvider, ctx, "write"); err != nil {
 		return nil, err
+	}
+	// IF NOT EXISTS, and it is tested BEFORE the schema is resolved because
+	// that is where PostgreSQL 17.11 tests it: `CREATE TABLE IF NOT EXISTS t
+	// (a nosuchtype)` over an existing `t` is the NOTICE and the skip, not a
+	// type error (measured). The clause reaches this form since #1024 gave
+	// the grammar `parseIfNotExists`; until this, it parsed, was documented as
+	// a no-op, and raised the 42P07 the documentation said it replaced
+	// (round-2 review B3).
+	if ct.IfNotExists {
+		exists, err := db.tableExists(ctx, ct.Name)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			return &QueryResult{
+				Columns: []string{"result"},
+				Rows:    []map[string]any{{"result": fmt.Sprintf("Table %q already exists (no-op)", ct.Name)}},
+			}, nil
+		}
 	}
 	schema, err := columnDefsToSchema(ct.Columns)
 	if err != nil {

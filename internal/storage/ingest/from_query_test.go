@@ -136,13 +136,25 @@ func TestAssignableToColumn(t *testing.T) {
 		{"IntIntoDecimal", fqCol("a", parquet.TypeInt64), dec123, true},
 		{"SameDecimal", dec123, dec123, true},
 		{"SameRow", row1, row1, true},
+		// The whole NUMERIC family assigns, in every direction, because the
+		// statement door converts every cell through the engine's one
+		// assignment converter before the writer sees it — the same converter
+		// INSERT … VALUES uses (round-2 review B1/B2). PostgreSQL assigns all
+		// of these too, and `wadjet.TestBothWriteDoorsStoreTheSameNumber` and
+		// `TestADecimalSourceIsAssignedAtItsValue` compare the VALUE both
+		// doors store, pair by pair, against its measured answer.
+		{"DecimalScaleDiffers", dec123, dec184, true},
+		{"DecimalIntoInt", dec123, fqCol("b", parquet.TypeInt64), true},
+		{"DecimalIntoFloat", dec123, fqCol("b", parquet.TypeFloat64), true},
+		{"FloatIntoInt", fqCol("a", parquet.TypeFloat64), fqCol("b", parquet.TypeInt64), true},
+		{"FloatIntoDecimal", fqCol("a", parquet.TypeFloat64), dec123, true},
+		{"IntIntoPort", fqCol("a", parquet.TypeInt64), fqCol("b", parquet.TypePort), true},
 
-		// The refusals. PostgreSQL assignment-casts some of these; this engine
-		// takes the loud side where a conversion would have to be invented at
-		// the writer, which is ADR-0012's recorded divergence.
-		{"DecimalScaleDiffers", dec123, dec184, false},
-		{"DecimalIntoInt", dec123, fqCol("b", parquet.TypeInt64), false},
-		{"DecimalIntoFloat", dec123, fqCol("b", parquet.TypeFloat64), false},
+		// The refusals: a pair outside the numeric family, where an assignment
+		// would have to invent a meaning the converter does not have.
+		// PostgreSQL assignment-casts some of them (bigint into text); this
+		// engine answers 42804 with its hint, which is ADR-0012's recorded
+		// divergence.
 		{"IntIntoString", fqCol("a", parquet.TypeInt64), fqCol("b", parquet.TypeString), false},
 		{"StringIntoInt", fqCol("a", parquet.TypeString), fqCol("b", parquet.TypeInt64), false},
 		{"BoolIntoInt", fqCol("a", parquet.TypeBool), fqCol("b", parquet.TypeInt64), false},
@@ -187,7 +199,7 @@ func TestARefusedCommitReclaimsWhatItUploaded(t *testing.T) {
 
 		_, err := WriteQueryRows(ctx, cat, QueryWrite{
 			Table: "taken", Schema: schema, Columns: []string{"a"}, Create: true,
-		}, [][]any{{int64(1)}, {int64(2)}})
+		}, SliceRows([][]any{{int64(1)}, {int64(2)}}))
 		if err == nil {
 			t.Fatal("a create onto a taken name succeeded")
 		}
@@ -208,7 +220,7 @@ func TestARefusedCommitReclaimsWhatItUploaded(t *testing.T) {
 		_, err := WriteQueryRows(ctx, cat, QueryWrite{
 			Table: "app", Schema: schema, Columns: []string{"a"},
 			Incarnation: "not-the-one-this-table-has",
-		}, [][]any{{int64(1)}})
+		}, SliceRows([][]any{{int64(1)}}))
 		if err == nil {
 			t.Fatal("an append against a foreign incarnation succeeded")
 		}
@@ -238,7 +250,7 @@ func TestACreateWithFilesPublishesThemTogether(t *testing.T) {
 
 	n, err := WriteQueryRows(ctx, cat, QueryWrite{
 		Table: "made", Schema: schema, Columns: []string{"a"}, Create: true,
-	}, [][]any{{int64(1)}, {int64(2)}, {int64(3)}})
+	}, SliceRows([][]any{{int64(1)}, {int64(2)}, {int64(3)}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +309,7 @@ func TestAPartlyWrittenStatementPublishesNoneOfIt(t *testing.T) {
 	_, err = WriteQueryRows(ctx, cat, QueryWrite{
 		Table: "multi", Schema: schema, Columns: []string{"a", "p"},
 		PartitionKeys: []string{"p"}, Incarnation: inc,
-	}, [][]any{{int64(1), "x"}, {int64(2), "y"}})
+	}, SliceRows([][]any{{int64(1), "x"}, {int64(2), "y"}}))
 	if err == nil {
 		t.Fatal("the statement succeeded over a store that refused its second file")
 	}

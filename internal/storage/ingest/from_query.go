@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
@@ -139,7 +140,8 @@ const queryWriteChunk = 8192
 // publishes them in ONE catalog write, or none.
 //
 // `rows` are POSITIONAL — cell j of every row is the query's output column j,
-// which w.Columns maps onto a target column. A map keyed by the query's own
+// which w.Columns maps onto a target column, and they are read ONE AT A TIME
+// (RowSource) so the result is never copied whole a second time. A map keyed by the query's own
 // names could not carry the answer: a result may legally publish two columns
 // of one name (`SELECT abs(a), abs(b)`), and the second would overwrite the
 // first.
@@ -159,7 +161,28 @@ const queryWriteChunk = 8192
 // ADR-0030 accepts for a refused DML retry ("bytes, never rows"), and it can
 // be: a DML retry may legitimately re-run and needs its window, while this
 // statement is over.
-func WriteQueryRows(ctx context.Context, cat *catalog.Catalog, w QueryWrite, rows [][]any) (n int64, err error) {
+// RowSource is a statement's result, read one row at a time.
+//
+// It is an accessor and not a `[][]any` because the caller already holds the
+// rows and a slice would be a second full copy of the result — the allocation
+// pattern CollectSink's own comment records as having held 21 GB of live heap
+// at SF10 Q18. `At` returns row i POSITIONALLY, its cells aligned with the
+// query's declared output, and may convert as it goes: the assignment
+// conversion a query-sourced append applies is per row, so doing it here keeps
+// exactly one converted row alive at a time.
+//
+// `At` returning an error stops the write; the statement reports it.
+type RowSource struct {
+	N  int
+	At func(i int) ([]any, error)
+}
+
+// SliceRows is a RowSource over rows a caller already has as a slice.
+func SliceRows(rows [][]any) RowSource {
+	return RowSource{N: len(rows), At: func(i int) ([]any, error) { return rows[i], nil }}
+}
+
+func WriteQueryRows(ctx context.Context, cat *catalog.Catalog, w QueryWrite, rows RowSource) (n int64, err error) {
 	cfg := w.Config
 	if cfg == (Config{}) {
 		cfg = DefaultConfig()
@@ -173,10 +196,21 @@ func WriteQueryRows(ctx context.Context, cat *catalog.Catalog, w QueryWrite, row
 		}
 		// Everything this statement uploaded, including the files an earlier
 		// flush landed before the one that failed.
-		reclaimPendingObjects(ctx, cat, ing.PendingFiles())
+		//
+		// WithoutCancel, and it is the whole of the reclaim: the commonest
+		// reason to be in this defer is that the statement's OWN context died
+		// — a client cancel, a deadline — and RetireObjects reads the live
+		// catalog state and issues its deletes through the context it is
+		// given. On a dead one both fail, the retirement is logged as
+		// deferred, and the bytes stay forever. MemStore ignores ctx entirely,
+		// which is why no fixture over it can see this; every real store
+		// honours it (#1024 review B4).
+		reclaim, cancel := context.WithTimeout(context.WithoutCancel(ctx), reclaimTimeout)
+		defer cancel()
+		reclaimPendingObjects(reclaim, cat, ing.PendingFiles())
 	}()
 
-	boxed := make([]map[string]any, 0, min(queryWriteChunk, len(rows)))
+	boxed := make([]map[string]any, 0, min(queryWriteChunk, rows.N))
 	flushChunk := func() error {
 		if len(boxed) == 0 {
 			return nil
@@ -187,7 +221,11 @@ func WriteQueryRows(ctx context.Context, cat *catalog.Catalog, w QueryWrite, row
 		boxed = boxed[:0]
 		return nil
 	}
-	for _, cells := range rows {
+	for i := 0; i < rows.N; i++ {
+		cells, err := rows.At(i)
+		if err != nil {
+			return 0, err
+		}
 		row := make(map[string]any, len(w.Columns))
 		for j, name := range w.Columns {
 			if j >= len(cells) {
@@ -217,14 +255,21 @@ func WriteQueryRows(ctx context.Context, cat *catalog.Catalog, w QueryWrite, row
 			ing.RestorePendingFiles(pending)
 			return 0, err
 		}
-		return int64(len(rows)), nil
+		return int64(rows.N), nil
 	}
 	if err := cat.CommitIngest(ctx, w.Table, w.Incarnation, pending); err != nil {
 		ing.RestorePendingFiles(pending)
 		return 0, err
 	}
-	return int64(len(rows)), nil
+	return int64(rows.N), nil
 }
+
+// reclaimTimeout bounds the reclaim of a failed statement's objects. It is a
+// bound and not a deadline anyone waits on: the statement has already failed
+// and its error is the answer, so a store that has stopped answering must not
+// hold the caller open — it costs the bytes instead, which is the residual
+// ADR-0030 already accepts.
+const reclaimTimeout = 30 * time.Second
 
 // reclaimPendingObjects retires the objects a failed statement uploaded.
 //
@@ -283,16 +328,8 @@ func AssignableToColumn(from, to parquet.Column) error {
 	if sameDeclaredType(from, to) {
 		return nil
 	}
-	if integerDeclaration(from.Type) && integerDeclaration(to.Type) {
+	if numericDeclaration(from.Type) && numericDeclaration(to.Type) {
 		return nil
-	}
-	if integerDeclaration(from.Type) || floatDeclaration(from.Type) {
-		if floatDeclaration(to.Type) {
-			return nil
-		}
-		if to.Type == parquet.TypeDecimal && integerDeclaration(from.Type) {
-			return nil
-		}
 	}
 	return sqlerr.New("42804",
 		"column %q is of type %s but expression is of type %s; "+
@@ -300,16 +337,18 @@ func AssignableToColumn(from, to parquet.Column) error {
 		to.Name, declaredTypeText(to), declaredTypeText(from))
 }
 
-func integerDeclaration(t parquet.TypeID) bool {
+// numericDeclaration is the family the assignment converter covers: every
+// declaration `assignEvaluatedValue` has a rule for. PostgreSQL assigns freely
+// within it — an integer into a numeric, a double into a bigint (rounded), a
+// numeric into a real — and so does this engine's VALUES door, which reaches
+// that converter for every literal it writes.
+func numericDeclaration(t parquet.TypeID) bool {
 	switch t {
-	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypePort, parquet.TypeProtocol:
+	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypePort, parquet.TypeProtocol,
+		parquet.TypeFloat32, parquet.TypeFloat64, parquet.TypeDecimal:
 		return true
 	}
 	return false
-}
-
-func floatDeclaration(t parquet.TypeID) bool {
-	return t == parquet.TypeFloat32 || t == parquet.TypeFloat64
 }
 
 // sameDeclaredType compares two columns' TYPES and nothing else — not the name

@@ -93,9 +93,9 @@ func (db *DB) executeCreateTableAs(ctx context.Context, ct *plansql.CreateTableI
 		return &ExecResult{Command: CommandCreateTableAs}, nil
 	}
 
-	res, err := db.Query(ctx, ct.AsSelect.SQL)
+	res, err := db.query(ctx, ct.AsSelect.SQL, db.querySourcedWriteBudget())
 	if err != nil {
-		return nil, querySourceError(err)
+		return nil, querySourceError(err, db.querySourcedWriteBudget())
 	}
 	schema, err := db.ctasSchema(ct, res.OutputSchema)
 	if err != nil {
@@ -107,7 +107,7 @@ func (db *DB) executeCreateTableAs(ctx context.Context, ct *plansql.CreateTableI
 		Schema:  schema,
 		Columns: schema.ColumnNames(),
 		Create:  true,
-	}, resultCells(res))
+	}, resultRows(res, nil, nil))
 	if err != nil {
 		return nil, err
 	}
@@ -162,9 +162,9 @@ func (db *DB) executeInsertSelect(ctx context.Context, info *plansql.InsertInfo)
 		return nil, err
 	}
 
-	res, err := db.Query(ctx, info.Select.SQL)
+	res, err := db.query(ctx, info.Select.SQL, db.querySourcedWriteBudget())
 	if err != nil {
-		return nil, querySourceError(err)
+		return nil, querySourceError(err, db.querySourcedWriteBudget())
 	}
 
 	if err := checkInsertSelectShape(res.OutputSchema, cols, len(info.Columns) > 0); err != nil {
@@ -177,7 +177,7 @@ func (db *DB) executeInsertSelect(ctx context.Context, info *plansql.InsertInfo)
 		Columns:       columns[:len(res.OutputSchema)],
 		PartitionKeys: tableMeta.PartitionKeys,
 		Incarnation:   incarnation,
-	}, resultCells(res))
+	}, resultRows(res, res.OutputSchema, cols))
 	if err != nil {
 		return nil, err
 	}
@@ -209,25 +209,35 @@ func checkInsertSelectShape(declared []parquet.Column, cols []parquet.Column, ex
 	return nil
 }
 
-// resultCells boxes a result POSITIONALLY, one []any per row aligned with the
-// declared output.
+// resultRows reads a result POSITIONALLY, one row at a time, converting each
+// row to the target's declared types as it goes.
 //
-// QueryResult.Rows is a map and a result may legally publish two columns of
-// one name, so the map form cannot carry the answer; Cells is the accessor
-// that is right either way.
-func resultCells(res *QueryResult) [][]any {
+// One row at a time and not a materialized `[][]any`: the result is already
+// held twice by the time it gets here (the collected batches, and the
+// name-keyed row maps `DB.Query` boxes them into), and a third full copy is
+// the allocation pattern CollectSink's own comment records as having held
+// 21 GB of live heap at SF10 Q18. Cells is the accessor that is right whether
+// or not two output columns share a name, which the map form is not.
+//
+// `declared` and `target`, when given, are the APPEND's two type lists and
+// every cell goes through the engine's one assignment conversion between them
+// — see assignQueryCells. A CREATE passes neither: its target columns ARE the
+// query's declared output, so there is nothing to convert.
+func resultRows(res *QueryResult, declared, target []parquet.Column) ingest.RowSource {
 	if res == nil {
-		return nil
+		return ingest.RowSource{}
 	}
 	n := len(res.Rows)
 	if len(res.RowValues) > n {
 		n = len(res.RowValues)
 	}
-	out := make([][]any, n)
-	for i := 0; i < n; i++ {
-		out[i] = res.Cells(i)
-	}
-	return out
+	return ingest.RowSource{N: n, At: func(i int) ([]any, error) {
+		cells := res.Cells(i)
+		if target == nil {
+			return cells, nil
+		}
+		return assignQueryCells(cells, declared, target)
+	}}
 }
 
 // tableExists reports whether the catalog holds this exact name.
@@ -287,7 +297,32 @@ func (db *DB) declaredOutputFor(ctx context.Context, parsed *plansql.ParsedQuery
 	if err != nil {
 		return nil, err
 	}
-	return planner.DeclaredOutputSchema(logicalPlan), nil
+	declared := planner.DeclaredOutputSchema(logicalPlan)
+
+	// The NAMES come from the one rule, not from this walk.
+	//
+	// `Planner.DeclaredOutputSchema` names an unaliased output column by its
+	// expression TEXT, because its caller — the async door describing a
+	// zero-row result — asks it for TYPES. The executed plan publishes
+	// PostgreSQL's name instead: `?column?` for an operator expression or a
+	// literal, the function's own name for a call (#732,
+	// `plansql.OutputColumnName`). Left alone, the two arms of one statement
+	// declared two different tables: `WITH DATA` gave `?column?` and
+	// `WITH NO DATA` gave `"n + 1"`, and with it went the duplicate rule —
+	// `SELECT id, n+1, s||'x', 42 … WITH NO DATA` was CREATED where the same
+	// statement `WITH DATA` and PostgreSQL 17.11 both answer 42701 (measured;
+	// round-2 review B7).
+	//
+	// `deriveColumns` is that rule, and it is the SAME call `DB.Query` makes
+	// on the executed plan — asked here with no rows, which is exactly what
+	// this arm has. A star falls through it to the plan's own schema names,
+	// which is what the executed arm publishes for a star too.
+	if names := deriveColumns(selectInfo, nil, declared); len(names) == len(declared) {
+		for i := range declared {
+			declared[i].Name = names[i]
+		}
+	}
+	return declared, nil
 }
 
 // execAsQueryResult runs a WRITE through the one DML entry point and boxes its
@@ -312,24 +347,88 @@ func (db *DB) execAsQueryResult(ctx context.Context, parsed *plansql.ParsedQuery
 	}, nil
 }
 
+// DefaultQuerySourcedWriteBytes bounds the RESULT a `CREATE TABLE … AS SELECT`
+// or an `INSERT INTO … SELECT` gathers before it writes.
+//
+// This first version reads the whole result on the process running the
+// statement and writes it from there (#1024; ADR-0036 records the streaming
+// writer as the named next step), so without a bound a large query is bounded
+// by nothing but the heap — measured at 860 MiB peak for a 99 MiB result, and
+// no refusal. The bound makes the refusal the docs promise reachable, and it is
+// the SAME field and the SAME class the coordinator's local fast path already
+// uses for a gathered result.
+//
+// 64 MiB is `DefaultLocalFastPathBytes`, which is this engine's existing answer
+// to "how much result may one process gather", so a write does not get a second
+// number. `Config.MemoryBudget`, when set, replaces it: an embedder that has
+// told the engine what it may use has already answered the question.
+const DefaultQuerySourcedWriteBytes = 64 << 20
+
+// querySourcedWriteBudget is the bound this DB applies to a query-sourced
+// write's gather.
+func (db *DB) querySourcedWriteBudget() int64 {
+	if db.memoryBudget > 0 {
+		return db.memoryBudget
+	}
+	return DefaultQuerySourcedWriteBytes
+}
+
 // querySourceError classifies a failure of the QUERY a write took its rows
 // from.
 //
-// One class is not the query's own: the result budget. This first version
-// gathers the whole result in the process that runs the statement and writes
-// it from there (#1024 — the per-worker parallel write is the follow-up), so a
-// result past that budget is a RESOURCE refusal and not a statement that means
-// nothing. It carries 53400, which is the class this engine already gives a
-// configured limit it will not exceed (physical.QueryLimitSQLState), and the
-// message says which statement could not be completed. Without it the refusal
-// reached the wire as the blanket 42000 — "your SQL is malformed" for a
-// statement that is not.
-func querySourceError(err error) error {
+// One class is not the query's own: the result budget. A statement whose source
+// is a query gathers the whole result before it writes, so a result past that
+// budget is a RESOURCE refusal and not a statement that means nothing. It
+// carries 53400, the class this engine already gives a configured limit it will
+// not exceed (physical.QueryLimitSQLState), and the message names the bound and
+// how to raise it. Without it the refusal reached the wire as the blanket
+// 42000 — "your SQL is malformed" for a statement that is not.
+func querySourceError(err error, budget int64) error {
 	if errors.Is(err, exec.ErrCollectBudget) {
 		return sqlerr.Wrap(physical.QueryLimitSQLState, fmt.Errorf(
-			"the query's result does not fit this statement's result budget, "+
-				"and a write whose source is a query gathers the whole result "+
-				"before it writes: %w", err))
+			"the query's result exceeds the %d-byte budget a write whose source is a "+
+				"query may gather before it writes; narrow the query, or raise "+
+				"Config.MemoryBudget: %w", budget, err))
 	}
 	return err
+}
+
+// assignQueryCells applies the engine's ONE assignment conversion to every cell
+// of ONE row an `INSERT INTO … SELECT` writes — `assignEvaluatedValue`, the converter
+// `INSERT … VALUES` and `UPDATE … SET` have used since #647/#678
+// (docs/internals/dml-evaluated-assignment-value-domain.md).
+//
+// It is the difference between a value and a CARRIER. Without it the query's
+// boxes reach the writer raw, and `parquet.DecimalValueFromBox` reads an
+// integer box as the already-UNSCALED carrier (ADR-0018 §4): a BIGINT 5 into a
+// DECIMAL(18,4) column stored 0.0005 where PostgreSQL 17.11 and this engine's
+// own VALUES door store 5.0000 (measured, both). That is the exact hazard
+// `ingest.AssignableToColumn`'s comment refuses DECIMAL→DECIMAL for, and its
+// integer arm has no scale either.
+//
+// It is also the only place that narrows PORT to uint16 and PROTOCOL to uint8.
+// The writer's leaf check range-checks an int32 carrier, not the stored width,
+// so `INSERT INTO t (p) SELECT i * 100000` stored PORT 500000 — a value no port
+// number can be — where the literal door (#814) and the computed door both
+// answer 22003. One converter, one answer, every door.
+//
+// The conversion belongs HERE and not at the writer, which is what ADR-0036
+// rejected: this is the one place that holds BOTH facts, the source's declared
+// type (the plan's output schema) and the target's (the catalog).
+func assignQueryCells(row []any, declared, target []parquet.Column) ([]any, error) {
+	for j := range row {
+		if j >= len(target) || j >= len(declared) {
+			break
+		}
+		// srcFloat tells the integer converter whether a fractional source
+		// rounds (a float does, PostgreSQL's float→int assignment cast) or
+		// refuses; the declared output is where that fact lives.
+		srcFloat := declared[j].Type == parquet.TypeFloat32 || declared[j].Type == parquet.TypeFloat64
+		v, err := assignEvaluatedValue(row[j], target[j], srcFloat)
+		if err != nil {
+			return nil, fmt.Errorf("column %q: %w", target[j].Name, err)
+		}
+		row[j] = v
+	}
+	return row, nil
 }
