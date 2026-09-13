@@ -26,6 +26,25 @@ import (
 // sink on the single-process path, and the gather's OutputRename target on the
 // stage DAG.
 
+// PublishedOutputNames is the list `Plan` stamps on the collecting sink as
+// `CollectSink.OutputNames`, derived from the LOGICAL plan alone.
+//
+// It is exported for the one door that needs the names a query publishes
+// WITHOUT running it: `CREATE TABLE … AS SELECT … WITH NO DATA`, which declares
+// a table and does not execute the statement (#1024). `Plan` is not a pure
+// derivation — it materializes every CTE body (`materializeCTEs` runs a whole
+// pipeline) and builds every hash join's build side — so asking `Plan` for
+// these names reads the source table and evaluates part of the query, which is
+// the thing that clause exists not to do. This is the same walk `Plan` makes to
+// stamp them, and nothing else.
+//
+// A nil or short answer means "the projection publishes what it always did",
+// and so does an empty entry inside it; a caller renames only the positions
+// this names.
+func PublishedOutputNames(plan *logical.Node) []string {
+	return publishedOutputNames(findOutputProjectionNode(plan))
+}
+
 // publishedOutputNames is the published name of each visible column of the
 // OUTPUT projection, positionally, or nil when the projection publishes what
 // it always did.

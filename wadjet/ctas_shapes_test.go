@@ -3,11 +3,15 @@ package wadjet
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/sqlerr"
+	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -556,4 +560,153 @@ func ctasNameOf(sql string) string {
 		}
 	}
 	return ""
+}
+
+// ctasReadCounter counts the data objects a statement READS.
+//
+// The unit is a `Get` of `tables/**.parquet`: that is a row of the source
+// table crossing into the engine, and a statement documented not to execute
+// its query must cause none.
+type ctasReadCounter struct {
+	objstore.Store
+	gets  atomic.Int64
+	bytes atomic.Int64
+}
+
+func (s *ctasReadCounter) Get(ctx context.Context, b, k string) (io.ReadCloser, objstore.ObjectInfo, error) {
+	rc, info, err := s.Store.Get(ctx, b, k)
+	if err == nil && strings.HasPrefix(k, "tables/") && strings.HasSuffix(k, ".parquet") {
+		s.gets.Add(1)
+		s.bytes.Add(info.Size)
+	}
+	return rc, info, err
+}
+
+func (s *ctasReadCounter) GetReaderAt(ctx context.Context, b, k string) (objstore.ReaderAtCloser, int64, error) {
+	ra, ok := s.Store.(objstore.ReaderAtStore)
+	if !ok {
+		return nil, 0, fmt.Errorf("no ReaderAt")
+	}
+	r, n, err := ra.GetReaderAt(ctx, b, k)
+	if err == nil && strings.HasPrefix(k, "tables/") && strings.HasSuffix(k, ".parquet") {
+		s.gets.Add(1)
+		s.bytes.Add(n)
+	}
+	return r, n, err
+}
+
+// WITH NO DATA DOES NOT RUN THE QUERY, and this asserts the ABSENCE of the
+// execution rather than the outcome (#1024 round-3 review B1/N4).
+//
+// The outcome — an empty table with the right columns — is the same whether or
+// not the rows were read, which is exactly how a round-3 change that ran every
+// CTE body and every hash join's build side inside `WITH NO DATA` passed the
+// gate above. Planning is not a pure derivation: `physical.Planner.Plan`
+// materializes a CTE by RUNNING a pipeline over it and builds a join's build
+// side, so a declaration that asks `Plan` for anything reads the table. The
+// names come from `physical.PublishedOutputNames`, a walk over the logical
+// plan, for that reason.
+//
+// Three assertions, because each catches a different way of executing: no data
+// object is READ; no spill scratch is created; and a row that would make the
+// query FAIL does not make the declaration fail — which is the property
+// ADR-0036 names as the point of the clause.
+func TestWithNoDataReadsNothingAndEvaluatesNothing(t *testing.T) {
+	ctx := context.Background()
+	scratch := t.TempDir()
+	store := &ctasReadCounter{Store: objstore.NewMemStore()}
+	db, err := Open(ctx, Config{Store: store, Bucket: "test", SpillDir: scratch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64, Nullable: true},
+		{Name: "g", Type: parquet.TypeInt64, Nullable: true},
+		{Name: "s", Type: parquet.TypeString, Nullable: true},
+	}}
+	if err := db.CreateTable(ctx, "big", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	rows := make([]map[string]any, 0, 4000)
+	for i := 0; i < 4000; i++ {
+		rows = append(rows, map[string]any{"id": int64(i), "g": int64(i % 7), "s": "x"})
+	}
+	ing := db.NewIngester("big", schema, nil, ingest.Config{MaxBufferRows: 2500, RowGroupSize: 512})
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Every shape the round-3 review measured a read on, plus the controls it
+	// measured zero on, so the cell that starts reading is named.
+	shapes := []struct{ name, query string }{
+		{"Plain", `SELECT id, g + 1 FROM big`},
+		{"StarOverDerived", `SELECT * FROM (SELECT id, g + 1 FROM big) x`},
+		{"StarOverCTE", `WITH c AS (SELECT id, g + 1 FROM big) SELECT * FROM c`},
+		{"CTEListedItems", `WITH c AS (SELECT id, g FROM big) SELECT id, g FROM c`},
+		{"CTEUsedTwice", `WITH c AS (SELECT id, g FROM big) SELECT a.id, b.g FROM c a JOIN c b ON b.id = a.id`},
+		{"NestedDerivedInCTE", `WITH c AS (SELECT * FROM (SELECT id, g + 1 FROM big) y) SELECT * FROM c`},
+		{"Join", `SELECT a.id, b.g FROM big a JOIN big b ON b.id = a.id`},
+		{"ScalarSubquery", `SELECT id, (SELECT MAX(g) FROM big) FROM big`},
+		{"Aggregate", `SELECT g, COUNT(*) FROM big GROUP BY g`},
+		// A row that would FAIL the query. `id = 5` exists, so the query
+		// divides by zero the moment it runs — and the declaration must not.
+		{"PoisonedRow", `SELECT id, 1 / (id - 5) AS x FROM big`},
+		{"PoisonedRowInCTE", `WITH c AS (SELECT id, 1 / (id - 5) AS x FROM big) SELECT * FROM c`},
+		{"PoisonedRowInCTEListed", `WITH c AS (SELECT id, 1 / (id - 5) AS x FROM big) SELECT id, x FROM c`},
+		{"PoisonedRowInDerived", `SELECT * FROM (SELECT id, 1 / (id - 5) AS x FROM big) y`},
+		{"PoisonedCastInCTE", `WITH c AS (SELECT CAST(s AS INT64) AS n FROM big) SELECT * FROM c`},
+		{"PoisonedRowInJoin", `SELECT a.id, 1 / (a.id - 5) AS x FROM big a JOIN big b ON b.id = a.id`},
+	}
+
+	for i, sh := range shapes {
+		t.Run(sh.name, func(t *testing.T) {
+			tbl := fmt.Sprintf("nd_%d", i)
+			store.gets.Store(0)
+			store.bytes.Store(0)
+
+			if _, err := db.Query(ctx, fmt.Sprintf("CREATE TABLE %s AS %s WITH NO DATA", tbl, sh.query)); err != nil {
+				t.Fatalf("the declaration FAILED: %v\n  WITH NO DATA must declare a table for a "+
+					"query it does not run, including one that would fail on a row", err)
+			}
+			if n := store.gets.Load(); n != 0 {
+				t.Errorf("the declaration READ %d data object(s) (%d bytes). WITH NO DATA does not "+
+					"run the query, and planning is not a pure derivation — materializeCTEs RUNS a "+
+					"pipeline and buildJoin builds the build side", n, store.bytes.Load())
+			}
+			if n := ctasScalar(t, ctx, db, "SELECT COUNT(*) AS c FROM "+tbl); n != 0 {
+				t.Errorf("the declared table holds %d rows", n)
+			}
+			// No scratch: a spilling operator that ran would leave one.
+			entries, err := os.ReadDir(scratch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				names := make([]string, 0, len(entries))
+				for _, e := range entries {
+					names = append(names, e.Name())
+				}
+				t.Errorf("the declaration left %d scratch entries %v; nothing ran", len(entries), names)
+			}
+		})
+	}
+
+	// The boundary from the other side: the SAME poisoned queries DO fail when
+	// the statement is asked to run them, so the cells above are not passing
+	// because the expression is harmless.
+	for i, q := range []string{
+		`SELECT id, 1 / (id - 5) AS x FROM big`,
+		`WITH c AS (SELECT id, 1 / (id - 5) AS x FROM big) SELECT * FROM c`,
+	} {
+		t.Run(fmt.Sprintf("WithDataFails%d", i), func(t *testing.T) {
+			if _, err := db.Query(ctx, fmt.Sprintf("CREATE TABLE poisoned_%d AS %s", i, q)); err == nil {
+				t.Errorf("%s succeeded WITH DATA; the poisoned cells above prove nothing", q)
+			}
+		})
+	}
 }

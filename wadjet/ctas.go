@@ -340,27 +340,26 @@ func (db *DB) declaredOutputFor(ctx context.Context, parsed *plansql.ParsedQuery
 	// star over `(SELECT n+1, n+2 …)` is 42701 on the executed arm and on
 	// PostgreSQL 17.11, and was CREATED here.
 	//
-	// The sink's names exist at PLAN time — `CollectSink.Schema()` answers
-	// from `SchemaHint` when no batch was consumed — so the fix is to BUILD
-	// the physical plan and read exactly what `DB.Query` reads, without
-	// running it. That is the one derivation this arm was supposed to share
-	// all along, and it costs a plan the `WITH NO DATA` arm was already
-	// paying for in `DeclaredOutputSchema`'s walk.
+	// The sink's names are a walk over the LOGICAL plan —
+	// `publishedOutputNames(findOutputProjectionNode(…))`, the same list `Plan`
+	// stamps on the sink as `CollectSink.OutputNames` — and
+	// `physical.PublishedOutputNames` exports it.
 	//
-	// A planning failure is not fatal here: the walk's answer is what this arm
-	// had before, and it is right for every shape but this one. `Plan` is also
-	// the call the WITH DATA arm makes moments later, so a plan that cannot be
-	// built fails the statement there, with that path's message.
-	if phys, perr := planner.Plan(ctx, logicalPlan); perr == nil && phys != nil && phys.Pipeline != nil {
-		if phys.Cleanup != nil {
-			defer phys.Cleanup()
-		}
-		defer phys.Pipeline.Close()
-		if cs, ok := phys.Pipeline.Sink.(*exec.CollectSink); ok {
-			if sch := cs.Schema(); len(sch) == len(declared) {
-				for i := range declared {
-					declared[i].Name = sch[i].Name
-				}
+	// Asking `Plan` for them instead, which is what round 3 did, READS THE
+	// TABLE: `Plan` materializes every CTE body by RUNNING a pipeline
+	// (`materializeCTEs`) and builds every hash join's build side, so a
+	// statement documented not to execute the query executed the part of it
+	// that costs the most — measured at 2 data objects on five of nine shapes,
+	// 58 ms at 400k rows, 123 MiB peak (round-3 review B1). The clause exists
+	// so that a query which would fail on row five still declares its table;
+	// a declaration that reads the rows is not that clause.
+	//
+	// An empty entry means "this position publishes what it always did", so
+	// only the named positions are renamed.
+	if names := physical.PublishedOutputNames(logicalPlan); len(names) == len(declared) {
+		for i := range declared {
+			if names[i] != "" {
+				declared[i].Name = names[i]
 			}
 		}
 	}
