@@ -454,8 +454,19 @@ func materializedBlockUnder(n *logical.Node, published map[*logical.Node]bool) *
 		if published[cur] {
 			return cur
 		}
+		// A SORT of the block's OWN is on this path too. The lateral lowering
+		// puts the block's `ORDER BY` between its projection and the join, and
+		// stopping here left the join reading the positions off
+		// `declaredJoinSchema`'s walk — which descends to the AGGREGATE and
+		// answers its order (`product, __key_0`) where the stage publishes the
+		// projection's (`__key_0, p`). The minted slot was then looked for at
+		// the wrong ordinal and rode out to the client beside the block's own
+		// column on both DAG arms (#1020). A Sort changes neither the columns
+		// nor their order, so the block below it is still the relation this
+		// side publishes.
 		if cur.Type != logical.NodeFilter && cur.Type != logical.NodeLimit &&
-			cur.Type != logical.NodeProject && cur.Type != logical.NodeDistinct {
+			cur.Type != logical.NodeProject && cur.Type != logical.NodeDistinct &&
+			cur.Type != logical.NodeSort {
 			return nil
 		}
 	}
