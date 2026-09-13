@@ -1209,7 +1209,7 @@ each one does. The cell numbers are
 | a correlated subquery's HAVING | the enclosing query | kept; the re-run substitutes the HAVING | 47 |
 | a correlated IN set's SELECT list | the enclosing query | kept; substituted | 46, 69 |
 | a correlated subquery's ORDER BY or GROUP BY, where the SUBSTITUTED term is an expression | the enclosing query | kept; substituted and answered | 52, 52a, 82, 83, 110 |
-| a correlated subquery's ORDER BY or GROUP BY, where the SUBSTITUTED term renders as a BARE NUMERIC LITERAL | the enclosing query | kept; REFUSED 0A000 — that rendering reads as an ordinal | 52b, 53, 111, 112 |
+| a correlated subquery's ORDER BY or GROUP BY, where the SUBSTITUTED term would render as a BARE NUMERIC LITERAL | the enclosing query | kept; the value is rendered as a typed CAST (`CAST(1 AS BIGINT)`), a constant on both engines and a position on neither, and answered — nothing is refused for this reason any more | 52b, 53, 111, 112 |
 | a correlated subquery's ORDER BY with NO LIMIT or OFFSET | the enclosing query | kept as written — a sort with no slice cannot change the answer | 109 |
 | a JOIN's ON condition inside a correlated subquery | the enclosing query | kept; walked and substituted | 108 |
 | a correlated subquery whose BODY is a SET OPERATION | the enclosing query | REFUSED 0A000 — `RebuildSQL` renders one select and has no arm for a union | 84, 85 |
