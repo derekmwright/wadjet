@@ -51,7 +51,8 @@ second call site that re-ran three of the five post-parse passes would be a
 second dialect, and `resolvePositionalRefs` alone decides what `GROUP BY 1`
 means.
 
-**2. The schema is the plan's declared output, after enforcement.**
+**2. The schema is the plan's declared output, after enforcement — and ONE
+derivation.**
 `ingest.TableSchemaForQuery` turns `[]parquet.Column` into the new table's
 schema. It never infers `NOT NULL` (PostgreSQL does not); it applies the
 optional column-name list POSITIONALLY and accepts a SHORT one (PostgreSQL
@@ -59,8 +60,14 @@ does); it refuses a duplicate name `42701` and a too-long list `42601`; and it
 asks `parquet.ValidateWriteSchema`, so a declared type the writer cannot store
 is refused at CREATE rather than at the first flush (ADR-0018 §14). The list it
 is given comes from the EXECUTED plan — `QueryResult.OutputSchema`, which is
-the CollectSink's schema — or, for `WITH NO DATA`, from
-`Planner.DeclaredOutputSchema` over the same enforced plan. Both are post-
+the CollectSink's schema. `WITH NO DATA`, which does not execute, takes its
+TYPES from `Planner.DeclaredOutputSchema` over the same enforced plan and its
+NAMES from the same CollectSink, by building the physical plan and not running
+it: the sink answers `Schema()` from its plan-time hint when no batch was
+consumed. Two rounds of review were spent on the consequence of taking the
+names from anywhere else — the walk spells an unaliased item by its expression
+TEXT, so `WITH NO DATA` declared `"n + 1"` where `WITH DATA` and PostgreSQL say
+`?column?`, and with the name went the duplicate rule. Both are post-
 enforcement, which is what makes rule 2 of the Context hold.
 
 **2b. Every value goes through the one assignment conversion.** (Added
@@ -118,14 +125,23 @@ executed on the node that received them. MERGE's own source read
 family rather than breaking it.
 
 The boundary is LOUD where it bites, and since the round-2 review it is also
-REACHABLE: the statement gathers the whole result before it writes, and that
-gather is bounded by `DefaultQuerySourcedWriteBytes` (64 MiB, the same number
-`--local-fastpath-bytes` uses for a gathered result) or by `Config.MemoryBudget`
-when one is set. Past it the statement is `53400` naming the bound
-(`querySourceError`), never a silently truncated table and never the heap's
-business. It had been unreachable: `CollectSink.MaxBytes` was set only inside
-`internal/coordinator`, which refuses these statements `0A000` before it gets
-there, so a 99 MiB CTAS was never refused and peaked at 860 MiB.
+REACHABLE: the statement gathers the whole result before it writes, and the SIZE
+OF THAT RESULT is bounded by `DefaultQuerySourcedWriteBytes` (64 MiB, the same
+number `--local-fastpath-bytes` uses for a gathered result) or by
+`Config.MemoryBudget` when one is set. Past it the statement is `53400` naming
+the bound (`querySourceError`), never a silently truncated table. It had been
+unreachable: `CollectSink.MaxBytes` was set only inside `internal/coordinator`,
+which refuses these statements `0A000` before it gets there, so a 99 MiB CTAS
+was never refused at all.
+
+**The bound is on the RESULT, not on the process.** Measured in the round-2
+review: a 94 MiB result refused against a 64 MiB bound still peaked at 1400 MiB
+of Go heap, and the IDENTICAL query as a plain unbounded `SELECT` peaked at
+1500 MiB. The remainder is `DB.Query`'s `map[string]any` per row — the pattern
+`CollectSink`'s own comment records as having held 21 GB at SF10 Q18 — and it
+belongs to reading a result of that size, not to writing it. Nothing here
+claims otherwise, and the statement is bounded by the same arithmetic every
+other reader of a large result is.
 
 STREAMING the result into the writer is the step that removes the bound rather
 than enforcing it, and it is the smaller half of the deferral above: the writer
@@ -133,9 +149,13 @@ is a `Sink`, `CollectSink` is not a `MergeableSink` so a pipeline shares ONE
 sink across its morsel workers, and a mutex-protected sink that boxes each batch
 into the ingester as it arrives is all the shape needs. What it costs is the
 schema: the table's declaration would come from the first batch rather than from
-the completed plan, with the plan-time walk as the zero-row fallback — the two
-agree today (`TestTheTwoArmsOfACreateDeclareOneTable`), and that agreement would
-become load-bearing rather than merely true.
+the completed plan. The `WITH NO DATA` arm already reads that declaration from
+the same place — it BUILDS the physical plan and takes `CollectSink.Schema()`
+from it without running it, which is what round 3 settled after the round-2 fix
+left a star over a subquery naming its inner unaliased item by expression text —
+so the agreement between the two arms is already a shared derivation rather than
+two that happen to match. `TestTheTwoArmsOfACreateDeclareOneTable` (21 shapes,
+including eight stars over a CTE or a derived table) is the gate for it.
 
 Lifting it is a separate arc, and the mechanism is written down here so it is
 not redesigned: `Coordinator.ExecuteSQL` gains a branch for `QueryCreateTable`

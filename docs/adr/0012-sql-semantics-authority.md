@@ -5047,12 +5047,18 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     `NOTICE: relation "t" already exists, skipping` and the `CREATE TABLE AS`
     tag; this engine sends the tag and no NOTICE, because it has no NOTICE
     channel on every door and a message only pgwire could carry would be a
-    fourth answer to one statement. The tag is what a client branches on and
-    it is identical, so the divergence is in what a human sees in `psql`.
-    `DROP TABLE IF EXISTS` has always answered this way, and the DECLARED
-    `CREATE TABLE IF NOT EXISTS` — whose grammar this arc added — answers the
-    same way since the round-2 review found it raising the 42P07 the clause
-    exists to replace.
+    fourth answer to one statement. For the two `CREATE TABLE … AS SELECT`
+    forms and for `INSERT INTO … SELECT` the TAG is what a client branches on
+    and it is IDENTICAL to PostgreSQL's — `CREATE TABLE AS` for a skip or a
+    `WITH NO DATA`, `SELECT <n>`, `INSERT 0 <n>`, all measured on the wire —
+    so for those the divergence is only in what a human sees in `psql`.
+
+    The DECLARED `CREATE TABLE IF NOT EXISTS` (and `DROP TABLE IF EXISTS`) skip
+    the same way, but their tag is NOT PostgreSQL's: this engine answers every
+    declared DDL statement with `SELECT 1` over a one-row result, a fresh
+    `CREATE TABLE` included, where PostgreSQL sends `CREATE TABLE` and no rows.
+    That is a pre-existing property of declared DDL on this wire and not of the
+    clause; the skip is consistent with the form it belongs to.
 
 ## Consequences
 

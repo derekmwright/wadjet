@@ -177,8 +177,11 @@ type RowSource struct {
 	At func(i int) ([]any, error)
 }
 
-// SliceRows is a RowSource over rows a caller already has as a slice.
-func SliceRows(rows [][]any) RowSource {
+// sliceRows is a RowSource over rows a caller already has as a slice. It is
+// unexported because no door has such a slice — every production caller reads
+// its rows one at a time out of a result — and it exists for the tests that
+// drive this seam directly.
+func sliceRows(rows [][]any) RowSource {
 	return RowSource{N: len(rows), At: func(i int) ([]any, error) { return rows[i], nil }}
 }
 

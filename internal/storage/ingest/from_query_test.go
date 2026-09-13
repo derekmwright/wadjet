@@ -199,7 +199,7 @@ func TestARefusedCommitReclaimsWhatItUploaded(t *testing.T) {
 
 		_, err := WriteQueryRows(ctx, cat, QueryWrite{
 			Table: "taken", Schema: schema, Columns: []string{"a"}, Create: true,
-		}, SliceRows([][]any{{int64(1)}, {int64(2)}}))
+		}, sliceRows([][]any{{int64(1)}, {int64(2)}}))
 		if err == nil {
 			t.Fatal("a create onto a taken name succeeded")
 		}
@@ -220,7 +220,7 @@ func TestARefusedCommitReclaimsWhatItUploaded(t *testing.T) {
 		_, err := WriteQueryRows(ctx, cat, QueryWrite{
 			Table: "app", Schema: schema, Columns: []string{"a"},
 			Incarnation: "not-the-one-this-table-has",
-		}, SliceRows([][]any{{int64(1)}}))
+		}, sliceRows([][]any{{int64(1)}}))
 		if err == nil {
 			t.Fatal("an append against a foreign incarnation succeeded")
 		}
@@ -250,7 +250,7 @@ func TestACreateWithFilesPublishesThemTogether(t *testing.T) {
 
 	n, err := WriteQueryRows(ctx, cat, QueryWrite{
 		Table: "made", Schema: schema, Columns: []string{"a"}, Create: true,
-	}, SliceRows([][]any{{int64(1)}, {int64(2)}, {int64(3)}}))
+	}, sliceRows([][]any{{int64(1)}, {int64(2)}, {int64(3)}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +309,7 @@ func TestAPartlyWrittenStatementPublishesNoneOfIt(t *testing.T) {
 	_, err = WriteQueryRows(ctx, cat, QueryWrite{
 		Table: "multi", Schema: schema, Columns: []string{"a", "p"},
 		PartitionKeys: []string{"p"}, Incarnation: inc,
-	}, SliceRows([][]any{{int64(1), "x"}, {int64(2), "y"}}))
+	}, sliceRows([][]any{{int64(1), "x"}, {int64(2), "y"}}))
 	if err == nil {
 		t.Fatal("the statement succeeded over a store that refused its second file")
 	}

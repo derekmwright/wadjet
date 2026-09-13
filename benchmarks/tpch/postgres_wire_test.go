@@ -2683,6 +2683,13 @@ func runWireCreatedTableSchema(t *testing.T, ctx context.Context, wConn, pConn *
 		{"ScalarSubquery", `SELECT n_nationkey, (SELECT MAX(n_nationkey) FROM nation) FROM nation WHERE n_nationkey < 2`},
 		{"RenameList", `SELECT n_nationkey, n_name FROM nation WHERE n_nationkey < 2`},
 		{"Empty", `SELECT n_nationkey, n_name FROM nation WHERE n_nationkey < 0`},
+		// A STAR over a relation that is not a base table, with an UNALIASED
+		// item inside it. It is the one shape where the two arms of a CTAS
+		// derived their names differently (round-2 review B1), and the entry
+		// above could not see it: every other case lists its items, so the
+		// outer SELECT's own names answer for them.
+		{"StarOverADerivedTable", `SELECT * FROM (SELECT n_nationkey, n_nationkey + 1 FROM nation WHERE n_nationkey < 3) x`},
+		{"StarOverACTE", `WITH c AS (SELECT n_nationkey, n_name FROM nation WHERE n_nationkey < 3) SELECT * FROM c`},
 	}
 	for _, c := range cases {
 		for _, arm := range []struct{ name, suffix string }{

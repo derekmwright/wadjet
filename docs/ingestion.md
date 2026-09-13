@@ -34,9 +34,12 @@ statement having an end:
   as unreferenced bytes — see "Which Wadjet Wrote a File" below.)
 
 Both statements gather the whole result in the process running them before they
-write, and that gather is BOUNDED — 64 MiB by default, `Config.MemoryBudget`
-when one is set. A result past the bound is SQLSTATE `53400` naming it, never
-truncated. Every value is converted to its target column's type by the same
+write, and the size of that gathered RESULT is bounded — 64 MiB by default,
+`Config.MemoryBudget` when one is set. A result past the bound is SQLSTATE
+`53400` naming it, rather than truncated or attempted. The bound counts the
+result's bytes and not the process's memory: reading a result of that size costs
+several times its payload in Go heap, as the same rows do through a plain
+`SELECT`. Every value is converted to its target column's type by the same
 assignment conversion `INSERT … VALUES` applies, so a value outside a column's
 domain is refused at the statement rather than stored. See
 [SQL reference](sql-reference.md#create-table-as-select) for the syntax, the

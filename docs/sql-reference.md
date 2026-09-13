@@ -595,11 +595,17 @@ validated against the table identity the statement read. The command tag is
 `INSERT 0 <n>`.
 
 **Both statements gather the whole result before they write**, on the process
-that runs the statement, and that gather is BOUNDED: 64 MiB by default, or
-`Config.MemoryBudget` when one is configured. A result past the bound is refused
-with SQLSTATE `53400` naming the bound, never truncated and never left to the
-heap. Streaming the result into the writer instead of gathering it — which would
-remove the bound rather than enforce it — is the named next step in
+that runs the statement, and the size of that GATHERED RESULT is bounded: 64 MiB
+by default, or `Config.MemoryBudget` when one is configured. A result past the
+bound is refused with SQLSTATE `53400` naming the bound, rather than truncated
+or attempted.
+
+The bound counts the result's own bytes, not the process's memory. Reading a
+result of that size costs several times its payload in Go heap — a plain
+`SELECT` of the same rows costs the same, because it is the row boxing rather
+than the write path — so size a machine for the query, not for the bound.
+Streaming the result into the writer, which removes the gather rather than
+bounding it, is the named next step in
 [ADR-0036](adr/0036-a-query-sourced-write-is-one-statement-one-commit.md),
 together with the per-worker parallel write.
 
