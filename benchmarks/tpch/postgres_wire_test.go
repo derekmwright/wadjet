@@ -81,6 +81,7 @@ func runPostgresWireArm(t *testing.T, ctx context.Context, o *postgresOracle) {
 	t.Cleanup(func() { pConn.Close(context.Background()) })
 
 	t.Run("Metadata", func(t *testing.T) { runWireMetadata(t, ctx, wConn, pConn) })
+	t.Run("CreatedTableSchema", func(t *testing.T) { runWireCreatedTableSchema(t, ctx, wConn, pConn) })
 	t.Run("Errors", func(t *testing.T) { runWireErrors(t, ctx, wConn, pConn) })
 	t.Run("CommandTags", func(t *testing.T) { runWireCommandTags(t, ctx, wConn, pConn) })
 	t.Run("Cancellation", func(t *testing.T) { runWireCancellation(t, ctx, wadjetDSN, o.dsn) })
@@ -2660,6 +2661,84 @@ func wireDMLTagCases(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgC
 			`WHEN MATCHED THEN UPDATE SET n = s.n `+
 			`WHEN NOT MATCHED THEN INSERT (id, n) VALUES (s.id, s.n)`),
 	}
+}
+
+// runWireCreatedTableSchema compares the SCHEMA a `CREATE TABLE … AS SELECT`
+// creates, on both engines, through `information_schema.columns` — which is
+// what the issue asks the oracle for and what a client actually reads.
+//
+// The arc's own gates compare a created table's declaration against
+// expectations written into the arc; this compares it against the SERVER. It is
+// the cell that would have caught the `WITH NO DATA` arm naming an unaliased
+// column by its expression text where PostgreSQL names it `?column?`, so both
+// arms of every statement are run.
+func runWireCreatedTableSchema(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgConn) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"Columns", `SELECT n_nationkey, n_name FROM nation WHERE n_nationkey < 4`},
+		{"UnaliasedExpression", `SELECT n_nationkey, n_nationkey + 1, n_name FROM nation WHERE n_nationkey < 4`},
+		{"Aggregate", `SELECT n_regionkey, COUNT(*) AS c FROM nation GROUP BY n_regionkey`},
+		{"ScalarSubquery", `SELECT n_nationkey, (SELECT MAX(n_nationkey) FROM nation) FROM nation WHERE n_nationkey < 2`},
+		{"RenameList", `SELECT n_nationkey, n_name FROM nation WHERE n_nationkey < 2`},
+		{"Empty", `SELECT n_nationkey, n_name FROM nation WHERE n_nationkey < 0`},
+	}
+	for _, c := range cases {
+		for _, arm := range []struct{ name, suffix string }{
+			{"WithData", ""},
+			{"WithNoData", " WITH NO DATA"},
+		} {
+			t.Run(c.name+"/"+arm.name, func(t *testing.T) {
+				tbl := "wire_sch_" + strings.ToLower(c.name+arm.name)
+				execBoth(ctx, wConn, pConn, `DROP TABLE `+tbl, `DROP TABLE IF EXISTS `+tbl)
+				t.Cleanup(func() {
+					execBoth(context.Background(), wConn, pConn, `DROP TABLE `+tbl, `DROP TABLE IF EXISTS `+tbl)
+				})
+				cols := ""
+				if c.name == "RenameList" {
+					cols = " (a, b)"
+				}
+				stmt := fmt.Sprintf("CREATE TABLE %s%s AS %s%s", tbl, cols, c.body, arm.suffix)
+				if res := pConn.ExecParams(ctx, stmt, nil, nil, nil, nil).Read(); res.Err != nil {
+					t.Fatalf("the ORACLE refused this statement: %v\n  SQL: %s", res.Err, stmt)
+				}
+				if res := wConn.ExecParams(ctx, stmt, nil, nil, nil, nil).Read(); res.Err != nil {
+					t.Errorf("wire divergence [%s]: wadjet refused a statement PostgreSQL ran: %v\n  SQL: %s",
+						wirePropFieldNames, res.Err, stmt)
+					return
+				}
+				probe := fmt.Sprintf(
+					`SELECT column_name FROM information_schema.columns WHERE table_name = '%s' ORDER BY ordinal_position`, tbl)
+				want := wireColumnNames(t, ctx, pConn, probe, "PostgreSQL")
+				got := wireColumnNames(t, ctx, wConn, probe, "wadjet")
+				if len(got) != len(want) {
+					t.Errorf("wire divergence [%s]: the created table has %d columns %v, PostgreSQL's has %d %v\n  SQL: %s",
+						wirePropFieldCount, len(got), got, len(want), want, stmt)
+					return
+				}
+				for i := range want {
+					if got[i] != want[i] {
+						t.Errorf("wire divergence [%s]: column %d is %q, PostgreSQL names it %q\n  SQL: %s",
+							wirePropFieldNames, i, got[i], want[i], stmt)
+					}
+				}
+			})
+		}
+	}
+}
+
+func wireColumnNames(t *testing.T, ctx context.Context, conn *pgconn.PgConn, sql, who string) []string {
+	t.Helper()
+	res := conn.ExecParams(ctx, sql, nil, nil, nil, nil).Read()
+	if res.Err != nil {
+		t.Fatalf("%s: %s: %v", who, sql, res.Err)
+	}
+	out := make([]string, 0, len(res.Rows))
+	for _, row := range res.Rows {
+		out = append(out, string(row[0]))
+	}
+	return out
 }
 
 // wireQuerySourcedWriteTagCases covers the two statements whose SOURCE is a

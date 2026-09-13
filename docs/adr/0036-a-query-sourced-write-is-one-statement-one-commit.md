@@ -63,12 +63,32 @@ the CollectSink's schema — or, for `WITH NO DATA`, from
 `Planner.DeclaredOutputSchema` over the same enforced plan. Both are post-
 enforcement, which is what makes rule 2 of the Context hold.
 
+**2b. Every value goes through the one assignment conversion.** (Added
+2026-09-13, the round-2 review.) A CREATE needs none — its target columns ARE
+the query's declared output — but an APPEND has two type lists, and the value
+has to cross between them. It crosses through `assignEvaluatedValue`, the
+converter `INSERT … VALUES` and `UPDATE … SET` have used since #647/#678, at the
+STATEMENT door: the one place that holds both the source's declared type (the
+plan's output schema) and the target's (the catalog). Handing the query's BOX
+to the writer instead is not a smaller version of this — it is a different
+answer, because `parquet.DecimalValueFromBox` reads an integer box as the
+already-UNSCALED carrier (ADR-0018 §4) and stored a BIGINT 5 into a
+`DECIMAL(18,4)` as 0.0005, and because no leaf check narrows PORT to its uint16
+or PROTOCOL to its uint8, so `PORT 500000` landed in a table.
+
 **3. One commit, and a failure reclaims.** The Ingester's
 `DeferManifestCommit` (built for #691) holds every flushed file out of the
 manifest, and the statement ends in one catalog write:
 
 - `catalog.CreateTableWithFiles` for a create — the table's FIRST manifest
-  already holds the rows, so the name never resolves to an empty table;
+  already holds the rows, so the name never resolves to an empty table. The
+  three catalog records a table is (`table.<name>`, `manifest.<name>`, the
+  `meta` list) are one commit or none: every payload is ENCODED before any key
+  is written, and a write that fails after an earlier one succeeded rolls the
+  earlier ones back. Readers do not agree about which record IS the table —
+  `GetTable` reads the first, `DropTable` goes through the last — so a partial
+  write leaves not a half-table but a WEDGED NAME, one that cannot be read,
+  created or dropped (the round-2 review reached it from ordinary SQL);
 - `catalog.CommitIngest` for an append — one CAS, validated INSIDE the CAS
   against the table incarnation the STATEMENT read (#919, ADR-0030).
 
@@ -97,9 +117,25 @@ executed on the node that received them. MERGE's own source read
 (`db.Query("SELECT * FROM <source>")`) is exactly this shape. A CTAS joins that
 family rather than breaking it.
 
-The boundary is LOUD where it bites: the statement gathers the whole result
-before it writes, and a result past that budget is `53400` naming the statement
-(`querySourceError`), never a silently truncated table.
+The boundary is LOUD where it bites, and since the round-2 review it is also
+REACHABLE: the statement gathers the whole result before it writes, and that
+gather is bounded by `DefaultQuerySourcedWriteBytes` (64 MiB, the same number
+`--local-fastpath-bytes` uses for a gathered result) or by `Config.MemoryBudget`
+when one is set. Past it the statement is `53400` naming the bound
+(`querySourceError`), never a silently truncated table and never the heap's
+business. It had been unreachable: `CollectSink.MaxBytes` was set only inside
+`internal/coordinator`, which refuses these statements `0A000` before it gets
+there, so a 99 MiB CTAS was never refused and peaked at 860 MiB.
+
+STREAMING the result into the writer is the step that removes the bound rather
+than enforcing it, and it is the smaller half of the deferral above: the writer
+is a `Sink`, `CollectSink` is not a `MergeableSink` so a pipeline shares ONE
+sink across its morsel workers, and a mutex-protected sink that boxes each batch
+into the ingester as it arrives is all the shape needs. What it costs is the
+schema: the table's declaration would come from the first batch rather than from
+the completed plan, with the plan-time walk as the zero-row fallback — the two
+agree today (`TestTheTwoArmsOfACreateDeclareOneTable`), and that agreement would
+become load-bearing rather than merely true.
 
 Lifting it is a separate arc, and the mechanism is written down here so it is
 not redesigned: `Coordinator.ExecuteSQL` gains a branch for `QueryCreateTable`
@@ -151,6 +187,21 @@ commit it needs (`CommitIngest` takes a list).
   point of the clause and is what PostgreSQL does.
 
 ## Consequences
+
+- Gates (round 2): `wadjet.TestBothWriteDoorsStoreTheSameNumber` and
+  `TestADecimalSourceIsAssignedAtItsValue` (the two doors' stored VALUES, pair
+  by pair, against each other and against PostgreSQL 17.11);
+  `TestAQuerySourcedWriteRefusesTheSameRangesTheOtherDoorsDo`;
+  `TestACreateWhoseCommitFailsLeavesTheNameFree` (a failure injected at each of
+  the three catalog keys in turn, asserting the name stays REUSABLE);
+  `TestANonFiniteValueIsStoredAndItsBoundIsDropped`;
+  `TestACancelAfterAFileLandsStillReclaimsIt` (over a store that honours the
+  context, which MemStore does not); `TestAQuerySourcedWriteRefusesPastItsGatherBudget`;
+  `TestTheTwoArmsOfACreateDeclareOneTable` and `TestTheDuplicateNameRuleHoldsOnBothArms`;
+  `TestIfNotExistsIsHonouredOnBothFormsOfCreateTable`;
+  `TestADefinitionListAndAQueryCannotBothBeWritten`; and the oracle wire arm's
+  `CreatedTableSchema` — `information_schema.columns` after the same CTAS on
+  both engines, both arms.
 
 - Gates: `wadjet.TestACreatedTableHoldsExactlyWhatTheQueryAnswered` and
   `TestACreatedTableHoldsEveryColumnOneAtATime` (all 22 types plus the DECIMAL

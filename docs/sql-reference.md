@@ -487,7 +487,10 @@ CREATE TABLE flow_logs (
 CREATE TABLE IF NOT EXISTS flow_logs (...)
 ```
 
-`IF NOT EXISTS` makes an existing name a no-op instead of SQLSTATE `42P07`.
+`IF NOT EXISTS` makes an existing name a no-op instead of SQLSTATE `42P07`, on
+both forms of `CREATE TABLE`. The existing table is left exactly as it is —
+including its schema, which the skipped statement may declare differently — and
+the query of a `CREATE TABLE IF NOT EXISTS … AS SELECT` is not run.
 
 ## CREATE TABLE AS SELECT
 
@@ -519,7 +522,8 @@ already carries, so the table holds exactly the columns the identical bare
 - An unaliased expression takes PostgreSQL's `?column?` name. Two of them in
   one statement is SQLSTATE `42701`, `column "?column?" specified more than
   once`, because a relation cannot hold both — alias them, or name them in the
-  column list.
+  column list. `WITH NO DATA` declares the same columns under the same rule:
+  the two arms of one statement always create the same table.
 - **`NOT NULL` is never inferred**, as PostgreSQL does not infer it: every
   column of the new table is nullable, including one copied from a `NOT NULL`
   source column.
@@ -532,7 +536,9 @@ already carries, so the table holds exactly the columns the identical bare
 
 The statement takes no `PARTITION BY`: a table created from a query is
 unpartitioned. Create it with the declared form and `INSERT INTO … SELECT` into
-it when you want partitioning.
+it when you want partitioning. A column DEFINITION list and a query cannot both
+be written — `CREATE TABLE t (a INT64) AS SELECT 1` is SQLSTATE `42601`, as it
+is on PostgreSQL; drop the types to name the query's columns.
 
 **Refusals.** An existing name is SQLSTATE `42P07` unless `IF NOT EXISTS` is
 written, in which case the statement is a no-op **and the query is not run**.
@@ -572,12 +578,16 @@ explicit list, a shortfall is SQLSTATE `42601`, `INSERT has more target columns
 than expressions`. More items than target columns is `42601`, `INSERT has more
 expressions than target columns`.
 
-Each position's type must be one the target column can hold. The same type
-is always accepted; so is any integer declaration into any other, and an
-integer or float into a float, and an integer into a `DECIMAL`. Everything else
-is SQLSTATE `42804` naming both types — write the `CAST` yourself. PostgreSQL
-inserts an assignment cast for some of those pairs and this engine does not;
-the difference is deliberate and is listed in
+Each position's value is converted to the target column's type by the same
+assignment conversion `INSERT … VALUES` applies, so the two doors store the same
+number: an integer into a `DECIMAL(18,4)` is `5.0000`, a `DECIMAL(12,3)` into a
+`DECIMAL(18,4)` is rescaled, a `double` into a `bigint` is rounded, and a value
+outside a column's domain is refused — `PORT 500000` is SQLSTATE `22003` on
+every door. Any pair within the numeric family (`INT32`, `INT64`, `PORT`,
+`PROTOCOL`, `FLOAT32`, `FLOAT64`, `DECIMAL`) assigns; a pair outside it — an
+integer into a `STRING`, a timestamp into an integer — is SQLSTATE `42804`
+naming both types, so write the `CAST` yourself. PostgreSQL assignment-casts a
+few of the refused pairs; the difference is listed in
 [ADR-0012](adr/0012-sql-semantics-authority.md).
 
 The append publishes all of its files or none of them, in one catalog write
@@ -585,9 +595,13 @@ validated against the table identity the statement read. The command tag is
 `INSERT 0 <n>`.
 
 **Both statements gather the whole result before they write**, on the process
-that runs the statement. A result past that budget is refused loudly (SQLSTATE
-`53400`) rather than truncated; the per-worker parallel write is a separate
-piece of work.
+that runs the statement, and that gather is BOUNDED: 64 MiB by default, or
+`Config.MemoryBudget` when one is configured. A result past the bound is refused
+with SQLSTATE `53400` naming the bound, never truncated and never left to the
+heap. Streaming the result into the writer instead of gathering it — which would
+remove the bound rather than enforce it — is the named next step in
+[ADR-0036](adr/0036-a-query-sourced-write-is-one-statement-one-commit.md),
+together with the per-worker parallel write.
 
 ## Column Selection
 

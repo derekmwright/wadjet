@@ -33,10 +33,14 @@ statement having an end:
   retired, because nothing references them. (The micro-batch path leaves them
   as unreferenced bytes — see "Which Wadjet Wrote a File" below.)
 
-Both statements gather the whole result in the process running them before
-they write; a result past that budget is refused loudly rather than truncated.
-See [SQL reference](sql-reference.md#create-table-as-select) for the syntax,
-the schema rule and the refusals.
+Both statements gather the whole result in the process running them before they
+write, and that gather is BOUNDED — 64 MiB by default, `Config.MemoryBudget`
+when one is set. A result past the bound is SQLSTATE `53400` naming it, never
+truncated. Every value is converted to its target column's type by the same
+assignment conversion `INSERT … VALUES` applies, so a value outside a column's
+domain is refused at the statement rather than stored. See
+[SQL reference](sql-reference.md#create-table-as-select) for the syntax, the
+schema rule and the refusals.
 
 ## Built-in Micro-Batch Ingester
 
