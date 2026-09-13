@@ -3,7 +3,9 @@ package ingest
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/sqlerr"
@@ -260,6 +262,71 @@ func TestACreateWithFilesPublishesThemTogether(t *testing.T) {
 	if rows != 3 {
 		t.Errorf("the table's first manifest names %d rows, want 3", rows)
 	}
+}
+
+// The strongest atomicity cell: a statement that writes SEVERAL files and
+// fails on a later one has published NONE of them, and the earlier ones are
+// reclaimed.
+//
+// It lives here rather than at a door because the buffer bound is what makes
+// the statement write more than one file, and only this seam takes a Config.
+// Without it every door-level fixture writes exactly one file, and a
+// per-flush manifest commit — the shape this rule replaces — passes.
+func TestAPartlyWrittenStatementPublishesNoneOfIt(t *testing.T) {
+	ctx := context.Background()
+	mem := objstore.NewMemStore()
+	failing := &fqFailAfter{Store: mem, after: 1}
+	cat := catalog.NewWithStore(failing, "test")
+	if err := cat.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "a", Type: parquet.TypeInt64, Nullable: true},
+		{Name: "p", Type: parquet.TypeString, Nullable: true},
+	}}
+	if err := cat.CreateTable(ctx, "multi", schema, []string{"p"}); err != nil {
+		t.Fatal(err)
+	}
+	inc, err := cat.TableIncarnation(ctx, "multi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := fqKeys(t, ctx, failing)
+
+	// Two partitions, so the flush writes two files; the second Put fails.
+	_, err = WriteQueryRows(ctx, cat, QueryWrite{
+		Table: "multi", Schema: schema, Columns: []string{"a", "p"},
+		PartitionKeys: []string{"p"}, Incarnation: inc,
+	}, [][]any{{int64(1), "x"}, {int64(2), "y"}})
+	if err == nil {
+		t.Fatal("the statement succeeded over a store that refused its second file")
+	}
+	fqAssertNoNewObjects(t, ctx, failing, before)
+
+	m, err := cat.GetManifest(ctx, "multi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range m.Partitions {
+		if len(p.Files) != 0 {
+			t.Errorf("partition %q holds %d files; a statement that failed halfway "+
+				"must have published none", p.Path, len(p.Files))
+		}
+	}
+}
+
+// fqFailAfter fails every data-object Put after the first n.
+type fqFailAfter struct {
+	objstore.Store
+	writes atomic.Int64
+	after  int64
+}
+
+func (s *fqFailAfter) Put(ctx context.Context, bucket, key string, r io.Reader, size int64, ct string) (string, error) {
+	if strings.HasPrefix(key, "tables/") && s.writes.Add(1) > s.after {
+		return "", errors.New("simulated object-store failure")
+	}
+	return s.Store.Put(ctx, bucket, key, r, size, ct)
 }
 
 func fqCatalog(t *testing.T) (*catalog.Catalog, objstore.Store) {

@@ -112,6 +112,34 @@ func TestACreateTableAsSelectReadsThroughThePolicedList(t *testing.T) {
 			"asserts that boundary (ran=%d)", ran)
 	}
 	t.Logf("nine-door census: %d doors ran the write, %d refused it", ran, refused)
+
+	// The NEGATIVE control, and it is what keeps the assertions above from
+	// passing for the wrong reason (correctness-fix-protocol method 2): the
+	// same statement run by an identity NO obligation covers stores the raw
+	// values. If the mask were coming from somewhere other than this
+	// identity's plan — a constant, a schema default, a value the fixture
+	// happens to hold — this table would carry `***` too.
+	for _, door := range rig.doors {
+		if !strings.HasPrefix(door.name, "embedded/s") {
+			continue
+		}
+		t.Run(door.name+"/admin-control", func(t *testing.T) {
+			if _, err := door.run(t, "admin-key",
+				"CREATE TABLE ctas_raw AS SELECT id, ssn, salary FROM "+pmTable); err != nil {
+				t.Fatalf("the admin's own CTAS: %v", err)
+			}
+			got, err := door.run(t, "admin-key", "SELECT id, ssn, salary FROM ctas_raw")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range got.rows {
+				if !strings.HasPrefix(row["ssn"], "true-") {
+					t.Fatalf("the unpoliced identity stored ssn as %q; the census's mask "+
+						"assertion cannot distinguish the two rules", row["ssn"])
+				}
+			}
+		})
+	}
 }
 
 // An identity that may not write is refused BEFORE the query runs, and an
