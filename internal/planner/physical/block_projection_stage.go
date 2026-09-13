@@ -176,7 +176,19 @@ func blockSortCarriesAMaterializedKey(p *logical.Node) bool {
 			if sorted && logical.HasHiddenProjection(cur.Projections) {
 				return true
 			}
-			return false
+			// A BLOCK OVER A BLOCK. The sort that materialized the key may be
+			// one projection deeper — `(SELECT y.a FROM (SELECT a FROM t ORDER
+			// BY b LIMIT 3) y)` — and stopping at the first Project left the
+			// DAG taking the narrowing exemption and reading the stream, which
+			// still carries the key's SOURCE column: six columns where the
+			// single-process arms and PostgreSQL publish five (#1076). A
+			// projection that carries no hidden column of its own re-publishes
+			// what is under it, so the walk continues through it; one that
+			// does IS the block this question is about, and it was answered
+			// above.
+			if logical.HasHiddenProjection(cur.Projections) {
+				return false
+			}
 		case logical.NodeLimit, logical.NodeDistinct:
 		default:
 			return false
