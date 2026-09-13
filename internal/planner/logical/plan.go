@@ -1244,16 +1244,29 @@ func NewWindow(child *Node, exprs []WindowExpr) *Node {
 	return &Node{Type: NodeWindow, Children: []*Node{child}, WindowExprs: exprs}
 }
 
+// A RELATION-COMBINING OPERATOR BUILDS ITS OUTPUT FROM ITS SIDES' STREAMS, so
+// each side publishes its VISIBLE list there (#991, #1075; ADR-0026 §9).
+//
+// A key a derived block materialized for its own ORDER BY is read by the sort
+// below it and by nothing above, and no operator re-projects over it: the
+// statement's own output trim reaches only the top (`physical.hiddenSortTrimOp`,
+// the gather's output renames). Every UNARY operator — Filter, Project,
+// Aggregate, Sort, Limit, Distinct, Window — passes a relation through or
+// names its own columns, so the tail survives only as far as that trim. A
+// BINARY one composes a new relation out of what its sides EMIT, and there the
+// tail becomes a column of the answer: `SELECT *` over a join published
+// `__sortkey_0` (#991) and a SET OPERATION published it too — with the two arms
+// then disagreeing on column count, so the DAG refused a query PostgreSQL
+// answers and `INTERSECT` lost every row (#1075).
+//
+// `NewJoin`, `NewUnion`, `NewIntersect` and `NewExcept` are the whole of that
+// class in this plan — there is no fifth binary node — which is why the call
+// belongs on each of them rather than on a list of consumers somebody has to
+// remember to extend. A side that materialized nothing is returned unchanged,
+// so an ordinary plan is what it always was. See block_visible_output.go.
+//
 // NewJoin creates a join node.
 func NewJoin(left, right *Node, joinType, condition string) *Node {
-	// A JOIN is the one consumer that reads a derived block's STREAM rather
-	// than its published list, so it is where a key the block materialized for
-	// its own ORDER BY would escape: the sort reads that key below, nothing
-	// re-projects above it, and `SELECT *` over the join published
-	// `__sortkey_0` — a name no query can spell — on every arm and in
-	// RowDescription (#991). Each side publishes its VISIBLE list here; a side
-	// that materialized nothing is returned unchanged, so an ordinary join's
-	// plan is what it always was. See block_visible_output.go.
 	return &Node{
 		Type:     NodeJoin,
 		Children: []*Node{dropBlockHiddenSlots(left), dropBlockHiddenSlots(right)},
@@ -1267,7 +1280,7 @@ func NewJoin(left, right *Node, joinType, condition string) *Node {
 func NewUnion(left, right *Node, all bool) *Node {
 	return &Node{
 		Type:     NodeUnion,
-		Children: []*Node{left, right},
+		Children: []*Node{dropBlockHiddenSlots(left), dropBlockHiddenSlots(right)},
 		UnionAll: all,
 	}
 }
@@ -1277,7 +1290,7 @@ func NewUnion(left, right *Node, all bool) *Node {
 func NewIntersect(left, right *Node, all bool) *Node {
 	return &Node{
 		Type:     NodeIntersect,
-		Children: []*Node{left, right},
+		Children: []*Node{dropBlockHiddenSlots(left), dropBlockHiddenSlots(right)},
 		UnionAll: all, // reuse field: true = ALL variant
 	}
 }
@@ -1287,7 +1300,7 @@ func NewIntersect(left, right *Node, all bool) *Node {
 func NewExcept(left, right *Node, all bool) *Node {
 	return &Node{
 		Type:     NodeExcept,
-		Children: []*Node{left, right},
+		Children: []*Node{dropBlockHiddenSlots(left), dropBlockHiddenSlots(right)},
 		UnionAll: all, // reuse field: true = ALL variant
 	}
 }
