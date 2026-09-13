@@ -75,6 +75,80 @@ tasks:
     cmds:
       - go run ./tools/docscheck .
 
+  # --- Release housekeeping (CLAUDE.md, "Release Housekeeping") ---
+  #
+  # The MECHANICAL half of the pre-tag pass. The judgement half — docs that
+  # state the current flag/default/type rule, doc comments that state the
+  # current invariant, an ADR per settled position, issues closed, release
+  # notes a user can read — is an authored pass and cannot be a task.
+
+  housekeeping:
+    desc: Pre-tag mechanical checks — gofmt, vet, go mod tidy, docscheck, tracked binaries, open worktrees
+    cmds:
+      - task: housekeeping:gofmt
+      - task: vet
+      - task: housekeeping:tidy
+      - task: docs:check
+      - task: housekeeping:binaries
+      - task: housekeeping:worktrees
+
+  housekeeping:gofmt:
+    desc: Fail if any tracked Go file is not gofmt-clean
+    cmds:
+      # git ls-files, never a filesystem walk: a git worktree lives at
+      # .claude/worktrees/<name>/ INSIDE the module root and is a full second
+      # copy of the source, so a walking check's verdict depends on whether
+      # anybody happens to have one open. That has been the defect twice.
+      - >
+        unformatted=$(git ls-files -z '*.go' | xargs -0 gofmt -l);
+        if [ -n "$unformatted" ]; then
+          echo "gofmt is not a no-op on:"; echo "$unformatted"; exit 1;
+        fi;
+        echo "gofmt: clean"
+
+  housekeeping:tidy:
+    desc: Fail if go mod tidy would change go.mod or go.sum
+    cmds:
+      # Runs tidy against a copy of the manifests and puts the originals back,
+      # so the check never leaves the tree changed behind it.
+      - >
+        saved=$(mktemp -d);
+        cp go.mod go.sum "$saved/";
+        go mod tidy;
+        if ! diff -q "$saved/go.mod" go.mod >/dev/null || ! diff -q "$saved/go.sum" go.sum >/dev/null; then
+          cp "$saved/go.mod" "$saved/go.sum" .; rm -rf "$saved";
+          echo "go mod tidy is not a no-op — run it and commit the result"; exit 1;
+        fi;
+        rm -rf "$saved";
+        echo "go mod tidy: no-op"
+
+  housekeeping:binaries:
+    desc: Fail if any tracked file is a compiled binary
+    cmds:
+      # Building to the repo root once wrote a 59 MB binary INTO the wadjet/
+      # package directory (see this file's header). Every binary belongs in
+      # dist/, which is gitignored, so a tracked ELF object is always a stray.
+      - >
+        tracked=$(git ls-files -z | xargs -0 file --mime-type |
+          grep -E 'application/x-(executable|pie-executable|sharedlib|object)' || true);
+        if [ -n "$tracked" ]; then
+          echo "tracked binaries:"; echo "$tracked"; exit 1;
+        fi;
+        echo "tracked binaries: none"
+
+  housekeeping:worktrees:
+    desc: List every git worktree besides the main checkout (a tag should leave none behind)
+    cmds:
+      # A listing, not a gate: an arc legitimately has one open while it runs.
+      # `git worktree remove <path>` is how a finished one goes away.
+      - >
+        extra=$(git worktree list --porcelain | awk '/^worktree /{print $2}' | tail -n +2);
+        if [ -n "$extra" ]; then
+          echo "worktrees still open:"; echo "$extra";
+        else
+          echo "worktrees: none besides the main checkout";
+        fi
+
   # --- Benchmark deploy pipeline ---
   # Usage:
   #   task bench:stage PROFILE=sf100-distributed     # Build + upload binaries
