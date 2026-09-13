@@ -9,8 +9,8 @@ import (
 	"github.com/derekmwright/wadjet/internal/testutil/tcpflagcases"
 )
 
-// Promotes the recursive used/unused cases in a2r7rev_extra_test.go.txt,
-// and enumerates the expression/query-block walk over empty input.
+// Covers the recursive used/unused cases and enumerates the
+// expression/query-block walk over empty input.
 func TestTCPFlagASTCoverage(t *testing.T) {
 	_, srv := setupRealDB(t)
 	conn := connectPgconn(t, srv.Addr())

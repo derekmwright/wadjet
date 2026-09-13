@@ -107,10 +107,10 @@ func selfJoinLogicalPlan(t *testing.T) *logical.Node {
 // self-join statement over one table — annotated, optimized (which
 // re-annotates), routed through the LOCAL FAST PATH's estimate and plan, and
 // then planned and (via PlanDistributed's NodeScan handling) walked into
-// stages — reads the catalog exactly TWICE for table "t": once for its
-// manifest, once for its aggregated column stats (a separate Catalog
-// operation with its own internal manifest read — see ManifestSnapshot's doc
-// for why the floor is two, not one) — when every physical.Planner built for
+// stages — reads the catalog exactly ONCE for table "t": the manifest and the
+// aggregated column statistics are one read of one revision, because the
+// statistics are taken FROM the pinned manifest (#540) — when every
+// physical.Planner built for
 // the statement shares one context-attached ManifestSnapshot
 // (physical.NewPlannerForContext), reproducing the coordinator's own
 // ExecuteSQL/SubmitSQL wiring. Without the pin (plain NewPlanner, no

@@ -94,7 +94,7 @@ func fillEmptyEntries(entries []intHashEntry) {
 // bijection. Four bijective shifts plus multiplication keep full hashes
 // injective (TestFibHashIsInjective); slot truncation can still collide.
 // The same hash routes by top bits and indexes by low bits
-// (TestHashSpreadFamilies). The fold is linear, not avalanching: strided
+// (TestUnifiedHashSpread, which checks both bit windows per key family). The fold is linear, not avalanching: strided
 // families retain mild owner/bucket correlation (TestTwoLevelThreeWindowSpread).
 // No optswitch: hashing changes unordered group emission order, not row sets.
 // See docs/internals/integer-hash-prefix-fold.md for the design.

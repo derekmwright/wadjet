@@ -102,8 +102,9 @@ type arcD5Cell struct {
 	// forcing anyway. So the arm costs two seconds per outer row: 295 forced
 	// reservations in ten minutes here, one cell per five minutes, against
 	// 0.71 s for the same cell with no budget. Both halves are pinned in
-	// TestCorrelatedRerunReadsTheInnerOncePerOuterRow and its budgeted
-	// sibling, with the numbers; neither is a leak — `used` is flat.
+	// TestEveryCorrelatedInnerIsReadOnce and its budgeted sibling
+	// TestCorrelatedRerunPaysTheFullReserveWaitPerOuterRow, with the
+	// numbers; neither is a leak — `used` is flat.
 	//
 	// What that arm would add here is nothing: the literal these cells gate is
 	// built in expr.readOuterValues from the VECTOR's own TypeID, before any

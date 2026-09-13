@@ -11,7 +11,9 @@ import (
 // one statement (#502), independent of scan-node count and Optimize passes.
 // Every scan shares one ScanDeletes snapshot, so first-wins unions cannot retain
 // stale markers across concurrent writes (#491). Pin the two Catalog operations
-// separately: the floor is two manifest reads per table, pending #540.
+// separately; the column statistics are read FROM the manifest this snapshot
+// already pinned (AggregateColumnStatsFrom), so the floor is ONE manifest read
+// per table and both halves describe one revision (#540).
 // Attach before planning: NewPlanner creates a fresh snapshot; forSubquery shares
 // it. Callers creating several Planners per statement MUST assign the same pointer.
 // Asynchronous watch caching cannot provide the required freshness (#483).

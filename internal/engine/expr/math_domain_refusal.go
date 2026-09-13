@@ -11,7 +11,8 @@ import (
 // zero raise 22012. Negative SQRT and undefined POWER pairs raise 2201F.
 // POWER/EXP overflow or underflow and ASIN/ACOS outside [-1,1] raise 22003.
 // Test only each failing condition: NaN and allowed infinities remain values,
-// and SQRT(-0.0) preserves -0. math_domain_test.go probes this boundary.
+// and SQRT(-0.0) preserves -0. scalar_coverage_test.go probes this boundary
+// per function, alongside tier2_funcs_test.go.
 // See docs/internals/math-function-domain-refusals.md for the design.
 
 // raiseLogarithmDomain refuses a logarithm argument that is zero or negative.

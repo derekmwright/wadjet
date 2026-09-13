@@ -144,7 +144,9 @@ func TestN1AnOrdinalSortKeyBindsItsSlot(t *testing.T) {
 			// CONTROL: a sort over a bare CROSS join with no materialized
 			// projection — the shape sortKeySlotPosStage's bound exists for
 			// (`SELECT clt1.c2, clt2.c1 FROM clt1, clt2 ORDER BY 2`, held by
-			// TestArcA2OrderBy and benchmarks/tpch/duplicate_name_dag_test.go).
+			// collide.Corpus()'s ordinal_over_a_comma_join entry through
+			// TestCollidingBareNamesOnEveryArm, and by
+			// benchmarks/tpch/duplicate_name_dag_test.go).
 			// The measurement must still DECLINE there, and the by-name
 			// resolution must still answer PostgreSQL's order.
 			name: "control: an ordinal over a bare cross join",

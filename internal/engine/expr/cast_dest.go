@@ -43,8 +43,8 @@ var castOnlyDestTypes = map[string]bool{
 // `CAST('{"a":1}' AS json)` is `{"a":1}` on both; `CAST('<a/>' AS xml)` is
 // `<a/>` on both. The first cut of #652 refused all three, which turned a
 // RIGHT answer into a loud one — the direction ADR-0012 does not permit, and
-// the direction `expr.TestUnknownCastTypeStillDeclaresString` had already
-// been left in the tree to forbid (round-1 review, B4).
+// the direction `expr.TestUnknownCastTypeIsRefusedAndKnownOnesStillAnswer`
+// had already been left in the tree to forbid (round-1 review, B4).
 //
 // They declare `text` where PostgreSQL declares time/json/xml. That is a
 // DECLARATION divergence over a right value, which is the same class as every

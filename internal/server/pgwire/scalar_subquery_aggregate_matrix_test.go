@@ -10,10 +10,9 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-// Reconstructed from the 180 cells in r7rev_logs/matrix_wire.log: the saved
-// a2r7rev_matrix_test.go.txt actually contains the coordinator probe. All cells
-// were remeasured on PostgreSQL 17.11 before promotion. The 24 wide DECIMAL
-// value divergences are #1037; a pin that starts agreeing fails.
+// 180 cells, every one measured on PostgreSQL 17.11 before it was written
+// here. The 24 wide DECIMAL value divergences are #1037; a pin that starts
+// agreeing fails.
 func TestScalarSubqueryAggregateMatrix(t *testing.T) {
 	_, srv := setupRealDB(t)
 	conn := connectPgconn(t, srv.Addr())

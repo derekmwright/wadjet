@@ -836,7 +836,7 @@ func TestPlanDistributed_InsertsExchanges(t *testing.T) {
 //     every StageExchangeReplicate has DistBroadcast, every StageExchangeGather
 //     has DistSingleton.
 //
-// Spec: docs/_archive/specs/2026-04-20-distribution-property-phase-2.md
+// Spec: docs/_archive/specs/2026-04-20-distribution-property-phase-2-design.md
 func TestTPCH_EnsureDistribution_PlannerParity(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
 

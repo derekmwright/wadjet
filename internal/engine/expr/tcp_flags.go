@@ -595,8 +595,8 @@ func fnTCPFlagsFromString(args []any) any {
 	return mask
 }
 
-// fnIsTCPHandshake tests for SYN-only (connection initiation).
-// is_tcp_handshake(flags) → true if SYN is set and ACK is not.
+// fnIsTCPHandshake tests for SYN set with ACK clear (connection initiation).
+// Other bits are not consulted, so SYN+PSH is a handshake and SYN+ACK is not.
 func fnIsTCPHandshake(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil

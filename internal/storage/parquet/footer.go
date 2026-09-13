@@ -133,7 +133,8 @@ func ReadFileMetaData(r io.ReaderAt, fileSize int64) (*FileMetaData, error) {
 // open against its leaf position; slice-index decoding depends on that (#927).
 // Refuse swapped, duplicate, foreign or shifted paths by name.
 // ValidateChunkLayout cannot catch a swap with valid byte ranges.
-// A missing chunk retains column_completeness.go's per-column refusal;
+// A missing chunk retains ColumnPageReader.checkColumnComplete's per-column
+// refusal (page_reader.go);
 // validate every carried position that has metadata and a schema leaf.
 // See docs/internals/parquet-column-chunk-path-binding.md for the design.
 func ValidateColumnChunkPaths(md *FileMetaData) error {
