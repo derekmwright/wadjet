@@ -50,6 +50,23 @@ func ExpandStarProjections(n *Node) {
 		// the input schema` on the single-process arms and, on the DAG, a
 		// column whose NAME and VALUE were both the string `*`.
 		qual := starQualifier(proj)
+		// A BARE star over a JOIN is the FROM clause's arms in WRITTEN order
+		// (star_join_order.go, #997/#1012): every arm's own list, each item
+		// qualified so it binds its own relation whichever side the plan
+		// builds, published under the column's own name. It is asked before
+		// the single-source list below because that list answers only for a
+		// lone scan, and a star that reaches a join otherwise reads the join
+		// operator's stream — which is the PLAN's order and the PLAN's
+		// qualification.
+		if qual == "" {
+			if items := joinStarColumns(n.Children[0]); len(items) > 0 {
+				changed = true
+				for _, it := range items {
+					expanded = append(expanded, starItemProjection(it.qualifier, it.column))
+				}
+				continue
+			}
+		}
 		cols := StarSourceColumns(n.Children[0], qual)
 		if len(cols) == 0 {
 			expanded = append(expanded, proj)

@@ -32,6 +32,15 @@ func Optimize(plan *Node, annotators ...func(*Node)) *Node {
 	// narrowed the scan to whatever else the SELECT list mentioned and the
 	// star's own columns came back NULL (#315). See star_expansion.go.
 	ExpandStarProjections(plan)
+	// …and immediately after THAT: the Project a bare star over a JOIN is
+	// minted into is a hypothesis the expansion has just confirmed or not,
+	// and an unconfirmed one is taken back out so the star keeps the answer
+	// it had (star_join_order.go, #997/#1012).
+	plan = ElideUnstatedJoinStar(plan)
+	// …and a POSITIONAL ORDER BY term over that star now has a list to count:
+	// the projection sits above the Sort, so ResolveOrdinalSortKeys below
+	// declines it and the star's own expansion answers it instead.
+	ResolveStarJoinOrdinalSortKeys(plan)
 	// Immediately after, and for the same reason: a COLUMN-ALIAS LIST over a
 	// `SELECT *` body renames the LEADING output columns, and which columns
 	// those are is what the expansion just decided (#958, ADR-0012's entry).

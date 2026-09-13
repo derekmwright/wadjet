@@ -66,22 +66,13 @@ func TestStarExpansionFeedsColumnPruning(t *testing.T) {
 // A star whose column set is not knowable here is left alone rather than
 // guessed at: expanding it to one side of a join would silently change which
 // columns the query returns.
+//
+// A JOIN used to be in this list and is NOT any more (#997, #1012): its arms
+// ARE knowable, in the FROM clause's written order, and leaving the star to
+// read the join operator's stream published the PLAN's order and the PLAN's
+// qualified side. star_join_order_test.go holds that rule and the shapes that
+// still decline.
 func TestStarExpansionDeclinesUnknowableSources(t *testing.T) {
-	t.Run("join", func(t *testing.T) {
-		left := NewScan("items", "")
-		left.ScanColumns = []string{"id", "name"}
-		right := NewScan("owners", "")
-		right.ScanColumns = []string{"id", "owner"}
-		plan := NewProject(NewJoin(left, right, "inner", "items.id = owners.id"),
-			[]Projection{{Expr: "*"}, {Column: "owner", Expr: "owner", Alias: "owner"}})
-
-		ExpandStarProjections(plan)
-
-		if len(plan.Projections) != 2 || plan.Projections[0].Expr != "*" {
-			t.Fatalf("star over a join was expanded: %+v", plan.Projections)
-		}
-	})
-
 	t.Run("unannotated scan", func(t *testing.T) {
 		scan := NewScan("items", "") // no ScanColumns: no catalog at plan time
 		plan := NewProject(scan, []Projection{{Expr: "*"}})

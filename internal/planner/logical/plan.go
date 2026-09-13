@@ -231,6 +231,21 @@ type Node struct {
 	// must APPLY it at the scan (distributed walkStages treats ordinary
 	// Projects as passthrough — a dropped barrier would leak raw values).
 	SecurityBarrier bool
+	// StarJoinArms marks the Project the builder mints for a bare `SELECT *`
+	// whose FROM is a JOIN, carrying the star itself as its one item.
+	//
+	// A star over a join is NOT the identity of its input: the input is the
+	// join operator's stream, whose ORDER and whose qualified side both
+	// follow a cost decision, where the star's list is the FROM clause's arms
+	// in written order (#997, #1012). The projection is what publishes that
+	// order, and it is minted before the passes that reorder joins so the
+	// order is read off the query rather than off the plan.
+	//
+	// The mark is what lets the mint be a HYPOTHESIS: ExpandStarProjections
+	// states the arms where it can, and ElideUnstatedJoinStar removes this
+	// node where it cannot, leaving the shape the builder would have built.
+	// See star_join_order.go.
+	StarJoinArms bool
 
 	// Aggregate
 	// PreservesAggOutputs marks a synthetic Project inserted by a rewrite

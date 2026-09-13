@@ -700,6 +700,36 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	}
 	plan = limitNode
 
+	// A BARE `*` OVER A JOIN IS NOT THE IDENTITY OF ITS INPUT, which is the
+	// claim isStarOnly rests on. The input is the JOIN OPERATOR's stream —
+	// probe columns then build columns, every duplicate build column
+	// qualified by its owning alias — and which side probes is a COST
+	// decision (`reorderJoins`), so the same statement published a different
+	// relation as the estimates moved (#997, #1012). The star's own list is
+	// the FROM clause's arms in written order, and publishing it in that
+	// order takes a projection.
+	//
+	// ABOVE the ORDER BY and the LIMIT, which is where an OUTPUT permutation
+	// belongs: the sort reads the FROM clause's own namespace, where `i.id`
+	// names one column, and every sort-key resolver below therefore sees the
+	// tree it saw before this projection existed. The one term that addresses
+	// the OUTPUT list instead is a positional one, and
+	// ResolveStarJoinOrdinalSortKeys answers it from the expanded list.
+	//
+	// The item is the star itself: ExpandStarProjections, which runs after
+	// the scans are annotated, is the one pass that can state an arm's
+	// columns. If it cannot — a LATERAL arm, a table function, a block whose
+	// own list is unknown — ElideUnstatedJoinStar takes this node back out
+	// and the star keeps the answer it had, which is why the mint is a
+	// HYPOTHESIS the expansion confirms rather than a second namer
+	// (star_join_order.go).
+	if isStarOnly(info.Columns) && starJoinSource(plan) != nil {
+		plan = NewProject(plan, []Projection{{
+			Expr: "*", Column: "*", ASTExpr: &plansql.StarNode{},
+		}})
+		plan.StarJoinArms = true
+	}
+
 	// Store CTE definitions on the root node so the physical planner
 	// can resolve CTE references in scalar subqueries.
 	if len(ctes) > 0 {

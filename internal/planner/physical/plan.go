@@ -187,6 +187,8 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// buildProject, and without the check the DAG published a column whose
 	// name and value were both `*` while the single-process arms refused.
 	logical.ExpandStarProjections(node)
+	node = logical.ElideUnstatedJoinStar(node)
+	logical.ResolveStarJoinOrdinalSortKeys(node)
 	if err := refuseUnexpandedStarAnywhere(node); err != nil {
 		return nil, err
 	}
@@ -704,4 +706,7 @@ func (p *Planner) expandStarProjections(ctx context.Context, node, child *logica
 	p.AnnotateScanColumns(ctx, child)
 	logical.ExpandStarProjections(node)
 	logical.ResolveOrdinalSortKeys(node)
+	// No ElideUnstatedJoinStar here: this entry is handed the Project that
+	// ALREADY carries the star, so there is no minted node of its own to take
+	// back, and removing a node the caller holds would answer to nobody.
 }
