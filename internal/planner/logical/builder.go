@@ -2107,6 +2107,9 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	if err := refuseDecorrelatedWindow(subInfo, correlatedParts, leftAliases); err != nil {
 		return nil, "", lateralEmptyInput{}, nil, err
 	}
+	if err := refuseDecorrelatedBound(subInfo, correlatedParts); err != nil {
+		return nil, "", lateralEmptyInput{}, nil, err
+	}
 
 	right, err := BuildFromSelectWithCTEs(subInfo, scopeCTEs(ctes, subInfo.CTEs))
 	if err != nil {
@@ -2371,6 +2374,47 @@ func refuseDecorrelatedWindow(info *plansql.SelectInfo, correlatedParts []string
 			plansql.WindowOutputName(c), strings.Join(sortedKeyNames(keys), ", "))
 	}
 	return nil
+}
+
+// refuseDecorrelatedBound refuses a correlated LATERAL whose body carries its
+// own LIMIT or OFFSET.
+//
+// PostgreSQL evaluates a LATERAL body ONCE PER OUTER ROW, so its LIMIT bounds
+// each evaluation: `JOIN LATERAL (SELECT p FROM item WHERE order_id = o.id
+// ORDER BY amount LIMIT 1) s` yields one row for EVERY order. The
+// decorrelation turns the correlation into a join condition, which makes the
+// body ONE relation joined once — and the bound then applies to the whole of
+// it, so the same statement answered ONE row for PostgreSQL's two, silently,
+// on every arm and in every spelling of the consumer (`SELECT *`, an explicit
+// list, `s.*`).
+//
+// Honouring it means the bound travelling WITH the correlation key as a
+// per-key top-N, which is ADR-0021's territory and not a bound this pass can
+// move. Until then the shape is LOUD: a plausible wrong row count is the one
+// thing a client cannot detect, and `0A000` says the engine does not implement
+// what PostgreSQL answers rather than that the query is wrong (#1079).
+//
+// An UNCORRELATED lateral is untouched: with no correlated part there is no
+// decorrelation, the body is evaluated once, and its own bound means exactly
+// what it says.
+func refuseDecorrelatedBound(info *plansql.SelectInfo, correlatedParts []string) error {
+	if info == nil || len(correlatedParts) == 0 {
+		return nil
+	}
+	clause, text := "LIMIT", strings.TrimSpace(info.Limit)
+	if text == "" {
+		clause, text = "OFFSET", strings.TrimSpace(info.Offset)
+	}
+	if text == "" {
+		return nil
+	}
+	return sqlerr.New("0A000",
+		"%s %s inside a LATERAL subquery correlated on %s is not supported: PostgreSQL "+
+			"evaluates the subquery once per outer row, so the bound applies to each row's "+
+			"own result, and the correlation is executed here as a join — which would apply "+
+			"it to the whole inner relation instead, a different answer. Take the bound "+
+			"outside the LATERAL, or rank inside it with a window function",
+		clause, text, strings.Join(correlatedParts, ", "))
 }
 
 // sortedKeyNames renders a correlation-key set in a stable order for a message.
