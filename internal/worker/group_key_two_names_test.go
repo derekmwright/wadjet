@@ -54,6 +54,39 @@ func TestFragmentResolvesAndPublishesTheTwoNames(t *testing.T) {
 			publish: []string{"w"},
 		},
 		{
+			// AN AGGREGATE OUTPUT OCCUPIES THE NAME (#1078). `GROUP BY
+			// i.product` beside `COUNT(*) AS product` would strip the key's
+			// qualifier onto the aggregate's own alias, and the operator would
+			// emit TWO columns called `product` — after which every consumer
+			// above reads the FIRST, which is the key. The qualifier is kept
+			// for the same reason a second KEY keeps it, and the fragment and
+			// the single-process operator answer that identically.
+			name: "a-key-whose-bare-name-is-an-aggregate's-alias-keeps-its-qualifier",
+			spec: distributed.OpSpec{
+				Type:           distributed.OpHashAggregate,
+				GroupByCols:    []string{"i.product"},
+				GroupByResolve: []distributed.GroupKeyResolveSpec{{Expr: "product"}},
+				Aggregates:     []distributed.AggSpec{{Func: "count", OutputCol: "product"}},
+				BuildProject:   true,
+			},
+			resolve: []string{"product"},
+			publish: []string{"i.product"},
+		},
+		{
+			// THE CONTROL: the same key with the aggregate under its own
+			// alias, where the strip still happens.
+			name: "ctl-a-key-whose-bare-name-nothing-else-owns-is-stripped",
+			spec: distributed.OpSpec{
+				Type:           distributed.OpHashAggregate,
+				GroupByCols:    []string{"i.product"},
+				GroupByResolve: []distributed.GroupKeyResolveSpec{{Expr: "product"}},
+				Aggregates:     []distributed.AggSpec{{Func: "count", OutputCol: "n"}},
+				BuildProject:   true,
+			},
+			resolve: []string{"product"},
+			publish: []string{"product"},
+		},
+		{
 			// The AMBIGUOUS pair: two arms publish `w`, so the join qualified
 			// the build's. The key naming the build arm resolves by `y.w`, and
 			// binding it to the bare `w` would answer the OTHER arm's values.
