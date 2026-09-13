@@ -81,7 +81,8 @@ func TestN1ATwoGroupedLateralsPublishTheirOwnColumns(t *testing.T) {
 				"JOIN LATERAL (SELECT i.product AS p, COUNT(*) AS n FROM lat_item i WHERE i.order_id = o.id GROUP BY i.product) s ON true " +
 				"JOIN LATERAL (SELECT i2.product AS q, SUM(i2.amount) AS sm FROM lat_item i2 WHERE i2.order_id = o.id GROUP BY i2.product) s2 ON true " +
 				"ORDER BY o.id, p, q",
-			want: "cols=[id:INT64 customer:STRING total:FLOAT64 p:STRING n:INT64 q:STRING sm:FLOAT64] rows=8 | " +
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 p:STRING n:INT64 " +
+				"q:STRING sm:FLOAT64] rows=8 | " +
 				"1,Alice,150,Gadget,1,Gadget,100 | 1,Alice,150,Gadget,1,Widget,50 | " +
 				"1,Alice,150,Widget,1,Gadget,100 | 1,Alice,150,Widget,1,Widget,50 | " +
 				"2,Bob,200,Doohickey,1,Doohickey,125 | 2,Bob,200,Doohickey,1,Widget,75 | " +
@@ -147,10 +148,10 @@ func TestN1ATwoGroupedLateralsPublishTheirOwnColumns(t *testing.T) {
 			// change narrows the rule to MANUFACTURED joins and nothing else.
 			name: "control: an ordinary two-way inner join",
 			sql:  "SELECT * FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ORDER BY i.id",
-			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 " +
-				"o.id:INT64 customer:STRING total:FLOAT64] rows=4 | " +
-				"1,1,Widget,50,1,Alice,150 | 2,1,Gadget,100,1,Alice,150 | " +
-				"3,2,Widget,75,2,Bob,200 | 4,2,Doohickey,125,2,Bob,200",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 id:INT64 order_id:INT64 " +
+				"product:STRING amount:FLOAT64] rows=4 | " +
+				"1,Alice,150,1,1,Widget,50 | 1,Alice,150,2,1,Gadget,100 | " +
+				"2,Bob,200,3,2,Widget,75 | 2,Bob,200,4,2,Doohickey,125",
 		},
 		{
 			// A GROUPED LATERAL CARRYING ITS OWN `ORDER BY`. The minted slot

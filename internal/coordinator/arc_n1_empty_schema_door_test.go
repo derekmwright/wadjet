@@ -46,15 +46,21 @@ func TestN1AResultWithNoColumnsIsRefused(t *testing.T) {
 
 	f1Run(t, arms, []f1Case{
 		{
-			// A zero-row star over a THREE-relation join: nothing declares
-			// it, and at base it came back as `cols=[] rows=0`.
-			name: "a zero-row star over a bushy join is refused, not empty",
+			// A zero-row star over a THREE-relation join. At base it came
+			// back as `cols=[] rows=0` (#1010), then as the empty-column
+			// REFUSAL, because nothing could declare it. Arc O1 declares it
+			// (#997, #1012): a star over a join is the FROM clause's arms in
+			// written order, and that list is known before any row exists, so
+			// the empty result describes the relation the non-empty one
+			// publishes. The refusal is not deleted — the two cells below
+			// still hold it — it is this SHAPE that stopped needing it.
+			name: "a zero-row star over a bushy join declares its columns",
 			sql: "SELECT * FROM lat_ord o " +
 				"JOIN lat_item i ON i.order_id = o.id " +
 				"JOIN lat_item j ON j.order_id = o.id WHERE o.id > 99",
-			want:        refusal,
-			wantDag:     refusalDAG,
-			wantDagshuf: refusalDAG,
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 id:INT64 order_id:INT64 " +
+				"product:STRING amount:FLOAT64 id:INT64 order_id:INT64 product:STRING " +
+				"amount:FLOAT64] rows=0",
 		},
 		{
 			// CONTROL: a zero-row star over ONE relation declares the table's
@@ -69,8 +75,8 @@ func TestN1AResultWithNoColumnsIsRefused(t *testing.T) {
 			name: "control: a zero-row star over one join declares its columns",
 			sql: "SELECT * FROM lat_ord o JOIN lat_item i ON i.order_id = o.id " +
 				"WHERE o.id > 99",
-			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 " +
-				"o.id:INT64 customer:STRING total:FLOAT64] rows=0",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 id:INT64 order_id:INT64 " +
+				"product:STRING amount:FLOAT64] rows=0",
 		},
 		{
 			// CONTROL: a zero-row NAMED select list has declared its columns

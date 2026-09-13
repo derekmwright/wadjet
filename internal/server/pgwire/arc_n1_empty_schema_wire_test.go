@@ -34,13 +34,31 @@ func TestN1AnEmptyColumnListIsRefusedOnTheWire(t *testing.T) {
 		wantSQLState string
 	}{
 		{
-			// The shape no door can declare: a zero-row star over a BUSHY
-			// join (`starJoinDeclaredOutputSchema` declines where a side
-			// contains a join of its own, #978's stated bound).
-			name: "a_zero_row_star_over_a_bushy_join_is_XX000",
+			// THE SHAPE NO DOOR CAN DECLARE, and the one this cell now holds:
+			// a zero-row star over a LATERAL whose subquery is an UNGROUPED
+			// AGGREGATE. Its join carries the pad marker the declaration will
+			// not publish (ADR-0012's list), so the refusal is what crosses
+			// the wire — SQLSTATE and sentence — and the door keeps a fixture
+			// for it after arc O1 closed the bushy-join half below.
+			name: "a_zero_row_star_over_an_ungrouped_lateral_is_XX000",
+			sql: `SELECT * FROM j1ord o JOIN LATERAL (SELECT MAX(amount) AS mx ` +
+				`FROM j1item WHERE order_id = o.id) s ON true WHERE o.id > 99`,
+			wantSQLState: sqlerr.EmptyResultSQLState,
+		},
+		{
+			// The shape no door COULD declare — a zero-row star over a BUSHY
+			// join, where `starJoinDeclaredOutputSchema` declined because a
+			// side contains a join of its own (#978's stated bound). Arc O1
+			// declares it (#997/#1012): the star is expanded into the FROM
+			// clause's arms before any declaration walk runs, per ARM rather
+			// than per operator, so the depth of the join stopped mattering
+			// and the ordinary projection walk answers. The refusal below is
+			// unchanged for everything else.
+			name: "a_zero_row_star_over_a_bushy_join_declares",
 			sql: `SELECT * FROM j1ord o JOIN j1item i ON i.order_id = o.id ` +
 				`JOIN j1item j ON j.order_id = o.id WHERE o.id > 99`,
-			wantSQLState: sqlerr.EmptyResultSQLState,
+			want: []string{"id", "customer", "total", "id", "order_id", "product",
+				"amount", "id", "order_id", "product", "amount"},
 		},
 		// The three zero-row shapes that DO declare, which is what says the
 		// refusal is narrow rather than "no rows means no columns".
@@ -50,7 +68,7 @@ func TestN1AnEmptyColumnListIsRefusedOnTheWire(t *testing.T) {
 			[]string{"id", "customer", "total"}, ""},
 		{"a_zero_row_star_over_one_join_declares",
 			`SELECT * FROM j1ord o JOIN j1item i ON i.order_id = o.id WHERE o.id > 99`,
-			[]string{"id", "order_id", "product", "amount", "o.id", "customer", "total"}, ""},
+			[]string{"id", "customer", "total", "id", "order_id", "product", "amount"}, ""},
 		// THE OTHER HALF. A statement that produces no result set sends no
 		// fields, and the rule must not reach it.
 		{"ctl_a_session_command_sends_no_fields_and_is_not_refused", `SET search_path = public`, nil, ""},

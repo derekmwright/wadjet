@@ -68,10 +68,16 @@ func TestN1AnEmptyColumnListIsRefusedOnTheHTTPDoor(t *testing.T) {
 	defer ts.Close()
 	client := ts.Client()
 
-	t.Run("a zero-row star over a bushy join is refused", func(t *testing.T) {
+	// The shape no door CAN declare, on this door: a zero-row star over a
+	// LATERAL whose subquery is an UNGROUPED AGGREGATE, whose join carries the
+	// pad marker the declaration will not publish (ADR-0012's list). It used
+	// to be the BUSHY JOIN below, which arc O1 taught every door to declare
+	// (#997/#1012, ADR-0026 §9) — so the refusal keeps a fixture here and the
+	// bushy join joins the controls.
+	t.Run("a zero-row star over an ungrouped lateral is refused", func(t *testing.T) {
 		status, body := postSQL(t, client, ts.URL,
-			"SELECT * FROM n1ord o JOIN n1item i ON i.order_id = o.id "+
-				"JOIN n1item j ON j.order_id = o.id WHERE o.id > 99")
+			"SELECT * FROM n1ord o JOIN LATERAL (SELECT MAX(order_id) AS mx "+
+				"FROM n1item WHERE order_id = o.id) s ON true WHERE o.id > 99")
 		if status == http.StatusOK {
 			t.Fatalf("answered HTTP 200 with %s — a result set declares its columns or fails", body)
 		}
@@ -92,6 +98,9 @@ func TestN1AnEmptyColumnListIsRefusedOnTheHTTPDoor(t *testing.T) {
 		{"control: a zero-row star over one relation", "SELECT * FROM n1ord WHERE id > 99", 2},
 		{"control: a zero-row star over one join",
 			"SELECT * FROM n1ord o JOIN n1item i ON i.order_id = o.id WHERE o.id > 99", 4},
+		{"control: a zero-row star over a BUSHY join (declared since arc O1)",
+			"SELECT * FROM n1ord o JOIN n1item i ON i.order_id = o.id " +
+				"JOIN n1item j ON j.order_id = o.id WHERE o.id > 99", 6},
 		{"control: a zero-row named select list",
 			"SELECT o.id, o.customer FROM n1ord o WHERE o.id > 99", 2},
 		{"control: the same query with rows", "SELECT * FROM n1ord", 2},

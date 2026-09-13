@@ -491,16 +491,17 @@ func i1Cells() []i1Cell {
 			sql: `SELECT (SELECT COUNT(*) FROM (SELECT tx.* FROM typemx_dim dim JOIN typemx tx ` +
 				`ON tx.g = dim.k) t WHERE id < 10) AS n FROM decpair WHERE id < 2`,
 			want: `n | 10`},
-		{name: "54_pin_a_derived_bare_star_over_a_join_is_filtered",
+		// …and its BARE-star twin, CLOSED 2026-09-13 by arc O1 (#997, #1012)
+		// for the same reason one level over: a bare star over a join is now
+		// the FROM clause's arms (ADR-0026 §9), so the derived block publishes
+		// a list the filter's `id` is in. It was loud on all four arms — the
+		// block published the join and nothing carried `id` — and the pin is
+		// deleted as the fix's proof. It EXECUTES distributed now, so the
+		// unreachable-output route it used to take is gone with it.
+		{name: "54_a_derived_bare_star_over_a_join_is_filtered",
 			sql: `SELECT (SELECT COUNT(*) FROM (SELECT * FROM typemx_dim dim JOIN typemx tx ` +
 				`ON tx.g = dim.k) t WHERE id < 10) AS n FROM decpair WHERE id < 2`,
-			want: `n | 10`,
-			pinArms: map[string]string{
-				"single": `filter column "id" does not exist in the input schema`, spilledArm: `filter column "id" does not exist in the input schema`,
-				"dag": `filter column "id" does not exist in the input schema`, "dagshuf": `filter column "id" does not exist in the input schema`,
-			},
-			pinWhy: "the bare-star twin of 53, same site (all four arms answered 4616 at base)",
-			routes: a2Routes{UnreachableOutput: 1}},
+			want: `n | 10`},
 
 		// --- A BOOLEAN CONNECTIVE SHORT-CIRCUITS ---------------------------
 		//

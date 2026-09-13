@@ -65,7 +65,8 @@ func TestM1AMergedOrderIsTheQuerysOrder(t *testing.T) {
 			//   (3,2,Widget,75)   × (3,2,Widget,75)   … and so on.
 			name: "1002 a star DISTINCT over a self-join, a total ORDER BY across both references",
 			sql:  selfJoin + "ORDER BY a.order_id, a.amount, b.amount",
-			want: selfCols + " rows=8 | " +
+			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 id:INT64 " +
+				"order_id:INT64 product:STRING amount:FLOAT64] rows=8 | " +
 				"1,1,Widget,50,1,1,Widget,50 | 1,1,Widget,50,2,1,Gadget,100 | " +
 				"2,1,Gadget,100,1,1,Widget,50 | 2,1,Gadget,100,2,1,Gadget,100 | " +
 				"3,2,Widget,75,3,2,Widget,75 | 3,2,Widget,75,4,2,Doohickey,125 | " +
@@ -79,7 +80,8 @@ func TestM1AMergedOrderIsTheQuerysOrder(t *testing.T) {
 			// surviving trailing one, not a truncation.
 			name: "1002 the same with DESC on the trailing key",
 			sql:  selfJoin + "ORDER BY a.order_id, a.amount, b.amount DESC",
-			want: selfCols + " rows=8 | " +
+			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 id:INT64 " +
+				"order_id:INT64 product:STRING amount:FLOAT64] rows=8 | " +
 				"1,1,Widget,50,2,1,Gadget,100 | 1,1,Widget,50,1,1,Widget,50 | " +
 				"2,1,Gadget,100,2,1,Gadget,100 | 2,1,Gadget,100,1,1,Widget,50 | " +
 				"3,2,Widget,75,4,2,Doohickey,125 | 3,2,Widget,75,3,2,Widget,75 | " +
@@ -90,7 +92,8 @@ func TestM1AMergedOrderIsTheQuerysOrder(t *testing.T) {
 			// keys to one column cannot pass in this direction either.
 			name: "1002 the same with the second reference's key first",
 			sql:  selfJoin + "ORDER BY a.order_id, b.amount, a.amount",
-			want: selfCols + " rows=8 | " +
+			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 id:INT64 " +
+				"order_id:INT64 product:STRING amount:FLOAT64] rows=8 | " +
 				"1,1,Widget,50,1,1,Widget,50 | 2,1,Gadget,100,1,1,Widget,50 | " +
 				"1,1,Widget,50,2,1,Gadget,100 | 2,1,Gadget,100,2,1,Gadget,100 | " +
 				"3,2,Widget,75,3,2,Widget,75 | 4,2,Doohickey,125,3,2,Widget,75 | " +
@@ -101,7 +104,8 @@ func TestM1AMergedOrderIsTheQuerysOrder(t *testing.T) {
 			// second comparator, which read the same dropped-key indices.
 			name: "1002 the same under a LIMIT (the top-K heap)",
 			sql:  selfJoin + "ORDER BY a.order_id, a.amount, b.amount LIMIT 4",
-			want: selfCols + " rows=4 | " +
+			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 id:INT64 " +
+				"order_id:INT64 product:STRING amount:FLOAT64] rows=4 | " +
 				"1,1,Widget,50,1,1,Widget,50 | 1,1,Widget,50,2,1,Gadget,100 | " +
 				"2,1,Gadget,100,1,1,Widget,50 | 2,1,Gadget,100,2,1,Gadget,100",
 		},
@@ -113,7 +117,8 @@ func TestM1AMergedOrderIsTheQuerysOrder(t *testing.T) {
 			// return here.
 			name: "1002 the same under an OFFSET (the skipped rows are the ordered ones)",
 			sql:  selfJoin + "ORDER BY a.order_id, a.amount, b.amount OFFSET 4",
-			want: selfCols + " rows=4 | " +
+			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 id:INT64 " +
+				"order_id:INT64 product:STRING amount:FLOAT64] rows=4 | " +
 				"3,2,Widget,75,3,2,Widget,75 | 3,2,Widget,75,4,2,Doohickey,125 | " +
 				"4,2,Doohickey,125,3,2,Widget,75 | 4,2,Doohickey,125,4,2,Doohickey,125",
 		},
@@ -138,12 +143,12 @@ func TestM1AMergedOrderIsTheQuerysOrder(t *testing.T) {
 			// twice, in the FROM clause's order.
 			name: "1002 boundary: a predicate that swaps the arms leaves the order alone",
 			sql:  selfJoin + "WHERE a.id < 100 ORDER BY b.amount DESC, a.order_id, a.amount",
-			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 a.id:INT64 " +
-				"a.order_id:INT64 a.product:STRING a.amount:FLOAT64] rows=8 | " +
-				"4,2,Doohickey,125,3,2,Widget,75 | 4,2,Doohickey,125,4,2,Doohickey,125 | " +
-				"2,1,Gadget,100,1,1,Widget,50 | 2,1,Gadget,100,2,1,Gadget,100 | " +
-				"3,2,Widget,75,3,2,Widget,75 | 3,2,Widget,75,4,2,Doohickey,125 | " +
-				"1,1,Widget,50,1,1,Widget,50 | 1,1,Widget,50,2,1,Gadget,100",
+			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 id:INT64 " +
+				"order_id:INT64 product:STRING amount:FLOAT64] rows=8 | " +
+				"3,2,Widget,75,4,2,Doohickey,125 | 4,2,Doohickey,125,4,2,Doohickey,125 | " +
+				"1,1,Widget,50,2,1,Gadget,100 | 2,1,Gadget,100,2,1,Gadget,100 | " +
+				"3,2,Widget,75,3,2,Widget,75 | 4,2,Doohickey,125,3,2,Widget,75 | " +
+				"1,1,Widget,50,1,1,Widget,50 | 2,1,Gadget,100,1,1,Widget,50",
 			why: "#997: the star's column ORDER and its qualified side follow the PLAN, so " +
 				"the arm-swapped spelling publishes `a.` where the unswapped one publishes " +
 				"`b.`; PostgreSQL publishes the FROM arms in written order with duplicates " +
@@ -158,10 +163,10 @@ func TestM1AMergedOrderIsTheQuerysOrder(t *testing.T) {
 			name: "1002 a star DISTINCT over two tables sharing one column name",
 			sql: "SELECT DISTINCT * FROM lat_ord o JOIN lat_item i ON i.order_id = o.id " +
 				"ORDER BY i.amount DESC, o.id",
-			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 o.id:INT64 " +
-				"customer:STRING total:FLOAT64] rows=4 | " +
-				"4,2,Doohickey,125,2,Bob,200 | 2,1,Gadget,100,1,Alice,150 | " +
-				"3,2,Widget,75,2,Bob,200 | 1,1,Widget,50,1,Alice,150",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 id:INT64 order_id:INT64 " +
+				"product:STRING amount:FLOAT64] rows=4 | " +
+				"2,Bob,200,4,2,Doohickey,125 | 1,Alice,150,2,1,Gadget,100 | " +
+				"2,Bob,200,3,2,Widget,75 | 1,Alice,150,1,1,Widget,50",
 			why: "#997: PostgreSQL publishes `o` first (id, customer, total) then `i`; this " +
 				"tree publishes the join operator's order. Same rows, same sequence.",
 		},
@@ -172,7 +177,8 @@ func TestM1AMergedOrderIsTheQuerysOrder(t *testing.T) {
 			name: "1002 control: the non-DISTINCT twin has a sort stage",
 			sql: "SELECT * FROM lat_item a JOIN lat_item b ON b.order_id = a.order_id " +
 				"ORDER BY a.order_id, a.amount, b.amount",
-			want: selfCols + " rows=8 | " +
+			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 id:INT64 " +
+				"order_id:INT64 product:STRING amount:FLOAT64] rows=8 | " +
 				"1,1,Widget,50,1,1,Widget,50 | 1,1,Widget,50,2,1,Gadget,100 | " +
 				"2,1,Gadget,100,1,1,Widget,50 | 2,1,Gadget,100,2,1,Gadget,100 | " +
 				"3,2,Widget,75,3,2,Widget,75 | 3,2,Widget,75,4,2,Doohickey,125 | " +
@@ -184,8 +190,8 @@ func TestM1AMergedOrderIsTheQuerysOrder(t *testing.T) {
 			// above must not fire here.
 			name: "1002 a zero-row star DISTINCT over a self-join still answers",
 			sql:  selfJoin + "WHERE a.id < 0 ORDER BY a.order_id, a.amount, b.amount",
-			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 a.id:INT64 " +
-				"a.order_id:INT64 a.product:STRING a.amount:FLOAT64] rows=0",
+			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 id:INT64 " +
+				"order_id:INT64 product:STRING amount:FLOAT64] rows=0",
 			why: "#997: the zero-row declaration takes the join operator's own namer, so it " +
 				"carries the same plan-dependent qualification the arm-swapped cell above " +
 				"does. PostgreSQL declares `id, order_id, product, amount` twice.",

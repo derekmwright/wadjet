@@ -199,29 +199,21 @@ func TestArcK1AStarIsItsSourceInItsPosition(t *testing.T) {
 			want: "cols=[n:INT64] rows=1 | 10",
 		},
 		{
-			// The BARE-star twin, NOT closed and pinned with its mechanism:
-			// `ExpandStarProjections` declines a bare star over a JOIN by
-			// design, because guessing a join's column set would silently
-			// change which columns a query returns (ADR-0012, #810). Lifting
-			// it needs an ORDERED model of a join's emitted columns and the
-			// three refusals #810 records lift together; that is its own arc.
-			// LOUD at bb8635a4 and loud here, by the same sentence.
-			name: "963 PINNED a derived BARE star over a join, filtered",
+			// The BARE-star twin, CLOSED 2026-09-13 by arc O1 (#997, #1012).
+			// It was pinned LOUD on all four arms because
+			// `ExpandStarProjections` declined a bare star over a JOIN — the
+			// derived block published the join's stream, which carries no
+			// column the filter's `id` binds. A bare star over a join is now
+			// the FROM clause's arms in written order (ADR-0026 §9), so the
+			// block publishes a list and the filter resolves; the ORDERED
+			// model of a join's emitted columns that the pin said this needed
+			// is that expansion. The pin is deleted as the fix's proof, and
+			// the unreachable-output route it recorded is gone with it: the
+			// shape EXECUTES distributed.
+			name: "963 a derived BARE star over a join, filtered",
 			sql: `SELECT (SELECT COUNT(*) FROM (SELECT * FROM typemx_dim dim ` +
 				`JOIN typemx tx ON tx.g = dim.k) t WHERE id < 10) AS n FROM decpair WHERE id < 2`,
 			want: "cols=[n:INT64] rows=1 | 10",
-			pin: map[string]string{
-				"single":   `ERR executing query: scalar subquery could not be executed`,
-				spilledArm: `ERR executing query: scalar subquery could not be executed`,
-				"dag":      `ERR SELECT list no stage computes local execution`,
-				"dagshuf":  `ERR SELECT list no stage computes local execution`,
-			},
-			routed: map[string]string{
-				"dag": "unreachable output +1", "dagshuf": "unreachable output +1",
-			},
-			why: "a BARE star over a JOIN is left unexpanded by design (ADR-0012, #810): " +
-				"guessing a join's column set would silently change which columns a query " +
-				"returns, and lifting it needs an ordered model of a join's emitted columns",
 		},
 
 		// ---- #962 VERIFIED CLOSED AT BASE ----------------------------------

@@ -163,11 +163,16 @@ func TestArcJ1AHiddenSlotIsNotInTheRowDescription(t *testing.T) {
 			[]string{"id", "customer", "total", "mx"}, "", ""},
 		{"cte_star", `WITH c AS (SELECT * ` + aggLateral + `) SELECT * FROM c`,
 			[]string{"id", "customer", "total", "mx"}, "", ""},
+		// The plain join's star, which used to publish the join OPERATOR's
+		// order with the build side's duplicates qualified (`o.id`) and now
+		// publishes the FROM clause's arms in written order with duplicates
+		// kept by position — PostgreSQL's own list (2026-09-13, arc O1,
+		// #997/#1012, ADR-0026 §9). The pgSays this cell carried is deleted
+		// because there is no divergence left to state.
 		{"ctl_a_plain_join_star_is_untouched",
 			`SELECT * FROM j1ord o JOIN j1item li ON li.order_id = o.id`,
-			[]string{"id", "order_id", "product", "amount", "o.id", "customer", "total"},
-			"(id, customer, total, id, order_id, product, amount) — the join's own " +
-				"duplicate-name qualification, pre-existing and unrelated", ""},
+			[]string{"id", "customer", "total", "id", "order_id", "product", "amount"},
+			"", ""},
 		// A STORED column in the reserved namespace is a USER's column and
 		// reaches the wire: the drop is by identity — the slot this join
 		// minted, on the side it minted it for — never by a name a table

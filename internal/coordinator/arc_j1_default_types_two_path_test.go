@@ -459,9 +459,9 @@ func TestArcJ1AStarOverAnUnstageableLateralProjectionIsRouted(t *testing.T) {
 		{name: "ctl/a-plain-join-star",
 			sql: `SELECT * FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ` +
 				`ORDER BY o.id, i.id`,
-			want: `id,order_id,product,amount,o.id,customer,total | ` +
-				`1,1,Widget,50,1,Alice,150 | 2,1,Gadget,100,1,Alice,150 | ` +
-				`3,2,Widget,75,2,Bob,200 | 4,2,Doohickey,125,2,Bob,200`},
+			want: `id,customer,total,id,order_id,product,amount | ` +
+				`1,Alice,150,1,1,Widget,50 | 1,Alice,150,2,1,Gadget,100 | ` +
+				`2,Bob,200,3,2,Widget,75 | 2,Bob,200,4,2,Doohickey,125`},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {

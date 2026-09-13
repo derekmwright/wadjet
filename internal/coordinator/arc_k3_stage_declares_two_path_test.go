@@ -71,8 +71,8 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 		{name: "dup/derived",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, order_id AS oid ` +
 				`FROM lat_item) s ON s.order_id = o.id ORDER BY o.id`,
-			want: `order_id,oid,id,customer,total | 1,1,1,Alice,150 | 1,1,1,Alice,150 | ` +
-				`2,2,2,Bob,200 | 2,2,2,Bob,200`},
+			want: `id,customer,total,order_id,oid | 1,Alice,150,1,1 | 1,Alice,150,1,1 | ` +
+				`2,Bob,200,2,2 | 2,Bob,200,2,2`},
 		{name: "dup/cte",
 			sql: `WITH q AS (SELECT order_id, order_id AS oid FROM lat_item) ` +
 				`SELECT * FROM lat_ord o JOIN q ON q.order_id = o.id ORDER BY o.id`,
@@ -85,8 +85,8 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 		{name: "rename/join-keys-on-the-alias",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id AS k, amount ` +
 				`FROM lat_item) d ON d.k = o.id ORDER BY o.id, d.amount`,
-			want: `k,amount,id,customer,total | 1,50,1,Alice,150 | 1,100,1,Alice,150 | ` +
-				`2,75,2,Bob,200 | 2,125,2,Bob,200`},
+			want: `id,customer,total,k,amount | 1,Alice,150,1,50 | 1,Alice,150,1,100 | ` +
+				`2,Bob,200,2,75 | 2,Bob,200,2,125`},
 		// AN ALIAS OVER AN AGGREGATE. The aggregate stage emits `__agg_0`
 		// beside the computed `n`; a reserved slot reaching a client is worse
 		// than a lost column, because no query can spell it to avoid it.
@@ -101,15 +101,15 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 		{name: "computed/source-does-not-leak",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, amount * 2 AS d ` +
 				`FROM lat_item) s ON s.order_id = o.id ORDER BY o.id, d`,
-			want: `order_id,d,id,customer,total | 1,100,1,Alice,150 | 1,200,1,Alice,150 | ` +
-				`2,150,2,Bob,200 | 2,250,2,Bob,200`},
+			want: `id,customer,total,order_id,d | 1,Alice,150,1,100 | 1,Alice,150,1,200 | ` +
+				`2,Bob,200,2,150 | 2,Bob,200,2,250`},
 
 		// CONTROLS — none of these may move.
 		{name: "ctl/block-is-its-stream",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id FROM lat_item) s ` +
 				`ON s.order_id = o.id ORDER BY o.id`,
-			want: `order_id,id,customer,total | 1,1,Alice,150 | 1,1,Alice,150 | ` +
-				`2,2,Bob,200 | 2,2,Bob,200`},
+			want: `id,customer,total,order_id | 1,Alice,150,1 | 1,Alice,150,1 | ` +
+				`2,Bob,200,2 | 2,Bob,200,2`},
 		// The DAG orders the star's columns PROBE SIDE FIRST here where the
 		// single-process arms put the outer table first. Same set, same
 		// names, same values; a PRE-EXISTING per-arm column ORDER divergence
@@ -118,8 +118,7 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 		{name: "ctl/derived-aggregate-is-its-stream",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, COUNT(*) AS n ` +
 				`FROM lat_item GROUP BY order_id) s ON s.order_id = o.id ORDER BY o.id`,
-			want:    `id,customer,total,order_id,n | 1,Alice,150,1,2 | 2,Bob,200,2,2`,
-			wantDAG: `order_id,n,id,customer,total | 1,2,1,Alice,150 | 2,2,2,Bob,200`},
+			want: `id,customer,total,order_id,n | 1,Alice,150,1,2 | 2,Bob,200,2,2`},
 		{name: "ctl/no-join-above-the-block",
 			sql: `SELECT * FROM (SELECT order_id, order_id AS oid FROM lat_item) s ` +
 				`ORDER BY s.order_id, s.oid`,
@@ -154,20 +153,20 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 		{name: "selfjoin/star-with-rows",
 			sql: `SELECT * FROM lat_item a JOIN lat_item b ON a.id = b.id ` +
 				`WHERE a.id < 100 ORDER BY a.id`,
-			want: `id,order_id,product,amount,a.id,a.order_id,a.product,a.amount | ` +
+			want: `id,order_id,product,amount,id,order_id,product,amount | ` +
 				`1,1,Widget,50,1,1,Widget,50 | 2,1,Gadget,100,2,1,Gadget,100 | ` +
 				`3,2,Widget,75,3,2,Widget,75 | 4,2,Doohickey,125,4,2,Doohickey,125`},
 		{name: "selfjoin/star-with-no-rows-declares-the-same",
 			sql: `SELECT * FROM lat_item a JOIN lat_item b ON a.id = b.id ` +
 				`WHERE a.id < 0 ORDER BY a.id`,
-			want: `id,order_id,product,amount,a.id,a.order_id,a.product,a.amount`},
+			want: `id,order_id,product,amount,id,order_id,product,amount`},
 
 		{name: "ctl/a-plain-join-star",
 			sql: `SELECT * FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ` +
 				`ORDER BY o.id, i.id`,
-			want: `id,order_id,product,amount,o.id,customer,total | ` +
-				`1,1,Widget,50,1,Alice,150 | 2,1,Gadget,100,1,Alice,150 | ` +
-				`3,2,Widget,75,2,Bob,200 | 4,2,Doohickey,125,2,Bob,200`},
+			want: `id,customer,total,id,order_id,product,amount | ` +
+				`1,Alice,150,1,1,Widget,50 | 1,Alice,150,2,1,Gadget,100 | ` +
+				`2,Bob,200,3,2,Widget,75 | 2,Bob,200,4,2,Doohickey,125`},
 
 		// #980 — A LATERAL'S DEFAULTED COLUMN IS PART OF THE STAGE'S ONE
 		// COLUMN SET. Each of these answered on the single arms and, at
@@ -228,7 +227,7 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 		{name: "981/ctl-a-self-join-still-qualifies",
 			sql: `SELECT * FROM lat_item a JOIN lat_item b ON b.order_id = a.order_id ` +
 				`AND b.id > a.id ORDER BY a.id, b.id`,
-			want: `id,order_id,product,amount,b.id,b.order_id,b.product,b.amount | ` +
+			want: `id,order_id,product,amount,id,order_id,product,amount | ` +
 				`1,1,Widget,50,2,1,Gadget,100 | 3,2,Widget,75,4,2,Doohickey,125`},
 		// ------------------------------------------------------------------
 		// A COMPUTED ITEM OVER A PRODUCER THAT MATERIALIZES IT IS ALREADY ON
@@ -241,31 +240,31 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, ` +
 				`(SELECT MAX(amount) FROM lat_item) AS sq FROM lat_item) s ` +
 				`ON s.order_id = o.id ORDER BY o.id, sq`,
-			want: `order_id,sq,id,customer,total | 1,125,1,Alice,150 | 1,125,1,Alice,150 | ` +
-				`2,125,2,Bob,200 | 2,125,2,Bob,200`},
+			want: `id,customer,total,order_id,sq | 1,Alice,150,1,125 | 1,Alice,150,1,125 | ` +
+				`2,Bob,200,2,125 | 2,Bob,200,2,125`},
 		{name: "computed/scalar-subquery-over-a-CTE",
 			sql: `WITH q AS (SELECT MAX(amount) AS m FROM lat_item) SELECT * FROM lat_ord o ` +
 				`JOIN (SELECT order_id, (SELECT m FROM q) AS sq FROM lat_item) s ` +
 				`ON s.order_id = o.id ORDER BY o.id, sq`,
-			want: `order_id,sq,id,customer,total | 1,125,1,Alice,150 | 1,125,1,Alice,150 | ` +
-				`2,125,2,Bob,200 | 2,125,2,Bob,200`},
+			want: `id,customer,total,order_id,sq | 1,Alice,150,1,125 | 1,Alice,150,1,125 | ` +
+				`2,Bob,200,2,125 | 2,Bob,200,2,125`},
 		{name: "computed/an-all-NULL-CASE",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, ` +
 				`CASE WHEN order_id = 1 THEN NULL ELSE NULL END AS c FROM lat_item) s ` +
 				`ON s.order_id = o.id ORDER BY o.id`,
-			want: `order_id,c,id,customer,total | 1,NULL,1,Alice,150 | 1,NULL,1,Alice,150 | ` +
-				`2,NULL,2,Bob,200 | 2,NULL,2,Bob,200`},
+			want: `id,customer,total,order_id,c | 1,Alice,150,1,NULL | 1,Alice,150,1,NULL | ` +
+				`2,Bob,200,2,NULL | 2,Bob,200,2,NULL`},
 		{name: "computed/a-CASE-with-one-typed-arm",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, ` +
 				`CASE WHEN order_id = 1 THEN 7 ELSE NULL END AS c FROM lat_item) s ` +
 				`ON s.order_id = o.id ORDER BY o.id`,
-			want: `order_id,c,id,customer,total | 1,7,1,Alice,150 | 1,7,1,Alice,150 | ` +
-				`2,NULL,2,Bob,200 | 2,NULL,2,Bob,200`},
+			want: `id,customer,total,order_id,c | 1,Alice,150,1,7 | 1,Alice,150,1,7 | ` +
+				`2,Bob,200,2,NULL | 2,Bob,200,2,NULL`},
 		{name: "computed/COALESCE-of-two-NULLs",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, COALESCE(NULL, NULL) AS c ` +
 				`FROM lat_item) s ON s.order_id = o.id ORDER BY o.id`,
-			want: `order_id,c,id,customer,total | 1,NULL,1,Alice,150 | 1,NULL,1,Alice,150 | ` +
-				`2,NULL,2,Bob,200 | 2,NULL,2,Bob,200`},
+			want: `id,customer,total,order_id,c | 1,Alice,150,1,NULL | 1,Alice,150,1,NULL | ` +
+				`2,Bob,200,2,NULL | 2,Bob,200,2,NULL`},
 		// The container cases. At bb8635a4 the DAG published the container's
 		// SOURCE column beside it — five columns for PostgreSQL's four — and
 		// the FILTERED spelling did too, because the predicate keeps the
@@ -274,13 +273,13 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 		{name: "computed/a-container-over-a-plain-column",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, ARRAY[amount] AS a ` +
 				`FROM lat_item) s ON s.order_id = o.id ORDER BY o.id`,
-			want: `order_id,a,id,customer,total | 1,[50],1,Alice,150 | ` +
-				`1,[100],1,Alice,150 | 2,[75],2,Bob,200 | 2,[125],2,Bob,200`},
+			want: `id,customer,total,order_id,a | 1,Alice,150,1,[50] | ` +
+				`1,Alice,150,1,[100] | 2,Bob,200,2,[75] | 2,Bob,200,2,[125]`},
 		{name: "computed/a-two-element-container",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, ARRAY[amount, amount * 2] ` +
 				`AS a FROM lat_item) s ON s.order_id = o.id ORDER BY o.id`,
-			want: `order_id,a,id,customer,total | 1,[50 100],1,Alice,150 | ` +
-				`1,[100 200],1,Alice,150 | 2,[75 150],2,Bob,200 | 2,[125 250],2,Bob,200`},
+			want: `id,customer,total,order_id,a | 1,Alice,150,1,[50 100] | ` +
+				`1,Alice,150,1,[100 200] | 2,Bob,200,2,[75 150] | 2,Bob,200,2,[125 250]`},
 		{name: "computed/a-container-over-a-FILTERED-scan",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, ARRAY[amount] AS a ` +
 				`FROM lat_item WHERE amount > 60) s ON s.order_id = o.id ORDER BY o.id, a`,
@@ -395,8 +394,8 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 		{name: "boundary/a-twice-referenced-CTE-executes",
 			sql: `WITH q AS (SELECT order_id, amount FROM lat_item) SELECT * FROM q a ` +
 				`JOIN q b ON b.order_id = a.order_id ORDER BY a.order_id, a.amount, b.amount`,
-			want: `order_id,amount,b.order_id,b.amount | 1,50,1,50 | 1,50,1,100 | ` +
-				`1,100,1,50 | 1,100,1,100 | 2,75,2,75 | 2,75,2,125 | 2,125,2,75 | 2,125,2,125`},
+			want: `order_id,amount,order_id,amount | 1,50,1,50 | 1,50,1,100 | 1,100,1,50 | ` +
+				`1,100,1,100 | 2,75,2,75 | 2,75,2,125 | 2,125,2,75 | 2,125,2,125`},
 		// LOUD on both DAG arms at bb8635a4. A CTE body is planned ONCE, so
 		// the second reference's Project nodes never reach the publish hook —
 		// the verdict is carried to them where the subtree is deduped. Its
@@ -404,16 +403,16 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 		{name: "boundary/a-twice-referenced-CTE-with-a-rename-executes",
 			sql: `WITH q AS (SELECT order_id AS k, amount FROM lat_item) SELECT * FROM q a ` +
 				`JOIN q b ON b.k = a.k ORDER BY a.k, a.amount, b.amount`,
-			want: `k,amount,b.k,b.amount | 1,50,1,50 | 1,50,1,100 | 1,100,1,50 | ` +
-				`1,100,1,100 | 2,75,2,75 | 2,75,2,125 | 2,125,2,75 | 2,125,2,125`},
+			want: `k,amount,k,amount | 1,50,1,50 | 1,50,1,100 | 1,100,1,50 | 1,100,1,100 | ` +
+				`2,75,2,75 | 2,75,2,125 | 2,125,2,75 | 2,125,2,125`},
 		// SQL's `unknown` DECIDES: PostgreSQL declares a bare NULL select item
 		// `text`. Leaving it undecided routed a query that executed correctly
 		// at bb8635a4 (round-1 B2).
 		{name: "boundary/a-bare-NULL-item-is-text-and-executes",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, NULL AS c FROM lat_item) s ` +
 				`ON s.order_id = o.id ORDER BY o.id, s.order_id`,
-			want: `order_id,c,id,customer,total | 1,NULL,1,Alice,150 | 1,NULL,1,Alice,150 | ` +
-				`2,NULL,2,Bob,200 | 2,NULL,2,Bob,200`},
+			want: `id,customer,total,order_id,c | 1,Alice,150,1,NULL | 1,Alice,150,1,NULL | ` +
+				`2,Bob,200,2,NULL | 2,Bob,200,2,NULL`},
 		// SILENT WRONG at bb8635a4 (`order_id,amount` — both aliases lost).
 		// It EXECUTES distributed, which round 1's docs denied.
 		{name: "boundary/one-name-published-twice-executes",
@@ -455,15 +454,13 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 				`ON s.order_id = o.id ORDER BY o.id`,
 			want: `id,customer,total,order_id,sa,sb | 1,Alice,150,1,150,150 | ` +
 				`2,Bob,200,2,200,200`,
-			wantDAG: `order_id,sa,sb,id,customer,total | 1,150,150,1,Alice,150 | ` +
-				`2,200,200,2,Bob,200`,
 			wantRouted: true},
 		// LOUD on both DAG arms at bb8635a4.
 		{name: "residue/a-window-inside-the-block",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, SUM(amount) OVER () AS w ` +
 				`FROM lat_item) s ON s.order_id = o.id ORDER BY o.id, w`,
-			want: `order_id,w,id,customer,total | 1,350,1,Alice,150 | 1,350,1,Alice,150 | ` +
-				`2,350,2,Bob,200 | 2,350,2,Bob,200`,
+			want: `id,customer,total,order_id,w | 1,Alice,150,1,350 | 1,Alice,150,1,350 | ` +
+				`2,Bob,200,2,350 | 2,Bob,200,2,350`,
 			wantRouted: true},
 	} {
 		tc := tc

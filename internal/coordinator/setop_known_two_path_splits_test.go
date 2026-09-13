@@ -45,7 +45,10 @@ func TestKnownSetOperationTwoPathSplits(t *testing.T) {
 		// singleRows is PostgreSQL 17.11's row count, which the
 		// single-process path answers.
 		singleRows int
-		// dagErr is the substring of the refusal both DAG arms give.
+		// dagErr is the substring of the refusal both DAG arms give, or
+		// EMPTY where both arms answer — a cell whose split has closed stays
+		// here, asserting the rows on every arm, so the shape keeps a gate
+		// rather than losing one.
 		dagErr string
 	}{
 		{
@@ -60,15 +63,20 @@ func TestKnownSetOperationTwoPathSplits(t *testing.T) {
 			dagErr:     "selects the aggregate",
 		},
 		{
+			// CLOSED 2026-09-13 by arc O1 (#997, #1012), in this cell's own
+			// terms: "`SELECT *` over a JOIN builds no Project, and the
+			// star's expansion is not recorded on the join node, so
+			// setOpOutputNames has no column list to take the result's names
+			// from". The star now BUILDS a projection, carrying the FROM
+			// clause's arms in written order (ADR-0026 §9), so the arm has a
+			// column list like any other and both DAG arms answer. dagErr is
+			// empty, which is how this table says "both arms answer" — the
+			// pin is deleted and the rows are asserted instead.
 			name: "a_star_over_a_join_as_an_arm",
-			why: "`SELECT *` over a JOIN builds no Project, and the star's expansion is not " +
-				"recorded on the join node, so setOpOutputNames has no column list to take " +
-				"the result's names from. Over a single relation the scan's ScanColumns are " +
-				"that list, which is why the star arm below answers.",
+			why:  "CLOSED by arc O1: the star over a join is a projection now",
 			sql: `SELECT * FROM (SELECT id FROM decpair) p JOIN (SELECT id AS id2 FROM decpair) q ` +
 				`ON p.id = q.id2 UNION ALL SELECT id, id FROM decpair`,
 			singleRows: 18,
-			dagErr:     "no resolvable output column list",
 		},
 		{
 			name: "duplicate_output_names_of_different_types",
@@ -97,8 +105,20 @@ func TestKnownSetOperationTwoPathSplits(t *testing.T) {
 				c    *Coordinator
 			}{{"dag", coord}, {"dag-shuffled", coordB}} {
 				before := a2ReadRoutes(arm.c)
-				_, derr := tmdRunDAG(ctx, arm.c, tc.sql)
+				dres, derr := tmdRunDAG(ctx, arm.c, tc.sql)
 				a2CheckRoutes(t, arm.name, before, a2ReadRoutes(arm.c), a2Routes{}, tc.sql)
+				if tc.dagErr == "" {
+					if derr != nil {
+						t.Errorf("the %s arm REFUSED a shape this table says both arms answer:"+
+							" %v\n  %s\n  SQL: %s", arm.name, derr, tc.why, tc.sql)
+						continue
+					}
+					if len(dres.Rows) != tc.singleRows {
+						t.Errorf("the %s arm returned %d rows, want %d (PostgreSQL 17)\n  SQL: %s",
+							arm.name, len(dres.Rows), tc.singleRows, tc.sql)
+					}
+					continue
+				}
 				if derr == nil {
 					t.Errorf("the %s arm now ANSWERS this shape, so the split is closed: delete "+
 						"this pin and assert the rows on both arms.\n  mechanism: %s\n  SQL: %s",

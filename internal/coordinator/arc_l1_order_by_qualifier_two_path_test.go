@@ -67,8 +67,9 @@ func TestL1AQualifiedOrderByTermBindsTheReferenceItNames(t *testing.T) {
 			name: "989 a CTE self-join star, a total ORDER BY across both references",
 			sql: cte + "SELECT * FROM q a JOIN q b ON b.order_id = a.order_id " +
 				"ORDER BY a.order_id, a.amount, b.amount",
-			want: starCols + " rows=8 | 1,50,1,50 | 1,50,1,100 | 1,100,1,50 | 1,100,1,100 | " +
-				"2,75,2,75 | 2,75,2,125 | 2,125,2,75 | 2,125,2,125",
+			want: "cols=[order_id:INT64 amount:FLOAT64 order_id:INT64 amount:FLOAT64] rows=8 | " +
+				"1,50,1,50 | 1,50,1,100 | 1,100,1,50 | 1,100,1,100 | 2,75,2,75 | " +
+				"2,75,2,125 | 2,125,2,75 | 2,125,2,125",
 		},
 		{
 			// DESC on the trailing key. This spelling AGREED at base on all
@@ -79,8 +80,9 @@ func TestL1AQualifiedOrderByTermBindsTheReferenceItNames(t *testing.T) {
 			name: "989 the same with DESC on the trailing key",
 			sql: cte + "SELECT * FROM q a JOIN q b ON b.order_id = a.order_id " +
 				"ORDER BY a.order_id, a.amount, b.amount DESC",
-			want: starCols + " rows=8 | 1,50,1,100 | 1,50,1,50 | 1,100,1,100 | 1,100,1,50 | " +
-				"2,75,2,125 | 2,75,2,75 | 2,125,2,125 | 2,125,2,75",
+			want: "cols=[order_id:INT64 amount:FLOAT64 order_id:INT64 amount:FLOAT64] rows=8 | " +
+				"1,50,1,100 | 1,50,1,50 | 1,100,1,100 | 1,100,1,50 | 2,75,2,125 | " +
+				"2,75,2,75 | 2,125,2,125 | 2,125,2,75",
 		},
 		{
 			// The two references SWAPPED in the ORDER BY, so a run that binds
@@ -89,8 +91,9 @@ func TestL1AQualifiedOrderByTermBindsTheReferenceItNames(t *testing.T) {
 			name: "989 the same with the second reference's key FIRST",
 			sql: cte + "SELECT * FROM q a JOIN q b ON b.order_id = a.order_id " +
 				"ORDER BY a.order_id, b.amount, a.amount",
-			want: starCols + " rows=8 | 1,50,1,50 | 1,100,1,50 | 1,50,1,100 | 1,100,1,100 | " +
-				"2,75,2,75 | 2,125,2,75 | 2,75,2,125 | 2,125,2,125",
+			want: "cols=[order_id:INT64 amount:FLOAT64 order_id:INT64 amount:FLOAT64] rows=8 | " +
+				"1,50,1,50 | 1,100,1,50 | 1,50,1,100 | 1,100,1,100 | 2,75,2,75 | " +
+				"2,125,2,75 | 2,75,2,125 | 2,125,2,125",
 		},
 		{
 			// A DERIVED-TABLE self-join, which shares no CTE body: the defect
@@ -100,16 +103,17 @@ func TestL1AQualifiedOrderByTermBindsTheReferenceItNames(t *testing.T) {
 			sql: "SELECT * FROM (SELECT order_id, amount FROM lat_item) a " +
 				"JOIN (SELECT order_id, amount FROM lat_item) b ON b.order_id = a.order_id " +
 				"ORDER BY a.order_id, a.amount, b.amount",
-			want: starCols + " rows=8 | 1,50,1,50 | 1,50,1,100 | 1,100,1,50 | 1,100,1,100 | " +
-				"2,75,2,75 | 2,75,2,125 | 2,125,2,75 | 2,125,2,125",
+			want: "cols=[order_id:INT64 amount:FLOAT64 order_id:INT64 amount:FLOAT64] rows=8 | " +
+				"1,50,1,50 | 1,50,1,100 | 1,100,1,50 | 1,100,1,100 | 2,75,2,75 | " +
+				"2,75,2,125 | 2,125,2,75 | 2,125,2,125",
 		},
 		{
 			// A BASE-TABLE self-join star: no CTE and no derived block at all.
 			name: "989 a base-table self-join star",
 			sql: "SELECT * FROM lat_item a JOIN lat_item b ON b.order_id = a.order_id " +
 				"ORDER BY a.order_id, a.amount, b.amount",
-			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 b.id:INT64 " +
-				"b.order_id:INT64 b.product:STRING b.amount:FLOAT64] rows=8 | " +
+			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 id:INT64 " +
+				"order_id:INT64 product:STRING amount:FLOAT64] rows=8 | " +
 				"1,1,Widget,50,1,1,Widget,50 | 1,1,Widget,50,2,1,Gadget,100 | " +
 				"2,1,Gadget,100,1,1,Widget,50 | 2,1,Gadget,100,2,1,Gadget,100 | " +
 				"3,2,Widget,75,3,2,Widget,75 | 3,2,Widget,75,4,2,Doohickey,125 | " +
@@ -134,12 +138,12 @@ func TestL1AQualifiedOrderByTermBindsTheReferenceItNames(t *testing.T) {
 			name: "989 boundary: a predicate that swaps the arms leaves the ORDER alone",
 			sql: "SELECT * FROM lat_item a JOIN lat_item b ON b.order_id = a.order_id " +
 				"WHERE a.id < 100 ORDER BY a.order_id, a.amount, b.amount",
-			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 a.id:INT64 " +
-				"a.order_id:INT64 a.product:STRING a.amount:FLOAT64] rows=8 | " +
-				"1,1,Widget,50,1,1,Widget,50 | 2,1,Gadget,100,1,1,Widget,50 | " +
-				"1,1,Widget,50,2,1,Gadget,100 | 2,1,Gadget,100,2,1,Gadget,100 | " +
-				"3,2,Widget,75,3,2,Widget,75 | 4,2,Doohickey,125,3,2,Widget,75 | " +
-				"3,2,Widget,75,4,2,Doohickey,125 | 4,2,Doohickey,125,4,2,Doohickey,125",
+			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 id:INT64 " +
+				"order_id:INT64 product:STRING amount:FLOAT64] rows=8 | " +
+				"1,1,Widget,50,1,1,Widget,50 | 1,1,Widget,50,2,1,Gadget,100 | " +
+				"2,1,Gadget,100,1,1,Widget,50 | 2,1,Gadget,100,2,1,Gadget,100 | " +
+				"3,2,Widget,75,3,2,Widget,75 | 3,2,Widget,75,4,2,Doohickey,125 | " +
+				"4,2,Doohickey,125,3,2,Widget,75 | 4,2,Doohickey,125,4,2,Doohickey,125",
 		},
 		{
 			// THREE references to one CTE, so the middle key is neither the
@@ -148,10 +152,11 @@ func TestL1AQualifiedOrderByTermBindsTheReferenceItNames(t *testing.T) {
 			sql: cte + "SELECT * FROM q a JOIN q b ON b.order_id=a.order_id " +
 				"JOIN q c ON c.order_id=a.order_id WHERE a.order_id=1 " +
 				"ORDER BY a.amount, c.amount, b.amount",
-			want: "cols=[order_id:INT64 amount:FLOAT64 b.order_id:INT64 b.amount:FLOAT64 " +
-				"c.order_id:INT64 c.amount:FLOAT64] rows=8 | " +
+			want: "cols=[order_id:INT64 amount:FLOAT64 order_id:INT64 amount:FLOAT64 " +
+				"order_id:INT64 amount:FLOAT64] rows=8 | " +
 				"1,50,1,50,1,50 | 1,50,1,100,1,50 | 1,50,1,50,1,100 | 1,50,1,100,1,100 | " +
-				"1,100,1,50,1,50 | 1,100,1,100,1,50 | 1,100,1,50,1,100 | 1,100,1,100,1,100",
+				"1,100,1,50,1,50 | 1,100,1,100,1,50 | 1,100,1,50,1,100 | " +
+				"1,100,1,100,1,100",
 		},
 		{
 			// The TOP-N builder is the second sort site and had the same key
@@ -159,7 +164,8 @@ func TestL1AQualifiedOrderByTermBindsTheReferenceItNames(t *testing.T) {
 			name: "989 the same under a LIMIT (the top-N builder)",
 			sql: cte + "SELECT * FROM q a JOIN q b ON b.order_id = a.order_id " +
 				"ORDER BY a.order_id, a.amount, b.amount LIMIT 4",
-			want: starCols + " rows=4 | 1,50,1,50 | 1,50,1,100 | 1,100,1,50 | 1,100,1,100",
+			want: "cols=[order_id:INT64 amount:FLOAT64 order_id:INT64 amount:FLOAT64] rows=4 | " +
+				"1,50,1,50 | 1,50,1,100 | 1,100,1,50 | 1,100,1,100",
 		},
 		{
 			// CONTROL: the explicit SELECT list. Two outputs named `amount`,
@@ -195,10 +201,10 @@ func TestL1AQualifiedOrderByTermBindsTheReferenceItNames(t *testing.T) {
 			name: "989 a star over a join of two different tables sharing one name",
 			sql: "SELECT * FROM lat_ord o JOIN lat_item i ON i.order_id = o.id " +
 				"ORDER BY o.id DESC, i.amount",
-			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 o.id:INT64 " +
-				"customer:STRING total:FLOAT64] rows=4 | " +
-				"3,2,Widget,75,2,Bob,200 | 4,2,Doohickey,125,2,Bob,200 | " +
-				"1,1,Widget,50,1,Alice,150 | 2,1,Gadget,100,1,Alice,150",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 id:INT64 order_id:INT64 " +
+				"product:STRING amount:FLOAT64] rows=4 | " +
+				"2,Bob,200,3,2,Widget,75 | 2,Bob,200,4,2,Doohickey,125 | " +
+				"1,Alice,150,1,1,Widget,50 | 1,Alice,150,2,1,Gadget,100",
 		},
 		{
 			// #1002 — the DISTINCT sibling of the headline shape. One keyword
@@ -225,7 +231,8 @@ func TestL1AQualifiedOrderByTermBindsTheReferenceItNames(t *testing.T) {
 			name: "1002 the DISTINCT sibling binds the same keys on all four arms",
 			sql: "SELECT DISTINCT * FROM lat_item a JOIN lat_item b ON b.order_id = a.order_id " +
 				"ORDER BY a.order_id, a.amount, b.amount",
-			want: distinctCols + " rows=8 | " +
+			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 id:INT64 " +
+				"order_id:INT64 product:STRING amount:FLOAT64] rows=8 | " +
 				"1,1,Widget,50,1,1,Widget,50 | 1,1,Widget,50,2,1,Gadget,100 | " +
 				"2,1,Gadget,100,1,1,Widget,50 | 2,1,Gadget,100,2,1,Gadget,100 | " +
 				"3,2,Widget,75,3,2,Widget,75 | 3,2,Widget,75,4,2,Doohickey,125 | " +
@@ -237,7 +244,8 @@ func TestL1AQualifiedOrderByTermBindsTheReferenceItNames(t *testing.T) {
 			name: "1002 the same with DESC on the trailing key",
 			sql: "SELECT DISTINCT * FROM lat_item a JOIN lat_item b ON b.order_id = a.order_id " +
 				"ORDER BY a.order_id, a.amount, b.amount DESC",
-			want: distinctCols + " rows=8 | " +
+			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 id:INT64 " +
+				"order_id:INT64 product:STRING amount:FLOAT64] rows=8 | " +
 				"1,1,Widget,50,2,1,Gadget,100 | 1,1,Widget,50,1,1,Widget,50 | " +
 				"2,1,Gadget,100,2,1,Gadget,100 | 2,1,Gadget,100,1,1,Widget,50 | " +
 				"3,2,Widget,75,4,2,Doohickey,125 | 3,2,Widget,75,3,2,Widget,75 | " +

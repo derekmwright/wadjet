@@ -43,11 +43,18 @@ func TestN1AnAsyncResultDeclaresItsColumns(t *testing.T) {
 		wantRefusal         bool
 	}{
 		{
-			// The shape no door can declare, refused on all four.
-			name: "a zero-row star over a bushy join is refused",
+			// DECLARED since arc O1 (#997, #1012): this was "the shape no
+			// door can declare", refused on all four with the empty-column
+			// refusal, because a star over a THREE-relation join had no
+			// ordered model of its emitted columns. It has one now — the FROM
+			// clause's arms in written order (ADR-0026 §9) — so the zero-row
+			// result declares the same eleven columns the non-empty one
+			// publishes, which is what #846 and #978 asked of every other
+			// shape.
+			name: "a zero-row star over a bushy join declares its columns",
 			sql: "SELECT * FROM lat_ord o JOIN lat_item i ON i.order_id = o.id " +
 				"JOIN lat_item j ON j.order_id = o.id WHERE o.id > 99",
-			wantRefusal: true,
+			wantCols: "id,customer,total,id,order_id,product,amount,id,order_id,product,amount",
 		},
 		{
 			// THE CELL THE OTHER DOORS USE AS A CONTROL, and the one this
@@ -65,7 +72,9 @@ func TestN1AnAsyncResultDeclaresItsColumns(t *testing.T) {
 			name: "a zero-row star over one join declares its columns",
 			sql: "SELECT * FROM lat_ord o JOIN lat_item i ON i.order_id = o.id " +
 				"WHERE o.id > 99",
-			wantCols: "id,order_id,product,amount,o.id,customer,total",
+			// The FROM clause's arms in written order, duplicates kept by
+			// position — PostgreSQL's list, and the plan's no longer (#1012).
+			wantCols: "id,customer,total,id,order_id,product,amount",
 		},
 		{
 			// CONTROL: the same statement WITH rows, whose columns come off

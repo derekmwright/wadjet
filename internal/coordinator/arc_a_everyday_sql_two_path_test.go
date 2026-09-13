@@ -804,6 +804,7 @@ func arcACells() []arcACell {
 				"c=Bob|a=float:75", "c=Bob|a=float:125"}},
 
 		// ------------------------------------------------------------------
+		// ------------------------------------------------------------------
 		// #993 — a star over a derived block whose BODY is a join, and the
 		// reason the two per-DAG-arm fields above exist.
 		//
@@ -812,22 +813,33 @@ func arcACells() []arcACell {
 		//
 		//   id, customer, total | id, order_id, product, amount | id, customer, total
 		//
-		// The filing's "nine on dag, seven on dagshuf, five in PostgreSQL"
-		// counted a different fixture and no longer reproduces: K3's v0.18.62
-		// (`Stage.ProjectExprs`, `blockPublishedColumns`) closed the
-		// column-SET half, and all four arms now publish ten. What SURVIVES is
-		// an arm-specific NAME divergence — `dag-shuffled` qualifies the outer
-		// `lat_ord`'s non-key columns (`o.customer`, `o.total`) where the
-		// other three arms publish them bare — and that is exactly the state
-		// this census could not say before: one `wantDAG` for both DAG arms
-		// meant the shape had to be dropped rather than recorded.
+		// This is the ONE shape arc O1's expansion DECLINES, and the decline
+		// is what this cell records (ADR-0026 §9): the derived block's own
+		// body is a star over a join, so the block publishes TWO columns
+		// named `id`, and every item of an expanded star is a QUALIFIED
+		// reference — `s.id` binds the first of the two, so the second column
+		// would carry the first's VALUES. A wrong value is worse than a wrong
+		// name, so the outer star still reads the join's stream and this cell
+		// still publishes the arms in the PLAN's order.
 		//
-		// The column ORDER (`lat_item` first, `lat_ord o` second) is #997's
-		// separate divergence, deferred with its mechanism in ADR-0026 §6a and
-		// pinned in arc_l1_order_by_qualifier_two_path_test.go.
+		// What the arc DID change here is the block's own list: its inner
+		// star now expands, so the block publishes `id, order_id, product,
+		// amount, id, customer, total` (PostgreSQL's list for the block) and
+		// the join qualifies against THAT. The three lists below are the
+		// three ways the arms spell the block's second `id` and the outer
+		// relation's non-key columns; the VALUES are identical on all four
+		// arms and are PostgreSQL's, in PostgreSQL's row sequence.
 		//
-		// A pin that starts agreeing FAILS: when either half is fixed, the arm
-		// whose list changes fails here and the field it needed is deleted.
+		// Closing it needs a block's column addressed by POSITION, which is
+		// ADR-0026 §7's slot territory. A pin that starts agreeing FAILS.
+		//
+		// THIS RENDERER KEYS A ROW BY COLUMN NAME (`na2Run` reads
+		// `oracle.Result.Rows[c]`), so where the block publishes `id` twice
+		// the single-process arms render ONE of them twice. That is the
+		// harness's bound and not the engine's: the COLUMN LIST is asserted
+		// positionally by `coordinator.TestO1AStarOverAJoinPublishesTheQuery
+		// NotThePlan` and on the wire by `pgwire.TestO1TheWireDeclaresAStar
+		// JoinsOwnArms`.
 		{issue: "#993", name: "a star over a join-bodied derived block names the outer arm per DAG arm",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT * FROM lat_item i ` +
 				`JOIN lat_ord o2 ON o2.id = i.order_id) s ON s.order_id = o.id ` +
@@ -835,15 +847,24 @@ func arcACells() []arcACell {
 			pgSays: "ten columns: id, customer, total | id, order_id, product, amount | " +
 				"id, customer, total — the three FROM arms in written order",
 			want: []string{
-				"id=int64:1|order_id=int64:1|product=Widget|amount=float:50|o.id=int64:1|customer=Alice|total=float:150|o2.id=int64:1|o2.customer=Alice|o2.total=float:150",
-				"id=int64:2|order_id=int64:1|product=Gadget|amount=float:100|o.id=int64:1|customer=Alice|total=float:150|o2.id=int64:1|o2.customer=Alice|o2.total=float:150",
-				"id=int64:3|order_id=int64:2|product=Widget|amount=float:75|o.id=int64:2|customer=Bob|total=float:200|o2.id=int64:2|o2.customer=Bob|o2.total=float:200",
-				"id=int64:4|order_id=int64:2|product=Doohickey|amount=float:125|o.id=int64:2|customer=Bob|total=float:200|o2.id=int64:2|o2.customer=Bob|o2.total=float:200"},
+				"id=int64:1|order_id=int64:1|product=Gadget|amount=float:100|id=int64:1|customer=Alice|total=float:150|o.id=int64:1|o.customer=Alice|o.total=float:150",
+				"id=int64:1|order_id=int64:1|product=Widget|amount=float:50|id=int64:1|customer=Alice|total=float:150|o.id=int64:1|o.customer=Alice|o.total=float:150",
+				"id=int64:2|order_id=int64:2|product=Doohickey|amount=float:125|id=int64:2|customer=Bob|total=float:200|o.id=int64:2|o.customer=Bob|o.total=float:200",
+				"id=int64:2|order_id=int64:2|product=Widget|amount=float:75|id=int64:2|customer=Bob|total=float:200|o.id=int64:2|o.customer=Bob|o.total=float:200",
+			},
+			wantDag: []string{
+				"id=int64:1|order_id=int64:1|product=Widget|amount=float:50|o2.id=int64:1|customer=Alice|total=float:150|o.id=int64:1|o.customer=Alice|o.total=float:150",
+				"id=int64:2|order_id=int64:1|product=Gadget|amount=float:100|o2.id=int64:1|customer=Alice|total=float:150|o.id=int64:1|o.customer=Alice|o.total=float:150",
+				"id=int64:3|order_id=int64:2|product=Widget|amount=float:75|o2.id=int64:2|customer=Bob|total=float:200|o.id=int64:2|o.customer=Bob|o.total=float:200",
+				"id=int64:4|order_id=int64:2|product=Doohickey|amount=float:125|o2.id=int64:2|customer=Bob|total=float:200|o.id=int64:2|o.customer=Bob|o.total=float:200",
+			},
 			wantDagshuf: []string{
-				"id=int64:1|order_id=int64:1|product=Widget|amount=float:50|o.id=int64:1|o.customer=Alice|o.total=float:150|o2.id=int64:1|o2.customer=Alice|o2.total=float:150",
-				"id=int64:2|order_id=int64:1|product=Gadget|amount=float:100|o.id=int64:1|o.customer=Alice|o.total=float:150|o2.id=int64:1|o2.customer=Alice|o2.total=float:150",
-				"id=int64:3|order_id=int64:2|product=Widget|amount=float:75|o.id=int64:2|o.customer=Bob|o.total=float:200|o2.id=int64:2|o2.customer=Bob|o2.total=float:200",
-				"id=int64:4|order_id=int64:2|product=Doohickey|amount=float:125|o.id=int64:2|o.customer=Bob|o.total=float:200|o2.id=int64:2|o2.customer=Bob|o2.total=float:200"}},
+				"id=int64:1|order_id=int64:1|product=Widget|amount=float:50|o2.id=int64:1|o2.customer=Alice|o2.total=float:150|o.id=int64:1|o.customer=Alice|o.total=float:150",
+				"id=int64:2|order_id=int64:1|product=Gadget|amount=float:100|o2.id=int64:1|o2.customer=Alice|o2.total=float:150|o.id=int64:1|o.customer=Alice|o.total=float:150",
+				"id=int64:3|order_id=int64:2|product=Widget|amount=float:75|o2.id=int64:2|o2.customer=Bob|o2.total=float:200|o.id=int64:2|o.customer=Bob|o.total=float:200",
+				"id=int64:4|order_id=int64:2|product=Doohickey|amount=float:125|o2.id=int64:2|o2.customer=Bob|o2.total=float:200|o.id=int64:2|o.customer=Bob|o.total=float:200",
+			},
+		},
 	}
 }
 

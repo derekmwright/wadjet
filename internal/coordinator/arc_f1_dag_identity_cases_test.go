@@ -93,53 +93,33 @@ func TestF1AJoinArmPublishesTheColumnsItSelects(t *testing.T) {
 				"dag": "unreachable output +1", "dagshuf": "unreachable output +1"},
 		},
 		{
-			// PINNED, and pre-existing: `SELECT *` over a materialized arm
-			// publishes the arm's INNER columns as well as the ones it
-			// selects — 10 where PostgreSQL and the single path have 8. The
-			// arm's stage passes its whole stream through and appends the
-			// computed alias, deliberately: every DAG resolver reads those
-			// source names, and narrowing the passthrough to the arm's SELECT
-			// list would take them away from resolvers this arc does not
-			// move. So the section's doctrine — one column per SELECT item —
-			// is true of what the arm PUBLISHES and not of what its stage
-			// SHIPS, and `SELECT *` is where the difference is visible.
-			// Fail-on-agree: the day the DAG publishes 8, delete this.
-			name: "780 PINNED: SELECT * over a materialized arm ships the arm's inner columns",
+			// CLOSED 2026-09-13 by arc O1 (#997, #1012): `SELECT *` over a
+			// materialized arm used to publish the arm's INNER columns as
+			// well as the ones it selects — TEN on both DAG arms where
+			// PostgreSQL and the single path have EIGHT, with `h.a` and
+			// `h.id` (the arm's own build side) beside them. The pin's own
+			// terms were "the day the DAG publishes 8, delete this".
+			//
+			// The star is now expanded into the FROM clause's arms before any
+			// stage is emitted (ADR-0026 §9), so what the statement publishes
+			// is the LIST — `t`'s six columns then `m`'s two — and what the
+			// arm's stage SHIPS is free to stay wider for the resolvers that
+			// read those source names. The two questions the pin conflated
+			// are separate again.
+			//
+			// The names are PostgreSQL's too: `m.id`/`m.a` were the JOIN
+			// operator's qualification of a duplicate, and the published name
+			// is the column's own, duplicates kept by position.
+			name: "780 SELECT * over a materialized arm publishes the arm's SELECT list",
 			sql: "SELECT * FROM decpair t JOIN " +
 				"(SELECT g.id AS id, g.a * 3 AS a FROM decpair g JOIN decpair h ON g.id = h.id) m " +
 				"ON t.id = m.id ORDER BY t.id",
 			want: "cols=[id:INT64 a:DECIMAL(9,2) b:DECIMAL(18,4) s:STRING f:FLOAT64 r:FLOAT32 " +
-				"m.id:INT64 m.a:DECIMAL(11,2)] rows=9 | 1,12.75,12.7500,1.50,1.5,1.5,1,38.25 | " +
+				"id:INT64 a:DECIMAL(11,2)] rows=9 | 1,12.75,12.7500,1.50,1.5,1.5,1,38.25 | " +
 				"2,12.75,12.7501,1.5,100,100,2,38.25 | 3,12.75,12.7499,abc,-3.5,-3.5,3,38.25 | " +
 				"4,-0.01,-0.0100,10,0.5,0.5,4,-0.03 | 5,2.00,10.0000,9,9.5,9.5,5,6.00 | " +
 				"6,0.00,0.0000,1.500,20,20,6,0.00 | 7,NULL,1.0000,0,7.25,7.25,7,NULL | " +
 				"8,12.75,NULL,-1,NULL,NULL,8,38.25 | 9,NULL,NULL,1.5,3.5,3.5,9,NULL",
-			pin: map[string]string{
-				"dag": "cols=[id:INT64 a:DECIMAL(9,2) b:DECIMAL(18,4) s:STRING f:FLOAT64 r:FLOAT32 " +
-					"m.id:INT64 h.a:DECIMAL(9,2) h.id:INT64 m.a:DECIMAL(11,2)] rows=9 | " +
-					"1,12.75,12.7500,1.50,1.5,1.5,1,12.75,1,38.25 | " +
-					"2,12.75,12.7501,1.5,100,100,2,12.75,2,38.25 | " +
-					"3,12.75,12.7499,abc,-3.5,-3.5,3,12.75,3,38.25 | " +
-					"4,-0.01,-0.0100,10,0.5,0.5,4,-0.01,4,-0.03 | " +
-					"5,2.00,10.0000,9,9.5,9.5,5,2.00,5,6.00 | " +
-					"6,0.00,0.0000,1.500,20,20,6,0.00,6,0.00 | " +
-					"7,NULL,1.0000,0,7.25,7.25,7,NULL,7,NULL | " +
-					"8,12.75,NULL,-1,NULL,NULL,8,12.75,8,38.25 | " +
-					"9,NULL,NULL,1.5,3.5,3.5,9,NULL,9,NULL",
-				"dagshuf": "cols=[id:INT64 a:DECIMAL(9,2) b:DECIMAL(18,4) s:STRING f:FLOAT64 r:FLOAT32 " +
-					"m.id:INT64 h.a:DECIMAL(9,2) h.id:INT64 m.a:DECIMAL(11,2)] rows=9 | " +
-					"1,12.75,12.7500,1.50,1.5,1.5,1,12.75,1,38.25 | " +
-					"2,12.75,12.7501,1.5,100,100,2,12.75,2,38.25 | " +
-					"3,12.75,12.7499,abc,-3.5,-3.5,3,12.75,3,38.25 | " +
-					"4,-0.01,-0.0100,10,0.5,0.5,4,-0.01,4,-0.03 | " +
-					"5,2.00,10.0000,9,9.5,9.5,5,2.00,5,6.00 | " +
-					"6,0.00,0.0000,1.500,20,20,6,0.00,6,0.00 | " +
-					"7,NULL,1.0000,0,7.25,7.25,7,NULL,7,NULL | " +
-					"8,12.75,NULL,-1,NULL,NULL,8,12.75,8,38.25 | " +
-					"9,NULL,NULL,1.5,3.5,3.5,9,NULL,9,NULL",
-			},
-			why: "the arm's stage ships its whole stream so every DAG resolver keeps the " +
-				"source names it reads; pre-existing, base ships 10 too",
 		},
 		{
 			name: "780 control: the same arm publishing a DISTINCT alias",

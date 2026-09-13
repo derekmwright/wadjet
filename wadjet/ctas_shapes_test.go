@@ -2,6 +2,7 @@ package wadjet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -221,42 +222,30 @@ func TestAQuerySourcedWriteRefusesWhatPostgresRefuses(t *testing.T) {
 		}
 	})
 
-	// A STAR over a SELF JOIN is the deliberate SUPERSET, and it is the one
-	// place this statement answers where PostgreSQL 17.11 refuses. There, both
-	// sides publish `id` and `CREATE TABLE … AS SELECT * FROM shp a JOIN shp b`
-	// is 42701, `column "id" specified more than once`. Here a join publishes
-	// the probe's columns bare and every duplicate build column QUALIFIED by
-	// its owning alias (ADR-0026 §8d), so the list has no duplicate at all and
-	// the table is created — with `b.id` as a column name, reachable by its
-	// delimited spelling. Recorded in ADR-0012's divergence list; the fixture
-	// is here because a superset that cannot be READ BACK is not a superset.
-	t.Run("StarOverASelfJoinIsASuperset", func(t *testing.T) {
-		if _, err := db.Query(ctx, `CREATE TABLE dupstar AS SELECT * FROM shp a JOIN shp b ON b.id = a.id`); err != nil {
-			t.Fatalf("the qualified-name superset was refused: %v", err)
+	// A STAR over a SELF JOIN was the deliberate SUPERSET and is PostgreSQL's
+	// own refusal since arc O1 (#997, #1012). Both sides publish `id`, and
+	// `CREATE TABLE … AS SELECT * FROM shp a JOIN shp b` is 42701, `column
+	// "id" specified more than once`, on PostgreSQL 17.11. The join used to
+	// publish the probe's columns bare and every duplicate build column
+	// QUALIFIED by its owning alias, so the list had no duplicate and the
+	// table was created with a column literally called `b.id`; a star over a
+	// join now publishes the FROM clause's arms with duplicates kept BY
+	// POSITION (ADR-0026 §9), so the duplicate is real and the door that
+	// already refuses one refuses this. ADR-0012's divergence is deleted.
+	t.Run("StarOverASelfJoinIsPostgresRefusal", func(t *testing.T) {
+		_, err := db.Query(ctx, `CREATE TABLE dupstar AS SELECT * FROM shp a JOIN shp b ON b.id = a.id`)
+		if err == nil {
+			t.Fatalf("created a table from a list with two columns called `id`")
 		}
-		meta, err := db.catalog.GetTable(ctx, "dupstar")
-		if err != nil {
-			t.Fatal(err)
+		if !strings.Contains(err.Error(), `column "id" specified more than once`) {
+			t.Fatalf("refused with %v\n  want PostgreSQL's 42701 sentence", err)
 		}
-		if got := meta.Schema.ColumnNames(); !ctasEqualStrings(got,
-			[]string{"id", "g", "s", "d", "ip", "b.id", "b.g", "b.s", "b.d", "b.ip"}) {
-			t.Fatalf("declared %v", got)
+		var se *sqlerr.Error
+		if !errors.As(err, &se) || se.SQLState() != "42701" {
+			t.Errorf("refusal carries %v, want SQLSTATE 42701 — PostgreSQL's own class", err)
 		}
-		res, err := db.Query(ctx, `SELECT id, "b.id" FROM dupstar ORDER BY id`)
-		if err != nil {
-			t.Fatalf("a delimited reference to the qualified column: %v", err)
-		}
-		if len(res.Rows) != 4 {
-			t.Fatalf("%d rows, want 4", len(res.Rows))
-		}
-		for i := range res.Rows {
-			c := res.Cells(i)
-			if c[0] != c[1] {
-				t.Errorf("row %d: id=%v, \"b.id\"=%v — the self join matched on id", i, c[0], c[1])
-			}
-		}
-		// The column-list form is the way to give them ordinary names, and
-		// PostgreSQL accepts that spelling too (measured, 14 names).
+		// The column-list form is how the statement is spelled instead, and
+		// PostgreSQL accepts that spelling too (measured, 10 names).
 		if _, err := db.Query(ctx, `CREATE TABLE dupstar2 (aid, ag, as_, ad, aip, bid, bg, bs, bd, bip) `+
 			`AS SELECT * FROM shp a JOIN shp b ON b.id = a.id`); err != nil {
 			t.Fatalf("the rename list over a self-join star: %v", err)

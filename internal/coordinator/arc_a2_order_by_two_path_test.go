@@ -152,19 +152,21 @@ func a2OrderCells() []a2OrderCell {
 			wantErrLike: "ORDER BY position 99 is not in select list",
 			wantState:   "42P10",
 			pgSays:      `42P10: ORDER BY position 99 is not in select list`},
-		// THE BOUNDARY, and it is a real divergence rather than a fix's edge:
-		// a star over a JOIN. PostgreSQL answers this (4 columns, ordered by
-		// the first). Wadjet refuses, because ExpandStarProjections declines
-		// a star whose source is not a lone scan — guessing a join's column
-		// set would silently change which columns a query returns, which is
-		// that pass's own stated reason and predates this fix. The cell is
-		// here so the boundary has a fixture that attempts it (protocol rule
-		// 11) and so a later change that starts answering it is noticed.
-		{issue: "#810", name: "boundary_star_over_join",
-			sql:         `SELECT * FROM zzp a JOIN zzj b ON a.id = b.id ORDER BY 1`,
-			wantErrLike: "expands to a column list the planner cannot count",
-			wantState:   "42P10",
-			pgSays:      "PostgreSQL ANSWERS: 3 rows, 4 columns, ordered by a.id"},
+		// THE BOUNDARY, ANSWERED 2026-09-13 by arc O1 (#997, #1012). It was
+		// a refusal — `ExpandStarProjections` declined a star whose source is
+		// not a lone scan, so the ordinal had no list to count — for a
+		// statement PostgreSQL answers. A star over a join is now the FROM
+		// clause's arms in written order (ADR-0026 §9), which is a list, and
+		// `ResolveStarJoinOrdinalSortKeys` answers the position from it in
+		// the item's SOURCE spelling (`a.id`), because the sort reads the
+		// join's stream. The refusal this cell used to pin is deleted.
+		{issue: "#810", name: "boundary_star_over_join", ordered: true,
+			sql: `SELECT * FROM zzp a JOIN zzj b ON a.id = b.id ORDER BY 1`,
+			want: []string{
+				"id=int64:1|d92=1.1111|id=int64:1|d92=1.1111",
+				"id=int64:2|d92=12345678.1234|id=int64:2|d92=12345678.1234",
+				"id=int64:3|d92=3.3333|id=int64:3|d92=3.3333"},
+			pgSays: "3 rows, 4 columns, ordered by a.id"},
 
 		// ------------------------------------------------------------------
 		// #811 — an aggregate in ORDER BY makes the query AGGREGATED.

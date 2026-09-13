@@ -48,25 +48,27 @@ func TestArcK3TheWireDeclaresTheBlocksProjection(t *testing.T) {
 		want []string
 		// pgSays is what PostgreSQL 17 sends when it differs — a divergence
 		// this arc does not close is stated, never left to be discovered.
+		//
+		// The three it carried are GONE (2026-09-13, arc O1, #997/#1012):
+		// they were the star's column ORDER — the join operator's probe side
+		// first — and a star over a join is the FROM clause's arms in written
+		// order now (ADR-0026 §9), so these cells assert PostgreSQL's own
+		// list rather than record a divergence from it.
 		pgSays string
 	}{
 		{"dup_source_column", `SELECT * FROM j1ord o JOIN (SELECT order_id, ` +
 			`order_id AS oid FROM j1item) s ON s.order_id = o.id`,
-			[]string{"order_id", "oid", "id", "customer", "total"},
-			"(id, customer, total, order_id, oid) — the same five, in FROM order; " +
-				"this engine publishes the join's probe side first on every arm"},
+			[]string{"id", "customer", "total", "order_id", "oid"}, ""},
 		{"derived_rename", `SELECT * FROM j1ord o JOIN (SELECT order_id AS k, ` +
 			`amount FROM j1item) d ON d.k = o.id`,
-			[]string{"k", "amount", "id", "customer", "total"},
-			"(id, customer, total, k, amount) — same five, FROM order"},
+			[]string{"id", "customer", "total", "k", "amount"}, ""},
 		{"alias_over_an_aggregate", `SELECT * FROM j1ord o JOIN (SELECT order_id, ` +
 			`CAST(COUNT(*) AS VARCHAR) AS n FROM j1item GROUP BY order_id) s ` +
 			`ON s.order_id = o.id`,
 			[]string{"id", "customer", "total", "order_id", "n"}, ""},
 		{"computed_item", `SELECT * FROM j1ord o JOIN (SELECT order_id, ` +
 			`amount * 2 AS d FROM j1item) s ON s.order_id = o.id`,
-			[]string{"order_id", "d", "id", "customer", "total"},
-			"(id, customer, total, order_id, d) — same five, FROM order"},
+			[]string{"id", "customer", "total", "order_id", "d"}, ""},
 		{"lateral_with_a_computed_default", `SELECT * FROM j1ord o LEFT JOIN LATERAL (` +
 			`SELECT COUNT(*) + 1 AS n FROM j1item WHERE order_id = o.id) s ON true`,
 			[]string{"id", "customer", "total", "n"}, ""},
@@ -84,16 +86,17 @@ func TestArcK3TheWireDeclaresTheBlocksProjection(t *testing.T) {
 			[]string{"a", "b"}, ""},
 		{"ctl_a_plain_join_star",
 			`SELECT * FROM j1ord o JOIN j1item li ON li.order_id = o.id`,
-			[]string{"id", "order_id", "product", "amount", "o.id", "customer", "total"},
-			"(id, customer, total, id, order_id, product, amount) — the join's own " +
-				"duplicate-name qualification, pre-existing and unrelated"},
-		// THE LEAK THESE TWO PINNED IS CLOSED (#991, arc O2). A block with its
-		// own `ORDER BY … LIMIT` materializes a `__sortkey_N` below its LIMIT,
-		// and nothing re-projected above it, so a star over the join published
-		// a sixth field that no query can spell. The block now publishes its
-		// VISIBLE list above its own sort (`logical.dropBlockHiddenSlots`), on
-		// this door and on both DAG arms, and the two pins are DELETED — which
-		// is the fix's proof. PostgreSQL's five fields, exactly.
+			[]string{"id", "customer", "total", "id", "order_id", "product", "amount"}, ""},
+		// THE LEAK THESE TWO PINNED IS CLOSED (#991, arc O2; #997/#1012, arc
+		// O1 — both arcs reach it, and they agree). A block with its own
+		// `ORDER BY … LIMIT` materializes a `__sortkey_N` below its LIMIT, and
+		// nothing re-projected above it, so a star over the join published a
+		// sixth field that no query can spell. The block now publishes its
+		// VISIBLE list above its own sort (`logical.dropBlockHiddenSlots`),
+		// and the star publishes each arm's visible projection
+		// (`logical.blockOwnProjection`), on this door and on both DAG arms.
+		// The two pins are DELETED — which is the fix's proof. PostgreSQL's
+		// five fields, exactly.
 		{"a_materialized_sort_key_is_not_on_the_wire",
 			`SELECT * FROM j1ord o JOIN (SELECT order_id, product FROM j1item ` +
 				`ORDER BY amount LIMIT 3) s ON s.order_id = o.id`,
@@ -106,7 +109,7 @@ func TestArcK3TheWireDeclaresTheBlocksProjection(t *testing.T) {
 		{"ctl_star_over_a_block_that_is_its_stream",
 			`SELECT * FROM j1ord o JOIN (SELECT order_id FROM j1item) s ` +
 				`ON s.order_id = o.id`,
-			[]string{"order_id", "id", "customer", "total"}, ""},
+			[]string{"id", "customer", "total", "order_id"}, ""},
 	} {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
