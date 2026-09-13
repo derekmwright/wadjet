@@ -409,6 +409,24 @@ func TestTheTwoArmsOfACreateDeclareOneTable(t *testing.T) {
 		`WITH c AS (SELECT id, UPPER(s) FROM shp) SELECT * FROM c`,
 		`SELECT * FROM (SELECT id, (SELECT MAX(g) FROM shp) FROM shp) x`,
 		`WITH c AS (SELECT id, COUNT(*) OVER () FROM shp) SELECT * FROM c`,
+		// A scalar subquery whose FROM is a CTE, which is where the TYPES
+		// diverged: `DeclaredOutputSchema` types a scalar subquery by building
+		// its own plan, and that build resolves relations through the
+		// planner's WITH list — which only `Plan` used to seed. The arm that
+		// does not plan therefore could not resolve `c`, declined, and fell
+		// back to the untyped default: `(SELECT SUM(d) FROM c)` was
+		// DECIMAL(38,3) executed and FLOAT64 declared, and an append into the
+		// declared table stored ten significant digits fewer (round-4 review
+		// B1). The last of these is the control — the same subquery over a
+		// BASE table, which always agreed.
+		`WITH c AS (SELECT id, g FROM shp) SELECT id, (SELECT MAX(g) FROM c) FROM shp`,
+		`WITH c AS (SELECT id, g FROM shp) SELECT id, (SELECT MAX(g) FROM c) AS m FROM shp`,
+		`WITH c AS (SELECT id, g FROM shp) SELECT id, (SELECT COUNT(*) FROM c) FROM shp`,
+		`WITH c AS (SELECT id, d FROM shp) SELECT id, (SELECT SUM(d) FROM c) FROM shp`,
+		`WITH c AS (SELECT id, g FROM shp) SELECT id, (SELECT MAX(g) FROM c) FROM c`,
+		`WITH c AS (SELECT id, g FROM shp) SELECT id, (SELECT MIN(g) FROM c) + 1 FROM shp`,
+		`WITH c AS (SELECT id, s FROM shp) SELECT id, (SELECT MAX(s) FROM c) FROM shp`,
+		`SELECT id, (SELECT MAX(g) FROM shp) FROM shp`,
 	}
 	for i, q := range shapes {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
@@ -661,6 +679,18 @@ func TestWithNoDataReadsNothingAndEvaluatesNothing(t *testing.T) {
 		{"PoisonedRowInDerived", `SELECT * FROM (SELECT id, 1 / (id - 5) AS x FROM big) y`},
 		{"PoisonedCastInCTE", `WITH c AS (SELECT CAST(s AS INT64) AS n FROM big) SELECT * FROM c`},
 		{"PoisonedRowInJoin", `SELECT a.id, 1 / (a.id - 5) AS x FROM big a JOIN big b ON b.id = a.id`},
+		// The scalar-subquery-over-a-CTE class (round-4 review B1). Its repair
+		// seeds the planner's WITH list so the DECLARATION can resolve `c`;
+		// seeding the NAMES must not run the BODIES, which is what this gate
+		// is here to say.
+		{"ScalarSubqueryOverCTE", `WITH c AS (SELECT id, g FROM big) SELECT id, (SELECT MAX(g) FROM c) FROM big`},
+		{"ScalarSubqueryOverCTEAliased", `WITH c AS (SELECT id, g FROM big) SELECT id, (SELECT MAX(g) FROM c) AS m FROM big`},
+		{"ScalarSubqueryCountOverCTE", `WITH c AS (SELECT id, g FROM big) SELECT id, (SELECT COUNT(*) FROM c) FROM big`},
+		{"ScalarSubquerySumOverCTE", `WITH c AS (SELECT id, g FROM big) SELECT id, (SELECT SUM(g) FROM c) FROM big`},
+		{"ScalarSubqueryOverCTEFromCTE", `WITH c AS (SELECT id, g FROM big) SELECT id, (SELECT MAX(g) FROM c) FROM c`},
+		{"ScalarSubqueryOverCTEArith", `WITH c AS (SELECT id, g FROM big) SELECT id, (SELECT MIN(g) FROM c) + 1 FROM big`},
+		{"ScalarSubqueryTextOverCTE", `WITH c AS (SELECT id, s FROM big) SELECT id, (SELECT MAX(s) FROM c) FROM big`},
+		{"ScalarSubqueryOverBaseTable", `SELECT id, (SELECT MAX(g) FROM big) FROM big`},
 	}
 
 	for i, sh := range shapes {

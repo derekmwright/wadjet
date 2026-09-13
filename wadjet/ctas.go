@@ -121,9 +121,15 @@ func (db *DB) executeCreateTableAs(ctx context.Context, ct *plansql.CreateTableI
 //
 // It cannot make them agree — a name that differs by the time it gets here is a
 // name it renames or refuses, not one it repairs. The agreement is made
-// upstream, in `declaredOutputFor`, which reads the same `CollectSink.Schema()`
-// the executed arm publishes. Two rounds of review were spent on what happens
-// when that is not true (round-1 B7, round-2 B1).
+// upstream, in `declaredOutputFor`, which takes the same published NAMES the
+// executed arm's sink applies — `physical.PublishedOutputNames`, a walk over
+// the logical plan — and its TYPES from `Planner.DeclaredOutputSchema`. Four
+// rounds of review were spent on those two lists: on a name taken from the type
+// walk (round-1 B7, round-2 B1), on reading the names from the wrong place —
+// asking `Plan` for the sink itself RUNS every CTE body and every hash join's
+// build side, on the arm documented not to execute the query (round-3 B1) — and
+// on a type the walk could not resolve because only `Plan` seeded the WITH list
+// (round-4 B1).
 func (db *DB) ctasSchema(ct *plansql.CreateTableInfo, declared []parquet.Column) (parquet.Schema, error) {
 	schema, err := ingest.TableSchemaForQuery(declared, ct.AsColumnNames)
 	if err != nil {

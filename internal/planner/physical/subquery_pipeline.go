@@ -169,6 +169,30 @@ func (p *Planner) DeclaredOutputSchema(plan *logical.Node) []parquet.Column {
 	if plan == nil {
 		return nil
 	}
+	// The WITH list, seeded the way `Plan` seeds it (planner_entry.go).
+	//
+	// A scalar subquery is typed by `subqueryOutputColumn`, which builds the
+	// subquery's OWN logical plan and resolves its relations through `p.ctes`.
+	// `Plan` is the only other place that fills that field, so a caller who
+	// asks this walk WITHOUT planning — `CREATE TABLE … AS <q> WITH NO DATA`,
+	// which is documented not to execute the query (#1024) — left it empty:
+	// `(SELECT MAX(g) FROM c)` could not resolve `c`, the typing declined, and
+	// the column fell back to the untyped default. The two arms of one
+	// statement then declared different TYPES for a query both of them plan —
+	// `(SELECT SUM(d) FROM c)` was DECIMAL(38,10) executed and FLOAT64
+	// declared, and an append into the declared table stored
+	// 1.2345678901234123e+13 for a number the executed arm and PostgreSQL
+	// 17.11 both store as 12345678901234.1234567892 (round-4 review B1).
+	//
+	// The NAMES are seeded, not the bodies: nothing here runs a CTE, which is
+	// what keeps the caller's zero-read property (round-3 B1). Restored on the
+	// way out because this walk is also called from inside a plan that has its
+	// own WITH list.
+	if len(plan.CTEs) > 0 {
+		saved := p.ctes
+		p.ctes = plan.CTEs
+		defer func() { p.ctes = saved }()
+	}
 	return declaredOutputSchema(plan, p.subqueryOutputColumn)
 }
 
