@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"reflect"
 	"sync"
 	"time"
@@ -115,18 +116,6 @@ func (ing *Ingester) RestorePendingFiles(files []catalog.PendingFile) {
 	ing.mu.Lock()
 	defer ing.mu.Unlock()
 	ing.pending = append(append([]catalog.PendingFile(nil), files...), ing.pending...)
-}
-
-// TableIncarnation is the table identity this ingester bound to, and whether
-// it has bound one yet.
-//
-// A caller that commits the pending files ITSELF needs the binding the
-// ingester took, so that commit can make the same incarnation check a flush
-// would have made (#919, ADR-0030). See WriteQueryRows.
-func (ing *Ingester) TableIncarnation() (string, bool) {
-	ing.mu.Lock()
-	defer ing.mu.Unlock()
-	return ing.incarnation, ing.incarnationBound
 }
 
 type partitionBuffer struct {
@@ -692,6 +681,24 @@ func extractColumnStats(data []byte) map[string]catalog.FileColumnStats {
 		if b, ok := cs.MaxValue.(parquet.CidrInetBound); ok {
 			cs.MaxValue = b.Text
 		}
+		// A NON-FINITE bound is dropped, for the same reason the CIDR box is
+		// unwrapped: it cannot survive the journey. encoding/json REFUSES
+		// +Inf, -Inf and NaN outright, so a column whose min or max is one of
+		// them made the whole manifest unencodable — the flush failed, and
+		// through `CREATE TABLE … AS SELECT f * 10 FROM src` it failed with a
+		// catalog record already written (#1024 review B6).
+		//
+		// Dropping it costs nothing a reader wanted. A bound is here for the
+		// row-group prune, and no predicate prunes on an infinity: every
+		// comparison against NaN is false, and a range whose end is +Inf
+		// excludes nothing. The file still carries its own statistics; this
+		// is the catalog's copy.
+		if !finiteStatBound(cs.MinValue) {
+			cs.MinValue = nil
+		}
+		if !finiteStatBound(cs.MaxValue) {
+			cs.MaxValue = nil
+		}
 		merged[col] = cs
 	}
 	if len(merged) == 0 {
@@ -789,4 +796,16 @@ func estimateRowSize(row map[string]any) int {
 		}
 	}
 	return size
+}
+
+// finiteStatBound reports whether a min/max bound is a value the catalog can
+// hold. Only the float carriers can be non-finite; everything else passes.
+func finiteStatBound(v any) bool {
+	switch f := v.(type) {
+	case float64:
+		return !math.IsInf(f, 0) && !math.IsNaN(f)
+	case float32:
+		return !math.IsInf(float64(f), 0) && !math.IsNaN(float64(f))
+	}
+	return true
 }

@@ -396,10 +396,6 @@ func (c *Catalog) CreateTableWithFiles(_ context.Context, name string, schema pa
 		Incarnation:   incarnation,
 	}
 
-	if err := c.putJSON(c.key("table."+name), tableMeta); err != nil {
-		return err
-	}
-
 	manifest := PartitionManifest{
 		Table:       name,
 		Partitions:  []PartitionEntry{},
@@ -430,13 +426,72 @@ func (c *Catalog) CreateTableWithFiles(_ context.Context, name string, schema pa
 			})
 		}
 	}
-	if err := c.putJSON(c.key("manifest."+name), manifest); err != nil {
-		return err
-	}
-
 	meta.Tables = append(meta.Tables, name)
 	meta.UpdatedAt = now
-	return c.putJSON(c.key("meta"), meta)
+
+	// THREE KEYS, ONE COMMIT, OR NONE (#1024 review B6).
+	//
+	// A table is three records — `table.<name>`, `manifest.<name>` and the
+	// `meta` list — and readers do not agree about which one IS the table:
+	// `GetTable` and `tableExists` read `table.<name>`, `ListTables` and
+	// `DropTable` go through `meta`. A partial write therefore does not
+	// leave a half-table, it leaves a WEDGED NAME: one that resolves to a
+	// relation with no manifest (`SELECT` answers "manifest not found"),
+	// cannot be created (42P07 from the record that is there) and cannot be
+	// dropped (`DropTable` looks in the list, which never got it).
+	//
+	// It became reachable from ordinary SQL when this manifest started
+	// carrying the flush's per-file ColumnStats: those are QUERY-DERIVED
+	// values, so `CREATE TABLE t AS SELECT f * 10 FROM src` over a float at
+	// the edge of the range put a +Inf in a min/max, encoding/json refused
+	// it, and the second put failed with the first already written. At the
+	// base the manifest was always `Partitions: []PartitionEntry{}` and
+	// nothing in it could fail to encode.
+	//
+	// Two things make the commit one unit. Every payload is ENCODED first,
+	// so a value that cannot be represented fails before any key is written
+	// — which is the whole of the deterministic trigger. And a write that
+	// fails after an earlier one succeeded rolls the earlier ones back, so
+	// a transient KV or store error leaves the name free rather than wedged.
+	// The rollback is best-effort by necessity (the delete can fail for the
+	// same reason the write did); the ORDER is what bounds that residual —
+	// `table.<name>`, the record every existence test reads, is written LAST
+	// of the two per-table keys and deleted FIRST, so the worst surviving
+	// state is an orphan `manifest.<name>` that no reader looks for and the
+	// next CreateTable overwrites.
+	tableBytes, err := json.Marshal(tableMeta)
+	if err != nil {
+		return fmt.Errorf("creating table %q: encoding the table record: %w", name, err)
+	}
+	manifestBytes, err := json.Marshal(manifest)
+	if err != nil {
+		return fmt.Errorf("creating table %q: encoding the manifest: %w", name, err)
+	}
+	metaBytes, err := json.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("creating table %q: encoding the catalog list: %w", name, err)
+	}
+
+	written := make([]string, 0, 2)
+	rollback := func() {
+		for i := len(written) - 1; i >= 0; i-- {
+			_ = c.kv.Delete(written[i])
+		}
+	}
+	if _, err := c.kv.Put(c.key("manifest."+name), manifestBytes); err != nil {
+		return err
+	}
+	written = append(written, c.key("manifest."+name))
+	if _, err := c.kv.Put(c.key("table."+name), tableBytes); err != nil {
+		rollback()
+		return err
+	}
+	written = append(written, c.key("table."+name))
+	if _, err := c.kv.Put(c.key("meta"), metaBytes); err != nil {
+		rollback()
+		return err
+	}
+	return nil
 }
 
 // checkDistinctColumnNames refuses a schema whose column names collide under

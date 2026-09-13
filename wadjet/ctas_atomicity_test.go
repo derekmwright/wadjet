@@ -10,7 +10,9 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -268,5 +270,302 @@ func ctasAssertNoTable(t *testing.T, ctx context.Context, db *DB, name string) {
 		if tbl == name {
 			t.Errorf("the failed statement left %q in the catalog's table list", name)
 		}
+	}
+}
+
+// failKeyKV fails every Put of a key whose suffix matches, so a gate can make
+// the catalog's commit fail at a chosen step.
+type failKeyKV struct {
+	catalog.MetaKV
+	suffix string
+	armed  atomic.Bool
+}
+
+func (k *failKeyKV) Put(key string, value []byte) (uint64, error) {
+	if k.armed.Load() && strings.HasSuffix(key, k.suffix) {
+		return 0, errors.New("simulated catalog write failure")
+	}
+	return k.MetaKV.Put(key, value)
+}
+
+// A CTAS whose COMMIT fails leaves the name FREE (#1024 round-2 review B6).
+//
+// A table is three catalog records — `table.<name>`, `manifest.<name>` and the
+// `meta` list — and readers do not agree about which one IS the table:
+// `GetTable` and `tableExists` read the first, `ListTables` and `DropTable` go
+// through the last. A partial write therefore does not leave a half-table, it
+// leaves a WEDGED NAME: one that cannot be read (`manifest not found`), cannot
+// be created (42P07 from the record that is there) and cannot be dropped (the
+// list never got it).
+//
+// The trigger the review found needed no fault injection at all — a float
+// column whose min/max is an infinity has no JSON form, and this arc is what
+// put query-derived statistics into that manifest. That trigger is gone (a
+// non-finite bound is dropped before the stats leave for the catalog, and the
+// statement now SUCCEEDS, which is what PostgreSQL 17.11 does with an infinity
+// in a double precision column — measured). So the gate injects the failure
+// instead: at each of the three keys, in turn.
+func TestACreateWhoseCommitFailsLeavesTheNameFree(t *testing.T) {
+	ctx := context.Background()
+
+	for _, step := range []struct{ name, suffix string }{
+		{"AtTheManifest", "manifest.wedged"},
+		{"AtTheTableRecord", "table.wedged"},
+		{"AtTheCatalogList", ".meta"},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			kv := &failKeyKV{MetaKV: catalog.NewMemKV(), suffix: step.suffix}
+			store := objstore.NewMemStore()
+			db, err := Open(ctx, Config{Store: store, Bucket: "test", MetaKV: kv})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { db.Close() })
+			if err := db.CreateTable(ctx, "src", parquet.Schema{Columns: []parquet.Column{
+				{Name: "id", Type: parquet.TypeInt64, Nullable: true},
+			}}, nil); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Execute(ctx, "INSERT INTO src (id) VALUES (1),(2)"); err != nil {
+				t.Fatal(err)
+			}
+			before := ctasObjectKeys(t, ctx, store)
+
+			kv.armed.Store(true)
+			if _, err := db.Query(ctx, "CREATE TABLE wedged AS SELECT id FROM src"); err == nil {
+				t.Fatal("the statement succeeded over a catalog that refused its commit")
+			}
+			kv.armed.Store(false)
+
+			// Nothing is left: not the record every existence test reads, not
+			// the list, and not the objects.
+			ctasAssertNoTable(t, ctx, db, "wedged")
+			ctasAssertNoNewObjects(t, ctx, store, before)
+
+			// And the NAME is reusable, which is the property the wedge took
+			// away: the retry must create the table, not answer 42P07.
+			if _, err := db.Query(ctx, "CREATE TABLE wedged AS SELECT id FROM src"); err != nil {
+				t.Fatalf("the name is not reusable after a failed commit: %v", err)
+			}
+			if n := ctasScalar(t, ctx, db, "SELECT COUNT(*) AS c FROM wedged"); n != 2 {
+				t.Errorf("the retry's table holds %d rows, want 2", n)
+			}
+			if _, err := db.Query(ctx, "DROP TABLE wedged"); err != nil {
+				t.Errorf("the name cannot be dropped: %v", err)
+			}
+		})
+	}
+}
+
+// A value the CATALOG cannot encode is not a value the statement may lose.
+//
+// `CREATE TABLE t AS SELECT f * 10 FROM src` over a float at the edge of the
+// range produces an infinity, and a manifest carrying it as a min/max bound
+// cannot be marshalled at all. PostgreSQL 17.11 stores an infinity in a double
+// precision column (measured: `CREATE TABLE t AS SELECT 'Infinity'::float8`
+// answers `Infinity`), so the statement must succeed and the value must read
+// back — the bound is what gives way, not the row.
+func TestANonFiniteValueIsStoredAndItsBoundIsDropped(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.CreateTable(ctx, "fsrc", parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64, Nullable: true},
+		{Name: "f", Type: parquet.TypeFloat64, Nullable: true},
+	}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Execute(ctx, "INSERT INTO fsrc (id, f) VALUES (1, 1e308), (2, 2.0)"); err != nil {
+		t.Fatal(err)
+	}
+
+	for i, sql := range []string{
+		`SELECT id, f * 10 AS x FROM fsrc`,
+		`SELECT id, f * f AS x FROM fsrc`,
+		`SELECT id, CAST('Infinity' AS FLOAT64) AS x FROM fsrc`,
+		`SELECT id, CAST('-Infinity' AS FLOAT64) AS x FROM fsrc`,
+		`SELECT id, CAST('NaN' AS FLOAT64) AS x FROM fsrc`,
+		`SELECT id, CAST('Infinity' AS FLOAT32) AS x FROM fsrc`,
+	} {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			tbl := fmt.Sprintf("nonfinite%d", i)
+			if _, err := db.Query(ctx, fmt.Sprintf("CREATE TABLE %s AS %s", tbl, sql)); err != nil {
+				t.Fatalf("%s: %v", sql, err)
+			}
+			// The row is the query's row, infinity and all.
+			ctasCompareQueries(t, ctx, db, sql+" ORDER BY id", "SELECT id, x FROM "+tbl+" ORDER BY id")
+			// And the table is usable from here on: the name reads, drops and
+			// is re-creatable.
+			if _, err := db.Query(ctx, "DROP TABLE "+tbl); err != nil {
+				t.Errorf("the table cannot be dropped: %v", err)
+			}
+		})
+	}
+}
+
+// ctxHonouringStore refuses every call whose context is done, the way every
+// real object store does. MemStore ignores context.Context entirely
+// (`func (m *MemStore) Put(_ context.Context, …)`), which is why no fixture
+// over a bare MemStore can see a cancel reach the store at all.
+type ctxHonouringStore struct {
+	objstore.Store
+	puts     atomic.Int64
+	cancelAt int64
+	cancel   context.CancelFunc
+}
+
+func (s *ctxHonouringStore) Put(ctx context.Context, b, k string, r io.Reader, n int64, ct string) (string, error) {
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	etag, err := s.Store.Put(ctx, b, k, r, n, ct)
+	if err == nil && strings.HasPrefix(k, "tables/") && s.puts.Add(1) == s.cancelAt && s.cancel != nil {
+		// The client goes away AFTER this file has landed.
+		s.cancel()
+	}
+	return etag, err
+}
+
+func (s *ctxHonouringStore) Delete(ctx context.Context, b, k string) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return s.Store.Delete(ctx, b, k)
+}
+
+func (s *ctxHonouringStore) List(ctx context.Context, b string, o objstore.ListOptions) ([]objstore.ObjectInfo, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return s.Store.List(ctx, b, o)
+}
+
+// A CANCEL that lands after a file has been uploaded still reclaims it
+// (#1024 round-2 review B4).
+//
+// The reclaim used to run on the STATEMENT's own context — the one that was
+// just cancelled — so `RetireObjects` could neither read the live catalog state
+// nor issue its deletes, logged the retirement as deferred, and the bytes
+// stayed forever. It runs on a fresh bounded context now.
+//
+// The store here honours the context, which is the whole of the fixture: the
+// arc's own cancel cell cancels BEFORE the statement runs, so nothing was ever
+// uploaded, and a MemStore would have accepted the upload either way.
+func TestACancelAfterAFileLandsStillReclaimsIt(t *testing.T) {
+	ctx := context.Background()
+	mem := objstore.NewMemStore()
+	st := &ctxHonouringStore{Store: mem, cancelAt: 1}
+	db, err := Open(ctx, Config{Store: st, Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64, Nullable: true},
+		{Name: "part", Type: parquet.TypeString, Nullable: true},
+	}}
+	if err := db.CreateTable(ctx, "csrc", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	// A PARTITIONED target, so the append writes one file per partition and
+	// there is a file on the ground when the cancel lands.
+	if err := db.CreateTable(ctx, "cdst", schema, []string{"part"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Execute(ctx, `INSERT INTO csrc (id, part) VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d'),(5,'e')`); err != nil {
+		t.Fatal(err)
+	}
+	before := ctasObjectKeys(t, ctx, st)
+
+	stmtCtx, cancel := context.WithCancel(ctx)
+	st.puts.Store(0)
+	st.cancel = cancel
+	_, err = db.Query(stmtCtx, `INSERT INTO cdst SELECT id, part FROM csrc`)
+	cancel()
+	if err == nil {
+		t.Fatal("the cancelled statement succeeded")
+	}
+
+	if n := ctasScalar(t, ctx, db, `SELECT COUNT(*) AS c FROM cdst`); n != 0 {
+		t.Errorf("the cancelled statement published %d rows", n)
+	}
+	ctasAssertNoNewObjects(t, ctx, st, before)
+}
+
+// A query-sourced write's GATHER is bounded, and past it the statement is a
+// LOUD resource refusal (#1024 round-2 review B5).
+//
+// A statement whose source is a query reads the whole result before it writes.
+// Without a bound that is the heap's business — measured at 860 MiB peak for a
+// 99 MiB result, and no refusal, while the docs and ADR-0036 promised a 53400
+// nobody could reach: `CollectSink.MaxBytes` was set only inside the
+// coordinator, and the coordinator refuses these statements 0A000 before it
+// gets there.
+func TestAQuerySourcedWriteRefusesPastItsGatherBudget(t *testing.T) {
+	ctx := context.Background()
+	// A small budget so the fixture stays small; Config.MemoryBudget is the
+	// documented way to move it.
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test",
+		MemoryBudget: 256 << 10, SpillDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if got := db.querySourcedWriteBudget(); got != 256<<10 {
+		t.Fatalf("the budget is %d, want the configured 256 KiB", got)
+	}
+
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64, Nullable: true},
+		{Name: "s", Type: parquet.TypeString, Nullable: true},
+	}}
+	if err := db.CreateTable(ctx, "bsrc", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	rows := make([]map[string]any, 0, 20000)
+	for i := 0; i < 20000; i++ {
+		rows = append(rows, map[string]any{"id": int64(i), "s": strings.Repeat("x", 64)})
+	}
+	ing := db.NewIngester("bsrc", schema, nil, ingest.Config{MaxBufferRows: len(rows) + 1})
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTable(ctx, "bdst", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct{ name, sql string }{
+		{"CreateTableAsSelect", `CREATE TABLE btoobig AS SELECT id, s FROM bsrc`},
+		{"InsertIntoSelect", `INSERT INTO bdst SELECT id, s FROM bsrc`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := db.Query(ctx, tc.sql)
+			if err == nil {
+				t.Fatal("a result past the gather budget was accepted; the refusal the docs " +
+					"and ADR-0036 promise must be reachable on a door that RUNS the statement")
+			}
+			if got := sqlerr.StateOf(err); got != physical.QueryLimitSQLState {
+				t.Errorf("SQLSTATE %q, want %s: %v", got, physical.QueryLimitSQLState, err)
+			}
+			if !strings.Contains(err.Error(), "budget") {
+				t.Errorf("the refusal does not name the bound: %v", err)
+			}
+			ctasAssertNoTable(t, ctx, db, "btoobig")
+			if n := ctasScalar(t, ctx, db, `SELECT COUNT(*) AS c FROM bdst`); n != 0 {
+				t.Errorf("the refused append wrote %d rows", n)
+			}
+		})
+	}
+
+	// The boundary: a result INSIDE the budget is written, not refused.
+	if _, err := db.Query(ctx, `CREATE TABLE bsmall AS SELECT id, s FROM bsrc WHERE id < 100`); err != nil {
+		t.Errorf("a result inside the budget was refused: %v", err)
 	}
 }
