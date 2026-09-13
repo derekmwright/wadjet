@@ -139,10 +139,34 @@ type DropFunctionInfo struct {
 }
 
 // CreateTableInfo holds details for a CREATE TABLE statement.
+//
+// Two grammars share it. The DECLARED form carries Columns (and optionally
+// PartitionKeys) and creates an empty table. The `AS <select>` form (#1024)
+// carries AsSelect instead: the new table's schema is that query's DECLARED
+// OUTPUT (ADR-0026 §8), so there is nothing to declare here, and Columns is
+// empty for it — AsColumnNames holds the optional `(a, b)` list, which RENAMES
+// the query's output columns positionally rather than declaring types.
 type CreateTableInfo struct {
 	Name          string
 	Columns       []ColumnDef
 	PartitionKeys []string
+	// IfNotExists makes an existing name a no-op instead of 42P07, which is
+	// PostgreSQL's rule: a NOTICE and the `CREATE TABLE AS` tag, and the query
+	// is NOT run.
+	IfNotExists bool
+	// AsSelect is the whole SELECT statement a CTAS carries, parsed by the one
+	// parseSelectStatement every bare SELECT goes through. nil for the
+	// declared form.
+	AsSelect *ParsedQuery
+	// AsColumnNames renames the query's output columns POSITIONALLY (K1's
+	// alias-list rule, #958). A list SHORTER than the query's output renames a
+	// prefix and leaves the rest with the names the query published;
+	// PostgreSQL 17.11 refuses a LONGER one with 42601.
+	AsColumnNames []string
+	// WithData is false only for the explicit `WITH NO DATA`, which creates
+	// the table with the declared schema and does not run the query. It is
+	// true for the default and for the explicit `WITH DATA`.
+	WithData bool
 }
 
 // ColumnDef defines a column in a CREATE TABLE statement.
@@ -205,10 +229,18 @@ type DeleteInfo struct {
 }
 
 // InsertInfo holds details for an INSERT statement.
+//
+// Values and Select are the two source grammars and exactly one is set:
+// `VALUES (…), (…)` carries literal rows, `INSERT INTO t [(cols)] <select>`
+// carries a whole query (#1024).
 type InsertInfo struct {
 	Table   string     // table name
 	Columns []string   // target column names (empty = all columns)
 	Values  [][]string // rows of value expressions
+	// Select is the query an `INSERT INTO … SELECT` inserts, parsed by the one
+	// parseSelectStatement a bare SELECT goes through. nil for the VALUES
+	// form.
+	Select *ParsedQuery
 }
 
 // CreateAlertInfo holds details for a CREATE ALERT statement.
@@ -381,9 +413,30 @@ func parseDispatch(sql string) (*ParsedQuery, error) {
 		return lexParseAnalyze(trimmed, l)
 	}
 
+	return parseSelectStatement(sql, trimmed)
+}
+
+// parseSelectStatement parses one complete SELECT statement — the optional
+// WITH prefix, the set-operation tree, ORDER BY, LIMIT/OFFSET/FETCH — and runs
+// every post-parse pass a top-level query gets.
+//
+// It is a FUNCTION rather than the tail of parseDispatch because
+// `CREATE TABLE … AS <select>` and `INSERT INTO … <select>` carry a whole
+// SELECT and must get the SAME one (#1024). A second call site that re-ran
+// three of the five passes would be a second dialect: `resolvePositionalRefs`
+// alone decides what `GROUP BY 1` means, and a CTAS whose inner SELECT skipped
+// it would write a different table than the identical bare SELECT returns.
+//
+// `stmt` is what the door received — it becomes ParsedQuery.SQL, so an error
+// or a re-plan names the text the client wrote. `body` is the same statement
+// with the leading keywords a caller has already consumed removed; for a bare
+// SELECT the two are equal.
+func parseSelectStatement(stmt, body string) (*ParsedQuery, error) {
+	trimmed := strings.TrimSpace(body)
+
 	// Pre-parse CTEs — extract WITH ... AS (...) clauses
 	var cteDefs []CTEDef
-	if first.typ == TokenKWWith {
+	if newLexer(trimmed).peekToken().typ == TokenKWWith {
 		l2 := newLexer(trimmed)
 		var err error
 		cteDefs, err = lexParseCTEs(l2)
@@ -443,7 +496,7 @@ func parseDispatch(sql string) (*ParsedQuery, error) {
 
 	pq := &ParsedQuery{
 		Type:       QuerySelect,
-		SQL:        sql,
+		SQL:        stmt,
 		Windows:    windowSpecs,
 		CTEs:       cteDefs,
 		SelectInfo: info,
@@ -1023,10 +1076,27 @@ func collectTypeParams(l *lexer) (string, error) {
 }
 
 func lexParseCreateTable(sql string, l *lexer) (*ParsedQuery, error) {
+	ifNotExists := parseIfNotExists(l)
+
 	// Table name
 	nameTok := l.nextToken()
 	if nameTok.typ != TokenIdent {
 		return nil, fmt.Errorf("CREATE TABLE: table name is required")
+	}
+
+	// `CREATE TABLE t AS <select>` — the query IS the declaration (#1024).
+	if l.peekToken().typ == TokenKWAs {
+		return parseCreateTableAs(sql, l, nameTok.val, ifNotExists, nil)
+	}
+	// `CREATE TABLE t (a, b) AS <select>` — a rename list, not a column
+	// definition list. The two are told apart by the token after the first
+	// name; see looksLikeColumnNameList.
+	if looksLikeColumnNameList(l) {
+		renames, err := parseColumnNameList(l, "CREATE TABLE")
+		if err != nil {
+			return nil, err
+		}
+		return parseCreateTableAs(sql, l, nameTok.val, ifNotExists, renames)
 	}
 
 	// Opening paren for column definitions
@@ -1160,6 +1230,8 @@ func lexParseCreateTable(sql string, l *lexer) (*ParsedQuery, error) {
 			Name:          nameTok.val,
 			Columns:       columns,
 			PartitionKeys: partitionKeys,
+			IfNotExists:   ifNotExists,
+			WithData:      true,
 		},
 	}, nil
 }

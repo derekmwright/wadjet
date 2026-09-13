@@ -323,10 +323,15 @@ func parseInsert(sql string, l *lexer) (*ParsedQuery, error) {
 		}
 	}
 
+	// `INSERT INTO t [(cols)] <select>` — the query is the source (#1024).
+	if startsAQuery(l.peekToken().typ) {
+		return parseInsertSelect(sql, l, tableName, columns)
+	}
+
 	// VALUES keyword
 	valTok := l.nextToken()
 	if valTok.typ != TokenKWValues {
-		return nil, fmt.Errorf("expected VALUES after INSERT INTO %s, got %q", tableName, valTok.val)
+		return nil, fmt.Errorf("expected VALUES or a query after INSERT INTO %s, got %q", tableName, valTok.val)
 	}
 
 	// Parse value rows: (v1, v2), (v3, v4), ...
