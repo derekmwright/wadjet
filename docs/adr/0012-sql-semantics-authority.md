@@ -3236,6 +3236,58 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `server.TestPolicyMaskingIsPlanTimeOnEveryDoor`'s three
      `a_laterals_own_star_*` cells.
 
+   - **The published NAME of an UNALIASED item inside a block a JOIN reads is
+     its expression text, where PostgreSQL publishes `?column?`.** (Added
+     2026-09-13, arc O2; PRE-EXISTING, measured byte-identical at
+     `0193c4e9`.) `SELECT * FROM (SELECT order_id, amount + 1 FROM lat_item) x
+     JOIN lat_ord o ON true` sends `amount + 1` in `RowDescription` where
+     PostgreSQL sends `?column?`. A column has two names (ADR-0026 §2) and the
+     block's stream carries the RESOLUTION one; the published name is applied
+     where the block IS the statement's output projection, and a star over a
+     join reads the stream instead. Values, types and positions agree on all
+     five arms — only the name differs. Making the stream carry `?column?`
+     would give two unaliased items ONE name, after which every by-name lookup
+     between the block and the client reads the first of them, so closing it
+     needs the published list travelling BESIDE the stream by POSITION
+     (`physical.ProjectExprSpec.SourceSlot` one relation out). Pinned per arm
+     in `coordinator.TestArcO2ADerivedBlockPublishesItsVisibleList`, twelve
+     cells.
+
+   - **A QUALIFIED star over a block that publishes TWO columns of one name is
+     REFUSED, where PostgreSQL answers the pair.** (Added 2026-09-13, arc O2 —
+     a WRONG → LOUD move, measured at `0193c4e9`.) `SELECT x.* FROM (SELECT
+     a.id, b.id FROM lat_item a JOIN lat_item b …) x` published the FIRST `id`
+     twice on the single-process arms (`1,1 | 1,1 | …` for PostgreSQL's
+     `1,1 | 1,2 | …`), the block's inner join stream on the DAG arms, and
+     `(SELECT order_id AS k, amount AS k …)` published a wrong TYPE with it.
+     The expansion emits one column REFERENCE per published column, and two
+     references spelled alike both bind the first column of that name, so the
+     list is one this pass cannot state and the star is refused (`0A000`). The
+     BARE star over the same block reads the relation by POSITION and answers
+     PostgreSQL's pair, which is what makes this the qualified spelling's own.
+     Closing it needs the same positional list as the entry above. The
+     explicit-list spelling (`SELECT x.id FROM (SELECT a.id, b.id …) x`) still
+     ANSWERS where PostgreSQL raises `42702 column reference "id" is
+     ambiguous`, and that half is open. Gated as a refusal in
+     `coordinator.TestArcO2ADerivedBlockPublishesItsVisibleList`'s `o2Refuses`,
+     four cells on five arms.
+
+   - **A `LIMIT` or `OFFSET` inside a CORRELATED LATERAL is REFUSED, where
+     PostgreSQL answers per outer row.** (Added 2026-09-13, arc O2 — a
+     WRONG → LOUD move; the wrong row count is measured at `0193c4e9` and was
+     pinned by arc N1.) PostgreSQL evaluates a LATERAL body once per OUTER
+     ROW, so `JOIN LATERAL (SELECT i.product … WHERE i.order_id = o.id ORDER BY
+     i.product LIMIT 3) x` yields up to three rows for every order. The
+     decorrelation promotes the correlation into a join condition, which makes
+     the body ONE relation joined once, and the bound then applies to the whole
+     of it — three rows for PostgreSQL's four, silently, on five arms and in
+     every spelling of the consumer. Honouring it needs the bound travelling
+     WITH the correlation key as a per-key top-N (ADR-0021's territory), so the
+     shape is loud until then: `0A000`, with the two ways out in the message.
+     An UNCORRELATED lateral is untouched. Gated as a refusal in
+     `coordinator.TestArcO2ADerivedBlockPublishesItsVisibleList`'s `o2Refuses`,
+     six cells on five arms.
+
    - **A star over a NON-aggregated LATERAL publishes PostgreSQL's columns in
      a different ORDER.** (Added 2026-09-07, arc J1 round 2; PRE-EXISTING.
      **CLOSED by #1008.**) `SELECT * FROM o JOIN LATERAL (SELECT amount …) li`

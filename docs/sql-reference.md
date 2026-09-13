@@ -1140,10 +1140,11 @@ A subquery item's TYPE never decides where the query runs: a container
 a bare `NULL` are published like any other column, and are declared the way the
 same item is declared outside a subquery.
 
-One shape is not covered and is wrong on the distributed path in a way this
-release does not change: `SELECT *` over a subquery whose own body is a JOIN
-publishes that join's columns rather than the subquery's `SELECT` list. Name
-the columns.
+A bare `SELECT *` over a subquery whose own body is a JOIN publishes the
+subquery's own `SELECT` list, on every path. What is not covered is the
+QUALIFIED spelling over such a block when the block publishes two columns of
+ONE name: `x.*` is refused there rather than answered, because one reference
+per column cannot tell two columns of a name apart. Name the columns.
 
 The correlated equality is turned into a join, and a join needs the inner
 value as a column, so the planner materializes one under a name from its
@@ -1170,8 +1171,21 @@ own `ORDER BY`, `LIMIT` or `DISTINCT` — none of those changes a column or its
 position.
 
 Where the list is not knowable the star is still REFUSED (`0A000`) rather than
-guessed: a derived table whose body is itself a BARE star over a join. Name the
-columns there.
+guessed, and the refusal's own sentence states the rule: a qualified star
+expands only from a relation whose column list is known — a base table, or a
+derived table or CTE **whose own SELECT list names its columns**. So a block
+whose body is itself a bare star is refused (over one table as well as over a
+join), and so is one whose body is a set operation, one reached through an
+ALIASED CTE reference, and one that publishes TWO columns of one name — there
+the references would both bind the first column, which is a wrong value.
+PostgreSQL answers all of these; name the columns.
+
+A `LIMIT` or `OFFSET` inside a LATERAL subquery that is CORRELATED is refused
+(`0A000`) for a different reason: PostgreSQL evaluates the subquery once per
+outer row, so the bound applies to each row's own result, and the correlation
+is executed here as a join — which would apply it to the whole inner relation
+instead. Take the bound outside the LATERAL, or rank inside it with a window
+function. An uncorrelated LATERAL's own bound means exactly what it says.
 
 An inner `SELECT` list that aliases something to the correlation key's own name
 answers what PostgreSQL answers. `JOIN LATERAL (SELECT MAX(t.id) AS g …

@@ -169,14 +169,27 @@ func starQualifier(proj Projection) string {
 	return strings.TrimSpace(strings.TrimSuffix(e, ".*"))
 }
 
-// relationOutputColumns returns alias's PUBLISHED outputs in order, or nil:
-// leave unknown stars unexpanded and LOUD, never guess from a scan beneath a Project.
-// DerivedAlias/CTEName roots answer ONLY from their OWN projection; if elided,
-// there is no list here and the answer is nil. Respect positional column aliases.
-// Base scans publish their schema subject to the enclosing security projection.
-// Do not enumerate decorrelated LATERAL: its alias also marks the scan, but its
-// projection carries the correlation slot the join will drop; s.* beside an item
-// therefore remains unexpanded and LOUD.
+// relationOutputColumns returns alias's PUBLISHED outputs in order, under both
+// of the names ADR-0026 §2 gives a column, or nil: leave a star this pass
+// cannot state unexpanded and LOUD, never guess from a scan beneath a Project.
+//
+// A DerivedAlias/CTEName root answers from its OWN projection, reached through
+// the operators that change neither a column nor its position — its own Sort,
+// Limit and Distinct (blockOutputProjection). Where the projection was elided
+// there is no list here and the answer is nil. Positional column aliases are
+// respected; base scans publish their schema subject to the enclosing security
+// projection.
+//
+// A DECORRELATED LATERAL is enumerated TOO, and its published list is its
+// projection MINUS the slots the join above minted — `Node.HiddenJoinCols`,
+// the same identity the join's own drop uses (ADR-0026 §3c). It was excluded
+// until arc O2, because the correlation slot the lowering injects is an
+// ordinary select item of that projection and this pass could not tell it from
+// a user's own.
+//
+// TWO published columns of ONE resolution name answer nil: the expansion emits
+// one reference per column and two spelled alike both bind the first, which is
+// a wrong VALUE (projectionOutputNames).
 // See docs/internals/qualified-star-relation-output-list.md for the design.
 func relationOutputColumns(n *Node, alias string) []StarColumn {
 	var found []StarColumn
