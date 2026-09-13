@@ -390,6 +390,21 @@ func TestTheTwoArmsOfACreateDeclareOneTable(t *testing.T) {
 		`SELECT id, s FROM shp ORDER BY id DESC LIMIT 2`,
 		`SELECT id, s, d FROM shp WHERE 1 = 0`,
 		`SELECT CAST(id AS DECIMAL(18,4)), CAST(s AS STRING) FROM shp`,
+		// A STAR over a relation that is not a base table, which is where the
+		// round-2 fix stopped: `deriveColumns` names the items the OUTER
+		// select lists, and a star lists none, so these fell through to the
+		// plan-time walk — which spells an INNER unaliased item by its
+		// expression TEXT. PostgreSQL 17.11 declares `id, ?column?` for every
+		// one of them on BOTH arms (measured). A star over a base table was
+		// always fine, which is why the round-2 shapes above could not see it.
+		`WITH c AS (SELECT id, g + 1 FROM shp) SELECT * FROM c`,
+		`SELECT * FROM (SELECT id, g + 1 FROM shp) x`,
+		`SELECT * FROM (SELECT id, s || 'x' FROM shp) x`,
+		`WITH c AS (SELECT * FROM (SELECT id, g + 1 FROM shp) y) SELECT * FROM c`,
+		`WITH c AS (SELECT id, g + 1 AS np FROM shp) SELECT * FROM c`,
+		`WITH c AS (SELECT id, UPPER(s) FROM shp) SELECT * FROM c`,
+		`SELECT * FROM (SELECT id, (SELECT MAX(g) FROM shp) FROM shp) x`,
+		`WITH c AS (SELECT id, COUNT(*) OVER () FROM shp) SELECT * FROM c`,
 	}
 	for i, q := range shapes {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
@@ -423,6 +438,11 @@ func TestTheDuplicateNameRuleHoldsOnBothArms(t *testing.T) {
 		`SELECT id, g+1, s||'x', 42 FROM shp`,
 		`SELECT g+1, g+2 FROM shp`,
 		`SELECT g+1, g+1 FROM shp`,
+		// …and through a STAR, where the two unaliased items are the INNER
+		// relation's. `WITH NO DATA` CREATED these where `WITH DATA` and
+		// PostgreSQL both answer 42701 (round-2 review B1).
+		`WITH c AS (SELECT g+1, g+2 FROM shp) SELECT * FROM c`,
+		`SELECT * FROM (SELECT g+1, g+2 FROM shp) x`,
 	} {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			for _, suffix := range []string{"", " WITH NO DATA"} {

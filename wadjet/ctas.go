@@ -115,9 +115,15 @@ func (db *DB) executeCreateTableAs(ctx context.Context, ct *plansql.CreateTableI
 	return &ExecResult{Command: "SELECT", RowsAffected: n}, nil
 }
 
-// ctasSchema is the ONE derivation of a new table's schema from a query's
-// declared output, shared by the WITH DATA and WITH NO DATA arms so the two
-// cannot declare the same statement differently.
+// ctasSchema is the last step both arms share: the rename list, the reserved
+// namespace and the writer's rules, applied to a declared output the two arms
+// have already agreed on.
+//
+// It cannot make them agree — a name that differs by the time it gets here is a
+// name it renames or refuses, not one it repairs. The agreement is made
+// upstream, in `declaredOutputFor`, which reads the same `CollectSink.Schema()`
+// the executed arm publishes. Two rounds of review were spent on what happens
+// when that is not true (round-1 B7, round-2 B1).
 func (db *DB) ctasSchema(ct *plansql.CreateTableInfo, declared []parquet.Column) (parquet.Schema, error) {
 	schema, err := ingest.TableSchemaForQuery(declared, ct.AsColumnNames)
 	if err != nil {
@@ -320,6 +326,42 @@ func (db *DB) declaredOutputFor(ctx context.Context, parsed *plansql.ParsedQuery
 	if names := deriveColumns(selectInfo, nil, declared); len(names) == len(declared) {
 		for i := range declared {
 			declared[i].Name = names[i]
+		}
+	}
+
+	// A STAR lists no items, so the loop above renamed nothing and the names
+	// are still the plan-time walk's — which spells an INNER unaliased
+	// projection item by its expression TEXT. The comment this replaces said a
+	// star "falls through to the plan's own schema names, which is what the
+	// executed arm publishes for a star too"; it is not. The executed arm
+	// publishes the SINK's names, and for `SELECT * FROM (SELECT id, n + 1
+	// FROM s) x` those are `id, ?column?` where the walk says `id, "n + 1"`
+	// (#732; round-2 review B1). The duplicate rule goes with it: the same
+	// star over `(SELECT n+1, n+2 …)` is 42701 on the executed arm and on
+	// PostgreSQL 17.11, and was CREATED here.
+	//
+	// The sink's names exist at PLAN time — `CollectSink.Schema()` answers
+	// from `SchemaHint` when no batch was consumed — so the fix is to BUILD
+	// the physical plan and read exactly what `DB.Query` reads, without
+	// running it. That is the one derivation this arm was supposed to share
+	// all along, and it costs a plan the `WITH NO DATA` arm was already
+	// paying for in `DeclaredOutputSchema`'s walk.
+	//
+	// A planning failure is not fatal here: the walk's answer is what this arm
+	// had before, and it is right for every shape but this one. `Plan` is also
+	// the call the WITH DATA arm makes moments later, so a plan that cannot be
+	// built fails the statement there, with that path's message.
+	if phys, perr := planner.Plan(ctx, logicalPlan); perr == nil && phys != nil && phys.Pipeline != nil {
+		if phys.Cleanup != nil {
+			defer phys.Cleanup()
+		}
+		defer phys.Pipeline.Close()
+		if cs, ok := phys.Pipeline.Sink.(*exec.CollectSink); ok {
+			if sch := cs.Schema(); len(sch) == len(declared) {
+				for i := range declared {
+					declared[i].Name = sch[i].Name
+				}
+			}
 		}
 	}
 	return declared, nil
