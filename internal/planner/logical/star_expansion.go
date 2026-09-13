@@ -61,20 +61,31 @@ func ExpandStarProjections(n *Node) {
 			// binds the FIRST column of that name in the join's output, which
 			// for `SELECT o.*, li.amount FROM o JOIN li` is li's `id`: the
 			// star's own relation was named and the expansion has to keep
-			// naming it. The published name stays the column's own, which is
-			// what PostgreSQL publishes.
-			ref := &plansql.ColRef{Column: col}
-			expr := col
+			// naming it.
+			//
+			// The reference is spelled with the relation's RESOLUTION name and
+			// the item carries its PUBLISHED one — ADR-0026 §2's pair, in the
+			// direction a star needs. An UNALIASED item publishes `?column?`,
+			// which is a rendering and not a handle: the block emits that
+			// column under its own expression text, so a star that referenced
+			// `?column?` named nothing and read NULL under a STRING
+			// declaration where PostgreSQL answers the value (#1077).
+			ref := &plansql.ColRef{Column: col.Resolve}
+			expr := col.Resolve
 			if qual != "" {
 				ref.Table = qual
-				expr = qual + "." + col
+				expr = qual + "." + col.Resolve
 			}
-			expanded = append(expanded, Projection{
+			item := Projection{
 				Column:  expr,
-				Alias:   col,
+				Alias:   col.Resolve,
 				Expr:    expr,
 				ASTExpr: ref,
-			})
+			}
+			if !strings.EqualFold(col.Publish, col.Resolve) {
+				item.PublishedName = col.Publish
+			}
+			expanded = append(expanded, item)
 		}
 	}
 	if !changed {
@@ -92,7 +103,7 @@ func ExpandStarProjections(n *Node) {
 // This applies beside items, alone, through derived/CTE scopes, under positional
 // ORDER BY and nested combinations alike.
 // See docs/internals/star-source-policy-publication.md for the design.
-func StarSourceColumns(input *Node, qualifier string) []string {
+func StarSourceColumns(input *Node, qualifier string) []StarColumn {
 	if input == nil {
 		return nil
 	}
@@ -106,6 +117,31 @@ func StarSourceColumns(input *Node, qualifier string) []string {
 	return publishedScanColumns(scan, barrier)
 }
 
+// StarColumn is one column of a star's source relation, under both of the
+// names ADR-0026 §2 gives a column: Resolve is what the relation's producer
+// EMITS and what a reference above must be spelled with, Publish is what the
+// client is told. They differ for exactly one class of select item — an
+// unaliased expression, which every engine emits under some spelling of its
+// own and PostgreSQL publishes as `?column?`.
+type StarColumn struct {
+	Resolve string
+	Publish string
+}
+
+// starColumnsOf pairs each name with itself, for a relation whose producer
+// emits what it publishes: a base-table scan, and a security projection over
+// one.
+func starColumnsOf(names []string) []StarColumn {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]StarColumn, len(names))
+	for i, n := range names {
+		out[i] = StarColumn{Resolve: n, Publish: n}
+	}
+	return out
+}
+
 // publishedScanColumns is what one scan PUBLISHES: the security projection's
 // column list when a column policy put one over it, and the scan's own
 // catalog-annotated columns when none applies.
@@ -114,11 +150,11 @@ func StarSourceColumns(input *Node, qualifier string) []string {
 // stays unexpanded and the query is refused. That direction is deliberate: a
 // security control never degrades to a grant, so "I could not read the policed
 // list" must never fall back to the catalog's.
-func publishedScanColumns(scan, barrier *Node) []string {
+func publishedScanColumns(scan, barrier *Node) []StarColumn {
 	if barrier != nil {
 		return projectionOutputNames(barrier)
 	}
-	return scan.ScanColumns
+	return starColumnsOf(scan.ScanColumns)
 }
 
 // starQualifier is the relation a QUALIFIED star names, or "" for a bare `*`.
@@ -142,8 +178,13 @@ func starQualifier(proj Projection) string {
 // projection carries the correlation slot the join will drop; s.* beside an item
 // therefore remains unexpanded and LOUD.
 // See docs/internals/qualified-star-relation-output-list.md for the design.
-func relationOutputColumns(n *Node, alias string) []string {
-	var found []string
+func relationOutputColumns(n *Node, alias string) []StarColumn {
+	var found []StarColumn
+	// hidden is every slot a JOIN on the path above MINTED for itself and
+	// drops from its own output (ADR-0026 §3c). A decorrelated LATERAL's
+	// correlation key is an ordinary select item of the block's list, so the
+	// block's published relation is that list MINUS the slots the join owes.
+	hidden := map[string]bool{}
 	// barrier is the nearest enclosing security projection, carried down the
 	// walk the way CheckPolicyPlanOrder carries it: a scan reached through one
 	// publishes the barrier's list and not its own (StarSourceColumns).
@@ -152,7 +193,24 @@ func relationOutputColumns(n *Node, alias string) []string {
 		if cur == nil || found != nil {
 			return
 		}
+		if cur.Type == NodeJoin {
+			for _, h := range cur.HiddenJoinCols {
+				hidden[strings.ToLower(bareColumn(strings.TrimSpace(h)))] = true
+			}
+		}
 		if cur.LateralSubtree {
+			// A decorrelated LATERAL is a relation the enclosing query NAMES,
+			// and its published list is its projection minus the correlation
+			// slot the join above minted and drops (ADR-0026 §3c). The alias
+			// is recorded on the SCANS below it (setSubtreeAlias), not on the
+			// subtree root, so that is where the name is looked for; the
+			// scan's own columns are never the answer here, because what this
+			// relation publishes is the body's SELECT list.
+			if subtreeScanAnswersTo(cur, alias) {
+				if proj := blockOutputProjection(cur); proj != nil {
+					found = starColumnsWithout(projectionOutputNames(proj), hidden)
+				}
+			}
 			return
 		}
 		if cur.Type == NodeProject && cur.SecurityBarrier {
@@ -165,8 +223,14 @@ func relationOutputColumns(n *Node, alias string) []string {
 			if !strings.EqualFold(cur.DerivedAlias, alias) && !strings.EqualFold(cur.CTEName, alias) {
 				return
 			}
-			if cur.Type == NodeProject {
-				found = projectionOutputNames(cur)
+			// The block's own SORT, LIMIT or DISTINCT stands between its root
+			// and its projection, and none of them changes a column or its
+			// position. Stopping at the root answered nil for every block that
+			// carries one, and the query was refused where PostgreSQL answers
+			// it — `SELECT x.* FROM (SELECT order_id, product FROM lat_item
+			// ORDER BY product) x`.
+			if proj := blockOutputProjection(cur); proj != nil {
+				found = starColumnsWithout(projectionOutputNames(proj), hidden)
 			}
 			return
 		}
@@ -191,23 +255,86 @@ func relationOutputColumns(n *Node, alias string) []string {
 	return found
 }
 
-// projectionOutputNames is a Project's published column list, or nil when one
-// of its items is a star this pass has not expanded — a column set that is not
-// knowable is not guessed at.
-func projectionOutputNames(n *Node) []string {
-	out := make([]string, 0, len(n.Projections))
+// subtreeScanAnswersTo reports whether a scan inside this subtree carries
+// alias — the association setSubtreeAlias records for a derived table and for
+// a LATERAL body alike.
+func subtreeScanAnswersTo(n *Node, alias string) bool {
+	if n == nil || alias == "" {
+		return false
+	}
+	if n.Type == NodeScan {
+		if strings.EqualFold(n.TableAlias, alias) || strings.EqualFold(n.TableName, alias) {
+			return true
+		}
+		for _, d := range n.DerivedAliases {
+			if strings.EqualFold(d, alias) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, c := range n.Children {
+		if subtreeScanAnswersTo(c, alias) {
+			return true
+		}
+	}
+	return false
+}
+
+// starColumnsWithout drops the slots a join above MINTED and will remove from
+// its own output: they are the planner's own, no query can spell them, and a
+// star must not publish one.
+func starColumnsWithout(cols []StarColumn, hidden map[string]bool) []StarColumn {
+	if len(cols) == 0 || len(hidden) == 0 {
+		return cols
+	}
+	out := make([]StarColumn, 0, len(cols))
+	for _, c := range cols {
+		if hidden[strings.ToLower(bareColumn(c.Resolve))] {
+			continue
+		}
+		out = append(out, c)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// projectionOutputNames is a Project's column list under BOTH names, or nil
+// when one of its items is a star this pass has not expanded — a column set
+// that is not knowable is not guessed at.
+func projectionOutputNames(n *Node) []StarColumn {
+	out := make([]StarColumn, 0, len(n.Projections))
 	for _, pr := range VisibleProjections(n.Projections) {
-		name := pr.PublishedName
-		if name == "" {
-			name = pr.Alias
+		resolve := pr.Alias
+		if resolve == "" {
+			resolve = pr.Column
 		}
-		if name == "" {
-			name = pr.Column
+		publish := pr.PublishedName
+		if publish == "" {
+			publish = resolve
 		}
-		if name == "" || name == "*" || strings.HasSuffix(name, ".*") {
+		if publish != "" && resolve == "" {
+			// An item the parser NAMED but that carries no alias and no
+			// column reference is an unaliased expression, and the column the
+			// Project emits for it is its expression text — the rule
+			// physical.projectionOutputName states, read from the other end.
+			// The two names are what ADR-0026 §2 calls a resolution spelling
+			// and a published name, and the one to REFERENCE is the first.
+			resolve = cleanExpr(pr.Expr)
+		}
+		// A projection with no name of any kind is one this pass cannot
+		// enumerate, and the answer is nil rather than a guess: a SECURITY
+		// barrier is a Project too, and a control that cannot state its list
+		// must never degrade to the catalog's (publishedScanColumns).
+		if resolve == "" || resolve == "*" || strings.HasSuffix(resolve, ".*") {
 			return nil
 		}
-		out = append(out, name)
+		if publish == "" || publish == "*" || strings.HasSuffix(publish, ".*") {
+			return nil
+		}
+		out = append(out, StarColumn{Resolve: resolve, Publish: publish})
 	}
 	if len(out) == 0 {
 		return nil
