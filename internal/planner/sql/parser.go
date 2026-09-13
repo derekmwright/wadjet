@@ -1223,6 +1223,26 @@ func lexParseCreateTable(sql string, l *lexer) (*ParsedQuery, error) {
 		}
 	}
 
+	// The statement has to be consumed in full, the rule every other
+	// statement in this parser keeps (#337, and the CTAS branch gets it from
+	// parseSelectStatement's expectEndOfStatement). Without it the DECLARED
+	// branch dropped whatever followed on the floor, and the shape that
+	// reaches it is the natural mistake now that `CREATE TABLE … AS` exists:
+	// `CREATE TABLE t (a INT64) AS SELECT 1` reported SUCCESS over an empty
+	// table, having discarded the query. PostgreSQL 17.11 answers
+	// `syntax error at or near "AS"` (measured); round-2 review P1.
+	if tail := l.nextToken(); tail.typ != TokenEOF {
+		if tail.typ == TokenKWAs {
+			return nil, sqlerr.New("42601",
+				"CREATE TABLE %s: a column DEFINITION list and a query cannot both be written; "+
+					"drop the types to name the query's columns — CREATE TABLE %s (%s) AS <query>",
+				nameTok.val, nameTok.val, columnNameListHint(columns))
+		}
+		return nil, sqlerr.New("42601",
+			"CREATE TABLE %s: trailing input after the end of the statement: %q",
+			nameTok.val, tail.source())
+	}
+
 	return &ParsedQuery{
 		Type: QueryCreateTable,
 		SQL:  sql,
@@ -1234,6 +1254,16 @@ func lexParseCreateTable(sql string, l *lexer) (*ParsedQuery, error) {
 			WithData:      true,
 		},
 	}, nil
+}
+
+// columnNameListHint renders a definition list as the RENAME list the CTAS
+// grammar takes, so the refusal above shows the statement the writer meant.
+func columnNameListHint(columns []ColumnDef) string {
+	names := make([]string, 0, len(columns))
+	for _, c := range columns {
+		names = append(names, c.Name)
+	}
+	return strings.Join(names, ", ")
 }
 
 // resolvePositionalRefs replaces numeric positional references in GROUP BY

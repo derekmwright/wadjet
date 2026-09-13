@@ -233,6 +233,13 @@ func TestAMalformedWriteQueryIsRefusedWithPostgresClass(t *testing.T) {
 		{`CREATE TABLE t AS`, "42601"},
 		{`CREATE TABLE t (a, b)`, "42601"},
 		{`CREATE TABLE t (a, b) SELECT 1`, "42601"},
+		// A column DEFINITION list and a query cannot both be written: the
+		// declared branch used to drop the query on the floor and report
+		// success over an empty table. PostgreSQL 17.11: `syntax error at or
+		// near "AS"` (measured; round-2 P1).
+		{`CREATE TABLE t (a INT64) AS SELECT 1`, "42601"},
+		{`CREATE TABLE t (a INT64) PARTITION BY (a) AS SELECT 1`, "42601"},
+		{`CREATE TABLE t (a INT64) GARBAGE`, "42601"},
 		{`INSERT INTO t`, ""}, // the existing unterminated-statement refusal
 	}
 	for _, tc := range cases {

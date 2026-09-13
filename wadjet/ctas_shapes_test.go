@@ -291,7 +291,13 @@ func TestAQuerySourcedWriteRefusesWhatPostgresRefuses(t *testing.T) {
 func TestWithNoDataDeclaresWithoutRunning(t *testing.T) {
 	db, ctx := ctasShapeDB(t)
 
-	res, err := db.Query(ctx, `CREATE TABLE nodata AS SELECT id, g + 1 AS gp, d FROM shp WITH NO DATA`)
+	// The fixture carries an UNALIASED item on purpose. With every item
+	// aliased or a bare column there is no `?column?` for the two arms to
+	// disagree about, and they DID disagree: `WITH NO DATA` named this column
+	// `"g + 1"` — its expression TEXT, which is what the plan-time walk names
+	// it — where `WITH DATA` and PostgreSQL 17.11 both name it `?column?`
+	// (round-2 review B7).
+	res, err := db.Query(ctx, `CREATE TABLE nodata AS SELECT id, g + 1, d FROM shp WITH NO DATA`)
 	if err != nil {
 		t.Fatalf("WITH NO DATA: %v", err)
 	}
@@ -302,14 +308,14 @@ func TestWithNoDataDeclaresWithoutRunning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := meta.Schema.ColumnNames(); !ctasEqualStrings(got, []string{"id", "gp", "d"}) {
-		t.Errorf("declared %v, want [id gp d]", got)
+	if got := meta.Schema.ColumnNames(); !ctasEqualStrings(got, []string{"id", "?column?", "d"}) {
+		t.Errorf("declared %v, want [id ?column? d]", got)
 	}
 	if n := ctasScalar(t, ctx, db, `SELECT COUNT(*) AS c FROM nodata`); n != 0 {
 		t.Errorf("the table holds %d rows; WITH NO DATA writes none", n)
 	}
 	// The declaration is the same one the WITH DATA arm takes.
-	if _, err := db.Query(ctx, `CREATE TABLE withdata AS SELECT id, g + 1 AS gp, d FROM shp`); err != nil {
+	if _, err := db.Query(ctx, `CREATE TABLE withdata AS SELECT id, g + 1, d FROM shp`); err != nil {
 		t.Fatal(err)
 	}
 	withData, err := db.catalog.GetTable(ctx, "withdata")
@@ -352,4 +358,182 @@ func ctasEqualStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// The two arms of one statement declare ONE table (#1024 round-2 review B7).
+//
+// `WITH DATA` takes its columns from the EXECUTED plan's declared output;
+// `WITH NO DATA` takes them from the plan-time walk, because it does not run
+// the query. The walk names an unaliased column by its expression TEXT and the
+// executed plan gives it PostgreSQL's `?column?` — so the two arms of one
+// statement declared two different tables, and with the name went the
+// duplicate rule: `SELECT id, n+1, s||'x', 42 … WITH NO DATA` was CREATED where
+// the same statement `WITH DATA` and PostgreSQL 17.11 both answer 42701
+// (measured).
+//
+// Every shape here is run BOTH ways and the two declarations compared, and the
+// shapes are the ones where a name has to be derived rather than copied.
+func TestTheTwoArmsOfACreateDeclareOneTable(t *testing.T) {
+	db, ctx := ctasShapeDB(t)
+
+	shapes := []string{
+		`SELECT * FROM shp`,
+		`SELECT id, g + 1, s FROM shp`,
+		`SELECT UPPER(s), d * 2 AS d2, id % 2 AS m FROM shp`,
+		`SELECT id, (SELECT MAX(g) FROM shp) FROM shp`,
+		`SELECT id, COUNT(*) OVER () FROM shp`,
+		`SELECT g, COUNT(*), SUM(d), MIN(ip) FROM shp GROUP BY g`,
+		`SELECT a.id, b.s FROM shp a JOIN shp b ON b.id = a.id`,
+		`WITH x AS (SELECT id, d FROM shp) SELECT id, d FROM x`,
+		`SELECT id FROM shp UNION SELECT g FROM shp`,
+		`SELECT DISTINCT g FROM shp`,
+		`SELECT id, s FROM shp ORDER BY id DESC LIMIT 2`,
+		`SELECT id, s, d FROM shp WHERE 1 = 0`,
+		`SELECT CAST(id AS DECIMAL(18,4)), CAST(s AS STRING) FROM shp`,
+	}
+	for i, q := range shapes {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			withData, nodata := fmt.Sprintf("wd%d", i), fmt.Sprintf("nd%d", i)
+			if _, err := db.Query(ctx, fmt.Sprintf("CREATE TABLE %s AS %s", withData, q)); err != nil {
+				t.Fatalf("WITH DATA: %v", err)
+			}
+			if _, err := db.Query(ctx, fmt.Sprintf("CREATE TABLE %s AS %s WITH NO DATA", nodata, q)); err != nil {
+				t.Fatalf("WITH NO DATA: %v", err)
+			}
+			a, err := db.catalog.GetTable(ctx, withData)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := db.catalog.GetTable(ctx, nodata)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctasCompareSchemas(t, a.Schema.Columns, b.Schema.Columns)
+		})
+	}
+}
+
+// …and the duplicate rule travels with the name, on both arms.
+func TestTheDuplicateNameRuleHoldsOnBothArms(t *testing.T) {
+	db, ctx := ctasShapeDB(t)
+
+	// Each measured on PostgreSQL 17.11: `ERROR: column "?column?" specified
+	// more than once`.
+	for i, q := range []string{
+		`SELECT id, g+1, s||'x', 42 FROM shp`,
+		`SELECT g+1, g+2 FROM shp`,
+		`SELECT g+1, g+1 FROM shp`,
+	} {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			for _, suffix := range []string{"", " WITH NO DATA"} {
+				tbl := fmt.Sprintf("dupname%d%d", i, len(suffix))
+				_, err := db.Query(ctx, fmt.Sprintf("CREATE TABLE %s AS %s%s", tbl, q, suffix))
+				if err == nil {
+					t.Errorf("`%s%s` was created; PostgreSQL 17.11 answers 42701", q, suffix)
+					continue
+				}
+				if got := sqlerr.StateOf(err); got != "42701" {
+					t.Errorf("`%s%s` refused %s, want 42701: %v", q, suffix, got, err)
+				}
+			}
+		})
+	}
+}
+
+// The DECLARED form honours IF NOT EXISTS (#1024 round-2 review B3).
+//
+// The grammar took the clause in this arc; the executor did not read it, so a
+// statement documented as a no-op raised the very 42P07 the documentation said
+// it replaced. PostgreSQL 17.11 answers a NOTICE and skips, and it tests
+// existence BEFORE the column types — `CREATE TABLE IF NOT EXISTS t (a
+// nosuchtype)` over an existing `t` is the skip, not a type error (measured).
+func TestIfNotExistsIsHonouredOnBothFormsOfCreateTable(t *testing.T) {
+	db, ctx := ctasShapeDB(t)
+
+	for _, form := range []struct{ name, create, again string }{
+		{"Declared",
+			`CREATE TABLE ine (a INT64, b STRING)`,
+			`CREATE TABLE IF NOT EXISTS ine (a INT64, b STRING)`},
+		{"AsSelect",
+			`CREATE TABLE inect AS SELECT id, s FROM shp`,
+			`CREATE TABLE IF NOT EXISTS inect AS SELECT id FROM shp`},
+	} {
+		t.Run(form.name, func(t *testing.T) {
+			if _, err := db.Query(ctx, form.create); err != nil {
+				t.Fatal(err)
+			}
+			before, err := db.catalog.GetTable(ctx, ctasNameOf(form.create))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Query(ctx, form.again); err != nil {
+				t.Fatalf("IF NOT EXISTS over a taken name refused: %v", err)
+			}
+			// The existing table is untouched — its SCHEMA above all, because
+			// the second statement declares a different one.
+			after, err := db.catalog.GetTable(ctx, ctasNameOf(form.create))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !ctasEqualStrings(before.Schema.ColumnNames(), after.Schema.ColumnNames()) {
+				t.Errorf("the no-op replaced the table's schema: %v -> %v",
+					before.Schema.ColumnNames(), after.Schema.ColumnNames())
+			}
+			// Without the clause it is still 42P07.
+			if _, err := db.Query(ctx, form.create); sqlerr.StateOf(err) != "42P07" {
+				t.Errorf("without IF NOT EXISTS: %s %v, want 42P07", sqlerr.StateOf(err), err)
+			}
+		})
+	}
+
+	// The existence test precedes the column types, as PostgreSQL's does.
+	if _, err := db.Query(ctx, `CREATE TABLE IF NOT EXISTS ine (a NOSUCHTYPE)`); err != nil {
+		t.Errorf("IF NOT EXISTS over a taken name looked at the types: %v", err)
+	}
+}
+
+// A column DEFINITION list and a query cannot both be written (round-2 P1).
+//
+// `CREATE TABLE t (a INT64) AS SELECT 1` created an empty declared table and
+// dropped the query on the floor, reporting success. PostgreSQL 17.11:
+// `syntax error at or near "AS"` (measured).
+func TestADefinitionListAndAQueryCannotBothBeWritten(t *testing.T) {
+	db, ctx := ctasShapeDB(t)
+
+	for _, sql := range []string{
+		`CREATE TABLE trail (a INT64) AS SELECT 1 AS a`,
+		`CREATE TABLE trail (a INT64, b STRING) AS SELECT id, s FROM shp`,
+		`CREATE TABLE trail (a INT64) PARTITION BY (a) AS SELECT 1 AS a`,
+	} {
+		_, err := db.Query(ctx, sql)
+		if err == nil {
+			t.Errorf("%q was accepted; PostgreSQL 17.11 answers 42601", sql)
+			continue
+		}
+		if got := sqlerr.StateOf(err); got != "42601" {
+			t.Errorf("%q refused %s, want 42601: %v", sql, got, err)
+		}
+		if _, gerr := db.catalog.GetTable(ctx, "trail"); gerr == nil {
+			t.Errorf("%q created the table anyway", sql)
+		}
+	}
+	// The boundary from the other side: a RENAME list and a query is the CTAS
+	// form and is accepted, and a definition list ALONE is the declared form.
+	if _, err := db.Query(ctx, `CREATE TABLE renamed (a, b) AS SELECT id, s FROM shp`); err != nil {
+		t.Errorf("the rename list form was refused: %v", err)
+	}
+	if _, err := db.Query(ctx, `CREATE TABLE declaredonly (a INT64, b STRING)`); err != nil {
+		t.Errorf("the declared form was refused: %v", err)
+	}
+}
+
+// ctasNameOf reads the table name out of a CREATE TABLE statement.
+func ctasNameOf(sql string) string {
+	f := strings.Fields(sql)
+	for i, w := range f {
+		if strings.EqualFold(w, "TABLE") && i+1 < len(f) {
+			return strings.TrimSuffix(strings.TrimSuffix(f[i+1], "("), ",")
+		}
+	}
+	return ""
 }
