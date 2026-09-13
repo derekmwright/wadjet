@@ -274,7 +274,7 @@ func emittedColumnNames(n *logical.Node) []string {
 			return out
 		case logical.NodeAggregate:
 			published, resolve := stageGroupKeyNames(cur, aggInput(cur))
-			out := append([]string(nil), stageEmittedKeyNames(published, resolve)...)
+			out := append([]string(nil), stageEmittedKeyNames(published, resolve, logicalAggOutNames(cur))...)
 			for _, agg := range cur.AggExprs {
 				out = append(out, agg.OutputCol)
 			}

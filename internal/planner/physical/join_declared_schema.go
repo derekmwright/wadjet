@@ -117,7 +117,7 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 			// in the operator's emission order.
 			in := emittedColTypes(cur.Children[0])
 			published, resolve := stageGroupKeyNames(cur, cur.Children[0])
-			emitted := stageEmittedKeyNames(published, resolve)
+			emitted := stageEmittedKeyNames(published, resolve, logicalAggOutNames(cur))
 			keyTypes, _ := derivedGroupKeyTypes(cur.GroupBy, cur.Children[0])
 			for i, name := range emitted {
 				lc := strings.ToLower(name)

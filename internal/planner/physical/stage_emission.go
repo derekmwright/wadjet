@@ -404,7 +404,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// published one; now it is exec's own output rule over the published
 		// list, which is what the single-process aggregate emits for the same
 		// query (#355, #467, ADR-0026 §2b).
-		emitted := stageEmittedKeyNames(groupBy, groupByResolve)
+		emitted := stageEmittedKeyNames(groupBy, groupByResolve, logicalAggOutNames(node))
 		haveGBExprs := len(node.GroupByExprs) == len(node.GroupBy)
 		for i, key := range node.GroupBy {
 			var keyExpr plansql.Node

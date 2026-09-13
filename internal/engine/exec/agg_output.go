@@ -393,11 +393,20 @@ func (h *HashAggregate) emitOutputSchema() []parquet.Column {
 // the planner's published overrides (groupByOutNames, empty entries meaning
 // "apply the rule below").
 //
-// The rule: strip a table qualifier, unless stripping would make two keys
-// share one output name — `GROUP BY n1.n_name, n2.n_name` keeps both
-// qualifiers so a projection above can tell them apart. `GroupByAll`
-// (DISTINCT) passes its input schema through verbatim, because the operator
-// must be name-transparent to every downstream column reference.
+// The rule: strip a table qualifier, unless stripping would make two columns
+// of the operator's OWN OUTPUT share one name — another key
+// (`GROUP BY n1.n_name, n2.n_name` keeps both qualifiers so a projection above
+// can tell them apart) or an AGGREGATE OUTPUT. The aggregate emits its keys
+// and its aggregates into ONE batch, and `batch.RecordBatch.ColumnIndex`
+// answers the FIRST column of a name, so a key whose stripped name equals an
+// aggregate's alias is the same ambiguity from the other side: `SELECT
+// COUNT(*) AS product … GROUP BY i.product` published TWO columns called
+// `product` and every consumer above read the KEY where PostgreSQL answers the
+// count (#1078). aggOutNames is that list, in the operator's own order; nil
+// means the caller has no aggregates, never "do not check".
+//
+// `GroupByAll` (DISTINCT) passes its input schema through verbatim, because
+// the operator must be name-transparent to every downstream column reference.
 //
 // It is exported because BOTH engines have to answer this question with one
 // rule. The single-process planner feeds this operator directly; the stage DAG
@@ -405,22 +414,30 @@ func (h *HashAggregate) emitOutputSchema() []parquet.Column {
 // worker computes the same answer from the same inputs so the two aggregate
 // output schemas are identical (ADR-0026 §2b). A copy of the rule in the
 // planner is exactly how the two would drift.
-func PublishedGroupKeyNames(groupByCols, groupByOutNames []string, groupByAll bool) []string {
+func PublishedGroupKeyNames(groupByCols, groupByOutNames, aggOutNames []string, groupByAll bool) []string {
 	outNames := make([]string, len(groupByCols))
 	if groupByAll {
 		copy(outNames, groupByCols)
 	} else {
-		baseCounts := make(map[string]int, len(groupByCols))
+		baseCounts := make(map[string]int, len(groupByCols)+len(aggOutNames))
+		// An AGGREGATE OUTPUT occupies the name before the strip is even
+		// considered: it is a column of the same output batch, and the
+		// planner decided its name.
+		for _, a := range aggOutNames {
+			if a = strings.TrimSpace(a); a != "" {
+				baseCounts[strings.ToLower(a)]++
+			}
+		}
 		for i, name := range groupByCols {
 			base := name
 			if dot := strings.IndexByte(name, '.'); dot >= 0 {
 				base = name[dot+1:]
 			}
 			outNames[i] = base
-			baseCounts[base]++
+			baseCounts[strings.ToLower(base)]++
 		}
 		for i, name := range groupByCols {
-			if baseCounts[outNames[i]] > 1 {
+			if baseCounts[strings.ToLower(outNames[i])] > 1 {
 				outNames[i] = name // keep qualified to avoid ambiguity
 			}
 		}
@@ -440,7 +457,8 @@ func PublishedGroupKeyNames(groupByCols, groupByOutNames []string, groupByAll bo
 func (h *HashAggregate) outputSchema() []parquet.Column {
 	cols := make([]parquet.Column, 0, len(h.GroupByCols)+len(h.Aggs)+len(h.NullGroupCols))
 
-	outNames := PublishedGroupKeyNames(h.GroupByCols, h.GroupByOutNames, h.GroupByAll)
+	outNames := PublishedGroupKeyNames(h.GroupByCols, h.GroupByOutNames,
+		AggOutputNames(h.Aggs), h.GroupByAll)
 
 	for i, name := range outNames {
 		typ := parquet.TypeString // default fallback
@@ -728,4 +746,19 @@ func minMaxOutputType(in batch.TypeID) (parquet.TypeID, bool) {
 		return parquet.TypeID(in), true
 	}
 	return 0, false
+}
+
+// AggOutputNames is an aggregate's OUTPUT column names in the operator's own
+// emission order — the list `PublishedGroupKeyNames` asks about, exported so
+// the planner and the worker compute the same answer from the same inputs
+// (ADR-0026 §2b).
+func AggOutputNames(aggs []AggColumn) []string {
+	if len(aggs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(aggs))
+	for _, a := range aggs {
+		out = append(out, a.OutputCol)
+	}
+	return out
 }

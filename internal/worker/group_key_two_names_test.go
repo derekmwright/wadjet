@@ -122,7 +122,8 @@ func TestFragmentResolvesAndPublishesTheTwoNames(t *testing.T) {
 					"a name the input does not carry lands every row in one NULL group",
 					agg.GroupByCols, tc.resolve)
 			}
-			got := exec.PublishedGroupKeyNames(agg.GroupByCols, agg.GroupByOutNames, agg.GroupByAll)
+			got := exec.PublishedGroupKeyNames(agg.GroupByCols, agg.GroupByOutNames,
+				exec.AggOutputNames(agg.Aggs), agg.GroupByAll)
 			if !equalStringSlices(got, tc.publish) {
 				t.Errorf("the aggregate PUBLISHES its keys as %v, want %v — this is the name every "+
 					"consumer above the stage reads, and the single-process aggregate's own",
@@ -186,8 +187,10 @@ func TestFragmentPublishesWhatTheSingleProcessOperatorPublishes(t *testing.T) {
 	// with the canonical text as the override.
 	slot0 := plansql.SlotName(plansql.SlotGroupKey, 0)
 	single := exec.PublishedGroupKeyNames(
-		[]string{"n1.n_name", "n2.n_name", slot0}, []string{"", "", "g + 1"}, false)
-	got := exec.PublishedGroupKeyNames(agg.GroupByCols, agg.GroupByOutNames, agg.GroupByAll)
+		[]string{"n1.n_name", "n2.n_name", slot0}, []string{"", "", "g + 1"},
+		exec.AggOutputNames(agg.Aggs), false)
+	got := exec.PublishedGroupKeyNames(agg.GroupByCols, agg.GroupByOutNames,
+		exec.AggOutputNames(agg.Aggs), agg.GroupByAll)
 	if !equalStringSlices(got, single) {
 		t.Errorf("the DAG's aggregate emits %v where the single-process aggregate emits %v — one "+
 			"HAVING predicate, one sort key and one projection are resolved on both engines, and "+

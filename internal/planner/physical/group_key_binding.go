@@ -606,7 +606,7 @@ func aggregateOutputName(n *logical.Node, col string) (string, bool) {
 		child = n.Children[0]
 	}
 	published, resolve := stageGroupKeyNames(n, child)
-	names := stageEmittedKeyNames(published, resolve)
+	names := stageEmittedKeyNames(published, resolve, logicalAggOutNames(n))
 	emit := func(i int, g string) (string, bool) {
 		if i >= 0 && i < len(names) {
 			return names[i], true

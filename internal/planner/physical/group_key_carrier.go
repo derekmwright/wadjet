@@ -206,7 +206,7 @@ func stageGroupKeyNames(agg, child *logical.Node) (published []string, resolve [
 	// keys) already carry planner-chosen GroupByOutNames and bypass exec's strip
 	// (#467, #480, #740; ADR-0026 §2).
 	if anyExecRule(execRule) {
-		emitted := exec.PublishedGroupKeyNames(published, nil, false)
+		emitted := exec.PublishedGroupKeyNames(published, nil, logicalAggOutNames(agg), false)
 		for i := range published {
 			if execRule[i] {
 				published[i] = emitted[i]
@@ -263,7 +263,7 @@ func identityGroupKeyResolutions(names []string) []GroupKeyResolution {
 // slot placeholder here is not the slot the worker allocates — that index is a
 // runtime fact — but the rule only reads a name's qualifier and its collisions,
 // and a reserved-family name has neither.
-func stageEmittedKeyNames(published []string, resolve []GroupKeyResolution) []string {
+func stageEmittedKeyNames(published []string, resolve []GroupKeyResolution, aggOut []string) []string {
 	byRule := make([]string, len(published))
 	overrides := make([]string, len(published))
 	for i := range published {
@@ -274,7 +274,35 @@ func stageEmittedKeyNames(published []string, resolve []GroupKeyResolution) []st
 		}
 		byRule[i] = published[i]
 	}
-	return exec.PublishedGroupKeyNames(byRule, overrides, false)
+	return exec.PublishedGroupKeyNames(byRule, overrides, aggOut, false)
+}
+
+// logicalAggOutNames is an Aggregate node's OUTPUT column names, the list
+// `exec.PublishedGroupKeyNames` asks about (ADR-0026 §2b).
+func logicalAggOutNames(agg *logical.Node) []string {
+	if agg == nil || len(agg.AggExprs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(agg.AggExprs))
+	for i := range agg.AggExprs {
+		out = append(out, agg.AggExprs[i].OutputCol)
+	}
+	return out
+}
+
+// stageAggOutNames is a Stage's aggregate OUTPUT names, from whichever of the
+// three spec lists the stage carries — the same list one operator lower.
+func stageAggOutNames(s *Stage) []string {
+	if s == nil {
+		return nil
+	}
+	var out []string
+	for _, specs := range [][]AggSpec{s.AggSpecs, s.FusedAggSpecs, s.ChainedAggSpecs} {
+		for _, a := range specs {
+			out = append(out, a.OutputCol)
+		}
+	}
+	return out
 }
 
 // aggregateEmittedKeyNames is the column name a stage's aggregate emits for
@@ -288,7 +316,7 @@ func aggregateEmittedKeyNames(s *Stage) []string {
 	if len(s.GroupByResolve) != len(keys) {
 		return keys
 	}
-	return stageEmittedKeyNames(keys, s.GroupByResolve)
+	return stageEmittedKeyNames(keys, s.GroupByResolve, stageAggOutNames(s))
 }
 
 // stageGroupKeyDecls types every key the computing fragment MATERIALIZES, so

@@ -785,7 +785,7 @@ func aggregateOutputNameList(node *logical.Node, emitted bool) ([]string, bool) 
 			// other key takes exec's rule. Passing the all-empty list when
 			// nothing is derived is the same input a nil GroupByOutNames is.
 			over, _ := publishedGroupKeyNames(keyOuts, elided)
-			names = exec.PublishedGroupKeyNames(names, over, false)
+			names = exec.PublishedGroupKeyNames(names, over, logicalAggOutNames(node), false)
 		}
 		for i := range node.AggExprs {
 			names = append(names, node.AggExprs[i].OutputCol)

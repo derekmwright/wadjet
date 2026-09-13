@@ -673,7 +673,16 @@ func fragmentGroupKeyPlan(spec distributed.OpSpec) (*fragmentGroupKeys, error) {
 			p.slotDecimal[slot] = d
 		}
 	}
-	p.published = exec.PublishedGroupKeyNames(byRule, overrides, false)
+	// The aggregate's OWN output names, so the fragment's operator and the
+	// single-process one keep a key's qualifier in the same cases (ADR-0026
+	// §2b): a key whose stripped name is an aggregate's alias would otherwise
+	// be published twice in one batch and every consumer above would read the
+	// FIRST of the two (#1078).
+	aggOut := make([]string, 0, len(spec.Aggregates))
+	for _, a := range spec.Aggregates {
+		aggOut = append(aggOut, a.OutputCol)
+	}
+	p.published = exec.PublishedGroupKeyNames(byRule, overrides, aggOut, false)
 	return p, nil
 }
 

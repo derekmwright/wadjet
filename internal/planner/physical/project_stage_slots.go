@@ -111,7 +111,7 @@ func aggregateEmittedSlots(s *Stage) (names []string, isAgg []bool, ok bool) {
 	if len(resolve) != len(keys) {
 		resolve = nil
 	}
-	keys = stageEmittedKeyNames(keys, resolve)
+	keys = stageEmittedKeyNames(keys, resolve, stageAggOutNames(s))
 	for _, k := range keys {
 		names = append(names, k)
 		isAgg = append(isAgg, false)
