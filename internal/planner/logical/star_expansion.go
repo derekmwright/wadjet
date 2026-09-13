@@ -336,6 +336,28 @@ func projectionOutputNames(n *Node) []StarColumn {
 		}
 		out = append(out, StarColumn{Resolve: resolve, Publish: publish})
 	}
+	// TWO ITEMS OF ONE RESOLUTION NAME cannot be enumerated by NAME. The
+	// expansion emits one reference per published column, and two references
+	// spelled alike both bind the FIRST column of that name
+	// (`batch.RecordBatch.ColumnIndex`), so `SELECT x.* FROM (SELECT a.id,
+	// b.id FROM lat_item a JOIN lat_item b …) x` published the first `id`
+	// TWICE where PostgreSQL publishes the pair — a wrong VALUE, and a wrong
+	// TYPE where the two items differ in type (`order_id AS k, amount AS k`).
+	//
+	// A list this pass cannot state is answered nil, which is the direction
+	// the loop above already takes for an item with no name at all: the star
+	// stays unexpanded and the query is REFUSED. Closing it properly means the
+	// block's published list travelling by POSITION rather than by name —
+	// `ProjectExprSpec.SourceSlot` one relation out — and until it does, loud
+	// beats a plausible wrong value (#1076).
+	seen := make(map[string]bool, len(out))
+	for _, c := range out {
+		k := strings.ToLower(c.Resolve)
+		if seen[k] {
+			return nil
+		}
+		seen[k] = true
+	}
 	if len(out) == 0 {
 		return nil
 	}
