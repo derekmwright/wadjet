@@ -12,6 +12,32 @@ Wadjet ingests data by:
 
 Data lands in Parquet format on your S3-compatible store, organized by partition keys.
 
+### A query's result is a source too
+
+`CREATE TABLE … AS SELECT` and `INSERT INTO … SELECT` write through this same
+path: the query runs, its rows go into the ingester, and they are flushed to
+Parquet and committed to the manifest exactly as an `INSERT … VALUES` or a Go
+`Ingester` batch would be. A table a query wrote is indistinguishable from one
+an ingester wrote — same file layout, same per-file statistics and sketches,
+same compaction behaviour.
+
+Two things differ from the micro-batch path, and both are consequences of a
+statement having an end:
+
+- **The whole statement commits at once.** The files it writes are held out of
+  the manifest until it finishes, so a statement that fails halfway has
+  published nothing. A `CREATE TABLE … AS SELECT` creates its catalog entry
+  with the files already in it, so the new name never resolves to an empty
+  table.
+- **A failure reclaims.** The Parquet objects a failed statement uploaded are
+  retired, because nothing references them. (The micro-batch path leaves them
+  as unreferenced bytes — see "Which Wadjet Wrote a File" below.)
+
+Both statements gather the whole result in the process running them before
+they write; a result past that budget is refused loudly rather than truncated.
+See [SQL reference](sql-reference.md#create-table-as-select) for the syntax,
+the schema rule and the refusals.
+
 ## Built-in Micro-Batch Ingester
 
 ### How It Works

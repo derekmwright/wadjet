@@ -12,11 +12,13 @@ Wadjet supports a broad subset of SQL for analytical queries, parsed by a custom
 | `SHOW COLUMNS FROM table_name` | Alias for DESCRIBE |
 | `SHOW TABLES` | List the tables the calling identity may read |
 | `SHOW FUNCTIONS` | List registered user-defined functions |
-| `CREATE TABLE` | Create a table with schema and optional partitioning |
+| `CREATE TABLE [IF NOT EXISTS]` | Create a table with schema and optional partitioning |
+| `CREATE TABLE [IF NOT EXISTS] … [(col, …)] AS <query> [WITH [NO] DATA]` | Create a table from a query's result — see [CREATE TABLE AS SELECT](#create-table-as-select) |
 | `DROP TABLE [IF EXISTS]` | Remove a table |
 | `CREATE [OR REPLACE] FUNCTION` | Register a user-defined function |
 | `DROP FUNCTION [IF EXISTS]` | Remove a user-defined function |
 | `INSERT` / `UPDATE` / `DELETE` | Modify table data (merge-on-read) — see [Data Manipulation](#data-manipulation-dml) |
+| `INSERT INTO … [(col, …)] <query>` | Append a query's result to an existing table — see [INSERT INTO … SELECT](#insert-into--select) |
 | `MERGE INTO ... USING ... WHEN MATCHED` | Conditional upsert; target and source must have different exposed names (SQLSTATE 42712 otherwise); `WHEN NOT MATCHED BY SOURCE/TARGET` is refused with SQLSTATE 0A000 |
 | `ANALYZE [TABLE] table_name` | Collect column statistics for the cost-based planner |
 | `CREATE ALERT` / `ALTER ALERT` / `DROP ALERT` | Manage saved alert definitions. Runs on the embedded API with `Config.EnableAlerts`; on a server, through the gRPC `Query` RPC against a coordinator started with `--enable-alerts`. `psql` and the HTTP query endpoint do not reach a handler — see below |
@@ -481,7 +483,111 @@ CREATE TABLE flow_logs (
     bytes_in  Int64,
     timestamp Timestamp NOT NULL
 ) PARTITION BY (date)
+
+CREATE TABLE IF NOT EXISTS flow_logs (...)
 ```
+
+`IF NOT EXISTS` makes an existing name a no-op instead of SQLSTATE `42P07`.
+
+## CREATE TABLE AS SELECT
+
+```sql
+CREATE TABLE [IF NOT EXISTS] <name> [(col, …)] AS <query> [WITH [NO] DATA]
+```
+
+The query is planned, optimized and executed exactly as it would be on its
+own, and its result becomes the table. `<query>` is any SELECT this engine
+answers: a join, a GROUP BY, a window, a CTE (including `WITH RECURSIVE`), a
+LATERAL, a set operation, `DISTINCT`, `ORDER BY … LIMIT`, a scalar subquery.
+
+```sql
+CREATE TABLE busy_hosts AS
+    SELECT src_ip, SUM(bytes_in) AS total
+    FROM flow_logs
+    GROUP BY src_ip
+
+-- Schema only, no rows: the query is NOT executed.
+CREATE TABLE busy_hosts_empty AS SELECT src_ip, SUM(bytes_in) AS total
+    FROM flow_logs GROUP BY src_ip WITH NO DATA
+```
+
+**The new table's schema is the query's declared output.** Names, types and a
+`DECIMAL`'s `(precision, scale)` come from the one inference the planner
+already carries, so the table holds exactly the columns the identical bare
+`SELECT` returns:
+
+- An unaliased expression takes PostgreSQL's `?column?` name. Two of them in
+  one statement is SQLSTATE `42701`, `column "?column?" specified more than
+  once`, because a relation cannot hold both — alias them, or name them in the
+  column list.
+- **`NOT NULL` is never inferred**, as PostgreSQL does not infer it: every
+  column of the new table is nullable, including one copied from a `NOT NULL`
+  source column.
+- The optional `(col, …)` list **renames positionally** and may be shorter
+  than the query's output; the columns it does not reach keep the names the
+  query published. A list longer than the output is SQLSTATE `42601`, `too
+  many column names were specified`.
+- A declared type the Parquet writer cannot store is refused at `CREATE`, not
+  at the first flush.
+
+The statement takes no `PARTITION BY`: a table created from a query is
+unpartitioned. Create it with the declared form and `INSERT INTO … SELECT` into
+it when you want partitioning.
+
+**Refusals.** An existing name is SQLSTATE `42P07` unless `IF NOT EXISTS` is
+written, in which case the statement is a no-op **and the query is not run**.
+The existence check happens before the query, so a `CREATE TABLE … AS SELECT`
+onto a taken name costs nothing.
+
+**The command tag** is PostgreSQL's: `SELECT <n>` when the query ran and wrote
+n rows, and the bare `CREATE TABLE AS` when it did not — `WITH NO DATA`, or an
+`IF NOT EXISTS` that skipped.
+
+**Atomicity.** The catalog entry is created by the commit that publishes the
+rows, so there is no instant at which the name resolves to an empty table. A
+statement that fails — the query raises, the store refuses a write, the client
+cancels — creates no table and leaves no objects behind.
+
+**Security.** The query reads through the same column policies a bare `SELECT`
+reads through: a denied column never lands in the new table and a masked column
+lands **masked**. The new name itself is authorized as a write before the
+statement runs.
+
+## INSERT INTO … SELECT
+
+```sql
+INSERT INTO <table> [(col, …)] <query>
+```
+
+```sql
+INSERT INTO busy_hosts SELECT src_ip, SUM(bytes_in) FROM flow_logs GROUP BY src_ip
+INSERT INTO busy_hosts (total, src_ip) SELECT SUM(bytes_in), src_ip FROM flow_logs GROUP BY src_ip
+```
+
+The query's items are matched to the target's columns **by position** — by the
+explicit list where one is written, by the table's own column order otherwise —
+never by the names the query published. Columns the query does not reach take
+NULL, which is what PostgreSQL does when no column list is written; with an
+explicit list, a shortfall is SQLSTATE `42601`, `INSERT has more target columns
+than expressions`. More items than target columns is `42601`, `INSERT has more
+expressions than target columns`.
+
+Each position's type must be one the target column can hold. The same type
+is always accepted; so is any integer declaration into any other, and an
+integer or float into a float, and an integer into a `DECIMAL`. Everything else
+is SQLSTATE `42804` naming both types — write the `CAST` yourself. PostgreSQL
+inserts an assignment cast for some of those pairs and this engine does not;
+the difference is deliberate and is listed in
+[ADR-0012](adr/0012-sql-semantics-authority.md).
+
+The append publishes all of its files or none of them, in one catalog write
+validated against the table identity the statement read. The command tag is
+`INSERT 0 <n>`.
+
+**Both statements gather the whole result before they write**, on the process
+that runs the statement. A result past that budget is refused loudly (SQLSTATE
+`53400`) rather than truncated; the per-worker parallel write is a separate
+piece of work.
 
 ## Column Selection
 

@@ -2559,6 +2559,7 @@ func runWireCommandTags(t *testing.T, ctx context.Context, wConn, pConn *pgconn.
 		{name: "Set", sql: `SET extra_float_digits = 3`},
 	}
 	cases = append(cases, wireDMLTagCases(t, ctx, wConn, pConn)...)
+	cases = append(cases, wireQuerySourcedWriteTagCases(t, ctx, wConn, pConn)...)
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			for _, stmt := range c.setup {
@@ -2658,6 +2659,67 @@ func wireDMLTagCases(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgC
 		c("MergeManyRows", `MERGE INTO wire_dml AS t USING wire_dml_src AS s ON t.id = s.id `+
 			`WHEN MATCHED THEN UPDATE SET n = s.n `+
 			`WHEN NOT MATCHED THEN INSERT (id, n) VALUES (s.id, s.n)`),
+	}
+}
+
+// wireQuerySourcedWriteTagCases covers the two statements whose SOURCE is a
+// query: `CREATE TABLE … AS SELECT` and `INSERT INTO … SELECT` (#1024).
+//
+// Their tags are the least guessable in the protocol, which is why they are
+// compared against the server rather than against documentation: a CTAS is
+// `SELECT <n>` when it RAN the query and the bare `CREATE TABLE AS` when it
+// did not — `WITH NO DATA`, or an `IF NOT EXISTS` over a name that already
+// exists — so the split is the query and not the DDL. The append is the
+// ordinary `INSERT 0 <n>`.
+//
+// Every case creates its own target and drops it first, so a crashed run does
+// not decide this run's counts.
+func wireQuerySourcedWriteTagCases(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgConn) []wireTagCase {
+	t.Helper()
+
+	drop := func(name string) string { return `DROP TABLE ` + name }
+	pgDrop := func(name string) string { return `DROP TABLE IF EXISTS ` + name }
+	names := []string{"wire_ctas_a", "wire_ctas_b", "wire_ctas_c", "wire_ctas_d", "wire_ctas_ins"}
+	for _, n := range names {
+		execBoth(ctx, wConn, pConn, drop(n), pgDrop(n))
+	}
+	t.Cleanup(func() {
+		bg := context.Background()
+		for _, n := range names {
+			execBoth(bg, wConn, pConn, drop(n), pgDrop(n))
+		}
+	})
+
+	// The scratch source is `nation`, which both servers hold with the same
+	// 25 rows.
+	return []wireTagCase{
+		{name: "CreateTableAsSelect",
+			sql:   `CREATE TABLE wire_ctas_a AS SELECT n_nationkey, n_name FROM nation WHERE n_nationkey < 4`,
+			setup: []string{`DROP TABLE IF EXISTS wire_ctas_a`}},
+		{name: "CreateTableAsSelectZeroRows",
+			sql:   `CREATE TABLE wire_ctas_b AS SELECT n_nationkey FROM nation WHERE n_nationkey < 0`,
+			setup: []string{`DROP TABLE IF EXISTS wire_ctas_b`}},
+		{name: "CreateTableAsSelectWithNoData",
+			sql:   `CREATE TABLE wire_ctas_c AS SELECT n_nationkey FROM nation WITH NO DATA`,
+			setup: []string{`DROP TABLE IF EXISTS wire_ctas_c`}},
+		{name: "CreateTableIfNotExistsAsSelectSkips",
+			sql: `CREATE TABLE IF NOT EXISTS wire_ctas_d AS SELECT n_nationkey FROM nation`,
+			setup: []string{
+				`DROP TABLE IF EXISTS wire_ctas_d`,
+				`CREATE TABLE wire_ctas_d AS SELECT n_nationkey FROM nation`,
+			}},
+		{name: "InsertIntoSelect",
+			sql: `INSERT INTO wire_ctas_ins SELECT n_nationkey, n_name FROM nation WHERE n_nationkey < 4`,
+			setup: []string{
+				`DROP TABLE IF EXISTS wire_ctas_ins`,
+				`CREATE TABLE wire_ctas_ins AS SELECT n_nationkey, n_name FROM nation WHERE n_nationkey < 0`,
+			}},
+		{name: "InsertIntoSelectZeroRows",
+			sql: `INSERT INTO wire_ctas_ins SELECT n_nationkey, n_name FROM nation WHERE n_nationkey < 0`,
+			setup: []string{
+				`DROP TABLE IF EXISTS wire_ctas_ins`,
+				`CREATE TABLE wire_ctas_ins AS SELECT n_nationkey, n_name FROM nation WHERE n_nationkey < 0`,
+			}},
 	}
 }
 

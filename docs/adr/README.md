@@ -53,3 +53,4 @@ Conventions:
 | [0033](0033-a-column-policy-is-a-plan-time-projection-at-the-scan.md) | A column policy is a plan-time projection at the scan, on every door; a denied column does not exist | Accepted |
 | [0034](0034-every-door-authorizes-before-it-acts.md) | Every door authorizes before it acts: one shared table-access decision, fail-closed configuration, and one refusal class per protocol | Accepted |
 | [0035](0035-mergeable-aggregate-states.md) | A summarizing aggregate ships a mergeable STATE, not its answer | Accepted |
+| [0036](0036-a-query-sourced-write-is-one-statement-one-commit.md) | A query-sourced write is one statement with one commit, and its schema is the plan's declared output | Accepted |

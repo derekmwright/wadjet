@@ -4975,6 +4975,58 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     input. And TIMESTAMP deliberately keeps its own string grammar — a quoted
     string against a TIMESTAMP column is a timestamp, not a number (#493).
 
+  - **`INSERT INTO … SELECT` does not insert an assignment cast.** (Added
+    2026-09-12, #1024.) PostgreSQL's `transformAssignedExpr` coerces each
+    query item to its target column's type, so `INSERT INTO t (text_col)
+    SELECT bigint_col`, `INSERT INTO t (bigint_col) SELECT numeric_col` and
+    `INSERT INTO t (bigint_col) SELECT double_col` all succeed there
+    (measured on 17.11, three `INSERT 0 3`s), while a boolean or a timestamp
+    into bigint is `42804`. This engine accepts the pairs whose BOX the writer
+    already stores correctly for the target's declaration — the same declared
+    type, any integer declaration into any other, an integer or float into a
+    float, an integer into a DECIMAL — and answers `42804` with PostgreSQL's
+    own message and hint for everything else.
+
+    It is a divergence in the REFUSING direction, and the reason is a value
+    rather than caution. A DECIMAL box carries an unscaled integer and NO
+    scale, so assigning a `DECIMAL(12,3)` value to a `DECIMAL(18,4)` column
+    without rescaling stores 1.500 as 0.1500 — a silent wrong number, which
+    item 6 forbids outright. Every refused pair has the same shape: a
+    conversion would have to be invented at the writer, where there is no
+    expression compiler and no declared source type to convert FROM. The
+    statement's answer is "write the CAST", which is what PostgreSQL's own
+    HINT says for the pairs it refuses. `ingest.AssignableToColumn` is the
+    rule and `TestAssignableToColumn` is its census, pair by measured pair.
+
+  - **A CTAS over a star of a self join answers where PostgreSQL refuses.**
+    (Added 2026-09-12, #1024.) `CREATE TABLE t AS SELECT * FROM s a JOIN s b
+    ON b.id = a.id` is `42701` on PostgreSQL 17.11 — `column "id" specified
+    more than once` — because both sides publish `id` and a relation cannot
+    hold two columns of one name. A join in this engine publishes the probe's
+    columns bare and every DUPLICATE build column QUALIFIED by its owning
+    alias (ADR-0026 §8d), so the declared output has no duplicate at all and
+    the table is created, with `b.id` as a column name.
+
+    A strict SUPERSET, allowed by rule 5: PostgreSQL refuses, this answers,
+    and no value differs. The created table is fully usable — `SELECT *` reads
+    it and `SELECT "b.id"` addresses the qualified column by its delimited
+    spelling, while the unqualified `b.id` is PostgreSQL's own "missing
+    FROM-clause entry" — and the column-list form gives every column an
+    ordinary name, which is the spelling PostgreSQL accepts for the same query.
+    `wadjet.TestAQuerySourcedWriteRefusesWhatPostgresRefuses/StarOverASelfJoinIsASuperset`
+    carries the fixture, including the read-back: a superset that cannot be
+    read back is not a superset.
+
+  - **`CREATE TABLE IF NOT EXISTS … AS SELECT` over a taken name sends no
+    NOTICE.** (Added 2026-09-12, #1024.) PostgreSQL emits
+    `NOTICE: relation "t" already exists, skipping` and the `CREATE TABLE AS`
+    tag; this engine sends the tag and no NOTICE, because it has no NOTICE
+    channel on every door and a message only pgwire could carry would be a
+    fourth answer to one statement. The tag is what a client branches on and
+    it is identical, so the divergence is in what a human sees in `psql`. The
+    same is true of the declared `CREATE TABLE IF NOT EXISTS` and of
+    `DROP TABLE IF EXISTS`, which have always answered this way.
+
 ## Consequences
 
 - `ORDER BY x DESC` places NULLs first (changed 2026-08-19). The default had
