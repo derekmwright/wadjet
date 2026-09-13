@@ -149,15 +149,16 @@ func TestArcJ1AHiddenSlotIsNotInTheRowDescription(t *testing.T) {
 		// built no projection for the expansion to rewrite.
 		{"outer_qualified_star", `SELECT o.* ` + aggLateral,
 			[]string{"id", "customer", "total"}, "", ""},
-		// The LATERAL's OWN star is still refused, which is arc J1's decision
-		// and ADR-0012's record: the lateral's output is a projection the
-		// expansion does not enumerate, and its scan carries the correlation
-		// slot the join is about to drop. It published the whole join before,
-		// which is a column set the query did not ask for; a refusal on the
-		// wire is the honest form of not knowing.
-		{"inner_qualified_star", `SELECT s.* ` + aggLateral, nil,
-			"(mx) — the lateral's own star is refused here (ADR-0012)",
-			"a `s.*` expands only from a relation whose column list is known"},
+		// The LATERAL's OWN star. It published the whole join until arc K1,
+		// was REFUSED from arc J1 until arc O2 — the lateral's output is a
+		// projection that carries the correlation slot the join is about to
+		// drop, and the expansion could not tell that slot from a user's item
+		// — and now publishes the body's own list: the slot is identified by
+		// `Node.HiddenJoinCols`, the same identity the drop uses (ADR-0026
+		// §3c), so what is left is exactly the columns the query wrote. The
+		// ADR-0012 divergence this cell recorded is DELETED with it.
+		{"inner_qualified_star", `SELECT s.* ` + aggLateral,
+			[]string{"mx"}, "", ""},
 		{"derived_star", `SELECT * FROM (SELECT * ` + aggLateral + `) x`,
 			[]string{"id", "customer", "total", "mx"}, "", ""},
 		{"cte_star", `WITH c AS (SELECT * ` + aggLateral + `) SELECT * FROM c`,

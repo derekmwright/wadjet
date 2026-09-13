@@ -87,26 +87,21 @@ func TestArcK3TheWireDeclaresTheBlocksProjection(t *testing.T) {
 			[]string{"id", "order_id", "product", "amount", "o.id", "customer", "total"},
 			"(id, customer, total, id, order_id, product, amount) — the join's own " +
 				"duplicate-name qualification, pre-existing and unrelated"},
-		// A PRE-EXISTING LEAK, PINNED ON THE WIRE. A block with its own
-		// `ORDER BY … LIMIT` carries a materialized `__sortkey_N`, and this
-		// door — a single-process server — has always published it.
-		// PostgreSQL sends five fields. Held here so the day it stops leaking
-		// this cell fails; the property assertion below exempts nothing that
-		// the cell's own list does not already name. The DAG's answer for the
-		// same shapes is pinned per arm in
-		// `coordinator.TestArcK3ADerivedBlockPublishesItsOwnProjection`.
-		{"pinned_a_materialized_sort_key_reaches_the_wire",
+		// THE LEAK THESE TWO PINNED IS CLOSED (#991, arc O2). A block with its
+		// own `ORDER BY … LIMIT` materializes a `__sortkey_N` below its LIMIT,
+		// and nothing re-projected above it, so a star over the join published
+		// a sixth field that no query can spell. The block now publishes its
+		// VISIBLE list above its own sort (`logical.dropBlockHiddenSlots`), on
+		// this door and on both DAG arms, and the two pins are DELETED — which
+		// is the fix's proof. PostgreSQL's five fields, exactly.
+		{"a_materialized_sort_key_is_not_on_the_wire",
 			`SELECT * FROM j1ord o JOIN (SELECT order_id, product FROM j1item ` +
 				`ORDER BY amount LIMIT 3) s ON s.order_id = o.id`,
-			[]string{"id", "customer", "total", "order_id", "product", "__sortkey_0"},
-			"(id, customer, total, order_id, product) — five; this engine publishes " +
-				"the block's own ORDER BY term as a sixth column"},
-		{"pinned_an_introducing_block_with_a_sort_key",
+			[]string{"id", "customer", "total", "order_id", "product"}, ""},
+		{"an_introducing_block_with_a_sort_key",
 			`SELECT * FROM j1ord o JOIN (SELECT order_id, order_id AS oid FROM j1item ` +
 				`ORDER BY amount LIMIT 3) s ON s.order_id = o.id`,
-			[]string{"id", "customer", "total", "order_id", "oid", "__sortkey_0"},
-			"(id, customer, total, order_id, oid) — five; the sixth is this engine's " +
-				"materialized ORDER BY term, and at v0.18.60 this statement FAILED"},
+			[]string{"id", "customer", "total", "order_id", "oid"}, ""},
 
 		{"ctl_star_over_a_block_that_is_its_stream",
 			`SELECT * FROM j1ord o JOIN (SELECT order_id FROM j1item) s ` +

@@ -1068,13 +1068,29 @@ func pmCells() []pmCell {
 		{name: "denied_column_beside_a_qualified_star",
 			sql: `SELECT a.*, a.salary FROM e7emp a`, deniedLike: "salary"},
 		// The boundary from the other side: a star whose source is a
-		// decorrelated LATERAL cannot be enumerated at all, and that shape is
-		// REFUSED with one sentence on every door rather than expanded from
-		// anything — the policed list included (#979, ADR-0012).
-		{name: "a_laterals_own_star_is_refused",
+		// decorrelated LATERAL. It used to be REFUSED because the lowering
+		// mints a correlation slot into the body's SELECT list and the
+		// expansion could not tell that slot from the user's items (#979);
+		// arc O2 publishes the body's list minus the slots the join above
+		// OWES (`Node.HiddenJoinCols`, ADR-0026 §3c), so the shape now answers
+		// what PostgreSQL answers.
+		//
+		// WHAT IT PUBLISHES IS THE BODY'S OWN SELECT LIST, which is the list
+		// the column policy already vetted: the three cells below are the
+		// three dispositions a policed column has, and they are what keeps
+		// this an expansion from the POLICED list rather than from a scan.
+		{name: "a_laterals_own_star_publishes_the_bodys_list",
 			sql: `SELECT s.* FROM e7other o, LATERAL (` +
 				`SELECT a.id AS mx FROM e7emp a WHERE a.id = o.id) s`,
-			wantErrLike: `column "s.*" does not exist in the input schema`},
+			want: []string{"mx=1", "mx=2", "mx=3"}},
+		{name: "a_laterals_own_star_over_a_masked_column",
+			sql: `SELECT s.* FROM e7other o, LATERAL (` +
+				`SELECT a.ssn AS sv FROM e7emp a WHERE a.id = o.id) s`,
+			want: []string{"sv=" + pmMaskSSN, "sv=" + pmMaskSSN, "sv=" + pmMaskSSN}},
+		{name: "a_laterals_own_star_over_a_denied_column",
+			sql: `SELECT s.* FROM e7other o, LATERAL (` +
+				`SELECT a.salary AS sal FROM e7emp a WHERE a.id = o.id) s`,
+			deniedLike: "salary"},
 		{name: "aggregate_of_a_case_over_masked",
 			sql:  `SELECT SUM(CASE WHEN ssn = 'true-ssn-01' THEN 1 ELSE 0 END) AS c FROM e7emp`,
 			want: []string{"c=0"}},

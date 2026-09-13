@@ -82,32 +82,18 @@ func TestArcK1AStarIsItsSourceInItsPosition(t *testing.T) {
 			want: ord3,
 		},
 		{
-			// THE LATERAL'S OWN STAR, ALONE — a WRONG → LOUD move this arc
-			// makes, and declares. At bb8635a4 `SELECT s.*` published the
-			// whole join (`id, customer, total, mx`) where PostgreSQL
-			// publishes `mx`, on four arms and on the wire; it is refused now,
-			// because the expansion deliberately declines a lateral's own
-			// output (ADR-0012, arc J1's reason: that output is a projection
-			// this pass does not enumerate, and its scan carries the
-			// correlation slot the join is about to drop).
-			//
-			// The refusal is the PLANNER's one sentence on every arm, which is
-			// what `docs/sql-reference.md` and ADR-0012 promise. It reached the
-			// executor's generic `42000 operator execute: column "s.*" …` for
-			// as long as a star-only list built no projection for
-			// `refuseUnexpandedStarBesideItems` to see.
-			name: "979 the lateral's own star alone is refused, in one sentence",
-			sql:  `SELECT s.* ` + lat,
-			want: `ERR building physical plan: column "s.*" does not exist in the input ` +
-				"schema: a `s.*` expands only from a relation whose column list is known",
-			pin: map[string]string{
-				"dag": `ERR physical plan: column "s.*" does not exist in the input ` +
-					"schema: a `s.*` expands only from a relation whose column list is known",
-				"dagshuf": `ERR physical plan: column "s.*" does not exist in the input ` +
-					"schema: a `s.*` expands only from a relation whose column list is known",
-			},
-			why: "ONE refusal under the two engines' own error prefixes, not a divergence; " +
-				"PostgreSQL publishes `mx` and answers",
+			// THE LATERAL'S OWN STAR, ALONE. Three dispositions in three
+			// arcs: at bb8635a4 it published the whole join (`id, customer,
+			// total, mx`) where PostgreSQL publishes `mx`; arc J1 refused it,
+			// because the expansion could not tell the correlation slot the
+			// join is about to drop from a user's own item; and arc O2
+			// publishes the body's list, with the slot identified by
+			// `Node.HiddenJoinCols` — the same identity the drop itself uses
+			// (ADR-0026 §3c, §9). PostgreSQL's column and PostgreSQL's value,
+			// on every arm; the ADR-0012 divergence is deleted with the pin.
+			name: "979 the lateral's own star alone publishes the body's list",
+			sql:  `SELECT s.* ` + lat + ` ORDER BY o.id`,
+			want: "cols=[mx:FLOAT64] rows=3 | 100 | 125 | NULL",
 		},
 		{
 			name: "979 ctl a qualified star BESIDE another item, right since J1",

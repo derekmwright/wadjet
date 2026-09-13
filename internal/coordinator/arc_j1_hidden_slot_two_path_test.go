@@ -763,15 +763,18 @@ func TestArcJ1AQualifiedStarBesideAnotherItemExpands(t *testing.T) {
 		{name: "outer-star-beside-a-computed-item",
 			sql:  `SELECT o.*, o.total * 2 AS t2 FROM lat_ord o ` + cnt + ` ORDER BY o.id`,
 			want: `id,customer,total,t2 | 1,Alice,150,300 | 2,Bob,200,400 | 3,Carol,0,0`},
-		// PINNED: the LATERAL's own star beside another item. Loud on every
-		// arm and with one sentence, which is what it was NOT before — the
-		// DAG invented a column called `*`.
-		{name: "pinned-the-lateral-s-own-star-beside-another-item",
-			sql:         `SELECT s.*, o.id FROM lat_ord o ` + cnt + ` ORDER BY o.id`,
-			wantErrLike: `column "s.*" does not exist in the input schema`},
-		{name: "pinned-both-stars",
-			sql:         `SELECT o.*, s.* FROM lat_ord o ` + cnt + ` ORDER BY o.id`,
-			wantErrLike: `column "s.*" does not exist in the input schema`},
+		// THE LATERAL'S OWN STAR beside another item. The DAG invented a
+		// column called `*` at base, arc J1 made it LOUD on every arm, and arc
+		// O2 publishes the body's own list: the correlation slot the join
+		// drops is identified by `Node.HiddenJoinCols` rather than guessed at,
+		// so what is left is the columns the query wrote. PostgreSQL's answer,
+		// and the pin is deleted as the proof (ADR-0026 §9).
+		{name: "the-lateral-s-own-star-beside-another-item",
+			sql:  `SELECT s.*, o.id FROM lat_ord o ` + cnt + ` ORDER BY o.id`,
+			want: `n,id | 2,1 | 2,2 | 0,3`},
+		{name: "both-stars",
+			sql:  `SELECT o.*, s.* FROM lat_ord o ` + cnt + ` ORDER BY o.id`,
+			want: `id,customer,total,n | 1,Alice,150,2 | 2,Bob,200,2 | 3,Carol,0,0`},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
@@ -844,12 +847,13 @@ func TestArcJ1AQualifiedStarExpandsFromTheRelationsOutput(t *testing.T) {
 			sql: `SELECT d.*, x.id AS i FROM (SELECT * FROM lat_ord o JOIN lat_item li ` +
 				`ON li.order_id = o.id) d JOIN lat_ord x ON x.id = d.id ORDER BY x.id`,
 			wantErrLike: `column "d.*" does not exist in the input schema`},
-		// The lateral's own star beside another item: still loud, still one
-		// sentence on every arm.
-		{name: "pinned-the-lateral-s-own-star-beside-another-item",
+		// The lateral's own star beside another item publishes the body's
+		// list — the same rule as every other relation in this table, which is
+		// what it was not until arc O2 (ADR-0026 §9).
+		{name: "the-lateral-s-own-star-beside-another-item",
 			sql: `SELECT s.*, o.id FROM lat_ord o LEFT JOIN LATERAL (SELECT COUNT(*) AS n ` +
 				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id`,
-			wantErrLike: `column "s.*" does not exist in the input schema`},
+			want: `n,id | 2,1 | 2,2 | 0,3`},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {

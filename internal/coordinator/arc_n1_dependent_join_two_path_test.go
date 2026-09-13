@@ -153,31 +153,21 @@ func TestN1ATwoGroupedLateralsPublishTheirOwnColumns(t *testing.T) {
 				"3,2,Widget,75,2,Bob,200 | 4,2,Doohickey,125,2,Bob,200",
 		},
 		{
-			// A GROUPED LATERAL CARRYING ITS OWN `ORDER BY`. The rows are
-			// PostgreSQL's on every arm — the grouping fix answers it — and on
-			// the DAG arms the minted slot RIDES OUT to the client beside
-			// them. `stageHiddenPositions` looks for the slot's ordinal in
-			// what the lateral's STAGE publishes, and with a Sort of the
-			// lateral's own between the projection and the join that list is
-			// not the projection's, so the join drops nothing. Not closed
-			// here: it is the DAG's stage-stream model (ADR-0026 §3c's
-			// distributed half), and it belongs with the arc that gives a
-			// lateral's own ORDER BY / LIMIT its per-outer-row meaning, below.
-			name: "1008 boundary: a grouped lateral with its own ORDER BY leaks the slot on the DAG",
+			// A GROUPED LATERAL CARRYING ITS OWN `ORDER BY`. The minted slot
+			// rode out to the client on both DAG arms until arc O2 (#1020):
+			// `stageHiddenPositions` reads the slot's ordinal off the list the
+			// lateral's STAGE publishes, `materializedBlockUnder` stopped at a
+			// Sort, and the fallback walk descends to the AGGREGATE and answers
+			// ITS order (`product, __key_0`) where the stage publishes the
+			// projection's (`__key_0, p`). A Sort changes neither the columns
+			// nor their order, so the walk passes it now, and the two per-arm
+			// pins are DELETED as the proof (ADR-0026 §9).
+			name: "1008 boundary: a grouped lateral with its own ORDER BY",
 			sql: "SELECT * FROM lat_ord o " +
 				"JOIN LATERAL (SELECT i.product AS p FROM lat_item i WHERE i.order_id = o.id " +
 				"GROUP BY i.product ORDER BY i.product) s ON true ORDER BY o.id, p",
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 p:STRING] rows=4 | " +
 				"1,Alice,150,Gadget | 1,Alice,150,Widget | 2,Bob,200,Doohickey | 2,Bob,200,Widget",
-			wantDag: "cols=[id:INT64 customer:STRING total:FLOAT64 __key_0:INT64 p:STRING] rows=4 | " +
-				"1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | " +
-				"2,Bob,200,2,Doohickey | 2,Bob,200,2,Widget",
-			wantDagshuf: "cols=[id:INT64 customer:STRING total:FLOAT64 __key_0:INT64 p:STRING] rows=4 | " +
-				"1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | " +
-				"2,Bob,200,2,Doohickey | 2,Bob,200,2,Widget",
-			why: "the lateral's own Sort sits between its projection and the join, " +
-				"so the stage publishes a list stageHiddenPositions cannot find the " +
-				"slot's ordinal in; the ROWS are PostgreSQL's on all four arms",
 		},
 		{
 			// THE SAME WITH `LIMIT 1`, a wrong answer on every arm, DEFERRED
@@ -195,10 +185,6 @@ func TestN1ATwoGroupedLateralsPublishTheirOwnColumns(t *testing.T) {
 				"GROUP BY i.product ORDER BY i.product LIMIT 1) s ON true ORDER BY o.id, p",
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 p:STRING] rows=1 | " +
 				"2,Bob,200,Doohickey",
-			wantDag: "cols=[id:INT64 customer:STRING total:FLOAT64 __key_0:INT64 p:STRING] rows=1 | " +
-				"2,Bob,200,2,Doohickey",
-			wantDagshuf: "cols=[id:INT64 customer:STRING total:FLOAT64 __key_0:INT64 p:STRING] rows=1 | " +
-				"2,Bob,200,2,Doohickey",
 			why: "PostgreSQL 17 answers TWO rows — 1,Alice,150,Gadget and " +
 				"2,Bob,200,Doohickey — because a lateral's LIMIT bounds each outer " +
 				"row's evaluation; the decorrelated form bounds the whole relation " +

@@ -332,22 +332,23 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 			want: `order_id,a,id,customer,total | 1,[100],1,Alice,150 | ` +
 				`1,[50],1,Alice,150 | 2,[125],2,Bob,200 | 2,[75],2,Bob,200`},
 
-		// THE SAME RULE where the block ALSO introduces a column, and it is
-		// the sort key that decides, not the introduction: `ORDER BY id` keys
-		// on a column this block does not publish, so it is reachability-
-		// refused like the two above. The improvement is what it answers —
-		// at bb8635a4 this lost `a2` silently on both DAG arms and the
-		// `order_id AS oid` spelling failed LOUDLY (`sort: key column "oid"
-		// does not exist`). The DAG now answers exactly what the
-		// single-process arms answer, `__sortkey_0` included.
+		// THE SAME RULE where the block ALSO introduces a column. At bb8635a4
+		// this lost `a2` silently on both DAG arms and the `order_id AS oid`
+		// spelling failed LOUDLY (`sort: key column "oid" does not exist`); K3
+		// made the DAG answer what the single-process arms answer,
+		// `__sortkey_0` included; and arc O2 removed that sixth column from
+		// both — the block re-projects to its visible list above its own sort,
+		// so the key dies with the sort (#991, ADR-0026 §9). PostgreSQL's six
+		// columns; the disposition is the route, for the reason the cell below
+		// gives.
 		{name: "sortkey/introducing-block-keeps-its-column",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, amount, amount AS a2 ` +
 				`FROM lat_item ORDER BY id LIMIT 4) s ON s.order_id = o.id ` +
 				`ORDER BY o.id, s.amount`,
-			want: `order_id,amount,a2,__sortkey_0,id,customer,total | ` +
-				`1,50,50,1,1,Alice,150 | 1,100,100,2,1,Alice,150 | ` +
-				`2,75,75,3,2,Bob,200 | 2,125,125,4,2,Bob,200`,
-			wantUnreachableRoute: true},
+			want: `order_id,amount,a2,id,customer,total | ` +
+				`1,50,50,1,Alice,150 | 1,100,100,1,Alice,150 | ` +
+				`2,75,75,2,Bob,200 | 2,125,125,2,Bob,200`,
+			wantRouted: true},
 
 		// ------------------------------------------------------------------
 		// THE BOUNDARY, SHAPE BY SHAPE (round 2). The route is NOT
@@ -358,24 +359,25 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 		// measured at bb8635a4.
 		//
 		// A BLOCK WHOSE OWN `ORDER BY` KEYS ON A COLUMN IT DOES NOT PUBLISH is
-		// refused by the SELECT-list reachability check (#656) and answered on
-		// the coordinator-local pipeline — on BOTH DAG arms, with and without
-		// a LIMIT, and whether or not the block also introduces a column. That
-		// is the rule, and it is about the SORT KEY rather than about the
+		// refused and answered on the coordinator-local pipeline — on BOTH DAG
+		// arms, with and without a LIMIT, and whether or not the block also
+		// introduces a column. Which refusal names it moved with #991 (see the
+		// cell), and the rule is about the SORT KEY rather than about the
 		// class: keying on a column the block DOES publish executes with both
 		// counters at zero, the cell below.
 		//
-		// It publishes `__sortkey_0` on every arm — the sort below still reads
-		// that key, so the projection cannot drop it. PostgreSQL sends five
-		// columns; the sixth is this engine's own materialized ORDER BY term,
-		// PRE-EXISTING on the single path, pinned in `want` rather than
-		// exempted. bb8635a4's DAG published the scan's `amount` in its place.
+		// It published `__sortkey_0` on every arm until arc O2 — the sort
+		// below reads that key, so the block's own projection could not drop
+		// it and nothing re-projected above the LIMIT. The block publishes its
+		// VISIBLE list there now (#991, ADR-0026 §9), so PostgreSQL's five
+		// columns reach the client and the sort key stays where the sort is.
+		// bb8635a4's DAG published the scan's `amount` in its place.
 		{name: "boundary/a-sort-key-the-block-does-not-publish",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, product FROM lat_item ` +
 				`ORDER BY amount LIMIT 3) s ON s.order_id = o.id ORDER BY o.id, s.product`,
-			want: `id,customer,total,order_id,product,__sortkey_0 | 1,Alice,150,1,Gadget,100 | ` +
-				`1,Alice,150,1,Widget,50 | 2,Bob,200,2,Widget,75`,
-			wantUnreachableRoute: true},
+			want: `id,customer,total,order_id,product | 1,Alice,150,1,Gadget | ` +
+				`1,Alice,150,1,Widget | 2,Bob,200,2,Widget`,
+			wantRouted: true},
 		// THE CONTROL, and the half that makes the rule a rule: the same block
 		// keyed on a column it DOES publish executes distributed, both
 		// counters at zero.
