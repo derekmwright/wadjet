@@ -238,6 +238,14 @@ func TestUpdate_NoMatch(t *testing.T) {
 
 func TestDML_ViaQueryDispatch(t *testing.T) {
 	// Test that DML works through the Query() method (used by pgwire)
+	//
+	// The cell a write's result carries here is the COMMAND TAG, rendered by
+	// the one renderer every door uses (wadjet.CommandTag). It used to be
+	// built inline in DB.Query as `fmt.Sprintf("%s %d", …)`, so this door and
+	// the gRPC Query RPC answered `INSERT 1` while pgwire and REST answered
+	// `INSERT 0 1` for the identical statement — PostgreSQL's INSERT tag
+	// carries an oid field, fixed at 0 since 12, and docs/api-reference.md
+	// promises the tag does not depend on the door (#1024).
 	db := setupDMLTestDB(t)
 	ctx := context.Background()
 
@@ -246,8 +254,8 @@ func TestDML_ViaQueryDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query INSERT: %v", err)
 	}
-	if len(result.Rows) != 1 || result.Rows[0]["result"] != "INSERT 1" {
-		t.Fatalf("expected result 'INSERT 1', got %v", result.Rows)
+	if len(result.Rows) != 1 || result.Rows[0]["result"] != "INSERT 0 1" {
+		t.Fatalf("expected result 'INSERT 0 1', got %v", result.Rows)
 	}
 
 	// DELETE via Query

@@ -1175,7 +1175,7 @@ func (c *pgConn) runSimpleStatement(sql string) bool {
 	// merge reported `SELECT 1` — a command tag naming the wrong statement
 	// and the wrong count, which for a client is the statement's whole
 	// answer. PostgreSQL reports `MERGE <n>` (#686 R2-5).
-	if isDMLSQL(sql) {
+	if isWriteSQL(sql) {
 		ctx, cancel := c.queryContext()
 		defer cancel()
 		if !c.server.acquireQuery(ctx) {
@@ -1522,7 +1522,7 @@ func (c *pgConn) describeSQL(sql string, fmtCodes []int16) {
 	// `UPDATE … WHERE version = ?`, then "if 0 rows, someone else won" —
 	// could never detect a conflict. Not describing it here is half the fix;
 	// handleExecute's DML branch is the other half.
-	if isDMLSQL(sql) {
+	if isWriteSQL(sql) {
 		c.closeDescribeCache()
 		c.describedSQL = sql
 		c.sendNoData()
@@ -1726,7 +1726,7 @@ func (c *pgConn) handleExecute(payload []byte) {
 	// The same shape as the simple path's branch, minus the ReadyForQuery:
 	// on this protocol Sync sends it, and sending one here would put a second
 	// 'Z' on the wire for one Query message.
-	if isDMLSQL(sql) {
+	if isWriteSQL(sql) {
 		ctx, cancel := c.queryContext()
 		defer cancel()
 		if !c.server.acquireQuery(ctx) {
@@ -3299,7 +3299,8 @@ func extractSelectColumns(sql string) []string {
 	return cols
 }
 
-// isDMLSQL reports whether an UPPERCASED statement is a DML verb.
+// isWriteSQL reports whether a statement is a WRITE — one whose answer is a
+// command tag over no rows, not a result set.
 //
 // One predicate, because the simple and the extended protocol must agree
 // about which statements are writes. They did not: the simple path had this
@@ -3312,10 +3313,17 @@ func extractSelectColumns(sql string) []string {
 // and a leading `/* hint */` — what ORMs and APM layers actually emit — missed
 // the branch, and missing it meant Describe EXECUTED the write and Execute ran
 // it again (review B3).
-func isDMLSQL(sql string) bool {
+//
+// `CREATE TABLE … AS SELECT` is here too (#1024) and a declared `CREATE TABLE`
+// is not: the CTAS runs a query and answers `SELECT <n>` or `CREATE TABLE AS`,
+// which is exactly the tag #816 was about, while the declared form still takes
+// the query path and its long-standing tag.
+func isWriteSQL(sql string) bool {
 	switch plansql.LeadingKeyword(sql) {
 	case "INSERT", "UPDATE", "DELETE", "MERGE":
 		return true
+	case "CREATE":
+		return plansql.IsCreateTableAsSelect(sql)
 	}
 	return false
 }

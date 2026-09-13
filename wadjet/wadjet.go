@@ -370,6 +370,21 @@ type QueryResult struct {
 	// path) may read Rows without consulting this first.
 	RowValues [][]any
 	Plan      string
+	// OutputSchema is the EXECUTED plan's declared output — one entry per
+	// Columns entry, in order, carrying the type, the DECIMAL (p, s), a
+	// VECTOR's dimension and a container's whole shape.
+	//
+	// It is the same list ColumnMetas is derived from, published in the
+	// engine's own vocabulary because one caller needs a `parquet.Column` and
+	// not a rendering of one: `CREATE TABLE … AS SELECT` DECLARES the new
+	// table from it (#1024). Taking it from the EXECUTED plan rather than
+	// re-deriving it is what makes the new table's columns the columns this
+	// identity may see — the security projection has already been applied, so
+	// a denied column is not in this list and a masked one is masked
+	// (ADR-0034, #994).
+	//
+	// nil for the introspection and synthetic results that carry no plan.
+	OutputSchema []parquet.Column
 }
 
 // Cells returns row i positionally, whether or not the result needed
@@ -426,6 +441,12 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 	case plansql.QueryShowFunctions:
 		return db.ShowFunctions(ctx)
 	case plansql.QueryCreateTable:
+		if parsed.CreateTable.AsSelect != nil {
+			// A CTAS is a WRITE and answers with a command tag, not a result
+			// set — so it goes through the one DML entry point and is boxed
+			// like the other verbs below (#1024).
+			return db.execAsQueryResult(ctx, parsed)
+		}
 		return db.createTableSQL(ctx, parsed.CreateTable)
 	case plansql.QueryDropTable:
 		return db.dropTableSQL(ctx, parsed.DropTable)
@@ -440,16 +461,7 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 	case plansql.QueryAlterAlert:
 		return db.alterAlertSQL(ctx, parsed.AlterAlert)
 	case plansql.QueryInsert, plansql.QueryUpdate, plansql.QueryDelete, plansql.QueryMerge:
-		result, err := db.Execute(ctx, sql)
-		if err != nil {
-			return nil, err
-		}
-		return &QueryResult{
-			Columns: []string{"result"},
-			Rows: []map[string]any{{
-				"result": fmt.Sprintf("%s %d", result.Command, result.RowsAffected),
-			}},
-		}, nil
+		return db.execAsQueryResult(ctx, parsed)
 	}
 
 	// One dispatch point per door (#860): the switch above is every statement
@@ -599,11 +611,12 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 	}
 
 	return &QueryResult{
-		Columns:     columns,
-		ColumnMetas: metas,
-		Rows:        rows,
-		RowValues:   rowValues,
-		Plan:        planStr,
+		Columns:      columns,
+		ColumnMetas:  metas,
+		Rows:         rows,
+		RowValues:    rowValues,
+		Plan:         planStr,
+		OutputSchema: outSchema,
 	}, nil
 }
 

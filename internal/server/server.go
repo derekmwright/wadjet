@@ -308,6 +308,13 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	// Handle CREATE TABLE
 	if parsed.Type == plansql.QueryCreateTable {
+		if parsed.CreateTable != nil && parsed.CreateTable.AsSelect != nil {
+			// A CTAS is a WRITE and takes the write door, so every door
+			// reaches ONE implementation of it and reports PostgreSQL's tag
+			// for it (#1024). The declared form keeps the DDL handler.
+			s.handleDML(w, r, req.SQL, start)
+			return
+		}
 		s.handleCreateTableSQL(w, r, parsed, start)
 		return
 	}

@@ -80,6 +80,13 @@ func RefuseUnsupportedStatement(pq *ParsedQuery) error {
 		return nil
 	}
 	name := pq.Type.StatementName()
+	if pq.Type == QueryCreateTable && pq.CreateTable != nil && pq.CreateTable.AsSelect != nil {
+		// A CTAS refused by a door that does not run writes is refused BY ITS
+		// OWN NAME: it is not the declared `CREATE TABLE`, and a client told
+		// "CREATE TABLE is not supported" after `CREATE TABLE t AS SELECT …`
+		// would read that as the whole statement family being unavailable.
+		name = "CREATE TABLE AS SELECT"
+	}
 	if pq.Type == QueryExplain && pq.Explain != nil {
 		// EXPLAIN keeps only the inner statement's SelectInfo, so a nil one
 		// here means the inner statement is what cannot be run.

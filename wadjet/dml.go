@@ -54,6 +54,14 @@ func CommandTag(command string, rows int64) string {
 	if cmd == "INSERT" {
 		return fmt.Sprintf("INSERT 0 %d", rows)
 	}
+	if cmd == CommandCreateTableAs {
+		// PostgreSQL's DDL tags carry no row count, and this is the one that
+		// reaches an ExecResult: a `CREATE TABLE … AS SELECT` that did not run
+		// its query (`WITH NO DATA`, or an `IF NOT EXISTS` skip) is the bare
+		// `CREATE TABLE AS`. The same statement WITH data is `SELECT <n>` and
+		// takes the line above. Measured on 17.11, both shapes.
+		return cmd
+	}
 	return fmt.Sprintf("%s %d", cmd, rows)
 }
 
@@ -100,7 +108,20 @@ func (db *DB) ExecuteParsed(ctx context.Context, parsed *plansql.ParsedQuery) (r
 	}
 
 	switch parsed.Type {
+	case plansql.QueryCreateTable:
+		// A CTAS reaches the DML entry point and a declared CREATE TABLE does
+		// not, because a CTAS is a WRITE: it runs a query, drives rows into
+		// the ingest path and commits against a manifest. Routing it here is
+		// what makes every door — embedded, pgwire, HTTP — carry one
+		// implementation of it, the rule #815 settled for the four verbs.
+		if parsed.CreateTable == nil || parsed.CreateTable.AsSelect == nil {
+			return nil, fmt.Errorf("Execute only supports CREATE TABLE ... AS SELECT, not a declared CREATE TABLE")
+		}
+		return db.executeCreateTableAs(ctx, parsed.CreateTable)
 	case plansql.QueryInsert:
+		if parsed.Insert != nil && parsed.Insert.Select != nil {
+			return db.executeInsertSelect(ctx, parsed.Insert)
+		}
 		return db.executeInsert(ctx, parsed.Insert)
 	case plansql.QueryDelete:
 		return db.executeDelete(ctx, parsed.Delete)
@@ -109,7 +130,7 @@ func (db *DB) ExecuteParsed(ctx context.Context, parsed *plansql.ParsedQuery) (r
 	case plansql.QueryMerge:
 		return db.executeMerge(ctx, parsed.Merge)
 	default:
-		return nil, fmt.Errorf("Execute only supports INSERT/UPDATE/DELETE/MERGE, got %v", parsed.Type)
+		return nil, fmt.Errorf("Execute only supports INSERT/UPDATE/DELETE/MERGE and CREATE TABLE ... AS SELECT, got %v", parsed.Type)
 	}
 }
 

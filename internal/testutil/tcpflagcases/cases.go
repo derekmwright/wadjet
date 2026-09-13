@@ -96,8 +96,8 @@ var ResidualState = map[string]string{
 	"window_frame_start": "42601", "window_frame_end": "42601",
 	"named_window": "42601", "limit": "42601", "offset": "42601",
 	"table_function": "42601", "table_function_named": "42601", "table_sample": "42601",
-	"insert_values": "42601", "insert_select": "42601",
-	"merge_on": "0A000", "merge_set": "", "merge_values": "",
+	"insert_values": "42601",
+	"merge_on":      "0A000", "merge_set": "", "merge_values": "",
 }
 
 func State(name, door string) string {
@@ -109,7 +109,15 @@ func State(name, door string) string {
 	}
 	if door == "dag" {
 		switch name {
-		case "update_set", "update_where", "delete_where", "merge_on", "merge_condition", "merge_source", "merge_set", "merge_values":
+		case "update_set", "update_where", "delete_where", "merge_on", "merge_condition", "merge_source", "merge_set", "merge_values",
+			// `INSERT INTO … SELECT` is a WRITE and the coordinator runs no
+			// writes, so the native-DAG door refuses it by name the way it
+			// refuses the other verbs (#1024). On every other door the
+			// statement now RUNS and the bad flag name is 22023 — it used to be
+			// 42601 on all of them because the parser refused the grammar
+			// itself ("expected VALUES"), and that pin is deleted here as the
+			// proof the grammar landed.
+			"insert_select":
 			return "0A000"
 		}
 	}

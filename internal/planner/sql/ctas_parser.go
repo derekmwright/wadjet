@@ -243,3 +243,45 @@ func RefuseUnnamedCTASOutput(names []string) error {
 	}
 	return nil
 }
+
+// IsCreateTableAsSelect reports whether a statement is
+// `CREATE TABLE … AS <select>` without parsing the query it carries.
+//
+// It exists for the doors that route on the STATEMENT KIND before they parse:
+// pgwire decides between its write path and its query path from the text,
+// because extended-query Bind/Execute reuses one cached statement across
+// several code paths and a full Parse there is wasted work when the answer is
+// the query path anyway. This is a bounded token scan — at most
+// `CREATE TABLE IF NOT EXISTS name (a, b, …) AS` — and it stops at the first
+// token that cannot belong to the prefix.
+//
+// A CTAS routed as a query would report the tag of the wrong statement: its
+// answer is `SELECT <n>` or `CREATE TABLE AS` over NO rows, and the query path
+// sends `SELECT 1` over the one row the embedded door boxes a write's tag into
+// (#816's shape, for a statement #816 did not yet have).
+func IsCreateTableAsSelect(sql string) bool {
+	l := newLexer(strings.TrimSpace(sql))
+	if l.nextToken().typ != TokenKWCreate {
+		return false
+	}
+	if l.nextToken().typ != TokenKWTable {
+		return false
+	}
+	parseIfNotExists(l)
+	if l.nextToken().typ != TokenIdent {
+		return false
+	}
+	switch l.peekToken().typ {
+	case TokenKWAs:
+		return true
+	case TokenLParen:
+		if !looksLikeColumnNameList(l) {
+			return false
+		}
+		if _, err := parseColumnNameList(l, "CREATE TABLE"); err != nil {
+			return false
+		}
+		return l.peekToken().typ == TokenKWAs
+	}
+	return false
+}
