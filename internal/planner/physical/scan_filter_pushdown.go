@@ -56,8 +56,12 @@ func (p *Planner) tryPushFilterIntoScan(ctx context.Context, node *logical.Node,
 	if err != nil {
 		return orig
 	}
-	// Nested schemas take the row-based fallback scan, which never
-	// evaluates rowPreds — pushing there would silently DROP the filter.
+	// Decline on the TABLE's own declaration when it carries any ARRAY, MAP
+	// or ROW column. A nested schema can take the row-based fallback scan,
+	// which never evaluates rowPreds, and pushing there would silently DROP
+	// the filter — but this gate is the table's, not the read schema's: it is
+	// wider than scan.HasUnsupportedColumnarTypes, which admits a ROW whose
+	// fields are all flat. Wider is the safe direction for a filter.
 	if (&parquet.Schema{Columns: meta.Schema.Columns}).HasNestedColumns() {
 		return orig
 	}

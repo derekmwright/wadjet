@@ -2283,8 +2283,8 @@ FROM flows) s` is `NUMERIC`, grouped, ungrouped and `OVER ()` alike — while
 
 A **scalar subquery's column keeps the subquery's own declaration** through a
 derived table, a CTE or a window slot, so `SELECT SUM(v) FROM (SELECT (SELECT
-a & 3 FROM u) AS v FROM t) s` is `BIGINT` and the `bigint` form is `NUMERIC`,
-as PostgreSQL declares them. Written DIRECTLY as an aggregate's argument —
+BITWISE_AND(a,3) FROM u) AS v FROM t) s` is `BIGINT` and the `bigint` form is
+`NUMERIC`, as PostgreSQL declares them. Written DIRECTLY as an aggregate's argument —
 `SUM((SELECT …))` — it takes the same declaration, grouped and `OVER ()`
 alike, and accumulates exactly:
 `SUM((SELECT CAST(9007199254740993 AS BIGINT)))` over three rows is
@@ -2888,8 +2888,9 @@ A `TCP_FLAGS_HAS_*` predicate over a bare `INT32`/`INT64` column with literal
 names is evaluated inside the scan, as is the `BITWISE_AND(flags, 18) = 18`
 spelling of the same test — that spelling in its `= mask`, `= 0` and `<> 0`
 forms only; `BITWISE_AND(flags, 18) = 16` is answered by the filter above the
-scan. A table carrying any ARRAY, MAP or ROW column takes the row-based scan,
-which evaluates no pushed predicate, so nothing is pushed there either. On a dictionary-encoded column the mask is evaluated
+scan. Nothing is pushed at all for a table whose schema carries any ARRAY, MAP
+or ROW column: the pass that rewrites the filter declines on the table's own
+declaration, whatever the query reads. On a dictionary-encoded column the mask is evaluated
 once per dictionary ENTRY rather than once per row; Wadjet's own writer emits
 no dictionary pages, so that applies to Parquet written elsewhere and a table
 ingested through Wadjet is evaluated per value. Either way a flags column
@@ -3198,7 +3199,7 @@ See [data-types.md](data-types.md) §Timestamp, "One rendering".
 
 | Function | Description | Example |
 |----------|-------------|---------|
-| `TO_HEX(n)` | Convert integer to an UNSIGNED two's-complement hex string, as wide as the argument's own type — eight digits for an INT32, sixteen for a BIGINT | `TO_HEX(255)` → `'ff'`, `TO_HEX(CAST(-1 AS BIGINT))` → `'ffffffffffffffff'` |
+| `TO_HEX(n)` | Convert integer to an UNSIGNED two's-complement hex string over the 64-bit word. A negative argument therefore renders SIXTEEN sign-extended digits even from an `INT32` column, where PostgreSQL renders eight — a recorded divergence ([ADR-0012](adr/0012-sql-semantics-authority.md)); the number is the same two's complement and a non-negative argument renders identically | `TO_HEX(255)` → `'ff'`, `TO_HEX(CAST(-1 AS BIGINT))` → `'ffffffffffffffff'`, `TO_HEX(int32_col)` over `-1` → `'ffffffffffffffff'` |
 | `FROM_HEX(s)` | Convert a hex string to a BIGINT. The WHOLE string must be hexadecimal and fit a signed 64-bit integer; anything else is NULL, as `FROM_BASE(s,16)` answers | `FROM_HEX('ff')` → `255`, `FROM_HEX('12zz')` → NULL |
 | `TO_BASE64(s)` | Encode string to Base64 | `TO_BASE64('hello')` |
 | `FROM_BASE64(s)` | Decode Base64 string | `FROM_BASE64('aGVsbG8=')` |

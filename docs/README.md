@@ -15,6 +15,7 @@ Port and Protocol are first-class column types with 100+ network functions.
 | [Architecture](architecture.md) | System internals, execution model, data flow |
 | [ADRs](adr/README.md) | Architecture decision records — what's settled, what it beat, and the evidence |
 | [Benchmarks](benchmarks/README.md) | Every measurement memo: topology, scale factor, headline numbers, reproduction |
+| [Release notes](releases/v0.19.0.md) | What each release changed, written for the reader upgrading into it |
 | [Internals: native-DAG execution](internals/native-dag-execution.md) | File-anchored map of the distributed execution path |
 | [Configuration](configuration.md) | YAML config, environment variables, CLI flags |
 | [Data Types](data-types.md) | Supported column types including network primitives |

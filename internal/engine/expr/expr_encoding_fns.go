@@ -20,9 +20,14 @@ import (
 // `fmt.Sprintf("%x", int64(...))` answered `-1` — Go's rendering of a negative
 // integer, not a hexadecimal machine word — and the argument came through a
 // float64, so the wide value above lost its low bits and answered
-// 4000000000000000 (#966 round 2). The width comes from the argument's own box,
-// which is what makes an INT32 column answer eight digits and a BIGINT one
-// sixteen.
+// 4000000000000000 (#966 round 2). The width comes from the argument's own
+// BOX, and the int32 branch below is NOT reachable from a column: a column's
+// value arrives here widened to int64, so `to_hex(int4_col)` over a negative
+// renders sixteen sign-extended digits where PostgreSQL renders eight. That is
+// a recorded divergence (ADR-0012 item 5, the bitwise-family entry), measured
+// on all five arms in `coordinator.…/to_hex_of_an_int32_column_*` and stated
+// again in `bitwise_family_test.go`. The branch stays for a caller that boxes
+// an int32 itself.
 func fnToHex(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil

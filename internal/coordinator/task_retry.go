@@ -253,8 +253,8 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 //
 // ONE CLASS, deliberately. A data exception such as 22003 or 22012 is also
 // deterministic for the same input, and widening this to the family is a
-// change to every arc's refusals rather than to this one — recorded as a
-// filing candidate instead. A failure carrying a MISSING INPUT is excluded
+// change to every arc's refusals rather than to this one — filed as #1057
+// (ADR-0019's 2026-09-12 amendment). A failure carrying a MISSING INPUT is excluded
 // whatever its class: that one CAN succeed on a retry, once the producer's
 // output is durable.
 func isDeterministicRefusal(r distributed.ResultNotification) bool {

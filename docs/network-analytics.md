@@ -596,8 +596,9 @@ wadjet> SELECT COUNT(*) AS ecn_flows
 **Pushdown.** A `TCP_FLAGS_HAS_*` predicate over a bare column with literal
 names is evaluated inside the scan, and so is the `BITWISE_AND(flags, 18) = 18`
 spelling of the same test — that spelling in its `= mask`, `= 0` and `<> 0`
-forms only. A table carrying any ARRAY, MAP or ROW column takes the row-based
-scan, which evaluates no pushed predicate, so nothing is pushed there. The flags column's values are never materialized
+forms only. Nothing is pushed at all for a table whose schema carries any
+ARRAY, MAP or ROW column: the pass that rewrites the filter declines on the
+table's own declaration, whatever the query reads. The flags column's values are never materialized
 when the filter is the only thing that reads them. Set
 `WADJET_FLAG_DICT_PUSHDOWN=0` to disable the pushdown.
 

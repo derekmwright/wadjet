@@ -177,8 +177,8 @@ check cannot cover.
 
 **One class, deliberately.** A data exception such as 22003 or 22012 is also
 deterministic for the same input, and widening this to the whole family changes
-every arc's refusals rather than this one; it is a filing candidate, not part
-of this amendment. A failure carrying a MISSING INPUT key is excluded whatever
+every arc's refusals rather than this one; it is filed as **#1057** and is not
+part of this amendment. A failure carrying a MISSING INPUT key is excluded whatever
 its SQLSTATE — that one CAN succeed on a retry, once the producer's output is
 durable.
 
