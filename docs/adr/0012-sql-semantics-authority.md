@@ -5017,6 +5017,25 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     carries the fixture, including the read-back: a superset that cannot be
     read back is not a superset.
 
+  - **A CTAS column that PostgreSQL declares UNCONSTRAINED `numeric` is
+    declared `DECIMAL(p,s)` here.** (Added 2026-09-13, #1024.)
+    `COALESCE(numeric(15,2), numeric(38,10))` folds to unconstrained `numeric`
+    on PostgreSQL 17.11, so `CREATE TABLE t AS SELECT …` gives a column whose
+    `format_type` is `numeric` and whose values keep each row's own scale —
+    12.75 renders `12.75` (measured). This engine has no unconstrained DECIMAL a
+    table column can carry: a stored column needs a (precision, scale), so the
+    CTAS stores the fold's declaration, `DECIMAL(38,10)`, and the same number
+    renders `12.7500000000`.
+
+    The NUMBER is identical, and that is what keeps it off item 6's list: the
+    stored-position census (`coordinator.TestNumericFoldStoredPosition`)
+    compares both sides through `math/big` and every one of its ten composites
+    agrees on both arms, so `nfStoredPins` is empty. What differs is the
+    DECLARATION a client reads — the same unconstrained-numeric difference
+    ADR-0024 already carries on the wire for an aggregate's result
+    (`ColumnMeta.WireUnconstrained`), now visible in a table's schema because a
+    query's declared output has become one.
+
   - **`CREATE TABLE IF NOT EXISTS … AS SELECT` over a taken name sends no
     NOTICE.** (Added 2026-09-12, #1024.) PostgreSQL emits
     `NOTICE: relation "t" already exists, skipping` and the `CREATE TABLE AS`

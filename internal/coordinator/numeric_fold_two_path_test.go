@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/oracle"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/wadjet"
 )
@@ -1695,29 +1696,138 @@ func nfSameRows(want, got string) bool {
 	return true
 }
 
-// TestInsertSelectIsNotAValuePositionYet is method 10's fixture for the one
-// value-producing position the corpus above does NOT cover: a composite stored
-// through `INSERT INTO … SELECT` or `CREATE TABLE … AS SELECT`, where the
-// declared type decides the COLUMN a table keeps rather than a vector a query
-// throws away.
+// nfStoredPins are the composites whose STORED answer diverges, keyed
+// "<entry>|<arm>" like nfPosPins, each recording wadjet's answer against
+// PostgreSQL's in the corpus.
 //
-// It is not covered because the parser has neither form — INSERT takes VALUES
-// only (dml_parser.go) — so there is no shape to write. That is a claim about
-// the engine, and this is the fixture that ATTEMPTS it: when either form
-// lands, this test fails and the corpus above gets the position it is missing.
-func TestInsertSelectIsNotAValuePositionYet(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+// It is EMPTY, and that is the finding: every one of the ten composites comes
+// back out of the table as the number PostgreSQL 17.11's own CTAS stores, on
+// both arms.
+//
+// One difference is real and is not a divergence this census can express,
+// because this census compares VALUES (nfSameRows folds both sides through
+// math/big). `COALESCE(numeric(15,2), numeric(38,10))` folds to UNCONSTRAINED
+// numeric on PostgreSQL, so its CTAS column is `numeric` and 12.75 renders
+// 12.75; this engine has no unconstrained DECIMAL a table column can carry, so
+// the column is DECIMAL(38,10) and the same number renders 12.7500000000. Equal
+// numbers, different declarations — the stored face of the
+// unconstrained-numeric declaration ADR-0024 already carries on the wire, and
+// an entry in ADR-0012's divergence list.
+var nfStoredPins = map[string]string{}
+
+// TestNumericFoldStoredPosition is the value-producing position the corpus
+// above could not cover until `CREATE TABLE … AS SELECT` landed (#1024): a
+// composite STORED, where the declared type decides the COLUMN a table keeps
+// rather than a vector a query throws away.
+//
+// It replaces TestInsertSelectIsNotAValuePositionYet, which was method 10's
+// fixture for the same gap — a claim that the shape could not be written, with
+// a test that ATTEMPTED it and failed the day it could. This is what that
+// failure was for.
+//
+// The expected answer is not written down twice: it is the PROJECTION entry's
+// own `want`, because a composite stored is the composite projected. PostgreSQL
+// 17.11 agrees for every one of the ten composites — the CTAS's stored rows are
+// byte-for-byte its projection's rows, and the created column's `format_type`
+// is the type the projection declares (measured: double precision, real,
+// bigint, numeric).
+//
+// The write runs single-process, which is where every write in this engine runs
+// (ADR-0036); the READ-BACK runs on both arms, because the file it produced is
+// an ordinary table file and the two engines must agree about it.
+func TestNumericFoldStoredPosition(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	t.Cleanup(cancel)
-	db := tmdStandalone(t, ctx)
-	for _, sql := range []string{
-		"INSERT INTO " + nfTable + " SELECT id, GREATEST(n_i64, n_f32, n_f64, '1e39') FROM " + nfTable,
-		"CREATE TABLE nffold AS SELECT GREATEST(n_i64, n_f32, n_f64, '1e39') AS v FROM " + nfTable,
-	} {
-		if _, err := tmdRunSingle(ctx, db, sql); err == nil {
-			t.Errorf("%q was accepted — a composite can now be STORED, which is a "+
-				"value-producing position TestNumericFoldValuePositionsTwoPath does not "+
-				"cover. Add it there and delete this test.", sql)
+
+	// ONE catalog behind the writer and both readers, so what is read back is
+	// what was written.
+	infra := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infra, nil)
+	coord := tmdCoordinator(t, ctx, infra)
+	writer, err := wadjet.Open(ctx, wadjet.Config{
+		MetaKV: infra.kv, Store: infra.store, Bucket: "test",
+	})
+	if err != nil {
+		t.Fatalf("open over the shared catalog: %v", err)
+	}
+	t.Cleanup(func() { writer.Close() })
+
+	want := map[string]string{}
+	for _, c := range nfPositions() {
+		name, pos, ok := strings.Cut(c.name, "|")
+		if ok && pos == "Projection" {
+			want[name] = c.want
 		}
+	}
+	for key := range nfStoredPins {
+		name, _, _ := strings.Cut(key, "|")
+		if _, ok := want[name]; !ok {
+			t.Errorf("stored pin %q names no composite — delete it or fix the key.", key)
+		}
+	}
+
+	for i, c := range nfPositions() {
+		name, pos, ok := strings.Cut(c.name, "|")
+		if !ok || pos != "Projection" {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			// The composite, taken out of the Projection entry's own SQL, so
+			// the two positions cannot drift apart.
+			expr := strings.TrimSuffix(strings.TrimPrefix(c.sql,
+				"SELECT id, "), " AS v FROM "+nfTable+" ORDER BY id")
+			tbl := fmt.Sprintf("nfstored%d", i)
+			ctas := fmt.Sprintf("CREATE TABLE %s AS SELECT id, %s AS v FROM %s", tbl, expr, nfTable)
+			if _, err := tmdRunSingle(ctx, writer, ctas); err != nil {
+				t.Fatalf("%s refused: %v\n  PostgreSQL 17.11 creates the table and stores %s",
+					ctas, err, want[name])
+			}
+			read := fmt.Sprintf("SELECT id, v FROM %s ORDER BY id", tbl)
+			for _, arm := range []struct {
+				name string
+				run  func() (*oracle.Result, error)
+			}{
+				{"single", func() (*oracle.Result, error) { return tmdRunSingle(ctx, writer, read) }},
+				{"dag", func() (*oracle.Result, error) { return tmdRunDAG(ctx, coord, read) }},
+			} {
+				res, err := arm.run()
+				if err != nil {
+					t.Fatalf("%s: %s: %v", arm.name, read, err)
+				}
+				got := nfRows(res)
+				if pin, pinned := nfStoredPins[name+"|"+arm.name]; pinned {
+					if nfSameRows(want[name], got) {
+						t.Errorf("%s: the stored composite now AGREES with PostgreSQL (%s) — "+
+							"delete this nfStoredPins entry", arm.name, want[name])
+					} else if !nfSameRows(pin, got) {
+						t.Errorf("%s: %s\n  got  %s\n  pin  %s\n  PostgreSQL 17.11: %s",
+							arm.name, ctas, got, pin, want[name])
+					}
+					continue
+				}
+				if !nfSameRows(want[name], got) {
+					t.Errorf("%s: %s\n  stored %s\n  projected/PostgreSQL 17.11 %s",
+						arm.name, ctas, got, want[name])
+				}
+			}
+		})
+	}
+
+	// The APPEND half, and it is a refusal: `INSERT INTO numfold SELECT id,
+	// GREATEST(n_i64, n_f32, n_f64, '1e39') FROM numfold` puts a composite
+	// declared FLOAT64 into `n_i32`, which is INT32. PostgreSQL would
+	// assignment-cast it; this engine answers 42804 naming both types
+	// (ADR-0012's divergence list, #1024). The cell is here because it is the
+	// same position from the other side: a composite offered to a column that
+	// already has a declaration.
+	appendSQL := "INSERT INTO " + nfTable + " SELECT id, GREATEST(n_i64, n_f32, n_f64, '1e39') FROM " + nfTable
+	if _, err := tmdRunSingle(ctx, writer, appendSQL); err == nil {
+		t.Errorf("%q was accepted; a FLOAT64 composite into an INT32 column is 42804", appendSQL)
+	} else if sqlerr.StateOf(err) != "42804" {
+		t.Errorf("%q refused %s: %v; want 42804", appendSQL, sqlerr.StateOf(err), err)
 	}
 }
 
