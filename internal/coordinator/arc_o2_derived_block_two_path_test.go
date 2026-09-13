@@ -66,6 +66,7 @@ func TestArcO2ADerivedBlockPublishesItsVisibleList(t *testing.T) {
 				if p, has := o2Pin[tc.name][arm.name]; has {
 					armWant, pinned = p, true
 				}
+				o2RefuseReservedSlots(t, arm.name, got, tc.sql)
 				if got == armWant {
 					continue
 				}
@@ -78,25 +79,26 @@ func TestArcO2ADerivedBlockPublishesItsVisibleList(t *testing.T) {
 				t.Fatalf("%s arm: %s\n  want %s (PostgreSQL 17.11)\n  SQL: %s",
 					arm.name, got, want, tc.sql)
 			}
-			// NOTHING THE PLANNER MINTED FOR ITSELF REACHES A CLIENT. The
-			// reserved-name property tolerates nothing now: #991 and #1020 were
-			// the two leaks a `want` string used to carry, and both are closed,
-			// so a reserved name in any cell's column list is a failure rather
-			// than an expectation (K3's property, back to its full strength).
-			for _, arm := range arms {
-				got, err := arm.run(tc.sql)
-				if err != nil {
-					continue
-				}
-				head, _, _ := strings.Cut(got, "] rows=")
-				for _, col := range strings.Fields(strings.TrimPrefix(head, "cols=[")) {
-					name, _, _ := strings.Cut(col, ":")
-					if strings.HasPrefix(name, "__") {
-						t.Fatalf("%s arm published the reserved slot %q to the client\n  SQL: %s",
-							arm.name, name, tc.sql)
-					}
-				}
-			}
 		})
+	}
+}
+
+// o2RefuseReservedSlots is the property behind every cell of the table:
+// NOTHING THE PLANNER MINTED FOR ITSELF REACHES A CLIENT. It tolerates
+// nothing — #991 and #1020 were the two leaks a `want` string used to carry,
+// and both are closed, so a reserved name in any rendering is a failure rather
+// than an expectation (K3's property, back to its full strength).
+func o2RefuseReservedSlots(t *testing.T, arm, rendered, sql string) {
+	t.Helper()
+	head, _, ok := strings.Cut(rendered, "] rows=")
+	if !ok {
+		return // a refusal, which publishes no columns at all
+	}
+	for _, col := range strings.Fields(strings.TrimPrefix(head, "cols=[")) {
+		name, _, _ := strings.Cut(col, ":")
+		if strings.HasPrefix(name, "__") {
+			t.Fatalf("%s arm published the reserved slot %q to the client\n  SQL: %s",
+				arm, name, sql)
+		}
 	}
 }
