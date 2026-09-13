@@ -2112,6 +2112,12 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	if err != nil {
 		return nil, "", lateralEmptyInput{}, nil, fmt.Errorf("building LATERAL subquery plan: %w", err)
 	}
+	// The body publishes its VISIBLE list, which for a LATERAL means the
+	// user's items and the correlation slot the join keys on — but never a key
+	// the body materialized for its own `ORDER BY`, which the sort below reads
+	// and nothing above does (#991, block_visible_output.go). Where there is
+	// none the plan is unchanged.
+	right = dropBlockHiddenSlots(right)
 	// An AGGREGATED lateral groups on the key, and an aggregate publishes a
 	// group key under the key's own text -- which is the collision the slot
 	// exists to avoid, one operator lower. Record the slot as the key's

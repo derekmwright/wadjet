@@ -1246,9 +1246,17 @@ func NewWindow(child *Node, exprs []WindowExpr) *Node {
 
 // NewJoin creates a join node.
 func NewJoin(left, right *Node, joinType, condition string) *Node {
+	// A JOIN is the one consumer that reads a derived block's STREAM rather
+	// than its published list, so it is where a key the block materialized for
+	// its own ORDER BY would escape: the sort reads that key below, nothing
+	// re-projects above it, and `SELECT *` over the join published
+	// `__sortkey_0` — a name no query can spell — on every arm and in
+	// RowDescription (#991). Each side publishes its VISIBLE list here; a side
+	// that materialized nothing is returned unchanged, so an ordinary join's
+	// plan is what it always was. See block_visible_output.go.
 	return &Node{
 		Type:     NodeJoin,
-		Children: []*Node{left, right},
+		Children: []*Node{dropBlockHiddenSlots(left), dropBlockHiddenSlots(right)},
 		JoinType: joinType,
 		JoinCond: condition,
 	}

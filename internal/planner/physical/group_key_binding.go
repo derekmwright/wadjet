@@ -26,7 +26,20 @@ func resolveShuffleKey(key string, child *logical.Node, published map[*logical.N
 		if n.Type == logical.NodeProject {
 			bare := derivedScopeBareName(resolved, n)
 			proj := projectionForName(n.Projections, resolved, bare)
-			if proj != nil && bare != "" && (published[n] || projectsAMintedGroupKey(n, bare)) {
+			// A key already spelled BARE names the same column; the scope
+			// stripper answers "" for it because there is no qualifier to
+			// strip, not because the name is unknown. Without this the stop
+			// below is reachable only from a QUALIFIED spelling, and a
+			// projection that republishes the slot under its own name
+			// (logical.dropBlockHiddenSlots, #991) makes the key bare one
+			// operator higher — after which the walk chased the minted key's
+			// SOURCE column and the shuffle refused it (`key "order_id" not
+			// in schema`).
+			stop := bare
+			if stop == "" && proj != nil && !strings.Contains(resolved, ".") {
+				stop = resolved
+			}
+			if proj != nil && stop != "" && (published[n] || projectsAMintedGroupKey(n, stop)) {
 				// The aggregate below PUBLISHES this name (a hidden
 				// correlation slot, ADR-0026 3a): the stage emits it under
 				// exactly this name and nothing below carries it, so the walk
@@ -34,7 +47,7 @@ func resolveShuffleKey(key string, child *logical.Node, published map[*logical.N
 				// key's SOURCE column, which the aggregate stage does not
 				// emit -- measured as `partitioned shuffle: key "g" not in
 				// schema` and, where the join still built, zero matched rows.
-				return bare
+				return stop
 			}
 			switch {
 			case proj != nil && proj.Column != "" && !strings.EqualFold(proj.Column, resolved):
@@ -81,17 +94,51 @@ func projectsAMintedGroupKey(project *logical.Node, name string) bool {
 	if project == nil || len(project.Children) == 0 {
 		return false
 	}
-	agg := findAggregateAncestor(project.Children[0])
-	if agg == nil {
-		return false
-	}
-	for i := range agg.GroupBy {
-		if i < len(agg.GroupByPublish) && agg.GroupByPublish[i] != "" &&
-			strings.EqualFold(agg.GroupByPublish[i], name) {
-			return true
+	// A Project that REPUBLISHES this name under itself is transparent to the
+	// question: the block re-projects to its visible list above its own sort
+	// (logical.dropBlockHiddenSlots, #991), and the aggregate that minted the
+	// slot then sits one Project further down. Stopping at the first Project
+	// answered "not minted" for a key that is, and the caller chased it to the
+	// key's SOURCE column — `partitioned shuffle: key "order_id" not in
+	// schema` over a grouped LATERAL with an `ORDER BY` of its own.
+	for child := project.Children[0]; child != nil; {
+		if agg := findAggregateAncestor(child); agg != nil {
+			for i := range agg.GroupBy {
+				if i < len(agg.GroupByPublish) && agg.GroupByPublish[i] != "" &&
+					strings.EqualFold(agg.GroupByPublish[i], name) {
+					return true
+				}
+			}
+			return false
 		}
+		child = passThroughProjectFor(child, name)
 	}
 	return false
+}
+
+// passThroughProjectFor is the input of the first Project at or below n that
+// publishes name UNCHANGED — the same name in and out — or nil when the next
+// operator down is one this question cannot see through.
+func passThroughProjectFor(n *logical.Node, name string) *logical.Node {
+	for cur := n; cur != nil && len(cur.Children) == 1; cur = cur.Children[0] {
+		if cur.Type != logical.NodeProject {
+			if !aggScopePreservingWrapper(cur.Type) {
+				return nil
+			}
+			continue
+		}
+		for _, pr := range cur.Projections {
+			if !strings.EqualFold(pr.Alias, name) {
+				continue
+			}
+			if pr.Column == "" || strings.EqualFold(pr.Column, name) {
+				return cur.Children[0]
+			}
+			return nil
+		}
+		return nil
+	}
+	return nil
 }
 
 // resolveAggInputName resolves aggregate arguments/group keys through Project

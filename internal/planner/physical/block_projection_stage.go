@@ -100,6 +100,17 @@ func blockProjectionLeavesItsStream(p *logical.Node) blockDivergence {
 		return out
 	}
 	names, stream = user(names), user(stream)
+	// A KEY THE BLOCK MATERIALIZED FOR ITS OWN `ORDER BY` is carried by the
+	// stream because the SORT below reads it, and no pruning can take it away
+	// — which is exactly what the narrowing exemption below assumes. The block
+	// re-projects to its visible list above that sort
+	// (logical.dropBlockHiddenSlots, #991); on the DAG a Project emits no
+	// stage, so without this mark the star reads the stream and the sort key's
+	// SOURCE column rides out beside the block's own (`amount` beside
+	// `order_id, product`).
+	if blockSortCarriesAMaterializedKey(p) {
+		return blockIntroduces
+	}
 	// NARROWING IS THE WEAK CLASS, and the difference is what happens when the
 	// publish declines rather than whether the block is looked at. A block that publishes FEWER columns than
 	// the stream — every one of them the stream's, once, and no name of its
@@ -150,6 +161,33 @@ const (
 	blockAgrees blockDivergence = iota
 	blockIntroduces
 )
+
+// blockSortCarriesAMaterializedKey reports whether the block re-projects over
+// a SORT of its own whose key the block does not publish — the shape
+// `logical.dropBlockHiddenSlots` builds, and the one case where a block that
+// publishes FEWER columns than its stream is not answered by column pruning.
+func blockSortCarriesAMaterializedKey(p *logical.Node) bool {
+	sorted := false
+	for cur := p.Children[0]; cur != nil; {
+		switch cur.Type {
+		case logical.NodeSort:
+			sorted = true
+		case logical.NodeProject:
+			if sorted && logical.HasHiddenProjection(cur.Projections) {
+				return true
+			}
+			return false
+		case logical.NodeLimit, logical.NodeDistinct:
+		default:
+			return false
+		}
+		if len(cur.Children) != 1 {
+			return false
+		}
+		cur = cur.Children[0]
+	}
+	return false
+}
 
 // blockStreamNames is what the STAGE under this block's projection emits: the
 // first node below it that is not a Project, because a Project emits no stage.
