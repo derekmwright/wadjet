@@ -308,7 +308,28 @@ func (c *Catalog) ListTables(_ context.Context) ([]string, error) {
 }
 
 // CreateTable creates a new table with the given schema and partition keys.
-func (c *Catalog) CreateTable(_ context.Context, name string, schema parquet.Schema, partitionKeys []string) error {
+func (c *Catalog) CreateTable(ctx context.Context, name string, schema parquet.Schema, partitionKeys []string) error {
+	return c.CreateTableWithFiles(ctx, name, schema, partitionKeys, nil)
+}
+
+// CreateTableWithFiles creates a table whose manifest already holds `seed` —
+// the data files a `CREATE TABLE … AS SELECT` wrote before the name existed
+// (#1024).
+//
+// The table's FIRST manifest is the one that holds the rows, so there is no
+// instant at which the name resolves to an empty table. That matters because
+// wadjet has no transactions: a create-then-commit pair would publish an empty
+// table to every concurrent reader for the length of the commit, and a commit
+// that then failed would leave that empty table behind — a CTAS reporting an
+// error over a relation it created. The failure mode this shape leaves instead
+// is the one ADR-0030 already accepts and the CTAS door then reclaims: written
+// objects that no manifest names.
+//
+// seed's files are stamped EngineWritten, the ownership marker AddNewFiles
+// stamps (#494, ADR-0020 layer 0), and take the object-retirement
+// registration interlock (#896) for the window in which they are not yet
+// referenced by anything.
+func (c *Catalog) CreateTableWithFiles(_ context.Context, name string, schema parquet.Schema, partitionKeys []string, seed []PendingFile) error {
 	if err := CheckStorableName("table", name); err != nil {
 		return err
 	}
@@ -324,6 +345,21 @@ func (c *Catalog) CreateTable(_ context.Context, name string, schema parquet.Sch
 		if !schema.HasColumn(pk) {
 			return fmt.Errorf("partition key %q not found in schema", pk)
 		}
+	}
+
+	// The object-retirement registration interlock (#896), taken BEFORE the
+	// first catalog write: a sweep that is deciding whether to delete one of
+	// these objects must refuse this registration rather than have the table
+	// record written and the bytes removed underneath it.
+	if len(seed) > 0 {
+		registered := make([]string, len(seed))
+		for i := range seed {
+			registered[i] = seed[i].Entry.Path
+		}
+		if err := c.beginRegistration(registered); err != nil {
+			return err
+		}
+		defer c.endRegistration(registered)
 	}
 
 	meta, err := c.getMeta()
@@ -369,6 +405,30 @@ func (c *Catalog) CreateTable(_ context.Context, name string, schema parquet.Sch
 		Partitions:  []PartitionEntry{},
 		UpdatedAt:   now,
 		Incarnation: incarnation,
+	}
+	for _, pf := range seed {
+		entry := pf.Entry
+		entry.EngineWritten = true
+		found := false
+		for i := range manifest.Partitions {
+			if manifest.Partitions[i].Path != pf.PartPath {
+				continue
+			}
+			merged, mErr := mergeNewFileEntries(manifest.Partitions[i].Files, []FileEntry{entry})
+			if mErr != nil {
+				return mErr
+			}
+			manifest.Partitions[i].Files = merged
+			found = true
+			break
+		}
+		if !found {
+			manifest.Partitions = append(manifest.Partitions, PartitionEntry{
+				Path:   pf.PartPath,
+				Values: pf.PartValues,
+				Files:  []FileEntry{entry},
+			})
+		}
 	}
 	if err := c.putJSON(c.key("manifest."+name), manifest); err != nil {
 		return err

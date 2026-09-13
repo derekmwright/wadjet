@@ -61,6 +61,28 @@ type PendingFile struct {
 // reclaim; only the manifest decides row visibility.
 // See docs/internals/catalog-dml-atomic-publication.md for the design.
 func (c *Catalog) CommitDML(_ context.Context, tableName string, newFiles []PendingFile, markers []DeleteMarker) error {
+	return c.commitFilesAndMarkers(tableName, "", newFiles, markers)
+}
+
+// CommitIngest publishes a whole ingest's files in ONE CAS, or none of them,
+// against the table INCARNATION the rows were accepted for.
+//
+// It is CommitDML's sibling for a writer that mints no markers: an
+// `INSERT INTO … SELECT` (#1024). Per-flush registration through
+// AddNewFilesForIncarnation would publish a statement's first file and then
+// fail on its second, leaving rows in the table that the client was told were
+// not written — which is exactly the split ADR-0030 closed for UPDATE. The
+// incarnation check is the one AddNewFilesForIncarnation makes and it is made
+// INSIDE the CAS for the same reason (#919): a DROP+CREATE landing between a
+// lookup and the commit would otherwise write these rows into the new table.
+//
+// An empty expectIncarnation skips the check, as AddNewFilesForIncarnation's
+// does, for a manifest written before the field existed.
+func (c *Catalog) CommitIngest(_ context.Context, tableName, expectIncarnation string, files []PendingFile) error {
+	return c.commitFilesAndMarkers(tableName, expectIncarnation, files, nil)
+}
+
+func (c *Catalog) commitFilesAndMarkers(tableName, expectIncarnation string, newFiles []PendingFile, markers []DeleteMarker) error {
 	if len(newFiles) == 0 && len(markers) == 0 {
 		return nil
 	}
@@ -97,6 +119,14 @@ func (c *Catalog) CommitDML(_ context.Context, tableName string, newFiles []Pend
 		}
 
 		// (1) Validation, before anything is merged in.
+		//
+		// The incarnation first: a table dropped and recreated under this name
+		// is not the table these rows were accepted for, and nothing else
+		// below can tell (#919, ADR-0030).
+		if expectIncarnation != "" && manifest.Incarnation != expectIncarnation {
+			return fmt.Errorf("table %q: %w (expected %s, manifest has %s)",
+				tableName, ErrTableIncarnationChanged, expectIncarnation, manifest.Incarnation)
+		}
 		live := make(map[string]bool)
 		for _, p := range manifest.Partitions {
 			for _, f := range p.Files {

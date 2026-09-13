@@ -100,6 +100,35 @@ func (ing *Ingester) PendingFiles() []catalog.PendingFile {
 	return out
 }
 
+// RestorePendingFiles puts a drained list back, in front of anything that has
+// landed since.
+//
+// It exists for the one caller that drains the list, attempts a commit, and
+// finds the commit refused: the objects are still uploaded and still
+// unreferenced, and the reclaim has to be able to name them (#1024,
+// WriteQueryRows). Without it a refused commit would be exactly the byte leak
+// this door exists to avoid.
+func (ing *Ingester) RestorePendingFiles(files []catalog.PendingFile) {
+	if len(files) == 0 {
+		return
+	}
+	ing.mu.Lock()
+	defer ing.mu.Unlock()
+	ing.pending = append(append([]catalog.PendingFile(nil), files...), ing.pending...)
+}
+
+// TableIncarnation is the table identity this ingester bound to, and whether
+// it has bound one yet.
+//
+// A caller that commits the pending files ITSELF needs the binding the
+// ingester took, so that commit can make the same incarnation check a flush
+// would have made (#919, ADR-0030). See WriteQueryRows.
+func (ing *Ingester) TableIncarnation() (string, bool) {
+	ing.mu.Lock()
+	defer ing.mu.Unlock()
+	return ing.incarnation, ing.incarnationBound
+}
+
 type partitionBuffer struct {
 	values map[string]string
 	path   string
