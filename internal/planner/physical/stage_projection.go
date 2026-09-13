@@ -310,6 +310,13 @@ func (p *Planner) attachScanSelectProjections(root *logical.Node, stages []Stage
 				continue
 			}
 		}
+		// A reference INTO A MATERIALIZED BLOCK already names what the
+		// stream carries (referenceIntoPublishedBlock, ADR-0026 §7): chasing
+		// it to the block's source column would name the column that
+		// projection renamed away.
+		if p.referenceIntoPublishedBlock(specs[j].Name, renameChild) {
+			continue
+		}
 		src := resolveOutputRenameSource(specs[j].Name, renameChild)
 		if strings.EqualFold(src, specs[j].Name) && strings.Contains(specs[j].Name, ".") {
 			// Qualified spelling: the nested Project's alias is bare — the

@@ -36,7 +36,18 @@ func starReadBlockProjections(root *logical.Node) map[*logical.Node]blockDiverge
 			if d := blockProjectionLeavesItsStream(n); !projected && joined && d != blockAgrees {
 				out[n] = d
 			}
-			projected = true
+			// A STAR'S OWN EXPANSION IS THE STAR, not a named list over it.
+			// `logical.StarJoinArms` marks the projection minted to publish a
+			// bare `*` over a join in the FROM clause's order (ADR-0026 §9),
+			// and its items are the arms' columns and nothing else — so the
+			// block below is still read BY POSITION and still owes its own
+			// list. Counting it as a Project un-marked every block under a
+			// star join: the stage went back to shipping the stream, the
+			// star's item resolved through the rename to the SOURCE column
+			// (`c_str` for `c_str AS v`), and an ORDER BY on the block's
+			// published `v` then named a column no stage emitted — loud, at
+			// dispatch, on a query the single-process path answers.
+			projected = projected || !n.StarJoinArms
 		}
 		if n.Type == logical.NodeJoin {
 			joined = true
@@ -537,4 +548,34 @@ func markStarReadBlocks(n *logical.Node, candidates map[*logical.Node]blockDiver
 	for _, c := range n.Children {
 		markStarReadBlocks(c, candidates, published)
 	}
+}
+
+// referenceIntoPublishedBlock reports whether a QUALIFIED reference names a
+// column of a block whose projection a stage MATERIALIZES.
+//
+// Such a reference is already the name the stream carries, so resolving it
+// back through the block's rename to a SOURCE column points at a column that
+// projection renamed away — the rule plan.go's gather loop states for a name
+// some stage already materializes, asked structurally rather than by name so
+// that a qualified reference and a bare stream column still meet.
+//
+// It is the SELECT list's half of §7's first consequence: `resolveShuffleKey`
+// and `resolveJoinNeededColumns` already stop at a materialized block and take
+// the PUBLISHED name (ADR-0026 §7), and a star's own expansion is a consumer
+// of exactly the same kind — `SELECT * FROM d JOIN (SELECT c_str AS v FROM t)
+// s ON …` publishes `s.v`, the block's stage emits `v`, and the spec attached
+// to the sort stage read `c_str`: loud, at dispatch, on one DAG arm.
+func (p *Planner) referenceIntoPublishedBlock(ref string, child *logical.Node) bool {
+	if p == nil || len(p.publishedBlocks) == 0 || child == nil {
+		return false
+	}
+	dot := strings.LastIndexByte(ref, '.')
+	if dot <= 0 || dot == len(ref)-1 {
+		return false
+	}
+	scope := relationScopeSubtree(child, ref[:dot])
+	if scope == nil {
+		return false
+	}
+	return materializedBlockUnder(scope, p.publishedBlocks) != nil
 }

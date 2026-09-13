@@ -475,6 +475,9 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 				renames[i].From = src
 				continue
 			}
+			if p.referenceIntoPublishedBlock(renames[i].From, renameChild) {
+				continue
+			}
 			if renames[i].Expr == nil {
 				renames[i].From = resolveOutputRenameSourceForGather(renames[i].From, renameChild)
 			}
