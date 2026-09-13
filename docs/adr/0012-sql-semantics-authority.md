@@ -3214,21 +3214,27 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      the two spellings agree.
 
      What is NOT expanded is unchanged and still refused rather than guessed:
-     a bare `*` over a JOIN (the entry below), a derived table whose body is
-     itself such a star, and the LATERAL's own star, whose output is a
-     projection the expansion does not enumerate and whose scan carries the
-     correlation slot the join is about to drop.
+     a bare `*` over a JOIN (the entry below), and a derived table whose body
+     is itself such a star.
 
-     The lateral's own star ALONE (`SELECT s.*` with nothing beside it) is a
-     WRONG → LOUD move and is recorded as one: it published the whole join —
-     four columns where PostgreSQL publishes `mx`, on four arms and on the
-     wire — and is refused now, with the PLANNER's one sentence rather than the
-     executor's generic `operator execute: column "s.*" does not exist in the
-     input schema`. A star-only SELECT list built no projection for that
-     refusal to see until #979. Gated by
+     **The LATERAL's own star is no longer among them — CLOSED 2026-09-13 by
+     arc O2.** It published the whole join until #979, was REFUSED from then
+     until this arc, and publishes the body's own SELECT list now: the
+     correlation slot the join is about to drop is identified by
+     `Node.HiddenJoinCols` — the same identity the drop itself uses (ADR-0026
+     §3c) — so what the star publishes is exactly the columns the query wrote,
+     which is what PostgreSQL publishes. The divergence this entry recorded is
+     DELETED rather than pinned, and the same walk closed the neighbouring
+     refusals: a derived table or CTE carrying its own `ORDER BY`, `LIMIT` or
+     `DISTINCT` answers `x.*` too, because none of those changes a column or
+     its position. Gated by
      `coordinator.TestArcJ1AQualifiedStarExpandsFromTheRelationsOutput`,
-     `coordinator.TestArcK1AStarIsItsSourceInItsPosition` and
-     `pgwire.TestArcJ1AHiddenSlotIsNotInTheRowDescription`.
+     `coordinator.TestArcK1AStarIsItsSourceInItsPosition`,
+     `coordinator.TestArcO2ADerivedBlockPublishesItsVisibleList` (the `qstar`
+     column of every block class), `pgwire.TestArcJ1AHiddenSlotIsNotInTheRowDescription`
+     and — for the policed list, which is the half a star must never widen —
+     `server.TestPolicyMaskingIsPlanTimeOnEveryDoor`'s three
+     `a_laterals_own_star_*` cells.
 
    - **A star over a NON-aggregated LATERAL publishes PostgreSQL's columns in
      a different ORDER.** (Added 2026-09-07, arc J1 round 2; PRE-EXISTING.

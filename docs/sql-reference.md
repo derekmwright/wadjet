@@ -1162,15 +1162,16 @@ A QUALIFIED star ALONE (`SELECT o.*` with nothing beside it) publishes the same
 columns: it names one relation whichever way it is written, over a lateral, a
 plain join, a derived table or a CTE.
 
-Where the list is not knowable the star is REFUSED (`0A000`) rather than
-guessed: a derived table whose body is itself a BARE star over a join, and a
-LATERAL's own star — `SELECT s.*, o.id` and `SELECT s.*` alike, whose output is
-a projection this expansion does not enumerate. Name the columns in those two.
+A LATERAL's own star publishes the lateral's own columns, which is what
+PostgreSQL publishes: `SELECT s.*` and `SELECT s.*, o.id` both answer the
+body's SELECT list, with the correlation key the planner materialized left out
+of it. So does a qualified star over a derived table or a CTE that carries its
+own `ORDER BY`, `LIMIT` or `DISTINCT` — none of those changes a column or its
+position.
 
-PostgreSQL answers BOTH lateral spellings (it publishes the lateral's own
-columns), so both refusals are recorded divergences rather than bug reports.
-They differ only in what they replaced: `SELECT s.*, o.id` has been refused
-throughout, and `SELECT s.*` alone used to publish the whole join.
+Where the list is not knowable the star is still REFUSED (`0A000`) rather than
+guessed: a derived table whose body is itself a BARE star over a join. Name the
+columns there.
 
 An inner `SELECT` list that aliases something to the correlation key's own name
 answers what PostgreSQL answers. `JOIN LATERAL (SELECT MAX(t.id) AS g …

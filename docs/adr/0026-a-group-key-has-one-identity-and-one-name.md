@@ -2408,10 +2408,99 @@ therefore not an address, and it was the only one in use in three places:
    columns answer to it", §3a), and the positions are the inner operation's
    own by the same construction the rest of this item rests on.
 
+## §9 A derived block publishes its VISIBLE list, and a qualified star reads it
+
+Added 2026-09-13 by arc O2 (#1077, #991, #1020).
+
+§7 made a derived block a relation the DAG can publish. §9 says what that
+relation IS on every path — its VISIBLE projection, under the names the block
+wrote — and closes the three ways it was not.
+
+**A slot the planner minted is dropped where the operator that minted it ends,
+and a derived block had no such place.** An `ORDER BY` term the SELECT list
+does not carry is materialized as a hidden projection and sorted on, so the
+projection sits BELOW the sort. At the top of a statement the hidden tail is
+trimmed where the rows leave the engine (`physical.hiddenSortTrimOp`, the
+gather's output renames). A derived block has neither, and with the block as
+the ONLY relation the statement's own output projection IS the block's — which
+is why this was invisible until a JOIN stood above it:
+
+```
+SELECT * FROM lat_ord o JOIN (SELECT order_id, product FROM lat_item
+                              ORDER BY amount LIMIT 3) s ON s.order_id = o.id
+PostgreSQL   id, customer, total, order_id, product
+wadjet       … , __sortkey_0          ← a name no query can spell, on the wire
+```
+
+`logical.dropBlockHiddenSlots` re-projects the block to its visible list ABOVE
+its own Sort and LIMIT — the block's own projection re-applied, same names,
+same order, one reference per item — and it runs in `NewJoin`, because a JOIN
+is the one consumer that reads a side's STREAM rather than its published list.
+The placement is part of the rule: applying it at the block's own construction
+puts a Project between the SELECT list and the producer that would materialize
+it, and the DAG then computes no SELECT list for the shape at all (#467's own
+gate said so).
+
+Two consumers had to be told, and each was a wrong answer:
+
+- A Project emits no stage, so on the DAG the re-projection alone left the star
+  reading the stream and the sort key's SOURCE column rode out in the slot's
+  place. `blockProjectionLeavesItsStream` exempts a block that publishes FEWER
+  columns than its stream because the column pruning answers that — and pruning
+  cannot remove a column the sort BELOW reads. That narrowing is marked now.
+- `resolveShuffleKey` stops at a projection that publishes a MINTED group key,
+  because such a key exists on the DAG only under its slot (§3c). The stop was
+  reachable only from a QUALIFIED spelling and only from the Project directly
+  over the aggregate; the re-projection makes the key bare one operator higher
+  and puts a Project in between, after which the walk chased the key to its
+  SOURCE column — `partitioned shuffle: key "order_id" not in schema`. It reads
+  a bare spelling as itself now and sees through a Project that republishes the
+  name unchanged.
+
+**The MINTED slot's ordinal is read through the block's own sort (#1020).** A
+join drops the slot its lowering minted BY POSITION, and on the DAG that
+position comes from the list the STAGE publishes (§7 item 3).
+`materializedBlockUnder` stopped at a Sort, so a grouped LATERAL carrying its
+own `ORDER BY` fell through to `declaredJoinSchema`, which descends to the
+AGGREGATE and answers its order (`product, __key_0`) where the stage publishes
+the projection's (`__key_0, p`): the slot was looked for at the wrong ordinal,
+nothing was dropped, and `__key_0` reached the client on both DAG arms. A Sort
+changes neither the columns nor their order, so the block beneath it is still
+the relation that side publishes, and the walk passes it exactly as it already
+passes a Filter, a Limit and a Distinct.
+
+**A QUALIFIED star binds the block's RESOLUTION spelling and publishes its
+PUBLISHED one (#1077).** §2's pair, in the direction a star needs. An unaliased
+select item publishes `?column?` — a RENDERING, which no stream carries — and
+resolves by the spelling `buildProject` emits it under, its expression text.
+`logical.projectionOutputNames` answered the published name alone, so
+`SELECT x.* FROM (SELECT id, g + 1 FROM shp) x` referenced a column nothing
+carries: NULL under a STRING declaration on every arm, where the bare star
+answered the value. `StarSourceColumns` answers PAIRS now, and the expansion
+carries both.
+
+The same walk decides what a star can REACH, and it reached almost nothing: it
+stopped at the block's root, so a block carrying its own `ORDER BY`, `LIMIT` or
+`DISTINCT` answered nil and the query was REFUSED where PostgreSQL answers it,
+and a decorrelated LATERAL was excluded outright. It descends through the
+operators that change neither a column nor its position, and a LATERAL body
+publishes its list minus the slots the join above OWES — `Node.HiddenJoinCols`,
+the same identity the drop itself uses. The ADR-0012 divergence that recorded
+the lateral-star refusal is deleted with it.
+
+**What a star must never widen is the POLICED list**, and that is unchanged:
+what the expansion publishes is the block's own SELECT list, which the column
+policy already vetted, so a masked column arrives masked and a denied one is
+still `42703`. `server.TestPolicyMaskingIsPlanTimeOnEveryDoor`'s three
+`a_laterals_own_star_*` cells assert exactly that, on every door.
+
 ### Gates
 
 | gate | what it holds |
 |---|---|
+| `coordinator.TestArcO2ADerivedBlockPublishesItsVisibleList` | §9 — 339 cells on five arms against PostgreSQL 17.11: five block classes × twelve projection shapes × five consumers, plus the five issues in the spelling each was reported in; the reserved-name property tolerates nothing |
+| `pgwire.TestArcK3TheWireDeclaresTheBlocksProjection` | §9 on the wire door — the two `__sortkey_0` pins are deleted |
+| `server.TestPolicyMaskingIsPlanTimeOnEveryDoor` | §9's policed half — a lateral's own star publishes the body's list, masked stays masked, denied stays 42703 |
 | `coordinator.TestM1AMergedOrderIsTheQuerysOrder` | 8a — ten shapes, four arms, incl. LIMIT (top-K heap), OFFSET, a zero-row result, the arm-swapping predicate, and two controls that never reach the merge |
 | `coordinator.TestM1AMergedOrderIsTheQuerysOrderAtScale` | 8a past ONE BATCH — seven 5000-row shapes, the two DAG arms asserted row for row against the single-process one |
 | `coordinator.TestCoalescingAMergeAdvancesAVarlenNullsOffset` + `TestCoalescingAdvancesEveryNullsOffset` | 8a's null-write rule, per carrier |
