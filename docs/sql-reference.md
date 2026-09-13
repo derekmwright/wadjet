@@ -509,7 +509,9 @@ CREATE TABLE busy_hosts AS
     FROM flow_logs
     GROUP BY src_ip
 
--- Schema only, no rows: the query is NOT executed.
+-- Schema only, no rows: the query is NOT executed — not the rows, not the
+-- expressions, and not a CTE body or a join's build side. A query that would
+-- fail on row five still declares its table.
 CREATE TABLE busy_hosts_empty AS SELECT src_ip, SUM(bytes_in) AS total
     FROM flow_logs GROUP BY src_ip WITH NO DATA
 ```
@@ -522,8 +524,10 @@ already carries, so the table holds exactly the columns the identical bare
 - An unaliased expression takes PostgreSQL's `?column?` name. Two of them in
   one statement is SQLSTATE `42701`, `column "?column?" specified more than
   once`, because a relation cannot hold both — alias them, or name them in the
-  column list. `WITH NO DATA` declares the same columns under the same rule:
-  the two arms of one statement always create the same table.
+  column list. `WITH NO DATA` declares the same columns under the same rule,
+  wherever the query PLANS: a query the planner refuses — a `LATERAL` with no
+  `FROM` whose item it cannot compute, say — is refused by the `WITH DATA` arm
+  and declared by the other, because only one of them plans it.
 - **`NOT NULL` is never inferred**, as PostgreSQL does not infer it: every
   column of the new table is nullable, including one copied from a `NOT NULL`
   source column.

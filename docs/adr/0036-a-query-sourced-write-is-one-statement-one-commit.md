@@ -61,13 +61,18 @@ asks `parquet.ValidateWriteSchema`, so a declared type the writer cannot store
 is refused at CREATE rather than at the first flush (ADR-0018 §14). The list it
 is given comes from the EXECUTED plan — `QueryResult.OutputSchema`, which is
 the CollectSink's schema. `WITH NO DATA`, which does not execute, takes its
-TYPES from `Planner.DeclaredOutputSchema` over the same enforced plan and its
-NAMES from the same CollectSink, by building the physical plan and not running
-it: the sink answers `Schema()` from its plan-time hint when no batch was
-consumed. Two rounds of review were spent on the consequence of taking the
-names from anywhere else — the walk spells an unaliased item by its expression
-TEXT, so `WITH NO DATA` declared `"n + 1"` where `WITH DATA` and PostgreSQL say
-`?column?`, and with the name went the duplicate rule. Both are post-
+TYPES from `Planner.DeclaredOutputSchema` and its NAMES from
+`physical.PublishedOutputNames` — the list `Plan` stamps onto the sink, derived
+from the LOGICAL plan alone. Three rounds of review were spent on where those
+names come from. Taking them from the type walk spells an unaliased item by its
+expression TEXT, so `WITH NO DATA` declared `"n + 1"` where `WITH DATA` and
+PostgreSQL say `?column?`, and with the name went the duplicate rule. Taking
+them by calling `Plan` fixes that and breaks the clause itself: `Plan` is NOT a
+pure derivation — it materializes every CTE body by running a pipeline over it,
+and builds every hash join's build side — so the statement read the source
+table and evaluated part of the query it is documented not to run (measured: 2
+data objects on five of nine shapes, 58 ms at 400k rows, 123 MiB peak). The
+name list is a walk over the logical plan and nothing else. Both are post-
 enforcement, which is what makes rule 2 of the Context hold.
 
 **2b. Every value goes through the one assignment conversion.** (Added
@@ -149,13 +154,19 @@ is a `Sink`, `CollectSink` is not a `MergeableSink` so a pipeline shares ONE
 sink across its morsel workers, and a mutex-protected sink that boxes each batch
 into the ingester as it arrives is all the shape needs. What it costs is the
 schema: the table's declaration would come from the first batch rather than from
-the completed plan. The `WITH NO DATA` arm already reads that declaration from
-the same place — it BUILDS the physical plan and takes `CollectSink.Schema()`
-from it without running it, which is what round 3 settled after the round-2 fix
-left a star over a subquery naming its inner unaliased item by expression text —
-so the agreement between the two arms is already a shared derivation rather than
-two that happen to match. `TestTheTwoArmsOfACreateDeclareOneTable` (21 shapes,
-including eight stars over a CTE or a derived table) is the gate for it.
+the completed plan. The `WITH NO DATA` arm already takes its NAMES from the same
+list the sink publishes — `physical.PublishedOutputNames`, the walk over the
+LOGICAL plan that `Plan` stamps onto the sink — so the agreement between the two
+arms is a shared derivation rather than two that happen to match.
+`TestTheTwoArmsOfACreateDeclareOneTable` (21 shapes, including eight stars over
+a CTE or a derived table) is the gate for it.
+
+It holds wherever the query PLANS. The two arms answer one statement
+differently in exactly one recorded place: a query the PLANNER refuses — a
+`LATERAL` with no `FROM` clause whose item it cannot compute — is refused by the
+`WITH DATA` arm and declared by the `WITH NO DATA` arm, because only one of them
+plans it. That is the planner's gap and not the naming path's; PostgreSQL 17.11
+creates the table on both arms.
 
 Lifting it is a separate arc, and the mechanism is written down here so it is
 not redesigned: `Coordinator.ExecuteSQL` gains a branch for `QueryCreateTable`
@@ -207,6 +218,16 @@ commit it needs (`CommitIngest` takes a list).
   point of the clause and is what PostgreSQL does.
 
 ## Consequences
+
+- Gate (round 4): `wadjet.TestWithNoDataReadsNothingAndEvaluatesNothing` asserts
+  the ABSENCE of execution rather than the outcome — fifteen shapes, each
+  required to read ZERO data objects, leave no spill scratch, and declare a
+  table even when a row would make the query fail — with the same poisoned
+  queries run `WITH DATA` beside them, so the cells cannot pass because the
+  expression is harmless. The outcome alone cannot see this: an empty table
+  with the right columns is the same table whether or not the rows were read,
+  which is how a change that ran every CTE body and every join build inside
+  `WITH NO DATA` passed the declaration gate.
 
 - Gates (round 2): `wadjet.TestBothWriteDoorsStoreTheSameNumber` and
   `TestADecimalSourceIsAssignedAtItsValue` (the two doors' stored VALUES, pair
