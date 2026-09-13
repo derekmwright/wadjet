@@ -1816,18 +1816,23 @@ func TestNumericFoldStoredPosition(t *testing.T) {
 		})
 	}
 
-	// The APPEND half, and it is a refusal: `INSERT INTO numfold SELECT id,
-	// GREATEST(n_i64, n_f32, n_f64, '1e39') FROM numfold` puts a composite
-	// declared FLOAT64 into `n_i32`, which is INT32. PostgreSQL would
-	// assignment-cast it; this engine answers 42804 naming both types
-	// (ADR-0012's divergence list, #1024). The cell is here because it is the
-	// same position from the other side: a composite offered to a column that
-	// already has a declaration.
+	// The APPEND half, and it is a refusal about the VALUE rather than the
+	// type: `INSERT INTO numfold SELECT id, GREATEST(n_i64, n_f32, n_f64,
+	// '1e39') FROM numfold` offers a composite declared FLOAT64 to `n_i32`,
+	// which is INT32. The pair ASSIGNS — a query-sourced write converts every
+	// cell through the engine's one assignment converter, as PostgreSQL's
+	// assignment cast does — and 1e39 is then a number an integer column
+	// cannot hold: 22003. PostgreSQL 17.11 answers `integer out of range` for
+	// the identical shape (measured).
+	//
+	// The cell is here because it is this position from the other side: a
+	// composite offered to a column that already HAS a declaration, where the
+	// CREATE half declares from the composite itself.
 	appendSQL := "INSERT INTO " + nfTable + " SELECT id, GREATEST(n_i64, n_f32, n_f64, '1e39') FROM " + nfTable
 	if _, err := tmdRunSingle(ctx, writer, appendSQL); err == nil {
-		t.Errorf("%q was accepted; a FLOAT64 composite into an INT32 column is 42804", appendSQL)
-	} else if sqlerr.StateOf(err) != "42804" {
-		t.Errorf("%q refused %s: %v; want 42804", appendSQL, sqlerr.StateOf(err), err)
+		t.Errorf("%q was accepted; 1e39 does not fit an INT32 column", appendSQL)
+	} else if sqlerr.StateOf(err) != "22003" {
+		t.Errorf("%q refused %s: %v; want 22003", appendSQL, sqlerr.StateOf(err), err)
 	}
 }
 
