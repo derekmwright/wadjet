@@ -951,7 +951,24 @@ func (b *binder) registerCTE(ctx context.Context, cte *plansql.CTEDef) error {
 		if err != nil {
 			return nil // The parser/planner owns an unparseable body.
 		}
-		return b.validateBlock(ctx, body, nil)
+		if err := b.validateBlock(ctx, body, nil); err != nil {
+			return err
+		}
+		// A COLUMN-ALIAS LIST IS ARITY-CHECKED HERE TOO. A recursive item's
+		// list renames the leading columns exactly as a non-recursive one's
+		// does (plansql.OverlayColumnAliases, ADR-0021 §1p), and PostgreSQL
+		// 17.11 refuses a list LONGER than the body publishes with the same
+		// sentence for both: `WITH RECURSIVE r(w,x,y) AS (SELECT 1 AS a, 2 AS
+		// b UNION ALL ...) SELECT r.w FROM r` is 42P10 there and answered one
+		// row of NULL here.
+		if len(cte.Columns) > 0 {
+			if names, known := b.blockColumns(ctx, body); known && len(cte.Columns) > len(names) {
+				return sqlerr.New("42P10",
+					"WITH query %q has %d columns available but %d columns specified",
+					cte.Name, len(names), len(cte.Columns))
+			}
+		}
+		return nil
 	}
 	body, perr := cte.BodySelect()
 	if perr != nil || body == nil {
