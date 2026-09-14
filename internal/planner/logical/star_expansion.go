@@ -271,6 +271,23 @@ func relationOutputColumns(n *Node, alias string) []StarColumn {
 			// ORDER BY product) x`.
 			if proj := blockOutputProjection(cur); proj != nil {
 				found = starColumnsWithout(projectionOutputNames(proj), hidden)
+				return
+			}
+			// A RECURSIVE CTE REFERENCE IS A NAMED BLOCK WITH NO PROJECTION
+			// UNDER IT: it is a tagged Scan the physical planner resolves from
+			// its own cache (ADR-0021 §1b, §1o), so blockOutputProjection
+			// finds nothing and the star stayed unexpanded — `SELECT r.* FROM
+			// r` was refused where PostgreSQL 17.11 answers, and where the
+			// BARE star over the same relation already answered. The list it
+			// publishes is recorded on the reference itself (§1p,
+			// recursiveCTEColumns), and the star is one more consumer of it.
+			// The list still comes from publishedScanColumns and nowhere else,
+			// which asks the security barrier first
+			// (TestOnlyOnePathReadsAScanColumnListForAStar).
+			if cur.Type == NodeScan {
+				if cols := publishedScanColumns(cur, barrier); len(cols) > 0 {
+					found = starColumnsWithout(cols, hidden)
+				}
 			}
 			return
 		}
