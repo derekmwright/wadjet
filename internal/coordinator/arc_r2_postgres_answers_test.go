@@ -15,6 +15,20 @@ package coordinator
 // with no entry: the table is the claim, and a position nobody measured is
 // not one.
 var r2Want = map[string]string{
+	"emptybuild/selfjoin/ctl-inner/list":           "cols=[id:INT64 k:INT64] rows=4 | 1,1 | 1,1 | 2,2 | 2,2",
+	"emptybuild/selfjoin/full/list":                "cols=[id:INT64 k:INT64] rows=5 | 1,1 | 1,1 | 2,2 | 2,2 | 3,NULL",
+	"emptybuild/selfjoin/left/list":                "cols=[id:INT64 k:INT64] rows=5 | 1,1 | 1,1 | 2,2 | 2,2 | 3,NULL",
+	"emptybuild/selfjoin/right/list":               "cols=[id:INT64 k:INT64] rows=5 | 1,1 | 1,1 | 2,2 | 2,2 | 3,NULL",
+	"emptybuild/setop/ctl-inner/list":              "cols=[id:INT64 k:INT64 c:STRING] rows=1 | 1,1,Alice",
+	"emptybuild/setop/full/distinct":               "cols=[id:INT64 k:INT64] rows=3 | 1,1 | 2,NULL | 3,NULL",
+	"emptybuild/setop/full/list":                   "cols=[id:INT64 k:INT64 c:STRING] rows=3 | 1,1,Alice | 2,NULL,NULL | 3,NULL,NULL",
+	"emptybuild/setop/full/star":                   "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 c:STRING] rows=3 | 1,Alice,150,1,Alice | 2,Bob,200,NULL,NULL | 3,Carol,0,NULL,NULL",
+	"emptybuild/setop/left/distinct":               "cols=[id:INT64 k:INT64] rows=3 | 1,1 | 2,NULL | 3,NULL",
+	"emptybuild/setop/left/list":                   "cols=[id:INT64 k:INT64 c:STRING] rows=3 | 1,1,Alice | 2,NULL,NULL | 3,NULL,NULL",
+	"emptybuild/setop/left/star":                   "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 c:STRING] rows=3 | 1,Alice,150,1,Alice | 2,Bob,200,NULL,NULL | 3,Carol,0,NULL,NULL",
+	"emptybuild/setop/right/distinct":              "cols=[id:INT64 k:INT64] rows=3 | 1,1 | 2,NULL | 3,NULL",
+	"emptybuild/setop/right/list":                  "cols=[id:INT64 k:INT64 c:STRING] rows=3 | 1,1,Alice | 2,NULL,NULL | 3,NULL,NULL",
+	"emptybuild/setop/right/star":                  "cols=[k:INT64 c:STRING id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,Alice,1,Alice,150 | NULL,NULL,2,Bob,200 | NULL,NULL,3,Carol,0",
 	"except-collide/both/distinct":                 "cols=[id:INT64 customer:STRING id:INT64] rows=2 | 1,Alice,1 | 2,Bob,2",
 	"except-collide/both/group":                    "cols=[id:INT64 n:INT64] rows=2 | 1,1 | 2,1",
 	"except-collide/both/list":                     "cols=[id:INT64 customer:STRING id:INT64 customer:STRING] rows=2 | 1,Alice,1,Alice | 2,Bob,2,Bob",

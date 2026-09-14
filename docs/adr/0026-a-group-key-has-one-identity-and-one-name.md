@@ -2487,6 +2487,23 @@ spelling the arm's stream really carries.**
    was written. The first two are the declaration's own; the third is settled
    over the finished graph, qualifier only, for the sides that flag reaches.
 
+   **Item 5 has two residues of its own, both measured, both refusal-only.**
+   The declaration describes the stream where this layer can derive it from
+   the logical plan, and two producers put a relation there that no walk of
+   that plan states. A SET OPERATION whose arms are FILTERED empties one
+   shuffle partition of the operation's own output and not another, and the
+   stage's files then disagree about a column's NAME (`names column 1 "s.id"
+   where an earlier file … named it "k"`), about the WIDTH of a star, or the
+   DISTINCT spelling's GROUP BY key resolves against an input that no longer
+   carries it — nine cells, every distributed arm. And a block whose body is a
+   CO-PATHING SELF-JOIN under an outer join is qualified on BOTH of its joins
+   by that same late pass, so the declaration is one column narrower than the
+   file its siblings write — two cells, on `dag` and `dag-morsel4`, where
+   `dag-shuffled` now agrees. Every one is loud at the shuffle, never a value,
+   and identical at base: they are recorded per arm in
+   `coordinator.arc_r2_pins_test.go`'s `r2Refuse`, and a cell that starts
+   ANSWERING fails the gate.
+
 **The residue is the NESTED GROUPED arm, and it is two cells.** An aggregate
 publishes a relation of its own — its keys and outputs, under the names IT
 decided — so an arm whose SELECT list the aggregate absorption MATERIALIZED is
@@ -2505,7 +2522,7 @@ between them: no list is materialized there, and marking such an arm anyway
 trades one wrong answer for another. They are pinned per arm in
 `coordinator.arc_r2_pins_test.go` with that mechanism.
 
-Gate: `coordinator.TestR2AJoinArmIsKeyedAndNamedTheSameOnEveryArm` — 501 cells,
+Gate: `coordinator.TestR2AJoinArmIsKeyedAndNamedTheSameOnEveryArm` — 515 cells,
 {a plain derived block, the four set operations, join-bodied, grouped, grouped
 with an aggregate aliased like the key's source, nested renamed, nested renamed
 over a grouped inner block, a block carrying its own sort key, the same with a

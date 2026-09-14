@@ -60,3 +60,89 @@ var r2Pin = map[string]map[string]string{
 		"dag-morsel4":  "cols=[id:INT64 customer:STRING id:INT64 customer:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
 	},
 }
+
+// r2Refuse is the second half of the residue: a cell an arm REFUSES, recorded
+// per arm with the STABLE part of the message, because the text carries a
+// query id and a file name that differ on every run.
+//
+// A refusal is a disposition and not a value: the query is right, the
+// single-process arms and PostgreSQL 17.11 answer it, and the distributed arms
+// say — loudly, at the shuffle — that one stage's files do not describe one
+// relation (ADR-0010). Both shapes below are IDENTICAL at base `2d819c95`, so
+// neither is this arc's doing; they are here because ADR-0026 §8i item 5
+// states a rule and these are the two shapes measured not to honour it, and a
+// rule with an unmeasured neighbour is how a class hides (arc R2 round 2's
+// closure review, N2 and N3).
+//
+// A cell that starts ANSWERING fails the gate: it then needs PostgreSQL's
+// answer, not a refusal.
+var r2Refuse = map[string]map[string]string{
+	// N2 — A SET OPERATION whose arms are FILTERED, so one shuffle partition
+	// of the operation's own output is empty and another is not. The stage's
+	// files then disagree about a column's NAME, about the WIDTH of a star,
+	// and the DISTINCT spelling's GROUP BY key resolves against an input that
+	// no longer carries it. The 36-cell outer dimension carries a set-op arm
+	// too, but only with a FULL build, so the empty-partition condition is
+	// never reached there.
+	"emptybuild/setop/left/list": {
+		"dag":          `names column 1 "s.id" where an earlier file of the same stage input named it "k"`,
+		"dag-shuffled": `names column 1 "s.id" where an earlier file of the same stage input named it "k"`,
+		"dag-morsel4":  `names column 1 "s.id" where an earlier file of the same stage input named it "k"`,
+	},
+	"emptybuild/setop/full/list": {
+		"dag":          `names column 1 "s.id" where an earlier file of the same stage input named it "k"`,
+		"dag-shuffled": `names column 1 "s.id" where an earlier file of the same stage input named it "k"`,
+		"dag-morsel4":  `names column 1 "s.id" where an earlier file of the same stage input named it "k"`,
+	},
+	"emptybuild/setop/right/list": {
+		"dag":          `names column 0 "id" where an earlier file of the same stage input named it "k"`,
+		"dag-shuffled": `names column 0 "id" where an earlier file of the same stage input named it "k"`,
+		"dag-morsel4":  `names column 0 "id" where an earlier file of the same stage input named it "k"`,
+	},
+	"emptybuild/setop/left/star": {
+		"dag":          "declares 9 columns where an earlier file of the same stage input declared 5",
+		"dag-shuffled": "declares 9 columns where an earlier file of the same stage input declared 5",
+		"dag-morsel4":  "declares 9 columns where an earlier file of the same stage input declared 5",
+	},
+	"emptybuild/setop/right/star": {
+		"dag":          "declares 9 columns where an earlier file of the same stage input declared 5",
+		"dag-shuffled": "declares 9 columns where an earlier file of the same stage input declared 5",
+		"dag-morsel4":  "declares 9 columns where an earlier file of the same stage input declared 5",
+	},
+	"emptybuild/setop/full/star": {
+		"dag":          "declares 9 columns where an earlier file of the same stage input declared 5",
+		"dag-shuffled": "declares 9 columns where an earlier file of the same stage input declared 5",
+		"dag-morsel4":  "declares 9 columns where an earlier file of the same stage input declared 5",
+	},
+	"emptybuild/setop/left/distinct": {
+		"dag":          `GROUP BY key "s.k" is not a column of its input`,
+		"dag-shuffled": `GROUP BY key "s.k" is not a column of its input`,
+		"dag-morsel4":  `GROUP BY key "s.k" is not a column of its input`,
+	},
+	"emptybuild/setop/right/distinct": {
+		"dag":          `GROUP BY key "s.k" is not a column of its input`,
+		"dag-shuffled": `GROUP BY key "s.k" is not a column of its input`,
+		"dag-morsel4":  `GROUP BY key "s.k" is not a column of its input`,
+	},
+	"emptybuild/setop/full/distinct": {
+		"dag":          `GROUP BY key "s.k" is not a column of its input`,
+		"dag-shuffled": `GROUP BY key "s.k" is not a column of its input`,
+		"dag-morsel4":  `GROUP BY key "s.k" is not a column of its input`,
+	},
+
+	// N3 — a block whose body is a CO-PATHING SELF-JOIN under an outer join:
+	// `markCoPathingSelfJoinBuilds` qualifies every build column of BOTH
+	// joins, over the finished stage list, and the declared side schema is
+	// then one column narrower than the file its siblings write. The
+	// dag-shuffled arm answers PostgreSQL's rows — round 2 improved it there
+	// and did not close it — and the RIGHT spelling, where the block is the
+	// preserved side, answers on every arm.
+	"emptybuild/selfjoin/left/list": {
+		"dag":         "declares 5 columns where an earlier file of the same stage input declared 4",
+		"dag-morsel4": "declares 5 columns where an earlier file of the same stage input declared 4",
+	},
+	"emptybuild/selfjoin/full/list": {
+		"dag":         "declares 5 columns where an earlier file of the same stage input declared 4",
+		"dag-morsel4": "declares 5 columns where an earlier file of the same stage input declared 4",
+	},
+}

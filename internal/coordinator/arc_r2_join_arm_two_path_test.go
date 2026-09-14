@@ -53,6 +53,22 @@ func TestR2AJoinArmIsKeyedAndNamedTheSameOnEveryArm(t *testing.T) {
 				} else if tc.sorted {
 					got = o2SortRender(got)
 				}
+				// A REFUSAL is a recorded disposition, not a value: the stable
+				// part of the message is asserted and the query id and file
+				// name in it are not. A cell that starts ANSWERING fails —
+				// it then needs PostgreSQL's answer, not a refusal.
+				if refusal, has := r2Refuse[tc.name][arm.name]; has {
+					if !strings.HasPrefix(got, "ERR:") {
+						t.Errorf("%s arm ANSWERED where this cell is a recorded REFUSAL: %s\n"+
+							"  the refusal is the disposition; a shape that starts answering "+
+							"needs PostgreSQL's answer beside it\n  SQL: %s",
+							arm.name, got, tc.sql)
+					} else if !strings.Contains(got, refusal) {
+						t.Errorf("%s arm refused for a different reason than the recorded one:\n"+
+							"  %s\n  recorded %q\n  SQL: %s", arm.name, got, refusal, tc.sql)
+					}
+					continue
+				}
 				armWant := want
 				pinned := false
 				if p, has := r2Pin[tc.name][arm.name]; has {
@@ -142,6 +158,14 @@ func TestR2EveryCellHasAMeasuredAnswer(t *testing.T) {
 	for name := range r2Pin {
 		if !inTable[name] {
 			t.Errorf("pin %q names no cell of the table", name)
+		}
+	}
+	for name := range r2Refuse {
+		if !inTable[name] {
+			t.Errorf("recorded refusal %q names no cell of the table", name)
+		}
+		if _, both := r2Pin[name]; both {
+			t.Errorf("cell %q is both pinned and recorded as a refusal", name)
 		}
 	}
 }

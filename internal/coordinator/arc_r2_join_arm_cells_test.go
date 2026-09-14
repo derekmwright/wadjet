@@ -244,6 +244,73 @@ func r2Consumers() []r2Consumer {
 	}
 }
 
+// r2EmptyBuildCells are the two shapes §8i item 5's rule does not reach, each
+// measured on five arms and recorded as what it IS rather than as what the
+// rule says (arc R2 round 2's closure review, N2 and N3).
+//
+// The declaration describes the stream only where this layer can derive it
+// from the logical plan. Two producers put a relation into the stream that no
+// walk of that plan states:
+//
+//   - a SET OPERATION whose arms are FILTERED, so one shuffle partition of the
+//     operation's own output is empty while another is not. The stage's files
+//     then disagree about a column's NAME (`names column 1 "s.id" where an
+//     earlier file of the same stage input named it "k"`), about the WIDTH of
+//     a star, or the GROUP BY key of the DISTINCT spelling resolves against an
+//     input that no longer carries it. The 36-cell outer dimension carries a
+//     set-op arm, but only with a FULL build, so the empty-partition condition
+//     is never reached there — which is why these nine cells exist.
+//   - a block whose body is a CO-PATHING SELF-JOIN under a FULL join, where
+//     `markCoPathingSelfJoinBuilds` qualifies every build column of BOTH
+//     joins and the declaration is one column narrower than the file.
+//
+// Every one of them is a loud REFUSAL on the arms that diverge — never a
+// value — and every one is identical at base `2d819c95`. They are recorded per
+// arm in `r2Refuse` with the stable part of the message, because the text
+// carries a query id and a file name that differ on every run.
+func r2EmptyBuildCells() []r2Cell {
+	setop := "(SELECT o2.id AS k, o2.customer AS c FROM lat_ord o2 WHERE o2.id = 1 " +
+		"UNION SELECT o2.id AS k, o2.customer AS c FROM lat_ord o2 WHERE o2.id = 1)"
+	selfjoin := "(SELECT a.order_id AS k, b.product AS c FROM lat_item a " +
+		"JOIN lat_item b ON a.id = b.id)"
+	kinds := []struct{ key, from string }{
+		{"left", "lat_ord o LEFT JOIN %s s ON s.k = o.id"},
+		{"right", "%s s RIGHT JOIN lat_ord o ON s.k = o.id"},
+		{"full", "lat_ord o FULL JOIN %s s ON s.k = o.id"},
+	}
+	consumers := []struct{ key, sel string }{
+		{"list", "SELECT o.id, s.k, s.c FROM "},
+		{"star", "SELECT * FROM "},
+		{"distinct", "SELECT DISTINCT o.id, s.k FROM "},
+	}
+	var out []r2Cell
+	for _, kind := range kinds {
+		for _, c := range consumers {
+			out = append(out, r2Cell{
+				name:   "emptybuild/setop/" + kind.key + "/" + c.key,
+				sql:    c.sel + fmt.Sprintf(kind.from, setop),
+				sorted: true,
+			})
+		}
+	}
+	for _, kind := range kinds {
+		out = append(out, r2Cell{
+			name:   "emptybuild/selfjoin/" + kind.key + "/list",
+			sql:    "SELECT o.id, s.k FROM " + fmt.Sprintf(kind.from, selfjoin),
+			sorted: true,
+		})
+	}
+	// The INNER control for each body: the same arm under a join that asks no
+	// task to shape a row its data did not produce.
+	out = append(out,
+		r2Cell{name: "emptybuild/setop/ctl-inner/list", sorted: true,
+			sql: "SELECT o.id, s.k, s.c FROM lat_ord o JOIN " + setop + " s ON s.k = o.id"},
+		r2Cell{name: "emptybuild/selfjoin/ctl-inner/list", sorted: true,
+			sql: "SELECT o.id, s.k FROM lat_ord o JOIN " + selfjoin + " s ON s.k = o.id"})
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out
+}
+
 // r2Cell is one position in the table.
 type r2Cell struct {
 	name   string
@@ -267,6 +334,7 @@ func r2Table() []r2Cell {
 		}
 	}
 	out = append(out, r2OuterCells()...)
+	out = append(out, r2EmptyBuildCells()...)
 	return append(out, r2IssueCells()...)
 }
 
