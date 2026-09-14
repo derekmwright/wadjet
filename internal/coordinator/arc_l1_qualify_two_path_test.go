@@ -118,13 +118,13 @@ var l1QualifyRefuses = map[string]string{
 
 // l1QualifyPins holds a cell whose divergence is a DIFFERENT defect, with the
 // measurement that localises it. A pin that starts agreeing FAILS.
-var l1QualifyPins = map[string]string{
-	// A window PARTITION BY naming a join arm's column binds the arm the
-	// reorderer emitted BARE, so every row lands in its own partition and
-	// `ROW_NUMBER() = 1` admits all four. It reproduces with no QUALIFY
-	// (TestArcL1AWindowKeyBindsItsOwnJoinArm) and the fix belongs there.
-	"overJoin": "rows=4 1,1 | 1,2 | 2,3 | 2,4",
-}
+//
+// EMPTY: `overJoin` was pinned here — a window PARTITION BY naming a join
+// arm's column bound the other arm's column of that bare name, so
+// `ROW_NUMBER() = 1` admitted every row. It reproduced with no QUALIFY in the
+// query and is closed where it lived, in the window key resolver
+// (TestArcL1AWindowKeyBindsItsOwnJoinArm).
+var l1QualifyPins = map[string]string{}
 
 func TestArcL1QualifyAnswersDuckDBOnEveryArm(t *testing.T) {
 	if testing.Short() {

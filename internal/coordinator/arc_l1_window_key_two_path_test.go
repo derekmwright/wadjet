@@ -1,0 +1,137 @@
+package coordinator
+
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+// A WINDOW KEY BINDS ITS OWN JOIN ARM — #1028, on FIVE ARMS.
+//
+// `PARTITION BY o.id` over `lat_ord o JOIN lat_item i` reached the operator
+// as the BARE `id`, because `bindWindowColRef` falls back to the bare name
+// when the qualified spelling is not in the input's type map — and a map keyed
+// by name folds two arms' `id` into one entry. The join emits one arm's
+// duplicate bare and the other's qualified, so the key bound whichever arm the
+// reorderer put bare: every row landed in its own partition and the window
+// answered 1 where PostgreSQL 17.11 answers 2, on all five arms, in silence.
+// `ORDER BY o.id` and `SUM(o.total) OVER (PARTITION BY o.id)` are the same
+// fact through the window's other two positions.
+//
+// `PARTITION BY o.id + 0` — one character away, and an EXPRESSION, so it is
+// MATERIALIZED into a slot the projection below the window computes — was
+// already right, and that is what says the loss is in the NAME and not in the
+// operator. So a qualified reference the input cannot settle takes the same
+// route: `windowInputIsAJoin` asks the one question the type map cannot
+// answer, and the key is materialized rather than resolved by a name.
+//
+// #1028 was filed for the DERIVED-ALIAS spelling of this — a window argument
+// naming a computed alias published by one ARM — and that family answers on
+// all five arms at this arc's base (`derivedAlias*` below); it is gated here
+// because an unreproduced issue with no gate is one nobody re-checks. The
+// BASE-COLUMN spelling beside it did not, which is what this commit closes.
+//
+// ONE CELL IS PINNED. `orderOverArm` — `ORDER BY o.id` over the same join —
+// binds the same wrong arm, and the SAME repair does not close it: an ORDER BY
+// term carries its DESC flag on the OrderExpr and a materialized key does not,
+// so routing an ORDER BY term through materialization INVERTED the window's
+// direction for every window over a join (`orderDescOverJoin`,
+// `orderAscOverJoin`, `orderDescNoPartition`, right at base and wrong with
+// it). The materialization route's lost direction is the older defect and
+// closing it comes first; the three direction cells are here so the day it is
+// closed they say so.
+//
+// `windowUnderGroupKeySubset` is a third shape and a different mechanism: a
+// window partitioned on a SUBSET of the GROUP BY keys below it was REFUSED on
+// the three DAG arms by AssertExchangeConsistency, because EnsureDistribution
+// read the aggregate's distribution before its own exchange relabelled it.
+// Every want here is live PostgreSQL 17.11 over this package's lat_ord /
+// lat_item rows.
+
+func TestArcL1AWindowKeyBindsItsOwnJoinArm(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: five arms over the window-key table")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Minute)
+	t.Cleanup(cancel)
+	arms := r1Arms(t, ctx)
+	for _, tc := range []l1Case{
+		{"partOuterArm", "SELECT o.id AS a, i.id AS b, COUNT(*) OVER (PARTITION BY o.id) AS n FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ORDER BY a, b"},
+		{"partInnerArm", "SELECT o.id AS a, i.id AS b, COUNT(*) OVER (PARTITION BY i.id) AS n FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ORDER BY a, b"},
+		{"partArmsSwapped", "SELECT o.id AS a, i.id AS b, COUNT(*) OVER (PARTITION BY o.id) AS n FROM lat_item i JOIN lat_ord o ON i.order_id = o.id ORDER BY a, b"},
+		{"partUncontested", "SELECT o.id AS a, i.id AS b, COUNT(*) OVER (PARTITION BY o.customer) AS n FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ORDER BY a, b"},
+		{"partBothArms", "SELECT o.id AS a, i.id AS b, COUNT(*) OVER (PARTITION BY o.id, i.id) AS n FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ORDER BY a, b"},
+		{"partExpression", "SELECT o.id AS a, i.id AS b, COUNT(*) OVER (PARTITION BY o.id + 0) AS n FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ORDER BY a, b"},
+		{"argOverArm", "SELECT o.id AS a, i.id AS b, SUM(o.total) OVER (PARTITION BY o.id) AS n FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ORDER BY a, b"},
+		{"orderOverArm", "SELECT o.id AS a, i.id AS b, COUNT(*) OVER (ORDER BY o.id) AS n FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ORDER BY a, b"},
+		{"leftJoinArm", "SELECT o.id AS a, i.id AS b, COUNT(*) OVER (PARTITION BY o.id) AS n FROM lat_ord o LEFT JOIN lat_item i ON i.order_id = o.id ORDER BY a, b"},
+		{"threeWay", "SELECT o.id AS a, COUNT(*) OVER (PARTITION BY o.id) AS n FROM lat_ord o JOIN lat_item i ON i.order_id = o.id JOIN lat_item j ON j.order_id = o.id ORDER BY a, n"},
+		{"singleRelation", "SELECT p.id AS a, COUNT(*) OVER (PARTITION BY p.order_id) AS n FROM lat_item p ORDER BY a"},
+		{"derivedAliasArm", "SELECT SUM(x.v) OVER () AS s FROM (SELECT id, id * 2 AS v FROM lat_ord) x JOIN lat_ord y ON x.id = y.id ORDER BY s"},
+		{"derivedAliasPart", "SELECT SUM(y.total) OVER (PARTITION BY x.v) AS s FROM (SELECT id, id * 2 AS v FROM lat_ord) x JOIN lat_ord y ON x.id = y.id ORDER BY s"},
+		{"derivedAliasBuild", "SELECT SUM(y.total) OVER (PARTITION BY x.v) AS s FROM lat_ord y JOIN (SELECT id, id * 2 AS v FROM lat_ord) x ON x.id = y.id ORDER BY s"},
+		{"derivedAliasLeft", "SELECT SUM(y.total) OVER (PARTITION BY x.v) AS s FROM (SELECT id, id * 2 AS v FROM lat_ord) x LEFT JOIN lat_ord y ON x.id = y.id ORDER BY s"},
+		{"derivedAliasArg", "SELECT SUM(x.v * 2) OVER () AS s FROM (SELECT id, id * 2 AS v FROM lat_ord) x JOIN lat_ord y ON x.id = y.id ORDER BY s"},
+		{"derivedAliasNested", "SELECT SUM(x.v) OVER () + 1 AS s FROM (SELECT id, id * 2 AS v FROM lat_ord) x JOIN lat_ord y ON x.id = y.id ORDER BY s"},
+		{"windowUnderGroupKeySubset", "SELECT i.order_id AS g, i.product AS p, SUM(i.amount) AS m, ROW_NUMBER() OVER (PARTITION BY i.order_id ORDER BY i.product) AS rn FROM lat_item i GROUP BY i.order_id, i.product ORDER BY g, p"},
+		{"orderDescOverJoin", "SELECT o.id AS a, i.id AS b, ROW_NUMBER() OVER (PARTITION BY o.id ORDER BY i.amount DESC) AS rn FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ORDER BY a, b"},
+		{"orderAscOverJoin", "SELECT o.id AS a, i.id AS b, ROW_NUMBER() OVER (PARTITION BY o.id ORDER BY i.amount) AS rn FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ORDER BY a, b"},
+		{"orderDescNoPartition", "SELECT o.id AS a, i.id AS b, ROW_NUMBER() OVER (ORDER BY i.amount DESC) AS rn FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ORDER BY a, b"},
+	} {
+		want := l1WindowKeyPostgres[tc.name]
+		if want == "" {
+			t.Fatalf("%s: no PostgreSQL row set recorded", tc.name)
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				got := arm.run(tc.sql)
+				if pin, pinned := l1WindowKeyPins[tc.name]; pinned {
+					if got == want {
+						t.Errorf("%s\n  arm  %s\n  the pinned divergence is GONE and the cell "+
+							"answers PostgreSQL's %s: delete this cell's pin", tc.sql, arm.name, want)
+						continue
+					}
+					if got != pin {
+						t.Errorf("%s\n  arm  %s\n  got  %s\n  pinned %s (PostgreSQL answers %s)",
+							tc.sql, arm.name, got, pin, want)
+					}
+					continue
+				}
+				if got != want {
+					t.Errorf("%s\n  arm  %s\n  got  %s\n  want %s (PostgreSQL 17.11)",
+						tc.sql, arm.name, got, want)
+				}
+			}
+		})
+	}
+}
+
+// l1WindowKeyPins is the one residue, with the mechanism in the header above.
+// A pin that starts agreeing FAILS.
+var l1WindowKeyPins = map[string]string{
+	"orderOverArm": "rows=4 1,1,1 | 1,2,2 | 2,3,3 | 2,4,4",
+}
+
+var l1WindowKeyPostgres = map[string]string{
+	"partOuterArm":              "rows=4 1,1,2 | 1,2,2 | 2,3,2 | 2,4,2",
+	"partInnerArm":              "rows=4 1,1,1 | 1,2,1 | 2,3,1 | 2,4,1",
+	"partArmsSwapped":           "rows=4 1,1,2 | 1,2,2 | 2,3,2 | 2,4,2",
+	"partUncontested":           "rows=4 1,1,2 | 1,2,2 | 2,3,2 | 2,4,2",
+	"partBothArms":              "rows=4 1,1,1 | 1,2,1 | 2,3,1 | 2,4,1",
+	"partExpression":            "rows=4 1,1,2 | 1,2,2 | 2,3,2 | 2,4,2",
+	"argOverArm":                "rows=4 1,1,300 | 1,2,300 | 2,3,400 | 2,4,400",
+	"orderOverArm":              "rows=4 1,1,2 | 1,2,2 | 2,3,4 | 2,4,4",
+	"leftJoinArm":               "rows=5 1,1,2 | 1,2,2 | 2,3,2 | 2,4,2 | 3,NULL,1",
+	"threeWay":                  "rows=8 1,4 | 1,4 | 1,4 | 1,4 | 2,4 | 2,4 | 2,4 | 2,4",
+	"singleRelation":            "rows=4 1,2 | 2,2 | 3,2 | 4,2",
+	"derivedAliasArm":           "rows=3 12 | 12 | 12",
+	"derivedAliasPart":          "rows=3 0 | 150 | 200",
+	"derivedAliasBuild":         "rows=3 0 | 150 | 200",
+	"derivedAliasLeft":          "rows=3 0 | 150 | 200",
+	"derivedAliasArg":           "rows=3 24 | 24 | 24",
+	"derivedAliasNested":        "rows=3 13 | 13 | 13",
+	"windowUnderGroupKeySubset": "rows=4 1,Gadget,100,1 | 1,Widget,50,2 | 2,Doohickey,125,1 | 2,Widget,75,2",
+	"orderDescOverJoin":         "rows=4 1,1,2 | 1,2,1 | 2,3,2 | 2,4,1",
+	"orderAscOverJoin":          "rows=4 1,1,1 | 1,2,2 | 2,3,1 | 2,4,2",
+	"orderDescNoPartition":      "rows=4 1,1,4 | 1,2,2 | 2,3,3 | 2,4,1",
+}

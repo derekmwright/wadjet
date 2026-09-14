@@ -91,7 +91,7 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 	// aggregate's own output name, after which it is indistinguishable from
 	// `OVER (ORDER BY a)` where `a` is that aggregate's alias — and the two
 	// bind DIFFERENT columns (ADR-0026 §4, #968's own flag).
-	add := func(term string, namesAgg bool) {
+	add := func(term string, namesAgg, isPartition bool) {
 		term = strings.TrimSpace(term)
 		if term == "" {
 			return
@@ -156,11 +156,51 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 				// where the name is not contested: `exec.columnIndexFallback`
 				// tries the exact spelling, then the bare part, then a unique
 				// `.bare` suffix, so `x.w` still finds a lone `w`.
-				if bound, ok := bindWindowColRef(ref, colTypes); ok {
+				bound, ok := bindWindowColRef(ref, colTypes)
+				if ok && (!isPartition || strings.Contains(bound, ".") ||
+					!windowInputIsAJoin(child)) {
 					k.Name = bound
-				} else if ref.Column != "" {
-					k.Name = plansql.NormalizeIdentRef(ref.Table) + "." +
-						plansql.NormalizeIdentRef(ref.Column)
+					break
+				}
+				// THE INPUT IS A JOIN, AND A NAME IS NOT ENOUGH THERE.
+				// `inputColTypes` declines a join outright, so the bind above
+				// never runs for one, and keeping the qualified text hands the
+				// operator a name to RESOLVE: `exec.columnIndexFallback` tries
+				// the exact spelling, then the BARE one — and a join emits one
+				// arm's duplicate bare and the other's qualified, so
+				// `PARTITION BY o.id` over `lat_ord o JOIN lat_item i` bound
+				// `i.id`, made every row its own partition and answered 1
+				// where PostgreSQL 17.11 answers 2, on all five arms, in
+				// silence. `ORDER BY o.id` and `SUM(o.total) OVER (PARTITION
+				// BY o.id)` are the same fact through the other two positions.
+				//
+				// So the reference is MATERIALIZED instead, exactly as an
+				// expression key already is: the projection below the window
+				// evaluates `o.id` against the join's own output, where the
+				// qualifier means what the query wrote, and the window keys on
+				// the slot that holds it. `PARTITION BY o.id + 0` — one
+				// character away, and an expression — was already right for
+				// that reason, which is what says the loss is in the NAME and
+				// not in the operator.
+				//
+				// ONLY A `PARTITION BY` TERM TAKES THIS ROUTE, and the bound
+				// is measured: materializing an `ORDER BY` term INVERTS the
+				// window's direction — `ORDER BY i.amount DESC` over a join
+				// numbered the rows ascending, on the single-process arms,
+				// for every window over a join — because the `Desc` flag
+				// lives on the OrderExpr and the materialized key does not
+				// carry it. That is a defect of the materialization route
+				// itself and it is older than this hunk (an expression
+				// `ORDER BY` term already took it); it is recorded, not
+				// widened. `ORDER BY o.id` over a join therefore still binds
+				// the wrong arm and is pinned in
+				// TestArcL1AWindowKeyBindsItsOwnJoinArm.
+				//
+				// A reference whose arm the input CAN settle keeps the bound
+				// name and no slot: this arm is reached only where the bind
+				// declined.
+				if ref.Column != "" {
+					k.Expr, k.Text = ast, ast.String()
 				}
 			}
 		}
@@ -233,20 +273,20 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 				switch e := ast.(type) {
 				case *plansql.ColRef:
 					if fieldOf(colFields, e) != nil {
-						add(col, false)
+						add(col, false, false)
 					}
 				case *plansql.StarNode, *plansql.Lit, *plansql.IntervalLit:
 					// Nothing to compute.
 				default:
-					add(col, false)
+					add(col, false, false)
 				}
 			}
 		}
 		for _, pb := range we.PartitionBy {
-			add(pb, false)
+			add(pb, false, true)
 		}
 		for _, ob := range we.OrderBy {
-			add(ob.Column, ob.NamesAggregateOutput)
+			add(ob.Column, ob.NamesAggregateOutput, false)
 		}
 	}
 	return out
@@ -670,4 +710,29 @@ func validateWindowKeyExprs(stages []Stage, idx map[string]int, s Stage) error {
 		}
 	}
 	return nil
+}
+
+// windowInputIsAJoin reports whether the relation a window reads is a JOIN,
+// walking the same order- and cardinality-preserving nodes `inputColTypes`
+// walks and stopping where it stops.
+//
+// It is the one question `colTypes` cannot answer: a map keyed by name folds
+// two arms' `id` into one entry, so a bare-name bind over a join looks exactly
+// like a bare-name bind over a single relation and binds whichever arm the
+// reorderer emitted bare.
+func windowInputIsAJoin(n *logical.Node) bool {
+	for cur := n; cur != nil; {
+		switch cur.Type {
+		case logical.NodeJoin:
+			return true
+		case logical.NodeFilter, logical.NodeLimit, logical.NodeSort, logical.NodeDistinct:
+			if len(cur.Children) != 1 {
+				return false
+			}
+			cur = cur.Children[0]
+		default:
+			return false
+		}
+	}
+	return false
 }
