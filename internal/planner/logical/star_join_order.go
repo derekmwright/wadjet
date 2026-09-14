@@ -268,16 +268,23 @@ func joinPublishesBothArms(n *Node) bool {
 // the two `StarSourceColumns` already asks for a qualified star.
 func armRelationColumns(arm *Node) (string, []string) {
 	if name := blockRelationName(arm); name != "" {
-		if arm.Type == NodeProject {
-			return name, projectionOutputNames(arm)
+		if sel := blockOwnProjection(arm); sel != nil {
+			// EVERY ITEM MUST BE ADDRESSABLE BY THE NAME THE BLOCK PUBLISHES,
+			// because that is the only handle an expanded item has.
+			for _, pr := range VisibleProjections(sel.Projections) {
+				if !armItemIsAddressable(pr) {
+					return "", nil
+				}
+			}
+			return name, projectionOutputNames(sel)
 		}
 		// A block with no projection of its own is `SELECT *` over ONE
 		// relation, which is the case isStarOnly builds no Project for: its
 		// output IS that relation's, and StarSourceColumns answers for it
 		// under the bare-star rule. The pass-through descent is what tells
-		// that apart from every other elided shape — an aggregate, a set
-		// operation, a sorted or limited block — whose output is its own and
-		// not the scan's.
+		// that apart from every other elided shape — an aggregate whose own
+		// list was elided, a table function — whose output is its own and not
+		// the scan's.
 		if armRelationName(arm) == "" {
 			return "", nil
 		}
@@ -288,6 +295,95 @@ func armRelationColumns(arm *Node) (string, []string) {
 		return "", nil
 	}
 	return name, relationOutputColumns(arm, name)
+}
+
+// blockOwnProjection is the SELECT list a named block publishes, reached
+// through the nodes that publish their input's columns UNCHANGED, or nil when
+// the block has none this pass can read.
+//
+// A block's root is not always its projection. `(SELECT id, customer FROM t
+// ORDER BY id LIMIT 2) a` is a Limit over a Sort over the Project, and
+// `(SELECT DISTINCT order_id FROM t) a` a Distinct over it — none of those
+// renames a column or changes the width, so the block publishes the Project's
+// list and the star can state it. Stopping at the root instead made the star
+// read the JOIN's stream for every such block, which is the PLAN's order and
+// the PLAN's qualified side: the very divergence this file exists to close,
+// surviving one node above where it was looked for (round-2 review, P1).
+//
+// A SET OPERATION is NOT descended into, and the reason is measured: its
+// arms' columns reach the join under the SCAN's qualifier rather than the
+// block's — `(SELECT id FROM lat_ord UNION ALL SELECT id FROM lat_ord) a`
+// joined against `lat_item` publishes `lat_ord.id` on the three DAG arms — so
+// `a.id` binds the OTHER arm's `id` through the bare fallback and the column
+// carries the wrong VALUE. It publishes its leftmost arm's NAMES (PostgreSQL's
+// rule, which `plansql.BlockOutputColumns` and `projectOutputNamesBelow`
+// read), but a name the stream does not spell through this block is not an
+// address, which is `armItemIsAddressable`'s rule one level up.
+//
+// Everything else answers nil too: an Aggregate, a Window or a table function
+// publishes something this walk cannot state, and a block still carrying an
+// unexpanded star has no list at all.
+func blockOwnProjection(block *Node) *Node {
+	for n, hops := block, 0; n != nil && hops < 8; hops++ {
+		switch n.Type {
+		case NodeProject:
+			if HasStarProjection(n) || len(n.Projections) == 0 {
+				return nil
+			}
+			return n
+		case NodeSort, NodeLimit, NodeDistinct, NodeFilter:
+			if len(n.Children) != 1 {
+				return nil
+			}
+			n = n.Children[0]
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
+// armItemIsAddressable reports whether a block publishes this item under the
+// name its PRODUCER EMITS.
+//
+// An expanded star item is a qualified REFERENCE — `s.count` — and a reference
+// is resolved by NAME against the stream. Where the two names differ the
+// reference binds nothing, and an unresolvable reference falls to the STRING
+// default and reads NULL: `(SELECT order_id, COUNT(*) …)` publishes `count`
+// (PostgreSQL's FigureColname) while both engines emit the item under
+// `count(*)`, so a star over that arm answered NULL where the unexpanded star
+// answered 2 (round-2 review, B1). The same for `amount * 2` (`?column?` vs
+// `amount * 2`), a literal, and a CAST (`amount` vs `cast(amount as bigint)`).
+//
+// So the arm DECLINES, and the star keeps the answer it had: the plan's order
+// under the producer's own names, with the right VALUES. It is the same
+// disposition as the duplicate-name decline above and for the same reason — a
+// name that addresses the wrong column, or no column, is worse than a name
+// that is merely not PostgreSQL's.
+//
+// The item needs both names to be one name only while an item carries ONE
+// name. ADR-0026 §9 states the pair — resolve by the producer's spelling,
+// publish PostgreSQL's — and when a star item carries it this check goes away
+// rather than being widened.
+func armItemIsAddressable(pr Projection) bool {
+	published := pr.PublishedName
+	if published == "" {
+		published = pr.Alias
+	}
+	if published == "" {
+		published = pr.Column
+	}
+	// What the producer emits: the alias where the item has one, the column
+	// where it is a plain reference, and the expression's own text otherwise
+	// — `physical.buildProject`'s rule and the DAG's `ProjectExprSpec.Name`.
+	emitted := pr.Alias
+	if emitted == "" {
+		emitted = pr.Column
+	}
+	if emitted == "" {
+		emitted = strings.ToLower(strings.TrimSpace(pr.Expr))
+	}
+	return published != "" && strings.EqualFold(published, emitted)
 }
 
 // blockRelationName is the name a DERIVED TABLE or CTE reference is known by

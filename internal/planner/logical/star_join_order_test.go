@@ -86,6 +86,50 @@ func TestABareStarOverAJoinExpandsToTheFromClausesArms(t *testing.T) {
 			items: []string{"o.id AS id", "s.amt AS amt"},
 		},
 		{
+			// A BLOCK'S ROOT IS NOT ITS PROJECTION (round-2 review, P1): a
+			// Sort, a Limit, a Distinct and a Filter all pass their input's
+			// columns through unchanged, so the block publishes the Project
+			// below them.
+			name: "a block rooted at a LIMIT publishes its own projection",
+			plan: func() *Node {
+				block := NewLimit(NewSort(NewProject(armScan("lat_ord", "o", "id", "customer"),
+					[]Projection{
+						{Column: "o.id", Expr: "o.id", Alias: "id"},
+						{Column: "o.customer", Expr: "o.customer", Alias: "customer"},
+					}), []OrderExpr{{Column: "id"}}), 2, 0)
+				block.DerivedAlias = "a"
+				return NewProject(joinOf(t, block, armScan("lat_item", "i", "id")),
+					[]Projection{{Expr: "*"}})
+			},
+			items: []string{"a.id AS id", "a.customer AS customer", "i.id AS id"},
+		},
+		{
+			// The same unaliased-expression arm WITH an alias publishes: the
+			// two names are one name, which is the whole of the rule.
+			name: "an ALIASED expression in an arm publishes",
+			plan: func() *Node {
+				block := NewProject(armScan("lat_item", "i", "id", "amount"), []Projection{
+					{Column: "id", Expr: "id", Alias: "k", PublishedName: "k"},
+					{Expr: "amount * 2", Alias: "d", PublishedName: "d"},
+				})
+				block.DerivedAlias = "s"
+				return NewProject(joinOf(t, armScan("lat_ord", "o", "id"), block),
+					[]Projection{{Expr: "*"}})
+			},
+			items: []string{"o.id AS id", "s.k AS k", "s.d AS d"},
+		},
+		{
+			name: "a block rooted at a DISTINCT publishes its own projection",
+			plan: func() *Node {
+				block := NewDistinct(NewProject(armScan("lat_item", "i", "order_id"),
+					[]Projection{{Column: "i.order_id", Expr: "i.order_id", Alias: "order_id"}}))
+				block.DerivedAlias = "a"
+				return NewProject(joinOf(t, block, armScan("lat_ord", "o", "id")),
+					[]Projection{{Expr: "*"}})
+			},
+			items: []string{"a.order_id AS order_id", "o.id AS id"},
+		},
+		{
 			name: "a block with no projection of its own publishes its one relation",
 			plan: func() *Node {
 				block := armScan("lat_item", "lat_item", "id", "amount")
@@ -151,6 +195,51 @@ func TestABareStarOverAJoinDeclinesWhatItCannotState(t *testing.T) {
 			plan: func() *Node {
 				return NewProject(joinOf(t, armScan("lat_item", "", "id"),
 					armScan("lat_item", "", "id")),
+					[]Projection{{Expr: "*"}})
+			},
+		},
+		{
+			// AN ITEM WHOSE PUBLISHED NAME IS NOT ITS EMITTED SPELLING
+			// (round-2 review, B1): every expanded item is a reference
+			// resolved BY NAME, and `s.count` binds nothing where the
+			// producer emits `count(*)` — the column would read NULL under
+			// the STRING default. Declining keeps the value.
+			name: "an arm with an UNALIASED aggregate",
+			plan: func() *Node {
+				block := NewProject(armScan("lat_item", "i", "order_id"), []Projection{
+					{Column: "order_id", Expr: "order_id", Alias: "", PublishedName: "order_id"},
+					{Expr: "count(*)", IsAgg: true, PublishedName: "count"},
+				})
+				block.DerivedAlias = "s"
+				return NewProject(joinOf(t, armScan("lat_ord", "o", "id"), block),
+					[]Projection{{Expr: "*"}})
+			},
+		},
+		{
+			name: "an arm with an UNALIASED expression",
+			plan: func() *Node {
+				block := NewProject(armScan("lat_item", "i", "id", "amount"), []Projection{
+					{Column: "id", Expr: "id", Alias: "k", PublishedName: "k"},
+					{Expr: "amount * 2", PublishedName: "?column?"},
+				})
+				block.DerivedAlias = "s"
+				return NewProject(joinOf(t, armScan("lat_ord", "o", "id"), block),
+					[]Projection{{Expr: "*"}})
+			},
+		},
+		{
+			// A SET OPERATION's columns reach the join under the SCAN's
+			// qualifier rather than the block's, so the block's alias is not
+			// an address for them.
+			name: "an arm that is a set operation",
+			plan: func() *Node {
+				arm := func() *Node {
+					return NewProject(armScan("lat_ord", "lat_ord", "id"),
+						[]Projection{{Column: "id", Expr: "id", PublishedName: "id"}})
+				}
+				block := NewUnion(arm(), arm(), true)
+				block.DerivedAlias = "a"
+				return NewProject(joinOf(t, block, armScan("lat_item", "i", "id")),
 					[]Projection{{Expr: "*"}})
 			},
 		},
