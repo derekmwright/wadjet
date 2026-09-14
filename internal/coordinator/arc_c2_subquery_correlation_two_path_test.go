@@ -551,24 +551,24 @@ func c2Cells() []c2Cell {
 		{name: "69_a_fromless_subquery_as_an_IN_set",
 			sql:  `SELECT id FROM c2users u WHERE u.id IN (SELECT u.id) ORDER BY id`,
 			want: `id | 1 | 2 | 3`},
-		{name: "70_a_LATERAL_body_that_projects_an_outer_column_is_the_residual",
+		{name: "70_a_LATERAL_body_that_projects_an_outer_column_is_refused",
 			sql: `SELECT u.id, l.v FROM c2users u CROSS JOIN LATERAL ` +
 				`(SELECT u.id AS v FROM c2users x WHERE x.id=1) l ORDER BY 1`,
-			want: `id,v | 1,1 | 2,2 | 3,3`,
-			pin:  `id,v | 1,1 | 2,1 | 3,1`,
-			pinArms: map[string]string{
-				// The three DAG arms also publish the item under the inner
-				// expression's name rather than the lateral's alias — a
-				// second, separate defect in the same shape (round-2 review,
-				// N7), pinned here so this cell asserts what each arm does.
-				"dag":          `id,x.id | 1,1 | 2,1 | 3,1`,
-				"dag-shuffled": `id,x.id | 1,1 | 2,1 | 3,1`,
-				"dag-morsel4":  `id,x.id | 1,1 | 2,1 | 3,1`,
-			},
-			pinWhy: "a LATERAL is decorrelated into a JOIN, and a body that PROJECTS an outer " +
-				"column rather than joining on it has nothing for the lowering to respell — " +
-				"J1's territory (ADR-0021 §1h), unchanged by this arc and identical at " +
-				"bf99c56c"},
+			// PostgreSQL 17.11 answers `1,1 | 2,2 | 3,3`. This engine
+			// answered `1,1 | 2,1 | 3,1` on the single-process arms — the
+			// FIRST outer row's value repeated — and published the item under
+			// the inner expression's name on the three DAG arms. Both were
+			// SILENT, and both were the same fact: a LATERAL is decorrelated
+			// into a JOIN and the body is then planned over its own
+			// relations, where `u.id` is not a column, so an outer reference
+			// in the body's SELECT list resolves to the inner relation's
+			// column of that name.
+			//
+			// It is LOUD now (0A000, logical.lateral_outer_reference.go) and
+			// the pin is deleted. Answering it needs the body evaluated per
+			// outer row, or its outer-reading items computed ABOVE the join —
+			// ADR-0021's dependent-join layer.
+			wantErr: `LATERAL body's SELECT list reads "u.id" from the enclosing query`},
 		// --- AN ORDER BY TERM IS NEVER REWRITTEN INTO AN ORDINAL (round-2
 		// review, B1). PostgreSQL reads only an integer literal WRITTEN IN
 		// THE CLAUSE as a select-list position, never one a subquery

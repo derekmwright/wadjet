@@ -49,6 +49,39 @@ type l1Case struct{ name, sql string }
 
 func l1LateralCases() []l1Case {
 	return []l1Case{
+		// THE REFUSAL'S REACH — an outer reference in each clause of a
+		// correlated body other than its WHERE. Every one answered a SILENT
+		// wrong value before it (lateral_outer_reference.go's table); gated
+		// here because a fix's reach is a claim, and an ungated claim is one
+		// nobody re-checks.
+		{"OUTERREF/selectExpr", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT o.total + i.amount AS m FROM lat_item i WHERE i.order_id = o.id) s ON true ORDER BY a, m"},
+		{"OUTERREF/selectBare", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT o.id AS m FROM lat_item i WHERE i.order_id = o.id) s ON true ORDER BY a, m"},
+		{"OUTERREF/selectCase", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT CASE WHEN o.id > 1 THEN 1 ELSE 0 END AS m FROM lat_item i WHERE i.order_id = o.id) s ON true ORDER BY a, m"},
+		{"OUTERREF/groupBy", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT SUM(i.amount) AS m FROM lat_item i WHERE i.order_id = o.id GROUP BY o.id) s ON true ORDER BY a, m"},
+		{"OUTERREF/having", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT SUM(i.amount) AS m FROM lat_item i WHERE i.order_id = o.id HAVING SUM(i.amount) > o.total) s ON true ORDER BY a, m"},
+		{"OUTERREF/orderBy", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT i.amount AS m FROM lat_item i WHERE i.order_id = o.id ORDER BY i.amount * o.total LIMIT 1) s ON true ORDER BY a, m"},
+		{"OUTERREF/aggArg", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT SUM(i.amount + o.total) AS m FROM lat_item i WHERE i.order_id = o.id) s ON true ORDER BY a, m"},
+		// A LIFTED CORRELATED PREDICATE THAT IS NOT AN EQUALITY. It is
+		// evaluated over the body's OUTPUT, so the inner column it names has to
+		// be published there UNDER THAT NAME — `publishedSource` and
+		// `localInequality` are the two spellings where it is, and they answer
+		// PostgreSQL on all five arms. The rest are refused; before the
+		// refusal they answered ZERO rows on the single-process arms, three
+		// NULLs for the aggregated body, and a loud join failure on the DAG.
+		{"OUTERREF/whereInequality", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT i.amount AS m FROM lat_item i WHERE i.order_id = o.id AND i.amount < o.total) s ON true ORDER BY a, m"},
+		{"LIFTED/inequalityAlone", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT i.amount AS m FROM lat_item i WHERE i.amount < o.total) s ON true ORDER BY a, m"},
+		{"LIFTED/publishedSource", "SELECT o.id AS a, s.amount AS m FROM lat_ord o JOIN LATERAL (SELECT i.amount FROM lat_item i WHERE i.amount < o.total) s ON true ORDER BY a, m"},
+		{"LIFTED/localInequality", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT i.amount AS m FROM lat_item i WHERE i.order_id = o.id AND i.amount < 120) s ON true ORDER BY a, m"},
+		{"LIFTED/aggregated", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT SUM(i.amount) AS m FROM lat_item i WHERE i.amount < o.total) s ON true ORDER BY a, m"},
+		{"LIFTED/leftArm", "SELECT o.id AS a, s.m AS m FROM lat_ord o LEFT JOIN LATERAL (SELECT i.amount AS m FROM lat_item i WHERE i.amount < o.total) s ON true ORDER BY a, m"},
+		{"LIFTED/twoColumns", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT i.amount AS m, i.id AS k FROM lat_item i WHERE i.amount < o.total AND i.id > 1) s ON true ORDER BY a, m"},
+		{"LIFTED/exprBothSides", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT i.amount AS m FROM lat_item i WHERE i.amount * 2 < o.total) s ON true ORDER BY a, m"},
+
+		// CONTROL: a FROM-less body, which is a projection over the outer row
+		// (ADR-0021 s1n) and never reaches the decorrelation at all. The other
+		// control is `LAT/inner/where`: the outer reference in the WHERE
+		// EQUALITY the decorrelation reads, which still answers.
+		{"OUTERREF/fromlessControl", "SELECT o.id AS a, s.m AS m FROM lat_ord o, LATERAL (SELECT o.total AS m) s ORDER BY a, m"},
 		{"LAT/inner/where", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT i.amount AS m FROM lat_item i WHERE i.order_id = o.id) s ON true ORDER BY a, m"},
 		{"LAT/inner/selectlist", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT o.total + i.amount AS m FROM lat_item i WHERE i.order_id = o.id) s ON true ORDER BY a, m"},
 		{"LAT/inner/winarg", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT SUM(o.total) OVER () AS m FROM lat_item i WHERE i.order_id = o.id) s ON true ORDER BY a, m"},
@@ -226,12 +259,37 @@ const (
 	l1KeylessLeftJoin     = `could not extract join keys from`
 	l1KeylessLeftJoinDAG  = `no stage computes requires single-process execution`
 	l1KeylessLeftJoinTask = `LeftKeys and RightKeys required`
+	// An outer reference in a clause of a correlated body OTHER than its
+	// WHERE. The decorrelation carries the outer row into that clause and no
+	// other, so the reference bound the inner relation's column of the same
+	// name, or nothing (lateral_outer_reference.go).
+	l1OuterRefOutsideWhere = `from the enclosing query`
+	// A lifted correlated predicate that is not an equality, naming an inner
+	// column the body does not publish under that name
+	// (lateral_correlated_refs.go).
+	l1LiftedRefNotPublished = `is not an equality and reads`
 )
 
 // l1Postgres is PostgreSQL 17.11's answer for every cell, rendered by
 // r1RenderRows (a sorted ROW SET, so a legal ordering difference between arms
 // is never read as a wrong answer).
 var l1Postgres = map[string]string{
+	"OUTERREF/selectExpr":        "rows=4 1,200 | 1,250 | 2,275 | 2,325",
+	"OUTERREF/selectBare":        "rows=4 1,1 | 1,1 | 2,2 | 2,2",
+	"OUTERREF/selectCase":        "rows=4 1,0 | 1,0 | 2,1 | 2,1",
+	"OUTERREF/groupBy":           "rows=2 1,150 | 2,200",
+	"OUTERREF/having":            "rows=0 ",
+	"OUTERREF/orderBy":           "rows=2 1,50 | 2,75",
+	"OUTERREF/aggArg":            "rows=3 1,450 | 2,600 | 3,NULL",
+	"OUTERREF/fromlessControl":   "rows=3 1,150 | 2,200 | 3,0",
+	"OUTERREF/whereInequality":   "rows=4 1,100 | 1,50 | 2,125 | 2,75",
+	"LIFTED/inequalityAlone":     "rows=8 1,100 | 1,125 | 1,50 | 1,75 | 2,100 | 2,125 | 2,50 | 2,75",
+	"LIFTED/publishedSource":     "rows=8 1,100 | 1,125 | 1,50 | 1,75 | 2,100 | 2,125 | 2,50 | 2,75",
+	"LIFTED/localInequality":     "rows=3 1,100 | 1,50 | 2,75",
+	"LIFTED/aggregated":          "rows=3 1,350 | 2,350 | 3,NULL",
+	"LIFTED/leftArm":             "rows=9 1,100 | 1,125 | 1,50 | 1,75 | 2,100 | 2,125 | 2,50 | 2,75 | 3,NULL",
+	"LIFTED/twoColumns":          "rows=6 1,100 | 1,125 | 1,75 | 2,100 | 2,125 | 2,75",
+	"LIFTED/exprBothSides":       "rows=3 1,50 | 2,50 | 2,75",
 	"LAT/inner/where":            "rows=4 1,100 | 1,50 | 2,125 | 2,75",
 	"LAT/inner/selectlist":       "rows=4 1,200 | 1,250 | 2,275 | 2,325",
 	"LAT/inner/winarg":           "rows=4 1,300 | 1,300 | 2,400 | 2,400",
@@ -375,24 +433,40 @@ var l1Postgres = map[string]string{
 // l1RefusalPins names the refusal classes a cell's arms may raise. Every arm's
 // answer must contain one of them.
 var l1RefusalPins = map[string][]string{
+	"LAT/comma/selectlist":     {l1OuterRefOutsideWhere},
+	"LAT/inner/selectlist":     {l1OuterRefOutsideWhere},
+	"LAT/left/selectlist":      {l1OuterRefOutsideWhere},
+	"LIFTED/aggregated":        {l1LiftedRefNotPublished},
+	"LIFTED/exprBothSides":     {l1LiftedRefNotPublished},
+	"LIFTED/inequalityAlone":   {l1LiftedRefNotPublished},
+	"LIFTED/leftArm":           {l1LiftedRefNotPublished},
+	"LIFTED/twoColumns":        {l1LiftedRefNotPublished},
+	"OUTERREF/aggArg":          {l1OuterRefOutsideWhere},
+	"OUTERREF/groupBy":         {l1OuterRefOutsideWhere},
+	"OUTERREF/having":          {l1OuterRefOutsideWhere},
+	"OUTERREF/orderBy":         {l1OuterRefOutsideWhere},
+	"OUTERREF/selectBare":      {l1OuterRefOutsideWhere},
+	"OUTERREF/selectCase":      {l1OuterRefOutsideWhere},
+	"OUTERREF/selectExpr":      {l1OuterRefOutsideWhere},
+	"OUTERREF/whereInequality": {l1LiftedRefNotPublished},
 	"IN/noJoin/winsel":         {l1WindowInSubquery},
-	"LAT/comma/frame":          {l1WindowInLateral},
-	"LAT/comma/winarg":         {l1WindowInLateral},
-	"LAT/comma/winord":         {l1WindowInLateral},
-	"LAT/comma/winpart":        {l1WindowInLateral},
-	"LAT/inner/frame":          {l1WindowInLateral},
-	"LAT/inner/winarg":         {l1WindowInLateral},
-	"LAT/inner/winord":         {l1WindowInLateral},
-	"LAT/inner/winpart":        {l1WindowInLateral},
-	"LAT/joinInner/winarg":     {l1WindowInLateral},
-	"LAT/joinLeft/winarg":      {l1WindowInLateral},
+	"LAT/comma/frame":          {l1WindowInLateral, l1OuterRefOutsideWhere},
+	"LAT/comma/winarg":         {l1WindowInLateral, l1OuterRefOutsideWhere},
+	"LAT/comma/winord":         {l1WindowInLateral, l1OuterRefOutsideWhere},
+	"LAT/comma/winpart":        {l1WindowInLateral, l1OuterRefOutsideWhere},
+	"LAT/inner/frame":          {l1WindowInLateral, l1OuterRefOutsideWhere},
+	"LAT/inner/winarg":         {l1WindowInLateral, l1OuterRefOutsideWhere},
+	"LAT/inner/winord":         {l1WindowInLateral, l1OuterRefOutsideWhere},
+	"LAT/inner/winpart":        {l1WindowInLateral, l1OuterRefOutsideWhere},
+	"LAT/joinInner/winarg":     {l1WindowInLateral, l1OuterRefOutsideWhere},
+	"LAT/joinLeft/winarg":      {l1WindowInLateral, l1OuterRefOutsideWhere},
 	"LAT/left/cteUncorr":       {l1KeylessLeftJoin},
-	"LAT/left/frame":           {l1WindowInLateral},
+	"LAT/left/frame":           {l1WindowInLateral, l1OuterRefOutsideWhere},
 	"LAT/left/uncorr":          {l1KeylessLeftJoin},
 	"LAT/left/uncorrLimit":     {l1KeylessLeftJoin, l1KeylessLeftJoinTask},
-	"LAT/left/winarg":          {l1WindowInLateral},
-	"LAT/left/winord":          {l1WindowInLateral},
-	"LAT/left/winpart":         {l1WindowInLateral},
+	"LAT/left/winarg":          {l1WindowInLateral, l1OuterRefOutsideWhere},
+	"LAT/left/winord":          {l1WindowInLateral, l1OuterRefOutsideWhere},
+	"LAT/left/winpart":         {l1WindowInLateral, l1OuterRefOutsideWhere},
 	"LAT/star/agg":             {l1StarOrdinal},
 	"LAT/star/grouped":         {l1StarOrdinal},
 	"LAT/star/groupedLimit":    {l1StarOrdinal},
@@ -424,8 +498,6 @@ var l1RefusalPins = map[string][]string{
 var l1ValuePins = map[string]string{
 	"EXISTS/inner/winarg":  "rows=4 1,1 | 1,2 | 2,3 | 2,4",
 	"EXISTS/noJoin/winarg": "rows=2 1 | 2",
-	"LAT/comma/selectlist": "rows=4 1,NULL | 1,NULL | 2,NULL | 2,NULL",
-	"LAT/inner/selectlist": "rows=4 1,NULL | 1,NULL | 2,NULL | 2,NULL",
 	"LAT/left/selectlist":  "rows=5 1,NULL | 1,NULL | 2,NULL | 2,NULL | 3,NULL",
 }
 

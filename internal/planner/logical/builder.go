@@ -2043,6 +2043,15 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 		}
 	}
 
+	// AN OUTER REFERENCE OUTSIDE THE BODY'S `WHERE` IS REFUSED, because the
+	// decorrelation carries the outer row into that clause and no other
+	// (#1111's neighbour, lateral_outer_reference.go). Checked BEFORE the
+	// WHERE is rewritten and before any slot is injected, so what it reads is
+	// the body the query wrote.
+	if err := refuseLateralOuterReferenceOutsideWhere(subInfo, leftAliases); err != nil {
+		return nil, "", lateralEmptyInput{}, nil, err
+	}
+
 	// Rebuild the inner plan with only local WHERE predicates.
 	// Always clear WhereExpr — it's the AST for the original full WHERE and
 	// would conflict with the modified Where string.
@@ -2211,6 +2220,16 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 				respellKeyRefsToSlot(subInfo, innerCol, slot)
 			}
 		}
+		// A LIFTED predicate that is not an equality is evaluated over the
+		// body's OUTPUT, so every inner column it names has to be published
+		// there under that name. One that is not is REFUSED, with the two
+		// repairs that were measured and rejected written down
+		// (lateral_correlated_refs.go).
+		if err := refuseUnpublishedLiftedRefs(subInfo, correlatedParts,
+			leftAliases, aggregates); err != nil {
+			return nil, "", lateralEmptyInput{}, nil, err
+		}
+
 		// The marker a padded row is recognised by: the name the lateral
 		// PUBLISHES its correlation key under — the slot where one was
 		// minted, the list's own name otherwise. The join keys on it, so it
