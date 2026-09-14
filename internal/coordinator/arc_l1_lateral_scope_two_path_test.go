@@ -61,6 +61,19 @@ func l1LateralCases() []l1Case {
 		{"OUTERREF/having", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT SUM(i.amount) AS m FROM lat_item i WHERE i.order_id = o.id HAVING SUM(i.amount) > o.total) s ON true ORDER BY a, m"},
 		{"OUTERREF/orderBy", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT i.amount AS m FROM lat_item i WHERE i.order_id = o.id ORDER BY i.amount * o.total LIMIT 1) s ON true ORDER BY a, m"},
 		{"OUTERREF/aggArg", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT SUM(i.amount + o.total) AS m FROM lat_item i WHERE i.order_id = o.id) s ON true ORDER BY a, m"},
+		// AN UNCORRELATED LATERAL PUBLISHING A NAME THE ENCLOSING RELATION
+		// ALSO CARRIES — #1111's shape without its CTE, which was never the
+		// mechanism. `collidingName` answered the OUTER row's own `total` on
+		// ALL FIVE arms before the alias stamp; the stamp closes the two
+		// single-process arms and the three DAG arms still bind the outer
+		// column, so it is pinned PER ARM with PostgreSQL's answer beside it.
+		// `nonCollidingName` beside it is the discriminator: the same body
+		// under an alias the outer relation does not carry was right before
+		// and after.
+		{"UNCORRLAT/collidingName", "SELECT o.id AS a, t.total AS m FROM lat_ord o, LATERAL (SELECT SUM(i.amount) AS total FROM lat_item i) t ORDER BY a"},
+		{"UNCORRLAT/nonCollidingName", "SELECT o.id AS a, t.tot AS m FROM lat_ord o, LATERAL (SELECT SUM(i.amount) AS tot FROM lat_item i) t ORDER BY a"},
+		{"UNCORRLAT/issue1111", "SELECT t.dx AS v FROM setopdecja a, LATERAL (WITH c AS (SELECT dx FROM setopdecjb) SELECT SUM(dx) AS dx FROM c) t"},
+
 		// A LIFTED CORRELATED PREDICATE THAT IS NOT AN EQUALITY. It is
 		// evaluated over the body's OUTPUT, so the inner column it names has to
 		// be published there UNDER THAT NAME — `publishedSource` and
@@ -274,6 +287,9 @@ const (
 // r1RenderRows (a sorted ROW SET, so a legal ordering difference between arms
 // is never read as a wrong answer).
 var l1Postgres = map[string]string{
+	"UNCORRLAT/collidingName":    "rows=3 1,350 | 2,350 | 3,350",
+	"UNCORRLAT/nonCollidingName": "rows=3 1,350 | 2,350 | 3,350",
+	"UNCORRLAT/issue1111":        "rows=4 51.0000 | 51.0000 | 51.0000 | 51.0000",
 	"OUTERREF/selectExpr":        "rows=4 1,200 | 1,250 | 2,275 | 2,325",
 	"OUTERREF/selectBare":        "rows=4 1,1 | 1,1 | 2,2 | 2,2",
 	"OUTERREF/selectCase":        "rows=4 1,0 | 1,0 | 2,1 | 2,1",
@@ -499,6 +515,16 @@ var l1RefusalPins = map[string][]string{
 // function in a WHERE clause is an ERROR in PostgreSQL ("window functions are
 // not allowed in WHERE") and this engine evaluates it. Recorded here rather
 // than in a refusal list because the cell's disposition is a ROW SET.
+// l1ArmPins is a divergence that is NOT the same on every arm, so it is
+// recorded per arm. A pin that starts agreeing FAILS.
+var l1ArmPins = map[string]map[string]string{
+	"UNCORRLAT/collidingName": {
+		"dag":          "rows=3 1,150 | 2,200 | 3,0",
+		"dag-shuffled": "rows=3 1,150 | 2,200 | 3,0",
+		"dag-morsel4":  "rows=3 1,150 | 2,200 | 3,0",
+	},
+}
+
 var l1ValuePins = map[string]string{
 	"EXISTS/inner/winarg":  "rows=4 1,1 | 1,2 | 2,3 | 2,4",
 	"EXISTS/noJoin/winarg": "rows=2 1 | 2",
@@ -536,6 +562,20 @@ func TestArcL1LateralAndWindowScopeAnswersPostgresOnEveryArm(t *testing.T) {
 							tc.sql, arm.name, got, classes, want)
 					}
 					continue
+				}
+				if arms, pinned := l1ArmPins[tc.name]; pinned {
+					if pin, has := arms[arm.name]; has {
+						if got == want {
+							t.Errorf("%s\n  arm  %s\n  the pinned divergence is GONE and the arm "+
+								"answers PostgreSQL's %s: delete this arm's pin", tc.sql, arm.name, want)
+							continue
+						}
+						if got != pin {
+							t.Errorf("%s\n  arm  %s\n  got  %s\n  pinned %s (PostgreSQL answers %s)",
+								tc.sql, arm.name, got, pin, want)
+						}
+						continue
+					}
 				}
 				if pin, pinned := l1ValuePins[tc.name]; pinned {
 					if got == want {
