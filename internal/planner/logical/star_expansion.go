@@ -219,6 +219,16 @@ func relationOutputColumns(n *Node, alias string) []StarColumn {
 			// subtree root, so that is where the name is looked for; the
 			// scan's own columns are never the answer here, because what this
 			// relation publishes is the body's SELECT list.
+			if cur.LateralBoundNotPerRow {
+				// A body whose own bound the decorrelation cannot apply per
+				// outer row is not a relation this pass can state: the
+				// columns are knowable but the ROW COUNT is not the one the
+				// query wrote (#1019, Node.LateralBoundNotPerRow). The star
+				// stays unexpanded and the query is refused, which is the
+				// disposition this spelling had before the reach fix reached
+				// it; the named spellings keep theirs, pinned.
+				return
+			}
 			if subtreeScanAnswersTo(cur, alias) {
 				if proj := blockOutputProjection(cur); proj != nil {
 					found = starColumnsWithout(projectionOutputNames(proj), hidden)
