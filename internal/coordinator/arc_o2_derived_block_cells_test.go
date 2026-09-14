@@ -299,6 +299,7 @@ func o2Table() []o2Cell {
 	}
 	out = append(out, o2OutputSlotCells()...)
 	out = append(out, o2SetOpCells()...)
+	out = append(out, o2CombiningClassCells()...)
 	out = append(out, o2NestedCells()...)
 	out = append(out, o2DupNameCells()...)
 	return append(out, o2IssueCells()...)
@@ -355,6 +356,52 @@ func o2SetOpCells() []o2Cell {
 			sql: "SELECT * FROM (SELECT order_id, product FROM lat_item) x " +
 				"UNION ALL SELECT id, customer FROM lat_ord"},
 	)
+}
+
+// o2CombiningClassCells is the rest of the relation-COMBINING class: the joins
+// the DECORRELATION builds rather than the ones a query writes. `IN`, `NOT IN`,
+// `EXISTS` and a correlated scalar subquery each construct a `NodeJoin`
+// LITERALLY and fill its probe child in afterwards, so a rule that lived in the
+// four constructors never saw them and a sorted block under any of them still
+// published `__sortkey_0` on five arms and in `RowDescription` (#1080).
+//
+// There is no fifth binary node TYPE — that part of round 2's claim held — but
+// a type is not a door. Every wiring goes through `setCombinedChild` now, and
+// `logical.TestEveryRelationCombiningSideIsWiredThroughOneDoor` walks built
+// plans for a side that still carries a materialized key.
+func o2CombiningClassCells() []o2Cell {
+	const blk = "SELECT order_id, product FROM lat_item ORDER BY amount LIMIT 3"
+	const plain = "SELECT order_id, product FROM lat_item"
+	pred := []struct{ key, sql string }{
+		{"in", "x.order_id IN (SELECT id FROM lat_ord)"},
+		{"exists", "EXISTS (SELECT 1 FROM lat_ord o WHERE o.id = x.order_id)"},
+		{"not-in", "x.order_id NOT IN (SELECT id FROM lat_ord WHERE id > 2)"},
+		{"not-exists", "NOT EXISTS (SELECT 1 FROM lat_ord o WHERE o.id = x.order_id AND o.id > 2)"},
+		{"stacked", "x.order_id IN (SELECT id FROM lat_ord) AND " +
+			"EXISTS (SELECT 1 FROM lat_ord o WHERE o.id = x.order_id)"},
+	}
+	var out []o2Cell
+	for _, p := range pred {
+		out = append(out,
+			o2Cell{name: "class/" + p.key + "/over-a-sorted-block", sorted: true,
+				sql: "SELECT * FROM (" + blk + ") x WHERE " + p.sql},
+			o2Cell{name: "class/" + p.key + "/over-a-sorted-block-qstar", sorted: true,
+				sql: "SELECT x.* FROM (" + blk + ") x WHERE " + p.sql},
+			// The CONTROL for each: the same predicate over a block that
+			// materialized NOTHING, which was right throughout.
+			o2Cell{name: "class/" + p.key + "/ctl-plain-block", sorted: true,
+				sql: "SELECT * FROM (" + plain + ") x WHERE " + p.sql},
+			// …and the decorrelated join with ANOTHER combining operator
+			// above it, which is where the leak reached a second consumer.
+			// The block is written FIRST for the reason the `joined` class
+			// gives: `SELECT *` publishes the FROM order and wadjet publishes
+			// the BUILD side first, which is arc O1's lane (#997).
+			o2Cell{name: "class/" + p.key + "/then-join", sorted: true,
+				sql: "SELECT * FROM (SELECT * FROM (" + blk + ") x WHERE " + p.sql +
+					") y JOIN lat_ord o ON o.id = y.order_id"},
+		)
+	}
+	return out
 }
 
 // o2NestedCells is the depth the first cut of this table did not cross: a

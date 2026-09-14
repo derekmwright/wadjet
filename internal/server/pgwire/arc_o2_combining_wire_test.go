@@ -9,21 +9,24 @@ import (
 )
 
 // WHAT THE WIRE DECLARES when the consumer above a derived block that
-// materialized its own ORDER BY key is a SET OPERATION rather than a JOIN.
+// materialized its own ORDER BY key is a relation-combining operator OTHER
+// than a written join: a SET OPERATION, or the semi/anti join a decorrelated
+// `IN` / `NOT IN` / `EXISTS` builds.
 //
 // #991 made the block publish its visible list to a JOIN and ADR-0026 §9 gave
 // the reason as a rule — "a JOIN is the one consumer that reads a side's
 // STREAM" — which was false: a set-operation arm reads the same stream, so
 // `__sortkey_0` reached `RowDescription` here for every operation and for the
 // CTE spelling (#1075). A relation-COMBINING operator builds its output from
-// its sides' streams, and `NewUnion`, `NewIntersect` and `NewExcept` are the
-// rest of that class.
+// its sides' streams — and the class is every WIRING of such a node, not the
+// four constructors: three of these shapes build a `NodeJoin` literally and
+// fill its probe child in afterwards (#1080).
 //
 // The door matters: this is the single-process server, where the leak was
 // silent. On the distributed arms the same statement was REFUSED, because the
 // extra column made the two arms disagree on count — which the coordinator's
 // own `setop/*` cells hold.
-func TestArcO2TheWireUnderASetOperation(t *testing.T) {
+func TestArcO2TheWireUnderACombiningOperator(t *testing.T) {
 	srv := setupJ1LateralDB(t)
 	const block = `SELECT order_id, product FROM j1item ORDER BY amount LIMIT 3`
 	for _, c := range []struct {
@@ -54,6 +57,30 @@ func TestArcO2TheWireUnderASetOperation(t *testing.T) {
 		{"ctl_join_over_a_sorted_block",
 			`SELECT * FROM j1ord o JOIN (` + block + `) s ON s.order_id = o.id`,
 			[]string{"id", "customer", "total", "order_id", "product"}},
+		// THE REST OF THE CLASS: the joins the DECORRELATION builds. `IN`,
+		// `NOT IN` and `EXISTS` each construct a `NodeJoin` LITERALLY and fill
+		// its probe child in afterwards, so a rule that lived in the four
+		// constructors never saw them and the block's sort key reached this
+		// door under every one of them (#1080).
+		{"in_over_a_sorted_block",
+			`SELECT * FROM (` + block + `) x WHERE x.order_id IN (SELECT id FROM j1ord)`,
+			[]string{"order_id", "product"}},
+		{"exists_over_a_sorted_block",
+			`SELECT * FROM (` + block + `) x ` +
+				`WHERE EXISTS (SELECT 1 FROM j1ord o WHERE o.id = x.order_id)`,
+			[]string{"order_id", "product"}},
+		{"not_in_over_a_sorted_block",
+			`SELECT * FROM (` + block + `) x ` +
+				`WHERE x.order_id NOT IN (SELECT id FROM j1ord WHERE id > 2)`,
+			[]string{"order_id", "product"}},
+		{"not_exists_over_a_sorted_block",
+			`SELECT * FROM (` + block + `) x ` +
+				`WHERE NOT EXISTS (SELECT 1 FROM j1ord o WHERE o.id = x.order_id AND o.id > 2)`,
+			[]string{"order_id", "product"}},
+		{"in_and_exists_stacked_over_a_sorted_block",
+			`SELECT * FROM (` + block + `) x WHERE x.order_id IN (SELECT id FROM j1ord) ` +
+				`AND EXISTS (SELECT 1 FROM j1ord o WHERE o.id = x.order_id)`,
+			[]string{"order_id", "product"}},
 		// The CONTROL from the other side: a set operation over a block that
 		// materialized NOTHING is untouched by the re-projection.
 		{"ctl_setop_over_an_unsorted_block",
