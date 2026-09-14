@@ -86,7 +86,12 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 	for name := range colTypes {
 		keyAlloc.Seed(name)
 	}
-	add := func(term string) {
+	// namesAgg says the term names an AGGREGATE CALL rather than a column the
+	// query wrote: the builder re-spells `OVER (ORDER BY SUM(x.b))` to the
+	// aggregate's own output name, after which it is indistinguishable from
+	// `OVER (ORDER BY a)` where `a` is that aggregate's alias — and the two
+	// bind DIFFERENT columns (ADR-0026 §4, #968's own flag).
+	add := func(term string, namesAgg bool) {
 		term = strings.TrimSpace(term)
 		if term == "" {
 			return
@@ -114,6 +119,25 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 				// (#603, #568's rule).
 				k.Expr, k.Text = ast, ast.String()
 				k.Field = fieldOf(colFields, ref)
+			case ref.Table == "":
+				// A BARE reference inside a WINDOW specification names an
+				// INPUT column: PostgreSQL does not make the select list's
+				// output aliases visible there, so `SELECT SUM(x.b) AS a …
+				// GROUP BY x.a, RANK() OVER (ORDER BY a)` ranks by the KEY
+				// and not by the sum (measured on 17.11). Over an aggregate
+				// the window's input IS the aggregate's output batch, where a
+				// group key is published under whatever spelling the
+				// aggregate chose — and it chooses the QUALIFIED one when an
+				// aggregate output already owns the bare name (#1078). Taking
+				// the bare name at its word then bound the aggregate's column.
+				//
+				// Only a GROUP KEY is rebound. A bare name that no key
+				// answers to is left exactly as it was.
+				if !namesAgg {
+					if pub, ok := windowKeyPublishedGroupKey(child, ref.Column); ok {
+						k.Name = pub
+					}
+				}
 			case ref.Table != "":
 				// A QUALIFIED reference KEEPS its qualifier where the input's
 				// column set cannot settle it. Dropping to the bare name is
@@ -209,20 +233,20 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 				switch e := ast.(type) {
 				case *plansql.ColRef:
 					if fieldOf(colFields, e) != nil {
-						add(col)
+						add(col, false)
 					}
 				case *plansql.StarNode, *plansql.Lit, *plansql.IntervalLit:
 					// Nothing to compute.
 				default:
-					add(col)
+					add(col, false)
 				}
 			}
 		}
 		for _, pb := range we.PartitionBy {
-			add(pb)
+			add(pb, false)
 		}
 		for _, ob := range we.OrderBy {
-			add(ob.Column)
+			add(ob.Column, ob.NamesAggregateOutput)
 		}
 	}
 	return out
@@ -336,6 +360,36 @@ func aggregateUnderWindow(n *logical.Node) *logical.Node {
 		}
 	}
 	return nil
+}
+
+// windowKeyPublishedGroupKey is the name the aggregate under a window
+// PUBLISHES for the group key a BARE reference names, when exactly one key
+// answers to that bare form under a different spelling.
+//
+// It consults the group keys ONLY. An aggregate's own output column is a
+// column of the same batch, but PostgreSQL resolves a bare name inside a
+// window specification against the query's INPUT, so binding one here would be
+// a second divergence rather than a repair.
+func windowKeyPublishedGroupKey(child *logical.Node, col string) (string, bool) {
+	agg := aggregateUnderWindow(child)
+	if agg == nil || col == "" || len(agg.GroupBy) == 0 {
+		return "", false
+	}
+	published, resolve := stageGroupKeyNames(agg, aggInput(agg))
+	emitted := stageEmittedKeyNames(published, resolve, logicalAggOutNames(agg))
+	match, count := "", 0
+	for i, g := range agg.GroupBy {
+		if i >= len(emitted) {
+			break
+		}
+		if strings.EqualFold(blockBareName(g), col) {
+			match, count = emitted[i], count+1
+		}
+	}
+	if count != 1 || match == "" || strings.EqualFold(match, col) {
+		return "", false
+	}
+	return match, true
 }
 
 // bindWindowColRef reports the input column a window key's column reference

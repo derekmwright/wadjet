@@ -211,33 +211,24 @@ func TestArcK1AnOutputSlotHasOneIdentity(t *testing.T) {
 		// derived table. The census in REPORT counts these cells, not the
 		// rule's full extent.
 		{
-			name: "968 PINNED an outer GROUP BY over the collision",
+			name: "968 an outer GROUP BY over the collision",
 			sql: `SELECT t.a AS ta, COUNT(*) AS n FROM (SELECT x.a AS b, SUM(x.b) AS a ` +
 				`FROM decpair x GROUP BY x.a) t GROUP BY t.a ORDER BY ta`,
 			want: "cols=[ta:DECIMAL(38,4) n:INT64] rows=5 | -0.0100,1 | 0.0000,1 | " +
 				"1.0000,1 | 10.0000,1 | 38.2500,1",
-			pin: map[string]string{
-				"dag": "cols=[ta:DECIMAL(9,2) n:INT64] rows=5 | -0.01,1 | 0.00,1 | " +
-					"2.00,1 | 12.75,1 | NULL,1",
-				"dagshuf": "cols=[ta:DECIMAL(9,2) n:INT64] rows=5 | -0.01,1 | 0.00,1 | " +
-					"2.00,1 | 12.75,1 | NULL,1",
-			},
-			why: "a stage's GROUP BY key is a NAME with no slot: the outer aggregate reads " +
-				"`a` off a stream that publishes it twice and takes the first, the key — " +
-				"with the key's declared type on the wire",
+			why: "CLOSED by #1078: the aggregate below no longer publishes two columns " +
+				"called `a` at all — an aggregate OUTPUT occupies its name before a " +
+				"key's qualifier is stripped, so the outer GROUP BY's `a` names the sum " +
+				"and the two per-arm pins are deleted as the proof",
 		},
 		{
-			name: "968 PINNED the same at 5000 rows, through a real shuffle",
+			name: "968 the same at 5000 rows, through a real shuffle",
 			sql: `SELECT t.g AS tg, COUNT(*) AS n FROM (SELECT x.g AS b, SUM(x.c_i64) AS g ` +
 				`FROM typemx x GROUP BY x.g) t GROUP BY t.g ORDER BY tg LIMIT 3`,
 			want: "cols=[tg:DECIMAL(38,0) n:INT64] rows=3 | 929156787462,1 | " +
 				"1591177773519,1 | 1592105776303,1",
-			pin: map[string]string{
-				"dag":     "cols=[tg:INT32 n:INT64] rows=3 | 0,1 | 1,1 | 2,1",
-				"dagshuf": "cols=[tg:INT32 n:INT64] rows=3 | 0,1 | 1,1 | 2,1",
-			},
 			why: "same site as the cell above, with the partial→final re-aggregation and a " +
-				"shuffle between; the declared type moves with the value",
+				"shuffle between; CLOSED by #1078 and the two pins deleted with it",
 		},
 		{
 			name: "968 PINNED a CTE of the collision consumed twice in one join",
@@ -247,14 +238,18 @@ func TestArcK1AnOutputSlotHasOneIdentity(t *testing.T) {
 				"0.0000,0.00 | 10.0000,2.00 | 38.2500,12.75",
 			pin: map[string]string{
 				spilledArm: "ERR building physical plan: building hash table",
-				"dag": "cols=[a1:DECIMAL(9,2) b2:DECIMAL(9,2)] rows=4 | -0.01,-0.01 | " +
-					"0.00,0.00 | 2.00,2.00 | 12.75,12.75",
-				"dagshuf": "cols=[a1:DECIMAL(9,2) b2:DECIMAL(9,2)] rows=4 | -0.01,-0.01 | " +
-					"0.00,0.00 | 2.00,2.00 | 12.75,12.75",
+				"dag": "cols=[a1:DECIMAL(38,4) b2:DECIMAL(9,2)] rows=5 | -0.0100,-0.01 | " +
+					"0.0000,0.00 | 1.0000,NULL | 10.0000,2.00 | 38.2500,12.75",
+				"dagshuf": "cols=[a1:DECIMAL(38,4) b2:DECIMAL(9,2)] rows=5 | -0.0100,-0.01 | " +
+					"0.0000,0.00 | 1.0000,NULL | 10.0000,2.00 | 38.2500,12.75",
 			},
-			why: "a join stage's projection reads `g1.a` off the two exchanges of one " +
-				"aggregate and takes the first column of that name; the SPILLED arm's " +
-				"refusal is the 512 KiB budget on a self-join, identical at bb8635a4",
+			why: "#1078 moved this one from wrong VALUES to a wrong ROW COUNT and it is " +
+				"still pinned: the projection reads the aggregate's `a` now (the values " +
+				"are PostgreSQL's) but the join on the CTE's key matches its NULL to " +
+				"itself, so a FIFTH row arrives that PostgreSQL's `NULL = NULL` excludes. " +
+				"The control below with no shared name is right on every arm, which is " +
+				"what says the residue is the collision and not the join. The SPILLED " +
+				"arm's refusal is the 512 KiB budget on a self-join, identical at bb8635a4",
 		},
 		{
 			name: "968 ctl the same CTE consumed ONCE",
@@ -267,57 +262,36 @@ func TestArcK1AnOutputSlotHasOneIdentity(t *testing.T) {
 			},
 		},
 		{
-			name: "968 PINNED DISTINCT together with LIMIT",
+			name: "968 DISTINCT together with LIMIT",
 			sql: `SELECT DISTINCT x.a AS b, SUM(x.b) AS a FROM decpair x GROUP BY x.a ` +
 				`ORDER BY a LIMIT 3`,
 			want: cols + " rows=3 | -0.01,-0.0100 | 0.00,0.0000 | NULL,1.0000",
-			pin: map[string]string{
-				"dag":     cols + " rows=3 | -0.01,-0.0100 | 0.00,0.0000 | 2.00,10.0000",
-				"dagshuf": cols + " rows=3 | -0.01,-0.0100 | 0.00,0.0000 | 2.00,10.0000",
-			},
 			why: "the coordinator's post-gather DISTINCT and LIMIT run over the gathered " +
-				"rows by NAME; DISTINCT alone and LIMIT alone are right (both are cells " +
-				"above), and only the pair takes the top three in the KEY's order",
+				"rows by NAME, and the pair used to take the top three in the KEY's " +
+				"order; CLOSED by #1078 — there is no second column of that name to take",
 		},
 		{
-			name: "968 PINNED DISTINCT with LIMIT at 5000 rows",
+			name: "968 DISTINCT with LIMIT at 5000 rows",
 			sql: `SELECT DISTINCT x.g AS b, SUM(x.c_i64) AS g FROM typemx x GROUP BY x.g ` +
 				`ORDER BY g LIMIT 3`,
 			want: "cols=[b:INT32 g:DECIMAL(38,0)] rows=3 | NULL,929156787462 | " +
 				"3,1591177773519 | 2,1592105776303",
-			pin: map[string]string{
-				"dag": "cols=[b:INT32 g:DECIMAL(38,0)] rows=3 | 2,1592105776303 | " +
-					"0,1593407780209 | 1,1597875793613",
-				"dagshuf": "cols=[b:INT32 g:DECIMAL(38,0)] rows=3 | 2,1592105776303 | " +
-					"0,1593407780209 | 1,1597875793613",
-			},
-			why: "same site; a DIFFERENT ROW SET, because the LIMIT is taken in the key's " +
-				"order and the two smallest sums never reach the client",
+			why: "same site; the LIMIT used to be taken in the key's order and a DIFFERENT " +
+				"ROW SET reached the client. CLOSED by #1078, both pins deleted",
 		},
 		{
-			name: "968 PINNED a window ARGUMENT over the colliding aggregate",
+			name: "968 a window ARGUMENT over the colliding aggregate",
 			sql: `SELECT x.a AS b, SUM(x.b) AS a, SUM(SUM(x.b)) OVER () AS tot ` +
 				`FROM decpair x GROUP BY x.a ORDER BY a`,
-			want: "cols=[b:DECIMAL(9,2) a:DECIMAL(38,4) tot:DECIMAL(38,2)] rows=5 | " +
+			want: "cols=[b:DECIMAL(9,2) a:DECIMAL(38,4) tot:DECIMAL(38,4)] rows=5 | " +
 				"-0.01,-0.0100,49.2400 | 0.00,0.0000,49.2400 | NULL,1.0000,49.2400 | " +
 				"2.00,10.0000,49.2400 | 12.75,38.2500,49.2400",
-			pin: map[string]string{
-				"single": "cols=[b:DECIMAL(9,2) a:DECIMAL(38,4) tot:DECIMAL(38,2)] rows=5 | " +
-					"-0.01,-0.0100,14.74 | 0.00,0.0000,14.74 | NULL,1.0000,14.74 | " +
-					"2.00,10.0000,14.74 | 12.75,38.2500,14.74",
-				spilledArm: "cols=[b:DECIMAL(9,2) a:DECIMAL(38,4) tot:DECIMAL(38,2)] rows=5 | " +
-					"-0.01,-0.0100,14.74 | 0.00,0.0000,14.74 | NULL,1.0000,14.74 | " +
-					"2.00,10.0000,14.74 | 12.75,38.2500,14.74",
-				"dag": "cols=[b:DECIMAL(9,2) a:DECIMAL(38,4) tot:DECIMAL(38,2)] rows=5 | " +
-					"-0.01,-0.0100,14.74 | 0.00,0.0000,14.74 | NULL,1.0000,14.74 | " +
-					"2.00,10.0000,14.74 | 12.75,38.2500,14.74",
-				"dagshuf": "cols=[b:DECIMAL(9,2) a:DECIMAL(38,4) tot:DECIMAL(38,2)] rows=5 | " +
-					"-0.01,-0.0100,14.74 | 0.00,0.0000,14.74 | NULL,1.0000,14.74 | " +
-					"2.00,10.0000,14.74 | 12.75,38.2500,14.74",
-			},
-			why: "a window's ARGUMENT is a plain string on `exec.WindowColumn` with no slot " +
-				"to carry a position, so it binds the first column of the name and sums " +
-				"the KEYS: 14.74 for PostgreSQL's 49.2400, on all four arms",
+			why: "a window's ARGUMENT is a plain string on `exec.WindowColumn` with no " +
+				"slot to carry a position, so it bound the first column of the name and " +
+				"summed the KEYS: 14.74 for PostgreSQL's 49.2400, on ALL FOUR arms. " +
+				"CLOSED by #1078 — there is no first-of-two to bind — and the four pins " +
+				"are deleted as the proof. PostgreSQL declares the total `numeric`; this " +
+				"engine's 128-bit carrier states DECIMAL(38,4) (ADR-0024, ADR-0012)",
 		},
 		{
 			name: "968 PINNED a sort over a derived star of the collision",
@@ -346,23 +320,16 @@ func TestArcK1AnOutputSlotHasOneIdentity(t *testing.T) {
 			// The window beside it ranks correctly on all four arms, which is
 			// what says this is the deferred consumer and not the one round 2
 			// closed.
-			name: "968 PINNED two aggregates sharing the key's name, read on the DAG",
+			name: "968 two aggregates sharing the key's name, read on the DAG",
 			sql: `SELECT x.a AS b, SUM(x.b) AS a, MIN(x.b) AS a, ` +
 				`RANK() OVER (ORDER BY MIN(x.b)) AS rk FROM decpair x GROUP BY x.a ORDER BY 2`,
 			want: "cols=[b:DECIMAL(9,2) a:DECIMAL(38,4) a:DECIMAL(18,4) rk:INT64] rows=5 | " +
 				"-0.01,-0.0100,-0.0100,1 | 0.00,0.0000,0.0000,2 | NULL,1.0000,1.0000,3 | " +
 				"2.00,10.0000,10.0000,4 | 12.75,38.2500,12.7499,5",
-			pin: map[string]string{
-				"dag": "cols=[b:DECIMAL(9,2) a:DECIMAL(9,2) a:DECIMAL(38,4) rk:INT64] rows=5 | " +
-					"-0.01,-0.01,-0.0100,1 | 0.00,0.00,0.0000,2 | NULL,NULL,1.0000,3 | " +
-					"2.00,2.00,10.0000,4 | 12.75,12.75,38.2500,5",
-				"dagshuf": "cols=[b:DECIMAL(9,2) a:DECIMAL(9,2) a:DECIMAL(38,4) rk:INT64] rows=5 | " +
-					"-0.01,-0.01,-0.0100,1 | 0.00,0.00,0.0000,2 | NULL,NULL,1.0000,3 | " +
-					"2.00,2.00,10.0000,4 | 12.75,12.75,38.2500,5",
-			},
-			why: "the gather's rename pairing resolves each output name against the " +
-				"aggregate's stream and takes the first of THREE columns called `a`; the " +
-				"single-process projection hands out the two aggregate slots by class",
+			why: "the gather's rename pairing used to resolve each output name against " +
+				"the aggregate's stream and take the first of THREE columns called `a`; " +
+				"CLOSED by #1078 — the KEY is not one of the three any more, and the two " +
+				"aggregate slots are handed out by class on every arm",
 		},
 		{
 			// The collision read through a derived table by an EXPLICIT
@@ -371,21 +338,16 @@ func TestArcK1AnOutputSlotHasOneIdentity(t *testing.T) {
 			// now, because the projection over the aggregate binds by slot,
 			// and the DAG's derived-block consumer is the same name path as
 			// the cells above. `t.rk` beside it is right on every arm.
-			name: "968 PINNED the collision read through a derived table by name",
+			name: "968 the collision read through a derived table by name",
 			sql: `SELECT t.rk AS rk, t.a AS a FROM (SELECT x.a AS b, SUM(x.b) AS a, ` +
 				`RANK() OVER (ORDER BY SUM(x.b)) AS rk FROM decpair x GROUP BY x.a) t ` +
 				`ORDER BY rk`,
 			want: "cols=[rk:INT64 a:DECIMAL(38,4)] rows=5 | 1,-0.0100 | 2,0.0000 | " +
 				"3,1.0000 | 4,10.0000 | 5,38.2500",
-			pin: map[string]string{
-				"dag": "cols=[rk:INT64 a:DECIMAL(9,2)] rows=5 | 1,-0.01 | 2,0.00 | " +
-					"3,NULL | 4,2.00 | 5,12.75",
-				"dagshuf": "cols=[rk:INT64 a:DECIMAL(9,2)] rows=5 | 1,-0.01 | 2,0.00 | " +
-					"3,NULL | 4,2.00 | 5,12.75",
-			},
-			why: "a derived block's consumer reads `a` off the aggregate's stream, which " +
-				"publishes it twice, and takes the first; wrong on all four arms at " +
-				"bb8635a4 and right on the single-process arms now",
+			why: "a derived block's consumer read `a` off the aggregate's stream, which " +
+				"published it twice, and took the first; wrong on all four arms at " +
+				"bb8635a4, right on the single-process arms after arc K1, and CLOSED " +
+				"everywhere by #1078",
 		},
 	})
 }
