@@ -307,20 +307,47 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// applies the sort in-process rather than serializing the
 	// pre-sort output and letting a separate sort task pick it up.
 	stages = fuseSortIntoPredecessor(stages, p.WorkerCount)
-	var ensureErr error
-	stages, ensureErr = EnsureDistribution(stages, p.WorkerCount)
-	if ensureErr != nil {
-		return nil, fmt.Errorf("ensure distribution: %w", ensureErr)
+	// INSERT, RE-RESOLVE, REPEAT — the pass has to reach a FIXED POINT.
+	//
+	// EnsureDistribution reads each child's Distribution as it stands, and
+	// re-resolving comes after: a stage whose own input was just rewritten to
+	// an exchange output is relabelled by `assignStageDistributions` below,
+	// which can INVALIDATE a requirement already checked against its stale
+	// label. A window partitioned on a SUBSET of the group keys below it is
+	// the shape: the aggregate read as Singleton while its own exchange was
+	// being spliced in, satisfied `clustered_on[k]` trivially, and came out
+	// hash-partitioned on `[g, k]` — which does not, because two rows with
+	// the same `k` and different `g` land in different partitions. The plan
+	// was then REFUSED by AssertExchangeConsistency below, on all three DAG
+	// arms, for a query the single-process arms answer (#1019's grouped
+	// spelling, and `SELECT …, ROW_NUMBER() OVER (PARTITION BY k) … GROUP BY
+	// g, k` with no lateral in it at all).
+	//
+	// Repeating until nothing is inserted is the whole repair: a plan that
+	// was already consistent inserts nothing on the first pass and the second
+	// is a no-op, so no plan that used to be accepted moves. The bound is
+	// small and stated: each round strictly adds stages, and the loop stops
+	// the round it adds none.
+	for round := 0; ; round++ {
+		before := len(stages)
+		var ensureErr error
+		stages, ensureErr = EnsureDistribution(stages, p.WorkerCount)
+		if ensureErr != nil {
+			return nil, fmt.Errorf("ensure distribution: %w", ensureErr)
+		}
+		// Re-resolve distributions after EnsureDistribution: stages whose
+		// inputs got rewritten to exchange outputs need their Distribution
+		// recomputed against the new dep distributions. Without this, e.g.,
+		// a grouped final_aggregate whose dep was upgraded from Singleton
+		// to HashPartitioned (via an inserted exchange-repartition) would
+		// keep its initial Singleton label, and dispatchComputeStage would
+		// run it as one task instead of the N parallel tasks the exchange
+		// is feeding (Q18 SF10 OOM trigger).
+		assignStageDistributions(stages, p.WorkerCount)
+		if len(stages) == before || round >= maxEnsureDistributionRounds {
+			break
+		}
 	}
-	// Re-resolve distributions after EnsureDistribution: stages whose
-	// inputs got rewritten to exchange outputs need their Distribution
-	// recomputed against the new dep distributions. Without this, e.g.,
-	// a grouped final_aggregate whose dep was upgraded from Singleton
-	// to HashPartitioned (via an inserted exchange-repartition) would
-	// keep its initial Singleton label, and dispatchComputeStage would
-	// run it as one task instead of the N parallel tasks the exchange
-	// is feeding (Q18 SF10 OOM trigger).
-	assignStageDistributions(stages, p.WorkerCount)
 	// Drop identity re-shuffles (input already hash-partitioned on the
 	// exchange's exact keys/count — Q18's 40 GB repartition-15 at
 	// SF100). Must run after distributions are final; consumers keep

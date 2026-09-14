@@ -320,3 +320,14 @@ func keyTypesCacheKey(types []parquet.TypeID, n int) string {
 	}
 	return b.String()
 }
+
+// maxEnsureDistributionRounds bounds the insert/re-resolve fixed point in
+// BuildDistributed.
+//
+// Each round strictly adds stages and the loop stops the round it adds none,
+// so the bound is a guard against a requirement that cannot be satisfied
+// rather than a step count anyone should reach: two rounds settle every shape
+// measured, and a plan that was already consistent settles in one. Reaching it
+// leaves the plan as the last round left it, which AssertExchangeConsistency
+// then refuses by name.
+const maxEnsureDistributionRounds = 4

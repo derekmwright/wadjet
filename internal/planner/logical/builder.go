@@ -2221,6 +2221,15 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 		subInfo.Columns = append(injected, subInfo.Columns...)
 	}
 
+	// A BOUND THE DECORRELATION CANNOT APPLY PER OUTER ROW travels with the
+	// correlation key instead: the body's ORDER BY / LIMIT / OFFSET become a
+	// per-key `ROW_NUMBER()` and a QUALIFY over it (#1019,
+	// lateral_per_row_bound.go). Done HERE, after the key injection, because
+	// over an aggregated body the window reads what the AGGREGATE publishes
+	// the key under — which is what that loop just decided. Where it declines,
+	// the body keeps its bound and `lateralBoundIsNotPerOuterRow` marks it.
+	lateralBoundPerOuterRow(subInfo, correlatedParts, leftAliases, aggregates, keyRename)
+
 	if err := refuseDecorrelatedWindow(subInfo, correlatedParts, leftAliases); err != nil {
 		return nil, "", lateralEmptyInput{}, nil, err
 	}

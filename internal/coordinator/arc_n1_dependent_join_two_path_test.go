@@ -171,31 +171,31 @@ func TestN1ATwoGroupedLateralsPublishTheirOwnColumns(t *testing.T) {
 				"1,Alice,150,Gadget | 1,Alice,150,Widget | 2,Bob,200,Doohickey | 2,Bob,200,Widget",
 		},
 		{
-			// THE SAME WITH `LIMIT 1`, a wrong answer on every arm, DEFERRED
-			// with its mechanism. PostgreSQL evaluates a lateral per outer
-			// row, so its LIMIT bounds each one — two rows here, one per
-			// order. The decorrelation makes the lateral ONE relation joined
-			// once, so the LIMIT bounds the whole of it and a single row
-			// survives. Repairing it means the bound travelling with the
-			// correlation key (a per-key top-N), which is ADR-0021's territory
-			// and not a boundary this arc can move.
+			// THE SAME WITH `LIMIT 1`. PostgreSQL evaluates a lateral per
+			// outer row, so its LIMIT bounds EACH one — two rows here, one
+			// per order. The decorrelation made the lateral ONE relation
+			// joined once and the bound applied to the whole of it, so this
+			// answered a single row on every arm, silently, and was pinned
+			// here with PostgreSQL's answer written beside it.
 			//
-			// Arc O2 tried a plan-time REFUSAL here and took it out again,
-			// measured: the trigger was the bound's EXISTENCE, and whether a
-			// bound BINDS is a property of the data — `LIMIT 10` over this
-			// same body answers PostgreSQL's rows and was refused with it.
-			// Only the QUALIFIED star declines now, because a star publishes a
-			// relation whose row count this one does not have (#1019, #1079).
-			name: "1008 boundary: a grouped lateral's own LIMIT is not per outer row",
+			// #1019 closed it and the pin is DELETED as the proof: the bound
+			// travels with the correlation key as a per-key top-N —
+			// `ROW_NUMBER() OVER (PARTITION BY <key> ORDER BY <the body's own
+			// ORDER BY>)` and a QUALIFY over it, which is why #1076 is the
+			// commit before this one (logical.lateral_per_row_bound.go).
+			//
+			// Arc O2's plan-time REFUSAL of the same shape stays out, and
+			// that measurement still holds: the trigger was the bound's
+			// EXISTENCE, and whether a bound BINDS is a property of the data.
+			// The rewrite does not decide that question — it makes the bound
+			// mean what it says — so `LIMIT 10` over this body answers
+			// PostgreSQL's rows either way.
+			name: "1008 a grouped lateral's own LIMIT is per outer row",
 			sql: "SELECT * FROM lat_ord o " +
 				"JOIN LATERAL (SELECT i.product AS p FROM lat_item i WHERE i.order_id = o.id " +
 				"GROUP BY i.product ORDER BY i.product LIMIT 1) s ON true ORDER BY o.id, p",
-			want: "cols=[id:INT64 customer:STRING total:FLOAT64 p:STRING] rows=1 | " +
-				"2,Bob,200,Doohickey",
-			why: "PostgreSQL 17 answers TWO rows — 1,Alice,150,Gadget and " +
-				"2,Bob,200,Doohickey — because a lateral's LIMIT bounds each outer " +
-				"row's evaluation; the decorrelated form bounds the whole relation " +
-				"once. DEFERRED: the bound has to travel with the correlation key",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 p:STRING] rows=2 | " +
+				"1,Alice,150,Gadget | 2,Bob,200,Doohickey",
 		},
 		{
 			// CONTROL: an ordinary THREE-way inner join, the shape
