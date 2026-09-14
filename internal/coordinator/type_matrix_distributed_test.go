@@ -513,6 +513,7 @@ func tmdTables() []tmdTable {
 		{nvEdgeTable, nvEdgeSchema(), nvEdgeData()},
 		{nvRealTable, nvRealSchema(), nvRealData()},
 		{nvFoldTable, nvFoldSchema(), nvFoldData()},
+		{nvRetTable, nvRetSchema(), nvRetData()},
 	}, append(multikeyTables(), collideTables()...)...)
 }
 

@@ -33,6 +33,7 @@ func nvCells() []nvCell {
 		nvSpc = nvSpecTable
 		nvEdg = nvEdgeTable
 		nvRl  = nvRealTable
+		nvRet = nvRetTable
 	)
 	return []nvCell{
 		// ------------------------------------------------------------------
@@ -288,6 +289,109 @@ func nvCells() []nvCell {
 			sql: "SELECT SUM(d302) AS v FROM " + nvEdg + " WHERE id=1", want: "v=9007199254740993.25"},
 		{name: "control/through_a_computed_argument_as_well",
 			sql: "SELECT SUM(d302 * 1) AS v FROM " + nvEdg + " WHERE id=1", want: "v=9007199254740993.25"},
+
+		// ------------------------------------------------------------------
+		// REVIEW N1 — a MOVING frame is RECOMPUTED, at float8's width as well
+		// as float4's. PostgreSQL has no inverse transition for either float
+		// sum, so a frame whose lower end advanced is recomputed there;
+		// subtracting the departing row instead loses whatever the addition
+		// absorbed. Over 1e16, 1, 1 the one-preceding sum answered 1 where
+		// 17.11 answers 2, and its average 0.5 where 17.11 answers 1 — a
+		// wrong NUMBER, pre-existing at c34cdbcb, and the half this arc's
+		// first cut fixed was the real one only.
+		//
+		// Every `want` below is psql on 17.11 over these five rows. The REAL
+		// cells are here for the same reason the float8 ones are: one rule,
+		// two widths, and a fix to either alone would let them disagree.
+		{name: "N1/f8_sum_one_preceding",
+			sql: "SELECT id, SUM(f8) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS v FROM " +
+				nvRet + " ORDER BY id",
+			want: "id=1<i8>|v=1e+16<f8>;id=2<i8>|v=1e+16<f8>;id=3<i8>|v=2<f8>;" +
+				"id=4<i8>|v=1e+16<f8>;id=5<i8>|v=1.0000000000000002e+16<f8>",
+			why: "row 3 answered 1 before: 1e16 + 1 + 1 − 1e16 on a float8 carrier"},
+		{name: "N1/f8_avg_one_preceding",
+			sql: "SELECT id, AVG(f8) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS v FROM " +
+				nvRet + " ORDER BY id",
+			want: "id=1<i8>|v=1e+16<f8>;id=2<i8>|v=5e+15<f8>;id=3<i8>|v=1<f8>;" +
+				"id=4<i8>|v=5e+15<f8>;id=5<i8>|v=5.000000000000001e+15<f8>",
+			why: "row 3 answered 0.5"},
+		{name: "N1/f8_sum_two_preceding",
+			sql: "SELECT id, SUM(f8) OVER (ORDER BY id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS v FROM " +
+				nvRet + " ORDER BY id",
+			want: "id=1<i8>|v=1e+16<f8>;id=2<i8>|v=1e+16<f8>;id=3<i8>|v=1e+16<f8>;" +
+				"id=4<i8>|v=1.0000000000000002e+16<f8>;id=5<i8>|v=1.0000000000000002e+16<f8>",
+			why: "row 4 answered 1e+16 — a whole ulp of the total"},
+		{name: "N1/f8_sum_current_and_following",
+			sql: "SELECT id, SUM(f8) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS v FROM " +
+				nvRet + " ORDER BY id",
+			want: "id=1<i8>|v=1e+16<f8>;id=2<i8>|v=2<f8>;id=3<i8>|v=1e+16<f8>;" +
+				"id=4<i8>|v=1.0000000000000002e+16<f8>;id=5<i8>|v=2<f8>",
+			why: "a FOLLOWING frame moves its lower end too"},
+		{name: "N1/f8_sum_preceding_and_following",
+			sql: "SELECT id, SUM(f8) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS v FROM " +
+				nvRet + " ORDER BY id",
+			want: "id=1<i8>|v=1e+16<f8>;id=2<i8>|v=1e+16<f8>;" +
+				"id=3<i8>|v=1.0000000000000002e+16<f8>;" +
+				"id=4<i8>|v=1.0000000000000002e+16<f8>;" +
+				"id=5<i8>|v=1.0000000000000002e+16<f8>"},
+		// A RANGE frame with a VALUE offset is refused by the parser, loudly
+		// and before this arc — so the frame form PostgreSQL answers
+		// `1e+16; 1e+16; 2; 1e+16; 1.0000000000000002e+16` for is not a wrong
+		// number here, it is a missing feature. The cell is a ratchet: the day
+		// the parser accepts it, this fails and gets the server's values.
+		{name: "N1/a_range_frame_with_an_offset_is_refused",
+			sql: "SELECT id, SUM(f8) OVER (ORDER BY id RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) AS v FROM " +
+				nvRet + " ORDER BY id",
+			wantState: "42601",
+			why: "psql answers 1e+16; 1e+16; 2; 1e+16; 1.0000000000000002e+16 — a " +
+				"feature this parser declines, not a value it gets wrong"},
+		{name: "N1/control_a_range_frame_without_an_offset_answers",
+			sql: "SELECT id, SUM(f8) OVER (ORDER BY id RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS v FROM " +
+				nvRet + " ORDER BY id",
+			want: "id=1<i8>|v=1e+16<f8>;id=2<i8>|v=1e+16<f8>;id=3<i8>|v=1e+16<f8>;" +
+				"id=4<i8>|v=2e+16<f8>;id=5<i8>|v=2e+16<f8>"},
+		{name: "N1/f8_sum_within_a_partition",
+			sql: "SELECT id, SUM(f8) OVER (PARTITION BY g ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS v FROM " +
+				nvRet + " ORDER BY id",
+			want: "id=1<i8>|v=1e+16<f8>;id=2<i8>|v=1e+16<f8>;id=3<i8>|v=2<f8>;" +
+				"id=4<i8>|v=1e+16<f8>;id=5<i8>|v=1.0000000000000002e+16<f8>"},
+		{name: "N1/f4_sum_one_preceding",
+			sql: "SELECT id, SUM(f4) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS v FROM " +
+				nvRet + " ORDER BY id",
+			want: "id=1<i8>|v=1e+07<f8>;id=2<i8>|v=1.0000001e+07<f8>;id=3<i8>|v=2<f8>;" +
+				"id=4<i8>|v=1.0000001e+07<f8>;id=5<i8>|v=1.0000002e+07<f8>",
+			why: "the half the arc's first cut already fixed; it must stay fixed"},
+		{name: "N1/f4_avg_one_preceding",
+			sql: "SELECT id, AVG(f4) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS v FROM " +
+				nvRet + " ORDER BY id",
+			want: "id=1<i8>|v=1e+07<f8>;id=2<i8>|v=5.0000005e+06<f8>;id=3<i8>|v=1<f8>;" +
+				"id=4<i8>|v=5.0000005e+06<f8>;id=5<i8>|v=5.000001e+06<f8>",
+			why: "psql: 10000000; 5000000.5; 1; 5000000.5; 5000001 — avg(real) totals " +
+				"at float8's width on both engines (#760), so the frame does not narrow"},
+		{name: "N1/f4_sum_preceding_and_following",
+			sql: "SELECT id, SUM(f4) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS v FROM " +
+				nvRet + " ORDER BY id",
+			want: "id=1<i8>|v=1.0000001e+07<f8>;id=2<i8>|v=1.0000002e+07<f8>;" +
+				"id=3<i8>|v=1.0000002e+07<f8>;id=4<i8>|v=1.0000003e+07<f8>;" +
+				"id=5<i8>|v=1.0000002e+07<f8>"},
+		// The CONTROLS: a frame whose lower end never moves is still the same
+		// running total in the same order, and the two aggregates that do not
+		// accumulate are untouched by the change.
+		{name: "N1/control_unbounded_preceding_is_a_running_total",
+			sql: "SELECT id, SUM(f8) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS v FROM " +
+				nvRet + " ORDER BY id",
+			want: "id=1<i8>|v=1e+16<f8>;id=2<i8>|v=1e+16<f8>;id=3<i8>|v=1e+16<f8>;" +
+				"id=4<i8>|v=2e+16<f8>;id=5<i8>|v=2e+16<f8>"},
+		{name: "N1/control_min_over_a_moving_frame",
+			sql: "SELECT id, MIN(f8) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS v FROM " +
+				nvRet + " ORDER BY id",
+			want: "id=1<i8>|v=1e+16<f8>;id=2<i8>|v=1<f8>;id=3<i8>|v=1<f8>;" +
+				"id=4<i8>|v=1<f8>;id=5<i8>|v=2<f8>"},
+		{name: "N1/control_count_over_a_moving_frame",
+			sql: "SELECT id, COUNT(f8) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS v FROM " +
+				nvRet + " ORDER BY id",
+			want: "id=1<i8>|v=1<i8>;id=2<i8>|v=2<i8>;id=3<i8>|v=2<i8>;" +
+				"id=4<i8>|v=2<i8>;id=5<i8>|v=2<i8>"},
 
 		// ------------------------------------------------------------------
 		// #712 and #764 — DEFERRED, re-measured here, and pinned so the

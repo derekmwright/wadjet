@@ -1851,12 +1851,12 @@ type float64FrameAcc struct {
 	// answer what the grouped one answers (#950), and the grouped one is
 	// float4pl since this arc.
 	//
-	// It also changes how the frame MOVES. PostgreSQL has no inverse
-	// transition for a float sum, so a frame whose lower end advances is
-	// recomputed there; retracting a float4 total instead accumulates
-	// rounding the server never has. So a real accumulator resets and refills
-	// rather than subtracting, which costs the frame's width on exactly the
-	// frames that move and nothing on the default one.
+	// It says nothing about how the frame MOVES: BOTH widths reset and refill
+	// a frame whose lower end advanced, because PostgreSQL has no inverse
+	// transition for either float sum and recomputes (see slide). The first
+	// cut of this field carried that rule too and applied it to half the
+	// type, which left the float8 half answering a number the server does not
+	// (review N1).
 	real bool
 	// overflow latches a total that left the type with every contributing
 	// value finite — float8pl's rule, the same one the grouped accumulator
@@ -1923,7 +1923,19 @@ func (a *float64FrameAcc) slide(in *batch.Vector, rd windowNumericReader, start,
 	if hi < lo {
 		hi = lo
 	}
-	if lo >= a.hi || (a.real && lo > a.lo) {
+	// A frame whose lower end ADVANCED is recomputed, at float8's width as
+	// well as float4's. PostgreSQL has no inverse transition for EITHER float
+	// sum — `sum(float8)` has no `msfunc` in pg_aggregate — so it recomputes,
+	// and retracting instead loses whatever the addition absorbed: over
+	// `1e16, 1, 1` a `ROWS BETWEEN 1 PRECEDING AND CURRENT ROW` sum answered
+	// 1 where 17.11 answers 2, and the AVG of that frame 0.5 where it answers
+	// 1 (measured; arc NV review N1, pre-existing at c34cdbcb).
+	//
+	// The retract loop below is what the condition leaves reachable: a frame
+	// whose lower end did NOT move, which is every default frame and every
+	// `UNBOUNDED PRECEDING` one. Nothing subtracts there, so the running
+	// total is the same addition order the grouped accumulator uses.
+	if lo >= a.hi || lo > a.lo {
 		a.reset(lo)
 	}
 	for a.lo < lo {

@@ -140,6 +140,38 @@ func nvRealData() []map[string]any {
 	}
 }
 
+// nvRetSchema is the MOVING-FRAME fixture (arc NV review N1): five rows whose
+// magnitudes cancel, so a frame that RETRACTS answers a different number from
+// one that recomputes. 1e16 absorbs a 1 completely at float8's width and 1e7
+// absorbs it at float4's, so `ROWS BETWEEN 1 PRECEDING AND CURRENT ROW` over
+// 1e16, 1, 1 is 2 when the frame is recomputed — which is what PostgreSQL
+// does, having no inverse transition for either float sum — and 1 when the
+// departing row is subtracted.
+//
+// It is its own table because every other fixture here is read by cells that
+// would move if a row were added, and because a cancellation pair is the only
+// data that can tell the two frame strategies apart at all.
+func nvRetSchema() parquet.Schema {
+	return parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "g", Type: parquet.TypeInt32},
+		{Name: "f8", Type: parquet.TypeFloat64, Nullable: true},
+		{Name: "f4", Type: parquet.TypeFloat32, Nullable: true},
+	}}
+}
+
+const nvRetTable = "nvret"
+
+func nvRetData() []map[string]any {
+	return []map[string]any{
+		{"id": int64(1), "g": int32(1), "f8": 1e16, "f4": float32(1e7)},
+		{"id": int64(2), "g": int32(1), "f8": 1.0, "f4": float32(1.0)},
+		{"id": int64(3), "g": int32(1), "f8": 1.0, "f4": float32(1.0)},
+		{"id": int64(4), "g": int32(2), "f8": 1e16, "f4": float32(1e7)},
+		{"id": int64(5), "g": int32(2), "f8": 2.0, "f4": float32(2.0)},
+	}
+}
+
 // nvFoldSchema is the DEFERRED half's fixture: a DECIMAL at the carrier's
 // declared width beside one at an ordinary scale, so the shapes #712 and #764
 // name are expressible (see TestADecimalFoldStillRendersAtTheFoldsScale).
