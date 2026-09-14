@@ -177,6 +177,49 @@ func r1Cases() []r1Case {
 		r1Case{"REC/joinTwice", rec + " SELECT u.id AS a, r.v AS b FROM lat_ord u JOIN r ON r.v = u.id JOIN lat_item i ON i.order_id = u.id ORDER BY a, b"},
 		r1Case{"CTE/join", "WITH p AS (SELECT id AS v FROM lat_ord) SELECT u.id AS a, p.v AS b FROM lat_ord u JOIN p ON p.v = u.id ORDER BY a, b"},
 	)
+	// ROUND 2 — a COLUMN-ALIAS LIST's arity over a recursive item (#1066 /
+	// §1p's own seam: the published list f7f4e76e installs is what the list
+	// renames). PostgreSQL accepts a list SHORTER than the body publishes and
+	// refuses one that is LONGER, with the same sentence for a recursive item,
+	// a plain one and a derived table; a recursive item was never checked, and
+	// answered ONE ROW OF NULL where the CTE has three rows.
+	rec2 := "SELECT 1 AS a, 2 AS b UNION ALL SELECT r.w+1, 5 FROM r WHERE r.w < 3"
+	recNoAlias := "SELECT 1 AS a, 2 AS b UNION ALL SELECT r.a+1, 5 FROM r WHERE r.a < 3"
+	out = append(out,
+		r1Case{"arity/rec-over", "WITH RECURSIVE r(w,x,y) AS (" + rec2 + ") SELECT r.w AS p FROM r ORDER BY p"},
+		r1Case{"arity/rec-equal", "WITH RECURSIVE r(w,x) AS (" + rec2 + ") SELECT r.w AS p, r.x AS q FROM r ORDER BY p, q"},
+		r1Case{"arity/rec-under", "WITH RECURSIVE r(w) AS (" + rec2 + ") SELECT r.w AS p, r.b AS q FROM r ORDER BY p, q"},
+		r1Case{"arity/rec-none", "WITH RECURSIVE r AS (" + recNoAlias + ") SELECT r.a AS p, r.b AS q FROM r ORDER BY p, q"},
+		r1Case{"arity/plain-over", "WITH p(w,x,y) AS (SELECT id, customer FROM lat_ord) SELECT p.w AS a FROM p ORDER BY a"},
+		r1Case{"arity/plain-equal", "WITH p(w,x) AS (SELECT id, customer FROM lat_ord) SELECT p.w AS a, p.x AS b FROM p ORDER BY a"},
+		r1Case{"arity/plain-under", "WITH p(w) AS (SELECT id, customer FROM lat_ord) SELECT p.w AS a, p.customer AS b FROM p ORDER BY a"},
+		r1Case{"arity/rec-over-join", "WITH RECURSIVE r(w,x,y) AS (" + rec2 + ") SELECT u.id AS a FROM lat_ord u JOIN r ON r.w = u.id ORDER BY a"},
+		r1Case{"arity/derived-over", "SELECT d.w AS a FROM (SELECT id, customer FROM lat_ord) d(w,x,y) ORDER BY a"},
+	)
+	// ROUND 2 — a STAR over a recursive CTE. §1p's headline is that the
+	// reference publishes a column list, and the QUALIFIED star door was the
+	// one consumer that did not read it: `SELECT r.*` was refused where the
+	// BARE star over the same relation answered.
+	rstar := "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT r.v+1 FROM r WHERE r.v < 3)"
+	out = append(out,
+		r1Case{"p2/rec-star", rstar + " SELECT r.* FROM r ORDER BY 1"},
+		r1Case{"p2/rec-bare-star", rstar + " SELECT * FROM r ORDER BY 1"},
+		r1Case{"p2/rec-join-star", rstar + " SELECT r.* FROM lat_ord u JOIN r ON r.v = u.id ORDER BY 1"},
+		r1Case{"p2/rec-star-alias", "WITH RECURSIVE r(w) AS (SELECT 1 AS v UNION ALL SELECT r.w+1 FROM r WHERE r.w < 3) SELECT r.* FROM r ORDER BY 1"},
+		r1Case{"p2/plain-star-control", "WITH p AS (SELECT id AS v FROM lat_ord) SELECT p.* FROM p ORDER BY 1"},
+	)
+	// ROUND 2 — an outer reference INSIDE the body's own WITH item. The body's
+	// WITH is in scope for the body (the cells above); a WITH ITEM that itself
+	// reads the enclosing row is a CORRELATED FROM ITEM, which this engine
+	// plans as its own block — the same boundary the derived-table spelling
+	// has, and `derived-corr-control` is that spelling beside it.
+	out = append(out,
+		r1Case{"p1/exists-cte-corr", "SELECT o.id AS a FROM lat_ord o WHERE EXISTS (WITH n AS (SELECT z.id FROM lat_ord z WHERE z.id = o.id) SELECT 1 FROM n) ORDER BY a"},
+		r1Case{"p1/in-cte-corr", "SELECT o.id AS a FROM lat_ord o WHERE o.id IN (WITH n AS (SELECT z.id FROM lat_ord z WHERE z.id = o.id) SELECT n.id FROM n) ORDER BY a"},
+		r1Case{"p1/scalar-cte-corr", "SELECT o.id AS a FROM lat_ord o WHERE o.id = (WITH n AS (SELECT z.id FROM lat_ord z WHERE z.id = o.id) SELECT MAX(n.id) FROM n) ORDER BY a"},
+		r1Case{"p1/exists-cte-corr-onOuter", "SELECT o.id AS a, i.id AS b FROM lat_ord o JOIN lat_item i ON i.order_id = o.id WHERE EXISTS (WITH n AS (SELECT z.id FROM lat_ord z WHERE z.id = o.id) SELECT 1 FROM n) ORDER BY a, b"},
+		r1Case{"p1/derived-corr-control", "SELECT o.id AS a FROM lat_ord o WHERE EXISTS (SELECT 1 FROM (SELECT z.id FROM lat_ord z WHERE z.id = o.id) n) ORDER BY a"},
+	)
 	// The four issues' own shapes, verbatim.
 	out = append(out,
 		r1Case{"ISSUE/1067", "SELECT o.id AS a FROM lat_ord o WHERE EXISTS (WITH n AS (SELECT 1 AS v UNION ALL SELECT 2) SELECT n.v FROM n WHERE n.v = o.id) ORDER BY a"},
@@ -208,6 +251,22 @@ const (
 	// nested block's arms this shape was not refused at all: it was planned
 	// UNCORRELATED and every outer row answered NULL.
 	r1NestedSetOpRefusal = "holds a SET OPERATION one level down"
+	// A refusal PostgreSQL 17.11 also raises, with the sentence it raises.
+	// These cells are NOT boundaries: the engine agrees with PostgreSQL that
+	// the statement is an error, and the assertion is that it says so with
+	// PostgreSQL's own sentence (the `want` beside each is pgx's rendering of
+	// it, SQLSTATE included).
+	r1ArityRefusal = "columns available but"
+	// An outer reference INSIDE a WITH item's own body — a CORRELATED FROM
+	// ITEM, which this engine plans as its own query block. The derived-table
+	// spelling of the same shape is refused by name
+	// (physical.refuseOuterLevelReference); the WITH spelling gets the generic
+	// 42P01 today, which is why `p1/derived-corr-control` sits beside it.
+	// ADR-0021 §1p records the boundary; closing it is a correlated FROM item,
+	// not a CTE-scope question.
+	r1CorrelatedFromItemRefusal = "missing FROM-clause entry for table"
+	// The DERIVED-TABLE spelling of the same boundary, which does name it.
+	r1CorrelatedDerivedRefusal = "from an enclosing query is not supported"
 	// A recursive CTE JOINED to a relation, on the three DAG arms: the stage
 	// for the CTE reference names a relation no catalog has, so the dispatcher
 	// can resolve no files for it. Pre-existing at the base commit and
@@ -220,6 +279,25 @@ const (
 )
 
 var r1PostgresRowSets = map[string]string{
+	"arity/rec-over":                  "ERR ERROR: WITH query \"r\" has 2 columns available but 3 columns specified (SQLSTATE 42P10)",
+	"arity/rec-equal":                 "rows=3 1,2 | 2,5 | 3,5",
+	"arity/rec-under":                 "rows=3 1,2 | 2,5 | 3,5",
+	"arity/rec-none":                  "rows=3 1,2 | 2,5 | 3,5",
+	"arity/plain-over":                "ERR ERROR: WITH query \"p\" has 2 columns available but 3 columns specified (SQLSTATE 42P10)",
+	"arity/plain-equal":               "rows=3 1,Alice | 2,Bob | 3,Carol",
+	"arity/plain-under":               "rows=3 1,Alice | 2,Bob | 3,Carol",
+	"arity/rec-over-join":             "ERR ERROR: WITH query \"r\" has 2 columns available but 3 columns specified (SQLSTATE 42P10)",
+	"arity/derived-over":              "ERR ERROR: table \"d\" has 2 columns available but 3 columns specified (SQLSTATE 42P10)",
+	"p1/exists-cte-corr":              "rows=3 1 | 2 | 3",
+	"p1/in-cte-corr":                  "rows=3 1 | 2 | 3",
+	"p1/scalar-cte-corr":              "rows=3 1 | 2 | 3",
+	"p1/exists-cte-corr-onOuter":      "rows=4 1,1 | 1,2 | 2,3 | 2,4",
+	"p1/derived-corr-control":         "rows=3 1 | 2 | 3",
+	"p2/rec-star":                     "rows=3 1 | 2 | 3",
+	"p2/rec-bare-star":                "rows=3 1 | 2 | 3",
+	"p2/rec-join-star":                "rows=3 1 | 2 | 3",
+	"p2/rec-star-alias":               "rows=3 1 | 2 | 3",
+	"p2/plain-star-control":           "rows=3 1 | 2 | 3",
 	"IN/onOuter/plain":                "rows=4 1,1 | 1,2 | 2,3 | 2,4",
 	"NOTIN/onOuter/plain":             "rows=0 ",
 	"ANY/onOuter/plain":               "rows=4 1,1 | 1,2 | 2,3 | 2,4",
@@ -726,7 +804,36 @@ var r1RefusedNestedSetOp = []string{
 	"ISSUE/1072in",
 }
 
+// r1RefusesLikePostgres: every arm refuses, and PostgreSQL refuses too.
+var r1RefusesLikePostgres = []string{
+	"arity/rec-over",
+	"arity/plain-over",
+	"arity/rec-over-join",
+	"arity/derived-over",
+}
+
+// r1RefusedCorrelatedFromItem: every arm refuses where PostgreSQL answers, and
+// the two SPELLINGS of the one boundary say different things — which is the
+// finding, recorded rather than smoothed over. The derived-table spelling names
+// its mechanism and its two workarounds; the WITH-item spelling falls out as the
+// generic 42P01, because the CTE body is validated with no enclosing
+// diagnostic to classify the reference against.
+var r1RefusedCorrelatedFromItem = map[string]string{
+	"p1/exists-cte-corr":         r1CorrelatedFromItemRefusal,
+	"p1/in-cte-corr":             r1CorrelatedFromItemRefusal,
+	"p1/scalar-cte-corr":         r1CorrelatedFromItemRefusal,
+	"p1/exists-cte-corr-onOuter": r1CorrelatedFromItemRefusal,
+	"p1/derived-corr-control":    r1CorrelatedDerivedRefusal,
+}
+
 var r1RefusedOnTheDAG = []string{
+	"arity/rec-equal",
+	"arity/rec-under",
+	"arity/rec-none",
+	"p2/rec-star",
+	"p2/rec-bare-star",
+	"p2/rec-join-star",
+	"p2/rec-star-alias",
 	"REC/join",
 	"REC/joinFiltered",
 	"REC/joinRev",
@@ -854,6 +961,8 @@ func TestArcR1ACorrelatedBodyAnswersPostgresRowSetOnEveryArm(t *testing.T) {
 	setOp := r1Set(r1RefusedSetOpBody)
 	nested := r1Set(r1RefusedNestedSetOp)
 	dagOnly := r1Set(r1RefusedOnTheDAG)
+	arity := r1Set(r1RefusesLikePostgres)
+
 	seen := make(map[string]bool, len(r1PostgresRowSets))
 	for _, tc := range r1Cases() {
 		want, ok := r1PostgresRowSets[tc.name]
@@ -867,6 +976,10 @@ func TestArcR1ACorrelatedBodyAnswersPostgresRowSetOnEveryArm(t *testing.T) {
 				got := arm.run(tc.sql)
 				refusal := ""
 				switch {
+				case arity[tc.name]:
+					refusal = r1ArityRefusal
+				case r1RefusedCorrelatedFromItem[tc.name] != "":
+					refusal = r1RefusedCorrelatedFromItem[tc.name]
 				case setOp[tc.name]:
 					refusal = r1SetOpBodyRefusal
 				case nested[tc.name]:
