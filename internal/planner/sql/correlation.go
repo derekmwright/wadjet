@@ -783,18 +783,17 @@ func walkNestedForOuterRefs(sql string, s *outerRefScope, refs *[]OuterRef) {
 	if err != nil || info == nil {
 		return
 	}
-	nested := s.nest(info)
-	if info.WhereExpr != nil {
-		walkForOuterRefs(info.WhereExpr, nested, refs)
-	}
-	if info.HavingExpr != nil {
-		walkForOuterRefs(info.HavingExpr, nested, refs)
-	}
-	for _, col := range info.Columns {
-		if col.ASTExpr != nil {
-			walkForOuterRefs(col.ASTExpr, nested, refs)
-		}
-	}
+	// ONE WALK, ONE RULE. A nested block is a block: it has the same clauses
+	// the enclosing one has, and an outer reference can sit in any of them.
+	// This used to read the WHERE, the HAVING and the SELECT list only, so a
+	// SET OPERATION's arms, a JOIN's ON condition, the GROUP BY, the ORDER BY
+	// and the QUALIFY were invisible ONE LEVEL DOWN while
+	// walkBlockForOuterRefs read all of them at the top. A correlated scalar
+	// subquery whose body held `x.id IN (SELECT k FROM c2t2 WHERE k = u.id
+	// UNION ALL SELECT k FROM c2t2 WHERE k = 99)` was therefore planned with
+	// `u.id` binding nothing: the IN set came out empty and every outer row
+	// answered NULL, for PostgreSQL 17.11's 100, 42, NULL (#1072).
+	walkBlockForOuterRefs(info, s.nest(info), refs)
 }
 
 // rewriteNestedSubquery substitutes outer values inside a nested subquery and
@@ -1171,6 +1170,49 @@ func rebuildSQL(info *SelectInfo, cols []string, rewrittenWhere Node, having str
 func rebuildSQLFull(info *SelectInfo, cols []string, rewrittenWhere Node, having string,
 	groupBy, orderBy, joins []string) string {
 	var sb strings.Builder
+	// THE BLOCK'S OWN WITH CLAUSE IS PART OF THE BLOCK (#1067).
+	//
+	// A rebuild that drops it hands the re-parsed statement a FROM item that
+	// names nothing the statement declares, and the name then resolves the
+	// only other way it can: as a base table. With no such table the body read
+	// an empty relation and a correlated EXISTS answered ZERO rows for every
+	// outer row; with one, it read the WRONG RELATION —
+	// `EXISTS (WITH lat_item AS (SELECT id FROM lat_ord WHERE id = 1) SELECT 1
+	// FROM lat_item WHERE lat_item.id = o.id)` answered 3 rows where
+	// PostgreSQL 17.11 answers 1, silently, on all five arms.
+	//
+	// RECURSIVE is a property of the WITH clause and not of one item, which is
+	// PostgreSQL's spelling: one recursive item makes the whole list
+	// `WITH RECURSIVE`.
+	if len(info.CTEs) > 0 {
+		sb.WriteString("WITH ")
+		for _, c := range info.CTEs {
+			if c.Recursive {
+				sb.WriteString("RECURSIVE ")
+				break
+			}
+		}
+		for i, c := range info.CTEs {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(QuoteIdent(c.Name))
+			if len(c.Columns) > 0 {
+				sb.WriteString("(")
+				for j, col := range c.Columns {
+					if j > 0 {
+						sb.WriteString(", ")
+					}
+					sb.WriteString(QuoteIdent(col))
+				}
+				sb.WriteString(")")
+			}
+			sb.WriteString(" AS (")
+			sb.WriteString(c.SQL)
+			sb.WriteString(")")
+		}
+		sb.WriteString(" ")
+	}
 	sb.WriteString("SELECT ")
 	if info.Distinct {
 		sb.WriteString("DISTINCT ")
@@ -1735,6 +1777,80 @@ func OuterRefsInUnsubstitutedClauses(info *SelectInfo, outerTables map[string]bo
 // strip answered one constant per outer row. Seen, it has to be refused.
 func HoldsSetOperation(info *SelectInfo) bool {
 	return info != nil && info.Union != nil
+}
+
+// HoldsNestedSetOperation reports whether a SET OPERATION sits inside a
+// SUBQUERY NESTED in this block — `x.id IN (SELECT k FROM t WHERE k = u.id
+// UNION ALL SELECT k FROM t WHERE k = 99)`.
+//
+// It exists so a refusal can NAME what it found. The per-row re-run renders one
+// select per block (RebuildSQLForRerun has no arm for info.Union), so an outer
+// reference written inside such an arm survives the substitution and the
+// rebuilt statement still names the enclosing relation — which rerunSQL refuses.
+// Reported as a REASON on that refusal and never as a refusal of its own: a
+// nested set operation carrying no outer reference is re-emitted as the text the
+// user wrote and answers correctly.
+//
+// The depth bound is the same one fromReadsAny uses, for the same reason: this
+// parses text, and text can nest without end.
+func HoldsNestedSetOperation(info *SelectInfo) bool {
+	return holdsNestedSetOperation(info, 0)
+}
+
+func holdsNestedSetOperation(info *SelectInfo, depth int) bool {
+	if info == nil || depth > 8 {
+		return false
+	}
+	found := false
+	visit := func(n Node) (Node, bool) {
+		if found {
+			return n, true
+		}
+		sql := ""
+		switch x := n.(type) {
+		case *SubqueryNode:
+			sql = x.SQL
+		case *ExistsNode:
+			sql = x.SQL
+		default:
+			return n, false
+		}
+		parsed, err := Parse(sql)
+		if err != nil {
+			return n, true
+		}
+		sub, err := ExtractSelect(parsed)
+		if err != nil || sub == nil {
+			return n, true
+		}
+		if sub.Union != nil || holdsNestedSetOperation(sub, depth+1) {
+			found = true
+		}
+		return n, true
+	}
+	look := func(trees ...Node) {
+		for _, t := range trees {
+			if t != nil && !found {
+				RewriteExpr(t, visit)
+			}
+		}
+	}
+	if info.Union != nil {
+		return holdsNestedSetOperation(info.Union.Left, depth+1) ||
+			holdsNestedSetOperation(info.Union.Right, depth+1)
+	}
+	look(info.WhereExpr, info.HavingExpr, info.QualifyExpr)
+	for i := range info.Columns {
+		look(info.Columns[i].ASTExpr)
+	}
+	for i := range info.Joins {
+		look(info.Joins[i].CondExpr)
+	}
+	look(info.GroupByExprs...)
+	for i := range info.OrderBy {
+		look(info.OrderBy[i].Expr)
+	}
+	return found
 }
 
 // AN AGGREGATE BESIDE A NESTED SUBQUERY HAS NO PLAN-TIME TYPE (round-2

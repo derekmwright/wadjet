@@ -75,6 +75,20 @@ func (p *selectParser) isKeyword(kw TokenType) bool {
 	return p.cur.typ == kw
 }
 
+// atSubqueryStart reports whether the parser is sitting on the first token of a
+// SUBQUERY inside parentheses.
+//
+// A subquery begins with SELECT or with its own WITH clause — `x IN (WITH n AS
+// (…) SELECT …)` is one statement with a WITH, exactly as `EXISTS (WITH …)` is,
+// and EXISTS accepted it only because it captures the parenthesised text without
+// looking. The three sites that DID look accepted SELECT alone, so a WITH there
+// fell through to the value-list / expression parser and the query was
+// `unexpected token "WITH"` — legal SQL PostgreSQL 17.11 answers, refused at the
+// door (#1067).
+func (p *selectParser) atSubqueryStart() bool {
+	return p.isKeyword(TokenKWSelect) || p.isKeyword(TokenKWWith)
+}
+
 // expectEndOfStatement reports an error unless the parser consumed the whole
 // statement: only a statement separator and end of input may remain.
 //
@@ -1485,7 +1499,7 @@ func (p *selectParser) parseComparison() (Node, error) {
 			return nil, fmt.Errorf("expected ( after IN")
 		}
 		// Check if it's a subquery
-		if p.isKeyword(TokenKWSelect) {
+		if p.atSubqueryStart() {
 			subSQL := p.consumeBalancedParens()
 			if _, err := p.expect(TokenRParen); err != nil {
 				return nil, fmt.Errorf("expected ) after IN subquery")
@@ -1610,7 +1624,7 @@ func (p *selectParser) parseComparison() (Node, error) {
 				return nil, fmt.Errorf("expected ( after %s", upper)
 			}
 			// Check for subquery
-			if p.isKeyword(TokenKWSelect) {
+			if p.atSubqueryStart() {
 				subSQL := p.consumeBalancedParens()
 				if _, err := p.expect(TokenRParen); err != nil {
 					return nil, fmt.Errorf("expected ) after %s subquery", upper)
@@ -2059,7 +2073,7 @@ func (p *selectParser) parsePrimary() (Node, error) {
 	case TokenLParen:
 		p.advance()
 		// Check for subquery
-		if p.isKeyword(TokenKWSelect) {
+		if p.atSubqueryStart() {
 			subSQL := p.consumeBalancedParens()
 			if _, err := p.expect(TokenRParen); err != nil {
 				return nil, fmt.Errorf("expected ) after subquery")
