@@ -91,6 +91,8 @@ func l1LateralCases() []l1Case {
 		{"R2/twoBounds", "SELECT o.id AS a, s.m AS m, t.p AS p FROM lat_ord o JOIN LATERAL (SELECT i.amount AS m FROM lat_item i WHERE i.order_id = o.id ORDER BY i.amount DESC LIMIT 1) s ON true JOIN LATERAL (SELECT j.product AS p FROM lat_item j WHERE j.order_id = o.id ORDER BY j.amount LIMIT 1) t ON true ORDER BY a, m, p"},
 		{"R2/limitAll", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT i.amount AS m FROM lat_item i WHERE i.order_id = o.id ORDER BY i.amount LIMIT ALL) s ON true ORDER BY a, m"},
 		{"R2/winargNested", "SELECT u.id AS a, (SELECT MAX(y.v) FROM (SELECT SUM(u.id) OVER () AS v FROM lat_ord x WHERE x.id = 1) y) AS v FROM lat_ord u ORDER BY a"},
+		{"R2/shadowSelect", "SELECT x.id AS a, s.m AS m FROM lat_ord x JOIN LATERAL (SELECT x.amount AS m FROM lat_item x WHERE x.order_id = 1) s ON true ORDER BY a, m"},
+		{"R2/shadowOrderBy", "SELECT x.id AS a, s.m AS m FROM lat_ord x JOIN LATERAL (SELECT x.amount AS m FROM lat_item x ORDER BY x.amount LIMIT 2) s ON true ORDER BY a, m"},
 		{"R2/shadowGroupBy", "SELECT x.id AS a, s.m AS m FROM lat_ord x, LATERAL (SELECT SUM(x.amount) AS m FROM lat_item x GROUP BY x.order_id) s ORDER BY a, m"},
 		{"R2/shadowCte", "SELECT x.id AS a, s.m AS m FROM lat_ord x, LATERAL (WITH x AS (SELECT amount FROM lat_item) SELECT SUM(x.amount) AS m FROM x) s ORDER BY a, m"},
 		{"R2/ctlNoShadow", "SELECT x.id AS a, s.m AS m FROM lat_ord x, LATERAL (SELECT SUM(w.amount) AS m FROM lat_item w GROUP BY w.order_id) s ORDER BY a, m"},
@@ -317,6 +319,8 @@ const (
 // r1RenderRows (a sorted ROW SET, so a legal ordering difference between arms
 // is never read as a wrong answer).
 var l1Postgres = map[string]string{
+	"R2/shadowSelect":            "rows=6 1,100 | 1,50 | 2,100 | 2,50 | 3,100 | 3,50",
+	"R2/shadowOrderBy":           "rows=6 1,50 | 1,75 | 2,50 | 2,75 | 3,50 | 3,75",
 	"R2/collideWinBound":         "rows=4 1,1,1 | 1,2,2 | 2,3,1 | 2,4,2",
 	"R2/collideWinNoBound":       "rows=4 1,1,1 | 1,2,2 | 2,3,1 | 2,4,2",
 	"R2/noCollideWinBound":       "rows=4 1,100,2 | 1,50,1 | 2,125,2 | 2,75,1",
@@ -563,6 +567,22 @@ var l1RefusalPins = map[string][]string{
 // l1ArmPins is a divergence that is NOT the same on every arm, so it is
 // recorded per arm. A pin that starts agreeing FAILS.
 var l1ArmPins = map[string]map[string]string{
+	// A body whose own FROM item is named like an enclosing relation. SQL
+	// scoping resolves the qualifier to the INNER item and the two
+	// single-process arms do; the three DAG arms bind the outer relation's
+	// column of that name, which is the same seam ADR-0026 8j records.
+	// Identical at c34cdbcb for `shadowOrderBy`; `shadowSelect` was REFUSED
+	// there and on the arc's round-1 tip, and answers on two arms now.
+	"R2/shadowSelect": {
+		"dag":          "rows=6 1,50 | 1,50 | 1,50 | 2,100 | 2,100 | 2,100",
+		"dag-shuffled": "rows=6 1,50 | 1,50 | 1,50 | 2,100 | 2,100 | 2,100",
+		"dag-morsel4":  "rows=6 1,50 | 1,50 | 1,50 | 2,100 | 2,100 | 2,100",
+	},
+	"R2/shadowOrderBy": {
+		"dag":          "rows=6 1,50 | 1,50 | 1,50 | 3,75 | 3,75 | 3,75",
+		"dag-shuffled": "rows=6 1,50 | 1,50 | 1,50 | 3,75 | 3,75 | 3,75",
+		"dag-morsel4":  "rows=6 1,50 | 1,50 | 1,50 | 3,75 | 3,75 | 3,75",
+	},
 	"R2/collideWinArg": {
 		"single":       "rows=2 1,2 | 2,4",
 		"spilled512k":  "rows=2 1,2 | 2,4",

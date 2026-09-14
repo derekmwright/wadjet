@@ -2029,20 +2029,6 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 		return nil, "", lateralEmptyInput{}, nil, err
 	}
 
-	// Split WHERE clause into correlated and local predicates
-	var correlatedParts []string
-	var localParts []string
-	if subInfo.Where != "" {
-		parts := splitANDPredicates(subInfo.Where)
-		for _, p := range parts {
-			if referencesAliases(p, leftAliases) {
-				correlatedParts = append(correlatedParts, p)
-			} else {
-				localParts = append(localParts, p)
-			}
-		}
-	}
-
 	// THE BODY'S OWN FROM ITEMS SHADOW THE ENCLOSING QUERY'S NAMES. A LATERAL
 	// body may alias its own relation (or its own CTE) to a name the enclosing
 	// query already uses, and SQL scoping then resolves a qualified reference
@@ -2070,6 +2056,20 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	for _, c := range subInfo.CTEs {
 		if c.Name != "" {
 			delete(leftAliases, strings.ToLower(c.Name))
+		}
+	}
+
+	// Split WHERE clause into correlated and local predicates
+	var correlatedParts []string
+	var localParts []string
+	if subInfo.Where != "" {
+		parts := splitANDPredicates(subInfo.Where)
+		for _, p := range parts {
+			if referencesAliases(p, leftAliases) {
+				correlatedParts = append(correlatedParts, p)
+			} else {
+				localParts = append(localParts, p)
+			}
 		}
 	}
 
