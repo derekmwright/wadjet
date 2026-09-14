@@ -139,7 +139,20 @@ func (e *Cast) castToDecimal(b *batch.RecordBatch, row int, v any, d decimalDest
 		// fallback below then answered 1 (#555 review, N3).
 		raiseCannotCastToNumeric("boolean")
 	}
-	typ, ok := e.castDecimalTarget(b, row, v, d)
+	// A wide numeric LITERAL reaches this cast as the float64 compileLit
+	// boxed it, and past ~17 significant digits that box has already lost the
+	// value: `CAST(9007199254740993.25 AS DECIMAL(30,2))` answered
+	// 9007199254740994.00 where PostgreSQL 17.11 answers 9007199254740993.25,
+	// and the fraction was gone before this conversion ever saw it (#1037).
+	//
+	// The literal's own SOURCE TEXT is kept for exactly this reason — it is
+	// what arithmetic over the same literal already reads (ADR-0012 item 6)
+	// — so a cast reads it too, and reads it FIRST, before the box.
+	src, litText := v, ""
+	if text, ok := castExactSourceText(e.Operand); ok {
+		src, litText = text, text
+	}
+	typ, ok := e.castDecimalTarget(b, row, src, litText, d)
 	if !ok {
 		// A bare DECIMAL over an operand whose own (p,s) nothing here can
 		// resolve. Answering the float64 this arm answered before ADR-0024 is
@@ -156,7 +169,7 @@ func (e *Cast) castToDecimal(b *batch.RecordBatch, row int, v any, d decimalDest
 		}
 		return ToFloat64(v)
 	}
-	unscaled, ok := castDecimalValue(v, typ.Scale)
+	unscaled, ok := castDecimalValue(src, typ.Scale)
 	if !ok {
 		return nil
 	}
@@ -170,13 +183,25 @@ func (e *Cast) castToDecimal(b *batch.RecordBatch, row int, v any, d decimalDest
 // destination's own when it named one, and otherwise the operand's — the
 // value's natural scale at the carrier's full width, or (38,0) for an integer
 // (ADR-0024 item 3).
-func (e *Cast) castDecimalTarget(b *batch.RecordBatch, row int, v any, d decimalDest) (batch.DecimalType, bool) {
+func (e *Cast) castDecimalTarget(b *batch.RecordBatch, row int, v any, litText string, d decimalDest) (batch.DecimalType, bool) {
 	if d.params {
 		return d.typ, true
 	}
 	// A bare DECIMAL over an operand with an exact form keeps that form.
 	if o, ok := e.Operand.(decimalOperand); ok {
 		if t, ok := o.decimalType(b); ok {
+			return batch.DecimalType{Precision: batch.MaxDecimalPrecision, Scale: t.Scale}, true
+		}
+	}
+	// A LITERAL's own source text names its scale — its SPELLING, ADR-0024
+	// item 2's rule for a numeric literal — so a BARE destination over one
+	// keeps every digit it was written with rather than declining to the
+	// float fallback below (#1037). litText is empty for every other operand,
+	// and a TEXT COLUMN stays on that fallback: the planner declines a bare
+	// destination over one and allocates a FLOAT64 vector, so answering a
+	// decimal box here would meet the #361 store guard.
+	if litText != "" {
+		if t, ok := batch.DecimalTextType(litText); ok {
 			return batch.DecimalType{Precision: batch.MaxDecimalPrecision, Scale: t.Scale}, true
 		}
 	}
@@ -423,4 +448,27 @@ func castFloatToInt64Even(f float64, dest string) int64 {
 		raiseIntegerOutOfRange(dest)
 	}
 	return int64(r)
+}
+
+// castExactSourceText is the operand's own numeric SOURCE TEXT, when it has
+// one. Only a literal does: its box is whatever compileLit could fit, and past
+// a double's significant digits that is not the number the query spelled
+// (#1037, ADR-0012 item 6).
+//
+// A negated literal is folded into a literal with its own negated text at
+// compile time, so the unary form arrives here already covered.
+func castExactSourceText(operand Expr) (string, bool) {
+	lit, ok := operand.(*Lit)
+	if !ok || lit.Text == "" {
+		return "", false
+	}
+	switch lit.Val.(type) {
+	case float64, float32, int64, int32, int:
+	default:
+		return "", false
+	}
+	if _, ok := batch.DecimalTextType(lit.Text); !ok {
+		return "", false
+	}
+	return lit.Text, true
 }
