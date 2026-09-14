@@ -125,22 +125,6 @@ func refuseFloatProduct(a, b, r float64) {
 	}
 }
 
-// pgFloatArith applies the rule for a resolved opcode. It is the form the
-// row-at-a-time nodes take; the tight loops keep their own unrolled arms.
-func pgFloatArith(op arithOp, a, b float64) (float64, bool) {
-	switch op {
-	case arithAdd:
-		return pgFloatAdd(a, b), true
-	case arithSub:
-		return pgFloatSub(a, b), true
-	case arithMul:
-		return pgFloatMul(a, b), true
-	case arithDiv:
-		return pgFloatDiv(a, b), true
-	}
-	return 0, false
-}
-
 // checkFusedFloatRange applies the rule to a buffer the FUSED column-constant
 // loops filled, by re-deriving only the rows that could be refused.
 //
