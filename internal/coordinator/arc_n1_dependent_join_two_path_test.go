@@ -170,29 +170,27 @@ func TestN1ATwoGroupedLateralsPublishTheirOwnColumns(t *testing.T) {
 				"1,Alice,150,Gadget | 1,Alice,150,Widget | 2,Bob,200,Doohickey | 2,Bob,200,Widget",
 		},
 		{
-			// THE SAME WITH `LIMIT 1`. PostgreSQL evaluates a lateral per
-			// outer row, so its LIMIT bounds each one — two rows here, one per
+			// THE SAME WITH `LIMIT 1`, a wrong answer on every arm, DEFERRED
+			// with its mechanism. PostgreSQL evaluates a lateral per outer
+			// row, so its LIMIT bounds each one — two rows here, one per
 			// order. The decorrelation makes the lateral ONE relation joined
 			// once, so the LIMIT bounds the whole of it and a single row
-			// survived: a plausible row count, which is the one thing a client
-			// cannot detect. Repairing it means the bound travelling with the
+			// survives. Repairing it means the bound travelling with the
 			// correlation key (a per-key top-N), which is ADR-0021's territory
-			// and not a boundary this arc can move — so arc O2 made the shape
-			// LOUD instead of pinning the number (#1079): `0A000`, on every
-			// arm and in every spelling of the consumer, with the two ways out
-			// in the message.
-			name: "1008 boundary: a grouped lateral's own LIMIT is refused",
+			// and not a boundary this arc can move.
+			//
+			// Arc O2 tried a plan-time REFUSAL here and took it out again,
+			// measured: the trigger was the bound's EXISTENCE, and whether a
+			// bound BINDS is a property of the data — `LIMIT 10` over this
+			// same body answers PostgreSQL's rows and was refused with it.
+			// Only the QUALIFIED star declines now, because a star publishes a
+			// relation whose row count this one does not have (#1019, #1079).
+			name: "1008 boundary: a grouped lateral's own LIMIT is not per outer row",
 			sql: "SELECT * FROM lat_ord o " +
 				"JOIN LATERAL (SELECT i.product AS p FROM lat_item i WHERE i.order_id = o.id " +
 				"GROUP BY i.product ORDER BY i.product LIMIT 1) s ON true ORDER BY o.id, p",
-			want: "ERR building logical plan: LIMIT 1 inside a LATERAL subquery " +
-				"correlated on i.order_id = o.id is not supported",
-			pin: map[string]string{
-				"dag": "ERR logical plan: LIMIT 1 inside a LATERAL subquery " +
-					"correlated on i.order_id = o.id is not supported",
-				"dagshuf": "ERR logical plan: LIMIT 1 inside a LATERAL subquery " +
-					"correlated on i.order_id = o.id is not supported",
-			},
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 p:STRING] rows=1 | " +
+				"2,Bob,200,Doohickey",
 			why: "PostgreSQL 17 answers TWO rows — 1,Alice,150,Gadget and " +
 				"2,Bob,200,Doohickey — because a lateral's LIMIT bounds each outer " +
 				"row's evaluation; the decorrelated form bounds the whole relation " +
