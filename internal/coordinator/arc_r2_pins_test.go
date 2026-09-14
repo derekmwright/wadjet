@@ -77,18 +77,10 @@ var r2Pin = map[string]map[string]string{
 		"dag-morsel4":  "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=8 | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 1,Widget,1,Widget | 1,Widget,1,Widget | 2,Doohickey,2,Doohickey | 2,Doohickey,2,Doohickey | 2,Widget,2,Widget | 2,Widget,2,Widget",
 	},
 
-	// #1095's ORDER half, on the three DAG arms: the statement's ORDER BY
-	// above the JOIN sorts by the group KEY's value where the projection
-	// reads the aggregate that was aliased with the key's source name, so the
-	// gather merges the stage's runs on the wrong column (ADR-0026 §8a).
-	"issue/1095": {
-		"dag":          "cols=[product:INT64 id:INT64] rows=9 | 1,1 | 1,2 | 1,3 | 1,1 | 1,2 | 1,3 | 2,1 | 2,2 | 2,3",
-		"dag-shuffled": "cols=[product:INT64 id:INT64] rows=9 | 1,1 | 1,2 | 1,3 | 1,1 | 1,2 | 1,3 | 2,1 | 2,2 | 2,3",
-		"dag-morsel4":  "cols=[product:INT64 id:INT64] rows=9 | 1,1 | 1,2 | 1,3 | 1,1 | 1,2 | 1,3 | 2,1 | 2,2 | 2,3",
-	},
-	"issue/1095-desc": {
-		"dag":          "cols=[product:INT64 id:INT64] rows=9 | 2,1 | 2,2 | 2,3 | 1,1 | 1,2 | 1,3 | 1,1 | 1,2 | 1,3",
-		"dag-shuffled": "cols=[product:INT64 id:INT64] rows=9 | 2,1 | 2,2 | 2,3 | 1,1 | 1,2 | 1,3 | 1,1 | 1,2 | 1,3",
-		"dag-morsel4":  "cols=[product:INT64 id:INT64] rows=9 | 2,1 | 2,2 | 2,3 | 1,1 | 1,2 | 1,3 | 1,1 | 1,2 | 1,3",
-	},
+	// #1095 IS CLOSED and its 2 cells are deleted, which is the proof: an
+	// ordering fused onto a JOIN whose probe is the aggregate that publishes
+	// one name twice now addresses the SLOT its class names, exactly as the
+	// gather's rename does (physical.joinProbeAggregateSlots, and the class
+	// through the block from physical.sortTermNamesAggregateItem).
+
 }
