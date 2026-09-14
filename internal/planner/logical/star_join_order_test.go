@@ -119,6 +119,39 @@ func TestABareStarOverAJoinExpandsToTheFromClausesArms(t *testing.T) {
 			items: []string{"o.id AS id", "s.k AS k", "s.d AS d"},
 		},
 		{
+			// AN ITEM WHOSE PUBLISHED NAME IS NOT ITS EMITTED SPELLING
+			// (round-2 review, B1): the reference RESOLVES by the producer's
+			// spelling (`count(*)`) and the client is told PostgreSQL's name
+			// (`count`). Referencing the published name instead bound nothing
+			// and the column read NULL under the STRING default.
+			name: "an arm with an UNALIASED aggregate carries the pair",
+			plan: func() *Node {
+				block := NewProject(armScan("lat_item", "i", "order_id"), []Projection{
+					{Column: "order_id", Expr: "order_id", Alias: "", PublishedName: "order_id"},
+					{Expr: "count(*)", IsAgg: true, PublishedName: "count"},
+				})
+				block.DerivedAlias = "s"
+				return NewProject(joinOf(t, armScan("lat_ord", "o", "id"), block),
+					[]Projection{{Expr: "*"}})
+			},
+			items: []string{"o.id AS id", "s.order_id AS order_id",
+				"s.count(*) AS count(*) PUB count"},
+		},
+		{
+			name: "an arm with an UNALIASED expression carries the pair",
+			plan: func() *Node {
+				block := NewProject(armScan("lat_item", "i", "id", "amount"), []Projection{
+					{Column: "id", Expr: "id", Alias: "k", PublishedName: "k"},
+					{Expr: "amount * 2", PublishedName: "?column?"},
+				})
+				block.DerivedAlias = "s"
+				return NewProject(joinOf(t, armScan("lat_ord", "o", "id"), block),
+					[]Projection{{Expr: "*"}})
+			},
+			items: []string{"o.id AS id", "s.k AS k",
+				"s.amount * 2 AS amount * 2 PUB ?column?"},
+		},
+		{
 			name: "a block rooted at a DISTINCT publishes its own projection",
 			plan: func() *Node {
 				block := NewDistinct(NewProject(armScan("lat_item", "i", "order_id"),
@@ -147,7 +180,14 @@ func TestABareStarOverAJoinExpandsToTheFromClausesArms(t *testing.T) {
 			ExpandStarProjections(plan)
 			var got []string
 			for _, p := range plan.Projections {
-				got = append(got, p.Expr+" AS "+p.Alias)
+				item := p.Expr + " AS " + p.Alias
+				if p.PublishedName != "" && !strings.EqualFold(p.PublishedName, p.Alias) {
+					// The PAIR: the reference resolves by the producer's
+					// spelling and the client is told PostgreSQL's name
+					// (ADR-0026 §9).
+					item += " PUB " + p.PublishedName
+				}
+				got = append(got, item)
 			}
 			if strings.Join(got, " | ") != strings.Join(tt.items, " | ") {
 				t.Errorf("expanded to\n  %s\nwant\n  %s",
@@ -195,35 +235,6 @@ func TestABareStarOverAJoinDeclinesWhatItCannotState(t *testing.T) {
 			plan: func() *Node {
 				return NewProject(joinOf(t, armScan("lat_item", "", "id"),
 					armScan("lat_item", "", "id")),
-					[]Projection{{Expr: "*"}})
-			},
-		},
-		{
-			// AN ITEM WHOSE PUBLISHED NAME IS NOT ITS EMITTED SPELLING
-			// (round-2 review, B1): every expanded item is a reference
-			// resolved BY NAME, and `s.count` binds nothing where the
-			// producer emits `count(*)` — the column would read NULL under
-			// the STRING default. Declining keeps the value.
-			name: "an arm with an UNALIASED aggregate",
-			plan: func() *Node {
-				block := NewProject(armScan("lat_item", "i", "order_id"), []Projection{
-					{Column: "order_id", Expr: "order_id", Alias: "", PublishedName: "order_id"},
-					{Expr: "count(*)", IsAgg: true, PublishedName: "count"},
-				})
-				block.DerivedAlias = "s"
-				return NewProject(joinOf(t, armScan("lat_ord", "o", "id"), block),
-					[]Projection{{Expr: "*"}})
-			},
-		},
-		{
-			name: "an arm with an UNALIASED expression",
-			plan: func() *Node {
-				block := NewProject(armScan("lat_item", "i", "id", "amount"), []Projection{
-					{Column: "id", Expr: "id", Alias: "k", PublishedName: "k"},
-					{Expr: "amount * 2", PublishedName: "?column?"},
-				})
-				block.DerivedAlias = "s"
-				return NewProject(joinOf(t, armScan("lat_ord", "o", "id"), block),
 					[]Projection{{Expr: "*"}})
 			},
 		},

@@ -22,9 +22,14 @@ import (
 // order. The join's own qualification survives underneath as a RESOLUTION
 // spelling (ADR-0026 §2's pair of names).
 //
+// Each item carries ADR-0026 §2's PAIR — the spelling that RESOLVES in the
+// producer's stream and the name the client is PUBLISHED (`StarColumn`) — so
+// an arm's unaliased `COUNT(*)` is referenced as `count(*)` and published as
+// `count`, which is what PostgreSQL publishes.
+//
 // A BUILD-SIDE MARK on the join node cannot state this, the mint is a
 // HYPOTHESIS the expansion confirms, the projection sits ABOVE the ORDER BY,
-// and seven shapes decline — each with its measurement in
+// and six shapes decline — each with its measurement in
 // docs/internals/bare-star-over-a-join-arms.md, which is the design.
 
 // joinStarItem is one column a bare `*` over a join publishes: the relation
@@ -32,7 +37,7 @@ import (
 // name the client is told, exactly as PostgreSQL publishes it.
 type joinStarItem struct {
 	qualifier string
-	column    string
+	column    StarColumn
 }
 
 // joinStarColumns is the list a bare `*` over a JOIN publishes, or nil when
@@ -146,7 +151,18 @@ func ElideUnstatedJoinStar(n *Node) *Node {
 		return nil
 	}
 	for i, child := range n.Children {
-		n.Children[i] = ElideUnstatedJoinStar(child)
+		next := ElideUnstatedJoinStar(child)
+		switch n.Type {
+		case NodeJoin, NodeUnion, NodeIntersect, NodeExcept:
+			// A RELATION-COMBINING SIDE goes through the ONE door, even when
+			// this pass is only putting back the child that was already
+			// there: taking the minted projection off a side re-exposes
+			// whatever the block materialized under it, and the door is what
+			// keeps a hidden slot off a star above (setCombinedChild, #1080).
+			setCombinedChild(n, i, next)
+		default:
+			n.Children[i] = next
+		}
 	}
 	if !n.StarJoinArms || len(n.Children) != 1 || !HasStarProjection(n) {
 		return n
@@ -266,16 +282,9 @@ func joinPublishesBothArms(n *Node) bool {
 // itself, so an ABAC security projection over the scan is what publishes
 // (StarSourceColumns, ADR-0033 decision 1). There is no third list: these are
 // the two `StarSourceColumns` already asks for a qualified star.
-func armRelationColumns(arm *Node) (string, []string) {
+func armRelationColumns(arm *Node) (string, []StarColumn) {
 	if name := blockRelationName(arm); name != "" {
 		if sel := blockOwnProjection(arm); sel != nil {
-			// EVERY ITEM MUST BE ADDRESSABLE BY THE NAME THE BLOCK PUBLISHES,
-			// because that is the only handle an expanded item has.
-			for _, pr := range VisibleProjections(sel.Projections) {
-				if !armItemIsAddressable(pr) {
-					return "", nil
-				}
-			}
 			return name, projectionOutputNames(sel)
 		}
 		// A block with no projection of its own is `SELECT *` over ONE
@@ -318,7 +327,8 @@ func armRelationColumns(arm *Node) (string, []string) {
 // carries the wrong VALUE. It publishes its leftmost arm's NAMES (PostgreSQL's
 // rule, which `plansql.BlockOutputColumns` and `projectOutputNamesBelow`
 // read), but a name the stream does not spell through this block is not an
-// address, which is `armItemIsAddressable`'s rule one level up.
+// address — the same rule the PAIR states per item, one level up: a reference
+// is only a handle where the producer answers to it.
 //
 // Everything else answers nil too: an Aggregate, a Window or a table function
 // publishes something this walk cannot state, and a block still carrying an
@@ -343,60 +353,34 @@ func blockOwnProjection(block *Node) *Node {
 	return nil
 }
 
-// armItemIsAddressable reports whether a block publishes this item under the
-// name its PRODUCER EMITS.
-//
-// An expanded star item is a qualified REFERENCE — `s.count` — and a reference
-// is resolved by NAME against the stream. Where the two names differ the
-// reference binds nothing, and an unresolvable reference falls to the STRING
-// default and reads NULL: `(SELECT order_id, COUNT(*) …)` publishes `count`
-// (PostgreSQL's FigureColname) while both engines emit the item under
-// `count(*)`, so a star over that arm answered NULL where the unexpanded star
-// answered 2 (round-2 review, B1). The same for `amount * 2` (`?column?` vs
-// `amount * 2`), a literal, and a CAST (`amount` vs `cast(amount as bigint)`).
-//
-// So the arm DECLINES, and the star keeps the answer it had: the plan's order
-// under the producer's own names, with the right VALUES. It is the same
-// disposition as the duplicate-name decline above and for the same reason — a
-// name that addresses the wrong column, or no column, is worse than a name
-// that is merely not PostgreSQL's.
-//
-// The item needs both names to be one name only while an item carries ONE
-// name. ADR-0026 §9 states the pair — resolve by the producer's spelling,
-// publish PostgreSQL's — and when a star item carries it this check goes away
-// rather than being widened.
-func armItemIsAddressable(pr Projection) bool {
-	published := pr.PublishedName
-	if published == "" {
-		published = pr.Alias
-	}
-	if published == "" {
-		published = pr.Column
-	}
-	// What the producer emits: the alias where the item has one, the column
-	// where it is a plain reference, and the expression's own text otherwise
-	// — `physical.buildProject`'s rule and the DAG's `ProjectExprSpec.Name`.
-	emitted := pr.Alias
-	if emitted == "" {
-		emitted = pr.Column
-	}
-	if emitted == "" {
-		emitted = strings.ToLower(strings.TrimSpace(pr.Expr))
-	}
-	return published != "" && strings.EqualFold(published, emitted)
-}
-
 // blockRelationName is the name a DERIVED TABLE or CTE reference is known by
 // in the enclosing FROM clause, or "" when this node is not one. A reference's
 // own rename wins: `FROM c AS x` makes `x` the only spelling PostgreSQL allows.
+//
+// A BLOCK RE-PROJECTED TO ITS VISIBLE LIST IS STILL THAT BLOCK. A block that
+// materialized an ORDER BY term of its own is wrapped in a Project of its
+// visible list above its own Sort and LIMIT, so the minted key dies with the
+// sort (`dropBlockHiddenSlots`, #991) — and that wrapper carries no alias,
+// because the NAME is the block's, one node down. Reading only the root made
+// every such arm unstatable and put the PLAN's order back on exactly the
+// shapes #991 repaired (`SELECT * FROM lat_ord o JOIN (SELECT order_id,
+// amount, amount AS a2 FROM lat_item ORDER BY id LIMIT 4) s ON …`, measured on
+// five arms). The list comes from the wrapper — it is what the block
+// publishes — and the name from the block under it.
 func blockRelationName(n *Node) string {
-	switch {
-	case n.CTERefAlias != "":
-		return n.CTERefAlias
-	case n.DerivedAlias != "":
-		return n.DerivedAlias
-	case n.CTEName != "":
-		return n.CTEName
+	for hops := 0; n != nil && hops < 4; hops++ {
+		switch {
+		case n.CTERefAlias != "":
+			return n.CTERefAlias
+		case n.DerivedAlias != "":
+			return n.DerivedAlias
+		case n.CTEName != "":
+			return n.CTEName
+		case n.Type == NodeProject && len(n.Children) == 1 && !HasStarProjection(n):
+			n = n.Children[0]
+		default:
+			return ""
+		}
 	}
 	return ""
 }
@@ -428,12 +412,19 @@ func armRelationName(n *Node) string {
 	return ""
 }
 
-// repeatsAName reports whether one relation publishes two columns of the same
-// name, FOLDED — the identity every resolver above compares by (#731).
-func repeatsAName(cols []string) bool {
+// repeatsAName reports whether one relation emits two columns under the same
+// RESOLUTION spelling, FOLDED — the identity every resolver above compares by
+// (#731).
+//
+// The resolution spelling and not the published one: an expanded item
+// references `<arm>.<Resolve>`, so two items that RESOLVE to one name cannot be
+// told apart and the second would carry the first's values. Two items that
+// merely PUBLISH one name are fine — PostgreSQL publishes duplicates too, and
+// each reference still names its own column (ADR-0026 §9's pair).
+func repeatsAName(cols []StarColumn) bool {
 	seen := make(map[string]bool, len(cols))
 	for _, c := range cols {
-		lc := strings.ToLower(strings.TrimSpace(c))
+		lc := strings.ToLower(strings.TrimSpace(c.Resolve))
 		if seen[lc] {
 			return true
 		}
@@ -446,12 +437,16 @@ func repeatsAName(cols []string) bool {
 // QUALIFIED reference, so it binds its own relation's column whichever side
 // the plan built, published under the column's own name, which is what
 // PostgreSQL publishes.
-func starItemProjection(qualifier, column string) Projection {
-	ref := &plansql.ColRef{Column: column}
-	expr := column
+func starItemProjection(qualifier string, col StarColumn) Projection {
+	ref := &plansql.ColRef{Column: col.Resolve}
+	expr := col.Resolve
 	if qualifier != "" {
 		ref.Table = qualifier
-		expr = qualifier + "." + column
+		expr = qualifier + "." + col.Resolve
 	}
-	return Projection{Column: expr, Alias: column, Expr: expr, ASTExpr: ref}
+	item := Projection{Column: expr, Alias: col.Resolve, Expr: expr, ASTExpr: ref}
+	if !strings.EqualFold(col.Publish, col.Resolve) {
+		item.PublishedName = col.Publish
+	}
+	return item
 }
