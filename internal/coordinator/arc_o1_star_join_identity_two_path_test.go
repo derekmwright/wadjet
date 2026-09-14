@@ -328,5 +328,336 @@ func TestO1AStarOverAJoinPublishesTheQueryNotThePlan(t *testing.T) {
 				"`i.id`) rather than the relations' own names. Identical at 0193c4e9 on " +
 				"all five arms; a star over an aggregate is its own question.",
 		},
+
+		// ------------------------------------------------------------------
+		// ROUND 2 — the two dimensions the first census never varied (review
+		// P2): a derived arm's ROOT (plain / Sort / LIMIT / DISTINCT / set
+		// operation / GROUP BY) and its ITEM KIND (aliased column, plain
+		// column, unaliased expression, unaliased aggregate, literal, CAST).
+		//
+		// The ROOT dimension was a real hole: a block is not always its own
+		// projection, and stopping at the root made the star read the JOIN's
+		// stream for every sorted, limited or DISTINCT arm — #997's
+		// divergence, one node above where the first pass looked for it. Those
+		// cells agree with PostgreSQL on all five arms now.
+		//
+		// The ITEM KIND dimension is the seam's other half and it DECLINES:
+		// an expanded item addresses its column by NAME, so an arm whose
+		// PUBLISHED name is not the name its producer EMITS cannot be stated
+		// (ADR-0026 §9). Those cells keep the values they had at 0193c4e9.
+		{
+			name: "root-plain-aliased",
+			sql:  "SELECT * FROM lat_ord o JOIN (SELECT id AS k, product AS p FROM lat_item) s ON s.k = o.id ORDER BY s.k",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 p:STRING] rows=3 | 1,Alice,150,1,Widget | 2,Bob,200,2,Gadget | 3,Carol,0,3,Widget",
+		},
+		{
+			name: "root-plain-plaincols",
+			sql:  "SELECT * FROM lat_ord o JOIN (SELECT id, product FROM lat_item) s ON s.id = o.id ORDER BY s.id",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Widget | 2,Bob,200,2,Gadget | 3,Carol,0,3,Widget",
+		},
+		{
+			name: "root-sort",
+			sql:  "SELECT * FROM lat_ord o JOIN (SELECT id, customer FROM lat_ord ORDER BY id) a ON a.id = o.id ORDER BY a.id",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 id:INT64 customer:STRING] rows=3 | 1,Alice,150,1,Alice | 2,Bob,200,2,Bob | 3,Carol,0,3,Carol",
+		},
+		{
+			name: "root-limit",
+			sql:  "SELECT * FROM (SELECT id, customer FROM lat_ord ORDER BY id LIMIT 2) a JOIN lat_item i ON i.order_id = a.id ORDER BY i.id",
+			want: "cols=[id:INT64 customer:STRING id:INT64 order_id:INT64 product:STRING amount:FLOAT64] rows=4 | 1,Alice,1,1,Widget,50 | 1,Alice,2,1,Gadget,100 | 2,Bob,3,2,Widget,75 | 2,Bob,4,2,Doohickey,125",
+		},
+		{
+			name: "root-limit-sel",
+			sql:  "SELECT * FROM (SELECT id, customer FROM lat_ord ORDER BY id LIMIT 2) a JOIN lat_item i ON i.order_id = a.id WHERE i.id < 100 ORDER BY i.id",
+			want: "cols=[id:INT64 customer:STRING id:INT64 order_id:INT64 product:STRING amount:FLOAT64] rows=4 | 1,Alice,1,1,Widget,50 | 1,Alice,2,1,Gadget,100 | 2,Bob,3,2,Widget,75 | 2,Bob,4,2,Doohickey,125",
+		},
+		{
+			name: "root-limit-fromrev",
+			sql:  "SELECT * FROM lat_item i JOIN (SELECT id, customer FROM lat_ord ORDER BY id LIMIT 2) a ON i.order_id = a.id ORDER BY i.id",
+			want: "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 id:INT64 customer:STRING] rows=4 | 1,1,Widget,50,1,Alice | 2,1,Gadget,100,1,Alice | 3,2,Widget,75,2,Bob | 4,2,Doohickey,125,2,Bob",
+		},
+		{
+			name: "root-distinct",
+			sql:  "SELECT * FROM (SELECT DISTINCT order_id FROM lat_item) a JOIN lat_ord o ON o.id = a.order_id ORDER BY a.order_id",
+			want: "cols=[order_id:INT64 id:INT64 customer:STRING total:FLOAT64] rows=2 | 1,1,Alice,150 | 2,2,Bob,200",
+		},
+		{
+			name: "root-distinct-fromrev",
+			sql:  "SELECT * FROM lat_ord o JOIN (SELECT DISTINCT order_id FROM lat_item) a ON o.id = a.order_id ORDER BY a.order_id",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64] rows=2 | 1,Alice,150,1 | 2,Bob,200,2",
+		},
+		{
+			name: "root-setop",
+			sql:  "SELECT * FROM (SELECT id FROM lat_ord UNION ALL SELECT id FROM lat_ord) a JOIN lat_item i ON i.order_id = a.id ORDER BY i.id, a.id",
+			want: "cols=[id:INT64 id:INT64 order_id:INT64 product:STRING amount:FLOAT64] rows=8 | 1,1,1,Widget,50 | 1,1,1,Widget,50 | 1,2,1,Gadget,100 | 1,2,1,Gadget,100 | 2,3,2,Widget,75 | 2,3,2,Widget,75 | 2,4,2,Doohickey,125 | 2,4,2,Doohickey,125",
+			pin: map[string]string{
+				"single":       "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 a.id:INT64] rows=8 | 1,1,Widget,50,1 | 1,1,Widget,50,1 | 2,1,Gadget,100,1 | 2,1,Gadget,100,1 | 3,2,Widget,75,2 | 3,2,Widget,75,2 | 4,2,Doohickey,125,2 | 4,2,Doohickey,125,2",
+				"spilled512k":  "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 a.id:INT64] rows=8 | 1,1,Widget,50,1 | 1,1,Widget,50,1 | 2,1,Gadget,100,1 | 2,1,Gadget,100,1 | 3,2,Widget,75,2 | 3,2,Widget,75,2 | 4,2,Doohickey,125,2 | 4,2,Doohickey,125,2",
+				"dag":          "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 lat_ord.id:INT64] rows=8 | 1,1,Widget,50,1 | 1,1,Widget,50,1 | 2,1,Gadget,100,1 | 2,1,Gadget,100,1 | 3,2,Widget,75,2 | 3,2,Widget,75,2 | 4,2,Doohickey,125,2 | 4,2,Doohickey,125,2",
+				"dag-shuffled": "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 lat_ord.id:INT64] rows=8 | 1,1,Widget,50,1 | 1,1,Widget,50,1 | 2,1,Gadget,100,1 | 2,1,Gadget,100,1 | 3,2,Widget,75,2 | 3,2,Widget,75,2 | 4,2,Doohickey,125,2 | 4,2,Doohickey,125,2",
+				"dag-morsel4":  "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 lat_ord.id:INT64] rows=8 | 1,1,Widget,50,1 | 1,1,Widget,50,1 | 2,1,Gadget,100,1 | 2,1,Gadget,100,1 | 3,2,Widget,75,2 | 3,2,Widget,75,2 | 4,2,Doohickey,125,2 | 4,2,Doohickey,125,2",
+			},
+			why: "DECLINED, with its mechanism: a SET OPERATION's columns reach the join " +
+				"under the SCAN's qualifier rather than the block's — the three DAG arms " +
+				"spell this one `lat_ord.id` — so an item spelled `a.id` binds the OTHER " +
+				"arm's `id` through the bare fallback and carries the WRONG VALUE " +
+				"(measured, round 2). A name the stream does not spell through this block " +
+				"is not an address, so the star reads the stream and keeps the answer it " +
+				"had at 0193c4e9.",
+		},
+		{
+			name: "root-groupby",
+			sql:  "SELECT * FROM lat_ord o JOIN (SELECT order_id, COUNT(*) AS n FROM lat_item GROUP BY order_id) s ON s.order_id = o.id ORDER BY s.order_id",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 n:INT64] rows=2 | 1,Alice,150,1,2 | 2,Bob,200,2,2",
+		},
+		{
+			name: "root-cte-limit",
+			sql:  "WITH c AS (SELECT id, customer FROM lat_ord ORDER BY id LIMIT 2) SELECT * FROM c JOIN lat_item i ON i.order_id = c.id ORDER BY i.id",
+			want: "cols=[id:INT64 customer:STRING id:INT64 order_id:INT64 product:STRING amount:FLOAT64] rows=4 | 1,Alice,1,1,Widget,50 | 1,Alice,2,1,Gadget,100 | 2,Bob,3,2,Widget,75 | 2,Bob,4,2,Doohickey,125",
+		},
+		{
+			name: "item-expr",
+			sql:  "SELECT * FROM lat_ord o JOIN (SELECT id AS k, amount * 2 FROM lat_item) s ON s.k = o.id ORDER BY s.k",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 ?column?:FLOAT64] rows=3 | 1,Alice,150,1,100 | 2,Bob,200,2,200 | 3,Carol,0,3,150",
+			pin: map[string]string{
+				"single":       "cols=[k:INT64 amount * 2:FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,100,1,Alice,150 | 2,200,2,Bob,200 | 3,150,3,Carol,0",
+				"spilled512k":  "cols=[k:INT64 amount * 2:FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,100,1,Alice,150 | 2,200,2,Bob,200 | 3,150,3,Carol,0",
+				"dag":          "cols=[k:INT64 amount * 2:FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,100,1,Alice,150 | 2,200,2,Bob,200 | 3,150,3,Carol,0",
+				"dag-shuffled": "cols=[k:INT64 amount * 2:FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,100,1,Alice,150 | 2,200,2,Bob,200 | 3,150,3,Carol,0",
+				"dag-morsel4":  "cols=[k:INT64 amount * 2:FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,100,1,Alice,150 | 2,200,2,Bob,200 | 3,150,3,Carol,0",
+			},
+			why: "DECLINED, with its mechanism (round-2 review, B1): the arm publishes this " +
+				"item under PostgreSQL's name for it (`?column?`) while both engines EMIT it " +
+				"under `amount * 2`, and an expanded star item is a REFERENCE resolved by name — " +
+				"so the reference would bind nothing and the column would read NULL under " +
+				"the STRING default. The star declines and keeps the VALUES and TYPE it " +
+				"had at 0193c4e9, under the producer's own name, which is a wrong NAME " +
+				"rather than a wrong VALUE. It closes when a star item carries the PAIR " +
+				"(resolve by the producer's spelling, publish PostgreSQL's) — ADR-0026 §9.",
+		},
+		{
+			name: "item-func",
+			sql:  "SELECT * FROM lat_ord o JOIN (SELECT id AS k, UPPER(product) FROM lat_item) s ON s.k = o.id ORDER BY s.k",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 upper:STRING] rows=3 | 1,Alice,150,1,WIDGET | 2,Bob,200,2,GADGET | 3,Carol,0,3,WIDGET",
+		},
+		{
+			name: "item-literal",
+			sql:  "SELECT * FROM lat_ord o JOIN (SELECT id AS k, 1 FROM lat_item) s ON s.k = o.id ORDER BY s.k",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 ?column?:INT32] rows=3 | 1,Alice,150,1,1 | 2,Bob,200,2,1 | 3,Carol,0,3,1",
+			pin: map[string]string{
+				"single":       "cols=[k:INT64 1:INT64 id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,1,1,Alice,150 | 2,1,2,Bob,200 | 3,1,3,Carol,0",
+				"spilled512k":  "cols=[k:INT64 1:INT64 id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,1,1,Alice,150 | 2,1,2,Bob,200 | 3,1,3,Carol,0",
+				"dag":          "cols=[k:INT64 1:INT64 id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,1,1,Alice,150 | 2,1,2,Bob,200 | 3,1,3,Carol,0",
+				"dag-shuffled": "cols=[k:INT64 1:INT64 id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,1,1,Alice,150 | 2,1,2,Bob,200 | 3,1,3,Carol,0",
+				"dag-morsel4":  "cols=[k:INT64 1:INT64 id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,1,1,Alice,150 | 2,1,2,Bob,200 | 3,1,3,Carol,0",
+			},
+			why: "DECLINED, with its mechanism (round-2 review, B1): the arm publishes this " +
+				"item under PostgreSQL's name for it (`?column?`) while both engines EMIT it " +
+				"under `1`, and an expanded star item is a REFERENCE resolved by name — " +
+				"so the reference would bind nothing and the column would read NULL under " +
+				"the STRING default. The star declines and keeps the VALUES and TYPE it " +
+				"had at 0193c4e9, under the producer's own name, which is a wrong NAME " +
+				"rather than a wrong VALUE. It closes when a star item carries the PAIR " +
+				"(resolve by the producer's spelling, publish PostgreSQL's) — ADR-0026 §9.",
+		},
+		{
+			name: "item-agg-unaliased",
+			sql:  "SELECT * FROM lat_ord o JOIN (SELECT order_id, COUNT(*) FROM lat_item GROUP BY order_id) s ON s.order_id = o.id ORDER BY s.order_id",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 count:INT64] rows=2 | 1,Alice,150,1,2 | 2,Bob,200,2,2",
+			pin: map[string]string{
+				"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 count(*):INT64] rows=2 | 1,Alice,150,1,2 | 2,Bob,200,2,2",
+				"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 count(*):INT64] rows=2 | 1,Alice,150,1,2 | 2,Bob,200,2,2",
+				"dag":          "cols=[order_id:INT64 count(*):INT64 id:INT64 customer:STRING total:FLOAT64] rows=2 | 1,2,1,Alice,150 | 2,2,2,Bob,200",
+				"dag-shuffled": "cols=[order_id:INT64 count(*):INT64 id:INT64 customer:STRING total:FLOAT64] rows=2 | 1,2,1,Alice,150 | 2,2,2,Bob,200",
+				"dag-morsel4":  "cols=[order_id:INT64 count(*):INT64 id:INT64 customer:STRING total:FLOAT64] rows=2 | 1,2,1,Alice,150 | 2,2,2,Bob,200",
+			},
+			why: "DECLINED, with its mechanism (round-2 review, B1): the arm publishes this " +
+				"item under PostgreSQL's name for it (`count`) while both engines EMIT it " +
+				"under `count(*)`, and an expanded star item is a REFERENCE resolved by name — " +
+				"so the reference would bind nothing and the column would read NULL under " +
+				"the STRING default. The star declines and keeps the VALUES and TYPE it " +
+				"had at 0193c4e9, under the producer's own name, which is a wrong NAME " +
+				"rather than a wrong VALUE. It closes when a star item carries the PAIR " +
+				"(resolve by the producer's spelling, publish PostgreSQL's) — ADR-0026 §9.",
+		},
+		{
+			name: "item-sum-unaliased",
+			sql:  "SELECT * FROM lat_ord o JOIN (SELECT order_id, SUM(amount) FROM lat_item GROUP BY order_id) s ON s.order_id = o.id ORDER BY s.order_id",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 sum:FLOAT64] rows=2 | 1,Alice,150,1,150 | 2,Bob,200,2,200",
+			pin: map[string]string{
+				"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 sum(amount):FLOAT64] rows=2 | 1,Alice,150,1,150 | 2,Bob,200,2,200",
+				"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 sum(amount):FLOAT64] rows=2 | 1,Alice,150,1,150 | 2,Bob,200,2,200",
+				"dag":          "cols=[order_id:INT64 sum(amount):FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=2 | 1,150,1,Alice,150 | 2,200,2,Bob,200",
+				"dag-shuffled": "cols=[order_id:INT64 sum(amount):FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=2 | 1,150,1,Alice,150 | 2,200,2,Bob,200",
+				"dag-morsel4":  "cols=[order_id:INT64 sum(amount):FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=2 | 1,150,1,Alice,150 | 2,200,2,Bob,200",
+			},
+			why: "DECLINED, with its mechanism (round-2 review, B1): the arm publishes this " +
+				"item under PostgreSQL's name for it (`sum`) while both engines EMIT it " +
+				"under `sum(amount)`, and an expanded star item is a REFERENCE resolved by name — " +
+				"so the reference would bind nothing and the column would read NULL under " +
+				"the STRING default. The star declines and keeps the VALUES and TYPE it " +
+				"had at 0193c4e9, under the producer's own name, which is a wrong NAME " +
+				"rather than a wrong VALUE. It closes when a star item carries the PAIR " +
+				"(resolve by the producer's spelling, publish PostgreSQL's) — ADR-0026 §9.",
+		},
+		{
+			name: "item-cast",
+			sql:  "SELECT * FROM lat_ord o JOIN (SELECT id AS k, CAST(amount AS BIGINT) FROM lat_item) s ON s.k = o.id ORDER BY s.k",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 amount:INT64] rows=3 | 1,Alice,150,1,50 | 2,Bob,200,2,100 | 3,Carol,0,3,75",
+			pin: map[string]string{
+				"single":       "cols=[k:INT64 cast(amount as bigint):INT64 id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,50,1,Alice,150 | 2,100,2,Bob,200 | 3,75,3,Carol,0",
+				"spilled512k":  "cols=[k:INT64 cast(amount as bigint):INT64 id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,50,1,Alice,150 | 2,100,2,Bob,200 | 3,75,3,Carol,0",
+				"dag":          "cols=[k:INT64 cast(amount as bigint):INT64 id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,50,1,Alice,150 | 2,100,2,Bob,200 | 3,75,3,Carol,0",
+				"dag-shuffled": "cols=[k:INT64 cast(amount as bigint):INT64 id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,50,1,Alice,150 | 2,100,2,Bob,200 | 3,75,3,Carol,0",
+				"dag-morsel4":  "cols=[k:INT64 cast(amount as bigint):INT64 id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,50,1,Alice,150 | 2,100,2,Bob,200 | 3,75,3,Carol,0",
+			},
+			why: "DECLINED, with its mechanism (round-2 review, B1): the arm publishes this " +
+				"item under PostgreSQL's name for it (`amount`) while both engines EMIT it " +
+				"under `cast(amount as bigint)`, and an expanded star item is a REFERENCE resolved by name — " +
+				"so the reference would bind nothing and the column would read NULL under " +
+				"the STRING default. The star declines and keeps the VALUES and TYPE it " +
+				"had at 0193c4e9, under the producer's own name, which is a wrong NAME " +
+				"rather than a wrong VALUE. It closes when a star item carries the PAIR " +
+				"(resolve by the producer's spelling, publish PostgreSQL's) — ADR-0026 §9.",
+		},
+		{
+			name: "item-expr-cte",
+			sql:  "WITH c AS (SELECT id AS k, amount * 2 FROM lat_item) SELECT * FROM lat_ord o JOIN c ON c.k = o.id ORDER BY c.k",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 ?column?:FLOAT64] rows=3 | 1,Alice,150,1,100 | 2,Bob,200,2,200 | 3,Carol,0,3,150",
+			pin: map[string]string{
+				"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 amount * 2:FLOAT64] rows=3 | 1,Alice,150,1,100 | 2,Bob,200,2,200 | 3,Carol,0,3,150",
+				"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 amount * 2:FLOAT64] rows=3 | 1,Alice,150,1,100 | 2,Bob,200,2,200 | 3,Carol,0,3,150",
+				"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 amount * 2:FLOAT64] rows=3 | 1,Alice,150,1,100 | 2,Bob,200,2,200 | 3,Carol,0,3,150",
+				"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 amount * 2:FLOAT64] rows=3 | 1,Alice,150,1,100 | 2,Bob,200,2,200 | 3,Carol,0,3,150",
+				"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 amount * 2:FLOAT64] rows=3 | 1,Alice,150,1,100 | 2,Bob,200,2,200 | 3,Carol,0,3,150",
+			},
+			why: "DECLINED, with its mechanism (round-2 review, B1): the arm publishes this " +
+				"item under PostgreSQL's name for it (`?column?`) while both engines EMIT it " +
+				"under `amount * 2`, and an expanded star item is a REFERENCE resolved by name — " +
+				"so the reference would bind nothing and the column would read NULL under " +
+				"the STRING default. The star declines and keeps the VALUES and TYPE it " +
+				"had at 0193c4e9, under the producer's own name, which is a wrong NAME " +
+				"rather than a wrong VALUE. It closes when a star item carries the PAIR " +
+				"(resolve by the producer's spelling, publish PostgreSQL's) — ADR-0026 §9.",
+		},
+		{
+			name: "item-expr-derived-alone",
+			sql:  "SELECT * FROM (SELECT * FROM lat_ord o JOIN (SELECT id AS k, amount * 2 FROM lat_item) s ON s.k = o.id) d ORDER BY d.k",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 ?column?:FLOAT64] rows=3 | 1,Alice,150,1,100 | 2,Bob,200,2,200 | 3,Carol,0,3,150",
+			pin: map[string]string{
+				"single":       "cols=[k:INT64 amount * 2:FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,100,1,Alice,150 | 2,200,2,Bob,200 | 3,150,3,Carol,0",
+				"spilled512k":  "cols=[k:INT64 amount * 2:FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,100,1,Alice,150 | 2,200,2,Bob,200 | 3,150,3,Carol,0",
+				"dag":          "cols=[k:INT64 amount * 2:FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,100,1,Alice,150 | 2,200,2,Bob,200 | 3,150,3,Carol,0",
+				"dag-shuffled": "cols=[k:INT64 amount * 2:FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,100,1,Alice,150 | 2,200,2,Bob,200 | 3,150,3,Carol,0",
+				"dag-morsel4":  "cols=[k:INT64 amount * 2:FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=3 | 1,100,1,Alice,150 | 2,200,2,Bob,200 | 3,150,3,Carol,0",
+			},
+			why: "DECLINED, with its mechanism (round-2 review, B1): the arm publishes this " +
+				"item under PostgreSQL's name for it (`?column?`) while both engines EMIT it " +
+				"under `amount * 2`, and an expanded star item is a REFERENCE resolved by name — " +
+				"so the reference would bind nothing and the column would read NULL under " +
+				"the STRING default. The star declines and keeps the VALUES and TYPE it " +
+				"had at 0193c4e9, under the producer's own name, which is a wrong NAME " +
+				"rather than a wrong VALUE. It closes when a star item carries the PAIR " +
+				"(resolve by the producer's spelling, publish PostgreSQL's) — ADR-0026 §9.",
+		},
+		{
+			name: "item-expr-qstar-ctl",
+			sql:  "SELECT s.* FROM lat_ord o JOIN (SELECT id AS k, amount * 2 FROM lat_item) s ON s.k = o.id ORDER BY s.k",
+			want: "cols=[k:INT64 ?column?:FLOAT64] rows=3 | 1,100 | 2,200 | 3,150",
+			pin: map[string]string{
+				"single":       "cols=[k:INT64 ?column?:STRING] rows=3 | 1,NULL | 2,NULL | 3,NULL",
+				"spilled512k":  "cols=[k:INT64 ?column?:STRING] rows=3 | 1,NULL | 2,NULL | 3,NULL",
+				"dag":          `ERR parse projection "s.?column?"`,
+				"dag-shuffled": `ERR parse projection "s.?column?"`,
+				"dag-morsel4":  `ERR parse projection "s.?column?"`,
+			},
+			why: "CONTROL, pre-existing (#1077) and identical at 0193c4e9: a QUALIFIED star " +
+				"over an arm with an unaliased item is NULL on the single-process arms and " +
+				"a loud `parse projection \"s.?column?\"` on the three DAG ones. It is the " +
+				"same (published name != emitted spelling) seam as the cells above, in the " +
+				"branch this arc does not own.",
+		},
+		{
+			name: "item-expr-named-ctl",
+			sql:  "SELECT o.id, s.k FROM lat_ord o JOIN (SELECT id AS k, amount * 2 FROM lat_item) s ON s.k = o.id ORDER BY s.k",
+			want: "cols=[id:INT64 k:INT64] rows=3 | 1,1 | 2,2 | 3,3",
+			// The NAMED control routes local on the two broadcast-family DAG
+			// arms (the SELECT list names a column no stage publishes — the
+			// arm's unaliased item is not in the join's emitted set), which is
+			// answer-preserving and identical at 0193c4e9. Recorded beside the
+			// rows because a right-to-routed move is invisible to a value check.
+			routed: map[string]string{
+				"dag": "UnreachableOutput +1", "dag-shuffled": "UnreachableOutput +1",
+				"dag-morsel4": "UnreachableOutput +1",
+			},
+		},
+		{
+			name: "lateral-arm-star",
+			sql:  "SELECT * FROM lat_ord o, LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) l ORDER BY o.id, l.id",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,1,50 | 1,Alice,150,2,100 | 2,Bob,200,3,75 | 2,Bob,200,4,125",
+			pin: map[string]string{
+				"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 i.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,2,100 | 1,Alice,150,1,50 | 2,Bob,200,4,125 | 2,Bob,200,3,75",
+				"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 i.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,2,100 | 1,Alice,150,1,50 | 2,Bob,200,4,125 | 2,Bob,200,3,75",
+				"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 i.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,2,100 | 1,Alice,150,1,50 | 2,Bob,200,4,125 | 2,Bob,200,3,75",
+				"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 i.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,2,100 | 1,Alice,150,1,50 | 2,Bob,200,4,125 | 2,Bob,200,3,75",
+				"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 i.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,2,100 | 1,Alice,150,1,50 | 2,Bob,200,4,125 | 2,Bob,200,3,75",
+			},
+			why: "DECLINED by design and identical at 0193c4e9: a written LATERAL's subtree " +
+				"carries the correlation slot the join drops (ADR-0026 §3c), so the star is " +
+				"left to read the stream — which publishes the inner scan's qualifier " +
+				"(`i.id`) rather than the lateral's alias, and `ORDER BY l.id` then binds " +
+				"nothing and leaves the ties unordered. PostgreSQL publishes `id` and " +
+				"orders by it.",
+		},
+		{
+			name: "using-star",
+			sql:  "SELECT * FROM lat_ord o JOIN lat_item i USING (id) ORDER BY i.id",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING amount:FLOAT64] rows=3 | 1,Alice,150,1,Widget,50 | 2,Bob,200,1,Gadget,100 | 3,Carol,0,2,Widget,75",
+			pin: map[string]string{
+				"single":       "ERR SELECT * over a JOIN ... USING at position 40 is not supported",
+				"spilled512k":  "ERR SELECT * over a JOIN ... USING at position 40 is not supported",
+				"dag":          "ERR SELECT * over a JOIN ... USING at position 40 is not supported",
+				"dag-shuffled": "ERR SELECT * over a JOIN ... USING at position 40 is not supported",
+				"dag-morsel4":  "ERR SELECT * over a JOIN ... USING at position 40 is not supported",
+			},
+			why: "REFUSED, and it is the ONE place `every arm's own list, concatenated` is " +
+				"not PostgreSQL's rule: USING MERGES the joined column into one output " +
+				"column (PostgreSQL publishes six here, not seven). The list is knowable " +
+				"now — the merge is not implemented — so the refusal states that rather " +
+				"than the pre-arc `not resolvable here`. Pre-existing, identical at " +
+				"0193c4e9 (#655).",
+		},
+		{
+			name: "natural-star",
+			sql:  "SELECT * FROM lat_ord o NATURAL JOIN lat_item i ORDER BY i.id",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING amount:FLOAT64] rows=3 | 1,Alice,150,1,Widget,50 | 2,Bob,200,1,Gadget,100 | 3,Carol,0,2,Widget,75",
+			pin: map[string]string{
+				"single":       "ERR NATURAL JOIN is not supported at position 24",
+				"spilled512k":  "ERR NATURAL JOIN is not supported at position 24",
+				"dag":          "ERR NATURAL JOIN is not supported at position 24",
+				"dag-shuffled": "ERR NATURAL JOIN is not supported at position 24",
+				"dag-morsel4":  "ERR NATURAL JOIN is not supported at position 24",
+			},
+			why: "REFUSED at the PARSER, pre-existing and identical at 0193c4e9: NATURAL " +
+				"JOIN is not implemented at all, and its star would merge the joined " +
+				"columns the way USING does.",
+		},
+		{
+			name: "derived-aliaslist",
+			sql:  "SELECT * FROM (SELECT * FROM lat_ord o JOIN lat_item i ON i.order_id = o.id) s (c1, c2, c3, c4, c5, c6, c7) ORDER BY c4",
+			want: "cols=[c1:INT64 c2:STRING c3:FLOAT64 c4:INT64 c5:INT64 c6:STRING c7:FLOAT64] rows=4 | 1,Alice,150,1,1,Widget,50 | 1,Alice,150,2,1,Gadget,100 | 2,Bob,200,3,2,Widget,75 | 2,Bob,200,4,2,Doohickey,125",
+			pin: map[string]string{
+				"single":       "ERR renames the columns of a `SELECT *` this planner did not expand",
+				"spilled512k":  "ERR renames the columns of a `SELECT *` this planner did not expand",
+				"dag":          "ERR renames the columns of a `SELECT *` this planner did not expand",
+				"dag-shuffled": "ERR renames the columns of a `SELECT *` this planner did not expand",
+				"dag-morsel4":  "ERR renames the columns of a `SELECT *` this planner did not expand",
+			},
+			why: "REFUSED, pre-existing and identical at 0193c4e9: the column-alias list " +
+				"wraps the block in a SECOND `SELECT *`, and that wrapper's star reads a " +
+				"DERIVED TABLE — the branch this pass does not enumerate — so the width " +
+				"the list renames is unknown. The star over the JOIN inside the block DID " +
+				"expand, which is why the refusal's sentence names the state rather than " +
+				"the rule it used to name.",
+		},
 	})
 }

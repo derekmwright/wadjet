@@ -335,18 +335,18 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 		// this lost `a2` silently on both DAG arms and the `order_id AS oid`
 		// spelling failed LOUDLY (`sort: key column "oid" does not exist`); K3
 		// made the DAG answer what the single-process arms answer,
-		// `__sortkey_0` included; and arc O2 removed that sixth column from
-		// both — the block re-projects to its visible list above its own sort,
-		// so the key dies with the sort (#991, ADR-0026 §9). PostgreSQL's six
-		// columns; the disposition is the route, for the reason the cell below
-		// gives.
+		// `__sortkey_0` included; arc O2 removed that sixth column from both —
+		// the block re-projects to its visible list above its own sort, so the
+		// key dies with the sort (#991) — and arc O1 put the arms in the FROM
+		// clause's written order (#997/#1012). PostgreSQL's six columns, in
+		// PostgreSQL's order; the disposition is the route, for the reason the
+		// cell below gives.
 		{name: "sortkey/introducing-block-keeps-its-column",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, amount, amount AS a2 ` +
 				`FROM lat_item ORDER BY id LIMIT 4) s ON s.order_id = o.id ` +
 				`ORDER BY o.id, s.amount`,
-			want: `order_id,amount,a2,id,customer,total | ` +
-				`1,50,50,1,Alice,150 | 1,100,100,1,Alice,150 | ` +
-				`2,75,75,2,Bob,200 | 2,125,125,2,Bob,200`,
+			want: `id,customer,total,order_id,amount,a2 | 1,Alice,150,1,50,50 | ` +
+				`1,Alice,150,1,100,100 | 2,Bob,200,2,75,75 | 2,Bob,200,2,125,125`,
 			wantRouted: true},
 
 		// ------------------------------------------------------------------
@@ -368,9 +368,10 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 		// It published `__sortkey_0` on every arm until arc O2 — the sort
 		// below reads that key, so the block's own projection could not drop
 		// it and nothing re-projected above the LIMIT. The block publishes its
-		// VISIBLE list there now (#991, ADR-0026 §9), so PostgreSQL's five
-		// columns reach the client and the sort key stays where the sort is.
-		// bb8635a4's DAG published the scan's `amount` in its place.
+		// VISIBLE list there now (#991), and the star publishes each arm's
+		// visible projection in the FROM clause's order (#997/#1012, ADR-0026
+		// §9), so PostgreSQL's five columns reach the client in PostgreSQL's
+		// order. bb8635a4's DAG published the scan's `amount` in its place.
 		{name: "boundary/a-sort-key-the-block-does-not-publish",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, product FROM lat_item ` +
 				`ORDER BY amount LIMIT 3) s ON s.order_id = o.id ORDER BY o.id, s.product`,
