@@ -40,6 +40,7 @@ type l1QCase struct{ name, sql string }
 
 func l1QualifyCases() []l1QCase {
 	return []l1QCase{
+		{"boundAndOuterQualify", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT i.amount AS m FROM lat_item i WHERE i.order_id = o.id ORDER BY i.amount DESC LIMIT 2) s ON true QUALIFY ROW_NUMBER() OVER (PARTITION BY o.id ORDER BY s.m) <= 1 ORDER BY a, m"},
 		{"aliasRn", "SELECT u.id AS id, ROW_NUMBER() OVER (ORDER BY u.id) AS rn FROM lat_ord u QUALIFY rn = 1 ORDER BY id"},
 		{"aliasRnLe", "SELECT u.id AS id, ROW_NUMBER() OVER (ORDER BY u.id) AS rn FROM lat_ord u QUALIFY rn <= 2 ORDER BY id"},
 		{"inline", "SELECT u.id AS id FROM lat_ord u QUALIFY ROW_NUMBER() OVER (ORDER BY u.id) = 1 ORDER BY id"},
@@ -78,37 +79,38 @@ func l1QualifyCases() []l1QCase {
 // r1RenderRows (a sorted ROW SET, so a legal ordering difference is never read
 // as a wrong answer).
 var l1QualifyDuckDB = map[string]string{
-	"aliasRn":        "rows=1 1,1",
-	"aliasRnLe":      "rows=2 1,1 | 2,2",
-	"inline":         "rows=1 1",
-	"inlinePart":     "rows=2 1,Gadget | 2,Doohickey",
-	"noWindow":       "ERR Binder Error: at least one window function must appear in the SELECT column or QUALIFY clause",
-	"noWindowSel":    "rows=1 1,1",
-	"nonSelected":    "rows=2 Doohickey | Gadget",
-	"withWhere":      "rows=2 Gadget,100 | Widget,75",
-	"withGroupBy":    "rows=1 2,200",
-	"withHaving":     "rows=1 1,150",
-	"withOrderLimit": "rows=2 3 | 4",
-	"withDistinct":   "rows=2 1 | 2",
-	"andPredicate":   "rows=1 3",
-	"orPredicate":    "rows=3 1 | 3 | 4",
-	"notPredicate":   "rows=2 2 | 4",
-	"aggWindow":      "rows=2 3 | 4",
-	"twoWindows":     "rows=2 1 | 3",
-	"rank":           "rows=2 2 | 4",
-	"lag":            "rows=3 2 | 3 | 4",
-	"exprAlias":      "rows=2 1,10 | 3,10",
-	"aliasInExpr":    "rows=2 1,1 | 3,1",
-	"inDerived":      "rows=2 1 | 3",
-	"inCTE":          "rows=2 1 | 3",
-	"overJoin":       "rows=2 1,2 | 2,4",
-	"overLeftJoin":   "rows=3 1,2 | 2,4 | 3,NULL",
-	"overLateral":    "rows=2 1,150 | 2,200",
-	"star":           "rows=2 2,1,Gadget,100 | 4,2,Doohickey,125",
-	"emptyResult":    "rows=0 ",
-	"setopArm":       "rows=2 1 | 99",
-	"frameWindow":    "rows=2 3 | 4",
-	"windowOnly":     "rows=1 4",
+	"boundAndOuterQualify": "rows=2 1,50 | 2,75",
+	"aliasRn":              "rows=1 1,1",
+	"aliasRnLe":            "rows=2 1,1 | 2,2",
+	"inline":               "rows=1 1",
+	"inlinePart":           "rows=2 1,Gadget | 2,Doohickey",
+	"noWindow":             "ERR Binder Error: at least one window function must appear in the SELECT column or QUALIFY clause",
+	"noWindowSel":          "rows=1 1,1",
+	"nonSelected":          "rows=2 Doohickey | Gadget",
+	"withWhere":            "rows=2 Gadget,100 | Widget,75",
+	"withGroupBy":          "rows=1 2,200",
+	"withHaving":           "rows=1 1,150",
+	"withOrderLimit":       "rows=2 3 | 4",
+	"withDistinct":         "rows=2 1 | 2",
+	"andPredicate":         "rows=1 3",
+	"orPredicate":          "rows=3 1 | 3 | 4",
+	"notPredicate":         "rows=2 2 | 4",
+	"aggWindow":            "rows=2 3 | 4",
+	"twoWindows":           "rows=2 1 | 3",
+	"rank":                 "rows=2 2 | 4",
+	"lag":                  "rows=3 2 | 3 | 4",
+	"exprAlias":            "rows=2 1,10 | 3,10",
+	"aliasInExpr":          "rows=2 1,1 | 3,1",
+	"inDerived":            "rows=2 1 | 3",
+	"inCTE":                "rows=2 1 | 3",
+	"overJoin":             "rows=2 1,2 | 2,4",
+	"overLeftJoin":         "rows=3 1,2 | 2,4 | 3,NULL",
+	"overLateral":          "rows=2 1,150 | 2,200",
+	"star":                 "rows=2 2,1,Gadget,100 | 4,2,Doohickey,125",
+	"emptyResult":          "rows=0 ",
+	"setopArm":             "rows=2 1 | 99",
+	"frameWindow":          "rows=2 3 | 4",
+	"windowOnly":           "rows=1 4",
 }
 
 // l1QualifyRefuses holds the cells where the answer is an ERROR, by the
@@ -120,6 +122,14 @@ var l1QualifyRefuses = map[string]string{
 // l1QualifyPins holds a cell whose divergence is a DIFFERENT defect, with the
 // measurement that localises it. A pin that starts agreeing FAILS.
 var l1QualifyPins = map[string]string{
+	// A QUALIFY over a correlated LATERAL that carries its own bound. The
+	// bound is applied to the WHOLE inner relation (#1019 is deferred — see
+	// TestArcL1LateralAndWindowScopeAnswersPostgresOnEveryArm's `LAT/*/orderLimit*`
+	// pins), so the body hands the clause the two largest amounts overall
+	// rather than each order's two, and `rn <= 1` then keeps the largest where
+	// DuckDB keeps each order's smallest. The clause itself is right: the same
+	// QUALIFY over an UNBOUNDED body answers DuckDB's rows.
+	"boundAndOuterQualify": "rows=2 1,100 | 2,125",
 	// A window PARTITION BY naming a join arm's column binds the arm the
 	// reorderer emitted BARE, so every row lands in its own partition and
 	// `ROW_NUMBER() = 1` admits all four. It reproduces with no QUALIFY in

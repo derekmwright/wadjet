@@ -1014,28 +1014,30 @@ JOIN LATERAL (
 `SELECT *` over a lateral join publishes the OUTER relation's columns first
 and the lateral's after them, which is PostgreSQL's order.
 
-**A correlated LATERAL's `ORDER BY … LIMIT`/`OFFSET` is applied PER OUTER
-ROW**, which is PostgreSQL's rule and what makes the top-N-per-group idiom
-work:
+**A correlated LATERAL's `ORDER BY … LIMIT`/`OFFSET` is NOT applied per outer
+row.** PostgreSQL evaluates the body once per outer row, so its bound applies
+to each row's own result; this engine lowers the correlation into a join, which
+makes the body ONE relation joined once, and the bound then applies to the
+whole of it. The top-N-per-group idiom
 
 ```sql
-SELECT o.customer, s.product, s.amount
-FROM orders o
-JOIN LATERAL (
-    SELECT product, amount FROM line_items i
-    WHERE i.order_id = o.id ORDER BY i.amount DESC LIMIT 1
-) s ON true          -- one row per order: each order's largest item
+SELECT o.customer, s.product FROM orders o
+JOIN LATERAL (SELECT product, amount FROM line_items i
+              WHERE i.order_id = o.id ORDER BY i.amount DESC LIMIT 1) s ON true
 ```
 
-Internally the bound travels with the correlation key as a per-key top-N, so
-`LIMIT n`, `OFFSET m` and both together mean what they say for each outer row.
-The rewrite is declined — and the bound then applies to the whole inner
-relation once — for an UNCORRELATED body (where the two are the same thing), a
-bound that cannot change any answer (`LIMIT ALL`, `OFFSET 0`), a bound that is
-not a non-negative integer constant, a correlation no equality names an inner
-column for, and a body carrying `DISTINCT` or a set operation. A qualified
-star (`s.*`) over a declined body is refused rather than answered, because it
-would publish a relation whose row count is not the one the query wrote.
+therefore answers fewer rows than PostgreSQL does, on every path, and a
+qualified star (`s.*`) over such a body is refused rather than answered,
+because it would publish a relation whose row count is not the one the query
+wrote. Honouring the bound means it travelling with the correlation key as a
+per-key top-N; that rewrite was written and taken out again after measurement
+(it partitioned on a value the DAG bound to the wrong relation, which over a
+policed column disclosed the stored value's equivalence classes), so the shape
+is the one described here until the window key binds its own arm.
+
+`LIMIT ALL` is not accepted by the parser at all — `expected number after
+LIMIT` — in a lateral body or anywhere else; PostgreSQL treats it as "no
+bound".
 
 **The body carries the outer row in its `WHERE` clause and nowhere else.** The
 correlation is lowered into a join and the body is then planned over its own
@@ -1058,6 +1060,11 @@ evaluated over the body's OUTPUT, so every inner column it names has to be
 published there under that name. `WHERE i.amount < o.total` beside `SELECT
 i.amount` answers; beside `SELECT i.amount AS m`, or over an aggregated body,
 it is refused.
+
+A reference whose qualifier the body's OWN `FROM` item or `WITH` item shadows
+is not an outer reference and is not refused: `FROM orders x, LATERAL (SELECT
+SUM(x.amount) FROM line_items x GROUP BY x.order_id)` reads `line_items`,
+which is SQL's scoping and PostgreSQL's answer.
 
 **A LATERAL body with NO FROM clause that READS THE OUTER ROW is a projection
 over the outer row.** It yields exactly one row per outer row whose columns are

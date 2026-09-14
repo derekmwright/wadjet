@@ -1872,43 +1872,58 @@ and it is three facts about one lowering — `buildLateralSubquery` promotes the
 body's correlated WHERE equalities into the join condition, and everything
 that layer does NOT carry has to be either carried or refused.
 
-**THE BOUND IS PER OUTER ROW, AND THE CORRELATION KEY IS WHAT CARRIES IT.**
-PostgreSQL evaluates the body once per outer row, so `ORDER BY … LIMIT n`
-bounds each evaluation; the decorrelation makes the body ONE relation joined
-once and the bound applied to the whole of it. The top-N-per-group idiom
-therefore answered ONE row for PostgreSQL's two, silently, on every arm and in
-every spelling of the consumer (#1019; §1h's own text recorded it as the next
-layer). The repair is the one that text named: the bound becomes a per-key
-top-N — `ROW_NUMBER() OVER (PARTITION BY <the inner column the correlation
-keys on> ORDER BY <the body's own ORDER BY>)` and a `QUALIFY` over that number,
-`OFFSET m LIMIT n` reading `rn > m AND rn <= m+n`. It is the reason `QUALIFY`
-is implemented first rather than beside this: a filter over a window's output
-is what the clause IS, and the rewrite has no second mechanism.
+**THE BOUND IS STILL NOT PER OUTER ROW, AND THE REPAIR WAS WRITTEN AND TAKEN
+OUT.** PostgreSQL evaluates the body once per outer row, so `ORDER BY … LIMIT
+n` bounds each evaluation; the decorrelation makes the body ONE relation joined
+once and the bound applied to the whole of it, so the top-N-per-group idiom
+answers ONE row for PostgreSQL's two, silently, on every arm (#1019).
 
-The body's `ORDER BY` is CONSUMED by the window, because a FROM item's row
-order is not preserved by SQL and deciding which rows the bound keeps was the
-clause's only effect. Over an AGGREGATED body the window sits above the
-aggregate, so the partition is spelled with the name the aggregate PUBLISHES
-the key under — the hidden `__key_N` where the lowering minted one; written as
-the source column the operator refused by name.
+The repair §1h named — the bound travelling with the correlation key as a
+per-key top-N, `ROW_NUMBER() OVER (PARTITION BY <the inner column the
+correlation keys on> ORDER BY <the body's own ORDER BY>)` and a `QUALIFY` over
+it — was built, and an adversarial review measured three faults in it that are
+all one fault:
 
-Five shapes DECLINE the rewrite and keep `Node.LateralBoundNotPerRow` and the
-disposition #1079 gave them: an uncorrelated body, a bound that cannot change
-any answer (`LIMIT ALL`, `OFFSET 0`), a bound that is not a non-negative
-integer constant, a correlation no equality names an inner column for, and a
-body carrying `DISTINCT` or a set operation. Arc O2's measured position stands
-unchanged — the rewrite does not decide whether a bound BINDS, which is a
-property of the data; it makes the bound mean what it says.
+- **The minted window's partition does not bind the body's own column on the
+  DAG.** Over a SELF-correlated body (`FROM e7emp b JOIN LATERAL (… FROM e7emp
+  c WHERE c.dept = b.dept …)`) the three DAG arms put every row in its own
+  partition, so the bound kept every row and the join paired each outer row
+  with itself — measured over an UNPOLICED correlation column, which is what
+  says it is a name-binding fault and not a policy one. Over a POLICED column
+  it is worse than wrong: `e7bal`'s masked `bal` has singleton equivalence
+  classes under its STORED values, so the answer an analyst reads is arithmetic
+  on the column the policy hides, on four of the nine doors (embedded/dag,
+  embedded/dag-shuffled, pgwire/dag, http/dag), where all nine gave the mask's
+  answer before. That is the class #859 round 2 named, reached through a window
+  the PLANNER mints rather than one the user wrote.
+- **The decline list was false.** `lateralBoundPerOuterRow` returned false the
+  moment one correlated part named no inner column, so a body with BOTH
+  `i.order_id = o.id` and a non-equality outer comparison kept the whole-
+  relation bound — silently, on all five arms, for a shape none of the five
+  declines names.
+- **The minted `__win_N` was allocated per BLOCK, not per STATEMENT.** Two
+  bounded laterals, or a bounded lateral under a user's own `QUALIFY`, both
+  took `__win_0`: the single-process arms failed with a reserved slot name and
+  the DAG arms answered the user's clause against the LATERAL's row number.
 
-One consequence reached outside the lateral. A window partitioned on a SUBSET
-of the group keys below it was REFUSED on all three DAG arms by
-`AssertExchangeConsistency`, because `EnsureDistribution` reads each child's
-distribution as it stands and the re-resolve came after the whole pass: the
-aggregate was read as Singleton while its own exchange was being spliced in,
-and came out hash-partitioned on `[g, k]`, which does not satisfy
-`clustered_on[k]`. The pass runs to a FIXED POINT now. It reproduces with
-`SELECT …, ROW_NUMBER() OVER (PARTITION BY k) … GROUP BY g, k` and no lateral
-in the query at all.
+The first is the deciding one, and it is not this section's to close: it is the
+window-key seam ADR-0026 §8j records — which arm owns a window key — answered
+today by three mechanisms that disagree. A rewrite that MINTS a window inherits
+every one of them, and a planner-minted window over a policed relation turns a
+wrong answer into a disclosure. So #1019 stays open, the shape keeps the
+disposition #1079 gave it (the row count PINNED, PostgreSQL's answer recorded
+beside it, and only the QUALIFIED star declining), and the repair waits on
+§8j. `LIMIT ALL`, which an earlier version of this section listed as a shape
+the rewrite declines, is not parseable at all (`expected number after LIMIT`).
+
+**ONE CONSEQUENCE OF THAT WORK IS KEPT**, because it is independent of the
+rewrite and closes a refusal on its own: `EnsureDistribution` runs to a FIXED
+POINT. It reads each child's distribution as it stands and the re-resolve came
+after the whole pass, so a window partitioned on a SUBSET of the group keys
+below it read its aggregate as Singleton while that aggregate's own exchange
+was being spliced in, and `AssertExchangeConsistency` then REFUSED the plan on
+all three DAG arms — for `SELECT …, ROW_NUMBER() OVER (PARTITION BY k) … GROUP
+BY g, k`, with no lateral in the query at all.
 
 **THE ALIAS IS WHAT THE JOIN QUALIFIES THE ARM BY.** A derived table stamps
 its alias on its subtree root and `joinArmAlias` reads it (§1j's neighbour,
@@ -1931,22 +1946,33 @@ references against the names it wrote (#1111).
 outer row into the body's WHERE equalities and no further, so an outer
 reference in the body's SELECT list, `GROUP BY`, `HAVING`, `ORDER BY` or
 `QUALIFY` resolved against the INNER relation — its column of that name, or
-nothing. Measured, before → after, against live PostgreSQL 17.11:
+nothing. Measured, before → after, against live PostgreSQL 17.11, PER ARM
+(single / spilled512k first, the three DAG arms second):
 
-| the body's clause | PostgreSQL | before | after |
-|---|---|---|---|
-| `SELECT o.total + i.amount AS m` | 200, 250, 275, 325 | NULL x4 | 0A000 |
-| `SELECT o.id AS m` | 1, 1, 2, 2 | 1, 2, 3, 4 (`i.id`) | 0A000 |
-| `GROUP BY o.id` | 150, 200 | 100, 50, 125, 75 | 0A000 |
-| `HAVING SUM(i.amount) > o.total` | no rows | 3 rows of NULL | 0A000 |
-| `SELECT CASE WHEN o.id > 1 …` | 0, 0, 1, 1 | 0, 1, 1, 1 | 0A000 |
-| `ORDER BY i.amount * o.total LIMIT 1` | 50, 75 | 50, 75 | 0A000 |
+| the body's clause | PostgreSQL | before, single/spilled | before, DAG ×3 | after |
+|---|---|---|---|---|
+| `SELECT o.total + i.amount AS m` | 200, 250, 275, 325 | NULL ×4 | NULL ×4 | 0A000 |
+| `SELECT o.id AS m` | 1, 1, 2, 2 | 1, 2, 3, 4 (`i.id`) | **RIGHT** | 0A000 |
+| `GROUP BY o.id` | 150, 200 | 100, 50, 125, 75 | same | 0A000 |
+| `HAVING SUM(i.amount) > o.total` | no rows | 3 rows of NULL | same | 0A000 |
+| `SELECT CASE WHEN o.id > 1 …` | 0, 0, 1, 1 | 0, 1, 1, 1 | same | 0A000 |
+| `ORDER BY i.amount * o.total LIMIT 1` | 50, 75 | wrong | wrong | 0A000 |
 
-The last moves RIGHT → LOUD and its rightness was the fixture's: the term
-reads NULL for the outer column like the others, and multiplying one outer
-key's rows by that key's own constant does not change their order. A FROM-less
-body is untouched — §1n lowers it as a projection over the outer row and it
-never reaches this path — and so is the WHERE clause the decorrelation reads.
+**Seven (cell, arm) results move RIGHT → LOUD** — the `SELECT o.id AS m` row's
+three DAG arms, `LIFTED/leftArm`'s three, and `OUTERREF/whereInequality`'s
+`dag-shuffled` — measured at `c34cdbcb`. It is taken deliberately: a refusal is
+a property of the PLAN and has no per-arm spelling, and an answer that is right
+on three arms and wrong on two is a two-path split this engine does not ship
+either. The first version of this table stated the single-process behaviour as
+if it were every arm's, which it is not; that is corrected here.
+
+A FROM-less body is untouched — §1n lowers it as a projection over the outer
+row — and so is its `ORDER BY`, which over a one-row body is the IDENTITY. And
+a reference whose qualifier the BODY'S OWN `FROM` item or `WITH` item shadows
+is not an outer reference at all: SQL scoping resolves it to the inner item, so
+`buildLateralSubquery` subtracts those names before the WHERE split. Without
+that subtraction `FROM lat_ord x, LATERAL (SELECT SUM(x.amount) … FROM lat_item
+x …)` was refused for reading an outer row it never touches.
 
 A correlated predicate that is NOT an equality is the same layer from the
 other side. It is LIFTED to the join and evaluated over the body's OUTPUT, so
@@ -2423,8 +2449,9 @@ counters assert beside the rows. The DML door reached the same boundary as a
   #767 (LATERAL over an empty input), #809 / #601 (an aggregate in a
   subquery's own WHERE), and #616 / #614 / #714 (measured, not moved).
   `internal/coordinator/arc_d5_correlation_two_path_test.go` is their census.
-- §1q: #1019 (the bound per outer row), #1111 (the lateral's alias as a join
-  arm's qualifier), and the lateral scope refusals arc L1 measured.
+- §1q: #1111 (the lateral's alias as a join arm's qualifier), the lateral
+  scope refusals arc L1 measured, and #1019's repair written, measured and
+  withdrawn.
 - §1p: #1098 (the probe key, the per-row batch read), #1067 (a block's own
   WITH, in the parse / the build / the rebuild), #1072 (the nested walk and the
   refusal that names its own mechanism), #1066 (a recursive CTE reference's

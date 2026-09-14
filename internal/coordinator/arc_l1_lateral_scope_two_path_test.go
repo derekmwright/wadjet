@@ -74,6 +74,27 @@ func l1LateralCases() []l1Case {
 		{"UNCORRLAT/nonCollidingName", "SELECT o.id AS a, t.tot AS m FROM lat_ord o, LATERAL (SELECT SUM(i.amount) AS tot FROM lat_item i) t ORDER BY a"},
 		{"UNCORRLAT/issue1111", "SELECT t.dx AS v FROM setopdecja a, LATERAL (WITH c AS (SELECT dx FROM setopdecjb) SELECT SUM(dx) AS dx FROM c) t"},
 
+		// ROUND 2 — the shapes the adversarial review found the table did not
+		// hold. `collide*` is a window over a decorrelated LATERAL whose body
+		// publishes a name the enclosing relation also carries; `boundLifted*`
+		// is a bound BESIDE a lifted non-equality predicate; `twoBounds` is two
+		// bounded laterals in one statement; `limitAll` is the spelling the
+		// decline list named and the parser cannot read; `winargNested` is
+		// #1045's silent constant one level down; `shadow*` is a body whose own
+		// FROM item is named like an enclosing relation, with its control.
+		{"R2/collideWinBound", "SELECT o.id AS a, s.m AS m, ROW_NUMBER() OVER (PARTITION BY o.id ORDER BY s.m) AS rn FROM lat_ord o JOIN LATERAL (SELECT i.id AS m FROM lat_item i WHERE i.order_id = o.id ORDER BY i.amount DESC LIMIT 2) s ON true ORDER BY a, m"},
+		{"R2/collideWinNoBound", "SELECT o.id AS a, s.m AS m, ROW_NUMBER() OVER (PARTITION BY o.id ORDER BY s.m) AS rn FROM lat_ord o JOIN LATERAL (SELECT i.id AS m FROM lat_item i WHERE i.order_id = o.id) s ON true ORDER BY a, m"},
+		{"R2/noCollideWinBound", "SELECT o.id AS a, s.m AS m, ROW_NUMBER() OVER (PARTITION BY o.id ORDER BY s.m) AS rn FROM lat_ord o JOIN LATERAL (SELECT i.amount AS m FROM lat_item i WHERE i.order_id = o.id ORDER BY i.amount DESC LIMIT 2) s ON true ORDER BY a, m"},
+		{"R2/collideWinArg", "SELECT o.id AS a, SUM(s.m) OVER (PARTITION BY o.customer) AS n FROM lat_ord o JOIN LATERAL (SELECT i.id AS m FROM lat_item i WHERE i.order_id = o.id ORDER BY i.amount DESC LIMIT 2) s ON true ORDER BY a, n"},
+		{"R2/boundLiftedFrac", "SELECT o.id AS a, s.amount AS m FROM lat_ord o JOIN LATERAL (SELECT i.amount FROM lat_item i WHERE i.order_id = o.id AND i.amount < o.total * 0.6 ORDER BY i.amount DESC LIMIT 1) s ON true ORDER BY a, m"},
+		{"R2/boundLiftedPlain", "SELECT o.id AS a, s.amount AS m FROM lat_ord o JOIN LATERAL (SELECT i.amount FROM lat_item i WHERE i.order_id = o.id AND i.amount < o.total ORDER BY i.amount DESC LIMIT 1) s ON true ORDER BY a, m"},
+		{"R2/twoBounds", "SELECT o.id AS a, s.m AS m, t.p AS p FROM lat_ord o JOIN LATERAL (SELECT i.amount AS m FROM lat_item i WHERE i.order_id = o.id ORDER BY i.amount DESC LIMIT 1) s ON true JOIN LATERAL (SELECT j.product AS p FROM lat_item j WHERE j.order_id = o.id ORDER BY j.amount LIMIT 1) t ON true ORDER BY a, m, p"},
+		{"R2/limitAll", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT i.amount AS m FROM lat_item i WHERE i.order_id = o.id ORDER BY i.amount LIMIT ALL) s ON true ORDER BY a, m"},
+		{"R2/winargNested", "SELECT u.id AS a, (SELECT MAX(y.v) FROM (SELECT SUM(u.id) OVER () AS v FROM lat_ord x WHERE x.id = 1) y) AS v FROM lat_ord u ORDER BY a"},
+		{"R2/shadowGroupBy", "SELECT x.id AS a, s.m AS m FROM lat_ord x, LATERAL (SELECT SUM(x.amount) AS m FROM lat_item x GROUP BY x.order_id) s ORDER BY a, m"},
+		{"R2/shadowCte", "SELECT x.id AS a, s.m AS m FROM lat_ord x, LATERAL (WITH x AS (SELECT amount FROM lat_item) SELECT SUM(x.amount) AS m FROM x) s ORDER BY a, m"},
+		{"R2/ctlNoShadow", "SELECT x.id AS a, s.m AS m FROM lat_ord x, LATERAL (SELECT SUM(w.amount) AS m FROM lat_item w GROUP BY w.order_id) s ORDER BY a, m"},
+
 		// A LIFTED CORRELATED PREDICATE THAT IS NOT AN EQUALITY. It is
 		// evaluated over the body's OUTPUT, so the inner column it names has to
 		// be published there UNDER THAT NAME — `publishedSource` and
@@ -272,6 +293,15 @@ const (
 	l1KeylessLeftJoin     = `could not extract join keys from`
 	l1KeylessLeftJoinDAG  = `no stage computes requires single-process execution`
 	l1KeylessLeftJoinTask = `LeftKeys and RightKeys required`
+	// A QUALIFIED star over a correlated LATERAL whose own bound is not
+	// applied per outer row: the body's COLUMNS are knowable, its ROW COUNT is
+	// not the one the query wrote, so the one consumer that must state the
+	// relation declines (#1079, arc O2).
+	l1QStarBoundNotPerRow = `column "s.*" does not exist in`
+	// `LIMIT ALL` — which the decline list named as a shape the per-key
+	// rewrite declines — does not PARSE. PostgreSQL accepts it and means "no
+	// bound"; this parser wants a number (round 2, P1).
+	l1LimitAllUnparsed = `expected number after LIMIT`
 	// An outer reference in a clause of a correlated body OTHER than its
 	// WHERE. The decorrelation carries the outer row into that clause and no
 	// other, so the reference bound the inner relation's column of the same
@@ -287,6 +317,18 @@ const (
 // r1RenderRows (a sorted ROW SET, so a legal ordering difference between arms
 // is never read as a wrong answer).
 var l1Postgres = map[string]string{
+	"R2/collideWinBound":         "rows=4 1,1,1 | 1,2,2 | 2,3,1 | 2,4,2",
+	"R2/collideWinNoBound":       "rows=4 1,1,1 | 1,2,2 | 2,3,1 | 2,4,2",
+	"R2/noCollideWinBound":       "rows=4 1,100,2 | 1,50,1 | 2,125,2 | 2,75,1",
+	"R2/collideWinArg":           "rows=4 1,3 | 1,3 | 2,7 | 2,7",
+	"R2/boundLiftedFrac":         "rows=2 1,50 | 2,75",
+	"R2/boundLiftedPlain":        "rows=2 1,100 | 2,125",
+	"R2/twoBounds":               "rows=2 1,100,Widget | 2,125,Widget",
+	"R2/limitAll":                "rows=4 1,100 | 1,50 | 2,125 | 2,75",
+	"R2/winargNested":            "rows=3 1,1 | 2,2 | 3,3",
+	"R2/shadowGroupBy":           "rows=6 1,150 | 1,200 | 2,150 | 2,200 | 3,150 | 3,200",
+	"R2/shadowCte":               "rows=3 1,350 | 2,350 | 3,350",
+	"R2/ctlNoShadow":             "rows=6 1,150 | 1,200 | 2,150 | 2,200 | 3,150 | 3,200",
 	"UNCORRLAT/collidingName":    "rows=3 1,350 | 2,350 | 3,350",
 	"UNCORRLAT/nonCollidingName": "rows=3 1,350 | 2,350 | 3,350",
 	"UNCORRLAT/issue1111":        "rows=4 51.0000 | 51.0000 | 51.0000 | 51.0000",
@@ -449,9 +491,35 @@ var l1Postgres = map[string]string{
 // l1RefusalPins names the refusal classes a cell's arms may raise. Every arm's
 // answer must contain one of them.
 var l1RefusalPins = map[string][]string{
+	"R2/limitAll":              {l1LimitAllUnparsed},
+	"IN/noJoin/winsel":         {l1WindowInSubquery},
+	"LAT/comma/frame":          {l1WindowInLateral},
 	"LAT/comma/selectlist":     {l1OuterRefOutsideWhere},
+	"LAT/comma/winarg":         {l1OuterRefOutsideWhere},
+	"LAT/comma/winord":         {l1OuterRefOutsideWhere},
+	"LAT/comma/winpart":        {l1OuterRefOutsideWhere},
+	"LAT/inner/frame":          {l1WindowInLateral},
 	"LAT/inner/selectlist":     {l1OuterRefOutsideWhere},
+	"LAT/inner/winarg":         {l1OuterRefOutsideWhere},
+	"LAT/inner/winord":         {l1OuterRefOutsideWhere},
+	"LAT/inner/winpart":        {l1OuterRefOutsideWhere},
+	"LAT/joinInner/winarg":     {l1OuterRefOutsideWhere},
+	"LAT/joinLeft/winarg":      {l1OuterRefOutsideWhere},
+	"LAT/left/cteUncorr":       {l1KeylessLeftJoin},
+	"LAT/left/frame":           {l1WindowInLateral},
 	"LAT/left/selectlist":      {l1OuterRefOutsideWhere},
+	"LAT/left/uncorr":          {l1KeylessLeftJoin},
+	"LAT/left/uncorrLimit":     {l1KeylessLeftJoin, l1KeylessLeftJoinTask},
+	"LAT/left/winarg":          {l1OuterRefOutsideWhere},
+	"LAT/left/winord":          {l1OuterRefOutsideWhere},
+	"LAT/left/winpart":         {l1OuterRefOutsideWhere},
+	"LAT/qstar/groupedLimit":   {l1QStarBoundNotPerRow},
+	"LAT/qstar/orderLimit":     {l1QStarBoundNotPerRow},
+	"LAT/star/agg":             {l1StarOrdinal},
+	"LAT/star/grouped":         {l1StarOrdinal},
+	"LAT/star/groupedLimit":    {l1StarOrdinal},
+	"LAT/star/orderLimit":      {l1StarOrdinal},
+	"LAT/star/where":           {l1StarOrdinal},
 	"LIFTED/aggregated":        {l1LiftedRefNotPublished},
 	"LIFTED/exprBothSides":     {l1LiftedRefNotPublished},
 	"LIFTED/inequalityAlone":   {l1LiftedRefNotPublished},
@@ -465,29 +533,6 @@ var l1RefusalPins = map[string][]string{
 	"OUTERREF/selectCase":      {l1OuterRefOutsideWhere},
 	"OUTERREF/selectExpr":      {l1OuterRefOutsideWhere},
 	"OUTERREF/whereInequality": {l1LiftedRefNotPublished},
-	"IN/noJoin/winsel":         {l1WindowInSubquery},
-	"LAT/comma/frame":          {l1WindowInLateral, l1OuterRefOutsideWhere},
-	"LAT/comma/winarg":         {l1WindowInLateral, l1OuterRefOutsideWhere},
-	"LAT/comma/winord":         {l1WindowInLateral, l1OuterRefOutsideWhere},
-	"LAT/comma/winpart":        {l1WindowInLateral, l1OuterRefOutsideWhere},
-	"LAT/inner/frame":          {l1WindowInLateral, l1OuterRefOutsideWhere},
-	"LAT/inner/winarg":         {l1WindowInLateral, l1OuterRefOutsideWhere},
-	"LAT/inner/winord":         {l1WindowInLateral, l1OuterRefOutsideWhere},
-	"LAT/inner/winpart":        {l1WindowInLateral, l1OuterRefOutsideWhere},
-	"LAT/joinInner/winarg":     {l1WindowInLateral, l1OuterRefOutsideWhere},
-	"LAT/joinLeft/winarg":      {l1WindowInLateral, l1OuterRefOutsideWhere},
-	"LAT/left/cteUncorr":       {l1KeylessLeftJoin},
-	"LAT/left/frame":           {l1WindowInLateral, l1OuterRefOutsideWhere},
-	"LAT/left/uncorr":          {l1KeylessLeftJoin},
-	"LAT/left/uncorrLimit":     {l1KeylessLeftJoin, l1KeylessLeftJoinTask},
-	"LAT/left/winarg":          {l1WindowInLateral, l1OuterRefOutsideWhere},
-	"LAT/left/winord":          {l1WindowInLateral, l1OuterRefOutsideWhere},
-	"LAT/left/winpart":         {l1WindowInLateral, l1OuterRefOutsideWhere},
-	"LAT/star/agg":             {l1StarOrdinal},
-	"LAT/star/grouped":         {l1StarOrdinal},
-	"LAT/star/groupedLimit":    {l1StarOrdinal},
-	"LAT/star/orderLimit":      {l1StarOrdinal},
-	"LAT/star/where":           {l1StarOrdinal},
 	"SCALAR/inner/winInOrder":  {l1OverClauseRebuild},
 	"SCALAR/inner/winarg":      {l1WindowInSubquery},
 	"SCALAR/inner/winargBare":  {l1WindowInSubquery},
@@ -518,16 +563,65 @@ var l1RefusalPins = map[string][]string{
 // l1ArmPins is a divergence that is NOT the same on every arm, so it is
 // recorded per arm. A pin that starts agreeing FAILS.
 var l1ArmPins = map[string]map[string]string{
+	"R2/collideWinArg": {
+		"single":       "rows=2 1,2 | 2,4",
+		"spilled512k":  "rows=2 1,2 | 2,4",
+		"dag":          "rows=2 1,NULL | 2,NULL",
+		"dag-shuffled": "rows=2 1,NULL | 2,NULL",
+		"dag-morsel4":  "rows=2 1,NULL | 2,NULL",
+	},
+	"R2/collideWinBound": {
+		"single":       "rows=2 1,2,1 | 2,4,1",
+		"spilled512k":  "rows=2 1,2,1 | 2,4,1",
+		"dag":          "ERR ~window: ORDER BY \"s.m\" is not a column of its input",
+		"dag-shuffled": "ERR ~window: ORDER BY \"s.m\" is not a column of its input",
+		"dag-morsel4":  "ERR ~window: ORDER BY \"s.m\" is not a column of its input",
+	},
+	"R2/collideWinNoBound": {
+		"dag":          "rows=4 1,1,1 | 1,1,2 | 2,2,1 | 2,2,2",
+		"dag-shuffled": "rows=4 1,1,1 | 1,1,2 | 2,2,1 | 2,2,2",
+		"dag-morsel4":  "rows=4 1,1,1 | 1,1,2 | 2,2,1 | 2,2,2",
+	},
 	"UNCORRLAT/collidingName": {
 		"dag":          "rows=3 1,150 | 2,200 | 3,0",
-		"dag-shuffled": "rows=3 1,150 | 2,200 | 3,0",
 		"dag-morsel4":  "rows=3 1,150 | 2,200 | 3,0",
+		"dag-shuffled": "rows=3 1,150 | 2,200 | 3,0",
 	},
 }
 
 var l1ValuePins = map[string]string{
-	"EXISTS/inner/winarg":  "rows=4 1,1 | 1,2 | 2,3 | 2,4",
-	"EXISTS/noJoin/winarg": "rows=2 1 | 2",
+	"R2/boundLiftedFrac":         "rows=0 ",
+	"R2/boundLiftedPlain":        "rows=1 2,125",
+	"R2/noCollideWinBound":       "rows=2 1,100,1 | 2,125,1",
+	"R2/twoBounds":               "rows=0 ",
+	"R2/winargNested":            "rows=3 1,1 | 2,1 | 3,1",
+	"EXISTS/inner/winarg":        "rows=4 1,1 | 1,2 | 2,3 | 2,4",
+	"EXISTS/noJoin/winarg":       "rows=2 1 | 2",
+	"LAT/comma/groupedLimit":     "rows=1 2,Doohickey,125",
+	"LAT/comma/groupedOffset":    "rows=3 1,Gadget,100 | 1,Widget,50 | 2,Widget,75",
+	"LAT/comma/limitOffset":      "rows=1 2,75",
+	"LAT/comma/limitOnly":        "rows=1 1,50",
+	"LAT/comma/orderLimit":       "rows=1 2,125",
+	"LAT/comma/orderLimit2":      "rows=2 1,100 | 2,125",
+	"LAT/comma/orderOffset":      "rows=3 1,100 | 1,50 | 2,75",
+	"LAT/inner/groupedLimit":     "rows=1 2,Doohickey,125",
+	"LAT/inner/groupedOffset":    "rows=3 1,Gadget,100 | 1,Widget,50 | 2,Widget,75",
+	"LAT/inner/limitOffset":      "rows=1 2,75",
+	"LAT/inner/limitOnly":        "rows=1 1,50",
+	"LAT/inner/orderLimit":       "rows=1 2,125",
+	"LAT/inner/orderLimit2":      "rows=2 1,100 | 2,125",
+	"LAT/inner/orderOffset":      "rows=3 1,100 | 1,50 | 2,75",
+	"LAT/joinInner/groupedLimit": "rows=2 2,Doohickey,125 | 2,Doohickey,125",
+	"LAT/joinInner/orderLimit":   "rows=2 2,125 | 2,125",
+	"LAT/joinLeft/groupedLimit":  "rows=2 2,Doohickey,125 | 2,Doohickey,125",
+	"LAT/joinLeft/orderLimit":    "rows=2 2,125 | 2,125",
+	"LAT/left/groupedLimit":      "rows=3 1,NULL,NULL | 2,Doohickey,125 | 3,NULL,NULL",
+	"LAT/left/groupedOffset":     "rows=4 1,Gadget,100 | 1,Widget,50 | 2,Widget,75 | 3,NULL,NULL",
+	"LAT/left/limitOffset":       "rows=3 1,NULL | 2,75 | 3,NULL",
+	"LAT/left/limitOnly":         "rows=3 1,50 | 2,NULL | 3,NULL",
+	"LAT/left/orderLimit":        "rows=3 1,NULL | 2,125 | 3,NULL",
+	"LAT/left/orderLimit2":       "rows=3 1,100 | 2,125 | 3,NULL",
+	"LAT/left/orderOffset":       "rows=4 1,100 | 1,50 | 2,75 | 3,NULL",
 }
 
 func TestArcL1LateralAndWindowScopeAnswersPostgresOnEveryArm(t *testing.T) {
@@ -565,6 +659,16 @@ func TestArcL1LateralAndWindowScopeAnswersPostgresOnEveryArm(t *testing.T) {
 				}
 				if arms, pinned := l1ArmPins[tc.name]; pinned {
 					if pin, has := arms[arm.name]; has {
+						// A pin beginning `ERR ~` is a SUBSTRING: a DAG task
+						// id is in the message and changes every run.
+						if strings.HasPrefix(pin, "ERR ~") {
+							if !strings.Contains(got, strings.TrimPrefix(pin, "ERR ~")) {
+								t.Errorf("%s\n  arm  %s\n  got  %s\n  the pinned refusal (%q) is gone: "+
+									"if it answers now, assert PostgreSQL's %s and delete this arm's pin",
+									tc.sql, arm.name, got, pin, want)
+							}
+							continue
+						}
 						if got == want {
 							t.Errorf("%s\n  arm  %s\n  the pinned divergence is GONE and the arm "+
 								"answers PostgreSQL's %s: delete this arm's pin", tc.sql, arm.name, want)

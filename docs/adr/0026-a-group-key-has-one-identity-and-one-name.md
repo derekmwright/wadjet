@@ -2439,29 +2439,45 @@ folds the two arms' `id` into one entry.
 one character away, and an EXPRESSION, so it is MATERIALIZED into a slot the
 projection below the window computes — is right, which localises the loss to
 the NAME. Routing a qualified reference the input cannot settle down that same
-route fixes seven cells and breaks four green gates:
+route fixes seven cells and breaks three green gates — and THAT is the whole
+of the deferral's reason:
 
 - over two DERIVED arms that both publish `w`, `PARTITION BY x.w` is right as a
   NAME — the join qualifies the build arm's copy by the alias the query wrote,
   which is what §4 and #975 settled — and MATERIALIZING it answers each row its
   own partition (`coordinator.TestArcK1AWindowPartitionKeyBindsItsOwnArm`).
   Narrowing the route to a BASE-SCAN arm still leaves
-  `TestADerivedTablesComputedAliasIsNotASortOrWindowKeyOnTheDAG` (#658),
-  `TestJ2AJoinConsumerBindsThePublishedIdentity` (#770) and two arc-C1
-  read-seam cells failing.
-- materializing an `ORDER BY` term INVERTS the window's direction, because the
-  `Desc` flag lives on the `OrderExpr` and a materialized key does not carry
-  it: `ORDER BY i.amount DESC` over a join numbers ascending.
+  `TestADerivedTablesComputedAliasIsNotASortOrWindowKeyOnTheDAG` (#658) and
+  `TestJ2AJoinConsumerBindsThePublishedIdentity` (#770) failing.
+
+An earlier version of this section gave a SECOND reason — that materializing an
+`ORDER BY` term inverts the window's direction, "a prerequisite either way" —
+and it is FALSE, measured two ways. `ORDER BY i.amount + 0 DESC` over the same
+join, an EXPRESSION and so already on the materialization route, answers
+PostgreSQL's DESCENDING numbering on all five arms; and re-applying the repair
+verbatim makes the two direction cells ANSWER PostgreSQL rather than invert.
+What was seen while the repair was being narrowed was the bare-name bind moving
+under it, not the route. `orderDescExprOverJoin` and `orderDescSingleRel` are
+gate cells so the claim cannot drift back.
 
 So the seam is one question answered three ways — the bare-name bind, the
 qualified name #975 settled for derived arms, and the materialized slot — and
-closing it is ONE resolution for all three, not a fourth beside them. The
-materialization route's lost direction is a prerequisite either way.
-`coordinator.TestArcL1AWindowKeyBindsItsOwnJoinArm` is the gate: 21 cells on
-five arms, seven PINNED with PostgreSQL's answer beside them, the two direction
-cells among the pins so the day the key binds its arm they must also keep their
-direction, and #1028's own DERIVED-ALIAS family — which answers on all five
-arms — gated for the first time.
+closing it is ONE resolution for all three, not a fourth beside them. There is
+no prerequisite in front of it.
+`coordinator.TestArcL1AWindowKeyBindsItsOwnJoinArm` is the gate: 23 cells on
+five arms, seven PINNED with PostgreSQL's answer beside them — the two
+direction cells among them, pinned on the SAME bare-name bind as the rest — and
+#1028's own DERIVED-ALIAS family, which answers on all five arms, gated for the
+first time.
+
+**A PLANNER-MINTED window inherits all three.** Arc L1 built the per-outer-row
+LATERAL bound (#1019) on a minted `ROW_NUMBER() OVER (PARTITION BY <the inner
+correlation column>)` and withdrew it: on the three DAG arms that partition did
+not bind the body's own column, so over a SELF-correlated body every row became
+its own partition — and over a POLICED column that is a per-row disclosure of
+the stored value's equivalence classes on four of the nine doors (ADR-0021
+§1q, ADR-0033). A window the PLANNER writes is not safer than one the user
+writes: it is the same key resolution, reached where no user can see it.
 
 ### 8i. A join ARM that is not a base scan is named by the query (2026-09-14, arc R2: #1102, #1099, #1095)
 

@@ -2043,6 +2043,36 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 		}
 	}
 
+	// THE BODY'S OWN FROM ITEMS SHADOW THE ENCLOSING QUERY'S NAMES. A LATERAL
+	// body may alias its own relation (or its own CTE) to a name the enclosing
+	// query already uses, and SQL scoping then resolves a qualified reference
+	// to the INNER item — PostgreSQL answers `SELECT x.amount FROM lat_item x`
+	// inside `FROM lat_ord x, LATERAL (…)` against lat_item. Without this
+	// subtraction `leftAliases` claims the name, so the WHERE split calls a
+	// purely LOCAL predicate correlated and the refusal below fires on a body
+	// that reads nothing from the outer row at all (round-2 review).
+	for _, tr := range subInfo.Tables {
+		if tr.Alias != "" {
+			delete(leftAliases, strings.ToLower(tr.Alias))
+			continue
+		}
+		if tr.Name != "" {
+			delete(leftAliases, strings.ToLower(tr.Name))
+		}
+	}
+	for _, j := range subInfo.Joins {
+		for _, nm := range []string{j.RightAlias, j.LeftTable, j.RightTable} {
+			if nm != "" && !strings.HasPrefix(strings.TrimSpace(nm), "(") {
+				delete(leftAliases, strings.ToLower(nm))
+			}
+		}
+	}
+	for _, c := range subInfo.CTEs {
+		if c.Name != "" {
+			delete(leftAliases, strings.ToLower(c.Name))
+		}
+	}
+
 	// AN OUTER REFERENCE OUTSIDE THE BODY'S `WHERE` IS REFUSED, because the
 	// decorrelation carries the outer row into that clause and no other
 	// (#1111's neighbour, lateral_outer_reference.go). Checked BEFORE the
@@ -2261,15 +2291,6 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 		// the projection above stays elidable in the ordinary shape.
 		subInfo.Columns = append(injected, subInfo.Columns...)
 	}
-
-	// A BOUND THE DECORRELATION CANNOT APPLY PER OUTER ROW travels with the
-	// correlation key instead: the body's ORDER BY / LIMIT / OFFSET become a
-	// per-key `ROW_NUMBER()` and a QUALIFY over it (#1019,
-	// lateral_per_row_bound.go). Done HERE, after the key injection, because
-	// over an aggregated body the window reads what the AGGREGATE publishes
-	// the key under — which is what that loop just decided. Where it declines,
-	// the body keeps its bound and `lateralBoundIsNotPerOuterRow` marks it.
-	lateralBoundPerOuterRow(subInfo, correlatedParts, leftAliases, aggregates, keyRename)
 
 	if err := refuseDecorrelatedWindow(subInfo, correlatedParts, leftAliases); err != nil {
 		return nil, "", lateralEmptyInput{}, nil, err

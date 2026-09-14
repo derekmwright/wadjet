@@ -24,7 +24,8 @@ import (
 // EXPRESSION, so it is MATERIALIZED into a slot the projection below the
 // window computes — is right, which says the loss is in the NAME. Routing a
 // qualified reference the input cannot settle down that same route fixes these
-// seven cells and breaks four gates that were green:
+// seven cells and breaks three gates that were green, and THAT is the whole of
+// the deferral's reason:
 //
 //   - `coordinator.TestArcK1AWindowPartitionKeyBindsItsOwnArm` (#975): over two
 //     DERIVED arms that both publish `w`, `PARTITION BY x.w` is right as a
@@ -32,14 +33,19 @@ import (
 //     wrote — and MATERIALIZING it answers each row its own partition. The
 //     base-table and derived-table resolutions are DIFFERENT mechanisms, and
 //     narrowing the route to a base-scan arm still left
-//     `TestADerivedTablesComputedAliasIsNotASortOrWindowKeyOnTheDAG` (#658),
-//     `TestJ2AJoinConsumerBindsThePublishedIdentity` (#770) and two arc-C1
-//     read-seam cells failing.
-//   - materializing an ORDER BY term INVERTS the window's direction, because
-//     the Desc flag lives on the OrderExpr and a materialized key does not
-//     carry it. `orderDescOverJoin` / `orderAscOverJoin` are the two cells
-//     that say so, and they are pinned on the SAME bare-name bind, so the day
-//     the key binds its arm they must also keep their direction.
+//     `TestADerivedTablesComputedAliasIsNotASortOrWindowKeyOnTheDAG` (#658)
+//     and `TestJ2AJoinConsumerBindsThePublishedIdentity` (#770) failing.
+//
+// An earlier version of this header added a second reason — that materializing
+// an ORDER BY term INVERTS the window's direction, "a prerequisite either way"
+// — and it is FALSE. Measured two ways by the round-2 review and re-measured
+// here: `ORDER BY i.amount + 0 DESC` over the same join, an EXPRESSION and so
+// already on the materialization route, answers PostgreSQL's DESCENDING
+// numbering on all five arms (`orderDescExprOverJoin`, with its
+// single-relation control), and re-applying the repair verbatim makes
+// `orderDescOverJoin` and `orderAscOverJoin` ANSWER PostgreSQL rather than
+// invert. Those two are pinned on the SAME bare-name bind as the rest of the
+// seven, and the two expression cells are here so the claim cannot drift back.
 //
 // So the seam is one question — which arm owns a window key — answered today
 // by three mechanisms that disagree (the bare-name bind, the qualified name
@@ -85,6 +91,8 @@ func TestArcL1AWindowKeyBindsItsOwnJoinArm(t *testing.T) {
 		{"derivedAliasArg", "SELECT SUM(x.v * 2) OVER () AS s FROM (SELECT id, id * 2 AS v FROM lat_ord) x JOIN lat_ord y ON x.id = y.id ORDER BY s"},
 		{"derivedAliasNested", "SELECT SUM(x.v) OVER () + 1 AS s FROM (SELECT id, id * 2 AS v FROM lat_ord) x JOIN lat_ord y ON x.id = y.id ORDER BY s"},
 		{"windowUnderGroupKeySubset", "SELECT i.order_id AS g, i.product AS p, SUM(i.amount) AS m, ROW_NUMBER() OVER (PARTITION BY i.order_id ORDER BY i.product) AS rn FROM lat_item i GROUP BY i.order_id, i.product ORDER BY g, p"},
+		{"orderDescExprOverJoin", "SELECT i.id AS a, ROW_NUMBER() OVER (ORDER BY i.amount + 0 DESC) AS rn FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ORDER BY a"},
+		{"orderDescSingleRel", "SELECT i.id AS a, ROW_NUMBER() OVER (ORDER BY i.amount DESC) AS rn FROM lat_item i ORDER BY a"},
 		{"orderDescOverJoin", "SELECT o.id AS a, i.id AS b, ROW_NUMBER() OVER (PARTITION BY o.id ORDER BY i.amount DESC) AS rn FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ORDER BY a, b"},
 		{"orderAscOverJoin", "SELECT o.id AS a, i.id AS b, ROW_NUMBER() OVER (PARTITION BY o.id ORDER BY i.amount) AS rn FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ORDER BY a, b"},
 		{"orderDescNoPartition", "SELECT o.id AS a, i.id AS b, ROW_NUMBER() OVER (ORDER BY i.amount DESC) AS rn FROM lat_ord o JOIN lat_item i ON i.order_id = o.id ORDER BY a, b"},
@@ -131,6 +139,8 @@ var l1WindowKeyPins = map[string]string{
 }
 
 var l1WindowKeyPostgres = map[string]string{
+	"orderDescExprOverJoin":     "rows=4 1,4 | 2,2 | 3,3 | 4,1",
+	"orderDescSingleRel":        "rows=4 1,4 | 2,2 | 3,3 | 4,1",
 	"partOuterArm":              "rows=4 1,1,2 | 1,2,2 | 2,3,2 | 2,4,2",
 	"partInnerArm":              "rows=4 1,1,1 | 1,2,1 | 2,3,1 | 2,4,1",
 	"partArmsSwapped":           "rows=4 1,1,2 | 1,2,2 | 2,3,2 | 2,4,2",

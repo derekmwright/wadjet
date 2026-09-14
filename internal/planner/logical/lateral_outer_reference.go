@@ -19,22 +19,30 @@ import (
 // An outer reference in any OTHER clause of the body therefore resolves
 // against the inner relation — to the inner column of that bare name where one
 // exists, and to nothing where it does not. Measured against live PostgreSQL
-// 17.11 over the `lat_ord` / `lat_item` rows, before this refusal:
+// 17.11 over the `lat_ord` / `lat_item` rows, before this refusal, PER ARM
+// (single / spilled512k on the left of the slash, the three DAG arms on the
+// right — they are not the same, which the first version of this comment said
+// they were):
 //
 //	SELECT s.m FROM lat_ord o JOIN LATERAL (
 //	  SELECT o.total + i.amount AS m FROM lat_item i WHERE i.order_id = o.id) s ON true
-//	-- PostgreSQL  200, 250, 275, 325      this engine  NULL, NULL, NULL, NULL
+//	-- PostgreSQL  200, 250, 275, 325     before  NULL ×4 on all five arms
 //
-//	  SELECT o.id AS m …                     1, 1, 2, 2          1, 2, 3, 4  (i.id)
-//	  … GROUP BY o.id                        150, 200            100, 50, 125, 75
-//	  … HAVING SUM(i.amount) > o.total       no rows             3 rows of NULL
-//	  SELECT CASE WHEN o.id > 1 …            0, 0, 1, 1          0, 1, 1, 1
+//	  SELECT o.id AS m …          1, 1, 2, 2   1, 2, 3, 4 (`i.id`) / RIGHT on the DAG
+//	  … GROUP BY o.id             150, 200     100, 50, 125, 75 on all five
+//	  … HAVING SUM(…) > o.total   no rows      3 rows of NULL on all five
+//	  SELECT CASE WHEN o.id > 1 … 0, 0, 1, 1   0, 1, 1, 1 on all five
 //
-// Every one of them is a SILENT wrong value on every arm. `0A000` —
-// PostgreSQL's feature_not_supported — is the honest disposition until the
-// body is evaluated per outer row or its outer-reading items are computed
-// ABOVE the join, which is ADR-0021's dependent-join layer and not a rewrite
-// this pass can make.
+// **THE `SELECT o.id AS m` ROW IS A REGRESSION ON THREE ARMS AND IT IS TAKEN
+// DELIBERATELY.** The three DAG arms carried PostgreSQL's exact row set there
+// and are loud now; so are `LIFTED/leftArm`'s three DAG arms and
+// `OUTERREF/whereInequality`'s `dag-shuffled`, seven (cell, arm) results in
+// all, measured at `c34cdbcb` by this arc. A refusal is a property of the
+// PLAN and there is no per-arm spelling of one; and an answer that is right on
+// three arms and wrong on two is a two-path split, which this engine does not
+// ship either. Loud on five is the only disposition available, and the cells
+// are in the L1 table with PostgreSQL's answer beside them so the day the
+// single-process arms can answer, all five do.
 //
 // **One cell moves from right to loud, and its rightness was the fixture's.**
 // An outer reference in the body's own `ORDER BY` — `ORDER BY i.amount *
@@ -50,6 +58,12 @@ import (
 //     lowered as one (ADR-0021 §1n, lateral_dual_body.go) — that path never
 //     reaches here.
 //   - the WHERE clause itself, which is what the decorrelation reads.
+//   - a reference whose qualifier the BODY'S OWN FROM ITEM or CTE shadows.
+//     `buildLateralSubquery` subtracts those names from `leftAliases` before
+//     the WHERE split, because SQL scoping resolves them to the inner item:
+//     without the subtraction `FROM lat_ord x, LATERAL (SELECT SUM(x.amount)
+//     … FROM lat_item x …)` was refused for reading an outer row it never
+//     touches (round-2 review).
 //   - an UNCORRELATED body, which names no outer column anywhere.
 func refuseLateralOuterReferenceOutsideWhere(info *plansql.SelectInfo, leftAliases map[string]bool) error {
 	if info == nil || len(leftAliases) == 0 {
