@@ -27,29 +27,29 @@ var r2Pin = map[string]map[string]string{
 	// name, and a bare name binds the PROBE side's copy — so both items read
 	// one relation and every row is paired with itself.
 	//
-	// SIX of the ten cells are closed and deleted, which is the proof: the
-	// gather's rename puts the BUILD arm's own name back on a source column
-	// the walk resolved to a bare one, wherever the arm holds exactly one
-	// relation and computes no relation of its own
-	// (physical.buildArmQualified).
+	// EIGHT of the ten cells are closed and deleted. Six by the gather's
+	// rename putting the BUILD arm's own name back on a source column the
+	// walk resolved to a bare one (physical.buildArmQualified); two more by
+	// an arm whose SELECT list the aggregate absorption MATERIALIZED being a
+	// materialized arm, qualified by the name the enclosing query writes
+	// rather than by the scan below it — #1102's rule one producer over, and
+	// it moves nothing in the corpus (round 2, P1: the TPC-H stage-dump
+	// golden, the distribution snapshot, the optimization-invariance and
+	// two-path arms are byte-identical with it).
 	//
-	// THE FOUR THAT REMAIN ARE THE AGGREGATE-ROOTED ARMS, and their mechanism
-	// is one step past this arc's fix: an aggregate publishes a relation of
-	// its OWN — its keys and its outputs, under the names IT decided — so the
-	// identity of those columns is the ARM's name, while the DAG qualifies
-	// them by the scan below it (`stageBuildTableAlias`). Closing it is the
-	// same move #1102 made for a set operation: treat an aggregate-terminated
-	// arm as a MATERIALIZED arm so the join qualifies it by `joinArmAlias`,
-	// and re-qualify here under that name. It is deferred rather than done
-	// because that alias decides the spelling of every grouped join arm in
-	// the corpus — TPC-H Q13, Q15, Q17 and Q18 each have one — and the change
-	// belongs with its own measurement of them.
-	"grouped-alias-src-collide/both/list": {
-		"dag":          "cols=[id:INT64 customer:STRING id:INT64 customer:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
-		"dag-shuffled": "cols=[id:INT64 customer:STRING id:INT64 customer:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
-		"dag-morsel4":  "cols=[id:INT64 customer:STRING id:INT64 customer:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
-	},
-	"grouped-alias-src/both/list": {
+	// THE TWO THAT REMAIN ARE THE NESTED GROUPED ARM: the block that renames
+	// is TWO blocks above the aggregate, with the inner block's own Sort
+	// between them, so `aggregateProjectionTarget` — which reads a Project
+	// whose INPUT is the aggregate's output, through a HAVING Filter and
+	// nothing else — does not reach it and no list is materialized. Marking
+	// such an arm materialized anyway was MEASURED in round 2 and is a
+	// different wrong answer, not a fix: the arm is then named `b` while its
+	// stage still emits the inner block's `p`/`n`, and the outer block's
+	// rename is lost — `cols=[p n b.product b.n]` where PostgreSQL publishes
+	// `k p k p`. Closing it needs the nested block's list materialized onto
+	// the aggregate stage (the #991/#1076 machinery, one level deeper), which
+	// is a second question and not a name.
+	"nested-rename-grouped/both/list": {
 		"dag":          "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
 		"dag-shuffled": "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
 		"dag-morsel4":  "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
@@ -59,16 +59,4 @@ var r2Pin = map[string]map[string]string{
 		"dag-shuffled": "cols=[id:INT64 customer:STRING id:INT64 customer:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
 		"dag-morsel4":  "cols=[id:INT64 customer:STRING id:INT64 customer:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
 	},
-	"nested-rename-grouped/both/list": {
-		"dag":          "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
-		"dag-shuffled": "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
-		"dag-morsel4":  "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
-	},
-
-	// #1095 IS CLOSED and its 2 cells are deleted, which is the proof: an
-	// ordering fused onto a JOIN whose probe is the aggregate that publishes
-	// one name twice now addresses the SLOT its class names, exactly as the
-	// gather's rename does (physical.joinProbeAggregateSlots, and the class
-	// through the block from physical.sortTermNamesAggregateItem).
-
 }

@@ -537,3 +537,20 @@ func setOpArmPublishesItsOwnList(child *logical.Node) bool {
 	}
 	return false
 }
+
+// dependentJoinNode is `logical.isDependentJoin`'s question asked from here: a
+// join the PLANNER manufactured out of a LATERAL, whose inner side is a plan OF
+// the outer side's rows and whose arms are therefore not the relations the
+// query wrote (ADR-0026 §3c).
+func dependentJoinNode(n *logical.Node) bool {
+	if n == nil || n.Type != logical.NodeJoin {
+		return false
+	}
+	for _, c := range n.Children {
+		if c != nil && c.LateralSubtree {
+			return true
+		}
+	}
+	return len(n.HiddenJoinCols) > 0 || n.LateralPadMarker != "" ||
+		len(n.LateralEmptyDefaults) > 0
+}

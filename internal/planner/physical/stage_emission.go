@@ -743,6 +743,32 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				!p.cteTerminals[(*stages)[idx].ID] {
 				p.recordAggProjectionRenames((*stages)[idx].ID,
 					absorbAggregateOutputProjection(child, &(*stages)[idx]))
+				// …and that arm's stream is then the AGGREGATE's own relation
+				// — its keys and its outputs, under the names IT decided —
+				// so the one name the enclosing query writes describes all of
+				// it, exactly as for a set operation (#1102's rule, one
+				// producer over). Without this the join qualified such an
+				// arm's duplicate columns by the SCAN below it, and two
+				// copies of one grouped block each bound the PROBE's copy:
+				// every row came back paired with itself (arc R2 round 2,
+				// P1). The mark is HERE, and not on every aggregate-rooted
+				// arm, because this is where the arm's list was really
+				// materialized: marking one whose projection this pass could
+				// not reach traded that wrong answer for another — the outer
+				// block's rename lost and the inner names published
+				// (measured; the two `nested-rename-grouped*` cells).
+				//
+				// NOT under a DEPENDENT join: a decorrelated LATERAL's arm is
+				// a plan OF the outer side's rows rather than a relation the
+				// query wrote (ADR-0026 §3c), and naming it by the enclosing
+				// alias there moved `MAX` over a CTE inside a LATERAL from
+				// PostgreSQL's declared scale on the DAG (12.7500) to the
+				// single-process arm's 12.75 — a wrong declaration on the
+				// wire traded for a right row set, which is not a trade
+				// (`TestKnownSetOperationTwoPathSplits`, measured).
+				if !dependentJoinNode(node) && !child.LateralSubtree {
+					armMaterialized[ci] = true
+				}
 			}
 			childLeaves = append(childLeaves, leafStages((*stages)[childStart:]))
 		}
