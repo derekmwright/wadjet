@@ -245,25 +245,40 @@ func (e *CorrelatedExistsSubquery) buildSQL(b *batch.RecordBatch, row int) (stri
 //
 // A column that IS present and holds SQL NULL still reads as nil, which is the
 // correct answer and unaffected by this.
+//
+// THE QUALIFIED SPELLING IS TRIED FIRST, and that order is the whole of #1098's
+// per-row half. The batch this reads is the enclosing query's stream, and when
+// the enclosing query is a JOIN that stream carries one arm's `id` bare and the
+// other arm's as `o.id` (exec.joinOutputSchemaWithMapping). Reading the bare
+// name first therefore answered the OTHER RELATION's column for a reference the
+// query qualified: `… FROM lat_ord o JOIN lat_item i ON i.order_id = o.id WHERE
+// o.id NOT IN (SELECT z.id FROM lat_ord z WHERE z.id = o.id)` re-ran the
+// subquery with lat_item's id, and answered 3 rows where PostgreSQL 17.11
+// answers none. An UNqualified reference, and a qualified one the stream does
+// not carry under its qualifier, still read the bare name — a single relation's
+// scan emits every column bare, which is the overwhelmingly common shape.
 func readOuterValues(b *batch.RecordBatch, row int, refs []plansql.OuterRef) (map[string]any, error) {
 	vals := make(map[string]any, len(refs))
 	for _, ref := range refs {
-		// The outer column may be named as just "column" in the batch
-		// (table qualifiers are stripped during projection). Try both.
 		key := ref.Table + "." + ref.Column
-		v := b.ColumnByName(ref.Column)
-		if v == nil {
-			// Try with table prefix (some queries preserve qualified names)
-			v = b.ColumnByName(strings.ReplaceAll(key, ".", "_"))
-		}
-		if v == nil {
+		var v *batch.Vector
+		if ref.Table != "" {
 			// ColumnByName is case-sensitive and correlation analysis
 			// lowercases every name it reports, so a mixed-case column
-			// ("SearchPhrase") never matches either spelling above.
-			v = columnByNameFold(b, ref.Column)
+			// ("SearchPhrase") never matches a byte-exact spelling.
+			v = columnByNameFold(b, key)
+			if v == nil {
+				// Some producers flatten the qualifier into the name.
+				v = columnByNameFold(b, strings.ReplaceAll(key, ".", "_"))
+			}
 		}
 		if v == nil {
-			v = columnByNameFold(b, strings.ReplaceAll(key, ".", "_"))
+			// The outer column is named as just "column" in the batch wherever
+			// the stream had no collision to disambiguate.
+			v = b.ColumnByName(ref.Column)
+		}
+		if v == nil {
+			v = columnByNameFold(b, ref.Column)
 		}
 		if v == nil {
 			return nil, &MissingOuterColumnError{Ref: ref, Available: batchColumnNames(b)}
@@ -734,12 +749,26 @@ func rerunSQL(kind string, b *batch.RecordBatch, row int, refs []plansql.OuterRe
 	// their own trees: an outer reference there did not move, and running the
 	// statement with it still in place is the silent answer §1c refuses.
 	if left := plansql.OuterRefsInUnsubstitutedClauses(info, outerTables, rewrite); len(left) > 0 {
-		return "", &UnsubstitutedOuterRefError{Kind: kind, SQL: sql, Refs: left}
+		return "", &UnsubstitutedOuterRefError{Kind: kind, SQL: sql, Refs: left,
+			Reason: "the substituted term still renders as a bare numeric literal, which a " +
+				"GROUP BY or an ORDER BY reads as a select-list POSITION"}
 	}
 	// And the belt: a rebuilt statement that still names a relation it does
 	// not read is one this engine cannot run, whatever put the name there.
 	if left := plansql.DanglingTableRefsWithScope(sql, scope); len(left) > 0 {
-		return "", &UnsubstitutedOuterRefError{Kind: kind, SQL: sql, Refs: left}
+		// NAME WHAT WAS FOUND. The reachable cause here is a nested SET
+		// OPERATION: the rebuild renders one select per block and has no arm
+		// for a set operation, so a reference written in an ARM is re-emitted
+		// as the user wrote it and survives into the rebuilt statement (#1072).
+		// Before the correlation walk descended into a nested block's arms
+		// this shape was not refused at all — it was planned UNCORRELATED, the
+		// arm's reference bound nothing, and every outer row answered NULL.
+		reason := "a reference the substitution did not rewrite survives in the rebuilt statement"
+		if plansql.HoldsNestedSetOperation(info) {
+			reason = "its body holds a SET OPERATION one level down, which the rebuild " +
+				"renders no arm for, so a reference written in an ARM is re-emitted as written"
+		}
+		return "", &UnsubstitutedOuterRefError{Kind: kind, SQL: sql, Refs: left, Reason: reason}
 	}
 	return sql, nil
 }
@@ -761,6 +790,12 @@ type UnsubstitutedOuterRefError struct {
 	Kind string
 	SQL  string
 	Refs []plansql.OuterRef
+	// Reason is WHICH of the two post-conditions failed, in the caller's own
+	// words. A refusal that states one mechanism for every cause is a refusal
+	// that sends the next reader to the wrong place: this message named a bare
+	// numeric literal in a GROUP BY for a query whose actual obstacle was a set
+	// operation one level down (#1072).
+	Reason string
 }
 
 func (e *UnsubstitutedOuterRefError) Error() string {
@@ -768,13 +803,16 @@ func (e *UnsubstitutedOuterRefError) Error() string {
 	for _, r := range e.Refs {
 		names = append(names, r.Table+"."+r.Column)
 	}
+	reason := e.Reason
+	if reason == "" {
+		reason = "a reference the substitution did not rewrite survives in the rebuilt statement"
+	}
 	return fmt.Sprintf("%s subquery is correlated on %s in a clause its per-row re-run "+
 		"cannot substitute — the rebuild renders the SELECT list, the WHERE, the HAVING, "+
 		"the GROUP BY, the ORDER BY and each JOIN's ON condition from their own trees, and "+
-		"the substituted term still renders as a bare numeric literal, which a GROUP BY or "+
-		"an ORDER BY reads as a select-list POSITION; this query has no distributed or "+
+		"%s; this query has no distributed or "+
 		"single-process lowering for that correlation\n  subquery: %s",
-		e.Kind, strings.Join(names, ", "), e.SQL)
+		e.Kind, strings.Join(names, ", "), reason, e.SQL)
 }
 
 // FatalEvalError satisfies the marker the pipeline drivers recover on.
