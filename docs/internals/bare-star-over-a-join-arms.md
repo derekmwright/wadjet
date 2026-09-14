@@ -105,27 +105,24 @@ a renaming block arm), because the RESOLVE spelling is the producer's: a
 qualified item binds its own relation's column whichever side built, so no
 later rule can permute what it means.
 
-It breaks in exactly one direction — where an arm's PUBLISHED name is not the
+It broke in exactly one direction — where an arm's PUBLISHED name is not the
 name its producer EMITS. That is ADR-0026 §2's pair of names arriving at a
-star, and until a star item carries both, the expansion declines exactly there
-(`armItemIsAddressable`): the value is kept and only the name is lost.
+star, and the close is to carry both: `StarColumn{Resolve, Publish}`, the same
+seam the qualified star uses (#1077). `(SELECT order_id, COUNT(*) …)` is
+referenced as `s.count(*)` and published as `count`, so the column carries
+PostgreSQL's value under PostgreSQL's name and OID.
 
 ## What it declines, and why the boundary is exactly there
 
 Each of these keeps the answer it had. A PARTIAL expansion is never returned:
 the star covers every arm or none of them.
 
-  - **An arm that publishes one name TWICE.** Every item is a qualified
-    reference, and `s.id` over a block publishing two `id`s binds the first —
-    so the second column would carry the first's VALUES. A wrong value is
-    worse than a wrong name. Closing it needs a block's column addressed by
-    POSITION.
-  - **An arm with an item whose PUBLISHED name is not its EMITTED spelling**
-    — an unaliased expression, aggregate, literal or CAST. `(SELECT order_id,
-    COUNT(*) …)` publishes `count` and emits `count(*)`, so `s.count` binds
-    nothing and the column reads NULL under the STRING default; declining
-    keeps `count(*)`'s value and type. `AS` makes the two names one, and the
-    arm publishes normally.
+  - **An arm that RESOLVES two items to one name.** Every item is a qualified
+    reference, and `s.id` over a block whose two items both resolve to `id`
+    binds the first — so the second column would carry the first's VALUES. A
+    wrong value is worse than a wrong name. Closing it needs a block's column
+    addressed by POSITION. Two items that merely PUBLISH one name are fine:
+    each references its own producer spelling.
   - **An arm that is a SET OPERATION.** Its columns reach the join under the
     SCAN's own qualifier — `(SELECT id FROM lat_ord UNION ALL …) a` joined
     against `lat_item` publishes `lat_ord.id` on the three DAG arms — so
@@ -151,11 +148,20 @@ left every such arm reading the join's stream — #997's divergence one node
 above where the first pass looked for it, and a list that flipped under a
 predicate that changes no row.
 
+Nor is a block's own RE-PROJECTION. A block that materialized an ORDER BY term
+of its own is wrapped in a Project of its visible list above its Sort and
+LIMIT, so the minted `__sortkey_0` dies with the sort (#991,
+`dropBlockHiddenSlots`). The wrapper carries NO alias — the name is the
+block's, one node down — so the list is read off the wrapper and the NAME off
+the node under it (`blockRelationName`). Reading only the root made exactly the
+blocks #991 repaired unstatable here, and they went back to publishing the
+plan's order: the two rules compose or neither holds.
+
 ## Gates
 
 | gate | what it holds |
 |---|---|
-| `coordinator.TestO1AStarOverAJoinPublishesTheQueryNotThePlan` | the seam: 47 shapes × five arms against PostgreSQL 17.11 |
+| `coordinator.TestO1AStarOverAJoinPublishesTheQueryNotThePlan` | the seam: 74 shapes × five arms against PostgreSQL 17.11, including a derived arm’s ROOT and its ITEM KIND |
 | `pgwire.TestO1TheWireDeclaresAStarJoinsOwnArms` | the same rule on the wire, names AND type OIDs |
 | `logical.TestABareStarOverAJoinExpandsToTheFromClausesArms` | the list itself, per shape |
 | `logical.TestABareStarOverAJoinDeclinesWhatItCannotState` | the declines above |

@@ -2050,23 +2050,26 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      by position, and `markCoPathingSelfJoinBuilds`'s arm-specific
      qualification is no longer a published name either. The census that
      pinned it is deleted; the rule is gated by
-     `coordinator.TestO1AStarOverAJoinPublishesTheQueryNotThePlan` (47 shapes
-     × five arms) and `pgwire.TestO1TheWireDeclaresAStarJoinsOwnArms`.
+     `coordinator.TestO1AStarOverAJoinPublishesTheQueryNotThePlan` (74 shapes
+     × five arms, varying the join kind, the predicate, the FROM order, the
+     star spelling, a derived arm's ROOT and its ITEM KIND) and
+     `pgwire.TestO1TheWireDeclaresAStarJoinsOwnArms` (names and type OIDs).
 
      WHAT STILL PUBLISHES THE PLAN'S ORDER is every FROM item whose own names
      do not address its columns, and the list is in ADR-0026 §9's decline
-     table: a block publishing ONE NAME TWICE (`s.id` binds the first, so the
-     second column would carry the first's values); an arm with an item whose
-     PUBLISHED name is not the name its producer EMITS — an unaliased
-     expression, aggregate, literal or CAST, where `COUNT(*)` publishes
-     `count` and is emitted as `count(*)`, and writing `AS` makes the two
-     names one; an arm that is a SET OPERATION, whose columns reach the join
-     under the scan's own qualifier; a LATERAL arm; and a table function. Each
-     keeps the VALUES it had — a wrong name rather than a wrong value — and
-     each has a cell in `coordinator.TestO1AStarOverAJoinPublishesTheQuery
-     NotThePlan`. The item-name class closes when a star item carries BOTH
-     names (ADR-0026 §9's pair); the duplicate-name class needs a block's
-     column addressed by POSITION.
+     table: a block whose two items RESOLVE to one name (`s.id` binds the
+     first, so the second column would carry the first's values); an arm that
+     is a SET OPERATION, whose columns reach the join under the scan's own
+     qualifier; a LATERAL arm; and a table function. Each keeps the VALUES it
+     had — a wrong name rather than a wrong value — and each has a cell in
+     that gate. Closing the resolve-collision class needs a block's column
+     addressed by POSITION.
+
+     An UNALIASED item in an arm — an expression, an aggregate, a literal or a
+     CAST — was in that list and is not any more: a star item carries ADR-0026
+     §9's PAIR, referencing the producer's spelling (`count(*)`) and publishing
+     PostgreSQL's name (`count`), so those arms answer PostgreSQL's value under
+     PostgreSQL's name and OID on all five arms and on the wire.
 
      The deferral this paragraph recorded read: the build side has to become a
      PROPERTY of the join node, with the children left in the query's written
@@ -3302,22 +3305,36 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `server.TestPolicyMaskingIsPlanTimeOnEveryDoor`'s three
      `a_laterals_own_star_*` cells.
 
-   - **The published NAME of an UNALIASED item inside a block a JOIN reads is
-     its expression text, where PostgreSQL publishes `?column?`.** (Added
-     2026-09-13, arc O2; PRE-EXISTING, measured byte-identical at
-     `0193c4e9`.) `SELECT * FROM (SELECT order_id, amount + 1 FROM lat_item) x
-     JOIN lat_ord o ON true` sends `amount + 1` in `RowDescription` where
-     PostgreSQL sends `?column?`. A column has two names (ADR-0026 §2) and the
-     block's stream carries the RESOLUTION one; the published name is applied
-     where the block IS the statement's output projection, and a star over a
-     join reads the stream instead. Values, types and positions agree on all
-     five arms — only the name differs. Making the stream carry `?column?`
-     would give two unaliased items ONE name, after which every by-name lookup
-     between the block and the client reads the first of them, so closing it
-     needs the published list travelling BESIDE the stream by POSITION
+   - **The published NAME of an UNALIASED item inside a block a LATERAL reads
+     is its expression text, where PostgreSQL publishes `?column?`.** (Added
+     2026-09-13, arc O2; PRE-EXISTING, measured byte-identical at `0193c4e9`.
+     NARROWED 2026-09-14 by arc O1 — the JOIN half is CLOSED.) `SELECT * FROM
+     lat_ord o JOIN LATERAL (SELECT order_id, i.amount + 1 FROM lat_item i
+     WHERE i.order_id = o.id) s ON true` sends `i.amount + 1` in
+     `RowDescription` where PostgreSQL sends `?column?`. A column has two names
+     (ADR-0026 §2) and the decorrelated body's stream carries the RESOLUTION
+     one; the published name is applied where the block IS the statement's
+     output projection, and a star over the lateral's join reads the stream
+     instead. Values, types and positions agree on all five arms — only the
+     name differs. Making the stream carry `?column?` would give two unaliased
+     items ONE name, after which every by-name lookup between the block and the
+     client reads the first of them, so closing it needs the published list
+     travelling BESIDE the stream by POSITION
      (`physical.ProjectExprSpec.SourceSlot` one relation out). Pinned per arm
-     in `coordinator.TestArcO2ADerivedBlockPublishesItsVisibleList`, twelve
-     cells.
+     in `coordinator.TestArcO2ADerivedBlockPublishesItsVisibleList`, six cells.
+
+     THE JOIN SPELLING IS CLOSED (arc O1, #997/#1012): a star over a join
+     MINTS the projection that publishes it, and each item carries ADR-0026
+     §9's pair — it references the producer's spelling (`amount + 1`) and
+     publishes PostgreSQL's name (`?column?`), so no by-name lookup is asked to
+     serve both. `SELECT * FROM (SELECT order_id, amount + 1 FROM lat_item) x
+     JOIN lat_ord o ON true` now declares `?column?` on all five arms and on
+     the wire, with the value and OID PostgreSQL sends. The six `joined/*` pins
+     that recorded it are deleted, and the ITEM-KIND row of
+     `coordinator.TestO1AStarOverAJoinPublishesTheQueryNotThePlan` (unaliased
+     expression, aggregate, SUM, literal, CAST, each through an inline derived
+     arm, a CTE arm and a derived block) is the gate, with
+     `pgwire.TestO1TheWireDeclaresAStarJoinsOwnArms` for the OIDs.
 
    - **A QUALIFIED star over a block that publishes TWO columns of one name is
      REFUSED, where PostgreSQL answers the pair.** (Added 2026-09-13, arc O2 —
@@ -3336,7 +3353,12 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      ANSWERS where PostgreSQL raises `42702 column reference "id" is
      ambiguous`, and that half is open. Gated as a refusal in
      `coordinator.TestArcO2ADerivedBlockPublishesItsVisibleList`'s `o2Refuses`,
-     four cells on five arms.
+     four cells on five arms, and — for the spelling where the duplicate comes
+     from a body the block did not write, `(SELECT * FROM lat_ord o JOIN
+     lat_item li ON …) d` publishing `id` in positions 1 and 4 —
+     `coordinator.TestArcJ1AQualifiedStarExpandsFromTheRelationsOutput`'s
+     `a-derived-table-whose-body-is-a-star-over-a-join`, with the
+     distinct-names control beside it.
 
    - **A QUALIFIED STAR over a CORRELATED LATERAL whose own bound is not
      applied per outer row is REFUSED.** (Added 2026-09-13, arc O2; NARROWED

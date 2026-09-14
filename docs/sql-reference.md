@@ -916,13 +916,9 @@ join operator's own order instead — the same rows and the same values, under
 the producer's names. A name is the only handle an expanded star item has, so
 an arm is published only where its own names address its columns:
 
-  - a derived block that publishes ONE NAME TWICE — `(SELECT * FROM a JOIN b)
-    s` publishes `s`'s two `id`s, and an outer star would have to address the
-    second by a name that binds the first;
-  - an arm whose item PostgreSQL names one thing and this engine emits under
-    another: an UNALIASED expression, aggregate, literal or `CAST`
-    (`COUNT(*)` publishes `count` and is emitted as `count(*)`). Write `AS` to
-    pin the name and the arm publishes normally;
+  - a derived block whose two items resolve to ONE NAME — `(SELECT * FROM a
+    JOIN b) s` publishes `s`'s two `id`s, and an outer star would have to
+    address the second by a name that binds the first;
   - an arm that is a SET OPERATION, whose columns reach the join under the
     scan's own qualifier rather than the block's;
   - a `LATERAL` arm, a table function, and an arm whose own list this planner

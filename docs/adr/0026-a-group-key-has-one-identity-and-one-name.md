@@ -2771,14 +2771,16 @@ the PRODUCER's: `expr.ResolveColumnRef` binds `b.id` exactly when the join
 qualified b's side and through the qualifier-stripping fallback when it
 qualified a's, so no later rule can permute what the item means.
 
-It breaks in exactly ONE direction — where an arm's PUBLISHED name is not the
-name its producer EMITS — which is §2's pair of names arriving at a star:
+It broke in exactly ONE direction — where an arm's PUBLISHED name is not the
+name its producer EMITS, which is §2's pair of names arriving at a star:
 `(SELECT order_id, COUNT(*) …)` publishes `count` (PostgreSQL's FigureColname)
-and emits `count(*)`, so an item spelled `s.count` binds nothing and reads NULL
-under the STRING default. Until a star item carries BOTH names, the expansion
-DECLINES exactly there (`armItemIsAddressable`), which keeps the value and
-costs only the name. Carrying the pair is the close: resolve by the producer's
-spelling, publish PostgreSQL's.
+and emits `count(*)`, so an item spelled `s.count` bound nothing and read NULL
+under the STRING default. **CLOSED by carrying the pair**: a star item is a
+`StarColumn{Resolve, Publish}` — it references the producer's spelling and
+publishes PostgreSQL's name — which is the same seam a QUALIFIED star uses
+(#1077, arc O2), so one model serves both spellings. An unaliased aggregate,
+expression, literal or CAST in an arm now answers PostgreSQL's value under
+PostgreSQL's name and OID on all five arms and on the wire.
 
 **What declines, and why the boundary is there.** Each of these keeps the
 answer it had — the plan's order under the producer's names — and a PARTIAL
@@ -2786,8 +2788,7 @@ expansion is never returned:
 
 | declines | why |
 |---|---|
-| an arm publishing ONE NAME TWICE | `s.id` binds the first, so the second column would carry the first's VALUES — a wrong value where leaving the star alone is only a wrong name |
-| an arm with an item whose PUBLISHED name is not its EMITTED spelling | the pair above: an unaliased expression, aggregate, literal or CAST. `AS` makes the two names one and the arm publishes |
+| an arm that RESOLVES two items to one name | the reference `s.id` binds the first, so the second column would carry the first's VALUES. Two items that merely PUBLISH one name are fine — each still references its own producer spelling, and PostgreSQL publishes duplicates too |
 | an arm that is a SET OPERATION | its columns reach the join under the SCAN's qualifier, not the block's, so `a.id` binds the other arm's `id` — measured wrong on the three DAG arms |
 | two arms of one name | both expand to the same qualified reference |
 | a LATERAL arm, or a manufactured lateral's join | the subtree carries the correlation slot the join drops (§3c) |
@@ -2803,6 +2804,17 @@ through unchanged (`blockOwnProjection`) — stopping at the root instead was
 #997's divergence surviving one node above where the first pass looked for it
 (round-2 review, P1).
 
+Nor is a block's own RE-PROJECTION. A block that materialized an ORDER BY term
+of its own is wrapped in a Project of its visible list above its Sort and
+LIMIT, so the minted key dies with the sort (§9's `dropBlockHiddenSlots`,
+#991), and that wrapper carries NO alias — the name is the block's, one node
+down. The list comes from the wrapper, because it is what the block publishes;
+the NAME comes from the block under it (`blockRelationName`). Reading only the
+root made every such arm unstatable, which put the plan's order back on exactly
+the shapes #991 had just repaired — the two rules compose or neither holds, and
+`coordinator.TestArcK3ADerivedBlockPublishesItsOwnProjection`'s
+`sortkey/introducing-block-keeps-its-column` is where that is measured.
+
 The design, with every measurement, is
 `docs/internals/bare-star-over-a-join-arms.md`.
 
@@ -2810,9 +2822,9 @@ The design, with every measurement, is
 
 | gate | what it holds |
 |---|---|
-| `coordinator.TestO1AStarOverAJoinPublishesTheQueryNotThePlan` | the seam: 47 shapes — inner / left / right / full / cross / comma / self / three-way / derived block / CTE × no, selective and zero-row predicates × both FROM orders × `*`, `t.*`, `*` beside an item × no sort, a written key, a positional key, DISTINCT, LIMIT — on FIVE arms against PostgreSQL 17.11 |
+| `coordinator.TestO1AStarOverAJoinPublishesTheQueryNotThePlan` | the seam: 74 shapes — inner / left / right / full / cross / comma / self / three-way / derived block / CTE × no, selective and zero-row predicates × both FROM orders × `*`, `t.*`, `*` beside an item × no sort, a written key, a positional key, DISTINCT, LIMIT × a derived arm's ROOT (Sort, LIMIT, DISTINCT, GROUP BY, set operation) × its ITEM KIND (aliased, unaliased expression, aggregate, literal, CAST) — on FIVE arms against PostgreSQL 17.11 |
 | `pgwire.TestO1TheWireDeclaresAStarJoinsOwnArms` | the same rule on the wire: RowDescription names AND type OIDs, including the three #997 predicates and the zero-row declaration |
 | `logical.TestABareStarOverAJoinExpandsToTheFromClausesArms` | the list per shape, and that every item keeps its qualifier |
-| `logical.TestABareStarOverAJoinDeclinesWhatItCannotState` | the seven declines |
+| `logical.TestABareStarOverAJoinDeclinesWhatItCannotState` | the six declines |
 | `logical.TestAnUnstatedStarProjectionIsTakenBackOut` | the hypothesis, and the naming that travels back with it |
 | `logical.TestAPositionalSortKeyOverAStarJoinBindsItsItemsSource` | the ordinal, in the input's spelling |
