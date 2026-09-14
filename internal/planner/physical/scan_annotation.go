@@ -72,8 +72,10 @@ func (p *Planner) annotateScanColumns(ctx context.Context, node *logical.Node) {
 			}
 			strictInt := make(map[string]bool, len(table.Schema.Columns))
 			for _, c := range table.Schema.Columns {
-				switch c.Type {
-				case parquet.TypeInt64, parquet.TypeInt32:
+				// The set expr.operandIsInt's ColRef arm accepts, PORT and
+				// PROTOCOL included since their arithmetic moved to the int4
+				// kernels (#1000) — see physical.intArithColumnType.
+				if intArithColumnType(c.Type) {
 					strictInt[strings.ToLower(c.Name)] = true
 				}
 			}

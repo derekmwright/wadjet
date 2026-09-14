@@ -88,19 +88,39 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 		{name: "813 control: SUM(int8) grouped", sql: grp("SUM", "w_i64"),
 			want: "cols=[v:DECIMAL(38,0)] rows=1 | 9007201419001868"},
 		{
-			// The width the filing does not name and the census found: a
-			// FLOAT32 input takes the same float64 accumulator, so the window
-			// and the grouped spelling disagree about the TYPE and about the
-			// last digit.
+			// The width the filing does not name and the census found. It had
+			// THREE answers: the window's float64 accumulator, the grouped
+			// spelling's float64 total narrowed once at the store, and the
+			// server's. All three are one number now — PostgreSQL's —
+			// because sum(real) accumulates at float4's width on every path
+			// (#950).
+			//
+			// The window column still DECLARES float8 where the server
+			// declares real. That is a declaration, not a value: the box here
+			// is the real widened, digit for digit the grouped spelling's.
+			// Recorded in ADR-0012's #813 entry.
 			name: "813 SUM(real) OVER ()",
 			sql:  win("SUM", "w_f32"),
-			want: "cols=[v:FLOAT64] rows=1 | 1.67772251e+07",
-			why: "PostgreSQL 17 declares real and answers 1.6777224e+07; wadjet's " +
-				"GROUPED spelling declares FLOAT32 and answers 1.6777226e+07. Three " +
-				"answers to one question. DEFERRED (ADR-0012).",
+			want: "cols=[v:FLOAT64] rows=1 | 1.6777224e+07",
+			why: "PostgreSQL 17.11 declares real and answers 1.6777224e+07, which is " +
+				"the VALUE both spellings now carry; only the window's DECLARATION is " +
+				"still float8.",
 		},
 		{name: "813 control: SUM(real) grouped", sql: grp("SUM", "w_f32"),
-			want: "cols=[v:FLOAT32] rows=1 | 1.6777226e+07"},
+			want:    "cols=[v:FLOAT32] rows=1 | 1.6777224e+07",
+			wantDag: "cols=[v:FLOAT32] rows=1 | 1.6777226e+07",
+			// Same width, different ASSOCIATION. The DAG splits this scan
+			// into three partial aggregates and folds their totals, and at
+			// float4's width the fold's order reaches the SIXTH significant
+			// digit where a float8 accumulator's reaches the tenth — both
+			// 16777224 and 16777226 are the float4 sum of these ten values,
+			// under different groupings. ADR-0013's nondeterminism class 9
+			// at a narrower carrier; PostgreSQL's own parallel aggregate has
+			// it too.
+			wantDagshuf: "cols=[v:FLOAT32] rows=1 | 1.6777226e+07",
+			why: "class 9 at float4's width: the DAG folds three partial real " +
+				"totals and the association moves the sixth digit",
+		},
 		{name: "813 control: SUM(float8) OVER ()", sql: win("SUM", "w_f64"),
 			want: "cols=[v:FLOAT64] rows=1 | 9.007199271518218e+15"},
 		{name: "813 control: SUM(numeric(9,2)) OVER ()", sql: win("SUM", "w_d2"),
@@ -252,18 +272,21 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 		// above pins — and each group's AVG is that group's SUM over its own
 		// COUNT(*) (1660 / 1640 / 1637), so every number here is checkable
 		// from PostgreSQL's `sum(int4)` rule and arithmetic, not taken on
-		// faith. `c_proto % 3` declares float8, which is the modulo's own
-		// pre-existing typing and not this arc's.
+		// faith. `c_proto % 3` declares INT64 since #1000: arithmetic over a
+		// PROTOCOL is int4 arithmetic and `proto % 3` is `integer` on the
+		// server, which this engine widens to int8 the way it widens every
+		// computed integer (ADR-0024's recorded widening). It declared float8
+		// before, which was the modulo reading its operand through a double.
 		{name: "953 keyed: SUM(PROTOCOL) GROUP BY a key — the row updater and the SoA scatter",
 			sql:  "SELECT c_proto % 3 AS g, SUM(c_proto) AS s FROM typemx GROUP BY c_proto % 3 ORDER BY 1",
-			want: "cols=[g:FLOAT64 s:INT64] rows=4 | 0,209145 | 1,205430 | 2,206860 | NULL,NULL"},
+			want: "cols=[g:INT64 s:INT64] rows=4 | 0,209145 | 1,205430 | 2,206860 | NULL,NULL"},
 		{name: "953 keyed: AVG(PROTOCOL) GROUP BY a key — the exact Int128 scatter",
 			sql: "SELECT c_proto % 3 AS g, AVG(c_proto) AS a FROM typemx GROUP BY c_proto % 3 ORDER BY 1",
-			want: "cols=[g:FLOAT64 a:DECIMAL(38,4)] rows=4 | 0,125.9910 | 1,125.2622 | " +
+			want: "cols=[g:INT64 a:DECIMAL(38,4)] rows=4 | 0,125.9910 | 1,125.2622 | " +
 				"2,126.3653 | NULL,NULL"},
 		{name: "953 keyed: SUM(PORT) GROUP BY a key",
 			sql: "SELECT c_port % 3 AS g, SUM(c_port) AS s FROM typemx GROUP BY c_port % 3 ORDER BY 1",
-			want: "cols=[g:FLOAT64 s:INT64] rows=4 | 0,5792238 | 1,5792226 | " +
+			want: "cols=[g:INT64 s:INT64] rows=4 | 0,5792238 | 1,5792226 | " +
 				"2,5792214 | NULL,NULL"},
 		// PROTOCOL holds 0..255 with every value present, so the DISTINCT
 		// total is 0+1+…+255 = 32640 over 256 values — sharply different from
@@ -474,50 +497,51 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 				"numwidth c, numwidth d, numwidth e ORDER BY 1 LIMIT 1",
 			want: "cols=[v:DECIMAL(38,0)] rows=1 | 90072014190018680000"},
 
-		// #987 review ROUND 3, P1 — PINNED, fail-on-agree. A bare PORT or
-		// PROTOCOL takes int4's result types (the eight #953 cells above);
-		// the same column under ARITHMETIC does not, in EITHER spelling,
-		// because `c_port * 1` is evaluated on the float path.
-		// `expr.operandIsInt` keeps the network types there deliberately
-		// ("Timestamps/dates/network types keep the float path — their
-		// arithmetic semantics are handled elsewhere"), and
-		// `physical.intArithAllInt` mirrors it so a declaration cannot
-		// promise an integer the kernel will not produce. Moving the
-		// declaration alone would be exactly that promise.
+		// #1000, the fix's proof: these six cells were PINNED fail-on-agree
+		// at float8 and the pins are gone. A bare PORT or PROTOCOL took
+		// int4's result types (the eight #953 cells above) while the same
+		// column under ARITHMETIC did not, because `expr.operandIsInt` kept
+		// the network types on the float path and `physical.intArithAllInt`
+		// mirrored it so the declaration could not promise an integer the
+		// kernel would not produce.
 		//
-		// The two spellings AGREE with each other and PostgreSQL has neither
-		// type, so this is an internal-consistency gap, not a value
-		// divergence — but it is one the docs claimed was closed, so it is
-		// pinned here and recorded in ADR-0012's #953 entry with its
-		// mechanism. The day the expression layer makes network arithmetic
-		// integral, these cells FAIL and deleting them is the proof.
-		{name: "953 P1 PINNED: SUM(PROTOCOL * 1) OVER () is float8, not bigint",
+		// Both moved together. Arithmetic over a PORT is int4 arithmetic and
+		// its RESULT is an integer — a port is constrained to 0..65535 at the
+		// TYPE boundary only, exactly as `smallint + 1` is integer in
+		// PostgreSQL. The values are unchanged; the BOX is the fix, and
+		// `c_proto / 2` is 127 rather than 127.5 because integer division
+		// truncates.
+		{name: "1000: SUM(PROTOCOL * 1) OVER () is bigint, like the bare SUM",
 			sql:  "SELECT SUM(c_proto * 1) OVER () AS v FROM typemx ORDER BY 1 LIMIT 1",
-			want: "cols=[v:FLOAT64] rows=1 | 621435",
-			why: "the bare SUM(c_proto) is INT64 621435 two dozen cells up. PORT and " +
-				"PROTOCOL arithmetic runs on the float path by design (expr.operandIsInt); " +
-				"closing it means moving the KERNEL, not this declaration. PINNED."},
-		{name: "953 P1 PINNED control: the GROUPED spelling agrees",
+			want: "cols=[v:INT64] rows=1 | 621435"},
+		{name: "1000 control: the GROUPED spelling agrees",
 			sql:  "SELECT SUM(c_proto * 1) AS v FROM typemx",
-			want: "cols=[v:FLOAT64] rows=1 | 621435",
-			why:  "same mechanism; the two spellings agree with each other, which is the point"},
-		{name: "953 P1 PINNED: SUM(PORT * 1) OVER () is float8",
+			want: "cols=[v:INT64] rows=1 | 621435"},
+		{name: "1000: SUM(PORT * 1) OVER () is bigint",
 			sql:  "SELECT SUM(c_port * 1) OVER () AS v FROM typemx ORDER BY 1 LIMIT 1",
-			want: "cols=[v:FLOAT64] rows=1 | 1.7376678e+07",
-			why: "the bare SUM(c_port) is INT64 17376678 — the same number in a different " +
-				"box AND a different rendering. PINNED with SUM(c_proto * 1)."},
-		{name: "953 P1 PINNED control: the GROUPED spelling agrees",
+			want: "cols=[v:INT64] rows=1 | 17376678"},
+		{name: "1000 control: the GROUPED spelling agrees",
 			sql:  "SELECT SUM(c_port * 1) AS v FROM typemx",
-			want: "cols=[v:FLOAT64] rows=1 | 1.7376678e+07",
-			why:  "same mechanism"},
-		{name: "953 P1 PINNED: SUM(ABS(PROTOCOL)) OVER () is float8",
+			want: "cols=[v:INT64] rows=1 | 17376678"},
+		{name: "1000: SUM(ABS(PROTOCOL)) OVER () is bigint",
 			sql:  "SELECT SUM(ABS(c_proto)) OVER () AS v FROM typemx ORDER BY 1 LIMIT 1",
-			want: "cols=[v:FLOAT64] rows=1 | 621435",
-			why:  "ABS answers in its argument's domain, and that domain is the float path here"},
-		{name: "953 P1 PINNED: AVG(PROTOCOL * 1) OVER () is float8, not numeric(38,4)",
+			want: "cols=[v:INT64] rows=1 | 621435"},
+		{name: "1000: AVG(PROTOCOL * 1) OVER () is numeric(38,4), like the bare AVG",
 			sql:  "SELECT AVG(c_proto * 1) OVER () AS v FROM typemx ORDER BY 1 LIMIT 1",
-			want: "cols=[v:FLOAT64] rows=1 | 125.87299979744785",
-			why:  "the bare AVG(c_proto) is DECIMAL(38,4). PINNED with the SUM cells."},
+			want: "cols=[v:DECIMAL(38,4)] rows=1 | 125.8730"},
+		{name: "1000: a negated PORT is an integer",
+			sql:  "SELECT SUM(-c_port) AS v FROM typemx",
+			want: "cols=[v:INT64] rows=1 | -17376678"},
+		{name: "1000: PROTOCOL division TRUNCATES, as int4 division does",
+			sql:  "SELECT SUM(c_proto / 2) AS v FROM typemx",
+			want: "cols=[v:INT64] rows=1 | 309483",
+			why: "it answered 310717.5 on the float path. 309483 is computed from the " +
+				"FIXTURE GENERATOR, not from this engine: over typematrix.Data the " +
+				"protocols total 621435 with 2469 odd values, and (621435-2469)/2 is " +
+				"309483 — which is the identity the cell below asserts as well"},
+		{name: "1000 control: the truncation identity holds over the same column",
+			sql:  "SELECT (SUM(c_proto) - SUM(c_proto % 2)) / 2 AS v FROM typemx",
+			want: "cols=[v:INT64] rows=1 | 309483"},
 
 		{
 			// The OTHER side of the same walk, and the reason it is a walk

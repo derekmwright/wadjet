@@ -53,6 +53,14 @@ func NumericDomainResult(name string, args []batch.TypeID) (batch.TypeID, bool) 
 		switch args[0] {
 		case batch.TypeInt32, batch.TypeInt64, batch.TypeFloat32:
 			return args[0], true
+		case batch.TypePort, batch.TypeProtocol:
+			// The answer is an INTEGER, not a port: arithmetic over a port is
+			// int4 arithmetic and its result is int4, the same way
+			// `abs(smallint)` is integer in PostgreSQL (#1000). The value half
+			// already agreed — a PORT boxes as an int32 and absKeepsDomain
+			// takes that arm — so this line is what stops the declaration from
+			// widening it to double precision on the way out.
+			return batch.TypeInt32, true
 		}
 	case "mod":
 		// Both integers, and the wider of the two — PostgreSQL's
@@ -63,6 +71,8 @@ func NumericDomainResult(name string, args []batch.TypeID) (batch.TypeID, bool) 
 			if l == batch.TypeInt64 || r == batch.TypeInt64 {
 				return batch.TypeInt64, true
 			}
+			// int4, including for a PORT or PROTOCOL operand: the result of
+			// arithmetic over one is an integer (#1000).
 			return batch.TypeInt32, true
 		}
 	}
@@ -70,7 +80,11 @@ func NumericDomainResult(name string, args []batch.TypeID) (batch.TypeID, bool) 
 }
 
 func isDomainInt(t batch.TypeID) bool {
-	return t == batch.TypeInt32 || t == batch.TypeInt64
+	switch t {
+	case batch.TypeInt32, batch.TypeInt64, batch.TypePort, batch.TypeProtocol:
+		return true
+	}
+	return false
 }
 
 // absKeepsDomain is ABS over a boxed value whose Go type names an integer or a

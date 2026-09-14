@@ -88,8 +88,17 @@ type BinOpNumeric struct {
 // arithmetic node, or any of the value PRODUCERS int_domain.go enumerates —
 // a CAST to an integer type, a polymorphic function over integer arguments,
 // a choice construct whose branches are all integer (#849).
-// Timestamps/dates/network types keep the float path — their arithmetic
-// semantics are handled elsewhere and unchanged.
+// PORT and PROTOCOL are on the integer path (#1000). They declare int4 on the
+// wire (#834) and a BARE SUM over one already follows int4's rules, but a
+// COMPUTED argument — `c_port * 1`, `ABS(c_proto)`, `-c_port` — produced a
+// FLOAT64 vector, so `SUM(c_port * 1)` accumulated in float64 where
+// PostgreSQL's int4 arithmetic is exact, and `c_proto / 2` answered 127.5
+// where the server answers 127. A port is constrained to 0..65535 at the TYPE
+// boundary only: arithmetic over one is plain int4 arithmetic and its RESULT
+// is an integer, exactly as `smallint + 1` is integer in PostgreSQL.
+//
+// Timestamps, dates and the ADDRESS types (IPv4, IPv6, MAC, CIDR) keep the
+// float path — their arithmetic semantics are handled elsewhere and unchanged.
 //
 // The concrete node cases come BEFORE the intModer interface case on purpose:
 // *BinOp implements intMode too now, and a type switch takes the first case
@@ -102,7 +111,7 @@ func operandIsInt(e Expr, b *batch.RecordBatch) bool {
 			return false
 		}
 		switch v.typ {
-		case batch.TypeInt64, batch.TypeInt32:
+		case batch.TypeInt64, batch.TypeInt32, batch.TypePort, batch.TypeProtocol:
 			return true
 		}
 		return false

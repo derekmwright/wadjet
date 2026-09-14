@@ -116,6 +116,19 @@ func inferProjectionDeclTypeConf(node plansql.Node, fallback parquet.TypeID,
 	return expr.Decl(fallback), expr.Undecided
 }
 
+// intArithColumnType is the set expr.operandIsInt's ColRef arm accepts. PORT
+// and PROTOCOL are in it because their arithmetic runs on the int4 kernels
+// (#1000): the declaration and the kernel have to name the same set, or the
+// plan promises an integer the runtime does not produce — or, as here before
+// the kernel moved, declines one it does.
+func intArithColumnType(t parquet.TypeID) bool {
+	switch t {
+	case parquet.TypeInt64, parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol:
+		return true
+	}
+	return false
+}
+
 // intArithAllInt mirrors expr.operandIsInt over the AST: int-typed scan
 // columns, integer literals, and nested integer arithmetic. Anything
 // unrecognized declines (Float64 declaration = today's behavior). `/` is
@@ -157,7 +170,7 @@ func intArithAllInt(node plansql.Node, strictInt map[string]bool, decls colDecls
 			// type a bare column reference at those very sites, so reading
 			// them here claims nothing new; it only stops the claim from
 			// evaporating the moment the reference sits under a `+`.
-			return c.Type == parquet.TypeInt64 || c.Type == parquet.TypeInt32
+			return intArithColumnType(c.Type)
 		}
 		// A ROW FIELD PATH of a strictly-int type is one too. strictInt is
 		// keyed by COLUMN name and a field is not a column, so `rw.n + 1`
@@ -165,7 +178,7 @@ func intArithAllInt(node plansql.Node, strictInt map[string]bool, decls colDecls
 		// — the two spellings of one question answering with different types
 		// (#568, #297's rule).
 		if f, ok := decls.field(n); ok && decls.isFieldPath(n) {
-			return f.Type == parquet.TypeInt64 || f.Type == parquet.TypeInt32
+			return intArithColumnType(f.Type)
 		}
 		return false
 	case *plansql.FuncCallNode:
@@ -1164,7 +1177,11 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 					return d
 				}
 				switch t.ID {
-				case parquet.TypeInt64, parquet.TypeInt32:
+				case parquet.TypeInt64, parquet.TypeInt32,
+					parquet.TypePort, parquet.TypeProtocol:
+					// PORT and PROTOCOL negate as integers, the same set
+					// intArithColumnType names: `-c_port` is an INTEGER on
+					// both engines and the kernel produces one (#1000).
 					return withExact(expr.Decl(parquet.TypeInt64)), c
 				case parquet.TypeFloat64, parquet.TypeFloat32:
 					return withExact(expr.Decl(parquet.TypeFloat64)), c

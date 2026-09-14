@@ -142,20 +142,27 @@ func TestAComputedIntegerWindowArgumentDeclaresPostgresOID(t *testing.T) {
 		// where the OID is seen.
 		{"cast_int8_times_two", "CAST(i64 AS BIGINT) * 2", oidNumeric, "18014398509481956"},
 
-		// PINNED, fail-on-agree (#987 review round 3, P1). A BARE PORT or
-		// PROTOCOL takes int4's result types — the two cells first — and the
-		// same column under ARITHMETIC does not, in either spelling, because
-		// `pt * 1` is evaluated on the FLOAT path: `expr.operandIsInt` keeps
-		// the network types there deliberately and `physical.intArithAllInt`
-		// mirrors it, so a declaration cannot promise an integer the kernel
-		// will not produce. Closing it means moving the KERNEL. PostgreSQL
-		// has neither type, so the two spellings agreeing with each other is
-		// the property at stake; ADR-0012's #953 entry carries the mechanism.
+		// #1000, and these three were PINNED fail-on-agree at OID 701. A
+		// BARE PORT or PROTOCOL took int4's result types — the two cells
+		// first — and the same column under ARITHMETIC did not, in either
+		// spelling, because `pt * 1` was evaluated on the FLOAT path:
+		// `expr.operandIsInt` kept the network types there and
+		// `physical.intArithAllInt` mirrored it so a declaration could not
+		// promise an integer the kernel would not produce.
+		//
+		// The KERNEL moved and the declaration followed. Arithmetic over a
+		// PORT is int4 arithmetic whose result is an integer, so all five
+		// cells declare bigint now, which is what PostgreSQL declares for
+		// `sum(int4_expression)`.
 		{"port_bare", "pt", oidInt8, "9627"},
 		{"protocol_bare", "pr", oidInt8, "30"},
-		{"port_times_one_PINNED", "pt * 1", oidFloat8, "9627"},
-		{"protocol_times_one_PINNED", "pr * 1", oidFloat8, "30"},
-		{"protocol_abs_PINNED", "ABS(pr)", oidFloat8, "30"},
+		{"port_times_one", "pt * 1", oidInt8, "9627"},
+		{"protocol_times_one", "pr * 1", oidInt8, "30"},
+		{"protocol_abs", "ABS(pr)", oidInt8, "30"},
+		// The shapes the filing also names, now that the domain is integral:
+		// a negated port, and a division that TRUNCATES.
+		{"port_negated", "-pt", oidInt8, "-9627"},
+		{"protocol_plus_zero", "pr + 0", oidInt8, "30"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			for _, sp := range []struct {

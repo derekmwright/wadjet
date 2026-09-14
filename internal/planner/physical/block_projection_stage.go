@@ -320,7 +320,7 @@ func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool,
 		// materializes a computed column into a scan fragment (#297, #445):
 		// without it `COUNT(*) + 1` declares FLOAT64 where every other path
 		// answers a bigint (ADR-0024).
-		if col.Type == parquet.TypeInt32 || col.Type == parquet.TypeInt64 {
+		if intArithColumnType(col.Type) {
 			strictInt[lc] = true
 		}
 	}
