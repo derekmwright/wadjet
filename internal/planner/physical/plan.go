@@ -626,6 +626,10 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// asks what the fragment's input will really SHIP, which is what those
 	// passes have just settled.
 	bindConsumersToPublishedIdentity(stages)
+	// …and the ADVISORY side schemas a join hands an EMPTY partition, wherever
+	// `markCoPathingSelfJoinBuilds` changed a producing stage's spelling after
+	// those declarations were written (join_declared_schema.go, ADR-0010).
+	respellDeclaredJoinSideSchemas(stages)
 	if err := assertJoinFiltersAreBacked(stages); err != nil {
 		return nil, err
 	}

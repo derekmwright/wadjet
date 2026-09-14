@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -265,7 +266,62 @@ func r2Table() []r2Cell {
 			}
 		}
 	}
+	out = append(out, r2OuterCells()...)
 	return append(out, r2IssueCells()...)
+}
+
+// r2OuterCells is the OUTER-JOIN dimension of the same seam: the arm on the
+// NULL-SUPPLYING side of a LEFT, RIGHT or FULL join.
+//
+// The cross product above joins with a plain `JOIN` throughout, and an outer
+// join asks the seam a question an inner one cannot: the task whose build
+// partition is EMPTY must still emit the NULL-extended probe rows, under the
+// same relation every other task emits. It does that from the side's DECLARED
+// schema — so a declaration that is narrower than the stream is a file of the
+// wrong WIDTH beside its siblings (ADR-0010), and a NULL-extended row whose
+// column the declaration lost reads the wrong relation's value:
+// `SELECT DISTINCT o.id, s.k FROM lat_ord o LEFT JOIN (SELECT o2.id AS k FROM
+// lat_item i2 JOIN lat_ord o2 ON o2.id = i2.order_id) s ON s.k = o.id` read
+// `3,3` on the three DAG arms where PostgreSQL 17.11 and both single-process
+// arms read `3,NULL` (arc R2 round 2, B1).
+//
+// {LEFT, RIGHT, FULL} × {join-bodied, set-op, grouped, nested renamed} ×
+// {an explicit list, DISTINCT, a star}, with the block always on the side that
+// supplies NULLs.
+func r2OuterCells() []r2Cell {
+	bodies := map[string]func(k, p string) string{}
+	for _, b := range r2ArmBodies() {
+		bodies[b.key] = b.body
+	}
+	kinds := []struct{ key, from string }{
+		{"left", "lat_ord o LEFT JOIN (%s) a ON a.k = o.id"},
+		{"right", "(%s) a RIGHT JOIN lat_ord o ON a.k = o.id"},
+		{"full", "lat_ord o FULL JOIN (%s) a ON a.k = o.id"},
+	}
+	consumers := []struct {
+		key, sel string
+	}{
+		{"list", "SELECT o.id, a.k, a.p FROM "},
+		{"distinct", "SELECT DISTINCT o.id, a.k FROM "},
+		{"star", "SELECT * FROM "},
+	}
+	var out []r2Cell
+	for _, arm := range []string{"joinbody", "union", "grouped", "nested-rename"} {
+		body := bodies[arm]("k", "p")
+		body = strings.TrimSpace(body)
+		for _, kind := range kinds {
+			from := fmt.Sprintf(kind.from, body)
+			for _, c := range consumers {
+				out = append(out, r2Cell{
+					name:   "outer/" + kind.key + "/" + arm + "/" + c.key,
+					sql:    c.sel + from,
+					sorted: true,
+				})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out
 }
 
 // r2IssueCells are the four defects in the spelling each was REPORTED in, kept
@@ -335,6 +391,73 @@ func r2IssueCells() []r2Cell {
 		{name: "issue/1095-ctl-no-collision",
 			sql: "SELECT x.n, o.id FROM (SELECT COUNT(*) AS n FROM lat_item " +
 				"GROUP BY product) x JOIN lat_ord o ON true ORDER BY x.n, o.id"},
+
+		// B1's own twelve spellings (arc R2 round 2), the reviewer's probe
+		// verbatim: the join-bodied arm on the NULL-supplying side, with the
+		// five controls that make the divergence a property of THAT class —
+		// a plain arm, a set-operation arm, a grouped arm, the same block
+		// keyed on a name only ONE relation inside it publishes (so the key
+		// stays bare), the block on the PRESERVED side, and the inner-join
+		// control.
+		{name: "issue/b1-left-joinbody", sorted: true,
+			sql: "SELECT o.id, s.k FROM lat_ord o LEFT JOIN (SELECT o2.id AS k FROM lat_item i2 " +
+				"JOIN lat_ord o2 ON o2.id = i2.order_id) s ON s.k = o.id"},
+		{name: "issue/b1-left-joinbody-distinct", sorted: true,
+			sql: "SELECT DISTINCT o.id, s.k FROM lat_ord o LEFT JOIN (SELECT o2.id AS k " +
+				"FROM lat_item i2 JOIN lat_ord o2 ON o2.id = i2.order_id) s ON s.k = o.id"},
+		{name: "issue/b1-left-joinbody-star", sorted: true,
+			sql: "SELECT * FROM lat_ord o LEFT JOIN (SELECT o2.id AS k FROM lat_item i2 " +
+				"JOIN lat_ord o2 ON o2.id = i2.order_id) s ON s.k = o.id"},
+		{name: "issue/b1-left-joinbody-two-cols", sorted: true,
+			sql: "SELECT o.id, s.k, s.c FROM lat_ord o LEFT JOIN (SELECT o2.id AS k, " +
+				"o2.customer AS c FROM lat_item i2 JOIN lat_ord o2 ON o2.id = i2.order_id) s " +
+				"ON s.k = o.id"},
+		{name: "issue/b1-right-joinbody", sorted: true,
+			sql: "SELECT o.id, s.k FROM (SELECT o2.id AS k FROM lat_item i2 JOIN lat_ord o2 " +
+				"ON o2.id = i2.order_id) s RIGHT JOIN lat_ord o ON s.k = o.id"},
+		{name: "issue/b1-full-joinbody", sorted: true,
+			sql: "SELECT o.id, s.k FROM lat_ord o FULL JOIN (SELECT o2.id AS k FROM lat_item i2 " +
+				"JOIN lat_ord o2 ON o2.id = i2.order_id) s ON s.k = o.id"},
+		{name: "issue/b1-ctl-left-joinbody-preserved", sorted: true,
+			sql: "SELECT s.k, o.id FROM (SELECT o2.id AS k FROM lat_item i2 JOIN lat_ord o2 " +
+				"ON o2.id = i2.order_id) s LEFT JOIN lat_ord o ON s.k = o.id"},
+		{name: "issue/b1-ctl-left-joinbody-barekey", sorted: true,
+			sql: "SELECT o.total, s.k FROM lat_ord o LEFT JOIN (SELECT i2.amount AS k " +
+				"FROM lat_item i2 JOIN lat_ord o2 ON o2.id = i2.order_id) s ON s.k = o.total"},
+		{name: "issue/b1-ctl-left-plain", sorted: true,
+			sql: "SELECT o.id, s.k FROM lat_ord o LEFT JOIN (SELECT id AS k FROM lat_ord) s " +
+				"ON s.k = o.id"},
+		{name: "issue/b1-ctl-left-setop", sorted: true,
+			sql: "SELECT o.id, s.k FROM lat_ord o LEFT JOIN (SELECT id AS k FROM lat_ord " +
+				"UNION SELECT id AS k FROM lat_ord) s ON s.k = o.id"},
+		{name: "issue/b1-ctl-left-grouped", sorted: true,
+			sql: "SELECT o.id, s.k FROM lat_ord o LEFT JOIN (SELECT order_id AS k FROM lat_item " +
+				"GROUP BY order_id) s ON s.k = o.id"},
+		{name: "issue/b1-ctl-inner-joinbody", sorted: true,
+			sql: "SELECT o.id, s.k FROM lat_ord o JOIN (SELECT o2.id AS k FROM lat_item i2 " +
+				"JOIN lat_ord o2 ON o2.id = i2.order_id) s ON s.k = o.id"},
+
+		// ARC R1's N1, which is #1099's class with no subquery at all: the
+		// block's body is a JOIN and both of its relations publish `id`, so
+		// `d.a` chased to the bare name bound the wrong one and the DAG lost
+		// the rows where `u.id <> d.a`. Closed by d1a89ab4; kept as the
+		// measurement that says so.
+		{name: "issue/r1n1-plainjoin-nosub",
+			sql: "SELECT d.a, d.b, u.id FROM (SELECT o.id AS a, i.id AS b FROM lat_ord o " +
+				"JOIN lat_item i ON i.order_id = o.id) d JOIN lat_ord u ON u.id = d.a " +
+				"ORDER BY 1, 2, 3"},
+		{name: "issue/r1n1-plainjoin-nosub-rev",
+			sql: "SELECT d.a, d.b, u.id FROM lat_ord u JOIN (SELECT o.id AS a, i.id AS b " +
+				"FROM lat_ord o JOIN lat_item i ON i.order_id = o.id) d ON u.id = d.a " +
+				"ORDER BY 1, 2, 3"},
+		{name: "issue/r1n1-plainjoin-distinct",
+			sql: "SELECT DISTINCT d.a, d.b, u.id FROM (SELECT o.id AS a, i.id AS b " +
+				"FROM lat_ord o JOIN lat_item i ON i.order_id = o.id) d " +
+				"JOIN lat_ord u ON u.id = d.a ORDER BY 1, 2, 3"},
+		{name: "issue/r1n1-in-a",
+			sql: "SELECT d.a, d.b FROM (SELECT o.id AS a, i.id AS b FROM lat_ord o " +
+				"JOIN lat_item i ON i.order_id = o.id) d WHERE d.a IN " +
+				"(SELECT z.id FROM lat_ord z) ORDER BY 1, 2"},
 
 		// #1096 — a nested block's rename, where the inner block minted a sort
 		// key, read through a star over a join.
