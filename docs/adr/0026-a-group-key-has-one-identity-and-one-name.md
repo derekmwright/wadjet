@@ -2480,7 +2480,7 @@ aggregate, and it is deferred rather than done because that alias decides the
 spelling of every grouped join arm in the corpus. It is pinned per arm in
 `coordinator.arc_r2_pins_test.go` with that mechanism.
 
-Gate: `coordinator.TestR2AJoinArmIsKeyedAndNamedTheSameOnEveryArm` — 446 cells,
+Gate: `coordinator.TestR2AJoinArmIsKeyedAndNamedTheSameOnEveryArm` — 449 cells,
 {a plain derived block, the four set operations, join-bodied, grouped, grouped
 with an aggregate aliased like the key's source, nested renamed, nested renamed
 over a grouped inner block, a block carrying its own sort key, the same with a
