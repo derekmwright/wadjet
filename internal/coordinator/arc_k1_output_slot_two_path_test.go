@@ -238,18 +238,17 @@ func TestArcK1AnOutputSlotHasOneIdentity(t *testing.T) {
 				"0.0000,0.00 | 10.0000,2.00 | 38.2500,12.75",
 			pin: map[string]string{
 				spilledArm: "ERR building physical plan: building hash table",
-				"dag": "cols=[a1:DECIMAL(38,4) b2:DECIMAL(9,2)] rows=5 | -0.0100,-0.01 | " +
-					"0.0000,0.00 | 1.0000,NULL | 10.0000,2.00 | 38.2500,12.75",
-				"dagshuf": "cols=[a1:DECIMAL(38,4) b2:DECIMAL(9,2)] rows=5 | -0.0100,-0.01 | " +
-					"0.0000,0.00 | 1.0000,NULL | 10.0000,2.00 | 38.2500,12.75",
 			},
-			why: "#1078 moved this one from wrong VALUES to a wrong ROW COUNT and it is " +
-				"still pinned: the projection reads the aggregate's `a` now (the values " +
-				"are PostgreSQL's) but the join on the CTE's key matches its NULL to " +
-				"itself, so a FIFTH row arrives that PostgreSQL's `NULL = NULL` excludes. " +
-				"The control below with no shared name is right on every arm, which is " +
-				"what says the residue is the collision and not the join. The SPILLED " +
-				"arm's refusal is the 512 KiB budget on a self-join, identical at bb8635a4",
+			why: "#1078 moved this one from wrong VALUES to a wrong ROW COUNT, and the " +
+				"row count is CLOSED too (#1099, arc R2): the join key `g1.b` names the " +
+				"CTE's rename of the GROUP KEY, and resolving it to the bare `a` bound " +
+				"the aggregate's output instead — the arms joined on the SUM, whose " +
+				"values are all non-NULL, so a FIFTH row arrived that PostgreSQL's " +
+				"`NULL = NULL` excludes. The key keeps the qualifier the query wrote " +
+				"now (`x.a`), which is the spelling the aggregate publishes its key " +
+				"under when an output takes the stripped name. The two DAG pins are " +
+				"deleted, which is the proof. The SPILLED arm's refusal is the 512 KiB " +
+				"budget on a self-join, identical at bb8635a4",
 		},
 		{
 			name: "968 ctl the same CTE consumed ONCE",

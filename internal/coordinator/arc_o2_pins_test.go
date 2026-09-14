@@ -128,20 +128,16 @@ var o2Pin = map[string]map[string]string{
 	// declares (#997/#1012). The two `nested/grouped-hidden-key/*/join-star`
 	// pins are deleted, which is the proof.
 
-	// AN AGGREGATE ALIASED LIKE ITS OWN GROUP KEY'S SOURCE COLUMN — the VALUE
-	// half is closed (#1078) and what remains is an ORDER on the three DAG
-	// arms: the statement's `ORDER BY x.product, o.id` over the JOIN above the
-	// block sorts by the group KEY's value while the projection reads the
-	// count, so the key sequence comes back as two concatenated runs where
-	// PostgreSQL's is non-decreasing. The binder that still reaches the key is
-	// not the one #1078 moved — the sort sits above a JOIN, so the gather's
-	// merge orders on what the stage emitted (ADR-0026 §8a). PRE-EXISTING:
-	// byte-identical at base on all five arms.
-	"joined/group-alias-src/ordkeys": {
-		"dag":          "cols=[product:INT64 id:INT64] rows=9 | 1,1 | 1,2 | 1,3 | 1,1 | 1,2 | 1,3 | 2,1 | 2,2 | 2,3",
-		"dag-shuffled": "cols=[product:INT64 id:INT64] rows=9 | 1,1 | 1,2 | 1,3 | 1,1 | 1,2 | 1,3 | 2,1 | 2,2 | 2,3",
-		"dag-morsel4":  "cols=[product:INT64 id:INT64] rows=9 | 1,1 | 1,2 | 1,3 | 1,1 | 1,2 | 1,3 | 2,1 | 2,2 | 2,3",
-	},
+	// AN AGGREGATE ALIASED LIKE ITS OWN GROUP KEY'S SOURCE COLUMN is CLOSED
+	// in both halves and the `joined/group-alias-src/ordkeys` pin is deleted,
+	// which is the proof. The VALUE half was #1078 (arc O2); the ORDER half
+	// was #1095 (arc R2): the statement's `ORDER BY x.product, o.id` over the
+	// JOIN above the block sorted by the group KEY while the projection read
+	// the count, because the ordering fused onto the join bound its key by
+	// NAME and the aggregate publishes that name twice. It addresses the SLOT
+	// its class names now — the class read through the block, the position
+	// from the probe's model measured against the stage's own output stream
+	// (physical.joinProbeAggregateSlots, ADR-0026 §8i).
 
 	// THE COLUMN ORDER OF A STAR OVER A JOIN followed the side the planner
 	// BUILDS, not the FROM clause — ADR-0026 §7's own note: which side builds

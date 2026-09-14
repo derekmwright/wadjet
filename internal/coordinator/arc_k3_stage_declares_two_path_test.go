@@ -320,16 +320,22 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 				`WHERE order_id = o.id) s ON true ORDER BY o.id`,
 			want: `id,customer,total,c | 1,Alice,150,NULL | 1,Alice,150,NULL | ` +
 				`2,Bob,200,NULL | 2,Bob,200,NULL | 3,Carol,0,NULL`},
-		// A SET-OP ARM is not a relation a star reads: the operation names its
-		// arms. Marking one published its list onto the arm's own stage and
-		// the union above then read columns that were no longer there —
-		// `[<nil>]` for `[50]`, measured, in round 4's first cut.
+		// A SET-OP ARM's own Project is not a relation a star reads: the
+		// operation names its arms. Marking one published its list onto the
+		// ARM's stage and the union above then read columns that were no
+		// longer there — `[<nil>]` for `[50]`, measured, in round 4's first
+		// cut. The OPERATION is a relation the star reads, and its columns
+		// come after `lat_ord`'s because that is the FROM clause's order —
+		// PostgreSQL 17.11 answers `id,customer,total,order_id,a` here, and
+		// this cell recorded the BUILD-side-first order the star published
+		// while it declined a set-operation arm (#1102, arc R2). The ARRAY
+		// sequence is the comparison-kernel residue the cells above record.
 		{name: "computed/a-container-in-a-set-op-arm",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, ARRAY[amount] AS a ` +
 				`FROM lat_item UNION ALL SELECT order_id, ARRAY[amount] FROM lat_item ` +
 				`WHERE amount > 1000) s ON s.order_id = o.id ORDER BY o.id, a`,
-			want: `order_id,a,id,customer,total | 1,[100],1,Alice,150 | ` +
-				`1,[50],1,Alice,150 | 2,[125],2,Bob,200 | 2,[75],2,Bob,200`},
+			want: `id,customer,total,order_id,a | 1,Alice,150,1,[100] | ` +
+				`1,Alice,150,1,[50] | 2,Bob,200,2,[125] | 2,Bob,200,2,[75]`},
 
 		// THE SAME RULE where the block ALSO introduces a column. At bb8635a4
 		// this lost `a2` silently on both DAG arms and the `order_id AS oid`
