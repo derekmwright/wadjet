@@ -12,7 +12,7 @@ func fnFromUnixtime(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	epoch := int64(ToFloat64(args[0]))
+	epoch := exactIntArg(args[0]) // exactly, not through a double (#1031)
 	return formatInstant(time.Unix(epoch, 0))
 }
 

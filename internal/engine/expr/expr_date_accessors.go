@@ -158,7 +158,9 @@ func fnHumanReadableSeconds(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	total := int64(ToFloat64(args[0]))
+	// Read exactly: past 2^53 a double cannot hold the seconds' low bits, so
+	// this ended a 9007199254740993-second span at 32 seconds (#1031).
+	total := exactIntArg(args[0])
 	if total < 0 {
 		total = -total
 	}

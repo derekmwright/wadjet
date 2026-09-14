@@ -3,6 +3,7 @@ package expr
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -69,11 +70,18 @@ func fnParseBytes(args []any) any {
 			if numStr == "" {
 				return nil
 			}
+			if n, ok := exactScaledInt(numStr, multipliers[suffix]); ok {
+				return n
+			}
 			num := ToFloat64(numStr)
 			return int64(num * multipliers[suffix])
 		}
 	}
-	// No unit — assume raw bytes
+	// No unit — assume raw bytes, and read them exactly: '9007199254740993'
+	// answered 9007199254740992 through the double (#1031).
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return n
+	}
 	return int64(ToFloat64(s))
 }
 
@@ -158,6 +166,13 @@ func fnParseRate(args []any) any {
 			if numStr == "" {
 				return nil
 			}
+			// Bits to bytes, exactly where both steps admit it: the
+			// multiplier is a power of ten and the division by 8 is exact
+			// whenever the product is a multiple of 8, which every whole
+			// number of Kbps and up is.
+			if n, ok := exactScaledInt(numStr, r.bitsPerSec); ok && n%8 == 0 {
+				return n / 8
+			}
 			bps := ToFloat64(numStr) * r.bitsPerSec
 			return int64(bps / 8) // bits to bytes
 		}
@@ -185,11 +200,17 @@ func fnParseRate(args []any) any {
 			if numStr == "" {
 				return nil
 			}
+			if n, ok := exactScaledInt(numStr, r.bytesPerSec); ok {
+				return n
+			}
 			return int64(ToFloat64(numStr) * r.bytesPerSec)
 		}
 	}
 
-	// No unit — assume bytes/sec
+	// No unit — assume bytes/sec, read exactly (#1031).
+	if n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil {
+		return n
+	}
 	return int64(ToFloat64(s))
 }
 

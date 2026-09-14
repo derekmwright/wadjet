@@ -39,15 +39,12 @@ package expr
 
 // bitIntArg reads a bitwise operand as the 64-bit pattern it is.
 //
-// An integer box is taken as itself — that is the whole fix. Anything else
-// (a float, a numeric string) keeps the conversion the family has always
-// applied, so no shape that answered before starts refusing.
-func bitIntArg(v any) int64 {
-	if i, ok := toInt64Safe(v); ok {
-		return i
-	}
-	return int64(ToFloat64(v))
-}
+// It is the registry's one integer read (exact_int_arg.go), under this
+// family's own name: an integer box is taken as itself and a decimal string is
+// parsed as one, so no spelling of a 64-bit value loses its low bits on the
+// way in. The four sites #1031 names had a second copy of the first half of
+// this rule and lacked the second.
+func bitIntArg(v any) int64 { return exactIntArg(v) }
 
 func fnBitwiseAnd(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
