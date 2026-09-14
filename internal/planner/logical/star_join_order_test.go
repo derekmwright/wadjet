@@ -67,6 +67,26 @@ func TestABareStarOverAJoinExpandsToTheFromClausesArms(t *testing.T) {
 			items: []string{"o.id AS id", "i.id AS id", "o.id AS id"},
 		},
 		{
+			// A SET OPERATION publishes its LEFTMOST arm's list, which is
+			// PostgreSQL's rule, and the operation's own stage emits exactly
+			// that list under the block's name (#1102, closed here): arc O1
+			// declined this shape because the three DAG arms qualified those
+			// columns by the SCAN below, and `a.id` then bound the OTHER
+			// join arm's `id`.
+			name: "an arm that is a set operation publishes its leftmost arm",
+			plan: func() *Node {
+				arm := func() *Node {
+					return NewProject(armScan("lat_ord", "lat_ord", "id"),
+						[]Projection{{Column: "id", Expr: "id", PublishedName: "id"}})
+				}
+				block := NewUnion(arm(), arm(), true)
+				block.DerivedAlias = "a"
+				return NewProject(joinOf(t, block, armScan("lat_item", "i", "id")),
+					[]Projection{{Expr: "*"}})
+			},
+			items: []string{"a.id AS id", "i.id AS id"},
+		},
+		{
 			name: "a FILTER between the star and the join is a pass-through",
 			plan: func() *Node {
 				j := joinOf(t, armScan("lat_ord", "o", "id"), armScan("lat_item", "i", "id"))
@@ -235,22 +255,6 @@ func TestABareStarOverAJoinDeclinesWhatItCannotState(t *testing.T) {
 			plan: func() *Node {
 				return NewProject(joinOf(t, armScan("lat_item", "", "id"),
 					armScan("lat_item", "", "id")),
-					[]Projection{{Expr: "*"}})
-			},
-		},
-		{
-			// A SET OPERATION's columns reach the join under the SCAN's
-			// qualifier rather than the block's, so the block's alias is not
-			// an address for them.
-			name: "an arm that is a set operation",
-			plan: func() *Node {
-				arm := func() *Node {
-					return NewProject(armScan("lat_ord", "lat_ord", "id"),
-						[]Projection{{Column: "id", Expr: "id", PublishedName: "id"}})
-				}
-				block := NewUnion(arm(), arm(), true)
-				block.DerivedAlias = "a"
-				return NewProject(joinOf(t, block, armScan("lat_item", "i", "id")),
 					[]Projection{{Expr: "*"}})
 			},
 		},

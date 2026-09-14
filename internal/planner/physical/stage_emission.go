@@ -730,7 +730,11 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// fragment, or the build/probe files never carry it and every
 			// downstream read — the ON residual, the projected output —
 			// sees NULL (#383).
-			armMaterialized[ci] = absorbComputedSubqueryProjection(child, (*stages)[childStart:], false)
+			// …or because a SET OPERATION terminates the arm, whose stage
+			// output is the operation's own column list rather than any
+			// scan's (#1102).
+			armMaterialized[ci] = absorbComputedSubqueryProjection(child, (*stages)[childStart:], false) ||
+				setOpArmPublishesItsOwnList(child)
 			// …and the same materialization for a join input that is a
 			// SELECT list over an AGGREGATE: `(SELECT g, COUNT(*)+1 AS k …
 			// GROUP BY g) b` joined ON b.k names a column the aggregate

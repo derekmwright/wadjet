@@ -494,3 +494,46 @@ func windowArmColDecls(win *logical.Node) colDecls {
 	}
 	return colDecls{types: types, fields: base.fields, dec: dec}
 }
+
+// setOpArmPublishesItsOwnList reports whether a join arm's stage output IS the
+// arm's published relation because a SET OPERATION terminates it — the second
+// answer to `armMaterialized`, and true for the same reason the first one is.
+//
+// A set operation composes a NEW relation out of what its arms emit: the stage
+// projects every arm onto the operation's own column list (Stage.UnionArms'
+// per-arm Projections), so the stream the join receives carries one column per
+// SELECT item of the operation, under the name the operation publishes, and
+// nothing of any scan below it. `stageBuildTableAlias` answered the first scan
+// it found there — `lat_ord` for `(SELECT id FROM lat_ord UNION SELECT id FROM
+// lat_ord) a` — and the join then qualified the arm's duplicate `id` as
+// `lat_ord.id`, a spelling no query can write. The enclosing `a.id` matched
+// neither side exactly, fell through to the resolver's qualifier strip, and
+// bound the OTHER arm's bare `id`: `SELECT a.id … JOIN lat_item b ON
+// b.order_id = a.id` read 1|2|3|4 — lat_item's ids — where PostgreSQL 17.11
+// and both single-process arms read 1|1|2|2 (#1102).
+//
+// The arm must have a NAME for this to say anything: the materialized branch
+// qualifies by `joinArmAlias`, and an arm with no name would leave the build's
+// duplicates unqualified, which is strictly worse than the scan's spelling.
+// The descent stops at a Project for the reason the whole rule turns on — a
+// Project RENAMES, and an un-materialized one emits no stage, so above it the
+// stream is no longer what the block publishes.
+func setOpArmPublishesItsOwnList(child *logical.Node) bool {
+	if namedArmScope(child) == "" {
+		return false
+	}
+	for n, hops := child, 0; n != nil && hops < 8; hops++ {
+		switch n.Type {
+		case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
+			return true
+		case logical.NodeFilter, logical.NodeSort, logical.NodeLimit, logical.NodeDistinct:
+			if len(n.Children) != 1 {
+				return false
+			}
+			n = n.Children[0]
+		default:
+			return false
+		}
+	}
+	return false
+}

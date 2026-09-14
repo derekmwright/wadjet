@@ -319,18 +319,21 @@ func armRelationColumns(arm *Node) (string, []StarColumn) {
 // the PLAN's qualified side: the very divergence this file exists to close,
 // surviving one node above where it was looked for (round-2 review, P1).
 //
-// A SET OPERATION is NOT descended into, and the reason is measured: its
-// arms' columns reach the join under the SCAN's qualifier rather than the
-// block's — `(SELECT id FROM lat_ord UNION ALL SELECT id FROM lat_ord) a`
-// joined against `lat_item` publishes `lat_ord.id` on the three DAG arms — so
-// `a.id` binds the OTHER arm's `id` through the bare fallback and the column
-// carries the wrong VALUE. It publishes its leftmost arm's NAMES (PostgreSQL's
-// rule, which `plansql.BlockOutputColumns` and `projectOutputNamesBelow`
-// read), but a name the stream does not spell through this block is not an
-// address — the same rule the PAIR states per item, one level up: a reference
-// is only a handle where the producer answers to it.
+// A SET OPERATION publishes its LEFTMOST arm's list, which is PostgreSQL's
+// rule and the one `plansql.BlockOutputColumns` reads, and the operation's own
+// stage emits exactly that list — one column per SELECT item of the arm, under
+// the name the arm publishes, and nothing of any scan below it
+// (`Stage.UnionArms`' per-arm projections). Arc O1 declined it because the
+// three DAG arms qualified those columns by the SCAN below (`lat_ord.id` for
+// `(SELECT id FROM lat_ord UNION ALL SELECT id FROM lat_ord) a`), so `a.id`
+// matched nothing exactly and bound the other join arm's `id` through the bare
+// fallback — a wrong VALUE, and the decline kept the right one. That is
+// #1102's mechanism and it is closed: a set-operation arm is a MATERIALIZED
+// arm, qualified by the name the enclosing query writes
+// (`physical.setOpArmPublishesItsOwnList`), so the reference this expansion
+// emits is an address on every arm.
 //
-// Everything else answers nil too: an Aggregate, a Window or a table function
+// Everything else answers nil: an Aggregate, a Window or a table function
 // publishes something this walk cannot state, and a block still carrying an
 // unexpanded star has no list at all.
 func blockOwnProjection(block *Node) *Node {
@@ -343,6 +346,11 @@ func blockOwnProjection(block *Node) *Node {
 			return n
 		case NodeSort, NodeLimit, NodeDistinct, NodeFilter:
 			if len(n.Children) != 1 {
+				return nil
+			}
+			n = n.Children[0]
+		case NodeUnion, NodeIntersect, NodeExcept:
+			if len(n.Children) != 2 {
 				return nil
 			}
 			n = n.Children[0]

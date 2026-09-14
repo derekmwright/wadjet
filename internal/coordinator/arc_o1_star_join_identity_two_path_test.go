@@ -389,20 +389,6 @@ func TestO1AStarOverAJoinPublishesTheQueryNotThePlan(t *testing.T) {
 			name: "root-setop",
 			sql:  "SELECT * FROM (SELECT id FROM lat_ord UNION ALL SELECT id FROM lat_ord) a JOIN lat_item i ON i.order_id = a.id ORDER BY i.id, a.id",
 			want: "cols=[id:INT64 id:INT64 order_id:INT64 product:STRING amount:FLOAT64] rows=8 | 1,1,1,Widget,50 | 1,1,1,Widget,50 | 1,2,1,Gadget,100 | 1,2,1,Gadget,100 | 2,3,2,Widget,75 | 2,3,2,Widget,75 | 2,4,2,Doohickey,125 | 2,4,2,Doohickey,125",
-			pin: map[string]string{
-				"single":       "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 a.id:INT64] rows=8 | 1,1,Widget,50,1 | 1,1,Widget,50,1 | 2,1,Gadget,100,1 | 2,1,Gadget,100,1 | 3,2,Widget,75,2 | 3,2,Widget,75,2 | 4,2,Doohickey,125,2 | 4,2,Doohickey,125,2",
-				"spilled512k":  "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 a.id:INT64] rows=8 | 1,1,Widget,50,1 | 1,1,Widget,50,1 | 2,1,Gadget,100,1 | 2,1,Gadget,100,1 | 3,2,Widget,75,2 | 3,2,Widget,75,2 | 4,2,Doohickey,125,2 | 4,2,Doohickey,125,2",
-				"dag":          "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 lat_ord.id:INT64] rows=8 | 1,1,Widget,50,1 | 1,1,Widget,50,1 | 2,1,Gadget,100,1 | 2,1,Gadget,100,1 | 3,2,Widget,75,2 | 3,2,Widget,75,2 | 4,2,Doohickey,125,2 | 4,2,Doohickey,125,2",
-				"dag-shuffled": "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 lat_ord.id:INT64] rows=8 | 1,1,Widget,50,1 | 1,1,Widget,50,1 | 2,1,Gadget,100,1 | 2,1,Gadget,100,1 | 3,2,Widget,75,2 | 3,2,Widget,75,2 | 4,2,Doohickey,125,2 | 4,2,Doohickey,125,2",
-				"dag-morsel4":  "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 lat_ord.id:INT64] rows=8 | 1,1,Widget,50,1 | 1,1,Widget,50,1 | 2,1,Gadget,100,1 | 2,1,Gadget,100,1 | 3,2,Widget,75,2 | 3,2,Widget,75,2 | 4,2,Doohickey,125,2 | 4,2,Doohickey,125,2",
-			},
-			why: "DECLINED, with its mechanism: a SET OPERATION's columns reach the join " +
-				"under the SCAN's qualifier rather than the block's — the three DAG arms " +
-				"spell this one `lat_ord.id` — so an item spelled `a.id` binds the OTHER " +
-				"arm's `id` through the bare fallback and carries the WRONG VALUE " +
-				"(measured, round 2). A name the stream does not spell through this block " +
-				"is not an address, so the star reads the stream and keeps the answer it " +
-				"had at 0193c4e9.",
 		},
 		{
 			name: "root-groupby",
