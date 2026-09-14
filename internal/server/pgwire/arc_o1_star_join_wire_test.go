@@ -92,6 +92,37 @@ func TestO1TheWireDeclaresAStarJoinsOwnArms(t *testing.T) {
 			ord + "," + item, ""},
 		{"a_qualified_star_still_names_one_relation",
 			`SELECT i.* FROM j1ord o JOIN j1item i ON i.order_id = o.id`, item, ""},
+
+		// AN ARM WITH AN UNALIASED ITEM, on the door that sees both halves of
+		// the pair: the NAME PostgreSQL publishes and the OID its type gets.
+		// At 3842eaba every one of these read NULL under OID 25 (text),
+		// because the item was referenced by its PUBLISHED name while the
+		// producer emits it under its own expression text; a star item
+		// carries BOTH names now (ADR-0026 §9's pair, `StarColumn`).
+		{"an_arm_with_an_unaliased_aggregate",
+			`SELECT * FROM j1ord o JOIN (SELECT order_id, COUNT(*) FROM j1item ` +
+				`GROUP BY order_id) s ON s.order_id = o.id`,
+			ord + ",order_id:20,count:20",
+			"`count` is PostgreSQL's name for an unaliased COUNT(*), and bigint its type"},
+		{"an_arm_with_an_unaliased_expression",
+			`SELECT * FROM j1ord o JOIN (SELECT id AS k, amount * 2 FROM j1item) s ` +
+				`ON s.k = o.id`,
+			ord + ",k:20,?column?:701", ""},
+		{"an_arm_with_an_unaliased_CAST",
+			`SELECT * FROM j1ord o JOIN (SELECT id AS k, CAST(amount AS BIGINT) FROM j1item) s ` +
+				`ON s.k = o.id`,
+			ord + ",k:20,amount:20",
+			"PostgreSQL names a CAST after the column it casts"},
+		{"an_arm_with_an_unaliased_literal",
+			`SELECT * FROM j1ord o JOIN (SELECT id AS k, 1 FROM j1item) s ON s.k = o.id`,
+			ord + ",k:20,?column?:20",
+			"PostgreSQL sends OID 23 (int4) for a bare integer literal and this engine " +
+				"sends 20 (int8) — the numeric-literal typing rule (ADR-0024), identical " +
+				"for the same literal outside a star. The NAME is PostgreSQL's."},
+		{"a_CTE_arm_with_an_unaliased_aggregate",
+			`WITH c AS (SELECT id AS k, SUM(amount) FROM j1item GROUP BY id) ` +
+				`SELECT * FROM j1ord o JOIN c ON c.k = o.id`,
+			ord + ",k:20,sum:701", ""},
 	} {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
