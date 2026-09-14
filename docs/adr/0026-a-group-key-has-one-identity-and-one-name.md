@@ -2088,11 +2088,16 @@ executes in the narrowing spelling; that was wrong, and it was wrong because
 the measurement that produced it had truncated the routing counter out of the
 probe's own output.
 
-**Two PRE-EXISTING leaks are pinned, not fixed.** A block whose own `ORDER BY`
-was MATERIALIZED publishes its `__sortkey_N` (the sort below still reads that
-key), on every arm and on the wire; and two independent LATERALs over one table
-publish the second lowering's `__key_1`. Both are in a `want` string, so the
-day either stops leaking its cell fails.
+**Two PRE-EXISTING leaks were pinned, not fixed; ONE is closed.** A block whose
+own `ORDER BY` was MATERIALIZED published its `__sortkey_N` (the sort below
+still reads that key), on every arm and on the wire — **closed 2026-09-13 by
+§9**: a star over a join publishes each arm's VISIBLE projection, and the
+planner's materialized term is not one of them, so the reserved name stops
+reaching the client for that shape (the two `sortkey/` cells in
+`coordinator.TestArcK3ADerivedBlockPublishesItsOwnProjection` now assert
+PostgreSQL's list). Two independent LATERALs over one table still publish the
+second lowering's `__key_1`; it is in a `want` string, so the day it stops
+leaking its cell fails.
 
 **A build side that collapses its input is not a repeated scan of its table
 (#981).** `markCoPathingSelfJoinBuilds` walks a join's build dependency chain
@@ -2754,17 +2759,49 @@ every row. The one term that addresses the OUTPUT list is a POSITIONAL one, and
 item's SOURCE spelling; `ORDER BY 4` over a star join was refused with 42P10
 before this arc, for a statement PostgreSQL answers.
 
-**What declines, and why the boundary is there.** An arm that publishes one
-name TWICE is the load-bearing one: every item is a qualified reference, so
-`s.id` over a block publishing two `id`s binds the first and the second column
-would carry the first's VALUES — a wrong value where leaving the star alone is
-only a wrong name. Also declined: two arms of one name, a LATERAL arm or a
-manufactured lateral's join, a SEMI/ANTI join, a table function, an arm whose
-output is its own (an aggregate, a set operation, a sorted or limited block
-with no projection), and an Aggregate, Window or set operation between the star
-and the join. Each keeps the answer it had, and a PARTIAL expansion is never
-returned. Closing the duplicate-name arm needs a block's column addressed by
-POSITION, which is §7's slot territory rather than this section's.
+**A STAR ITEM IS A (RESOLVE, PUBLISH) PAIR, and that is the invariant.** The
+expanded list carries NAMES — `(FROM-clause relation, column name)` — resolved
+later against whatever tree the optimizer ends up with, not positions in the
+step-1 tree and not stable column handles. Measured (round-2 review), the pair
+survives every rule that restructures the tree: the two-way swap, the
+`costBasedJoinReorder` rebuild, predicate pushdown, forced estimates, a forced
+build side, a decorrelation that ADDS a join, CTE inlining, one CTE referenced
+twice, and a renaming block arm. It is stable because the resolve spelling is
+the PRODUCER's: `expr.ResolveColumnRef` binds `b.id` exactly when the join
+qualified b's side and through the qualifier-stripping fallback when it
+qualified a's, so no later rule can permute what the item means.
+
+It breaks in exactly ONE direction — where an arm's PUBLISHED name is not the
+name its producer EMITS — which is §2's pair of names arriving at a star:
+`(SELECT order_id, COUNT(*) …)` publishes `count` (PostgreSQL's FigureColname)
+and emits `count(*)`, so an item spelled `s.count` binds nothing and reads NULL
+under the STRING default. Until a star item carries BOTH names, the expansion
+DECLINES exactly there (`armItemIsAddressable`), which keeps the value and
+costs only the name. Carrying the pair is the close: resolve by the producer's
+spelling, publish PostgreSQL's.
+
+**What declines, and why the boundary is there.** Each of these keeps the
+answer it had — the plan's order under the producer's names — and a PARTIAL
+expansion is never returned:
+
+| declines | why |
+|---|---|
+| an arm publishing ONE NAME TWICE | `s.id` binds the first, so the second column would carry the first's VALUES — a wrong value where leaving the star alone is only a wrong name |
+| an arm with an item whose PUBLISHED name is not its EMITTED spelling | the pair above: an unaliased expression, aggregate, literal or CAST. `AS` makes the two names one and the arm publishes |
+| an arm that is a SET OPERATION | its columns reach the join under the SCAN's qualifier, not the block's, so `a.id` binds the other arm's `id` — measured wrong on the three DAG arms |
+| two arms of one name | both expand to the same qualified reference |
+| a LATERAL arm, or a manufactured lateral's join | the subtree carries the correlation slot the join drops (§3c) |
+| a SEMI/ANTI join | it publishes its probe alone; no star spells one |
+| a table function | no catalog annotation to publish from |
+| an Aggregate, Window or set operation BETWEEN the star and the join | the emitted columns are that operator's |
+| an arm whose own list this pass cannot state | an aggregate or a window whose projection was elided |
+
+A block's ROOT is not one of them. `(SELECT … ORDER BY … LIMIT 2) a`,
+`(SELECT DISTINCT …) a` and a `GROUP BY` block all publish their own
+projection's list, reached through the nodes that pass their input's columns
+through unchanged (`blockOwnProjection`) — stopping at the root instead was
+#997's divergence surviving one node above where the first pass looked for it
+(round-2 review, P1).
 
 The design, with every measurement, is
 `docs/internals/bare-star-over-a-join-arms.md`.

@@ -902,18 +902,35 @@ SELECT * FROM orders o JOIN items i ON i.order_id = o.id
 -- id, customer, total, id, order_id, product, amount
 ```
 
-It is a property of the QUERY: neither the order nor the names move with the
-data, the predicate, the join type, the execution path or which side the
-planner builds. The same holds through a derived table or a CTE whose body is
-that star, for `INNER`, `LEFT`, `RIGHT`, `FULL`, `CROSS` and comma joins, and
+Wherever a FROM item's own names address its columns — every base table, and
+every derived table or CTE whose items are named (see the exceptions below) —
+that list is a property of the QUERY: neither the order nor the names move with
+the data, the predicate, the join type, the execution path or which side the
+planner builds. It holds through a derived table or a CTE whose body is that
+star, through one whose root is an `ORDER BY`, a `LIMIT`, a `DISTINCT` or a
+`GROUP BY`, for `INNER`, `LEFT`, `RIGHT`, `FULL`, `CROSS` and comma joins, and
 for a star beside other items (`SELECT *, o.id FROM …`).
 
-One shape publishes the join operator's own order instead, and it is the one
-where a name cannot address a column: a derived block whose own body is a star
-over a join publishes two columns of the same name (`(SELECT * FROM a JOIN b)
-s` publishes `s`'s two `id`s), and an outer star would have to address the
-second one by a name that binds the first. The rows and the values are the
-same; the column order is the plan's. Name the block's columns to pin it.
+Some FROM items cannot be published that way, and there the star keeps the
+join operator's own order instead — the same rows and the same values, under
+the producer's names. A name is the only handle an expanded star item has, so
+an arm is published only where its own names address its columns:
+
+  - a derived block that publishes ONE NAME TWICE — `(SELECT * FROM a JOIN b)
+    s` publishes `s`'s two `id`s, and an outer star would have to address the
+    second by a name that binds the first;
+  - an arm whose item PostgreSQL names one thing and this engine emits under
+    another: an UNALIASED expression, aggregate, literal or `CAST`
+    (`COUNT(*)` publishes `count` and is emitted as `count(*)`). Write `AS` to
+    pin the name and the arm publishes normally;
+  - an arm that is a SET OPERATION, whose columns reach the join under the
+    scan's own qualifier rather than the block's;
+  - a `LATERAL` arm, a table function, and an arm whose own list this planner
+    does not enumerate.
+
+A `SELECT *` over `JOIN … USING` or `NATURAL JOIN` is refused (`0A000`): USING
+MERGES the joined column into one output column, which is the one place where
+"every arm's own list" is not PostgreSQL's rule.
 
 Subqueries that reference columns from the outer query. The optimizer decorrelates them where it can — EXISTS / NOT EXISTS and IN become semi/anti joins, and a correlated scalar subquery becomes a join against a grouped aggregate — so they are not re-executed per outer row. Either side may be a CTE, a derived table, a comma-joined list or a base table: the subquery's own FROM clause is planned the way a top-level FROM clause is.
 

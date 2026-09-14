@@ -94,6 +94,22 @@ CTERefAlias) and the WITH list. Without it a shape whose arms cannot be
 enumerated would reach `refuseUnexpandedStarAnywhere` and be refused, where
 it used to answer.
 
+## A star item is a (resolve, publish) pair
+
+The expanded list carries NAMES — `(FROM-clause relation, column name)` —
+resolved later against whatever tree the optimizer ends up with. Measured, that
+pair survives every rule that restructures the tree (the two-way swap, the
+`costBasedJoinReorder` rebuild, pushdown, forced estimates, a forced build
+side, a decorrelation that adds a join, CTE inlining, one CTE referenced twice,
+a renaming block arm), because the RESOLVE spelling is the producer's: a
+qualified item binds its own relation's column whichever side built, so no
+later rule can permute what it means.
+
+It breaks in exactly one direction — where an arm's PUBLISHED name is not the
+name its producer EMITS. That is ADR-0026 §2's pair of names arriving at a
+star, and until a star item carries both, the expansion declines exactly there
+(`armItemIsAddressable`): the value is kept and only the name is lost.
+
 ## What it declines, and why the boundary is exactly there
 
 Each of these keeps the answer it had. A PARTIAL expansion is never returned:
@@ -104,6 +120,17 @@ the star covers every arm or none of them.
     so the second column would carry the first's VALUES. A wrong value is
     worse than a wrong name. Closing it needs a block's column addressed by
     POSITION.
+  - **An arm with an item whose PUBLISHED name is not its EMITTED spelling**
+    — an unaliased expression, aggregate, literal or CAST. `(SELECT order_id,
+    COUNT(*) …)` publishes `count` and emits `count(*)`, so `s.count` binds
+    nothing and the column reads NULL under the STRING default; declining
+    keeps `count(*)`'s value and type. `AS` makes the two names one, and the
+    arm publishes normally.
+  - **An arm that is a SET OPERATION.** Its columns reach the join under the
+    SCAN's own qualifier — `(SELECT id FROM lat_ord UNION ALL …) a` joined
+    against `lat_item` publishes `lat_ord.id` on the three DAG arms — so
+    `a.id` binds the OTHER arm's `id` through the bare fallback and carries
+    the wrong value. Measured.
   - **Two arms of one name.** Both would expand to the same qualified
     reference. PostgreSQL refuses the spelling outright.
   - **A LATERAL arm, or a join carrying a manufactured lateral's lowering.**
@@ -111,11 +138,18 @@ the star covers every arm or none of them.
     (ADR-0026 §3c), and the arms are not the relations the query wrote.
   - **A SEMI or ANTI join.** It publishes its probe alone; no star spells one.
   - **A table function arm**, which has no catalog annotation to publish from.
-  - **An arm that is an aggregate, a set operation, or a sorted or limited
-    block with no projection of its own.** Its output is its own, not the
-    scan's, and this walk cannot state it.
+  - **An arm whose own list this walk cannot state** — an aggregate or a
+    window whose projection was elided.
   - **An Aggregate, Window or set operation between the star and the join.**
     The emitted columns are that operator's.
+
+A block's ROOT is not one of them. `(SELECT … ORDER BY … LIMIT 2) a`,
+`(SELECT DISTINCT …) a`, a `GROUP BY` block and a filtered one publish their
+own projection's list, reached through the nodes that pass their input's
+columns through unchanged (`blockOwnProjection`). Stopping at the root instead
+left every such arm reading the join's stream — #997's divergence one node
+above where the first pass looked for it, and a list that flipped under a
+predicate that changes no row.
 
 ## Gates
 

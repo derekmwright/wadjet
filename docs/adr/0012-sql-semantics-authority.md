@@ -2053,14 +2053,20 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `coordinator.TestO1AStarOverAJoinPublishesTheQueryNotThePlan` (47 shapes
      × five arms) and `pgwire.TestO1TheWireDeclaresAStarJoinsOwnArms`.
 
-     ONE shape still publishes the plan's order, with its mechanism: a derived
-     block whose OWN body is a star over a join publishes two columns named
-     `id`, and an expanded star addresses an arm's columns by QUALIFIED
-     REFERENCE — `s.id` binds the first of the two, so the second column would
-     carry the first's values. A wrong value is worse than a wrong name, so
-     that star is left to read the stream (pinned in
-     `coordinator.TestArcAEverydaySQLMatchesPostgres`'s #993 cell and in the
-     O1 gate). Closing it needs a block's column addressed by POSITION.
+     WHAT STILL PUBLISHES THE PLAN'S ORDER is every FROM item whose own names
+     do not address its columns, and the list is in ADR-0026 §9's decline
+     table: a block publishing ONE NAME TWICE (`s.id` binds the first, so the
+     second column would carry the first's values); an arm with an item whose
+     PUBLISHED name is not the name its producer EMITS — an unaliased
+     expression, aggregate, literal or CAST, where `COUNT(*)` publishes
+     `count` and is emitted as `count(*)`, and writing `AS` makes the two
+     names one; an arm that is a SET OPERATION, whose columns reach the join
+     under the scan's own qualifier; a LATERAL arm; and a table function. Each
+     keeps the VALUES it had — a wrong name rather than a wrong value — and
+     each has a cell in `coordinator.TestO1AStarOverAJoinPublishesTheQuery
+     NotThePlan`. The item-name class closes when a star item carries BOTH
+     names (ADR-0026 §9's pair); the duplicate-name class needs a block's
+     column addressed by POSITION.
 
      The deferral this paragraph recorded read: the build side has to become a
      PROPERTY of the join node, with the children left in the query's written
