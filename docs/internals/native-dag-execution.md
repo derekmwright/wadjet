@@ -464,8 +464,13 @@ spelling the arm's stream really carries:
 - `resolveShuffleKey` chased a projection's BARE `Column`, so a block's
   `o2.id AS k` resolved to `id`; where the block is itself a JOIN, both of its
   relations answer to that name and the outer join keyed on the wrong one
-  (#1099). It chases `projSourceName` — the qualifier the query wrote included
-  — which is what `resolveRenameSource` beside it has always chased.
+  (#1099). It keeps the qualifier exactly where the producer publishes the bare
+  name TWICE — a join inside the block whose two relations both answer to it,
+  or an aggregate publishing its key qualified because an output took the
+  stripped name — which is exactly where the stream carries the qualified
+  spelling (`projKeySpelling`). A qualifier the stream does not carry is
+  resolved by every binding except `exec.HashJoin.FixKeyAssignment`, whose
+  exact-name test then swaps a correctly assigned pair.
 - the GATHER's rename comes back out of an arm with the block's SOURCE column,
   and a block that wrote a bare name leaves nothing to tell two copies of
   itself apart. `buildArmQualified` puts the BUILD arm's own name back, which

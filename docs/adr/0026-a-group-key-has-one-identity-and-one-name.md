@@ -2445,9 +2445,19 @@ spelling the arm's stream really carries.**
    block's item written `o2.id AS k` resolved to `id` — and where the block is
    itself a JOIN, both of its relations answer to `id`. The outer join keyed on
    `lat_item`'s id instead of `lat_ord`'s and paired rows violating its own
-   condition. It chases `projSourceName` now — the qualifier the query wrote
-   included, which is what `resolveRenameSource` beside it has always chased
-   and what the inner join's own qualification puts in the stream.
+   condition. It keeps the qualifier the query wrote EXACTLY WHERE THE PRODUCER
+   PUBLISHES THE BARE NAME TWICE, which is exactly where the stream carries the
+   qualified spelling: a JOIN inside the block whose two relations both answer
+   to the name, or an AGGREGATE publishing its key qualified because one of its
+   own outputs took the stripped name (§2b's rule, #1078). Not everywhere: a
+   qualifier the stream does not carry is resolved by every binding
+   (`exec.ColumnIndexFallback` strips one on a miss) EXCEPT
+   `exec.HashJoin.FixKeyAssignment`, which asks whether a key is "in the build
+   schema" with an exact-name map and swaps a correctly assigned pair when the
+   answer is no — after which a null-aware anti join keys on the probe's
+   column and loses NOT IN's NULL (25 rows for PostgreSQL's 0, measured). The
+   two-name rule is about which column a name IS, and the spelling that reaches
+   the stream is a fact about the producer.
 
 3. **An ordering above a join addresses the SLOT its class names (#1095, a
    wrong ORDER).** §8d's class rule for a duplicate name had one consumer
