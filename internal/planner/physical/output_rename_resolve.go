@@ -209,7 +209,11 @@ func resolveRenameSource(name string, child *logical.Node, forGather bool) strin
 				if (jt == "semi" || jt == "anti") && own == n.Children[1] {
 					return resolved // the build side is not output-visible
 				}
-				return resolveRenameSource(resolved, own, forGather)
+				src := resolveRenameSource(resolved, own, forGather)
+				if forGather && own == n.Children[1] {
+					src = buildArmQualified(own, src)
+				}
+				return src
 			}
 			if r := resolveRenameSource(resolved, n.Children[0], forGather); !strings.EqualFold(r, resolved) {
 				return r
@@ -670,4 +674,77 @@ func resolveJoinNeededColumns(node *logical.Node, published map[*logical.Node]bo
 		out = append(out, c)
 	}
 	return out
+}
+
+// buildArmQualified puts the BUILD arm's own name back on a source column the
+// walk resolved to a bare one, for the GATHER's rename alone.
+//
+// The walk enters an arm through its qualifier and comes back out with the
+// column the block's projection reads — and where the block wrote a bare
+// source name (`SELECT order_id AS k`), the arm identity is gone with it. Two
+// copies of one block then resolve to one name: `SELECT a.k, a.p, b.k, b.p
+// FROM (…) a JOIN (…) b ON b.k = a.k` bound BOTH items to the probe's column
+// and paired every row with itself on the three DAG arms, where PostgreSQL
+// pairs each row of one arm with each matching row of the other.
+//
+// The join qualifies its BUILD's duplicate columns by that arm's name, so the
+// spelling this puts back is the one the stream really carries — and where the
+// column is not a duplicate, the stream carries it bare and
+// `exec.ColumnIndexFallback` strips the qualifier on the miss, which is the
+// same column. The PROBE arm needs nothing: its columns keep their bare names,
+// which is what a resolution that lost the qualifier already bound.
+//
+// It applies only where the arm holds exactly ONE relation and computes no
+// relation of its own — no aggregate, no set operation — because that is
+// exactly the case where the stream is that relation's columns and the name
+// the join qualifies them with describes all of them. A block over two
+// relations names a raw inner column after the arm, which is #773's wrong
+// value from the other side; an aggregate or a set operation publishes a
+// relation of its OWN, whose identity is the arm's name and not the scan's,
+// and re-qualifying there would spell a column after a relation it did not
+// come from.
+//
+// The spelling is `stageBuildTableAlias`, the DAG's answer, because this is
+// the GATHER's rename and the gather reads what the stage DAG emitted
+// (`joinArmAlias`' comment: the two engines hand the join two different
+// streams, and a name describes a stream).
+func buildArmQualified(arm *logical.Node, name string) string {
+	if arm == nil || strings.TrimSpace(name) == "" || strings.IndexByte(name, '.') >= 0 {
+		return name
+	}
+	if !armIsOneRelationsColumns(arm) {
+		return name
+	}
+	alias := stageBuildTableAlias(arm)
+	if alias == "" {
+		return name
+	}
+	return strings.ToLower(alias + "." + name)
+}
+
+// armIsOneRelationsColumns reports whether every column this arm emits is ONE
+// relation's, read and renamed but never recomputed into a relation of the
+// arm's own.
+func armIsOneRelationsColumns(arm *logical.Node) bool {
+	if len(subtreeNamingOf(arm).aliasCols) != 1 {
+		return false
+	}
+	computes := false
+	var walk func(n *logical.Node)
+	walk = func(n *logical.Node) {
+		if n == nil || computes {
+			return
+		}
+		switch n.Type {
+		case logical.NodeAggregate, logical.NodeUnion, logical.NodeIntersect,
+			logical.NodeExcept, logical.NodeWindow:
+			computes = true
+			return
+		}
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	walk(arm)
+	return !computes
 }

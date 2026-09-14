@@ -24,8 +24,26 @@ var r2Pin = map[string]map[string]string{
 
 	// TWO DERIVED ARMS OF ONE SHAPE, on the three DAG arms: `a.k` and `b.k`
 	// each resolve through their block's projection to the same bare source
-	// name (`order_id`), and a bare name binds the PROBE side's copy — so
-	// both items read one relation and every row is paired with itself.
+	// name, and a bare name binds the PROBE side's copy — so both items read
+	// one relation and every row is paired with itself.
+	//
+	// SIX of the ten cells are closed and deleted, which is the proof: the
+	// gather's rename puts the BUILD arm's own name back on a source column
+	// the walk resolved to a bare one, wherever the arm holds exactly one
+	// relation and computes no relation of its own
+	// (physical.buildArmQualified).
+	//
+	// THE FOUR THAT REMAIN ARE THE AGGREGATE-ROOTED ARMS, and their mechanism
+	// is one step past this arc's fix: an aggregate publishes a relation of
+	// its OWN — its keys and its outputs, under the names IT decided — so the
+	// identity of those columns is the ARM's name, while the DAG qualifies
+	// them by the scan below it (`stageBuildTableAlias`). Closing it is the
+	// same move #1102 made for a set operation: treat an aggregate-terminated
+	// arm as a MATERIALIZED arm so the join qualifies it by `joinArmAlias`,
+	// and re-qualify here under that name. It is deferred rather than done
+	// because that alias decides the spelling of every grouped join arm in
+	// the corpus — TPC-H Q13, Q15, Q17 and Q18 each have one — and the change
+	// belongs with its own measurement of them.
 	"grouped-alias-src-collide/both/list": {
 		"dag":          "cols=[id:INT64 customer:STRING id:INT64 customer:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
 		"dag-shuffled": "cols=[id:INT64 customer:STRING id:INT64 customer:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
@@ -36,11 +54,6 @@ var r2Pin = map[string]map[string]string{
 		"dag-shuffled": "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
 		"dag-morsel4":  "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
 	},
-	"nested-rename-collide/both/list": {
-		"dag":          "cols=[id:INT64 customer:STRING id:INT64 customer:STRING] rows=8 | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 1,Widget,1,Widget | 1,Widget,1,Widget | 2,Doohickey,2,Doohickey | 2,Doohickey,2,Doohickey | 2,Widget,2,Widget | 2,Widget,2,Widget",
-		"dag-shuffled": "cols=[id:INT64 customer:STRING id:INT64 customer:STRING] rows=8 | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 1,Widget,1,Widget | 1,Widget,1,Widget | 2,Doohickey,2,Doohickey | 2,Doohickey,2,Doohickey | 2,Widget,2,Widget | 2,Widget,2,Widget",
-		"dag-morsel4":  "cols=[id:INT64 customer:STRING id:INT64 customer:STRING] rows=8 | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 1,Widget,1,Widget | 1,Widget,1,Widget | 2,Doohickey,2,Doohickey | 2,Doohickey,2,Doohickey | 2,Widget,2,Widget | 2,Widget,2,Widget",
-	},
 	"nested-rename-grouped-collide/both/list": {
 		"dag":          "cols=[id:INT64 customer:STRING id:INT64 customer:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
 		"dag-shuffled": "cols=[id:INT64 customer:STRING id:INT64 customer:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
@@ -50,31 +63,6 @@ var r2Pin = map[string]map[string]string{
 		"dag":          "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
 		"dag-shuffled": "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
 		"dag-morsel4":  "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=5 | 1,Doohickey,1,Doohickey | 1,Doohickey,1,Doohickey | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 2,Widget,2,Widget",
-	},
-	"nested-rename/both/list": {
-		"dag":          "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=8 | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 1,Widget,1,Widget | 1,Widget,1,Widget | 2,Doohickey,2,Doohickey | 2,Doohickey,2,Doohickey | 2,Widget,2,Widget | 2,Widget,2,Widget",
-		"dag-shuffled": "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=8 | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 1,Widget,1,Widget | 1,Widget,1,Widget | 2,Doohickey,2,Doohickey | 2,Doohickey,2,Doohickey | 2,Widget,2,Widget | 2,Widget,2,Widget",
-		"dag-morsel4":  "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=8 | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 1,Widget,1,Widget | 1,Widget,1,Widget | 2,Doohickey,2,Doohickey | 2,Doohickey,2,Doohickey | 2,Widget,2,Widget | 2,Widget,2,Widget",
-	},
-	"sortkey-collide/both/list": {
-		"dag":          "cols=[id:INT64 customer:STRING id:INT64 customer:STRING] rows=8 | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 1,Widget,1,Widget | 1,Widget,1,Widget | 2,Doohickey,2,Doohickey | 2,Doohickey,2,Doohickey | 2,Widget,2,Widget | 2,Widget,2,Widget",
-		"dag-shuffled": "cols=[id:INT64 customer:STRING id:INT64 customer:STRING] rows=8 | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 1,Widget,1,Widget | 1,Widget,1,Widget | 2,Doohickey,2,Doohickey | 2,Doohickey,2,Doohickey | 2,Widget,2,Widget | 2,Widget,2,Widget",
-		"dag-morsel4":  "cols=[id:INT64 customer:STRING id:INT64 customer:STRING] rows=8 | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 1,Widget,1,Widget | 1,Widget,1,Widget | 2,Doohickey,2,Doohickey | 2,Doohickey,2,Doohickey | 2,Widget,2,Widget | 2,Widget,2,Widget",
-	},
-	"sortkey-limit-collide/both/list": {
-		"dag":          "cols=[id:INT64 customer:STRING id:INT64 customer:STRING] rows=5 | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 1,Widget,1,Widget | 1,Widget,1,Widget | 2,Widget,2,Widget",
-		"dag-shuffled": "cols=[id:INT64 customer:STRING id:INT64 customer:STRING] rows=5 | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 1,Widget,1,Widget | 1,Widget,1,Widget | 2,Widget,2,Widget",
-		"dag-morsel4":  "cols=[id:INT64 customer:STRING id:INT64 customer:STRING] rows=5 | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 1,Widget,1,Widget | 1,Widget,1,Widget | 2,Widget,2,Widget",
-	},
-	"sortkey-limit/both/list": {
-		"dag":          "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=5 | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 1,Widget,1,Widget | 1,Widget,1,Widget | 2,Widget,2,Widget",
-		"dag-shuffled": "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=5 | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 1,Widget,1,Widget | 1,Widget,1,Widget | 2,Widget,2,Widget",
-		"dag-morsel4":  "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=5 | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 1,Widget,1,Widget | 1,Widget,1,Widget | 2,Widget,2,Widget",
-	},
-	"sortkey/both/list": {
-		"dag":          "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=8 | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 1,Widget,1,Widget | 1,Widget,1,Widget | 2,Doohickey,2,Doohickey | 2,Doohickey,2,Doohickey | 2,Widget,2,Widget | 2,Widget,2,Widget",
-		"dag-shuffled": "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=8 | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 1,Widget,1,Widget | 1,Widget,1,Widget | 2,Doohickey,2,Doohickey | 2,Doohickey,2,Doohickey | 2,Widget,2,Widget | 2,Widget,2,Widget",
-		"dag-morsel4":  "cols=[k:INT64 p:STRING k:INT64 p:STRING] rows=8 | 1,Gadget,1,Gadget | 1,Gadget,1,Gadget | 1,Widget,1,Widget | 1,Widget,1,Widget | 2,Doohickey,2,Doohickey | 2,Doohickey,2,Doohickey | 2,Widget,2,Widget | 2,Widget,2,Widget",
 	},
 
 	// #1095 IS CLOSED and its 2 cells are deleted, which is the proof: an
