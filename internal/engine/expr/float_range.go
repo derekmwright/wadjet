@@ -19,18 +19,17 @@ import (
 // the point: an INFINITY that arrives as an operand is a VALUE, and every
 // result it produces is one too, so `'Infinity'::float8 * 10` is Infinity on
 // both engines. Only a non-finite result from FINITE operands is a range
-// error.
+// error, and only a zero from non-zero ones is an underflow.
 //
-//   - and - : overflow when the result is infinite and neither operand was
-//     (float8pl/float8mi). No underflow rule — a sum that rounds to
-//     zero is the answer.
-//   - : the same overflow rule, plus underflow when the product is zero
-//     and neither operand was (float8mul).
-//     /       : overflow when the result is infinite and the DIVIDEND was not,
-//     underflow when the result is zero and the dividend was not
-//     (float8div). The divisor is not exempted: `1e308 / 1e-308` is an
-//     overflow on both engines, and a zero divisor is 22012, raised by
-//     the callers before they reach here.
+//	+  -    float8pl / float8mi: overflow when the result is infinite and
+//	        neither operand was. No underflow rule — a sum that rounds to zero
+//	        is the answer.
+//	*       float8mul: the same overflow rule, plus underflow when the product
+//	        is zero and neither operand was.
+//	/       float8div: both rules again, with BOTH operands exempted — so
+//	        `1 / Infinity` is zero while `1e308 / 1e-308`, where neither
+//	        operand is infinite, is an overflow. A zero DIVISOR is 22012 and
+//	        the callers raise it before they reach here.
 //
 // Unary minus has no rule at all — negation cannot leave the range — which is
 // why `-1e308` answers and `-1e308 * 10` does not (both measured).
@@ -42,8 +41,13 @@ import (
 // bitcast the compiler emits no instruction for, an AND and a compare, on the
 // integer unit, with no dependency on the float pipeline. It is true for both
 // infinities and for NaN; a NaN result from finite operands is impossible for
-// these four operators, so routing it to the overflow refusal reaches no
-// value a query can produce.
+// these four operators, so routing it to the overflow refusal reaches no value
+// a query can produce.
+
+// floatExpMask is a float64's exponent field: all ones for an infinity and a
+// NaN, and never all ones for a finite value.
+const floatExpMask = 0x7FF0000000000000
+
 // nonFiniteFloat reports whether f is an infinity or a NaN, by its exponent
 // bits. See the file comment for why this and not math.IsInf.
 func nonFiniteFloat(f float64) bool {
@@ -58,8 +62,6 @@ func floatNeedsRangeCheck(f float64) bool {
 	m := math.Float64bits(f) &^ uint64(1<<63)
 	return m-1 >= floatExpMask-1
 }
-
-const floatExpMask = 0x7FF0000000000000
 
 func pgFloatAdd(a, b float64) float64 {
 	r := a + b
