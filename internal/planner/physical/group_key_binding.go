@@ -50,8 +50,22 @@ func resolveShuffleKey(key string, child *logical.Node, published map[*logical.N
 				return stop
 			}
 			switch {
-			case proj != nil && proj.Column != "" && !strings.EqualFold(proj.Column, resolved):
-				resolved = proj.Column
+			case proj != nil && proj.Column != "" && !strings.EqualFold(projSourceName(proj), resolved):
+				// THE QUALIFIER-PRESERVING SPELLING, which is the one
+				// `resolveRenameSource` has always chased and the one the
+				// stream really carries: a block's item written `o2.id AS k`
+				// names ONE of the relations inside the block, and chasing
+				// the bare `proj.Column` threw that away. Where the block is
+				// itself a JOIN both of its relations answer to `id`, so the
+				// outer join keyed on the wrong one — `SELECT DISTINCT o.id,
+				// s.k FROM lat_ord o JOIN (SELECT o2.id AS k FROM lat_item i2
+				// JOIN lat_ord o2 ON o2.id = i2.order_id) s ON s.k = o.id`
+				// paired rows where `s.k <> o.id` on the three DAG arms
+				// (#1099). The key is resolved against the stream with
+				// `exec.ColumnIndexFallback`, exact spelling first and the
+				// qualifier stripped on a miss, so a block whose stream
+				// carries the column bare is unaffected.
+				resolved = projSourceName(proj)
 			case proj != nil && proj.Column == "" && bare != "" && !strings.EqualFold(bare, resolved):
 				// A COMPUTED output (`COUNT(*) + 1 AS k`) has no source
 				// column to chase. It exists on the DAG only under its own
