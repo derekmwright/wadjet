@@ -6,40 +6,51 @@ import (
 	"time"
 )
 
-// A WINDOW KEY BINDS ITS OWN JOIN ARM — #1028, on FIVE ARMS.
+// A WINDOW KEY AND ITS JOIN ARM — #1028, on FIVE ARMS, with the repair that
+// was tried and MEASURED BACK OUT.
 //
-// `PARTITION BY o.id` over `lat_ord o JOIN lat_item i` reached the operator
-// as the BARE `id`, because `bindWindowColRef` falls back to the bare name
-// when the qualified spelling is not in the input's type map — and a map keyed
-// by name folds two arms' `id` into one entry. The join emits one arm's
-// duplicate bare and the other's qualified, so the key bound whichever arm the
-// reorderer put bare: every row landed in its own partition and the window
-// answered 1 where PostgreSQL 17.11 answers 2, on all five arms, in silence.
-// `ORDER BY o.id` and `SUM(o.total) OVER (PARTITION BY o.id)` are the same
-// fact through the window's other two positions.
+// `PARTITION BY o.id` over `lat_ord o JOIN lat_item i` reaches the operator as
+// the BARE `id`: `bindWindowColRef` falls back to the bare name when the
+// qualified spelling is not in the input's type map, and a map keyed by name
+// folds two arms' `id` into one entry. The join emits one arm's duplicate bare
+// and the other's qualified, so the key binds whichever arm the reorderer put
+// bare — every row lands in its own partition and the window answers 1 where
+// PostgreSQL 17.11 answers 2, on all five arms, in silence. `SUM(o.total) OVER
+// (PARTITION BY o.id)` and `ORDER BY o.id` are the same fact through the
+// window's other two positions. Seven cells below are PINNED on it.
 //
-// `PARTITION BY o.id + 0` — one character away, and an EXPRESSION, so it is
-// MATERIALIZED into a slot the projection below the window computes — was
-// already right, and that is what says the loss is in the NAME and not in the
-// operator. So a qualified reference the input cannot settle takes the same
-// route: `windowInputIsAJoin` asks the one question the type map cannot
-// answer, and the key is materialized rather than resolved by a name.
+// **The repair was written, measured and taken out, and that measurement is
+// the finding.** `PARTITION BY o.id + 0` — one character away, and an
+// EXPRESSION, so it is MATERIALIZED into a slot the projection below the
+// window computes — is right, which says the loss is in the NAME. Routing a
+// qualified reference the input cannot settle down that same route fixes these
+// seven cells and breaks four gates that were green:
 //
-// #1028 was filed for the DERIVED-ALIAS spelling of this — a window argument
-// naming a computed alias published by one ARM — and that family answers on
-// all five arms at this arc's base (`derivedAlias*` below); it is gated here
-// because an unreproduced issue with no gate is one nobody re-checks. The
-// BASE-COLUMN spelling beside it did not, which is what this commit closes.
+//   - `coordinator.TestArcK1AWindowPartitionKeyBindsItsOwnArm` (#975): over two
+//     DERIVED arms that both publish `w`, `PARTITION BY x.w` is right as a
+//     NAME — the join qualifies the build arm's copy by the alias the query
+//     wrote — and MATERIALIZING it answers each row its own partition. The
+//     base-table and derived-table resolutions are DIFFERENT mechanisms, and
+//     narrowing the route to a base-scan arm still left
+//     `TestADerivedTablesComputedAliasIsNotASortOrWindowKeyOnTheDAG` (#658),
+//     `TestJ2AJoinConsumerBindsThePublishedIdentity` (#770) and two arc-C1
+//     read-seam cells failing.
+//   - materializing an ORDER BY term INVERTS the window's direction, because
+//     the Desc flag lives on the OrderExpr and a materialized key does not
+//     carry it. `orderDescOverJoin` / `orderAscOverJoin` are the two cells
+//     that say so, and they are pinned on the SAME bare-name bind, so the day
+//     the key binds its arm they must also keep their direction.
 //
-// ONE CELL IS PINNED. `orderOverArm` — `ORDER BY o.id` over the same join —
-// binds the same wrong arm, and the SAME repair does not close it: an ORDER BY
-// term carries its DESC flag on the OrderExpr and a materialized key does not,
-// so routing an ORDER BY term through materialization INVERTED the window's
-// direction for every window over a join (`orderDescOverJoin`,
-// `orderAscOverJoin`, `orderDescNoPartition`, right at base and wrong with
-// it). The materialization route's lost direction is the older defect and
-// closing it comes first; the three direction cells are here so the day it is
-// closed they say so.
+// So the seam is one question — which arm owns a window key — answered today
+// by three mechanisms that disagree (the bare-name bind, the qualified name
+// arc K1 settled for derived arms, and the materialized slot), and closing it
+// is one resolution for all three, not a fourth. Pinned here, with
+// PostgreSQL's answer beside every cell.
+//
+// #1028 was filed for the DERIVED-ALIAS spelling — a window argument naming a
+// computed alias published by one ARM — and that family answers on all five
+// arms at this arc's base (`derivedAlias*` below); it is gated here because an
+// unreproduced issue with no gate is one nobody re-checks.
 //
 // `windowUnderGroupKeySubset` is a third shape and a different mechanism: a
 // window partitioned on a SUBSET of the GROUP BY keys below it was REFUSED on
@@ -106,10 +117,17 @@ func TestArcL1AWindowKeyBindsItsOwnJoinArm(t *testing.T) {
 	}
 }
 
-// l1WindowKeyPins is the one residue, with the mechanism in the header above.
-// A pin that starts agreeing FAILS.
+// l1WindowKeyPins are the seven cells a window key's bare-name bind gets
+// wrong, with the mechanism in the header above. A pin that starts agreeing
+// FAILS.
 var l1WindowKeyPins = map[string]string{
-	"orderOverArm": "rows=4 1,1,1 | 1,2,2 | 2,3,3 | 2,4,4",
+	"partOuterArm":      "rows=4 1,1,1 | 1,2,1 | 2,3,1 | 2,4,1",
+	"partArmsSwapped":   "rows=4 1,1,1 | 1,2,1 | 2,3,1 | 2,4,1",
+	"argOverArm":        "rows=4 1,1,150 | 1,2,150 | 2,3,200 | 2,4,200",
+	"orderOverArm":      "rows=4 1,1,1 | 1,2,2 | 2,3,3 | 2,4,4",
+	"threeWay":          "rows=8 1,2 | 1,2 | 1,2 | 1,2 | 2,2 | 2,2 | 2,2 | 2,2",
+	"orderDescOverJoin": "rows=4 1,1,1 | 1,2,1 | 2,3,1 | 2,4,1",
+	"orderAscOverJoin":  "rows=4 1,1,1 | 1,2,1 | 2,3,1 | 2,4,1",
 }
 
 var l1WindowKeyPostgres = map[string]string{

@@ -909,31 +909,25 @@ func arcD5LateralCells() []arcD5Cell {
 		// A SECOND LATERAL THAT READS THE FIRST ONE'S OUTPUT. PostgreSQL
 		// resolves `s.n` inside the second lateral's WHERE — a lateral may
 		// name any FROM item to its left — and answers `Alice 2 2, Bob 2 2,
-		// Carol 0 0`. This engine answers `m = 0` for all three, on all four
-		// arms, in silence.
-		//
-		// The plan says why: `buildLateralSubquery` promotes the second
+		// Carol 0 0`. This engine answered `m = 0` for all three, on all four
+		// arms, in SILENCE: `buildLateralSubquery` promoted the second
 		// lateral's correlated EQUALITY (`order_id = o.id`) into the join
-		// condition and DROPS `amount > s.n * 10` entirely — the second
-		// aggregate carries no filter at all — after which both LEFT joins key
-		// on a column called `order_id` and the second matches nothing, so the
-		// empty-input default fills `m` with 0.
+		// condition and DROPPED `amount > s.n * 10` entirely, after which the
+		// second aggregate carried no filter at all.
 		//
-		// NOT this arc's doing and not a regression: the plan holds no
-		// semi/anti join and no decorrelated inner, which are the only nodes
-		// this arc's change can produce, and `buildLateralSubquery` is
-		// untouched by it. Filed; pinned here with PostgreSQL's answer so the
-		// day it is fixed this cell fails.
+		// It is LOUD at arc L1 (0A000) and the pin is deleted. The lifted
+		// predicate is not an equality and names `amount`, which an AGGREGATED
+		// body publishes no column for — publishing it would put it in the
+		// GROUP BY and change what the aggregate computes. Answering it needs
+		// the body evaluated per outer row (ADR-0021 §1q).
 		{issue: "#767", name: "boundary_a_second_lateral_reading_the_first_ones_output",
 			sql: `SELECT o.customer AS c, s.n AS n, t.m AS m FROM lat_ord o JOIN LATERAL (` +
 				`SELECT COUNT(*) AS n FROM lat_item WHERE order_id = o.id) s ON true ` +
 				`JOIN LATERAL (SELECT COUNT(*) AS m FROM lat_item ` +
 				`WHERE order_id = o.id AND amount > s.n * 10) t ON true ORDER BY 1`,
-			want: []string{"c=Alice|n=int64:2|m=int64:0", "c=Bob|n=int64:2|m=int64:0",
-				"c=Carol|n=int64:0|m=int64:0"},
-			wantUnreachableRoutes: 1,
-			pgSays: "Alice 2 2, Bob 2 2, Carol 0 0 — the second lateral's " +
-				"`amount > s.n * 10` is dropped from the plan here"},
+			wantErrLike: `is not an equality and reads "amount"`,
+			pgSays: "Alice 2 2, Bob 2 2, Carol 0 0 — this engine refuses the " +
+				"second lateral's `amount > s.n * 10` rather than dropping it"},
 		// CROSS JOIN LATERAL, the spelling the corpus had none of. It is
 		// PostgreSQL's own synonym for `JOIN LATERAL ... ON true` and it takes
 		// the same repair, so the four cells here are what says the repair

@@ -62,7 +62,7 @@ func refuseLateralOuterReferenceOutsideWhere(info *plansql.SelectInfo, leftAlias
 		{"SELECT list", lateralSelectListNodes(info)},
 		{"GROUP BY", lateralGroupByNodes(info)},
 		{"HAVING", []plansql.Node{info.HavingExpr}},
-		{"ORDER BY", lateralOrderByNodes(info)},
+		{"ORDER BY", lateralSortNodes(info)},
 		{"QUALIFY", []plansql.Node{info.QualifyExpr}},
 	}
 	for _, c := range clauses {
@@ -106,6 +106,21 @@ func lateralGroupByNodes(info *plansql.SelectInfo) []plansql.Node {
 		}
 	}
 	return out
+}
+
+// lateralSortNodes is the body's ORDER BY, and it is EMPTY for a body with no
+// FROM clause.
+//
+// Such a body yields at most one row, so a sort over it is the IDENTITY and an
+// outer name in it does not make the body correlated — arc C1's measured
+// position (`LATERAL (SELECT 7 AS v ORDER BY u.id)` answers PostgreSQL's rows
+// on five arms, and so does a second lateral sorting on the first's output).
+// The clause decides nothing there, so there is nothing to refuse.
+func lateralSortNodes(info *plansql.SelectInfo) []plansql.Node {
+	if len(info.Tables) == 0 {
+		return nil
+	}
+	return lateralOrderByNodes(info)
 }
 
 func lateralOrderByNodes(info *plansql.SelectInfo) []plansql.Node {

@@ -2415,38 +2415,53 @@ therefore not an address, and it was the only one in use in three places:
    columns answer to it", §3a), and the positions are the inner operation's
    own by the same construction the rest of this item rests on.
 
-### 8j. A WINDOW's PARTITION BY binds its own join arm (2026-09-14, arc L1: #1028)
+### 8j. A WINDOW key's ARM is asked THREE ways, and they disagree (2026-09-14, arc L1: #1028) — NOT SETTLED, with the measurement
 
 A window key is a key, and §4's rule holds for it: the identity of a column is
-the relation that produced it, never the bare name two relations share.
+the relation that produced it, never the bare name two relations share. Today
+three mechanisms answer "which arm owns this key" and they do not agree, which
+is why this section records a seam rather than a decision.
 
-`resolveWindowKeys` kept a QUALIFIED reference's qualifier where the input's
-column set could not settle it (#975), and then handed the operator a NAME to
-resolve. `exec.columnIndexFallback` tries the exact spelling and then the BARE
-one — and a join emits one arm's duplicate bare and the other's qualified — so
-`PARTITION BY o.id` over `lat_ord o JOIN lat_item i` bound `i.id`, put every
-row in its own partition, and answered 1 where PostgreSQL 17.11 answers 2, on
-all five arms, in silence. The fallback cannot be narrowed by inspecting the
-type map: it is keyed by name and folds the two arms' `id` into one entry.
+**The defect.** `resolveWindowKeys` keeps a QUALIFIED reference's qualifier
+where the input's column set cannot settle it (#975) and hands the operator a
+NAME to resolve. `exec.columnIndexFallback` tries the exact spelling and then
+the BARE one — and a join emits one arm's duplicate bare and the other's
+qualified — so `PARTITION BY o.id` over `lat_ord o JOIN lat_item i` binds
+`i.id`, puts every row in its own partition, and answers 1 where PostgreSQL
+17.11 answers 2, on all five arms, in silence. `SUM(o.total) OVER (PARTITION BY
+o.id)` and `ORDER BY o.id` are the same fact through the window's other two
+positions, and the LEFT spelling of the same query is right by luck, because a
+LEFT join emits the probe arm bare and that is the arm the key names. The
+fallback cannot be narrowed by inspecting the type map: it is keyed by name and
+folds the two arms' `id` into one entry.
 
-`PARTITION BY o.id + 0` — one character away, and an EXPRESSION, so it is
-MATERIALIZED into a slot the projection below the window computes — was
-already right, which localises the loss to the NAME. A qualified reference the
-input cannot settle takes the same route now: `windowInputIsAJoin` asks the one
-question the map cannot answer, and the key is materialized rather than
-resolved.
+**The repair was written and measured BACK OUT.** `PARTITION BY o.id + 0` —
+one character away, and an EXPRESSION, so it is MATERIALIZED into a slot the
+projection below the window computes — is right, which localises the loss to
+the NAME. Routing a qualified reference the input cannot settle down that same
+route fixes seven cells and breaks four green gates:
 
-**Only a `PARTITION BY` term, and the bound is measured.** An `ORDER BY` term
-carries its direction on the `OrderExpr` and a materialized key does not, so
-routing one through materialization INVERTED every window's direction over a
-join — `ORDER BY i.amount DESC` numbered ascending. That is the materialization
-route's own older defect (an expression `ORDER BY` term already takes it), so
-`ORDER BY o.id` over a join still binds the wrong arm and is PINNED with
-PostgreSQL's answer beside it, next to three direction cells that were right
-before this hunk and must stay right.
-`coordinator.TestArcL1AWindowKeyBindsItsOwnJoinArm` is the gate — 21 cells on
-five arms, the DERIVED-ALIAS family #1028 was filed for among them, which
-answers at arc L1's base and is gated for the first time.
+- over two DERIVED arms that both publish `w`, `PARTITION BY x.w` is right as a
+  NAME — the join qualifies the build arm's copy by the alias the query wrote,
+  which is what §4 and #975 settled — and MATERIALIZING it answers each row its
+  own partition (`coordinator.TestArcK1AWindowPartitionKeyBindsItsOwnArm`).
+  Narrowing the route to a BASE-SCAN arm still leaves
+  `TestADerivedTablesComputedAliasIsNotASortOrWindowKeyOnTheDAG` (#658),
+  `TestJ2AJoinConsumerBindsThePublishedIdentity` (#770) and two arc-C1
+  read-seam cells failing.
+- materializing an `ORDER BY` term INVERTS the window's direction, because the
+  `Desc` flag lives on the `OrderExpr` and a materialized key does not carry
+  it: `ORDER BY i.amount DESC` over a join numbers ascending.
+
+So the seam is one question answered three ways — the bare-name bind, the
+qualified name #975 settled for derived arms, and the materialized slot — and
+closing it is ONE resolution for all three, not a fourth beside them. The
+materialization route's lost direction is a prerequisite either way.
+`coordinator.TestArcL1AWindowKeyBindsItsOwnJoinArm` is the gate: 21 cells on
+five arms, seven PINNED with PostgreSQL's answer beside them, the two direction
+cells among the pins so the day the key binds its arm they must also keep their
+direction, and #1028's own DERIVED-ALIAS family — which answers on all five
+arms — gated for the first time.
 
 ### 8i. A join ARM that is not a base scan is named by the query (2026-09-14, arc R2: #1102, #1099, #1095)
 

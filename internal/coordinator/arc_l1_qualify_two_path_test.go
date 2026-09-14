@@ -30,10 +30,11 @@ import (
 //     clause"; wadjet says the same thing in its own words, and the assertion
 //     is that it refuses rather than filtering, because a QUALIFY no window
 //     reaches means something WHERE already means.
-//   - `overJoin` is a PIN, and it is not a QUALIFY defect at all: a window
-//     whose PARTITION BY names a join arm's column binds the other arm's
-//     column of that bare name, which reproduces with no QUALIFY in the
-//     query. See TestArcL1AWindowKeyBindsItsOwnJoinArm.
+//   - `overJoin` is a PIN, and it is not a QUALIFY defect:
+//     a window whose PARTITION BY names a join arm's column binds the other
+//     arm's column of that bare name, so the filter admits every row. Both
+//     reproduce with no QUALIFY in the query. See
+//     TestArcL1AWindowKeyBindsItsOwnJoinArm.
 
 type l1QCase struct{ name, sql string }
 
@@ -118,13 +119,20 @@ var l1QualifyRefuses = map[string]string{
 
 // l1QualifyPins holds a cell whose divergence is a DIFFERENT defect, with the
 // measurement that localises it. A pin that starts agreeing FAILS.
-//
-// EMPTY: `overJoin` was pinned here — a window PARTITION BY naming a join
-// arm's column bound the other arm's column of that bare name, so
-// `ROW_NUMBER() = 1` admitted every row. It reproduced with no QUALIFY in the
-// query and is closed where it lived, in the window key resolver
-// (TestArcL1AWindowKeyBindsItsOwnJoinArm).
-var l1QualifyPins = map[string]string{}
+var l1QualifyPins = map[string]string{
+	// A window PARTITION BY naming a join arm's column binds the arm the
+	// reorderer emitted BARE, so every row lands in its own partition and
+	// `ROW_NUMBER() = 1` admits all four. It reproduces with no QUALIFY in
+	// the query, and the repair was measured back out —
+	// TestArcL1AWindowKeyBindsItsOwnJoinArm holds the seam and the two
+	// mechanisms that disagree with it.
+	// The LEFT spelling beside it is NOT pinned and answers DuckDB's rows:
+	// a LEFT join emits the probe arm's `id` bare, which is the arm the
+	// PARTITION BY names, so the bare-name bind lands on it by luck. That
+	// pair is the discriminator — the defect is which arm the name reaches,
+	// not the clause.
+	"overJoin": "rows=4 1,1 | 1,2 | 2,3 | 2,4",
+}
 
 func TestArcL1QualifyAnswersDuckDBOnEveryArm(t *testing.T) {
 	if testing.Short() {
