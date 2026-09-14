@@ -85,6 +85,11 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	// states for HAVING, one operator over.
 	var groupKeyRefs map[string]string
 	winAggRefs := map[string]string{}
+	// havingReplacements maps an aggregate CALL's text to the column the
+	// aggregate publishes it under. HAVING is its first consumer and QUALIFY
+	// is its second: both are predicates ABOVE the aggregate, where a call is
+	// a NAME and not arithmetic (#1076).
+	havingReplacements := map[string]string{}
 
 	// GROUP BY / aggregation
 	// GROUPING(...) anywhere in the SELECT list or HAVING (#804). Every call
@@ -260,7 +265,6 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		// Add hidden aggregates from HAVING that aren't in the SELECT list.
 		// e.g., SELECT l_orderkey FROM lineitem GROUP BY l_orderkey HAVING SUM(l_quantity) > 300
 		// needs SUM(l_quantity) computed even though it's not in SELECT.
-		havingReplacements := map[string]string{}
 		if info.HavingExpr != nil {
 			havingAggs := plansql.FindAllAggregates(info.HavingExpr)
 			for _, hAgg := range havingAggs {
@@ -367,24 +371,30 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		// exactly as HAVING reuses one; anything else is hoisted into the
 		// nested-aggregate slot family, which is where an aggregate inside an
 		// expression has lived since #610.
+		//
+		// A window written in the QUALIFY clause is one of them: the clause
+		// is evaluated over the same windowed rows, so an aggregate in its
+		// OVER terms is the block's aggregate too (#1076).
+		winTerms := qualifyWindowTerms(info)
 		for _, col := range info.Columns {
-			for _, term := range windowSpecTerms(col) {
-				for _, wAgg := range plansql.FindAllAggregates(term) {
-					wKey := strings.ToLower(wAgg.String())
-					if _, done := winAggRefs[wKey]; done {
-						continue
-					}
-					if existing, ok := aggSyntheticNames[wKey]; ok {
-						winAggRefs[wKey] = existing
-						continue
-					}
-					name, err := reuseOrAddAggregate(wAgg, &aggs, &aggCounter)
-					if err != nil {
-						return nil, err
-					}
-					winAggRefs[wKey] = name
-					aggSyntheticNames[wKey] = name
+			winTerms = append(winTerms, windowSpecTerms(col)...)
+		}
+		for _, term := range winTerms {
+			for _, wAgg := range plansql.FindAllAggregates(term) {
+				wKey := strings.ToLower(wAgg.String())
+				if _, done := winAggRefs[wKey]; done {
+					continue
 				}
+				if existing, ok := aggSyntheticNames[wKey]; ok {
+					winAggRefs[wKey] = existing
+					continue
+				}
+				name, err := reuseOrAddAggregate(wAgg, &aggs, &aggCounter)
+				if err != nil {
+					return nil, err
+				}
+				winAggRefs[wKey] = name
+				aggSyntheticNames[wKey] = name
 			}
 		}
 
@@ -477,6 +487,13 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		nestedWinRewrites[i] = plansql.ReplaceWindowFuncs(col.ASTExpr, replacements)
 	}
 
+	// QUALIFY's own window calls take slots of the same family and from the
+	// same counter, because the clause is evaluated over the rows the Window
+	// operator produced and its calls are that operator's work (#1076,
+	// qualify.go). A block whose SELECT list holds no window still gets one
+	// when the clause does.
+	qual := qualifyWindows(info, &winCounter)
+
 	// A BARE window column — one whose whole SELECT expression is the window
 	// call — writes its result into a slot of its own, exactly as the nested
 	// case above does, and the SELECT list reads THAT slot.
@@ -495,7 +512,8 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	// single-process path answered NULL while the DAG dropped the column from
 	// the result entirely.
 	bareWinOutput := map[int]string{}
-	if len(info.Windows) > 0 || len(nestedWinExprs) > 0 {
+	windowed := len(info.Windows) > 0 || len(nestedWinExprs) > 0 || len(qual.windows) > 0
+	if windowed {
 		var winExprs []WindowExpr
 		for i, col := range info.Columns {
 			if !col.IsWindow || col.WindowSpec == nil {
@@ -531,6 +549,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			winExprs = append(winExprs, we)
 		}
 		winExprs = append(winExprs, nestedWinExprs...)
+		winExprs = append(winExprs, qual.windows...)
 		// Spell every term the window will EVALUATE against what the producer
 		// below it PUBLISHES. Above an aggregate `g + 1` is the NAME of one
 		// column and `COUNT(*)` is the name of another; rebuilding either as an
@@ -557,6 +576,24 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			}
 		}
 		plan = NewWindow(plan, winExprs)
+	}
+
+	// QUALIFY: a filter over the WINDOW's output, below the projection.
+	//
+	// Below it, because the clause may name a column the SELECT list does not
+	// publish; above the Window, because the whole point of the clause is the
+	// rows a window decides. A clause no window reaches is an ERROR and not a
+	// WHERE in disguise — see qualify.go for the four measured facts.
+	if info.QualifyExpr != nil {
+		if err := refuseQualifyWithoutAWindow(info, windowed); err != nil {
+			return nil, err
+		}
+		pred := resolveQualifyNames(qual.pred, info.Columns, bareWinOutput, nestedWinRewrites, plan)
+		if len(havingReplacements) > 0 {
+			pred = plansql.ReplaceAllAggregates(pred, havingReplacements)
+		}
+		pred = plansql.ReplaceGroupKeyRefs(pred, groupKeyRefs)
+		plan = NewFilter(plan, []Predicate{{Raw: pred.String(), ASTExpr: pred}})
 	}
 
 	// When ORDER BY references a nested aggregate, sort BEFORE Project
@@ -606,8 +643,18 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	}
 
 	// PROJECT (SELECT columns)
+	//
+	// A STAR-ONLY list normally needs no projection — the relation below is
+	// already what the statement publishes. A QUALIFY clause is the one thing
+	// that can put a window under such a list, and `exec.Window` APPENDS its
+	// output to the batch, so without a projection the clause's own
+	// `__win_N` slot rode out to the client beside the star's columns and the
+	// statement published a column no query can spell (ADR-0026 §3c: a minted
+	// slot is dropped by the operator that minted it). The star item is
+	// projected as written and `ExpandStarProjections` expands it in the
+	// ordinary pass.
 	var projectNode *Node
-	if !isStarOnly(info.Columns) {
+	if !isStarOnly(info.Columns) || len(qual.windows) > 0 {
 		var projections []Projection
 		for i, col := range info.Columns {
 			if col.IsWindow {
