@@ -501,6 +501,18 @@ func tmdTables() []tmdTable {
 		// there pairs a price column with a volume column at all.
 		{ohlcvTable, ohlcvSchema(), ohlcvData()},
 		{ohlcvZeroTable, ohlcvSchema(), ohlcvZeroData()},
+		// The NUMERIC-VALUES fixture (arc NV, #1082/#950/#1037/#1000). Rides
+		// along for the reason the fixtures above do: only
+		// TestNumericValuesMatchPostgres and its deferral pins name these
+		// tables, and no type-matrix corpus entry does. The type matrix
+		// cannot stand in — it is a ROUND-TRIP corpus whose every aggregate
+		// expectation would move if a NaN or a 1e308 were added to it, which
+		// is #1091's own half of this.
+		{nvOvfTable, nvOvfSchema(), nvOvfData()},
+		{nvSpecTable, nvSpecSchema(), nvSpecData()},
+		{nvEdgeTable, nvEdgeSchema(), nvEdgeData()},
+		{nvRealTable, nvRealSchema(), nvRealData()},
+		{nvFoldTable, nvFoldSchema(), nvFoldData()},
 	}, append(multikeyTables(), collideTables()...)...)
 }
 
