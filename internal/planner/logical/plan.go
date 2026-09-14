@@ -293,6 +293,20 @@ type Node struct {
 	// star is what makes the slot unreachable rather than usually-hidden
 	// (ADR-0026 §3c). Empty on every other join.
 	HiddenJoinCols []string
+	// LateralBoundNotPerRow marks a DECORRELATED LATERAL's body that carries
+	// a `LIMIT` or `OFFSET` the decorrelation cannot apply per outer row:
+	// PostgreSQL evaluates the body once per OUTER ROW, so its bound applies
+	// to each row's own result, and the join applies it to the whole inner
+	// relation once (#1019, #1079).
+	//
+	// It is a MARK and not a refusal, because whether the bound BINDS is a
+	// property of the data: `LIMIT 10` over a body that never yields ten rows
+	// for one key answers PostgreSQL's rows either way. The one consumer that
+	// declines on it is the QUALIFIED star, which would otherwise publish this
+	// body as a relation whose ROW COUNT is not the one the query wrote
+	// (relationOutputColumns) — every other spelling keeps the disposition it
+	// had, with the row count pinned and PostgreSQL's answer beside it.
+	LateralBoundNotPerRow bool
 	// LateralSubtree marks the node a DECORRELATED LATERAL's lowering built —
 	// the side of the join that carries the columns it MINTED.
 	//
@@ -1259,50 +1273,55 @@ func NewWindow(child *Node, exprs []WindowExpr) *Node {
 // then disagreeing on column count, so the DAG refused a query PostgreSQL
 // answers and `INTERSECT` lost every row (#1075).
 //
-// `NewJoin`, `NewUnion`, `NewIntersect` and `NewExcept` are the whole of that
-// class in this plan — there is no fifth binary node — which is why the call
-// belongs on each of them rather than on a list of consumers somebody has to
-// remember to extend. A side that materialized nothing is returned unchanged,
-// so an ordinary plan is what it always was. See block_visible_output.go.
+// There is no fifth binary node TYPE, but a type is not a door: the
+// decorrelation of `IN`, `NOT IN`, `EXISTS` and a correlated scalar subquery
+// each builds a `NodeJoin` LITERALLY and fills its left child in afterwards, so
+// a constructor-only rule missed all four and a sorted block under any of them
+// still leaked (#1080). Every wiring of a side — here and there — goes through
+// `setCombinedChild`, and a source gate fails on one that does not. A side that
+// materialized nothing is returned unchanged, so an ordinary plan is what it
+// always was. See block_visible_output.go.
 //
 // NewJoin creates a join node.
 func NewJoin(left, right *Node, joinType, condition string) *Node {
-	return &Node{
+	n := &Node{
 		Type:     NodeJoin,
-		Children: []*Node{dropBlockHiddenSlots(left), dropBlockHiddenSlots(right)},
+		Children: []*Node{nil, nil},
 		JoinType: joinType,
 		JoinCond: condition,
 	}
+	setCombinedChild(n, 0, left)
+	setCombinedChild(n, 1, right)
+	return n
 }
 
 // NewUnion creates a union node. If all is true, it represents UNION ALL
 // (no deduplication); otherwise it represents UNION (with deduplication).
 func NewUnion(left, right *Node, all bool) *Node {
-	return &Node{
-		Type:     NodeUnion,
-		Children: []*Node{dropBlockHiddenSlots(left), dropBlockHiddenSlots(right)},
-		UnionAll: all,
-	}
+	n := &Node{Type: NodeUnion, Children: []*Node{nil, nil}, UnionAll: all}
+	setCombinedChild(n, 0, left)
+	setCombinedChild(n, 1, right)
+	return n
 }
 
 // NewIntersect creates an intersect node. Returns only rows present in both sides.
 // If all is true (INTERSECT ALL), preserves duplicates; otherwise deduplicates.
 func NewIntersect(left, right *Node, all bool) *Node {
-	return &Node{
-		Type:     NodeIntersect,
-		Children: []*Node{dropBlockHiddenSlots(left), dropBlockHiddenSlots(right)},
-		UnionAll: all, // reuse field: true = ALL variant
-	}
+	n := &Node{Type: NodeIntersect, Children: []*Node{nil, nil},
+		UnionAll: all} // reuse field: true = ALL variant
+	setCombinedChild(n, 0, left)
+	setCombinedChild(n, 1, right)
+	return n
 }
 
 // NewExcept creates an except node. Returns rows from left that are not in right.
 // If all is true (EXCEPT ALL), preserves duplicates; otherwise deduplicates.
 func NewExcept(left, right *Node, all bool) *Node {
-	return &Node{
-		Type:     NodeExcept,
-		Children: []*Node{dropBlockHiddenSlots(left), dropBlockHiddenSlots(right)},
-		UnionAll: all, // reuse field: true = ALL variant
-	}
+	n := &Node{Type: NodeExcept, Children: []*Node{nil, nil},
+		UnionAll: all} // reuse field: true = ALL variant
+	setCombinedChild(n, 0, left)
+	setCombinedChild(n, 1, right)
+	return n
 }
 
 // PrettyPrint returns a formatted string representation of the plan tree.

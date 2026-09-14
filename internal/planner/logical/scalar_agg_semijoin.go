@@ -96,12 +96,18 @@ func walkReduceScalarAggs(n *Node) {
 	for host.Children[0].Type == NodeFilter && len(host.Children[0].Children) == 1 {
 		host = host.Children[0]
 	}
-	host.Children[0] = &Node{
+	semi := &Node{
 		Type:     NodeJoin,
 		JoinType: "semi",
 		JoinCond: strings.Join(condParts, " AND "),
-		Children: []*Node{host.Children[0], keySource},
+		Children: []*Node{nil, nil},
 	}
+	// Both sides through the one door (ADR-0026 §9, #1080): this join is built
+	// literally because it carries a semi-join's own condition, and a literal
+	// is exactly where the rule used to be missed.
+	setCombinedChild(semi, 0, host.Children[0])
+	setCombinedChild(semi, 1, keySource)
+	host.Children[0] = semi
 }
 
 // eqPair is one "left = right" conjunct of a decorrelation join condition.

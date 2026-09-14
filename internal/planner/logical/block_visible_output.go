@@ -108,3 +108,27 @@ func blockProjectionName(pr Projection) string {
 	}
 	return cleanExpr(pr.Expr)
 }
+
+// setCombinedChild wires side i of a RELATION-COMBINING node — a join or a set
+// operation — to plan, and is the ONE door every such wiring goes through.
+//
+// The rule is §9's: a relation-combining operator builds its output from its
+// sides' STREAMS, so each side publishes its VISIBLE list there. Round 2 put
+// the call in the four constructors and said they were the whole class,
+// because there is no fifth binary node TYPE. That was true of the type and
+// false of the wiring: the decorrelation of `IN`, `NOT IN`, `EXISTS` and a
+// correlated scalar subquery each builds a `NodeJoin` LITERALLY, with a nil
+// left child the caller fills in afterwards — so the constructor never saw the
+// side, and a sorted derived block under any of them still published
+// `__sortkey_0` on five arms and in `RowDescription` (#1080).
+//
+// A door is a door only if everything uses it, which is why this is a function
+// rather than a line repeated at each site, and why
+// `TestEveryRelationCombiningSideIsWiredThroughOneDoor` fails on a new
+// assignment that does not come through here.
+func setCombinedChild(n *Node, i int, child *Node) {
+	if n == nil || i < 0 || i >= len(n.Children) {
+		return
+	}
+	n.Children[i] = dropBlockHiddenSlots(child)
+}

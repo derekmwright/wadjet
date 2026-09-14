@@ -1200,8 +1200,11 @@ func decorrelateScalarSubqueries(n *Node, ctes []plansql.CTEDef, annotate func(*
 			remainingPreds = append(remainingPreds, pred)
 			continue
 		}
-		// Wire the current plan as the left (probe) child
-		joinNode.Children[0] = currentPlan
+		// Wire the current plan as the left (probe) child, through the one
+		// door every relation-combining side goes through: a decorrelated
+		// join composes relations exactly as a written one does, so the side
+		// it reads publishes its VISIBLE list here too (ADR-0026 §9, #1080).
+		setCombinedChild(joinNode, 0, currentPlan)
 		currentPlan = joinNode
 		remainingPreds = append(remainingPreds, rewrittenPred)
 		scalarIdx++
@@ -1548,8 +1551,11 @@ func decorrelateInSubqueries(n *Node, ctes []plansql.CTEDef, annotate func(*Node
 			continue
 		}
 
-		// Wire the current plan as the left (probe) child
-		joinNode.Children[0] = currentPlan
+		// Wire the current plan as the left (probe) child, through the one
+		// door every relation-combining side goes through: a decorrelated
+		// join composes relations exactly as a written one does, so the side
+		// it reads publishes its VISIBLE list here too (ADR-0026 §9, #1080).
+		setCombinedChild(joinNode, 0, currentPlan)
 		currentPlan = joinNode
 	}
 
@@ -3070,8 +3076,11 @@ func decorrelateExists(n *Node, ctes []plansql.CTEDef, annotate func(*Node)) *No
 			continue
 		}
 
-		// Wire the current plan as the left (probe) child
-		joinNode.Children[0] = currentPlan
+		// Wire the current plan as the left (probe) child, through the one
+		// door every relation-combining side goes through: a decorrelated
+		// join composes relations exactly as a written one does, so the side
+		// it reads publishes its VISIBLE list here too (ADR-0026 §9, #1080).
+		setCombinedChild(joinNode, 0, currentPlan)
 		currentPlan = joinNode
 	}
 
