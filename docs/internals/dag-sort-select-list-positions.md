@@ -55,3 +55,42 @@ Without it, `ORDER BY 1, b.amount DESC` over an output list that publishes
 under a LIMIT a wrong ROW SET as well as a wrong sequence. Gate:
 `coordinator.TestC3AWrittenSortKeyBindsItsOwnColumn`, five arms, with the bare
 cross join as the control the measurement must still decline.
+
+## Amendment, 2026-09-14 (#1095, arc R2)
+
+**A slot is also the address where the producer publishes one NAME twice, and
+an ordering fused onto a JOIN had no model of that producer.**
+
+`pinSortKeySlotsOverProducerOutput` (`sort_key_slots.go`) settles the second
+half of #968's rule: where the producing aggregate emits one name for a group
+KEY and for an aggregate OUTPUT, the key's CLASS says which column is meant.
+It modelled a sort reading its aggregate directly, or through a window. Put a
+JOIN under it and there was no model at all, so the key bound by name and a
+name answers with the first column that carries it:
+
+    SELECT x.product, o.id
+    FROM (SELECT COUNT(*) AS product FROM lat_item GROUP BY product) x
+    JOIN lat_ord o ON true ORDER BY x.product, o.id
+
+came back on the three DAG arms ordered by the group KEY — the product names —
+while the projection read the count.
+
+`joinProbeAggregateSlots` is that model. A join emits its PROBE's columns first
+and unchanged, so a slot in the probe is a slot in the join — MEASURED, not
+assumed: the probe's model must be the leading prefix of the stage's own output
+stream (`stageStreamColumns`), name for name in order, and a stage that drops a
+materialized join column (`HiddenJoinCols`) is declined outright. The slot is
+looked for under the name that will actually bind — exact spelling first, the
+qualifier stripped on a miss, which is `exec.ColumnIndexFallback`'s order —
+because a key written through the block's alias (`x.product`) reaches a stream
+where no column carries that spelling.
+
+The CLASS travels the same way the gather's rename gets it: a term written as
+the item wrote it answers to no alias and to no published name, and one derived
+table makes an aggregate output a plain column reference, so
+`sortTermNamesAggregateItem` matches the written spelling too and asks
+`renameIsAggregateOutput` through the block (#785 round 2's question, one
+consumer over).
+
+Gate: `coordinator.TestR2AJoinArmIsKeyedAndNamedTheSameOnEveryArm`'s
+`issue/1095` cells, five arms, with the no-collision control beside them.

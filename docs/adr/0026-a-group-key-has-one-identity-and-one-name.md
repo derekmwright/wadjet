@@ -2415,6 +2415,71 @@ therefore not an address, and it was the only one in use in three places:
    columns answer to it", §3a), and the positions are the inner operation's
    own by the same construction the rest of this item rests on.
 
+### 8i. A join ARM that is not a base scan is named by the query (2026-09-14, arc R2: #1102, #1099, #1095)
+
+A join arm that is a SET OPERATION, a join-bodied derived block, a grouped
+block or a nested renamed block is keyed, shuffled, merged and NAMED on the
+three DAG arms exactly as on the single-process arms. Four defects said
+otherwise, each right on the single arms and wrong on the distributed ones, and
+each is one sentence of the same rule: **the identity of a column is the
+relation that produced it, and a reference into an arm has to reach the
+spelling the arm's stream really carries.**
+
+1. **A SET OPERATION's arm is its own relation (#1102, a wrong VALUE).** The
+   stage projects every arm onto the operation's own column list, so the stream
+   the join receives carries the operation's columns and nothing of any scan
+   below it. `stageBuildTableAlias` named it after the first scan it found, so
+   `(SELECT id FROM lat_ord UNION SELECT id FROM lat_ord) a JOIN lat_item b ON
+   b.order_id = a.id` qualified the arm's duplicate `id` as `lat_ord.id`, and
+   `SELECT a.id` — matching neither spelling exactly — fell through the
+   qualifier strip onto lat_item's `id`: 1|2|3|4 for PostgreSQL's 1|1|2|2.
+   Which side BUILDS is a cost decision, so the same statement was right
+   whenever the plan chose the other relation. Such an arm is a MATERIALIZED
+   arm now (`setOpArmPublishesItsOwnList`), qualified by `joinArmAlias`; with
+   its columns addressable, arc O1's decline of the STAR over one comes out
+   (§9's table) and `blockOwnProjection` descends a set operation to its
+   leftmost arm, which is the list PostgreSQL publishes.
+
+2. **A key into a block names the column the stream carries (#1099, wrong
+   ROWS).** `resolveShuffleKey` chased `Projection.Column`, the BARE name, so a
+   block's item written `o2.id AS k` resolved to `id` — and where the block is
+   itself a JOIN, both of its relations answer to `id`. The outer join keyed on
+   `lat_item`'s id instead of `lat_ord`'s and paired rows violating its own
+   condition. It chases `projSourceName` now — the qualifier the query wrote
+   included, which is what `resolveRenameSource` beside it has always chased
+   and what the inner join's own qualification puts in the stream.
+
+3. **An ordering above a join addresses the SLOT its class names (#1095, a
+   wrong ORDER).** §8d's class rule for a duplicate name had one consumer
+   missing: the ordering FUSED onto a join. Both halves of the slot are
+   recorded where each is known (§6's pattern) — the CLASS at emission,
+   through the block and not off the wrapper; the POSITION at the end of
+   planning, from the PROBE's model, which is the join's leading prefix
+   MEASURED against the stage's own output stream rather than assumed.
+
+4. **The gather's rename keeps the BUILD arm's name.** Two copies of one block
+   resolve their items to one bare source name, which binds the probe's copy,
+   so every row came back paired with itself. `buildArmQualified` puts the
+   arm's name back for the gather's rename, wherever the arm holds exactly one
+   relation and computes no relation of its own.
+
+The residue is the AGGREGATE-terminated arm: an aggregate publishes a relation
+of its own — its keys and outputs, under the names IT decided — while the DAG
+still qualifies them by the scan below. Closing it is item 1's move for an
+aggregate, and it is deferred rather than done because that alias decides the
+spelling of every grouped join arm in the corpus. It is pinned per arm in
+`coordinator.arc_r2_pins_test.go` with that mechanism.
+
+Gate: `coordinator.TestR2AJoinArmIsKeyedAndNamedTheSameOnEveryArm` — 446 cells,
+{a plain derived block, the four set operations, join-bodied, grouped, grouped
+with an aggregate aliased like the key's source, nested renamed, nested renamed
+over a grouped inner block, a block carrying its own sort key, the same with a
+LIMIT} × {names nothing else spells, names the other side spells too} × {left,
+right, both sides} × {an explicit list, a qualified reference alone, a star,
+DISTINCT, an ORDER BY above, a GROUP BY above}, on five arms against live
+PostgreSQL 17.11. The name-collision dimension is load-bearing: with names
+nothing else spells, three of the five classes answer correctly by luck.
+
 ## §9 A derived block publishes its VISIBLE list, and a qualified star reads it
 
 Added 2026-09-13 by arc O2 (#1077, #991, #1020).
@@ -2789,13 +2854,17 @@ expansion is never returned:
 | declines | why |
 |---|---|
 | an arm that RESOLVES two items to one name | the reference `s.id` binds the first, so the second column would carry the first's VALUES. Two items that merely PUBLISH one name are fine — each still references its own producer spelling, and PostgreSQL publishes duplicates too |
-| an arm that is a SET OPERATION | its columns reach the join under the SCAN's qualifier, not the block's, so `a.id` binds the other arm's `id` — measured wrong on the three DAG arms |
 | two arms of one name | both expand to the same qualified reference |
 | a LATERAL arm, or a manufactured lateral's join | the subtree carries the correlation slot the join drops (§3c) |
 | a SEMI/ANTI join | it publishes its probe alone; no star spells one |
 | a table function | no catalog annotation to publish from |
 | an Aggregate, Window or set operation BETWEEN the star and the join | the emitted columns are that operator's |
 | an arm whose own list this pass cannot state | an aggregate or a window whose projection was elided |
+
+A SET OPERATION is no longer one of them: it publishes its leftmost arm's list
+and its own stage emits exactly that list, so once the arm is named by the
+query (§8i item 1) the expansion's reference is an address on every arm
+(#1102, arc R2).
 
 A block's ROOT is not one of them. `(SELECT … ORDER BY … LIMIT 2) a`,
 `(SELECT DISTINCT …) a` and a `GROUP BY` block all publish their own
@@ -2825,6 +2894,6 @@ The design, with every measurement, is
 | `coordinator.TestO1AStarOverAJoinPublishesTheQueryNotThePlan` | the seam: 74 shapes — inner / left / right / full / cross / comma / self / three-way / derived block / CTE × no, selective and zero-row predicates × both FROM orders × `*`, `t.*`, `*` beside an item × no sort, a written key, a positional key, DISTINCT, LIMIT × a derived arm's ROOT (Sort, LIMIT, DISTINCT, GROUP BY, set operation) × its ITEM KIND (aliased, unaliased expression, aggregate, literal, CAST) — on FIVE arms against PostgreSQL 17.11 |
 | `pgwire.TestO1TheWireDeclaresAStarJoinsOwnArms` | the same rule on the wire: RowDescription names AND type OIDs, including the three #997 predicates and the zero-row declaration |
 | `logical.TestABareStarOverAJoinExpandsToTheFromClausesArms` | the list per shape, and that every item keeps its qualifier |
-| `logical.TestABareStarOverAJoinDeclinesWhatItCannotState` | the six declines |
+| `logical.TestABareStarOverAJoinDeclinesWhatItCannotState` | the declines above |
 | `logical.TestAnUnstatedStarProjectionIsTakenBackOut` | the hypothesis, and the naming that travels back with it |
 | `logical.TestAPositionalSortKeyOverAStarJoinBindsItsItemsSource` | the ordinal, in the input's spelling |

@@ -123,11 +123,6 @@ the star covers every arm or none of them.
     wrong value is worse than a wrong name. Closing it needs a block's column
     addressed by POSITION. Two items that merely PUBLISH one name are fine:
     each references its own producer spelling.
-  - **An arm that is a SET OPERATION.** Its columns reach the join under the
-    SCAN's own qualifier — `(SELECT id FROM lat_ord UNION ALL …) a` joined
-    against `lat_item` publishes `lat_ord.id` on the three DAG arms — so
-    `a.id` binds the OTHER arm's `id` through the bare fallback and carries
-    the wrong value. Measured.
   - **Two arms of one name.** Both would expand to the same qualified
     reference. PostgreSQL refuses the spelling outright.
   - **A LATERAL arm, or a join carrying a manufactured lateral's lowering.**
@@ -139,6 +134,17 @@ the star covers every arm or none of them.
     window whose projection was elided.
   - **An Aggregate, Window or set operation between the star and the join.**
     The emitted columns are that operator's.
+
+A SET OPERATION is no longer one of them (arc R2, #1102). It publishes its
+LEFTMOST arm's list, which is PostgreSQL's rule, and the operation's own stage
+emits exactly that list under the block's name. The decline was there because
+the three DAG arms qualified those columns by the SCAN below —
+`(SELECT id FROM lat_ord UNION ALL …) a` joined against `lat_item` spelled them
+`lat_ord.id` — so `a.id` matched nothing exactly and bound the OTHER arm's `id`
+through the bare fallback. A set-operation arm is a MATERIALIZED arm now
+(`physical.setOpArmPublishesItsOwnList`), qualified by the one name the
+enclosing query writes, so the reference this expansion emits is an address on
+every arm.
 
 A block's ROOT is not one of them. `(SELECT … ORDER BY … LIMIT 2) a`,
 `(SELECT DISTINCT …) a`, a `GROUP BY` block and a filtered one publish their
@@ -162,8 +168,9 @@ plan's order: the two rules compose or neither holds.
 | gate | what it holds |
 |---|---|
 | `coordinator.TestO1AStarOverAJoinPublishesTheQueryNotThePlan` | the seam: 74 shapes × five arms against PostgreSQL 17.11, including a derived arm’s ROOT and its ITEM KIND |
+| `coordinator.TestR2AJoinArmIsKeyedAndNamedTheSameOnEveryArm` | the star over a set-operation arm, on both sides of the join and on both sides at once |
 | `pgwire.TestO1TheWireDeclaresAStarJoinsOwnArms` | the same rule on the wire, names AND type OIDs |
-| `logical.TestABareStarOverAJoinExpandsToTheFromClausesArms` | the list itself, per shape |
+| `logical.TestABareStarOverAJoinExpandsToTheFromClausesArms` | the list itself, per shape, including a set-operation arm |
 | `logical.TestABareStarOverAJoinDeclinesWhatItCannotState` | the declines above |
 | `logical.TestAnUnstatedStarProjectionIsTakenBackOut` | the hypothesis, and the naming that travels with it |
 | `logical.TestAPositionalSortKeyOverAStarJoinBindsItsItemsSource` | the ordinal, in the input's spelling |

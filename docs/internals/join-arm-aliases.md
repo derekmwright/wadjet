@@ -47,3 +47,33 @@ Source: internal/planner/physical/join_keys.go — joinArmAlias, moved 2026-09-1
 // the raw one, and each engine's resolvers use its own — which is what makes
 // the declaration and the value agree on each path (#773, #706 round 2).
 ```
+
+## Amendment, 2026-09-14 (#1102, arc R2)
+
+There is a THIRD case, and it is the materialized answer on the DAG too: an arm
+a SET OPERATION terminates.
+
+A set operation composes a NEW relation out of what its arms emit — the stage
+projects every arm onto the operation's own column list (`Stage.UnionArms`'
+per-arm projections) — so the stream the join receives is one column per SELECT
+item of the operation and nothing of any scan below it. `stageBuildTableAlias`
+answered the first scan it found there, and the join then qualified the arm's
+duplicate `id` as `lat_ord.id`:
+
+    SELECT a.id FROM (SELECT id FROM lat_ord UNION SELECT id FROM lat_ord) a
+    JOIN lat_item b ON b.order_id = a.id
+    -- PostgreSQL 17.11 and both single-process arms: 1|1|2|2
+    -- the three DAG arms, before: 1|2|3|4 (lat_item's ids)
+
+`a.id` matched neither spelling exactly, fell through to the resolver's
+qualifier strip, and bound the OTHER arm's bare `id`. Which side builds is a
+cost decision, so the same statement answered correctly whenever the plan chose
+the other relation for the build.
+
+`physical.setOpArmPublishesItsOwnList` makes such an arm a MATERIALIZED arm, so
+`joinArmAlias` names it — the one name the enclosing query writes. It requires
+the arm to HAVE a name: an unnamed one keeps the scan's spelling, which is
+strictly better than no qualification at all.
+
+Gate: `coordinator.TestR2AJoinArmIsKeyedAndNamedTheSameOnEveryArm`, the
+`{union-all,union,intersect,except}*` rows of the join-arm table, five arms.

@@ -412,7 +412,7 @@ Because a Project emits no stage, **a derived table's rename happens nowhere
 on the DAG**: every stream carries SOURCE column names, and each consumer
 resolves the alias back through the logical plan.
 
-Three exceptions, all of them "the convention has no answer here, so the column
+Four exceptions, all of them "the convention has no answer here, so the column
 is MATERIALIZED instead" (`join_input_projection.go`, ADR-0025):
 
 - a derived arm's COMPUTED column belongs to no scan, so there is no source
@@ -445,11 +445,32 @@ is MATERIALIZED instead" (`join_input_projection.go`, ADR-0025):
   output schema); and a SELECT list no stage RUNS (#813 item 1) — are pinned
   fail-on-agree in `coordinator.TestJ2AJoinConsumerBindsThePublishedIdentity`
   and `coordinator.TestH2TheWindowDeclaredTypeCensus`.
+- a SET OPERATION arm publishes a relation of its OWN: the stage projects every
+  arm onto the operation's column list, so the stream the join receives carries
+  the operation's columns and nothing of any scan below it
+  (`setOpArmPublishesItsOwnList`, #1102). Naming it after the first scan made
+  `a.id` over `(SELECT id FROM lat_ord UNION …) a` bind the OTHER join arm's
+  `id` — a wrong VALUE that followed which side the plan chose to build.
 - once an arm's SELECT list is materialized its stream is the arm's OUTPUT, so
   the join names it with `joinArmAlias` and `materializedBuildColOrigins` — the
   MATERIALIZED answers — rather than `stageBuildTableAlias`'s raw one. The
   split between those two is about which STREAM the join receives, not about
   which engine is running.
+
+Two of the resolvers below lost the arm identity on the way down, and both are
+the same sentence of ADR-0026 §8i — a reference into an arm has to reach the
+spelling the arm's stream really carries:
+
+- `resolveShuffleKey` chased a projection's BARE `Column`, so a block's
+  `o2.id AS k` resolved to `id`; where the block is itself a JOIN, both of its
+  relations answer to that name and the outer join keyed on the wrong one
+  (#1099). It chases `projSourceName` — the qualifier the query wrote included
+  — which is what `resolveRenameSource` beside it has always chased.
+- the GATHER's rename comes back out of an arm with the block's SOURCE column,
+  and a block that wrote a bare name leaves nothing to tell two copies of
+  itself apart. `buildArmQualified` puts the BUILD arm's own name back, which
+  is the spelling the join qualifies its duplicates with, wherever the arm
+  holds exactly one relation and computes no relation of its own.
 
 | consumer | resolver | file |
 |---|---|---|
