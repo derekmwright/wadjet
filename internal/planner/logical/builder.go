@@ -1563,6 +1563,30 @@ func scopeCTEs(outer, own []plansql.CTEDef) []plansql.CTEDef {
 	return append(out, own...)
 }
 
+// recursiveCTEColumns is the column list a RECURSIVE WITH item publishes, or
+// nil when its body cannot be named exactly.
+//
+// earlier is the scope its body resolves a star against: the items BEFORE it and
+// not itself, which is PostgreSQL's rule and what keeps the item's own name out
+// of its own body (scopeCTEs' reason, #771).
+func recursiveCTEColumns(cte *plansql.CTEDef, earlier []plansql.CTEDef) []string {
+	body, err := cte.BodySelect()
+	if err != nil || body == nil {
+		// The list is still knowable when the item declares one.
+		if len(cte.Columns) > 0 {
+			return append([]string(nil), cte.Columns...)
+		}
+		return nil
+	}
+	cols := plansql.BlockPublishedColumns(body, plansql.CTEColumns(earlier, nil))
+	if len(cte.Columns) == 0 {
+		return cols
+	}
+	// A COLUMN-ALIAS LIST is a POSITIONAL rename of the leading columns and
+	// not the whole namespace — the same overlay a derived table's list takes.
+	return plansql.OverlayColumnAliases(cte.Columns, cols)
+}
+
 // resolveTableOrCTE checks whether a table reference matches a CTE name.
 //
 // `table` and `ctes` are held by POINTER into the caller's own AST, not by
@@ -1589,6 +1613,22 @@ func resolveTableOrCTE(table *plansql.TableRef, ctes []plansql.CTEDef) (*Node, e
 				// rather than only at the statement root (#1047). See
 				// Node.RecursiveCTE.
 				node.RecursiveCTE = cte
+				// AND SO DOES THE PUBLISHED LIST (#1066). This tagged scan is
+				// a relation like any other to every pass above it, and the
+				// one thing it could not say was WHICH COLUMNS IT HAS: no
+				// catalog answers to its name, so the annotator leaves
+				// ScanColumns empty and nothing could attribute `r.v` to it.
+				// A join keyed on such a column then could not tell which side
+				// owned which key (physical.assignJoinKeySides), the executor
+				// resolved both to -1, and a key that resolves to nothing
+				// hashes as a constant — so every probe row matched every
+				// build row and `… FROM lat_ord u JOIN r ON r.v = u.id`
+				// answered the CROSS PRODUCT, 9 rows for PostgreSQL 17.11's 3,
+				// on all five arms. The list is the block's own published
+				// namespace (ADR-0026 §9 applied to a recursive item): a set
+				// operation publishes its LEFT arm's names, and an explicit
+				// column list renames them positionally.
+				node.ScanColumns = recursiveCTEColumns(cte, ctes[:i])
 				return node, nil
 			}
 
