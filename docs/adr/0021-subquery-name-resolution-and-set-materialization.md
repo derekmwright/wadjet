@@ -21,6 +21,10 @@ where a null-aware anti join's replicated build is DECLARED.
 binds to — the inner relation's SCHEMA decides, whatever kind of relation it is
 — and §2b gives an uncorrelated EXISTS the plan-time evaluation an
 uncorrelated scalar subquery and an IN-subquery already had (#955).
+§1p (2026-09-14) corrects §1's own premise about the PROBE side, gives a block
+its own WITH scope in the parse, the build and the rebuild, makes the nested
+correlation walk the same walk as the top-level one, and gives a recursive CTE
+reference the column list a join key needs (#1098, #1067, #1072, #1066).
 
 ## Context
 
@@ -1669,11 +1673,142 @@ recursive TERM: the iteration re-ran it until `maxRecursiveIterations` and
 answered 1001 rows where PostgreSQL answers 2.
 
 **NOT SETTLED:** the DAG still cannot run any recursive CTE, at the root or
-nested (#1042) — the tagged scan becomes a stage with no scan files and no
+nested (#1042, #960) — the tagged scan becomes a stage with no scan files and no
 dependencies and the dispatcher fails it, loudly. The census pins that on the
 three distributed arms with the ROOT shape beside them as the proof it is not
-this position's. A `WITH` written inside a scalar or `IN` subquery is still not
-PARSED at all (`42601`), which is a parser gap and not a materialization one.
+this position's. (A `WITH` written inside a scalar or `IN` subquery was a second
+NOT-SETTLED here, `42601` at the parser; §1p closed it.)
+
+### 1p. A decorrelated join's key has TWO references, and a block declares its own scope
+
+§1's whole subject is the BUILD side: because the rewrite builds `Scan →
+[Join …] → [Filter] → [Aggregate]` and never a Project, the build side carries
+the source names of the relations it reads, and which of them a join emits bare
+is `reorderJoins`' decision long after the rewrite runs. §1j, #526 and #527
+settled that by RECORDING the reference and letting
+`repairDecorrelatedSpelling` spell it once the order is final.
+
+The premise under that machinery was written down and it was wrong by half:
+
+> a probe-side term the rewrite already spelled correctly (it names the OUTER
+> query's columns, which no inner reordering can move)
+
+The outer query's columns do not move, but **the name the outer PLAN emits for
+them does**, and for exactly the reason the build side's does: the enclosing
+query is a join as often as the subquery is, and a join emits one arm's `id`
+bare and the other arm's as `o.id`. Spelling the probe key by dropping the
+qualifier therefore bound whichever arm the estimator put on the probe:
+
+```
+SELECT … FROM lat_ord o JOIN lat_item i ON i.order_id = o.id
+  WHERE o.id IN (SELECT id FROM lat_ord)                      PG 4 → 3
+  WHERE o.id IN (SELECT order_id FROM lat_item)               PG 4 → 2
+  WHERE EXISTS (SELECT 1 FROM lat_ord z WHERE z.id = o.id)    PG 4 → 3
+  WHERE o.id = (SELECT MAX(z.id) FROM lat_ord z
+                WHERE z.id = o.id)                            PG 4 → 1
+```
+
+silently, on all five arms, with the INNER-side spelling and the no-join
+spelling both right — which is what localises the loss to the probe rather than
+to the build (#1098). **A decorrelated join's key is two references, and each is
+spelled against the side that emits it.** `InnerKeyRef` is `KeyRef` because that
+is what it always was; the repair resolves the probe side against
+`emittedColumns(Children[0])` exactly as it resolves the build side against
+`Children[1]`.
+
+The same fact has a second site. A correlated subquery that is NOT decorrelated
+re-runs per outer row, and `readOuterValues` reads the outer value out of the
+enclosing query's BATCH — which is that same join output. It looked up the bare
+name first, so `o.id NOT IN (…)` over a join read `lat_item`'s id. The
+qualified spelling is tried first now; an unqualified reference, and a qualified
+one the stream does not carry under its qualifier, still read the bare name.
+
+**A BLOCK DECLARES ITS OWN SCOPE.** Three readers treated a subquery body's own
+`WITH` as though it were not there:
+
+- `decorrelatedInnerPlan` built the body's FROM with the ENCLOSING items alone,
+  so a CTE the body declares was indistinguishable from a base table and the
+  build side became a Scan of that name (#1067).
+- `rebuildSQLFull` started at `SELECT ` and dropped `info.CTEs`, so a
+  correlated body's per-row re-run named a FROM item nothing declared.
+- the parser accepted a subquery that begins with `SELECT` and not one that
+  begins with `WITH`, at `IN`, at `ANY`/`ALL` and at a parenthesised scalar
+  subquery — `EXISTS` accepted it only because it captures the parenthesised
+  text without looking.
+
+The first two are the same wrong answer with two faces: where nothing answers
+to the name the body read an EMPTY relation and a correlated `EXISTS` dropped
+every outer row; where something did, it read the BASE TABLE, and `EXISTS (WITH
+lat_item AS (SELECT id FROM lat_ord WHERE id = 1) SELECT 1 FROM lat_item WHERE
+lat_item.id = o.id)` answered 3 rows for PostgreSQL 17.11's 1. The rule is the
+one every other block is built with: `scopeCTEs(enclosing, own)`, and a rebuild
+re-emits the clause it re-parses — `RECURSIVE` as a property of the clause,
+which is PostgreSQL's spelling.
+
+**AND A NESTED BLOCK IS A BLOCK.** §1l made the walk over a subquery's OWN
+clauses complete, including its set-operation arms. One level down it was not:
+`walkNestedForOuterRefs` read the WHERE, the HAVING and the SELECT list, so a
+nested set operation's arms, a JOIN's `ON`, the GROUP BY, the ORDER BY and the
+QUALIFY were invisible. A correlated scalar subquery holding
+
+```sql
+x.id IN (SELECT k FROM c2t2 WHERE k = u.id UNION ALL SELECT k FROM c2t2 WHERE k = 99)
+```
+
+was planned UNCORRELATED: `u.id` bound nothing, the IN set came out empty, and
+every outer row answered NULL for PostgreSQL's `100, 42, NULL` (#1072). The same
+blindness sat in the LOGICAL classifier: `nodeTableRefs` had no case for a
+subquery, so such a condition reported neither side — built into the build side
+by the IN rewrite, and DROPPED outright by the EXISTS rewrite, whose classifier
+keeps only what reports `hasInner`.
+
+One walk, one rule: a nested block is walked by `walkBlockForOuterRefs`, and
+`nodeTableRefs` covers every node kind the correlation walk covers, asking the
+correlation walk itself about a nested block rather than re-reading the same
+trees.
+
+Seen, the shape is REFUSED and not answered — the per-row rebuild renders one
+select per block and has no arm for `info.Union` — and the refusal says THAT,
+rather than borrowing the sentence about a bare numeric literal in a GROUP BY.
+**A refusal that states one mechanism for every cause is a refusal that sends
+the next reader to the wrong place.**
+
+**A RECURSIVE CTE REFERENCE PUBLISHES A COLUMN LIST.** §1b and §1o settled what
+a recursive CTE reference IS — a tagged scan the physical planner resolves from
+its own cache — and left it saying nothing about its columns: no catalog answers
+to its name, so the annotator left `ScanColumns` empty. A join keyed on such a
+column could not tell which side owned which key
+(`physical.assignJoinKeySides`), the executor resolved both to −1, and a key
+that resolves to nothing hashes as a constant, so every probe row matched every
+build row:
+
+```
+WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT v+1 FROM r WHERE v < 3)
+SELECT u.id, r.v FROM lat_ord u JOIN r ON r.v = u.id     PG 3 rows → 9
+```
+
+The IN spelling over the same CTE was right, and writing the CTE FIRST in the
+FROM was right too — the reorderer then put it on the probe, where a bare name
+resolves by accident. Both are what localise the loss to the KEY and not to the
+CTE's rows (#1066). The list is the block's own published namespace, ADR-0026
+§9 applied to a recursive item: a set operation publishes its LEFT arm's names,
+and an explicit column list renames them positionally.
+
+**NOT SETTLED, with the mechanism.** A correlated subquery whose body IS a set
+operation is still refused (`0A000`), and so is one holding a set operation one
+level down. Closing it takes two hunks, not one: a set-operation arm in
+`RebuildSQLForRerun`, AND the arms in `collectOuterCandidatesBlock`, which is
+where the outer columns a re-run will read are added to the ENCLOSING query's
+projection. That second one is deliberately omitted today, because widening the
+projection over a POLICED relation is a plan the ABAC order invariant no longer
+trips on (`server.TestPolicyMaskingIsPlanTimeOnEveryDoor`) — so the two must
+land together, with that gate as the arbiter. Until then the shape is loud.
+
+`coordinator.TestArcR1ACorrelatedBodyAnswersPostgresRowSetOnEveryArm` is the
+gate: 450 cells of {operator} × {where the outer column sits} × {what the body
+holds} on five arms, every want live PostgreSQL 17.11, with those two
+boundaries and the DAG's recursive-CTE gap (#960) pinned by the sentence each
+refusal says.
 
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
@@ -2120,6 +2255,11 @@ counters assert beside the rows. The DML door reached the same boundary as a
   #767 (LATERAL over an empty input), #809 / #601 (an aggregate in a
   subquery's own WHERE), and #616 / #614 / #714 (measured, not moved).
   `internal/coordinator/arc_d5_correlation_two_path_test.go` is their census.
+- §1p: #1098 (the probe key, the per-row batch read), #1067 (a block's own
+  WITH, in the parse / the build / the rebuild), #1072 (the nested walk and the
+  refusal that names its own mechanism), #1066 (a recursive CTE reference's
+  published column list), #960 (its DAG stage, open).
+  `internal/coordinator/arc_r1_decorrelation_row_sets_test.go` is their gate.
 - `internal/planner/logical/inner_key_spelling.go`,
   `internal/planner/logical/semi_anti_dedup.go`,
   `internal/planner/physical/in_subquery_set.go`,

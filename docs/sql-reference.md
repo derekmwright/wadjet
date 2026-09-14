@@ -781,7 +781,9 @@ CAST(1 AS BIGINT)` — because a bare number in those two clauses is a
 select-list POSITION and not a value.
 
 Three shapes are refused (`0A000`) instead. A body that is a SET OPERATION has
-no arm in the rebuild, and neither has a `LATERAL` body's outer reference,
+no arm in the rebuild — and neither has one written ONE LEVEL DOWN, inside a
+subquery the body itself holds, which is refused with that mechanism named.
+Neither has a `LATERAL` body's outer reference,
 which is decorrelated into a join with nothing left to respell. A SELECT item
 holding an aggregate beside a nested subquery THAT NAMES THE ENCLOSING QUERY
 is the third — the nested subquery's value is the outer row's, so the item has
@@ -929,6 +931,11 @@ MERGES the joined column into one output column, which is the one place where
 "every arm's own list" is not PostgreSQL's rule.
 
 Subqueries that reference columns from the outer query. The optimizer decorrelates them where it can — EXISTS / NOT EXISTS and IN become semi/anti joins, and a correlated scalar subquery becomes a join against a grouped aggregate — so they are not re-executed per outer row. Either side may be a CTE, a derived table, a comma-joined list or a base table: the subquery's own FROM clause is planned the way a top-level FROM clause is.
+
+The outer column may sit on EITHER relation of a join, on a derived block or on
+a CTE reference, and the answer is the same either way: `… FROM orders o JOIN
+items i ON i.order_id = o.id WHERE o.id IN (SELECT id FROM orders)` reads `o`'s
+`id` even though the join also carries `i`'s.
 
 ```sql
 -- EXISTS with correlation
@@ -1809,6 +1816,10 @@ engine has no stage lowering for one and refuses such a query rather than
 answering it differently. The refusal is LOUD but it is not yet a SQLSTATE:
 a query that reads a recursive CTE fails on a distributed plan with the stage
 builder's own message, `stage scan-0 has no dependencies and no ScanFiles`.
+On the single-process path a recursive CTE is a relation like any other: its
+columns are join keys, so `… FROM t u JOIN r ON r.v = u.id` answers the matched
+rows rather than the cross product, and an explicit column list (`WITH
+RECURSIVE r(w) AS …`) renames them positionally.
 A misspelt constant in the CTE's body is refused before that, at plan time, on
 every plan — the seed and the recursive term alike, and whether or not the
 outer query reads the CTE at all.
@@ -1825,10 +1836,20 @@ WITH o AS (SELECT id, dx FROM b)
 SELECT v FROM (WITH c AS (SELECT id, dx FROM o) SELECT dx AS v FROM c) t
 ```
 
+A `WITH` may also be written inside a SUBQUERY — under `EXISTS`, `NOT EXISTS`,
+`IN`, `NOT IN`, `= ANY`, `<> ALL` or a scalar `(SELECT …)` — correlated or not,
+and its items are in scope for that body and shadow a base table of the same
+name:
+
+```sql
+SELECT id FROM t
+WHERE EXISTS (WITH n AS (SELECT 1 AS v UNION ALL SELECT 2)
+              SELECT v FROM n WHERE v = t.id)
+```
+
 One divergence: where a block's own item has the SAME NAME as one of the
 enclosing query's, PostgreSQL reads the inner definition and wadjet reads the
-outer one. A `WITH` written inside a scalar or `IN` subquery is not parsed at
-all (SQLSTATE `42601`).
+outer one.
 
 ## Output column names
 
