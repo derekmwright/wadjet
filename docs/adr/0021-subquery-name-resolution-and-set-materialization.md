@@ -1357,6 +1357,15 @@ one: there is no faithful rendering of an `OVER` clause to rebuild, and
 `WindowFuncNode.String()` emitting `OVER (...)` — three literal dots — is a
 defect of its own worth closing before anything here can.
 
+(Arc L1, 2026-09-14.) Fifteen cells of
+`coordinator.TestArcL1LateralAndWindowScopeAnswersPostgresOnEveryArm` hold that
+refusal on five arms — the scalar subquery in three join positions × the
+window's argument, a bare argument, `PARTITION BY`, `ORDER BY` and a two-row
+inner — plus the `IN` spelling and the three cells that die in the PARSER
+instead, where the window sits in the body's own `ORDER BY` and
+`HoldsWindowCall` does not read. Both doors are the same rendering, recorded
+together so the day it is faithful they move together.
+
 ### 1n. A LATERAL body with NO FROM clause is a projection over the outer row
 
 (Added 2026-09-12, #1033.)
@@ -1854,6 +1863,121 @@ PostgreSQL 17.11, with those
 boundaries and the DAG's recursive-CTE gap (#960) pinned by the sentence each
 refusal says.
 
+### 1q. A LATERAL's BOUND travels with the correlation key, its ALIAS is what the join qualifies it by, and everything else it reads is loud
+
+(Added 2026-09-14, #1019, #1111, arc L1.)
+
+§1h settled what a LATERAL means for an EMPTY input. This is the next layer,
+and it is three facts about one lowering — `buildLateralSubquery` promotes the
+body's correlated WHERE equalities into the join condition, and everything
+that layer does NOT carry has to be either carried or refused.
+
+**THE BOUND IS PER OUTER ROW, AND THE CORRELATION KEY IS WHAT CARRIES IT.**
+PostgreSQL evaluates the body once per outer row, so `ORDER BY … LIMIT n`
+bounds each evaluation; the decorrelation makes the body ONE relation joined
+once and the bound applied to the whole of it. The top-N-per-group idiom
+therefore answered ONE row for PostgreSQL's two, silently, on every arm and in
+every spelling of the consumer (#1019; §1h's own text recorded it as the next
+layer). The repair is the one that text named: the bound becomes a per-key
+top-N — `ROW_NUMBER() OVER (PARTITION BY <the inner column the correlation
+keys on> ORDER BY <the body's own ORDER BY>)` and a `QUALIFY` over that number,
+`OFFSET m LIMIT n` reading `rn > m AND rn <= m+n`. It is the reason `QUALIFY`
+is implemented first rather than beside this: a filter over a window's output
+is what the clause IS, and the rewrite has no second mechanism.
+
+The body's `ORDER BY` is CONSUMED by the window, because a FROM item's row
+order is not preserved by SQL and deciding which rows the bound keeps was the
+clause's only effect. Over an AGGREGATED body the window sits above the
+aggregate, so the partition is spelled with the name the aggregate PUBLISHES
+the key under — the hidden `__key_N` where the lowering minted one; written as
+the source column the operator refused by name.
+
+Five shapes DECLINE the rewrite and keep `Node.LateralBoundNotPerRow` and the
+disposition #1079 gave them: an uncorrelated body, a bound that cannot change
+any answer (`LIMIT ALL`, `OFFSET 0`), a bound that is not a non-negative
+integer constant, a correlation no equality names an inner column for, and a
+body carrying `DISTINCT` or a set operation. Arc O2's measured position stands
+unchanged — the rewrite does not decide whether a bound BINDS, which is a
+property of the data; it makes the bound mean what it says.
+
+One consequence reached outside the lateral. A window partitioned on a SUBSET
+of the group keys below it was REFUSED on all three DAG arms by
+`AssertExchangeConsistency`, because `EnsureDistribution` reads each child's
+distribution as it stands and the re-resolve came after the whole pass: the
+aggregate was read as Singleton while its own exchange was being spliced in,
+and came out hash-partitioned on `[g, k]`, which does not satisfy
+`clustered_on[k]`. The pass runs to a FIXED POINT now. It reproduces with
+`SELECT …, ROW_NUMBER() OVER (PARTITION BY k) … GROUP BY g, k` and no lateral
+in the query at all.
+
+**THE ALIAS IS WHAT THE JOIN QUALIFIES THE ARM BY.** A derived table stamps
+its alias on its subtree root and `joinArmAlias` reads it (§1j's neighbour,
+#751/#773); the LATERAL path never did, so the lateral was an arm with no
+name. `joinOutputSchemaWithMapping` DROPS a colliding build column it cannot
+qualify, so a body publishing a name the ENCLOSING relation also carries lost
+its own column and the reference bound the outer row's:
+
+```
+SELECT t.dx FROM setopdecja a,
+  LATERAL (WITH c AS (SELECT dx FROM setopdecjb) SELECT SUM(dx) AS dx FROM c) t
+-- PostgreSQL 17.11  51.0000 x4      this engine  12.75 x4, the outer row's dx
+```
+
+Only the subtree ROOT is stamped: `setSubtreeAlias` would make the body's own
+relations answer to the lateral's name, and the body resolves its own
+references against the names it wrote (#1111).
+
+**AND EVERYTHING ELSE THE BODY READS IS LOUD.** The decorrelation carries the
+outer row into the body's WHERE equalities and no further, so an outer
+reference in the body's SELECT list, `GROUP BY`, `HAVING`, `ORDER BY` or
+`QUALIFY` resolved against the INNER relation — its column of that name, or
+nothing. Measured, before → after, against live PostgreSQL 17.11:
+
+| the body's clause | PostgreSQL | before | after |
+|---|---|---|---|
+| `SELECT o.total + i.amount AS m` | 200, 250, 275, 325 | NULL x4 | 0A000 |
+| `SELECT o.id AS m` | 1, 1, 2, 2 | 1, 2, 3, 4 (`i.id`) | 0A000 |
+| `GROUP BY o.id` | 150, 200 | 100, 50, 125, 75 | 0A000 |
+| `HAVING SUM(i.amount) > o.total` | no rows | 3 rows of NULL | 0A000 |
+| `SELECT CASE WHEN o.id > 1 …` | 0, 0, 1, 1 | 0, 1, 1, 1 | 0A000 |
+| `ORDER BY i.amount * o.total LIMIT 1` | 50, 75 | 50, 75 | 0A000 |
+
+The last moves RIGHT → LOUD and its rightness was the fixture's: the term
+reads NULL for the outer column like the others, and multiplying one outer
+key's rows by that key's own constant does not change their order. A FROM-less
+body is untouched — §1n lowers it as a projection over the outer row and it
+never reaches this path — and so is the WHERE clause the decorrelation reads.
+
+A correlated predicate that is NOT an equality is the same layer from the
+other side. It is LIFTED to the join and evaluated over the body's OUTPUT, so
+every inner column it names has to be published there UNDER THAT NAME.
+`WHERE i.amount < o.total` beside `SELECT i.amount` answers PostgreSQL's rows
+on all five arms; beside `SELECT i.amount AS m` it answered ZERO rows on the
+single-process arms and failed loudly on the DAG. Both repairs were measured
+and both trade a right answer on some arms for a wrong one on others —
+respelling to the body's published ALIAS makes the two single-process arms
+right and makes the three DAG arms pad every row of the LEFT spelling, which
+was right there before, because the stage that publishes a decorrelated
+lateral's output on the DAG emits the source column where the single-process
+projection emits the alias; minting a hidden slot puts the value below the
+join's `HiddenJoinCols` drop, where the lifted predicate cannot see it. So the
+shape is REFUSED on all five arms, and closing it is #1028's DAG-identity
+layer plus a lifted predicate evaluated AT the join rather than above it.
+
+**NOT SETTLED, with the mechanism.** A LEFT JOIN LATERAL over an UNCORRELATED
+body has no join keys and is refused by three different layers in three
+different sentences (`could not extract join keys from`, the DAG's SELECT-list
+check, and the join operator's own `LeftKeys and RightKeys required`);
+PostgreSQL answers the cross product with no padding, and the INNER and comma
+spellings of the same body answer here too. `ORDER BY <ordinal>` over a
+`SELECT *` whose FROM is a join — which a lateral always is once lowered —
+has no position to count, and reproduces with an ordinary join in place of the
+lateral. Both are cells of
+`coordinator.TestArcL1LateralAndWindowScopeAnswersPostgresOnEveryArm`, which
+is this section's gate: 154 cells of {LATERAL, scalar subquery, EXISTS, IN} ×
+{where the outer reference sits} × {INNER, LEFT, comma, a join below, a star
+over} on five arms, every want live PostgreSQL 17.11.
+
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
 `resolveSubqueryAST` gains an `InExpr` case. An uncorrelated IN-subquery is
@@ -2299,6 +2423,8 @@ counters assert beside the rows. The DML door reached the same boundary as a
   #767 (LATERAL over an empty input), #809 / #601 (an aggregate in a
   subquery's own WHERE), and #616 / #614 / #714 (measured, not moved).
   `internal/coordinator/arc_d5_correlation_two_path_test.go` is their census.
+- §1q: #1019 (the bound per outer row), #1111 (the lateral's alias as a join
+  arm's qualifier), and the lateral scope refusals arc L1 measured.
 - §1p: #1098 (the probe key, the per-row batch read), #1067 (a block's own
   WITH, in the parse / the build / the rebuild), #1072 (the nested walk and the
   refusal that names its own mechanism), #1066 (a recursive CTE reference's

@@ -5260,6 +5260,31 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     That is a pre-existing property of declared DDL on this wire and not of the
     clause; the skip is consistent with the form it belongs to.
 
+  - **`QUALIFY` has no PostgreSQL, and DUCKDB 1.1.3 IS THE ORACLE FOR IT.**
+    (Added 2026-09-14, #1076.) The clause originates in Snowflake/BigQuery and
+    has a second, checkable implementation in DuckDB; PostgreSQL has none, so
+    rule 1 has nothing to say and rule 2's "oracle" role is the whole of the
+    authority here. Every fact in `logical/qualify.go` was measured on DuckDB
+    1.1.3 over rows identical to this repository's `lat_ord` / `lat_item`
+    fixtures, and
+    `coordinator.TestArcL1QualifyAnswersDuckDBOnEveryArm` holds 31 cells of it
+    on five arms.
+
+    Four of those facts are decisions a second implementation could have made
+    differently, so they are recorded rather than left implicit: the clause
+    filters AFTER window evaluation and BELOW the projection (so it may name a
+    column the SELECT list does not publish); a window call written inside it
+    is evaluated and not projected; a BARE name binds the INPUT relation's
+    column first and a SELECT-list alias second (`SELECT i.amount AS id …
+    QUALIFY … AND id > 60` answers ZERO rows in DuckDB — `id` is the table's);
+    and a `QUALIFY` no window function reaches is an ERROR, not a `WHERE`
+    under another name.
+
+    This is the only clause in the supported language whose oracle is not
+    PostgreSQL, and the reason is stated so the next reader does not take it
+    as a precedent: PostgreSQL cannot parse the statement at all. Where
+    PostgreSQL has a spelling, it decides.
+
 ## Consequences
 
 - `ORDER BY x DESC` places NULLs first (changed 2026-08-19). The default had

@@ -1014,6 +1014,51 @@ JOIN LATERAL (
 `SELECT *` over a lateral join publishes the OUTER relation's columns first
 and the lateral's after them, which is PostgreSQL's order.
 
+**A correlated LATERAL's `ORDER BY … LIMIT`/`OFFSET` is applied PER OUTER
+ROW**, which is PostgreSQL's rule and what makes the top-N-per-group idiom
+work:
+
+```sql
+SELECT o.customer, s.product, s.amount
+FROM orders o
+JOIN LATERAL (
+    SELECT product, amount FROM line_items i
+    WHERE i.order_id = o.id ORDER BY i.amount DESC LIMIT 1
+) s ON true          -- one row per order: each order's largest item
+```
+
+Internally the bound travels with the correlation key as a per-key top-N, so
+`LIMIT n`, `OFFSET m` and both together mean what they say for each outer row.
+The rewrite is declined — and the bound then applies to the whole inner
+relation once — for an UNCORRELATED body (where the two are the same thing), a
+bound that cannot change any answer (`LIMIT ALL`, `OFFSET 0`), a bound that is
+not a non-negative integer constant, a correlation no equality names an inner
+column for, and a body carrying `DISTINCT` or a set operation. A qualified
+star (`s.*`) over a declined body is refused rather than answered, because it
+would publish a relation whose row count is not the one the query wrote.
+
+**The body carries the outer row in its `WHERE` clause and nowhere else.** The
+correlation is lowered into a join and the body is then planned over its own
+relations, so an outer reference in the body's SELECT list, `GROUP BY`,
+`HAVING`, `ORDER BY` or `QUALIFY` would resolve against the inner relation —
+to its column of that name, or to nothing. Those are refused (`0A000`); write
+the expression in the enclosing query over the lateral's output instead:
+
+```sql
+-- refused
+JOIN LATERAL (SELECT o.total + i.amount AS m FROM line_items i
+              WHERE i.order_id = o.id) s ON true
+-- write
+JOIN LATERAL (SELECT i.amount AS m FROM line_items i
+              WHERE i.order_id = o.id) s ON true      …  SELECT o.total + s.m
+```
+
+A correlated predicate that is NOT an equality is lifted to the join and
+evaluated over the body's OUTPUT, so every inner column it names has to be
+published there under that name. `WHERE i.amount < o.total` beside `SELECT
+i.amount` answers; beside `SELECT i.amount AS m`, or over an aggregated body,
+it is refused.
+
 **A LATERAL body with NO FROM clause that READS THE OUTER ROW is a projection
 over the outer row.** It yields exactly one row per outer row whose columns are
 functions of that row, so it is computed as a projection and there is no join
@@ -2590,6 +2635,31 @@ both publish `w` partitions on `x`'s column. A BARE key over such a pair is
 ambiguous — PostgreSQL refuses it with `42702 column reference "w" is
 ambiguous` and wadjet answers it by binding one of them (ADR-0012). Qualify the
 key.
+
+### QUALIFY
+
+`QUALIFY` filters the rows a window function produced, the way `HAVING` filters
+the rows a `GROUP BY` produced. PostgreSQL has no such clause; wadjet
+implements the one DuckDB, Snowflake and BigQuery define, and DuckDB is the
+oracle for it (ADR-0012).
+
+```sql
+-- the top item of every order, without a derived table
+SELECT i.order_id, i.product
+FROM line_items i
+QUALIFY ROW_NUMBER() OVER (PARTITION BY i.order_id ORDER BY i.amount DESC) = 1
+```
+
+- It is evaluated AFTER the window functions and BEFORE `DISTINCT`, `ORDER BY`
+  and `LIMIT`, so it may name a column the SELECT list does not publish.
+- A window call written inside the clause is evaluated like any other and is
+  not projected.
+- A bare name binds the INPUT relation's column where one exists and a
+  SELECT-list alias otherwise, so `QUALIFY rn = 1` works over
+  `ROW_NUMBER() OVER (…) AS rn`, and a computed alias (`… * 10 AS rn`,
+  `i.amount * 2 AS d`) is addressable too.
+- A `QUALIFY` no window function reaches — neither in the SELECT list nor in
+  the clause itself — is an error (`42601`), not a `WHERE` in disguise.
 
 ### Window Frame Specifications
 
