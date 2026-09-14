@@ -246,14 +246,16 @@ func (e *BinOpFloat64) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int
 	if cr, ok := e.Left.(*ColRef); ok {
 		if lit, ok2 := e.Right.(*Lit); ok2 && lit.Val != nil {
 			if done, hasNull := fusedColConstFloat64(b, cr, ToFloat64(lit.Val), e.opCode, false, dst, n); done {
-				return e.rangeCheckVec(b, dst, n, hasNull)
+				checkFusedFloatRange(b.Columns[cr.idx], cr.typ, ToFloat64(lit.Val), e.opCode, false, dst, n)
+				return hasNull
 			}
 		}
 	}
 	if lit, ok := e.Left.(*Lit); ok && lit.Val != nil {
 		if cr, ok2 := e.Right.(*ColRef); ok2 {
 			if done, hasNull := fusedColConstFloat64(b, cr, ToFloat64(lit.Val), e.opCode, true, dst, n); done {
-				return e.rangeCheckVec(b, dst, n, hasNull)
+				checkFusedFloatRange(b.Columns[cr.idx], cr.typ, ToFloat64(lit.Val), e.opCode, true, dst, n)
+				return hasNull
 			}
 		}
 	}
@@ -284,18 +286,43 @@ func (e *BinOpFloat64) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int
 	leftNull := leftVec.EvalFloat64Vec(b, tmp, n)
 
 	// Apply op in tight loop (compiler can auto-vectorize these)
+	// The range rule lives INSIDE these loops rather than in a pass over
+	// dst, because dst holds the RESULT and the right operand is gone the
+	// moment it is written: a result of +Inf is a refusal when both operands
+	// were finite and the ANSWER when one of them was an infinity, and
+	// nothing in the filled buffer can tell those apart. The common row pays
+	// one integer test (float_range.go).
 	switch e.opCode {
 	case arithAdd:
 		for i := 0; i < n; i++ {
-			dst[i] = tmp[i] + dst[i]
+			l, r := tmp[i], dst[i]
+			s := l + r
+			dst[i] = s
+			if nonFiniteFloat(s) && !nonFiniteFloat(l) && !nonFiniteFloat(r) {
+				raiseFloatOverflow()
+			}
 		}
 	case arithSub:
 		for i := 0; i < n; i++ {
-			dst[i] = tmp[i] - dst[i]
+			l, r := tmp[i], dst[i]
+			s := l - r
+			dst[i] = s
+			if nonFiniteFloat(s) && !nonFiniteFloat(l) && !nonFiniteFloat(r) {
+				raiseFloatOverflow()
+			}
 		}
 	case arithMul:
 		for i := 0; i < n; i++ {
-			dst[i] = tmp[i] * dst[i]
+			l, r := tmp[i], dst[i]
+			p := l * r
+			dst[i] = p
+			if p == 0 {
+				if l != 0 && r != 0 {
+					raiseFloatUnderflow()
+				}
+			} else if nonFiniteFloat(p) && !nonFiniteFloat(l) && !nonFiniteFloat(r) {
+				raiseFloatOverflow()
+			}
 		}
 	case arithDiv:
 		// A zero divisor slot is either a NULL row (whose placeholder is 0)
@@ -306,16 +333,17 @@ func (e *BinOpFloat64) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int
 		// divisor silently produced 0 (#367).
 		sawZero := false
 		for i := 0; i < n; i++ {
-			if dst[i] != 0 {
-				dst[i] = tmp[i] / dst[i]
-			} else {
+			l, r := tmp[i], dst[i]
+			if r == 0 {
 				sawZero = true
+				continue
 			}
+			dst[i] = pgFloatDiv(l, r)
 		}
 		if sawZero {
 			// The per-row pass the caller runs re-evaluates through the
-			// checked scalar kernel, so the range rule reaches these rows
-			// there rather than here.
+			// checked scalar kernel, so a genuine zero divisor becomes 22012
+			// there and a NULL row stays NULL.
 			return true
 		}
 	case arithMod:
@@ -332,26 +360,7 @@ func (e *BinOpFloat64) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int
 		}
 	}
 
-	return e.rangeCheckVec(b, dst, n, leftNull || rightNull)
-}
-
-// rangeCheckVec applies PostgreSQL's float8 range rule to a filled result
-// buffer (#1082, float_range.go).
-//
-// The scan is the whole cost on an ordinary batch; only a buffer holding a
-// non-finite value — or a zero under the two operators with an underflow rule
-// — re-evaluates the batch row by row through EvalFloat64, which has the
-// operands and raises with the right rule for the right row. It is written
-// this way because the loops above do not keep the operands: a result of +Inf
-// is a refusal when both operands were finite and the ANSWER when one of them
-// was an infinity, and nothing in dst can tell those apart.
-func (e *BinOpFloat64) rangeCheckVec(b *batch.RecordBatch, dst []float64, n int, hasNull bool) bool {
-	if floatVecSuspect(dst, n, e.opCode) {
-		for i := 0; i < n; i++ {
-			e.EvalFloat64(b, i)
-		}
-	}
-	return hasNull
+	return leftNull || rightNull
 }
 
 // fusedColConstFloat64 computes dst = col op c (or c op col when constFirst)

@@ -1,5 +1,11 @@
 package expr
 
+import (
+	"math"
+
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+)
+
 // PostgreSQL's float8 RANGE rule, applied to the arithmetic kernels (#1082).
 //
 // `1e308 * 10` answered +Inf here and PostgreSQL 17.11 raises
@@ -29,38 +35,52 @@ package expr
 // Unary minus has no rule at all — negation cannot leave the range — which is
 // why `-1e308` answers and `-1e308 * 10` does not (both measured).
 //
-// The checks are written as `r-r != 0` rather than math.IsInf where the extra
-// branch would cost more than the arithmetic it guards: that expression is a
-// subtract and a compare, is false for every finite operand including zero,
-// and is true for both infinities and for NaN. A NaN result from finite
-// operands is impossible for these four operators, so routing it to the
-// overflow refusal costs nothing and reaches no reachable value.
+// The non-finite test is the EXPONENT BITS, not math.IsInf and not `r-r != 0`.
+// Both of those cost the float unit — two compares against ±MaxFloat64, or a
+// subtract whose latency the next iteration waits on — and this test runs once
+// per row on the hottest arithmetic path in the engine. `bits & 0x7FF…` is a
+// bitcast the compiler emits no instruction for, an AND and a compare, on the
+// integer unit, with no dependency on the float pipeline. It is true for both
+// infinities and for NaN; a NaN result from finite operands is impossible for
+// these four operators, so routing it to the overflow refusal reaches no
+// value a query can produce.
+// nonFiniteFloat reports whether f is an infinity or a NaN, by its exponent
+// bits. See the file comment for why this and not math.IsInf.
+func nonFiniteFloat(f float64) bool {
+	return math.Float64bits(f)&floatExpMask == floatExpMask
+}
+
+// floatNeedsRangeCheck is nonFiniteFloat OR zero, in one unsigned compare: a
+// magnitude of 0 wraps to the maximum and every non-finite magnitude is at
+// least the exponent mask, so the two conditions the multiply and the divide
+// care about collapse into one subtract and one comparison.
+func floatNeedsRangeCheck(f float64) bool {
+	m := math.Float64bits(f) &^ uint64(1<<63)
+	return m-1 >= floatExpMask-1
+}
+
+const floatExpMask = 0x7FF0000000000000
+
 func pgFloatAdd(a, b float64) float64 {
 	r := a + b
-	if r-r != 0 && a-a == 0 && b-b == 0 {
-		raiseFloatOverflow()
+	if nonFiniteFloat(r) {
+		refuseFloatSum(a, b)
 	}
 	return r
 }
 
 func pgFloatSub(a, b float64) float64 {
 	r := a - b
-	if r-r != 0 && a-a == 0 && b-b == 0 {
-		raiseFloatOverflow()
+	if nonFiniteFloat(r) {
+		refuseFloatSum(a, b)
 	}
 	return r
 }
 
 func pgFloatMul(a, b float64) float64 {
 	r := a * b
-	if r == 0 {
-		if a != 0 && b != 0 {
-			raiseFloatUnderflow()
-		}
-		return r
-	}
-	if r-r != 0 && a-a == 0 && b-b == 0 {
-		raiseFloatOverflow()
+	if floatNeedsRangeCheck(r) {
+		refuseFloatProduct(a, b, r)
 	}
 	return r
 }
@@ -70,16 +90,39 @@ func pgFloatMul(a, b float64) float64 {
 // rows have already been separated from the genuine zeros.
 func pgFloatDiv(a, b float64) float64 {
 	r := a / b
-	if r == 0 {
-		if a != 0 && b-b == 0 {
-			raiseFloatUnderflow()
-		}
-		return r
-	}
-	if r-r != 0 && a-a == 0 && b-b == 0 {
-		raiseFloatOverflow()
+	if floatNeedsRangeCheck(r) {
+		refuseFloatProduct(a, b, r)
 	}
 	return r
+}
+
+// refuseFloatSum and refuseFloatProduct are the COLD arms, out of line so the
+// four guards above stay inside the inliner's budget: with the operand test
+// and the panic inlined into them, pgFloatAdd cost 135 against a budget of 80,
+// and a guard that becomes a call costs more than the arithmetic it protects
+// (the same shape int_overflow.go's mulInt64Wide takes).
+//
+//go:noinline
+func refuseFloatSum(a, b float64) {
+	if !nonFiniteFloat(a) && !nonFiniteFloat(b) {
+		raiseFloatOverflow()
+	}
+}
+
+//go:noinline
+func refuseFloatProduct(a, b, r float64) {
+	if r == 0 {
+		// A zero product or quotient is the ANSWER when an operand was zero,
+		// and an underflow otherwise. The divisor's own exemption is the
+		// reason `1 / Infinity` is zero rather than a refusal.
+		if a != 0 && b != 0 && !nonFiniteFloat(b) {
+			raiseFloatUnderflow()
+		}
+		return
+	}
+	if !nonFiniteFloat(a) && !nonFiniteFloat(b) {
+		raiseFloatOverflow()
+	}
 }
 
 // pgFloatArith applies the rule for a resolved opcode. It is the form the
@@ -98,37 +141,78 @@ func pgFloatArith(op arithOp, a, b float64) (float64, bool) {
 	return 0, false
 }
 
-// floatVecSuspect reports whether a filled result buffer holds anything the
-// range rule might refuse: a non-finite value for every operator, and a zero
-// for the two that have an underflow rule.
+// checkFusedFloatRange applies the rule to a buffer the FUSED column-constant
+// loops filled, by re-deriving only the rows that could be refused.
 //
-// It is one pass with no branch on the common row, and it exists so the
-// vectorized kernels pay a compare rather than the operand test: a batch whose
-// results are all ordinary finite non-zero numbers — every batch TPC-H and
-// ClickBench produce — answers false here and never re-reads its operands. A
-// batch that answers true is re-evaluated ROW BY ROW through the checked
-// scalar path, which has the operands in hand and raises with the right rule
-// for the right row. Re-evaluating is what keeps the two paths from
-// disagreeing: the loop does not carry enough state to tell an infinite
-// OPERAND from an infinite RESULT.
-func floatVecSuspect(dst []float64, n int, op arithOp) bool {
+// The loops above it are monomorphic per column type and per operator, and
+// putting the operand test inside all twenty of them would cost more in
+// duplication than it saves. Instead each result is asked ONE question — is
+// it non-finite, or (for the two operators with an underflow rule) zero — and
+// only a row that answers yes is recomputed from its source value, which the
+// caller still has. On an ordinary batch that is one integer test per row and
+// nothing else; on a column of zeros under `*` it is a switch and a multiply
+// for those rows, which is still far short of re-evaluating the expression.
+func checkFusedFloatRange(v *batch.Vector, typ batch.TypeID, c float64, op arithOp, constFirst bool, dst []float64, n int) {
 	if n > len(dst) {
 		n = len(dst)
 	}
+	// Two loops rather than one with a loop-invariant bool in its test: only
+	// `*` and `/` have an underflow rule, and the ordinary row should pay ONE
+	// integer test.
 	switch op {
-	case arithMul, arithDiv:
-		for i := 0; i < n; i++ {
-			v := dst[i]
-			if v == 0 || v-v != 0 {
-				return true
-			}
-		}
 	case arithAdd, arithSub:
 		for i := 0; i < n; i++ {
-			if v := dst[i]; v-v != 0 {
-				return true
+			if nonFiniteFloat(dst[i]) {
+				recheckFusedRow(v, typ, c, op, constFirst, i)
+			}
+		}
+	case arithMul, arithDiv:
+		for i := 0; i < n; i++ {
+			if floatNeedsRangeCheck(dst[i]) {
+				recheckFusedRow(v, typ, c, op, constFirst, i)
 			}
 		}
 	}
-	return false
+}
+
+// recheckFusedRow re-derives one suspect row and raises if the rule refuses
+// it. Out of line so the scanning loops above stay tight.
+//
+//go:noinline
+func recheckFusedRow(v *batch.Vector, typ batch.TypeID, c float64, op arithOp, constFirst bool, i int) {
+	x, ok := fusedSrcFloat(v, typ, i)
+	if !ok {
+		return
+	}
+	l, r := x, c
+	if constFirst {
+		l, r = c, x
+	}
+	switch op {
+	case arithAdd:
+		pgFloatAdd(l, r)
+	case arithSub:
+		pgFloatSub(l, r)
+	case arithMul:
+		pgFloatMul(l, r)
+	case arithDiv:
+		pgFloatDiv(l, r)
+	}
+}
+
+// fusedSrcFloat reads one source value back at the width the fused loop read
+// it. ok=false for a column shape that has no fused loop, which cannot reach
+// here.
+func fusedSrcFloat(v *batch.Vector, typ batch.TypeID, i int) (float64, bool) {
+	switch typ {
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		return float64(v.Int32Data[i]), true
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		return float64(v.Int64Data[i]), true
+	case batch.TypeFloat64:
+		return v.Float64Data[i], true
+	case batch.TypeFloat32:
+		return float64(v.Float32Data[i]), true
+	}
+	return 0, false
 }

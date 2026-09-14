@@ -91,10 +91,20 @@ func int32Count(n int) int32 {
 // infinite EITHER operand from the overflow, and `dpow`'s underflow does not
 // apply here at all — see fnPow. Each caller states its own rule beside the
 // call, where the reader can compare it to float.c.
+//
+// Both are //go:noinline for the reason raiseBigintOutOfRange is: they are the
+// COLD arm of a guard that runs once per row on the arithmetic kernels
+// (float_range.go), and letting the panic and the sqlerr construction inline
+// into that guard puts pgFloatAdd at cost 135 against an inline budget of 80 —
+// so the guard itself becomes a call, which costs more than the arithmetic it
+// protects.
+//
+//go:noinline
 func raiseFloatOverflow() {
 	panic(fatalEval{sqlerr.New("22003", "value out of range: overflow")})
 }
 
+//go:noinline
 func raiseFloatUnderflow() {
 	panic(fatalEval{sqlerr.New("22003", "value out of range: underflow")})
 }
