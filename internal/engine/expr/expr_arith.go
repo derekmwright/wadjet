@@ -80,11 +80,11 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 	rf := ToFloat64(rv)
 	switch e.Op {
 	case "+":
-		return lf + rf
+		return pgFloatAdd(lf, rf)
 	case "-":
-		return lf - rf
+		return pgFloatSub(lf, rf)
 	case "*":
-		return lf * rf
+		return pgFloatMul(lf, rf)
 	case "/":
 		// int / int is INTEGER division, truncating toward zero (#369,
 		// PostgreSQL semantics per ADR-0012). This generic node is where
@@ -109,7 +109,7 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 			// genuine zero divisor: PostgreSQL refuses it and so do we (#367).
 			raiseDivisionByZero()
 		}
-		return lf / rf
+		return pgFloatDiv(lf, rf)
 	case "%":
 		if rf == 0 {
 			raiseDivisionByZero()
@@ -182,17 +182,17 @@ func (e *BinOpFloat64) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool
 	e.resolveOpCode()
 	switch e.opCode {
 	case arithAdd:
-		return lf + rf, true
+		return pgFloatAdd(lf, rf), true
 	case arithSub:
-		return lf - rf, true
+		return pgFloatSub(lf, rf), true
 	case arithMul:
-		return lf * rf, true
+		return pgFloatMul(lf, rf), true
 	case arithDiv:
 		if rf == 0 {
 			// A NULL divisor returned above already; a zero here is genuine.
 			raiseDivisionByZero()
 		}
-		return lf / rf, true
+		return pgFloatDiv(lf, rf), true
 	case arithMod:
 		if rf == 0 {
 			raiseDivisionByZero()
@@ -246,14 +246,14 @@ func (e *BinOpFloat64) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int
 	if cr, ok := e.Left.(*ColRef); ok {
 		if lit, ok2 := e.Right.(*Lit); ok2 && lit.Val != nil {
 			if done, hasNull := fusedColConstFloat64(b, cr, ToFloat64(lit.Val), e.opCode, false, dst, n); done {
-				return hasNull
+				return e.rangeCheckVec(b, dst, n, hasNull)
 			}
 		}
 	}
 	if lit, ok := e.Left.(*Lit); ok && lit.Val != nil {
 		if cr, ok2 := e.Right.(*ColRef); ok2 {
 			if done, hasNull := fusedColConstFloat64(b, cr, ToFloat64(lit.Val), e.opCode, true, dst, n); done {
-				return hasNull
+				return e.rangeCheckVec(b, dst, n, hasNull)
 			}
 		}
 	}
@@ -313,6 +313,9 @@ func (e *BinOpFloat64) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int
 			}
 		}
 		if sawZero {
+			// The per-row pass the caller runs re-evaluates through the
+			// checked scalar kernel, so the range rule reaches these rows
+			// there rather than here.
 			return true
 		}
 	case arithMod:
@@ -329,7 +332,26 @@ func (e *BinOpFloat64) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int
 		}
 	}
 
-	return leftNull || rightNull
+	return e.rangeCheckVec(b, dst, n, leftNull || rightNull)
+}
+
+// rangeCheckVec applies PostgreSQL's float8 range rule to a filled result
+// buffer (#1082, float_range.go).
+//
+// The scan is the whole cost on an ordinary batch; only a buffer holding a
+// non-finite value — or a zero under the two operators with an underflow rule
+// — re-evaluates the batch row by row through EvalFloat64, which has the
+// operands and raises with the right rule for the right row. It is written
+// this way because the loops above do not keep the operands: a result of +Inf
+// is a refusal when both operands were finite and the ANSWER when one of them
+// was an infinity, and nothing in dst can tell those apart.
+func (e *BinOpFloat64) rangeCheckVec(b *batch.RecordBatch, dst []float64, n int, hasNull bool) bool {
+	if floatVecSuspect(dst, n, e.opCode) {
+		for i := 0; i < n; i++ {
+			e.EvalFloat64(b, i)
+		}
+	}
+	return hasNull
 }
 
 // fusedColConstFloat64 computes dst = col op c (or c op col when constFirst)
