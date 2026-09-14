@@ -495,10 +495,13 @@ var l1RefusalPins = map[string][]string{
 // l1ValuePins are the cells that answer a wrong VALUE rather than refusing,
 // with PostgreSQL's answer recorded above beside them. Each is a boundary with
 // a mechanism, not a shrug.
+// The two EXISTS cells are an ENGINE SUPERSET and not a wrong value: a window
+// function in a WHERE clause is an ERROR in PostgreSQL ("window functions are
+// not allowed in WHERE") and this engine evaluates it. Recorded here rather
+// than in a refusal list because the cell's disposition is a ROW SET.
 var l1ValuePins = map[string]string{
 	"EXISTS/inner/winarg":  "rows=4 1,1 | 1,2 | 2,3 | 2,4",
 	"EXISTS/noJoin/winarg": "rows=2 1 | 2",
-	"LAT/left/selectlist":  "rows=5 1,NULL | 1,NULL | 2,NULL | 2,NULL | 3,NULL",
 }
 
 func TestArcL1LateralAndWindowScopeAnswersPostgresOnEveryArm(t *testing.T) {
