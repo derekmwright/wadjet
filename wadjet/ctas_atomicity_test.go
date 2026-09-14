@@ -359,12 +359,17 @@ func TestACreateWhoseCommitFailsLeavesTheNameFree(t *testing.T) {
 
 // A value the CATALOG cannot encode is not a value the statement may lose.
 //
-// `CREATE TABLE t AS SELECT f * 10 FROM src` over a float at the edge of the
-// range produces an infinity, and a manifest carrying it as a min/max bound
-// cannot be marshalled at all. PostgreSQL 17.11 stores an infinity in a double
-// precision column (measured: `CREATE TABLE t AS SELECT 'Infinity'::float8`
-// answers `Infinity`), so the statement must succeed and the value must read
-// back — the bound is what gives way, not the row.
+// PostgreSQL 17.11 stores an infinity in a double precision column (measured:
+// `CREATE TABLE t AS SELECT 'Infinity'::float8` answers `Infinity`), and a
+// manifest carrying one as a min/max bound cannot be marshalled at all — so
+// for a CAST that NAMES the value the statement must succeed and the value
+// must read back, and the bound is what gives way, not the row.
+//
+// The other half is #1082, and it is a refusal: `f * 10` over a float at the
+// edge of the range is `22003 value out of range: overflow` on both engines
+// now, so no infinity is computed and none reaches the writer. Those two
+// spellings were entries 0 and 1 of the list below and they are the first
+// subtest here.
 func TestANonFiniteValueIsStoredAndItsBoundIsDropped(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
@@ -382,9 +387,26 @@ func TestANonFiniteValueIsStoredAndItsBoundIsDropped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for i, sql := range []string{
+	// An arithmetic result that leaves the type never reaches the writer at
+	// all: PostgreSQL raises 22003 for it and so does this engine now, so a
+	// CTAS over one fails instead of storing an infinity (#1082). `f * 10`
+	// and `f * f` over 1e308 were this list's first two entries.
+	for _, sql := range []string{
 		`SELECT id, f * 10 AS x FROM fsrc`,
 		`SELECT id, f * f AS x FROM fsrc`,
+	} {
+		t.Run("refused/"+sql, func(t *testing.T) {
+			_, err := db.Query(ctx, "CREATE TABLE nonfiniteovf AS "+sql)
+			if err == nil {
+				t.Fatalf("%s stored an infinity; PostgreSQL 17.11 raises 22003 for it", sql)
+			}
+			if state := sqlerr.StateOf(err); state != "22003" {
+				t.Errorf("%s raised SQLSTATE %s, want 22003: %v", sql, state, err)
+			}
+		})
+	}
+
+	for i, sql := range []string{
 		`SELECT id, CAST('Infinity' AS FLOAT64) AS x FROM fsrc`,
 		`SELECT id, CAST('-Infinity' AS FLOAT64) AS x FROM fsrc`,
 		`SELECT id, CAST('NaN' AS FLOAT64) AS x FROM fsrc`,

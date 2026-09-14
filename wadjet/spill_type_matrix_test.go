@@ -80,7 +80,7 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 			t.Fatalf("the unbudgeted run of %s returned no rows — this cell would compare nothing\n  SQL: %s",
 				cell.name, cell.sql)
 		}
-		refs[cell.name] = spillMxRender(want.Columns, want.Rows, cell.ordered)
+		refs[cell.name] = spillMxRender(want.Columns, want.Rows, cell.ordered, cell.floatDigits)
 	}
 
 	// Reaching the sort, window and raw-row paths at all is not a budget
@@ -137,7 +137,7 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 					t.Fatalf("under a %d KiB budget, run %d: %v\n  SQL: %s", budget/1024, run, err, cell.sql)
 				}
 				answered++
-				g := spillMxRender(got.Columns, got.Rows, cell.ordered)
+				g := spillMxRender(got.Columns, got.Rows, cell.ordered, cell.floatDigits)
 				diff := spillMxDiff(g, w)
 				if diff == "" {
 					agreed++
@@ -192,7 +192,7 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 						exec.ForceAggDrainEvery(restore)
 						t.Fatalf("drain-every-batch run %d: %v\n  SQL: %s", run, err, cell.sql)
 					}
-					if diff := spillMxDiff(spillMxRender(got.Columns, got.Rows, cell.ordered), w); diff != "" {
+					if diff := spillMxDiff(spillMxRender(got.Columns, got.Rows, cell.ordered, cell.floatDigits), w); diff != "" {
 						exec.ForceAggDrainEvery(restore)
 						t.Fatalf("drain-every-batch run %d: %s\n  SQL: %s", run, diff, cell.sql)
 					}
@@ -230,7 +230,7 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 						t.Fatalf("forced-run pass %d wrote NO forced run, so it compared two "+
 							"in-memory answers\n  SQL: %s", run, cell.sql)
 					}
-					if diff := spillMxDiff(spillMxRender(got.Columns, got.Rows, cell.ordered), w); diff != "" {
+					if diff := spillMxDiff(spillMxRender(got.Columns, got.Rows, cell.ordered, cell.floatDigits), w); diff != "" {
 						t.Fatalf("forced-run pass %d: %s\n  SQL: %s", run, diff, cell.sql)
 					}
 				}
@@ -445,6 +445,21 @@ type spillMxCell struct {
 	// the cell. The ratchet in the direction a loud bug needs it — the pin
 	// cannot outlive the fix any more than knownBug's can.
 	knownError string
+	// floatDigits overrides the six significant digits spillMxRender compares
+	// a float at. A cell sets it when its answer is a float sum whose LAST
+	// digits move with the order the rows reach the accumulator — the class
+	// ADR-0013 records — and whose accumulator is narrow enough that the
+	// movement reaches the sixth digit.
+	//
+	// SUM(real) is the one that does. PostgreSQL accumulates it at float4's
+	// width (#950) and so does this engine now, so a 642-row group of values
+	// near 350 carries an ulp of 0.0156 per add: the spilled arm, which
+	// re-associates the total across drained partials, answers 229141 where
+	// the in-memory one answers 229140. Both are the sum; neither is the
+	// other's rounding error. AVG over the same column is double precision on
+	// PostgreSQL (#760) and stays at six digits, which is what keeps this from
+	// being a blanket tolerance over the float family.
+	floatDigits int
 	// forceDrainEvery arms exec.ForceAggDrainEvery(N) around THIS cell's
 	// runs. A defect whose trigger is a CONDITION is pinned by bounding the
 	// condition, never by tolerating an outcome mix: the first draft of this
@@ -682,11 +697,18 @@ func spillMxCells() []spillMxCell {
 		// format, and it is where #782's second symptom lived.
 		switch n {
 		case "c_i32", "c_i64", "c_f32", "c_f64", "c_dec":
-			add(spillMxCell{name: "sum_avg_" + n, noSpill: spillMxTinyKey, sql: fmt.Sprintf(
+			// SUM(real) accumulates at float4's width on both engines (#950),
+			// so its last digits move with the order the drained partials
+			// re-associate in — see spillMxCell.floatDigits.
+			fd := 0
+			if n == "c_f32" {
+				fd = 4
+			}
+			add(spillMxCell{name: "sum_avg_" + n, noSpill: spillMxTinyKey, floatDigits: fd, sql: fmt.Sprintf(
 				`SELECT g AS k, SUM(%[1]s) AS s, AVG(%[1]s) AS a, COUNT(%[1]s) AS n FROM %[2]s GROUP BY g`, n, tbl)})
 			// A window stage above a grouped SUM, which is the shape the
 			// DECIMAL loss first showed on.
-			add(spillMxCell{name: "sum_window_" + n, ordered: true, noSpill: spillMxTinyKey, sql: fmt.Sprintf(
+			add(spillMxCell{name: "sum_window_" + n, ordered: true, noSpill: spillMxTinyKey, floatDigits: fd, sql: fmt.Sprintf(
 				`SELECT g AS k, SUM(%[1]s) AS s, SUM(SUM(%[1]s)) OVER () AS w FROM %[2]s GROUP BY g ORDER BY k`, n, tbl)})
 		}
 	}
@@ -881,7 +903,12 @@ func spillMxDiff(got, want []string) string {
 // FLOATs are printed to 6 significant digits: a float sum's last digits move
 // with accumulation order, which changes under a budget (ADR-0013 class 9).
 // Nothing else is rounded — a DECIMAL is compared digit for digit.
-func spillMxRender(columns []string, rows []map[string]any, ordered bool) []string {
+func spillMxRender(columns []string, rows []map[string]any, ordered bool, digits ...int) []string {
+	d := 6
+	if len(digits) > 0 && digits[0] > 0 {
+		d = digits[0]
+	}
+	verb := fmt.Sprintf("%%s=float:%%.%dg|", d)
 	out := make([]string, 0, len(rows))
 	var sb strings.Builder
 	for _, r := range rows {
@@ -896,9 +923,9 @@ func spillMxRender(columns []string, rows []map[string]any, ordered bool) []stri
 					sb.WriteString(c + "=NULL|")
 				}
 			case float64:
-				fmt.Fprintf(&sb, "%s=float:%.6g|", c, t)
+				fmt.Fprintf(&sb, verb, c, t)
 			case float32:
-				fmt.Fprintf(&sb, "%s=float:%.6g|", c, float64(t))
+				fmt.Fprintf(&sb, verb, c, float64(t))
 			default:
 				fmt.Fprintf(&sb, "%s=%T:%v|", c, v, v)
 			}

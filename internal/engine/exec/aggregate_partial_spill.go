@@ -86,7 +86,13 @@ type partialAggSpec struct {
 	Func      AggFunc
 	IsFloat   bool
 	IsDecimal bool
-	DecScale  int32
+	// IsReal narrows IsFloat to float4's width, which is what PostgreSQL's
+	// sum(real) accumulates in (#950). It rides the header's existing IsFloat
+	// BYTE as the value 2 rather than a field of its own, so the per-agg
+	// record keeps its ten bytes and the offset arithmetic in Close is
+	// unchanged.
+	IsReal   bool
+	DecScale int32
 }
 
 // partialGroupCol is one GROUP BY column in the spill header — name + type so
@@ -195,9 +201,12 @@ func (w *partialSpillWriter) writeHeader() error {
 		if _, err := w.w.Write(w.scratch[:4]); err != nil {
 			return err
 		}
-		if a.IsFloat {
+		switch {
+		case a.IsReal:
+			w.scratch[0] = 2
+		case a.IsFloat:
 			w.scratch[0] = 1
-		} else {
+		default:
 			w.scratch[0] = 0
 		}
 		if a.IsDecimal {
@@ -312,6 +321,13 @@ func emitAcc(w *bufio.Writer, scratch []byte, spec partialAggSpec, a *kernel.Acc
 			}
 			return writeInt128(w, scratch, a.SumDec)
 		case spec.IsFloat:
+			// The float carrier's range flag rides with its value for the
+			// reason the integer and DECIMAL ones do: a partial whose total
+			// left the type and then spilled came back holding an infinity
+			// with nothing that said so (#1082).
+			if err := writeBool(w, a.FloatOverflow); err != nil {
+				return err
+			}
 			return writeFloat64(w, scratch, a.SumF64)
 		default:
 			// The INT64 carrier's wrap flag rides with its value for the same
@@ -364,6 +380,7 @@ func emitAcc(w *bufio.Writer, scratch []byte, spec partialAggSpec, a *kernel.Acc
 
 func readAcc(r *bufio.Reader, scratch []byte, spec partialAggSpec, a *kernel.Accumulator) error {
 	a.IsFloat = spec.IsFloat
+	a.RealSum = spec.IsReal
 	a.IsDecimal = spec.IsDecimal
 	a.DecScale = int(spec.DecScale)
 	switch spec.Func {
@@ -386,6 +403,11 @@ func readAcc(r *bufio.Reader, scratch []byte, spec partialAggSpec, a *kernel.Acc
 			}
 			a.SumDec = v
 		case spec.IsFloat:
+			of, err := readBool(r)
+			if err != nil {
+				return err
+			}
+			a.FloatOverflow = of
 			v, err := readFloat64(r, scratch)
 			if err != nil {
 				return err
@@ -838,6 +860,7 @@ func (r *partialSpillReader) readHeader() error {
 		r.header.Aggs[i] = partialAggSpec{
 			Func:      AggFunc(binary.LittleEndian.Uint32(r.scratch[:4])),
 			IsFloat:   r.scratch[4] != 0,
+			IsReal:    r.scratch[4] == 2,
 			IsDecimal: r.scratch[5] != 0,
 			DecScale:  int32(binary.LittleEndian.Uint32(r.scratch[6:10])),
 		}
@@ -1285,6 +1308,7 @@ func (h *HashAggregate) latchAggEncodings() {
 		}
 		fa := &h.intFlatAccs[i]
 		spec.IsFloat = spec.IsFloat || fa.isFloat
+		spec.IsReal = spec.IsReal || fa.realSum
 		spec.IsDecimal = spec.IsDecimal || fa.isDecimal
 		if fa.decScale != 0 {
 			spec.DecScale = int32(fa.decScale)

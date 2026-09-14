@@ -236,6 +236,10 @@ func (h *HashAggregate) initFlatAccums(b *batch.RecordBatch) {
 			case typ == batch.TypeFloat64 || typ == batch.TypeFloat32:
 				fa.sumF64 = memory.Offheap[float64](reg, initCap)
 				fa.isFloat = true
+				// sum(real) accumulates at float4's width and avg(real) at
+				// float8's — two widths over one column, which is what
+				// PostgreSQL declares for the two aggregates (#950, #760).
+				fa.realSum = agg.Func == AggSum && typ == batch.TypeFloat32
 			case typ == batch.TypeDecimal:
 				fa.sumDec = memory.Offheap[batch.Int128](reg, initCap)
 				fa.isDecimal = true
@@ -319,6 +323,8 @@ func loadAccFromFlat(fa *flatAccumArrays, countArr []int64, gi int, dst *kernel.
 	dst.DecScale = fa.decScale
 	dst.DecOverflow = fa.sumDecOverflow
 	dst.IntOverflow = fa.sumIntOverflow
+	dst.FloatOverflow = fa.sumFloatOverflow
+	dst.RealSum = fa.realSum
 	if fa.sumI64 != nil {
 		dst.SumI64 = fa.sumI64[gi]
 	}
@@ -582,6 +588,7 @@ func (h *HashAggregate) rebuildFlatAccums(b *batch.RecordBatch) {
 			}
 			if fa.sumF64 != nil {
 				fa.sumF64[gi] = acc.SumF64
+				fa.sumFloatOverflow = fa.sumFloatOverflow || acc.FloatOverflow
 			}
 			if fa.sumDec != nil {
 				fa.sumDec[gi] = acc.SumDec

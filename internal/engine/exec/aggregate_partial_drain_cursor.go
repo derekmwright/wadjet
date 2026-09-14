@@ -322,6 +322,8 @@ func (c *partialGroupCursor) loadHeadAccsSoA(gi int) {
 		}
 		if fa.sumF64 != nil {
 			acc.SumF64 = fa.sumF64[gi]
+			acc.RealSum = fa.realSum
+			acc.FloatOverflow = fa.sumFloatOverflow
 		}
 		if fa.sumDec != nil {
 			acc.SumDec = fa.sumDec[gi]

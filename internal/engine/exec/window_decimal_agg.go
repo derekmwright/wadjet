@@ -314,13 +314,19 @@ func windowExactIntFrames(winVec, inputVec *batch.Vector, cells windowExactCells
 // number PostgreSQL does not, and a frame of only NULLs answered 0 where
 // PostgreSQL answers NULL.
 func windowFloat64Frames(winVec, inputVec *batch.Vector, rd windowNumericReader,
-	fr resolvedFrame, start, n int, fn WindowFunc) {
-	var acc float64FrameAcc
+	fr resolvedFrame, start, n int, fn WindowFunc, outCol string) error {
+	acc := float64FrameAcc{real: windowRealSum(inputVec, fn)}
 	out := winVec.Float64Data
 	avg := fn == WinAvg
 	for i := 0; i < n; i++ {
 		lo, hi := fr.bounds(i)
 		acc.slide(inputVec, rd, start, lo, hi)
+		if acc.overflow {
+			// PostgreSQL's sum(float8) over a window raises here too,
+			// measured: `SUM(f) OVER ()` over two rows of 1e308 is 22003 and
+			// not the +Infinity this path wrote (#1082).
+			return floatSumOverflow(outCol)
+		}
 		if hi <= lo || acc.count == 0 {
 			continue
 		}
@@ -331,6 +337,7 @@ func windowFloat64Frames(winVec, inputVec *batch.Vector, rd windowNumericReader,
 		}
 		winVec.Nulls.SetValid(start + i)
 	}
+	return nil
 }
 
 // resolveWindowExactCells reports whether this window column's SUM/AVG runs

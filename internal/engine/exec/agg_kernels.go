@@ -125,6 +125,17 @@ func resolveAggUpdaterNoNull(agg AggColumn, typ batch.TypeID) kernel.RowAggUpdat
 // requires at every value-producing site. As a bare fmt.Errorf this reached
 // clients as the internal-error class, so nothing on the wire distinguished
 // "your total is too big" from "the server broke".
+// floatSumOverflow reports a FLOAT sum that left float8's (or, for a real
+// sum, float4's) range with every contributing value finite. PostgreSQL's
+// message and SQLSTATE, measured on 17.11: `value out of range: overflow`,
+// 22003.
+func floatSumOverflow(col string) error {
+	if col == "" {
+		col = "sum"
+	}
+	return sqlerr.New("22003", "value out of range: overflow (%s)", col)
+}
+
 func decimalSumOverflow(col string) error {
 	if col == "" {
 		col = "sum"
@@ -222,6 +233,13 @@ func (h *HashAggregate) aggEmitErr(acc *kernel.Accumulator, j int, fn AggFunc) e
 	// COUNT share the accumulator type and never write that field.
 	if acc.IntOverflow && (fn == AggSum || fn == AggAvg) {
 		return integerSumOverflow(name())
+	}
+	// The float8 carrier's range, read for the same functions and for the same
+	// reason: PostgreSQL's sum(float8) is float8pl row by row and raises 22003
+	// when the running total leaves the type, where this path answered
+	// +Infinity and a CTAS stored it (#1082).
+	if acc.FloatOverflow && (fn == AggSum || fn == AggAvg) {
+		return floatSumOverflow(name())
 	}
 	if acc.DecScaleConflict || h.decScaleConflict {
 		return decimalScaleConflict(name())

@@ -1579,7 +1579,9 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 			// unreachable for every plan the planner builds.
 			return nil
 		}
-		windowFloat64Frames(winVec, inputVec, rd, fr, start, n, wc.Func)
+		if err := windowFloat64Frames(winVec, inputVec, rd, fr, start, n, wc.Func, wc.OutputCol); err != nil {
+			return err
+		}
 
 	// COUNT is the one aggregate an empty frame does not make NULL: it
 	// counts the rows it can see, and seeing none is 0.
@@ -1844,6 +1846,22 @@ type float64FrameAcc struct {
 	sum    float64
 	count  int64
 	lo, hi int
+	// real narrows every addition to float4's width, which is what
+	// PostgreSQL's sum(real) accumulates in — the windowed spelling has to
+	// answer what the grouped one answers (#950), and the grouped one is
+	// float4pl since this arc.
+	//
+	// It also changes how the frame MOVES. PostgreSQL has no inverse
+	// transition for a float sum, so a frame whose lower end advances is
+	// recomputed there; retracting a float4 total instead accumulates
+	// rounding the server never has. So a real accumulator resets and refills
+	// rather than subtracting, which costs the frame's width on exactly the
+	// frames that move and nothing on the default one.
+	real bool
+	// overflow latches a total that left the type with every contributing
+	// value finite — float8pl's rule, the same one the grouped accumulator
+	// carries (#1082).
+	overflow bool
 }
 
 // nonNullFrameAcc counts the NON-NULL rows of a sliding frame — COUNT(col)'s
@@ -1886,6 +1904,13 @@ func (a *float64FrameAcc) reset(pos int) {
 	a.lo, a.hi = pos, pos
 }
 
+// windowRealSum reports whether this window column is a SUM over a REAL input,
+// the one case whose accumulator is narrower than float8 (#950, #760: AVG over
+// the same column is double precision on PostgreSQL).
+func windowRealSum(inputVec *batch.Vector, fn WindowFunc) bool {
+	return fn == WinSum && inputVec != nil && inputVec.Type == batch.TypeFloat32
+}
+
 // slide advances the accumulator to [lo, hi), retracting before it adds and
 // resetting outright between disjoint frames — exactFrameAcc.slide's order,
 // for a reason that survives the change of carrier. Adding first makes the
@@ -1898,7 +1923,7 @@ func (a *float64FrameAcc) slide(in *batch.Vector, rd windowNumericReader, start,
 	if hi < lo {
 		hi = lo
 	}
-	if lo >= a.hi {
+	if lo >= a.hi || (a.real && lo > a.lo) {
 		a.reset(lo)
 	}
 	for a.lo < lo {
@@ -1910,11 +1935,22 @@ func (a *float64FrameAcc) slide(in *batch.Vector, rd windowNumericReader, start,
 	}
 	for a.hi < hi {
 		if r := start + a.hi; !in.Nulls.IsNullFast(r) {
-			a.sum += rd.at(r)
-			a.count++
+			a.add(rd.at(r))
 		}
 		a.hi++
 	}
+}
+
+// add folds one value in under the width and range rules of float_sum.go.
+func (a *float64FrameAcc) add(v float64) {
+	var ovf bool
+	if a.real {
+		a.sum, ovf = kernel.FoldRealSum(a.sum, float32(v))
+	} else {
+		a.sum, ovf = kernel.FoldFloatSum(a.sum, v)
+	}
+	a.overflow = a.overflow || ovf
+	a.count++
 }
 
 // rowMapCarries reports whether ANY row of the partition has col as a key.

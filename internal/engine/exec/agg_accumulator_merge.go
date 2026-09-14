@@ -61,7 +61,21 @@ func mergeFlatAccumRow(dst, src []flatAccumArrays, dstIdx, srcIdx int) {
 			hfa.sumI64[dstIdx] = sum
 		}
 		if hfa.sumF64 != nil {
-			hfa.sumF64[dstIdx] += ofa.sumF64[srcIdx]
+			// The float fold carries both of the float sum's rules
+			// (kernel/float_sum.go): a real SUM keeps adding at float4's
+			// width here too, and a float8 one can leave the type for the
+			// first time when two partials meet.
+			var sum float64
+			var ovf bool
+			if hfa.realSum {
+				sum, ovf = kernel.FoldRealSum(hfa.sumF64[dstIdx], float32(ofa.sumF64[srcIdx]))
+			} else {
+				sum, ovf = kernel.FoldFloatSum(hfa.sumF64[dstIdx], ofa.sumF64[srcIdx])
+			}
+			hfa.sumF64[dstIdx] = sum
+			if ovf {
+				hfa.sumFloatOverflow = true
+			}
 		}
 		if hfa.sumDec != nil {
 			sum, ok := hfa.sumDec[dstIdx].AddChecked(ofa.sumDec[srcIdx])
@@ -75,6 +89,9 @@ func mergeFlatAccumRow(dst, src []flatAccumArrays, dstIdx, srcIdx int) {
 		}
 		if ofa.sumIntOverflow {
 			hfa.sumIntOverflow = true
+		}
+		if ofa.sumFloatOverflow {
+			hfa.sumFloatOverflow = true
 		}
 		if ofa.hasMin != nil && ofa.hasMin[srcIdx] {
 			if hfa.hasMin[dstIdx] {

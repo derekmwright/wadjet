@@ -46,6 +46,19 @@ type Accumulator struct {
 	// while `SUM(b)` and `SUM(b + 0)` were exact, so three spellings of one
 	// question were right and two were zero.
 	IntOverflow bool
+	// FloatOverflow marks a FLOAT SUM whose running total left the type's
+	// range with every contributing value FINITE. It is IntOverflow's float8
+	// sibling and is read at the same emit-time check: PostgreSQL's
+	// `sum(float8)` is float8pl row by row and raises 22003 there, where this
+	// engine answered +Infinity and a CTAS stored it (#1082).
+	FloatOverflow bool
+	// RealSum marks a SUM whose input column is REAL, which PostgreSQL
+	// accumulates at float4's width rather than float8's (#950). It rides the
+	// accumulator because every merge, clone and spill reload has to keep
+	// adding at that width — a float8 fold of two float4-exact partials is a
+	// different number. AVG over the same column does NOT set it: PostgreSQL's
+	// avg(real) is double precision (#760).
+	RealSum bool
 	// DecOverflow marks a DECIMAL SUM that left the 128-bit range. SumDec
 	// then holds the WRAPPED value — a different number — so the emit path
 	// turns this into a query error instead of writing it out (#455). It
@@ -223,10 +236,28 @@ func (a *Accumulator) Merge(other *Accumulator) {
 		a.IntOverflow = true
 	}
 	a.SumI64 = si
-	a.SumF64 += other.SumF64
+	if other.RealSum {
+		a.RealSum = true
+	}
+	// The float fold carries both of the float sum's rules (float_sum.go): a
+	// merge is where two partials that each held their total meet, so it is
+	// where a real SUM has to keep adding at float4's width and where a float8
+	// one can leave the type for the first time.
+	if a.RealSum {
+		sf, ovf := foldRealSum(a.SumF64, float32(other.SumF64))
+		a.SumF64 = sf
+		a.FloatOverflow = a.FloatOverflow || ovf
+	} else {
+		sf, ovf := foldFloatSum(a.SumF64, other.SumF64)
+		a.SumF64 = sf
+		a.FloatOverflow = a.FloatOverflow || ovf
+	}
 	a.Count += other.Count
 	if other.IntOverflow {
 		a.IntOverflow = true
+	}
+	if other.FloatOverflow {
+		a.FloatOverflow = true
 	}
 	if other.IsFloat {
 		a.IsFloat = true

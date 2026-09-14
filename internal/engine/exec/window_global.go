@@ -286,7 +286,11 @@ func collectGlobalWindowStats(m *runMerger, schema []parquet.Column, g windowSpe
 						if !col.Nulls.IsNullFast(r) {
 							st.cnt[i]++
 						}
-						st.sum[i] += f
+						sum, ovf := foldWindowFloatSum(st.sum[i], f, windowRealSum(col, wc.Func))
+						st.sum[i] = sum
+						if ovf {
+							return nil, floatSumOverflow(wc.OutputCol)
+						}
 					}
 				// A whole-input COUNT(col) needs the partition's non-NULL
 				// total in pass 1, the same way SUM needs its sum: pass 2
@@ -868,8 +872,24 @@ func (s *globalWindowStreamer) accumulateRunning(wc WindowColumn, i, r int, inVe
 	if inVec != nil && !inVec.Nulls.IsNullFast(r) {
 		s.runNonNull[i]++
 	}
-	s.runSum[i] += f
+	sum, ovf := foldWindowFloatSum(s.runSum[i], f, windowRealSum(inVec, wc.Func))
+	s.runSum[i] = sum
+	if ovf {
+		// float8pl's range rule, the one the grouped accumulator and the
+		// in-memory frame accumulator carry (#1082).
+		return floatSumOverflow(wc.OutputCol)
+	}
 	return nil
+}
+
+// foldWindowFloatSum is the two window paths' shared float fold: float4's
+// width for a SUM over a REAL input, float8's otherwise, with PostgreSQL's
+// range rule on both (kernel/float_sum.go, #950 and #1082).
+func foldWindowFloatSum(sum, v float64, real bool) (float64, bool) {
+	if real {
+		return kernel.FoldRealSum(sum, float32(v))
+	}
+	return kernel.FoldFloatSum(sum, v)
 }
 
 // peerDeferred reports whether f's value under the DEFAULT frame depends on

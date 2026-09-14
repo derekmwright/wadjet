@@ -289,6 +289,9 @@ func isAvgFloatAccumType(typ batch.TypeID) bool {
 // ResolveRowAvg returns a row-level updater for AVG. Differs from
 // ResolveRowSum only for int64-class inputs (float64 accumulation).
 func ResolveRowAvg(typ batch.TypeID) RowAggUpdater {
+	if typ == batch.TypeFloat32 {
+		return avgRowFloat32 // float8 width — see avgRowFloat32 (#760, #950)
+	}
 	if isAvgFloatAccumType(typ) {
 		return avgRowInt64AsFloat
 	}
@@ -297,6 +300,9 @@ func ResolveRowAvg(typ batch.TypeID) RowAggUpdater {
 
 // ResolveRowAvgNoNulls is the no-null-check variant of ResolveRowAvg.
 func ResolveRowAvgNoNulls(typ batch.TypeID) RowAggUpdater {
+	if typ == batch.TypeFloat32 {
+		return avgRowFloat32NoNulls
+	}
 	if isAvgFloatAccumType(typ) {
 		return avgRowInt64AsFloatNoNulls
 	}
@@ -304,8 +310,16 @@ func ResolveRowAvgNoNulls(typ batch.TypeID) RowAggUpdater {
 }
 
 // ResolveBatchAvg returns a batch-level kernel for AVG. Differs from
-// ResolveBatchSum only for int64-class inputs (float64 accumulation).
+// ResolveBatchSum for int64-class inputs (float64 accumulation) and for REAL,
+// whose average PostgreSQL computes at DOUBLE precision while its sum stays
+// real (#760 for the first half, #950 for the second).
 func ResolveBatchAvg(typ batch.TypeID) BatchAggKernel {
+	if typ == batch.TypeFloat32 {
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
+			sumSliceFloat32WidenedChecked(acc, vec.Float32Data, &vec.Nulls, sel, vecLen)
+			acc.IsFloat = true
+		}
+	}
 	if !isAvgFloatAccumType(typ) {
 		return ResolveBatchSum(typ)
 	}
@@ -330,7 +344,9 @@ func ResolveBatchAvg(typ batch.TypeID) BatchAggKernel {
 				}
 			}
 		}
-		acc.SumF64 += sum
+		s, ovf := foldFloatSum(acc.SumF64, sum)
+		acc.SumF64 = s
+		acc.FloatOverflow = acc.FloatOverflow || ovf
 		acc.Count += count
 	}
 }

@@ -8,43 +8,6 @@ import (
 
 // --- Generic aggregate slice functions (monomorphized at compile time) ---
 
-// sumSliceFloat32Widened totals a REAL column at DOUBLE width, widening each
-// value before adding it. See the TypeFloat32 arm of ResolveBatchSum for why
-// the widening has to happen per value rather than on the batch's own float32
-// sum (#760).
-func sumSliceFloat32Widened(data []float32, nulls *batch.Bitmap, sel []uint32, vecLen int) (float64, int64) {
-	var sum float64
-	var count int64
-	if sel != nil {
-		if nulls.HasNulls() {
-			for _, idx := range sel {
-				if !nulls.IsNullFast(int(idx)) {
-					sum += float64(data[idx])
-					count++
-				}
-			}
-			return sum, count
-		}
-		for _, idx := range sel {
-			sum += float64(data[idx])
-		}
-		return sum, int64(len(sel))
-	}
-	if nulls.HasNulls() {
-		for i := 0; i < vecLen; i++ {
-			if !nulls.IsNullFast(i) {
-				sum += float64(data[i])
-				count++
-			}
-		}
-		return sum, count
-	}
-	for i := 0; i < vecLen; i++ {
-		sum += float64(data[i])
-	}
-	return sum, int64(vecLen)
-}
-
 func sumSlice[T Numeric](data []T, nulls *batch.Bitmap, sel []uint32, vecLen int) (T, int64) {
 	var sum T
 	var count int64
@@ -130,31 +93,126 @@ func sumRowInt32NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
 
 func sumRowFloat64(acc *Accumulator, vec *batch.Vector, row int) {
 	if !vec.Nulls.IsNullFast(row) {
-		acc.SumF64 += vec.Float64Data[row]
-		acc.Count++
-		acc.IsFloat = true
+		sumRowFloat64NoNulls(acc, vec, row)
 	}
 }
 func sumRowFloat64NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
-	acc.SumF64 += vec.Float64Data[row]
+	s, ovf := foldFloatSum(acc.SumF64, vec.Float64Data[row])
+	acc.SumF64 = s
+	acc.FloatOverflow = acc.FloatOverflow || ovf
 	acc.Count++
 	acc.IsFloat = true
 }
 
 // REAL width, the row-at-a-time twin of the batched arm in ResolveBatchSum.
 // The two must accumulate at the SAME width or one query answers two numbers
-// depending on which path the operator took (#760).
+// depending on which path the operator took (#760, #950).
 func sumRowFloat32(acc *Accumulator, vec *batch.Vector, row int) {
 	if !vec.Nulls.IsNullFast(row) {
-		acc.SumF64 += float64(vec.Float32Data[row])
-		acc.Count++
-		acc.IsFloat = true
+		sumRowFloat32NoNulls(acc, vec, row)
 	}
 }
 func sumRowFloat32NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
-	acc.SumF64 += float64(vec.Float32Data[row])
+	s, ovf := foldRealSum(acc.SumF64, vec.Float32Data[row])
+	acc.SumF64 = s
+	acc.FloatOverflow = acc.FloatOverflow || ovf
 	acc.Count++
 	acc.IsFloat = true
+	acc.RealSum = true
+}
+
+// avgRowFloat32 is AVG(real)'s row updater: float8 width, per value (#760).
+// It is a separate function from the SUM one because the two aggregates
+// accumulate at DIFFERENT widths on PostgreSQL, and ResolveRowAvg used to
+// reach SUM's.
+func avgRowFloat32(acc *Accumulator, vec *batch.Vector, row int) {
+	if !vec.Nulls.IsNullFast(row) {
+		avgRowFloat32NoNulls(acc, vec, row)
+	}
+}
+func avgRowFloat32NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
+	s, ovf := foldFloatSum(acc.SumF64, float64(vec.Float32Data[row]))
+	acc.SumF64 = s
+	acc.FloatOverflow = acc.FloatOverflow || ovf
+	acc.Count++
+	acc.IsFloat = true
+}
+
+// sumSliceFloatChecked folds a FLOAT8 column into acc value by value under
+// float8pl's range rule.
+func sumSliceFloatChecked(acc *Accumulator, data []float64, nulls *batch.Bitmap, sel []uint32, vecLen int) {
+	sum, count, ovf := acc.SumF64, int64(0), false
+	fold := func(v float64) {
+		s, o := foldFloatSum(sum, v)
+		sum, ovf = s, ovf || o
+		count++
+	}
+	if sel != nil {
+		for _, idx := range sel {
+			if !nulls.IsNullFast(int(idx)) {
+				fold(data[idx])
+			}
+		}
+	} else {
+		for i := 0; i < vecLen; i++ {
+			if !nulls.IsNullFast(i) {
+				fold(data[i])
+			}
+		}
+	}
+	acc.SumF64, acc.Count = sum, acc.Count+count
+	acc.FloatOverflow = acc.FloatOverflow || ovf
+}
+
+// sumSliceRealChecked is sumSliceFloatChecked at float4's width.
+func sumSliceRealChecked(acc *Accumulator, data []float32, nulls *batch.Bitmap, sel []uint32, vecLen int) {
+	sum, count, ovf := acc.SumF64, int64(0), false
+	fold := func(v float32) {
+		s, o := foldRealSum(sum, v)
+		sum, ovf = s, ovf || o
+		count++
+	}
+	if sel != nil {
+		for _, idx := range sel {
+			if !nulls.IsNullFast(int(idx)) {
+				fold(data[idx])
+			}
+		}
+	} else {
+		for i := 0; i < vecLen; i++ {
+			if !nulls.IsNullFast(i) {
+				fold(data[i])
+			}
+		}
+	}
+	acc.SumF64, acc.Count = sum, acc.Count+count
+	acc.FloatOverflow = acc.FloatOverflow || ovf
+}
+
+// sumSliceFloat32WidenedChecked totals a REAL column at DOUBLE width, which
+// is AVG(real)'s accumulator on PostgreSQL (#760).
+func sumSliceFloat32WidenedChecked(acc *Accumulator, data []float32, nulls *batch.Bitmap, sel []uint32, vecLen int) {
+	sum, count, ovf := acc.SumF64, int64(0), false
+	fold := func(v float32) {
+		s, o := foldFloatSum(sum, float64(v))
+		sum, ovf = s, ovf || o
+		count++
+	}
+	if sel != nil {
+		for _, idx := range sel {
+			if !nulls.IsNullFast(int(idx)) {
+				fold(data[idx])
+			}
+		}
+	} else {
+		for i := 0; i < vecLen; i++ {
+			if !nulls.IsNullFast(i) {
+				fold(data[i])
+			}
+		}
+	}
+	acc.SumF64, acc.Count = sum, acc.Count+count
+	acc.FloatOverflow = acc.FloatOverflow || ovf
 }
 
 func countRow(acc *Accumulator, vec *batch.Vector, row int) {
@@ -803,33 +861,29 @@ func ResolveBatchSum(typ batch.TypeID) BatchAggKernel {
 		}
 	case batch.TypeFloat64:
 		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
-			s, c := sumSlice(vec.Float64Data, &vec.Nulls, sel, vecLen)
-			acc.SumF64 += s
-			acc.Count += c
+			// Folded value by value rather than batch-total-then-fold: the
+			// range rule is float8pl's, applied to each addition, and a batch
+			// total computed first can reach an infinity the per-row server
+			// refuses one row earlier (#1082, float_sum.go).
+			sumSliceFloatChecked(acc, vec.Float64Data, &vec.Nulls, sel, vecLen)
 			acc.IsFloat = true
 		}
 	case batch.TypeFloat32:
 		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
-			// Widened PER VALUE, not per batch sum (#760). PostgreSQL's
-			// avg(real) is double precision and totals each value at that
-			// width: over 0.1, 16777216 and -0.5 the per-value float8 total
-			// is 16777215.6 and its average 5592405.2, which is what the
-			// server answers. Summing the batch at float32 first absorbs the
-			// 0.1 and averages 5592405.33 — which is what the single-process
-			// path answered while the DAG, whose three workers each summed
-			// ONE row, answered PostgreSQL's number. One query, two engines,
-			// two numbers, reproducibly: not ADR-0013's legal float
-			// nondeterminism.
+			// REAL width, value by value: PostgreSQL's sum(real) is float4pl
+			// and the total it carries between rows is a real (#950). Over 2,
+			// 0.1, 12.75, 16777216 and -20 that is 1.677721e+07, while a
+			// float8 total narrowed once at the store is 1.6777211e+07 — the
+			// same query with three answers, because the window spelling
+			// carried a third.
 			//
-			// SUM(real) is real on the same server, and the REAL-width
-			// DECLARATION narrows this total once at the store rather than
-			// carrying a second accumulator — which is also what makes the
-			// two engines agree there, because the narrowing happens on every
-			// partial and again on the merge.
-			s, c := sumSliceFloat32Widened(vec.Float32Data, &vec.Nulls, sel, vecLen)
-			acc.SumF64 += s
-			acc.Count += c
+			// avg(real) is NOT this: it is double precision on the same
+			// server and totals each value at float8's width, which is why
+			// ResolveBatchAvg keeps its own float32 arm (#760). Summing the
+			// batch at float32 for AVG absorbed a 0.1 that the server keeps.
+			sumSliceRealChecked(acc, vec.Float32Data, &vec.Nulls, sel, vecLen)
 			acc.IsFloat = true
+			acc.RealSum = true
 		}
 	case batch.TypeDecimal:
 		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {

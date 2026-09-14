@@ -212,7 +212,9 @@ func BenchmarkWindowFrameSlide(b *testing.B) {
 							}
 							continue
 						}
-						windowFloat64Frames(winVec, inputVec, rd, fr, 0, n, fn.f)
+						if err := windowFloat64Frames(winVec, inputVec, rd, fr, 0, n, fn.f, wc.OutputCol); err != nil {
+							b.Fatal(err)
+						}
 					}
 				})
 			}
