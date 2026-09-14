@@ -1502,6 +1502,28 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 					// Left as written. See lateralEmptyInputPlan.
 				}
 				right.LateralSubtree = true
+				// THE LATERAL'S ALIAS IS WHAT THE ENCLOSING QUERY CALLS THIS
+				// ARM, and the join needs it to qualify a duplicate column
+				// (#1111). A derived table stamps it (`plan.DerivedAlias =
+				// table.Alias` above); a LATERAL never did, so a body
+				// publishing a name the enclosing relation also carries had
+				// nothing to disambiguate by — `joinOutputSchemaWithMapping`
+				// DROPS a colliding build column with no alias, and the
+				// reference then bound the OUTER relation's column:
+				//
+				//   SELECT t.dx FROM setopdecja a,
+				//     LATERAL (WITH c AS (SELECT dx FROM setopdecjb)
+				//              SELECT SUM(dx) AS dx FROM c) t
+				//   -- PostgreSQL 17.11: 51.0000; this engine: 12.75, the
+				//      OUTER row's own dx, on the single-process arms
+				//
+				// Only the ROOT is stamped, not the scans below it:
+				// `setSubtreeAlias` would make the body's own relations
+				// answer to the lateral's name, and the body resolves its own
+				// references against the names it wrote.
+				if join.RightAlias != "" && right.DerivedAlias == "" {
+					right.DerivedAlias = join.RightAlias
+				}
 				lat := NewJoin(left, right, jt, joinCond)
 				// The correlation key this lowering MATERIALIZED is the
 				// join's to key on and nobody else's to see: the enclosing
