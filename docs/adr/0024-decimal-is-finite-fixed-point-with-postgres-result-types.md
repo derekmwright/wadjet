@@ -71,6 +71,8 @@ Category resolution is PostgreSQL's, already pinned for set operations by
 
     INT32 → INT64 → DECIMAL → FLOAT64
     SUM(int2/int4) → bigint ; SUM(int8) → numeric ; AVG(int*) → numeric
+    SUM(real) → real (float4pl) ; AVG(real) → double precision
+    PORT ⊕ PORT, PORT ⊕ int → integer (int4 arithmetic; the result is not a PORT)
     numeric ⊕ integer   → numeric      (an integer is DECIMAL(10,0) / (19,0))
     numeric ⊕ float8    → float8       (float8 is the category's preferred type)
     int ⊕ int           → int          (truncating division, as PostgreSQL)

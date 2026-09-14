@@ -1,6 +1,7 @@
 # ADR-0013: The correctness gates, and what they deliberately do not gate
 
-Status: Accepted (2026-08-19; nondeterminism class 9 added 2026-08-22;
+Status: Accepted (2026-08-19; nondeterminism class 9 added 2026-08-22 and
+amended 2026-09-14 for a REAL accumulator;
 type-matrix gates and the per-issue ratchet amendment added 2026-08-23;
 nondeterminism class 10 added 2026-08-29;
 replication-floor amendment added 2026-09-02)
@@ -101,6 +102,26 @@ named mechanism.
    value in all four runs, which is what rules out a code-level change). The
    dual-precision fingerprint digest (6 or 4 significant digits) is unaffected.
    Investigate only if the divergence reaches the digest.
+
+   **Amended 2026-09-14 (arc NV, #950): at a REAL accumulator the same class
+   reaches the SIXTH significant digit.** `sum(real)` is `real` on PostgreSQL
+   and now here, so the running total carries 24 bits rather than 53 and each
+   addition can lose half an ulp of the total. Over a five-row group crossing
+   2^24 the stage DAG — which folds three partial REAL totals — answers
+   `1.6777226e+07` where the single-process arm answers `1.6777224e+07`, and
+   over 642 rows near 350 the spilled arm answers `229141` against `229140`.
+   Both are the float4 sum of the same values under different groupings, and
+   PostgreSQL's own parallel aggregate has the property; what changed is that
+   the movement is now visible at six digits where the float8 example above
+   needed ten.
+
+   Two consequences for gates, both taken: a gate that compares a REAL `SUM`
+   across arms names the digits it compares (`wadjet.spillMxCell.floatDigits`)
+   or PINS the distributed arms with this class in its `why`
+   (`coordinator.TestNumericValuesMatchPostgres`, cells `950/*`). `AVG` over
+   the same column is NOT in the class at that width: PostgreSQL's `avg(real)`
+   is double precision and this engine totals it there (#760), so it keeps the
+   tenth-digit movement the float8 example describes.
 10. **A window function with no ORDER BY inside the OVER assigns each row an
     unspecified value.** `ROW_NUMBER() OVER (PARTITION BY k)` numbers rows in
     ARRIVAL order, and arrival order at the Window sink is the order several

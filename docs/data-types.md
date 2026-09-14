@@ -256,6 +256,15 @@ follow `int4`'s rules: `SUM(port)` is `bigint` and `AVG(port)` is
 `sum(timestamp)`, and an interval's sum is an interval rather than a number —
 so those keep `double precision` in both spellings.
 
+**Arithmetic over a `Port` or a `Protocol` is `int4` arithmetic.** A port is
+constrained to 0–65535 at the TYPE boundary only; once it is an operand it is
+an ordinary integer and the RESULT is an integer, the same way `smallint + 1`
+is `integer` in PostgreSQL. So `port * 1`, `port + 0`, `-port`, `ABS(proto)`
+and `MOD(proto, 2)` are integers, `SUM` over any of them is `bigint` and `AVG`
+is `numeric(38,4)`, and **division truncates**: `proto / 2` over 255 is 127,
+not 127.5. The address types (`IPv4`, `IPv6`, `MAC`, `CIDR`) and the temporal
+ones keep their own arithmetic and are unaffected.
+
 **Literal spellings in a comparison.** A `MAC` or `UUID` literal compared
 against a column is read in every spelling PostgreSQL accepts, at every site
 (`=`, `IN`, `CASE`, `IS DISTINCT FROM`, `GREATEST`, `LEAST`):
@@ -752,6 +761,31 @@ integers are exact types, not float64: `SUM(int4)` is `bigint`, `SUM(int8)` is
 `numeric(38,0)`, and `AVG` over any integer is `numeric(38,4)`. `SUM` over a
 `DECIMAL(p,s)` is `DECIMAL(38,s)` and `AVG` is `DECIMAL(38,s+4)`. An overflow is
 SQLSTATE 22003, never a wrapped or saturated number.
+
+**A `FLOAT64` result outside the type is SQLSTATE 22003, not an infinity.**
+`+`, `-`, `*` and `/` follow PostgreSQL's own range rule: a non-finite result
+computed from FINITE operands is `22003 value out of range: overflow`, and for
+`*` and `/` a result that flushes to zero from non-zero operands is
+`22003 value out of range: underflow`. `1e308 * 10`, `1e308 + 1e308` and
+`1e308 / 0.5` are all refused, and so is a `SUM` or `AVG` whose running total
+leaves the type. An infinity that ARRIVES as a value is not affected: a
+`FLOAT64` column may hold `Infinity` or `NaN`, every operator over one answers,
+and `SUM` over such a column answers `Infinity`. Unary minus has no rule at
+all, because negation cannot leave the range.
+
+**`SUM` over a `FLOAT32` accumulates at `real`'s width**, which is what
+PostgreSQL's `sum(real)` does, in the grouped and the windowed spelling alike.
+`AVG` over the same column does not: PostgreSQL's `avg(real)` is
+`double precision` and totals each value at that width. One consequence is
+worth knowing: a `real` total carries 24 bits, so the order the rows reach the
+accumulator can move its last digits — over a five-row group crossing 2^24 the
+distributed arms answer `1.6777226e+07` where the single-process one answers
+`1.6777224e+07`. Both are the `real` sum of the same values under different
+groupings; PostgreSQL's own parallel aggregate has the same property. `SUM`
+over a `FLOAT64` moves in its tenth significant digit for the same reason.
+
+**A numeric LITERAL is read from its own text.** `CAST(9007199254740993.25 AS
+DECIMAL(30,2))` keeps every digit, including the ones past a double's reach.
 
 The **windowed** spelling answers the same type and the same digits:
 `SUM(x) OVER (…)` and `SUM(x) … GROUP BY` are one question written twice, and

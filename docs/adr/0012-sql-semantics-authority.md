@@ -485,12 +485,50 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      FLOAT32 and answers `1.6777226e+07`. Three answers to one question, so
      the repair has to settle the grouped side too.
 
-     **That FLOAT32 cell is the part of this entry still OPEN** (#813 item 2,
-     deferred to 0.19.x). The integer repair does not close it and cannot: an
-     exact carrier has nothing to say about a float sum's association order,
-     and settling it means moving the GROUPED float32 accumulator as well. The
-     census cell `813 SUM(real) OVER ()` stays pinned with PostgreSQL's answer
-     in its `why`, so it is measured rather than remembered.
+     **That FLOAT32 cell's VALUE half CLOSED 2026-09-14 (arc NV, #950).**
+     `sum(real)` is `real` on PostgreSQL — float4pl — and every arm of this
+     engine accumulates at that width now, grouped, distinct, through a
+     derived table and windowed, so the three answers are one and it is the
+     server's: `1.6777224e+07`. `avg(real)` stays double precision, which is
+     PostgreSQL's (#760). What remains OPEN is the window column's
+     DECLARATION: `SUM(real) OVER ()` still describes itself float8 where the
+     server declares real. The digits are the grouped spelling's, widened —
+     a declaration, not a value — and moving it is the window-output typing
+     arc ND owns. The census cell `813 SUM(real) OVER ()` now carries
+     PostgreSQL's VALUE and names the declaration in its `why`.
+
+     One consequence is recorded rather than left to be found: a real total
+     carries 24 bits, so its last digits move with the ORDER the partials fold
+     in. ADR-0013's nondeterminism class 9, amended 2026-09-14 for that
+     carrier.
+   - **ARITHMETIC over two REALs computes in `double precision`, where
+     PostgreSQL computes it in `real`.** (Added 2026-09-14, arc NV, found by
+     #950's seam enumeration and NOT closed by it.) Measured on 17.11 over a
+     `real` column holding 16777216 — 2^24, where a real stops counting by
+     ones:
+
+     ```
+     r + 1.0::real      PostgreSQL 1.6777216e+07   wadjet 1.6777217e+07
+     f4 * 10.0::real    PostgreSQL 22003 overflow  wadjet 9.999999680285692e+38
+     f4 + f4            PostgreSQL 2e+38           wadjet 1.9999999360571385e+38
+     ```
+
+     The first is a different NUMBER; the second is an answer where the server
+     refuses (float4's range is 3.4e38); the third is the same number printed
+     at float8's width because that is the type wadjet declares for it. The
+     ACCUMULATOR half of this family closed with #950 — a SUM over a real
+     column totals at float4's width — but the arithmetic that produces a real
+     operand does not, so `SUM(r * 1.0::real)` is a float8 sum of float8
+     products.
+
+     Deferred rather than fixed with #950: the value half is a float32 kernel
+     in `expr` (a resolve step plus a typed arm, the shape the DECIMAL and
+     INTEGER arms already have), and the other half is the DECLARATION —
+     `physical.inferProjectionTypeCols` would have to answer FLOAT32 for
+     arithmetic over two reals — which is the projection-typing layer arc ND
+     owns. Doing only the first would produce a float32 value under a float8
+     declaration, which is the class this list exists to prevent. Filed as a
+     candidate in arc NV's landing notes with these measurements.
 
      ITEM 1 of the filing is CLOSED, and closed by measurement rather than by
      a change: `CAST(SUM(x) OVER () AS BIGINT)` was reported as INT64
@@ -538,23 +576,28 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `SUM(ABS(c_proto))` and `AVG(c_proto * 1)` answer float8 in BOTH
      spellings, where the bare column answers bigint and numeric(38,4).
 
-     The mechanism is one layer below the declaration and is deliberate
-     there. `expr.operandIsInt` keeps the network types on the FLOAT path
-     ("Timestamps/dates/network types keep the float path — their arithmetic
-     semantics are handled elsewhere"), and `physical.intArithAllInt` mirrors
-     that predicate exactly so a declaration can never promise an integer the
-     kernel will not produce. Moving the declaration alone would be that
-     promise; closing the gap means moving `expr.operandIsInt` and the
-     int-domain family with it, which is an expression-layer arc. The two
-     spellings AGREE with each other and PostgreSQL has neither type, so this
-     is internal consistency rather than a value divergence. Six cells in
-     `coordinator.TestH2TheWindowDeclaredTypeCensus` and THREE in
-     `pgwire.TestAComputedIntegerWindowArgumentDeclaresPostgresOID`
-     (`port_times_one_PINNED`, `protocol_times_one_PINNED`,
-     `protocol_abs_PINNED`) are PINNED to the float8 answer: the day the
-     expression layer changes, they FAIL and deleting them is the proof. The
-     wire gate's `port_bare` and `protocol_bare` are CONTROLS beside them,
-     not pins — they assert OID 20, which is the rule that does hold.
+     **That gap CLOSED 2026-09-14 (arc NV, #1000), and it was not only a
+     type.** The mechanism was one layer below the declaration:
+     `expr.operandIsInt` kept the network types on the FLOAT path and
+     `physical.intArithAllInt` mirrored that predicate so a declaration could
+     never promise an integer the kernel would not produce. What it cost
+     besides the OID was a VALUE — `c_proto / 2` answered 127.5, because
+     integer division truncates and this was not integer division — and a
+     NULL: `SUM(-c_port) OVER ()` answered nothing at all.
+
+     A port is constrained to 0..65535 at the TYPE boundary only. Arithmetic
+     over one is plain int4 arithmetic and its RESULT is an integer, exactly
+     as `smallint + 1` is `integer` in PostgreSQL, so the kernel and the
+     declaration moved together: `physical.intArithColumnType` is the one set
+     both read, `expr.NumericDomainResult` answers ABS and MOD in the integer
+     domain, and `nodeDeclaredType` declares a negated port an integer. The
+     ADDRESS types and the temporal ones are untouched — their arithmetic
+     means something else. Eleven pins flipped and were deleted: six in
+     `coordinator.TestH2TheWindowDeclaredTypeCensus` and five in
+     `pgwire.TestAComputedIntegerWindowArgumentDeclaresPostgresOID`. Four
+     cells replaced them with the shapes the filing named, `c_proto % 3` as a
+     GROUP BY key now declares INT64 rather than FLOAT64, and the wire gate's
+     `port_bare` and `protocol_bare` stay as the controls they always were.
 
      What was there before was worse than a wrong type. `TypeProtocol` had no
      arm in `kernel.ResolveRowSum`, `exec.isFlatSumType` or the SoA scatter's

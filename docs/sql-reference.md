@@ -2343,6 +2343,9 @@ are different answers — a client branches on them:
 | `POWER(2, 10000)`, `EXP(1000)` | `22003` | value out of range: overflow |
 | `EXP(-1000)` | `22003` | value out of range: underflow |
 | `ASIN(2)`, `ACOS(2)` | `22003` | input is out of range |
+| `1e308 * 10`, `1e308 + 1e308`, `1e308 / 0.5` | `22003` | value out of range: overflow |
+| `1e-300 * 1e-300`, `1e-300 / 1e300` | `22003` | value out of range: underflow |
+| `SUM(f)` / `AVG(f)` whose running total leaves `float8` | `22003` | value out of range: overflow |
 
 The four string-modifier refusals and the two `FLOAT(n)` ones are read by ONE
 function, so **`CREATE TABLE` refuses exactly what a `CAST` refuses**, with the
@@ -2368,6 +2371,15 @@ PostgreSQL passes them: `SQRT('NaN')` is NaN, `LN('Infinity')` is Infinity,
 `SQRT(-0.0)` is `-0`, `ASIN('NaN')` is NaN, `EXP('-Infinity')` is `0`,
 `EXP('Infinity')` is `Infinity`, and `POWER(2, 'Infinity')` is `Infinity`. An
 infinite operand is never an overflow — the value was already there.
+
+The ARITHMETIC operators follow the same rule, which is PostgreSQL's own
+`float8pl`/`float8mul`/`float8div`: a non-finite result from FINITE operands is
+`22003`, while an infinity that arrived as an operand is a value and every
+operator over one answers. So `1e308 * 10` is refused and `'Infinity'::float8 *
+10` is `Infinity`; `SUM` over a column holding an infinity answers `Infinity`,
+and only a total that leaves the type from finite rows is refused. Unary minus
+has no rule at all — negation cannot leave the range — so `-1e308` answers and
+`-1e308 * 10` does not.
 
 `POWER` that UNDERFLOWS to zero — `POWER(0.5, 2000)`, `POWER(1e-200, 3)` — is a
 **value**, `0`, not an error. PostgreSQL resolves that spelling to
@@ -2449,14 +2461,19 @@ declares and answers — one question written two ways:
 | `INT32`, `PORT`, `PROTOCOL` | `BIGINT` | `NUMERIC(38,4)` |
 | `INT64` | `NUMERIC(38,0)` | `NUMERIC(38,4)` |
 | `DECIMAL(p,s)` | `DECIMAL(38,s)` | `DECIMAL(38,s+4)` |
-| `FLOAT32` / `FLOAT64` | `DOUBLE PRECISION` \* | `DOUBLE PRECISION` |
+| `FLOAT32` | `REAL` \* | `DOUBLE PRECISION` |
+| `FLOAT64` | `DOUBLE PRECISION` | `DOUBLE PRECISION` |
 | `DATE`, `TIMESTAMP`, `DURATION` | `DOUBLE PRECISION` | `DOUBLE PRECISION` |
 
-\* The `FLOAT32` cell is the one row of this table that is not PostgreSQL's:
-`sum(real)` is `real` there. It is a known divergence, recorded in
-[ADR-0012](adr/0012-sql-semantics-authority.md) and deferred — settling it
-means moving the grouped `FLOAT32` accumulator as well, which is a separate
-change. Every other row matches PostgreSQL.
+\* `SUM` over a `FLOAT32` accumulates at `real`'s width — PostgreSQL's
+`sum(real)` — in the grouped and the windowed spelling alike, while `AVG` over
+the same column totals at `double precision`, which is PostgreSQL's
+`avg(real)`. The windowed spelling still DECLARES `double precision` for the
+`SUM` where the server declares `real`; the digits are the grouped spelling's,
+widened. A `real` total carries 24 bits, so the order the rows reach the
+accumulator can move its last digits between the single-process and the
+distributed paths — the same property PostgreSQL's parallel aggregate has, and
+the reason a `real` `SUM` is not a stable sort key.
 
 The integer and decimal rows accumulate exactly, in every frame form —
 `OVER ()`, `PARTITION BY`, a running `ORDER BY` frame, a sliding `ROWS`/`RANGE`
