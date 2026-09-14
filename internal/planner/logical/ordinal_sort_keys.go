@@ -70,34 +70,55 @@ func ResolveOrdinalSortKeys(n *Node) {
 // arbitrary sequence, no error. That is the failure the whole hidden-sort-key
 // pass exists to end (#320).
 func RefuseUnresolvedOrdinalSortKeys(n *Node) error {
+	return refuseUnresolvedOrdinals(n, 0)
+}
+
+// refuseUnresolvedOrdinals carries the WIDTH of the nearest enclosing star
+// projection down the walk.
+//
+// A star over a join is expanded ABOVE the Sort (ADR-0026 §9), so
+// `projectOutputNamesBelow` — which looks DOWN from the Sort — finds the join
+// and answers nothing, while the statement's output list is right there on the
+// node above. Without this the out-of-range position over a star join was
+// refused with "the planner cannot count", a sentence that stopped being true
+// when the star started expanding.
+func refuseUnresolvedOrdinals(n *Node, starWidth int) error {
 	if n == nil {
 		return nil
+	}
+	if n.Type == NodeProject && n.StarJoinArms && !HasStarProjection(n) {
+		starWidth = len(VisibleProjections(n.Projections))
 	}
 	if n.Type == NodeSort && len(n.Children) > 0 {
 		for _, k := range n.OrderBy {
 			if k.Position <= 0 {
 				continue
 			}
-			if names := projectOutputNamesBelow(n.Children[0]); len(names) > 0 {
+			width := len(projectOutputNamesBelow(n.Children[0]))
+			if width == 0 {
+				width = starWidth
+			}
+			if width > 0 {
 				// The list WAS countable, so this is PostgreSQL's own error
 				// for the shape, verbatim in kind: `ORDER BY position 99 is
 				// not in select list`, SQLSTATE 42P10.
 				return sqlerr.New("42P10",
 					"ORDER BY position %d is not in select list (it has %d columns)",
-					k.Position, len(names))
+					k.Position, width)
 			}
 			return sqlerr.New("42P10",
-				"ORDER BY position %d: `SELECT *` over this FROM clause expands to a "+
-					"column list the planner cannot count — a star over a join, or over "+
-					"a derived table whose own FROM is a join, is left unexpanded, "+
-					"because guessing its column set would silently change which "+
-					"columns the query returns. Name the columns, or ORDER BY the "+
-					"column itself",
+				"ORDER BY position %d: this `SELECT *` was not expanded into a column "+
+					"list, so there is no position to count. A star over a JOIN is "+
+					"expanded — every FROM arm's own list, in the clause's written "+
+					"order — and one is left alone only where an arm's list is not "+
+					"knowable here: a LATERAL, a table function, a relation whose own "+
+					"list a block does not state, or an arm publishing one name twice. "+
+					"Name the columns, or ORDER BY the column itself",
 				k.Position)
 		}
 	}
 	for _, child := range n.Children {
-		if err := RefuseUnresolvedOrdinalSortKeys(child); err != nil {
+		if err := refuseUnresolvedOrdinals(child, starWidth); err != nil {
 			return err
 		}
 	}

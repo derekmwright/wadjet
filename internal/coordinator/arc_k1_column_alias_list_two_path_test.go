@@ -111,24 +111,30 @@ func TestArcK1AColumnAliasListRenamesPositionally(t *testing.T) {
 		},
 		{
 			// THE BOUNDARY, attempted from the side the deferral does NOT
-			// reach: a bare star over a JOIN, whose column set
-			// `ExpandStarProjections` refuses to guess (ADR-0012, #810). The
-			// list cannot be applied truthfully, so it is REFUSED in one
-			// sentence rather than dropped — at bb8635a4 it was dropped, and
-			// every reference to a name it renames TO read NULL on all four
-			// arms for a query PostgreSQL answers. Silent-wrong to loud.
+			// reach. The column-alias list WRAPS the block in a second
+			// `SELECT *` (column_alias_defer.go), and that wrapper's star
+			// reads a DERIVED TABLE, which this pass does not enumerate — so
+			// the width the list renames is still unknown and the list cannot
+			// be applied truthfully. It is REFUSED in one sentence rather
+			// than dropped: at bb8635a4 it was dropped, and every reference
+			// to a name it renames TO read NULL on all four arms for a query
+			// PostgreSQL answers. Silent-wrong to loud.
+			//
+			// The REASON moved in arc O1 (#997, #1012) and the sentence with
+			// it: the star over the JOIN inside the block expands now (the
+			// block publishes seven columns), so what declines is the star
+			// over the BLOCK. The refusal is unchanged.
 			name: "958 boundary a list over a star the expansion declines",
 			sql: `SELECT kk FROM (SELECT * FROM lat_ord o JOIN lat_item i ON i.order_id = o.id) ` +
 				`t(kk)`,
-			want: "ERR building physical plan: table \"t\" renames columns of a `SELECT *`",
+			want: "ERR building physical plan: table \"t\" renames the columns of a `SELECT *` this planner did not expand",
 			pin: map[string]string{
-				"dag":     "ERR physical plan: table \"t\" renames columns of a `SELECT *`",
-				"dagshuf": "ERR physical plan: table \"t\" renames columns of a `SELECT *`",
+				"dag":     "ERR physical plan: table \"t\" renames the columns of a `SELECT *` this planner did not expand",
+				"dagshuf": "ERR physical plan: table \"t\" renames the columns of a `SELECT *` this planner did not expand",
 			},
 			why: "ONE refusal under the two engines' own error prefixes, not a divergence: " +
-				"PostgreSQL publishes `kk` and the join's remaining six columns, the " +
-				"expansion declines a bare star over a join (ADR-0012, #810), and the " +
-				"list cannot be applied truthfully",
+				"PostgreSQL publishes `kk` and the join's remaining six columns, and the " +
+				"star over the derived BLOCK is the one this pass does not enumerate",
 		},
 	})
 }

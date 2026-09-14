@@ -179,11 +179,16 @@ func hiddenSortProjection(ob plansql.OrderByItem, child, project *Node, name str
 		// a star that reads one base table.
 		if scan, _ := loneScan(child); scan == nil {
 			// 0A000, not 42703: PostgreSQL ANSWERS this shape. The refusal is
-			// wadjet's own bound — a star over a join is left unexpanded
-			// because guessing its column set would change which columns the
-			// query returns — and a client is owed the class that says
-			// "this engine does not implement it" rather than one that says
-			// "your SQL is wrong".
+			// wadjet's own bound — this builder materializes a computed sort
+			// key as a hidden projection beside the SELECT list, and a
+			// star-only list has no projection here to carry one — and a
+			// client is owed the class that says "this engine does not
+			// implement it" rather than one that says "your SQL is wrong".
+			//
+			// The bound is narrower than it was: a star over a join IS
+			// expanded (ADR-0026 §9), one pass later than this one, so the
+			// list a hidden key could ride beside does come to exist. Lifting
+			// the refusal is a measured follow-up, not a comment change.
 			return Projection{}, orderByError(ob, "0A000",
 				"`SELECT *` over more than one relation cannot carry a computed sort key — name the columns, or select the sort expression")
 		}

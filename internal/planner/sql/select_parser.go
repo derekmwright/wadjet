@@ -841,11 +841,12 @@ func (p *selectParser) parseJoinUsing(info *SelectInfo, ji *JoinInfo) error {
 	// The OUTPUT half, which this clause does NOT implement and must not
 	// answer wrong. `SELECT *` over a USING join emits the joined column
 	// ONCE — three output columns for two two-column tables, where an ON join
-	// emits four — and the star's column set over a join is not knowable
-	// here: logical.ExpandStarProjections declines a star whose source is not
-	// a lone scan, by design, because guessing it would silently change which
-	// columns a query returns. Answering four columns would be a wrong answer
-	// in kind, so the shape is REFUSED and #655 stays open on it.
+	// emits four. The star's column set over a join IS knowable now (every
+	// arm's own list, in the FROM clause's written order — ADR-0026 §9), and
+	// that list is the UNMERGED one: USING is the single place where "the
+	// arms concatenated" is not PostgreSQL's answer. Publishing it would be a
+	// wrong answer in kind, so the shape is REFUSED and #655 stays open on
+	// the merge.
 	//
 	// Only a BARE star merges. `aa.*` names one side and needs no merge, so
 	// it is admitted.
@@ -853,8 +854,9 @@ func (p *selectParser) parseJoinUsing(info *SelectInfo, ji *JoinInfo) error {
 		if c.Star && c.TableRef == "" {
 			return sqlerr.New("0A000",
 				"SELECT * over a JOIN ... USING at position %d is not supported: USING merges the "+
-					"joined column into ONE output column and the star's column set over a join "+
-					"is not resolvable here — name the columns, or write the join condition with ON",
+					"joined column into ONE output column, and a star over a join publishes every "+
+					"arm's own list — which is the UNMERGED one, so it would answer a column this "+
+					"statement does not have. Name the columns, or write the join condition with ON",
 				usingPos)
 		}
 	}

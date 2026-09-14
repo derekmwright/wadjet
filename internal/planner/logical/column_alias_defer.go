@@ -100,6 +100,11 @@ func ApplyDeferredColumnAliases(n *Node) *Node {
 // column set is not knowable, so the rename cannot be made truthfully, and
 // dropping it silently is what made every reference to a renamed name read
 // NULL for a query PostgreSQL answers.
+//
+// What DECLINES is not what it was: a star over a join is expanded now
+// (ADR-0026 §9), and a star over a derived table or a CTE is the branch that
+// still reads a relation this pass does not enumerate — so the sentence names
+// the state, not a rule that moved.
 func RefuseUnappliedColumnAliasLists(n *Node) error {
 	if n == nil {
 		return nil
@@ -107,11 +112,9 @@ func RefuseUnappliedColumnAliasLists(n *Node) error {
 	if len(n.DeferredColumnAliases) > 0 {
 		if HasStarProjection(n) {
 			return sqlerr.New("0A000",
-				"%s %q renames columns of a `SELECT *` whose column list the planner "+
-					"cannot count — a star over a join, or over a derived table whose own "+
-					"FROM is a join, is left unexpanded, because guessing its column set "+
-					"would silently change which columns the query returns. Name the "+
-					"columns in the subquery",
+				"%s %q renames the columns of a `SELECT *` this planner did not expand, "+
+					"so the relation's column list is not knowable here and the rename "+
+					"cannot be made truthfully. Name the columns in the subquery",
 				n.DeferredAliasKind, n.DeferredAliasRelation)
 		}
 		return sqlerr.New("42P10",
