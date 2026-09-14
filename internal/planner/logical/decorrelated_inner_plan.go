@@ -93,7 +93,13 @@ func decorrelatedInnerPlan(info *plansql.SelectInfo, innerOnly []plansql.Node,
 		}
 	}
 
-	plan, err := buildFromClause(info, ctes)
+	// The block's OWN WITH items are in scope for its FROM (#1067). Without
+	// them a CTE the subquery body declares is indistinguishable from a base
+	// table here, and the build side became a Scan of that name: zero rows
+	// where nothing answers to it, and the BASE TABLE's rows where something
+	// does. scopeCTEs is the same enclosing-then-own order every other block
+	// is built with.
+	plan, err := buildFromClause(info, scopeCTEs(ctes, info.CTEs))
 	if err != nil || plan == nil {
 		return nil, false
 	}

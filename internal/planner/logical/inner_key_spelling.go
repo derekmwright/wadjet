@@ -15,21 +15,22 @@ import (
 // repairDecorrelatedSpelling settle TEXT after the join order is final.
 // See docs/internals/decorrelated-key-spelling-after-reorder.md for the design.
 
-// InnerKeyRef is one reference into a decorrelated subquery's own relations,
-// recorded the way the subquery spelled it.
+// KeyRef is one reference a decorrelated join's condition makes — into the
+// subquery's own relations on the BUILD side, or into the enclosing query's on
+// the PROBE side — recorded the way the query spelled it.
 //
 // Text is what the rewrite wrote into the plan when it built the node. It is
 // what the repair keeps when it cannot resolve the reference — an un-annotated
 // Scan (no ScanColumns) is the reachable case — so a plan that never reaches
 // the repair reads exactly as it did before this machinery existed.
-type InnerKeyRef struct {
+type KeyRef struct {
 	Qualifier string // relation alias, or table name when unaliased; "" = unqualified
 	Column    string // source column, unqualified
 	Text      string // the spelling the rewrite wrote, and the repair's fallback
 }
 
 // spelled returns the reference's current text.
-func (r InnerKeyRef) spelled() string {
+func (r KeyRef) spelled() string {
 	if r.Text != "" {
 		return r.Text
 	}
@@ -39,14 +40,27 @@ func (r InnerKeyRef) spelled() string {
 	return r.Column
 }
 
-// DecorrelatedKey is one conjunct of a decorrelated semi/anti join: a
-// probe-side term the rewrite already spelled correctly (it names the OUTER
-// query's columns, which no inner reordering can move), an operator, and a
-// build-side reference whose spelling only reorderJoins can settle.
+// DecorrelatedKey is one conjunct of a decorrelated semi/anti/LEFT join: a
+// probe-side reference into the ENCLOSING query's relations, an operator, and a
+// build-side reference into the SUBQUERY's. NEITHER side's text is settled when
+// the rewrite runs, and for one reason: a join emits its probe side's columns
+// bare and qualifies a build column only where the bare name collides, and
+// which relation is on which side is reorderJoins' decision at Optimize step
+// 73 — long after the rewrites at steps 35/36.
+//
+// The build side has been recorded rather than guessed since #526/#527. The
+// PROBE side was spelled by dropping the qualifier, on the premise that "the
+// semi join probes the outer query's columns where the outer plan emits them"
+// — which is true of a single relation and false of a JOIN. `SELECT … FROM
+// lat_ord o JOIN lat_item i ON i.order_id = o.id WHERE o.id IN (SELECT id FROM
+// lat_ord)` probed `id`, the join emitted `i`'s `id` bare, and the semi join
+// filtered on the WRONG RELATION's column: 3 rows for PostgreSQL 17.11's 4,
+// silently, on all five arms (#1098). Both sides are references now, and
+// repairDecorrelatedSpelling settles both against the side that emits them.
 type DecorrelatedKey struct {
-	Outer string
+	Outer KeyRef
 	Op    string
-	Inner InnerKeyRef
+	Inner KeyRef
 }
 
 // conjunct renders the key as the join condition text.
@@ -55,7 +69,7 @@ func (k DecorrelatedKey) conjunct() string {
 	if op == "" {
 		op = "="
 	}
-	return k.Outer + " " + op + " " + k.Inner.spelled()
+	return k.Outer.spelled() + " " + op + " " + k.Inner.spelled()
 }
 
 // renderDecorrelatedKeys joins the conjuncts with AND, or returns "" for none.
@@ -271,13 +285,13 @@ func ownerOf(cols []emittedCol, ref string) string {
 	return ""
 }
 
-// spellInner returns the name the subtree emitting cols carries for ref.
+// spellRef returns the name the subtree emitting cols carries for ref.
 //
 // A qualified reference is emitted under its qualifier exactly when its bare
 // name collided on the probe side; otherwise the join emitted it bare and the
 // qualified spelling names nothing. ok=false means the reference could not be
 // resolved at all — the caller keeps whatever the rewrite wrote.
-func spellInner(ref InnerKeyRef, cols []emittedCol) (string, bool) {
+func spellRef(ref KeyRef, cols []emittedCol) (string, bool) {
 	if ref.Column == "" || len(cols) == 0 {
 		return "", false
 	}
@@ -331,7 +345,7 @@ func repairDecorrelatedSpelling(n *Node) *Node {
 			if i >= len(n.InnerGroupRefs) {
 				break
 			}
-			if spelled, ok := spellInner(n.InnerGroupRefs[i], cols); ok {
+			if spelled, ok := spellRef(n.InnerGroupRefs[i], cols); ok {
 				n.GroupBy[i] = spelled
 			}
 		}
@@ -346,14 +360,27 @@ func repairDecorrelatedSpelling(n *Node) *Node {
 		}
 		deferred := deferSemiAntiDedup(n)
 		cols := emittedColumns(n.Children[1])
+		// The PROBE side is modelled the same way and for the same reason
+		// (#1098): the outer plan under a decorrelated join is whatever the
+		// enclosing query wrote, a join included, and the name it emits for
+		// `o.id` is `id` or `o.id` depending on which arm reorderJoins put on
+		// the probe. Spelled against the probe subtree, a key that names the
+		// other arm's column cannot be written.
+		probe := emittedColumns(n.Children[0])
 		for i := range n.InnerKeys {
-			if spelled, ok := spellInner(n.InnerKeys[i].Inner, cols); ok {
+			if spelled, ok := spellRef(n.InnerKeys[i].Inner, cols); ok {
 				n.InnerKeys[i].Inner.Text = spelled
+			}
+			if spelled, ok := spellRef(n.InnerKeys[i].Outer, probe); ok {
+				n.InnerKeys[i].Outer.Text = spelled
 			}
 		}
 		for i := range n.InnerFilterKeys {
-			if spelled, ok := spellInner(n.InnerFilterKeys[i].Inner, cols); ok {
+			if spelled, ok := spellRef(n.InnerFilterKeys[i].Inner, cols); ok {
 				n.InnerFilterKeys[i].Inner.Text = spelled
+			}
+			if spelled, ok := spellRef(n.InnerFilterKeys[i].Outer, probe); ok {
+				n.InnerFilterKeys[i].Outer.Text = spelled
 			}
 		}
 		if cond := renderDecorrelatedKeys(n.InnerKeys); cond != "" {

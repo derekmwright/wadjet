@@ -275,7 +275,7 @@ type Node struct {
 	// final. An aggregate's output column IS its group key's text, so a key
 	// named from write order moves the #526 mismatch one node up rather
 	// than removing it. Nil elsewhere, and nil again after the repair.
-	InnerGroupRefs []InnerKeyRef
+	InnerGroupRefs []KeyRef
 	// GroupByPublish parallels GroupBy and names the HIDDEN SLOT a group key
 	// is PUBLISHED under when the planner MINTED the key rather than the
 	// query naming it. Empty entries — every ordinary GROUP BY — keep the

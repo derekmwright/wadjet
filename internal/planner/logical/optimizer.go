@@ -1263,7 +1263,7 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 	// package has no catalog, so a base table's columns are still unknown here
 	// and the identifier-comparison fallback decides those.
 	refs, err := plansql.FindCorrelatedRefsWithScope(subq.SQL, outerTables, outerColMap,
-		plansql.CTEColumns(ctes, nil))
+		plansql.CTEColumns(scopeCTEs(ctes, info.CTEs), nil))
 	if err != nil || len(refs) == 0 {
 		return nil, pred, false
 	}
@@ -1281,13 +1281,39 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 		outerRefCols[ref.Column] = true
 	}
 
+	// The relations the subquery itself reads, so a correlated equality's two
+	// sides can be told apart by the QUALIFIER the query wrote and not only by
+	// the column's name — `z.id = o.id` names the same column on both sides.
+	innerTableSet := make(map[string]bool)
+	for _, t := range info.Tables {
+		innerTableSet[strings.ToLower(t.Name)] = true
+		if t.Alias != "" {
+			innerTableSet[strings.ToLower(t.Alias)] = true
+		}
+	}
+	for _, j := range info.Joins {
+		innerTableSet[strings.ToLower(j.RightTable)] = true
+		if j.RightAlias != "" {
+			innerTableSet[strings.ToLower(j.RightAlias)] = true
+		}
+	}
+
 	// Flatten subquery WHERE into individual conditions
 	var whereNodes []plansql.Node
 	flattenASTNodes(info.WhereExpr, &whereNodes)
 
-	// Classify each condition as correlated or inner-only
-	type corrKey struct{ outerCol, innerCol string }
+	// Classify each condition as correlated or inner-only.
+	//
+	// The outer side is recorded WITH its qualifier, for the reason
+	// DecorrelatedKey gives: this LEFT join's probe is the enclosing query's
+	// plan, and over a join `o.id` spelled bare binds to whichever arm the
+	// reorderer put on the probe — 1 row for PostgreSQL 17.11's 4 in the same
+	// fixture #1098 was measured over. The INNER side stays bare: it is the
+	// aggregate's GROUP BY term, and an aggregate emits a group key with the
+	// qualifier stripped (aggregateGroupOutputNames).
+	type corrKey struct{ innerCol string }
 	var correlationKeys []corrKey
+	var outerRefs []KeyRef
 	var innerFilterNodes []plansql.Node
 
 	for _, node := range whereNodes {
@@ -1302,11 +1328,30 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 			if leftCol == "" || rightCol == "" {
 				return nil, pred, false
 			}
-			if outerRefCols[strings.ToLower(leftCol)] {
-				correlationKeys = append(correlationKeys, corrKey{outerCol: leftCol, innerCol: rightCol})
-			} else {
-				correlationKeys = append(correlationKeys, corrKey{outerCol: rightCol, innerCol: leftCol})
+			// WHICH SIDE IS THE OUTER ONE. A name-only test cannot say when
+			// both sides spell the SAME column — `WHERE z.id = o.id` — and it
+			// picked the left one, so the LEFT join this builds was keyed on
+			// the SUBQUERY's relation. The qualifier answers it where the
+			// query wrote one; the name test remains for the shapes it cannot
+			// decide, which is what this pass did for every shape before.
+			_, leftIsOuter := getColRefInfo(cmpNode.Left, outerTables, innerTableSet, outerColMap)
+			_, rightIsOuter := getColRefInfo(cmpNode.Right, outerTables, innerTableSet, outerColMap)
+			outerSide, innerCol := cmpNode.Left, rightCol
+			switch {
+			case leftIsOuter && !rightIsOuter:
+			case rightIsOuter && !leftIsOuter:
+				outerSide, innerCol = cmpNode.Right, leftCol
+			default:
+				if !outerRefCols[strings.ToLower(leftCol)] {
+					outerSide, innerCol = cmpNode.Right, leftCol
+				}
 			}
+			ref, ok := outerProbeKey(outerSide)
+			if !ok {
+				return nil, pred, false
+			}
+			correlationKeys = append(correlationKeys, corrKey{innerCol: innerCol})
+			outerRefs = append(outerRefs, ref)
 		} else {
 			innerFilterNodes = append(innerFilterNodes, node)
 		}
@@ -1373,17 +1418,22 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 	// For 0.2 * AVG(x) → BinaryOp(0.2, *, ColRef("__scalar_0"))
 	replacementExpr := plansql.ReplaceAggregate(selectAST, aggOutputCol)
 
-	// Build LEFT JOIN condition
-	var joinCondParts []string
-	for _, ck := range correlationKeys {
-		joinCondParts = append(joinCondParts, ck.outerCol+" = "+ck.innerCol)
+	// Build LEFT JOIN condition. The keys ride on the node so
+	// repairDecorrelatedSpelling settles the probe side's text once
+	// reorderJoins has decided which arm the outer plan emits bare (#1098);
+	// the rendered text below is what runs if the repair cannot resolve it,
+	// which is what this rewrite wrote before the keys existed.
+	keys := make([]DecorrelatedKey, len(correlationKeys))
+	for i, ck := range correlationKeys {
+		keys[i] = DecorrelatedKey{Outer: outerRefs[i], Op: "=", Inner: KeyRef{Text: ck.innerCol}}
 	}
 
 	joinNode := &Node{
 		Type:               NodeJoin,
 		Children:           []*Node{nil, aggNode}, // left child filled by caller
 		JoinType:           "left",
-		JoinCond:           strings.Join(joinCondParts, " AND "),
+		JoinCond:           renderDecorrelatedKeys(keys),
+		InnerKeys:          keys,
 		ScalarDecorrelated: true,
 	}
 
@@ -1467,6 +1517,23 @@ func colRefName(node plansql.Node) string {
 		return ""
 	}
 	return ref.Column
+}
+
+// outerProbeKey records a decorrelated join's PROBE-side reference the way the
+// enclosing query spelled it. ok=false declines the rewrite for anything that
+// is not a plain column reference.
+//
+// Text is the bare column — what this rewrite wrote before #1098 and what the
+// repair keeps when it cannot resolve the reference against the probe subtree.
+func outerProbeKey(node plansql.Node) (KeyRef, bool) {
+	// A DIRECT ColRef and nothing else, which is exactly what colRefName
+	// accepted: widening the shapes this rewrite takes is a separate question
+	// from spelling the ones it already takes correctly.
+	ref, isRef := node.(*plansql.ColRef)
+	if !isRef || ref.Column == "" {
+		return KeyRef{}, false
+	}
+	return KeyRef{Qualifier: ref.Table, Column: ref.Column, Text: ref.Column}, true
 }
 
 // replaceSubqueryInExpr replaces a specific SubqueryNode in an expression
@@ -1615,14 +1682,14 @@ func findInSubqueryNode(node plansql.Node) (*plansql.InExpr, *plansql.SubqueryNo
 // ALIAS (`SELECT b.id AS bid` — no Project materializes `bid`) and a
 // qualifier on the subquery's own leading relation (`b.id`, where the Scan
 // under it emits `id`).
-func innerSemiJoinKey(info *plansql.SelectInfo) (InnerKeyRef, bool) {
+func innerSemiJoinKey(info *plansql.SelectInfo) (KeyRef, bool) {
 	col := info.Columns[0]
 	if col.IsAgg {
 		// Only the GROUP BY branch below builds an aggregate, and it names
 		// the output exactly this. Without a GROUP BY nothing in the inner
 		// plan computes the aggregate at all.
 		if len(info.GroupBy) == 0 {
-			return InnerKeyRef{}, false
+			return KeyRef{}, false
 		}
 		name := cleanExpr(col.Alias)
 		if name == "" {
@@ -1631,19 +1698,19 @@ func innerSemiJoinKey(info *plansql.SelectInfo) (InnerKeyRef, bool) {
 		// An aggregate output is computed, not read from a relation: there
 		// is no qualifier for repairDecorrelatedSpelling to resolve, and the
 		// name the Aggregate node declares is the name it emits.
-		return InnerKeyRef{Text: name}, name != ""
+		return KeyRef{Text: name}, name != ""
 	}
 	ref := plainColRef(col.ASTExpr)
 	if ref == nil {
 		// A computed item (`b.id + 0`): no node in the inner plan
 		// materializes it, and the physical planner refuses the resulting
 		// non-column equi-join key outright.
-		return InnerKeyRef{}, false
+		return KeyRef{}, false
 	}
 	if ref.Column == "" {
-		return InnerKeyRef{}, false
+		return KeyRef{}, false
 	}
-	key := InnerKeyRef{Qualifier: ref.Table, Column: ref.Column}
+	key := KeyRef{Qualifier: ref.Table, Column: ref.Column}
 	// Text is the spelling this rewrite commits to NOW, and the one that
 	// survives if the repair cannot resolve the reference later (an
 	// un-annotated Scan). Over a single relation it is provably what the
@@ -1707,15 +1774,15 @@ func namesInnerLeadRelation(info *plansql.SelectInfo, qualifier string) bool {
 // for innerSemiJoinKey's reason: the aggregate's output column IS its group
 // key's text, and a key spelled `b.g` over a Scan emitting `g` puts the
 // mismatch one node higher instead of removing it.
-func innerGroupKey(info *plansql.SelectInfo, term string) InnerKeyRef {
+func innerGroupKey(info *plansql.SelectInfo, term string) KeyRef {
 	term = cleanExpr(term)
 	dot := strings.IndexByte(term, '.')
 	if dot <= 0 || strings.ContainsAny(term, "() ") {
 		// Bare, or an expression this rewrite does not take apart: the text
 		// is the whole of what it means.
-		return InnerKeyRef{Text: term}
+		return KeyRef{Text: term}
 	}
-	ref := InnerKeyRef{Qualifier: term[:dot], Column: term[dot+1:], Text: term}
+	ref := KeyRef{Qualifier: term[:dot], Column: term[dot+1:], Text: term}
 	if namesInnerLeadRelation(info, ref.Qualifier) {
 		ref.Text = ref.Column
 	}
@@ -1782,9 +1849,12 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 		return nil
 	}
 
-	// Get outer key from InExpr.Left — must be a simple column reference
-	outerKey := colRefName(inExpr.Left)
-	if outerKey == "" {
+	// Get outer key from InExpr.Left — must be a simple column reference.
+	// Recorded with its qualifier: the probe side is the ENCLOSING query's
+	// plan, and when that is a join the bare name it emits may be the OTHER
+	// arm's column (#1098). repairDecorrelatedSpelling settles the text.
+	outerKey, ok := outerProbeKey(inExpr.Left)
+	if !ok {
 		return nil
 	}
 
@@ -1834,11 +1904,11 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 				if !ok || cmp.Op != "=" {
 					return nil
 				}
-				outerCol, innerRef, ok := extractCorrelatedRefs(cmp, outerTables, innerTableSet, outerColMap)
+				outerRef, innerRef, ok := extractCorrelatedRefs(cmp, outerTables, innerTableSet, outerColMap)
 				if !ok {
 					return nil
 				}
-				correlationKeys = append(correlationKeys, DecorrelatedKey{Outer: outerCol, Op: "=", Inner: innerRef})
+				correlationKeys = append(correlationKeys, DecorrelatedKey{Outer: outerRef, Op: "=", Inner: innerRef})
 			} else {
 				// Inner-only condition (including subquery expressions)
 				innerFilterNodes = append(innerFilterNodes, node)
@@ -1853,7 +1923,7 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 		return nil
 	}
 	// Handle GROUP BY + HAVING
-	var groupRefs []InnerKeyRef
+	var groupRefs []KeyRef
 	if len(info.GroupBy) > 0 {
 		var groupBy []string
 		for _, gb := range info.GroupBy {
@@ -3123,7 +3193,7 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 	// detect unqualified outer refs (e.g., c_custkey from customer), with the
 	// WITH items in scope as relations of their own (#955).
 	refs, err := plansql.FindCorrelatedRefsWithScope(exists.SQL, outerTables, outerColMap,
-		plansql.CTEColumns(ctes, nil))
+		plansql.CTEColumns(scopeCTEs(ctes, info.CTEs), nil))
 	if err != nil || len(refs) == 0 {
 		return nil // uncorrelated, keep as-is
 	}
@@ -3165,12 +3235,12 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 			if !ok {
 				return nil // can't decorrelate complex cross-table predicates
 			}
-			outerCol, innerRef, ok := extractCorrelatedRefs(cmp, outerTables, innerTables, outerColMap)
+			outerRef, innerRef, ok := extractCorrelatedRefs(cmp, outerTables, innerTables, outerColMap)
 			if !ok {
 				return nil
 			}
 			if cmp.Op == "=" {
-				eqKeys = append(eqKeys, DecorrelatedKey{Outer: outerCol, Op: "=", Inner: innerRef})
+				eqKeys = append(eqKeys, DecorrelatedKey{Outer: outerRef, Op: "=", Inner: innerRef})
 			} else {
 				// JoinFilter convention is "probe(outer) OP build(inner)".
 				// extractCorrelatedCols returns (outer, inner) regardless of
@@ -3182,7 +3252,7 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 				if _, leftIsOuter := getColRefInfo(cmp.Left, outerTables, innerTables, outerColMap); !leftIsOuter {
 					op = flipCmpOp(op)
 				}
-				filterConds = append(filterConds, DecorrelatedKey{Outer: outerCol, Op: op, Inner: innerRef})
+				filterConds = append(filterConds, DecorrelatedKey{Outer: outerRef, Op: op, Inner: innerRef})
 			}
 		} else if hasInner {
 			innerFilterNodes = append(innerFilterNodes, node)
@@ -3359,16 +3429,121 @@ func nodeTableRefs(node plansql.Node, outerTables, innerTables map[string]bool, 
 		ro, ri := nodeTableRefs(e.Right, outerTables, innerTables, outerColMap)
 		hasOuter = lo || ro
 		hasInner = li || ri
+	case *plansql.OrNode:
+		lo, li := nodeTableRefs(e.Left, outerTables, innerTables, outerColMap)
+		ro, ri := nodeTableRefs(e.Right, outerTables, innerTables, outerColMap)
+		hasOuter = lo || ro
+		hasInner = li || ri
 	case *plansql.ParenNode:
 		hasOuter, hasInner = nodeTableRefs(e.Inner, outerTables, innerTables, outerColMap)
 	case *plansql.NotNode:
 		hasOuter, hasInner = nodeTableRefs(e.Inner, outerTables, innerTables, outerColMap)
+	case *plansql.UnaryOp:
+		hasOuter, hasInner = nodeTableRefs(e.Inner, outerTables, innerTables, outerColMap)
+	case *plansql.CastNode:
+		hasOuter, hasInner = nodeTableRefs(e.Inner, outerTables, innerTables, outerColMap)
+	case *plansql.IsExpr:
+		hasOuter, hasInner = nodeTableRefs(e.Left, outerTables, innerTables, outerColMap)
 	case *plansql.FuncCallNode:
 		for _, arg := range e.Args {
 			o, i := nodeTableRefs(arg, outerTables, innerTables, outerColMap)
 			hasOuter = hasOuter || o
 			hasInner = hasInner || i
 		}
+	case *plansql.WindowFuncNode:
+		nodes := []plansql.Node{e.Func}
+		nodes = append(nodes, e.PartitionBy...)
+		for _, o := range e.OrderBy {
+			nodes = append(nodes, o.Expr)
+		}
+		if e.Frame != nil {
+			nodes = append(nodes, e.Frame.Start.Offset)
+			if e.Frame.End != nil {
+				nodes = append(nodes, e.Frame.End.Offset)
+			}
+		}
+		for _, n := range nodes {
+			o, i := nodeTableRefs(n, outerTables, innerTables, outerColMap)
+			hasOuter = hasOuter || o
+			hasInner = hasInner || i
+		}
+	case *plansql.InExpr:
+		nodes := append([]plansql.Node{e.Left}, e.Values...)
+		for _, n := range nodes {
+			o, i := nodeTableRefs(n, outerTables, innerTables, outerColMap)
+			hasOuter = hasOuter || o
+			hasInner = hasInner || i
+		}
+	case *plansql.AnyAllExpr:
+		nodes := append([]plansql.Node{e.Left}, e.Values...)
+		for _, n := range nodes {
+			o, i := nodeTableRefs(n, outerTables, innerTables, outerColMap)
+			hasOuter = hasOuter || o
+			hasInner = hasInner || i
+		}
+	case *plansql.TupleNode:
+		for _, n := range e.Elements {
+			o, i := nodeTableRefs(n, outerTables, innerTables, outerColMap)
+			hasOuter = hasOuter || o
+			hasInner = hasInner || i
+		}
+	case *plansql.BetweenExpr:
+		for _, n := range []plansql.Node{e.Left, e.Low, e.High} {
+			o, i := nodeTableRefs(n, outerTables, innerTables, outerColMap)
+			hasOuter = hasOuter || o
+			hasInner = hasInner || i
+		}
+	case *plansql.LikeExpr:
+		for _, n := range []plansql.Node{e.Left, e.Pattern} {
+			o, i := nodeTableRefs(n, outerTables, innerTables, outerColMap)
+			hasOuter = hasOuter || o
+			hasInner = hasInner || i
+		}
+	case *plansql.CaseNode:
+		nodes := []plansql.Node{e.Subject, e.Else}
+		for _, w := range e.Whens {
+			nodes = append(nodes, w.Cond, w.Result)
+		}
+		for _, n := range nodes {
+			o, i := nodeTableRefs(n, outerTables, innerTables, outerColMap)
+			hasOuter = hasOuter || o
+			hasInner = hasInner || i
+		}
+	// A SUBQUERY IS A POSITION AN OUTER REFERENCE CAN SIT IN (#1072).
+	//
+	// There was no case for one, so `x.id IN (SELECT k FROM t WHERE k = u.id
+	// UNION ALL …)` inside a decorrelated body reported NEITHER side: it was
+	// classified INNER-ONLY, built into the build side with `u.id` binding
+	// nothing, and the IN answered ZERO rows for every outer row on the
+	// single-process arm while the other four refused it. The same blindness
+	// DROPPED such a condition outright in tryDecorrelateExists, whose
+	// classifier keeps only what reports hasInner.
+	case *plansql.SubqueryNode:
+		hasOuter, hasInner = nestedSubqueryTableRefs(e.SQL, outerTables, innerTables, outerColMap)
+	case *plansql.ExistsNode:
+		hasOuter, hasInner = nestedSubqueryTableRefs(e.SQL, outerTables, innerTables, outerColMap)
+	}
+	return
+}
+
+// nestedSubqueryTableRefs answers nodeTableRefs' two questions for a SUBQUERY
+// nested inside the condition being classified: does it read the ENCLOSING
+// query's relations, and does it read THIS block's?
+//
+// Both are the correlation walk with a different idea of which relations are
+// "outer" — the same walk the decorrelations already classify their own body
+// with, rather than a second reader of the same trees.
+func nestedSubqueryTableRefs(sql string, outerTables, innerTables map[string]bool,
+	outerColMap map[string]string) (hasOuter, hasInner bool) {
+	if refs, err := plansql.FindCorrelatedRefsWithColumns(sql, outerTables, outerColMap); err == nil && len(refs) > 0 {
+		hasOuter = true
+	}
+	// Qualified references only: without a catalog a BARE name inside the
+	// nested block may be its own relation's, and reading it as this block's
+	// would attribute a self-contained subquery to a correlation it does not
+	// have.
+	if refs, err := plansql.FindCorrelatedRefs(sql, innerTables); err == nil && len(refs) > 0 {
+		hasInner = true
 	}
 	return
 }
@@ -3408,38 +3583,43 @@ func extractCorrelatedCols(cmp *plansql.CmpExpr, outerTables, innerTables map[st
 	return "", "", false
 }
 
-// extractCorrelatedRefs is extractCorrelatedCols keeping the INNER side's
-// relation qualifier, which the decorrelations need in order to spell the
-// reference once the inner join order is final.
+// extractCorrelatedRefs is extractCorrelatedCols keeping BOTH sides' relation
+// qualifiers, which the decorrelations need in order to spell each reference
+// once the join order is final.
 //
-// getColRefInfo returns a bare column name for both sides. On the outer side
-// that is right — the correlated predicate names the outer query's own
-// columns and the semi join probes them where the outer plan emits them. On
-// the inner side it is the #527 defect: `c.x` becomes `x`, and over a joined
-// inner the bare `x` resolves to whichever relation reorderJoins put on the
-// probe. The qualifier is kept here and resolved by
-// repairDecorrelatedSpelling.
-func extractCorrelatedRefs(cmp *plansql.CmpExpr, outerTables, innerTables map[string]bool, outerColMap map[string]string) (outerCol string, inner InnerKeyRef, ok bool) {
+// getColRefInfo returns a bare column name for both sides. On the inner side
+// that is the #527 defect: `c.x` becomes `x`, and over a joined inner the bare
+// `x` resolves to whichever relation reorderJoins put on the probe. On the
+// OUTER side it is #1098, the same fact one join over: the enclosing query's
+// plan is a join as often as the subquery's is, and a join emits one arm's
+// `id` bare and the other's as `o.id`. Both qualifiers are kept here and
+// resolved by repairDecorrelatedSpelling against the side that emits them.
+func extractCorrelatedRefs(cmp *plansql.CmpExpr, outerTables, innerTables map[string]bool, outerColMap map[string]string) (outer, inner KeyRef, ok bool) {
 	outerCol, innerCol, ok := extractCorrelatedCols(cmp, outerTables, innerTables, outerColMap)
 	if !ok {
-		return "", InnerKeyRef{}, false
+		return KeyRef{}, KeyRef{}, false
 	}
-	inner = InnerKeyRef{Column: innerCol, Text: innerCol}
-	// Recover the qualifier from whichever side of the comparison was the
-	// inner one. extractCorrelatedCols already decided that; matching on the
-	// column name it returned identifies the side without repeating the
+	outer = KeyRef{Column: outerCol, Text: outerCol}
+	inner = KeyRef{Column: innerCol, Text: innerCol}
+	// Recover each qualifier from whichever side of the comparison carried it.
+	// extractCorrelatedCols already decided which side is which; matching on
+	// the column name it returned identifies the side without repeating the
 	// classification.
 	for _, side := range []plansql.Node{cmp.Left, cmp.Right} {
 		ref, isRef := side.(*plansql.ColRef)
-		if !isRef || ref.Table == "" || !strings.EqualFold(ref.Column, innerCol) {
+		if !isRef || ref.Table == "" {
 			continue
 		}
-		if innerTables[strings.ToLower(ref.Table)] {
+		tbl := strings.ToLower(ref.Table)
+		if innerTables[tbl] && strings.EqualFold(ref.Column, innerCol) && inner.Qualifier == "" {
 			inner.Qualifier = ref.Table
-			break
+			continue
+		}
+		if outerTables[tbl] && !innerTables[tbl] && strings.EqualFold(ref.Column, outerCol) && outer.Qualifier == "" {
+			outer.Qualifier = ref.Table
 		}
 	}
-	return outerCol, inner, true
+	return outer, inner, true
 }
 
 // getColRefInfo returns the unqualified column name and whether it's an outer reference.
