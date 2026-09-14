@@ -208,6 +208,22 @@ func r1Cases() []r1Case {
 		r1Case{"p2/rec-star-alias", "WITH RECURSIVE r(w) AS (SELECT 1 AS v UNION ALL SELECT r.w+1 FROM r WHERE r.w < 3) SELECT r.* FROM r ORDER BY 1"},
 		r1Case{"p2/plain-star-control", "WITH p AS (SELECT id AS v FROM lat_ord) SELECT p.* FROM p ORDER BY 1"},
 	)
+	// ROUND 2 CLOSURE — the SHAPES THE STAR HUNK ALSO REACHED. The fix that
+	// let a qualified star read a recursive CTE's published list changed
+	// `relationOutputColumns`' NAMED-BLOCK arm, and a block whose body is
+	// itself a `SELECT *` takes the same arm: `blockOutputProjection` answers a
+	// projection whose only item is the unexpanded star, so nothing was
+	// published and the query was refused where PostgreSQL answers. These
+	// three were loud before the hunk and answer PostgreSQL's rows after it, on
+	// all five arms; the BARE star over the same block is the control that was
+	// always right. Gated here because a fix's reach is a claim, and an
+	// ungated one is a claim nobody re-checks.
+	out = append(out,
+		r1Case{"star/cte-starbody", "WITH c AS (SELECT * FROM lat_ord) SELECT c.* FROM c ORDER BY 1"},
+		r1Case{"star/cte-starbody-join", "WITH c AS (SELECT * FROM lat_ord) SELECT c.* FROM lat_ord u JOIN c ON c.id = u.id ORDER BY 1"},
+		r1Case{"star/derived-starbody", "SELECT d.* FROM (SELECT * FROM lat_ord) d ORDER BY 1"},
+		r1Case{"star/cte-starbody-bare", "WITH c AS (SELECT * FROM lat_ord) SELECT * FROM c ORDER BY 1"},
+	)
 	// ROUND 2 — an outer reference INSIDE the body's own WITH item. The body's
 	// WITH is in scope for the body (the cells above); a WITH ITEM that itself
 	// reads the enclosing row is a CORRELATED FROM ITEM, which this engine
@@ -279,6 +295,10 @@ const (
 )
 
 var r1PostgresRowSets = map[string]string{
+	"star/cte-starbody":               "rows=3 1,Alice,150 | 2,Bob,200 | 3,Carol,0",
+	"star/cte-starbody-join":          "rows=3 1,Alice,150 | 2,Bob,200 | 3,Carol,0",
+	"star/derived-starbody":           "rows=3 1,Alice,150 | 2,Bob,200 | 3,Carol,0",
+	"star/cte-starbody-bare":          "rows=3 1,Alice,150 | 2,Bob,200 | 3,Carol,0",
 	"arity/rec-over":                  "ERR ERROR: WITH query \"r\" has 2 columns available but 3 columns specified (SQLSTATE 42P10)",
 	"arity/rec-equal":                 "rows=3 1,2 | 2,5 | 3,5",
 	"arity/rec-under":                 "rows=3 1,2 | 2,5 | 3,5",

@@ -1816,6 +1816,12 @@ a follow-up:
   publishes a list, and the qualified star is one more consumer. The list still
   comes from `publishedScanColumns`, which asks the security barrier first, so
   the one-path rule (`TestOnlyOnePathReadsAScanColumnListForAStar`) is unweakened.
+  That arm is the NAMED-BLOCK arm, so the same repair reaches every block whose
+  body is itself a `SELECT *` — `WITH c AS (SELECT * FROM t) SELECT c.*`, its
+  joined spelling and the derived-table twin were refused before it and answer
+  PostgreSQL's rows after it, gated as cells of the R1 table and, over a POLICED
+  relation on all nine doors, by
+  `server.TestArcR1AStarOverAStarBodiedBlockNeverPublishesAPolicedValue`.
 
 **A CORRELATED FROM ITEM IS NOT A SCOPE QUESTION.** The body's own `WITH` is in
 scope for the body — that is what this section settles — but an outer reference
@@ -1841,9 +1847,10 @@ trips on (`server.TestPolicyMaskingIsPlanTimeOnEveryDoor`) — so the two must
 land together, with that gate as the arbiter. Until then the shape is loud.
 
 `coordinator.TestArcR1ACorrelatedBodyAnswersPostgresRowSetOnEveryArm` is the
-gate: 469 cells of {operator} × {where the outer column sits} × {what the body
+gate: 473 cells of {operator} × {where the outer column sits} × {what the body
 holds} on five arms, plus the alias-list arity matrix, the star over a recursive
-CTE and the correlated FROM item, every want live PostgreSQL 17.11, with those
+CTE and over a star-bodied block, and the correlated FROM item, every want live
+PostgreSQL 17.11, with those
 boundaries and the DAG's recursive-CTE gap (#960) pinned by the sentence each
 refusal says.
 
