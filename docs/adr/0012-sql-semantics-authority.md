@@ -3272,21 +3272,33 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `coordinator.TestArcO2ADerivedBlockPublishesItsVisibleList`'s `o2Refuses`,
      four cells on five arms.
 
-   - **A `LIMIT` or `OFFSET` inside a CORRELATED LATERAL is REFUSED, where
-     PostgreSQL answers per outer row.** (Added 2026-09-13, arc O2 — a
-     WRONG → LOUD move; the wrong row count is measured at `0193c4e9` and was
-     pinned by arc N1.) PostgreSQL evaluates a LATERAL body once per OUTER
+   - **A QUALIFIED STAR over a CORRELATED LATERAL whose own bound is not
+     applied per outer row is REFUSED.** (Added 2026-09-13, arc O2; NARROWED
+     the same day after review.) PostgreSQL evaluates a LATERAL body once per OUTER
      ROW, so `JOIN LATERAL (SELECT i.product … WHERE i.order_id = o.id ORDER BY
      i.product LIMIT 3) x` yields up to three rows for every order. The
      decorrelation promotes the correlation into a join condition, which makes
      the body ONE relation joined once, and the bound then applies to the whole
-     of it — three rows for PostgreSQL's four, silently, on five arms and in
-     every spelling of the consumer. Honouring it needs the bound travelling
-     WITH the correlation key as a per-key top-N (ADR-0021's territory), so the
-     shape is loud until then: `0A000`, with the two ways out in the message.
-     An UNCORRELATED lateral is untouched. Gated as a refusal in
-     `coordinator.TestArcO2ADerivedBlockPublishesItsVisibleList`'s `o2Refuses`,
-     six cells on five arms.
+     of it — three rows for PostgreSQL's four, silently. Honouring it needs the
+     bound travelling WITH the correlation key as a per-key top-N (ADR-0021's
+     territory), and that defect stays OPEN and PINNED with PostgreSQL's answer
+     recorded.
+
+     What is REFUSED is the QUALIFIED star over such a body, and only it: a
+     star publishes a RELATION, and this one's ROW COUNT is not the one the
+     query wrote. `SELECT *` and an explicit list answer, with the row count
+     pinned.
+
+     THE FIRST CUT OF THIS ENTRY REFUSED EVERY SPELLING, on the bound's
+     EXISTENCE, and that was measured wrong: whether a bound BINDS is a
+     property of the DATA, so `… ORDER BY p LIMIT 10` over a body that never
+     yields ten rows for one outer key — RIGHT on five arms at `0193c4e9` —
+     became an error, as did `OFFSET 0`. A new refusal on a shape that answered
+     correctly is a regression whatever it stands in for; `OFFSET 0` and
+     `LIMIT ALL` are not marked at all, because they cannot remove a row. An
+     UNCORRELATED lateral is untouched. Gated as a refusal in
+     `coordinator.TestArcO2ADerivedBlockPublishesItsVisibleList`'s `o2Refuses`
+     (two `qstar` cells) with the four named spellings pinned beside them.
 
    - **A star over a NON-aggregated LATERAL publishes PostgreSQL's columns in
      a different ORDER.** (Added 2026-09-07, arc J1 round 2; PRE-EXISTING.

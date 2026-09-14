@@ -1180,12 +1180,25 @@ ALIASED CTE reference, and one that publishes TWO columns of one name — there
 the references would both bind the first column, which is a wrong value.
 PostgreSQL answers all of these; name the columns.
 
-A `LIMIT` or `OFFSET` inside a LATERAL subquery that is CORRELATED is refused
-(`0A000`) for a different reason: PostgreSQL evaluates the subquery once per
-outer row, so the bound applies to each row's own result, and the correlation
-is executed here as a join — which would apply it to the whole inner relation
-instead. Take the bound outside the LATERAL, or rank inside it with a window
-function. An uncorrelated LATERAL's own bound means exactly what it says.
+A `LIMIT` or `OFFSET` inside a LATERAL subquery that is CORRELATED is applied
+to the whole inner relation ONCE, where PostgreSQL applies it to each outer
+row's own result — so `JOIN LATERAL (… WHERE i.order_id = o.id ORDER BY i.p
+LIMIT 1) s` answers ONE row where PostgreSQL answers one per outer row. The
+boundary is exact and worth stating:
+
+- a bound that cannot remove a row — `OFFSET 0`, `LIMIT ALL`, no bound — means
+  the same thing either way and is unaffected;
+- a bound that does not actually bind, because no outer row's own result is
+  longer than it, gives PostgreSQL's rows either way and is answered;
+- a bound that binds returns the whole relation's first rows rather than each
+  outer row's, which is a wrong ROW COUNT and is a known open defect;
+- the QUALIFIED star over such a subquery (`SELECT s.*`) is REFUSED (`0A000`),
+  because a star publishes a relation and the row count of this one is not the
+  one the query wrote. `SELECT *` and an explicit column list answer.
+
+Rank inside the subquery with a window function (`ROW_NUMBER() OVER (PARTITION
+BY …)`) to get PostgreSQL's per-outer-row bound today. An UNCORRELATED
+LATERAL's own bound means exactly what it says.
 
 An inner `SELECT` list that aliases something to the correlation key's own name
 answers what PostgreSQL answers. `JOIN LATERAL (SELECT MAX(t.id) AS g …
