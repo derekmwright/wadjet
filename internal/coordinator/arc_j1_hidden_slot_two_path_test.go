@@ -842,32 +842,43 @@ func TestArcJ1AQualifiedStarExpandsFromTheRelationsOutput(t *testing.T) {
 				`ON li.order_id = o.id ORDER BY o.id, li.amount`,
 			want: `id,customer,total,a | 1,Alice,150,50 | 1,Alice,150,100 | ` +
 				`2,Bob,200,75 | 2,Bob,200,125`},
-		// COMPUTABLE since arc O1 (#997, #1012): the block's body is a star
-		// over a join, and such a star is now the FROM clause's arms in
-		// written order (ADR-0026 §9), so `d` publishes a list `d.*` can
-		// expand from — `lat_ord`'s three columns then `lat_item`'s four,
-		// with `id` published TWICE, exactly as PostgreSQL publishes it.
+		// A BLOCK WHOSE BODY IS A STAR OVER A JOIN PUBLISHES `id` TWICE, and a
+		// QUALIFIED star cannot enumerate that list by NAME (#1076).
 		//
-		// The key is `d.order_id`, which `d` publishes ONCE, and the ordering
-		// is TOTAL: the pin's own `x.id = d.id` names a column `d` publishes
-		// twice, and PostgreSQL refuses that spelling with 42702 `column
-		// reference "id" is ambiguous` (measured live) where this binder
-		// resolves it to the first — ADR-0012's documented superset, not this
-		// cell's subject. Every value below is PostgreSQL 17.11's.
+		// The body is the FROM clause's arms in written order since arc O1
+		// (#997, #1012, ADR-0026 §9) — `lat_ord`'s three columns then
+		// `lat_item`'s four, with `id` in positions 1 and 4, exactly as
+		// PostgreSQL publishes it. `d.*` above it expands to one REFERENCE per
+		// published column, and two references spelled `d.id` both bind the
+		// FIRST column of that name: the fourth column would carry `lat_ord`'s
+		// 1, 1, 2, 2 where PostgreSQL's is `lat_item`'s 1, 2, 3, 4 — a wrong
+		// VALUE this renderer cannot see, because it keys a row by column
+		// name. So the star is REFUSED, which is arc O2's disposition for
+		// every block that publishes one name twice, reached here through a
+		// body the block did not write itself. Closing it means the block's
+		// list travelling by POSITION (`ProjectExprSpec.SourceSlot` one
+		// relation out) and deleting this cell's `wantErrLike` is the proof.
+		//
+		// The BARE star over the same block reads the relation positionally
+		// and answers — `coordinator.TestO1AStarOverAJoinPublishesTheQueryNotThePlan`
+		// asserts that list POSITIONALLY — which is what makes this the
+		// qualified spelling's own refusal.
 		{name: "a-derived-table-whose-body-is-a-star-over-a-join",
 			sql: `SELECT d.*, x.id AS i FROM (SELECT * FROM lat_ord o JOIN lat_item li ` +
 				`ON li.order_id = o.id) d JOIN lat_ord x ON x.id = d.order_id ` +
 				`ORDER BY x.id, d.amount`,
-			// THIS RENDERER KEYS A ROW BY COLUMN NAME, so the duplicated `id`
-			// renders one value twice (`1,…,1` where PostgreSQL's fourth
-			// column is `lat_item`'s own 1, 2, 3, 4). That is the harness's
-			// bound and not the engine's: the star-join family's column list
-			// is asserted POSITIONALLY by
-			// `coordinator.TestO1AStarOverAJoinPublishesTheQueryNotThePlan`
-			// and on the wire by `pgwire.TestO1TheWireDeclaresAStarJoinsOwnArms`.
-			want: `id,customer,total,id,order_id,product,amount,i | ` +
-				`1,Alice,150,1,1,Widget,50,1 | 1,Alice,150,1,1,Gadget,100,1 | ` +
-				`2,Bob,200,2,2,Widget,75,2 | 2,Bob,200,2,2,Doohickey,125,2`},
+			wantErrLike: `column "d.*" does not exist in the input schema`},
+		// THE CONTROL from the other side: the same nesting with no name
+		// published twice, which expands and answers PostgreSQL's list in
+		// PostgreSQL's order. The refusal above is about the DUPLICATE, not
+		// about the star-over-a-join body.
+		{name: "a-derived-table-whose-star-body-publishes-distinct-names",
+			sql: `SELECT d.*, x.id AS i FROM (SELECT * FROM (SELECT id AS oid, customer ` +
+				`FROM lat_ord) o JOIN lat_item li ON li.order_id = o.oid) d ` +
+				`JOIN lat_ord x ON x.id = d.order_id ORDER BY x.id, d.amount`,
+			want: `oid,customer,id,order_id,product,amount,i | 1,Alice,1,1,Widget,50,1 | ` +
+				`1,Alice,2,1,Gadget,100,1 | 2,Bob,3,2,Widget,75,2 | ` +
+				`2,Bob,4,2,Doohickey,125,2`},
 		// The lateral's own star beside another item publishes the body's
 		// list — the same rule as every other relation in this table, which is
 		// what it was not until arc O2 (ADR-0026 §9).

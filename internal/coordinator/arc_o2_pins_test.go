@@ -11,16 +11,24 @@ package coordinator
 // arc closing half of each. No pin records a value this arc made worse: a
 // pin that starts agreeing FAILS, and deleting it is the proof of the fix.
 var o2Pin = map[string]map[string]string{
-	// THE PUBLISHED NAME OF AN UNALIASED ITEM inside a block a JOIN reads.
+	// THE PUBLISHED NAME OF AN UNALIASED ITEM inside a block a LATERAL reads.
 	// PostgreSQL calls it `?column?`; wadjet publishes the spelling the block's
 	// own Project emits it under — its expression text — because the star over
-	// the join reads the STREAM, and the published name is applied only where
-	// the block IS the statement's output projection. Closing it means the
-	// block's published names travelling BESIDE its stream, addressed by
-	// POSITION (`ProjectExprSpec.SourceSlot` one relation out); renaming the
-	// stream itself gives two unaliased items ONE name. Values and positions
-	// agree on every arm; the NAME is the divergence. Recorded in ADR-0012.
-	// PRE-EXISTING: byte-identical at base 0193c4e9 on all five arms.
+	// the lateral reads the STREAM, and the published name is applied only
+	// where the block IS the statement's output projection. Values and
+	// positions agree on every arm; the NAME is the divergence. Recorded in
+	// ADR-0012. PRE-EXISTING: byte-identical at base 0193c4e9 on all five arms.
+	//
+	// THE `joined/*` HALF OF THIS PIN IS CLOSED (arc O1, #997/#1012): a star
+	// item is ADR-0026 §2's PAIR — it RESOLVES by the producer's spelling and
+	// PUBLISHES PostgreSQL's — so a star over a JOIN publishes `?column?` over
+	// a stream still carrying `amount + 1`. The six `joined/*` pins this
+	// comment used to carry are deleted, which is the proof. The LATERAL
+	// spelling has no such projection to carry the pair: its body is
+	// decorrelated into the join and the star reads the stream directly, so it
+	// keeps the divergence and its own mechanism — the block's published names
+	// travelling BESIDE the stream, addressed by POSITION
+	// (`ProjectExprSpec.SourceSlot` one relation out).
 	"lateral/unaliased/star": {
 		"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.amount + 1:FLOAT64] rows=4 | 1,Alice,150,1,101 | 1,Alice,150,1,51 | 2,Bob,200,2,126 | 2,Bob,200,2,76",
 		"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.amount + 1:FLOAT64] rows=4 | 1,Alice,150,1,101 | 1,Alice,150,1,51 | 2,Bob,200,2,126 | 2,Bob,200,2,76",
@@ -62,48 +70,6 @@ var o2Pin = map[string]map[string]string{
 		"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 product:STRING count(*) + 1:INT64] rows=4 | 1,Alice,150,Gadget,2 | 1,Alice,150,Widget,2 | 2,Bob,200,Doohickey,2 | 2,Bob,200,Widget,2",
 		"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 product:STRING count(*) + 1:INT64] rows=4 | 1,Alice,150,Gadget,2 | 1,Alice,150,Widget,2 | 2,Bob,200,Doohickey,2 | 2,Bob,200,Widget,2",
 		"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 product:STRING count(*) + 1:INT64] rows=4 | 1,Alice,150,Gadget,2 | 1,Alice,150,Widget,2 | 2,Bob,200,Doohickey,2 | 2,Bob,200,Widget,2",
-	},
-	"joined/unaliased/star": {
-		"single":       "cols=[order_id:INT64 amount + 1:FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=12 | 1,101,1,Alice,150 | 1,101,2,Bob,200 | 1,101,3,Carol,0 | 1,51,1,Alice,150 | 1,51,2,Bob,200 | 1,51,3,Carol,0 | 2,126,1,Alice,150 | 2,126,2,Bob,200 | 2,126,3,Carol,0 | 2,76,1,Alice,150 | 2,76,2,Bob,200 | 2,76,3,Carol,0",
-		"spilled512k":  "cols=[order_id:INT64 amount + 1:FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=12 | 1,101,1,Alice,150 | 1,101,2,Bob,200 | 1,101,3,Carol,0 | 1,51,1,Alice,150 | 1,51,2,Bob,200 | 1,51,3,Carol,0 | 2,126,1,Alice,150 | 2,126,2,Bob,200 | 2,126,3,Carol,0 | 2,76,1,Alice,150 | 2,76,2,Bob,200 | 2,76,3,Carol,0",
-		"dag":          "cols=[order_id:INT64 amount + 1:FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=12 | 1,101,1,Alice,150 | 1,101,2,Bob,200 | 1,101,3,Carol,0 | 1,51,1,Alice,150 | 1,51,2,Bob,200 | 1,51,3,Carol,0 | 2,126,1,Alice,150 | 2,126,2,Bob,200 | 2,126,3,Carol,0 | 2,76,1,Alice,150 | 2,76,2,Bob,200 | 2,76,3,Carol,0",
-		"dag-shuffled": "cols=[order_id:INT64 amount + 1:FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=12 | 1,101,1,Alice,150 | 1,101,2,Bob,200 | 1,101,3,Carol,0 | 1,51,1,Alice,150 | 1,51,2,Bob,200 | 1,51,3,Carol,0 | 2,126,1,Alice,150 | 2,126,2,Bob,200 | 2,126,3,Carol,0 | 2,76,1,Alice,150 | 2,76,2,Bob,200 | 2,76,3,Carol,0",
-		"dag-morsel4":  "cols=[order_id:INT64 amount + 1:FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=12 | 1,101,1,Alice,150 | 1,101,2,Bob,200 | 1,101,3,Carol,0 | 1,51,1,Alice,150 | 1,51,2,Bob,200 | 1,51,3,Carol,0 | 2,126,1,Alice,150 | 2,126,2,Bob,200 | 2,126,3,Carol,0 | 2,76,1,Alice,150 | 2,76,2,Bob,200 | 2,76,3,Carol,0",
-	},
-	"joined/unaliased/ordstar": {
-		"single":       "cols=[order_id:INT64 amount + 1:FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=12 | 1,101,1,Alice,150 | 1,101,2,Bob,200 | 1,101,3,Carol,0 | 1,51,1,Alice,150 | 1,51,2,Bob,200 | 1,51,3,Carol,0 | 2,126,1,Alice,150 | 2,126,2,Bob,200 | 2,126,3,Carol,0 | 2,76,1,Alice,150 | 2,76,2,Bob,200 | 2,76,3,Carol,0",
-		"spilled512k":  "cols=[order_id:INT64 amount + 1:FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=12 | 1,101,1,Alice,150 | 1,101,2,Bob,200 | 1,101,3,Carol,0 | 1,51,1,Alice,150 | 1,51,2,Bob,200 | 1,51,3,Carol,0 | 2,126,1,Alice,150 | 2,126,2,Bob,200 | 2,126,3,Carol,0 | 2,76,1,Alice,150 | 2,76,2,Bob,200 | 2,76,3,Carol,0",
-		"dag":          "cols=[order_id:INT64 amount + 1:FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=12 | 1,101,1,Alice,150 | 1,101,2,Bob,200 | 1,101,3,Carol,0 | 1,51,1,Alice,150 | 1,51,2,Bob,200 | 1,51,3,Carol,0 | 2,126,1,Alice,150 | 2,126,2,Bob,200 | 2,126,3,Carol,0 | 2,76,1,Alice,150 | 2,76,2,Bob,200 | 2,76,3,Carol,0",
-		"dag-shuffled": "cols=[order_id:INT64 amount + 1:FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=12 | 1,101,1,Alice,150 | 1,101,2,Bob,200 | 1,101,3,Carol,0 | 1,51,1,Alice,150 | 1,51,2,Bob,200 | 1,51,3,Carol,0 | 2,126,1,Alice,150 | 2,126,2,Bob,200 | 2,126,3,Carol,0 | 2,76,1,Alice,150 | 2,76,2,Bob,200 | 2,76,3,Carol,0",
-		"dag-morsel4":  "cols=[order_id:INT64 amount + 1:FLOAT64 id:INT64 customer:STRING total:FLOAT64] rows=12 | 1,101,1,Alice,150 | 1,101,2,Bob,200 | 1,101,3,Carol,0 | 1,51,1,Alice,150 | 1,51,2,Bob,200 | 1,51,3,Carol,0 | 2,126,1,Alice,150 | 2,126,2,Bob,200 | 2,126,3,Carol,0 | 2,76,1,Alice,150 | 2,76,2,Bob,200 | 2,76,3,Carol,0",
-	},
-	"joined/unaliased-string/star": {
-		"single":       "cols=[order_id:INT64 product || 'y':STRING id:INT64 customer:STRING total:FLOAT64] rows=12 | 1,Gadgety,1,Alice,150 | 1,Gadgety,2,Bob,200 | 1,Gadgety,3,Carol,0 | 1,Widgety,1,Alice,150 | 1,Widgety,2,Bob,200 | 1,Widgety,3,Carol,0 | 2,Doohickeyy,1,Alice,150 | 2,Doohickeyy,2,Bob,200 | 2,Doohickeyy,3,Carol,0 | 2,Widgety,1,Alice,150 | 2,Widgety,2,Bob,200 | 2,Widgety,3,Carol,0",
-		"spilled512k":  "cols=[order_id:INT64 product || 'y':STRING id:INT64 customer:STRING total:FLOAT64] rows=12 | 1,Gadgety,1,Alice,150 | 1,Gadgety,2,Bob,200 | 1,Gadgety,3,Carol,0 | 1,Widgety,1,Alice,150 | 1,Widgety,2,Bob,200 | 1,Widgety,3,Carol,0 | 2,Doohickeyy,1,Alice,150 | 2,Doohickeyy,2,Bob,200 | 2,Doohickeyy,3,Carol,0 | 2,Widgety,1,Alice,150 | 2,Widgety,2,Bob,200 | 2,Widgety,3,Carol,0",
-		"dag":          "cols=[order_id:INT64 product || 'y':STRING id:INT64 customer:STRING total:FLOAT64] rows=12 | 1,Gadgety,1,Alice,150 | 1,Gadgety,2,Bob,200 | 1,Gadgety,3,Carol,0 | 1,Widgety,1,Alice,150 | 1,Widgety,2,Bob,200 | 1,Widgety,3,Carol,0 | 2,Doohickeyy,1,Alice,150 | 2,Doohickeyy,2,Bob,200 | 2,Doohickeyy,3,Carol,0 | 2,Widgety,1,Alice,150 | 2,Widgety,2,Bob,200 | 2,Widgety,3,Carol,0",
-		"dag-shuffled": "cols=[order_id:INT64 product || 'y':STRING id:INT64 customer:STRING total:FLOAT64] rows=12 | 1,Gadgety,1,Alice,150 | 1,Gadgety,2,Bob,200 | 1,Gadgety,3,Carol,0 | 1,Widgety,1,Alice,150 | 1,Widgety,2,Bob,200 | 1,Widgety,3,Carol,0 | 2,Doohickeyy,1,Alice,150 | 2,Doohickeyy,2,Bob,200 | 2,Doohickeyy,3,Carol,0 | 2,Widgety,1,Alice,150 | 2,Widgety,2,Bob,200 | 2,Widgety,3,Carol,0",
-		"dag-morsel4":  "cols=[order_id:INT64 product || 'y':STRING id:INT64 customer:STRING total:FLOAT64] rows=12 | 1,Gadgety,1,Alice,150 | 1,Gadgety,2,Bob,200 | 1,Gadgety,3,Carol,0 | 1,Widgety,1,Alice,150 | 1,Widgety,2,Bob,200 | 1,Widgety,3,Carol,0 | 2,Doohickeyy,1,Alice,150 | 2,Doohickeyy,2,Bob,200 | 2,Doohickeyy,3,Carol,0 | 2,Widgety,1,Alice,150 | 2,Widgety,2,Bob,200 | 2,Widgety,3,Carol,0",
-	},
-	"joined/unaliased-string/ordstar": {
-		"single":       "cols=[order_id:INT64 product || 'y':STRING id:INT64 customer:STRING total:FLOAT64] rows=12 | 1,Gadgety,1,Alice,150 | 1,Gadgety,2,Bob,200 | 1,Gadgety,3,Carol,0 | 1,Widgety,1,Alice,150 | 1,Widgety,2,Bob,200 | 1,Widgety,3,Carol,0 | 2,Doohickeyy,1,Alice,150 | 2,Doohickeyy,2,Bob,200 | 2,Doohickeyy,3,Carol,0 | 2,Widgety,1,Alice,150 | 2,Widgety,2,Bob,200 | 2,Widgety,3,Carol,0",
-		"spilled512k":  "cols=[order_id:INT64 product || 'y':STRING id:INT64 customer:STRING total:FLOAT64] rows=12 | 1,Gadgety,1,Alice,150 | 1,Gadgety,2,Bob,200 | 1,Gadgety,3,Carol,0 | 1,Widgety,1,Alice,150 | 1,Widgety,2,Bob,200 | 1,Widgety,3,Carol,0 | 2,Doohickeyy,1,Alice,150 | 2,Doohickeyy,2,Bob,200 | 2,Doohickeyy,3,Carol,0 | 2,Widgety,1,Alice,150 | 2,Widgety,2,Bob,200 | 2,Widgety,3,Carol,0",
-		"dag":          "cols=[order_id:INT64 product || 'y':STRING id:INT64 customer:STRING total:FLOAT64] rows=12 | 1,Gadgety,1,Alice,150 | 1,Gadgety,2,Bob,200 | 1,Gadgety,3,Carol,0 | 1,Widgety,1,Alice,150 | 1,Widgety,2,Bob,200 | 1,Widgety,3,Carol,0 | 2,Doohickeyy,1,Alice,150 | 2,Doohickeyy,2,Bob,200 | 2,Doohickeyy,3,Carol,0 | 2,Widgety,1,Alice,150 | 2,Widgety,2,Bob,200 | 2,Widgety,3,Carol,0",
-		"dag-shuffled": "cols=[order_id:INT64 product || 'y':STRING id:INT64 customer:STRING total:FLOAT64] rows=12 | 1,Gadgety,1,Alice,150 | 1,Gadgety,2,Bob,200 | 1,Gadgety,3,Carol,0 | 1,Widgety,1,Alice,150 | 1,Widgety,2,Bob,200 | 1,Widgety,3,Carol,0 | 2,Doohickeyy,1,Alice,150 | 2,Doohickeyy,2,Bob,200 | 2,Doohickeyy,3,Carol,0 | 2,Widgety,1,Alice,150 | 2,Widgety,2,Bob,200 | 2,Widgety,3,Carol,0",
-		"dag-morsel4":  "cols=[order_id:INT64 product || 'y':STRING id:INT64 customer:STRING total:FLOAT64] rows=12 | 1,Gadgety,1,Alice,150 | 1,Gadgety,2,Bob,200 | 1,Gadgety,3,Carol,0 | 1,Widgety,1,Alice,150 | 1,Widgety,2,Bob,200 | 1,Widgety,3,Carol,0 | 2,Doohickeyy,1,Alice,150 | 2,Doohickeyy,2,Bob,200 | 2,Doohickeyy,3,Carol,0 | 2,Widgety,1,Alice,150 | 2,Widgety,2,Bob,200 | 2,Widgety,3,Carol,0",
-	},
-	"joined/group-unaliased/star": {
-		"single":       "cols=[product:STRING count(*) + 1:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,2,1,Alice,150 | Doohickey,2,2,Bob,200 | Doohickey,2,3,Carol,0 | Gadget,2,1,Alice,150 | Gadget,2,2,Bob,200 | Gadget,2,3,Carol,0 | Widget,3,1,Alice,150 | Widget,3,2,Bob,200 | Widget,3,3,Carol,0",
-		"spilled512k":  "cols=[product:STRING count(*) + 1:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,2,1,Alice,150 | Doohickey,2,2,Bob,200 | Doohickey,2,3,Carol,0 | Gadget,2,1,Alice,150 | Gadget,2,2,Bob,200 | Gadget,2,3,Carol,0 | Widget,3,1,Alice,150 | Widget,3,2,Bob,200 | Widget,3,3,Carol,0",
-		"dag":          "cols=[product:STRING count(*) + 1:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,2,1,Alice,150 | Doohickey,2,2,Bob,200 | Doohickey,2,3,Carol,0 | Gadget,2,1,Alice,150 | Gadget,2,2,Bob,200 | Gadget,2,3,Carol,0 | Widget,3,1,Alice,150 | Widget,3,2,Bob,200 | Widget,3,3,Carol,0",
-		"dag-shuffled": "cols=[product:STRING count(*) + 1:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,2,1,Alice,150 | Doohickey,2,2,Bob,200 | Doohickey,2,3,Carol,0 | Gadget,2,1,Alice,150 | Gadget,2,2,Bob,200 | Gadget,2,3,Carol,0 | Widget,3,1,Alice,150 | Widget,3,2,Bob,200 | Widget,3,3,Carol,0",
-		"dag-morsel4":  "cols=[product:STRING count(*) + 1:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,2,1,Alice,150 | Doohickey,2,2,Bob,200 | Doohickey,2,3,Carol,0 | Gadget,2,1,Alice,150 | Gadget,2,2,Bob,200 | Gadget,2,3,Carol,0 | Widget,3,1,Alice,150 | Widget,3,2,Bob,200 | Widget,3,3,Carol,0",
-	},
-	"joined/group-unaliased/ordstar": {
-		"single":       "cols=[product:STRING count(*) + 1:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,2,1,Alice,150 | Doohickey,2,2,Bob,200 | Doohickey,2,3,Carol,0 | Gadget,2,1,Alice,150 | Gadget,2,2,Bob,200 | Gadget,2,3,Carol,0 | Widget,3,1,Alice,150 | Widget,3,2,Bob,200 | Widget,3,3,Carol,0",
-		"spilled512k":  "cols=[product:STRING count(*) + 1:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,2,1,Alice,150 | Doohickey,2,2,Bob,200 | Doohickey,2,3,Carol,0 | Gadget,2,1,Alice,150 | Gadget,2,2,Bob,200 | Gadget,2,3,Carol,0 | Widget,3,1,Alice,150 | Widget,3,2,Bob,200 | Widget,3,3,Carol,0",
-		"dag":          "cols=[product:STRING count(*) + 1:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,2,1,Alice,150 | Doohickey,2,2,Bob,200 | Doohickey,2,3,Carol,0 | Gadget,2,1,Alice,150 | Gadget,2,2,Bob,200 | Gadget,2,3,Carol,0 | Widget,3,1,Alice,150 | Widget,3,2,Bob,200 | Widget,3,3,Carol,0",
-		"dag-shuffled": "cols=[product:STRING count(*) + 1:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,2,1,Alice,150 | Doohickey,2,2,Bob,200 | Doohickey,2,3,Carol,0 | Gadget,2,1,Alice,150 | Gadget,2,2,Bob,200 | Gadget,2,3,Carol,0 | Widget,3,1,Alice,150 | Widget,3,2,Bob,200 | Widget,3,3,Carol,0",
-		"dag-morsel4":  "cols=[product:STRING count(*) + 1:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,2,1,Alice,150 | Doohickey,2,2,Bob,200 | Doohickey,2,3,Carol,0 | Gadget,2,1,Alice,150 | Gadget,2,2,Bob,200 | Gadget,2,3,Carol,0 | Widget,3,1,Alice,150 | Widget,3,2,Bob,200 | Widget,3,3,Carol,0",
 	},
 
 	// A CORRELATED LATERAL'S OWN BOUND IS NOT APPLIED PER OUTER ROW (#1019).
@@ -154,23 +120,13 @@ var o2Pin = map[string]map[string]string{
 		"dag-morsel4":  "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Widget",
 	},
 
-	// A NESTED BLOCK'S RENAME is lost on the DAG: the inner block publishes
-	// `product AS p` and the outer republishes `z.p`, and the three DAG arms
-	// publish the SOURCE name `product` where the single-process arms and
-	// PostgreSQL publish `p`. Values, positions and row count agree; only the
-	// first column's NAME differs, and only where the inner block also
-	// materialized its own ORDER BY key. PRE-EXISTING: byte-identical at base
-	// on all five arms, and independently with this arc's depth walk reverted.
-	"nested/grouped-hidden-key/depth2/join-star": {
-		"dag":          "cols=[product:STRING n:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,1,1,Alice,150 | Doohickey,1,2,Bob,200 | Doohickey,1,3,Carol,0 | Gadget,1,1,Alice,150 | Gadget,1,2,Bob,200 | Gadget,1,3,Carol,0 | Widget,2,1,Alice,150 | Widget,2,2,Bob,200 | Widget,2,3,Carol,0",
-		"dag-shuffled": "cols=[product:STRING n:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,1,1,Alice,150 | Doohickey,1,2,Bob,200 | Doohickey,1,3,Carol,0 | Gadget,1,1,Alice,150 | Gadget,1,2,Bob,200 | Gadget,1,3,Carol,0 | Widget,2,1,Alice,150 | Widget,2,2,Bob,200 | Widget,2,3,Carol,0",
-		"dag-morsel4":  "cols=[product:STRING n:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,1,1,Alice,150 | Doohickey,1,2,Bob,200 | Doohickey,1,3,Carol,0 | Gadget,1,1,Alice,150 | Gadget,1,2,Bob,200 | Gadget,1,3,Carol,0 | Widget,2,1,Alice,150 | Widget,2,2,Bob,200 | Widget,2,3,Carol,0",
-	},
-	"nested/grouped-hidden-key/depth3/join-star": {
-		"dag":          "cols=[product:STRING n:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,1,1,Alice,150 | Doohickey,1,2,Bob,200 | Doohickey,1,3,Carol,0 | Gadget,1,1,Alice,150 | Gadget,1,2,Bob,200 | Gadget,1,3,Carol,0 | Widget,2,1,Alice,150 | Widget,2,2,Bob,200 | Widget,2,3,Carol,0",
-		"dag-shuffled": "cols=[product:STRING n:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,1,1,Alice,150 | Doohickey,1,2,Bob,200 | Doohickey,1,3,Carol,0 | Gadget,1,1,Alice,150 | Gadget,1,2,Bob,200 | Gadget,1,3,Carol,0 | Widget,2,1,Alice,150 | Widget,2,2,Bob,200 | Widget,2,3,Carol,0",
-		"dag-morsel4":  "cols=[product:STRING n:INT64 id:INT64 customer:STRING total:FLOAT64] rows=9 | Doohickey,1,1,Alice,150 | Doohickey,1,2,Bob,200 | Doohickey,1,3,Carol,0 | Gadget,1,1,Alice,150 | Gadget,1,2,Bob,200 | Gadget,1,3,Carol,0 | Widget,2,1,Alice,150 | Widget,2,2,Bob,200 | Widget,2,3,Carol,0",
-	},
+	// A NESTED BLOCK'S RENAME WAS LOST ON THE DAG — the inner block publishes
+	// `product AS p`, the outer republishes `z.p`, and the three DAG arms
+	// published the SOURCE name `product` — and arc O1 closed it for the star
+	// that reads such a block over a JOIN: the star publishes each arm's own
+	// VISIBLE list, so `p` is what the expansion spells and what the gather
+	// declares (#997/#1012). The two `nested/grouped-hidden-key/*/join-star`
+	// pins are deleted, which is the proof.
 
 	// AN AGGREGATE ALIASED LIKE ITS OWN GROUP KEY'S SOURCE COLUMN — the VALUE
 	// half is closed (#1078) and what remains is an ORDER on the three DAG
@@ -187,35 +143,14 @@ var o2Pin = map[string]map[string]string{
 		"dag-morsel4":  "cols=[product:INT64 id:INT64] rows=9 | 1,1 | 1,2 | 1,3 | 1,1 | 1,2 | 1,3 | 2,1 | 2,2 | 2,3",
 	},
 
-	// THE COLUMN ORDER OF A STAR OVER A JOIN follows the side the planner
+	// THE COLUMN ORDER OF A STAR OVER A JOIN followed the side the planner
 	// BUILDS, not the FROM clause — ADR-0026 §7's own note: which side builds
-	// is a cost decision and must not decide a name or a position, and it
-	// rides arc O1 (#997). The `then-join` cells are the ANTI spellings, where
-	// the decorrelated join makes the other side the build even though the
-	// block is written first. Values and row counts agree on every arm.
-	// PRE-EXISTING: byte-identical at base on all five arms.
-	"joined/group/star": {
-		"single":      "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 n:INT64] rows=6 | 1,Alice,150,1,2 | 1,Alice,150,2,2 | 2,Bob,200,1,2 | 2,Bob,200,2,2 | 3,Carol,0,1,2 | 3,Carol,0,2,2",
-		"spilled512k": "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 n:INT64] rows=6 | 1,Alice,150,1,2 | 1,Alice,150,2,2 | 2,Bob,200,1,2 | 2,Bob,200,2,2 | 3,Carol,0,1,2 | 3,Carol,0,2,2",
-	},
-	"joined/group/ordstar": {
-		"single":      "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 n:INT64] rows=6 | 1,Alice,150,1,2 | 1,Alice,150,2,2 | 2,Bob,200,1,2 | 2,Bob,200,2,2 | 3,Carol,0,1,2 | 3,Carol,0,2,2",
-		"spilled512k": "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 n:INT64] rows=6 | 1,Alice,150,1,2 | 1,Alice,150,2,2 | 2,Bob,200,1,2 | 2,Bob,200,2,2 | 3,Carol,0,1,2 | 3,Carol,0,2,2",
-	},
-	"class/not-in/then-join": {
-		"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Widget",
-		"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Widget",
-		"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Widget",
-		"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Widget",
-		"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Widget",
-	},
-	"class/not-exists/then-join": {
-		"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Widget",
-		"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Widget",
-		"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Widget",
-		"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Widget",
-		"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Widget",
-	},
+	// is a cost decision and must not decide a name or a position. Arc O1 rode
+	// it (#997/#1012): the order is the LOGICAL join's, left arm then right in
+	// written order, on all five arms. The four pins this comment carried —
+	// `joined/group/{star,ordstar}` and the two `class/*/then-join` ANTI
+	// spellings, where the decorrelated join makes the other side the build
+	// even though the block is written first — are deleted, which is the proof.
 
 	// SUM OVER A `numeric(18,4)` IS DECLARED `DECIMAL(38,4)` where PostgreSQL
 	// declares an UNCONSTRAINED `numeric`. The ROWS and the ORDER agree on
