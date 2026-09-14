@@ -304,6 +304,26 @@ func r2IssueCells() []r2Cell {
 			sql: "SELECT DISTINCT o.id, o.customer, s.c, s.k FROM lat_ord o JOIN " +
 				"(SELECT o2.customer AS c, o2.id AS k FROM lat_ord o2) s ON s.k = o.id"},
 
+		// #1099's BOUNDARY, and the reason the qualifier is kept only where
+		// the producer publishes the name TWICE: here ONE relation inside the
+		// block publishes `amount`, so the stream spells it bare, and a key
+		// that carried a qualifier anyway read as "not in the build schema"
+		// to `exec.HashJoin.FixKeyAssignment`'s exact-name test — which
+		// swapped a correctly assigned pair and left a null-aware anti join
+		// keying on the PROBE's column, losing NOT IN's NULL.
+		{name: "issue/1099-boundary-not-in",
+			sql: "SELECT COUNT(*) AS c FROM lat_ord a WHERE a.total NOT IN " +
+				"(SELECT s.rk FROM (SELECT r.amount AS rk FROM lat_ord b JOIN lat_item r " +
+				"ON r.amount = b.total AND r.amount < 60) s)"},
+		{name: "issue/1099-boundary-not-in-outer",
+			sql: "SELECT COUNT(*) AS c FROM lat_ord a WHERE a.total NOT IN " +
+				"(SELECT s.rk FROM (SELECT r.amount AS rk FROM lat_ord b LEFT JOIN lat_item r " +
+				"ON r.amount = b.total AND r.amount < 60) s)"},
+		{name: "issue/1099-boundary-in-outer",
+			sql: "SELECT COUNT(*) AS c FROM lat_ord a WHERE a.total IN " +
+				"(SELECT s.rk FROM (SELECT r.amount AS rk FROM lat_ord b LEFT JOIN lat_item r " +
+				"ON r.amount = b.total AND r.amount < 60) s)"},
+
 		// #1095 — the ORDER half of an aggregate aliased like its group key's
 		// source column, above a JOIN.
 		{name: "issue/1095",

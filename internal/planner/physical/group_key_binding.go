@@ -4,6 +4,7 @@ package physical
 import (
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -50,22 +51,12 @@ func resolveShuffleKey(key string, child *logical.Node, published map[*logical.N
 				return stop
 			}
 			switch {
-			case proj != nil && proj.Column != "" && !strings.EqualFold(projSourceName(proj), resolved):
-				// THE QUALIFIER-PRESERVING SPELLING, which is the one
-				// `resolveRenameSource` has always chased and the one the
-				// stream really carries: a block's item written `o2.id AS k`
-				// names ONE of the relations inside the block, and chasing
-				// the bare `proj.Column` threw that away. Where the block is
-				// itself a JOIN both of its relations answer to `id`, so the
-				// outer join keyed on the wrong one — `SELECT DISTINCT o.id,
-				// s.k FROM lat_ord o JOIN (SELECT o2.id AS k FROM lat_item i2
-				// JOIN lat_ord o2 ON o2.id = i2.order_id) s ON s.k = o.id`
-				// paired rows where `s.k <> o.id` on the three DAG arms
-				// (#1099). The key is resolved against the stream with
-				// `exec.ColumnIndexFallback`, exact spelling first and the
-				// qualifier stripped on a miss, so a block whose stream
-				// carries the column bare is unaffected.
-				resolved = projSourceName(proj)
+			case proj != nil && proj.Column != "" &&
+				!strings.EqualFold(projKeySpelling(proj, n), resolved):
+				// THE SPELLING THE PRODUCING STREAM CARRIES, which is the
+				// bare source name except where the block holds two relations
+				// answering to it — see projKeySpelling (#1099).
+				resolved = projKeySpelling(proj, n)
 			case proj != nil && proj.Column == "" && bare != "" && !strings.EqualFold(bare, resolved):
 				// A COMPUTED output (`COUNT(*) + 1 AS k`) has no source
 				// column to chase. It exists on the DAG only under its own
@@ -662,4 +653,95 @@ func aggregateOutputName(n *logical.Node, col string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// projKeySpelling is the name a KEY into this block's item reaches the
+// producing stream under.
+//
+// A plain rename publishes its SOURCE column, because an ordinary Project
+// emits no stage — and the source is spelled bare, because that is how the
+// stream carries it. With ONE exception, and it is the one #1099 is: where the
+// block's body is itself a JOIN and BOTH of its relations answer to that bare
+// name, the join qualifies the build's copy by its own alias, so the stream
+// carries `o2.id` and `id` side by side and only the qualified spelling names
+// one of them. Chasing the bare name there let the OUTER join key on
+// `lat_item`'s id instead of `lat_ord`'s:
+//
+//	SELECT DISTINCT o.id, o.customer, s.c, s.k FROM lat_ord o JOIN
+//	  (SELECT o2.customer AS c, o2.id AS k FROM lat_item i2
+//	   JOIN lat_ord o2 ON o2.id = i2.order_id) s ON s.k = o.id
+//	-- PostgreSQL 17.11: two rows; the three DAG arms: three, two of them
+//	-- pairing rows where s.k <> o.id
+//
+// The count is the test and not the qualifier's presence, because a qualifier
+// the stream does not carry is not free: every binding resolves it
+// (`exec.ColumnIndexFallback` strips one on a miss), but
+// `exec.HashJoin.FixKeyAssignment` asks whether a key is "in the build schema"
+// with an EXACT-name map, reads a spelling the build emits bare as "not in the
+// build", and SWAPS a correctly assigned pair — after which a null-aware anti
+// join keys on the probe's column and loses NOT IN's NULL
+// (`TestTwoPathInvariance/NotInSubqueryDerivedInnerNullInList`).
+func projKeySpelling(proj *logical.Projection, block *logical.Node) string {
+	src := projSourceName(proj)
+	dot := strings.LastIndexByte(src, '.')
+	if dot <= 0 || dot == len(src)-1 {
+		return proj.Column
+	}
+	if relationsPublishing(block, src[dot+1:]) < 2 &&
+		!aggregatePublishesQualified(block, src) {
+		return proj.Column
+	}
+	return src
+}
+
+// aggregatePublishesQualified reports whether an AGGREGATE inside this block
+// publishes a group key under the QUALIFIED spelling src.
+//
+// `exec.PublishedGroupKeyNames` strips a key's qualifier UNLESS stripping
+// would make two columns of the operator's own output share one name — another
+// key, or an AGGREGATE OUTPUT (#1078). That is the second way a stream comes to
+// carry a qualified spelling, and it is the same fact as the join's duplicate
+// qualification one relation up: the producer publishes the bare name twice, so
+// only the qualified one is an address.
+//
+//	WITH g AS (SELECT x.a AS b, SUM(x.b) AS a FROM decpair x GROUP BY x.a)
+//	SELECT g1.a AS a1, g2.b AS b2 FROM g g1 JOIN g g2 ON g1.b = g2.b
+//
+// The key `g1.b` names the CTE's rename of the GROUP KEY; resolving it to the
+// bare `a` bound the aggregate's OUTPUT instead, so the arms joined on the SUM
+// — whose values are all non-NULL — and a fifth row arrived that PostgreSQL's
+// `NULL = NULL` excludes (arc K1's `968 PINNED` cell, closed here).
+func aggregatePublishesQualified(block *logical.Node, src string) bool {
+	if block == nil || len(block.Children) != 1 {
+		return false
+	}
+	agg := findAggregateAncestor(block.Children[0])
+	if agg == nil || len(agg.GroupBy) == 0 {
+		return false
+	}
+	want := strings.TrimSpace(src)
+	for _, n := range exec.PublishedGroupKeyNames(agg.GroupBy, agg.GroupByPublish,
+		logicalAggOutNames(agg), false) {
+		if strings.EqualFold(strings.TrimSpace(n), want) {
+			return true
+		}
+	}
+	return false
+}
+
+// relationsPublishing counts the relations inside a subtree whose own columns
+// include this bare name — the join's duplicate-qualification test, asked of
+// the logical plan.
+func relationsPublishing(n *logical.Node, bare string) int {
+	if n == nil || bare == "" {
+		return 0
+	}
+	lc := strings.ToLower(strings.TrimSpace(bare))
+	hits := 0
+	for _, cols := range subtreeNamingOf(n).aliasCols {
+		if cols[lc] {
+			hits++
+		}
+	}
+	return hits
 }
