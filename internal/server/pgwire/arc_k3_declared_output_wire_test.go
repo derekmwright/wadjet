@@ -72,9 +72,17 @@ func TestArcK3TheWireDeclaresTheBlocksProjection(t *testing.T) {
 		{"lateral_with_a_computed_default", `SELECT * FROM j1ord o LEFT JOIN LATERAL (` +
 			`SELECT COUNT(*) + 1 AS n FROM j1item WHERE order_id = o.id) s ON true`,
 			[]string{"id", "customer", "total", "n"}, ""},
+		// The second lateral correlates on an EQUALITY. It read `s.mx` — the
+		// FIRST lateral's output — through `amount >= s.mx` until arc L1, and
+		// that spelling is refused now (0A000): a lifted correlated predicate
+		// that is not an equality is evaluated over the body's OUTPUT, and an
+		// AGGREGATED body publishes no `amount` to evaluate it against. The
+		// property this cell holds is the two laterals' PUBLISHED LIST, which
+		// the equality spelling exercises identically; the shape it lost is
+		// gated by its values in coordinator.TestArcD5CorrelationMatchesPostgres.
 		{"two_laterals_publish_bare_names", `SELECT * FROM j1ord o JOIN LATERAL (` +
 			`SELECT MAX(amount) AS mx FROM j1item WHERE order_id = o.id) s ON true ` +
-			`JOIN LATERAL (SELECT MIN(amount) AS mn FROM j1item WHERE amount >= s.mx) s2 ` +
+			`JOIN LATERAL (SELECT MIN(amount) AS mn FROM j1item WHERE order_id = o.id) s2 ` +
 			`ON true`,
 			[]string{"id", "customer", "total", "mx", "mn"}, ""},
 

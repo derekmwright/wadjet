@@ -133,14 +133,19 @@ func TestKnownSetOperationTwoPathSplits(t *testing.T) {
 		})
 	}
 
-	// A DECLARED-TYPE split rather than a refusal: `MAX` over a CTE inside a
-	// LATERAL is scale 2 on the single-process path where the stage DAG and
-	// PostgreSQL are scale 4. The same number under two declarations, and only
-	// with a CTE inside the LATERAL — the same aggregate over a CTE without a
-	// LATERAL, and over a LATERAL without a CTE, agrees on both paths. Newly
-	// REACHABLE when a block's own WITH came into scope (#684); before that the
-	// shape answered four NULL rows there.
-	t.Run("max_over_a_cte_inside_a_lateral_declares_a_narrower_scale", func(t *testing.T) {
+	// CLOSED at arc L1 (#1111), and asserted rather than pinned. `MAX` over a
+	// CTE inside a LATERAL was scale 2 on the single-process path where the
+	// stage DAG and PostgreSQL are scale 4 — the same number under two
+	// declarations, and only with a CTE inside the LATERAL.
+	//
+	// The CTE was never the mechanism. The body published `dx`, a name the
+	// ENCLOSING relation also carries, and the lateral was an arm with no
+	// alias for the join to qualify its duplicate by — so the join DROPPED the
+	// body's column and `t.dx` bound the outer row's own `dx`, which is
+	// DECIMAL(9,2). The single-process path read the outer value; the DAG read
+	// the lateral's. The lateral's subtree root carries the alias the query
+	// wrote now, and both paths answer PostgreSQL's 12.7500.
+	t.Run("max_over_a_cte_inside_a_lateral_declares_one_scale", func(t *testing.T) {
 		sql := fmt.Sprintf(`SELECT t.dx AS v FROM %s a, LATERAL (WITH c AS (SELECT dx FROM %s) `+
 			`SELECT MAX(dx) AS dx FROM c) t`, sodJoinA, sodJoinB)
 		sres, err := tmdRunSingle(ctx, single, sql)
@@ -151,16 +156,14 @@ func TestKnownSetOperationTwoPathSplits(t *testing.T) {
 		if err != nil {
 			t.Fatalf("dag: %v\n  SQL: %s", err, sql)
 		}
-		s := fmt.Sprintf("%v", sres.Rows[0]["v"])
-		d := fmt.Sprintf("%v", dres.Rows[0]["v"])
-		if s == d {
-			t.Errorf("the two paths now declare one scale (%q), so this split is closed: delete "+
-				"the pin and assert PostgreSQL's 12.7500 on both.\n  SQL: %s", s, sql)
-			return
-		}
-		if s != "12.75" || d != "12.7500" {
-			t.Errorf("the split moved: single %q, dag %q; it was single 12.75 (scale 2) against "+
-				"dag 12.7500 (scale 4, which is PostgreSQL's)\n  SQL: %s", s, d, sql)
+		for arm, got := range map[string]string{
+			"single": fmt.Sprintf("%v", sres.Rows[0]["v"]),
+			"dag":    fmt.Sprintf("%v", dres.Rows[0]["v"]),
+		} {
+			if got != "12.7500" {
+				t.Errorf("the %s arm answered %q, want 12.7500 (PostgreSQL 17.11)\n  SQL: %s",
+					arm, got, sql)
+			}
 		}
 	})
 }

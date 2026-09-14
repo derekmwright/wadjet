@@ -208,20 +208,31 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 		// `s2.mn` where PostgreSQL and the single-process path publish `mx`,
 		// `mn`. An aggregate's output is not its table's columns, so the walk
 		// stops there and the two builds are not a repeated scan.
+		//
+		// The SECOND lateral correlates on an EQUALITY. It read `s.mx` — the
+		// first lateral's output — through `amount >= s.mx` until arc L1, and
+		// that spelling is refused now (0A000, ADR-0021 §1q): a lifted
+		// correlated predicate that is not an equality is evaluated over the
+		// body's OUTPUT and an AGGREGATED body publishes no `amount` to
+		// evaluate it against. Its `want` here recorded `mn = NULL` — the
+		// predicate DROPPED from the plan, which is the wrong value arc D5
+		// pinned — so nothing about #981's property is lost by writing the
+		// correlation the way it works; the equality spelling publishes the
+		// same two bare names and now carries real values too.
 		{name: "981/nested-laterals-publish-bare-names",
 			sql: `SELECT * FROM lat_ord o JOIN LATERAL (SELECT MAX(amount) AS mx ` +
 				`FROM lat_item WHERE order_id = o.id) s ON true JOIN LATERAL (` +
-				`SELECT MIN(amount) AS mn FROM lat_item WHERE amount >= s.mx) s2 ` +
+				`SELECT MIN(amount) AS mn FROM lat_item WHERE order_id = o.id) s2 ` +
 				`ON true ORDER BY o.id`,
-			want: `id,customer,total,mx,mn | 1,Alice,150,100,NULL | 2,Bob,200,125,NULL | ` +
+			want: `id,customer,total,mx,mn | 1,Alice,150,100,50 | 2,Bob,200,125,75 | ` +
 				`3,Carol,0,NULL,NULL`},
 		{name: "981/nested-laterals-two-inner-items",
 			sql: `SELECT * FROM lat_ord o JOIN LATERAL (SELECT MAX(amount) AS mx ` +
 				`FROM lat_item WHERE order_id = o.id) s ON true JOIN LATERAL (` +
-				`SELECT MIN(amount) AS mn, MAX(id) AS zz FROM lat_item WHERE amount >= s.mx) s2 ` +
+				`SELECT MIN(amount) AS mn, MAX(id) AS zz FROM lat_item WHERE order_id = o.id) s2 ` +
 				`ON true ORDER BY o.id`,
-			want: `id,customer,total,mx,mn,zz | 1,Alice,150,100,NULL,NULL | ` +
-				`2,Bob,200,125,NULL,NULL | 3,Carol,0,NULL,NULL,NULL`},
+			want: `id,customer,total,mx,mn,zz | 1,Alice,150,100,50,2 | ` +
+				`2,Bob,200,125,75,4 | 3,Carol,0,NULL,NULL,NULL`},
 		// THE CONTROL FOR THE MARKING: a real self-join over one table still
 		// qualifies, which is what the pass was written for (Q07's shape).
 		{name: "981/ctl-a-self-join-still-qualifies",
