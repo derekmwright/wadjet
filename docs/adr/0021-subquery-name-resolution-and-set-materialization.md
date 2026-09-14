@@ -1794,6 +1794,42 @@ CTE's rows (#1066). The list is the block's own published namespace, ADR-0026
 §9 applied to a recursive item: a set operation publishes its LEFT arm's names,
 and an explicit column list renames them positionally.
 
+**AND THE PUBLISHED LIST IS ARITY-CHECKED, AND READ BY THE STAR.** Two consumers
+of that list were found by the round-2 review and are part of this section, not
+a follow-up:
+
+- `physical.registerCTE` splits on `cte.Recursive` and the recursive branch
+  returned straight out of `validateBlock`, so a COLUMN-ALIAS LIST over a
+  recursive item was never counted. `OverlayColumnAliases` renames the leading
+  columns positionally and says nothing about a list that is too long, so
+  `WITH RECURSIVE r(w,x,y) AS (…two-column body…)` published a third column
+  nothing produces and the statement answered ONE ROW OF NULL where the CTE has
+  three rows — PostgreSQL 17.11 raises `42P10`, and the plain-CTE and
+  derived-table spellings already raised that exact sentence. **A published list
+  is counted against its alias list wherever it is built**, which is one check
+  in one place per builder and not a rule per spelling.
+- `logical.relationOutputColumns` treats a node that NAMES itself as a block and
+  asks `blockOutputProjection` for its list. A recursive CTE reference is a named
+  block with NO projection under it, so `SELECT r.*` was refused — *"a `r.*`
+  expands only from a relation whose column list is known"* — where the BARE star
+  over the same relation answered. The headline is the answer: the reference
+  publishes a list, and the qualified star is one more consumer. The list still
+  comes from `publishedScanColumns`, which asks the security barrier first, so
+  the one-path rule (`TestOnlyOnePathReadsAScanColumnListForAStar`) is unweakened.
+
+**A CORRELATED FROM ITEM IS NOT A SCOPE QUESTION.** The body's own `WITH` is in
+scope for the body — that is what this section settles — but an outer reference
+written INSIDE a WITH item's own body is something else: a relation in the FROM
+clause whose body reads the ENCLOSING row, which is `LATERAL` semantics, and
+which this engine plans as its own query block. `EXISTS (WITH n AS (SELECT z.id
+FROM t z WHERE z.id = o.id) SELECT 1 FROM n)` is refused on all five arms, and so
+is the derived-table spelling of the same shape, which is the measurement that
+says which boundary it is. The two spellings do not say the SAME thing:
+`physical.refuseOuterLevelReference` names the mechanism and its two workarounds
+for the derived table, while the WITH item falls out as the generic `42P01` —
+the CTE body is validated with no enclosing diagnostic to classify the reference
+against. Recorded, with `docs/sql-reference.md` narrowed to the measurement.
+
 **NOT SETTLED, with the mechanism.** A correlated subquery whose body IS a set
 operation is still refused (`0A000`), and so is one holding a set operation one
 level down. Closing it takes two hunks, not one: a set-operation arm in
@@ -1805,8 +1841,9 @@ trips on (`server.TestPolicyMaskingIsPlanTimeOnEveryDoor`) — so the two must
 land together, with that gate as the arbiter. Until then the shape is loud.
 
 `coordinator.TestArcR1ACorrelatedBodyAnswersPostgresRowSetOnEveryArm` is the
-gate: 450 cells of {operator} × {where the outer column sits} × {what the body
-holds} on five arms, every want live PostgreSQL 17.11, with those two
+gate: 469 cells of {operator} × {where the outer column sits} × {what the body
+holds} on five arms, plus the alias-list arity matrix, the star over a recursive
+CTE and the correlated FROM item, every want live PostgreSQL 17.11, with those
 boundaries and the DAG's recursive-CTE gap (#960) pinned by the sentence each
 refusal says.
 

@@ -1818,8 +1818,10 @@ a query that reads a recursive CTE fails on a distributed plan with the stage
 builder's own message, `stage scan-0 has no dependencies and no ScanFiles`.
 On the single-process path a recursive CTE is a relation like any other: its
 columns are join keys, so `… FROM t u JOIN r ON r.v = u.id` answers the matched
-rows rather than the cross product, and an explicit column list (`WITH
-RECURSIVE r(w) AS …`) renames them positionally.
+rows rather than the cross product; `SELECT r.*` expands to them; and an explicit
+column list (`WITH RECURSIVE r(w) AS …`) renames the LEADING ones positionally —
+a list LONGER than the body publishes is `42P10`, PostgreSQL's own refusal, the
+same one a plain CTE's and a derived table's over-long list raises.
 A misspelt constant in the CTE's body is refused before that, at plan time, on
 every plan — the seed and the recursive term alike, and whether or not the
 outer query reads the CTE at all.
@@ -1837,15 +1839,24 @@ SELECT v FROM (WITH c AS (SELECT id, dx FROM o) SELECT dx AS v FROM c) t
 ```
 
 A `WITH` may also be written inside a SUBQUERY — under `EXISTS`, `NOT EXISTS`,
-`IN`, `NOT IN`, `= ANY`, `<> ALL` or a scalar `(SELECT …)` — correlated or not,
-and its items are in scope for that body and shadow a base table of the same
-name:
+`IN`, `NOT IN`, `= ANY`, `<> ALL` or a scalar `(SELECT …)` — and its items are in
+scope for that body and shadow a base table of the same name. The body may be
+correlated: the outer reference is read from the body's own clauses, the WITH
+item included as a relation it may read.
 
 ```sql
 SELECT id FROM t
 WHERE EXISTS (WITH n AS (SELECT 1 AS v UNION ALL SELECT 2)
               SELECT v FROM n WHERE v = t.id)
 ```
+
+What that does NOT cover is an outer reference written INSIDE the WITH item's
+own body — `EXISTS (WITH n AS (SELECT z.id FROM t z WHERE z.id = o.id) SELECT 1
+FROM n)`. That is a correlated FROM item, which this engine plans as its own
+query block, and it is refused (`42P01`, "missing FROM-clause entry"), on every
+arm, exactly as the derived-table spelling of the same shape is — that one names
+the boundary and its two workarounds. Lift the correlated predicate out of the
+WITH item, or write the correlated relation as a `LATERAL` join.
 
 One divergence: where a block's own item has the SAME NAME as one of the
 enclosing query's, PostgreSQL reads the inner definition and wadjet reads the
