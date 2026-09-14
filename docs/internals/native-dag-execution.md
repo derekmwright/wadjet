@@ -448,7 +448,13 @@ is MATERIALIZED instead" (`join_input_projection.go`, ADR-0025):
 - a SET OPERATION arm publishes a relation of its OWN: the stage projects every
   arm onto the operation's column list, so the stream the join receives carries
   the operation's columns and nothing of any scan below it
-  (`setOpArmPublishesItsOwnList`, #1102). Naming it after the first scan made
+  (`setOpArmPublishesItsOwnList`, #1102). An arm whose SELECT list the AGGREGATE
+  absorption materialized is the same case one producer over — the stream is
+  the aggregate's own relation, so the enclosing alias describes it — except
+  under a DEPENDENT join, where the arm is a plan OF the outer side's rows
+  rather than a relation the query wrote, and naming it by the enclosing alias
+  narrowed a declared DECIMAL scale on the wire (measured, arc R2 round 2).
+  Naming it after the first scan made
   `a.id` over `(SELECT id FROM lat_ord UNION …) a` bind the OTHER join arm's
   `id` — a wrong VALUE that followed which side the plan chose to build.
 - once an arm's SELECT list is materialized its stream is the arm's OUTPUT, so
@@ -1005,6 +1011,25 @@ Without them `buildSchema` stayed nil and the joined schema carried only the
 preserved side — values still read NULL through the projection's missing-name
 fallback, but `COUNT(col)` degenerated to `COUNT(*)` and `IS NULL` matched
 nothing (#348, same declare-on-the-wire shape as #329's `AggSpec.OutputType`).
+
+**The declaration is a claim about the STREAM, and three narrowings broke it**
+(arc R2 round 2). A side whose block body is itself a JOIN emits a column whose
+bare name another relation in that block already published — QUALIFIED by the
+relation that owns it — and the declaration DROPPED it as a duplicate; a
+block's want list arrives in the CONSUMER's spelling (`c` for `o2.customer AS
+c`) while the walk enumerates the producer's, so a renamed column was dropped
+as unwanted; and `markCoPathingSelfJoinBuilds` qualifies EVERY build column of
+a co-pathing join after every declaration is written. Each made an empty
+partition write a file of a different width or a different name from its
+siblings' — `declares 2 columns where an earlier file of the same stage input
+declared 3` (ADR-0010) — on every outer join over a join-bodied derived arm,
+and where the declaration merely lost the NULL-extended column the row read the
+other relation's value instead (`3,3` for PostgreSQL's `3,NULL`). The first two
+are fixed in `declaredJoinSchema` itself and the third in
+`respellDeclaredJoinSideSchemas`, which settles only the QUALIFIER and only for
+sides whose producing chain carries that flag: the stream model spells a column
+with the planner's case and the executor keeps the catalog's, so copying the
+model's spelling whole is the same refusal from the other side.
 
 **Empty-side short circuits.** Two exist and both had to learn the join type:
 

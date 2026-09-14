@@ -2473,22 +2473,50 @@ spelling the arm's stream really carries.**
    arm's name back for the gather's rename, wherever the arm holds exactly one
    relation and computes no relation of its own.
 
-The residue is the AGGREGATE-terminated arm: an aggregate publishes a relation
-of its own — its keys and outputs, under the names IT decided — while the DAG
-still qualifies them by the scan below. Closing it is item 1's move for an
-aggregate, and it is deferred rather than done because that alias decides the
-spelling of every grouped join arm in the corpus. It is pinned per arm in
+5. **An OUTER join's DECLARED side schema describes the stream its siblings
+   write (round 2).** The task whose build partition is EMPTY shapes its
+   NULL-extended rows from the side's declaration, so a declaration narrower
+   than the stream is a file of the wrong WIDTH beside its siblings —
+   `declares 2 columns where an earlier file of the same stage input declared
+   3` (ADR-0010) — and where it merely LOST the NULL-extended column the row
+   read the other relation's value: `3,3` for PostgreSQL's `3,NULL`. Three
+   narrowings did it: a duplicate bare name DROPPED where a join under that
+   side emits it qualified; a want list spelled in the CONSUMER's names against
+   a walk that enumerates the producer's; and `markCoPathingSelfJoinBuilds`
+   qualifying every build column of a co-pathing join AFTER every declaration
+   was written. The first two are the declaration's own; the third is settled
+   over the finished graph, qualifier only, for the sides that flag reaches.
+
+**The residue is the NESTED GROUPED arm, and it is two cells.** An aggregate
+publishes a relation of its own — its keys and outputs, under the names IT
+decided — so an arm whose SELECT list the aggregate absorption MATERIALIZED is
+named by the query (item 1's move, one producer over), and the four cells
+deferred in round 1 are two now. Round 1's stated reason for that deferral was
+not the measured one: the TPC-H aliases do not move — the stage-dump golden,
+the distribution snapshot and both invariance arms are byte-identical. What the
+measurement does say is a BOUNDARY: a DEPENDENT join's arm is excluded, because
+a decorrelated LATERAL's arm is a plan OF the outer side's rows rather than a
+relation the query wrote (§3c), and naming it by the enclosing alias moved
+`MAX` over a CTE inside a LATERAL from PostgreSQL's declared scale on the DAG
+to the single-process arm's narrower one — a wrong declaration traded for a
+right row set, which is not a trade. The two cells that remain are the block
+that renames TWO blocks above the aggregate, with the inner block's Sort
+between them: no list is materialized there, and marking such an arm anyway
+trades one wrong answer for another. They are pinned per arm in
 `coordinator.arc_r2_pins_test.go` with that mechanism.
 
-Gate: `coordinator.TestR2AJoinArmIsKeyedAndNamedTheSameOnEveryArm` — 449 cells,
+Gate: `coordinator.TestR2AJoinArmIsKeyedAndNamedTheSameOnEveryArm` — 501 cells,
 {a plain derived block, the four set operations, join-bodied, grouped, grouped
 with an aggregate aliased like the key's source, nested renamed, nested renamed
 over a grouped inner block, a block carrying its own sort key, the same with a
 LIMIT} × {names nothing else spells, names the other side spells too} × {left,
 right, both sides} × {an explicit list, a qualified reference alone, a star,
 DISTINCT, an ORDER BY above, a GROUP BY above}, on five arms against live
-PostgreSQL 17.11. The name-collision dimension is load-bearing: with names
-nothing else spells, three of the five classes answer correctly by luck.
+PostgreSQL 17.11, plus {LEFT, RIGHT, FULL} × {join-bodied, set-op, grouped,
+nested renamed} × {list, DISTINCT, star} with the arm on the NULL-supplying
+side. The name-collision dimension is load-bearing: with names nothing else
+spells, three of the five classes answer correctly by luck. So is the OUTER
+one: an inner join never asks a task to shape a row its data did not produce.
 
 ## §9 A derived block publishes its VISIBLE list, and a qualified star reads it
 

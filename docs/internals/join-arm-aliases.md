@@ -77,3 +77,21 @@ strictly better than no qualification at all.
 
 Gate: `coordinator.TestR2AJoinArmIsKeyedAndNamedTheSameOnEveryArm`, the
 `{union-all,union,intersect,except}*` rows of the join-arm table, five arms.
+
+## Amendment, 2026-09-14 (arc R2 round 2)
+
+And a FOURTH case, which is the third one's twin: an arm whose SELECT list the
+AGGREGATE ABSORPTION materialized onto its stage
+(`absorbAggregateOutputProjection`). The stream there is the aggregate's own
+relation — its keys under the names `exec.PublishedGroupKeyNames` decides and
+its outputs under the planner's — so the one name the enclosing query writes
+describes all of it, and the scan below it describes none of it. Two copies of
+one grouped block were both qualified by the same inner scan name and each
+reference bound the PROBE's copy: every row came back paired with itself.
+
+NOT under a DEPENDENT join. A decorrelated LATERAL's arm is a plan OF the outer
+side's rows rather than a relation the query wrote (ADR-0026 §3c), and naming it
+by the enclosing alias moved `MAX` over a CTE inside a LATERAL from
+PostgreSQL's declared scale on the DAG (12.7500) to the single-process arm's
+12.75 — a wrong declaration on the wire traded for a right row set, which is
+not a trade. Measured both ways in `TestKnownSetOperationTwoPathSplits`.
