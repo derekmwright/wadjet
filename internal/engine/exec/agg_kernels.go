@@ -125,23 +125,24 @@ func resolveAggUpdaterNoNull(agg AggColumn, typ batch.TypeID) kernel.RowAggUpdat
 // requires at every value-producing site. As a bare fmt.Errorf this reached
 // clients as the internal-error class, so nothing on the wire distinguished
 // "your total is too big" from "the server broke".
-// floatSumOverflow reports a FLOAT sum that left float8's (or, for a real
-// sum, float4's) range with every contributing value finite. PostgreSQL's
-// message and SQLSTATE, measured on 17.11: `value out of range: overflow`,
-// 22003.
-func floatSumOverflow(col string) error {
-	if col == "" {
-		col = "sum"
-	}
-	return sqlerr.New("22003", "value out of range: overflow (%s)", col)
-}
-
 func decimalSumOverflow(col string) error {
 	if col == "" {
 		col = "sum"
 	}
 	return sqlerr.New("22003", "SUM over a DECIMAL column overflowed the 128-bit exact accumulator (%s): "+
 		"the running total is outside the range DECIMAL(38) can represent", col)
+}
+
+// floatSumOverflow reports a FLOAT sum that left float8's range — or float4's,
+// for a SUM over a REAL column — with every contributing value FINITE. It is
+// decimalSumOverflow's float sibling, read at the same emit-time check, and it
+// carries PostgreSQL's own message and SQLSTATE, measured on 17.11:
+// `value out of range: overflow`, 22003.
+func floatSumOverflow(col string) error {
+	if col == "" {
+		col = "sum"
+	}
+	return sqlerr.New("22003", "value out of range: overflow (%s)", col)
 }
 
 // integerSumOverflow reports a SUM whose INT64 carrier wrapped. It is
