@@ -1089,6 +1089,11 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
         `CREATE TABLE p AS SELECT CAST(70000 AS PORT)` are all 22003 naming the
         value and the type, through the writer's own check
         (`parquet.NetworkIntRangeError`) so the two boundaries cannot drift.
+        The Go-BOX door joined them in round 3 — `db.NewIngester().Ingest`
+        with `int32(65536)` put that number at REST while the same value as
+        text was refused — and the check lives at the leaf every box narrows
+        through, asked BEFORE the carrier's width so the refusal names the
+        same range at every magnitude.
         ARITHMETIC keeps int4's rules and may leave the range without error —
         `port + 70000` answers — which is PostgreSQL's `smallint + 1` rule and
         leaves #901's position intact: that ADR entry is about the arithmetic
@@ -1113,12 +1118,22 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
         boxed-pair layer a type-specific literal reading at five sites, and
         deciding which of the two the type MEANS; measured, not guessed, and
         left as a filing candidate rather than half-done.
-     4. **A quoted FRACTIONAL literal rounds at the cast and the
-        `INSERT … SELECT` door.** `CAST('2.5' AS PORT)` is 3 and so is
-        `CAST('2.5' AS INTEGER)`, where PostgreSQL answers 22P02 for both:
-        the decimal reader precedes the text grammar and cannot tell a DECIMAL
-        box from a quoted literal. It is int4's cell rather than PORT's — the
-        writer doors refuse it — and belongs to the numeric family's lane.
+     4. **A quoted FRACTIONAL literal rounds at the BARE integer cast.**
+        (Narrowed 2026-09-15, round 3.) `CAST('2.5' AS INTEGER)` is 3 where
+        PostgreSQL answers 22P02, because `castDecimalToInt` reads TEXT with
+        no type knowledge and cannot tell a DECIMAL box — which must keep
+        rounding, as PG's numeric→int does — from a quoted literal. It is
+        int4's cell and belongs to the numeric family's lane (FC-7).
+
+        What was ALSO in this residual and is now FIXED: the same text reached
+        REST. `CAST('2.5' AS PORT)`, `CAST(string_col AS PORT)`,
+        `INSERT INTO t (port_col) SELECT '2.5'` and a CTAS over the cast all
+        stored 3, while the VALUES, COPY, UPDATE and ingester doors said
+        22P02. The cast now asks the operand's SHAPE — a quoted literal or a
+        STRING column is text and takes the type's own reader; a DECIMAL
+        column or a numeric literal still rounds — and the assignment path
+        coerces an unknown-typed literal with the TARGET's input function,
+        which is the rule #1088 relies on everywhere else.
 
      **PostgreSQL-valid text a bare-address column has no room for is 0A000,
      ONE class at every door.** (Amended 2026-09-15.) It has two reasons — the
