@@ -1571,7 +1571,7 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 		if cells, exact := resolveWindowExactCells(winVec, inputVec); exact {
 			return windowExactFrames(winVec, inputVec, cells, fr, start, n, wc)
 		}
-		if winVec.Type != batch.TypeFloat64 {
+		if !windowFloatOutputFits(winVec, inputVec, wc.Func) {
 			// A declaration the operator could not reconcile with the input
 			// vector. Writing float sums into any other backing array is the
 			// #361 silent-write class, so the answer is NULL — which is what
@@ -1909,6 +1909,24 @@ func (a *float64FrameAcc) reset(pos int) {
 // the same column is double precision on PostgreSQL).
 func windowRealSum(inputVec *batch.Vector, fn WindowFunc) bool {
 	return fn == WinSum && inputVec != nil && inputVec.Type == batch.TypeFloat32
+}
+
+// windowFloatOutputFits reports whether the inexact SUM/AVG path may write
+// into this output vector at all.
+//
+// float8 is the general answer and float4 is the one exception PostgreSQL
+// makes: `sum(real)` is real there (#1118), and only for SUM — `avg(real)` is
+// double precision. Anything else is a declaration the operator cannot
+// reconcile with the input, and its rows stay NULL rather than becoming a
+// silent write into the wrong backing array.
+func windowFloatOutputFits(winVec, inputVec *batch.Vector, fn WindowFunc) bool {
+	switch winVec.Type {
+	case batch.TypeFloat64:
+		return true
+	case batch.TypeFloat32:
+		return windowRealSum(inputVec, fn)
+	}
+	return false
 }
 
 // slide advances the accumulator to [lo, hi), retracting before it adds and

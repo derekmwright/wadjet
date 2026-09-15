@@ -700,9 +700,9 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 			return nil // every row NULL: SQL says NULL, not 0
 		}
 		if wc.Func == WinAvg {
-			vec.Float64Data[r] = s.stats.sum[i] / float64(s.stats.cnt[i])
+			windowWriteFloat(vec, r, s.stats.sum[i]/float64(s.stats.cnt[i]))
 		} else {
-			vec.Float64Data[r] = s.stats.sum[i]
+			windowWriteFloat(vec, r, s.stats.sum[i])
 		}
 		vec.Nulls.SetValid(r)
 
@@ -970,9 +970,9 @@ func (s *globalWindowStreamer) backfillPeerFrame(end int64) error {
 					// The rows that CONTRIBUTED, not `end`: a NULL is not
 					// part of an aggregate's input, and dividing by the row
 					// count answered a number PostgreSQL does not.
-					vec.Float64Data[lr] = s.runSum[i] / float64(s.runNonNull[i])
+					windowWriteFloat(vec, lr, s.runSum[i]/float64(s.runNonNull[i]))
 				} else {
-					vec.Float64Data[lr] = s.runSum[i]
+					windowWriteFloat(vec, lr, s.runSum[i])
 				}
 				vec.Nulls.SetValid(lr)
 			case WinCount:

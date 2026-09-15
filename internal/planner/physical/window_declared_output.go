@@ -141,6 +141,12 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 					}
 					return expr.Decl(out)
 				}
+				if fn == "sum" && d.ID == parquet.TypeFloat32 {
+					// The computed-argument twin of the bare column's real
+					// arm below: `SUM(r * 1) OVER ()` is real on the server
+					// exactly as `SUM(r) OVER ()` is (#1118).
+					return expr.Decl(parquet.TypeFloat32)
+				}
 			}
 		}
 		if minMax {
@@ -188,6 +194,16 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 			out, prec, scale, ok := exec.IntegerAccOutputType(fn == "avg",
 				windowBareArgWidth(inDecls, col, t.ID))
 			if !ok {
+				if fn == "sum" && t.ID == parquet.TypeFloat32 {
+					// `pg_typeof(sum(real))` is real windowed exactly as it
+					// is grouped, and the accumulator has folded at float4's
+					// width since #950. The GROUPED spelling declared real
+					// from that moment (aggSpecOutputType) and this one kept
+					// double, so one column's digits went out under OID 700
+					// or 701 depending on the spelling (#1118). AVG stays
+					// double, which is what the server declares for it.
+					return expr.Decl(parquet.TypeFloat32)
+				}
 				return expr.Decl(windowOutputType(fn))
 			}
 			if out == parquet.TypeDecimal {

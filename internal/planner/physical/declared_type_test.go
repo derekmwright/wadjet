@@ -434,6 +434,7 @@ func TestWindowSpecOutputType(t *testing.T) {
 		"n_seen_at":   parquet.TypeTimestamp,
 		"n_rate":      parquet.TypeDecimal,
 		"n_tags":      parquet.TypeArray,
+		"n_share":     parquet.TypeFloat32,
 	}
 	scan := func(cols map[string]parquet.TypeID) *logical.Node {
 		return &logical.Node{Type: logical.NodeScan, TableName: "nation", ScanColTypes: cols}
@@ -479,6 +480,14 @@ func TestWindowSpecOutputType(t *testing.T) {
 		// keeps the name list's float64 (#987).
 		{"sum over an int4 is bigint", win(scan(nation)), "sum", "n_nationkey", parquet.TypeInt64},
 		{"avg over an int4 is numeric", win(scan(nation)), "avg", "n_nationkey", parquet.TypeDecimal},
+		// `pg_typeof(sum(real))` is real and `pg_typeof(avg(real))` is double
+		// precision, windowed exactly as grouped — the accumulator has folded
+		// at float4's width since #950 and only the declaration lagged
+		// (#1118). The AVG row beside it is what keeps the arm from widening
+		// into the function PostgreSQL does NOT narrow.
+		{"sum over a real is real", win(scan(nation)), "sum", "n_share", parquet.TypeFloat32},
+		{"avg over a real stays double precision", win(scan(nation)), "avg", "n_share", parquet.TypeFloat64},
+		{"min over a real is real", win(scan(nation)), "min", "n_share", parquet.TypeFloat32},
 		{"sum over a TIMESTAMP keeps float64", win(scan(nation)), "sum", "n_seen_at", parquet.TypeFloat64},
 		{"sum over a DATE keeps float64", win(scan(nation)), "sum", "n_founded", parquet.TypeFloat64},
 

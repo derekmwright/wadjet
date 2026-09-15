@@ -316,7 +316,6 @@ func windowExactIntFrames(winVec, inputVec *batch.Vector, cells windowExactCells
 func windowFloat64Frames(winVec, inputVec *batch.Vector, rd windowNumericReader,
 	fr resolvedFrame, start, n int, fn WindowFunc, outCol string) error {
 	acc := float64FrameAcc{real: windowRealSum(inputVec, fn)}
-	out := winVec.Float64Data
 	avg := fn == WinAvg
 	for i := 0; i < n; i++ {
 		lo, hi := fr.bounds(i)
@@ -331,9 +330,9 @@ func windowFloat64Frames(winVec, inputVec *batch.Vector, rd windowNumericReader,
 			continue
 		}
 		if avg {
-			out[start+i] = acc.sum / float64(acc.count)
+			windowWriteFloat(winVec, start+i, acc.sum/float64(acc.count))
 		} else {
-			out[start+i] = acc.sum
+			windowWriteFloat(winVec, start+i, acc.sum)
 		}
 		winVec.Nulls.SetValid(start + i)
 	}
@@ -397,5 +396,30 @@ func windowAccOutputType(fn WindowFunc, declared, in parquet.TypeID) parquet.Typ
 	if out, _, _, ok := IntegerAccOutputType(fn == WinAvg, in); ok {
 		return out
 	}
+	if fn == WinSum && in == parquet.TypeFloat32 {
+		// `pg_typeof(sum(real))` is real, windowed exactly as grouped, and
+		// this accumulator has folded at float4's width since #950
+		// (foldWindowFloatSum). Only the declaration still said double, so
+		// one query put the same digits under OID 700 grouped and 701
+		// windowed (#1118). AVG is deliberately not here: `avg(real)` IS
+		// double precision on the server, and it totals at float8's width.
+		return parquet.TypeFloat32
+	}
 	return parquet.TypeFloat64
+}
+
+// windowWriteFloat stores one float result at the OUTPUT VECTOR's own width.
+//
+// A SUM over a REAL declares real and its accumulator folds at float4's width
+// (#1118, #950), so the vector this writes into is a float32 one for that
+// column and a float64 one for every other float aggregate — AVG(real)
+// included, which is double precision on the server. Every float SUM/AVG
+// writer goes through here so the two evaluators and the spilled path cannot
+// disagree about which vector a window column has.
+func windowWriteFloat(v *batch.Vector, i int, f float64) {
+	if v.Type == batch.TypeFloat32 {
+		v.Float32Data[i] = float32(f)
+		return
+	}
+	v.Float64Data[i] = f
 }
