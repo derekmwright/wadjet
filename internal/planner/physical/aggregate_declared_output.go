@@ -496,6 +496,15 @@ func aggOutputFromInputDecl(fn string, distinct bool, in parquet.TypeID, precisi
 			}
 			return parquet.TypeInt64, 0, 0, true
 		}
+		if name == "sum" && in == parquet.TypeFloat32 {
+			// `sum(real)` is real whether the argument is a COLUMN or an
+			// EXPRESSION — `sum(r + 1.0::real)` is real on 17.11 — and the
+			// accumulator folds at float4's width either way (#950). The bare
+			// arm of aggSpecOutputType has said so since then; this is the
+			// computed one, reachable since a real expression declares real
+			// (#1117).
+			return parquet.TypeFloat32, 0, 0, true
+		}
 		return aggOutputType(fn, distinct), 0, 0, true
 	case "min_by", "max_by":
 		return in, 0, 0, true

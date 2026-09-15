@@ -123,6 +123,39 @@ func inferProjectionDeclTypeConf(node plansql.Node, fallback parquet.TypeID,
 	return expr.Decl(fallback), expr.Undecided
 }
 
+// realArithBothReal reports whether both operands of an arithmetic node are
+// REAL, which is the one pairing PostgreSQL answers in real.
+//
+// Measured on 17.11 over a float4 column: `real + real` and `real * real` and
+// `real / real` are real, while `real + 1.0` is double precision (a numeric
+// literal), `real + 1` is double precision (an integer) and `real + float8` is
+// double precision. So the test is both sides, DECIDED, and FLOAT32 — nothing
+// weaker, because widening the rule would narrow a value the server keeps at
+// float8's width.
+//
+// The DECLARATION is the whole fix. This engine computes `r1 + r2` on the
+// float64 carrier, and the exact sum, difference or product of two float32s is
+// representable in a float64, so rounding it once into a float4 output vector
+// is the correctly-rounded float4 answer — which is why `r + 1.0::real` at
+// 2^24 answered 16777217 under a float8 declaration and answers PostgreSQL's
+// 16777216 under this one (#1117). A result with no float4 is
+// batch.FloatRangeError's 22003, the server's own answer.
+//
+// `%` is excluded: PostgreSQL has no float modulo at all, so there is no
+// server type to follow and wadjet's own answer stays double.
+func realArithBothReal(n *plansql.BinaryOp, decls colDecls) bool {
+	switch n.Op {
+	case "+", "-", "*", "/":
+	default:
+		return false
+	}
+	isReal := func(side plansql.Node) bool {
+		d, c := nodeDeclaredType(side, decls)
+		return c == expr.Decided && d.ID == parquet.TypeFloat32
+	}
+	return isReal(n.Left) && isReal(n.Right)
+}
+
 // intArithDeclaredID is the TypeID an INTEGER expression declares: int4 when
 // the width walk PROVES every operand is int4-domain, int8 otherwise.
 //
@@ -1231,6 +1264,9 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 			if expr.IntArithOn() && intArithAllInt(n, nil, decls) {
 				return expr.Decl(intArithDeclaredID(n, decls)), expr.Decided
 			}
+			if realArithBothReal(n, decls) {
+				return expr.Decl(parquet.TypeFloat32), expr.Decided
+			}
 			return expr.Decl(parquet.TypeFloat64), expr.Decided
 		}
 	case *plansql.UnaryOp:
@@ -1263,8 +1299,13 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 					// minimum, where the store guard raises 22003 —
 					// PostgreSQL's own answer for `-(-2147483648)::int4`.
 					return withExact(expr.Decl(intArithDeclaredID(n, decls))), c
-				case parquet.TypeFloat64, parquet.TypeFloat32:
+				case parquet.TypeFloat64:
 					return withExact(expr.Decl(parquet.TypeFloat64)), c
+				case parquet.TypeFloat32:
+					// `-real` is real on the server, and negation moves no
+					// digit, so the narrower declaration holds every value the
+					// operand did (#1117).
+					return withExact(expr.Decl(parquet.TypeFloat32)), c
 				case parquet.TypeDecimal:
 					// Negation moves no digit, so -d is a value the same
 					// column holds and keeps its exact (p,s) — which is what

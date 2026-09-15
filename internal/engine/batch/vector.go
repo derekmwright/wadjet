@@ -1139,7 +1139,12 @@ func (v *Vector) SetValue(i int, val any) {
 		case float32:
 			v.Float32Data[i] = tv
 		case float64:
-			v.Float32Data[i] = float32(tv)
+			// A widened box narrowing back into a real column, which is the
+			// float twin of the INT32 arm above: `real + real` computes on
+			// the float64 carrier and its result has to fit a float4 or be
+			// PostgreSQL's 22003 rather than a silent ±Inf or zero
+			// (#1117). See FloatRangeError.
+			v.Float32Data[i] = float32OrRaise(tv)
 		case int64:
 			v.Float32Data[i] = float32(tv)
 		case int:

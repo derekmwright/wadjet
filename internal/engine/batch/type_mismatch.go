@@ -67,6 +67,44 @@ func (e *IntegerRangeError) SQLState() string { return "22003" }
 // TypeMismatchError takes: a query error, never a process exit.
 func (e *IntegerRangeError) FatalEvalError() error { return e }
 
+// FloatRangeError reports a write of a FINITE float64 that has no float32 —
+// the float sibling of IntegerRangeError, and the same mechanism: a kernel
+// computes an int4 or a real result on the WIDER carrier (ADR-0012's recorded
+// "every integer spelling is INT64" superset has a float twin), the planner
+// declares the narrow PostgreSQL type because that IS the type
+// (`pg_typeof(real + real)` is real), and the store is the one seam every such
+// kernel crosses.
+//
+// Narrowing without the check is silent and in both directions: 1e39 becomes
+// +Inf and 1e-60 becomes 0, where PostgreSQL 17.11 raises
+// `value out of range: overflow` and `value out of range: underflow` — both
+// measured, for `1e38::real * 10.0::real` and `1e-30::real * 1e-30::real`, and
+// for a bare `1e-60::real` too.
+//
+// The operands are EXEMPT exactly as float_range.go's rule exempts them: an
+// infinity or a NaN that ARRIVES is a value, so a non-finite source narrows to
+// a non-finite float32 and is stored. Only a finite source with no float32 is
+// an error, and only a non-zero source that becomes zero is an underflow.
+type FloatRangeError struct {
+	Val       float64 // the value with no float32, for diagnosis
+	Underflow bool    // true for a non-zero value that narrows to zero
+}
+
+func (e *FloatRangeError) Error() string {
+	if e.Underflow {
+		return "value out of range: underflow"
+	}
+	return "value out of range: overflow"
+}
+
+// SQLState is PostgreSQL's numeric_value_out_of_range, the same class the
+// integer guard and the float8 arithmetic rule raise.
+func (e *FloatRangeError) SQLState() string { return "22003" }
+
+// FatalEvalError implements the exec.FatalEvalPanic contract: a query error,
+// never a process exit.
+func (e *FloatRangeError) FatalEvalError() error { return e }
+
 // VectorWidthError reports a write of a VECTOR value whose component count is
 // not the column's declared dimension — the third member of this file's family
 // and the one that is neither a wrong Go type nor a number out of range: the
@@ -116,6 +154,26 @@ func (v *Vector) int32OrRaise(n int64) int32 {
 		panic(&IntegerRangeError{Dst: v.Type, Val: n})
 	}
 	return int32(n)
+}
+
+// float32OrRaise narrows a float64 box into a float32 or refuses. See
+// FloatRangeError for the rule and for why the operand exemptions are the
+// whole of it.
+//
+//go:noinline
+func raiseFloatRange(f float64, underflow bool) {
+	panic(&FloatRangeError{Val: f, Underflow: underflow})
+}
+
+func float32OrRaise(f float64) float32 {
+	r := float32(f)
+	switch {
+	case math.IsInf(float64(r), 0) && !math.IsInf(f, 0):
+		raiseFloatRange(f, false)
+	case r == 0 && f != 0:
+		raiseFloatRange(f, true)
+	}
+	return r
 }
 
 // int32FromFloatOrRaise is the same guard for a float box. Go's float→int
