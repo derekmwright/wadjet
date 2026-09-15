@@ -148,22 +148,27 @@ func TestTranscendentalFunctionsStayFloat64(t *testing.T) {
 // fraction. The registry's declaration is the shape it was missing.
 func TestIntegerFunctionArithmeticTruncates(t *testing.T) {
 	db := ddrOpen(t)
+	// wantType is PostgreSQL's own declaration for each expression: the
+	// string-length functions answer `integer` there, and so does arithmetic
+	// over them and over integer literals, while `id` is a bigint column and
+	// `id / 2` is bigint (#1070).
 	for _, tc := range []struct {
-		name string
-		sql  string
-		want int64
+		name     string
+		sql      string
+		want     int64
+		wantType parquet.TypeID
 	}{
 		// s is "12.75" on row 1: five characters.
-		{"length over two", "SELECT LENGTH(s) / 2 AS v FROM decdecl WHERE id = 1", 2},
-		{"octet_length over two", "SELECT OCTET_LENGTH(s) / 2 AS v FROM decdecl WHERE id = 1", 2},
-		{"char_length over two", "SELECT CHAR_LENGTH(s) / 2 AS v FROM decdecl WHERE id = 1", 2},
-		{"nested", "SELECT (LENGTH(s) + 1) / 2 AS v FROM decdecl WHERE id = 1", 3},
-		{"modulo", "SELECT LENGTH(s) % 2 AS v FROM decdecl WHERE id = 1", 1},
+		{"length over two", "SELECT LENGTH(s) / 2 AS v FROM decdecl WHERE id = 1", 2, parquet.TypeInt32},
+		{"octet_length over two", "SELECT OCTET_LENGTH(s) / 2 AS v FROM decdecl WHERE id = 1", 2, parquet.TypeInt32},
+		{"char_length over two", "SELECT CHAR_LENGTH(s) / 2 AS v FROM decdecl WHERE id = 1", 2, parquet.TypeInt32},
+		{"nested", "SELECT (LENGTH(s) + 1) / 2 AS v FROM decdecl WHERE id = 1", 3, parquet.TypeInt32},
+		{"modulo", "SELECT LENGTH(s) % 2 AS v FROM decdecl WHERE id = 1", 1, parquet.TypeInt32},
 		// The plain integer forms, unchanged, beside them.
-		{"column over literal", "SELECT id / 2 AS v FROM decdecl WHERE id = 7", 3},
-		{"two literals", "SELECT 7 / 2 AS v FROM decdecl WHERE id = 1", 3},
-		{"negative truncates toward zero", "SELECT (0 - 7) / 2 AS v FROM decdecl WHERE id = 1", -3},
-		{"modulo takes the dividend's sign", "SELECT 7 % (0 - 3) AS v FROM decdecl WHERE id = 1", 1},
+		{"column over literal", "SELECT id / 2 AS v FROM decdecl WHERE id = 7", 3, parquet.TypeInt64},
+		{"two literals", "SELECT 7 / 2 AS v FROM decdecl WHERE id = 1", 3, parquet.TypeInt32},
+		{"negative truncates toward zero", "SELECT (0 - 7) / 2 AS v FROM decdecl WHERE id = 1", -3, parquet.TypeInt32},
+		{"modulo takes the dividend's sign", "SELECT 7 % (0 - 3) AS v FROM decdecl WHERE id = 1", 1, parquet.TypeInt32},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := ddrQuery(t, db, tc.sql)
@@ -171,12 +176,19 @@ func TestIntegerFunctionArithmeticTruncates(t *testing.T) {
 				t.Fatalf("%s returned %d rows, want 1", tc.sql, len(res.Rows))
 			}
 			got := res.Rows[0]["v"]
-			if got != any(tc.want) {
+			// The NUMBER, not the box: every expression here is int4-domain
+			// on PostgreSQL — `length(text)/2` is integer and so is `7/2` —
+			// and this engine declares int4 for them since #1070, so the box
+			// is an int32. What the case is about is that the division
+			// TRUNCATES (#636), which is a fact about the value.
+			n, ok := ddrIntValue(got)
+			if !ok || n != tc.want {
 				t.Errorf("%s = %#v (%T), want %d — integer division TRUNCATES (#636)",
 					tc.sql, got, got, tc.want)
 			}
-			if len(res.ColumnMetas) == 1 && res.ColumnMetas[0].TypeID != parquet.TypeInt64 {
-				t.Errorf("%s declared %s, want INT64", tc.sql, res.ColumnMetas[0].TypeID)
+			if len(res.ColumnMetas) == 1 && res.ColumnMetas[0].TypeID != tc.wantType {
+				t.Errorf("%s declared %s, want %s (PostgreSQL's own width)",
+					tc.sql, res.ColumnMetas[0].TypeID, tc.wantType)
 			}
 		})
 	}
@@ -262,4 +274,17 @@ func TestConstantDecimalProjectionIsNotZero(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ddrIntValue reads an integer answer out of whichever integer box its
+// DECLARATION put it in. int4 and int8 are two declarations of one number and
+// the cases above are about the number.
+func ddrIntValue(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return n, true
+	case int32:
+		return int64(n), true
+	}
+	return 0, false
 }

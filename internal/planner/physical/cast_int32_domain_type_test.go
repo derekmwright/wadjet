@@ -21,9 +21,14 @@ import (
 // driver reads as a string.
 func TestInferCastTypeInt32DomainSpellings(t *testing.T) {
 	for _, spelling := range []string{"INT32", "int32", " Int32 "} {
+		if got := inferCastType(spelling); got != parquet.TypeInt32 {
+			t.Errorf("inferCastType(%q) = %v, want INT32 — the int4 spellings declare "+
+				"int4 since #1070, and the cast enforces that range itself", spelling, got)
+		}
+	}
+	for _, spelling := range []string{"BIGINT", "int8", " Int64 ", "SIGNED"} {
 		if got := inferCastType(spelling); got != parquet.TypeInt64 {
-			t.Errorf("inferCastType(%q) = %v, want INT64 — every integer spelling "+
-				"lands there and the cast enforces int4's own range", spelling, got)
+			t.Errorf("inferCastType(%q) = %v, want INT64", spelling, got)
 		}
 	}
 	for _, spelling := range []string{"FLOAT32", "float32", " Float32 "} {

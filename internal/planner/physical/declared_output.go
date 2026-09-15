@@ -2,6 +2,7 @@
 package physical
 
 import (
+	"math"
 	"strconv"
 	"strings"
 
@@ -93,7 +94,13 @@ func inferProjectionDeclTypeConf(node plansql.Node, fallback parquet.TypeID,
 		switch inner.(type) {
 		case *plansql.BinaryOp, *plansql.UnaryOp:
 			if intArithAllInt(inner, strictInt, decls) {
-				return expr.Decl(parquet.TypeInt64), expr.Decided
+				// At the operands' own WIDTH (#1070): int4 arithmetic is
+				// `integer` on the server and int8 arithmetic is `bigint`.
+				// The declaration this reaches must be the same one
+				// nodeDeclaredType's arithmetic arm reaches for the identical
+				// expression — two answers for one column is what this whole
+				// function's doc is about — so both call intArithDeclaredID.
+				return expr.Decl(intArithDeclaredID(inner, decls)), expr.Decided
 			}
 		}
 	}
@@ -114,6 +121,73 @@ func inferProjectionDeclTypeConf(node plansql.Node, fallback parquet.TypeID,
 		return t, c
 	}
 	return expr.Decl(fallback), expr.Undecided
+}
+
+// intArithDeclaredID is the TypeID an INTEGER expression declares: int4 when
+// the width walk PROVES every operand is int4-domain, int8 otherwise.
+//
+// PostgreSQL's arithmetic result type is its operands' — `int4 + int4` is
+// integer, `int4 + int8` is bigint — and this engine declared bigint for both
+// because every integer it computes is carried in an int64 (ADR-0024's
+// recorded widening). The carrier does not have to be the declaration: an int4
+// result STORED into an int4 vector is exactly PostgreSQL's value, including
+// at the boundary, because batch's store guard raises 22003 with PostgreSQL's
+// own message for a value with no room — which is the answer the server gives
+// for `2147483647 + 1` (#1070).
+//
+// UNKNOWN is int8, deliberately: guessing narrow is how an exact bigint total
+// becomes a wrapped integer, and the width walk answers unknown for every
+// operand whose declaration says nothing.
+func intArithDeclaredID(n plansql.Node, decls colDecls) parquet.TypeID {
+	if int4DomainProven(n, decls) {
+		return parquet.TypeInt32
+	}
+	return parquet.TypeInt64
+}
+
+// int4DomainProven reports whether every integer operand of n is int4-domain
+// and NONE of them is unknown.
+//
+// declaredIntWidth alone is not that test, and the difference is a query that
+// stopped answering. Its combinator is widerIntWidth, whose rule is "an
+// unknown operand contributes nothing rather than narrowing" — right for the
+// AGGREGATE question it was written for, where an unknown argument leaves the
+// accumulator alone — and read as a DECLARATION it says int4 for
+// `(SELECT MAX(c_i64) …) + 1`, whose left operand it cannot type at all. That
+// declared an int4 output vector for a bigint total and the store guard
+// refused the row: 22003 on a query PostgreSQL answers (#1070, found by
+// pgwire.TestArcH1AScalarSubqueryDeclaresItsOwnTypeOnTheWire).
+//
+// So the declaration asks the stronger question, and the walk it makes is the
+// same shape declaredIntWidth's: through the operators and the choice arms to
+// the LEAVES, each of which must name a width of its own.
+func int4DomainProven(n plansql.Node, decls colDecls) bool {
+	return declaredIntWidth(n, decls) == intWidth4 && intWidthFullyKnown(n, decls)
+}
+
+func intWidthFullyKnown(node plansql.Node, decls colDecls) bool {
+	switch n := node.(type) {
+	case *plansql.ParenNode:
+		return intWidthFullyKnown(n.Inner, decls)
+	case *plansql.UnaryOp:
+		return intWidthFullyKnown(n.Inner, decls)
+	case *plansql.BinaryOp:
+		return intWidthFullyKnown(n.Left, decls) && intWidthFullyKnown(n.Right, decls)
+	case *plansql.CaseNode:
+		for _, w := range n.Whens {
+			if !intWidthFullyKnown(w.Result, decls) {
+				return false
+			}
+		}
+		if n.Else != nil {
+			return intWidthFullyKnown(n.Else, decls)
+		}
+		return true
+	}
+	// A LEAF — a column, a literal, a cast, a function call — answers for
+	// itself: a function whose own PostgreSQL result width is int4 is int4
+	// whatever its arguments are, and a name nothing declares is unknown.
+	return declaredIntWidth(node, decls) != intWidthUnknown
 }
 
 // intArithColumnType is the set expr.operandIsInt's ColRef arm accepts. PORT
@@ -1155,7 +1229,7 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 			// integer mode, so a declaration never promises what the kernel cannot emit.
 			// Require IntArithOn: WADJET_INT_ARITH=0 uses the float delegate.
 			if expr.IntArithOn() && intArithAllInt(n, nil, decls) {
-				return expr.Decl(parquet.TypeInt64), expr.Decided
+				return expr.Decl(intArithDeclaredID(n, decls)), expr.Decided
 			}
 			return expr.Decl(parquet.TypeFloat64), expr.Decided
 		}
@@ -1182,7 +1256,13 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 					// PORT and PROTOCOL negate as integers, the same set
 					// intArithColumnType names: `-c_port` is an INTEGER on
 					// both engines and the kernel produces one (#1000).
-					return withExact(expr.Decl(parquet.TypeInt64)), c
+					//
+					// At the operand's own WIDTH since #1070: `-int4` is
+					// integer on the server and `-int8` is bigint. The
+					// negation of an int4 leaves int4 only at int32's
+					// minimum, where the store guard raises 22003 —
+					// PostgreSQL's own answer for `-(-2147483648)::int4`.
+					return withExact(expr.Decl(intArithDeclaredID(n, decls))), c
 				case parquet.TypeFloat64, parquet.TypeFloat32:
 					return withExact(expr.Decl(parquet.TypeFloat64)), c
 				case parquet.TypeDecimal:
@@ -1281,7 +1361,17 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 			// literal's `0` is DECIMAL(1,0) in that fold; a FLOAT COLUMN
 			// beside the same DECIMAL carries no such (p,s) and keeps
 			// PostgreSQL's float8.
-			if _, err := strconv.ParseInt(n.Value, 10, 64); err == nil {
+			if v, err := strconv.ParseInt(n.Value, 10, 64); err == nil {
+				// PostgreSQL's own literal rule, which declaredIntWidth
+				// already reads for the aggregate question: an integer
+				// literal is `integer` unless it does not fit, and then it is
+				// `bigint`. Declaring int8 for every one of them put
+				// `SELECT 1` on the wire under OID 20 where the server says
+				// 23, and carried that width into every fold and aggregate
+				// above it (#1070).
+				if v >= math.MinInt32 && v <= math.MaxInt32 {
+					return expr.DeclNumericLit(parquet.TypeInt32, n.Value), expr.Decided
+				}
 				return expr.DeclNumericLit(parquet.TypeInt64, n.Value), expr.Decided
 			}
 			return expr.DeclNumericLit(parquet.TypeFloat64, n.Value), expr.Decided
@@ -1511,7 +1601,19 @@ func bitwiseInt4Result(n *plansql.FuncCallNode, decls colDecls) bool {
 	if !known || w.Width != expr.PGIntWidthOperands || !w.FitsOperands {
 		return false
 	}
-	return widestArgIntWidth(n.Args, &w, decls) == intWidth4
+	if widestArgIntWidth(n.Args, &w, decls) != intWidth4 {
+		return false
+	}
+	// And every width-contributing argument must be KNOWN, for the reason
+	// int4DomainProven states: widerIntWidth lets an unknown operand be
+	// narrowed by a known int4 sibling, which here would declare int4 for
+	// `BITWISE_AND(<a bigint nothing typed>, 6)`.
+	for i, a := range n.Args {
+		if pgWidthArg(w, i) && !intWidthFullyKnown(a, decls) {
+			return false
+		}
+	}
+	return true
 }
 
 // inferCastType maps SQL type names to parquet types for CAST expressions.
@@ -1551,14 +1653,22 @@ func inferCastType(typeName string) parquet.TypeID {
 	// label in Cast.Eval either, so `x::INT32` published its operand
 	// unchanged under a STRING declaration — #310/#443's shape, and the one
 	// #652 closed for names that answer to nothing at all.
-	case "INTEGER", "INT", "INT4", "INT32", "BIGINT", "INT8", "INT64", "SMALLINT", "INT2", "SIGNED":
-		// Every integer spelling lands on INT64: the engine has no int16
-		// and reads an INT32 column as an int64 everywhere else. The cast
-		// evaluator still enforces each spelling's own RANGE (22003 past
-		// it), which is the half that changes a value; the OID it reaches
-		// a client under is int8 where PostgreSQL says int4/int2, recorded
-		// in ADR-0012 item 12's divergence list.
+	case "BIGINT", "INT8", "INT64", "SIGNED":
 		return parquet.TypeInt64
+	case "INTEGER", "INT", "INT4", "INT32", "SMALLINT", "INT2":
+		// int4, not int8 — the same move the REAL arm below makes and for the
+		// same reason: the cast EVALUATOR already enforces this spelling's
+		// range and raises 22003 past it (castIntInRange), so the value a
+		// projection has to hold provably fits an int4 column, and declaring
+		// int8 for it put `CAST(x AS INT)` on the wire under OID 20 where
+		// PostgreSQL declares 23 (#1070).
+		//
+		// SMALLINT and INT2 ride here rather than getting an arm of their
+		// own: the engine has no int16 carrier, so int4 is the narrowest
+		// declaration that can hold what the evaluator produces. PostgreSQL
+		// declares 21 for those two and this engine declares 23 — recorded in
+		// ADR-0012 item 12's list, one step nearer than the int8 it was.
+		return parquet.TypeInt32
 	case "REAL", "FLOAT4", "FLOAT32":
 		// float4, not float8: expr.Cast now ROUNDS to float32 for these two
 		// spellings, so the projection has to allocate a column that can hold

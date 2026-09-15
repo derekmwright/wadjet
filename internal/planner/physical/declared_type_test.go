@@ -88,9 +88,12 @@ func TestNodeDeclaredTypeThroughNestedCalls(t *testing.T) {
 			want: parquet.TypeFloat64, wantC: expr.Guessed,
 		},
 		{
+			// int4, not int8: the literal `1` declares integer since #1070,
+			// which is what PostgreSQL's own literal rule says and what makes
+			// `coalesce(nullif(int4,0), 1)` integer there.
 			name: "numeric stays numeric through a nested guess",
 			sql:  "COALESCE(NULLIF(n_regionkey, 0), 1)",
-			want: parquet.TypeInt64, wantC: expr.Decided,
+			want: parquet.TypeInt32, wantC: expr.Decided,
 		},
 	}
 	for _, tc := range tests {

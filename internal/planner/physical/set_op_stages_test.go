@@ -266,8 +266,13 @@ func TestSetOpArmTypesReconciled(t *testing.T) {
 			castArm: 1,
 		},
 		{
+			// The BIGINT cast is what makes this a widening at all since
+			// #1070: `r_regionkey + 100` is integer now, the same type the
+			// other arm's int4 column already has, so the bare spelling
+			// reconciles to int4 with no cast on either arm — which is what
+			// PostgreSQL answers for it (`pg_typeof` over the union: integer).
 			name:    "int64 widening",
-			sql:     "SELECT r_regionkey + 100 AS k FROM region UNION ALL SELECT n_nationkey AS k FROM nation",
+			sql:     "SELECT CAST(r_regionkey AS BIGINT) + 100 AS k FROM region UNION ALL SELECT n_nationkey AS k FROM nation",
 			want:    parquet.TypeInt64,
 			castArm: 1,
 		},

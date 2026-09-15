@@ -113,12 +113,12 @@ func TestO1TheWireDeclaresAStarJoinsOwnArms(t *testing.T) {
 				`ON s.k = o.id`,
 			ord + ",k:20,amount:20",
 			"PostgreSQL names a CAST after the column it casts"},
+		// The divergence note this cell carried is GONE: an integer literal
+		// that fits declares int4 since #1070, which is PostgreSQL's own
+		// literal rule, so the OID is the server's as well as the name.
 		{"an_arm_with_an_unaliased_literal",
 			`SELECT * FROM j1ord o JOIN (SELECT id AS k, 1 FROM j1item) s ON s.k = o.id`,
-			ord + ",k:20,?column?:20",
-			"PostgreSQL sends OID 23 (int4) for a bare integer literal and this engine " +
-				"sends 20 (int8) — the numeric-literal typing rule (ADR-0024), identical " +
-				"for the same literal outside a star. The NAME is PostgreSQL's."},
+			ord + ",k:20,?column?:23", ""},
 		{"a_CTE_arm_with_an_unaliased_aggregate",
 			`WITH c AS (SELECT id AS k, SUM(amount) FROM j1item GROUP BY id) ` +
 				`SELECT * FROM j1ord o JOIN c ON c.k = o.id`,

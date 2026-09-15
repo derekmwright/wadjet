@@ -968,11 +968,75 @@ func splitQualifiedCol(col string) (string, string) {
 // matchByKeys checks if a source row and target row match on all ON key pairs.
 func matchByKeys(srcRow, tgtRow map[string]any, keys []onKeyPair) bool {
 	for _, k := range keys {
-		if srcRow[k.SourceCol] != tgtRow[k.TargetCol] {
+		if !mergeKeyEqual(srcRow[k.SourceCol], tgtRow[k.TargetCol]) {
 			return false
 		}
 	}
 	return true
+}
+
+// mergeKeyEqual is MERGE's ON-key equality, and it compares NUMBERS rather
+// than Go BOXES.
+//
+// `srcRow[k] != tgtRow[k]` over two `any` values is an INTERFACE comparison:
+// it is false the moment the two sides carry different dynamic types, so an
+// int4 source key matched against an int8 target column matched NOTHING and
+// the statement reported success having changed no row — a wrong answer
+// dressed as a no-op, and a silent one.
+//
+// Nothing produced that pair until a numeric LITERAL began declaring integer
+// rather than bigint (#1070), so `MERGE … USING (SELECT 2 AS sid) s ON
+// t.id = s.sid` over a bigint target went from matching to not. The box
+// agreeing was the accident; this is ADR-0023's invariant one door over —
+// "compares equal" and "keys alike" have to name one relation.
+//
+// Deliberately narrow: the INTEGER family is compared as int64 and the FLOAT
+// family as float64, and every other pair keeps the interface comparison it
+// had. A mixed integer/float key is untouched — PostgreSQL resolves that pair
+// to float8 and this door never has — and widening it here would change which
+// rows a MERGE matches for a reason no issue has measured.
+func mergeKeyEqual(a, b any) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	if ai, ok := mergeKeyInt(a); ok {
+		if bi, ok := mergeKeyInt(b); ok {
+			return ai == bi
+		}
+	}
+	if af, ok := mergeKeyFloat(a); ok {
+		if bf, ok := mergeKeyFloat(b); ok {
+			return af == bf
+		}
+	}
+	return a == b
+}
+
+// mergeKeyInt and mergeKeyFloat name the two families mergeKeyEqual compares
+// as one number. They are boxes this engine actually produces for an integer
+// or a float column; a DECIMAL boxes as its rendered TEXT and is compared as
+// that text, which is exact for one declared scale and is what the door did
+// before.
+func mergeKeyInt(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return n, true
+	case int32:
+		return int64(n), true
+	case int:
+		return int64(n), true
+	}
+	return 0, false
+}
+
+func mergeKeyFloat(v any) (float64, bool) {
+	switch f := v.(type) {
+	case float64:
+		return f, true
+	case float32:
+		return float64(f), true
+	}
+	return 0, false
 }
 
 // applySetClauses applies "SET col = expr, ..." to a row.

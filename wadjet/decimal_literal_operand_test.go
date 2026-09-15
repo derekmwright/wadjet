@@ -70,12 +70,15 @@ func TestNumericLiteralIsAnExactDecimalOperand(t *testing.T) {
 				// The two shapes that deliberately stay off the exact path:
 				// an integer literal pair (integer division, 3) and a
 				// constant division (float, 2.5).
-				switch got := res.Rows[0]["v"]; got {
-				case any(int64(3)), any(float64(2.5)):
-				default:
-					t.Errorf("%s = %#v (%T), want the integer 3 or the float 2.5",
-						tc.sql, got, got)
+				got := res.Rows[0]["v"]
+				if n, ok := ddrIntValue(got); ok && n == 3 {
+					return // the integer answer: division TRUNCATED
 				}
+				if f, ok := got.(float64); ok && f == 2.5 {
+					return // the float answer: the constant division
+				}
+				t.Errorf("%s = %#v (%T), want the integer 3 or the float 2.5",
+					tc.sql, got, got)
 				return
 			}
 			got, ok := res.Rows[0]["v"].(string)
@@ -209,8 +212,12 @@ func TestSmallintCastAndWideRound(t *testing.T) {
 	db := ddrOpen(t)
 	t.Run("cast to smallint rounds", func(t *testing.T) {
 		res := ddrQuery(t, db, "SELECT CAST(a AS SMALLINT) AS v FROM decdecl WHERE id = 1")
-		if got := res.Rows[0]["v"]; got != any(int64(13)) {
-			t.Errorf("CAST(12.75 AS SMALLINT) = %#v (%T), want 13", got, got)
+		// The NUMBER: a SMALLINT destination declares int4 here since #1070
+		// (this engine has no int16 carrier), so the box is an int32. What
+		// the case is about is that the cast ROUNDS rather than truncating.
+		if n, ok := ddrIntValue(res.Rows[0]["v"]); !ok || n != 13 {
+			t.Errorf("CAST(12.75 AS SMALLINT) = %#v (%T), want 13",
+				res.Rows[0]["v"], res.Rows[0]["v"])
 		}
 	})
 	t.Run("smallint refuses an INTEGER source past its range", func(t *testing.T) {

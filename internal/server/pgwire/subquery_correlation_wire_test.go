@@ -74,9 +74,12 @@ func TestASubqueryReadsTheRowItIsCorrelatedOnOnTheWire(t *testing.T) {
 		// list, and a BI client binds a result set to that name (#732). Every
 		// other cell here is written `AS v`, which is exactly what hid this:
 		// an alias on the ITEM masks the name the item would otherwise carry.
+		// OID 23: `pg_typeof((SELECT 1))` is integer on 17.11 — the literal
+		// rule, measured. These three cells recorded this engine's bigint as
+		// PostgreSQL's, and #1070's own table is what corrected them.
 		{name: "the_subquerys_own_alias_is_the_published_name",
 			sql:  `SELECT (SELECT 1 AS zzz) FROM users u`,
-			oids: []uint32{20}, text: `1|1|1`, names: []string{"zzz"}},
+			oids: []uint32{23}, text: `1|1|1`, names: []string{"zzz"}},
 		{name: "an_aliased_column_reference_keeps_the_alias",
 			sql:  `SELECT (SELECT u.id AS zzz) FROM users u ORDER BY 1`,
 			oids: []uint32{23}, text: `1|2|3`, names: []string{"zzz"}},
@@ -85,13 +88,13 @@ func TestASubqueryReadsTheRowItIsCorrelatedOnOnTheWire(t *testing.T) {
 			oids: []uint32{25}, text: `alice|bob|carol`, names: []string{"nm"}},
 		{name: "an_aliased_expression_keeps_the_alias",
 			sql:  `SELECT (SELECT u.id + 1 AS zzz) FROM users u ORDER BY 1`,
-			oids: []uint32{20}, text: `2|3|4`, names: []string{"zzz"}},
+			oids: []uint32{23}, text: `2|3|4`, names: []string{"zzz"}},
 		{name: "an_unaliased_subquery_publishes_its_columns_name",
 			sql:  `SELECT (SELECT u.id) FROM users u ORDER BY 1`,
 			oids: []uint32{23}, text: `1|2|3`, names: []string{"id"}},
 		{name: "an_unaliased_constant_publishes_question_column",
 			sql:  `SELECT (SELECT 1) FROM users u`,
-			oids: []uint32{20}, text: `1|1|1`, names: []string{"?column?"}},
+			oids: []uint32{23}, text: `1|1|1`, names: []string{"?column?"}},
 		{name: "aggregated_over_the_alias",
 			sql:  `SELECT SUM((SELECT u.x)) AS v FROM (SELECT id AS x FROM users) u`,
 			oids: []uint32{20}, text: `6`},
