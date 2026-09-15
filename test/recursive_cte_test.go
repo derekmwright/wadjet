@@ -133,6 +133,11 @@ func TestRecursiveCTE_GenerateSeries(t *testing.T) {
 		switch v := row["n"].(type) {
 		case int64:
 			n = v
+		case int32:
+			// The anchor is the literal `1`, which declares integer since
+			// #1070 — PostgreSQL's own literal rule — so the column is an
+			// int4 and the box an int32.
+			n = int64(v)
 		case float64:
 			n = int64(v)
 		default:
@@ -176,6 +181,8 @@ func TestRecursiveCTE_Fibonacci(t *testing.T) {
 		switch v := row["a"].(type) {
 		case int64:
 			a = v
+		case int32:
+			a = int64(v)
 		case float64:
 			a = int64(v)
 		default:

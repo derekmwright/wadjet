@@ -148,10 +148,16 @@ func TestTranscendentalFunctionsStayFloat64(t *testing.T) {
 // fraction. The registry's declaration is the shape it was missing.
 func TestIntegerFunctionArithmeticTruncates(t *testing.T) {
 	db := ddrOpen(t)
-	// wantType is PostgreSQL's own declaration for each expression: the
-	// string-length functions answer `integer` there, and so does arithmetic
-	// over them and over integer literals, while `id` is a bigint column and
-	// `id / 2` is bigint (#1070).
+	// wantType is what THIS ENGINE declares. PostgreSQL declares `integer`
+	// for every row but `column over literal` — the string-length functions
+	// answer integer there and so does arithmetic over them and over integer
+	// literals — and this engine declares `bigint` for an int4 ARITHMETIC
+	// expression, which is ADR-0024 §2b's recorded divergence: #1070's
+	// arithmetic half was narrowed, measured on five arms and put back,
+	// because the stage arms type an expression over a published slot more
+	// coarsely than the single-process path does. The LITERAL half of #1070
+	// did land, which is why `SELECT 1` is int4 — but `7 / 2` is arithmetic,
+	// not a literal.
 	for _, tc := range []struct {
 		name     string
 		sql      string
@@ -159,16 +165,16 @@ func TestIntegerFunctionArithmeticTruncates(t *testing.T) {
 		wantType parquet.TypeID
 	}{
 		// s is "12.75" on row 1: five characters.
-		{"length over two", "SELECT LENGTH(s) / 2 AS v FROM decdecl WHERE id = 1", 2, parquet.TypeInt32},
-		{"octet_length over two", "SELECT OCTET_LENGTH(s) / 2 AS v FROM decdecl WHERE id = 1", 2, parquet.TypeInt32},
-		{"char_length over two", "SELECT CHAR_LENGTH(s) / 2 AS v FROM decdecl WHERE id = 1", 2, parquet.TypeInt32},
-		{"nested", "SELECT (LENGTH(s) + 1) / 2 AS v FROM decdecl WHERE id = 1", 3, parquet.TypeInt32},
-		{"modulo", "SELECT LENGTH(s) % 2 AS v FROM decdecl WHERE id = 1", 1, parquet.TypeInt32},
+		{"length over two", "SELECT LENGTH(s) / 2 AS v FROM decdecl WHERE id = 1", 2, parquet.TypeInt64},
+		{"octet_length over two", "SELECT OCTET_LENGTH(s) / 2 AS v FROM decdecl WHERE id = 1", 2, parquet.TypeInt64},
+		{"char_length over two", "SELECT CHAR_LENGTH(s) / 2 AS v FROM decdecl WHERE id = 1", 2, parquet.TypeInt64},
+		{"nested", "SELECT (LENGTH(s) + 1) / 2 AS v FROM decdecl WHERE id = 1", 3, parquet.TypeInt64},
+		{"modulo", "SELECT LENGTH(s) % 2 AS v FROM decdecl WHERE id = 1", 1, parquet.TypeInt64},
 		// The plain integer forms, unchanged, beside them.
 		{"column over literal", "SELECT id / 2 AS v FROM decdecl WHERE id = 7", 3, parquet.TypeInt64},
-		{"two literals", "SELECT 7 / 2 AS v FROM decdecl WHERE id = 1", 3, parquet.TypeInt32},
-		{"negative truncates toward zero", "SELECT (0 - 7) / 2 AS v FROM decdecl WHERE id = 1", -3, parquet.TypeInt32},
-		{"modulo takes the dividend's sign", "SELECT 7 % (0 - 3) AS v FROM decdecl WHERE id = 1", 1, parquet.TypeInt32},
+		{"two literals", "SELECT 7 / 2 AS v FROM decdecl WHERE id = 1", 3, parquet.TypeInt64},
+		{"negative truncates toward zero", "SELECT (0 - 7) / 2 AS v FROM decdecl WHERE id = 1", -3, parquet.TypeInt64},
+		{"modulo takes the dividend's sign", "SELECT 7 % (0 - 3) AS v FROM decdecl WHERE id = 1", 1, parquet.TypeInt64},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := ddrQuery(t, db, tc.sql)
@@ -176,11 +182,9 @@ func TestIntegerFunctionArithmeticTruncates(t *testing.T) {
 				t.Fatalf("%s returned %d rows, want 1", tc.sql, len(res.Rows))
 			}
 			got := res.Rows[0]["v"]
-			// The NUMBER, not the box: every expression here is int4-domain
-			// on PostgreSQL — `length(text)/2` is integer and so is `7/2` —
-			// and this engine declares int4 for them since #1070, so the box
-			// is an int32. What the case is about is that the division
-			// TRUNCATES (#636), which is a fact about the value.
+			// The NUMBER, whichever integer box the declaration put it in.
+			// What the case is about is that the division TRUNCATES (#636),
+			// which is a fact about the value.
 			n, ok := ddrIntValue(got)
 			if !ok || n != tc.want {
 				t.Errorf("%s = %#v (%T), want %d — integer division TRUNCATES (#636)",

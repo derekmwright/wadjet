@@ -128,9 +128,13 @@ func TestMetadataMinMax(t *testing.T) {
 			wantRows: []map[string]any{{"lo": int64(1), "hi": int64(16)}},
 		},
 		{
-			name: "int32 widens to int64", wantFire: true,
+			// int4 in, int4 out — `pg_typeof(min(int4))` is integer (#951),
+			// and the statistics path has to say what the scan path says or
+			// one query answers two types depending on whether it carries a
+			// WHERE clause. The kill-switch arm below is what asserts that.
+			name: "int32 stays int32", wantFire: true,
 			sql:      "SELECT MIN(i32) AS lo, MAX(i32) AS hi FROM events",
-			wantRows: []map[string]any{{"lo": int64(1), "hi": int64(16)}},
+			wantRows: []map[string]any{{"lo": int32(1), "hi": int32(16)}},
 		},
 		{
 			name: "date renders as a date, not epoch days", wantFire: true,
@@ -412,9 +416,11 @@ func TestMetadataMinMaxResolvesFoldedReferences(t *testing.T) {
 			wantRows: []map[string]any{{"lo": "2013-07-01", "hi": "2013-07-06"}},
 		},
 		{
+			// WatchID is a bigint and ResolutionWidth an int4, so the two
+			// boxes differ since #951 — which is the point of the pair.
 			name:     "two different CamelCase columns",
 			sql:      "SELECT MIN(WatchID) AS lo, MAX(ResolutionWidth) AS hi FROM hits",
-			wantRows: []map[string]any{{"lo": int64(1), "hi": int64(600)}},
+			wantRows: []map[string]any{{"lo": int64(1), "hi": int32(600)}},
 		},
 		{
 			// A delimited reference keeps its case and resolves byte-exact,
