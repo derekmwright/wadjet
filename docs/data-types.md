@@ -15,6 +15,37 @@ Wadjet supports a focused set of column types optimized for analytical workloads
 | `Decimal(p,s)` | `Int128` | 16 bytes | Up to 38 digits | Financial amounts, exact arithmetic |
 | `Bool` | `bool` | 1 bit | true/false | Flags, states |
 
+#### An integer expression keeps its PostgreSQL WIDTH
+
+An integer's declared type is its operands', exactly as PostgreSQL resolves it,
+and it is what a client binds on:
+
+| Expression | Declared | OID |
+|---|---|---|
+| `i32 + 1`, `-i32`, `i32 * 3`, `i32 / 2`, `i32 % 2` | `integer` | 23 |
+| `i32 + i64`, `i64 + 1` | `bigint` | 20 |
+| `1`, `2147483647` | `integer` | 23 |
+| `2147483648`, `9007199254740993` | `bigint` | 20 |
+| `CAST(x AS INT)`, `CAST(x AS SMALLINT)` | `integer` | 23 |
+| `CAST(x AS BIGINT)` | `bigint` | 20 |
+| `BITWISE_AND/OR/XOR/NOT` over int4 operands | `integer` | 23 |
+| `MIN(i32)`, `MAX(i32)` | `integer` | 23 |
+| `SUM(i32)` | `bigint` | 20 |
+| `SUM(i64)`, `AVG(i32)`, `AVG(i64)` | `numeric` | 1700 |
+
+**An int4 result that does not fit an int4 is `22003 integer out of range`, the
+same error PostgreSQL gives.** `2147483647 + 1` is an error rather than
+2147483648: the declaration and the value are one answer, and an engine that
+declared `integer` while answering a bigint would be telling a client something
+untrue. Where the width cannot be PROVEN — an operand nothing declares — the
+expression stays `bigint`, because guessing narrow is how an exact total
+becomes a wrapped one.
+
+`SMALLINT` and `INT2` declare `integer` (23) where PostgreSQL declares
+`smallint` (21): this engine has no int16 carrier. That is in ADR-0012's
+divergence list, and so are the SHIFTS — `i32 << 2` is `bigint` here and a
+MODULAR `integer` there.
+
 #### DECIMAL Type
 
 `DECIMAL(precision, scale)` stores exact fixed-point numbers using 128-bit scaled integers (the same approach used by DuckDB). The value `123.45` with `DECIMAL(10,2)` is stored internally as `12345` with scale 2.
@@ -125,6 +156,18 @@ SELECT CAST(1.0/3 AS FLOAT(1));    -- 0.33333334          (real)
 SELECT CAST(1.0/3 AS FLOAT(25));   -- 0.3333333333333333  (double precision)
 CREATE TABLE t (f FLOAT(1));       -- a Float32 column
 ```
+
+**Arithmetic over two REALs is real, and computes at float4's width.**
+`r + CAST(1.0 AS REAL)` over a real holding 2^24 is 16777216, not 16777217.
+That pairing alone: `real + 1.0` (a numeric literal), `real + 1` (an integer)
+and `real + double precision` are all double precision, which is what
+PostgreSQL resolves them to. `-real` is real; `SUM(real)` is real grouped and
+windowed alike; `AVG(real)` is double precision.
+
+A real result that leaves float4's range is `22003 value out of range:
+overflow`, and one that rounds to zero from a non-zero operand is
+`22003 value out of range: underflow` — PostgreSQL's own two sentences,
+applied wherever a wider value is stored into a `Float32` column.
 
 #### `VARCHAR(n)` and `CHAR(n)`
 
@@ -433,7 +476,8 @@ whether or not the result is ever written to a column:
 
 | cast | in range | out of range |
 |---|---|---|
-| `::INT32` | the number, declared `bigint` | `22003` |
+| `::INT32`, `::INT`, `::INTEGER`, `::SMALLINT` | the number, declared `integer` (OID 23) | `22003` |
+| `::BIGINT`, `::INT8` | the number, declared `bigint` (OID 20) | `22003` |
 | `::PORT`, `::PROTOCOL` | the number, declared `integer` (OID 23, the same OID the column declares) | `22003` |
 | `::DATE` | the day count, declared `date` | `22003` |
 | `::FLOAT32` | the value rounded to float4, declared `real` | `22003`, `value … is out of range for type real` |
@@ -577,8 +621,36 @@ comma, a quote, or is empty.
 ```
 
 PostgreSQL declares `record` = OID 2249 for an anonymous composite. Declaring
-25 instead is recorded in ADR-0012's divergence list beside ARRAY's (#992); the
-VALUE — which is what a client parses — is PostgreSQL's, byte for byte.
+25 instead is recorded in ADR-0012's divergence list; the VALUE — which is what
+a client parses — is PostgreSQL's, byte for byte.
+
+**An ARRAY column declares the array OF its element** (#992). PostgreSQL has no
+generic `array` type, so the OID is the element's own array type and a typed
+client (`getArray` in JDBC, pgx's array scanning, DataGrip's column typing)
+reads a real array rather than a string:
+
+| Element | Wire type | OID |
+|---|---|---|
+| `Int32`, `Port`, `Protocol` | `integer[]` | 1007 |
+| `Int64`, `Duration` | `bigint[]` | 1016 |
+| `Float32` | `real[]` | 1021 |
+| `Float64` | `double precision[]` | 1022 |
+| `String`, and every type rendered as text (`IPv4`, `IPv6`, `CIDR`, `MAC`, `Vector`) | `text[]` | 1009 |
+| `Bool` | `boolean[]` | 1000 |
+| `Bytes` | `bytea[]` | 1001 |
+| `Timestamp` | `timestamp[]` | 1115 |
+| `Date` | `date[]` | 1182 |
+| `Decimal` | `numeric[]` | 1231 |
+| `UUID` | `uuid[]` | 2951 |
+
+The BINARY format carries PostgreSQL's array wire form under those OIDs, and
+the text format is the `{…}` it always was. Two element kinds keep OID 25, and
+both are a fact about PostgreSQL rather than a gap: a NESTED array, because
+PostgreSQL's `int4[][]` is rectangular and this engine's nested arrays are
+ragged (`{{1,2},{3}}` is a value here and a syntax error there), and a `ROW` or
+`MAP` element, which would need a registered composite OID. An ARRAY the
+planner could not type — a ZERO-ROW result, where there is no vector to read
+the element from — declares 25 as well; both are in ADR-0012's list.
 
 **Array functions:** `cardinality`, `element_at`, `array_contains`, `array_join`, `array_min`, `array_max`, `array_length`
 

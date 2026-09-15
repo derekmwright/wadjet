@@ -126,6 +126,47 @@ divergence entry that recorded the arc's measurements, function by function
 and position by position, is ADR-0012's bitwise-family item; this is where the
 RULE lives.
 
+#### 2b. The width is the DECLARED TYPE too, and the int4 superset is closed (2026-09-15, arc ND, #1070)
+
+§2a says the width is "METADATA BESIDE the carrier" and gives the reason:
+declaring an INT32 vector for an int4-domain expression "would put every such
+value in front of the #361 store guard". That is true and it is the POINT,
+which the first version of this record had backwards. `batch.IntegerRangeError`
+raises `22003 integer out of range` — PostgreSQL's own SQLSTATE and its own
+sentence — and `2147483647 + 1` IS that error on the server. Being in front of
+that guard is agreement, not a hazard.
+
+So an integer expression whose width is PROVABLY int4 declares int4, and the
+declaration a client binds on is PostgreSQL's: `i32 + 1`, `-i32`, `i32 / 2`,
+`CAST(x AS INT)`, `BITWISE_AND(i32, 6)`, `MIN(i32)` and an integer LITERAL
+that fits are `integer` (OID 23); `i32 + i64`, `i64 + 1`, `CAST(x AS BIGINT)`
+and a literal that does not fit are `bigint`. `physical.intArithDeclaredID` is
+the one function, read by nodeDeclaredType's arithmetic and unary arms and by
+inferProjectionDeclTypeConf's strict-int arm so the two cannot disagree about
+one expression.
+
+**PROVABLY is the load-bearing word, and it needs a stronger test than the
+width walk.** `widerIntWidth`'s rule — "an unknown operand contributes nothing
+rather than narrowing" — is right for the aggregate question of §2a and wrong
+read as a declaration: it answers int4 for `(SELECT MAX(i64) …) + 1`, whose
+left operand nothing typed, and that declared an int4 vector for a bigint
+total and refused a row PostgreSQL answers. `physical.int4DomainProven` walks
+to the LEAVES and requires every one to name a width; unknown stays int8.
+
+What this CLOSES is the int4 superset for the arithmetic domain: this engine
+answered 2147483648 for `2147483647 + 1` and now raises what the server
+raises. What it does NOT close, and is recorded in ADR-0012's list: `SMALLINT`
+and `INT2` declare `integer` (23) where PostgreSQL declares `smallint` (21),
+because there is no int16 carrier here; and the three SHIFTS stay `bigint`,
+because this engine shifts on the int64 carrier while PostgreSQL's int4 shift
+is MODULAR — `expr.PGIntegerResult.FitsOperands` is the field that keeps them
+out of the narrowing.
+
+The REAL domain took the same shape on the same day (#1117): `real op real`
+declares real, its result is stored into a float4 vector, and
+`batch.FloatRangeError` is IntegerRangeError's float sibling at that store.
+See ADR-0012's real-arithmetic entry.
+
 **The INTEGER half of the choice rule landed 2026-08-29 (#695), and the BOX is
 what it took.** The type fold was the easy half: an integer contributes its
 whole range at scale 0 and a numeric LITERAL its own spelling, so

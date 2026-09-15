@@ -497,6 +497,18 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      arc ND owns. The census cell `813 SUM(real) OVER ()` now carries
      PostgreSQL's VALUE and names the declaration in its `why`.
 
+     **That DECLARATION half CLOSED 2026-09-15 (arc ND, #1118).**
+     `SUM(real) OVER (…)` declares real (OID 700) on every arm, which is what
+     the grouped spelling has declared since #950 and what the server declares
+     for both. Three layers had to agree — `physical.windowSpecOutputType`,
+     `exec.windowAccOutputType` and the operator's own output-vector guard,
+     which refused to write into any vector but a float64's — and the writer
+     the three float SUM/AVG evaluators share is `exec.windowWriteFloat`.
+     `AVG(real) OVER ()` stays double precision, which is the server's type
+     for it. The pin in `pgwire.TestAMovingFloatWindowFrameCarriesTheRecomputedValue`
+     is DELETED, and `coordinator.TestNDDeclarationsMatchPostgres`'s `1118/*`
+     cells are what hold it.
+
      One consequence is recorded rather than left to be found: a real total
      carries 24 bits, so its last digits move with the ORDER the partials fold
      in. ADR-0013's nondeterminism class 9, amended 2026-09-14 for that
@@ -529,6 +541,30 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      owns. Doing only the first would produce a float32 value under a float8
      declaration, which is the class this list exists to prevent. Filed as a
      candidate in arc NV's landing notes with these measurements.
+
+     **CLOSED 2026-09-15 (arc ND, #1117), and the DECLARATION was the whole
+     of it.** `real op real` declares real, and the exact sum, difference or
+     product of two float32s is representable in a float64 — so rounding the
+     carrier's result once into a float4 output vector IS the correctly
+     rounded float4 answer. No float32 kernel was needed. All three rows
+     above now answer PostgreSQL's: `1.6777216e+07`, `22003 value out of
+     range: overflow`, `2e+38`.
+
+     The range rule came with it, because a narrower declaration without one
+     is a silent ±Infinity. `batch.FloatRangeError` is IntegerRangeError's
+     float sibling at the same seam — the STORE — carrying PostgreSQL's own
+     two sentences, `value out of range: overflow` for a FINITE float64 with
+     no float32 and `underflow` for a non-zero one that narrows to zero, both
+     measured on 17.11. The operand exemptions are float_range.go's: an
+     infinity that ARRIVES is a value.
+
+     The rule is EXACTLY that pairing, which is PostgreSQL's own: `real + 1.0`
+     (a numeric literal), `real + 1` (an integer) and `real + float8` are all
+     double precision there, and three control cells beside the fix keep it
+     from widening. `-real` is real; `sum(real)` over a real EXPRESSION is
+     real, which is what `aggOutputFromInputDecl`'s new arm says; `avg(real)`
+     is double precision. `%` is untouched — PostgreSQL has no float modulo,
+     so there is no server type to follow.
 
      ITEM 1 of the filing is CLOSED, and closed by measurement rather than by
      a change: `CAST(SUM(x) OVER () AS BIGINT)` was reported as INT64
@@ -2337,11 +2373,38 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `pgwire.TestPGWireDeclaresABarFieldTheSameWithRowsAndWithout` and
      `server.TestTheBarDeclaresTheSameThingOnBothWireDoors`.
 
+   - **`SMALLINT` and `INT2` declare `integer` (OID 23) where PostgreSQL
+     declares `smallint` (21).** (Added 2026-09-15, arc ND, #1070.) An
+     integer expression declares PostgreSQL's own WIDTH now — `i32 + 1`,
+     `-i32`, `CAST(x AS INT)`, `BITWISE_AND(i32, 6)`, `MIN(i32)` and a literal
+     that fits are `integer`; `i64 + 1` and a literal that does not are
+     `bigint` (ADR-0024 §2b) — and this is the one integer spelling that
+     cannot land on the server's type, because this engine has no int16
+     carrier. int4 is the NARROWEST declaration that holds what a SMALLINT
+     cast produces, and it is one step nearer than the `bigint` it was. The
+     value is unchanged: `castIntInRange` has enforced smallint's own range
+     since #901, so `CAST(99999 AS SMALLINT)` is `22003` on both engines.
+
    - **A ROW column declares OID 25 (text), not `record` 2249.** (Added
      2026-09-08, arc A1; the divergence predates it.) `\gdesc` on
      `ROW(1::int4, 2.5::float8, 'x'::text)` says `record`, OID 2249, measured
      on 17.11. `pgTypeOID` has no ROW arm and falls to its text default, as it
-     does for ARRAY (#992), MAP, and the network types. The VALUE is
+     does for MAP and for the network types this engine renders as text.
+     **ARRAY left that list 2026-09-15 (arc ND, #992):** an ARRAY column
+     declares the array OF its element now (int4[] 1007, int8[] 1016, text[]
+     1009, float8[] 1022, numeric[] 1231, timestamp[] 1115, date[] 1182,
+     uuid[] 2951, bool[] 1000, bytea[] 1001), with PostgreSQL's array binary
+     form under those OIDs. Three ARRAY shapes still declare 25 and each is a
+     fact about PostgreSQL rather than a gap: a NESTED array (PostgreSQL's
+     `int4[][]` is RECTANGULAR and this engine's are ragged, so `{{1,2},{3}}`
+     is a value here and a syntax error there), a ROW or MAP element (no
+     registered composite OID for a constructed row; no MAP at all), and an
+     ARRAY the PLANNER could not type — a ZERO-ROW result, where there is no
+     vector to read the element from and `colDecls` carries no element map.
+     The last is pinned fail-on-agree in
+     `pgwire.TestAZeroRowArrayResultKeepsItsDeclaration`.
+
+     The ROW half of this entry is unchanged. The VALUE is
      PostgreSQL's own composite text in DECLARED field order, byte for byte
      including the empty slot for a NULL field, so a client that parses the
      text gets the server's answer; only the OID a driver binds by differs.
@@ -2635,11 +2698,20 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      They are LIMITATIONS, not cells where this engine was measured to agree
      with PostgreSQL: no gate counts any of them as agreement, and the arm
      census normalizes or labels each one where it appears (#966 round 2, N3).
-     The int4-operand widening at the head of this entry is filed as #1018.
-     It is a SCALAR divergence only: `SUM(BITWISE_AND(int4_col, 18))` agrees
-     with PostgreSQL's `bigint` (see the width rule at the end of this entry),
-     because the width an aggregate reads follows the OPERANDS for this
-     family rather than the result's carrier.
+     The int4-operand widening at the head of this entry was filed as #1018
+     and **CLOSED 2026-09-15 (arc ND)**: `BITWISE_AND/OR/XOR/NOT` over int4
+     operands declares `integer` (OID 23) now, following its operands the way
+     `+ - *` already did. AND, OR, XOR and NOT over two int4 values produce an
+     int4 value by construction, so the narrower output vector can hold every
+     answer they have — which is why the three SHIFTS are NOT in it and stay
+     bigint (see the shift entries below): this engine shifts on the int64
+     carrier and PostgreSQL's int4 shift is MODULAR, so `2147483647 << 2` is
+     8589934588 here and -4 there, and declaring int4 for it would turn a
+     query the server answers into a 22003. `expr.PGIntegerResult.FitsOperands`
+     is where that distinction lives, and
+     `coordinator.TestNDDeclarationsMatchPostgres`'s `1018/*` cells hold both
+     halves. `SUM(BITWISE_AND(int4_col, 18))` was already PostgreSQL's
+     `bigint` and is unchanged.
 
      - **`BITWISE_RIGHT_SHIFT` is Trino's LOGICAL shift, not PostgreSQL's
        `>>`.** PostgreSQL's `>>` on an integer is arithmetic (sign-preserving):
@@ -2947,8 +3019,9 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `{SYN,ACK}`. `map_keys`, `map_values` and `map_entries` have answered that
      way since they were added. The value IS an ARRAY where a consumer reads it
      as one: `element_at(tcp_flags(f), 1)` is `SYN` and `array_length` is 2.
-     On the wire it is OID 25, which is what an ARRAY column declares here
-     anyway (#992, the entry above). Pinned in
+     On the wire it is OID 25 — and since #992 that is no longer what an ARRAY
+     COLUMN declares, so this projection is now text where a stored array of
+     the same element would be `text[]` (1009). Pinned in
      `wadjet.TestATopLevelTCPFlagsProjectionIsTextToday`, which FAILS when a
      projection can carry an ARRAY declaration. Fixed-schema ROW declarations
      travel through the complete column declaration independently (A3b);
