@@ -389,7 +389,10 @@ func TestCurrentDateNotNull(t *testing.T) {
 		{
 			sql:    "SELECT 1 + 1 AS result",
 			colKey: "result",
-			check:  func(val any) bool { return val == float64(2) || val == int64(2) || val == 2 },
+			check: func(val any) bool {
+				// int32 since #1070: `1 + 1` is `integer` on PostgreSQL.
+				return val == float64(2) || val == int64(2) || val == int32(2) || val == 2
+			},
 		},
 	}
 
@@ -994,8 +997,9 @@ func TestLiteralProjectionType(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Projection of a numeric literal must keep its int64 type — `IN
-	// (SELECT 13)` against an int column has to match.
+	// Projection of a numeric literal must keep an INTEGER type — `IN
+	// (SELECT 13)` against an int column has to match. int4 since #1070,
+	// which is PostgreSQL's own rule for a literal that fits.
 	res, err := db.Query(ctx, "SELECT name FROM t WHERE k IN (SELECT 13)")
 	if err != nil {
 		t.Fatalf("query: %v", err)
@@ -1007,7 +1011,7 @@ func TestLiteralProjectionType(t *testing.T) {
 		t.Errorf("name: got %v, want thirteen", got)
 	}
 
-	// The standalone literal projection must also produce an int64-typed cell.
+	// The standalone literal projection must also produce an integer cell.
 	res, err = db.Query(ctx, "SELECT 13 AS x")
 	if err != nil {
 		t.Fatalf("query: %v", err)
@@ -1015,8 +1019,8 @@ func TestLiteralProjectionType(t *testing.T) {
 	if len(res.Rows) != 1 {
 		t.Fatalf("expected 1 row, got %d", len(res.Rows))
 	}
-	if got, want := res.Rows[0]["x"], int64(13); got != want {
-		t.Errorf("x: got %v (%T), want %v (int64)", got, got, want)
+	if got, want := res.Rows[0]["x"], int32(13); got != want {
+		t.Errorf("x: got %v (%T), want %v (int32)", got, got, want)
 	}
 }
 

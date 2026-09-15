@@ -52,9 +52,11 @@ func TestAggInputProjectionDeclaredGroupKeyType(t *testing.T) {
 
 	// Undeclared (older coordinator): the schema-blind inference stands.
 	// This documents WHY the declaration exists — the literal alone types
-	// the key Int64, which truncates float values.
-	if got := keyType(t, nil); got != parquet.TypeInt64 {
-		t.Errorf("undeclared key type = %v, want the blind inference's Int64 (has the inference changed? then this test's premise needs re-checking)", got)
+	// the key an INTEGER, which truncates float values. Int32 since #1070:
+	// a literal that fits int4 declares integer, which is PostgreSQL's rule
+	// and does not change the point being made here.
+	if got := keyType(t, nil); got != parquet.TypeInt32 {
+		t.Errorf("undeclared key type = %v, want the blind inference's Int32 (has the inference changed? then this test's premise needs re-checking)", got)
 	}
 
 	// Declared: the plan-time type wins over the inference.
