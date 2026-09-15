@@ -901,7 +901,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// stage below and by the two exchange-repartition stages that feed
 		// it — the SAME list, so the partition hash and the join key cannot
 		// be built at two different types.
-		stageKeyTypes := resolveJoinKeyTypes(node, leftKeys, rightKeys)
+		stageKeyTypes := resolveJoinKeyTypes(node, leftKeys, rightKeys, p.cteKeyColTypes)
 
 		// Insert shuffle stages for non-broadcast joins when distributed
 		numPartitions := 0

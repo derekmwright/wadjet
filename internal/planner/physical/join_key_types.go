@@ -65,13 +65,18 @@ func joinKeyNumeric(t parquet.TypeID) bool {
 // sides are final. A key either side cannot be typed is unresolved: declining
 // leaves the pre-existing behaviour, and the pre-existing behaviour is
 // correct for every pair whose two sides agree.
-func resolveJoinKeyTypes(node *logical.Node, leftKeys, rightKeys []string) []parquet.TypeID {
+// cteColTypes answers what a MATERIALIZED CTE's columns are called and what
+// they carry, or false for a name the caller cannot resolve. nil is a caller
+// with no cache to ask — every test, and any site that has no Planner.
+type cteColTypes func(name string) (map[string]parquet.TypeID, bool)
+
+func resolveJoinKeyTypes(node *logical.Node, leftKeys, rightKeys []string, cte cteColTypes) []parquet.TypeID {
 	if node == nil || len(node.Children) < 2 ||
 		len(leftKeys) == 0 || len(leftKeys) != len(rightKeys) {
 		return nil
 	}
-	left := joinSideColTypes(node.Children[0])
-	right := joinSideColTypes(node.Children[1])
+	left := joinSideColTypes(node.Children[0], cte)
+	right := joinSideColTypes(node.Children[1], cte)
 	if left == nil || right == nil {
 		return nil
 	}
@@ -112,7 +117,7 @@ func joinKeyLookupName(key string) string {
 // their inputs retain their own types under source names. Delete conflicting
 // names rather than choosing: exec.joinKeyEncodingMismatch remains the
 // runtime backstop. See docs/internals/join-side-declared-types.md for the design.
-func joinSideColTypes(n *logical.Node) map[string]parquet.TypeID {
+func joinSideColTypes(n *logical.Node, cte cteColTypes) map[string]parquet.TypeID {
 	if n == nil {
 		return nil
 	}
@@ -139,7 +144,7 @@ func joinSideColTypes(n *logical.Node) map[string]parquet.TypeID {
 		delete(out, lc)
 		conflict[lc] = true
 	}
-	for name, t := range joinSideEmittedTypes(n) {
+	for name, t := range joinSideEmittedTypes(n, cte) {
 		put(name, t, true)
 	}
 	for name, t := range joinSideSourceTypes(n) {
@@ -159,9 +164,27 @@ func joinSideColTypes(n *logical.Node) map[string]parquet.TypeID {
 // that one answers nil for a set operation — so `SELECT k FROM (A UNION ALL
 // B)` would type every projection from an empty map. Recursing through THIS
 // function instead closes that hole; everything else defers.
-func joinSideEmittedTypes(n *logical.Node) map[string]parquet.TypeID {
+func joinSideEmittedTypes(n *logical.Node, cte cteColTypes) map[string]parquet.TypeID {
 	if n == nil {
 		return nil
+	}
+	// A CTE REFERENCE is a tagged Scan with no ScanColTypes — its columns are
+	// the MATERIALIZED relation's, and nothing below it describes them. Every
+	// walk here therefore answered nil for one, so a join keyed on a CTE
+	// column resolved no common type and exec.HashJoin refused the query
+	// outright: `WITH RECURSIVE r AS (SELECT 1 AS v …) … JOIN r ON r.v = u.id`
+	// over a bigint `id` is `integer = bigint` on PostgreSQL and answered
+	// nothing here. The hole predates the int4 declaration rule — a `SELECT
+	// 1.5 AS v` anchor against the same bigint column refuses at 118f2edd too
+	// — and #1070 is what made an ORDINARY shape reach it.
+	//
+	// The cache is the authority because it holds the schema the rows were
+	// actually materialized at. A name it does not hold declines, which is
+	// exactly what this function did before.
+	if n.Type == logical.NodeScan && n.CTEName != "" && cte != nil {
+		if types, ok := cte(n.CTEName); ok {
+			return types
+		}
 	}
 	if cols, ok := setOpDeclaredOutputSchema(n); ok {
 		out := make(map[string]parquet.TypeID, len(cols))
@@ -171,7 +194,7 @@ func joinSideEmittedTypes(n *logical.Node) map[string]parquet.TypeID {
 		return out
 	}
 	if n.Type == logical.NodeProject && len(n.Children) == 1 {
-		in := joinSideEmittedTypes(n.Children[0])
+		in := joinSideEmittedTypes(n.Children[0], cte)
 		if in == nil {
 			return emittedColTypes(n)
 		}
@@ -237,4 +260,23 @@ func joinSideSourceTypes(n *logical.Node) map[string]parquet.TypeID {
 		return nil
 	}
 	return out
+}
+
+// cteKeyColTypes is the Planner's cteColTypes: the schema the CTE was
+// MATERIALIZED at, keyed by lower-cased column name. A name the cache does
+// not hold — a recursive reference this block has not materialized yet —
+// declines, and the key pair stays unresolved exactly as it was.
+func (p *Planner) cteKeyColTypes(name string) (map[string]parquet.TypeID, bool) {
+	if p == nil || p.cteCache == nil {
+		return nil, false
+	}
+	mat, ok := p.cteCache[name]
+	if !ok || mat == nil || len(mat.schema) == 0 {
+		return nil, false
+	}
+	out := make(map[string]parquet.TypeID, len(mat.schema))
+	for _, c := range mat.schema {
+		out[strings.ToLower(c.Name)] = c.Type
+	}
+	return out, true
 }

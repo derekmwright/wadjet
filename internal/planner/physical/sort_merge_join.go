@@ -32,7 +32,7 @@ func (p *Planner) shouldSortMergeJoin(node *logical.Node, leftKeys, rightKeys []
 	// (exec.SortMergeJoin.resolveCompareKernels); it has no equivalent of the
 	// hash path's per-side widened key encoder. Declining routes the query to
 	// the hash join, which answers it — a plan choice, not a refusal.
-	for _, t := range resolveJoinKeyTypes(node, leftKeys, rightKeys) {
+	for _, t := range resolveJoinKeyTypes(node, leftKeys, rightKeys, p.cteKeyColTypes) {
 		if t != exec.KeyTypeUnresolved {
 			return false
 		}

@@ -281,7 +281,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// which the integer / bloom fast paths are gated on (#615, ADR-0023).
 	// Nil for every join whose key types already agree — every TPC-H join —
 	// and the operator then behaves exactly as it did.
-	hj.KeyTypes = resolveJoinKeyTypes(node, leftKeys, rightKeys)
+	hj.KeyTypes = resolveJoinKeyTypes(node, leftKeys, rightKeys, p.cteKeyColTypes)
 
 	// Set build-side table alias for column disambiguation in self-joins
 	if alias := joinArmAlias(node.Children[1]); alias != "" {
