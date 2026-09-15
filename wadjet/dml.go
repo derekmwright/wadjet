@@ -2989,7 +2989,18 @@ func ConvertTextForColumn(s string, col parquet.Column) (any, error) {
 	// `  spaced  ` — while a field into a numeric column still parses. Trimming
 	// here was the third literal rule the commit meant to remove and did not
 	// (review P7).
-	return columnChecked(convertUnquoted(s, col.Type))(col)
+	v, err := convertUnquoted(s, col.Type)
+	if err != nil && sqlerr.StateOf(err) == "" {
+		// This door has no second reading to fall back to — `assignLiteralToColumn`
+		// has one and that is why convertUnquoted leaves a SYNTAX miss
+		// unclassified — so an unclassified refusal would cross the wire as the
+		// blanket class. A COPY field that names no value of the column's type
+		// is 22P02, like every other door (review NT, the COPY column of the
+		// grammar census).
+		return nil, sqlerr.New("22P02", "invalid input syntax for type %s: %s",
+			parquet.NetworkTextTypeName(col.Type), sqlerr.Quote(s))
+	}
+	return columnChecked(v, err)(col)
 }
 
 // columnChecked is the shared tail of the two converters: a value whose
@@ -3084,6 +3095,12 @@ func convertUnquoted(s string, typ parquet.TypeID) (any, error) {
 	switch typ {
 	case parquet.TypeString, parquet.TypeBytes:
 		// The value is the bytes. Nothing is trimmed.
+	case parquet.TypeIPv4, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeMAC,
+		parquet.TypeUUID, parquet.TypePort, parquet.TypeProtocol:
+		// The TYPE's own grammar decides what whitespace means: macaddr_in
+		// skips it and inet/uuid refuse it. Trimming here made this ONE door
+		// take `' 10.0.0.1'` and `'<uuid> '`, which PostgreSQL refuses and
+		// every other door in this engine refuses (review NT B1).
 	default:
 		s = strings.TrimSpace(s)
 	}
