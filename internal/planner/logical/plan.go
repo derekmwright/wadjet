@@ -308,6 +308,18 @@ type Node struct {
 	// star is what makes the slot unreachable rather than usually-hidden
 	// (ADR-0026 §3c). Empty on every other join.
 	HiddenJoinCols []string
+	// StarLiftedRefCols, on a JOIN node, names slots the LATERAL lowering
+	// materialized so a LIFTED correlated predicate could be evaluated — and
+	// which a STAR must not publish, but which the join must still EMIT.
+	//
+	// `HiddenJoinCols` cannot serve: it is both "invisible to a star" and
+	// "dropped from the join's output", and a lifted predicate routed ABOVE
+	// the join (which is where the physical planner puts a non-equi residual
+	// beside an equality it can key on) reads the column THERE. Dropping it
+	// answered zero rows; publishing it put a duplicate in `SELECT *`. These
+	// are the same slots under the first half of that rule only
+	// (ADR-0021 §1q, round 3).
+	StarLiftedRefCols []string
 	// LateralBoundNotPerRow marks a DECORRELATED LATERAL's body that carries
 	// a `LIMIT` or `OFFSET` the decorrelation cannot apply per outer row:
 	// PostgreSQL evaluates the body once per OUTER ROW, so its bound applies

@@ -1446,7 +1446,7 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 					items[idx] = lowered
 					continue
 				}
-				right, joinCond, empty, hiddenCols, err := buildLateralSubquery(info, left, join, ctes)
+				right, joinCond, empty, hiddenCols, starLifted, err := buildLateralSubquery(info, left, join, ctes)
 				if err != nil {
 					return nil, err
 				}
@@ -1533,6 +1533,7 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 				// place below every star, derived star and CTE star, so the
 				// trim cannot be reached around (ADR-0026 3c).
 				lat.HiddenJoinCols = hiddenCols
+				lat.StarLiftedRefCols = starLifted
 				lat.LateralEmptyDefaults = emptyDefaults
 				if len(emptyDefaults) > 0 {
 					lat.LateralPadMarker = empty.padMarker
@@ -2001,7 +2002,7 @@ func getOutputColNames(info *plansql.SelectInfo) []string {
 // 2. Parsing the subquery and splitting WHERE into correlated vs local predicates
 // 3. Building the inner plan with only local predicates
 // 4. Returning the inner plan and the combined join condition
-func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.JoinInfo, ctes []plansql.CTEDef) (*Node, string, lateralEmptyInput, []string, error) {
+func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.JoinInfo, ctes []plansql.CTEDef) (*Node, string, lateralEmptyInput, []string, []string, error) {
 	// Collect left-side table aliases to detect correlated references
 	leftAliases := collectLogicalAliases(left)
 
@@ -2009,11 +2010,11 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	inner := join.RightTable[1 : len(join.RightTable)-1]
 	parsed, err := plansql.Parse(inner)
 	if err != nil {
-		return nil, "", lateralEmptyInput{}, nil, fmt.Errorf("parsing LATERAL subquery: %w", err)
+		return nil, "", lateralEmptyInput{}, nil, nil, fmt.Errorf("parsing LATERAL subquery: %w", err)
 	}
 	subInfo, err := plansql.ExtractSelect(parsed)
 	if err != nil {
-		return nil, "", lateralEmptyInput{}, nil, fmt.Errorf("extracting SELECT from LATERAL subquery: %w", err)
+		return nil, "", lateralEmptyInput{}, nil, nil, fmt.Errorf("extracting SELECT from LATERAL subquery: %w", err)
 	}
 
 	// THE FROM ITEM'S COLUMN-ALIAS LIST renames the body's items POSITIONALLY,
@@ -2026,7 +2027,7 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	// — one with a star — is left alone, and `RefuseUnappliedColumnAliasLists`
 	// raises PostgreSQL's 42P10 for it.
 	if err := applyLateralItemAliases(subInfo, join); err != nil {
-		return nil, "", lateralEmptyInput{}, nil, err
+		return nil, "", lateralEmptyInput{}, nil, nil, err
 	}
 
 	// THE BODY'S OWN FROM ITEMS SHADOW THE ENCLOSING QUERY'S NAMES. A LATERAL
@@ -2079,7 +2080,7 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	// WHERE is rewritten and before any slot is injected, so what it reads is
 	// the body the query wrote.
 	if err := refuseLateralOuterReferenceOutsideWhere(subInfo, leftAliases); err != nil {
-		return nil, "", lateralEmptyInput{}, nil, err
+		return nil, "", lateralEmptyInput{}, nil, nil, err
 	}
 
 	// Rebuild the inner plan with only local WHERE predicates.
@@ -2123,6 +2124,9 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	// a slot that only RENAMES a column the list already carries is not one
 	// of them, because no column was added.
 	var injectedSlots []string
+	// starLifted are slots the join must EMIT (a lifted predicate above it
+	// reads them) and no STAR may publish. See publishLiftedRefs.
+	var starLifted []string
 	if len(correlatedParts) > 0 {
 		// The inner correlation key must be SELECTED, for non-aggregated laterals too,
 		// and GROUPED only when the subquery aggregates (#591, #767 part 2).
@@ -2255,10 +2259,19 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 		// there under that name. One that is not is REFUSED, with the two
 		// repairs that were measured and rejected written down
 		// (lateral_correlated_refs.go).
-		if err := refuseUnpublishedLiftedRefs(subInfo, correlatedParts,
-			leftAliases, aggregates); err != nil {
-			return nil, "", lateralEmptyInput{}, nil, err
+		// A LIFTED predicate that is not an equality is evaluated over the
+		// body's OUTPUT, so every inner column it names is MATERIALIZED here
+		// and the predicate respelled to it (lateral_correlated_refs.go).
+		// Where the whole correlation is the join's own ON the slots are
+		// dropped at the join; where an equality keys the join and the
+		// residual routes ABOVE it, they are emitted and hidden from a STAR.
+		lifted, liftedDroppable, lerr := publishLiftedRefs(subInfo, correlatedParts,
+			leftAliases, aggregates, alloc, &injected)
+		if lerr != nil {
+			return nil, "", lateralEmptyInput{}, nil, nil, lerr
 		}
+		_ = liftedDroppable
+		starLifted = append(starLifted, lifted...)
 
 		// The marker a padded row is recognised by: the name the lateral
 		// PUBLISHES its correlation key under — the slot where one was
@@ -2293,12 +2306,12 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	}
 
 	if err := refuseDecorrelatedWindow(subInfo, correlatedParts, leftAliases); err != nil {
-		return nil, "", lateralEmptyInput{}, nil, err
+		return nil, "", lateralEmptyInput{}, nil, nil, err
 	}
 
 	right, err := BuildFromSelectWithCTEs(subInfo, scopeCTEs(ctes, subInfo.CTEs))
 	if err != nil {
-		return nil, "", lateralEmptyInput{}, nil, fmt.Errorf("building LATERAL subquery plan: %w", err)
+		return nil, "", lateralEmptyInput{}, nil, nil, fmt.Errorf("building LATERAL subquery plan: %w", err)
 	}
 	// A BOUND THE DECORRELATION CANNOT APPLY PER OUTER ROW is recorded on the
 	// body rather than refused (#1079, #1019's class). See
@@ -2330,7 +2343,7 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	// join would then key on a name nothing carries and answer no rows. Loud
 	// beats plausible, and the sentence now describes the code.
 	if err := refuseLateralAliasListOverStar(outer, subInfo, join); err != nil {
-		return nil, "", lateralEmptyInput{}, nil, err
+		return nil, "", lateralEmptyInput{}, nil, nil, err
 	}
 	if join.RightAlias != "" {
 		setSubtreeAlias(right, join.RightAlias)
@@ -2375,7 +2388,7 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	}
 	empty.correlationCond = corrCond
 
-	return right, joinCond, empty, injectedSlots, nil
+	return right, joinCond, empty, injectedSlots, starLifted, nil
 }
 
 // collectLogicalAliases collects table names and aliases from scan nodes.

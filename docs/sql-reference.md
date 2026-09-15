@@ -1056,10 +1056,13 @@ JOIN LATERAL (SELECT i.amount AS m FROM line_items i
 ```
 
 A correlated predicate that is NOT an equality is lifted to the join and
-evaluated over the body's OUTPUT, so every inner column it names has to be
-published there under that name. `WHERE i.amount < o.total` beside `SELECT
-i.amount` answers; beside `SELECT i.amount AS m`, or over an aggregated body,
-it is refused.
+evaluated over the body's OUTPUT. Every inner column it names is materialized
+by the body for that purpose — `WHERE i.amount < o.total` answers whether the
+body writes `SELECT i.amount`, `SELECT i.amount AS m` or `SELECT i.id AS m` —
+and the materialized column is not published by `SELECT *` over the lateral.
+Over an AGGREGATED body it is refused: there is no projection to publish the
+column in, and publishing it would put it in the `GROUP BY` and change what the
+aggregate computes.
 
 A reference whose qualifier the body's OWN `FROM` item or `WITH` item shadows
 is not an outer reference and is not refused: `FROM orders x, LATERAL (SELECT

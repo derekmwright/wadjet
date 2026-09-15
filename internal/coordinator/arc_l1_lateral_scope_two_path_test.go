@@ -74,6 +74,30 @@ func l1LateralCases() []l1Case {
 		{"UNCORRLAT/nonCollidingName", "SELECT o.id AS a, t.tot AS m FROM lat_ord o, LATERAL (SELECT SUM(i.amount) AS tot FROM lat_item i) t ORDER BY a"},
 		{"UNCORRLAT/issue1111", "SELECT t.dx AS v FROM setopdecja a, LATERAL (WITH c AS (SELECT dx FROM setopdecjb) SELECT SUM(dx) AS dx FROM c) t"},
 
+		// ROUND 3 — the two halves of the outer-reference question, adjudicated
+		// by measurement. `outerRef*` are the ACCIDENT: `SELECT o.id AS m` was
+		// right on the three DAG arms only because the qualified name degrades
+		// to the bare `id` and the join emits the OUTER arm's `id` bare — one
+		// character of change (`o.id + 0`), a column the inner relation does
+		// not carry (`o.total`), or a second outer column all break it, so the
+		// uniform refusal is the honest disposition and these three record why.
+		// `lifted*` and `mixedPublished` are the MECHANISM: a lifted
+		// non-equality predicate answers PostgreSQL on ALL FIVE arms now,
+		// including the body that publishes the column under no name at all
+		// and the aggregated consumer that made the row count decisive.
+		// `liftedStar` is the leak control — the materialized column is not in
+		// the star's list.
+		{"R3/outerRefExpr", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT o.id + 0 AS m FROM lat_item i WHERE i.order_id = o.id) s ON true ORDER BY a, m"},
+		{"R3/outerRefOnlyOuter", "SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (SELECT o.total AS m FROM lat_item i WHERE i.order_id = o.id) s ON true ORDER BY a, m"},
+		{"R3/outerRefTwoOuter", "SELECT o.id AS a, s.m AS m, s.t AS t FROM lat_ord o JOIN LATERAL (SELECT o.id AS m, o.total AS t FROM lat_item i WHERE i.order_id = o.id) s ON true ORDER BY a, m, t"},
+		{"R3/liftedRenamedOther", "SELECT o.id AS a, s.m AS m FROM lat_ord o LEFT JOIN LATERAL (SELECT i.id AS m FROM lat_item i WHERE i.amount < o.total) s ON true ORDER BY a, m"},
+		{"R3/liftedRenameToK", "SELECT o.id AS a, s.k AS m FROM lat_ord o LEFT JOIN LATERAL (SELECT i.amount AS k, i.id AS id2 FROM lat_item i WHERE i.amount < o.total) s ON true ORDER BY a, m"},
+		{"R3/liftedPublished", "SELECT o.id AS a, s.amount AS m FROM lat_ord o LEFT JOIN LATERAL (SELECT i.amount FROM lat_item i WHERE i.amount < o.total) s ON true ORDER BY a, m"},
+		{"R3/liftedAgg", "SELECT COUNT(*) AS c, SUM(s.m) AS t, MIN(s.m) AS lo, MAX(s.m) AS hi FROM lat_ord o LEFT JOIN LATERAL (SELECT i.id AS m FROM lat_item i WHERE i.amount < o.total) s ON true"},
+		{"R3/liftedAggPublished", "SELECT COUNT(*) AS c, SUM(s.amount) AS t, MIN(s.amount) AS lo, MAX(s.amount) AS hi FROM lat_ord o LEFT JOIN LATERAL (SELECT i.amount FROM lat_item i WHERE i.amount < o.total) s ON true"},
+		{"R3/mixedPublished", "SELECT o.id AS a, s.amount AS m FROM lat_ord o JOIN LATERAL (SELECT i.amount FROM lat_item i WHERE i.order_id = o.id AND i.amount < o.total) s ON true ORDER BY a, m"},
+		{"R3/liftedStar", "SELECT s.* FROM lat_ord o LEFT JOIN LATERAL (SELECT i.id AS m FROM lat_item i WHERE i.amount < o.total) s ON true ORDER BY 1"},
+
 		// ROUND 2 — the shapes the adversarial review found the table did not
 		// hold. `collide*` is a window over a decorrelated LATERAL whose body
 		// publishes a name the enclosing relation also carries; `boundLifted*`
@@ -309,16 +333,27 @@ const (
 	// other, so the reference bound the inner relation's column of the same
 	// name, or nothing (lateral_outer_reference.go).
 	l1OuterRefOutsideWhere = `from the enclosing query`
-	// A lifted correlated predicate that is not an equality, naming an inner
-	// column the body does not publish under that name
-	// (lateral_correlated_refs.go).
-	l1LiftedRefNotPublished = `is not an equality and reads`
+	// An AGGREGATED body whose lifted correlated predicate is not an
+	// equality: there is no projection to publish the inner column in, and
+	// publishing it would put it in the GROUP BY (lateral_correlated_refs.go).
+	// The UNAGGREGATED spellings ANSWER since round 3.
+	l1LiftedRefNotPublished = `AGGREGATES and its correlated predicate`
 )
 
 // l1Postgres is PostgreSQL 17.11's answer for every cell, rendered by
 // r1RenderRows (a sorted ROW SET, so a legal ordering difference between arms
 // is never read as a wrong answer).
 var l1Postgres = map[string]string{
+	"R3/outerRefExpr":            "rows=4 1,1 | 1,1 | 2,2 | 2,2",
+	"R3/outerRefOnlyOuter":       "rows=4 1,150 | 1,150 | 2,200 | 2,200",
+	"R3/outerRefTwoOuter":        "rows=4 1,1,150 | 1,1,150 | 2,2,200 | 2,2,200",
+	"R3/liftedRenamedOther":      "rows=9 1,1 | 1,2 | 1,3 | 1,4 | 2,1 | 2,2 | 2,3 | 2,4 | 3,NULL",
+	"R3/liftedRenameToK":         "rows=9 1,100 | 1,125 | 1,50 | 1,75 | 2,100 | 2,125 | 2,50 | 2,75 | 3,NULL",
+	"R3/liftedPublished":         "rows=9 1,100 | 1,125 | 1,50 | 1,75 | 2,100 | 2,125 | 2,50 | 2,75 | 3,NULL",
+	"R3/liftedAgg":               "rows=1 9,20,1,4",
+	"R3/liftedAggPublished":      "rows=1 9,700,50,125",
+	"R3/mixedPublished":          "rows=4 1,100 | 1,50 | 2,125 | 2,75",
+	"R3/liftedStar":              "rows=9 1 | 1 | 2 | 2 | 3 | 3 | 4 | 4 | NULL",
 	"R2/shadowSelect":            "rows=6 1,100 | 1,50 | 2,100 | 2,50 | 3,100 | 3,50",
 	"R2/shadowOrderBy":           "rows=6 1,50 | 1,75 | 2,50 | 2,75 | 3,50 | 3,75",
 	"R2/collideWinBound":         "rows=4 1,1,1 | 1,2,2 | 2,3,1 | 2,4,2",
@@ -495,7 +530,9 @@ var l1Postgres = map[string]string{
 // l1RefusalPins names the refusal classes a cell's arms may raise. Every arm's
 // answer must contain one of them.
 var l1RefusalPins = map[string][]string{
-	"R2/limitAll":              {l1LimitAllUnparsed},
+	"R3/outerRefExpr":          {l1OuterRefOutsideWhere},
+	"R3/outerRefOnlyOuter":     {l1OuterRefOutsideWhere},
+	"R3/outerRefTwoOuter":      {l1OuterRefOutsideWhere},
 	"IN/noJoin/winsel":         {l1WindowInSubquery},
 	"LAT/comma/frame":          {l1WindowInLateral},
 	"LAT/comma/selectlist":     {l1OuterRefOutsideWhere},
@@ -525,10 +562,6 @@ var l1RefusalPins = map[string][]string{
 	"LAT/star/orderLimit":      {l1StarOrdinal},
 	"LAT/star/where":           {l1StarOrdinal},
 	"LIFTED/aggregated":        {l1LiftedRefNotPublished},
-	"LIFTED/exprBothSides":     {l1LiftedRefNotPublished},
-	"LIFTED/inequalityAlone":   {l1LiftedRefNotPublished},
-	"LIFTED/leftArm":           {l1LiftedRefNotPublished},
-	"LIFTED/twoColumns":        {l1LiftedRefNotPublished},
 	"OUTERREF/aggArg":          {l1OuterRefOutsideWhere},
 	"OUTERREF/groupBy":         {l1OuterRefOutsideWhere},
 	"OUTERREF/having":          {l1OuterRefOutsideWhere},
@@ -536,7 +569,7 @@ var l1RefusalPins = map[string][]string{
 	"OUTERREF/selectBare":      {l1OuterRefOutsideWhere},
 	"OUTERREF/selectCase":      {l1OuterRefOutsideWhere},
 	"OUTERREF/selectExpr":      {l1OuterRefOutsideWhere},
-	"OUTERREF/whereInequality": {l1LiftedRefNotPublished},
+	"R2/limitAll":              {l1LimitAllUnparsed},
 	"SCALAR/inner/winInOrder":  {l1OverClauseRebuild},
 	"SCALAR/inner/winarg":      {l1WindowInSubquery},
 	"SCALAR/inner/winargBare":  {l1WindowInSubquery},
@@ -567,40 +600,60 @@ var l1RefusalPins = map[string][]string{
 // l1ArmPins is a divergence that is NOT the same on every arm, so it is
 // recorded per arm. A pin that starts agreeing FAILS.
 var l1ArmPins = map[string]map[string]string{
-	// A body whose own FROM item is named like an enclosing relation. SQL
-	// scoping resolves the qualifier to the INNER item and the two
-	// single-process arms do; the three DAG arms bind the outer relation's
-	// column of that name, which is the same seam ADR-0026 8j records.
-	// Identical at c34cdbcb for `shadowOrderBy`; `shadowSelect` was REFUSED
-	// there and on the arc's round-1 tip, and answers on two arms now.
-	"R2/shadowSelect": {
-		"dag":          "rows=6 1,50 | 1,50 | 1,50 | 2,100 | 2,100 | 2,100",
-		"dag-shuffled": "rows=6 1,50 | 1,50 | 1,50 | 2,100 | 2,100 | 2,100",
-		"dag-morsel4":  "rows=6 1,50 | 1,50 | 1,50 | 2,100 | 2,100 | 2,100",
+	// A LIFTED non-equality predicate now ANSWERS on the two single-process
+	// arms (round 3): the inner columns it names are published by the body
+	// under their OWN names, which is the evaluation point the DAG's stage
+	// plan already had. The three DAG arms keep what they had — a KEYLESS
+	// join they refuse, loudly, identically at c34cdbcb — except
+	// `whereInequality`'s dag-shuffled, which shuffles on the equality and
+	// answers. `LIFTED/leftArm` is not here at all: it answers on all five.
+	"LIFTED/exprBothSides": {
+		"dag":          "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
+		"dag-morsel4":  "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
+		"dag-shuffled": "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
 	},
-	"R2/shadowOrderBy": {
-		"dag":          "rows=6 1,50 | 1,50 | 1,50 | 3,75 | 3,75 | 3,75",
-		"dag-shuffled": "rows=6 1,50 | 1,50 | 1,50 | 3,75 | 3,75 | 3,75",
-		"dag-morsel4":  "rows=6 1,50 | 1,50 | 1,50 | 3,75 | 3,75 | 3,75",
+	"LIFTED/inequalityAlone": {
+		"dag":          "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
+		"dag-morsel4":  "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
+		"dag-shuffled": "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
+	},
+	"LIFTED/twoColumns": {
+		"dag":          "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
+		"dag-morsel4":  "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
+		"dag-shuffled": "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
+	},
+	"OUTERREF/whereInequality": {
+		"dag":         "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
+		"dag-morsel4": "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
 	},
 	"R2/collideWinArg": {
+		"dag":          "rows=2 1,NULL | 2,NULL",
+		"dag-morsel4":  "rows=2 1,NULL | 2,NULL",
+		"dag-shuffled": "rows=2 1,NULL | 2,NULL",
 		"single":       "rows=2 1,2 | 2,4",
 		"spilled512k":  "rows=2 1,2 | 2,4",
-		"dag":          "rows=2 1,NULL | 2,NULL",
-		"dag-shuffled": "rows=2 1,NULL | 2,NULL",
-		"dag-morsel4":  "rows=2 1,NULL | 2,NULL",
 	},
 	"R2/collideWinBound": {
+		"dag":          "ERR ~window: ORDER BY \"s.m\" is not a column of its input",
+		"dag-morsel4":  "ERR ~window: ORDER BY \"s.m\" is not a column of its input",
+		"dag-shuffled": "ERR ~window: ORDER BY \"s.m\" is not a column of its input",
 		"single":       "rows=2 1,2,1 | 2,4,1",
 		"spilled512k":  "rows=2 1,2,1 | 2,4,1",
-		"dag":          "ERR ~window: ORDER BY \"s.m\" is not a column of its input",
-		"dag-shuffled": "ERR ~window: ORDER BY \"s.m\" is not a column of its input",
-		"dag-morsel4":  "ERR ~window: ORDER BY \"s.m\" is not a column of its input",
 	},
 	"R2/collideWinNoBound": {
 		"dag":          "rows=4 1,1,1 | 1,1,2 | 2,2,1 | 2,2,2",
-		"dag-shuffled": "rows=4 1,1,1 | 1,1,2 | 2,2,1 | 2,2,2",
 		"dag-morsel4":  "rows=4 1,1,1 | 1,1,2 | 2,2,1 | 2,2,2",
+		"dag-shuffled": "rows=4 1,1,1 | 1,1,2 | 2,2,1 | 2,2,2",
+	},
+	"R2/shadowOrderBy": {
+		"dag":          "rows=6 1,50 | 1,50 | 1,50 | 3,75 | 3,75 | 3,75",
+		"dag-morsel4":  "rows=6 1,50 | 1,50 | 1,50 | 3,75 | 3,75 | 3,75",
+		"dag-shuffled": "rows=6 1,50 | 1,50 | 1,50 | 3,75 | 3,75 | 3,75",
+	},
+	"R2/shadowSelect": {
+		"dag":          "rows=6 1,50 | 1,50 | 1,50 | 2,100 | 2,100 | 2,100",
+		"dag-morsel4":  "rows=6 1,50 | 1,50 | 1,50 | 2,100 | 2,100 | 2,100",
+		"dag-shuffled": "rows=6 1,50 | 1,50 | 1,50 | 2,100 | 2,100 | 2,100",
 	},
 	"UNCORRLAT/collidingName": {
 		"dag":          "rows=3 1,150 | 2,200 | 3,0",
@@ -610,11 +663,6 @@ var l1ArmPins = map[string]map[string]string{
 }
 
 var l1ValuePins = map[string]string{
-	"R2/boundLiftedFrac":         "rows=0 ",
-	"R2/boundLiftedPlain":        "rows=1 2,125",
-	"R2/noCollideWinBound":       "rows=2 1,100,1 | 2,125,1",
-	"R2/twoBounds":               "rows=0 ",
-	"R2/winargNested":            "rows=3 1,1 | 2,1 | 3,1",
 	"EXISTS/inner/winarg":        "rows=4 1,1 | 1,2 | 2,3 | 2,4",
 	"EXISTS/noJoin/winarg":       "rows=2 1 | 2",
 	"LAT/comma/groupedLimit":     "rows=1 2,Doohickey,125",
@@ -642,6 +690,11 @@ var l1ValuePins = map[string]string{
 	"LAT/left/orderLimit":        "rows=3 1,NULL | 2,125 | 3,NULL",
 	"LAT/left/orderLimit2":       "rows=3 1,100 | 2,125 | 3,NULL",
 	"LAT/left/orderOffset":       "rows=4 1,100 | 1,50 | 2,75 | 3,NULL",
+	"R2/boundLiftedFrac":         "rows=0 ",
+	"R2/boundLiftedPlain":        "rows=1 2,125",
+	"R2/noCollideWinBound":       "rows=2 1,100,1 | 2,125,1",
+	"R2/twoBounds":               "rows=0 ",
+	"R2/winargNested":            "rows=3 1,1 | 2,1 | 3,1",
 }
 
 func TestArcL1LateralAndWindowScopeAnswersPostgresOnEveryArm(t *testing.T) {

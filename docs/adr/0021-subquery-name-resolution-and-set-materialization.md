@@ -1975,20 +1975,52 @@ that subtraction `FROM lat_ord x, LATERAL (SELECT SUM(x.amount) … FROM lat_ite
 x …)` was refused for reading an outer row it never touches.
 
 A correlated predicate that is NOT an equality is the same layer from the
-other side. It is LIFTED to the join and evaluated over the body's OUTPUT, so
-every inner column it names has to be published there UNDER THAT NAME.
-`WHERE i.amount < o.total` beside `SELECT i.amount` answers PostgreSQL's rows
-on all five arms; beside `SELECT i.amount AS m` it answered ZERO rows on the
-single-process arms and failed loudly on the DAG. Both repairs were measured
-and both trade a right answer on some arms for a wrong one on others —
-respelling to the body's published ALIAS makes the two single-process arms
-right and makes the three DAG arms pad every row of the LEFT spelling, which
-was right there before, because the stage that publishes a decorrelated
-lateral's output on the DAG emits the source column where the single-process
-projection emits the alias; minting a hidden slot puts the value below the
-join's `HiddenJoinCols` drop, where the lifted predicate cannot see it. So the
-shape is REFUSED on all five arms, and closing it is #1028's DAG-identity
-layer plus a lifted predicate evaluated AT the join rather than above it.
+other side, and it ANSWERS. It is lifted out of the body and evaluated at or
+above the JOIN, over the body's OUTPUT rows, so every inner column it names has
+to be there. Where the body publishes the column under its own name it always
+was; where the body RENAMES it, or does not select it at all, the single-process
+projection had dropped it and the predicate named nothing — `rows=0`, or a
+LEFT-padded `NULL` per outer row, silently.
+
+**The DAG answered these by MECHANISM, and that is what the repair follows.**
+An earlier version of this section refused the shape uniformly and said closing
+it needed "#1028's DAG-identity layer plus a lifted predicate evaluated AT the
+join". The round-2 review refuted the first half by measurement: over 40 outer
+rows and 5 000 inner ones, with the correlation column published under NO name
+at all, the three DAG arms land on PostgreSQL's 177 500 rows — because the
+DAG's stage plan reads the column off a stream that carries the SCAN's own
+names and never consults the body's published list for this predicate.
+
+So the body publishes the columns the predicate names, UNDER THEIR OWN NAMES,
+and the predicate is not respelled. That last clause is the measured part: a
+first attempt materialized them into hidden `__key_N` slots and respelled the
+predicate to those, which made the two single-process arms right and took the
+three DAG arms from PostgreSQL's nine rows to three NULL-padded ones — the
+minted name is one the DAG's evaluation point does not carry. What the
+single-process path lacked was not a NAME but the COLUMN.
+
+The materialized column is emitted by the join and hidden from a STAR
+(`Node.StarLiftedRefCols`), which is a different property from
+`HiddenJoinCols`: that one both hides from a star AND drops from the join's
+output, and a predicate the physical planner routes to a FILTER ABOVE the join
+— which is where a non-equi residual goes when an equality beside it keys the
+join — reads that output. Dropping answered zero rows there; hiding from the
+star alone answers PostgreSQL on every arm and puts no extra column in
+`SELECT *`.
+
+An AGGREGATED body is still refused, for a reason the projection cannot answer:
+publishing `i.amount` beside `SUM(i.amount)` needs it in the `GROUP BY`, which
+changes what the aggregate computes. PostgreSQL evaluates the body per outer
+row; this engine does not, for that shape.
+
+**The OUTER-REFERENCE refusal above is the opposite verdict on the opposite
+evidence, and the pair is the point.** `SELECT o.id AS m` was right on the three
+DAG arms too — and it is an ACCIDENT: the qualified `o.id` degrades to the bare
+`id` and the join happens to emit the OUTER arm's `id` bare. `o.id + 0` is the
+inner relation's, `o.total` is NULL (or loud on the DAG, where the column does
+not exist at that point at all), and a second outer column in the same list is
+NULL. Three cells record that (`R3/outerRef*`), so the uniform refusal there is
+not the same decision made twice.
 
 **NOT SETTLED, with the mechanism.** A LEFT JOIN LATERAL over an UNCORRELATED
 body has no join keys and is refused by three different layers in three

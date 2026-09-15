@@ -227,6 +227,12 @@ func relationOutputColumns(n *Node, alias string) []StarColumn {
 			for _, h := range cur.HiddenJoinCols {
 				hidden[strings.ToLower(bareColumn(strings.TrimSpace(h)))] = true
 			}
+			// …and the slots a LIFTED correlated predicate is evaluated
+			// against, which the join EMITS (the predicate may run above it)
+			// and no star may publish.
+			for _, h := range cur.StarLiftedRefCols {
+				hidden[strings.ToLower(bareColumn(strings.TrimSpace(h)))] = true
+			}
 		}
 		if cur.LateralSubtree {
 			// A decorrelated LATERAL is a relation the enclosing query NAMES,
