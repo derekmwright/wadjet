@@ -122,6 +122,20 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		// nearest double's integer part, and a value past the destination's
 		// range came back as whatever the float conversion produced instead
 		// of the refusal PostgreSQL gives (ADR-0024 item 4).
+		// A TEXT operand for PORT or PROTOCOL is read by the TYPE's input
+		// function BEFORE the decimal reader gets it, because those two are
+		// different questions and PostgreSQL keeps them apart: `'2.5'::integer`
+		// is 22P02 there while `numeric_col::integer` ROUNDS. castDecimalToInt
+		// reads text with no type knowledge, so with it first
+		// `CAST('2.5' AS PORT)` was 3 — and `INSERT … SELECT '2.5'` put that 3
+		// at REST in a PORT column whose text doors say 22P02 (review NT
+		// round 2, P). The operand's SHAPE is what separates them: a quoted
+		// literal or a STRING column is text, a DECIMAL column is not.
+		if dest == "port" || dest == "protocol" {
+			if s, ok := stringOperand(v); ok && castOperandIsText(e.Operand) {
+				return castPortProtocolText(s, dest)
+			}
+		}
 		if i, ok := castDecimalToInt(v, dest); ok {
 			return i
 		}
@@ -139,13 +153,7 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 						return int64(n)
 					}
 				}
-				switch n, st := parquet.DecimalIntegerText(s); st {
-				case parquet.NetTextOK:
-					return castIntInRange(n, dest)
-				case parquet.NetTextRange:
-					raiseNumericOutOfRange("integer", s)
-				}
-				raiseInvalidTextRepresentation("integer", s)
+				return castPortProtocolText(s, dest)
 			}
 			typ := "integer"
 			if dest == "bigint" || dest == "int8" || dest == "signed" {
@@ -243,6 +251,42 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	default:
 		return v
 	}
+}
+
+// castPortProtocolText reads a TEXT operand with PORT's or PROTOCOL's own
+// input function: the IANA name, or a DECIMAL number held to the TYPE's range.
+// It is the one reader the writer's doors use (parquet.DecimalIntegerText plus
+// castIntInRange's bound), so a text this cast takes is a text that column can
+// store.
+func castPortProtocolText(s, dest string) any {
+	if dest == "protocol" {
+		if n, named := parquet.ProtocolNumberFromName(s); named {
+			return int64(n)
+		}
+	}
+	switch n, st := parquet.DecimalIntegerText(s); st {
+	case parquet.NetTextOK:
+		return castIntInRange(n, dest)
+	case parquet.NetTextRange:
+		raiseNumericOutOfRange("integer", s)
+	}
+	raiseInvalidTextRepresentation("integer", s)
+	return nil
+}
+
+// castOperandIsText reports whether the operand's own DECLARATION says its
+// values are text: a bare quoted literal (SQL's `unknown`) or a STRING column.
+// A DECIMAL column's box is text too — that is the whole reason this question
+// has to be asked of the EXPRESSION rather than of the box.
+func castOperandIsText(operand Expr) bool {
+	switch v := operand.(type) {
+	case *Lit:
+		_, isText := v.Val.(string)
+		return isText && v.Text == ""
+	case *ColRef:
+		return v.valueType() == batch.TypeString
+	}
+	return false
 }
 
 // castToReal narrows a value to float4, which is what `REAL`, `FLOAT4` and

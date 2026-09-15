@@ -107,7 +107,7 @@ func (db *DB) executeCreateTableAs(ctx context.Context, ct *plansql.CreateTableI
 		Schema:  schema,
 		Columns: schema.ColumnNames(),
 		Create:  true,
-	}, resultRows(res, nil, nil))
+	}, resultRows(res, nil, nil, nil))
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +190,8 @@ func (db *DB) executeInsertSelect(ctx context.Context, info *plansql.InsertInfo)
 		Columns:       columns[:len(res.OutputSchema)],
 		PartitionKeys: tableMeta.PartitionKeys,
 		Incarnation:   incarnation,
-	}, resultRows(res, res.OutputSchema, cols))
+	}, resultRows(res, res.OutputSchema, cols,
+		unknownTypedSelectItems(info.Select, len(res.OutputSchema))))
 	if err != nil {
 		return nil, err
 	}
@@ -308,7 +309,8 @@ const (
 // every cell goes through the engine's one assignment conversion between them
 // — see assignQueryCells. A CREATE passes neither: its target columns ARE the
 // query's declared output, so there is nothing to convert.
-func resultRows(res *QueryResult, declared, target []parquet.Column) ingest.RowSource {
+func resultRows(res *QueryResult, declared, target []parquet.Column,
+	unknownLit []ntUnknownKind) ingest.RowSource {
 	if res == nil {
 		return ingest.RowSource{}
 	}
@@ -321,8 +323,44 @@ func resultRows(res *QueryResult, declared, target []parquet.Column) ingest.RowS
 		if target == nil {
 			return cells, nil
 		}
-		return assignQueryCells(cells, declared, target)
+		return assignQueryCells(cells, declared, target, unknownLit)
 	}}
+}
+
+// assignUnknownLiteral coerces SQL's `unknown` — a bare quoted literal in the
+// select list — with the TARGET's own input function. For the integer-domain
+// types that is a decimal number in the type's range and nothing else; every
+// other declaration keeps the assignment converter, whose text readings ARE
+// those types' input functions (parquet's accept-sets for the network and
+// temporal families, DecimalValueFromText for DECIMAL).
+func assignUnknownLiteral(v any, col parquet.Column) (any, error) {
+	s, isText := v.(string)
+	if !isText {
+		return assignEvaluatedValue(v, col, false)
+	}
+	switch col.Type {
+	case parquet.TypePort, parquet.TypeProtocol:
+		// The TYPE's whole input function, name included: `SELECT 'udp'` into
+		// a PROTOCOL column is 17, the same as at every other writer door.
+		v, st, _ := parquet.NetworkTextValue(col.Type, s)
+		if st != parquet.NetTextOK {
+			return nil, parquet.NetworkTextError(col.Type, s, st)
+		}
+		return v, nil
+	case parquet.TypeInt32, parquet.TypeInt64:
+		n, st := parquet.DecimalIntegerText(s)
+		if st != parquet.NetTextOK {
+			// The name a client can look up.
+			name := "integer"
+			if col.Type == parquet.TypeInt64 {
+				name = "bigint"
+			}
+			return nil, sqlerr.New("22P02", "invalid input syntax for type %s: %s",
+				name, sqlerr.Quote(s))
+		}
+		return assignEvaluatedValue(n, col, false)
+	}
+	return assignEvaluatedValue(v, col, false)
 }
 
 // tableExists reports whether the catalog holds this exact name.
@@ -535,10 +573,28 @@ func querySourceError(err error, budget int64) error {
 // The conversion belongs HERE and not at the writer, which is what ADR-0036
 // rejected: this is the one place that holds BOTH facts, the source's declared
 // type (the plan's output schema) and the target's (the catalog).
-func assignQueryCells(row []any, declared, target []parquet.Column) ([]any, error) {
+func assignQueryCells(row []any, declared, target []parquet.Column,
+	unknownLit []ntUnknownKind) ([]any, error) {
 	for j := range row {
 		if j >= len(target) || j >= len(declared) {
 			break
+		}
+		// An UNKNOWN-typed literal is coerced by the TARGET's input function,
+		// not by the numeric assignment cast — PostgreSQL's rule and the one
+		// #1088 relies on. The difference shows for a quoted FRACTIONAL
+		// literal: `'2.5'::integer` is 22P02 on the server and this converter
+		// rounded it to 3, so `INSERT INTO t (port_col) SELECT '2.5'` put a
+		// number no PORT can be at REST while the same text at the VALUES,
+		// COPY, UPDATE and ingester doors was 22P02 (review NT round 2, P).
+		// A value from a COLUMN keeps the assignment cast, which is what
+		// rounds a DECIMAL into an integer as PostgreSQL's numeric→int does.
+		if j < len(unknownLit) && unknownLit[j] == ntUnknownText {
+			v, err := assignUnknownLiteral(row[j], target[j])
+			if err != nil {
+				return nil, fmt.Errorf("column %q: %w", target[j].Name, err)
+			}
+			row[j] = v
+			continue
 		}
 		// srcFloat tells the integer converter whether a fractional source
 		// rounds (a float does, PostgreSQL's float→int assignment cast) or
