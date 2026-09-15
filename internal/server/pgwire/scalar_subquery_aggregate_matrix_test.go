@@ -17,11 +17,13 @@ import (
 // now, in both wire formats. A pin that starts agreeing fails, which is how
 // these were found.
 //
-// The twelve MIN/MAX-over-an-int4 pins are gone too (#951, #1070, arc ND):
-// `min(int4)` declares integer here as it does there, whether the int4 comes
-// from a CAST inside the subquery or from an aggregate over an int4 column.
-// `oid` and `pgOID` are the same number in every cell of this file now, and a
-// cell where they differ is a divergence stated on purpose.
+// SIX of the twelve MIN/MAX-over-an-int4 pins are gone (#951, arc ND):
+// `min(int4)` declares integer here as it does there when the int4 comes from
+// an aggregate over an int4 COLUMN. The six `int4/*` cells beside them keep
+// their pins, because their int4 comes from a CAST — and a CAST still declares
+// int8 here, which is ADR-0012's list and the two-path measurement in #1070's
+// own record. A cell where `oid` and `pgOID` differ is a divergence stated on
+// purpose.
 func TestScalarSubqueryAggregateMatrix(t *testing.T) {
 	_, srv := setupRealDB(t)
 	conn := connectPgconn(t, srv.Addr())
@@ -43,12 +45,12 @@ func TestScalarSubqueryAggregateMatrix(t *testing.T) {
 		{"int4/AVG/plain", "SELECT AVG((SELECT CAST(3 AS INT))) AS v FROM users", 1700, 1700, "3", "3"},
 		{"int4/AVG/grouped", "SELECT AVG((SELECT CAST(3 AS INT))) AS v FROM users GROUP BY id ORDER BY id", 1700, 1700, "3;3;3", "3;3;3"},
 		{"int4/AVG/window", "SELECT AVG((SELECT CAST(3 AS INT))) OVER () AS v FROM users", 1700, 1700, "3;3;3", "3;3;3"},
-		{"int4/MIN/plain", "SELECT MIN((SELECT CAST(3 AS INT))) AS v FROM users", 23, 23, "3", "3"},
-		{"int4/MIN/grouped", "SELECT MIN((SELECT CAST(3 AS INT))) AS v FROM users GROUP BY id ORDER BY id", 23, 23, "3;3;3", "3;3;3"},
-		{"int4/MIN/window", "SELECT MIN((SELECT CAST(3 AS INT))) OVER () AS v FROM users", 23, 23, "3;3;3", "3;3;3"},
-		{"int4/MAX/plain", "SELECT MAX((SELECT CAST(3 AS INT))) AS v FROM users", 23, 23, "3", "3"},
-		{"int4/MAX/grouped", "SELECT MAX((SELECT CAST(3 AS INT))) AS v FROM users GROUP BY id ORDER BY id", 23, 23, "3;3;3", "3;3;3"},
-		{"int4/MAX/window", "SELECT MAX((SELECT CAST(3 AS INT))) OVER () AS v FROM users", 23, 23, "3;3;3", "3;3;3"},
+		{"int4/MIN/plain", "SELECT MIN((SELECT CAST(3 AS INT))) AS v FROM users", 20, 23, "3", "3"},
+		{"int4/MIN/grouped", "SELECT MIN((SELECT CAST(3 AS INT))) AS v FROM users GROUP BY id ORDER BY id", 20, 23, "3;3;3", "3;3;3"},
+		{"int4/MIN/window", "SELECT MIN((SELECT CAST(3 AS INT))) OVER () AS v FROM users", 20, 23, "3;3;3", "3;3;3"},
+		{"int4/MAX/plain", "SELECT MAX((SELECT CAST(3 AS INT))) AS v FROM users", 20, 23, "3", "3"},
+		{"int4/MAX/grouped", "SELECT MAX((SELECT CAST(3 AS INT))) AS v FROM users GROUP BY id ORDER BY id", 20, 23, "3;3;3", "3;3;3"},
+		{"int4/MAX/window", "SELECT MAX((SELECT CAST(3 AS INT))) OVER () AS v FROM users", 20, 23, "3;3;3", "3;3;3"},
 		{"int4/COUNT/plain", "SELECT COUNT((SELECT CAST(3 AS INT))) AS v FROM users", 20, 20, "3", "3"},
 		{"int4/COUNT/grouped", "SELECT COUNT((SELECT CAST(3 AS INT))) AS v FROM users GROUP BY id ORDER BY id", 20, 20, "1;1;1", "1;1;1"},
 		{"int4/COUNT/window", "SELECT COUNT((SELECT CAST(3 AS INT))) OVER () AS v FROM users", 20, 20, "3;3;3", "3;3;3"},

@@ -25,11 +25,11 @@ func TestAnInt32DomainCastOnTheWire(t *testing.T) {
 		oid  uint32
 		text string
 	}{
-		{`SELECT 2147483647::INT32 AS v`, 23, "2147483647"}, // int4, which is what PostgreSQL declares (#1070)
+		{`SELECT 2147483647::INT32 AS v`, 20, "2147483647"}, // int8: every integer CAST still lands on INT64 (ADR-0012)
 		{`SELECT 443::PORT AS v`, 23, "443"},                // int4, the same OID a PORT column declares
 		{`SELECT 6::PROTOCOL AS v`, 23, "6"},                // int4
 		{`SELECT CAST(1.5 AS FLOAT32) AS v`, 700, "1.5"},    // float4
-		{`SELECT CAST(3000000000 AS INTEGER) AS v`, 23, ""}, // the control: refuses, no row
+		{`SELECT CAST(3000000000 AS INTEGER) AS v`, 20, ""}, // the control: refuses, no row
 	} {
 		t.Run(c.sql, func(t *testing.T) {
 			res := conn.ExecParams(ctx, c.sql, nil, nil, nil, []int16{0}).Read()

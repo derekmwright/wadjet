@@ -86,10 +86,10 @@ func TestUnknownCastDestinationIsUndefinedObject(t *testing.T) {
 		want      any
 	}{
 		{"bigint", `SELECT CAST(c_i64 AS BIGINT) AS v FROM ` + tbl + ` WHERE id = 1`, int64(1000003)},
-		{"integer", `SELECT CAST(c_i32 AS INTEGER) AS v FROM ` + tbl + ` WHERE id = 1`, int32(3)},
-		{"smallint", `SELECT CAST(c_i32 AS SMALLINT) AS v FROM ` + tbl + ` WHERE id = 1`, int32(3)},
-		{"int2", `SELECT CAST(c_i32 AS INT2) AS v FROM ` + tbl + ` WHERE id = 1`, int32(3)},
-		{"int4", `SELECT CAST(c_i32 AS INT4) AS v FROM ` + tbl + ` WHERE id = 1`, int32(3)},
+		{"integer", `SELECT CAST(c_i32 AS INTEGER) AS v FROM ` + tbl + ` WHERE id = 1`, int64(3)},
+		{"smallint", `SELECT CAST(c_i32 AS SMALLINT) AS v FROM ` + tbl + ` WHERE id = 1`, int64(3)},
+		{"int2", `SELECT CAST(c_i32 AS INT2) AS v FROM ` + tbl + ` WHERE id = 1`, int64(3)},
+		{"int4", `SELECT CAST(c_i32 AS INT4) AS v FROM ` + tbl + ` WHERE id = 1`, int64(3)},
 		{"signed", `SELECT CAST(c_i32 AS SIGNED) AS v FROM ` + tbl + ` WHERE id = 1`, int64(3)},
 		{"real", `SELECT CAST(1.0/3 AS REAL) AS v FROM ` + tbl + ` WHERE id = 1`, float32(0.33333334)},
 		{"float4", `SELECT CAST(1.0/3 AS FLOAT4) AS v FROM ` + tbl + ` WHERE id = 1`, float32(0.33333334)},

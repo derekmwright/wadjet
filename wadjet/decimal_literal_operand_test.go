@@ -212,8 +212,7 @@ func TestSmallintCastAndWideRound(t *testing.T) {
 	db := ddrOpen(t)
 	t.Run("cast to smallint rounds", func(t *testing.T) {
 		res := ddrQuery(t, db, "SELECT CAST(a AS SMALLINT) AS v FROM decdecl WHERE id = 1")
-		// The NUMBER: a SMALLINT destination declares int4 here since #1070
-		// (this engine has no int16 carrier), so the box is an int32. What
+		// The NUMBER, whichever integer box the declaration put it in. What
 		// the case is about is that the cast ROUNDS rather than truncating.
 		if n, ok := ddrIntValue(res.Rows[0]["v"]); !ok || n != 13 {
 			t.Errorf("CAST(12.75 AS SMALLINT) = %#v (%T), want 13",

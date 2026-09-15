@@ -1694,22 +1694,18 @@ func inferCastType(typeName string) parquet.TypeID {
 	// label in Cast.Eval either, so `x::INT32` published its operand
 	// unchanged under a STRING declaration — #310/#443's shape, and the one
 	// #652 closed for names that answer to nothing at all.
-	case "BIGINT", "INT8", "INT64", "SIGNED":
+	case "INTEGER", "INT", "INT4", "INT32", "BIGINT", "INT8", "INT64", "SMALLINT", "INT2", "SIGNED":
+		// Every integer spelling lands on INT64, and #1070 did NOT move this
+		// one. The cast evaluator enforces each spelling's own RANGE (22003
+		// past it), so the value would fit an int4 column — but the DAG
+		// declares a CAST OVER A WINDOW from the window's own output rather
+		// than from the cast, so narrowing here made
+		// `CAST(SUM(a) OVER () AS INTEGER)` int4 on the single path and int8
+		// on the stage arms: one expression, two declarations, which is
+		// exactly what #813 item 1 was and what this arc forbids. Measured,
+		// and filed rather than half-fixed. The OID a client sees is int8
+		// where PostgreSQL says int4/int2, in ADR-0012 item 12's list.
 		return parquet.TypeInt64
-	case "INTEGER", "INT", "INT4", "INT32", "SMALLINT", "INT2":
-		// int4, not int8 — the same move the REAL arm below makes and for the
-		// same reason: the cast EVALUATOR already enforces this spelling's
-		// range and raises 22003 past it (castIntInRange), so the value a
-		// projection has to hold provably fits an int4 column, and declaring
-		// int8 for it put `CAST(x AS INT)` on the wire under OID 20 where
-		// PostgreSQL declares 23 (#1070).
-		//
-		// SMALLINT and INT2 ride here rather than getting an arm of their
-		// own: the engine has no int16 carrier, so int4 is the narrowest
-		// declaration that can hold what the evaluator produces. PostgreSQL
-		// declares 21 for those two and this engine declares 23 — recorded in
-		// ADR-0012 item 12's list, one step nearer than the int8 it was.
-		return parquet.TypeInt32
 	case "REAL", "FLOAT4", "FLOAT32":
 		// float4, not float8: expr.Cast now ROUNDS to float32 for these two
 		// spellings, so the projection has to allocate a column that can hold

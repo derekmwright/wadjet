@@ -20,13 +20,12 @@ import (
 // PORT must declare the same thing — a right value under a text OID is what a
 // driver reads as a string.
 func TestInferCastTypeInt32DomainSpellings(t *testing.T) {
-	for _, spelling := range []string{"INT32", "int32", " Int32 "} {
-		if got := inferCastType(spelling); got != parquet.TypeInt32 {
-			t.Errorf("inferCastType(%q) = %v, want INT32 — the int4 spellings declare "+
-				"int4 since #1070, and the cast enforces that range itself", spelling, got)
-		}
-	}
-	for _, spelling := range []string{"BIGINT", "int8", " Int64 ", "SIGNED"} {
+	// Every integer spelling lands on INT64. #1070 narrowed arithmetic and
+	// literals to int4 and did NOT narrow the CAST: the DAG declares a cast
+	// OVER A WINDOW from the window's own output, so an int4 cast declaration
+	// made the two paths disagree about one expression (ADR-0012's list).
+	for _, spelling := range []string{"INT32", "int32", " Int32 ",
+		"BIGINT", "int8", " Int64 ", "SIGNED"} {
 		if got := inferCastType(spelling); got != parquet.TypeInt64 {
 			t.Errorf("inferCastType(%q) = %v, want INT64", spelling, got)
 		}
