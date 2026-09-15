@@ -167,14 +167,13 @@ func QuotedLitStatus(typ batch.TypeID, text string) (NumConstStatus, bool) {
 		// answered inside a CASE, and on the DAG answered a WRONG NUMBER —
 		// the widened parser's zero reading. One classification, at typing
 		// time, for every arm and every site (#627 round 2, B1).
-		if NetworkPrefixLiteral(typ, text) {
-			return NumConstOK, true // NOT a syntax error; see RefuseNetworkPrefixLiteral
-		}
-		if typ == batch.TypeIPv4 {
-			if _, ok := IPv4LitKey(text); ok {
-				return NumConstOK, true
-			}
-		} else if _, ok := IPv6LitKey(text); ok {
+		// ONE reader, the writer's: a literal this column can hold is a
+		// value, a PostgreSQL-valid one it cannot hold reaches
+		// RefuseNetworkPrefixLiteral's 0A000, and anything else is 22P02.
+		// Asking IPv4LitKey/IPv6LitKey here instead was a second grammar at
+		// the one site whose whole job is to classify once (review NT P2).
+		switch _, st, _ := parquet.NetworkTextValue(typ, text); st {
+		case parquet.NetTextOK, parquet.NetTextPrefix:
 			return NumConstOK, true
 		}
 		return NumConstSyntax, true

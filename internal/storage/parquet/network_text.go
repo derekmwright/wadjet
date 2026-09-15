@@ -101,12 +101,48 @@ func NetworkTextError(typ TypeID, s string, st NetTextStatus) error {
 		return sqlerr.New("22003", "invalid octet value in %q value: %s",
 			NetworkTextTypeName(typ), sqlerr.Quote(s))
 	case NetTextPrefix:
-		return sqlerr.New("0A000", "a network prefix is not representable in an %s column: %s "+
-			"(PostgreSQL reads it as a network; use a CIDR column, or compare against the "+
-			"address alone)", typ.String(), sqlerr.Quote(s))
+		return sqlerr.New("0A000", "%s is not representable in an %s column: %s "+
+			"(PostgreSQL reads it as %s; use a CIDR column, or an address this type can hold)",
+			networkUnholdableKind(typ, s), typ.String(), sqlerr.Quote(s),
+			networkUnholdableReading(typ, s))
 	}
 	return sqlerr.New("22P02", "invalid input syntax for type %s: %s",
 		NetworkTextTypeName(typ), sqlerr.Quote(s))
+}
+
+// networkUnholdableKind and networkUnholdableReading name WHY a
+// PostgreSQL-valid inet literal has no room in this column, so the one 0A000
+// class can still say which of its two reasons applies: the literal names a
+// NETWORK where the type holds a bare address, or it names an address of the
+// OTHER FAMILY.
+func networkUnholdableKind(typ TypeID, s string) string {
+	if networkWrongFamily(typ, s) {
+		return "an address of the other family"
+	}
+	return "a network prefix"
+}
+
+func networkUnholdableReading(typ TypeID, s string) string {
+	if networkWrongFamily(typ, s) {
+		return "an IPv6 address"
+	}
+	return "a network"
+}
+
+func networkWrongFamily(typ TypeID, s string) bool {
+	family, _, _, ok := PgInetPton(s)
+	if !ok {
+		return false
+	}
+	switch typ {
+	case TypeIPv4:
+		return family != 0x04
+	case TypeIPv6:
+		// Never: an IPV6 column holds a v4 address as its v4-mapped form, so
+		// the only thing it has no room for is a NETWORK.
+		return false
+	}
+	return false
 }
 
 // NetworkTextTypeName is the type PostgreSQL's own message names for this
@@ -136,6 +172,14 @@ func NetworkTextTypeName(typ TypeID) string {
 func PgIPv4Address(s string) (int64, NetTextStatus) {
 	addr, bits, ok := PgIPv4Pton(s)
 	if !ok {
+		// Not a v4 form. If it is nevertheless valid `inet` — every v6
+		// spelling is — then the TEXT is not the problem and this column's
+		// type is: one class, one code (0A000), the same answer a NETWORK
+		// gets. It used to be 22P02 for the wrong family and 0A000 for a
+		// prefix, which is one class with two answers (review NT P2).
+		if _, _, _, inet := PgInetPton(s); inet {
+			return 0, NetTextPrefix
+		}
 		return 0, NetTextSyntax
 	}
 	if bits != 32 {
@@ -149,19 +193,22 @@ func PgIPv4Address(s string) (int64, NetTextStatus) {
 // IPV6 column already renders it back as.
 func PgIPv6Address(s string) ([]byte, NetTextStatus) {
 	body, mask, cut := strings.Cut(s, "/")
-	if cut {
-		if !strings.ContainsRune(body, ':') {
-			// A v4-shaped body takes the v4 grammar, mask and all:
-			// `'10.0.0.1/128'` is 22P02 on the server because 128 does not
-			// fit a v4 address.
-			n, st := PgIPv4Address(s)
-			if st != NetTextOK {
-				return nil, st
-			}
-			var quad [4]byte
-			binary.BigEndian.PutUint32(quad[:], uint32(n))
-			return net.IP(quad[:]).To16(), NetTextOK
+	if !strings.ContainsRune(body, ':') {
+		// A v4-shaped body takes the v4 grammar, mask or no mask:
+		// `'10.0.0.1/128'` is 22P02 on the server because 128 does not fit a
+		// v4 address, and `'010.1.2.3'` is 10.1.2.3 there whether or not a
+		// `/32` follows it. Reading the maskless spelling with net.ParseIP
+		// instead gave one type two grammars: `'010.1.2.3/32'` was a value
+		// and `'010.1.2.3'` was 22P02 (review NT B2).
+		n, st := PgIPv4Address(s)
+		if st != NetTextOK {
+			return nil, st
 		}
+		var quad [4]byte
+		binary.BigEndian.PutUint32(quad[:], uint32(n))
+		return net.IP(quad[:]).To16(), NetTextOK
+	}
+	if cut {
 		bits, ok := PgInet6MaskBits(mask)
 		if !ok {
 			return nil, NetTextSyntax
@@ -223,6 +270,15 @@ func PgInetPton(s string) (family byte, full []byte, ones int, ok bool) {
 			t += "/128"
 		} else {
 			t += "/32"
+		}
+	}
+	if body, mask, cut := strings.Cut(s, "/"); cut && strings.ContainsRune(body, ':') {
+		// inet6's mask grammar is not Go's: digits only, no leading zeros,
+		// 0-128. net.ParseCIDR takes `'::1/064'`, which is 22P02 on the
+		// server and is refused one function away in PgIPv6Address — one
+		// grammar, two readings (review NT B3).
+		if _, ok := PgInet6MaskBits(mask); !ok {
+			return 0, nil, 0, false
 		}
 	}
 	ip, ipnet, err := net.ParseCIDR(t)
@@ -477,7 +533,19 @@ func PgProtocolText(s string) (int32, NetTextStatus) {
 	return boundedDecimal(s, 0, 255)
 }
 
-func boundedDecimal(s string, lo, hi int64) (int32, NetTextStatus) {
+// DecimalIntegerText is the TEXT GRAMMAR of PORT and PROTOCOL, without either
+// type's range: surrounding whitespace (which PostgreSQL's own integer input
+// ignores), an optional sign, decimal digits and nothing else.
+//
+// It is deliberately NARROWER than int4's input function, which also reads
+// `0x1bb`, `0o17`, `0b101` and `1_000`. These two types do not have int4's
+// text form — PROTOCOL's includes a NAME, which int4's certainly does not —
+// and the one place that form is decided has to be one place: the CAST read
+// int4's grammar through kernel.IntLitText and took `'0x1bb'` for a PORT the
+// writer refused, which is the one-grammar claim failing one type over
+// (review NT P4). The two DOMAINS still differ by door and that is ADR-0012's
+// recorded split, not this function's business.
+func DecimalIntegerText(s string) (int64, NetTextStatus) {
 	t := strings.TrimSpace(s)
 	if t == "" {
 		return 0, NetTextSyntax
@@ -498,11 +566,19 @@ func boundedDecimal(s string, lo, hi int64) (int32, NetTextStatus) {
 		}
 		v = v*10 + int64(t[i]-'0')
 		if v > 1<<40 {
-			v = 1 << 40
+			v = 1 << 40 // far past any int4; the caller answers 22003
 		}
 	}
 	if neg {
 		v = -v
+	}
+	return v, NetTextOK
+}
+
+func boundedDecimal(s string, lo, hi int64) (int32, NetTextStatus) {
+	v, st := DecimalIntegerText(s)
+	if st != NetTextOK {
+		return 0, st
 	}
 	if v < lo || v > hi {
 		return 0, NetTextRange

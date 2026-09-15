@@ -173,6 +173,26 @@ func TestNetworkTextValueIsOneGrammarPerType(t *testing.T) {
 		{TypeIPv4, "192.168", NetTextSyntax},
 		{TypeIPv4, "10.0.0.256", NetTextSyntax},
 		{TypeIPv4, "zzz", NetTextSyntax},
+		// A PostgreSQL-valid inet literal of the OTHER FAMILY is the SAME
+		// class as a network: the text is fine and this column has no room
+		// for it, which is 0A000 (review NT P2, ADR-0012 item 5).
+		{TypeIPv4, "::1", NetTextPrefix},
+		{TypeIPv4, "2001:db8::1", NetTextPrefix},
+		{TypeIPv4, "::ffff:1.2.3.4", NetTextPrefix},
+		{TypeIPv6, "10/8", NetTextPrefix},
+		{TypeIPv6, "192.168/16", NetTextPrefix},
+		// An IPV6 column HOLDS a v4 address, as its v4-mapped form, with or
+		// without the `/32` PostgreSQL treats as decoration — one grammar,
+		// not two (review NT B2).
+		{TypeIPv6, "010.1.2.3", NetTextOK},
+		{TypeIPv6, "010.1.2.3/32", NetTextOK},
+		{TypeIPv6, "10.1.2.3.", NetTextOK},
+		{TypeIPv6, "10.0.0.01", NetTextOK},
+		// inet6's mask grammar reaches the CIDR type too, which read Go's
+		// instead and stored `'::1/064'` — text that names no inet (B3).
+		{TypeCIDR, "::1/064", NetTextSyntax},
+		{TypeCIDR, "::1/00", NetTextSyntax},
+		{TypeCIDR, "::1/128", NetTextOK},
 		{TypeIPv6, "2001:db8::1", NetTextOK},
 		{TypeIPv6, "::1", NetTextOK},
 		{TypeIPv6, "2001:DB8::1", NetTextOK},

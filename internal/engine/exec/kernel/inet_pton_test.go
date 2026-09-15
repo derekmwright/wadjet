@@ -339,8 +339,8 @@ func TestNetworkLiteralRefusalIsOnePredicate(t *testing.T) {
 		{"10.0.0.1", false, true},
 	} {
 		t.Run("v6_mask/"+c.text, func(t *testing.T) {
-			if got := IPv6PrefixLiteral(c.text); got != c.prefix {
-				t.Errorf("IPv6PrefixLiteral(%q) = %v, want %v", c.text, got, c.prefix)
+			if got := NetworkPrefixLiteral(batch.TypeIPv6, c.text); got != c.prefix {
+				t.Errorf("NetworkPrefixLiteral(IPV6, %q) = %v, want %v", c.text, got, c.prefix)
 			}
 			if _, ok := IPv6LitKey(c.text); ok != c.address {
 				t.Errorf("IPv6LitKey(%q) ok = %v, want %v", c.text, ok, c.address)
@@ -364,10 +364,34 @@ func TestNetworkLiteralRefusalIsOnePredicate(t *testing.T) {
 	if _, ok := IPv4LitKey("10/8"); ok {
 		t.Errorf(`IPv4LitKey("10/8") answered; the deferral is that a NETWORK has no place in a bare address`)
 	}
-	if !IPv4PrefixLiteral("10/8") || IPv4PrefixLiteral("zzz") || IPv4PrefixLiteral("10.0.0.1/32") {
-		t.Errorf("IPv4PrefixLiteral does not separate a network from garbage and from a host")
+	if !NetworkPrefixLiteral(batch.TypeIPv4, "10/8") ||
+		NetworkPrefixLiteral(batch.TypeIPv4, "zzz") ||
+		NetworkPrefixLiteral(batch.TypeIPv4, "10.0.0.1/32") {
+		t.Errorf("NetworkPrefixLiteral(IPV4) does not separate a network from garbage and from a host")
 	}
-	if !IPv6PrefixLiteral("2001:db8::/64") || IPv6PrefixLiteral("zzz") || IPv6PrefixLiteral("::1/128") {
-		t.Errorf("IPv6PrefixLiteral does not separate a network from garbage and from a host")
+	if !NetworkPrefixLiteral(batch.TypeIPv6, "2001:db8::/64") ||
+		NetworkPrefixLiteral(batch.TypeIPv6, "zzz") ||
+		NetworkPrefixLiteral(batch.TypeIPv6, "::1/128") {
+		t.Errorf("NetworkPrefixLiteral(IPV6) does not separate a network from garbage and from a host")
+	}
+	// The OTHER FAMILY is the same class as a network, and it is one class at
+	// every door since review NT P2: a PostgreSQL-valid inet literal this
+	// column has no room for is 0A000, never 22P02.
+	for _, c := range []struct {
+		typ  batch.TypeID
+		text string
+	}{
+		{batch.TypeIPv4, "::1"}, {batch.TypeIPv4, "2001:db8::1"}, {batch.TypeIPv4, "::"},
+		{batch.TypeIPv4, "::ffff:1.2.3.4"}, {batch.TypeIPv4, "2001:db8::1/64"},
+		{batch.TypeIPv6, "10/8"}, {batch.TypeIPv6, "192.168/16"}, {batch.TypeIPv6, "1.2.3.4/0"},
+	} {
+		if !NetworkPrefixLiteral(c.typ, c.text) {
+			t.Errorf("NetworkPrefixLiteral(%v, %q) = false; PostgreSQL reads it as an inet "+
+				"value and this column has no room for it, which is 0A000", c.typ, c.text)
+		}
+		if st, _ := QuotedLitStatus(c.typ, c.text); st != NumConstOK {
+			t.Errorf("QuotedLitStatus(%v, %q) = %v; a representability refusal is not a "+
+				"syntax one", c.typ, c.text, st)
+		}
 	}
 }

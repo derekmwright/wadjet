@@ -861,6 +861,14 @@ func IPv6LitKey(s string) (key string, ok bool) {
 			return "", false
 		}
 		s = body
+	} else if !strings.ContainsRune(s, ':') {
+		// A maskless v4-shaped literal takes the v4 grammar too, so
+		// `'010.1.2.3'` is the value it is on the server and the value the
+		// writer and the CAST read (review NT B2).
+		if _, bits, ok := parquet.PgIPv4Pton(s); !ok || bits != 32 {
+			return "", false
+		}
+		return "", true
 	}
 	ip := net.ParseIP(s)
 	if ip == nil {
@@ -2342,64 +2350,24 @@ func parseIPv4ToInt64(s string) (int64, bool) {
 	return int64(binary.BigEndian.Uint32(ip4)), true
 }
 
-// IPv4PrefixLiteral reports whether s is PostgreSQL-valid inet text that names
-// a NETWORK rather than a host — the one family this engine's bare-address
-// types cannot represent, which is what separates a refusal that is a defect
-// from one that is a deferral (#627).
-func IPv4PrefixLiteral(s string) bool {
-	// An explicit `/mask` is required, and that is PostgreSQL's own rule
-	// rather than a convenience: `'10/8'::inet` is the network 10.0.0.0/8 and
-	// `'192.168'::inet` is a 22P02 — the abbreviation without a mask is a
-	// CIDR-only grammar there. So a maskless abbreviation is a SYNTAX refusal
-	// (QuotedLitStatus's arm), not a representability one, and the two classes
-	// stay apart.
-	if !strings.ContainsRune(s, '/') {
-		return false
-	}
-	_, bits, ok := parquet.PgIPv4Pton(s)
-	return ok && bits != 32
-}
-
 // NetworkPrefixLiteral reports whether text is a PostgreSQL-VALID literal that
 // names a NETWORK rather than a host, for a bare-address column type. It is the
 // ONE predicate the plan-time refusal and the runtime one both read, so a
 // literal cannot be a network at one site and garbage at another.
 func NetworkPrefixLiteral(typ batch.TypeID, text string) bool {
+	// The WRITER's classification, not a second one: a literal that is
+	// PostgreSQL-valid inet with no room in this column is 0A000 wherever it
+	// appears, and parquet.NetworkTextValue is where that is decided. The two
+	// copies this replaces disagreed at the comparison door — `'::1'` beside
+	// an IPV4 column was 22P02 there and 0A000 at every other door, and a v4
+	// NETWORK beside an IPV6 column was 22P02 there and 0A000 elsewhere
+	// (review NT P2).
 	switch typ {
-	case batch.TypeIPv4:
-		return IPv4PrefixLiteral(text)
-	case batch.TypeIPv6:
-		return IPv6PrefixLiteral(text)
+	case batch.TypeIPv4, batch.TypeIPv6:
+		_, st, ok := parquet.NetworkTextValue(typ, text)
+		return ok && st == parquet.NetTextPrefix
 	}
 	return false
-}
-
-// IPv6PrefixLiteral is IPv4PrefixLiteral for the v6 spellings: an address with
-// a prefix narrower than /128 — and, like its twin, it answers only for text
-// PostgreSQL itself accepts, because the 0A000 its answer produces is a claim
-// that the text IS valid and this engine's TYPE is the limit.
-//
-// The first version answered `mask != "128"` without parsing the mask or
-// looking at the family, so `'2001:db8::1/129'`, `'/abc'` and `'/0128'` — all
-// 22P02 on the server — were called networks and refused with 0A000, telling a
-// client to use a CIDR column for text no column can hold. The same literal
-// was 22P02 at an IPV4 column and 0A000 at an IPV6 one (round-3 review B3-3).
-func IPv6PrefixLiteral(s string) bool {
-	body, mask, cut := strings.Cut(s, "/")
-	if !cut {
-		return false
-	}
-	// A v4-shaped body is the v4 grammar's question, mask and all:
-	// `'10.0.0.1/128'` is 22P02 on the server because 128 does not fit a v4
-	// address, and answering "network" here would make it 0A000 instead.
-	if !strings.ContainsRune(body, ':') {
-		return false
-	}
-	if ip := net.ParseIP(body); ip == nil || ip.To16() == nil {
-		return false
-	}
-	bits, ok := parquet.PgInet6MaskBits(mask)
-	return ok && bits != 128
 }
 
 // IPv4SortKey re-keys an IPv4 literal or a rendered IPV4 column value into

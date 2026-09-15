@@ -6,9 +6,12 @@ import "strings"
 // Maskless input requires four octets; with a mask accept 1–4, retain host
 // bits and require bits/8 <= octets. Allow leading zeros and one trailing dot.
 // Reject hex, whitespace, malformed/empty octets and masks outside 0..32.
-// CIDR's classful inference/hex/host-bit rejection belongs to its explicit
-// input cast, not comparison INET grammar; that CAST still passes text through.
-// IPv6 uses net.ParseCIDR; this parser is v4-only.
+// CIDR's classful inference/hex/host-bit rejection belongs to PostgreSQL's
+// `cidr` TYPE and reaches no door here: a wadjet CIDR column is `inet` (it
+// holds host bits under a mask, which `cidr` refuses), and since #1092 the
+// CAST validates its text against this same grammar rather than passing it
+// through. IPv6 bodies go through PgIPv6Address / PgInet6MaskBits; this
+// parser is v4-only.
 // CidrSortKey and CidrStatsSortKey must agree byte-for-byte or pruning loses rows.
 // See docs/internals/parquet-postgres-inet-ipv4-grammar.md for the design.
 func PgIPv4Pton(s string) (addr [4]byte, bits int, ok bool) {
