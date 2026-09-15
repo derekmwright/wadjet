@@ -17,7 +17,12 @@ import (
 //
 // PostgreSQL raises 22003 for the same assignment.
 func TestTheIngestBoundaryRefusesAnInt32ItCannotHold(t *testing.T) {
-	for _, colType := range []parquet.TypeID{parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol} {
+	// PORT and PROTOCOL have LEFT this test: their range is the TYPE's, not
+	// the carrier's, and it is checked wherever a value enters the type — by
+	// cast or by write — which includes this Go-box door (ADR-0012's
+	// 2026-09-15 entry; review NT round 2, B2). TestTheIngestBoundaryHoldsPortAndProtocolToTheirOwnRange
+	// below is their half.
+	for _, colType := range []parquet.TypeID{parquet.TypeInt32} {
 		col := parquet.Column{Name: "a", Type: colType, Nullable: true}
 		for _, box := range []any{int64(3000000000), int64(-2147483649), int(3000000000), int64(-1) << 40} {
 			err := checkType(col, box)
@@ -35,6 +40,33 @@ func TestTheIngestBoundaryRefusesAnInt32ItCannotHold(t *testing.T) {
 		} {
 			if err := checkType(col, box); err != nil {
 				t.Errorf("%s: ingest refused %v (%T), which an int32 holds: %v", colType, box, box, err)
+			}
+		}
+	}
+}
+
+// TestTheIngestBoundaryHoldsPortAndProtocolToTheirOwnRange is the other half:
+// the two types with a range of their own are held to it at the Go-BOX door,
+// the same way the text door and the CAST hold them.
+func TestTheIngestBoundaryHoldsPortAndProtocolToTheirOwnRange(t *testing.T) {
+	for _, c := range []struct {
+		typ parquet.TypeID
+		hi  int64
+	}{{parquet.TypePort, 65535}, {parquet.TypeProtocol, 255}} {
+		col := parquet.Column{Name: "a", Type: c.typ, Nullable: true}
+		for _, box := range []any{int32(0), int64(c.hi), int(1), uint8(9), float64(c.hi)} {
+			if err := checkType(col, box); err != nil {
+				t.Errorf("%s: refused %v (%T), which the type holds: %v", c.typ, box, box, err)
+			}
+		}
+		for _, box := range []any{int32(c.hi + 1), int64(c.hi + 1), int(-1), int32(-1), float64(c.hi + 1)} {
+			err := checkType(col, box)
+			if err == nil {
+				t.Errorf("%s: accepted %v (%T); no %s is that", c.typ, box, box, c.typ)
+				continue
+			}
+			if s := sqlerr.StateOf(err); s != "22003" {
+				t.Errorf("%s: refusing %v carried SQLSTATE %q, want 22003: %v", c.typ, box, s, err)
 			}
 		}
 	}

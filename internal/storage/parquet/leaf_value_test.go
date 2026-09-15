@@ -76,6 +76,13 @@ func TestAnInt32LeafRefusesEveryValueItCannotHold(t *testing.T) {
 	}
 
 	for _, colType := range int32LeafTypes(t) {
+		if colType == TypePort || colType == TypeProtocol {
+			// Their range is the TYPE's, not the leaf carrier's, and it is
+			// checked here because this is where every BOX door narrows
+			// (ADR-0012's 2026-09-15 entry; review NT round 2, B2). The
+			// carrier-width cells below would assert the old position.
+			continue
+		}
 		col := Column{Name: "c", Type: colType, Nullable: true}
 		for _, tc := range refused {
 			t.Run(colType.String()+"/refused/"+tc.name, func(t *testing.T) {

@@ -22,6 +22,15 @@ func int32LeafValue(colType TypeID, v any) (int32, error) {
 		if err != nil {
 			return 0, err
 		}
+		// The TYPE's range FIRST for the two types that have one, so the
+		// refusal names the same bound at every magnitude: with the carrier
+		// check first, `int32(65536)` said "[0, 65535]" and
+		// `int64(2147483648)` said nothing about PORT at all — one rule, two
+		// messages.
+		if out, err := networkIntInRange(colType, n); err != nil || colType == TypePort ||
+			colType == TypeProtocol {
+			return out, err
+		}
 		if n < math.MinInt32 || n > math.MaxInt32 {
 			return 0, leafRangeError(colType, v)
 		}
@@ -255,7 +264,23 @@ func floatToInt32Leaf(colType TypeID, f float64, box any) (int32, error) {
 	if f != math.Trunc(f) {
 		return 0, leafInexactError(colType, box)
 	}
-	return int32(f), nil
+	return networkIntInRange(colType, int64(f))
+}
+
+// networkIntInRange is the TYPE's range — not the int32 carrier's — for the
+// two types that have one, at the leaf every BOX door narrows through. It is
+// the same bound the CAST and the text doors read (NetworkIntBounds), so
+// Derek's rule ("checked when a value ENTERS the type, by cast or by write")
+// reaches the Go-box door too: db.NewIngester().Ingest with int32(65536) put a
+// number no PORT can be at REST, where the same value as text and the same
+// value through a CAST are both 22003 (review NT round 2, B2).
+func networkIntInRange(colType TypeID, n int64) (int32, error) {
+	if colType == TypePort || colType == TypeProtocol {
+		if lo, hi := NetworkIntBounds(colType); n < lo || n > hi {
+			return 0, NetworkIntRangeError(colType, n)
+		}
+	}
+	return int32(n), nil
 }
 
 // maxInt64AsFloat is 2^63 — the first float64 ABOVE math.MaxInt64, since
