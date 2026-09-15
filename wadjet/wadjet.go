@@ -334,6 +334,16 @@ type ColumnMeta struct {
 	// describes it. Nil for every non-ROW column and for a ROW the plan could
 	// not declare, where that catalog fallback still applies.
 	Fields []parquet.Column
+	// ElementType is an ARRAY column's declared ELEMENT, and nil for every
+	// other column and for an ARRAY the plan could not type.
+	//
+	// It is here for the reason Fields is: a bare TypeID is not a type for an
+	// ARRAY either. PostgreSQL has no generic `array` — every array is the
+	// array OF something, with its own OID (int4[] 1007, text[] 1009,
+	// numeric[] 1231 …), and a client keys `getArray`/array scanning on that
+	// OID. Without the element the wire could only declare text, so a typed
+	// consumer got a string where it expected an array (#992).
+	ElementType *parquet.Column
 	// StringLength is the declared CHARACTER count of a parameterized string
 	// destination — `CAST(x AS VARCHAR(4))` — and 0 for a column that is not a
 	// string destination at all. PostgreSQL carries it on the wire as atttypmod
@@ -1074,6 +1084,7 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 			metas[i].TypeName = col.Type.String()
 			metas[i].Precision, metas[i].Scale = col.Precision, col.Scale
 			metas[i].Fields = col.Fields
+			metas[i].ElementType = col.ElementType
 			continue
 		}
 
@@ -1084,6 +1095,7 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 			metas[i].TypeName = col.Type.String()
 			metas[i].Precision, metas[i].Scale = col.Precision, col.Scale
 			metas[i].Fields = col.Fields
+			metas[i].ElementType = col.ElementType
 			continue
 		}
 
@@ -1093,6 +1105,7 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 			metas[i].TypeName = col.Type.String()
 			metas[i].Precision, metas[i].Scale = col.Precision, col.Scale
 			metas[i].Fields = col.Fields
+			metas[i].ElementType = col.ElementType
 			continue
 		}
 

@@ -409,11 +409,24 @@ func containsIdentWord(s, word string) bool {
 func nestedSchemaFromMetas(metas []wadjet.ColumnMeta) *nestedFieldSchema {
 	any := false
 	for _, m := range metas {
-		if m.TypeID != parquet.TypeRow {
+		switch m.TypeID {
+		case parquet.TypeRow:
+			if len(m.Fields) == 0 {
+				return nil
+			}
+		case parquet.TypeArray:
+			// An ARRAY's ELEMENT is the same kind of declaration a ROW's
+			// field list is, and since #992 it rides the meta. Without it
+			// here, a result whose array column is ALIASED — `SELECT a_i32
+			// AS v` — fell through to the catalog lookup, which is keyed by
+			// the catalog's own name and misses every alias; the renderer
+			// then had no element type and the binary path no array to
+			// write.
+			if m.ElementType == nil {
+				return nil
+			}
+		default:
 			continue
-		}
-		if len(m.Fields) == 0 {
-			return nil
 		}
 		any = true
 	}
@@ -424,7 +437,8 @@ func nestedSchemaFromMetas(metas []wadjet.ColumnMeta) *nestedFieldSchema {
 	ordered := make([]parquet.Column, len(metas))
 	for i, m := range metas {
 		col := parquet.Column{Name: m.Name, Type: m.TypeID,
-			Precision: m.Precision, Scale: m.Scale, Fields: m.Fields}
+			Precision: m.Precision, Scale: m.Scale, Fields: m.Fields,
+			ElementType: m.ElementType}
 		ordered[i] = col
 		byName[m.Name] = col
 	}

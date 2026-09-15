@@ -144,6 +144,10 @@ func coordColumnMetas(res *coordinator.SQLResult) []wadjet.ColumnMeta {
 			Nullable:  col.Nullable,
 			Precision: col.Precision,
 			Scale:     col.Scale,
+			// An ARRAY's ELEMENT, which decides its wire OID: PostgreSQL has
+			// no generic array type (#992). Nil for every other column.
+			ElementType: col.ElementType,
+			Fields:      col.Fields,
 			// A plan property (FIX 2, #457/#458 fold-in): which DECIMAL
 			// columns carry no PostgreSQL type modifier, and so must declare
 			// typmod -1 on the wire regardless of the real Precision/Scale

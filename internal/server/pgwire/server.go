@@ -2530,7 +2530,83 @@ func pgColumnOID(m wadjet.ColumnMeta) int {
 	if m.TypeID == parquet.TypeString && m.StringLength != 0 {
 		return oidVarchar
 	}
+	if m.TypeID == parquet.TypeArray {
+		return pgArrayColumnOID(m.ElementType)
+	}
 	return pgTypeOID(m.TypeName)
+}
+
+// pgArrayColumnOID is the OID an ARRAY column declares: PostgreSQL's array
+// type OF its element (int4[] 1007, int8[] 1016, text[] 1009, float8[] 1022,
+// numeric[] 1231, timestamp[] 1115, date[] 1182, uuid[] 2951, bool[] 1000,
+// bytea[] 1001).
+//
+// PostgreSQL has no generic `array`, so declaring OID 25 for every ARRAY
+// meant the text a client read was right — `{1,2}` either way — while the
+// TYPE it was told was not: JDBC's getArray, pgx's array scanning and
+// DataGrip's column typing all key on the OID, so an array column arrived as
+// a string and a typed consumer refused or mis-rendered it (#992).
+//
+// TWO element kinds deliberately keep text, and both are a fact about
+// PostgreSQL rather than a gap here:
+//
+//   - a NESTED array. PostgreSQL's `int4[][]` is still OID 1007 and is
+//     RECTANGULAR — one element count per dimension, in the binary header and
+//     enforced by its text parser. This engine's nested arrays are ragged in
+//     general (`{{1,2},{3}}` is a value here and a syntax error there), so
+//     declaring 1007 for one would promise a shape the value may not have.
+//   - a ROW or MAP element. PostgreSQL has no MAP at all, and a composite
+//     array needs the composite's own registered OID, which a query that
+//     CONSTRUCTS a row does not have. ADR-0012 records both.
+//
+// A nil element is an ARRAY the plan could not type, and it keeps text for
+// the same reason a DECIMAL with no (p,s) keeps typmod -1: a declaration
+// invented here is one a client cannot tell from a real one.
+func pgArrayColumnOID(elem *parquet.Column) int {
+	if elem == nil {
+		return oidText
+	}
+	switch elem.Type {
+	case parquet.TypeArray, parquet.TypeRow, parquet.TypeMap:
+		return oidText
+	}
+	return pgArrayOID(pgTypeOID(elem.Type.String()))
+}
+
+// pgArrayOID maps an element's own declared OID onto PostgreSQL's array OID
+// for it. The pairing is pg_type.typarray, read off a live 17.11 catalog.
+//
+// Keyed on the ELEMENT'S OID rather than on the engine type, so the two can
+// never drift: whatever pgTypeOID decides a scalar column of that type
+// declares, its array declares the array of exactly that. The types this
+// engine renders as text — IPv4, IPv6, CIDR, MAC, VECTOR — therefore land on
+// text[] 1009, which is what their scalar declaration already says.
+func pgArrayOID(elemOID int) int {
+	switch elemOID {
+	case 16:
+		return 1000 // bool[]
+	case 17:
+		return 1001 // bytea[]
+	case 20:
+		return 1016 // int8[]
+	case 23:
+		return 1007 // int4[]
+	case 700:
+		return 1021 // float4[]
+	case 701:
+		return 1022 // float8[]
+	case oidVarchar:
+		return 1015 // varchar[]
+	case 1082:
+		return 1182 // date[]
+	case 1114:
+		return 1115 // timestamp[]
+	case 1700:
+		return 1231 // numeric[]
+	case 2950:
+		return 2951 // uuid[]
+	}
+	return 1009 // text[]
 }
 
 func pgTypeOID(typeName string) int {
@@ -3719,16 +3795,31 @@ func (c *pgConn) sendDataRowFormatted(columns []string, cells []any, fmtCodes []
 			continue
 		}
 
-		// ROW/ARRAY/MAP have no PostgreSQL binary wire form of their own —
+		// ROW and MAP have no PostgreSQL binary wire form of their own —
 		// they declare OID 25 (text), same as an unresolved type, and OID
 		// 25's "binary" format IS its text bytes — so both formats render
 		// the same way here, ahead of the numeric/timestamp/date binary
 		// arms below (which do not apply) and appendBinaryValue's generic
 		// fallback (which used to reach these via Go's %v and print
 		// "map[...]"/"[...]" instead of PostgreSQL's composite/array text).
+		//
+		// An ARRAY is the one that left this arm with #992. It now declares
+		// its element's array OID, and under a BINARY format code that OID
+		// promises PostgreSQL's array wire form rather than the `{…}` text —
+		// the same obligation declaring 1082/1700/2950 created for date,
+		// numeric and uuid. An ARRAY still declaring text (a nested or
+		// composite element, or one the plan could not type) keeps the text
+		// bytes, which under OID 25 is what binary means.
 		switch val.(type) {
 		case map[string]any, []any:
-			s := formatPgValueTyped(val, nestedColumnFor(nestedSchema, col, i))
+			decl := nestedColumnFor(nestedSchema, col, i)
+			if vals, isArr := val.([]any); isArr && fmtCodeAt(fmtCodes, i) == 1 {
+				if elem, ok := binaryArrayElement(decl); ok {
+					c.buf = appendBinaryArray(c.buf, vals, elem)
+					continue
+				}
+			}
+			s := formatPgValueTyped(val, decl)
 			c.buf = appendInt32(c.buf, int32(len(s)))
 			c.buf = append(c.buf, s...)
 			continue
@@ -3784,6 +3875,93 @@ func (c *pgConn) sendDataRowFormatted(columns []string, cells []any, fmtCodes []
 	}
 
 	c.sendMsg('D', c.buf)
+}
+
+// binaryArrayElement reports the ELEMENT a binary-format ARRAY is written
+// from, and false for every column that keeps OID 25 — a ROW, a MAP, an
+// untyped or nested ARRAY. It is pgArrayColumnOID's own test, asked of the
+// DECLARATION rather than of the OID, so the bytes and the RowDescription
+// cannot come to different conclusions about one column (#992).
+func binaryArrayElement(decl *parquet.Column) (parquet.Column, bool) {
+	if decl == nil || decl.Type != parquet.TypeArray || decl.ElementType == nil {
+		return parquet.Column{}, false
+	}
+	switch decl.ElementType.Type {
+	case parquet.TypeArray, parquet.TypeRow, parquet.TypeMap:
+		return parquet.Column{}, false
+	}
+	return *decl.ElementType, true
+}
+
+// appendBinaryArray encodes one ARRAY value in PostgreSQL's array binary
+// format: ndim, a has-null flag, the element OID, then one (length, lower
+// bound) pair per dimension and the elements themselves, each a length-
+// prefixed value or -1 for NULL.
+//
+// One dimension only, which is the shape binaryArrayElement admits. An EMPTY
+// array is ndim 0 with no dimension pair at all — PostgreSQL's own encoding
+// for `'{}'::int4[]`, and not the same bytes as a one-dimension array of
+// length zero.
+//
+// The elements go through appendBinaryCell, the same dispatch the scalar
+// columns take, so a date, timestamp, numeric or uuid ELEMENT is encoded the
+// way that type's own column would be rather than as the text it is boxed as.
+func appendBinaryArray(buf []byte, vals []any, elem parquet.Column) []byte {
+	elemOID := int32(pgTypeOID(elem.Type.String()))
+	var hasNull int32
+	for _, v := range vals {
+		if v == nil {
+			hasNull = 1
+			break
+		}
+	}
+	var p []byte
+	if len(vals) == 0 {
+		p = appendInt32(p, 0)
+		p = appendInt32(p, hasNull)
+		p = appendInt32(p, elemOID)
+	} else {
+		p = appendInt32(p, 1)
+		p = appendInt32(p, hasNull)
+		p = appendInt32(p, elemOID)
+		p = appendInt32(p, int32(len(vals)))
+		p = appendInt32(p, 1)
+		for _, v := range vals {
+			p = appendBinaryCell(p, v, elem.Type)
+		}
+	}
+	buf = appendInt32(buf, int32(len(p)))
+	return append(buf, p...)
+}
+
+// appendBinaryCell writes one length-prefixed binary value under the type its
+// column declares — the four conversions sendDataRowFormatted makes inline for
+// a top-level column, in one function so an ARRAY's ELEMENTS take exactly the
+// same route. A NULL is -1 with no payload, which is what both a NULL column
+// and a NULL array element are on the wire.
+func appendBinaryCell(buf []byte, val any, colType parquet.TypeID) []byte {
+	if val == nil {
+		return appendInt32(buf, -1)
+	}
+	switch colType {
+	case parquet.TypeTimestamp:
+		if ms, ok := val.(int64); ok {
+			return appendBinaryTimestamp(buf, ms)
+		}
+	case parquet.TypeDate:
+		if s, ok := val.(string); ok {
+			return appendBinaryDate(buf, s)
+		}
+	case parquet.TypeDecimal:
+		if s, ok := val.(string); ok {
+			return appendBinaryNumeric(buf, s)
+		}
+	case parquet.TypeUUID:
+		if s, ok := val.(string); ok {
+			return appendBinaryUUID(buf, s)
+		}
+	}
+	return appendBinaryValue(buf, val)
 }
 
 // appendBinaryTimestamp encodes epoch milliseconds as a PostgreSQL binary
@@ -4057,6 +4235,17 @@ func formatPgValue(val any) string {
 // degrades to a schema-free rendering instead of refusing, per each
 // helper's own doc.
 func formatPgValueTyped(val any, col *parquet.Column) string {
+	// A TIMESTAMP is boxed as epoch MILLISECONDS, and its rendering is the
+	// caller's everywhere a top-level column is sent (sendDataRowFormatted's
+	// default arm reaches for batch.FormatTimestamp). Nothing did that for a
+	// timestamp INSIDE a container, so a `timestamp[]` element came out as the
+	// raw number — tolerable while the column declared text and a promise the
+	// moment it declares OID 1115 (#992).
+	if col != nil && col.Type == parquet.TypeTimestamp {
+		if ms, ok := val.(int64); ok {
+			return batch.FormatTimestamp(ms)
+		}
+	}
 	switch tv := val.(type) {
 	case []float32:
 		// VECTOR: a wadjet extension with no PostgreSQL array/composite
