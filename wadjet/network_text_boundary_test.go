@@ -13,186 +13,303 @@ import (
 )
 
 // This file is arc NT's ONE gate: every network-native type has ONE text
-// grammar and every boundary that reads text reads THAT one. The table below
-// is the seam enumerated once — type × input form × boundary — and each cell's
-// expected disposition is PostgreSQL 17.11's own answer, measured in a
-// postgres:17-alpine container (inet for IPv4/IPv6/CIDR, macaddr for MAC, uuid
-// for UUID; PORT and PROTOCOL have no PostgreSQL type, so their oracle is this
-// engine's documented text form — docs/data-types.md).
+// grammar and every door that reads text reads THAT one.
 //
-// Before this arc the same literal got three different answers depending on
-// which door it arrived at: the writer refused `aa-bb-cc-dd-ee-ff` and `{uuid}`
-// that the comparison kernels accepted, the kernels accepted `a-0eebc99…` that
-// PostgreSQL refuses, the CAST parsed nothing at all, and a CIDR column
-// validated nothing whatsoever (#1092, #627, #986, #1088).
+// The table is PostgreSQL 17.11's GRAMMAR, measured from a live server into
+// network_text_pgcensus_test.go — every documented family of accepted form and
+// every family of rejected one, including whitespace, mask digits, leading
+// zeros, trailing dots and the abbreviations. It is not a list of the
+// spellings the issues named. That distinction is the round-2 review's
+// structural finding: the round-1 table had no whitespace cell, no
+// IPv6-abbreviation cell and no CIDR v6-mask cell, so it passed while
+// `INSERT … VALUES` trimmed `' 10.0.0.1'`, an IPV6 column refused
+// `'010.1.2.3'` that it accepted as `'010.1.2.3/32'`, and a CIDR column stored
+// `'::1/064'` — three grammars that were not PostgreSQL's, under a claim that
+// there was one that was.
+//
+// The EXPECTATION is derived, not listed: PostgreSQL's answer plus the type's
+// own representability rule (ntExpect below). A form nobody thought of still
+// gets a right expectation, which is what makes the table a grammar.
 
-// ntBoundary names one door text can enter through.
-type ntBoundary string
+// ntDoor names one place text enters the engine.
+type ntDoor string
 
 const (
-	ntIngester   ntBoundary = "ingester"      // db.NewIngester (the embedded writer)
-	ntValues     ntBoundary = "insert-values" // INSERT INTO t (c) VALUES ('…')
-	ntInsertSel  ntBoundary = "insert-select" // INSERT INTO t (c) SELECT '…'
-	ntCastLit    ntBoundary = "cast-literal"  // CAST('…' AS T)
-	ntCastCol    ntBoundary = "cast-column"   // CAST(s AS T) over a STRING column
-	ntWhereEmpty ntBoundary = "where-empty"   // a literal in WHERE over a scan no row survives
-	ntWhereFull  ntBoundary = "where-rows"    // the same over a scan that has rows
+	ntIngester   ntDoor = "ingester"      // db.NewIngester — the embedded writer
+	ntValues     ntDoor = "insert-values" // INSERT INTO t (c) VALUES ('…')
+	ntInsertSel  ntDoor = "insert-select" // INSERT INTO t (c) SELECT '…'
+	ntCopy       ntDoor = "copy"          // ConvertTextForColumn — the COPY door
+	ntUpdate     ntDoor = "update"        // UPDATE t SET c = '…'
+	ntCastLit    ntDoor = "cast-literal"  // CAST('…' AS T)
+	ntCastCol    ntDoor = "cast-column"   // CAST(s AS T) over a STRING column
+	ntWhereEmpty ntDoor = "where-empty"   // a literal in WHERE over a scan no row survives
+	ntWhereFull  ntDoor = "where-rows"    // the same over a scan that has rows
 )
 
-var ntAllBoundaries = []ntBoundary{
-	ntIngester, ntValues, ntInsertSel, ntCastLit, ntCastCol, ntWhereEmpty, ntWhereFull,
+var ntAllDoors = []ntDoor{
+	ntIngester, ntValues, ntInsertSel, ntCopy, ntUpdate,
+	ntCastLit, ntCastCol, ntWhereEmpty, ntWhereFull,
 }
 
-// ntCell is one row of the coverage table: a type, an input form, the
-// disposition every boundary gives it, and the deliberate per-boundary
-// exceptions. An exception here is a CLAIM — it says this engine answers
-// differently at this door ON PURPOSE — so each one carries its reason in the
-// table's comments and in ADR-0012.
+// ntWriterDoors are the doors that STORE, where the value at rest is
+// observable and is asserted beside the disposition.
+func ntIsWriterDoor(d ntDoor) bool {
+	return d == ntIngester || d == ntValues || d == ntInsertSel || d == ntUpdate
+}
+
+// ntInetShape reads PostgreSQL's canonical `inet` output — always
+// `address/bits` — into the two facts a bare-address column's representability
+// rule needs.
+func ntInetShape(canonical string) (family, bits int) {
+	addr, mask, _ := strings.Cut(canonical, "/")
+	family = 4
+	if strings.ContainsRune(addr, ':') {
+		family = 6
+	}
+	fmt.Sscanf(mask, "%d", &bits)
+	return family, bits
+}
+
+// ntExpect is the RULE, and it is the whole claim: this engine answers what
+// PostgreSQL answers, except where its own type has no room for the value,
+// and then it says so with 0A000 rather than pretending the text is bad.
+//
+//   - PostgreSQL refuses → this engine refuses with the SAME class.
+//   - PostgreSQL accepts and the column can hold it → a value.
+//   - PostgreSQL accepts and the column cannot hold it → 0A000, one class for
+//     both of its reasons (a NETWORK where the type holds a bare address, and
+//     an address of the other family). ADR-0012 item 5.
+func ntExpect(typ parquet.TypeID, c ntPgCell) string {
+	if c.state != "" {
+		return c.state
+	}
+	switch typ {
+	case parquet.TypeIPv4:
+		if family, bits := ntInetShape(c.value); family == 4 && bits == 32 {
+			return "ok"
+		}
+		return "0A000"
+	case parquet.TypeIPv6:
+		family, bits := ntInetShape(c.value)
+		if (family == 6 && bits == 128) || (family == 4 && bits == 32) {
+			return "ok"
+		}
+		return "0A000"
+	}
+	// CIDR keeps the prefix, and MAC and UUID have no representability
+	// question at all: what PostgreSQL reads, this engine reads.
+	return "ok"
+}
+
+// ntExpectValue is the value at rest for the types whose storage IS the value.
+// "" means "do not assert" — CIDR stores its input text verbatim (its storage
+// is text, so canonicalizing at one door would split it from the others), and
+// a refusal has no value.
+func ntExpectValue(typ parquet.TypeID, c ntPgCell) string {
+	if c.state != "" || c.value == "" {
+		return ""
+	}
+	switch typ {
+	case parquet.TypeIPv4, parquet.TypeIPv6:
+		addr, _, _ := strings.Cut(c.value, "/")
+		if typ == parquet.TypeIPv6 && !strings.ContainsRune(addr, ':') {
+			// An IPV6 column stores a v4 address in its v4-mapped form, which
+			// is what every reader renders it back as.
+			return "::ffff:" + addr
+		}
+		return addr
+	case parquet.TypeMAC, parquet.TypeUUID:
+		return c.value
+	}
+	return ""
+}
+
+// ntNumCell is a PORT/PROTOCOL form. These two types have no PostgreSQL type
+// to measure against, so the oracle is the type's own documented text form
+// (docs/data-types.md): a DECIMAL number in the type's range, and for PROTOCOL
+// the IANA name `protocol_name()` prints. int4's `0x1bb` / `0o17` / `1_000`
+// are deliberately NOT part of it — the writer never read them and the CAST
+// stopped reading them in round 2 (review NT P4).
+type ntNumCell struct {
+	form  string
+	write string // disposition at a door that STORES (the type's own range)
+	cast  string // disposition at the CAST (int4's domain, #901; ADR-0012)
+	// cmp is the disposition at a COMPARISON door, where the literal is
+	// resolved against the column's DECLARED WIRE TYPE — `integer`, OID 23
+	// (#834) — and therefore reads int4's text grammar rather than the type's
+	// own. That is why `'udp'` is 22P02 there while `CAST('udp' AS PROTOCOL)`
+	// is 17, and why `'0x6'` is the other way round. One deferral, recorded in
+	// ADR-0012 and filed as FC-1; "" means "same as cast".
+	cmp   string
+	value int32 // the stored value when write == "ok"
+}
+
+func (c ntNumCell) at(d ntDoor) string {
+	switch d {
+	case ntWhereEmpty, ntWhereFull:
+		if c.cmp != "" {
+			return c.cmp
+		}
+		return c.cast
+	case ntCastLit, ntCastCol:
+		return c.cast
+	}
+	return c.write
+}
+
+// The `write` / `cast` / `cmp` columns below are the three readings these two
+// types get, and every difference between them is recorded rather than
+// silent: the type's own form and range at a writer, int4's RANGE at a CAST
+// (#901, FC-2), and int4's whole GRAMMAR at a comparison (FC-1).
+//
+// `'2.5'` and `'443.0'` are the numeric family's boundary, not the network
+// one, and they sit here to SHOW it: a quoted fractional literal is 22P02 on
+// PostgreSQL and rounds at this engine's cast and INSERT … SELECT doors —
+// identically for INTEGER (`CAST('2.5' AS INTEGER)` is 3 here, measured), so
+// it is int4's cell and not PORT's. Filed as FC-7.
+func ntPortCells() []ntNumCell {
+	return []ntNumCell{
+		{"443", "ok", "ok", "", 443},
+		{"0", "ok", "ok", "", 0},
+		{"65535", "ok", "ok", "", 65535},
+		{" 443", "ok", "ok", "", 443},
+		{"443 ", "ok", "ok", "", 443},
+		{"+443", "ok", "ok", "", 443},
+		{"-0", "ok", "ok", "", 0},
+		{"017", "ok", "ok", "", 17},
+		{"65536", "22003", "ok", "", 0},
+		{"-1", "22003", "ok", "", 0},
+		{"3000000000", "22003", "22003", "", 0},
+		{"0x1bb", "22P02", "22P02", "ok", 0},
+		{"0o17", "22P02", "22P02", "ok", 0},
+		{"0b101", "22P02", "22P02", "ok", 0},
+		{"1_000", "22P02", "22P02", "ok", 0},
+		{"443.0", "22P02", "ok", "22P02", 0},
+		{"2.5", "22P02", "ok", "22P02", 0},
+		{"https", "22P02", "22P02", "", 0},
+		{"zzz", "22P02", "22P02", "", 0},
+		{"", "22P02", "22P02", "", 0},
+	}
+}
+
+func ntProtocolCells() []ntNumCell {
+	return []ntNumCell{
+		{"6", "ok", "ok", "", 6},
+		{"17", "ok", "ok", "", 17},
+		{"255", "ok", "ok", "", 255},
+		{"udp", "ok", "ok", "22P02", 17},
+		{"TCP", "ok", "ok", "22P02", 6},
+		{"icmp", "ok", "ok", "22P02", 1},
+		{"icmpv6", "ok", "ok", "22P02", 58},
+		{"ipv6-icmp", "ok", "ok", "22P02", 58},
+		{" udp", "ok", "ok", "22P02", 17},
+		{"256", "22003", "ok", "", 0},
+		{"3000000000", "22003", "22003", "", 0},
+		{"0x6", "22P02", "22P02", "ok", 0},
+		{"nosuchproto", "22P02", "22P02", "", 0},
+		{"", "22P02", "22P02", "", 0},
+	}
+}
+
+// ntCells flattens the PostgreSQL census into (type, form, expected) rows —
+// the coverage table, derived from the grammar rather than listed.
 type ntCell struct {
-	typ  parquet.TypeID
-	form string
-	want string // "ok" | "22P02" | "22003" | "0A000"
-	only map[ntBoundary]string
+	typ   parquet.TypeID
+	form  string
+	want  string
+	value string
+	// only holds the doors whose answer differs ON PURPOSE, each with its
+	// reason in the comment at the site that fills it in.
+	only map[ntDoor]string
 }
 
-func (c ntCell) at(b ntBoundary) string {
-	if v, ok := c.only[b]; ok {
+func (c ntCell) at(d ntDoor) string {
+	if v, ok := c.only[d]; ok {
 		return v
 	}
 	return c.want
 }
 
-// ntWriterNull is the one exception every type shares, and it is a SPLIT
-// between two kinds of door rather than a divergence from PostgreSQL: at the
-// embedded INGESTER an empty string is ABSENCE — the empty CSV or JSON field,
-// which means NULL — while at every SQL door it is a VALUE the type cannot
-// read, which is PostgreSQL's 22P02 for an empty inet literal. Both doors said
-// absence until this arc, so `INSERT INTO t (ip) VALUES (”)` stored a NULL
-// nobody wrote.
-var ntWriterNull = map[ntBoundary]string{ntIngester: "ok"}
-
 func ntCells() []ntCell {
-	return []ntCell{
-		// --- IPv4 -----------------------------------------------------------
-		{typ: parquet.TypeIPv4, form: "10.0.0.1", want: "ok"},
-		{typ: parquet.TypeIPv4, form: "010.1.2.3", want: "ok"},   // leading zeros are decimal
-		{typ: parquet.TypeIPv4, form: "10.1.2.3.", want: "ok"},   // one trailing dot is ignored
-		{typ: parquet.TypeIPv4, form: "10.0.0.1/32", want: "ok"}, /* a HOST-width prefix is the address */
-		{typ: parquet.TypeIPv4, form: "192.168", want: "22P02"},  // no mask ⇒ all four octets
-		{typ: parquet.TypeIPv4, form: "10.0.0.256", want: "22P02"},
-		{typ: parquet.TypeIPv4, form: "zzz", want: "22P02"},
-		// A NETWORK: valid inet, and a bare-address column has no room for it.
-		// 0A000 rather than 22P02 because the TEXT is not the problem
-		// (ADR-0012 item 5).
-		{typ: parquet.TypeIPv4, form: "10/8", want: "0A000"},
-		{typ: parquet.TypeIPv4, form: "", want: "22P02", only: ntWriterNull},
-
-		// --- IPv6 -----------------------------------------------------------
-		{typ: parquet.TypeIPv6, form: "2001:db8::1", want: "ok"},
-		{typ: parquet.TypeIPv6, form: "2001:DB8::1", want: "ok"},
-		{typ: parquet.TypeIPv6, form: "::1", want: "ok"},
-		{typ: parquet.TypeIPv6, form: "::ffff:10.0.0.1", want: "ok"},
-		{typ: parquet.TypeIPv6, form: "2001:db8::1/128", want: "ok"},
-		{typ: parquet.TypeIPv6, form: "2001:db8::1/64", want: "0A000"},
-		// inet6's mask grammar is NOT inet's: no leading zeros, ever.
-		{typ: parquet.TypeIPv6, form: "::1/064", want: "22P02"},
-		{typ: parquet.TypeIPv6, form: "zzz", want: "22P02"},
-		{typ: parquet.TypeIPv6, form: "", want: "22P02", only: ntWriterNull},
-
-		// --- CIDR -----------------------------------------------------------
-		{typ: parquet.TypeCIDR, form: "192.168.1.0/24", want: "ok"},
-		{typ: parquet.TypeCIDR, form: "10.0.0.1/32", want: "ok"},
-		{typ: parquet.TypeCIDR, form: "192.168/16", want: "ok"}, // abbreviated, with a mask
-		{typ: parquet.TypeCIDR, form: "10.0.0.1", want: "ok"},   // a bare address is /32
-		{typ: parquet.TypeCIDR, form: "2001:db8::1/64", want: "ok"},
-		{typ: parquet.TypeCIDR, form: "192.168", want: "22P02"}, // abbreviated, NO mask
-		{typ: parquet.TypeCIDR, form: "10.0.0.1/33", want: "22P02"},
-		{typ: parquet.TypeCIDR, form: "zzz", want: "22P02"},
-		{typ: parquet.TypeCIDR, form: "", want: "22P02", only: ntWriterNull},
-
-		// --- MAC ------------------------------------------------------------
-		// macaddr_in is a LIST OF sscanf PATTERNS; all seven spellings are one
-		// value and the regroupings between them are 22P02.
-		{typ: parquet.TypeMAC, form: "aa:bb:cc:dd:ee:ff", want: "ok"},
-		{typ: parquet.TypeMAC, form: "AA:BB:CC:DD:EE:FF", want: "ok"},
-		{typ: parquet.TypeMAC, form: "aa-bb-cc-dd-ee-ff", want: "ok"},
-		{typ: parquet.TypeMAC, form: "aabbcc:ddeeff", want: "ok"},
-		{typ: parquet.TypeMAC, form: "aabbcc-ddeeff", want: "ok"},
-		{typ: parquet.TypeMAC, form: "aabb.ccdd.eeff", want: "ok"},
-		{typ: parquet.TypeMAC, form: "aabb-ccdd-eeff", want: "ok"},
-		{typ: parquet.TypeMAC, form: "aabbccddeeff", want: "ok"},
-		{typ: parquet.TypeMAC, form: "a:b:c:d:e:f", want: "ok"}, // %x groups are variable-width
-		{typ: parquet.TypeMAC, form: "aabb:ccdd:eeff", want: "22P02"},
-		{typ: parquet.TypeMAC, form: "aa.bb.cc.dd.ee.ff", want: "22P02"},
-		{typ: parquet.TypeMAC, form: "aa:bb:cc:dd:ee", want: "22P02"},
-		{typ: parquet.TypeMAC, form: "zz:bb:cc:dd:ee:ff", want: "22P02"},
-		// An octet the type cannot carry is 22003, a DIFFERENT answer from a
-		// spelling it cannot read.
-		{typ: parquet.TypeMAC, form: "aa:bb:cc:dd:ee:100", want: "22003"},
-		{typ: parquet.TypeMAC, form: "", want: "22P02", only: ntWriterNull},
-
-		// --- UUID -----------------------------------------------------------
-		{typ: parquet.TypeUUID, form: "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", want: "ok"},
-		{typ: parquet.TypeUUID, form: "A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11", want: "ok"},
-		{typ: parquet.TypeUUID, form: "{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11}", want: "ok"},
-		{typ: parquet.TypeUUID, form: "a0eebc999c0b4ef8bb6d6bb9bd380a11", want: "ok"},
-		// A hyphen after ANY group of four, and NOWHERE else.
-		{typ: parquet.TypeUUID, form: "a0ee-bc99-9c0b-4ef8-bb6d-6bb9-bd38-0a11", want: "ok"},
-		{typ: parquet.TypeUUID, form: "a-0eebc999c0b4ef8bb6d6bb9bd380a11", want: "22P02"},
-		{typ: parquet.TypeUUID, form: "{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", want: "22P02"},
-		{typ: parquet.TypeUUID, form: "zzz", want: "22P02"},
-		{typ: parquet.TypeUUID, form: "", want: "22P02", only: ntWriterNull},
-
-		// --- PORT -----------------------------------------------------------
-		// Numeric only: the type's documented text form names no service, and
-		// `port_name()` is the function that does. The CAST's domain is the
-		// int4 CARRIER (#901) while a WRITER door holds the type's own
-		// 0..65535 — the one deliberate split in this table, recorded in
-		// ADR-0012 and in the landing notes as a filing candidate.
-		{typ: parquet.TypePort, form: "443", want: "ok"},
-		{typ: parquet.TypePort, form: "0", want: "ok"},
-		{typ: parquet.TypePort, form: "65535", want: "ok"},
-		{typ: parquet.TypePort, form: "65536", want: "22003", only: map[ntBoundary]string{
-			ntCastLit: "ok", ntCastCol: "ok", ntWhereEmpty: "ok", ntWhereFull: "ok"}},
-		{typ: parquet.TypePort, form: "https", want: "22P02"},
-		{typ: parquet.TypePort, form: "zzz", want: "22P02"},
-		{typ: parquet.TypePort, form: "", want: "22P02", only: ntWriterNull},
-
-		// --- PROTOCOL -------------------------------------------------------
-		{typ: parquet.TypeProtocol, form: "6", want: "ok"},
-		{typ: parquet.TypeProtocol, form: "17", want: "ok"},
-		// The IANA NAME is the type's own text form: what protocol_name()
-		// prints has to read back (#986). It is read at the doors that resolve
-		// the literal against the TYPE; a WHERE comparison resolves it against
-		// the DECLARED wire type instead, which is integer (OID 23) — the
-		// deferral recorded in the landing notes.
-		{typ: parquet.TypeProtocol, form: "udp", want: "ok", only: map[ntBoundary]string{
-			ntWhereEmpty: "22P02", ntWhereFull: "22P02"}},
-		{typ: parquet.TypeProtocol, form: "TCP", want: "ok", only: map[ntBoundary]string{
-			ntWhereEmpty: "22P02", ntWhereFull: "22P02"}},
-		{typ: parquet.TypeProtocol, form: "ipv6-icmp", want: "ok", only: map[ntBoundary]string{
-			ntWhereEmpty: "22P02", ntWhereFull: "22P02"}},
-		{typ: parquet.TypeProtocol, form: "255", want: "ok"},
-		{typ: parquet.TypeProtocol, form: "256", want: "22003", only: map[ntBoundary]string{
-			ntCastLit: "ok", ntCastCol: "ok", ntWhereEmpty: "ok", ntWhereFull: "ok"}},
-		{typ: parquet.TypeProtocol, form: "zzz", want: "22P02"},
-		{typ: parquet.TypeProtocol, form: "", want: "22P02", only: ntWriterNull},
+	var out []ntCell
+	add := func(typ parquet.TypeID, cells []ntPgCell) {
+		for _, c := range cells {
+			cell := ntCell{typ: typ, form: c.form, want: ntExpect(typ, c), value: ntExpectValue(typ, c)}
+			if c.form == "" {
+				// The ONE door-shaped exception the types share, and it is a
+				// split between two kinds of door rather than a divergence:
+				// at the embedded INGESTER an empty string is ABSENCE — the
+				// empty CSV or JSON field, which means NULL — while at every
+				// SQL door it is a value the type cannot read, which is
+				// PostgreSQL's 22P02. ADR-0012 records it.
+				cell.only = map[ntDoor]string{ntIngester: "ok"}
+				cell.value = ""
+			}
+			out = append(out, cell)
+		}
 	}
+	// The three types that share the `inet` oracle. A wadjet CIDR column is
+	// `inet` and not `cidr`: it holds host bits under a mask, which `cidr`
+	// refuses outright.
+	add(parquet.TypeIPv4, ntPgInet)
+	add(parquet.TypeIPv6, ntPgInet)
+	add(parquet.TypeCIDR, ntPgInet)
+	add(parquet.TypeMAC, ntPgMacaddr)
+	add(parquet.TypeUUID, ntPgUuid)
+	for _, c := range ntPortCells() {
+		out = append(out, ntNumRow(parquet.TypePort, c))
+	}
+	for _, c := range ntProtocolCells() {
+		out = append(out, ntNumRow(parquet.TypeProtocol, c))
+	}
+	return out
+}
+
+func ntNumRow(typ parquet.TypeID, c ntNumCell) ntCell {
+	cell := ntCell{typ: typ, form: c.form, want: c.write, only: map[ntDoor]string{}}
+	if c.write == "ok" {
+		cell.value = fmt.Sprintf("%d", c.value)
+	}
+	for _, d := range ntAllDoors {
+		if c.at(d) != c.write {
+			cell.only[d] = c.at(d)
+		}
+	}
+	// INSERT … SELECT carries an unknown-typed literal through the ASSIGNMENT
+	// converter, which reaches the same decimal reader the CAST does — so the
+	// fractional pair answers there too. Same cell as FC-7, one door over.
+	if c.form == "443.0" || c.form == "2.5" {
+		cell.only[ntInsertSel] = "ok"
+	}
+	if c.form == "" {
+		cell.only = map[ntDoor]string{ntIngester: "ok"}
+		cell.value = ""
+	}
+	return cell
 }
 
 func TestEveryNetworkTypeReadsOneTextGrammarAtEveryBoundary(t *testing.T) {
 	cells := ntCells()
-	for _, b := range ntAllBoundaries {
-		t.Run(string(b), func(t *testing.T) {
-			run := ntBoundaryRunner(t, b)
+	if len(cells) < 320 {
+		t.Fatalf("the census has %d rows; the grammar tables are not loaded", len(cells))
+	}
+	for _, d := range ntAllDoors {
+		t.Run(string(d), func(t *testing.T) {
+			run := ntDoorRunner(t, d)
 			for _, c := range cells {
-				name := c.typ.String() + "/" + ntFormName(c.form)
-				t.Run(name, func(t *testing.T) {
-					got := run(t, c.typ, c.form)
-					if got != c.at(b) {
-						t.Errorf("%s at %s = %s, want %s "+
-							"(PostgreSQL 17.11, or the type's own documented text form)",
-							ntFormName(c.form), b, got, c.at(b))
+				t.Run(c.typ.String()+"/"+ntFormName(c.form), func(t *testing.T) {
+					got, value := run(t, c.typ, c.form)
+					if got != c.at(d) {
+						t.Errorf("%s at %s = %s, want %s (PostgreSQL 17.11, or the "+
+							"type's own documented text form)", ntFormName(c.form), d, got, c.at(d))
+						return
+					}
+					// The VALUE at rest, where the storage IS the value: a
+					// door that TRIMS or canonicalizes differently from the
+					// others answers the same disposition and stores a
+					// different thing (review NT B1).
+					if got == "ok" && c.value != "" && ntIsWriterDoor(d) && value != c.value {
+						t.Errorf("%s at %s stored %q, want %q", ntFormName(c.form), d, value, c.value)
 					}
 				})
 			}
@@ -200,78 +317,159 @@ func TestEveryNetworkTypeReadsOneTextGrammarAtEveryBoundary(t *testing.T) {
 	}
 }
 
-// ntBoundaryRunner builds one door's probe. Each returns the disposition of a
-// literal at that door: "ok" or the SQLSTATE of the refusal.
-func ntBoundaryRunner(t *testing.T, b ntBoundary) func(*testing.T, parquet.TypeID, string) string {
+// ntDoorRunner builds one door's probe: it reports the disposition ("ok" or
+// the SQLSTATE) and, at a door that stores, the value read back.
+func ntDoorRunner(t *testing.T, d ntDoor) func(*testing.T, parquet.TypeID, string) (string, string) {
 	t.Helper()
-	switch b {
+	ctx := context.Background()
+	switch d {
 	case ntIngester:
-		return func(t *testing.T, typ parquet.TypeID, form string) string {
+		return func(t *testing.T, typ parquet.TypeID, form string) (string, string) {
 			t.Helper()
 			db, schema := ntOpenTyped(t, typ)
 			ing := db.NewIngester("t", schema, nil, ingest.DefaultConfig())
-			err := ing.Ingest(context.Background(), []map[string]any{{"id": int64(1), "c": form}})
+			err := ing.Ingest(ctx, []map[string]any{{"id": int64(1), "c": ntBox(typ, form)}})
 			if err == nil {
-				err = ing.FlushAll(context.Background())
+				err = ing.FlushAll(ctx)
 			}
-			return ntDisposition(err)
+			if err != nil {
+				return ntDisposition(err), ""
+			}
+			return "ok", ntReadBack(t, db, typ)
 		}
 	case ntValues:
-		return func(t *testing.T, typ parquet.TypeID, form string) string {
+		return func(t *testing.T, typ parquet.TypeID, form string) (string, string) {
 			t.Helper()
 			db, _ := ntOpenTyped(t, typ)
-			_, err := db.Query(context.Background(),
-				fmt.Sprintf("INSERT INTO t (id, c) VALUES (1, '%s')", form))
-			return ntDisposition(err)
+			_, err := db.Query(ctx, "INSERT INTO t (id, c) VALUES (1, "+ntQuote(form)+")")
+			if err != nil {
+				return ntDisposition(err), ""
+			}
+			return "ok", ntReadBack(t, db, typ)
 		}
 	case ntInsertSel:
-		return func(t *testing.T, typ parquet.TypeID, form string) string {
+		return func(t *testing.T, typ parquet.TypeID, form string) (string, string) {
 			t.Helper()
 			db, _ := ntOpenTyped(t, typ)
-			_, err := db.Query(context.Background(),
-				fmt.Sprintf("INSERT INTO t (c) SELECT '%s'", form))
-			return ntDisposition(err)
+			_, err := db.Query(ctx, "INSERT INTO t (c) SELECT "+ntQuote(form))
+			if err != nil {
+				return ntDisposition(err), ""
+			}
+			return "ok", ntReadBack(t, db, typ)
+		}
+	case ntCopy:
+		// The COPY door is a function, not a statement: pgwire's COPY FROM
+		// calls ConvertTextForColumn per field. The round-1 notes excluded it
+		// as "the same boundary as the embedded ingester" — it is not, and
+		// the two disagreed about every whitespace-padded literal.
+		return func(t *testing.T, typ parquet.TypeID, form string) (string, string) {
+			t.Helper()
+			v, err := ConvertTextForColumn(form, parquet.Column{Name: "c", Type: typ, Nullable: true})
+			if err != nil {
+				return ntDisposition(err), ""
+			}
+			db, schema := ntOpenTyped(t, typ)
+			ing := db.NewIngester("t", schema, nil, ingest.DefaultConfig())
+			if err := ing.Ingest(ctx, []map[string]any{{"id": int64(1), "c": v}}); err != nil {
+				return ntDisposition(err), ""
+			}
+			if err := ing.FlushAll(ctx); err != nil {
+				return ntDisposition(err), ""
+			}
+			return "ok", ntReadBack(t, db, typ)
+		}
+	case ntUpdate:
+		return func(t *testing.T, typ parquet.TypeID, form string) (string, string) {
+			t.Helper()
+			db, _ := ntOpenTyped(t, typ)
+			if _, err := db.Query(ctx, "INSERT INTO t (id, c) VALUES (1, "+
+				ntQuote(ntSeedValue(typ))+")"); err != nil {
+				t.Fatalf("seeding: %v", err)
+			}
+			_, err := db.Query(ctx, "UPDATE t SET c = "+ntQuote(form)+" WHERE id = 1")
+			if err != nil {
+				return ntDisposition(err), ""
+			}
+			return "ok", ntReadBack(t, db, typ)
 		}
 	case ntCastLit:
-		return func(t *testing.T, typ parquet.TypeID, form string) string {
+		return func(t *testing.T, typ parquet.TypeID, form string) (string, string) {
 			t.Helper()
 			db, _ := ntOpenTyped(t, typ)
-			_, err := db.Query(context.Background(),
-				fmt.Sprintf("SELECT CAST('%s' AS %s) AS v", form, ntCastName(typ)))
-			return ntDisposition(err)
+			res, err := db.Query(ctx, "SELECT CAST("+ntQuote(form)+" AS "+ntCastName(typ)+") AS v")
+			if err != nil {
+				return ntDisposition(err), ""
+			}
+			return "ok", ntCellText(res)
 		}
 	case ntCastCol:
-		return func(t *testing.T, typ parquet.TypeID, form string) string {
+		return func(t *testing.T, typ parquet.TypeID, form string) (string, string) {
 			t.Helper()
 			db, _ := ntOpenTyped(t, typ)
-			if _, err := db.Query(context.Background(),
-				fmt.Sprintf("INSERT INTO t (id, s) VALUES (1, '%s')", form)); err != nil {
+			if _, err := db.Query(ctx, "INSERT INTO t (id, s) VALUES (1, "+ntQuote(form)+")"); err != nil {
 				t.Fatalf("seeding the string column: %v", err)
 			}
-			_, err := db.Query(context.Background(),
-				fmt.Sprintf("SELECT CAST(s AS %s) AS v FROM t WHERE id = 1", ntCastName(typ)))
-			return ntDisposition(err)
+			res, err := db.Query(ctx,
+				"SELECT CAST(s AS "+ntCastName(typ)+") AS v FROM t WHERE id = 1")
+			if err != nil {
+				return ntDisposition(err), ""
+			}
+			return "ok", ntCellText(res)
 		}
 	case ntWhereEmpty, ntWhereFull:
-		return func(t *testing.T, typ parquet.TypeID, form string) string {
+		return func(t *testing.T, typ parquet.TypeID, form string) (string, string) {
 			t.Helper()
 			db, _ := ntOpenTyped(t, typ)
-			if b == ntWhereFull {
-				// One row whose value is a spelling every type reads, so the
-				// scan is non-empty and the literal's disposition cannot be
-				// coming from "no row reached the comparison" (#517's shape).
-				if _, err := db.Query(context.Background(),
-					fmt.Sprintf("INSERT INTO t (id, c) VALUES (1, '%s')", ntSeedValue(typ))); err != nil {
+			if d == ntWhereFull {
+				// One row whose value every type reads, so the scan is
+				// non-empty and a literal's disposition cannot be coming from
+				// "no row reached the comparison" (#517's shape).
+				if _, err := db.Query(ctx, "INSERT INTO t (id, c) VALUES (1, "+
+					ntQuote(ntSeedValue(typ))+")"); err != nil {
 					t.Fatalf("seeding: %v", err)
 				}
 			}
-			_, err := db.Query(context.Background(),
-				fmt.Sprintf("SELECT count(*) AS v FROM t WHERE c = '%s'", form))
-			return ntDisposition(err)
+			_, err := db.Query(ctx, "SELECT count(*) AS v FROM t WHERE c = "+ntQuote(form))
+			if err != nil {
+				return ntDisposition(err), ""
+			}
+			return "ok", ""
 		}
 	}
-	t.Fatalf("no runner for boundary %s", b)
+	t.Fatalf("no runner for door %s", d)
 	return nil
+}
+
+// ntBox is the Go value the embedded ingester is handed. PORT and PROTOCOL are
+// int4-backed and their map API takes a number OR the type's text; every cell
+// here is text, which is the form a CSV or JSON source supplies.
+func ntBox(typ parquet.TypeID, form string) any { return form }
+
+// ntQuote is a SQL string literal. No corpus form contains an apostrophe; the
+// doubling is here so that adding one cannot silently change the statement.
+func ntQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+
+func ntReadBack(t *testing.T, db *DB, typ parquet.TypeID) string {
+	t.Helper()
+	res, err := db.Query(context.Background(), "SELECT c AS v FROM t WHERE c IS NOT NULL")
+	if err != nil {
+		t.Fatalf("reading back: %v", err)
+	}
+	return ntCellText(res)
+}
+
+func ntCellText(res *QueryResult) string {
+	if res == nil || len(res.Rows) == 0 {
+		return ""
+	}
+	v := res.Rows[0]["v"]
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", v)
 }
 
 // ntOpenTyped is one table with a column of typ, a STRING column beside it for
@@ -330,9 +528,7 @@ func ntDisposition(err error) string {
 	if st := sqlerr.StateOf(err); st != "" && st != "XX000" {
 		return st
 	}
-	// A writer door wraps its refusal in plain context ("schema validation:
-	// …"); the SQLSTATE still travels through the wrap, so reaching here means
-	// the refusal carries no class at all, which is itself the finding.
+	// A refusal that carries no class at all is itself the finding.
 	return "no-sqlstate: " + err.Error()
 }
 
@@ -341,5 +537,5 @@ func ntFormName(form string) string {
 	if form == "" {
 		return "<empty>"
 	}
-	return strings.NewReplacer("/", "_", " ", "_").Replace(form)
+	return strings.NewReplacer("/", "_", " ", "_SP_", "\t", "_TAB_").Replace(form)
 }
