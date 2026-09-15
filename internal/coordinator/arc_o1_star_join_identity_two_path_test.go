@@ -424,10 +424,10 @@ func TestO1AStarOverAJoinPublishesTheQueryNotThePlan(t *testing.T) {
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 ?column?:INT32] rows=3 | 1,Alice,150,1,1 | 2,Bob,200,2,1 | 3,Carol,0,3,1",
 			pin: map[string]string{
 				"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 ?column?:INT32] rows=3 | 1,Alice,150,1,1 | 2,Bob,200,2,1 | 3,Carol,0,3,1",
-				"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 ?column?:INT64] rows=3 | 1,Alice,150,1,1 | 2,Bob,200,2,1 | 3,Carol,0,3,1",
-				"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 ?column?:INT64] rows=3 | 1,Alice,150,1,1 | 2,Bob,200,2,1 | 3,Carol,0,3,1",
-				"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 ?column?:INT64] rows=3 | 1,Alice,150,1,1 | 2,Bob,200,2,1 | 3,Carol,0,3,1",
-				"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 ?column?:INT64] rows=3 | 1,Alice,150,1,1 | 2,Bob,200,2,1 | 3,Carol,0,3,1",
+				"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 ?column?:INT32] rows=3 | 1,Alice,150,1,1 | 2,Bob,200,2,1 | 3,Carol,0,3,1",
+				"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 ?column?:INT32] rows=3 | 1,Alice,150,1,1 | 2,Bob,200,2,1 | 3,Carol,0,3,1",
+				"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 ?column?:INT32] rows=3 | 1,Alice,150,1,1 | 2,Bob,200,2,1 | 3,Carol,0,3,1",
+				"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 k:INT64 ?column?:INT32] rows=3 | 1,Alice,150,1,1 | 2,Bob,200,2,1 | 3,Carol,0,3,1",
 			},
 			why: "NOT a star question, and the only thing left in it is the DECLARED TYPE: " +
 				"the VALUE and the NAME are PostgreSQL's on all five arms, and a bare " +

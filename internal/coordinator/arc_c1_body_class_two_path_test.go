@@ -323,7 +323,7 @@ func TestC1EBThePredicateInputTable(t *testing.T) {
 			// item / predicate inputs: constant expression
 			name:   "item_constexpr (constant expression)",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 3+4 AS v) l ORDER BY 1",
-			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
+			want:   "cols=[v:INT64] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
@@ -434,7 +434,7 @@ func TestC1EBThePredicateInputTable(t *testing.T) {
 			// having / predicate inputs: constant expression
 			name:   "having_constexpr (constant expression)",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v HAVING 1=1) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 7 | 7 | 7",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{

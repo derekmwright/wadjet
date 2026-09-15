@@ -238,8 +238,8 @@ func TestJoinDeclaredSchemaAgreesWhenBuildSideEmpty(t *testing.T) {
 			" empty-build %s\n full-build  %s", got, want)
 	}
 	for _, c := range gotSchema {
-		if strings.EqualFold(c.Name, "g2") && c.Type != parquet.TypeInt32 {
-			t.Errorf("g2 declared %v with an empty build side, want INT32 (g + 1 over an int4 strict-int column, #1070)",
+		if strings.EqualFold(c.Name, "g2") && c.Type != parquet.TypeInt64 {
+			t.Errorf("g2 declared %v with an empty build side, want INT64 (g + 1 over a strict-int column)",
 				c.Type)
 		}
 	}

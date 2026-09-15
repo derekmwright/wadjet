@@ -442,7 +442,7 @@ func arcACells() []arcACell {
 			wantTableLessRoutes: 1},
 		{issue: "#806", name: "table_less_select_union",
 			sql:  `SELECT 1 AS n UNION ALL SELECT 2 AS n ORDER BY n`,
-			want: []string{"n=int32:1", "n=int64:2"}, wantTableLessRoutes: 1},
+			want: []string{"n=int32:1", "n=int32:2"}, wantTableLessRoutes: 1},
 		// The control: the same expression WITH a FROM stays on the DAG, so
 		// the refusal is scoped to the shape that has no stage and does not
 		// quietly route ordinary queries local.

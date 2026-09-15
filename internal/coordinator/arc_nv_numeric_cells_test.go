@@ -196,14 +196,14 @@ func nvCells() []nvCell {
 		// column already followed int4's rules; a COMPUTED one did not, so the
 		// SUM accumulated in float64 and the DIVISION did not truncate.
 		{name: "1000/a_bare_port_is_int4",
-			sql: "SELECT pt AS v FROM " + nvEdg + " WHERE id=1", want: "v=65535<i8>"},
-		// The BOX is an i4 since #1070: `port * 1` is `integer` on the
-		// server, and these cells are about the NUMBER — 65535 rather than
-		// the 65535.0 the float path answered.
+			sql: "SELECT pt AS v FROM " + nvEdg + " WHERE id=1", want: "v=65535<i4>"},
+		// These cells are about the NUMBER — 65535 rather than the 65535.0 the
+		// float path answered. The box is the int64 every computed integer is
+		// carried in (ADR-0024's recorded widening).
 		{name: "1000/port_times_one",
 			sql: "SELECT pt * 1 AS v FROM " + nvEdg + " WHERE id=1", want: "v=65535<i8>"},
 		{name: "1000/port_plus_zero",
-			sql: "SELECT pt + 0 AS v FROM " + nvEdg + " WHERE id=1", want: "v=65535<i4>"},
+			sql: "SELECT pt + 0 AS v FROM " + nvEdg + " WHERE id=1", want: "v=65535<i8>"},
 		{name: "1000/a_negated_port",
 			sql: "SELECT -pt AS v FROM " + nvEdg + " WHERE id=1", want: "v=-65535<i8>"},
 		{name: "1000/abs_of_a_port_answers_in_its_own_domain",

@@ -119,15 +119,15 @@ func a2OrderCells() []a2OrderCell {
 			want: []string{
 				"id=int64:1|d92=-3.50|seven=int32:7",
 				"id=int64:2|d92=0.00|seven=int32:7",
-				"id=int64:3|d92=12.75|seven=int64:7"},
+				"id=int64:3|d92=12.75|seven=int32:7"},
 			pgSays: "3 rows ordered by id"},
 		// And position 3, which names the sibling ITEM rather than a star
 		// column: the count has to cross the star, not stop at it.
 		{issue: "#810", name: "star_plus_item_order_by_3", ordered: true,
 			sql: `SELECT *, 7 AS seven FROM zzp WHERE id < 3 ORDER BY 3, 1 DESC`,
 			want: []string{
-				"id=int64:2|d92=0.00|seven=int64:7",
-				"id=int64:1|d92=-3.50|seven=int64:7"},
+				"id=int64:2|d92=0.00|seven=int32:7",
+				"id=int64:1|d92=-3.50|seven=int32:7"},
 			pgSays: "2 rows: seven is constant, so the tiebreak `1 DESC` decides — id 2 then 1"},
 		// A star over a DERIVED TABLE: the star expands against the
 		// subquery's own projection, which the logical layer can enumerate.
