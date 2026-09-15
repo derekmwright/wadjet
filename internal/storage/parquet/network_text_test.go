@@ -80,6 +80,17 @@ func TestMACTextGrammarIsPostgresMacaddr(t *testing.T) {
 		{"08:00:2b:01:02:03:", "", NetTextSyntax},
 		{":08:00:2b:01:02:03", "", NetTextSyntax},
 		{"", "", NetTextSyntax},
+		// C's `%x` reads into an `int`, so a field past 2^32 TRUNCATES and the
+		// server answers the truncated value rather than refusing. Saturating
+		// instead refused three spellings 17.11 takes (review NT P3).
+		{"100000000:0:0:0:0:0", "000000000000", NetTextOK},
+		{"100000001:0:0:0:0:0", "010000000000", NetTextOK},
+		{"10000000000:0:0:0:0:0", "000000000000", NetTextOK},
+		{"-100000000:0:0:0:0:0", "000000000000", NetTextOK},
+		{"0x100000001:0:0:0:0:0", "010000000000", NetTextOK},
+		{"1000000ff:0:0:0:0:0", "ff0000000000", NetTextOK},
+		{"-100000001:0:0:0:0:0", "", NetTextRange},
+		{"100000100:0:0:0:0:0", "", NetTextRange},
 		// An octet the type cannot carry is 22003, a different answer.
 		{"08:00:2b:01:02:100", "", NetTextRange},
 		{"08:00:2b:01:02:-3", "", NetTextRange},

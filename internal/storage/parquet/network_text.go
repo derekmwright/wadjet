@@ -413,21 +413,23 @@ func scanHex(s string, i, width int) (int64, int, bool) {
 		i += 2
 	}
 	digits := i
-	var v int64
+	// THIRTY-TWO BITS, wrapping, because that is where C's `%x` puts the
+	// value: an `int`. PostgreSQL 17.11 answers 00:00:00:00:00:00 for
+	// `'100000000:0:0:0:0:0'` and 01:00:00:00:00:00 for `'100000001:…'` —
+	// the truncation is visible in the value, not only in the accept-set, and
+	// saturating instead refused a spelling the server takes (review NT P3).
+	var u uint32
 	for i < len(s) && isHexByte(s[i]) && room(1) {
-		v = v*16 + int64(hexValue(s[i]))
-		if v > 1<<40 {
-			v = 1 << 40 // far past any octet; the caller answers 22003
-		}
+		u = u*16 + uint32(hexValue(s[i]))
 		i++
 	}
 	if i == digits {
 		return 0, i, false
 	}
 	if neg {
-		v = -v
+		u = -u
 	}
-	return v, i, true
+	return int64(int32(u)), i, true
 }
 
 func isSpaceByte(c byte) bool {
