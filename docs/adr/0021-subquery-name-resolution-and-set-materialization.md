@@ -2017,16 +2017,32 @@ and three shapes decline — each returning to the disposition it had at
 `c34cdbcb`, never to a new wrong answer: a body carrying `DISTINCT`; a body
 whose own output alias already publishes the name, or an enclosing relation
 that does; and an enclosing query that writes a star over this join. A GROUPED
-body needs no decline — it aggregates, so the refusal above fires first, and
-the refusal's order is load-bearing: the key injection adds the correlation
-column to the body's `GROUP BY`, so a decline tested before it would swallow
-the aggregated refusal and answer silently. Round 4's seven cells hold them,
-with the base measurement beside each.
+body needs no decline — it aggregates, so the refusal above fires first.
+Round 4's seven cells hold them, with the base measurement beside each.
 
 An AGGREGATED body is still refused, for a reason the projection cannot answer:
 publishing `i.amount` beside `SUM(i.amount)` needs it in the `GROUP BY`, which
 changes what the aggregate computes. PostgreSQL evaluates the body per outer
 row; this engine does not, for that shape.
+
+**THE REFUSAL COMES BEFORE EVERY DECLINE, AND THAT ORDER IS ASSERTED RATHER
+THAN COMMENTED.** The refusal and the declines look alike — neither
+materializes anything — but they are not interchangeable: a decline on an
+aggregated body DROPS the predicate, so every outer row is given the whole
+relation's aggregate, or a NULL. Round 4 put the refusal in front of the
+`DISTINCT` / contested arm and left the enclosing-star test as an early return
+above the loop, and one statement then had two dispositions decided by the
+ENCLOSING SELECT list: written with a named list it was `0A000`, written
+`SELECT *` it answered `NULL | NULL | NULL` for PostgreSQL's `350 | 350 |
+NULL` — silently, on all five arms and all nine doors, through a derived star,
+a top-level star, a qualified star and a CTE star alike. Every decline is
+therefore a FLAG folded into one arm below the refusal, and two properties hold
+it there: `logical.TestNoLiftedRefDeclineSitsBeforeTheAggregatedRefusal` reads
+the order off the function's own source, so a decline added in the wrong place
+fails even when no cell reaches it, and
+`logical.TestTheAggregatedRefusalPrecedesEveryLiftedRefDecline` crosses every
+trigger with an aggregated body and with a non-aggregated control. The `R5/*`
+cells gate the values on five arms.
 
 **The OUTER-REFERENCE refusal above is the opposite verdict on the opposite
 evidence, and the pair is the point.** `SELECT o.id AS m` was right on the three
@@ -2047,7 +2063,7 @@ spellings of the same body answer here too. `ORDER BY <ordinal>` over a
 has no position to count, and reproduces with an ordinary join in place of the
 lateral. Both are cells of
 `coordinator.TestArcL1LateralAndWindowScopeAnswersPostgresOnEveryArm`, which
-is this section's gate: 154 cells of {LATERAL, scalar subquery, EXISTS, IN} ×
+is this section's gate: 196 cells of {LATERAL, scalar subquery, EXISTS, IN} ×
 {where the outer reference sits} × {INNER, LEFT, comma, a join below, a star
 over} on five arms, every want live PostgreSQL 17.11.
 

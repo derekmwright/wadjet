@@ -1065,9 +1065,11 @@ else: a body carrying `DISTINCT`, a body whose own alias already publishes that
 name, an enclosing relation that publishes it, and an enclosing `SELECT *` over
 the join all keep the older behaviour instead, in which the
 predicate reads a column the body dropped and the lateral answers a NULL-padded
-row per outer row. Over an AGGREGATED body it is refused: there is no projection to publish the
-column in, and publishing it would put it in the `GROUP BY` and change what the
-aggregate computes.
+row per outer row. Over an AGGREGATED body it is refused instead, in EVERY one
+of those spellings — an enclosing `SELECT *` included: there is no projection
+to publish the column in, and publishing it would put it in the `GROUP BY` and
+change what the aggregate computes. One statement never gets two dispositions
+from the enclosing SELECT list.
 
 A reference whose qualifier the body's OWN `FROM` item or `WITH` item shadows
 is not an outer reference and is not refused: `FROM orders x, LATERAL (SELECT

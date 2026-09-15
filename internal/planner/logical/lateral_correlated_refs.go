@@ -92,13 +92,27 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 	// fourth off the enclosing SELECT list. None of them can be decided after
 	// the plan is built, which is why they are conditions on the injection and
 	// not a repair above it.
+	//
+	// EVERY ONE OF THEM IS TESTED AFTER THE AGGREGATED REFUSAL, inside the
+	// loop — the star test sets a flag rather than returning, for exactly that
+	// reason. A decline on an aggregated body is a silent wrong answer, so
+	// while the refusal and the declines look alike (neither materializes
+	// anything), they are not interchangeable: round 4 left the star test as a
+	// return above the loop and one statement got two dispositions decided by
+	// the ENCLOSING SELECT list — a named list refused, `SELECT *` answered
+	// three NULLs for PostgreSQL's `350 | 350 | NULL` on all five arms. That
+	// ordering is no longer a comment: `TestNoLiftedRefDeclineSitsBeforeThe`
+	// `AggregatedRefusal` reads it off this function's source, and
+	// `TestTheAggregatedRefusalPrecedesEveryLiftedRefDecline` crosses every
+	// trigger above with an aggregated body.
 	if info == nil {
 		return nil, nil
 	}
+	enclosingStar := false
 	if outer != nil {
 		for _, c := range outer.Columns {
 			if c.Star {
-				return nil, nil
+				enclosingStar = true
 			}
 		}
 	}
@@ -150,10 +164,11 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 		if len(mint) == 0 {
 			continue
 		}
-		// THE AGGREGATED REFUSAL COMES FIRST. It is a statement about the
-		// BODY — there is no projection to publish the column in — and not
-		// about what publishing it would disturb, so a shape that would also
-		// decline below must still be refused rather than silently answered.
+		// THE AGGREGATED REFUSAL COMES FIRST, and two tests hold it there. It
+		// is a statement about the BODY — there is no projection to publish
+		// the column in — and not about what publishing it would disturb, so
+		// a shape that would also decline below must still be refused rather
+		// than silently answered.
 		if aggregates {
 			return nil, sqlerr.New("0A000",
 				"LATERAL body AGGREGATES and its correlated predicate %s is not an "+
@@ -165,11 +180,12 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 					"ENCLOSING query over an unaggregated lateral instead",
 				sqlerr.Quote(strings.TrimSpace(cp)))
 		}
-		// A CONTESTED NAME, or a DISTINCT the widened projection would change,
-		// DECLINES: the query keeps the disposition it had before this repair
-		// existed, which is never a new wrong answer. (A GROUPED body needs no
-		// arm here — it aggregates, so the refusal above has already fired.)
-		if contested || info.Distinct {
+		// A CONTESTED NAME, a DISTINCT the widened projection would change, or
+		// an enclosing STAR whose published list it would enter, DECLINES: the
+		// query keeps the disposition it had before this repair existed, which
+		// is never a new wrong answer. (A GROUPED body needs no arm here — it
+		// aggregates, so the refusal above has already fired.)
+		if contested || info.Distinct || enclosingStar {
 			return nil, nil
 		}
 		// PUBLISHED UNDER ITS OWN NAME, and the predicate is NOT respelled.

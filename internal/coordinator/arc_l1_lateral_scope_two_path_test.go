@@ -91,6 +91,28 @@ func l1LateralCases() []l1Case {
 		{"R4/outerContestsName", "SELECT o.id AS a, s.m AS m FROM lat_ord o LEFT JOIN LATERAL (SELECT i.product AS m FROM lat_item i WHERE i.id < o.id) s ON true ORDER BY a, m"},
 		{"R4/setopBody", "SELECT o.id AS a, s.m AS m FROM lat_ord o LEFT JOIN LATERAL (SELECT i.product AS m FROM lat_item i WHERE i.amount < o.total UNION SELECT 'Z') s ON true ORDER BY a, m"},
 
+		// ROUND 5 — the aggregated refusal comes before EVERY decline, and the
+		// ENCLOSING STAR is a decline. `144001f9` put the refusal in front of the
+		// DISTINCT / contested arm, which is INSIDE the per-predicate loop; the
+		// star decline returned before the loop ran, so ONE statement had two
+		// dispositions decided by the enclosing SELECT list — `ctlAggNoStar`
+		// refused, and the same body under a star answered a plausible NULL on
+		// all five arms (round-5 review, B1; measured at `c34cdbcb` by this
+		// author: `1,NULL | 2,NULL | 3,NULL` for PostgreSQL's `1,350 | 2,350 |
+		// 3,NULL`, on every arm, through a derived star, a top-level star, a
+		// qualified star and a CTE star alike). Six spellings of the star and two
+		// controls: the same body with a NAMED list above it, which was loud
+		// already, and a NON-aggregated body under the same star, whose decline
+		// is correct and whose two-path split must not move.
+		{"R5/aggUnderBareStar", "SELECT z.id AS a, z.m AS m FROM (SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT SUM(i.amount) AS m FROM lat_item i WHERE i.amount < o.total) s ON true) z ORDER BY a, m"},
+		{"R5/aggUnderBareStarTop", "SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT SUM(i.amount) AS m FROM lat_item i WHERE i.amount < o.total) s ON true"},
+		{"R5/aggUnderQStar", "SELECT z.m AS m FROM (SELECT s.* FROM lat_ord o LEFT JOIN LATERAL (SELECT SUM(i.amount) AS m FROM lat_item i WHERE i.amount < o.total) s ON true) z ORDER BY m"},
+		{"R5/aggUnderCteStar", "WITH w AS (SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT SUM(i.amount) AS m FROM lat_item i WHERE i.amount < o.total) s ON true) SELECT w.id AS a, w.m AS m FROM w ORDER BY a, m"},
+		{"R5/aggGroupedUnderStar", "SELECT z.id AS a, z.p AS p, z.m AS m FROM (SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT i.product AS p, SUM(i.amount) AS m FROM lat_item i WHERE i.amount < o.total GROUP BY i.product) s ON true) z ORDER BY a, p, m"},
+		{"R5/aggCountUnderStar", "SELECT z.id AS a, z.n AS n FROM (SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT COUNT(*) AS n FROM lat_item i WHERE i.amount < o.total) s ON true) z ORDER BY a, n"},
+		{"R5/ctlAggNoStar", "SELECT o.id AS a, s.m AS m FROM lat_ord o LEFT JOIN LATERAL (SELECT SUM(i.amount) AS m FROM lat_item i WHERE i.amount < o.total) s ON true ORDER BY a, m"},
+		{"R5/ctlPlainUnderStar", "SELECT z.id AS a, z.m AS m FROM (SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT i.amount AS m FROM lat_item i WHERE i.amount < o.total) s ON true) z ORDER BY a, m"},
+
 		// ROUND 3 — the two halves of the outer-reference question, adjudicated
 		// by measurement. `outerRef*` are the ACCIDENT: `SELECT o.id AS m` was
 		// right on the three DAG arms only because the qualified name degrades
@@ -371,6 +393,14 @@ var l1Postgres = map[string]string{
 	"R4/outerStar":               "rows=9 1,Alice,150 | 1,Alice,150 | 1,Alice,150 | 1,Alice,150 | 2,Bob,200 | 2,Bob,200 | 2,Bob,200 | 2,Bob,200 | 3,Carol,0",
 	"R4/outerContestsName":       "rows=4 1,NULL | 2,Widget | 3,Gadget | 3,Widget",
 	"R4/setopBody":               "rows=9 1,Doohickey | 1,Gadget | 1,Widget | 1,Z | 2,Doohickey | 2,Gadget | 2,Widget | 2,Z | 3,Z",
+	"R5/aggUnderBareStar":        "rows=3 1,350 | 2,350 | 3,NULL",
+	"R5/aggUnderBareStarTop":     "rows=3 1,Alice,150,350 | 2,Bob,200,350 | 3,Carol,0,NULL",
+	"R5/aggUnderQStar":           "rows=3 350 | 350 | NULL",
+	"R5/aggUnderCteStar":         "rows=3 1,350 | 2,350 | 3,NULL",
+	"R5/aggGroupedUnderStar":     "rows=7 1,Doohickey,125 | 1,Gadget,100 | 1,Widget,125 | 2,Doohickey,125 | 2,Gadget,100 | 2,Widget,125 | 3,NULL,NULL",
+	"R5/aggCountUnderStar":       "rows=3 1,4 | 2,4 | 3,0",
+	"R5/ctlAggNoStar":            "rows=3 1,350 | 2,350 | 3,NULL",
+	"R5/ctlPlainUnderStar":       "rows=9 1,100 | 1,125 | 1,50 | 1,75 | 2,100 | 2,125 | 2,50 | 2,75 | 3,NULL",
 	"R3/outerRefExpr":            "rows=4 1,1 | 1,1 | 2,2 | 2,2",
 	"R3/outerRefOnlyOuter":       "rows=4 1,150 | 1,150 | 2,200 | 2,200",
 	"R3/outerRefTwoOuter":        "rows=4 1,1,150 | 1,1,150 | 2,2,200 | 2,2,200",
@@ -559,6 +589,13 @@ var l1Postgres = map[string]string{
 var l1RefusalPins = map[string][]string{
 	"R4/groupedBody":           {l1LiftedRefNotPublished},
 	"R4/setopBody":             {l1FromlessSetOpBody},
+	"R5/aggUnderBareStar":      {l1LiftedRefNotPublished},
+	"R5/aggUnderBareStarTop":   {l1LiftedRefNotPublished},
+	"R5/aggUnderQStar":         {l1LiftedRefNotPublished},
+	"R5/aggUnderCteStar":       {l1LiftedRefNotPublished},
+	"R5/aggGroupedUnderStar":   {l1LiftedRefNotPublished},
+	"R5/aggCountUnderStar":     {l1LiftedRefNotPublished},
+	"R5/ctlAggNoStar":          {l1LiftedRefNotPublished},
 	"R3/outerRefExpr":          {l1OuterRefOutsideWhere},
 	"R3/outerRefOnlyOuter":     {l1OuterRefOutsideWhere},
 	"R3/outerRefTwoOuter":      {l1OuterRefOutsideWhere},
@@ -644,6 +681,18 @@ var l1ArmPins = map[string]map[string]string{
 	"R4/outerStar": {
 		"single":      "rows=3 1,Alice,150 | 2,Bob,200 | 3,Carol,0",
 		"spilled512k": "rows=3 1,Alice,150 | 2,Bob,200 | 3,Carol,0",
+	},
+	// ROUND 5's control: a NON-aggregated body under the same enclosing star.
+	// The star decline is CORRECT for it — the materialized column would enter
+	// the star's published list — so the two single-process arms keep the
+	// `rows=3` NULL pads they answered at `c34cdbcb` while the three DAG arms
+	// answer PostgreSQL's nine rows. Measured at `c34cdbcb` by this author and
+	// byte-identical here: moving the star test from a pre-loop return into
+	// the decline arm changed nothing about this cell, which is what makes it
+	// the control for B1 rather than a second finding.
+	"R5/ctlPlainUnderStar": {
+		"single":      "rows=3 1,NULL | 2,NULL | 3,NULL",
+		"spilled512k": "rows=3 1,NULL | 2,NULL | 3,NULL",
 	},
 	// A LIFTED non-equality predicate now ANSWERS on the two single-process
 	// arms (round 3): the inner columns it names are published by the body
