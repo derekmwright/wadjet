@@ -126,10 +126,26 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 			return i
 		}
 		if s, ok := stringOperand(v); ok {
-			if dest == "protocol" {
-				if n, named := parquet.ProtocolNumberFromName(s); named {
-					return int64(n)
+			if dest == "port" || dest == "protocol" {
+				// These two have a TEXT FORM OF THEIR OWN, and it is not
+				// int4's: PROTOCOL reads the IANA name `protocol_name()`
+				// prints, and neither reads int4's `0x1bb` / `0o17` /
+				// `1_000`, which the writer refuses. One grammar per type,
+				// parquet.DecimalIntegerText, read here and at the writer
+				// (review NT P4). The DOMAIN below is still int4's — that
+				// split is ADR-0012's, and #901's.
+				if dest == "protocol" {
+					if n, named := parquet.ProtocolNumberFromName(s); named {
+						return int64(n)
+					}
 				}
+				switch n, st := parquet.DecimalIntegerText(s); st {
+				case parquet.NetTextOK:
+					return castIntInRange(n, dest)
+				case parquet.NetTextRange:
+					raiseNumericOutOfRange("integer", s)
+				}
+				raiseInvalidTextRepresentation("integer", s)
 			}
 			typ := "integer"
 			if dest == "bigint" || dest == "int8" || dest == "signed" {
