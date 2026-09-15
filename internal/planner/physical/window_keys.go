@@ -287,24 +287,36 @@ func windowKeyInputTypes(child *logical.Node) (map[string]parquet.TypeID, map[st
 	if t := sourceColTypesThroughRenames(child); len(t) > 0 {
 		return t, strictIntArithColsThroughRenames(child)
 	}
-	agg := aggregateUnderWindow(child)
-	if agg == nil || len(agg.Children) != 1 {
-		return nil, nil
-	}
-	base := inputColTypes(agg.Children[0])
-	if len(base) == 0 {
-		return nil, nil
-	}
-	types := make(map[string]parquet.TypeID, len(base)+len(agg.AggExprs))
-	for name, t := range base {
-		types[name] = t
-	}
-	for _, a := range agg.AggExprs {
-		if t, known := aggSpecOutputType(agg, a); known {
-			types[strings.ToLower(a.OutputCol)] = t
+	if agg := aggregateUnderWindow(child); agg != nil && len(agg.Children) == 1 {
+		if base := inputColTypes(agg.Children[0]); len(base) > 0 {
+			types := make(map[string]parquet.TypeID, len(base)+len(agg.AggExprs))
+			for name, t := range base {
+				types[name] = t
+			}
+			for _, a := range agg.AggExprs {
+				if t, known := aggSpecOutputType(agg, a); known {
+					types[strings.ToLower(a.OutputCol)] = t
+				}
+			}
+			return types, strictIntArithCols(agg.Children[0])
 		}
 	}
-	return types, strictIntArithCols(agg.Children[0])
+	// The EMITTED walk, which is the only one of the four that crosses a SET
+	// OPERATION. `SUM(v * 3000000) OVER ()` over
+	// `(SELECT c_i32 AS v FROM t UNION ALL SELECT NULL)` reached here with
+	// nothing: inputColTypes stops at a set operator by construction and the
+	// rename peel lands on that same node, so the materialized argument was
+	// declared by the float rule, computed in a float64, and the window
+	// aggregate then CORRECTED its own bigint declaration down to the double
+	// its input vector actually was. The declaration and the value were wrong
+	// together, which is why nothing downstream could see it (#954).
+	//
+	// Last, not first: the three walks above answer about the shapes they
+	// were written for and this one is the fallback for a producer none of
+	// them can see through. It carries no strict-int hint, which is the
+	// honest answer — that hint is a SCAN annotation and there is no single
+	// scan below a set operation.
+	return emittedColTypes(child), nil
 }
 
 // windowKeyInputDecimal is windowKeyInputTypes' companion for DECIMAL
@@ -320,24 +332,25 @@ func windowKeyInputDecimal(child *logical.Node) map[string]logical.DecimalMeta {
 	if d := sourceColDeclsThroughRenames(child).dec; len(d) > 0 {
 		return d
 	}
-	agg := aggregateUnderWindow(child)
-	if agg == nil || len(agg.Children) != 1 {
-		return nil
-	}
-	base := inputColDecimal(agg.Children[0])
-	out := make(map[string]logical.DecimalMeta, len(base)+len(agg.AggExprs))
-	for name, m := range base {
-		out[name] = m
-	}
-	for _, a := range agg.AggExprs {
-		if m, known := aggSpecOutputDecimal(agg, a); known {
-			out[strings.ToLower(a.OutputCol)] = m
+	if agg := aggregateUnderWindow(child); agg != nil && len(agg.Children) == 1 {
+		base := inputColDecimal(agg.Children[0])
+		out := make(map[string]logical.DecimalMeta, len(base)+len(agg.AggExprs))
+		for name, m := range base {
+			out[name] = m
+		}
+		for _, a := range agg.AggExprs {
+			if m, known := aggSpecOutputDecimal(agg, a); known {
+				out[strings.ToLower(a.OutputCol)] = m
+			}
+		}
+		if len(out) > 0 {
+			return out
 		}
 	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
+	// windowKeyInputTypes' set-operation fallback, for the (p,s) half: the
+	// two have to come from the same place or a DECIMAL key is declared
+	// without its scale, which is not a declaration at all (ADR-0024 item 2).
+	return emittedColDecimal(child)
 }
 
 // aggregateUnderWindow finds the Aggregate a window reads from, descending
