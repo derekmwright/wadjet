@@ -88,7 +88,15 @@ func TestASubqueryReadsTheRowItIsCorrelatedOnOnTheWire(t *testing.T) {
 			oids: []uint32{25}, text: `alice|bob|carol`, names: []string{"nm"}},
 		{name: "an_aliased_expression_keeps_the_alias",
 			sql:  `SELECT (SELECT u.id + 1 AS zzz) FROM users u ORDER BY 1`,
-			oids: []uint32{23}, text: `2|3|4`, names: []string{"zzz"}},
+			oids: []uint32{23}, text: `2|3|4`, names: []string{"zzz"},
+			pinOIDs: []uint32{20},
+			pinWhy: "int4 ARITHMETIC declares bigint here where PostgreSQL declares " +
+				"integer — ADR-0024 §2b. The LITERAL cells above this one are NOT " +
+				"pinned: a literal that fits int4 declares 23 since #1070, and it is " +
+				"the arithmetic that could not follow, because the stage arms type an " +
+				"expression over a published slot more coarsely than the " +
+				"single-process path does and narrowing it made the two paths " +
+				"disagree. The NAME and the VALUES are PostgreSQL's"},
 		{name: "an_unaliased_subquery_publishes_its_columns_name",
 			sql:  `SELECT (SELECT u.id) FROM users u ORDER BY 1`,
 			oids: []uint32{23}, text: `1|2|3`, names: []string{"id"}},
