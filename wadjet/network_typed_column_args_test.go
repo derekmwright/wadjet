@@ -148,6 +148,25 @@ func TestNetworkTypedColumnFunctionArgumentMatrix(t *testing.T) {
 		{"port CAST AS STRING (guard)", `SELECT CAST(c_port AS STRING) AS v FROM net_matrix WHERE id = 1`, "443"},
 		{"protocol CAST AS STRING (guard)", `SELECT CAST(c_proto AS STRING) AS v FROM net_matrix WHERE id = 1`, "6"},
 
+		// --- the type's own TEXT form, both directions (#986) ---
+		// PROTOCOL's text form is the IANA name `protocol_name()` prints, so
+		// a cast FROM text has to read it back: `CAST('udp' AS PROTOCOL)` was
+		// an integer-syntax error, and the round trip below could not close.
+		{"protocol CAST from name", `SELECT CAST('udp' AS PROTOCOL) AS v FROM net_matrix WHERE id = 1`, int32(17)},
+		{"protocol CAST from NAME upper", `SELECT CAST('TCP' AS PROTOCOL) AS v FROM net_matrix WHERE id = 1`, int32(6)},
+		{"protocol round trip through its name",
+			`SELECT CAST(protocol_name(c_proto) AS PROTOCOL) AS v FROM net_matrix WHERE id = 1`, int32(6)},
+		// The four address types the same way: a cast from the column's own
+		// printed text is the value the column holds (#1092).
+		{"ipv4 round trip through its text",
+			`SELECT CAST(CAST(c_ipv4 AS STRING) AS IPV4) AS v FROM net_matrix WHERE id = 1`, "10.1.2.3"},
+		{"mac round trip through its text",
+			`SELECT CAST(CAST(c_mac AS STRING) AS MACADDR) AS v FROM net_matrix WHERE id = 1`, "aa:bb:cc:dd:ee:ff"},
+		{"ipv6 round trip through its text",
+			`SELECT CAST(CAST(c_ipv6 AS STRING) AS IPV6) AS v FROM net_matrix WHERE id = 1`, "2001:db8::1"},
+		{"cidr round trip through its text",
+			`SELECT CAST(CAST(c_cidr AS STRING) AS CIDR) AS v FROM net_matrix WHERE id = 1`, "192.168.1.0/24"},
+
 		// --- comparison against a string literal ---
 		{"ipv4 = literal", `SELECT (c_ipv4 = '10.1.2.3') AS v FROM net_matrix WHERE id = 1`, true},
 		{"ipv4 <> literal", `SELECT (c_ipv4 = '9.9.9.9') AS v FROM net_matrix WHERE id = 1`, false},
