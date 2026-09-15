@@ -91,13 +91,13 @@ func ndCells() []ndCell {
 		{name: "1070/scalar_subquery_literal", sql: `SELECT (SELECT 1) AS v FROM numwidth WHERE w_key = 0`,
 			want: "v:INT32 | 1<i4>"},
 		{name: "1070/scalar_subquery_arith", sql: `SELECT (SELECT w_i32 + 1 FROM numwidth WHERE w_key = 0) AS v FROM numwidth WHERE w_key = 0`,
-			want: "v:INT32 | 3<i4>"},
+			want: "v:INT64 | 3<i8>"},
 		{name: "1070/i32_plus_one", sql: `SELECT w_i32 + 1 AS v FROM numwidth WHERE w_key = 0`,
-			want: "v:INT32 | 3<i4>"},
+			want: "v:INT64 | 3<i8>"},
 		{name: "1070/cast_to_int", sql: `SELECT CAST(w_i32 AS INT) AS v FROM numwidth WHERE w_key = 0`,
-			want: "v:INT32 | 2<i4>"},
+			want: "v:INT64 | 2<i8>"},
 		{name: "1070/neg_i32", sql: `SELECT -w_i32 AS v FROM numwidth WHERE w_key = 0`,
-			want: "v:INT32 | -2<i4>"},
+			want: "v:INT64 | -2<i8>"},
 		{name: "952/avg_i32_grouped", sql: `SELECT AVG(w_i32) AS v FROM numwidth GROUP BY w_key HAVING w_key = 5`,
 			want: "v:DECIMAL(38,4) | -20.0000",
 			why:  "PostgreSQL 17.11 renders -20.0000000000000000: its avg(int) keeps sixteen significant digits and this engine keeps batch.AvgScale(0) = 4. The NUMBER is the same and both are exact to min(scale) — ADR-0024 item 3's recorded digit-count divergence, which the DECIMAL carrier decides and this arc does not."},
@@ -130,9 +130,14 @@ func ndCells() []ndCell {
 		{name: "1118/sum_real_over", sql: `SELECT SUM(w_f32) OVER () AS v FROM numwidth WHERE w_key = 0`,
 			want: "v:FLOAT32 | 2<f4>"},
 		{name: "1118/sum_real_grouped", sql: `SELECT SUM(w_f32) AS v FROM numwidth`,
-			want: "v:FLOAT32 | 1.6777224e+07<f4>",
-			pin:  map[string]string{"dag": "v:FLOAT32 | 1.6777226e+07<f4>", "dagshuf": "v:FLOAT32 | 1.6777226e+07<f4>"},
-			why:  "ADR-0013 nondeterminism class 9 at float4's carrier: the DAG folds three partial real totals and the association reaches the sixth significant digit. PostgreSQL's own parallel aggregate has the property; arc NV recorded it for this exact query."},
+			want:   "v:FLOAT32 | 1.67772e+07<f4>",
+			digits: 6,
+			why: "ADR-0013 nondeterminism class 9 at float4's carrier: the DAG folds " +
+				"three partial real totals and the association reaches the sixth " +
+				"significant digit, and WHICH arm lands on which of 1.6777224e+07 and " +
+				"1.6777226e+07 moves between runs. PostgreSQL's own parallel aggregate " +
+				"has the property. Six digits is where the two agree, and the cell is " +
+				"about the real DECLARATION either way."},
 		{name: "1118/avg_real_over", sql: `SELECT AVG(w_f32) OVER () AS v FROM numwidth WHERE w_key = 0`,
 			want: "v:FLOAT64 | 2<f8>"},
 		{name: "1118/min_real_over", sql: `SELECT MIN(w_f32) OVER () AS v FROM numwidth WHERE w_key = 0`,

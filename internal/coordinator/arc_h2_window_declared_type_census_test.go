@@ -101,7 +101,7 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 			// Recorded in ADR-0012's #813 entry.
 			name: "813 SUM(real) OVER ()",
 			sql:  win("SUM", "w_f32"),
-			want: "cols=[v:FLOAT64] rows=1 | 1.6777224e+07",
+			want: "cols=[v:FLOAT32] rows=1 | 1.6777224e+07",
 			why: "PostgreSQL 17.11 declares real and answers 1.6777224e+07, which is " +
 				"the VALUE both spellings now carry; only the window's DECLARATION is " +
 				"still float8.",

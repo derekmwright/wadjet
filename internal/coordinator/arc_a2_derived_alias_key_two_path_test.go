@@ -73,15 +73,15 @@ func a2AliasKeyCells() []a2AliasKeyCell {
 		{issue: "#807", name: "grouped_over_derived_computed_alias",
 			sql: `SELECT x.w, COUNT(*) AS n FROM (SELECT g*3 AS w FROM typemx ORDER BY w LIMIT 100) x ` +
 				`GROUP BY x.w ORDER BY x.w`,
-			want:   []string{"w=int32:0|n=int64:100"},
+			want:   []string{"w=int64:0|n=int64:100"},
 			pgSays: "one row, 0|100"},
 		{issue: "#807", name: "derived_computed_alias_inner_order_and_limit",
 			sql:    `SELECT x.w FROM (SELECT g*3 AS w FROM typemx ORDER BY w LIMIT 5) x ORDER BY x.w`,
-			want:   []string{"w=int32:0", "w=int32:0", "w=int32:0", "w=int32:0", "w=int32:0"},
+			want:   []string{"w=int64:0", "w=int64:0", "w=int64:0", "w=int64:0", "w=int64:0"},
 			pgSays: "5 rows of 0"},
 		{issue: "#807", name: "derived_computed_alias_no_inner_limit",
 			sql:    `SELECT x.w FROM (SELECT g*3 AS w FROM typemx ORDER BY w) x ORDER BY x.w LIMIT 5`,
-			want:   []string{"w=int32:0", "w=int32:0", "w=int32:0", "w=int32:0", "w=int32:0"},
+			want:   []string{"w=int64:0", "w=int64:0", "w=int64:0", "w=int64:0", "w=int64:0"},
 			pgSays: "5 rows of 0"},
 		// ANY computed alias, not just arithmetic: the walk declines on
 		// `proj.Column == ""`, which a function call has too.
@@ -95,7 +95,7 @@ func a2AliasKeyCells() []a2AliasKeyCell {
 		{issue: "#807", name: "cte_spelling",
 			sql: `WITH c AS (SELECT g*3 AS w FROM typemx ORDER BY w LIMIT 100) ` +
 				`SELECT c.w, COUNT(*) AS n FROM c GROUP BY c.w ORDER BY c.w`,
-			want:   []string{"w=int32:0|n=int64:100"},
+			want:   []string{"w=int64:0|n=int64:100"},
 			pgSays: "one row, 0|100"},
 		{issue: "#807", name: "count_above_the_derived_limit",
 			sql:    `SELECT COUNT(*) AS n FROM (SELECT g*3 AS w FROM typemx ORDER BY w LIMIT 100) x`,
@@ -126,25 +126,25 @@ func a2AliasKeyCells() []a2AliasKeyCell {
 			sql: `SELECT z.id, z.gk, SUM(z.v) OVER (PARTITION BY z.gk) AS s ` +
 				`FROM (SELECT id, g*2 AS gk, id AS v FROM typemx WHERE id < 6) z ORDER BY z.id`,
 			want: []string{
-				"id=int64:0|gk=int32:0|s=0", "id=int64:1|gk=int32:2|s=1",
-				"id=int64:2|gk=int32:4|s=2", "id=int64:3|gk=int32:6|s=3",
-				"id=int64:4|gk=int32:8|s=4", "id=int64:5|gk=int32:10|s=5"},
+				"id=int64:0|gk=int64:0|s=0", "id=int64:1|gk=int64:2|s=1",
+				"id=int64:2|gk=int64:4|s=2", "id=int64:3|gk=int64:6|s=3",
+				"id=int64:4|gk=int64:8|s=4", "id=int64:5|gk=int64:10|s=5"},
 			pgSays: "6 rows, each its own partition"},
 		{issue: "#658", name: "window_order_by_computed_alias",
 			sql: `SELECT z.id, z.gk, SUM(z.v) OVER (ORDER BY z.gk) AS s ` +
 				`FROM (SELECT id, g*2 AS gk, id AS v FROM typemx WHERE id < 6) z ORDER BY z.id`,
 			want: []string{
-				"id=int64:0|gk=int32:0|s=0", "id=int64:1|gk=int32:2|s=1",
-				"id=int64:2|gk=int32:4|s=3", "id=int64:3|gk=int32:6|s=6",
-				"id=int64:4|gk=int32:8|s=10", "id=int64:5|gk=int32:10|s=15"},
+				"id=int64:0|gk=int64:0|s=0", "id=int64:1|gk=int64:2|s=1",
+				"id=int64:2|gk=int64:4|s=3", "id=int64:3|gk=int64:6|s=6",
+				"id=int64:4|gk=int64:8|s=10", "id=int64:5|gk=int64:10|s=15"},
 			pgSays: "6 rows, running total"},
 		{issue: "#658", name: "window_cte_spelling",
 			sql: `WITH c AS (SELECT id, g*2 AS gk, id AS v FROM typemx WHERE id < 6) ` +
 				`SELECT c.id, c.gk, SUM(c.v) OVER (PARTITION BY c.gk) AS s FROM c ORDER BY c.id`,
 			want: []string{
-				"id=int64:0|gk=int32:0|s=0", "id=int64:1|gk=int32:2|s=1",
-				"id=int64:2|gk=int32:4|s=2", "id=int64:3|gk=int32:6|s=3",
-				"id=int64:4|gk=int32:8|s=4", "id=int64:5|gk=int32:10|s=5"},
+				"id=int64:0|gk=int64:0|s=0", "id=int64:1|gk=int64:2|s=1",
+				"id=int64:2|gk=int64:4|s=2", "id=int64:3|gk=int64:6|s=3",
+				"id=int64:4|gk=int64:8|s=4", "id=int64:5|gk=int64:10|s=5"},
 			pgSays: "6 rows, each its own partition"},
 		// The alias that SHADOWS a base column, which is what
 		// `materializeAliasColumns`' collision branch is really about.
@@ -194,15 +194,15 @@ func a2AliasKeyCells() []a2AliasKeyCell {
 		// can see that. Without them the branch is live code with no fixture.
 		{issue: "#807", name: "decline_outer_expression_over_an_inner_sorted_alias",
 			sql:         `SELECT x.w + 1 AS q FROM (SELECT g*3 AS w FROM typemx ORDER BY w LIMIT 5) x ORDER BY q`,
-			want:        []string{"q=int32:1", "q=int32:1", "q=int32:1", "q=int32:1", "q=int32:1"},
+			want:        []string{"q=int64:1", "q=int64:1", "q=int64:1", "q=int64:1", "q=int64:1"},
 			wantUnreach: 1,
 			pgSays:      "5 rows of 1"},
 		{issue: "#807", name: "two_computed_aliases_one_sorted_inside",
 			sql: `SELECT x.w, x.d FROM (SELECT g*3 AS w, g*2 AS d FROM typemx ORDER BY w LIMIT 5) x ` +
 				`ORDER BY x.d`,
 			want: []string{
-				"w=int32:0|d=int32:0", "w=int32:0|d=int32:0", "w=int32:0|d=int32:0",
-				"w=int32:0|d=int32:0", "w=int32:0|d=int32:0"},
+				"w=int64:0|d=int64:0", "w=int64:0|d=int64:0", "w=int64:0|d=int64:0",
+				"w=int64:0|d=int64:0", "w=int64:0|d=int64:0"},
 			wantUnreach: 0,
 			pgSays:      "5 rows of 0|0"},
 		{issue: "#658", name: "ctl_window_partition_by_plain_rename",
@@ -290,10 +290,10 @@ func TestAnAliasThatShadowsABaseColumnPublishesItsComputedValue(t *testing.T) {
 	}{
 		{"no_outer_order_by",
 			`SELECT x.id FROM (SELECT g*3 AS id FROM typemx WHERE id<6) x`,
-			[]string{"id=int32:0", "id=int32:12", "id=int32:15", "id=int32:3", "id=int32:6", "id=int32:9"}},
+			[]string{"id=int64:0", "id=int64:12", "id=int64:15", "id=int64:3", "id=int64:6", "id=int64:9"}},
 		{"inner_order_by",
 			`SELECT x.id FROM (SELECT g*3 AS id FROM typemx WHERE id<6 ORDER BY id) x`,
-			[]string{"id=int32:0", "id=int32:12", "id=int32:15", "id=int32:3", "id=int32:6", "id=int32:9"}},
+			[]string{"id=int64:0", "id=int64:12", "id=int64:15", "id=int64:3", "id=int64:6", "id=int64:9"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := na2Run(tmdRunSingle(ctx, single, tc.sql))

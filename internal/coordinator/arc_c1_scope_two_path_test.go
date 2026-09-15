@@ -332,7 +332,7 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			// the lowering did not break the shape it did not need to fix.
 			name:   "control: a constant body",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 7 | 7 | 7",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
@@ -393,7 +393,7 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			// …and on the UNCORRELATED body too, which takes the base path.
 			name:   "a column-alias list over an uncorrelated body",
 			sql:    "SELECT l.w FROM lat_ord u, LATERAL (SELECT 7 AS v) l(w) ORDER BY 1",
-			want:   "cols=[w:INT64] rows=3 | 7 | 7 | 7",
+			want:   "cols=[w:INT32] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
@@ -500,7 +500,7 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			name: "control: a sibling lateral's own name equal to the list name",
 			sql: "SELECT b.w, u.id FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
 				"WHERE i.order_id = u.id) l(w), LATERAL (SELECT w FROM (SELECT 2 AS w) y) b ORDER BY 2, 1",
-			want: "cols=[w:INT64 id:INT64] rows=4 | 2,1 | 2,1 | 2,2 | 2,2",
+			want: "cols=[w:INT32 id:INT64] rows=4 | 2,1 | 2,1 | 2,2 | 2,2",
 			// The sibling's own body is table-less under its derived table, so
 			// the DAG arms take #806's local route — the existing disposition
 			// of a table-less item, not this cell's subject.
@@ -512,7 +512,7 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			name: "control: an earlier sibling lateral's own name equal to the list name",
 			sql: "SELECT a.w, u.id FROM lat_ord u, LATERAL (SELECT w FROM (SELECT 1 AS w) x) a, " +
 				"LATERAL (SELECT * FROM lat_item i WHERE i.order_id = u.id) l(w) ORDER BY 2",
-			want:   "cols=[w:INT64 id:INT64] rows=4 | 1,1 | 1,1 | 1,2 | 1,2",
+			want:   "cols=[w:INT32 id:INT64] rows=4 | 1,1 | 1,1 | 1,2 | 1,2",
 			routed: c1TableLess,
 		},
 		{

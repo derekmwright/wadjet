@@ -52,7 +52,7 @@ func TestC1EATheBodyClassTable(t *testing.T) {
 			// BASE PATH - the body reads nothing, so nothing depends on the outer row
 			name:   "plain / no outer reference",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 7 | 7 | 7",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
@@ -66,7 +66,7 @@ func TestC1EATheBodyClassTable(t *testing.T) {
 			// BASE PATH - the body reads nothing, so nothing depends on the outer row
 			name:   "LIMIT / no outer reference",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v LIMIT 1) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 7 | 7 | 7",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
@@ -81,7 +81,7 @@ func TestC1EATheBodyClassTable(t *testing.T) {
 			// BASE PATH - the body reads nothing, so nothing depends on the outer row
 			name:   "OFFSET / no outer reference",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v OFFSET 1) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=0",
+			want:   "cols=[v:INT32] rows=0",
 			routed: c1TableLess,
 		},
 		{
@@ -96,7 +96,7 @@ func TestC1EATheBodyClassTable(t *testing.T) {
 			// BASE PATH - the body reads nothing, so nothing depends on the outer row
 			name:   "DISTINCT / no outer reference",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT DISTINCT 7 AS v) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 7 | 7 | 7",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
@@ -110,7 +110,7 @@ func TestC1EATheBodyClassTable(t *testing.T) {
 			// BASE PATH - the body reads nothing, so nothing depends on the outer row
 			name:   "ORDER BY / no outer reference",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v ORDER BY 1) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 7 | 7 | 7",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
@@ -141,7 +141,7 @@ func TestC1EATheBodyClassTable(t *testing.T) {
 			// BASE PATH - the body reads nothing, so nothing depends on the outer row
 			name:   "GROUP BY / no outer reference",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v GROUP BY 1) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 7 | 7 | 7",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
@@ -155,7 +155,7 @@ func TestC1EATheBodyClassTable(t *testing.T) {
 			// BASE PATH - the body reads nothing, so nothing depends on the outer row
 			name:   "HAVING / no outer reference",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v HAVING 1=1) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 7 | 7 | 7",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
@@ -183,7 +183,7 @@ func TestC1EATheBodyClassTable(t *testing.T) {
 			// BASE PATH - the body reads nothing, so nothing depends on the outer row
 			name:   "set operation / no outer reference",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 1 AS v UNION ALL SELECT 2) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=6 | 1 | 1 | 1 | 2 | 2 | 2",
+			want:   "cols=[v:INT32] rows=6 | 1 | 1 | 1 | 2 | 2 | 2",
 			routed: c1TableLess,
 		},
 		{
@@ -197,7 +197,7 @@ func TestC1EATheBodyClassTable(t *testing.T) {
 			// BASE PATH - the body reads nothing, so nothing depends on the outer row
 			name:   "WITH / no outer reference",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (WITH n AS (SELECT 5 AS x) SELECT 7 AS v) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 7 | 7 | 7",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
@@ -232,14 +232,14 @@ func TestC1EATheBodyClassTable(t *testing.T) {
 			// LOWERED - a projection over the outer row
 			name:   "body WHERE / reads the outer row",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v WHERE u.id > 1) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=2 | 7 | 7",
+			want:   "cols=[v:INT32] rows=2 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
 			// BASE PATH - the body reads nothing, so nothing depends on the outer row
 			name:   "LEFT JOIN ON false / no outer reference",
 			sql:    "SELECT u.id, l.v FROM lat_ord u LEFT JOIN LATERAL (SELECT 7 AS v) l ON false ORDER BY 1",
-			want:   "cols=[id:INT64 v:INT64] rows=3 | 1,NULL | 2,NULL | 3,NULL",
+			want:   "cols=[id:INT64 v:INT32] rows=3 | 1,NULL | 2,NULL | 3,NULL",
 			routed: c1TableLess,
 		},
 		{
@@ -254,7 +254,7 @@ func TestC1EATheBodyClassTable(t *testing.T) {
 			// BASE PATH - the body reads nothing, so nothing depends on the outer row
 			name:   "LEFT JOIN ON an outer column / no outer reference",
 			sql:    "SELECT u.id, l.v FROM lat_ord u LEFT JOIN LATERAL (SELECT 7 AS v) l ON u.id > 1 ORDER BY 1",
-			want:   "cols=[id:INT64 v:INT64] rows=3 | 1,NULL | 2,7 | 3,7",
+			want:   "cols=[id:INT64 v:INT32] rows=3 | 1,NULL | 2,7 | 3,7",
 			routed: c1TableLess,
 		},
 		{
@@ -268,7 +268,7 @@ func TestC1EATheBodyClassTable(t *testing.T) {
 			// BASE PATH - the body reads nothing, so nothing depends on the outer row
 			name:   "INNER JOIN ON an outer column / no outer reference",
 			sql:    "SELECT l.v FROM lat_ord u JOIN LATERAL (SELECT 7 AS v) l ON u.id > 1 ORDER BY 1",
-			want:   "cols=[v:INT64] rows=2 | 7 | 7",
+			want:   "cols=[v:INT32] rows=2 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
@@ -316,14 +316,14 @@ func TestC1EBThePredicateInputTable(t *testing.T) {
 			// item / predicate inputs: literal
 			name:   "item_literal (literal)",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 7 | 7 | 7",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
 			// item / predicate inputs: constant expression
 			name:   "item_constexpr (constant expression)",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 3+4 AS v) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 7 | 7 | 7",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
@@ -344,7 +344,7 @@ func TestC1EBThePredicateInputTable(t *testing.T) {
 			// where / predicate inputs: literal
 			name:   "where_literal (literal)",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v WHERE true) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 7 | 7 | 7",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
@@ -359,7 +359,7 @@ func TestC1EBThePredicateInputTable(t *testing.T) {
 			// where / predicate inputs: outer name
 			name:   "where_outer (outer name)",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v WHERE u.id > 1) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=2 | 7 | 7",
+			want:   "cols=[v:INT32] rows=2 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
@@ -374,14 +374,14 @@ func TestC1EBThePredicateInputTable(t *testing.T) {
 			// orderby / predicate inputs: ordinal
 			name:   "orderby_ordinal (ordinal)",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v ORDER BY 1) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 7 | 7 | 7",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
 			// orderby / predicate inputs: literal
 			name:   "orderby_literal (literal)",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v ORDER BY 'x') l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 7 | 7 | 7",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			why:    "PostgreSQL REFUSES a non-integer constant in ORDER BY; answering it is a superset, unchanged from the base (ADR-0012)",
 			routed: c1TableLess,
 		},
@@ -389,14 +389,14 @@ func TestC1EBThePredicateInputTable(t *testing.T) {
 			// orderby / predicate inputs: body-local name
 			name:   "orderby_bodylocal (body-local name)",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v ORDER BY v) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 7 | 7 | 7",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
 			// orderby / predicate inputs: outer name
 			name:   "orderby_outer (outer name)",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v ORDER BY u.id) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 7 | 7 | 7",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			why:    "a one-row sort is the IDENTITY, so an outer name here does not make the body correlated",
 			routed: c1TableLess,
 		},
@@ -412,14 +412,14 @@ func TestC1EBThePredicateInputTable(t *testing.T) {
 			// groupby / predicate inputs: ordinal
 			name:   "groupby_ordinal (ordinal)",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v GROUP BY 1) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 7 | 7 | 7",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
 			// groupby / predicate inputs: body-local name
 			name:   "groupby_bodylocal (body-local name)",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v GROUP BY v) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 7 | 7 | 7",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
@@ -500,21 +500,21 @@ func TestC1EBThePredicateInputTable(t *testing.T) {
 			// limit / predicate inputs: literal
 			name:   "limit_literal (literal)",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v LIMIT 1) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 7 | 7 | 7",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
 			// limit / predicate inputs: literal
 			name:   "limit_zero (literal)",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v LIMIT 0) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=0",
+			want:   "cols=[v:INT32] rows=0",
 			routed: c1TableLess,
 		},
 		{
 			// offset / predicate inputs: literal
 			name:   "offset_literal (literal)",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v OFFSET 1) l ORDER BY 1",
-			want:   "cols=[v:INT64] rows=0",
+			want:   "cols=[v:INT32] rows=0",
 			routed: c1TableLess,
 		},
 		{

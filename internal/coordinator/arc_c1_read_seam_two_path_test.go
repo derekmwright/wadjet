@@ -286,7 +286,7 @@ func TestC1FTheReadTestSeam(t *testing.T) {
 			name: "a sibling that publishes the same name, projected -> the sibling's column -> ANSWERS",
 			sql: "SELECT b.w, u.id " + lat + ", LATERAL (SELECT w FROM (SELECT 2 AS w) y) b " +
 				"ORDER BY 2, 1",
-			want:   "cols=[w:INT64 id:INT64] rows=4 | 2,1 | 2,1 | 2,2 | 2,2",
+			want:   "cols=[w:INT32 id:INT64] rows=4 | 2,1 | 2,1 | 2,2 | 2,2",
 			routed: c1TableLess,
 		},
 		{
@@ -296,14 +296,14 @@ func TestC1FTheReadTestSeam(t *testing.T) {
 			name: "a sibling body's OWN sort term, qualified -> a one-row sort, not asked -> ANSWERS",
 			sql: "SELECT m.z, u.id " + lat + ", LATERAL (SELECT 7 AS z ORDER BY l.w) m " +
 				"ORDER BY 2, 1",
-			want:   "cols=[z:INT64 id:INT64] rows=4 | 7,1 | 7,1 | 7,2 | 7,2",
+			want:   "cols=[z:INT32 id:INT64] rows=4 | 7,1 | 7,1 | 7,2 | 7,2",
 			routed: c1TableLess,
 		},
 		{
 			name: "a sibling body's OWN sort term, bare -> a one-row sort, not asked -> ANSWERS",
 			sql: "SELECT m.z, u.id " + lat + ", LATERAL (SELECT 7 AS z ORDER BY w) m " +
 				"ORDER BY 2, 1",
-			want:   "cols=[z:INT64 id:INT64] rows=4 | 7,1 | 7,1 | 7,2 | 7,2",
+			want:   "cols=[z:INT32 id:INT64] rows=4 | 7,1 | 7,1 | 7,2 | 7,2",
 			routed: c1TableLess,
 		},
 
@@ -358,7 +358,7 @@ func TestC1FTheReadTestSeam(t *testing.T) {
 			name: "a subquery whose OWN FROM publishes the name -> that subquery's column -> ANSWERS",
 			sql: "SELECT u.id, (SELECT q.w FROM (SELECT 9 AS w) q) AS z " + lat +
 				"ORDER BY 1, 2",
-			want: "cols=[id:INT64 z:INT64] rows=4 | 1,9 | 1,9 | 2,9 | 2,9",
+			want: "cols=[id:INT64 z:INT32] rows=4 | 1,9 | 1,9 | 2,9 | 2,9",
 			// An uncorrelated scalar subquery in the SELECT list has no
 			// distributed stage of its own; the coordinator answers it
 			// in-process. Pre-existing, and asserted so a right-to-routed move

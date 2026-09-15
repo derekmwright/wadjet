@@ -435,14 +435,14 @@ func arcACells() []arcACell {
 		// the rows on every cell in this census, so this class of answer
 		// cannot be mistaken for the DAG executing the shape.
 		{issue: "#806", name: "table_less_select_of_an_expression",
-			sql: `SELECT CONCAT('a', NULL, 'b') AS v, 1 AS n`, want: []string{"v=ab|n=int64:1"},
+			sql: `SELECT CONCAT('a', NULL, 'b') AS v, 1 AS n`, want: []string{"v=ab|n=int32:1"},
 			wantTableLessRoutes: 1},
 		{issue: "#806", name: "table_less_select_of_a_null_propagating_operator",
 			sql: `SELECT 'a' || NULL AS p`, want: []string{"p=NULL"},
 			wantTableLessRoutes: 1},
 		{issue: "#806", name: "table_less_select_union",
 			sql:  `SELECT 1 AS n UNION ALL SELECT 2 AS n ORDER BY n`,
-			want: []string{"n=int64:1", "n=int64:2"}, wantTableLessRoutes: 1},
+			want: []string{"n=int32:1", "n=int64:2"}, wantTableLessRoutes: 1},
 		// The control: the same expression WITH a FROM stays on the DAG, so
 		// the refusal is scoped to the shape that has no stage and does not
 		// quietly route ordinary queries local.

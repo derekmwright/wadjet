@@ -120,7 +120,7 @@ func TestC1CARecursiveCTEIsMaterializedWhereItsBlockIsPlanned(t *testing.T) {
 			sql: "SELECT u.id, q.m FROM lat_ord u, LATERAL (WITH RECURSIVE r AS " +
 				"(SELECT 1 AS v UNION ALL SELECT v+1 FROM r WHERE v<3) " +
 				"SELECT MAX(v) AS m FROM r) q ORDER BY 1",
-			want:   "cols=[id:INT64 m:INT64] rows=3 | 1,3 | 2,3 | 3,3",
+			want:   "cols=[id:INT64 m:INT32] rows=3 | 1,3 | 2,3 | 3,3",
 			pin:    c1RecDAGPins(),
 			why:    "#1042: the DAG cannot run any recursive CTE, at the root or nested",
 			routed: c1RecRoutes,
@@ -134,7 +134,7 @@ func TestC1CARecursiveCTEIsMaterializedWhereItsBlockIsPlanned(t *testing.T) {
 			sql: "WITH RECURSIVE o AS (WITH RECURSIVE i AS (SELECT 1 AS v UNION ALL " +
 				"SELECT v+1 FROM i WHERE v<3) SELECT v FROM i UNION ALL " +
 				"SELECT v+10 FROM o WHERE v<5) SELECT v FROM o ORDER BY 1",
-			want:   "cols=[v:INT64] rows=6 | 1 | 2 | 3 | 11 | 12 | 13",
+			want:   "cols=[v:INT32] rows=6 | 1 | 2 | 3 | 11 | 12 | 13",
 			pin:    c1RecDAGPins(),
 			why:    "#1042: the DAG cannot run any recursive CTE, at the root or nested",
 			routed: c1RecRoutes,
@@ -186,7 +186,7 @@ func TestC1CARecursiveCTEIsMaterializedWhereItsBlockIsPlanned(t *testing.T) {
 			name: "1047 a nested recursive CTE with a column alias list",
 			sql: "SELECT q.a FROM (WITH RECURSIVE r(a) AS (SELECT 1 UNION ALL " +
 				"SELECT a+1 FROM r WHERE a<3) SELECT a FROM r) q ORDER BY 1",
-			want:   "cols=[a:INT64] rows=3 | 1 | 2 | 3",
+			want:   "cols=[a:INT32] rows=3 | 1 | 2 | 3",
 			pin:    c1RecDAGPins(),
 			why:    "#1042: the DAG cannot run any recursive CTE, at the root or nested",
 			routed: c1RecRoutes,

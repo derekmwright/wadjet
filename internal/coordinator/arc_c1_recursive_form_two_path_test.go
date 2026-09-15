@@ -112,7 +112,7 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 			// all, and PostgreSQL answers it. It must keep answering.
 			name:   "control: UNION without ALL and no self-reference answers",
 			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION SELECT 2) SELECT v FROM r ORDER BY 1",
-			want:   "cols=[v:INT64] rows=2 | 1 | 2",
+			want:   "cols=[v:INT32] rows=2 | 1 | 2",
 			pin:    c1RecDAGPins(),
 			why:    "#1042 fires first on the DAG arms",
 			routed: c1RecRoutes,
@@ -123,7 +123,7 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 			// that arm until `maxRecursiveIterations` and answered 1001.
 			name: "a UNION ALL arm that names no CTE is not a recursive term",
 			sql:  "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT 1) SELECT v FROM r ORDER BY 1",
-			want: "cols=[v:INT64] rows=2 | 1 | 1",
+			want: "cols=[v:INT32] rows=2 | 1 | 1",
 			pin:  c1RecDAGPins(),
 			why: "PostgreSQL 17.11: two rows; the fixed-point loop answered 1001 before the form test. " +
 				"#1042 fires first on the DAG arms",
@@ -135,7 +135,7 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 			// break and does not.
 			name:   "control: UNION ALL recursion at the root",
 			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			want:   "cols=[v:INT32] rows=3 | 1 | 2 | 3",
 			pin:    c1RecDAGPins(),
 			why:    "#1042: the DAG cannot run any recursive CTE",
 			routed: c1RecRoutes,
@@ -143,7 +143,7 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 		{
 			name:   "control: UNION ALL recursion nested in a derived table",
 			sql:    "SELECT q.v FROM (WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r) q ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			want:   "cols=[v:INT32] rows=3 | 1 | 2 | 3",
 			pin:    c1RecDAGPins(),
 			why:    "#1042: the DAG cannot run any recursive CTE",
 			routed: c1RecRoutes,
@@ -160,7 +160,7 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 		{
 			name:   "multi-arm: 2 arms, self-reference LAST, UNION ALL",
 			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			want:   "cols=[v:INT32] rows=3 | 1 | 2 | 3",
 			pin:    c1RecDAGPins(),
 			why:    "#1042 fires first on the DAG arms",
 			routed: c1RecRoutes,
@@ -176,7 +176,7 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 		{
 			name:   "multi-arm: 3 arms, self-reference LAST, UNION ALL",
 			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT 2 UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
-			want:   "cols=[v:INT64] rows=5 | 1 | 2 | 2 | 3 | 3",
+			want:   "cols=[v:INT32] rows=5 | 1 | 2 | 2 | 3 | 3",
 			pin:    c1RecDAGPins(),
 			why:    "the text split answered 1002 rows — one, then 1001 NULLs; #1042 fires first on the DAG arms",
 			routed: c1RecRoutes,
@@ -200,7 +200,7 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 		{
 			name:   "multi-arm: 3 arms, NO self-reference, UNION ALL",
 			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT 2 UNION ALL SELECT 3) SELECT v FROM r ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			want:   "cols=[v:INT32] rows=3 | 1 | 2 | 3",
 			pin:    c1RecDAGPins(),
 			why:    "#1042 fires first on the DAG arms",
 			routed: c1RecRoutes,
@@ -208,7 +208,7 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 		{
 			name:   "multi-arm: 4 arms, self-reference LAST, UNION ALL",
 			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
-			want:   "cols=[v:INT64] rows=6 | 1 | 2 | 2 | 3 | 3 | 3",
+			want:   "cols=[v:INT32] rows=6 | 1 | 2 | 2 | 3 | 3 | 3",
 			pin:    c1RecDAGPins(),
 			why:    "#1042 fires first on the DAG arms",
 			routed: c1RecRoutes,
@@ -264,7 +264,7 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 		{
 			name:   "multi-arm: 3 arms, UNION then UNION ALL, self-reference LAST",
 			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION SELECT 2 UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
-			want:   "cols=[v:INT64] rows=5 | 1 | 2 | 2 | 3 | 3",
+			want:   "cols=[v:INT32] rows=5 | 1 | 2 | 2 | 3 | 3",
 			pin:    c1RecDAGPins(),
 			why:    "the TOP operator is UNION ALL, so PostgreSQL keeps duplicates; #1042 fires first on the DAG arms",
 			routed: c1RecRoutes,
@@ -279,7 +279,7 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 		{
 			name:   "lexical split: the letters `unionall` in an identifier after the last operator",
 			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT v+1 AS unionall FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			want:   "cols=[v:INT32] rows=3 | 1 | 2 | 3",
 			pin:    c1RecDAGPins(),
 			why:    "a hand-rolled text scan matched the letters and split there, so the halves disagreed with the parse and the body was refused 42P19 where both bases answer (round-3 review, B1); #1042 fires first on the DAG arms",
 			routed: c1RecRoutes,
@@ -287,7 +287,7 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 		{
 			name:   "lexical split: a comment naming UNION ALL after the last operator",
 			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT v+1 FROM r WHERE v<3 /* UNION ALL */) SELECT v FROM r ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			want:   "cols=[v:INT32] rows=3 | 1 | 2 | 3",
 			pin:    c1RecDAGPins(),
 			why:    "the scan did not skip comments; #1042 fires first on the DAG arms",
 			routed: c1RecRoutes,
@@ -295,7 +295,7 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 		{
 			name:   "lexical split: a string literal 'UNION ALL' in the recursive term",
 			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT v+1 FROM r WHERE v<3 AND 'UNION ALL' <> 'z') SELECT v FROM r ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			want:   "cols=[v:INT32] rows=3 | 1 | 2 | 3",
 			pin:    c1RecDAGPins(),
 			why:    "#1042 fires first on the DAG arms",
 			routed: c1RecRoutes,
@@ -303,7 +303,7 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 		{
 			name:   "lexical split: a delimited identifier \"union all\" in the recursive term",
 			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT v+1 AS \"union all\" FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			want:   "cols=[v:INT32] rows=3 | 1 | 2 | 3",
 			pin:    c1RecDAGPins(),
 			why:    "#1042 fires first on the DAG arms",
 			routed: c1RecRoutes,
@@ -311,7 +311,7 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 		{
 			name:   "lexical split: control: the same letters BEFORE the operator",
 			sql:    "WITH RECURSIVE r AS (SELECT 1 AS unionall, 1 AS v UNION ALL SELECT v+1, v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
-			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
+			want:   "cols=[v:INT32] rows=3 | 1 | 2 | 3",
 			pin:    c1RecDAGPins(),
 			why:    "#1042 fires first on the DAG arms",
 			routed: c1RecRoutes,
@@ -326,7 +326,7 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 		{
 			name:   "parenthesised arm: a parenthesised arm after UNION",
 			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION (SELECT 2) UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
-			want:   "cols=[v:INT64] rows=5 | 1 | 2 | 2 | 3 | 3",
+			want:   "cols=[v:INT32] rows=5 | 1 | 2 | 2 | 3 | 3",
 			pin:    c1RecDAGPins(),
 			why:    "#1042 fires first on the DAG arms",
 			routed: c1RecRoutes,
@@ -342,7 +342,7 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 		{
 			name:   "parenthesised arm: a parenthesised arm holding its own UNION ALL",
 			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION (SELECT 2 UNION ALL SELECT 9) UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
-			want:   "cols=[v:INT64] rows=6 | 1 | 2 | 2 | 3 | 3 | 9",
+			want:   "cols=[v:INT32] rows=6 | 1 | 2 | 2 | 3 | 3 | 9",
 			pin:    c1RecDAGPins(),
 			why:    "#1042 fires first on the DAG arms",
 			routed: c1RecRoutes,
@@ -350,7 +350,7 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 		{
 			name:   "parenthesised arm: a doubly parenthesised arm",
 			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ((SELECT 2)) UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
-			want:   "cols=[v:INT64] rows=5 | 1 | 2 | 2 | 3 | 3",
+			want:   "cols=[v:INT32] rows=5 | 1 | 2 | 2 | 3 | 3",
 			pin:    c1RecDAGPins(),
 			why:    "#1042 fires first on the DAG arms",
 			routed: c1RecRoutes,
@@ -358,7 +358,7 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 		{
 			name:   "parenthesised arm: two parenthesised arms",
 			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION (SELECT 2) UNION (SELECT 3) UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
-			want:   "cols=[v:INT64] rows=6 | 1 | 2 | 2 | 3 | 3 | 3",
+			want:   "cols=[v:INT32] rows=6 | 1 | 2 | 2 | 3 | 3 | 3",
 			pin:    c1RecDAGPins(),
 			why:    "#1042 fires first on the DAG arms",
 			routed: c1RecRoutes,
@@ -366,7 +366,7 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 		{
 			name:   "parenthesised arm: control: a parenthesised arm after UNION ALL",
 			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL (SELECT 2) UNION ALL SELECT v+1 FROM r WHERE v<3) SELECT v FROM r ORDER BY 1",
-			want:   "cols=[v:INT64] rows=5 | 1 | 2 | 2 | 3 | 3",
+			want:   "cols=[v:INT32] rows=5 | 1 | 2 | 2 | 3 | 3",
 			pin:    c1RecDAGPins(),
 			why:    "#1042 fires first on the DAG arms",
 			routed: c1RecRoutes,

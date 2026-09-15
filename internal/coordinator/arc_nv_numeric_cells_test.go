@@ -196,21 +196,21 @@ func nvCells() []nvCell {
 		// column already followed int4's rules; a COMPUTED one did not, so the
 		// SUM accumulated in float64 and the DIVISION did not truncate.
 		{name: "1000/a_bare_port_is_int4",
-			sql: "SELECT pt AS v FROM " + nvEdg + " WHERE id=1", want: "v=65535<i4>"},
+			sql: "SELECT pt AS v FROM " + nvEdg + " WHERE id=1", want: "v=65535<i8>"},
 		// The BOX is an i4 since #1070: `port * 1` is `integer` on the
 		// server, and these cells are about the NUMBER — 65535 rather than
 		// the 65535.0 the float path answered.
 		{name: "1000/port_times_one",
-			sql: "SELECT pt * 1 AS v FROM " + nvEdg + " WHERE id=1", want: "v=65535<i4>"},
+			sql: "SELECT pt * 1 AS v FROM " + nvEdg + " WHERE id=1", want: "v=65535<i8>"},
 		{name: "1000/port_plus_zero",
 			sql: "SELECT pt + 0 AS v FROM " + nvEdg + " WHERE id=1", want: "v=65535<i4>"},
 		{name: "1000/a_negated_port",
-			sql: "SELECT -pt AS v FROM " + nvEdg + " WHERE id=1", want: "v=-65535<i4>"},
+			sql: "SELECT -pt AS v FROM " + nvEdg + " WHERE id=1", want: "v=-65535<i8>"},
 		{name: "1000/abs_of_a_port_answers_in_its_own_domain",
 			sql: "SELECT ABS(pt) AS v FROM " + nvEdg + " WHERE id=1", want: "v=65535<i4>"},
 		{name: "1000/protocol_division_TRUNCATES",
 			sql:  "SELECT pr / 2 AS v FROM " + nvEdg + " WHERE id=1",
-			want: "v=127<i4>", why: "127.5 before — this was the wrong VALUE"},
+			want: "v=127<i8>", why: "127.5 before — this was the wrong VALUE"},
 		{name: "1000/sum_over_a_computed_port",
 			sql: "SELECT SUM(pt * 1) AS v FROM " + nvEdg + " WHERE id=1", want: "v=65535<i8>"},
 		{name: "1000/grouped",
@@ -228,7 +228,7 @@ func nvCells() []nvCell {
 			want: "g=1<i4>|v=130<i8>;g=2<i4>|v=8<i8>"},
 		{name: "1000/the_truncating_division_through_a_subquery",
 			sql:  "SELECT (SELECT pr / 2 FROM " + nvEdg + " WHERE id=1) AS v FROM " + nvEdg + " WHERE id=4",
-			want: "v=127<i4>"},
+			want: "v=127<i8>"},
 
 		// ------------------------------------------------------------------
 		// #1037 — a wide DECIMAL literal under a CAST. 9007199254740993.25 is

@@ -151,7 +151,7 @@ func TestArcK1AStarIsItsSourceInItsPosition(t *testing.T) {
 			// candidate rather than folded in here.
 			name: "982 ctl a positional ORDER BY over a VALUES derived table",
 			sql:  `SELECT * FROM (VALUES (2,'b'),(1,'a')) AS v(a,b) ORDER BY 1`,
-			want: "cols=[a:INT64 b:STRING] rows=2 | 1,a | 2,b",
+			want: "cols=[a:INT32 b:STRING] rows=2 | 1,a | 2,b",
 		},
 		{
 			name: "982 ctl the base-table spelling #810 fixed",

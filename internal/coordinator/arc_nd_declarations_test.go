@@ -48,7 +48,13 @@ type ndCell struct {
 	want      string
 	// pin overrides want for the named arm, with the mechanism in why.
 	pin map[string]string
-	why string
+	// digits rounds this cell's float renderings to that many significant
+	// figures, borrowing arc NV's own knob. A cell sets it when its answer is
+	// a float whose LAST digits move with the ORDER the rows reach the
+	// accumulator — ADR-0013's nondeterminism class 9 — and the cell is about
+	// the DECLARATION rather than about those digits.
+	digits int
+	why    string
 }
 
 func TestNDDeclarationsMatchPostgres(t *testing.T) {
@@ -85,7 +91,9 @@ func TestNDDeclarationsMatchPostgres(t *testing.T) {
 	for _, tc := range ndCells() {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {
+				nvDigits = tc.digits
 				got, err := arm.run(tc.sql)
+				nvDigits = 0
 				if err != nil {
 					got = "ERR " + ndFirstLine(err.Error())
 				}
