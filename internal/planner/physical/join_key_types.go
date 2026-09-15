@@ -5,6 +5,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -68,7 +69,7 @@ func joinKeyNumeric(t parquet.TypeID) bool {
 // cteColTypes answers what a MATERIALIZED CTE's columns are called and what
 // they carry, or false for a name the caller cannot resolve. nil is a caller
 // with no cache to ask — every test, and any site that has no Planner.
-type cteColTypes func(name string) (map[string]parquet.TypeID, bool)
+type cteColTypes func(ref *logical.Node) (map[string]parquet.TypeID, bool)
 
 func resolveJoinKeyTypes(node *logical.Node, leftKeys, rightKeys []string, cte cteColTypes) []parquet.TypeID {
 	if node == nil || len(node.Children) < 2 ||
@@ -181,8 +182,8 @@ func joinSideEmittedTypes(n *logical.Node, cte cteColTypes) map[string]parquet.T
 	// The cache is the authority because it holds the schema the rows were
 	// actually materialized at. A name it does not hold declines, which is
 	// exactly what this function did before.
-	if n.Type == logical.NodeScan && n.CTEName != "" && cte != nil {
-		if types, ok := cte(n.CTEName); ok {
+	if n.Type == logical.NodeScan && cte != nil && (n.CTEName != "" || n.RecursiveCTE != nil) {
+		if types, ok := cte(n); ok {
 			return types
 		}
 	}
@@ -266,17 +267,84 @@ func joinSideSourceTypes(n *logical.Node) map[string]parquet.TypeID {
 // MATERIALIZED at, keyed by lower-cased column name. A name the cache does
 // not hold — a recursive reference this block has not materialized yet —
 // declines, and the key pair stays unresolved exactly as it was.
-func (p *Planner) cteKeyColTypes(name string) (map[string]parquet.TypeID, bool) {
-	if p == nil || p.cteCache == nil {
+func (p *Planner) cteKeyColTypes(ref *logical.Node) (map[string]parquet.TypeID, bool) {
+	if p == nil || ref == nil {
 		return nil, false
 	}
-	mat, ok := p.cteCache[name]
-	if !ok || mat == nil || len(mat.schema) == 0 {
+	if mat, ok := p.cteCache[ref.CTEName]; ok && mat != nil && len(mat.schema) > 0 {
+		out := make(map[string]parquet.TypeID, len(mat.schema))
+		for _, c := range mat.schema {
+			out[strings.ToLower(c.Name)] = c.Type
+		}
+		return out, true
+	}
+	// The definition ON THE REFERENCE first: a RECURSIVE CTE declared inside a
+	// derived table, another CTE's body or a LATERAL is carried there and is
+	// in no enclosing WITH list (#1047).
+	if ref.RecursiveCTE != nil {
+		if types, ok := p.cteBodyColTypes(*ref.RecursiveCTE); ok {
+			return types, true
+		}
+	}
+	return p.cteDefColTypes(ref.CTEName)
+}
+
+// cteDefColTypes types a CTE that is NOT in the cache, from its DEFINITION.
+//
+// A RECURSIVE CTE declared inside the block being planned is materialized when
+// that block is BUILT (buildNestedRecursiveCTE, #1047), and the join's key
+// types are resolved before either side is built — the two sides are prepared
+// concurrently, so the resolution cannot simply be moved later. The definition
+// is available the whole time, and typing it is the same walk a scalar
+// subquery's declaration takes.
+//
+// Planning the body does not recurse: the logical builder leaves a RECURSIVE
+// self-reference as a tagged Scan rather than expanding it, so the body's own
+// reference types nothing and the ANCHOR arm decides — which is PostgreSQL's
+// rule for a recursive union's column types.
+//
+// Declines on anything it cannot plan, which leaves the pair unresolved
+// exactly as it was.
+func (p *Planner) cteDefColTypes(name string) (types map[string]parquet.TypeID, ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			types, ok = nil, false
+		}
+	}()
+	lc := strings.ToLower(strings.TrimSpace(name))
+	for i := range p.ctes {
+		if strings.ToLower(p.ctes[i].Name) == lc {
+			return p.cteBodyColTypes(p.ctes[i])
+		}
+	}
+	return nil, false
+}
+
+// cteBodyColTypes is cteDefColTypes over one definition, so the enclosing-WITH
+// lookup and the on-the-reference one type the same way.
+func (p *Planner) cteBodyColTypes(def plansql.CTEDef) (types map[string]parquet.TypeID, ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			types, ok = nil, false
+		}
+	}()
+	plan := p.subqueryLogicalPlan(def.SQL)
+	if plan == nil {
 		return nil, false
 	}
-	out := make(map[string]parquet.TypeID, len(mat.schema))
-	for _, c := range mat.schema {
-		out[strings.ToLower(c.Name)] = c.Type
+	schema := declaredOutputSchema(plan, p.subqueryOutputColumn)
+	if len(schema) == 0 {
+		return nil, false
+	}
+	out := make(map[string]parquet.TypeID, len(schema))
+	for j, c := range schema {
+		// The definition's own column-alias list renames the body's output,
+		// and a join key names the RENAMED column.
+		n := c.Name
+		if j < len(def.Columns) && def.Columns[j] != "" {
+			n = def.Columns[j]
+		}
+		out[strings.ToLower(n)] = c.Type
 	}
 	return out, true
 }
