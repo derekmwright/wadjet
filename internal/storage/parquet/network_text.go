@@ -325,38 +325,38 @@ func scanHexFields(s string, widths []int, seps string) ([]int64, bool) {
 // offset past it, and whether a conversion happened at all. A value past the
 // carrier saturates NEGATIVE so the caller's range check refuses it rather
 // than wrapping into a plausible octet.
+//
+// The WIDTH counts every character the conversion consumes — the sign and the
+// prefix included — which is C's rule and not an implementation detail: with
+// the width counting digits only, `'08-002b010203'` matched the `%2x`x6
+// pattern (`08`, `-0`+an extra digit, …) and this engine answered a MAC for
+// text PostgreSQL refuses, at six comparison sites on three arms
+// (coordinator.TestANetworkLiteralHasOneDispositionAtEverySite, the #579 pin).
 func scanHex(s string, i, width int) (int64, int, bool) {
 	for i < len(s) && isSpaceByte(s[i]) {
 		i++
 	}
+	start := i
+	room := func(n int) bool { return width == 0 || i-start+n <= width }
 	neg := false
-	if i < len(s) && (s[i] == '+' || s[i] == '-') {
+	if room(1) && i < len(s) && (s[i] == '+' || s[i] == '-') {
 		neg = s[i] == '-'
 		i++
 	}
-	// The 0x prefix costs two of the width's characters, as it does in C.
-	if width == 0 || width > 2 {
-		if i+1 < len(s) && s[i] == '0' && (s[i+1] == 'x' || s[i+1] == 'X') &&
-			i+2 < len(s) && isHexByte(s[i+2]) {
-			i += 2
-			if width > 0 {
-				width -= 2
-			}
-		}
+	if room(3) && i+2 < len(s) && s[i] == '0' && (s[i+1] == 'x' || s[i+1] == 'X') &&
+		isHexByte(s[i+2]) {
+		i += 2
 	}
-	start := i
+	digits := i
 	var v int64
-	for i < len(s) && isHexByte(s[i]) {
-		if width > 0 && i-start == width {
-			break
-		}
+	for i < len(s) && isHexByte(s[i]) && room(1) {
 		v = v*16 + int64(hexValue(s[i]))
 		if v > 1<<40 {
 			v = 1 << 40 // far past any octet; the caller answers 22003
 		}
 		i++
 	}
-	if i == start {
+	if i == digits {
 		return 0, i, false
 	}
 	if neg {

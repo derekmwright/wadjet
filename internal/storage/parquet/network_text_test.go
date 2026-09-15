@@ -4,7 +4,13 @@ import "testing"
 
 // The accept-sets below are MEASURED on PostgreSQL 17.11 (`postgres:17-alpine`,
 // initdb --locale=C), one `SELECT <literal>::<type>::text` per row, not
-// recalled from documentation. Each table is the whole answer for its type:
+// recalled from documentation. The two grammars with real combinatorics were
+// also compared over a GENERATED DOMAIN rather than samples: every single- and
+// double-separator split of the twelve MAC digits with each of `:`, `-` and
+// `.`, plus the sign/prefix/whitespace forms (236 cells), and every single- and
+// double-hyphen placement in a UUID's 32 digits, braced and upper-cased (1795
+// cells). Zero divergences from the server at the tip; the rows here are the
+// boundaries that domain is built around. Each table is the whole answer for its type:
 // what the server takes, what it canonicalizes the value to, and what it
 // refuses with which SQLSTATE class. They are the one grammar every boundary
 // reads (#1092, #627, #986).
@@ -56,6 +62,15 @@ func TestMACTextGrammarIsPostgresMacaddr(t *testing.T) {
 		{"0800.2b01-0203", "", NetTextSyntax},
 		{"08002b.010203", "", NetTextSyntax},
 		{"08 :00:2b:01:02:03", "", NetTextSyntax},
+		// The WIDTH of a `%2x` conversion counts the SIGN it consumes, so
+		// this one matches no pattern: `%2x`x6 reads `08`, `-0`, `02`, `b0`,
+		// `10`, `20` and leaves a digit behind. With the width counting
+		// digits only it matched, and this engine answered a MAC at six
+		// comparison sites on three arms for text the server refuses
+		// (coordinator.TestANetworkLiteralHasOneDispositionAtEverySite).
+		{"08-002b010203", "", NetTextSyntax},
+		{"0800-2b010203", "", NetTextSyntax},
+		{"-08002b010203", "", NetTextSyntax},
 		// Too few, too many, garbage, trailing junk.
 		{"08:00:2b:01:02", "", NetTextSyntax},
 		{"08:00:2b:01:02:03:04", "", NetTextSyntax},
