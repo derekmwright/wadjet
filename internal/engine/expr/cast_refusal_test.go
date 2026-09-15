@@ -2,6 +2,7 @@ package expr
 
 import (
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -120,22 +121,19 @@ func TestCastTextToFloatReadsOrRefuses(t *testing.T) {
 	}
 }
 
-// TestCastToANetworkTypeStillPassesThrough is a DEFERRAL, pinned.
+// TestCastToANetworkTypeParsesItsOperand replaces the pin
+// TestCastToANetworkTypeStillPassesThrough, which recorded #839's deferred
+// half: `CAST('abc' AS IPV4|IPV6|CIDR|MACADDR)` answered "abc" under a network
+// declaration because Cast.Eval had no arm for those types and reached
+// `default: return v`. The pin's own condition for deleting it was "when the
+// network types have ONE text accept-set, shared by ingest, the comparison
+// kernels and this cast" — parquet.NetworkTextValue is that accept-set and all
+// three read it, so the pin is gone and its inverse is asserted (#1092).
 //
-// `CAST('abc' AS IPV4|IPV6|CIDR|MACADDR)` returns the text under a STRING
-// declaration; PostgreSQL raises 22P02 for its inet/cidr/macaddr equivalents.
-// The fix is NOT a validator written inside Cast.Eval: the engine has no
-// single network-text accept-set to validate against — the ingest boundary
-// type-checks the Go box and not the text, and #627 records that the literal
-// accept-set already diverges from PostgreSQL's abbreviated forms. Minting a
-// second accept-set here would give one engine two answers to "is this an
-// address", which is the failure `parquet.ParseDateDays` exists to prevent for
-// dates.
-//
-// TODO(#839): delete this when the network types have ONE text accept-set,
-// shared by ingest, the comparison kernels and this cast. This pin fails the
-// day the cast starts refusing, which is the signal to record the accept-set
-// rather than discover it.
+// The result is the type's own TEXT, which is what a column of that type boxes
+// as, so an abbreviated, upper-case or alternately-spelled literal comes back
+// canonical. CIDR is the exception and deliberately so: its storage IS its
+// text, so the cast keeps the spelling the writer would store.
 // TestArrayLengthIsDimensionAware is #637: `array_length` was registered as an
 // alias of the one-argument `cardinality`, so it answered 0 for an empty array
 // where PostgreSQL answers NULL and IGNORED its dimension argument entirely.
@@ -413,21 +411,84 @@ func TestIntegerConversionsRaiseInsteadOfWrapping(t *testing.T) {
 	}
 }
 
-func TestCastToANetworkTypeStillPassesThrough(t *testing.T) {
+func TestCastToANetworkTypeParsesItsOperand(t *testing.T) {
 	b := castRefusalBatch(t)
-	for _, dest := range []string{"ipv4", "ipv6", "cidr", "macaddr", "mac"} {
-		got := func() (v any) {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Fatalf("CAST('abc' AS %s) now raises %v — #839's network half has moved. "+
-						"Record the accept-set it validates against and check it is the SAME one "+
-						"ingest and the comparison kernels use, then delete this pin.", dest, r)
-				}
-			}()
-			return (&Cast{Operand: &Lit{Val: "abc"}, DestType: dest}).Eval(b, 0)
-		}()
-		if got != "abc" {
-			t.Errorf("CAST('abc' AS %s) = %v, this pin records %q", dest, got, "abc")
+	for _, c := range []struct {
+		dest string
+		in   string
+		want string
+	}{
+		{"ipv4", "010.1.2.3", "10.1.2.3"},
+		{"ipv4", "10.0.0.1/32", "10.0.0.1"},
+		{"ipv6", "2001:DB8::1", "2001:db8::1"},
+		{"ipv6", "::ffff:10.0.0.1", "::ffff:10.0.0.1"},
+		{"cidr", "192.168/16", "192.168/16"},
+		{"cidr", "10.0.0.1", "10.0.0.1"},
+		{"macaddr", "AA-BB-CC-DD-EE-FF", "aa:bb:cc:dd:ee:ff"},
+		{"mac", "aabbccddeeff", "aa:bb:cc:dd:ee:ff"},
+		{"mac", "a:b:c:d:e:f", "0a:0b:0c:0d:0e:0f"},
+		{"uuid", "{A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11}", "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"},
+		{"uuid", "a0ee-bc99-9c0b-4ef8-bb6d-6bb9-bd38-0a11", "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"},
+	} {
+		t.Run(c.dest+"/"+c.in, func(t *testing.T) {
+			got, err := evalCastForTest(&Cast{Operand: &Lit{Val: c.in}, DestType: c.dest}, b)
+			if err != nil {
+				t.Fatalf("CAST(%q AS %s) refused: %v", c.in, c.dest, err)
+			}
+			if got != c.want {
+				t.Errorf("CAST(%q AS %s) = %#v, want %q", c.in, c.dest, got, c.want)
+			}
+		})
+	}
+	// Text that names no value of the type is 22P02 naming the text, at every
+	// destination — the cell the pin recorded as a pass-through.
+	for _, dest := range []string{"ipv4", "ipv6", "cidr", "macaddr", "mac", "uuid"} {
+		t.Run(dest+"/abc", func(t *testing.T) {
+			_, err := evalCastForTest(&Cast{Operand: &Lit{Val: "abc"}, DestType: dest}, b)
+			if err == nil {
+				t.Fatalf("CAST('abc' AS %s) answered; PostgreSQL 17.11 raises 22P02", dest)
+			}
+			if st := sqlerr.StateOf(err); st != "22P02" {
+				t.Errorf("SQLSTATE %q, want 22P02 (%v)", st, err)
+			}
+			if !strings.Contains(err.Error(), `"abc"`) {
+				t.Errorf("refusal %q does not name the text it refused", err)
+			}
+		})
+	}
+	// A PostgreSQL-valid literal naming a NETWORK is the OTHER answer and it is
+	// 0A000: the text is valid inet and this engine's bare-address type is the
+	// limit, not the grammar (ADR-0012 item 5).
+	for _, c := range []struct{ dest, in string }{{"ipv4", "10/8"}, {"ipv6", "2001:db8::1/64"}} {
+		t.Run(c.dest+"/"+c.in, func(t *testing.T) {
+			_, err := evalCastForTest(&Cast{Operand: &Lit{Val: c.in}, DestType: c.dest}, b)
+			if err == nil || sqlerr.StateOf(err) != "0A000" {
+				t.Errorf("CAST(%q AS %s) = %v, want 0A000", c.in, c.dest, err)
+			}
+		})
+	}
+}
+
+// TestCastToProtocolReadsTheIANAName is #986: a PROTOCOL's TEXT FORM is the
+// name `protocol_name()` prints, so a cast from text has to read it back and
+// `CAST(CAST(p AS TEXT) AS PROTOCOL)` round-trips. The NUMBER keeps int4's
+// domain and int4's refusal (#901, TestAnInt32DomainCastRefusesPastItsOwnRange).
+func TestCastToProtocolReadsTheIANAName(t *testing.T) {
+	b := castRefusalBatch(t)
+	for _, c := range []struct {
+		in   string
+		want int64
+	}{
+		{"udp", 17}, {"TCP", 6}, {"icmp", 1}, {"icmpv6", 58}, {"ipv6-icmp", 58},
+		{"sctp", 132}, {"6", 6}, {"17", 17},
+	} {
+		got, err := evalCastForTest(&Cast{Operand: &Lit{Val: c.in}, DestType: "protocol"}, b)
+		if err != nil || got != c.want {
+			t.Errorf("CAST(%q AS PROTOCOL) = %#v/%v, want %d", c.in, got, err, c.want)
 		}
+	}
+	if _, err := evalCastForTest(&Cast{Operand: &Lit{Val: "nosuchproto"}, DestType: "protocol"}, b); err == nil ||
+		sqlerr.StateOf(err) != "22P02" {
+		t.Errorf("CAST('nosuchproto' AS PROTOCOL) = %v, want 22P02", err)
 	}
 }

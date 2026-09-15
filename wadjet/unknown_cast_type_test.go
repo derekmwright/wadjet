@@ -114,6 +114,16 @@ func TestUnknownCastDestinationIsUndefinedObject(t *testing.T) {
 		{"date", `SELECT CAST('2011-02-02' AS DATE) AS v FROM ` + tbl + ` WHERE id = 1`, "2011-02-02"},
 		{"uuid", `SELECT CAST('123e4567-e89b-12d3-a456-426614174000' AS UUID) AS v FROM ` + tbl +
 			` WHERE id = 1`, "123e4567-e89b-12d3-a456-426614174000"},
+		// The four address types moved UP from the pass-through list below
+		// when #1092 gave them an arm: they now parse their operand with the
+		// type's own grammar and answer the type's own text, so a cast over
+		// a STRING column holding `s-000001` is 22P02 rather than that
+		// string handed back under a network declaration.
+		{"ipv4", `SELECT CAST('010.1.2.3' AS IPV4) AS v FROM ` + tbl + ` WHERE id = 1`, "10.1.2.3"},
+		{"ipv6", `SELECT CAST('2001:DB8::1' AS IPV6) AS v FROM ` + tbl + ` WHERE id = 1`, "2001:db8::1"},
+		{"cidr", `SELECT CAST('192.168/16' AS CIDR) AS v FROM ` + tbl + ` WHERE id = 1`, "192.168/16"},
+		{"mac", `SELECT CAST('AA-BB-CC-DD-EE-FF' AS MAC) AS v FROM ` + tbl + ` WHERE id = 1`,
+			"aa:bb:cc:dd:ee:ff"},
 	} {
 		t.Run("ctl_"+c.name, func(t *testing.T) {
 			res, err := db.Query(ctx, c.sql)
@@ -135,9 +145,6 @@ func TestUnknownCastDestinationIsUndefinedObject(t *testing.T) {
 		`SELECT CAST('12:34:56' AS time) AS v FROM ` + tbl + ` WHERE id = 1`,
 		`SELECT CAST('{"a":1}' AS json) AS v FROM ` + tbl + ` WHERE id = 1`,
 		`SELECT CAST('<a/>' AS xml) AS v FROM ` + tbl + ` WHERE id = 1`,
-		`SELECT CAST(c_str AS IPV4) AS v FROM ` + tbl + ` WHERE id = 1`,
-		`SELECT CAST(c_str AS CIDR) AS v FROM ` + tbl + ` WHERE id = 1`,
-		`SELECT CAST(c_str AS MAC) AS v FROM ` + tbl + ` WHERE id = 1`,
 		`SELECT CAST(c_i64 AS DURATION) AS v FROM ` + tbl + ` WHERE id = 1`,
 		`SELECT CAST(c_i64 AS INTERVAL) AS v FROM ` + tbl + ` WHERE id = 1`,
 		`SELECT CAST(c_str AS BYTES) AS v FROM ` + tbl + ` WHERE id = 1`,

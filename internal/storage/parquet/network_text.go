@@ -2,6 +2,7 @@ package parquet
 
 import (
 	"encoding/binary"
+	"math"
 	"net"
 	"strings"
 
@@ -91,6 +92,12 @@ func NetworkTextError(typ TypeID, s string, st NetTextStatus) error {
 	case NetTextOK:
 		return nil
 	case NetTextRange:
+		if typ == TypePort || typ == TypeProtocol {
+			// These two carry a BOUND, not an octet: the message is the one
+			// the INSERT VALUES door has always produced for the same value.
+			lo, hi := NetworkIntBounds(typ)
+			return sqlerr.New("22003", "%s value %s out of range [%d, %d]", typ, s, lo, hi)
+		}
 		return sqlerr.New("22003", "invalid octet value in %q value: %s",
 			NetworkTextTypeName(typ), sqlerr.Quote(s))
 	case NetTextPrefix:
@@ -420,23 +427,25 @@ func PgUUIDPton(s string) ([16]byte, NetTextStatus) {
 	return raw, NetTextOK
 }
 
-// FormatUUIDText renders 16 raw bytes as the canonical dashed lower-case text,
-// which is both PostgreSQL's uuid output and what a UUID column reads back as.
-func FormatUUIDText(raw []byte) (string, bool) {
-	if len(raw) != 16 {
-		return "", false
+// NetworkIntBounds is the RANGE a PORT or a PROTOCOL carries, in one place.
+// It was written out three times — the INSERT VALUES door, the assignment
+// converter and (not at all) the CAST — and the three disagreed: `'65536'` was
+// refused at one door and stored at another.
+func NetworkIntBounds(typ TypeID) (lo, hi int64) {
+	switch typ {
+	case TypePort:
+		return 0, 65535
+	case TypeProtocol:
+		return 0, 255
 	}
-	const hexDigits = "0123456789abcdef"
-	var b strings.Builder
-	b.Grow(36)
-	for i, c := range raw {
-		if i == 4 || i == 6 || i == 8 || i == 10 {
-			b.WriteByte('-')
-		}
-		b.WriteByte(hexDigits[c>>4])
-		b.WriteByte(hexDigits[c&0x0f])
-	}
-	return b.String(), true
+	return math.MinInt32, math.MaxInt32
+}
+
+// NetworkIntRangeError is that bound's refusal, in the wording all three doors
+// now share.
+func NetworkIntRangeError(typ TypeID, n int64) error {
+	lo, hi := NetworkIntBounds(typ)
+	return sqlerr.New("22003", "%s value %d out of range [%d, %d]", typ, n, lo, hi)
 }
 
 // PgPortText reads a PORT literal. The type's documented text form is a

@@ -57,6 +57,26 @@ func putIPv4(dst []byte, v uint32) int {
 	return n
 }
 
+// FormatIPv4, FormatMAC and FormatUUID are the exported renderings of the
+// three binary-backed network types, beside FormatIPv6 below. A CAST to one of
+// these types has to produce the SAME text its column produces — the box every
+// consumer above expects — and the renderers were unexported, which is how the
+// CAST came to hand its operand back unparsed instead (#1092).
+func FormatIPv4(v uint32) string { return formatIPv4(v) }
+
+// FormatMAC renders the lower 48 bits as PostgreSQL's macaddr output.
+func FormatMAC(v uint64) string { return formatMAC(v) }
+
+// FormatUUID renders 16 raw bytes as the canonical dashed lower-case text, and
+// the empty string for any other length — the same answer Vector.GetValue
+// gives for a UUID entry that is not 16 bytes.
+func FormatUUID(raw []byte) string {
+	if len(raw) != 16 {
+		return ""
+	}
+	return formatUUID(raw)
+}
+
 // FormatIPv6 renders 16 bytes using the FIRST longest zero-word run of length
 // >= 2 as ::. Use a trailing dotted quad only when that run starts at word 0
 // and spans six words, or five words with word 5 == 0xffff (#580).

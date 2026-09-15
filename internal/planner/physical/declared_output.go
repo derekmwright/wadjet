@@ -1711,6 +1711,21 @@ func inferCastType(typeName string) parquet.TypeID {
 			return parquet.TypePort
 		}
 		return parquet.TypeProtocol
+	case "IPV4", "IP":
+		return parquet.TypeIPv4
+	case "IPV6":
+		return parquet.TypeIPv6
+	case "CIDR":
+		return parquet.TypeCIDR
+	case "MAC", "MACADDR":
+		// The declaration half of #1092, the same shape as UUID's below. The
+		// four address types declared STRING because Cast.Eval implemented
+		// none of them; now that it parses, the projection has to allocate a
+		// column that can HOLD what the evaluator produces, or a
+		// `CREATE TABLE … AS SELECT CAST(col AS IPV4) FROM read_parquet(…)`
+		// mints a STRING column over a foreign file's string column — which
+		// is the whole reason the cast exists.
+		return parquet.TypeMAC
 	case "UUID":
 		// The declaration half of #839. `CAST(x AS UUID)` declared STRING, so
 		// the cast changed neither the value nor the type a client sees —
@@ -1719,8 +1734,8 @@ func inferCastType(typeName string) parquet.TypeID {
 		return parquet.TypeUUID
 	default:
 		// What is LEFT here is the destinations Cast.Eval does not implement
-		// and passes its operand through — the network types, the containers,
-		// DURATION, BYTES, VECTOR. A name that answers to NO type at all no
+		// and passes its operand through — the containers, DURATION, BYTES,
+		// VECTOR. A name that answers to NO type at all no
 		// longer reaches this arm: expr.KnownCastDest refuses it at compile
 		// with 42704, because declaring STRING for it made the two layers
 		// agree with each other about a column PostgreSQL says cannot be

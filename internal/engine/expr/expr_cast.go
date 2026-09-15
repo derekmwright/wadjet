@@ -76,6 +76,14 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		}
 		return ToFloat64(v)
 	}
+	// A NETWORK destination is resolved before the switch for the same reason
+	// a DECIMAL one is: its spellings (`macaddr`, `proto`, `ip`) are the
+	// type's, not this switch's, and until #1092 not one of them had a case
+	// label at all — every network cast reached `default: return v` and
+	// published its operand unparsed under a network declaration.
+	if nt, ok := networkCastType(dest); ok {
+		return castToNetwork(b, row, e.Operand, v, nt)
+	}
 	switch dest {
 	// Keep this label list and IsIntegerCastDest in step: that predicate is
 	// what tells the DAG's gather materialization to build an INT64 vector
@@ -90,6 +98,12 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	// signed 32-bit field (#901). castIntInRange carries their bound; PORT
 	// and PROTOCOL then reach a PORT/PROTOCOL vector, whose own int4 guard is
 	// the second net (batch.IntegerRangeError).
+	//
+	// A PROTOCOL destination reads ONE thing this arm's integer grammar does
+	// not: the IANA NAME, which is the type's own text form and what
+	// `protocol_name()` prints, so `CAST('udp' AS PROTOCOL)` is 17 and
+	// `CAST(CAST(p AS TEXT) AS PROTOCOL)` round-trips (#986). The NUMBER
+	// keeps int4's domain and int4's message.
 	case "int", "integer", "int4", "int32", "bigint", "int8", "signed", "smallint", "int2",
 		"port", "protocol":
 		// A string that does not read as a number is refused, not coerced to
@@ -112,6 +126,11 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 			return i
 		}
 		if s, ok := stringOperand(v); ok {
+			if dest == "protocol" {
+				if n, named := parquet.ProtocolNumberFromName(s); named {
+					return int64(n)
+				}
+			}
 			typ := "integer"
 			if dest == "bigint" || dest == "int8" || dest == "signed" {
 				typ = "bigint"
@@ -191,8 +210,6 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 			return f
 		}
 		return ToFloat64(v)
-	case "uuid":
-		return castToUUID(v)
 	case "bool", "boolean":
 		// The conversion the operand's DECLARATION selects, not the one its
 		// Go box suggests — see cast_bool.go for what each source type
