@@ -261,21 +261,8 @@ func PgInetPton(s string) (family byte, full []byte, ones int, ok bool) {
 // 22003 `invalid octet value`, a distinct answer from a syntax error.
 func PgMACPton(s string) ([6]byte, NetTextStatus) {
 	var out [6]byte
-	type pattern struct {
-		widths []int // 0 = unbounded (%x); n = at most n digits (%nx)
-		seps   string
-	}
-	// macaddr_in's patterns, in its own order.
-	for _, p := range []pattern{
-		{[]int{0, 0, 0, 0, 0, 0}, ":::::"},
-		{[]int{0, 0, 0, 0, 0, 0}, "-----"},
-		{[]int{2, 2, 2, 2, 2, 2}, "\x00\x00:\x00\x00"},
-		{[]int{2, 2, 2, 2, 2, 2}, "\x00\x00-\x00\x00"},
-		{[]int{2, 2, 2, 2, 2, 2}, "\x00.\x00.\x00"},
-		{[]int{2, 2, 2, 2, 2, 2}, "\x00-\x00-\x00"},
-		{[]int{2, 2, 2, 2, 2, 2}, "\x00\x00\x00\x00\x00"},
-	} {
-		vals, ok := scanHexFields(s, p.widths, p.seps)
+	for _, p := range macaddrPatterns {
+		vals, ok := scanHexFields(s, p.width, p.seps)
 		if !ok {
 			continue
 		}
@@ -290,26 +277,48 @@ func PgMACPton(s string) ([6]byte, NetTextStatus) {
 	return out, NetTextSyntax
 }
 
-// scanHexFields is one sscanf pattern: len(widths) hex conversions with the
-// literal separator seps[i] between conversion i and i+1 (NUL means no
-// separator), then optional trailing whitespace and nothing else. A width of 0
-// reads as many hex digits as are there; a width of n reads at most n.
-func scanHexFields(s string, widths []int, seps string) ([]int64, bool) {
-	vals := make([]int64, 0, len(widths))
+// macaddrPattern is one of macaddr_in's sscanf formats: six hex conversions of
+// the same width (0 = `%x`, unbounded; 2 = `%2x`) with the literal separator
+// seps[i] between conversion i and i+1, NUL meaning none.
+type macaddrPattern struct {
+	width int
+	seps  string
+}
+
+// macaddrPatterns is macaddr_in's list, in its own order. Package-level, not a
+// literal inside PgMACPton: this runs once per MAC value on the INGEST path,
+// and a slice literal there is eight allocations per value written.
+var macaddrPatterns = [...]macaddrPattern{
+	{0, ":::::"},
+	{0, "-----"},
+	{2, "\x00\x00:\x00\x00"},
+	{2, "\x00\x00-\x00\x00"},
+	{2, "\x00.\x00.\x00"},
+	{2, "\x00-\x00-\x00"},
+	{2, "\x00\x00\x00\x00\x00"},
+}
+
+// scanHexFields is one sscanf pattern: six hex conversions of the given width
+// with the literal separator seps[f] between conversion f and f+1 (NUL means
+// none), then optional trailing whitespace and nothing else. The result is an
+// ARRAY rather than a slice so a failed pattern attempt — six of the seven, for
+// most inputs — costs no allocation on the ingest path.
+func scanHexFields(s string, width int, seps string) ([6]int64, bool) {
+	var vals [6]int64
 	i := 0
-	for f, w := range widths {
-		v, next, ok := scanHex(s, i, w)
+	for f := 0; f < len(vals); f++ {
+		v, next, ok := scanHex(s, i, width)
 		if !ok {
-			return nil, false
+			return vals, false
 		}
-		vals = append(vals, v)
+		vals[f] = v
 		i = next
-		if f == len(widths)-1 {
+		if f == len(vals)-1 {
 			break
 		}
 		if sep := seps[f]; sep != 0 {
 			if i >= len(s) || s[i] != sep {
-				return nil, false
+				return vals, false
 			}
 			i++
 		}
