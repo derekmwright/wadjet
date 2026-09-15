@@ -2373,17 +2373,38 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `pgwire.TestPGWireDeclaresABarFieldTheSameWithRowsAndWithout` and
      `server.TestTheBarDeclaresTheSameThingOnBothWireDoors`.
 
-   - **`SMALLINT` and `INT2` declare `integer` (OID 23) where PostgreSQL
-     declares `smallint` (21).** (Added 2026-09-15, arc ND, #1070.) An
-     integer expression declares PostgreSQL's own WIDTH now — `i32 + 1`,
-     `-i32`, `CAST(x AS INT)`, `BITWISE_AND(i32, 6)`, `MIN(i32)` and a literal
-     that fits are `integer`; `i64 + 1` and a literal that does not are
-     `bigint` (ADR-0024 §2b) — and this is the one integer spelling that
-     cannot land on the server's type, because this engine has no int16
-     carrier. int4 is the NARROWEST declaration that holds what a SMALLINT
-     cast produces, and it is one step nearer than the `bigint` it was. The
-     value is unchanged: `castIntInRange` has enforced smallint's own range
-     since #901, so `CAST(99999 AS SMALLINT)` is `22003` on both engines.
+   - **int4 ARITHMETIC and an integer CAST declare `bigint` where PostgreSQL
+     declares `integer`, and the reason is a TWO-PATH one.** (Added
+     2026-09-15, arc ND, #1070; the divergence itself predates it.) A LITERAL
+     that fits int4 declares `integer` now, and so do `MIN`/`MAX` of an int4
+     (#951) and the bitwise family over int4 operands (#1018) — all measured
+     identical on the single arm, the spilled arm and all three DAG arms. The
+     other two sites were narrowed, measured, and put back:
+
+     ```
+     CAST(SUM(a) OVER () AS INTEGER)   single int4   dag int8   dag-shuffled int8
+     MAX(c_i32) + 0                    single int4   dag int8   dag-shuffled int8
+     ```
+
+     The stage arms type an expression written over a published SLOT — an
+     aggregate's `__agg_N`, a window's `__win_N` — from something coarser than
+     the single-process walk reads. One expression with two declarations is
+     #813 item 1's own class, and shipping it to close an OID gap would trade a
+     stated divergence from PostgreSQL for an unstated one between this
+     engine's own two paths. Two repairs were measured and neither closed it:
+     letting a known carrier beat an `intWidthUnknown` entry in
+     `declaredIntWidth`'s ColRef arm, and giving the three `colDecls` builders
+     above an aggregate's output projection the width their types imply
+     (#1029's proposal). ADR-0024 §2b carries the rule and the measurements.
+
+     `SMALLINT` and `INT2` ride with the CAST and have a second reason of their
+     own: this engine has no int16 carrier, so int4 would be the narrowest
+     declaration available even if the cast narrowed. The VALUE is unchanged
+     either way — `castIntInRange` has enforced each spelling's own range since
+     #901, so `CAST(99999 AS SMALLINT)` is `22003` on both engines.
+
+     ADR-0024's recorded int4 SUPERSET therefore stands: `2147483647 + 1`
+     answers 2147483648 here and raises there.
 
    - **A ROW column declares OID 25 (text), not `record` 2249.** (Added
      2026-09-08, arc A1; the divergence predates it.) `\gdesc` on

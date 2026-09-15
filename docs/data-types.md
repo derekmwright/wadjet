@@ -15,36 +15,25 @@ Wadjet supports a focused set of column types optimized for analytical workloads
 | `Decimal(p,s)` | `Int128` | 16 bytes | Up to 38 digits | Financial amounts, exact arithmetic |
 | `Bool` | `bool` | 1 bit | true/false | Flags, states |
 
-#### An integer expression keeps its PostgreSQL WIDTH
+#### What an integer expression declares
 
-An integer's declared type is its operands', exactly as PostgreSQL resolves it,
-and it is what a client binds on:
+| Expression | Declared | OID | PostgreSQL |
+|---|---|---|---|
+| `1`, `2147483647` | `integer` | 23 | same |
+| `2147483648`, `9007199254740993` | `bigint` | 20 | same |
+| `MIN(i32)`, `MAX(i32)` | `integer` | 23 | same |
+| `BITWISE_AND/OR/XOR/NOT` over `integer` operands | `integer` | 23 | same |
+| `SUM(i32)` | `bigint` | 20 | same |
+| `SUM(i64)`, `AVG(i32)`, `AVG(i64)` | `numeric` | 1700 | same |
+| `i32 + 1`, `-i32`, `i32 * 3`, `i32 / 2` | `bigint` | 20 | `integer` |
+| `CAST(x AS INT)`, `CAST(x AS SMALLINT)` | `bigint` | 20 | `integer` / `smallint` |
+| `i32 << 2` | `bigint` | 20 | `integer`, and MODULAR |
 
-| Expression | Declared | OID |
-|---|---|---|
-| `i32 + 1`, `-i32`, `i32 * 3`, `i32 / 2`, `i32 % 2` | `integer` | 23 |
-| `i32 + i64`, `i64 + 1` | `bigint` | 20 |
-| `1`, `2147483647` | `integer` | 23 |
-| `2147483648`, `9007199254740993` | `bigint` | 20 |
-| `CAST(x AS INT)`, `CAST(x AS SMALLINT)` | `integer` | 23 |
-| `CAST(x AS BIGINT)` | `bigint` | 20 |
-| `BITWISE_AND/OR/XOR/NOT` over int4 operands | `integer` | 23 |
-| `MIN(i32)`, `MAX(i32)` | `integer` | 23 |
-| `SUM(i32)` | `bigint` | 20 |
-| `SUM(i64)`, `AVG(i32)`, `AVG(i64)` | `numeric` | 1700 |
-
-**An int4 result that does not fit an int4 is `22003 integer out of range`, the
-same error PostgreSQL gives.** `2147483647 + 1` is an error rather than
-2147483648: the declaration and the value are one answer, and an engine that
-declared `integer` while answering a bigint would be telling a client something
-untrue. Where the width cannot be PROVEN — an operand nothing declares — the
-expression stays `bigint`, because guessing narrow is how an exact total
-becomes a wrapped one.
-
-`SMALLINT` and `INT2` declare `integer` (23) where PostgreSQL declares
-`smallint` (21): this engine has no int16 carrier. That is in ADR-0012's
-divergence list, and so are the SHIFTS — `i32 << 2` is `bigint` here and a
-MODULAR `integer` there.
+The last three rows are recorded divergences (ADR-0012). Arithmetic and an
+integer CAST keep `bigint` because this engine carries every computed integer
+in an int64, which is also why `2147483647 + 1` answers 2147483648 here where
+PostgreSQL raises `integer out of range`. The shifts keep it because
+PostgreSQL's int4 shift is modular and this engine's is not.
 
 #### DECIMAL Type
 
@@ -476,8 +465,7 @@ whether or not the result is ever written to a column:
 
 | cast | in range | out of range |
 |---|---|---|
-| `::INT32`, `::INT`, `::INTEGER`, `::SMALLINT` | the number, declared `integer` (OID 23) | `22003` |
-| `::BIGINT`, `::INT8` | the number, declared `bigint` (OID 20) | `22003` |
+| `::INT32` | the number, declared `bigint` | `22003` |
 | `::PORT`, `::PROTOCOL` | the number, declared `integer` (OID 23, the same OID the column declares) | `22003` |
 | `::DATE` | the day count, declared `date` | `22003` |
 | `::FLOAT32` | the value rounded to float4, declared `real` | `22003`, `value … is out of range for type real` |

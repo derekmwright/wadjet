@@ -126,46 +126,46 @@ divergence entry that recorded the arc's measurements, function by function
 and position by position, is ADR-0012's bitwise-family item; this is where the
 RULE lives.
 
-#### 2b. The width is the DECLARED TYPE too, and the int4 superset is closed (2026-09-15, arc ND, #1070)
+#### 2b. A literal's width is its DECLARED TYPE; an expression's is not (2026-09-15, arc ND, #1070)
 
 §2a says the width is "METADATA BESIDE the carrier" and gives the reason:
 declaring an INT32 vector for an int4-domain expression "would put every such
-value in front of the #361 store guard". That is true and it is the POINT,
-which the first version of this record had backwards. `batch.IntegerRangeError`
-raises `22003 integer out of range` — PostgreSQL's own SQLSTATE and its own
-sentence — and `2147483647 + 1` IS that error on the server. Being in front of
-that guard is agreement, not a hazard.
+value in front of the #361 store guard". Arc ND set out to reverse that
+reading — `batch.IntegerRangeError` raises `22003 integer out of range`, which
+is PostgreSQL's own answer for `2147483647 + 1`, so being in front of that
+guard is agreement rather than a hazard — and MEASURED the result on five arms.
+Half of it holds and half does not, and the line between them is the DAG.
 
-So an integer expression whose width is PROVABLY int4 declares int4, and the
-declaration a client binds on is PostgreSQL's: `i32 + 1`, `-i32`, `i32 / 2`,
-`CAST(x AS INT)`, `BITWISE_AND(i32, 6)`, `MIN(i32)` and an integer LITERAL
-that fits are `integer` (OID 23); `i32 + i64`, `i64 + 1`, `CAST(x AS BIGINT)`
-and a literal that does not fit are `bigint`. `physical.intArithDeclaredID` is
-the one function, read by nodeDeclaredType's arithmetic and unary arms and by
-inferProjectionDeclTypeConf's strict-int arm so the two cannot disagree about
-one expression.
+**What holds: a LITERAL.** An integer literal that fits int4 declares
+`integer` (OID 23) and one that does not declares `bigint`, which is
+PostgreSQL's own literal rule. `SELECT 1`, `(SELECT 1)`, a literal published by
+a derived table and a literal in a recursive CTE's anchor all carry that
+declaration identically on the single arm, the spilled arm and all three DAG
+arms. `MIN`/`MAX` of an int4 (#951) and the bitwise family over int4 operands
+(#1018) ship on the same footing, re-measured over an AGGREGATE and a WINDOW
+slot on both paths.
 
-**PROVABLY is the load-bearing word, and it needs a stronger test than the
-width walk.** `widerIntWidth`'s rule — "an unknown operand contributes nothing
-rather than narrowing" — is right for the aggregate question of §2a and wrong
-read as a declaration: it answers int4 for `(SELECT MAX(i64) …) + 1`, whose
-left operand nothing typed, and that declared an int4 vector for a bigint
-total and refused a row PostgreSQL answers. `physical.int4DomainProven` walks
-to the LEAVES and requires every one to name a width; unknown stays int8.
+**What does not: an ARITHMETIC expression and a CAST.** The stage arms type an
+expression written over a published SLOT — an aggregate's `__agg_N`, a window's
+`__win_N` — from something coarser than the single-process walk reads, so
+`CAST(SUM(a) OVER () AS INTEGER)` and `MAX(c_i32) + 0` came back `integer` on
+the single path and `bigint` on both DAG arms. One expression, two
+declarations, which is #813 item 1's own class and the thing that arc forbids.
+Two candidate repairs were measured and neither closed it: letting a known
+carrier beat an `intWidthUnknown` entry in `declaredIntWidth`'s ColRef arm, and
+giving the three `colDecls` builders above an aggregate's own output projection
+the width their types imply (#1029's own proposal). Filed with both.
 
-What this CLOSES is the int4 superset for the arithmetic domain: this engine
-answered 2147483648 for `2147483647 + 1` and now raises what the server
-raises. What it does NOT close, and is recorded in ADR-0012's list: `SMALLINT`
-and `INT2` declare `integer` (23) where PostgreSQL declares `smallint` (21),
-because there is no int16 carrier here; and the three SHIFTS stay `bigint`,
-because this engine shifts on the int64 carrier while PostgreSQL's int4 shift
-is MODULAR — `expr.PGIntegerResult.FitsOperands` is the field that keeps them
-out of the narrowing.
+So the int4 SUPERSET is NOT closed: `2147483647 + 1` still answers 2147483648
+here where the server raises, because int4 arithmetic still declares and
+carries int8. `SMALLINT` and `INT2` still declare `integer` nowhere — an
+integer CAST declares `bigint` — and ADR-0012's list carries both divergences.
 
-The REAL domain took the same shape on the same day (#1117): `real op real`
+The REAL domain is where the same idea DID land whole (#1117): `real op real`
 declares real, its result is stored into a float4 vector, and
-`batch.FloatRangeError` is IntegerRangeError's float sibling at that store.
-See ADR-0012's real-arithmetic entry.
+`batch.FloatRangeError` is IntegerRangeError's float sibling at that store. It
+has no slot problem because a real expression's operands are columns and casts
+rather than aggregate outputs. See ADR-0012's real-arithmetic entry.
 
 **The INTEGER half of the choice rule landed 2026-08-29 (#695), and the BOX is
 what it took.** The type fold was the easy half: an integer contributes its
