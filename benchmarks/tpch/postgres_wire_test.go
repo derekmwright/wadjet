@@ -1578,9 +1578,9 @@ func wireCorpus() []wireCase {
 				wirePropTypeOIDs: "int4 + an integer literal widens to int8 (OID 20) here where " +
 					"PostgreSQL stays int4 (23). Not this cell's subject and not #732's: what it " +
 					"asserts is that the TWO columns declare DIFFERENT types, which they do — a " +
-					"name-keyed declaration gave both the LAST one's. The same integer-width " +
-					"divergence is pinned on UnaliasedLiteral and belongs to the literal typing " +
-					"layer",
+					"name-keyed declaration gave both the LAST one's. The LITERAL half closed with " +
+					"#1070 and its pin on UnaliasedLiteral is deleted; what is left here is int4 " +
+					"ARITHMETIC, which still declares bigint (ADR-0024 §2b)",
 				wirePropTypeSizes: "the size that follows that OID (8, not 4). Same mechanism; a " +
 					"size pin without the OID pin would be the wrong half",
 			}},
@@ -1590,18 +1590,13 @@ func wireCorpus() []wireCase {
 		{name: "DuplicateNamesOfDifferentModifiers",
 			sql: `SELECT CAST(s_name AS VARCHAR(4)), CAST(s_name AS VARCHAR(9)) FROM supplier ORDER BY s_suppkey LIMIT 2`},
 		// A literal and a predicate, the other two `?column?` families.
+		// The OID and size pins this entry carried are GONE (#1070, arc ND):
+		// an integer literal that fits int4 declares int4, which is
+		// PostgreSQL's own literal rule, so every wire property of this cell
+		// is gated again. It is the cell that reported the fix — no other wire
+		// entry selects a bare literal.
 		{name: "UnaliasedLiteral",
-			sql: `SELECT 1 FROM supplier ORDER BY supplier.s_suppkey LIMIT 2`,
-			pins: map[string]string{
-				wirePropTypeOIDs: "an integer LITERAL in a SELECT list declares int8 (OID 20) where " +
-					"PostgreSQL declares int4 (OID 23). Not #732's: the NAME is `?column?` on both " +
-					"sides, which is what this entry was added for. The declaration is the literal " +
-					"typing layer's — a bare integer literal is carried as int64 with no narrowing " +
-					"to the smallest type that holds it — and found by this cell because no other " +
-					"wire entry selects a bare literal",
-				wirePropTypeSizes: "the size that follows that OID (8, not 4). Same mechanism; a " +
-					"size pin without the OID pin would be the wrong half",
-			}},
+			sql: `SELECT 1 FROM supplier ORDER BY supplier.s_suppkey LIMIT 2`},
 		{name: "UnaliasedPredicate",
 			sql: `SELECT supplier.s_acctbal > 0 FROM supplier ORDER BY supplier.s_suppkey LIMIT 2`},
 		// --- DUPLICATE output names, values compared cell by cell ----------
