@@ -150,26 +150,25 @@ func realArithBothReal(n *plansql.BinaryOp, decls colDecls) bool {
 	return isReal(n.Left) && isReal(n.Right)
 }
 
-// int4DomainProven reports whether every integer operand of n is int4-domain
-// and NONE of them is unknown.
+// intWidthFullyKnown reports whether every integer operand of n names a width
+// of its own — no leaf the walk cannot type.
 //
 // declaredIntWidth alone is not that test, and the difference is a query that
 // stopped answering. Its combinator is widerIntWidth, whose rule is "an
 // unknown operand contributes nothing rather than narrowing" — right for the
 // AGGREGATE question it was written for, where an unknown argument leaves the
 // accumulator alone — and read as a DECLARATION it says int4 for
-// `(SELECT MAX(c_i64) …) + 1`, whose left operand it cannot type at all. That
-// declared an int4 output vector for a bigint total and the store guard
+// `(SELECT MAX(c_i64) ...) + 1`, whose left operand it cannot type at all.
+// That declared an int4 output vector for a bigint total and the store guard
 // refused the row: 22003 on a query PostgreSQL answers (#1070, found by
 // pgwire.TestArcH1AScalarSubqueryDeclaresItsOwnTypeOnTheWire).
 //
-// So the declaration asks the stronger question, and the walk it makes is the
-// same shape declaredIntWidth's: through the operators and the choice arms to
-// the LEAVES, each of which must name a width of its own.
-func int4DomainProven(n plansql.Node, decls colDecls) bool {
-	return declaredIntWidth(n, decls) == intWidth4 && intWidthFullyKnown(n, decls)
-}
-
+// So a declaration that narrows asks `declaredIntWidth(n) == intWidth4 &&
+// intWidthFullyKnown(n)`, and the walk this makes is the same shape
+// declaredIntWidth's: through the operators and the choice arms to the LEAVES,
+// each of which must name a width of its own. bitwiseInt4Result is the one
+// caller left — the arithmetic and CAST narrowings that were its other two
+// were measured, reverted and recorded in ADR-0012.
 func intWidthFullyKnown(node plansql.Node, decls colDecls) bool {
 	switch n := node.(type) {
 	case *plansql.ParenNode:
@@ -1620,7 +1619,7 @@ func bitwiseInt4Result(n *plansql.FuncCallNode, decls colDecls) bool {
 		return false
 	}
 	// And every width-contributing argument must be KNOWN, for the reason
-	// int4DomainProven states: widerIntWidth lets an unknown operand be
+	// intWidthFullyKnown states: widerIntWidth lets an unknown operand be
 	// narrowed by a known int4 sibling, which here would declare int4 for
 	// `BITWISE_AND(<a bigint nothing typed>, 6)`.
 	for i, a := range n.Args {

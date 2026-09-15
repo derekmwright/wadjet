@@ -146,8 +146,15 @@ SELECT CAST(1.0/3 AS FLOAT(25));   -- 0.3333333333333333  (double precision)
 CREATE TABLE t (f FLOAT(1));       -- a Float32 column
 ```
 
-**Arithmetic over two REALs is real, and computes at float4's width.**
-`r + CAST(1.0 AS REAL)` over a real holding 2^24 is 16777216, not 16777217.
+**Arithmetic over two REALs is real, and a value SELECTed from it computes at
+float4's width.** `r + CAST(1.0 AS REAL)` over a real holding 2^24 is
+16777216, not 16777217 — in a SELECT list, a GROUP BY key, an ORDER BY key, an
+aggregate argument and each arm of a set operation. Two positions still compute
+it at `double precision` and are recorded in ADR-0012: the same expression
+inside a WHERE, HAVING, ON or CASE WHEN condition, and an inner step of a
+NESTED real expression such as `(r + CAST(1.0 AS REAL)) + CAST(1.0 AS REAL)`.
+Spelling the step — `CAST(r + CAST(1.0 AS REAL) AS REAL) + CAST(1.0 AS REAL)` —
+answers PostgreSQL's number today.
 That pairing alone: `real + 1.0` (a numeric literal), `real + 1` (an integer)
 and `real + double precision` are all double precision, which is what
 PostgreSQL resolves them to. `-real` is real; `SUM(real)` is real grouped and

@@ -566,6 +566,52 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      is double precision. `%` is untouched — PostgreSQL has no float modulo,
      so there is no server type to follow.
 
+     **Amended 2026-09-15 (arc ND round 2): the declaration is the whole of it
+     for a PROJECTED value, and for nothing else.** The rounding IS the store
+     into the float4 output vector the declaration names, so it happens
+     exactly where a projection materializes the expression. Three positions
+     have no such store. All were measured on 17.11 over the same row:
+
+     ```
+     (r + 1.0::real) + 1.0::real             PG 16777216   wadjet 16777218
+     WHERE r + 1.0::real > 16777216::real    PG no rows    wadjet one row
+     WHERE r + 1.0::real = 16777216::real    PG one row    wadjet no rows
+     CASE WHEN r + 1.0::real = 16777216::real  PG 'eq'     wadjet 'ne'
+     ```
+
+     A NESTED step never reaches an output vector and a COMPARISON has none at
+     all, so the float64 carrier's digits reach the next operator; PostgreSQL
+     rounds at EVERY float4 operator. A predicate's ROW SET is unchanged from
+     before #1117 — it was wrong there too — but the row it selects now PRINTS
+     a number the predicate says it does not hold, which is the visible shape
+     of the same gap. Cells `1117/nested_real_arith`,
+     `1117/real_arith_in_a_predicate`, `…_in_an_equality_predicate`,
+     `…_as_the_only_filter` and `…_in_a_case_condition` carry it on five arms,
+     each with a `ctl_` twin that spells the `CAST` and gets PostgreSQL's
+     answer.
+
+     Closing it means rounding AT the operator, and the measured shape of that
+     is an AST rewrite wrapping every `real op real` node in `CAST(… AS REAL)`
+     — which is why spelling the cast by hand already answers correctly on all
+     five arms. It was built and backed out in round 2 because it lands on the
+     two LOCAL arms only: a worker compiles its fragment's expressions from
+     SQL text with no declaration walk, so the rewrite must travel in the
+     stage's emitted text too (projection specs, `FilterExprs`, aggregate and
+     window arguments, join keys), and a half-landed version replaces one
+     wrong answer with two different ones — the class this list exists to
+     prevent. Filed with the measurements.
+
+     The SET-OPERATION arm was the third position and it IS closed
+     (`setOpCastExpr`, 2026-09-15). A set operation REPLACES an arm's
+     declaration with the union's common type, so the store that rounds never
+     happened: `r + 1.0::real UNION ALL <a float8 arm>` answered 1.6777216e+07
+     on the two local arms and 1.6777217e+07 on the three stage arms — one
+     expression, two VALUES, which ADR-0013 admits for no total. The arm now
+     narrows to real before it widens, on the one rung of `setOpWiden`'s
+     ladder that loses a narrower type's rounding. Gated on six shapes × five
+     arms: `1117/setop_real_arm_*` in the declaration census and
+     `1117/real_arm_through_*` in the value gate.
+
      ITEM 1 of the filing is CLOSED, and closed by measurement rather than by
      a change: `CAST(SUM(x) OVER () AS BIGINT)` was reported as INT64
      single-process and FLOAT64 on the stage DAG, and at 2e386378 both

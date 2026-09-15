@@ -161,11 +161,24 @@ here where the server raises, because int4 arithmetic still declares and
 carries int8. `SMALLINT` and `INT2` still declare `integer` nowhere — an
 integer CAST declares `bigint` — and ADR-0012's list carries both divergences.
 
-The REAL domain is where the same idea DID land whole (#1117): `real op real`
-declares real, its result is stored into a float4 vector, and
+The REAL domain is where the same idea landed for a PROJECTED value (#1117):
+`real op real` declares real, its result is stored into a float4 vector, and
 `batch.FloatRangeError` is IntegerRangeError's float sibling at that store. It
-has no slot problem because a real expression's operands are columns and casts
-rather than aggregate outputs. See ADR-0012's real-arithmetic entry.
+has no SLOT problem — a real expression's operands are columns and casts rather
+than aggregate outputs — but the store is the rounding, so the rule reaches
+exactly as far as a store does. A NESTED step (`(r + 1.0::real) + 1.0::real`)
+and a COMPARISON (`WHERE r + 1.0::real > 16777216::real`, a `CASE WHEN`
+condition) reach none, and both still compute at float8's width where
+PostgreSQL rounds at every float4 operator; both are measured, gated as census
+cells with a `ctl_` twin that spells the `CAST`, and recorded in ADR-0012 with
+the shape of the fix and why it was backed out of round 2 rather than landed on
+two arms of five.
+
+A SET OPERATION was a third such position and is closed: it REPLACES the arm's
+declaration with the union's common type, so the arm's store never narrowed and
+one expression answered two values across the arms. `setOpCastExpr` narrows the
+arm to real before widening it, on the one rung of the ladder that loses a
+narrower type's rounding. See ADR-0012's real-arithmetic entry.
 
 **The INTEGER half of the choice rule landed 2026-08-29 (#695), and the BOX is
 what it took.** The type fold was the easy half: an integer contributes its
