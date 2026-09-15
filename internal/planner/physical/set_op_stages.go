@@ -1251,7 +1251,7 @@ func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string, op string, 
 			if plans[i].types[col].typ == want.typ {
 				continue
 			}
-			cast, ok := setOpCastExpr(plans[i].specs[col].Expr, want.typ)
+			cast, ok := setOpCastExpr(plans[i].specs[col].Expr, plans[i].types[col].typ, want.typ)
 			if !ok {
 				return fmt.Errorf("result column %q must be %s to match the other arms, and arm %d's "+
 					"value cannot be cast to it", outNames[col], want.typ, i+1)
@@ -1465,7 +1465,22 @@ func setOpWiden(a, b parquet.TypeID) (parquet.TypeID, bool) {
 
 // setOpCastExpr wraps an arm's expression so it produces the reconciled type.
 // The destination spellings are the ones expr.Cast understands.
-func setOpCastExpr(e string, to parquet.TypeID) (string, bool) {
+//
+// `from` is the arm's OWN declared type, and it is not decoration: a widening
+// that LOSES the narrower type's rounding has to narrow FIRST. `real ∪ float8`
+// is the one such rung in setOpWiden's ladder, and it is a VALUE:
+// `w_f32 + CAST(1.0 AS REAL)` over 2^24 is 16777216 as a real and 16777217 as
+// a double, and this engine computes every float expression on the float64
+// carrier. The single-process path narrows because the arm's projection
+// materializes into the FLOAT32 vector its own declaration names; the stage
+// arms declare the RECONCILED type on that same projection, so nothing
+// narrowed and one expression answered two values depending on the arm
+// (#1117, found by arc ND's review). An inner `CAST(… AS REAL)` is what the
+// single path's store does, spelled where both paths can see it.
+func setOpCastExpr(e string, from, to parquet.TypeID) (string, bool) {
+	if from == parquet.TypeFloat32 && to != parquet.TypeFloat32 {
+		e = "CAST(" + e + " AS REAL)"
+	}
 	switch to {
 	case parquet.TypeInt64:
 		return "CAST(" + e + " AS BIGINT)", true

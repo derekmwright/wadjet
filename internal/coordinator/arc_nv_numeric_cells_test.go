@@ -20,10 +20,15 @@ package coordinator
 //     `WideDecimalSquaredRowCount`.
 //   - WIRE declarations. What OID a column goes out under is arc ND's; this
 //     gate reads the Go BOX, which is what decides the VALUE.
-//   - The REAL ARITHMETIC width. `r + 1.0::real` is 16777216 on the server
-//     and 16777217 here, because arithmetic over two reals computes in
-//     float64. It is a residual of this arc, recorded with its shape rather
-//     than gated here — closing it needs the declaration layer arc ND owns.
+//   - The REAL ARITHMETIC width in a COMPARISON or an inner step. Arc ND's
+//     #1117 closed the projected value — `r + 1.0::real` is the server's
+//     16777216 here, and the cells below gate it through every set operation
+//     — by declaring real and letting the store into the float4 vector round.
+//     A comparison has no output vector and a nested step never reaches one,
+//     so `WHERE r + 1.0::real > 16777216::real` still compares 16777217 and
+//     `(r + 1.0::real) + 1.0::real` is 16777218 where the server says
+//     16777216. Both are in ADR-0012's list with their mechanism, gated as
+//     cells in coordinator.TestNDDeclarationsMatchPostgres.
 //   - The float `%` operator. PostgreSQL has no `double precision % double
 //     precision` at all, so wadjet's answer is a superset with no oracle.
 func nvCells() []nvCell {
@@ -181,6 +186,52 @@ func nvCells() []nvCell {
 				"total, in the f4 box #1118 gave the window column " +
 				"(2.0999999046325684 IS float64(float32(2.1)), which is what the " +
 				"renderer prints for a float32 carrying float32(2.1))"},
+		// The REAL ARITHMETIC width, arc ND's #1117: `r + 1.0::real` is real
+		// on the server and computes at float4's width, so 2^24 + 1 is
+		// 16777216 and not 16777217. It reaches this gate because it is a
+		// VALUE, and because its one loss-bearing position is a SET
+		// OPERATION: the union's common type REPLACES the arm's own
+		// declaration, and the store into a float4 vector was the whole of
+		// the narrowing, so the three stage arms answered 1.6777217e+07 while
+		// the two local arms answered the server's number. Both arms below
+		// carry 16777216 on PostgreSQL 17.11 — the real one because it
+		// rounds, the double one because it never left 2^24 — so UNION ALL
+		// prints it twice, INTERSECT keeps the row and EXCEPT keeps none.
+		{name: "1117/real_arith_alone",
+			sql:  "SELECT r + CAST(1.0 AS REAL) AS v FROM " + nvRl + " WHERE id = 4",
+			want: "v=1.6777216e+07<f4>"},
+		{name: "1117/real_arm_through_a_union_all",
+			sql: "SELECT r + CAST(1.0 AS REAL) AS v FROM " + nvRl + " WHERE id = 4" +
+				" UNION ALL SELECT r + 0.0 FROM " + nvRl + " WHERE id = 4",
+			want: "v=1.6777216e+07<f8>;v=1.6777216e+07<f8>"},
+		{name: "1117/real_arm_through_a_union",
+			sql: "SELECT r + CAST(1.0 AS REAL) AS v FROM " + nvRl + " WHERE id = 4" +
+				" UNION SELECT r + 0.0 FROM " + nvRl + " WHERE id = 4",
+			want: "v=1.6777216e+07<f8>"},
+		{name: "1117/real_arm_through_an_intersect",
+			sql: "SELECT r + CAST(1.0 AS REAL) AS v FROM " + nvRl + " WHERE id = 4" +
+				" INTERSECT SELECT r + 0.0 FROM " + nvRl + " WHERE id = 4",
+			want: "v=1.6777216e+07<f8>"},
+		{name: "1117/real_arm_through_an_except",
+			sql: "SELECT r + CAST(1.0 AS REAL) AS v FROM " + nvRl + " WHERE id = 4" +
+				" EXCEPT SELECT r + 0.0 FROM " + nvRl + " WHERE id = 4",
+			want: "",
+			why: "PostgreSQL 17.11 returns no rows: both arms are 16777216 under " +
+				"double precision. A row here means the real arm kept float8's digits"},
+		{name: "1117/real_arm_through_a_cte",
+			sql: "WITH u AS (SELECT r + CAST(1.0 AS REAL) AS v FROM " + nvRl + " WHERE id = 4" +
+				" UNION ALL SELECT r + 0.0 FROM " + nvRl + " WHERE id = 4) SELECT v FROM u",
+			want: "v=1.6777216e+07<f8>;v=1.6777216e+07<f8>"},
+		{name: "1117/real_arm_through_a_derived_block",
+			sql: "SELECT v FROM (SELECT r + CAST(1.0 AS REAL) AS v FROM " + nvRl + " WHERE id = 4" +
+				" UNION ALL SELECT r + 0.0 FROM " + nvRl + " WHERE id = 4) s",
+			want: "v=1.6777216e+07<f8>;v=1.6777216e+07<f8>"},
+		{name: "1117/ctl_both_arms_real",
+			sql: "SELECT r + CAST(1.0 AS REAL) AS v FROM " + nvRl + " WHERE id = 4" +
+				" UNION ALL SELECT r FROM " + nvRl + " WHERE id = 4",
+			want: "v=1.6777216e+07<f4>;v=1.6777216e+07<f4>",
+			why: "real ∪ real reconciles to real, so no arm is widened and nothing " +
+				"is narrowed first — the control that keeps the rule on its rung"},
 		{name: "950/min_and_max_are_untouched",
 			sql:  "SELECT MIN(r) AS lo, MAX(r) AS hi FROM " + nvRl,
 			want: "lo=-20<f4>|hi=1.6777216e+07<f4>"},

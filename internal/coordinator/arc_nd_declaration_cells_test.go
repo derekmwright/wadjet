@@ -127,6 +127,59 @@ func ndCells() []ndCell {
 			why:  "ADR-0013 class 9 again, one function over: AVG(real) totals at float8's width (which is the server's type) over float4 SUMMANDS, so the arms differ in the eleventh digit by association alone."},
 		{name: "1117/ctl_real_column", sql: `SELECT w_f32 AS v FROM numwidth WHERE w_key = 3`,
 			want: "v:FLOAT32 | 1.6777216e+07<f4>"},
+		// The BOUNDARY of #1117's rule, measured on five arms against
+		// PostgreSQL 17.11. A set-operation ARM is the position where the
+		// projection's own declaration is REPLACED by the union's common
+		// type, so the store that does the rounding never happens — and the
+		// three stage arms answered 1.6777217e+07 where the two local arms
+		// answered PostgreSQL's 1.6777216e+07 until setOpCastExpr narrowed
+		// the arm first. Each operation is its own signal: UNION ALL prints
+		// both numbers, UNION folds them to one row, INTERSECT keeps a row
+		// and EXCEPT keeps none.
+		{name: "1117/setop_real_arm_union_all", sql: `SELECT w_f32 + CAST(1.0 AS REAL) AS v FROM numwidth WHERE w_key = 3 UNION ALL SELECT w_f64 - 1.0 FROM numwidth WHERE w_key = 3`,
+			want: "v:FLOAT64 | 1.6777216e+07<f8> | 1.6777216e+07<f8>"},
+		{name: "1117/setop_real_arm_union", sql: `SELECT w_f32 + CAST(1.0 AS REAL) AS v FROM numwidth WHERE w_key = 3 UNION SELECT w_f64 - 1.0 FROM numwidth WHERE w_key = 3`,
+			want: "v:FLOAT64 | 1.6777216e+07<f8>"},
+		{name: "1117/setop_real_arm_intersect", sql: `SELECT w_f32 + CAST(1.0 AS REAL) AS v FROM numwidth WHERE w_key = 3 INTERSECT SELECT w_f64 - 1.0 FROM numwidth WHERE w_key = 3`,
+			want: "v:FLOAT64 | 1.6777216e+07<f8>"},
+		{name: "1117/setop_real_arm_except", sql: `SELECT w_f32 + CAST(1.0 AS REAL) AS v FROM numwidth WHERE w_key = 3 EXCEPT SELECT w_f64 - 1.0 FROM numwidth WHERE w_key = 3`,
+			want: "v:FLOAT64"},
+		{name: "1117/setop_real_arm_in_a_cte", sql: `WITH u AS (SELECT w_f32 + CAST(1.0 AS REAL) AS v FROM numwidth WHERE w_key = 3 UNION ALL SELECT w_f64 - 1.0 FROM numwidth WHERE w_key = 3) SELECT v FROM u ORDER BY v`,
+			want: "v:FLOAT64 | 1.6777216e+07<f8> | 1.6777216e+07<f8>"},
+		{name: "1117/setop_real_arm_in_a_derived_block", sql: `SELECT v FROM (SELECT w_f32 + CAST(1.0 AS REAL) AS v FROM numwidth WHERE w_key = 3 UNION ALL SELECT w_f64 - 1.0 FROM numwidth WHERE w_key = 3) s ORDER BY v`,
+			want: "v:FLOAT64 | 1.6777216e+07<f8> | 1.6777216e+07<f8>"},
+		// The controls that keep the narrowing on the rung it belongs to:
+		// real ∪ real reconciles to real and takes no cast at all, and the
+		// integer ladder is untouched by a rule about float4.
+		{name: "1117/ctl_setop_both_real", sql: `SELECT w_f32 + CAST(1.0 AS REAL) AS v FROM numwidth WHERE w_key = 3 UNION ALL SELECT w_f32 FROM numwidth WHERE w_key = 3`,
+			want: "v:FLOAT32 | 1.6777216e+07<f4> | 1.6777216e+07<f4>"},
+		{name: "1117/ctl_setop_int_ladder", sql: `SELECT w_i32 AS v FROM numwidth WHERE w_key = 0 UNION ALL SELECT w_i64 FROM numwidth WHERE w_key = 0`,
+			want: "v:INT64 | 2<i8> | 2<i8>"},
+		// The COMPARISON positions, where the declaration does not reach, so
+		// the row the predicate selected prints a number the predicate says
+		// it does not hold.
+		{name: "1117/real_arith_in_a_predicate", sql: `SELECT w_f32 + CAST(1.0 AS REAL) AS v FROM numwidth WHERE w_key = 3 AND w_f32 + CAST(1.0 AS REAL) > CAST(16777216 AS REAL)`,
+			want: "v:FLOAT32 | 1.6777216e+07<f4>",
+			why:  "PostgreSQL 17.11 returns NO rows here, and answers the other way on each spelling below too: the row for `=`, key 3 for the bare filter, 'eq' for the CASE. #1117 narrows by DECLARATION — a projection stores the float64 carrier's result into the float4 vector its declaration names, and that STORE is the rounding. A comparison has no output vector, so the carrier's float8 digits reach the operator and 2^24 + 1.0::real compares as 16777217. The ROW SET is the base row set; what #1117 changed is that the row now PRINTS the number the predicate denies. The ctl cell below is the mechanism: spelling the CAST is PostgreSQL's answer on all five arms. Closing it means rounding AT the operator, and the three stage arms cannot take that from the local planner — a worker compiles its fragment's expressions from SQL text with no declaration walk — so a rewrite that lands on single and budget alone (measured: it does) replaces one wrong answer with two different ones. Filed rather than half-fixed; ADR-0012 carries it."},
+		{name: "1117/real_arith_in_an_equality_predicate", sql: `SELECT w_f32 + CAST(1.0 AS REAL) AS v FROM numwidth WHERE w_key = 3 AND w_f32 + CAST(1.0 AS REAL) = CAST(16777216 AS REAL)`,
+			want: "v:FLOAT32",
+			why:  "The seam of 1117/real_arith_in_a_predicate, the other way round: PostgreSQL 17.11 returns the row and this returns none."},
+		{name: "1117/real_arith_as_the_only_filter", sql: `SELECT w_key AS v FROM numwidth WHERE w_f32 + CAST(1.0 AS REAL) = CAST(16777216 AS REAL)`,
+			want: "v:INT64",
+			why:  "The same seam with no projection of the expression at all: PostgreSQL 17.11 returns key 3."},
+		{name: "1117/real_arith_in_a_case_condition", sql: `SELECT CASE WHEN w_f32 + CAST(1.0 AS REAL) = CAST(16777216 AS REAL) THEN 'eq' ELSE 'ne' END AS v FROM numwidth WHERE w_key = 3`,
+			want: "v:STRING | ne",
+			why:  "The same seam inside a CASE condition: PostgreSQL 17.11 answers 'eq'."},
+		{name: "1117/ctl_real_arith_cast_in_a_predicate", sql: `SELECT w_f32 + CAST(1.0 AS REAL) AS v FROM numwidth WHERE w_key = 3 AND CAST(w_f32 + CAST(1.0 AS REAL) AS REAL) > CAST(16777216 AS REAL)`,
+			want: "v:FLOAT32"},
+		{name: "1117/ctl_real_arith_cast_in_a_case_condition", sql: `SELECT CASE WHEN CAST(w_f32 + CAST(1.0 AS REAL) AS REAL) = CAST(16777216 AS REAL) THEN 'eq' ELSE 'ne' END AS v FROM numwidth WHERE w_key = 3`,
+			want: "v:STRING | eq"},
+		// NESTING, the other position with no output vector to round in.
+		{name: "1117/nested_real_arith", sql: `SELECT (w_f32 + CAST(1.0 AS REAL)) + CAST(1.0 AS REAL) AS v FROM numwidth WHERE w_key = 3`,
+			want: "v:FLOAT32 | 1.6777218e+07<f4>",
+			why:  "PostgreSQL 17.11 answers 1.6777216e+07: it rounds at EVERY float4 operator, so the inner sum is already 16777216 when the second one runs. Here the whole expression computes on the float64 carrier and rounds once, at the projection's store — so an inner step keeps digits float4 does not have. Same seam and same filing as the predicate cells above; the ctl cell below is the mechanism."},
+		{name: "1117/ctl_nested_real_arith_cast", sql: `SELECT CAST(w_f32 + CAST(1.0 AS REAL) AS REAL) + CAST(1.0 AS REAL) AS v FROM numwidth WHERE w_key = 3`,
+			want: "v:FLOAT32 | 1.6777216e+07<f4>"},
 		{name: "1118/sum_real_over", sql: `SELECT SUM(w_f32) OVER () AS v FROM numwidth WHERE w_key = 0`,
 			want: "v:FLOAT32 | 2<f4>"},
 		{name: "1118/sum_real_grouped", sql: `SELECT SUM(w_f32) AS v FROM numwidth`,
