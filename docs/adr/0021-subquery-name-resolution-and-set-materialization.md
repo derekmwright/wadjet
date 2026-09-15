@@ -2013,11 +2013,15 @@ answers zero rows there (measured), while a MINTED NAME is one the DAG's
 evaluation point does not carry (measured, round 3).
 
 So the column is materialized ONLY where publishing it changes nothing else,
-and four shapes decline — each returning to the disposition it had at
-`c34cdbcb`, never to a new wrong answer: a body carrying `DISTINCT` or `GROUP
-BY`; a body whose own output alias already publishes the name; an enclosing
-relation that publishes it; and an enclosing query that writes a star over this
-join. Round 4's seven cells hold them, with the base measurement beside each.
+and three shapes decline — each returning to the disposition it had at
+`c34cdbcb`, never to a new wrong answer: a body carrying `DISTINCT`; a body
+whose own output alias already publishes the name, or an enclosing relation
+that does; and an enclosing query that writes a star over this join. A GROUPED
+body needs no decline — it aggregates, so the refusal above fires first, and
+the refusal's order is load-bearing: the key injection adds the correlation
+column to the body's `GROUP BY`, so a decline tested before it would swallow
+the aggregated refusal and answer silently. Round 4's seven cells hold them,
+with the base measurement beside each.
 
 An AGGREGATED body is still refused, for a reason the projection cannot answer:
 publishing `i.amount` beside `SUM(i.amount)` needs it in the `GROUP BY`, which

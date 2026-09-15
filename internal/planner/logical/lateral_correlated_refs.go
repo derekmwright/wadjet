@@ -95,9 +95,6 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 	if info == nil {
 		return nil, nil
 	}
-	if info.Distinct || len(info.GroupBy) > 0 || len(info.GroupingSets) > 0 {
-		return nil, nil
-	}
 	if outer != nil {
 		for _, c := range outer.Columns {
 			if c.Star {
@@ -118,7 +115,7 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 			continue
 		}
 		repl := map[string]string{}
-		declined := false
+		contested := false
 		var mint []string
 		walkExprNodes(node, func(x plansql.Node) {
 			ref, ok := x.(*plansql.ColRef)
@@ -145,18 +142,18 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 				bare = strings.ToLower(strings.TrimSpace(ref.Column))
 			}
 			if outerNames[bare] || lateralAliasPublishes(info.Columns, bare) {
-				declined = true
-				return
+				contested = true
 			}
 			repl[k] = ""
 			mint = append(mint, ref.Column)
 		})
-		if declined {
-			return nil, nil
-		}
 		if len(mint) == 0 {
 			continue
 		}
+		// THE AGGREGATED REFUSAL COMES FIRST. It is a statement about the
+		// BODY — there is no projection to publish the column in — and not
+		// about what publishing it would disturb, so a shape that would also
+		// decline below must still be refused rather than silently answered.
 		if aggregates {
 			return nil, sqlerr.New("0A000",
 				"LATERAL body AGGREGATES and its correlated predicate %s is not an "+
@@ -167,6 +164,13 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 					"which this engine does not do for this shape. Aggregate in the "+
 					"ENCLOSING query over an unaggregated lateral instead",
 				sqlerr.Quote(strings.TrimSpace(cp)))
+		}
+		// A CONTESTED NAME, or a DISTINCT the widened projection would change,
+		// DECLINES: the query keeps the disposition it had before this repair
+		// existed, which is never a new wrong answer. (A GROUPED body needs no
+		// arm here — it aggregates, so the refusal above has already fired.)
+		if contested || info.Distinct {
+			return nil, nil
 		}
 		// PUBLISHED UNDER ITS OWN NAME, and the predicate is NOT respelled.
 		// The two paths resolve it differently and only the source name is

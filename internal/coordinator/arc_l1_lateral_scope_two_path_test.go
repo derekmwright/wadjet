@@ -557,6 +557,7 @@ var l1Postgres = map[string]string{
 // l1RefusalPins names the refusal classes a cell's arms may raise. Every arm's
 // answer must contain one of them.
 var l1RefusalPins = map[string][]string{
+	"R4/groupedBody":           {l1LiftedRefNotPublished},
 	"R4/setopBody":             {l1FromlessSetOpBody},
 	"R3/outerRefExpr":          {l1OuterRefOutsideWhere},
 	"R3/outerRefOnlyOuter":     {l1OuterRefOutsideWhere},
