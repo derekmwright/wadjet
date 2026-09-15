@@ -39,6 +39,11 @@ func TestANetworkCastOnTheWire(t *testing.T) {
 		// PROTOCOL column declares (#834).
 		{`SELECT CAST('udp' AS PROTOCOL) AS v`, 23, "17"},
 		{`SELECT CAST('TCP' AS PROTOCOL) AS v`, 23, "6"},
+		// The edges of each type's own range still answer, under the OID the
+		// column declares.
+		{`SELECT CAST(65535 AS PORT) AS v`, 23, "65535"},
+		{`SELECT CAST(0 AS PORT) AS v`, 23, "0"},
+		{`SELECT CAST(255 AS PROTOCOL) AS v`, 23, "255"},
 	} {
 		t.Run(c.sql, func(t *testing.T) {
 			res := conn.ExecParams(ctx, c.sql, nil, nil, nil, []int16{0}).Read()
@@ -64,6 +69,14 @@ func TestANetworkCastOnTheWire(t *testing.T) {
 		{`SELECT CAST('aabb:ccdd:eeff' AS MACADDR) AS v`, "22P02"},
 		{`SELECT CAST('a-0eebc999c0b4ef8bb6d6bb9bd380a11' AS UUID) AS v`, "22P02"},
 		{`SELECT CAST('nosuchproto' AS PROTOCOL) AS v`, "22P02"},
+		// A value ENTERING PORT or PROTOCOL is held to the TYPE's range, and
+		// the refusal crosses the wire as 22003 rather than the blanket class
+		// (Derek, 2026-09-15). `CAST('0x1bb' AS PORT)` is 22P02 one line up in
+		// the value table: the type's TEXT form is decimal, not int4's.
+		{`SELECT CAST(65536 AS PORT) AS v`, "22003"},
+		{`SELECT CAST('65536' AS PORT) AS v`, "22003"},
+		{`SELECT CAST(-1 AS PORT) AS v`, "22003"},
+		{`SELECT CAST(256 AS PROTOCOL) AS v`, "22003"},
 		// PostgreSQL-valid text naming a NETWORK, which a bare-address column
 		// has no room for: a feature limit, not a syntax error.
 		{`SELECT CAST('10/8' AS IPV4) AS v`, "0A000"},

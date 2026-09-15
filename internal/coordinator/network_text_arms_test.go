@@ -7,6 +7,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
+	"github.com/derekmwright/wadjet/internal/worker"
 )
 
 // TestNetworkTextGrammarAnswersTheSameOnEveryArm is arc NT's distribution arm.
@@ -33,6 +34,13 @@ func TestNetworkTextGrammarAnswersTheSameOnEveryArm(t *testing.T) {
 	tmdWriteTables(t, ctx, infraB, nil)
 	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) { c.BroadcastBytesOverride = 1 })
 	spilled := na2Standalone(t, ctx, 512*1024)
+	// The FIFTH arm: the DAG with morsel-parallel breakers, where a fragment's
+	// operators run in clones. A refusal that a clone decides has to be the
+	// same refusal every other clone and every other arm decides.
+	infraM := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infraM, nil)
+	coordM := tmdCoordinatorWithWorkers(t, ctx, infraM,
+		func(w *worker.Config) { w.MorselWorkers = 4 })
 
 	arms := []struct {
 		name string
@@ -41,6 +49,7 @@ func TestNetworkTextGrammarAnswersTheSameOnEveryArm(t *testing.T) {
 		{"single", func(sql string) ([]string, error) { return na2Run(tmdRunSingle(ctx, single, sql)) }},
 		{"dag", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coord, sql)) }},
 		{"dag-shuffled", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordB, sql)) }},
+		{"dag+morsel4", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordM, sql)) }},
 		{"spilled", func(sql string) ([]string, error) {
 			restore := exec.ForceAggDrainEvery(1)
 			restoreRuns := exec.ForceSmallSpillRuns(512)
@@ -97,6 +106,28 @@ func TestNetworkTextGrammarAnswersTheSameOnEveryArm(t *testing.T) {
 			`SELECT CAST('a-0eebc999c0b4ef8bb6d6bb9bd380a11' AS UUID) AS v FROM typemx WHERE id = 1`,
 			"", "22P02"},
 		{"ipv4 network", `SELECT CAST('10/8' AS IPV4) AS v FROM typemx WHERE id = 1`, "", "0A000"},
+
+		// A value ENTERING PORT or PROTOCOL is held to the TYPE's range, at
+		// every door and on every arm (Derek, 2026-09-15; the round-2 review's
+		// FC-2). The in-range cells are here too, so a repair that refused
+		// everything could not pass.
+		{"port in range", `SELECT CAST(65535 AS PORT) AS v FROM typemx WHERE id = 1`, "v=int32:65535", ""},
+		{"port from text in range", `SELECT CAST('65535' AS PORT) AS v FROM typemx WHERE id = 1`,
+			"v=int32:65535", ""},
+		{"protocol in range", `SELECT CAST(255 AS PROTOCOL) AS v FROM typemx WHERE id = 1`,
+			"v=int32:255", ""},
+		{"port one past", `SELECT CAST(65536 AS PORT) AS v FROM typemx WHERE id = 1`, "", "22003"},
+		{"port from text one past", `SELECT CAST('65536' AS PORT) AS v FROM typemx WHERE id = 1`,
+			"", "22003"},
+		{"port negative", `SELECT CAST(-1 AS PORT) AS v FROM typemx WHERE id = 1`, "", "22003"},
+		{"port from a wider int", `SELECT CAST(3000000000 AS PORT) AS v FROM typemx WHERE id = 1`,
+			"", "22003"},
+		{"protocol one past", `SELECT CAST(256 AS PROTOCOL) AS v FROM typemx WHERE id = 1`, "", "22003"},
+		{"protocol negative", `SELECT CAST(-1 AS PROTOCOL) AS v FROM typemx WHERE id = 1`, "", "22003"},
+		// ARITHMETIC is NOT a type boundary and keeps int4's range, which is
+		// PostgreSQL's `smallint + 1` rule and #901's position.
+		{"port arithmetic leaves the range", `SELECT c_port + 70000 AS v FROM typemx WHERE id = 1`,
+			"v=int64:71025", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			for _, arm := range arms {

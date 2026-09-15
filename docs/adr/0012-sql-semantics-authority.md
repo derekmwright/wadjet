@@ -1081,15 +1081,28 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
         door.** An empty CSV or JSON field means NULL, which is what the Go
         map API's `""` has always meant; a SQL literal `''` is a value, and
         `''::inet` is 22P02 on 17.11. Both doors said absence before this arc.
-     2. **PORT and PROTOCOL have two domains.** The CAST holds the int4
-        CARRIER (#901's settled position, pinned by
-        `expr.TestAnInt32DomainCastRefusesPastItsOwnRange`) while every WRITER
-        door holds the type's own 0..65535 / 0..255. So `CAST(70000 AS PORT)`
-        answers and `INSERT INTO t (p) VALUES ('70000')` is 22003 — loud at the
-        door that stores, which is the one that matters, but not one rule. The
-        CTAS door carries the cast's answer to REST: `CREATE TABLE p AS SELECT
-        CAST(70000 AS PORT)` mints a PORT column holding 70000, measured
-        identical at base.
+     2. ~~**PORT and PROTOCOL have two domains.**~~ **SETTLED 2026-09-15
+        (Derek).** They have one, and it is the TYPE's: a PORT is 0..65535 and
+        a PROTOCOL 0..255. **The range is checked when a value ENTERS the type
+        — by CAST or by WRITE — and nowhere else.** `CAST(70000 AS PORT)`,
+        `CAST('70000' AS PORT)`, `CAST(-1 AS PROTOCOL)` and
+        `CREATE TABLE p AS SELECT CAST(70000 AS PORT)` are all 22003 naming the
+        value and the type, through the writer's own check
+        (`parquet.NetworkIntRangeError`) so the two boundaries cannot drift.
+        ARITHMETIC keeps int4's rules and may leave the range without error —
+        `port + 70000` answers — which is PostgreSQL's `smallint + 1` rule and
+        leaves #901's position intact: that ADR entry is about the arithmetic
+        and the wire declaration, not about what a value may BE.
+
+        What it replaces: the CAST held the int4 CARRIER's range, so
+        `CAST(70000 AS PORT)` answered and the CTAS door carried it to REST —
+        a PORT column holding 70000, which `INSERT` on the same table refuses
+        (round-2 review N2, measured identical at base). Gated per type ×
+        {in range, each edge, one past each edge, negative, from text, from
+        int, from a wider int, from a float} in
+        `expr.TestAValueEnteringPortOrProtocolIsHeldToTheTypesRange`, on five
+        arms in `coordinator.TestNetworkTextGrammarAnswersTheSameOnEveryArm`,
+        and on the wire in `pgwire.TestANetworkCastOnTheWire`.
      3. **PORT and PROTOCOL beside a COLUMN are read as the `integer` they
         DECLARE.** `CAST('udp' AS PROTOCOL)` is 17 because the cast resolves
         against the TYPE; `WHERE c_proto = 'udp'` is 22P02, and

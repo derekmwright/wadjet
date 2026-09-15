@@ -133,7 +133,11 @@ func ntExpectValue(typ parquet.TypeID, c ntPgCell) string {
 type ntNumCell struct {
 	form  string
 	write string // disposition at a door that STORES (the type's own range)
-	cast  string // disposition at the CAST (int4's domain, #901; ADR-0012)
+	// cast was int4's domain until 2026-09-15 and is now the type's own, at
+	// every door a value ENTERS the type through (Derek's decision on the
+	// round-2 review's FC-2). It stays a column of its own because the
+	// FRACTIONAL pair still differs there — the numeric family's cell, FC-7.
+	cast string
 	// cmp is the disposition at a COMPARISON door, where the literal is
 	// resolved against the column's DECLARED WIRE TYPE — `integer`, OID 23
 	// (#834) — and therefore reads int4's text grammar rather than the type's
@@ -177,8 +181,8 @@ func ntPortCells() []ntNumCell {
 		{"+443", "ok", "ok", "", 443},
 		{"-0", "ok", "ok", "", 0},
 		{"017", "ok", "ok", "", 17},
-		{"65536", "22003", "ok", "", 0},
-		{"-1", "22003", "ok", "", 0},
+		{"65536", "22003", "22003", "ok", 0},
+		{"-1", "22003", "22003", "ok", 0},
 		{"3000000000", "22003", "22003", "", 0},
 		{"0x1bb", "22P02", "22P02", "ok", 0},
 		{"0o17", "22P02", "22P02", "ok", 0},
@@ -203,7 +207,7 @@ func ntProtocolCells() []ntNumCell {
 		{"icmpv6", "ok", "ok", "22P02", 58},
 		{"ipv6-icmp", "ok", "ok", "22P02", 58},
 		{" udp", "ok", "ok", "22P02", 17},
-		{"256", "22003", "ok", "", 0},
+		{"256", "22003", "22003", "ok", 0},
 		{"3000000000", "22003", "22003", "", 0},
 		{"0x6", "22P02", "22P02", "ok", 0},
 		{"nosuchproto", "22P02", "22P02", "", 0},

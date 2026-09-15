@@ -1,6 +1,8 @@
 package expr
 
 import (
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -19,12 +21,11 @@ import (
 // `integer out of range` for `3000000000::int4`, and `3000000000::PORT`
 // answered it under a type whose whole carrier is a signed 32-bit field.
 //
-// The bound for PORT and PROTOCOL is the engine's own, stated in
-// docs/data-types.md before this fix existed: "a DATE, a PORT and a PROTOCOL
-// are all stored in a signed 32-bit field, and a number with no room in one is
-// 22003 integer out of range". PostgreSQL has no such type to consult, so the
-// in-range half of this table is what says the refusal is about the VALUE and
-// not about the cast existing.
+// PORT and PROTOCOL have LEFT this table (2026-09-15, Derek's decision on the
+// round-2 review's FC-2). Their bound is the TYPE's — 0..65535 and 0..255 —
+// not the int4 carrier's, and it is checked wherever a value ENTERS the type.
+// TestAValueEnteringPortOrProtocolIsHeldToTheTypesRange below is their table;
+// what stays here is int4's, which INT32 and DATE still take.
 func TestAnInt32DomainCastRefusesPastItsOwnRange(t *testing.T) {
 	b := batch.NewRecordBatch(nil, 1)
 
@@ -32,7 +33,7 @@ func TestAnInt32DomainCastRefusesPastItsOwnRange(t *testing.T) {
 	// an int64 through toInt64Safe, a float through castFloatToInt64Even, a
 	// numeric literal through castFloatToInt64 and text through
 	// kernel.IntLitText, and only ONE of those four used to be checked.
-	for _, dest := range []string{"int32", "INT32", "port", "PROTOCOL"} {
+	for _, dest := range []string{"int32", "INT32"} {
 		for _, c := range []struct {
 			name    string
 			operand Expr
@@ -172,4 +173,74 @@ func evalCastForTest(c *Cast, b *batch.RecordBatch) (v any, err error) {
 		}
 	}()
 	return c.Eval(b, 0), nil
+}
+
+// TestAValueEnteringPortOrProtocolIsHeldToTheTypesRange is the rule Derek
+// settled on 2026-09-15: a PORT is 0..65535 and a PROTOCOL 0..255, the range
+// is checked when a value ENTERS the type — by CAST or by WRITE — and nowhere
+// else, and a value outside it is 22003 naming the value and the type.
+//
+// Before it the CAST held the int4 CARRIER's range, so `CAST(70000 AS PORT)`
+// answered 70000 and `CREATE TABLE p AS SELECT CAST(70000 AS PORT)` PERSISTED
+// it into a column the catalog declares PORT — a value `INSERT` refuses with
+// 22003 at the same table (review NT N2). One rule, one refusal, one message:
+// parquet.NetworkIntRangeError, which is the writer's own.
+//
+// ARITHMETIC is deliberately NOT here: `port + 70000` is plain int4 arithmetic
+// and may leave the range without error, which is PostgreSQL's `smallint + 1`
+// rule and #901's position, both intact.
+func TestAValueEnteringPortOrProtocolIsHeldToTheTypesRange(t *testing.T) {
+	b := batch.NewRecordBatch(nil, 1)
+	for _, d := range []struct {
+		dest   string
+		lo, hi int64
+	}{{"port", 0, 65535}, {"PORT", 0, 65535}, {"protocol", 0, 255}, {"PROTOCOL", 0, 255}} {
+		for _, c := range []struct {
+			name    string
+			operand Expr
+			want    int64
+			refused bool
+		}{
+			{"low edge", &Lit{Val: d.lo}, d.lo, false},
+			{"high edge", &Lit{Val: d.hi}, d.hi, false},
+			{"inside", &Lit{Val: d.hi / 2}, d.hi / 2, false},
+			{"one past the high edge", &Lit{Val: d.hi + 1}, 0, true},
+			{"one below the low edge", &Lit{Val: d.lo - 1}, 0, true},
+			{"negative", &Lit{Val: int64(-5)}, 0, true},
+			// From TEXT, from a WIDER int, and from a float: every source
+			// reaches the same bound, which is what "when a value enters the
+			// type" means.
+			{"from text, inside", &Lit{Val: strconv.FormatInt(d.hi, 10)}, d.hi, false},
+			{"from text, past", &Lit{Val: strconv.FormatInt(d.hi+1, 10)}, 0, true},
+			{"from a wider int", &Lit{Val: int64(3000000000)}, 0, true},
+			{"from int64's maximum", &Lit{Val: int64(math.MaxInt64)}, 0, true},
+			{"from a float, inside", &Lit{Val: float64(d.hi)}, d.hi, false},
+			{"from a float, past", &Lit{Val: float64(d.hi) + 1}, 0, true},
+		} {
+			t.Run(d.dest+"/"+c.name, func(t *testing.T) {
+				got, err := evalCastForTest(&Cast{Operand: c.operand, DestType: d.dest}, b)
+				if c.refused {
+					if err == nil {
+						t.Fatalf("CAST(%v AS %s) answered %v; the type's range is [%d, %d]",
+							c.operand, d.dest, got, d.lo, d.hi)
+					}
+					if st := sqlerr.StateOf(err); st != "22003" {
+						t.Errorf("SQLSTATE %q, want 22003 (%v)", st, err)
+					}
+					if !strings.Contains(err.Error(), "out of range") ||
+						!strings.Contains(strings.ToUpper(err.Error()), strings.ToUpper(d.dest)) {
+						t.Errorf("refusal %q names neither the type nor the bound", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("CAST(%v AS %s) refused a value the type holds: %v",
+						c.operand, d.dest, err)
+				}
+				if n, ok := got.(int64); !ok || n != c.want {
+					t.Errorf("= %#v, want %d", got, c.want)
+				}
+			})
+		}
+	}
 }

@@ -158,6 +158,37 @@ func TestInsertSelectTypesAnUnknownLiteralFromItsTarget(t *testing.T) {
 		})
 	}
 
+	// A value ENTERING the type through a CAST is held to the TYPE's range at
+	// the CTAS door too, which is where it used to reach REST: before Derek's
+	// 2026-09-15 decision `CREATE TABLE p AS SELECT CAST(70000 AS PORT)`
+	// minted a PORT column holding 70000 — a value the INSERT door on the same
+	// table refuses with 22003 (review NT N2).
+	for _, c := range []struct{ name, sql string }{
+		{"ctas port past the range", "CREATE TABLE p AS SELECT CAST(70000 AS PORT) AS v"},
+		{"ctas port negative", "CREATE TABLE p2 AS SELECT CAST(-5 AS PORT) AS v"},
+		{"ctas protocol past the range", "CREATE TABLE p3 AS SELECT CAST(999 AS PROTOCOL) AS v"},
+	} {
+		t.Run("range/"+c.name, func(t *testing.T) {
+			_, err := db.Query(ctx, c.sql)
+			if err == nil {
+				t.Fatalf("%s created a column holding a value its type cannot be", c.sql)
+			}
+			if st := sqlerr.StateOf(err); st != "22003" {
+				t.Errorf("SQLSTATE %q, want 22003 (%v)", st, err)
+			}
+		})
+	}
+	// And the edge still persists, so the refusal is about the VALUE.
+	t.Run("range/ctas port at the edge", func(t *testing.T) {
+		if _, err := db.Query(ctx, "CREATE TABLE p4 AS SELECT CAST(65535 AS PORT) AS v"); err != nil {
+			t.Fatalf("CTAS of the type's own maximum refused: %v", err)
+		}
+		res, err := db.Query(ctx, "SELECT v FROM p4")
+		if err != nil || len(res.Rows) != 1 || res.Rows[0]["v"] != int32(65535) {
+			t.Errorf("read back %#v/%v, want int32(65535)", res.Rows, err)
+		}
+	})
+
 	// And the declarations whose text no leaf in this writer reads stay
 	// 42804 rather than failing at the flush with a box error.
 	t.Run("bool/stays_42804", func(t *testing.T) {

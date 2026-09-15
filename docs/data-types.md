@@ -332,15 +332,23 @@ embedded ingester it is ABSENCE (the empty CSV or JSON field, stored as NULL),
 and at every SQL door it is a value the type cannot read — `22P02`, which is
 what `''::inet` is on the server.
 
-`PORT` and `PROTOCOL` get one more reading than the others, and both
-differences are deliberate. A `CAST` holds the int4 CARRIER those types are
-stored in while every writer door holds the type's own 0–65535 / 0–255, so
-`CAST(70000 AS PORT)` answers and `INSERT INTO t (p) VALUES ('70000')` is
-`22003` — loud at the door that stores. And beside a COLUMN they are read as
-the `integer` they DECLARE on the wire (OID 23), which is int4's whole
-grammar: `WHERE proto = 'udp'` is `22P02` and `WHERE port = '0x1bb'` answers.
-Use `CAST('udp' AS PROTOCOL)` or `protocol_number('udp')` in a predicate. Both
-are in ADR-0012's list.
+**A `PORT` or `PROTOCOL` range is checked when a value ENTERS the type — by
+cast or by write — and nowhere else.** A port is 0–65535 and a protocol
+0–255, and a value outside the range is `22003` naming the value and the type,
+at every door: `CAST(70000 AS PORT)`, `CAST('70000' AS PORT)`,
+`CAST(-1 AS PROTOCOL)`, `INSERT INTO t (p) VALUES (70000)` and
+`CREATE TABLE p AS SELECT CAST(70000 AS PORT)` all refuse. It is the same
+refusal and the same words at each one.
+
+Arithmetic is not a type boundary and keeps `int4`'s rules: `port * 1`,
+`port + 70000`, `-port` and `SUM(port)` are integers and may leave the range
+without error, exactly as `smallint + 1` is `integer` in PostgreSQL. The
+constraint is on the TYPE, not on the arithmetic that reads it.
+
+Beside a COLUMN, though, both types are read as the `integer` they DECLARE on
+the wire (OID 23), which is int4's whole grammar: `WHERE proto = 'udp'` is
+`22P02` and `WHERE port = '0x1bb'` answers. Use `CAST('udp' AS PROTOCOL)` or
+`protocol_number('udp')` in a predicate. That one is in ADR-0012's list.
 
 **A value PostgreSQL accepts that this engine's type has no room for is
 `0A000`, one class at every door.** An `IPv4` column cannot hold a NETWORK

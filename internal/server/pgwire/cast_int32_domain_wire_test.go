@@ -55,6 +55,10 @@ func TestAnInt32DomainCastOnTheWire(t *testing.T) {
 	// The refusals carry PostgreSQL's class, not XX000 ("the server broke").
 	for _, sql := range []string{
 		`SELECT 3000000000::INT32 AS v`,
+		// PORT and PROTOCOL still refuse this magnitude, and since
+		// 2026-09-15 they refuse it at the TYPE's own range rather than
+		// int4's — the message names the type and the bound. The wire class
+		// is 22003 either way, which is what this loop asserts.
 		`SELECT 3000000000::PORT AS v`,
 		`SELECT 3000000000::PROTOCOL AS v`,
 		`SELECT CAST(1e40 AS FLOAT32) AS v`,

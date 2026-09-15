@@ -2335,9 +2335,12 @@ SELECT CAST(bytes_in AS Float64) / CAST(packets AS Float64) AS avg_size FROM flo
 `INT32` is a second spelling of `int4` and lands on the carrier every integer
 spelling lands on (`bigint` on the wire); `PORT` and `PROTOCOL` declare
 `integer` (OID 23), the same OID their columns declare; `FLOAT32` is `REAL`.
-Those four, and `DATE` from an integer day count, are stored in a signed 32-bit
-field, so a value with no room in one is `22003 integer out of range` — see the
-table below and `docs/data-types.md`. `PORT` and `PROTOCOL` also read TEXT
+`INT32`, `FLOAT32` and `DATE` from an integer day count are stored in a signed
+32-bit field, so a value with no room in one is `22003 integer out of range` —
+see the table below and `docs/data-types.md`. `PORT` and `PROTOCOL` are held to
+the TYPE's range instead, 0–65535 and 0–255: a cast is a place a value ENTERS
+the type, so `CAST(70000 AS PORT)` is `22003` naming the value and the type,
+while `port + 70000` is plain `int4` arithmetic and answers. `PORT` and `PROTOCOL` also read TEXT
 (`'443'::PORT` is 443, `'abc'::PORT` is `22P02`), and `PROTOCOL` reads the IANA
 NAME as well — `CAST('udp' AS PROTOCOL)` is 17, which is the text form
 `protocol_name()` prints.

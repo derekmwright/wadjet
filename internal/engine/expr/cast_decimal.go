@@ -9,6 +9,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // CAST(x AS DECIMAL(p,s)) / NUMERIC(p,s) / bare DECIMAL / ::numeric, done
@@ -404,7 +405,29 @@ func castDecimalToInt(v any, dest string) (int64, bool) {
 // whose result is aggregated, compared or grouped may never reach a vector.
 func castIntInRange(v int64, dest string) int64 {
 	switch dest {
-	case "int", "integer", "int4", "int32", "port", "protocol", "date":
+	case "port", "protocol":
+		// The TYPE's own range, not the int4 carrier's. A PORT is 0..65535 and
+		// a PROTOCOL 0..255, and the rule Derek settled on 2026-09-15 is that
+		// the range is checked when a value ENTERS the type — by CAST or by
+		// WRITE — and nowhere else. So `CAST(70000 AS PORT)` is 22003 naming
+		// the value and the type, the same refusal and the same words the
+		// writer's door has always produced (parquet.NetworkIntRangeError, one
+		// check shared), while `port + 70000` stays plain int4 arithmetic and
+		// may leave the range without error — PostgreSQL's `smallint + 1` rule,
+		// and #901's position, both intact.
+		//
+		// Before this a cast held the CARRIER's range and minted a value no
+		// PORT column could store: `CREATE TABLE p AS SELECT CAST(70000 AS
+		// PORT)` persisted 70000 into a column the catalog declares PORT,
+		// which `INSERT` refused with 22003 (review NT N2).
+		typ := parquet.TypePort
+		if dest == "protocol" {
+			typ = parquet.TypeProtocol
+		}
+		if lo, hi := parquet.NetworkIntBounds(typ); v < lo || v > hi {
+			panic(fatalEval{parquet.NetworkIntRangeError(typ, v)})
+		}
+	case "int", "integer", "int4", "int32", "date":
 		if v < -(1<<31) || v > (1<<31)-1 {
 			raiseIntegerOutOfRange(dest)
 		}
