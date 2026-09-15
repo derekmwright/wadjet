@@ -8,6 +8,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // This file is the expression layer's half of the one literal-vs-numeric-column
@@ -172,6 +173,14 @@ func numericLitError(typ batch.TypeID, text string, st kernel.NumConstStatus) er
 		return nil
 	}
 	if st == kernel.NumConstRange {
+		if typ == batch.TypeMAC {
+			// macaddr's own wording, which is not the numeric family's:
+			// `invalid octet value in "macaddr" value: "…"`, measured on
+			// 17.11. The message is part of the answer (ADR-0012 item 1), and
+			// the one place it lives is parquet.NetworkTextError — the same
+			// text the WRITER produces for the same literal.
+			return parquet.NetworkTextError(typ, text, parquet.NetTextRange)
+		}
 		return &NumericRangeError{Input: text, DestType: name}
 	}
 	return &InvalidLiteralError{Input: text, DestType: name}

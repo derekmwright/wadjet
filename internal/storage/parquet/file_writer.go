@@ -10,7 +10,6 @@ import (
 	"math"
 	"net"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -2144,58 +2143,29 @@ func (lb *leafBuffer) updateStatsCIDR(b []byte) {
 	}
 }
 
-// CidrStatsSortKey is kernel.CidrSortKey, duplicated here rather than
-// imported: internal/storage/parquet sits BELOW internal/engine/exec/kernel
-// in the import graph (kernel imports internal/engine/batch, which imports
-// this package, and since #523 imports this package directly as well), so
-// this package cannot import kernel without a cycle. Any change to
-// CidrSortKey's encoding must be mirrored here.
+// CidrStatsSortKey is the CIDR order key, and since #627 it is the ONLY body
+// of it: kernel.CidrSortKey delegates here rather than carrying a second copy,
+// which is possible because internal/storage/parquet sits BELOW
+// internal/engine/exec/kernel in the import graph and kernel already imports
+// this package. The two copies it replaces had to be mirrored by hand, and a
+// drift between them is a WRONG ANSWER — the writer picks a row group's
+// min/max with one and the filter keys its literal with the other, so a
+// disagreement prunes away row groups holding rows the filter keeps.
 //
-// Exported ONLY so the duplication can be pinned from the side of the graph
-// that can see both: kernel.TestCidrStatsSortKeyMatchesKernel runs
-// PostgreSQL's own inet-order fixture (pgInetOrder, derived from a live
-// postgres:17-alpine) through both functions and requires byte-identical
-// keys. Nothing outside this package should call it to make a decision —
-// RowGroupStats' CidrInetBound is the supported way to get a comparable
-// CIDR bound, because it also carries the per-file confirmation this
-// function cannot make.
+// The grammar is PgInetPton's, the same one the writer validates a CIDR value
+// with; kernel.TestCidrStatsSortKeyMatchesKernel holds the delegation shut and
+// TestCidrSortKeyMatchesPostgresInetOrder pins the ORDER against a live
+// postgres:17-alpine. Nothing outside this package should call it to make a
+// decision — RowGroupStats' CidrInetBound is the supported way to get a
+// comparable CIDR bound, because it also carries the per-file confirmation
+// this function cannot make.
 func CidrStatsSortKey(s string) (string, bool) {
-	t := s
-	if !strings.ContainsRune(t, '/') {
-		if strings.ContainsRune(t, ':') {
-			t += "/128"
-		} else {
-			t += "/32"
-		}
+	family, full, ones, ok := PgInetPton(s)
+	if !ok {
+		return "", false
 	}
-	ip, ipnet, err := net.ParseCIDR(t)
-	if err != nil || ipnet == nil {
-		// PostgreSQL's abbreviated v4 forms in its INET grammar, read by the
-		// ONE parser this package and kernel share (#627). Mirrors
-		// kernel.CidrSortKey's own fallback exactly, which is what the
-		// duplication gate requires.
-		a, ones, pok := PgIPv4Pton(s)
-		if !pok {
-			return "", false
-		}
-		full := net.IP(a[:])
-		masked := full.Mask(net.CIDRMask(ones, 32))
-		buf := make([]byte, 0, 2+2*net.IPv4len)
-		buf = append(buf, 0x04)
-		buf = append(buf, masked...)
-		buf = append(buf, byte(ones))
-		buf = append(buf, full...)
-		return string(buf), true
-	}
-	ones, bits := ipnet.Mask.Size()
-	var full, masked net.IP
-	var family byte
-	if bits == net.IPv4len*8 {
-		family, full, masked = 0x04, ip.To4(), ipnet.IP.To4()
-	} else {
-		family, full, masked = 0x06, ip.To16(), ipnet.IP.To16()
-	}
-	if full == nil || masked == nil {
+	masked := net.IP(full).Mask(net.CIDRMask(ones, len(full)*8))
+	if masked == nil {
 		return "", false
 	}
 	buf := make([]byte, 0, 2+2*len(full))

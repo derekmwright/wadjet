@@ -767,71 +767,14 @@ func compareFilterString(op CompareOp, val string) FilterKernel {
 // discard host bits as net.ParseCIDR's network alone would (#492).
 // Bare v4/v6 addresses mean /32 or /128; v4-mapped v6 stays family 6.
 // Invalid input returns ok=false and callers must raise, never match nothing.
-// Share this structural key with expr.CmpNetworkLit and stats; all must agree
-// bit-for-bit. TestCidrSortKeyMatchesPostgresInetOrder pins the mixed-prefix order.
+//
+// The BODY lives in parquet.CidrStatsSortKey, which the row-group statistics
+// writer also calls; this was a hand-mirrored copy until #627, and a drift
+// between the two prunes away row groups holding rows the filter keeps.
+// TestCidrSortKeyMatchesPostgresInetOrder pins the mixed-prefix order and
+// TestCidrStatsSortKeyMatchesKernel holds the delegation shut.
 // See docs/internals/kernel-cidr-inet-sort-key.md for the design.
-func CidrSortKey(s string) (string, bool) {
-	t := s
-	if !strings.ContainsRune(t, '/') {
-		// A bare address is a host route. ':' is present in every IPv6 text
-		// form and in no IPv4 one, which is the same split net.ParseCIDR
-		// itself makes (it tries the dotted-quad parse first and falls back
-		// to the v6 parser).
-		if strings.ContainsRune(t, ':') {
-			t += "/128"
-		} else {
-			t += "/32"
-		}
-	}
-	ip, ipnet, err := net.ParseCIDR(t)
-	if err != nil || ipnet == nil {
-		// PostgreSQL's ABBREVIATED v4 forms, which Go's parser does not read:
-		// '10/8', '192.168/16', '10.1/8', and the leading zeros in
-		// '010.1.2.3' (#627). The canonical spelling goes back through the
-		// same key builder, so an abbreviated literal and the address it names
-		// produce one key — which is what makes `cd = '10/8'` find the row
-		// holding '10.0.0.0/8', as it does on the server.
-		//
-		// The grammar is INET's, not cidr's, because that is the type the
-		// server resolves `cd = '<literal>'` through — see PgIPv4Pton's own
-		// doc. A maskless abbreviation ('239', '192.168') is 22P02 here for
-		// the same reason it is there.
-		//
-		// This arm is why CidrAddressText exists beside this function: a
-		// MASKED abbreviation is an address here and a syntax error beside a
-		// numeric column, so a site that does not know the column's type must
-		// not read it as one.
-		a, ones, pok := parquet.PgIPv4Pton(s)
-		if !pok {
-			return "", false
-		}
-		full := net.IP(a[:])
-		masked := full.Mask(net.CIDRMask(ones, 32))
-		buf := make([]byte, 0, 2+2*net.IPv4len)
-		buf = append(buf, 0x04)
-		buf = append(buf, masked...)
-		buf = append(buf, byte(ones))
-		buf = append(buf, full...)
-		return string(buf), true
-	}
-	ones, bits := ipnet.Mask.Size()
-	var full, masked net.IP
-	var family byte
-	if bits == net.IPv4len*8 {
-		family, full, masked = 0x04, ip.To4(), ipnet.IP.To4()
-	} else {
-		family, full, masked = 0x06, ip.To16(), ipnet.IP.To16()
-	}
-	if full == nil || masked == nil {
-		return "", false
-	}
-	buf := make([]byte, 0, 2+2*len(full))
-	buf = append(buf, family)
-	buf = append(buf, masked...)
-	buf = append(buf, byte(ones))
-	buf = append(buf, full...)
-	return string(buf), true
-}
+func CidrSortKey(s string) (string, bool) { return parquet.CidrStatsSortKey(s) }
 
 // CidrAddressText is the type-BLIND address gate for expr.tryNetworkLit and
 // expr.firstNonAddressLit (#627); exclude abbreviated v4 forms such as 10/8
@@ -914,7 +857,7 @@ func IPv6LitKey(s string) (key string, ok bool) {
 			}
 			return "", true
 		}
-		if bits, ok := pgInet6MaskBits(mask); !ok || bits != 128 {
+		if bits, ok := parquet.PgInet6MaskBits(mask); !ok || bits != 128 {
 			return "", false
 		}
 		s = body
@@ -2455,41 +2398,8 @@ func IPv6PrefixLiteral(s string) bool {
 	if ip := net.ParseIP(body); ip == nil || ip.To16() == nil {
 		return false
 	}
-	bits, ok := pgInet6MaskBits(mask)
+	bits, ok := parquet.PgInet6MaskBits(mask)
 	return ok && bits != 128
-}
-
-// pgInet6MaskBits reads the `/bits` of an inet6 literal exactly as
-// PostgreSQL's inet6 input does — and its rule is NOT the v4 one. Measured on
-// 17.11:
-//
-//	'::1/0'    ::1/0        '::1/00'    22P02   no leading zeros, ever
-//	'::1/64'   ::1/64       '::1/064'   22P02
-//	'::1/128'  ::1/128      '::1/0128'  22P02
-//	                        '::1/129'   22P02   0-128 only
-//	                        '::1/abc'   22P02   digits only
-//	                        '::1/'      22P02
-//
-// while the v4 side takes `'10.0.0.1/031'` as /31 and `'10/008'` as /8. Two
-// parsers, two rules; this one is v6's.
-func pgInet6MaskBits(mask string) (int, bool) {
-	if mask == "" || len(mask) > 3 {
-		return 0, false
-	}
-	if len(mask) > 1 && mask[0] == '0' {
-		return 0, false // '/00', '/01', '/064' are all 22P02 on the server
-	}
-	bits := 0
-	for i := 0; i < len(mask); i++ {
-		if mask[i] < '0' || mask[i] > '9' {
-			return 0, false
-		}
-		bits = bits*10 + int(mask[i]-'0')
-	}
-	if bits > 128 {
-		return 0, false
-	}
-	return bits, true
 }
 
 // IPv4SortKey re-keys an IPv4 literal or a rendered IPV4 column value into
@@ -2518,94 +2428,27 @@ func IPv4SortKey(s string) (string, bool) {
 // already do for their two types.
 func IPv4LitKey(s string) (int64, bool) { return parseIPv4ToInt64(s) }
 
-// parseMACToInt64 converts a string MAC address to its int64 representation.
-// ok is false when s names no address at all (#519; see parseIPv4ToInt64).
+// parseMACToInt64 converts a string MAC address to its int64 representation,
+// through the type's ONE grammar (parquet.PgMACPton, which is PostgreSQL
+// 17.11's macaddr_in). ok is false when s names no address at all (#519; see
+// parseIPv4ToInt64) — including an octet past 255, which the server answers
+// 22003 for rather than 22P02 (parquet.NetworkTextError carries that split).
+//
+// It used to be net.ParseMAC plus a grouped-hex extension that counted
+// SEPARATORS, and the pair was wrong in both directions: `'a:b:c:d:e:f'` and
+// `'08002b010203'` are values on the server and were refused here, while
+// macaddr_in's real grammar is a list of sscanf PATTERNS that admits neither
+// `'08.00.2b.01.02.03'` nor `'08002b:0102:03'` (#627).
 func parseMACToInt64(s string) (int64, bool) {
-	hw, err := net.ParseMAC(s)
-	if err != nil {
-		if b, ok := pgMACGroupedHex(s); ok {
-			hw = b
-		} else {
-			return 0, false
-		}
-	}
-	if len(hw) != 6 {
+	b, st := parquet.PgMACPton(s)
+	if st != parquet.NetTextOK {
 		return 0, false
 	}
 	var n uint64
-	for _, b := range hw {
-		n = (n << 8) | uint64(b)
+	for _, c := range b {
+		n = n<<8 | uint64(c)
 	}
 	return int64(n), true
-}
-
-// pgMACGroupedHex extends net.ParseMAC with PostgreSQL grouped hex (#627).
-// Require exactly twelve hex digits split 6+6 or 4+4+4 by colon/hyphen.
-// Accept the additional spellings as the same six bytes, never infer another
-// address; malformed runs or non-hex characters remain refused.
-// CIDR/INET abbreviation grammar is separate from this MAC parser.
-// See docs/internals/kernel-mac-grouped-hex-grammar.md for the design.
-func pgMACGroupedHex(s string) ([]byte, bool) {
-	digits := make([]byte, 0, 12)
-	var sizes []int
-	run := 0
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c == ':' || c == '-':
-			if run == 0 {
-				return nil, false // a separator with no digits before it
-			}
-			sizes = append(sizes, run)
-			run = 0
-		case isHexDigit(c):
-			digits = append(digits, c)
-			run++
-			if len(digits) > 12 {
-				return nil, false
-			}
-		default:
-			return nil, false
-		}
-	}
-	if run == 0 || len(digits) != 12 {
-		return nil, false
-	}
-	sizes = append(sizes, run)
-	// The GROUP SIZES, not merely the separator COUNT. PostgreSQL's two
-	// grouped-hex spellings are 6+6 and 4+4+4 and nothing else — measured on
-	// 17.11 over every 12-digit regrouping:
-	//
-	//	08002b:010203   08002b-010203   0800-2b01-0203      accepted
-	//	0-8-002b010203  0:8002b010203   08-002b010203       22P02
-	//	08002b:01:0203  08:002b:010203  08002b:0102:03      22P02
-	//
-	// Counting separators alone took all nine, which is a SUPERSET of
-	// PostgreSQL's grammar rather than the equality this function and
-	// ADR-0012's #627 entry both claimed. A superset is a keeper only when it
-	// is recorded; an unrecorded one is a claim the code does not make true,
-	// so the bound is enforced here instead.
-	switch len(sizes) {
-	case 2:
-		if sizes[0] != 6 || sizes[1] != 6 {
-			return nil, false
-		}
-	case 3:
-		if sizes[0] != 4 || sizes[1] != 4 || sizes[2] != 4 {
-			return nil, false
-		}
-	default:
-		return nil, false
-	}
-	out := make([]byte, 6)
-	if _, err := hex.Decode(out, digits); err != nil {
-		return nil, false
-	}
-	return out, true
-}
-
-func isHexDigit(c byte) bool {
-	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
 }
 
 // MACLitKey exports parseMACToInt64 for exec.networkConstError; see
@@ -2623,6 +2466,12 @@ func MACLitKey(s string) (int64, bool) { return parseMACToInt64(s) }
 // that form, and no UUID TEXT is 16 characters long (32 without dashes, 36
 // with), so the two cannot be confused.
 //
+// The TEXT grammar is parquet.PgUUIDPton, which is PostgreSQL 17.11's uuid_in.
+// This function used to strip EVERY hyphen, so `'a-0eebc99…'` was a value here
+// and 22P02 on the server, while the CAST door's own copy refused the
+// `'a0ee-bc99-9c0b-…'` spelling the server accepts — two parsers, two answers,
+// neither of them PostgreSQL's (#627).
+//
 // ok is false when s names no address at all — callers must turn that into a
 // query ERROR rather than the historical match-nothing/match-everything
 // sentinel of "" (#519; see parseIPv4ToInt64).
@@ -2630,27 +2479,11 @@ func parseUUIDToRawString(s string) (string, bool) {
 	if len(s) == 16 {
 		return s, true
 	}
-	// The BRACED spelling PostgreSQL accepts — `{a0eebc99-...-a11}` — is one
-	// of the six it takes for one value, and it is the only one this parser
-	// did not (#627). Value-preserving: the braces are punctuation, and the
-	// dash-free and mixed-case forms already worked.
-	if len(s) >= 2 && s[0] == '{' && s[len(s)-1] == '}' {
-		s = s[1 : len(s)-1]
-	}
-	clean := make([]byte, 0, 32)
-	for i := 0; i < len(s); i++ {
-		if s[i] != '-' {
-			clean = append(clean, s[i])
-		}
-	}
-	if len(clean) != 32 {
+	raw, st := parquet.PgUUIDPton(s)
+	if st != parquet.NetTextOK {
 		return "", false
 	}
-	raw := make([]byte, 16)
-	if _, err := hex.Decode(raw, clean); err != nil {
-		return "", false
-	}
-	return string(raw), true
+	return string(raw[:]), true
 }
 
 // UUIDLiteralToRaw is parseUUIDToRawString for the row-at-a-time predicate in

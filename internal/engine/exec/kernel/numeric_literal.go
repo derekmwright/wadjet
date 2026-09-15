@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // Quoted unknown literals take the numeric operand's OWN input grammar and
@@ -193,7 +194,7 @@ func QuotedLitStatus(typ batch.TypeID, text string) (NumConstStatus, bool) {
 		// PostgreSQL's — the rule #579 named: a refusal built on a parser
 		// stricter than the server's refuses valid input, so the parser has
 		// to be widened first. CIDR reads PostgreSQL's abbreviated grammar
-		// (pgIPv4Pton), MAC its six spellings (pgMACGroupedHex) and UUID the
+		// (PgIPv4Pton), MAC its seven spellings (PgMACPton) and UUID the
 		// brace/no-dash/uppercase forms.
 		//
 		// IPv4 and IPv6 are deliberately absent: their accept-set is not yet a
@@ -207,8 +208,15 @@ func QuotedLitStatus(typ batch.TypeID, text string) (NumConstStatus, bool) {
 		}
 		return NumConstSyntax, true
 	case batch.TypeMAC:
-		if _, ok := MACLitKey(text); ok {
+		// macaddr_in's two failures are two SQLSTATEs on the server and this
+		// arm reported one: `'08:00:2b:01:02:100'` is 22003 `invalid octet
+		// value` there — the text IS a macaddr spelling and an octet does not
+		// fit — while `'zz'` is 22P02. Both were 22P02 here (#627).
+		switch _, st := parquet.PgMACPton(text); st {
+		case parquet.NetTextOK:
 			return NumConstOK, true
+		case parquet.NetTextRange:
+			return NumConstRange, true
 		}
 		return NumConstSyntax, true
 	case batch.TypeUUID:
