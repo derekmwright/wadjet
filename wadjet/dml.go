@@ -1799,11 +1799,34 @@ func assignEvaluatedValue(v any, col parquet.Column, srcFloat bool) (any, error)
 	case parquet.TypeDecimal:
 		return assignDecimalValue(v, col)
 	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypePort, parquet.TypeProtocol:
+		if s, isText := v.(string); isText &&
+			(col.Type == parquet.TypePort || col.Type == parquet.TypeProtocol) {
+			// The type's own TEXT form first, so an unknown-typed literal
+			// assigned to a PROTOCOL column reads the IANA name (#986, #1088).
+			// A SYNTAX miss falls through to the numeric assignment, which has
+			// a reading for a fractional literal that this grammar does not.
+			switch n, st, _ := parquet.NetworkTextValue(col.Type, s); st {
+			case parquet.NetTextOK:
+				return n, nil
+			case parquet.NetTextRange:
+				return nil, parquet.NetworkTextError(col.Type, s, st)
+			}
+		}
 		return assignIntegerValue(v, col, srcFloat)
 	case parquet.TypeFloat32, parquet.TypeFloat64:
 		return assignFloatValue(v, col)
 	case parquet.TypeString:
 		return assignTextValue(v, col)
+	case parquet.TypeIPv4, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeMAC, parquet.TypeUUID:
+		// The same rule convertUnquoted applies to a VALUES literal: a SQL
+		// text value is read by the type's grammar here, so `''` is 22P02
+		// rather than the writer's ABSENCE, and a malformed literal is
+		// refused naming the column rather than at the flush.
+		if s, isText := v.(string); isText {
+			if _, st, _ := parquet.NetworkTextValue(col.Type, s); st != parquet.NetTextOK {
+				return nil, parquet.NetworkTextError(col.Type, s, st)
+			}
+		}
 	}
 	return v, nil
 }
@@ -1929,12 +1952,16 @@ func assignIntegerValue(v any, col parquet.Column, srcFloat bool) (any, error) {
 	switch col.Type {
 	case parquet.TypeInt32:
 		lo, hi = math.MinInt32, math.MaxInt32
-	case parquet.TypePort:
-		lo, hi = 0, 65535
-	case parquet.TypeProtocol:
-		lo, hi = 0, 255
+	case parquet.TypePort, parquet.TypeProtocol:
+		// The type boundary's bound, in the ONE place it is written down
+		// (parquet.NetworkIntBounds). It used to be spelled out here and again
+		// at the VALUES literal door, and a third door had none at all.
+		lo, hi = parquet.NetworkIntBounds(col.Type)
 	}
 	if n < lo || n > hi {
+		if col.Type == parquet.TypePort || col.Type == parquet.TypeProtocol {
+			return nil, parquet.NetworkIntRangeError(col.Type, n)
+		}
 		return nil, sqlerr.New("22003", "%s value %d out of range [%d, %d]", col.Type, n, lo, hi)
 	}
 	if col.Type == parquet.TypeInt64 {
@@ -2004,6 +2031,16 @@ func assignLiteralToColumn(text string, col parquet.Column) (any, error) {
 	v, err := ConvertValueForColumn(text, col)
 	if err == nil {
 		return v, nil
+	}
+	if sqlerr.StateOf(err) != "" {
+		// The column's own input grammar has already CLASSIFIED this literal —
+		// 22003 for a PORT past 65535, 22P02 for text naming no address — and
+		// a classified refusal is an answer, not a hint to try a second
+		// reading. Falling through re-read the STILL-QUOTED literal through
+		// the numeric cast, which reported `invalid input syntax for type
+		// numeric: "'65536'"` (quotes included) for a value the type boundary
+		// had already refused with the right code and the right words.
+		return nil, err
 	}
 	switch col.Type {
 	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypePort, parquet.TypeProtocol:
@@ -3072,33 +3109,39 @@ func convertUnquoted(s string, typ parquet.TypeID) (any, error) {
 		return strconv.ParseFloat(s, 64)
 	case parquet.TypeString:
 		return s, nil
+	case parquet.TypeIPv4, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeMAC, parquet.TypeUUID:
+		// The five text-formed network types, validated HERE rather than left
+		// to the writer, because the writer's `""` means ABSENCE — the empty
+		// CSV or JSON field — while a SQL literal `''` is a VALUE the type
+		// cannot read (`''::inet` is 22P02 on 17.11). Without this arm
+		// `INSERT INTO t (ip) VALUES ('')` stored a NULL nobody wrote.
+		// The TEXT is handed on, not the parsed box: an IPV4/IPV6/CIDR/MAC/
+		// UUID column takes its text through the ingest boundary and the
+		// writer converts it there, once.
+		if _, st, _ := parquet.NetworkTextValue(typ, s); st != parquet.NetTextOK {
+			return nil, parquet.NetworkTextError(typ, s, st)
+		}
+		return s, nil
 	case parquet.TypePort, parquet.TypeProtocol:
-		// Both are INT32-backed (schema.go: PORT a uint16, PROTOCOL a
-		// uint8, both widened into Int32Data) and, like TypeInt32 above,
-		// only ever reached a plain integer literal's text — the parser
-		// has no other literal form for them and neither does the writer.
-		// ParseInt(s, 10, 32) alone accepts anything an int32 holds, but
-		// the STORED width is narrower — uint16 for PORT, uint8 for
-		// PROTOCOL — and nothing downstream (checkType, the writer's
-		// toInt32/convertStringToInt64) re-checks that narrower range, so
-		// an out-of-range literal (99999, -1) silently succeeded and read
-		// back verbatim: a value no real port or protocol number can be.
-		// Range-check against the STORED type here, loudly, the same way
-		// an out-of-range int32 literal already fails ParseInt above.
-		v, err := strconv.ParseInt(s, 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("cannot parse %s value %q: %w", typ, s, err)
+		// The type's OWN text form, read by the one grammar every boundary
+		// reads (#986): a decimal number in the type's range, and for
+		// PROTOCOL the IANA name `protocol_name()` prints. Three copies of
+		// this bound existed and one door had no bound at all, so an
+		// out-of-range literal read back verbatim — a value no real port or
+		// protocol number can be.
+		//
+		// A RANGE failure is final and carries its class; a SYNTAX one is not,
+		// because the assignment CAST above this still has a reading for a
+		// fractional literal (`VALUES (2.5)` into an int4-backed column rounds
+		// on the server, #699) and must get its turn.
+		n, st, _ := parquet.NetworkTextValue(typ, s)
+		switch st {
+		case parquet.NetTextOK:
+			return n, nil
+		case parquet.NetTextRange:
+			return nil, parquet.NetworkTextError(typ, s, st)
 		}
-		var lo, hi int64
-		if typ == parquet.TypePort {
-			lo, hi = 0, 65535
-		} else {
-			lo, hi = 0, 255
-		}
-		if v < lo || v > hi {
-			return nil, fmt.Errorf("%s value %d out of range [%d, %d]", typ, v, lo, hi)
-		}
-		return int32(v), nil
+		return nil, fmt.Errorf("cannot parse %s value %q", typ, s)
 	case parquet.TypeDuration, parquet.TypeTimestamp, parquet.TypeDate:
 		// One accept-set per temporal type, shared with the writer and the
 		// ingest boundary (parquet.ParseDurationNanos / ParseTimestampMillis /

@@ -45,12 +45,29 @@ func TestInferCastTypeInt32DomainSpellings(t *testing.T) {
 			t.Errorf("inferCastType(%q) = %v, want PROTOCOL", spelling, got)
 		}
 	}
+	// The four ADDRESS types moved out of the pass-through list below when
+	// #1092 gave Cast.Eval an arm for them: the evaluator parses the operand
+	// with the type's own grammar, so the declaration has to name the type
+	// that can HOLD what it produces. A CTAS over `CAST(col AS IPV4)` minted a
+	// STRING column while the two layers agreed on STRING.
+	for _, c := range []struct {
+		spelling string
+		want     parquet.TypeID
+	}{
+		{"IPV4", parquet.TypeIPv4}, {"ipv4", parquet.TypeIPv4}, {" Ip ", parquet.TypeIPv4},
+		{"IPV6", parquet.TypeIPv6}, {"CIDR", parquet.TypeCIDR},
+		{"MAC", parquet.TypeMAC}, {"MACADDR", parquet.TypeMAC},
+	} {
+		if got := inferCastType(c.spelling); got != c.want {
+			t.Errorf("inferCastType(%q) = %v, want %v", c.spelling, got, c.want)
+		}
+	}
 	// The BOUNDARY of this pass, from the other side: the destinations
 	// Cast.Eval still passes through keep their STRING declaration, because
 	// the two layers must agree about which names this engine converts. A
 	// declaration change without a kernel change is the #310/#443 shape in
 	// the other direction.
-	for _, spelling := range []string{"DURATION", "BYTES", "IPV4", "IPV6", "CIDR", "MAC", "VECTOR"} {
+	for _, spelling := range []string{"DURATION", "BYTES", "VECTOR"} {
 		if got := inferCastType(spelling); got != parquet.TypeString {
 			t.Errorf("inferCastType(%q) = %v, want STRING — Cast.Eval has no arm for it, "+
 				"so declaring a type would publish the operand under an OID nothing produces",

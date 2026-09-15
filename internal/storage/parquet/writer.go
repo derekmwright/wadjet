@@ -1,10 +1,8 @@
 package parquet
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
-	"net"
 	"strings"
 	"time"
 )
@@ -140,34 +138,23 @@ func (w *Writer) prepareRows(rows []map[string]any) error {
 			if !ok || val == nil {
 				continue
 			}
+			// A TEXT value for any type with a text input form goes through
+			// the ONE grammar (convertNetworkLiteral). This arm used to carry
+			// a FOURTH set of parsers — net.ParseIP for the two address types,
+			// net.ParseMAC for MAC — which silently left an unparsed string in
+			// place for the leaf to refuse later, and read spellings the
+			// writer's own door did not (#627).
+			if s, isText := val.(string); isText && hasNetworkLiteralForm(col.Type) {
+				conv, err := convertNetworkLiteral(col.Type, s)
+				if err != nil {
+					return fmt.Errorf("column %q: %w", col.Name, err)
+				}
+				// A nil is the EMPTY literal, which is absence; the leaf
+				// writes it as NULL exactly as a missing key would be.
+				row[col.Name] = conv
+				continue
+			}
 			switch col.Type {
-			case TypeIPv4:
-				if s, ok := val.(string); ok {
-					ip := net.ParseIP(s)
-					if ip != nil {
-						if ip4 := ip.To4(); ip4 != nil {
-							row[col.Name] = int64(binary.BigEndian.Uint32(ip4))
-						}
-					}
-				}
-			case TypeIPv6:
-				if s, ok := val.(string); ok {
-					ip := net.ParseIP(s)
-					if ip != nil {
-						row[col.Name] = []byte(ip.To16())
-					}
-				}
-			case TypeMAC:
-				if s, ok := val.(string); ok {
-					hw, err := net.ParseMAC(s)
-					if err == nil && len(hw) == 6 {
-						var n uint64
-						for _, b := range hw {
-							n = (n << 8) | uint64(b)
-						}
-						row[col.Name] = int64(n)
-					}
-				}
 			case TypePort, TypeProtocol:
 				// This used to narrow int / int64 / float64 to an int32 HERE,
 				// with a bare Go conversion, on the CALLER's map — so
@@ -198,13 +185,6 @@ func (w *Writer) prepareRows(rows []map[string]any) error {
 					return fmt.Errorf("column %q: %w", col.Name, err)
 				} else if ok {
 					row[col.Name] = norm
-				}
-			case TypeUUID:
-				if s, ok := val.(string); ok {
-					raw := parseUUIDForWrite(s)
-					if raw != nil {
-						row[col.Name] = raw
-					}
 				}
 			case TypeDate:
 				// Both a text literal and a time.Time land here — the second
