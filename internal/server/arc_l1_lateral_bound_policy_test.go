@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +79,40 @@ func TestArcL1ABoundedLateralReadsThePublishedValue(t *testing.T) {
 			`SELECT b.id AS a, s.m AS m FROM e7emp b JOIN LATERAL (SELECT c.id AS m ` +
 				`FROM e7emp c WHERE c.dept = b.dept ORDER BY c.id LIMIT 1) s ON true`,
 			pmDeptPairs()},
+	}
+
+	// THE DECLARED OUTPUT IS PostgreSQL's, ON EVERY DOOR. A bare `SELECT *`
+	// publishes the join's STREAM, so a column the planner materializes for a
+	// lifted predicate would enter it — and two of the nine doors are pgwire,
+	// where that is `RowDescription`. The materialization declines over a star
+	// for exactly this reason (ADR-0021 §1q, round 4); this cell is what says
+	// so on the wire.
+	starCols := []struct{ name, sql, want string }{
+		{"starOverLifted",
+			`SELECT * FROM e7bal b LEFT JOIN LATERAL (SELECT c.id AS m FROM e7bal c ` +
+				`WHERE c.bal < b.bal) s ON true`, "bal,id,m"},
+		{"starOverLiftedUnpoliced",
+			`SELECT * FROM e7other b LEFT JOIN LATERAL (SELECT c.note AS m FROM e7other c ` +
+				`WHERE c.id < b.id) s ON true`, "id,m,note"},
+		{"qualifiedStarOverLifted",
+			`SELECT s.* FROM e7bal b LEFT JOIN LATERAL (SELECT c.id AS m FROM e7bal c ` +
+				`WHERE c.bal < b.bal) s ON true`, "m"},
+	}
+	for _, c := range starCols {
+		for _, door := range rig.doors {
+			t.Run(c.name+"/"+door.name, func(t *testing.T) {
+				got, err := door.run(t, "analyst-key", c.sql)
+				if err != nil {
+					t.Fatalf("refused: %v\n  SQL: %s", err, c.sql)
+				}
+				cols := append([]string(nil), got.cols...)
+				sort.Strings(cols)
+				if strings.Join(cols, ",") != c.want {
+					t.Errorf("%s\n  door %s\n  publishes %v\n  want %s (PostgreSQL's list)",
+						c.sql, door.name, cols, c.want)
+				}
+			})
+		}
 	}
 
 	answered := 0
