@@ -2338,15 +2338,28 @@ spelling lands on (`bigint` on the wire); `PORT` and `PROTOCOL` declare
 Those four, and `DATE` from an integer day count, are stored in a signed 32-bit
 field, so a value with no room in one is `22003 integer out of range` — see the
 table below and `docs/data-types.md`. `PORT` and `PROTOCOL` also read TEXT
-(`'443'::PORT` is 443, `'abc'::PORT` is `22P02`).
+(`'443'::PORT` is 443, `'abc'::PORT` is `22P02`), and `PROTOCOL` reads the IANA
+NAME as well — `CAST('udp' AS PROTOCOL)` is 17, which is the text form
+`protocol_name()` prints.
+
+`IPV4`, `IPV6`, `CIDR`, `MACADDR` and `UUID` **parse** their operand with the
+type's own text grammar — PostgreSQL's `inet`, `macaddr` and `uuid` input
+functions, the same accept-set the writer and a comparison read (see
+`docs/data-types.md`). The result is the type's own text, so an abbreviated,
+upper-case or alternately-spelled literal comes back canonical
+(`CAST('010.1.2.3' AS IPV4)` is `10.1.2.3`, `CAST('AA-BB-CC-DD-EE-FF' AS MACADDR)`
+is `aa:bb:cc:dd:ee:ff`); `CIDR` is the exception and keeps the spelling it was
+given, because a CIDR column stores its text directly. Text naming no value of
+the type is `22P02`, and PostgreSQL-valid text naming a NETWORK where the
+target holds a bare address (`CAST('10/8' AS IPV4)`) is `0A000`. This is what
+makes `CREATE TABLE t AS SELECT CAST(col AS IPV4) FROM read_parquet(...)`
+produce a native column over a foreign file's string column.
 
 The remaining type names are **accepted destinations this engine does not
-convert to**: `BYTES`, `IPV4`, `IPV6`, `CIDR`, `MAC`, `DURATION`, `ARRAY`,
-`MAP` and `VECTOR(n)` hand the operand's text back under a `text` declaration
-(OID 25), and `ROW` is a syntax error. The four network ones are a recorded
-divergence — ADR-0012's list, "a CAST to a NETWORK type does not read its
-text", held fail-on-agree by `expr.TestCastToANetworkTypeStillPassesThrough`.
-A name that answers to no type at all is `42704`, not a text column (#652).
+convert to**: `BYTES`, `DURATION`, `ARRAY`, `MAP` and `VECTOR(n)` hand the
+operand's text back under a `text` declaration (OID 25), and `ROW` is a syntax
+error. A name that answers to no type at all is `42704`, not a text column
+(#652).
 
 `CAST(<col> AS STRING)` renders the value's own printed form — the text the
 column projects and the text `LIKE` matches against, which for a TIMESTAMP is

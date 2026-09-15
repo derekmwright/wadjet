@@ -1037,20 +1037,63 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      belongs to. Gated on four arms by
      `coordinator.TestAnInt32DomainRefusalHoldsOnEveryArm` and at the door by
      `wadjet.TestAnOutOfRangeCastRefusesAtTheDoor`.
-   - **A CAST to a NETWORK type does not read its text.** (Added 2026-09-03,
-     #839's census.) `CAST('abc' AS IPV4|IPV6|CIDR|MACADDR)` returns the text
-     under a STRING declaration; PostgreSQL raises 22P02 for its
-     inet/cidr/macaddr equivalents. The reason it is recorded rather than fixed
-     is a rule this ADR already enforces elsewhere: the engine has ONE text
-     accept-set per type and it lives in one function (`parquet.ParseDateDays`
-     for dates). The network types have none — the ingest boundary type-checks
-     the Go box and not the text, and the abbreviated-literal divergence above
-     shows the literal accept-set already differs from PostgreSQL's — so a
-     validator written inside `Cast.Eval` would give one engine two answers to
-     "is this an address". Pinned by
-     `expr.TestCastToANetworkTypeStillPassesThrough`, which fails the day the
-     cast starts refusing. UUID and the float family were the same shape and
-     ARE fixed: both had a single unambiguous accept-set to read.
+   - **CLOSED 2026-09-15 (#1092, #627, #986): a CAST to a network type reads
+     its text.** The entry this replaces recorded that
+     `CAST('abc' AS IPV4|IPV6|CIDR|MACADDR)` returned the text under a STRING
+     declaration where PostgreSQL raises 22P02, and it gave the reason the fix
+     had to wait: this ADR requires ONE text accept-set per type, in one
+     function, and the network types had none — the writer's parsers, the
+     comparison kernels' parsers and (for UUID) the CAST's own parser
+     disagreed in BOTH directions. `parquet.NetworkTextValue` is that one
+     accept-set now: measured against PostgreSQL 17.11's own input functions
+     (`inet` for IPv4/IPv6/CIDR, `macaddr`, `uuid`) and read by the writer, the
+     CAST, the plan-time literal classifier and the runtime comparison alike.
+     `expr.TestCastToANetworkTypeStillPassesThrough` is deleted; its inverse,
+     `expr.TestCastToANetworkTypeParsesItsOperand`, is the proof, and
+     `wadjet.TestEveryNetworkTypeReadsOneTextGrammarAtEveryBoundary` walks the
+     whole type × form × boundary table.
+
+     What the repair CHANGED, and which was PostgreSQL's answer all along: the
+     writer now takes `08-00-2b-01-02-03`, `0800.2b01.0203`, `08002b010203`,
+     `a:b:c:d:e:f` and `{uuid}`; the comparison kernels now refuse
+     `a-0eebc99…`, which no `uuid_in` spelling contains; a CIDR column
+     validates its text at all, where `'zzz'` used to be written into one and
+     ordered as raw bytes for the rest of its life; and an out-of-range macaddr
+     octet is `22003 invalid octet value`, a different answer from a spelling
+     the type cannot read.
+
+     Three DELIBERATE splits remain and are this family's residual:
+
+     1. **`''` is absence at the embedded ingester and 22P02 at every SQL
+        door.** An empty CSV or JSON field means NULL, which is what the Go
+        map API's `""` has always meant; a SQL literal `''` is a value, and
+        `''::inet` is 22P02 on 17.11. Both doors said absence before this arc.
+     2. **PORT and PROTOCOL have two domains.** The CAST holds the int4
+        CARRIER (#901's settled position, pinned by
+        `expr.TestAnInt32DomainCastRefusesPastItsOwnRange`) while every WRITER
+        door holds the type's own 0..65535 / 0..255. So `CAST(70000 AS PORT)`
+        answers and `INSERT INTO t (p) VALUES ('70000')` is 22003 — loud at the
+        door that stores, which is the one that matters, but not one rule.
+     3. **A PROTOCOL literal beside a COLUMN is read as int4.**
+        `CAST('udp' AS PROTOCOL)` is 17 because the cast resolves against the
+        TYPE; `WHERE c_proto = 'udp'` is 22P02 because a comparison resolves
+        an unknown literal against the column's DECLARED wire type, which is
+        `integer` (OID 23, #834). Closing it means teaching
+        `kernel.ResolveFilterKernel`, `exec/filter.go` and the boxed-pair layer
+        a PROTOCOL-specific literal reading at five sites; measured, not
+        guessed, and left as a filing candidate rather than half-done.
+
+     **BOOL, BYTES and the containers refuse an unknown-typed literal in
+     `INSERT … SELECT`** (Added 2026-09-15, #1088.) A bare quoted literal is
+     SQL's `unknown` and is typed FROM the INSERT's target, so
+     `INSERT INTO t (ip) SELECT '10.0.0.1'` is a value here as it is on the
+     server. The targets whose TEXT no leaf in this writer reads — BOOL, BYTES,
+     ARRAY, ROW, MAP, VECTOR — stay `42804` instead, because admitting one
+     would replace a plan-time refusal with a flush-time box error. A literal
+     reached through a UNION, a CTE or a derived table also stays 42804: it is
+     typed by that construct's own fold before it meets the target, and the
+     walk that marks unknown-typed positions answers only for a single SELECT
+     block it can prove.
 
      **PORT and PROTOCOL have LEFT this family.** (Amended 2026-09-06, #901.)
      The paragraph's reason — "the network types have none" — was never true of
@@ -1060,8 +1103,8 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      443 under a PORT declaration (OID 23, the same OID a PORT column declares
      since #834), `'abc'::PORT` is `22P02 invalid input syntax for type
      integer`, and a value with no int32 is `22003 integer out of range` — all
-     measured. `IPV4`, `IPV6`, `CIDR` and `MAC` are unchanged and are what the
-     paragraph above now covers; they are four, not six.
+     measured. `IPV4`, `IPV6`, `CIDR` and `MAC` followed them out of the family
+     on 2026-09-15; the entry above records what replaced it.
 
      Before #901 all four of `INT32`, `PORT`, `PROTOCOL` and `FLOAT32` were
      accepted NAMES with no cast at all — `Cast.Eval`'s switch matched none of

@@ -264,12 +264,12 @@ naming the string instead.
 
 | Type | Go Backing | Size | Format | Use Cases |
 |------|-----------|------|--------|-----------|
-| `IPv4` | `uint32` | 4 bytes | Dotted-quad string on input ("10.0.1.1") | Source/destination addresses |
-| `IPv6` | `[16]byte` | 16 bytes | Standard IPv6 notation on input | IPv6 addresses |
-| `CIDR` | `string` | Variable | CIDR notation ("10.0.0.0/8") | Subnet definitions, ACLs |
-| `MAC` | `uint64` | 8 bytes | Colon-separated hex on input ("aa:bb:cc:dd:ee:ff") | Interface identification |
+| `IPv4` | `uint32` | 4 bytes | PostgreSQL `inet` text ("10.0.1.1") | Source/destination addresses |
+| `IPv6` | `[16]byte` | 16 bytes | PostgreSQL `inet` text ("2001:db8::1") | IPv6 addresses |
+| `CIDR` | `string` | Variable | PostgreSQL `inet` text with a prefix ("10.0.0.0/8") | Subnet definitions, ACLs |
+| `MAC` | `uint64` | 8 bytes | PostgreSQL `macaddr` text ("aa:bb:cc:dd:ee:ff") | Interface identification |
 | `Port` | `uint16` (in `Int32Data`) | 2 bytes | Integer 0–65535 | Transport-layer ports |
-| `Protocol` | `uint8` (in `Int32Data`) | 1 byte | IANA protocol number | IP protocol (6=TCP, 17=UDP) |
+| `Protocol` | `uint8` (in `Int32Data`) | 1 byte | IANA protocol number or name | IP protocol (6=TCP, 17=UDP) |
 
 IPv4, IPv6, MAC, Port and Protocol are stored in compact binary representations rather than as text, enabling efficient comparison and aggregation while keeping human-readable input/output formats. CIDR is the exception: it stores its text form directly.
 
@@ -304,14 +304,34 @@ is `numeric(38,4)`, and **division truncates**: `proto / 2` over 255 is 127,
 not 127.5. The address types (`IPv4`, `IPv6`, `MAC`, `CIDR`) and the temporal
 ones keep their own arithmetic and are unaffected.
 
-**Literal spellings in a comparison.** A `MAC` or `UUID` literal compared
-against a column is read in every spelling PostgreSQL accepts, at every site
-(`=`, `IN`, `CASE`, `IS DISTINCT FROM`, `GREATEST`, `LEAST`):
+**Every network type has ONE text grammar, and every door reads it.** The
+writer (the embedded ingester, `INSERT … VALUES`, `COPY`), a `CAST` at query
+time, a literal beside a column in a `WHERE`, `IN`, `CASE`, `IS DISTINCT FROM`,
+`GREATEST` or `LEAST`, and an unknown-typed literal in `INSERT … SELECT` all
+read the same accept-set. It is PostgreSQL 17.11's own input function for the
+type, measured cell by cell:
 
 | Type | Accepted spellings |
 |---|---|
-| `MAC` | `08:00:2b:01:02:03`, `08-00-2b-01-02-03`, `0800.2b01.0203`, `08002b010203`, `08002b:010203`, `08002b-010203`, `0800-2b01-0203`, and the same in upper case. A grouped-hex spelling must split the twelve digits `6+6` or `4+4+4`; any other regrouping is `22P02`, as it is in PostgreSQL |
-| `UUID` | dashed, undashed, braced (`{...}`), and any case |
+| `IPv4`, `IPv6`, `CIDR` | `inet`'s grammar — see the abbreviated-address table below. Leading zeros are decimal (`010.1.2.3`), one trailing dot is ignored (`10.1.2.3.`), a HOST-width prefix is the address itself (`10.0.0.1/32`), and `inet6`'s mask has its OWN rule: digits only, no leading zeros, 0–128 (`::1/064` is `22P02`) |
+| `MAC` | `08:00:2b:01:02:03`, `08-00-2b-01-02-03`, `08002b:010203`, `08002b-010203`, `0800.2b01.0203`, `0800-2b01-0203`, `08002b010203`, any case — `macaddr_in`'s seven `sscanf` patterns. The colon and hyphen forms read VARIABLE-width groups, so `a:b:c:d:e:f` is `0a:0b:0c:0d:0e:0f`; any other regrouping (`0800:2b01:0203`, `08.00.2b.01.02.03`) is `22P02`, and an octet above 255 is `22003 invalid octet value` |
+| `UUID` | 32 hex digits in any case, optionally wrapped in BOTH braces, with a hyphen permitted after any group of four and nowhere else: `a0ee-bc99-9c0b-4ef8-bb6d-6bb9-bd38-0a11` is a value, `a-0eebc99…` is `22P02` |
+| `Port` | a decimal number in 0–65535. Service NAMES are not resolved: `port_name()` is the function that names a port |
+| `Protocol` | a decimal number in 0–255, or the IANA NAME case-insensitively (`udp`, `TCP`, `icmp`, `ipv6-icmp`) — the text form `protocol_name()` prints, so `CAST(CAST(p AS TEXT) AS PROTOCOL)` round-trips |
+
+An empty string is the one place two kinds of door differ on purpose: at the
+embedded ingester it is ABSENCE (the empty CSV or JSON field, stored as NULL),
+and at every SQL door it is a value the type cannot read — `22P02`, which is
+what `''::inet` is on the server.
+
+Two ranges have two domains, also on purpose: a `CAST` to `PORT` or `PROTOCOL`
+holds the int4 CARRIER those types are stored in, while every writer door holds
+the type's own 0–65535 / 0–255. So `CAST(70000 AS PORT)` answers and
+`INSERT INTO t (p) VALUES ('70000')` is `22003` — loud at the door that stores.
+And a `PROTOCOL` literal beside a COLUMN (`WHERE proto = 'udp'`) is read as
+`integer`, because a comparison resolves an unknown literal against the
+column's DECLARED wire type; use `CAST('udp' AS PROTOCOL)` or
+`protocol_number('udp')` there. Both are in ADR-0012's list.
 
 An abbreviated address **is** accepted beside a `CIDR` column, in the grammar
 PostgreSQL itself uses there — `inet`'s, not `cidr`'s. That distinction is the
@@ -366,9 +386,10 @@ this engine's differential oracle maps it to — and over an `inet` column
 PostgreSQL refuses `'239'`, `'192.168'` and `'zzz'` at every fold, exactly as
 this engine does.
 
-`INSERT` and the `mac_*` formatting functions read only the spellings Go's
-parser takes (colon, hyphen, dotted, and the bare twelve digits), not the three
-grouped-hex forms above.
+The `mac_*` formatting functions read only the spellings Go's parser takes
+(colon, hyphen, dotted, and the bare twelve digits), not the grouped-hex forms
+above. Every other door — `INSERT`, the ingester, a `CAST`, a comparison —
+reads the full `macaddr` grammar.
 
 **The printed form of an IPv6 value is PostgreSQL's `inet` output**, which
 differs from Go's for two families: a v4-MAPPED address prints

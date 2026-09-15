@@ -227,6 +227,38 @@ Device Logs ──► Bento (parse, enrich, partition) ──► S3 (Parquet) �
 
 This separation keeps each component focused and independently scalable.
 
+### Network-native columns need Wadjet's own writer
+
+A Parquet file written by another tool carries STRINGS where Wadjet's
+network-native types carry addresses: Parquet has no `IPV4`, `IPV6`, `CIDR`,
+`MAC`, `PORT` or `PROTOCOL`, so Bento's `parquet_encode` writes UTF8 and the
+schemas registered below declare `TypeString` for `src_ip` and `protocol`. That
+is the honest declaration for those files — declaring `TypeIPv4` over a column
+whose bytes are UTF8 does not make it one.
+
+Two paths give you native columns:
+
+1. **Write through Wadjet's ingester** — `db.NewIngester(...)` (see
+   [Usage (Go API)](#usage-go-api) above), or Bento with an
+   in-process output plugin that calls it. The ingester parses each value with
+   the type's own grammar and refuses a value it cannot store, naming the
+   column and the row.
+2. **Convert on read, once** — `CAST` a foreign file's string column to the
+   native type and materialise the result:
+
+   ```sql
+   CREATE TABLE netflow_typed AS
+   SELECT CAST(src_ip   AS IPV4)     AS src_ip,
+          CAST(dst_ip   AS IPV4)     AS dst_ip,
+          CAST(protocol AS PROTOCOL) AS protocol,
+          bytes, packets, timestamp
+   FROM read_parquet('s3://wadjet/bento/netflow/*.parquet');
+   ```
+
+   The cast reads exactly what the writer reads, so a value that converts is a
+   value the new table can hold; text naming no address is `22P02` naming the
+   text, and the same works over `read_csv` and `read_json`.
+
 ### Syslog to Wadjet via Bento
 
 ```yaml
@@ -452,7 +484,8 @@ db.CreateTable(ctx, "syslog", wadjet.Schema{
         {Name: "severity",  Type: wadjet.TypeString},
         {Name: "facility",  Type: wadjet.TypeString},
         {Name: "message",   Type: wadjet.TypeString},
-        {Name: "src_ip",    Type: wadjet.TypeString},  // String since Bento writes UTF8
+        {Name: "src_ip",    Type: wadjet.TypeString},  // String since Bento writes UTF8;
+        // CAST it to IPV4 in a CTAS (above) for a native column
     },
 }, []string{"day"})
 

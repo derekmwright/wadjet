@@ -19,12 +19,12 @@ error text says so (`invalid input syntax for type inet: "239"` beside a
 cidr column). The cidr grammar's extras (a classful address INFERENCE for a
 maskless abbreviation, `0x`-hex input, and the refusal of bits set to the
 right of the mask) are reachable only through an explicit cast — and this
-engine's `CAST(<text> AS CIDR)` does not READ its text: it passes the string
-through, validating and canonicalising nothing, which is a recorded
-divergence in ADR-0012 ("A CAST to a NETWORK type does not read its text",
-pinned by expr.TestCastToANetworkTypeStillPassesThrough). So the cidr
-grammar has no implementation here at all, and this function does not carry
-it. When that cast starts reading its text, THAT is where the cidr grammar
+engine's `CAST(<text> AS CIDR)` VALIDATES its text against this same inet
+grammar (#1092) rather than the cidr type's: it refuses what inet refuses and
+keeps the spelling it was given, because a wadjet CIDR column stores its text
+directly. So the cidr grammar — classful inference, `0x` hex, the refusal of
+bits right of the mask — has no implementation here at all, and this function
+does not carry it. If a cidr-grammar cast is ever added, THAT is where it
 goes, beside its own measured table — not here.
 
 The grammar below is measured on live PostgreSQL 17.11, cell by cell, and
