@@ -72,7 +72,10 @@ func TestAMovingFloatWindowFrameCarriesTheRecomputedValue(t *testing.T) {
 	t.Cleanup(srv.Shutdown)
 	conn := connectPgconn(t, srv.Addr())
 
-	const oidFloat8 = 701
+	const (
+		oidFloat4 = 700
+		oidFloat8 = 701
+	)
 	for _, c := range []struct {
 		name, sql string
 		oid       uint32
@@ -91,11 +94,12 @@ func TestAMovingFloatWindowFrameCarriesTheRecomputedValue(t *testing.T) {
 			"SELECT SUM(f8) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS v FROM nvret ORDER BY id",
 			oidFloat8, "1e+16;2;1e+16;1.0000000000000002e+16;2"},
 		// The REAL half, which the arc's first cut already recomputed. Its
-		// OID is 701 where the server declares 700 — the residual, not this
-		// cell's subject; the DIGITS are the server's.
+		// OID was 701 where the server declares 700 and is 700 now (#1118,
+		// arc ND); the DIGITS are the server's and did not move. AVG stays
+		// 701, which is what `avg(real)` declares there.
 		{"f4/sum/rows_1_preceding",
 			"SELECT SUM(f4) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS v FROM nvret ORDER BY id",
-			oidFloat8, "1e+07;1.0000001e+07;2;1.0000001e+07;1.0000002e+07"},
+			oidFloat4, "1e+07;1.0000001e+07;2;1.0000001e+07;1.0000002e+07"},
 		{"f4/avg/rows_1_preceding",
 			"SELECT AVG(f4) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS v FROM nvret ORDER BY id",
 			oidFloat8, "1e+07;5.0000005e+06;1;5.0000005e+06;5.000001e+06"},
