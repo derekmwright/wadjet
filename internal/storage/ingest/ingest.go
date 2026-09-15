@@ -233,7 +233,7 @@ func checkType(col parquet.Column, v any) error {
 		if _, ok := v.(bool); !ok {
 			return fmt.Errorf("column %q: expected bool, got %T", col.Name, v)
 		}
-	case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeInt64:
+	case parquet.TypeInt32, parquet.TypeInt64:
 		switch v.(type) {
 		case int, int8, int16, int32, int64,
 			uint, uint8, uint16, uint32, uint64,
@@ -243,6 +243,20 @@ func checkType(col parquet.Column, v any) error {
 			// the leaf stores.
 		default:
 			return fmt.Errorf("column %q: expected integer, got %T", col.Name, v)
+		}
+	case parquet.TypePort, parquet.TypeProtocol:
+		switch v.(type) {
+		case int, int8, int16, int32, int64,
+			uint, uint8, uint16, uint32, uint64,
+			float32, float64:
+		case string:
+			// Both types have a TEXT form of their own — a decimal number,
+			// and for PROTOCOL the IANA name `protocol_name()` prints — and
+			// this door refused every one of them, so a CSV or JSON source
+			// could not feed a PROTOCOL column at all (#986). The VALUE check
+			// below reads that text with the type's one grammar.
+		default:
+			return fmt.Errorf("column %q: expected integer or its text form, got %T", col.Name, v)
 		}
 	case parquet.TypeFloat32, parquet.TypeFloat64:
 		switch v.(type) {

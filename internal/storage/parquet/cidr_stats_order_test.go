@@ -45,7 +45,13 @@ func cidrStatsTestFile(t *testing.T, cidrVals []string) []byte {
 	}}
 	rows := make([]map[string]any, len(cidrVals))
 	for i, v := range cidrVals {
-		rows[i] = map[string]any{"id": int64(i), "c_cidr": v}
+		// A []byte, not a string: since #627 the writer reads a STRING into a
+		// CIDR column with inet's grammar and refuses text that names no
+		// address, so a file holding one can no longer be written through the
+		// text door. It can still be READ — every file an older wadjet or a
+		// foreign tool wrote is one — and the byte door is the shape those
+		// files have, which is what the withholding test below needs.
+		rows[i] = map[string]any{"id": int64(i), "c_cidr": []byte(v)}
 	}
 	var buf bytes.Buffer
 	w, err := NewWriter(&buf, schema, DefaultWriterConfig())

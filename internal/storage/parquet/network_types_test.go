@@ -335,7 +335,12 @@ func TestUnparseableNetworkLiteralIsRefused(t *testing.T) {
 		{TypeUUID, "550e8400"},
 		{TypeUUID, "GGGGGGGG-GGGG-GGGG-GGGG-GGGGGGGGGGGG"},
 		{TypeMAC, "zz"},
-		{TypeMAC, "00:11:22:33:44:5"},
+		// "00:11:22:33:44:5" USED to be here. PostgreSQL 17.11 reads it as
+		// 00:11:22:33:44:05 — macaddr_in's first pattern is `%x:%x:…`, whose
+		// groups are variable-width — so refusing it refused PG-valid text,
+		// which is the direction ADR-0012 item 1 forbids. Five colons with a
+		// group MISSING is the refusal that survives.
+		{TypeMAC, "00:11:22:33:44:"},
 		{TypeMAC, "00:11:22:33:44:zz"},
 		{TypeIPv4, "not an address"},
 		{TypeIPv4, "10.0.0"},

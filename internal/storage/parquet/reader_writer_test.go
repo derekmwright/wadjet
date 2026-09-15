@@ -504,40 +504,6 @@ func TestParseDateForWriteDoesNotClampFarDates(t *testing.T) {
 	}
 }
 
-func TestUnhex(t *testing.T) {
-	// Digits
-	for i := byte('0'); i <= '9'; i++ {
-		v := unhex(i)
-		if v != i-'0' {
-			t.Errorf("unhex(%c) = %d, want %d", i, v, i-'0')
-		}
-	}
-
-	// Lowercase a-f
-	for i := byte('a'); i <= 'f'; i++ {
-		v := unhex(i)
-		if v != i-'a'+10 {
-			t.Errorf("unhex(%c) = %d, want %d", i, v, i-'a'+10)
-		}
-	}
-
-	// Uppercase A-F
-	for i := byte('A'); i <= 'F'; i++ {
-		v := unhex(i)
-		if v != i-'A'+10 {
-			t.Errorf("unhex(%c) = %d, want %d", i, v, i-'A'+10)
-		}
-	}
-
-	// Invalid
-	if unhex('g') != 0xFF {
-		t.Error("expected 0xFF for invalid hex char 'g'")
-	}
-	if unhex('!') != 0xFF {
-		t.Error("expected 0xFF for invalid hex char '!'")
-	}
-}
-
 func TestPrepareRows_TypeConversions(t *testing.T) {
 	// Port/Protocol: int, int64, float64 -> int32
 	schema := Schema{

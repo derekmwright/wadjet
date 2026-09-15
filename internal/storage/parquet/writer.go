@@ -228,40 +228,18 @@ func (w *Writer) Close() error {
 
 var epochDate = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
 
-// parseUUIDForWrite converts a UUID string to raw 16 bytes for parquet storage.
+// parseUUIDForWrite converts a UUID string to raw 16 bytes for parquet storage,
+// through the type's one grammar (PgUUIDPton). It used to strip EVERY hyphen,
+// which accepted `'a-0eebc99…'` that PostgreSQL refuses, and had no arm for the
+// braced spelling that PostgreSQL accepts — wrong in both directions at once.
 func parseUUIDForWrite(s string) []byte {
-	clean := make([]byte, 0, 32)
-	for i := 0; i < len(s); i++ {
-		if s[i] != '-' {
-			clean = append(clean, s[i])
-		}
-	}
-	if len(clean) != 32 {
+	raw, st := PgUUIDPton(s)
+	if st != NetTextOK {
 		return nil
 	}
-	raw := make([]byte, 16)
-	for i := 0; i < 16; i++ {
-		hi := unhex(clean[i*2])
-		lo := unhex(clean[i*2+1])
-		if hi == 0xFF || lo == 0xFF {
-			return nil
-		}
-		raw[i] = hi<<4 | lo
-	}
-	return raw
-}
-
-func unhex(c byte) byte {
-	switch {
-	case c >= '0' && c <= '9':
-		return c - '0'
-	case c >= 'a' && c <= 'f':
-		return c - 'a' + 10
-	case c >= 'A' && c <= 'F':
-		return c - 'A' + 10
-	default:
-		return 0xFF
-	}
+	out := make([]byte, 16)
+	copy(out, raw[:])
+	return out
 }
 
 // parseDateForWrite converts a date string "2006-01-02" to days since epoch.

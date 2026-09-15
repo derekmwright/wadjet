@@ -707,46 +707,47 @@ func (nw *NativeWriter) appendAbsentLeaf(lb *leafBuffer, col Column, defLevel, r
 	lb.appendEntry(defLevel, repLevel)
 }
 
-// hasNetworkLiteralForm reports whether a column of this type stores BINARY
-// but accepts TEXT on the way in.
+// hasNetworkLiteralForm reports whether a column of this type has a TEXT input
+// form the writer reads (network_text.go's one grammar per type).
+//
+// CIDR, PORT and PROTOCOL joined the four binary types here. A CIDR column
+// stores its text directly and so was never asked to parse it at all: `'zzz'`
+// and `'192.168'` were written into one, and a value with no place in the
+// address order groups and sorts as raw bytes for the rest of its life. PORT
+// and PROTOCOL are int4-backed and refused text outright, which is the form a
+// CSV or JSON source supplies and the form `protocol_name()` prints (#986).
 func hasNetworkLiteralForm(t TypeID) bool {
 	switch t {
-	case TypeIPv4, TypeIPv6, TypeMAC, TypeUUID:
+	case TypeIPv4, TypeIPv6, TypeCIDR, TypeMAC, TypeUUID, TypePort, TypeProtocol:
 		return true
 	}
 	return false
 }
 
-// convertNetworkLiteral parses IPv4/MAC text to int64 and IPv6/UUID to 16 bytes.
-// Malformed nonempty text fails with column/row/literal context at the caller
-// (ADR-0012); never substitute zero or store malformed raw bytes.
-// Empty text is absence and becomes NULL, not a zero-length fixed-width value.
-// Both row and native readers likewise read zero-length IPv6/UUID entries as
-// NULL; keep the two ends of this contract aligned.
+// convertNetworkLiteral reads one network literal with its type's ONE input
+// grammar (NetworkTextValue) and returns the box this writer stores.
+//
+// It used to carry its own parsers, and they were strictly narrower than the
+// ones the comparison kernels read: `'08-00-2b-01-02-03'`, `'{uuid}'`,
+// `'10.0.0.1/32'` and `'10.1.2.3.'` are all values PostgreSQL stores and this
+// door refused, so a literal a query could compare against was a literal the
+// table could not hold (#627). Malformed text fails with column/row/literal
+// context at the caller (ADR-0012); never substitute zero or store malformed
+// raw bytes. Empty text is absence and becomes NULL, not a zero-length
+// fixed-width value — both readers read a zero-length IPv6/UUID entry as NULL.
 // See docs/internals/parquet-network-literal-write-contract.md for the design.
 func convertNetworkLiteral(colType TypeID, s string) (any, error) {
 	if s == "" {
 		return nil, nil
 	}
-	switch colType {
-	case TypeIPv4:
-		if n, ok := ipv4StringToInt64(s); ok {
-			return n, nil
-		}
-	case TypeMAC:
-		if n, ok := macStringToInt64(s); ok {
-			return n, nil
-		}
-	case TypeIPv6:
-		if b := ipv6StringToBytes(s); b != nil {
-			return b, nil
-		}
-	case TypeUUID:
-		if b := parseUUIDForWrite(s); b != nil {
-			return b, nil
-		}
+	v, st, ok := NetworkTextValue(colType, s)
+	if !ok {
+		return nil, fmt.Errorf("%q is not a valid %s value", s, colType)
 	}
-	return nil, fmt.Errorf("%q is not a valid %s value", s, colType)
+	if st != NetTextOK {
+		return nil, NetworkTextError(colType, s, st)
+	}
+	return v, nil
 }
 
 // decomposeArray handles ARRAY (LIST) type columns.
@@ -2416,61 +2417,27 @@ func compressPage(data []byte, codec CompressionCodec) ([]byte, error) {
 // caller could not tell a parsed address from a rejected one, and "zz" was
 // stored as a real MAC. See convertNetworkLiteral.
 func ipv4StringToInt64(s string) (int64, bool) {
-	// Simple IPv4 parser — avoid net.ParseIP allocation.
-	var ip [4]byte
-	idx := 0
-	octet := 0
-	digits := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '.' {
-			if digits == 0 || idx >= 3 {
-				return 0, false
-			}
-			ip[idx] = byte(octet)
-			idx++
-			octet = 0
-			digits = 0
-		} else if s[i] >= '0' && s[i] <= '9' {
-			octet = octet*10 + int(s[i]-'0')
-			digits++
-			if octet > 255 || digits > 3 {
-				return 0, false
-			}
-		} else {
-			return 0, false
-		}
-	}
-	if idx == 3 && digits > 0 {
-		ip[idx] = byte(octet)
-		return int64(binary.BigEndian.Uint32(ip[:])), true
-	}
-	return 0, false
+	n, st := PgIPv4Address(s)
+	return n, st == NetTextOK
 }
 
 func macStringToInt64(s string) (int64, bool) {
-	// Parse "00:11:22:33:44:55" format.
-	if len(s) != 17 {
+	b, st := PgMACPton(s)
+	if st != NetTextOK {
 		return 0, false
 	}
 	var n uint64
-	for i := 0; i < 6; i++ {
-		if i > 0 && s[i*3-1] != ':' {
-			return 0, false
-		}
-		hi := unhex(s[i*3])
-		lo := unhex(s[i*3+1])
-		if hi == 0xFF || lo == 0xFF {
-			return 0, false
-		}
-		n = (n << 8) | uint64(hi<<4|lo)
+	for _, c := range b {
+		n = n<<8 | uint64(c)
 	}
 	return int64(n), true
 }
 
 // ipv6StringToBytes parses an IPv6 literal into the 16-byte storage form an
-// IPV6 column is defined to hold — the same conversion Writer.prepareRows
-// does ahead of WriteRows, and the same one batch.Vector.SetValue does for a
-// string handed to an IPV6 vector.
+// IPV6 column is defined to hold, through the type's one grammar
+// (PgIPv6Address) — the same conversion Writer.prepareRows does ahead of
+// WriteRows, and the same one batch.Vector.SetValue does for a string handed
+// to an IPV6 vector.
 //
 // It used to store the TEXT instead, on the reasoning that prepareRows had
 // already converted anything real. Whatever came through the NativeWriter's
@@ -2484,9 +2451,9 @@ func macStringToInt64(s string) (int64, bool) {
 // (convertNetworkLiteral). It used to be stored as no bytes at all, which
 // read back as "" — an address-shaped hole that IS NULL answered false to.
 func ipv6StringToBytes(s string) []byte {
-	ip := net.ParseIP(s)
-	if ip == nil {
+	b, st := PgIPv6Address(s)
+	if st != NetTextOK {
 		return nil
 	}
-	return ip.To16()
+	return b
 }
