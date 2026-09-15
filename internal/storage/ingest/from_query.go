@@ -340,6 +340,38 @@ func AssignableToColumn(from, to parquet.Column) error {
 		to.Name, declaredTypeText(to), declaredTypeText(from))
 }
 
+// AssignableFromUnknownLiteral is the same question for an item the select
+// list wrote as a BARE QUOTED LITERAL, which is SQL's `unknown` and not a text
+// column: PostgreSQL types it FROM the target and coerces it with that type's
+// own input function, so `INSERT INTO t (ip) SELECT '10.0.0.1'` is a value
+// there and was 42804 here for every target type at once (#1088) — while
+// `INSERT INTO t (ip) SELECT text_col` is 42804 on both, because text has no
+// assignment cast to inet.
+//
+// The set below is every declaration whose TEXT this engine reads on the way
+// in: the numeric family through assignEvaluatedValue, the temporal and
+// network ones through the writer's own accept-sets. A bad literal is refused
+// there, loudly and naming the column — which is what the coercion does on the
+// server too, at execution rather than at parse analysis.
+//
+// BOOL, BYTES and the containers are deliberately absent: no leaf in this
+// writer reads their text, so admitting one would replace a plan-time 42804
+// with a flush-time box error. They stay 42804 and are in ADR-0012's list.
+func AssignableFromUnknownLiteral(to parquet.Column) error {
+	switch to.Type {
+	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat32, parquet.TypeFloat64,
+		parquet.TypeDecimal, parquet.TypeString,
+		parquet.TypePort, parquet.TypeProtocol, parquet.TypeDuration,
+		parquet.TypeTimestamp, parquet.TypeDate,
+		parquet.TypeIPv4, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeMAC, parquet.TypeUUID:
+		return nil
+	}
+	return sqlerr.New("42804",
+		"column %q is of type %s but expression is of type %s; "+
+			"you will need to rewrite or cast the expression",
+		to.Name, declaredTypeText(to), "unknown")
+}
+
 // numericDeclaration is the family the assignment converter covers: every
 // declaration `assignEvaluatedValue` has a rule for. PostgreSQL assigns freely
 // within it — an integer into a numeric, a double into a bigint (rounded), a

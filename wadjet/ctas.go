@@ -179,7 +179,8 @@ func (db *DB) executeInsertSelect(ctx context.Context, info *plansql.InsertInfo)
 		return nil, querySourceError(err, db.querySourcedWriteBudget())
 	}
 
-	if err := checkInsertSelectShape(res.OutputSchema, cols, len(info.Columns) > 0); err != nil {
+	if err := checkInsertSelectShape(res.OutputSchema, cols, len(info.Columns) > 0,
+		unknownTypedSelectItems(info.Select, len(res.OutputSchema))); err != nil {
 		return nil, err
 	}
 
@@ -206,7 +207,8 @@ func (db *DB) executeInsertSelect(ctx context.Context, info *plansql.InsertInfo)
 // id, n FROM src` is `INSERT 0 3` with `s` NULL). With an EXPLICIT list the
 // same shortfall is 42601 there, under its own message, because the list is a
 // promise about how many values follow.
-func checkInsertSelectShape(declared []parquet.Column, cols []parquet.Column, explicitList bool) error {
+func checkInsertSelectShape(declared []parquet.Column, cols []parquet.Column, explicitList bool,
+	unknownLit []bool) error {
 	switch {
 	case len(declared) > len(cols):
 		return sqlerr.New("42601", "INSERT has more expressions than target columns")
@@ -214,11 +216,48 @@ func checkInsertSelectShape(declared []parquet.Column, cols []parquet.Column, ex
 		return sqlerr.New("42601", "INSERT has more target columns than expressions")
 	}
 	for i, d := range declared {
+		if i < len(unknownLit) && unknownLit[i] {
+			// SQL's `unknown`, typed FROM the target rather than compared
+			// against it (#1088).
+			if err := ingest.AssignableFromUnknownLiteral(cols[i]); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := ingest.AssignableToColumn(d, cols[i]); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// unknownTypedSelectItems marks the select-list positions written as a BARE
+// QUOTED LITERAL — SQL's `unknown`, which PostgreSQL types from the INSERT's
+// target column rather than from itself.
+//
+// It answers only for the shape it can PROVE: a single SELECT block whose item
+// count matches the declared output, with no star and no set operation. A
+// literal reached through a UNION, a CTE or a derived table is typed by that
+// construct's own fold before it ever meets the target, and guessing here
+// would put a wrong rule on it — so those positions stay false and keep the
+// 42804 they have today (the honest answer: this walk cannot see them).
+func unknownTypedSelectItems(q *plansql.ParsedQuery, n int) []bool {
+	if q == nil || n == 0 {
+		return nil
+	}
+	info, err := plansql.ExtractSelect(q)
+	if err != nil || info == nil || info.Union != nil || len(info.Columns) != n {
+		return nil
+	}
+	out := make([]bool, n)
+	for i, c := range info.Columns {
+		if c.Star {
+			return nil
+		}
+		lit, ok := c.ASTExpr.(*plansql.Lit)
+		out[i] = ok && lit.Kind == plansql.LitString
+	}
+	return out
 }
 
 // resultRows reads a result POSITIONALLY, one row at a time, converting each
