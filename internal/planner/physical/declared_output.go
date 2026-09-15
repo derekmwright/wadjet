@@ -1480,8 +1480,38 @@ func funcReturnType(n *plansql.FuncCallNode, decls colDecls) (expr.DeclType, exp
 		// with and an ARRAY column built without one reads back empty. Keep
 		// the string fallback until a projection can carry a nested type.
 		return expr.DeclType{}, expr.Undecided
+	case parquet.TypeInt64:
+		if bitwiseInt4Result(n, decls) {
+			return expr.Decl(parquet.TypeInt32), c
+		}
 	}
 	return t, c
+}
+
+// bitwiseInt4Result reports whether this call is a member of the BITWISE
+// family whose operands are all int4-domain, which PostgreSQL declares
+// integer.
+//
+// `c_i32 & 6` is integer on 17.11 and `c_i64 & 6` is bigint — the family
+// FOLLOWS its operands, exactly as `+ - *` do (ADR-0024 item 2), and the
+// registry gave it one fixed bigint declaration instead. The value was always
+// the same number; the wire put it under OID 20 where a client that binds on
+// the declared type expects 23 (#1018).
+//
+// Narrow on purpose, in three ways. Only PGIntWidthOperands, the one class
+// whose PostgreSQL result type is a function of its arguments. Only where the
+// width walk PROVES int4: unknown leaves the bigint carrier alone, because
+// guessing narrow is how an exact bigint becomes a wrapped integer. And only
+// where the table says the result FITS that width — which excludes the three
+// SHIFTS, measured: this engine shifts on the int64 carrier and PostgreSQL's
+// int4 shift is modular, so declaring int4 for `w_i32 << 2` turned a query
+// the server answers into a 22003 at the store guard.
+func bitwiseInt4Result(n *plansql.FuncCallNode, decls colDecls) bool {
+	w, known := expr.PGIntegerResultWidth(n.Name)
+	if !known || w.Width != expr.PGIntWidthOperands || !w.FitsOperands {
+		return false
+	}
+	return widestArgIntWidth(n.Args, &w, decls) == intWidth4
 }
 
 // inferCastType maps SQL type names to parquet types for CAST expressions.

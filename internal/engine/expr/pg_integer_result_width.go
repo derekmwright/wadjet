@@ -72,6 +72,19 @@ type PGIntegerResult struct {
 	// a separate int4 and the result is the SHIFTED value's type, so
 	// `f4 << 2` is integer however the count is spelled.
 	WidthArgs []int
+	// FitsOperands says the result cannot leave the width above — the
+	// STRONGER claim, and the one that decides whether this engine may
+	// DECLARE the narrow type rather than merely know it.
+	//
+	// AND, OR, XOR and NOT over two int4 values produce an int4 value by
+	// construction, so an int4 output vector can hold every answer they have.
+	// A SHIFT cannot: this engine computes it on the int64 carrier, and
+	// `2147483647 << 2` is 8589934588 here where PostgreSQL's int4 shift is
+	// MODULAR and answers -4. Declaring int4 for a shift therefore turned a
+	// query PostgreSQL answers into a 22003 at the store guard — measured,
+	// which is why this field exists rather than the width alone deciding
+	// (#1018). The shifts' own divergence is ADR-0012's, unchanged by this.
+	FitsOperands bool
 }
 
 // pgIntegerResultWidths is the table. Every function whose declared return
@@ -137,11 +150,13 @@ var pgIntegerResultWidths = map[string]PGIntegerResult{
 	// pg_typeof(~f4)     integer   pg_typeof(~f8)     bigint
 	// pg_typeof(f4 << 2) integer   pg_typeof(f8 << 2) bigint
 	// pg_typeof(f4 >> 2) integer   pg_typeof(f8 >> 2) bigint
-	"bitwise_and": {Width: PGIntWidthOperands},
-	"bitwise_or":  {Width: PGIntWidthOperands},
-	"bitwise_xor": {Width: PGIntWidthOperands},
-	"bitwise_not": {Width: PGIntWidthOperands},
-	// A shift's width is the SHIFTED value's, not the count's.
+	"bitwise_and": {Width: PGIntWidthOperands, FitsOperands: true},
+	"bitwise_or":  {Width: PGIntWidthOperands, FitsOperands: true},
+	"bitwise_xor": {Width: PGIntWidthOperands, FitsOperands: true},
+	"bitwise_not": {Width: PGIntWidthOperands, FitsOperands: true},
+	// A shift's width is the SHIFTED value's, not the count's — and its RESULT
+	// leaves that width, which is why FitsOperands is false for all three. See
+	// the field's own comment.
 	"bitwise_left_shift":             {Width: PGIntWidthOperands, WidthArgs: []int{0}},
 	"bitwise_right_shift":            {Width: PGIntWidthOperands, WidthArgs: []int{0}},
 	"bitwise_arithmetic_shift_right": {Width: PGIntWidthOperands, WidthArgs: []int{0}},
