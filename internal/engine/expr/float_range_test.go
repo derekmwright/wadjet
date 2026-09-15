@@ -168,6 +168,47 @@ func TestTheVectorizedFloatKernelRefusesTheSameRows(t *testing.T) {
 		}
 	})
 
+	// The FLOAT64 column-constant loops carry the rule themselves
+	// (fused_float64_range.go), so every operator and every operand exemption
+	// is asked here as well as on the scalar path.
+	t.Run("the_fused_float64_loops_carry_every_operator", func(t *testing.T) {
+		for _, c := range []struct {
+			name  string
+			fill  func(i int) float64
+			op    string
+			konst float64
+			state string
+		}{
+			{"add_overflows", func(int) float64 { return 1e308 }, "+", 1e308, "22003"},
+			{"sub_overflows", func(int) float64 { return 1e308 }, "-", -1e308, "22003"},
+			{"mul_overflows", func(int) float64 { return 1e308 }, "*", 10, "22003"},
+			{"div_overflows", func(int) float64 { return 1e308 }, "/", 0.5, "22003"},
+			{"mul_underflows", func(int) float64 { return 1e-300 }, "*", 1e-300, "22003"},
+			{"div_underflows", func(int) float64 { return 1e-300 }, "/", 1e300, "22003"},
+			// The exemptions, each of which the loop must NOT refuse.
+			{"mul_by_zero_is_zero", func(int) float64 { return 1e308 }, "*", 0, ""},
+			{"a_zero_row_times_a_constant", func(int) float64 { return 0 }, "*", 2, ""},
+			{"an_infinite_operand_stays_infinite", func(int) float64 { return math.Inf(1) }, "*", 10, ""},
+			{"an_infinite_CONSTANT_divisor_gives_zero", func(int) float64 { return 1e-300 }, "/", math.Inf(1), ""},
+			{"an_infinite_CONSTANT_multiplier_is_a_value", func(int) float64 { return 1e-300 }, "*", math.Inf(1), ""},
+			{"an_ordinary_batch", func(i int) float64 { return float64(i + 1) }, "*", 2, ""},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				b := mk(t, func(i int) (float64, float64) { return c.fill(i), 0 })
+				e := &BinOpFloat64{Left: &ColRef{Name: "a"}, Right: &Lit{Val: c.konst}, Op: c.op}
+				dst := make([]float64, n)
+				if c.state == "" {
+					e.EvalFloat64Vec(b, dst, n)
+					return
+				}
+				state, _ := recoverFatalEvalForTest(t, func() { e.EvalFloat64Vec(b, dst, n) })
+				if state != c.state {
+					t.Errorf("raised [%s], want [%s]", state, c.state)
+				}
+			})
+		}
+	})
+
 	t.Run("an_ordinary_batch_is_untouched", func(t *testing.T) {
 		b := mk(t, func(i int) (float64, float64) { return float64(i + 1), 2 })
 		dst := make([]float64, n)

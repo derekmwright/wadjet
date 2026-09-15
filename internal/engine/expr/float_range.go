@@ -202,3 +202,9 @@ func fusedSrcFloat(v *batch.Vector, typ batch.TypeID, i int) (float64, bool) {
 	}
 	return 0, false
 }
+
+// floatSignMask is a float64's sign bit; clearing it leaves the MAGNITUDE,
+// which orders the same way the unsigned integer does — so one comparison per
+// row inside an arithmetic loop answers "did any result leave the type"
+// without a second pass over the result buffer (fused_float64_range.go).
+const floatSignMask = uint64(1) << 63

@@ -246,7 +246,10 @@ func (e *BinOpFloat64) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int
 	if cr, ok := e.Left.(*ColRef); ok {
 		if lit, ok2 := e.Right.(*Lit); ok2 && lit.Val != nil {
 			if done, hasNull := fusedColConstFloat64(b, cr, ToFloat64(lit.Val), e.opCode, false, dst, n); done {
-				checkFusedFloatRange(b.Columns[cr.idx], cr.typ, ToFloat64(lit.Val), e.opCode, false, dst, n)
+				if cr.typ != batch.TypeFloat64 {
+					// The float64 arm carries the rule in its own loops.
+					checkFusedFloatRange(b.Columns[cr.idx], cr.typ, ToFloat64(lit.Val), e.opCode, false, dst, n)
+				}
 				return hasNull
 			}
 		}
@@ -254,7 +257,9 @@ func (e *BinOpFloat64) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int
 	if lit, ok := e.Left.(*Lit); ok && lit.Val != nil {
 		if cr, ok2 := e.Right.(*ColRef); ok2 {
 			if done, hasNull := fusedColConstFloat64(b, cr, ToFloat64(lit.Val), e.opCode, true, dst, n); done {
-				checkFusedFloatRange(b.Columns[cr.idx], cr.typ, ToFloat64(lit.Val), e.opCode, true, dst, n)
+				if cr.typ != batch.TypeFloat64 {
+					checkFusedFloatRange(b.Columns[cr.idx], cr.typ, ToFloat64(lit.Val), e.opCode, true, dst, n)
+				}
 				return hasNull
 			}
 		}
@@ -461,7 +466,9 @@ func fusedColConstFloat64(b *batch.RecordBatch, cr *ColRef, c float64, op arithO
 			}
 		}
 	case batch.TypeFloat64:
-		apply(func(i int) float64 { return v.Float64Data[i] })
+		// The hot source has its own monomorphic loops, which carry the
+		// range rule instead of a second pass over dst (fused_float64_range.go).
+		return fusedFloat64Range(v, c, op, constFirst, dst, n)
 	case batch.TypeFloat32:
 		apply(func(i int) float64 { return float64(v.Float32Data[i]) })
 	default:
