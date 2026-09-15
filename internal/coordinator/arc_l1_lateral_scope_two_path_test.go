@@ -74,6 +74,23 @@ func l1LateralCases() []l1Case {
 		{"UNCORRLAT/nonCollidingName", "SELECT o.id AS a, t.tot AS m FROM lat_ord o, LATERAL (SELECT SUM(i.amount) AS tot FROM lat_item i) t ORDER BY a"},
 		{"UNCORRLAT/issue1111", "SELECT t.dx AS v FROM setopdecja a, LATERAL (WITH c AS (SELECT dx FROM setopdecjb) SELECT SUM(dx) AS dx FROM c) t"},
 
+		// ROUND 4 — a MATERIALIZED column is a PUBLISHED column, so it is only
+		// added where publishing it changes nothing else. These seven are the
+		// four shapes where it would, each measured at `c34cdbcb` and each
+		// back at exactly that disposition: a body alias of the same name
+		// (`aliasCollides`, RIGHT on five arms at base and on five here), a
+		// DISTINCT or GROUP BY body whose KEY the extra column would join, a
+		// bare `*` or an outer `o.*` whose published list it would enter, and
+		// an injected name the ENCLOSING relation already carries. `setopBody`
+		// is the fifth spelling and it refuses for a reason of its own.
+		{"R4/aliasCollides", "SELECT o.id AS a, s.amount AS am, s.p AS p FROM lat_ord o LEFT JOIN LATERAL (SELECT i.id AS amount, i.product AS p FROM lat_item i WHERE i.amount < o.total) s ON true ORDER BY a, am, p"},
+		{"R4/distinctBody", "SELECT o.id AS a, s.m AS m FROM lat_ord o LEFT JOIN LATERAL (SELECT DISTINCT i.product AS m FROM lat_item i WHERE i.amount < o.total) s ON true ORDER BY a, m"},
+		{"R4/groupedBody", "SELECT o.id AS a, s.m AS m FROM lat_ord o LEFT JOIN LATERAL (SELECT i.product AS m FROM lat_item i WHERE i.amount < o.total GROUP BY i.product) s ON true ORDER BY a, m"},
+		{"R4/bareStar", "SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT i.id AS m FROM lat_item i WHERE i.amount < o.total) s ON true ORDER BY o.id, s.m"},
+		{"R4/outerStar", "SELECT o.* FROM lat_ord o LEFT JOIN LATERAL (SELECT i.id AS m FROM lat_item i WHERE i.amount < o.total) s ON true ORDER BY 1"},
+		{"R4/outerContestsName", "SELECT o.id AS a, s.m AS m FROM lat_ord o LEFT JOIN LATERAL (SELECT i.product AS m FROM lat_item i WHERE i.id < o.id) s ON true ORDER BY a, m"},
+		{"R4/setopBody", "SELECT o.id AS a, s.m AS m FROM lat_ord o LEFT JOIN LATERAL (SELECT i.product AS m FROM lat_item i WHERE i.amount < o.total UNION SELECT 'Z') s ON true ORDER BY a, m"},
+
 		// ROUND 3 — the two halves of the outer-reference question, adjudicated
 		// by measurement. `outerRef*` are the ACCIDENT: `SELECT o.id AS m` was
 		// right on the three DAG arms only because the qualified name degrades
@@ -328,6 +345,9 @@ const (
 	// rewrite declines — does not PARSE. PostgreSQL accepts it and means "no
 	// bound"; this parser wants a number (round 2, P1).
 	l1LimitAllUnparsed = `expected number after LIMIT`
+	// A LATERAL body that is a SET OPERATION whose second arm has no FROM
+	// clause: the table-less lowering claims the whole body.
+	l1FromlessSetOpBody = `a LATERAL subquery with no FROM clause`
 	// An outer reference in a clause of a correlated body OTHER than its
 	// WHERE. The decorrelation carries the outer row into that clause and no
 	// other, so the reference bound the inner relation's column of the same
@@ -344,6 +364,13 @@ const (
 // r1RenderRows (a sorted ROW SET, so a legal ordering difference between arms
 // is never read as a wrong answer).
 var l1Postgres = map[string]string{
+	"R4/aliasCollides":           "rows=9 1,1,Widget | 1,2,Gadget | 1,3,Widget | 1,4,Doohickey | 2,1,Widget | 2,2,Gadget | 2,3,Widget | 2,4,Doohickey | 3,NULL,NULL",
+	"R4/distinctBody":            "rows=7 1,Doohickey | 1,Gadget | 1,Widget | 2,Doohickey | 2,Gadget | 2,Widget | 3,NULL",
+	"R4/groupedBody":             "rows=7 1,Doohickey | 1,Gadget | 1,Widget | 2,Doohickey | 2,Gadget | 2,Widget | 3,NULL",
+	"R4/bareStar":                "rows=9 1,Alice,150,1 | 1,Alice,150,2 | 1,Alice,150,3 | 1,Alice,150,4 | 2,Bob,200,1 | 2,Bob,200,2 | 2,Bob,200,3 | 2,Bob,200,4 | 3,Carol,0,NULL",
+	"R4/outerStar":               "rows=9 1,Alice,150 | 1,Alice,150 | 1,Alice,150 | 1,Alice,150 | 2,Bob,200 | 2,Bob,200 | 2,Bob,200 | 2,Bob,200 | 3,Carol,0",
+	"R4/outerContestsName":       "rows=4 1,NULL | 2,Widget | 3,Gadget | 3,Widget",
+	"R4/setopBody":               "rows=9 1,Doohickey | 1,Gadget | 1,Widget | 1,Z | 2,Doohickey | 2,Gadget | 2,Widget | 2,Z | 3,Z",
 	"R3/outerRefExpr":            "rows=4 1,1 | 1,1 | 2,2 | 2,2",
 	"R3/outerRefOnlyOuter":       "rows=4 1,150 | 1,150 | 2,200 | 2,200",
 	"R3/outerRefTwoOuter":        "rows=4 1,1,150 | 1,1,150 | 2,2,200 | 2,2,200",
@@ -530,6 +557,7 @@ var l1Postgres = map[string]string{
 // l1RefusalPins names the refusal classes a cell's arms may raise. Every arm's
 // answer must contain one of them.
 var l1RefusalPins = map[string][]string{
+	"R4/setopBody":             {l1FromlessSetOpBody},
 	"R3/outerRefExpr":          {l1OuterRefOutsideWhere},
 	"R3/outerRefOnlyOuter":     {l1OuterRefOutsideWhere},
 	"R3/outerRefTwoOuter":      {l1OuterRefOutsideWhere},
@@ -600,6 +628,22 @@ var l1RefusalPins = map[string][]string{
 // l1ArmPins is a divergence that is NOT the same on every arm, so it is
 // recorded per arm. A pin that starts agreeing FAILS.
 var l1ArmPins = map[string]map[string]string{
+	// The QUALIFIED star over a lifted-predicate body: the enclosing query
+	// writes a star over this join, so the materialization DECLINES (round 4)
+	// and the two single-process arms answer what they answered at c34cdbcb.
+	// The three DAG arms never needed it.
+	"R3/liftedStar": {
+		"single":      "rows=3 NULL | NULL | NULL",
+		"spilled512k": "rows=3 NULL | NULL | NULL",
+	},
+	"R4/outerContestsName": {
+		"single":      "rows=3 1,NULL | 2,NULL | 3,NULL",
+		"spilled512k": "rows=3 1,NULL | 2,NULL | 3,NULL",
+	},
+	"R4/outerStar": {
+		"single":      "rows=3 1,Alice,150 | 2,Bob,200 | 3,Carol,0",
+		"spilled512k": "rows=3 1,Alice,150 | 2,Bob,200 | 3,Carol,0",
+	},
 	// A LIFTED non-equality predicate now ANSWERS on the two single-process
 	// arms (round 3): the inner columns it names are published by the body
 	// under their OWN names, which is the evaluation point the DAG's stage
@@ -663,6 +707,9 @@ var l1ArmPins = map[string]map[string]string{
 }
 
 var l1ValuePins = map[string]string{
+	"R4/bareStar":                "rows=3 1,Alice,150,NULL | 2,Bob,200,NULL | 3,Carol,0,NULL",
+	"R4/distinctBody":            "rows=3 1,NULL | 2,NULL | 3,NULL",
+	"R4/groupedBody":             "rows=3 1,NULL | 2,NULL | 3,NULL",
 	"EXISTS/inner/winarg":        "rows=4 1,1 | 1,2 | 2,3 | 2,4",
 	"EXISTS/noJoin/winarg":       "rows=2 1 | 2",
 	"LAT/comma/groupedLimit":     "rows=1 2,Doohickey,125",

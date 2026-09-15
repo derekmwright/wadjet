@@ -1059,8 +1059,13 @@ A correlated predicate that is NOT an equality is lifted to the join and
 evaluated over the body's OUTPUT. Every inner column it names is materialized
 by the body for that purpose — `WHERE i.amount < o.total` answers whether the
 body writes `SELECT i.amount`, `SELECT i.amount AS m` or `SELECT i.id AS m` —
-and the materialized column is not published by `SELECT *` over the lateral.
-Over an AGGREGATED body it is refused: there is no projection to publish the
+and the materialized column is not published by `s.*`. Because it IS a
+published column, it is only materialized where publishing it changes nothing
+else: a body carrying `DISTINCT` or `GROUP BY`, a body whose own alias already
+publishes that name, an enclosing relation that publishes it, and an enclosing
+`SELECT *` over the join all keep the older behaviour instead, in which the
+predicate reads a column the body dropped and the lateral answers a NULL-padded
+row per outer row. Over an AGGREGATED body it is refused: there is no projection to publish the
 column in, and publishing it would put it in the `GROUP BY` and change what the
 aggregate computes.
 

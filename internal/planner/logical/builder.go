@@ -2265,12 +2265,11 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 		// Where the whole correlation is the join's own ON the slots are
 		// dropped at the join; where an equality keys the join and the
 		// residual routes ABOVE it, they are emitted and hidden from a STAR.
-		lifted, liftedDroppable, lerr := publishLiftedRefs(subInfo, correlatedParts,
-			leftAliases, aggregates, alloc, &injected)
+		lifted, lerr := publishLiftedRefs(subInfo, correlatedParts,
+			leftAliases, aggregates, outer, left, &injected)
 		if lerr != nil {
 			return nil, "", lateralEmptyInput{}, nil, nil, lerr
 		}
-		_ = liftedDroppable
 		starLifted = append(starLifted, lifted...)
 
 		// The marker a padded row is recognised by: the name the lateral

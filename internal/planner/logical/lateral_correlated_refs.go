@@ -64,13 +64,50 @@ import (
 // An AGGREGATED body is still refused: there is no projection to publish the
 // column in at all, and publishing it would put it in the GROUP BY.
 func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
-	leftAliases map[string]bool, aggregates bool,
-	alloc *plansql.SlotAllocator, injected *[]plansql.SelectColumn) (slots []string, droppable bool, err error) {
-	droppable = true
-	for _, cp := range correlatedParts {
-		if extractInnerColumn(cp, leftAliases) != "" {
-			droppable = false // an equality keys the join; the rest routes above it
+	leftAliases map[string]bool, aggregates bool, outer *plansql.SelectInfo, left *Node,
+	injected *[]plansql.SelectColumn) (slots []string, err error) {
+	// THE COLUMN IS PUBLISHED, SO IT IS ONLY MATERIALIZED WHERE PUBLISHING IT
+	// CHANGES NOTHING ELSE. Four shapes decline, and each returns the query to
+	// the disposition it had before this repair existed — never to a new wrong
+	// answer (round-4 review, B1r / B2r / B3r / P1r):
+	//
+	//   - the body carries DISTINCT or GROUP BY. Both are computed over the
+	//     projection, so a widened projection is a different key: a DISTINCT
+	//     body answered nine rows for PostgreSQL's seven, silently, on every
+	//     arm.
+	//   - one of the body's OWN output aliases already publishes that name.
+	//     `SELECT i.id AS amount` beside a predicate naming `i.amount` gave
+	//     the join two columns called `amount`, and `s.amount` bound the
+	//     injected one on the three DAG arms — a cell RIGHT on five arms
+	//     before.
+	//   - the ENCLOSING relation publishes that name. The lifted predicate
+	//     then reads the outer column instead of the body's, which is the
+	//     `i.id < o.id` shape.
+	//   - the enclosing query writes a STAR over this join. A bare `SELECT *`
+	//     publishes the join's stream, and the materialized column is in it —
+	//     on all nine doors, in `RowDescription`. The QUALIFIED star reads the
+	//     body's own list and is already clean (`Node.StarLiftedRefCols`).
+	//
+	// The first three are read off the body and the enclosing query; the
+	// fourth off the enclosing SELECT list. None of them can be decided after
+	// the plan is built, which is why they are conditions on the injection and
+	// not a repair above it.
+	if info == nil {
+		return nil, nil
+	}
+	if info.Distinct || len(info.GroupBy) > 0 || len(info.GroupingSets) > 0 {
+		return nil, nil
+	}
+	if outer != nil {
+		for _, c := range outer.Columns {
+			if c.Star {
+				return nil, nil
+			}
 		}
+	}
+	outerNames := map[string]bool{}
+	for _, e := range emittedColumns(left) {
+		outerNames[strings.ToLower(stripQualifier(e.name))] = true
 	}
 	for i, cp := range correlatedParts {
 		if extractInnerColumn(cp, leftAliases) != "" {
@@ -81,6 +118,7 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 			continue
 		}
 		repl := map[string]string{}
+		declined := false
 		var mint []string
 		walkExprNodes(node, func(x plansql.Node) {
 			ref, ok := x.(*plansql.ColRef)
@@ -99,14 +137,28 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 				lateralSelectsColumn(info.Columns, ref.Column) {
 				return
 			}
+			// A name the ENCLOSING relation carries, or one the body's own
+			// list already publishes as an ALIAS over some other value, is a
+			// name this pass may not add a second column under.
+			bare := strings.ToLower(lateralBareKeyName(ref.Column))
+			if bare == "" {
+				bare = strings.ToLower(strings.TrimSpace(ref.Column))
+			}
+			if outerNames[bare] || lateralAliasPublishes(info.Columns, bare) {
+				declined = true
+				return
+			}
 			repl[k] = ""
 			mint = append(mint, ref.Column)
 		})
+		if declined {
+			return nil, nil
+		}
 		if len(mint) == 0 {
 			continue
 		}
 		if aggregates {
-			return nil, false, sqlerr.New("0A000",
+			return nil, sqlerr.New("0A000",
 				"LATERAL body AGGREGATES and its correlated predicate %s is not an "+
 					"equality: the predicate is evaluated over the body's OUTPUT and an "+
 					"aggregated body publishes no column to evaluate it against — "+
@@ -139,5 +191,16 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 		}
 		_ = i
 	}
-	return slots, droppable, nil
+	return slots, nil
+}
+
+// lateralAliasPublishes reports whether one of the body's own output items
+// publishes `bare` as its ALIAS — a name the injection may not take.
+func lateralAliasPublishes(cols []plansql.SelectColumn, bare string) bool {
+	for _, c := range cols {
+		if c.Alias != "" && strings.EqualFold(c.Alias, bare) {
+			return true
+		}
+	}
+	return false
 }

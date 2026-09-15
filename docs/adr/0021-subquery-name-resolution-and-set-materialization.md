@@ -1999,14 +1999,25 @@ three DAG arms from PostgreSQL's nine rows to three NULL-padded ones — the
 minted name is one the DAG's evaluation point does not carry. What the
 single-process path lacked was not a NAME but the COLUMN.
 
-The materialized column is emitted by the join and hidden from a STAR
-(`Node.StarLiftedRefCols`), which is a different property from
-`HiddenJoinCols`: that one both hides from a star AND drops from the join's
-output, and a predicate the physical planner routes to a FILTER ABOVE the join
-— which is where a non-equi residual goes when an equality beside it keys the
-join — reads that output. Dropping answered zero rows there; hiding from the
-star alone answers PostgreSQL on every arm and puts no extra column in
-`SELECT *`.
+**A MATERIALIZED COLUMN IS A PUBLISHED COLUMN**, and that is the rule the
+repair is bounded by. The qualified star reads the body's own list, so
+`Node.StarLiftedRefCols` keeps it out of `s.*`; everything else that reads a
+PUBLISHED list — a bare `SELECT *`, which publishes the join's stream on all
+nine doors and in `RowDescription`; a `DISTINCT` or `GROUP BY` key, computed
+over the projection the injection widened; a reference to a name the body's own
+alias or the ENCLOSING relation already carries — sees a column the query did
+not write. ADR-0026 §3c's answer is a hidden slot dropped by position, and that
+is not available here: the single-process path evaluates the predicate ABOVE
+the join whenever an equality beside it keys the join, and a dropped slot
+answers zero rows there (measured), while a MINTED NAME is one the DAG's
+evaluation point does not carry (measured, round 3).
+
+So the column is materialized ONLY where publishing it changes nothing else,
+and four shapes decline — each returning to the disposition it had at
+`c34cdbcb`, never to a new wrong answer: a body carrying `DISTINCT` or `GROUP
+BY`; a body whose own output alias already publishes the name; an enclosing
+relation that publishes it; and an enclosing query that writes a star over this
+join. Round 4's seven cells hold them, with the base measurement beside each.
 
 An AGGREGATED body is still refused, for a reason the projection cannot answer:
 publishing `i.amount` beside `SUM(i.amount)` needs it in the `GROUP BY`, which
