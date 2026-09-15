@@ -182,7 +182,7 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 		{"#786", "derived_decimal_key_beside_a_delimited_column_of_that_text",
 			`SELECT c_dec + 1 AS k, MAX("c_dec + 1") AS m FROM ` +
 				`(SELECT c_dec, c_i32 AS "c_dec + 1" FROM typemx WHERE id < 4) s GROUP BY c_dec + 1 ORDER BY k`,
-			[]string{"k=1.0000|m=int64:0", "k=2.0001|m=int64:3", "k=3.0002|m=int64:6", "k=4.0003|m=int64:9"}},
+			[]string{"k=1.0000|m=int32:0", "k=2.0001|m=int32:3", "k=3.0002|m=int32:6", "k=4.0003|m=int32:9"}},
 
 		// ------------------------------------------------------------------
 		// #749 — item 3's p>38 reduction spent an EXACT operator's fraction
@@ -403,14 +403,15 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 		{"#784", "sum_of_an_int32_case_arm_past_int32",
 			`SELECT SUM(CASE WHEN w IS NULL THEN 0 ELSE w END) AS s FROM i32wide`,
 			[]string{"s=int64:6000000000"}},
-		// MIN/MAX keep the VALUE PostgreSQL gives; the BOX is int64 where
-		// PostgreSQL keeps int4, on all five arms alike. That is ADR-0024's
-		// recorded widening — wadjet declares every integer INT64 — and not a
-		// two-path defect, which is why it is asserted here rather than left
-		// unstated: the cell fails the day one arm disagrees with the others.
-		{"#784", "min_max_of_int32_keep_their_value_in_the_wider_box",
+		// MIN/MAX keep the VALUE PostgreSQL gives AND its type: an int4 in,
+		// an int4 out (#951, arc ND). The comment here used to record the
+		// int64 box as ADR-0024's recorded widening; MIN/MAX answer a value
+		// the column HOLDS, so there was nothing to widen. The cell still
+		// fails the day one arm disagrees with the others, which is what it
+		// is for.
+		{"#784", "min_max_of_int32_keep_their_value_and_their_type",
 			`SELECT MIN(w) AS mn, MAX(w) AS mx FROM i32wide`,
-			[]string{"mn=int64:-2000000000|mx=int64:2000000000"}},
+			[]string{"mn=int32:-2000000000|mx=int32:2000000000"}},
 
 		// EMPTY SCAN TASKS. typemx is written as four chunks, so a selective
 		// predicate leaves some scan task with no rows — and a task that saw no

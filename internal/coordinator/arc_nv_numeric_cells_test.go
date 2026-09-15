@@ -160,26 +160,27 @@ func nvCells() []nvCell {
 		// both engines too — measured, in case this reads like a hedge.
 		{name: "950/windowed_over_the_partition",
 			sql: "SELECT g, SUM(r) OVER (PARTITION BY g) AS v FROM " + nvRl,
-			want: "g=1<i4>|v=1.677721e+07<f8>;g=1<i4>|v=1.677721e+07<f8>;" +
-				"g=1<i4>|v=1.677721e+07<f8>;g=1<i4>|v=1.677721e+07<f8>;" +
-				"g=1<i4>|v=1.677721e+07<f8>;g=2<i4>|v=14.25<f8>;g=2<i4>|v=14.25<f8>;" +
-				"g=2<i4>|v=14.25<f8>;g=2<i4>|v=14.25<f8>",
-			why: "the window column still DECLARES float8 where the server declares " +
-				"real — a declaration, not a value; the digits are the grouped " +
-				"spelling's, widened. The whole table, no filter: a WHERE beside the " +
+			want: "g=1<i4>|v=1.677721e+07<f4>;g=1<i4>|v=1.677721e+07<f4>;" +
+				"g=1<i4>|v=1.677721e+07<f4>;g=1<i4>|v=1.677721e+07<f4>;" +
+				"g=1<i4>|v=1.677721e+07<f4>;g=2<i4>|v=14.25<f4>;g=2<i4>|v=14.25<f4>;" +
+				"g=2<i4>|v=14.25<f4>;g=2<i4>|v=14.25<f4>",
+			why: "the DIGITS are the grouped spelling's and have not moved; the BOX " +
+				"is an f4 since #1118 gave the window column the real declaration " +
+				"the server gives it. The whole table, no filter: a WHERE beside the " +
 				"window would restrict the PARTITION, which is what both engines do " +
 				"and what would make the cell vacuous"},
 		{name: "950/windowed_running_total",
 			sql: "SELECT id, SUM(r) OVER (ORDER BY id) AS v FROM " + nvRl + " ORDER BY id",
-			want: "id=1<i8>|v=2<f8>;id=2<i8>|v=2.0999999046325684<f8>;" +
-				"id=3<i8>|v=14.850000381469727<f8>;id=4<i8>|v=1.677723e+07<f8>;" +
-				"id=5<i8>|v=1.677721e+07<f8>;id=6<i8>|v=1.677721e+07<f8>;" +
-				"id=7<i8>|v=1.6777222e+07<f8>;id=8<i8>|v=1.6777224e+07<f8>;" +
-				"id=9<i8>|v=1.6777224e+07<f8>",
+			want: "id=1<i8>|v=2<f4>;id=2<i8>|v=2.0999999046325684<f4>;" +
+				"id=3<i8>|v=14.850000381469727<f4>;id=4<i8>|v=1.677723e+07<f4>;" +
+				"id=5<i8>|v=1.677721e+07<f4>;id=6<i8>|v=1.677721e+07<f4>;" +
+				"id=7<i8>|v=1.6777222e+07<f4>;id=8<i8>|v=1.6777224e+07<f4>;" +
+				"id=9<i8>|v=1.6777224e+07<f4>",
 			why: "psql: 2, 2.1, 14.85, 1.677723e+07, 1.677721e+07, 1.677721e+07, " +
 				"1.6777222e+07, 1.6777224e+07, 1.6777224e+07 — the REAL running " +
-				"total, printed here as the float8 the window column declares " +
-				"(2.0999999046325684 IS float64(float32(2.1)))"},
+				"total, in the f4 box #1118 gave the window column " +
+				"(2.0999999046325684 IS float64(float32(2.1)), which is what the " +
+				"renderer prints for a float32 carrying float32(2.1))"},
 		{name: "950/min_and_max_are_untouched",
 			sql:  "SELECT MIN(r) AS lo, MAX(r) AS hi FROM " + nvRl,
 			want: "lo=-20<f4>|hi=1.6777216e+07<f4>"},
@@ -196,17 +197,20 @@ func nvCells() []nvCell {
 		// SUM accumulated in float64 and the DIVISION did not truncate.
 		{name: "1000/a_bare_port_is_int4",
 			sql: "SELECT pt AS v FROM " + nvEdg + " WHERE id=1", want: "v=65535<i4>"},
+		// The BOX is an i4 since #1070: `port * 1` is `integer` on the
+		// server, and these cells are about the NUMBER — 65535 rather than
+		// the 65535.0 the float path answered.
 		{name: "1000/port_times_one",
-			sql: "SELECT pt * 1 AS v FROM " + nvEdg + " WHERE id=1", want: "v=65535<i8>"},
+			sql: "SELECT pt * 1 AS v FROM " + nvEdg + " WHERE id=1", want: "v=65535<i4>"},
 		{name: "1000/port_plus_zero",
-			sql: "SELECT pt + 0 AS v FROM " + nvEdg + " WHERE id=1", want: "v=65535<i8>"},
+			sql: "SELECT pt + 0 AS v FROM " + nvEdg + " WHERE id=1", want: "v=65535<i4>"},
 		{name: "1000/a_negated_port",
-			sql: "SELECT -pt AS v FROM " + nvEdg + " WHERE id=1", want: "v=-65535<i8>"},
+			sql: "SELECT -pt AS v FROM " + nvEdg + " WHERE id=1", want: "v=-65535<i4>"},
 		{name: "1000/abs_of_a_port_answers_in_its_own_domain",
 			sql: "SELECT ABS(pt) AS v FROM " + nvEdg + " WHERE id=1", want: "v=65535<i4>"},
 		{name: "1000/protocol_division_TRUNCATES",
 			sql:  "SELECT pr / 2 AS v FROM " + nvEdg + " WHERE id=1",
-			want: "v=127<i8>", why: "127.5 before — this was the wrong VALUE"},
+			want: "v=127<i4>", why: "127.5 before — this was the wrong VALUE"},
 		{name: "1000/sum_over_a_computed_port",
 			sql: "SELECT SUM(pt * 1) AS v FROM " + nvEdg + " WHERE id=1", want: "v=65535<i8>"},
 		{name: "1000/grouped",
@@ -224,7 +228,7 @@ func nvCells() []nvCell {
 			want: "g=1<i4>|v=130<i8>;g=2<i4>|v=8<i8>"},
 		{name: "1000/the_truncating_division_through_a_subquery",
 			sql:  "SELECT (SELECT pr / 2 FROM " + nvEdg + " WHERE id=1) AS v FROM " + nvEdg + " WHERE id=4",
-			want: "v=127<i8>"},
+			want: "v=127<i4>"},
 
 		// ------------------------------------------------------------------
 		// #1037 — a wide DECIMAL literal under a CAST. 9007199254740993.25 is
@@ -358,9 +362,10 @@ func nvCells() []nvCell {
 		{name: "N1/f4_sum_one_preceding",
 			sql: "SELECT id, SUM(f4) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS v FROM " +
 				nvRet + " ORDER BY id",
-			want: "id=1<i8>|v=1e+07<f8>;id=2<i8>|v=1.0000001e+07<f8>;id=3<i8>|v=2<f8>;" +
-				"id=4<i8>|v=1.0000001e+07<f8>;id=5<i8>|v=1.0000002e+07<f8>",
-			why: "the half the arc's first cut already fixed; it must stay fixed"},
+			want: "id=1<i8>|v=1e+07<f4>;id=2<i8>|v=1.0000001e+07<f4>;id=3<i8>|v=2<f4>;" +
+				"id=4<i8>|v=1.0000001e+07<f4>;id=5<i8>|v=1.0000002e+07<f4>",
+			why: "the half the arc's first cut already fixed; it must stay fixed. The " +
+				"box is an f4 since #1118 — the DIGITS are unchanged"},
 		{name: "N1/f4_avg_one_preceding",
 			sql: "SELECT id, AVG(f4) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS v FROM " +
 				nvRet + " ORDER BY id",
@@ -371,9 +376,9 @@ func nvCells() []nvCell {
 		{name: "N1/f4_sum_preceding_and_following",
 			sql: "SELECT id, SUM(f4) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS v FROM " +
 				nvRet + " ORDER BY id",
-			want: "id=1<i8>|v=1.0000001e+07<f8>;id=2<i8>|v=1.0000002e+07<f8>;" +
-				"id=3<i8>|v=1.0000002e+07<f8>;id=4<i8>|v=1.0000003e+07<f8>;" +
-				"id=5<i8>|v=1.0000002e+07<f8>"},
+			want: "id=1<i8>|v=1.0000001e+07<f4>;id=2<i8>|v=1.0000002e+07<f4>;" +
+				"id=3<i8>|v=1.0000002e+07<f4>;id=4<i8>|v=1.0000003e+07<f4>;" +
+				"id=5<i8>|v=1.0000002e+07<f4>"},
 		// The CONTROLS: a frame whose lower end never moves is still the same
 		// running total in the same order, and the two aggregates that do not
 		// accumulate are untouched by the change.
