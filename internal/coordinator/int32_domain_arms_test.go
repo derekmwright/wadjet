@@ -102,10 +102,17 @@ func TestAnInt32DomainRefusalHoldsOnEveryArm(t *testing.T) {
 		{"int32_above_the_range", "SELECT (c_i64 + 3000000000)::INT32 AS v FROM " + tbl, true},
 		{"int32_below_the_range", "SELECT (c_i64 - 3000000000)::INT32 AS v FROM " + tbl, true},
 		{"int32_inside_the_range", "SELECT (c_i32 + 1)::INT32 AS v FROM " + tbl, false},
+		// PORT and PROTOCOL are refused against the TYPE's range since
+		// 2026-09-15 (Derek's decision on the round-2 review's FC-2), not the
+		// int4 carrier's, so their refusal names the type and the bound and
+		// `(c_i32 + 1)::PROTOCOL` — 1201 — is now past it. `want` carries the
+		// sentence each destination's refusal must contain.
 		{"port_above_the_range", "SELECT (c_i64 + 3000000000)::PORT AS v FROM " + tbl, true},
 		{"port_inside_the_range", "SELECT (c_i32 + 1)::PORT AS v FROM " + tbl, false},
+		{"port_past_the_types_range", "SELECT (c_i32 + 70000)::PORT AS v FROM " + tbl, true},
 		{"protocol_above_the_range", "SELECT (c_i64 + 3000000000)::PROTOCOL AS v FROM " + tbl, true},
-		{"protocol_inside_the_range", "SELECT (c_i32 + 1)::PROTOCOL AS v FROM " + tbl, false},
+		{"protocol_past_the_types_range", "SELECT (c_i32 + 1)::PROTOCOL AS v FROM " + tbl, true},
+		{"protocol_inside_the_range", "SELECT (c_i32 % 200)::PROTOCOL AS v FROM " + tbl, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {
@@ -114,9 +121,9 @@ func TestAnInt32DomainRefusalHoldsOnEveryArm(t *testing.T) {
 				case tc.refused && err == nil:
 					t.Errorf("%s arm: %s answered instead of refusing; no int32 holds that value",
 						arm.name, tc.sql)
-				case tc.refused && !strings.Contains(err.Error(), "integer out of range"):
-					t.Errorf("%s arm: %s refused with %v, want PostgreSQL's \"integer out of range\"",
-						arm.name, tc.sql, err)
+				case tc.refused && !strings.Contains(err.Error(), wantSentence(tc.name)):
+					t.Errorf("%s arm: %s refused with %v, want %q",
+						arm.name, tc.sql, err, wantSentence(tc.name))
 				case !tc.refused && err != nil:
 					t.Errorf("%s arm: %s refused a value an int32 holds: %v",
 						arm.name, tc.sql, err)
@@ -177,8 +184,8 @@ func TestAnInt32DomainRefusalHoldsOnEveryArm(t *testing.T) {
 			[]string{"v=int64:1201"}},
 		{"port_value", `SELECT (c_i32 + 1)::PORT AS v FROM ` + tbl + ` WHERE id = 400`,
 			[]string{"v=int32:1201"}},
-		{"protocol_value", `SELECT (c_i32 + 1)::PROTOCOL AS v FROM ` + tbl + ` WHERE id = 400`,
-			[]string{"v=int32:1201"}},
+		{"protocol_value", `SELECT (c_i32 % 200)::PROTOCOL AS v FROM ` + tbl + ` WHERE id = 400`,
+			[]string{"v=int32:0"}},
 		{"float32_value", `SELECT CAST(c_i32 AS FLOAT32) AS v FROM ` + tbl + ` WHERE id = 400`,
 			[]string{"v=float:1200"}},
 		{"date_value", `SELECT (c_i32 % 100)::DATE AS v FROM ` + tbl + ` WHERE id = 400`,
@@ -207,4 +214,20 @@ func TestAnInt32DomainRefusalHoldsOnEveryArm(t *testing.T) {
 			}
 		})
 	}
+}
+
+// wantSentence is the sentence a destination's 22003 must carry. INT32 and
+// DATE take PostgreSQL's own words for an int4 that cannot hold the value;
+// PORT and PROTOCOL take the TYPE's, because since 2026-09-15 the bound they
+// are held to is the type's own 0..65535 / 0..255 and the message names it
+// (parquet.NetworkIntRangeError, the writer's own refusal, shared so the two
+// boundaries cannot drift).
+func wantSentence(name string) string {
+	switch {
+	case strings.HasPrefix(name, "port"):
+		return "PORT value"
+	case strings.HasPrefix(name, "protocol"):
+		return "PROTOCOL value"
+	}
+	return "integer out of range"
 }
