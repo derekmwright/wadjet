@@ -726,7 +726,14 @@ func minMaxOutputType(in batch.TypeID) (parquet.TypeID, bool) {
 	case batch.TypeInt64:
 		return parquet.TypeInt64, true
 	case batch.TypeInt32:
-		return parquet.TypeInt64, true
+		// INT32 in, INT32 out — `pg_typeof(min(int4))` is integer, the same
+		// rule the REAL arm below carries and the same one MIN/MAX follow for
+		// every other type here: the answer is a value the column HOLDS, so
+		// it cannot leave the column's type. Declaring INT64 put a stored
+		// int4 on the wire under OID 20, where `MIN(c_i32) OVER ()` — which
+		// asks exec.WindowMinMaxType and has always answered INT32 — put the
+		// same value under 23 (#951).
+		return parquet.TypeInt32, true
 	case batch.TypeFloat64:
 		return parquet.TypeFloat64, true
 	case batch.TypeFloat32:

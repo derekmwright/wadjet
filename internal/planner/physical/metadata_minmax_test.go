@@ -28,7 +28,7 @@ func TestMMTypeFor(t *testing.T) {
 		wantOut parquet.TypeID
 		wantOK  bool
 	}{
-		{"int32 widens to int64", parquet.TypeInt32, parquet.TypeInt64, true},
+		{"int32 stays int32", parquet.TypeInt32, parquet.TypeInt32, true},
 		{"int64", parquet.TypeInt64, parquet.TypeInt64, true},
 		{"date stays date", parquet.TypeDate, parquet.TypeDate, true},
 		{"timestamp stays timestamp", parquet.TypeTimestamp, parquet.TypeTimestamp, true},

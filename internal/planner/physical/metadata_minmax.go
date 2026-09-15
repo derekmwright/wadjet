@@ -75,7 +75,12 @@ type mmOutput struct {
 func mmTypeFor(t parquet.TypeID) (kind mmKind, out parquet.TypeID, ok bool) {
 	switch t {
 	case parquet.TypeInt32:
-		return mmInt, parquet.TypeInt64, true // int32-class MIN/MAX widens to int64
+		// int4 in, int4 out — `pg_typeof(min(int4))` is integer, and this arm
+		// must track exec.minMaxOutputType exactly for the reason the REAL
+		// arm below states: with the scan path emitting int4 and this one
+		// emitting bigint, one query answered two types depending on whether
+		// a WHERE clause sent it down the statistics path (#951).
+		return mmInt, parquet.TypeInt32, true
 	case parquet.TypeInt64:
 		return mmInt, parquet.TypeInt64, true
 	case parquet.TypeDate:
@@ -399,7 +404,7 @@ func (p *Planner) tryBuildMetadataMinMax(ctx context.Context, node *logical.Node
 			} else {
 				vec.Int64Data[0] = c.minI
 			}
-		case parquet.TypeDate:
+		case parquet.TypeDate, parquet.TypeInt32:
 			if o.isMax {
 				vec.Int32Data[0] = int32(c.maxI)
 			} else {

@@ -169,32 +169,20 @@ func mmOrderByReference(t *testing.T, db *DB, col string, where ...string) (lo, 
 // The int32 widening stays because it is real: wadjet's MIN/MAX over an int32
 // column answers int64, and PostgreSQL's answers integer — the standing
 // int4/int8 width divergence, not this rule's.
-func mmOutputType(in parquet.TypeID) parquet.TypeID {
-	if in == parquet.TypeInt32 {
-		return parquet.TypeInt64
-	}
-	return in
-}
+func mmOutputType(in parquet.TypeID) parquet.TypeID { return in }
 
 // mmWiden converts a projected value into the shape MIN/MAX declares for its
-// column, for the ONE type whose aggregate output is not the input's own: the
-// int32 class widens to int64. Nothing else is converted, so a genuine type change still fails — DECIMAL in particular
-// compares as the same TEXT the projection renders, which is what makes this
-// a check on the digits and not on a rounding of them (#455).
+// column. NOTHING is converted any more, so a genuine type change still fails
+// — DECIMAL in particular compares as the same TEXT the projection renders,
+// which is what makes this a check on the digits and not on a rounding of them
+// (#455).
+//
+// FLOAT32 left this function with #760 and INT32 with #951, for one reason:
+// MIN/MAX answer a value the column HOLDS, so the aggregate's box and the
+// projection's are the same box for every type there is. The helper stays
+// because its ABSENCE is the claim — a future widening would have to be
+// written back in here, in front of a reader.
 func mmWiden(t *testing.T, in parquet.TypeID, v any) any {
 	t.Helper()
-	if v == nil {
-		return nil
-	}
-	if in == parquet.TypeInt32 {
-		n, ok := v.(int32)
-		if !ok {
-			t.Fatalf("projection of an INT32 column boxed %T", v)
-		}
-		return int64(n)
-	}
-	// FLOAT32 was here and is not any more (#760): MIN/MAX over a REAL
-	// answers REAL, so the aggregate's box and the projection's are the same
-	// and there is nothing to convert.
 	return v
 }

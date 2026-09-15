@@ -565,8 +565,18 @@ func minMaxDeclaredType(in parquet.TypeID) parquet.TypeID {
 		return parquet.TypeDuration
 	case parquet.TypeBool:
 		return parquet.TypeBool
-	case parquet.TypeInt64, parquet.TypeInt32:
+	case parquet.TypeInt64:
 		return parquet.TypeInt64
+	case parquet.TypeInt32:
+		// MIN/MAX of an int4 is a value the column HOLDS, so it answers in
+		// int4 — `pg_typeof(min(int4))` is integer on the live server, and
+		// this engine's own WINDOW spelling has always said so
+		// (exec.WindowMinMaxType). The GROUPED spelling declared INT64, so
+		// one query put the same stored number on the wire under two OIDs
+		// depending on which spelling asked for it (#951). exec's
+		// minMaxOutputType carries the identical arm so the planner and the
+		// operator cannot disagree.
+		return parquet.TypeInt32
 	case parquet.TypeFloat32:
 		// MIN/MAX of a REAL is a value the column HOLDS, so it answers in
 		// REAL — `pg_typeof(min(real))` is real on the live server. The

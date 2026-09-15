@@ -85,10 +85,11 @@ func TestAggSpecOutputType(t *testing.T) {
 			logical.AggExpr{Func: "max", InputCol: "o_orderdate"}, parquet.TypeDate, false},
 		{"min over a float column is a float", aggNodeOver(orders),
 			logical.AggExpr{Func: "min", InputCol: "o_totalprice"}, parquet.TypeFloat64, false},
-		// exec widens int32 to int64 on the way out; the declaration has to
-		// say the same thing or the identity row and a populated one disagree.
-		{"min over an int32 column widens to int64", aggNodeOver(orders),
-			logical.AggExpr{Func: "min", InputCol: "o_shippriority"}, parquet.TypeInt64, false},
+		// MIN/MAX of an int4 is an int4 — `pg_typeof(min(int4))` is integer
+		// (#951). exec.minMaxOutputType says the same thing, which is what
+		// keeps the identity row and a populated one agreeing.
+		{"min over an int32 column stays int32", aggNodeOver(orders),
+			logical.AggExpr{Func: "min", InputCol: "o_shippriority"}, parquet.TypeInt32, false},
 		{"a qualified input column resolves on its bare name",
 			aggNodeOver(customer), logical.AggExpr{Func: "min", InputCol: "customer.c_name"}, parquet.TypeString, false},
 		{"min resolves through a join below the aggregate",
