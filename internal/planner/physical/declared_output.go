@@ -94,13 +94,7 @@ func inferProjectionDeclTypeConf(node plansql.Node, fallback parquet.TypeID,
 		switch inner.(type) {
 		case *plansql.BinaryOp, *plansql.UnaryOp:
 			if intArithAllInt(inner, strictInt, decls) {
-				// At the operands' own WIDTH (#1070): int4 arithmetic is
-				// `integer` on the server and int8 arithmetic is `bigint`.
-				// The declaration this reaches must be the same one
-				// nodeDeclaredType's arithmetic arm reaches for the identical
-				// expression — two answers for one column is what this whole
-				// function's doc is about — so both call intArithDeclaredID.
-				return expr.Decl(intArithDeclaredID(inner, decls)), expr.Decided
+				return expr.Decl(parquet.TypeInt64), expr.Decided
 			}
 		}
 	}
@@ -154,28 +148,6 @@ func realArithBothReal(n *plansql.BinaryOp, decls colDecls) bool {
 		return c == expr.Decided && d.ID == parquet.TypeFloat32
 	}
 	return isReal(n.Left) && isReal(n.Right)
-}
-
-// intArithDeclaredID is the TypeID an INTEGER expression declares: int4 when
-// the width walk PROVES every operand is int4-domain, int8 otherwise.
-//
-// PostgreSQL's arithmetic result type is its operands' — `int4 + int4` is
-// integer, `int4 + int8` is bigint — and this engine declared bigint for both
-// because every integer it computes is carried in an int64 (ADR-0024's
-// recorded widening). The carrier does not have to be the declaration: an int4
-// result STORED into an int4 vector is exactly PostgreSQL's value, including
-// at the boundary, because batch's store guard raises 22003 with PostgreSQL's
-// own message for a value with no room — which is the answer the server gives
-// for `2147483647 + 1` (#1070).
-//
-// UNKNOWN is int8, deliberately: guessing narrow is how an exact bigint total
-// becomes a wrapped integer, and the width walk answers unknown for every
-// operand whose declaration says nothing.
-func intArithDeclaredID(n plansql.Node, decls colDecls) parquet.TypeID {
-	if int4DomainProven(n, decls) {
-		return parquet.TypeInt32
-	}
-	return parquet.TypeInt64
 }
 
 // int4DomainProven reports whether every integer operand of n is int4-domain
@@ -1262,7 +1234,14 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 			// integer mode, so a declaration never promises what the kernel cannot emit.
 			// Require IntArithOn: WADJET_INT_ARITH=0 uses the float delegate.
 			if expr.IntArithOn() && intArithAllInt(n, nil, decls) {
-				return expr.Decl(intArithDeclaredID(n, decls)), expr.Decided
+				// INT64, not the operands' own width. #1070 narrowed this to
+				// int4 and the DAG did not follow for an expression over an
+				// AGGREGATE or WINDOW slot: `MAX(c_i32) + 0` came back
+				// integer on the single path and bigint on both stage arms,
+				// which is the two-path divergence #813 item 1 is. Measured
+				// and filed; the LITERAL half of #1070 shipped because it
+				// agrees on every arm.
+				return expr.Decl(parquet.TypeInt64), expr.Decided
 			}
 			if realArithBothReal(n, decls) {
 				return expr.Decl(parquet.TypeFloat32), expr.Decided
@@ -1293,12 +1272,7 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 					// intArithColumnType names: `-c_port` is an INTEGER on
 					// both engines and the kernel produces one (#1000).
 					//
-					// At the operand's own WIDTH since #1070: `-int4` is
-					// integer on the server and `-int8` is bigint. The
-					// negation of an int4 leaves int4 only at int32's
-					// minimum, where the store guard raises 22003 —
-					// PostgreSQL's own answer for `-(-2147483648)::int4`.
-					return withExact(expr.Decl(intArithDeclaredID(n, decls))), c
+					return withExact(expr.Decl(parquet.TypeInt64)), c
 				case parquet.TypeFloat64:
 					return withExact(expr.Decl(parquet.TypeFloat64)), c
 				case parquet.TypeFloat32:

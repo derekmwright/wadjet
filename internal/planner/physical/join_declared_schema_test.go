@@ -147,9 +147,9 @@ func TestDeclaredJoinSchemaAgreesWithComputedInputProjection(t *testing.T) {
 	if !foundScan {
 		t.Fatal("region scan carries no materialized projection for rk2")
 	}
-	if scanProjType != parquet.TypeInt32 {
-		t.Errorf("materializing projection declares rk2 as %v, want INT32 "+
-			"(r_regionkey + 1 over an int4 strict-int column, #1070)", scanProjType)
+	if scanProjType != parquet.TypeInt64 {
+		t.Errorf("materializing projection declares rk2 as %v, want INT64 "+
+			"(r_regionkey + 1 over a strict-int column)", scanProjType)
 	}
 
 	// The PROBESC spec: the join stage's declared build-side schema

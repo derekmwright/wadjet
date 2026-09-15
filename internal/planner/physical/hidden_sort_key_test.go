@@ -141,13 +141,9 @@ func TestHiddenSortKeyDeclaresComputedType(t *testing.T) {
 			wantType: parquet.TypeBool,
 		},
 		{
-			// int4, because s_suppkey is an int4 column and `int4 + 1` is
-			// integer on the server (#1070). What the case is ABOUT is that
-			// the hidden key declares a NUMBER rather than the STRING
-			// fallback, which is what made `-1` sort before `-5`.
 			name:     "strict-int arithmetic",
 			sql:      `SELECT COUNT(*) AS c FROM (SELECT s_suppkey FROM supplier ORDER BY s_suppkey + 1 DESC LIMIT 7) t`,
-			wantType: parquet.TypeInt32,
+			wantType: parquet.TypeInt64,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
