@@ -456,6 +456,35 @@ func TestCastToANetworkTypeParsesItsOperand(t *testing.T) {
 			}
 		})
 	}
+	// A NON-TEXT operand is a wrong TYPE PAIR, which is neither of those: 42846
+	// `cannot cast type bigint to inet`, PostgreSQL's own answer for
+	// `12345::inet`. Handing the operand back — what every network cast used to
+	// do — stopped being harmless when the projection started allocating a
+	// column of the type: an int64 in an IPV4 vector IS an address, so
+	// `CAST(12345 AS IPV4)` would read back as 0.0.48.57.
+	for _, c := range []struct {
+		dest string
+		val  any
+		from string
+	}{
+		{"ipv4", int64(12345), "bigint"},
+		{"macaddr", int64(1), "bigint"},
+		{"ipv6", float64(1.5), "double precision"},
+		{"uuid", true, "boolean"},
+	} {
+		t.Run(c.dest+"/wrong-type-pair", func(t *testing.T) {
+			_, err := evalCastForTest(&Cast{Operand: &Lit{Val: c.val}, DestType: c.dest}, b)
+			if err == nil {
+				t.Fatalf("CAST(%v AS %s) answered; PostgreSQL 17.11 raises 42846", c.val, c.dest)
+			}
+			if st := sqlerr.StateOf(err); st != "42846" {
+				t.Errorf("SQLSTATE %q, want 42846 (%v)", st, err)
+			}
+			if !strings.Contains(err.Error(), c.from) {
+				t.Errorf("refusal %q does not name the source type %q", err, c.from)
+			}
+		})
+	}
 	// A PostgreSQL-valid literal naming a NETWORK is the OTHER answer and it is
 	// 0A000: the text is valid inet and this engine's bare-address type is the
 	// limit, not the grammar (ADR-0012 item 5).

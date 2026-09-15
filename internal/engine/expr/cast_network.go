@@ -1,7 +1,10 @@
 package expr
 
 import (
+	"fmt"
+
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -28,21 +31,15 @@ func castToNetwork(b *batch.RecordBatch, row int, operand Expr, v any, typ parqu
 	text := boxedTextOperand(b, row, operand, v)
 	s, isText := stringOperand(text)
 	if !isText {
-		// A raw encoding that reached here unresolved still has one reading,
-		// and it is not a refusal: render it as the type does.
-		switch n := text.(type) {
-		case int64:
-			switch typ {
-			case parquet.TypeIPv4:
-				return batch.FormatIPv4(uint32(n))
-			case parquet.TypeMAC:
-				return batch.FormatMAC(uint64(n))
-			}
-		}
-		// Anything else is a wrong TYPE PAIR, which PostgreSQL answers at
-		// parse time with 42846 rather than a data exception; minting a data
-		// exception for one here would be a different divergence.
-		return v
+		// A wrong TYPE PAIR, which PostgreSQL answers with 42846
+		// `cannot cast type integer to inet`. The old arms handed the operand
+		// back instead, and that was harmless only while the DECLARATION was
+		// STRING: now that the projection allocates a column of the type, an
+		// int64 handed back lands in an IPV4 vector as its RAW ENCODING and
+		// reads back as an address nobody wrote — `CAST(12345 AS IPV4)` would
+		// answer 0.0.48.57. Loud beats plausible.
+		panic(fatalEval{sqlerr.New("42846", "cannot cast type %s to %s",
+			networkCastSourceName(text), parquet.NetworkTextTypeName(typ))})
 	}
 	val, st, ok := parquet.NetworkTextValue(typ, s)
 	if !ok {
@@ -87,4 +84,23 @@ func networkCastType(dest string) (parquet.TypeID, bool) {
 		return parquet.TypeUUID, true
 	}
 	return 0, false
+}
+
+// networkCastSourceName names the operand's type the way PostgreSQL's 42846
+// would, from the BOX — which is the same fallback castToBool's refusal arms
+// use when no declaration answered.
+func networkCastSourceName(v any) string {
+	switch v.(type) {
+	case bool:
+		return "boolean"
+	case int32:
+		return "integer"
+	case int, int64:
+		return "bigint"
+	case float32:
+		return "real"
+	case float64:
+		return "double precision"
+	}
+	return fmt.Sprintf("%T", v)
 }
