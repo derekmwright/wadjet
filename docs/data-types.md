@@ -313,25 +313,41 @@ type, measured cell by cell:
 
 | Type | Accepted spellings |
 |---|---|
-| `IPv4`, `IPv6`, `CIDR` | `inet`'s grammar — see the abbreviated-address table below. Leading zeros are decimal (`010.1.2.3`), one trailing dot is ignored (`10.1.2.3.`), a HOST-width prefix is the address itself (`10.0.0.1/32`), and `inet6`'s mask has its OWN rule: digits only, no leading zeros, 0–128 (`::1/064` is `22P02`) |
+| `IPv4`, `IPv6`, `CIDR` | `inet`'s grammar — see the abbreviated-address table below. Leading zeros are decimal (`010.1.2.3`), one trailing dot is ignored (`10.1.2.3.`), a HOST-width prefix is the address itself (`10.0.0.1/32`), and `inet6`'s mask has its OWN rule: digits only, no leading zeros, 0–128 (`::1/064` is `22P02`, at a `CIDR` column as well as an `IPv6` one). A v4 address is read the same way whether or not a `/32` follows it, at every one of the three types: `'010.1.2.3'` and `'010.1.2.3/32'` are one value, and an `IPv6` column stores it as `::ffff:10.1.2.3` |
 | `MAC` | `08:00:2b:01:02:03`, `08-00-2b-01-02-03`, `08002b:010203`, `08002b-010203`, `0800.2b01.0203`, `0800-2b01-0203`, `08002b010203`, any case — `macaddr_in`'s seven `sscanf` patterns. The colon and hyphen forms read VARIABLE-width groups, so `a:b:c:d:e:f` is `0a:0b:0c:0d:0e:0f`; any other regrouping (`0800:2b01:0203`, `08.00.2b.01.02.03`) is `22P02`, and an octet above 255 is `22003 invalid octet value` |
 | `UUID` | 32 hex digits in any case, optionally wrapped in BOTH braces, with a hyphen permitted after any group of four and nowhere else: `a0ee-bc99-9c0b-4ef8-bb6d-6bb9-bd38-0a11` is a value, `a-0eebc99…` is `22P02` |
-| `Port` | a decimal number in 0–65535. Service NAMES are not resolved: `port_name()` is the function that names a port |
-| `Protocol` | a decimal number in 0–255, or the IANA NAME case-insensitively (`udp`, `TCP`, `icmp`, `ipv6-icmp`) — the text form `protocol_name()` prints, so `CAST(CAST(p AS TEXT) AS PROTOCOL)` round-trips |
+| `Port` | a DECIMAL number in 0–65535, with an optional sign and surrounding whitespace. int4's other spellings are NOT part of it: `'0x1bb'`, `'0o17'`, `'0b101'` and `'1_000'` are `22P02`, even though `'0x1bb'::integer` is 443. Service NAMES are not resolved either: `port_name()` is the function that names a port |
+| `Protocol` | the same decimal form in 0–255, or the IANA NAME case-insensitively (`udp`, `TCP`, `icmp`, `ipv6-icmp`) — the text form `protocol_name()` prints, so `CAST(CAST(p AS TEXT) AS PROTOCOL)` round-trips |
+
+**Whitespace is the type's own business, and the types disagree** — which is
+what having ONE grammar per type means rather than one rule for all of them.
+`macaddr` SKIPS it, before every group and after the last, so
+`' 08:00:2b:01:02:03 '` and `'08: 00:2b:01:02:03'` are values; `inet` and
+`uuid` REFUSE it, so `' 10.0.0.1'` and `'<uuid> '` are `22P02`; `Port` and
+`Protocol` ignore it as their integer form does. Every door answers the same
+way — the writer, `COPY`, `UPDATE`, a `CAST` and a comparison.
 
 An empty string is the one place two kinds of door differ on purpose: at the
 embedded ingester it is ABSENCE (the empty CSV or JSON field, stored as NULL),
 and at every SQL door it is a value the type cannot read — `22P02`, which is
 what `''::inet` is on the server.
 
-Two ranges have two domains, also on purpose: a `CAST` to `PORT` or `PROTOCOL`
-holds the int4 CARRIER those types are stored in, while every writer door holds
-the type's own 0–65535 / 0–255. So `CAST(70000 AS PORT)` answers and
-`INSERT INTO t (p) VALUES ('70000')` is `22003` — loud at the door that stores.
-And a `PROTOCOL` literal beside a COLUMN (`WHERE proto = 'udp'`) is read as
-`integer`, because a comparison resolves an unknown literal against the
-column's DECLARED wire type; use `CAST('udp' AS PROTOCOL)` or
-`protocol_number('udp')` there. Both are in ADR-0012's list.
+`PORT` and `PROTOCOL` get one more reading than the others, and both
+differences are deliberate. A `CAST` holds the int4 CARRIER those types are
+stored in while every writer door holds the type's own 0–65535 / 0–255, so
+`CAST(70000 AS PORT)` answers and `INSERT INTO t (p) VALUES ('70000')` is
+`22003` — loud at the door that stores. And beside a COLUMN they are read as
+the `integer` they DECLARE on the wire (OID 23), which is int4's whole
+grammar: `WHERE proto = 'udp'` is `22P02` and `WHERE port = '0x1bb'` answers.
+Use `CAST('udp' AS PROTOCOL)` or `protocol_number('udp')` in a predicate. Both
+are in ADR-0012's list.
+
+**A value PostgreSQL accepts that this engine's type has no room for is
+`0A000`, one class at every door.** An `IPv4` column cannot hold a NETWORK
+(`'10/8'`) and cannot hold an IPv6 address (`'::1'`); an `IPv6` column cannot
+hold a v4 network. All of them are `0A000` with a message naming the reason —
+never `22P02`, which would claim the text is bad, and never a silent zero-row
+answer.
 
 An abbreviated address **is** accepted beside a `CIDR` column, in the grammar
 PostgreSQL itself uses there — `inet`'s, not `cidr`'s. That distinction is the

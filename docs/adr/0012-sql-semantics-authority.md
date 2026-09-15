@@ -1062,7 +1062,20 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      octet is `22003 invalid octet value`, a different answer from a spelling
      the type cannot read.
 
-     Three DELIBERATE splits remain and are this family's residual:
+     **Amended 2026-09-15 (round-2 review).** The first cut of the repair left
+     three readers that were not PostgreSQL's still in the path, and the gate
+     that was supposed to catch that listed the spellings the issues named
+     rather than the grammar, so it passed with all three present. All three
+     are closed and the gate is now generated from a live server — every
+     documented ACCEPTED form and every documented REJECTED one, nine doors,
+     3 133 cells. What was wrong: an IPV6 column read a maskless v4-shaped
+     literal with Go's parser, so `'010.1.2.3'` was 22P02 and `'010.1.2.3/32'`
+     was a value; a CIDR column validated its v6 mask with Go's, so `'::1/064'`
+     was stored where the IPV6 column one function away refuses it; and
+     `INSERT … VALUES`, `COPY` and `UPDATE` TRIMMED, so `' 10.0.0.1'` and
+     `'<uuid> '` were stored at three doors and refused at every other.
+
+     Four DELIBERATE readings remain and are this family's residual:
 
      1. **`''` is absence at the embedded ingester and 22P02 at every SQL
         door.** An empty CSV or JSON field means NULL, which is what the Go
@@ -1073,15 +1086,49 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
         `expr.TestAnInt32DomainCastRefusesPastItsOwnRange`) while every WRITER
         door holds the type's own 0..65535 / 0..255. So `CAST(70000 AS PORT)`
         answers and `INSERT INTO t (p) VALUES ('70000')` is 22003 — loud at the
-        door that stores, which is the one that matters, but not one rule.
-     3. **A PROTOCOL literal beside a COLUMN is read as int4.**
-        `CAST('udp' AS PROTOCOL)` is 17 because the cast resolves against the
-        TYPE; `WHERE c_proto = 'udp'` is 22P02 because a comparison resolves
-        an unknown literal against the column's DECLARED wire type, which is
-        `integer` (OID 23, #834). Closing it means teaching
-        `kernel.ResolveFilterKernel`, `exec/filter.go` and the boxed-pair layer
-        a PROTOCOL-specific literal reading at five sites; measured, not
-        guessed, and left as a filing candidate rather than half-done.
+        door that stores, which is the one that matters, but not one rule. The
+        CTAS door carries the cast's answer to REST: `CREATE TABLE p AS SELECT
+        CAST(70000 AS PORT)` mints a PORT column holding 70000, measured
+        identical at base.
+     3. **PORT and PROTOCOL beside a COLUMN are read as the `integer` they
+        DECLARE.** `CAST('udp' AS PROTOCOL)` is 17 because the cast resolves
+        against the TYPE; `WHERE c_proto = 'udp'` is 22P02, and
+        `WHERE c_port = '0x1bb'` answers, because a comparison resolves an
+        unknown literal against the column's declared wire type (OID 23,
+        #834) — int4's whole grammar, not only its range. Closing it means
+        teaching `kernel.ResolveFilterKernel`, `exec/filter.go` and the
+        boxed-pair layer a type-specific literal reading at five sites, and
+        deciding which of the two the type MEANS; measured, not guessed, and
+        left as a filing candidate rather than half-done.
+     4. **A quoted FRACTIONAL literal rounds at the cast and the
+        `INSERT … SELECT` door.** `CAST('2.5' AS PORT)` is 3 and so is
+        `CAST('2.5' AS INTEGER)`, where PostgreSQL answers 22P02 for both:
+        the decimal reader precedes the text grammar and cannot tell a DECIMAL
+        box from a quoted literal. It is int4's cell rather than PORT's — the
+        writer doors refuse it — and belongs to the numeric family's lane.
+
+     **PostgreSQL-valid text a bare-address column has no room for is 0A000,
+     ONE class at every door.** (Amended 2026-09-15.) It has two reasons — the
+     literal names a NETWORK, or an address of the OTHER FAMILY — and the
+     message says which. Before the amendment `'10/8'` at an IPV4 column was
+     0A000 while `'::1'` was 22P02 and two v4-mapped spellings were not
+     refused at all at the comparison door: one class, three answers. The
+     plan-time classifier now reads the WRITER's classification rather than a
+     second copy of it.
+
+     **A mask whose text is not a value of the column's type stops a CAST.**
+     (Recorded 2026-09-15.) An ABAC `mask_column` obligation replaces the
+     column's expression with the mask, so `CAST(ip AS IPV4)` over a column
+     masked `'***'` is `CAST('***' AS IPV4)` — 22P02, which is also
+     PostgreSQL's answer for that text. No value leaks in either direction and
+     a mask whose text IS a value of the type (`'0.0.0.0'`) flows through
+     every door, but a report that casts a policed column stopped answering
+     when the cast started parsing. The structural fix is at the policy
+     boundary — a mask that cannot produce a value of the column's declared
+     type is an unenforceable mask, which `auth.plan_enforce` already refuses
+     other kinds of — and it is filed rather than patched at the cast, because
+     making the cast hand a non-value back is exactly the pass-through #1092
+     closed.
 
      **BOOL, BYTES and the containers refuse an unknown-typed literal in
      `INSERT … SELECT`** (Added 2026-09-15, #1088.) A bare quoted literal is
