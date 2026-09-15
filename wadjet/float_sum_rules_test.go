@@ -112,9 +112,9 @@ func TestSumOverARealAccumulatesAtRealWidth(t *testing.T) {
 }
 
 // TestTheWindowedRealSumAnswersWhatTheGroupedOneAnswers is the other half of
-// #950: the window spelling was a THIRD number. The box is still float64 here
-// — the window column's DECLARATION is not this arc's — so the comparison is
-// against the widened real, which is the value both engines hold.
+// #950: the window spelling was a THIRD number. Since #1118 the column
+// DECLARES real as well, so the box is a float32 — the same box the grouped
+// spelling produces, which is the point of the pairing.
 func TestTheWindowedRealSumAnswersWhatTheGroupedOneAnswers(t *testing.T) {
 	db := fsrOpen(t)
 	res, err := db.Query(context.Background(),
@@ -130,12 +130,13 @@ func TestTheWindowedRealSumAnswersWhatTheGroupedOneAnswers(t *testing.T) {
 		t.Fatalf("got %d rows, want %d", len(res.Rows), len(want))
 	}
 	for i, row := range res.Rows {
-		f, ok := row["v"].(float64)
+		f, ok := row["v"].(float32)
 		if !ok {
-			t.Fatalf("row %d: %T, want float64", i, row["v"])
+			t.Fatalf("row %d: %T, want float32 — `sum(real) over ()` declares real (#1118)",
+				i, row["v"])
 		}
-		if f != float64(want[i]) {
-			t.Errorf("row %d = %v, want %v (the real total, widened)", i, f, float64(want[i]))
+		if f != want[i] {
+			t.Errorf("row %d = %v, want %v (the real total)", i, f, want[i])
 		}
 	}
 }
@@ -156,9 +157,13 @@ func TestAMovingRealFrameRecomputesRatherThanRetracting(t *testing.T) {
 	// -20, 12.75, 14.25, 1.5.
 	want := []float32{2, 2.1, 12.85, 1.6777228e+07, 1.6777196e+07, -20, 12.75, 14.25, 1.5}
 	for i, row := range res.Rows {
-		f := row["v"].(float64)
-		if f != float64(want[i]) {
-			t.Errorf("row %d = %v, want %v", i, f, float64(want[i]))
+		f, ok := row["v"].(float32)
+		if !ok {
+			t.Fatalf("row %d: %T, want float32 — `sum(real) over ()` declares real (#1118)",
+				i, row["v"])
+		}
+		if f != want[i] {
+			t.Errorf("row %d = %v, want %v", i, f, want[i])
 		}
 	}
 }
