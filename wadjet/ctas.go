@@ -208,7 +208,7 @@ func (db *DB) executeInsertSelect(ctx context.Context, info *plansql.InsertInfo)
 // same shortfall is 42601 there, under its own message, because the list is a
 // promise about how many values follow.
 func checkInsertSelectShape(declared []parquet.Column, cols []parquet.Column, explicitList bool,
-	unknownLit []bool) error {
+	unknownLit []ntUnknownKind) error {
 	switch {
 	case len(declared) > len(cols):
 		return sqlerr.New("42601", "INSERT has more expressions than target columns")
@@ -216,9 +216,15 @@ func checkInsertSelectShape(declared []parquet.Column, cols []parquet.Column, ex
 		return sqlerr.New("42601", "INSERT has more target columns than expressions")
 	}
 	for i, d := range declared {
-		if i < len(unknownLit) && unknownLit[i] {
+		if i < len(unknownLit) && unknownLit[i] != ntNotUnknown {
 			// SQL's `unknown`, typed FROM the target rather than compared
-			// against it (#1088).
+			// against it (#1088). A NULL literal is unknown-typed too and
+			// needs no grammar at all — it produces no value — so it is
+			// assignable to EVERY declaration, which is what PostgreSQL does
+			// with `INSERT INTO t (c) SELECT NULL` (review NT N1).
+			if unknownLit[i] == ntUnknownNull {
+				continue
+			}
 			if err := ingest.AssignableFromUnknownLiteral(cols[i]); err != nil {
 				return err
 			}
@@ -241,7 +247,7 @@ func checkInsertSelectShape(declared []parquet.Column, cols []parquet.Column, ex
 // construct's own fold before it ever meets the target, and guessing here
 // would put a wrong rule on it — so those positions stay false and keep the
 // 42804 they have today (the honest answer: this walk cannot see them).
-func unknownTypedSelectItems(q *plansql.ParsedQuery, n int) []bool {
+func unknownTypedSelectItems(q *plansql.ParsedQuery, n int) []ntUnknownKind {
 	if q == nil || n == 0 {
 		return nil
 	}
@@ -249,16 +255,44 @@ func unknownTypedSelectItems(q *plansql.ParsedQuery, n int) []bool {
 	if err != nil || info == nil || info.Union != nil || len(info.Columns) != n {
 		return nil
 	}
-	out := make([]bool, n)
+	out := make([]ntUnknownKind, n)
 	for i, c := range info.Columns {
 		if c.Star {
 			return nil
 		}
-		lit, ok := c.ASTExpr.(*plansql.Lit)
-		out[i] = ok && lit.Kind == plansql.LitString
+		// PARENTHESES carry no meaning past grouping, so `SELECT ('10.0.0.1')`
+		// is the same item as `SELECT '10.0.0.1'` and was 42804 while its twin
+		// inserted a row (review NT N1) — the same rule physical.unwrapParens
+		// states for the refusal side.
+		e := c.ASTExpr
+		for {
+			pn, ok := e.(*plansql.ParenNode)
+			if !ok || pn.Inner == nil {
+				break
+			}
+			e = pn.Inner
+		}
+		lit, ok := e.(*plansql.Lit)
+		switch {
+		case ok && lit.Kind == plansql.LitString:
+			out[i] = ntUnknownText
+		case ok && lit.Kind == plansql.LitNull:
+			out[i] = ntUnknownNull
+		}
 	}
 	return out
 }
+
+// ntUnknownKind classifies a select-list item as SQL's `unknown`: a bare
+// quoted literal, whose TEXT the target's input function reads, or a NULL,
+// which produces no value and so needs no grammar.
+type ntUnknownKind int
+
+const (
+	ntNotUnknown ntUnknownKind = iota
+	ntUnknownText
+	ntUnknownNull
+)
 
 // resultRows reads a result POSITIONALLY, one row at a time, converting each
 // row to the target's declared types as it goes.

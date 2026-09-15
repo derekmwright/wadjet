@@ -138,6 +138,26 @@ func TestInsertSelectTypesAnUnknownLiteralFromItsTarget(t *testing.T) {
 		})
 	}
 
+	// PARENTHESES carry no meaning past grouping, and a NULL literal is
+	// unknown-typed too — it produces no value, so it needs no grammar and is
+	// assignable to EVERY declaration, BOOL and BYTES included. Both were
+	// 42804 while their twins inserted a row (review NT N1).
+	for _, c := range []struct{ name, sql, col string }{
+		{"parens", "INSERT INTO t (c_ipv4) SELECT ('10.0.0.1')", "c_ipv4"},
+		{"null", "INSERT INTO t (c_ipv4) SELECT NULL", "c_ipv4"},
+		{"null into bool", "INSERT INTO t (c_bool) SELECT NULL", "c_bool"},
+		{"null into int", "INSERT INTO t (c_i64) SELECT NULL", "c_i64"},
+	} {
+		t.Run("unknown/"+c.name, func(t *testing.T) {
+			if _, err := db.Query(ctx, c.sql); err != nil {
+				t.Fatalf("%s: %v", c.sql, err)
+			}
+			if _, err := db.Query(ctx, "DELETE FROM t"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
 	// And the declarations whose text no leaf in this writer reads stay
 	// 42804 rather than failing at the flush with a box error.
 	t.Run("bool/stays_42804", func(t *testing.T) {
