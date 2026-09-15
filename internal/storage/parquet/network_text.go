@@ -418,18 +418,35 @@ func scanHex(s string, i, width int) (int64, int, bool) {
 	// `'100000000:0:0:0:0:0'` and 01:00:00:00:00:00 for `'100000001:…'` —
 	// the truncation is visible in the value, not only in the accept-set, and
 	// saturating instead refused a spelling the server takes (review NT P3).
-	var u uint32
+	// C's `%x` converts with strtoul FIRST and narrows to `int` after, so
+	// there are TWO truncations and they are not the same one: a value past
+	// 2^64-1 saturates to ULONG_MAX (`'10000000000000000:0:0:0:0:0'` is
+	// 22003 on 17.11, not 00:00:…), and only what survives that is taken
+	// mod 2^32. Wrapping a uint32 alone answered a MAC for five spellings the
+	// server refuses (review NT round 2, B1).
+	var u64 uint64
+	sat := false
 	for i < len(s) && isHexByte(s[i]) && room(1) {
-		u = u*16 + uint32(hexValue(s[i]))
+		if u64 > (math.MaxUint64-uint64(hexValue(s[i])))/16 {
+			sat = true
+		}
+		u64 = u64*16 + uint64(hexValue(s[i]))
 		i++
 	}
 	if i == digits {
 		return 0, i, false
 	}
-	if neg {
-		u = -u
+	// The SIGN is strtoul's too, and it is applied INSIDE the 64-bit
+	// accumulation — but not on top of a saturated one: an overflowing subject
+	// sequence returns ULONG_MAX whether or not a minus preceded it, which is
+	// why `'-10000000000000000:0:0:0:0:0'` is 22003 on 17.11 and
+	// `'-1000000000000000:…'` (no overflow) is 00:00:00:00:00:00.
+	if sat {
+		u64 = math.MaxUint64 // strtoul's own answer for an overflowing subject
+	} else if neg {
+		u64 = -u64
 	}
-	return int64(int32(u)), i, true
+	return int64(int32(uint32(u64))), i, true
 }
 
 func isSpaceByte(c byte) bool {
