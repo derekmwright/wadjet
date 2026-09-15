@@ -3,6 +3,7 @@ package wadjet
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -44,17 +45,25 @@ const (
 	ntCastCol    ntDoor = "cast-column"   // CAST(s AS T) over a STRING column
 	ntWhereEmpty ntDoor = "where-empty"   // a literal in WHERE over a scan no row survives
 	ntWhereFull  ntDoor = "where-rows"    // the same over a scan that has rows
+	// ntBox is the Go-BOX write door: db.NewIngester().Ingest handed a NUMBER
+	// rather than text. It exists only for PORT and PROTOCOL, the two types
+	// whose range is not their carrier's, and it is where a value entered the
+	// type without passing any text grammar at all — int32(65536) was AT REST
+	// in a PORT column while the same value as text at the same door was
+	// 22003 (review NT round 2, B2). Every other type takes only text through
+	// the ingest boundary, so the cell is skipped for them with that reason.
+	ntBox ntDoor = "ingester-box"
 )
 
 var ntAllDoors = []ntDoor{
 	ntIngester, ntValues, ntInsertSel, ntCopy, ntUpdate,
-	ntCastLit, ntCastCol, ntWhereEmpty, ntWhereFull,
+	ntCastLit, ntCastCol, ntWhereEmpty, ntWhereFull, ntBox,
 }
 
 // ntWriterDoors are the doors that STORE, where the value at rest is
 // observable and is asserted beside the disposition.
 func ntIsWriterDoor(d ntDoor) bool {
-	return d == ntIngester || d == ntValues || d == ntInsertSel || d == ntUpdate
+	return d == ntIngester || d == ntValues || d == ntInsertSel || d == ntUpdate || d == ntBox
 }
 
 // ntInetShape reads PostgreSQL's canonical `inet` output — always
@@ -184,12 +193,22 @@ func ntPortCells() []ntNumCell {
 		{"65536", "22003", "22003", "ok", 0},
 		{"-1", "22003", "22003", "ok", 0},
 		{"3000000000", "22003", "22003", "", 0},
+		{"70000", "22003", "22003", "ok", 0},
+		{"2147483648", "22003", "22003", "22003", 0},
+		{"300", "ok", "ok", "", 300},
 		{"0x1bb", "22P02", "22P02", "ok", 0},
 		{"0o17", "22P02", "22P02", "ok", 0},
 		{"0b101", "22P02", "22P02", "ok", 0},
 		{"1_000", "22P02", "22P02", "ok", 0},
-		{"443.0", "22P02", "ok", "22P02", 0},
-		{"2.5", "22P02", "ok", "22P02", 0},
+		// A quoted FRACTIONAL literal is 22P02 at every door this arc owns
+		// since round 3: `'2.5'::integer` is 22P02 on the server, and the
+		// value used to reach REST through INSERT … SELECT and a CTAS. The
+		// BARE `CAST('2.5' AS INTEGER)` still rounds and is FC-7's, in the
+		// numeric lane — a DECIMAL BOX must keep rounding (PG's numeric→int
+		// does), and telling the two apart at that cast needs the operand's
+		// declared type, which this arc's seam does not own.
+		{"443.0", "22P02", "22P02", "22P02", 0},
+		{"2.5", "22P02", "22P02", "22P02", 0},
 		{"https", "22P02", "22P02", "", 0},
 		{"zzz", "22P02", "22P02", "", 0},
 		{"", "22P02", "22P02", "", 0},
@@ -209,6 +228,10 @@ func ntProtocolCells() []ntNumCell {
 		{" udp", "ok", "ok", "22P02", 17},
 		{"256", "22003", "22003", "ok", 0},
 		{"3000000000", "22003", "22003", "", 0},
+		{"70000", "22003", "22003", "ok", 0},
+		{"2147483648", "22003", "22003", "22003", 0},
+		{"300", "22003", "22003", "ok", 0},
+		{"443", "22003", "22003", "ok", 0},
 		{"0x6", "22P02", "22P02", "ok", 0},
 		{"nosuchproto", "22P02", "22P02", "", 0},
 		{"", "22P02", "22P02", "", 0},
@@ -279,12 +302,8 @@ func ntNumRow(typ parquet.TypeID, c ntNumCell) ntCell {
 			cell.only[d] = c.at(d)
 		}
 	}
-	// INSERT … SELECT carries an unknown-typed literal through the ASSIGNMENT
-	// converter, which reaches the same decimal reader the CAST does — so the
-	// fractional pair answers there too. Same cell as FC-7, one door over.
-	if c.form == "443.0" || c.form == "2.5" {
-		cell.only[ntInsertSel] = "ok"
-	}
+	// The BOX door is a WRITE door: the type's own range, like the text ones.
+	delete(cell.only, ntBox)
 	if c.form == "" {
 		cell.only = map[ntDoor]string{ntIngester: "ok"}
 		cell.value = ""
@@ -332,7 +351,7 @@ func ntDoorRunner(t *testing.T, d ntDoor) func(*testing.T, parquet.TypeID, strin
 			t.Helper()
 			db, schema := ntOpenTyped(t, typ)
 			ing := db.NewIngester("t", schema, nil, ingest.DefaultConfig())
-			err := ing.Ingest(ctx, []map[string]any{{"id": int64(1), "c": ntBox(typ, form)}})
+			err := ing.Ingest(ctx, []map[string]any{{"id": int64(1), "c": form}})
 			if err == nil {
 				err = ing.FlushAll(ctx)
 			}
@@ -420,6 +439,26 @@ func ntDoorRunner(t *testing.T, d ntDoor) func(*testing.T, parquet.TypeID, strin
 			}
 			return "ok", ntCellText(res)
 		}
+	case ntBox:
+		return func(t *testing.T, typ parquet.TypeID, form string) (string, string) {
+			t.Helper()
+			box, ok := ntNumericBox(typ, form)
+			if !ok {
+				t.Skip("the Go-box door exists for PORT and PROTOCOL, whose range is " +
+					"not their carrier's; every other type reaches the ingest " +
+					"boundary as text")
+			}
+			db, schema := ntOpenTyped(t, typ)
+			ing := db.NewIngester("t", schema, nil, ingest.DefaultConfig())
+			err := ing.Ingest(ctx, []map[string]any{{"id": int64(1), "c": box}})
+			if err == nil {
+				err = ing.FlushAll(ctx)
+			}
+			if err != nil {
+				return ntDisposition(err), ""
+			}
+			return "ok", ntReadBack(t, db, typ)
+		}
 	case ntWhereEmpty, ntWhereFull:
 		return func(t *testing.T, typ parquet.TypeID, form string) (string, string) {
 			t.Helper()
@@ -444,10 +483,21 @@ func ntDoorRunner(t *testing.T, d ntDoor) func(*testing.T, parquet.TypeID, strin
 	return nil
 }
 
-// ntBox is the Go value the embedded ingester is handed. PORT and PROTOCOL are
-// int4-backed and their map API takes a number OR the type's text; every cell
-// here is text, which is the form a CSV or JSON source supplies.
-func ntBox(typ parquet.TypeID, form string) any { return form }
+// ntNumericBox is the NUMBER a PORT or PROTOCOL form names, for the Go-box
+// door. Only a plain decimal integer has one: whitespace, a sign spelling, a
+// fraction and an IANA name are text questions and are asked at the text
+// doors. int64 is the box, and the range check must fire before the int32
+// narrowing that used to swallow it.
+func ntNumericBox(typ parquet.TypeID, form string) (any, bool) {
+	if typ != parquet.TypePort && typ != parquet.TypeProtocol {
+		return nil, false
+	}
+	n, err := strconv.ParseInt(form, 10, 64)
+	if err != nil || form != strconv.FormatInt(n, 10) {
+		return nil, false
+	}
+	return n, true
+}
 
 // ntQuote is a SQL string literal. No corpus form contains an apostrophe; the
 // doubling is here so that adding one cannot silently change the statement.

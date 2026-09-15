@@ -152,6 +152,24 @@ var ntPgMacaddr = []ntPgCell{
 	{"100000001:0:0:0:0:0", "01:00:00:00:00:00", ""},
 	{"-100000001:0:0:0:0:0", "", "22003"},
 	{"1000000ff:0:0:0:0:0", "ff:00:00:00:00:00", ""},
+	// The OVERFLOW family, measured on 17.11. macaddr_in converts with
+	// strtoul and narrows to `int` after, so there are TWO truncations: a
+	// subject sequence past 2^64-1 SATURATES to ULONG_MAX (22003 after the
+	// narrowing) and only what survives that is taken mod 2^32. The boundary
+	// is the VALUE, not the digit count — 22 leading zeros are a value, 17
+	// significant digits are not — which is why a corpus of spellings did not
+	// reach it (review NT round 2, B1).
+	{"1000000000000000:0:0:0:0:0", "00:00:00:00:00:00", ""},
+	{"10000000000000000:0:0:0:0:0", "", "22003"},
+	{"100000000000000000:0:0:0:0:0", "", "22003"},
+	{"10000000000000001:0:0:0:0:0", "", "22003"},
+	{"1000000000000000000000:0:0:0:0:0", "", "22003"},
+	{"100000000000000000000000000000ff:0:0:0:0:0", "", "22003"},
+	{"fffffffffffffffff:0:0:0:0:0", "", "22003"},
+	{"0000000000000000000001:0:0:0:0:0", "01:00:00:00:00:00", ""},
+	{"-10000000000000000:0:0:0:0:0", "", "22003"},
+	{"-1000000000000000:0:0:0:0:0", "00:00:00:00:00:00", ""},
+	{"0:0:0:0:0:10000000000000000", "", "22003"},
 }
 
 var ntPgUuid = []ntPgCell{
