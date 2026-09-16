@@ -43,11 +43,13 @@ func (p *Planner) makeSubqueryRunner() expr.SubqueryRunner {
 // Drop MaterializedInputs, StreamingSources and ScanFileFilter: those aliases
 // and file slices belong to the enclosing fragment; subqueries read the whole table.
 // See docs/internals/subquery-planner-resource-ownership.md for the design.
+// The stage emitter's own per-build scratch is no longer reset here: it is
+// not on this type. A subquery planner is a LOCAL planner — it builds a
+// pipeline — and a StagePlanner made from one starts with empty scratch by
+// construction (StagePlanner, stage_planner.go).
 func (p *Planner) forSubquery() *Planner {
 	sub := *p
 	sub.scanCounter = nil
-	sub.ctePlannedTerminal = nil
-	sub.scanDeletes = nil
 	// The scalar-subquery DECLARATION memo is per-BUILD, like the fields
 	// above it. It is a plain map with no lock, `sub := *p` copies the map
 	// HEADER, and this runner is reached from every parallel pipeline
@@ -57,7 +59,6 @@ func (p *Planner) forSubquery() *Planner {
 	// round 6 review, B2). A child gets its own; memoization is a
 	// within-one-build economy, never a promise across builds.
 	sub.subqueryDeclCache = nil
-	sub.scalarPlaceholderSeq = 0
 	sub.MaterializedInputs = nil
 	sub.StreamingSources = nil
 	sub.ScanFileFilter = nil

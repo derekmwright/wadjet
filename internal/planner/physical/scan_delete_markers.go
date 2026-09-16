@@ -39,7 +39,7 @@ func deleteMarkerMap(markers []catalog.DeleteMarker) map[string][]int64 {
 // the map derived from the SAME manifest object the stage's ScanFiles came
 // from; a nil map (no deletes) is recorded too, so a later stage over that
 // table is annotated as "known to have none" rather than left unvisited.
-func (p *Planner) rememberScanDeletes(table string, deletes map[string][]int64) {
+func (p *StagePlanner) rememberScanDeletes(table string, deletes map[string][]int64) {
 	if table == "" {
 		return
 	}
@@ -66,7 +66,7 @@ func (p *Planner) rememberScanDeletes(table string, deletes map[string][]int64) 
 // carrying markers is left alone, and a stage pinned to a remote cluster is
 // skipped — its files live under that cluster's manifest, which this
 // planner did not read.
-func (p *Planner) annotateScanDeletes(stages []Stage) {
+func (p *StagePlanner) annotateScanDeletes(stages []Stage) {
 	if len(p.scanDeletes) == 0 {
 		return
 	}

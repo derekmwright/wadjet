@@ -176,7 +176,7 @@ func cleanExpr(s string) string {
 	return s
 }
 
-func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]Stage, error) {
+func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) ([]Stage, error) {
 	p.planCtx = ctx // store for scalar subquery evaluation during stage generation
 	if len(node.CTEs) > 0 {
 		p.ctes = node.CTEs

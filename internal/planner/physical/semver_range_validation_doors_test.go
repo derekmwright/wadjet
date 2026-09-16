@@ -26,11 +26,11 @@ func TestSemverRangeValidationDoors(t *testing.T) {
 		for _, distributed := range []bool{false, true} {
 			t.Run(door+map[bool]string{false: "/Plan", true: "/PlanDistributed"}[distributed], func(t *testing.T) {
 				ctx := context.Background()
-				p := NewPlanner(nil)
+				p := NewStagePlanner(NewPlanner(nil))
 				q := `SELECT semver_satisfies('1.2.3','^^1.0') AS v WHERE FALSE`
 				if door != "catalogless" {
 					cat, _ := setupCatalog(t)
-					p = NewPlanner(cat)
+					p = NewStagePlanner(NewPlanner(cat))
 					if err := cat.CreateTable(ctx, "empty_pkgs", parquet.Schema{Columns: []parquet.Column{{Name: "id", Type: parquet.TypeInt32}}}, nil); err != nil {
 						t.Fatal(err)
 					}
@@ -96,7 +96,7 @@ func TestSemverRangeValidationDoors(t *testing.T) {
 func TestTheBinderRefusesAConstantSemverRangeInEveryExpressionPosition(t *testing.T) {
 	ctx := context.Background()
 	cat, _ := setupCatalog(t)
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 	schema := parquet.Schema{Columns: []parquet.Column{
 		{Name: "id", Type: parquet.TypeInt32},
 		{Name: "v", Type: parquet.TypeString, Nullable: true},
@@ -141,7 +141,7 @@ func TestTheBinderRefusesAConstantSemverRangeInEveryExpressionPosition(t *testin
 func TestTheBinderLeavesANonConstantSemverRangeAlone(t *testing.T) {
 	ctx := context.Background()
 	cat, _ := setupCatalog(t)
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 	schema := parquet.Schema{Columns: []parquet.Column{
 		{Name: "id", Type: parquet.TypeInt32},
 		{Name: "v", Type: parquet.TypeString, Nullable: true},

@@ -78,7 +78,7 @@ func sqlToStagesWithEnsure(t *testing.T, cat *catalog.Catalog, ctx context.Conte
 	scanAnnotator := func(plan *logical.Node) { NewPlanner(cat).AnnotateScanColumns(ctx, plan) }
 	scanAnnotator(logicalPlan)
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.WorkerCount = workerCount
 	stages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {

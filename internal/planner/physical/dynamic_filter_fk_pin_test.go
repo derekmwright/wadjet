@@ -21,7 +21,7 @@ func TestFKReferencedRowCountManifestReadsArePinned(t *testing.T) {
 	cat, kv, ctx := setupSelfJoinCatalog(t) // table "t"
 	snap := NewManifestSnapshot()
 	ctx = WithManifestSnapshot(ctx, snap)
-	p := NewPlannerForContext(ctx, cat)
+	p := NewStagePlanner(NewPlannerForContext(ctx, cat))
 
 	// "x_tkey" -> stem "t" -> candidates "t" (HIT) and "ts" (never tried,
 	// since "t" already answers with rows).
@@ -58,7 +58,7 @@ func TestFKReferencedRowCountManifestReadsArePinned(t *testing.T) {
 	// Unpinned contrast, so a green assertion above cannot be something
 	// else having started caching.
 	cat2, kv2, ctx2 := setupSelfJoinCatalog(t)
-	p2 := NewPlanner(cat2)
+	p2 := NewStagePlanner(NewPlanner(cat2))
 	p2.ManifestSnapshot = nil // a bare planner: the documented fallback
 	for i := 0; i < 6; i++ {
 		p2.estimateFKReferencedRowCount(ctx2, "x_tkey")

@@ -169,7 +169,7 @@ func planStagesForTest(t *testing.T, ctx context.Context, cat *catalog.Catalog, 
 	if err != nil {
 		t.Fatalf("logical plan: %v", err)
 	}
-	planner := physical.NewPlanner(cat)
+	planner := physical.NewStagePlanner(physical.NewPlanner(cat))
 	planner.WorkerCount = workers
 	planner.BroadcastBytesThreshold = broadcastThreshold
 	planner.AnnotateScanColumns(ctx, plan)

@@ -51,7 +51,7 @@ const (
 // B or its exchange. NULL skipping/dropping relies on null-insensitive equi keys.
 // See docs/design/semi-anti-build-dynamic-filters.md and
 // docs/internals/semi-anti-build-filter-wiring.md for the design.
-func (p *Planner) markSemiAntiBuildFilters(ctx context.Context, stages []Stage) []Stage {
+func (p *StagePlanner) markSemiAntiBuildFilters(ctx context.Context, stages []Stage) []Stage {
 	if !SemiAntiBuildFilter.On() {
 		return stages
 	}

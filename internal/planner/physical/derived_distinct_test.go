@@ -211,7 +211,7 @@ func planDistributedErr(t *testing.T, cat *catalog.Catalog, ctx context.Context,
 	}
 	scanAnnotator(logicalPlan)
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.WorkerCount = 3
 	_, err = planner.PlanDistributed(ctx, logicalPlan)
 	return err

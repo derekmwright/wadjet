@@ -174,7 +174,7 @@ func sqlToStagesWithColumnPolicies(t *testing.T, cat *catalog.Catalog, ctx conte
 	}
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.WorkerCount = workerCount
 	stages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {

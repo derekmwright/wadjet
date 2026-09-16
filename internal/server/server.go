@@ -1228,7 +1228,8 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, parsed *p
 		// was before the split. A plan the distributed planner refuses falls
 		// back to the pipeline's own line rather than failing EXPLAIN.
 		physicalPlanText := physPlan.PrettyPrint()
-		if stages, stageErr := planner.PlanDistributed(explainCtx, logicalPlan); stageErr == nil && len(stages) > 0 {
+		stagePlanner := physical.NewStagePlanner(planner)
+		if stages, stageErr := stagePlanner.PlanDistributed(explainCtx, logicalPlan); stageErr == nil && len(stages) > 0 {
 			physicalPlanText = physical.PrettyPrintStages(stages)
 		}
 		planStr += "\n\n-- Physical Plan --\n" + physicalPlanText

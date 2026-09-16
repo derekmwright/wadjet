@@ -15,7 +15,7 @@ import (
 // files need catalog types to avoid exposing raw storage representations (#423).
 // Matching declarations are a no-op; on disagreement catalog wins only if the
 // bytes can carry its type, otherwise SchemaAs/retypeFromCatalog fails the task.
-func (p *Planner) annotateScanSchemas(ctx context.Context, stages []Stage) {
+func (p *StagePlanner) annotateScanSchemas(ctx context.Context, stages []Stage) {
 	if p.catalog == nil {
 		return
 	}

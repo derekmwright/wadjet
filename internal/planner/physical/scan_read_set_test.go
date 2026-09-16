@@ -295,7 +295,7 @@ func planStagesForReadSet(t *testing.T, cat *catalog.Catalog, ctx context.Contex
 	ann := func(p *logical.Node) { NewPlanner(cat).AnnotateScanColumns(ctx, p) }
 	ann(lp)
 	lp = logical.Optimize(lp, ann)
-	pl := NewPlanner(cat)
+	pl := NewStagePlanner(NewPlanner(cat))
 	pl.WorkerCount = 3
 	return pl.PlanDistributed(ctx, lp)
 }

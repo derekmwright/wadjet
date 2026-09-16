@@ -45,7 +45,7 @@ func TestGatherRefusesANestedWrappedWindow(t *testing.T) {
 	annotate := func(n *logical.Node) { NewPlanner(cat).AnnotateScanColumns(ctx, n) }
 	annotate(node)
 	node = logical.Optimize(node, annotate)
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 	p.WorkerCount = 3
 	if _, err = p.PlanDistributed(ctx, node); err == nil {
 		t.Errorf("the DAG now computes the SELECT list for %q, so this shape no longer needs "+

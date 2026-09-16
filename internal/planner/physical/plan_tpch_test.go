@@ -166,7 +166,7 @@ func sqlToStages(t *testing.T, cat *catalog.Catalog, ctx context.Context, sql st
 	scanAnnotator(logicalPlan)
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.WorkerCount = workerCount
 	stages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
@@ -581,7 +581,7 @@ func TestTPCHRoutingDecisions(t *testing.T) {
 			logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 
 			// Generate physical stages
-			planner := NewPlanner(cat)
+			planner := NewStagePlanner(NewPlanner(cat))
 			planner.WorkerCount = workerCount
 			stages, err := planner.PlanDistributed(ctx, logicalPlan)
 			if err != nil {
@@ -719,7 +719,7 @@ func TestTPCHDistributionConsistency(t *testing.T) {
 			scanAnnotator(logicalPlan)
 			logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 
-			planner := NewPlanner(cat)
+			planner := NewStagePlanner(NewPlanner(cat))
 			planner.WorkerCount = 4
 			stages, err := planner.PlanDistributed(ctx, logicalPlan)
 			if err != nil {
@@ -796,7 +796,7 @@ func TestPlanDistributed_InsertsExchanges(t *testing.T) {
 
 	t.Run("Q01_wiring", func(t *testing.T) {
 		// Simple wiring test: PlanDistributed must not error on Q01.
-		planner := NewPlanner(cat)
+		planner := NewStagePlanner(NewPlanner(cat))
 		planner.WorkerCount = 4
 
 		node := buildLogicalPlan(t, tpchPlanQueryMap[1])
@@ -808,7 +808,7 @@ func TestPlanDistributed_InsertsExchanges(t *testing.T) {
 
 	t.Run("Q05_exchange_inserted", func(t *testing.T) {
 		// Q05 has multiple joins large enough to trigger exchange insertion.
-		planner := NewPlanner(cat)
+		planner := NewStagePlanner(NewPlanner(cat))
 		planner.WorkerCount = 4
 
 		node := buildLogicalPlan(t, tpchPlanQueryMap[5])
@@ -874,7 +874,7 @@ func TestTPCH_EnsureDistribution_PlannerParity(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			node := buildLogicalPlanEnsure(t, sql)
 
-			planner := NewPlanner(cat)
+			planner := NewStagePlanner(NewPlanner(cat))
 			planner.WorkerCount = 4
 
 			// Assertion 1: plan succeeds.
@@ -989,7 +989,7 @@ func TestTPCH_EnsureDistribution_Snapshot(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			node := buildLogicalPlanSnap(t, sql)
 
-			planner := NewPlanner(cat)
+			planner := NewStagePlanner(NewPlanner(cat))
 			planner.WorkerCount = 4
 
 			stages, err := planner.PlanDistributed(ctx, node)

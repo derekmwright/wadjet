@@ -49,7 +49,7 @@ func TestEstimatePlanScanBytes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			plan := buildOptimized(tc.sql)
-			got, ok := NewPlanner(cat).EstimatePlanScanBytes(ctx, plan)
+			got, ok := NewStagePlanner(NewPlanner(cat)).EstimatePlanScanBytes(ctx, plan)
 			if ok != tc.ok {
 				t.Fatalf("ok=%v want %v", ok, tc.ok)
 			}
@@ -61,7 +61,7 @@ func TestEstimatePlanScanBytes(t *testing.T) {
 
 	// Unknown table (table functions, virtual sources) is unestimable.
 	unknown := &logical.Node{Type: logical.NodeScan, TableName: "no_such_table"}
-	if _, ok := NewPlanner(cat).EstimatePlanScanBytes(ctx, unknown); ok {
+	if _, ok := NewStagePlanner(NewPlanner(cat)).EstimatePlanScanBytes(ctx, unknown); ok {
 		t.Fatal("unknown table should be unestimable")
 	}
 
@@ -69,7 +69,7 @@ func TestEstimatePlanScanBytes(t *testing.T) {
 	sub := &logical.Node{Type: logical.NodeFilter,
 		Predicates: []logical.Predicate{{Raw: "l_quantity > (SELECT avg(l_quantity) FROM lineitem)"}},
 		Children:   []*logical.Node{{Type: logical.NodeScan, TableName: "nation"}}}
-	if _, ok := NewPlanner(cat).EstimatePlanScanBytes(ctx, sub); ok {
+	if _, ok := NewStagePlanner(NewPlanner(cat)).EstimatePlanScanBytes(ctx, sub); ok {
 		t.Fatal("residual subquery predicate should be unestimable")
 	}
 }

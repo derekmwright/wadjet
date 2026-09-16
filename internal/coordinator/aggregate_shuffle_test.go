@@ -55,7 +55,7 @@ func TestPreComputeDerivedAggregate_Q17SF001(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build Q17 logical plan: %v", err)
 	}
-	planner := physical.NewPlanner(coord.catalog)
+	planner := physical.NewStagePlanner(physical.NewPlanner(coord.catalog))
 	planner.WorkerCount = coord.workers.Count()
 	planner.AnnotateScanColumns(ctx, plan)
 	optimized := logical.Optimize(plan, func(p *logical.Node) {

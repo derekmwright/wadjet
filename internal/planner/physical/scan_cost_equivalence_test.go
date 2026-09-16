@@ -86,7 +86,7 @@ func TestTheLogicalScanCostMatchesTheStageCost(t *testing.T) {
 			logicalPlanner := NewPlanner(cat)
 			fromLogical := logicalPlanner.EstimatePlanScanCost(ctx, node)
 
-			stagePlanner := NewPlanner(cat)
+			stagePlanner := NewStagePlanner(NewPlanner(cat))
 			stagePlanner.WorkerCount = 4
 			stages, err := stagePlanner.PlanDistributed(ctx, node)
 			if err != nil {

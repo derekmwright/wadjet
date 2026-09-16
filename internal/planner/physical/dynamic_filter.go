@@ -57,7 +57,7 @@ const dynamicFilterMinBloomBits = 1024
 // mode SortMergeJoinsPlanned exists to prevent.
 var DynamicFiltersPlanned atomic.Int64
 
-func (p *Planner) applyDynamicFilters(ctx context.Context, stages []Stage) []Stage {
+func (p *StagePlanner) applyDynamicFilters(ctx context.Context, stages []Stage) []Stage {
 	if !p.DynamicFiltersEnabled {
 		return stages
 	}
@@ -244,7 +244,7 @@ func computeDynamicFilterBloomBits(rows int64) int {
 // The qualified-form ("o.o_orderkey") and unqualified-form ("o_orderkey")
 // are both tried so the lookup works regardless of how the join
 // condition phrases the column reference.
-func (p *Planner) lookupCatalogNDV(ctx context.Context, table, column string) int64 {
+func (p *StagePlanner) lookupCatalogNDV(ctx context.Context, table, column string) int64 {
 	if p == nil || p.catalog == nil || table == "" || column == "" {
 		return 0
 	}
@@ -284,7 +284,7 @@ func stripQualifier(s string) string {
 // Returns 0 when the column name doesn't follow the pattern or the
 // inferred table isn't in the catalog. Callers fall back to raw row
 // count in that case.
-func (p *Planner) estimateFKReferencedRowCount(ctx context.Context, column string) int64 {
+func (p *StagePlanner) estimateFKReferencedRowCount(ctx context.Context, column string) int64 {
 	if p == nil || p.catalog == nil {
 		return 0
 	}
@@ -331,7 +331,7 @@ func (p *Planner) estimateFKReferencedRowCount(ctx context.Context, column strin
 // of a column via the catalog. Returns ok=false for non-integer columns or
 // catalog lookup failures — caller skips the filter rather than emitting
 // a malformed one.
-func (p *Planner) columnIntType(ctx context.Context, table, column string) (string, bool) {
+func (p *StagePlanner) columnIntType(ctx context.Context, table, column string) (string, bool) {
 	if p == nil || p.catalog == nil || table == "" || column == "" {
 		return "", false
 	}

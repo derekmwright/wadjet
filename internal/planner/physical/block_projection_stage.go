@@ -528,7 +528,7 @@ func declaredBlockSchema(p *logical.Node, wantSet map[string]bool,
 }
 
 // stageIndexByID is the index of the stage with this ID, or ok=false.
-func (p *Planner) stageIndexByID(stages []Stage, id string) (int, bool) {
+func (p *StagePlanner) stageIndexByID(stages []Stage, id string) (int, bool) {
 	for i := range stages {
 		if stages[i].ID == id {
 			return i, true
@@ -567,7 +567,7 @@ func markStarReadBlocks(n *logical.Node, candidates map[*logical.Node]blockDiver
 // of exactly the same kind — `SELECT * FROM d JOIN (SELECT c_str AS v FROM t)
 // s ON …` publishes `s.v`, the block's stage emits `v`, and the spec attached
 // to the sort stage read `c_str`: loud, at dispatch, on one DAG arm.
-func (p *Planner) referenceIntoPublishedBlock(ref string, child *logical.Node) bool {
+func (p *StagePlanner) referenceIntoPublishedBlock(ref string, child *logical.Node) bool {
 	if p == nil || len(p.publishedBlocks) == 0 || child == nil {
 		return false
 	}

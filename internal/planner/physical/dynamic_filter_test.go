@@ -31,7 +31,7 @@ func sqlToStagesWithDynamicFilters(t *testing.T, cat *catalog.Catalog, ctx conte
 	scanAnnotator(logicalPlan)
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.WorkerCount = workerCount
 	planner.DynamicFiltersEnabled = true
 	// broadcastThreshold: 0 keeps the planner default; -1 disables
@@ -141,7 +141,7 @@ func TestDynamicFilterPass_AnnotatesShuffledJoin(t *testing.T) {
 	scanAnnotator(logicalPlan)
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.WorkerCount = 3
 	planner.BroadcastBytesThreshold = -1 // force the shuffled hash join
 	planner.DynamicFiltersEnabled = true

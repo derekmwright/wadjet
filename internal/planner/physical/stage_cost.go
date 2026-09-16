@@ -86,7 +86,7 @@ func CanProbeSplit(stages []Stage, workerCount int) (probeAlias string, probeFil
 // ownership rule for filters/projections (#656), at the cost of scan→aggregate
 // materialization. canFuseScanAggregate separately requires all children be scans.
 // See docs/internals/cte-terminal-aggregate-fusion-boundary.md for the design.
-func (p *Planner) fusesIntoACTETerminal(childStages []Stage) bool {
+func (p *StagePlanner) fusesIntoACTETerminal(childStages []Stage) bool {
 	if len(p.ctePlannedTerminal) == 0 {
 		return false
 	}
@@ -139,7 +139,7 @@ func hasFilterOrPartition(n *logical.Node) bool {
 // owns that sort, not that any sort exists below; stop the backward search at
 // an already-claimed sort so an outer LIMIT cannot overwrite an inner one (#525).
 // Never also stage the root LIMIT: that would apply OFFSET twice.
-func (p *Planner) needsLimitStage(node *logical.Node, sorted bool) bool {
+func (p *StagePlanner) needsLimitStage(node *logical.Node, sorted bool) bool {
 	if node == p.limitStageRoot {
 		return false // the coordinator's post-gather pass owns this one
 	}

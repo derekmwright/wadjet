@@ -174,7 +174,7 @@ func TestFormatBytes(t *testing.T) {
 
 func TestEnforceQueryLimits_NilLimits(t *testing.T) {
 	cat, _ := setupCatalog(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	// No query limits — should pass
 	err := planner.enforceQueryLimits(context.Background(), logical.NewScan("events", ""))
 	if err != nil {
@@ -184,7 +184,7 @@ func TestEnforceQueryLimits_NilLimits(t *testing.T) {
 
 func TestEnforceQueryLimits_MaxScanBytes(t *testing.T) {
 	cat, ctx := setupCatalog(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.QueryLimits = &config.QueryLimits{MaxScanBytes: 500}
 
 	err := planner.enforceQueryLimits(ctx, logical.NewScan("events", ""))
@@ -195,7 +195,7 @@ func TestEnforceQueryLimits_MaxScanBytes(t *testing.T) {
 
 func TestEnforceQueryLimits_MaxScanRows(t *testing.T) {
 	cat, ctx := setupCatalog(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.QueryLimits = &config.QueryLimits{MaxScanRows: 50}
 
 	err := planner.enforceQueryLimits(ctx, logical.NewScan("events", ""))
@@ -206,7 +206,7 @@ func TestEnforceQueryLimits_MaxScanRows(t *testing.T) {
 
 func TestEnforceQueryLimits_MaxScanFiles(t *testing.T) {
 	cat, ctx := setupCatalog(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.QueryLimits = &config.QueryLimits{MaxScanFiles: 0}
 	// 0 means "no file limit"; the cell needs a limit BELOW the fixture's
 	// one file, and one file is the smallest a table can have — so the
@@ -224,7 +224,7 @@ func TestEnforceQueryLimits_MaxScanFiles(t *testing.T) {
 
 func TestEnforceQueryLimits_RequireFilterAboveBytes(t *testing.T) {
 	cat, ctx := setupCatalog(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.QueryLimits = &config.QueryLimits{RequireFilterAboveBytes: 100}
 
 	scan := logical.NewScan("events", "") // no filter
@@ -243,7 +243,7 @@ func TestEnforceQueryLimits_RequireFilterAboveBytes(t *testing.T) {
 
 func TestEnforceQueryLimits_RequireLimitAboveRows(t *testing.T) {
 	cat, ctx := setupCatalog(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.QueryLimits = &config.QueryLimits{RequireLimitAboveRows: 50}
 
 	scan := logical.NewScan("events", "") // no limit
@@ -262,7 +262,7 @@ func TestEnforceQueryLimits_RequireLimitAboveRows(t *testing.T) {
 
 func TestEnforceQueryLimits_UnderLimits(t *testing.T) {
 	cat, _ := setupCatalog(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.QueryLimits = &config.QueryLimits{
 		MaxScanBytes: 5000,
 		MaxScanRows:  500,
@@ -525,7 +525,7 @@ func TestDecimalFromBytes(t *testing.T) {
 
 func TestPlanDistributed_Distinct(t *testing.T) {
 	cat, ctx := setupCatalog(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 
 	scan := logical.NewScan("events", "e")
 	distinct := logical.NewDistinct(scan)
@@ -544,7 +544,7 @@ func TestPlanDistributed_Distinct(t *testing.T) {
 
 func TestPlanDistributed_Project(t *testing.T) {
 	cat, ctx := setupCatalog(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 
 	scan := logical.NewScan("events", "e")
 	proj := logical.NewProject(scan, []logical.Projection{{Column: "event_id", Alias: "id"}})
@@ -562,7 +562,7 @@ func TestPlanDistributed_Project(t *testing.T) {
 
 func TestPlanDistributed_Filter(t *testing.T) {
 	cat, ctx := setupCatalog(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 
 	scan := logical.NewScan("events", "e")
 	filter := logical.NewFilter(scan, []logical.Predicate{
@@ -579,7 +579,7 @@ func TestPlanDistributed_Filter(t *testing.T) {
 
 func TestPlanDistributed_LimitSort(t *testing.T) {
 	cat, ctx := setupCatalog(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 
 	scan := logical.NewScan("events", "e")
 	sort := logical.NewSort(scan, []logical.OrderExpr{{Column: "ts", Desc: true}})
@@ -616,7 +616,7 @@ func TestPlanDistributed_LimitSort(t *testing.T) {
 // consumes BOTH arms.
 func TestPlanDistributed_UnionSetOp(t *testing.T) {
 	cat, ctx := setupCatalogWithUsers(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 
 	// Both arms scan `users`: a set operation's arms must agree on arity,
 	// and events/users do not.
@@ -655,7 +655,7 @@ func TestPlanDistributed_UnionSetOp(t *testing.T) {
 // one arm's rows; refusing is the fix (#346).
 func TestPlanDistributed_IntersectSetOp(t *testing.T) {
 	cat, ctx := setupCatalogWithUsers(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 
 	left := logical.NewScan("events", "e")
 	right := logical.NewScan("users", "u")
@@ -669,7 +669,7 @@ func TestPlanDistributed_IntersectSetOp(t *testing.T) {
 
 func TestPlanDistributed_ExceptSetOp(t *testing.T) {
 	cat, ctx := setupCatalogWithUsers(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 
 	left := logical.NewScan("events", "e")
 	right := logical.NewScan("users", "u")
@@ -903,7 +903,7 @@ func TestCleanExprLeavesExpressionsAlone(t *testing.T) {
 
 func TestPlanDistributed_Window(t *testing.T) {
 	cat, ctx := setupCatalog(t)
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 
 	scan := logical.NewScan("events", "e")
 	window := logical.NewWindow(scan, []logical.WindowExpr{
@@ -926,7 +926,7 @@ func TestPlanDistributed_Window(t *testing.T) {
 
 func TestPlanDistributed_Aggregate(t *testing.T) {
 	cat, ctx := setupCatalog(t)
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 
 	scan := logical.NewScan("events", "e")
 	agg := logical.NewAggregate(scan, []string{"src_ip"}, []logical.AggExpr{
@@ -944,7 +944,7 @@ func TestPlanDistributed_Aggregate(t *testing.T) {
 
 func TestPlanDistributed_Sort(t *testing.T) {
 	cat, ctx := setupCatalog(t)
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 
 	scan := logical.NewScan("events", "e")
 	sort := logical.NewSort(scan, []logical.OrderExpr{{Column: "ts"}})
@@ -973,7 +973,7 @@ func TestPlanDistributed_Sort(t *testing.T) {
 
 func TestPlanDistributed_Join(t *testing.T) {
 	cat, ctx := setupCatalogWithUsers(t)
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 
 	left := logical.NewScan("events", "e")
 	right := logical.NewScan("users", "u")

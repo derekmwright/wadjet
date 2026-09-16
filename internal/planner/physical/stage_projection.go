@@ -115,7 +115,7 @@ func qualifySharedRenameSource(name, src string, proj []logical.Projection, chil
 // naming is decided here rather than in resolveSortKeyColumn precisely because
 // this pass owns it: it runs last, and only it knows whether the producing
 // fragment will carry an alias-naming OpProject.
-func (p *Planner) attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
+func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 	projNode := findOutputProjectionNode(root)
 	if projNode == nil {
 		return stages

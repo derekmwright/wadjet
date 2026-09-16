@@ -62,7 +62,7 @@ const (
 // Eligible join types are inner, semi and left under probe-left convention;
 // exclude outer-build shapes. An unmatched inner-form probe produces no row.
 // See docs/internals/dimension-bloom-cascade.md for the design.
-func (p *Planner) markDimensionCascade(ctx context.Context, stages []Stage) []Stage {
+func (p *StagePlanner) markDimensionCascade(ctx context.Context, stages []Stage) []Stage {
 	if !DimensionCascade.Load() {
 		return stages
 	}
@@ -88,7 +88,7 @@ func (p *Planner) markDimensionCascade(ctx context.Context, stages []Stage) []St
 
 // markDimensionCascadeOnce runs one marking sweep; reports whether any
 // segment was marked (the fixpoint driver's continue signal).
-func (p *Planner) markDimensionCascadeOnce(ctx context.Context, stages []Stage, byID map[string]int, seqp *int) bool {
+func (p *StagePlanner) markDimensionCascadeOnce(ctx context.Context, stages []Stage, byID map[string]int, seqp *int) bool {
 	seq := *seqp
 	defer func() { *seqp = seq }()
 	anyMarked := false

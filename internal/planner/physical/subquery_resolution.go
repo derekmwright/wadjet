@@ -48,7 +48,7 @@ type deferredScalar struct {
 // Non-native-DAG mode keeps the legacy behavior: CTE-referencing subqueries
 // are left unresolved (worker re-executes via SubqueryRunner), others are
 // pre-computed and substituted in place.
-func (p *Planner) resolveFilterSubqueries(exprStr string, decls colDecls) (string, []deferredScalar) {
+func (p *StagePlanner) resolveFilterSubqueries(exprStr string, decls colDecls) (string, []deferredScalar) {
 	// Quick check: no subquery to resolve
 	if !strings.Contains(strings.ToUpper(exprStr), "SELECT") {
 		return exprStr, nil
@@ -108,14 +108,14 @@ func scalarSubqueryIsOneRow(sql string) bool {
 // allocScalarPlaceholder returns the next unused placeholder name (no leading
 // colon) for this planner. Names are unique per Planner instance so that
 // multiple deferred subqueries in the same query can coexist.
-func (p *Planner) allocScalarPlaceholder() string {
+func (p *StagePlanner) allocScalarPlaceholder() string {
 	p.scalarPlaceholderSeq++
 	return fmt.Sprintf("scalar_%d", p.scalarPlaceholderSeq)
 }
 
 // subqueryReferencesCTE returns true if the expression contains a scalar
 // subquery whose FROM clause references a CTE defined in the current query.
-func (p *Planner) subqueryReferencesCTE(exprStr string) bool {
+func (p *StagePlanner) subqueryReferencesCTE(exprStr string) bool {
 	upper := strings.ToUpper(exprStr)
 	for _, cte := range p.ctes {
 		// Check if the CTE name appears after FROM in the subquery.
@@ -132,7 +132,7 @@ func (p *Planner) subqueryReferencesCTE(exprStr string) bool {
 // (when the subquery references a CTE under native-DAG) a LiteralPlaceholder
 // whose concrete value will be substituted by the coordinator. Any deferred
 // subqueries are appended to *deferred.
-func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, deferred *[]deferredScalar, decls colDecls) plansql.Node {
+func (p *StagePlanner) resolveSubqueryAST(ctx context.Context, node plansql.Node, deferred *[]deferredScalar, decls colDecls) plansql.Node {
 	if node == nil {
 		return nil
 	}
@@ -366,7 +366,7 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, def
 // DAG task refusal until lazy subquery evaluation is supported; the boundary is
 // pinned by coordinator.TestArcI1AnUnqualifiedNameBindsTheInnerRelation.
 // See docs/internals/boolean-subquery-hoisting-boundary.md for the design.
-func (p *Planner) resolveBooleanExists(ctx context.Context, node plansql.Node,
+func (p *StagePlanner) resolveBooleanExists(ctx context.Context, node plansql.Node,
 	deferred *[]deferredScalar, decls colDecls) plansql.Node {
 	if node == nil {
 		return nil
@@ -420,7 +420,7 @@ func (p *Planner) resolveBooleanExists(ctx context.Context, node plansql.Node,
 // CTE definitions from the enclosing query are merged so the subquery can
 // resolve :CTE references. The terminal stage is forced to Tasks=1 so its
 // output is a single unpartitioned WSHF file suitable for scalar extraction.
-func (p *Planner) emitScalarProducerStages(stages *[]Stage, subquerySQL string) (string, error) {
+func (p *StagePlanner) emitScalarProducerStages(stages *[]Stage, subquerySQL string) (string, error) {
 	id, _, _, err := p.emitScalarProducerStagesTyped(stages, subquerySQL)
 	return id, err
 }
@@ -434,7 +434,7 @@ func (p *Planner) emitScalarProducerStages(stages *[]Stage, subquerySQL string) 
 // uses it to DECIDE, not to declare: a value whose literal spelling does not
 // read back at the same type is not lowered at all (see
 // scalarProducerValueIsLiteralSafe).
-func (p *Planner) emitScalarProducerStagesTyped(stages *[]Stage, subquerySQL string) (string, parquet.TypeID, bool, error) {
+func (p *StagePlanner) emitScalarProducerStagesTyped(stages *[]Stage, subquerySQL string) (string, parquet.TypeID, bool, error) {
 	pq, err := plansql.Parse(subquerySQL)
 	if err != nil {
 		return "", 0, false, fmt.Errorf("parse subquery: %w", err)

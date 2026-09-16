@@ -69,7 +69,7 @@ func sqlToStagesShuffled(t *testing.T, cat *catalog.Catalog, ctx context.Context
 	scanAnnotator(logicalPlan)
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.WorkerCount = 3
 	planner.BroadcastBytesThreshold = -1
 	stages, err := planner.PlanDistributed(ctx, logicalPlan)
@@ -210,7 +210,7 @@ func semiAntiFixture(key string) []Stage {
 func TestSemiAntiBuildFilter_FixturePositive(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
 	stages := semiAntiFixture("l_orderkey")
-	NewPlanner(cat).markSemiAntiBuildFilters(ctx, stages)
+	NewStagePlanner(NewPlanner(cat)).markSemiAntiBuildFilters(ctx, stages)
 	emitters, consumers := findSemiAntiMarks(stages)
 	if len(emitters) == 0 || len(consumers) == 0 {
 		t.Fatalf("control fixture did not mark (emitters=%d consumers=%d) — every negative below is vacuous",
@@ -234,7 +234,7 @@ func TestSemiAntiBuildFilter_FixtureNegatives(t *testing.T) {
 		stages[2].FilterExprs = nil
 		stages[3].JoinLeftKeys = []string{"l_orderkey"}
 		stages[4].JoinLeftKeys = []string{"l_orderkey"}
-		NewPlanner(cat).markSemiAntiBuildFilters(ctx, stages)
+		NewStagePlanner(NewPlanner(cat)).markSemiAntiBuildFilters(ctx, stages)
 		if _, consumers := findSemiAntiMarks(stages); len(consumers) != 0 {
 			t.Fatal("same-table raw probe source must not mark")
 		}
@@ -245,7 +245,7 @@ func TestSemiAntiBuildFilter_FixtureNegatives(t *testing.T) {
 			ID: "other", Type: "final_aggregate",
 			Dependencies: []string{"rp"},
 		})
-		NewPlanner(cat).markSemiAntiBuildFilters(ctx, stages)
+		NewStagePlanner(NewPlanner(cat)).markSemiAntiBuildFilters(ctx, stages)
 		if _, consumers := findSemiAntiMarks(stages); len(consumers) != 0 {
 			t.Fatal("non-semi consumer of the shared exchange must block marking")
 		}
@@ -260,7 +260,7 @@ func TestSemiAntiBuildFilter_FixtureNegatives(t *testing.T) {
 		// key stays o_orderkey, an INT32, so the build gate is the only one
 		// that can be the reason this does not mark.
 		stages := semiAntiFixture("l_shipmode")
-		NewPlanner(cat).markSemiAntiBuildFilters(ctx, stages)
+		NewStagePlanner(NewPlanner(cat)).markSemiAntiBuildFilters(ctx, stages)
 		if _, consumers := findSemiAntiMarks(stages); len(consumers) != 0 {
 			t.Fatal("a STRING build key must not be marked: the emit op indexes Int64Data")
 		}
@@ -274,7 +274,7 @@ func TestSemiAntiBuildFilter_FixtureNegatives(t *testing.T) {
 		stages[2].Columns = []string{"o_orderstatus"}
 		stages[3].JoinLeftKeys = []string{"o_orderstatus"}
 		stages[4].JoinLeftKeys = []string{"o_orderstatus"}
-		NewPlanner(cat).markSemiAntiBuildFilters(ctx, stages)
+		NewStagePlanner(NewPlanner(cat)).markSemiAntiBuildFilters(ctx, stages)
 		if _, consumers := findSemiAntiMarks(stages); len(consumers) != 0 {
 			t.Fatal("a STRING probe key must not be marked: the emit op indexes Int64Data on S's output")
 		}
@@ -284,7 +284,7 @@ func TestSemiAntiBuildFilter_FixtureNegatives(t *testing.T) {
 		// stumbled into, so a future fixture that loses its catalog fails
 		// here instead of quietly making every other negative vacuous.
 		stages := semiAntiFixture("l_orderkey")
-		NewPlanner(nil).markSemiAntiBuildFilters(context.Background(), stages)
+		NewStagePlanner(NewPlanner(nil)).markSemiAntiBuildFilters(context.Background(), stages)
 		if _, consumers := findSemiAntiMarks(stages); len(consumers) != 0 {
 			t.Fatal("with no catalog the key class is unknowable and the pass must refuse")
 		}

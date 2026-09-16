@@ -75,7 +75,7 @@ func maxInlinedInSetRows() int {
 // refuseInSubquery parks the first IN-subquery refusal. resolveSubqueryAST
 // runs under walkStages, which has no error path, so the refusal is recorded
 // and PlanDistributed returns it — the same mechanism refuseCorrelated uses.
-func (p *Planner) refuseInSubquery(err error) {
+func (p *StagePlanner) refuseInSubquery(err error) {
 	if p.inSubqueryErr == nil {
 		p.inSubqueryErr = err
 	}
@@ -90,7 +90,7 @@ func (p *Planner) refuseInSubquery(err error) {
 // NULL one, because an empty set has nothing to be UNKNOWN about. Neither
 // renders as an empty value list (nothing parses that), so they render as the
 // constant they are.
-func (p *Planner) materializeInSubquery(ctx context.Context, in *plansql.InExpr, subq *plansql.SubqueryNode, decls colDecls) (plansql.Node, bool) {
+func (p *StagePlanner) materializeInSubquery(ctx context.Context, in *plansql.InExpr, subq *plansql.SubqueryNode, decls colDecls) (plansql.Node, bool) {
 	// A FLOAT32 PROBE cannot take this path at all, whatever the set holds.
 	// PostgreSQL's multi-element `real IN (…)` NARROWS its literals to real[]
 	// (#549) while `real = ANY(<subquery>)` widens the real to float8 — so
@@ -335,7 +335,7 @@ var NullAwareAntiForcedBroadcasts atomic.Int64
 // or in the subquery itself. Its logical twin is innerRelationsAreScannable's
 // CTE decline: the logical pass keeps a recursive CTE out of a semi/anti
 // join's build side, and this keeps it out of a materialized IN set.
-func (p *Planner) subqueryReadsRecursiveCTE(sql string) bool {
+func (p *StagePlanner) subqueryReadsRecursiveCTE(sql string) bool {
 	recursive := make(map[string]bool, len(p.ctes))
 	for _, c := range p.ctes {
 		if c.Recursive {

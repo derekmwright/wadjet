@@ -38,7 +38,7 @@ func dspPlan(t *testing.T, sql string) error {
 	annotate := func(n *logical.Node) { NewPlanner(cat).AnnotateScanColumns(ctx, n) }
 	annotate(node)
 	node = logical.Optimize(node, annotate)
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 	p.WorkerCount = 3
 	stages, err := p.PlanDistributed(ctx, node)
 	if err != nil {

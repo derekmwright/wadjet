@@ -18,11 +18,11 @@ func TestTCPFlagValidationDoors(t *testing.T) {
 		for _, distributed := range []bool{false, true} {
 			t.Run(door+map[bool]string{false: "/Plan", true: "/PlanDistributed"}[distributed], func(t *testing.T) {
 				ctx := context.Background()
-				p := NewPlanner(nil)
+				p := NewStagePlanner(NewPlanner(nil))
 				q := `SELECT tcp_flag_mask('BOGUS') AS v WHERE FALSE`
 				if door != "catalogless" {
 					cat, _ := setupCatalog(t)
-					p = NewPlanner(cat)
+					p = NewStagePlanner(NewPlanner(cat))
 					if err := cat.CreateTable(ctx, "empty_flags", parquet.Schema{Columns: []parquet.Column{{Name: "id", Type: parquet.TypeInt32}}}, nil); err != nil {
 						t.Fatal(err)
 					}

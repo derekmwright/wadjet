@@ -17,7 +17,7 @@ import (
 // small enough to broadcast to all workers. When broadcast, the build side
 // is sent to every worker and the probe side is split round-robin across
 // workers — no shuffle stages needed for either side.
-func (p *Planner) isBroadcastCandidate(joinNode *logical.Node) bool {
+func (p *StagePlanner) isBroadcastCandidate(joinNode *logical.Node) bool {
 	if len(joinNode.Children) < 2 {
 		return false
 	}

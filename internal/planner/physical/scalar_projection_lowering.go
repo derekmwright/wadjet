@@ -33,7 +33,7 @@ type projScalarProducer struct {
 // subquery into `:scalar_N` placeholder text, emitting the producer stages the
 // coordinator will await. It returns ok=false for an item it cannot rewrite,
 // which keeps that item on the refusal path.
-func (p *Planner) lowerProjectionSubquery(stages *[]Stage, item *logical.Projection,
+func (p *StagePlanner) lowerProjectionSubquery(stages *[]Stage, item *logical.Projection,
 	decls colDecls) (text string, decl expr.DeclType, declKnown, ok bool) {
 
 	if item.ASTExpr == nil || p.planCtx == nil {
@@ -195,7 +195,7 @@ func countExprSubqueries(n plansql.Node) int {
 // projection onto a stage this walk covers or drop it entirely, and a
 // predicate the worker cannot compile is a failed task, not an answer. The
 // refusal is the one the coordinator already routes on.
-func (p *Planner) attachProjectionScalarDependencies(stages []Stage) error {
+func (p *StagePlanner) attachProjectionScalarDependencies(stages []Stage) error {
 	if len(p.projScalarProducers) == 0 {
 		return nil
 	}

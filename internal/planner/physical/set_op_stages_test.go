@@ -36,7 +36,7 @@ func planSetOpStages(t *testing.T, cat *catalog.Catalog, ctx context.Context, sq
 	annotate(plan)
 	plan = logical.Optimize(plan, annotate)
 
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 	p.WorkerCount = 3
 	return p.PlanDistributed(ctx, plan)
 }

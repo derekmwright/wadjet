@@ -84,7 +84,7 @@ func TestTPCHStageDumpGolden(t *testing.T) {
 			continue
 		}
 		node := build(t, sql)
-		planner := NewPlanner(cat)
+		planner := NewStagePlanner(NewPlanner(cat))
 		planner.WorkerCount = 4
 		stages, err := planner.PlanDistributed(ctx, node)
 		if err != nil {

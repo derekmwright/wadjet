@@ -18,7 +18,7 @@ func TestAttachOnArrivalConvertsTerminalScanConsume(t *testing.T) {
 	DFGuardedReemit.Store(true) // opt-in: exercise the guarded machinery
 	defer DFGuardedReemit.Store(false)
 	cat, ctx := setupTPCHCatalog(t)
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 	stages := cascadeFixture()
 	p.markDimensionCascade(ctx, stages)
 	before := AttachOnArrivalConsumesPlanned.Load()
@@ -73,7 +73,7 @@ func TestAttachOnArrivalConvertsTerminalScanConsume(t *testing.T) {
 // WADJET_DF_GUARDED_REEMIT=1, while terminal consumes still convert.
 func TestAttachOnArrivalGuardedReemitDefaultOff(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 	stages := cascadeFixture()
 	p.markDimensionCascade(ctx, stages)
 	stages = applyAttachOnArrival(stages)
@@ -105,7 +105,7 @@ func TestAttachOnArrivalGuardedReemitRequiresBareScan(t *testing.T) {
 	DFGuardedReemit.Store(true)
 	defer DFGuardedReemit.Store(false)
 	cat, ctx := setupTPCHCatalog(t)
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 	stages := cascadeFixture()
 	p.markDimensionCascade(ctx, stages)
 	for i := range stages {
@@ -198,7 +198,7 @@ func TestAttachOnArrivalKillSwitch(t *testing.T) {
 	DFAttachOnArrival.Store(false)
 	defer DFAttachOnArrival.Store(true)
 	cat, ctx := setupTPCHCatalog(t)
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 	stages := cascadeFixture()
 	p.markDimensionCascade(ctx, stages)
 	stages = applyAttachOnArrival(stages)

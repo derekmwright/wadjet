@@ -127,7 +127,7 @@ func TestJoinInputComputedProjection(t *testing.T) {
 		annotate := func(n *logical.Node) { NewPlanner(cat).AnnotateScanColumns(ctx, n) }
 		annotate(plan)
 		plan = logical.Optimize(plan, annotate)
-		p := NewPlanner(cat)
+		p := NewStagePlanner(NewPlanner(cat))
 		p.WorkerCount = 3
 		p.BroadcastBytesThreshold = -1
 		stages, err := p.PlanDistributed(ctx, plan)

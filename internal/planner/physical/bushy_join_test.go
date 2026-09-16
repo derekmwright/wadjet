@@ -129,7 +129,7 @@ func bushyJoin(jt, cond string, left, right *logical.Node) *logical.Node {
 func planTree(t *testing.T, cat *catalog.Catalog, root *logical.Node) *PhysicalPlan {
 	t.Helper()
 	ctx := context.Background()
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.AnnotateScanColumns(ctx, root)
 	plan, err := planner.Plan(ctx, root)
 	if err != nil {
@@ -308,7 +308,7 @@ func TestBushyBuild_DistributedStageShape(t *testing.T) {
 			bushyScan("b_supplier", ""),
 			bushyScan("b_nation", "")))
 
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.WorkerCount = 3
 	planner.AnnotateScanColumns(ctx, bushy)
 	stages, err := planner.PlanDistributed(ctx, bushy)

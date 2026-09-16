@@ -102,7 +102,7 @@ func planSQL(t *testing.T, cat *catalog.Catalog, sql string, smjBytes int64) *Ph
 	scanAnnotator(logicalPlan)
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.SortMergeJoinBytes = smjBytes
 	plan, err := planner.Plan(ctx, logicalPlan)
 	if err != nil {
@@ -210,7 +210,7 @@ func planDistributedSQL(t *testing.T, cat *catalog.Catalog, sql string, smjBytes
 	scanAnnotator(logicalPlan)
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.WorkerCount = workers
 	planner.BroadcastBytesThreshold = -1 // never broadcast: force the shuffled-join path
 	planner.SortMergeJoinBytes = smjBytes

@@ -44,7 +44,7 @@ var ErrCorrelatedSubqueryDistributed = errors.New(
 // paths classify identically by construction: a subquery this pass calls
 // uncorrelated is one the single-process engine executes once, and its
 // plan-time deferral to a producer stage is sound.
-func (p *Planner) refuseCorrelatedSubqueries(node *logical.Node) error {
+func (p *StagePlanner) refuseCorrelatedSubqueries(node *logical.Node) error {
 	if node == nil {
 		return nil
 	}
@@ -89,7 +89,7 @@ func (p *Planner) refuseCorrelatedSubqueries(node *logical.Node) error {
 // refuseCorrelatedInExpr checks every subquery embedded in one expression
 // against the outer scope and returns the typed refusal for the first
 // correlated one.
-func (p *Planner) refuseCorrelatedInExpr(ast plansql.Node, site string, outerTables map[string]bool, outerCols map[string]string) error {
+func (p *StagePlanner) refuseCorrelatedInExpr(ast plansql.Node, site string, outerTables map[string]bool, outerCols map[string]string) error {
 	if ast == nil || len(outerTables) == 0 {
 		return nil
 	}
@@ -113,7 +113,7 @@ func (p *Planner) refuseCorrelatedInExpr(ast plansql.Node, site string, outerTab
 // refuseCorrelated parks a refusal found DURING stage generation, for
 // PlanDistributed to return — walkStages has no error return, same shape as
 // setOpErr / joinCondErr. First one wins.
-func (p *Planner) refuseCorrelated(err error) {
+func (p *StagePlanner) refuseCorrelated(err error) {
 	if p.correlatedErr == nil {
 		p.correlatedErr = err
 	}
@@ -124,7 +124,7 @@ func (p *Planner) refuseCorrelated(err error) {
 // like refuseCorrelated — but this one is not a ROUTING refusal: SQLSTATE
 // 21000 is the query's answer on every path, so re-running it locally would
 // reach the same error after doing the work twice.
-func (p *Planner) refuseScalarRows(err error) {
+func (p *StagePlanner) refuseScalarRows(err error) {
 	if p.scalarRowsErr == nil {
 		p.scalarRowsErr = err
 	}
@@ -136,7 +136,7 @@ func (p *Planner) refuseScalarRows(err error) {
 // not to a planning narrative (ADR-0034 item 6). Same slot as
 // refuseScalarRows, and for the same reason: it is not a ROUTING refusal, so
 // re-running the query locally would reach it again after doing the work twice.
-func (p *Planner) refusePlanTimeAnswer(err error) {
+func (p *StagePlanner) refusePlanTimeAnswer(err error) {
 	if p.scalarRowsErr == nil {
 		p.scalarRowsErr = err
 	}
@@ -249,7 +249,7 @@ func describeOuterRefs(refs []plansql.OuterRef) string {
 // filter's original TEXT shipped to a worker that cannot compile a subquery
 // (#945). Parked here, PlanDistributed returns it ahead of every routing
 // refusal.
-func (p *Planner) parkAuthorizationRefusal(err error) bool {
+func (p *StagePlanner) parkAuthorizationRefusal(err error) bool {
 	if err == nil || sqlerr.StateOf(err) != "42501" {
 		return false
 	}

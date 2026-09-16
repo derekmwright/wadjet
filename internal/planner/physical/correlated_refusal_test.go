@@ -24,7 +24,7 @@ import (
 
 // planDistributed builds, optimizes and distributed-plans sql exactly the way
 // the coordinator does.
-func planDistributed(t *testing.T, p *Planner, sql string) ([]Stage, error) {
+func planDistributed(t *testing.T, p *StagePlanner, sql string) ([]Stage, error) {
 	t.Helper()
 	ctx := context.Background()
 	parsed, err := plansql.Parse(sql)
@@ -66,7 +66,7 @@ func TestPlanDistributedRefusesCorrelatedSubqueries(t *testing.T) {
 	}
 	for _, tc := range refused {
 		t.Run(tc.name, func(t *testing.T) {
-			p := NewPlanner(cat)
+			p := NewStagePlanner(NewPlanner(cat))
 			p.WorkerCount = 3
 			stages, err := planDistributed(t, p, tc.sql)
 			if err == nil {
@@ -99,7 +99,7 @@ func TestPlanDistributedRefusesCorrelatedSubqueries(t *testing.T) {
 	}
 	for _, tc := range accepted {
 		t.Run(tc.name, func(t *testing.T) {
-			p := NewPlanner(cat)
+			p := NewStagePlanner(NewPlanner(cat))
 			p.WorkerCount = 3
 			stages, err := planDistributed(t, p, tc.sql)
 			if err != nil {
@@ -138,7 +138,7 @@ func TestDanglingTableRefsBackstop(t *testing.T) {
 // columns, and the fact that the coordinator runs the query single-process.
 func TestCorrelatedRefusalMessage(t *testing.T) {
 	cat := scanCacheFixture(t, 20)
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 	p.WorkerCount = 3
 	_, err := planDistributed(t, p, `SELECT COUNT(*) AS n FROM items i1
 		WHERE i1.id > (SELECT AVG(id) FROM items i2 WHERE i2.id2 < i1.id2)`)

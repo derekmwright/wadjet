@@ -33,7 +33,7 @@ const (
 // NULLs, so each partition answers independently. The SetOp emit operator applies
 // membership/multiplicity rules to counts and drops tags.
 // See docs/internals/set-operation-stage-lowering.md for the design.
-func (p *Planner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
+func (p *StagePlanner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 	if len(node.Children) < 2 {
 		p.refuseSetOp(fmt.Errorf("distributed planning: %s has %d arms, expected at least 2",
 			setOpName(node), len(node.Children)))
@@ -167,7 +167,7 @@ func (p *Planner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 // then repartitions and dispatches one task per partition. A later fused sort
 // may correctly collapse this to Singleton. Deterministic NULL hash markers and
 // HashAggregate's NULL equality preserve set membership semantics.
-func (p *Planner) emitSetOpCountingStage(stages *[]Stage, unionID string, node *logical.Node, outNames []string) {
+func (p *StagePlanner) emitSetOpCountingStage(stages *[]Stage, unionID string, node *logical.Node, outNames []string) {
 	op := "intersect"
 	if node.Type == logical.NodeExcept {
 		op = "except"
@@ -215,7 +215,7 @@ func (p *Planner) emitSetOpCountingStage(stages *[]Stage, unionID string, node *
 // makes it sound (identical rows hash identically, so equal rows always land
 // in the same partition), so this can become sharded without touching
 // anything emitted here.
-func (p *Planner) emitSetOpDedup(stages *[]Stage, unionID string) {
+func (p *StagePlanner) emitSetOpDedup(stages *[]Stage, unionID string) {
 	*stages = append(*stages, Stage{
 		ID:           fmt.Sprintf("final_aggregate-%d", len(*stages)),
 		Type:         "final_aggregate",
@@ -228,7 +228,7 @@ func (p *Planner) emitSetOpDedup(stages *[]Stage, unionID string) {
 // refuseSetOp parks the first refusal; PlanDistributed returns it. First one
 // wins so a nested set operation's specific message is not overwritten by an
 // outer one's.
-func (p *Planner) refuseSetOp(err error) {
+func (p *StagePlanner) refuseSetOp(err error) {
 	if p.setOpErr == nil {
 		p.setOpErr = err
 	}

@@ -39,7 +39,7 @@ func cascadeFixture() []Stage {
 
 func TestDimensionCascadeMarksQ21Shape(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 	stages := cascadeFixture()
 	before := DimensionCascadesPlanned.Load()
 	p.markDimensionCascade(ctx, stages)
@@ -95,7 +95,7 @@ func TestDimensionCascadeNegatives(t *testing.T) {
 	for name, mutate := range cases {
 		stages := cascadeFixture()
 		mutate(stages)
-		NewPlanner(cat).markDimensionCascade(ctx, stages)
+		NewStagePlanner(NewPlanner(cat)).markDimensionCascade(ctx, stages)
 		for i := range stages {
 			if len(stages[i].ConsumeDynamicFilters) != 0 {
 				t.Errorf("%s: stage %s unexpectedly marked", name, stages[i].ID)
@@ -109,7 +109,7 @@ func TestDimensionCascadeKillSwitch(t *testing.T) {
 	defer DimensionCascade.Store(true)
 	cat, ctx := setupTPCHCatalog(t)
 	stages := cascadeFixture()
-	NewPlanner(cat).markDimensionCascade(context.Background(), stages)
+	NewStagePlanner(NewPlanner(cat)).markDimensionCascade(context.Background(), stages)
 	_ = ctx
 	for i := range stages {
 		if len(stages[i].EmitDynamicFilters) != 0 {
@@ -156,7 +156,7 @@ func TestDimensionCascadeMarksRealSF100Shape(t *testing.T) {
 			}},
 		},
 	}
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 	p.markDimensionCascade(ctx, stages)
 	var nation, supp, l1 *Stage
 	for i := range stages {
@@ -229,7 +229,7 @@ func q05Fixture() []Stage {
 // (generalized target) and every mid keeping its WAIT stat-dep.
 func TestDimensionCascadeThreeHopQ05Shape(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 	stages := q05Fixture()
 	before := DimensionCascadesPlanned.Load()
 	p.markDimensionCascade(ctx, stages)
@@ -344,7 +344,7 @@ func sf100Q05Fixture() []Stage {
 // with zero marks.
 func TestDimensionCascadeSF100Q05BuildHeavyShape(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 	stages := sf100Q05Fixture()
 	before := DimensionCascadesPlanned.Load()
 	p.markDimensionCascade(ctx, stages)
@@ -447,7 +447,7 @@ func q08Fixture() []Stage {
 // marks on the second fixpoint sweep (after the correct n1 segment dedups).
 func TestDimensionCascadeQ08AliasProvenance(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 	stages := q08Fixture()
 	p.markDimensionCascade(ctx, stages)
 
@@ -495,7 +495,7 @@ func TestDimensionCascadeUnqualifiedAmbiguityRejects(t *testing.T) {
 			stages[i].ChainedJoins[1].JoinRightKeys = []string{"n_nationkey"}
 		}
 	}
-	NewPlanner(cat).markDimensionCascade(ctx, stages)
+	NewStagePlanner(NewPlanner(cat)).markDimensionCascade(ctx, stages)
 	for i := range stages {
 		if n := stages[i]; n.TableName == "nation" &&
 			(len(n.ConsumeDynamicFilters) != 0 || len(n.EmitDynamicFilters) != 0) {
@@ -553,7 +553,7 @@ func sf100Q07Fixture() []Stage {
 // stat-dep. Fails pre-feature: the flat emitter cap rejected the mid.
 func TestDimensionCascadeInFlowMidQ07Shape(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 	stages := sf100Q07Fixture()
 	before := DimensionCascadesPlanned.Load()
 	p.markDimensionCascade(ctx, stages)
@@ -627,7 +627,7 @@ func TestDimensionCascadeInFlowNegatives(t *testing.T) {
 	for name, mutate := range cases {
 		stages := sf100Q07Fixture()
 		mutate(stages)
-		NewPlanner(cat).markDimensionCascade(ctx, stages)
+		NewStagePlanner(NewPlanner(cat)).markDimensionCascade(ctx, stages)
 		for i := range stages {
 			if stages[i].ID == "scan-9" && len(stages[i].EmitDynamicFilters) != 0 {
 				t.Errorf("%s: customer mid unexpectedly emits: %+v", name, stages[i].EmitDynamicFilters)
@@ -640,7 +640,7 @@ func TestDimensionCascadeInFlowNegatives(t *testing.T) {
 // mark nothing new (the segment dedup) — guards against oscillation.
 func TestDimensionCascadeFixpointTerminates(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
-	p := NewPlanner(cat)
+	p := NewStagePlanner(NewPlanner(cat))
 	stages := q05Fixture()
 	p.markDimensionCascade(ctx, stages)
 	before := DimensionCascadesPlanned.Load()

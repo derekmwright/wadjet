@@ -59,7 +59,7 @@ func planCarrierStages(t *testing.T, cat *catalog.Catalog, ctx context.Context, 
 	ann := func(p *logical.Node) { NewPlanner(cat).AnnotateScanColumns(ctx, p) }
 	ann(lp)
 	node := logical.Optimize(lp, ann)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.WorkerCount = 4
 	return planner.PlanDistributed(ctx, node)
 }

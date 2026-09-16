@@ -19,7 +19,7 @@ type aggRenameSite struct {
 
 // recordAggProjectionRenames notes one absorb. Nil-safe, because the absorb
 // declines far more often than it fires.
-func (p *Planner) recordAggProjectionRenames(stageID string, renames map[string]string) {
+func (p *StagePlanner) recordAggProjectionRenames(stageID string, renames map[string]string) {
 	if len(renames) == 0 {
 		return
 	}

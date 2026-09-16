@@ -48,7 +48,7 @@ func TestScalarDeferAll_Q11_Q22(t *testing.T) {
 			scanAnnotator(logicalPlan)
 			logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 
-			planner := NewPlanner(cat)
+			planner := NewStagePlanner(NewPlanner(cat))
 			planner.WorkerCount = 4
 
 			stages, err := planner.PlanDistributed(ctx, logicalPlan)
@@ -121,7 +121,7 @@ func TestScalarDeferAll_KillSwitch(t *testing.T) {
 	scanAnnotator(logicalPlan)
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.WorkerCount = 4
 	stages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {

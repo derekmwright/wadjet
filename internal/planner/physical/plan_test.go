@@ -83,7 +83,7 @@ func setupCatalogWithUsers(t *testing.T) (*catalog.Catalog, context.Context) {
 
 func TestPlanDistributed_SimpleScan(t *testing.T) {
 	cat, ctx := setupCatalog(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 
 	scan := logical.NewScan("events", "e")
 	stages, err := planner.PlanDistributed(ctx, scan)
@@ -113,7 +113,7 @@ func TestPlanDistributed_SimpleScan(t *testing.T) {
 
 func TestPlanDistributed_AggregateScan(t *testing.T) {
 	cat, ctx := setupCatalog(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 
 	scan := logical.NewScan("events", "e")
 	agg := logical.NewAggregate(scan,
@@ -165,7 +165,7 @@ func TestPlanDistributed_AggregateScan(t *testing.T) {
 
 func TestPlanDistributed_SortAggregateScan(t *testing.T) {
 	cat, ctx := setupCatalog(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 
 	scan := logical.NewScan("events", "e")
 	agg := logical.NewAggregate(scan,
@@ -225,7 +225,7 @@ func TestPlanDistributed_SortAggregateScan(t *testing.T) {
 
 func TestPlanDistributed_JoinTwoScans(t *testing.T) {
 	cat, ctx := setupCatalogWithUsers(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 
 	left := logical.NewScan("events", "e")
 	right := logical.NewScan("users", "u")
@@ -268,7 +268,7 @@ func TestPlanDistributed_JoinTwoScans(t *testing.T) {
 
 func TestPlanDistributed_WindowScan(t *testing.T) {
 	cat, ctx := setupCatalog(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 
 	scan := logical.NewScan("events", "e")
 	win := logical.NewWindow(scan, []logical.WindowExpr{
@@ -318,7 +318,7 @@ func TestPlanDistributed_WindowScan(t *testing.T) {
 
 func TestPlan_SimpleScan(t *testing.T) {
 	cat, ctx := setupCatalog(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 
 	scan := logical.NewScan("events", "e")
 	plan, err := planner.Plan(ctx, scan)
@@ -385,7 +385,7 @@ func TestExpandFederatedScans(t *testing.T) {
 	}
 
 	// Plan from central's perspective
-	planner := NewPlanner(central)
+	planner := NewStagePlanner(NewPlanner(central))
 
 	scan := logical.NewScan("events", "e")
 	agg := logical.NewAggregate(scan, nil, []logical.AggExpr{
@@ -459,7 +459,7 @@ func TestExpandFederatedScans(t *testing.T) {
 func TestExpandFederatedScans_SingleCluster(t *testing.T) {
 	// With only one cluster, ExpandFederatedScans should be a no-op
 	cat, ctx := setupCatalog(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 
 	scan := logical.NewScan("events", "e")
 	stages, err := planner.PlanDistributed(ctx, scan)
@@ -477,7 +477,7 @@ func TestExpandFederatedScans_SingleCluster(t *testing.T) {
 
 func TestScanStage_TableNameAndFiles(t *testing.T) {
 	cat, ctx := setupCatalog(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 
 	scan := logical.NewScan("events", "e")
 	stages, err := planner.PlanDistributed(ctx, scan)
@@ -507,7 +507,7 @@ func TestScanStage_TableNameAndFiles(t *testing.T) {
 
 func TestPlanDistributed_ShuffleJoin(t *testing.T) {
 	cat, ctx := setupCatalogWithUsers(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.WorkerCount = 4 // enables shuffle stages
 
 	left := logical.NewScan("events", "e")
@@ -551,7 +551,7 @@ func TestBroadcastBytesThreshold_TightBudgetDemotesToShuffle(t *testing.T) {
 
 	// Default threshold: users (512 bytes) is broadcast.
 	{
-		planner := NewPlanner(cat)
+		planner := NewStagePlanner(NewPlanner(cat))
 		planner.WorkerCount = 4
 		left := logical.NewScan("events", "e")
 		right := logical.NewScan("users", "u")
@@ -573,7 +573,7 @@ func TestBroadcastBytesThreshold_TightBudgetDemotesToShuffle(t *testing.T) {
 
 	// Tight threshold: 256 < users size (512 bytes) → must demote to hash_join.
 	{
-		planner := NewPlanner(cat)
+		planner := NewStagePlanner(NewPlanner(cat))
 		planner.WorkerCount = 4
 		planner.BroadcastBytesThreshold = 256
 		left := logical.NewScan("events", "e")
@@ -596,7 +596,7 @@ func TestBroadcastBytesThreshold_TightBudgetDemotesToShuffle(t *testing.T) {
 
 	// Negative threshold: broadcast disabled entirely.
 	{
-		planner := NewPlanner(cat)
+		planner := NewStagePlanner(NewPlanner(cat))
 		planner.WorkerCount = 4
 		planner.BroadcastBytesThreshold = -1
 		left := logical.NewScan("events", "e")
@@ -673,7 +673,7 @@ func setupCatalogWithLargeTables(t *testing.T) (*catalog.Catalog, context.Contex
 
 func TestPlanDistributed_ShuffleJoinLargeTables(t *testing.T) {
 	cat, ctx := setupCatalogWithLargeTables(t)
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.WorkerCount = 4
 
 	left := logical.NewScan("lineitem", "l")
@@ -789,7 +789,7 @@ func TestPlanDistributed_MultiWayJoinShuffleKeys(t *testing.T) {
 		}
 	}
 
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.WorkerCount = 4
 
 	// Build left-deep join: (customer ⋈ orders) ⋈ lineitem
@@ -975,7 +975,7 @@ func TestPlanDistributed_ColumnPruning(t *testing.T) {
 	}
 
 	// Run optimizer to compute RequiredColumns/NeededColumns
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.WorkerCount = 4
 	planner.AnnotateScanColumns(ctx, agg)
 	optimized := logical.Optimize(agg, func(plan *logical.Node) {

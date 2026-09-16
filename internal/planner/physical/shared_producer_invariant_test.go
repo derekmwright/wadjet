@@ -58,7 +58,7 @@ func TestSharedProducerAttachmentsAreProducerOwned(t *testing.T) {
 		annotate := func(n *logical.Node) { NewPlanner(cat).AnnotateScanColumns(ctx, n) }
 		annotate(node)
 		node = logical.Optimize(node, annotate)
-		p := NewPlanner(cat)
+		p := NewStagePlanner(NewPlanner(cat))
 		p.WorkerCount = 3
 		return p.PlanDistributed(ctx, node)
 	}

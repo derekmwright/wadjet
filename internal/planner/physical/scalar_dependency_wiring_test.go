@@ -45,7 +45,7 @@ func TestQ15_ScalarDependenciesWiring(t *testing.T) {
 	scanAnnotator(logicalPlan)
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.WorkerCount = 4
 
 	stages, err := planner.PlanDistributed(ctx, logicalPlan)

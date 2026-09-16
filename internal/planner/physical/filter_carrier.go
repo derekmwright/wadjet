@@ -23,7 +23,7 @@ import (
 //
 // An entry holding a NUL separates the predicate's two spellings: either may
 // be the one resolveFilterAliasSpelling settles on.
-func (p *Planner) AttachedFilterExprs() []string {
+func (p *StagePlanner) AttachedFilterExprs() []string {
 	return append([]string(nil), p.attachedFilterExprs...)
 }
 
@@ -32,7 +32,7 @@ func (p *Planner) AttachedFilterExprs() []string {
 // one must still be emitted by some stage in the final plan — the projection
 // half of the conservation gate, which a pass that deletes a projection's
 // carrier breaks exactly as it breaks a predicate's.
-func (p *Planner) AttachedProjectionOutputs() []string {
+func (p *StagePlanner) AttachedProjectionOutputs() []string {
 	return append([]string(nil), p.attachedProjectionOutputs...)
 }
 

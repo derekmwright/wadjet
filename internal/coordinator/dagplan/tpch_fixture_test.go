@@ -170,7 +170,7 @@ func sqlToStages(t *testing.T, cat *catalog.Catalog, ctx context.Context, sql st
 	scanAnnotator(logicalPlan)
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 
-	planner := physical.NewPlanner(cat)
+	planner := physical.NewStagePlanner(physical.NewPlanner(cat))
 	planner.WorkerCount = workerCount
 	stages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {

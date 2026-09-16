@@ -13,7 +13,7 @@ import (
 // multiple clusters. If so, it splits the scan into per-cluster scan stages
 // and rewrites downstream dependencies. Returns stages unchanged if only one
 // cluster has the table (or if federation lookup fails).
-func (p *Planner) ExpandFederatedScans(stages []Stage) []Stage {
+func (p *StagePlanner) ExpandFederatedScans(stages []Stage) []Stage {
 	clusters, err := p.catalog.ListClusters()
 	if err != nil || len(clusters) <= 1 {
 		return stages // single cluster or error — no expansion needed
@@ -117,7 +117,7 @@ func (p *Planner) ExpandFederatedScans(stages []Stage) []Stage {
 	return expanded
 }
 
-func (p *Planner) generateStages(node *logical.Node) []Stage {
+func (p *StagePlanner) generateStages(node *logical.Node) []Stage {
 	var stages []Stage
 	// Fresh CTE dedup cache per query — walkStages populates it as it
 	// encounters CTE-named subtrees and consults it on subsequent walks

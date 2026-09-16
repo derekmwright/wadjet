@@ -1102,7 +1102,12 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		return res, err
 	}
 
-	planner := physical.NewPlannerForContext(ctx, c.catalog)
+	// The distributed planner: the local planner with the stage emitter's own
+	// state beside it (physical.StagePlanner). Fields the DAG owns —
+	// WorkerCount, the broadcast threshold, dynamic filters — are set on it;
+	// the ones the local pipeline reads are promoted from the planner it
+	// embeds.
+	planner := physical.NewStagePlanner(physical.NewPlannerForContext(ctx, c.catalog))
 	planner.WorkerCount = c.workers.Count()
 	planner.BroadcastBytesThreshold = broadcastThresholdFromCluster(c.workers.MinWorkerPoolBudget())
 	if c.config.BroadcastBytesOverride != 0 {
@@ -3611,7 +3616,12 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	}
 
 	// Generate distributed stages and route to pipeline execution
-	planner := physical.NewPlannerForContext(ctx, c.catalog)
+	// The distributed planner: the local planner with the stage emitter's own
+	// state beside it (physical.StagePlanner). Fields the DAG owns —
+	// WorkerCount, the broadcast threshold, dynamic filters — are set on it;
+	// the ones the local pipeline reads are promoted from the planner it
+	// embeds.
+	planner := physical.NewStagePlanner(physical.NewPlannerForContext(ctx, c.catalog))
 	planner.WorkerCount = c.workers.Count()
 	planner.BroadcastBytesThreshold = broadcastThresholdFromCluster(c.workers.MinWorkerPoolBudget())
 	if c.config.BroadcastBytesOverride != 0 {

@@ -16,7 +16,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *string) {
+func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID *string) {
 	// CTE deduplication: when this subtree's root is a CTE reference and
 	// a structurally-identical clone has already been planned, link the
 	// parent's deps to the cached terminal stage and skip re-walking.

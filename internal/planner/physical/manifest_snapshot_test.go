@@ -143,7 +143,7 @@ func TestManifestSnapshotPinsReadsAcrossAStatement(t *testing.T) {
 	// uses. Its Plan() call is deliberately not reproduced: that one opens
 	// the parquet objects, which this catalog-only fixture does not have —
 	// and the read this leg contributes is the estimate's, not the plan's.
-	fastPlanner := NewPlannerForContext(ctx, cat)
+	fastPlanner := NewStagePlanner(NewPlannerForContext(ctx, cat))
 	estBytes, estOK := fastPlanner.EstimatePlanScanBytes(ctx, logicalPlan)
 	if !estOK {
 		t.Fatal("EstimatePlanScanBytes declined the self-join — the fast-path leg this test " +
@@ -155,7 +155,7 @@ func TestManifestSnapshotPinsReadsAcrossAStatement(t *testing.T) {
 			"so it is not the per-scan-node cost this leg is here to pin", estBytes)
 	}
 
-	planner := NewPlannerForContext(ctx, cat)
+	planner := NewStagePlanner(NewPlannerForContext(ctx, cat))
 	planner.WorkerCount = 2
 	stages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
@@ -203,7 +203,7 @@ func TestManifestSnapshotUnpinnedReadsRepeatedly(t *testing.T) {
 	scanAnnotator(logicalPlan)
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 
-	planner := NewPlanner(cat)
+	planner := NewStagePlanner(NewPlanner(cat))
 	planner.WorkerCount = 2
 	if _, err := planner.PlanDistributed(ctx, logicalPlan); err != nil {
 		t.Fatalf("PlanDistributed: %v", err)
@@ -247,7 +247,7 @@ func TestManifestSnapshotIgnoresAConcurrentWriteMidStatement(t *testing.T) {
 	kv.mu.Unlock()
 
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
-	planner := NewPlannerForContext(ctx, cat)
+	planner := NewStagePlanner(NewPlannerForContext(ctx, cat))
 	planner.WorkerCount = 2
 	stages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
@@ -274,7 +274,7 @@ func TestManifestSnapshotIgnoresAConcurrentWriteMidStatement(t *testing.T) {
 	logicalPlan2 = logical.Optimize(logicalPlan2, func(plan *logical.Node) {
 		NewPlannerForContext(ctx2, cat).AnnotateScanColumns(ctx2, plan)
 	})
-	planner2 := NewPlannerForContext(ctx2, cat)
+	planner2 := NewStagePlanner(NewPlannerForContext(ctx2, cat))
 	planner2.WorkerCount = 2
 	stages2, err := planner2.PlanDistributed(ctx2, logicalPlan2)
 	if err != nil {
@@ -326,7 +326,7 @@ func TestManifestSnapshotClosesTheDeleteMarkerRace(t *testing.T) {
 	}
 
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
-	planner := NewPlannerForContext(ctx, cat)
+	planner := NewStagePlanner(NewPlannerForContext(ctx, cat))
 	planner.WorkerCount = 2
 	stages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
@@ -420,7 +420,7 @@ func TestManifestSnapshotPinsTheMetadataFoldReads(t *testing.T) {
 			scanAnnotator(logicalPlan)
 			logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 
-			planner := NewPlannerForContext(ctx, cat)
+			planner := NewStagePlanner(NewPlannerForContext(ctx, cat))
 			planner.WorkerCount = 2
 			if _, ok := planner.EstimatePlanScanBytes(ctx, logicalPlan); !ok {
 				t.Fatal("EstimatePlanScanBytes declined the plan")
@@ -444,7 +444,7 @@ func TestManifestSnapshotPinsTheMetadataFoldReads(t *testing.T) {
 			ann2 := func(plan *logical.Node) { NewPlanner(cat2).AnnotateScanColumns(ctx2, plan) }
 			ann2(logicalPlan2)
 			logicalPlan2 = logical.Optimize(logicalPlan2, ann2)
-			p2 := NewPlanner(cat2)
+			p2 := NewStagePlanner(NewPlanner(cat2))
 			p2.WorkerCount = 2
 			p2.EstimatePlanScanBytes(ctx2, logicalPlan2)
 			if _, err := p2.Plan(ctx2, logicalPlan2); err != nil {
