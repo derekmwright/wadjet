@@ -5,9 +5,9 @@ package coordinator
 import (
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -25,24 +25,24 @@ func derefType(p *int) int {
 // claimed it, and the task shipped with Operators == nil, which the worker
 // rejects with "empty Operators".
 func TestBuildWindowFragment(t *testing.T) {
-	stage := physical.Stage{
+	stage := dagplan.Stage{
 		ID:           "window-1",
-		Type:         physical.StageWindow,
+		Type:         dagplan.StageWindow,
 		Dependencies: []string{"scan-0"},
-		WindowCols: []physical.WindowColSpec{
+		WindowCols: []dagplan.WindowColSpec{
 			{
 				Func:        "row_number",
 				OutputCol:   "rn",
 				OutputType:  parquet.TypeInt64,
 				PartitionBy: []string{"n_regionkey"},
-				OrderBy:     []physical.SortKeySpec{{Column: "n_nationkey", NullsLast: true}},
+				OrderBy:     []dagplan.SortKeySpec{{Column: "n_nationkey", NullsLast: true}},
 			},
 			{
 				Func:       "nth_value",
 				InputCol:   "n_name",
 				OutputCol:  "second",
 				OutputType: parquet.TypeString,
-				OrderBy:    []physical.SortKeySpec{{Column: "n_nationkey"}},
+				OrderBy:    []dagplan.SortKeySpec{{Column: "n_nationkey"}},
 				Frame: &logical.WindowFrameSpec{
 					Mode:  "rows",
 					Start: logical.WindowBound{Type: "unbounded_preceding"},
@@ -152,7 +152,7 @@ func TestBuildWindowFragment(t *testing.T) {
 		// ship LAG(bool_col) as "undeclared" and the worker would build a
 		// Float64 vector for it — #345 for exactly one type.
 		boolStage := stage
-		boolStage.WindowCols = []physical.WindowColSpec{{
+		boolStage.WindowCols = []dagplan.WindowColSpec{{
 			Func: "lag", InputCol: "flag", OutputCol: "prev_flag", OutputType: parquet.TypeBool,
 		}}
 		ops, err := buildWindowFragment(boolStage, task, taskInputs, "")

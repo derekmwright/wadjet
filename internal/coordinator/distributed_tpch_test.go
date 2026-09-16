@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
@@ -645,9 +646,9 @@ func TestDistributedTPCHBuildCacheSF100Sample(t *testing.T) {
 		t.Skipf("SF100 sample files missing in %s — see test comment for setup", sampleDir)
 	}
 
-	origMinBytes := physical.ProbeSplitMinBytes
-	physical.ProbeSplitMinBytes = 1
-	t.Cleanup(func() { physical.ProbeSplitMinBytes = origMinBytes })
+	origMinBytes := dagplan.ProbeSplitMinBytes
+	dagplan.ProbeSplitMinBytes = 1
+	t.Cleanup(func() { dagplan.ProbeSplitMinBytes = origMinBytes })
 
 	// At SF100, orders has ~150M rows so reverse-bloom (>50M build inner)
 	// fires for the customer×orders join. With our 10M-row sample we'd miss
@@ -890,9 +891,9 @@ func sf100SampleClusterN(t *testing.T, memoryBudget int64, wantWorkers, maxConcu
 		t.Skipf("SF100 sample files missing in %s — see TestDistributedTPCHBuildCacheSF100Sample for setup", sampleDir)
 	}
 
-	origMinBytes := physical.ProbeSplitMinBytes
-	physical.ProbeSplitMinBytes = 1
-	t.Cleanup(func() { physical.ProbeSplitMinBytes = origMinBytes })
+	origMinBytes := dagplan.ProbeSplitMinBytes
+	dagplan.ProbeSplitMinBytes = 1
+	t.Cleanup(func() { dagplan.ProbeSplitMinBytes = origMinBytes })
 
 	origRev := physical.ReverseBloomInnerThreshold
 	physical.ReverseBloomInnerThreshold = 1
@@ -1176,9 +1177,9 @@ func TestDistributedTPCHBuildCachePolarsQ05(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping SF0.3 Polars repro test in -short mode (heavy: ~55s, ~500MB)")
 	}
-	origMinBytes := physical.ProbeSplitMinBytes
-	physical.ProbeSplitMinBytes = 1
-	t.Cleanup(func() { physical.ProbeSplitMinBytes = origMinBytes })
+	origMinBytes := dagplan.ProbeSplitMinBytes
+	dagplan.ProbeSplitMinBytes = 1
+	t.Cleanup(func() { dagplan.ProbeSplitMinBytes = origMinBytes })
 
 	origGroupSize := buildCacheGroupSize
 	buildCacheGroupSize = 1
@@ -1250,9 +1251,9 @@ func TestDistributedTPCHQ17AggregateShuffleCorrectness(t *testing.T) {
 		t.Skip("skipping SF0.1 Q17 correctness test in -short mode (heavy: generates ~600K lineitem rows)")
 	}
 
-	origMinBytes := physical.ProbeSplitMinBytes
-	physical.ProbeSplitMinBytes = 1
-	t.Cleanup(func() { physical.ProbeSplitMinBytes = origMinBytes })
+	origMinBytes := dagplan.ProbeSplitMinBytes
+	dagplan.ProbeSplitMinBytes = 1
+	t.Cleanup(func() { dagplan.ProbeSplitMinBytes = origMinBytes })
 
 	// Run twice, same cluster, under different threshold settings to
 	// exercise both code paths on identical data.
@@ -1339,9 +1340,9 @@ func TestDistributedTPCHQ17AggregateShuffleCorrectness(t *testing.T) {
 // may not produce). Compares in-plan vs aggregate-shuffle paths on
 // non-null data — any substitution bug shows up as a numeric divergence.
 func TestAggregateShuffleCorrectness_NonEmptyResult(t *testing.T) {
-	origMinBytes := physical.ProbeSplitMinBytes
-	physical.ProbeSplitMinBytes = 1
-	t.Cleanup(func() { physical.ProbeSplitMinBytes = origMinBytes })
+	origMinBytes := dagplan.ProbeSplitMinBytes
+	dagplan.ProbeSplitMinBytes = 1
+	t.Cleanup(func() { dagplan.ProbeSplitMinBytes = origMinBytes })
 
 	// Q17's decorrelated shape: Aggregate(SUM) → LEFT JOIN against inner
 	// GROUP BY l_partkey AVG(l_quantity) → Scan(lineitem). Filter flipped
@@ -1431,9 +1432,9 @@ func TestAggregateShuffleCorrectness_NonEmptyResult(t *testing.T) {
 // If this test passes but the SF1-sample / SF10 run doesn't, the gap is
 // scale-specific (e.g. pre-compute task memory) not structural.
 func TestDistributedTPCHQ17AggregateShuffle(t *testing.T) {
-	origMinBytes := physical.ProbeSplitMinBytes
-	physical.ProbeSplitMinBytes = 1
-	t.Cleanup(func() { physical.ProbeSplitMinBytes = origMinBytes })
+	origMinBytes := dagplan.ProbeSplitMinBytes
+	dagplan.ProbeSplitMinBytes = 1
+	t.Cleanup(func() { dagplan.ProbeSplitMinBytes = origMinBytes })
 
 	// Lower the aggregate-shuffle threshold to 1 byte so SF0.01's tiny
 	// inner lineitem scan (~3.7 MB) trips detection. Production uses 1 GB
@@ -1487,9 +1488,9 @@ func TestDistributedTPCHBuildCachePartialOrders(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping multi-cache-file SF0.01 repro test in -short mode")
 	}
-	origMinBytes := physical.ProbeSplitMinBytes
-	physical.ProbeSplitMinBytes = 1
-	t.Cleanup(func() { physical.ProbeSplitMinBytes = origMinBytes })
+	origMinBytes := dagplan.ProbeSplitMinBytes
+	dagplan.ProbeSplitMinBytes = 1
+	t.Cleanup(func() { dagplan.ProbeSplitMinBytes = origMinBytes })
 
 	origGroupSize := buildCacheGroupSize
 	buildCacheGroupSize = 1
@@ -1526,9 +1527,9 @@ func TestDistributedTPCHBuildCache(t *testing.T) {
 	// Force probe-split to activate on tiny SF0.01 tables by lowering the
 	// 64MB floor. Without this the coordinator routes to the single-worker
 	// pipeline and neither probe-split nor the build cache ever run.
-	origMinBytes := physical.ProbeSplitMinBytes
-	physical.ProbeSplitMinBytes = 1
-	t.Cleanup(func() { physical.ProbeSplitMinBytes = origMinBytes })
+	origMinBytes := dagplan.ProbeSplitMinBytes
+	dagplan.ProbeSplitMinBytes = 1
+	t.Cleanup(func() { dagplan.ProbeSplitMinBytes = origMinBytes })
 
 	ctx, coord := setupTPCHDistributed(t)
 
@@ -1584,9 +1585,9 @@ func TestDistributedTPCHBuildCache(t *testing.T) {
 func TestDistributedTPCHForcedShuffle(t *testing.T) {
 	// Force probe-split to activate (so mergeInfo is non-nil and the shuffle
 	// branch is reachable). Same trick as TestDistributedTPCHBuildCache.
-	origMinBytes := physical.ProbeSplitMinBytes
-	physical.ProbeSplitMinBytes = 1
-	t.Cleanup(func() { physical.ProbeSplitMinBytes = origMinBytes })
+	origMinBytes := dagplan.ProbeSplitMinBytes
+	dagplan.ProbeSplitMinBytes = 1
+	t.Cleanup(func() { dagplan.ProbeSplitMinBytes = origMinBytes })
 
 	// Force shuffle path on every join-heavy query by lowering the threshold
 	// to 1 byte.
@@ -1657,9 +1658,9 @@ func TestDistributedTPCHForcedShuffle(t *testing.T) {
 // the cached rows are 4× the expected count. We detect that by counting cache
 // files per alias and by asserting Q02 still returns exactly 5 rows.
 func TestDistributedTPCHBuildCacheDuplicateAlias(t *testing.T) {
-	origMinBytes := physical.ProbeSplitMinBytes
-	physical.ProbeSplitMinBytes = 1
-	t.Cleanup(func() { physical.ProbeSplitMinBytes = origMinBytes })
+	origMinBytes := dagplan.ProbeSplitMinBytes
+	dagplan.ProbeSplitMinBytes = 1
+	t.Cleanup(func() { dagplan.ProbeSplitMinBytes = origMinBytes })
 
 	origGroupSize := buildCacheGroupSize
 	buildCacheGroupSize = 2

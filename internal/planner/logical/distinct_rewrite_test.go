@@ -248,7 +248,7 @@ func TestRewriteDistinctAsGroupBy_PreservesCTEs(t *testing.T) {
 // annotation — the same source ExpandStarProjections uses.
 //
 // Before this, the shape was declined here and then REFUSED off the root path
-// by physical.refuseUnstageableDistinct, so `SELECT COUNT(*) FROM (SELECT
+// by dagplan.refuseUnstageableDistinct, so `SELECT COUNT(*) FROM (SELECT
 // DISTINCT * FROM supplier) u` — which PostgreSQL answers 100, and which the
 // pre-#466 DAG also answered 100 — came back as an error.
 func TestRewriteDistinctAsGroupBy_StarUsesScanColumns(t *testing.T) {

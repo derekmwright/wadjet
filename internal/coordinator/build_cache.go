@@ -13,7 +13,6 @@ import (
 	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"golang.org/x/sync/errgroup"
@@ -59,7 +58,7 @@ const buildCacheTimeout = 8 * time.Minute
 //
 // This eliminates the N× build-side memory duplication that OOMs Q09 at SF100
 // (e.g., 3 workers × 15GB orders hash tables = ~45GB peak vs 15GB with caching).
-func (c *Coordinator) preScanBuildTables(ctx context.Context, parentQueryID string, sql string, stages []physical.Stage, probeAlias string) (map[string][]string, error) {
+func (c *Coordinator) preScanBuildTables(ctx context.Context, parentQueryID string, sql string, stages []dagplan.Stage, probeAlias string) (map[string][]string, error) {
 	threshold := int64(buildCacheThreshold)
 	if c.BuildCacheThreshold > 0 {
 		threshold = c.BuildCacheThreshold
@@ -85,7 +84,7 @@ func (c *Coordinator) preScanBuildTables(ctx context.Context, parentQueryID stri
 
 	// Count total goroutines: one per (table, fileGroup) pair.
 	type tableGroup struct {
-		stage    physical.Stage
+		stage    dagplan.Stage
 		groupIdx int
 		files    []string
 	}
@@ -143,7 +142,7 @@ func (c *Coordinator) preScanBuildTables(ctx context.Context, parentQueryID stri
 // Return nil for empty stage.Columns or catalog lookup errors; the caller uses SELECT *.
 // A total resolution miss also falls back to SELECT *, never a partial guessed schema.
 // See docs/internals/build-cache-scan-column-resolution.md for the design.
-func (c *Coordinator) prunedScanColumns(ctx context.Context, stage physical.Stage) []string {
+func (c *Coordinator) prunedScanColumns(ctx context.Context, stage dagplan.Stage) []string {
 	if len(stage.Columns) == 0 {
 		return nil
 	}
@@ -204,7 +203,7 @@ func chunkFiles(files []string, size int) [][]string {
 // resultPrefix below, or the inline-promoted equivalent), never the base
 // parquet it read — see the assertion at the resultPath return below,
 // which is what makes that guarantee load-bearing rather than incidental.
-func (c *Coordinator) preScanOneTable(parentCtx context.Context, parentQueryID string, stage physical.Stage, groupIdx int, fileSubset []string) ([]string, error) {
+func (c *Coordinator) preScanOneTable(parentCtx context.Context, parentQueryID string, stage dagplan.Stage, groupIdx int, fileSubset []string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(parentCtx, buildCacheTimeout)
 	defer cancel()
 	cacheQueryID := fmt.Sprintf("bc-%s-%s-%d", parentQueryID, stage.ScanAlias, groupIdx)

@@ -10,7 +10,7 @@ import (
 )
 
 // runCorrelatedLocal executes a query the stage DAG refused
-// (physical.ErrCorrelatedSubqueryDistributed) on the coordinator-local
+// (dagplan.ErrCorrelatedSubqueryDistributed) on the coordinator-local
 // single-process pipeline — the engine that owns correlated-subquery
 // semantics, where a correlated reference compiles against a real
 // SubqueryRunner and re-executes per outer row.
@@ -24,7 +24,7 @@ func (c *Coordinator) runCorrelatedLocal(ctx context.Context, queryID string, lo
 }
 
 // runDistinctLocal executes a query the stage DAG refused
-// (physical.ErrDistinctDistributed) on the coordinator-local single-process
+// (dagplan.ErrDistinctDistributed) on the coordinator-local single-process
 // pipeline, which applies a Distinct wherever it sits.
 //
 // The refusal covers the shapes logical.rewriteDistinctAsGroupBy cannot turn
@@ -40,7 +40,7 @@ func (c *Coordinator) runDistinctLocal(ctx context.Context, queryID string, logi
 }
 
 // runGroupingSetsLocal executes a query the stage DAG refused
-// (physical.ErrGroupingSetsDistributed) on the coordinator-local
+// (dagplan.ErrGroupingSetsDistributed) on the coordinator-local
 // single-process pipeline, whose HashAggregate is the only operator in the
 // process that knows what a grouping set is.
 //
@@ -57,7 +57,7 @@ func (c *Coordinator) runGroupingSetsLocal(ctx context.Context, queryID string, 
 }
 
 // runGroupKeyLocal executes a query the stage DAG refused
-// (physical.ErrGroupKeyDistributed) on the coordinator-local single-process
+// (dagplan.ErrGroupKeyDistributed) on the coordinator-local single-process
 // pipeline, which is the engine that keeps a derived GROUP BY key's RESOLUTION
 // name and its PUBLISHED name apart — a hidden `__gb_expr_N` slot and
 // `exec.HashAggregate.GroupByOutNames` (ADR-0026 §2).
@@ -75,7 +75,7 @@ func (c *Coordinator) runGroupKeyLocal(ctx context.Context, queryID string, logi
 }
 
 // runInSubqueryLocal executes a query the stage DAG refused
-// (physical.ErrInSubqueryDistributed) on the coordinator-local single-process
+// (dagplan.ErrInSubqueryDistributed) on the coordinator-local single-process
 // pipeline, where expr.InSubquery resolves the set once under resolveMu and
 // caches it.
 //
@@ -92,7 +92,7 @@ func (c *Coordinator) runInSubqueryLocal(ctx context.Context, queryID string, lo
 }
 
 // runScalarProjectionLocal executes a query the stage DAG refused
-// (physical.ErrScalarSubqueryProjectionDistributed) on the coordinator-local
+// (dagplan.ErrScalarSubqueryProjectionDistributed) on the coordinator-local
 // single-process pipeline, where a SELECT-list subquery compiles against a
 // real SubqueryRunner.
 //
@@ -106,7 +106,7 @@ func (c *Coordinator) runScalarProjectionLocal(ctx context.Context, queryID stri
 }
 
 // runNullAwareAntiLocal executes a query the stage DAG refused
-// (physical.ErrNullAwareAntiBuildNotReplicated) on the coordinator-local
+// (dagplan.ErrNullAwareAntiBuildNotReplicated) on the coordinator-local
 // single-process pipeline, whose single HashJoin sees the whole build side by
 // construction.
 //
@@ -131,7 +131,7 @@ func (c *Coordinator) NullAwareAntiLocalRoutes() int64 {
 }
 
 // runUnreachableOutputLocal executes a query the stage DAG refused
-// (physical.ErrUnreachableGatherOutput) on the coordinator-local
+// (dagplan.ErrUnreachableGatherOutput) on the coordinator-local
 // single-process pipeline, where every Project is a real operator.
 //
 // The refusal covers the shapes no stage can compute the SELECT list for and
@@ -146,7 +146,7 @@ func (c *Coordinator) runUnreachableOutputLocal(ctx context.Context, queryID str
 }
 
 // runTableLessLocal executes a query the stage DAG refused
-// (physical.ErrTableLessSelectDistributed) on the coordinator-local
+// (dagplan.ErrTableLessSelectDistributed) on the coordinator-local
 // single-process pipeline, whose DualSource produces the one row a SELECT
 // with no FROM is.
 //
@@ -170,7 +170,7 @@ func (c *Coordinator) TableLessLocalRoutes() int64 {
 }
 
 // runUnbuildableStageLocal executes a query the stage DAG refused
-// (physical.ErrUnbuildableStageDistributed) on the coordinator-local
+// (dagplan.ErrUnbuildableStageDistributed) on the coordinator-local
 // single-process pipeline.
 //
 // The refused plan holds a stage naming neither a dependency nor a table, and
@@ -201,7 +201,7 @@ func (c *Coordinator) UnreachableOutputLocalRoutes() int64 {
 }
 
 // runLateralProjectionLocal executes a query the stage DAG refused
-// (physical.ErrLateralProjectionDistributed) on the coordinator-local
+// (dagplan.ErrLateralProjectionDistributed) on the coordinator-local
 // single-process pipeline, where a derived block's SELECT list is a real
 // Project operator and every column it publishes is a real column.
 //

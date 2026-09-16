@@ -26,7 +26,7 @@ import (
 // parent's build scratch across those goroutines is not an option.
 func (p *Planner) makeSubqueryRunner() expr.SubqueryRunner {
 	return func(sql string) ([]map[string]any, error) {
-		ctx := p.planCtx
+		ctx := p.PlanCtx
 		if ctx == nil {
 			ctx = context.Background()
 		}
@@ -77,7 +77,7 @@ func (p *Planner) forSubquery() *Planner {
 // the type the subquery answers rather than by the bytes of the box (#696).
 //
 // It plans the subquery's SQL — parse, logical build, annotate — and reads
-// declaredOutputSchema, the same walk the top-level statement's own output
+// DeclaredOutputSchema, the same walk the top-level statement's own output
 // schema comes from. No execution: the question is the TYPE, and the value is
 // resolved once at evaluation as it always was. A subquery that does not
 // resolve to exactly one column answers ok=false and the comparison keeps the
@@ -86,18 +86,18 @@ func (p *Planner) forSubquery() *Planner {
 // The cost is one logical build per compiled scalar subquery, at plan time.
 func (p *Planner) subqueryDeclOption() expr.CompileOption {
 	env := expr.WithSubqueryEnv(func(sql string) (parquet.TypeID, int, int, bool) {
-		cols, ok := p.subqueryOutputColumn(sql)
+		cols, ok := p.SubqueryOutputColumn(sql)
 		if !ok {
 			return 0, 0, 0, false
 		}
 		return cols.Type, cols.Precision, cols.Scale, true
-	}, p.subqueryOutputArity)
+	}, p.SubqueryOutputArity)
 	// …and the RELATION resolver the dangling-reference guard needs to tell a
 	// ROW FIELD PATH from a lost correlation (#866). It travels with the
 	// other two plan-time answers because it is the same question asked of
 	// the same plan, and a compile site that took only the first two would
 	// refuse `d.b IN (SELECT c_row.b FROM t)` — a query PostgreSQL answers.
-	return expr.Options(env, expr.WithSubqueryScope(p.subqueryInnerColumns()))
+	return expr.Options(env, expr.WithSubqueryScope(p.SubqueryInnerColumns()))
 }
 
 // subqueryOutputArity is how many columns a subquery's SELECT list has, from
@@ -113,13 +113,13 @@ func (p *Planner) subqueryDeclOption() expr.CompileOption {
 // It recovers from a panic and answers not-known for anything it cannot plan,
 // exactly as subqueryOutputColumn does and for the same reason: an unplannable
 // subquery must cost the refusal its evidence, never the query its answer.
-func (p *Planner) subqueryOutputArity(sql string) (n int, ok bool) {
+func (p *Planner) SubqueryOutputArity(sql string) (n int, ok bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			n, ok = 0, false
 		}
 	}()
-	ctx := p.planCtx
+	ctx := p.PlanCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -132,9 +132,9 @@ func (p *Planner) subqueryOutputArity(sql string) (n int, ok bool) {
 		return 0, false
 	}
 	var plan *logical.Node
-	if len(p.ctes) > 0 {
+	if len(p.Ctes) > 0 {
 		plan, err = logical.BuildFromSelectWithCTEs(info,
-			append(append([]plansql.CTEDef(nil), p.ctes...), info.CTEs...))
+			append(append([]plansql.CTEDef(nil), p.Ctes...), info.CTEs...))
 	} else {
 		plan, err = logical.BuildFromSelect(info)
 	}
@@ -142,7 +142,7 @@ func (p *Planner) subqueryOutputArity(sql string) (n int, ok bool) {
 		return 0, false
 	}
 	p.AnnotateScanColumns(ctx, plan)
-	schema := declaredOutputSchema(plan, p.subqueryOutputColumn)
+	schema := DeclaredOutputSchema(plan, p.SubqueryOutputColumn)
 	if len(schema) == 0 {
 		// A shape this walk cannot name — a star it could not expand, a
 		// projection it cannot read. Not-known, and the row-count backstop
@@ -192,18 +192,18 @@ func (p *Planner) DeclaredOutputSchema(plan *logical.Node) []parquet.Column {
 	// way out because this walk is also called from inside a plan that has its
 	// own WITH list.
 	if len(plan.CTEs) > 0 {
-		saved := p.ctes
-		p.ctes = plan.CTEs
-		defer func() { p.ctes = saved }()
+		saved := p.Ctes
+		p.Ctes = plan.CTEs
+		defer func() { p.Ctes = saved }()
 	}
-	return declaredOutputSchema(plan, p.subqueryOutputColumn)
+	return DeclaredOutputSchema(plan, p.SubqueryOutputColumn)
 }
 
 // subqueryOutputColumn resolves a scalar subquery's single declared output
 // column. It recovers from a panic for the reason every plan-time helper on
 // this path does: an unplannable subquery must cost the comparison its
 // declaration, never the query.
-func (p *Planner) subqueryOutputColumn(sql string) (col parquet.Column, ok bool) {
+func (p *Planner) SubqueryOutputColumn(sql string) (col parquet.Column, ok bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			col, ok = parquet.Column{}, false
@@ -213,7 +213,7 @@ func (p *Planner) subqueryOutputColumn(sql string) (col parquet.Column, ok bool)
 	if plan == nil {
 		return parquet.Column{}, false
 	}
-	schema := declaredOutputSchema(plan, p.subqueryOutputColumn)
+	schema := DeclaredOutputSchema(plan, p.SubqueryOutputColumn)
 	if len(schema) != 1 {
 		// Not a scalar subquery's shape. Declining is the honest answer: a
 		// wrong declaration here would pick a comparison RULE, which is worse
@@ -227,7 +227,7 @@ func (p *Planner) subqueryOutputColumn(sql string) (col parquet.Column, ok bool)
 // named so the WIDTH half (subqueryOutputIntWidth) asks the same tree the TYPE
 // half does rather than building a second one that could differ.
 func (p *Planner) subqueryLogicalPlan(sql string) *logical.Node {
-	ctx := p.planCtx
+	ctx := p.PlanCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -240,8 +240,8 @@ func (p *Planner) subqueryLogicalPlan(sql string) *logical.Node {
 		return nil
 	}
 	var plan *logical.Node
-	if len(p.ctes) > 0 {
-		plan, err = logical.BuildFromSelectWithCTEs(info, append(append([]plansql.CTEDef(nil), p.ctes...), info.CTEs...))
+	if len(p.Ctes) > 0 {
+		plan, err = logical.BuildFromSelectWithCTEs(info, append(append([]plansql.CTEDef(nil), p.Ctes...), info.CTEs...))
 	} else {
 		plan, err = logical.BuildFromSelect(info)
 	}
@@ -260,9 +260,9 @@ func (p *Planner) subqueryLogicalPlan(sql string) *logical.Node {
 // answered NULL for every column the CTE computes.
 func (p *Planner) buildSubqueryPipelineScoped(ctx context.Context, sql string,
 	ctes []plansql.CTEDef) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
-	saved := p.ctes
-	p.ctes = ctes
-	defer func() { p.ctes = saved }()
+	saved := p.Ctes
+	p.Ctes = ctes
+	defer func() { p.Ctes = saved }()
 	return p.buildSubqueryPipeline(ctx, sql)
 }
 
@@ -270,9 +270,9 @@ func (p *Planner) buildSubqueryPipelineScoped(ctx context.Context, sql string,
 // already-parsed block — see buildSubqueryPipelineFor.
 func (p *Planner) buildSubqueryPipelineScopedFor(ctx context.Context, info *plansql.SelectInfo,
 	ctes []plansql.CTEDef) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
-	saved := p.ctes
-	p.ctes = ctes
-	defer func() { p.ctes = saved }()
+	saved := p.Ctes
+	p.Ctes = ctes
+	defer func() { p.Ctes = saved }()
 	return p.buildSubqueryPipelineFor(ctx, info)
 }
 
@@ -299,8 +299,8 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 	// Build logical plan — merge outer CTEs so subqueries can reference
 	// CTE tables defined in the enclosing WITH clause.
 	var logicalPlan *logical.Node
-	if len(p.ctes) > 0 {
-		merged := append(p.ctes, info.CTEs...)
+	if len(p.Ctes) > 0 {
+		merged := append(p.Ctes, info.CTEs...)
 		logicalPlan, err = logical.BuildFromSelectWithCTEs(info, merged)
 	} else {
 		logicalPlan, err = logical.BuildFromSelect(info)
@@ -333,13 +333,13 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 			// nil table hook: applyContextColumnPolicies below asks the
 			// ACCESS decision for every relation this plan reads (#945), so
 			// the binder's own refusal would be a second copy of it.
-			if err := ValidateColumnsUnderPolicy(ctx, p.catalog, info, func(table string) map[string]bool {
+			if err := ValidateColumnsUnderPolicy(ctx, p.Catalog, info, func(table string) map[string]bool {
 				return denied[strings.ToLower(table)]
 			}, nil); err != nil {
 				return nil, nil, nil, err
 			}
 		}
-		logicalPlan, err = p.applyContextColumnPolicies(ctx, logicalPlan)
+		logicalPlan, err = p.ApplyContextColumnPolicies(ctx, logicalPlan)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -352,7 +352,7 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 	})
 	// The optimizer MINTS scans, after the policy went in above (#859).
 	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 || logical.PolicyLookupFromContext(ctx) != nil {
-		logicalPlan, err = p.applyContextColumnPoliciesToNewScans(ctx, logicalPlan)
+		logicalPlan, err = p.ApplyContextColumnPoliciesToNewScans(ctx, logicalPlan)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -360,7 +360,7 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 		// pushed here, and one that ends up between a security projection and
 		// its scan reads the stored column exactly as it would in the outer
 		// plan (#859 round 4).
-		if err := p.checkPolicyPlanOrderFromContext(ctx, logicalPlan); err != nil {
+		if err := p.CheckPolicyPlanOrderFromContext(ctx, logicalPlan); err != nil {
 			return nil, nil, nil, err
 		}
 	}
@@ -395,7 +395,7 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 	// The trim is the same operator the top-level statement gets, from the
 	// same plan, so the two paths cannot disagree about which columns a
 	// SELECT list has.
-	if trim := hiddenSortTrimOp(logicalPlan); trim != nil {
+	if trim := HiddenSortTrimOp(logicalPlan); trim != nil {
 		ops = append(ops, trim)
 	}
 	return source, ops, sink, nil
@@ -403,7 +403,7 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 
 // executeSubquery parses and executes a SQL subquery, returning result rows.
 func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string]any, error) {
-	rows, _, err := p.executeSubquerySchema(ctx, sql)
+	rows, _, err := p.ExecuteSubquerySchema(ctx, sql)
 	return rows, err
 }
 
@@ -415,7 +415,7 @@ func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string
 // IN-set materializer, which inlines them into filter TEXT) needs the
 // declaration to tell them apart. That is ADR-0012 item 8's rule applied to
 // the one place the boxing happens on the PLANNER's side of the wire.
-func (p *Planner) executeSubquerySchema(ctx context.Context, sql string) ([]map[string]any, []parquet.Column, error) {
+func (p *Planner) ExecuteSubquerySchema(ctx context.Context, sql string) ([]map[string]any, []parquet.Column, error) {
 	source, ops, sink, err := p.buildSubqueryPipeline(ctx, sql)
 	if err != nil {
 		return nil, nil, err

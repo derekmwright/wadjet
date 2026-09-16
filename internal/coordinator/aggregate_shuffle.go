@@ -11,36 +11,35 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 )
 
 // buildPreComputedAggregateMeta converts a candidate + cache paths into the
-// metadata shape that travels on physical.Stage and later becomes the
+// metadata shape that travels on dagplan.Stage and later becomes the
 // distributed.PreComputedAggregate wire message. Extracted so the
 // coordinator-routing and test paths share one construction site.
 func buildPreComputedAggregateMeta(
 	cand dagplan.AggregateShuffleCandidate,
-	stages []physical.Stage,
+	stages []dagplan.Stage,
 	cacheFiles []string,
-) (physical.PreComputedAggregateMeta, error) {
-	byID := make(map[string]physical.Stage, len(stages))
+) (dagplan.PreComputedAggregateMeta, error) {
+	byID := make(map[string]dagplan.Stage, len(stages))
 	for _, s := range stages {
 		byID[s.ID] = s
 	}
 	agg, ok := byID[cand.AggregateStageID]
 	if !ok {
-		return physical.PreComputedAggregateMeta{}, fmt.Errorf("aggregate stage %q not found", cand.AggregateStageID)
+		return dagplan.PreComputedAggregateMeta{}, fmt.Errorf("aggregate stage %q not found", cand.AggregateStageID)
 	}
 	scan, ok := byID[cand.InputScanID]
 	if !ok {
-		return physical.PreComputedAggregateMeta{}, fmt.Errorf("input scan %q not found", cand.InputScanID)
+		return dagplan.PreComputedAggregateMeta{}, fmt.Errorf("input scan %q not found", cand.InputScanID)
 	}
-	return physical.PreComputedAggregateMeta{
+	return dagplan.PreComputedAggregateMeta{
 		InputTable:  scan.TableName,
 		GroupByCols: append([]string(nil), agg.GroupByCols...),
-		AggSpecs:    append([]physical.AggSpec(nil), agg.AggSpecs...),
+		AggSpecs:    append([]dagplan.AggSpec(nil), agg.AggSpecs...),
 		CacheFiles:  append([]string(nil), cacheFiles...),
 	}, nil
 }
@@ -83,7 +82,7 @@ func (c *Coordinator) preComputeDerivedAggregate(
 	parentCtx context.Context,
 	parentQueryID string,
 	cand dagplan.AggregateShuffleCandidate,
-	stages []physical.Stage,
+	stages []dagplan.Stage,
 ) ([]string, error) {
 	sqlText, err := dagplan.BuildAggregateShuffleSQL(cand, stages)
 	if err != nil {

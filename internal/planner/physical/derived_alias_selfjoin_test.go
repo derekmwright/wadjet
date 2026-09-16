@@ -45,12 +45,12 @@ func TestAggInputNameKeepsTheQualifierOverASelfJoin(t *testing.T) {
 		{"b", "n2.nm"},
 	} {
 		t.Run(tc.key, func(t *testing.T) {
-			got, expr, _, renamed := resolveAggInputName(tc.key, selfJoinDerived())
+			got, expr, _, renamed := ResolveAggInputName(tc.key, selfJoinDerived())
 			if expr != nil {
-				t.Fatalf("resolveAggInputName(%q) returned an expression, want a column", tc.key)
+				t.Fatalf("ResolveAggInputName(%q) returned an expression, want a column", tc.key)
 			}
 			if !renamed || got != tc.want {
-				t.Errorf("resolveAggInputName(%q) = %q (renamed=%v), want %q — the bare name "+
+				t.Errorf("ResolveAggInputName(%q) = %q (renamed=%v), want %q — the bare name "+
 					"names BOTH arms of the self-join", tc.key, got, renamed, tc.want)
 			}
 		})
@@ -69,9 +69,9 @@ func TestAggInputNameLeavesAnUnqualifiedRenameAlone(t *testing.T) {
 			ScanColumns: []string{"n_nationkey"}, DerivedAliases: []string{"u"},
 		}},
 	}
-	got, _, _, renamed := resolveAggInputName("u.k", plan)
+	got, _, _, renamed := ResolveAggInputName("u.k", plan)
 	if !renamed || got != "n_nationkey" {
-		t.Errorf("resolveAggInputName(%q) = %q (renamed=%v), want %q",
+		t.Errorf("ResolveAggInputName(%q) = %q (renamed=%v), want %q",
 			"u.k", got, renamed, "n_nationkey")
 	}
 }

@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 )
 
 // TestAggregatePartialSplit_Trigger verifies the dispatcher's decision to
@@ -18,11 +18,11 @@ import (
 // run showed per-partition granularity produces swarms of ~2ms tasks
 // whose scheduling overhead regresses the whole suite.
 func TestAggregatePartialSplit_Trigger(t *testing.T) {
-	rrStage := physical.Stage{
-		Type:         physical.StageAggregate,
+	rrStage := dagplan.Stage{
+		Type:         dagplan.StageAggregate,
 		GroupByCols:  []string{"k"},
 		Dependencies: []string{"join-1"},
-		Distribution: physical.Distribution{Kind: physical.DistRoundRobin},
+		Distribution: dagplan.Distribution{Kind: dagplan.DistRoundRobin},
 	}
 	big := int64(aggSplitMinBytes)
 	partitioned := map[string]StageOutput{
@@ -34,7 +34,7 @@ func TestAggregatePartialSplit_Trigger(t *testing.T) {
 			Files: [][]string{{"f0", "f1", "f2", "f3"}}},
 	}
 
-	withField := func(mut func(*physical.Stage)) physical.Stage {
+	withField := func(mut func(*dagplan.Stage)) dagplan.Stage {
 		s := rrStage
 		mut(&s)
 		return s
@@ -42,7 +42,7 @@ func TestAggregatePartialSplit_Trigger(t *testing.T) {
 
 	cases := []struct {
 		name       string
-		stage      physical.Stage
+		stage      dagplan.Stage
 		inputs     map[string]StageOutput
 		workers    int
 		curTasks   int
@@ -94,24 +94,24 @@ func TestAggregatePartialSplit_Trigger(t *testing.T) {
 		{name: "missing_dep_output", stage: rrStage, inputs: map[string]StageOutput{}, workers: 3, curTasks: 1, wantOK: false},
 		{
 			name:   "not_roundrobin",
-			stage:  withField(func(s *physical.Stage) { s.Distribution = physical.Distribution{Kind: physical.DistSingleton} }),
+			stage:  withField(func(s *dagplan.Stage) { s.Distribution = dagplan.Distribution{Kind: dagplan.DistSingleton} }),
 			inputs: partitioned, workers: 3, curTasks: 1, wantOK: false,
 		},
 		{
 			name:   "final_aggregate_excluded",
-			stage:  withField(func(s *physical.Stage) { s.Type = "final_aggregate" }),
+			stage:  withField(func(s *dagplan.Stage) { s.Type = "final_aggregate" }),
 			inputs: partitioned, workers: 3, curTasks: 1, wantOK: false,
 		},
 		{
 			// A sort, limit, or post-filter applied per-slice would be wrong
 			// before the merge has seen all partials.
 			name:   "sort_keys_excluded",
-			stage:  withField(func(s *physical.Stage) { s.SortKeys = []physical.SortKeySpec{{Column: "k"}} }),
+			stage:  withField(func(s *dagplan.Stage) { s.SortKeys = []dagplan.SortKeySpec{{Column: "k"}} }),
 			inputs: partitioned, workers: 3, curTasks: 1, wantOK: false,
 		},
 		{
 			name:   "limit_excluded",
-			stage:  withField(func(s *physical.Stage) { s.Limit = 10; s.HasLimit = true }),
+			stage:  withField(func(s *dagplan.Stage) { s.Limit = 10; s.HasLimit = true }),
 			inputs: partitioned, workers: 3, curTasks: 1, wantOK: false,
 		},
 		{
@@ -119,17 +119,17 @@ func TestAggregatePartialSplit_Trigger(t *testing.T) {
 			// other limit — HasLimit is what the guard now consults, never
 			// `Limit != 0`, which would have missed this case entirely.
 			name:   "limit_zero_excluded",
-			stage:  withField(func(s *physical.Stage) { s.Limit = 0; s.HasLimit = true }),
+			stage:  withField(func(s *dagplan.Stage) { s.Limit = 0; s.HasLimit = true }),
 			inputs: partitioned, workers: 3, curTasks: 1, wantOK: false,
 		},
 		{
 			name:   "post_filter_excluded",
-			stage:  withField(func(s *physical.Stage) { s.FilterExprs = []string{"cnt > 3"} }),
+			stage:  withField(func(s *dagplan.Stage) { s.FilterExprs = []string{"cnt > 3"} }),
 			inputs: partitioned, workers: 3, curTasks: 1, wantOK: false,
 		},
 		{
 			name:   "multi_dep_excluded",
-			stage:  withField(func(s *physical.Stage) { s.Dependencies = []string{"join-1", "join-2"} }),
+			stage:  withField(func(s *dagplan.Stage) { s.Dependencies = []string{"join-1", "join-2"} }),
 			inputs: partitioned, workers: 3, curTasks: 1, wantOK: false,
 		},
 	}
@@ -157,11 +157,11 @@ func TestAggregatePartialSplit_Trigger(t *testing.T) {
 // outputs use the manifest-fed partition-range convention, which does not
 // match custom file groups — the split must decline.
 func TestAggregatePartialSplit_EagerExcluded(t *testing.T) {
-	stage := physical.Stage{
-		Type:         physical.StageAggregate,
+	stage := dagplan.Stage{
+		Type:         dagplan.StageAggregate,
 		GroupByCols:  []string{"k"},
 		Dependencies: []string{"join-1"},
-		Distribution: physical.Distribution{Kind: physical.DistRoundRobin},
+		Distribution: dagplan.Distribution{Kind: dagplan.DistRoundRobin},
 	}
 	inputs := map[string]StageOutput{
 		"join-1": {Kind: OutputPartitioned, NumPartitions: 2, Bytes: aggSplitMinBytes,

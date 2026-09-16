@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/derekmwright/wadjet/benchmarks/tpch"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 )
 
 // windowShuffleBroadcastThreshold forces lineitem ⋈ orders to hash-join at
@@ -40,16 +40,16 @@ func TestWindowStagePartitionParallel(t *testing.T) {
 		FROM lineitem JOIN orders ON l_orderkey = o_orderkey`
 
 	stages := planStagesForTest(t, ctx, coord.catalog, sql, 3, windowShuffleBroadcastThreshold)
-	var win *physical.Stage
+	var win *dagplan.Stage
 	for i := range stages {
-		if stages[i].Type == physical.StageWindow {
+		if stages[i].Type == dagplan.StageWindow {
 			win = &stages[i]
 		}
 	}
 	if win == nil {
 		t.Fatalf("no window stage in the plan: %+v", stages)
 	}
-	if win.Distribution.Kind != physical.DistHashPartitioned || win.Distribution.Count < 2 {
+	if win.Distribution.Kind != dagplan.DistHashPartitioned || win.Distribution.Count < 2 {
 		t.Fatalf("window stage distribution = %+v, want hash-partitioned across ≥2 tasks — "+
 			"the partition-parallel path did not engage and this test would be vacuous",
 			win.Distribution)

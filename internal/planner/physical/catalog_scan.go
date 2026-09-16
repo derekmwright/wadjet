@@ -21,7 +21,7 @@ import (
 
 func (p *Planner) newScanner(ctx context.Context, tableName string, partFilter map[string]string, requiredCols []string, scanPreds []logical.Predicate) exec.Source {
 	// Get table schema
-	tableMeta, err := p.catalog.GetTable(ctx, tableName)
+	tableMeta, err := p.Catalog.GetTable(ctx, tableName)
 	if err != nil {
 		return &exec.SliceSource{}
 	}
@@ -29,7 +29,7 @@ func (p *Planner) newScanner(ctx context.Context, tableName string, partFilter m
 
 	// Create a scanner source that reads from the catalog
 	src := &catalogScanSource{
-		catalog:          p.catalog,
+		catalog:          p.Catalog,
 		tableName:        tableName,
 		partitionFilter:  partFilter,
 		requiredCols:     requiredCols,

@@ -14,7 +14,7 @@ import (
 
 // setOpResolveUnknownLiteralArms assigns quoted literals and bare NULL the
 // other arm's type before unifySetOpSchemas, despite their pipeline STRING vector.
-// Use the plan-time setOpUnknownLiteralArms mask so local and DAG select the same
+// Use the plan-time SetOpUnknownLiteralArms mask so local and DAG select the same
 // items and declarations. Leave positions where both arms are UNKNOWN alone:
 // PostgreSQL resolves those to text, which they already declare.
 func setOpResolveUnknownLiteralArms(left, right []parquet.Column,
@@ -65,7 +65,7 @@ func setOpResolveUnknownLiteralArms(left, right []parquet.Column,
 }
 
 // unifySetOpSchemas keeps first-arm names over per-position common types from
-// the DAG's setOpWiden and setOpDecimalTarget, including wire OIDs (#541).
+// the DAG's SetOpWiden and SetOpDecimalTarget, including wire OIDs (#541).
 // DECIMAL scale is max; rebuild precision from max integer digits (#532).
 // Integers widen into numeric at its scale, never as unscaled carriers (#547).
 // FLOAT32/FLOAT64 beat exact types and only FLOAT64 beats FLOAT32, in either
@@ -117,14 +117,14 @@ func setOpUnifyColumn(l, r parquet.Column) (parquet.Column, bool) {
 		}
 		return parquet.Column{}, false
 	}
-	widened, ok := setOpWiden(lc.typ, rc.typ)
+	widened, ok := SetOpWiden(lc.Typ, rc.Typ)
 	if !ok {
 		return parquet.Column{}, false
 	}
 	col := l // the result takes the FIRST arm's NAME
 	switch widened {
 	case parquet.TypeDecimal:
-		meta, ok := setOpDecimalTarget([]setOpColType{lc, rc})
+		meta, ok := SetOpDecimalTarget([]SetOpColType{lc, rc})
 		if !ok {
 			if l.Type == parquet.TypeDecimal && r.Type == parquet.TypeDecimal {
 				return setOpUnifyDecimalFallback(l, r)
@@ -156,7 +156,7 @@ func setOpUnifyColumn(l, r parquet.Column) (parquet.Column, bool) {
 		col.Type = parquet.TypeInt64
 		col.Precision, col.Scale = 0, 0
 	default:
-		// setOpWiden's a==b early return for two identical non-DECIMAL types.
+		// SetOpWiden's a==b early return for two identical non-DECIMAL types.
 		return parquet.Column{}, false
 	}
 	// A set operation's output column takes a NULL from either arm, and the
@@ -166,7 +166,7 @@ func setOpUnifyColumn(l, r parquet.Column) (parquet.Column, bool) {
 }
 
 // setOpUnifyDecimalFallback is the DECIMAL ∪ DECIMAL rule for the pair
-// setOpDecimalTarget declines: max(scale) so no arm's digits are dropped
+// SetOpDecimalTarget declines: max(scale) so no arm's digits are dropped
 // (#532), max(precision) because there is no declared integer part to rebuild
 // one from. It is deliberately the PRE-existing behaviour of this path —
 // leaving an unresolvable pair alone entirely would reopen #532 for it.
@@ -181,38 +181,38 @@ func setOpUnifyDecimalFallback(l, r parquet.Column) (parquet.Column, bool) {
 	return col, true
 }
 
-// setOpColTypeFromColumn adapts a runtime parquet.Column into the setOpColType
+// setOpColTypeFromColumn adapts a runtime parquet.Column into the SetOpColType
 // the ladder helpers take. It resolves only the numeric types the ladder
 // describes; everything else is ok=false, which unifySetOpSchemas reads as
 // "leave this column alone".
-func setOpColTypeFromColumn(c parquet.Column) (setOpColType, bool) {
+func setOpColTypeFromColumn(c parquet.Column) (SetOpColType, bool) {
 	switch c.Type {
 	case parquet.TypeDecimal:
 		if c.Precision <= 0 {
 			// #458's "unconstrained" sentinel. Reported as unresolved rather
-			// than taken at face value: setOpDecimalTarget would otherwise
+			// than taken at face value: SetOpDecimalTarget would otherwise
 			// widen every arm to scale 0 and truncate all of them.
-			return setOpColType{}, false
+			return SetOpColType{}, false
 		}
-		return setOpColType{
-			typ:      c.Type,
-			known:    true,
-			dec:      logical.DecimalMeta{Precision: c.Precision, Scale: c.Scale},
-			decKnown: true,
+		return SetOpColType{
+			Typ:      c.Type,
+			Known:    true,
+			Dec:      logical.DecimalMeta{Precision: c.Precision, Scale: c.Scale},
+			DecKnown: true,
 		}, true
 	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat32, parquet.TypeFloat64:
-		return setOpColType{typ: c.Type, known: true}, true
+		return SetOpColType{Typ: c.Type, Known: true}, true
 	case parquet.TypePort, parquet.TypeProtocol, parquet.TypeDuration:
 		// The three types whose WIRE declaration is an integer (#834). They are
-		// on setOpWiden's ladder, so the stage DAG resolves `PORT ∪ INT64` to
+		// on SetOpWiden's ladder, so the stage DAG resolves `PORT ∪ INT64` to
 		// bigint and builds the column as one — and this path used to decline
 		// them here, leave the column at the FIRST arm's type, and materialise
 		// the union in a PORT vector: `SELECT c_port … UNION ALL SELECT
 		// 4000000000` came back as -294967296 on this path and 4000000000 on
 		// the DAG, one query answered two ways by the fast-path threshold.
-		return setOpColType{typ: c.Type, known: true}, true
+		return SetOpColType{Typ: c.Type, Known: true}, true
 	default:
-		return setOpColType{}, false
+		return SetOpColType{}, false
 	}
 }
 
@@ -223,7 +223,7 @@ func setOpColTypeFromColumn(c parquet.Column) (setOpColType, bool) {
 // matching exec.coerceDecimalVector; never use saturating comparison parsing.
 // PostgreSQL may answer beyond the finite carrier (ADR-0024 items 7 and 1).
 // srcSchema is the arm's OWN schema, positionally aligned to target; rows still
-// use source names, so coerce before alignSetOpRows.
+// use source names, so coerce before AlignSetOpRows.
 // See docs/internals/set-operation-box-coercion.md for the design.
 func coerceSetOpArmRows(rows []map[string]any, srcSchema, target []parquet.Column) ([]map[string]any, error) {
 	if len(target) == 0 || len(srcSchema) != len(target) {

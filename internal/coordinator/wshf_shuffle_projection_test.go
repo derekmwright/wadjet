@@ -6,16 +6,16 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 )
 
 func TestWSHFShuffleProjection(t *testing.T) {
-	base := func() physical.Stage {
-		return physical.Stage{
+	base := func() dagplan.Stage {
+		return dagplan.Stage{
 			ID:      "exchange-repartition-3",
-			Type:    physical.StageExchangeRepartition,
+			Type:    dagplan.StageExchangeRepartition,
 			Columns: []string{"c_custkey", "o_orderkey", "o_custkey"},
-			Exchange: &physical.ExchangeStage{
+			Exchange: &dagplan.ExchangeStage{
 				Keys: []string{"o_custkey"},
 			},
 		}
@@ -61,7 +61,7 @@ func TestWSHFShuffleProjection(t *testing.T) {
 
 	t.Run("computed cols ineligible", func(t *testing.T) {
 		s := base()
-		s.Exchange.ComputedCols = []physical.ComputedCol{{Name: "__flag", Expr: "x > 1"}}
+		s.Exchange.ComputedCols = []dagplan.ComputedCol{{Name: "__flag", Expr: "x > 1"}}
 		if got := wshfShuffleProjection(s, "a.wshf", nil); got != nil {
 			t.Errorf("got %v, want nil", got)
 		}
@@ -85,7 +85,7 @@ func TestWSHFShuffleProjection(t *testing.T) {
 }
 
 func TestShuffleTaskColumns(t *testing.T) {
-	wshfStage := physical.Stage{
+	wshfStage := dagplan.Stage{
 		ScanFiles:     []string{"queries/q1/scan-1/partition=0000/t1.wshf"},
 		OutputColumns: []string{"o_custkey", "o_orderkey"},
 	}

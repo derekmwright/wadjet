@@ -14,7 +14,7 @@ import (
 // starOnlyDeclaredOutputSchema declares bare SELECT * from its source scan,
 // in schema order with annotated types, matching the executed result.
 // The declaration also controls scalar-subquery comparison; decline rather
-// than guess. Projects belong to findOutputProjectionNode; joins delegate to
+// than guess. Projects belong to FindOutputProjectionNode; joins delegate to
 // starJoinDeclaredOutputSchema and the executor's namer. Aggregate, Window
 // and table-function outputs are not catalog columns. ok=false leaves the
 // ordinary projection walk to answer. #846, #416, #696; ADR-0026.
@@ -81,11 +81,11 @@ func scanColumnSpelling(scan *logical.Node, ref string) (string, bool) {
 // scan's own columns, in schema order"). scan is nil when the plan is not
 // that shape.
 //
-// The descent is findOutputProjectionNode's, minus the Project arm: a Filter,
+// The descent is FindOutputProjectionNode's, minus the Project arm: a Filter,
 // Sort, Limit or Distinct above the scan passes its input through unchanged,
 // which is why `SELECT * FROM t WHERE false`, `... ORDER BY c0` and `...
 // LIMIT 10` all publish the table's own columns. Reaching a Project means
-// findOutputProjectionNode owns the answer; reaching anything else means the
+// FindOutputProjectionNode owns the answer; reaching anything else means the
 // emitted columns are not the scan's.
 //
 // The one node that changes the answer without leaving the star's world is a
@@ -130,7 +130,7 @@ func starOnlySourceScan(n *logical.Node) (*logical.Node, []string) {
 // starJoinDeclaredOutputSchema declares SELECT * over one join, including
 // zero rows, using exec.JoinOutputSchema: probe then build, duplicate bare
 // names qualified by their owning alias. #978, #846, #416.
-// Neither side may contain a join: declaredJoinSchema's nested concatenation
+// Neither side may contain a join: DeclaredJoinSchema's nested concatenation
 // and deduplication do not match the executor. With one join,
 // QualifyAllBuildCols is false; it is a stage property for co-pathing joins.
 // Decline the whole schema if either side cannot be typed.
@@ -150,15 +150,15 @@ func starJoinDeclaredOutputSchema(root *logical.Node,
 	// `s.id`, `product` and `qty` invented and a rename's alias missing
 	// (round-1 B3). That is #984's own defect living inside #978's answer.
 	published := sideBlockProjections(join)
-	probe := declaredJoinSchema(join.Children[0], nil, published, subqueryDecl)
-	build := declaredJoinSchema(join.Children[1], nil, published, subqueryDecl)
+	probe := DeclaredJoinSchema(join.Children[0], nil, published, subqueryDecl)
+	build := DeclaredJoinSchema(join.Children[1], nil, published, subqueryDecl)
 	if len(probe) == 0 || len(build) == 0 {
 		return nil, false
 	}
 	excludeProbe, excludeBuild := joinHiddenPositions(join)
-	out := exec.JoinOutputSchema(mapExecJoinType(strings.ToLower(join.JoinType)),
-		probe, build, joinArmAlias(join.Children[1]),
-		subtreeNamingOf(join.Children[1]).materializedBuildColOrigins(),
+	out := exec.JoinOutputSchema(MapExecJoinType(strings.ToLower(join.JoinType)),
+		probe, build, JoinArmAlias(join.Children[1]),
+		SubtreeNamingOf(join.Children[1]).MaterializedBuildColOrigins(),
 		false, joinProbeOutputFilter(join), excludeProbe, excludeBuild)
 	if len(out) == 0 {
 		return nil, false
@@ -174,7 +174,7 @@ func starJoinDeclaredOutputSchema(root *logical.Node,
 	// declaration beats a wrong one.
 	for _, col := range out {
 		if plansql.ReservedSlotFamily(col.Name) != "" ||
-			plansql.ReservedSlotFamily(blockBareName(col.Name)) != "" {
+			plansql.ReservedSlotFamily(BlockBareName(col.Name)) != "" {
 			return nil, false
 		}
 	}
@@ -186,7 +186,7 @@ func starJoinDeclaredOutputSchema(root *logical.Node,
 //
 // The descent is starOnlySourceScan's — a Filter, Sort, Limit or Distinct
 // above the join passes its input through unchanged — and it stops at a
-// Project for the same reason: reaching one means findOutputProjectionNode
+// Project for the same reason: reaching one means FindOutputProjectionNode
 // owns the answer.
 func starOnlySourceJoin(n *logical.Node) *logical.Node {
 	for n != nil {
@@ -231,7 +231,7 @@ func containsJoin(n *logical.Node) bool {
 }
 
 // sideBlockProjections marks the block Project on each side of this join, so
-// declaredJoinSchema describes the side by the relation it PUBLISHES.
+// DeclaredJoinSchema describes the side by the relation it PUBLISHES.
 //
 // It is not `Planner.publishedBlocks`: that set answers "did the DAG's stage
 // materialize this projection", and the question here is the other one — what

@@ -13,32 +13,6 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
-// isBroadcastCandidate returns true if the right (build) side of a join is
-// small enough to broadcast to all workers. When broadcast, the build side
-// is sent to every worker and the probe side is split round-robin across
-// workers — no shuffle stages needed for either side.
-func (p *StagePlanner) isBroadcastCandidate(joinNode *logical.Node) bool {
-	if len(joinNode.Children) < 2 {
-		return false
-	}
-	totalBytes, ok := p.estimateSubtreeBytes(joinNode.Children[1])
-	if !ok {
-		return false
-	}
-	// Broadcast threshold: defaults to 100 MB (legacy behavior). Distributed
-	// callers override via BroadcastBytesThreshold to adapt the decision to
-	// per-worker pool budget so a moderate build (say 500 MB) on a tight
-	// cluster falls back to hash-shuffle instead of multiplying memory
-	// pressure N× across worker procs.
-	threshold := int64(100 * 1024 * 1024)
-	if p.BroadcastBytesThreshold > 0 {
-		threshold = p.BroadcastBytesThreshold
-	} else if p.BroadcastBytesThreshold < 0 {
-		return false // broadcast disabled
-	}
-	return totalBytes <= threshold
-}
-
 // estimateSubtreeBytes estimates a join input's post-selectivity size by
 // walking through Filter/Project/Limit wrappers to the underlying Scan and
 // scaling the table's manifest bytes by the subtree's estimated selectivity.
@@ -53,7 +27,7 @@ func (p *StagePlanner) isBroadcastCandidate(joinNode *logical.Node) bool {
 // regression, 2026-07-09: +135% from shuffling what should replicate).
 // Gated on the flag: flag-off keeps semi/anti-leaf builds on their
 // SF100-validated shuffle plans.
-func (p *Planner) estimateSubtreeBytes(n *logical.Node) (int64, bool) {
+func (p *Planner) EstimateSubtreeBytes(n *logical.Node) (int64, bool) {
 	// Distinct(Project[keys]) build sides (IN/EXISTS decorrelation and
 	// scalar-agg-semijoin key sources) are sized by distinct KEY count,
 	// not table bytes × row selectivity. The row-selectivity path is a
@@ -75,7 +49,7 @@ func (p *Planner) estimateSubtreeBytes(n *logical.Node) (int64, bool) {
 		return 0, false
 	}
 	// Estimate size from file count
-	manifest, err := p.getManifest(context.Background(), scan.TableName)
+	manifest, err := p.GetManifest(context.Background(), scan.TableName)
 	if err != nil {
 		return 0, false
 	}
@@ -178,7 +152,7 @@ func (p *Planner) estimateJoinSubtreeBytes(n *logical.Node) (int64, bool) {
 	}
 
 	sideWidth := func(child *logical.Node) (float64, bool) {
-		bytes, ok := p.estimateSubtreeBytes(child)
+		bytes, ok := p.EstimateSubtreeBytes(child)
 		if !ok {
 			return 0, false
 		}
@@ -236,7 +210,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		return p.buildTableLessLateralJoin(ctx, node)
 	}
 
-	jt := mapJoinType(node.JoinType)
+	jt := MapJoinType(node.JoinType)
 	// An inner join with no condition at all IS a cross join (#376): the
 	// join reorderer emits this shape for a comma-joined relation with no
 	// edge to the rest of the chain, and reading the absent condition as a
@@ -244,7 +218,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	if jt == "inner" && strings.TrimSpace(node.JoinCond) == "" && node.JoinFilter == "" {
 		jt = "cross"
 	}
-	joinType := mapExecJoinType(jt)
+	joinType := MapExecJoinType(jt)
 	// An outer join may carry an ON residual (#358) — routed there by
 	// logical.routeOuterJoinOnResiduals — and with it, zero key pairs.
 	outerResidual := node.JoinFilter != "" &&
@@ -254,9 +228,9 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	var leftKeys, rightKeys []string
 	if jt != "cross" {
 		var residual []string
-		leftKeys, rightKeys, residual = parseJoinKeys(node.JoinCond)
+		leftKeys, rightKeys, residual = ParseJoinKeys(node.JoinCond)
 		if len(residual) > 0 {
-			return nil, nil, nil, refuseJoinCond(jt, node.JoinCond, residual)
+			return nil, nil, nil, RefuseJoinCond(jt, node.JoinCond, residual)
 		}
 		if len(leftKeys) == 0 && !outerResidual {
 			return nil, nil, nil, fmt.Errorf("could not extract join keys from: %s", node.JoinCond)
@@ -264,8 +238,8 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		// Fix key assignment using plan-level column ownership: ensure left keys
 		// are probe-side and right keys are build-side. This avoids the expensive
 		// post-build FixKeyAssignment hash table rebuild.
-		assignJoinKeySides(leftKeys, rightKeys,
-			subtreeNamingOf(node.Children[0]), subtreeNamingOf(node.Children[1]))
+		AssignJoinKeySides(leftKeys, rightKeys,
+			SubtreeNamingOf(node.Children[0]), SubtreeNamingOf(node.Children[1]))
 	}
 
 	// Big-vs-big inner equi-joins route to sort-merge join when BOTH sides'
@@ -273,7 +247,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// default — this branch is dormant unless the deploy opts in). Small
 	// builds keep the strictly-better hash path below, unchanged.
 	if joinType == exec.InnerJoin && node.JoinFilter == "" && len(leftKeys) > 0 &&
-		p.shouldSortMergeJoin(node, leftKeys, rightKeys) {
+		p.ShouldSortMergeJoin(node, leftKeys, rightKeys) {
 		return p.buildSortMergeJoin(ctx, node, leftKeys, rightKeys)
 	}
 
@@ -283,15 +257,15 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// which the integer / bloom fast paths are gated on (#615, ADR-0023).
 	// Nil for every join whose key types already agree — every TPC-H join —
 	// and the operator then behaves exactly as it did.
-	hj.KeyTypes = resolveJoinKeyTypes(node, leftKeys, rightKeys, p.cteKeyColTypes)
+	hj.KeyTypes = ResolveJoinKeyTypes(node, leftKeys, rightKeys, p.CteKeyColTypes)
 
 	// Set build-side table alias for column disambiguation in self-joins
-	if alias := joinArmAlias(node.Children[1]); alias != "" {
+	if alias := JoinArmAlias(node.Children[1]); alias != "" {
 		hj.BuildTableAlias = alias
 	}
 	// Multi-table build subtrees carry per-column origin aliases so each
 	// duplicate qualifies under its OWNING scan (nil for single-scan builds).
-	hj.BuildColOrigins = subtreeNamingOf(node.Children[1]).materializedBuildColOrigins()
+	hj.BuildColOrigins = SubtreeNamingOf(node.Children[1]).MaterializedBuildColOrigins()
 
 	// Grace Hash Join spill-to-disk: prevents OOM on large build sides (e.g.
 	// SF100 orders table at 150M rows). The shared MemTracker means multi-join
@@ -345,13 +319,13 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		leftKeys, rightKeys = rightKeys, leftKeys
 		hj.LeftKeys = leftKeys
 		hj.RightKeys = rightKeys
-		assignJoinKeySides(leftKeys, rightKeys,
-			subtreeNamingOf(node.Children[0]), subtreeNamingOf(node.Children[1]))
+		AssignJoinKeySides(leftKeys, rightKeys,
+			SubtreeNamingOf(node.Children[0]), SubtreeNamingOf(node.Children[1]))
 		// Update build-side alias + origins after swap
-		if alias := joinArmAlias(node.Children[1]); alias != "" {
+		if alias := JoinArmAlias(node.Children[1]); alias != "" {
 			hj.BuildTableAlias = alias
 		}
-		hj.BuildColOrigins = subtreeNamingOf(node.Children[1]).materializedBuildColOrigins()
+		hj.BuildColOrigins = SubtreeNamingOf(node.Children[1]).MaterializedBuildColOrigins()
 	}
 
 	// Plan-declared schemas for the two sides, read only when a side delivers
@@ -362,8 +336,8 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// Project is a real operator, so a hint read from the scan below it
 	// described an EMPTY side by columns the full side never emits — eight
 	// columns for PostgreSQL's five (round-1 P2).
-	hj.ProbeSchemaHint, hj.BuildSchemaHint = joinSideSchemas(node, hj.LeftKeys, hj.RightKeys,
-		sideBlockProjections(node), p.subqueryOutputColumn)
+	hj.ProbeSchemaHint, hj.BuildSchemaHint = JoinSideSchemas(node, hj.LeftKeys, hj.RightKeys,
+		sideBlockProjections(node), p.SubqueryOutputColumn)
 
 	// For semi/anti joins without a filter, enable key-only build:
 	// only build the key index and bloom filter, skip batch storage and arena refs.
@@ -414,7 +388,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// Pre-compute post-build operations that can run in the build goroutine.
 	var keepCols []string
 	if joinType == exec.SemiJoin || joinType == exec.AntiJoin {
-		keepCols = extractFilterBuildColumns(node.JoinFilter)
+		keepCols = ExtractFilterBuildColumns(node.JoinFilter)
 	}
 	if (joinType == exec.SemiJoin || joinType == exec.AntiJoin) && node.JoinFilter != "" {
 		hj.SemiAntiFilter = BuildSemiAntiFilter(node.JoinFilter)
@@ -531,16 +505,16 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		probe.OutputExcludeProbe, probe.OutputExcludeBuild = joinHiddenPositions(node)
 
 		bridge := &reverseBloomBridge{
-			childSource:   leftSource,
-			childOps:      leftOps,
+			ChildSource:   leftSource,
+			ChildOps:      leftOps,
 			rbBuildSource: &rbBuildSource,
 			buildSource:   buildSource,
 			buildStart:    buildStart,
-			barrier:       buildDone,
-			buildErr:      &buildErr,
+			Barrier:       buildDone,
+			BuildErr:      &buildErr,
 			probeKey:      leftKeys[0],
 			buildKey:      rightKeys[0],
-			workers:       innerPipelineWorkers(leftSource),
+			Workers:       innerPipelineWorkers(leftSource),
 			spill:         p.getSpillManager(),
 		}
 		return bridge, append([]exec.UnaryOperator{probe}, lateralEmptyDefaultOps(node)...), &exec.CollectSink{}, nil
@@ -558,12 +532,12 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		}
 		probe.OutputExcludeProbe, probe.OutputExcludeBuild = joinHiddenPositions(node)
 
-		bridge := &deferredJoinBridge{
-			childSource: leftSource,
-			childOps:    leftOps,
-			barrier:     buildDone,
-			buildErr:    &buildErr,
-			workers:     innerPipelineWorkers(leftSource),
+		bridge := &DeferredJoinBridge{
+			ChildSource: leftSource,
+			ChildOps:    leftOps,
+			Barrier:     buildDone,
+			BuildErr:    &buildErr,
+			Workers:     innerPipelineWorkers(leftSource),
 			spill:       p.getSpillManager(),
 		}
 
@@ -583,11 +557,11 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		return nil, nil, nil, buildErr
 	}
 
-	// Fix key assignment: parseJoinKeys takes columns from the SQL literally
+	// Fix key assignment: ParseJoinKeys takes columns from the SQL literally
 	// (left of "=" → leftKey, right → rightKey), but the SQL may put the
 	// build-side column on the left (e.g., "JOIN t ON t.id = probe.id").
 	// After building, we know the build schema; swap any misassigned pairs.
-	// A repair firing here means plan-time assignJoinKeySides missed a pair.
+	// A repair firing here means plan-time AssignJoinKeySides missed a pair.
 	if hj.FixKeyAssignment() {
 		slog.Warn("join key repair fired at runtime — plan-time side assignment missed a pair",
 			"left_keys", hj.LeftKeys, "right_keys", hj.RightKeys)

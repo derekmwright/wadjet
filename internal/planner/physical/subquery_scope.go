@@ -11,10 +11,10 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// collectOuterColumns recursively collects a column-name→table mapping from
+// CollectOuterColumns recursively collects a column-name→table mapping from
 // scan nodes in a logical plan subtree. Used to resolve unqualified column
 // references in correlated subqueries.
-func collectOuterColumns(node *logical.Node) map[string]string {
+func CollectOuterColumns(node *logical.Node) map[string]string {
 	colMap := make(map[string]string)
 	var walk func(n *logical.Node)
 	walk = func(n *logical.Node) {
@@ -31,7 +31,7 @@ func collectOuterColumns(node *logical.Node) map[string]string {
 		}
 		// A CTE reference's OUTPUT columns answer to the CTE's scope, and
 		// those names are the CTE's own — `did`, not the `g` the scan below
-		// emits. Read off the subtree root for collectTableAliases' reason
+		// emits. Read off the subtree root for CollectTableAliases' reason
 		// (#535).
 		if scope := cteScopeID(n); scope != "" {
 			for _, col := range cteOutputNames(n) {
@@ -116,22 +116,22 @@ func cteOutputNames(n *logical.Node) []string {
 //
 // A relation this cannot name resolves to nil, which leaves the name to the
 // identifier-comparison fallback rather than silently declaring it inner.
-func (p *Planner) subqueryInnerColumns() plansql.TableColumns {
-	return plansql.CTEColumns(p.ctes, p.catalogColumns())
+func (p *Planner) SubqueryInnerColumns() plansql.TableColumns {
+	return plansql.CTEColumns(p.Ctes, p.catalogColumns())
 }
 
 // catalogColumns is the base of subqueryInnerColumns' resolver: a relation's
 // declared schema, from the catalog.
 func (p *Planner) catalogColumns() plansql.TableColumns {
-	if p.catalog == nil {
+	if p.Catalog == nil {
 		return nil
 	}
-	ctx := p.planCtx
+	ctx := p.PlanCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	return func(table string) []string {
-		t, err := p.catalog.GetTable(ctx, table)
+		t, err := p.Catalog.GetTable(ctx, table)
 		if err != nil || t == nil {
 			return nil
 		}

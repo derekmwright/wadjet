@@ -152,7 +152,7 @@ func c1Run(t *testing.T, arms []c1Arm, cases []c1Case) {
 
 // c1TableLess is the disposition every #1033 cell MEASURES on the three DAG
 // arms: the plan carries a Dual, the stage planner has no distributed
-// single-row source to dispatch it with (physical.ErrTableLessSelectDistributed,
+// single-row source to dispatch it with (dagplan.ErrTableLessSelectDistributed,
 // #806), and the coordinator answers in-process. That is why the lowering
 // keeps the Dual in the tree — one engine answers all five arms — and it is
 // recorded rather than wished away.

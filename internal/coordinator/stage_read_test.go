@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/dataplane"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -314,7 +314,7 @@ func TestScalarSubstitution_ServedByPeerTier(t *testing.T) {
 	h := newStageReadHarness(t, true, "")
 	h.resolver.token = h.c.peerFiles.ExistingTokenFor(stageReadRoot)
 
-	consumer := physical.Stage{
+	consumer := dagplan.Stage{
 		ID:                 "join-4",
 		ScalarDependencies: map[string]string{"scalar_1": "final_aggregate-6"},
 		FilterExprs:        []string{"total > :scalar_1"},
@@ -323,7 +323,7 @@ func TestScalarSubstitution_ServedByPeerTier(t *testing.T) {
 		"final_aggregate-6": {Files: [][]string{{stageReadKey}}},
 	}
 	out, err := h.c.substituteScalarDependencies(context.Background(), consumer, producers,
-		map[string]physical.Stage{"final_aggregate-6": {ID: "final_aggregate-6"}})
+		map[string]dagplan.Stage{"final_aggregate-6": {ID: "final_aggregate-6"}})
 	if err != nil {
 		t.Fatalf("substituteScalarDependencies: %v", err)
 	}

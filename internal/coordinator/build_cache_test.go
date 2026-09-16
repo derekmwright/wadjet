@@ -8,7 +8,6 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -37,7 +36,7 @@ func TestCreatePipelineTasksBuildCache(t *testing.T) {
 		"partsupp": {"queries/q1/build-cache/partsupp/def.wshf"},
 	}
 
-	stage := physical.Stage{
+	stage := dagplan.Stage{
 		ID:                 "pipeline-0",
 		Type:               "pipeline",
 		Tasks:              3,
@@ -92,7 +91,7 @@ func TestCreatePipelineTasksNoBuildCache(t *testing.T) {
 		coord.mu.Unlock()
 	}()
 
-	stage := physical.Stage{
+	stage := dagplan.Stage{
 		ID:              "pipeline-0",
 		Type:            "pipeline",
 		Tasks:           2,
@@ -118,7 +117,7 @@ func TestPreScanBuildTablesSkipsSmallTables(t *testing.T) {
 	ctx, coord, _ := setupDistributed(t)
 
 	// All scans are small (well below the 2GB threshold)
-	smallStages := []physical.Stage{
+	smallStages := []dagplan.Stage{
 		{ID: "s1", Type: "scan", ScanAlias: "lineitem", TableName: "lineitem",
 			EstimatedBytes: 100 * 1024 * 1024, ScanFiles: []string{"l1.parquet"}},
 		{ID: "s2", Type: "scan", ScanAlias: "orders", TableName: "orders",
@@ -153,7 +152,7 @@ func TestBuildCacheTaskHasCorrectFields(t *testing.T) {
 	}()
 
 	cache := map[string][]string{"orders": {"queries/qtest-fields/build-cache/orders/task1.wshf"}}
-	stage := physical.Stage{
+	stage := dagplan.Stage{
 		ID:                 "pipeline-0",
 		Type:               "pipeline",
 		Tasks:              2,
@@ -188,7 +187,7 @@ func TestPreScanBuildTablesInjectableThreshold(t *testing.T) {
 	// Set a 1MB threshold so even small tables trigger the pre-scan path.
 	coord.BuildCacheThreshold = 1 * 1024 * 1024 // 1 MB
 
-	stages := []physical.Stage{
+	stages := []dagplan.Stage{
 		{ID: "s1", Type: "scan", ScanAlias: "lineitem", TableName: "lineitem",
 			EstimatedBytes: 50 * 1024 * 1024, ScanFiles: []string{"l1.parquet"}},
 		{ID: "s2", Type: "scan", ScanAlias: "orders", TableName: "orders",
@@ -221,7 +220,7 @@ func TestPreScanBuildTablesDefaultThreshold(t *testing.T) {
 	ctx, coord, _ := setupDistributed(t)
 
 	// Don't set BuildCacheThreshold — leave at zero (use default).
-	stages := []physical.Stage{
+	stages := []dagplan.Stage{
 		{ID: "s1", Type: "scan", ScanAlias: "lineitem", TableName: "lineitem",
 			EstimatedBytes: 50 * 1024 * 1024, ScanFiles: []string{"l1.parquet"}},
 		{ID: "s2", Type: "scan", ScanAlias: "orders", TableName: "orders",
@@ -260,7 +259,7 @@ func TestPrunedScanColumnsFiltersAlienColumns(t *testing.T) {
 	// Stage.Columns over-approximates: contains real columns from partsupp
 	// PLUS columns belonging to other tables in the join chain. The pruner
 	// must drop the alien ones AND dedupe.
-	stage := physical.Stage{
+	stage := dagplan.Stage{
 		ScanAlias: "partsupp:1",
 		TableName: "ps_test",
 		Columns: []string{
@@ -292,12 +291,12 @@ func TestPrunedScanColumnsEmptyAndUnknown(t *testing.T) {
 	ctx, coord, _ := setupDistributed(t)
 
 	// Empty Columns → nil.
-	if got := coord.prunedScanColumns(ctx, physical.Stage{TableName: "anything"}); got != nil {
+	if got := coord.prunedScanColumns(ctx, dagplan.Stage{TableName: "anything"}); got != nil {
 		t.Errorf("empty columns: got %v, want nil", got)
 	}
 
 	// Unknown table → nil (catalog lookup error).
-	stage := physical.Stage{TableName: "no_such_table", Columns: []string{"a", "b"}}
+	stage := dagplan.Stage{TableName: "no_such_table", Columns: []string{"a", "b"}}
 	if got := coord.prunedScanColumns(ctx, stage); got != nil {
 		t.Errorf("unknown table: got %v, want nil", got)
 	}
@@ -311,7 +310,7 @@ func TestPreScanBuildTablesThresholdBoundary(t *testing.T) {
 	const boundary = int64(10 * 1024 * 1024) // 10 MB
 	coord.BuildCacheThreshold = boundary
 
-	stages := []physical.Stage{
+	stages := []dagplan.Stage{
 		{ID: "probe", Type: "scan", ScanAlias: "lineitem", TableName: "lineitem",
 			EstimatedBytes: 100 * 1024 * 1024},
 		{ID: "at", Type: "scan", ScanAlias: "at_boundary", TableName: "at_boundary",

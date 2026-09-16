@@ -332,7 +332,7 @@ func armRelationColumns(arm *Node) (string, []StarColumn) {
 // fallback — a wrong VALUE, and the decline kept the right one. That is
 // #1102's mechanism and it is closed: a set-operation arm is a MATERIALIZED
 // arm, qualified by the name the enclosing query writes
-// (`physical.setOpArmPublishesItsOwnList`), so the reference this expansion
+// (`dagplan.setOpArmPublishesItsOwnList`), so the reference this expansion
 // emits is an address on every arm.
 //
 // Everything else answers nil: an Aggregate, a Window or a table function

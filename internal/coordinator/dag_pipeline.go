@@ -8,7 +8,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 )
 
 // dispatchPipelineStage executes a compute stage (scan/join/aggregate/etc.)
@@ -29,7 +29,7 @@ import (
 func (c *Coordinator) dispatchPipelineStage(
 	ctx context.Context,
 	queryID, sql string,
-	stage physical.Stage,
+	stage dagplan.Stage,
 	inputs map[string]StageOutput,
 	workerCount int,
 	isBroadcastJoinProbe bool,
@@ -45,7 +45,7 @@ func (c *Coordinator) dispatchPipelineStage(
 	// only provide upstream BuildStats. ScanFiles is the structural marker:
 	// any stage with ScanFiles populated IS a leaf scan regardless of how
 	// many soft deps it has.
-	if stage.Type == physical.StageScan && len(stage.ScanFiles) > 0 {
+	if stage.Type == dagplan.StageScan && len(stage.ScanFiles) > 0 {
 		// Fused scan-aggregate: the planner marked this scan to produce
 		// partial aggregates (saves the scan→aggregate round-trip in the
 		// legacy single-pipeline executor). Under native-DAG we must
@@ -163,7 +163,7 @@ func (c *Coordinator) dispatchPipelineStage(
 // goroutine chose deferral (scalarsDeferrableToFinalMerge): dispatch calls
 // it at the last point before the substituted exprs are consumed, letting
 // earlier phases overlap the scalar producer chain.
-type scalarResolver func(context.Context) (physical.Stage, error)
+type scalarResolver func(context.Context) (dagplan.Stage, error)
 
 // scalarsDeferrableToFinalMerge reports whether a stage's scalar
 // placeholders are consumed only by its final-merge phase — i.e. they
@@ -175,7 +175,7 @@ type scalarResolver func(context.Context) (physical.Stage, error)
 // partial merge would drop groups before they finished merging). Only
 // final_aggregate qualifies because it is the one stage type dispatched
 // in two phases; every other type consumes its exprs in its only phase.
-func scalarsDeferrableToFinalMerge(s physical.Stage) bool {
+func scalarsDeferrableToFinalMerge(s dagplan.Stage) bool {
 	if s.Type != "final_aggregate" || len(s.ScalarDependencies) == 0 {
 		return false
 	}

@@ -5,8 +5,8 @@ package coordinator
 import (
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -29,7 +29,7 @@ func TestApplyOutputRenames(t *testing.T) {
 	// entry, even pass-throughs. extractOutputRenames emits a self-rename
 	// (From==To) for aggregate columns whose OutputCol already equals the
 	// alias.
-	renames := []physical.OutputRename{
+	renames := []dagplan.OutputRename{
 		{From: "n1.n_name", To: "supp_nation"},
 		{From: "substr(l_shipdate, 1, 4)", To: "l_year"},
 		{From: "revenue", To: "revenue"},
@@ -58,7 +58,7 @@ func TestApplyOutputRenames_CaseInsensitive(t *testing.T) {
 		batches: []*batch.RecordBatch{batch.NewRecordBatch(schema, 1)},
 		columns: []string{"substr(l_shipdate, 1, 4)"},
 	}
-	renames := []physical.OutputRename{
+	renames := []dagplan.OutputRename{
 		{From: "SUBSTR(L_SHIPDATE, 1, 4)", To: "l_year"},
 	}
 	applyOutputRenames(gr, renames)
@@ -89,7 +89,7 @@ func TestApplyOutputRenames_SelfJoinQualifierFallback(t *testing.T) {
 		batches: []*batch.RecordBatch{b},
 		columns: []string{"n_name", "n2.n_name"},
 	}
-	renames := []physical.OutputRename{
+	renames := []dagplan.OutputRename{
 		{From: "n1.n_name", To: "supp_nation"},
 		{From: "n2.n_name", To: "cust_nation"},
 	}
@@ -145,7 +145,7 @@ func TestResolveRenameSource(t *testing.T) {
 // TestApplyOutputRenames_NoOp guards the empty-renames + nil-result
 // fast paths.
 func TestApplyOutputRenames_NoOp(t *testing.T) {
-	applyOutputRenames(nil, []physical.OutputRename{{From: "x", To: "y"}}) // must not panic
+	applyOutputRenames(nil, []dagplan.OutputRename{{From: "x", To: "y"}}) // must not panic
 	gr := &gatherResult{columns: []string{"x"}}
 	applyOutputRenames(gr, nil)
 	if gr.columns[0] != "x" {

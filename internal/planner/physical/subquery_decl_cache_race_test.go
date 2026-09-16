@@ -30,9 +30,9 @@ import (
 // RUN IT WITH -race. Without the detector the shape passes either way.
 func TestTheScalarSubqueryDeclarationMemoIsOwnedByOneBuild(t *testing.T) {
 	ctx := context.Background()
-	cat := scanCacheFixture(t, 20)
+	cat := ScanCacheFixture(t, 20)
 	p := NewPlanner(cat)
-	p.planCtx = ctx
+	p.PlanCtx = ctx
 	// A parent that holds a scalar subquery, so the annotation pass runs and
 	// the memo exists before any child asks for it.
 	plan := planWithPlanner(t, p, "SELECT (SELECT MAX(id) FROM items) AS v FROM items")
@@ -64,9 +64,9 @@ func TestTheScalarSubqueryDeclarationMemoIsOwnedByOneBuild(t *testing.T) {
 // parent's.
 func TestANestedScalarSubqueryPlansConcurrentlyThroughChildPlanners(t *testing.T) {
 	ctx := context.Background()
-	cat := scanCacheFixture(t, 20)
+	cat := ScanCacheFixture(t, 20)
 	p := NewPlanner(cat)
-	p.planCtx = ctx
+	p.PlanCtx = ctx
 	plan := planWithPlanner(t, p, "SELECT (SELECT MAX(id) FROM items) AS v FROM items")
 	defer plan.Pipeline.Close()
 

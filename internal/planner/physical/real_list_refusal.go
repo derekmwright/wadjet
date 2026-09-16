@@ -16,15 +16,15 @@ import (
 // Refuse a real IN list containing an unrepresentable finite literal with
 // 22003 at plan time (#631), even for empty scans, NULL-only rows or unreachable
 // predicates: PostgreSQL casts the array before reading rows.
-// Use AnnotateScanColumns/inputColDecls to decide whether the operand is real.
+// Use AnnotateScanColumns/InputColDecls to decide whether the operand is real.
 // Run from Plan and PlanDistributed before dispatch so local, fast-path and DAG
 // agree. Keep row-loop backstops for untyped projection aliases and worker
 // fragments compiled from older coordinator plans.
 // See docs/internals/real-in-list-plan-time-refusal.md for the design.
 
-// refuseUnrepresentableRealInList reports the first `real IN (...)` list in the
+// RefuseUnrepresentableRealInList reports the first `real IN (...)` list in the
 // plan holding a finite literal past real's range.
-func refuseUnrepresentableRealInList(root *logical.Node) error {
+func RefuseUnrepresentableRealInList(root *logical.Node) error {
 	return walkRealInLists(root)
 }
 
@@ -33,7 +33,7 @@ func walkRealInLists(n *logical.Node) error {
 		return nil
 	}
 	if len(n.Predicates) > 0 {
-		d := inputColDecls(n)
+		d := InputColDecls(n)
 		for i := range n.Predicates {
 			if err := refuseRealInNode(n.Predicates[i].ASTExpr, d); err != nil {
 				return err
@@ -52,7 +52,7 @@ func walkRealInLists(n *logical.Node) error {
 // connectives are descended: an IN list nested inside a scalar expression
 // (a CASE arm, a function argument) is not lowered to the set kernel and is
 // not what PostgreSQL's array cast applies to either.
-func refuseRealInNode(node plansql.Node, decls colDecls) error {
+func refuseRealInNode(node plansql.Node, decls ColDecls) error {
 	switch n := node.(type) {
 	case nil:
 		return nil
@@ -81,7 +81,7 @@ func refuseRealInNode(node plansql.Node, decls colDecls) error {
 // than one member, all of them constants — the same conditions
 // expr.bindRealLitList and kernel.ResolveInFilterKernelArity narrow under, so
 // a query this refuses is exactly a query that would have narrowed.
-func refuseRealInList(n *plansql.InExpr, decls colDecls) error {
+func refuseRealInList(n *plansql.InExpr, decls ColDecls) error {
 	if len(n.Values) < 2 {
 		// Arity 1 WIDENS to double, where a finite over-range literal is an
 		// ordinary double that simply matches nothing — PostgreSQL raises
@@ -111,11 +111,11 @@ func refuseRealInList(n *plansql.InExpr, decls colDecls) error {
 // realTypedNode asks whether the operand itself is REAL for the IN-array cast,
 // not whether it contains a real column. Unary ± preserves REAL; adding an
 // integer literal widens to DOUBLE PRECISION, while CAST AS REAL names REAL.
-// Do not use nodeDeclaredType: it types projection vectors and deliberately
+// Do not use NodeDeclaredType: it types projection vectors and deliberately
 // widens unary FLOAT32 to FLOAT64. Keep this answer aligned with the runtime
 // twin expr.realTypedOperand.
 // See docs/internals/real-operand-array-cast-typing.md for the design.
-func realTypedNode(node plansql.Node, decls colDecls) bool {
+func realTypedNode(node plansql.Node, decls ColDecls) bool {
 	switch n := node.(type) {
 	case *plansql.ParenNode:
 		return realTypedNode(n.Inner, decls)
@@ -174,7 +174,7 @@ func realTypedNode(node plansql.Node, decls colDecls) bool {
 //
 // A non-literal arm this walk cannot type still takes the whole construct
 // off real, which is the conservative side for the shapes nobody can point at.
-func realTypedChoice(arms []plansql.Node, decls colDecls) bool {
+func realTypedChoice(arms []plansql.Node, decls ColDecls) bool {
 	if len(arms) == 0 {
 		return false
 	}
@@ -240,7 +240,7 @@ func caseArmNodes(n *plansql.CaseNode) []plansql.Node {
 // output column, so the operand a HAVING sees is a bare ColRef of that column
 // and the ColRef arm answers it. AVG is double precision in PostgreSQL and its
 // output column is not FLOAT32 here either, so it stays widened without a rule.
-func realTypedFuncNode(n *plansql.FuncCallNode, decls colDecls) bool {
+func realTypedFuncNode(n *plansql.FuncCallNode, decls ColDecls) bool {
 	if strings.EqualFold(strings.TrimSpace(n.Name), "abs") {
 		return len(n.Args) == 1 && realTypedNode(n.Args[0], decls)
 	}

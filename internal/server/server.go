@@ -23,6 +23,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/config"
 	"github.com/derekmwright/wadjet/internal/coordinator"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/metrics"
@@ -1228,9 +1229,9 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, parsed *p
 		// was before the split. A plan the distributed planner refuses falls
 		// back to the pipeline's own line rather than failing EXPLAIN.
 		physicalPlanText := physPlan.PrettyPrint()
-		stagePlanner := physical.NewStagePlanner(planner)
+		stagePlanner := dagplan.NewStagePlanner(planner)
 		if stages, stageErr := stagePlanner.PlanDistributed(explainCtx, logicalPlan); stageErr == nil && len(stages) > 0 {
-			physicalPlanText = physical.PrettyPrintStages(stages)
+			physicalPlanText = dagplan.PrettyPrintStages(stages)
 		}
 		planStr += "\n\n-- Physical Plan --\n" + physicalPlanText
 	}

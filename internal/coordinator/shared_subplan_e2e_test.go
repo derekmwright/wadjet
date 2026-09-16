@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -216,8 +216,8 @@ AND l_quantity < (
   SELECT 0.2 * AVG(l_quantity) FROM lineitem WHERE l_partkey = p_partkey
 )`, pick.brand, pick.container)
 
-	prev := physical.SharedSubplanDedup.Load()
-	t.Cleanup(func() { physical.SharedSubplanDedup.Store(prev) })
+	prev := dagplan.SharedSubplanDedup.Load()
+	t.Cleanup(func() { dagplan.SharedSubplanDedup.Store(prev) })
 	for _, arm := range []struct {
 		name string
 		on   bool
@@ -226,7 +226,7 @@ AND l_quantity < (
 		{"kill-switch", false},
 	} {
 		t.Run(arm.name+"/q11", func(t *testing.T) {
-			physical.SharedSubplanDedup.Store(arm.on)
+			dagplan.SharedSubplanDedup.Store(arm.on)
 			res, err := coord.ExecuteSQL(ctx, q11SQL)
 			if err != nil {
 				t.Fatalf("ExecuteSQL: %v", err)
@@ -256,7 +256,7 @@ AND l_quantity < (
 			}
 		})
 		t.Run(arm.name+"/q17", func(t *testing.T) {
-			physical.SharedSubplanDedup.Store(arm.on)
+			dagplan.SharedSubplanDedup.Store(arm.on)
 			res, err := coord.ExecuteSQL(ctx, q17SQL)
 			if err != nil {
 				t.Fatalf("ExecuteSQL: %v", err)

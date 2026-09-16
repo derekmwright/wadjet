@@ -22,7 +22,7 @@ func (p *Planner) EnsureMemoryTracker() {
 }
 
 func (p *Planner) SubqueryEnv(ctx context.Context) (expr.SubqueryRunner, plansql.TableColumns, []expr.CompileOption) {
-	p.planCtx = ctx
-	return p.subqueryRunner, p.subqueryInnerColumns(),
+	p.PlanCtx = ctx
+	return p.subqueryRunner, p.SubqueryInnerColumns(),
 		[]expr.CompileOption{p.subqueryDeclOption(), p.subqueryBudgetOption()}
 }

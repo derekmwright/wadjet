@@ -137,7 +137,7 @@ func ValidateColumnsUnderPolicy(ctx context.Context, cat *catalog.Catalog, info 
 // Return an error for denied access or an uncovered policed scan; never answer
 // from raw columns when obligations cannot be enforced.
 // See docs/internals/subquery-context-policy-enforcement.md for the design.
-func (p *Planner) applyContextColumnPolicies(ctx context.Context, plan *logical.Node) (*logical.Node, error) {
+func (p *Planner) ApplyContextColumnPolicies(ctx context.Context, plan *logical.Node) (*logical.Node, error) {
 	pol := logical.ColumnPoliciesFromContext(ctx)
 	lookup := logical.PolicyLookupFromContext(ctx)
 	if plan == nil || (len(pol) == 0 && lookup == nil) {
@@ -198,7 +198,7 @@ func (p *Planner) applyContextColumnPolicies(ctx context.Context, plan *logical.
 // resolved set never saw has no entry in that set, and the scan the optimizer
 // mints for a nested `IN (SELECT …)` INSIDE that subquery is exactly the scan
 // this pass exists for (#945).
-func (p *Planner) applyContextColumnPoliciesToNewScans(ctx context.Context, plan *logical.Node) (*logical.Node, error) {
+func (p *Planner) ApplyContextColumnPoliciesToNewScans(ctx context.Context, plan *logical.Node) (*logical.Node, error) {
 	pol := logical.ColumnPoliciesFromContext(ctx)
 	lookup := logical.PolicyLookupFromContext(ctx)
 	if len(pol) == 0 && lookup == nil {
@@ -217,10 +217,10 @@ func (p *Planner) applyContextColumnPoliciesToNewScans(ctx context.Context, plan
 }
 
 func (p *Planner) policyTableColumns(ctx context.Context, table string) []string {
-	if p.catalog == nil {
+	if p.Catalog == nil {
 		return nil
 	}
-	meta, err := p.catalog.GetTable(ctx, table)
+	meta, err := p.Catalog.GetTable(ctx, table)
 	if err != nil || meta == nil {
 		return nil
 	}
@@ -242,7 +242,7 @@ func (p *Planner) policyTableColumns(ctx context.Context, table string) []string
 // outer plan, and the shape that does it — a derived table, a set operation or
 // a correlation inside the subquery — is one no per-shape teaching can
 // enumerate (#859 round 4).
-func (p *Planner) checkPolicyPlanOrderFromContext(ctx context.Context, plan *logical.Node) error {
+func (p *Planner) CheckPolicyPlanOrderFromContext(ctx context.Context, plan *logical.Node) error {
 	pol := logical.ColumnPoliciesFromContext(ctx)
 	lookup := logical.PolicyLookupFromContext(ctx)
 	if len(pol) == 0 && lookup == nil {

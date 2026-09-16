@@ -11,10 +11,10 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -25,8 +25,8 @@ import (
 func (c *Coordinator) dispatchGatherStage(
 	ctx context.Context,
 	queryID, sql string,
-	stage physical.Stage,
-	depStage physical.Stage,
+	stage dagplan.Stage,
+	depStage dagplan.Stage,
 	inputs map[string]StageOutput,
 	workerCount int,
 ) (*gatherResult, error) {
@@ -50,7 +50,7 @@ func (c *Coordinator) dispatchGatherStage(
 	// single-task Singletons whose output is already globally ordered.
 	var ordering []distributed.SortKeySpec
 	switch depStage.Type {
-	case physical.StageHashJoin, physical.StageBroadcastJoin, physical.StageSortMergeJoin,
+	case dagplan.StageHashJoin, dagplan.StageBroadcastJoin, dagplan.StageSortMergeJoin,
 		"aggregate", "final_aggregate":
 		for _, o := range depStage.SortKeys {
 			ordering = append(ordering, distributed.SortKeySpec{Column: o.Column, Desc: o.Desc,

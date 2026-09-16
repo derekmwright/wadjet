@@ -48,7 +48,7 @@ type DynamicFilterEmit struct {
 	// GuardConsumes (guarded re-emit): FilterIDs of the emitting stage's
 	// own attach-mode consumes whose blooms must retro-filter this emit's
 	// buffered head rows at finalize. See the planner-side field of the
-	// same name (physical.DynamicFilterEmit).
+	// same name (dagplan.DynamicFilterEmit).
 	GuardConsumes []string `json:"guard_consumes,omitempty"`
 }
 

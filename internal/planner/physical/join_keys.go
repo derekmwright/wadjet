@@ -11,14 +11,14 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// parseJoinKeys structurally extracts bare-column equality pairs; return all
+// ParseJoinKeys structurally extracts bare-column equality pairs; return all
 // other conjuncts (expressions, literals, non-equi operators, disjunctions) as
 // residual for the caller to refuse, never as invented column names (#351).
 // Preserve qualifiers so self-join chains resolve exactly; the executor can
 // strip on miss for unqualified scan schemas, but ambiguous suffixes cannot
 // choose a relation. Exception: constant-to-constant conjuncts pass unchanged
 // as keys for the optimizer's 1 = 1 sentinel, preserving its cross product.
-func parseJoinKeys(cond string) (leftKeys, rightKeys, residual []string) {
+func ParseJoinKeys(cond string) (leftKeys, rightKeys, residual []string) {
 	cond = strings.TrimSpace(cond)
 	if cond == "" {
 		return nil, nil, nil
@@ -109,37 +109,37 @@ func joinKeyName(n plansql.Node) (string, bool) {
 	return "", false
 }
 
-// refuseJoinCond is the error a join whose ON clause the key representation
+// RefuseJoinCond is the error a join whose ON clause the key representation
 // cannot express. Both planning entry points raise it rather than let an
 // unrepresentable conjunct reach the executor as a column name.
-func refuseJoinCond(joinType, cond string, residual []string) error {
+func RefuseJoinCond(joinType, cond string, residual []string) error {
 	return fmt.Errorf("join ON %q: %s cannot be represented as an equi-join key "+
 		"(the %s join executor matches on column names, and only an equality between two "+
 		"bare columns is one); it must be lifted into a filter above the join, which is legal "+
 		"for an inner join only", cond, strings.Join(residual, ", "), joinType)
 }
 
-// joinArmAlias is the MATERIALIZED arm's enclosing-query identity, the only
+// JoinArmAlias is the MATERIALIZED arm's enclosing-query identity, the only
 // alias allowed to qualify that arm's duplicate columns. Base/derived tables
 // use findScanAlias (setSubtreeAlias stamps scans); CTE references name their
 // subtree root via CTEName/CTERefAlias, preserving inner relation identities.
-// Single-process Project outputs use joinArmAlias; ordinary DAG Projects do
-// not run, so raw inner streams use stageBuildTableAlias. Do not qualify a
+// Single-process Project outputs use JoinArmAlias; ordinary DAG Projects do
+// not run, so raw inner streams use StageBuildTableAlias. Do not qualify a
 // raw inner column as the arm's selected output (ADR-0025, #773, #706).
 // See docs/internals/join-arm-aliases.md for the design.
-func joinArmAlias(node *logical.Node) string {
+func JoinArmAlias(node *logical.Node) string {
 	// The name is on the arm's SUBTREE ROOT — CTERefAlias for `FROM c AS x`,
 	// CTEName for `FROM c`, DerivedAlias for `FROM (SELECT …) q` — and a pass
 	// that wraps the arm (a pushed-down Filter, a Sort) leaves it one or more
-	// single-child nodes down, so `namedArmScope` descends to find it.
-	if name := namedArmScope(node); name != "" {
+	// single-child nodes down, so `NamedArmScope` descends to find it.
+	if name := NamedArmScope(node); name != "" {
 		return name
 	}
 	// A base-table arm answers to its own alias, which the scan carries.
 	return findScanAlias(node)
 }
 
-// stageBuildTableAlias is joinArmAlias for the STAGE DAG, whose build stream
+// StageBuildTableAlias is JoinArmAlias for the STAGE DAG, whose build stream
 // is the arm's raw inner columns rather than its Project's output.
 //
 // A CTE reference still answers by name — `flattenCTEAliases` repoints the
@@ -148,7 +148,7 @@ func joinArmAlias(node *logical.Node) string {
 // answers by the scan below it, because that is the name the inner join
 // already qualified its duplicates with and therefore the name the stream
 // really carries.
-func stageBuildTableAlias(node *logical.Node) string {
+func StageBuildTableAlias(node *logical.Node) string {
 	if node == nil {
 		return ""
 	}
@@ -192,7 +192,7 @@ func SemiAntiBuildStoreCols(rightKeys []string, joinFilter string) []string {
 	if joinFilter == "" {
 		return nil
 	}
-	filterCols := extractFilterBuildColumns(joinFilter)
+	filterCols := ExtractFilterBuildColumns(joinFilter)
 	cols := make([]string, 0, len(rightKeys)+len(filterCols))
 	seen := make(map[string]bool, len(rightKeys)+len(filterCols))
 	for _, c := range rightKeys {
@@ -210,9 +210,9 @@ func SemiAntiBuildStoreCols(rightKeys []string, joinFilter string) []string {
 	return cols
 }
 
-// extractFilterBuildColumns extracts the build-side column names from a
+// ExtractFilterBuildColumns extracts the build-side column names from a
 // semi/anti join filter string. Convention: right of operator = build column.
-func extractFilterBuildColumns(filter string) []string {
+func ExtractFilterBuildColumns(filter string) []string {
 	if filter == "" {
 		return nil
 	}

@@ -30,7 +30,7 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]b
 		var err error
 		if len(outerTables) > 0 {
 			if len(outerCols) > 0 {
-				compiled, err = expr.CompileWithScopeResolver(pred.ASTExpr, p.subqueryRunner, outerTables, outerCols, p.subqueryInnerColumns(), p.subqueryDeclOption(), p.subqueryBudgetOption())
+				compiled, err = expr.CompileWithScopeResolver(pred.ASTExpr, p.subqueryRunner, outerTables, outerCols, p.SubqueryInnerColumns(), p.subqueryDeclOption(), p.subqueryBudgetOption())
 			} else {
 				compiled, err = expr.CompileWithScope(pred.ASTExpr, p.subqueryRunner, outerTables, p.subqueryDeclOption(), p.subqueryBudgetOption())
 			}
@@ -173,7 +173,7 @@ func colColFilterWithRowFallback(left, right string, op exec.CompareOp, cmp expr
 }
 
 // fieldPathColRef returns node as a *plansql.ColRef when it is one, seeing
-// through parentheses — the shape colDecls.field resolves against. A nil
+// through parentheses — the shape ColDecls.field resolves against. A nil
 // answer simply resolves to no field.
 func fieldPathColRef(node plansql.Node) *plansql.ColRef {
 	for {
@@ -618,10 +618,10 @@ func flipOp(op exec.CompareOp) exec.CompareOp {
 	}
 }
 
-// collectTableAliases recursively collects all table names and aliases from
+// CollectTableAliases recursively collects all table names and aliases from
 // scan nodes in a logical plan subtree. Used to provide outer scope context
 // for correlated subquery detection.
-func collectTableAliases(node *logical.Node) map[string]bool {
+func CollectTableAliases(node *logical.Node) map[string]bool {
 	aliases := make(map[string]bool)
 	var walk func(n *logical.Node)
 	walk = func(n *logical.Node) {

@@ -67,7 +67,7 @@ func (p *Planner) tryBuildMetadataCount(ctx context.Context, node *logical.Node)
 		return nil, false
 	}
 
-	manifest, err := p.getManifest(ctx, scan.TableName)
+	manifest, err := p.GetManifest(ctx, scan.TableName)
 	if err != nil {
 		return nil, false
 	}

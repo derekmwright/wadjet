@@ -54,10 +54,10 @@ func resolveTableSpelling(src tableColumnSource, name string) string {
 // query. A false positive breaks a working query; a false negative merely lets a
 // typo through to the existing runtime check.
 func (p *Planner) ValidateColumns(ctx context.Context, info *plansql.SelectInfo) error {
-	if p == nil || p.catalog == nil || info == nil {
+	if p == nil || p.Catalog == nil || info == nil {
 		return nil
 	}
-	return validateColumns(ctx, p.catalog, info)
+	return validateColumns(ctx, p.Catalog, info)
 }
 
 func validateColumns(ctx context.Context, src tableColumnSource, info *plansql.SelectInfo) error {
@@ -603,7 +603,7 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		declarations = nil
 		if names, known := b.blockColumns(ctx, info); known && len(info.Columns) == 1 {
 			for _, name := range names {
-				d, c := nodeDeclaredType(&plansql.ColRef{Column: name}, fieldInputs)
+				d, c := NodeDeclaredType(&plansql.ColRef{Column: name}, fieldInputs)
 				if c != expr.Decided {
 					d = expr.DeclType{Untyped: true}
 				}

@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -145,8 +145,8 @@ func TestShardedSortLimitFinals(t *testing.T) {
 FROM lineitem GROUP BY l_suppkey
 ORDER BY total DESC, l_suppkey LIMIT %d`, limit)
 
-	prev := physical.ShardedSortFinals.Load()
-	t.Cleanup(func() { physical.ShardedSortFinals.Store(prev) })
+	prev := dagplan.ShardedSortFinals.Load()
+	t.Cleanup(func() { dagplan.ShardedSortFinals.Store(prev) })
 	for _, arm := range []struct {
 		name    string
 		sharded bool
@@ -155,7 +155,7 @@ ORDER BY total DESC, l_suppkey LIMIT %d`, limit)
 		{"singleton-collapse", false},
 	} {
 		t.Run(arm.name, func(t *testing.T) {
-			physical.ShardedSortFinals.Store(arm.sharded)
+			dagplan.ShardedSortFinals.Store(arm.sharded)
 			res, err := coord.ExecuteSQL(ctx, sql)
 			if err != nil {
 				t.Fatalf("ExecuteSQL: %v", err)

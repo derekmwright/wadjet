@@ -7,8 +7,8 @@ package coordinator
 import (
 	"fmt"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // buildJoinFragment translates a hash_join / broadcast_join stage's task into
@@ -30,7 +30,7 @@ import (
 // Singleton sort into this join (post-join sort runs in-process via the
 // multi-breaker runner).
 func buildJoinFragment(
-	stage physical.Stage,
+	stage dagplan.Stage,
 	t *distributed.Task,
 	taskInputs map[string][]string,
 	wireFused []distributed.FusedJoinSpec,
@@ -98,7 +98,7 @@ func buildJoinFragment(
 		}
 	}
 	primaryType := distributed.OpHashJoinProbe
-	if stage.Type == physical.StageBroadcastJoin {
+	if stage.Type == dagplan.StageBroadcastJoin {
 		primaryType = distributed.OpBroadcastProbe
 	}
 	ops = append(ops, distributed.OpSpec{
@@ -169,7 +169,7 @@ func buildJoinFragment(
 // broadcast chains never attach to sort_merge_join stages (every fusion
 // pass gates on hash_join/broadcast_join), so wireFused must be empty.
 func buildSortMergeJoinFragment(
-	stage physical.Stage,
+	stage dagplan.Stage,
 	t *distributed.Task,
 	taskInputs map[string][]string,
 	wireFused []distributed.FusedJoinSpec,

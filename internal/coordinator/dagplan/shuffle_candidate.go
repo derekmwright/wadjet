@@ -2,8 +2,6 @@
 
 package dagplan
 
-import "github.com/derekmwright/wadjet/internal/planner/physical"
-
 // ShuffleCandidate describes a join in the plan whose build side is large
 // enough to warrant the shuffle execution path instead of broadcast.
 type ShuffleCandidate struct {
@@ -23,9 +21,9 @@ type ShuffleCandidate struct {
 // and take that entry's build/probe keys. Return one best candidate only;
 // chained-shuffle multi-candidate selection is not implemented.
 // See docs/internals/shuffle-candidate-selection.md for the design.
-func PickShuffleCandidate(stages []physical.Stage, thresholdBytes int64) (ShuffleCandidate, bool) {
+func PickShuffleCandidate(stages []Stage, thresholdBytes int64) (ShuffleCandidate, bool) {
 	// stage-id → stage lookup.
-	byID := map[string]physical.Stage{}
+	byID := map[string]Stage{}
 	for _, s := range stages {
 		byID[s.ID] = s
 	}
@@ -41,7 +39,7 @@ func PickShuffleCandidate(stages []physical.Stage, thresholdBytes int64) (Shuffl
 	}
 
 	// Step 2: find the largest non-probe scan above the threshold.
-	var candidateScan physical.Stage
+	var candidateScan Stage
 	var candidateScanID string
 	var candidateFound bool
 	for _, s := range stages {
@@ -219,8 +217,8 @@ func PickShuffleCandidate(stages []physical.Stage, thresholdBytes int64) (Shuffl
 // share typed WSHF rather than repeatedly decoding source parquet, and overlap
 // the one source scan with other work. A SINGLE large build still qualifies:
 // caching amortizes decode, not merely multi-build memory footprint.
-func LargeBuildScans(stages []physical.Stage, probeAlias string, thresholdBytes int64) []physical.Stage {
-	var large []physical.Stage
+func LargeBuildScans(stages []Stage, probeAlias string, thresholdBytes int64) []Stage {
+	var large []Stage
 	for _, s := range stages {
 		if s.Type != "scan" {
 			continue
@@ -238,10 +236,10 @@ func LargeBuildScans(stages []physical.Stage, probeAlias string, thresholdBytes 
 // CountJoinStages returns the total number of joins in the stage list,
 // including hash_join and broadcast_join stages plus fused joins that were
 // absorbed into parent stages by fuseJoinStages().
-func CountJoinStages(stages []physical.Stage) int {
+func CountJoinStages(stages []Stage) int {
 	n := 0
 	for _, s := range stages {
-		if s.Type == "hash_join" || s.Type == "broadcast_join" || s.Type == physical.StageSortMergeJoin {
+		if s.Type == "hash_join" || s.Type == "broadcast_join" || s.Type == StageSortMergeJoin {
 			n++
 		}
 		n += len(s.FusedJoins)

@@ -16,7 +16,7 @@ const (
 	setOpInt64Digits = batch.Int64DecimalDigits
 )
 
-// setOpDecimalTarget requires every DECIMAL arm to carry one common (p,s):
+// SetOpDecimalTarget requires every DECIMAL arm to carry one common (p,s):
 // scale=max(scales), precision=max(integer digits)+scale, capped at 38.
 // Never narrow scale or use max(precision) alone (#533, #532; ADR-0018 §4).
 // Values not representable in Int128 at output scale fail during DecimalCoerce,
@@ -25,16 +25,16 @@ const (
 // The shuffle writer's check sees only one writer and cannot catch cross-file
 // scale disagreements.
 // See docs/internals/set-operation-decimal-target.md for the design.
-func setOpDecimalTarget(arms []setOpColType) (logical.DecimalMeta, bool) {
+func SetOpDecimalTarget(arms []SetOpColType) (logical.DecimalMeta, bool) {
 	if len(arms) == 0 {
 		return logical.DecimalMeta{}, false
 	}
 	in := make([]batch.DecimalType, 0, len(arms))
 	for _, a := range arms {
-		if a.typ == parquet.TypeDecimal && !a.decKnown {
+		if a.Typ == parquet.TypeDecimal && !a.DecKnown {
 			return logical.DecimalMeta{}, false
 		}
-		m, ok := batch.DecimalTypeOf(a.typ, batch.DecimalType{Precision: a.dec.Precision, Scale: a.dec.Scale})
+		m, ok := batch.DecimalTypeOf(a.Typ, batch.DecimalType{Precision: a.Dec.Precision, Scale: a.Dec.Scale})
 		if !ok {
 			return logical.DecimalMeta{}, false
 		}

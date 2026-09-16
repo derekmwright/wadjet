@@ -94,8 +94,8 @@ func TestResolveFilterThroughProjectsScoping(t *testing.T) {
 		// whatever its producer emits — source columns, unless some pass put
 		// an alias-naming projection on the producing fragment. This walk
 		// cannot know which, so it resolves through both and the alias
-		// spelling travels beside the result (physical.Stage.FilterAliases);
-		// physical.resolveFilterAliasSpelling picks once that is settled.
+		// spelling travels beside the result (dagplan.Stage.FilterAliases);
+		// dagplan.resolveFilterAliasSpelling picks once that is settled.
 		//
 		// Declining here instead was what made #656 shapes a–d silent: the
 		// predicate kept an alias no stage under the sort emitted, and — on

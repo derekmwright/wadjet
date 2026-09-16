@@ -28,16 +28,16 @@ import (
 	_ "github.com/lib/pq"              // PostgreSQL driver
 )
 
-// buildTableFunctionSource creates an exec.Source for a table function like
+// BuildTableFunctionSource creates an exec.Source for a table function like
 // read_json('path_or_url'). The source reads data on Init and produces
 // RecordBatch results via Next.
-func buildTableFunctionSource(funcName string, args []string, namedArgs map[string]string) (exec.Source, error) {
+func BuildTableFunctionSource(funcName string, args []string, namedArgs map[string]string) (exec.Source, error) {
 	switch funcName {
 	case "read_json", "read_json_auto":
 		if len(args) < 1 {
 			return nil, fmt.Errorf("read_json requires at least 1 argument (path or URL)")
 		}
-		return &jsonTableFuncSource{path: expandHome(args[0])}, nil
+		return &JsonTableFuncSource{path: expandHome(args[0])}, nil
 	case "read_parquet":
 		if len(args) < 1 {
 			return nil, fmt.Errorf("read_parquet requires at least 1 argument (path or URL)")
@@ -47,27 +47,27 @@ func buildTableFunctionSource(funcName string, args []string, namedArgs map[stri
 		if len(args) < 1 {
 			return nil, fmt.Errorf("read_csv requires at least 1 argument (path or URL)")
 		}
-		return &csvTableFuncSource{path: expandHome(args[0]), namedArgs: namedArgs}, nil
+		return &CsvTableFuncSource{path: expandHome(args[0]), NamedArgs: namedArgs}, nil
 	case "postgres_scan":
 		if len(args) < 2 {
 			return nil, fmt.Errorf("postgres_scan requires 2 arguments (connection_string, table_name)")
 		}
-		return &dbScanSource{driver: "postgres", connStr: args[0], query: fmt.Sprintf("SELECT * FROM %s", args[1])}, nil
+		return &DbScanSource{driver: "postgres", connStr: args[0], query: fmt.Sprintf("SELECT * FROM %s", args[1])}, nil
 	case "postgres_query":
 		if len(args) < 2 {
 			return nil, fmt.Errorf("postgres_query requires 2 arguments (connection_string, sql_query)")
 		}
-		return &dbScanSource{driver: "postgres", connStr: args[0], query: args[1]}, nil
+		return &DbScanSource{driver: "postgres", connStr: args[0], query: args[1]}, nil
 	case "mysql_scan":
 		if len(args) < 2 {
 			return nil, fmt.Errorf("mysql_scan requires 2 arguments (connection_string, table_name)")
 		}
-		return &dbScanSource{driver: "mysql", connStr: args[0], query: fmt.Sprintf("SELECT * FROM %s", args[1])}, nil
+		return &DbScanSource{driver: "mysql", connStr: args[0], query: fmt.Sprintf("SELECT * FROM %s", args[1])}, nil
 	case "mysql_query":
 		if len(args) < 2 {
 			return nil, fmt.Errorf("mysql_query requires 2 arguments (connection_string, sql_query)")
 		}
-		return &dbScanSource{driver: "mysql", connStr: args[0], query: args[1]}, nil
+		return &DbScanSource{driver: "mysql", connStr: args[0], query: args[1]}, nil
 	case "generate_series":
 		return newGenerateSeriesSource(args)
 	default:
@@ -93,18 +93,18 @@ func expandHome(path string) string {
 	return filepath.Join(home, path[2:])
 }
 
-// jsonTableFuncSource reads JSON (local file, glob, or HTTP) and produces
+// JsonTableFuncSource reads JSON (local file, glob, or HTTP) and produces
 // batches. Streams through the incremental byte scanner: the previous shape
 // fetched the whole input into heap and then eagerly parsed EVERY batch up
 // front — a second full-size columnar copy held while the raw bytes were
 // still live, ~2-3× the input resident for any pgwire user (issue #130).
-type jsonTableFuncSource struct {
+type JsonTableFuncSource struct {
 	path   string
 	reader *jsonreader.StreamReader
 	closer io.Closer
 }
 
-func (s *jsonTableFuncSource) Init(_ context.Context) error {
+func (s *JsonTableFuncSource) Init(_ context.Context) error {
 	rc, err := openData(s.path)
 	if err != nil {
 		return fmt.Errorf("read_json: %w", err)
@@ -120,11 +120,11 @@ func (s *jsonTableFuncSource) Init(_ context.Context) error {
 	return nil
 }
 
-func (s *jsonTableFuncSource) Next(_ context.Context) (*batch.RecordBatch, error) {
+func (s *JsonTableFuncSource) Next(_ context.Context) (*batch.RecordBatch, error) {
 	return s.reader.Next()
 }
 
-func (s *jsonTableFuncSource) Close() error {
+func (s *JsonTableFuncSource) Close() error {
 	if s.closer != nil {
 		return s.closer.Close()
 	}
@@ -145,7 +145,7 @@ func (s *parquetTableFuncSource) Init(_ context.Context) error {
 	var ra io.ReaderAt
 	var size int64
 
-	if !isURL(s.path) && !isGlob(s.path) {
+	if !IsURL(s.path) && !IsGlob(s.path) {
 		// Local file: open as io.ReaderAt (zero-copy, no memory allocation)
 		f, err := os.Open(s.path)
 		if err != nil {
@@ -197,27 +197,27 @@ func (s *parquetTableFuncSource) Close() error {
 	return nil
 }
 
-// csvTableFuncSource reads a CSV file (local or HTTP) and produces batches.
+// CsvTableFuncSource reads a CSV file (local or HTTP) and produces batches.
 // For local files, uses streaming to avoid loading the entire file into memory.
-type csvTableFuncSource struct {
+type CsvTableFuncSource struct {
 	path      string
-	namedArgs map[string]string
+	NamedArgs map[string]string
 	reader    *csvreader.Reader
 	closer    io.Closer // file handle to close when done
 }
 
-func (s *csvTableFuncSource) Init(_ context.Context) error {
+func (s *CsvTableFuncSource) Init(_ context.Context) error {
 	cfg := csvreader.DefaultConfig()
-	if delim, ok := s.namedArgs["delimiter"]; ok && len(delim) > 0 {
+	if delim, ok := s.NamedArgs["delimiter"]; ok && len(delim) > 0 {
 		cfg.Delimiter = rune(delim[0])
 	}
-	if delim, ok := s.namedArgs["delim"]; ok && len(delim) > 0 {
+	if delim, ok := s.NamedArgs["delim"]; ok && len(delim) > 0 {
 		cfg.Delimiter = rune(delim[0])
 	}
-	if delim, ok := s.namedArgs["sep"]; ok && len(delim) > 0 {
+	if delim, ok := s.NamedArgs["sep"]; ok && len(delim) > 0 {
 		cfg.Delimiter = rune(delim[0])
 	}
-	if hdr, ok := s.namedArgs["header"]; ok {
+	if hdr, ok := s.NamedArgs["header"]; ok {
 		cfg.HasHeader = hdr == "true" || hdr == "TRUE" || hdr == "1"
 	}
 
@@ -240,11 +240,11 @@ func (s *csvTableFuncSource) Init(_ context.Context) error {
 	return nil
 }
 
-func (s *csvTableFuncSource) Next(_ context.Context) (*batch.RecordBatch, error) {
+func (s *CsvTableFuncSource) Next(_ context.Context) (*batch.RecordBatch, error) {
 	return s.reader.Next()
 }
 
-func (s *csvTableFuncSource) Close() error {
+func (s *CsvTableFuncSource) Close() error {
 	if s.closer != nil {
 		return s.closer.Close()
 	}
@@ -257,10 +257,10 @@ func (s *csvTableFuncSource) Close() error {
 // files for JSONL/CSV continuity — same framing fetchGlob produced, without
 // buffering every file at once). The caller owns the ReadCloser.
 func openData(path string) (io.ReadCloser, error) {
-	if isURL(path) {
+	if IsURL(path) {
 		return openHTTP(path)
 	}
-	if isGlob(path) {
+	if IsGlob(path) {
 		matches, err := filepath.Glob(path)
 		if err != nil {
 			return nil, fmt.Errorf("glob %s: %w", path, err)
@@ -354,16 +354,16 @@ func openHTTP(url string) (io.ReadCloser, error) {
 // URLs/globs — parquet needs random access (io.ReaderAt), so buffering is
 // inherent there; JSON/CSV stream via openData.
 func fetchData(path string) ([]byte, error) {
-	if isURL(path) {
+	if IsURL(path) {
 		return fetchHTTP(path)
 	}
-	if isGlob(path) {
+	if IsGlob(path) {
 		return fetchGlob(path)
 	}
 	return os.ReadFile(path)
 }
 
-func isGlob(s string) bool {
+func IsGlob(s string) bool {
 	return strings.ContainsAny(s, "*?[")
 }
 
@@ -392,7 +392,7 @@ func fetchGlob(pattern string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func isURL(s string) bool {
+func IsURL(s string) bool {
 	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
 }
 
@@ -433,9 +433,9 @@ func splitURL(rawURL string) (bucket, key string) {
 	return rawURL[:idx], rawURL[idx+1:]
 }
 
-// dbScanSource queries an external SQL database and produces columnar batches.
+// DbScanSource queries an external SQL database and produces columnar batches.
 // Supports PostgreSQL (via lib/pq) and MySQL (via go-sql-driver/mysql).
-type dbScanSource struct {
+type DbScanSource struct {
 	driver  string // "postgres" or "mysql"
 	connStr string
 	query   string
@@ -443,7 +443,7 @@ type dbScanSource struct {
 	scanner *dbscan.Scanner
 }
 
-func (s *dbScanSource) Init(_ context.Context) error {
+func (s *DbScanSource) Init(_ context.Context) error {
 	db, err := sql.Open(s.driver, s.connStr)
 	if err != nil {
 		return fmt.Errorf("%s_scan: connect: %w", s.driver, err)
@@ -466,11 +466,11 @@ func (s *dbScanSource) Init(_ context.Context) error {
 	return nil
 }
 
-func (s *dbScanSource) Next(_ context.Context) (*batch.RecordBatch, error) {
+func (s *DbScanSource) Next(_ context.Context) (*batch.RecordBatch, error) {
 	return s.scanner.Next()
 }
 
-func (s *dbScanSource) Close() error {
+func (s *DbScanSource) Close() error {
 	var firstErr error
 	if s.scanner != nil {
 		if err := s.scanner.Close(); err != nil {

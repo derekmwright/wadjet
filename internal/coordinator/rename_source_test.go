@@ -5,15 +5,15 @@ package coordinator
 import (
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-func renamesFor(pairs ...[2]string) []physical.OutputRename {
-	out := make([]physical.OutputRename, 0, len(pairs))
+func renamesFor(pairs ...[2]string) []dagplan.OutputRename {
+	out := make([]dagplan.OutputRename, 0, len(pairs))
 	for _, p := range pairs {
-		out = append(out, physical.OutputRename{From: p[0], To: p[1]})
+		out = append(out, dagplan.OutputRename{From: p[0], To: p[1]})
 	}
 	return out
 }
@@ -28,7 +28,7 @@ func TestRenameSourceIndicesDistinctOrRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		columns []string
-		renames []physical.OutputRename
+		renames []dagplan.OutputRename
 		want    []int
 	}{
 		{"unique names resolve as before",

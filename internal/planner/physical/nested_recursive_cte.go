@@ -62,8 +62,8 @@ func (p *Planner) buildNestedRecursiveCTE(ctx context.Context, node *logical.Nod
 	if err, failed := p.cteMaterializeErr[name]; failed {
 		return nil, nil, nil, err, true
 	}
-	savedCTEs := p.ctes
-	p.ctes = append(append([]plansql.CTEDef(nil), p.ctes...), *def)
+	savedCTEs := p.Ctes
+	p.Ctes = append(append([]plansql.CTEDef(nil), p.Ctes...), *def)
 	// The NAME binding is what the iteration seeds and reads for the
 	// self-reference, so the materialization has to own it — and hand it back
 	// afterwards, because the name may belong to a different relation in the
@@ -76,7 +76,7 @@ func (p *Planner) buildNestedRecursiveCTE(ctx context.Context, node *logical.Nod
 	} else {
 		delete(p.cteCache, node.CTEName)
 	}
-	p.ctes = savedCTEs
+	p.Ctes = savedCTEs
 	if materr != nil {
 		if p.cteMaterializeErr == nil {
 			p.cteMaterializeErr = map[string]error{}

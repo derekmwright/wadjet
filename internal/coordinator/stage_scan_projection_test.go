@@ -5,8 +5,8 @@ package coordinator
 import (
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -46,7 +46,7 @@ func TestStageInputScanColumnsProjectsPassThroughScans(t *testing.T) {
 	upstreams := map[string]StageOutput{"scan-0": leaf, "agg-1": compute}
 
 	t.Run("aggregate over a leaf scan", func(t *testing.T) {
-		stage := physical.Stage{ID: "agg-2", Type: "aggregate", Dependencies: []string{"scan-0"}}
+		stage := dagplan.Stage{ID: "agg-2", Type: "aggregate", Dependencies: []string{"scan-0"}}
 		got := coord.stageInputScanColumns(ctx, stage, upstreams)
 		want := []string{"id", "g", "c_vec"} // "not_a_column" is not on the table
 		assertCols(t, got["scan-0"], want)
@@ -64,7 +64,7 @@ func TestStageInputScanColumnsProjectsPassThroughScans(t *testing.T) {
 	})
 
 	t.Run("aggregate over a compute stage keeps reading whole", func(t *testing.T) {
-		stage := physical.Stage{ID: "agg-2", Type: "final_aggregate", Dependencies: []string{"agg-1"}}
+		stage := dagplan.Stage{ID: "agg-2", Type: "final_aggregate", Dependencies: []string{"agg-1"}}
 		got := coord.stageInputScanColumns(ctx, stage, upstreams)
 		if len(got) != 0 {
 			t.Fatalf("a .wshf upstream produced a projection: %v", got)
@@ -72,8 +72,8 @@ func TestStageInputScanColumnsProjectsPassThroughScans(t *testing.T) {
 	})
 
 	t.Run("join sides are keyed the way the file map is", func(t *testing.T) {
-		stage := physical.Stage{
-			ID: "join-3", Type: physical.StageBroadcastJoin,
+		stage := dagplan.Stage{
+			ID: "join-3", Type: dagplan.StageBroadcastJoin,
 			Dependencies: []string{"scan-0", "agg-1"},
 			LeftDepStage: "scan-0", RightDepStage: "agg-1",
 		}
@@ -95,7 +95,7 @@ func TestStageInputScanColumnsProjectsPassThroughScans(t *testing.T) {
 	})
 
 	t.Run("an explicit projection is never overwritten", func(t *testing.T) {
-		stage := physical.Stage{ID: "agg-2", Type: "aggregate", Dependencies: []string{"scan-0"}}
+		stage := dagplan.Stage{ID: "agg-2", Type: "aggregate", Dependencies: []string{"scan-0"}}
 		ops := []distributed.OpSpec{
 			{Type: distributed.OpScan, InputAlias: "scan-0", Columns: []string{"id"}},
 		}

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/internal/wshf"
 )
@@ -157,7 +157,7 @@ func TestSubstituteScalarDependencies(t *testing.T) {
 
 	// End-to-end contract check: substituteScalarDependencies with an empty
 	// stage returns the stage unchanged (no producer outputs).
-	stage := physical.Stage{ID: "s1"}
+	stage := dagplan.Stage{ID: "s1"}
 	out, err := c.substituteScalarDependencies(ctx, stage, nil, nil)
 	if err != nil {
 		t.Fatalf("substitute empty: %v", err)
@@ -222,34 +222,34 @@ func TestReadScalarFromStageOutput_WSHFDecode(t *testing.T) {
 // past the fanout's intermediate phase; any placeholder reachable from the
 // fields intermediates are built from must keep the upfront barrier.
 func TestScalarsDeferrableToFinalMerge(t *testing.T) {
-	q11 := physical.Stage{
+	q11 := dagplan.Stage{
 		Type:               "final_aggregate",
 		ScalarDependencies: map[string]string{"scalar_1": "final_aggregate-17"},
 		FilterExprs:        []string{"value > :scalar_1"},
-		AggSpecs:           []physical.AggSpec{{Func: "SUM", InputCol: "v", OutputCol: "value"}},
+		AggSpecs:           []dagplan.AggSpec{{Func: "SUM", InputCol: "v", OutputCol: "value"}},
 	}
 	cases := []struct {
 		name   string
-		mutate func(*physical.Stage)
+		mutate func(*dagplan.Stage)
 		want   bool
 	}{
-		{"q11 shape: placeholder only in HAVING", func(s *physical.Stage) {}, true},
-		{"placeholder in AggSpec input expr", func(s *physical.Stage) {
+		{"q11 shape: placeholder only in HAVING", func(s *dagplan.Stage) {}, true},
+		{"placeholder in AggSpec input expr", func(s *dagplan.Stage) {
 			s.AggSpecs[0].InputExpr = "v * :scalar_1"
 		}, false},
-		{"placeholder in fused agg spec", func(s *physical.Stage) {
-			s.FusedAggSpecs = []physical.AggSpec{{Func: "SUM", InputCol: "v", OutputCol: "w", InputExpr: "v - :scalar_1"}}
+		{"placeholder in fused agg spec", func(s *dagplan.Stage) {
+			s.FusedAggSpecs = []dagplan.AggSpec{{Func: "SUM", InputCol: "v", OutputCol: "w", InputExpr: "v - :scalar_1"}}
 		}, false},
-		{"placeholder in join filter", func(s *physical.Stage) {
+		{"placeholder in join filter", func(s *dagplan.Stage) {
 			s.JoinFilter = "a > :scalar_1"
 		}, false},
-		{"non-final_aggregate stage", func(s *physical.Stage) {
+		{"non-final_aggregate stage", func(s *dagplan.Stage) {
 			s.Type = "aggregate"
 		}, false},
-		{"no scalar deps", func(s *physical.Stage) {
+		{"no scalar deps", func(s *dagplan.Stage) {
 			s.ScalarDependencies = nil
 		}, false},
-		{"second placeholder leaks into agg specs", func(s *physical.Stage) {
+		{"second placeholder leaks into agg specs", func(s *dagplan.Stage) {
 			s.ScalarDependencies["scalar_2"] = "final_aggregate-19"
 			s.AggSpecs[0].InputExpr = "v * :scalar_2"
 		}, false},
@@ -262,7 +262,7 @@ func TestScalarsDeferrableToFinalMerge(t *testing.T) {
 				s.ScalarDependencies[k] = v
 			}
 			s.FilterExprs = append([]string(nil), q11.FilterExprs...)
-			s.AggSpecs = append([]physical.AggSpec(nil), q11.AggSpecs...)
+			s.AggSpecs = append([]dagplan.AggSpec(nil), q11.AggSpecs...)
 			tc.mutate(&s)
 			if got := scalarsDeferrableToFinalMerge(s); got != tc.want {
 				t.Fatalf("scalarsDeferrableToFinalMerge = %v, want %v", got, tc.want)

@@ -3,9 +3,10 @@
 package dagplan
 
 import (
-	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"strings"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
 // TestPickAggregateShuffleCandidate_Q17 verifies that Q17's decorrelated plan

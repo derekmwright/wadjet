@@ -12,14 +12,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// declaredOutputSchema derives plan-time output names from the SELECT list
+// DeclaredOutputSchema derives plan-time output names from the SELECT list
 // and types from AnnotateScanColumns catalog annotations (#416).
 // The schema is advisory: CollectSink.SchemaHint applies only if nothing was
 // consumed. Unresolved types fall back to STRING; non-empty results use data flow.
 // Names match projection building: alias, unqualified column, then cleaned text.
 // subqueryDecl resolves scalar-subquery output declarations; nil means unavailable.
 // Zero-row and non-empty scalar-subquery columns must agree (#416, #874).
-func declaredOutputSchema(root *logical.Node,
+func DeclaredOutputSchema(root *logical.Node,
 	subqueryDecl func(string) (parquet.Column, bool)) []parquet.Column {
 	// A caller with no Planner passes nil — the set-operation arm walk and
 	// emittedColIntWidth's do. The STAMP answers for them: it is the same
@@ -68,8 +68,8 @@ func declaredOutputSchema(root *logical.Node,
 	return out
 }
 
-// setOpDeclaredOutputSchema is declaredOutputSchema for a query whose OUTPUT
-// is a set operation. findOutputProjectionNode stops at one — there is no
+// setOpDeclaredOutputSchema is DeclaredOutputSchema for a query whose OUTPUT
+// is a set operation. FindOutputProjectionNode stops at one — there is no
 // single Project to read a SELECT list from — so the walk answered nil and a
 // ZERO-ROW `SELECT a FROM t WHERE false UNION ALL SELECT b FROM t` reached
 // the client with no RowDescription fields AT ALL: not an empty table with
@@ -77,7 +77,7 @@ func declaredOutputSchema(root *logical.Node,
 // reach.
 //
 // The names come from the first arm, exactly as the executed schema does. The
-// TYPE is the arms reconciled through setOpWiden — the ladder pinned live
+// TYPE is the arms reconciled through SetOpWiden — the ladder pinned live
 // against postgres:17 — with a DECIMAL's (p,s) from batch.DecimalCommon, the
 // same rule reconcileSetOpArmTypes coerces the arms with, so the declared
 // answer and the executed one describe one type.
@@ -128,7 +128,7 @@ func setOpDeclaredOutputSchema(root *logical.Node) ([]parquet.Column, bool) {
 			if unknown[ai] != nil && i < len(unknown[ai]) && unknown[ai][i] {
 				continue
 			}
-			t, ok := setOpWiden(out[i].Type, arm[i].Type)
+			t, ok := SetOpWiden(out[i].Type, arm[i].Type)
 			if !ok {
 				// Two types the ladder does not reconcile (two strings, two
 				// dates, a mismatch): the first arm's declaration stands,
@@ -191,7 +191,7 @@ func setOpArmUnknownLiteralSchemas(n *logical.Node, arms, cols int) [][]bool {
 				walk(inner)
 				continue
 			}
-			out = append(out, setOpUnknownLiteralArms(c, cols))
+			out = append(out, SetOpUnknownLiteralArms(c, cols))
 		}
 	}
 	walk(n)
@@ -213,7 +213,7 @@ func allTrue(b []bool) bool {
 // setOpArmSchemas is the declared output schema of each arm of a set
 // operation, flattening a nested one so a three-arm union compares all three.
 // A nil entry anywhere makes the whole answer empty: a partially-typed set
-// operation is worse than none, for the reason declaredOutputSchema returns
+// operation is worse than none, for the reason DeclaredOutputSchema returns
 // nil on a column it cannot name.
 func setOpArmSchemas(n *logical.Node) [][]parquet.Column {
 	out, _ := setOpArmSchemasAndTypmods(n)
@@ -238,17 +238,17 @@ func setOpArmSchemasAndTypmods(n *logical.Node) ([][]parquet.Column, []map[strin
 		}
 		// nil: this walk has no planner to ask, so a scalar subquery in a
 		// SET-OPERATION ARM declares what it always did.
-		schema := declaredOutputSchema(c, nil)
+		schema := DeclaredOutputSchema(c, nil)
 		if len(schema) == 0 {
 			return nil, nil
 		}
 		out = append(out, schema)
-		mods = append(mods, declaredWireUnconstrainedDecimal(c))
+		mods = append(mods, DeclaredWireUnconstrainedDecimal(c))
 	}
 	return out, mods
 }
 
-// declaredWireUnconstrainedDecimal marks outputs whose wire typmod is -1;
+// DeclaredWireUnconstrainedDecimal marks outputs whose wire typmod is -1;
 // keep real (p,s) in execution/storage declarations to preserve vector allocation
 // and parquet encoding. Only pgTypeMod consults this map (#457/#458).
 // Bare references and choice folds keep a modifier only when all candidate inputs
@@ -256,7 +256,7 @@ func setOpArmSchemasAndTypmods(n *logical.Node) ([][]parquet.Column, []map[strin
 // Aggregates, windows, arithmetic and other calls lose typmod (#587, #542).
 // See declaredTypmod for CAST handling and ADR-0024 item 5 for the rule.
 // See docs/internals/decimal-wire-and-carrier-modifiers.md for the design.
-func declaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
+func DeclaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
 	if out := setOpWireUnconstrainedDecimal(root); out != nil {
 		return out
 	}
@@ -265,7 +265,7 @@ func declaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
 		return nil
 	}
 	var computed map[string]bool
-	if pn := findOutputProjectionNode(root); pn != nil && len(pn.Children) == 1 {
+	if pn := FindOutputProjectionNode(root); pn != nil && len(pn.Children) == 1 {
 		computed = emittedComputedCols(pn.Children[0])
 	}
 	var out map[string]bool
@@ -275,7 +275,7 @@ func declaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
 			continue
 		}
 		// No "is it DECIMAL" precondition. The plan cannot always type an
-		// aggregate — aggSpecOutputDecimal declines a non-bare-ColRef input,
+		// aggregate — AggSpecOutputDecimal declines a non-bare-ColRef input,
 		// so `MAX(COALESCE(a, a))` resolved to the STRING fallback here
 		// while the RUNTIME schema declared numeric(9,2), and skipping it
 		// left the wire carrying a modifier PostgreSQL drops for every
@@ -307,7 +307,7 @@ func declaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
 // two disagree, PostgreSQL sends -1, and wadjet sent numeric(21,2). It was
 // invisible until the type fold learned to widen, because the column used to
 // declare INT64 and there was no numeric modifier to get wrong.
-func projectionKeepsTypmod(proj logical.Projection, decls colDecls, computed map[string]bool, strictInt map[string]bool) bool {
+func projectionKeepsTypmod(proj logical.Projection, decls ColDecls, computed map[string]bool, strictInt map[string]bool) bool {
 	if proj.IsAgg {
 		// An aggregate call. PostgreSQL never carries its argument's typmod
 		// through one.
@@ -341,7 +341,7 @@ func projectionKeepsTypmod(proj logical.Projection, decls colDecls, computed map
 // casts whose modifiers wadjet does not send carry -1, which poisons the fold;
 // unsupported modifiers diverge from PostgreSQL. declaredStringLength handles
 // string CAST lengths, enforced before declaration (#838, ADR-0012 item 5).
-func declaredTypmod(node plansql.Node, decls colDecls, computed map[string]bool) (int, int, bool) {
+func declaredTypmod(node plansql.Node, decls ColDecls, computed map[string]bool) (int, int, bool) {
 	switch n := node.(type) {
 	case *plansql.ParenNode:
 		return declaredTypmod(n.Inner, decls, computed)
@@ -357,7 +357,7 @@ func declaredTypmod(node plansql.Node, decls colDecls, computed map[string]bool)
 		}
 		return p, s, true
 	case *plansql.ColRef:
-		if computed[strings.ToLower(cleanExpr(n.String()))] || computed[strings.ToLower(n.Column)] {
+		if computed[strings.ToLower(CleanExpr(n.String()))] || computed[strings.ToLower(n.Column)] {
 			return 0, 0, false
 		}
 		c, ok := decls.colDecl(n)
@@ -419,7 +419,7 @@ func declaredTypmod(node plansql.Node, decls colDecls, computed map[string]bool)
 // it), so a stored column is unconstrained here exactly as it is in the engine.
 //
 // ok=false means "no length", which is the unconstrained answer.
-func declaredStringLength(node plansql.Node, decls colDecls, computed map[string]bool) (int, bool) {
+func declaredStringLength(node plansql.Node, decls ColDecls, computed map[string]bool) (int, bool) {
 	switch n := node.(type) {
 	case *plansql.ParenNode:
 		return declaredStringLength(n.Inner, decls, computed)
@@ -462,7 +462,7 @@ func declaredStringLength(node plansql.Node, decls colDecls, computed map[string
 
 // foldStringLength is foldTypmod for a length: every alternative carries the
 // same one, or the result carries none.
-func foldStringLength(arms []plansql.Node, decls colDecls, computed map[string]bool) (int, bool) {
+func foldStringLength(arms []plansql.Node, decls ColDecls, computed map[string]bool) (int, bool) {
 	first, have := 0, false
 	for _, a := range arms {
 		if a == nil {
@@ -487,7 +487,7 @@ func foldStringLength(arms []plansql.Node, decls colDecls, computed map[string]b
 
 // DeclaredStringLengths names the output columns whose declaration carries a
 // string LENGTH, and what it is. It is the string family's answer to
-// declaredWireUnconstrainedDecimal: wire metadata only, computed at plan time,
+// DeclaredWireUnconstrainedDecimal: wire metadata only, computed at plan time,
 // and empty for every query that casts to no parameterized string type.
 func DeclaredStringLengths(root *logical.Node) map[string]int {
 	projs, childTypes, strictInt, ok := declaredProjectionInputs(root)
@@ -496,7 +496,7 @@ func DeclaredStringLengths(root *logical.Node) map[string]int {
 	}
 	_ = strictInt
 	var computed map[string]bool
-	if pn := findOutputProjectionNode(root); pn != nil && len(pn.Children) == 1 {
+	if pn := FindOutputProjectionNode(root); pn != nil && len(pn.Children) == 1 {
 		computed = emittedComputedCols(pn.Children[0])
 	}
 	var out map[string]int
@@ -526,7 +526,7 @@ func DeclaredStringLengths(root *logical.Node) map[string]int {
 // argument does — verified live: COALESCE(numeric(9,2), NULL) describes as
 // plain numeric, while its TYPE is still numeric(9,2) (which is why
 // expr.CommonDeclType skips it and this does not).
-func foldTypmod(arms []plansql.Node, decls colDecls, computed map[string]bool) (int, int, bool) {
+func foldTypmod(arms []plansql.Node, decls ColDecls, computed map[string]bool) (int, int, bool) {
 	p, s, have := 0, 0, false
 	for _, a := range arms {
 		if a == nil {
@@ -554,7 +554,7 @@ func foldTypmod(arms []plansql.Node, decls colDecls, computed map[string]bool) (
 // exec.Project draws with ProjectColumn.Computed, and the one PostgreSQL
 // draws when it decides whether a numeric result keeps its typmod.
 func projectionIsComputed(proj logical.Projection) bool {
-	return proj.ASTExpr != nil && !isSimpleColRefForRename(proj.ASTExpr)
+	return proj.ASTExpr != nil && !IsSimpleColRefForRename(proj.ASTExpr)
 }
 
 // sourceRefName is the input column a bare (or renamed) projection copies.
@@ -562,7 +562,7 @@ func sourceRefName(proj logical.Projection) string {
 	if proj.Column != "" {
 		return proj.Column
 	}
-	return cleanExpr(proj.Expr)
+	return CleanExpr(proj.Expr)
 }
 
 // emittedComputedCols names the columns a subtree emits that are NOT a bare
@@ -679,8 +679,8 @@ func emittedComputedCols(n *logical.Node) map[string]bool {
 	return nil
 }
 
-// setOpWireUnconstrainedDecimal answers declaredWireUnconstrainedDecimal for
-// a query whose OUTPUT is a set operation, which findOutputProjectionNode
+// setOpWireUnconstrainedDecimal answers DeclaredWireUnconstrainedDecimal for
+// a query whose OUTPUT is a set operation, which FindOutputProjectionNode
 // stops at (there is no single Project to read a SELECT list from).
 //
 // PostgreSQL keeps a numeric's typmod across a set operation only when EVERY
@@ -775,39 +775,39 @@ func setOpAllDecimalUnconstrained(arms [][]parquet.Column) map[string]bool {
 	return out
 }
 
-// declaredProjectionInputs is declaredOutputSchema's and
-// declaredWireUnconstrainedDecimal's shared setup: the visible projection
+// declaredProjectionInputs is DeclaredOutputSchema's and
+// DeclaredWireUnconstrainedDecimal's shared setup: the visible projection
 // list plus the child's declarations each projection is resolved against. ok is false when there is nothing to declare (no output
 // projection node, or an empty SELECT list) — callers return their own
 // empty answer in that case rather than proceeding with nil maps.
-func declaredProjectionInputs(root *logical.Node) (projs []logical.Projection, childTypes colDecls, strictInt map[string]bool, ok bool) {
-	pn := findOutputProjectionNode(root)
+func declaredProjectionInputs(root *logical.Node) (projs []logical.Projection, childTypes ColDecls, strictInt map[string]bool, ok bool) {
+	pn := FindOutputProjectionNode(root)
 	if pn == nil {
-		return nil, colDecls{}, nil, false
+		return nil, ColDecls{}, nil, false
 	}
 	projs = logical.VisibleProjections(pn.Projections)
 	if len(projs) == 0 {
-		return nil, colDecls{}, nil, false
+		return nil, ColDecls{}, nil, false
 	}
 	if len(pn.Children) == 1 {
 		// The ROW fields come from inputColFields rather than an emitted-
-		// column walk of its own: the nodes emittedColTypes adds — an
+		// column walk of its own: the nodes EmittedColTypes adds — an
 		// Aggregate and a Project — rebind names, and a field path over
 		// either resolves against nothing anyway. Everything else passes
 		// its input through, which is exactly inputColFields' walk (#568).
-		childTypes = colDecls{
-			types:  emittedColTypes(pn.Children[0]),
-			fields: inputColFields(pn.Children[0]),
+		childTypes = ColDecls{
+			Types:  EmittedColTypes(pn.Children[0]),
+			Fields: inputColFields(pn.Children[0]),
 			// The (p,s) beside the TypeIDs, so a DECIMAL projection is
 			// resolved by ONE walk instead of two hand-mirrored ones
 			// (declaredProjectionDecl, ADR-0024 item 2).
-			dec: emittedColDecimal(pn.Children[0]),
+			Dec: emittedColDecimal(pn.Children[0]),
 		}
 		// The same integer-preserving-arithmetic hint the projection builder
 		// passes: without it `id + 1` declares FLOAT64 here where the
 		// operator emits INT64 (#297's rule), so an empty result would
 		// disagree with a full one about the type of its own column.
-		strictInt = strictIntArithCols(pn.Children[0])
+		strictInt = StrictIntArithCols(pn.Children[0])
 	}
 	return projs, childTypes, strictInt, true
 }
@@ -822,7 +822,7 @@ func declaredProjectionName(proj logical.Projection) string {
 	if proj.Column != "" {
 		return proj.Column
 	}
-	return cleanExpr(proj.Expr)
+	return CleanExpr(proj.Expr)
 }
 
 // declaredProjectionType answers what exec.Project will emit for one
@@ -831,7 +831,7 @@ func declaredProjectionName(proj logical.Projection) string {
 // overwrites it from the input batch. So a bare reference is typed from the
 // input's columns here, the way the operator would, and only a COMPUTED
 // expression takes inferProjectionTypeCols' answer.
-func declaredProjectionType(proj logical.Projection, decls colDecls, strictInt map[string]bool) parquet.TypeID {
+func declaredProjectionType(proj logical.Projection, decls ColDecls, strictInt map[string]bool) parquet.TypeID {
 	return declaredProjectionDecl(proj, decls, strictInt).ID
 }
 
@@ -847,22 +847,22 @@ func declaredProjectionType(proj logical.Projection, decls colDecls, strictInt m
 // The (p,s) half is undecided — reported as precision 0, pgTypeMod's
 // "unconstrained" — wherever it cannot be resolved rather than fabricated
 // (#458).
-func declaredProjectionDecl(proj logical.Projection, decls colDecls, strictInt map[string]bool) expr.DeclType {
+func declaredProjectionDecl(proj logical.Projection, decls ColDecls, strictInt map[string]bool) expr.DeclType {
 	if proj.IsAgg {
 		// The aggregate below emitted a column under this alias; its type
 		// is in the child's emitted map.
 		name := declaredProjectionName(proj)
-		t, ok := lookupColType(decls.types, name)
+		t, ok := lookupColType(decls.Types, name)
 		if !ok {
 			return expr.Decl(parquet.TypeString)
 		}
 		if t == parquet.TypeDecimal {
-			if m, ok := lookupColDecimal(decls.dec, name); ok && m.Precision > 0 {
+			if m, ok := lookupColDecimal(decls.Dec, name); ok && m.Precision > 0 {
 				return expr.DeclDecimal(m.Precision, m.Scale)
 			}
 			return expr.Decl(parquet.TypeDecimal)
 		}
-		return expr.DeclType{ID: t, Schema: &parquet.Column{Type: t, Fields: decls.fields[strings.ToLower(name)]}}
+		return expr.DeclType{ID: t, Schema: &parquet.Column{Type: t, Fields: decls.Fields[strings.ToLower(name)]}}
 	}
 	// A ROW FIELD PATH is not the bare reference it looks like: the name
 	// resolution below strips the qualifier and then finds no column, so
@@ -884,7 +884,7 @@ func declaredProjectionDecl(proj logical.Projection, decls colDecls, strictInt m
 		}
 		return expr.DeclType{ID: fc.Type, Schema: &fc}
 	}
-	if proj.ASTExpr != nil && !isSimpleColRefForRename(proj.ASTExpr) {
+	if proj.ASTExpr != nil && !IsSimpleColRefForRename(proj.ASTExpr) {
 		// The producer may PUBLISH this expression as a column, under its own
 		// text. That is what an aggregate does with a derived GROUP BY key,
 		// and the DISTINCT lowering makes every SELECT item one:
@@ -902,20 +902,20 @@ func declaredProjectionDecl(proj logical.Projection, decls colDecls, strictInt m
 		// #361's silent-write guard failed the task after three attempts
 		// (#949).
 		if name := strings.TrimSpace(proj.Expr); name != "" {
-			if t, ok := lookupColType(decls.types, name); ok {
+			if t, ok := lookupColType(decls.Types, name); ok {
 				if t == parquet.TypeDecimal {
-					if m, ok := lookupColDecimal(decls.dec, name); ok && m.Precision > 0 {
+					if m, ok := lookupColDecimal(decls.Dec, name); ok && m.Precision > 0 {
 						return expr.DeclDecimal(m.Precision, m.Scale)
 					}
 				}
-				return expr.DeclType{ID: t, Schema: &parquet.Column{Type: t, Fields: decls.fields[strings.ToLower(name)]}}
+				return expr.DeclType{ID: t, Schema: &parquet.Column{Type: t, Fields: decls.Fields[strings.ToLower(name)]}}
 			}
 		}
-		return inferProjectionDeclType(proj.ASTExpr, parquet.TypeString, strictInt, decls)
+		return InferProjectionDeclType(proj.ASTExpr, parquet.TypeString, strictInt, decls)
 	}
 	// A PARENTHESIZED bare reference — `SELECT (a)` — is a bare reference,
-	// which isSimpleColRefForRename already says and the name resolution
-	// below could not: proj.Column is empty for it and cleanExpr answers the
+	// which IsSimpleColRefForRename already says and the name resolution
+	// below could not: proj.Column is empty for it and CleanExpr answers the
 	// parenthesized TEXT, which names no column, so every such projection
 	// was declared STRING where PostgreSQL declares the column's own type.
 	// Resolve it from the AST, where the reference still is one.
@@ -929,19 +929,19 @@ func declaredProjectionDecl(proj logical.Projection, decls colDecls, strictInt m
 	}
 	ref := proj.Column
 	if ref == "" {
-		ref = cleanExpr(proj.Expr)
+		ref = CleanExpr(proj.Expr)
 	}
-	t, ok := lookupColType(decls.types, ref)
+	t, ok := lookupColType(decls.Types, ref)
 	if !ok {
 		return expr.Decl(parquet.TypeString)
 	}
 	if t == parquet.TypeDecimal {
-		if m, ok := lookupColDecimal(decls.dec, ref); ok && m.Precision > 0 {
+		if m, ok := lookupColDecimal(decls.Dec, ref); ok && m.Precision > 0 {
 			return expr.DeclDecimal(m.Precision, m.Scale)
 		}
 		return expr.Decl(parquet.TypeDecimal)
 	}
-	return expr.DeclType{ID: t, Schema: &parquet.Column{Type: t, Fields: decls.fields[strings.ToLower(ref)]}}
+	return expr.DeclType{ID: t, Schema: &parquet.Column{Type: t, Fields: decls.Fields[strings.ToLower(ref)]}}
 }
 
 // declaredProjectionDecimal is the DECIMAL half of declaredProjectionDecl,
@@ -949,9 +949,9 @@ func declaredProjectionDecl(proj logical.Projection, decls colDecls, strictInt m
 // through the SAME function as the type, so the two can never describe
 // different columns — before ADR-0024 they were two hand-mirrored walks
 // (#458).
-func declaredProjectionDecimal(proj logical.Projection, decls colDecls, decMeta map[string]logical.DecimalMeta) (logical.DecimalMeta, bool) {
-	if decls.dec == nil {
-		decls.dec = decMeta
+func declaredProjectionDecimal(proj logical.Projection, decls ColDecls, decMeta map[string]logical.DecimalMeta) (logical.DecimalMeta, bool) {
+	if decls.Dec == nil {
+		decls.Dec = decMeta
 	}
 	d := declaredProjectionDecl(proj, decls, nil)
 	if d.ID != parquet.TypeDecimal || !d.DecKnown {
@@ -961,7 +961,7 @@ func declaredProjectionDecimal(proj logical.Projection, decls colDecls, decMeta 
 }
 
 // bareColRefOf unwraps a projection expression that IS a column reference,
-// parentheses and all — the shape isSimpleColRefForRename accepts.
+// parentheses and all — the shape IsSimpleColRefForRename accepts.
 func bareColRefOf(e plansql.Node) (*plansql.ColRef, bool) {
 	for {
 		switch n := e.(type) {
@@ -979,7 +979,7 @@ func bareColRefOf(e plansql.Node) (*plansql.ColRef, bool) {
 // path to the FIELD's declaration. Both declaredProjectionType and
 // declaredProjectionDecimal go through it so the two never describe different
 // columns.
-func declaredFieldPath(proj logical.Projection, decls colDecls) (parquet.Column, bool) {
+func declaredFieldPath(proj logical.Projection, decls ColDecls) (parquet.Column, bool) {
 	if proj.IsAgg || proj.ASTExpr == nil {
 		return parquet.Column{}, false
 	}
@@ -1034,7 +1034,7 @@ func lookupColType(colTypes map[string]parquet.TypeID, name string) (parquet.Typ
 	return 0, false
 }
 
-// emittedColTypes describes the columns a node EMITS, by name.
+// EmittedColTypes describes the columns a node EMITS, by name.
 //
 // inputColTypes answers the same question for the nodes that pass their
 // input through unchanged, and deliberately STOPS at anything that rebinds a
@@ -1042,10 +1042,10 @@ func lookupColType(colTypes map[string]parquet.TypeID, name string) (parquet.Typ
 // past one of those would answer with the wrong value's type. This adds the
 // two rebinding nodes whose output IS derivable: an Aggregate emits its group
 // columns at their input types plus one column per aggregate at the type
-// aggSpecOutputType declares, and a Project emits its own projections.
+// AggSpecOutputType declares, and a Project emits its own projections.
 // Everything else still answers nil, and a nil map means every column falls
 // back to STRING rather than to a guess.
-func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
+func EmittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 	if n == nil {
 		return nil
 	}
@@ -1054,7 +1054,7 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		in := emittedColTypes(n.Children[0])
+		in := EmittedColTypes(n.Children[0])
 		out := make(map[string]parquet.TypeID, len(n.GroupBy)+len(n.AggExprs))
 		// A DERIVED key is emitted under its expression TEXT, which is not a
 		// name the input carries, so the bare lookup finds nothing and the
@@ -1079,7 +1079,7 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 			if name == "" {
 				continue
 			}
-			if t, known := aggSpecOutputType(n, agg); known {
+			if t, known := AggSpecOutputType(n, agg); known {
 				out[name] = t
 			}
 		}
@@ -1088,14 +1088,14 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		in := emittedColTypes(n.Children[0])
-		strictInt := strictIntArithCols(n.Children[0])
+		in := EmittedColTypes(n.Children[0])
+		strictInt := StrictIntArithCols(n.Children[0])
 		// A SCALAR SUBQUERY's type is a CATALOG fact this walk cannot ask
 		// for — it holds no Planner — so it is stamped on the plan's nodes
 		// by annotateSubqueryColumnDecls and installed here as the resolver
-		// nodeDeclaredType's SubqueryNode arm already reads.
+		// NodeDeclaredType's SubqueryNode arm already reads.
 		decls := withSubqueryDecls(
-			colDecls{types: in, dec: emittedColDecimal(n.Children[0])}, n)
+			ColDecls{Types: in, Dec: emittedColDecimal(n.Children[0])}, n)
 		out := make(map[string]parquet.TypeID, len(n.Projections))
 		for _, proj := range n.Projections {
 			name := declaredProjectionName(proj)
@@ -1109,12 +1109,12 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		return emittedColTypes(n.Children[0])
+		return EmittedColTypes(n.Children[0])
 	case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
 		// Use setOpDeclaredOutputSchema's common types above a set operation (#867):
 		// leaving differing arm declarations untyped makes arithmetic fall to FLOAT64
 		// and can lose exact values (#884). Skip UNKNOWN literal arms, widen typed arms
-		// through setOpWiden, and reconcile DECIMAL (p,s) through batch.DecimalCommon.
+		// through SetOpWiden, and reconcile DECIMAL (p,s) through batch.DecimalCommon.
 		// Keep arms[0]'s names; reconciliation contributes types only.
 		arms := setOpArmSchemas(n)
 		if len(arms) == 0 {
@@ -1133,7 +1133,7 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		// Window appends its output columns to the input batch in place — it
 		// drops nothing — so every input column passes through at its input
 		// type, and only the window expressions themselves need typing. Using
-		// windowSpecOutputType (walkStages/buildWindow's own resolver) keeps
+		// WindowSpecOutputType (walkStages/buildWindow's own resolver) keeps
 		// this answer identical to what the operator actually emits: an INT64
 		// passthrough column no longer declares STRING on a zero-row result,
 		// ROW_NUMBER/RANK/COUNT declare INT64, SUM/AVG declare DECIMAL over a
@@ -1143,7 +1143,7 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		in := emittedColTypes(n.Children[0])
+		in := EmittedColTypes(n.Children[0])
 		out := make(map[string]parquet.TypeID, len(in)+len(n.WindowExprs))
 		for k, t := range in {
 			out[k] = t
@@ -1153,11 +1153,11 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 			if name == "" {
 				continue
 			}
-			out[name] = windowSpecOutputType(n, we).ID
+			out[name] = WindowSpecOutputType(n, we).ID
 		}
 		return out
 	case logical.NodeJoin:
-		// Cross JOIN with emittedColTypes itself: inputColTypes cannot type Project,
+		// Cross JOIN with EmittedColTypes itself: inputColTypes cannot type Project,
 		// Aggregate or Window arms and can discard both sides when one is nil (#697).
 		// Retain known declarations for zero-row results rather than defaulting every
 		// column to STRING (#416). A nil side is tolerated: unresolved names are absent
@@ -1167,8 +1167,8 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 			return nil
 		}
 		return withJoinArmQualifiers(n,
-			emittedColTypes(n.Children[0]), emittedColTypes(n.Children[1]),
-			mergeJoinSides(emittedColTypes(n.Children[0]), emittedColTypes(n.Children[1])))
+			EmittedColTypes(n.Children[0]), EmittedColTypes(n.Children[1]),
+			mergeJoinSides(EmittedColTypes(n.Children[0]), EmittedColTypes(n.Children[1])))
 	}
 	return inputColTypes(n)
 }
@@ -1184,7 +1184,7 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 // — and a zero-row result, which is described from the plan alone, went out as
 // DECIMAL(0,0) (#706).
 //
-// Only where the arm has ONE name. `joinArmAlias` answers with a CTE's or a
+// Only where the arm has ONE name. `JoinArmAlias` answers with a CTE's or a
 // derived table's own name, which the enclosing query uses for every column of
 // that arm however many relations are inside it; for a bare arm it answers the
 // first scan's alias, which is that arm's only name when the arm holds one
@@ -1219,19 +1219,19 @@ func withJoinArmQualifiers[V comparable](n *logical.Node, left, right, merged ma
 	return merged
 }
 
-// namedArmScope is the name a CTE reference or a DERIVED table gives its whole
+// NamedArmScope is the name a CTE reference or a DERIVED table gives its whole
 // subtree, or "" for a subtree the enclosing query names relation by relation.
 //
 // It is the boundary the arc's doctrine rests on: inside such an arm the
 // relation aliases are the ARM's own business and no reference in the
 // enclosing query can write them, so every column the arm publishes answers to
-// this one name — the join qualifies its duplicates by it (`joinArmAlias`),
-// `subtreeNaming.buildColOrigins` does NOT override it with an inner scan's
+// this one name — the join qualifies its duplicates by it (`JoinArmAlias`),
+// `SubtreeNaming.BuildColOrigins` does NOT override it with an inner scan's
 // alias, and the planner's rename walk does not resolve past it into an inner
 // spelling. Those three have to agree: the executor publishing `m.w` while the
 // planner asks for `g.w` is one output described two ways, which is the defect
 // this arc exists to remove, pointing inward.
-func namedArmScope(n *logical.Node) string {
+func NamedArmScope(n *logical.Node) string {
 	for cur := n; cur != nil; {
 		if cur.CTERefAlias != "" {
 			return cur.CTERefAlias
@@ -1260,7 +1260,7 @@ func joinArmSoleName(n *logical.Node) string {
 	if n == nil {
 		return ""
 	}
-	if name := namedArmScope(n); name != "" {
+	if name := NamedArmScope(n); name != "" {
 		return name
 	}
 	var scans []*logical.Node
@@ -1287,7 +1287,7 @@ func joinArmSoleName(n *logical.Node) string {
 // mergeJoinSides merges the two sides of a join's emitted columns: a name only
 // one side carries is kept, and a name both carry at DIFFERENT values is
 // dropped rather than resolved to a side. It is inputColTypes' join rule with
-// a nil side tolerated instead of fatal — see emittedColTypes' NodeJoin arm.
+// a nil side tolerated instead of fatal — see EmittedColTypes' NodeJoin arm.
 func mergeJoinSides[V comparable](left, right map[string]V) map[string]V {
 	if left == nil {
 		return right
@@ -1309,9 +1309,9 @@ func mergeJoinSides[V comparable](left, right map[string]V) map[string]V {
 	return merged
 }
 
-// emittedColDecimal is emittedColTypes' companion for DECIMAL precision/
+// emittedColDecimal is EmittedColTypes' companion for DECIMAL precision/
 // scale (#458): the same walk over the same node kinds, but holding only
-// entries whose column IS declared DECIMAL by emittedColTypes — a name
+// entries whose column IS declared DECIMAL by EmittedColTypes — a name
 // present here and absent (or a different type) there would be a
 // contradiction between the two answers describing the same column.
 //
@@ -1330,7 +1330,7 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 		}
 		in := emittedColDecimal(n.Children[0])
 		out := make(map[string]logical.DecimalMeta, len(n.GroupBy)+len(n.AggExprs))
-		// The DERIVED keys' (p,s), the companion emittedColTypes already
+		// The DERIVED keys' (p,s), the companion EmittedColTypes already
 		// takes from the same place. A derived key is emitted under its
 		// expression TEXT, which the input does not carry, so the bare
 		// lookup finds no scale and the key reads as a DECIMAL with none —
@@ -1352,7 +1352,7 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 			if name == "" {
 				continue
 			}
-			if m, known := aggSpecOutputDecimal(n, agg); known {
+			if m, known := AggSpecOutputDecimal(n, agg); known {
 				out[name] = m
 			}
 		}
@@ -1362,8 +1362,8 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 			return nil
 		}
 		in := emittedColDecimal(n.Children[0])
-		fieldDecls := withSubqueryDecls(colDecls{types: emittedColTypes(n.Children[0]),
-			fields: inputColFields(n.Children[0]), dec: in}, n)
+		fieldDecls := withSubqueryDecls(ColDecls{Types: EmittedColTypes(n.Children[0]),
+			Fields: inputColFields(n.Children[0]), Dec: in}, n)
 		out := make(map[string]logical.DecimalMeta, len(n.Projections))
 		for _, proj := range n.Projections {
 			name := declaredProjectionName(proj)
@@ -1416,7 +1416,7 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 		// and all, and SUM/AVG answer the accumulator's DECIMAL(38,s) /
 		// DECIMAL(38,min(s+4,38)) — which is what exec.windowOutputColumn
 		// already emits (#586).
-		// Before ADR-0024 windowSpecOutputType could not resolve a
+		// Before ADR-0024 WindowSpecOutputType could not resolve a
 		// parameterized argument at all, so a ZERO-ROW window result — which
 		// is described from the plan alone — went out as float8 where the
 		// same query over rows went out as numeric (#587).
@@ -1426,7 +1426,7 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 			if name == "" {
 				continue
 			}
-			d := windowSpecOutputType(n, we)
+			d := WindowSpecOutputType(n, we)
 			if d.ID != parquet.TypeDecimal || !d.DecKnown {
 				continue
 			}
@@ -1443,7 +1443,7 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 		}
 		return in
 	case logical.NodeJoin:
-		// The (p,s) half of emittedColTypes' join arm, and it must cross the
+		// The (p,s) half of EmittedColTypes' join arm, and it must cross the
 		// join for the same reason and by the same rule — the two answers
 		// describe one column, so a name kept there and dropped here would be
 		// a DECIMAL with no precision, which #458's sentinel then reads as

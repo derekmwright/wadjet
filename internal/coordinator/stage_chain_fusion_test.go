@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/derekmwright/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -36,17 +37,17 @@ func TestStageChainFusionDifferential(t *testing.T) {
 	ctx, coord := setupTPCHDistributedAtScale(t, tpch.SF001)
 	coord.config.BroadcastBytesOverride = chainFusionBroadcastThreshold
 
-	prev := physical.StageFusion.Load()
-	prevAgg := physical.StageFusionAgg.Load()
+	prev := dagplan.StageFusion.Load()
+	prevAgg := dagplan.StageFusionAgg.Load()
 	t.Cleanup(func() {
-		physical.StageFusion.Store(prev)
-		physical.StageFusionAgg.Store(prevAgg)
+		dagplan.StageFusion.Store(prev)
+		dagplan.StageFusionAgg.Store(prevAgg)
 	})
 
 	runArm := func(t *testing.T, qNum int, fusion, aggFusion bool) []map[string]any {
 		t.Helper()
-		physical.StageFusion.Store(fusion)
-		physical.StageFusionAgg.Store(aggFusion)
+		dagplan.StageFusion.Store(fusion)
+		dagplan.StageFusionAgg.Store(aggFusion)
 		result, err := coord.ExecuteSQL(ctx, tpch.TPCHQueries[qNum].SQL)
 		if err != nil {
 			t.Fatalf("Q%02d fusion=%v/agg=%v: %v", qNum, fusion, aggFusion, err)
@@ -65,8 +66,8 @@ func TestStageChainFusionDifferential(t *testing.T) {
 	// which fusion mechanisms fire on the query.
 	planEngages := func(t *testing.T, qNum int) (joins, aggs bool) {
 		t.Helper()
-		physical.StageFusion.Store(true)
-		physical.StageFusionAgg.Store(true)
+		dagplan.StageFusion.Store(true)
+		dagplan.StageFusionAgg.Store(true)
 		stages := planStagesForTest(t, ctx, coord.catalog, tpch.TPCHQueries[qNum].SQL, 3, chainFusionBroadcastThreshold)
 		for _, s := range stages {
 			if len(s.ChainedJoins) > 0 {
@@ -155,7 +156,7 @@ func rowsEquivalent(a, b map[string]any) error {
 
 // planStagesForTest plans SQL through PlanDistributed with the given worker
 // count and broadcast threshold, mirroring the coordinator's inputs.
-func planStagesForTest(t *testing.T, ctx context.Context, cat *catalog.Catalog, sql string, workers int, broadcastThreshold int64) []physical.Stage {
+func planStagesForTest(t *testing.T, ctx context.Context, cat *catalog.Catalog, sql string, workers int, broadcastThreshold int64) []dagplan.Stage {
 	t.Helper()
 	parsed, err := plansql.Parse(sql)
 	if err != nil {
@@ -169,7 +170,7 @@ func planStagesForTest(t *testing.T, ctx context.Context, cat *catalog.Catalog, 
 	if err != nil {
 		t.Fatalf("logical plan: %v", err)
 	}
-	planner := physical.NewStagePlanner(physical.NewPlanner(cat))
+	planner := dagplan.NewStagePlanner(physical.NewPlanner(cat))
 	planner.WorkerCount = workers
 	planner.BroadcastBytesThreshold = broadcastThreshold
 	planner.AnnotateScanColumns(ctx, plan)

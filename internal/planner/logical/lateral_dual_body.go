@@ -284,7 +284,7 @@ func exprCarriesSubqueryNode(n plansql.Node) bool {
 // `LateralOuterScope` answers with the OUTER row's columns — so `v` declares
 // what `u.id` declares, at every one of those walks at once. And the stage DAG
 // hands any plan containing a Dual to the coordinator's in-process pipeline
-// (physical.ErrTableLessSelectDistributed, #806), which is what keeps all five
+// (dagplan.ErrTableLessSelectDistributed, #806), which is what keeps all five
 // arms answering through one engine rather than needing the distributed
 // single-row source that refusal exists for.
 func buildTableLessLateralJoin(info *plansql.SelectInfo, left *Node,

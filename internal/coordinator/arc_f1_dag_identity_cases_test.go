@@ -147,7 +147,7 @@ func TestF1AJoinArmPublishesTheColumnsItSelects(t *testing.T) {
 			// commit that made the cell agree: a consumer now binds through
 			// the identity the producing join PUBLISHES, and the payload
 			// carries only a value no published spelling reaches
-			// (physical.bindConsumersToPublishedIdentity). Two arms publish
+			// (dagplan.bindConsumersToPublishedIdentity). Two arms publish
 			// `w`, so the resolve-back-to-the-source-name convention had two
 			// sources and named neither; asking the stream what it will ship
 			// answers it without materializing the contested rename, which is

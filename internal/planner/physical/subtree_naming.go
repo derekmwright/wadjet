@@ -8,7 +8,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
-// subtreeNaming captures structure-independent column-provenance facts about
+// SubtreeNaming captures structure-independent column-provenance facts about
 // a logical subtree: which scan aliases it contains, which columns each alias
 // provides, which projection/aggregate output names it exposes, and —
 // mirroring the join executor's output-naming rule — which scan alias owns
@@ -19,12 +19,12 @@ import (
 // alias-qualified self-join keys (n1.x vs n2.x both collapsed to x) and
 // broke down entirely when a join's build side spans multiple tables — the
 // failure that blocked bushy join plans (see docs/design/bushy-join-cbo.md).
-type subtreeNaming struct {
-	// aliasCols maps a scan alias (lowercased; TableAlias falling back to
+type SubtreeNaming struct {
+	// AliasCols maps a scan alias (lowercased; TableAlias falling back to
 	// TableName) to that scan's column set (lowercased). Only scans visible
 	// in the subtree's output are included: a semi/anti join's build side
 	// contributes nothing.
-	aliasCols map[string]map[string]bool
+	AliasCols map[string]map[string]bool
 	// outputNames holds projection aliases and aggregate output columns
 	// (lowercased) exposed by the subtree (e.g. supplier_no from
 	// `l_suppkey AS supplier_no`, total_revenue from a CTE aggregate).
@@ -42,10 +42,10 @@ type subtreeNaming struct {
 	root *logical.Node
 }
 
-// subtreeNamingOf computes the naming facts for a logical subtree.
-func subtreeNamingOf(n *logical.Node) *subtreeNaming {
-	s := &subtreeNaming{
-		aliasCols:   make(map[string]map[string]bool),
+// SubtreeNamingOf computes the naming facts for a logical subtree.
+func SubtreeNamingOf(n *logical.Node) *SubtreeNaming {
+	s := &SubtreeNaming{
+		AliasCols:   make(map[string]map[string]bool),
 		outputNames: make(map[string]bool),
 		origins:     make(map[string]string),
 		root:        n,
@@ -54,7 +54,7 @@ func subtreeNamingOf(n *logical.Node) *subtreeNaming {
 	return s
 }
 
-func (s *subtreeNaming) collect(n *logical.Node) {
+func (s *SubtreeNaming) collect(n *logical.Node) {
 	if n == nil {
 		return
 	}
@@ -65,10 +65,10 @@ func (s *subtreeNaming) collect(n *logical.Node) {
 			alias = n.TableName
 		}
 		key := strings.ToLower(alias)
-		cols := s.aliasCols[key]
+		cols := s.AliasCols[key]
 		if cols == nil {
 			cols = make(map[string]bool, len(n.ScanColumns))
-			s.aliasCols[key] = cols
+			s.AliasCols[key] = cols
 		}
 		for _, col := range n.ScanColumns {
 			lc := strings.ToLower(col)
@@ -123,22 +123,22 @@ func (s *subtreeNaming) collect(n *logical.Node) {
 // The derived-table half is what `y.b` over `(SELECT n_nationkey AS b FROM
 // nation) y` needs: `b` is the derived table's OUTPUT name and appears in no
 // scan's column set, so ownership came back false for BOTH sides of a join,
-// assignJoinKeySides left the pair in its positional order, and each key was
+// AssignJoinKeySides left the pair in its positional order, and each key was
 // then resolved against the arm that does not own it. In a two-way join the
 // mistake is invisible (the arms' keys are symmetric); in a three-way one it
 // reached the worker verbatim and the shuffle failed loud with `partitioned
 // shuffle: key "y.b" not in schema` (#490).
-func (s *subtreeNaming) ownsKey(key string) bool {
+func (s *SubtreeNaming) OwnsKey(key string) bool {
 	k := strings.ToLower(strings.TrimSpace(key))
 	if dot := strings.IndexByte(k, '.'); dot >= 0 {
-		if cols, ok := s.aliasCols[k[:dot]]; ok && cols[k[dot+1:]] {
+		if cols, ok := s.AliasCols[k[:dot]]; ok && cols[k[dot+1:]] {
 			return true
 		}
 		// The qualifier may name a DERIVED TABLE rather than a scan, and then
 		// the column after it is that table's OUTPUT name — resolved here the
 		// way a bare key is, inside the scope that owns the qualifier and
-		// nowhere else (derivedScopeBareName).
-		if bare := derivedScopeBareName(k, s.root); bare != "" {
+		// nowhere else (DerivedScopeBareName).
+		if bare := DerivedScopeBareName(k, s.root); bare != "" {
 			return s.ownsBareName(bare)
 		}
 		return false
@@ -149,11 +149,11 @@ func (s *subtreeNaming) ownsKey(key string) bool {
 // ownsBareName reports whether an UNQUALIFIED column name resolves inside this
 // subtree: a projection or aggregate output it exposes, or a column any of its
 // scans provides.
-func (s *subtreeNaming) ownsBareName(k string) bool {
+func (s *SubtreeNaming) ownsBareName(k string) bool {
 	if s.outputNames[k] {
 		return true
 	}
-	for _, cols := range s.aliasCols {
+	for _, cols := range s.AliasCols {
 		if cols[k] {
 			return true
 		}
@@ -166,8 +166,8 @@ func (s *subtreeNaming) ownsBareName(k string) bool {
 // alias when the build side spans multiple tables. Single-alias subtrees
 // return nil: the join's single BuildTableAlias is already exact, and nil
 // keeps every current left-deep plan byte-identical.
-func (s *subtreeNaming) buildColOrigins() map[string]string {
-	if len(s.aliasCols) <= 1 {
+func (s *SubtreeNaming) BuildColOrigins() map[string]string {
+	if len(s.AliasCols) <= 1 {
 		return nil
 	}
 	return s.origins
@@ -188,15 +188,15 @@ func (s *subtreeNaming) buildColOrigins() map[string]string {
 // a query PostgreSQL answers, and a silent wrong number in the mirror.
 //
 // The DAG keeps the raw answer, because there the Project emits no stage and
-// the inner names are exactly what the stream carries (joinArmAlias).
-func (s *subtreeNaming) materializedBuildColOrigins() map[string]string {
-	if namedArmScope(s.root) != "" {
+// the inner names are exactly what the stream carries (JoinArmAlias).
+func (s *SubtreeNaming) MaterializedBuildColOrigins() map[string]string {
+	if NamedArmScope(s.root) != "" {
 		return nil
 	}
-	return s.buildColOrigins()
+	return s.BuildColOrigins()
 }
 
-// assignJoinKeySides ensures leftKeys reference the probe (left) child and
+// AssignJoinKeySides ensures leftKeys reference the probe (left) child and
 // rightKeys the build (right) child, deciding by column OWNERSHIP in each
 // child subtree rather than textual position in the join condition.
 //
@@ -205,10 +205,10 @@ func (s *subtreeNaming) materializedBuildColOrigins() map[string]string {
 // (shared column names, expression keys), the pair keeps its positional
 // order — exactly the previous fixJoinKeyOrder outcome — and the runtime
 // safety net (FixKeyAssignment) remains the last resort.
-func assignJoinKeySides(leftKeys, rightKeys []string, probe, build *subtreeNaming) {
+func AssignJoinKeySides(leftKeys, rightKeys []string, probe, build *SubtreeNaming) {
 	for i := range leftKeys {
-		lProbe, lBuild := probe.ownsKey(leftKeys[i]), build.ownsKey(leftKeys[i])
-		rProbe, rBuild := probe.ownsKey(rightKeys[i]), build.ownsKey(rightKeys[i])
+		lProbe, lBuild := probe.OwnsKey(leftKeys[i]), build.OwnsKey(leftKeys[i])
+		rProbe, rBuild := probe.OwnsKey(rightKeys[i]), build.OwnsKey(rightKeys[i])
 		lExclBuild := lBuild && !lProbe
 		rExclBuild := rBuild && !rProbe
 		switch {

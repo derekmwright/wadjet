@@ -33,7 +33,7 @@ import (
 // binOpDecimalType returns the DECIMAL type an arithmetic expression declares,
 // per batch.DecimalResultType. ok=false means this pair has no fixed-point
 // rule and the caller keeps FLOAT64.
-func binOpDecimalType(n *plansql.BinaryOp, decls colDecls) (expr.DeclType, bool) {
+func binOpDecimalType(n *plansql.BinaryOp, decls ColDecls) (expr.DeclType, bool) {
 	t, isDec, ok := binOpDecimalOperand(n, decls)
 	if !ok || !isDec {
 		// Not decimal arithmetic: either an operand has no exact form, or
@@ -57,7 +57,7 @@ func binOpDecimalType(n *plansql.BinaryOp, decls colDecls) (expr.DeclType, bool)
 // PostgreSQL, and the integer arithmetic inside it brings the INT64 range at
 // scale 0, exactly as a bare integer column does. expr.BinOpNumeric answers
 // the same for its int mode, which is what keeps the two in step.
-func binOpDecimalOperand(n *plansql.BinaryOp, decls colDecls) (batch.DecimalType, bool, bool) {
+func binOpDecimalOperand(n *plansql.BinaryOp, decls ColDecls) (batch.DecimalType, bool, bool) {
 	if _, _, ok := batch.DecimalResultType(n.Op, 1, 0, 1, 0); !ok {
 		return batch.DecimalType{}, false, false // not one of + - * / %
 	}
@@ -92,7 +92,7 @@ func binOpDecimalOperand(n *plansql.BinaryOp, decls colDecls) (batch.DecimalType
 // ok=false for every operand with no exact form — a float, a string, a
 // function call, a CAST, a CASE — and the whole expression then declares what
 // it declared before.
-func decimalArithOperand(node plansql.Node, decls colDecls) (batch.DecimalType, bool, bool) {
+func decimalArithOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, bool, bool) {
 	switch n := node.(type) {
 	case *plansql.ParenNode:
 		return decimalArithOperand(n.Inner, decls)
@@ -197,8 +197,8 @@ func decimalArithOperand(node plansql.Node, decls colDecls) (batch.DecimalType, 
 // INT64/FLOAT64, is not an exact operand — expr.decimalArmFold declines for
 // exactly those and the runtime would then run the float path the plan had
 // stopped declaring.
-func choiceDecimalArithOperand(node plansql.Node, decls colDecls) (batch.DecimalType, bool, bool) {
-	t, c := nodeDeclaredType(node, decls)
+func choiceDecimalArithOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, bool, bool) {
+	t, c := NodeDeclaredType(node, decls)
 	if c != expr.Decided || t.ID != parquet.TypeDecimal || !t.DecKnown {
 		return batch.DecimalType{}, false, false
 	}
@@ -223,7 +223,7 @@ func choiceDecimalArithOperand(node plansql.Node, decls colDecls) (batch.Decimal
 // the failure protocol method 8 names — and it is not hypothetical here:
 // `ABS(real 0.1)` answered 0.10000000149011612, the double's digits for a
 // value a real never held.
-func scalarFnDeclaredNumericDomain(n *plansql.FuncCallNode, decls colDecls) (expr.DeclType, bool) {
+func scalarFnDeclaredNumericDomain(n *plansql.FuncCallNode, decls ColDecls) (expr.DeclType, bool) {
 	want, ok := expr.NumericDomainScalarFn(n.Name)
 	if !ok || len(n.Args) != want {
 		return expr.DeclType{}, false
@@ -241,7 +241,7 @@ func scalarFnDeclaredNumericDomain(n *plansql.FuncCallNode, decls colDecls) (exp
 	}
 	args := make([]batch.TypeID, 0, want)
 	for i, a := range n.Args {
-		t, c := nodeDeclaredType(a, decls)
+		t, c := NodeDeclaredType(a, decls)
 		if c != expr.Decided {
 			return expr.DeclType{}, false
 		}
@@ -280,7 +280,7 @@ func scalarFnDeclaredNumericDomain(n *plansql.FuncCallNode, decls colDecls) (exp
 // round(x, n) and trunc(x, n) take their result SCALE from n, so n must be a
 // constant: a scale that changed per row is not a type. A non-constant second
 // argument declines here and the runtime node declines with it.
-func scalarFnDeclaredDecimal(n *plansql.FuncCallNode, decls colDecls) (expr.DeclType, bool) {
+func scalarFnDeclaredDecimal(n *plansql.FuncCallNode, decls ColDecls) (expr.DeclType, bool) {
 	if !expr.IsDecimalScalarFn(n.Name) || len(n.Args) < 1 {
 		return expr.DeclType{}, false
 	}
@@ -386,7 +386,7 @@ func constIntArg(node plansql.Node) (int, bool) {
 // case: `CAST(f AS NUMERIC)` over a float column is numeric in PostgreSQL and
 // float8 here, because a float has no scale for the fold to take and any fixed
 // one would either truncate the value or invent digits.
-func castDeclaredDecimal(n *plansql.CastNode, decls colDecls) (expr.DeclType, bool) {
+func castDeclaredDecimal(n *plansql.CastNode, decls ColDecls) (expr.DeclType, bool) {
 	p, s, hasParams, ok := expr.DecimalCastDest(n.TypeName)
 	if !ok {
 		return expr.DeclType{}, false
@@ -429,7 +429,7 @@ func decimalTypeOfColumn(c parquet.Column) (batch.DecimalType, bool, bool) {
 // that implement decimalOperand; over anything else it still goes through
 // float64, and declaring DECIMAL there would allocate an exact vector for a
 // rounded value.
-func decimalArithOperandDecided(node plansql.Node, decls colDecls) bool {
+func decimalArithOperandDecided(node plansql.Node, decls ColDecls) bool {
 	_, isDec, ok := decimalArithOperand(node, decls)
 	return ok && isDec
 }

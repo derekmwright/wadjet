@@ -3,6 +3,7 @@
 package coordinator
 
 import (
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
@@ -72,7 +73,7 @@ func wireGroupKeyResolve(resolve []physical.GroupKeyResolution) []distributed.Gr
 // already columns). A merge carries no resolution list, and that is the whole
 // of #794 — the intermediate phase and the exchange's partial both consume the
 // partial's OUTPUT, so there is nothing for them to agree with.
-func mergeModeResolve(stage physical.Stage, mergeMode bool) []distributed.GroupKeyResolveSpec {
+func mergeModeResolve(stage dagplan.Stage, mergeMode bool) []distributed.GroupKeyResolveSpec {
 	if mergeMode {
 		return nil
 	}
@@ -86,7 +87,7 @@ func mergeModeResolve(stage physical.Stage, mergeMode bool) []distributed.GroupK
 // or the aggregate behaves differently depending on which shape the query
 // took. That is how MIN_BY's ordering column and STRING_AGG's separator
 // would go missing on exactly one path (#353).
-func wireAggSpecs(specs []physical.AggSpec) []distributed.AggSpec {
+func wireAggSpecs(specs []dagplan.AggSpec) []distributed.AggSpec {
 	if len(specs) == 0 {
 		return nil
 	}
@@ -116,7 +117,7 @@ func wireAggSpecs(specs []physical.AggSpec) []distributed.AggSpec {
 			Percentile: a.Percentile,
 			Distinct:   a.Distinct,
 		}
-		// physical.AggSpec.OutputType (parquet.TypeID, plain int) is itself
+		// dagplan.AggSpec.OutputType (parquet.TypeID, plain int) is itself
 		// ambiguous at zero: TypeBool IS zero, and it is a GENUINE
 		// declaration for BOOL_AND/BOOL_OR/EVERY — and, since #392, for
 		// MIN_BY/MAX_BY over a BOOL column, whose output type is its input's

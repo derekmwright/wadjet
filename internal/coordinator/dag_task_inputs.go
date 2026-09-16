@@ -10,8 +10,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // runStageTasks publishes the given tasks under stageQueryID, subscribes to
@@ -105,7 +105,7 @@ func (c *Coordinator) runStageTasks(
 // manually sliced, so it splits too. Deps with unknown size (Bytes == 0,
 // e.g. legacy workers) contribute nothing — the estimate degrades toward
 // 0 = unknown rather than inventing numbers.
-func estimateComputeTaskBytes(stage physical.Stage, inputs map[string]StageOutput, numTasks int, probeSplit bool) int64 {
+func estimateComputeTaskBytes(stage dagplan.Stage, inputs map[string]StageOutput, numTasks int, probeSplit bool) int64 {
 	if numTasks <= 0 {
 		numTasks = 1
 	}
@@ -149,7 +149,7 @@ func estimateComputeTaskBytes(stage physical.Stage, inputs map[string]StageOutpu
 // The caller is responsible for the fourth: it must not call this for a task
 // whose inputs were assigned by probe-split / skew-split / round-robin
 // file grouping rather than by partitionRangeForWorker.
-func aggregateInputRowBound(stage physical.Stage, inputs map[string]StageOutput, w, numTasks int) int64 {
+func aggregateInputRowBound(stage dagplan.Stage, inputs map[string]StageOutput, w, numTasks int) int64 {
 	if len(stage.Dependencies) != 1 {
 		return 0
 	}
@@ -188,7 +188,7 @@ func aggregateInputRowBound(stage physical.Stage, inputs map[string]StageOutput,
 // The sum is taken over ALL tasks rather than sampled at w=0: a stage whose
 // partition 0 happens to be empty (e.g. an empty hash bucket) must not read
 // as "no bound" in the log when every other task has one.
-func aggregateRowBoundTotal(stage physical.Stage, inputs map[string]StageOutput, numTasks int, probeSets [][]string, probeSplit bool, rrAggGroups [][]string, skewAssign []skewTaskAssignment) (total int64, tasksWithBound int, ok bool) {
+func aggregateRowBoundTotal(stage dagplan.Stage, inputs map[string]StageOutput, numTasks int, probeSets [][]string, probeSplit bool, rrAggGroups [][]string, skewAssign []skewTaskAssignment) (total int64, tasksWithBound int, ok bool) {
 	if probeSets != nil || probeSplit || rrAggGroups != nil || skewAssign != nil {
 		return 0, 0, false
 	}
@@ -210,10 +210,10 @@ func aggregateRowBoundTotal(stage physical.Stage, inputs map[string]StageOutput,
 //     task.FusedJoins[i].BuildFiles directly (the dispatcher populates that
 //     wire field by looking up each fused build's upstream output).
 //   - aggregate/sort/etc: use the single dep's ID as alias.
-func buildTaskInputsForStage(stage physical.Stage, upstreams map[string]StageOutput, workerIdx, workerCount int) (map[string][]string, error) {
+func buildTaskInputsForStage(stage dagplan.Stage, upstreams map[string]StageOutput, workerIdx, workerCount int) (map[string][]string, error) {
 	inputs := make(map[string][]string)
 	switch stage.Type {
-	case physical.StageHashJoin, physical.StageBroadcastJoin, physical.StageSortMergeJoin:
+	case dagplan.StageHashJoin, dagplan.StageBroadcastJoin, dagplan.StageSortMergeJoin:
 		expectedDeps := 2 + len(stage.FusedJoins) + len(stage.ChainedJoins)
 		if len(stage.Dependencies) != expectedDeps {
 			return nil, fmt.Errorf("join stage %s expects %d deps (2 primary + %d fused + %d chained), got %d",
@@ -233,7 +233,7 @@ func buildTaskInputsForStage(stage physical.Stage, upstreams map[string]StageOut
 		// Fused-build deps are intentionally NOT added to inputs[]; their
 		// files flow through task.FusedJoins[i].BuildFiles, populated by
 		// dispatchComputeStage from the upstream stage outputs.
-	case physical.StageUnion:
+	case dagplan.StageUnion:
 		// Task w IS arm w: it reads that arm's output WHOLE (not a
 		// partition slice of it) and projects it onto the result columns.
 		// The stage's concatenation is the union of what its tasks emit.
@@ -258,7 +258,7 @@ func buildTaskInputsForStage(stage physical.Stage, upstreams map[string]StageOut
 // the projection map (stageInputScanColumns) is keyed exactly the way
 // buildTaskInputsForStage keys the file map — an alias that agreed by
 // coincidence would silently drop the projection instead of failing.
-func joinInputAliases(stage physical.Stage) (buildAlias, probeAlias string) {
+func joinInputAliases(stage dagplan.Stage) (buildAlias, probeAlias string) {
 	buildAlias = stage.BuildTableAlias
 	if buildAlias == "" {
 		buildAlias = "build"
@@ -285,14 +285,14 @@ func joinInputAliases(stage physical.Stage) (buildAlias, probeAlias string) {
 // Safe by construction on the worker side: a .wshf input ignores the hint
 // (source_select.go), and cachedFileStreamSource applies it all-or-nothing
 // — any name missing from the file schema reverts the read to full width.
-func (c *Coordinator) stageInputScanColumns(ctx context.Context, stage physical.Stage, upstreams map[string]StageOutput) map[string][]string {
+func (c *Coordinator) stageInputScanColumns(ctx context.Context, stage dagplan.Stage, upstreams map[string]StageOutput) map[string][]string {
 	out := make(map[string][]string)
 	for alias, depID := range stageInputDeps(stage) {
 		up, ok := upstreams[depID]
 		if !ok || up.ScanTable == "" || len(up.ScanColumns) == 0 {
 			continue
 		}
-		if p := c.prunedScanColumns(ctx, physical.Stage{
+		if p := c.prunedScanColumns(ctx, dagplan.Stage{
 			TableName: up.ScanTable,
 			Columns:   up.ScanColumns,
 		}); len(p) > 0 {
@@ -311,7 +311,7 @@ func (c *Coordinator) stageInputScanColumns(ctx context.Context, stage physical.
 // declared-schema footer key existed hands the consumer an INT64 where the
 // catalog says IPv4 and the DAG answers 167772165 for 10.0.0.5. Empty for
 // every WSHF input, which carries its own types.
-func stageInputScanSchemas(stage physical.Stage, upstreams map[string]StageOutput) map[string][]distributed.ColumnSpec {
+func stageInputScanSchemas(stage dagplan.Stage, upstreams map[string]StageOutput) map[string][]distributed.ColumnSpec {
 	out := make(map[string][]distributed.ColumnSpec)
 	for alias, depID := range stageInputDeps(stage) {
 		up, ok := upstreams[depID]
@@ -328,7 +328,7 @@ func stageInputScanSchemas(stage physical.Stage, upstreams map[string]StageOutpu
 // has to say something per INPUT rather than per operator — what to read
 // (stageInputScanColumns) and what it is (stageInputScanSchemas) — so the two
 // cannot disagree about which alias is which dep.
-func stageInputDeps(stage physical.Stage) map[string]string {
+func stageInputDeps(stage dagplan.Stage) map[string]string {
 	out := make(map[string]string, 2)
 	put := func(alias, depID string) {
 		if alias == "" {
@@ -337,7 +337,7 @@ func stageInputDeps(stage physical.Stage) map[string]string {
 		out[alias] = depID
 	}
 	switch stage.Type {
-	case physical.StageHashJoin, physical.StageBroadcastJoin, physical.StageSortMergeJoin:
+	case dagplan.StageHashJoin, dagplan.StageBroadcastJoin, dagplan.StageSortMergeJoin:
 		if len(stage.Dependencies) < 2 {
 			return out
 		}
@@ -364,7 +364,7 @@ func stageInputDeps(stage physical.Stage) map[string]string {
 		for _, cj := range stage.ChainedJoins {
 			put(cj.BuildTableAlias, cj.BuildDepStage)
 		}
-	case physical.StageUnion:
+	case dagplan.StageUnion:
 		// Every arm, not just this task's: the alias IS the dep ID, so one
 		// map serves all tasks.
 		for i := range stage.UnionArms {
@@ -460,11 +460,11 @@ func applySourceColumnTypes(ops []distributed.OpSpec, byAlias map[string][]distr
 // observing the regression on the SF10 deploy of 47630b3 (Q02 22m vs 12m
 // baseline) — sharding was firing but probe-split wasn't picking it up.
 func broadcastJoinProbeSplit(
-	stage physical.Stage,
+	stage dagplan.Stage,
 	inputs map[string]StageOutput,
 	workerCount, currentNumTasks int,
 ) (numTasks int, ok bool) {
-	if stage.Type != physical.StageBroadcastJoin {
+	if stage.Type != dagplan.StageBroadcastJoin {
 		return 0, false
 	}
 	if currentNumTasks != 1 {
@@ -505,14 +505,14 @@ func broadcastJoinProbeSplit(
 }
 
 func aggregatePartialSplit(
-	stage physical.Stage,
+	stage dagplan.Stage,
 	inputs map[string]StageOutput,
 	workerCount, currentNumTasks int,
 ) (depID string, groups [][]string, ok bool) {
-	if stage.Type != physical.StageAggregate {
+	if stage.Type != dagplan.StageAggregate {
 		return "", nil, false
 	}
-	if stage.Distribution.Kind != physical.DistRoundRobin {
+	if stage.Distribution.Kind != dagplan.DistRoundRobin {
 		return "", nil, false
 	}
 	if currentNumTasks != 1 || workerCount <= 1 {
@@ -555,7 +555,7 @@ func aggregatePartialSplit(
 // Caller must verify the stage has 2 deps and probe upstream is single-part
 // with multiple files; this helper assumes the dispatcher already vetted
 // eligibility.
-func buildTaskInputsForBroadcastJoinSplitProbe(stage physical.Stage, upstreams map[string]StageOutput, workerIdx, numTasks int) (map[string][]string, error) {
+func buildTaskInputsForBroadcastJoinSplitProbe(stage dagplan.Stage, upstreams map[string]StageOutput, workerIdx, numTasks int) (map[string][]string, error) {
 	probeDep := stage.LeftDepStage
 	if probeDep == "" && len(stage.Dependencies) > 0 {
 		probeDep = stage.Dependencies[0]
@@ -572,7 +572,7 @@ func buildTaskInputsForBroadcastJoinSplitProbe(stage physical.Stage, upstreams m
 // broadcast build set plus an explicit probe slice (an even split, or one
 // owner's group from probeSplitAffineSets). Any disjoint cover of the probe
 // files is a correct split, so the slicer is the caller's choice.
-func probeSplitTaskInputs(stage physical.Stage, upstreams map[string]StageOutput, probeFiles []string) (map[string][]string, error) {
+func probeSplitTaskInputs(stage dagplan.Stage, upstreams map[string]StageOutput, probeFiles []string) (map[string][]string, error) {
 	expectedDeps := 2 + len(stage.FusedJoins)
 	if len(stage.Dependencies) != expectedDeps {
 		return nil, fmt.Errorf("broadcast_join split-probe stage %s expects %d deps (2 primary + %d fused), got %d",

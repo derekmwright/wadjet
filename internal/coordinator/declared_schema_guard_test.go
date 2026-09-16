@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/wadjet"
@@ -134,7 +134,7 @@ func TestReplicateFallbackKeepsTheQueryAnswerable(t *testing.T) {
 	var materializeCalls int
 	prevMat := replicateMaterialize
 	replicateMaterialize = func(c *Coordinator, ctx context.Context, queryID string,
-		stage physical.Stage, upstreamID string, files []string, upstream StageOutput,
+		stage dagplan.Stage, upstreamID string, files []string, upstream StageOutput,
 	) ([]string, int64, error) {
 		materializeCalls++
 		return nil, 0, errors.New("injected: the consolidation task failed")

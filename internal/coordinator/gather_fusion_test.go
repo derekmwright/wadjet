@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // TestCanFuseGather_Eligibility table-tests every reject path in
@@ -21,130 +21,130 @@ func TestCanFuseGather_Eligibility(t *testing.T) {
 	// this table, so HasLimit mirrors that (limit > 0) rather than always
 	// being true — a real `LIMIT 0` dependency is exercised separately
 	// below via mkAggHasLimit, since 0 is ambiguous as a plain int param.
-	mkAgg := func(typ string, sortKeys []physical.SortKeySpec, limit int, dist physical.DistKind) physical.Stage {
-		return physical.Stage{
+	mkAgg := func(typ string, sortKeys []dagplan.SortKeySpec, limit int, dist dagplan.DistKind) dagplan.Stage {
+		return dagplan.Stage{
 			ID:           "agg",
 			Type:         typ,
 			SortKeys:     sortKeys,
 			Limit:        limit,
 			HasLimit:     limit > 0,
-			Distribution: physical.Distribution{Kind: dist},
+			Distribution: dagplan.Distribution{Kind: dist},
 		}
 	}
 	// mkAggHasLimit builds a stage with an explicit, always-real Limit
 	// (including zero) — the #481 shape the plain int param above cannot
 	// express.
-	mkAggHasLimit := func(typ string, limit int, dist physical.DistKind) physical.Stage {
-		return physical.Stage{
+	mkAggHasLimit := func(typ string, limit int, dist dagplan.DistKind) dagplan.Stage {
+		return dagplan.Stage{
 			ID:           "agg",
 			Type:         typ,
 			Limit:        limit,
 			HasLimit:     true,
-			Distribution: physical.Distribution{Kind: dist},
+			Distribution: dagplan.Distribution{Kind: dist},
 		}
 	}
 	tests := []struct {
 		name    string
-		gather  physical.Stage
-		pending map[string]physical.Stage
+		gather  dagplan.Stage
+		pending map[string]dagplan.Stage
 		want    bool
 	}{
 		{
 			name: "happy path: gather over final_aggregate",
-			gather: physical.Stage{
+			gather: dagplan.Stage{
 				ID:           "gather",
-				Type:         physical.StageExchangeGather,
+				Type:         dagplan.StageExchangeGather,
 				Dependencies: []string{"agg"},
 			},
-			pending: map[string]physical.Stage{
-				"agg": mkAgg("final_aggregate", nil, 0, physical.DistSingleton),
+			pending: map[string]dagplan.Stage{
+				"agg": mkAgg("final_aggregate", nil, 0, dagplan.DistSingleton),
 			},
 			want: true,
 		},
 		{
 			name: "happy path: gather over merge_aggregate",
-			gather: physical.Stage{
+			gather: dagplan.Stage{
 				ID:           "gather",
-				Type:         physical.StageExchangeGather,
+				Type:         dagplan.StageExchangeGather,
 				Dependencies: []string{"agg"},
 			},
-			pending: map[string]physical.Stage{
-				"agg": mkAgg("merge_aggregate", nil, 0, physical.DistSingleton),
+			pending: map[string]dagplan.Stage{
+				"agg": mkAgg("merge_aggregate", nil, 0, dagplan.DistSingleton),
 			},
 			want: true,
 		},
 		{
 			name: "happy path: gather over Singleton final_aggregate with SortKeys (post-fuseSortIntoPredecessor)",
-			gather: physical.Stage{
+			gather: dagplan.Stage{
 				ID:           "gather",
-				Type:         physical.StageExchangeGather,
+				Type:         dagplan.StageExchangeGather,
 				Dependencies: []string{"agg"},
 			},
-			pending: map[string]physical.Stage{
-				"agg": mkAgg("final_aggregate", []physical.SortKeySpec{{Column: "x"}}, 0, physical.DistSingleton),
+			pending: map[string]dagplan.Stage{
+				"agg": mkAgg("final_aggregate", []dagplan.SortKeySpec{{Column: "x"}}, 0, dagplan.DistSingleton),
 			},
 			want: true,
 		},
 		{
 			name: "happy path: gather over Singleton final_aggregate with Limit",
-			gather: physical.Stage{
+			gather: dagplan.Stage{
 				ID:           "gather",
-				Type:         physical.StageExchangeGather,
+				Type:         dagplan.StageExchangeGather,
 				Dependencies: []string{"agg"},
 			},
-			pending: map[string]physical.Stage{
-				"agg": mkAgg("final_aggregate", nil, 100, physical.DistSingleton),
+			pending: map[string]dagplan.Stage{
+				"agg": mkAgg("final_aggregate", nil, 100, dagplan.DistSingleton),
 			},
 			want: true,
 		},
 		{
 			name: "rejects: ordered gather (Exchange.Ordering set)",
-			gather: physical.Stage{
+			gather: dagplan.Stage{
 				ID:           "gather",
-				Type:         physical.StageExchangeGather,
+				Type:         dagplan.StageExchangeGather,
 				Dependencies: []string{"agg"},
-				Exchange: &physical.ExchangeStage{
-					Ordering: []physical.SortKeySpec{{Column: "x"}},
+				Exchange: &dagplan.ExchangeStage{
+					Ordering: []dagplan.SortKeySpec{{Column: "x"}},
 				},
 			},
-			pending: map[string]physical.Stage{
-				"agg": mkAgg("final_aggregate", nil, 0, physical.DistSingleton),
+			pending: map[string]dagplan.Stage{
+				"agg": mkAgg("final_aggregate", nil, 0, dagplan.DistSingleton),
 			},
 			want: false,
 		},
 		{
 			name: "rejects: dep is hash_join, not aggregate",
-			gather: physical.Stage{
+			gather: dagplan.Stage{
 				ID:           "gather",
-				Type:         physical.StageExchangeGather,
+				Type:         dagplan.StageExchangeGather,
 				Dependencies: []string{"join"},
 			},
-			pending: map[string]physical.Stage{
-				"join": {ID: "join", Type: physical.StageHashJoin},
+			pending: map[string]dagplan.Stage{
+				"join": {ID: "join", Type: dagplan.StageHashJoin},
 			},
 			want: false,
 		},
 		{
 			name: "rejects: dep has SortKeys but is hash-partitioned (multi-task sort loses global order)",
-			gather: physical.Stage{
+			gather: dagplan.Stage{
 				ID:           "gather",
-				Type:         physical.StageExchangeGather,
+				Type:         dagplan.StageExchangeGather,
 				Dependencies: []string{"agg"},
 			},
-			pending: map[string]physical.Stage{
-				"agg": mkAgg("final_aggregate", []physical.SortKeySpec{{Column: "x"}}, 0, physical.DistHashPartitioned),
+			pending: map[string]dagplan.Stage{
+				"agg": mkAgg("final_aggregate", []dagplan.SortKeySpec{{Column: "x"}}, 0, dagplan.DistHashPartitioned),
 			},
 			want: false,
 		},
 		{
 			name: "rejects: dep has Limit but is hash-partitioned",
-			gather: physical.Stage{
+			gather: dagplan.Stage{
 				ID:           "gather",
-				Type:         physical.StageExchangeGather,
+				Type:         dagplan.StageExchangeGather,
 				Dependencies: []string{"agg"},
 			},
-			pending: map[string]physical.Stage{
-				"agg": mkAgg("final_aggregate", nil, 100, physical.DistHashPartitioned),
+			pending: map[string]dagplan.Stage{
+				"agg": mkAgg("final_aggregate", nil, 100, dagplan.DistHashPartitioned),
 			},
 			want: false,
 		},
@@ -155,126 +155,126 @@ func TestCanFuseGather_Eligibility(t *testing.T) {
 			// indistinguishable from "no limit at all", so canFuseGather
 			// wrongly allowed the fusion and the zero-row bound was lost.
 			name: "rejects: dep has a real LIMIT 0 and is hash-partitioned",
-			gather: physical.Stage{
+			gather: dagplan.Stage{
 				ID:           "gather",
-				Type:         physical.StageExchangeGather,
+				Type:         dagplan.StageExchangeGather,
 				Dependencies: []string{"agg"},
 			},
-			pending: map[string]physical.Stage{
-				"agg": mkAggHasLimit("final_aggregate", 0, physical.DistHashPartitioned),
+			pending: map[string]dagplan.Stage{
+				"agg": mkAggHasLimit("final_aggregate", 0, dagplan.DistHashPartitioned),
 			},
 			want: false,
 		},
 		{
 			name: "rejects: gather has multiple deps",
-			gather: physical.Stage{
+			gather: dagplan.Stage{
 				ID:           "gather",
-				Type:         physical.StageExchangeGather,
+				Type:         dagplan.StageExchangeGather,
 				Dependencies: []string{"agg", "other"},
 			},
-			pending: map[string]physical.Stage{
-				"agg":   mkAgg("final_aggregate", nil, 0, physical.DistSingleton),
-				"other": mkAgg("final_aggregate", nil, 0, physical.DistSingleton),
+			pending: map[string]dagplan.Stage{
+				"agg":   mkAgg("final_aggregate", nil, 0, dagplan.DistSingleton),
+				"other": mkAgg("final_aggregate", nil, 0, dagplan.DistSingleton),
 			},
 			want: false,
 		},
 		{
 			name: "rejects: dep not in pending map",
-			gather: physical.Stage{
+			gather: dagplan.Stage{
 				ID:           "gather",
-				Type:         physical.StageExchangeGather,
+				Type:         dagplan.StageExchangeGather,
 				Dependencies: []string{"missing"},
 			},
-			pending: map[string]physical.Stage{},
+			pending: map[string]dagplan.Stage{},
 			want:    false,
 		},
 		{
 			name: "happy path: gather over Singleton sort, no Ordering",
-			gather: physical.Stage{
+			gather: dagplan.Stage{
 				ID:           "gather",
-				Type:         physical.StageExchangeGather,
+				Type:         dagplan.StageExchangeGather,
 				Dependencies: []string{"sort"},
 			},
-			pending: map[string]physical.Stage{
+			pending: map[string]dagplan.Stage{
 				"sort": {
 					ID:           "sort",
 					Type:         "sort",
-					SortKeys:     []physical.SortKeySpec{{Column: "x", Desc: true}},
-					Distribution: physical.Distribution{Kind: physical.DistSingleton},
+					SortKeys:     []dagplan.SortKeySpec{{Column: "x", Desc: true}},
+					Distribution: dagplan.Distribution{Kind: dagplan.DistSingleton},
 				},
 			},
 			want: true,
 		},
 		{
 			name: "happy path: gather over Singleton merge_sort, no Ordering",
-			gather: physical.Stage{
+			gather: dagplan.Stage{
 				ID:           "gather",
-				Type:         physical.StageExchangeGather,
+				Type:         dagplan.StageExchangeGather,
 				Dependencies: []string{"ms"},
 			},
-			pending: map[string]physical.Stage{
+			pending: map[string]dagplan.Stage{
 				"ms": {
 					ID:           "ms",
 					Type:         "merge_sort",
-					SortKeys:     []physical.SortKeySpec{{Column: "v"}},
-					Distribution: physical.Distribution{Kind: physical.DistSingleton},
+					SortKeys:     []dagplan.SortKeySpec{{Column: "v"}},
+					Distribution: dagplan.Distribution{Kind: dagplan.DistSingleton},
 				},
 			},
 			want: true,
 		},
 		{
 			name: "happy path: gather over Singleton sort with matching Ordering",
-			gather: physical.Stage{
+			gather: dagplan.Stage{
 				ID:           "gather",
-				Type:         physical.StageExchangeGather,
+				Type:         dagplan.StageExchangeGather,
 				Dependencies: []string{"sort"},
-				Exchange: &physical.ExchangeStage{
-					Ordering: []physical.SortKeySpec{{Column: "x", Desc: true}, {Column: "id"}},
+				Exchange: &dagplan.ExchangeStage{
+					Ordering: []dagplan.SortKeySpec{{Column: "x", Desc: true}, {Column: "id"}},
 				},
 			},
-			pending: map[string]physical.Stage{
+			pending: map[string]dagplan.Stage{
 				"sort": {
 					ID:           "sort",
 					Type:         "sort",
-					SortKeys:     []physical.SortKeySpec{{Column: "x", Desc: true}, {Column: "id"}},
-					Distribution: physical.Distribution{Kind: physical.DistSingleton},
+					SortKeys:     []dagplan.SortKeySpec{{Column: "x", Desc: true}, {Column: "id"}},
+					Distribution: dagplan.Distribution{Kind: dagplan.DistSingleton},
 				},
 			},
 			want: true,
 		},
 		{
 			name: "rejects: gather over sort with mismatched Ordering keys",
-			gather: physical.Stage{
+			gather: dagplan.Stage{
 				ID:           "gather",
-				Type:         physical.StageExchangeGather,
+				Type:         dagplan.StageExchangeGather,
 				Dependencies: []string{"sort"},
-				Exchange: &physical.ExchangeStage{
-					Ordering: []physical.SortKeySpec{{Column: "y"}},
+				Exchange: &dagplan.ExchangeStage{
+					Ordering: []dagplan.SortKeySpec{{Column: "y"}},
 				},
 			},
-			pending: map[string]physical.Stage{
+			pending: map[string]dagplan.Stage{
 				"sort": {
 					ID:           "sort",
 					Type:         "sort",
-					SortKeys:     []physical.SortKeySpec{{Column: "x"}},
-					Distribution: physical.Distribution{Kind: physical.DistSingleton},
+					SortKeys:     []dagplan.SortKeySpec{{Column: "x"}},
+					Distribution: dagplan.Distribution{Kind: dagplan.DistSingleton},
 				},
 			},
 			want: false,
 		},
 		{
 			name: "rejects: gather over multi-task sort (would lose global order)",
-			gather: physical.Stage{
+			gather: dagplan.Stage{
 				ID:           "gather",
-				Type:         physical.StageExchangeGather,
+				Type:         dagplan.StageExchangeGather,
 				Dependencies: []string{"sort"},
 			},
-			pending: map[string]physical.Stage{
+			pending: map[string]dagplan.Stage{
 				"sort": {
 					ID:           "sort",
 					Type:         "sort",
-					SortKeys:     []physical.SortKeySpec{{Column: "x"}},
-					Distribution: physical.Distribution{Kind: physical.DistHashPartitioned},
+					SortKeys:     []dagplan.SortKeySpec{{Column: "x"}},
+					Distribution: dagplan.Distribution{Kind: dagplan.DistHashPartitioned},
 				},
 			},
 			want: false,
@@ -295,7 +295,7 @@ func TestCanFuseGather_Eligibility(t *testing.T) {
 // SortKeys + Limit onto the OpSort spec. Caller-side preconditions
 // (single input alias, non-empty SortKeys) surface as errors.
 func TestBuildSortFragment(t *testing.T) {
-	stage := physical.Stage{
+	stage := dagplan.Stage{
 		Type:     "sort",
 		Limit:    5,
 		HasLimit: true,
@@ -379,7 +379,7 @@ func TestBuildSortFragment(t *testing.T) {
 // emits OpGatherSink (carrying the reply subject) when gatherReplySubject is
 // non-empty and OpUnpartitionedSink otherwise.
 func TestBuildAggregateFragment_GatherSink(t *testing.T) {
-	stage := physical.Stage{
+	stage := dagplan.Stage{
 		Type:        "final_aggregate",
 		GroupByCols: []string{"g"},
 	}
@@ -414,10 +414,10 @@ func TestBuildAggregateFragment_GatherSink(t *testing.T) {
 		}
 	})
 	t.Run("with sort keys appends OpSort before terminal sink", func(t *testing.T) {
-		stageWithSort := physical.Stage{
+		stageWithSort := dagplan.Stage{
 			Type:        "final_aggregate",
 			GroupByCols: []string{"g"},
-			SortKeys:    []physical.SortKeySpec{{Column: "total", Desc: true}},
+			SortKeys:    []dagplan.SortKeySpec{{Column: "total", Desc: true}},
 			Limit:       10,
 			HasLimit:    true,
 		}

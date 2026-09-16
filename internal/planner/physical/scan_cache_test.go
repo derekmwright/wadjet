@@ -17,9 +17,9 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// scanCacheFixture builds a MemStore catalog with one 3-column file so
+// ScanCacheFixture builds a MemStore catalog with one 3-column file so
 // two consumers with different RequiredColumns can share a cache.
-func scanCacheFixture(t *testing.T, rows int) *catalog.Catalog {
+func ScanCacheFixture(t *testing.T, rows int) *catalog.Catalog {
 	t.Helper()
 	ctx := context.Background()
 	schema := parquet.Schema{Columns: []parquet.Column{
@@ -84,7 +84,7 @@ func drainSource(t *testing.T, src *catalogScanSource) []*batch.RecordBatch {
 // 2026-07-06 double-charge stalled SF10 Q21 6× — and that
 // releaseScanCache drops the batches.
 func TestScanCachePerConsumerProjection(t *testing.T) {
-	cat := scanCacheFixture(t, 100)
+	cat := ScanCacheFixture(t, 100)
 	tracker := memory.NewTracker("scan-cache-test", 1<<30)
 	cache := &scanCached{unionCols: []string{"id", "id2"}}
 
@@ -229,7 +229,7 @@ func TestMergeDuplicateScansKeepsConsumerColumns(t *testing.T) {
 // cache rather than through a query, because the interleaving is a schedule
 // and a query cannot be relied on to produce it.
 func TestAbandonedScanCacheIsNeverMarkedDone(t *testing.T) {
-	cat := scanCacheFixture(t, 100)
+	cat := ScanCacheFixture(t, 100)
 	cache := &scanCached{unionCols: []string{"id"}}
 
 	// The claiming reader takes the claim and reads one batch.

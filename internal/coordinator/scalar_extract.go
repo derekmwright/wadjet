@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
@@ -36,7 +37,7 @@ import (
 // The returned tier names which copy of the producer's output answered
 // (kv / peer / s3, or none for a file-less producer) — the grep handle for
 // the substitution barrier SF100 window 4 §7 measured.
-func (c *Coordinator) readScalarFromStageOutput(ctx context.Context, out StageOutput, projection []physical.OutputRename) (string, coordReadTier, error) {
+func (c *Coordinator) readScalarFromStageOutput(ctx context.Context, out StageOutput, projection []dagplan.OutputRename) (string, coordReadTier, error) {
 	files := flattenStageFiles(out)
 	if len(files) == 0 {
 		// Empty producer output is a legitimate SQL state, not a protocol
@@ -90,7 +91,7 @@ func (c *Coordinator) readScalarFromStageOutput(ctx context.Context, out StageOu
 // wrapped-aggregate SELECT — e.g. SUM(...) * 0.0001), compile and evaluate
 // the expression for row 0 and return its formatted literal. Otherwise fall
 // back to firstScalarLiteral on the raw first column.
-func scalarFromBatches(batches []*batch.RecordBatch, projection []physical.OutputRename) (string, bool) {
+func scalarFromBatches(batches []*batch.RecordBatch, projection []dagplan.OutputRename) (string, bool) {
 	for _, r := range projection {
 		if r.Expr == nil {
 			continue
@@ -253,7 +254,7 @@ func formatScalar(vec *batch.Vector, row int, typ parquet.TypeID) string {
 // projection (OutputRenames) attached to the producer — used for wrapped-
 // aggregate subqueries like Q11's "SUM(...) * 0.0001" — gets applied
 // during scalar extraction.
-func (c *Coordinator) substituteScalarDependencies(ctx context.Context, stage physical.Stage, producerOutputs map[string]StageOutput, producerStages map[string]physical.Stage) (physical.Stage, error) {
+func (c *Coordinator) substituteScalarDependencies(ctx context.Context, stage dagplan.Stage, producerOutputs map[string]StageOutput, producerStages map[string]dagplan.Stage) (dagplan.Stage, error) {
 	if len(stage.ScalarDependencies) == 0 {
 		return stage, nil
 	}
@@ -264,7 +265,7 @@ func (c *Coordinator) substituteScalarDependencies(ctx context.Context, stage ph
 		if !ok {
 			return stage, fmt.Errorf("missing producer output for %s (stage %s)", producerID, stage.ID)
 		}
-		var projection []physical.OutputRename
+		var projection []dagplan.OutputRename
 		if ps, hasStage := producerStages[producerID]; hasStage {
 			projection = ps.OutputRenames
 		}
@@ -323,7 +324,7 @@ func (c *Coordinator) substituteScalarDependencies(ctx context.Context, stage ph
 		out.ProjectExprs = newPE
 	}
 	if len(out.AggSpecs) > 0 {
-		newAgg := make([]physical.AggSpec, len(out.AggSpecs))
+		newAgg := make([]dagplan.AggSpec, len(out.AggSpecs))
 		for i, a := range out.AggSpecs {
 			if a.InputExpr != "" {
 				a.InputExpr = replacePlaceholders(a.InputExpr, literals)
@@ -333,7 +334,7 @@ func (c *Coordinator) substituteScalarDependencies(ctx context.Context, stage ph
 		out.AggSpecs = newAgg
 	}
 	if len(out.FusedAggSpecs) > 0 {
-		newFused := make([]physical.AggSpec, len(out.FusedAggSpecs))
+		newFused := make([]dagplan.AggSpec, len(out.FusedAggSpecs))
 		for i, a := range out.FusedAggSpecs {
 			if a.InputExpr != "" {
 				a.InputExpr = replacePlaceholders(a.InputExpr, literals)

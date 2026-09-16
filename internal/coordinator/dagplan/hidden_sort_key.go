@@ -1,0 +1,830 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package dagplan
+
+import (
+	"strings"
+
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+
+	"github.com/derekmwright/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
+)
+
+// resolveHiddenSortKeys points every synthetic ORDER BY key at a column its
+// producing stage really emits.
+func resolveHiddenSortKeys(stages []Stage) {
+	idx := make(map[string]int, len(stages))
+	for i := range stages {
+		idx[stages[i].ID] = i
+	}
+	for i := range stages {
+		if !hasHiddenSortKey(stages[i].SortKeys) {
+			continue
+		}
+		// Two questions, two answers — the split sortInputStage's comment
+		// states and which this pass was asking with one answer.
+		//
+		// REWRITING a key that names a real column needs only the columns the
+		// sorted STREAM carries, and a pass-through stage forwards those from
+		// below it. MATERIALIZING a computed key needs a fragment that runs an
+		// OpProject, which is the narrow `projectableProducer` list.
+		//
+		// Asking the narrow question for both left a hidden key above a WINDOW
+		// producer failing loudly on a query the single-process path answers:
+		// `SELECT id, SUM(plain) OVER () + 0 AS w FROM t ORDER BY plain` is a
+		// NESTED window, so `attachScanSelectProjections` declines it (its
+		// spec references a synthetic window column), nothing materialized
+		// `__sortkey_0`, and the sort stage's dependency is the window — not a
+		// projectable producer — so this pass declined too (#490's rule, one
+		// producer kind over).
+		var stream map[string]string
+		if in := sortInputStage(stages, idx, i); in != nil {
+			stream = emittedThroughPassThrough(stages, idx, in)
+		}
+		producer := sortKeyProducer(stages, idx, i)
+		for k := range stages[i].SortKeys {
+			key := &stages[i].SortKeys[k]
+			if !logical.IsHiddenSortColumn(key.Column) || key.SourceExpr == "" {
+				continue
+			}
+			if _, ok := stream[strings.ToLower(key.Column)]; ok {
+				continue // already materialized (attachScanSelectProjections)
+			}
+			if key.SourceColumn != "" {
+				if name, ok := lookupEmittedColumn(stream, key.SourceColumn); ok {
+					key.Column = name
+					continue
+				}
+			}
+			if producer == nil {
+				continue // a shape this pass cannot make emit the term
+			}
+			if materializeSortKey(producer, *key) {
+				stream = emittedThroughPassThrough(stages, idx, sortInputStage(stages, idx, i))
+			}
+		}
+	}
+}
+
+func hasHiddenSortKey(keys []SortKeySpec) bool {
+	for _, k := range keys {
+		if logical.IsHiddenSortColumn(k.Column) && k.SourceExpr != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// sortKeyProducer returns the stage whose output the stage at i sorts, or nil
+// when this pass does not recognize the shape.
+//
+// A standalone sort stage sorts its single dependency's output. Every other
+// stage carrying SortKeys got them from fuseSortIntoPredecessor, which folds
+// the ordering onto the stage that PRODUCES the rows — there the key has to
+// exist in the stage's own output, so the stage is its own producer.
+//
+// Only the stage types whose fragments append an OpProject for
+// Stage.ProjectExprs qualify (scan and the three join types): a producer this
+// pass cannot make emit a column is one it must leave alone.
+func sortKeyProducer(stages []Stage, idx map[string]int, i int) *Stage {
+	s := &stages[i]
+	if s.Type != StageSort && s.Type != "merge_sort" {
+		if projectableProducer(s.Type) {
+			return s
+		}
+		return nil
+	}
+	if len(s.Dependencies) != 1 {
+		return nil
+	}
+	depIdx, ok := idx[s.Dependencies[0]]
+	if !ok {
+		return nil
+	}
+	dep := &stages[depIdx]
+	if !projectableProducer(dep.Type) {
+		return nil
+	}
+	return dep
+}
+
+func projectableProducer(typ string) bool {
+	switch typ {
+	case StageScan, StageHashJoin, StageBroadcastJoin, StageSortMergeJoin:
+		return true
+	}
+	return false
+}
+
+// sortInputStage returns the stage whose output the stage at i sorts, of
+// WHATEVER type — the standalone sort's single dependency, or the stage itself
+// when fuseSortIntoPredecessor folded the ordering onto its producer.
+//
+// It is sortKeyProducer without the projectableProducer gate, because the two
+// callers ask different things. Materializing a computed key needs a fragment
+// that appends an OpProject for Stage.ProjectExprs, which is the narrow list
+// that gate names. REWRITING a key that already names a column needs nothing
+// of the kind: it only has to know which columns the stream carries. Refusing
+// both questions with one answer is why an ORDER BY over a WINDOW producer
+// failed loud — `sort: key column "k" does not exist in the input schema` for
+// a derived alias this pass could have settled (#490).
+func sortInputStage(stages []Stage, idx map[string]int, i int) *Stage {
+	s := &stages[i]
+	if s.Type != StageSort && s.Type != "merge_sort" {
+		return s
+	}
+	if len(s.Dependencies) != 1 {
+		return nil
+	}
+	depIdx, ok := idx[s.Dependencies[0]]
+	if !ok {
+		return nil
+	}
+	return &stages[depIdx]
+}
+
+// forwardsInputColumns reports whether a stage's fragment ships its input's
+// columns onward — so the columns its stream carries have to be read off the
+// stage BELOW it, not off its own (empty) column lists.
+//
+// A window stage is the case that made this necessary: its Stage carries
+// WindowCols and nothing else, so stageEmittedColumns alone reports it as
+// emitting nothing while the fragment forwards every input column and appends
+// the window outputs. Sort, merge_sort, limit and project answer the same way
+// — none of them narrows anything unless it carries ProjectExprs, which
+// stageEmittedColumns already reads first (#656).
+func forwardsInputColumns(typ string) bool {
+	switch typ {
+	case StageWindow, StageSort, StageMergeSort, StageLimit, StageProject:
+		return true
+	case StageExchangeRepartition, StageExchangeReplicate, StageExchangeGather:
+		// An exchange MOVES rows; it does not compute. Its Columns list is
+		// the shipped payload when set, and stageEmittedColumns reads that
+		// first — but an exchange with no list forwards everything, and
+		// stopping there reported the stage below it as emitting nothing.
+		return true
+	}
+	return false
+}
+
+// passThroughDepth bounds the walk below a pass-through stage. Stage graphs
+// are acyclic and these chains are one or two long in practice; the bound is
+// there so a malformed graph cannot spin.
+const passThroughDepth = 8
+
+// emittedThroughPassThrough lists the columns a stage's stream carries,
+// following a PASS-THROUGH stage down to the producer whose columns it
+// forwards.
+//
+// A window stage is the case that needs it: its Stage carries WindowCols and
+// nothing else, so stageEmittedColumns alone reports it as emitting NOTHING,
+// while the fragment actually forwards every input column and appends the
+// window outputs. Every other stage type answers for itself.
+func emittedThroughPassThrough(stages []Stage, idx map[string]int, s *Stage) map[string]string {
+	emitted := stageEmittedColumns(s)
+	for depth := 0; s != nil && forwardsInputColumns(s.Type) && depth < passThroughDepth; depth++ {
+		for _, w := range s.WindowCols {
+			if w.OutputCol != "" {
+				emitted[strings.ToLower(w.OutputCol)] = w.OutputCol
+			}
+		}
+		if len(s.Dependencies) != 1 {
+			return emitted
+		}
+		depIdx, ok := idx[s.Dependencies[0]]
+		if !ok {
+			return emitted
+		}
+		s = &stages[depIdx]
+		for k, v := range stageEmittedColumns(s) {
+			if _, dup := emitted[k]; !dup {
+				emitted[k] = v
+			}
+		}
+	}
+	return emitted
+}
+
+// materializedThroughPassThrough reports whether name is COMPUTED under that
+// exact spelling anywhere in the pass-through chain below s — the alias-
+// naming OpProject attachScanSelectProjections may have attached to the
+// fragment a window stage forwards. See projectionMaterializes for why the
+// stage's plain column list does not count.
+func materializedThroughPassThrough(stages []Stage, idx map[string]int, s *Stage, name string) bool {
+	for depth := 0; s != nil && depth < passThroughDepth; depth++ {
+		if projectionMaterializes(s, name) {
+			return true
+		}
+		if !forwardsInputColumns(s.Type) || len(s.Dependencies) != 1 {
+			return false
+		}
+		depIdx, ok := idx[s.Dependencies[0]]
+		if !ok {
+			return false
+		}
+		s = &stages[depIdx]
+	}
+	return false
+}
+
+// stageEmittedColumns lists the columns a stage's fragment ships, keyed by
+// lowercased name and valued by the spelling the stream carries.
+//
+// A projection narrows the output to exactly its own outputs, so it wins over
+// the column lists when present; pruneScanOutputColumns' OutputColumns is the
+// next authority, and the read set is the fallback. The row-count sentinel is
+// not a column — buildReadSchema drops it whenever a real column is present —
+// so it never counts as one here.
+func stageEmittedColumns(s *Stage) map[string]string {
+	out := map[string]string{}
+	add := func(names []string) {
+		for _, n := range names {
+			if n == "" || strings.EqualFold(n, logical.RowCountOnlyColumn) {
+				continue
+			}
+			out[strings.ToLower(n)] = n
+		}
+	}
+	// A SCAN's column lists are a READ SET, not an output schema: they carry
+	// names ancestors asked for, and a name the TABLE does not have is not a
+	// column the fragment can ship. Intersecting with the declared schema is
+	// what makes this model a fact rather than a restatement of what somebody
+	// asked for — the same intersection `scanStreamColumnsFiltered` applies,
+	// asked here so the reachability check, the hidden-sort-key pass and the
+	// derived-alias passes all read one answer (#776, ADR-0026 §4b).
+	declared := map[string]bool{}
+	if s.Type == StageScan {
+		for _, c := range s.ScanSchema {
+			declared[strings.ToLower(c.Name)] = true
+		}
+	}
+	addRead := func(names []string) {
+		for _, n := range names {
+			if len(declared) > 0 && !declared[strings.ToLower(stripQualifier(n))] {
+				continue
+			}
+			add([]string{n})
+		}
+	}
+	switch {
+	case len(s.ProjectExprs) > 0:
+		for _, p := range s.ProjectExprs {
+			add([]string{p.Name})
+		}
+	case len(s.OutputColumns) > 0:
+		addRead(s.OutputColumns)
+	default:
+		addRead(s.Columns)
+	}
+	// An aggregate's output IS its group keys and its aggregates, and a
+	// fused scan-aggregate's is the same — none of which appears in any
+	// column list. Without them emittedThroughPassThrough reported an
+	// aggregate under a window as emitting NOTHING, and the reachability
+	// check refused plans that were correct (#656 F2).
+	// A union's output is its arms' projection names — the set operation's
+	// result columns — which appear in no column list either.
+	for _, arm := range s.UnionArms {
+		for _, pe := range arm.Projections {
+			add([]string{pe.Name})
+		}
+	}
+	if len(s.ProjectExprs) == 0 {
+		add(s.GroupByCols)
+		add(s.FusedAggGroupBy)
+		for _, a := range s.AggSpecs {
+			add([]string{a.OutputCol})
+		}
+		for _, a := range s.FusedAggSpecs {
+			add([]string{a.OutputCol})
+		}
+	}
+	return out
+}
+
+// lookupEmittedColumn finds col among the producer's outputs, tolerating one
+// side carrying a table qualifier the other omits — the same qualified↔bare
+// fallback the engine's runtime column lookup applies (columnIndexFallback).
+func lookupEmittedColumn(emitted map[string]string, col string) (string, bool) {
+	if name, ok := emitted[strings.ToLower(col)]; ok {
+		return name, true
+	}
+	bare := strings.ToLower(stripQualifier(col))
+	if bare == "" {
+		return "", false
+	}
+	if name, ok := emitted[bare]; ok {
+		return name, true
+	}
+	// The producer may carry the QUALIFIED spelling (a join qualifies its
+	// build side's colliding columns) where the ORDER BY named it bare.
+	var match string
+	for lower, name := range emitted {
+		if strings.ToLower(stripQualifier(lower)) != bare {
+			continue
+		}
+		if match != "" {
+			// Two columns share the bare name — a self-join. Picking one
+			// would sort by an arbitrary side; leave the key alone and let
+			// the sort report the missing column.
+			return "", false
+		}
+		match = name
+	}
+	return match, match != ""
+}
+
+// materializeSortKey projects a computed ORDER BY term into the producing
+// fragment under its hidden name, and reports whether it did.
+//
+// OpProject narrows the fragment's output to exactly its projections, so the
+// producer's existing output set is carried through as passthrough entries
+// first — every column a consumer resolves by source name has to survive.
+// A producer that already carries a projection is left alone: those specs were
+// written by a pass that knows the query's output shape, and appending to them
+// would widen a result the gather does not expect.
+func materializeSortKey(producer *Stage, key SortKeySpec) bool {
+	if len(producer.ProjectExprs) > 0 {
+		return false
+	}
+	emitted := stageEmittedColumns(producer)
+	if len(emitted) == 0 {
+		return false
+	}
+	// Preserve the producer's own column order; map iteration is random and
+	// the projected order becomes the stream's schema order.
+	source := producer.Columns
+	if len(producer.OutputColumns) > 0 {
+		source = producer.OutputColumns
+	}
+	specs := make([]physical.ProjectExprSpec, 0, len(source)+1)
+	seen := make(map[string]bool, len(source))
+	for _, c := range source {
+		lower := strings.ToLower(c)
+		if seen[lower] {
+			continue
+		}
+		if _, ok := emitted[lower]; !ok {
+			continue
+		}
+		seen[lower] = true
+		specs = append(specs, physical.ProjectExprSpec{Expr: c, Name: c})
+	}
+	if len(specs) == 0 {
+		return false
+	}
+	producer.ProjectExprs = append(specs, physical.ProjectExprSpec{
+		Expr: key.SourceExpr,
+		Name: strings.ToLower(key.Column),
+		// The materialized column exists in no catalog, so its declared
+		// type IS its runtime type — the worker builds the output vector
+		// from it (#333). TypeKnown must ride along: Type's zero value is
+		// TypeBool, so a genuinely BOOL sort key is indistinguishable from
+		// "not set" without it, and projectOpFromSpecs drops it off the
+		// wire (#445, #472).
+		Type:      key.SourceType,
+		TypeKnown: key.SourceTypeKnown,
+		Fields:    key.SourceFields, Precision: key.SourcePrecision,
+		Scale: key.SourceScale,
+	})
+	return true
+}
+
+// annotateDerivedAliasSortKey records the column the DAG's streams carry for
+// a sort key that names a DERIVED TABLE's SELECT-list alias. child is the
+// node the Sort reads. See SortKeySpec.AliasSource for the defect.
+//
+// The walk is resolveSortKeyColumn's, with the opposite terminal: that
+// resolver commits only at an AGGREGATE, whose outputs it can name exactly,
+// and deliberately leaves a scan/join producer alone because
+// attachScanSelectProjections may still put the alias onto its fragment.
+// This annotation is how that decision gets DEFERRED instead of dropped —
+// the name is recorded here and settled in resolveDerivedAliasSortKeys, which
+// runs after that pass and can see what the fragment really emits.
+//
+// Only a PLAIN rename is recorded. A computed alias has no source column to
+// point at; the #383/#169 machinery materializes it into the producing
+// fragment under the alias itself, and pointing the key at the expression
+// text would miss that projection. Chained renames resolve level by level
+// (`j` → `k` → `s_nationkey`), each Project substituting at most once because
+// a projection list is simultaneous.
+func annotateDerivedAliasSortKey(key *SortKeySpec, child *logical.Node) {
+	if key.Column == "" || logical.IsHiddenSortColumn(key.Column) {
+		return // the synthetic-key mechanism above owns those
+	}
+	if src := physical.DerivedAliasSourceColumn(key.Column, child); src != "" {
+		key.AliasSource = src
+		return
+	}
+	// A COMPUTED alias has no source column, which is why the walk above
+	// declines it. Record its DEFINITION as the key's second name instead:
+	// `resolveDerivedAliasSortKeys` materializes it onto the producing
+	// fragment under the alias's own name, and the key keeps the name the
+	// query wrote (#807, ADR-0026 §4b).
+	if def, owner := derivedAliasDefinition(key.Column, child); def != nil {
+		key.AliasExpr = def.String()
+		if owner != nil && len(owner.Children) == 1 {
+			materialized := physical.DeclTypeParts(
+				physical.InferProjectionDeclType(def, parquet.TypeString,
+					physical.StrictIntArithCols(owner.Children[0]), physical.InputColDecls(owner.Children[0])))
+			key.AliasExprType, key.AliasExprPrecision, key.AliasExprScale, key.AliasExprFields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
+			key.AliasExprTypeKnown = true
+		}
+	}
+}
+
+// derivedAliasDefinition resolves a name that is a DERIVED TABLE's or CTE's
+// COMPUTED SELECT-list alias to the expression that defines it, and to the
+// Project node whose INPUT that expression is spelled against.
+//
+// It is physical.DerivedAliasSourceColumn's other half: that walk answers "which column
+// does the stream already carry for this alias" and returns "" for a computed
+// one; this answers "what would compute it".
+//
+// The walk stops at any producer that is not a pure pass-through, and that
+// boundary is the whole safety of the pass. Below a JOIN, an AGGREGATE, a
+// DISTINCT or a set operation the alias is MATERIALIZED — the arm's own
+// projection, the aggregate's output, the DISTINCT's group key — so the name is
+// real there and substituting the definition would compute it a second time
+// over columns that relation no longer carries. That is the mistake ADR-0025
+// records for an aggregate's argument (`aggInputRespellable`), stated
+// positively: only Project, Filter, Sort and Limit are looked through, which is
+// exactly where walkStages provably emits no stage for the Project.
+func derivedAliasDefinition(name string, child *logical.Node) (plansql.Node, *logical.Node) {
+	if name == "" {
+		return nil, nil
+	}
+	resolved := name
+	for n := child; n != nil; {
+		switch n.Type {
+		case logical.NodeProject:
+			bare := physical.DerivedScopeBareName(resolved, n)
+			proj := physical.ProjectionForName(n.Projections, resolved, bare)
+			if proj == nil {
+				return nil, nil
+			}
+			if proj.IsAgg {
+				return nil, nil // an aggregate output is a name, not an expression
+			}
+			if proj.Column == "" {
+				if proj.ASTExpr == nil {
+					return nil, nil
+				}
+				return proj.ASTExpr, n
+			}
+			next := proj.Column
+			if strings.EqualFold(next, resolved) {
+				return nil, nil // self-rename: nothing new to resolve
+			}
+			resolved = next
+		case logical.NodeFilter, logical.NodeLimit, logical.NodeSort:
+			// Value-preserving wrappers that emit no stage of their own for
+			// the Project below them.
+		default:
+			return nil, nil
+		}
+		if len(n.Children) != 1 {
+			return nil, nil
+		}
+		n = n.Children[0]
+	}
+	return nil, nil
+}
+
+// resolveDerivedAliasSortKeys points every sort key that names a derived
+// table's SELECT-list alias at the column its producing stage really emits.
+//
+// It runs after attachScanSelectProjections, because that pass is the one
+// thing that can make the alias real: where it attached an alias-naming
+// OpProject the fragment emits the alias and the key is already right, and
+// where it declined the fragment emits the SOURCE column and the key has to
+// be pointed there. The distinction cannot be drawn from the emitted column
+// SET alone — a shadowing alias (`s_acctbal AS s_suppkey`) means the producer
+// emits a column spelled like the key that is the WRONG one — so the test is
+// whether the projection MATERIALIZES the name, not whether the name exists.
+//
+// A stage the producer walk does not recognize (a merge_sort over a sort, the
+// gather's fused ordering) inherits the decision made for the key it was
+// copied from: emitMergeSortTree hands out the same SortKeySpec values, so
+// matching on (column, alias source) re-applies the rewrite exactly where the
+// same key travelled.
+func resolveDerivedAliasSortKeys(stages []Stage) {
+	idx := make(map[string]int, len(stages))
+	for i := range stages {
+		idx[stages[i].ID] = i
+	}
+	rewrites := map[string]string{}
+	rewriteKey := func(k SortKeySpec) string {
+		return strings.ToLower(k.Column) + "\x00" + strings.ToLower(k.AliasSource)
+	}
+	for i := range stages {
+		if !hasAliasSortKey(stages[i].SortKeys) {
+			continue
+		}
+		producer := sortInputStage(stages, idx, i)
+		if producer == nil {
+			continue
+		}
+		emitted := emittedThroughPassThrough(stages, idx, producer)
+		for k := range stages[i].SortKeys {
+			key := &stages[i].SortKeys[k]
+			if materializedThroughPassThrough(stages, idx, producer, key.Column) {
+				continue
+			}
+			if key.AliasSource == "" {
+				// A COMPUTED alias: the stream carries no column for it, so
+				// the value has to be MADE. Materialize the definition onto
+				// the producing fragment under the alias's own name — the
+				// key's published name is unchanged and every consumer above
+				// keeps reading it (#807).
+				if key.AliasExpr == "" {
+					continue
+				}
+				if _, already := lookupEmittedColumn(emitted, key.Column); already {
+					continue
+				}
+				if kp := sortKeyProducer(stages, idx, i); kp != nil &&
+					materializeAliasKey(kp, *key) {
+					emitted = emittedThroughPassThrough(stages, idx,
+						sortInputStage(stages, idx, i))
+				}
+				continue
+			}
+			name, ok := lookupEmittedColumn(emitted, key.AliasSource)
+			if !ok {
+				continue // leave today's behavior rather than invent an order
+			}
+			rewrites[rewriteKey(*key)] = name
+			key.Column = name
+		}
+	}
+	if len(rewrites) == 0 {
+		return
+	}
+	for i := range stages {
+		for k := range stages[i].SortKeys {
+			key := &stages[i].SortKeys[k]
+			if key.AliasSource == "" {
+				continue
+			}
+			if name, ok := rewrites[rewriteKey(*key)]; ok {
+				key.Column = name
+			}
+		}
+	}
+}
+
+func hasAliasSortKey(keys []SortKeySpec) bool {
+	for _, k := range keys {
+		// EITHER of the two names a derived-table alias key can carry: the
+		// source COLUMN a plain rename points at, or the DEFINITION a
+		// computed alias has instead (#807).
+		if k.AliasSource != "" || k.AliasExpr != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// projectionMaterializes reports whether the producer's fragment computes a
+// column under this exact name — the only way a derived table's alias comes
+// to exist on the DAG (attachScanSelectProjections' aliased branch, #316).
+// The stage's plain column list does NOT count: a name that appears there
+// belongs to the underlying relation, which for a shadowing alias is exactly
+// the wrong column.
+func projectionMaterializes(s *Stage, name string) bool {
+	for _, p := range s.ProjectExprs {
+		if strings.EqualFold(p.Name, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// annotateHiddenSortSource records what materializes key, when key is a
+// synthetic ORDER BY term. child is the node the Sort reads.
+func annotateHiddenSortSource(key *SortKeySpec, child *logical.Node) {
+	if !logical.IsHiddenSortColumn(key.Column) {
+		return
+	}
+	proj, owner := findHiddenProjection(child, key.Column)
+	if proj == nil {
+		return
+	}
+	key.SourceExpr = proj.Expr
+	if key.SourceExpr == "" && proj.ASTExpr != nil {
+		key.SourceExpr = proj.ASTExpr.String()
+	}
+	if proj.ASTExpr != nil && physical.IsSimpleColRefForRename(proj.ASTExpr) {
+		key.SourceColumn = proj.Column
+		if key.SourceColumn == "" {
+			key.SourceColumn = key.SourceExpr
+		}
+		return
+	}
+	if proj.ASTExpr != nil && len(owner.Children) == 1 {
+		// Same integer-preserving-arithmetic hint the materializing
+		// projection passes for every other computed-column site (#297,
+		// #445): without it, `ORDER BY s_suppkey + 1` inside a derived
+		// table declares FLOAT64 here where the same term at the query's
+		// root gets INT64 through attachScanSelectProjections (#472).
+		strictInt := physical.StrictIntArithCols(owner.Children[0])
+		materialized := physical.DeclTypeParts(
+			physical.InferProjectionDeclType(proj.ASTExpr, parquet.TypeString,
+				strictInt, physical.InputColDecls(owner.Children[0])))
+		key.SourceType, key.SourcePrecision, key.SourceScale, key.SourceFields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
+		key.SourceTypeKnown = true
+	}
+}
+
+// findHiddenProjection locates the materialized ORDER BY projection named
+// name, descending from the Sort's child through the nodes that pass a
+// projection's output along unchanged.
+func findHiddenProjection(child *logical.Node, name string) (*logical.Projection, *logical.Node) {
+	for n := child; n != nil; {
+		if n.Type == logical.NodeProject {
+			for i := range n.Projections {
+				p := &n.Projections[i]
+				if p.Hidden && strings.EqualFold(p.Alias, name) {
+					return p, n
+				}
+			}
+		}
+		switch n.Type {
+		case logical.NodeProject, logical.NodeFilter, logical.NodeLimit,
+			logical.NodeSort, logical.NodeDistinct:
+			if len(n.Children) != 1 {
+				return nil, nil
+			}
+			n = n.Children[0]
+		default:
+			return nil, nil
+		}
+	}
+	return nil, nil
+}
+
+// materializeAliasKey projects a computed derived alias into the producing
+// fragment under the ALIAS'S OWN NAME, and reports whether it did.
+//
+// It is materializeSortKey with the other of ADR-0026 §2's two names: that one
+// materializes a synthetic `__sortkey_N` under the hidden name nothing else
+// reads, this one under the name the query wrote, because every consumer above
+// — the sort's own key, an outer sort's key, the gather's rename — already
+// spells the alias. OpProject narrows the fragment's output to exactly its
+// projections, so the producer's existing outputs are carried through first.
+//
+// A producer that already carries a projection is left alone, for
+// materializeSortKey's reason: those specs were written by a pass that knows
+// the query's output shape, and appending to them would widen a result the
+// gather does not expect.
+func materializeAliasKey(producer *Stage, key SortKeySpec) bool {
+	return materializeAliasColumns(producer, []aliasColumn{{
+		Name: stripQualifier(key.Column), Expr: key.AliasExpr,
+		Type: key.AliasExprType, TypeKnown: key.AliasExprTypeKnown,
+		Fields: key.AliasExprFields, Precision: key.AliasExprPrecision, Scale: key.AliasExprScale,
+	}})
+}
+
+// aliasColumn is one derived-table alias a fragment has to compute: the name
+// the query calls it and the expression that defines it, spelled in the
+// producer's own scope.
+type aliasColumn struct {
+	Fields    []parquet.Column
+	Name      string
+	Expr      string
+	Type      parquet.TypeID
+	TypeKnown bool
+	Precision int
+	Scale     int
+}
+
+// materializeAliasColumns projects a set of computed derived aliases into the
+// producing fragment under THEIR OWN NAMES, and reports whether it did.
+//
+// One call for the whole set, because OpProject narrows the fragment's output
+// to exactly its projections: a second call appending a second key would have
+// to rebuild the pass-through list, and a window with a PARTITION BY and an
+// ORDER BY over two different computed aliases needs both.
+func materializeAliasColumns(producer *Stage, cols []aliasColumn) bool {
+	if producer == nil || len(producer.ProjectExprs) > 0 {
+		return false
+	}
+	emitted := stageEmittedColumns(producer)
+	source := producer.OutputColumns
+	if len(source) == 0 {
+		source = producer.Columns
+	}
+	specs := make([]physical.ProjectExprSpec, 0, len(source)+len(cols))
+	// passThrough[lower] is the index in specs of a spec that merely FORWARDS
+	// the producer's own column of that name. An alias that SHADOWS one
+	// replaces it; an alias that collides with anything else does not.
+	passThrough := make(map[string]int, len(source))
+	seen := make(map[string]bool, len(source))
+	for _, c := range source {
+		lower := strings.ToLower(c)
+		if seen[lower] {
+			continue
+		}
+		if _, ok := emitted[lower]; !ok {
+			continue
+		}
+		seen[lower] = true
+		passThrough[lower] = len(specs)
+		specs = append(specs, physical.ProjectExprSpec{Expr: c, Name: c})
+	}
+	if len(specs) == 0 {
+		return false
+	}
+	added := false
+	for _, c := range cols {
+		if c.Name == "" || c.Expr == "" {
+			continue
+		}
+		lower := strings.ToLower(c.Name)
+		spec := physical.ProjectExprSpec{
+			Expr: c.Expr, Name: c.Name, Type: c.Type,
+			TypeKnown: c.TypeKnown, Fields: c.Fields, Precision: c.Precision, Scale: c.Scale,
+		}
+		if seen[lower] {
+			// The producer already emits a column of that name, and which of
+			// two things that means decides the answer.
+			//
+			// A derived table that REDEFINES the name — `(SELECT g*0 AS g …)`
+			// read by `PARTITION BY z.g` — publishes a COMPUTED alias, which
+			// is the only reason `derivedAliasDefinition` answered at all. The
+			// producer's own `g` is then the WRONG column, and forwarding it
+			// is a silent wrong answer: the window partitioned by the base `g`
+			// and every row got its own partition where the single-process
+			// path has one. So the alias REPLACES the pass-through. The
+			// projection's inputs are its INPUT batch, not its own outputs, so
+			// `g * 0` still reads the base column while emitting the alias —
+			// which is exactly how `SELECT g*0 AS g` works on the other engine.
+			//
+			// Anything else — a name another pass materialized, or a second
+			// alias of the same name — is left alone: this pass is not the one
+			// that put it there.
+			idx, isForwarded := passThrough[lower]
+			if !isForwarded {
+				continue
+			}
+			specs[idx] = spec
+			delete(passThrough, lower)
+			added = true
+			continue
+		}
+		seen[lower] = true
+		specs = append(specs, spec)
+		added = true
+	}
+	if !added {
+		return false
+	}
+	producer.ProjectExprs = specs
+	return true
+}
+
+// derivedAliasColumnFor resolves a name that may be a derived table's COMPUTED
+// alias into the column a fragment would have to compute for it, or the zero
+// value when the name is not one.
+func derivedAliasColumnFor(name string, child *logical.Node) aliasColumn {
+	def, owner := derivedAliasDefinition(name, child)
+	if def == nil {
+		return aliasColumn{}
+	}
+	out := aliasColumn{Name: stripQualifier(name), Expr: def.String()}
+	if owner != nil && len(owner.Children) == 1 {
+		materialized := physical.DeclTypeParts(
+			physical.InferProjectionDeclType(def, parquet.TypeString,
+				physical.StrictIntArithCols(owner.Children[0]), physical.InputColDecls(owner.Children[0])))
+		out.Type, out.Precision, out.Scale, out.Fields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
+		out.TypeKnown = true
+	}
+	return out
+}
+
+// materializeWindowAliasKeys makes the fragment below a WINDOW compute every
+// computed derived alias the window's keys name.
+//
+// It runs at STAGE EMISSION rather than in a late pass for the reason the
+// caller's comment gives about `physical.DerivedAliasSourceColumn`: a PARTITION BY key
+// is also the stage's DISTRIBUTION, and rewriting it after EnsureDistribution
+// would leave the exchange and the operator keyed on different columns.
+//
+// The producer is the last PROJECTABLE stage the window's subtree emitted —
+// the same `projectableProducer` list the sort-key passes use, because it is
+// the same question: which fragments append an OpProject for
+// `Stage.ProjectExprs`.
+func materializeWindowAliasKeys(stages []Stage, cols []aliasColumn) bool {
+	var producer *Stage
+	for i := range stages {
+		if projectableProducer(stages[i].Type) {
+			producer = &stages[i]
+		}
+	}
+	if producer == nil {
+		return false
+	}
+	return materializeAliasColumns(producer, cols)
+}

@@ -7,6 +7,7 @@ package coordinator
 import (
 	"fmt"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -22,7 +23,7 @@ import (
 // inputRowBound is an EXACT row upper bound or 0 when unknown; pass it through
 // OpHashAggregate to choose the worker group-index layout.
 // See docs/internals/aggregate-fragment-fold-and-gather.md for the design.
-func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, aggs []distributed.AggSpec, sorts []distributed.SortKeySpec, gatherReplySubject string, inputRowBound int64) ([]distributed.OpSpec, error) {
+func buildAggregateFragment(stage dagplan.Stage, t *distributed.Task, taskInputs map[string][]string, aggs []distributed.AggSpec, sorts []distributed.SortKeySpec, gatherReplySubject string, inputRowBound int64) ([]distributed.OpSpec, error) {
 	if len(taskInputs) != 1 {
 		return nil, fmt.Errorf("aggregate fragment: expected 1 input alias, got %d", len(taskInputs))
 	}
@@ -95,8 +96,8 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 			Type:          distributed.OpSetOpEmit,
 			SetOp:         stage.SetOp,
 			SetOpAll:      stage.SetOpAll,
-			SetOpLeftCol:  physical.SetOpLeftCountCol,
-			SetOpRightCol: physical.SetOpRightCountCol,
+			SetOpLeftCol:  dagplan.SetOpLeftCountCol,
+			SetOpRightCol: dagplan.SetOpRightCountCol,
 		})
 	}
 	if len(t.PostFilterExprs) > 0 {
@@ -146,14 +147,14 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 // tasks emit one schema between them. A pass-through parquet scan arm reaches
 // here carrying every column of its table; without the OpProject the union's
 // output would be that arm's raw table width (#346).
-func buildUnionFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, armIdx int, gatherReplySubject string) ([]distributed.OpSpec, error) {
+func buildUnionFragment(stage dagplan.Stage, t *distributed.Task, taskInputs map[string][]string, armIdx int, gatherReplySubject string) ([]distributed.OpSpec, error) {
 	if armIdx < 0 || armIdx >= len(stage.UnionArms) {
 		return nil, fmt.Errorf("union fragment: task %d has no arm (stage has %d)", armIdx, len(stage.UnionArms))
 	}
 	arm := stage.UnionArms[armIdx]
 	// The arm's producer is Dependencies[armIdx] — one record, read here
 	// rather than from a copy on the arm that a later pass could leave behind
-	// (physical.UnionArm, #715).
+	// (dagplan.UnionArm, #715).
 	dep := stage.UnionArmDep(armIdx)
 	files, ok := taskInputs[dep]
 	if !ok {
@@ -219,14 +220,14 @@ func buildUnionFragment(stage physical.Stage, t *distributed.Task, taskInputs ma
 // redundant work, and for a stage carrying two OVER clauses with different
 // ORDER BYs it could not serve both anyway.
 //
-// Every spec field is resolved at plan time (physical.WindowColSpec); this is
+// Every spec field is resolved at plan time (dagplan.WindowColSpec); this is
 // a translation, not a decision — see distributed.WindowColSpec.OutputType.
 //
 // gatherReplySubject is accepted for symmetry with the other fragment
 // builders and is empty today: canFuseGather fuses only aggregate and sort
 // deps, so a window stage always writes its output and lets a separate
 // gather stage read it.
-func buildWindowFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, gatherReplySubject string) ([]distributed.OpSpec, error) {
+func buildWindowFragment(stage dagplan.Stage, t *distributed.Task, taskInputs map[string][]string, gatherReplySubject string) ([]distributed.OpSpec, error) {
 	if len(taskInputs) != 1 {
 		return nil, fmt.Errorf("window fragment: expected 1 input alias, got %d", len(taskInputs))
 	}
@@ -333,11 +334,11 @@ func buildWindowFragment(stage physical.Stage, t *distributed.Task, taskInputs m
 //	[OpShuffleSource, OpLimit, OpFilter?(a predicate above the LIMIT), <sink>]
 //
 // One task, reading every partition of its input, because that is what makes
-// the bound GLOBAL — the whole point of the stage (physical.StageLimit,
+// the bound GLOBAL — the whole point of the stage (dagplan.StageLimit,
 // #478). There is no per-task split to make here and no ordering decision to
 // take: a LIMIT under an ORDER BY reaches this stage only for its OFFSET,
 // with the sort stage below already having produced the ordered prefix.
-func buildLimitFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, gatherReplySubject string) ([]distributed.OpSpec, error) {
+func buildLimitFragment(stage dagplan.Stage, t *distributed.Task, taskInputs map[string][]string, gatherReplySubject string) ([]distributed.OpSpec, error) {
 	if len(taskInputs) != 1 {
 		return nil, fmt.Errorf("limit fragment: expected 1 input alias, got %d", len(taskInputs))
 	}
@@ -396,7 +397,7 @@ func buildLimitFragment(stage physical.Stage, t *distributed.Task, taskInputs ma
 // One Singleton task reads every input partition; filter/project are per-row,
 // so partitioning would also be exact.
 // See docs/internals/project-fragment-input-filter-order.md for the design.
-func buildProjectFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, gatherReplySubject string) ([]distributed.OpSpec, error) {
+func buildProjectFragment(stage dagplan.Stage, t *distributed.Task, taskInputs map[string][]string, gatherReplySubject string) ([]distributed.OpSpec, error) {
 	if len(taskInputs) != 1 {
 		return nil, fmt.Errorf("project fragment: expected 1 input alias, got %d", len(taskInputs))
 	}
@@ -475,7 +476,7 @@ func projectOpFromSpecs(specs []physical.ProjectExprSpec) (distributed.OpSpec, b
 // AggSpec.InputCol in a derived-input Project before HashAggregate consumes.
 // ScanShardIndex/Count carry row-group sharding over a single compacted parquet file.
 // See docs/internals/scan-aggregate-fragment-input-projection.md for the design.
-func buildScanAggregateFragment(stage physical.Stage, t *distributed.Task, files []string, aggs []distributed.AggSpec, shardIdx, shardCount int, terminalSink distributed.OpSpec) ([]distributed.OpSpec, error) {
+func buildScanAggregateFragment(stage dagplan.Stage, t *distributed.Task, files []string, aggs []distributed.AggSpec, shardIdx, shardCount int, terminalSink distributed.OpSpec) ([]distributed.OpSpec, error) {
 	if len(files) == 0 {
 		return nil, fmt.Errorf("scan-aggregate fragment: empty file list")
 	}
@@ -545,7 +546,7 @@ func buildScanAggregateFragment(stage physical.Stage, t *distributed.Task, files
 // Gather fusion is safe only with DistSingleton (one task, one ordered stream);
 // canFuseGather enforces that boundary.
 // See docs/internals/sort-fragment-filter-and-gather-order.md for the design.
-func buildSortFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, sorts []distributed.SortKeySpec, gatherReplySubject string) ([]distributed.OpSpec, error) {
+func buildSortFragment(stage dagplan.Stage, t *distributed.Task, taskInputs map[string][]string, sorts []distributed.SortKeySpec, gatherReplySubject string) ([]distributed.OpSpec, error) {
 	if len(taskInputs) != 1 {
 		return nil, fmt.Errorf("sort fragment: expected 1 input alias, got %d", len(taskInputs))
 	}

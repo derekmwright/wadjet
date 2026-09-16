@@ -101,7 +101,7 @@ func TestSetOpArmDeclsResolvesThroughANestedJoin(t *testing.T) {
 }
 
 // TestSetOpArmDeclsDescendsIntoADerivedTable is #554 at the resolution layer:
-// inputColDecls STOPS at a Project, so a derived-table arm's columns were
+// InputColDecls STOPS at a Project, so a derived-table arm's columns were
 // invisible and its DECIMAL arrived with no (p,s). The arm walk answers for
 // the names the subplan EMITS.
 func TestSetOpArmDeclsDescendsIntoADerivedTable(t *testing.T) {
@@ -160,7 +160,7 @@ func TestSetOpArmDeclsClaimsNothingItCannotResolve(t *testing.T) {
 			{Expr: "nosuch", Column: "nosuch", Alias: "x", ASTExpr: &plansql.ColRef{Column: "nosuch"}},
 		},
 	}
-	if _, ok := setOpArmDecls(proj).types["x"]; ok {
+	if _, ok := setOpArmDecls(proj).Types["x"]; ok {
 		t.Error(`a projection of a column no scan carries was typed; the walk must claim nothing, ` +
 			`because a confident wrong type here casts the arm's values`)
 	}

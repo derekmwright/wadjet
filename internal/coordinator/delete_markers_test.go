@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/scan"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 )
 
@@ -102,7 +102,7 @@ func TestStampTaskDeleteMarkersCoversEveryFileCarrier(t *testing.T) {
 // over two tables, or a self-join planning two scan stages, must not lose
 // one of them.
 func TestCollectStageDeletesUnionsEveryStage(t *testing.T) {
-	stages := []physical.Stage{
+	stages := []dagplan.Stage{
 		{ID: "scan-0", TableName: "a", ScanDeletes: map[string][]int64{"tables/a/f0.parquet": {1}}},
 		{ID: "scan-1", TableName: "b", ScanDeletes: map[string][]int64{"tables/b/f0.parquet": {2, 3}}},
 		{ID: "join-2"},
@@ -114,7 +114,7 @@ func TestCollectStageDeletesUnionsEveryStage(t *testing.T) {
 	if len(got["tables/b/f0.parquet"]) != 2 {
 		t.Fatalf("second stage's markers lost: %v", got)
 	}
-	if collectStageDeletes([]physical.Stage{{ID: "scan-0"}}) != nil {
+	if collectStageDeletes([]dagplan.Stage{{ID: "scan-0"}}) != nil {
 		t.Fatal("a plan with no deletes must produce a nil map")
 	}
 }

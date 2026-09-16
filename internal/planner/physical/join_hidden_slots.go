@@ -32,7 +32,7 @@ import (
 // empty-input value on the lateral's own output column, or nil when this join
 // has none. See exec.LateralEmptyDefault and logical.Node.LateralCountDefaults.
 func lateralEmptyDefaultOps(node *logical.Node) []exec.UnaryOperator {
-	marker, cols, drop := lateralEmptySpec(node)
+	marker, cols, drop := LateralEmptySpec(node)
 	op := exec.NewLateralEmptyDefault(marker, cols, drop)
 	if op == nil {
 		return nil
@@ -57,7 +57,7 @@ func compileLateralDefault(sql string) (exec.Expression, error) {
 	return compiled.Eval, nil
 }
 
-// lateralEmptySpec is the empty-input default's three parts: the column whose
+// LateralEmptySpec is the empty-input default's three parts: the column whose
 // NULL marks a padded row, one COMPILED rule per output column, and whether
 // this operator is the one that drops the marker.
 //
@@ -65,7 +65,7 @@ func compileLateralDefault(sql string) (exec.Expression, error) {
 // would otherwise drop it BELOW this operator, and the marker is what this
 // operator reads. Where the lateral publishes its key under a name the query
 // wrote, the column is the user's and nobody drops it.
-func lateralEmptySpec(node *logical.Node) (marker string, cols []exec.LateralDefault, drop bool) {
+func LateralEmptySpec(node *logical.Node) (marker string, cols []exec.LateralDefault, drop bool) {
 	if node == nil || len(node.LateralEmptyDefaults) == 0 || node.LateralPadMarker == "" {
 		return "", nil, false
 	}
@@ -95,80 +95,10 @@ func lateralEmptySpec(node *logical.Node) (marker string, cols []exec.LateralDef
 	return marker, cols, drop
 }
 
-// LateralEmptyDefaultSpec is one output column's empty-input RULE on a join
-// stage — the CASE the logical layer rendered, which the worker compiles; see
-// logical.LateralEmptyDefault and exec.LateralDefault.
-type LateralEmptyDefaultSpec struct {
-	Column  string
-	ExprSQL string
-}
-
-// HiddenJoinCol is one column a join MINTED for itself: the ORDINAL it sits
-// at in the side that carries it, the name the planner expects there (a
-// safety check, never the identity), and which side that is.
-type HiddenJoinCol struct {
-	Ordinal int
-	Name    string
-	Probe   bool
-}
-
-// stageHiddenPositions is joinHiddenPositions against the model the
-// DISTRIBUTED path runs under: what each side's STAGE emits, which is not what
-// the logical subtree emits — a Project emits no stage, so a lateral whose
-// SELECT list is a bare projection streams its SCAN's columns and the slot's
-// alias never lands there at all. A slot the stream does not carry has no
-// ordinal and is dropped by nobody, which is the honest answer for that shape.
-//
-// WHERE THE BLOCK IS MATERIALIZED THE TWO MODELS ARE ONE (#984). A block a
-// star reads publishes its own projection onto the stage, so the stage's
-// column list IS the subtree's emitted list and the ordinal is read from the
-// projection — the single-process model, from the same function that computes
-// it there. Reading the stream's ordinal for a materialized block would drop
-// whatever column happens to sit at the slot's old position.
-func stageHiddenPositions(node *logical.Node, published map[*logical.Node]bool) []HiddenJoinCol {
-	if node == nil || len(node.HiddenJoinCols) == 0 || len(node.Children) < 2 {
-		return nil
-	}
-	side := lateralSideOf(node)
-	if side < 0 {
-		return nil
-	}
-	var out []HiddenJoinCol
-	if block := materializedBlockUnder(node.Children[side], published); block != nil {
-		for _, hidden := range node.HiddenJoinCols {
-			if lateralMarkerDroppedAbove(node, hidden) {
-				continue
-			}
-			for i, name := range emittedColumnNames(block) {
-				if !strings.EqualFold(name, hidden) {
-					continue
-				}
-				out = append(out, HiddenJoinCol{Ordinal: i, Name: hidden, Probe: side == 0})
-				break
-			}
-		}
-		return out
-	}
-	declared := declaredJoinSchema(node.Children[side], nil, nil, nil)
-	for _, hidden := range node.HiddenJoinCols {
-		if lateralMarkerDroppedAbove(node, hidden) {
-			continue
-		}
-		for i, col := range declared {
-			if !strings.EqualFold(col.Name, hidden) {
-				continue
-			}
-			out = append(out, HiddenJoinCol{Ordinal: i, Name: hidden, Probe: side == 0})
-			break
-		}
-	}
-	return out
-}
-
-// lateralMarkerDroppedAbove reports whether the empty-input default operator
+// LateralMarkerDroppedAbove reports whether the empty-input default operator
 // ABOVE this join is the one that removes name — the marker it reads. The join
 // leaves it in place then, because the join's own drop runs below.
-func lateralMarkerDroppedAbove(node *logical.Node, name string) bool {
+func LateralMarkerDroppedAbove(node *logical.Node, name string) bool {
 	if node == nil || node.LateralPadMarker == "" || len(node.LateralEmptyDefaults) == 0 {
 		return false
 	}
@@ -189,11 +119,11 @@ func sameLateralMarker(a, b string) bool {
 	return strings.EqualFold(bare(a), bare(b))
 }
 
-// lateralSideOf is which child of this join the LATERAL lowering built, or -1
+// LateralSideOf is which child of this join the LATERAL lowering built, or -1
 // when neither says so. Only that side can carry a column this join minted;
 // the other one's `__key_0` is a USER's stored column (ADR-0012), and looking
 // for the name on both sides dropped it.
-func lateralSideOf(node *logical.Node) int {
+func LateralSideOf(node *logical.Node) int {
 	if node == nil || len(node.Children) < 2 {
 		return -1
 	}
@@ -223,17 +153,17 @@ func joinHiddenPositions(node *logical.Node) (probe, build map[int]string) {
 	if node == nil || len(node.HiddenJoinCols) == 0 || len(node.Children) < 2 {
 		return nil, nil
 	}
-	side := lateralSideOf(node)
+	side := LateralSideOf(node)
 	if side < 0 {
 		return nil, nil
 	}
-	names := emittedColumnNames(node.Children[side])
+	names := EmittedColumnNames(node.Children[side])
 	if len(names) == 0 {
 		return nil, nil
 	}
 	found := map[int]string{}
 	for _, hidden := range node.HiddenJoinCols {
-		if lateralMarkerDroppedAbove(node, hidden) {
+		if LateralMarkerDroppedAbove(node, hidden) {
 			continue
 		}
 		for i, n := range names {
@@ -253,12 +183,12 @@ func joinHiddenPositions(node *logical.Node) (probe, build map[int]string) {
 	return nil, found
 }
 
-// emittedColumnNames is the ORDER a batch from this subtree arrives in, as
+// EmittedColumnNames is the ORDER a batch from this subtree arrives in, as
 // far as the logical plan states it: a Project emits its projections, an
 // Aggregate its published keys then its aggregates, a Scan its columns. A
 // shape it cannot state returns nil, and a position nobody can compute drops
 // nothing.
-func emittedColumnNames(n *logical.Node) []string {
+func EmittedColumnNames(n *logical.Node) []string {
 	for cur := n; cur != nil; {
 		switch cur.Type {
 		case logical.NodeProject:
@@ -275,8 +205,8 @@ func emittedColumnNames(n *logical.Node) []string {
 			}
 			return out
 		case logical.NodeAggregate:
-			published, resolve := stageGroupKeyNames(cur, aggInput(cur))
-			out := append([]string(nil), stageEmittedKeyNames(published, resolve, logicalAggOutNames(cur))...)
+			published, resolve := StageGroupKeyNames(cur, aggInput(cur))
+			out := append([]string(nil), StageEmittedKeyNames(published, resolve, LogicalAggOutNames(cur))...)
 			for _, agg := range cur.AggExprs {
 				out = append(out, agg.OutputCol)
 			}

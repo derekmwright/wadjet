@@ -26,7 +26,7 @@ import (
 // because an aggregate that RAISES has to raise here as PostgreSQL's does), so
 // the term needs no evaluation, only a name: the hidden projection is a plain
 // reference to that output column. The single-process Project copies it, and
-// `physical.resolveHiddenSortKeys` maps it straight onto the column the
+// `dagplan.resolveHiddenSortKeys` maps it straight onto the column the
 // aggregate stage emits — nothing is materialized on either engine, which is
 // why this is not the shape the refusal was really guarding.
 //

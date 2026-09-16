@@ -30,7 +30,7 @@ func parseSimplePredicate(raw string) exec.UnaryOperator {
 	for _, o := range operators {
 		parts := strings.SplitN(raw, o.sql, 2)
 		if len(parts) == 2 {
-			col := cleanExpr(strings.TrimSpace(parts[0]))
+			col := CleanExpr(strings.TrimSpace(parts[0]))
 			valStr := strings.TrimSpace(parts[1])
 			val := parseValue(valStr)
 			return kernelOrNothing(col, o.op, val, numericLitText(valStr))
@@ -40,13 +40,13 @@ func parseSimplePredicate(raw string) exec.UnaryOperator {
 	// LIKE / NOT LIKE
 	upper := strings.ToUpper(raw)
 	if idx := strings.Index(upper, " NOT LIKE "); idx >= 0 {
-		col := cleanExpr(strings.TrimSpace(raw[:idx]))
+		col := CleanExpr(strings.TrimSpace(raw[:idx]))
 		pattern := strings.TrimSpace(raw[idx+len(" NOT LIKE "):])
 		pattern = strings.Trim(pattern, "'")
 		return exec.NewLikeFilter(col, pattern, true)
 	}
 	if idx := strings.Index(upper, " LIKE "); idx >= 0 {
-		col := cleanExpr(strings.TrimSpace(raw[:idx]))
+		col := CleanExpr(strings.TrimSpace(raw[:idx]))
 		pattern := strings.TrimSpace(raw[idx+len(" LIKE "):])
 		pattern = strings.Trim(pattern, "'")
 		return exec.NewLikeFilter(col, pattern, false)
@@ -54,17 +54,17 @@ func parseSimplePredicate(raw string) exec.UnaryOperator {
 
 	// IS NULL / IS NOT NULL — vectorized null bitmap scan
 	if strings.Contains(upper, "IS NOT NULL") {
-		col := cleanExpr(strings.TrimSpace(raw[:strings.Index(upper, "IS NOT NULL")]))
+		col := CleanExpr(strings.TrimSpace(raw[:strings.Index(upper, "IS NOT NULL")]))
 		return exec.NewNullCheckFilter(col, false)
 	}
 	if strings.Contains(upper, "IS NULL") {
-		col := cleanExpr(strings.TrimSpace(raw[:strings.Index(upper, "IS NULL")]))
+		col := CleanExpr(strings.TrimSpace(raw[:strings.Index(upper, "IS NULL")]))
 		return exec.NewNullCheckFilter(col, true)
 	}
 
 	// BETWEEN: "col between X and Y" → col >= X AND col <= Y
 	if idx := strings.Index(upper, " BETWEEN "); idx >= 0 {
-		col := cleanExpr(strings.TrimSpace(raw[:idx]))
+		col := CleanExpr(strings.TrimSpace(raw[:idx]))
 		rest := strings.TrimSpace(raw[idx+len(" BETWEEN "):])
 		andIdx := strings.Index(strings.ToUpper(rest), " AND ")
 		if andIdx >= 0 {
@@ -80,7 +80,7 @@ func parseSimplePredicate(raw string) exec.UnaryOperator {
 
 	// IN: "col in (v1, v2, v3)" → vectorized set membership
 	if idx := strings.Index(upper, " IN "); idx >= 0 {
-		col := cleanExpr(strings.TrimSpace(raw[:idx]))
+		col := CleanExpr(strings.TrimSpace(raw[:idx]))
 		rest := strings.TrimSpace(raw[idx+len(" IN "):])
 		rest = strings.TrimPrefix(rest, "(")
 		rest = strings.TrimSuffix(rest, ")")
@@ -266,50 +266,4 @@ func wrapExpr(e expr.Expr) exec.Expression {
 // expr.FilterPredicate, so the row loop neither boxes nor re-dispatches.
 func wrapPredicate(e expr.Expr) exec.Predicate {
 	return expr.FilterPredicate(e)
-}
-
-// limitPushdownSafe reports whether a LIMIT may be applied independently by
-// each task under it.
-//
-// It may when every node between the LIMIT and its scans passes rows through
-// one at a time: Project and Filter qualify (a filtered task simply reaches n
-// later, or never), and a scan is the base case. Anything that derives rows
-// from more than one input row — join, aggregate, distinct, sort, window, set
-// operation — does not: bounding its INPUT changes its OUTPUT, which would
-// silently produce wrong answers rather than merely fewer rows.
-//
-// Multiple scans under a UNION ALL are fine: each bounds itself, and the
-// coordinator trims the union to n.
-func limitPushdownSafe(node *logical.Node) bool {
-	if node == nil {
-		return false
-	}
-	sawScan := false
-	var walk func(n *logical.Node) bool
-	walk = func(n *logical.Node) bool {
-		if n == nil {
-			return false
-		}
-		switch n.Type {
-		case logical.NodeScan:
-			// A table function's row count is not bounded by its input, but
-			// stopping early still yields a prefix of what it would produce.
-			sawScan = true
-			return true
-		case logical.NodeProject, logical.NodeFilter, logical.NodeLimit:
-			// A nested LIMIT is at most as permissive as this one.
-		default:
-			return false
-		}
-		for _, c := range n.Children {
-			if !walk(c) {
-				return false
-			}
-		}
-		return true
-	}
-	if !walk(node) {
-		return false
-	}
-	return sawScan
 }

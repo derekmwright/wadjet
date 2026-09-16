@@ -14,8 +14,8 @@ import (
 // rlrDecls is the declaration set the refusal reads: one REAL column and one
 // DOUBLE PRECISION column holding the same numbers, which is what makes the
 // "the OPERAND's type decides" rule visible.
-func rlrDecls() colDecls {
-	return colDecls{types: map[string]parquet.TypeID{
+func rlrDecls() ColDecls {
+	return ColDecls{Types: map[string]parquet.TypeID{
 		"r_val":   parquet.TypeFloat32,
 		"r_other": parquet.TypeFloat32,
 		"d_val":   parquet.TypeFloat64,

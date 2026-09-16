@@ -10,8 +10,8 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
@@ -132,7 +132,7 @@ func TestMergeCompleteBuildStats_ForceStageLateAttach(t *testing.T) {
 // Deferred spec pointing at the deterministic merged key; a wait-mode
 // consume in the same state is silently omitted (existing degradation).
 func TestDynamicFilterSpecsDeferred(t *testing.T) {
-	consumes := []physical.DynamicFilterConsume{
+	consumes := []dagplan.DynamicFilterConsume{
 		{FilterID: "fa", SourceStageID: "src-a", TargetColumn: "l_suppkey", KeyType: "int64", AttachOnArrival: true},
 		{FilterID: "fb", SourceStageID: "src-b", TargetColumn: "l_orderkey", KeyType: "int64"},
 	}
@@ -158,7 +158,7 @@ func TestDynamicFilterSpecsDeferredIncrementalKillSwitch(t *testing.T) {
 	old := dfIncrementalPartials
 	dfIncrementalPartials = false
 	defer func() { dfIncrementalPartials = old }()
-	consumes := []physical.DynamicFilterConsume{
+	consumes := []dagplan.DynamicFilterConsume{
 		{FilterID: "fa", SourceStageID: "src-a", TargetColumn: "l_suppkey", KeyType: "int64", AttachOnArrival: true},
 	}
 	specs := dynamicFilterSpecsFromBuildStats(consumes, map[string]StageOutput{}, "q", "bkt")

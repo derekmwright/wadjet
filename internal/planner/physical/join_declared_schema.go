@@ -9,21 +9,21 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// declaredJoinSchema derives one join side's plan-time schema from annotated
+// DeclaredJoinSchema derives one join side's plan-time schema from annotated
 // scan names/order/types, narrowed by want (NeededColumns plus join keys).
 // Empty want retains every scan column. Match buildReadSchema order: table
 // schema per scan, then scans in walk order. exec.HashJoin consults this
 // advisory schema only when the side produces no batch, so approximations for
 // untypable subtrees do not affect non-empty joins. Empty outer-join sides
 // must have present NULL columns, not absent columns (#348, #352).
-func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.Node]bool,
+func DeclaredJoinSchema(n *logical.Node, want []string, published map[*logical.Node]bool,
 	subqueryDecl func(string) (parquet.Column, bool)) []parquet.Column {
 	if n == nil {
 		return nil
 	}
 	wantSet := make(map[string]bool, len(want))
 	for _, w := range want {
-		if w = wantBareName(w); w != "" {
+		if w = WantBareName(w); w != "" {
 			wantSet[w] = true
 		}
 	}
@@ -51,7 +51,7 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 			// write a file of a different WIDTH from its siblings' —
 			// ADR-0010's `one stage's files describe one relation`.
 			for _, col := range declaredBlockSchema(cur, wantSet, published, subqueryDecl) {
-				lc := strings.ToLower(blockBareName(col.Name))
+				lc := strings.ToLower(BlockBareName(col.Name))
 				if seen[lc] {
 					continue
 				}
@@ -68,12 +68,12 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 			// still shapes it correctly. Bare columns and renames fall
 			// through to the scans below, source-named as the DAG spells
 			// them.
-			var colTypes colDecls
+			var colTypes ColDecls
 			var strictInt map[string]bool
 			haveTypes := false
 			for _, pr := range cur.Projections {
 				if pr.IsAgg || pr.Column != "" || pr.Alias == "" ||
-					pr.ASTExpr == nil || isSimpleColRefForRename(pr.ASTExpr) {
+					pr.ASTExpr == nil || IsSimpleColRefForRename(pr.ASTExpr) {
 					continue
 				}
 				lc := strings.ToLower(pr.Alias)
@@ -81,7 +81,7 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 					continue
 				}
 				if !haveTypes && len(cur.Children) == 1 {
-					colTypes = inputColDecls(cur.Children[0])
+					colTypes = InputColDecls(cur.Children[0])
 					// Same integer-preserving-arithmetic hint
 					// absorbComputedSubqueryProjection passes when it
 					// materializes this same computed column into the scan
@@ -89,11 +89,11 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 					// FLOAT64 here but INT64 there, and a join over an empty
 					// side disagrees with a join over a full one about the
 					// type of its own column (#473).
-					strictInt = strictIntArithCols(cur.Children[0])
+					strictInt = StrictIntArithCols(cur.Children[0])
 					haveTypes = true
 				}
 				seen[lc] = true
-				decl := inferProjectionDeclType(pr.ASTExpr, parquet.TypeString, strictInt, colTypes)
+				decl := InferProjectionDeclType(pr.ASTExpr, parquet.TypeString, strictInt, colTypes)
 				out = append(out, parquet.Column{
 					Name:      pr.Alias,
 					Type:      decl.ID,
@@ -121,14 +121,14 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 					}
 					pub := strings.ToLower(strings.TrimSpace(pr.Alias))
 					if pub == "" {
-						pub = wantBareName(pr.Column)
+						pub = WantBareName(pr.Column)
 					}
 					if !wantSet[pub] {
 						continue
 					}
-					wantSet[wantBareName(pr.Column)] = true
+					wantSet[WantBareName(pr.Column)] = true
 					if pr.Expr != "" {
-						wantSet[wantBareName(pr.Expr)] = true
+						wantSet[WantBareName(pr.Expr)] = true
 					}
 				}
 			}
@@ -137,12 +137,12 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 			// Stop at an aggregate: its output differs from the scan underneath it.
 			// Empty and non-empty partitions must agree on output width and types
 			// (ADR-0010; #767, #956), including hidden correlation-key slots.
-			// Declare keys first using stageGroupKeyNames and stageEmittedKeyNames
+			// Declare keys first using StageGroupKeyNames and StageEmittedKeyNames
 			// (exec.PublishedGroupKeyNames), then each aggregate under its OutputCol,
 			// in the operator's emission order.
-			in := emittedColTypes(cur.Children[0])
-			published, resolve := stageGroupKeyNames(cur, cur.Children[0])
-			emitted := stageEmittedKeyNames(published, resolve, logicalAggOutNames(cur))
+			in := EmittedColTypes(cur.Children[0])
+			published, resolve := StageGroupKeyNames(cur, cur.Children[0])
+			emitted := StageEmittedKeyNames(published, resolve, LogicalAggOutNames(cur))
 			keyTypes, _ := derivedGroupKeyTypes(cur.GroupBy, cur.Children[0])
 			for i, name := range emitted {
 				lc := strings.ToLower(name)
@@ -168,7 +168,7 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 				if agg.OutputCol == "" || seen[lc] || (len(wantSet) > 0 && !wantSet[lc]) {
 					continue
 				}
-				t, known := aggSpecOutputType(cur, agg)
+				t, known := AggSpecOutputType(cur, agg)
 				if !known {
 					continue
 				}
@@ -180,7 +180,7 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 					// exactly the disagreement the shuffle guard refuses, so a
 					// DECIMAL aggregate whose (p,s) is not known at plan time
 					// is left out rather than declared at scale 0.
-					m, known := aggSpecOutputDecimal(cur, agg)
+					m, known := AggSpecOutputDecimal(cur, agg)
 					if !known {
 						continue
 					}
@@ -270,10 +270,10 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 	return out
 }
 
-// joinSideSchemas returns the declared probe- and build-side schemas for a
+// JoinSideSchemas returns the declared probe- and build-side schemas for a
 // join node: the columns downstream needs plus the join keys, which is
 // exactly what the shuffle carries for each side.
-func joinSideSchemas(node *logical.Node, leftKeys, rightKeys []string,
+func JoinSideSchemas(node *logical.Node, leftKeys, rightKeys []string,
 	published map[*logical.Node]bool, subqueryDecl func(string) (parquet.Column, bool)) (probe, build []parquet.Column) {
 	if node == nil || len(node.Children) < 2 {
 		return nil, nil
@@ -287,139 +287,24 @@ func joinSideSchemas(node *logical.Node, leftKeys, rightKeys []string,
 	// on every star over a decorrelated LATERAL. An empty want keeps every
 	// column, which is what a star asks for.
 	if len(node.NeededColumns) == 0 {
-		return declaredJoinSchema(node.Children[0], nil, published, subqueryDecl),
-			declaredJoinSchema(node.Children[1], nil, published, subqueryDecl)
+		return DeclaredJoinSchema(node.Children[0], nil, published, subqueryDecl),
+			DeclaredJoinSchema(node.Children[1], nil, published, subqueryDecl)
 	}
 	want := make([]string, 0, len(node.NeededColumns)+len(leftKeys)+len(rightKeys))
 	want = append(want, node.NeededColumns...)
 	want = append(want, leftKeys...)
 	want = append(want, rightKeys...)
-	return declaredJoinSchema(node.Children[0], want, published, subqueryDecl),
-		declaredJoinSchema(node.Children[1], want, published, subqueryDecl)
+	return DeclaredJoinSchema(node.Children[0], want, published, subqueryDecl),
+		DeclaredJoinSchema(node.Children[1], want, published, subqueryDecl)
 }
 
-// wantSetBareName is the spelling declaredJoinSchema's want set is keyed by: a
+// wantSetBareName is the spelling DeclaredJoinSchema's want set is keyed by: a
 // qualified reference ("o.o_orderstatus") names the same column as its bare
 // form in the scan's schema.
-func wantBareName(name string) string {
+func WantBareName(name string) string {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if dot := strings.LastIndexByte(name, '.'); dot >= 0 {
 		name = name[dot+1:]
 	}
 	return name
-}
-
-// respellDeclaredJoinSideSchemas makes a join's advisory side schemas spell
-// their columns the way the producing stage really does, WHERE A LATE PASS
-// CHANGED THAT SPELLING AFTER THE DECLARATION WAS WRITTEN.
-//
-// `declaredJoinSchema` mirrors `joinOutputSchemaWithMapping`'s duplicate rule
-// at emission: the first relation to publish a bare name keeps it and the next
-// one is qualified by the alias that owns it. `markCoPathingSelfJoinBuilds`
-// then runs over the FINISHED stage list and sets `QualifyAllBuildCols` on
-// joins whose build scans co-path (the Q07 rule, ADR-0026 §7), which qualifies
-// EVERY build column of those stages — including ones the declaration left
-// bare because nothing contested them. A block whose body is such a join then
-// declared `customer` where the stream writes `o2.customer`, and the task
-// whose partition was EMPTY wrote that name beside its siblings':
-// `names column 2 "customer" where an earlier file of the same stage input
-// named it "o2.customer"` (ADR-0010, arc R2 round 2 B1).
-//
-// It fires ONLY for a side whose producing chain carries that flag, because
-// that is the only spelling this layer knows changed. Elsewhere the
-// declaration stands: the stream MODEL and the executor agree on every shape
-// this arc measured except one, a FULL OUTER join over a CamelCase schema
-// where the model qualifies a build column the executor emits bare
-// (`camel_case_schema_invariance_test.go`, measured in round 2 and recorded as
-// a filing candidate) — and respelling from the model there put the model's
-// answer into a file the executor then disagreed with.
-//
-// Only the QUALIFIER moves, never the column's own spelling: the model carries
-// whatever case the planner's lists hold and the executor keeps the catalog's.
-func respellDeclaredJoinSideSchemas(stages []Stage) {
-	idx := make(map[string]int, len(stages))
-	for i := range stages {
-		idx[stages[i].ID] = i
-	}
-	respell := func(decl []parquet.Column, dep string) {
-		d, ok := idx[dep]
-		if !ok || len(decl) == 0 || !chainQualifiesAllBuildCols(stages, idx, d, passThroughDepth) {
-			return
-		}
-		in := stageStreamColumns(stages, idx, &stages[d], passThroughDepth)
-		if len(in) == 0 {
-			return
-		}
-		for j := range decl {
-			if name, ok := streamSpellingFor(in, decl[j].Name); ok {
-				decl[j].Name = name
-			}
-		}
-	}
-	for i := range stages {
-		s := &stages[i]
-		if !isJoinStage(s.Type) {
-			continue
-		}
-		probeDep, buildDep := s.LeftDepStage, s.RightDepStage
-		if probeDep == "" && len(s.Dependencies) > 0 {
-			probeDep = s.Dependencies[0]
-		}
-		if buildDep == "" && len(s.Dependencies) > 1 {
-			buildDep = s.Dependencies[1]
-		}
-		respell(s.JoinProbeSchema, probeDep)
-		respell(s.JoinBuildSchema, buildDep)
-	}
-}
-
-// chainQualifiesAllBuildCols reports whether the stage at i, or a stage it
-// reads through, had `QualifyAllBuildCols` set on it.
-func chainQualifiesAllBuildCols(stages []Stage, idx map[string]int, i, depth int) bool {
-	if depth <= 0 || i < 0 || i >= len(stages) {
-		return false
-	}
-	if stages[i].QualifyAllBuildCols {
-		return true
-	}
-	for _, dep := range stages[i].Dependencies {
-		if d, ok := idx[dep]; ok && chainQualifiesAllBuildCols(stages, idx, d, depth-1) {
-			return true
-		}
-	}
-	return false
-}
-
-// streamSpellingFor is the QUALIFIER a stream carries a declared column under,
-// put back on the declared column's own spelling, when the two disagree about
-// it and exactly one stream column answers to the declared bare name.
-func streamSpellingFor(in []streamCol, declared string) (string, bool) {
-	want := strings.TrimSpace(declared)
-	if want == "" {
-		return "", false
-	}
-	bare := wantBareName(want)
-	written := want
-	if dot := strings.LastIndexByte(written, '.'); dot >= 0 {
-		written = written[dot+1:]
-	}
-	match, hits := "", 0
-	for _, c := range in {
-		if c.Dropped {
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(c.Name), want) {
-			return "", false // the stream already spells it this way
-		}
-		if wantBareName(c.Name) == bare {
-			match, hits = strings.TrimSpace(c.Name), hits+1
-		}
-	}
-	if hits != 1 {
-		return "", false
-	}
-	if dot := strings.LastIndexByte(match, '.'); dot >= 0 {
-		return match[:dot+1] + written, true
-	}
-	return written, true
 }

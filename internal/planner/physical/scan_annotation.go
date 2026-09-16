@@ -38,10 +38,10 @@ func (p *Planner) annotateScanColumns(ctx context.Context, node *logical.Node) {
 		// scan — so conceding at each door would be a different name at each
 		// door. Resolving here means a reference that named the table in
 		// another case becomes the catalog's own spelling for the whole plan.
-		if p.catalog != nil {
-			node.TableName = p.catalog.ResolveTableName(node.TableName)
+		if p.Catalog != nil {
+			node.TableName = p.Catalog.ResolveTableName(node.TableName)
 		}
-		table, err := p.catalog.GetTable(ctx, node.TableName)
+		table, err := p.Catalog.GetTable(ctx, node.TableName)
 		if err == nil {
 			cols := make([]string, len(table.Schema.Columns))
 			intCols := make(map[string]bool, len(table.Schema.Columns))
@@ -89,7 +89,7 @@ func (p *Planner) annotateScanColumns(ctx context.Context, node *logical.Node) {
 			node.ScanColFields = colFields
 		}
 		// Estimate row count from manifest for join reordering
-		if manifest, err := p.getManifest(ctx, node.TableName); err == nil {
+		if manifest, err := p.GetManifest(ctx, node.TableName); err == nil {
 			var total int64
 			for _, part := range manifest.Partitions {
 				for _, f := range part.Files {
@@ -99,7 +99,7 @@ func (p *Planner) annotateScanColumns(ctx context.Context, node *logical.Node) {
 			node.ScanRowEstimate = total
 
 			// Aggregate per-column stats for CBO selectivity estimation
-			if colStats, err := p.getAggregateColumnStats(ctx, node.TableName); err == nil && colStats != nil {
+			if colStats, err := p.GetAggregateColumnStats(ctx, node.TableName); err == nil && colStats != nil {
 				scanStats := make(map[string]logical.ScanColumnStats, len(colStats))
 				for col, cs := range colStats {
 					var hist any

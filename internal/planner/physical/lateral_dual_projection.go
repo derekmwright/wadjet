@@ -53,7 +53,7 @@ func (p *Planner) buildTableLessLateralJoin(ctx context.Context, node *logical.N
 // compileLateralDualItems compiles each item of a table-less LATERAL body
 // against the OUTER subtree's declared columns, through the engine's own
 // expression compiler and the same declaration rule an ordinary SELECT item
-// takes (inferProjectionDeclType). The declaration is not decoration: it is
+// takes (InferProjectionDeclType). The declaration is not decoration: it is
 // what the vector is allocated as, so an item typed by the BOOL zero value
 // stored `true` for every value #1033 lost.
 //
@@ -65,7 +65,7 @@ func compileLateralDualItems(items []logical.Projection, outer *logical.Node) (
 	[]exec.LateralOuterColumn, error) {
 
 	decls := lateralOuterDecls(outer)
-	strictInt := strictIntArithCols(outer)
+	strictInt := StrictIntArithCols(outer)
 	out := make([]exec.LateralOuterColumn, 0, len(items))
 	for _, item := range items {
 		name := item.Alias
@@ -76,7 +76,7 @@ func compileLateralDualItems(items []logical.Projection, outer *logical.Node) (
 			return nil, fmt.Errorf("a LATERAL subquery with no FROM clause has an item "+
 				"this planner cannot compute: %q", item.Expr)
 		}
-		compiled, err := expr.CompileWithColumnTypes(item.ASTExpr, nil, decls.types, nil)
+		compiled, err := expr.CompileWithColumnTypes(item.ASTExpr, nil, decls.Types, nil)
 		if err != nil {
 			return nil, fmt.Errorf("compiling LATERAL item %q: %w", item.Expr, err)
 		}
@@ -98,23 +98,23 @@ func compileLateralDualItems(items []logical.Projection, outer *logical.Node) (
 // #1033 was filed for, spelled the other way round.
 //
 // A BARE outer reference takes its column's own declaration rather than the
-// withheld one inferProjectionDeclTypeConf gives a bare reference: that
+// withheld one InferProjectionDeclTypeConf gives a bare reference: that
 // withholding exists because exec.Project types a direct COPY from the
 // same-named input column, and a body publishes the column under ITS OWN
 // alias, so there is no same-named input column to correct the fallback and
 // `u.id AS v` declared STRING.
-func lateralDualItemDecl(item logical.Projection, decls colDecls,
+func lateralDualItemDecl(item logical.Projection, decls ColDecls,
 	strictInt map[string]bool) expr.DeclType {
 
 	if item.ASTExpr == nil {
 		return expr.Decl(parquet.TypeString)
 	}
 	if _, bare := item.ASTExpr.(*plansql.ColRef); bare {
-		if t, c := nodeDeclaredType(item.ASTExpr, decls); c != expr.Undecided {
+		if t, c := NodeDeclaredType(item.ASTExpr, decls); c != expr.Undecided {
 			return t
 		}
 	}
-	return inferProjectionDeclType(item.ASTExpr, parquet.TypeString, strictInt, decls)
+	return InferProjectionDeclType(item.ASTExpr, parquet.TypeString, strictInt, decls)
 }
 
 // lateralDualItemDecls is every item's declaration, keyed by the LOWER-CASED
@@ -132,7 +132,7 @@ func lateralDualItemDecls(join *logical.Node) map[string]expr.DeclType {
 	}
 	outer := join.Children[0]
 	decls := lateralOuterDecls(outer)
-	strictInt := strictIntArithCols(outer)
+	strictInt := StrictIntArithCols(outer)
 	out := make(map[string]expr.DeclType, len(join.LateralDualItems))
 	for _, item := range join.LateralDualItems {
 		name := item.Alias
@@ -147,7 +147,7 @@ func lateralDualItemDecls(join *logical.Node) map[string]expr.DeclType {
 		// is the column the operator emits: an item colliding with an outer
 		// column is TWO columns, and this walk and the runtime have to describe
 		// the same one (exec.LateralOuterProject).
-		if _, collides := decls.types[name]; collides && join.LateralDualAlias != "" {
+		if _, collides := decls.Types[name]; collides && join.LateralDualAlias != "" {
 			name = strings.ToLower(join.LateralDualAlias) + "." + name
 		}
 		out[name] = lateralDualItemDecl(item, decls, strictInt)
@@ -158,7 +158,7 @@ func lateralDualItemDecls(join *logical.Node) map[string]expr.DeclType {
 // lateralOuterDecls is what the OUTER side of a table-less LATERAL PUBLISHES,
 // which is the scope the body's items are typed against.
 //
-// `inputColDecls` walks to the scan annotation and STOPS at a Project, because
+// `InputColDecls` walks to the scan annotation and STOPS at a Project, because
 // a rename may bind a name to a different value — so an outer side that is a
 // derived table, a CTE, a sort or an aggregate answered nothing and every item
 // took the STRING default. `SELECT l.v FROM (SELECT id FROM lat_ord) u, LATERAL
@@ -166,37 +166,37 @@ func lateralDualItemDecls(join *logical.Node) map[string]expr.DeclType {
 // half of #1033 the issue was filed for, one position over (round-2 review,
 // P1/B2i).
 //
-// `emittedColDecls` is the walk that answers for a Project — it types each
+// `EmittedColDecls` is the walk that answers for a Project — it types each
 // projection through the same `declaredProjectionDecl` the output schema uses —
 // so the emitted answer is preferred and the input walk is the fallback for
 // the shapes it does not cover. Merged rather than chosen so neither can lose a
 // name the other has.
-func lateralOuterDecls(outer *logical.Node) colDecls {
-	in := inputColDecls(outer)
-	emitted := emittedColDecls(outer)
-	if len(emitted.types) == 0 {
+func lateralOuterDecls(outer *logical.Node) ColDecls {
+	in := InputColDecls(outer)
+	emitted := EmittedColDecls(outer)
+	if len(emitted.Types) == 0 {
 		return in
 	}
-	if len(in.types) == 0 {
+	if len(in.Types) == 0 {
 		return emitted
 	}
-	merged := colDecls{
-		types:    make(map[string]parquet.TypeID, len(in.types)+len(emitted.types)),
-		fields:   emitted.fields,
-		dec:      emitted.dec,
+	merged := ColDecls{
+		Types:    make(map[string]parquet.TypeID, len(in.Types)+len(emitted.Types)),
+		Fields:   emitted.Fields,
+		Dec:      emitted.Dec,
 		intWidth: emitted.intWidth,
 	}
-	for k, v := range in.types {
-		merged.types[k] = v
+	for k, v := range in.Types {
+		merged.Types[k] = v
 	}
-	for k, v := range emitted.types {
-		merged.types[k] = v
+	for k, v := range emitted.Types {
+		merged.Types[k] = v
 	}
-	if merged.fields == nil {
-		merged.fields = in.fields
+	if merged.Fields == nil {
+		merged.Fields = in.Fields
 	}
-	if merged.dec == nil {
-		merged.dec = in.dec
+	if merged.Dec == nil {
+		merged.Dec = in.Dec
 	}
 	if merged.intWidth == nil {
 		merged.intWidth = in.intWidth

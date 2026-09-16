@@ -79,7 +79,7 @@ func TestABareStarOverAPolicedScanDeclinesToDeclareFromTheCatalog(t *testing.T) 
 // `starJoinDeclaredOutputSchema` declares each side from what that side
 // PUBLISHES. A security projection is what a policed side publishes, so the
 // declaration cannot name a DENIED column — it did, on both join sides, until
-// `declaredJoinSchema` read the barrier the way it already read a materialized
+// `DeclaredJoinSchema` read the barrier the way it already read a materialized
 // block.
 //
 // This is the RowDescription of `SELECT * FROM policed JOIN other`: a zero-row

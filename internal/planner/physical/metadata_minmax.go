@@ -257,7 +257,7 @@ func mmFileUsable(fr *parquet.FileReader, cols []mmColumn) bool {
 // node is answerable from footer statistics; ok=false falls back to the
 // ordinary build.
 func (p *Planner) tryBuildMetadataMinMax(ctx context.Context, node *logical.Node) (exec.Source, bool) {
-	if !metadataMinMaxToggle.On() || p.catalog == nil {
+	if !metadataMinMaxToggle.On() || p.Catalog == nil {
 		return nil, false
 	}
 	if p.StreamingSources != nil || p.MaterializedInputs != nil || p.ScanFileFilter != nil {
@@ -276,7 +276,7 @@ func (p *Planner) tryBuildMetadataMinMax(ctx context.Context, node *logical.Node
 		return nil, false
 	}
 
-	tableMeta, err := p.catalog.GetTable(ctx, scanNode.TableName)
+	tableMeta, err := p.Catalog.GetTable(ctx, scanNode.TableName)
 	if err != nil || tableMeta == nil {
 		return nil, false
 	}
@@ -356,7 +356,7 @@ func (p *Planner) tryBuildMetadataMinMax(ctx context.Context, node *logical.Node
 		return nil, false // pure COUNT(*) belongs to tryBuildMetadataCount
 	}
 
-	manifest, err := p.getManifest(ctx, scanNode.TableName)
+	manifest, err := p.GetManifest(ctx, scanNode.TableName)
 	if err != nil || manifest == nil {
 		return nil, false
 	}
@@ -510,8 +510,8 @@ func (p *Planner) mmFoldFiles(ctx context.Context, files []catalog.FileEntry, co
 // footer read when the store supports random access (buildRGUnits' pattern).
 // The returned release func must be called when the reader is done.
 func (p *Planner) mmOpenFooter(ctx context.Context, entry catalog.FileEntry) (*parquet.FileReader, func(), error) {
-	store := p.catalog.Store()
-	bucket := p.catalog.Bucket()
+	store := p.Catalog.Store()
+	bucket := p.Catalog.Bucket()
 	if ras, ok := store.(objstore.ReaderAtStore); ok {
 		ra, size, err := ras.GetReaderAt(ctx, bucket, entry.Path)
 		if err != nil {

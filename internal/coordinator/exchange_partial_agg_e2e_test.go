@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/derekmwright/wadjet/benchmarks/tpch"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 )
 
 // TestQ18ExchangePartialAggEngagesAndMatches proves the exchange partial
@@ -65,9 +65,9 @@ func TestQ18ExchangePartialAggEngagesAndMatches(t *testing.T) {
 		return canon(mustRows(t, res))
 	}
 
-	before := physical.ExchangePartialAggMarked.Load()
+	before := dagplan.ExchangePartialAggMarked.Load()
 	withAgg := run()
-	marked := physical.ExchangePartialAggMarked.Load() - before
+	marked := dagplan.ExchangePartialAggMarked.Load() - before
 	if marked == 0 {
 		t.Fatalf("exchange partial agg did not engage on Q18 under BroadcastBytesOverride=1 — plan shape drifted, the mechanism is untested")
 	}
@@ -76,8 +76,8 @@ func TestQ18ExchangePartialAggEngagesAndMatches(t *testing.T) {
 	}
 	t.Logf("Q18 marked %d exchange(s) for partial agg, %d rows", marked, len(withAgg))
 
-	origEnabled := physical.SetExchangePartialAggEnabled(false)
-	defer physical.SetExchangePartialAggEnabled(origEnabled)
+	origEnabled := dagplan.SetExchangePartialAggEnabled(false)
+	defer dagplan.SetExchangePartialAggEnabled(origEnabled)
 	withoutAgg := run()
 
 	if len(withAgg) != len(withoutAgg) {

@@ -15,8 +15,8 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/derekmwright/wadjet/internal/auth"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // gatherFusion carries the pre-installed gather subscription + reply subject
@@ -40,7 +40,7 @@ type gatherFusion struct {
 // concatenating independently sorted task streams loses global order.
 // The gather sink publishes via NATS, so fan-out does not amplify S3 GETs.
 // See docs/internals/gather-fusion-order-boundary.md for the design.
-func canFuseGather(gatherStage physical.Stage, pending map[string]physical.Stage) (depID string, ok bool) {
+func canFuseGather(gatherStage dagplan.Stage, pending map[string]dagplan.Stage) (depID string, ok bool) {
 	if len(gatherStage.Dependencies) != 1 {
 		return "", false
 	}
@@ -55,12 +55,12 @@ func canFuseGather(gatherStage physical.Stage, pending map[string]physical.Stage
 		if len(gatherOrdering) > 0 {
 			return "", false
 		}
-		if (len(dep.SortKeys) > 0 || dep.HasLimit) && dep.Distribution.Kind != physical.DistSingleton {
+		if (len(dep.SortKeys) > 0 || dep.HasLimit) && dep.Distribution.Kind != dagplan.DistSingleton {
 			return "", false
 		}
 		return depID, true
 	case "sort", "merge_sort":
-		if dep.Distribution.Kind != physical.DistSingleton {
+		if dep.Distribution.Kind != dagplan.DistSingleton {
 			return "", false
 		}
 		// When gather has Ordering, require it match the upstream sort's
@@ -75,14 +75,14 @@ func canFuseGather(gatherStage physical.Stage, pending map[string]physical.Stage
 	return "", false
 }
 
-func gatherOrderingKeys(gatherStage physical.Stage) []physical.SortKeySpec {
+func gatherOrderingKeys(gatherStage dagplan.Stage) []dagplan.SortKeySpec {
 	if gatherStage.Exchange == nil {
 		return nil
 	}
 	return gatherStage.Exchange.Ordering
 }
 
-func sortKeysEqual(a, b []physical.SortKeySpec) bool {
+func sortKeysEqual(a, b []dagplan.SortKeySpec) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -175,7 +175,7 @@ func awaitStageProgress(ctx context.Context, allDone <-chan struct{}, progress <
 func (c *Coordinator) executeStageDAG(
 	ctx context.Context,
 	queryID, sql string,
-	stages []physical.Stage,
+	stages []dagplan.Stage,
 	workerCount int,
 ) (*gatherResult, error) {
 	if len(stages) == 0 {
@@ -183,10 +183,10 @@ func (c *Coordinator) executeStageDAG(
 	}
 
 	// Fail-fast on plan shapes the dispatchers can't consume — see
-	// physical.ValidateNativeDAGShape. The 2026-04-23 SF10 A/B blew 10
+	// dagplan.ValidateNativeDAGShape. The 2026-04-23 SF10 A/B blew 10
 	// minutes on a multi-merge-tree timeout before surfacing the shape
 	// mismatch; this catches the same class at plan time.
-	if err := physical.ValidateNativeDAGShape(stages); err != nil {
+	if err := dagplan.ValidateNativeDAGShape(stages); err != nil {
 		return nil, err
 	}
 
@@ -271,13 +271,13 @@ func (c *Coordinator) executeStageDAG(
 	// fan-out patterns like the multi-level merge_aggregate/merge_sort tree
 	// (80+ independent siblings per query at SF10) serialize to one stage
 	// per coordinator-to-worker round-trip — catastrophically slow.
-	var gatherStage physical.Stage
+	var gatherStage dagplan.Stage
 	var hasGather bool
-	pending := make(map[string]physical.Stage, len(stages))
-	stageByID := make(map[string]physical.Stage, len(stages))
+	pending := make(map[string]dagplan.Stage, len(stages))
+	stageByID := make(map[string]dagplan.Stage, len(stages))
 	for _, s := range stages {
 		stageByID[s.ID] = s
-		if s.Type == physical.StageExchangeGather {
+		if s.Type == dagplan.StageExchangeGather {
 			if hasGather {
 				return nil, fmt.Errorf("executeStageDAG: plan has multiple Gather stages")
 			}
@@ -337,7 +337,7 @@ func (c *Coordinator) executeStageDAG(
 	// fix-verify deploy of 970374a, where Q05 regressed 3m7s → 10m47s).
 	probeOfBroadcast := make(map[string]bool, len(stages))
 	for _, s := range stages {
-		if s.Type != physical.StageBroadcastJoin {
+		if s.Type != dagplan.StageBroadcastJoin {
 			continue
 		}
 		probeDep := s.LeftDepStage
@@ -498,7 +498,7 @@ func (c *Coordinator) executeStageDAG(
 			// Would-split → barrier.
 			if !eagerBroken && eagerJoin {
 				numTasks := 1
-				if s.Distribution.Kind == physical.DistHashPartitioned {
+				if s.Distribution.Kind == dagplan.DistHashPartitioned {
 					numTasks = s.Distribution.Count
 					if numTasks <= 0 {
 						numTasks = workerCount
@@ -582,7 +582,7 @@ func (c *Coordinator) executeStageDAG(
 			var deferredScalars scalarResolver
 			if len(s.ScalarDependencies) > 0 {
 				stage := s
-				resolve := func(rctx context.Context) (physical.Stage, error) {
+				resolve := func(rctx context.Context) (dagplan.Stage, error) {
 					for _, pid := range stage.ScalarDependencies {
 						ch, tracked := done[pid]
 						if !tracked {
@@ -596,7 +596,7 @@ func (c *Coordinator) executeStageDAG(
 					}
 					outputsMu.Lock()
 					prod := make(map[string]StageOutput, len(stage.ScalarDependencies))
-					prodStages := make(map[string]physical.Stage, len(stage.ScalarDependencies))
+					prodStages := make(map[string]dagplan.Stage, len(stage.ScalarDependencies))
 					for _, pid := range stage.ScalarDependencies {
 						prod[pid] = outputs[pid]
 						if ps, ok := stageByID[pid]; ok {
@@ -663,7 +663,7 @@ func (c *Coordinator) executeStageDAG(
 			// behind lineitem's slot for 4s, bloom landed after the scan
 			// ended). The semaphore's stampede/memory rationale does not
 			// apply to single-digit-task dimension scans.
-			if s.Type == physical.StageScan && len(s.EmitDynamicFilters) > 0 {
+			if s.Type == dagplan.StageScan && len(s.EmitDynamicFilters) > 0 {
 				c.logger.Info("stage-DAG dispatch: emitter scan bypasses dispatch slot",
 					"query", queryID, "stage_id", s.ID)
 			} else {
@@ -681,9 +681,9 @@ func (c *Coordinator) executeStageDAG(
 			}
 			var out StageOutput
 			switch s.Type {
-			case physical.StageExchangeRepartition:
+			case dagplan.StageExchangeRepartition:
 				out, err = c.dispatchShuffleStage(gctx, queryID, s, inputs, workerCount)
-			case physical.StageExchangeReplicate:
+			case dagplan.StageExchangeReplicate:
 				out, err = c.dispatchReplicateStage(gctx, queryID, sql, s, inputs)
 			default:
 				out, err = c.dispatchPipelineStage(gctx, queryID, sql, s, inputs, workerCount, probeOfBroadcast[s.ID], stageFusion, deferredScalars)

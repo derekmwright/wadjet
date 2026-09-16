@@ -28,7 +28,7 @@ func TestTableFuncReadJSON_Local(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	source, err := buildTableFunctionSource("read_json", []string{path}, nil)
+	source, err := BuildTableFunctionSource("read_json", []string{path}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestTableFuncReadJSON_Array(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	source, err := buildTableFunctionSource("read_json", []string{path}, nil)
+	source, err := BuildTableFunctionSource("read_json", []string{path}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestTableFuncReadParquet_Local(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	source, err := buildTableFunctionSource("read_parquet", []string{path}, nil)
+	source, err := BuildTableFunctionSource("read_parquet", []string{path}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestTableFuncReadCSV_Local(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	source, err := buildTableFunctionSource("read_csv", []string{path}, nil)
+	source, err := BuildTableFunctionSource("read_csv", []string{path}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestTableFuncReadCSV_NamedArgs(t *testing.T) {
 	}
 
 	named := map[string]string{"delimiter": "\t", "header": "false"}
-	source, err := buildTableFunctionSource("read_csv", []string{path}, named)
+	source, err := BuildTableFunctionSource("read_csv", []string{path}, named)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +248,7 @@ func TestTableFuncReadCSV_PipeDelim(t *testing.T) {
 	}
 
 	named := map[string]string{"delim": "|"}
-	source, err := buildTableFunctionSource("read_csv", []string{path}, named)
+	source, err := BuildTableFunctionSource("read_csv", []string{path}, named)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,28 +267,28 @@ func TestTableFuncReadCSV_PipeDelim(t *testing.T) {
 }
 
 func TestTableFuncReadParquet_NoArgs(t *testing.T) {
-	_, err := buildTableFunctionSource("read_parquet", nil, nil)
+	_, err := BuildTableFunctionSource("read_parquet", nil, nil)
 	if err == nil {
 		t.Error("expected error for missing args")
 	}
 }
 
 func TestTableFuncUnknown(t *testing.T) {
-	_, err := buildTableFunctionSource("read_excel", []string{"file.xlsx"}, nil)
+	_, err := BuildTableFunctionSource("read_excel", []string{"file.xlsx"}, nil)
 	if err == nil {
 		t.Error("expected error for unknown table function")
 	}
 }
 
 func TestTableFuncReadJSON_NoArgs(t *testing.T) {
-	_, err := buildTableFunctionSource("read_json", nil, nil)
+	_, err := BuildTableFunctionSource("read_json", nil, nil)
 	if err == nil {
 		t.Error("expected error for missing args")
 	}
 }
 
 func TestTableFuncReadCSV_NoArgs(t *testing.T) {
-	_, err := buildTableFunctionSource("read_csv", nil, nil)
+	_, err := BuildTableFunctionSource("read_csv", nil, nil)
 	if err == nil {
 		t.Error("expected error for missing args")
 	}
@@ -306,7 +306,7 @@ func TestTableFuncReadJSON_Glob(t *testing.T) {
 	}
 
 	pattern := filepath.Join(dir, "*.json")
-	source, err := buildTableFunctionSource("read_json", []string{pattern}, nil)
+	source, err := BuildTableFunctionSource("read_json", []string{pattern}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +339,7 @@ func TestTableFuncReadCSV_Glob(t *testing.T) {
 	}
 
 	pattern := filepath.Join(dir, "*.csv")
-	source, err := buildTableFunctionSource("read_csv", []string{pattern}, nil)
+	source, err := BuildTableFunctionSource("read_csv", []string{pattern}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,36 +373,36 @@ func TestFetchGlob_NoMatch(t *testing.T) {
 }
 
 func TestTableFuncPostgresScan_NoArgs(t *testing.T) {
-	_, err := buildTableFunctionSource("postgres_scan", nil, nil)
+	_, err := BuildTableFunctionSource("postgres_scan", nil, nil)
 	if err == nil {
 		t.Error("expected error for missing args")
 	}
-	_, err = buildTableFunctionSource("postgres_scan", []string{"connstr"}, nil)
+	_, err = BuildTableFunctionSource("postgres_scan", []string{"connstr"}, nil)
 	if err == nil {
 		t.Error("expected error for missing table name")
 	}
 }
 
 func TestTableFuncPostgresQuery_NoArgs(t *testing.T) {
-	_, err := buildTableFunctionSource("postgres_query", nil, nil)
+	_, err := BuildTableFunctionSource("postgres_query", nil, nil)
 	if err == nil {
 		t.Error("expected error for missing args")
 	}
 }
 
 func TestTableFuncMySQLScan_NoArgs(t *testing.T) {
-	_, err := buildTableFunctionSource("mysql_scan", nil, nil)
+	_, err := BuildTableFunctionSource("mysql_scan", nil, nil)
 	if err == nil {
 		t.Error("expected error for missing args")
 	}
-	_, err = buildTableFunctionSource("mysql_scan", []string{"connstr"}, nil)
+	_, err = BuildTableFunctionSource("mysql_scan", []string{"connstr"}, nil)
 	if err == nil {
 		t.Error("expected error for missing table name")
 	}
 }
 
 func TestTableFuncMySQLQuery_NoArgs(t *testing.T) {
-	_, err := buildTableFunctionSource("mysql_query", nil, nil)
+	_, err := BuildTableFunctionSource("mysql_query", nil, nil)
 	if err == nil {
 		t.Error("expected error for missing args")
 	}
@@ -410,13 +410,13 @@ func TestTableFuncMySQLQuery_NoArgs(t *testing.T) {
 
 func TestTableFuncDBScan_SourceCreated(t *testing.T) {
 	// Verify sources are created with correct driver/query (Init will fail without a real DB)
-	source, err := buildTableFunctionSource("postgres_scan", []string{"host=localhost", "users"}, nil)
+	source, err := BuildTableFunctionSource("postgres_scan", []string{"host=localhost", "users"}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating source: %v", err)
 	}
-	dbs, ok := source.(*dbScanSource)
+	dbs, ok := source.(*DbScanSource)
 	if !ok {
-		t.Fatalf("expected *dbScanSource, got %T", source)
+		t.Fatalf("expected *DbScanSource, got %T", source)
 	}
 	if dbs.driver != "postgres" {
 		t.Errorf("expected driver=postgres, got %s", dbs.driver)
@@ -425,13 +425,13 @@ func TestTableFuncDBScan_SourceCreated(t *testing.T) {
 		t.Errorf("expected query='SELECT * FROM users', got %q", dbs.query)
 	}
 
-	source2, err := buildTableFunctionSource("mysql_query", []string{"root:pass@tcp(localhost)/db", "SELECT id FROM t"}, nil)
+	source2, err := BuildTableFunctionSource("mysql_query", []string{"root:pass@tcp(localhost)/db", "SELECT id FROM t"}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating source: %v", err)
 	}
-	dbs2, ok := source2.(*dbScanSource)
+	dbs2, ok := source2.(*DbScanSource)
 	if !ok {
-		t.Fatalf("expected *dbScanSource, got %T", source2)
+		t.Fatalf("expected *DbScanSource, got %T", source2)
 	}
 	if dbs2.driver != "mysql" {
 		t.Errorf("expected driver=mysql, got %s", dbs2.driver)
@@ -442,7 +442,7 @@ func TestTableFuncDBScan_SourceCreated(t *testing.T) {
 }
 
 func TestGenerateSeries_Basic(t *testing.T) {
-	source, err := buildTableFunctionSource("generate_series", []string{"1", "5"}, nil)
+	source, err := BuildTableFunctionSource("generate_series", []string{"1", "5"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -482,7 +482,7 @@ func TestGenerateSeries_Basic(t *testing.T) {
 }
 
 func TestGenerateSeries_WithStep(t *testing.T) {
-	source, err := buildTableFunctionSource("generate_series", []string{"0", "10", "3"}, nil)
+	source, err := BuildTableFunctionSource("generate_series", []string{"0", "10", "3"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,7 +511,7 @@ func TestGenerateSeries_WithStep(t *testing.T) {
 }
 
 func TestGenerateSeries_Descending(t *testing.T) {
-	source, err := buildTableFunctionSource("generate_series", []string{"5", "1"}, nil)
+	source, err := BuildTableFunctionSource("generate_series", []string{"5", "1"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,7 +539,7 @@ func TestGenerateSeries_Descending(t *testing.T) {
 }
 
 func TestGenerateSeries_NegativeStep(t *testing.T) {
-	source, err := buildTableFunctionSource("generate_series", []string{"10", "0", "-2"}, nil)
+	source, err := BuildTableFunctionSource("generate_series", []string{"10", "0", "-2"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -568,7 +568,7 @@ func TestGenerateSeries_NegativeStep(t *testing.T) {
 }
 
 func TestGenerateSeries_SingleValue(t *testing.T) {
-	source, err := buildTableFunctionSource("generate_series", []string{"5", "5"}, nil)
+	source, err := BuildTableFunctionSource("generate_series", []string{"5", "5"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -606,7 +606,7 @@ func TestGenerateSeries_Errors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := buildTableFunctionSource("generate_series", tt.args, nil)
+			_, err := BuildTableFunctionSource("generate_series", tt.args, nil)
 			if err == nil {
 				t.Error("expected error")
 			}
@@ -666,7 +666,7 @@ func TestTableFuncReadJSON_GlobStreams(t *testing.T) {
 		}
 	}
 
-	source, err := buildTableFunctionSource("read_json", []string{filepath.Join(dir, "*.json")}, nil)
+	source, err := BuildTableFunctionSource("read_json", []string{filepath.Join(dir, "*.json")}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -694,7 +694,7 @@ func TestTableFuncReadCSV_GlobStreams(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "x2.csv"), []byte("3,c\n4,d\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	source, err := buildTableFunctionSource("read_csv", []string{filepath.Join(dir, "x*.csv")}, nil)
+	source, err := BuildTableFunctionSource("read_csv", []string{filepath.Join(dir, "x*.csv")}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -722,7 +722,7 @@ func TestTableFuncReadJSON_HTTPStreams(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	source, err := buildTableFunctionSource("read_json", []string{srv.URL + "/data.json"}, nil)
+	source, err := BuildTableFunctionSource("read_json", []string{srv.URL + "/data.json"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -802,7 +802,7 @@ func TestTableFuncReadJSON_Tilde(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	source, err := buildTableFunctionSource("read_json", []string{"~/conn.log"}, nil)
+	source, err := BuildTableFunctionSource("read_json", []string{"~/conn.log"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

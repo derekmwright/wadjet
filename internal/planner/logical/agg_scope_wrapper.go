@@ -4,7 +4,7 @@ package logical
 
 // AggScopePreservingWrapper is THE shared list preserving an aggregate's OWN
 // output names (ADR-0026 §4): Filter, Sort, Limit and Window; Window only appends.
-// physical.aggregateUnderOutput, findAggregateAncestor, groupKeysPublishedBelow
+// dagplan.aggregateUnderOutput, findAggregateAncestor, groupKeysPublishedBelow
 // and AggregateOverGroupRows must read this list (#774); the physical wrapper
 // only delegates. TestAggScopePreservingWrapperIsReadByEveryWalk covers all four.
 // Aggregate replaces the schema and is the target, not a wrapper; Project handling

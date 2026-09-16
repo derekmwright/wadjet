@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -150,8 +150,8 @@ GROUP BY c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice
 ORDER BY o_totalprice DESC, o_orderdate
 LIMIT 100`, havingThreshold)
 
-	prev := physical.AggOverExchange.Load()
-	t.Cleanup(func() { physical.AggOverExchange.Store(prev) })
+	prev := dagplan.AggOverExchange.Load()
+	t.Cleanup(func() { dagplan.AggOverExchange.Store(prev) })
 	for _, arm := range []struct {
 		name string
 		on   bool
@@ -160,7 +160,7 @@ LIMIT 100`, havingThreshold)
 		{"kill-switch", false},
 	} {
 		t.Run(arm.name, func(t *testing.T) {
-			physical.AggOverExchange.Store(arm.on)
+			dagplan.AggOverExchange.Store(arm.on)
 			res, err := coord.ExecuteSQL(ctx, sql)
 			if err != nil {
 				t.Fatalf("ExecuteSQL: %v", err)

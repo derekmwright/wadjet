@@ -3,8 +3,9 @@
 package dagplan
 
 import (
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
@@ -25,33 +26,33 @@ import (
 // aggShuffleChain builds the canonical candidate chain — a fused
 // scan-aggregate, its merge, a shuffle, and the join whose build side it is —
 // with the key's two names given explicitly.
-func aggShuffleChain(published string, resolve physical.GroupKeyResolution) []physical.Stage {
+func aggShuffleChain(published string, resolve physical.GroupKeyResolution) []Stage {
 	const big = int64(8 * 1024 * 1024 * 1024)
-	return []physical.Stage{
+	return []Stage{
 		{
-			ID: "scan-0", Type: physical.StageScan, TableName: "lineitem", ScanAlias: "lineitem",
+			ID: "scan-0", Type: StageScan, TableName: "lineitem", ScanAlias: "lineitem",
 			Columns: []string{"a", "id"}, EstimatedBytes: big,
 			FusedAggGroupBy: []string{published},
 			GroupByResolve:  []physical.GroupKeyResolution{resolve},
-			FusedAggSpecs:   []physical.AggSpec{{Func: "SUM", InputCol: "a", OutputCol: "s"}},
+			FusedAggSpecs:   []AggSpec{{Func: "SUM", InputCol: "a", OutputCol: "s"}},
 		},
 		{
-			ID: "final_aggregate-1", Type: physical.StageFinalAggregate,
+			ID: "final_aggregate-1", Type: StageFinalAggregate,
 			GroupByCols:  []string{published},
-			AggSpecs:     []physical.AggSpec{{Func: "SUM", InputCol: "s", OutputCol: "s"}},
+			AggSpecs:     []AggSpec{{Func: "SUM", InputCol: "s", OutputCol: "s"}},
 			Dependencies: []string{"scan-0"},
 		},
 		{
-			ID: "exchange-repartition-2", Type: physical.StageExchangeRepartition,
+			ID: "exchange-repartition-2", Type: StageExchangeRepartition,
 			Dependencies: []string{"final_aggregate-1"},
-			Exchange:     &physical.ExchangeStage{Keys: []string{published}, Count: 4},
+			Exchange:     &ExchangeStage{Keys: []string{published}, Count: 4},
 		},
 		{
-			ID: "scan-3", Type: physical.StageScan, TableName: "part", ScanAlias: "part",
+			ID: "scan-3", Type: StageScan, TableName: "part", ScanAlias: "part",
 			Columns: []string{"p_partkey"}, EstimatedBytes: 1024,
 		},
 		{
-			ID: "join-4", Type: physical.StageHashJoin,
+			ID: "join-4", Type: StageHashJoin,
 			JoinLeftKeys: []string{"p_partkey"}, JoinRightKeys: []string{published},
 			LeftDepStage: "scan-3", RightDepStage: "exchange-repartition-2",
 			Dependencies: []string{"scan-3", "exchange-repartition-2"},
@@ -122,7 +123,7 @@ func TestAggregateShuffleGuardReachesTheKeyComputingStage(t *testing.T) {
 		    SELECT 0.2 * AVG(l_quantity) FROM lineitem WHERE l_partkey = p_partkey
 		  )`
 	stages := sqlToStages(t, cat, ctx, sql, 3)
-	byID := make(map[string]physical.Stage, len(stages))
+	byID := make(map[string]Stage, len(stages))
 	for _, s := range stages {
 		byID[s.ID] = s
 	}
@@ -150,13 +151,13 @@ func TestAggregateShuffleGuardReachesTheKeyComputingStage(t *testing.T) {
 			t.Fatalf("the guard could not reach a key-computing stage from %s — it would "+
 				"decline a candidate the pass is built for", agg.ID)
 		}
-		if !physical.StageComputesGroupKeys(&c) || len(c.GroupByResolve) == 0 {
+		if !StageComputesGroupKeys(&c) || len(c.GroupByResolve) == 0 {
 			t.Errorf("the walk stopped at %s (%s), which does not compute its keys", c.ID, c.Type)
 		}
 		if !keyNamesAreTheirSpelling(byID, agg) {
 			t.Errorf("Q17's key %v was declined — its two names are the same string, and "+
 				"declining it costs the pre-compute this pass exists for",
-				physical.StageGroupKeyList(&c))
+				StageGroupKeyList(&c))
 		}
 	}
 	if checked == 0 {
@@ -168,7 +169,7 @@ func TestAggregateShuffleGuardReachesTheKeyComputingStage(t *testing.T) {
 // lowerings, spelled here because the physical one is unexported.
 func isJoinStageType(typ string) bool {
 	switch typ {
-	case physical.StageHashJoin, physical.StageBroadcastJoin, physical.StageSortMergeJoin:
+	case StageHashJoin, StageBroadcastJoin, StageSortMergeJoin:
 		return true
 	}
 	return false

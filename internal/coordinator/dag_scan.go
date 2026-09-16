@@ -12,8 +12,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // dispatchScanAggregateStage dispatches N partial-aggregate tasks, one
@@ -34,7 +34,7 @@ import (
 func (c *Coordinator) dispatchScanAggregateStage(
 	ctx context.Context,
 	queryID string,
-	stage physical.Stage,
+	stage dagplan.Stage,
 	workerCount int,
 ) (StageOutput, error) {
 	if workerCount <= 0 {
@@ -290,7 +290,7 @@ func (c *Coordinator) dispatchScanAggregateStage(
 func (c *Coordinator) dispatchScanFilterStage(
 	ctx context.Context,
 	queryID string,
-	stage physical.Stage,
+	stage dagplan.Stage,
 	inputs map[string]StageOutput,
 	workerCount int,
 ) (StageOutput, error) {
@@ -668,7 +668,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 // emits belongs on the priority lane. In-flow emits (planner-marked
 // cascade mids riding normal scheduling) don't count; a stage with only
 // in-flow emits dispatches as ordinary bulk work.
-func stageHasLaneEmit(stage physical.Stage) bool {
+func stageHasLaneEmit(stage dagplan.Stage) bool {
 	for _, e := range stage.EmitDynamicFilters {
 		if !e.InFlow {
 			return true
@@ -680,7 +680,7 @@ func stageHasLaneEmit(stage physical.Stage) bool {
 // scanAliasForStage returns the alias key used when handing scan-fused
 // files to a worker's Inputs map. Falls back to the stage's TableName
 // or scan ID so the worker can resolve the parquet source.
-func scanAliasForStage(stage physical.Stage) string {
+func scanAliasForStage(stage dagplan.Stage) string {
 	if stage.ScanAlias != "" {
 		return stage.ScanAlias
 	}

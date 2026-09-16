@@ -9,7 +9,6 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
-	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // A GROUP BY key's PUBLISHED name (Stage.GroupByCols/plansql.GroupKeyName)
@@ -59,49 +58,9 @@ type GroupKeyResolution struct {
 
 // deferred reports whether this key's resolution is still a choice between two
 // candidate spellings that only the finished stage graph can settle.
-func (r GroupKeyResolution) deferred() bool { return r.Alias != "" }
+func (r GroupKeyResolution) Deferred() bool { return r.Alias != "" }
 
-// StageGroupKeyList returns the group-key list a stage carries and the field
-// it lives in. A stage carries exactly ONE of the three: an aggregate stage
-// its own GroupByCols, a fused scan-aggregate its FusedAggGroupBy, and a join
-// that absorbed a chain-terminal partial its ChainedAggGroupBy.
-// GroupByResolve is index-aligned with whichever one answers.
-func StageGroupKeyList(s *Stage) []string {
-	switch {
-	case len(s.GroupByCols) > 0:
-		return s.GroupByCols
-	case len(s.FusedAggGroupBy) > 0:
-		return s.FusedAggGroupBy
-	case len(s.ChainedAggGroupBy) > 0:
-		return s.ChainedAggGroupBy
-	}
-	return nil
-}
-
-// StageComputesGroupKeys reports whether this stage's fragment RESOLVES the
-// group keys against a raw input — the only class that reads GroupByResolve.
-//
-// A "final_aggregate" or "merge_aggregate" consumes a partial's OUTPUT, where
-// every key is already a column under its published name, so it resolves by
-// the published name and carries no resolution list. The exception is a
-// RawInputAggregate final: the distribution pass hash-partitions raw rows into
-// disjoint groups and the final aggregates them in ONE level, so that fragment
-// computes the keys itself.
-func StageComputesGroupKeys(s *Stage) bool {
-	switch s.Type {
-	case StageScan:
-		return len(s.FusedAggGroupBy) > 0
-	case StageAggregate:
-		return true
-	case StageFinalAggregate, StageMergeAggregate:
-		return s.RawInputAggregate
-	case StageHashJoin, StageBroadcastJoin, StageSortMergeJoin:
-		return len(s.ChainedAggGroupBy) > 0
-	}
-	return false
-}
-
-// stageGroupKeyNames computes both names of every GROUP BY key of one logical
+// StageGroupKeyNames computes both names of every GROUP BY key of one logical
 // Aggregate: what the stage PUBLISHES it as, and what the computing fragment
 // RESOLVES it by.
 //
@@ -112,7 +71,7 @@ func StageComputesGroupKeys(s *Stage) bool {
 // key published under the text the query wrote. Publishing it under the
 // single path's slot name would name a column the DAG's own consumers do not
 // ask for.
-func stageGroupKeyNames(agg, child *logical.Node) (published []string, resolve []GroupKeyResolution) {
+func StageGroupKeyNames(agg, child *logical.Node) (published []string, resolve []GroupKeyResolution) {
 	keys := groupKeyOutputs(agg)
 	published = make([]string, len(agg.GroupBy))
 	resolve = make([]GroupKeyResolution, len(agg.GroupBy))
@@ -153,7 +112,7 @@ func stageGroupKeyNames(agg, child *logical.Node) (published []string, resolve [
 			// differed from the published name only by them would make every
 			// reader that compares the two say "these are two names".
 			expr := k.Name
-			if respelled, ok := aggStageDerivedKey(k.Name, child); ok {
+			if respelled, ok := AggStageDerivedKey(k.Name, child); ok {
 				expr = respelled
 			}
 			resolve[i] = GroupKeyResolution{Expr: expr, Computed: true}
@@ -170,7 +129,7 @@ func stageGroupKeyNames(agg, child *logical.Node) (published []string, resolve [
 			// to a fragment that has no column of that name.
 			published[i] = k.Name
 			resolve[i] = GroupKeyResolution{Expr: k.Slot}
-			resolved, def, defScope, renamed := resolveAggInputName(gb, child)
+			resolved, def, defScope, renamed := ResolveAggInputName(gb, child)
 			if !renamed {
 				execRule[i] = agg.LateralAggregate && !k.Minted && !k.Delimited
 				break
@@ -195,7 +154,7 @@ func stageGroupKeyNames(agg, child *logical.Node) (published []string, resolve [
 				// columns. Typing it against the aggregate's own child leaves
 				// a DECIMAL key on the FLOAT rule, and the exact value then
 				// meets the #361 store guard on both DAG arms.
-				Decl: derivedGroupKeyDecl(def.String(), def, defScope),
+				Decl: DerivedGroupKeyDecl(def.String(), def, defScope),
 			}
 		}
 	}
@@ -208,7 +167,7 @@ func stageGroupKeyNames(agg, child *logical.Node) (published []string, resolve [
 	// keys) already carry planner-chosen GroupByOutNames and bypass exec's strip
 	// (#467, #480, #740; ADR-0026 §2).
 	if anyExecRule(execRule) {
-		emitted := exec.PublishedGroupKeyNames(published, nil, logicalAggOutNames(agg), false)
+		emitted := exec.PublishedGroupKeyNames(published, nil, LogicalAggOutNames(agg), false)
 		for i := range published {
 			if execRule[i] {
 				published[i] = emitted[i]
@@ -228,33 +187,7 @@ func anyExecRule(flags []bool) bool {
 	return false
 }
 
-// resolveExprs is the resolution list as plain text, for the callers that need
-// the spelling alone (the read-set prune, the type walk).
-func resolveExprs(resolve []GroupKeyResolution) []string {
-	out := make([]string, len(resolve))
-	for i, r := range resolve {
-		out[i] = r.Expr
-	}
-	return out
-}
-
-// identityGroupKeyResolutions is the resolution list for keys whose two names
-// are one string — every key a stage resolves by exactly the name it publishes.
-// Saying it explicitly is not redundant: an ABSENT list means "an older
-// coordinator", and the worker then recovers the second name by parsing the
-// first, which is the behaviour ADR-0026 §2 replaced.
-func identityGroupKeyResolutions(names []string) []GroupKeyResolution {
-	if len(names) == 0 {
-		return nil
-	}
-	out := make([]GroupKeyResolution, len(names))
-	for i, n := range names {
-		out[i] = GroupKeyResolution{Expr: n}
-	}
-	return out
-}
-
-// stageEmittedKeyNames is the column name the aggregate's FRAGMENT emits for
+// StageEmittedKeyNames is the column name the aggregate's FRAGMENT emits for
 // each key — the published list run through `exec.PublishedGroupKeyNames`,
 // which is the same rule and the same call the worker makes and the
 // single-process operator applies to its own key list.
@@ -265,7 +198,7 @@ func identityGroupKeyResolutions(names []string) []GroupKeyResolution {
 // slot placeholder here is not the slot the worker allocates — that index is a
 // runtime fact — but the rule only reads a name's qualifier and its collisions,
 // and a reserved-family name has neither.
-func stageEmittedKeyNames(published []string, resolve []GroupKeyResolution, aggOut []string) []string {
+func StageEmittedKeyNames(published []string, resolve []GroupKeyResolution, aggOut []string) []string {
 	byRule := make([]string, len(published))
 	overrides := make([]string, len(published))
 	for i := range published {
@@ -279,9 +212,9 @@ func stageEmittedKeyNames(published []string, resolve []GroupKeyResolution, aggO
 	return exec.PublishedGroupKeyNames(byRule, overrides, aggOut, false)
 }
 
-// logicalAggOutNames is an Aggregate node's OUTPUT column names, the list
+// LogicalAggOutNames is an Aggregate node's OUTPUT column names, the list
 // `exec.PublishedGroupKeyNames` asks about (ADR-0026 §2b).
-func logicalAggOutNames(agg *logical.Node) []string {
+func LogicalAggOutNames(agg *logical.Node) []string {
 	if agg == nil || len(agg.AggExprs) == 0 {
 		return nil
 	}
@@ -290,75 +223,4 @@ func logicalAggOutNames(agg *logical.Node) []string {
 		out = append(out, agg.AggExprs[i].OutputCol)
 	}
 	return out
-}
-
-// stageAggOutNames is a Stage's aggregate OUTPUT names, from whichever of the
-// three spec lists the stage carries — the same list one operator lower.
-func stageAggOutNames(s *Stage) []string {
-	if s == nil {
-		return nil
-	}
-	var out []string
-	for _, specs := range [][]AggSpec{s.AggSpecs, s.FusedAggSpecs, s.ChainedAggSpecs} {
-		for _, a := range specs {
-			out = append(out, a.OutputCol)
-		}
-	}
-	return out
-}
-
-// aggregateEmittedKeyNames is the column name a stage's aggregate emits for
-// each of its GROUP BY keys — `exec.PublishedGroupKeyNames` over the published
-// list, which is the same answer the single-process operator gives.
-func aggregateEmittedKeyNames(s *Stage) []string {
-	keys := StageGroupKeyList(s)
-	if len(keys) == 0 {
-		return nil
-	}
-	if len(s.GroupByResolve) != len(keys) {
-		return keys
-	}
-	return stageEmittedKeyNames(keys, s.GroupByResolve, stageAggOutNames(s))
-}
-
-// stageGroupKeyDecls types every key the computing fragment MATERIALIZES, so
-// the worker builds its vector from the planner's declaration rather than
-// inferring one from the expression text with no catalog (#379, ADR-0024
-// item 2).
-//
-// Keyed by the PUBLISHED name. The resolution spelling is not a stable key: a
-// derived-alias key's resolution is re-spelled at the end of planning, and a
-// map keyed by it would then answer for a text nothing carries.
-func stageGroupKeyDecls(published []string, resolve []GroupKeyResolution,
-	child *logical.Node) (map[string]parquet.TypeID, map[string]logical.DecimalMeta) {
-	var out map[string]parquet.TypeID
-	var dec map[string]logical.DecimalMeta
-	for i, r := range resolve {
-		if !r.Computed || r.Expr == "" || i >= len(published) {
-			continue
-		}
-		node, err := plansql.ParseExpression(r.Expr)
-		if err != nil {
-			continue
-		}
-		if out == nil {
-			out = make(map[string]parquet.TypeID)
-		}
-		d := r.Decl
-		if d.ID == 0 && !d.DecKnown {
-			d = derivedGroupKeyDecl(r.Expr, node, child)
-		}
-		resolve[i].Decl = d
-		out[published[i]] = d.ID
-		if d.ID == parquet.TypeDecimal && d.DecKnown {
-			// The (p,s) beside the TypeID: the worker builds the key vector
-			// from this declaration, and a DECIMAL one with no scale
-			// truncates every value written into it (ADR-0024 item 2).
-			if dec == nil {
-				dec = make(map[string]logical.DecimalMeta)
-			}
-			dec[published[i]] = logical.DecimalMeta{Precision: d.Precision, Scale: d.Scale}
-		}
-	}
-	return out, dec
 }

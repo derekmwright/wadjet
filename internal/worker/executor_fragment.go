@@ -2646,7 +2646,7 @@ func (e *Executor) buildUnaryChain(ctx context.Context, task distributed.Task, s
 	// reading its whole input for rows the coordinator will discard: opening
 	// a 15M-row table read all of it for 501 rows. Safe per task because the
 	// planner only sets RowLimit when nothing between the scan and the LIMIT
-	// changes cardinality (physical.limitPushdownSafe), and because a bare
+	// changes cardinality (dagplan.limitPushdownSafe), and because a bare
 	// LIMIT does not specify which rows it returns — the coordinator trims
 	// the union of tasks to the real limit.
 	if task.RowLimit > 0 {
@@ -3353,7 +3353,7 @@ type declaredSchemaRefusal struct {
 func (e *declaredSchemaRefusal) Error() string {
 	return fmt.Sprintf("%s: base-table parquet input %q arrived with no declared schema; "+
 		"refusing to type %d file(s) from their own footers — the catalog's types must ride the plan "+
-		"(physical.Stage.ScanSchema → OpSpec.ColumnTypes / BuildColumnTypes / Task.ColumnTypes). "+
+		"(dagplan.Stage.ScanSchema → OpSpec.ColumnTypes / BuildColumnTypes / Task.ColumnTypes). "+
 		"WADJET_DECLARED_SCHEMA_STRICT=0 restores the pre-#503 behavior of trusting the file",
 		e.what, e.alias, e.files)
 }

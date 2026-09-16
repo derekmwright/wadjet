@@ -5,8 +5,8 @@ package coordinator
 import (
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // The group-index layout of a DAG aggregate is decided from the EXACT number
@@ -28,7 +28,7 @@ func TestAggregateInputRowBound(t *testing.T) {
 			PartitionRows: rows,
 		}
 	}
-	stage := physical.Stage{
+	stage := dagplan.Stage{
 		ID:           "final_aggregate-7",
 		Type:         "final_aggregate",
 		Dependencies: []string{"repartition-11"},
@@ -37,7 +37,7 @@ func TestAggregateInputRowBound(t *testing.T) {
 
 	cases := []struct {
 		name     string
-		stage    physical.Stage
+		stage    dagplan.Stage
 		inputs   map[string]StageOutput
 		w        int
 		numTasks int
@@ -96,7 +96,7 @@ func TestAggregateInputRowBound(t *testing.T) {
 		},
 		{
 			name: "multiple dependencies do not compose",
-			stage: physical.Stage{
+			stage: dagplan.Stage{
 				Type:         "final_aggregate",
 				Dependencies: []string{"a", "b"},
 			},
@@ -153,7 +153,7 @@ func TestAggregateRowBoundTotalAgreesWithDispatchGuard(t *testing.T) {
 			PartitionRows: rows,
 		}
 	}
-	stage := physical.Stage{
+	stage := dagplan.Stage{
 		ID:           "final_aggregate-7",
 		Type:         "final_aggregate",
 		Dependencies: []string{"repartition-11"},
@@ -235,7 +235,7 @@ func TestAggregateInputRowBoundExactCover(t *testing.T) {
 			PartitionRows: rows,
 		}
 	}
-	stage := physical.Stage{
+	stage := dagplan.Stage{
 		Type:         "final_aggregate",
 		Dependencies: []string{"repartition-11"},
 	}
@@ -288,7 +288,7 @@ func TestAggregateInputRowBoundExactCover(t *testing.T) {
 // TestAggregateFragmentCarriesRowBound: the bound has to reach the wire spec
 // the worker reads, and only the aggregate op in the chain.
 func TestAggregateFragmentCarriesRowBound(t *testing.T) {
-	stage := physical.Stage{
+	stage := dagplan.Stage{
 		ID:           "final_aggregate-7",
 		Type:         "final_aggregate",
 		Dependencies: []string{"repartition-11"},

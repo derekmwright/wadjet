@@ -15,23 +15,23 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/memory"
 )
 
-// deferredJoinBridge creates a pipeline break for deferred hash join builds.
+// DeferredJoinBridge creates a pipeline break for deferred hash join builds.
 // Init runs the child pipeline (scan → early probes) with parallel workers,
 // overlapping with the deferred build goroutine. After the child pipeline
 // completes, it waits for the build barrier, then replays collected batches
 // as a Source for the deferred probe operators.
-type deferredJoinBridge struct {
-	childSource exec.Source
-	childOps    []exec.UnaryOperator
-	barrier     <-chan struct{}
-	buildErr    *error
-	workers     int
+type DeferredJoinBridge struct {
+	ChildSource exec.Source
+	ChildOps    []exec.UnaryOperator
+	Barrier     <-chan struct{}
+	BuildErr    *error
+	Workers     int
 	spill       *memory.SpillManager
 
 	collector *exec.SpillableBatchCollector
 }
 
-func (d *deferredJoinBridge) Init(ctx context.Context) error {
+func (d *DeferredJoinBridge) Init(ctx context.Context) error {
 	// Run child pipeline (scan → early probes) to collect filtered batches.
 	// This overlaps with the deferred build goroutine(s) running in background.
 	// The collector charges the tracker and spills past pressure — the raw
@@ -40,16 +40,16 @@ func (d *deferredJoinBridge) Init(ctx context.Context) error {
 	// residency, invisible to SpillManager victim selection).
 	d.collector = &exec.SpillableBatchCollector{Spill: d.spill}
 	pipe := &exec.Pipeline{
-		Source:  d.childSource,
-		Ops:     d.childOps,
+		Source:  d.ChildSource,
+		Ops:     d.ChildOps,
 		Sink:    d.collector,
-		Workers: d.workers,
+		Workers: d.Workers,
 	}
 	if err := pipe.Run(ctx); err != nil {
 		d.collector.Release()
 		// Wait for build goroutine to prevent leak
 		select {
-		case <-d.barrier:
+		case <-d.Barrier:
 		default:
 		}
 		return fmt.Errorf("deferred join child pipeline: %w", err)
@@ -57,23 +57,23 @@ func (d *deferredJoinBridge) Init(ctx context.Context) error {
 
 	// Wait for deferred build to complete
 	select {
-	case <-d.barrier:
+	case <-d.Barrier:
 	case <-ctx.Done():
 		d.collector.Release()
 		return ctx.Err()
 	}
-	if *d.buildErr != nil {
+	if *d.BuildErr != nil {
 		d.collector.Release()
-		return *d.buildErr
+		return *d.BuildErr
 	}
 	return nil
 }
 
-func (d *deferredJoinBridge) Next(ctx context.Context) (*batch.RecordBatch, error) {
+func (d *DeferredJoinBridge) Next(ctx context.Context) (*batch.RecordBatch, error) {
 	return d.collector.NextReplay(ctx)
 }
 
-func (d *deferredJoinBridge) Close() error {
+func (d *DeferredJoinBridge) Close() error {
 	if d.collector != nil {
 		d.collector.Release()
 	}
@@ -87,16 +87,16 @@ func (d *deferredJoinBridge) Close() error {
 // than the build table (e.g. Q21: 60M lineitem rows reduced to ~2M when only
 // ~500K orders match).
 type reverseBloomBridge struct {
-	childSource   exec.Source
-	childOps      []exec.UnaryOperator
+	ChildSource   exec.Source
+	ChildOps      []exec.UnaryOperator
 	rbBuildSource *exec.Source // pointer to the goroutine's build source (swappable)
 	buildSource   exec.Source  // original build source (unwrapped)
 	buildStart    chan struct{}
-	barrier       <-chan struct{}
-	buildErr      *error
+	Barrier       <-chan struct{}
+	BuildErr      *error
 	probeKey      string // probe-side column to extract bloom from
 	buildKey      string // build-side column to filter
-	workers       int
+	Workers       int
 	spill         *memory.SpillManager
 
 	collector *exec.SpillableBatchCollector
@@ -111,15 +111,15 @@ func (rb *reverseBloomBridge) Init(ctx context.Context) error {
 	// Finalize→ToRows boxing, which this bridge never needed.
 	rb.collector = &exec.SpillableBatchCollector{Spill: rb.spill}
 	pipe := &exec.Pipeline{
-		Source:  rb.childSource,
-		Ops:     rb.childOps,
+		Source:  rb.ChildSource,
+		Ops:     rb.ChildOps,
 		Sink:    rb.collector,
-		Workers: rb.workers,
+		Workers: rb.Workers,
 	}
 	if err := pipe.Run(ctx); err != nil {
 		rb.collector.Release()
 		close(rb.buildStart)
-		<-rb.barrier
+		<-rb.Barrier
 		return fmt.Errorf("reverse bloom child pipeline: %w", err)
 	}
 
@@ -152,7 +152,7 @@ func (rb *reverseBloomBridge) Init(ctx context.Context) error {
 		}); err != nil {
 			rb.collector.Release()
 			close(rb.buildStart)
-			<-rb.barrier
+			<-rb.Barrier
 			return fmt.Errorf("reverse bloom build: %w", err)
 		}
 		if encErr != nil {
@@ -195,14 +195,14 @@ func (rb *reverseBloomBridge) Init(ctx context.Context) error {
 
 	// Wait for build to complete.
 	select {
-	case <-rb.barrier:
+	case <-rb.Barrier:
 	case <-ctx.Done():
 		rb.collector.Release()
 		return ctx.Err()
 	}
-	if *rb.buildErr != nil {
+	if *rb.BuildErr != nil {
 		rb.collector.Release()
-		return *rb.buildErr
+		return *rb.BuildErr
 	}
 	return nil
 }
@@ -395,10 +395,10 @@ func (s *rightSemiFlushSource) Close() error {
 	return s.pipeline.Close()
 }
 
-// mapJoinType converts a join type string (e.g. "join", "left join",
+// MapJoinType converts a join type string (e.g. "join", "left join",
 // "right join", "full outer join", "cross join") to a canonical short
 // form used by the distributed planner.
-func mapJoinType(vt string) string {
+func MapJoinType(vt string) string {
 	lower := strings.ToLower(strings.TrimSpace(vt))
 	switch {
 	case lower == "cross" || strings.Contains(lower, "cross"):
@@ -418,22 +418,8 @@ func mapJoinType(vt string) string {
 	}
 }
 
-// preservesBuildSide reports whether a canonical join kind emits build-side
-// rows that found no probe partner — the rows a RIGHT or FULL join exists to
-// preserve, produced after probing by HashJoinProbe.FlushUnmatchedRows.
-//
-// Every distributed layout that REPLICATES the build side across tasks is
-// unsound for these: each task holds the whole build and sees only its slice
-// of the probe, so each would emit the same unmatched rows. Broadcast
-// (walkStages) and skew-split (coordinator.planSkewSplitTasks) both gate on
-// this; the hash-shuffle layout is sound because a partition's build and
-// probe rows land on the same task.
-func preservesBuildSide(jt string) bool {
-	return jt == "right" || jt == "full"
-}
-
-// mapExecJoinType converts a canonical join type string to exec.JoinType.
-func mapExecJoinType(jt string) exec.JoinType {
+// MapExecJoinType converts a canonical join type string to exec.JoinType.
+func MapExecJoinType(jt string) exec.JoinType {
 	switch jt {
 	case "left":
 		return exec.LeftJoin
@@ -590,7 +576,7 @@ func BuildSemiAntiFilter(filter string) func(probe *batch.RecordBatch, probeRow 
 			}
 			pv := probe.Columns[pi]
 			bv := build.Columns[bi]
-			if !evalFilterTyped(pv, bv, probeRow, buildRow, ops[i]) {
+			if !EvalFilterTyped(pv, bv, probeRow, buildRow, ops[i]) {
 				return false
 			}
 		}
@@ -608,9 +594,9 @@ func filterColumnIndex(b *batch.RecordBatch, name string) int {
 	return exec.ColumnIndexFallback(b, name)
 }
 
-// evalFilterTyped compares two vector values at given rows using typed dispatch.
+// EvalFilterTyped compares two vector values at given rows using typed dispatch.
 // Avoids interface boxing and fmt.Sprint allocation on every comparison.
-func evalFilterTyped(pv, bv *batch.Vector, pRow, bRow, op int) bool {
+func EvalFilterTyped(pv, bv *batch.Vector, pRow, bRow, op int) bool {
 	const (
 		opNE = iota
 		opGT

@@ -344,7 +344,7 @@ func readsAnAggregate(n *Node) bool {
 //
 // It descends through a HAVING and NOTHING ELSE, which is deliberate and is
 // why it is not AggScopePreservingWrapper's fourth reader. Both callers —
-// physical.aggregateProjectionTarget and physical.aggregateGroupKeyName — go
+// dagplan.aggregateProjectionTarget and physical.aggregateGroupKeyName — go
 // on to map this Project's SELECT list onto the aggregate's own STAGE, and a
 // Sort, a LIMIT or a WINDOW between the two emits a stage of ITS own that the
 // projection would then be carried past. The question "are these rows one per
@@ -607,7 +607,7 @@ func rewriteASTThroughProject(ast plansql.Node, p projRefs) (plansql.Node, bool)
 // their stages carry published names, not the source spelling below the Project.
 // physical.validate owns ambiguous bare-name errors (42702) on both paths.
 // Return nil AST and ok=false if unchanged; aliases are substituted OUTPUT names,
-// lowercased, for physical.resolveFilterAliasSpelling's alias/source choice (#656).
+// lowercased, for dagplan.resolveFilterAliasSpelling's alias/source choice (#656).
 // See docs/internals/dag-filter-project-respelling.md for the design.
 func ResolveFilterThroughProjects(pred Predicate, child *Node) (ast plansql.Node, aliases []string, ok bool) {
 	if pred.ASTExpr == nil {
@@ -652,7 +652,7 @@ func resolveFilterInSubtree(ast plansql.Node, n *Node, changed bool, subst *[]st
 			// carries rather than the alias the query wrote — which is right
 			// exactly when no pass materialized the alias onto the producing
 			// fragment. That is not knowable here, so both spellings travel
-			// to the stage and physical.resolveFilterAliasSpelling picks
+			// to the stage and dagplan.resolveFilterAliasSpelling picks
 			// once attachScanSelectProjections has decided (#656).
 		case NodeProject:
 			newAST, ok := rewriteASTThroughProject(ast, newProjRefs(n).withSubstitutionLog(subst))

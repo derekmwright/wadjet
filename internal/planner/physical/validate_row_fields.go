@@ -12,38 +12,38 @@ import (
 )
 
 // Resolve the container from the binder scope, including ROW child declarations.
-func rowFieldScopeDecls(scope *colScope) colDecls {
-	decls := colDecls{}
+func rowFieldScopeDecls(scope *colScope) ColDecls {
+	decls := ColDecls{}
 	if scope != nil {
-		decls.types = map[string]parquet.TypeID{}
+		decls.Types = map[string]parquet.TypeID{}
 		for name, t := range scope.colTypes {
 			if t != typeAmbiguous {
-				decls.types[name] = t
+				decls.Types[name] = t
 			}
 		}
 		for q, cols := range scope.qualColTypes {
 			for name, t := range cols {
-				decls.types[q+"."+name] = t
+				decls.Types[q+"."+name] = t
 			}
 		}
-		decls.fields = map[string][]parquet.Column{}
-		decls.dec = map[string]logical.DecimalMeta{}
+		decls.Fields = map[string][]parquet.Column{}
+		decls.Dec = map[string]logical.DecimalMeta{}
 		for k, v := range scope.rowFields {
-			decls.fields[k] = v
+			decls.Fields[k] = v
 		}
 		for k, d := range scope.fieldDecls {
 			if !strings.Contains(k, ".") && scope.srcCount[k] > 1 {
 				continue
 			}
-			decls.types[k] = d.ID
-			decls.fields[k] = d.RowFields()
+			decls.Types[k] = d.ID
+			decls.Fields[k] = d.RowFields()
 			if d.ID == parquet.TypeDecimal {
-				col := declTypeParts(d)
+				col := DeclTypeParts(d)
 				if d.Schema != nil {
 					col = *d.Schema
 				}
 				if col.Precision > 0 {
-					decls.dec[k] = logical.DecimalMeta{Precision: col.Precision, Scale: col.Scale}
+					decls.Dec[k] = logical.DecimalMeta{Precision: col.Precision, Scale: col.Scale}
 				}
 			}
 		}
@@ -73,18 +73,18 @@ func refuseInvalidRowFields(node plansql.Node, scope *colScope) error {
 
 // Aggregates are declared by the aggregate layer, not the scalar registry.
 // Ask that layer for their input-dependent result before checking a postfix.
-func fieldContainerDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Confidence) {
+func fieldContainerDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Confidence) {
 	if call, ok := node.(*plansql.FuncCallNode); ok && plansql.IsAggregate(call.Name) {
 		switch strings.ToLower(call.Name) {
 		case "sum", "avg", "min", "max", "min_by", "max_by":
 			if len(call.Args) == 0 {
 				return expr.DeclType{}, expr.Undecided
 			}
-			in, c := nodeDeclaredType(call.Args[0], decls)
+			in, c := NodeDeclaredType(call.Args[0], decls)
 			if c != expr.Decided {
 				return expr.DeclType{}, expr.Undecided
 			}
-			typ, p, s, known := aggOutputFromInputDecl(call.Name, call.Distinct, in.ID, in.Precision, in.Scale, aggInputIsWideInteger(call.Args[0], decls))
+			typ, p, s, known := AggOutputFromInputDecl(call.Name, call.Distinct, in.ID, in.Precision, in.Scale, AggInputIsWideInteger(call.Args[0], decls))
 			if !known {
 				return expr.DeclType{}, expr.Undecided
 			}
@@ -99,5 +99,5 @@ func fieldContainerDeclaredType(node plansql.Node, decls colDecls) (expr.DeclTyp
 			return expr.Decl(aggOutputType(call.Name, call.Distinct)), expr.Decided
 		}
 	}
-	return nodeDeclaredType(node, decls)
+	return NodeDeclaredType(node, decls)
 }

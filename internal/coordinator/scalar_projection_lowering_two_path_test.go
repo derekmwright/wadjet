@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 )
 
 // The SELECT-list scalar-subquery lowering (#659), gated on VALUES rather than
@@ -139,7 +139,7 @@ func TestSelectListSubqueriesAnswerTheSameOnEveryArm(t *testing.T) {
 						}
 					}
 					want := tc.wantRoutes
-					if !tc.readsACTE && !physical.ScalarSubqueriesAreDeferred() {
+					if !tc.readsACTE && !dagplan.ScalarSubqueriesAreDeferred() {
 						want = 1 // no deferral, no producer, no lowering
 					}
 					if d := arcD5RouteDelta(before, arcD5Routes(arm.c))[1]; d != want {
@@ -217,7 +217,7 @@ func TestAScalarSubqueryTheDagCannotCarryExactlyIsNeverRendered(t *testing.T) {
 
 	check := func(t *testing.T, sql string, wantRoutes int64) {
 		t.Helper()
-		if !physical.ScalarSubqueriesAreDeferred() {
+		if !dagplan.ScalarSubqueriesAreDeferred() {
 			// With the deferral off nothing becomes a producer, so every cell
 			// declines and the two lists stop being a pair.
 			wantRoutes = 1

@@ -5,9 +5,9 @@ package coordinator
 import (
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -84,10 +84,10 @@ func decomposeAvg(specs []distributed.AggSpec) []distributed.AggSpec {
 	return out
 }
 
-// decomposeAvgPhysical is the physical.AggSpec variant for the final_aggregate
-// stage's stage.AggSpecs (which uses physical.AggSpec, not distributed.AggSpec
+// decomposeAvgPhysical is the dagplan.AggSpec variant for the final_aggregate
+// stage's stage.AggSpecs (which uses dagplan.AggSpec, not distributed.AggSpec
 // — the dispatcher converts to wire format separately).
-func decomposeAvgPhysical(specs []physical.AggSpec) []physical.AggSpec {
+func decomposeAvgPhysical(specs []dagplan.AggSpec) []dagplan.AggSpec {
 	hasAvg := false
 	for _, a := range specs {
 		if isAvgFunc(a.Func) {
@@ -98,7 +98,7 @@ func decomposeAvgPhysical(specs []physical.AggSpec) []physical.AggSpec {
 	if !hasAvg {
 		return specs
 	}
-	out := make([]physical.AggSpec, 0, len(specs)+1)
+	out := make([]dagplan.AggSpec, 0, len(specs)+1)
 	for _, a := range specs {
 		if !isAvgFunc(a.Func) {
 			out = append(out, a)
@@ -168,7 +168,7 @@ func avgSumDecimalDecl(a distributed.AggSpec) (precision, scale int, ok bool) {
 	return batch.MaxDecimalPrecision, a.InputScale, true
 }
 
-// aggOutputTypePtr mirrors physical.AggSpec's (type, known) pair onto the
+// aggOutputTypePtr mirrors dagplan.AggSpec's (type, known) pair onto the
 // pointer convention distributed.AggSpec uses, so decomposeAvgPhysical can ask
 // avgSumDecimalDecl the same question decomposeAvg does.
 func aggOutputTypePtr(t parquet.TypeID, known bool) *int {

@@ -5,8 +5,8 @@ package coordinator
 import (
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -26,18 +26,18 @@ func TestBuildAggregateFragment_EmitEmptyIdentity(t *testing.T) {
 	}}
 	tests := []struct {
 		name  string
-		stage physical.Stage
+		stage dagplan.Stage
 		want  bool
 	}{
-		{"ungrouped final owes the row", physical.Stage{Type: "final_aggregate"}, true},
+		{"ungrouped final owes the row", dagplan.Stage{Type: "final_aggregate"}, true},
 		{"grouped final owes nothing — no groups, no rows",
-			physical.Stage{Type: "final_aggregate", GroupByCols: []string{"g"}}, false},
+			dagplan.Stage{Type: "final_aggregate", GroupByCols: []string{"g"}}, false},
 		{"DISTINCT final groups by every column",
-			physical.Stage{Type: "final_aggregate", GroupByAll: true}, false},
+			dagplan.Stage{Type: "final_aggregate", GroupByAll: true}, false},
 		{"partial aggregate is absorbed by the final above it",
-			physical.Stage{Type: "aggregate"}, false},
+			dagplan.Stage{Type: "aggregate"}, false},
 		{"merge_aggregate is absorbed by the final above it",
-			physical.Stage{Type: "merge_aggregate"}, false},
+			dagplan.Stage{Type: "merge_aggregate"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -93,7 +93,7 @@ func TestDecomposeAvg_LegOutputTypes(t *testing.T) {
 			got[1].OutputCol, parquet.TypeID(*got[1].OutputType), avgCountPrefix+"a", parquet.TypeInt64)
 	}
 
-	physIn := []physical.AggSpec{{
+	physIn := []dagplan.AggSpec{{
 		Func: "avg", InputCol: "v", OutputCol: "a", OutputType: parquet.TypeFloat64,
 	}}
 	physGot := decomposeAvgPhysical(physIn)

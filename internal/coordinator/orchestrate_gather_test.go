@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 )
 
 // TestOrchestrateGather_WrongType ensures the shim rejects stages that
@@ -14,7 +14,7 @@ import (
 func TestOrchestrateGather_WrongType(t *testing.T) {
 	coord := &Coordinator{}
 	_, _, err := coord.orchestrateGather(
-		physical.Stage{Type: physical.StageExchangeReplicate},
+		dagplan.Stage{Type: dagplan.StageExchangeReplicate},
 		newSliceStream(nil), nil, nil,
 	)
 	if err == nil {

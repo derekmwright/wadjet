@@ -432,7 +432,7 @@ func TestExecutePipelineStaleSizeBytes(t *testing.T) {
 // a base-table parquet input: the same schema writeParquetFile writes, in
 // wire form. Post-#503 a base-table read with no declaration is REFUSED, so
 // a fixture that dispatches one has to say what it holds — exactly as the
-// coordinator does from physical.Stage.ScanSchema.
+// coordinator does from dagplan.Stage.ScanSchema.
 func declaredFromRows(rows []map[string]any) []distributed.ColumnSpec {
 	cols := schemaFromRows(rows)
 	out := make([]distributed.ColumnSpec, len(cols))

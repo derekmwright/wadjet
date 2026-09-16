@@ -30,14 +30,14 @@ var nfdCols = []struct {
 	{"f64", parquet.TypeFloat64, "double precision"},
 }
 
-func nfdDecls() colDecls {
+func nfdDecls() ColDecls {
 	types := map[string]parquet.TypeID{"txt": parquet.TypeString}
 	for _, c := range nfdCols {
 		types[c.name] = c.typ
 	}
-	return colDecls{
-		types: types,
-		dec: map[string]logical.DecimalMeta{
+	return ColDecls{
+		Types: types,
+		Dec: map[string]logical.DecimalMeta{
 			"d152":  {Precision: 15, Scale: 2},
 			"d3810": {Precision: 38, Scale: 10},
 		},
@@ -60,7 +60,7 @@ func nfdDeclared(t *testing.T, sql string) (expr.DeclType, expr.Confidence) {
 	if err != nil {
 		t.Fatalf("parse %q: %v", sql, err)
 	}
-	return nodeDeclaredType(node, nfdDecls())
+	return NodeDeclaredType(node, nfdDecls())
 }
 
 // TestQuotedLiteralIsUnknownInTheFold is #724 at the layer the defect lives
@@ -266,7 +266,7 @@ func TestDeclaredFoldAgreesWithTheComparisonFold(t *testing.T) {
 					if err != nil {
 						t.Fatalf("parse %q: %v", sql, err)
 					}
-					declared, c := nodeDeclaredType(node, nfdDecls())
+					declared, c := NodeDeclaredType(node, nfdDecls())
 					if c != expr.Decided {
 						t.Fatalf("%s declared nothing (%s)", sql, c)
 					}

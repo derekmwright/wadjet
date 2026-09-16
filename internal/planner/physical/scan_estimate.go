@@ -28,18 +28,18 @@ func (p *Planner) EstimatePlanScanBytes(ctx context.Context, n *logical.Node) (i
 	}
 	var total int64
 	if n.Type == logical.NodeScan {
-		// p.getManifest, not p.catalog.GetManifest: this is the FIRST
+		// p.GetManifest, not p.catalog.GetManifest: this is the FIRST
 		// catalog read the default route makes (tryLocalFastPath calls it
 		// before anything else), and it visits every scan node, so an
 		// unpinned call here costs one manifest read per scan node on every
 		// statement (#502).
-		meta, err := p.getManifest(ctx, n.TableName)
+		meta, err := p.GetManifest(ctx, n.TableName)
 		if err != nil {
 			return 0, false
 		}
 		for _, part := range meta.Partitions {
 			if len(n.PartitionFilter) > 0 && len(part.Values) > 0 &&
-				!matchesPartitionFilter(part.Values, n.PartitionFilter) {
+				!MatchesPartitionFilter(part.Values, n.PartitionFilter) {
 				continue
 			}
 			for _, f := range part.Files {
@@ -88,8 +88,8 @@ func (p *Planner) EstimatePlanScanBytes(ctx context.Context, n *logical.Node) (i
 func (p *Planner) EstimatePlanScanCost(ctx context.Context, n *logical.Node) QueryCost {
 	var cost QueryCost
 	p.accumulateScanCost(ctx, n, &cost)
-	cost.HasFilter = hasFilterOrPartition(n)
-	cost.HasLimit = hasLimit(n)
+	cost.HasFilter = HasFilterOrPartition(n)
+	cost.HasLimit = HasLimit(n)
 	return cost
 }
 
@@ -98,12 +98,12 @@ func (p *Planner) accumulateScanCost(ctx context.Context, n *logical.Node, cost 
 		return
 	}
 	if n.Type == logical.NodeScan {
-		// p.getManifest, not p.catalog.GetManifest: one catalog read per
+		// p.GetManifest, not p.catalog.GetManifest: one catalog read per
 		// table per statement (#502).
-		if meta, err := p.getManifest(ctx, n.TableName); err == nil {
+		if meta, err := p.GetManifest(ctx, n.TableName); err == nil {
 			for _, part := range meta.Partitions {
 				if len(n.PartitionFilter) > 0 && len(part.Values) > 0 &&
-					!matchesPartitionFilter(part.Values, n.PartitionFilter) {
+					!MatchesPartitionFilter(part.Values, n.PartitionFilter) {
 					continue
 				}
 				for _, f := range part.Files {

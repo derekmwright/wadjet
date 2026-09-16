@@ -5,11 +5,11 @@ package worker
 import (
 	"fmt"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -53,7 +53,7 @@ func buildWindowKeyProjection(specs []distributed.ProjectSpec) (exec.UnaryOperat
 		// `PARTITION BY COALESCE(f, 0)` from its literal and truncate every
 		// float key on the write (#379). Nil = an older coordinator; the
 		// planner's own fallback for an unresolved key is STRING.
-		outType := physical.ProjectionOutputType(node, parquet.TypeString)
+		outType := dagplan.ProjectionOutputType(node, parquet.TypeString)
 		if spec.Type != nil {
 			outType = expr.DeclType{ID: parquet.TypeID(*spec.Type),
 				Precision: spec.Precision, Scale: spec.Scale, Schema: &parquet.Column{Fields: spec.Fields},
@@ -94,7 +94,7 @@ func buildWindowKeyProjection(specs []distributed.ProjectSpec) (exec.UnaryOperat
 	if len(cols) == 0 {
 		return nil, nil
 	}
-	return physical.NewComputedColumnsOp(cols), nil
+	return dagplan.NewComputedColumnsOp(cols), nil
 }
 
 // compileFilterExprs parses each scan-pushed filter SQL fragment and returns
@@ -106,7 +106,7 @@ func buildWindowKeyProjection(specs []distributed.ProjectSpec) (exec.UnaryOperat
 // the planner (see plan.go resolveFilterSubqueries) before FilterExprs is
 // populated, so compile here runs with a nil subquery runner. A PER-ROW
 // correlated subquery can never reach this compile: PlanDistributed refuses
-// that shape (physical.ErrCorrelatedSubqueryDistributed) and the coordinator
+// that shape (dagplan.ErrCorrelatedSubqueryDistributed) and the coordinator
 // answers it on its local single-process pipeline (#359). The nil-runner
 // compile error below is therefore a backstop, not a supported path — it
 // fails the task loudly rather than letting a subquery silently evaluate
@@ -266,7 +266,7 @@ func buildAggInputProjection(
 			// inference: with no catalog here, a polymorphic key like
 			// COALESCE(l_extendedprice, 0) infers Int64 from its literal
 			// and the float keys truncate on write (#379).
-			outType := physical.ProjectionOutputType(node, parquet.TypeString)
+			outType := dagplan.ProjectionOutputType(node, parquet.TypeString)
 			declType, declDec := groupByTypes, groupByDecimal
 			declKey := c
 

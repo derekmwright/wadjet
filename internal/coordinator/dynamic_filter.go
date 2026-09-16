@@ -10,9 +10,9 @@ import (
 	"os"
 	"sync"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
@@ -338,7 +338,7 @@ func dynamicFilterPartialPrefix(queryID, stageID string) string {
 
 // lateAttachFilterIDs collects the FilterIDs the planner marked LateAttach
 // on a stage's emits — the set mergeCompleteBuildStats must force-stage.
-func lateAttachFilterIDs(emits []physical.DynamicFilterEmit) map[string]bool {
+func lateAttachFilterIDs(emits []dagplan.DynamicFilterEmit) map[string]bool {
 	var out map[string]bool
 	for _, e := range emits {
 		if e.LateAttach {
@@ -357,7 +357,7 @@ func lateAttachFilterIDs(emits []physical.DynamicFilterEmit) map[string]bool {
 // polls the deterministic merged key; with incremental publication on it
 // additionally lists PartialPrefix and ORs partials as emitter tasks upload
 // them, activating at full ".of<N>" coverage.
-func deferredDynamicFilterSpec(c physical.DynamicFilterConsume, queryID, bucket string) distributed.DynamicFilterSpec {
+func deferredDynamicFilterSpec(c dagplan.DynamicFilterConsume, queryID, bucket string) distributed.DynamicFilterSpec {
 	spec := distributed.DynamicFilterSpec{
 		FilterID:     c.FilterID,
 		TargetColumn: c.TargetColumn,
@@ -385,7 +385,7 @@ func deferredDynamicFilterSpec(c physical.DynamicFilterConsume, queryID, bucket 
 // `upstream`; they get a Deferred spec pointing at the deterministic merged
 // key, which the worker polls and installs mid-scan.
 func dynamicFilterSpecsFromBuildStats(
-	consumes []physical.DynamicFilterConsume,
+	consumes []dagplan.DynamicFilterConsume,
 	upstream map[string]StageOutput,
 	queryID, bucket string,
 ) []distributed.DynamicFilterSpec {

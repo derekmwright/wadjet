@@ -71,7 +71,7 @@ func ResolveColumnRef(b *batch.RecordBatch, name string) (idx int, structField s
 		// #726).
 		//
 		// The planner's own schema check has assumed this resolution since
-		// #656 — physical.columnResolves matches a reference against a
+		// #656 — dagplan.columnResolves matches a reference against a
 		// qualified column by its bare part, in exactly this direction — so
 		// implementing it here removes a disagreement between the checker and
 		// the evaluator rather than adding a special case.
@@ -129,7 +129,7 @@ func ResolveColumnRef(b *batch.RecordBatch, name string) (idx int, structField s
 	}
 	// Last resort: resolve a qualified reference under a different stream
 	// qualifier only when its bare part identifies ONE qualified column (#762).
-	// Keep evaluator resolution aligned with physical.columnResolves (#656).
+	// Keep evaluator resolution aligned with dagplan.columnResolves (#656).
 	// Multiple matching arms decline and keep the loud failure; never guess
 	// which arm an unmatched qualifier meant (#742).
 	// See docs/internals/qualified-column-last-resort-resolution.md for the design.

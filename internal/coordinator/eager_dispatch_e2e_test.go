@@ -16,8 +16,8 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/derekmwright/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -403,9 +403,9 @@ func TestEagerChainedJoinDispatchE2E(t *testing.T) {
 	t.Cleanup(func() { eagerMinTailSeconds = restoreTail })
 
 	// Pin fusion ON so the chain exists regardless of environment.
-	restoreFusion := physical.StageFusion.Load()
-	physical.StageFusion.Store(true)
-	t.Cleanup(func() { physical.StageFusion.Store(restoreFusion) })
+	restoreFusion := dagplan.StageFusion.Load()
+	dagplan.StageFusion.Store(true)
+	t.Cleanup(func() { dagplan.StageFusion.Store(restoreFusion) })
 
 	ctx, newCoord := setupEagerE2E(t, []string{"lineitem", "orders"})
 	// Q18's chain shape at test scale: both joins key on l_orderkey /
@@ -448,9 +448,9 @@ func TestEagerComputeProducerE2E(t *testing.T) {
 	eagerMinTailSeconds = 0
 	t.Cleanup(func() { eagerMinTailSeconds = restoreTail })
 
-	restoreFusion := physical.StageFusion.Load()
-	physical.StageFusion.Store(false)
-	t.Cleanup(func() { physical.StageFusion.Store(restoreFusion) })
+	restoreFusion := dagplan.StageFusion.Load()
+	dagplan.StageFusion.Store(false)
+	t.Cleanup(func() { dagplan.StageFusion.Store(restoreFusion) })
 
 	ctx, newCoord := setupEagerE2E(t, []string{"lineitem", "orders"})
 	const sql = `SELECT o_orderkey, SUM(l_quantity) AS qty

@@ -27,8 +27,8 @@ func (p *Planner) buildFilter(ctx context.Context, node *logical.Node) (exec.Sou
 	}
 
 	// Collect outer table aliases and columns for correlated subquery detection
-	outerTables := collectTableAliases(node.Children[0])
-	outerCols := collectOuterColumns(node.Children[0])
+	outerTables := CollectTableAliases(node.Children[0])
+	outerCols := CollectOuterColumns(node.Children[0])
 
 	// Scan-level filter pushdown: when the filter sits directly on a
 	// catalog scan, eligible conjuncts move into the scan (dictionary-mask
@@ -90,9 +90,9 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		// A group key is decided against the AGGREGATE'S INPUT, which is
 		// where a ROW column and its fields live — the aggregate's own
 		// output carries neither.
-		var elideKeyDecls colDecls
-		if agg := findAggregateAncestor(child); agg != nil && len(agg.Children) == 1 {
-			elideKeyDecls = inputColDecls(agg.Children[0])
+		var elideKeyDecls ColDecls
+		if agg := FindAggregateAncestor(child); agg != nil && len(agg.Children) == 1 {
+			elideKeyDecls = InputColDecls(agg.Children[0])
 		}
 		needsProject := false
 		for _, proj := range node.Projections {
@@ -137,10 +137,10 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			// projected columns in order; hidden HAVING outputs and unselected group keys
 			// must not reach the client (#591). Unknown shapes, including grouping sets,
 			// keep the projection. Do not look through a Window: it appends __win_N beyond
-			// aggregateOutputNames' aggregate-only answer (#575). Sort and LIMIT add no
+			// AggregateOutputNames' aggregate-only answer (#575). Sort and LIMIT add no
 			// columns and are safe to look through.
-			if names, ok := aggregateOutputNames(child); ok &&
-				!wrapsAWindow(child) && namesMatchProjections(names, node.Projections) {
+			if names, ok := AggregateOutputNames(child); ok &&
+				!WrapsAWindow(child) && namesMatchProjections(names, node.Projections) {
 				return p.buildPipeline(ctx, child)
 			}
 		}
@@ -151,7 +151,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		return nil, nil, nil, err
 	}
 
-	aggNode := findAggregateAncestor(child)
+	aggNode := FindAggregateAncestor(child)
 	isOverAggregate := aggNode != nil
 
 	// Which column a SELECT item that IS a derived GROUP BY key reads.
@@ -164,22 +164,22 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	// `(g + 1)` against `g + 1`, `G + 1` against `g + 1` — and comparing the
 	// renderings made which spelling was used decide whether the query
 	// answered or came back with a NULL key column (#723).
-	gbExprToSyn := groupKeyByIdentity(aggNode)
+	gbExprToSyn := GroupKeyByIdentity(aggNode)
 
 	// Catalog types of what feeds these projections, resolved once for the
 	// whole list: a bare column reference inside a projection expression
-	// decides its type from them (see nodeDeclaredType, #333). The second
+	// decides its type from them (see NodeDeclaredType, #333). The second
 	// map is for a SELECT expression that maps to a synthetic group column —
 	// a rename of a value computed BELOW the aggregate, so it types against
 	// the aggregate's input rather than its output.
-	childColTypes := emittedColDecls(child)
+	childColTypes := EmittedColDecls(child)
 	// A SELECT-list scalar subquery types against its OWN plan, not against
 	// this projection's input columns (#874).
-	childColTypes.subqueryDecl = p.subqueryOutputColumn
-	var aggInputColTypes colDecls
+	childColTypes.subqueryDecl = p.SubqueryOutputColumn
+	var aggInputColTypes ColDecls
 	if isOverAggregate && len(aggNode.Children) > 0 {
-		aggInputColTypes = inputColDecls(aggNode.Children[0])
-		aggInputColTypes.subqueryDecl = p.subqueryOutputColumn
+		aggInputColTypes = InputColDecls(aggNode.Children[0])
+		aggInputColTypes.subqueryDecl = p.SubqueryOutputColumn
 
 	}
 
@@ -242,7 +242,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	for _, proj := range node.Projections {
 		colRef := proj.Column
 		if colRef == "" {
-			colRef = cleanExpr(proj.Expr)
+			colRef = CleanExpr(proj.Expr)
 		}
 		name := proj.Alias
 		if name == "" {
@@ -335,13 +335,13 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			// the Project then references, or (b) compiling each
 			// projection independently. (b) is what we do — recompiling
 			// a literal or already-compiled expression is cheap.
-			outerTables := collectTableAliases(child)
-			outerCols := collectOuterColumns(child)
+			outerTables := CollectTableAliases(child)
+			outerCols := CollectOuterColumns(child)
 			var compiled expr.Expr
 			var compErr error
 			if len(outerTables) > 0 {
 				if len(outerCols) > 0 {
-					compiled, compErr = expr.CompileWithScopeResolver(astExpr, p.subqueryRunner, outerTables, outerCols, p.subqueryInnerColumns(), p.subqueryDeclOption(), p.subqueryBudgetOption())
+					compiled, compErr = expr.CompileWithScopeResolver(astExpr, p.subqueryRunner, outerTables, outerCols, p.SubqueryInnerColumns(), p.subqueryDeclOption(), p.subqueryBudgetOption())
 				} else {
 					compiled, compErr = expr.CompileWithScope(astExpr, p.subqueryRunner, outerTables, p.subqueryDeclOption(), p.subqueryBudgetOption())
 				}
@@ -352,7 +352,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 				// always compiled to instead of deferring the question to the
 				// first batch (#555 review).
 				compiled, compErr = expr.CompileWithColumnTypes(
-					astExpr, p.subqueryRunner, childColTypes.types, p.subqueryBudgetOption())
+					astExpr, p.subqueryRunner, childColTypes.Types, p.subqueryBudgetOption())
 			}
 			// A name nothing implements has no input column to fall back to,
 			// so the direct-copy path below would only re-report it as a
@@ -380,7 +380,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			// RENAME of a value computed BELOW the aggregate — type it
 			// against the aggregate's input, or the declared Float64
 			// coerces the pre-projected int64 keys on the copy (#297).
-			strictInt := strictIntArithCols(child)
+			strictInt := StrictIntArithCols(child)
 			colTypes := childColTypes
 			// The RESPELLED expression is the one that gets evaluated, so it
 			// is the one to type. `(c_dec + 1) * 2` over `GROUP BY c_dec + 1`
@@ -396,12 +396,12 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 					// BELOW the aggregate, so it types against the
 					// aggregate's input or the declared Float64 coerces the
 					// pre-projected int64 keys on the copy (#297).
-					strictInt = strictIntArithCols(aggNode.Children[0])
+					strictInt = StrictIntArithCols(aggNode.Children[0])
 					colTypes = aggInputColTypes
 					typeExpr = proj.ASTExpr
 				}
 			}
-			outDecl = inferProjectionDeclType(typeExpr, outDecl.ID, strictInt, colTypes)
+			outDecl = InferProjectionDeclType(typeExpr, outDecl.ID, strictInt, colTypes)
 		}
 		outType := outDecl.ID
 		// The planner's declaration is the AUTHORITY for this projection's
@@ -466,7 +466,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		// A ROW FIELD PATH records the WHOLE path, qualifier included, even
 		// when the output name matches the field name. It is the only
 		// spelling exec.Project can resolve the field's declaration from —
-		// colRef here has already lost the `rw.` through cleanExpr — and it
+		// colRef here has already lost the `rw.` through CleanExpr — and it
 		// is what carries the shape a bare TypeID cannot: a DECIMAL field's
 		// (p,s) and a nested ROW/ARRAY/MAP field's own structure, which
 		// colRefDeclaredType declines for the same reason it declines them

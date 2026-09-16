@@ -58,7 +58,7 @@ func (p *Planner) mergeDuplicateScans(node *logical.Node) {
 		// A scan with no RequiredColumns needs every column: the union
 		// degrades to nil (full schema).
 		var merged []string
-		colSet := map[string]bool{}
+		ColSet := map[string]bool{}
 		needAll := false
 		for _, s := range scans {
 			if len(s.RequiredColumns) == 0 {
@@ -66,8 +66,8 @@ func (p *Planner) mergeDuplicateScans(node *logical.Node) {
 				break
 			}
 			for _, col := range s.RequiredColumns {
-				if !colSet[col] {
-					colSet[col] = true
+				if !ColSet[col] {
+					ColSet[col] = true
 					merged = append(merged, col)
 				}
 			}
@@ -85,21 +85,21 @@ func (p *Planner) mergeDuplicateScans(node *logical.Node) {
 
 // Plan converts a logical plan to a physical plan for local execution.
 func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, error) {
-	p.planCtx = ctx           // store for subquery runner context propagation
+	p.PlanCtx = ctx           // store for subquery runner context propagation
 	p.releaseScanCache()      // reset per-query scan cache (drops tracker reservation)
 	p.res = &queryResources{} // reset per-query spill manager + memory tracker
 	p.releaseCTECache()       // reset per-query CTE cache (frees stale spill scratch)
 	// Propagate CTE definitions from the logical plan so scalar subqueries
 	// (e.g., in WHERE/HAVING) can resolve CTE table references.
 	if len(node.CTEs) > 0 {
-		p.ctes = node.CTEs
+		p.Ctes = node.CTEs
 	}
 
 	// A star that could not be expanded, refused with the planner's own
 	// sentence BEFORE the ordinal one — the order PlanDistributed uses, so
 	// both engines say the same thing about `SELECT s.* … ORDER BY 1`: the
 	// star is the reason and the un-countable ordinal is its consequence.
-	if err := refuseUnexpandedStarAnywhere(node); err != nil {
+	if err := RefuseUnexpandedStarAnywhere(node); err != nil {
 		return nil, err
 	}
 	// A `SELECT * ... ORDER BY <n>` whose star never expanded (#810). Refused
@@ -117,7 +117,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	}
 
 	// The projection whose names the CLIENT reads, resolved once (#732).
-	p.outputProjection = findOutputProjectionNode(node)
+	p.outputProjection = FindOutputProjectionNode(node)
 
 	// Materialize CTEs referenced multiple times. Each CTE is computed once
 	// and cached so that all references (main query + subqueries) see the
@@ -133,7 +133,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// engine and the small-query fast path raise it too — and raise it for a
 	// predicate no row ever reaches, which the operator-level check cannot
 	// (#631 follow-up).
-	if err := refuseUnrepresentableRealInList(node); err != nil {
+	if err := RefuseUnrepresentableRealInList(node); err != nil {
 		p.resources().releaseSubqueryCharges()
 		p.releaseCTECache()
 		p.releaseScanCache()
@@ -150,7 +150,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 
 	// Drop the columns the logical builder materialized for its own use so the
 	// client sees exactly the columns it selected (#320).
-	if trim := hiddenSortTrimOp(node); trim != nil {
+	if trim := HiddenSortTrimOp(node); trim != nil {
 		ops = append(ops, trim)
 	}
 
@@ -164,7 +164,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// concurrent Next() calls (channel-based scan sources).
 	pipelineWorkers := 0
 	switch source.(type) {
-	case *catalogScanSource, *scannerExecSource, *deferredJoinBridge:
+	case *catalogScanSource, *scannerExecSource, *DeferredJoinBridge:
 		pipelineWorkers = scanParallelism()
 	}
 
@@ -175,7 +175,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 			Sink:    sink,
 			Workers: pipelineWorkers,
 		},
-		OutputSchema: declaredOutputSchema(node, p.subqueryOutputColumn),
+		OutputSchema: DeclaredOutputSchema(node, p.SubqueryOutputColumn),
 	}
 	// Hand the sink the plan's answer for the case where no batch will ever
 	// tell it: a zero-row result. It is consulted only then (#416).
@@ -186,7 +186,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		// rather than inside the plan, because inside the plan a name is also
 		// a HANDLE — a sort key, a HAVING reference, an aggregate's OutputCol
 		// — and the two are not the same string.
-		cs.OutputNames = publishedOutputNames(p.outputProjection)
+		cs.OutputNames = DAGPublishedOutputNames(p.outputProjection)
 		// Unlike SchemaHint, this is consulted on EVERY result, zero-row or
 		// not: which DECIMAL columns are aggregate output is a property of
 		// the PLAN, not of whether a batch arrived (FIX 2, #457/#458 fold-in).
@@ -195,15 +195,15 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		// PUBLISHED one (#732): filed under the resolution spelling they miss,
 		// and an unaliased `s_acctbal + 1` goes out with a DECIMAL typmod
 		// PostgreSQL sends -1 for.
-		rawWire, rawLens := declaredWireUnconstrainedDecimal(node), DeclaredStringLengths(node)
+		rawWire, rawLens := DeclaredWireUnconstrainedDecimal(node), DeclaredStringLengths(node)
 		// POSITIONAL first, and it is the authority: a name is not an address
 		// when two output columns publish one (#732, round-1 review B2).
 		cs.SchemaHintWireUnconstrainedPos, cs.SchemaHintStringLengthPos =
 			publishedOutputDecls(p.outputProjection, rawWire, rawLens)
-		cs.SchemaHintWireUnconstrainedDecimal = republishDeclaredNames(p.outputProjection, rawWire)
+		cs.SchemaHintWireUnconstrainedDecimal = RepublishDeclaredNames(p.outputProjection, rawWire)
 		// And the string family's modifier, which is a LENGTH rather than a
 		// (p,s) — same lifecycle, same reason (#838).
-		cs.SchemaHintStringLength = republishDeclaredNames(p.outputProjection, rawLens)
+		cs.SchemaHintStringLength = RepublishDeclaredNames(p.outputProjection, rawLens)
 	}
 
 	// Attach spill file cleanup. CTE collectors and the scan cache
@@ -237,7 +237,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// query was both wasted work and the single edge that made the local
 	// planner depend on the distributed one (LICENSING.md, ADR-0037).
 	// dagplan.PlanStages is the distributed entry.
-	if err := p.enforceQueryLimits(ctx, node); err != nil {
+	if err := p.EnforceQueryLimits(ctx, node); err != nil {
 		p.resources().releaseSubqueryCharges()
 		p.releaseCTECache()
 		p.releaseScanCache()

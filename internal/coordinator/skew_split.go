@@ -5,7 +5,7 @@ package coordinator
 import (
 	"sync/atomic"
 
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 )
 
 // Adaptive skew-aware task layout for shuffled hash joins
@@ -81,12 +81,12 @@ type skewTaskAssignment struct {
 // Fused builds are already replicated by dispatch; splitting is at file granularity.
 // See docs/internals/skew-split-probe-cover.md for the design.
 func (c *Coordinator) planSkewSplitTasks(
-	stage physical.Stage,
+	stage dagplan.Stage,
 	inputs map[string]StageOutput,
 	numTasks, workerCount int,
 ) []skewTaskAssignment {
-	if stage.Type != physical.StageHashJoin ||
-		stage.Distribution.Kind != physical.DistHashPartitioned ||
+	if stage.Type != dagplan.StageHashJoin ||
+		stage.Distribution.Kind != dagplan.DistHashPartitioned ||
 		numTasks <= 0 || workerCount <= 1 {
 		return nil
 	}

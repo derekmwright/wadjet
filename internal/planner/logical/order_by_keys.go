@@ -206,7 +206,7 @@ func hiddenSortProjection(ob plansql.OrderByItem, child, project *Node, name str
 		// to compute it too — one that raises must raise. So the term needs no
 		// evaluation at all, only a NAME: the hidden projection is a plain
 		// reference to that output column, which the single-process Project
-		// copies and which `physical.resolveHiddenSortKeys` maps straight onto
+		// copies and which `dagplan.resolveHiddenSortKeys` maps straight onto
 		// the column the aggregate stage emits (annotateHiddenSortSource's
 		// simple-ColRef arm sets SourceColumn, and nothing has to be
 		// materialized on either engine).

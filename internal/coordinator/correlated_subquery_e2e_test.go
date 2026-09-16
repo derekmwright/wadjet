@@ -36,7 +36,7 @@ import (
 // single-process.
 //
 // The fix: PlanDistributed REFUSES the shape with a typed error
-// (physical.ErrCorrelatedSubqueryDistributed) and the coordinator routes the
+// (dagplan.ErrCorrelatedSubqueryDistributed) and the coordinator routes the
 // refused query onto its local single-process pipeline — the engine that owns
 // correlated-subquery semantics — regardless of the fast-path byte threshold.
 // A local failure is reported to the client; there is no DAG to fall back to.

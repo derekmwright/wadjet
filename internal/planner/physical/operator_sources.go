@@ -35,7 +35,7 @@ func scanParallelism() int {
 // a concurrent-safe scan source.
 func innerPipelineWorkers(src exec.Source) int {
 	switch src.(type) {
-	case *catalogScanSource, *scannerExecSource, *deferredJoinBridge:
+	case *catalogScanSource, *scannerExecSource, *DeferredJoinBridge:
 		return scanParallelism()
 	}
 	return 0
@@ -43,8 +43,8 @@ func innerPipelineWorkers(src exec.Source) int {
 
 // aggSourceAdapter wraps a child pipeline + hash aggregate into a Source.
 type aggSourceAdapter struct {
-	childSource exec.Source
-	childOps    []exec.UnaryOperator
+	ChildSource exec.Source
+	ChildOps    []exec.UnaryOperator
 	agg         *exec.HashAggregate
 	initialized bool
 	// pipe is the inner pipeline this adapter runs. It is HELD, not
@@ -68,10 +68,10 @@ func (a *aggSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error)
 		a.initialized = true
 		// Run child pipeline into aggregate
 		a.pipe = &exec.Pipeline{
-			Source:  a.childSource,
-			Ops:     a.childOps,
+			Source:  a.ChildSource,
+			Ops:     a.ChildOps,
 			Sink:    a.agg,
-			Workers: innerPipelineWorkers(a.childSource),
+			Workers: innerPipelineWorkers(a.ChildSource),
 		}
 		if err := a.pipe.Run(ctx); err != nil {
 			return nil, err
@@ -81,7 +81,7 @@ func (a *aggSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error)
 }
 
 func (a *aggSourceAdapter) RowsScanned() int64 {
-	if sp, ok := a.childSource.(exec.ScanStatsProvider); ok {
+	if sp, ok := a.ChildSource.(exec.ScanStatsProvider); ok {
 		return sp.RowsScanned()
 	}
 	return 0
@@ -94,7 +94,7 @@ func (a *aggSourceAdapter) Close() error {
 		return a.pipe.Close()
 	}
 	a.agg.Close()
-	return a.childSource.Close()
+	return a.ChildSource.Close()
 }
 
 // sortSourceAdapter wraps a child pipeline + sort into a Source.
@@ -104,8 +104,8 @@ func (a *aggSourceAdapter) Close() error {
 // keep in sync — so a real LIMIT 0 (sort.Limit == 0) truncates correctly
 // instead of colliding with sort.Limit's own "no limit" sentinel (#481).
 type sortSourceAdapter struct {
-	childSource exec.Source
-	childOps    []exec.UnaryOperator
+	ChildSource exec.Source
+	ChildOps    []exec.UnaryOperator
 	sort        *exec.Sort
 	initialized bool
 	pipe        *exec.Pipeline // held so Close reaches the child ops and clones (#625 M2)
@@ -123,10 +123,10 @@ func (s *sortSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error
 	if !s.initialized {
 		s.initialized = true
 		s.pipe = &exec.Pipeline{
-			Source:  s.childSource,
-			Ops:     s.childOps,
+			Source:  s.ChildSource,
+			Ops:     s.ChildOps,
 			Sink:    s.sort,
-			Workers: innerPipelineWorkers(s.childSource),
+			Workers: innerPipelineWorkers(s.ChildSource),
 		}
 		if err := s.pipe.Run(ctx); err != nil {
 			return nil, err
@@ -145,11 +145,11 @@ func (s *sortSourceAdapter) Close() error {
 		return s.pipe.Close()
 	}
 	s.sort.Close()
-	return s.childSource.Close()
+	return s.ChildSource.Close()
 }
 
 func (s *sortSourceAdapter) RowsScanned() int64 {
-	if sp, ok := s.childSource.(exec.ScanStatsProvider); ok {
+	if sp, ok := s.ChildSource.(exec.ScanStatsProvider); ok {
 		return sp.RowsScanned()
 	}
 	return 0
@@ -160,8 +160,8 @@ func (s *sortSourceAdapter) RowsScanned() int64 {
 func (w *windowSourceAdapter) ServesHeldState() bool { return true }
 
 type windowSourceAdapter struct {
-	childSource exec.Source
-	childOps    []exec.UnaryOperator
+	ChildSource exec.Source
+	ChildOps    []exec.UnaryOperator
 	win         *exec.Window
 	initialized bool
 	pipe        *exec.Pipeline // held so Close reaches the child ops and clones (#625 M2)
@@ -173,8 +173,8 @@ func (w *windowSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, err
 	if !w.initialized {
 		w.initialized = true
 		w.pipe = &exec.Pipeline{
-			Source: w.childSource,
-			Ops:    w.childOps,
+			Source: w.ChildSource,
+			Ops:    w.ChildOps,
 			Sink:   w.win,
 		}
 		if err := w.pipe.Run(ctx); err != nil {
@@ -185,7 +185,7 @@ func (w *windowSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, err
 }
 
 func (w *windowSourceAdapter) RowsScanned() int64 {
-	if sp, ok := w.childSource.(exec.ScanStatsProvider); ok {
+	if sp, ok := w.ChildSource.(exec.ScanStatsProvider); ok {
 		return sp.RowsScanned()
 	}
 	return 0
@@ -196,5 +196,5 @@ func (w *windowSourceAdapter) Close() error {
 		return w.pipe.Close()
 	}
 	w.win.Close()
-	return w.childSource.Close()
+	return w.ChildSource.Close()
 }

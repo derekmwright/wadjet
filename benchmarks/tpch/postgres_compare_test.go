@@ -2624,7 +2624,7 @@ func postgresSemanticsCases() []pgCase {
 		// pinned: this entry WAS the #541 pin, and its agreeing is that fix's
 		// proof. unifySetOpSchemas now resolves the arms' common type through
 		// the same setOpWiden / setOpDecimalTarget the stage DAG uses
-		// (physical.reconcileSetOpArmTypes) and MOVES each arm's boxes into
+		// (dagplan.reconcileSetOpArmTypes) and MOVES each arm's boxes into
 		// it, so the two paths cannot drift on the type or the values.
 		// Refs #541.
 		pgCase{name: "SetOpUnionAllDoubleWithDecimal", ordered: true,

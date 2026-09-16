@@ -8,7 +8,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 )
 
 // Probe-split affinity (scan_affinity.go probeSplitAffineSets): a
@@ -180,9 +180,9 @@ func TestProbeSplitAffineSetsByteBalance(t *testing.T) {
 // slice; buildTaskInputsForBroadcastJoinSplitProbe remains the even-split
 // front door.
 func TestProbeSplitTaskInputs(t *testing.T) {
-	stage := physical.Stage{
+	stage := dagplan.Stage{
 		ID:              "join-6",
-		Type:            physical.StageBroadcastJoin,
+		Type:            dagplan.StageBroadcastJoin,
 		Dependencies:    []string{"scan-0", "build-1"},
 		LeftDepStage:    "scan-0",
 		RightDepStage:   "build-1",

@@ -21,7 +21,7 @@ func f32Col(name string) parquet.Column {
 
 // TestUnifySetOpSchemasWidensEveryRung is #541's TYPE half: the single-process
 // path resolves a set operation's output type through the SAME two functions
-// the stage DAG uses — setOpWiden for the ladder and setOpDecimalTarget for
+// the stage DAG uses — SetOpWiden for the ladder and SetOpDecimalTarget for
 // the DECIMAL rung — so the two paths cannot answer with different types for
 // the same pair of arms, in either arm order.
 //
@@ -103,7 +103,7 @@ func TestUnifySetOpSchemasWidensEveryRung(t *testing.T) {
 			if !ok1 || !ok2 {
 				t.Fatalf("the ladder must resolve both arms")
 			}
-			dagType, ok := setOpWiden(lc.typ, rc.typ)
+			dagType, ok := SetOpWiden(lc.Typ, rc.Typ)
 			if !ok || dagType != got.Type {
 				t.Fatalf("the stage DAG resolves %s, the local path %s", dagType, got.Type)
 			}

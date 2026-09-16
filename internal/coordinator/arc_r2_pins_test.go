@@ -13,7 +13,7 @@ var r2Pin = map[string]map[string]string{
 	// set operation composes a NEW relation out of what its arms emit, so the
 	// stage's stream is the operation's own list and the name the enclosing
 	// query writes describes all of it. The arm is a MATERIALIZED arm now
-	// (physical.setOpArmPublishesItsOwnList), qualified by that name, and the
+	// (dagplan.setOpArmPublishesItsOwnList), qualified by that name, and the
 	// star states its list (logical.blockOwnProjection) instead of declining
 	// it — 16 star cells on five arms and 3 value cells on the DAG arms.
 
@@ -21,7 +21,7 @@ var r2Pin = map[string]map[string]string{
 	// reference into a block resolves to the spelling the producing stream
 	// really carries, so `o2.id AS k` is chased to `o2.id` and not to the
 	// bare `id` that BOTH relations inside the block answer to
-	// (physical.resolveShuffleKey). Every consumer of a join-bodied arm moves
+	// (dagplan.resolveShuffleKey). Every consumer of a join-bodied arm moves
 	// with it.
 
 	// TWO DERIVED ARMS OF ONE SHAPE, on the three DAG arms: `a.k` and `b.k`

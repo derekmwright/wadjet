@@ -16,8 +16,6 @@ package dagplan
 import (
 	"fmt"
 	"strings"
-
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // AggregateShuffleCandidate describes a join in the plan whose build side is a
@@ -85,7 +83,7 @@ type AggregateShuffleDiag struct {
 // output with the probe side's partitioning, and the join would be incorrect.
 // In that case we return !found and let the caller fall back to the existing
 // probe-split or broadcast path.
-func PickAggregateShuffleCandidate(stages []physical.Stage, thresholdBytes int64) (AggregateShuffleCandidate, bool) {
+func PickAggregateShuffleCandidate(stages []Stage, thresholdBytes int64) (AggregateShuffleCandidate, bool) {
 	diag := PickAggregateShuffleCandidateDiag(stages, thresholdBytes)
 	return diag.Candidate, diag.Reason == AggShuffleRejectNone
 }
@@ -94,8 +92,8 @@ func PickAggregateShuffleCandidate(stages []physical.Stage, thresholdBytes int64
 // returns the reason for rejection (or Candidate + Reason=None for success).
 // Use this when you want to log why detection declined — essential for
 // threshold tuning on real production data.
-func PickAggregateShuffleCandidateDiag(stages []physical.Stage, thresholdBytes int64) AggregateShuffleDiag {
-	byID := make(map[string]physical.Stage, len(stages))
+func PickAggregateShuffleCandidateDiag(stages []Stage, thresholdBytes int64) AggregateShuffleDiag {
+	byID := make(map[string]Stage, len(stages))
 	for _, s := range stages {
 		byID[s.ID] = s
 	}
@@ -114,7 +112,7 @@ func PickAggregateShuffleCandidateDiag(stages []physical.Stage, thresholdBytes i
 	}
 
 	for _, j := range stages {
-		if j.Type != physical.StageHashJoin && j.Type != physical.StageBroadcastJoin {
+		if j.Type != StageHashJoin && j.Type != StageBroadcastJoin {
 			continue
 		}
 		// A join exists — upgrade from NoJoin.
@@ -229,12 +227,12 @@ func (r AggregateShuffleRejectReason) String() string {
 // model, and the answer there is NO: the pre-compute SQL below writes the key
 // list twice, once as a select item and once as a GROUP BY term over the base
 // table, and a list it cannot vouch for is not one to build SQL from.
-func keyNamesAreTheirSpelling(byID map[string]physical.Stage, agg physical.Stage) bool {
+func keyNamesAreTheirSpelling(byID map[string]Stage, agg Stage) bool {
 	c, ok := followToKeyComputingStage(byID, agg)
 	if !ok {
 		return false
 	}
-	keys := physical.StageGroupKeyList(&c)
+	keys := StageGroupKeyList(&c)
 	if len(keys) == 0 || len(keys) != len(c.GroupByResolve) {
 		return false
 	}
@@ -250,29 +248,29 @@ func keyNamesAreTheirSpelling(byID map[string]physical.Stage, agg physical.Stage
 // fragment that RESOLVES the group keys against raw rows — the fused
 // scan-aggregate or the partial. Merges and exchanges are transparent;
 // anything else ends the walk.
-func followToKeyComputingStage(byID map[string]physical.Stage, agg physical.Stage) (physical.Stage, bool) {
+func followToKeyComputingStage(byID map[string]Stage, agg Stage) (Stage, bool) {
 	seen := make(map[string]bool, 8)
 	current := agg.ID
 	for current != "" && !seen[current] {
 		seen[current] = true
 		s, ok := byID[current]
 		if !ok {
-			return physical.Stage{}, false
+			return Stage{}, false
 		}
-		if physical.StageComputesGroupKeys(&s) && len(s.GroupByResolve) > 0 {
+		if StageComputesGroupKeys(&s) && len(s.GroupByResolve) > 0 {
 			return s, true
 		}
 		switch s.Type {
-		case physical.StageExchangeRepartition, physical.StageFinalAggregate, physical.StageMergeAggregate:
+		case StageExchangeRepartition, StageFinalAggregate, StageMergeAggregate:
 			if len(s.Dependencies) == 0 {
-				return physical.Stage{}, false
+				return Stage{}, false
 			}
 			current = s.Dependencies[0]
 		default:
-			return physical.Stage{}, false
+			return Stage{}, false
 		}
 	}
-	return physical.Stage{}, false
+	return Stage{}, false
 }
 
 // followToAggregate walks the dependency chain from startID through transparent
@@ -287,43 +285,43 @@ func followToKeyComputingStage(byID map[string]physical.Stage, agg physical.Stag
 //
 // We follow until we hit the stage that carries GroupByCols; that's the
 // aggregate's identity for detection purposes.
-func followToAggregate(byID map[string]physical.Stage, startID string) (physical.Stage, bool) {
+func followToAggregate(byID map[string]Stage, startID string) (Stage, bool) {
 	seen := make(map[string]bool)
 	current := startID
 	for current != "" && !seen[current] {
 		seen[current] = true
 		s, ok := byID[current]
 		if !ok {
-			return physical.Stage{}, false
+			return Stage{}, false
 		}
 		// An aggregate stage with GroupByCols populated is our target.
-		if (s.Type == physical.StageAggregate || s.Type == "final_aggregate" || s.Type == "merge_aggregate") && len(s.GroupByCols) > 0 {
+		if (s.Type == StageAggregate || s.Type == "final_aggregate" || s.Type == "merge_aggregate") && len(s.GroupByCols) > 0 {
 			return s, true
 		}
 		// Shuffle and grouped-merge stages are transparent — follow through.
-		if s.Type == physical.StageExchangeRepartition || s.Type == "final_aggregate" || s.Type == "merge_aggregate" {
+		if s.Type == StageExchangeRepartition || s.Type == "final_aggregate" || s.Type == "merge_aggregate" {
 			if len(s.Dependencies) == 0 {
-				return physical.Stage{}, false
+				return Stage{}, false
 			}
 			current = s.Dependencies[0]
 			continue
 		}
 		// Anything else (scan, hash_join, etc.) breaks the chain.
-		return physical.Stage{}, false
+		return Stage{}, false
 	}
-	return physical.Stage{}, false
+	return Stage{}, false
 }
 
 // followToScan walks from an aggregate stage down to its root base-table scan.
 // Returns the scan stage on success. Phase 1 requires a single-scan-rooted
 // aggregate subplan; joins or multi-scan aggregates are out of scope.
-func followToScan(byID map[string]physical.Stage, agg physical.Stage) (physical.Stage, bool) {
+func followToScan(byID map[string]Stage, agg Stage) (Stage, bool) {
 	seen := make(map[string]bool)
 	// Walk the first dependency transitively. All intermediate stages should
 	// be aggregate/shuffle transparents; the root must be a single scan.
 	type frame struct{ id string }
 	stack := []frame{{id: agg.ID}}
-	var root physical.Stage
+	var root Stage
 	found := false
 	for len(stack) > 0 {
 		n := stack[len(stack)-1]
@@ -334,13 +332,13 @@ func followToScan(byID map[string]physical.Stage, agg physical.Stage) (physical.
 		seen[n.id] = true
 		s, ok := byID[n.id]
 		if !ok {
-			return physical.Stage{}, false
+			return Stage{}, false
 		}
-		if s.Type == physical.StageScan {
+		if s.Type == StageScan {
 			if found && s.ID != root.ID {
 				// Multiple distinct scans reach this aggregate — not a simple
 				// aggregate-on-scan pattern. Phase 1 rejects.
-				return physical.Stage{}, false
+				return Stage{}, false
 			}
 			root = s
 			found = true
@@ -353,7 +351,7 @@ func followToScan(byID map[string]physical.Stage, agg physical.Stage) (physical.
 		}
 	}
 	if !found {
-		return physical.Stage{}, false
+		return Stage{}, false
 	}
 	return root, true
 }
@@ -369,8 +367,8 @@ func followToScan(byID map[string]physical.Stage, agg physical.Stage) (physical.
 // supported aggregate functions. Scan filters push through unchanged. Any
 // shape the reconstruction cannot represent causes a caller-level fallback
 // to the existing in-pipeline execution — safety first, performance later.
-func BuildAggregateShuffleSQL(cand AggregateShuffleCandidate, stages []physical.Stage) (string, error) {
-	byID := make(map[string]physical.Stage, len(stages))
+func BuildAggregateShuffleSQL(cand AggregateShuffleCandidate, stages []Stage) (string, error) {
+	byID := make(map[string]Stage, len(stages))
 	for _, s := range stages {
 		byID[s.ID] = s
 	}
@@ -432,7 +430,7 @@ func BuildAggregateShuffleSQL(cand AggregateShuffleCandidate, stages []physical.
 // trip cleanly through the pre-compute SQL are supported; unsupported
 // functions return an error so the caller falls back instead of silently
 // producing a wrong plan.
-func formatAggExpr(spec physical.AggSpec) (string, error) {
+func formatAggExpr(spec AggSpec) (string, error) {
 	fn := strings.ToLower(spec.Func)
 	switch fn {
 	case "count":

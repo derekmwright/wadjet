@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/wadjet"
@@ -111,9 +111,9 @@ func TestDistributedScanHonorsDeleteMarkersOnThePipelinePath(t *testing.T) {
 	// against chunk_0003.parquet — are untouched; only the declared
 	// SizeBytes changes) makes CanProbeSplit's gates pass with 3 workers,
 	// the same trick TestDistributedFusedAgg uses.
-	origMinBytes := physical.ProbeSplitMinBytes
-	physical.ProbeSplitMinBytes = 1
-	t.Cleanup(func() { physical.ProbeSplitMinBytes = origMinBytes })
+	origMinBytes := dagplan.ProbeSplitMinBytes
+	dagplan.ProbeSplitMinBytes = 1
+	t.Cleanup(func() { dagplan.ProbeSplitMinBytes = origMinBytes })
 	resized := make([]catalog.FileEntry, n)
 	for i := 1; i <= n; i++ {
 		path := fmt.Sprintf("tables/psd_a/chunk_%04d.parquet", i)

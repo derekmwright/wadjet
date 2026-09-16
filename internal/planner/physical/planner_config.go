@@ -21,10 +21,10 @@ import (
 
 // Planner converts logical plans to physical plans.
 type Planner struct {
-	catalog        *catalog.Catalog
+	Catalog        *catalog.Catalog
 	subqueryRunner expr.SubqueryRunner
-	planCtx        context.Context  // context from the current Plan() call, used by subquery runner
-	ctes           []plansql.CTEDef // CTE definitions from the current query, for subquery resolution
+	PlanCtx        context.Context  // context from the current Plan() call, used by subquery runner
+	Ctes           []plansql.CTEDef // CTE definitions from the current query, for subquery resolution
 	// outputProjection is the Project whose names LEAVE the engine, resolved
 	// once per Plan() call. Only that projection publishes PostgreSQL's
 	// FigureColname (Projection.PublishedName, #732): a nested block's names
@@ -141,15 +141,6 @@ type Planner struct {
 	// lookups hit the right "table" / "table:N" key. forSubquery gives every
 	// subquery build a fresh one.
 	scanCounter map[string]int
-}
-
-// refuseJoin parks the first refusal; PlanDistributed returns it. First one
-// wins so a nested join's specific message is not overwritten by an outer
-// one's.
-func (p *StagePlanner) refuseJoin(err error) {
-	if p.joinCondErr == nil {
-		p.joinCondErr = err
-	}
 }
 
 // queryResources holds the spill manager and memory tracker for one query.
@@ -358,7 +349,7 @@ type scanCached struct {
 
 // NewPlanner creates a new physical planner.
 func NewPlanner(cat *catalog.Catalog) *Planner {
-	p := &Planner{catalog: cat, res: &queryResources{}, ManifestSnapshot: NewManifestSnapshot()}
+	p := &Planner{Catalog: cat, res: &queryResources{}, ManifestSnapshot: NewManifestSnapshot()}
 	// Create a subquery runner that re-uses this planner for nested queries
 	p.subqueryRunner = p.makeSubqueryRunner()
 	return p

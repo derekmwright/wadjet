@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -31,16 +31,16 @@ func lowerSkewThresholds(t *testing.T, target, floor int64) {
 	})
 }
 
-func skewTestStage() physical.Stage {
-	return physical.Stage{
+func skewTestStage() dagplan.Stage {
+	return dagplan.Stage{
 		ID:              "join-1",
-		Type:            physical.StageHashJoin,
+		Type:            dagplan.StageHashJoin,
 		JoinType:        "inner",
 		Dependencies:    []string{"probe-stage", "build-stage"},
 		LeftDepStage:    "probe-stage",
 		RightDepStage:   "build-stage",
 		BuildTableAlias: "d",
-		Distribution:    physical.Distribution{Kind: physical.DistHashPartitioned, Keys: []string{"k"}, Count: 3},
+		Distribution:    dagplan.Distribution{Kind: dagplan.DistHashPartitioned, Keys: []string{"k"}, Count: 3},
 	}
 }
 
@@ -210,7 +210,7 @@ func TestPlanSkewSplitTasks_IneligibleShapes(t *testing.T) {
 	}
 	// SMJ excluded v1 (needs aligned sorted runs).
 	smj := skewTestStage()
-	smj.Type = physical.StageSortMergeJoin
+	smj.Type = dagplan.StageSortMergeJoin
 	if got := c.planSkewSplitTasks(smj, map[string]StageOutput{"probe-stage": hotProbe, "build-stage": build}, 3, 3); got != nil {
 		t.Errorf("SMJ split: %+v", got)
 	}

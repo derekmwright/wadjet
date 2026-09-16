@@ -290,7 +290,7 @@ const (
 	// can resolve no files for it. Pre-existing at the base commit and
 	// DAG-only — the single-process arms answer PostgreSQL's rows. Closing it
 	// is #960 (recursive-CTE stage lowering); the narrower repair is a stage
-	// that says it reads a CTE, so physical.refuseUnbuildableStages stops
+	// that says it reads a CTE, so dagplan.refuseUnbuildableStages stops
 	// exempting it and the coordinator routes the query local as it already
 	// does for #806 and #812.
 	r1DAGRecursiveCTERefusal = "has no dependencies and no ScanFiles"

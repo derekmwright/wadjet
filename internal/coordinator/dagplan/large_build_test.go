@@ -4,13 +4,11 @@ package dagplan
 
 import (
 	"testing"
-
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 func TestLargeBuildScans(t *testing.T) {
 	const gb = 1024 * 1024 * 1024
-	stages := []physical.Stage{
+	stages := []Stage{
 		{ID: "s1", Type: "scan", ScanAlias: "lineitem", EstimatedBytes: 60 * gb, ScanFiles: []string{"l1.parquet"}},
 		{ID: "s2", Type: "scan", ScanAlias: "orders", EstimatedBytes: 15 * gb, ScanFiles: []string{"o1.parquet"}},
 		{ID: "s3", Type: "scan", ScanAlias: "partsupp", EstimatedBytes: 8 * gb, ScanFiles: []string{"ps1.parquet"}},
@@ -52,7 +50,7 @@ func TestLargeBuildScans(t *testing.T) {
 	})
 
 	t.Run("probe alias is only large scan", func(t *testing.T) {
-		onlyProbe := []physical.Stage{
+		onlyProbe := []Stage{
 			{ID: "s1", Type: "scan", ScanAlias: "lineitem", EstimatedBytes: 60 * gb},
 			{ID: "s2", Type: "scan", ScanAlias: "nation", EstimatedBytes: 1024},
 		}

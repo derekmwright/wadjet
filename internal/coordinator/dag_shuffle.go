@@ -13,8 +13,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // dispatchShuffleStage executes a StageExchangeRepartition: reads upstream
@@ -23,7 +23,7 @@ import (
 //
 // Phase 3 scaffolding: wraps the existing runShuffleSide helper by adapting
 // the upstream StageOutput's files into a synthetic source stage. The legacy
-// helper expects a physical.Stage with ScanFiles populated — we satisfy
+// helper expects a dagplan.Stage with ScanFiles populated — we satisfy
 // that by flattening the upstream output.
 //
 // Known limitations (follow-up commits):
@@ -36,7 +36,7 @@ import (
 func (c *Coordinator) dispatchShuffleStage(
 	ctx context.Context,
 	queryID string,
-	stage physical.Stage,
+	stage dagplan.Stage,
 	inputs map[string]StageOutput,
 	workerCount int,
 ) (StageOutput, error) {
@@ -79,9 +79,9 @@ func (c *Coordinator) dispatchShuffleStage(
 	if len(synthSchema) == 0 {
 		synthSchema = upstream.ScanSchema
 	}
-	synthetic := physical.Stage{
+	synthetic := dagplan.Stage{
 		ID:             stage.ID + "-src",
-		Type:           physical.StageScan,
+		Type:           dagplan.StageScan,
 		ScanFiles:      sourceFiles,
 		TableName:      synthTable,
 		Columns:        upstream.ScanColumns,
@@ -161,7 +161,7 @@ func (c *Coordinator) dispatchShuffleStage(
 // sides get the same union; "the reader ignores columns that don't
 // exist"), so the worker applies it with intersection semantics against
 // the decoded schema (wshfShufflePruneKeep) — never as a strict schema.
-func wshfShuffleProjection(stage physical.Stage, firstSourceFile string, syntheticCols []string) []string {
+func wshfShuffleProjection(stage dagplan.Stage, firstSourceFile string, syntheticCols []string) []string {
 	if !wshfShufflePrune {
 		return nil
 	}
@@ -228,7 +228,7 @@ func allWSHF(files []string) bool {
 func (c *Coordinator) dispatchReplicateStage(
 	ctx context.Context,
 	queryID, sql string,
-	stage physical.Stage,
+	stage dagplan.Stage,
 	inputs map[string]StageOutput,
 ) (StageOutput, error) {
 	_ = sql
@@ -311,7 +311,7 @@ func replicatePassThrough(upstream StageOutput, files []string) StageOutput {
 func (c *Coordinator) materializeReplicate(
 	ctx context.Context,
 	queryID string,
-	stage physical.Stage,
+	stage dagplan.Stage,
 	upstreamID string,
 	files []string,
 	upstream StageOutput, // the task reads all of it; Bytes is the estimate

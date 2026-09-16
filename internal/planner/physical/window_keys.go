@@ -3,7 +3,6 @@
 package physical
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 
@@ -14,8 +13,8 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// Window keys must name input columns on both paths: windowExecColumn uses
-// resolveWindowKeys for local operators and DAG specs (#585).
+// Window keys must name input columns on both paths: WindowExecColumn uses
+// ResolveWindowKeys for local operators and DAG specs (#585).
 // Bind qualified references in FROM scope at plan time, independently of
 // SELECT aliases, so DAG clustering also uses emitted names (#488).
 // Materialize expressions as __winkey_N, never their SQL text: Project type
@@ -25,10 +24,6 @@ import (
 // Leave unresolved terms as written for exec.Window.bindKeyNames to refuse;
 // missing keys must never silently collapse the input into one partition.
 // See docs/internals/window-key-binding-and-materialization.md for the design.
-
-// windowKeyColPrefix names a materialized window key. The "__" marks it
-// derived, the same convention as __sortkey_N and __gb_expr_N.
-const windowKeyColPrefix = string(SlotWindowKey)
 
 // windowKey is one resolved PARTITION BY or window ORDER BY term.
 type windowKey struct {
@@ -55,7 +50,7 @@ type windowKey struct {
 	Scale     int
 }
 
-// resolveWindowKeys resolves the PARTITION BY / ORDER BY terms of the window
+// ResolveWindowKeys resolves the PARTITION BY / ORDER BY terms of the window
 // expressions on node, keyed by the term's original text.
 //
 // The map is keyed by text and not by position because one window stage
@@ -63,7 +58,7 @@ type windowKey struct {
 // must resolve to one column: two clauses partitioning on `id % 3` compute it
 // once, and two spelling `g` and `p.g` end up on the same group (which is
 // what lets exec.Window run them in a single pass).
-func resolveWindowKeys(node *logical.Node) map[string]windowKey {
+func ResolveWindowKeys(node *logical.Node) map[string]windowKey {
 	if node == nil || len(node.Children) != 1 {
 		return nil
 	}
@@ -101,12 +96,12 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 		if _, dup := out[term]; dup {
 			return
 		}
-		// cleanExpr is the spelling every other window consumer already got:
+		// CleanExpr is the spelling every other window consumer already got:
 		// it drops the table qualifier, which is why `PARTITION BY p.g` used
 		// to reach the operator as the bare `g` and work — right up until a
 		// join made two columns share that bare name. The cases below only
 		// ever narrow it further.
-		k := windowKey{Name: cleanExpr(term)}
+		k := windowKey{Name: CleanExpr(term)}
 		if ast, err := plansql.ParseExpression(term); err == nil {
 			ref, isCol := ast.(*plansql.ColRef)
 			switch {
@@ -191,7 +186,7 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 				// well, where that Project emits no stage (#672, #656).
 				typed := k.Expr
 				if node != nil && len(node.Children) == 1 {
-					if r, ok := respellDerivedAliasRefs(k.Expr, node.Children[0]); ok {
+					if r, ok := RespellDerivedAliasRefs(k.Expr, node.Children[0]); ok {
 						typed = r
 					}
 				}
@@ -204,9 +199,9 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 				// every row where PostgreSQL answers 9 — while `MAX` of the
 				// same argument answered the right digits under OID 25
 				// (#1018 round 7, B3's window half).
-				materialized := declTypeParts(
-					inferProjectionDeclType(typed, parquet.TypeString, strictInt,
-						withSubqueryDecls(colDecls{types: typeCols, dec: typeDec}, node)))
+				materialized := DeclTypeParts(
+					InferProjectionDeclType(typed, parquet.TypeString, strictInt,
+						withSubqueryDecls(ColDecls{Types: typeCols, Dec: typeDec}, node)))
 				k.Type, k.Precision, k.Scale, k.Fields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
 			}
 		}
@@ -277,7 +272,7 @@ func fieldOf(colFields map[string][]parquet.Column, ref *plansql.ColRef) *parque
 // declared outputs laid over the top.
 func windowKeyInputTypes(child *logical.Node) (map[string]parquet.TypeID, map[string]bool) {
 	if t := inputColTypes(child); len(t) > 0 {
-		return t, strictIntArithCols(child)
+		return t, StrictIntArithCols(child)
 	}
 	// A DERIVED TABLE between the window and its producer: inputColTypes
 	// answers nothing for a Project, so a materialized key over one of its
@@ -287,7 +282,7 @@ func windowKeyInputTypes(child *logical.Node) (map[string]parquet.TypeID, map[st
 	// paths, for `SUM(v * 2) OVER ()` over `SELECT d_4 AS v`. These are the
 	// declarations the key is respelled against (#672, #656).
 	if t := sourceColTypesThroughRenames(child); len(t) > 0 {
-		return t, strictIntArithColsThroughRenames(child)
+		return t, StrictIntArithColsThroughRenames(child)
 	}
 	if agg := aggregateUnderWindow(child); agg != nil && len(agg.Children) == 1 {
 		if base := inputColTypes(agg.Children[0]); len(base) > 0 {
@@ -296,11 +291,11 @@ func windowKeyInputTypes(child *logical.Node) (map[string]parquet.TypeID, map[st
 				types[name] = t
 			}
 			for _, a := range agg.AggExprs {
-				if t, known := aggSpecOutputType(agg, a); known {
+				if t, known := AggSpecOutputType(agg, a); known {
 					types[strings.ToLower(a.OutputCol)] = t
 				}
 			}
-			return types, strictIntArithCols(agg.Children[0])
+			return types, StrictIntArithCols(agg.Children[0])
 		}
 	}
 	// The EMITTED walk, which is the only one of the four that crosses a SET
@@ -318,7 +313,7 @@ func windowKeyInputTypes(child *logical.Node) (map[string]parquet.TypeID, map[st
 	// them can see through. It carries no strict-int hint, which is the
 	// honest answer — that hint is a SCAN annotation and there is no single
 	// scan below a set operation.
-	return emittedColTypes(child), nil
+	return EmittedColTypes(child), nil
 }
 
 // windowKeyInputDecimal is windowKeyInputTypes' companion for DECIMAL
@@ -331,7 +326,7 @@ func windowKeyInputDecimal(child *logical.Node) map[string]logical.DecimalMeta {
 	// windowKeyInputTypes' derived-table fallback, for the (p,s) half: a
 	// DECIMAL declared without its scale is not a declaration at all
 	// (ADR-0024 item 2), so the two have to come from the same place.
-	if d := sourceColDeclsThroughRenames(child).dec; len(d) > 0 {
+	if d := SourceColDeclsThroughRenames(child).Dec; len(d) > 0 {
 		return d
 	}
 	if agg := aggregateUnderWindow(child); agg != nil && len(agg.Children) == 1 {
@@ -341,7 +336,7 @@ func windowKeyInputDecimal(child *logical.Node) map[string]logical.DecimalMeta {
 			out[name] = m
 		}
 		for _, a := range agg.AggExprs {
-			if m, known := aggSpecOutputDecimal(agg, a); known {
+			if m, known := AggSpecOutputDecimal(agg, a); known {
 				out[strings.ToLower(a.OutputCol)] = m
 			}
 		}
@@ -390,14 +385,14 @@ func windowKeyPublishedGroupKey(child *logical.Node, col string) (string, bool) 
 	if agg == nil || col == "" || len(agg.GroupBy) == 0 {
 		return "", false
 	}
-	published, resolve := stageGroupKeyNames(agg, aggInput(agg))
-	emitted := stageEmittedKeyNames(published, resolve, logicalAggOutNames(agg))
+	published, resolve := StageGroupKeyNames(agg, aggInput(agg))
+	emitted := StageEmittedKeyNames(published, resolve, LogicalAggOutNames(agg))
 	match, count := "", 0
 	for i, g := range agg.GroupBy {
 		if i >= len(emitted) {
 			break
 		}
-		if strings.EqualFold(blockBareName(g), col) {
+		if strings.EqualFold(BlockBareName(g), col) {
 			match, count = emitted[i], count+1
 		}
 	}
@@ -450,7 +445,7 @@ func bindWindowColRef(ref *plansql.ColRef, colTypes map[string]parquet.TypeID) (
 // through the window.
 //
 // The lookup walks the input's ROW columns (logical.Node.ScanColFields,
-// populated from the catalog). #568 introduces a general colDecls lookup over
+// populated from the catalog). #568 introduces a general ColDecls lookup over
 // the same map; when the two meet, this is the caller to point at it.
 func windowRowField(colFields map[string][]parquet.Column, ref *plansql.ColRef) (parquet.Column, bool) {
 	if ref == nil || ref.Table == "" {
@@ -508,13 +503,13 @@ func inputColRowFields(n *logical.Node) map[string][]parquet.Column {
 	return nil
 }
 
-// windowKeySpecs lists the materialized keys of a window node, for the DAG's
+// WindowKeySpecs lists the materialized keys of a window node, for the DAG's
 // stage spec and for the single-process pre-projection.
 //
-// The order is __winkey_N's own, which resolveWindowKeys assigns by first
+// The order is __winkey_N's own, which ResolveWindowKeys assigns by first
 // encounter over the window's expressions — a slice, so the numbering (and
 // therefore the plan) is deterministic where iterating the map would not be.
-func windowKeySpecs(keys map[string]windowKey) []ProjectExprSpec {
+func WindowKeySpecs(keys map[string]windowKey) []ProjectExprSpec {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -554,7 +549,7 @@ func windowKeySpecs(keys map[string]windowKey) []ProjectExprSpec {
 // pre-window operator builds its output vector from whichever of the two it is
 // given (#568's `meta`, plan.go's aggPreProject).
 func (p *Planner) windowKeyProjections(keys map[string]windowKey) ([]exec.ProjectColumn, []parquet.Column, error) {
-	specs := windowKeySpecs(keys)
+	specs := WindowKeySpecs(keys)
 	if len(specs) == 0 {
 		return nil, nil, nil
 	}
@@ -628,61 +623,3 @@ func (e *windowKeyError) Error() string {
 }
 
 func (e *windowKeyError) Unwrap() error { return e.err }
-
-// validateWindowKeyExprs checks that every materialized key a window stage
-// names is one its fragment can compute. See the StageWindow case in
-// native_dag_rewrite.go for why this is a plan-time check.
-//
-// The question is PROVENANCE, not spelling. `resolveWindowKeys` classes a
-// PARTITION BY / ORDER BY term as either a BOUND reference — a column the
-// input already carries — or a MATERIALIZED expression the fragment computes
-// into a `__winkey_N` slot, and only the second owes a `WindowKeyExprs`
-// entry. Reading the NAME alone cannot tell them apart, and a table written
-// before the namespace was reserved really can STORE a column called
-// `__winkey_1`: `PARTITION BY __winkey_1` over it is a bound reference the
-// single-process path answers and both DAG arms refused (#745). So the
-// producing stage's own stream is asked first — a name it emits is a column
-// the window READS, whoever spelled it — and the refusal is kept for a name
-// nothing computes and nothing supplies, which is the shape #585 filed.
-func validateWindowKeyExprs(stages []Stage, idx map[string]int, s Stage) error {
-	if len(s.WindowCols) == 0 {
-		return nil
-	}
-	computed := make(map[string]bool, len(s.WindowKeyExprs))
-	for _, k := range s.WindowKeyExprs {
-		computed[strings.ToLower(k.Name)] = true
-	}
-	supplied := map[string]string{}
-	if len(s.Dependencies) == 1 {
-		if di, ok := idx[s.Dependencies[0]]; ok {
-			supplied = emittedThroughPassThrough(stages, idx, &stages[di])
-		}
-	}
-	check := func(name string) error {
-		lc := strings.ToLower(name)
-		if !strings.HasPrefix(lc, windowKeyColPrefix) || computed[lc] {
-			return nil
-		}
-		if _, bound := supplied[lc]; bound {
-			return nil
-		}
-		return fmt.Errorf("native-DAG: window stage %s keys on %q, which nothing computes "+
-			"(WindowKeyExprs carries %d entries)", s.ID, name, len(s.WindowKeyExprs))
-	}
-	for _, wc := range s.WindowCols {
-		if err := check(wc.InputCol); err != nil {
-			return err
-		}
-		for _, pb := range wc.PartitionBy {
-			if err := check(pb); err != nil {
-				return err
-			}
-		}
-		for _, ob := range wc.OrderBy {
-			if err := check(ob.Column); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}

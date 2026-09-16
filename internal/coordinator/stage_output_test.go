@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 )
 
 func TestCollectInputs(t *testing.T) {
@@ -14,7 +14,7 @@ func TestCollectInputs(t *testing.T) {
 		"scan-0":   {Kind: OutputSinglePart, Files: [][]string{{"tables/o/p.parquet"}}},
 		"repart-0": {Kind: OutputPartitioned, NumPartitions: 4, Files: make([][]string, 4)},
 	}
-	stage := physical.Stage{ID: "join-0", Dependencies: []string{"scan-0", "repart-0"}}
+	stage := dagplan.Stage{ID: "join-0", Dependencies: []string{"scan-0", "repart-0"}}
 
 	got, err := collectInputs(stage, outputs)
 	if err != nil {
@@ -27,7 +27,7 @@ func TestCollectInputs(t *testing.T) {
 		t.Errorf("repart-0: got %+v want %+v", got["repart-0"], outputs["repart-0"])
 	}
 
-	missing := physical.Stage{ID: "j", Dependencies: []string{"unknown"}}
+	missing := dagplan.Stage{ID: "j", Dependencies: []string{"unknown"}}
 	if _, err := collectInputs(missing, outputs); err == nil {
 		t.Error("expected error for unknown dep")
 	}

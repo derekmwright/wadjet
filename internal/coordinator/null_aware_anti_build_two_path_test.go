@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 )
 
 // #539 / #507 — a NOT IN whose build the broadcast decision would REFUSE is
@@ -87,13 +87,13 @@ func TestANullAwareAntiJoinReplicatesItsBuildPastTheBroadcastDecision(t *testing
 			}
 			sort.Strings(want)
 
-			before := physical.NullAwareAntiForcedBroadcasts.Load()
+			before := dagplan.NullAwareAntiForcedBroadcasts.Load()
 			got, err := na2Run(tmdRunDAG(ctx, coord, tc.sql))
 			if err != nil {
 				t.Fatalf("dag arm: %v\n  SQL: %s", err, tc.sql)
 			}
 			sort.Strings(got)
-			forced := physical.NullAwareAntiForcedBroadcasts.Load() - before
+			forced := dagplan.NullAwareAntiForcedBroadcasts.Load() - before
 
 			if len(got) != len(want) {
 				t.Fatalf("dag arm: %v, single arm: %v\n  SQL: %s", got, want, tc.sql)

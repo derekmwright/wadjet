@@ -54,7 +54,7 @@ func (p *Planner) tryPushFilterIntoScan(ctx context.Context, node *logical.Node,
 	if scanNode.Type != logical.NodeScan || scanNode.IsTableFunc || scanNode.SampleMethod != "" {
 		return orig
 	}
-	meta, err := p.catalog.GetTable(ctx, scanNode.TableName)
+	meta, err := p.Catalog.GetTable(ctx, scanNode.TableName)
 	if err != nil {
 		return orig
 	}
@@ -142,7 +142,7 @@ func (p *Planner) tryPushFilterIntoScan(ctx context.Context, node *logical.Node,
 		residualRefs := make(map[string]bool, 4)
 		for _, r := range residual {
 			if r.ASTExpr != nil {
-				collectASTCols(r.ASTExpr, residualRefs)
+				CollectASTCols(r.ASTExpr, residualRefs)
 			}
 		}
 		filterOnly := make(map[string]bool, len(scanNode.FilterOnlyColumns))
@@ -411,60 +411,60 @@ func makeRowPred(colName string, typ parquet.TypeID, sc logical.Predicate) (scan
 	return scan.RowPred{}, false
 }
 
-// collectASTCols gathers lowercase column names referenced by an AST.
-func collectASTCols(n plansql.Node, out map[string]bool) {
+// CollectASTCols gathers lowercase column names referenced by an AST.
+func CollectASTCols(n plansql.Node, out map[string]bool) {
 	switch t := n.(type) {
 	case *plansql.ColRef:
 		out[strings.ToLower(t.Column)] = true
 	case *plansql.CmpExpr:
-		collectASTCols(t.Left, out)
-		collectASTCols(t.Right, out)
+		CollectASTCols(t.Left, out)
+		CollectASTCols(t.Right, out)
 	case *plansql.BinaryOp:
-		collectASTCols(t.Left, out)
-		collectASTCols(t.Right, out)
+		CollectASTCols(t.Left, out)
+		CollectASTCols(t.Right, out)
 	case *plansql.AndNode:
-		collectASTCols(t.Left, out)
-		collectASTCols(t.Right, out)
+		CollectASTCols(t.Left, out)
+		CollectASTCols(t.Right, out)
 	case *plansql.OrNode:
-		collectASTCols(t.Left, out)
-		collectASTCols(t.Right, out)
+		CollectASTCols(t.Left, out)
+		CollectASTCols(t.Right, out)
 	case *plansql.NotNode:
-		collectASTCols(t.Inner, out)
+		CollectASTCols(t.Inner, out)
 	case *plansql.ParenNode:
-		collectASTCols(t.Inner, out)
+		CollectASTCols(t.Inner, out)
 	case *plansql.UnaryOp:
-		collectASTCols(t.Inner, out)
+		CollectASTCols(t.Inner, out)
 	case *plansql.LikeExpr:
-		collectASTCols(t.Left, out)
-		collectASTCols(t.Pattern, out)
+		CollectASTCols(t.Left, out)
+		CollectASTCols(t.Pattern, out)
 	case *plansql.InExpr:
-		collectASTCols(t.Left, out)
+		CollectASTCols(t.Left, out)
 		for _, v := range t.Values {
-			collectASTCols(v, out)
+			CollectASTCols(v, out)
 		}
 	case *plansql.BetweenExpr:
-		collectASTCols(t.Left, out)
-		collectASTCols(t.Low, out)
-		collectASTCols(t.High, out)
+		CollectASTCols(t.Left, out)
+		CollectASTCols(t.Low, out)
+		CollectASTCols(t.High, out)
 	case *plansql.IsExpr:
-		collectASTCols(t.Left, out)
+		CollectASTCols(t.Left, out)
 	case *plansql.FuncCallNode:
 		for _, a := range t.Args {
-			collectASTCols(a, out)
+			CollectASTCols(a, out)
 		}
 	case *plansql.CaseNode:
 		if t.Subject != nil {
-			collectASTCols(t.Subject, out)
+			CollectASTCols(t.Subject, out)
 		}
 		for _, w := range t.Whens {
-			collectASTCols(w.Cond, out)
-			collectASTCols(w.Result, out)
+			CollectASTCols(w.Cond, out)
+			CollectASTCols(w.Result, out)
 		}
 		if t.Else != nil {
-			collectASTCols(t.Else, out)
+			CollectASTCols(t.Else, out)
 		}
 	case *plansql.CastNode:
-		collectASTCols(t.Inner, out)
+		CollectASTCols(t.Inner, out)
 	// A residual conjunct holding a correlated subquery reads the outer
 	// columns that subquery correlates on, per row, out of the batch. Missing
 	// them here lets the drop pass below strip a column another conjunct
@@ -479,13 +479,13 @@ func collectASTCols(n plansql.Node, out map[string]bool) {
 			out[c] = true
 		}
 	case *plansql.AnyAllExpr:
-		collectASTCols(t.Left, out)
+		CollectASTCols(t.Left, out)
 		for _, v := range t.Values {
-			collectASTCols(v, out)
+			CollectASTCols(v, out)
 		}
 	case *plansql.TupleNode:
 		for _, e := range t.Elements {
-			collectASTCols(e, out)
+			CollectASTCols(e, out)
 		}
 	}
 }

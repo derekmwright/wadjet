@@ -39,7 +39,7 @@ type cachedManifestEntry struct {
 // cachedColStatsEntry pins one table's AggregateColumnStats result the same
 // way cachedManifestEntry pins its manifest. AggregateColumnStats reads the
 // manifest internally (to key its own cache on the manifest's revision) via
-// Catalog.manifestWithRevision directly, NOT through Planner.getManifest —
+// Catalog.manifestWithRevision directly, NOT through Planner.GetManifest —
 // it is a Catalog method, not a Planner one — so it needed its own pin
 // alongside GetManifest's: pinning only GetManifest still left
 // AnnotateScanColumns paying one extra unpinned manifest read per scan node
@@ -151,20 +151,20 @@ func (m *ManifestSnapshot) AggregateColumnStats(ctx context.Context, cat *catalo
 // query — and estimateFKReferencedRowCount (dynamic_filter.go), whose reads
 // are SPECULATIVE lookups of table names guessed from a column name and so
 // are pure overhead when the guess misses.
-func (p *Planner) getManifest(ctx context.Context, table string) (*catalog.PartitionManifest, error) {
+func (p *Planner) GetManifest(ctx context.Context, table string) (*catalog.PartitionManifest, error) {
 	if p.ManifestSnapshot != nil {
-		return p.ManifestSnapshot.Get(ctx, p.catalog, table)
+		return p.ManifestSnapshot.Get(ctx, p.Catalog, table)
 	}
-	return p.catalog.GetManifest(ctx, table)
+	return p.Catalog.GetManifest(ctx, table)
 }
 
 // getAggregateColumnStats is catalog.AggregateColumnStats pinned to p's
 // ManifestSnapshot when it has one, mirroring getManifest.
-func (p *Planner) getAggregateColumnStats(ctx context.Context, table string) (map[string]catalog.TableColumnStats, error) {
+func (p *Planner) GetAggregateColumnStats(ctx context.Context, table string) (map[string]catalog.TableColumnStats, error) {
 	if p.ManifestSnapshot != nil {
-		return p.ManifestSnapshot.AggregateColumnStats(ctx, p.catalog, table)
+		return p.ManifestSnapshot.AggregateColumnStats(ctx, p.Catalog, table)
 	}
-	return p.catalog.AggregateColumnStats(ctx, table)
+	return p.Catalog.AggregateColumnStats(ctx, table)
 }
 
 // getManifestWith is getManifest for a caller that holds a *catalog.Catalog
@@ -179,26 +179,15 @@ func getManifestWith(ctx context.Context, snap *ManifestSnapshot, cat *catalog.C
 	return cat.GetManifest(ctx, table)
 }
 
-// manifestSnapshotCtxKey types the context key WithManifestSnapshot and
+// ManifestSnapshotCtxKey types the context key WithManifestSnapshot and
 // ManifestSnapshotFromContext use, so it cannot collide with a key any
 // other package defines.
-type manifestSnapshotCtxKey struct{}
-
-// WithManifestSnapshot attaches snap to ctx. A coordinator entry point that
-// handles one statement end to end but builds several Planner instances for
-// it — each construction is a separate physical.NewPlanner call, so a
-// Planner-instance-scoped snapshot alone cannot span them — calls this ONCE
-// near the top, before any planning begins, and passes the resulting
-// context to everything downstream. NewPlannerForContext is the pairing
-// half: every Planner built from that context onward shares snap.
-func WithManifestSnapshot(ctx context.Context, snap *ManifestSnapshot) context.Context {
-	return context.WithValue(ctx, manifestSnapshotCtxKey{}, snap)
-}
+type ManifestSnapshotCtxKey struct{}
 
 // ManifestSnapshotFromContext returns the snapshot WithManifestSnapshot
 // attached, or nil if ctx carries none.
 func ManifestSnapshotFromContext(ctx context.Context) *ManifestSnapshot {
-	snap, _ := ctx.Value(manifestSnapshotCtxKey{}).(*ManifestSnapshot)
+	snap, _ := ctx.Value(ManifestSnapshotCtxKey{}).(*ManifestSnapshot)
 	return snap
 }
 

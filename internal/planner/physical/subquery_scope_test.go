@@ -46,7 +46,7 @@ func planWithPlanner(t *testing.T, p *Planner, sql string) *PhysicalPlan {
 	if err != nil {
 		t.Fatalf("logical build: %v", err)
 	}
-	p.planCtx = ctx
+	p.PlanCtx = ctx
 	p.AnnotateScanColumns(ctx, lp)
 	lp = logical.Optimize(lp, func(n *logical.Node) { p.AnnotateScanColumns(ctx, n) })
 	plan, err := p.Plan(ctx, lp)
@@ -78,7 +78,7 @@ func countingPlanner(t *testing.T, cat *catalog.Catalog) (*Planner, *int64) {
 // own FROM, leaving the subquery uncorrelated and executed once.
 func TestUncorrelatedSubqueryPlannedUncorrelated(t *testing.T) {
 	ctx := context.Background()
-	cat := scanCacheFixture(t, 200)
+	cat := ScanCacheFixture(t, 200)
 
 	for _, tc := range []struct {
 		name string
@@ -115,7 +115,7 @@ func TestUncorrelatedSubqueryPlannedUncorrelated(t *testing.T) {
 // per-row path this issue is about.
 func TestCorrelatedSubqueryStaysCorrelated(t *testing.T) {
 	ctx := context.Background()
-	cat := scanCacheFixture(t, 200)
+	cat := ScanCacheFixture(t, 200)
 
 	p, calls := countingPlanner(t, cat)
 	plan := planWithPlanner(t, p,
@@ -143,10 +143,10 @@ func TestCorrelatedSubqueryStaysCorrelated(t *testing.T) {
 // often enough to take the process down.
 func TestSubqueryRunnerConcurrent(t *testing.T) {
 	ctx := context.Background()
-	cat := scanCacheFixture(t, 200)
+	cat := ScanCacheFixture(t, 200)
 
 	p := NewPlanner(cat)
-	p.planCtx = ctx
+	p.PlanCtx = ctx
 
 	const goroutines = 8
 	const perGoroutine = 4
@@ -211,7 +211,7 @@ func TestForSubqueryIsolatesBuildScratch(t *testing.T) {
 	if sub.res != p.res {
 		t.Error("child does not share the per-query resources: it would create its own spill dir that Cleanup never releases")
 	}
-	if sub.catalog != p.catalog {
+	if sub.Catalog != p.Catalog {
 		t.Error("child lost the catalog")
 	}
 	// The parent's own scratch must be untouched by spawning a child.

@@ -5,9 +5,9 @@ package coordinator
 import (
 	"fmt"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // orchestrateGather dispatches a StageExchangeGather. It wraps the
@@ -19,16 +19,16 @@ import (
 // Phase 2 Task 14 wires it in. MergeInfo survives until Task 19 deletes
 // the legacy side-channel.
 func (c *Coordinator) orchestrateGather(
-	stage physical.Stage,
+	stage dagplan.Stage,
 	in BatchStream,
 	columns []string,
 	mi *logical.MergeInfo,
 ) ([]*batch.RecordBatch, int64, error) {
-	if stage.Type != physical.StageExchangeGather {
+	if stage.Type != dagplan.StageExchangeGather {
 		in.Close()
 		return nil, 0, fmt.Errorf(
 			"orchestrate gather: wrong stage type %q (expected %q)",
-			stage.Type, physical.StageExchangeGather,
+			stage.Type, dagplan.StageExchangeGather,
 		)
 	}
 	return c.mergeProbePartials(in, columns, mi)

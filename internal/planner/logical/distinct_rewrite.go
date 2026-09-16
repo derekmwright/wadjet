@@ -68,7 +68,7 @@ func rewriteDistinctAsGroupBy(n *Node) *Node {
 // ExpandStarProjections reads when a star SHARES its select list with
 // another item (Node.ScanColumns, populated by physical.AnnotateScanColumns
 // — see star_expansion.go). Without this the shape was declined here and
-// then refused by physical.refuseUnstageableDistinct off the root path, so
+// then refused by dagplan.refuseUnstageableDistinct off the root path, so
 // `SELECT COUNT(*) FROM (SELECT DISTINCT * FROM supplier) u` — which
 // PostgreSQL and the pre-#466 DAG both answer 100 — came back as an error.
 //

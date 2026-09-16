@@ -6,9 +6,9 @@ import (
 	"context"
 	"sort"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/scan"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // Every DAG scan must skip the manifest's file-absolute deleted row indices.
@@ -47,7 +47,7 @@ func queryDeleteMarkersFromContext(ctx context.Context) map[string][]int64 {
 // file-keyed map. Stages of one query may scan several tables and the same
 // table twice (a self-join plans two scan stages); paths are unique per
 // object, so one flat map answers for all of them.
-func collectStageDeletes(stages []physical.Stage) map[string][]int64 {
+func collectStageDeletes(stages []dagplan.Stage) map[string][]int64 {
 	var out map[string][]int64
 	for i := range stages {
 		for file, rows := range stages[i].ScanDeletes {

@@ -9,9 +9,9 @@ import (
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/auth"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // ADR-0026 §8a IS TRUE OF EVERY DOOR — the ASYNC one included (#1002, round 2).
@@ -40,10 +40,10 @@ import (
 // reaches here is the key that does not resolve — which is #1002's own defect.
 func TestTheAsyncDoorReportsAMergeItCouldNotApply(t *testing.T) {
 	// One stage, one inline partial of 64 int64 rows in a column called `x`.
-	newCoord := func(t *testing.T, mi *logical.MergeInfo) (*Coordinator, []physical.Stage) {
+	newCoord := func(t *testing.T, mi *logical.MergeInfo) (*Coordinator, []dagplan.Stage) {
 		t.Helper()
 		tracker := NewQueryTracker()
-		stages := []physical.Stage{{ID: "s1", Type: "pipeline", Tasks: 1}}
+		stages := []dagplan.Stage{{ID: "s1", Type: "pipeline", Tasks: 1}}
 		tracker.Register("q1", "SELECT x FROM t ORDER BY x", auth.IdentitySnapshot{},
 			map[string]*StageInfo{"s1": {StageID: "s1", TotalTasks: 1}}, []string{"s1"})
 		tracker.RecordResult(distributed.ResultNotification{

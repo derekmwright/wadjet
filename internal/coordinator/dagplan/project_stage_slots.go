@@ -1,0 +1,114 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package dagplan
+
+import (
+	"strings"
+
+	"github.com/derekmwright/wadjet/internal/planner/physical"
+)
+
+// pinProjectSpecSlots pins each spec that reads a DUPLICATED name of the
+// producer's output to the slot its class names, and reports how many it
+// pinned.
+//
+// classOf answers, per spec index, whether the item is an AGGREGATE OUTPUT
+// (true) or a group-key reference (false). The gather's OutputRenames already
+// carry exactly that answer for the same list, resolved through however many
+// wrappers stand between (renameIsAggregateOutput), which is why the caller
+// passes them rather than re-deriving the class here.
+func pinProjectSpecSlots(producer *Stage, specs []physical.ProjectExprSpec, classOf func(int) (bool, bool)) int {
+	if producer == nil || len(specs) == 0 {
+		return 0
+	}
+	names, classes, ok := aggregateEmittedSlots(producer)
+	if !ok {
+		return 0
+	}
+	dup := map[string]int{}
+	for _, n := range names {
+		dup[strings.ToLower(strings.TrimSpace(n))]++
+	}
+	// Per (name, class) cursor, so two aggregate outputs of one name take the
+	// first and the second aggregate slot in SELECT-list order — the same
+	// walk buildProject makes over keySlotByName / aggSlotByName.
+	seen := map[string]int{}
+	pinned := 0
+	for j := range specs {
+		key := strings.ToLower(strings.TrimSpace(specs[j].Expr))
+		if key == "" || dup[key] < 2 {
+			continue
+		}
+		isAgg, known := classOf(j)
+		if !known {
+			continue
+		}
+		cursor := key + "\x00agg"
+		if !isAgg {
+			cursor = key + "\x00key"
+		}
+		nth, want := seen[cursor], -1
+		for i, n := range names {
+			if classes[i] != isAgg || !strings.EqualFold(strings.TrimSpace(n), key) {
+				continue
+			}
+			if nth == 0 {
+				want = i
+				break
+			}
+			nth--
+		}
+		if want < 0 {
+			continue
+		}
+		seen[cursor]++
+		specs[j].SourceSlot = want
+		specs[j].SourceSlotSet = true
+		pinned++
+	}
+	return pinned
+}
+
+// aggregateEmittedSlots is an aggregate-family producer's output columns IN
+// ORDER, with the class of each: `[group keys…, aggregate outputs…]` is what
+// exec.HashAggregate emits and what the worker's fragment rebuilds.
+//
+// ok is false for any producer whose output is not that shape — a projection
+// already on the stage renames it, grouping sets reorder it, a union or a scan
+// emits something else entirely — because a slot read off a model that does
+// not hold is worse than the name path it replaces.
+func aggregateEmittedSlots(s *Stage) (names []string, isAgg []bool, ok bool) {
+	if len(s.ProjectExprs) > 0 || len(s.UnionArms) > 0 {
+		return nil, nil, false
+	}
+	keys, aggs := s.GroupByCols, s.AggSpecs
+	if len(keys) == 0 && len(s.FusedAggGroupBy) > 0 {
+		keys, aggs = s.FusedAggGroupBy, s.FusedAggSpecs
+	}
+	if len(aggs) == 0 {
+		return nil, nil, false
+	}
+	// The names the fragment's aggregate really EMITS. The published list
+	// still spells a plain qualified key `x.a`; the operator calls that column
+	// `a` (`exec.PublishedGroupKeyNames`), and asking the published list
+	// whether two columns share a name missed every collision between a
+	// qualified key and an aggregate aliased to its bare form (#968).
+	//
+	// A resolve list of the wrong length is dropped rather than paired
+	// positionally with the wrong keys: a stage that consumes a partial's
+	// OUTPUT carries none, and exec's own rule is what names its keys there.
+	resolve := s.GroupByResolve
+	if len(resolve) != len(keys) {
+		resolve = nil
+	}
+	keys = physical.StageEmittedKeyNames(keys, resolve, stageAggOutNames(s))
+	for _, k := range keys {
+		names = append(names, k)
+		isAgg = append(isAgg, false)
+	}
+	for _, a := range aggs {
+		names = append(names, a.OutputCol)
+		isAgg = append(isAgg, true)
+	}
+	return names, isAgg, true
+}

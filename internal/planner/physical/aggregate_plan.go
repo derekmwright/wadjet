@@ -50,20 +50,20 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	// the same triple the stage DAG carries as AggSpec.InputType/Precision/
 	// Scale. The aggregate's OUTPUT declaration is read off it below, so this
 	// path and the DAG declare the same thing for the same query, identity row
-	// included (#685; see aggOutputFromInputDecl).
+	// included (#685; see AggOutputFromInputDecl).
 	synDecl := make(map[string]parquet.Column)
 
-	// Resolve aggregate input declarations once with emittedColDecls, crossing
-	// derived-table Projects as the SELECT list and declaredOutputSchema do (#529).
+	// Resolve aggregate input declarations once with EmittedColDecls, crossing
+	// derived-table Projects as the SELECT list and DeclaredOutputSchema do (#529).
 	// ROW field paths are not simple columns: columnIndexFallback has no ROW arm,
 	// so materialize them through the synthetic pre-projection at their declared
 	// type (#568). Derived computed arguments must retain their types through
 	// CASE rather than taking an ELSE type that fails the #361 store guard.
-	aggInputDecls := emittedColDecls(node.Children[0])
+	aggInputDecls := EmittedColDecls(node.Children[0])
 	// A SCALAR SUBQUERY written DIRECTLY as the argument — `SUM((SELECT …))` —
 	// has no column for that walk to read: its declaration is the CATALOG fact
 	// annotateSubqueryColumnDecls stamps on the plan. Without it
-	// inferProjectionDeclType below fell to its FLOAT64 fallback, so the
+	// InferProjectionDeclType below fell to its FLOAT64 fallback, so the
 	// synthetic column this aggregate accumulates over was materialized as a
 	// float64 vector and `SUM((SELECT CAST(9007199254740993 AS BIGINT)))` over
 	// three rows answered 27021597764222976 for PostgreSQL 17.11's exact
@@ -75,7 +75,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	aggInputDecls = withSubqueryDecls(aggInputDecls, node)
 
 	for i, agg := range node.AggExprs {
-		if agg.InputExpr != nil && (!isSimpleColRef(agg.InputExpr) || astIsFieldPath(agg.InputExpr, aggInputDecls)) {
+		if agg.InputExpr != nil && (!isSimpleColRef(agg.InputExpr) || AstIsFieldPath(agg.InputExpr, aggInputDecls)) {
 			exprStr := agg.InputExpr.String()
 			if existing, ok := exprDedup[exprStr]; ok {
 				// Reuse previously compiled expression
@@ -94,13 +94,13 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 			// re-run loud (#734, ADR-0021 §1c). The identical expression one
 			// level down — in a derived table's SELECT list — has always
 			// answered, because that site does ask.
-			aggOuterTables := collectTableAliases(node.Children[0])
-			aggOuterCols := collectOuterColumns(node.Children[0])
+			aggOuterTables := CollectTableAliases(node.Children[0])
+			aggOuterCols := CollectOuterColumns(node.Children[0])
 			var compiled expr.Expr
 			var compErr error
 			if len(aggOuterTables) > 0 {
 				compiled, compErr = expr.CompileWithScopeResolver(agg.InputExpr, p.subqueryRunner,
-					aggOuterTables, aggOuterCols, p.subqueryInnerColumns(),
+					aggOuterTables, aggOuterCols, p.SubqueryInnerColumns(),
 					p.subqueryDeclOption(), p.subqueryBudgetOption())
 			} else {
 				compiled, compErr = expr.CompileWithRunner(agg.InputExpr, p.subqueryRunner,
@@ -110,7 +110,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				return nil, nil, nil, compErr
 			}
 			if compErr == nil {
-				aggDecl := inferProjectionDeclType(agg.InputExpr, parquet.TypeFloat64, nil, aggInputDecls)
+				aggDecl := InferProjectionDeclType(agg.InputExpr, parquet.TypeFloat64, nil, aggInputDecls)
 				pc := exec.ProjectColumn{
 					Name: synName,
 					// Aggregate inputs are usually numeric, so Float64 is the
@@ -124,7 +124,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 					// materialized vector truncates at scale 0 (ADR-0024
 					// item 2).
 					Type:      aggDecl.ID,
-					Fields:    declTypeParts(aggDecl).Fields,
+					Fields:    DeclTypeParts(aggDecl).Fields,
 					Precision: aggDecl.Precision,
 					Scale:     aggDecl.Scale,
 					Expr:      wrapExpr(compiled),
@@ -238,7 +238,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		// Preserve the table qualifier — NormalizeIdentRef only strips the
 		// quotes off a delimited identifier, the way the GROUP BY keys below
 		// are normalized and the way the stage-DAG AggSpec carries
-		// agg.InputCol verbatim. cleanExpr here would drop the qualifier
+		// agg.InputCol verbatim. CleanExpr here would drop the qualifier
 		// ("t2.c2" -> "c2"), and a bare name binds to the FIRST column of
 		// that name in the input schema. Over a join whose two sides share a
 		// bare column name, that is the wrong table's column: BOOL_OR(t2.c2)
@@ -259,7 +259,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		// MIN/MAX from the vector it observes anyway, so this only decides
 		// the type of the identity row an empty input produces — which is
 		// exactly where the two paths would otherwise disagree.
-		outType, outTypeKnown := aggSpecOutputType(node, agg)
+		outType, outTypeKnown := AggSpecOutputType(node, agg)
 		if !outTypeKnown {
 			outType = aggOutputType(agg.Func, agg.Distinct)
 		}
@@ -290,13 +290,13 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		// a whole partial task's .wshf file (#685); here it is the zero-row
 		// result's schema, and the two paths declare the same thing only if
 		// both read this function.
-		if m, known := aggSpecOutputDecimal(node, agg); known {
+		if m, known := AggSpecOutputDecimal(node, agg); known {
 			ac.OutputPrecision, ac.OutputScale = m.Precision, m.Scale
 		}
 		// A ROW-valued aggregate's FIELDS, which a bare TypeID cannot carry
 		// either. Same function the stage spec uses, so the two paths declare
 		// one bar (#965).
-		if fields, ok := aggOhlcvOutputFields(node, agg); ok {
+		if fields, ok := AggOhlcvOutputFields(node, agg); ok {
 			ac.OutputFields = fields
 		}
 		// A COMPUTED argument is declared from the projection this path
@@ -305,9 +305,9 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		// zero-row SUM(a * (1 - b)) declared float64 here and DECIMAL there.
 		if synName, ok := syntheticNames[i]; ok {
 			if d, ok := synDecl[synName]; ok {
-				if t, prec, sc, known := aggOutputFromInputDecl(
+				if t, prec, sc, known := AggOutputFromInputDecl(
 					agg.Func, agg.Distinct, d.Type, d.Precision, d.Scale,
-					aggInputIsWideInteger(agg.InputExpr, aggInputDecls)); known {
+					AggInputIsWideInteger(agg.InputExpr, aggInputDecls)); known {
 					ac.OutputType = t
 					ac.OutputPrecision, ac.OutputScale = prec, sc
 				}
@@ -317,9 +317,9 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	}
 
 	// Catalog types of the aggregate's input, for typing derived GROUP BY
-	// key expressions (see nodeDeclaredType, #333). Resolved once.
-	aggChildStrictInt := strictIntArithCols(node.Children[0])
-	aggChildColTypes := inputColDecls(node.Children[0])
+	// key expressions (see NodeDeclaredType, #333). Resolved once.
+	aggChildStrictInt := StrictIntArithCols(node.Children[0])
+	aggChildColTypes := InputColDecls(node.Children[0])
 
 	groupByCols := make([]string, len(node.GroupBy))
 	for i, gb := range node.GroupBy {
@@ -345,7 +345,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	litElided := map[int]bool{}
 	// The names this aggregate publishes its keys under, resolved once. The
 	// literal elision below, the derived-key materialization further down,
-	// aggregateOutputNames and the projection above all read them from here —
+	// AggregateOutputNames and the projection above all read them from here —
 	// one rule, so the two engines' aggregate output schemas cannot drift
 	// apart (#723).
 	keyOuts := groupKeyOutputs(node)
@@ -375,7 +375,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				if compErr != nil {
 					continue
 				}
-				litDecl := inferProjectionDeclType(gbExpr, parquet.TypeString, aggChildStrictInt, aggChildColTypes)
+				litDecl := InferProjectionDeclType(gbExpr, parquet.TypeString, aggChildStrictInt, aggChildColTypes)
 				litPostOps = append(litPostOps, &aggPreProject{computed: []exec.ProjectColumn{{
 					Name:      keyOuts[i].Name,
 					Type:      litDecl.ID,
@@ -397,7 +397,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				continue
 			}
 			// keyOuts is the single answer to "is this key derived", shared
-			// with aggregateOutputNames and with the projection above, so
+			// with AggregateOutputNames and with the projection above, so
 			// the schema this materialization produces and the schema they
 			// describe cannot disagree (ADR-0026).
 			if gbExpr != nil && i < len(keyOuts) && keyOuts[i].Derived {
@@ -416,7 +416,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 					return nil, nil, nil, compErr
 				}
 				if compErr == nil {
-					gbDecl := derivedGroupKeyDecl(node.GroupBy[i], gbExpr, node.Children[0])
+					gbDecl := DerivedGroupKeyDecl(node.GroupBy[i], gbExpr, node.Children[0])
 					pc := exec.ProjectColumn{
 						Name: synName,
 						// Numeric expressions (abs(x), x-1, …) must get a
@@ -430,7 +430,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 						// item 2).
 						Precision: gbDecl.Precision,
 						Scale:     gbDecl.Scale,
-						Fields:    declTypeParts(gbDecl).Fields,
+						Fields:    DeclTypeParts(gbDecl).Fields,
 						Expr:      wrapExpr(compiled),
 					}
 					// Batched evaluation when available — beyond the vec
@@ -573,8 +573,8 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	// The aggregate acts as both sink and source
 	// We need to run childSource -> childOps -> hashAgg(sink), then hashAgg(source) -> collectSink
 	return &aggSourceAdapter{
-		childSource: childSource,
-		childOps:    childOps,
+		ChildSource: childSource,
+		ChildOps:    childOps,
 		agg:         hashAgg,
 	}, postOps, &exec.CollectSink{}, nil
 }

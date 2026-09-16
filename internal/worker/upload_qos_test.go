@@ -6,11 +6,12 @@ import (
 	"os"
 
 	"context"
-	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // The background-upload gate must run uploadSlotsBusy-wide while the

@@ -5,7 +5,7 @@ package coordinator
 import (
 	"testing"
 
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 )
 
 // The priority lane's memory contract only covers planner-bounded tiny
@@ -15,16 +15,16 @@ import (
 func TestStageHasLaneEmit(t *testing.T) {
 	cases := []struct {
 		name  string
-		emits []physical.DynamicFilterEmit
+		emits []dagplan.DynamicFilterEmit
 		want  bool
 	}{
 		{"no emits", nil, false},
-		{"lane emit", []physical.DynamicFilterEmit{{FilterID: "a"}}, true},
-		{"in-flow only", []physical.DynamicFilterEmit{{FilterID: "a", InFlow: true}}, false},
-		{"mixed", []physical.DynamicFilterEmit{{FilterID: "a", InFlow: true}, {FilterID: "b"}}, true},
+		{"lane emit", []dagplan.DynamicFilterEmit{{FilterID: "a"}}, true},
+		{"in-flow only", []dagplan.DynamicFilterEmit{{FilterID: "a", InFlow: true}}, false},
+		{"mixed", []dagplan.DynamicFilterEmit{{FilterID: "a", InFlow: true}, {FilterID: "b"}}, true},
 	}
 	for _, tc := range cases {
-		if got := stageHasLaneEmit(physical.Stage{EmitDynamicFilters: tc.emits}); got != tc.want {
+		if got := stageHasLaneEmit(dagplan.Stage{EmitDynamicFilters: tc.emits}); got != tc.want {
 			t.Errorf("%s: stageHasLaneEmit=%t want %t", tc.name, got, tc.want)
 		}
 	}

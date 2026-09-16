@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -1500,7 +1500,7 @@ func TestArcD5CorrelationMatchesPostgres(t *testing.T) {
 				// them are read on EVERY cell — a right-to-routed move is
 				// exactly what a row assertion cannot see.
 				wantScalarProj := tc.wantScalarProjRoutes
-				if tc.loweredOnlyWhenDeferred && !physical.ScalarSubqueriesAreDeferred() {
+				if tc.loweredOnlyWhenDeferred && !dagplan.ScalarSubqueriesAreDeferred() {
 					wantScalarProj = 1
 				}
 				for i, d := range arcD5RouteDelta(before, arcD5Routes(arm.c)) {

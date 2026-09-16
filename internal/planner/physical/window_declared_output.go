@@ -16,7 +16,7 @@ import (
 
 // windowOutputType declares input-independent rank/ratio functions and COUNT
 // (int64 regardless of input). Other names use the float64 fallback.
-// windowSpecOutputType resolves input-dependent value functions and MIN/MAX
+// WindowSpecOutputType resolves input-dependent value functions and MIN/MAX
 // from their argument, and SUM/AVG through accumulator typing; DECIMAL matches
 // the grouped result (#586, ADR-0012 item 9). Unresolved inputs keep fallback.
 // Value functions must copy the input type (#345); MIN/MAX use
@@ -46,12 +46,12 @@ func windowValueFunc(fn string) bool {
 }
 
 // windowComputedArgDecl types the argument AST and checks int8-domain operands
-// with nodeDeclaredType and aggInputIsWideInteger over the same declarations as
+// with NodeDeclaredType and AggInputIsWideInteger over the same declarations as
 // grouped aggregates (#329, #333, #987; ADR-0024). Both answers are required:
 // integer expressions compute in int64; SUM(int4-domain) is bigint, SUM(int8-domain)
 // is numeric, and non-integers retain fallback. Bare columns, missing/undecided
 // nodes and AST/InputCol spelling mismatches decline, never guess after respelling.
-// windowSpecOutputType resolves input-dependent types in the owning window's
+// WindowSpecOutputType resolves input-dependent types in the owning window's
 // schema; rebinding and unavailable parameter metadata bound lookup (#345).
 // Undecidable arguments keep windowOutputType's fallback.
 // See docs/internals/computed-window-argument-declarations.md for the design.
@@ -62,18 +62,18 @@ func windowComputedArgDecl(node *logical.Node, we logical.WindowExpr) (expr.Decl
 	if _, bare := we.InputExpr.(*plansql.ColRef); bare {
 		return expr.DeclType{}, false, false
 	}
-	if cleanExpr(we.InputExpr.String()) != cleanExpr(we.InputCol) {
+	if CleanExpr(we.InputExpr.String()) != CleanExpr(we.InputCol) {
 		return expr.DeclType{}, false, false
 	}
-	decls := withSubqueryDecls(inputColDecls(node.Children[0]), node)
-	if len(decls.types) == 0 {
-		decls = withSubqueryDecls(emittedColDecls(node.Children[0]), node)
+	decls := withSubqueryDecls(InputColDecls(node.Children[0]), node)
+	if len(decls.Types) == 0 {
+		decls = withSubqueryDecls(EmittedColDecls(node.Children[0]), node)
 	}
-	d, c := nodeDeclaredType(we.InputExpr, decls)
+	d, c := NodeDeclaredType(we.InputExpr, decls)
 	if c == expr.Undecided {
 		return expr.DeclType{}, false, false
 	}
-	return d, aggInputIsWideInteger(we.InputExpr, decls), true
+	return d, AggInputIsWideInteger(we.InputExpr, decls), true
 }
 
 // integerAccArgWidth maps a computed argument's DECLARED type plus the width
@@ -91,7 +91,7 @@ func integerAccArgWidth(declared parquet.TypeID, wide bool) parquet.TypeID {
 // width exec.IntegerAccOutputType is asked about for a BARE argument column,
 // read off the declaration the input publishes rather than off the INT64
 // carrier every integer expression materializes in.
-func windowBareArgWidth(decls colDecls, col string, carrier parquet.TypeID) parquet.TypeID {
+func windowBareArgWidth(decls ColDecls, col string, carrier parquet.TypeID) parquet.TypeID {
 	if carrier != parquet.TypeInt64 {
 		return carrier
 	}
@@ -101,7 +101,7 @@ func windowBareArgWidth(decls colDecls, col string, carrier parquet.TypeID) parq
 	return carrier
 }
 
-func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclType {
+func WindowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclType {
 	fn := strings.ToLower(strings.TrimSpace(we.Func))
 	minMax := fn == "min" || fn == "max"
 	sumAvg := fn == "sum" || fn == "avg"
@@ -110,11 +110,11 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 	}
 	// The same spelling buildWindow hands exec as the input column, so the
 	// declaration always describes the vector the operator will read.
-	col := cleanExpr(we.InputColumn())
+	col := CleanExpr(we.InputColumn())
 	if col == "" || len(node.Children) != 1 {
 		return expr.Decl(windowOutputType(fn))
 	}
-	// Resolve through emittedColDecls so derived Projects and ROW field metadata
+	// Resolve through EmittedColDecls so derived Projects and ROW field metadata
 	// reach the same declaration used by aggregates and the wire (#529, #568,
 	// #796; ADR-0026 §5). Parameterized types require their metadata.
 	// Where colRefDeclaredType declines, keep fallback; runtime value-column
@@ -122,7 +122,7 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 	// Zero-row results have no vector and depend solely on this declaration (#587);
 	// projection callers cannot rely on window runtime correction.
 	// See docs/internals/window-input-declaration-through-derived-plans.md for the design.
-	inDecls := emittedColDecls(node.Children[0])
+	inDecls := EmittedColDecls(node.Children[0])
 	t, conf := colRefDeclaredType(&plansql.ColRef{Column: col}, inDecls)
 	if conf != expr.Decided {
 		// A COMPUTED argument has no column declaration to read: the
@@ -200,7 +200,7 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 					// `pg_typeof(sum(real))` is real windowed exactly as it
 					// is grouped, and the accumulator has folded at float4's
 					// width since #950. The GROUPED spelling declared real
-					// from that moment (aggSpecOutputType) and this one kept
+					// from that moment (AggSpecOutputType) and this one kept
 					// double, so one column's digits went out under OID 700
 					// or 701 depending on the spelling (#1118). AVG stays
 					// double, which is what the server declares for it.
@@ -243,7 +243,7 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 	return t
 }
 
-// windowExecColumn resolves one logical WindowExpr into the executable
+// WindowExecColumn resolves one logical WindowExpr into the executable
 // column spec, over the Window node that owns it.
 //
 // It is the single place window arguments are read: the column out of the
@@ -255,7 +255,7 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 // second answer; the arguments are parsed once, here, where the types resolve
 // (#345's shape, and #329/#333's).
 // windowInputCol is the name a window function's ARGUMENT reaches the operator
-// under. It is `cleanExpr`'s bare spelling everywhere except where dropping the
+// under. It is `CleanExpr`'s bare spelling everywhere except where dropping the
 // qualifier would leave a name more than one arm of the window's input
 // publishes, and there it is the qualified spelling the query wrote — see
 // windowArgKeepsItsQualifier for why the strip is a coin toss in exactly that
@@ -265,11 +265,11 @@ func windowInputCol(node *logical.Node, we logical.WindowExpr) string {
 	if len(node.Children) == 1 && windowArgKeepsItsQualifier(arg, node.Children[0]) {
 		return arg
 	}
-	return cleanExpr(arg)
+	return CleanExpr(arg)
 }
 
-func windowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string]windowKey) exec.WindowColumn {
-	// resolveWindowKeys binds a qualified reference to the input column and
+func WindowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string]windowKey) exec.WindowColumn {
+	// ResolveWindowKeys binds a qualified reference to the input column and
 	// renames an expression to the column the pre-window projection computes
 	// under; a term it left alone keeps its own spelling (#585).
 	keyName := func(term string) string {
@@ -287,7 +287,7 @@ func windowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string
 		orderKeys = append(orderKeys, exec.SortKey{
 			Column:    keyName(ob.Column),
 			Order:     order,
-			NullsLast: resolveNullsLast(ob),
+			NullsLast: ResolveNullsLast(ob),
 			// A WINDOW reads its keys by NAME off the input batch, and a name
 			// stops being an address the moment the producer emits it twice.
 			// `SELECT x.a AS b, SUM(x.b) AS a, RANK() OVER (ORDER BY SUM(x.b))
@@ -309,13 +309,13 @@ func windowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string
 	wc := exec.WindowColumn{
 		Func: parseWindowFunc(we.Func),
 		// InputColumn drops the offset/default/N that share the
-		// argument string, so cleanExpr sees a column reference and
+		// argument string, so CleanExpr sees a column reference and
 		// nothing else. Applied the other way round, a float default
-		// (LAG(x, 1, 1.5)) looked like a qualified name and cleanExpr
+		// (LAG(x, 1, 1.5)) looked like a qualified name and CleanExpr
 		// returned "5" as the input column.
 		InputCol:    windowInputCol(node, we),
 		OutputCol:   we.OutputCol,
-		OutputType:  windowSpecOutputType(node, we).ID,
+		OutputType:  WindowSpecOutputType(node, we).ID,
 		PartitionBy: partBy,
 		OrderBy:     orderKeys,
 	}
@@ -323,7 +323,7 @@ func windowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string
 	// synthetic name: `SUM(rw.f) OVER ()` reached exec as the bare `f`, found
 	// no input vector, and answered NULL in every row (#603). The output type
 	// follows the FIELD for the functions whose answer is one of their input's
-	// values — windowSpecOutputType could not resolve it, because the name it
+	// values — WindowSpecOutputType could not resolve it, because the name it
 	// types is the field's, which is a column of nothing.
 	if k, ok := keys[strings.TrimSpace(we.InputColumn())]; ok && k.Expr != nil {
 		wc.InputCol = k.Name

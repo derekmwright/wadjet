@@ -5,8 +5,8 @@ package coordinator
 import (
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -71,13 +71,13 @@ func decomposeVar(specs []distributed.AggSpec) []distributed.AggSpec {
 	return out
 }
 
-// decomposeVarPhysical is the physical.AggSpec variant, for stage specs the
+// decomposeVarPhysical is the dagplan.AggSpec variant, for stage specs the
 // dispatcher rewrites before converting to wire format.
-func decomposeVarPhysical(specs []physical.AggSpec) []physical.AggSpec {
+func decomposeVarPhysical(specs []dagplan.AggSpec) []dagplan.AggSpec {
 	if !anyVarFunc(func(i int) string { return specs[i].Func }, len(specs)) {
 		return specs
 	}
-	out := make([]physical.AggSpec, 0, len(specs))
+	out := make([]dagplan.AggSpec, 0, len(specs))
 	for _, a := range specs {
 		kind, ok := varFuncKind(a.Func)
 		if !ok {

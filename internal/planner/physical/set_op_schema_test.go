@@ -43,7 +43,7 @@ func TestUnifySetOpSchemasDecimalIntegerRung(t *testing.T) {
 		// which is why this rung used to be skipped — but the OID does, and a
 		// client reading int4 for a column carrying int64 values is the same
 		// defect one type family over. Both orders resolve to INT64, the type
-		// setOpWiden and the stage DAG already agree on.
+		// SetOpWiden and the stage DAG already agree on.
 		{"int32_int64", i32, i64, parquet.TypeInt64, 0, 0, true},
 		{"int64_int32", i64, i32, parquet.TypeInt64, 0, 0, false},
 		// Two identical types are left alone.

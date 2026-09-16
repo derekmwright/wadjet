@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -80,7 +80,7 @@ func TestTheBarCrossesTheDAGAsAMergeableState(t *testing.T) {
 		if len(specs) == 0 {
 			specs = st.FusedAggSpecs
 		}
-		isMerge := st.Type == physical.StageFinalAggregate || st.Type == physical.StageMergeAggregate
+		isMerge := st.Type == dagplan.StageFinalAggregate || st.Type == dagplan.StageMergeAggregate
 		for _, a := range specs {
 			if !strings.EqualFold(a.Func, exec.OhlcvFunc) {
 				continue
@@ -173,7 +173,7 @@ func TestDecomposeOhlcvRewritesTheBarIntoItsState(t *testing.T) {
 	}
 }
 
-func ohlcvStageShapes(stages []physical.Stage) string {
+func ohlcvStageShapes(stages []dagplan.Stage) string {
 	var b strings.Builder
 	b.WriteString("\n  stages:")
 	for _, st := range stages {

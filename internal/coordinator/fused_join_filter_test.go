@@ -5,8 +5,8 @@ package coordinator
 import (
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // A fused join's own predicates must survive op-spec construction.
@@ -23,7 +23,7 @@ import (
 // revenues ~25x inflated with the wrong sum frozen into
 // baseline-local-small.json as the correctness oracle (#312).
 func TestFusedJoinFiltersReachTheFragment(t *testing.T) {
-	stage := physical.Stage{ID: "join-8", Type: physical.StageHashJoin}
+	stage := dagplan.Stage{ID: "join-8", Type: dagplan.StageHashJoin}
 	task := &distributed.Task{
 		BuildTableAlias: "orders",
 		JoinType:        "inner",

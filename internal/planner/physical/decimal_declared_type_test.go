@@ -15,9 +15,9 @@ import (
 // decDecls is a scan's catalog annotation with two DECIMAL columns at
 // DIFFERENT (p,s) — the shape a single-column fixture cannot test, because a
 // column reconciled against itself agrees whatever the rule.
-func decDecls() colDecls {
-	return colDecls{
-		types: map[string]parquet.TypeID{
+func decDecls() ColDecls {
+	return ColDecls{
+		Types: map[string]parquet.TypeID{
 			"a":     parquet.TypeDecimal,
 			"b":     parquet.TypeDecimal,
 			"wide":  parquet.TypeDecimal,
@@ -28,7 +28,7 @@ func decDecls() colDecls {
 			"txt":   parquet.TypeString,
 			"stamp": parquet.TypeTimestamp,
 		},
-		dec: map[string]logical.DecimalMeta{
+		Dec: map[string]logical.DecimalMeta{
 			"a":    {Precision: 9, Scale: 2},
 			"b":    {Precision: 18, Scale: 4},
 			"wide": {Precision: 38, Scale: 10},
@@ -168,7 +168,7 @@ func TestDecimalChoiceExpressionsDeclareTheCommonType(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse %q: %v", tc.sql, err)
 			}
-			got, c := nodeDeclaredType(node, decls)
+			got, c := NodeDeclaredType(node, decls)
 			if got != tc.want || c != tc.wantC {
 				t.Errorf("%s\n  declared (%v, %s), want (%v, %s)", tc.sql, got, c, tc.want, tc.wantC)
 			}
@@ -239,7 +239,7 @@ func TestDecimalArithmeticDeclaresTheResultType(t *testing.T) {
 		// Two integers stay integer arithmetic — PostgreSQL's rule, and the
 		// truncating division of #636. This used to answer FLOAT64 with the
 		// note that the declaration was "the caller's, not this one's": only
-		// inferProjectionDeclType held the integer rule, and only for the
+		// InferProjectionDeclType held the integer rule, and only for the
 		// outermost node of a projection. That split is what made the same
 		// expression declare INT64 as `SELECT i64 + i32` and FLOAT64 as a
 		// CASE branch or an aggregate's input. PostgreSQL 17 gives
@@ -255,7 +255,7 @@ func TestDecimalArithmeticDeclaresTheResultType(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse %q: %v", tc.sql, err)
 			}
-			got, c := nodeDeclaredType(node, decls)
+			got, c := NodeDeclaredType(node, decls)
 			if got != tc.want || c != expr.Decided {
 				t.Errorf("%s: declared (%v, %s), want (%v, DECIDED)", tc.sql, got, c, tc.want)
 			}
@@ -307,7 +307,7 @@ func TestDecimalCastDeclaresItsDestination(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse %q: %v", tc.sql, err)
 			}
-			got, c := nodeDeclaredType(node, decls)
+			got, c := NodeDeclaredType(node, decls)
 			if got != tc.want || c != expr.Decided {
 				t.Errorf("%s: declared (%v, %s), want (%v, DECIDED)", tc.sql, got, c, tc.want)
 			}
@@ -358,7 +358,7 @@ func TestWindowSpecOutputTypeResolvesDecimal(t *testing.T) {
 		{"avg over an int8 is numeric", "avg", "n", expr.DeclDecimal(38, 4)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := windowSpecOutputType(win, logical.WindowExpr{Func: tc.fn, InputCol: tc.input, OutputCol: "w"})
+			got := WindowSpecOutputType(win, logical.WindowExpr{Func: tc.fn, InputCol: tc.input, OutputCol: "w"})
 			if got != tc.want {
 				t.Errorf("%s(%s) declared %v, want %v", tc.fn, tc.input, got, tc.want)
 			}
@@ -407,7 +407,7 @@ func TestDecimalFoldDeclinesOverAnUnknownProducer(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse %q: %v", tc.sql, err)
 			}
-			got, c := nodeDeclaredType(node, decls)
+			got, c := NodeDeclaredType(node, decls)
 			if got != tc.want || c != tc.wantC {
 				t.Errorf("%s\n  declared (%v, %s), want (%v, %s)", tc.sql, got, c, tc.want, tc.wantC)
 			}
@@ -446,7 +446,7 @@ func TestNestedChoiceDeclarationIsLinearInDepth(t *testing.T) {
 				t.Fatalf("parse %s depth %d: %v", fn, depth, err)
 			}
 			start := time.Now()
-			got, c := nodeDeclaredType(node, decls)
+			got, c := NodeDeclaredType(node, decls)
 			if elapsed := time.Since(start); elapsed > time.Second {
 				t.Fatalf("%s nested %d deep took %v to declare — the argument walk is "+
 					"exponential in depth again", fn, depth, elapsed)
@@ -469,7 +469,7 @@ func TestNestedChoiceDeclarationIsLinearInDepth(t *testing.T) {
 		t.Fatalf("parse nested CASE: %v", err)
 	}
 	start := time.Now()
-	if got, c := nodeDeclaredType(node, decls); got != expr.DeclDecimal(18, 4) || c != expr.Decided {
+	if got, c := NodeDeclaredType(node, decls); got != expr.DeclDecimal(18, 4) || c != expr.Decided {
 		t.Errorf("nested CASE declared (%v, %s), want (DECIMAL(18,4), DECIDED)", got, c)
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {

@@ -10,11 +10,11 @@ import (
 
 // Ordinary Projects emit no DAG stage; consumers resolve SELECT-list aliases
 // back to source names (shuffle/aggregate/sort keys and gather renames).
-// derivedScopeBareName drops a derived-table qualifier ONLY when this subtree
+// DerivedScopeBareName drops a derived-table qualifier ONLY when this subtree
 // contains the named relation. BuildFromTable's setSubtreeAlias stamps that
 // alias onto its scans; join-recursing resolvers examine one arm at a time.
 // Never strip unconditionally: a qualified sibling column must keep its scope.
-func derivedScopeBareName(name string, subtree *logical.Node) string {
+func DerivedScopeBareName(name string, subtree *logical.Node) string {
 	dot := strings.LastIndexByte(name, '.')
 	if dot <= 0 || dot == len(name)-1 {
 		return ""
@@ -28,7 +28,7 @@ func derivedScopeBareName(name string, subtree *logical.Node) string {
 // subtreeNamesRelation reports whether any scan in the subtree answers to
 // name — its alias when it has one, its table name otherwise, or a DERIVED
 // TABLE whose scope it sits inside. This is the same alias→scan association
-// subtreeNaming.aliasCols builds; the walk is kept separate because this one
+// SubtreeNaming.aliasCols builds; the walk is kept separate because this one
 // needs no column sets and runs per key.
 //
 // The derived aliases are consulted separately from TableAlias because a scan
@@ -77,7 +77,7 @@ func subtreeNamesRelation(n *logical.Node, name string) bool {
 	return false
 }
 
-// projSourceName is the spelling of the column a PLAIN rename reads, keeping
+// ProjSourceName is the spelling of the column a PLAIN rename reads, keeping
 // the table qualifier when the projection has one.
 //
 // Projection.Column is the bare name, which is enough everywhere one relation
@@ -85,21 +85,21 @@ func subtreeNamesRelation(n *logical.Node, name string) bool {
 // both arms answer to `n_name`, and only `n2.n_name` names one of them. Expr
 // is the reference as WRITTEN, so it carries the qualifier when the query did;
 // where it did not, the two agree and this is Column.
-func projSourceName(proj *logical.Projection) string {
+func ProjSourceName(proj *logical.Projection) string {
 	if proj.Expr != "" {
 		return proj.Expr
 	}
 	return proj.Column
 }
 
-// projectionForName finds the SELECT-list item of a Project that a consumer's
+// ProjectionForName finds the SELECT-list item of a Project that a consumer's
 // name refers to: the alias as written first, then — for a reference
 // qualified by the derived table this Project belongs to — its bare form.
 //
 // Exact-first matters: a projection that aliases the qualified spelling
 // itself (`n1.n_name AS "n1.n_name"`) owns the name outright, and the bare
 // fallback must not overtake it.
-func projectionForName(projs []logical.Projection, name, bare string) *logical.Projection {
+func ProjectionForName(projs []logical.Projection, name, bare string) *logical.Projection {
 	for i := range projs {
 		if projs[i].Alias != "" && strings.EqualFold(projs[i].Alias, name) {
 			return &projs[i]
@@ -111,44 +111,6 @@ func projectionForName(projs []logical.Projection, name, bare string) *logical.P
 	for i := range projs {
 		if projs[i].Alias != "" && strings.EqualFold(projs[i].Alias, bare) {
 			return &projs[i]
-		}
-	}
-	return nil
-}
-
-// projectionPublishingName is projectionForName widened to an item the SELECT
-// list wrote with NO ALIAS, which publishes under its own bare column name:
-// `SELECT u.g, u.x FROM (…) u` publishes `g` and `x`.
-//
-// Only the CLASS walk asks it, and the split is deliberate rather than a
-// second copy of the rule. The other walks resolve a NAME to its SOURCE, and
-// for an unaliased qualified item those two are the same string — `u.x`
-// resolves to `u.x`, a self-rename that stops the walk one Project short of
-// the answer. Measured: widening projectionForName itself made
-// `SELECT u.g, u.x FROM (SELECT COUNT(*) AS g, g AS x … ) u ORDER BY u.x`
-// refuse its whole plan, because the sort key stopped resolving to the column
-// the aggregate emits. The CLASS question has no such fixpoint: it wants the
-// item, and an unaliased item is one.
-//
-// Without it, `renameIsAggregateOutput` answered "not an aggregate output" for
-// a name whose value IS one two derived tables above the aggregate, and the
-// gather's duplicate-name pairing then took the first column of the name —
-// the group KEY (#785, ADR-0026 §3a).
-func projectionPublishingName(projs []logical.Projection, name, bare string) *logical.Projection {
-	if p := projectionForName(projs, name, bare); p != nil {
-		return p
-	}
-	for _, want := range []string{name, bare} {
-		if want == "" {
-			continue
-		}
-		for i := range projs {
-			if projs[i].Alias != "" || projs[i].Column == "" {
-				continue
-			}
-			if strings.EqualFold(projs[i].Column, want) {
-				return &projs[i]
-			}
 		}
 	}
 	return nil

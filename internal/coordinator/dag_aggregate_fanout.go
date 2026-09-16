@@ -11,8 +11,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // finalAggregateFanoutCandidate reports whether a stage qualifies for
@@ -28,7 +28,7 @@ import (
 // qualifies; nil otherwise so callers fall through to the standard
 // single-task dispatch.
 func finalAggregateFanoutCandidate(
-	stage physical.Stage,
+	stage dagplan.Stage,
 	inputs map[string]StageOutput,
 	workerCount int,
 ) (depID string, files []string, ok bool) {
@@ -42,7 +42,7 @@ func finalAggregateFanoutCandidate(
 	if stage.RawInputAggregate {
 		return "", nil, false
 	}
-	if stage.Distribution.Kind != physical.DistSingleton {
+	if stage.Distribution.Kind != dagplan.DistSingleton {
 		return "", nil, false
 	}
 	if workerCount <= 1 {
@@ -94,7 +94,7 @@ func finalAggregateFanoutCandidate(
 func (c *Coordinator) dispatchFinalAggregateFanout(
 	ctx context.Context,
 	queryID string,
-	stage physical.Stage,
+	stage dagplan.Stage,
 	inputs map[string]StageOutput,
 	workerCount int,
 	fusion *gatherFusion,
@@ -110,7 +110,7 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 	// (scalarsDeferrableToFinalMerge guarantees the agg specs the
 	// intermediates are built from carry no placeholders).
 	type resolvedStage struct {
-		stage physical.Stage
+		stage dagplan.Stage
 		err   error
 	}
 	var scalarCh chan resolvedStage
@@ -158,7 +158,7 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 	// Synthetic stage for the intermediate fragments: Type="merge_aggregate"
 	// keeps FoldAvg=false (AVG synthetics survive end-to-end up to the
 	// final task), no SortKeys / Limit / FilterExprs — those are final-only.
-	intermStage := physical.Stage{
+	intermStage := dagplan.Stage{
 		Type:        "merge_aggregate",
 		GroupByCols: stage.GroupByCols,
 	}

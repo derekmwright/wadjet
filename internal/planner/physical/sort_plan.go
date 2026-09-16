@@ -10,165 +10,9 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// sortKeySlotPosStage may use a SELECT-list position only when it addresses
-// the producer's actual stream. Ordinary DAG Projects emit no stage; a single
-// narrowed relation supplies the list, but joins/set operations need stronger proof.
-// OutputColumns is populated only after walkStages; shape is the initial bound.
-// A WRITTEN term takes a position only under the MEASURED proof, never the shape
-// bound, because it is resolvable on far more queries than an ordinal (#1014).
-// The duplicate_name_dag and collide_two_path gates test both sides of it.
-// See docs/internals/dag-sort-select-list-positions.md for the design.
-func sortKeySlotPosStage(ob logical.OrderExpr, sortNode *logical.Node, produced []Stage) int {
-	if pos := sortKeySlotPos(ob, sortNode); pos != 0 {
-		// A set operation carries its own proof (sortInputSetOpWidth): its
-		// stage publishes the result column list and nothing else, so the
-		// subtree bound below — which exists because a JOIN stage emits both
-		// arms' whole schemas — has nothing to say about it (#1022).
-		if _, ok := sortInputSetOpWidth(sortNode.Children[0]); ok {
-			return pos
-		}
-		if !subtreeJoinsRelations(sortNode) {
-			return pos
-		}
-		// …unless the producer MATERIALIZED the select list, which is the one
-		// case where the stream and the select list are the same list (#1003).
-		if producerPublishesSelectList(produced, sortNode) {
-			return pos
-		}
-		return 0
-	}
-	// A WRITTEN term binds the same SLOT an ordinal does (#1014). It is the
-	// spelling one step over from #1003's, and it was the cell that arc PINNED:
-	// `SELECT DISTINCT a.order_id AS amount, b.amount … ORDER BY 1, b.amount
-	// DESC` publishes `amount` TWICE, so once the position is dropped the key
-	// resolves by that name and `ColumnIndexFallback` answers with the FIRST
-	// match — both keys bound column one and the DAG arms returned
-	// `1,50 | 1,100 | …` where PostgreSQL 17 and both single-process arms
-	// return `1,100 | 1,50 | …`. A total order is not one of ADR-0013's
-	// nondeterminism classes.
-	//
-	// Only under the MEASURED proof, on both sides of the shape bound. An
-	// ordinal may take the position on a subtree that joins no relations
-	// because a single narrowed relation's stage carries the select list as
-	// its ProjectExprs; a written term is resolvable on far more queries than
-	// an ordinal is, so widening it by the same shape argument would put a
-	// position on keys whose producer this layer has not looked at. What the
-	// measurement answers is exactly the question the position needs —
-	// does the producing stage publish the select list as the ordered prefix
-	// of its own output — and it answers it the same way for both spellings
-	// (ADR-0026 §8).
-	pos := sortKeyWrittenSlotPos(ob, sortNode)
-	if pos == 0 || !producerPublishesSelectList(produced, sortNode) {
-		return 0
-	}
-	return pos
-}
-
-// producerPublishesSelectList proves the whole visible SELECT list is an ordered
-// PREFIX of the producer's output, comparing both name and source expression.
-// Producer kind alone is insufficient (ADR-0026 §8): reordered or narrowed lists
-// fail, while materialized duplicate names can still be addressed by position
-// (#1003). Falling back to the first matching name can lose a total-order key,
-// which ADR-0013 does not permit. Unmaterialized lists retain name resolution.
-// See docs/internals/materialized-select-list-prefix.md for the design.
-func producerPublishesSelectList(produced []Stage, sortNode *logical.Node) bool {
-	if len(produced) == 0 || sortNode == nil || len(sortNode.Children) == 0 {
-		return false
-	}
-	child := sortNode.Children[0]
-	if child == nil || child.Type != logical.NodeProject || logical.HasStarProjection(child) {
-		return false
-	}
-	visible := logical.VisibleProjections(child.Projections)
-	if len(visible) == 0 {
-		return false
-	}
-	specs := produced[len(produced)-1].ProjectExprs
-	if len(specs) < len(visible) {
-		return false
-	}
-	for i, pr := range visible {
-		src := cleanExpr(pr.Expr)
-		if src == "" {
-			src = pr.Column
-		}
-		if src == "" || !sameProjectionSource(specs[i].Expr, src) {
-			return false
-		}
-		// The SOURCE is the identity; the NAME is the check, and a
-		// projection has more than one legitimately — the resolution
-		// spelling every pass inside the planner binds by, and the
-		// PublishedName the client is told (ADR-0026 §2). The stage
-		// materializes whichever the output owes.
-		if !projectionAnswersToName(pr, specs[i].Name) {
-			return false
-		}
-	}
-	return true
-}
-
-// sameProjectionSource reports whether a stage spec's source expression and a
-// logical projection's name the SAME input column.
-//
-// They may differ by a QUALIFIER and by nothing else: an aggregate publishes a
-// group key under its stripped name (ADR-0026 §2) so the logical projection
-// reads `order_id`, while the stage spec keeps the written `a.order_id`. Where
-// both sides carry a qualifier they must agree on it, so two arms of a
-// self-join are never taken for one another.
-func sameProjectionSource(specExpr, projExpr string) bool {
-	a := plansql.NormalizeIdentRef(cleanExpr(specExpr))
-	b := plansql.NormalizeIdentRef(cleanExpr(projExpr))
-	if a == "" || b == "" {
-		return false
-	}
-	if strings.EqualFold(a, b) {
-		return true
-	}
-	ab, bb := blockBareName(a), blockBareName(b)
-	if !strings.EqualFold(ab, bb) {
-		return false
-	}
-	// Exactly one side was bare; two different qualifiers are two columns.
-	return a == ab || b == bb
-}
-
-// projectionAnswersToName reports whether name is one of the names this
-// projection legitimately publishes.
-func projectionAnswersToName(pr logical.Projection, name string) bool {
-	if name == "" {
-		return false
-	}
-	name = plansql.NormalizeIdentRef(name)
-	for _, cand := range []string{pr.PublishedName, pr.Alias, pr.Column, cleanExpr(pr.Expr)} {
-		if cand != "" && strings.EqualFold(plansql.NormalizeIdentRef(cand), name) {
-			return true
-		}
-	}
-	return false
-}
-
-// subtreeJoinsRelations reports whether a node's subtree combines two
-// relations — a join or a set operation — anywhere below it.
-func subtreeJoinsRelations(n *logical.Node) bool {
-	if n == nil {
-		return false
-	}
-	switch n.Type {
-	case logical.NodeJoin, logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
-		return true
-	}
-	for _, c := range n.Children {
-		if subtreeJoinsRelations(c) {
-			return true
-		}
-	}
-	return false
-}
-
-// sortKeySlotPos is the input column index (1-based) a sort key addresses, or
+// SortKeySlotPos is the input column index (1-based) a sort key addresses, or
 // 0 to resolve it by name.
 //
 // It answers only when the Sort's input PROVABLY publishes the select list in
@@ -177,12 +21,12 @@ func subtreeJoinsRelations(n *logical.Node) bool {
 // the name is the address it always was; a position guessed against a schema
 // this layer cannot enumerate would sort by the wrong column, which is the
 // defect rather than the fix.
-func sortKeySlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
+func SortKeySlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 	if ob.SlotPos <= 0 || sortNode == nil || len(sortNode.Children) == 0 {
 		return 0
 	}
 	child := sortNode.Children[0]
-	if width, ok := sortInputSetOpWidth(child); ok {
+	if width, ok := SortInputSetOpWidth(child); ok {
 		if ob.SlotPos > width {
 			return 0
 		}
@@ -196,7 +40,7 @@ func sortKeySlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 		return 0
 	}
 	// The hidden columns a Sort's projection appends come AFTER the visible
-	// ones (hiddenSortTrimOp trims the tail), so a visible position is the
+	// ones (HiddenSortTrimOp trims the tail), so a visible position is the
 	// same index in the batch — but only when the visible ones really are the
 	// prefix.
 	for i := 0; i < len(visible); i++ {
@@ -207,13 +51,13 @@ func sortKeySlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 	return ob.SlotPos
 }
 
-// sortInputSetOpWidth reports the number of result columns when a Sort reads a
+// SortInputSetOpWidth reports the number of result columns when a Sort reads a
 // SET OPERATION directly, and false otherwise.
 //
 // A set operation needs no proof that a position addresses its stream: its
 // output IS its result column list, in order, on both engines. Every arm is
-// projected onto that list — `setOpArmProjection` builds the DAG union stage's
-// per-arm projection from it and `alignSetOpRows` re-keys the in-process rows
+// projected onto that list — `SetOpArmProjection` builds the DAG union stage's
+// per-arm projection from it and `AlignSetOpRows` re-keys the in-process rows
 // onto it — precisely so the arms are one schema and the concatenation is well
 // defined. Position i of the list is therefore column i of the sort's input by
 // construction.
@@ -224,11 +68,11 @@ func sortKeySlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 // no position both keys resolved to the first column and key 2 was never
 // applied — on every arm, 7 rows in PostgreSQL's key-1 order with key 2
 // ignored (#1022).
-func sortInputSetOpWidth(child *logical.Node) (int, bool) {
+func SortInputSetOpWidth(child *logical.Node) (int, bool) {
 	if !isSetOpNode(setOpUnwrap(child)) {
 		return 0, false
 	}
-	n := len(setOpOutputNames(child))
+	n := len(SetOpOutputNames(child))
 	return n, n > 0
 }
 
@@ -241,13 +85,13 @@ func sortInputSetOpWidth(child *logical.Node) (int, bool) {
 // and require that function's separate SELECT-list proof.
 // See docs/internals/local-sort-visible-item-positions.md for the design.
 func sortKeyLocalSlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
-	if pos := sortKeySlotPos(ob, sortNode); pos > 0 {
+	if pos := SortKeySlotPos(ob, sortNode); pos > 0 {
 		return pos
 	}
-	return sortKeyWrittenSlotPos(ob, sortNode)
+	return SortKeyWrittenSlotPos(ob, sortNode)
 }
 
-// sortKeyWrittenSlotPos is the visible SELECT-list position a WRITTEN sort term
+// SortKeyWrittenSlotPos is the visible SELECT-list position a WRITTEN sort term
 // names — by its alias, else by the expression the item was written as — or 0
 // where no position is provable.
 //
@@ -263,7 +107,7 @@ func sortKeyLocalSlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 // the two callers do NOT share is the PROOF that the position addresses their
 // stream; each still makes its own (sortKeySlotPosStage's is measured against
 // the producing stage).
-func sortKeyWrittenSlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
+func SortKeyWrittenSlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 	term := strings.TrimSpace(ob.Column)
 	if term == "" || sortNode == nil || len(sortNode.Children) == 0 {
 		return 0
@@ -273,7 +117,7 @@ func sortKeyWrittenSlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 		return 0
 	}
 	visible := logical.VisibleProjections(child.Projections)
-	// The same prefix proof sortKeySlotPos makes: a visible position is an
+	// The same prefix proof SortKeySlotPos makes: a visible position is an
 	// index into the batch only while the visible items really are the prefix
 	// of the projection list.
 	for i := 0; i < len(visible); i++ {
@@ -295,7 +139,7 @@ func sortKeyWrittenSlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 		return match
 	}
 	for i := range visible {
-		if !strings.EqualFold(strings.TrimSpace(projSourceName(&visible[i])), term) {
+		if !strings.EqualFold(strings.TrimSpace(ProjSourceName(&visible[i])), term) {
 			continue
 		}
 		if match > 0 {
@@ -325,7 +169,7 @@ func (p *Planner) buildSort(ctx context.Context, node *logical.Node) (exec.Sourc
 		keys = append(keys, exec.SortKey{
 			Column:    sortKeyLocalColumn(ob),
 			Order:     order,
-			NullsLast: resolveNullsLast(ob),
+			NullsLast: ResolveNullsLast(ob),
 			// The select-list POSITION: the Project below a Sort narrows the
 			// schema to exactly its visible outputs in order, so position i of
 			// the select list is column i of this operator's input — and it is
@@ -342,8 +186,8 @@ func (p *Planner) buildSort(ctx context.Context, node *logical.Node) (exec.Sourc
 	}
 
 	return &sortSourceAdapter{
-		childSource: childSource,
-		childOps:    childOps,
+		ChildSource: childSource,
+		ChildOps:    childOps,
 		sort:        sortOp,
 	}, nil, &exec.CollectSink{}, nil
 }
@@ -375,14 +219,14 @@ func (p *Planner) buildLimit(ctx context.Context, node *logical.Node) (exec.Sour
 
 	// Optimization: Limit(Sort(...)) → TopN sort (heap-based, keeps only N rows)
 	if child.Type == logical.NodeSort && node.OffsetVal == 0 && node.LimitVal != logical.NoLimit {
-		return p.buildTopN(ctx, child, node.LimitVal)
+		return p.BuildTopN(ctx, child, node.LimitVal)
 	}
 	// LIMIT n OFFSET m over a sort: same Top-K machinery with n+m kept
 	// rows, plus the Limit operator above to skip the offset. Without
 	// this, OFFSET queries (ClickBench Q40-43) fully materialized the
 	// sort input.
 	if child.Type == logical.NodeSort && node.OffsetVal > 0 && node.LimitVal > 0 {
-		source, ops, sink, err := p.buildTopN(ctx, child, node.LimitVal+node.OffsetVal)
+		source, ops, sink, err := p.BuildTopN(ctx, child, node.LimitVal+node.OffsetVal)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -414,7 +258,7 @@ func (p *Planner) buildLimit(ctx context.Context, node *logical.Node) (exec.Sour
 	return source, ops, sink, nil
 }
 
-func (p *Planner) buildTopN(ctx context.Context, sortNode *logical.Node, n int) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
+func (p *Planner) BuildTopN(ctx context.Context, sortNode *logical.Node, n int) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
 	childSource, childOps, _, err := p.buildPipeline(ctx, sortNode.Children[0])
 	if err != nil {
 		return nil, nil, nil, err
@@ -429,7 +273,7 @@ func (p *Planner) buildTopN(ctx context.Context, sortNode *logical.Node, n int) 
 		keys = append(keys, exec.SortKey{
 			Column:    sortKeyLocalColumn(ob),
 			Order:     order,
-			NullsLast: resolveNullsLast(ob),
+			NullsLast: ResolveNullsLast(ob),
 			SlotPos:   sortKeyLocalSlotPos(ob, sortNode),
 		})
 	}
@@ -445,8 +289,8 @@ func (p *Planner) buildTopN(ctx context.Context, sortNode *logical.Node, n int) 
 	}
 
 	return &sortSourceAdapter{
-		childSource: childSource,
-		childOps:    childOps,
+		ChildSource: childSource,
+		ChildOps:    childOps,
 		sort:        sortOp,
 	}, nil, &exec.CollectSink{}, nil
 }
@@ -461,7 +305,7 @@ func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Sou
 		return nil, nil, nil, err
 	}
 
-	winKeys := resolveWindowKeys(node)
+	winKeys := ResolveWindowKeys(node)
 	keyProjections, keyMeta, err := p.windowKeyProjections(winKeys)
 	if err != nil {
 		return nil, nil, nil, err
@@ -479,7 +323,7 @@ func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Sou
 	}
 	var winCols []exec.WindowColumn
 	for _, we := range node.WindowExprs {
-		winCols = append(winCols, windowExecColumn(node, we, winKeys))
+		winCols = append(winCols, WindowExecColumn(node, we, winKeys))
 	}
 
 	winOp := exec.NewWindow(winCols)
@@ -488,8 +332,8 @@ func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Sou
 	}
 
 	return &windowSourceAdapter{
-		childSource: childSource,
-		childOps:    childOps,
+		ChildSource: childSource,
+		ChildOps:    childOps,
 		win:         winOp,
 	}, nil, &exec.CollectSink{}, nil
 }
@@ -522,8 +366,8 @@ func (p *Planner) buildDistinct(ctx context.Context, node *logical.Node) (exec.S
 	}
 
 	return &aggSourceAdapter{
-		childSource: childSource,
-		childOps:    childOps,
+		ChildSource: childSource,
+		ChildOps:    childOps,
 		agg:         hashAgg,
 	}, nil, &exec.CollectSink{}, nil
 }

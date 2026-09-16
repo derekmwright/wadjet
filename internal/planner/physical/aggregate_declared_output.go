@@ -33,13 +33,13 @@ func aggOutputType(funcName string, distinct bool) parquet.TypeID {
 	}
 }
 
-// aggOhlcvOutputFields derives ROW fields from PRICE and VOLUME declarations
+// AggOhlcvOutputFields derives ROW fields from PRICE and VOLUME declarations
 // through exec.OhlcvOutputFields, the operator's own Consume-time rule.
 // Unknown input declarations return ok=false so runtime vectors supply the fields.
-// aggSpecOutputType likewise distinguishes unknown from TypeBool's zero TypeID;
+// AggSpecOutputType likewise distinguishes unknown from TypeBool's zero TypeID;
 // callers must use its bool, not treat BOOL as undeclared (#354, #371).
 // See docs/internals/aggregate-output-declaration-contracts.md for the design.
-func aggOhlcvOutputFields(node *logical.Node, agg logical.AggExpr) ([]parquet.Column, bool) {
+func AggOhlcvOutputFields(node *logical.Node, agg logical.AggExpr) ([]parquet.Column, bool) {
 	if strings.ToLower(strings.TrimSpace(agg.Func)) != "ohlcv" {
 		return nil, false
 	}
@@ -50,7 +50,7 @@ func aggOhlcvOutputFields(node *logical.Node, agg logical.AggExpr) ([]parquet.Co
 		}
 		c := parquet.Column{Name: name, Type: t}
 		if t == parquet.TypeDecimal {
-			m, known := aggInputColumnDecimal(node, name)
+			m, known := AggInputColumnDecimal(node, name)
 			if !known {
 				return parquet.Column{}, false
 			}
@@ -59,7 +59,7 @@ func aggOhlcvOutputFields(node *logical.Node, agg logical.AggExpr) ([]parquet.Co
 		return c, true
 	}
 	// The PRICE may be a COMPUTED argument, and the plan can type one: it is
-	// the same declaration aggSpecOutputType and aggSpecOutputDecimal take for
+	// the same declaration AggSpecOutputType and AggSpecOutputDecimal take for
 	// every other aggregate over an expression (#867). Without it the bar had
 	// no plan-time declaration at all for `ohlcv(ts, price*2, volume)`, and a
 	// declaration the plan declines is one every consumer then invents
@@ -84,7 +84,7 @@ func aggOhlcvOutputFields(node *logical.Node, agg logical.AggExpr) ([]parquet.Co
 	return exec.OhlcvOutputFields(price, vol)
 }
 
-func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID, bool) {
+func AggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID, bool) {
 	fn := strings.ToLower(strings.TrimSpace(agg.Func))
 	// SUM and AVG join the input-dependent list for ONE input type: over a
 	// DECIMAL column they answer in DECIMAL, exactly (#455). Over everything
@@ -115,13 +115,13 @@ func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID,
 		if _, bare := agg.InputExpr.(*plansql.ColRef); !bare {
 			// A COMPUTED argument is typed from its own EXPRESSION, over the
 			// aggregate's input declarations — the same source the runtime
-			// AggColumn/AggSpec already read through aggOutputFromInputDecl
+			// AggColumn/AggSpec already read through AggOutputFromInputDecl
 			// (plan.go's synDecl override, and the DAG's spec.OutputType).
 			//
 			// Declining here is what made `SUM(c_i64 * 3000000) + 1` float8:
 			// the aggregate's own output was right, the walk OVER it was not,
-			// so `__agg_0` was declared FLOAT64 in emittedColDecls and the
-			// arithmetic above it took nodeDeclaredType's float fall-through.
+			// so `__agg_0` was declared FLOAT64 in EmittedColDecls and the
+			// arithmetic above it took NodeDeclaredType's float fall-through.
 			// A float64 cannot hold 36280278840510000001, so the `+ 1`
 			// vanished and the answer came back BELOW the sum it was added to
 			// (#867).
@@ -170,7 +170,7 @@ func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID,
 // rather than a bare column, from that expression's own declaration over the
 // aggregate's input columns. It is the declared-schema side of the rule the
 // runtime already applies: plan.go's AggColumn override and the DAG's
-// AggSpec both call aggOutputFromInputDecl with the projection's declared
+// AggSpec both call AggOutputFromInputDecl with the projection's declared
 // type of the computed argument, and this reads the same function from the
 // same source so the DECLARATION and the VALUE cannot disagree (#867).
 //
@@ -181,26 +181,26 @@ func aggComputedInputDecl(node *logical.Node, agg logical.AggExpr) (parquet.Type
 	if agg.InputExpr == nil || node == nil || len(node.Children) == 0 {
 		return 0, 0, 0, false
 	}
-	decls := inputColDecls(node.Children[0])
-	if len(decls.types) == 0 {
-		decls = emittedColDecls(node.Children[0])
+	decls := InputColDecls(node.Children[0])
+	if len(decls.Types) == 0 {
+		decls = EmittedColDecls(node.Children[0])
 	}
 	// A SCALAR SUBQUERY written AS the aggregate's argument — `SUM((SELECT
 	// … ))` — has no column for the walk to read; its declaration is the
 	// stamp on the plan (subquery_decl_annotation.go).
 	decls = withSubqueryDecls(decls, node)
-	d, c := nodeDeclaredType(agg.InputExpr, decls)
+	d, c := NodeDeclaredType(agg.InputExpr, decls)
 	if c == expr.Undecided {
 		return 0, 0, 0, false
 	}
-	return aggOutputFromInputDecl(agg.Func, agg.Distinct, d.ID, d.Precision, d.Scale,
-		aggInputIsWideInteger(agg.InputExpr, decls))
+	return AggOutputFromInputDecl(agg.Func, agg.Distinct, d.ID, d.Precision, d.Scale,
+		AggInputIsWideInteger(agg.InputExpr, decls))
 }
 
 // aggComputedInputExprDecl is the declaration of the EXPRESSION an aggregate
 // computes over, as opposed to aggComputedInputDecl's declaration of what the
 // aggregate then ANSWERS. The two are the same walk and differ in one step:
-// this one stops before aggOutputFromInputDecl.
+// this one stops before AggOutputFromInputDecl.
 //
 // The bar needs the input's own type because its ROW fields ARE its inputs'
 // types — `ohlcv(ts, price*2, volume)` declares open/high/low/close as
@@ -211,15 +211,15 @@ func aggComputedInputExprDecl(node *logical.Node, agg logical.AggExpr) (parquet.
 	if agg.InputExpr == nil || node == nil || len(node.Children) == 0 {
 		return 0, 0, 0, false
 	}
-	decls := inputColDecls(node.Children[0])
-	if len(decls.types) == 0 {
-		decls = emittedColDecls(node.Children[0])
+	decls := InputColDecls(node.Children[0])
+	if len(decls.Types) == 0 {
+		decls = EmittedColDecls(node.Children[0])
 	}
 	// A SCALAR SUBQUERY written AS the aggregate's argument — `SUM((SELECT
 	// … ))` — has no column for the walk to read; its declaration is the
 	// stamp on the plan (subquery_decl_annotation.go).
 	decls = withSubqueryDecls(decls, node)
-	d, c := nodeDeclaredType(agg.InputExpr, decls)
+	d, c := NodeDeclaredType(agg.InputExpr, decls)
 	if c == expr.Undecided {
 		return 0, 0, 0, false
 	}
@@ -232,11 +232,11 @@ func aggComputedInputOutputType(node *logical.Node, agg logical.AggExpr) (parque
 	return t, ok
 }
 
-// aggSpecOutputDecimal is aggSpecOutputType's companion for the one piece a
+// AggSpecOutputDecimal is AggSpecOutputType's companion for the one piece a
 // bare TypeID cannot carry: MIN/MAX/MIN_BY/MAX_BY of a DECIMAL(p,s) column
 // answers in that SAME (p,s) — it hands back a value the column already
 // holds, not a computed one — so a zero-row result can declare it exactly
-// the way declaredOutputSchema declares the type itself (#458).
+// the way DeclaredOutputSchema declares the type itself (#458).
 //
 // SUM/AVG widen or rescale their input rather than keeping it, but the
 // WIDENING RULE itself is fixed at plan time, not decided by the
@@ -251,8 +251,8 @@ func aggComputedInputOutputType(node *logical.Node, agg logical.AggExpr) (parque
 // only NAME and TYPE, not (precision, scale) (fold-in to #457/#458, FIX 2).
 // The WIRE typmod for these is a separate question, answered unconditionally
 // -1 for every aggregate regardless of this function's answer — see
-// declaredWireUnconstrainedDecimal.
-func aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.DecimalMeta, bool) {
+// DeclaredWireUnconstrainedDecimal.
+func AggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.DecimalMeta, bool) {
 	fn := strings.ToLower(strings.TrimSpace(agg.Func))
 	switch fn {
 	case "min", "max", "min_by", "max_by", "sum", "avg":
@@ -261,7 +261,7 @@ func aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.Deci
 	}
 	if agg.InputExpr != nil {
 		if _, bare := agg.InputExpr.(*plansql.ColRef); !bare {
-			// aggSpecOutputType's rule, for the (p,s) half: a computed
+			// AggSpecOutputType's rule, for the (p,s) half: a computed
 			// argument declares what its own expression declares (#867).
 			if t, prec, scale, known := aggComputedInputDecl(node, agg); known && t == parquet.TypeDecimal {
 				return logical.DecimalMeta{Precision: prec, Scale: scale}, true
@@ -272,13 +272,13 @@ func aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.Deci
 	// An INTEGER input whose result PostgreSQL answers in numeric declares the
 	// carrier's full precision at scale 0 (SUM) or batch.AvgScale(0) (AVG) —
 	// #784. It is asked BEFORE the DECIMAL lookup because the input is not a
-	// DECIMAL column at all and aggInputColumnDecimal would decline it.
+	// DECIMAL column at all and AggInputColumnDecimal would decline it.
 	if t, ok := aggInputColumnType(node, agg.InputCol); ok {
 		if m, ok := aggIntegerOutputDecimal(fn, aggIntegerInputWidth(node, agg.InputCol, t)); ok {
 			return m, true
 		}
 	}
-	in, ok := aggInputColumnDecimal(node, agg.InputCol)
+	in, ok := AggInputColumnDecimal(node, agg.InputCol)
 	if !ok {
 		return logical.DecimalMeta{}, false
 	}
@@ -321,7 +321,7 @@ func aggIntegerOutputDecimal(fn string, in parquet.TypeID) (logical.DecimalMeta,
 	return logical.DecimalMeta{Precision: prec, Scale: scale}, true
 }
 
-// aggInputColumnType and aggInputColumnDecimal resolve both halves of a bare
+// aggInputColumnType and AggInputColumnDecimal resolve both halves of a bare
 // aggregate argument's declaration. Rename/derived-table outputs must be reachable
 // when a scan does not carry the name (#728); a type and (p,s) must describe the
 // same column. The lookup order below accounts for dispatch-respelled sources.
@@ -349,7 +349,7 @@ func aggInputColumnType(node *logical.Node, col string) (parquet.TypeID, bool) {
 	if t, ok := scanColumnType(node, col); ok {
 		return t, true
 	}
-	// namingScopeDecls, not emittedColDecls of the immediate child: the name
+	// namingScopeDecls, not EmittedColDecls of the immediate child: the name
 	// asked about here has ALREADY been re-spelled for dispatch, and a rename
 	// Project directly above its scope answers for the ALIAS and not for it.
 	// `SUM(w)` over `(SELECT id, SUM(a) OVER () AS w FROM decpair) x` arrives
@@ -370,7 +370,7 @@ func aggInputColumnType(node *logical.Node, col string) (parquet.TypeID, bool) {
 	return 0, false
 }
 
-func aggInputColumnDecimal(node *logical.Node, col string) (logical.DecimalMeta, bool) {
+func AggInputColumnDecimal(node *logical.Node, col string) (logical.DecimalMeta, bool) {
 	// The same order as aggInputColumnType, for the same reason: the two answer
 	// one question about one column and a disagreement between them is a
 	// DECIMAL declared with someone else's scale.
@@ -449,15 +449,15 @@ func aggInputColumnIntWidth(node *logical.Node, col string) (intWidth, bool) {
 	return intWidthUnknown, false
 }
 
-// aggOutputFromInputDecl derives a computed argument's aggregate output from
+// AggOutputFromInputDecl derives a computed argument's aggregate output from
 // AggSpec.InputType/InputPrecision/InputScale, the same declaration used by
 // worker.buildAggInputProjection. Empty-partial identity rows and non-empty
 // partials must agree, even when the input triple is a FLOAT64 fallback (#685).
 // Input-independent functions keep aggOutputType's answer. wideInt proves an
-// int8-domain operand via aggInputIsWideInteger, preserving the by-width SUM rule
+// int8-domain operand via AggInputIsWideInteger, preserving the by-width SUM rule
 // after computed integer TypeIDs have widened to INT64.
 // See docs/internals/computed-aggregate-output-declarations.md for the design.
-func aggOutputFromInputDecl(fn string, distinct bool, in parquet.TypeID, precision, scale int, wideInt bool) (
+func AggOutputFromInputDecl(fn string, distinct bool, in parquet.TypeID, precision, scale int, wideInt bool) (
 	out parquet.TypeID, outPrecision, outScale int, ok bool,
 ) {
 	name := strings.ToLower(strings.TrimSpace(fn))
@@ -474,7 +474,7 @@ func aggOutputFromInputDecl(fn string, distinct bool, in parquet.TypeID, precisi
 			return parquet.TypeDecimal, batch.MaxDecimalPrecision, batch.AvgScale(scale), true
 		default:
 			// MIN/MAX/MIN_BY/MAX_BY hand back a value the input HELD, so they
-			// keep its (p,s) — the same rule aggSpecOutputDecimal applies to a
+			// keep its (p,s) — the same rule AggSpecOutputDecimal applies to a
 			// bare column.
 			return parquet.TypeDecimal, precision, scale, true
 		}
@@ -482,7 +482,7 @@ func aggOutputFromInputDecl(fn string, distinct bool, in parquet.TypeID, precisi
 	switch name {
 	case "sum", "avg":
 		// Integer AVG is numeric; computed integer SUM uses bigint unless
-		// aggInputIsWideInteger proves an int8-domain operand from AST and column
+		// AggInputIsWideInteger proves an int8-domain operand from AST and column
 		// declarations (#784, #841). A shape the walk cannot see through keeps the
 		// int4 reading, including Q12's CASE of ones; bare columns use real width.
 		// Do not infer width from TypeID: every integer expression declares INT64
@@ -502,7 +502,7 @@ func aggOutputFromInputDecl(fn string, distinct bool, in parquet.TypeID, precisi
 			// `sum(real)` is real whether the argument is a COLUMN or an
 			// EXPRESSION — `sum(r + 1.0::real)` is real on 17.11 — and the
 			// accumulator folds at float4's width either way (#950). The bare
-			// arm of aggSpecOutputType has said so since then; this is the
+			// arm of AggSpecOutputType has said so since then; this is the
 			// computed one, reachable since a real expression declares real
 			// (#1117).
 			return parquet.TypeFloat32, 0, 0, true
@@ -513,35 +513,6 @@ func aggOutputFromInputDecl(fn string, distinct bool, in parquet.TypeID, precisi
 	default:
 		return minMaxDeclaredType(in), 0, 0, true
 	}
-}
-
-// aggSpecInputDecimal is the (p,s) of a bare DECIMAL COLUMN argument — the
-// declaration the aggregate READS, as opposed to the one aggSpecOutputDecimal
-// says it writes. Any aggregate, not only the six above: the pair describes the
-// column, not the function.
-//
-// It exists because AVG is not dispatched as AVG: decomposeAvg splits it into
-// SUM and COUNT legs, and the SUM leg declares the INPUT's scale where AVG
-// declares batch.AvgScale of it. That increment saturates at the carrier's 38
-// digits, so AVG's own declaration cannot be inverted back to the input's for
-// a scale of 34 or more — the leg has to be told (#685).
-//
-// Declines for a computed argument, where the derived-expression branch types
-// the projection instead (AggSpec.InputType/InputPrecision/InputScale).
-func aggSpecInputDecimal(node *logical.Node, agg logical.AggExpr) (logical.DecimalMeta, bool) {
-	if agg.InputExpr != nil {
-		if _, bare := agg.InputExpr.(*plansql.ColRef); !bare {
-			return logical.DecimalMeta{}, false
-		}
-	}
-	// aggInputColumnDecimal, not scanColumnDecimal: the same walk, in the same
-	// order, that aggSpecOutputType asks for the input's TYPE. Two functions
-	// answering one question about one column with two different walks is
-	// ADR-0023 item 5 one layer over, and the disagreement is a DECIMAL
-	// declared with nobody's scale — for a WINDOW SLOT (`SUM(__win_0)`), whose
-	// declaration lives in the emitted walk and in no scan at all, the scan-only
-	// walk answered (0,0) (#775).
-	return aggInputColumnDecimal(node, agg.InputCol)
 }
 
 // minMaxDeclaredType maps a MIN/MAX input column type to the output type
@@ -693,10 +664,10 @@ func scanColumnDecimal(node *logical.Node, col string) (logical.DecimalMeta, boo
 // hasAggregateAncestor checks if a node is an Aggregate, or if it's a
 // passthrough node (e.g., Filter for HAVING) whose child is an Aggregate.
 func hasAggregateAncestor(node *logical.Node) bool {
-	return findAggregateAncestor(node) != nil
+	return FindAggregateAncestor(node) != nil
 }
 
-// aggregateOutputNames returns the column names the pipeline under a
+// AggregateOutputNames returns the column names the pipeline under a
 // projection emits, in order, when that pipeline ends in an Aggregate, and
 // reports whether they could be determined at all. It mirrors buildAggregate's
 // own naming: group keys first (a non-plain GROUP BY expression under its
@@ -713,11 +684,11 @@ func hasAggregateAncestor(node *logical.Node) bool {
 // The redundancy check wants this one: a spelling that is wider than the
 // emitted name can only fail to match, and failing to match keeps the
 // projection, which is always sound.
-func aggregateOutputNames(node *logical.Node) ([]string, bool) {
+func AggregateOutputNames(node *logical.Node) ([]string, bool) {
 	return aggregateOutputNameList(node, false)
 }
 
-// aggregateEmittedOutputNames is aggregateOutputNames with the GROUP-BY half
+// aggregateEmittedOutputNames is AggregateOutputNames with the GROUP-BY half
 // stated the way the aggregate OPERATOR states it: `exec.PublishedGroupKeyNames`
 // over the same published list `buildAggregate` hands `exec.NewHashAggregate`,
 // which strips a key's relation qualifier and keeps it only where stripping
@@ -753,7 +724,7 @@ func aggregateOutputNameList(node *logical.Node, emitted bool) ([]string, bool) 
 		// rather than restated, because restating it is what this function was.
 		//
 		// It descended NodeFilter ALONE while its own guard at the #575 call
-		// site is `findAggregateAncestor`, which reads the full list. With a
+		// site is `FindAggregateAncestor`, which reads the full list. With a
 		// WINDOW between the aggregate and the SELECT list the guard said "yes,
 		// an aggregate is below" and this said "I cannot model that", so the
 		// duplicate-name slot pinning was skipped and two same-named outputs
@@ -766,14 +737,14 @@ func aggregateOutputNameList(node *logical.Node, emitted bool) ([]string, bool) 
 		}
 		return aggregateOutputNameList(node.Children[0], emitted)
 	case node.Type == logical.NodeProject:
-		// Only the synthetic finalization projections findAggregateAncestor
+		// Only the synthetic finalization projections FindAggregateAncestor
 		// walks through; a real one is the pipeline's output already.
 		if !node.PreservesAggOutputs {
 			return nil, false
 		}
 		names := make([]string, 0, len(node.Projections))
 		for i := range node.Projections {
-			names = append(names, projectionOutputName(node.Projections[i]))
+			names = append(names, ProjectionOutputName(node.Projections[i]))
 		}
 		return names, true
 	case node.Type == logical.NodeAggregate:
@@ -806,7 +777,7 @@ func aggregateOutputNameList(node *logical.Node, emitted bool) ([]string, bool) 
 			// other key takes exec's rule. Passing the all-empty list when
 			// nothing is derived is the same input a nil GroupByOutNames is.
 			over, _ := publishedGroupKeyNames(keyOuts, elided)
-			names = exec.PublishedGroupKeyNames(names, over, logicalAggOutNames(node), false)
+			names = exec.PublishedGroupKeyNames(names, over, LogicalAggOutNames(node), false)
 		}
 		for i := range node.AggExprs {
 			names = append(names, node.AggExprs[i].OutputCol)
@@ -816,13 +787,13 @@ func aggregateOutputNameList(node *logical.Node, emitted bool) ([]string, bool) 
 	return nil, false
 }
 
-// wrapsAWindow reports whether a WINDOW stands between this node and the
-// aggregate below it, walking the same list aggregateOutputNames does.
+// WrapsAWindow reports whether a WINDOW stands between this node and the
+// aggregate below it, walking the same list AggregateOutputNames does.
 //
 // A window APPENDS its output, so "the aggregate's output names" and "this
 // node's output names" are two different lists there. Only the second answers
 // whether a projection may be ELIDED.
-func wrapsAWindow(n *logical.Node) bool {
+func WrapsAWindow(n *logical.Node) bool {
 	for ; n != nil; n = n.Children[0] {
 		if n.Type == logical.NodeWindow {
 			return true
@@ -835,15 +806,15 @@ func wrapsAWindow(n *logical.Node) bool {
 	return false
 }
 
-// projectionOutputName is the column name a projection publishes, resolved the
+// ProjectionOutputName is the column name a projection publishes, resolved the
 // same way buildProject's own ProjectColumn naming resolves it.
-func projectionOutputName(proj logical.Projection) string {
+func ProjectionOutputName(proj logical.Projection) string {
 	name := proj.Alias
 	if name == "" {
 		name = proj.Column
 	}
 	if name == "" {
-		name = cleanExpr(proj.Expr)
+		name = CleanExpr(proj.Expr)
 	}
 	return plansql.NormalizeIdentRef(strings.TrimSpace(name))
 }
@@ -858,34 +829,34 @@ func namesMatchProjections(names []string, projections []logical.Projection) boo
 	}
 	for i := range names {
 		if !strings.EqualFold(plansql.NormalizeIdentRef(strings.TrimSpace(names[i])),
-			projectionOutputName(projections[i])) {
+			ProjectionOutputName(projections[i])) {
 			return false
 		}
 	}
 	return true
 }
 
-// findAggregateAncestor returns the Aggregate node if the given node is one,
+// FindAggregateAncestor returns the Aggregate node if the given node is one,
 // or traverses through the nodes that leave the aggregate's own output columns
 // visible to find it: a HAVING Filter, a Sort, a LIMIT, a WINDOW
-// (aggScopePreservingWrapper), and a synthetic finalization Project.
+// (AggScopePreservingWrapper), and a synthetic finalization Project.
 //
 // It is the single-process half of the walk `aggregateUnderOutput` performs
 // for the gather, and the two read one list so they cannot disagree about a
 // node kind — which is exactly how a window between the SELECT list and the
 // aggregate made a computed group key NULL on BOTH paths (#737).
-func findAggregateAncestor(node *logical.Node) *logical.Node {
+func FindAggregateAncestor(node *logical.Node) *logical.Node {
 	if node.Type == logical.NodeAggregate {
 		return node
 	}
-	if aggScopePreservingWrapper(node.Type) && len(node.Children) == 1 {
-		return findAggregateAncestor(node.Children[0])
+	if AggScopePreservingWrapper(node.Type) && len(node.Children) == 1 {
+		return FindAggregateAncestor(node.Children[0])
 	}
 	// Synthetic finalization projections (two-level AVG) pass every
 	// aggregate output through by name, so SELECT-list resolution treats
 	// the aggregate below as directly visible.
 	if node.Type == logical.NodeProject && node.PreservesAggOutputs && len(node.Children) > 0 {
-		return findAggregateAncestor(node.Children[0])
+		return FindAggregateAncestor(node.Children[0])
 	}
 	return nil
 }

@@ -5,8 +5,8 @@ package coordinator
 import (
 	"fmt"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -123,7 +123,7 @@ type BuildStats struct {
 // producing stage's ID by looking up each dependency's output in the
 // stageOutputs map. Returns an error if any dep has no recorded output —
 // that indicates the topological walk missed a stage.
-func collectInputs(stage physical.Stage, outputs map[string]StageOutput) (map[string]StageOutput, error) {
+func collectInputs(stage dagplan.Stage, outputs map[string]StageOutput) (map[string]StageOutput, error) {
 	inputs := make(map[string]StageOutput, len(stage.Dependencies))
 	for _, depID := range stage.Dependencies {
 		out, ok := outputs[depID]
@@ -207,7 +207,7 @@ func wireKeyTypes(types []parquet.TypeID) []int {
 }
 
 // wireLateralDefaults is the stage's empty-input constants on the wire.
-func wireLateralDefaults(cols []physical.LateralEmptyDefaultSpec) []distributed.LateralEmptyDefault {
+func wireLateralDefaults(cols []dagplan.LateralEmptyDefaultSpec) []distributed.LateralEmptyDefault {
 	if len(cols) == 0 {
 		return nil
 	}
@@ -218,10 +218,10 @@ func wireLateralDefaults(cols []physical.LateralEmptyDefaultSpec) []distributed.
 	return out
 }
 
-// wireHiddenJoinCols is physical.HiddenJoinCol on the wire: the ordinal a
+// wireHiddenJoinCols is dagplan.HiddenJoinCol on the wire: the ordinal a
 // join's own materialized column sits at in its side, the name expected
 // there, and which side that is.
-func wireHiddenJoinCols(cols []physical.HiddenJoinCol) []distributed.HiddenJoinColumn {
+func wireHiddenJoinCols(cols []dagplan.HiddenJoinCol) []distributed.HiddenJoinColumn {
 	if len(cols) == 0 {
 		return nil
 	}

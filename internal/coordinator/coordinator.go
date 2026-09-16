@@ -27,6 +27,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/telemetry"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
@@ -230,7 +231,7 @@ func (c *Coordinator) gatherResultBudget() int64 {
 
 // queryMeta stores per-query metadata needed for later result retrieval.
 type queryMeta struct {
-	stages             []physical.Stage
+	stages             []dagplan.Stage
 	planStr            string
 	sqlText            string // original SQL for pipeline tasks
 	identityName       string // caller identity for task propagation
@@ -244,7 +245,7 @@ type queryMeta struct {
 	policyEnforced bool
 	mergeInfo      *logical.MergeInfo // non-nil for probe-split queries needing merge
 	// declared is the PLAN-TIME output schema, for the zero-row result this
-	// door has no batch to read one from. `physical.GatherOutputSchema`
+	// door has no batch to read one from. `dagplan.GatherOutputSchema`
 	// describes a GATHER stage, and a one-stage plan has none, so without
 	// this every zero-row SELECT came back from the async door with no
 	// columns at all while the other three doors described it (#1008 round 2).
@@ -971,7 +972,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	// OWN physical.Planner below, and physical.NewPlannerForContext is what
 	// makes them share this one snapshot instead of each reading the
 	// catalog independently.
-	ctx = physical.WithManifestSnapshot(ctx, physical.NewManifestSnapshot())
+	ctx = dagplan.WithManifestSnapshot(ctx, physical.NewManifestSnapshot())
 
 	// Start OTel span for the query if tracing is enabled
 	if c.otel != nil {
@@ -1103,11 +1104,11 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	}
 
 	// The distributed planner: the local planner with the stage emitter's own
-	// state beside it (physical.StagePlanner). Fields the DAG owns —
+	// state beside it (dagplan.StagePlanner). Fields the DAG owns —
 	// WorkerCount, the broadcast threshold, dynamic filters — are set on it;
 	// the ones the local pipeline reads are promoted from the planner it
 	// embeds.
-	planner := physical.NewStagePlanner(physical.NewPlannerForContext(ctx, c.catalog))
+	planner := dagplan.NewStagePlanner(physical.NewPlannerForContext(ctx, c.catalog))
 	planner.WorkerCount = c.workers.Count()
 	planner.BroadcastBytesThreshold = broadcastThresholdFromCluster(c.workers.MinWorkerPoolBudget())
 	if c.config.BroadcastBytesOverride != 0 {
@@ -1125,7 +1126,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// coordinator-local single-process pipeline, which owns
 		// correlated-subquery semantics; any failure THERE is the query's
 		// outcome (no DAG plan exists to fall back to).
-		if errors.Is(err, physical.ErrCorrelatedSubqueryDistributed) {
+		if errors.Is(err, dagplan.ErrCorrelatedSubqueryDistributed) {
 			return c.runCorrelatedLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		// Same shape one construct over: a DISTINCT the DAG has no stage
@@ -1139,10 +1140,10 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// the invariant refuses rather than dispatch — and the single-process
 		// pipeline, whose one join holds the whole build by construction,
 		// answers it (#539).
-		if errors.Is(err, physical.ErrNullAwareAntiBuildNotReplicated) {
+		if errors.Is(err, dagplan.ErrNullAwareAntiBuildNotReplicated) {
 			return c.runNullAwareAntiLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
-		if errors.Is(err, physical.ErrDistinctDistributed) {
+		if errors.Is(err, dagplan.ErrDistinctDistributed) {
 			return c.runDistinctLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		// And once more for GROUPING SETS / ROLLUP / CUBE, which the DAG has no
@@ -1150,7 +1151,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// their union as a plain GROUP BY and dropped every super-aggregate
 		// row, silently (#778). The single-process HashAggregate is the only
 		// operator in the process that knows what a grouping set is.
-		if errors.Is(err, physical.ErrGroupingSetsDistributed) {
+		if errors.Is(err, dagplan.ErrGroupingSetsDistributed) {
 			return c.runGroupingSetsLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		// And a GROUP BY key that needs its resolution name and its published
@@ -1158,7 +1159,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// cannot be. The single-process pipeline carries them separately —
 		// a hidden slot and exec.HashAggregate.GroupByOutNames (ADR-0026 §2) —
 		// so the query has an answer here (#736).
-		if errors.Is(err, physical.ErrGroupKeyDistributed) {
+		if errors.Is(err, dagplan.ErrGroupKeyDistributed) {
 			return c.runGroupKeyLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		// And once more for an IN-subquery the planner could not materialize
@@ -1166,21 +1167,21 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// spelling. The single-process pipeline resolves the set once through
 		// expr.InSubquery and caches it, so the query has an answer here even
 		// though the DAG has no stage for the predicate (#524).
-		if errors.Is(err, physical.ErrInSubqueryDistributed) {
+		if errors.Is(err, dagplan.ErrInSubqueryDistributed) {
 			return c.runInSubqueryLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		// And a subquery in the SELECT list, whose only distributed lowering
 		// was to ship the SQL text to a worker with no SubqueryRunner and
 		// fail every task (#659). The single-process pipeline compiles it
 		// against a real runner.
-		if errors.Is(err, physical.ErrScalarSubqueryProjectionDistributed) {
+		if errors.Is(err, dagplan.ErrScalarSubqueryProjectionDistributed) {
 			return c.runScalarProjectionLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		// And a SELECT list no stage computed. The DAG would hand the client
 		// the producer's raw columns under their source names; the
 		// single-process pipeline runs the Project as a real operator
 		// (#656 F2).
-		if errors.Is(err, physical.ErrUnreachableGatherOutput) {
+		if errors.Is(err, dagplan.ErrUnreachableGatherOutput) {
 			return c.runUnreachableOutputLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		// And a star over a derived block whose projection no stage could be
@@ -1191,7 +1192,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// spelling failed loudly under ADR-0010 and the other silently dropped
 		// a column PostgreSQL sends; the single-process pipeline runs the
 		// block's Project as a real operator.
-		if errors.Is(err, physical.ErrLateralProjectionDistributed) {
+		if errors.Is(err, dagplan.ErrLateralProjectionDistributed) {
 			return c.runLateralProjectionLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		// And a SELECT that reads no table at all. Its `dual` stage has no
@@ -1199,7 +1200,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// task inputs for it and every table-less SELECT FAILED on the DAG
 		// (#806). There is nothing to distribute — the answer is one row —
 		// and the dual stage's own comment already says it runs here.
-		if errors.Is(err, physical.ErrTableLessSelectDistributed) {
+		if errors.Is(err, dagplan.ErrTableLessSelectDistributed) {
 			return c.runTableLessLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		// And a stage the dispatcher could not build task inputs for. #806
@@ -1208,7 +1209,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// stage naming neither a dependency nor a table. The query answers
 		// here, where the CTE is a real operator, instead of failing three
 		// task attempts later with an internal message and no SQLSTATE.
-		if errors.Is(err, physical.ErrUnbuildableStageDistributed) {
+		if errors.Is(err, dagplan.ErrUnbuildableStageDistributed) {
 			return c.runUnbuildableStageLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		// An authorization refusal is not a planning narrative: it reaches
@@ -1233,7 +1234,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	// is still possible (#763).
 	//
 	// `assertCarrierSchemaResolves` and its siblings run from
-	// `physical.ValidateNativeDAGShape` inside executeStageDAG, and the
+	// `dagplan.ValidateNativeDAGShape` inside executeStageDAG, and the
 	// routing block above reads the PLANNING error — so a refusal from them
 	// reached the client as a hard error even though it names exactly the
 	// class the local engine answers. Two spellings of one query disagreed
@@ -1247,8 +1248,8 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	// and surfaces from executeStageDAG, which still runs the same check.
 	// The duplicate run costs microseconds on a plan of tens of stages,
 	// which is the same accounting that put these checks on every plan.
-	if verr := physical.ValidateNativeDAGShape(physStages); verr != nil &&
-		errors.Is(verr, physical.ErrUnreachableGatherOutput) {
+	if verr := dagplan.ValidateNativeDAGShape(physStages); verr != nil &&
+		errors.Is(verr, dagplan.ErrUnreachableGatherOutput) {
 		return c.runUnreachableOutputLocal(ctx, queryID, logicalPlan, planStr, start, verr)
 	}
 
@@ -1342,8 +1343,8 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		Schema: declared,
 		// A plan property, unlike Schema's fallback above: applies whether
 		// or not this result has rows (FIX 2, #457/#458 fold-in).
-		WireUnconstrainedDecimal: physical.GatherOutputWireUnconstrainedDecimal(physStages),
-		StringLength:             physical.GatherOutputStringLength(physStages),
+		WireUnconstrainedDecimal: dagplan.GatherOutputWireUnconstrainedDecimal(physStages),
+		StringLength:             dagplan.GatherOutputStringLength(physStages),
 	}
 	if gr.spillPath != "" {
 		// Over-budget result: the in-memory prefix plus raw frames on
@@ -1378,7 +1379,7 @@ func (c *Coordinator) enrichTaskWithQueryContext(qm *queryMeta, t *distributed.T
 	t.PolicyDecisionJSON = qm.policyDecisionJSON
 }
 
-func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, depResults map[string][]string) []distributed.Task {
+func (c *Coordinator) createTasksForStage(queryID string, stage dagplan.Stage, depResults map[string][]string) []distributed.Task {
 	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
 
 	var tasks []distributed.Task
@@ -1407,7 +1408,7 @@ func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, 
 // createPipelineTasks creates tasks that run the entire query as a pipeline.
 // In probe-split mode, creates N tasks each with a subset of the probe table's
 // files. Otherwise creates a single task for the whole query.
-func (c *Coordinator) createPipelineTasks(queryID string, stage physical.Stage, resultPrefix string, depResults map[string][]string) []distributed.Task {
+func (c *Coordinator) createPipelineTasks(queryID string, stage dagplan.Stage, resultPrefix string, depResults map[string][]string) []distributed.Task {
 	c.mu.Lock()
 	qm := c.queryMetas[queryID]
 	c.mu.Unlock()
@@ -1653,7 +1654,7 @@ const natsKVResultThreshold = 4 * 1024 * 1024 // 4 MB — within NATS 8 MB max p
 
 // readFinalResults reads the result files from the final stage of a query.
 // When fetchAll is true, all results are materialized (needed for probe-split merge).
-func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stages []physical.Stage, fetchAll bool) ([]*batch.RecordBatch, []string, int64, error) {
+func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stages []dagplan.Stage, fetchAll bool) ([]*batch.RecordBatch, []string, int64, error) {
 	if len(stages) == 0 {
 		return nil, nil, 0, nil
 	}
@@ -3540,7 +3541,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	owner := auth.SnapshotIdentity(ctx)
 	// See ExecuteSQL: pins each table's manifest to one catalog read for
 	// this statement (#502) across every physical.Planner built below.
-	ctx = physical.WithManifestSnapshot(ctx, physical.NewManifestSnapshot())
+	ctx = dagplan.WithManifestSnapshot(ctx, physical.NewManifestSnapshot())
 
 	// Parse
 	parsed, err := plansql.Parse(sql)
@@ -3617,11 +3618,11 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 
 	// Generate distributed stages and route to pipeline execution
 	// The distributed planner: the local planner with the stage emitter's own
-	// state beside it (physical.StagePlanner). Fields the DAG owns —
+	// state beside it (dagplan.StagePlanner). Fields the DAG owns —
 	// WorkerCount, the broadcast threshold, dynamic filters — are set on it;
 	// the ones the local pipeline reads are promoted from the planner it
 	// embeds.
-	planner := physical.NewStagePlanner(physical.NewPlannerForContext(ctx, c.catalog))
+	planner := dagplan.NewStagePlanner(physical.NewPlannerForContext(ctx, c.catalog))
 	planner.WorkerCount = c.workers.Count()
 	planner.BroadcastBytesThreshold = broadcastThresholdFromCluster(c.workers.MinWorkerPoolBudget())
 	if c.config.BroadcastBytesOverride != 0 {
@@ -3649,7 +3650,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 
 	// Route to probe-split or single-worker pipeline (same as ExecuteSQL)
 	var probeSplitMergeInfo *logical.MergeInfo
-	probeAlias, probeFiles, canProbeSplit := physical.CanProbeSplit(physStages, c.workers.Count())
+	probeAlias, probeFiles, canProbeSplit := dagplan.CanProbeSplit(physStages, c.workers.Count())
 	mergeInfo := logical.ExtractMergeInfo(logicalPlan)
 
 	if canProbeSplit && mergeInfo != nil {
@@ -3658,7 +3659,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		if buildCacheErr != nil {
 			return "", "", fmt.Errorf("build cache pre-scan failed for query %s: %w", queryID, buildCacheErr)
 		}
-		physStages = []physical.Stage{{
+		physStages = []dagplan.Stage{{
 			ID:                 "pipeline-0",
 			Type:               "pipeline",
 			Tasks:              c.workers.Count(),
@@ -3667,7 +3668,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 			BuildCachePreScans: buildCache,
 		}}
 	} else {
-		physStages = []physical.Stage{{
+		physStages = []dagplan.Stage{{
 			ID:    "pipeline-0",
 			Type:  "pipeline",
 			Tasks: 1,
@@ -4012,8 +4013,8 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (res 
 		Schema: declared,
 		// A plan property, unlike Schema's fallback above: applies whether
 		// or not this result has rows (FIX 2, #457/#458 fold-in).
-		WireUnconstrainedDecimal: physical.GatherOutputWireUnconstrainedDecimal(meta.stages),
-		StringLength:             physical.GatherOutputStringLength(meta.stages),
+		WireUnconstrainedDecimal: dagplan.GatherOutputWireUnconstrainedDecimal(meta.stages),
+		StringLength:             dagplan.GatherOutputStringLength(meta.stages),
 	}, nil
 }
 
@@ -4043,11 +4044,11 @@ func columnNamesOf(schema []parquet.Column) []string {
 // the plan's declaration on the terminal gather stage. The two describe the
 // same columns; only a zero-row result needs the second, because there is no
 // batch to read the first from (#416).
-func schemaOrDeclared(gathered []parquet.Column, stages []physical.Stage) []parquet.Column {
+func schemaOrDeclared(gathered []parquet.Column, stages []dagplan.Stage) []parquet.Column {
 	if len(gathered) > 0 {
 		return gathered
 	}
-	return physical.GatherOutputSchema(stages)
+	return dagplan.GatherOutputSchema(stages)
 }
 
 // columnsOrDeclared is schemaOrDeclared for the column NAMES: the gather's own

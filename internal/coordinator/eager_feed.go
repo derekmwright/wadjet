@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // Eager consumer dispatch, Phase C1 slice 3 (docs/design/
@@ -303,7 +303,7 @@ func (f *eagerFeed) eagerInputForTask(w, numTasks int) distributed.EagerInput {
 // subscription existed), and stalled one full republisher tick per wave
 // — the §14.1 wave-quantization signature (3.0s beats in the A3 e2e;
 // Q18 join-8 137s vs ~25s at SF100).
-func refreshEagerReplay(t *distributed.Task, stage physical.Stage, inputs map[string]StageOutput) {
+func refreshEagerReplay(t *distributed.Task, stage dagplan.Stage, inputs map[string]StageOutput) {
 	if len(t.EagerInputs) == 0 {
 		return
 	}
@@ -400,7 +400,7 @@ func (c *Coordinator) startEagerRepublisher(f *eagerFeed) {
 
 // joinPrimaryDeps returns a join stage's (probe, build) dependency stage
 // IDs, mirroring buildTaskInputsForStage / planSkewSplitTasks resolution.
-func joinPrimaryDeps(s physical.Stage) (probeDep, buildDep string) {
+func joinPrimaryDeps(s dagplan.Stage) (probeDep, buildDep string) {
 	probeDep = s.LeftDepStage
 	buildDep = s.RightDepStage
 	if probeDep == "" && len(s.Dependencies) > 0 {
@@ -416,9 +416,9 @@ func joinPrimaryDeps(s physical.Stage) (probeDep, buildDep string) {
 // buildTaskInputsForStage files dependency depID for this stage.
 // Task.EagerInputs must key identically, or the worker's fragment source /
 // join-build routing won't find the feed spec.
-func eagerAliasForDep(stage physical.Stage, depID string) string {
+func eagerAliasForDep(stage dagplan.Stage, depID string) string {
 	switch stage.Type {
-	case physical.StageHashJoin, physical.StageBroadcastJoin, physical.StageSortMergeJoin:
+	case dagplan.StageHashJoin, dagplan.StageBroadcastJoin, dagplan.StageSortMergeJoin:
 		_, buildDep := joinPrimaryDeps(stage)
 		buildAlias := stage.BuildTableAlias
 		if buildAlias == "" {
@@ -450,11 +450,11 @@ func eagerAliasForDep(stage physical.Stage, depID string) string {
 // coordinator). Dispatch-time regroupings (skew split, rr-agg split,
 // probe split, gather fusion) are gated at the wiring site — they remap
 // task→partition and would break the ordinal contract.
-func eagerCapableComputeProducer(d physical.Stage) bool {
-	if d.Type != physical.StageHashJoin && d.Type != "final_aggregate" {
+func eagerCapableComputeProducer(d dagplan.Stage) bool {
+	if d.Type != dagplan.StageHashJoin && d.Type != "final_aggregate" {
 		return false
 	}
-	return d.Distribution.Kind == physical.DistHashPartitioned &&
+	return d.Distribution.Kind == dagplan.DistHashPartitioned &&
 		d.Distribution.Count > 0 &&
 		d.Exchange == nil &&
 		len(d.EmitDynamicFilters) == 0 && len(d.ConsumeDynamicFilters) == 0 &&
@@ -464,8 +464,8 @@ func eagerCapableComputeProducer(d physical.Stage) bool {
 // eagerFeedableDep reports whether dependency stage d can be consumed
 // through an eager feed: a standalone exchange-repartition (C1/C2) or an
 // A3 compute producer.
-func eagerFeedableDep(d physical.Stage) bool {
-	if d.Type == physical.StageExchangeRepartition {
+func eagerFeedableDep(d dagplan.Stage) bool {
+	if d.Type == dagplan.StageExchangeRepartition {
 		return d.Exchange != nil && d.Exchange.Count > 0
 	}
 	return eagerCapableComputeProducer(d)
@@ -481,8 +481,8 @@ func eagerFeedableDep(d physical.Stage) bool {
 // aggregates use ChainedAgg*, not GroupByCols, and remain eligible.
 // See docs/design/stage-chain-fusion.md §13.
 // See docs/internals/eager-join-consumer-boundary.md for the design.
-func eagerEligibleJoinConsumer(s physical.Stage, stageByID map[string]physical.Stage, fuseStageID string) bool {
-	if s.Type != physical.StageHashJoin {
+func eagerEligibleJoinConsumer(s dagplan.Stage, stageByID map[string]dagplan.Stage, fuseStageID string) bool {
+	if s.Type != dagplan.StageHashJoin {
 		return false
 	}
 	if len(s.GroupByCols) > 0 || s.ID == fuseStageID || len(s.ScalarDependencies) > 0 {
@@ -517,12 +517,12 @@ func eagerEligibleJoinConsumer(s physical.Stage, stageByID map[string]physical.S
 // factor (file counts are unknowable before completion), and missing
 // accounting on either side returns false — nil vectors would disable the
 // full-data split too, so no win is lost by clearing eagerly.
-func (c *Coordinator) eagerJoinWouldSplit(stage physical.Stage, probeFeed, buildFeed *eagerFeed, numTasks, workerCount int) bool {
+func (c *Coordinator) eagerJoinWouldSplit(stage dagplan.Stage, probeFeed, buildFeed *eagerFeed, numTasks, workerCount int) bool {
 	if !c.config.SkewSplit {
 		return false
 	}
-	if stage.Type != physical.StageHashJoin ||
-		stage.Distribution.Kind != physical.DistHashPartitioned ||
+	if stage.Type != dagplan.StageHashJoin ||
+		stage.Distribution.Kind != dagplan.DistHashPartitioned ||
 		numTasks <= 0 || workerCount <= 1 {
 		return false
 	}
@@ -651,7 +651,7 @@ func (g *eagerPublishGovernor) noteTerminal(taskID string) {
 // MaxConcurrent−1 producer lanes, with at most one manifest-blocked task.
 // Join clearance additionally needs the early skew decision.
 // See docs/internals/eager-single-input-consumer-boundary.md for the design.
-func eagerEligibleConsumer(s physical.Stage, stageByID map[string]physical.Stage, fuseStageID string, workerCount int) bool {
+func eagerEligibleConsumer(s dagplan.Stage, stageByID map[string]dagplan.Stage, fuseStageID string, workerCount int) bool {
 	if len(s.Dependencies) != 1 || len(s.ScalarDependencies) > 0 {
 		return false
 	}
@@ -681,7 +681,7 @@ func eagerEligibleConsumer(s physical.Stage, stageByID map[string]physical.Stage
 	// Consumer task count (mirrors dispatchComputeStage's derivation for
 	// the eligible types): Singleton → 1, HashPartitioned → Count.
 	numTasks := 1
-	if s.Distribution.Kind == physical.DistHashPartitioned {
+	if s.Distribution.Kind == dagplan.DistHashPartitioned {
 		numTasks = s.Distribution.Count
 		if numTasks <= 0 {
 			numTasks = workerCount

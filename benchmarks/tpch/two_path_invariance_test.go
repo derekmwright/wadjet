@@ -143,7 +143,7 @@ type twoPathQuery struct {
 	expectRows bool
 	// localRoute: arm B must answer this query via the #359 route — the
 	// stage DAG refuses a per-row correlated subquery
-	// (physical.ErrCorrelatedSubqueryDistributed) and the coordinator runs
+	// (dagplan.ErrCorrelatedSubqueryDistributed) and the coordinator runs
 	// it on its local single-process pipeline. The runner asserts the route
 	// engaged for these entries AND for no others: an over-broad refusal
 	// silently downgrades distributed queries to single-process, and
@@ -151,7 +151,7 @@ type twoPathQuery struct {
 	localRoute bool
 	// distinctRoute: arm B must answer this query via the #466 route — the
 	// stage DAG refuses a DISTINCT it has no stage for
-	// (physical.ErrDistinctDistributed) and the coordinator runs it on its
+	// (dagplan.ErrDistinctDistributed) and the coordinator runs it on its
 	// local single-process pipeline. Asserted for these entries AND for no
 	// others, for the same reason as localRoute: an over-broad refusal
 	// downgrades distributed queries to single-process while every answer
@@ -2883,7 +2883,7 @@ func twoPathCorpus() []twoPathQuery {
 		// These (and the Correlated* entries appended at the corpus end) run
 		// arm B through the #359 route: the stage DAG refuses a
 		// per-row correlated subquery (PlanDistributed returns
-		// physical.ErrCorrelatedSubqueryDistributed — there is no distributed
+		// dagplan.ErrCorrelatedSubqueryDistributed — there is no distributed
 		// lowering for a correlation that survives decorrelation) and the
 		// coordinator answers on its local single-process pipeline. The
 		// localRoute flag makes the runner assert that route engaged. Before
@@ -3667,7 +3667,7 @@ func twoPathCorpus() []twoPathQuery {
 		// the coordinator's compensating LIMIT/OFFSET pass reads
 		// ExtractMergeInfo, which sees the ROOT node only. Silent: the
 		// derived table yielded every row and the outer aggregate counted
-		// them all. physical.StageLimit is the third applier those two
+		// them all. dagplan.StageLimit is the third applier those two
 		// leave uncovered.
 		twoPathQuery{name: "DerivedLimitUnderCount", cmp: cmpUnordered, expectRows: true,
 			sql:      `SELECT COUNT(*) AS c FROM (SELECT n_nationkey FROM nation LIMIT 3) u`,

@@ -27,7 +27,7 @@ func joinNode(jt string, left, right *logical.Node, cond string) *logical.Node {
 }
 
 func TestSubtreeNamingScanOwnership(t *testing.T) {
-	s := subtreeNamingOf(scanNode("nation", "n1", "n_nationkey", "n_name"))
+	s := SubtreeNamingOf(scanNode("nation", "n1", "n_nationkey", "n_name"))
 
 	tests := []struct {
 		key  string
@@ -43,18 +43,18 @@ func TestSubtreeNamingScanOwnership(t *testing.T) {
 		{"extract(year from o_orderdate)", false}, // expression key
 	}
 	for _, tt := range tests {
-		if got := s.ownsKey(tt.key); got != tt.want {
+		if got := s.OwnsKey(tt.key); got != tt.want {
 			t.Errorf("ownsKey(%q) = %v, want %v", tt.key, got, tt.want)
 		}
 	}
 }
 
 func TestSubtreeNamingTableNameFallback(t *testing.T) {
-	s := subtreeNamingOf(scanNode("region", "", "r_regionkey", "r_name"))
-	if !s.ownsKey("region.r_regionkey") {
+	s := SubtreeNamingOf(scanNode("region", "", "r_regionkey", "r_name"))
+	if !s.OwnsKey("region.r_regionkey") {
 		t.Error("unaliased scan should own table-qualified key")
 	}
-	if !s.ownsKey("r_name") {
+	if !s.OwnsKey("r_name") {
 		t.Error("unaliased scan should own bare key")
 	}
 }
@@ -65,14 +65,14 @@ func TestSubtreeNamingSemiAntiBuildInvisible(t *testing.T) {
 		scanNode("orders", "", "o_orderkey", "o_custkey"),
 		scanNode("lineitem", "", "l_orderkey", "l_suppkey"),
 		"o_orderkey = l_orderkey")
-	s := subtreeNamingOf(semi)
-	if !s.ownsKey("o_custkey") {
+	s := SubtreeNamingOf(semi)
+	if !s.OwnsKey("o_custkey") {
 		t.Error("semi join must own probe columns")
 	}
-	if s.ownsKey("l_suppkey") {
+	if s.OwnsKey("l_suppkey") {
 		t.Error("semi join must NOT own build-only columns")
 	}
-	if s.ownsKey("lineitem.l_orderkey") {
+	if s.OwnsKey("lineitem.l_orderkey") {
 		t.Error("semi join must NOT own qualified build columns")
 	}
 }
@@ -82,13 +82,13 @@ func TestSubtreeNamingInnerJoinBothSidesVisible(t *testing.T) {
 		scanNode("nation", "n2", "n_nationkey", "n_name"),
 		scanNode("region", "", "r_regionkey", "r_name"),
 		"n_regionkey = r_regionkey")
-	s := subtreeNamingOf(inner)
+	s := SubtreeNamingOf(inner)
 	for _, key := range []string{"n2.n_name", "r_name", "n_nationkey", "r_regionkey"} {
-		if !s.ownsKey(key) {
+		if !s.OwnsKey(key) {
 			t.Errorf("inner join subtree should own %q", key)
 		}
 	}
-	if s.ownsKey("n1.n_name") {
+	if s.OwnsKey("n1.n_name") {
 		t.Error("must not own the other self-join copy's qualified key")
 	}
 }
@@ -105,14 +105,14 @@ func TestSubtreeNamingProjectAndAggregateOutputs(t *testing.T) {
 		Projections: []logical.Projection{{Column: "l_suppkey", Alias: "supplier_no"}},
 		Children:    []*logical.Node{agg},
 	}
-	s := subtreeNamingOf(proj)
-	if !s.ownsKey("total_revenue") {
+	s := SubtreeNamingOf(proj)
+	if !s.OwnsKey("total_revenue") {
 		t.Error("aggregate output name should be owned")
 	}
-	if !s.ownsKey("supplier_no") {
+	if !s.OwnsKey("supplier_no") {
 		t.Error("projection alias should be owned")
 	}
-	if !s.ownsKey("l_suppkey") {
+	if !s.OwnsKey("l_suppkey") {
 		t.Error("underlying scan column should remain owned")
 	}
 }
@@ -120,8 +120,8 @@ func TestSubtreeNamingProjectAndAggregateOutputs(t *testing.T) {
 func TestSubtreeNamingBuildColOrigins(t *testing.T) {
 	// Single-alias build: nil origins (BuildTableAlias suffices; keeps
 	// left-deep plans byte-identical).
-	single := subtreeNamingOf(scanNode("nation", "n2", "n_nationkey", "n_name"))
-	if single.buildColOrigins() != nil {
+	single := SubtreeNamingOf(scanNode("nation", "n2", "n_nationkey", "n_name"))
+	if single.BuildColOrigins() != nil {
 		t.Fatal("single-alias subtree must return nil origins")
 	}
 
@@ -133,7 +133,7 @@ func TestSubtreeNamingBuildColOrigins(t *testing.T) {
 			scanNode("region", "", "r_regionkey", "r_name"),
 			"n_regionkey = r_regionkey"),
 		"s_nationkey = n_nationkey")
-	origins := subtreeNamingOf(bushy).buildColOrigins()
+	origins := SubtreeNamingOf(bushy).BuildColOrigins()
 	if origins == nil {
 		t.Fatal("multi-alias subtree must return origins")
 	}
@@ -155,7 +155,7 @@ func TestSubtreeNamingOriginsProbePriority(t *testing.T) {
 		scanNode("nation", "n1", "n_nationkey", "n_name"),
 		scanNode("nation", "n2", "n_nationkey", "n_name"),
 		"n1.n_nationkey = n2.n_nationkey")
-	s := subtreeNamingOf(selfJoin)
+	s := SubtreeNamingOf(selfJoin)
 	if got := s.origins["n_name"]; got != "n1" {
 		t.Errorf("probe-most scan should own bare name: got %q, want n1", got)
 	}
@@ -244,11 +244,11 @@ func TestAssignJoinKeySides(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			probe := subtreeNamingOf(probeChain)
-			build := subtreeNamingOf(tt.build)
+			probe := SubtreeNamingOf(probeChain)
+			build := SubtreeNamingOf(tt.build)
 			left := append([]string(nil), tt.leftKeys...)
 			right := append([]string(nil), tt.rightKeys...)
-			assignJoinKeySides(left, right, probe, build)
+			AssignJoinKeySides(left, right, probe, build)
 			for i := range left {
 				if left[i] != tt.wantLeft[i] || right[i] != tt.wantRight[i] {
 					t.Errorf("pair %d = (%q, %q), want (%q, %q)",

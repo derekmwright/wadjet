@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 func TestPickLeastLoadedWorker(t *testing.T) {
@@ -173,37 +173,37 @@ func TestTaskRetrier_TotalBytes(t *testing.T) {
 }
 
 func TestEstimateComputeTaskBytes(t *testing.T) {
-	join := physical.Stage{
-		Type:         physical.StageBroadcastJoin,
+	join := dagplan.Stage{
+		Type:         dagplan.StageBroadcastJoin,
 		Dependencies: []string{"probe-dep", "build-dep"},
 		LeftDepStage: "probe-dep",
 	}
 	tests := []struct {
 		name       string
-		stage      physical.Stage
+		stage      dagplan.Stage
 		inputs     map[string]StageOutput
 		numTasks   int
 		probeSplit bool
 		want       int64
 	}{
-		{"partitioned splits", physical.Stage{}, map[string]StageOutput{
+		{"partitioned splits", dagplan.Stage{}, map[string]StageOutput{
 			"d": {Kind: OutputPartitioned, Bytes: 900},
 		}, 3, false, 300},
-		{"replicated charges full", physical.Stage{}, map[string]StageOutput{
+		{"replicated charges full", dagplan.Stage{}, map[string]StageOutput{
 			"d": {Kind: OutputReplicated, Bytes: 900},
 		}, 3, false, 900},
-		{"singlepart charges full", physical.Stage{}, map[string]StageOutput{
+		{"singlepart charges full", dagplan.Stage{}, map[string]StageOutput{
 			"d": {Kind: OutputSinglePart, Bytes: 900},
 		}, 3, false, 900},
 		{"probe-split slices the probe", join, map[string]StageOutput{
 			"probe-dep": {Kind: OutputSinglePart, Bytes: 600},
 			"build-dep": {Kind: OutputReplicated, Bytes: 90},
 		}, 3, true, 290}, // 600/3 + 90
-		{"unknown sizes contribute nothing", physical.Stage{}, map[string]StageOutput{
+		{"unknown sizes contribute nothing", dagplan.Stage{}, map[string]StageOutput{
 			"d1": {Kind: OutputPartitioned, Bytes: 0},
 			"d2": {Kind: OutputReplicated, Bytes: 100},
 		}, 2, false, 100},
-		{"zero tasks clamps to 1", physical.Stage{}, map[string]StageOutput{
+		{"zero tasks clamps to 1", dagplan.Stage{}, map[string]StageOutput{
 			"d": {Kind: OutputPartitioned, Bytes: 500},
 		}, 0, false, 500},
 	}

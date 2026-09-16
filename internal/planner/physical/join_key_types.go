@@ -12,14 +12,14 @@ import (
 )
 
 // Equi-join keys must encode one common comparison type (#615, #650, #663;
-// ADR-0023). Use operator resolution, not setOpWiden/select_common_type:
+// ADR-0023). Use operator resolution, not SetOpWiden/select_common_type:
 // int4/int8 → int8; integer/numeric → numeric; any unequal numeric pair
 // involving float4/float8 → float8. float4 is not an intermediate rung.
 // Numeric/numeric stays exact across scales: batch.AppendDecimalKey normalizes
 // scale, including integer scale 0 (#474); no (p,s) or column-range overflow.
 // See docs/internals/equi-join-key-common-types.md for the design.
 
-// joinKeyCommonType is the ladder above for one pair of DECLARED types.
+// JoinKeyCommonType is the ladder above for one pair of DECLARED types.
 //
 // ok=false means "leave this pair alone", which is the answer for every pair
 // that already agrees and for every pair the ladder does not describe — a
@@ -27,7 +27,7 @@ import (
 // keep exactly the encoding they had; widening them is a different question
 // with a different authority, and guessing here would move rows under a rule
 // nobody stated.
-func joinKeyCommonType(a, b parquet.TypeID) (parquet.TypeID, bool) {
+func JoinKeyCommonType(a, b parquet.TypeID) (parquet.TypeID, bool) {
 	if a == b || !joinKeyNumeric(a) || !joinKeyNumeric(b) {
 		return 0, false
 	}
@@ -57,14 +57,14 @@ func joinKeyNumeric(t parquet.TypeID) bool {
 	return false
 }
 
-// resolveJoinKeyTypes returns one entry per key PAIR: the type both sides'
+// ResolveJoinKeyTypes returns one entry per key PAIR: the type both sides'
 // key bytes must be built at, or exec.KeyTypeUnresolved where no widening
 // applies. A nil result means "no pair needs widening", which is every
 // same-type join and the whole of TPC-H — the caller then sets nothing and
 // the operator takes the path it took before, byte for byte.
 //
 // leftKeys name columns of node.Children[0] and rightKeys of
-// node.Children[1]; the caller has already run assignJoinKeySides, so the
+// node.Children[1]; the caller has already run AssignJoinKeySides, so the
 // sides are final. A key either side cannot be typed is unresolved: declining
 // leaves the pre-existing behaviour, and the pre-existing behaviour is
 // correct for every pair whose two sides agree.
@@ -73,13 +73,13 @@ func joinKeyNumeric(t parquet.TypeID) bool {
 // with no cache to ask — every test, and any site that has no Planner.
 type cteColTypes func(ref *logical.Node) (map[string]parquet.TypeID, bool)
 
-func resolveJoinKeyTypes(node *logical.Node, leftKeys, rightKeys []string, cte cteColTypes) []parquet.TypeID {
+func ResolveJoinKeyTypes(node *logical.Node, leftKeys, rightKeys []string, cte cteColTypes) []parquet.TypeID {
 	if node == nil || len(node.Children) < 2 ||
 		len(leftKeys) == 0 || len(leftKeys) != len(rightKeys) {
 		return nil
 	}
-	left := joinSideColTypes(node.Children[0], cte)
-	right := joinSideColTypes(node.Children[1], cte)
+	left := JoinSideColTypes(node.Children[0], cte)
+	right := JoinSideColTypes(node.Children[1], cte)
 	if left == nil || right == nil {
 		return nil
 	}
@@ -92,7 +92,7 @@ func resolveJoinKeyTypes(node *logical.Node, leftKeys, rightKeys []string, cte c
 		if !lok || !rok {
 			continue
 		}
-		if common, ok := joinKeyCommonType(lt, rt); ok {
+		if common, ok := JoinKeyCommonType(lt, rt); ok {
 			out[i], any = common, true
 		}
 	}
@@ -103,7 +103,7 @@ func resolveJoinKeyTypes(node *logical.Node, leftKeys, rightKeys []string, cte c
 }
 
 // joinKeyLookupName strips a qualifier and lower-cases, the same reading
-// declaredJoinSchema gives a wanted column: "a.w_i32" and "w_i32" name one
+// DeclaredJoinSchema gives a wanted column: "a.w_i32" and "w_i32" name one
 // column of one side.
 func joinKeyLookupName(key string) string {
 	k := strings.ToLower(strings.TrimSpace(key))
@@ -113,14 +113,14 @@ func joinKeyLookupName(key string) string {
 	return k
 }
 
-// joinSideColTypes merges shared declared types under both emitted names and
-// source names visible below renames (#615). Use emittedColTypes for
+// JoinSideColTypes merges shared declared types under both emitted names and
+// source names visible below renames (#615). Use EmittedColTypes for
 // aggregate/window/projection/DISTINCT, and setOpDeclaredOutputSchema with
-// setOpWiden for set operations. Computed projections bind only their alias;
+// SetOpWiden for set operations. Computed projections bind only their alias;
 // their inputs retain their own types under source names. Delete conflicting
 // names rather than choosing: exec.joinKeyEncodingMismatch remains the
 // runtime backstop. See docs/internals/join-side-declared-types.md for the design.
-func joinSideColTypes(n *logical.Node, cte cteColTypes) map[string]parquet.TypeID {
+func JoinSideColTypes(n *logical.Node, cte cteColTypes) map[string]parquet.TypeID {
 	if n == nil {
 		return nil
 	}
@@ -163,7 +163,7 @@ func joinSideColTypes(n *logical.Node, cte cteColTypes) map[string]parquet.TypeI
 // are called and what they carry.
 //
 // The Project arm is spelled out rather than delegated because
-// emittedColTypes' own Project arm asks emittedColTypes for its child, and
+// EmittedColTypes' own Project arm asks EmittedColTypes for its child, and
 // that one answers nil for a set operation — so `SELECT k FROM (A UNION ALL
 // B)` would type every projection from an empty map. Recursing through THIS
 // function instead closes that hole; everything else defers.
@@ -199,10 +199,10 @@ func joinSideEmittedTypes(n *logical.Node, cte cteColTypes) map[string]parquet.T
 	if n.Type == logical.NodeProject && len(n.Children) == 1 {
 		in := joinSideEmittedTypes(n.Children[0], cte)
 		if in == nil {
-			return emittedColTypes(n)
+			return EmittedColTypes(n)
 		}
-		decls := colDecls{types: in, dec: emittedColDecimal(n.Children[0])}
-		strictInt := strictIntArithCols(n.Children[0])
+		decls := ColDecls{Types: in, Dec: emittedColDecimal(n.Children[0])}
+		strictInt := StrictIntArithCols(n.Children[0])
 		out := make(map[string]parquet.TypeID, len(n.Projections))
 		for _, proj := range n.Projections {
 			name := declaredProjectionName(proj)
@@ -213,7 +213,7 @@ func joinSideEmittedTypes(n *logical.Node, cte cteColTypes) map[string]parquet.T
 		}
 		return out
 	}
-	return emittedColTypes(n)
+	return EmittedColTypes(n)
 }
 
 // joinSideSourceTypes is question 2: the catalog types of the scan columns
@@ -247,7 +247,7 @@ func joinSideSourceTypes(n *logical.Node) map[string]parquet.TypeID {
 		if cur.Type == logical.NodeJoin && len(cur.Children) == 2 {
 			walk(cur.Children[0])
 			// A semi/anti join exposes only its probe side, exactly as
-			// declaredJoinSchema reads it.
+			// DeclaredJoinSchema reads it.
 			if jt := strings.ToLower(cur.JoinType); jt == "semi" || jt == "anti" {
 				return
 			}
@@ -269,7 +269,7 @@ func joinSideSourceTypes(n *logical.Node) map[string]parquet.TypeID {
 // MATERIALIZED at, keyed by lower-cased column name. A name the cache does
 // not hold — a recursive reference this block has not materialized yet —
 // declines, and the key pair stays unresolved exactly as it was.
-func (p *Planner) cteKeyColTypes(ref *logical.Node) (map[string]parquet.TypeID, bool) {
+func (p *Planner) CteKeyColTypes(ref *logical.Node) (map[string]parquet.TypeID, bool) {
 	if p == nil || ref == nil {
 		return nil, false
 	}
@@ -314,9 +314,9 @@ func (p *Planner) cteDefColTypes(name string) (types map[string]parquet.TypeID, 
 		}
 	}()
 	lc := strings.ToLower(strings.TrimSpace(name))
-	for i := range p.ctes {
-		if strings.ToLower(p.ctes[i].Name) == lc {
-			return p.cteBodyColTypes(p.ctes[i])
+	for i := range p.Ctes {
+		if strings.ToLower(p.Ctes[i].Name) == lc {
+			return p.cteBodyColTypes(p.Ctes[i])
 		}
 	}
 	return nil, false
@@ -334,7 +334,7 @@ func (p *Planner) cteBodyColTypes(def plansql.CTEDef) (types map[string]parquet.
 	if plan == nil {
 		return nil, false
 	}
-	schema := declaredOutputSchema(plan, p.subqueryOutputColumn)
+	schema := DeclaredOutputSchema(plan, p.SubqueryOutputColumn)
 	if len(schema) == 0 {
 		return nil, false
 	}

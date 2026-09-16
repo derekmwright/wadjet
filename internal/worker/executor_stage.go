@@ -696,7 +696,7 @@ func preservesProbeSide(jt exec.JoinType) bool {
 // preservesBuildSide reports whether a join emits build rows the probe never
 // matched, which HashJoinProbe.FlushUnmatchedRows produces after probing.
 // Those joins must run even over an EMPTY probe side (#352). Mirrors
-// planner/physical.preservesBuildSide.
+// planner/dagplan.preservesBuildSide.
 func preservesBuildSide(jt exec.JoinType) bool {
 	return jt == exec.RightJoin || jt == exec.FullOuterJoin
 }

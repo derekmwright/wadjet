@@ -26,7 +26,7 @@ func (p *Planner) buildSetOp(ctx context.Context, node *logical.Node, op string)
 	// SELECT d FROM t` came back as a STRING column holding rendered decimals,
 	// and the same pair the other way round failed mid-execution with 22P02 on
 	// the first row of text that is not a number.
-	if err := setOpArmTypeConflict(node); err != nil {
+	if err := SetOpArmTypeConflict(node); err != nil {
 		return nil, nil, nil, err
 	}
 
@@ -70,7 +70,7 @@ func (p *Planner) buildSetOp(ctx context.Context, node *logical.Node, op string)
 // the DAG and 1.2345678901234568e+15 from this one, and a join on the union's
 // column matched nothing here because a float8 column met a DECIMAL key (#683).
 func setOpArmLiterals(arm *logical.Node) []*setOpLitDecimal {
-	proj := findOutputProjectionNode(arm)
+	proj := FindOutputProjectionNode(arm)
 	if proj == nil || len(proj.Projections) == 0 {
 		return nil
 	}
@@ -92,17 +92,17 @@ func setOpArmLiterals(arm *logical.Node) []*setOpLitDecimal {
 	return out
 }
 
-// setOpArmUnknownLits is setOpUnknownLiteralArms for the single-process path,
+// setOpArmUnknownLits is SetOpUnknownLiteralArms for the single-process path,
 // whose arms are a NESTED tree rather than the DAG's flattened list: the width
 // comes from this arm's own select list, and a nested set-operation arm has no
 // output projection of its own, so it contributes no mask (its columns are
 // already resolved by its own adapter).
 func setOpArmUnknownLits(arm *logical.Node) []bool {
-	proj := findOutputProjectionNode(arm)
+	proj := FindOutputProjectionNode(arm)
 	if proj == nil {
 		return nil
 	}
-	return setOpUnknownLiteralArms(arm, len(proj.Projections))
+	return SetOpUnknownLiteralArms(arm, len(proj.Projections))
 }
 
 // setOpApplyLiteralDecls restates a literal arm's column as the DECIMAL its
@@ -211,7 +211,7 @@ func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 
 		// Set-operation arms correspond by POSITION and use the first arm's names;
 		// re-key boxed rows before comparison/concatenation. Use Schema(), since ToRows
-		// releases batches. Unify both schemas via setOpWiden/setOpDecimalTarget before
+		// releases batches. Unify both schemas via SetOpWiden/SetOpDecimalTarget before
 		// building the dedup key or FromRows: arm order must not change scale (#532),
 		// interpret an integer as unscaled DECIMAL (#547), or change FLOAT typing (#541).
 		// Equality keys also need the common declaration, since rendered DECIMAL boxes
@@ -397,7 +397,7 @@ func exceptRows(k *setOpKeyer, left, right []map[string]any, all bool) []map[str
 	return result
 }
 
-// alignSetOpRows re-keys one set-operation arm's rows onto the column names
+// AlignSetOpRows re-keys one set-operation arm's rows onto the column names
 // of the arm that decides the result schema (the first one). Arms correspond
 // by POSITION in SQL, but these rows are name-keyed maps, so an arm selecting
 // differently-spelled columns is invisible to rowHashKey and to
@@ -456,13 +456,13 @@ func setOpArmRows(sink *exec.CollectSink, schema []parquet.Column) []map[string]
 	return out
 }
 
-// alignSetOpRows re-keys an arm's rows to the result's column names.
+// AlignSetOpRows re-keys an arm's rows to the result's column names.
 //
 // It is no longer reached from the set-operation adapter, which addresses its
 // arms by POSITION (setOpArmRows) and therefore needs no re-keying at all.
 // Kept for the other caller and because it states the rule the slots enforce:
 // the arms correspond by position, and the result takes the first arm's names.
-func alignSetOpRows(want, have []parquet.Column, rows []map[string]any) []map[string]any {
+func AlignSetOpRows(want, have []parquet.Column, rows []map[string]any) []map[string]any {
 	if len(want) == 0 || len(want) != len(have) {
 		return rows
 	}

@@ -11,7 +11,6 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
@@ -93,7 +92,7 @@ func (c *Coordinator) orchestrateRepartition(
 	ctx context.Context,
 	queryID string,
 	cand dagplan.ShuffleCandidate,
-	stages []physical.Stage,
+	stages []dagplan.Stage,
 	workerCount int,
 ) (*ShuffleLayout, error) {
 	numParts := workerCount * shufflePartitionMultiplier
@@ -173,7 +172,7 @@ type shuffleSideStats struct {
 // semantics. The suffix guard keeps this inert for legacy parquet source
 // stages that might carry planner-set OutputColumns (their read set must
 // stay full so pushed filters see their columns).
-func shuffleTaskColumns(pruned []string, sourceStage physical.Stage) []string {
+func shuffleTaskColumns(pruned []string, sourceStage dagplan.Stage) []string {
 	if len(pruned) > 0 {
 		return pruned
 	}
@@ -199,7 +198,7 @@ func (c *Coordinator) runShuffleSide(
 	ctx context.Context,
 	parentQueryID string,
 	sideName string, // "build" or "probe" — used in stage IDs and S3 prefix
-	sourceStage physical.Stage,
+	sourceStage dagplan.Stage,
 	keys []string,
 	keyTypes []parquet.TypeID, // resolved common type per key (#615); nil = each column's own
 	numParts int,
@@ -500,7 +499,7 @@ func buildShufflePipelineTasks(
 
 // findShuffleScanStages locates the build and probe scan stages corresponding
 // to the ShuffleCandidate's aliases.
-func findShuffleScanStages(stages []physical.Stage, cand dagplan.ShuffleCandidate) (build, probe physical.Stage, err error) {
+func findShuffleScanStages(stages []dagplan.Stage, cand dagplan.ShuffleCandidate) (build, probe dagplan.Stage, err error) {
 	var buildFound, probeFound bool
 	for _, s := range stages {
 		if s.Type != "scan" {
@@ -516,10 +515,10 @@ func findShuffleScanStages(stages []physical.Stage, cand dagplan.ShuffleCandidat
 		}
 	}
 	if !buildFound {
-		return physical.Stage{}, physical.Stage{}, fmt.Errorf("build scan stage for alias %q not found", cand.BuildAlias)
+		return dagplan.Stage{}, dagplan.Stage{}, fmt.Errorf("build scan stage for alias %q not found", cand.BuildAlias)
 	}
 	if !probeFound {
-		return physical.Stage{}, physical.Stage{}, fmt.Errorf("probe scan stage for alias %q not found", cand.ProbeAlias)
+		return dagplan.Stage{}, dagplan.Stage{}, fmt.Errorf("probe scan stage for alias %q not found", cand.ProbeAlias)
 	}
 	return build, probe, nil
 }

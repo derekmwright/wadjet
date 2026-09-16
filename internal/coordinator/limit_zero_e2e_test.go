@@ -22,7 +22,7 @@ import (
 // TestOrderByLimitZeroBoundsDistributedResult is the distributed/stage-DAG
 // regression test for #481: `ORDER BY ... LIMIT 0` returned every row
 // instead of zero. The root cause was a sentinel collision — exec.Sort.Limit,
-// sortSourceAdapter's Top-K guard, physical.Stage.Limit, MergeInfo.KeepRows,
+// sortSourceAdapter's Top-K guard, dagplan.Stage.Limit, MergeInfo.KeepRows,
 // and the OpSpec.SortLimit wire field all used 0 to mean "no limit",
 // colliding with a real `LIMIT 0`. Mirrors
 // TestBareLimitBoundsDistributedResult's scaffolding (same fixture, same

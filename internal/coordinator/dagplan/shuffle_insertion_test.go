@@ -4,12 +4,10 @@ package dagplan
 
 import (
 	"testing"
-
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 func TestPickShuffleCandidate_PicksLargestBuildAboveThreshold(t *testing.T) {
-	stages := []physical.Stage{
+	stages := []Stage{
 		{ID: "scan-orders", Type: "scan", ScanAlias: "orders", EstimatedBytes: 8 << 30},       // 8 GB - above
 		{ID: "scan-customer", Type: "scan", ScanAlias: "customer", EstimatedBytes: 100 << 20}, // 100 MB - below
 		{ID: "scan-lineitem", Type: "scan", ScanAlias: "lineitem", EstimatedBytes: 80 << 30},  // 80 GB - probe
@@ -51,7 +49,7 @@ func TestPickShuffleCandidate_PicksLargestBuildAboveThreshold(t *testing.T) {
 }
 
 func TestPickShuffleCandidate_NoCandidateBelowThreshold(t *testing.T) {
-	stages := []physical.Stage{
+	stages := []Stage{
 		{ID: "scan-orders", Type: "scan", ScanAlias: "orders", EstimatedBytes: 1 << 30}, // 1 GB - below 4 GB threshold
 		{ID: "scan-lineitem", Type: "scan", ScanAlias: "lineitem", EstimatedBytes: 80 << 30},
 		{
@@ -70,7 +68,7 @@ func TestPickShuffleCandidate_NoCandidateBelowThreshold(t *testing.T) {
 // "build alias == probe alias" test is subsumed by this: with only one scan, there
 // is no non-probe candidate above threshold.
 func TestPickShuffleCandidate_PathologicalNoOtherScans(t *testing.T) {
-	stages := []physical.Stage{
+	stages := []Stage{
 		{ID: "scan-orders", Type: "scan", ScanAlias: "orders", EstimatedBytes: 80 << 30},
 		{
 			ID: "join-1", Type: "hash_join",
@@ -83,7 +81,7 @@ func TestPickShuffleCandidate_PathologicalNoOtherScans(t *testing.T) {
 }
 
 func TestPickShuffleCandidate_NoJoins(t *testing.T) {
-	stages := []physical.Stage{
+	stages := []Stage{
 		{ID: "scan-only", Type: "scan", ScanAlias: "lineitem", EstimatedBytes: 80 << 30},
 	}
 	if _, ok := PickShuffleCandidate(stages, 4<<30); ok {
@@ -101,7 +99,7 @@ func TestPickShuffleCandidate_RejectsIndirectProbeJoin(t *testing.T) {
 	// join-2 references nation as RightDepStage, but LeftDepStage=join-1 (indirect).
 	// JoinLeftKeys=[s_nationkey] would fail against raw lineitem files, so it must
 	// be rejected. No other join references nation, so result is ok=false.
-	stages := []physical.Stage{
+	stages := []Stage{
 		{ID: "scan-nation", Type: "scan", ScanAlias: "nation", EstimatedBytes: 8 << 30},
 		{ID: "scan-lineitem", Type: "scan", ScanAlias: "lineitem", EstimatedBytes: 80 << 30},
 		{ID: "scan-supplier", Type: "scan", ScanAlias: "supplier", EstimatedBytes: 500 << 20},
@@ -128,7 +126,7 @@ func TestPickShuffleCandidate_RejectsIndirectProbeJoin(t *testing.T) {
 }
 
 func TestPickShuffleCandidate_MatchesBroadcastJoin(t *testing.T) {
-	stages := []physical.Stage{
+	stages := []Stage{
 		{ID: "scan-orders", Type: "scan", ScanAlias: "orders", EstimatedBytes: 8 << 30},
 		{ID: "scan-lineitem", Type: "scan", ScanAlias: "lineitem", EstimatedBytes: 80 << 30},
 		// Same shape as the hash_join test, but the join is classified as broadcast_join.
@@ -154,7 +152,7 @@ func TestPickShuffleCandidate_MatchesBroadcastJoin(t *testing.T) {
 // LeftDepStage (the runtime broadcast build we want to shuffle), customer
 // fused as a secondary build below threshold.
 func TestPickShuffleCandidate_Q03Shape(t *testing.T) {
-	stages := []physical.Stage{
+	stages := []Stage{
 		{ID: "scan-orders", Type: "scan", ScanAlias: "orders", EstimatedBytes: 8 << 30},
 		{ID: "scan-customer", Type: "scan", ScanAlias: "customer", EstimatedBytes: 1500 << 20},
 		{ID: "scan-lineitem", Type: "scan", ScanAlias: "lineitem", EstimatedBytes: 75 << 30},
@@ -165,7 +163,7 @@ func TestPickShuffleCandidate_Q03Shape(t *testing.T) {
 			RightDepStage:   "scan-lineitem", // lineitem is the probe (probe-split)
 			JoinLeftKeys:    []string{"o_orderkey"},
 			JoinRightKeys:   []string{"l_orderkey"},
-			FusedJoins: []physical.FusedJoinSpec{
+			FusedJoins: []FusedJoinSpec{
 				{
 					BuildTableAlias: "customer",
 					JoinLeftKeys:    []string{"o_custkey"},
@@ -204,7 +202,7 @@ func TestPickShuffleCandidate_Q03Shape(t *testing.T) {
 // c_nationkey (not in orders.Columns) and instead pick join-6 whose JoinLeftKeys=
 // [o_orderkey] ARE in orders.Columns.
 func TestPickShuffleCandidate_Q10Shape(t *testing.T) {
-	stages := []physical.Stage{
+	stages := []Stage{
 		// orders: 2nd largest (shuffle candidate)
 		{
 			ID: "scan-orders", Type: "scan", ScanAlias: "orders", EstimatedBytes: 8 << 30,
@@ -230,7 +228,7 @@ func TestPickShuffleCandidate_Q10Shape(t *testing.T) {
 			ID: "join-4", Type: "broadcast_join", BuildTableAlias: "nation",
 			LeftDepStage: "scan-orders", RightDepStage: "scan-nation",
 			JoinLeftKeys: []string{"c_nationkey"}, JoinRightKeys: []string{"n_nationkey"},
-			FusedJoins: []physical.FusedJoinSpec{
+			FusedJoins: []FusedJoinSpec{
 				{BuildTableAlias: "customer", JoinLeftKeys: []string{"o_custkey"}, JoinRightKeys: []string{"c_custkey"}},
 			},
 		},
@@ -270,7 +268,7 @@ func TestPickShuffleCandidate_Q10Shape(t *testing.T) {
 // deps. The candidate (large_dim at 6 GB) is the build of a fused secondary
 // join; the top-level join connects lineitem (probe) to supplier directly.
 func TestPickShuffleCandidate_FusedJoinMatch(t *testing.T) {
-	stages := []physical.Stage{
+	stages := []Stage{
 		{ID: "scan-lineitem", Type: "scan", ScanAlias: "lineitem", EstimatedBytes: 75 << 30},
 		{ID: "scan-supplier", Type: "scan", ScanAlias: "supplier", EstimatedBytes: 500 << 20},
 		{ID: "scan-large_dim", Type: "scan", ScanAlias: "large_dim", EstimatedBytes: 6 << 30},
@@ -283,7 +281,7 @@ func TestPickShuffleCandidate_FusedJoinMatch(t *testing.T) {
 			RightDepStage:   "scan-supplier",
 			JoinLeftKeys:    []string{"l_suppkey"},
 			JoinRightKeys:   []string{"s_suppkey"},
-			FusedJoins: []physical.FusedJoinSpec{
+			FusedJoins: []FusedJoinSpec{
 				{
 					BuildTableAlias: "large_dim",
 					JoinLeftKeys:    []string{"l_dimkey"},

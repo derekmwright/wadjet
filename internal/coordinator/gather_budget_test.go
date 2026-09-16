@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -284,7 +284,7 @@ func TestGatherReplayStream_AppliesRenames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wait: %v", err)
 	}
-	applyOutputRenames(gr, []physical.OutputRename{{From: "x", To: "alias_x"}})
+	applyOutputRenames(gr, []dagplan.OutputRename{{From: "x", To: "alias_x"}})
 	if gr.columns[0] != "alias_x" {
 		t.Fatalf("columns after rename = %v", gr.columns)
 	}

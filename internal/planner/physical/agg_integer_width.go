@@ -73,7 +73,7 @@ func carriesIntWidth(t parquet.TypeID) bool {
 	return catalogIntWidth(t) != intWidthUnknown
 }
 
-// aggInputIsWideInteger answers wide only for a provable int8-domain operand.
+// AggInputIsWideInteger answers wide only for a provable int8-domain operand.
 // It is the BOOLEAN FACE of declaredIntWidth, so the grouped aggregate
 // (aggComputedInputDecl), the window (windowComputedArgDecl) and the column
 // declaration a derived table publishes (emittedColIntWidth) cannot disagree:
@@ -82,7 +82,7 @@ func carriesIntWidth(t parquet.TypeID) bool {
 // PORT/PROTOCOL arithmetic is deliberately excluded: expr.operandIsInt and
 // intArithAllInt keep it on the FLOAT path; bare columns use int4's table.
 // See docs/internals/computed-integer-aggregate-width.md for the design.
-func aggInputIsWideInteger(node plansql.Node, decls colDecls) bool {
+func AggInputIsWideInteger(node plansql.Node, decls ColDecls) bool {
 	return declaredIntWidth(node, decls) == intWidth8
 }
 
@@ -95,7 +95,7 @@ func aggInputIsWideInteger(node plansql.Node, decls colDecls) bool {
 // projection's expression it says what that projection's OUTPUT COLUMN
 // declares, so the next query block reads the width instead of guessing it
 // from the carrier.
-func declaredIntWidth(node plansql.Node, decls colDecls) intWidth {
+func declaredIntWidth(node plansql.Node, decls ColDecls) intWidth {
 	switch n := node.(type) {
 	case *plansql.SubqueryNode:
 		// A SCALAR SUBQUERY's width is a CATALOG fact, stamped on the plan by
@@ -205,7 +205,7 @@ func declaredIntWidth(node plansql.Node, decls colDecls) intWidth {
 		return widestArgIntWidth(n.Args, nil, decls)
 	case *plansql.CastNode:
 		// A CAST's TARGET NAME decides its domain, independently of the operand.
-		// Do not use nodeDeclaredType: inferCastType declares every integer cast
+		// Do not use NodeDeclaredType: inferCastType declares every integer cast
 		// INT64 and cannot distinguish ::int4 from ::bigint (ADR-0012 item 12).
 		// The rule applies to grouped and window SUM (#987, #841); PostgreSQL
 		// answers must not become refusals (ADR-0012).
@@ -255,7 +255,7 @@ func declaredIntWidth(node plansql.Node, decls colDecls) intWidth {
 // w == nil means every argument contributes, which is what a polymorphic
 // choice and the numeric-domain functions want; a PGIntWidthOperands row names
 // the positions it takes its width from.
-func widestArgIntWidth(args []plansql.Node, w *expr.PGIntegerResult, decls colDecls) intWidth {
+func widestArgIntWidth(args []plansql.Node, w *expr.PGIntegerResult, decls ColDecls) intWidth {
 	out := intWidthUnknown
 	for i, a := range args {
 		if w != nil && !pgWidthArg(*w, i) {

@@ -7,7 +7,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 )
 
 // TestBroadcastJoinProbeSplit_Trigger verifies the dispatcher's decision to
@@ -16,8 +16,8 @@ import (
 // multi-file OutputSinglePart. Mirrors the conditions enforced in
 // dispatchComputeStage.
 func TestBroadcastJoinProbeSplit_Trigger(t *testing.T) {
-	stage := physical.Stage{
-		Type:          physical.StageBroadcastJoin,
+	stage := dagplan.Stage{
+		Type:          dagplan.StageBroadcastJoin,
 		Dependencies:  []string{"probe", "build"},
 		LeftDepStage:  "probe",
 		RightDepStage: "build",
@@ -29,7 +29,7 @@ func TestBroadcastJoinProbeSplit_Trigger(t *testing.T) {
 
 	cases := []struct {
 		name      string
-		stage     physical.Stage
+		stage     dagplan.Stage
 		inputs    map[string]StageOutput
 		workers   int
 		curTasks  int
@@ -47,7 +47,7 @@ func TestBroadcastJoinProbeSplit_Trigger(t *testing.T) {
 		}, workers: 4, curTasks: 1, wantOK: false},
 		{name: "single_worker", stage: stage, inputs: multi, workers: 1, curTasks: 1, wantOK: false},
 		{name: "already_parallel", stage: stage, inputs: multi, workers: 4, curTasks: 4, wantOK: false},
-		{name: "non_broadcast_stage", stage: physical.Stage{Type: physical.StageHashJoin, Dependencies: []string{"probe", "build"}, LeftDepStage: "probe", RightDepStage: "build"}, inputs: multi, workers: 4, curTasks: 1, wantOK: false},
+		{name: "non_broadcast_stage", stage: dagplan.Stage{Type: dagplan.StageHashJoin, Dependencies: []string{"probe", "build"}, LeftDepStage: "probe", RightDepStage: "build"}, inputs: multi, workers: 4, curTasks: 1, wantOK: false},
 		// OutputPartitioned probe with multiple files now triggers probe-split:
 		// the broadcast join's per-shard parallelism is independent of the
 		// upstream's hash partitioning. Pre-2026-04-30 this returned ok=false,
@@ -86,9 +86,9 @@ func TestBroadcastJoinProbeSplit_Trigger(t *testing.T) {
 // TestBuildTaskInputsForBroadcastJoinSplitProbe verifies the helper slices
 // probe files across tasks while replicating the build set to every task.
 func TestBuildTaskInputsForBroadcastJoinSplitProbe(t *testing.T) {
-	stage := physical.Stage{
+	stage := dagplan.Stage{
 		ID:              "bj-1",
-		Type:            physical.StageBroadcastJoin,
+		Type:            dagplan.StageBroadcastJoin,
 		Dependencies:    []string{"probe", "build"},
 		LeftDepStage:    "probe",
 		RightDepStage:   "build",
@@ -147,9 +147,9 @@ func TestBuildTaskInputsForBroadcastJoinSplitProbe(t *testing.T) {
 // has fewer files than numTasks, splitFilesEvenly returns fewer slices, and
 // the helper must not panic for trailing workers.
 func TestBuildTaskInputsForBroadcastJoinSplitProbe_FewerFilesThanTasks(t *testing.T) {
-	stage := physical.Stage{
+	stage := dagplan.Stage{
 		ID:            "bj-1",
-		Type:          physical.StageBroadcastJoin,
+		Type:          dagplan.StageBroadcastJoin,
 		Dependencies:  []string{"probe", "build"},
 		LeftDepStage:  "probe",
 		RightDepStage: "build",
@@ -185,9 +185,9 @@ func TestBuildTaskInputsForBroadcastJoinSplitProbe_FewerFilesThanTasks(t *testin
 // TestBuildTaskInputsForBroadcastJoinSplitProbe_MissingDeps: rejects stages
 // without exactly two dependencies.
 func TestBuildTaskInputsForBroadcastJoinSplitProbe_MissingDeps(t *testing.T) {
-	stage := physical.Stage{
+	stage := dagplan.Stage{
 		ID:           "bj-1",
-		Type:         physical.StageBroadcastJoin,
+		Type:         dagplan.StageBroadcastJoin,
 		Dependencies: []string{"only-one"},
 	}
 	if _, err := buildTaskInputsForBroadcastJoinSplitProbe(stage, nil, 0, 2); err == nil {
@@ -198,9 +198,9 @@ func TestBuildTaskInputsForBroadcastJoinSplitProbe_MissingDeps(t *testing.T) {
 // TestBuildTaskInputsForBroadcastJoinSplitProbe_BuildAliasFallback: when
 // stage.BuildTableAlias is empty, the helper must fall back to "build".
 func TestBuildTaskInputsForBroadcastJoinSplitProbe_BuildAliasFallback(t *testing.T) {
-	stage := physical.Stage{
+	stage := dagplan.Stage{
 		ID:            "bj-1",
-		Type:          physical.StageBroadcastJoin,
+		Type:          dagplan.StageBroadcastJoin,
 		Dependencies:  []string{"probe", "build"},
 		LeftDepStage:  "probe",
 		RightDepStage: "build",

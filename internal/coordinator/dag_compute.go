@@ -12,8 +12,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // dispatchComputeStage handles non-leaf compute stages (hash_join,
@@ -24,7 +24,7 @@ import (
 func (c *Coordinator) dispatchComputeStage(
 	ctx context.Context,
 	queryID string,
-	stage physical.Stage,
+	stage dagplan.Stage,
 	inputs map[string]StageOutput,
 	workerCount int,
 	fusion *gatherFusion,
@@ -63,14 +63,14 @@ func (c *Coordinator) dispatchComputeStage(
 	//   - Anything else: correctness-first default of 1 task.
 	numTasks := 1
 	switch stage.Distribution.Kind {
-	case physical.DistSingleton:
+	case dagplan.DistSingleton:
 		numTasks = 1
-	case physical.DistHashPartitioned:
+	case dagplan.DistHashPartitioned:
 		numTasks = stage.Distribution.Count
 		if numTasks <= 0 {
 			numTasks = workerCount
 		}
-	case physical.DistBroadcast:
+	case dagplan.DistBroadcast:
 		numTasks = 1
 	default:
 		// Unknown distribution — fall back to 1 rather than workerCount.
@@ -79,7 +79,7 @@ func (c *Coordinator) dispatchComputeStage(
 	// A union stage's task count is its ARM count, not a distribution
 	// property: task i reads arm i. Its RoundRobin label says only that the
 	// outputs carry no key clustering.
-	unionStage := stage.Type == physical.StageUnion
+	unionStage := stage.Type == dagplan.StageUnion
 	if unionStage {
 		if len(stage.UnionArms) < 2 {
 			return StageOutput{}, fmt.Errorf("stage %s: union stage has %d arms, expected at least 2",
@@ -191,7 +191,7 @@ func (c *Coordinator) dispatchComputeStage(
 	// benchmark.log (worker-side runtime counters live in worker logs, which
 	// benchmark teardown discards). Flag-off logs stay byte-identical.
 	if c.config.LateMaterialization &&
-		(stage.Type == physical.StageHashJoin || stage.Type == physical.StageBroadcastJoin) {
+		(stage.Type == dagplan.StageHashJoin || stage.Type == dagplan.StageBroadcastJoin) {
 		dispatchAttrs = append(dispatchAttrs, "late_mat", true)
 	}
 	// Stage-chain fusion engagement marker (grep-able from benchmark.log):
@@ -449,7 +449,7 @@ func (c *Coordinator) dispatchComputeStage(
 		// a primary build partition spilled under chain pressure can yield zero rows.
 		// See docs/internals/join-fragment-dispatch-contract.md for the design.
 		canMigrateJoin := t.Operators == nil &&
-			(stage.Type == physical.StageHashJoin || stage.Type == physical.StageBroadcastJoin) &&
+			(stage.Type == dagplan.StageHashJoin || stage.Type == dagplan.StageBroadcastJoin) &&
 			len(stage.GroupByCols) == 0
 		if canMigrateJoin {
 			var sinkOp distributed.OpSpec
@@ -477,7 +477,7 @@ func (c *Coordinator) dispatchComputeStage(
 		// Sort-merge join stages always route through the fragment runner —
 		// there is no legacy single-op execution path for them, so any
 		// ineligibility is a planner bug and fails loudly.
-		if stage.Type == physical.StageSortMergeJoin {
+		if stage.Type == dagplan.StageSortMergeJoin {
 			if t.Operators != nil {
 				return StageOutput{}, fmt.Errorf("stage %s: sort_merge_join stage already claimed by another migration", stage.ID)
 			}
@@ -555,7 +555,7 @@ func (c *Coordinator) dispatchComputeStage(
 		// single-op window handler in the worker — a window stage that
 		// reaches dispatch unclaimed ships with Operators == nil and dies
 		// in executeStage, which is the whole of #349.
-		if stage.Type == physical.StageWindow {
+		if stage.Type == dagplan.StageWindow {
 			if t.Operators != nil {
 				return StageOutput{}, fmt.Errorf("stage %s: window stage already claimed by another migration", stage.ID)
 			}
@@ -573,7 +573,7 @@ func (c *Coordinator) dispatchComputeStage(
 		// stage's reason — there is no legacy single-op limit handler, so an
 		// unclaimed limit stage would ship with Operators == nil and die in
 		// executeStage. Failing here says which stage instead.
-		if stage.Type == physical.StageLimit {
+		if stage.Type == dagplan.StageLimit {
 			if t.Operators != nil {
 				return StageOutput{}, fmt.Errorf("stage %s: limit stage already claimed by another migration", stage.ID)
 			}
@@ -591,7 +591,7 @@ func (c *Coordinator) dispatchComputeStage(
 		// stage's reason — there is no legacy single-op handler, so an
 		// unclaimed project stage would ship with Operators == nil and die
 		// in executeStage.
-		if stage.Type == physical.StageProject {
+		if stage.Type == dagplan.StageProject {
 			if t.Operators != nil {
 				return StageOutput{}, fmt.Errorf("stage %s: project stage already claimed by another migration", stage.ID)
 			}
@@ -849,7 +849,7 @@ func (c *Coordinator) dispatchComputeStage(
 	// number — same shape as runShuffleSide / dispatchScanFilterStage's
 	// fused-shuffle bucketing.
 	if stage.Exchange != nil && len(stage.Exchange.Keys) > 0 && stage.Exchange.Count > 0 &&
-		(stage.Type == physical.StageHashJoin || stage.Type == physical.StageBroadcastJoin) {
+		(stage.Type == dagplan.StageHashJoin || stage.Type == dagplan.StageBroadcastJoin) {
 		numParts := stage.Exchange.Count
 		shardFiles := make([][]string, numParts)
 		for _, taskFiles := range resultFiles {
@@ -905,9 +905,9 @@ func (c *Coordinator) dispatchComputeStage(
 	// SinglePart (one worker consumed all input).
 	kind := OutputSinglePart
 	switch stage.Distribution.Kind {
-	case physical.DistHashPartitioned:
+	case dagplan.DistHashPartitioned:
 		kind = OutputPartitioned
-	case physical.DistBroadcast:
+	case dagplan.DistBroadcast:
 		kind = OutputReplicated
 	}
 	if probeSplit || rrAggGroups != nil || unionStage {

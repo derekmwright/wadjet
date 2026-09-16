@@ -6,8 +6,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -88,7 +88,7 @@ func TestDecomposeVar_PassesThroughOtherAggregates(t *testing.T) {
 }
 
 func TestDecomposeVarPhysical(t *testing.T) {
-	got := decomposeVarPhysical([]physical.AggSpec{
+	got := decomposeVarPhysical([]dagplan.AggSpec{
 		{Func: "stddev_pop", InputCol: "v", OutputCol: "s", OutputType: parquet.TypeFloat64},
 	})
 	if len(got) != 1 {

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -74,7 +74,7 @@ func TestANullAwareAntiJoinWhoseBuildIsNotReplicatedRoutesRatherThanDispatch(t *
 	// and the answer stays right with nothing refused. That is the property
 	// hunk earning its keep, and it is why the coordinator gate the first
 	// round shipped could not fail on this commit's revert.
-	restoreForcing := physical.DisableNullAwareAntiBroadcastForcingForTest()
+	restoreForcing := dagplan.DisableNullAwareAntiBroadcastForcingForTest()
 	t.Cleanup(restoreForcing)
 
 	before = coord.NullAwareAntiLocalRoutes()
@@ -95,7 +95,7 @@ func TestANullAwareAntiJoinWhoseBuildIsNotReplicatedRoutesRatherThanDispatch(t *
 	// LAYER 2 OFF as well: now the build really is hash-partitioned, which is
 	// the state that answers NOT IN's two-valued twin. The INVARIANT is what
 	// stands between that and a client.
-	restoreProperty := physical.DisableNullAwareAntiRequiredBroadcastForTest()
+	restoreProperty := dagplan.DisableNullAwareAntiRequiredBroadcastForTest()
 	t.Cleanup(restoreProperty)
 
 	before = coord.NullAwareAntiLocalRoutes()
@@ -129,19 +129,19 @@ func TestANullAwareAntiJoinWhoseBuildIsNotReplicatedRoutesRatherThanDispatch(t *
 // 0A000, because a client branches on the code and this one is "the engine
 // cannot do this here", not an internal error.
 func TestTheNullAwareAntiRefusalCarriesItsSQLSTATE(t *testing.T) {
-	stages := []physical.Stage{
-		{ID: "probe", Type: physical.StageScan,
-			Distribution: physical.Distribution{Kind: physical.DistHashPartitioned,
+	stages := []dagplan.Stage{
+		{ID: "probe", Type: dagplan.StageScan,
+			Distribution: dagplan.Distribution{Kind: dagplan.DistHashPartitioned,
 				Keys: []string{"a"}, Count: 3}},
-		{ID: "build", Type: physical.StageScan,
-			Distribution: physical.Distribution{Kind: physical.DistHashPartitioned,
+		{ID: "build", Type: dagplan.StageScan,
+			Distribution: dagplan.Distribution{Kind: dagplan.DistHashPartitioned,
 				Keys: []string{"b"}, Count: 3}},
-		{ID: "join", Type: physical.StageHashJoin, NullAwareAnti: true, Tasks: 3,
+		{ID: "join", Type: dagplan.StageHashJoin, NullAwareAnti: true, Tasks: 3,
 			Dependencies: []string{"probe", "build"},
 			LeftDepStage: "probe", RightDepStage: "build",
-			Distribution: physical.Distribution{Kind: physical.DistHashPartitioned, Count: 3}},
+			Distribution: dagplan.Distribution{Kind: dagplan.DistHashPartitioned, Count: 3}},
 	}
-	err := physical.AssertNullAwareAntiBuildsAreReplicatedForTest(stages)
+	err := dagplan.AssertNullAwareAntiBuildsAreReplicatedForTest(stages)
 	if err == nil {
 		t.Fatal("a hash-partitioned build under a null-aware anti join was accepted")
 	}

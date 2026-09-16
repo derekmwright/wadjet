@@ -10,14 +10,14 @@ import (
 
 // annotateSubqueryColumnDecls stamps the declared output column of every
 // SCALAR SUBQUERY in a plan onto the plan's nodes, keyed by the subquery's own
-// SQL text — the key `nodeDeclaredType` already resolves a subquery by.
+// SQL text — the key `NodeDeclaredType` already resolves a subquery by.
 //
 // WHY A STAMP AND NOT A RESOLVER. A subquery is a whole second query whose type
 // lives in the CATALOG, so it can only be answered by planning it — and the
-// declaration walks (emittedColTypes, emittedColDecimal, emittedColIntWidth)
+// declaration walks (EmittedColTypes, emittedColDecimal, emittedColIntWidth)
 // are free functions over the logical tree that hold no Planner.
-// `colDecls.subqueryDecl` was therefore nil in every one of them, and the only
-// caller that passed a resolver was `declaredOutputSchema` at the OUTPUT
+// `ColDecls.subqueryDecl` was therefore nil in every one of them, and the only
+// caller that passed a resolver was `DeclaredOutputSchema` at the OUTPUT
 // projection. A scalar-subquery column MATERIALIZED one level down — by a
 // derived table, a CTE or a set-operation arm — was declared STRING, and every
 // reader above it fell to float64: `SELECT SUM(v) FROM (SELECT (SELECT c & 3
@@ -130,7 +130,7 @@ func collectSubquerySQL(e plansql.Node, out *[]string) {
 	}
 }
 
-// subqueryDeclsOf turns a node's stamped map into the two resolvers colDecls
+// subqueryDeclsOf turns a node's stamped map into the two resolvers ColDecls
 // carries: the declared COLUMN and its PostgreSQL integer WIDTH. Both are nil
 // when nothing was stamped, which is the "this caller cannot ask" the
 // SubqueryNode arms already decline on.
@@ -162,7 +162,7 @@ func subqueryDeclsOf(n *logical.Node) (func(string) (parquet.Column, bool), func
 
 // withSubqueryDecls is decls plus whatever node carries the stamp — the one
 // line every walk needs so a subquery's declaration reaches it.
-func withSubqueryDecls(decls colDecls, n *logical.Node) colDecls {
+func withSubqueryDecls(decls ColDecls, n *logical.Node) ColDecls {
 	d, w := subqueryDeclsOf(n)
 	if d == nil {
 		return decls
@@ -202,7 +202,7 @@ func (p *Planner) scalarSubqueryColumnDecl(sql string) (decl logical.SubqueryCol
 		return e.decl, e.ok
 	}
 	p.subqueryDeclCache[sql] = nil
-	col, ok := p.subqueryOutputColumn(sql)
+	col, ok := p.SubqueryOutputColumn(sql)
 	d := logical.SubqueryColumnDecl{}
 	if ok {
 		d = logical.SubqueryColumnDecl{
@@ -211,7 +211,7 @@ func (p *Planner) scalarSubqueryColumnDecl(sql string) (decl logical.SubqueryCol
 		}
 		// A DECIMAL without its scale is not a declaration: a vector built
 		// from it reads every value at the wrong power of ten, which is why
-		// nodeDeclaredType declines the same shape (ADR-0024 item 2).
+		// NodeDeclaredType declines the same shape (ADR-0024 item 2).
 		if d.Type == parquet.TypeDecimal && d.Precision == 0 {
 			ok = false
 		}
@@ -230,7 +230,7 @@ type subqueryDeclEntry struct {
 // single output column, read off the subquery's own plan with the same
 // emittedColIntWidth every other consumer reads. 0 — "say nothing" — for a
 // non-integer carrier and for a column the walk cannot prove, which leaves the
-// reader on the carrier exactly as an absent colDecls entry does.
+// reader on the carrier exactly as an absent ColDecls entry does.
 func (p *Planner) subqueryOutputIntWidth(sql string, carrier parquet.TypeID) int {
 	if !carriesIntWidth(carrier) {
 		return 0
@@ -239,7 +239,7 @@ func (p *Planner) subqueryOutputIntWidth(sql string, carrier parquet.TypeID) int
 	if plan == nil {
 		return 0
 	}
-	schema := declaredOutputSchema(plan, p.subqueryOutputColumn)
+	schema := DeclaredOutputSchema(plan, p.SubqueryOutputColumn)
 	if len(schema) != 1 {
 		return 0
 	}

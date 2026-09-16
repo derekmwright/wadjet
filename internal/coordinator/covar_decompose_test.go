@@ -5,8 +5,8 @@ package coordinator
 import (
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -89,7 +89,7 @@ func TestDecomposeCovar_PassesThroughOthers(t *testing.T) {
 // PERCENTILE_CONT's fraction all reached the worker through nothing before
 // #353.
 func TestWireAggSpecs_CarriesEveryArgument(t *testing.T) {
-	in := []physical.AggSpec{
+	in := []dagplan.AggSpec{
 		{Func: "min_by", InputCol: "label", InputCol2: "k", OutputCol: "mn", OutputType: parquet.TypeString},
 		{Func: "string_agg", InputCol: "p", Separator: "::", OutputCol: "s"},
 		{Func: "percentile_cont", InputCol: "v", Percentile: 0.9, OutputCol: "p90"},

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 func newEagerTestCoordinator(eager bool) *Coordinator {
@@ -141,7 +141,7 @@ func TestRefreshEagerReplay(t *testing.T) {
 	f := newEagerFeed()
 	f.dispatch("root", "st", []string{"t1", "t2"}, 3, 1)
 	inputs := map[string]StageOutput{"dep-1": f.provisionalOutput()}
-	c1Stage := physical.Stage{Type: "final_aggregate", Dependencies: []string{"dep-1"}}
+	c1Stage := dagplan.Stage{Type: "final_aggregate", Dependencies: []string{"dep-1"}}
 
 	task := distributed.Task{
 		EagerInputs: map[string]distributed.EagerInput{
@@ -182,8 +182,8 @@ func TestRefreshEagerReplayJoinAliases(t *testing.T) {
 	probe, build := newEagerFeed(), newEagerFeed()
 	probe.dispatch("root", "p", []string{"p1", "p2"}, 24, 3)
 	build.dispatch("root", "b", []string{"b1"}, 24, 3)
-	joinStage := physical.Stage{
-		Type:            physical.StageHashJoin,
+	joinStage := dagplan.Stage{
+		Type:            dagplan.StageHashJoin,
 		Dependencies:    []string{"ex-probe", "ex-build"},
 		LeftDepStage:    "ex-probe",
 		RightDepStage:   "ex-build",
@@ -214,60 +214,60 @@ func TestRefreshEagerReplayJoinAliases(t *testing.T) {
 }
 
 func TestEagerEligibleConsumer(t *testing.T) {
-	repart := physical.Stage{ID: "ex-1", Type: physical.StageExchangeRepartition,
-		Exchange: &physical.ExchangeStage{Keys: []string{"k"}, Count: 3}}
-	scan := physical.Stage{ID: "scan-1", Type: physical.StageScan}
-	byID := map[string]physical.Stage{"ex-1": repart, "scan-1": scan}
+	repart := dagplan.Stage{ID: "ex-1", Type: dagplan.StageExchangeRepartition,
+		Exchange: &dagplan.ExchangeStage{Keys: []string{"k"}, Count: 3}}
+	scan := dagplan.Stage{ID: "scan-1", Type: dagplan.StageScan}
+	byID := map[string]dagplan.Stage{"ex-1": repart, "scan-1": scan}
 
-	base := physical.Stage{
+	base := dagplan.Stage{
 		ID:           "agg-1",
 		Type:         "final_aggregate",
 		Dependencies: []string{"ex-1"},
-		Distribution: physical.Distribution{Kind: physical.DistHashPartitioned, Count: 3},
+		Distribution: dagplan.Distribution{Kind: dagplan.DistHashPartitioned, Count: 3},
 	}
 	if !eagerEligibleConsumer(base, byID, "", 3) {
 		t.Fatal("base final_aggregate over repartition must be eligible")
 	}
 
-	mutate := func(fn func(*physical.Stage)) physical.Stage {
+	mutate := func(fn func(*dagplan.Stage)) dagplan.Stage {
 		s := base
 		fn(&s)
 		return s
 	}
 	cases := []struct {
 		name    string
-		s       physical.Stage
+		s       dagplan.Stage
 		fuseID  string
 		workers int
 		want    bool
 	}{
-		{"aggregate type", mutate(func(s *physical.Stage) { s.Type = "aggregate" }), "", 3, true},
-		{"merge_aggregate type", mutate(func(s *physical.Stage) { s.Type = "merge_aggregate" }), "", 3, true},
-		{"sort with keys", mutate(func(s *physical.Stage) {
+		{"aggregate type", mutate(func(s *dagplan.Stage) { s.Type = "aggregate" }), "", 3, true},
+		{"merge_aggregate type", mutate(func(s *dagplan.Stage) { s.Type = "merge_aggregate" }), "", 3, true},
+		{"sort with keys", mutate(func(s *dagplan.Stage) {
 			s.Type = "sort"
-			s.SortKeys = []physical.SortKeySpec{{Column: "a"}}
+			s.SortKeys = []dagplan.SortKeySpec{{Column: "a"}}
 		}), "", 3, true},
-		{"sort without keys (legacy path)", mutate(func(s *physical.Stage) { s.Type = "sort" }), "", 3, false},
-		{"join is C2", mutate(func(s *physical.Stage) {
-			s.Type = physical.StageHashJoin
+		{"sort without keys (legacy path)", mutate(func(s *dagplan.Stage) { s.Type = "sort" }), "", 3, false},
+		{"join is C2", mutate(func(s *dagplan.Stage) {
+			s.Type = dagplan.StageHashJoin
 			s.Dependencies = []string{"ex-1"}
 		}), "", 3, false},
-		{"window not eager-fed", mutate(func(s *physical.Stage) { s.Type = physical.StageWindow }), "", 3, false},
-		{"scalar deps keep barrier", mutate(func(s *physical.Stage) {
+		{"window not eager-fed", mutate(func(s *dagplan.Stage) { s.Type = dagplan.StageWindow }), "", 3, false},
+		{"scalar deps keep barrier", mutate(func(s *dagplan.Stage) {
 			s.ScalarDependencies = map[string]string{":scalar_1": "prod-1"}
 		}), "", 3, false},
 		{"gather-fused excluded (retry unsafe)", base, "agg-1", 3, false},
-		{"dep not a repartition", mutate(func(s *physical.Stage) { s.Dependencies = []string{"scan-1"} }), "", 3, false},
-		{"dep unknown", mutate(func(s *physical.Stage) { s.Dependencies = []string{"ghost"} }), "", 3, false},
-		{"two deps", mutate(func(s *physical.Stage) { s.Dependencies = []string{"ex-1", "scan-1"} }), "", 3, false},
-		{"dynamic-filter consumer", mutate(func(s *physical.Stage) {
-			s.ConsumeDynamicFilters = []physical.DynamicFilterConsume{{FilterID: "f"}}
+		{"dep not a repartition", mutate(func(s *dagplan.Stage) { s.Dependencies = []string{"scan-1"} }), "", 3, false},
+		{"dep unknown", mutate(func(s *dagplan.Stage) { s.Dependencies = []string{"ghost"} }), "", 3, false},
+		{"two deps", mutate(func(s *dagplan.Stage) { s.Dependencies = []string{"ex-1", "scan-1"} }), "", 3, false},
+		{"dynamic-filter consumer", mutate(func(s *dagplan.Stage) {
+			s.ConsumeDynamicFilters = []dagplan.DynamicFilterConsume{{FilterID: "f"}}
 		}), "", 3, false},
-		{"task count above workers (lane reservation)", mutate(func(s *physical.Stage) {
+		{"task count above workers (lane reservation)", mutate(func(s *dagplan.Stage) {
 			s.Distribution.Count = 24
 		}), "", 3, false},
-		{"singleton always one task", mutate(func(s *physical.Stage) {
-			s.Distribution = physical.Distribution{Kind: physical.DistSingleton}
+		{"singleton always one task", mutate(func(s *dagplan.Stage) {
+			s.Distribution = dagplan.Distribution{Kind: dagplan.DistSingleton}
 		}), "", 3, true},
 	}
 	for _, tc := range cases {
@@ -397,9 +397,9 @@ func TestEagerJoinWouldSplit(t *testing.T) {
 		f.noteCompletion(parts) // completed=1 of tasks → projection ×tasks
 		return f
 	}
-	join := physical.Stage{
-		ID: "join-1", Type: physical.StageHashJoin, JoinType: "inner",
-		Distribution: physical.Distribution{Kind: physical.DistHashPartitioned, Count: 3},
+	join := dagplan.Stage{
+		ID: "join-1", Type: dagplan.StageHashJoin, JoinType: "inner",
+		Distribution: dagplan.Distribution{Kind: dagplan.DistHashPartitioned, Count: 3},
 	}
 	c := newEagerTestCoordinator(true)
 	c.config.SkewSplit = true
@@ -414,7 +414,7 @@ func TestEagerJoinWouldSplit(t *testing.T) {
 	// stages (dispatchComputeStage skips planSkewSplitTasks), so the
 	// projection must not send the consumer to the barrier either.
 	chained := join
-	chained.ChainedJoins = []physical.ChainedJoinSpec{{Partitioned: true}}
+	chained.ChainedJoins = []dagplan.ChainedJoinSpec{{Partitioned: true}}
 	if c.eagerJoinWouldSplit(chained, hotProbe, coldBuild, 3, 3) {
 		t.Error("partitioned-chain stage must never report would-split")
 	}
@@ -452,91 +452,91 @@ func TestEagerJoinWouldSplit(t *testing.T) {
 }
 
 func TestEagerEligibleJoinConsumer(t *testing.T) {
-	repartA := physical.Stage{ID: "ex-a", Type: physical.StageExchangeRepartition,
-		Exchange: &physical.ExchangeStage{Keys: []string{"k"}, Count: 24}}
-	repartB := physical.Stage{ID: "ex-b", Type: physical.StageExchangeRepartition,
-		Exchange: &physical.ExchangeStage{Keys: []string{"k"}, Count: 24}}
-	scan := physical.Stage{ID: "scan-1", Type: physical.StageScan}
-	joinUp := physical.Stage{ID: "join-up", Type: physical.StageHashJoin,
-		Distribution: physical.Distribution{Kind: physical.DistHashPartitioned, Count: 24}}
-	faggUp := physical.Stage{ID: "fagg-up", Type: "final_aggregate",
-		Distribution: physical.Distribution{Kind: physical.DistHashPartitioned, Count: 24}}
-	joinSingle := physical.Stage{ID: "join-single", Type: physical.StageHashJoin,
-		Distribution: physical.Distribution{Kind: physical.DistSingleton}}
-	joinExch := physical.Stage{ID: "join-exch", Type: physical.StageHashJoin,
-		Distribution: physical.Distribution{Kind: physical.DistHashPartitioned, Count: 24},
-		Exchange:     &physical.ExchangeStage{Keys: []string{"k"}, Count: 24}}
-	byID := map[string]physical.Stage{
+	repartA := dagplan.Stage{ID: "ex-a", Type: dagplan.StageExchangeRepartition,
+		Exchange: &dagplan.ExchangeStage{Keys: []string{"k"}, Count: 24}}
+	repartB := dagplan.Stage{ID: "ex-b", Type: dagplan.StageExchangeRepartition,
+		Exchange: &dagplan.ExchangeStage{Keys: []string{"k"}, Count: 24}}
+	scan := dagplan.Stage{ID: "scan-1", Type: dagplan.StageScan}
+	joinUp := dagplan.Stage{ID: "join-up", Type: dagplan.StageHashJoin,
+		Distribution: dagplan.Distribution{Kind: dagplan.DistHashPartitioned, Count: 24}}
+	faggUp := dagplan.Stage{ID: "fagg-up", Type: "final_aggregate",
+		Distribution: dagplan.Distribution{Kind: dagplan.DistHashPartitioned, Count: 24}}
+	joinSingle := dagplan.Stage{ID: "join-single", Type: dagplan.StageHashJoin,
+		Distribution: dagplan.Distribution{Kind: dagplan.DistSingleton}}
+	joinExch := dagplan.Stage{ID: "join-exch", Type: dagplan.StageHashJoin,
+		Distribution: dagplan.Distribution{Kind: dagplan.DistHashPartitioned, Count: 24},
+		Exchange:     &dagplan.ExchangeStage{Keys: []string{"k"}, Count: 24}}
+	byID := map[string]dagplan.Stage{
 		"ex-a": repartA, "ex-b": repartB, "scan-1": scan,
 		"join-up": joinUp, "fagg-up": faggUp,
 		"join-single": joinSingle, "join-exch": joinExch,
 	}
 
-	base := physical.Stage{
-		ID: "join-1", Type: physical.StageHashJoin, JoinType: "inner",
+	base := dagplan.Stage{
+		ID: "join-1", Type: dagplan.StageHashJoin, JoinType: "inner",
 		Dependencies: []string{"ex-a", "ex-b"},
 		LeftDepStage: "ex-a", RightDepStage: "ex-b",
-		Distribution: physical.Distribution{Kind: physical.DistHashPartitioned, Count: 24},
+		Distribution: dagplan.Distribution{Kind: dagplan.DistHashPartitioned, Count: 24},
 	}
 	if !eagerEligibleJoinConsumer(base, byID, "") {
 		t.Fatal("shuffled hash join over two repartitions must be eligible")
 	}
-	mutate := func(fn func(*physical.Stage)) physical.Stage {
+	mutate := func(fn func(*dagplan.Stage)) dagplan.Stage {
 		s := base
 		fn(&s)
 		return s
 	}
 	cases := []struct {
 		name   string
-		s      physical.Stage
+		s      dagplan.Stage
 		fuseID string
 		want   bool
 	}{
-		{"broadcast join out of scope", mutate(func(s *physical.Stage) { s.Type = physical.StageBroadcastJoin }), "", false},
-		{"sort-merge join out of slice-1 scope", mutate(func(s *physical.Stage) { s.Type = physical.StageSortMergeJoin }), "", false},
-		{"group-by join takes legacy path", mutate(func(s *physical.Stage) { s.GroupByCols = []string{"g"} }), "", false},
+		{"broadcast join out of scope", mutate(func(s *dagplan.Stage) { s.Type = dagplan.StageBroadcastJoin }), "", false},
+		{"sort-merge join out of slice-1 scope", mutate(func(s *dagplan.Stage) { s.Type = dagplan.StageSortMergeJoin }), "", false},
+		{"group-by join takes legacy path", mutate(func(s *dagplan.Stage) { s.GroupByCols = []string{"g"} }), "", false},
 		{"gather-fused excluded", base, "join-1", false},
-		{"scalar deps keep barrier", mutate(func(s *physical.Stage) {
+		{"scalar deps keep barrier", mutate(func(s *dagplan.Stage) {
 			s.ScalarDependencies = map[string]string{":s": "p"}
 		}), "", false},
-		{"probe dep not a repartition", mutate(func(s *physical.Stage) {
+		{"probe dep not a repartition", mutate(func(s *dagplan.Stage) {
 			s.Dependencies = []string{"scan-1", "ex-b"}
 			s.LeftDepStage = "scan-1"
 		}), "", false},
-		{"fused-join dep count mismatch", mutate(func(s *physical.Stage) {
-			s.FusedJoins = []physical.FusedJoinSpec{{}}
+		{"fused-join dep count mismatch", mutate(func(s *dagplan.Stage) {
+			s.FusedJoins = []dagplan.FusedJoinSpec{{}}
 		}), "", false},
 		// Stage-chain fusion: Dependencies grow one per ChainedJoinSpec;
 		// a matching count is eligible (chained builds keep the barrier),
 		// a mismatch is not.
-		{"chained joins with matching deps eligible", mutate(func(s *physical.Stage) {
-			s.ChainedJoins = []physical.ChainedJoinSpec{{BuildDepStage: "scan-1"}}
+		{"chained joins with matching deps eligible", mutate(func(s *dagplan.Stage) {
+			s.ChainedJoins = []dagplan.ChainedJoinSpec{{BuildDepStage: "scan-1"}}
 			s.Dependencies = []string{"ex-a", "ex-b", "scan-1"}
 		}), "", true},
-		{"chained joins with absorbed partial aggregate eligible", mutate(func(s *physical.Stage) {
-			s.ChainedJoins = []physical.ChainedJoinSpec{{BuildDepStage: "scan-1"}}
+		{"chained joins with absorbed partial aggregate eligible", mutate(func(s *dagplan.Stage) {
+			s.ChainedJoins = []dagplan.ChainedJoinSpec{{BuildDepStage: "scan-1"}}
 			s.Dependencies = []string{"ex-a", "ex-b", "scan-1"}
 			s.ChainedAggGroupBy = []string{"g"}
-			s.ChainedAggSpecs = []physical.AggSpec{{}}
+			s.ChainedAggSpecs = []dagplan.AggSpec{{}}
 		}), "", true},
-		{"chained-join dep count mismatch", mutate(func(s *physical.Stage) {
-			s.ChainedJoins = []physical.ChainedJoinSpec{{BuildDepStage: "scan-1"}}
+		{"chained-join dep count mismatch", mutate(func(s *dagplan.Stage) {
+			s.ChainedJoins = []dagplan.ChainedJoinSpec{{BuildDepStage: "scan-1"}}
 		}), "", false},
 		// A3: a hash-partitioned compute producer backs a feed like a
 		// repartition; a Singleton or exchange-sink one does not.
-		{"compute-producer probe eligible", mutate(func(s *physical.Stage) {
+		{"compute-producer probe eligible", mutate(func(s *dagplan.Stage) {
 			s.Dependencies = []string{"join-up", "ex-b"}
 			s.LeftDepStage = "join-up"
 		}), "", true},
-		{"final-aggregate probe eligible", mutate(func(s *physical.Stage) {
+		{"final-aggregate probe eligible", mutate(func(s *dagplan.Stage) {
 			s.Dependencies = []string{"fagg-up", "ex-b"}
 			s.LeftDepStage = "fagg-up"
 		}), "", true},
-		{"singleton compute probe ineligible", mutate(func(s *physical.Stage) {
+		{"singleton compute probe ineligible", mutate(func(s *dagplan.Stage) {
 			s.Dependencies = []string{"join-single", "ex-b"}
 			s.LeftDepStage = "join-single"
 		}), "", false},
-		{"exchange-sink compute probe ineligible", mutate(func(s *physical.Stage) {
+		{"exchange-sink compute probe ineligible", mutate(func(s *dagplan.Stage) {
 			s.Dependencies = []string{"join-exch", "ex-b"}
 			s.LeftDepStage = "join-exch"
 		}), "", false},
@@ -549,8 +549,8 @@ func TestEagerEligibleJoinConsumer(t *testing.T) {
 }
 
 func TestEagerAliasForDep(t *testing.T) {
-	join := physical.Stage{
-		Type:            physical.StageHashJoin,
+	join := dagplan.Stage{
+		Type:            dagplan.StageHashJoin,
 		Dependencies:    []string{"ex-probe", "ex-build"},
 		LeftDepStage:    "ex-probe",
 		RightDepStage:   "ex-build",
@@ -568,7 +568,7 @@ func TestEagerAliasForDep(t *testing.T) {
 	if got := eagerAliasForDep(join, "ex-probe"); got != "probe_side" {
 		t.Errorf("collision probe alias = %q, want probe_side", got)
 	}
-	agg := physical.Stage{Type: "final_aggregate", Dependencies: []string{"ex-1"}}
+	agg := dagplan.Stage{Type: "final_aggregate", Dependencies: []string{"ex-1"}}
 	if got := eagerAliasForDep(agg, "ex-1"); got != "ex-1" {
 		t.Errorf("single-input alias = %q, want dep ID", got)
 	}

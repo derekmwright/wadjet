@@ -92,23 +92,23 @@ type groupKeyOut struct {
 }
 
 // groupKeyOutputs describes an Aggregate node's GROUP BY keys. The rules are
-// buildAggregate's own, stated once so aggregateOutputNames, the projection
+// buildAggregate's own, stated once so AggregateOutputNames, the projection
 // above the aggregate and the pre-aggregate projection cannot drift apart.
 func groupKeyOutputs(agg *logical.Node) []groupKeyOut {
 	if agg == nil || agg.Type != logical.NodeAggregate {
 		return nil
 	}
-	var decls, emitted colDecls
+	var decls, emitted ColDecls
 	var below map[string]string
 	if len(agg.Children) == 1 {
-		decls = inputColDecls(agg.Children[0])
+		decls = InputColDecls(agg.Children[0])
 		// The names already in scope, for MINTING: a slot is only hidden if
 		// nothing else answers to it, and a stored column named `__gb_expr_0`
 		// is a legal column that must keep working. The reservation refuses
 		// user-minted names at the query and DDL doors; minting skips what
 		// is in scope regardless, so the two do not have to agree for the
 		// slot to be safe.
-		emitted = emittedColDecls(agg.Children[0])
+		emitted = EmittedColDecls(agg.Children[0])
 		// The keys an aggregate DIRECTLY BELOW this one already publishes,
 		// by identity. `SELECT DISTINCT g + 1 AS k … GROUP BY g + 1` lowers
 		// to two aggregates keyed alike, and the outer one reads the inner
@@ -122,7 +122,7 @@ func groupKeyOutputs(agg *logical.Node) []groupKeyOut {
 		// column SPELLED like the key carries a DIFFERENT value under that
 		// name, and re-using it would group by the wrong column — which is
 		// the collision the slot exists for.
-		below = groupKeysPublishedBelow(agg.Children[0])
+		below = GroupKeysPublishedBelow(agg.Children[0])
 	}
 	haveExprs := len(agg.GroupByExprs) == len(agg.GroupBy)
 	// A literal key is elided only when a non-literal key remains: GROUP BY
@@ -146,8 +146,8 @@ func groupKeyOutputs(agg *logical.Node) []groupKeyOut {
 	// and neither knew what the other had already taken (ADR-0026).
 	//
 	// Seeded from BOTH scope views, because they answer different questions
-	// and a slot has to clear both. inputColDecls says what a bare reference
-	// can name and STOPS at a rename Project; emittedColDecls says what the
+	// and a slot has to clear both. InputColDecls says what a bare reference
+	// can name and STOPS at a rename Project; EmittedColDecls says what the
 	// input really publishes, which is where a derived table's renames live.
 	// A name visible to only one of them is still a name the slot must not
 	// take.
@@ -250,45 +250,20 @@ func allocGroupKeySlot(a *plansql.SlotAllocator) string {
 	return plansql.SlotName(plansql.SlotGroupKey, 0)
 }
 
-// declNames lists the column names a colDecls describes, for seeding an
+// declNames lists the column names a ColDecls describes, for seeding an
 // allocator with the scope it must not collide with.
-func declNames(d colDecls) []string {
-	if len(d.types) == 0 {
+func declNames(d ColDecls) []string {
+	if len(d.Types) == 0 {
 		return nil
 	}
-	out := make([]string, 0, len(d.types))
-	for name := range d.types {
+	out := make([]string, 0, len(d.Types))
+	for name := range d.Types {
 		out = append(out, name)
 	}
 	return out
 }
 
-// groupKeysByIdentity indexes a STAGE's published output names by the
-// identity of the expression each one names.
-//
-// The stage has only the names — it is a serialized plan, not an AST — so
-// each is parsed back to recover its identity. A name that does not parse
-// as an expression is indexed under itself, which is what a text comparison
-// gave before identities existed.
-func groupKeysByIdentity(names map[string]string) map[string]string {
-	if len(names) == 0 {
-		return nil
-	}
-	m := make(map[string]string, len(names))
-	for _, real := range names {
-		id := strings.ToLower(real)
-		if parsed, err := plansql.ParseExpression(real); err == nil {
-			id = plansql.ExprIdentity(parsed)
-		}
-		if _, taken := m[id]; taken {
-			continue
-		}
-		m[id] = real
-	}
-	return m
-}
-
-// groupKeyByIdentity indexes the DERIVED keys of an aggregate by identity, so
+// GroupKeyByIdentity indexes the DERIVED keys of an aggregate by identity, so
 // a SELECT item, a HAVING term or a sort key spelled any way at all resolves
 // to the one column the aggregate publishes it under.
 //
@@ -298,7 +273,7 @@ func groupKeysByIdentity(names map[string]string) map[string]string {
 // shape it would repair — a SELECT item that spells the column in a different
 // CASE — is broken with no GROUP BY in sight (`SELECT G FROM t`), so it
 // belongs to the identifier-folding defect and not to this one.
-func groupKeyByIdentity(agg *logical.Node) map[string]string {
+func GroupKeyByIdentity(agg *logical.Node) map[string]string {
 	keys := groupKeyOutputs(agg)
 	if len(keys) == 0 {
 		return nil
@@ -313,7 +288,7 @@ func groupKeyByIdentity(agg *logical.Node) map[string]string {
 		// column reference can spell. Leaving that last one out re-parsed
 		// `g + 1` as arithmetic over a `g` the aggregate does not emit and
 		// answered NULL for every row (ADR-0026).
-		if !k.Derived && !k.Literal && !k.Minted && nameIsPlainColumn(k.Name) {
+		if !k.Derived && !k.Literal && !k.Minted && NameIsPlainColumn(k.Name) {
 			continue
 		}
 		if k.Identity == "" {
@@ -327,36 +302,13 @@ func groupKeyByIdentity(agg *logical.Node) map[string]string {
 	return m
 }
 
-// aggregateUnderOutput finds the Aggregate the output projection reads, or nil
-// when the plan's top is not a grouped query. Only the nodes that leave the
-// aggregate's own columns visible are walked through: a Project, and the
-// wrappers aggScopePreservingWrapper names. A join or a set operation below
-// the top means the SELECT list is written over something else, and the walk
-// declines rather than guessing.
-func aggregateUnderOutput(root *logical.Node) *logical.Node {
-	for n := root; n != nil; {
-		switch {
-		case n.Type == logical.NodeAggregate:
-			return n
-		case n.Type == logical.NodeProject, aggScopePreservingWrapper(n.Type):
-		default:
-			return nil
-		}
-		if len(n.Children) != 1 {
-			return nil
-		}
-		n = n.Children[0]
-	}
-	return nil
-}
-
-// aggScopePreservingWrapper asks whether a wrapper keeps the aggregate's
+// AggScopePreservingWrapper asks whether a wrapper keeps the aggregate's
 // OWN output columns visible under their own names. Delegate to
 // logical.AggScopePreservingWrapper so physical and logical readers share
 // one list (#774; ADR-0026 §4). Include Window: it APPENDS columns without
 // renaming existing ones; stopping there can re-evaluate a published group
 // key as arithmetic against absent inputs (#737).
-func aggScopePreservingWrapper(t logical.NodeType) bool {
+func AggScopePreservingWrapper(t logical.NodeType) bool {
 	return logical.AggScopePreservingWrapper(t)
 }
 
@@ -403,22 +355,22 @@ func publishedGroupKeyNames(keys []groupKeyOut, elided map[int]bool) (names []st
 //
 // Used to decide that a GROUP BY key needs no materialization: the value is
 // already there, under the name the key is published under.
-func (d colDecls) has(name string) bool {
-	if name == "" || d.types == nil {
+func (d ColDecls) has(name string) bool {
+	if name == "" || d.Types == nil {
 		return false
 	}
-	_, ok := d.types[strings.ToLower(strings.TrimSpace(name))]
+	_, ok := d.Types[strings.ToLower(strings.TrimSpace(name))]
 	return ok
 }
 
-// groupKeysPublishedBelow indexes, by identity, the group keys an Aggregate
+// GroupKeysPublishedBelow indexes, by identity, the group keys an Aggregate
 // directly below n already publishes and the name it publishes each under.
 // Empty when there is no such aggregate — a scan, a join, a set operation and
 // a derived table all answer "nothing is already computed for you here".
 //
 // The walk descends only through nodes that pass an aggregate's own output
 // rows through unchanged.
-func groupKeysPublishedBelow(n *logical.Node) map[string]string {
+func GroupKeysPublishedBelow(n *logical.Node) map[string]string {
 	for n != nil {
 		switch n.Type {
 		case logical.NodeAggregate:
@@ -447,7 +399,7 @@ func groupKeysPublishedBelow(n *logical.Node) map[string]string {
 			// that the inner already publishes the key, materialized it again
 			// over a schema with no `g`, and collapsed the table into one NULL
 			// group on the single-process path.
-			if !aggScopePreservingWrapper(n.Type) {
+			if !AggScopePreservingWrapper(n.Type) {
 				return nil
 			}
 		}

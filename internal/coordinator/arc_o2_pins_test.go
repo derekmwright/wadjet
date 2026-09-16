@@ -139,7 +139,7 @@ var o2Pin = map[string]map[string]string{
 	// NAME and the aggregate publishes that name twice. It addresses the SLOT
 	// its class names now — the class read through the block, the position
 	// from the probe's model measured against the stage's own output stream
-	// (physical.joinProbeAggregateSlots, ADR-0026 §8i).
+	// (dagplan.joinProbeAggregateSlots, ADR-0026 §8i).
 
 	// THE COLUMN ORDER OF A STAR OVER A JOIN followed the side the planner
 	// BUILDS, not the FROM clause — ADR-0026 §7's own note: which side builds

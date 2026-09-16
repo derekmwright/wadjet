@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -162,8 +162,8 @@ AND NOT EXISTS (
     AND l3.l_receiptdate > l3.l_commitdate
 )`
 
-	prev := physical.ExchangeSubsume.Load()
-	t.Cleanup(func() { physical.ExchangeSubsume.Store(prev) })
+	prev := dagplan.ExchangeSubsume.Load()
+	t.Cleanup(func() { dagplan.ExchangeSubsume.Store(prev) })
 	for _, arm := range []struct {
 		name string
 		on   bool
@@ -172,7 +172,7 @@ AND NOT EXISTS (
 		{"kill-switch", false},
 	} {
 		t.Run(arm.name, func(t *testing.T) {
-			physical.ExchangeSubsume.Store(arm.on)
+			dagplan.ExchangeSubsume.Store(arm.on)
 			res, err := coord.ExecuteSQL(ctx, sql)
 			if err != nil {
 				t.Fatalf("ExecuteSQL: %v", err)

@@ -76,7 +76,7 @@ type affineBalance struct {
 // parallelism while keeping every task's files on one canonical cache.
 //
 // sizes, when aligned with files (catalog SizeBytes plumbed through
-// physical.Stage.ScanFileSizes), enables byte-balance shedding: owners
+// dagplan.Stage.ScanFileSizes), enables byte-balance shedding: owners
 // holding more than (1+tolerance)× the fair byte share hand surplus files
 // to each file's rendezvous runner-up, and task shares go
 // byte-proportional instead of count-proportional. A nil/misaligned sizes

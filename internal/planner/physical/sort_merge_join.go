@@ -24,7 +24,7 @@ var SortMergeJoinsPlanned atomic.Int64
 // unknown estimate (no scan root — e.g. a join-on-join input — or a missing
 // manifest) keeps the hash path: SMJ is an opt-in for provably-big sides,
 // never a default for uncertainty.
-func (p *Planner) shouldSortMergeJoin(node *logical.Node, leftKeys, rightKeys []string) bool {
+func (p *Planner) ShouldSortMergeJoin(node *logical.Node, leftKeys, rightKeys []string) bool {
 	if p.SortMergeJoinBytes <= 0 || len(node.Children) < 2 {
 		return false
 	}
@@ -34,16 +34,16 @@ func (p *Planner) shouldSortMergeJoin(node *logical.Node, leftKeys, rightKeys []
 	// (exec.SortMergeJoin.resolveCompareKernels); it has no equivalent of the
 	// hash path's per-side widened key encoder. Declining routes the query to
 	// the hash join, which answers it — a plan choice, not a refusal.
-	for _, t := range resolveJoinKeyTypes(node, leftKeys, rightKeys, p.cteKeyColTypes) {
+	for _, t := range ResolveJoinKeyTypes(node, leftKeys, rightKeys, p.CteKeyColTypes) {
 		if t != exec.KeyTypeUnresolved {
 			return false
 		}
 	}
-	buildBytes, ok := p.estimateSubtreeBytes(node.Children[1])
+	buildBytes, ok := p.EstimateSubtreeBytes(node.Children[1])
 	if !ok || buildBytes < p.SortMergeJoinBytes {
 		return false
 	}
-	probeBytes, ok := p.estimateSubtreeBytes(node.Children[0])
+	probeBytes, ok := p.EstimateSubtreeBytes(node.Children[0])
 	if !ok || probeBytes < p.SortMergeJoinBytes {
 		return false
 	}
@@ -61,7 +61,7 @@ func (p *Planner) buildSortMergeJoin(ctx context.Context, node *logical.Node, le
 	j := exec.NewSortMergeJoin(leftKeys, rightKeys)
 
 	// Set build-side table alias for column disambiguation in self-joins
-	if alias := joinArmAlias(node.Children[1]); alias != "" {
+	if alias := JoinArmAlias(node.Children[1]); alias != "" {
 		j.BuildTableAlias = alias
 	}
 	// Multi-table build subtrees carry per-column origin aliases so each
@@ -69,7 +69,7 @@ func (p *Planner) buildSortMergeJoin(ctx context.Context, node *logical.Node, le
 	// and nil for a NAMED ARM, whose Project has already run here — see
 	// materializedBuildColOrigins). This is a single-process operator, so it
 	// takes the same answer buildJoin does.
-	j.BuildColOrigins = subtreeNamingOf(node.Children[1]).materializedBuildColOrigins()
+	j.BuildColOrigins = SubtreeNamingOf(node.Children[1]).MaterializedBuildColOrigins()
 	if sm := p.getSpillManager(); sm != nil {
 		j.Spill = sm
 	}
@@ -117,12 +117,12 @@ func (p *Planner) buildSortMergeJoin(ctx context.Context, node *logical.Node, le
 		return nil, nil, nil, fmt.Errorf("building sort-merge join left side: %w", err)
 	}
 
-	return &smjSourceAdapter{
-		childSource: leftSource,
-		childOps:    leftOps,
+	return &SmjSourceAdapter{
+		ChildSource: leftSource,
+		ChildOps:    leftOps,
 		join:        j,
-		barrier:     buildDone,
-		buildErr:    &buildErr,
+		Barrier:     buildDone,
+		BuildErr:    &buildErr,
 	}, nil, &exec.CollectSink{}, nil
 }
 
@@ -136,39 +136,39 @@ type smjProbeSink struct {
 
 func (s smjProbeSink) Finalize(context.Context) error { return nil }
 
-// smjSourceAdapter wraps the probe child pipeline + sort-merge join into a
+// SmjSourceAdapter wraps the probe child pipeline + sort-merge join into a
 // Source (the sortSourceAdapter pattern): the first Next runs the probe
 // pipeline into the join — concurrently with the build goroutine — waits for
 // the build barrier, finalizes the merge, and streams joined batches.
-type smjSourceAdapter struct {
-	childSource exec.Source
-	childOps    []exec.UnaryOperator
+type SmjSourceAdapter struct {
+	ChildSource exec.Source
+	ChildOps    []exec.UnaryOperator
 	join        *exec.SortMergeJoin
-	barrier     <-chan struct{}
-	buildErr    *error
+	Barrier     <-chan struct{}
+	BuildErr    *error
 	initialized bool
 }
 
-func (s *smjSourceAdapter) Init(ctx context.Context) error {
+func (s *SmjSourceAdapter) Init(ctx context.Context) error {
 	return nil
 }
 
-func (s *smjSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error) {
+func (s *SmjSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error) {
 	if !s.initialized {
 		s.initialized = true
 		pipe := &exec.Pipeline{
-			Source:  s.childSource,
-			Ops:     s.childOps,
+			Source:  s.ChildSource,
+			Ops:     s.ChildOps,
 			Sink:    smjProbeSink{s.join},
-			Workers: innerPipelineWorkers(s.childSource),
+			Workers: innerPipelineWorkers(s.ChildSource),
 		}
 		if err := pipe.Run(ctx); err != nil {
-			<-s.barrier // the build goroutine owns join state; let it finish
+			<-s.Barrier // the build goroutine owns join state; let it finish
 			return nil, err
 		}
-		<-s.barrier
-		if *s.buildErr != nil {
-			return nil, *s.buildErr
+		<-s.Barrier
+		if *s.BuildErr != nil {
+			return nil, *s.BuildErr
 		}
 		if err := s.join.Finalize(ctx); err != nil {
 			return nil, err
@@ -177,13 +177,13 @@ func (s *smjSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error)
 	return s.join.Next(ctx)
 }
 
-func (s *smjSourceAdapter) Close() error {
+func (s *SmjSourceAdapter) Close() error {
 	s.join.Close()
-	return s.childSource.Close()
+	return s.ChildSource.Close()
 }
 
-func (s *smjSourceAdapter) RowsScanned() int64 {
-	if sp, ok := s.childSource.(exec.ScanStatsProvider); ok {
+func (s *SmjSourceAdapter) RowsScanned() int64 {
+	if sp, ok := s.ChildSource.(exec.ScanStatsProvider); ok {
 		return sp.RowsScanned()
 	}
 	return 0

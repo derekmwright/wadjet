@@ -7,9 +7,9 @@ package coordinator
 import (
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -24,7 +24,7 @@ import (
 // resolves in the batch — if any source is missing (wrapped aggregates not
 // yet handled), falls back to a rename-only pass so the output is at least
 // non-empty rather than truncated to nothing.
-func applyOutputRenames(gr *gatherResult, renames []physical.OutputRename) {
+func applyOutputRenames(gr *gatherResult, renames []dagplan.OutputRename) {
 	if gr == nil || len(renames) == 0 {
 		return
 	}
@@ -57,7 +57,7 @@ func applyOutputRenames(gr *gatherResult, renames []physical.OutputRename) {
 // replayed from gather spill scratch. Both paths MUST use the same instance
 // so a single query's batches all share one schema shape.
 type batchRenamer struct {
-	renames  []physical.OutputRename
+	renames  []dagplan.OutputRename
 	compiled map[int]expr.Expr // index → compiled expr; nil map = compilation failed
 	// exprType is the output column type for each compiled expression, decided
 	// ONCE at construction so it cannot flap between batches (an all-null batch
@@ -81,7 +81,7 @@ type batchRenamer struct {
 // source column resolves in columns (case-insensitive, tolerating worker-
 // side lowercasing). Otherwise batches get a rename-only pass so the output
 // is at least non-empty rather than truncated to nothing.
-func newBatchRenamer(renames []physical.OutputRename, columns []string) *batchRenamer {
+func newBatchRenamer(renames []dagplan.OutputRename, columns []string) *batchRenamer {
 	br := &batchRenamer{renames: renames, project: true}
 	br.compiled = make(map[int]expr.Expr, len(renames))
 	br.exprType = make(map[int]parquet.TypeID, len(renames))
@@ -148,7 +148,7 @@ func newBatchRenamer(renames []physical.OutputRename, columns []string) *batchRe
 // Otherwise return -1: 1 < M < N has no valid counting rule, never reuse a first match.
 // The caller then degrades to a rename-only pass, exposing a wider result.
 // See docs/internals/gather-rename-source-ordinals.md for the design.
-func renameSourceIndices(names []string, renames []physical.OutputRename) []int {
+func renameSourceIndices(names []string, renames []dagplan.OutputRename) []int {
 	out := make([]int, len(renames))
 	groups := make(map[string][]int, len(renames))
 	for i, r := range renames {
@@ -261,7 +261,7 @@ func renameSourceIndices(names []string, renames []physical.OutputRename) []int 
 // answer to, by the CLASS of the select item: an aggregate output takes the
 // LAST such column, a group-key reference the FIRST. It reports false when the
 // name is not duplicated, where the ordinary resolution already answers.
-func classScopedMatch(names []string, r physical.OutputRename) (int, bool) {
+func classScopedMatch(names []string, r dagplan.OutputRename) (int, bool) {
 	if r.Expr != nil {
 		return 0, false
 	}

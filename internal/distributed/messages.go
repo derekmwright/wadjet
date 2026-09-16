@@ -153,7 +153,7 @@ type Task struct {
 	InputFiles  []string  `json:"input_files,omitempty"` // results from previous stage
 
 	// RowLimit bounds how many rows this task emits, for a LIMIT with no
-	// ORDER BY (physical.Stage.RowLimit). The task stops pulling once
+	// ORDER BY (dagplan.Stage.RowLimit). The task stops pulling once
 	// satisfied; the coordinator trims the union of tasks to the real limit.
 	RowLimit int `json:"row_limit,omitempty"`
 
@@ -197,14 +197,14 @@ type Task struct {
 	JoinProbeSchema []ColumnSpec `json:"join_probe_schema,omitempty"`
 	// HiddenJoinColumns are the join's OWN materialized columns — a
 	// decorrelated LATERAL's correlation key — which the probe must not
-	// publish however wide Columns is. See physical.Stage.HiddenJoinCols and
+	// publish however wide Columns is. See dagplan.Stage.HiddenJoinCols and
 	// exec.HashJoinProbe.OutputExclude.
 	HiddenJoinColumns []HiddenJoinColumn `json:"hidden_join_columns,omitempty"`
 	// LateralEmptyDefaults is the empty-input value of each output column of
 	// an ungrouped-aggregate lateral, LateralPadMarker the column whose NULL
 	// marks the row that needs it, and LateralDropMarker says the default
 	// operator is the one that removes the marker. See
-	// physical.Stage.LateralEmptyDefaults and exec.LateralEmptyDefault.
+	// dagplan.Stage.LateralEmptyDefaults and exec.LateralEmptyDefault.
 	LateralEmptyDefaults []LateralEmptyDefault `json:"lateral_empty_defaults,omitempty"`
 	LateralPadMarker     string                `json:"lateral_pad_marker,omitempty"`
 	LateralDropMarker    bool                  `json:"lateral_drop_marker,omitempty"`
@@ -357,7 +357,7 @@ type Task struct {
 
 	// StageType discriminates TaskTypeStage variants: "scan", "hash_join",
 	// "broadcast_join", "aggregate", "sort", "merge_sort", "window",
-	// "final_aggregate". Matches physical.Stage.Type strings. Empty for
+	// "final_aggregate". Matches dagplan.Stage.Type strings. Empty for
 	// non-TaskTypeStage tasks.
 	StageType string `json:"stage_type,omitempty"`
 
@@ -467,7 +467,7 @@ const (
 	// OpLimit applies OFFSET then LIMIT to the whole stream (exec.Limit).
 	// It runs in a StageLimit fragment, which the planner makes Singleton
 	// precisely so this operator sees every row: a per-task LIMIT n over N
-	// tasks is not a global LIMIT n. See physical.StageLimit (#478).
+	// tasks is not a global LIMIT n. See dagplan.StageLimit (#478).
 	OpLimit OpType = "limit"
 
 	// OpDecimalCoerce moves the named columns into one declared
@@ -1074,7 +1074,7 @@ type LateralEmptyDefault struct {
 	ExprSQL string `json:"expr_sql"`
 }
 
-// HiddenJoinColumn is physical.HiddenJoinCol on the wire: one column a join
+// HiddenJoinColumn is dagplan.HiddenJoinCol on the wire: one column a join
 // MINTED for itself, addressed by its ORDINAL in the side that carries it.
 // The name is the planner's expectation at that ordinal and is a SAFETY CHECK
 // — when the plan and the runtime disagree the column is KEPT, because an

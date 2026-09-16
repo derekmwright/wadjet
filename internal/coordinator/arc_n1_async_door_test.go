@@ -15,7 +15,7 @@ import (
 // `SubmitSQL` + `GetQueryResults` is a FOURTH place a result set is assembled,
 // and it is the one place that reads its columns off the GATHERED BATCHES —
 // of which a zero-row query has none. The DAG's own fallback,
-// `physical.GatherOutputSchema`, describes a GATHER stage, and a one-stage plan
+// `dagplan.GatherOutputSchema`, describes a GATHER stage, and a one-stage plan
 // has none, so EVERY zero-row SELECT came back from this door with
 // `"columns": null` and HTTP 200 — including the named select list that the
 // embedded, coordinator and HTTP-sync doors have described from the plan since

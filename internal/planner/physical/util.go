@@ -175,7 +175,7 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 			stats := parquet.ReconcileRowGroupStats(fr, readSchema, pqReader.RowGroupStats(rgIdx))
 			pruned := false
 			for _, pred := range preds {
-				op := mapPredOp(pred.Op)
+				op := MapPredOp(pred.Op)
 				if op >= 0 {
 					sp := scan.StatsPredicate{Column: pred.Column, Op: op, Value: pred.Value}
 					if scan.CanPruneRowGroup(sp, stats) {
@@ -291,8 +291,8 @@ func readBatchViaRows(pqReader *parquet.Reader, schema []parquet.Column, require
 	return fromRows(readSchema, rows), nil
 }
 
-// mapPredOp converts a logical predicate operator string to an exec.CompareOp.
-func mapPredOp(op string) exec.CompareOp {
+// MapPredOp converts a logical predicate operator string to an exec.CompareOp.
+func MapPredOp(op string) exec.CompareOp {
 	switch strings.ToLower(op) {
 	case "=":
 		return exec.OpEq
@@ -311,8 +311,8 @@ func mapPredOp(op string) exec.CompareOp {
 	}
 }
 
-// decimalFromBytes converts big-endian bytes to Int128.
-func decimalFromBytes(b []byte) batch.Int128 {
+// DecimalFromBytes converts big-endian bytes to Int128.
+func DecimalFromBytes(b []byte) batch.Int128 {
 	if len(b) == 0 {
 		return batch.Int128{}
 	}
@@ -923,7 +923,7 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 			// Predicate-based row group pruning
 			if len(inner.scanPreds) > 0 && scan.StatsPrune.On() {
 				for _, pred := range inner.scanPreds {
-					op := mapPredOp(pred.Op)
+					op := MapPredOp(pred.Op)
 					if op >= 0 {
 						sp := scan.StatsPredicate{Column: pred.Column, Op: op, Value: pred.Value}
 						if scan.CanPruneRowGroup(sp, stats) {

@@ -1,0 +1,535 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package dagplan
+
+import (
+	"strings"
+
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+
+	"github.com/derekmwright/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
+)
+
+// aggregateProjectionTarget finds the aggregate-family stage a Project node
+// sits directly above, among the stages its subtree emitted from index `from`.
+// ok=false when the shape is not that.
+//
+// The LAST such stage is the right one: both aggregate shapes end in the
+// final (fused scan-aggregate → final_aggregate, or partial aggregate →
+// final_aggregate), and that final is what the Project reads.
+func aggregateProjectionTarget(project *logical.Node, stages []Stage, from int) (stageIdx int, ok bool) {
+	if project == nil || project.Type != logical.NodeProject || len(project.Children) != 1 {
+		return 0, false
+	}
+	// Only a Project reading the aggregate's OUTPUT. A HAVING sits between
+	// the two as a Filter and changes nothing about the columns, so the walk
+	// descends through it (logical.AggregateBelowProject); anything else in
+	// between — a Sort, another Project, a join — emits or renames on its own
+	// terms and is a different question.
+	if logical.AggregateBelowProject(project) == nil {
+		return 0, false
+	}
+	for i := len(stages) - 1; i >= from; i-- {
+		switch stages[i].Type {
+		case StageAggregate, StageFinalAggregate, StageMergeAggregate:
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// absorbAggregateOutputProjection sets stage.ProjectExprs for the Project
+// above an aggregate only when a computed group key or an uncomputed
+// expression over aggregate outputs needs a usable alias.
+// Plain renames stay pass-through: resolveShuffleKey, physical.ResolveAggInputName,
+// resolveSortKeyColumn and physical.ResolveOutputRenameSource resolve back to sources.
+// Other outputs keep their emitted names; decline if no alias is needed.
+// Return performed renames as lowercased old name to new. Every downstream
+// reference, including gather, sort and filters, must use that map (#656).
+func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) map[string]string {
+	if len(project.Projections) == 0 || len(stage.ProjectExprs) > 0 {
+		return nil
+	}
+	groupKeys, aggOuts := aggregateStageOutputs(stage)
+	// DECLINED where this aggregate publishes ONE NAME TWICE — a derived key
+	// and one of the aggregate's own outputs both answering to `g + 1`
+	// (`SELECT g + 1 AS k, COUNT(*) AS "g + 1" … GROUP BY g + 1`).
+	//
+	// Carrying the projection there renames exactly one of the two, and every
+	// reference spelled BEFORE it — the sort key `aggregateOutputName`
+	// resolved to `g + 1`, the gather's rename — then names a column whose
+	// meaning has changed under it: the survivor is the OTHER class's. The
+	// query came back ordered by the COUNT.
+	//
+	// Declining leaves both columns under that one name, where the consumers
+	// that CAN tell them apart do: `exec.HashAggregate` emits keys before
+	// outputs, the gather's `OutputRename.IsAgg` pairs each rename with the
+	// column of its own class (#575), and a merge addresses its aggregates by
+	// ordinal (`mergeByPosition`). A projection carried wrong is worse than
+	// one not carried at all, which is this pass's own rule.
+	if aggregatePublishesADuplicateName(groupKeys, aggOuts, stage) {
+		return nil
+	}
+	decls := bareGroupKeyDecls(aggregateStageDecls(stage), stage, project)
+	// The identity indexes, built once. Each re-parses every published name,
+	// and the walk below asks them at every node of every SELECT item.
+	//
+	// Two of them, for the reason aggregateProjectionSource keeps the two
+	// NAME maps apart: a query may give a group key and an aggregate the same
+	// output name, and a whole SELECT item must resolve against the class it
+	// belongs to. The union is only for the sub-term walk, whose question is
+	// membership rather than which of two same-named columns is meant (#575).
+	keyIdentity := groupKeysByIdentity(groupKeys)
+	emittedAll := make(map[string]string, len(groupKeys)+len(aggOuts))
+	for k, v := range groupKeys {
+		emittedAll[k] = v
+	}
+	for k, v := range aggOuts {
+		emittedAll[k] = v
+	}
+	emittedIdentity := groupKeysByIdentity(emittedAll)
+	specs := make([]physical.ProjectExprSpec, 0, len(project.Projections)+len(groupKeys)+len(aggOuts))
+	renamed := map[string]string{}
+	needed := false
+	for i := range project.Projections {
+		p := &project.Projections[i]
+		alias := physical.ProjectionOutputName(*p)
+		if alias == "" {
+			return nil
+		}
+		src, computed, ok := aggregateProjectionSource(p, alias, groupKeys, aggOuts, keyIdentity, emittedAll, emittedIdentity)
+		if !ok {
+			return nil
+		}
+		switch {
+		case computed:
+			// This expression has no old spelling to retarget. Its declaration must
+			// come from the aggregate OUTPUT columns, not the catalog: nested aggregates
+			// already name synthetic OutputCol slots. stageAggregateDecls includes
+			// AggSpec.OutputPrecision/OutputScale (#685), keeping arithmetic and window
+			// aggregate consumers consistent with the #361 store guard (#784, #775).
+			// Decline a referenced DECIMAL aggregate whose spec lacks (p,s); declaring
+			// it without scale reads values at 10^0 (ADR-0024 item 2).
+			aggDecls, complete := stageAggregateDecls(stage, decls)
+			if !complete && referencesDecimalAggregate(p.ASTExpr, stage) {
+				return nil
+			}
+			decl := physical.InferProjectionDeclType(p.ASTExpr, parquet.TypeString, nil, aggDecls)
+			materialized := physical.DeclTypeParts(decl)
+			typ, prec, scale, fields := materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
+			specs = append(specs, physical.ProjectExprSpec{
+				Expr: src, Name: strings.ToLower(alias),
+				Type: typ, TypeKnown: true, Precision: prec, Scale: scale, Fields: fields,
+			})
+			needed = true
+		case !physical.NameIsPlainColumn(src):
+			// The stage emits it under an expression TEXT, which no
+			// consumer can name. The alias is the only usable spelling.
+			//
+			// It carries the key's DECLARED type. Leaving it unknown is not
+			// neutral: a set operation reconciles its arms by their declared
+			// types, so an untyped arm made the union pick FLOAT64 and CAST
+			// the OTHER arm, and the two arms then disagreed about what `gk`
+			// IS. The sort above read the key as float over an int vector
+			// and indexed an empty slice — a runtime panic, on a query
+			// PostgreSQL answers (#656 R4).
+			specs = append(specs, physical.ProjectExprSpec{
+				Expr: plansql.QuoteIdent(src), Name: strings.ToLower(alias),
+			})
+			declareGroupKeySpec(&specs[len(specs)-1], src, decls)
+			renamed[strings.ToLower(src)] = strings.ToLower(alias)
+			needed = true
+		default:
+			specs = append(specs, physical.ProjectExprSpec{Expr: src, Name: strings.ToLower(src)})
+		}
+	}
+	if !needed {
+		return nil
+	}
+	// An OpProject NARROWS the batch to exactly its outputs, so every other
+	// column the stage emits has to ride along as a pass-through — a
+	// consumer resolving one by source name would otherwise find it gone.
+	have := make(map[string]bool, len(specs))
+	for _, s := range specs {
+		have[s.Name] = true
+	}
+	for _, m := range []map[string]string{groupKeys, aggOuts} {
+		for low, real := range m {
+			if have[low] {
+				continue
+			}
+			have[low] = true
+			// A computed group key rides along under its OWN spelling too,
+			// delimited. The alias is what a consumer can NAME, but every
+			// resolver that ran before this projection existed — the sort
+			// key that chased `o_year` down to `substr(o_orderdate, 1, 4)`,
+			// the gather rename written against the same text — points at
+			// the old one, and narrowing it away would break them. Emitting
+			// both costs one column and keeps this projection purely
+			// ADDITIVE (#656 F1/F2).
+			expr := real
+			if !physical.NameIsPlainColumn(real) {
+				expr = plansql.QuoteIdent(real)
+			}
+			// The EXACT spelling, not the lowercased key: this is a
+			// pass-through, and every consumer that already resolved to this
+			// column named it as the stage spells it. `GROUP BY
+			// ARRAY[n_regionkey]` is emitted under that text, and a fused
+			// sort keyed on it stops finding it the moment the projection
+			// renames it to `array[n_regionkey]`.
+			specs = append(specs, physical.ProjectExprSpec{Expr: expr, Name: real})
+			declareGroupKeySpec(&specs[len(specs)-1], real, decls)
+		}
+	}
+	stage.ProjectExprs = specs
+	return renamed
+}
+
+// aggregateProjectionSource maps one SELECT-list item onto the aggregate
+// stage's output columns. computed=false returns the stage's exact output
+// NAME (unquoted — the caller decides whether it needs delimiting);
+// computed=true returns an EXPRESSION over those outputs.
+// The two maps are kept apart on purpose: a query may give a group key and an
+// aggregate the SAME output name (`SELECT g, COUNT(*) AS g … GROUP BY g`), and
+// looking an item up in the union would sometimes answer with the other one.
+func aggregateProjectionSource(p *logical.Projection, name string, groupKeys, aggOuts,
+	keyIdentity, emitted, emittedIdentity map[string]string) (src string, computed bool, ok bool) {
+	// An AGGREGATE item resolves against the aggregate outputs only. Its
+	// AggSpec.OutputCol is normally the item's own output name.
+	if p.IsAgg {
+		for _, cand := range []string{p.Expr, name} {
+			if cand == "" {
+				continue
+			}
+			if real, hit := aggOuts[strings.ToLower(cand)]; hit {
+				return real, false, true
+			}
+		}
+		return "", false, false
+	}
+	// A plain reference: a group key spelled as a column, or the exact text
+	// of a computed group key.
+	for _, cand := range []string{p.Column, p.Expr} {
+		if cand == "" {
+			continue
+		}
+		if real, hit := groupKeys[strings.ToLower(cand)]; hit {
+			return real, false, true
+		}
+		if real, hit := aggOuts[strings.ToLower(cand)]; hit {
+			return real, false, true
+		}
+	}
+	if p.ASTExpr == nil {
+		return "", false, false
+	}
+	// The same reference said differently. A computed group key is published
+	// under one canonical name and the SELECT item may spell it with other
+	// parentheses or other identifier case; comparing the two RENDERINGS
+	// made the spelling decide whether this projection resolved at all, and
+	// an unresolved one is rebuilt as arithmetic over columns the aggregate
+	// does not emit — NULL on every row (#723).
+	if real, hit := keyIdentity[plansql.ExprIdentity(p.ASTExpr)]; hit {
+		return real, false, true
+	}
+	// An expression over the aggregate's outputs (`COUNT(*) + 1`): the
+	// logical planner rewrote its aggregate calls into refs to their
+	// synthetic OutputCol, so every leaf must now be a name the stage emits.
+	rewritten, ok := requoteAggOutputRefsIdx(p.ASTExpr, emitted, emittedIdentity)
+	if !ok {
+		return "", false, false
+	}
+	return rewritten.String(), true, true
+}
+
+// requoteAggOutputRefs checks that every column reference in an expression
+// names one of the aggregate stage's outputs, rewriting each to the exact
+// spelling the stage emits. ok=false when any reference does not — the caller
+// then declines the whole projection rather than shipping an expression the
+// fragment cannot evaluate.
+//
+// It reuses physical.SubstituteNestedRenameRefs' copy-on-write shape without its
+// resolver: here the question is membership, not renaming.
+func requoteAggOutputRefs(n plansql.Node, emitted map[string]string) (plansql.Node, bool) {
+	return requoteAggOutputRefsIdx(n, emitted, groupKeysByIdentity(emitted))
+}
+
+// requoteAggOutputRefsIdx is requoteAggOutputRefs with the identity index
+// hoisted out of the recursion. Building it re-parses every emitted name, and
+// the walk visits every node of every SELECT item — ClickBench Q30 has ninety.
+func requoteAggOutputRefsIdx(n plansql.Node, emitted, byIdentity map[string]string) (plansql.Node, bool) {
+	// A WHOLE TERM can be the column. An aggregate emits its group key under
+	// the key's own expression TEXT, so above such a stage `n_regionkey + 1`
+	// is not arithmetic at all — it is the NAME of one column, and rebuilding
+	// it as arithmetic reads `n_regionkey`, which the aggregate's output does
+	// not carry, and answers NULL for every row.
+	//
+	// Matched by identity, so the term resolves however it is spelled: the
+	// stage publishes ONE name per key and `(n_regionkey + 1)` names the
+	// same key as `n_regionkey + 1` (#723).
+	if n != nil {
+		if _, isRef := n.(*plansql.ColRef); !isRef {
+			if real, hit := emitted[strings.ToLower(n.String())]; hit {
+				return &plansql.ColRef{Column: real}, true
+			}
+			if real, hit := byIdentity[plansql.ExprIdentity(n)]; hit {
+				return &plansql.ColRef{Column: real}, true
+			}
+		}
+	}
+	switch e := n.(type) {
+	case nil:
+		return nil, true
+	case *plansql.ColRef:
+		if e.Table != "" {
+			if real, hit := emitted[strings.ToLower(e.String())]; hit {
+				return &plansql.ColRef{Column: real}, true
+			}
+		}
+		real, hit := emitted[strings.ToLower(e.Column)]
+		if !hit {
+			return nil, false
+		}
+		return &plansql.ColRef{Column: real}, true
+	case *plansql.Lit, *plansql.IntervalLit:
+		return n, true
+	case *plansql.BinaryOp:
+		l, lok := requoteAggOutputRefsIdx(e.Left, emitted, byIdentity)
+		r, rok := requoteAggOutputRefsIdx(e.Right, emitted, byIdentity)
+		if !lok || !rok {
+			return nil, false
+		}
+		return &plansql.BinaryOp{Left: l, Op: e.Op, Right: r}, true
+	case *plansql.UnaryOp:
+		in, ok := requoteAggOutputRefsIdx(e.Inner, emitted, byIdentity)
+		if !ok {
+			return nil, false
+		}
+		return &plansql.UnaryOp{Op: e.Op, Inner: in}, true
+	case *plansql.ParenNode:
+		in, ok := requoteAggOutputRefsIdx(e.Inner, emitted, byIdentity)
+		if !ok {
+			return nil, false
+		}
+		return &plansql.ParenNode{Inner: in}, true
+	case *plansql.CastNode:
+		in, ok := requoteAggOutputRefsIdx(e.Inner, emitted, byIdentity)
+		if !ok {
+			return nil, false
+		}
+		return &plansql.CastNode{Inner: in, TypeName: e.TypeName}, true
+	}
+	// Every other node kind — a function call, a CASE, a subquery — is left
+	// alone rather than guessed at, which keeps the plan exactly as it was.
+	return nil, false
+}
+
+// aggregatePublishesADuplicateName reports whether this aggregate emits two
+// columns of one name — a group key and an aggregate output sharing it, or two
+// aggregates aliased alike.
+func aggregatePublishesADuplicateName(groupKeys, aggOuts map[string]string, stage *Stage) bool {
+	for low := range groupKeys {
+		if _, both := aggOuts[low]; both {
+			return true
+		}
+	}
+	seen := make(map[string]bool, len(stage.AggSpecs))
+	for _, a := range stage.AggSpecs {
+		low := strings.ToLower(a.OutputCol)
+		if low == "" {
+			continue
+		}
+		if seen[low] {
+			return true
+		}
+		seen[low] = true
+	}
+	return false
+}
+
+// aggregateStageOutputs lists the columns an aggregate stage's fragment emits,
+// keyed by lowercased name and valued by the exact spelling, split into the
+// GROUP BY keys and the aggregate outputs.
+func aggregateStageOutputs(s *Stage) (groupKeys, aggOuts map[string]string) {
+	groupKeys = make(map[string]string, len(s.GroupByCols))
+	aggOuts = make(map[string]string, len(s.AggSpecs))
+	for _, k := range s.GroupByCols {
+		if k != "" {
+			groupKeys[strings.ToLower(k)] = k
+		}
+	}
+	for _, a := range s.AggSpecs {
+		if a.OutputCol != "" {
+			aggOuts[strings.ToLower(a.OutputCol)] = a.OutputCol
+		}
+	}
+	return groupKeys, aggOuts
+}
+
+// aggregateStageDecls is the declared type of every aggregate stage output,
+// for typing a projection written over them.
+// bareGroupKeyDecls adds the declared type of every BARE group key, which
+// aggregateStageDecls cannot supply: `Stage.GroupByTypes` holds the DERIVED
+// keys only — a bare key IS a column of the aggregate's input and carries no
+// plan-time type of its own — so an expression over one had no declaration and
+// took the STRING fallback.
+//
+// `SELECT x.g FROM (SELECT -g AS g, COUNT(*) FROM t WHERE id < 6 GROUP BY g) x
+// ORDER BY 1` is the shape: the absorbed projection declared `-g` STRING, the
+// sort key materialized into a text vector, and both DAG arms answered
+// `-1 -2 -3 -4 -5 0` — the BYTE order — where the single-process pipeline
+// answers PostgreSQL's `-5 … 0`. The binary spellings of the same value
+// (`g * -3`, `0 - g`) were already right, because their own arms consult
+// `decls` for each operand and reach the aggregate's INPUT through a different
+// route; the unary one had nothing to consult (#851 round 2).
+//
+// The type comes from the aggregate's own INPUT, which is where a bare key's
+// value comes from, and is added only for a name the stage does not already
+// declare — a derived key's entry is the authority for its own name.
+func bareGroupKeyDecls(decls physical.ColDecls, stage *Stage, project *logical.Node) physical.ColDecls {
+	if stage == nil || len(stage.GroupByCols) == 0 {
+		return decls
+	}
+	agg := logical.AggregateOverGroupRows(project)
+	if agg == nil || len(agg.Children) != 1 {
+		return decls
+	}
+	in := physical.InputColDecls(agg.Children[0])
+	if len(in.Types) == 0 {
+		return decls
+	}
+	var types map[string]parquet.TypeID
+	var dec map[string]logical.DecimalMeta
+	for _, k := range stage.GroupByCols {
+		key := strings.ToLower(strings.TrimSpace(k))
+		if key == "" {
+			continue
+		}
+		if _, have := decls.Types[key]; have {
+			continue
+		}
+		t, ok := in.Types[key]
+		if !ok {
+			continue
+		}
+		if types == nil {
+			types = make(map[string]parquet.TypeID, len(decls.Types)+len(stage.GroupByCols))
+			for kk, vv := range decls.Types {
+				types[kk] = vv
+			}
+			dec = make(map[string]logical.DecimalMeta, len(decls.Dec))
+			for kk, vv := range decls.Dec {
+				dec[kk] = vv
+			}
+		}
+		types[key] = t
+		if d, has := in.Dec[key]; has {
+			dec[key] = d
+		}
+	}
+	if types == nil {
+		return decls
+	}
+	return physical.ColDecls{Types: types, Fields: decls.Fields, Dec: dec}
+}
+
+func aggregateStageDecls(s *Stage) physical.ColDecls {
+	types := make(map[string]parquet.TypeID, len(s.GroupByCols)+len(s.AggSpecs))
+	dec := map[string]logical.DecimalMeta{}
+	for _, k := range s.GroupByCols {
+		if t, ok := s.GroupByTypes[k]; ok {
+			types[strings.ToLower(k)] = t
+		}
+		if d, ok := s.GroupByDecimal[k]; ok {
+			dec[strings.ToLower(k)] = d
+		}
+	}
+	for _, a := range s.AggSpecs {
+		if a.OutputTypeKnown && a.OutputCol != "" {
+			types[strings.ToLower(a.OutputCol)] = a.OutputType
+		}
+	}
+	return physical.ColDecls{Types: types, Dec: dec}
+}
+
+// referencesDecimalAggregate reports whether an expression names an aggregate
+// output this stage declares DECIMAL. Stage.AggSpec has no (p,s) for one, so
+// such an expression has no declarable type here.
+// stageAggregateDecls is decls with this stage's own AGGREGATE OUTPUTS folded
+// in, so an expression written over them can be DECLARED rather than declined.
+//
+// complete=false means at least one DECIMAL aggregate output carries no (p,s);
+// the caller then declines the projection rather than declaring a DECIMAL with
+// no scale, which reads every value back at 10^0.
+//
+// The map is copied rather than mutated: decls is the caller's view of the
+// aggregate's INPUT and the pass-through arms below read it again.
+func stageAggregateDecls(stage *Stage, decls physical.ColDecls) (physical.ColDecls, bool) {
+	if stage == nil || len(stage.AggSpecs) == 0 {
+		return decls, true
+	}
+	types := make(map[string]parquet.TypeID, len(decls.Types)+len(stage.AggSpecs))
+	for k, v := range decls.Types {
+		types[k] = v
+	}
+	dec := make(map[string]logical.DecimalMeta, len(decls.Dec)+len(stage.AggSpecs))
+	for k, v := range decls.Dec {
+		dec[k] = v
+	}
+	complete := true
+	for _, a := range stage.AggSpecs {
+		name := strings.ToLower(strings.TrimSpace(a.OutputCol))
+		if name == "" || !a.OutputTypeKnown {
+			continue
+		}
+		if a.OutputType == parquet.TypeDecimal {
+			if a.OutputPrecision <= 0 {
+				complete = false
+				continue
+			}
+			dec[name] = logical.DecimalMeta{Precision: a.OutputPrecision, Scale: a.OutputScale}
+		}
+		types[name] = a.OutputType
+	}
+	return physical.ColDecls{Types: types, Fields: decls.Fields, Dec: dec}, complete
+}
+
+func referencesDecimalAggregate(n plansql.Node, stage *Stage) bool {
+	dec := map[string]bool{}
+	for _, a := range stage.AggSpecs {
+		if a.OutputCol != "" && a.OutputTypeKnown && a.OutputType == parquet.TypeDecimal {
+			dec[strings.ToLower(a.OutputCol)] = true
+		}
+	}
+	if len(dec) == 0 {
+		return false
+	}
+	for _, ref := range physical.CollectColRefs(n) {
+		if dec[strings.ToLower(ref.Column)] {
+			return true
+		}
+	}
+	return false
+}
+
+// declareGroupKeySpec puts the aggregate's DECLARED type for one of its own
+// outputs onto a pass-through spec.
+//
+// A projection NARROWS to its outputs and the fragment builds each output's
+// vector from the spec's declaration, so an undeclared pass-through is a
+// column whose type the plan does not state. Downstream that is not merely
+// missing information: reconcileSetOpArmTypes reads exactly this to decide a
+// set operation's output type, and an untyped arm sends it to FLOAT64.
+func declareGroupKeySpec(sp *physical.ProjectExprSpec, name string, decls physical.ColDecls) {
+	t, ok := decls.Types[strings.ToLower(name)]
+	if !ok {
+		return
+	}
+	sp.Type, sp.TypeKnown = t, true
+	sp.Fields = decls.Fields[strings.ToLower(name)]
+	if d, ok := decls.Dec[strings.ToLower(name)]; ok {
+		sp.Precision, sp.Scale = d.Precision, d.Scale
+	}
+}
