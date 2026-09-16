@@ -13,7 +13,7 @@ import (
 // #483 on the stage DAG, in the exact wiring standalone runs.
 //
 // cmd/wadjet's runStandalone builds ONE NATS KV and hands it to two catalog
-// owners: the coordinator (SELECT, via pgSrv.SetCoordinator) and a
+// owners: the coordinator (SELECT, via pgSrv.SetRouter) and a
 // wadjet.Open DB (INSERT/UPDATE/DELETE and DDL). This test reproduces that —
 // a DAG-only coordinator over tmdInfra's catalog, plus a DB over the same KV
 // and store — so a write through the DB has to be visible to the coordinator's

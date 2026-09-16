@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/derekmwright/wadjet/internal/coordinator"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/queryroute"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/wadjet"
@@ -57,7 +57,7 @@ func TestSendResultRows_PerBatch(t *testing.T) {
 	c := &pgConn{conn: rc}
 
 	batches := []*batch.RecordBatch{mk(1, 2, 3), mk(4, 5)}
-	sent, err := c.sendResultRows(context.Background(), []string{"n"}, coordinator.NewSliceStream(batches), nil, nil, nil, nil)
+	sent, err := c.sendResultRows(context.Background(), []string{"n"}, queryroute.NewSliceStream(batches), nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("sendResultRows: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestSendResultRows_LegacyRows(t *testing.T) {
 // (adversarial review of #464/#471): the #471 defect resurfacing under a
 // RENAMED output column.
 //
-// queryViaCoord resolves nestedSchema from res.OutputSchema(), which names
+// queryViaRouter resolves nestedSchema from res.OutputSchema(), which names
 // each column by its schema's own Name — not necessarily the name the
 // column surfaces under in the result's own Columns list, which an alias or
 // the gather's renamer can change. Before this fix, nestedColumnFor only
@@ -151,7 +151,7 @@ func TestSendResultRows_LegacyRows(t *testing.T) {
 // rendering "(Reston,VA,20190)" where PostgreSQL's declared order is
 // "(Reston,20190,VA)".
 //
-// This drives the exact chain queryViaCoord feeds sendResultRows — a coord-
+// This drives the exact chain queryViaRouter feeds sendResultRows — a coord-
 // style nestedSchema from nestedSchemaByName, through the SliceStream
 // harness TestSendResultRows_PerBatch above already established for the
 // coord path — without needing a live NATS-backed *coordinator.Coordinator
@@ -160,7 +160,7 @@ func TestSendResultRows_LegacyRows(t *testing.T) {
 // none of which reads through c.coord itself.
 func TestSendResultRowsRenamedRowColumnUsesCoordPositionalFallback(t *testing.T) {
 	// The query's declared output schema, exactly the shape
-	// queryViaCoord/nestedSchemaByName would see from res.OutputSchema():
+	// queryViaRouter/nestedSchemaByName would see from res.OutputSchema():
 	// column 1 is a ROW named "addr" with a deliberately non-alphabetical
 	// field order (sorted would be city, state, zip).
 	outputSchema := []parquet.Column{
@@ -189,7 +189,7 @@ func TestSendResultRowsRenamedRowColumnUsesCoordPositionalFallback(t *testing.T)
 	rc := &recordConn{}
 	c := &pgConn{conn: rc}
 	sent, err := c.sendResultRows(context.Background(), outCols,
-		coordinator.NewSliceStream([]*batch.RecordBatch{b}), nil, nil, nil, nestedSchema)
+		queryroute.NewSliceStream([]*batch.RecordBatch{b}), nil, nil, nil, nestedSchema)
 	if err != nil {
 		t.Fatalf("sendResultRows: %v", err)
 	}

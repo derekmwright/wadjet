@@ -22,11 +22,11 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/auth"
-	"github.com/derekmwright/wadjet/internal/coordinator"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/queryroute"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -38,7 +38,7 @@ import (
 // queries to a Wadjet DB instance.
 type Server struct {
 	db           *wadjet.DB
-	coord        *coordinator.Coordinator // optional; SELECT routes through native-DAG when set
+	router       queryroute.Router // optional; SELECT routes through it when set
 	listener     net.Listener
 	logger       *slog.Logger
 	wg           sync.WaitGroup
@@ -57,16 +57,19 @@ type Server struct {
 	sessions   map[int32]*pgConn
 }
 
-// SetCoordinator attaches a coordinator so SELECT statements stream through
-// coord.ExecuteSQL (native-DAG executor with batched output) instead of the
-// legacy wadjet.DB.Query path which materializes all rows into a single
-// CollectSink — root cause of the 2026-04-25 Q18 SF10 OOM.
+// SetRouter attaches a query router so SELECT statements stream through
+// its ExecuteSQL (the coordinator's native-DAG executor, with batched
+// output) instead of the legacy wadjet.DB.Query path which materializes all
+// rows into a single CollectSink — root cause of the 2026-04-25 Q18 SF10
+// OOM.
 //
-// When unset, all paths fall back to db.Query (current behavior; safe for
-// any caller that hasn't migrated). When set, only SELECT queries route
-// through coord; DDL / DESCRIBE / introspection stay on db.Query for now.
-func (s *Server) SetCoordinator(coord *coordinator.Coordinator) {
-	s.coord = coord
+// When unset, all paths fall back to db.Query. That is not a degraded mode:
+// it is the embedded server, pgwire over a wadjet.DB and nothing else, which
+// is why the router is an interface this package owns rather than the
+// coordinator type it used to be. When set, only SELECT and WITH route
+// through it; DDL / DESCRIBE / introspection stay on db.Query.
+func (s *Server) SetRouter(router queryroute.Router) {
+	s.router = router
 }
 
 // Config holds configuration for the pgwire server.
@@ -215,7 +218,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	c := &pgConn{
 		conn:         conn,
 		db:           s.db,
-		coord:        s.coord,
+		router:       s.router,
 		server:       s,
 		logger:       s.logger,
 		buf:          make([]byte, 0, 4096),
@@ -235,8 +238,8 @@ func (s *Server) handleConn(conn net.Conn) {
 type pgConn struct {
 	conn         net.Conn
 	db           *wadjet.DB
-	coord        *coordinator.Coordinator // optional: routes SELECT through native-DAG when non-nil
-	server       *Server                  // back-pointer for query admission
+	router       queryroute.Router // optional: routes SELECT away from db.Query when non-nil
+	server       *Server           // back-pointer for query admission
 	logger       *slog.Logger
 	buf          []byte
 	tlsConfig    *tls.Config   // non-nil = offer TLS upgrade on SSLRequest
@@ -256,16 +259,16 @@ type pgConn struct {
 	sessionVars map[string]string
 
 	// Extended Query protocol state
-	preparedSQL     string                  // last parsed statement SQL
-	preparedOIDs    []uint32                // parameter type OIDs Parse declared for it
-	portalSQL       string                  // last bound portal SQL
-	stmts           map[string]string       // named prepared statements
-	stmtOIDs        map[string][]uint32     // their declared parameter type OIDs
-	described       bool                    // true if Describe was sent for current portal
-	describedFields int                     // field count of the RowDescription Describe sent
-	resultFmtCodes  []int16                 // result format codes from Bind (0=text, 1=binary)
-	describeResult  *wadjet.QueryResult     // cached Describe result for Execute reuse
-	describeStream  coordinator.BatchStream // columnar half of describeResult (coord path)
+	preparedSQL     string              // last parsed statement SQL
+	preparedOIDs    []uint32            // parameter type OIDs Parse declared for it
+	portalSQL       string              // last bound portal SQL
+	stmts           map[string]string   // named prepared statements
+	stmtOIDs        map[string][]uint32 // their declared parameter type OIDs
+	described       bool                // true if Describe was sent for current portal
+	describedFields int                 // field count of the RowDescription Describe sent
+	resultFmtCodes  []int16             // result format codes from Bind (0=text, 1=binary)
+	describeResult  *wadjet.QueryResult // cached Describe result for Execute reuse
+	describeStream  queryroute.Stream   // columnar half of describeResult (routed path)
 	// describeNestedSchema is the declared ROW/ARRAY/MAP structure (field
 	// order, element type) sendDataRow needs to render a composite value in
 	// PostgreSQL's text form, keyed by output column name — resolved
@@ -1199,11 +1202,11 @@ func (c *pgConn) runSimpleStatement(sql string) bool {
 		return false
 	}
 	var result *wadjet.QueryResult
-	var stream coordinator.BatchStream
+	var stream queryroute.Stream
 	var nestedSchema *nestedFieldSchema
 	var err error
-	if c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
-		result, stream, nestedSchema, err = c.queryViaCoord(ctx, sql)
+	if c.router != nil && c.canBypassDB() && shouldRouteToRouter(sql) {
+		result, stream, nestedSchema, err = c.queryViaRouter(ctx, sql)
 	} else {
 		result, err = c.db.Query(ctx, sql)
 		if err == nil {
@@ -1568,11 +1571,11 @@ func (c *pgConn) describeSQL(sql string, fmtCodes []int16) {
 	ctx, cancel := c.queryContext()
 	defer cancel()
 	var result *wadjet.QueryResult
-	var stream coordinator.BatchStream
+	var stream queryroute.Stream
 	var nestedSchema *nestedFieldSchema
 	var err error
-	if c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(shapeSQL) {
-		result, stream, nestedSchema, err = c.queryViaCoord(ctx, shapeSQL)
+	if c.router != nil && c.canBypassDB() && shouldRouteToRouter(shapeSQL) {
+		result, stream, nestedSchema, err = c.queryViaRouter(ctx, shapeSQL)
 	} else {
 		result, err = c.db.Query(ctx, shapeSQL)
 		if err == nil {
@@ -1810,7 +1813,7 @@ func (c *pgConn) handleExecute(payload []byte) {
 	ctx, cancel := c.queryContext()
 	defer cancel()
 	var result *wadjet.QueryResult
-	var stream coordinator.BatchStream
+	var stream queryroute.Stream
 	var nestedSchema *nestedFieldSchema
 	if c.describeResult != nil {
 		result = c.describeResult
@@ -1821,8 +1824,8 @@ func (c *pgConn) handleExecute(payload []byte) {
 		c.describeNestedSchema = nil
 	} else {
 		var err error
-		if c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
-			result, stream, nestedSchema, err = c.queryViaCoord(ctx, sql)
+		if c.router != nil && c.canBypassDB() && shouldRouteToRouter(sql) {
+			result, stream, nestedSchema, err = c.queryViaRouter(ctx, sql)
 		} else {
 			result, err = c.db.Query(ctx, sql)
 			if err == nil {

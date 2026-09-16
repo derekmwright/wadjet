@@ -22,7 +22,7 @@ func TestResolvedRowContainersAndNullUnionArms(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			db, c := coordinator.FixedRowWireArm(t, mode)
 			srv := pgwire.NewServer(db, pgwire.Config{}, nil)
-			srv.SetCoordinator(c)
+			srv.SetRouter(coordinator.NewQueryRouter(c))
 			if err := srv.Start("127.0.0.1:0"); err != nil {
 				t.Fatal(err)
 			}

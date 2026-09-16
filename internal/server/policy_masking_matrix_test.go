@@ -586,7 +586,7 @@ func pmRigUpWith(t *testing.T, ctx context.Context, provider *auth.Provider) pmR
 	t.Cleanup(func() { pgDAGdb.Close() })
 	pgDAGdb.SetAuthProvider(provider)
 	pgDAG := pgwire.NewServer(pgDAGdb, pgwire.Config{AuthProvider: provider}, logger)
-	pgDAG.SetCoordinator(dag)
+	pgDAG.SetRouter(coordinator.NewQueryRouter(dag))
 	if err := pgDAG.Start("127.0.0.1:0"); err != nil {
 		t.Fatal(err)
 	}

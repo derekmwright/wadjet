@@ -18,7 +18,7 @@ package server
 // the same statement declared OID 1700 on one door and 701 on the other.
 //
 // Both doors are real pgwire servers over the same rows; the DAG door differs
-// only in `SetCoordinator`. The expected declarations are the census's own
+// only in `SetRouter`. The expected declarations are the census's own
 // list, parsed into (OID, typmod) here so the two gates cannot drift apart.
 //
 // TWO SHAPES since round 3, and the grouped one is the point: round 2's corpus
@@ -224,7 +224,7 @@ func TestTheBarDeclaresTheSameThingOnBothWireDoors(t *testing.T) {
 		t.Errorf("the DAG door decomposed NO bar into partial states — it answered "+
 			"in process, so `pgwire/dag` is a duplicate of `pgwire/single` and this "+
 			"gate proved nothing. LocalFastPathBytes is 0 and %d workers are "+
-			"registered; check that SetCoordinator still routes SELECT.",
+			"registered; check that SetRouter still routes SELECT.",
 			coord.Workers().Count())
 	}
 }
@@ -283,7 +283,7 @@ func owaDeclName(oid uint32, typmod int32) string {
 }
 
 // owaDoors stands up two pgwire servers over ONE set of rows: a single-process
-// door and a coordinator (DAG) door. They differ in `SetCoordinator` and in
+// door and a coordinator (DAG) door. They differ in `SetRouter` and in
 // nothing else, which is what makes a divergence between them a defect rather
 // than a difference in fixture.
 func owaDoors(t *testing.T, ctx context.Context) (singleAddr, dagAddr string, coord *coordinator.Coordinator) {
@@ -371,7 +371,7 @@ func owaDoors(t *testing.T, ctx context.Context) (singleAddr, dagAddr string, co
 	}
 	t.Cleanup(pgSingle.Shutdown)
 	pgDAG := pgwire.NewServer(db, pgwire.Config{}, nil)
-	pgDAG.SetCoordinator(coord)
+	pgDAG.SetRouter(coordinator.NewQueryRouter(coord))
 	if err := pgDAG.Start("127.0.0.1:0"); err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +494,7 @@ func TestTimeBucketDeclaresTimestampOnBothWireDoors(t *testing.T) {
 	if coord.OhlcvStateRoutes() == before {
 		t.Errorf("the DAG door dispatched nothing — `pgwire/dag` answered in "+
 			"process. LocalFastPathBytes is 0 and %d workers are registered; check "+
-			"that SetCoordinator still routes SELECT.", coord.Workers().Count())
+			"that SetRouter still routes SELECT.", coord.Workers().Count())
 	}
 }
 

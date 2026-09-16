@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/derekmwright/wadjet/internal/coordinator"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/queryroute"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/wadjet"
 )
@@ -49,7 +49,7 @@ func TestDataRowKeepsBothColumnsOfADuplicateName(t *testing.T) {
 	rc := &recordConn{}
 	c := &pgConn{conn: rc}
 	sent, err := c.sendResultRows(context.Background(), []string{"abs", "abs"},
-		coordinator.NewSliceStream([]*batch.RecordBatch{b}), nil, nil, nil, nil)
+		queryroute.NewSliceStream([]*batch.RecordBatch{b}), nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("sendResultRows: %v", err)
 	}

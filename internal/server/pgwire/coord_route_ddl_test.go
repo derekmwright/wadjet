@@ -6,7 +6,7 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// `shouldRouteThroughCoord` is the fact three documents now rest on: the
+// `shouldRouteToRouter` is the fact three documents now rest on: the
 // PostgreSQL wire protocol sends only SELECT and WITH to the coordinator, so a
 // statement whose ONLY handler is `Coordinator.ExecuteSQL` is unreachable from
 // psql however the server was started.
@@ -49,8 +49,8 @@ func TestThePgwireDoorRoutesOnlyQueriesToTheCoordinator(t *testing.T) {
 		{"MERGE INTO t USING (SELECT 1 AS i) s ON t.a = s.i WHEN MATCHED THEN UPDATE SET a = 2", false},
 	} {
 		t.Run(tc.sql, func(t *testing.T) {
-			if got := shouldRouteThroughCoord(tc.sql); got != tc.coord {
-				t.Errorf("shouldRouteThroughCoord(%q) = %v, want %v.\n"+
+			if got := shouldRouteToRouter(tc.sql); got != tc.coord {
+				t.Errorf("shouldRouteToRouter(%q) = %v, want %v.\n"+
 					"If DDL now routes to the coordinator, docs/sql-reference.md, "+
 					"docs/api-reference.md and docs/disaster-recovery.md all say it does "+
 					"not — CREATE SNAPSHOT and the ALERT statements are documented as "+
@@ -77,7 +77,7 @@ func TestNoCoordinatorOnlyStatementIsRoutedHere(t *testing.T) {
 		if parsed.SelectInfo != nil {
 			t.Fatalf("%q parses as a query; this list is for statements that do not", sql)
 		}
-		if shouldRouteThroughCoord(sql) {
+		if shouldRouteToRouter(sql) {
 			t.Errorf("%q routes to the coordinator, which is the only place its handler "+
 				"lives — if that is now true, the door attribution in the docs is stale "+
 				"and should be widened", sql)

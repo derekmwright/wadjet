@@ -83,7 +83,7 @@ func limitedDB(t *testing.T) *wadjet.DB {
 
 // TestQueryLimitsBoundTheStatementsPgwireDoesNotRoute is #803's pgwire gate.
 //
-// pgwire hands a statement to the coordinator only when shouldRouteThroughCoord
+// pgwire hands a statement to the coordinator only when shouldRouteToRouter
 // says so — the first six non-space bytes are SELECT, or it starts with WITH.
 // Everything else answers from the embedded wadjet.DB, which had no cost guard
 // at all, so `query_limits:` bounded nothing on the PostgreSQL wire for a
@@ -116,9 +116,9 @@ func TestQueryLimitsBoundTheStatementsPgwireDoesNotRoute(t *testing.T) {
 			// is not routed (the gate reads the first six non-space bytes),
 			// so it reaches the embedded planner; the plain one is routed and
 			// is here as the control that both planners carry the guard.
-			routed := shouldRouteThroughCoord(tc.sql)
+			routed := shouldRouteToRouter(tc.sql)
 			if want := tc.name == "plain-select"; routed != want {
-				t.Fatalf("test premise stale: shouldRouteThroughCoord(%q) = %v, want %v", tc.sql, routed, want)
+				t.Fatalf("test premise stale: shouldRouteToRouter(%q) = %v, want %v", tc.sql, routed, want)
 			}
 
 			fields := client.simpleQueryError(tc.sql)

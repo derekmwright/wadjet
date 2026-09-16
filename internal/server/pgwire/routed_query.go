@@ -4,21 +4,22 @@ import (
 	"context"
 	"strings"
 
-	"github.com/derekmwright/wadjet/internal/coordinator"
+	"github.com/derekmwright/wadjet/internal/queryroute"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/wadjet"
 )
 
-// shouldRouteThroughCoord reports whether a SQL statement should go through
-// coord.ExecuteSQL (the native-DAG executor). True for SELECT/WITH; false for
-// DDL, DML, DESCRIBE, EXPLAIN, SET, BEGIN, etc., which the coord doesn't
-// handle today and which need the legacy db.Query path.
+// shouldRouteToRouter reports whether a SQL statement should go through the
+// installed router's ExecuteSQL (the native-DAG executor, when the
+// coordinator is the router). True for SELECT/WITH; false for DDL, DML,
+// DESCRIBE, EXPLAIN, SET, BEGIN, etc., which the router doesn't handle today
+// and which need the legacy db.Query path.
 //
 // Detection is keyword-based rather than full-parse: pgwire already knows
 // it's a query statement at this point, but extended-query Bind/Execute
 // reuses the cached SQL across many code paths and a full Parse here would
 // be wasted CPU when the legacy path is the right answer anyway.
-func shouldRouteThroughCoord(sql string) bool {
+func shouldRouteToRouter(sql string) bool {
 	s := strings.TrimLeft(sql, " \t\n\r(")
 	if len(s) < 6 {
 		return false
@@ -35,23 +36,23 @@ func shouldRouteThroughCoord(sql string) bool {
 	return false
 }
 
-// canBypassDB reports whether the coord routing path is safe for this
-// connection. SECURITY GATE: db.Query enforces ABAC (row filters, column
-// policies, table-level access denial) via auth.EnforcePlanPolicies. The
-// coordinator applies the SAME enforcement in ExecuteSQL when an auth
-// provider is wired into it (Coordinator.SetAuthProvider → EnforcesABAC) —
-// queryContext already attaches the connection's identity, so authed
-// connections can route through the native-DAG executor and the local fast
-// path. Without coordinator-side enforcement, only unauthenticated
-// dev/harness connections may bypass db.Query.
+// canBypassDB reports whether the routing path is safe for this connection.
+// SECURITY GATE: db.Query enforces ABAC (row filters, column policies,
+// table-level access denial) via auth.EnforcePlanPolicies. The coordinator
+// applies the SAME enforcement in ExecuteSQL when an auth provider is wired
+// into it (Coordinator.SetAuthProvider → EnforcesABAC, reported here through
+// queryroute.Router) — queryContext already attaches the connection's
+// identity, so authed connections can route through the native-DAG executor
+// and the local fast path. Without router-side enforcement, only
+// unauthenticated dev/harness connections may bypass db.Query.
 func (c *pgConn) canBypassDB() bool {
 	if c.authProvider == nil && c.identity == nil {
 		return true
 	}
-	return c.coord != nil && c.coord.EnforcesABAC()
+	return c.router != nil && c.router.EnforcesABAC()
 }
 
-// queryViaCoord executes sql through coord.ExecuteSQL. The result batches
+// queryViaRouter executes sql through the installed router. The result batches
 // are returned as a consuming BatchStream, NOT boxed into QueryResult.Rows
 // — the send path boxes one batch (~2K rows) at a time via sendResultRows.
 // Results that exceeded the coordinator gather budget arrive as a lazy
@@ -63,16 +64,16 @@ func (c *pgConn) canBypassDB() bool {
 // only ever sees the 100 final rows because coord's native-DAG executor
 // produces the post-LIMIT batches at Gather. Legacy db.Query materialized
 // the full pre-LIMIT pipeline output.
-func (c *pgConn) queryViaCoord(ctx context.Context, sql string) (*wadjet.QueryResult, coordinator.BatchStream, *nestedFieldSchema, error) {
-	res, err := c.coord.ExecuteSQL(ctx, sql)
+func (c *pgConn) queryViaRouter(ctx context.Context, sql string) (*wadjet.QueryResult, queryroute.Stream, *nestedFieldSchema, error) {
+	res, err := c.router.ExecuteSQL(ctx, sql)
 	if err != nil {
 		res.Close()
 		return nil, nil, nil, err
 	}
 	// Read the schema BEFORE Stream() detaches the batches.
-	metas := coordColumnMetas(res)
+	metas := routedColumnMetas(res)
 	nestedSchema := nestedSchemaByName(res.OutputSchema())
-	return &wadjet.QueryResult{Columns: res.Columns, ColumnMetas: metas}, res.Stream(), nestedSchema, nil
+	return &wadjet.QueryResult{Columns: res.ColumnNames(), ColumnMetas: metas}, res.Stream(), nestedSchema, nil
 }
 
 // nestedFieldSchema carries declared ROW/ARRAY/MAP structure by output name
@@ -104,7 +105,7 @@ func nestedSchemaByName(schema []parquet.Column) *nestedFieldSchema {
 	return &nestedFieldSchema{byName: byName, ordered: schema}
 }
 
-// coordColumnMetas is the coord path's answer to wadjet.deriveColumnMetas:
+// routedColumnMetas is the routed path's answer to wadjet.deriveColumnMetas:
 // the typed column metadata sendTypedRowDescription needs, taken from the
 // schema of the vectors the values were actually stored in.
 //
@@ -117,17 +118,20 @@ func nestedSchemaByName(schema []parquet.Column) *nestedFieldSchema {
 // Nil when the schema does not cover every column: a partial declaration is
 // worse than the uniform fallback, because a client cannot tell which
 // columns were guessed.
-func coordColumnMetas(res *coordinator.SQLResult) []wadjet.ColumnMeta {
+func routedColumnMetas(res queryroute.Result) []wadjet.ColumnMeta {
 	schema := res.OutputSchema()
-	if len(schema) == 0 || len(res.Columns) == 0 {
+	columns := res.ColumnNames()
+	if len(schema) == 0 || len(columns) == 0 {
 		return nil
 	}
 	byName := make(map[string]parquet.Column, len(schema))
 	for _, col := range schema {
 		byName[col.Name] = col
 	}
-	metas := make([]wadjet.ColumnMeta, len(res.Columns))
-	for i, name := range res.Columns {
+	metas := make([]wadjet.ColumnMeta, len(columns))
+	unconstrained := res.WireUnconstrainedDecimal()
+	stringLength := res.StringLength()
+	for i, name := range columns {
 		col, ok := byName[name]
 		if !ok {
 			// Positional fallback: a renamed output column (the gather's
@@ -155,15 +159,15 @@ func coordColumnMetas(res *coordinator.SQLResult) []wadjet.ColumnMeta {
 			// — it cannot be, since the plan cannot always type an aggregate
 			// output — so the gate is applied here, keeping the field's
 			// documented DECIMAL meaning.
-			WireUnconstrained: col.Type == parquet.TypeDecimal && res.WireUnconstrainedDecimal[name],
-			StringLength:      coordStringLength(col, res.StringLength[name]),
+			WireUnconstrained: col.Type == parquet.TypeDecimal && unconstrained[name],
+			StringLength:      routedStringLength(col, stringLength[name]),
 		}
 	}
 	return metas
 }
 
 // sendResultRows emits a DataRow per result row and returns the count sent.
-// Columnar batches (coord path) are boxed one batch at a time, dropping each
+// Columnar batches (routed path) are boxed one batch at a time, dropping each
 // batch reference once sent so peak boxed residency stays one batch; boxed
 // rows (legacy db path) are sent as-is. fmtCodes selects the formatted
 // variant used by the extended protocol; nil sends text-format rows.
@@ -173,7 +177,7 @@ func coordColumnMetas(res *coordinator.SQLResult) []wadjet.ColumnMeta {
 // ErrorResponse after the partial DataRows (legal in the v3 protocol).
 // ctx is the statement's context: a CancelRequest (or statement_timeout)
 // mid-send stops the stream instead of sending the remaining rows.
-func (c *pgConn) sendResultRows(ctx context.Context, columns []string, stream coordinator.BatchStream, boxed *wadjet.QueryResult, fmtCodes []int16, metas []wadjet.ColumnMeta, nestedSchema *nestedFieldSchema) (int, error) {
+func (c *pgConn) sendResultRows(ctx context.Context, columns []string, stream queryroute.Stream, boxed *wadjet.QueryResult, fmtCodes []int16, metas []wadjet.ColumnMeta, nestedSchema *nestedFieldSchema) (int, error) {
 	sent := 0
 	// Resolved once per result, not per row: the value a client reads has
 	// to match the type the RowDescription declared, and only the metas
@@ -245,11 +249,11 @@ func (c *pgConn) closeDescribeCache() {
 	c.describedSQL = ""
 }
 
-// coordStringLength is the coord path's gate on a string modifier: the plan's
+// routedStringLength is the routed path's gate on a string modifier: the plan's
 // map answers by NAME without a type gate, and only the resolved column type
 // says whether the answer applies. wadjet.deriveColumnMetas makes the same
 // check for the same reason (#838).
-func coordStringLength(col parquet.Column, n int) int {
+func routedStringLength(col parquet.Column, n int) int {
 	if col.Type != parquet.TypeString {
 		return 0
 	}
