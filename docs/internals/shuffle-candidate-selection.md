@@ -1,6 +1,6 @@
 # Shuffle candidate selection
 
-Source: internal/planner/physical/stage_cost.go — PickShuffleCandidate, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/shuffle_candidate.go — PickShuffleCandidate, moved 2026-09-11 (#1026), moved again 2026-09-15 with the license split (LICENSING.md)
 
 ```go
 // PickShuffleCandidate identifies the largest non-probe scan above

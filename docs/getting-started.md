@@ -34,8 +34,16 @@ git clone https://github.com/derekmwright/wadjet.git
 cd wadjet
 # NOTE: -o must not be plain "wadjet" — that's the API package
 # directory, and Go would drop the binary inside it.
-go build -o wadjet-bin ./cmd/wadjet
+go build -o wadjet-bin ./cmd/wadjet     # the engine and its CLI
+go build -o wadjetd ./cmd/wadjetd       # the distributed server
 ```
+
+Two binaries, two licenses ([LICENSING.md](../LICENSING.md)). `wadjet`
+carries the command line and the embedded server — `query`, `shell`,
+`tables`, `serve` — and is MIT. `wadjetd` carries the distributed server,
+`serve --mode=standalone|coordinator|worker`, and is AGPL-3.0 with a
+commercial option. Everything below that does not start a cluster works with
+`wadjet` alone.
 
 ### As a Go Library
 
@@ -184,8 +192,10 @@ and is one of the two settings with no out-of-tree constructor; see
 [Embedding](embedding.md).
 
 The rest of this guide covers the **server** deployment — the same engine
-behind `wadjet serve`, speaking the PostgreSQL wire protocol, HTTP, and
-gRPC, backed by managed object storage.
+behind a `serve` command, speaking the PostgreSQL wire protocol, HTTP, and
+gRPC, backed by managed object storage. `wadjet serve` answers the wire
+protocol from one process; `wadjetd serve --mode=...` adds the coordinator,
+the workers and the HTTP and gRPC listeners.
 
 ## Start MinIO (Local Development)
 
@@ -257,10 +267,26 @@ mc mb local/wadjet
 > A query whose every source is a table function (`read_parquet`,
 > `read_csv`, `read_json`) needs no catalog and opens none.
 
-### Standalone Mode (Single Process)
+### Embedded Mode (One Process, pgwire Only)
 
 ```bash
 ./wadjet-bin serve \
+  --endpoint localhost:9000 \
+  --access-key minioadmin \
+  --secret-key minioadmin \
+  --bucket wadjet \
+  --pg-addr :5432
+```
+
+This is the engine you would embed in a Go program, published on the
+PostgreSQL wire protocol: one process, no NATS task queues, no workers, and
+no HTTP or gRPC listener. It answers the same SQL with the same answers as
+the modes below.
+
+### Standalone Mode (Single Process)
+
+```bash
+./wadjetd serve \
   --mode standalone \
   --endpoint localhost:9000 \
   --access-key minioadmin \

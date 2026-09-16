@@ -44,6 +44,16 @@ jobs:
         # over ~165 files — a few hundred ms, no fixtures or servers needed.
         run: go run ./tools/docscheck .
 
+      - name: License Boundary
+        # LICENSING.md: one repository, two licenses. No MIT package may reach
+        # an AGPL package through non-test imports, every .go file states its
+        # directory's region, every AGPL directory carries the AGPL text, and
+        # LICENSING.md names the same directories the code declares. The first
+        # of those is a transitive property of the import graph — an import
+        # added three packages down relicenses the MIT artifacts by accident,
+        # and no diff review catches that.
+        run: go run ./tools/licensecheck .
+
       - name: Unit Tests
         # -short skips heavy SF0.3 Polars/multi-cache-file local repro tests
         # that exist for hunting SF100 distributed bugs offline. They each

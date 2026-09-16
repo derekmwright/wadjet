@@ -6,9 +6,10 @@ Columnar analytics engine in Go with network-native operations, distributed exec
 
 ```bash
 # Build — every binary goes to dist/ (gitignored). Use the Taskfile:
-task build          # dist/wadjet
+task build          # dist/wadjet (MIT) and dist/wadjetd (AGPL-3.0)
 task build-all      # every ./cmd/... into dist/
 task clean          # remove dist/
+task licensecheck   # hold the license boundary (LICENSING.md)
 #
 # Never `go build -o wadjet`: wadjet/ is the API package directory and go
 # writes the binary INTO it rather than refusing. That is why /wadjet was
@@ -29,9 +30,26 @@ go test -bench=. -benchmem ./internal/engine/exec
 go test -bench=. -benchmem ./internal/engine/scan
 go test -bench=. -benchmem ./internal/engine/batch
 
-# Run standalone server
-wadjet serve --mode=standalone --pg-addr=:5432
+# Run the embedded server (pgwire over the in-process engine)
+wadjet serve --pg-addr=:5432
+
+# Run the distributed server
+wadjetd serve --mode=standalone --pg-addr=:5432
 ```
+
+## Licensing
+
+ONE repo, ONE module, TWO licenses (`LICENSING.md`): the embedded engine and
+`cmd/wadjet` are MIT; `internal/coordinator`, `internal/worker`,
+`internal/distributed`, `internal/dataplane`, `internal/wshf`,
+`internal/server` (not its `pgwire/` and `mcp/` subdirectories),
+`internal/clid`, `internal/harness`, `cmd/wadjetd` and the cluster-standing
+benchmark commands are AGPL-3.0 with a commercial option. Every .go file
+carries an SPDX header naming its region, every AGPL directory carries a
+verbatim `LICENSE` copy, and `go run ./tools/licensecheck .` (CI, `task
+housekeeping`) fails if an MIT package reaches AGPL code through a non-test
+import at ANY depth. A new package inherits MIT unless it is declared in
+`tools/licensecheck/regions.go`.
 
 ## Architecture
 
@@ -51,7 +69,12 @@ SQL text
 | Package | Purpose |
 |---|---|
 | `wadjet/` | Public embeddable API (`wadjet.DB`, `wadjet.Open()`) |
-| `cmd/wadjet/` | CLI entry point (Cobra: serve, query, shell, mcp) |
+| `cmd/wadjet/` | MIT binary: the CLI and the embedded server |
+| `cmd/wadjetd/` | AGPL binary: `serve --mode=standalone\|coordinator\|worker` |
+| `internal/cli/` | The command tree, the persistent flags and the config precedence both binaries share |
+| `internal/clid/` | The distributed serve modes (runStandalone / runCoordinator / runWorker) |
+| `internal/queryroute/` | The interface pgwire routes SELECT through (the coordinator satisfies it; the embedded server installs none) |
+| `internal/natsconn/` | Opening NATS: the embedded server, the connections, the JetStream context |
 | `internal/engine/batch/` | Record batches, vectors, selection vectors, batch pooling |
 | `internal/engine/exec/` | Pipeline executor, operators (filter, project, join, sort, aggregate, window); aggregate seams in `agg_consume.go`, `agg_accumulators.go`, `agg_partial_merge.go`, `agg_spill.go` |
 | `internal/engine/expr/` | Expression compiler, 379 scalar functions; sections in `expr_arith.go`, `expr_compare.go`, `expr_scalar_fns.go`, `expr_string_fns.go` |
@@ -65,6 +88,7 @@ SQL text
 | `internal/storage/parquet/` | Parquet reader/writer |
 | `internal/storage/ingest/` | Micro-batch accumulator + partitioner |
 | `internal/coordinator/` | Query coordinator (plan, dispatch, merge); `dag_dispatch.go`, `dag_compute.go`, `dag_fragments.go`, `dag_merge.go` |
+| `internal/coordinator/dagplan/` | Distributed placement policy: shuffle candidate, large-build scans, the aggregate shuffle |
 | `internal/worker/` | Distributed task executor |
 | `internal/server/pgwire/` | PostgreSQL wire protocol |
 | `internal/auth/` | API keys, JWT, mTLS, RBAC, ABAC policy engine, identity enrichment |
@@ -257,12 +281,15 @@ The `internal/storage/parquet/` package is **critical infrastructure** — any d
 ## Run Modes
 
 ```bash
+# Embedded (one process, pgwire over the in-process engine)
+wadjet serve --pg-addr=:5432
+
 # Development (all-in-one)
-wadjet serve --mode=standalone --pg-addr=:5432
+wadjetd serve --mode=standalone --pg-addr=:5432
 
 # Production distributed
-wadjet serve --mode=coordinator --pg-addr=:5432 --nats-url=nats://nats:4222
-wadjet serve --mode=worker --nats-url=nats://nats:4222
+wadjetd serve --mode=coordinator --pg-addr=:5432 --nats-url=nats://nats:4222
+wadjetd serve --mode=worker --nats-url=nats://nats:4222
 
 # Query interface
 psql -h localhost -p 5432 -U wadjet -d wadjet

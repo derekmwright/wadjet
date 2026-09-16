@@ -63,7 +63,7 @@ NATS provides the messaging backbone:
 ### Start the Coordinator
 
 ```bash
-./wadjet serve \
+./wadjetd serve \
   --mode coordinator \
   --http-addr :8080 \
   --grpc-addr :9090 \
@@ -81,7 +81,7 @@ NATS provides the messaging backbone:
 On each worker node:
 
 ```bash
-./wadjet serve \
+./wadjetd serve \
   --mode worker \
   --nats-url nats://coordinator.internal:4222 \
   --cluster-id central \
@@ -413,7 +413,7 @@ graph TD
 
 **Central coordinator:**
 ```bash
-./wadjet serve --mode coordinator \
+./wadjetd serve --mode coordinator \
   --cluster-id central \
   --nats-port 4222 \
   --endpoint minio-central:9000 \
@@ -422,7 +422,7 @@ graph TD
 
 **Central workers:**
 ```bash
-./wadjet serve --mode worker \
+./wadjetd serve --mode worker \
   --cluster-id central \
   --nats-url nats://coordinator:4222 \
   --memory-budget 268435456 --result-store 134217728 \
@@ -432,7 +432,7 @@ graph TD
 
 **Remote site workers (with leaf node connection):**
 ```bash
-./wadjet serve --mode worker \
+./wadjetd serve --mode worker \
   --cluster-id site-east \
   --nats-url nats://coordinator:4222 \
   --leaf-remote nats://coordinator:4222 \

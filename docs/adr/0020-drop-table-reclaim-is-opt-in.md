@@ -220,7 +220,7 @@ the sweep that calls it is opt-in.**
 **Wiring is opt-in** (`compaction.BackgroundConfig.ReclaimDroppedTables`,
 default `false`), not unconditional the way the compactor's own deferred
 deletes are. The reason is a real wiring gap, not caution for its own
-sake: a `*Catalog` is not unique per process. `cmd/wadjet/main.go`'s
+sake: a `*Catalog` is not unique per process. `internal/clid`'s
 standalone mode runs a `BackgroundCompactor` against one `*Catalog`, but
 its pgwire server opens a separate `wadjet.DB` (via `wadjet.Open`) with its
 *own* `*Catalog` — so a DROP issued over psql or the embedded API is

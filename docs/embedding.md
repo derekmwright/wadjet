@@ -4,6 +4,12 @@ Wadjet's `wadjet` package is the in-process query engine used by `cmd/wadjet`
 and by the test suites in this repository, giving a programmatic analytical
 query engine without running a separate server.
 
+It is **MIT-licensed**, as is everything it links: embed it, ship it, modify
+it, keep your changes. The AGPL-3.0 half of this repository is the
+distributed engine — the coordinator, the workers and the exchange — and an
+embedded program links none of it, which is a gate rather than a claim
+(`tools/licensecheck`, and [LICENSING.md](../LICENSING.md)).
+
 ## What the `wadjet` package exposes
 
 One import — `github.com/derekmwright/wadjet/wadjet` — is everything an
@@ -23,7 +29,7 @@ that package and runs the guide's program; the test suite builds and runs it,
 so this table is checked rather than asserted.
 
 **Deliberately not exposed.** `Config.MetaKV` (a catalog shared with a
-`wadjet serve` process, built from NATS JetStream) and `Config.AuthProvider`
+`serve` process, built from NATS JetStream) and `Config.AuthProvider`
 (in-process ABAC) name types under `internal/` and have no public
 constructor. A program needing either has to live inside this repository, or
 reach the engine through a server door — the PostgreSQL wire protocol, HTTP or
@@ -62,7 +68,7 @@ db, err := wadjet.Open(ctx, wadjet.Config{
 The `Config` struct accepts:
 - `Store` — the object store, from `wadjet.NewS3Store` (production), `wadjet.NewFileStore` (local dev) or `wadjet.NewMemStore` (testing)
 - `Bucket` — S3 bucket name
-- `MetaKV` — catalog KV. **nil means an in-memory catalog**: every table you create is process-local and gone at exit, and a `wadjet serve` process cannot see it. Pass `catalog.NewNATSKV(js)` to share the catalog with a server.
+- `MetaKV` — catalog KV. **nil means an in-memory catalog**: every table you create is process-local and gone at exit, and a `serve` process cannot see it. Pass `catalog.NewNATSKV(js)` to share the catalog with a server.
 - `Logger` — Optional `*slog.Logger` (defaults to slog.Default)
 - `MemoryBudget` — per-query memory budget in bytes (0 = unlimited); pipeline breakers spill past it
 - `SpillDir` — directory for spill-to-disk files (empty = OS temp dir)
@@ -70,7 +76,7 @@ The `Config` struct accepts:
 - `SortMergeJoinBytes`, `LateMaterialization`, `BushyJoinReorder` — planner knobs (0/false = off)
 - `EnableAlerts` — turns on the CREATE ALERT scheduler; call `db.Close()` to stop it.
   It also gates the alert DDL: `CREATE`/`ALTER`/`DROP ALERT` are refused on a `DB`
-  that does not carry a scheduler. That coupling is why `wadjet serve` does not give
+  that does not carry a scheduler. That coupling is why `wadjetd serve` does not give
   its PostgreSQL wire door the alert statements — the coordinator in that process
   already runs a scheduler, and a second one would fire every alert twice. See
   [SQL reference](sql-reference.md#parsed-and-not-executed).

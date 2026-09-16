@@ -447,11 +447,11 @@ Wadjet logs to stderr. In production, redirect to your log aggregation system:
 ```bash
 # systemd
 [Service]
-ExecStart=/usr/local/bin/wadjet serve ...
+ExecStart=/usr/local/bin/wadjetd serve ...
 StandardError=journal
 
 # Docker
-docker run ... wadjet serve ... 2>&1 | tee /var/log/wadjet/server.log
+docker run ... wadjetd serve ... 2>&1 | tee /var/log/wadjet/server.log
 
 # Kubernetes
 # Logs are automatically captured by the kubelet

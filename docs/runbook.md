@@ -2,7 +2,7 @@
 
 How to run the engine in each deployment shape, which knobs matter for
 which scenario, and what is (and is not) changeable at runtime. Grounded
-against `cmd/wadjet/main.go` as of 2026-07-04 (post morsel-v2 merge).
+against the CLI as of 2026-07-04 (post morsel-v2 merge); that code now lives in `internal/cli` and `internal/clid`.
 Companion docs: `operations.md` (metrics, troubleshooting),
 `configuration.md` (YAML config file), `distributed.md` (cluster
 concepts), `security.md` (authn/z), `tuning.md`.

@@ -60,7 +60,7 @@ rm -rf ~/.wadjet/nats
 
 # 3. Restart the coordinator with the restore flag — it restores the newest
 #    snapshot before serving.
-wadjet serve --mode=coordinator \
+wadjetd serve --mode=coordinator \
   --catalog-snapshot-s3-prefix=s3://wadjet/catalog/ \
   --force-restore-catalog=latest ...
 ```
@@ -75,7 +75,7 @@ when its catalog holds no tables.
 aws s3 ls s3://wadjet/catalog/snapshots/
 
 # 2. Restore that timestamp
-wadjet serve --mode=coordinator \
+wadjetd serve --mode=coordinator \
   --catalog-snapshot-s3-prefix=s3://wadjet/catalog/ \
   --force-restore-catalog=20260327T060000Z ...
 ```

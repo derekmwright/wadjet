@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package cli
 
 import (
@@ -150,9 +152,15 @@ var (
 // census cell independent of the last.
 func NewRootCmd(serve *cobra.Command) *cobra.Command {
 	rootCmd := &cobra.Command{
+		// The wadjetd binary overrides these three: one tree, two programs
+		// (LICENSING.md), and usage text that names the wrong one sends a
+		// user to the wrong binary.
 		Use:   "wadjet",
-		Short: "Wadjet — lightweight distributed analytical query engine",
-		Long:  "A distributed analytical query engine that uses embedded NATS for coordination and object storage for results.",
+		Short: "Wadjet — analytical query engine, embedded or distributed",
+		Long: "An analytical query engine over Parquet on object storage, speaking the PostgreSQL " +
+			"wire protocol.\n\n" +
+			"`wadjet serve` runs it in one process; `wadjetd serve --mode=...` runs it as a " +
+			"coordinator and workers.",
 		// Runtime failures (S3 unreachable, query errors) print the error
 		// alone — dumping the full flag listing after "context deadline
 		// exceeded" buries the message. Flag/usage mistakes still show

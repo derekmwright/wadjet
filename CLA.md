@@ -10,7 +10,7 @@ This Contributor License Agreement ("Agreement") documents the rights granted by
 
 **"Contribution"** means any work of authorship, including any modifications or additions to an existing work, that is submitted by You to Us for inclusion in Wadjet. "Submitted" means any form of electronic, verbal, or written communication sent to Us, including but not limited to pull requests, issues, patches, and email.
 
-**"Licensed Work"** means the Wadjet software project and all associated documentation.
+**"Licensed Work"** means the Wadjet software project and all associated documentation, under every license it is distributed under (see [LICENSING.md](LICENSING.md)).
 
 ## 2. Grant of Rights
 
@@ -29,6 +29,8 @@ To the extent permitted by applicable law, You waive and agree not to assert any
 ## 3. Dual Licensing
 
 You acknowledge that We may license the Licensed Work, including Your Contributions, under multiple licenses (including commercial licenses) at Our sole discretion. This right is essential to the sustainability of the project and is a condition of accepting Contributions.
+
+As of 2026, that right is in use: the Licensed Work is distributed under two licenses at once — the embedded engine under the MIT license and the distributed engine under the GNU Affero General Public License v3.0, with a commercial license available for the latter. Which part is under which is recorded in [LICENSING.md](LICENSING.md). This paragraph describes the present arrangement; it does not narrow the grant above, which continues to apply to any license We choose.
 
 ## 4. Representations
 

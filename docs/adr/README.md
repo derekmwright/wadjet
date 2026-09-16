@@ -54,3 +54,4 @@ Conventions:
 | [0034](0034-every-door-authorizes-before-it-acts.md) | Every door authorizes before it acts: one shared table-access decision, fail-closed configuration, and one refusal class per protocol | Accepted |
 | [0035](0035-mergeable-aggregate-states.md) | A summarizing aggregate ships a mergeable STATE, not its answer | Accepted |
 | [0036](0036-a-query-sourced-write-is-one-statement-one-commit.md) | A query-sourced write is one statement with one commit, and its schema is the plan's declared output | Accepted |
+| [0037](0037-one-module-two-licenses.md) | One module, two licenses: the embedded engine MIT, the distributed engine AGPL-3.0, and an import-boundary gate that holds the line | Accepted |

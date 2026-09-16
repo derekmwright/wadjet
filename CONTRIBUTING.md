@@ -13,8 +13,11 @@ Thank you for your interest in contributing to Wadjet! This document covers the 
 ## Development Setup
 
 ```bash
-# Build
-go build -o wadjet ./cmd/wadjet
+# Build both binaries (-o must not be plain "wadjet": wadjet/ is the API
+# package directory and Go writes the binary INTO it)
+task build                              # dist/wadjet and dist/wadjetd
+go build -o wadjet-bin ./cmd/wadjet     # the engine and its CLI (MIT)
+go build -o wadjetd ./cmd/wadjetd       # the distributed server (AGPL-3.0)
 
 # Run tests
 go test ./internal/... -timeout 5m
@@ -71,6 +74,28 @@ go test -run TestTPCHQueries ./benchmarks/tpch/ -timeout 5m
 4. A maintainer will review and may request changes
 5. Once approved, a maintainer will merge
 
+## Licensing
+
+This repository is one Go module with two licenses
+([LICENSING.md](LICENSING.md)): the embedded engine and the `wadjet` binary
+are MIT, and the distributed engine and `wadjetd` are AGPL-3.0 with a
+commercial option. Which half a directory is in is declared in
+`tools/licensecheck/regions.go`.
+
+Two things this asks of a change:
+
+- **Every new `.go` file carries an SPDX header** naming its directory's
+  region — `// SPDX-License-Identifier: MIT` or
+  `// SPDX-License-Identifier: AGPL-3.0-only` — as its first line, followed
+  by a blank line.
+- **No MIT package may import an AGPL package.** If a change needs one, the
+  code belongs on the other side of the line, or the seam belongs behind an
+  interface the MIT side owns (`internal/queryroute` is the worked example:
+  pgwire declares what it needs, the coordinator satisfies it).
+
+`go run ./tools/licensecheck .` checks both, along with the per-directory
+LICENSE copies, and runs in CI and in `task housekeeping`.
+
 ## Contributor License Agreement
 
 By submitting a contribution, you agree to the [CLA](CLA.md). Include the following sign-off in your first commit:
@@ -78,6 +103,11 @@ By submitting a contribution, you agree to the [CLA](CLA.md). Include the follow
 ```
 Signed-off-by: Your Name <your.email@example.com>
 ```
+
+The CLA is what makes the dual licensing above possible (§3): you grant the
+maintainer the right to license the work, including your contribution, under
+more than one license. It is unchanged by the split, and it applies the same
+way whichever region a contribution lands in.
 
 ## AI-Assisted Development
 
@@ -134,7 +164,13 @@ Checklist for every release:
    #429 release is the worked example: pre-#429 files are unreadable by
    pyarrow and are repaired by one rewrite, and a v0.18.0 reader silently
    truncates the new ones.
-6. Tag with `git tag -s` or an annotated tag from the release commit and
+6. **Publish both binaries.** A release carries `wadjet` (MIT — the engine,
+   the CLI and the embedded server) and `wadjetd` (AGPL-3.0 — the distributed
+   server); `task build` produces both into `dist/`. A release that ships one
+   of them alone leaves half the product unshipped, and a user who downloads
+   `wadjet` expecting `--mode=coordinator` gets a refusal naming the other
+   binary. Note in the release notes which binary a change is in.
+7. Tag with `git tag -s` or an annotated tag from the release commit and
    create the GitHub release from it.
 
 ## Reporting Issues

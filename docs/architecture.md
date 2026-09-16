@@ -31,7 +31,7 @@ stated.
 | Parquet reader/writer | own implementation: column projection, row-group pruning, nested types; a file's own statistics are treated as input, not fact | `internal/storage/parquet/`, [ADR-0018](adr/0018-parquet-file-numbers-are-input.md) |
 | Iceberg metadata | read-only v1/v2 metadata, manifest lists and manifests, bridged into the native catalog | `internal/iceberg/` |
 | NATS control plane | heartbeats, cancel/complete broadcasts, the KV catalog, and JetStream task queues in the default NATS dispatch mode | `internal/distributed/`, [ADR-0005](adr/0005-split-control-and-data-plane.md) |
-| gRPC data plane | worker↔worker exchange fetches ride gRPC whatever `--data-plane` says (the peer listener exists whenever `--streaming-exchange` is on, its default — `cmd/wadjet/main.go:2710-2715`); task dispatch, results and gather payloads move there too under `--data-plane=grpc` | `internal/dataplane/`, [ADR-0005](adr/0005-split-control-and-data-plane.md) |
+| gRPC data plane | worker↔worker exchange fetches ride gRPC whatever `--data-plane` says (the peer listener exists whenever `--streaming-exchange` is on, its default — `internal/clid/serve.go`); task dispatch, results and gather payloads move there too under `--data-plane=grpc` | `internal/dataplane/`, [ADR-0005](adr/0005-split-control-and-data-plane.md) |
 | Object-store circuit breaker | per operation class (read / write / delete), so a failing upload burst never fast-fails reads | [ADR-0028](adr/0028-operational-invariants-breaker-scope-and-query-reclamation.md) |
 | PostgreSQL wire protocol | `psql`, JDBC/ODBC and BI clients connect directly; PostgreSQL decides semantics, DuckDB is the performance goal and an oracle | `internal/server/pgwire/`, [ADR-0012](adr/0012-sql-semantics-authority.md) |
 | Kill switches | optimizations that could change the row set register a toggle (`WADJET_<NAME>=0`) and are swept by the invariance oracle | `internal/optswitch/` |
@@ -41,7 +41,7 @@ stated.
 
 ```mermaid
 graph TD
-    API["CLI / HTTP / gRPC / pgwire API<br/><sub>cmd/wadjet &nbsp; internal/server</sub>"]
+    API["CLI / HTTP / gRPC / pgwire API<br/><sub>cmd/wadjet &nbsp; cmd/wadjetd &nbsp; internal/server</sub>"]
     QP["Query Pipeline<br/><sub>SQL Parser → Logical Plan → Optimizer → Physical Plan → Execution Engine</sub>"]
     ST["Storage Layer<br/><sub>Object Store, Catalog,<br/>Parquet I/O, Ingest</sub>"]
     DL["Distributed Layer<br/><sub>NATS/JetStream, Coordinator,<br/>Worker Pool, Task Dispatch</sub>"]
@@ -57,7 +57,8 @@ graph TD
 
 ```
 github.com/derekmwright/wadjet/
-├── cmd/wadjet/             # CLI entry point (cobra commands)
+├── cmd/wadjet/             # CLI + embedded server entry point (MIT)
+├── cmd/wadjetd/            # Distributed server entry point (AGPL-3.0)
 ├── wadjet/             # Public embeddable Go API
 ├── proto/wadjet/v1/        # Protobuf service definition
 ├── gen/wadjet/v1/          # Generated gRPC + protobuf Go code
@@ -84,7 +85,12 @@ github.com/derekmwright/wadjet/
 │   │   ├── sql/            # Recursive descent SQL parser → SelectInfo
 │   │   ├── logical/        # Logical plan tree + optimizer
 │   │   └── physical/       # Physical plan + distributed stages
+│   ├── cli/                # The command tree, persistent flags, config precedence
+│   ├── clid/               # The distributed serve modes (standalone/coordinator/worker)
+│   ├── queryroute/         # The seam pgwire routes SELECT through (coordinator or nothing)
+│   ├── natsconn/           # Opening NATS: embedded server, connections, JetStream
 │   ├── coordinator/        # Distributed query coordinator + federated routing
+│   │   └── dagplan/        # Distributed placement policy (shuffle candidate, aggregate shuffle)
 │   ├── worker/             # Distributed task executor + result store
 │   ├── distributed/        # NATS messaging layer + cluster-scoped subjects
 │   ├── auth/               # Authentication + authorization
@@ -103,6 +109,14 @@ github.com/derekmwright/wadjet/
 │   └── format/             # table / json / csv output rendering
 └── test/                   # Integration tests
 ```
+
+Two license regions live in that tree: `internal/coordinator`,
+`internal/worker`, `internal/distributed`, `internal/dataplane`,
+`internal/wshf`, `internal/server` (excluding `pgwire/` and `mcp/`),
+`internal/clid`, `internal/harness`, `cmd/wadjetd` and the cluster-standing
+benchmark commands are AGPL-3.0; everything else is MIT. See
+[LICENSING.md](../LICENSING.md) and
+[ADR-0037](adr/0037-one-module-two-licenses.md).
 
 ## Data Model
 
@@ -443,7 +457,7 @@ graph TD
 - **Task routing**: Tasks are published to cluster-scoped NATS subjects (`wadjet.tasks.<cluster-id>.<type>.<query-id>.<stage-id>`). Workers subscribe to their cluster's filter (`wadjet.tasks.<cluster-id>.>`)
 - **Task placement**: eager reservation → cache affinity → input locality → memory bin-pack → round-robin, under a same-batch anti-clump cap ([ADR-0008](adr/0008-task-placement-policy.md))
 - **Worker concurrency**: 4 concurrent tasks per worker (default), auto-tuned down when the detected memory envelope cannot cover that many task budgets
-- **Worker cache**: 256 MB LRU cache for recently-read Parquet data by default in the worker library (`internal/worker/worker.go:191`). Left at 0, the CLI derives it from the Go memory limit instead: a tenth of it on the default path (`cmd/wadjet/main.go:422`), or the remainder after task footprint and headroom capped at a fifth when an explicit `--memory-budget` is set (`main.go:404-417`). The limit is itself 75 % of the detected machine memory (`main.go:350`), so the default works out near 7.5 % of RAM. The flag's own help string states both figures directly: "10% of the Go memory limit, ~7.5% of detected memory"
+- **Worker cache**: 256 MB LRU cache for recently-read Parquet data by default in the worker library (`internal/worker/worker.go:191`). Left at 0, the CLI derives it from the Go memory limit instead: a tenth of it on the default path, or the remainder after task footprint and headroom capped at a fifth when an explicit `--memory-budget` is set. The limit is itself 75 % of the detected machine memory — all three in `cli.ApplyServeRuntimeEnvelope` (`internal/cli/serve_runtime.go`), which both binaries' `serve` calls, so the default works out near 7.5 % of RAM. The flag's own help string states both figures directly: "10% of the Go memory limit, ~7.5% of detected memory"
 
 ### Stage DAG, exchange and shuffle
 

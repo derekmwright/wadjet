@@ -34,7 +34,7 @@ deletes reached the store — and that `CleanQuery` returned
 Two facts settle the scope question:
 
 - `NewCircuitStore` is constructed **exactly once** in the tree
-  (`cmd/wadjet/main.go`), wrapping the whole `Store`. The failure counter
+  (`internal/cli/serve_runtime.go`), wrapping the whole `Store`. The failure counter
   is therefore process-wide across every bucket AND every operation class —
   the filing's "per-bucket breaker" framing was wrong, and the correction
   is why one scratch-prefix cleanup can fail reads of base tables.

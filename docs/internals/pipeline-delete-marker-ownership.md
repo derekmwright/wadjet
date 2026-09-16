@@ -21,7 +21,7 @@ applied. And the only other file lists a pipeline task carries
 parquet — they are the query-scoped .wshf output of an earlier
 pipeline sub-query that already went through this same live-catalog
 scan when IT was written (see build_cache.go's preScanOneTable and
-aggregate_shuffle.go's preComputeDerivedAggregate, both of which
+coordinator/aggregate_shuffle.go's preComputeDerivedAggregate, both of which
 dispatch a TaskTypePipeline task and inherit the same guarantee).
 So this path was already correct for #491 before that fix landed,
 through a different mechanism than the DAG's wire-level markers;

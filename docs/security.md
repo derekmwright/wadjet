@@ -686,7 +686,7 @@ each of them; a rule scoped to no relation at all — the broad `allow` — has 
 schema to resolve against and its targets are not checked here.
 
 **Every entry that hands a policy set to a catalog does this**, not only
-`wadjet serve`. `wadjet mcp` refuses to start the same way, and the embedded
+`wadjet serve` and `wadjetd serve`. `wadjet mcp` refuses to start the same way, and the embedded
 API refuses at the call that attaches: `wadjet.Open` returns the error when the
 policy set arrives in `Config.AuthProvider`, and `DB.SetAuthProvider` returns
 it when the set is attached later. A caller that discards that error does not

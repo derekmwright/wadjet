@@ -1,6 +1,6 @@
 # Pgwire nested output schema order
 
-Source: internal/server/pgwire/coord_query.go — type nestedFieldSchema struct {, moved 2026-09-11 (#1026)
+Source: internal/server/pgwire/routed_query.go — type nestedFieldSchema struct {, moved 2026-09-11 (#1026)
 Superseded: Legacy nestedColumnSchemas now also populates positional structure from result metas via nestedSchemaFromMetas (#965); only its catalog fallback lacks positional identity.
 
 nestedFieldSchema is a query output column's declared ROW/ARRAY/MAP

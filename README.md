@@ -33,18 +33,28 @@ Local disk or object storage is the only choice to make — same engine either
 way. (This snippet is compiled as an example in `wadjet/example_readme_test.go`,
 so it cannot drift from the API.)
 
-**Distributed — the same binary, one flag.** Start all-in-one, then split the
-roles when one machine stops being enough:
+**Embedded — a server, too.** The same engine behind the PostgreSQL wire
+protocol, in one process:
 
 ```bash
-wadjet serve --mode=standalone                       # embedded NATS + coordinator + worker
-wadjet serve --mode=coordinator --nats-url=...       # plans, dispatches, merges
-wadjet serve --mode=worker      --nats-url=...       # executes fragments, scale horizontally
+wadjet serve --pg-addr=:5432        # pgwire over the in-process engine
+psql -h localhost -p 5432 -U wadjet
+```
+
+**Distributed — one flag, one binary further.** Start all-in-one, then split
+the roles when one machine stops being enough:
+
+```bash
+wadjetd serve --mode=standalone                       # embedded NATS + coordinator + worker
+wadjetd serve --mode=coordinator --nats-url=...       # plans, dispatches, merges
+wadjetd serve --mode=worker      --nats-url=...       # executes fragments, scale horizontally
 ```
 
 Both paths consume the identical optimized logical plan; what changes is
 whether it runs in one process or as a stage DAG across workers
-([internals map](docs/internals/native-dag-execution.md)).
+([internals map](docs/internals/native-dag-execution.md)). `wadjet` is the
+embedded engine and its CLI; `wadjetd` is the distributed server. They are
+licensed differently — see [Licensing](#licensing).
 
 **The proof, stated as such.** "Same answers" is a gate, not a promise:
 
@@ -73,6 +83,24 @@ costs a one-shot re-execution of the **query**, not of the task
 ([ADR-0004](docs/adr/0004-stage-dag-with-streaming-exchange.md) §Decision
 items 1–2 and §Consequences).
 
+## Licensing
+
+Two licenses, one repository:
+
+- **MIT** — the embedded engine and the `wadjet` binary. The parser, the
+  optimizer, the vectorized executor, the Parquet and Iceberg readers, the
+  type system, the network functions, the PostgreSQL wire protocol and the
+  MCP server. Embed it, ship it, modify it, keep your changes.
+- **AGPL-3.0, or a commercial license** — the distributed engine and the
+  `wadjetd` binary: the coordinator, the workers, the exchange and the
+  stage-DAG planning that schedules a query across machines.
+
+The split is the deployment, not the feature set: both answer the same SQL
+with the same answers (`TestTwoPathInvariance` requires it). Which
+directories are which, why each file says so in an SPDX header, and what a
+commercial license covers: **[LICENSING.md](LICENSING.md)**. For the AGPL
+half, contact derekmwright@gmail.com.
+
 ## How Wadjet compares
 
 Wadjet is a distributed SQL engine over a lake: it owns no storage format,
@@ -96,7 +124,8 @@ Query files on disk. No server, no object storage, no configuration:
 
 ```bash
 # Build (-o must not be plain "wadjet" — that's the API package directory)
-go build -o wadjet-bin ./cmd/wadjet
+go build -o wadjet-bin ./cmd/wadjet     # the engine and its CLI (MIT)
+go build -o wadjetd ./cmd/wadjetd       # the distributed server (AGPL-3.0)
 
 # Query a JSON log straight from disk
 ./wadjet-bin query "SELECT id_orig_h, SUM(orig_bytes) AS total FROM read_json('conn.log') GROUP BY 1 ORDER BY 2 DESC LIMIT 10"
@@ -109,8 +138,11 @@ go build -o wadjet-bin ./cmd/wadjet
 Managed tables live in an S3-compatible store (MinIO, AWS S3, R2). That is the distributed and production path — see [Getting Started](docs/getting-started.md) for MinIO setup:
 
 ```bash
-# Start standalone (embedded NATS + worker + coordinator)
-./wadjet-bin serve --mode=standalone --endpoint=localhost:9000
+# Start the embedded server (one process, pgwire over the in-process engine)
+./wadjet-bin serve --endpoint=localhost:9000
+
+# ...or standalone, which is the distributed engine in one process
+./wadjetd serve --mode=standalone --endpoint=localhost:9000
 
 # Run a query against a managed table — the CLI shares the running server's catalog
 ./wadjet-bin query --endpoint=localhost:9000 "SELECT src_ip, SUM(bytes_in) AS total FROM flow_logs GROUP BY src_ip ORDER BY total DESC LIMIT 10"
@@ -567,10 +599,15 @@ cd deploy/benchmark/terraform-clickbench && tofu apply   # official ClickBench r
 ## Deployment Modes
 
 ```
-wadjet serve --mode=standalone     # All-in-one (dev / small workloads)
-wadjet serve --mode=coordinator    # Plans queries, embeds NATS, runs small queries in-process
-wadjet serve --mode=worker         # Stateless task executor, scale horizontally
+wadjet  serve                       # Embedded: pgwire over the engine in this process
+wadjetd serve --mode=standalone     # All-in-one (dev / small workloads)
+wadjetd serve --mode=coordinator    # Plans queries, embeds NATS, runs small queries in-process
+wadjetd serve --mode=worker         # Stateless task executor, scale horizontally
 ```
+
+The embedded server answers the same SQL with the same answers as the
+distributed one — that is a gate (`TestTwoPathInvariance`), not a claim —
+and differs in what it can scale to, not in what it accepts.
 
 ## AI Agent Integration (MCP)
 
@@ -687,12 +724,8 @@ TPCH_SCALE=10 go test -v -run TestTPCHQueriesLarge -timeout 120m ./benchmarks/tp
 
 ## License
 
-Wadjet is free and open-source software licensed under the
-[GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
-
-If the AGPL doesn't fit your use case (e.g., embedding Wadjet in a
-proprietary product), commercial licenses are available — contact
-derekmwright@gmail.com.
+Two licenses, one repository — see **[LICENSING.md](LICENSING.md)** for the
+full map, and [Licensing](#licensing) above for the short version.
 
 Contributions are accepted under the [CLA](CLA.md); see
 [CONTRIBUTING.md](CONTRIBUTING.md).

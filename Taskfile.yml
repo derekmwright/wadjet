@@ -93,8 +93,29 @@ tasks:
       - task: vet
       - task: housekeeping:tidy
       - task: docs:check
+      - task: licensecheck
       - task: housekeeping:binaries
       - task: housekeeping:worktrees
+
+  release:artifacts:
+    desc: Build the two binaries a release publishes — dist/wadjet (MIT) and dist/wadjetd (AGPL-3.0)
+    cmds:
+      # There is no release workflow in this repository: a release is a tag
+      # plus a GitHub release created by hand (CONTRIBUTING.md, "Releases").
+      # This task is what produces the assets it carries, so that "both
+      # binaries" is one command rather than a step to remember.
+      - task: build
+      - '{{.DIST}}/wadjet --help > /dev/null && echo "dist/wadjet     (MIT)          ok"'
+      - '{{.DIST}}/wadjetd --help > /dev/null && echo "dist/wadjetd    (AGPL-3.0)     ok"'
+
+  licensecheck:
+    desc: Hold the license boundary — no MIT package reaches AGPL code, every file states its region
+    cmds:
+      # LICENSING.md: one module, two licenses. The MIT artifacts are
+      # distributable under the MIT terms only while nothing they link is
+      # AGPL, which is a transitive property of the import graph and not
+      # something a reviewer can settle by reading a diff.
+      - go run ./tools/licensecheck .
 
   housekeeping:gofmt:
     desc: Fail if any tracked Go file is not gofmt-clean

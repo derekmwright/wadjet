@@ -77,7 +77,7 @@ Three read paths, all resolving through `objstore.Store`:
 
 Store construction and decorator chain:
 
-- Base store built once in `cmd/wadjet/main.go` (`newStore()`), wrapped
+- Base store built once in `internal/cli` (`newStore()`, through `cli.OpenServeStore`), wrapped
   with `CircuitStore` at `main.go:531` — the single process-wide seam.
 - The worker additionally wraps per-query with `CachedStore` (in-heap
   LRU, `executor.go:539`) before building the catalog, so both scan-side
