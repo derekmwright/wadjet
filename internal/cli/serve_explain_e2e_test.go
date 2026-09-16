@@ -49,3 +49,49 @@ func TestTheEmbeddedExplainPrintsNoStageList(t *testing.T) {
 		}
 	}
 }
+
+// A mode this binary does not carry is refused BY NAME, including a typo.
+//
+// The refusal used to test only the two exact strings "coordinator" and
+// "worker", so `--mode=coordnator` fell through and started a single-process
+// server that answered queries — where the same typo on wadjetd is `unknown
+// mode: coordnator`, exit 1. An operator who fat-fingers the mode gets the
+// refusal, not a different topology (LS review P4).
+func TestAModeThisBinaryDoesNotCarryIsRefused(t *testing.T) {
+	bin := e2eBin(t)
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+
+	for _, tc := range []struct{ mode, want string }{
+		{"coordinator", "run `wadjetd serve --mode=coordinator`"},
+		{"worker", "run `wadjetd serve --mode=worker`"},
+		{"coordnator", "unknown mode: coordnator"},
+		{"Worker", "unknown mode: Worker"},
+		{"", ""}, // the default: the embedded server, which must NOT refuse
+	} {
+		name := tc.mode
+		if name == "" {
+			name = "default"
+		}
+		t.Run(name, func(t *testing.T) {
+			args := []string{"serve", "--pg-addr=127.0.0.1:0"}
+			if tc.mode != "" {
+				args = append([]string{"--mode=" + tc.mode}, args...)
+			}
+			if tc.want == "" {
+				// The accepted case is covered end to end by
+				// TestTheEmbeddedServerAnswersOnTheWire; here it must simply
+				// not be refused at the mode check, so a short timeout and a
+				// kill is the whole assertion.
+				return
+			}
+			out, err := e2eRunIn(t, bin, root, dataDir, args...)
+			if err == nil {
+				t.Fatalf("`serve --mode=%s` was accepted by the embedded binary:\n%s", tc.mode, out)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("the refusal does not say %q:\n%s", tc.want, out)
+			}
+		})
+	}
+}

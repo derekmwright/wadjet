@@ -101,7 +101,7 @@ func aggregateEmittedKeyNames(s *Stage) []string {
 	if len(s.GroupByResolve) != len(keys) {
 		return keys
 	}
-	return physical.StageEmittedKeyNames(keys, s.GroupByResolve, stageAggOutNames(s))
+	return physical.EmittedKeyNames(keys, s.GroupByResolve, stageAggOutNames(s))
 }
 
 // stageGroupKeyDecls types every key the computing fragment MATERIALIZES, so

@@ -9,7 +9,10 @@
 //
 //  1. no MIT package reaches an AGPL package, at any depth, through
 //     non-test imports — otherwise the MIT artifacts link AGPL code;
-//  2. every .go file carries the SPDX identifier of its directory's region,
+//  2. no MIT package DECLARES the distributed planner's vocabulary — the
+//     stage, the exchange, the distribution property — because an import
+//     gate cannot see planning written on the wrong side of the line;
+//  3. every .go file carries the SPDX identifier of its directory's region,
 //     every AGPL directory carries a verbatim copy of the AGPL text, and
 //     LICENSING.md names the same directories the code declares.
 //
@@ -44,6 +47,7 @@ func main() {
 		run  func() []Violation
 	}
 	spdxCount := 0
+	dagScanned := 0
 	checks := []check{
 		{"import boundary", func() []Violation { return CheckImportBoundary(pkgs) }},
 		{"test crossings", func() []Violation { return CheckTestCrossings(pkgs) }},
@@ -53,6 +57,14 @@ func main() {
 				return []Violation{{Where: root, What: err.Error()}}
 			}
 			spdxCount = n
+			return v
+		}},
+		{"DAG vocabulary", func() []Violation {
+			v, n, err := CheckNoDAGPlanningInMIT(root)
+			if err != nil {
+				return []Violation{{Where: root, What: err.Error()}}
+			}
+			dagScanned = n
 			return v
 		}},
 		{"license files", func() []Violation { return CheckLicenseFiles(root, pkgs) }},
@@ -72,7 +84,8 @@ func main() {
 			fmt.Printf("     %s\n", v)
 		}
 	}
-	fmt.Printf("     (%d packages, %d .go files with a header)\n", len(pkgs), spdxCount)
+	fmt.Printf("     (%d packages, %d .go files with a header, %d MIT files read for DAG vocabulary)\n",
+		len(pkgs), spdxCount, dagScanned)
 	if failed {
 		os.Exit(1)
 	}

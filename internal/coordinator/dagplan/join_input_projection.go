@@ -506,7 +506,7 @@ func windowArmColDecls(win *logical.Node) physical.ColDecls {
 // projects every arm onto the operation's own column list (Stage.UnionArms'
 // per-arm Projections), so the stream the join receives carries one column per
 // SELECT item of the operation, under the name the operation publishes, and
-// nothing of any scan below it. `physical.StageBuildTableAlias` answered the first scan
+// nothing of any scan below it. `physical.BuildStreamAlias` answered the first scan
 // it found there — `lat_ord` for `(SELECT id FROM lat_ord UNION SELECT id FROM
 // lat_ord) a` — and the join then qualified the arm's duplicate `id` as
 // `lat_ord.id`, a spelling no query can write. The enclosing `a.id` matched

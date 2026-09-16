@@ -276,7 +276,7 @@ func resolveSortKeyColumn(key string, child *logical.Node) string {
 // resolved through a rename lands on a column the stage really produces.
 //
 // A group key is reported the way the aggregate's fragment will EMIT it —
-// `physical.StageEmittedKeyNames` over the key's PUBLISHED name — which is one answer
+// `physical.EmittedKeyNames` over the key's PUBLISHED name — which is one answer
 // for both engines. It used to be the DISPATCH re-spelling
 // (`aggStageGroupKey`), because a stage published its keys under the spelling
 // the worker computed them from; now the two names are separate fields and the
@@ -287,8 +287,8 @@ func aggregateOutputName(n *logical.Node, col string) (string, bool) {
 	if len(n.Children) == 1 {
 		child = n.Children[0]
 	}
-	published, resolve := physical.StageGroupKeyNames(n, child)
-	names := physical.StageEmittedKeyNames(published, resolve, physical.LogicalAggOutNames(n))
+	published, resolve := physical.GroupKeyNames(n, child)
+	names := physical.EmittedKeyNames(published, resolve, physical.LogicalAggOutNames(n))
 	emit := func(i int, g string) (string, bool) {
 		if i >= 0 && i < len(names) {
 			return names[i], true

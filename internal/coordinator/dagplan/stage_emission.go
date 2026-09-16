@@ -400,14 +400,14 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 		// NULL group of every row — and the key an aggregate BELOW already
 		// published was recomputed against a schema without its leaves, which
 		// is the same collapse one shape over (ADR-0026 §2, #736, #794).
-		groupBy, groupByResolve := physical.StageGroupKeyNames(node, aggChild)
+		groupBy, groupByResolve := physical.GroupKeyNames(node, aggChild)
 		// The gather's output renames read the LOGICAL name and need the name
 		// the stage's fragment actually EMITS for it. That used to be the
 		// dispatch re-spelling, because the dispatch spelling was also the
 		// published one; now it is exec's own output rule over the published
 		// list, which is what the single-process aggregate emits for the same
 		// query (#355, #467, ADR-0026 §2b).
-		emitted := physical.StageEmittedKeyNames(groupBy, groupByResolve, physical.LogicalAggOutNames(node))
+		emitted := physical.EmittedKeyNames(groupBy, groupByResolve, physical.LogicalAggOutNames(node))
 		haveGBExprs := len(node.GroupByExprs) == len(node.GroupBy)
 		for i, key := range node.GroupBy {
 			var keyExpr plansql.Node
@@ -1022,7 +1022,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 		// Propagate build-side table alias for column disambiguation in self-joins
 		// (e.g., nation n1 JOIN nation n2 — prevents duplicate columns from being dropped).
 		if len(node.Children) >= 2 {
-			// physical.StageBuildTableAlias, not physical.JoinArmAlias: the DAG's build stream is
+			// physical.BuildStreamAlias, not physical.JoinArmAlias: the DAG's build stream is
 			// the arm's RAW columns, because a Project emits no stage. See
 			// physical.JoinArmAlias' comment for the two answers and why they differ.
 			//
@@ -1041,7 +1041,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				}
 				stage.BuildColOrigins = buildNaming.MaterializedBuildColOrigins()
 			} else {
-				if alias := physical.StageBuildTableAlias(node.Children[1]); alias != "" {
+				if alias := physical.BuildStreamAlias(node.Children[1]); alias != "" {
 					stage.BuildTableAlias = alias
 				}
 				// Multi-table build subtrees additionally carry per-column origin

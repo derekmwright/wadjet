@@ -182,3 +182,111 @@ func TestTheLongestDeclaredPrefixWins(t *testing.T) {
 		}
 	}
 }
+
+// TestNoDAGPlanningLivesInAnMITPackage is the third gate: the distributed
+// planner's vocabulary — the stage, the exchange, the distribution property,
+// the shuffle and probe-split policy — must be declared only under an AGPL
+// directory.
+//
+// The two import-and-header gates were green while 540 distributed-planning
+// declarations sat inside the MIT directory internal/planner/physical. An
+// import gate cannot see planning written on the wrong side of the line; this
+// one reads what a package DECLARES.
+func TestNoDAGPlanningLivesInAnMITPackage(t *testing.T) {
+	vs, scanned, err := CheckNoDAGPlanningInMIT(moduleRoot)
+	if err != nil {
+		t.Fatalf("walking the tree: %v", err)
+	}
+	if scanned < 300 {
+		t.Fatalf("only %d MIT files were read; the walk is broken, not the code", scanned)
+	}
+	for _, v := range vs {
+		t.Errorf("%s", v)
+	}
+}
+
+// TestTheDAGVocabularyGateCatchesAMovedBackSymbol is that gate's own gate.
+//
+// A vocabulary list that matches nothing passes exactly as quietly as a clean
+// tree, so the violation is constructed: a file under an MIT directory that
+// declares the stage type, the way it would look if somebody moved stage
+// planning back. The finding must name the file AND the identifier — "this
+// package contains distributed planning" is not actionable; "declares Stage"
+// is.
+func TestTheDAGVocabularyGateCatchesAMovedBackSymbol(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The MIT planner, with the stage type moved back into it.
+	write("internal/planner/physical/stage_types.go",
+		"// SPDX-License-Identifier: MIT\n\npackage physical\n\ntype Stage struct{ ID string }\n")
+	// …and a stage-emission method, which is the same finding by another name.
+	write("internal/planner/physical/emit.go",
+		"// SPDX-License-Identifier: MIT\n\npackage physical\n\nfunc (p *Planner) walkStages() {}\n")
+	// The AGPL planner declaring exactly the same things is not a finding.
+	write("internal/coordinator/dagplan/stage_types.go",
+		"// SPDX-License-Identifier: AGPL-3.0-only\n\npackage dagplan\n\ntype Stage struct{ ID string }\n\nconst StageExchangeGather = \"exchange_gather\"\n")
+	// A TEST file under MIT is not a shipped artifact and is not scanned.
+	write("internal/planner/physical/stage_probe_test.go",
+		"// SPDX-License-Identifier: MIT\n\npackage physical\n\ntype Stage struct{}\n")
+
+	vs, _, err := CheckNoDAGPlanningInMIT(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, v := range vs {
+		got[v.Where] = v.What
+	}
+	if what, ok := got["internal/planner/physical/stage_types.go"]; !ok {
+		t.Error("an MIT package declaring Stage was not reported")
+	} else if !strings.Contains(what, `"Stage"`) || !strings.Contains(what, "dagplan") {
+		t.Errorf("the finding does not name the identifier and where it belongs: %q", what)
+	}
+	if _, ok := got["internal/planner/physical/emit.go"]; !ok {
+		t.Error("an MIT package declaring walkStages was not reported")
+	}
+	if _, ok := got["internal/coordinator/dagplan/stage_types.go"]; ok {
+		t.Error("the AGPL planner was reported for declaring its own vocabulary")
+	}
+	if _, ok := got["internal/planner/physical/stage_probe_test.go"]; ok {
+		t.Error("a test file was reported; a test binary is not a distributed artifact")
+	}
+}
+
+// TestEveryDAGVocabularyEntryStillNamesSomething: a list that has gone stale
+// is a list nobody can trust. Every declared name must exist somewhere in the
+// tree — in the AGPL planner, where it belongs.
+func TestEveryDAGVocabularyEntryStillNamesSomething(t *testing.T) {
+	dagplan := filepath.Join(moduleRoot, "internal", "coordinator", "dagplan")
+	entries, err := os.ReadDir(dagplan)
+	if err != nil {
+		t.Fatalf("reading the AGPL planner: %v", err)
+	}
+	var src strings.Builder
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dagplan, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		src.Write(b)
+	}
+	text := src.String()
+	for name := range dagVocabulary {
+		if !strings.Contains(text, name) {
+			t.Errorf("dagVocabulary names %q, which the AGPL planner does not declare any more — "+
+				"delete the entry, so the list says what is true", name)
+		}
+	}
+}

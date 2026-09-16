@@ -137,12 +137,12 @@ func DeclaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 			// Stop at an aggregate: its output differs from the scan underneath it.
 			// Empty and non-empty partitions must agree on output width and types
 			// (ADR-0010; #767, #956), including hidden correlation-key slots.
-			// Declare keys first using StageGroupKeyNames and StageEmittedKeyNames
+			// Declare keys first using GroupKeyNames and EmittedKeyNames
 			// (exec.PublishedGroupKeyNames), then each aggregate under its OutputCol,
 			// in the operator's emission order.
 			in := EmittedColTypes(cur.Children[0])
-			published, resolve := StageGroupKeyNames(cur, cur.Children[0])
-			emitted := StageEmittedKeyNames(published, resolve, LogicalAggOutNames(cur))
+			published, resolve := GroupKeyNames(cur, cur.Children[0])
+			emitted := EmittedKeyNames(published, resolve, LogicalAggOutNames(cur))
 			keyTypes, _ := derivedGroupKeyTypes(cur.GroupBy, cur.Children[0])
 			for i, name := range emitted {
 				lc := strings.ToLower(name)

@@ -60,7 +60,7 @@ type GroupKeyResolution struct {
 // candidate spellings that only the finished stage graph can settle.
 func (r GroupKeyResolution) Deferred() bool { return r.Alias != "" }
 
-// StageGroupKeyNames computes both names of every GROUP BY key of one logical
+// GroupKeyNames computes both names of every GROUP BY key of one logical
 // Aggregate: what the stage PUBLISHES it as, and what the computing fragment
 // RESOLVES it by.
 //
@@ -71,7 +71,7 @@ func (r GroupKeyResolution) Deferred() bool { return r.Alias != "" }
 // key published under the text the query wrote. Publishing it under the
 // single path's slot name would name a column the DAG's own consumers do not
 // ask for.
-func StageGroupKeyNames(agg, child *logical.Node) (published []string, resolve []GroupKeyResolution) {
+func GroupKeyNames(agg, child *logical.Node) (published []string, resolve []GroupKeyResolution) {
 	keys := groupKeyOutputs(agg)
 	published = make([]string, len(agg.GroupBy))
 	resolve = make([]GroupKeyResolution, len(agg.GroupBy))
@@ -187,7 +187,7 @@ func anyExecRule(flags []bool) bool {
 	return false
 }
 
-// StageEmittedKeyNames is the column name the aggregate's FRAGMENT emits for
+// EmittedKeyNames is the column name the aggregate's FRAGMENT emits for
 // each key — the published list run through `exec.PublishedGroupKeyNames`,
 // which is the same rule and the same call the worker makes and the
 // single-process operator applies to its own key list.
@@ -198,7 +198,7 @@ func anyExecRule(flags []bool) bool {
 // slot placeholder here is not the slot the worker allocates — that index is a
 // runtime fact — but the rule only reads a name's qualifier and its collisions,
 // and a reserved-family name has neither.
-func StageEmittedKeyNames(published []string, resolve []GroupKeyResolution, aggOut []string) []string {
+func EmittedKeyNames(published []string, resolve []GroupKeyResolution, aggOut []string) []string {
 	byRule := make([]string, len(published))
 	overrides := make([]string, len(published))
 	for i := range published {

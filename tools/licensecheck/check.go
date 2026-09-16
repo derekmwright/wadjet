@@ -340,8 +340,21 @@ func CheckLicenseFiles(root string, pkgs []pkg) []Violation {
 func licenseFileDirs(pkgs []pkg) []string {
 	seen := map[string]bool{}
 	var dirs []string
+	candidates := make([]string, 0, len(pkgs)+len(regions))
 	for _, p := range pkgs {
-		dir := p.dir
+		candidates = append(candidates, p.dir)
+	}
+	// A declared region prefix that is not itself a Go package still needs
+	// the text. gen/dataplane holds only gen/dataplane/v1, so a candidate set
+	// built from packages alone never considers it — and with its LICENSE
+	// deleted, every scanner resolves the package under it to the ROOT
+	// license, which is MIT. The gate's own doc says a missing copy publishes
+	// the WRONG license rather than none; this is the case where that was
+	// true of the gate itself (LS review P1).
+	for _, r := range regions {
+		candidates = append(candidates, r.prefix)
+	}
+	for _, dir := range candidates {
 		if dir == "." {
 			continue
 		}

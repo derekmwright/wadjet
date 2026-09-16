@@ -385,8 +385,8 @@ func windowKeyPublishedGroupKey(child *logical.Node, col string) (string, bool) 
 	if agg == nil || col == "" || len(agg.GroupBy) == 0 {
 		return "", false
 	}
-	published, resolve := StageGroupKeyNames(agg, aggInput(agg))
-	emitted := StageEmittedKeyNames(published, resolve, LogicalAggOutNames(agg))
+	published, resolve := GroupKeyNames(agg, aggInput(agg))
+	emitted := EmittedKeyNames(published, resolve, LogicalAggOutNames(agg))
 	match, count := "", 0
 	for i, g := range agg.GroupBy {
 		if i >= len(emitted) {

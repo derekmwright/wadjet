@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: AGPL-3.0-only
 
 package dagplan
 
@@ -186,7 +186,7 @@ func TestAggregateOutputNameFollowsRename(t *testing.T) {
 		t.Errorf("aggregateOutputName = %q, want %q — the aggregate publishes the key under the "+
 			"name the query wrote, so a sort keyed on the alias resolves to it", got, "k")
 	}
-	published, resolve := physical.StageGroupKeyNames(agg, inner)
+	published, resolve := physical.GroupKeyNames(agg, inner)
 	if len(published) != 1 || published[0] != "k" {
 		t.Errorf("published names %v, want [k]", published)
 	}

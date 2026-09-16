@@ -4,6 +4,7 @@ package pgwire
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/queryroute"
@@ -69,8 +70,17 @@ func (c *pgConn) canBypassDB() bool {
 func (c *pgConn) queryViaRouter(ctx context.Context, sql string) (*wadjet.QueryResult, queryroute.Stream, *nestedFieldSchema, error) {
 	res, err := c.router.ExecuteSQL(ctx, sql)
 	if err != nil {
-		res.Close()
+		// A router may hand back a nil Result alongside its error — the
+		// interface's doc asks for a closable one, and the coordinator's
+		// always is, but a contract only one implementation honours is a
+		// panic waiting for the second one (LS review P3).
+		if res != nil {
+			res.Close()
+		}
 		return nil, nil, nil, err
+	}
+	if res == nil {
+		return nil, nil, nil, fmt.Errorf("query router returned no result and no error")
 	}
 	// Read the schema BEFORE Stream() detaches the batches.
 	metas := routedColumnMetas(res)

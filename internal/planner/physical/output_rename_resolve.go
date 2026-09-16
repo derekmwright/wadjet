@@ -528,7 +528,7 @@ func substituteNestedRenameList(nodes []plansql.Node, child *logical.Node) ([]pl
 // and re-qualifying there would spell a column after a relation it did not
 // come from.
 //
-// The spelling is `StageBuildTableAlias`, the DAG's answer, because this is
+// The spelling is `BuildStreamAlias`, the DAG's answer, because this is
 // the GATHER's rename and the gather reads what the stage DAG emitted
 // (`JoinArmAlias`' comment: the two engines hand the join two different
 // streams, and a name describes a stream).
@@ -539,7 +539,7 @@ func buildArmQualified(arm *logical.Node, name string) string {
 	if !armIsOneRelationsColumns(arm) {
 		return name
 	}
-	alias := StageBuildTableAlias(arm)
+	alias := BuildStreamAlias(arm)
 	if alias == "" {
 		return name
 	}

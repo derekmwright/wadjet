@@ -52,10 +52,23 @@ func EmbeddedServeCmd() *cobra.Command {
 		logger, closeSink := ServeLogger()
 		defer closeSink()
 
-		if m := serveMode(); m == "coordinator" || m == "worker" {
+		// Anything that is not this binary's mode is refused BY NAME, the way
+		// wadjetd refuses an unknown one. Refusing only the two exact strings
+		// "coordinator" and "worker" let every typo through — `--mode=coordnator`
+		// started a single-process server and answered queries, where the same
+		// typo on wadjetd is `unknown mode: coordnator`, exit 1. That is the
+		// failure this refusal exists to prevent, one character away (LS review P4).
+		switch m := serveMode(); m {
+		case "", "embedded", "standalone":
+			// The embedded server. "standalone" is accepted because it is the
+			// root command's default and means "one process" to a reader.
+		case "coordinator", "worker":
 			return fmt.Errorf("--mode=%s is the distributed server and this binary does not carry it: "+
 				"run `wadjetd serve --mode=%s`. `wadjet serve` is the embedded server — pgwire over "+
 				"the engine in this process, with no NATS task queues and no workers", m, m)
+		default:
+			return fmt.Errorf("unknown mode: %s (this binary runs the embedded server: "+
+				"--mode=embedded, or standalone; --mode=coordinator and --mode=worker are wadjetd's)", m)
 		}
 
 		ApplyServeRuntimeEnvelope(logger)

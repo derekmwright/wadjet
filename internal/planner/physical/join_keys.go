@@ -124,7 +124,7 @@ func RefuseJoinCond(joinType, cond string, residual []string) error {
 // use findScanAlias (setSubtreeAlias stamps scans); CTE references name their
 // subtree root via CTEName/CTERefAlias, preserving inner relation identities.
 // Single-process Project outputs use JoinArmAlias; ordinary DAG Projects do
-// not run, so raw inner streams use StageBuildTableAlias. Do not qualify a
+// not run, so raw inner streams use BuildStreamAlias. Do not qualify a
 // raw inner column as the arm's selected output (ADR-0025, #773, #706).
 // See docs/internals/join-arm-aliases.md for the design.
 func JoinArmAlias(node *logical.Node) string {
@@ -139,7 +139,7 @@ func JoinArmAlias(node *logical.Node) string {
 	return findScanAlias(node)
 }
 
-// StageBuildTableAlias is JoinArmAlias for the STAGE DAG, whose build stream
+// BuildStreamAlias is JoinArmAlias for the STAGE DAG, whose build stream
 // is the arm's raw inner columns rather than its Project's output.
 //
 // A CTE reference still answers by name — `flattenCTEAliases` repoints the
@@ -148,7 +148,7 @@ func JoinArmAlias(node *logical.Node) string {
 // answers by the scan below it, because that is the name the inner join
 // already qualified its duplicates with and therefore the name the stream
 // really carries.
-func StageBuildTableAlias(node *logical.Node) string {
+func BuildStreamAlias(node *logical.Node) string {
 	if node == nil {
 		return ""
 	}

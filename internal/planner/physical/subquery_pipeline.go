@@ -45,8 +45,8 @@ func (p *Planner) makeSubqueryRunner() expr.SubqueryRunner {
 // See docs/internals/subquery-planner-resource-ownership.md for the design.
 // The stage emitter's own per-build scratch is no longer reset here: it is
 // not on this type. A subquery planner is a LOCAL planner — it builds a
-// pipeline — and a StagePlanner made from one starts with empty scratch by
-// construction (StagePlanner, stage_planner.go).
+// pipeline — and the distributed planner (internal/coordinator/dagplan)
+// makes its own per-build scratch when it wraps one.
 func (p *Planner) forSubquery() *Planner {
 	sub := *p
 	sub.scanCounter = nil
