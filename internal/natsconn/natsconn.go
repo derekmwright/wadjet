@@ -1,7 +1,15 @@
-package distributed
+// Package natsconn opens NATS: the embedded server, the client connections
+// and the JetStream context. It is the transport a catalog is reached over,
+// not the distributed engine that runs on it — internal/distributed keeps
+// the subjects, the message envelopes and the streams, and re-exports these
+// names so its own callers are unchanged.
+//
+// It lives on its own so the embedded CLI (`wadjet tables`, `query`, `shell`)
+// can open the catalog of a running server without linking the coordinator
+// or the worker. See LICENSING.md.
+package natsconn
 
 import (
-	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -195,62 +203,6 @@ func (e *EmbeddedNATS) Shutdown() {
 	e.server.Shutdown()
 	e.server.WaitForShutdown()
 	e.logger.Info("embedded NATS shut down")
-}
-
-// SetupStreams creates the required JetStream streams for Wadjet.
-func SetupStreams(ctx context.Context, js jetstream.JetStream) error {
-	// Tasks stream: WorkQueue retention so each task is delivered to exactly one worker
-	_, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:      StreamTasks,
-		Subjects:  []string{SubjectTasksAll},
-		Retention: jetstream.WorkQueuePolicy,
-		MaxAge:    1 * time.Hour,
-		Storage:   jetstream.FileStorage,
-	})
-	if err != nil {
-		return fmt.Errorf("creating tasks stream: %w", err)
-	}
-
-	// Priority task lane: same WorkQueue semantics, separate stream so its
-	// consumer filter can't overlap the main tasks consumer (WorkQueue
-	// retention forbids overlapping filters).
-	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:      StreamPriTasks,
-		Subjects:  []string{SubjectPriTasksAll},
-		Retention: jetstream.WorkQueuePolicy,
-		MaxAge:    1 * time.Hour,
-		Storage:   jetstream.FileStorage,
-	})
-	if err != nil {
-		return fmt.Errorf("creating priority tasks stream: %w", err)
-	}
-
-	// Results stream: Interest retention so coordinators get results while subscribed
-	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:      StreamResults,
-		Subjects:  []string{SubjectResultsAll},
-		Retention: jetstream.InterestPolicy,
-		MaxAge:    1 * time.Hour,
-		Storage:   jetstream.FileStorage,
-	})
-	if err != nil {
-		return fmt.Errorf("creating results stream: %w", err)
-	}
-
-	// Dead-letter queue: retains failed tasks for 48 hours for inspection/retry
-	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:      StreamDLQ,
-		Subjects:  []string{SubjectDLQAll},
-		Retention: jetstream.LimitsPolicy,
-		MaxAge:    48 * time.Hour,
-		MaxMsgs:   10000,
-		Storage:   jetstream.FileStorage,
-	})
-	if err != nil {
-		return fmt.Errorf("creating DLQ stream: %w", err)
-	}
-
-	return nil
 }
 
 // Connect creates a NATS client connection over TCP.
