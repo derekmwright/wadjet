@@ -22,7 +22,9 @@ distribution/exchange assignment and the shuffle policy, and
 `internal/planner/physical` — which the embedded engine links — holds the
 local pipeline planner and nothing that names a stage. `wadjet serve`
 executes a pipeline and its `EXPLAIN VERBOSE` says so; the stage list is
-printed by the servers that dispatch one.
+printed by the servers that dispatch one, on both of their doors — `wadjetd`
+routes EXPLAIN to its coordinator so its PostgreSQL wire door and its HTTP
+door print the same plan.
 
 Both answer the same SQL with the same answers, and that is gated, not
 claimed: `TestTwoPathInvariance` runs every corpus query through both and

@@ -117,12 +117,22 @@ Two user-visible consequences follow, decided rather than discovered:
     twice on one side, a correlated subquery's scan invisible on the other).
   - **`EXPLAIN VERBOSE` on the embedded engine prints the local plan.** It
     printed a stage DAG the embedded engine never executes, emitted only to be
-    printed. A server with a coordinator still prints the stage list, planned
-    and rendered on the AGPL side. The one door that changes is `wadjetd`'s
-    pgwire: EXPLAIN is not routed through the coordinator, so it answers from
-    the embedded DB and prints the pipeline's line. No value, SQLSTATE or
-    section changes, and the alternative — a renderer injected back into the
-    MIT half — is the coupling this ADR removes.
+    printed. A server with a coordinator still prints a stage list — but the
+    list it prints is now the DAG it would DISPATCH, exchanges included, not
+    the local stage generation this door rendered before. Those were never the
+    same plan: the dispatched one carries the gather and replicate exchanges
+    and drops the stages the local emitter produced for operators a fragment
+    executes itself. Base parity is not recoverable on any door, because the
+    local generator is what this ADR removed.
+
+    Both of `wadjetd`'s doors print that same list. EXPLAIN routes to the
+    coordinator (one predicate in the wire server, behaviour-neutral where no
+    router is installed) and both doors render through
+    `Coordinator.StagePlanTextForExplain`, so one binary has one answer for one
+    statement. No renderer enters the MIT half: EXPLAIN's answer is a
+    one-column result, which the router already knows how to return.
+    EXPLAIN ANALYZE is not routed — it RUNS the statement — and still answers
+    from the embedded database.
 
 **7. A third gate holds where the planning LIVES.** The import gate reads what
 a package imports and the SPDX gate reads what a file says; neither can see

@@ -100,8 +100,12 @@ Two things this asks of a change:
   declared in `tools/licensecheck/dagvocabulary.go`; if a name of yours
   collides with it and is not distributed planning, rename it.
 
-`go run ./tools/licensecheck .` checks both, along with the per-directory
-LICENSE copies, and runs in CI and in `task housekeeping`.
+`go run ./tools/licensecheck .` checks all three, along with the per-directory
+LICENSE copies, and runs in CI and in `task housekeeping`. If a name of yours
+collides with the vocabulary and is NOT distributed planning, rename it — or,
+when the name is genuinely the right one for something both planners share,
+add it to `dagVocabularyExempt` with the reason. An exemption without a reason
+is a loophole; the list is read as documentation.
 
 ## Contributor License Agreement
 

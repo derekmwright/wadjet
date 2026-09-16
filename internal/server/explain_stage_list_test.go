@@ -13,9 +13,13 @@ import (
 //
 // The local planner stopped emitting stages when the two planners were
 // separated (ADR-0037): PhysicalPlan.PrettyPrint is the pipeline's own line
-// now. This door renders the DAG from the distributed planner instead, so its
-// EXPLAIN text is what it was before the split — the same "Stage <id> [<type>]
-// (<n> tasks)" lines, with the same dependency suffix.
+// now. This door renders the DAG from the distributed planner instead.
+//
+// What is unchanged is the RENDERING, which is what this test pins: the same
+// "Stage <id> [<type>] (<n> tasks)" line with the same dependency suffix. The
+// stage SET is not unchanged — the dispatched DAG carries exchanges the local
+// emitter never produced and drops stages it did — and that is gated end to
+// end, against the other door, by TestTheTwoExplainDoorsAgreeOnWadjetd.
 func TestTheDistributedExplainStillPrintsTheStageList(t *testing.T) {
 	stages := []dagplan.Stage{
 		{ID: "scan-0", Type: "scan", Tasks: 3},
