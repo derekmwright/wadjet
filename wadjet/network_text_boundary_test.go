@@ -593,3 +593,96 @@ func ntFormName(form string) string {
 	}
 	return strings.NewReplacer("/", "_", " ", "_SP_", "\t", "_TAB_").Replace(form)
 }
+
+// TestAStringTypedExpressionCastToPortIsFC7sOpenCell is a PIN, and its job is
+// to fail the day it starts agreeing with PostgreSQL.
+//
+// `Cast.Eval` decides between the TYPE's input function and the numeric→int
+// conversion by the operand's SHAPE: a bare quoted literal or a STRING column
+// is text (`'2.5'::PORT` is 22P02), a DECIMAL column or a numeric literal is a
+// number (`CAST(d AS PORT)` and `CAST(2.5 AS PORT)` round, as PostgreSQL's
+// numeric→int does). A STRING-typed EXPRESSION is neither shape, so it still
+// reaches the decimal reader and a FRACTION rounds where the server refuses —
+// and it reaches REST that way through INSERT … SELECT and a CTAS.
+//
+// It is pre-existing (identical at 435e08c3 and at both earlier tips of this
+// arc) and strictly narrower than it was: the RANGE and the hex spelling
+// already take the text path, so only fractional text slips through. It is
+// NOT repaired here, and the reason is measured rather than asserted:
+// extending the shape test to "any operand that arrives as a Go string" fixes
+// these cells and then refuses `CAST(d + 1 AS PORT)` with
+// `invalid input syntax for type integer: "3.50"`, where PostgreSQL answers 4
+// — a new wrong answer for an old one. Telling the two apart needs the
+// operand's DECLARED type across the whole integer family, which is FC-7's
+// seam in the numeric lane, not this one. ADR-0012 residual 4.
+func TestAStringTypedExpressionCastToPortIsFC7sOpenCell(t *testing.T) {
+	ctx := context.Background()
+	db, _ := ntOpenTyped(t, parquet.TypePort)
+	if _, err := db.Query(ctx, "INSERT INTO t (id, s) VALUES (1, ' 2.5 ')"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		expr string
+		// want is what this engine answers TODAY; pg is what PostgreSQL
+		// 17.11 answers for the same shape at `integer`, measured.
+		want any
+		pg   string
+	}{
+		{"CAST(CONCAT('2','.5') AS PORT)", int32(3), "22P02"},
+		{"CAST(TRIM(s) AS PORT)", int32(3), "22P02"},
+		{"CAST(SUBSTRING('2.5',1,3) AS PORT)", int32(3), "22P02"},
+		{"CAST(CAST(2.5 AS TEXT) AS PORT)", int32(3), "22P02"},
+	} {
+		t.Run(c.expr, func(t *testing.T) {
+			res, err := db.Query(ctx, "SELECT "+c.expr+" AS v FROM t WHERE id = 1")
+			if err != nil {
+				t.Fatalf("%s now refuses (%v). PostgreSQL answers %s for this shape, "+
+					"so agreeing is the FIX — delete this pin, close FC-7's cell in "+
+					"ADR-0012 residual 4, and add the shapes to the census's rows.",
+					c.expr, err, c.pg)
+			}
+			if got := res.Rows[0]["v"]; got != c.want {
+				t.Errorf("%s = %#v, want %#v (the disposition this pin records; "+
+					"PostgreSQL answers %s)", c.expr, got, c.want, c.pg)
+			}
+		})
+	}
+	// The two halves that are NOT open, so a repair cannot pass by refusing
+	// everything: the RANGE and the hex spelling already take the type's own
+	// reader through the same expression shape.
+	for _, c := range []struct{ expr, state string }{
+		{"CAST(CONCAT('70','000') AS PORT)", "22003"},
+		{"CAST(CONCAT('0x','1bb') AS PORT)", "22P02"},
+	} {
+		t.Run(c.expr, func(t *testing.T) {
+			_, err := db.Query(ctx, "SELECT "+c.expr+" AS v FROM t WHERE id = 1")
+			if err == nil || sqlerr.StateOf(err) != c.state {
+				t.Errorf("%s = %v, want %s", c.expr, err, c.state)
+			}
+		})
+	}
+	// And the NUMBER-shaped operands that must keep rounding, which is why the
+	// local repair is wrong: PostgreSQL answers 4 for the first and 3 for the
+	// second, measured.
+	if _, err := db.Query(ctx, "INSERT INTO t (id, s) VALUES (2, 'x')"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		expr string
+		want any
+	}{
+		{"CAST(2.5 AS PORT)", int32(3)},
+		{"CAST(1.5 + 1 AS PORT)", int32(3)},
+	} {
+		t.Run(c.expr, func(t *testing.T) {
+			res, err := db.Query(ctx, "SELECT "+c.expr+" AS v")
+			if err != nil {
+				t.Fatalf("%s refused: %v — a NUMBER must still round into an "+
+					"integer-domain type, as PostgreSQL's numeric→int does", c.expr, err)
+			}
+			if got := res.Rows[0]["v"]; got != c.want {
+				t.Errorf("%s = %#v, want %#v", c.expr, got, c.want)
+			}
+		})
+	}
+}

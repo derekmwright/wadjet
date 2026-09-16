@@ -1118,12 +1118,31 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
         boxed-pair layer a type-specific literal reading at five sites, and
         deciding which of the two the type MEANS; measured, not guessed, and
         left as a filing candidate rather than half-done.
-     4. **A quoted FRACTIONAL literal rounds at the BARE integer cast.**
-        (Narrowed 2026-09-15, round 3.) `CAST('2.5' AS INTEGER)` is 3 where
-        PostgreSQL answers 22P02, because `castDecimalToInt` reads TEXT with
-        no type knowledge and cannot tell a DECIMAL box — which must keep
-        rounding, as PG's numeric→int does — from a quoted literal. It is
-        int4's cell and belongs to the numeric family's lane (FC-7).
+     4. **A FRACTIONAL value whose DECLARATION is text but whose SHAPE is
+        neither a quoted literal nor a column reference rounds at an
+        integer-domain cast.** (Narrowed twice, 2026-09-15.) The cast decides
+        between the TYPE's input function and the numeric→int conversion by
+        the operand's SHAPE: a bare quoted literal or a STRING column is TEXT
+        (`'2.5'::PORT` and `CAST(string_col AS PORT)` are 22P02, as
+        `'2.5'::integer` is on the server), and a DECIMAL column or a numeric
+        literal is a NUMBER (`CAST(d AS PORT)` and `CAST(2.5 AS PORT)` round,
+        as PG's numeric→int does). A STRING-typed EXPRESSION is neither, so
+        `CAST(CONCAT('2','.5') AS PORT)`, `CAST(TRIM(s) AS PORT)`,
+        `CAST(SUBSTRING(…) AS PORT)` and `CAST(CAST(2.5 AS TEXT) AS PORT)` are
+        3 where PostgreSQL is 22P02 — for PORT and PROTOCOL as well as
+        INTEGER, and through `INSERT … SELECT` and CTAS to REST. Only
+        FRACTIONAL text slips through: the RANGE and the hex spelling already
+        take the text path at those shapes.
+
+        It is NOT repaired, and the reason is measured rather than asserted:
+        widening the shape test to "any operand that arrives as a Go string"
+        fixes those cells and then refuses `CAST(d + 1 AS PORT)` with
+        `invalid input syntax for type integer: "3.50"`, where PostgreSQL
+        answers 4 — a new wrong answer for an old one. Telling the two apart
+        needs the operand's DECLARED type across the whole integer family,
+        which is FC-7's seam in the numeric lane. Pinned by
+        `wadjet.TestAStringTypedExpressionCastToPortIsFC7sOpenCell`, which
+        FAILS the day it starts agreeing.
 
         What was ALSO in this residual and is now FIXED: the same text reached
         REST. `CAST('2.5' AS PORT)`, `CAST(string_col AS PORT)`,

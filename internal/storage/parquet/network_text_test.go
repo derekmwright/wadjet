@@ -80,9 +80,16 @@ func TestMACTextGrammarIsPostgresMacaddr(t *testing.T) {
 		{"08:00:2b:01:02:03:", "", NetTextSyntax},
 		{":08:00:2b:01:02:03", "", NetTextSyntax},
 		{"", "", NetTextSyntax},
-		// C's `%x` reads into an `int`, so a field past 2^32 TRUNCATES and the
-		// server answers the truncated value rather than refusing. Saturating
-		// instead refused three spellings 17.11 takes (review NT P3).
+		// C's `%x` converts with strtoul and narrows to `int` after, so it
+		// truncates TWICE and the two are different: a subject sequence past
+		// 2^64-1 SATURATES to ULONG_MAX, which narrows to -1 and is 22003,
+		// and only what survives that is taken mod 2^32. Modelling the second
+		// alone refused three spellings 17.11 takes (review NT P3); modelling
+		// it WITHOUT the first accepted five it refuses, with a value nobody
+		// wrote (review NT round 2, B1). The boundary is the VALUE, not the
+		// digit count — twenty-two leading zeros are still the value they
+		// precede — and the SIGN belongs to strtoul, which returns ULONG_MAX
+		// for an overflowing subject whether or not a minus preceded it.
 		{"100000000:0:0:0:0:0", "000000000000", NetTextOK},
 		{"100000001:0:0:0:0:0", "010000000000", NetTextOK},
 		{"10000000000:0:0:0:0:0", "000000000000", NetTextOK},
@@ -91,6 +98,18 @@ func TestMACTextGrammarIsPostgresMacaddr(t *testing.T) {
 		{"1000000ff:0:0:0:0:0", "ff0000000000", NetTextOK},
 		{"-100000001:0:0:0:0:0", "", NetTextRange},
 		{"100000100:0:0:0:0:0", "", NetTextRange},
+		// The FIRST truncation: past 2^64-1, measured cell by cell on 17.11.
+		{"1000000000000000:0:0:0:0:0", "000000000000", NetTextOK},       // 2^60, no overflow
+		{"0000000000000000000001:0:0:0:0:0", "010000000000", NetTextOK}, // 22 digits, value 1
+		{"-1000000000000000:0:0:0:0:0", "000000000000", NetTextOK},      // negated, no overflow
+		{"10000000000000000:0:0:0:0:0", "", NetTextRange},               // 2^64
+		{"10000000000000001:0:0:0:0:0", "", NetTextRange},
+		{"100000000000000000:0:0:0:0:0", "", NetTextRange},
+		{"fffffffffffffffff:0:0:0:0:0", "", NetTextRange},
+		{"1000000000000000000000:0:0:0:0:0", "", NetTextRange},
+		{"100000000000000000000000000000ff:0:0:0:0:0", "", NetTextRange},
+		{"-10000000000000000:0:0:0:0:0", "", NetTextRange}, // the sign does not undo it
+		{"0:0:0:0:0:10000000000000000", "", NetTextRange},  // the LAST field too
 		// An octet the type cannot carry is 22003, a different answer.
 		{"08:00:2b:01:02:100", "", NetTextRange},
 		{"08:00:2b:01:02:-3", "", NetTextRange},
