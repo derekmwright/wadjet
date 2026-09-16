@@ -222,16 +222,16 @@ func declsCoverEveryColRef(node plansql.Node, decls ColDecls) bool {
 	return true
 }
 
-// AggDerivedGroupKey re-spells a computed GROUP BY key's column references
+// AggDerivedGroupKey re-spells a COMPUTED GROUP BY key's column references
 // into the columns the aggregate's input really emits, the way
-// dagplan.aggStageGroupKey does for a bare one. ok=false leaves the key exactly as it
-// was — which is every key whose leaves are already source columns, and every
-// shape this walk does not recognize.
-// AggDerivedGroupKey respells a GROUP BY key against what the child actually
-// emits. Both planners need it — the local pipeline binds the key to a
-// column of its input, the stage emitter to a column of its producer stage —
-// so it stays on the MIT side; it was spelled AggStageDerivedKey, which named
-// only one of its two callers (LS review round 2, P2).
+// dagplan.aggStageGroupKey does for a bare one. ok=false leaves the key
+// exactly as it was — which is every key whose leaves are already source
+// columns, and every shape this walk does not recognize.
+//
+// Both planners need it — the local pipeline binds the key to a column of its
+// input, the stage emitter to a column of its producer stage — so it stays on
+// the MIT side. It was spelled AggStageDerivedKey, which named one of those
+// two callers (LS review round 2, P2).
 func AggDerivedGroupKey(key string, child *logical.Node) (string, bool) {
 	node, err := plansql.ParseExpression(key)
 	if err != nil {

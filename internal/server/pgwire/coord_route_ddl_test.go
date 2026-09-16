@@ -57,6 +57,17 @@ func TestThePgwireDoorRoutesOnlyQueriesToTheCoordinator(t *testing.T) {
 		{"EXPLAIN ANALYZE SELECT 1", false},
 		{"EXPLAIN ANALYZE VERBOSE SELECT 1", false},
 		{"  EXPLAIN   ANALYZE SELECT 1", false},
+		// The separator is WHITESPACE, not a space: psql sends a multi-line
+		// statement as typed, so EXPLAIN on its own line is an ordinary
+		// spelling and used to fall through to the unrouted path (round-3
+		// review P1).
+		{"EXPLAIN\nVERBOSE SELECT 1", true},
+		{"EXPLAIN\tVERBOSE SELECT 1", true},
+		{"EXPLAIN\r\nSELECT 1", true},
+		{"EXPLAIN\nANALYZE SELECT 1", false},
+		{"EXPLAIN\tANALYZE SELECT 1", false},
+		{"EXPLAINX SELECT 1", false},
+		{"EXPLAIN", false},
 		{"EXPLAIN CREATE TABLE t (a BIGINT)", true},
 		{"INSERT INTO t VALUES (1)", false},
 		{"UPDATE t SET a = 1", false},

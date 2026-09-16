@@ -1,6 +1,6 @@
 # Cte terminal aggregate fusion boundary
 
-Source: internal/planner/physical/stage_cost.go — fusesIntoACTETerminal / canFuseScanAggregate, moved 2026-09-11 (#1026)
+Source: internal/planner/physical/query_limits.go — fusesIntoACTETerminal / canFuseScanAggregate, moved 2026-09-11 (#1026)
 
 ```go
 // canFuseScanAggregate returns true when child stages are all scans (or

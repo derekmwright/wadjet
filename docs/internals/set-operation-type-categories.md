@@ -1,6 +1,6 @@
 # Set operation type categories
 
-Source: internal/planner/physical/set_op_stages.go — setOpCategory, moved 2026-09-11 (#1026)
+Source: internal/planner/physical/set_op_types.go — setOpCategory, moved 2026-09-11 (#1026)
 
 ```go
 // setOpCategory is PostgreSQL's TYPE CATEGORY, which is what its

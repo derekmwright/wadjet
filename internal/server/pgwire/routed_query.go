@@ -55,7 +55,13 @@ func shouldRouteToRouter(sql string) bool {
 	// immediately after EXPLAIN (`EXPLAIN [ANALYZE] [VERBOSE] <query>`), so
 	// the next word settles it without a parse — the same keyword test the
 	// rest of this gate makes, and for the same reason.
-	if len(s) >= 8 && strings.EqualFold(s[:8], "EXPLAIN ") {
+	//
+	// The SEPARATOR is any whitespace, not a space: psql sends a multi-line
+	// statement as typed, so `EXPLAIN` on its own line is an ordinary
+	// spelling, and testing `s[:8] == "EXPLAIN "` left it — and the tab
+	// spelling — on the unrouted path, which is round-2's two-door divergence
+	// surviving on a whitespace variant (round-3 review P1).
+	if len(s) >= 8 && strings.EqualFold(s[:7], "EXPLAIN") && strings.ContainsRune(" \t\n\r", rune(s[7])) {
 		return !strings.HasPrefix(strings.ToUpper(strings.TrimLeft(s[8:], " \t\n\r")), "ANALYZE")
 	}
 	return false

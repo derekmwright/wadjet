@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
 
+// Whether a subtree carries a security barrier. It was called
+// security_stage_order.go, from when the answer ordered stage emission; the
+// question it answers is about the logical subtree (ADR-0037).
 package physical
 
 import (

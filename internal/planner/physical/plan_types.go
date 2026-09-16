@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT
 
-// This file holds stage types for the physical planner, governed by ADR-0010 and ADR-0026.
+// The LOCAL plan type and its siblings — PhysicalPlan is what Plan returns
+// and what the embedded engine runs. The file was called stage_types.go,
+// which is where the Stage type lived until it moved to
+// internal/coordinator/dagplan (ADR-0037); what is left here holds no stage.
+// Governed by ADR-0010 and ADR-0026.
 package physical
 
 import (

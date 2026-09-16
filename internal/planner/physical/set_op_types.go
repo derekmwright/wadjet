@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: MIT
 
+// Set-operation TYPE reconciliation: the output name of a UNION/INTERSECT/
+// EXCEPT column, the type categories the arms are widened through, the
+// carrier gaps and the literal-arm rules. It was called set_op_stages.go; the
+// set-op STAGE emission is in internal/coordinator/dagplan under that name,
+// and none of it is here (ADR-0037).
 package physical
 
 import (

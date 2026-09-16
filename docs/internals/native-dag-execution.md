@@ -1226,7 +1226,7 @@ have.
 
 ## Set operations
 
-`planner/physical/set_op_stages.go`. Until #346 `walkStages` walked both arms
+`planner/physical/set_op_types.go`. Until #346 `walkStages` walked both arms
 of a set operation and emitted nothing else, on the comment *"each side runs
 independently; merge results at the end"* — and nothing merged. The terminal
 gather attached to whichever arm was emitted last, so a union answered with
@@ -2011,7 +2011,7 @@ correctness of a distributed change before EC2.
 ## Where a LIMIT is applied
 
 Three things can bound a stream on the DAG. Deciding which one owns a given
-`NodeLimit` is `needsLimitStage` (`planner/physical/stage_cost.go`):
+`NodeLimit` is `needsLimitStage` (`planner/physical/query_limits.go`):
 
 | Applier | Reaches | How |
 |---|---|---|

@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT
 
-// This file holds stage cost for the physical planner, governed by ADR-0026 and ADR-0034.
+// The cost guard: QueryCost, the logical-plan estimate it reads and the
+// refusal it raises (SQLSTATE QueryLimitSQLState). It was called
+// stage_cost.go, from when the estimate was summed over a stage list; it is
+// summed over the logical plan now and no stage is involved (ADR-0037).
+// Governed by ADR-0026 and ADR-0034.
 package physical
 
 import (

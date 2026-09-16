@@ -1,6 +1,6 @@
 # Set operation numeric widening
 
-Source: internal/planner/physical/set_op_stages.go — setOpWiden, moved 2026-09-11 (#1026)
+Source: internal/planner/physical/set_op_types.go — setOpWiden, moved 2026-09-11 (#1026)
 
 ```go
 // setOpWiden is the numeric ladder: INT32 → INT64 → DECIMAL → FLOAT32 →

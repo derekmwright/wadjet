@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: MIT
 
+// The published columns of a projection BLOCK, and the bare name a block
+// publishes. It was called block_projection_stage.go; the stage that carries
+// a block's projection is emitted in internal/coordinator/dagplan
+// (ADR-0037).
 package physical
 
 import (

@@ -1,6 +1,6 @@
 # Star read block projections
 
-Source: internal/planner/physical/block_projection_stage.go — starReadBlockProjections, moved 2026-09-11 (#1026)
+Source: internal/planner/physical/block_projection.go — starReadBlockProjections, moved 2026-09-11 (#1026)
 
 ```go
 // A DERIVED BLOCK A STAR READS IS A RELATION, AND SOME STAGE PUBLISHES IT

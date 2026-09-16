@@ -1,6 +1,6 @@
 # Set operation quoted literal gap
 
-Source: internal/planner/physical/set_op_stages.go — setOpQuotedLiteralGap, moved 2026-09-11 (#1026)
+Source: internal/planner/physical/set_op_types.go — setOpQuotedLiteralGap, moved 2026-09-11 (#1026)
 
 ```go
 // setOpQuotedLiteralGap is the refusal for an UNKNOWN-typed literal — a

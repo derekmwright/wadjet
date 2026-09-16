@@ -55,6 +55,12 @@ func TestTheTwoExplainDoorsAgreeOnWadjetd(t *testing.T) {
 		{"aggregate_order_by", "EXPLAIN VERBOSE SELECT s, count(*) FROM m GROUP BY s ORDER BY s"},
 		{"join", "EXPLAIN VERBOSE SELECT a.id FROM m a JOIN m b ON a.id = b.id"},
 		{"not_verbose", "EXPLAIN SELECT s, count(*) FROM m GROUP BY s"},
+		// Whitespace spellings, because psql sends a multi-line statement as
+		// typed: EXPLAIN on its own line used to take the unrouted path and
+		// print the pipeline's line while the HTTP door printed the DAG
+		// (round-3 review P1).
+		{"newline_separator", "EXPLAIN\nVERBOSE SELECT s, count(*) FROM m GROUP BY s"},
+		{"tab_separator", "EXPLAIN\tVERBOSE SELECT s, count(*) FROM m GROUP BY s"},
 	}
 	for _, sh := range shapes {
 		t.Run(sh.name, func(t *testing.T) {
