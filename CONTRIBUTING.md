@@ -87,11 +87,18 @@ Two things this asks of a change:
 - **Every new `.go` file carries an SPDX header** naming its directory's
   region — `// SPDX-License-Identifier: MIT` or
   `// SPDX-License-Identifier: AGPL-3.0-only` — as its first line, followed
-  by a blank line.
+  by a blank line. Generated files (`// Code generated ... DO NOT EDIT.`) are
+  exempt, because a regeneration would drop it; their directory's `LICENSE`
+  is what covers them.
 - **No MIT package may import an AGPL package.** If a change needs one, the
   code belongs on the other side of the line, or the seam belongs behind an
   interface the MIT side owns (`internal/queryroute` is the worked example:
   pgwire declares what it needs, the coordinator satisfies it).
+- **No MIT package may DECLARE distributed planning** — a stage, an exchange,
+  a distribution property, stage emission, the shuffle or probe-split policy.
+  That code belongs in `internal/coordinator/dagplan`. The vocabulary is
+  declared in `tools/licensecheck/dagvocabulary.go`; if a name of yours
+  collides with it and is not distributed planning, rename it.
 
 `go run ./tools/licensecheck .` checks both, along with the per-directory
 LICENSE copies, and runs in CI and in `task housekeeping`.

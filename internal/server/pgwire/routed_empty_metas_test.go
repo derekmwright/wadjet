@@ -66,7 +66,7 @@ func TestRoutedColumnMetasFromPlanSchemaWithNoRows(t *testing.T) {
 	}
 }
 
-// TestCoordColumnMetasStillNilWithoutASchema pins the other half of the
+// TestRoutedColumnMetasStillNilWithoutASchema pins the other half of the
 // contract: with nothing to declare from, the uniform text fallback is still
 // what happens. A PARTIAL declaration would be worse, because a client cannot
 // tell which columns were guessed.

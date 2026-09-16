@@ -251,8 +251,10 @@ func CheckSPDX(root string) ([]Violation, int, error) {
 				What: "no SPDX header. Add " + want + " as the first line, followed by a blank line."})
 		} else if got != want {
 			out = append(out, Violation{Where: filepath.ToSlash(rel),
-				What: fmt.Sprintf("SPDX header says %q but its directory is %s. Either the header or "+
-					"the region in tools/licensecheck/regions.go is wrong.", got, want)})
+				What: fmt.Sprintf("SPDX header says %s but its directory is %s. Either the header or "+
+					"the region in tools/licensecheck/regions.go is wrong.",
+					strings.TrimPrefix(got, "// SPDX-License-Identifier: "),
+					licenseOf(filepath.ToSlash(filepath.Dir(rel))))})
 		}
 		return nil
 	})

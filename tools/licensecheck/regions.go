@@ -49,11 +49,13 @@ var testCrossings = map[string]string{
 	"internal/cli":    "two config gates assert that a `serve` config reaches the HTTP server's own planner, which lives with the distributed engine",
 }
 
-// licensedDirs are the directories that must carry their own LICENSE file:
-// every AGPL directory, because the root LICENSE is MIT and pkg.go.dev
-// resolves a license per directory (nearest LICENSE at or above the
-// package), and the two MIT carve-outs under internal/server, because the
-// nearest LICENSE above them would otherwise be the AGPL one.
+// The two license names, spelled the way an SPDX header spells them.
+//
+// Which directories must carry their own LICENSE file is computed in
+// check.go (licenseFileDirs): every AGPL directory, because the root LICENSE
+// is MIT and a license is resolved per directory from the nearest one at or
+// above the package, and the two MIT carve-outs under internal/server,
+// because the nearest LICENSE above them would otherwise be the AGPL one.
 const (
 	mit  = "MIT"
 	agpl = "AGPL-3.0-only"
