@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package coordinator
 
 // o2Pin is the RESIDUE: every cell this table measures that does not agree

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package expr provides a typed expression engine for evaluating SQL expressions
 // against record batches. It replaces the string-based expression parsing with
 // a compiled expression tree built from the SQL parser AST.

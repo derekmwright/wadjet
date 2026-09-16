@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package typematrix supplies fixtures and generated consumer queries for all
 // 22 types; Columns() additions must expand coverage automatically.
 // Separate flat and nested tables keep pooled native-scan coverage reachable.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // This file holds terminal gather dispatch and declared-column evaluation.
 // ADR-0010 governs shuffle transport; ADR-0026 §8 governs ordering across the gather boundary.
 package coordinator

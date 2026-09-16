@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package metrics provides Prometheus instrumentation for Wadjet.
 package metrics
 

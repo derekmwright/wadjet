@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // A DISTINCT ARM'S COMPUTED COLUMN DECLARES numeric ON THE WIRE — #949.

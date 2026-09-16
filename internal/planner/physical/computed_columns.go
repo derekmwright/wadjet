@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // This file holds computed columns for the physical planner, governed by ADR-0026.
 package physical
 

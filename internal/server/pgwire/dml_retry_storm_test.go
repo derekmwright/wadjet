@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // P2: a DML statement that keeps losing the CAS reports 40001, and leaves the

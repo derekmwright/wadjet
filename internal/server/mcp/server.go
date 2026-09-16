@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package mcp implements a Model Context Protocol (MCP) server for Wadjet.
 // This allows AI agents (Claude, Cursor, etc.) to discover tables, inspect schemas,
 // and execute SQL queries against a Wadjet instance.

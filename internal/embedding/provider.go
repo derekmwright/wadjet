@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package embedding provides text embedding via external APIs (OpenAI, Ollama).
 package embedding
 

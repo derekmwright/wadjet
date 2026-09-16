@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package server provides the HTTP API for Wadjet.
 package server
 

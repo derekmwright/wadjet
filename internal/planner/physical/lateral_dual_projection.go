@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // This file holds the single-process lowering of a table-less LATERAL body,
 // governed by ADR-0021.
 package physical

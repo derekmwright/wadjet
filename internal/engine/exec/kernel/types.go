@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package kernel provides type-specialized vectorized operations for the query engine.
 // Generic functions are monomorphized at compile time and dispatch is resolved once
 // at query init time (not per-row), eliminating type-switch overhead from hot loops.

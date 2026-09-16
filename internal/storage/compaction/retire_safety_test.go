@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package compaction
 
 // Object retirement: an object is physically retired only with proof that no

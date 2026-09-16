@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package shapegen
 
 import "strings"

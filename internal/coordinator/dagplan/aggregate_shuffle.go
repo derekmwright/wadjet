@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package dagplan is the coordinator's planning policy over a physical
 // stage plan: which join gets a shuffle, which build is large enough to
 // pay for one, and which derived aggregate is rewritten into a distributed

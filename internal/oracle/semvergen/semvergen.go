@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package semvergen generates the version corpus every semver gate runs over.
 //
 // It is ONE generator, shared by the expression unit gates, the five-arm census

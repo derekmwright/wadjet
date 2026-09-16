@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package coordinator manages query planning, scheduling, and lifecycle tracking.
 package coordinator
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package physical converts logical plans to physical execution plans.
 package physical
 

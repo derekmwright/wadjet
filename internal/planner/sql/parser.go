@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package sql provides SQL parsing using a custom recursive descent parser.
 package sql
 

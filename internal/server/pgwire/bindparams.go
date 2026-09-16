@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // Extended-query parameter binding.

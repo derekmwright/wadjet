@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // Regression tests for #363: a CAST to a temporal type must declare the

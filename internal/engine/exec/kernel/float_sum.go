@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package kernel
 
 // The float SUM's two range rules, both PostgreSQL's and both measured on

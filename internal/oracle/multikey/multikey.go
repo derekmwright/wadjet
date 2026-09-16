@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package multikey supplies fixtures and queries correlating on MORE THAN ONE
 // column (#562), covering build-side narrowing that could drop later conjuncts.
 // Single-key corpora cannot prove compound-key retention.

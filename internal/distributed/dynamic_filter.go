@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package distributed
 
 // Dynamic filter (Trino-style semi-join pushdown) wire types.

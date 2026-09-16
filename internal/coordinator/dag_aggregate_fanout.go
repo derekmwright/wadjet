@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // This file holds final-aggregate fan-out eligibility and dispatch.
 // ADR-0010 governs shuffle transport; ADR-0026 §8 governs ordering across the gather boundary.
 package coordinator

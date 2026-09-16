@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package parquet provides Parquet file reading and writing on top of objstore.
 package parquet
 

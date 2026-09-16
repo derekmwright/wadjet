@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // This file holds per-block recursive CTE materialization, governed by ADR-0021.
 package physical
 

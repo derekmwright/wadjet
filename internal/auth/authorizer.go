@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package auth
 
 // Authorizer checks whether an identity has permission to perform operations.

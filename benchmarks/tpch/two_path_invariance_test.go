@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package tpch's two-path invariance gate gives one statement one answer.
 //
 // The coordinator answers a query on one of two engines: the small-query

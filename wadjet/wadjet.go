@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package wadjet provides the public embeddable API for Wadjet.
 package wadjet
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package dmlassign is the SET-value matrix for DML assignment casts, and the
 // PostgreSQL answers it is checked against.
 //

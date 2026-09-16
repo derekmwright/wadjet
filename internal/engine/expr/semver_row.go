@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package expr
 
 import "github.com/derekmwright/wadjet/internal/storage/parquet"

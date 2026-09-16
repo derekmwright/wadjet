@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package diskio reduces dirty-page pressure from large sequential worker writes
 // using asynchronous sync_file_range WRITE per window, with NO per-window wait.
 // Strict writeback serialization regresses downloads; see Flusher.wrote and

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package shapegen generates random-but-valid SQL over a described schema,
 // aimed at the shapes a BI client emits and the fixed benchmark corpus does
 // not contain.

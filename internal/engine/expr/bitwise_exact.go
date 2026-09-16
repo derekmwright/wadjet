@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package expr
 
 // The bitwise operators read their arguments EXACTLY and answer an integer.

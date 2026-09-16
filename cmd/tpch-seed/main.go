@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Command tpch-seed generates TPC-H data and loads it into an S3-compatible
 // object store for reusable benchmarking. The data persists in the bucket so
 // subsequent wadjet benchmark runs can skip generation.

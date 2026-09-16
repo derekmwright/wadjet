@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package exec provides the push-based pipeline execution framework.
 package exec
 

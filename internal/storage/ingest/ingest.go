@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package ingest provides micro-batch accumulation and flushing to object storage.
 package ingest
 

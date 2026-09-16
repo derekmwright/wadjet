@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package objstore provides an abstraction over S3-compatible object storage.
 package objstore
 

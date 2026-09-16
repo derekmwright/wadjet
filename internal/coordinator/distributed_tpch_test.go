@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //go:build !race
 
 // The tests in this file spin up an embedded NATS server with multiple

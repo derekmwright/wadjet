@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // This file holds pipeline source for the physical planner, governed by ADR-0026 and ADR-0027.
 package physical
 

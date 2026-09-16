@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // This file holds planner config for the physical planner, governed by ADR-0034.
 package physical
 

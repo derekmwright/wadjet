@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // Regression coverage for #471: formatPgValue rendered a ROW's NULL field as

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // A memory refusal names what was charged PAST the budget, and the WIRE carries

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package iceberg provides read-only support for Apache Iceberg table metadata.
 // It parses Iceberg metadata JSON files to resolve snapshots, manifests, and
 // data file paths for querying existing Iceberg tables.

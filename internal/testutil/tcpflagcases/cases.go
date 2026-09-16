@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package tcpflagcases holds the empty-input AST coverage census shared by both planning paths and the wire gate.
 package tcpflagcases
 

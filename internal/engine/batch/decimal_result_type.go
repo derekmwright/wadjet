@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package batch
 
 // The DECIMAL RESULT-TYPE rules of ADR-0024, in one place.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package batch
 
 // View (dictionary) vectors — the late-materialization primitive.

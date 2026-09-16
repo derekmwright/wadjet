@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // This file holds flat accumulators, count-array planning, and scatter dispatch.
 // ADR-0010, ADR-0023, and ADR-0027 govern partial-state transport, key identity, and spill ownership.
 package exec

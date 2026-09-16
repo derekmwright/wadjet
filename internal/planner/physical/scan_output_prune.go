@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package physical
 
 import "github.com/derekmwright/wadjet/internal/optswitch"

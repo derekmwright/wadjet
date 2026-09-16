@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package alerts
 
 import "github.com/prometheus/client_golang/prometheus"

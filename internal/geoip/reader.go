@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package geoip provides MaxMind GeoIP2/GeoLite2 database lookups for IP geolocation and ASN enrichment.
 package geoip
 

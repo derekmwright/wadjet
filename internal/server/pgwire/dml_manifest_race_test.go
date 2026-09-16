@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // #691 — a DML statement that commits delete markers against a manifest that

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package queryroute is the seam pgwire takes when a SELECT is answered by
 // something other than the embedded wadjet.DB it was opened over.
 //

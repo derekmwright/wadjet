@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // THE WIRE CARRIES THE BLOCK'S OWN PROJECTION — arc K3, #984.

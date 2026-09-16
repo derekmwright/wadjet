@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // This file holds expr hash fns; ADR-0012 and ADR-0024 governs the execution contracts.
 package expr
 

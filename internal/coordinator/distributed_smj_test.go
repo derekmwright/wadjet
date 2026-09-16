@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //go:build !race
 
 // Shares setupTPCHDistributed with distributed_tpch_test.go, which is

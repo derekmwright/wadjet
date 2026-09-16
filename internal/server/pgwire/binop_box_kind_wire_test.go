@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // The generic arithmetic node on the WIRE (#849 round-3 residual, #555).

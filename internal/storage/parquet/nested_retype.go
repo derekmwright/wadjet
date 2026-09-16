@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package parquet
 
 // nestedFileNode resolves a top-level column name to its node in the FILE's

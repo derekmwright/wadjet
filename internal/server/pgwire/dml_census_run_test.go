@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // The census runner: the fixture, the three doors, and the digest that makes

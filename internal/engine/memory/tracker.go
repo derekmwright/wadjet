@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package memory provides memory tracking and budget enforcement for the query engine.
 package memory
 

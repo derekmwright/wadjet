@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // This file holds join hidden slots for the physical planner, governed by ADR-0023 and ADR-0026.
 package physical
 

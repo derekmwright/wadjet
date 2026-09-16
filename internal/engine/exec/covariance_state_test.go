@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Regression tests for #353: CORR, COVAR_SAMP and COVAR_POP had no way to
 // cross a partial/final aggregate split. On the stage DAG the worker had no
 // case for their function names at all, so they fell to its `default:

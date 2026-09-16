@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package skew generates the synthetic hot-key benchmark fixture for the
 // adaptive skew-aware shuffle A/B (docs/design/skew-aware-shuffle.md,
 // Phase 3). It is the TestSkewSplitParity fixture shape scaled to sizes that

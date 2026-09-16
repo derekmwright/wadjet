@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package physical defines stage-type string constants used by
 // Stage.Type. Exchange stages are inserted by EnsureDistribution
 // to bridge distribution mismatches between child output and parent

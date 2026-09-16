@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // #835 — two DML statements over the same row, on all three doors.

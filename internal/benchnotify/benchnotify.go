@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package benchnotify emits one single-line JSON event per SQS message.
 // Absent fields mean not applicable, not zero; preserve the documented lifecycle
 // schema/order with deploy/benchmark/watch-events.sh. Fatal is terminal.

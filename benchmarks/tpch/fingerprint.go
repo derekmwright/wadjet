@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package tpch
 
 // SF100 value-level correctness gate.

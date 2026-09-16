@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // #711 — a simple-protocol string carrying MORE THAN ONE statement.

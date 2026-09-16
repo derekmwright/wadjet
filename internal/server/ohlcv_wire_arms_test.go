@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package server
 
 // THE BAR'S DECLARATION ON THE WIRE, ON BOTH DOORS — #965 round 2, B1.

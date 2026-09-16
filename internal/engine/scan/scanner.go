@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package scan provides table scanning with 3-level predicate pushdown.
 package scan
 

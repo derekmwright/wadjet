@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //go:build !race
 
 // See distributed_tpch_test.go for why this package is skipped under -race

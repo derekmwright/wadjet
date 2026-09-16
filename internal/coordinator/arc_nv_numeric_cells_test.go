@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package coordinator
 
 // The coverage table, one row per (family × position × spelling) the arc

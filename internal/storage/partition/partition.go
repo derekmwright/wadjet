@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package partition implements Hive-style partitioning for table data.
 package partition
 

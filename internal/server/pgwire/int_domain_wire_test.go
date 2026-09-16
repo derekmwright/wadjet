@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // #849 on the WIRE, which is the half a value oracle cannot see.

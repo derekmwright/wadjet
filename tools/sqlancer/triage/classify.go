@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package triage classifies SQLancer soak-log output (and the wadjet
 // server logs captured alongside it) the way wadjet#289's harness actually
 // needs, which is not the way its README long documented.

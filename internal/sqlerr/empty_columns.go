@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package sqlerr
 
 // A result-producing statement must declare columns even when it returns no rows.

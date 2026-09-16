@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package config provides YAML configuration loading for Wadjet.
 package config
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package dataplane is the worker↔coord transport for high-rate task
 // traffic that NATS JetStream is a poor fit for at scale: task dispatch,
 // result batches, gather payloads, and per-task progress. Out of scope

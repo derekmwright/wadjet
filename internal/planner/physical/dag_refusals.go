@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // This file holds dag refusals for the physical planner, governed by ADR-0026 and ADR-0034.
 package physical
 

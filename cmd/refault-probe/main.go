@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Command refault-probe is a field diagnostic for the §9 page-cache
 // pressure sensor (internal/engine/memory/pressure_os.go). It prints,
 // once per second, the raw workingset_refault counter this process can

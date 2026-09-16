@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package catalog manages table schema and partition metadata.
 // Metadata is stored in a MetaKV (NATS KV in production, MemKV in tests).
 // Data files remain in object storage (S3/MinIO).

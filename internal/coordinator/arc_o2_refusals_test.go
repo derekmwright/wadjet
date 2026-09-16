@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package coordinator
 
 // THE SHAPES THIS ENGINE REFUSES WHERE POSTGRESQL ANSWERS, with the mechanism

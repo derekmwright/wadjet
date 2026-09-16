@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package wadjet
 
 // ntPgCell is one measured PostgreSQL 17.11 answer: the literal, the text the

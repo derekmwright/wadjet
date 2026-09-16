@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package memory
 
 // ForcePurpose names what a charge taken PAST the budget was taken for.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package pgwire implements the PostgreSQL v3 wire protocol frontend.
 // This allows psql, JDBC, ODBC, and any Postgres-compatible client to
 // connect to Wadjet and execute SQL queries.

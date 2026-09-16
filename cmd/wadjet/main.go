@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Command wadjet is the Wadjet command-line interface.
 package main
 

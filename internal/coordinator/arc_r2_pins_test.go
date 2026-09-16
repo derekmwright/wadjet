@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package coordinator
 
 // r2Pin is the RESIDUE of the join-arm table: every cell that does not agree

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package format provides output formatting for query results.
 package format
 

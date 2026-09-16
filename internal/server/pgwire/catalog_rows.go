@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // Single-row catalog relations: pg_database and pg_namespace.

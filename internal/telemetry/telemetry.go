@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package telemetry provides OpenTelemetry tracing for Wadjet.
 //
 // Wadjet already generates W3C-compatible TraceID/SpanID and propagates them

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // This file holds the INTEGER WIDTH half of a node's emitted declaration, the
 // companion to emittedColTypes (the carrier) and emittedColDecimal (the
 // (p,s)). Governed by ADR-0024 item 2 and ADR-0012.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // Regression coverage for the issue #305 punch list — the pgwire

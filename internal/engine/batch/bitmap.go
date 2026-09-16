@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package batch provides the core columnar data structures for the execution engine.
 package batch
 

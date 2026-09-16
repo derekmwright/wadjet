@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // This file holds the PLAN-TIME half of the TCP flag family's name refusal:
 // a constant flag-name list is folded from the DECLARATION, before any row.
 // Governed by ADR-0012 item 1 (#1018 round 5, B2).

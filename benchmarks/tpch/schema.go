@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package tpch
 
 import "github.com/derekmwright/wadjet/internal/storage/parquet"

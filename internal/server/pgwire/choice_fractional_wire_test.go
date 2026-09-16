@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // #849's boundary on the WIRE: a choice construct with a FRACTIONAL literal

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // This file holds the PLAN-TIME half of `semver_satisfies`'s range refusal: a
 // range written as a CONSTANT is read from the DECLARATION, before any row.
 // Governed by ADR-0012 item 1 (#967).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package shapegen
 
 // TPCH is the generation universe for the TPC-H schema as Wadjet stores it:

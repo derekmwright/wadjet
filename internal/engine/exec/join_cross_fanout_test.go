@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 //go:build !race
 
 // The 400M-pair fan-out gate is excluded under -race: the detector

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // THE HIDDEN SLOT DOES NOT REACH THE WIRE — arc J1, #956 / #767.

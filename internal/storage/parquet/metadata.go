@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package parquet
 
 // Parquet Thrift metadata structures.

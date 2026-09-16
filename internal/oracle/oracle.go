@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package oracle is the optimization-invariance differential harness
 // (#287): every corpus query runs with all registered optimizations
 // enabled (baseline), then once per optswitch toggle with just that

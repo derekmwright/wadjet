@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package rowdecl provides the fixed-ROW declaration position corpus.
 package rowdecl
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // This file holds the TABLE-LESS LATERAL lowering, governed by ADR-0021.
 package logical
 

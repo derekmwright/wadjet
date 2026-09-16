@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Command sqlancer-triage classifies SQLancer soak-log output (and the
 // wadjet server logs captured next to it) into genuine oracle violations,
 // wadjet-crash echoes, and ordinary SQL-surface noise. See

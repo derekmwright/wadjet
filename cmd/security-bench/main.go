@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // security-bench runs the security analytics benchmark against a Wadjet database.
 //
 // Standalone mode (default): in-memory storage, single process.

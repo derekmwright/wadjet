@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // The engine's DECIMAL overflow refusals reach a client as SQLSTATE 22003

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // A MULTI-COLUMN SUBQUERY IS 42601 ON THE WIRE — #875's second face, and the

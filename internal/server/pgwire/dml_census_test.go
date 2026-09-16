@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // The DML census: every shape in the Arc B round-0 dossier, on all THREE

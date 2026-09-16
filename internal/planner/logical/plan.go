@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package logical provides logical query plan representation and optimization.
 package logical
 

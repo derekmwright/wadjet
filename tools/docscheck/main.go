@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Command docscheck resolves every relative link and #anchor markdown
 // documentation makes against the tree, and checks that every top-level
 // docs/*.md page is reachable by following links starting at

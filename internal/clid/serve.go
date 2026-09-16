@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package clid is the distributed server: the run modes `wadjetd serve`
 // carries, standalone, coordinator and worker.
 //

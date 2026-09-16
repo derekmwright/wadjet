@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package batch
 
 // VectorAcceptsText reports whether SetValue/SetValueChecked has a string arm

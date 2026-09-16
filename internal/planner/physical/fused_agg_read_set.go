@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package physical
 
 // pruneFusedAggOutputCols removes aggregate OUTPUT column names from a fused

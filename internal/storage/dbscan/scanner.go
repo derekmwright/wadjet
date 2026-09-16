@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package dbscan provides table-function sources for querying external
 // SQL databases (PostgreSQL, MySQL) and producing columnar RecordBatches.
 package dbscan

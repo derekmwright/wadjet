@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // AN ARRAY DECLARES THE ARRAY OF ITS ELEMENT — #992.

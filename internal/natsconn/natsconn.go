@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package natsconn opens NATS: the embedded server, the client connections
 // and the JetStream context. It is the transport a catalog is reached over,
 // not the distributed engine that runs on it — internal/distributed keeps

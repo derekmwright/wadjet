@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // The census's PostgreSQL arm: the same shapes, the same digest, run against a

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // WHAT THE WIRE CARRIES FOR THE SEMVER FAMILY (#967).

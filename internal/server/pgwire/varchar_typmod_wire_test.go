@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // #838's declaration half, on the WIRE — the only place it is visible.

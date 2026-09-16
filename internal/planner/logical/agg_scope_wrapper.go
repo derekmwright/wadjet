@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package logical
 
 // AggScopePreservingWrapper is THE shared list preserving an aggregate's OWN

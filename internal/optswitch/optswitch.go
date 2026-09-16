@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package optswitch is the registry of optimization kill switches (#287).
 //
 // Every optimization that can change the shape of query results — pruning,

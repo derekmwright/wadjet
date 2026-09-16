@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // This file holds stage generation for the physical planner, governed by ADR-0010 and ADR-0026.
 package physical
 

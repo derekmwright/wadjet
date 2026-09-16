@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package coordinator
 
 // PostgreSQL 17.11's UNION type-resolution verdict for every ORDERED PAIR of

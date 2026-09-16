@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package tpch
 
 // postgresJoinArmCases asks PostgreSQL what a reference resolves to when it is

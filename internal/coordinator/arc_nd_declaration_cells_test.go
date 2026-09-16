@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package coordinator
 
 // The ND cells. See arc_nd_declarations_test.go for the rule and the arms.

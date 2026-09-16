@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // Regression coverage for #464: bindparams.go folded oidNumeric into the

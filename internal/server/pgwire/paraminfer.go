@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // Parameter type inference for placeholders the client did NOT declare.

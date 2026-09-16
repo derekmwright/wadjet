@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // A SELECT-LIST SCALAR SUBQUERY DECLARES ITS OWN TYPE ON THE WIRE — #874.

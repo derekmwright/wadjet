@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Command embedcheck is docs/getting-started.md's "Your First Table (Embedded
 // Go)" program, in a module that is NOT github.com/derekmwright/wadjet.
 //

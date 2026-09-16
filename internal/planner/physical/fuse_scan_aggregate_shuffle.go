@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package physical
 
 // fuseScanAggregateShuffle absorbs an exchange into a scan-aggregate and

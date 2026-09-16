@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // Regression tests for #362: a portal bound with binary result formats must

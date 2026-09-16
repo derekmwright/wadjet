@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //go:build race
 
 // distributed_tpch_test.go is gated with //go:build !race because the

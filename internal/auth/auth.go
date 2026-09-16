@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package auth provides authentication and authorization for Wadjet's HTTP API.
 //
 // Supports three authentication methods:

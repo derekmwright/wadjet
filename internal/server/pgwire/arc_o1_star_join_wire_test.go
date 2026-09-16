@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // THE WIRE DECLARES A STAR JOIN'S OWN ARMS — arc O1, #997 / #1012 / #993.

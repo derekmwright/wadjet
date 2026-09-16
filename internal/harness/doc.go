@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package harness implements the distributed test harness used by
 // cmd/tpch-harness. It orchestrates a multi-process wadjet cluster on the
 // dev box (local mode) or drives a pre-existing cluster (golden mode),

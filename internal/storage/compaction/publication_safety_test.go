@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package compaction
 
 // Publication safety: a compaction commit is ONE conditional manifest

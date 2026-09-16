@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package json reads JSON data (JSONL or JSON array format) and converts it
 // to the columnar RecordBatch format used by Wadjet's execution engine.
 package json

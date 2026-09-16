@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package wshf owns shuffle magics/envelopes and the ONE bounds-checked decoder
 // for worker file/stream/pread and coordinator inline consumers (#422).
 // Preserve column order, per-file schema, DECIMAL scale/precision and per-chunk

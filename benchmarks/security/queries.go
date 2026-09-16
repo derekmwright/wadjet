@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package security
 
 // SecurityQueries defines analytics queries representative of real SOC and SIEM workloads.

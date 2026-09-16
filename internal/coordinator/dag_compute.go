@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // This file holds compute-stage dispatch and partitioned task construction.
 // ADR-0010 governs shuffle transport; ADR-0026 §8 governs ordering across the gather boundary.
 package coordinator

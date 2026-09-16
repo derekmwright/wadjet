@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package parquet
 
 // ReconcileRowGroupStats moves DECIMAL min/max from FILE to READ schema

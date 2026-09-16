@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // #544 stated as the identity it is: the text a TIMESTAMP is COERCED to and

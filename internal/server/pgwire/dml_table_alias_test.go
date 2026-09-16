@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // What the WIRE carries for an aliased DELETE or UPDATE: the command tag.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package sqlgen generates random-but-valid SQL queries over a described
 // schema, for differential testing (#288). Generation is fully determined
 // by the seed — a failing seed IS the repro — and is weighted toward the

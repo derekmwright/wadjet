@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // This file holds the ONE walk arc C1's scope questions are asked of,
 // governed by ADR-0021.
 package logical

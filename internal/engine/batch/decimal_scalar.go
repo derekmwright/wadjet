@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package batch
 
 // Exact execution of the scalar math functions that answer in their argument's

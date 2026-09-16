@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package distributed provides NATS-based distributed coordination.
 package distributed
 

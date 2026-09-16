@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package collide is the COLLIDING-BARE-NAME fixture: three relations whose
 // columns are all called c0, c1, c2, the way SQLancer names every schema it
 // generates.

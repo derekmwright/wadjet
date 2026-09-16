@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Regression tests for #339: STDDEV/VARIANCE answered from part of their
 // input, because a partial aggregate's (count, mean, M2) state was dropped
 // at every merge rather than combined.

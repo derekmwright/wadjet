@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package worker implements the distributed task execution worker.
 package worker
 

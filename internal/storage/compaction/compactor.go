@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package compaction merges small Parquet files within a partition into
 // larger files, reducing S3 list overhead and scan file-open costs.
 package compaction

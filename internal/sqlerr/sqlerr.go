@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package sqlerr carries a PostgreSQL SQLSTATE alongside an error message.
 //
 // Wadjet speaks the PostgreSQL wire protocol, and a client branches on the

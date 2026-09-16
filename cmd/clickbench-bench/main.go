@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // clickbench-bench runs the ClickBench 43-query suite against an embedded
 // wadjet DB over local hits parquet parts, following the official
 // methodology (https://github.com/ClickHouse/ClickBench):

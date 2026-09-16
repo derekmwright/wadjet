@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package logio decouples log production from the log sink.
 //
 // Motivation (2026-08-14, frozen-spin/quiet-stall stall family): the

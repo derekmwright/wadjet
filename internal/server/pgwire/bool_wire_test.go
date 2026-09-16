@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package pgwire
 
 // Regression tests for #364: a boolean-valued EXPRESSION column must declare
