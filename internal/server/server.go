@@ -1221,7 +1221,17 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, parsed *p
 		if physPlan.Cleanup != nil {
 			physPlan.Cleanup()
 		}
-		planStr += "\n\n-- Physical Plan --\n" + physPlan.PrettyPrint()
+		// This server has a coordinator, so it prints the stage DAG it would
+		// dispatch. The local planner no longer emits stages (ADR-0037): the
+		// embedded engine runs a pipeline and its EXPLAIN says so, and the
+		// stage list is planned here, on the distributed side, exactly as it
+		// was before the split. A plan the distributed planner refuses falls
+		// back to the pipeline's own line rather than failing EXPLAIN.
+		physicalPlanText := physPlan.PrettyPrint()
+		if stages, stageErr := planner.PlanDistributed(explainCtx, logicalPlan); stageErr == nil && len(stages) > 0 {
+			physicalPlanText = physical.PrettyPrintStages(stages)
+		}
+		planStr += "\n\n-- Physical Plan --\n" + physicalPlanText
 	}
 
 	rows := []map[string]any{{"plan": planStr}}

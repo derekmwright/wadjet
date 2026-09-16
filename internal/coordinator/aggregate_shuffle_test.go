@@ -61,11 +61,12 @@ func TestPreComputeDerivedAggregate_Q17SF001(t *testing.T) {
 	optimized := logical.Optimize(plan, func(p *logical.Node) {
 		planner.AnnotateScanColumns(ctx, p)
 	})
-	physPlan, err := planner.Plan(ctx, optimized)
+	// PlanDistributed, not Plan: the local entry plans a pipeline and emits
+	// no stages (ADR-0037).
+	stages, err := planner.PlanDistributed(ctx, optimized)
 	if err != nil {
-		t.Fatalf("Q17 physical plan: %v", err)
+		t.Fatalf("Q17 distributed plan: %v", err)
 	}
-	stages := physPlan.Stages
 
 	// Bypass the production threshold — at SF0.01 the input scan is well
 	// below 4 GB, so PickAggregateShuffleCandidate would return !ok. Use a

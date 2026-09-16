@@ -232,9 +232,11 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		}
 	}
 
-	// Generate distributed stages for coordinator dispatch
-	plan.Stages = p.generateStages(node)
-
+	// No stage generation here. The local entry plans a PIPELINE; the stage
+	// DAG is the distributed engine's, and emitting one on every embedded
+	// query was both wasted work and the single edge that made the local
+	// planner depend on the distributed one (LICENSING.md, ADR-0037).
+	// dagplan.PlanStages is the distributed entry.
 	if err := p.enforceQueryLimits(ctx, node); err != nil {
 		p.resources().releaseSubqueryCharges()
 		p.releaseCTECache()

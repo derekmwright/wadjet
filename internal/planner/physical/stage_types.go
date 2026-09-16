@@ -5,19 +5,17 @@ package physical
 
 import (
 	"fmt"
-	"strings"
-
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"strings"
 )
 
 // PhysicalPlan represents an executable query plan.
 type PhysicalPlan struct {
 	Pipeline *exec.Pipeline
-	Stages   []Stage // for distributed execution
-	Cleanup  func()  // optional: called after pipeline finishes to clean up spill files
+	Cleanup  func() // optional: called after pipeline finishes to clean up spill files
 	// OutputSchema is the PLAN-DERIVED output schema: the SELECT list's
 	// column names with the types the catalog says they carry. It answers
 	// the question a zero-row result leaves open, since every other source
@@ -982,22 +980,15 @@ type DynamicFilterConsume struct {
 	AttachOnArrival bool
 }
 
-// PrettyPrint returns a formatted string representation of the physical plan.
+// PrettyPrint renders the plan for EXPLAIN VERBOSE.
+//
+// A PhysicalPlan is a single-process PIPELINE and says so. It used to print
+// the distributed stage list, which meant `EXPLAIN VERBOSE` through the
+// embedded API — and through the `wadjet` binary — printed a DAG the embedded
+// engine never executes, emitted only to be printed. The stage list belongs to
+// the distributed planner and `wadjetd` still prints it, from there.
 func (p *PhysicalPlan) PrettyPrint() string {
-	if len(p.Stages) == 0 {
-		return "Single-stage local execution"
-	}
-	var b strings.Builder
-	for i, stage := range p.Stages {
-		if i > 0 {
-			b.WriteString("\n")
-		}
-		b.WriteString(fmt.Sprintf("Stage %s [%s] (%d tasks)", stage.ID, stage.Type, stage.Tasks))
-		if len(stage.Dependencies) > 0 {
-			b.WriteString(fmt.Sprintf(" <- depends on %s", strings.Join(stage.Dependencies, ", ")))
-		}
-	}
-	return b.String()
+	return "Single-stage local execution"
 }
 
 // PreComputedAggregateMeta travels on physical.Stage to tell task creation
@@ -1009,4 +1000,27 @@ type PreComputedAggregateMeta struct {
 	GroupByCols []string
 	AggSpecs    []AggSpec
 	CacheFiles  []string
+}
+
+// PrettyPrintStages renders a stage DAG for EXPLAIN VERBOSE.
+//
+// It is what PhysicalPlan.PrettyPrint used to print. The rendering moved
+// beside the stages because the stages are the distributed planner's: the
+// embedded engine executes a pipeline and says so, and a server with a
+// coordinator prints the DAG it will actually dispatch.
+func PrettyPrintStages(stages []Stage) string {
+	if len(stages) == 0 {
+		return "Single-stage local execution"
+	}
+	var b strings.Builder
+	for i, stage := range stages {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(fmt.Sprintf("Stage %s [%s] (%d tasks)", stage.ID, stage.Type, stage.Tasks))
+		if len(stage.Dependencies) > 0 {
+			b.WriteString(fmt.Sprintf(" <- depends on %s", strings.Join(stage.Dependencies, ", ")))
+		}
+	}
+	return b.String()
 }

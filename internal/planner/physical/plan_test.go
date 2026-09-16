@@ -335,10 +335,9 @@ func TestPlan_SimpleScan(t *testing.T) {
 	if plan.Pipeline.Sink == nil {
 		t.Error("expected Pipeline.Sink to be non-nil")
 	}
-	// Plan also populates Stages
-	if len(plan.Stages) == 0 {
-		t.Error("expected Plan to also populate Stages")
-	}
+	// Plan emits NO stages: the stage DAG is the distributed planner's
+	// (dagplan.PlanStages), and the local entry stopped generating one on
+	// every query when the two were separated (ADR-0037).
 }
 
 func TestExpandFederatedScans(t *testing.T) {

@@ -15,43 +15,21 @@ import (
 
 // --- PrettyPrint ---
 
-func TestPrettyPrint_EmptyStages(t *testing.T) {
+// A PhysicalPlan is a single-process pipeline and EXPLAIN VERBOSE says so.
+//
+// It used to print the distributed stage list, which the embedded engine
+// never executes — `Plan` emitted a DAG only so this could print it. The
+// stage list is the distributed planner's and `wadjetd` still prints it from
+// there; the `wadjet` binary's EXPLAIN carries no "Stage " line at all, which
+// TestTheEmbeddedExplainPrintsNoStageList gates on the built binary.
+func TestPrettyPrintIsTheLocalPipeline(t *testing.T) {
 	plan := &PhysicalPlan{}
 	got := plan.PrettyPrint()
 	if got != "Single-stage local execution" {
 		t.Errorf("PrettyPrint() = %q, want 'Single-stage local execution'", got)
 	}
-}
-
-func TestPrettyPrint_MultipleStages(t *testing.T) {
-	plan := &PhysicalPlan{
-		Stages: []Stage{
-			{ID: "scan-0", Type: "scan", Tasks: 2},
-			{ID: "agg-1", Type: "aggregate", Tasks: 1, Dependencies: []string{"scan-0"}},
-		},
-	}
-	got := plan.PrettyPrint()
-	if got == "" {
-		t.Error("PrettyPrint() returned empty string for multi-stage plan")
-	}
-	// Should contain stage information
-	if !contains(got, "scan-0") || !contains(got, "agg-1") {
-		t.Errorf("PrettyPrint() missing stage IDs: %q", got)
-	}
-	if !contains(got, "depends on") {
-		t.Errorf("PrettyPrint() missing dependency info: %q", got)
-	}
-}
-
-func TestPrettyPrint_StageWithNoDeps(t *testing.T) {
-	plan := &PhysicalPlan{
-		Stages: []Stage{
-			{ID: "scan-0", Type: "scan", Tasks: 3},
-		},
-	}
-	got := plan.PrettyPrint()
-	if contains(got, "depends on") {
-		t.Errorf("PrettyPrint() should not show deps for stage without them: %q", got)
+	if strings.Contains(got, "Stage ") {
+		t.Errorf("the local plan's EXPLAIN names a stage: %q", got)
 	}
 }
 
