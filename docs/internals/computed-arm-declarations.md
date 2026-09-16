@@ -1,6 +1,6 @@
 # Computed arm declarations
 
-Source: internal/planner/physical/join_input_projection.go — absorbComputedSubqueryProjection (declaration inference), moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/join_input_projection.go — absorbComputedSubqueryProjection (declaration inference), moved 2026-09-11 (#1026)
 
 ```go
 		// The computed column exists nowhere in the catalog, so its declared

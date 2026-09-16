@@ -1,6 +1,6 @@
 # Fragment output stream model
 
-Source: internal/planner/physical/stage_stream_model.go — streamCol / stage stream model, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/stage_stream_model.go — streamCol / stage stream model, moved 2026-09-11 (#1026)
 
 ```go
 // What a stage's fragment SHIPS, per column, with the arm it came from.

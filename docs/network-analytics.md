@@ -61,7 +61,9 @@ mc mb local/wadjet
 ### Wadjet Server
 
 ```bash
-./wadjet serve \
+# wadjetd: the distributed server. This guide's HTTP examples (`:8080`) are
+# its API; `wadjet serve` is the embedded binary and serves pgwire only.
+./wadjetd serve \
   --mode standalone \
   --http-addr :8080 \
   --endpoint localhost:9000 \
@@ -329,7 +331,7 @@ After Bento starts writing data, register the tables so Wadjet can query them.
 > rather than the three that used to apply:
 >
 > 1. `wadjet.Open` with no `MetaKV` gets an in-memory catalog. Anything it
->    registers dies with the process and is invisible to `wadjet serve`, whose
+>    registers dies with the process and is invisible to a `serve` process, whose
 >    catalog is NATS-backed. Pass `Config.MetaKV` built from the same NATS
 >    JetStream the server uses — and `MetaKV` has no out-of-tree constructor,
 >    which is what keeps this program in-repo.

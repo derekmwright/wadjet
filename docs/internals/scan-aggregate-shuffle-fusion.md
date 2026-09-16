@@ -1,6 +1,6 @@
 # Scan aggregate shuffle fusion
 
-Source: internal/planner/physical/fuse_scan_aggregate_shuffle.go — fuseScanAggregateShuffle, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/fuse_scan_aggregate_shuffle.go — fuseScanAggregateShuffle, moved 2026-09-11 (#1026)
 
 ```go
 // fuseScanAggregateShuffle absorbs StageExchangeRepartition stages into

@@ -862,7 +862,7 @@ build side started planning derived tables. The spelling that puts the derived
 arm on the PROBE agrees today, and that is the reason BOTH decline rather than
 only the one measured: which arm goes where is `reorderJoins`' decision from
 row counts, so a cut drawn there would move under the fixture. Closing it is
-`physical/join_carried_columns.go`, not this rewrite.
+`dagplan/join_carried_columns.go`, not this rewrite.
 
 **The second boundary, and it is §1's own rule one level down.** A derived
 table or a CTE reference that COMPUTES a column it publishes is DECLINED.

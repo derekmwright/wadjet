@@ -1,6 +1,6 @@
 # Singleton sort fusion
 
-Source: internal/planner/physical/native_dag_rewrite.go — projectionCoversSortKeys / fuseSortIntoPredecessor, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/native_dag_rewrite.go — projectionCoversSortKeys / fuseSortIntoPredecessor, moved 2026-09-11 (#1026)
 
 ```go
 // fuseSortIntoPredecessor folds a Singleton sort stage into the compute

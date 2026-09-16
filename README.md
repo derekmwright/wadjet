@@ -88,12 +88,15 @@ items 1–2 and §Consequences).
 Two licenses, one repository:
 
 - **MIT** — the embedded engine and the `wadjet` binary. The parser, the
-  optimizer, the vectorized executor, the Parquet and Iceberg readers, the
-  type system, the network functions, the PostgreSQL wire protocol and the
-  MCP server. Embed it, ship it, modify it, keep your changes.
+  optimizer, the local pipeline planner, the vectorized executor, the Parquet
+  and Iceberg readers, the type system, the network functions, the PostgreSQL
+  wire protocol and the MCP server. Embed it, ship it, modify it, keep your
+  changes.
 - **AGPL-3.0, or a commercial license** — the distributed engine and the
-  `wadjetd` binary: the coordinator, the workers, the exchange and the
-  stage-DAG planning that schedules a query across machines.
+  `wadjetd` binary: the coordinator, the workers, the exchange, and the
+  stage-DAG planner that schedules a query across machines
+  (`internal/coordinator/dagplan` — stage emission, the distribution and
+  exchange assignment, the shuffle policy).
 
 The split is the deployment, not the feature set: both answer the same SQL
 with the same answers (`TestTwoPathInvariance` requires it). Which

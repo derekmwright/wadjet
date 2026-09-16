@@ -41,14 +41,17 @@ wadjetd serve --mode=standalone --pg-addr=:5432
 
 ONE repo, ONE module, TWO licenses (`LICENSING.md`): the embedded engine and
 `cmd/wadjet` are MIT; `internal/coordinator`, `internal/worker`,
-`internal/distributed`, `internal/dataplane`, `internal/wshf`,
+`internal/coordinator/dagplan` (the stage-DAG planner), `internal/distributed`,
+`internal/dataplane`, `internal/wshf`,
 `internal/server` (not its `pgwire/` and `mcp/` subdirectories),
 `internal/clid`, `internal/harness`, `cmd/wadjetd` and the cluster-standing
 benchmark commands are AGPL-3.0 with a commercial option. Every .go file
 carries an SPDX header naming its region, every AGPL directory carries a
 verbatim `LICENSE` copy, and `go run ./tools/licensecheck .` (CI, `task
 housekeeping`) fails if an MIT package reaches AGPL code through a non-test
-import at ANY depth. A new package inherits MIT unless it is declared in
+import at ANY depth — or DECLARES the distributed planner's vocabulary (the
+stage, the exchange, the distribution property; see
+`tools/licensecheck/dagvocabulary.go`). A new package inherits MIT unless it is declared in
 `tools/licensecheck/regions.go`.
 
 ## Architecture
@@ -82,13 +85,13 @@ SQL text
 | `internal/engine/memory/` | Per-task memory budget, spill-to-disk |
 | `internal/planner/sql/` | SQL parser + AST types |
 | `internal/planner/logical/` | Logical plan builder + optimizer |
-| `internal/planner/physical/` | Physical planner + distributed task stages; `planner_config.go`, `stage_emission.go`, `declared_output.go`, `join_plan.go`, `dag_refusals.go` |
+| `internal/planner/physical/` | LOCAL pipeline planner (MIT): `planner_entry.go`, `pipeline_plan.go`, `declared_output.go`, `join_plan.go`, the query-limit cost walk. The stage DAG is `internal/coordinator/dagplan` |
 | `internal/storage/objstore/` | S3-compatible object store (MemStore, MinIOStore, FileStore) |
 | `internal/storage/catalog/` | Metadata in NATS KV |
 | `internal/storage/parquet/` | Parquet reader/writer |
 | `internal/storage/ingest/` | Micro-batch accumulator + partitioner |
 | `internal/coordinator/` | Query coordinator (plan, dispatch, merge); `dag_dispatch.go`, `dag_compute.go`, `dag_fragments.go`, `dag_merge.go` |
-| `internal/coordinator/dagplan/` | Distributed placement policy: shuffle candidate, large-build scans, the aggregate shuffle |
+| `internal/coordinator/dagplan/` | The distributed PLANNER (AGPL): stage emission, distribution/exchange assignment, shuffle fusion, set-op stage planning, DAG validation and refusals |
 | `internal/worker/` | Distributed task executor |
 | `internal/server/pgwire/` | PostgreSQL wire protocol |
 | `internal/auth/` | API keys, JWT, mTLS, RBAC, ABAC policy engine, identity enrichment |

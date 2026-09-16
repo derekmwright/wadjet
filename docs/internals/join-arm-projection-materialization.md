@@ -1,6 +1,6 @@
 # Join arm projection materialization
 
-Source: internal/planner/physical/join_input_projection.go — absorbJoinArmProjection, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/join_input_projection.go — absorbJoinArmProjection, moved 2026-09-11 (#1026)
 
 ```go
 // absorbJoinArmProjection materializes a derived arm's computed SELECT list

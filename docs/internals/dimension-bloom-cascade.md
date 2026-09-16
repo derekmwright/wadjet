@@ -1,6 +1,6 @@
 # Dimension bloom cascade
 
-Source: internal/planner/physical/dimension_cascade.go — markDimensionCascade, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/dimension_cascade.go — markDimensionCascade, moved 2026-09-11 (#1026)
 
 ```go
 // markDimensionCascade wires the two-hop dimension bloom cascade

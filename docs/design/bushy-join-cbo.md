@@ -91,7 +91,7 @@ assumes the build side (`Children[1]`) is a single base scan:
 | `collectPlanColumns` | physical/join_keys.go | unions ALL scans under `Children[1]` (special-cases only semi/anti) | inner-join build leaks several tables' columns into the membership set |
 | `findScanAlias` → `BuildTableAlias` | physical/join_keys.go | one scan under the build | returns the first scan's alias in DFS order; all other build tables' aliases are lost |
 | `joinOutputSchemaWithMapping` | exec/join.go:3190 | one `buildAlias` valid for every build column | stamps the wrong alias onto other tables' columns (e.g. region cols shipped as `n2.r_regionkey`) |
-| `markCoPathingSelfJoinBuilds` | physical/stage_generation.go | build dep chain reaches a `StageScan` within 3 Exchange hops | build dep = join stage → walk bails → Q07-class self-join qualification silently disabled |
+| `markCoPathingSelfJoinBuilds` | dagplan/stage_generation.go | build dep chain reaches a `StageScan` within 3 Exchange hops | build dep = join stage → walk bails → Q07-class self-join qualification silently disabled |
 | `columnIndexFallback` | exec/agg_consume.go | unqualified suffix match unique in schema | multi-table build → ambiguous → −1 → zero/wrong rows |
 | `FixKeyAssignment` / SMJ counterpart | exec/join.go:1707, sort_merge_join.go:230 | runtime swap on the same asymmetric-membership rule | same blind spot as `fixJoinKeyOrder`, now against the real schema |
 | `resolveShuffleKey` | physical/group_key_binding.go | walks single-child chains only | breaks at a 2-child build; Project aliases inside a bushy build unresolved for shuffle keys |

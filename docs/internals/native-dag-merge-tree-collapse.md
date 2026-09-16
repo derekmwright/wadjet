@@ -1,6 +1,6 @@
 # Native dag merge tree collapse
 
-Source: internal/planner/physical/native_dag_rewrite.go — collapseMergeTreesForNativeDAG, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/native_dag_rewrite.go — collapseMergeTreesForNativeDAG, moved 2026-09-11 (#1026)
 
 ```go
 // collapseMergeTreesForNativeDAG rewrites multi-level merge_aggregate /

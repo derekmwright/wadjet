@@ -1,6 +1,6 @@
 # Join evaluated column payloads
 
-Source: internal/planner/physical/join_carried_columns.go — ensureJoinCarriesEvaluatedColumns, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/join_carried_columns.go — ensureJoinCarriesEvaluatedColumns, moved 2026-09-11 (#1026)
 
 ```go
 // A join's exchange carries every column the join stage will EVALUATE.

@@ -17,6 +17,11 @@ package main
 var regions = []region{
 	// The distributed engine.
 	{"internal/coordinator", agpl},
+	// Declared in its own right, though the prefix above already covers it:
+	// LICENSING.md names it as a region because it is the stage-DAG PLANNER,
+	// the part of the split with the most commercial weight, and the document
+	// and this list are held equal by the gate.
+	{"internal/coordinator/dagplan", agpl},
 	{"internal/worker", agpl},
 	{"internal/distributed", agpl},
 	{"internal/dataplane", agpl},

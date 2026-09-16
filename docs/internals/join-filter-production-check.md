@@ -1,6 +1,6 @@
 # Join filter production check
 
-Source: internal/planner/physical/join_carried_columns.go — producedColumnsInPlan / assertJoinFiltersAreBacked, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/join_carried_columns.go — producedColumnsInPlan / assertJoinFiltersAreBacked, moved 2026-09-11 (#1026)
 
 ```go
 // assertJoinFiltersAreBacked refuses a plan whose JOIN stage carries a

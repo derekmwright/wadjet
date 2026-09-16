@@ -1,6 +1,6 @@
 # Semi anti build filter wiring
 
-Source: internal/planner/physical/semi_anti_build_filter.go — markSemiAntiBuildFilters, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/semi_anti_build_filter.go — markSemiAntiBuildFilters, moved 2026-09-11 (#1026)
 
 ```go
 // markSemiAntiBuildFilters wires probe-sourced dynamic filters onto the

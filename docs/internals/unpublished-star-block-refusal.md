@@ -1,6 +1,6 @@
 # Unpublished star block refusal
 
-Source: internal/planner/physical/lateral_projection_refusal.go — ErrLateralProjectionDistributed, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/lateral_projection_refusal.go — ErrLateralProjectionDistributed, moved 2026-09-11 (#1026)
 
 ```go
 // ErrLateralProjectionDistributed marks a plan the stage DAG refuses because a

@@ -42,7 +42,7 @@ Three parts:
 
 1. **The planner mirrors the fragment builders.**
    `stageRunsFilterExprs` / `stageAppliesProjection`
-   (`planner/physical/filter_carrier.go`) answer, per stage type,
+   (`planner/dagplan/filter_carrier.go`) answer, per stage type,
    whether the coordinator emits an `OpFilter` / `OpProject` for the
    field. They are read off `dag_fragments.go` and are deliberately
    separate from `projectableProducer`, which answers a different

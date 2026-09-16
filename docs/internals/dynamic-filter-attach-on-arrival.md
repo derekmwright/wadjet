@@ -1,6 +1,6 @@
 # Dynamic filter attach on arrival
 
-Source: internal/planner/physical/dynamic_filter_attach.go — applyAttachOnArrival, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/dynamic_filter_attach.go — applyAttachOnArrival, moved 2026-09-11 (#1026)
 
 ```go
 // Attach-on-arrival normalization for dynamic-filter consume edges

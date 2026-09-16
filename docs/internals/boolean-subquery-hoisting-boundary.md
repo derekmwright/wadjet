@@ -1,6 +1,6 @@
 # Boolean subquery hoisting boundary
 
-Source: internal/planner/physical/subquery_resolution.go — resolveBooleanExists, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/subquery_resolution.go — resolveBooleanExists, moved 2026-09-11 (#1026)
 
 resolveBooleanExists resolves the EXISTS leaves under a boolean connective
 and leaves every other leaf exactly as it found it.

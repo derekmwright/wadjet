@@ -1,6 +1,6 @@
 # Computed subquery materialization
 
-Source: internal/planner/physical/join_input_projection.go — absorbComputedSubqueryProjection, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/join_input_projection.go — absorbComputedSubqueryProjection, moved 2026-09-11 (#1026)
 
 ```go
 // absorbComputedSubqueryProjection materializes a subquery's COMPUTED

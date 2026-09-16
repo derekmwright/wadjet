@@ -3368,6 +3368,7 @@ GeoIP functions require [MaxMind GeoLite2](https://dev.maxmind.com/geoip/geolite
 ```bash
 # Start with GeoIP databases
 wadjet serve --geoip-city /path/to/GeoLite2-City.mmdb --geoip-asn /path/to/GeoLite2-ASN.mmdb
+# (wadjetd serve --mode=... takes the same two flags)
 ```
 
 ```yaml

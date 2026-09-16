@@ -5,15 +5,24 @@ Wadjet is one repository and one Go module with **two licenses**.
 | | License | What it is |
 |---|---|---|
 | The embedded engine and the `wadjet` binary | [MIT](LICENSE) | The query engine you link into a Go program, and the CLI and single-process server built on it |
-| The distributed engine and the `wadjetd` binary | [AGPL-3.0](LICENSE-AGPL-3.0), or a commercial license | The coordinator, the workers, the exchange, and the stage-DAG planning that schedules a query across machines |
+| The distributed engine and the `wadjetd` binary | [AGPL-3.0](LICENSE-AGPL-3.0), or a commercial license | The coordinator, the workers, the exchange, and the stage-DAG planning that schedules a query across machines — `internal/coordinator/dagplan` |
 
 The split is the deployment, not the feature set. Everything that answers a
 query in one process — the parser, the optimizer, the vectorized executor,
 the Parquet and Iceberg readers, the type system, the network functions, the
 PostgreSQL wire protocol, the MCP server, the object-store and catalog
-layers — is MIT. What is AGPL is what makes a *cluster*: the coordinator
-that plans and dispatches, the workers that execute fragments, the shuffle
-and gather exchange, and the placement policy that decides who does what.
+layers, and the LOCAL pipeline planner — is MIT. What is AGPL is what makes a
+*cluster*: the coordinator that plans and dispatches, the workers that
+execute fragments, the shuffle and gather exchange, and the stage-DAG planner
+that decides who does what.
+
+That last one is a directory, not a figure of speech:
+`internal/coordinator/dagplan` holds the stage emitter, the
+distribution/exchange assignment and the shuffle policy, and
+`internal/planner/physical` — which the embedded engine links — holds the
+local pipeline planner and nothing that names a stage. `wadjet serve`
+executes a pipeline and its `EXPLAIN VERBOSE` says so; the stage list is
+printed by the servers that dispatch one.
 
 Both answer the same SQL with the same answers, and that is gated, not
 claimed: `TestTwoPathInvariance` runs every corpus query through both and
@@ -35,7 +44,8 @@ the same tools.
 
 These directories, and everything under them, are AGPL-3.0:
 
-- `internal/coordinator/` — query coordination: planning, dispatch, gather, the local fast path, and (in `dagplan/`) the distributed placement policy
+- `internal/coordinator/` — query coordination: planning, dispatch, gather and the local fast path
+- `internal/coordinator/dagplan/` — the distributed PLANNER: stage emission, the distribution and exchange assignment, the shuffle fusions, set-op stage planning, the dynamic-filter and dimension-cascade passes, DAG shape validation and every distributed refusal
 - `internal/worker/` — the distributed task executor
 - `internal/distributed/` — the task, result and DLQ streams, the subjects and the message envelopes
 - `internal/dataplane/` — the gRPC data plane for dispatch, results and peer exchange
@@ -48,9 +58,10 @@ These directories, and everything under them, are AGPL-3.0:
 - `gen/dataplane/` — the generated data-plane protobuf code
 
 Everything else in the repository is MIT, including `wadjet/` (the public
-API), `cmd/wadjet/`, `internal/engine/`, `internal/planner/`,
-`internal/storage/`, `internal/auth/`, `internal/server/pgwire/`,
-`internal/server/mcp/` and `tools/`.
+API), `cmd/wadjet/`, `internal/engine/`, `internal/planner/` (the parser, the
+logical optimizer and the LOCAL physical planner), `internal/storage/`,
+`internal/auth/`, `internal/server/pgwire/`, `internal/server/mcp/` and
+`tools/`.
 
 Each AGPL directory carries a verbatim copy of `LICENSE-AGPL-3.0` as its own
 `LICENSE`, because pkg.go.dev and most license scanners resolve a package's
@@ -87,6 +98,13 @@ go test ./tools/licensecheck/
    declared region, every AGPL directory must carry a verbatim copy of the
    AGPL text, and this document must name exactly the directories the code
    declares.
+3. **The DAG vocabulary.** No MIT package may DECLARE the distributed
+   planner's own words — the stage, the exchange, the distribution property,
+   stage emission, the shuffle and probe-split policy. An import gate reads
+   what a package imports and an SPDX gate reads what a file says; neither
+   can see distributed planning WRITTEN on the MIT side, which is exactly how
+   540 such declarations sat in `internal/planner/physical` with both gates
+   green. The list is declared in `tools/licensecheck/dagvocabulary.go`.
 
 The regions are **declared**, in `tools/licensecheck/regions.go`, rather than
 derived from what a package happens to import. A derived region would

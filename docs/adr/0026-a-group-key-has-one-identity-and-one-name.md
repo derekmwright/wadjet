@@ -280,7 +280,7 @@ rename left to carry it.
 
 #### The model the rules read
 
-`stageStreamColumns` (`planner/physical/stage_stream_model.go`) lists what a
+`stageStreamColumns` (`planner/dagplan/stage_stream_model.go`) lists what a
 stage's fragment SHIPS, per column, and it mirrors the executor rather than
 guessing:
 

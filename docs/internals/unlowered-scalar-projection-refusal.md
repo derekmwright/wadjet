@@ -1,6 +1,6 @@
 # Unlowered scalar projection refusal
 
-Source: internal/planner/physical/scalar_projection_refusal.go — ErrScalarSubqueryProjectionDistributed, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/scalar_projection_refusal.go — ErrScalarSubqueryProjectionDistributed, moved 2026-09-11 (#1026)
 
 ```go
 // ErrScalarSubqueryProjectionDistributed marks a plan the stage DAG refuses

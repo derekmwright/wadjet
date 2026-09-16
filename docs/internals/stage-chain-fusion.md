@@ -1,6 +1,6 @@
 # Stage chain fusion
 
-Source: internal/planner/physical/fuse_stage_chains.go — fuseStageChains, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/fuse_stage_chains.go — fuseStageChains, moved 2026-09-11 (#1026)
 
 ```go
 // fuseStageChains absorbs 1:1 same-distribution downstream joins into their

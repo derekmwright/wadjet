@@ -1,6 +1,6 @@
 # Project stage ordering visibility
 
-Source: internal/planner/physical/project_stage_insert.go — orderingSurvivesAProjectStage, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/project_stage_insert.go — orderingSurvivesAProjectStage, moved 2026-09-11 (#1026)
 
 ```go
 // orderingSurvivesAProjectStage reports whether inserting a StageProject

@@ -146,7 +146,7 @@ directory. This is a developer box, not the benchmark topology, and the
 numbers are process footprints — not a suite performance claim.
 
 **Startup to PostgreSQL-wire-ready.** Five sequential starts of
-`wadjet serve --mode=standalone --storage-type=file` (embedded NATS +
+`wadjetd serve --mode=standalone --storage-type=file` (embedded NATS +
 JetStream + coordinator + worker), each with its own data, NATS and spill
 directories. A probe sends a real PostgreSQL `StartupMessage` to `--pg-addr`
 in a poll loop and stops the clock on the server's first response byte:

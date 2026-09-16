@@ -1,6 +1,6 @@
 # Broadcast join fusion budget
 
-Source: internal/planner/physical/join_fusion.go — fuseJoinStages, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/join_fusion.go — fuseJoinStages, moved 2026-09-11 (#1026)
 
 ```go
 // fuseJoinStages absorbs broadcast join stages into their downstream consumer

@@ -1,6 +1,6 @@
 # Table less distributed handoff
 
-Source: internal/planner/physical/table_less_refusal.go — ErrTableLessSelectDistributed, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/table_less_refusal.go — ErrTableLessSelectDistributed, moved 2026-09-11 (#1026)
 
 ErrTableLessSelectDistributed marks a plan the stage DAG refuses because it
 reads from no table at all.

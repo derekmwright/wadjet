@@ -1,6 +1,6 @@
 # Distributed grouping sets refusal
 
-Source: internal/planner/physical/grouping_sets_refusal.go — ErrGroupingSetsDistributed, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/grouping_sets_refusal.go — ErrGroupingSetsDistributed, moved 2026-09-11 (#1026)
 
 ```go
 // ErrGroupingSetsDistributed marks a plan the stage DAG refuses because it

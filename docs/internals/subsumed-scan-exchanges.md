@@ -1,6 +1,6 @@
 # Subsumed scan exchanges
 
-Source: internal/planner/physical/exchange_subsume.go — dedupeSubsumedScanExchanges, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/exchange_subsume.go — dedupeSubsumedScanExchanges, moved 2026-09-11 (#1026)
 
 ```go
 // dedupeSubsumedScanExchanges drops an exchange-repartition whose payload is

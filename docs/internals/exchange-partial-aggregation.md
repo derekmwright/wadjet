@@ -1,6 +1,6 @@
 # Exchange partial aggregation
 
-Source: internal/planner/physical/exchange_partial_agg.go — markExchangePartialAgg, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/exchange_partial_agg.go — markExchangePartialAgg, moved 2026-09-11 (#1026)
 
 ```go
 // markExchangePartialAgg marks exchange-repartition stages whose rows can

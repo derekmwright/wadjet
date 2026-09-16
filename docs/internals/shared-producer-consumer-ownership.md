@@ -1,6 +1,6 @@
 # Shared producer consumer ownership
 
-Source: internal/planner/physical/shared_cte_producer.go — assertNoConsumerScopedFilterOnSharedStage (ConsumerScoped check), moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/shared_cte_producer.go — assertNoConsumerScopedFilterOnSharedStage (ConsumerScoped check), moved 2026-09-11 (#1026)
 
 ```go
 		// The question is OWNERSHIP, not presence, and the marker is the

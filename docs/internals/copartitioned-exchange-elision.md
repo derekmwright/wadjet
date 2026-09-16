@@ -1,6 +1,6 @@
 # Copartitioned exchange elision
 
-Source: internal/planner/physical/elide_copartitioned_exchange.go — elideCoPartitionedExchanges, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/elide_copartitioned_exchange.go — elideCoPartitionedExchanges, moved 2026-09-11 (#1026)
 
 ```go
 // elideCoPartitionedExchanges removes exchange-repartition stages whose

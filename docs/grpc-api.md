@@ -113,7 +113,7 @@ Submit a query for asynchronous execution. Returns immediately with a query ID.
 rpc SubmitQuery(QueryRequest) returns (SubmitQueryResponse);
 ```
 
-Every `wadjet serve` mode has a coordinator — standalone embeds one alongside a worker and NATS — so this works in standalone too. It returns `UNAVAILABLE` only when the gRPC server was constructed without a coordinator, i.e. the embedded library path.
+Every `wadjetd serve` mode has a coordinator — standalone embeds one alongside a worker and NATS — so this works in standalone too. It returns `UNAVAILABLE` only when the gRPC server was constructed without a coordinator, which is the embedded library path and the `wadjet` binary: `wadjet serve` runs pgwire over the in-process engine and starts no gRPC listener at all.
 
 ---
 

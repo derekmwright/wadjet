@@ -1,6 +1,6 @@
 # Whole input aggregates
 
-Source: internal/planner/physical/agg_whole_input.go — aggNeedsWholeInput, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/agg_whole_input.go — aggNeedsWholeInput, moved 2026-09-11 (#1026)
 
 ```go
 // aggNeedsWholeInput reports whether an aggregate's answer for one group

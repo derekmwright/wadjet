@@ -40,7 +40,7 @@ parquet:
 ```
 
 ```bash
-./wadjet serve --mode worker \
+./wadjetd serve --mode worker \
   --nats-url nats://coordinator:4222 \
   --memory-budget 67108864 \
   --spill-dir /var/wadjet/spill \
@@ -89,7 +89,7 @@ parquet:
 ```
 
 ```bash
-./wadjet serve --mode worker \
+./wadjetd serve --mode worker \
   --nats-url nats://coordinator:4222 \
   --memory-budget 268435456 \
   --spill-dir /var/wadjet/spill \
@@ -137,7 +137,7 @@ parquet:
 ```
 
 ```bash
-./wadjet serve --mode worker \
+./wadjetd serve --mode worker \
   --nats-url nats://coordinator:4222 \
   --memory-budget 1073741824 \
   --spill-dir /nvme/wadjet/spill \
@@ -173,7 +173,7 @@ In federated deployments, different clusters can run different profiles. A centr
 
 ```bash
 # Central DC worker (8+ GB RAM)
-./wadjet serve --mode worker \
+./wadjetd serve --mode worker \
   --cluster-id central \
   --nats-url nats://coordinator:4222 \
   --memory-budget 1073741824 \
@@ -183,7 +183,7 @@ In federated deployments, different clusters can run different profiles. A centr
   --access-key $S3_ACCESS_KEY --secret-key $S3_SECRET_KEY --bucket wadjet
 
 # Remote site worker (1 GB RAM)
-./wadjet serve --mode worker \
+./wadjetd serve --mode worker \
   --cluster-id site-east \
   --leaf-remote nats://coordinator.central:4222 \
   --nats-url nats://local-nats:4222 \

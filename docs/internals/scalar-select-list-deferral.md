@@ -1,6 +1,6 @@
 # Scalar select list deferral
 
-Source: internal/planner/physical/scalar_projection_lowering.go — lowerProjectionSubquery, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/scalar_projection_lowering.go — lowerProjectionSubquery, moved 2026-09-11 (#1026)
 
 ```go
 // The SELECT-list half of the scalar-subquery deferral (#659).

@@ -1,6 +1,6 @@
 # Aggregate over raw exchange
 
-Source: internal/planner/physical/agg_over_exchange.go — rewireAggOverRawExchange, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/agg_over_exchange.go — rewireAggOverRawExchange, moved 2026-09-11 (#1026)
 
 ```go
 // rewireAggOverRawExchange drops a fused scan-aggregate leg whose input is a

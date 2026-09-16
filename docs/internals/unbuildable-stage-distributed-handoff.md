@@ -1,6 +1,6 @@
 # Unbuildable stage distributed handoff
 
-Source: internal/planner/physical/unbuildable_stage_refusal.go — ErrUnbuildableStageDistributed, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/unbuildable_stage_refusal.go — ErrUnbuildableStageDistributed, moved 2026-09-11 (#1026)
 
 ErrUnbuildableStageDistributed marks a plan the stage DAG refuses because
 one of its stages has nothing to read.

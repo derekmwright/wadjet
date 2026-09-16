@@ -1,6 +1,6 @@
 # Filter and projection carriers
 
-Source: internal/planner/physical/filter_carrier.go — filterCarrierIndex, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/filter_carrier.go — filterCarrierIndex, moved 2026-09-11 (#1026)
 
 ```go
 // Where a Filter and a Project land on the stage DAG, and what happens when

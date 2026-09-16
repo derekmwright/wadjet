@@ -1,7 +1,7 @@
 # ADR-0037: One module, two licenses, and an embedded server that needs neither
 
 Status: Accepted
-Date: 2026-09-15
+Date: 2026-09-15 (revised 2026-09-16: the stage-DAG planner moved; decision items 6-7 and their consequences are new)
 
 ## Context
 
@@ -90,7 +90,53 @@ compile time. The routed path is now an interface the wire server owns
 (`internal/queryroute`), which the coordinator satisfies and the embedded
 server simply does not install.
 
-**6. The CLA is the basis, and is not narrowed.** §3 records that the
+**6. The stage-DAG planner is AGPL, in its own package.** `Plan` — the local
+entry the embedded engine, the CLI and every pgwire fallback use — ran the
+distributed stage emitter on every query and hung the result on
+`PhysicalPlan.Stages`. That single call edge was the whole entanglement: with
+it cut, 48 of `internal/planner/physical`'s files have no locally-reachable
+declaration left, and 540 declarations — stage emission, the distribution and
+exchange assignment, the shuffle fusions, set-op stage planning, the
+dynamic-filter and dimension-cascade passes, DAG shape validation and every
+distributed refusal — move to `internal/coordinator/dagplan`. `physical` keeps
+the local pipeline planner, the declared-output logic, the set-op type
+reconciliation both paths need, and the query-limit cost walk. dagplan imports
+physical; physical imports nothing back, and an MIT package that names a Stage
+no longer compiles.
+
+Two user-visible consequences follow, decided rather than discovered:
+
+  - **The cost guard reads the logical plan.** `enforceQueryLimits` estimated
+    from the stage list, which is why the local entry emitted one at all. It
+    now sums the same catalog numbers over the logical plan
+    (`Planner.EstimatePlanScanCost`), on BOTH entries, so a query is refused
+    or answered by its own text rather than by which engine planned it. The
+    two counts agree exactly on 18 of the 22 TPC-H queries; the four that
+    differ are pinned with their mechanism in
+    `TestTheLogicalScanCostMatchesTheStageCost` (a shared subplan counted
+    twice on one side, a correlated subquery's scan invisible on the other).
+  - **`EXPLAIN VERBOSE` on the embedded engine prints the local plan.** It
+    printed a stage DAG the embedded engine never executes, emitted only to be
+    printed. A server with a coordinator still prints the stage list, planned
+    and rendered on the AGPL side. The one door that changes is `wadjetd`'s
+    pgwire: EXPLAIN is not routed through the coordinator, so it answers from
+    the embedded DB and prints the pipeline's line. No value, SQLSTATE or
+    section changes, and the alternative — a renderer injected back into the
+    MIT half — is the coupling this ADR removes.
+
+**7. A third gate holds where the planning LIVES.** The import gate reads what
+a package imports and the SPDX gate reads what a file says; neither can see
+distributed planning WRITTEN on the MIT side, which is how 540 such
+declarations sat in an MIT directory with both gates green.
+`CheckNoDAGPlanningInMIT` reads declarations against a DECLARED vocabulary —
+the stage, the exchange, the distribution property, stage emission, the
+shuffle and probe-split policy. After the move most of that is
+compiler-enforced anyway (naming a stage requires an import, which the
+boundary gate refuses); the vocabulary gate is the residual that stops NEW
+distributed planning being written on the MIT side before anybody reaches for
+the import.
+
+**8. The CLA is the basis, and is not narrowed.** §3 records that the
 maintainer may license the work, including contributions, under multiple
 licenses. Relicensing part of the tree from AGPL-3.0 to MIT is that right in
 use, in the direction that gives users more. The CLA text now says so
@@ -107,15 +153,23 @@ explicitly; the grant itself is unchanged.
   also means: when it legitimately needs one, the fix is an interface the MIT
   side owns. `internal/queryroute` and `cli.ServeOptions` are the two worked
   examples in the landing arc.
-- **The distributed engine's own planning belongs on its side of the line.**
-  `internal/coordinator/dagplan` is where that migration starts: the shuffle
-  candidate, the large-build scan set and the aggregate-shuffle rewrite moved
-  there. The rest of the stage planning — stage emission, the
-  distribution/exchange assignment and set-op stage planning — is still in
-  `internal/planner/physical`, because it is reachable from 136 of that
-  package's 139 non-test files through the shared `Planner` type and its
-  ~150 unexported helpers. Moving it is a package-scale split, not a file
-  move, and it is the next step in this direction rather than a defect.
+- **The distributed engine's planning is on its side of the line.** All of it:
+  `internal/coordinator/dagplan` holds 540 declarations and 85 files, and
+  `internal/planner/physical` holds no declaration that names a stage. The
+  first cut of this ADR deferred that move on a measurement of the wrong
+  thing — the closure of a FILE seed through the shared `Planner` type, which
+  reaches nearly everything. The decisive number is narrower: one call edge,
+  `plan.Stages = p.generateStages(node)` inside the local `Plan`. Cutting it
+  took the reachable-from-local set from 25 files to 44, and the move fell
+  out of the compiler.
+- **The Planner is two planners.** `physical.Planner` is the local pipeline
+  planner; `dagplan.StagePlanner` embeds it and adds the 23 fields of
+  per-build scratch stage emission keeps. Every embedded query used to carry
+  those fields.
+- **physical exports what dagplan reads.** ~130 identifiers — the catalog, the
+  CTE list and the plan context on Planner, the declared-output and set-op
+  helpers, the subtree naming, the manifest accessors. That is the price of
+  the boundary being a package boundary, and it is paid once.
 - **Two binaries to ship, two to document.** Every release publishes both;
   every `serve` in the documentation says which one.
 - **Per-directory `LICENSE` copies are duplication on purpose.** Thirteen

@@ -1,6 +1,6 @@
 # Join shuffle fusion
 
-Source: internal/planner/physical/fuse_join_shuffle.go — fuseJoinShuffle, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/fuse_join_shuffle.go — fuseJoinShuffle, moved 2026-09-11 (#1026)
 
 ```go
 // fuseJoinShuffle absorbs StageExchangeRepartition stages into their upstream

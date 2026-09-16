@@ -40,7 +40,7 @@ historical line numbers in older design notes.
 | Seam | Files |
 |---|---|
 | Planner configuration and entry | `physical/planner_config.go`, `planner_entry.go`, `plan.go`; star refusal helpers in `dag_refusals.go` |
-| Stage emission and schema | `physical/stage_emission.go`, `stage_types.go`, `declared_output.go` |
+| Stage emission and schema | `dagplan/stage_emission.go`, `stage_types.go`, `declared_output.go` |
 | Join, key binding, subquery, policy | `physical/join_plan.go`, `group_key_binding.go`, `subquery_pipeline.go`, `validate_policy.go` |
 | Expression nodes and scalar registry | `expr/expr_leaf.go`, `expr_arith.go`, `expr_compare.go`, `expr_scalar_fns.go`; built-in registration remains in `expr/expr.go` |
 | Aggregate indexes, accumulators, partials, spill | `exec/agg_hash_tables.go`, `agg_accumulators.go`, `agg_partial_merge.go`, `agg_spill.go` |
@@ -84,7 +84,7 @@ Facts that matter when touching this:
   idempotent; the DAG gather spills oversized results to scratch). This
   makes the threshold a latency knob, not a correctness-of-judgment knob.
 - `Config.LocalFastPathBytes <= 0` = disabled (the zero value, so library
-  and test usage is DAG-pure by default); `wadjet serve` enables it by
+  and test usage is DAG-pure by default); `wadjetd serve` enables it by
   default via `--local-fastpath-bytes` (64 MiB).
 - The tpch-harness spawns coordinators with `--local-fastpath-bytes=0` so
   the DAG gate keeps meaning; re-enable via
@@ -96,7 +96,7 @@ Facts that matter when touching this:
 ## ABAC on the coordinator paths
 
 With an auth provider wired (`Coordinator.SetAuthProvider`, done by
-`wadjet serve` whenever auth is configured), `ExecuteSQL` enforces access
+`wadjetd serve` whenever auth is configured), `ExecuteSQL` enforces access
 policies itself via `auth.EnforcePlanPolicies` — the same helper the
 embedded engine calls — table denial, row-filter injection, and column
 deny/mask, applied to the logical plan after scan annotation and before
@@ -160,7 +160,7 @@ meets only its own slice of the build.
 | `NodeLimit` | a bound on the sort stage below it (unless a lower LIMIT already owns that sort — #525), a per-task `RowLimit` on the scans, and — for every LIMIT the coordinator's post-gather pass cannot see — a `limit` stage | `stage_cost.go`, `needsLimitStage`. See §Where a LIMIT is applied. |
 | `NodeUnion` | `union` (+ a `GroupByAll` `final_aggregate` when not ALL) | `set_op_stages.go`. One task per arm: task *i* reads arm *i*'s whole output and projects it onto the result column names and types, so the stage's files ARE the concatenation. |
 | `NodeIntersect` / `NodeExcept` | `union` (with per-arm tag columns) + a grouped counting `final_aggregate` | `set_op_stages.go` (#346). The distribution pass inserts an `exchange-repartition` on the full result row between them — see §Set operations. |
-| **`NodeDistinct`** | **nothing — passthrough** | `default` case `stage_emission.go`; walks children only. No USER DISTINCT reaches here — `logical.rewriteDistinctAsGroupBy` (optimizer) turns every `Distinct(Project)` in the tree, at any depth, into an aggregate-free `NodeAggregate` first, so it rides the aggregate stages (#466 widened this from the root path only). What still passes through: planner-inserted `BuildSideDedup` Distincts (semi/anti build dedup, decorrelated semijoin key source), which carry no user-visible semantics, and root-path fallback shapes the coordinator dedups after the gather. A user Distinct anywhere else is REFUSED by `refuseUnstageableDistinct` (`physical/distinct_refusal.go`) rather than dropped, and the coordinator answers it on the local single-process pipeline. |
+| **`NodeDistinct`** | **nothing — passthrough** | `default` case `stage_emission.go`; walks children only. No USER DISTINCT reaches here — `logical.rewriteDistinctAsGroupBy` (optimizer) turns every `Distinct(Project)` in the tree, at any depth, into an aggregate-free `NodeAggregate` first, so it rides the aggregate stages (#466 widened this from the root path only). What still passes through: planner-inserted `BuildSideDedup` Distincts (semi/anti build dedup, decorrelated semijoin key source), which carry no user-visible semantics, and root-path fallback shapes the coordinator dedups after the gather. A user Distinct anywhere else is REFUSED by `refuseUnstageableDistinct` (`dagplan/distinct_refusal.go`) rather than dropped, and the coordinator answers it on the local single-process pipeline. |
 | **`NodeProject`** | **nothing — passthrough**, unless a consumer needs it materialized | same `default` case; aliases recovered at gather, and every other consumer resolves them back to source names — see §Derived-table aliases and §Where a Filter and a Project land. ONE consumer cannot: a **STAR** has no name to resolve with and reads the stream by POSITION, so a derived block a star reads emits its own projection as the stage's column set (`starReadBlockProjections` / `publishBlockProjection` → `Stage.ProjectExprs`; ADR-0026 §7, #984). The join's keys, its OutputFilter, the declaration for an empty side and the hidden slot's ordinal all read the PUBLISHED list there. A block the pass cannot state is refused and routed local (`ErrLateralProjectionDistributed`, asked AFTER stage generation because that is where the answer is exact). |
 
 ## Where a Filter and a Project land (the #656 class)
@@ -190,7 +190,7 @@ it did not:
 Every one answered WITHOUT the predicate or the projection, silently, because
 no operator ever saw a name it could not resolve.
 
-Three things close it (`planner/physical/filter_carrier.go`):
+Three things close it (`planner/dagplan/filter_carrier.go`):
 
 - **`stageEvaluatesFilter` / `stageAppliesProjection`** are the planner-side
   mirrors of the coordinator's fragment builders — per stage type, does the
@@ -712,7 +712,7 @@ The resolution spelling of a key that names a derived table's COMPUTED alias
 is not decidable where `walkStages` emits the stage — whether any fragment
 publishes the alias is what `attachScanSelectProjections` and
 `absorbWindowArmProjection` decide, later. `resolveStageGroupKeys`
-(`planner/physical/group_key_resolution.go`) settles it at the end of
+(`planner/dagplan/group_key_resolution.go`) settles it at the end of
 `PlanDistributed`, against `stageStreamColumns` — a model of what a fragment
 SHIPS that mirrors `joinOutputSchemaWithMapping` line for line, including the
 duplicate-name qualification that makes a join stream carry `w` and `y.w` at
@@ -856,7 +856,7 @@ because a delete marker belongs to the **file**, not to the alias reading it:
 
 | Where | What |
 |---|---|
-| `physical.Stage.ScanDeletes` | file → deleted row indices, read from the SAME manifest object that produced `ScanFiles` (`walkStages` `NodeScan`). Replayed onto the final stage list by `annotateScanDeletes` (`physical/scan_delete_markers.go`) from the planner's snapshot — **never a second catalog read**: markers grow until a compaction replaces the file they name, so a marker set read AFTER the file list can be missing the markers of a file the list still holds. |
+| `physical.Stage.ScanDeletes` | file → deleted row indices, read from the SAME manifest object that produced `ScanFiles` (`walkStages` `NodeScan`). Replayed onto the final stage list by `annotateScanDeletes` (`dagplan/scan_delete_markers.go`) from the planner's snapshot — **never a second catalog read**: markers grow until a compaction replaces the file they name, so a marker set read AFTER the file list can be missing the markers of a file the list still holds. |
 | `coordinator.collectStageDeletes` → `withQueryDeleteMarkers(ctx, …)` | the query's union, parked on the dispatch context at the top of `executeStageDAG`. **Not** at the top of `SubmitSQL`, deliberately: `physStages` there is overwritten with a synthetic single "pipeline" stage before any stamp built from it would be read, and that emptiness is correct — every `TaskTypePipeline` task re-plans its `SQLText` on the worker against a live catalog (`executePipeline` → `planner.Plan`), whose scanner reads `manifest.DeleteMarkers` itself at scan Init, the same as the single-process engine. `coordinator.TestDistributedScanHonorsDeleteMarkersOnThePipelinePath` covers both shapes that path dispatches (plain and probe-split). |
 | `Scheduler.PublishTasks` → `stampTaskDeleteMarkers` | the ONE stamp. Walks every file list a task can carry — `Files`, `InputFiles`, `BuildFiles`, `Inputs`, `PreScannedInputs`, `ScanFileFilter`, `FusedJoins[].BuildFiles`, `Operators[].{InputFiles,BuildFiles}`, `PreComputedAggregates[].CacheFiles` — the same set `annotateTaskPeerLocations` walks (`coordinator.TestTaskFieldCarrierCoverage` guards both against a new carrier going unclassified), and emits `Task.DeleteMarkers`. Every dispatcher and every retry passes through here, so a new dispatcher gets it for free. |
 | worker `taskDeleteSets` → `cachedFileStreamSource.SetDeleteMarkers` | decoded per task, handed to every source the task builds; a key naming a file this source never opens simply never matches |
@@ -1102,7 +1102,7 @@ it, with the inequality riding as the stage's post-filter.
 
 ## Shuffle internals
 
-- Stage type `StageExchangeRepartition = "exchange-repartition"` (`planner/physical/exchange.go:19`), `ExchangeStage{Keys, KeyTypes, Count}`. Sender op `OpExchangeSender{ShuffleKeys, ShuffleKeyTypes, NumPartitions}` (`distributed/messages.go`).
+- Stage type `StageExchangeRepartition = "exchange-repartition"` (`planner/dagplan/exchange.go:19`), `ExchangeStage{Keys, KeyTypes, Count}`. Sender op `OpExchangeSender{ShuffleKeys, ShuffleKeyTypes, NumPartitions}` (`distributed/messages.go`).
 - `partitionedShuffleSink.Consume` (`worker/partitioned_shuffle_sink.go:103`) resolves `keyIdxs` from key names on the first batch, then `hashRowsIntoPartitions` (`:611`) computes `fnv(col1||col2||…) % numParts`.
 - **Type coverage of the hash:** Int32/Port/Protocol/Date, Int64/Timestamp/IPv4/MAC/Duration, Float32 and Float64 (canonical bits, #459), String/Bytes/IPv6/UUID, CIDR (`kernel.CidrOrderKey`, #492/#520), Bool, Decimal (`batch.AppendDecimalKey`, scale-normalized so a DECIMAL(9,2) and a DECIMAL(18,4) holding one quantity co-partition, #474) and Vector. **NOT covered** (hashed as a constant via the `default` arm): Array, Row, Map. The planner never picks a container column as a partition key, so this is fine there.
 - **A key pair the planner cannot type is caught at RUN time, not refused at plan time.** `joinSideColTypes` reads the shared declared-type layer, so an aggregate / window / set-operation / DISTINCT / CAST side resolves; a side it still cannot type answers `exec.KeyTypeUnresolved`, and `exec.checkProbeKeyTypes` raises when the two sides' actual key ENCODINGS then disagree (the integer fast path over a non-integer probe, or a numeric-ladder pair with different encodings and nothing resolving them). Refusing at plan time on "cannot type" would refuse joins over table functions and unannotated scans that are perfectly well-typed at run time; the runtime check cannot produce that false positive because it sees both vectors.
@@ -1128,7 +1128,7 @@ A DISTINCT is executed by being turned into a GROUP BY. Three outcomes, and no s
 |---|---|
 | `SELECT DISTINCT a, b + c AS x …` — every projection is a usable group key | **Rewritten in place**, wherever the Distinct sits. Sharded. |
 | `SELECT DISTINCT *` / `SELECT DISTINCT t.*` — no `NodeProject` exists at all (a bare-star select list produces none), so the plan is `Distinct → Scan` or `Distinct → Filter → Scan` or `Distinct → Join(Scan, Scan)` | **Rewritten in place** by `rewriteStarDistinct`: the group keys are the relation's own columns, read off `Node.ScanColumns` (the catalog annotation `ExpandStarProjections` uses). Descends only through column-preserving nodes — a Filter, and a join that emits BOTH sides — and declines a semi/anti join, a nested aggregate/projection, an unannotated scan, or a name that appears in two scans (one group key cannot stand for two columns). Sharded. |
-| `SELECT DISTINCT a, SUM(b) …` (an aggregate projection has no group key), a projection carrying a subquery, or a star over a SELF-JOIN (the third row's decline: one name in two scans) | **Not rewritten.** On the ROOT path `ExecuteSQL` applies `dedupGatherResult` over the projected gather output (`MergeInfo.HasDistinct`) — correct, but single-node at the coordinator. Anywhere else nothing on the DAG would apply it, so `PlanDistributed` returns `ErrDistinctDistributed` (`planner/physical/distinct_refusal.go`) and the coordinator **routes the query to its local single-process pipeline** (`Coordinator.runDistinctLocal`, `coordinator/refused_local.go`) — the #359 pattern, counter `DistinctLocalRoutes()`. |
+| `SELECT DISTINCT a, SUM(b) …` (an aggregate projection has no group key), a projection carrying a subquery, or a star over a SELF-JOIN (the third row's decline: one name in two scans) | **Not rewritten.** On the ROOT path `ExecuteSQL` applies `dedupGatherResult` over the projected gather output (`MergeInfo.HasDistinct`) — correct, but single-node at the coordinator. Anywhere else nothing on the DAG would apply it, so `PlanDistributed` returns `ErrDistinctDistributed` (`planner/dagplan/distinct_refusal.go`) and the coordinator **routes the query to its local single-process pipeline** (`Coordinator.runDistinctLocal`, `coordinator/refused_local.go`) — the #359 pattern, counter `DistinctLocalRoutes()`. |
 
 **The coordinator's dedup does not preserve order, so it re-applies the ORDER
 BY — and that re-sort has to BIND the query's keys** (#1002). `dedupGatherResult`
@@ -1170,7 +1170,7 @@ Declaring the star's group keys is also what stops the column pruner from eating
 
 A DISTINCT aggregate has no bounded partial form (#291), so the DAG routes
 every aggregate carrying one through the one-level shape:
-`RawInputAggregate: true, Tasks: 1` (`planner/physical/stage_emission.go`, the
+`RawInputAggregate: true, Tasks: 1` (`planner/dagplan/stage_emission.go`, the
 `hasDistinctAgg` arm), and `dag_compute.go` then REFUSES to fan it
 out. One task reads the whole input. Measured intra-node, before any
 cluster factor: grouped `COUNT(DISTINCT)` 291.0 ms at one worker against
@@ -1393,7 +1393,7 @@ These answer correctly on the single-process path, so they are a two-path
 divergence of the "errors on one arm" kind — which is the honest shape.
 Returning one arm is the wrong answer that looks like a right one.
 
-Coverage: `physical/set_op_stages_test.go` (plan shape + every refusal),
+Coverage: `dagplan/set_op_stages_test.go` (plan shape + every refusal),
 `exec/set_op_emit_test.go` (the count rules),
 `benchmarks/tpch/two_path_invariance_test.go` (`Union*`, `Intersect*`,
 `Except*` — row count AND column list asserted absolutely on both arms;
@@ -1426,7 +1426,7 @@ the file's (the stream), so one stage writes two relations — ADR-0010.
 Mechanism (the same refuse-and-route shape as the correlated subqueries below):
 
 - `Planner.refuseLateralProjection`
-  (`physical/lateral_projection_refusal.go`) — pre-pass over the optimized
+  (`dagplan/lateral_projection_refusal.go`) — pre-pass over the optimized
   logical plan, run in `PlanDistributed` beside `refuseCorrelatedSubqueries`.
   It descends carrying `projected`: a `Project` between the root and the join
   means the statement NAMED its columns, and a named list is resolved by name
@@ -1474,7 +1474,7 @@ answered **0, silently**, distributed-only.
 
 Mechanism (same refuse-loudly shape as set operations):
 
-- `Planner.refuseCorrelatedSubqueries` (`physical/correlated_refusal.go`) —
+- `Planner.refuseCorrelatedSubqueries` (`dagplan/correlated_refusal.go`) —
   pre-pass over the optimized logical plan, run at the top of
   `PlanDistributed`. Scope per expression is derived exactly as the
   single-process pipeline derives it when it DECIDES correlation
@@ -1498,7 +1498,7 @@ Mechanism (same refuse-loudly shape as set operations):
   for an expression the pre-pass never visited (e.g. inside a scalar
   producer's own re-walk).
 
-Coverage: `physical/correlated_refusal_test.go` (refusal + the shapes that
+Coverage: `dagplan/correlated_refusal_test.go` (refusal + the shapes that
 must KEEP planning: uncorrelated deferral, #334 inner-scope binding, equality
 decorrelation), `coordinator/correlated_subquery_e2e_test.go` (five shapes
 end-to-end on a DAG-forced cluster, route counters, over-budget fails loudly),
@@ -1534,7 +1534,7 @@ claim a type it does not know — `TypeKnown` with no type is TypeID zero, which
 is BOOLEAN.
 
 Four shapes decline and keep the old disposition — refused with
-`ErrScalarSubqueryProjectionDistributed` (`physical/scalar_projection_refusal.go`)
+`ErrScalarSubqueryProjectionDistributed` (`dagplan/scalar_projection_refusal.go`)
 and routed to the local pipeline (`runScalarProjectionLocal`, counter
 `ScalarProjectionLocalRoutes()`), the same route the correlated, DISTINCT and
 IN-set refusals take:
@@ -1648,7 +1648,7 @@ the runner asserts this refusal fires for NO corpus entry, because one that
 takes the route is a set the planner should have inlined),
 `benchmarks/tpch/in_subquery_dag_test.go` (the refusal forced by shrinking the
 bound: the query must still ANSWER, and answer the same thing),
-`physical/in_subquery_set_test.go` (literal round trip per kind — the quote is
+`dagplan/in_subquery_set_test.go` (literal round trip per kind — the quote is
 the one that turns a set into a different set — refusal for what it cannot
 spell, and the empty-set constants).
 
@@ -1740,7 +1740,7 @@ defines its FRAME, not the stream: `exec.Window` groups its input by
 stage can carry two OVER clauses that order differently — a single pre-sort
 could not serve both.
 
-**Distribution** (`physical/distribution.go`, `windowPartitionKeys`):
+**Distribution** (`dagplan/distribution.go`, `windowPartitionKeys`):
 
 - A window over `PARTITION BY k` is computable one partition at a time, so
   the stage requires `ClusteredOn(k)` and — when its input actually arrives
@@ -1910,7 +1910,7 @@ keys from the scan's catalog annotation, and anything the rewrite still
 declines off the root path is refused and routed to the coordinator-local
 pipeline instead of dropped. Regression coverage:
 `planner/logical/distinct_rewrite_test.go` (rewrite scope, star keys, marker),
-`planner/physical/derived_distinct_test.go` (the emitted dedup stage and the
+`planner/dagplan/derived_distinct_test.go` (the emitted dedup stage and the
 refusal), the `DerivedDistinct*` / `DerivedStarDistinct*` /
 `GroupByOverDerivedDistinct` entries in the two-path invariance corpus, and the
 matching PostgreSQL-oracle entries that settle what the answers ARE.
@@ -1985,7 +1985,7 @@ child AND on an unpinned recovered panic; the obligation regressions live in
 ## How to inspect this machinery (recipes)
 
 **Dump the stages a query plans to** — fastest way to see what the DAG looks
-like. Pattern (see `planner/physical/dynamic_filter_test.go` `sqlToStages` /
+like. Pattern (see `planner/dagplan/dynamic_filter_test.go` `sqlToStages` /
 `plan_tpch_test.go:setupTPCHCatalog`):
 
 ```go

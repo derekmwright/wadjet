@@ -1,6 +1,6 @@
 # Stage group key resolution
 
-Source: internal/planner/physical/group_key_resolution.go — resolveStageGroupKeys, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/group_key_resolution.go — resolveStageGroupKeys, moved 2026-09-11 (#1026)
 
 ```go
 // resolveStageGroupKeys settles the RESOLUTION spelling of every GROUP BY key

@@ -1,6 +1,6 @@
 # Consumer published identity
 
-Source: internal/planner/physical/published_identity.go — bindConsumersToPublishedIdentity, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/published_identity.go — bindConsumersToPublishedIdentity, moved 2026-09-11 (#1026)
 
 ```go
 // A CONSUMER BINDS THROUGH THE IDENTITY ITS PRODUCER PUBLISHED (#770).

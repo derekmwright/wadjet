@@ -1,6 +1,6 @@
 # Distributed group key refusals
 
-Source: internal/planner/physical/group_key_refusal.go — ErrGroupKeyDistributed, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/group_key_refusal.go — ErrGroupKeyDistributed, moved 2026-09-11 (#1026)
 
 ```go
 // ErrGroupKeyDistributed marks a plan the stage DAG refuses because the value

@@ -1,6 +1,6 @@
 # Sort output source binding
 
-Source: internal/planner/physical/published_identity.go — respellSortKeysOverProducerOutput, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/published_identity.go — respellSortKeysOverProducerOutput, moved 2026-09-11 (#1026)
 
 ```go
 // An ORDER BY term names an OUTPUT column, and the producing stage has its own

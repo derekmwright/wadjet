@@ -26,7 +26,7 @@ parallel by default (`exec.Pipeline` with Workers=NumCPU). Use
 ### 1.2 Standalone dev server (local files)
 
 ```bash
-wadjet serve --mode=standalone --storage-type=file --data-dir=./data --pg-addr=:5432
+wadjetd serve --mode=standalone --storage-type=file --data-dir=./data --pg-addr=:5432
 psql -h localhost -p 5432 -U wadjet -d wadjet
 ```
 
@@ -35,10 +35,16 @@ pgwire, HTTP (`:8080`), gRPC (`:9090`). Prometheus `/metrics` is served on the
 HTTP API port here — `--metrics-addr` (default `:9100`) binds a listener only
 in **worker** mode.
 
+For development without a cluster at all, `wadjet serve` (the other binary)
+runs the engine in ONE process behind pgwire only: no NATS task queues, no
+workers, no HTTP or gRPC listener. Same SQL, same answers
+(`TestTwoPathInvariance`); see [LICENSING.md](../LICENSING.md) for which
+binary is which.
+
 ### 1.3 Standalone against S3-compatible storage
 
 ```bash
-wadjet serve --mode=standalone \
+wadjetd serve --mode=standalone \
   --storage-type=s3 --endpoint=minio:9000 --bucket=wadjet \
   --access-key=... --secret-key=... [--ssl --region=us-east-2]
 ```
@@ -50,7 +56,7 @@ R2.
 
 ```bash
 # Coordinator
-wadjet serve --mode=coordinator \
+wadjetd serve --mode=coordinator \
   --pg-addr=:5432 --nats-url=nats://nats:4222 \
   --storage-type=s3 --endpoint=s3.us-east-2.amazonaws.com --ssl \
   --bucket=<data-bucket> --region=us-east-2 \
@@ -58,7 +64,7 @@ wadjet serve --mode=coordinator \
   --catalog-snapshot-s3-prefix=s3://<bucket>/catalog/
 
 # Each worker
-wadjet serve --mode=worker \
+wadjetd serve --mode=worker \
   --nats-url=nats://nats:4222 \
   --storage-type=s3 --endpoint=... --bucket=... --region=... --ssl \
   --data-plane=grpc --coord-data-plane=<coord-host>:9091 \
