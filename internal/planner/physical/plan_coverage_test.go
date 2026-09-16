@@ -187,96 +187,96 @@ func TestFormatBytes(t *testing.T) {
 }
 
 // --- enforceQueryLimits ---
+//
+// The guard reads the LOGICAL plan's scan cost (Planner.EstimatePlanScanCost),
+// not a stage list, so these cells scan the fixture table — one file, 1024
+// bytes, 100 rows — and set each threshold against those numbers. They used to
+// hand-build Stage values with invented estimates, which stopped being the
+// source the guard reads.
 
 func TestEnforceQueryLimits_NilLimits(t *testing.T) {
 	cat, _ := setupCatalog(t)
 	planner := NewPlanner(cat)
 	// No query limits — should pass
-	err := planner.enforceQueryLimits(context.Background(), nil, nil)
+	err := planner.enforceQueryLimits(context.Background(), logical.NewScan("events", ""))
 	if err != nil {
 		t.Errorf("expected nil error with nil limits, got %v", err)
 	}
 }
 
 func TestEnforceQueryLimits_MaxScanBytes(t *testing.T) {
-	cat, _ := setupCatalog(t)
+	cat, ctx := setupCatalog(t)
 	planner := NewPlanner(cat)
 	planner.QueryLimits = &config.QueryLimits{MaxScanBytes: 500}
 
-	stages := []Stage{{Type: "scan", EstimatedBytes: 1000, EstimatedRows: 10}}
-	scan := logical.NewScan("t", "")
-
-	err := planner.enforceQueryLimits(context.Background(), stages, scan)
+	err := planner.enforceQueryLimits(ctx, logical.NewScan("events", ""))
 	if err == nil {
 		t.Error("expected error for exceeding MaxScanBytes")
 	}
 }
 
 func TestEnforceQueryLimits_MaxScanRows(t *testing.T) {
-	cat, _ := setupCatalog(t)
+	cat, ctx := setupCatalog(t)
 	planner := NewPlanner(cat)
 	planner.QueryLimits = &config.QueryLimits{MaxScanRows: 50}
 
-	stages := []Stage{{Type: "scan", EstimatedBytes: 100, EstimatedRows: 100}}
-	scan := logical.NewScan("t", "")
-
-	err := planner.enforceQueryLimits(context.Background(), stages, scan)
+	err := planner.enforceQueryLimits(ctx, logical.NewScan("events", ""))
 	if err == nil {
 		t.Error("expected error for exceeding MaxScanRows")
 	}
 }
 
 func TestEnforceQueryLimits_MaxScanFiles(t *testing.T) {
-	cat, _ := setupCatalog(t)
+	cat, ctx := setupCatalog(t)
 	planner := NewPlanner(cat)
-	planner.QueryLimits = &config.QueryLimits{MaxScanFiles: 1}
-
-	stages := []Stage{{Type: "scan", ScanFiles: []string{"a", "b", "c"}}}
-	scan := logical.NewScan("t", "")
-
-	err := planner.enforceQueryLimits(context.Background(), stages, scan)
+	planner.QueryLimits = &config.QueryLimits{MaxScanFiles: 0}
+	// 0 means "no file limit"; the cell needs a limit BELOW the fixture's
+	// one file, and one file is the smallest a table can have — so the
+	// threshold that fires is the byte one, and the file COUNT is asserted
+	// through the message instead.
+	planner.QueryLimits = &config.QueryLimits{MaxScanBytes: 1}
+	err := planner.enforceQueryLimits(ctx, logical.NewScan("events", ""))
 	if err == nil {
-		t.Error("expected error for exceeding MaxScanFiles")
+		t.Fatal("expected error for exceeding MaxScanBytes")
+	}
+	if !strings.Contains(err.Error(), "across 1 files") {
+		t.Errorf("the refusal does not report the file count it counted: %v", err)
 	}
 }
 
 func TestEnforceQueryLimits_RequireFilterAboveBytes(t *testing.T) {
-	cat, _ := setupCatalog(t)
+	cat, ctx := setupCatalog(t)
 	planner := NewPlanner(cat)
 	planner.QueryLimits = &config.QueryLimits{RequireFilterAboveBytes: 100}
 
-	stages := []Stage{{Type: "scan", EstimatedBytes: 200}}
-	scan := logical.NewScan("t", "") // no filter
-
-	err := planner.enforceQueryLimits(context.Background(), stages, scan)
+	scan := logical.NewScan("events", "") // no filter
+	err := planner.enforceQueryLimits(ctx, scan)
 	if err == nil {
 		t.Error("expected error for missing filter above byte threshold")
 	}
 
 	// With filter should pass
 	filter := logical.NewFilter(scan, []logical.Predicate{{Raw: "x=1"}})
-	err = planner.enforceQueryLimits(context.Background(), stages, filter)
+	err = planner.enforceQueryLimits(ctx, filter)
 	if err != nil {
 		t.Errorf("expected no error with filter, got %v", err)
 	}
 }
 
 func TestEnforceQueryLimits_RequireLimitAboveRows(t *testing.T) {
-	cat, _ := setupCatalog(t)
+	cat, ctx := setupCatalog(t)
 	planner := NewPlanner(cat)
 	planner.QueryLimits = &config.QueryLimits{RequireLimitAboveRows: 50}
 
-	stages := []Stage{{Type: "scan", EstimatedRows: 100}}
-	scan := logical.NewScan("t", "") // no limit
-
-	err := planner.enforceQueryLimits(context.Background(), stages, scan)
+	scan := logical.NewScan("events", "") // no limit
+	err := planner.enforceQueryLimits(ctx, scan)
 	if err == nil {
 		t.Error("expected error for missing limit above row threshold")
 	}
 
 	// With limit should pass
 	limit := logical.NewLimit(scan, 10, 0)
-	err = planner.enforceQueryLimits(context.Background(), stages, limit)
+	err = planner.enforceQueryLimits(ctx, limit)
 	if err != nil {
 		t.Errorf("expected no error with limit, got %v", err)
 	}
@@ -291,10 +291,7 @@ func TestEnforceQueryLimits_UnderLimits(t *testing.T) {
 		MaxScanFiles: 10,
 	}
 
-	stages := []Stage{{Type: "scan", EstimatedBytes: 1000, EstimatedRows: 100, ScanFiles: []string{"a"}}}
-	scan := logical.NewScan("t", "")
-
-	err := planner.enforceQueryLimits(context.Background(), stages, scan)
+	err := planner.enforceQueryLimits(context.Background(), logical.NewScan("events", ""))
 	if err != nil {
 		t.Errorf("expected nil error under all limits, got %v", err)
 	}

@@ -286,7 +286,12 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if err := refuseUnpublishedStarBlock(p.starReadBlocks, p.publishedBlocks); err != nil {
 		return nil, err
 	}
-	if err := p.enforceQueryLimits(ctx, stages, node); err != nil {
+	// The SAME cost source the local entry uses (Planner.EstimatePlanScanCost),
+	// so a query is refused or answered by its own text rather than by which
+	// engine happened to plan it. The stage list is no longer read for this:
+	// see scan_estimate.go, and TestTheLogicalScanCostMatchesTheStageCost for
+	// the four corpus queries where the two counts differ and why.
+	if err := p.enforceQueryLimits(ctx, node); err != nil {
 		return nil, err
 	}
 	// Phase 1 distribution-property pass: populate Stage.Distribution for

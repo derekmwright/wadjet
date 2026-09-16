@@ -235,7 +235,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// Generate distributed stages for coordinator dispatch
 	plan.Stages = p.generateStages(node)
 
-	if err := p.enforceQueryLimits(ctx, plan.Stages, node); err != nil {
+	if err := p.enforceQueryLimits(ctx, node); err != nil {
 		p.resources().releaseSubqueryCharges()
 		p.releaseCTECache()
 		p.releaseScanCache()

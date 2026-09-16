@@ -177,12 +177,12 @@ const QueryLimitSQLState = "53400"
 // overrides) narrowed by the calling identity's, which an ABAC `query_limit`
 // obligation puts on the context. See identity_limits.go for why the two
 // arrive by different routes and meet here.
-func (p *Planner) enforceQueryLimits(ctx context.Context, stages []Stage, node *logical.Node) error {
+func (p *Planner) enforceQueryLimits(ctx context.Context, node *logical.Node) error {
 	limits := tightestLimits(p.QueryLimits, IdentityQueryLimitsFromContext(ctx))
 	if limits == nil {
 		return nil
 	}
-	cost := EstimateCost(stages, node)
+	cost := p.EstimatePlanScanCost(ctx, node)
 
 	if limits.MaxScanBytes > 0 && cost.TotalBytes > limits.MaxScanBytes {
 		return sqlerr.New(QueryLimitSQLState, "query would scan %s (%d bytes) across %d files, exceeding limit of %s — add a WHERE clause or partition filter",
