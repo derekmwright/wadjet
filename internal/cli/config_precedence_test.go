@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"fmt"
@@ -30,10 +30,10 @@ import (
 // subcommand and returns the resolution the probe saw.
 func resolveThroughTheRealCommand(t *testing.T, args []string) (*config.Resolution, error) {
 	t.Helper()
-	root := newRootCmd()
+	root := NewRootCmd()
 	resolvedConfig.Store(nil)
 	t.Cleanup(func() {
-		newRootCmd() // restore every bound variable to its default
+		NewRootCmd() // restore every bound variable to its default
 		resolvedConfig.Store(nil)
 	})
 
@@ -241,7 +241,7 @@ var newKeysWithNonZeroDefaults = map[string]bool{
 // asserted in BOTH directions, so a new non-zero-default flag cannot quietly
 // join the blast radius without the docs naming it.
 func TestEveryNonZeroDefaultFlagIsAccountedFor(t *testing.T) {
-	newRootCmd()
+	NewRootCmd()
 	found := map[string]string{}
 	for _, k := range config.Keys() {
 		if k.Flag == "" {
@@ -314,7 +314,7 @@ func TestAFlagLeftAtItsDefaultLosesToTheEnvironment(t *testing.T) {
 // registry name the same flags, and every one of them is a real persistent
 // flag of the root command.
 func TestConfigFlagBindingsMatchTheRegistry(t *testing.T) {
-	root := newRootCmd()
+	root := NewRootCmd()
 
 	inRegistry := map[string]bool{}
 	for _, k := range config.Keys() {

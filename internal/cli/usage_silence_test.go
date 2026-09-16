@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"os/exec"
@@ -21,7 +21,7 @@ func TestRuntimeErrorsDoNotDumpUsage(t *testing.T) {
 		t.Skip("go tool unavailable")
 	}
 	// Runtime error: catalog table with unreachable store.
-	out, _ := exec.Command(bin, "run", ".", "query", "SELECT * FROM no_such_table").CombinedOutput()
+	out, _ := exec.Command(bin, "run", "../../cmd/wadjet", "query", "SELECT * FROM no_such_table").CombinedOutput()
 	s := string(out)
 	if !strings.Contains(s, "Error:") {
 		t.Fatalf("runtime error output missing Error line: %q", s)
@@ -30,7 +30,7 @@ func TestRuntimeErrorsDoNotDumpUsage(t *testing.T) {
 		t.Fatalf("runtime error output dumped usage: %q", s)
 	}
 	// Flag error: usage must still appear.
-	out, _ = exec.Command(bin, "run", ".", "query", "--no-such-flag").CombinedOutput()
+	out, _ = exec.Command(bin, "run", "../../cmd/wadjet", "query", "--no-such-flag").CombinedOutput()
 	if !strings.Contains(string(out), "Usage:") {
 		t.Fatalf("flag error output missing usage: %q", string(out))
 	}

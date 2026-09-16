@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"os"
@@ -205,7 +205,7 @@ func TestAConfigWithoutADeferredSectionStartsFine(t *testing.T) {
 // OTLP collector up in a unit test would gate a wiring fact behind a network
 // service.
 func TestTelemetryReachesEveryModeThatHasAConsumer(t *testing.T) {
-	src, err := os.ReadFile("main.go")
+	src, err := os.ReadFile("root.go")
 	if err != nil {
 		t.Fatal(err)
 	}

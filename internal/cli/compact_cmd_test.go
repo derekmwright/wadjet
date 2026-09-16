@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"bytes"
@@ -58,11 +58,11 @@ func TestCompactCommandIsRegistered(t *testing.T) {
 	if err != nil {
 		t.Skip("go tool unavailable")
 	}
-	out, _ := exec.Command(bin, "run", ".", "compact", "--help").CombinedOutput()
+	out, _ := exec.Command(bin, "run", "../../cmd/wadjet", "compact", "--help").CombinedOutput()
 	if !strings.Contains(string(out), "--rewrite") {
 		t.Fatalf("`wadjet compact --help` does not mention --rewrite: %s", out)
 	}
-	out, _ = exec.Command(bin, "run", ".", "--help").CombinedOutput()
+	out, _ = exec.Command(bin, "run", "../../cmd/wadjet", "--help").CombinedOutput()
 	if !strings.Contains(string(out), "compact") {
 		t.Fatalf("`wadjet --help` does not list compact: %s", out)
 	}

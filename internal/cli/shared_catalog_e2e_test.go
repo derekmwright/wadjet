@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"io"
@@ -38,7 +38,7 @@ func e2eBin(t *testing.T) string {
 	// Never `go build -o wadjet` at the repo root: wadjet/ is a package
 	// directory and the toolchain writes the binary INTO it (CLAUDE.md).
 	bin := filepath.Join(t.TempDir(), "wadjet")
-	out, err := exec.Command(goBin, "build", "-o", bin, ".").CombinedOutput()
+	out, err := exec.Command(goBin, "build", "-o", bin, "../../cmd/wadjet").CombinedOutput()
 	if err != nil {
 		t.Skipf("building the CLI: %v\n%s", err, out)
 	}

@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"fmt"
@@ -27,7 +27,7 @@ func TestCacheBytesHelpStringMatchesComputation(t *testing.T) {
 	// goMemLimit = detected * numerator / denominator).
 	detectedShareTenths := 1000 * memoryEnvelopeNumerator / memoryEnvelopeDenominator / cacheBytesAutoDivisor
 
-	flag := newRootCmd().PersistentFlags().Lookup("cache-bytes")
+	flag := NewRootCmd().PersistentFlags().Lookup("cache-bytes")
 	if flag == nil {
 		t.Fatal("--cache-bytes flag not registered")
 	}
