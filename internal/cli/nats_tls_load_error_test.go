@@ -12,7 +12,7 @@ import (
 //
 // Dropping config.Load's error is how the tier's stated invariant gets
 // falsified. An unparseable file that NAMES tls_cert, tls_key and tls_ca
-// yields a nil config; resolveNATSTLSPaths then sees three empty strings,
+// yields a nil config; ResolveNATSTLSPaths then sees three empty strings,
 // which is the legitimate "no TLS configured" shape, and returns no error —
 // so the process connects to NATS in PLAINTEXT, with the operator's
 // certificate sitting in a file it never read. Worker mode has no other
@@ -38,11 +38,11 @@ func TestAnUnparseableConfigIsAStartupErrorNotPlaintextNATS(t *testing.T) {
 	configFile = path
 	t.Cleanup(func() { configFile = prev })
 
-	cfg, err := loadConfigForNATSTLS()
+	cfg, err := LoadConfigForNATSTLS()
 	if err == nil {
-		cert, key, ca, rerr := resolveNATSTLSPaths(cfg)
+		cert, key, ca, rerr := ResolveNATSTLSPaths(cfg)
 		t.Fatalf("an unparseable config file NAMING all three TLS paths was accepted: "+
-			"loadConfigForNATSTLS returned nil error, and the tier then resolved to "+
+			"LoadConfigForNATSTLS returned nil error, and the tier then resolved to "+
 			"cert=%q key=%q ca=%q err=%v — the process would connect to NATS in "+
 			"PLAINTEXT with no error and no warning (#827, #802).",
 			cert, key, ca, rerr)
@@ -67,13 +67,13 @@ func TestAReadableConfigStillLoads(t *testing.T) {
 	configFile = path
 	t.Cleanup(func() { configFile = prev })
 
-	cfg, err := loadConfigForNATSTLS()
+	cfg, err := LoadConfigForNATSTLS()
 	if err != nil {
 		t.Fatalf("a well-formed config file was refused: %v", err)
 	}
-	cert, key, ca, err := resolveNATSTLSPaths(cfg)
+	cert, key, ca, err := ResolveNATSTLSPaths(cfg)
 	if err != nil {
-		t.Fatalf("resolveNATSTLSPaths: %v", err)
+		t.Fatalf("ResolveNATSTLSPaths: %v", err)
 	}
 	if cert != "/etc/wadjet/cert.pem" || key != "/etc/wadjet/key.pem" || ca != "/etc/wadjet/ca.pem" {
 		t.Fatalf("the file tier did not reach the connection: (%q, %q, %q)", cert, key, ca)
@@ -88,7 +88,7 @@ func TestNoConfigFileIsNotAnError(t *testing.T) {
 	configFile = ""
 	t.Cleanup(func() { configFile = prev })
 
-	cfg, err := loadConfigForNATSTLS()
+	cfg, err := LoadConfigForNATSTLS()
 	if err != nil || cfg != nil {
 		t.Fatalf("no --config should resolve to (nil, nil); got (%v, %v)", cfg, err)
 	}

@@ -210,11 +210,11 @@ func effectiveResolution() *config.Resolution {
 	return config.Resolve(config.Inputs{Flags: cobraFlagValues{}})
 }
 
-// effectiveConfig returns the configuration the process is running on.
-func effectiveConfig() *config.Config { return effectiveResolution().Config() }
+// EffectiveConfig returns the configuration the process is running on.
+func EffectiveConfig() *config.Config { return effectiveResolution().Config() }
 
 // serveMode is the run mode `serve` dispatches on. It reads the RESOLVED
 // mode: before #808's fix the switch read the flag variable, so a `mode:` in
 // the config file or a WADJET_MODE in the environment was parsed, validated,
 // reported by GET /v1/admin/config — and never dispatched on.
-func serveMode() string { return effectiveConfig().Mode }
+func serveMode() string { return EffectiveConfig().Mode }

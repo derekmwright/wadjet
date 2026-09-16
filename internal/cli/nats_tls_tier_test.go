@@ -7,7 +7,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/config"
 )
 
-// resolveNATSTLSPaths' config-file tier exists, and material that is named
+// ResolveNATSTLSPaths' config-file tier exists, and material that is named
 // but unusable is a startup error (#827).
 //
 // The function's own doc comment promised "CLI flags take priority, then
@@ -73,9 +73,9 @@ func TestNATSTLSResolutionTiers(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			withNATSTLSEnv(t, tc.flagCert, tc.flagKey, tc.flagCA, tc.envCert, tc.envKey, tc.envCA)
-			cert, key, ca, err := resolveNATSTLSPaths(tc.cfg)
+			cert, key, ca, err := ResolveNATSTLSPaths(tc.cfg)
 			if err != nil {
-				t.Fatalf("resolveNATSTLSPaths: %v", err)
+				t.Fatalf("ResolveNATSTLSPaths: %v", err)
 			}
 			if cert != tc.wantCert || key != tc.wantKey || ca != tc.wantCA {
 				t.Fatalf("got (%q, %q, %q), want (%q, %q, %q)",
@@ -103,7 +103,7 @@ func TestPartialNATSTLSMaterialIsAStartupError(t *testing.T) {
 			withNATSTLSEnv(t, "", "", "", "", "", "")
 			cfg := &config.Config{}
 			cfg.NATS.TLSCert, cfg.NATS.TLSKey, cfg.NATS.TLSCA = tc.cert, tc.key, tc.ca
-			_, _, _, err := resolveNATSTLSPaths(cfg)
+			_, _, _, err := ResolveNATSTLSPaths(cfg)
 			if err == nil {
 				t.Fatal("partially configured NATS TLS material was accepted; the process " +
 					"would connect to NATS WITHOUT TLS and say nothing (#827)")

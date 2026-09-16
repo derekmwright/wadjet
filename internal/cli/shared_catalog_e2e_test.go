@@ -45,6 +45,27 @@ func e2eBin(t *testing.T) string {
 	return bin
 }
 
+// e2eServerBin builds dist/wadjetd — the distributed server — the same way,
+// for the gates that need a `serve --mode=standalone` rather than the
+// embedded one. It is EXEC'd, never linked: this package does not import the
+// distributed engine (LICENSING.md), and a subprocess is not an import.
+func e2eServerBin(t *testing.T) string {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("-short: this gate builds and spawns the CLI binary")
+	}
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("go tool unavailable")
+	}
+	bin := filepath.Join(t.TempDir(), "wadjetd")
+	out, err := exec.Command(goBin, "build", "-o", bin, "../../cmd/wadjetd").CombinedOutput()
+	if err != nil {
+		t.Skipf("building the server: %v\n%s", err, out)
+	}
+	return bin
+}
+
 // e2eRun runs one command against a data directory under root, with the
 // STORAGE flags the guide documents and NO catalog flags at all, and returns
 // its combined output.
@@ -235,7 +256,27 @@ func TestTwoDataDirsDoNotShareACatalog(t *testing.T) {
 // process dials THAT, so A's server is unreachable from B by construction. The
 // assertions are both directions: B sees only B, and A's catalog is unchanged
 // after B has tried to create a table in it.
+// Both servers are gated, because there are two of them now: `wadjet serve`
+// holds the catalog through internal/cli's own opener, `wadjetd serve
+// --mode=standalone` through runStandalone's. They lock and publish the same
+// way and a regression in either one is this defect again, so the case runs
+// against each.
 func TestAServerOnAnotherDataDirIsNeverUsed(t *testing.T) {
+	for _, arm := range []struct {
+		name      string
+		serveBin  func(*testing.T) string
+		serveArgs []string
+	}{
+		{"embedded", e2eBin, []string{"serve"}},
+		{"standalone", e2eServerBin, []string{"serve", "--mode=standalone"}},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			serverOnAnotherDataDirIsNeverUsed(t, arm.serveBin(t), arm.serveArgs)
+		})
+	}
+}
+
+func serverOnAnotherDataDirIsNeverUsed(t *testing.T, serveBin string, serveArgs []string) {
 	bin := e2eBin(t)
 	root := t.TempDir()
 	dirA := filepath.Join(root, "A")
@@ -253,10 +294,11 @@ func TestAServerOnAnotherDataDirIsNeverUsed(t *testing.T) {
 	// A `serve` on data dir A, on the port every command below also carries,
 	// so the dial address resolves to A's server for anyone who trusts it.
 	const port = "45873"
-	serve := exec.Command(bin,
-		"--storage-type=file", "--data-dir="+dirA, "--bucket=wadjet",
-		"--nats-port="+port, "serve", "--mode=standalone",
-		"--pg-addr=127.0.0.1:45874", "--http-addr=127.0.0.1:45875")
+	serveArgv := append([]string{
+		"--storage-type=file", "--data-dir=" + dirA, "--bucket=wadjet",
+		"--nats-port=" + port}, serveArgs...)
+	serveArgv = append(serveArgv, "--pg-addr=127.0.0.1:45874", "--http-addr=127.0.0.1:45875")
+	serve := exec.Command(serveBin, serveArgv...)
 	serve.Env = append(os.Environ(), "HOME="+filepath.Join(root, "home"))
 	if err := serve.Start(); err != nil {
 		t.Fatalf("starting serve on A: %v", err)
@@ -386,7 +428,7 @@ func TestAStaleCatalogLockIsRefused(t *testing.T) {
 	// Round-3 P2: the refusal must not advise deleting the lock file. The
 	// kernel releases a dead holder's flock on its own, so removal is never
 	// needed — and doing it in the state this message actually appears in, a
-	// LIVE holder that has not published, is what catalogLock.release's own
+	// LIVE holder that has not published, is what CatalogLock.Release's own
 	// comment warns about: a third process creates a fresh inode, flocks
 	// that, and two writers end up on one JetStream store.
 	if strings.Contains(out, "can be removed") || strings.Contains(out, "is stale and") {
@@ -480,7 +522,7 @@ func waitForShellBanner(t *testing.T, stdout io.Reader) {
 // over one store directory must not both open it.
 //
 // nats-server does not lock its own store directory, so before
-// lockCatalogStoreDir the second process opened the same JetStream file store
+// LockCatalogStoreDir the second process opened the same JetStream file store
 // and the two wrote over each other's metadata — reachable the moment the CLI
 // gained an embedded fallback. The answer is a refusal naming the way out, and
 // the catalog must survive it intact.
@@ -521,7 +563,7 @@ func TestCLIRefusesASecondProcessOnTheSameCatalogStore(t *testing.T) {
 
 	// Wait for the shell to hold the lock AND publish its address,
 	// deterministically rather than by sleeping: it prints its banner only
-	// after openSharedDB has returned, which is after lockCatalogStoreDir took
+	// after openSharedDB has returned, which is after LockCatalogStoreDir took
 	// the lock and the holder's URL was written. The lock FILE is no signal —
 	// create-table above already made it.
 	waitForShellBanner(t, stdout)

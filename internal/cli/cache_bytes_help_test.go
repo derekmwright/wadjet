@@ -27,7 +27,7 @@ func TestCacheBytesHelpStringMatchesComputation(t *testing.T) {
 	// goMemLimit = detected * numerator / denominator).
 	detectedShareTenths := 1000 * memoryEnvelopeNumerator / memoryEnvelopeDenominator / cacheBytesAutoDivisor
 
-	flag := NewRootCmd().PersistentFlags().Lookup("cache-bytes")
+	flag := NewRootCmd(EmbeddedServeCmd()).PersistentFlags().Lookup("cache-bytes")
 	if flag == nil {
 		t.Fatal("--cache-bytes flag not registered")
 	}

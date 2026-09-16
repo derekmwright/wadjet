@@ -24,7 +24,7 @@ OUTDIR="$(mktemp -d)"
 
 echo "Building wadjet + tpch-bench + security-bench for linux/arm64 (${GIT_SHA})..."
 cd "$REPO_ROOT"
-GOOS=linux GOARCH=arm64 go build -o "${OUTDIR}/wadjet" ./cmd/wadjet
+GOOS=linux GOARCH=arm64 go build -o "${OUTDIR}/wadjet" ./cmd/wadjetd
 GOOS=linux GOARCH=arm64 go build -o "${OUTDIR}/tpch-bench" ./cmd/tpch-bench
 GOOS=linux GOARCH=arm64 go build -o "${OUTDIR}/security-bench" ./cmd/security-bench
 
@@ -33,7 +33,7 @@ GOOS=linux GOARCH=arm64 go build -o "${OUTDIR}/security-bench" ./cmd/security-be
 # knob selects the path at instance bootstrap.
 echo "Building linux/amd64 variants..."
 mkdir -p "${OUTDIR}/amd64"
-GOOS=linux GOARCH=amd64 go build -o "${OUTDIR}/amd64/wadjet" ./cmd/wadjet
+GOOS=linux GOARCH=amd64 go build -o "${OUTDIR}/amd64/wadjet" ./cmd/wadjetd
 GOOS=linux GOARCH=amd64 go build -o "${OUTDIR}/amd64/tpch-bench" ./cmd/tpch-bench
 GOOS=linux GOARCH=amd64 go build -o "${OUTDIR}/amd64/clickbench-bench" ./cmd/clickbench-bench
 

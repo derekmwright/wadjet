@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/config"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/memory"
 	"github.com/derekmwright/wadjet/internal/optswitch"
@@ -76,7 +77,11 @@ func classifyLocalFailure(err, ctxErr error, strict bool) localOutcome {
 // costs (task dispatch + object-store materialization per stage boundary)
 // are independent of data size, so small queries pay a latency floor the
 // local pipeline doesn't have.
-const DefaultLocalFastPathBytes = 64 << 20
+//
+// The value itself is config.DefaultLocalFastPathBytes: the flag that sets
+// it is registered by the shared command tree, which does not link this
+// package.
+const DefaultLocalFastPathBytes = config.DefaultLocalFastPathBytes
 
 // defaultLocalFastPathConcurrency bounds simultaneous local executions so a
 // burst of interactive queries cannot monopolize coordinator CPU/memory.

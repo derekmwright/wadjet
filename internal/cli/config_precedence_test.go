@@ -30,10 +30,10 @@ import (
 // subcommand and returns the resolution the probe saw.
 func resolveThroughTheRealCommand(t *testing.T, args []string) (*config.Resolution, error) {
 	t.Helper()
-	root := NewRootCmd()
+	root := NewRootCmd(EmbeddedServeCmd())
 	resolvedConfig.Store(nil)
 	t.Cleanup(func() {
-		NewRootCmd() // restore every bound variable to its default
+		NewRootCmd(EmbeddedServeCmd()) // restore every bound variable to its default
 		resolvedConfig.Store(nil)
 	})
 
@@ -241,7 +241,7 @@ var newKeysWithNonZeroDefaults = map[string]bool{
 // asserted in BOTH directions, so a new non-zero-default flag cannot quietly
 // join the blast radius without the docs naming it.
 func TestEveryNonZeroDefaultFlagIsAccountedFor(t *testing.T) {
-	NewRootCmd()
+	NewRootCmd(EmbeddedServeCmd())
 	found := map[string]string{}
 	for _, k := range config.Keys() {
 		if k.Flag == "" {
@@ -314,7 +314,7 @@ func TestAFlagLeftAtItsDefaultLosesToTheEnvironment(t *testing.T) {
 // registry name the same flags, and every one of them is a real persistent
 // flag of the root command.
 func TestConfigFlagBindingsMatchTheRegistry(t *testing.T) {
-	root := NewRootCmd()
+	root := NewRootCmd(EmbeddedServeCmd())
 
 	inRegistry := map[string]bool{}
 	for _, k := range config.Keys() {
@@ -445,16 +445,16 @@ query:
 	}
 
 	// nats — the embedded server configuration both serve modes build.
-	nats := natsServerConfig()
+	nats := NATSServerConfig()
 	if nats.Port != 4555 || nats.ClusterID != "from-file" || nats.StoreDir != "/file/nats/store" {
-		t.Errorf("natsServerConfig() = {port %d, cluster %q, store %q}; the nats: section did not reach it",
+		t.Errorf("NATSServerConfig() = {port %d, cluster %q, store %q}; the nats: section did not reach it",
 			nats.Port, nats.ClusterID, nats.StoreDir)
 	}
 	if len(nats.LeafRemotes) != 1 || nats.LeafRemotes[0] != "nats://leaf-one:4222" {
-		t.Errorf("natsServerConfig() leaf remotes = %v", nats.LeafRemotes)
+		t.Errorf("NATSServerConfig() leaf remotes = %v", nats.LeafRemotes)
 	}
 
-	cfg := effectiveConfig()
+	cfg := EffectiveConfig()
 	if httpAddr != ":18080" || cfg.HTTP.Addr != ":18080" {
 		t.Errorf("http.addr: server sees %q, resolved %q", httpAddr, cfg.HTTP.Addr)
 	}
@@ -477,7 +477,7 @@ query:
 }
 
 // TestNATSTLSAgreesWithTheResolvedConfig is the anti-drift pin over the one
-// place the flag/env/file walk still exists by hand: resolveNATSTLSPaths is
+// place the flag/env/file walk still exists by hand: ResolveNATSTLSPaths is
 // #827's security control and keeps its own gates, so the loader must not be
 // able to disagree with it in any presence cell.
 func TestNATSTLSAgreesWithTheResolvedConfig(t *testing.T) {
@@ -513,13 +513,13 @@ func TestNATSTLSAgreesWithTheResolvedConfig(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			fileCfg, err := loadConfigForNATSTLS()
+			fileCfg, err := LoadConfigForNATSTLS()
 			if err != nil {
-				t.Fatalf("loadConfigForNATSTLS: %v", err)
+				t.Fatalf("LoadConfigForNATSTLS: %v", err)
 			}
-			cert, key, ca, err := resolveNATSTLSPaths(fileCfg)
+			cert, key, ca, err := ResolveNATSTLSPaths(fileCfg)
 			if err != nil {
-				t.Fatalf("resolveNATSTLSPaths: %v", err)
+				t.Fatalf("ResolveNATSTLSPaths: %v", err)
 			}
 			n := res.Config().NATS
 			if cert != n.TLSCert || key != n.TLSKey || ca != n.TLSCA {

@@ -24,7 +24,7 @@ func main() {
 		queries        = flag.String("queries", "", "comma-separated query names (default: all 22 + micros)")
 		updateBaseline = flag.Bool("update-baseline", false, "(golden only) write the result directly to --baseline")
 		noCompare      = flag.Bool("no-compare", false, "skip baseline comparison, just emit measurements")
-		wadjetBin      = flag.String("wadjet-bin", "", "path to wadjet binary (default: $WADJET_BIN or ./wadjet)")
+		wadjetBin      = flag.String("wadjet-bin", "", "path to the wadjetd server binary (default: $WADJET_BIN or ./wadjetd)")
 		pgAddr         = flag.String("pg-addr", ":15433", "pgwire listen address for the spawned coordinator")
 		source         = flag.String("source", "local", "data source: local (files under --data-dir) or s3 (coordinator reads from --bucket)")
 		bucket         = flag.String("bucket", "wadjet-bench-sf10-use2", "S3 bucket name (source=s3)")
@@ -89,7 +89,9 @@ func main() {
 		cfg.WadjetBin = os.Getenv("WADJET_BIN")
 	}
 	if cfg.WadjetBin == "" {
-		cfg.WadjetBin = "./wadjet"
+		// wadjetd, not wadjet: the harness starts coordinators and workers,
+		// which is what the server binary carries (LICENSING.md).
+		cfg.WadjetBin = "./wadjetd"
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))

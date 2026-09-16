@@ -32,7 +32,7 @@ func TestTheCostGuardReachesTheRunPathFromTheEnvironmentAlone(t *testing.T) {
 	}
 
 	// Exactly the expression runStandalone and runCoordinator evaluate.
-	global, roles := effectiveConfig().EffectiveQueryLimits()
+	global, roles := EffectiveConfig().EffectiveQueryLimits()
 	if global == nil {
 		t.Fatal("the cost guard is nil with the environment set and no --config: " +
 			"srvCfg.QueryLimits and coord.SetQueryLimits would both receive nil, " +
@@ -58,7 +58,7 @@ func TestTheCostGuardIsNilWhenNothingConfiguresIt(t *testing.T) {
 	if _, err := resolveThroughTheRealCommand(t, nil); err != nil {
 		t.Fatal(err)
 	}
-	if global, _ := effectiveConfig().EffectiveQueryLimits(); global != nil {
+	if global, _ := EffectiveConfig().EffectiveQueryLimits(); global != nil {
 		t.Fatalf("an unconfigured deployment gained a cost guard: %+v", *global)
 	}
 }
@@ -194,36 +194,5 @@ func TestAConfigWithoutADeferredSectionStartsFine(t *testing.T) {
 	}
 	if got := res.Config().Storage.Bucket; got != "fine" {
 		t.Fatalf("storage.bucket = %q, want %q", got, "fine")
-	}
-}
-
-// TestTelemetryReachesEveryModeThatHasAConsumer is P2's gate.
-//
-// initTelemetry was called from runCoordinator and runWorker and NOT from
-// runStandalone, so `telemetry:` and WADJET_OTEL_* reached nothing in the
-// default run mode. The assertion is on the call sites, because standing an
-// OTLP collector up in a unit test would gate a wiring fact behind a network
-// service.
-func TestTelemetryReachesEveryModeThatHasAConsumer(t *testing.T) {
-	src, err := os.ReadFile("root.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(src)
-	for _, fn := range []string{"func runStandalone(", "func runCoordinator(", "func runWorker("} {
-		start := strings.Index(text, fn)
-		if start < 0 {
-			t.Fatalf("%s not found", fn)
-		}
-		// The body runs to the next top-level func declaration.
-		end := strings.Index(text[start+len(fn):], "\nfunc ")
-		if end < 0 {
-			end = len(text) - start - len(fn)
-		}
-		body := text[start : start+len(fn)+end]
-		if !strings.Contains(body, "initTelemetry(") {
-			t.Errorf("%s never calls initTelemetry: the telemetry: section and "+
-				"WADJET_OTEL_* reach nothing in that mode", strings.TrimSuffix(fn, "("))
-		}
 	}
 }

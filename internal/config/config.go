@@ -213,6 +213,19 @@ type Parquet struct {
 }
 
 // DefaultConfig returns a configuration with sensible defaults.
+// DefaultLocalFastPathBytes is the default routing threshold for
+// --local-fastpath-bytes: a query whose total post-pruning catalog scan
+// bytes stay under this executes in-process instead of as a distributed
+// stage DAG. The DAG's fixed costs (task dispatch + object-store
+// materialization per stage boundary) are independent of data size, so
+// small queries pay a latency floor the local pipeline does not have.
+//
+// It lives here, beside the other resolved defaults, because the flag is
+// registered by the command tree — which both binaries share — while the
+// routing decision it feeds belongs to the coordinator, which the embedded
+// binary does not link. coordinator.DefaultLocalFastPathBytes is this value.
+const DefaultLocalFastPathBytes = 64 << 20
+
 func DefaultConfig() Config {
 	return Config{
 		Mode: "standalone",

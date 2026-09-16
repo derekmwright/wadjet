@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	if err := cli.NewRootCmd().Execute(); err != nil {
+	if err := cli.NewRootCmd(cli.EmbeddedServeCmd()).Execute(); err != nil {
 		os.Exit(1)
 	}
 }

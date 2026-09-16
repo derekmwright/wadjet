@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// startHeapDumper runs a goroutine that writes a Go heap profile to disk
+// StartHeapDumper runs a goroutine that writes a Go heap profile to disk
 // every interval. Each profile is written to a fresh file, then fsync'd
 // before move-into-place so the latest snapshot survives an OOM-kill.
 //
@@ -24,7 +24,7 @@ import (
 // (project_q18_sf10_native_dag_oom_2026-04-24) showed that slog writes
 // during query execution don't reach disk before SIGKILL. fsync on each
 // snapshot guarantees the latest profile survives.
-func startHeapDumper(ctx context.Context, logger *slog.Logger) {
+func StartHeapDumper(ctx context.Context, logger *slog.Logger) {
 	intervalStr := os.Getenv("WADJET_HEAP_DUMP_INTERVAL")
 	if intervalStr == "" {
 		return

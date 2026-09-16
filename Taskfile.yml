@@ -16,10 +16,14 @@ vars:
 
 tasks:
   build:
-    desc: Build the wadjet binary into dist/
+    desc: Build both binaries into dist/ — wadjet (MIT) and wadjetd (AGPL-3.0)
     cmds:
       - mkdir -p {{.DIST}}
+      # wadjet is the embedded CLI and server; wadjetd is the distributed
+      # server. They are licensed differently — see LICENSING.md — which is
+      # why they are two binaries and not one flag.
       - go build -o {{.DIST}}/wadjet ./cmd/wadjet
+      - go build -o {{.DIST}}/wadjetd ./cmd/wadjetd
 
   build-all:
     desc: Build every command into dist/
@@ -197,29 +201,30 @@ tasks:
   # --- Distributed test harness (cmd/tpch-harness) ---
 
   harness:build:
-    desc: Build the tpch-harness and wadjet binaries
+    desc: Build the tpch-harness and wadjetd binaries
     cmds:
       - mkdir -p {{.DIST}}
       - go build -o {{.DIST}}/tpch-harness ./cmd/tpch-harness
-      - go build -o {{.DIST}}/wadjet ./cmd/wadjet
+      # wadjetd: the harness starts coordinators and workers.
+      - go build -o {{.DIST}}/wadjetd ./cmd/wadjetd
 
   harness:smoke:
     desc: Real-cluster smoke test against SF0.01 fixture (~30s)
     deps: [harness:build]
     cmds:
-      - "{{.DIST}}/tpch-harness --mode=local --slice=small --no-compare --queries=q01,q06 --wadjet-bin={{.DIST}}/wadjet"
+      - "{{.DIST}}/tpch-harness --mode=local --slice=small --no-compare --queries=q01,q06 --wadjet-bin={{.DIST}}/wadjetd"
 
   harness:local:
     desc: Local fast gate using the small slice (~1-2 min)
     deps: [harness:build]
     cmds:
-      - "{{.DIST}}/tpch-harness --mode=local --slice=small --wadjet-bin={{.DIST}}/wadjet"
+      - "{{.DIST}}/tpch-harness --mode=local --slice=small --wadjet-bin={{.DIST}}/wadjetd"
 
   harness:large:
     desc: Local pre-merge gate using the large slice (forces spill, ~5-10 min)
     deps: [harness:build]
     cmds:
-      - "{{.DIST}}/tpch-harness --mode=local --slice=large --wadjet-bin={{.DIST}}/wadjet"
+      - "{{.DIST}}/tpch-harness --mode=local --slice=large --wadjet-bin={{.DIST}}/wadjetd"
 
   harness:golden:
     desc: Run against an existing EC2 cluster (requires COORD_URL)

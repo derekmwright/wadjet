@@ -19,8 +19,9 @@ import (
 // A gate that only asserts the loader is right cannot notice a NEW
 // hand-rolled read appearing beside it, which is how this defect got here in
 // the first place — so the boundary is enumerated and asserted, and a
-// `os.Getenv("WADJET_…")` added to cmd/wadjet fails this test until it is
-// either a registry key or an explicitly reasoned exemption.
+// `os.Getenv("WADJET_…")` added to the command line — this package or
+// internal/clid, which holds the distributed serve modes — fails this test
+// until it is either a registry key or an explicitly reasoned exemption.
 //
 // The exemptions are not configuration in the sense ADR-0029 governs: they
 // are runtime/debug knobs with no config-file meaning, per-invocation
@@ -65,30 +66,37 @@ var handRolledEnvExemptions = map[string]string{
 var literalEnvRead = regexp.MustCompile(`os\.(?:Getenv|LookupEnv)\("(WADJET_[A-Z0-9_]+)"\)`)
 
 // TestEveryHandRolledEnvReadIsAccountedFor: every literal WADJET_* read in
-// cmd/wadjet is either a registry key (resolved by the loader) or an
-// exemption with a reason.
+// the command line — this package and internal/clid — is either a registry
+// key (resolved by the loader) or an exemption with a reason.
+//
+// BOTH directories, because the serve modes moved out of this one when the
+// binaries split: a scan of "." alone would have stopped seeing every
+// hand-rolled read in runStandalone, runCoordinator and runWorker, and the
+// boundary would have quietly shrunk to the half that stayed.
 func TestEveryHandRolledEnvReadIsAccountedFor(t *testing.T) {
 	inRegistry := map[string]bool{}
 	for _, name := range config.EnvNames() {
 		inRegistry[name] = true
 	}
 
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatal(err)
-	}
 	found := map[string][]string{}
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		src, err := os.ReadFile(filepath.Clean(name))
+	for _, dir := range []string{".", "../clid"} {
+		entries, err := os.ReadDir(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, m := range literalEnvRead.FindAllStringSubmatch(string(src), -1) {
-			found[m[1]] = append(found[m[1]], name)
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			src, err := os.ReadFile(filepath.Clean(filepath.Join(dir, name)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, m := range literalEnvRead.FindAllStringSubmatch(string(src), -1) {
+				found[m[1]] = append(found[m[1]], filepath.Join(dir, name))
+			}
 		}
 	}
 	if len(found) == 0 {

@@ -20,7 +20,7 @@ import (
 
 // ClusterConfig describes a local-mode cluster to spawn.
 type ClusterConfig struct {
-	WadjetBin  string // path to wadjet binary
+	WadjetBin  string // path to the wadjetd server binary (it runs serve --mode=coordinator|worker)
 	RunDir     string // /tmp/wadjet-harness/run-X
 	NumWorkers int
 	GoMemLimit int64
