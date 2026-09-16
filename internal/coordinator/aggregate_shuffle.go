@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/google/uuid"
@@ -18,7 +19,7 @@ import (
 // distributed.PreComputedAggregate wire message. Extracted so the
 // coordinator-routing and test paths share one construction site.
 func buildPreComputedAggregateMeta(
-	cand physical.AggregateShuffleCandidate,
+	cand dagplan.AggregateShuffleCandidate,
 	stages []physical.Stage,
 	cacheFiles []string,
 ) (physical.PreComputedAggregateMeta, error) {
@@ -79,10 +80,10 @@ const aggregateShuffleTimeout = 8 * time.Minute
 func (c *Coordinator) preComputeDerivedAggregate(
 	parentCtx context.Context,
 	parentQueryID string,
-	cand physical.AggregateShuffleCandidate,
+	cand dagplan.AggregateShuffleCandidate,
 	stages []physical.Stage,
 ) ([]string, error) {
-	sqlText, err := physical.BuildAggregateShuffleSQL(cand, stages)
+	sqlText, err := dagplan.BuildAggregateShuffleSQL(cand, stages)
 	if err != nil {
 		return nil, fmt.Errorf("build aggregate pre-compute SQL: %w", err)
 	}

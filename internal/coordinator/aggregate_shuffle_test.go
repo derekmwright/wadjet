@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/derekmwright/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -68,7 +69,7 @@ func TestPreComputeDerivedAggregate_Q17SF001(t *testing.T) {
 	// below 4 GB, so PickAggregateShuffleCandidate would return !ok. Use a
 	// tiny threshold so the detection fires for this test. Production code
 	// uses the real threshold; this just exercises the dispatch primitive.
-	cand, ok := physical.PickAggregateShuffleCandidate(stages, 1)
+	cand, ok := dagplan.PickAggregateShuffleCandidate(stages, 1)
 	if !ok {
 		t.Fatal("Q17 at SF0.01: expected aggregate-shuffle candidate with threshold=1")
 	}

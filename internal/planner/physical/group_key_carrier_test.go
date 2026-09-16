@@ -84,10 +84,10 @@ func TestStageCarriesOneGroupKeyList(t *testing.T) {
 				t.Errorf("Q%02d stage %s carries %d group-key lists — GroupByResolve is index-"+
 					"aligned with ONE of them and cannot say which", qNum, s.ID, lists)
 			}
-			keys := stageGroupKeyList(s)
+			keys := StageGroupKeyList(s)
 			switch {
 			case len(s.GroupByResolve) == 0:
-				if stageComputesGroupKeys(s) && len(keys) > 0 {
+				if StageComputesGroupKeys(s) && len(keys) > 0 {
 					t.Errorf("Q%02d stage %s (%s) COMPUTES its %d group keys and carries no "+
 						"resolution list — the worker is back to deriving the second name by "+
 						"parsing the first (ADR-0026 §2)", qNum, s.ID, s.Type, len(keys))
@@ -95,7 +95,7 @@ func TestStageCarriesOneGroupKeyList(t *testing.T) {
 			case len(s.GroupByResolve) != len(keys):
 				t.Errorf("Q%02d stage %s: %d resolutions against %d keys — the two lists are "+
 					"index-aligned or they are nothing", qNum, s.ID, len(s.GroupByResolve), len(keys))
-			case !stageComputesGroupKeys(s):
+			case !StageComputesGroupKeys(s):
 				t.Errorf("Q%02d stage %s (%s) carries a resolution list but does not compute its "+
 					"keys — a merge reads a partial's output, where the two names are one",
 					qNum, s.ID, s.Type)
@@ -156,7 +156,7 @@ func TestEveryComputedKeyResolvesAgainstItsProducer(t *testing.T) {
 		checked := 0
 		for i := range stages {
 			s := &stages[i]
-			if len(s.GroupByResolve) == 0 || !stageComputesGroupKeys(s) {
+			if len(s.GroupByResolve) == 0 || !StageComputesGroupKeys(s) {
 				continue
 			}
 			in, _ := aggregateInputStreamColumns(stages, idx, s)
@@ -241,7 +241,7 @@ func TestGroupKeyPublishedNameIsTheQuerysOwn(t *testing.T) {
 		found := false
 		for i := range stages {
 			s := &stages[i]
-			if !stageComputesGroupKeys(s) || len(s.GroupByResolve) == 0 {
+			if !StageComputesGroupKeys(s) || len(s.GroupByResolve) == 0 {
 				continue
 			}
 			found = true

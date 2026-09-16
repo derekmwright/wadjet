@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
@@ -61,7 +62,7 @@ func (c *Coordinator) preScanBuildTables(ctx context.Context, parentQueryID stri
 	if c.BuildCacheThreshold > 0 {
 		threshold = c.BuildCacheThreshold
 	}
-	largeBuildScans := physical.LargeBuildScans(stages, probeAlias, threshold)
+	largeBuildScans := dagplan.LargeBuildScans(stages, probeAlias, threshold)
 	if len(largeBuildScans) == 0 {
 		return nil, nil
 	}

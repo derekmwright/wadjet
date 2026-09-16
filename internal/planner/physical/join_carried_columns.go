@@ -132,7 +132,7 @@ func ensureJoinCarriesEvaluatedColumns(stages []Stage) {
 func groupKeyResolutionRefs(stages []Stage, idx map[string]int, s *Stage) []string {
 	var texts []string
 	add := func(c *Stage) {
-		if len(c.GroupByResolve) == 0 || !stageComputesGroupKeys(c) {
+		if len(c.GroupByResolve) == 0 || !StageComputesGroupKeys(c) {
 			return
 		}
 		for _, r := range c.GroupByResolve {

@@ -236,7 +236,7 @@ func assertGroupKeys(t *testing.T, stages []Stage, wantPublished, wantResolve st
 	found, computed := false, false
 	for i := range stages {
 		s := &stages[i]
-		keys := stageGroupKeyList(s)
+		keys := StageGroupKeyList(s)
 		if len(keys) == 0 {
 			continue
 		}
@@ -245,7 +245,7 @@ func assertGroupKeys(t *testing.T, stages []Stage, wantPublished, wantResolve st
 			t.Errorf("stage %s publishes GROUP BY %v, want [%s] — the consumers above read "+
 				"this name", s.ID, keys, wantPublished)
 		}
-		if !stageComputesGroupKeys(s) {
+		if !StageComputesGroupKeys(s) {
 			if len(s.GroupByResolve) != 0 {
 				t.Errorf("stage %s does not compute its keys but carries a resolution list %v "+
 					"— a merge reads a partial's output, where the two names are one",

@@ -48,8 +48,8 @@ func bindConsumersToPublishedIdentity(stages []Stage) {
 // second carry AND a second evaluation.
 func carryUnreachableConsumerValues(stages []Stage, idx map[string]int, i int) {
 	s := &stages[i]
-	keys := stageGroupKeyList(s)
-	groups := stageComputesGroupKeys(s) && len(s.GroupByResolve) == len(keys)
+	keys := StageGroupKeyList(s)
+	groups := StageComputesGroupKeys(s) && len(s.GroupByResolve) == len(keys)
 	specs := stageComputedAggSpecs(s)
 	wins := stageComputedWindowCols(s)
 	if !groups && len(specs) == 0 && len(wins) == 0 {
@@ -119,8 +119,8 @@ func carryUnreachableConsumerValues(stages []Stage, idx map[string]int, i int) {
 // stage i to the spelling its producer PUBLISHES.
 func respellConsumersOverProducerOutput(stages []Stage, idx map[string]int, i int) {
 	s := &stages[i]
-	keys := stageGroupKeyList(s)
-	groups := stageComputesGroupKeys(s) && len(s.GroupByResolve) == len(keys)
+	keys := StageGroupKeyList(s)
+	groups := StageComputesGroupKeys(s) && len(s.GroupByResolve) == len(keys)
 	specs := stageComputedAggSpecs(s)
 	wins := stageComputedWindowCols(s)
 	if !groups && len(specs) == 0 && len(wins) == 0 {
@@ -182,7 +182,7 @@ func stageComputedWindowCols(s *Stage) []*WindowColSpec {
 
 // stageComputedAggSpecs is every aggregate spec whose ARGUMENT this stage's
 // fragment resolves against a RAW input, in the three places a stage can carry
-// one. It is stageComputesGroupKeys' twin, and it excludes a merge for the
+// one. It is StageComputesGroupKeys' twin, and it excludes a merge for the
 // same reason: a final or merge aggregate over a partial's output reads that
 // partial's OutputCol, never the argument's own spelling.
 func stageComputedAggSpecs(s *Stage) []*AggSpec {

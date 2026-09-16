@@ -59,12 +59,12 @@ type GroupKeyResolution struct {
 // candidate spellings that only the finished stage graph can settle.
 func (r GroupKeyResolution) deferred() bool { return r.Alias != "" }
 
-// stageGroupKeyList returns the group-key list a stage carries and the field
+// StageGroupKeyList returns the group-key list a stage carries and the field
 // it lives in. A stage carries exactly ONE of the three: an aggregate stage
 // its own GroupByCols, a fused scan-aggregate its FusedAggGroupBy, and a join
 // that absorbed a chain-terminal partial its ChainedAggGroupBy.
 // GroupByResolve is index-aligned with whichever one answers.
-func stageGroupKeyList(s *Stage) []string {
+func StageGroupKeyList(s *Stage) []string {
 	switch {
 	case len(s.GroupByCols) > 0:
 		return s.GroupByCols
@@ -76,7 +76,7 @@ func stageGroupKeyList(s *Stage) []string {
 	return nil
 }
 
-// stageComputesGroupKeys reports whether this stage's fragment RESOLVES the
+// StageComputesGroupKeys reports whether this stage's fragment RESOLVES the
 // group keys against a raw input — the only class that reads GroupByResolve.
 //
 // A "final_aggregate" or "merge_aggregate" consumes a partial's OUTPUT, where
@@ -85,7 +85,7 @@ func stageGroupKeyList(s *Stage) []string {
 // RawInputAggregate final: the distribution pass hash-partitions raw rows into
 // disjoint groups and the final aggregates them in ONE level, so that fragment
 // computes the keys itself.
-func stageComputesGroupKeys(s *Stage) bool {
+func StageComputesGroupKeys(s *Stage) bool {
 	switch s.Type {
 	case StageScan:
 		return len(s.FusedAggGroupBy) > 0
@@ -309,7 +309,7 @@ func stageAggOutNames(s *Stage) []string {
 // each of its GROUP BY keys — `exec.PublishedGroupKeyNames` over the published
 // list, which is the same answer the single-process operator gives.
 func aggregateEmittedKeyNames(s *Stage) []string {
-	keys := stageGroupKeyList(s)
+	keys := StageGroupKeyList(s)
 	if len(keys) == 0 {
 		return nil
 	}

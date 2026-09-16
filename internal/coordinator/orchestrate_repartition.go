@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -89,7 +90,7 @@ type ShuffleLayout struct {
 func (c *Coordinator) orchestrateRepartition(
 	ctx context.Context,
 	queryID string,
-	cand physical.ShuffleCandidate,
+	cand dagplan.ShuffleCandidate,
 	stages []physical.Stage,
 	workerCount int,
 ) (*ShuffleLayout, error) {
@@ -497,7 +498,7 @@ func buildShufflePipelineTasks(
 
 // findShuffleScanStages locates the build and probe scan stages corresponding
 // to the ShuffleCandidate's aliases.
-func findShuffleScanStages(stages []physical.Stage, cand physical.ShuffleCandidate) (build, probe physical.Stage, err error) {
+func findShuffleScanStages(stages []physical.Stage, cand dagplan.ShuffleCandidate) (build, probe physical.Stage, err error) {
 	var buildFound, probeFound bool
 	for _, s := range stages {
 		if s.Type != "scan" {

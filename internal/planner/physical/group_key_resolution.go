@@ -24,7 +24,7 @@ func resolveStageGroupKeys(stages []Stage) error {
 	}
 	for i := range stages {
 		s := &stages[i]
-		if len(s.GroupByResolve) == 0 || !stageComputesGroupKeys(s) {
+		if len(s.GroupByResolve) == 0 || !StageComputesGroupKeys(s) {
 			continue
 		}
 		var in []streamCol
@@ -47,7 +47,7 @@ func resolveStageGroupKeys(stages []Stage) error {
 			r.Alias, r.Def = "", ""
 		}
 		for k, r := range s.GroupByResolve {
-			if err := refuseUnevaluableGroupKey(r, stageGroupKeyList(s), k, s.ID); err != nil {
+			if err := refuseUnevaluableGroupKey(r, StageGroupKeyList(s), k, s.ID); err != nil {
 				return err
 			}
 		}

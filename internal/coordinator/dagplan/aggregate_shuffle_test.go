@@ -1,4 +1,4 @@
-package physical
+package dagplan
 
 import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"

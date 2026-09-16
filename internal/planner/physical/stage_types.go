@@ -120,7 +120,7 @@ type Stage struct {
 	// aliases; workers must not recover it by parsing (ADR-0026 §2, §4a;
 	// #736, #777, #781, #794, #795).
 	// Align with the stage's ONE key list: GroupByCols, FusedAggGroupBy or
-	// ChainedAggGroupBy. stageGroupKeyList and TestStageCarriesOneGroupKeyList
+	// ChainedAggGroupBy. StageGroupKeyList and TestStageCarriesOneGroupKeyList
 	// express that exclusivity.
 	GroupByResolve []GroupKeyResolution
 	// GroupByTypes is the plan-time output type of each DERIVED (non-bare)
@@ -996,4 +996,15 @@ func (p *PhysicalPlan) PrettyPrint() string {
 		}
 	}
 	return b.String()
+}
+
+// PreComputedAggregateMeta travels on physical.Stage to tell task creation
+// which cache files back a derived aggregate subtree the worker should
+// substitute. Distinct from distributed.PreComputedAggregate (the wire
+// type) — the coordinator converts between them when assembling tasks.
+type PreComputedAggregateMeta struct {
+	InputTable  string
+	GroupByCols []string
+	AggSpecs    []AggSpec
+	CacheFiles  []string
 }

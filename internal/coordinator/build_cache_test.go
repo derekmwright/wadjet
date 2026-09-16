@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -195,7 +196,7 @@ func TestPreScanBuildTablesInjectableThreshold(t *testing.T) {
 	}
 
 	// With 1MB threshold, orders (5MB) should be a candidate but part (500KB) should not.
-	large := physical.LargeBuildScans(stages, "lineitem", coord.BuildCacheThreshold)
+	large := dagplan.LargeBuildScans(stages, "lineitem", coord.BuildCacheThreshold)
 	if len(large) != 1 {
 		t.Fatalf("expected 1 large build scan with 1MB threshold, got %d", len(large))
 	}
@@ -204,7 +205,7 @@ func TestPreScanBuildTablesInjectableThreshold(t *testing.T) {
 	}
 
 	// Verify lineitem (probe table) is never included regardless of size.
-	largeAll := physical.LargeBuildScans(stages, "lineitem", 1) // threshold=1 byte
+	largeAll := dagplan.LargeBuildScans(stages, "lineitem", 1) // threshold=1 byte
 	for _, s := range largeAll {
 		if s.ScanAlias == "lineitem" {
 			t.Error("probe table 'lineitem' must never be included in build scans")
@@ -319,7 +320,7 @@ func TestPreScanBuildTablesThresholdBoundary(t *testing.T) {
 			EstimatedBytes: boundary + 1}, // 1 byte above
 	}
 
-	large := physical.LargeBuildScans(stages, "lineitem", coord.BuildCacheThreshold)
+	large := dagplan.LargeBuildScans(stages, "lineitem", coord.BuildCacheThreshold)
 
 	found := make(map[string]bool)
 	for _, s := range large {
