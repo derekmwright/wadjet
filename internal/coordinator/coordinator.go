@@ -1090,6 +1090,18 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	}
 	planStr := logicalPlan.PrettyPrint(0)
 
+	// EXPLAIN is answered here, not executed. The statement's whole result is
+	// the plan text, and on a server with a coordinator that text has to be
+	// the DAG this coordinator would dispatch — which is why the wire door
+	// routes EXPLAIN to the router at all (explain.go).
+	//
+	// EXPLAIN ANALYZE is not routed: it RUNS the statement and reports what it
+	// measured, which the embedded database still does.
+	if parsed.Type == plansql.QueryExplain && parsed.Explain != nil && !parsed.Explain.Analyze {
+		return c.explainResult(ctx, physical.NewPlannerForContext(ctx, c.catalog),
+			logicalPlan, planStr, parsed.Explain.Verbose), nil
+	}
+
 	// Small-query fast path: when the plan's total post-pruning scan bytes
 	// stay under the routing threshold, execute in-process on the
 	// coordinator instead of dispatching a stage DAG. The DAG's fixed

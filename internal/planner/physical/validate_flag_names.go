@@ -26,7 +26,7 @@ import (
 // predicate, which the coordinator folds on both paths, did not. Whether a typo
 // was an error depended on the data AND on the plan shape.
 //
-// This runs from the binder, which BOTH Plan and PlanDistributed reach through
+// This runs from the binder, which BOTH Plan and dagplan.PlanDistributed reach through
 // auth.ValidateStatementColumns before any stage exists, so the refusal is one
 // answer for every arm.
 //

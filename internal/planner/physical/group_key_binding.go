@@ -129,16 +129,16 @@ func ResolveAggInputName(name string, child *logical.Node) (resolved string, exp
 //
 // The repair is #387's own: an expression re-spelled into SOURCE columns is
 // typed against the decls BELOW the rename chain, because a plain rename
-// rebinds names and not values. AggStageDerivedKey performs exactly that
+// rebinds names and not values. AggDerivedGroupKey performs exactly that
 // re-spelling, and the key the DAG dispatches has already had it done, so the
 // second arm catches that case too.
 func DerivedGroupKeyDecl(key string, node plansql.Node, child *logical.Node) expr.DeclType {
 	// The form the WORKER computes. A key whose leaves a rename Project binds
-	// is dispatched re-spelled into source columns (AggStageDerivedKey), and
+	// is dispatched re-spelled into source columns (AggDerivedGroupKey), and
 	// typing the spelling the query wrote instead types an expression nothing
 	// evaluates.
 	typed := node
-	if respelled, changed := AggStageDerivedKey(key, child); changed {
+	if respelled, changed := AggDerivedGroupKey(key, child); changed {
 		if n, err := plansql.ParseExpression(respelled); err == nil {
 			typed = n
 		}
@@ -222,12 +222,17 @@ func declsCoverEveryColRef(node plansql.Node, decls ColDecls) bool {
 	return true
 }
 
-// AggStageDerivedKey re-spells a computed GROUP BY key's column references
+// AggDerivedGroupKey re-spells a computed GROUP BY key's column references
 // into the columns the aggregate's input really emits, the way
-// aggStageGroupKey does for a bare one. ok=false leaves the key exactly as it
+// dagplan.aggStageGroupKey does for a bare one. ok=false leaves the key exactly as it
 // was — which is every key whose leaves are already source columns, and every
 // shape this walk does not recognize.
-func AggStageDerivedKey(key string, child *logical.Node) (string, bool) {
+// AggDerivedGroupKey respells a GROUP BY key against what the child actually
+// emits. Both planners need it — the local pipeline binds the key to a
+// column of its input, the stage emitter to a column of its producer stage —
+// so it stays on the MIT side; it was spelled AggStageDerivedKey, which named
+// only one of its two callers (LS review round 2, P2).
+func AggDerivedGroupKey(key string, child *logical.Node) (string, bool) {
 	node, err := plansql.ParseExpression(key)
 	if err != nil {
 		return key, false
@@ -286,7 +291,7 @@ func QualifiedColumn(ref *plansql.ColRef) string {
 // expression in one vector type. Keys that parse as bare column references
 // (or not at all) are omitted; the worker passes those through untyped.
 //
-// The map is keyed by the exact dispatched key text (post-aggStageGroupKey),
+// The map is keyed by the exact dispatched key text (post-dagplan.aggStageGroupKey),
 // because that text is what the worker parses and looks up (#379).
 func derivedGroupKeyTypes(groupBy []string, child *logical.Node) (map[string]parquet.TypeID, map[string]logical.DecimalMeta) {
 	var out map[string]parquet.TypeID

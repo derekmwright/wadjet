@@ -85,7 +85,7 @@ func (p *StagePlanner) materializeInSubquery(ctx context.Context, in *plansql.In
 			"which has no set-producer lowering", ErrInSubqueryDistributed))
 		return nil, false
 	}
-	bound := physical.DAGMaxInlinedInSetRows()
+	bound := physical.InlinedInSetRowCap()
 	if bound == 0 {
 		p.refuseInSubquery(fmt.Errorf("%w: materialization disabled (WADJET_IN_SET_MAX=0)",
 			ErrInSubqueryDistributed))

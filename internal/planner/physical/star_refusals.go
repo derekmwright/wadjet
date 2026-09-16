@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: MIT
 
-// This file holds dag refusals for the physical planner, governed by ADR-0026 and ADR-0034.
+// The two unexpanded-star refusals, which BOTH planners make: the local entry
+// raises them before it builds a pipeline and the stage planner before it
+// emits a DAG. The file was called dag_refusals.go, which named one caller of
+// two and put a DAG word in the MIT package; the refusals themselves are about
+// a star the expander could not expand, not about stages (LS review round 2,
+// P1/P2). Governed by ADR-0026 and ADR-0034.
 package physical
 
 import (
@@ -17,7 +22,6 @@ import (
 // Leave DeferredColumnAliases alone: deferColumnAliasesOverStar created
 // that wrapper, and RefuseUnappliedColumnAliasLists provides the more
 // specific refusal about its list (#958).
-// PlanDistributed returns a stage DAG ordered for coordinator dispatch.
 func refuseUnexpandedStarBesideItems(node *logical.Node) error {
 	if node == nil || node.Type != logical.NodeProject || len(node.Projections) == 0 {
 		return nil

@@ -249,7 +249,7 @@ func WindowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 // It is the single place window arguments are read: the column out of the
 // argument list, the offset/default/N that share it, the frame, and the
 // output type. Both consumers go through it — the single-process pipeline
-// (buildWindow) builds exec.WindowColumn directly, and walkStages copies the
+// (buildWindow) builds exec.WindowColumn directly, and dagplan's stage emission copies the
 // resolved values into the stage spec the DAG ships to workers. A worker has
 // no catalog and no logical plan, so a second implementation there would be a
 // second answer; the arguments are parsed once, here, where the types resolve

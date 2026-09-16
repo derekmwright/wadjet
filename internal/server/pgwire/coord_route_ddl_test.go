@@ -9,9 +9,10 @@ import (
 )
 
 // `shouldRouteToRouter` is the fact three documents now rest on: the
-// PostgreSQL wire protocol sends only SELECT and WITH to the coordinator, so a
-// statement whose ONLY handler is `Coordinator.ExecuteSQL` is unreachable from
-// psql however the server was started.
+// PostgreSQL wire protocol sends only queries — SELECT, WITH, and EXPLAIN of
+// one — to the coordinator, so a statement whose ONLY handler is
+// `Coordinator.ExecuteSQL` is unreachable from psql however the server was
+// started.
 //
 // That is why `CREATE SNAPSHOT` is documented as reachable through the gRPC
 // `Query` RPC and nowhere else (round-1 B2), and why `--enable-alerts` makes
@@ -44,7 +45,19 @@ func TestThePgwireDoorRoutesOnlyQueriesToTheCoordinator(t *testing.T) {
 		{"ANALYZE t", false},
 		{"DESCRIBE t", false},
 		{"SHOW TABLES", false},
-		{"EXPLAIN SELECT 1", false},
+		// EXPLAIN of a query IS routed: the plan text is the statement's whole
+		// answer and only the router knows the plan this server would run, so
+		// answering it from the embedded database made one binary's two doors
+		// disagree (round-2 B1, internal/server.TestTheTwoExplainDoorsAgreeOnWadjetd).
+		// EXPLAIN ANALYZE is not: it RUNS the statement and reports what it
+		// measured, which the embedded database does and the router does not.
+		{"EXPLAIN SELECT 1", true},
+		{"EXPLAIN VERBOSE SELECT 1", true},
+		{"explain select 1", true},
+		{"EXPLAIN ANALYZE SELECT 1", false},
+		{"EXPLAIN ANALYZE VERBOSE SELECT 1", false},
+		{"  EXPLAIN   ANALYZE SELECT 1", false},
+		{"EXPLAIN CREATE TABLE t (a BIGINT)", true},
 		{"INSERT INTO t VALUES (1)", false},
 		{"UPDATE t SET a = 1", false},
 		{"DELETE FROM t", false},

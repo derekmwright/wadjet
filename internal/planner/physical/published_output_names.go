@@ -43,17 +43,23 @@ import (
 // and so does an empty entry inside it; a caller renames only the positions
 // this names.
 func PublishedOutputNames(plan *logical.Node) []string {
-	return DAGPublishedOutputNames(FindOutputProjectionNode(plan))
+	return PublishedNamesOfProjection(FindOutputProjectionNode(plan))
 }
 
-// DAGPublishedOutputNames is the published name of each visible column of the
-// OUTPUT projection, positionally, or nil when the projection publishes what
-// it always did.
+// PublishedNamesOfProjection is the published name of each visible column of
+// the OUTPUT projection, positionally, or nil when the projection publishes
+// what it always did.
+//
+// Exported from the MIT side because both planners stamp these names: the
+// local entry from its own output projection, the distributed one from the
+// projection its gather publishes. The name says what it computes; it used to
+// carry a DAG prefix, which was an artefact of the export pass, not a claim
+// about where it belongs (LS review round 2, P2).
 //
 // Nil rather than a copy of the current names, because the sink applies the
 // list only when it is non-empty: a query whose every item is aliased or is a
 // bare column costs nothing.
-func DAGPublishedOutputNames(projNode *logical.Node) []string {
+func PublishedNamesOfProjection(projNode *logical.Node) []string {
 	if projNode == nil || projNode.Type != logical.NodeProject {
 		return nil
 	}

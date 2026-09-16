@@ -14,9 +14,24 @@ import (
 
 // shouldRouteToRouter reports whether a SQL statement should go through the
 // installed router's ExecuteSQL (the native-DAG executor, when the
-// coordinator is the router). True for SELECT/WITH; false for DDL, DML,
-// DESCRIBE, EXPLAIN, SET, BEGIN, etc., which the router doesn't handle today
-// and which need the legacy db.Query path.
+// coordinator is the router). True for SELECT/WITH and for EXPLAIN that is
+// not EXPLAIN ANALYZE; false for DDL, DML, DESCRIBE, SET, BEGIN, etc., which
+// the router doesn't handle today and which need the legacy db.Query path.
+//
+// EXPLAIN is routed because the plan text is the statement's whole answer and
+// only the router knows the plan this server would RUN. Answering it from the
+// embedded database made one binary's two doors disagree: the PostgreSQL wire
+// door printed "Single-stage local execution" while the same server's HTTP
+// door printed the stage DAG it was about to dispatch.
+//
+// This changes nothing for a server with NO router — the embedded binary — for
+// the same reason nothing else routes there: the caller checks `c.router !=
+// nil` first, and with none installed every statement answers from
+// wadjet.DB exactly as before.
+//
+// EXPLAIN ANALYZE is deliberately not routed: it RUNS the statement and
+// reports what it measured, which the embedded database does today and the
+// router does not.
 //
 // Detection is keyword-based rather than full-parse: pgwire already knows
 // it's a query statement at this point, but extended-query Bind/Execute
@@ -35,6 +50,13 @@ func shouldRouteToRouter(sql string) bool {
 	// WITH ... SELECT (CTE)
 	if len(s) >= 5 && strings.EqualFold(s[:5], "WITH ") {
 		return true
+	}
+	// EXPLAIN [VERBOSE] …, but not EXPLAIN ANALYZE. The grammar puts ANALYZE
+	// immediately after EXPLAIN (`EXPLAIN [ANALYZE] [VERBOSE] <query>`), so
+	// the next word settles it without a parse — the same keyword test the
+	// rest of this gate makes, and for the same reason.
+	if len(s) >= 8 && strings.EqualFold(s[:8], "EXPLAIN ") {
+		return !strings.HasPrefix(strings.ToUpper(strings.TrimLeft(s[8:], " \t\n\r")), "ANALYZE")
 	}
 	return false
 }

@@ -23,7 +23,6 @@ import (
 	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/config"
 	"github.com/derekmwright/wadjet/internal/coordinator"
-	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/metrics"
@@ -1223,15 +1222,19 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, parsed *p
 			physPlan.Cleanup()
 		}
 		// This server has a coordinator, so it prints the stage DAG it would
-		// dispatch. The local planner no longer emits stages (ADR-0037): the
-		// embedded engine runs a pipeline and its EXPLAIN says so, and the
-		// stage list is planned here, on the distributed side, exactly as it
-		// was before the split. A plan the distributed planner refuses falls
-		// back to the pipeline's own line rather than failing EXPLAIN.
+		// DISPATCH — not the local stage generation this door used to render,
+		// which the local planner stopped emitting (ADR-0037). The two are
+		// different plans: the dispatched one carries the gather and replicate
+		// exchanges, and drops the stages the local emitter produced for
+		// operators a fragment executes itself.
+		//
+		// Through the coordinator, so this door and the PostgreSQL wire door —
+		// which routes EXPLAIN to the same place — print the same text for the
+		// same statement. Without a coordinator (the embedded library's HTTP
+		// server) the pipeline's own line is the true answer.
 		physicalPlanText := physPlan.PrettyPrint()
-		stagePlanner := dagplan.NewStagePlanner(planner)
-		if stages, stageErr := stagePlanner.PlanDistributed(explainCtx, logicalPlan); stageErr == nil && len(stages) > 0 {
-			physicalPlanText = dagplan.PrettyPrintStages(stages)
+		if s.coord != nil {
+			physicalPlanText = s.coord.StagePlanTextForExplain(explainCtx, planner, logicalPlan)
 		}
 		planStr += "\n\n-- Physical Plan --\n" + physicalPlanText
 	}

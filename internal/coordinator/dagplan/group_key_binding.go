@@ -211,7 +211,7 @@ func aggStageDispatchKey(key string, e plansql.Node, child *logical.Node) (strin
 	if resolved, renamed := aggStageGroupKey(key, e, child); renamed {
 		return resolved, true
 	}
-	return physical.AggStageDerivedKey(key, child)
+	return physical.AggDerivedGroupKey(key, child)
 }
 
 // resolveSortKeyColumn maps ORDER BY aliases to an aggregate's emitted

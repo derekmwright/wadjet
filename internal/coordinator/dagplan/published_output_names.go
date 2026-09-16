@@ -12,7 +12,7 @@ import (
 // the published names, positionally — the same rename CollectSink.OutputNames
 // applies to the sink's own schema, for the copy the GATHER carries.
 func republishDeclaredSchema(projNode *logical.Node, cols []parquet.Column) []parquet.Column {
-	names := physical.DAGPublishedOutputNames(projNode)
+	names := physical.PublishedNamesOfProjection(projNode)
 	if len(names) == 0 || len(names) != len(cols) {
 		return cols
 	}

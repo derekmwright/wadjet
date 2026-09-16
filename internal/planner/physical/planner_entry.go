@@ -96,14 +96,14 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	}
 
 	// A star that could not be expanded, refused with the planner's own
-	// sentence BEFORE the ordinal one — the order PlanDistributed uses, so
+	// sentence BEFORE the ordinal one — the order dagplan.PlanDistributed uses, so
 	// both engines say the same thing about `SELECT s.* … ORDER BY 1`: the
 	// star is the reason and the un-countable ordinal is its consequence.
 	if err := RefuseUnexpandedStarAnywhere(node); err != nil {
 		return nil, err
 	}
 	// A `SELECT * ... ORDER BY <n>` whose star never expanded (#810). Refused
-	// here rather than in buildSort so this path and PlanDistributed say the
+	// here rather than in buildSort so this path and dagplan.PlanDistributed say the
 	// same thing about the same query.
 	if err := logical.RefuseUnresolvedOrdinalSortKeys(node); err != nil {
 		return nil, err
@@ -129,7 +129,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// The first scan caches decoded batches; subsequent scans replay from cache.
 	p.mergeDuplicateScans(node)
 
-	// The same plan-time refusal PlanDistributed makes, so the single-process
+	// The same plan-time refusal dagplan.PlanDistributed makes, so the single-process
 	// engine and the small-query fast path raise it too — and raise it for a
 	// predicate no row ever reaches, which the operator-level check cannot
 	// (#631 follow-up).
@@ -186,7 +186,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		// rather than inside the plan, because inside the plan a name is also
 		// a HANDLE — a sort key, a HAVING reference, an aggregate's OutputCol
 		// — and the two are not the same string.
-		cs.OutputNames = DAGPublishedOutputNames(p.outputProjection)
+		cs.OutputNames = PublishedNamesOfProjection(p.outputProjection)
 		// Unlike SchemaHint, this is consulted on EVERY result, zero-row or
 		// not: which DECIMAL columns are aggregate output is a property of
 		// the PLAN, not of whether a batch arrived (FIX 2, #457/#458 fold-in).

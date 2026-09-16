@@ -14,7 +14,7 @@ import (
 // substitute at most once per simultaneous projection list, resolving nested
 // Projects level by level through order/cardinality-preserving wrappers.
 // Stop at computed aliases, materialized by #383/#169, and at Aggregates,
-// whose GroupBy/OutputCol outputs have their own schema (#355's aggStageRenames).
+// whose GroupBy/OutputCol outputs have their own schema (#355's aggStageRenames, now in dagplan).
 // Joins recurse into output-visible children (probe only for semi/anti), first
 // substitution wins. See resolveOutputRenameSourceForGather for caller differences.
 // See docs/internals/gather-output-rename-resolution.md for the design.

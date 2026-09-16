@@ -39,7 +39,7 @@ historical line numbers in older design notes.
 
 | Seam | Files |
 |---|---|
-| Planner configuration and entry | `physical/planner_config.go`, `planner_entry.go`, `plan.go`; star refusal helpers in `dag_refusals.go` |
+| Planner configuration and entry | `physical/planner_config.go`, `planner_entry.go`; the DAG entry is `dagplan/plan.go`; star refusal helpers in `star_refusals.go` |
 | Stage emission and schema | `dagplan/stage_emission.go`, `stage_types.go`, `declared_output.go` |
 | Join, key binding, subquery, policy | `physical/join_plan.go`, `group_key_binding.go`, `subquery_pipeline.go`, `validate_policy.go` |
 | Expression nodes and scalar registry | `expr/expr_leaf.go`, `expr_arith.go`, `expr_compare.go`, `expr_scalar_fns.go`; built-in registration remains in `expr/expr.go` |

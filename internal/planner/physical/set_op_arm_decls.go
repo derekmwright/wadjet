@@ -442,7 +442,7 @@ func declFromKey(decls ColDecls, key string) expr.DeclType {
 // setOpArmComputedSource rewrites an arm's SELECT item that merely FORWARDS a
 // derived table's COMPUTED column into the expression that computes it.
 //
-// walkStages emits no stage for a Project, so an arm's materialized output
+// dagplan's stage emission produces no stage for a Project, so an arm's materialized output
 // carries SOURCE names — the convention ResolveOutputRenameSource compensates
 // for by chasing a RENAME down to the column the stream really carries. A
 // COMPUTED alias has no such column to chase to: `SELECT x FROM (SELECT i8 + 1

@@ -107,7 +107,7 @@ func (p *Planner) estimateDistinctKeyBytes(d *logical.Node) (int64, bool) {
 			return 0, false // expression projection — no width to reason from
 		}
 	}
-	// Size by INPUT rows, not NDV: walkStages treats Distinct as a
+	// Size by INPUT rows, not NDV: dagplan's stage emission treats Distinct as a
 	// passthrough (see the #163 note), so the replicated payload is the
 	// UNdeduplicated projected scan output. Q22's anti build is
 	// Distinct(o_custkey) over unfiltered orders — ~10M distinct keys but

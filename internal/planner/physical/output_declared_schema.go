@@ -1133,7 +1133,7 @@ func EmittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		// Window appends its output columns to the input batch in place — it
 		// drops nothing — so every input column passes through at its input
 		// type, and only the window expressions themselves need typing. Using
-		// WindowSpecOutputType (walkStages/buildWindow's own resolver) keeps
+		// WindowSpecOutputType (stage emission / buildWindow's own resolver) keeps
 		// this answer identical to what the operator actually emits: an INT64
 		// passthrough column no longer declares STRING on a zero-row result,
 		// ROW_NUMBER/RANK/COUNT declare INT64, SUM/AVG declare DECIMAL over a

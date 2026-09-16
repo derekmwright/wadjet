@@ -26,8 +26,8 @@ import (
 // wire. A key that names a derived table's COMPUTED alias has two candidate
 // spellings — the alias, and the expression that defines it — and which one
 // the producing fragment emits is decided by `attachScanSelectProjections` and
-// `absorbWindowArmProjection`, which run AFTER `walkStages`. Emission records
-// both candidates; `resolveStageGroupKeys` settles it at the end of planning
+// `absorbWindowArmProjection`, which run AFTER stage emission. Emission records
+// both candidates; `dagplan.resolveStageGroupKeys` settles it at the end of planning
 // against the producer's real output, exactly as `resolveFilterAliasSpelling`
 // settles a predicate's spelling and `resolveDerivedAliasSortKeys` a sort
 // key's (ADR-0025).
@@ -112,7 +112,7 @@ func GroupKeyNames(agg, child *logical.Node) (published []string, resolve []Grou
 			// differed from the published name only by them would make every
 			// reader that compares the two say "these are two names".
 			expr := k.Name
-			if respelled, ok := AggStageDerivedKey(k.Name, child); ok {
+			if respelled, ok := AggDerivedGroupKey(k.Name, child); ok {
 				expr = respelled
 			}
 			resolve[i] = GroupKeyResolution{Expr: expr, Computed: true}
@@ -142,7 +142,7 @@ func GroupKeyNames(agg, child *logical.Node) (published []string, resolve []Grou
 			// The alias names an EXPRESSION, and there are two candidate
 			// spellings — the alias, and the definition. Which one the
 			// producing fragment emits is decided after the projection
-			// passes; record both and settle it in resolveStageGroupKeys.
+			// passes; record both and settle it in dagplan.resolveStageGroupKeys.
 			resolve[i] = GroupKeyResolution{
 				Expr:     def.String(),
 				Computed: true,

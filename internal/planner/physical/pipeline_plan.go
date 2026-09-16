@@ -75,7 +75,7 @@ func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.S
 
 func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
 	// Track scan alias for both MaterializedInputs and ScanFileFilter.
-	// Alias scheme matches walkStages: "table" for first, "table:N" for duplicates.
+	// Alias scheme matches dagplan's stage emission: "table" for first, "table:N" for duplicates.
 	if p.scanCounter == nil {
 		p.scanCounter = make(map[string]int)
 	}

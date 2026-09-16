@@ -142,7 +142,7 @@ func (m *ManifestSnapshot) AggregateColumnStats(ctx context.Context, cat *catalo
 // EVERY in-package manifest read goes through here; a direct
 // p.catalog.GetManifest call silently opts that site out of the statement's
 // pin, which is not visible in any answer — only in the read count. The
-// sites are AnnotateScanColumns, walkStages and estimateSubtreeBytes
+// sites are AnnotateScanColumns, dagplan's stage emission and EstimateSubtreeBytes
 // (plan.go), EstimatePlanScanBytes (scan_estimate.go — the FIRST catalog
 // read the default route makes, in tryLocalFastPath, once per scan node),
 // tryBuildMetadataCount (metadata_count.go) and tryBuildMetadataMinMax

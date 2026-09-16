@@ -17,7 +17,7 @@ import (
 // 22003 at plan time (#631), even for empty scans, NULL-only rows or unreachable
 // predicates: PostgreSQL casts the array before reading rows.
 // Use AnnotateScanColumns/InputColDecls to decide whether the operand is real.
-// Run from Plan and PlanDistributed before dispatch so local, fast-path and DAG
+// Run from Plan and dagplan.PlanDistributed before dispatch so local, fast-path and DAG
 // agree. Keep row-loop backstops for untyped projection aliases and worker
 // fragments compiled from older coordinator plans.
 // See docs/internals/real-in-list-plan-time-refusal.md for the design.
