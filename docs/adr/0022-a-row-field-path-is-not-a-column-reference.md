@@ -239,7 +239,7 @@ excludes first — and both directions are gated.
   which MATERIALIZES the path — that is `logical.isBareColRef`. An OUTER join
   cannot use that placement (a residual above the join deletes the rows the
   join preserves), so `routeOuterJoinOnResiduals` sends it to `JoinFilter`
-  instead, and `physical.BuildJoinResidualFilter` — an EIGHTH resolver, and one
+  instead, and `physical.PlanContext.BuildJoinResidualFilter` — an EIGHTH resolver, and one
   rule 1 had not reached — stripped the qualifier before asking. It bound
   `c_row.b` to the build side's own `b`, so `LEFT JOIN decpair d ON
   c_row.b = d.b` evaluated `d.b = d.b`, accepted every candidate and returned

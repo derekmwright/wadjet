@@ -43,8 +43,8 @@ func aggregateProjectionTarget(project *logical.Node, stages []Stage, from int) 
 // absorbAggregateOutputProjection sets stage.ProjectExprs for the Project
 // above an aggregate only when a computed group key or an uncomputed
 // expression over aggregate outputs needs a usable alias.
-// Plain renames stay pass-through: resolveShuffleKey, physical.ResolveAggInputName,
-// resolveSortKeyColumn and physical.ResolveOutputRenameSource resolve back to sources.
+// Plain renames stay pass-through: resolveShuffleKey, physical.PlanContext.ResolveAggInputName,
+// resolveSortKeyColumn and physical.PlanContext.ResolveOutputRenameSource resolve back to sources.
 // Other outputs keep their emitted names; decline if no alias is needed.
 // Return performed renames as lowercased old name to new. Every downstream
 // reference, including gather, sort and filters, must use that map (#656).
@@ -250,7 +250,7 @@ func aggregateProjectionSource(p *logical.Projection, name string, groupKeys, ag
 // then declines the whole projection rather than shipping an expression the
 // fragment cannot evaluate.
 //
-// It reuses physical.SubstituteNestedRenameRefs' copy-on-write shape without its
+// It reuses physical.PlanContext.SubstituteNestedRenameRefs' copy-on-write shape without its
 // resolver: here the question is membership, not renaming.
 func requoteAggOutputRefs(n plansql.Node, emitted map[string]string) (plansql.Node, bool) {
 	return requoteAggOutputRefsIdx(n, emitted, groupKeysByIdentity(emitted))

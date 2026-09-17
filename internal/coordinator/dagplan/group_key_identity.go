@@ -38,7 +38,7 @@ func groupKeysByIdentity(names map[string]string) map[string]string {
 // aggregateUnderOutput finds the Aggregate the output projection reads, or nil
 // when the plan's top is not a grouped query. Only the nodes that leave the
 // aggregate's own columns visible are walked through: a Project, and the
-// wrappers physical.AggScopePreservingWrapper names. A join or a set operation below
+// wrappers physical.PlanContext.AggScopePreservingWrapper names. A join or a set operation below
 // the top means the SELECT list is written over something else, and the walk
 // declines rather than guessing.
 func aggregateUnderOutput(root *logical.Node) *logical.Node {

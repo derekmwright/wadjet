@@ -30,7 +30,7 @@ func WithIdentityQueryLimits(ctx context.Context, lim *config.QueryLimits) conte
 	return context.WithValue(ctx, identityLimitsKey{}, lim)
 }
 
-// IdentityQueryLimitsFromContext returns those limits, or nil.
+// identityQueryLimitsFromContext returns those limits, or nil.
 func identityQueryLimitsFromContext(ctx context.Context) *config.QueryLimits {
 	if ctx == nil {
 		return nil

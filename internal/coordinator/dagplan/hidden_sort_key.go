@@ -438,7 +438,7 @@ func annotateDerivedAliasSortKey(key *SortKeySpec, child *logical.Node) {
 // COMPUTED SELECT-list alias to the expression that defines it, and to the
 // Project node whose INPUT that expression is spelled against.
 //
-// It is physical.DerivedAliasSourceColumn's other half: that walk answers "which column
+// It is physical.PlanContext.DerivedAliasSourceColumn's other half: that walk answers "which column
 // does the stream already carry for this alias" and returns "" for a computed
 // one; this answers "what would compute it".
 //
@@ -808,7 +808,7 @@ func derivedAliasColumnFor(name string, child *logical.Node) aliasColumn {
 // computed derived alias the window's keys name.
 //
 // It runs at STAGE EMISSION rather than in a late pass for the reason the
-// caller's comment gives about `physical.DerivedAliasSourceColumn`: a PARTITION BY key
+// caller's comment gives about `physical.PlanContext.DerivedAliasSourceColumn`: a PARTITION BY key
 // is also the stage's DISTRIBUTION, and rewriting it after EnsureDistribution
 // would leave the exchange and the operator keyed on different columns.
 //

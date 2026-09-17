@@ -32,7 +32,7 @@ compares. No closure, no chain walk.
 
 ## Mechanism
 
-- **Recognition** (`physical.ParseSemiAntiNE`): the join filter must be
+- **Recognition** (`physical.PlanContext.ParseSemiAntiNE`): the join filter must be
   EXACTLY one column-to-column `<>`/`!=` condition. Conjunctions,
   literals, and other operators stay on the generic closure path. Wired
   at both HashJoin construction sites (worker fragment executor,

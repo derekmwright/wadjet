@@ -40,7 +40,7 @@ import (
 //     source and per file shape, so a second source's scan can never be handed
 //     the first's buffers; an arm built that way is vacuous by type.
 //
-// And PoisonReleasedSlabs makes the recycle visible: every buffer handed back
+// And setPoisonReleasedSlabs makes the recycle visible: every buffer handed back
 // from the pool is overwritten first, so an aliased value becomes 0xEE rather
 // than "whatever the next row group happened to put there".
 
@@ -218,7 +218,7 @@ func TestAReleasedSlabIsActuallyPoisoned(t *testing.T) {
 	inner.putSlab(buf)
 	for i, c := range buf[:cap(buf)] {
 		if c != 0xEE {
-			t.Fatalf("byte %d of a released buffer is %#x, want the poison — PoisonReleasedSlabs "+
+			t.Fatalf("byte %d of a released buffer is %#x, want the poison — setPoisonReleasedSlabs "+
 				"is not reaching the release path, so the aliasing gate cannot fail", i, c)
 		}
 	}

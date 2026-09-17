@@ -8,7 +8,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
-// projectionPublishingName is physical.ProjectionForName widened to an item the SELECT
+// projectionPublishingName is physical.PlanContext.ProjectionForName widened to an item the SELECT
 // list wrote with NO ALIAS, which publishes under its own bare column name:
 // `SELECT u.g, u.x FROM (…) u` publishes `g` and `x`.
 //
@@ -16,7 +16,7 @@ import (
 // second copy of the rule. The other walks resolve a NAME to its SOURCE, and
 // for an unaliased qualified item those two are the same string — `u.x`
 // resolves to `u.x`, a self-rename that stops the walk one Project short of
-// the answer. Measured: widening physical.ProjectionForName itself made
+// the answer. Measured: widening physical.PlanContext.ProjectionForName itself made
 // `SELECT u.g, u.x FROM (SELECT COUNT(*) AS g, g AS x … ) u ORDER BY u.x`
 // refuse its whole plan, because the sort key stopped resolving to the column
 // the aggregate emits. The CLASS question has no such fixpoint: it wants the

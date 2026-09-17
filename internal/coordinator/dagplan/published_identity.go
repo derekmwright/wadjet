@@ -354,7 +354,7 @@ func bindStreamColumnFromArm(name string, arms map[string]bool, in []streamCol) 
 //
 // It reads the text the SPEC carries rather than the query's, so a reference
 // the emission-time passes already re-spelled to its source records nothing:
-// `physical.ResolveAggInputName` reports a source column as no rename at all.
+// `physical.PlanContext.ResolveAggInputName` reports a source column as no rename at all.
 func aggInputAliasCandidates(spec AggSpec, child *logical.Node) []AggInputRef {
 	text := spec.InputExpr
 	if text == "" {

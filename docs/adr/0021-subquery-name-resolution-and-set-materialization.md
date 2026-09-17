@@ -451,7 +451,7 @@ invariant refuses and routes.
 
 What #539 asks for beyond that — a lowering that does not need a replicated
 build, so a large `NOT IN` can shuffle — is the two-join identity above, and
-it is still blocked on the same thing: `physical.BuildSemiAntiFilter` reads a
+it is still blocked on the same thing: `physical.PlanContext.BuildSemiAntiFilter` reads a
 semi/anti residual as TEXT.
 
 That evaluator had the same empty-set defect the operator guards against, and
@@ -473,7 +473,7 @@ tree and the reason is worth recording. The identity
 lowers to an ordinary equi-key anti join beside a second one whose residual is
 `(y IS NULL OR x IS NULL)`. Both hash-partition like any other join, so
 neither needs #539's replicated build — it would keep the join AND the rule.
-It fails at the semi/anti residual: `physical.BuildSemiAntiFilter` reads the
+It fails at the semi/anti residual: `physical.PlanContext.BuildSemiAntiFilter` reads the
 filter as TEXT (split on `" and "`, then find one of six comparison
 operators), so an OR and an IS NULL compile to NOTHING and are dropped in
 SILENCE, and `physical.extractFilterBuildColumns` narrows the stored build by

@@ -47,13 +47,13 @@ func inferRenameExprDecl(astExpr plansql.Node, scope *logical.Node) (expr.DeclTy
 		return expr.DeclType{}, false
 	}
 	child := scope.Children[0]
-	// physical.EmittedColDecls, not physical.InputColDecls. The scope is the node BELOW the
+	// physical.PlanContext.EmittedColDecls, not physical.PlanContext.InputColDecls. The scope is the node BELOW the
 	// output projection, and what the gather's expression reads is what that
 	// node EMITS: a WINDOW's `__win_N` slots, and an AGGREGATE's `__agg_N`
 	// outputs. `inputColTypes` has a Window arm (#729) and NO Aggregate arm,
 	// so the window half of this family was typed and the aggregate half fell
-	// through to the STRING fallback — `physical.EmittedColTypes`' aggregate arm
-	// already declares each output from `physical.AggSpecOutputType`, which is the same
+	// through to the STRING fallback — `physical.PlanContext.EmittedColTypes`' aggregate arm
+	// already declares each output from `physical.PlanContext.AggSpecOutputType`, which is the same
 	// rule the stage's own AggSpec carries. One rule, both slot families.
 	//
 	// And the declaration is made only when the inference DECIDED. A fallback

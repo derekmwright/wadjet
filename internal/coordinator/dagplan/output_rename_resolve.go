@@ -32,7 +32,7 @@ func resolveOutputRenameSourceForGather(name string, child *logical.Node) string
 // which is the key, and both DAG arms answered 0,0 | 1,1 | 2,2 for
 // PostgreSQL's 80,0 | 80,1 | 80,2 (#785 round 2).
 //
-// It walks the same way physical.ResolveRenameSource does and stops where that stops,
+// It walks the same way physical.PlanContext.ResolveRenameSource does and stops where that stops,
 // so the two answers are about the same projection.
 func renameIsAggregateOutput(name string, child *logical.Node) bool {
 	resolved := name
@@ -124,7 +124,7 @@ func resolveRenameSourceInScope(name string, child *logical.Node) (string, bool)
 // windowArgSourceInScope resolves a QUALIFIED window argument to the source
 // column the DAG's streams carry, inside the arm its qualifier names.
 //
-// `physical.DerivedAliasSourceColumn` stops at a Join — it has no way to choose an arm
+// `physical.PlanContext.DerivedAliasSourceColumn` stops at a Join — it has no way to choose an arm
 // — so asked of a join it answers nothing and the argument reached the worker
 // under the derived ALIAS, which on the DAG no stream carries. Scoping it
 // first is the same composition `resolveRenameSourceInScope` performs for a

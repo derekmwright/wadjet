@@ -374,7 +374,7 @@ func TestBuildTableFunctionSource_CSV_SepArg(t *testing.T) {
 	}
 	csvSrc, ok := source.(*csvTableFuncSource)
 	if !ok {
-		t.Fatalf("expected *physical.CsvTableFuncSource, got %T", source)
+		t.Fatalf("expected *physical.csvTableFuncSource, got %T", source)
 	}
 	if csvSrc.NamedArgs["sep"] != "|" {
 		t.Errorf("expected sep=|, got %v", csvSrc.NamedArgs)
@@ -387,7 +387,7 @@ func TestBuildTableFunctionSource_ReadJSONAuto(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if _, ok := source.(*jsonTableFuncSource); !ok {
-		t.Errorf("expected *physical.JsonTableFuncSource for read_json_auto, got %T", source)
+		t.Errorf("expected *physical.jsonTableFuncSource for read_json_auto, got %T", source)
 	}
 }
 
@@ -397,7 +397,7 @@ func TestBuildTableFunctionSource_ReadCSVAuto(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if _, ok := source.(*csvTableFuncSource); !ok {
-		t.Errorf("expected *physical.CsvTableFuncSource for read_csv_auto, got %T", source)
+		t.Errorf("expected *physical.csvTableFuncSource for read_csv_auto, got %T", source)
 	}
 }
 

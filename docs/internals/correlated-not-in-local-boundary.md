@@ -29,7 +29,7 @@ The identity that WOULD express it with joins this engine already has:
 `(y IS NULL OR x IS NULL)`. Both hash-partition like any other join, so
 neither needs #539's replicated build. It was built and measured, and it
 does not work TODAY for a reason that is not in this package: a
-semi/anti join's residual is compiled by physical.BuildSemiAntiFilter,
+semi/anti join's residual is compiled by physical.PlanContext.BuildSemiAntiFilter,
 which reads the filter as TEXT — split on " and ", then find one of six
 comparison operators — so an OR and an IS NULL compile to NOTHING and
 are dropped in SILENCE, and physical.extractFilterBuildColumns narrows

@@ -20,7 +20,7 @@ import (
 // See docs/internals/dag-sort-select-list-positions.md for the design.
 func sortKeySlotPosStage(ob logical.OrderExpr, sortNode *logical.Node, produced []Stage) int {
 	if pos := localPlanFacts.SortKeySlotPos(ob, sortNode); pos != 0 {
-		// A set operation carries its own proof (physical.SortInputSetOpWidth): its
+		// A set operation carries its own proof (physical.PlanContext.SortInputSetOpWidth): its
 		// stage publishes the result column list and nothing else, so the
 		// subtree bound below — which exists because a JOIN stage emits both
 		// arms' whole schemas — has nothing to say about it (#1022).

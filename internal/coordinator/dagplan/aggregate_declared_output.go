@@ -8,7 +8,7 @@ import (
 )
 
 // aggSpecInputDecimal is the (p,s) of a bare DECIMAL COLUMN argument — the
-// declaration the aggregate READS, as opposed to the one physical.AggSpecOutputDecimal
+// declaration the aggregate READS, as opposed to the one physical.PlanContext.AggSpecOutputDecimal
 // says it writes. Any aggregate, not only the six above: the pair describes the
 // column, not the function.
 //
@@ -26,8 +26,8 @@ func aggSpecInputDecimal(node *logical.Node, agg logical.AggExpr) (logical.Decim
 			return logical.DecimalMeta{}, false
 		}
 	}
-	// physical.AggInputColumnDecimal, not scanColumnDecimal: the same walk, in the same
-	// order, that physical.AggSpecOutputType asks for the input's TYPE. Two functions
+	// physical.PlanContext.AggInputColumnDecimal, not scanColumnDecimal: the same walk, in the same
+	// order, that physical.PlanContext.AggSpecOutputType asks for the input's TYPE. Two functions
 	// answering one question about one column with two different walks is
 	// ADR-0023 item 5 one layer over, and the disagreement is a DECIMAL
 	// declared with nobody's scale — for a WINDOW SLOT (`SUM(__win_0)`), whose

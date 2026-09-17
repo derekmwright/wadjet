@@ -9,7 +9,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
-// physical.AggScopePreservingWrapper is read by FIVE walks, and this is what keeps
+// physical.PlanContext.AggScopePreservingWrapper is read by FIVE walks, and this is what keeps
 // that a checked fact rather than a sentence in an ADR.
 //
 // Each of them answers a consumer's version of one question — "does this node
@@ -17,13 +17,13 @@ import (
 // and each had grown its own hardcoded list:
 //
 //   - `aggregateUnderOutput`, for the gather's OutputRenames;
-//   - `physical.FindAggregateAncestor`, for the single-process projection;
-//   - `physical.GroupKeysPublishedBelow`, for whether an aggregate DIRECTLY BELOW
+//   - `physical.PlanContext.FindAggregateAncestor`, for the single-process projection;
+//   - `physical.PlanContext.GroupKeysPublishedBelow`, for whether an aggregate DIRECTLY BELOW
 //     already publishes a key, so the one above must not re-materialize it.
 //   - `logical.AggregateOverGroupRows`, for whether a Project's INPUT rows are
 //     one per GROUP — which is what decides whether a predicate above the
 //     Project may be substituted below it.
-//   - `physical.AggregateOutputNames`, for the names the aggregate below publishes —
+//   - `physical.PlanContext.AggregateOutputNames`, for the names the aggregate below publishes —
 //     which is what pins each projection to the physical SLOT its provenance
 //     names when two outputs share one name (#575).
 //
@@ -42,15 +42,15 @@ import (
 // below the Project, where it met a schema with no `g`: UNKNOWN on every row,
 // zero rows on all four arms where PostgreSQL answers four (#774). The list
 // therefore moved to `logical` — `physical` imports `logical`, so a shared list
-// can only live there — and `physical.AggScopePreservingWrapper` is now a delegation.
+// can only live there — and `physical.PlanContext.AggScopePreservingWrapper` is now a delegation.
 // `AggregateBelowProject` keeps its narrower list ON PURPOSE and says so: its
 // two callers map a SELECT list onto the aggregate's own STAGE, and a Sort or a
 // window between them emits a stage of its own.
 //
 // The FIFTH was found by the next review, one round later, and it was inside
-// this package all along: `physical.AggregateOutputNames` descended NodeFilter ALONE
+// this package all along: `physical.PlanContext.AggregateOutputNames` descended NodeFilter ALONE
 // while the call site that guards it (`isOverAggregate`, i.e.
-// `physical.FindAggregateAncestor`) reads the full list. With a WINDOW between, the two
+// `physical.PlanContext.FindAggregateAncestor`) reads the full list. With a WINDOW between, the two
 // disagreed — the guard said an aggregate is below, the walk said it could not
 // model that — so #575's duplicate-name slot pinning was silently skipped and
 // `SELECT COUNT(*) AS g, g AS x, ROW_NUMBER() OVER (ORDER BY g) ... GROUP BY g`
@@ -80,7 +80,7 @@ import (
 // logical.NodeLimit` clause and exactly ONE of them is asking this question;
 // the rest ask what a node EMITS, what its input TYPES are, what a set-op arm
 // declares, or whether a stage forwards its columns, and requiring them to read
-// `physical.AggScopePreservingWrapper` would be wrong. A grep guard therefore needs an
+// `physical.PlanContext.AggScopePreservingWrapper` would be wrong. A grep guard therefore needs an
 // eleven-entry allowlist that drifts with every new walk — the
 // enumerate-the-kinds shape ADR-0025 records as having been wrong twice. What
 // finds a fourth reader is a review counting them, which is how this one was
@@ -150,18 +150,18 @@ func TestAggScopePreservingWrapperIsReadByEveryWalk(t *testing.T) {
 
 		if found := aggregateUnderOutput(wrapped); (found != nil) != w {
 			t.Errorf("aggregateUnderOutput through %v found=%v, want %v — the gather's walk "+
-				"stopped reading physical.AggScopePreservingWrapper", typ, found != nil, w)
+				"stopped reading physical.PlanContext.AggScopePreservingWrapper", typ, found != nil, w)
 		}
 		if found := localPlanFacts.FindAggregateAncestor(wrapped); (found != nil) != w {
 			t.Errorf("FindAggregateAncestor through %v found=%v, want %v — the single-process "+
-				"walk stopped reading physical.AggScopePreservingWrapper", typ, found != nil, w)
+				"walk stopped reading physical.PlanContext.AggScopePreservingWrapper", typ, found != nil, w)
 		}
-		// physical.GroupKeysPublishedBelow returns a (possibly empty) map when it
+		// physical.PlanContext.GroupKeysPublishedBelow returns a (possibly empty) map when it
 		// reaches an aggregate and nil when it declines, which is the same
 		// yes/no one level down.
 		if reached := (physical.PlanContext{}).GroupKeysPublishedBelow(wrapped) != nil; reached != w {
 			t.Errorf("groupKeysPublishedBelow through %v reached=%v, want %v — the THIRD walk "+
-				"stopped reading physical.AggScopePreservingWrapper", typ, reached, w)
+				"stopped reading physical.PlanContext.AggScopePreservingWrapper", typ, reached, w)
 		}
 		// The fourth reader starts at a PROJECT and asks about its input, so
 		// the probe puts one on top of the wrapper.
@@ -169,14 +169,14 @@ func TestAggScopePreservingWrapperIsReadByEveryWalk(t *testing.T) {
 			Children: []*logical.Node{wrapped}}
 		if found := logical.AggregateOverGroupRows(overProject); (found != nil) != w {
 			t.Errorf("logical.AggregateOverGroupRows through %v found=%v, want %v — the FOURTH "+
-				"walk stopped reading physical.AggScopePreservingWrapper (#774)", typ, found != nil, w)
+				"walk stopped reading physical.PlanContext.AggScopePreservingWrapper (#774)", typ, found != nil, w)
 		}
 		// The fifth answers the aggregate's OUTPUT NAMES through the wrapper.
 		if _, ok := (physical.PlanContext{}).AggregateOutputNames(wrapped); ok != w {
 			t.Errorf("aggregateOutputNames through %v ok=%v, want %v — the FIFTH walk stopped "+
-				"reading physical.AggScopePreservingWrapper (#575 under a window)", typ, ok, w)
+				"reading physical.PlanContext.AggScopePreservingWrapper (#575 under a window)", typ, ok, w)
 		}
-		// And `physical.WrapsAWindow`, which is not a sixth reader but a REFINEMENT of
+		// And `physical.PlanContext.WrapsAWindow`, which is not a sixth reader but a REFINEMENT of
 		// the same question — "is one of these wrappers specifically a Window"
 		// — asked so the projection-elision decision does not look through a
 		// node that ADDS a column. It is asserted here because it walks the

@@ -14,7 +14,7 @@ import (
 // resolveShuffleKey follows Project aliases to the source columns ordinary
 // DAG Projects leave unchanged. Recurse into output-visible join children:
 // both sides for inner/outer, probe only for semi/anti; first resolution wins.
-// Use physical.DerivedScopeBareName to drop qualifiers only in their owning scope
+// Use physical.PlanContext.DerivedScopeBareName to drop qualifiers only in their owning scope
 // (#467, #480). Follow chained renames, substituting at most once per Project:
 // a projection list is simultaneous (b AS a, a AS b must not chase itself).
 // The walk only descends, so it terminates.
@@ -196,7 +196,7 @@ func aggStageGroupKey(key string, e plansql.Node, child *logical.Node) (string, 
 // text the worker parses and computes the key from.
 //
 // It answers for a DERIVED key too, which aggStageGroupKey deliberately does
-// not. `a_b + 1` is not a name, so physical.ResolveAggInputName declines it — but its
+// not. `a_b + 1` is not a name, so physical.PlanContext.ResolveAggInputName declines it — but its
 // LEAVES are names, and a rename Project between the aggregate and its scan
 // emits no stage of its own, so the key reached the worker spelled over `a_b`,
 // which the scan does not emit: the key computed NULL for every row and the
@@ -275,7 +275,7 @@ func resolveSortKeyColumn(key string, child *logical.Node) string {
 // resolved through a rename lands on a column the stage really produces.
 //
 // A group key is reported the way the aggregate's fragment will EMIT it —
-// `physical.EmittedKeyNames` over the key's PUBLISHED name — which is one answer
+// `physical.PlanContext.EmittedKeyNames` over the key's PUBLISHED name — which is one answer
 // for both engines. It used to be the DISPATCH re-spelling
 // (`aggStageGroupKey`), because a stage published its keys under the spelling
 // the worker computed them from; now the two names are separate fields and the
@@ -302,7 +302,7 @@ func aggregateOutputName(n *logical.Node, col string) (string, bool) {
 	// The two spellings of one key: `GROUP BY u.k` names the same output as
 	// the `k` the SELECT list and the ORDER BY use, and either side may be
 	// the qualified one. Both are dropped to their bare form only inside the
-	// derived scope that owns the qualifier — see physical.DerivedScopeBareName
+	// derived scope that owns the qualifier — see physical.PlanContext.DerivedScopeBareName
 	// (#467). A bare spelling that matches TWO group keys is a self-join's
 	// `n1.n_name`/`n2.n_name`: naming one of them would order by an
 	// arbitrary side, so the key is left for the caller to give up on, the

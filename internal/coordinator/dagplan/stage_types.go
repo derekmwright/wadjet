@@ -194,7 +194,7 @@ type Stage struct {
 	JoinLeftKeys  []string
 	JoinRightKeys []string
 	// JoinKeyTypes[i] is the resolved COMMON type of the pair
-	// (JoinLeftKeys[i], JoinRightKeys[i]) — physical.ResolveJoinKeyTypes, #615. Both
+	// (JoinLeftKeys[i], JoinRightKeys[i]) — physical.PlanContext.ResolveJoinKeyTypes, #615. Both
 	// sides' key bytes and the exchange's partition hash are built at it.
 	// Nil means no pair needs widening, which is every same-type join.
 	JoinKeyTypes    []parquet.TypeID
@@ -211,7 +211,7 @@ type Stage struct {
 	// columns the join MATERIALIZED for itself — a decorrelated LATERAL's
 	// correlation key — which it must not publish, however wide the
 	// consumer's ask is. The worker applies it as the probe's OutputExclude,
-	// and physical.DeclaredJoinSchema leaves them out of the declaration, so the
+	// and physical.PlanContext.DeclaredJoinSchema leaves them out of the declaration, so the
 	// stage's empty-side files and its full ones describe the same relation
 	// (ADR-0010). Nil on every other join.
 	HiddenJoinCols []HiddenJoinCol
@@ -238,7 +238,7 @@ type Stage struct {
 	BuildFilterExprs []string
 
 	// JoinProbeSchema / JoinBuildSchema are the plan-declared columns of each
-	// join side (physical.DeclaredJoinSchema). The worker reads them only for
+	// join side (physical.PlanContext.DeclaredJoinSchema). The worker reads them only for
 	// the side that turns out to be empty, where there is no batch to learn a
 	// schema from and an outer join still owes the rows that side shapes
 	// (#348/#352).
@@ -391,7 +391,7 @@ type Stage struct {
 	// OutputSchema is the PLAN-DERIVED result schema — the same column list
 	// OutputRenames names, with the types the catalog says they carry. Only
 	// populated on the Gather stage, and read only when the gathered batches
-	// cannot answer: a zero-row result (#416, physical.DeclaredOutputSchema).
+	// cannot answer: a zero-row result (#416, physical.PlanContext.OutputSchema).
 	OutputSchema []parquet.Column
 
 	// OutputWireUnconstrainedDecimal names the DECIMAL columns in
@@ -401,7 +401,7 @@ type Stage struct {
 	// never keeps its argument's typmod on live PostgreSQL. Only populated
 	// on the Gather stage, and unlike OutputSchema's zero-row-only role,
 	// consulted for every result (FIX 2, #457/#458 fold-in; see
-	// physical.DeclaredWireUnconstrainedDecimal).
+	// physical.declaredWireUnconstrainedDecimal).
 	OutputWireUnconstrainedDecimal map[string]bool
 	// OutputStringLength names the output columns whose declaration carries a
 	// string LENGTH, and what it is — the DAG's copy of the single-process
@@ -569,7 +569,7 @@ func (s *Stage) UnionArmDep(i int) string {
 }
 
 // WindowColSpec defines a window function column in a stage. Every field is
-// resolved by physical.WindowExecColumn — the same resolution the single-process
+// resolved by physical.PlanContext.WindowExecColumn — the same resolution the single-process
 // pipeline compiles into exec.WindowColumn — so the stage carries a spec the
 // worker can execute without a catalog or a logical plan.
 type WindowColSpec struct {
@@ -679,7 +679,7 @@ type AggSpec struct {
 	// OutputType is the plan-time output type of this aggregate, mirrored
 	// onto distributed.AggSpec at dispatch. Undeclared — OutputTypeKnown
 	// false — is only produced for a MIN/MAX-family aggregate whose input
-	// column does not resolve to a catalog type; see physical.AggSpecOutputType.
+	// column does not resolve to a catalog type; see physical.PlanContext.AggSpecOutputType.
 	OutputType parquet.TypeID
 	// OutputTypeKnown distinguishes a DECLARED OutputType from the zero
 	// value, which TypeBool shares: BOOL_AND/BOOL_OR always declare BOOL,
@@ -826,7 +826,7 @@ type SortKeySpec struct {
 	// compute it.
 	//
 	// Two names are needed because neither one alone is right on every plan.
-	// `physical.DerivedAliasSourceColumn` declines a computed alias by design (there
+	// `physical.PlanContext.DerivedAliasSourceColumn` declines a computed alias by design (there
 	// is no source column to point at), so `AliasSource` stays empty and the
 	// stage keyed on a name nothing emits: `sort: key column "w" does not
 	// exist in the input schema` on both DAG arms for a query the

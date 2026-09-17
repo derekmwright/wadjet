@@ -369,7 +369,7 @@ func TestTheCarrierGapListIsTheCodes(t *testing.T) {
 	stated, _ := strconv.Atoi(m[1])
 	if stated != len(code) {
 		t.Errorf("ADR-0012 item 12 says there are %d ordered carrier-gap pairs; "+
-			"physical.SetOpCarrierGapPairs computes %d", stated, len(code))
+			"physical.PlanContext.SetOpCarrierGapPairs computes %d", stated, len(code))
 	}
 	// And every computed pair appears in the table that follows the sentence,
 	// under wadjet's own type names — which is what the refusal the client

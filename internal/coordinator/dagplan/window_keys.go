@@ -17,7 +17,7 @@ const windowKeyColPrefix = string(plansql.SlotWindowKey)
 // names is one its fragment can compute. See the StageWindow case in
 // native_dag_rewrite.go for why this is a plan-time check.
 //
-// The question is PROVENANCE, not spelling. `physical.ResolveWindowKeys` classes a
+// The question is PROVENANCE, not spelling. `physical.PlanContext.ResolveWindowKeys` classes a
 // PARTITION BY / ORDER BY term as either a BOUND reference — a column the
 // input already carries — or a MATERIALIZED expression the fragment computes
 // into a `__winkey_N` slot, and only the second owes a `WindowKeyExprs`

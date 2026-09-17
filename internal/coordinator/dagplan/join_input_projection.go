@@ -123,14 +123,14 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 			colTypes = localPlanFacts.InputColDecls(proj.Children[0])
 			if joinArm {
 				// A JOIN arm's declarations have to be read the way the
-				// EXECUTOR spells that stream: `physical.InputColDecls` merges the two
+				// EXECUTOR spells that stream: `physical.PlanContext.InputColDecls` merges the two
 				// sides and DROPS a name they declare differently, which is
 				// the honest answer to a bare reference and no answer at all
 				// to `h.d92 * 2` over two tables that both have a `d92`. The
 				// undecided answer falls to the FLOAT rule, and the fragment
 				// then tried to store a DECIMAL's rendering into a float
 				// vector — the #361 guard, on a query PostgreSQL answers.
-				// `physical.EmittedColDecls` publishes the per-arm QUALIFIED entries
+				// `physical.PlanContext.EmittedColDecls` publishes the per-arm QUALIFIED entries
 				// beside the merged bare ones (withJoinArmQualifiers), which
 				// is exactly the spelling the arm's own SELECT list wrote.
 				colTypes = localPlanFacts.EmittedColDecls(proj.Children[0])
@@ -174,7 +174,7 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 		// including DECIMAL (p,s), which must not default to scale 0 (ADR-0024 item 2).
 		// Infer against the schema the respelled expression NOW names: SOURCE columns,
 		// with intervening stage-less Filters stripped, as in #387.
-		// Window slots need physical.WindowSpecOutputType's complete declaration, including
+		// Window slots need physical.PlanContext.WindowSpecOutputType's complete declaration, including
 		// (p,s): a missing type can project correctly yet feed NULL to an aggregate.
 		// See docs/internals/computed-arm-declarations.md for the design.
 		declTypes, declStrict := colTypes, strictInt
@@ -436,7 +436,7 @@ func absorbJoinArmProjection(childStages []Stage, computed []physical.ProjectExp
 
 // stripArmFilters descends past the FILTER nodes an arm's rename chain may be
 // interleaved with. walkStages emits no stage for a Filter and
-// physical.SubstituteNestedRenameRefs walks through one, so the declarations that type
+// physical.PlanContext.SubstituteNestedRenameRefs walks through one, so the declarations that type
 // a respelled expression are the ones visible below them — reading them at
 // the Filter answered the FLOAT fallback for `a * 2` over `a AS v`, and the
 // fragment then tried to store a DECIMAL's rendering into a float vector.
@@ -447,7 +447,7 @@ func stripArmFilters(n *logical.Node) *logical.Node {
 	return n
 }
 
-// armSourceDecls is physical.SourceColDeclsThroughRenames with those Filters stripped,
+// armSourceDecls is physical.PlanContext.SourceColDeclsThroughRenames with those Filters stripped,
 // at every level of the chain rather than only the first.
 func armSourceDecls(n *logical.Node) physical.ColDecls {
 	for {
@@ -467,7 +467,7 @@ func armSourceDecls(n *logical.Node) physical.ColDecls {
 
 // windowArmColDecls declares the columns visible ABOVE a window node: its
 // input's, plus each window OUTPUT SLOT typed the way the window stage types
-// it. The slot is not a catalog column, so physical.InputColDecls answers nothing for
+// it. The slot is not a catalog column, so physical.PlanContext.InputColDecls answers nothing for
 // it and every expression over one fell to the float rule — which for a
 // DECIMAL sum is a declaration that disagrees with the bytes.
 func windowArmColDecls(win *logical.Node) physical.ColDecls {
@@ -506,7 +506,7 @@ func windowArmColDecls(win *logical.Node) physical.ColDecls {
 // projects every arm onto the operation's own column list (Stage.UnionArms'
 // per-arm Projections), so the stream the join receives carries one column per
 // SELECT item of the operation, under the name the operation publishes, and
-// nothing of any scan below it. `physical.BuildStreamAlias` answered the first scan
+// nothing of any scan below it. `physical.PlanContext.BuildStreamAlias` answered the first scan
 // it found there — `lat_ord` for `(SELECT id FROM lat_ord UNION SELECT id FROM
 // lat_ord) a` — and the join then qualified the arm's duplicate `id` as
 // `lat_ord.id`, a spelling no query can write. The enclosing `a.id` matched
@@ -516,7 +516,7 @@ func windowArmColDecls(win *logical.Node) physical.ColDecls {
 // and both single-process arms read 1|1|2|2 (#1102).
 //
 // The arm must have a NAME for this to say anything: the materialized branch
-// qualifies by `physical.JoinArmAlias`, and an arm with no name would leave the build's
+// qualifies by `physical.PlanContext.JoinArmAlias`, and an arm with no name would leave the build's
 // duplicates unqualified, which is strictly worse than the scan's spelling.
 // The descent stops at a Project for the reason the whole rule turns on — a
 // Project RENAMES, and an un-materialized one emits no stage, so above it the

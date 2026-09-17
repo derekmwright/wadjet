@@ -11,7 +11,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// TestJoinKeyLadderMatchesPostgresOperatorResolution pins physical.JoinKeyCommonType
+// TestJoinKeyLadderMatchesPostgresOperatorResolution pins joinKeyCommonType
 // against a transcript taken live off postgres:17.11's EXPLAIN VERBOSE, over
 // a table with one column of each numeric type. The transcript, verbatim:
 //
@@ -30,7 +30,7 @@ import (
 // comparison happens at float8. `x.c = y.d` prints no cast at all and is
 // float48eq, which likewise compares at float8. Both are float8 rungs here.
 //
-// This is the OPERATOR ladder. The SET-OPERATION ladder (physical.SetOpWiden,
+// This is the OPERATOR ladder. The SET-OPERATION ladder (setOpWiden,
 // TestSetOpWidenLadder) is different where float4 is involved — `numeric ∪
 // real` is real and `int ∪ real` is real — and the two must not be merged.
 func TestJoinKeyLadderMatchesPostgresOperatorResolution(t *testing.T) {
@@ -81,7 +81,7 @@ func TestJoinKeyLadderMatchesPostgresOperatorResolution(t *testing.T) {
 	}
 	// The ladder must be SYMMETRIC: which side of the `=` a column is
 	// spelled on cannot change the type both sides key at, or
-	// physical.AssignJoinKeySides' swap would change the answer.
+	// PlanContext.AssignJoinKeySides' swap would change the answer.
 	for _, a := range []parquet.TypeID{i32, i64, f32, f64, dec} {
 		for _, b := range []parquet.TypeID{i32, i64, f32, f64, dec} {
 			ab, aok := joinKeyCommonType(a, b)
@@ -189,7 +189,7 @@ func TestResolveJoinKeyTypesDeclinesWhatItCannotType(t *testing.T) {
 // TestJoinSideColTypesSeesThroughRebindingNodes is the review finding on the
 // first #615 commit, at the unit level.
 //
-// physical.JoinSideColTypes' first version was a walk of its own — scans and rename
+// joinSideColTypes' first version was a walk of its own — scans and rename
 // projections — so a side rooted at an AGGREGATE, a WINDOW or a SET
 // OPERATION answered nothing and every COMPUTED projection was dropped. The
 // pair then resolved to KeyTypeUnresolved and joinKeyUsesIntPath fell back to

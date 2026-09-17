@@ -63,7 +63,7 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	if len(node.CTEs) > 0 {
 		p.Ctes = node.CTEs
 	}
-	// Ensure scan nodes have column metadata — needed by physical.AssignJoinKeySides
+	// Ensure scan nodes have column metadata — needed by physical.PlanContext.AssignJoinKeySides
 	// to assign shuffle keys to the correct child side.
 	p.AnnotateScanColumns(ctx, node)
 	// A star that shares its SELECT list and could not be expanded is the

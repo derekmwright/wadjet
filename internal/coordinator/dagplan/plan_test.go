@@ -742,7 +742,7 @@ func TestPlanDistributed_ShuffleJoinLargeTables(t *testing.T) {
 
 // TestPlanDistributed_MultiWayJoinShuffleKeys verifies that shuffle stages in
 // a multi-way join (A ⋈ B ⋈ C) have correctly assigned key columns.
-// Regression: physical.ParseJoinKeys assigned left/right based on position in "="
+// Regression: physical.PlanContext.ParseJoinKeys assigned left/right based on position in "="
 // rather than which child subtree owns the column, causing "shuffle key X
 // not found in schema" errors when the second join's shuffle read from the
 // wrong upstream stage.
@@ -873,7 +873,7 @@ func TestPlanDistributed_MultiWayJoinShuffleKeys(t *testing.T) {
 
 		// Every shuffle key must exist in the dependency's column set.
 		// Strip table qualifiers ("c.c_custkey" -> "c_custkey") because
-		// physical.ParseJoinKeys now preserves qualifiers (needed for self-join
+		// physical.PlanContext.ParseJoinKeys now preserves qualifiers (needed for self-join
 		// chain resolution); the worker's shuffle sink uses
 		// exec.ColumnIndexFallback which strips them on miss.
 		if s.Exchange != nil {

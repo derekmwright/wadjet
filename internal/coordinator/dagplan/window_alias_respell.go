@@ -14,7 +14,7 @@ import (
 // respellWindowKeyExprs rewrites each materialized window-key EXPRESSION so
 // its column references name what the window stage's input really carries.
 //
-// physical.ResolveWindowKeys is shared by both paths, so a key expression written over
+// physical.PlanContext.ResolveWindowKeys is shared by both paths, so a key expression written over
 // a derived table's or CTE's SELECT-list alias (`SUM(v * 2) OVER ()` above
 // `SELECT c_i64 AS v`) is correct for the single-process pipeline, where the
 // Project below the window is a real operator. On the DAG that Project emits
@@ -42,7 +42,7 @@ func respellWindowKeyExprs(specs []physical.ProjectExprSpec, child *logical.Node
 }
 
 // respellAggInputExpr rewrites aggregate argument references to the columns
-// emitted by the stage below, using physical.ResolveAggInputName per reference (#702).
+// emitted by the stage below, using physical.PlanContext.ResolveAggInputName per reference (#702).
 // A rename becomes its source column; a computed alias becomes its defining
 // expression, parenthesized to preserve association inside the larger AST.
 // DAG-only: rewrite stage-spec text, never the logical node executed by the
@@ -69,7 +69,7 @@ func respellAggInputExprAt(n plansql.Node, child *logical.Node, depth int) (plan
 				// The definition may name aliases of its OWN input:
 				// `SELECT twice * 3 AS t FROM (SELECT id * 2 AS twice …)`
 				// substitutes `twice * 3`, which still names `twice`.
-				// physical.ResolveAggInputName returns at the first computed alias it
+				// physical.PlanContext.ResolveAggInputName returns at the first computed alias it
 				// meets and cannot continue past it, so the substituted
 				// subtree is respelled against the node that Project reads.
 				inner := expr
@@ -243,7 +243,7 @@ func respellWindowSlotAliasRefs(n plansql.Node, child *logical.Node) (plansql.No
 		return &plansql.ColRef{Column: localPlanFacts.CleanExpr(resolved)}, true
 	})
 	if !complete {
-		// Same rule as physical.RespellDerivedAliasRefs: a walk that met a node kind it
+		// Same rule as physical.PlanContext.RespellDerivedAliasRefs: a walk that met a node kind it
 		// does not rewrite has NOT considered every reference, and a partial
 		// respell looks resolved without being it.
 		return n, false

@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// TestParseJoinKeys_PreservesQualifiers locks in the physical.ParseJoinKeys behavior
-// after the Q07 fix. Stripping qualifiers in physical.CleanExpr would re-introduce
+// TestParseJoinKeys_PreservesQualifiers locks in the PlanContext.ParseJoinKeys behavior
+// after the Q07 fix. Stripping qualifiers in PlanContext.CleanExpr would re-introduce
 // the ambiguity that broke Q07/Q08 (probe-side lookup of unqualified
 // "n_regionkey" matches both "n1.n_regionkey" and "n2.n_regionkey").
 func TestParseJoinKeys_PreservesQualifiers(t *testing.T) {

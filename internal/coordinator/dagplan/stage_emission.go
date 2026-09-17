@@ -185,7 +185,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 		var aggSpecs []AggSpec
 		hasDistinctAgg := false
 		for _, agg := range node.AggExprs {
-			// Resolved before the spec is built so physical.AggSpecOutputType and the
+			// Resolved before the spec is built so physical.PlanContext.AggSpecOutputType and the
 			// derived-expression branch below both see the real column: the
 			// type lookup misses on an alias too, and an undeclared type
 			// makes MAX come back float64 where the column is INT64.
@@ -203,7 +203,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// A delimited identifier's quotes are not part of its NAME (#725),
 			// and the same rule applies to an aggregate's argument as to a GROUP
 			// BY key. The table qualifier is preserved for the reason the
-			// single-process loop gives: `physical.CleanExpr` would drop it and a bare
+			// single-process loop gives: `physical.PlanContext.CleanExpr` would drop it and a bare
 			// name binds to the FIRST column of that name (#622).
 			agg.InputCol = plansql.NormalizeIdentRef(strings.TrimSpace(agg.InputCol))
 			agg.InputCol2 = plansql.NormalizeIdentRef(strings.TrimSpace(agg.InputCol2))
@@ -318,7 +318,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				_, bare := agg.InputExpr.(*plansql.ColRef)
 				if !bare || p.PlanContext.AstIsFieldPath(agg.InputExpr, p.PlanContext.InputColDecls(exprCols)) {
 					// Every reference INSIDE the expression gets the same
-					// resolution physical.ResolveAggInputName gave the argument as a
+					// resolution physical.PlanContext.ResolveAggInputName gave the argument as a
 					// whole. Without it the worker compiles the text against a
 					// batch carrying the SCAN's columns and a derived name
 					// reads NULL on every row — TPC-H Q08's shape, silently 0
@@ -347,7 +347,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 					// And the type that expression evaluates into, since
 					// the worker builds the pre-aggregate projection from
 					// the text alone and has no catalog to consult.
-					// physical.EmittedColDecls, not physical.InputColDecls, and for the reason
+					// physical.PlanContext.EmittedColDecls, not physical.PlanContext.InputColDecls, and for the reason
 					// the single-process pre-projection uses it too: the walk
 					// has to cross a DERIVED TABLE. TPC-H Q08's CASE branch is
 					// a bare reference to a column a subquery computes, and
@@ -365,9 +365,9 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 					// declaration — reading the output off it is what makes the
 					// identity row of a partial whose filter matched nothing
 					// declare what its siblings will write, instead of
-					// physical.AggSpecOutputType's float64 default for anything that is
+					// physical.PlanContext.AggSpecOutputType's float64 default for anything that is
 					// not a bare column (#685: SUM(a * (1 - b)) and its whole
-					// class). See physical.AggOutputFromInputDecl.
+					// class). See physical.PlanContext.AggOutputFromInputDecl.
 					//
 					// It reads the triple the line above produced, so the two
 					// changes compose: #695 made that triple resolve through a
@@ -867,7 +867,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 						node.JoinFilter, jt))
 				}
 			}
-			// physical.ParseJoinKeys assigns left/right based on position in the "="
+			// physical.PlanContext.ParseJoinKeys assigns left/right based on position in the "="
 			// expression, not based on which child subtree owns the column.
 			// Fix the assignment so leftKeys are from the probe (left) child
 			// and rightKeys are from the build (right) child.
@@ -1022,15 +1022,15 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 		// Propagate build-side table alias for column disambiguation in self-joins
 		// (e.g., nation n1 JOIN nation n2 — prevents duplicate columns from being dropped).
 		if len(node.Children) >= 2 {
-			// physical.BuildStreamAlias, not physical.JoinArmAlias: the DAG's build stream is
+			// physical.PlanContext.BuildStreamAlias, not physical.PlanContext.JoinArmAlias: the DAG's build stream is
 			// the arm's RAW columns, because a Project emits no stage. See
-			// physical.JoinArmAlias' comment for the two answers and why they differ.
+			// physical.PlanContext.JoinArmAlias' comment for the two answers and why they differ.
 			//
 			// UNLESS the arm's own SELECT list was just materialized onto the
 			// stage that terminates it (#780). Then the stream is not raw: it
 			// is exactly what the arm publishes, one column per SELECT item,
 			// and the one name the enclosing query writes describes all of
-			// them — which is the MATERIALIZED answer, `physical.JoinArmAlias`, and
+			// them — which is the MATERIALIZED answer, `physical.PlanContext.JoinArmAlias`, and
 			// with it the materialized per-column origins. Qualifying that
 			// stream by an inner scan's alias instead named columns the arm
 			// does not publish, and the enclosing `m.a` then bound the PROBE
@@ -1305,7 +1305,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				// ec.OrderBy carries the RESOLVED spelling; ob.Column is
 				// what the query wrote. A stage keyed on the latter would
 				// send the worker the name #585 could not resolve.
-				// SlotPos rides along: `physical.WindowExecColumn` decided it from the
+				// SlotPos rides along: `physical.PlanContext.WindowExecColumn` decided it from the
 				// aggregate's emitted output, and the worker rebuilds an
 				// `exec.SortKey` from this spec — so without it the DAG's
 				// window binds the key by NAME where the single-process one
@@ -1315,7 +1315,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			}
 			// A key naming a derived table's or CTE's SELECT-list alias
 			// (`PARTITION BY gk` over `SELECT g AS gk`) is bound by neither
-			// of physical.ResolveWindowKeys' two arms: it is not a qualified
+			// of physical.PlanContext.ResolveWindowKeys' two arms: it is not a qualified
 			// reference and not an expression to materialize. The
 			// single-process pipeline never notices — the Project below the
 			// window is a real operator there — but on the DAG that Project
@@ -1371,9 +1371,9 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// found no vector called `v` and wrote NULL in every row, the
 			// silent half of the same defect. A materialized argument is
 			// already a __winkey_N the fragment computes, and
-			// physical.DerivedAliasSourceColumn leaves those (and `*`) alone.
+			// physical.PlanContext.DerivedAliasSourceColumn leaves those (and `*`) alone.
 			// …and a QUALIFIED argument resolves inside the arm its
-			// qualifier names, because physical.DerivedAliasSourceColumn stops at a
+			// qualifier names, because physical.PlanContext.DerivedAliasSourceColumn stops at a
 			// Join and answered nothing for it (round 4 of #742). Without
 			// the scoping `SUM(x.w) OVER ()` over two arms both publishing
 			// `w` reached the worker as the bare `w` and summed the OTHER

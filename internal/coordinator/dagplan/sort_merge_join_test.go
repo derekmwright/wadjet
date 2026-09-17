@@ -121,7 +121,7 @@ func TestSortMergeJoinGate_RoutesBigInnerJoin(t *testing.T) {
 
 	plan := planSQL(t, cat, sql, 1)
 	if !(physical.PlanContext{}).IsSortMergeSource(plan.Pipeline.Source) {
-		t.Fatalf("expected physical.SmjSourceAdapter source under forced threshold, got %T", plan.Pipeline.Source)
+		t.Fatalf("expected physical.smjSourceAdapter source under forced threshold, got %T", plan.Pipeline.Source)
 	}
 	if err := plan.Pipeline.Run(context.Background()); err != nil {
 		t.Fatalf("running SMJ plan: %v", err)

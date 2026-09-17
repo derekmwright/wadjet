@@ -13,7 +13,7 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// RecordBatch type alias for convenience
+// recordBatch type alias for convenience
 type recordBatch = batch.RecordBatch
 
 // buildFilterOp compiles one predicate into a filter operator. It returns an

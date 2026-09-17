@@ -4969,7 +4969,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     reached a client as XX000, which says the server broke.
 
     The pairs, in full — there are 14 ordered ones. The list is COMPUTED from
-    the predicate by `physical.SetOpCarrierGapPairs`, and
+    the predicate by `physical.PlanContext.SetOpCarrierGapPairs`, and
     `coordinator.TestTheCarrierGapListIsTheCodes` READS THIS PARAGRAPH: it
     parses the count in the sentence you are reading and the type names in the
     table below, and fails when either disagrees with the computed set. An

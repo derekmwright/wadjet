@@ -12,7 +12,7 @@ import (
 // their columns the way the producing stage really does, WHERE A LATE PASS
 // CHANGED THAT SPELLING AFTER THE DECLARATION WAS WRITTEN.
 //
-// `physical.DeclaredJoinSchema` mirrors `joinOutputSchemaWithMapping`'s duplicate rule
+// `physical.PlanContext.DeclaredJoinSchema` mirrors `joinOutputSchemaWithMapping`'s duplicate rule
 // at emission: the first relation to publish a bare name keeps it and the next
 // one is qualified by the alias that owns it. `markCoPathingSelfJoinBuilds`
 // then runs over the FINISHED stage list and sets `QualifyAllBuildCols` on

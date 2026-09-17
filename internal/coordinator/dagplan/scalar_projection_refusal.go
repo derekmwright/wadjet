@@ -71,7 +71,7 @@ func refuseScalarSubqueryProjections(root *logical.Node, lowered map[*logical.Pr
 		// A WINDOW's ARGUMENT and its PARTITION BY / ORDER BY terms are the
 		// same claim one node over, and they are NOT Projections: a computed
 		// window term is materialized by the PHYSICAL planner
-		// (physical.ResolveWindowKeys → `__winkey_N`), so the walk above never saw it
+		// (physical.PlanContext.ResolveWindowKeys → `__winkey_N`), so the walk above never saw it
 		// and the refusal never fired. `SUM((SELECT … )) OVER ()` therefore
 		// staged, and the worker's fragment failed compiling the key —
 		// "window key project: compile window key … : subqueries require a

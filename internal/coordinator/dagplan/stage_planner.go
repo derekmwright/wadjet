@@ -127,7 +127,7 @@ type StagePlanner struct {
 	// answer (#346). Reset at the start of generateStages.
 	setOpErr error
 
-	// joinCondErr records an ON clause physical.ParseJoinKeys cannot represent as a
+	// joinCondErr records an ON clause physical.PlanContext.ParseJoinKeys cannot represent as a
 	// key pair, parked for the same reason setOpErr is: walkStages has no
 	// error return. Refusing is the point — the alternative it replaces was
 	// passing the unrepresentable operand to the executor AS A COLUMN NAME,

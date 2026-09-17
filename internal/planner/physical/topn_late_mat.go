@@ -32,7 +32,7 @@ import (
 // scan-split fragment modes. Everything else falls back to the ordinary
 // top-N build. Kill switch: WADJET_TOPN_LATEMAT=0.
 
-// RowLocColumn is the synthetic column carrying (rgUnit ordinal << 32 |
+// rowLocColumn is the synthetic column carrying (rgUnit ordinal << 32 |
 // row-in-group) through the narrow phase. The "__" prefix keeps it out of
 // user column namespaces (sanitizeScanNeeds already passes such names).
 const rowLocColumn = "__row_loc"

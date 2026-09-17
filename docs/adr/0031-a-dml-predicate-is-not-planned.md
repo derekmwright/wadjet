@@ -78,7 +78,7 @@ physical row (#676).
 There is exactly one synthetic scan column in the engine and it is the wrong
 shape:
 
-`physical.RowLocColumn` = `"__row_loc"`
+`physical.rowLocColumn` = `"__row_loc"`
 (`internal/planner/physical/topn_late_mat.go:33`) packs
 `rgUnit ordinal << 32 | row-WITHIN-ROW-GROUP`
 (`stampRowLoc`, `internal/planner/physical/util.go:1154`). Three things

@@ -22,7 +22,7 @@ import (
 // A renamed GROUP BY key is the louder half of the same miss: an unresolvable
 // key serializes as a NULL key, so every row collapses into one NULL group.
 //
-// physical.ResolveAggInputName is the mapping walkStages applies so the aggregate reads
+// PlanContext.ResolveAggInputName is the mapping walkStages applies so the aggregate reads
 // the name the stage below it actually emits — the aggregate's counterpart to
 // resolveShuffleKey (join keys) and resolveSortKeyColumn (ORDER BY terms).
 func TestResolveAggInputName(t *testing.T) {

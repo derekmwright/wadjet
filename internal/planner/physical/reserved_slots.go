@@ -49,10 +49,10 @@ const (
 // slotName mints the Nth slot of a family.
 func slotName(family slotFamily, n int) string { return plansql.SlotName(family, n) }
 
-// ReservedSlotFamily returns the slot prefix name collides with, or "".
+// reservedSlotFamily returns the slot prefix name collides with, or "".
 func reservedSlotFamily(name string) string { return plansql.ReservedSlotFamily(name) }
 
-// RefuseReservedSlotName is the 42939 refusal for a name a user is CREATING.
+// checkReservedSlotName is the 42939 refusal for a name a user is CREATING.
 func checkReservedSlotName(name, where string) error {
 	return plansql.RefuseReservedSlotName(name, where)
 }

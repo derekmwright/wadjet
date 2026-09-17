@@ -217,7 +217,7 @@ func TestBushyBuild_DimensionChain(t *testing.T) {
 }
 
 // TestBushyBuild_ReversedKeysInCondition is the same shape with every join
-// condition written build-side-first ("s_sk = l_sk"). physical.ParseJoinKeys assigns
+// condition written build-side-first ("s_sk = l_sk"). physical.PlanContext.ParseJoinKeys assigns
 // positionally, so every pair needs a plan-time swap — against a MULTI-TABLE
 // build subtree that the old membership test could not resolve.
 func TestBushyBuild_ReversedKeysInCondition(t *testing.T) {

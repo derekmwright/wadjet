@@ -12,7 +12,7 @@ import (
 // expression reads, in first-seen order, and reports whether the walk
 // understood the WHOLE expression.
 //
-// It shares `physical.RewriteColRefs` rather than growing a fourth private walk, for
+// It shares `physical.PlanContext.RewriteColRefs` rather than growing a fourth private walk, for
 // the reason ADR-0025 gives about the three that existed: a walk that does not
 // descend into a node kind is not a no-op, it silently reports fewer
 // references than the expression has. Here that would be a pass-through list

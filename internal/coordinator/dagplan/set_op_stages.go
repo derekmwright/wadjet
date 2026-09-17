@@ -177,7 +177,7 @@ func (p *StagePlanner) emitSetOpCountingStage(stages *[]Stage, unionID string, n
 		Tasks:       1,
 		GroupByCols: append([]string(nil), outNames...),
 		// The result columns are positions 0..n-1 of the union stage's output
-		// by construction — physical.SetOpArmProjection emits exactly them, in order,
+		// by construction — physical.PlanContext.SetOpArmProjection emits exactly them, in order,
 		// with the two tag columns appended AFTER. Two of those names may be
 		// the same string, and then the name is not an address: both keys
 		// resolved to column one and `EXCEPT` answered 0 rows where
@@ -426,7 +426,7 @@ func setOpUnresolvedArmsDesc(plans []physical.SetOpArmPlan, col int) string {
 //
 // `from` is the arm's OWN declared type, and it is not decoration: a widening
 // that LOSES the narrower type's rounding has to narrow FIRST. `real ∪ float8`
-// is the one such rung in physical.SetOpWiden's ladder, and it is a VALUE:
+// is the one such rung in physical.setOpWiden's ladder, and it is a VALUE:
 // `w_f32 + CAST(1.0 AS REAL)` over 2^24 is 16777216 as a real and 16777217 as
 // a double, and this engine computes every float expression on the float64
 // carrier. The single-process path narrows because the arm's projection

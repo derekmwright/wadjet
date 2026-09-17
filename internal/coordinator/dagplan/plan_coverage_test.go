@@ -79,11 +79,11 @@ func TestEstimateCost_WithScanPredicates(t *testing.T) {
 	}
 }
 
-// --- physical.HasFilterOrPartition ---
+// --- physical.PlanContext.HasFilterOrPartition ---
 
 // --- HasLimit ---
 
-// --- physical.FormatBytes ---
+// --- physical.formatBytes ---
 
 // --- enforceQueryLimits ---
 //
@@ -196,19 +196,19 @@ func TestEnforceQueryLimits_UnderLimits(t *testing.T) {
 	}
 }
 
-// --- physical.MapJoinType ---
+// --- physical.PlanContext.MapJoinType ---
 
-// --- physical.MapExecJoinType ---
+// --- physical.mapExecJoinType ---
 
-// --- physical.ParseJoinKeys ---
+// --- physical.PlanContext.ParseJoinKeys ---
 
-// --- physical.MatchesPartitionFilter ---
+// --- physical.PlanContext.MatchesPartitionFilter ---
 
-// --- physical.EvalFilterTyped ---
+// --- physical.evalFilterTyped ---
 
-// --- physical.MapPredOp ---
+// --- physical.mapPredOp ---
 
-// --- physical.DecimalFromBytes ---
+// --- physical.decimalFromBytes ---
 
 // --- Distributed plan stage generation ---
 
@@ -370,9 +370,9 @@ func TestPlanDistributed_ExceptSetOp(t *testing.T) {
 	}
 }
 
-// --- physical.IsURL / physical.IsGlob helpers ---
+// --- physical.isURL / physical.isGlob helpers ---
 
-// --- physical.DbScanSource ---
+// --- physical.dbScanSource ---
 
 // --- CSV named args ---
 
@@ -391,11 +391,11 @@ func containsSubstring(s, sub string) bool {
 	return false
 }
 
-// --- physical.ResolveNullsLast ---
+// --- physical.PlanContext.ResolveNullsLast ---
 
-// --- physical.ExtractFilterBuildColumns ---
+// --- physical.extractFilterBuildColumns ---
 
-// --- physical.CleanExpr ---
+// --- physical.PlanContext.CleanExpr ---
 
 // --- PlanDistributed: additional node types ---
 

@@ -25,7 +25,7 @@ import (
 // cannot test that boundary, and no S3/MinIO run measured it.
 // See docs/internals/row-group-object-stream-loading.md for the design.
 
-// ScanRowGroupBuffers is the kill switch for row-group-at-a-time file loads.
+// scanRowGroupBuffers is the kill switch for row-group-at-a-time file loads.
 // Off, every scan takes the whole-file read this replaced.
 var scanRowGroupBuffers = optswitch.Register("scan-rg-buffers", "WADJET_SCAN_RG_BUFFERS",
 	"land a scan's parquet file into one buffer per row group, charged and released per row group, instead of one whole-file buffer")
@@ -58,15 +58,15 @@ var (
 	rgSlabReleases atomic.Int64
 )
 
-// RowGroupSlabReleases is how many row-group buffers this process has returned
+// rowGroupSlabReleases is how many row-group buffers this process has returned
 // to the pool. See rgSlabReleases.
 func rowGroupSlabReleases() int64 { return rgSlabReleases.Load() }
 
-// RowGroupSlabAllocs is how many row-group buffers this process has allocated
+// rowGroupSlabAllocs is how many row-group buffers this process has allocated
 // rather than taken from a pool. See rgSlabAllocs.
 func rowGroupSlabAllocs() int64 { return rgSlabAllocs.Load() }
 
-// ResetSlabPoolsForTest empties every size-class bucket. TEST-ONLY: the pool is
+// resetSlabPoolsForTest empties every size-class bucket. TEST-ONLY: the pool is
 // process-wide, so a gate that asserts an exact reuse or allocation count has
 // to start from a state it owns — otherwise it reads whatever the test before
 // it left in the bucket, which made the reuse gate fail two runs in three
@@ -77,7 +77,7 @@ func resetSlabPoolsForTest() {
 	slabPools = map[int]*sync.Pool{}
 }
 
-// RowGroupSlabReuses is how many row-group buffers this process has taken back
+// rowGroupSlabReuses is how many row-group buffers this process has taken back
 // out of a pool. See rgSlabReuses.
 func rowGroupSlabReuses() int64 { return rgSlabReuses.Load() }
 
@@ -372,7 +372,7 @@ func (s *rgSlabs) close() {
 // happens every time, so the hazard is observed every time.
 var poisonReleasedSlabs atomic.Bool
 
-// PoisonReleasedSlabs turns that on and returns the previous setting.
+// setPoisonReleasedSlabs turns that on and returns the previous setting.
 // Test-only in spirit; production never calls it.
 func setPoisonReleasedSlabs(on bool) (prev bool) { return poisonReleasedSlabs.Swap(on) }
 

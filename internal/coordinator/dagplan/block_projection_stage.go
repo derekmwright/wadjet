@@ -15,7 +15,7 @@ import (
 // does, and the block's projection is not already the list its stage emits.
 //
 // A JOIN must be on the path because a block that feeds the root directly IS
-// the statement's output projection — physical.FindOutputProjectionNode answers it and
+// the statement's output projection — physical.PlanContext.FindOutputProjectionNode answers it and
 // the gather already projects it, which is why `SELECT * FROM (SELECT
 // order_id, order_id AS oid FROM lat_item) s` has always been right.
 func starReadBlockProjections(root *logical.Node) map[*logical.Node]blockDivergence {
@@ -287,7 +287,7 @@ func materializedBlockUnder(n *logical.Node, published map[*logical.Node]bool) *
 		// A SORT of the block's OWN is on this path too. The lateral lowering
 		// puts the block's `ORDER BY` between its projection and the join, and
 		// stopping here left the join reading the positions off
-		// `physical.DeclaredJoinSchema`'s walk — which descends to the AGGREGATE and
+		// `physical.PlanContext.DeclaredJoinSchema`'s walk — which descends to the AGGREGATE and
 		// answers its order (`product, __key_0`) where the stage publishes the
 		// projection's (`__key_0, p`). The minted slot was then looked for at
 		// the wrong ordinal and rode out to the client beside the block's own

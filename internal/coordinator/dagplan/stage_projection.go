@@ -31,7 +31,7 @@ func GatherOutputSchema(stages []Stage) []parquet.Column {
 // the DECIMAL output columns whose PostgreSQL wire typmod must say
 // "unconstrained" (-1) regardless of whether the result has rows — an
 // aggregate function call, unlike a bare column reference (FIX 2,
-// #457/#458 fold-in; see physical.DeclaredWireUnconstrainedDecimal).
+// #457/#458 fold-in; see physical.declaredWireUnconstrainedDecimal).
 func GatherOutputWireUnconstrainedDecimal(stages []Stage) map[string]bool {
 	for i := range stages {
 		if stages[i].Type == StageExchangeGather {
@@ -43,7 +43,7 @@ func GatherOutputWireUnconstrainedDecimal(stages []Stage) map[string]bool {
 
 // GatherOutputStringLength is the same companion for the string family's
 // modifier: the declared LENGTH of each output column a parameterized string
-// cast bounds (#838; see physical.DeclaredStringLengths).
+// cast bounds (#838; see physical.declaredStringLengths).
 func GatherOutputStringLength(stages []Stage) map[string]int {
 	for i := range stages {
 		if stages[i].Type == StageExchangeGather {
@@ -134,7 +134,7 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 	if len(projNode.Children) == 1 {
 		colTypes = p.PlanContext.InputColDecls(projNode.Children[0])
 		// The same integer-preserving-arithmetic hint the single-process
-		// path resolves via physical.EmittedColTypes/declaredProjectionType (#297):
+		// path resolves via physical.PlanContext.EmittedColTypes/declaredProjectionType (#297):
 		// without it, `id + 1` over a strict-int column declares (and
 		// COMPUTES) FLOAT64 here, where the single-process engine answers
 		// INT64 for the identical SQL (#443, #445).
@@ -279,7 +279,7 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 			// today's loud failure over a silently different expression.
 			if rewritten, ok := p.PlanContext.SubstituteNestedRenameRefs(proj[j].ASTExpr, renameChild); ok && rewritten != proj[j].ASTExpr {
 				specs[j].Expr = rewritten.String()
-				// physical.StrictIntArithColsThroughRenames mirrors the colTypes call
+				// physical.PlanContext.StrictIntArithColsThroughRenames mirrors the colTypes call
 				// just below it: the rewritten expression names only SOURCE
 				// columns, so the strict-int set to check it against is the
 				// one visible BELOW the rename chain, same as #445 above.

@@ -190,7 +190,7 @@ func TestPlanDistributed_JoinColumnsResolveNestedRename(t *testing.T) {
 // in a scope wider than the one it named — and a bare lookup in a scope that
 // spans a join takes the first arm that answers, which is #742's silent
 // capture. That is exactly how WINDOW was missed: `ResolveRenameSource` has no
-// case for it and descended, `physical.ScopePreservingWrapper` did not list it and
+// case for it and descended, `physical.PlanContext.ScopePreservingWrapper` did not list it and
 // stopped, and `SUM(y.w) OVER ()` in the SELECT list put one between the outer
 // Project and the join.
 //
@@ -221,7 +221,7 @@ func TestScopePreservingWrapperMatchesTheRenameWalk(t *testing.T) {
 	}
 
 	type expectation struct {
-		wrapper bool   // what physical.ScopePreservingWrapper must answer
+		wrapper bool   // what physical.PlanContext.ScopePreservingWrapper must answer
 		crossed bool   // whether the rename-walk probe is meaningful here
 		why     string // why, in one line, for the failure message
 	}

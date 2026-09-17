@@ -40,7 +40,7 @@ var ErrCorrelatedSubqueryDistributed = errors.New(
 // typed refusal for the first per-row correlated subquery it finds in a filter
 // predicate or SELECT-list projection. Scope is derived exactly the way the
 // single-process pipeline derives it when it DECIDES correlation
-// (physical.CollectTableAliases / physical.CollectOuterColumns over the expression's input
+// (physical.PlanContext.CollectTableAliases / physical.PlanContext.CollectOuterColumns over the expression's input
 // subtree, plus the catalog-backed inner-column resolver of #334), so the two
 // paths classify identically by construction: a subquery this pass calls
 // uncorrelated is one the single-process engine executes once, and its

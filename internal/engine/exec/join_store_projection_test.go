@@ -47,7 +47,7 @@ func storeProjProbeRows(n int) []map[string]any {
 	return rows
 }
 
-// storeProjFilter mirrors physical.BuildSemiAntiFilter's contract: columns
+// storeProjFilter mirrors physical.PlanContext.BuildSemiAntiFilter's contract: columns
 // are resolved by NAME against whatever storage the build retained — this is
 // what makes name-preserving projection transparent to the probe.
 func storeProjFilter(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {

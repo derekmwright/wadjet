@@ -12,7 +12,7 @@ import (
 )
 
 func TestDeferredJoinBridge(t *testing.T) {
-	// Verify that physical.DeferredJoinBridge collects child pipeline batches
+	// Verify that deferredJoinBridge collects child pipeline batches
 	// and waits for the build barrier before returning.
 	ctx := context.Background()
 
