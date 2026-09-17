@@ -99,8 +99,9 @@ Workers automatically register with the coordinator and begin pulling tasks. The
 ### Docker Compose Example
 
 > The repository ships no Dockerfile and publishes no container image. Build
-> and push your own from `./cmd/wadjet`, then replace `build: .` and the
-> `image:` values below with your registry path.
+> and push your own from `./cmd/wadjetd`, with `wadjetd` as the image
+> entrypoint, then replace `build: .` and the `image:` values below with your
+> registry path. See [LICENSING.md](../LICENSING.md) for the binary split.
 
 ```yaml
 version: "3.8"
