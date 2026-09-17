@@ -11,10 +11,10 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// CollectOuterColumns recursively collects a column-name→table mapping from
+// collectOuterColumns recursively collects a column-name→table mapping from
 // scan nodes in a logical plan subtree. Used to resolve unqualified column
 // references in correlated subqueries.
-func CollectOuterColumns(node *logical.Node) map[string]string {
+func collectOuterColumns(node *logical.Node) map[string]string {
 	colMap := make(map[string]string)
 	var walk func(n *logical.Node)
 	walk = func(n *logical.Node) {

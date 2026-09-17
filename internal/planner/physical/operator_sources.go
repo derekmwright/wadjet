@@ -35,7 +35,7 @@ func scanParallelism() int {
 // a concurrent-safe scan source.
 func innerPipelineWorkers(src exec.Source) int {
 	switch src.(type) {
-	case *catalogScanSource, *scannerExecSource, *DeferredJoinBridge:
+	case *catalogScanSource, *scannerExecSource, *deferredJoinBridge:
 		return scanParallelism()
 	}
 	return 0

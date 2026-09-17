@@ -12,13 +12,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// NewComputedColumnsOpWithMeta is NewComputedColumnsOp plus the full
+// newComputedColumnsOpWithMeta is NewComputedColumnsOp plus the full
 // declaration of each computed column, for a caller that has one.
 //
 // ProjectColumn carries fixed ROW fields directly. Explicit metadata also
 // carries ARRAY/MAP element declarations and nested field shapes recovered
 // from an input column (#568, #618).
-func NewComputedColumnsOpWithMeta(cols []exec.ProjectColumn, meta []parquet.Column) exec.UnaryOperator {
+func newComputedColumnsOpWithMeta(cols []exec.ProjectColumn, meta []parquet.Column) exec.UnaryOperator {
 	// shareOutputs, which here means per-CALL computed vectors rather than
 	// the pooled ones. The aggregate consumes each batch's values before the
 	// next Execute overwrites them; the window RETAINS every batch it is

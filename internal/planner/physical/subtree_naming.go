@@ -42,8 +42,8 @@ type SubtreeNaming struct {
 	root *logical.Node
 }
 
-// SubtreeNamingOf computes the naming facts for a logical subtree.
-func SubtreeNamingOf(n *logical.Node) *SubtreeNaming {
+// subtreeNamingOf computes the naming facts for a logical subtree.
+func subtreeNamingOf(n *logical.Node) *SubtreeNaming {
 	s := &SubtreeNaming{
 		AliasCols:   make(map[string]map[string]bool),
 		outputNames: make(map[string]bool),
@@ -123,7 +123,7 @@ func (s *SubtreeNaming) collect(n *logical.Node) {
 // The derived-table half is what `y.b` over `(SELECT n_nationkey AS b FROM
 // nation) y` needs: `b` is the derived table's OUTPUT name and appears in no
 // scan's column set, so ownership came back false for BOTH sides of a join,
-// AssignJoinKeySides left the pair in its positional order, and each key was
+// assignJoinKeySides left the pair in its positional order, and each key was
 // then resolved against the arm that does not own it. In a two-way join the
 // mistake is invisible (the arms' keys are symmetric); in a three-way one it
 // reached the worker verbatim and the shuffle failed loud with `partitioned
@@ -196,7 +196,7 @@ func (s *SubtreeNaming) MaterializedBuildColOrigins() map[string]string {
 	return s.BuildColOrigins()
 }
 
-// AssignJoinKeySides ensures leftKeys reference the probe (left) child and
+// assignJoinKeySides ensures leftKeys reference the probe (left) child and
 // rightKeys the build (right) child, deciding by column OWNERSHIP in each
 // child subtree rather than textual position in the join condition.
 //
@@ -205,7 +205,7 @@ func (s *SubtreeNaming) MaterializedBuildColOrigins() map[string]string {
 // (shared column names, expression keys), the pair keeps its positional
 // order — exactly the previous fixJoinKeyOrder outcome — and the runtime
 // safety net (FixKeyAssignment) remains the last resort.
-func AssignJoinKeySides(leftKeys, rightKeys []string, probe, build *SubtreeNaming) {
+func assignJoinKeySides(leftKeys, rightKeys []string, probe, build *SubtreeNaming) {
 	for i := range leftKeys {
 		lProbe, lBuild := probe.OwnsKey(leftKeys[i]), build.OwnsKey(leftKeys[i])
 		rProbe, rBuild := probe.OwnsKey(rightKeys[i]), build.OwnsKey(rightKeys[i])

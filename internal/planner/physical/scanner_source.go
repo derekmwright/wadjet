@@ -261,7 +261,7 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 	for _, p := range manifest.Partitions {
 		// Prune partitions that don't match the filter
 		if len(s.partitionFilter) > 0 && len(p.Values) > 0 {
-			if !MatchesPartitionFilter(p.Values, s.partitionFilter) {
+			if !matchesPartitionFilter(p.Values, s.partitionFilter) {
 				continue
 			}
 		}
@@ -572,8 +572,8 @@ func estimateDecodedBatchBytes(schema []parquet.Column, rows int) int64 {
 	return int64(perRow) * int64(rows)
 }
 
-// MatchesPartitionFilter returns true if all filter keys match the partition values.
-func MatchesPartitionFilter(partValues, filter map[string]string) bool {
+// matchesPartitionFilter returns true if all filter keys match the partition values.
+func matchesPartitionFilter(partValues, filter map[string]string) bool {
 	for k, v := range filter {
 		pv, ok := partValues[k]
 		if !ok {

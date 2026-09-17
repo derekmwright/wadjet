@@ -123,7 +123,7 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 			}
 			return source, nil, &exec.CollectSink{}, nil
 		}
-		source, err := BuildTableFunctionSource(node.FuncName, node.FuncArgs, node.FuncNamedArgs)
+		source, err := buildTableFunctionSource(node.FuncName, node.FuncArgs, node.FuncNamedArgs)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("table function %s: %w", node.FuncName, err)
 		}

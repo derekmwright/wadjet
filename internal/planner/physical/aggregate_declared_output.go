@@ -664,10 +664,10 @@ func scanColumnDecimal(node *logical.Node, col string) (logical.DecimalMeta, boo
 // hasAggregateAncestor checks if a node is an Aggregate, or if it's a
 // passthrough node (e.g., Filter for HAVING) whose child is an Aggregate.
 func hasAggregateAncestor(node *logical.Node) bool {
-	return FindAggregateAncestor(node) != nil
+	return findAggregateAncestor(node) != nil
 }
 
-// AggregateOutputNames returns the column names the pipeline under a
+// aggregateOutputNames returns the column names the pipeline under a
 // projection emits, in order, when that pipeline ends in an Aggregate, and
 // reports whether they could be determined at all. It mirrors buildAggregate's
 // own naming: group keys first (a non-plain GROUP BY expression under its
@@ -684,7 +684,7 @@ func hasAggregateAncestor(node *logical.Node) bool {
 // The redundancy check wants this one: a spelling that is wider than the
 // emitted name can only fail to match, and failing to match keeps the
 // projection, which is always sound.
-func AggregateOutputNames(node *logical.Node) ([]string, bool) {
+func aggregateOutputNames(node *logical.Node) ([]string, bool) {
 	return aggregateOutputNameList(node, false)
 }
 
@@ -787,13 +787,13 @@ func aggregateOutputNameList(node *logical.Node, emitted bool) ([]string, bool) 
 	return nil, false
 }
 
-// WrapsAWindow reports whether a WINDOW stands between this node and the
+// wrapsAWindow reports whether a WINDOW stands between this node and the
 // aggregate below it, walking the same list AggregateOutputNames does.
 //
 // A window APPENDS its output, so "the aggregate's output names" and "this
 // node's output names" are two different lists there. Only the second answers
 // whether a projection may be ELIDED.
-func WrapsAWindow(n *logical.Node) bool {
+func wrapsAWindow(n *logical.Node) bool {
 	for ; n != nil; n = n.Children[0] {
 		if n.Type == logical.NodeWindow {
 			return true
@@ -836,7 +836,7 @@ func namesMatchProjections(names []string, projections []logical.Projection) boo
 	return true
 }
 
-// FindAggregateAncestor returns the Aggregate node if the given node is one,
+// findAggregateAncestor returns the Aggregate node if the given node is one,
 // or traverses through the nodes that leave the aggregate's own output columns
 // visible to find it: a HAVING Filter, a Sort, a LIMIT, a WINDOW
 // (AggScopePreservingWrapper), and a synthetic finalization Project.
@@ -845,18 +845,18 @@ func namesMatchProjections(names []string, projections []logical.Projection) boo
 // for the gather, and the two read one list so they cannot disagree about a
 // node kind — which is exactly how a window between the SELECT list and the
 // aggregate made a computed group key NULL on BOTH paths (#737).
-func FindAggregateAncestor(node *logical.Node) *logical.Node {
+func findAggregateAncestor(node *logical.Node) *logical.Node {
 	if node.Type == logical.NodeAggregate {
 		return node
 	}
 	if aggScopePreservingWrapper(node.Type) && len(node.Children) == 1 {
-		return FindAggregateAncestor(node.Children[0])
+		return findAggregateAncestor(node.Children[0])
 	}
 	// Synthetic finalization projections (two-level AVG) pass every
 	// aggregate output through by name, so SELECT-list resolution treats
 	// the aggregate below as directly visible.
 	if node.Type == logical.NodeProject && node.PreservesAggOutputs && len(node.Children) > 0 {
-		return FindAggregateAncestor(node.Children[0])
+		return findAggregateAncestor(node.Children[0])
 	}
 	return nil
 }

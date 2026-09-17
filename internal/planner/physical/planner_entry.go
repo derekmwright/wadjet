@@ -164,7 +164,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// concurrent Next() calls (channel-based scan sources).
 	pipelineWorkers := 0
 	switch source.(type) {
-	case *catalogScanSource, *scannerExecSource, *DeferredJoinBridge:
+	case *catalogScanSource, *scannerExecSource, *deferredJoinBridge:
 		pipelineWorkers = scanParallelism()
 	}
 

@@ -191,7 +191,7 @@ func windowArgKeepsItsQualifier(arg string, child *logical.Node) bool {
 // armsPublishingBareName counts the join arms below n whose subtree publishes
 // bare — a scan column of theirs, or a name one of their Projects mints.
 func armsPublishingBareName(n *logical.Node, bare string) int {
-	for n != nil && ScopePreservingWrapper(n) {
+	for n != nil && scopePreservingWrapper(n) {
 		n = n.Children[0]
 	}
 	if n == nil {
@@ -201,7 +201,7 @@ func armsPublishingBareName(n *logical.Node, bare string) int {
 		return armsPublishingBareName(n.Children[0], bare) +
 			armsPublishingBareName(n.Children[1], bare)
 	}
-	if SubtreeNamingOf(n).ownsBareName(strings.ToLower(bare)) {
+	if subtreeNamingOf(n).ownsBareName(strings.ToLower(bare)) {
 		return 1
 	}
 	return 0
@@ -233,7 +233,7 @@ func relationScopeSubtree(n *logical.Node, name string) *logical.Node {
 			}
 			continue
 		}
-		if ScopePreservingWrapper(n) {
+		if scopePreservingWrapper(n) {
 			n = n.Children[0]
 			continue
 		}
@@ -241,7 +241,7 @@ func relationScopeSubtree(n *logical.Node, name string) *logical.Node {
 	}
 }
 
-// ScopePreservingWrapper reports whether n is a single-child node that leaves
+// scopePreservingWrapper reports whether n is a single-child node that leaves
 // the relations below it addressable by the same names and renames none of
 // their columns, so a scope walk may descend through it.
 //
@@ -260,7 +260,7 @@ func relationScopeSubtree(n *logical.Node, name string) *logical.Node {
 // gap — its output schema is its own GROUP BY keys and aggregate output names,
 // so the child's columns are no longer addressable and resolving a bare name
 // below it would answer from a schema the stream does not carry.
-func ScopePreservingWrapper(n *logical.Node) bool {
+func scopePreservingWrapper(n *logical.Node) bool {
 	if len(n.Children) != 1 {
 		return false
 	}
@@ -539,7 +539,7 @@ func buildArmQualified(arm *logical.Node, name string) string {
 	if !armIsOneRelationsColumns(arm) {
 		return name
 	}
-	alias := BuildStreamAlias(arm)
+	alias := buildStreamAlias(arm)
 	if alias == "" {
 		return name
 	}
@@ -550,7 +550,7 @@ func buildArmQualified(arm *logical.Node, name string) string {
 // relation's, read and renamed but never recomputed into a relation of the
 // arm's own.
 func armIsOneRelationsColumns(arm *logical.Node) bool {
-	if len(SubtreeNamingOf(arm).AliasCols) != 1 {
+	if len(subtreeNamingOf(arm).AliasCols) != 1 {
 		return false
 	}
 	computes := false

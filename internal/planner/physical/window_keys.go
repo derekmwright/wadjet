@@ -162,7 +162,7 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 			}
 		}
 		if k.Expr != nil {
-			fresh, ok := keyAlloc.Next(SlotWindowKey)
+			fresh, ok := keyAlloc.Next(slotWindowKey)
 			if !ok {
 				return // the family is exhausted; leave this key as written
 			}

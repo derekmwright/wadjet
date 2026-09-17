@@ -24,7 +24,7 @@ type QueryCost struct {
 	HasLimit   bool
 }
 
-func HasFilterOrPartition(n *logical.Node) bool {
+func hasFilterOrPartition(n *logical.Node) bool {
 	if n == nil {
 		return false
 	}
@@ -35,14 +35,14 @@ func HasFilterOrPartition(n *logical.Node) bool {
 		return true
 	}
 	for _, c := range n.Children {
-		if HasFilterOrPartition(c) {
+		if hasFilterOrPartition(c) {
 			return true
 		}
 	}
 	return false
 }
 
-func HasLimit(n *logical.Node) bool {
+func hasLimit(n *logical.Node) bool {
 	if n == nil {
 		return false
 	}
@@ -50,7 +50,7 @@ func HasLimit(n *logical.Node) bool {
 		return true
 	}
 	for _, c := range n.Children {
-		if HasLimit(c) {
+		if hasLimit(c) {
 			return true
 		}
 	}
@@ -78,7 +78,7 @@ func (p *Planner) EnforceQueryLimits(ctx context.Context, node *logical.Node) er
 
 	if limits.MaxScanBytes > 0 && cost.TotalBytes > limits.MaxScanBytes {
 		return sqlerr.New(QueryLimitSQLState, "query would scan %s (%d bytes) across %d files, exceeding limit of %s — add a WHERE clause or partition filter",
-			FormatBytes(cost.TotalBytes), cost.TotalBytes, cost.TotalFiles, FormatBytes(limits.MaxScanBytes))
+			formatBytes(cost.TotalBytes), cost.TotalBytes, cost.TotalFiles, formatBytes(limits.MaxScanBytes))
 	}
 	if limits.MaxScanRows > 0 && cost.TotalRows > limits.MaxScanRows {
 		return sqlerr.New(QueryLimitSQLState, "query would scan %d rows across %d files, exceeding limit of %d rows — add a WHERE clause or LIMIT",
@@ -90,7 +90,7 @@ func (p *Planner) EnforceQueryLimits(ctx context.Context, node *logical.Node) er
 	}
 	if limits.RequireFilterAboveBytes > 0 && cost.TotalBytes > limits.RequireFilterAboveBytes && !cost.HasFilter {
 		return sqlerr.New(QueryLimitSQLState, "query scans %s without a WHERE clause (filter required above %s)",
-			FormatBytes(cost.TotalBytes), FormatBytes(limits.RequireFilterAboveBytes))
+			formatBytes(cost.TotalBytes), formatBytes(limits.RequireFilterAboveBytes))
 	}
 	if limits.RequireLimitAboveRows > 0 && cost.TotalRows > limits.RequireLimitAboveRows && !cost.HasLimit {
 		return sqlerr.New(QueryLimitSQLState, "query scans %d rows without a LIMIT (limit required above %d rows)",
@@ -99,7 +99,7 @@ func (p *Planner) EnforceQueryLimits(ctx context.Context, node *logical.Node) er
 	return nil
 }
 
-func FormatBytes(b int64) string {
+func formatBytes(b int64) string {
 	switch {
 	case b >= 1<<40:
 		return fmt.Sprintf("%.1fTB", float64(b)/float64(1<<40))

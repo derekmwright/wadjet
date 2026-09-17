@@ -29,7 +29,7 @@ func TestDeferredJoinBridge(t *testing.T) {
 	barrier := make(chan struct{})
 	var buildErr error
 
-	bridge := &DeferredJoinBridge{
+	bridge := &deferredJoinBridge{
 		ChildSource: source,
 		ChildOps:    nil,
 		Barrier:     barrier,
@@ -67,7 +67,7 @@ func TestDeferredJoinBridgeBuildError(t *testing.T) {
 	barrier := make(chan struct{})
 	buildErr := fmt.Errorf("build failed: out of memory")
 
-	bridge := &DeferredJoinBridge{
+	bridge := &deferredJoinBridge{
 		ChildSource: source,
 		ChildOps:    nil,
 		Barrier:     barrier,

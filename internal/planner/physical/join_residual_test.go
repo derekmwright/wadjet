@@ -11,7 +11,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// BuildJoinResidualFilter compiles an outer join's ON residual into a
+// buildJoinResidualFilter compiles an outer join's ON residual into a
 // combined-row predicate (#358). These tests pin the evaluation rules:
 // two-sided column resolution (bare, qualified, and build-alias forms),
 // literal and arithmetic operands with integer division truncating the way
@@ -89,7 +89,7 @@ func TestBuildJoinResidualFilter(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := BuildJoinResidualFilter(tc.filter, "r")
+			f := buildJoinResidualFilter(tc.filter, "r")
 			if f == nil {
 				t.Fatalf("filter %q did not compile", tc.filter)
 			}
@@ -111,7 +111,7 @@ func TestBuildJoinResidualFilterRefusesUnsupported(t *testing.T) {
 		"n_nationkey BETWEEN 1 AND 5",                        // BETWEEN
 		"CASE WHEN n_nationkey > 1 THEN true ELSE false END", // CASE
 	} {
-		if f := BuildJoinResidualFilter(filter, "r"); f != nil {
+		if f := buildJoinResidualFilter(filter, "r"); f != nil {
 			t.Errorf("filter %q compiled; it must be refused so the planner can error loudly", filter)
 		}
 	}
@@ -132,7 +132,7 @@ func TestBuildJoinResidualFilterSelfJoinAliases(t *testing.T) {
 		{"s_suppkey": int64(9), "s_nationkey": int64(5)},
 		{"s_suppkey": int64(0), "s_nationkey": int64(5)},
 	})
-	f := BuildJoinResidualFilter("a.s_suppkey < b.s_suppkey", "b")
+	f := buildJoinResidualFilter("a.s_suppkey < b.s_suppkey", "b")
 	if f == nil {
 		t.Fatal("self-join residual did not compile")
 	}

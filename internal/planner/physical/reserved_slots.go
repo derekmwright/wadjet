@@ -25,9 +25,9 @@ type slotFamily = plansql.SlotFamily
 
 const (
 	slotWindowOutput = plansql.SlotWindowOutput
-	SlotWindowKey    = plansql.SlotWindowKey
+	slotWindowKey    = plansql.SlotWindowKey
 	slotSortKey      = plansql.SlotSortKey
-	SlotGroupKey     = plansql.SlotGroupKey
+	slotGroupKey     = plansql.SlotGroupKey
 	slotAggInput     = plansql.SlotAggInput
 	slotNestedAgg    = plansql.SlotNestedAgg
 	slotScalar       = plansql.SlotScalar
@@ -40,14 +40,14 @@ const (
 	slotCovarState   = plansql.SlotCovarState
 
 	slotPreComputedAgg = plansql.SlotPreComputedAgg
-	SlotSubsumeFlag    = plansql.SlotSubsumeFlag
+	slotSubsumeFlag    = plansql.SlotSubsumeFlag
 	slotRowLocator     = plansql.SlotRowLocator
 	slotRowCountOnly   = plansql.SlotRowCountOnly
 	slotDefaultPart    = plansql.SlotDefaultPart
 )
 
-// SlotName mints the Nth slot of a family.
-func SlotName(family slotFamily, n int) string { return plansql.SlotName(family, n) }
+// slotName mints the Nth slot of a family.
+func slotName(family slotFamily, n int) string { return plansql.SlotName(family, n) }
 
 // ReservedSlotFamily returns the slot prefix name collides with, or "".
 func reservedSlotFamily(name string) string { return plansql.ReservedSlotFamily(name) }

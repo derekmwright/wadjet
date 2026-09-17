@@ -122,7 +122,7 @@ func groupKeyOutputs(agg *logical.Node) []groupKeyOut {
 		// column SPELLED like the key carries a DIFFERENT value under that
 		// name, and re-using it would group by the wrong column — which is
 		// the collision the slot exists for.
-		below = GroupKeysPublishedBelow(agg.Children[0])
+		below = groupKeysPublishedBelow(agg.Children[0])
 	}
 	haveExprs := len(agg.GroupByExprs) == len(agg.GroupBy)
 	// A literal key is elided only when a non-literal key remains: GROUP BY
@@ -288,7 +288,7 @@ func groupKeyByIdentity(agg *logical.Node) map[string]string {
 		// column reference can spell. Leaving that last one out re-parsed
 		// `g + 1` as arithmetic over a `g` the aggregate does not emit and
 		// answered NULL for every row (ADR-0026).
-		if !k.Derived && !k.Literal && !k.Minted && NameIsPlainColumn(k.Name) {
+		if !k.Derived && !k.Literal && !k.Minted && nameIsPlainColumn(k.Name) {
 			continue
 		}
 		if k.Identity == "" {
@@ -363,14 +363,14 @@ func (d ColDecls) has(name string) bool {
 	return ok
 }
 
-// GroupKeysPublishedBelow indexes, by identity, the group keys an Aggregate
+// groupKeysPublishedBelow indexes, by identity, the group keys an Aggregate
 // directly below n already publishes and the name it publishes each under.
 // Empty when there is no such aggregate — a scan, a join, a set operation and
 // a derived table all answer "nothing is already computed for you here".
 //
 // The walk descends only through nodes that pass an aggregate's own output
 // rows through unchanged.
-func GroupKeysPublishedBelow(n *logical.Node) map[string]string {
+func groupKeysPublishedBelow(n *logical.Node) map[string]string {
 	for n != nil {
 		switch n.Type {
 		case logical.NodeAggregate:

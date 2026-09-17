@@ -315,7 +315,7 @@ func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Sou
 		// projection that keeps every input column and appends the computed
 		// PARTITION BY / ORDER BY keys, so exec.Window resolves them by name
 		// like any other column (#585).
-		childOps = append(childOps, NewComputedColumnsOpWithMeta(keyProjections, keyMeta))
+		childOps = append(childOps, newComputedColumnsOpWithMeta(keyProjections, keyMeta))
 	}
 
 	if err := refuseUnwindowable(node.WindowExprs); err != nil {

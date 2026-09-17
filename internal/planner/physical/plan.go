@@ -42,7 +42,7 @@ var reverseBloomToggle = optswitch.Register("reverse-bloom", "WADJET_REVERSE_BLO
 // optimization it was written for ever engaged.
 var ReverseBloomsInstalled atomic.Int64
 
-// BuildSemiAntiFilter compiles a non-equality join filter string (e.g., "l_suppkey != l_suppkey")
+// buildSemiAntiFilter compiles a non-equality join filter string (e.g., "l_suppkey != l_suppkey")
 // into a function that evaluates the condition on probe and build batch rows.
 // Convention: left of operator = probe column, right = build column.
 //
@@ -55,9 +55,9 @@ var ReverseBloomsInstalled atomic.Int64
 // across the lifetime of the query (same logical plan → same projected
 // columns). Use sync.Once to resolve indices safely on first call; later
 // calls become a single relaxed atomic load on the once.done flag.
-// SemiAntiNE gates the distinct-pair semi/anti build fast path
+// semiAntiNE gates the distinct-pair semi/anti build fast path
 // (exec/join_semianti_ne.go). Kill switch WADJET_SEMIANTI_NE=0.
-var SemiAntiNE atomic.Bool
+var semiAntiNE atomic.Bool
 
 // resolveNullsLast determines whether nulls should sort last for a given order
 // expression. An explicit NULLS FIRST / NULLS LAST always wins; otherwise the

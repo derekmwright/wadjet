@@ -54,7 +54,7 @@ func (PlanContext) AggregateGroupKeyName(proj *logical.Projection, projectNode *
 }
 
 func (PlanContext) AssignJoinKeySides(leftKeys, rightKeys []string, probe, build *SubtreeNaming) {
-	AssignJoinKeySides(leftKeys, rightKeys, probe, build)
+	assignJoinKeySides(leftKeys, rightKeys, probe, build)
 }
 
 func (PlanContext) AstIsFieldPath(node plansql.Node, decls ColDecls) bool {
@@ -71,11 +71,11 @@ func (PlanContext) BlockPublishedColumns(p *logical.Node, published map[*logical
 }
 
 func (PlanContext) BuildJoinResidualFilter(filter, buildAlias string) func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {
-	return BuildJoinResidualFilter(filter, buildAlias)
+	return buildJoinResidualFilter(filter, buildAlias)
 }
 
 func (PlanContext) BuildStreamAlias(node *logical.Node) string {
-	return BuildStreamAlias(node)
+	return buildStreamAlias(node)
 }
 
 func (PlanContext) CleanExpr(s string) string {
@@ -99,7 +99,7 @@ func (PlanContext) CollectColRefsBelow(n plansql.Node, stop func(plansql.Node) b
 }
 
 func (PlanContext) CollectOuterColumns(node *logical.Node) map[string]string {
-	return CollectOuterColumns(node)
+	return collectOuterColumns(node)
 }
 
 func (PlanContext) CollectTableAliases(node *logical.Node) map[string]bool {
@@ -149,7 +149,7 @@ func (PlanContext) EmittedKeyNames(published []string, resolve []GroupKeyResolut
 }
 
 func (PlanContext) FindAggregateAncestor(node *logical.Node) *logical.Node {
-	return FindAggregateAncestor(node)
+	return findAggregateAncestor(node)
 }
 
 func (PlanContext) FindOutputProjectionNode(n *logical.Node) *logical.Node {
@@ -169,11 +169,11 @@ func (PlanContext) GroupKeyNames(agg, child *logical.Node) (published []string, 
 }
 
 func (PlanContext) HasFilterOrPartition(n *logical.Node) bool {
-	return HasFilterOrPartition(n)
+	return hasFilterOrPartition(n)
 }
 
 func (PlanContext) HasLimit(n *logical.Node) bool {
-	return HasLimit(n)
+	return hasLimit(n)
 }
 
 func (PlanContext) InferProjectionDeclType(node plansql.Node, fallback parquet.TypeID, strictInt map[string]bool, decls ColDecls) expr.DeclType {
@@ -223,15 +223,15 @@ func (PlanContext) LogicalAggOutNames(agg *logical.Node) []string {
 }
 
 func (PlanContext) MapJoinType(vt string) string {
-	return MapJoinType(vt)
+	return mapJoinType(vt)
 }
 
 func (PlanContext) MatchesPartitionFilter(partValues, filter map[string]string) bool {
-	return MatchesPartitionFilter(partValues, filter)
+	return matchesPartitionFilter(partValues, filter)
 }
 
 func (PlanContext) NameIsPlainColumn(s string) bool {
-	return NameIsPlainColumn(s)
+	return nameIsPlainColumn(s)
 }
 
 func (PlanContext) NamedArmScope(n *logical.Node) string {
@@ -239,7 +239,7 @@ func (PlanContext) NamedArmScope(n *logical.Node) string {
 }
 
 func (PlanContext) NewComputedColumnsOpWithMeta(cols []exec.ProjectColumn, meta []parquet.Column) exec.UnaryOperator {
-	return NewComputedColumnsOpWithMeta(cols, meta)
+	return newComputedColumnsOpWithMeta(cols, meta)
 }
 
 func (PlanContext) NodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Confidence) {
@@ -251,7 +251,7 @@ func (PlanContext) OwnedJoinArm(n *logical.Node, name string) *logical.Node {
 }
 
 func (PlanContext) ParseJoinKeys(cond string) (leftKeys, rightKeys, residual []string) {
-	return ParseJoinKeys(cond)
+	return parseJoinKeys(cond)
 }
 
 func (PlanContext) ProjSourceName(proj *logical.Projection) string {
@@ -393,7 +393,7 @@ func (PlanContext) SubstituteNestedRenameRefs(expr plansql.Node, child *logical.
 }
 
 func (PlanContext) SubtreeNamingOf(n *logical.Node) *SubtreeNaming {
-	return SubtreeNamingOf(n)
+	return subtreeNamingOf(n)
 }
 
 func (PlanContext) ValidateColumnsUnderPolicy(ctx context.Context, cat *catalog.Catalog, info *plansql.SelectInfo,
@@ -427,11 +427,11 @@ func (PlanContext) WithManifestSnapshot(ctx context.Context, snapshot *ManifestS
 	return context.WithValue(ctx, manifestSnapshotCtxKey{}, snapshot)
 }
 func (PlanContext) SetReverseBloomInnerThreshold(n int64) { ReverseBloomInnerThreshold = n }
-func (PlanContext) SemiAntiNE() *atomic.Bool              { return &SemiAntiNE }
+func (PlanContext) SemiAntiNE() *atomic.Bool              { return &semiAntiNE }
 func (PlanContext) SortMergeJoinsPlanned() *atomic.Int64  { return &SortMergeJoinsPlanned }
 
 func (PlanContext) BuildSemiAntiFilter(filter string) func(*batch.RecordBatch, int, *batch.RecordBatch, int) bool {
-	return BuildSemiAntiFilter(filter)
+	return buildSemiAntiFilter(filter)
 }
 func (PlanContext) SemiAntiBuildStoreCols(keys []string, filter string) []string {
 	return semiAntiBuildStoreCols(keys, filter)

@@ -15,12 +15,12 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/memory"
 )
 
-// DeferredJoinBridge creates a pipeline break for deferred hash join builds.
+// deferredJoinBridge creates a pipeline break for deferred hash join builds.
 // Init runs the child pipeline (scan → early probes) with parallel workers,
 // overlapping with the deferred build goroutine. After the child pipeline
 // completes, it waits for the build barrier, then replays collected batches
 // as a Source for the deferred probe operators.
-type DeferredJoinBridge struct {
+type deferredJoinBridge struct {
 	ChildSource exec.Source
 	ChildOps    []exec.UnaryOperator
 	Barrier     <-chan struct{}
@@ -31,7 +31,7 @@ type DeferredJoinBridge struct {
 	collector *exec.SpillableBatchCollector
 }
 
-func (d *DeferredJoinBridge) Init(ctx context.Context) error {
+func (d *deferredJoinBridge) Init(ctx context.Context) error {
 	// Run child pipeline (scan → early probes) to collect filtered batches.
 	// This overlaps with the deferred build goroutine(s) running in background.
 	// The collector charges the tracker and spills past pressure — the raw
@@ -69,11 +69,11 @@ func (d *DeferredJoinBridge) Init(ctx context.Context) error {
 	return nil
 }
 
-func (d *DeferredJoinBridge) Next(ctx context.Context) (*batch.RecordBatch, error) {
+func (d *deferredJoinBridge) Next(ctx context.Context) (*batch.RecordBatch, error) {
 	return d.collector.NextReplay(ctx)
 }
 
-func (d *DeferredJoinBridge) Close() error {
+func (d *deferredJoinBridge) Close() error {
 	if d.collector != nil {
 		d.collector.Release()
 	}
@@ -395,10 +395,10 @@ func (s *rightSemiFlushSource) Close() error {
 	return s.pipeline.Close()
 }
 
-// MapJoinType converts a join type string (e.g. "join", "left join",
+// mapJoinType converts a join type string (e.g. "join", "left join",
 // "right join", "full outer join", "cross join") to a canonical short
 // form used by the distributed planner.
-func MapJoinType(vt string) string {
+func mapJoinType(vt string) string {
 	lower := strings.ToLower(strings.TrimSpace(vt))
 	switch {
 	case lower == "cross" || strings.Contains(lower, "cross"):
@@ -418,8 +418,8 @@ func MapJoinType(vt string) string {
 	}
 }
 
-// MapExecJoinType converts a canonical join type string to exec.JoinType.
-func MapExecJoinType(jt string) exec.JoinType {
+// mapExecJoinType converts a canonical join type string to exec.JoinType.
+func mapExecJoinType(jt string) exec.JoinType {
 	switch jt {
 	case "left":
 		return exec.LeftJoin
@@ -438,13 +438,13 @@ func MapExecJoinType(jt string) exec.JoinType {
 	}
 }
 
-// ParseSemiAntiNE recognizes a join filter that is EXACTLY one
+// parseSemiAntiNE recognizes a join filter that is EXACTLY one
 // column-to-column not-equal condition ("l1.l_suppkey <> l2.l_suppkey").
 // That is the decorrelated-EXISTS self-inequality class the distinct-pair
 // build serves; anything else (conjunctions, other operators, literals)
 // returns ok=false and stays on the generic closure path.
-func ParseSemiAntiNE(filter string) (probeCol, buildCol string, ok bool) {
-	if !SemiAntiNE.Load() || filter == "" {
+func parseSemiAntiNE(filter string) (probeCol, buildCol string, ok bool) {
+	if !semiAntiNE.Load() || filter == "" {
 		return "", "", false
 	}
 	parts := strings.Split(strings.ToLower(filter), " and ")
@@ -490,7 +490,7 @@ func isBareColumnRef(s string) bool {
 	return hasLetter
 }
 
-func BuildSemiAntiFilter(filter string) func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {
+func buildSemiAntiFilter(filter string) func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {
 	type filterCond struct {
 		probeCol string
 		op       string
@@ -576,7 +576,7 @@ func BuildSemiAntiFilter(filter string) func(probe *batch.RecordBatch, probeRow 
 			}
 			pv := probe.Columns[pi]
 			bv := build.Columns[bi]
-			if !EvalFilterTyped(pv, bv, probeRow, buildRow, ops[i]) {
+			if !evalFilterTyped(pv, bv, probeRow, buildRow, ops[i]) {
 				return false
 			}
 		}
@@ -594,9 +594,9 @@ func filterColumnIndex(b *batch.RecordBatch, name string) int {
 	return exec.ColumnIndexFallback(b, name)
 }
 
-// EvalFilterTyped compares two vector values at given rows using typed dispatch.
+// evalFilterTyped compares two vector values at given rows using typed dispatch.
 // Avoids interface boxing and fmt.Sprint allocation on every comparison.
-func EvalFilterTyped(pv, bv *batch.Vector, pRow, bRow, op int) bool {
+func evalFilterTyped(pv, bv *batch.Vector, pRow, bRow, op int) bool {
 	const (
 		opNE = iota
 		opGT

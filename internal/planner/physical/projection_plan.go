@@ -28,7 +28,7 @@ func (p *Planner) buildFilter(ctx context.Context, node *logical.Node) (exec.Sou
 
 	// Collect outer table aliases and columns for correlated subquery detection
 	outerTables := collectTableAliases(node.Children[0])
-	outerCols := CollectOuterColumns(node.Children[0])
+	outerCols := collectOuterColumns(node.Children[0])
 
 	// Scan-level filter pushdown: when the filter sits directly on a
 	// catalog scan, eligible conjuncts move into the scan (dictionary-mask
@@ -91,7 +91,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		// where a ROW column and its fields live — the aggregate's own
 		// output carries neither.
 		var elideKeyDecls ColDecls
-		if agg := FindAggregateAncestor(child); agg != nil && len(agg.Children) == 1 {
+		if agg := findAggregateAncestor(child); agg != nil && len(agg.Children) == 1 {
 			elideKeyDecls = inputColDecls(agg.Children[0])
 		}
 		needsProject := false
@@ -139,8 +139,8 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			// keep the projection. Do not look through a Window: it appends __win_N beyond
 			// AggregateOutputNames' aggregate-only answer (#575). Sort and LIMIT add no
 			// columns and are safe to look through.
-			if names, ok := AggregateOutputNames(child); ok &&
-				!WrapsAWindow(child) && namesMatchProjections(names, node.Projections) {
+			if names, ok := aggregateOutputNames(child); ok &&
+				!wrapsAWindow(child) && namesMatchProjections(names, node.Projections) {
 				return p.buildPipeline(ctx, child)
 			}
 		}
@@ -151,7 +151,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		return nil, nil, nil, err
 	}
 
-	aggNode := FindAggregateAncestor(child)
+	aggNode := findAggregateAncestor(child)
 	isOverAggregate := aggNode != nil
 
 	// Which column a SELECT item that IS a derived GROUP BY key reads.
@@ -336,7 +336,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			// projection independently. (b) is what we do — recompiling
 			// a literal or already-compiled expression is cheap.
 			outerTables := collectTableAliases(child)
-			outerCols := CollectOuterColumns(child)
+			outerCols := collectOuterColumns(child)
 			var compiled expr.Expr
 			var compErr error
 			if len(outerTables) > 0 {

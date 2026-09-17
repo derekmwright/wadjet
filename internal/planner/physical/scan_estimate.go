@@ -39,7 +39,7 @@ func (p *Planner) EstimatePlanScanBytes(ctx context.Context, n *logical.Node) (i
 		}
 		for _, part := range meta.Partitions {
 			if len(n.PartitionFilter) > 0 && len(part.Values) > 0 &&
-				!MatchesPartitionFilter(part.Values, n.PartitionFilter) {
+				!matchesPartitionFilter(part.Values, n.PartitionFilter) {
 				continue
 			}
 			for _, f := range part.Files {
@@ -88,8 +88,8 @@ func (p *Planner) EstimatePlanScanBytes(ctx context.Context, n *logical.Node) (i
 func (p *Planner) EstimatePlanScanCost(ctx context.Context, n *logical.Node) QueryCost {
 	var cost QueryCost
 	p.accumulateScanCost(ctx, n, &cost)
-	cost.HasFilter = HasFilterOrPartition(n)
-	cost.HasLimit = HasLimit(n)
+	cost.HasFilter = hasFilterOrPartition(n)
+	cost.HasLimit = hasLimit(n)
 	return cost
 }
 
@@ -103,7 +103,7 @@ func (p *Planner) accumulateScanCost(ctx context.Context, n *logical.Node, cost 
 		if meta, err := p.GetManifest(ctx, n.TableName); err == nil {
 			for _, part := range meta.Partitions {
 				if len(n.PartitionFilter) > 0 && len(part.Values) > 0 &&
-					!MatchesPartitionFilter(part.Values, n.PartitionFilter) {
+					!matchesPartitionFilter(part.Values, n.PartitionFilter) {
 					continue
 				}
 				for _, f := range part.Files {

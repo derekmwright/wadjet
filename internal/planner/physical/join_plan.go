@@ -210,7 +210,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		return p.buildTableLessLateralJoin(ctx, node)
 	}
 
-	jt := MapJoinType(node.JoinType)
+	jt := mapJoinType(node.JoinType)
 	// An inner join with no condition at all IS a cross join (#376): the
 	// join reorderer emits this shape for a comma-joined relation with no
 	// edge to the rest of the chain, and reading the absent condition as a
@@ -218,7 +218,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	if jt == "inner" && strings.TrimSpace(node.JoinCond) == "" && node.JoinFilter == "" {
 		jt = "cross"
 	}
-	joinType := MapExecJoinType(jt)
+	joinType := mapExecJoinType(jt)
 	// An outer join may carry an ON residual (#358) — routed there by
 	// logical.routeOuterJoinOnResiduals — and with it, zero key pairs.
 	outerResidual := node.JoinFilter != "" &&
@@ -228,7 +228,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	var leftKeys, rightKeys []string
 	if jt != "cross" {
 		var residual []string
-		leftKeys, rightKeys, residual = ParseJoinKeys(node.JoinCond)
+		leftKeys, rightKeys, residual = parseJoinKeys(node.JoinCond)
 		if len(residual) > 0 {
 			return nil, nil, nil, refuseJoinCond(jt, node.JoinCond, residual)
 		}
@@ -238,8 +238,8 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		// Fix key assignment using plan-level column ownership: ensure left keys
 		// are probe-side and right keys are build-side. This avoids the expensive
 		// post-build FixKeyAssignment hash table rebuild.
-		AssignJoinKeySides(leftKeys, rightKeys,
-			SubtreeNamingOf(node.Children[0]), SubtreeNamingOf(node.Children[1]))
+		assignJoinKeySides(leftKeys, rightKeys,
+			subtreeNamingOf(node.Children[0]), subtreeNamingOf(node.Children[1]))
 	}
 
 	// Big-vs-big inner equi-joins route to sort-merge join when BOTH sides'
@@ -265,7 +265,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	}
 	// Multi-table build subtrees carry per-column origin aliases so each
 	// duplicate qualifies under its OWNING scan (nil for single-scan builds).
-	hj.BuildColOrigins = SubtreeNamingOf(node.Children[1]).MaterializedBuildColOrigins()
+	hj.BuildColOrigins = subtreeNamingOf(node.Children[1]).MaterializedBuildColOrigins()
 
 	// Grace Hash Join spill-to-disk: prevents OOM on large build sides (e.g.
 	// SF100 orders table at 150M rows). The shared MemTracker means multi-join
@@ -319,13 +319,13 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		leftKeys, rightKeys = rightKeys, leftKeys
 		hj.LeftKeys = leftKeys
 		hj.RightKeys = rightKeys
-		AssignJoinKeySides(leftKeys, rightKeys,
-			SubtreeNamingOf(node.Children[0]), SubtreeNamingOf(node.Children[1]))
+		assignJoinKeySides(leftKeys, rightKeys,
+			subtreeNamingOf(node.Children[0]), subtreeNamingOf(node.Children[1]))
 		// Update build-side alias + origins after swap
 		if alias := joinArmAlias(node.Children[1]); alias != "" {
 			hj.BuildTableAlias = alias
 		}
-		hj.BuildColOrigins = SubtreeNamingOf(node.Children[1]).MaterializedBuildColOrigins()
+		hj.BuildColOrigins = subtreeNamingOf(node.Children[1]).MaterializedBuildColOrigins()
 	}
 
 	// Plan-declared schemas for the two sides, read only when a side delivers
@@ -388,16 +388,16 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// Pre-compute post-build operations that can run in the build goroutine.
 	var keepCols []string
 	if joinType == exec.SemiJoin || joinType == exec.AntiJoin {
-		keepCols = ExtractFilterBuildColumns(node.JoinFilter)
+		keepCols = extractFilterBuildColumns(node.JoinFilter)
 	}
 	if (joinType == exec.SemiJoin || joinType == exec.AntiJoin) && node.JoinFilter != "" {
-		hj.SemiAntiFilter = BuildSemiAntiFilter(node.JoinFilter)
-		if pc, bc, ok := ParseSemiAntiNE(node.JoinFilter); ok {
+		hj.SemiAntiFilter = buildSemiAntiFilter(node.JoinFilter)
+		if pc, bc, ok := parseSemiAntiNE(node.JoinFilter); ok {
 			hj.SemiAntiNEProbeCol, hj.SemiAntiNEBuildCol = pc, bc
 		}
 	}
 	if outerResidual {
-		hj.Residual = BuildJoinResidualFilter(node.JoinFilter, hj.BuildTableAlias)
+		hj.Residual = buildJoinResidualFilter(node.JoinFilter, hj.BuildTableAlias)
 		if hj.Residual == nil {
 			// Refuse loudly rather than answer with the conjunct dropped —
 			// the pre-#358 failure mode this path replaced.
@@ -532,7 +532,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		}
 		probe.OutputExcludeProbe, probe.OutputExcludeBuild = joinHiddenPositions(node)
 
-		bridge := &DeferredJoinBridge{
+		bridge := &deferredJoinBridge{
 			ChildSource: leftSource,
 			ChildOps:    leftOps,
 			Barrier:     buildDone,

@@ -11,14 +11,14 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// ParseJoinKeys structurally extracts bare-column equality pairs; return all
+// parseJoinKeys structurally extracts bare-column equality pairs; return all
 // other conjuncts (expressions, literals, non-equi operators, disjunctions) as
 // residual for the caller to refuse, never as invented column names (#351).
 // Preserve qualifiers so self-join chains resolve exactly; the executor can
 // strip on miss for unqualified scan schemas, but ambiguous suffixes cannot
 // choose a relation. Exception: constant-to-constant conjuncts pass unchanged
 // as keys for the optimizer's 1 = 1 sentinel, preserving its cross product.
-func ParseJoinKeys(cond string) (leftKeys, rightKeys, residual []string) {
+func parseJoinKeys(cond string) (leftKeys, rightKeys, residual []string) {
 	cond = strings.TrimSpace(cond)
 	if cond == "" {
 		return nil, nil, nil
@@ -139,7 +139,7 @@ func joinArmAlias(node *logical.Node) string {
 	return findScanAlias(node)
 }
 
-// BuildStreamAlias is JoinArmAlias for the STAGE DAG, whose build stream
+// buildStreamAlias is JoinArmAlias for the STAGE DAG, whose build stream
 // is the arm's raw inner columns rather than its Project's output.
 //
 // A CTE reference still answers by name — `flattenCTEAliases` repoints the
@@ -148,7 +148,7 @@ func joinArmAlias(node *logical.Node) string {
 // answers by the scan below it, because that is the name the inner join
 // already qualified its duplicates with and therefore the name the stream
 // really carries.
-func BuildStreamAlias(node *logical.Node) string {
+func buildStreamAlias(node *logical.Node) string {
 	if node == nil {
 		return ""
 	}
@@ -192,7 +192,7 @@ func semiAntiBuildStoreCols(rightKeys []string, joinFilter string) []string {
 	if joinFilter == "" {
 		return nil
 	}
-	filterCols := ExtractFilterBuildColumns(joinFilter)
+	filterCols := extractFilterBuildColumns(joinFilter)
 	cols := make([]string, 0, len(rightKeys)+len(filterCols))
 	seen := make(map[string]bool, len(rightKeys)+len(filterCols))
 	for _, c := range rightKeys {
@@ -210,9 +210,9 @@ func semiAntiBuildStoreCols(rightKeys []string, joinFilter string) []string {
 	return cols
 }
 
-// ExtractFilterBuildColumns extracts the build-side column names from a
+// extractFilterBuildColumns extracts the build-side column names from a
 // semi/anti join filter string. Convention: right of operator = build column.
-func ExtractFilterBuildColumns(filter string) []string {
+func extractFilterBuildColumns(filter string) []string {
 	if filter == "" {
 		return nil
 	}

@@ -63,7 +63,7 @@ func windowOrderKeySlot(win *logical.Node, name string, isAgg bool) int {
 	if !ok {
 		return 0
 	}
-	agg := FindAggregateAncestor(win.Children[0])
+	agg := findAggregateAncestor(win.Children[0])
 	if agg == nil {
 		return 0
 	}

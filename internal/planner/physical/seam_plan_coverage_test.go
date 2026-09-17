@@ -30,7 +30,7 @@ func TestPrettyPrintIsTheLocalPipeline(t *testing.T) {
 }
 
 func TestHasFilterOrPartition_NilNode(t *testing.T) {
-	if HasFilterOrPartition(nil) {
+	if hasFilterOrPartition(nil) {
 		t.Error("expected false for nil node")
 	}
 }
@@ -40,20 +40,20 @@ func TestHasFilterOrPartition_DeepFilter(t *testing.T) {
 	filter := logical.NewFilter(scan, nil)
 	project := logical.NewProject(filter, nil)
 
-	if !HasFilterOrPartition(project) {
+	if !hasFilterOrPartition(project) {
 		t.Error("expected true for deeply nested filter")
 	}
 }
 
 func TestHasLimit_NilNode(t *testing.T) {
-	if HasLimit(nil) {
+	if hasLimit(nil) {
 		t.Error("expected false for nil node")
 	}
 }
 
 func TestHasLimit_NoLimit(t *testing.T) {
 	scan := logical.NewScan("t", "")
-	if HasLimit(scan) {
+	if hasLimit(scan) {
 		t.Error("expected false for scan without limit")
 	}
 }
@@ -63,7 +63,7 @@ func TestHasLimit_DeepLimit(t *testing.T) {
 	limit := logical.NewLimit(scan, 10, 0)
 	sort := logical.NewSort(limit, nil)
 
-	if !HasLimit(sort) {
+	if !hasLimit(sort) {
 		t.Error("expected true for deeply nested limit")
 	}
 }
@@ -82,7 +82,7 @@ func TestFormatBytes(t *testing.T) {
 		{2 * (1 << 40), "2.0TB"},
 	}
 	for _, tt := range tests {
-		got := FormatBytes(tt.input)
+		got := formatBytes(tt.input)
 		if got != tt.want {
 			t.Errorf("formatBytes(%d) = %q, want %q", tt.input, got, tt.want)
 		}
@@ -112,7 +112,7 @@ func TestMapJoinType(t *testing.T) {
 		{"", "inner"},
 	}
 	for _, tt := range tests {
-		got := MapJoinType(tt.input)
+		got := mapJoinType(tt.input)
 		if got != tt.want {
 			t.Errorf("MapJoinType(%q) = %q, want %q", tt.input, got, tt.want)
 		}
@@ -134,7 +134,7 @@ func TestMapExecJoinType(t *testing.T) {
 		{"unknown", exec.InnerJoin},
 	}
 	for _, tt := range tests {
-		got := MapExecJoinType(tt.input)
+		got := mapExecJoinType(tt.input)
 		if got != tt.want {
 			t.Errorf("mapExecJoinType(%q) = %v, want %v", tt.input, got, tt.want)
 		}
@@ -157,7 +157,7 @@ func TestParseJoinKeys(t *testing.T) {
 		{cond: "1 = 1", leftN: 1, rightN: 1},
 	}
 	for _, tt := range tests {
-		left, right, residual := ParseJoinKeys(tt.cond)
+		left, right, residual := parseJoinKeys(tt.cond)
 		if len(left) != tt.leftN || len(right) != tt.rightN || len(residual) != tt.residual {
 			t.Errorf("ParseJoinKeys(%q) = left=%v, right=%v, residual=%v, want %d left, %d right, %d residual",
 				tt.cond, left, right, residual, tt.leftN, tt.rightN, tt.residual)
@@ -194,9 +194,9 @@ func TestParseJoinKeysRefusesUnrepresentable(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, residual := ParseJoinKeys(tt.cond)
+			_, _, residual := parseJoinKeys(tt.cond)
 			if len(residual) == 0 {
-				left, right, _ := ParseJoinKeys(tt.cond)
+				left, right, _ := parseJoinKeys(tt.cond)
 				t.Fatalf("ParseJoinKeys(%q) reported no residual; it produced keys left=%v right=%v, "+
 					"which the executor would look up as column names", tt.cond, left, right)
 			}
@@ -220,7 +220,7 @@ func TestMatchesPartitionFilter(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := MatchesPartitionFilter(tt.partVals, tt.filter)
+			got := matchesPartitionFilter(tt.partVals, tt.filter)
 			if got != tt.want {
 				t.Errorf("MatchesPartitionFilter(%v, %v) = %v, want %v", tt.partVals, tt.filter, got, tt.want)
 			}
@@ -245,16 +245,16 @@ func TestEvalFilterTyped(t *testing.T) {
 	pv.Int32Data[1] = 20
 	bv.Int32Data[0] = 20
 	bv.Int32Data[1] = 20
-	if !EvalFilterTyped(pv, bv, 0, 0, opNE) {
+	if !evalFilterTyped(pv, bv, 0, 0, opNE) {
 		t.Error("10 != 20 should be true")
 	}
-	if EvalFilterTyped(pv, bv, 1, 1, opNE) {
+	if evalFilterTyped(pv, bv, 1, 1, opNE) {
 		t.Error("20 != 20 should be false")
 	}
-	if !EvalFilterTyped(pv, bv, 0, 0, opLT) {
+	if !evalFilterTyped(pv, bv, 0, 0, opLT) {
 		t.Error("10 < 20 should be true")
 	}
-	if !EvalFilterTyped(pv, bv, 1, 1, opEQ) {
+	if !evalFilterTyped(pv, bv, 1, 1, opEQ) {
 		t.Error("20 == 20 should be true")
 	}
 
@@ -265,13 +265,13 @@ func TestEvalFilterTyped(t *testing.T) {
 	tv := batch.NewVector(batch.TypeString, 2)
 	tv.BytesData.Set(0, []byte("b"))
 	tv.BytesData.Set(1, []byte("b"))
-	if !EvalFilterTyped(sv, tv, 0, 0, opNE) {
+	if !evalFilterTyped(sv, tv, 0, 0, opNE) {
 		t.Error("a != b should be true")
 	}
-	if EvalFilterTyped(sv, tv, 1, 1, opNE) {
+	if evalFilterTyped(sv, tv, 1, 1, opNE) {
 		t.Error("b != b should be false")
 	}
-	if !EvalFilterTyped(sv, tv, 0, 0, opLT) {
+	if !evalFilterTyped(sv, tv, 0, 0, opLT) {
 		t.Error("a < b should be true")
 	}
 }
@@ -292,7 +292,7 @@ func TestMapPredOp(t *testing.T) {
 		{"in", exec.CompareOp(-1)},
 	}
 	for _, tt := range tests {
-		got := MapPredOp(tt.op)
+		got := mapPredOp(tt.op)
 		if got != tt.want {
 			t.Errorf("mapPredOp(%q) = %d, want %d", tt.op, got, tt.want)
 		}
@@ -313,7 +313,7 @@ func TestDecimalFromBytes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := DecimalFromBytes(tt.input)
+			got := decimalFromBytes(tt.input)
 			if tt.wantZ && (got.Hi != 0 || got.Lo != 0) {
 				t.Errorf("decimalFromBytes(%v) = {Hi:%d, Lo:%d}, want zero", tt.input, got.Hi, got.Lo)
 			}
@@ -333,7 +333,7 @@ func TestIsURL(t *testing.T) {
 		{"data.json", false},
 	}
 	for _, tt := range tests {
-		got := IsURL(tt.input)
+		got := isURL(tt.input)
 		if got != tt.want {
 			t.Errorf("isURL(%q) = %v, want %v", tt.input, got, tt.want)
 		}
@@ -352,7 +352,7 @@ func TestIsGlob(t *testing.T) {
 		{"/path/to/file.parquet", false},
 	}
 	for _, tt := range tests {
-		got := IsGlob(tt.input)
+		got := isGlob(tt.input)
 		if got != tt.want {
 			t.Errorf("isGlob(%q) = %v, want %v", tt.input, got, tt.want)
 		}
@@ -360,7 +360,7 @@ func TestIsGlob(t *testing.T) {
 }
 
 func TestDBScanSource_Close_NilFields(t *testing.T) {
-	s := &DbScanSource{}
+	s := &dbScanSource{}
 	err := s.Close()
 	if err != nil {
 		t.Errorf("Close on nil fields should not error, got %v", err)
@@ -368,11 +368,11 @@ func TestDBScanSource_Close_NilFields(t *testing.T) {
 }
 
 func TestBuildTableFunctionSource_CSV_SepArg(t *testing.T) {
-	source, err := BuildTableFunctionSource("read_csv", []string{"/tmp/test.csv"}, map[string]string{"sep": "|"})
+	source, err := buildTableFunctionSource("read_csv", []string{"/tmp/test.csv"}, map[string]string{"sep": "|"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	csvSrc, ok := source.(*CsvTableFuncSource)
+	csvSrc, ok := source.(*csvTableFuncSource)
 	if !ok {
 		t.Fatalf("expected *physical.CsvTableFuncSource, got %T", source)
 	}
@@ -382,21 +382,21 @@ func TestBuildTableFunctionSource_CSV_SepArg(t *testing.T) {
 }
 
 func TestBuildTableFunctionSource_ReadJSONAuto(t *testing.T) {
-	source, err := BuildTableFunctionSource("read_json_auto", []string{"/tmp/data.json"}, nil)
+	source, err := buildTableFunctionSource("read_json_auto", []string{"/tmp/data.json"}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if _, ok := source.(*JsonTableFuncSource); !ok {
+	if _, ok := source.(*jsonTableFuncSource); !ok {
 		t.Errorf("expected *physical.JsonTableFuncSource for read_json_auto, got %T", source)
 	}
 }
 
 func TestBuildTableFunctionSource_ReadCSVAuto(t *testing.T) {
-	source, err := BuildTableFunctionSource("read_csv_auto", []string{"/tmp/data.csv"}, nil)
+	source, err := buildTableFunctionSource("read_csv_auto", []string{"/tmp/data.csv"}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if _, ok := source.(*CsvTableFuncSource); !ok {
+	if _, ok := source.(*csvTableFuncSource); !ok {
 		t.Errorf("expected *physical.CsvTableFuncSource for read_csv_auto, got %T", source)
 	}
 }
@@ -444,13 +444,13 @@ func TestResolveNullsLast(t *testing.T) {
 
 func TestExtractFilterBuildColumns(t *testing.T) {
 	// Empty
-	cols := ExtractFilterBuildColumns("")
+	cols := extractFilterBuildColumns("")
 	if cols != nil {
 		t.Errorf("expected nil for empty, got %v", cols)
 	}
 
 	// Simple equality
-	cols = ExtractFilterBuildColumns("e.id = u.id")
+	cols = extractFilterBuildColumns("e.id = u.id")
 	if len(cols) != 1 {
 		t.Fatalf("expected 1 column, got %d: %v", len(cols), cols)
 	}
@@ -464,13 +464,13 @@ func TestExtractFilterBuildColumns(t *testing.T) {
 	}
 
 	// Multiple conditions with AND
-	cols = ExtractFilterBuildColumns("a.x = b.x AND a.y = b.y")
+	cols = extractFilterBuildColumns("a.x = b.x AND a.y = b.y")
 	if len(cols) != 2 {
 		t.Fatalf("expected 2 columns, got %d: %v", len(cols), cols)
 	}
 
 	// No operator matches
-	cols = ExtractFilterBuildColumns("unknown stuff")
+	cols = extractFilterBuildColumns("unknown stuff")
 	if len(cols) != 0 {
 		t.Errorf("expected 0 columns for unrecognized filter, got %v", cols)
 	}

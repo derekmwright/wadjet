@@ -69,7 +69,7 @@ func (p *Planner) buildSortMergeJoin(ctx context.Context, node *logical.Node, le
 	// and nil for a NAMED ARM, whose Project has already run here — see
 	// materializedBuildColOrigins). This is a single-process operator, so it
 	// takes the same answer buildJoin does.
-	j.BuildColOrigins = SubtreeNamingOf(node.Children[1]).MaterializedBuildColOrigins()
+	j.BuildColOrigins = subtreeNamingOf(node.Children[1]).MaterializedBuildColOrigins()
 	if sm := p.getSpillManager(); sm != nil {
 		j.Spill = sm
 	}
@@ -117,7 +117,7 @@ func (p *Planner) buildSortMergeJoin(ctx context.Context, node *logical.Node, le
 		return nil, nil, nil, fmt.Errorf("building sort-merge join left side: %w", err)
 	}
 
-	return &SmjSourceAdapter{
+	return &smjSourceAdapter{
 		ChildSource: leftSource,
 		ChildOps:    leftOps,
 		join:        j,
@@ -136,11 +136,11 @@ type smjProbeSink struct {
 
 func (s smjProbeSink) Finalize(context.Context) error { return nil }
 
-// SmjSourceAdapter wraps the probe child pipeline + sort-merge join into a
+// smjSourceAdapter wraps the probe child pipeline + sort-merge join into a
 // Source (the sortSourceAdapter pattern): the first Next runs the probe
 // pipeline into the join — concurrently with the build goroutine — waits for
 // the build barrier, finalizes the merge, and streams joined batches.
-type SmjSourceAdapter struct {
+type smjSourceAdapter struct {
 	ChildSource exec.Source
 	ChildOps    []exec.UnaryOperator
 	join        *exec.SortMergeJoin
@@ -149,11 +149,11 @@ type SmjSourceAdapter struct {
 	initialized bool
 }
 
-func (s *SmjSourceAdapter) Init(ctx context.Context) error {
+func (s *smjSourceAdapter) Init(ctx context.Context) error {
 	return nil
 }
 
-func (s *SmjSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error) {
+func (s *smjSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error) {
 	if !s.initialized {
 		s.initialized = true
 		pipe := &exec.Pipeline{
@@ -177,12 +177,12 @@ func (s *SmjSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error)
 	return s.join.Next(ctx)
 }
 
-func (s *SmjSourceAdapter) Close() error {
+func (s *smjSourceAdapter) Close() error {
 	s.join.Close()
 	return s.ChildSource.Close()
 }
 
-func (s *SmjSourceAdapter) RowsScanned() int64 {
+func (s *smjSourceAdapter) RowsScanned() int64 {
 	if sp, ok := s.ChildSource.(exec.ScanStatsProvider); ok {
 		return sp.RowsScanned()
 	}

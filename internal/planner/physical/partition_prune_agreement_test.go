@@ -53,7 +53,7 @@ func TestBothPartitionPrunesAgreeOnAnAbsentKey(t *testing.T) {
 			map[string]string{"year": ""}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			phys := MatchesPartitionFilter(c.partValues, c.filter)
+			phys := matchesPartitionFilter(c.partValues, c.filter)
 			store := partition.MatchesFilter(c.partValues, c.filter)
 			if phys != store {
 				t.Fatalf("physical.matchesPartitionFilter = %v, partition.MatchesFilter = %v "+

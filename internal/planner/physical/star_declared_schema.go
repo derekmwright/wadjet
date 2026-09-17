@@ -156,9 +156,9 @@ func starJoinDeclaredOutputSchema(root *logical.Node,
 		return nil, false
 	}
 	excludeProbe, excludeBuild := joinHiddenPositions(join)
-	out := exec.JoinOutputSchema(MapExecJoinType(strings.ToLower(join.JoinType)),
+	out := exec.JoinOutputSchema(mapExecJoinType(strings.ToLower(join.JoinType)),
 		probe, build, joinArmAlias(join.Children[1]),
-		SubtreeNamingOf(join.Children[1]).MaterializedBuildColOrigins(),
+		subtreeNamingOf(join.Children[1]).MaterializedBuildColOrigins(),
 		false, joinProbeOutputFilter(join), excludeProbe, excludeBuild)
 	if len(out) == 0 {
 		return nil, false

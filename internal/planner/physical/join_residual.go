@@ -13,7 +13,7 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// BuildJoinResidualFilter evaluates non-equi ON conjuncts over each combined
+// buildJoinResidualFilter evaluates non-equi ON conjuncts over each combined
 // probe/build candidate before NULL-padding (#358); never filter above the join
 // or push into a preserved scan. Literals, arithmetic and SQL three-valued logic
 // are required: UNKNOWN rejects a candidate, and NOT UNKNOWN must not accept.
@@ -23,7 +23,7 @@ import (
 // NeededColumns must ship them. Unsupported shapes return nil: callers must refuse.
 // The camel-case battery's folded residual names do not distinguish this resolver.
 // See docs/internals/outer-join-residual-evaluation.md for the design.
-func BuildJoinResidualFilter(filter, buildAlias string) func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {
+func buildJoinResidualFilter(filter, buildAlias string) func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {
 	expr := parseJoinCondExpr(filter)
 	if expr == nil || !residualSupported(expr) {
 		return nil

@@ -16,12 +16,12 @@ import (
 // Plain renames stay pass-through: DAG consumers resolve back to sources.
 // Decline any projection that cannot map onto a published output.
 
-// NameIsPlainColumn reports whether a stage output's name is one an ordinary
+// nameIsPlainColumn reports whether a stage output's name is one an ordinary
 // column reference can spell — i.e. whether a consumer can name it at all.
 // A group key computed from an expression is emitted under the expression's
 // own TEXT ("g + 1"), which re-parses as arithmetic over a column the
 // aggregate's output does not carry.
-func NameIsPlainColumn(s string) bool {
+func nameIsPlainColumn(s string) bool {
 	if s == "" {
 		return false
 	}

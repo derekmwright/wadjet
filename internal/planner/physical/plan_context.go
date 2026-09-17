@@ -18,27 +18,27 @@ type PlanContext struct {
 func (p *Planner) PlanContext() *PlanContext { return &PlanContext{Planner: p} }
 
 func (PlanContext) AggregateOutputNames(node *logical.Node) ([]string, bool) {
-	return AggregateOutputNames(node)
+	return aggregateOutputNames(node)
 }
 
 func (PlanContext) GroupKeysPublishedBelow(node *logical.Node) map[string]string {
-	return GroupKeysPublishedBelow(node)
+	return groupKeysPublishedBelow(node)
 }
 
 func (PlanContext) WrapsAWindow(node *logical.Node) bool {
-	return WrapsAWindow(node)
+	return wrapsAWindow(node)
 }
 
 func (PlanContext) ScopePreservingWrapper(node *logical.Node) bool {
-	return ScopePreservingWrapper(node)
+	return scopePreservingWrapper(node)
 }
 
 // IsSortMergeSource reports whether a local pipeline uses the sort-merge source.
 func (PlanContext) IsSortMergeSource(source exec.Source) bool {
-	_, ok := source.(*SmjSourceAdapter)
+	_, ok := source.(*smjSourceAdapter)
 	return ok
 }
 
 func (PlanContext) ParseSemiAntiNE(filter string) (string, string, bool) {
-	return ParseSemiAntiNE(filter)
+	return parseSemiAntiNE(filter)
 }

@@ -82,7 +82,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				syntheticNames[i] = existing
 				continue
 			}
-			synName := SlotName(slotAggInput, i)
+			synName := slotName(slotAggInput, i)
 			// WITH THE OUTER SCOPE, exactly as the SELECT-list projection
 			// site compiles its own expressions (see the CompileWith*
 			// ladder above). Without it this site asked for none, so a
@@ -95,7 +95,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 			// level down — in a derived table's SELECT list — has always
 			// answered, because that site does ask.
 			aggOuterTables := collectTableAliases(node.Children[0])
-			aggOuterCols := CollectOuterColumns(node.Children[0])
+			aggOuterCols := collectOuterColumns(node.Children[0])
 			var compiled expr.Expr
 			var compErr error
 			if len(aggOuterTables) > 0 {

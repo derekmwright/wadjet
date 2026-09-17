@@ -25,8 +25,8 @@ func TestOwnsKeyRecognizesADerivedTablesOutputColumn(t *testing.T) {
 			}},
 		}
 	}
-	y := SubtreeNamingOf(derived("y", "n_nationkey", "b"))
-	z := SubtreeNamingOf(derived("z", "r_regionkey", "c"))
+	y := subtreeNamingOf(derived("y", "n_nationkey", "b"))
+	z := subtreeNamingOf(derived("z", "r_regionkey", "c"))
 
 	if !y.OwnsKey("y.b") {
 		t.Errorf("the y arm does not own y.b — its own output column")
@@ -44,7 +44,7 @@ func TestOwnsKeyRecognizesADerivedTablesOutputColumn(t *testing.T) {
 	// End to end: a pair written the other way round has to be swapped so
 	// leftKeys name the probe child.
 	left, right := []string{"z.c"}, []string{"y.b"}
-	AssignJoinKeySides(left, right, y, z)
+	assignJoinKeySides(left, right, y, z)
 	if left[0] != "y.b" || right[0] != "z.c" {
 		t.Errorf("AssignJoinKeySides left=%v right=%v, want left=[y.b] right=[z.c]", left, right)
 	}
@@ -54,7 +54,7 @@ func TestOwnsKeyRecognizesADerivedTablesOutputColumn(t *testing.T) {
 // fallback must not weaken: `n2.x` names n2's copy and no other, so a subtree
 // holding only n1 does not own it.
 func TestOwnsKeyStillRefusesTheOtherSelfJoinCopy(t *testing.T) {
-	n1 := SubtreeNamingOf(&logical.Node{Type: logical.NodeScan, TableName: "n", TableAlias: "n1",
+	n1 := subtreeNamingOf(&logical.Node{Type: logical.NodeScan, TableName: "n", TableAlias: "n1",
 		ScanColumns: []string{"id", "nm"}})
 	if !n1.OwnsKey("n1.nm") {
 		t.Errorf("the n1 subtree does not own n1.nm")
