@@ -35,10 +35,15 @@ import (
 // the harness, the scale parameter, and why the string collation is configured
 // rather than exempted.
 //
-// The suite SKIPS with no PostgreSQL reachable. There is no stored baseline: a
-// wire comparison has nothing a file could stand in for, and a stored file is
-// the artefact that twice made a wrong answer look like ground truth here.
+// The suite SKIPS under -short or with no PostgreSQL reachable. There is no
+// stored baseline: a wire comparison has nothing a file could stand in for,
+// and a stored file is the artefact that twice made a wrong answer look like
+// ground truth here.
 func TestPostgresOracle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("PostgreSQL oracle skipped under -short; run task pg-oracle:test")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	t.Cleanup(cancel)
 
