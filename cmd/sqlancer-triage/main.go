@@ -24,6 +24,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io/fs"
 	"os"
@@ -35,12 +36,14 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
+	page := flag.String("known-differences", "docs/postgres-differences.md", "deliberate PostgreSQL differences page")
+	flag.Parse()
+	if flag.NArg() < 1 {
 		fmt.Fprintln(os.Stderr, "usage: sqlancer-triage <file-or-dir>...")
 		os.Exit(2)
 	}
 
-	files, err := collectFiles(os.Args[1:])
+	files, err := collectFiles(flag.Args())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -50,7 +53,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	pageFile, err := os.Open(*page)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	known, err := triage.LoadKnownDifferences(pageFile)
+	pageFile.Close()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	report := triage.NewReport()
+	report.KnownDifferences = known
 	hadError := false
 	for _, f := range files {
 		if err := report.ClassifyFile(f); err != nil {

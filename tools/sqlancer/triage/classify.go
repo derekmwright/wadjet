@@ -88,6 +88,8 @@ const (
 	// the Postgres dialect's ExpectedErrors list — a SQL-surface gap or a
 	// by-design loud rejection, not an oracle-detected wrong answer.
 	CategoryUnexpectedError
+	// CategoryKnownDifference matches a deliberate difference on the documentation page.
+	CategoryKnownDifference
 )
 
 func (c Category) String() string {
@@ -104,6 +106,8 @@ func (c Category) String() string {
 		return "CERT violation"
 	case CategoryCrashEcho:
 		return "crash/panic/connection-loss"
+	case CategoryKnownDifference:
+		return "known difference"
 	case CategoryUnexpectedError:
 		return "unexpected error (noise)"
 	default:
@@ -129,12 +133,14 @@ func (c Category) IsGenuineViolation() bool {
 // nothing more to learn from the 4000th "Connection refused" than the
 // 1st).
 type Finding struct {
-	Category Category
-	Source   string // file path this was found in
-	Line     int    // 1-based line number of the header line
-	Header   string // the AssertionError/panic header line itself
-	Detail   string // header plus any message-continuation lines, before the stack trace
-	Queries  []string
+	Category  Category
+	Reason    string
+	Reference string
+	Source    string // file path this was found in
+	Line      int    // 1-based line number of the header line
+	Header    string // the AssertionError/panic header line itself
+	Detail    string // header plus any message-continuation lines, before the stack trace
+	Queries   []string
 	// OracleCheck names the specific oracle method whose stack frame
 	// produced this finding (e.g. "TLP-WHERE", "TLP-HAVING",
 	// "TLP-AGGREGATE", "NoREC", "PQS", "CERT"), when one of the frames
@@ -151,8 +157,9 @@ type Finding struct {
 
 // Report accumulates classification results across one or more sources.
 type Report struct {
-	Counts   map[Category]int
-	Findings []Finding
+	KnownDifferences KnownDifferences
+	Counts           map[Category]int
+	Findings         []Finding
 }
 
 // NewReport returns an empty Report ready for Classify/ClassifyFile calls.
@@ -390,6 +397,7 @@ func (r *Report) classifyAssertion(source string, lines []string, i int) int {
 
 	detailLines := []string{header}
 	oracleCheck := ""
+	var causes []string
 	inStack := false
 	j := i + 1
 	for ; j < len(lines); j++ {
@@ -420,6 +428,7 @@ func (r *Report) classifyAssertion(source string, lines []string, i int) int {
 				category = CategoryPQS
 			}
 		case strings.HasPrefix(trimmed, "Caused by:"):
+			causes = append(causes, l)
 			inStack = true
 		case strings.HasPrefix(trimmed, "... ") && strings.HasSuffix(trimmed, "more"):
 			inStack = true
@@ -432,15 +441,21 @@ func (r *Report) classifyAssertion(source string, lines []string, i int) int {
 		}
 	}
 done:
-	if category == CategoryUnexpectedError {
-		r.incr(CategoryUnexpectedError)
-		return j - 1
-	}
-
 	detail := strings.Join(detailLines, "\n")
+	reason, reference := "", ""
+	if entry, ok := r.KnownDifferences.Match(detail, strings.Join(causes, "\n")); ok {
+		category = CategoryKnownDifference
+		reason = entry.Heading
+		reference = fmt.Sprintf("docs/postgres-differences.md:%d", entry.Line)
+	}
+	if len(causes) > 0 {
+		detail += "\n" + strings.Join(causes, "\n")
+	}
 	r.incr(category)
 	r.Findings = append(r.Findings, Finding{
 		Category:    category,
+		Reason:      reason,
+		Reference:   reference,
 		Source:      source,
 		Line:        i + 1,
 		Header:      header,

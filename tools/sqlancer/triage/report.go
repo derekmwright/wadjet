@@ -18,6 +18,7 @@ var orderedCategories = []Category{
 	CategoryCERT,
 	CategoryCrashEcho,
 	CategoryUnexpectedError,
+	CategoryKnownDifference,
 }
 
 // Print writes a human-readable summary of r to w: counts per category,
@@ -45,10 +46,13 @@ func (r *Report) Print(w io.Writer) {
 	fmt.Fprintln(w, "--------")
 	for n, f := range r.Findings {
 		fmt.Fprintf(w, "[%d] %s (%s:%d)\n", n+1, f.Category, f.Source, f.Line)
+		if f.Reason != "" {
+			fmt.Fprintf(w, "    reason: %s (%s)\n", f.Reason, f.Reference)
+		}
 		if f.OracleCheck != "" {
 			fmt.Fprintf(w, "    oracle check: %s\n", f.OracleCheck)
 		}
-		if len(f.Queries) > 0 {
+		if len(f.Queries) > 0 && f.Category != CategoryUnexpectedError && f.Category != CategoryKnownDifference {
 			for _, q := range f.Queries {
 				fmt.Fprintf(w, "    query: %s\n", q)
 			}
