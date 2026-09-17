@@ -104,6 +104,17 @@ reconciliation both paths need, and the query-limit cost walk. dagplan imports
 physical; physical imports nothing back, and an MIT package that names a Stage
 no longer compiles.
 
+The planning seam is `physical.PlanContext`, obtained from
+`Planner.PlanContext()`. It shares the local planner's statement state and
+manifest snapshot, and provides methods for column declarations, emitted
+names, join-side schemas, set-operation arm types, window keys, group-key
+resolution and the cost walk. `dagplan.StagePlanner` embeds this context;
+argument-only walks use its zero value. Value types remain named where a
+caller stores or passes them. The [measurement](../design/seam-narrowing-measurement.md)
+records those names and their reasons, and `TestAGPLPhysicalReferenceBudget`
+limits package-qualified physical names across all AGPL packages, including
+tests.
+
 Two user-visible consequences follow, decided rather than discovered:
 
   - **The cost guard reads the logical plan.** `enforceQueryLimits` estimated
@@ -173,13 +184,12 @@ explicitly; the grant itself is unchanged.
   took the reachable-from-local set from 25 files to 44, and the move fell
   out of the compiler.
 - **The Planner is two planners.** `physical.Planner` is the local pipeline
-  planner; `dagplan.StagePlanner` embeds it and adds the 23 fields of
+  planner; `dagplan.StagePlanner` embeds its planning context and adds the 23 fields of
   per-build scratch stage emission keeps. Every embedded query used to carry
   those fields.
-- **physical exports what dagplan reads.** ~130 identifiers — the catalog, the
-  CTE list and the plan context on Planner, the declared-output and set-op
-  helpers, the subtree naming, the manifest accessors. That is the price of
-  the boundary being a package boundary, and it is paid once.
+- **physical exposes a planning context.** The shared planner state and local
+  planning operations are reached through `PlanContext`; the measurement
+  records the separate value types and constructors that callers still name.
 - **Two binaries to ship, two to document.** Every release publishes both;
   every `serve` in the documentation says which one.
 - **Per-directory `LICENSE` copies are duplication on purpose.** Thirteen

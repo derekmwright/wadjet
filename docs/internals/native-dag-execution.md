@@ -52,6 +52,14 @@ historical line numbers in older design notes.
 | Local fast path and routing counters | Already separate: `coordinator/local_fastpath.go`, `correlated_local.go` |
 | Shuffle dispatch and durability | `coordinator/dag_shuffle.go`; durability remains in `peer_locations.go`, `stage_read.go`, `orchestrate_repartition.go` |
 
+The local-planning boundary is [`physical.PlanContext`](../../internal/planner/physical/plan_context.go).
+`dagplan.StagePlanner` obtains it from the supplied local planner and shares
+that planner's statement state and manifest snapshot. Its methods provide
+local column declarations, naming, join and set-operation types, window keys,
+group-key resolution and cost estimates. Argument-only walks use a zero-value
+context. The [reference inventory](../design/seam-narrowing-measurement.md)
+records the remaining named values; the license checks also hold their count.
+
 ## Small-query local fast path (routing ahead of the DAG)
 
 Before planning a DAG, `ExecuteSQL` routes small queries onto a
