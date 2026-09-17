@@ -8,13 +8,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
-// A hidden __sortkey_N must be emitted by the sort's producer; ordinary DAG
-// Projects emit no stage (#424; #313/#316/#320). resolveHiddenSortKeys runs
-// after attachScanSelectProjections and leaves already-materialized keys alone.
-// Otherwise rename a plain-column key to the shipped source name, or project
-// a computed term under its hidden name via Stage.ProjectExprs/OpProject
-// (#383, #169). Gather uses the visible SELECT list; consumers use source names.
-// Leave unrecognized shapes unchanged to preserve loud failure, never invent order.
+// Resolve a derived alias to the source column its producer supplies. The
+// local sort uses that spelling when it has not materialized the alias itself.
+// The distributed caller is dagplan.resolveHiddenSortKeys (ADR-0037 §6): it
+// leaves materialized keys alone, renames a plain-column key to its source,
+// and projects a computed term under its hidden name (#424; #313/#316/#320).
+// That caller owns the projection and gather choices (#383, #169); this walk
+// only resolves names, returning no answer for a shape it cannot describe.
 // See docs/internals/hidden-sort-key-materialization.md for the design.
 
 // derivedAliasSourceColumn resolves a name that may be a DERIVED TABLE's or

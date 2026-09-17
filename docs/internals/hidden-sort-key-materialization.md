@@ -1,6 +1,6 @@
 # Hidden sort key materialization
 
-Source: internal/planner/physical/hidden_sort_key.go — resolveHiddenSortKeys, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/hidden_sort_key.go — resolveHiddenSortKeys (ADR-0037 §6).
 
 ```go
 // The synthetic ORDER BY key on the DAG, and the stage that has to emit it.

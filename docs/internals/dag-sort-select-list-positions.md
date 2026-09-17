@@ -1,6 +1,6 @@
 # Dag sort select list positions
 
-Source: internal/planner/physical/sort_plan.go — sortKeySlotPosStage, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/sort_plan.go — sortKeySlotPosStage (ADR-0037 §6).
 
 ```go
 // sortKeySlotPosStage is sortKeySlotPos for the DAG, which needs a stricter

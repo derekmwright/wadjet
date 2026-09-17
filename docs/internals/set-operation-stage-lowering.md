@@ -1,6 +1,6 @@
 # Set operation stage lowering
 
-Source: internal/planner/physical/set_op_types.go — emitSetOpStages, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/set_op_stages.go — emitSetOpStages (ADR-0037 §6).
 
 ```go
 // emitSetOpStages lowers a set-operation node onto the stage DAG.

@@ -130,7 +130,7 @@ the embedded engine per policy shape.
 
 ## Planning pipeline (logical → stages)
 
-`PlanDistributed` (`planner/physical/plan.go`):
+`dagplan.StagePlanner.PlanDistributed` (`coordinator/dagplan/plan.go`, ADR-0037 §6):
 1. `AnnotateScanColumns` — scan column metadata for shuffle-key assignment.
 2. `generateStages` (`stage_generation.go`) → `walkStages` (`stage_emission.go`) builds the raw stage list, then `fuseJoinStages` / CTE flattening.
 3. `assignStageDistributions` + `EnsureDistribution` (`plan.go`) — the **distribution-property system**: each `Stage` gets a `Distribution` (Singleton / HashPartitioned{keys,count} / …); `EnsureDistribution` inserts `exchange-*` stages where a stage's input requirement isn't met by its child's output. This is *the* mechanism that introduces shuffles.
@@ -298,7 +298,7 @@ reached a fragment emitting no such column and the task failed with
 `sort: key column "__sortkey_0" does not exist in the input schema` on a query
 the fast path answered (#424).
 
-`resolveHiddenSortKeys` (`planner/physical/hidden_sort_key.go`) settles them,
+`resolveHiddenSortKeys` (`coordinator/dagplan/hidden_sort_key.go`) settles them,
 and runs **last** in `PlanDistributed` — after `attachScanSelectProjections`,
 because the repair depends on what that pass did:
 
@@ -1236,7 +1236,7 @@ have.
 
 ## Set operations
 
-`planner/physical/set_op_types.go`. Until #346 `walkStages` walked both arms
+`coordinator/dagplan/set_op_stages.go` (ADR-0037 §6). Until #346 `walkStages` walked both arms
 of a set operation and emitted nothing else, on the comment *"each side runs
 independently; merge results at the end"* — and nothing merged. The terminal
 gather attached to whichever arm was emitted last, so a union answered with
@@ -1484,7 +1484,7 @@ answered **0, silently**, distributed-only.
 
 Mechanism (same refuse-loudly shape as set operations):
 
-- `Planner.refuseCorrelatedSubqueries` (`dagplan/correlated_refusal.go`) —
+- `dagplan.StagePlanner.refuseCorrelatedSubqueries` (`dagplan/correlated_refusal.go`) —
   pre-pass over the optimized logical plan, run at the top of
   `PlanDistributed`. Scope per expression is derived exactly as the
   single-process pipeline derives it when it DECIDES correlation
@@ -1629,9 +1629,9 @@ a subquery PREDICATE. Until #524 the DAG had nothing to execute one with:
 with *"IN subquery requires a SubqueryRunner"* while the single-process path
 answered correctly.
 
-Mechanism (`physical/in_subquery_set.go`, ADR-0021 §2):
+Mechanism (`dagplan/in_subquery_set.go`, ADR-0021 §2 and ADR-0037 §6):
 
-- `resolveSubqueryAST`'s `InExpr` arm calls `Planner.materializeInSubquery`,
+- `resolveSubqueryAST`'s `InExpr` arm calls `dagplan.StagePlanner.materializeInSubquery`,
   which executes the UNCORRELATED subquery once on the coordinator and rewrites
   the predicate to the literal list the expression layer already evaluates —
   three-valued over a NULL in the list (#370), the same rule #507 gave the
@@ -2021,7 +2021,7 @@ correctness of a distributed change before EC2.
 ## Where a LIMIT is applied
 
 Three things can bound a stream on the DAG. Deciding which one owns a given
-`NodeLimit` is `needsLimitStage` (`planner/physical/query_limits.go`):
+`NodeLimit` is `needsLimitStage` (`coordinator/dagplan/stage_cost.go`, ADR-0037 §6):
 
 | Applier | Reaches | How |
 |---|---|---|
