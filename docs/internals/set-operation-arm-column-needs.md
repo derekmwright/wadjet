@@ -29,4 +29,5 @@ arms answered 0 on all four arms.
 nil is "all columns" for this walk, and it is what an arm's own SELECT
 list narrows again on the way down: an arm with an explicit list is a
 Project, which builds its own needs set from its own items, so only the
-STAR arm — which has no Project at all — is widened by this.
+STAR arm without a Project is widened by this; an expanded join star
+narrows through its projection like an explicit list (ADR-0026 §9).

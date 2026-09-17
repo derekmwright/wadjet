@@ -60,9 +60,9 @@ func rewriteDistinctAsGroupBy(n *Node) *Node {
 
 // rewriteStarDistinct handles the one user DISTINCT that reaches the rewrite
 // with no Project below it: `SELECT DISTINCT *` (and `SELECT DISTINCT t.*`).
-// A bare-star select list produces no NodeProject at all, so the Distinct
-// sits directly on the relation and the projection-driven path above has no
-// projections to read.
+// A star over a single scan needs no Project, so the Distinct sits directly
+// on that relation. An expanded join star supplies a Project instead and
+// takes the projection-driven path above (ADR-0026 §9).
 //
 // Its group keys are the relation's own columns, taken from the same source
 // ExpandStarProjections reads when a star SHARES its select list with

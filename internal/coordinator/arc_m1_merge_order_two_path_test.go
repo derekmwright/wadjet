@@ -16,14 +16,14 @@ import (
 // rows differ in the three keys, so exactly one sequence is legal and ADR-0013
 // lists no nondeterminism class that covers one.
 //
-// A star DISTINCT over a self-join is the one user DISTINCT that reaches the
-// coordinator un-deduplicated. `rewriteDistinctAsGroupBy` gives every other
-// spelling a stage — a projection's items become GROUP BY keys, and a star
-// over ONE relation takes `rewriteStarDistinct` — but a star over a self-join
-// declines there (`starDistinctGroupKeys` refuses a name two scans publish,
-// because collapsing two columns into one over-deduplicates), so `walkStages`
-// passes the Distinct through (#163) and `dedupGatherResult` dedups and
-// RE-SORTS at the coordinator.
+// An expanded self-join star now supplies qualified projection items to
+// `rewriteDistinctAsGroupBy`, so its dedup uses those keys (ADR-0026 §9).
+// Before that expansion, a star over a self-join reached the coordinator
+// un-deduplicated: `starDistinctGroupKeys` declined a name two scans published,
+// because collapsing two columns into one would over-deduplicate. `walkStages`
+// passed that Distinct through (#163), and `dedupGatherResult` deduplicated
+// and re-sorted at the coordinator. The ordering defect below describes that
+// earlier path; this fixture still holds the query's complete ordering.
 //
 // That re-sort bound each key by an exact lookup in `mergeColIdx` and
 // `continue`d past a key that missed. The join publishes `[id order_id product

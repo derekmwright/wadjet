@@ -171,7 +171,7 @@ meets only its own slice of the build.
 | `NodeUnion` | `union` (+ a `GroupByAll` `final_aggregate` when not ALL) | `set_op_stages.go`. One task per arm: task *i* reads arm *i*'s whole output and projects it onto the result column names and types, so the stage's files ARE the concatenation. |
 | `NodeIntersect` / `NodeExcept` | `union` (with per-arm tag columns) + a grouped counting `final_aggregate` | `set_op_stages.go` (#346). The distribution pass inserts an `exchange-repartition` on the full result row between them — see §Set operations. |
 | **`NodeDistinct`** | **nothing — passthrough** | `default` case `stage_emission.go`; walks children only. No USER DISTINCT reaches here — `logical.rewriteDistinctAsGroupBy` (optimizer) turns every `Distinct(Project)` in the tree, at any depth, into an aggregate-free `NodeAggregate` first, so it rides the aggregate stages (#466 widened this from the root path only). What still passes through: planner-inserted `BuildSideDedup` Distincts (semi/anti build dedup, decorrelated semijoin key source), which carry no user-visible semantics, and root-path fallback shapes the coordinator dedups after the gather. A user Distinct anywhere else is REFUSED by `refuseUnstageableDistinct` (`dagplan/distinct_refusal.go`) rather than dropped, and the coordinator answers it on the local single-process pipeline. |
-| **`NodeProject`** | **nothing — passthrough**, unless a consumer needs it materialized | same `default` case; aliases recovered at gather, and every other consumer resolves them back to source names — see §Derived-table aliases and §Where a Filter and a Project land. ONE consumer cannot: a **STAR** has no name to resolve with and reads the stream by POSITION, so a derived block a star reads emits its own projection as the stage's column set (`starReadBlockProjections` / `publishBlockProjection` → `Stage.ProjectExprs`; ADR-0026 §7, #984). The join's keys, its OutputFilter, the declaration for an empty side and the hidden slot's ordinal all read the PUBLISHED list there. A block the pass cannot state is refused and routed local (`ErrLateralProjectionDistributed`, asked AFTER stage generation because that is where the answer is exact). |
+| **`NodeProject`** | **nothing — passthrough**, unless a consumer needs it materialized | same `default` case; aliases recovered at gather, and every other consumer resolves them back to source names — see §Derived-table aliases and §Where a Filter and a Project land. A **STAR** item carries resolution and publication names (ADR-0026 §9); the derived block it reads publishes its visible projection as the stage's column set (`starReadBlockProjections` / `publishBlockProjection` → `Stage.ProjectExprs`; ADR-0026 §7, #984). The join's keys, its OutputFilter, the declaration for an empty side and the hidden slot's ordinal all read the PUBLISHED list there. A block the pass cannot state is refused and routed local (`ErrLateralProjectionDistributed`, asked AFTER stage generation because that is where the answer is exact). |
 
 ## Where a Filter and a Project land (the #656 class)
 
@@ -1137,8 +1137,8 @@ A DISTINCT is executed by being turned into a GROUP BY. Three outcomes, and no s
 | Shape | What happens |
 |---|---|
 | `SELECT DISTINCT a, b + c AS x …` — every projection is a usable group key | **Rewritten in place**, wherever the Distinct sits. Sharded. |
-| `SELECT DISTINCT *` / `SELECT DISTINCT t.*` — no `NodeProject` exists at all (a bare-star select list produces none), so the plan is `Distinct → Scan` or `Distinct → Filter → Scan` or `Distinct → Join(Scan, Scan)` | **Rewritten in place** by `rewriteStarDistinct`: the group keys are the relation's own columns, read off `Node.ScanColumns` (the catalog annotation `ExpandStarProjections` uses). Descends only through column-preserving nodes — a Filter, and a join that emits BOTH sides — and declines a semi/anti join, a nested aggregate/projection, an unannotated scan, or a name that appears in two scans (one group key cannot stand for two columns). Sharded. |
-| `SELECT DISTINCT a, SUM(b) …` (an aggregate projection has no group key), a projection carrying a subquery, or a star over a SELF-JOIN (the third row's decline: one name in two scans) | **Not rewritten.** On the ROOT path `ExecuteSQL` applies `dedupGatherResult` over the projected gather output (`MergeInfo.HasDistinct`) — correct, but single-node at the coordinator. Anywhere else nothing on the DAG would apply it, so `PlanDistributed` returns `ErrDistinctDistributed` (`planner/dagplan/distinct_refusal.go`) and the coordinator **routes the query to its local single-process pipeline** (`Coordinator.runDistinctLocal`, `coordinator/refused_local.go`) — the #359 pattern, counter `DistinctLocalRoutes()`. |
+| A `SELECT DISTINCT *` with no `NodeProject` below it, such as `Distinct → Scan` or `Distinct → Filter → Scan`; an expanded join star instead supplies a projection to the preceding row (ADR-0026 §9) | **Rewritten in place** by `rewriteStarDistinct`: the group keys are the relation's own columns, read off `Node.ScanColumns` (the catalog annotation `ExpandStarProjections` uses). Descends only through column-preserving nodes — a Filter, and a join that emits BOTH sides — and declines a semi/anti join, a nested aggregate/projection, an unannotated scan, or a name that appears in two scans (one group key cannot stand for two columns). Sharded. |
+| `SELECT DISTINCT a, SUM(b) …` (an aggregate projection has no group key), a projection carrying a subquery, or an unexpanded star whose relation keys cannot be enumerated (expanded self-join stars use their qualified projection keys, ADR-0026 §9) | **Not rewritten.** On the ROOT path `ExecuteSQL` applies `dedupGatherResult` over the projected gather output (`MergeInfo.HasDistinct`) — correct, but single-node at the coordinator. Anywhere else nothing on the DAG would apply it, so `PlanDistributed` returns `ErrDistinctDistributed` (`planner/dagplan/distinct_refusal.go`) and the coordinator **routes the query to its local single-process pipeline** (`Coordinator.runDistinctLocal`, `coordinator/refused_local.go`) — the #359 pattern, counter `DistinctLocalRoutes()`. |
 
 **The coordinator's dedup does not preserve order, so it re-applies the ORDER
 BY — and that re-sort has to BIND the query's keys** (#1002). `dedupGatherResult`
@@ -1435,18 +1435,17 @@ the file's (the stream), so one stage writes two relations — ADR-0010.
 
 Mechanism (the same refuse-and-route shape as the correlated subqueries below):
 
-- `Planner.refuseLateralProjection`
-  (`dagplan/lateral_projection_refusal.go`) — pre-pass over the optimized
-  logical plan, run in `PlanDistributed` beside `refuseCorrelatedSubqueries`.
-  It descends carrying `projected`: a `Project` between the root and the join
-  means the statement NAMED its columns, and a named list is resolved by name
-  on both paths, so only a join whose own output IS the statement's output is
-  examined. At such a join it compares the lateral side's projection with
-  `lateralStreamNames` — the first node below it that is not a Project — and
-  reports the first published name the stream does not carry, or carries only
-  once for two publishes. The MINTED correlation slot is excluded, because the
-  join drops it: `SELECT COUNT(*) AS n` publishes `__key_0, n` over a stream of
-  `order_id, n` and stays distributed.
+- `dagplan.refuseUnpublishedStarBlock`
+  (`dagplan/lateral_projection_refusal.go`) runs AFTER stage generation in
+  `PlanDistributed`. It compares the blocks a star reads with the blocks whose
+  projections were actually published. A name comparison before emission
+  cannot decide whether a fragment can materialize the list (ADR-0026 §7, §9).
+  Each block must publish its visible projection, and each star item keeps its
+  resolution spelling alongside its published name. A computed item whose
+  type cannot be stated, an expression its producer cannot supply, or a
+  projection placement that would hide ordering leaves the block unpublished
+  and produces the refusal. A minted correlation slot is removed by the join
+  that minted it; it is not part of the block's visible list (ADR-0026 §3c, §9).
 - Typed error `dagplan.ErrLateralProjectionDistributed`; the coordinator
   matches it after `PlanDistributed` and answers on the coordinator-local
   single-process pipeline (`Coordinator.runLateralProjectionLocal`), where the

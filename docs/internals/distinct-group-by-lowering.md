@@ -29,9 +29,9 @@ Scope:
   - A Distinct marked BuildSideDedup is planner-inserted (semi/anti build
     dedup, decorrelated semijoin key source), carries no user-visible
     semantics, and has dedicated physical handling. Left alone.
-  - `SELECT DISTINCT *` has no Project below it at all — a bare-star
-    select list produces none — so it takes the branch below into
-    rewriteStarDistinct, which reads the group keys off the relation.
+  - A `SELECT DISTINCT *` without a Project takes rewriteStarDistinct,
+    which reads group keys off the relation. An expanded join star has a
+    Project and uses its qualified items as group keys (ADR-0026 §9).
   - Aggregate projections (SELECT DISTINCT a, SUM(b) …) and subquery
     expressions still fall through: neither has a group key. On the root
     path the coordinator dedup (MergeInfo.HasDistinct) answers them;
