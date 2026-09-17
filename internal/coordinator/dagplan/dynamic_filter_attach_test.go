@@ -256,7 +256,7 @@ func TestParseSemiAntiNE(t *testing.T) {
 		{"", "", "", false},
 	}
 	for _, c := range cases {
-		p, b, ok := physical.ParseSemiAntiNE(c.filter)
+		p, b, ok := (physical.PlanContext{}).ParseSemiAntiNE(c.filter)
 		if ok != c.wantOK || p != c.wantProbe || b != c.wantBuild {
 			t.Errorf("ParseSemiAntiNE(%q) = (%q,%q,%v), want (%q,%q,%v)",
 				c.filter, p, b, ok, c.wantProbe, c.wantBuild, c.wantOK)
@@ -264,7 +264,7 @@ func TestParseSemiAntiNE(t *testing.T) {
 	}
 	physical.SemiAntiNE.Store(false)
 	defer physical.SemiAntiNE.Store(true)
-	if _, _, ok := physical.ParseSemiAntiNE("a.x <> b.y"); ok {
+	if _, _, ok := (physical.PlanContext{}).ParseSemiAntiNE("a.x <> b.y"); ok {
 		t.Fatal("kill switch must disable recognition")
 	}
 }

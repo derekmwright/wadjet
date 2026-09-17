@@ -159,7 +159,7 @@ func TestAggScopePreservingWrapperIsReadByEveryWalk(t *testing.T) {
 		// physical.GroupKeysPublishedBelow returns a (possibly empty) map when it
 		// reaches an aggregate and nil when it declines, which is the same
 		// yes/no one level down.
-		if reached := physical.GroupKeysPublishedBelow(wrapped) != nil; reached != w {
+		if reached := (physical.PlanContext{}).GroupKeysPublishedBelow(wrapped) != nil; reached != w {
 			t.Errorf("groupKeysPublishedBelow through %v reached=%v, want %v — the THIRD walk "+
 				"stopped reading physical.AggScopePreservingWrapper", typ, reached, w)
 		}
@@ -172,7 +172,7 @@ func TestAggScopePreservingWrapperIsReadByEveryWalk(t *testing.T) {
 				"walk stopped reading physical.AggScopePreservingWrapper (#774)", typ, found != nil, w)
 		}
 		// The fifth answers the aggregate's OUTPUT NAMES through the wrapper.
-		if _, ok := physical.AggregateOutputNames(wrapped); ok != w {
+		if _, ok := (physical.PlanContext{}).AggregateOutputNames(wrapped); ok != w {
 			t.Errorf("aggregateOutputNames through %v ok=%v, want %v — the FIFTH walk stopped "+
 				"reading physical.AggScopePreservingWrapper (#575 under a window)", typ, ok, w)
 		}
@@ -182,7 +182,7 @@ func TestAggScopePreservingWrapperIsReadByEveryWalk(t *testing.T) {
 		// node that ADDS a column. It is asserted here because it walks the
 		// same list: if the list grows a kind, this says whether the refinement
 		// still means what its name says.
-		if got := physical.WrapsAWindow(wrapped); got != (typ == logical.NodeWindow) {
+		if got := (physical.PlanContext{}).WrapsAWindow(wrapped); got != (typ == logical.NodeWindow) {
 			t.Errorf("wrapsAWindow through %v = %v, want %v — the elision guard and the walk it "+
 				"refines have drifted", typ, got, typ == logical.NodeWindow)
 		}

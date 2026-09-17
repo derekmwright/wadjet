@@ -120,7 +120,7 @@ func TestSortMergeJoinGate_RoutesBigInnerJoin(t *testing.T) {
 	sql := "SELECT id, val, rval FROM smj_l JOIN smj_r ON smj_l.id = smj_r.rid"
 
 	plan := planSQL(t, cat, sql, 1)
-	if _, ok := plan.Pipeline.Source.(*physical.SmjSourceAdapter); !ok {
+	if !(physical.PlanContext{}).IsSortMergeSource(plan.Pipeline.Source) {
 		t.Fatalf("expected physical.SmjSourceAdapter source under forced threshold, got %T", plan.Pipeline.Source)
 	}
 	if err := plan.Pipeline.Run(context.Background()); err != nil {
@@ -146,7 +146,7 @@ func TestSortMergeJoinGate_DormantByDefault(t *testing.T) {
 
 	before := physical.SortMergeJoinsPlanned.Load()
 	plan := planSQL(t, cat, sql, 0)
-	if _, ok := plan.Pipeline.Source.(*physical.SmjSourceAdapter); ok {
+	if (physical.PlanContext{}).IsSortMergeSource(plan.Pipeline.Source) {
 		t.Fatal("SMJ planned with threshold 0 — the gate must be dormant by default")
 	}
 	if got := physical.SortMergeJoinsPlanned.Load(); got != before {
@@ -164,7 +164,7 @@ func TestSortMergeJoinGate_SkipsNonInner(t *testing.T) {
 	sql := "SELECT id, val, rval FROM smj_l LEFT JOIN smj_r ON smj_l.id = smj_r.rid"
 
 	plan := planSQL(t, cat, sql, 1)
-	if _, ok := plan.Pipeline.Source.(*physical.SmjSourceAdapter); ok {
+	if (physical.PlanContext{}).IsSortMergeSource(plan.Pipeline.Source) {
 		t.Fatal("LEFT JOIN must not take the sort-merge path in v1")
 	}
 	if err := plan.Pipeline.Run(context.Background()); err != nil {
@@ -183,7 +183,7 @@ func TestSortMergeJoinGate_SkipsSmallSides(t *testing.T) {
 	sql := "SELECT id, val, rval FROM smj_l JOIN smj_r ON smj_l.id = smj_r.rid"
 
 	plan := planSQL(t, cat, sql, 1<<40)
-	if _, ok := plan.Pipeline.Source.(*physical.SmjSourceAdapter); ok {
+	if (physical.PlanContext{}).IsSortMergeSource(plan.Pipeline.Source) {
 		t.Fatal("tiny sides must not take the sort-merge path")
 	}
 }

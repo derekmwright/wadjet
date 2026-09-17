@@ -1,0 +1,281 @@
+// SPDX-License-Identifier: MIT
+
+package physical
+
+import (
+	"sort"
+	"testing"
+
+	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
+)
+
+// TestJoinKeyLadderMatchesPostgresOperatorResolution pins physical.JoinKeyCommonType
+// against a transcript taken live off postgres:17.11's EXPLAIN VERBOSE, over
+// a table with one column of each numeric type. The transcript, verbatim:
+//
+//	ON x.a = y.b  (int4, int8)     Merge Cond: (x.a = y.b)
+//	ON x.a = y.c  (int4, float4)   Merge Cond: (((x.a)::double precision) = y.c)
+//	ON x.a = y.e  (int4, numeric)  Merge Cond: (((x.a)::numeric) = y.e)
+//	ON x.b = y.d  (int8, float8)   Merge Cond: (((x.b)::double precision) = y.d)
+//	ON x.c = y.d  (float4, float8) Merge Cond: (x.c = y.d)            [float48eq]
+//	ON x.c = y.e  (float4, numeric) Merge Cond: (x.c = ((y.e)::double precision))
+//	ON x.d = y.f  (float8, numeric) Merge Cond: (x.d = ((y.f)::double precision))
+//	ON x.e = y.f  (numeric(9,2), numeric(18,4)) Merge Cond: (x.e = y.f)
+//
+// Two readings need stating because the cast printed is not always the whole
+// answer. `((x.a)::double precision) = y.c` is float8 = float4, which
+// PostgreSQL resolves with float84eq — the float4 side widens too, so the
+// comparison happens at float8. `x.c = y.d` prints no cast at all and is
+// float48eq, which likewise compares at float8. Both are float8 rungs here.
+//
+// This is the OPERATOR ladder. The SET-OPERATION ladder (physical.SetOpWiden,
+// TestSetOpWidenLadder) is different where float4 is involved — `numeric ∪
+// real` is real and `int ∪ real` is real — and the two must not be merged.
+func TestJoinKeyLadderMatchesPostgresOperatorResolution(t *testing.T) {
+	const (
+		i32 = parquet.TypeInt32
+		i64 = parquet.TypeInt64
+		f32 = parquet.TypeFloat32
+		f64 = parquet.TypeFloat64
+		dec = parquet.TypeDecimal
+	)
+	cases := []struct {
+		a, b parquet.TypeID
+		want parquet.TypeID
+		ok   bool
+	}{
+		// The diagonal: nothing to widen, and the KEY must not move.
+		{i32, i32, 0, false}, {i64, i64, 0, false}, {f32, f32, 0, false},
+		{f64, f64, 0, false}, {dec, dec, 0, false},
+
+		{i32, i64, i64, true}, {i64, i32, i64, true},
+		{i32, f32, f64, true}, {f32, i32, f64, true},
+		{i64, f32, f64, true}, {f32, i64, f64, true},
+		{i32, f64, f64, true}, {f64, i32, f64, true},
+		{i64, f64, f64, true}, {f64, i64, f64, true},
+		{f32, f64, f64, true}, {f64, f32, f64, true},
+		{i32, dec, dec, true}, {dec, i32, dec, true},
+		{i64, dec, dec, true}, {dec, i64, dec, true},
+		{f32, dec, f64, true}, {dec, f32, f64, true},
+		{f64, dec, f64, true}, {dec, f64, f64, true},
+
+		// Off the ladder entirely: a STRING key, a DATE against a TIMESTAMP,
+		// an IPv4 against a BIGINT. Declining leaves the encoding exactly
+		// where it was — widening them is a different question with a
+		// different authority, and there is no PostgreSQL transcript here to
+		// answer it with.
+		{parquet.TypeString, parquet.TypeString, 0, false},
+		{parquet.TypeDate, parquet.TypeTimestamp, 0, false},
+		{parquet.TypeIPv4, i64, 0, false},
+		{i64, parquet.TypeIPv4, 0, false},
+		{parquet.TypeBool, i32, 0, false},
+	}
+	for _, c := range cases {
+		got, ok := JoinKeyCommonType(c.a, c.b)
+		if ok != c.ok || (ok && got != c.want) {
+			t.Errorf("joinKeyCommonType(%v, %v) = (%v, %v), want (%v, %v)",
+				c.a, c.b, got, ok, c.want, c.ok)
+		}
+	}
+	// The ladder must be SYMMETRIC: which side of the `=` a column is
+	// spelled on cannot change the type both sides key at, or
+	// physical.AssignJoinKeySides' swap would change the answer.
+	for _, a := range []parquet.TypeID{i32, i64, f32, f64, dec} {
+		for _, b := range []parquet.TypeID{i32, i64, f32, f64, dec} {
+			ab, aok := JoinKeyCommonType(a, b)
+			ba, bok := JoinKeyCommonType(b, a)
+			if aok != bok || ab != ba {
+				t.Errorf("asymmetric: (%v,%v)=(%v,%v) but (%v,%v)=(%v,%v)",
+					a, b, ab, aok, b, a, ba, bok)
+			}
+		}
+	}
+}
+
+// TestResolveJoinKeyTypesDeclinesWhatItCannotType covers the answers that are
+// deliberately "leave it alone": the pre-#615 behaviour, which is correct for
+// every pair whose two sides already agree and is the only safe answer for a
+// pair neither side can be typed for.
+func TestResolveJoinKeyTypesDeclinesWhatItCannotType(t *testing.T) {
+	scan := func(alias string, cols map[string]parquet.TypeID) *logical.Node {
+		n := &logical.Node{Type: logical.NodeScan, TableName: alias}
+		n.ScanColTypes = map[string]parquet.TypeID{}
+		for c, tp := range cols {
+			n.ScanColumns = append(n.ScanColumns, c)
+			n.ScanColTypes[c] = tp
+		}
+		return n
+	}
+	join := func(l, r *logical.Node) *logical.Node {
+		return &logical.Node{Type: logical.NodeJoin, Children: []*logical.Node{l, r}}
+	}
+
+	t.Run("SameTypeIsNil", func(t *testing.T) {
+		n := join(
+			scan("a", map[string]parquet.TypeID{"x": parquet.TypeInt64}),
+			scan("b", map[string]parquet.TypeID{"y": parquet.TypeInt64}))
+		if got := ResolveJoinKeyTypes(n, []string{"a.x"}, []string{"b.y"}, nil); got != nil {
+			t.Errorf("a same-type pair resolved %v, want nil — the operator must keep "+
+				"the exact path it had before", got)
+		}
+	})
+	t.Run("CrossWidthResolves", func(t *testing.T) {
+		n := join(
+			scan("a", map[string]parquet.TypeID{"x": parquet.TypeInt64}),
+			scan("b", map[string]parquet.TypeID{"y": parquet.TypeDecimal}))
+		got := ResolveJoinKeyTypes(n, []string{"a.x"}, []string{"b.y"}, nil)
+		if len(got) != 1 || got[0] != parquet.TypeDecimal {
+			t.Errorf("int64 vs DECIMAL resolved %v, want [DECIMAL]", got)
+		}
+	})
+	t.Run("UntypedKeyDeclines", func(t *testing.T) {
+		n := join(
+			scan("a", map[string]parquet.TypeID{"x": parquet.TypeInt64}),
+			scan("b", map[string]parquet.TypeID{"y": parquet.TypeDecimal}))
+		if got := ResolveJoinKeyTypes(n, []string{"a.nosuch"}, []string{"b.y"}, nil); got != nil {
+			t.Errorf("an unresolvable key resolved %v, want nil", got)
+		}
+	})
+	t.Run("AmbiguousNameDeclines", func(t *testing.T) {
+		// One SIDE carrying the name at two different types cannot decide
+		// the pair: resolving it against whichever scan the walk reached
+		// first is a silently different join. Deleting the name is the same
+		// answer inputColTypes gives for the same situation.
+		inner := join(
+			scan("a1", map[string]parquet.TypeID{"x": parquet.TypeInt64}),
+			scan("a2", map[string]parquet.TypeID{"x": parquet.TypeFloat32}))
+		n := join(inner, scan("b", map[string]parquet.TypeID{"y": parquet.TypeDecimal}))
+		if got := ResolveJoinKeyTypes(n, []string{"x"}, []string{"b.y"}, nil); got != nil {
+			t.Errorf("an ambiguous key resolved %v, want nil", got)
+		}
+	})
+	t.Run("MixedPairsResolvePerPair", func(t *testing.T) {
+		// Two key columns, one pair needing widening and one not: the
+		// unmoved pair must come back KeyTypeUnresolved, not the other
+		// pair's type.
+		n := join(
+			scan("a", map[string]parquet.TypeID{"x": parquet.TypeInt64, "s": parquet.TypeString}),
+			scan("b", map[string]parquet.TypeID{"y": parquet.TypeFloat64, "t": parquet.TypeString}))
+		got := ResolveJoinKeyTypes(n, []string{"a.x", "a.s"}, []string{"b.y", "b.t"}, nil)
+		if len(got) != 2 || got[0] != parquet.TypeFloat64 || got[1] != exec.KeyTypeUnresolved {
+			t.Errorf("resolved %v, want [FLOAT64 unresolved]", got)
+		}
+	})
+	t.Run("SemiAntiBuildThroughAProjectResolves", func(t *testing.T) {
+		// `x IN (SELECT y FROM t)` narrows its build side to
+		// Project(keys) → Distinct (dedupSemiAntiBuildSide), which is the
+		// shape inputColTypes cannot see through — and the one #615's
+		// executeSemiAntiJoin panic came out of.
+		build := &logical.Node{
+			Type: logical.NodeProject,
+			Projections: []logical.Projection{
+				{Column: "y", Alias: "y"},
+			},
+			Children: []*logical.Node{
+				scan("b", map[string]parquet.TypeID{"y": parquet.TypeInt64}),
+			},
+		}
+		n := join(scan("a", map[string]parquet.TypeID{"x": parquet.TypeDecimal}), build)
+		got := ResolveJoinKeyTypes(n, []string{"a.x"}, []string{"b.y"}, nil)
+		if len(got) != 1 || got[0] != parquet.TypeDecimal {
+			t.Errorf("a DECIMAL probe against a projected BIGINT build resolved %v, "+
+				"want [DECIMAL] — a nil here is the panic coming back", got)
+		}
+	})
+}
+
+// TestJoinSideColTypesSeesThroughRebindingNodes is the review finding on the
+// first #615 commit, at the unit level.
+//
+// physical.JoinSideColTypes' first version was a walk of its own — scans and rename
+// projections — so a side rooted at an AGGREGATE, a WINDOW or a SET
+// OPERATION answered nothing and every COMPUTED projection was dropped. The
+// pair then resolved to KeyTypeUnresolved and joinKeyUsesIntPath fell back to
+// the build column's storage, which is exactly the gate #615 replaces.
+//
+// It now reads the shared declared-type layer, so each of these resolves.
+//
+// Only RenameOverGroupBy DISCRIMINATES at this level: the others resolve
+// through the source-name half of the map (the scan columns are still visible
+// below the rebinding node under their own names) and are controls. The
+// discriminating spelling is the one a real derived-table key takes — the
+// ALIAS, `b.k` — which is why the query-level proof is
+// TestNumericWidthDerivedSideKeysMatchPostgres and this is its unit twin.
+func TestJoinSideColTypesSeesThroughRebindingNodes(t *testing.T) {
+	scan := func(cols map[string]parquet.TypeID) *logical.Node {
+		n := &logical.Node{Type: logical.NodeScan, TableName: "t"}
+		n.ScanColTypes = map[string]parquet.TypeID{}
+		for c, tp := range cols {
+			n.ScanColumns = append(n.ScanColumns, c)
+			n.ScanColTypes[c] = tp
+		}
+		sort.Strings(n.ScanColumns)
+		return n
+	}
+	base := func() *logical.Node {
+		return scan(map[string]parquet.TypeID{
+			"i32": parquet.TypeInt32, "i64": parquet.TypeInt64, "d2": parquet.TypeDecimal,
+		})
+	}
+
+	cases := []struct {
+		name string
+		side *logical.Node
+		key  string
+		want parquet.TypeID
+	}{
+		{"BareScan", base(), "i64", parquet.TypeInt64},
+		{"GroupByPassesTheKeyThrough", &logical.Node{
+			Type: logical.NodeAggregate, GroupBy: []string{"i64"},
+			Children: []*logical.Node{base()},
+		}, "i64", parquet.TypeInt64},
+		{"RenameOverGroupBy", &logical.Node{
+			Type:        logical.NodeProject,
+			Projections: []logical.Projection{{Column: "i64", Alias: "k"}},
+			Children: []*logical.Node{{
+				Type: logical.NodeAggregate, GroupBy: []string{"i64"},
+				Children: []*logical.Node{base()},
+			}},
+		}, "k", parquet.TypeInt64},
+		{"DistinctPassesThrough", &logical.Node{
+			Type: logical.NodeDistinct, Children: []*logical.Node{base()},
+		}, "i64", parquet.TypeInt64},
+		{"WindowPassesInputColumnsThrough", &logical.Node{
+			Type: logical.NodeWindow, Children: []*logical.Node{base()},
+		}, "i64", parquet.TypeInt64},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := JoinSideColTypes(c.side, nil)
+			if got == nil {
+				t.Fatalf("resolved nothing; a nil map here is the pre-review decline that "+
+					"reinstates isIntKeyColumn(own) — the gate #615 replaces (key %q)", c.key)
+			}
+			if tp, ok := got[c.key]; !ok || tp != c.want {
+				t.Errorf("%q resolved to (%v, %v), want %v", c.key, tp, ok, c.want)
+			}
+		})
+	}
+}
+
+// TestJoinSideColTypesDropsANameTwoScansDisagreeAbout keeps the conservative
+// half: a key resolved against the wrong side's column is a silently
+// different join, so a name two scans carry at two types is deleted and the
+// runtime backstop decides.
+func TestJoinSideColTypesDropsANameTwoScansDisagreeAbout(t *testing.T) {
+	mk := func(name string, tp parquet.TypeID) *logical.Node {
+		return &logical.Node{
+			Type: logical.NodeScan, TableName: "t",
+			ScanColumns:  []string{name},
+			ScanColTypes: map[string]parquet.TypeID{name: tp},
+		}
+	}
+	side := &logical.Node{Type: logical.NodeJoin, JoinType: "inner", Children: []*logical.Node{
+		mk("x", parquet.TypeInt64), mk("x", parquet.TypeFloat32),
+	}}
+	if tp, ok := JoinSideColTypes(side, nil)["x"]; ok {
+		t.Errorf("a name two scans disagree about resolved to %v; it must be dropped", tp)
+	}
+}
