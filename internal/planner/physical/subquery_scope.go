@@ -98,7 +98,7 @@ func cteOutputNames(n *logical.Node) []string {
 	return nil
 }
 
-// subqueryInnerColumns returns a resolver that reports a relation's columns, so
+// SubqueryInnerColumns returns a resolver that reports a relation's columns, so
 // correlation analysis can bind an unqualified name inside a subquery to the
 // subquery's own FROM before considering the outer query — the SQL scoping
 // rule. Without it, a name that also exists in the outer scope is claimed by

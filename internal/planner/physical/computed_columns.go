@@ -12,7 +12,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// newComputedColumnsOpWithMeta is NewComputedColumnsOp plus the full
+// newComputedColumnsOpWithMeta is dagplan.NewComputedColumnsOp plus the full
 // declaration of each computed column, for a caller that has one.
 //
 // ProjectColumn carries fixed ROW fields directly. Explicit metadata also

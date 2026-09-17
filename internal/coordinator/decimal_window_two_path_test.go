@@ -18,7 +18,7 @@ import (
 //
 // The DAG is the arm nothing else covers. It executes window stages (#349),
 // and it reaches the operator by a different route than the single-process
-// pipeline: `physical.walkStages` ships a `WindowColSpec` carrying a bare
+// pipeline: `dagplan.walkStages` ships a `WindowColSpec` carrying a bare
 // TypeID, the stage's input arrives from S3 rather than from the scan's own
 // vectors, and `worker.buildFragmentWindow` rebuilds `exec.WindowColumn`
 // with no catalog and no logical plan. The (p,s) of the output column is

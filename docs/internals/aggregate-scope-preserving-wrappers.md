@@ -10,7 +10,7 @@ This is THE list. ADR-0026 §4 states it once and names the walks that read
 it, because every one of them is asking a consumer's version of the same
 question and every one of them had grown its own answer:
 
-  - physical.aggregateUnderOutput — the gather's OutputRenames;
+  - dagplan.aggregateUnderOutput — the gather's OutputRenames;
   - physical.findAggregateAncestor — the single-process projection;
   - physical.groupKeysPublishedBelow — whether an aggregate DIRECTLY BELOW
     already publishes a key, so the one above must not re-materialize it;

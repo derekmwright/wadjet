@@ -74,7 +74,7 @@ func decimalScalarFnIsInt(e *decimalScalarFn, b *batch.RecordBatch) bool {
 // funcCallIsInt reports whether a scalar call produces an int64 box.
 //
 // A FIXED integer declaration answers on its own — that is Ret.Integer(), the
-// same test isIntNative and physical.FuncReturnsInteger make. A POLYMORPHIC
+// same test isIntNative and expr.FuncReturnsInteger make. A POLYMORPHIC
 // one (RetSameAsArg: abs, greatest, least, nullif, ifnull, if, and the
 // domain-preserving math functions) mirrors an argument, so it is integer
 // exactly when every argument it can take its value from is — the question

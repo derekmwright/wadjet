@@ -100,7 +100,7 @@ consumer can sniff and decode, including mid-stream.
   time naming the column, rather than left as written for this reader to
   misread.
 
-  The planner is where this is FIXED — `physical.reconcileSetOpArmTypes`
+  The planner is where this is FIXED — `dagplan.reconcileSetOpArmTypes`
   coerces every arm to the set operation's output `(p,s)` before its rows enter
   the stream (ADR-0012 item 12). The writer check is a narrow second line, not
   a safety net for the general case, and reasoning that treats it as one will

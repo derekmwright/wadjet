@@ -1125,7 +1125,7 @@ where it is a NAME:
   `exec.Window` APPENDS its output and renames nothing, which is the same
   answer `scopePreservingWrapper` gives for the relation-scope question.
   `logical.AggScopePreservingWrapper` states the list once and **all FIVE**
-  walks read it — `physical.aggregateUnderOutput` for the gather,
+  walks read it — `dagplan.aggregateUnderOutput` for the gather,
   `physical.findAggregateAncestor` for the single-process projection,
   `physical.groupKeysPublishedBelow`, which decides whether an aggregate
   DIRECTLY BELOW already publishes the key, `logical.AggregateOverGroupRows`,
@@ -1158,7 +1158,7 @@ where it is a NAME:
 
   `logical.AggregateBelowProject` keeps a narrower, Filter-only list ON PURPOSE,
   and says so at its definition. Its two callers —
-  `physical.aggregateProjectionTarget` and `physical.aggregateGroupKeyName` —
+  `dagplan.aggregateProjectionTarget` and `physical.aggregateGroupKeyName` —
   map a Project's SELECT list onto the aggregate's own STAGE, and a Sort, a
   LIMIT or a WINDOW between the two emits a stage of ITS own that the projection
   would be carried past. "Are these rows one per group" and "which stage does
@@ -1186,7 +1186,7 @@ where it is a NAME:
 
   | function | list | decision |
   |---|---|---|
-  | `physical.aggregateUnderOutput` | shared | reader 1 |
+  | `dagplan.aggregateUnderOutput` | shared | reader 1 |
   | `physical.findAggregateAncestor` | shared | reader 2 |
   | `physical.groupKeysPublishedBelow` | shared | reader 3 |
   | `logical.AggregateOverGroupRows` | shared | reader 4 (#774) |
@@ -1194,7 +1194,7 @@ where it is a NAME:
   | `physical.wrapsAWindow` | shared | a REFINEMENT of the question — "is one of the wrappers specifically a Window" — used to keep the projection-elision decision from looking through one, because a window ADDS a column and elision needs the node's WHOLE output |
   | `logical.AggregateBelowProject` | Filter only | deliberately narrower; its callers map a SELECT list onto the aggregate's own STAGE and a Sort/LIMIT/window emits a stage of its own. Documented at its definition |
   | `physical.scopePreservingWrapper` | Filter/Sort/Limit/Distinct/**Window** | the RELATION-scope twin of this question, already has Window |
-  | `physical.resolveSortKeyColumn` | Filter/Limit/Sort/Distinct, no Window | MEASURED, left alone. `SELECT g AS k, ROW_NUMBER() OVER (…) … GROUP BY g ORDER BY k DESC` and six siblings answer PostgreSQL's order on all four arms — the call site's `producerMaterializesName` reset already covers it, and its mirror walk `derivedAliasSourceColumn` also excludes Window, so changing one alone is the ADR-0025 out-of-step shape |
+  | `dagplan.resolveSortKeyColumn` | Filter/Limit/Sort/Distinct, no Window | MEASURED, left alone. `SELECT g AS k, ROW_NUMBER() OVER (…) … GROUP BY g ORDER BY k DESC` and six siblings answer PostgreSQL's order on all four arms — the call site's `producerMaterializesName` reset already covers it, and its mirror walk `derivedAliasSourceColumn` also excludes Window, so changing one alone is the ADR-0025 out-of-step shape |
   | `physical.aggregateUnderWindow` | Filter/Project/Sort/Limit/Distinct, no Window | MEASURED, left alone. Five stacked-window-over-aggregate shapes over a DECIMAL(18,4) column — the type question it exists for — answer PostgreSQL's values on single and on both DAG arms. Adding Window would also need `windowSpecOutputType` layered for the skipped window, so it is a change with its own gap and no defect to justify it |
   | `logical.aggregateBelow` | Filter/Project/Window/Sort/Limit — its own, WIDER | a sixth de-facto reader, filed as **#787**; wider than the shared list by `NodeProject`, so it is a different question or a bug, and either way not settled here |
 

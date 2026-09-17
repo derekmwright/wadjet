@@ -70,7 +70,7 @@ qualifier strip, and bound the OTHER arm's bare `id`. Which side builds is a
 cost decision, so the same statement answered correctly whenever the plan chose
 the other relation for the build.
 
-`physical.setOpArmPublishesItsOwnList` makes such an arm a MATERIALIZED arm, so
+`dagplan.setOpArmPublishesItsOwnList` makes such an arm a MATERIALIZED arm, so
 `joinArmAlias` names it — the one name the enclosing query writes. It requires
 the arm to HAVE a name: an unnamed one keeps the scan's spelling, which is
 strictly better than no qualification at all.

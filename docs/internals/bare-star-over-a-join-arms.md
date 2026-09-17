@@ -142,7 +142,7 @@ the three DAG arms qualified those columns by the SCAN below —
 `(SELECT id FROM lat_ord UNION ALL …) a` joined against `lat_item` spelled them
 `lat_ord.id` — so `a.id` matched nothing exactly and bound the OTHER arm's `id`
 through the bare fallback. A set-operation arm is a MATERIALIZED arm now
-(`physical.setOpArmPublishesItsOwnList`), qualified by the one name the
+(`dagplan.setOpArmPublishesItsOwnList`), qualified by the one name the
 enclosing query writes, so the reference this expansion emits is an address on
 every arm.
 

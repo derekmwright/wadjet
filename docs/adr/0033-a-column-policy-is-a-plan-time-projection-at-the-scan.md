@@ -102,7 +102,7 @@ in-process pipeline returned none. The other operand is the policy's own mask,
 a constant the client knows, so each row's membership in that answer IS the
 hidden value.
 
-`physical.CheckSecurityFilterOrder` is the invariant, checked after every
+`dagplan.CheckSecurityFilterOrder` is the invariant, checked after every
 rewriting pass: **no predicate below a security projection may name a column
 that projection hides**, the policy's own filter excepted. It refuses `0A000`
 rather than trusting the routing, because a pass that copies `FilterExprs`

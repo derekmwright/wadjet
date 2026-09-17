@@ -50,4 +50,4 @@ predicate exactly as it did before.
 aliases lists the OUTPUT names the rewrite substituted away, lowercased —
 the spellings the predicate carried before this pass touched it. The DAG
 needs them to decide whether the producing fragment carries the alias or
-the source column (physical.resolveFilterAliasSpelling, #656).
+the source column (dagplan.resolveFilterAliasSpelling, #656).

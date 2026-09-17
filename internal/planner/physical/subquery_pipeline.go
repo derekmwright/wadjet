@@ -100,7 +100,7 @@ func (p *Planner) subqueryDeclOption() expr.CompileOption {
 	return expr.Options(env, expr.WithSubqueryScope(p.SubqueryInnerColumns()))
 }
 
-// subqueryOutputArity is how many columns a subquery's SELECT list has, from
+// SubqueryOutputArity is how many columns a subquery's SELECT list has, from
 // the subquery's OWN PLAN.
 //
 // It is what lets a construct requiring ONE column refuse before the subquery
@@ -152,7 +152,7 @@ func (p *Planner) SubqueryOutputArity(sql string) (n int, ok bool) {
 	return len(schema), true
 }
 
-// declaredOutputSchema is the PLAN-TIME declaration of a statement's output
+// DeclaredOutputSchema is the PLAN-TIME declaration of a statement's output
 // columns — the same walk `Plan` stamps on a single-process pipeline as
 // `Plan.OutputSchema` — for a door that assembles a result set from batches it
 // may not have.
@@ -199,7 +199,7 @@ func (p *Planner) DeclaredOutputSchema(plan *logical.Node) []parquet.Column {
 	return declaredOutputSchema(plan, p.SubqueryOutputColumn)
 }
 
-// subqueryOutputColumn resolves a scalar subquery's single declared output
+// SubqueryOutputColumn resolves a scalar subquery's single declared output
 // column. It recovers from a panic for the reason every plan-time helper on
 // this path does: an unplannable subquery must cost the comparison its
 // declaration, never the query.
@@ -407,7 +407,7 @@ func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string
 	return rows, err
 }
 
-// executeSubquerySchema is executeSubquery with the result's DECLARED SCHEMA
+// ExecuteSubquerySchema is executeSubquery with the result's DECLARED SCHEMA
 // alongside the rows.
 //
 // A boxed row value cannot always say what it is — a DECIMAL and a STRING both

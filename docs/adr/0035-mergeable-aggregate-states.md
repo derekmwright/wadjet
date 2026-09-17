@@ -7,7 +7,7 @@ Status: Accepted (2026-09-08, arc A1, #965 — the OHLCV bar is its first instan
 `SUM` distributes because a sum of sums is a sum. `MIN` distributes because a
 minimum of minima is a minimum. That property — the function's own output is a
 valid input to itself — is what the stage DAG's partial-then-merge shape
-assumes, and `physical.aggNeedsWholeInput` is the list of functions for which
+assumes, and `dagplan.aggNeedsWholeInput` is the list of functions for which
 it is false. Everything on that list is dispatched instead as a one-level
 `RawInputAggregate`: every row of a group crosses the exchange, and an
 ungrouped one collapses to a single task whose peak memory is the whole column.

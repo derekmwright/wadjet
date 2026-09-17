@@ -2229,7 +2229,7 @@ func (e *Executor) buildFragmentSortMergeJoin(ctx context.Context, task distribu
 	// A key pair that needs WIDENING has no sort-merge lowering: the operator
 	// resolves ONE comparison kernel per key from the declared schema and has
 	// no equivalent of the hash path's per-side widened key encoder (#615).
-	// physical.shouldSortMergeJoin declines such a pair, so reaching here
+	// physical.Planner.ShouldSortMergeJoin declines such a pair, so reaching here
 	// means the plan and this executor disagree — refuse rather than answer
 	// a join whose two sides are compared at two different widths.
 	for i, t := range spec.KeyTypes {

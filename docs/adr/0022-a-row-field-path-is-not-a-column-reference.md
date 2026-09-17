@@ -39,7 +39,7 @@ column reference and behaves like a computed expression.
 **1. A ROW field path is resolved from its PARENT's declaration, in the same
 order the runtime resolves the value.**
 
-`physical.colDecls` carries the input's column types AND, for the ROW columns
+`physical.ColDecls` carries the input's column types AND, for the ROW columns
 among them, their fields (`logical.Node.ScanColFields`, populated by
 `AnnotateScanColumns`). Resolution mirrors `expr.ColRef.resolveSlow` step for
 step: the full dotted spelling names a column of its own first (a flat Zeek
@@ -60,7 +60,7 @@ stream published a column of the FIELD's name:
 Six resolvers had grown their own copy of the three-way order —
 `expr.ResolveColumnRef`, `exec.lazyFieldIdx.get`, `exec.fieldPathColumn`,
 `exec.Project`'s schema pass, the four vectorized filters' ROW delegation,
-`physical.colDecls.colDecl`/`isFieldPath` and `exec.columnIndexFallback` (the
+`physical.ColDecls.colDecl`/`isFieldPath` and `exec.columnIndexFallback` (the
 one the group keys, the aggregate inputs, the sort keys and the join keys all
 come through). `batch.RowFieldPath` is the one place the question is answered
 now, and every one of those sites asks it.

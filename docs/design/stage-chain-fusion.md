@@ -138,7 +138,7 @@ the primary probe in `buildJoinFragment`:
 
 ## Kill switch and tests
 
-`WADJET_STAGE_FUSION=0` (exported `physical.StageFusion` atomic.Bool, same
+`WADJET_STAGE_FUSION=0` (exported `dagplan.StageFusion` atomic.Bool, same
 pattern as `AggOverExchange`; tests pin either arm). Plan-dump regression
 tests cover fused vs unfused shapes for the Q18/Q05/Q10 chain patterns and
 the interplay with `AggOverExchange`; a multi-worker e2e diff runs the

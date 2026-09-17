@@ -390,7 +390,7 @@ type Node struct {
 	//
 	// It scopes the one place the stage's published list has to say what
 	// `exec.PublishedGroupKeyNames` will emit rather than what the GROUP BY
-	// text says (physical.stageGroupKeyNames): the qualifier strip. A
+	// text says (dagplan.stageGroupKeyNames): the qualifier strip. A
 	// decorrelated lateral always groups on a QUALIFIED plain column
 	// (`GROUP BY t.g`) and the stream publishes the stripped `g`, so a join
 	// above it carried a name no file had (ADR-0010, #767). Applying that to

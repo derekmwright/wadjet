@@ -751,7 +751,7 @@ declared schema in their own footer (`parquet.DeclaredSchemaKey`); files
 written before it do not, and a reader that types from the FILE answers
 `167772165` where the catalog says `10.0.0.5` (#396, then #423 for the
 migration boundary). The catalog's answer therefore rides the plan —
-`physical.Stage.ScanSchema`, filled by `annotateScanSchemas` at the end of
+`dagplan.Stage.ScanSchema`, filled by `annotateScanSchemas` at the end of
 `PlanDistributed`, at PLAN time so every task of a query sees one catalog
 revision.
 
@@ -866,7 +866,7 @@ because a delete marker belongs to the **file**, not to the alias reading it:
 
 | Where | What |
 |---|---|
-| `physical.Stage.ScanDeletes` | file → deleted row indices, read from the SAME manifest object that produced `ScanFiles` (`walkStages` `NodeScan`). Replayed onto the final stage list by `annotateScanDeletes` (`dagplan/scan_delete_markers.go`) from the planner's snapshot — **never a second catalog read**: markers grow until a compaction replaces the file they name, so a marker set read AFTER the file list can be missing the markers of a file the list still holds. |
+| `dagplan.Stage.ScanDeletes` | file → deleted row indices, read from the SAME manifest object that produced `ScanFiles` (`walkStages` `NodeScan`). Replayed onto the final stage list by `annotateScanDeletes` (`dagplan/scan_delete_markers.go`) from the planner's snapshot — **never a second catalog read**: markers grow until a compaction replaces the file they name, so a marker set read AFTER the file list can be missing the markers of a file the list still holds. |
 | `coordinator.collectStageDeletes` → `withQueryDeleteMarkers(ctx, …)` | the query's union, parked on the dispatch context at the top of `executeStageDAG`. **Not** at the top of `SubmitSQL`, deliberately: `physStages` there is overwritten with a synthetic single "pipeline" stage before any stamp built from it would be read, and that emptiness is correct — every `TaskTypePipeline` task re-plans its `SQLText` on the worker against a live catalog (`executePipeline` → `planner.Plan`), whose scanner reads `manifest.DeleteMarkers` itself at scan Init, the same as the single-process engine. `coordinator.TestDistributedScanHonorsDeleteMarkersOnThePipelinePath` covers both shapes that path dispatches (plain and probe-split). |
 | `Scheduler.PublishTasks` → `stampTaskDeleteMarkers` | the ONE stamp. Walks every file list a task can carry — `Files`, `InputFiles`, `BuildFiles`, `Inputs`, `PreScannedInputs`, `ScanFileFilter`, `FusedJoins[].BuildFiles`, `Operators[].{InputFiles,BuildFiles}`, `PreComputedAggregates[].CacheFiles` — the same set `annotateTaskPeerLocations` walks (`coordinator.TestTaskFieldCarrierCoverage` guards both against a new carrier going unclassified), and emits `Task.DeleteMarkers`. Every dispatcher and every retry passes through here, so a new dispatcher gets it for free. |
 | worker `taskDeleteSets` → `cachedFileStreamSource.SetDeleteMarkers` | decoded per task, handed to every source the task builds; a key naming a file this source never opens simply never matches |
@@ -879,7 +879,7 @@ scan-node manifest reads within one statement: the older marker set could win
 for a file the newer read would have marked further. Closed by #502's
 per-statement manifest pinning: `physical.ManifestSnapshot`
 (`internal/planner/physical/manifest_snapshot.go`), attached to a statement's
-context by the coordinator (`physical.WithManifestSnapshot`,
+context by the coordinator (`physical.PlanContext.WithManifestSnapshot`,
 `ExecuteSQL`/`SubmitSQL`) and consulted by every `physical.Planner` built for
 it (`NewPlannerForContext`) in place of a bare `catalog.GetManifest` call.
 Every scan node of one table in one statement now reads from the SAME
@@ -1360,7 +1360,7 @@ counting** (#346, second half — until then they were refused at plan time):
 ```
 arm 0 stages ─┐
               ├─ union (per-arm projections + TAG columns: arm 0 rows carry
-arm 1 stages ─┘         (1,0), arm 1 rows (0,1) — physical.SetOpLeftCountCol
+arm 1 stages ─┘         (1,0), arm 1 rows (0,1) — dagplan.SetOpLeftCountCol
               │         / SetOpRightCountCol, literal Int64 projections)
               ├─ exchange-repartition on the FULL result row   ← inserted by
               │   EnsureDistribution: the union is DistRoundRobin and a
@@ -1447,7 +1447,7 @@ Mechanism (the same refuse-and-route shape as the correlated subqueries below):
   once for two publishes. The MINTED correlation slot is excluded, because the
   join drops it: `SELECT COUNT(*) AS n` publishes `__key_0, n` over a stream of
   `order_id, n` and stays distributed.
-- Typed error `physical.ErrLateralProjectionDistributed`; the coordinator
+- Typed error `dagplan.ErrLateralProjectionDistributed`; the coordinator
   matches it after `PlanDistributed` and answers on the coordinator-local
   single-process pipeline (`Coordinator.runLateralProjectionLocal`), where the
   block's Project is a real operator. Counter:
@@ -1492,7 +1492,7 @@ Mechanism (same refuse-loudly shape as set operations):
   resolver), so the two paths classify identically by construction. Covers
   filter predicates and SELECT-list projections; scalar, EXISTS/NOT EXISTS,
   IN, ANY/ALL; nesting via `FindCorrelatedRefsWithScope`'s recursion.
-- Typed error `physical.ErrCorrelatedSubqueryDistributed`; the coordinator
+- Typed error `dagplan.ErrCorrelatedSubqueryDistributed`; the coordinator
   matches it after `PlanDistributed` and answers on the coordinator-local
   single-process pipeline (`Coordinator.runCorrelatedLocal`,
   `coordinator/correlated_local.go`) — a ROUTE, not a fallback: no DAG plan
@@ -1597,7 +1597,7 @@ and three things say so at three layers:
 - `walkStages` forces `broadcast_join` for such a node past the size decision
   and past an explicit `BroadcastBytesThreshold < 0`, logs a WARN naming the
   build's estimated bytes, and counts it in
-  `physical.NullAwareAntiForcedBroadcasts` — the only way to see the trade from
+  `dagplan.NullAwareAntiForcedBroadcasts` — the only way to see the trade from
   outside, since the answers are right either way and what changes is that a
   build the threshold refused is now on every task.
 - `RequiredChildDistribution` returns `RequiredBroadcast` for slot 1 of a
@@ -1644,7 +1644,7 @@ Mechanism (`physical/in_subquery_set.go`, ADR-0021 §2):
   (default 10,000 — a plan-TEXT budget, since the expression is serialized into
   every task; `=0` disables materialization) and a value with no literal
   spelling that survives the round trip through the filter's text.
-- Typed error `physical.ErrInSubqueryDistributed`, parked like `correlatedErr`
+- Typed error `dagplan.ErrInSubqueryDistributed`, parked like `correlatedErr`
   and returned by `PlanDistributed`; the coordinator routes it to
   `Coordinator.runInSubqueryLocal` — the same `runRefusedLocal` guards as the
   #359 and #466 routes. Counter: `InSubqueryLocalRoutes()`.
@@ -1776,7 +1776,7 @@ could not serve both.
   projection has run, so no upstream stage emits a column by that name and
   no exchange can hash-partition on it.
 
-**Spec resolution.** `physical.WindowColSpec` is filled by `windowExecColumn`,
+**Spec resolution.** `dagplan.WindowColSpec` is filled by `windowExecColumn`,
 the same helper `buildWindow` compiles the single-process operator from: the
 column out of the argument list, the offset/default/N that share it, the
 frame, and `OutputType`. The worker has no catalog and no logical plan, so
@@ -1821,7 +1821,7 @@ outcome either half can produce.
 The materialized keys ride the wire as `Stage.WindowKeyExprs` →
 `OpSpec.WindowKeyExprs`, and the worker compiles them into a pass-through
 projection prepended to the window's consume phase
-(`worker.buildWindowKeyProjection`, `physical.NewComputedColumnsOp`). It
+(`worker.buildWindowKeyProjection`, `dagplan.NewComputedColumnsOp`). It
 APPENDS rather than narrowing, because a window emits every input column plus
 its own — which is also why it is not `exec.Project`. Nothing above the window
 reads `__winkey_N`, which is what keeps it clear of #558: the gather projects
@@ -2078,4 +2078,4 @@ can be truncated below what the prefix could need from it.
 
 ## Limit sentinels (#481)
 
-A real `LIMIT 0` is a bound, not an absence. The convention after #481: `exec.Sort.Limit` and the shared sort helpers use `-1` (`logical.NoLimit`) for "unbounded"; `physical.Stage`, `logical.MergeInfo`, and `distributed.OpSpec` carry companion bools (`HasLimit`, `HasSortLimit`) because their zero-value literals are ubiquitous. An unbounded stage leaves both fields at their zero value — the shared-subplan fingerprint hashes `Limit` unconditionally. Never reintroduce `0 == no limit` on any carrier; the wire's `HasSortLimit` also tolerates a pre-#481 coordinator via the `SortLimit > 0` disjunct in the worker (ADR-0010 mandates wholesale deploys regardless).
+A real `LIMIT 0` is a bound, not an absence. The convention after #481: `exec.Sort.Limit` and the shared sort helpers use `-1` (`logical.NoLimit`) for "unbounded"; `dagplan.Stage`, `logical.MergeInfo`, and `distributed.OpSpec` carry companion bools (`HasLimit`, `HasSortLimit`) because their zero-value literals are ubiquitous. An unbounded stage leaves both fields at their zero value — the shared-subplan fingerprint hashes `Limit` unconditionally. Never reintroduce `0 == no limit` on any carrier; the wire's `HasSortLimit` also tolerates a pre-#481 coordinator via the `SortLimit > 0` disjunct in the worker (ADR-0010 mandates wholesale deploys regardless).

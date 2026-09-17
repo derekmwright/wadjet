@@ -36,6 +36,6 @@ Scope:
     expressions still fall through: neither has a group key. On the root
     path the coordinator dedup (MergeInfo.HasDistinct) answers them;
     anywhere else PlanDistributed refuses the query rather than dropping
-    the DISTINCT silently (physical.refuseUnstageableDistinct) and the
+    the DISTINCT silently (dagplan.refuseUnstageableDistinct) and the
     coordinator answers it on its local single-process pipeline
     (Coordinator.runDistinctLocal).

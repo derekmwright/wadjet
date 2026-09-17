@@ -109,7 +109,7 @@ Three rules settle it:
    bitwise family and the shifts declare nothing of their own: they FOLLOW
    their operands, the shifts following argument 0.
 2. **The width is three-valued, and "unknown" is not "int4".**
-   `physical.colDecls.intWidth` carries int4, int8 or unknown; an unknown
+   `physical.ColDecls.intWidth` carries int4, int8 or unknown; an unknown
    width leaves the result to the accumulator rather than declaring a narrow
    one, because guessing narrow is how an exact `bigint` total becomes a
    wrapped `integer`.

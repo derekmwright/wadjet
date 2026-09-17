@@ -134,7 +134,7 @@ func (m *ManifestSnapshot) AggregateColumnStats(ctx context.Context, cat *catalo
 	return stats, err
 }
 
-// getManifest is catalog.GetManifest pinned to p's ManifestSnapshot when it
+// GetManifest is catalog.GetManifest pinned to p's ManifestSnapshot when it
 // has one, and the ordinary per-call catalog.GetManifest otherwise — the
 // fallback a bare Planner literal (rather than one built by NewPlanner)
 // gets, which today is only test code.
@@ -158,7 +158,7 @@ func (p *Planner) GetManifest(ctx context.Context, table string) (*catalog.Parti
 	return p.Catalog.GetManifest(ctx, table)
 }
 
-// getAggregateColumnStats is catalog.AggregateColumnStats pinned to p's
+// GetAggregateColumnStats is catalog.AggregateColumnStats pinned to p's
 // ManifestSnapshot when it has one, mirroring getManifest.
 func (p *Planner) GetAggregateColumnStats(ctx context.Context, table string) (map[string]catalog.TableColumnStats, error) {
 	if p.ManifestSnapshot != nil {

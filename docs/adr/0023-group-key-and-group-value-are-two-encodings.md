@@ -182,7 +182,7 @@ derived from the other.**
      canonical decimal text, and as float64. A FLOAT set gets no decimal
      view, because `numeric ⊕ float8` is float8 and an exact comparison
      against it would be a different predicate.
-   - `physical.materializeInSubquery` inlines the set as a LITERAL list, and
+   - `dagplan.materializeInSubquery` inlines the set as a LITERAL list, and
      PostgreSQL's multi-element `real IN (…)` NARROWS its literals to real[]
      (#549) while a subquery WIDENS the real to float8. A float32 probe
      therefore declines that path entirely — the mirror of the float32 SET

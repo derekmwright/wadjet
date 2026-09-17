@@ -18,7 +18,7 @@ import (
 // dormant); ops dashboards can sample it the same way.
 var SortMergeJoinsPlanned atomic.Int64
 
-// shouldSortMergeJoin decides whether an inner equi-join takes the
+// ShouldSortMergeJoin decides whether an inner equi-join takes the
 // sort-merge path (docs/design/sort-merge-join.md §3.4): both sides'
 // estimated post-selectivity bytes must reach SortMergeJoinBytes. An
 // unknown estimate (no scan root — e.g. a join-on-join input — or a missing

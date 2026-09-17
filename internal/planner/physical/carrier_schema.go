@@ -28,7 +28,7 @@ func collectColRefs(n plansql.Node) []*plansql.ColRef {
 	return collectColRefsBelow(n, nil)
 }
 
-// collectColRefsBelow is CollectColRefs with a STOP predicate: a node the
+// collectColRefsBelow is collectColRefs with a STOP predicate: a node the
 // predicate accepts is a column in its own right, and its children are not
 // references at all.
 //

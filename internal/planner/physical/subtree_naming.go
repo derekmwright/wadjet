@@ -161,7 +161,7 @@ func (s *SubtreeNaming) ownsBareName(k string) bool {
 	return false
 }
 
-// buildColOrigins returns the bare-column → origin-alias map the join
+// BuildColOrigins returns the bare-column → origin-alias map the join
 // executor needs to qualify duplicate build columns with the OWNING scan's
 // alias when the build side spans multiple tables. Single-alias subtrees
 // return nil: the join's single BuildTableAlias is already exact, and nil
@@ -173,7 +173,7 @@ func (s *SubtreeNaming) BuildColOrigins() map[string]string {
 	return s.origins
 }
 
-// materializedBuildColOrigins is buildColOrigins for a build stream that is the
+// MaterializedBuildColOrigins is buildColOrigins for a build stream that is the
 // arm's OWN OUTPUT rather than its raw inner columns — the single-process
 // pipeline, where the arm's Project is a real operator.
 //

@@ -353,7 +353,7 @@ dropped, or found under a name that belongs to the other arm:
 **A consumer binds a column through the identity its PRODUCER published. The
 payload is widened only for a value that NO published spelling reaches.**
 
-`physical.bindConsumersToPublishedIdentity` runs at the end of planning, after
+`dagplan.bindConsumersToPublishedIdentity` runs at the end of planning, after
 `ensureJoinCarriesEvaluatedColumns` and `ensureJoinCarriesGatherOutputs`, and
 asks the stream the fragment will really see — `aggregateInputStreamColumns`
 with the narrowing lists APPLIED. That is a different question from the one

@@ -1,6 +1,6 @@
 # Star read block projections
 
-Source: internal/planner/physical/block_projection.go — starReadBlockProjections, moved 2026-09-11 (#1026)
+Source: internal/coordinator/dagplan/block_projection_stage.go — starReadBlockProjections (ADR-0037 §6); shared column declarations remain in internal/planner/physical/block_projection.go.
 
 ```go
 // A DERIVED BLOCK A STAR READS IS A RELATION, AND SOME STAGE PUBLISHES IT

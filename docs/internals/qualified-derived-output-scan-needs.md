@@ -8,7 +8,7 @@ TableAlias, so `x.w` over `(SELECT g*3 AS w FROM t) x` is
 the Project's OUTPUT name arriving qualified — and keeping
 it wrote a column the table does not have into the scan's
 read set. Every "what does this stage emit" model reads
-that list (physical.stageEmittedColumns and, through it,
+that list (dagplan.stageEmittedColumns and, through it,
 emittedThroughPassThrough, gatherOutputSources,
 stageStreamColumns), so the phantom made the reachability
 check, the sort-key resolver and the window-key resolver

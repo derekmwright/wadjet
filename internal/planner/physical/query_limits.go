@@ -64,7 +64,7 @@ func hasLimit(n *logical.Node) bool {
 // this" apart from a syntax or type error and stop retrying (#803).
 const QueryLimitSQLState = "53400"
 
-// enforceQueryLimits checks estimated query cost against the limits in force:
+// EnforceQueryLimits checks estimated query cost against the limits in force:
 // the deployment's (Planner.QueryLimits, from `query_limits:` and its per-role
 // overrides) narrowed by the calling identity's, which an ABAC `query_limit`
 // obligation puts on the context. See identity_limits.go for why the two

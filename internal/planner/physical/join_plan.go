@@ -13,7 +13,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
-// estimateSubtreeBytes estimates a join input's post-selectivity size by
+// EstimateSubtreeBytes estimates a join input's post-selectivity size by
 // walking through Filter/Project/Limit wrappers to the underlying Scan and
 // scaling the table's manifest bytes by the subtree's estimated selectivity.
 // Returns ok=false when the subtree has no scan root (e.g. another join) or

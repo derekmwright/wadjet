@@ -19,7 +19,7 @@ The BARE spelling of that same predicate (`WHERE dv > 1`) already
 answered 6, through the branch above — which is what says the
 qualifier is the whole of it and not the carrying.
 
-physical.columnResolves has accepted this direction since #656 (its
+dagplan.columnResolves has accepted this direction since #656 (its
 last loop compares the two names by their bare parts), so the
 planner's checker believed in a resolution the evaluator did not
 implement, and every check waved the plan through. Implementing it
