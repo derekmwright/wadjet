@@ -435,7 +435,7 @@ func main() {
 ### Via the Interactive Shell
 
 ```bash
-./wadjet shell --endpoint localhost:9000 --access-key minioadmin --secret-key minioadmin --bucket wadjet
+./wadjet-bin shell --endpoint localhost:9000 --access-key minioadmin --secret-key minioadmin --bucket wadjet
 ```
 
 ```sql

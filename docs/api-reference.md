@@ -83,7 +83,7 @@ Execute a SQL query and return results.
 | `columns` | []string | Ordered list of result column names |
 | `rows` | []object | Array of row objects (column name → value) |
 | `stats.elapsed` | string | Wall-clock execution time |
-| `stats.rows_scanned` | int | Rows read from storage on the embedded (no-coordinator) path. On the coordinator path — every `wadjetd serve` mode — this carries the **result** row count instead. |
+| `stats.rows_scanned` | int | Rows read from storage on the embedded (no-coordinator) path. On the coordinator path — `wadjetd serve --mode=standalone` and `wadjetd serve --mode=coordinator` — this carries the **result** row count instead. |
 | `stats.plan` | string | Human-readable execution plan |
 
 **Error Response (400/401/403/500):**
@@ -283,7 +283,7 @@ POST /v1/queries/async
 
 Submit a query for asynchronous execution. Returns immediately with a query ID that can be polled for results.
 
-> **Note:** The async endpoints (`POST /v1/queries/async`, `GET /v1/queries`, `GET /v1/queries/{queryID}`, `GET /v1/queries/{queryID}/results`, `DELETE /v1/queries/{queryID}`) need a coordinator. Every `wadjetd serve` mode has one — standalone embeds a coordinator, a worker and NATS in one process — so these work there too. They return `503 Service Unavailable` only when the HTTP server is constructed without a coordinator, which is the embedded-library path.
+> **Note:** The async endpoints (`POST /v1/queries/async`, `GET /v1/queries`, `GET /v1/queries/{queryID}`, `GET /v1/queries/{queryID}/results`, `DELETE /v1/queries/{queryID}`) need a coordinator. `wadjetd serve --mode=coordinator` has one, and `wadjetd serve --mode=standalone` embeds a coordinator, a worker and NATS in one process, so these work in both modes. Worker mode runs the worker; `wadjet serve` runs the embedded engine over pgwire (see [LICENSING.md](../LICENSING.md)). They return `503 Service Unavailable` only when the HTTP server is constructed without a coordinator, which is the embedded-library path.
 
 > **A query belongs to the identity that submitted it.** With authentication
 > enabled, its status, its SQL, its results, its cancellation and its result
