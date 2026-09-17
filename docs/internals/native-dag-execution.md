@@ -58,7 +58,9 @@ that planner's statement state and manifest snapshot. Its methods provide
 local column declarations, naming, join and set-operation types, window keys,
 group-key resolution and cost estimates. Argument-only walks use a zero-value
 context. The [reference inventory](../design/seam-narrowing-measurement.md)
-records the remaining named values; the license checks also hold their count.
+records the remaining named values AND the operations the AGPL side reaches
+through the context — 16 package-qualified names, 209 identifiers by any
+spelling — and a license-check budget holds each of the two counts.
 
 ## Small-query local fast path (routing ahead of the DAG)
 

@@ -4,7 +4,7 @@ Issue #1142. Baseline: `561fb5a4a3379456e6bfb054f8698f70f7826b52`.
 
 ## Method
 
-The inventory resolves Go identifiers with `go/types`, including test variants of every package in the main module. It excludes generated test-main packages, nested modules, test entry-point declarations, type parameters and local variables. Imported package aliases are resolved by import path. A package-qualified reference is a selector whose operand resolves to the physical package; member references through values are recorded separately. Comments and strings are not references. Each declaration is identified by its source position, so equal field names on different types remain distinct.
+The inventory resolves Go identifiers with `go/types`, including test variants of every package in the main module. It excludes generated test-main packages, nested modules, test entry-point declarations, type parameters and local variables. Imported package aliases are resolved by import path. A package-qualified reference is a selector whose operand resolves to the physical package; member references through values are recorded separately, and counted once per DECLARING object — a method reached through a type that embeds the context is the same method. See [Identifiers reached by any spelling](#identifiers-reached-by-any-spelling). Comments and strings are not references. Each declaration is identified by its source position, so equal field names on different types remain distinct.
 
 Categories a, c and d may overlap. Category b is dagplan test references minus category a. Category e contains production declarations with no direct reference outside physical, including its external test package. A method reached through an interface need not have a direct reference; absence from a reference list alone does not justify renaming it.
 
@@ -878,6 +878,58 @@ The dagplan production list is the table minus `NewManifestSnapshot`,
 Its test-only additions are the three constructors and `PhysicalPlan`.
 `QueryLimitSQLState` is referenced by other AGPL packages.
 
+## Identifiers reached by any spelling
+
+The counts above are package-qualified names — a `physical.X` written at the
+call site. They do not count what a caller reaches THROUGH a value: a method on
+`PlanContext`, a field of `ProjectExprSpec`. That is the second measurement,
+and it is the one that says how big the seam is as a set of OPERATIONS rather
+than as a list of spellings. Same resolution, same packages, counting each
+exported object of physical that an AGPL package's syntax reaches:
+
+| Scope | Before | After |
+|---|---:|---:|
+| All AGPL packages, production and tests | 236 | 209 |
+| All AGPL packages, production only | 198 | 196 |
+| dagplan production | 174 | 172 |
+| dagplan production and tests | 221 | 194 |
+
+| Kind | Before | After |
+|---|---:|---:|
+| Package-scope names | 152 | 16 |
+| Methods | 29 | 139 |
+| Fields | 55 | 54 |
+
+**The operation set is unchanged in size.** dagplan's production code reached
+174 exported physical identifiers before this work and reaches 172 after it.
+What narrowed is the PACKAGE-SCOPE surface: 152 names an AGPL package could
+write as `physical.X` became 16. The rest of the seam did not go away; it moved
+onto one type. `PlanContext` declares 114 exported methods and every one of
+them is reached (104 from dagplan production alone), so none was built
+speculatively — but 112 of them take an unnamed receiver and forward to the
+unexported function that used to be the exported one. The narrowing is of the
+spelling, and of what a package outside physical can NAME, not of what the
+AGPL side can do.
+
+Keyed by the receiver expression's type instead of by the declaring object —
+which spells a method reached through both `StagePlanner` and `PlanContext`
+twice — the same measurement reads 242 → 215 for all AGPL packages, 202 → 200
+for production only and 174 → 172 for dagplan production. Six members account
+for the whole difference.
+
+Four of the fields belong to an unexported type: dagplan reads `Expr`, `Name`,
+`Decl` and `DeclKnown` from the `blockColumn` values
+`PlanContext.BlockPublishedColumns` returns. It cannot name that type and does
+not need to.
+
+Two budgets hold the two halves, because a method added to the context moves
+one and not the other. `TestAGPLPhysicalReferenceBudget` holds the
+package-qualified count at `maxAGPLPhysicalNames` = 16.
+`TestAGPLPhysicalMemberBudget` holds the reached-identifier count at
+`maxAGPLPhysicalMembers` = 209 and lists the 193 members by name, so a new
+operation behind the context fails a gate that names it rather than passing one
+that cannot see it. Both are in `tools/licensecheck`.
+
 ## Test placement and declaration renames
 
 Step 2 lowercased the 29 package-scope declarations in category e, using only
@@ -900,6 +952,7 @@ a direct-reference count alone is insufficient to change their contracts.
 |---|---:|---:|
 | Production export declarations, including members | 424 | 375 |
 | Package-scope exports | 197 | 35 |
+| Exported methods declared in physical | 126 | 238 |
 | a: dagplan production package-qualified names | 117 | 11 |
 | b: additional dagplan test names | 29 | 4 |
 | c: other AGPL package-qualified names | 16 | 8 |
@@ -907,6 +960,13 @@ a direct-reference count alone is insufficient to change their contracts.
 | e: declarations without a direct outside reference | 165 | 145 |
 | All dagplan package-qualified names | 146 | 15 |
 | All AGPL package-qualified names | 152 | 16 |
+| AGPL-reached identifiers, any spelling | 236 | 209 |
+| of which members: methods and fields | 84 | 193 |
+
+The declaration total falls by 49 while the method component rises by 112:
+that is the same movement the reached-identifier table shows, seen from
+inside physical. 162 package-scope names became private and the operations
+they named became methods on the context.
 
 Every remaining package-scope export has an outside reference. Category e is
 now 101 interface methods and 44 fields. Interface method names retain their

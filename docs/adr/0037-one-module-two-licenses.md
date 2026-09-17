@@ -111,9 +111,12 @@ names, join-side schemas, set-operation arm types, window keys, group-key
 resolution and the cost walk. `dagplan.StagePlanner` embeds this context;
 argument-only walks use its zero value. Value types remain named where a
 caller stores or passes them. The [measurement](../design/seam-narrowing-measurement.md)
-records those names and their reasons, and `TestAGPLPhysicalReferenceBudget`
-limits package-qualified physical names across all AGPL packages, including
-tests.
+records those names and their reasons, and two budgets in `tools/licensecheck`
+hold the seam: `TestAGPLPhysicalReferenceBudget` limits package-qualified
+physical names across all AGPL packages, including tests, and
+`TestAGPLPhysicalMemberBudget` limits the exported physical identifiers those
+packages reach by ANY spelling — the count a method added to the context moves
+and the first one does not.
 
 Two user-visible consequences follow, decided rather than discovered:
 
@@ -190,6 +193,13 @@ explicitly; the grant itself is unchanged.
 - **physical exposes a planning context.** The shared planner state and local
   planning operations are reached through `PlanContext`; the measurement
   records the separate value types and constructors that callers still name.
+  It also records what the boundary costs, because the context did not make it
+  smaller: the context carries 114 exported methods, all of them reached, and
+  the AGPL side reaches 209 exported physical identifiers in all — dagplan's
+  production code reached 174 before the context and reaches 172 after it.
+  What narrowed is the package-qualified half, 152 names to 16, and with it
+  what a package outside physical can NAME. That is the price of the boundary
+  being a package boundary, and it is paid once.
 - **Two binaries to ship, two to document.** Every release publishes both;
   every `serve` in the documentation says which one.
 - **Per-directory `LICENSE` copies are duplication on purpose.** Thirteen
