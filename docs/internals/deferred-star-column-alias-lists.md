@@ -25,6 +25,6 @@ returns no error — so the node keeps its marker and
 `RefuseUnappliedColumnAliasLists` turns it into the refusal at the two plan
 entries, beside the star and ordinal refusals that live there for the same
 reason: an OVERLONG list is PostgreSQL's own 42P10, and a list over a star
-the expansion DECLINED (a bare `*` over a join, ADR-0012, #810) is one 0A000
-sentence. Dropping that second one silently is what made every reference to
+the expansion DECLINED because its source list cannot be stated is one 0A000
+sentence; enumerable join arms expand in written order (ADR-0026 §9). Dropping that second one silently is what made every reference to
 a name the list renames TO read NULL.

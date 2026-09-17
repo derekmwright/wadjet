@@ -23,14 +23,14 @@ import (
 // embedded `wadjet.DB.Query` and `Coordinator.ExecuteSQL` — which every other
 // door (pgwire, the HTTP sync and async doors, gRPC) renders.
 //
-// THE FIXTURE THAT REACHES IT is a zero-row `SELECT *` over a BUSHY join.
-// `starJoinDeclaredOutputSchema` declares a star over ONE join by calling the
-// join operator's own namer (#978), and declines where a side contains a join
-// of its own, because concatenating a nested join's sides is not the rule the
-// operator applies. With no rows to read a schema off and no declaration, the
-// result had no columns at all. PostgreSQL ANSWERS this query with a header
-// and zero rows, so the refusal is a wadjet-side bound and goes in ADR-0012's
-// divergence list; what it replaces is not PostgreSQL's answer either.
+// A zero-row `SELECT *` over a BUSHY join now declares its expanded list
+// (ADR-0026 §9): each FROM arm contributes columns in written order.
+// `starJoinDeclaredOutputSchema` remains the unexpanded single-join fallback;
+// it calls the join operator's namer (#978) and declines a nested join.
+// The expanded projection supplies the declaration for the bushy fixture,
+// so PostgreSQL and this query both answer with a header and zero rows.
+// The two remaining undeclared shapes below still exercise the refusal;
+// their result must report that no column list could be stated.
 //
 // THE CONTROLS ARE THE BOUNDARY: a zero-row star over one relation and over
 // one join still DECLARE their columns and must keep answering, or this
@@ -72,8 +72,8 @@ func TestN1AResultWithNoColumnsIsRefused(t *testing.T) {
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64] rows=0",
 		},
 		{
-			// CONTROL: a zero-row star over ONE join declares what the join
-			// operator publishes (#978) and must still answer.
+			// CONTROL: a zero-row star over ONE join declares the written
+			// FROM arms (ADR-0026 §9) and must still answer.
 			name: "control: a zero-row star over one join declares its columns",
 			sql: "SELECT * FROM lat_ord o JOIN lat_item i ON i.order_id = o.id " +
 				"WHERE o.id > 99",

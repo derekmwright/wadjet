@@ -21,12 +21,12 @@ import (
 // path only escaped because an unknown name trips the worker's all-or-nothing
 // parquet projection guard, which falls back to full width.
 //
-// A star's source columns come from the scan's catalog-annotated schema
-// (ScanColumns, populated by physical.AnnotateScanColumns), so this resolves
-// only when a single base-table scan sits below the projection — the shape
-// clients send. A star over a join — or over a derived table whose own FROM is
-// a join — is left alone: its column set is not knowable here, and guessing it
-// would silently change which columns a query returns.
+// A star's source columns come from the relation's published list: the scan's
+// catalog annotation or a derived block's visible projection (ADR-0026 §9).
+// A star over a join expands the FROM clause's arms in written order, before
+// join reordering. Each item carries its resolution and publication names;
+// only a shape whose column list cannot be stated is left unexpanded, since
+// guessing it would silently change which columns a query returns.
 func ExpandStarProjections(n *Node) {
 	if n == nil {
 		return
@@ -46,8 +46,8 @@ func ExpandStarProjections(n *Node) {
 			continue
 		}
 		// A QUALIFIED star names its own relation, so it expands wherever
-		// that relation's scan is — a join below does not make `o.*`
-		// unknowable, only `*` (#955's rule, applied to the shape a lateral
+		// that relation's list is — a join below does not make `o.*`
+		// unknowable (ADR-0026 §9; #955, applied to the shape a lateral
 		// produces). `SELECT o.*, s.n` was `column "o.*" does not exist in
 		// the input schema` on the single-process arms and, on the DAG, a
 		// column whose NAME and VALUE were both the string `*`.

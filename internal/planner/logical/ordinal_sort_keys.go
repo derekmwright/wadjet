@@ -148,8 +148,8 @@ func projectOutputNamesBelow(n *Node) []string {
 		switch n.Type {
 		case NodeProject:
 			if HasStarProjection(n) {
-				// The star did not expand — over a join, or over a derived
-				// table whose columns this layer cannot enumerate. Answering
+				// The star did not expand — its source columns could not be
+				// enumerated under ADR-0026 §9's rules. Answering
 				// from the unexpanded list would count the star as ONE
 				// column, which is the wrong answer rather than none.
 				return nil

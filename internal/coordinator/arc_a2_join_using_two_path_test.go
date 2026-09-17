@@ -30,10 +30,10 @@ import (
 //
 //   - `SELECT *` over a USING join. USING merges the joined column into ONE
 //     output column — three columns for two two-column tables where an ON join
-//     emits four — and the star's column set over a join is not resolvable in
-//     the layer that expands stars (ExpandStarProjections declines a star whose
-//     source is not a lone scan, by design). Answering four would be a wrong
-//     answer in kind. 0A000.
+//     emits four. Join stars now expand the FROM arms in written order
+//     (ADR-0026 §9), but that concatenation does not merge USING columns.
+//     The parser therefore still refuses this spelling: answering four
+//     would be a wrong answer in kind. 0A000.
 //   - A USING clause following another join on the same FROM item, where the
 //     column could come from either relation on the left and picking one
 //     without the catalog is a guess that changes the answer. 0A000.

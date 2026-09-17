@@ -24,9 +24,9 @@ import (
 // The fix is not a fourth rule: `SubmitSQL` records
 // `physical.Planner.DeclaredOutputSchema` — the same walk the embedded door's
 // `Plan.OutputSchema` carries — and `GetQueryResults` falls back to it. The
-// four doors then describe one statement with one list, and the ONE shape none
-// of them can declare (a zero-row star over a bushy join) is refused here with
-// the same `sqlerr.EmptyResultColumns` (XX000) it is refused with everywhere
+// four doors then describe one statement with one list. A bushy join star
+// declares its expanded arms (ADR-0026 §9); a shape with no declared columns
+// still reports `sqlerr.EmptyResultColumns` (XX000), as it does everywhere
 // else, on this door's `SQLResult.Error` channel — the one
 // `internal/server.handleGetQueryResults` already answers a failed query on,
 // and the one #1002's merge refusal took.

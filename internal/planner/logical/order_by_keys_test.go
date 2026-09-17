@@ -346,7 +346,7 @@ func TestOrderByUnhonourableKeyErrors(t *testing.T) {
 		// What is still LOUD, and where, is gated by
 		// coordinator.TestOrderByResolvesAPositionAfterTheStarExpands: an
 		// out-of-range position is 42P10 with PostgreSQL's own wording, and a
-		// star over a join is 42P10 saying the column list cannot be counted.
+		// join star's ordinal binds its expanded arm list (ADR-0026 §9).
 	}
 
 	for _, tt := range tests {

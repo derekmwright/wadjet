@@ -12,8 +12,8 @@ import (
 // ExpandStarProjections establishes width, then plansql.OverlayColumnAliases renames it.
 // Never guess width (ADR-0012). Optimize cannot return errors, so keep failed markers:
 // RefuseUnappliedColumnAliasLists refuses at BOTH plan entries, with 42P10 for an
-// overlong list and 0A000 for a star expansion declined, including bare star over join
-// (ADR-0012, #810). Dropping the list would make renamed references read NULL.
+// overlong list and 0A000 for a star expansion whose list cannot be stated
+// (ADR-0026 §9). Dropping the list would make renamed references read NULL.
 // See docs/internals/deferred-star-column-alias-lists.md for the design.
 
 // deferColumnAliasesOverStar wraps plan in a Project carrying the star and
@@ -65,8 +65,8 @@ func ApplyDeferredColumnAliases(n *Node) *Node {
 		return n
 	}
 	if HasStarProjection(n) {
-		// The expansion DECLINED this star — a bare `*` over a join, whose
-		// column set the planner refuses to guess (ADR-0012, #810). The
+		// The expansion DECLINED this star — its source list could not be
+		// stated, unlike an enumerable join's arms (ADR-0026 §9). The
 		// wrapper and its marker stay: `RefuseUnappliedColumnAliasLists` turns
 		// them into one refusal, because the alternative is what this shape
 		// did before — the list silently dropped, and every reference to a

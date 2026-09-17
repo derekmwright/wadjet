@@ -32,8 +32,8 @@ import (
 // question the builder cannot ask; it is DEFERRED to the pass that answers it
 // (`logical.ApplyDeferredColumnAliases`, immediately after
 // `ExpandStarProjections`) rather than dropped, and the ARITY refusal moves
-// with it. Where the expansion declines — a bare star over a join — the
-// wrapper is removed and the relation keeps exactly the disposition it had.
+// with it. Join stars expand their written arms (ADR-0026 §9). Where the
+// expansion declines, the wrapper keeps its marker for the later refusal.
 func TestArcK1AColumnAliasListRenamesPositionally(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")

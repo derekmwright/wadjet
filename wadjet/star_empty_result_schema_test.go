@@ -47,21 +47,21 @@ func TestStarEmptyResultDeclaresSameColumnsAsNonEmpty(t *testing.T) {
 		{"star_union_all", "SELECT * FROM mbtypes WHERE %s UNION ALL SELECT * FROM mbtypes WHERE %[1]s"},
 		// THE DEFERRED HALF OF #846, closed by #978, and the pin that used to
 		// hold it here (`TestStarOverAJoinIsStillUndeclared`) is deleted as
-		// its proof. A star over a JOIN declares the join operator's OWN
-		// output — `exec.JoinOutputSchema`, the namer the executed answer
-		// uses — so the two arms describe one relation.
+		// its proof. A star over a JOIN now declares its expanded projection,
+		// using the FROM clause's arms in written order (ADR-0026 §9),
+		// so the empty and non-empty answers describe one relation.
 		//
 		// PostgreSQL publishes `id, g, …, id, g, …`: duplicate names kept by
-		// POSITION. This engine keeps the first side's names and qualifies the
-		// second by its owning alias (`a.id`, `a.g`, …), which is the executed
-		// convention on every arm and a PRE-EXISTING divergence older than
-		// this test — the cell asserts the two arms AGREE, which is #978's
-		// claim, not that either matches PostgreSQL's spelling.
+		// POSITION. The expanded star keeps that same list on both paths;
+		// each item resolves through its own relation's qualified name and
+		// publishes the source column's name (ADR-0026 §9). The test compares
+		// the empty result's declaration with the executed result's schema,
+		// so both must describe the query's expanded list.
 		//
-		// WHICH side is qualified is a COST decision: the same statement
-		// without the predicate plans the other side as the build and
-		// publishes `b.id, b.g, …`. That is why the pair is one statement
-		// under two predicates and never a predicate against no predicate.
+		// WHICH side builds remains a COST decision, but the star's output
+		// order and names are set before that choice (ADR-0026 §9).
+		// The pair runs one statement under two predicates so it compares
+		// the declared empty result with rows from the same select list.
 		{"star_self_join", "SELECT * FROM mbtypes a JOIN mbtypes b ON a.id = b.id WHERE a.%s"},
 		{"star_join_ordered", "SELECT * FROM mbtypes a JOIN mbtypes b ON a.id = b.id " +
 			"WHERE a.%s ORDER BY a.id"},

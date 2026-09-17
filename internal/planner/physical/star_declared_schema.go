@@ -127,7 +127,7 @@ func starOnlySourceScan(n *logical.Node) (*logical.Node, []string) {
 	return nil, nil
 }
 
-// starJoinDeclaredOutputSchema declares SELECT * over one join, including
+// starJoinDeclaredOutputSchema declares an unexpanded star over one join, including
 // zero rows, using exec.JoinOutputSchema: probe then build, duplicate bare
 // names qualified by their owning alias. #978, #846, #416.
 // Neither side may contain a join: DeclaredJoinSchema's nested concatenation

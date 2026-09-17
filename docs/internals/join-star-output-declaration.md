@@ -2,19 +2,19 @@
 
 Source: internal/planner/physical/star_declared_schema.go — starJoinDeclaredOutputSchema, moved 2026-09-11 (#1026)
 
-starJoinDeclaredOutputSchema is the declaration for `SELECT *` over a JOIN —
-the one zero-row shape that reached a client with NO COLUMNS AT ALL, on
-every arm (#978, #846's twin).
+starJoinDeclaredOutputSchema declares an unexpanded single-join fallback.
+An expanded `SELECT *` declares its projection: FROM arms in written order,
+with duplicate names kept by position (ADR-0026 §9; #978, #846).
 
-`SELECT * FROM a JOIN b ON …` produces no Project node for the walk above to
-read and no single scan for it to describe, so a result WITH rows was
+Before join-star expansion, `SELECT * FROM a JOIN b ON …` produced no Project
+node for the walk to read and no single scan to describe, so a result WITH rows was
 described from the first batch and a result without rows was described by
 nothing: psql printed no header, pgJDBC's executeQuery had no column
 metadata, and the pgwire door sent an EMPTY RowDescription because that was
 the most honest thing it could say. `SELECT * FROM a WHERE false` has
 declared its columns since #416.
 
-THE NAMES ARE THE OPERATOR'S OWN. The join executor emits the probe's
+THE FALLBACK NAMES ARE THE OPERATOR'S OWN. The join executor emits the probe's
 columns and then the build's, with every DUPLICATE bare name qualified by
 its owning alias, and that rule lives in `exec.joinOutputSchemaWithMapping`.
 This function does not reimplement it — it assembles the arguments from the
