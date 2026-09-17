@@ -242,6 +242,56 @@ priority: TLP first, then NoREC, then PQS):
   or free to add to a long soak alongside one of the above; not run in
   this pilot.
 
+## Running against the MIT embedded server
+
+`wadjet serve` (the MIT binary, no `--mode`) is the target the correctness
+campaign runs against, and `task sqlancer:run-mit` drives it end to end:
+
+```bash
+source ~/tools/sqlancer-env.sh
+task build && task sqlancer:build            # dist/wadjet and the jar
+export SQLANCER_JAR=/tmp/sqlancer-wadjet/target/sqlancer-2.0.0.jar
+task sqlancer:run-mit ARGS="--num-threads 1 --random-seed 1 --num-queries 200 \
+  --num-tries 200 --timeout-seconds 120 wadjet --oracle NOREC"
+task sqlancer:triage LOGS=<run dir>/logs/wadjet
+```
+
+`tools/sqlancer/run-mit.sh` starts `dist/wadjet serve --pg-addr=:15432` on a
+file store, with the catalog's NATS store and the data directory both inside
+a scratch run directory (`SQLANCER_RUN_DIR`, default a fresh `mktemp -d`;
+a directory inside the checkout is refused), waits for the port, hands the
+arguments to `run.sh`, and stops the server it started when the run ends.
+The server runs with `--query-timeout=8s` so one runaway generated query
+cannot stall a round. SQLancer's exit status is non-zero whenever it recorded
+any error, so a "failed" task is the normal end of a run; the report is what
+decides.
+
+The triage report has a **known difference** bucket. The classifier reads
+`docs/postgres-differences.md` (`-known-differences` to point it elsewhere),
+extracts from each bold entry the SQLSTATEs its prose names and the
+distinctive SQL vocabulary of its heading (a type name, a clause keyword, an
+extension function name; never a common word, and never a word from the
+prose, whose examples name types the engine's messages echo back — the rule
+and its measurements are documented in `triage/known.go`). A refused query
+is matched on the engine's error text alone, and an oracle violation on its
+queries as well, because matching a refusal on its generated SQL filed 58 of
+the first run's 200 refusals under an unrelated entry through a `::VARCHAR`
+cast, and the expression the engine quotes back inside its message is
+blanked first for the same reason. A match lands in that bucket with the
+entry's heading as the reason. Everything left in **unexpected error** and
+the oracle-violation buckets is undocumented, and is the campaign's input:
+an oracle violation is a wrong answer; an unexpected error is a shape the
+engine refuses that PostgreSQL accepts, filed as a refusal, not fixed
+silently.
+
+First run on the MIT target (2026-09-17, seed 1, 200 databases, NoREC): 0
+oracle violations, 0 crashes, 0 known differences, 200 unexpected errors —
+every database stopped at its first refused shape, almost all of them an
+outer join whose `ON` clause is not a bare column equality (a cast, a
+function call or a `LIKE`), then `BETWEEN SYMMETRIC`, `int4range`, and two
+parser gaps. Those are the refusal shapes to file before NoREC can get past
+the first query of a database.
+
 ## Reproducing a finding from a seed
 
 SQLancer writes one running log per database round to

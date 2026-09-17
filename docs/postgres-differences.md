@@ -406,4 +406,4 @@ Only psql’s anchored literal-name patterns work; other patterns/operators rais
 
 ## What is NOT on this list
 
-A value, a row set, a declared type or an error that differs from PostgreSQL 17.11 and is not on this list is a defect: [report them](https://github.com/derekmwright/wadjet/issues/new/choose). EXPLAIN output and timing are not SQL semantics, and row order without ORDER BY is unspecified under [ADR-0013’s legal classes](adr/0013-correctness-gates-and-their-boundaries.md).
+A value, a row set, a declared type or an error that differs from PostgreSQL 17.11 and is not on this list is a defect: [report them](https://github.com/derekmwright/wadjet/issues/new/choose). EXPLAIN output and timing are not SQL semantics, and row order without ORDER BY is unspecified under [ADR-0013’s legal classes](adr/0013-correctness-gates-and-their-boundaries.md). The SQLancer harness (`task sqlancer:triage`) reads this page as its known-difference list: a generated query whose error matches an entry here is reported under that entry, and everything else it reports is a candidate defect.
