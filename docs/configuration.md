@@ -1,6 +1,6 @@
 # Configuration
 
-Wadjet is configured through CLI flags, environment variables, and an optional YAML configuration file.
+Wadjet is configured through CLI flags, environment variables, and an optional YAML configuration file. The distributed server settings below describe `wadjetd serve`; `wadjet serve` runs the embedded engine behind the PostgreSQL wire protocol, with no coordinator or workers (see [LICENSING.md](../LICENSING.md)).
 
 ## Precedence
 
@@ -88,7 +88,7 @@ passing `--result-store`.
 
 ## CLI Flags
 
-### `serve` Command
+### `wadjetd serve` Command
 
 | Flag | Description | Default |
 |------|-------------|---------|
@@ -98,8 +98,8 @@ passing `--result-store`.
 | `--storage-type` | Storage backend: `s3` or `file` | `s3` |
 | `--data-dir` | Local directory for `--storage-type file` | none |
 | `--endpoint` | S3-compatible endpoint (host:port) | `localhost:9000` |
-| `--access-key` | S3 access key | required for S3 |
-| `--secret-key` | S3 secret key | required for S3 |
+| `--access-key` | S3 access key (empty = auto-detect from env/IAM) | empty |
+| `--secret-key` | S3 secret key (empty = auto-detect from env/IAM) | empty |
 | `--bucket` | S3 bucket name | `wadjet` |
 | `--nats-port` | Embedded NATS port (standalone/coordinator mode) | `4222` |
 | `--nats-url` | NATS server URL (worker mode) | none |
@@ -142,7 +142,7 @@ open state, labelled `read`, `write` or `delete`. An operator seeing
 read outage.
 
 `--query-intermediate-ttl` and `--query-intermediate-sweep` reach the two
-`serve` modes that build a coordinator (`standalone` and `coordinator`). A
+`wadjetd serve` modes that build a coordinator (`standalone` and `coordinator`). A
 coordinator constructed by the embedded API keeps the built-in 1-hour TTL
 and 10-minute sweep; there is no library setting for them.
 
@@ -157,8 +157,8 @@ effect.
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--endpoint` | S3-compatible endpoint | `localhost:9000` |
-| `--access-key` | S3 access key | required |
-| `--secret-key` | S3 secret key | required |
+| `--access-key` | S3 access key (empty = auto-detect from env/IAM) | empty |
+| `--secret-key` | S3 secret key (empty = auto-detect from env/IAM) | empty |
 | `--bucket` | S3 bucket name | `wadjet` |
 | `--storage-type` | `s3` or `file` | `s3` |
 | `--data-dir` | Local data directory (with `--storage-type=file`) | — |
@@ -167,7 +167,7 @@ effect.
 | `--nats-store-dir` | Catalog store directory | `<data-dir>/_catalog` with `--storage-type=file`, else `~/.wadjet/nats` |
 | `--format` | Output format: `json`, `table`, `csv` | `json` |
 
-Usage: `wadjet query [flags] "SQL STATEMENT"`
+Usage: `wadjet query --format=table "SELECT 1"`
 
 `query`, `create-table`, `drop-table`, `shell` and `tables` share ONE
 persisted catalog with `serve`. `--nats-url` names a server explicitly;

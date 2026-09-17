@@ -46,7 +46,7 @@ binary is which.
 ```bash
 wadjetd serve --mode=standalone \
   --storage-type=s3 --endpoint=minio:9000 --bucket=wadjet \
-  --access-key=... --secret-key=... [--ssl --region=us-east-2]
+  --access-key="$S3_ACCESS_KEY" --secret-key="$S3_SECRET_KEY" --ssl --region=us-east-2
 ```
 
 Credentials empty = auto-detect from env/IAM. Works with MinIO, AWS S3,
@@ -59,15 +59,15 @@ R2.
 wadjetd serve --mode=coordinator \
   --pg-addr=:5432 --nats-url=nats://nats:4222 \
   --storage-type=s3 --endpoint=s3.us-east-2.amazonaws.com --ssl \
-  --bucket=<data-bucket> --region=us-east-2 \
+  --bucket=analytics --region=us-east-2 \
   --data-plane=grpc --data-plane-addr=:9091 \
-  --catalog-snapshot-s3-prefix=s3://<bucket>/catalog/
+  --catalog-snapshot-s3-prefix=s3://analytics/catalog/
 
 # Each worker
 wadjetd serve --mode=worker \
   --nats-url=nats://nats:4222 \
-  --storage-type=s3 --endpoint=... --bucket=... --region=... --ssl \
-  --data-plane=grpc --coord-data-plane=<coord-host>:9091 \
+  --storage-type=s3 --endpoint=s3.us-east-2.amazonaws.com --bucket=analytics --region=us-east-2 --ssl \
+  --data-plane=grpc --coord-data-plane=coordinator:9091 \
   --spill-dir=/mnt/nvme/spill \
   --max-concurrent=4
 ```
@@ -172,7 +172,8 @@ Probes on the metrics port (`--metrics-addr`, default `:9100`):
 terminationGracePeriodSeconds: 900   # >= --drain-timeout + margin
 containers:
 - name: wadjet-worker
-  args: ["serve", "--mode=worker", "--drain-timeout=10m", ...]
+  command: ["wadjetd"]
+  args: ["serve", "--mode=worker", "--drain-timeout=10m"]
   livenessProbe:  { httpGet: { path: /healthz, port: 9100 } }
   readinessProbe: { httpGet: { path: /readyz,  port: 9100 } }
 ```
@@ -190,7 +191,7 @@ README. Local gate first: `cmd/tpch-harness --mode=local` (~11s)
 catches distributed regressions before any EC2 spend. Disable
 `--background-compaction=false` for comparable timings.
 
-## 2. Flag reference (serve-relevant, as of 2026-07-04)
+## 2. Flag reference (`wadjetd serve`, as of 2026-07-04)
 
 "Runtime?" = can this become a live switch without a restart, given how
 the value is consumed today. **Today every flag is process-start only**
