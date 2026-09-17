@@ -10,7 +10,6 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -53,8 +52,8 @@ func (p *StagePlanner) refuseCorrelatedSubqueries(node *logical.Node) error {
 	switch node.Type {
 	case logical.NodeFilter:
 		if len(node.Children) > 0 && len(node.Predicates) > 0 {
-			outerTables := physical.CollectTableAliases(node.Children[0])
-			outerCols := physical.CollectOuterColumns(node.Children[0])
+			outerTables := p.PlanContext.CollectTableAliases(node.Children[0])
+			outerCols := p.PlanContext.CollectOuterColumns(node.Children[0])
 			for _, pred := range node.Predicates {
 				ast := pred.ASTExpr
 				if ast == nil && pred.Raw != "" {
@@ -67,8 +66,8 @@ func (p *StagePlanner) refuseCorrelatedSubqueries(node *logical.Node) error {
 		}
 	case logical.NodeProject:
 		if len(node.Children) > 0 {
-			outerTables := physical.CollectTableAliases(node.Children[0])
-			outerCols := physical.CollectOuterColumns(node.Children[0])
+			outerTables := p.PlanContext.CollectTableAliases(node.Children[0])
+			outerCols := p.PlanContext.CollectOuterColumns(node.Children[0])
 			for _, proj := range node.Projections {
 				ast := proj.ASTExpr
 				if ast == nil && proj.Expr != "" {

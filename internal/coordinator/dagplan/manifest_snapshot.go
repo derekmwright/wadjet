@@ -16,5 +16,5 @@ import (
 // context to everything downstream. NewPlannerForContext is the pairing
 // half: every physical.Planner built from that context onward shares snap.
 func WithManifestSnapshot(ctx context.Context, snap *physical.ManifestSnapshot) context.Context {
-	return context.WithValue(ctx, physical.ManifestSnapshotCtxKey{}, snap)
+	return localPlanFacts.WithManifestSnapshot(ctx, snap)
 }

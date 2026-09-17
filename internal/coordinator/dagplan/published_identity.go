@@ -265,7 +265,7 @@ func respellAggSpecOverProducerOutput(spec *AggSpec, arms map[string]bool, in []
 		if err != nil {
 			return "", false
 		}
-		out, changed, complete := physical.RewriteColRefs(node, func(c *plansql.ColRef) (plansql.Node, bool) {
+		out, changed, complete := localPlanFacts.RewriteColRefs(node, func(c *plansql.ColRef) (plansql.Node, bool) {
 			ref, ok := byWritten[strings.ToLower(c.String())]
 			if !ok {
 				return nil, false
@@ -375,12 +375,12 @@ func aliasCandidatesForText(text string, child *logical.Node) []AggInputRef {
 	}
 	var out []AggInputRef
 	seen := map[string]bool{}
-	for _, c := range physical.CollectColRefs(node) {
+	for _, c := range localPlanFacts.CollectColRefs(node) {
 		written := c.String()
 		if seen[strings.ToLower(written)] {
 			continue
 		}
-		resolved, expr, _, renamed := physical.ResolveAggInputName(written, child)
+		resolved, expr, _, renamed := localPlanFacts.ResolveAggInputName(written, child)
 		if !renamed {
 			continue
 		}
@@ -576,7 +576,7 @@ func specResolvesOverStream(text string, in []streamCol) bool {
 	if err != nil {
 		return true // not ours to judge; leave the spec alone
 	}
-	for _, ref := range physical.CollectColRefs(ast) {
+	for _, ref := range localPlanFacts.CollectColRefs(ast) {
 		if strings.HasPrefix(ref.Column, windowKeyColPrefix) || strings.HasPrefix(ref.Column, ":") {
 			continue // the fragment computes it, or dispatch substitutes it
 		}

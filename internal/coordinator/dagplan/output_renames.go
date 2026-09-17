@@ -9,7 +9,6 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // extractOutputRenames inspects the logical plan tree's outermost projection
@@ -34,7 +33,7 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 	// the SELECT list does not carry (#320). Leaving them out of the rename
 	// list is what drops them from the client's result: the gather projects to
 	// exactly the columns named here.
-	proj := logical.VisibleProjections(physical.FindOutputProjectionsForRename(root))
+	proj := logical.VisibleProjections(localPlanFacts.FindOutputProjectionsForRename(root))
 	if len(proj) == 0 {
 		return nil
 	}
@@ -44,9 +43,9 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 	// here spelled over `g`, so the gather read a column the aggregate does
 	// not emit and answered NULL for every row while the single-process path
 	// answered correctly — the same identity gap as #723, one stage later.
-	keyRefs := physical.GroupKeyByIdentity(aggregateUnderOutput(root))
+	keyRefs := localPlanFacts.GroupKeyByIdentity(aggregateUnderOutput(root))
 	renames := make([]OutputRename, 0, len(proj))
-	renameScope := physical.FindOutputProjectionNode(root)
+	renameScope := localPlanFacts.FindOutputProjectionNode(root)
 	for _, p := range proj {
 		var src, target string
 		var astExpr plansql.Node
@@ -83,8 +82,8 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 				target = p.Expr
 				src = strings.ToLower(p.Expr)
 			}
-		case p.ASTExpr != nil && !physical.IsSimpleColRefForRename(p.ASTExpr) &&
-			(physical.ReferencesSyntheticAgg(p.ASTExpr) || referencesSyntheticWindow(p.ASTExpr)):
+		case p.ASTExpr != nil && !localPlanFacts.IsSimpleColRefForRename(p.ASTExpr) &&
+			(localPlanFacts.ReferencesSyntheticAgg(p.ASTExpr) || referencesSyntheticWindow(p.ASTExpr)):
 			// Evaluate expressions over __agg_N at gather so wrappers around aggregates
 			// are applied. Pure scalar GROUP BY/project outputs already exist under their
 			// lowercased expression text and need a plain rename, not evaluation.
@@ -160,7 +159,7 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 // synthetic column (__win_N), the marker the logical builder's nested-window
 // rewrite uses for a window extracted out of a larger expression (#610).
 func referencesSyntheticWindow(n plansql.Node) bool {
-	return physical.ReferencesSynthetic(n, "__win_")
+	return localPlanFacts.ReferencesSynthetic(n, "__win_")
 }
 
 // firstColRefName returns the first column reference name in an AST, used as

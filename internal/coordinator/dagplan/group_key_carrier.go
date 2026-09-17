@@ -101,7 +101,7 @@ func aggregateEmittedKeyNames(s *Stage) []string {
 	if len(s.GroupByResolve) != len(keys) {
 		return keys
 	}
-	return physical.EmittedKeyNames(keys, s.GroupByResolve, stageAggOutNames(s))
+	return localPlanFacts.EmittedKeyNames(keys, s.GroupByResolve, stageAggOutNames(s))
 }
 
 // stageGroupKeyDecls types every key the computing fragment MATERIALIZES, so
@@ -129,7 +129,7 @@ func stageGroupKeyDecls(published []string, resolve []physical.GroupKeyResolutio
 		}
 		d := r.Decl
 		if d.ID == 0 && !d.DecKnown {
-			d = physical.DerivedGroupKeyDecl(r.Expr, node, child)
+			d = localPlanFacts.DerivedGroupKeyDecl(r.Expr, node, child)
 		}
 		resolve[i].Decl = d
 		out[published[i]] = d.ID

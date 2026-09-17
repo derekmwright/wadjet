@@ -55,7 +55,7 @@ func (p *StagePlanner) materializeInSubquery(ctx context.Context, in *plansql.In
 	// PostgreSQL answers 6 (#615 F2). inSetLiteral already declines a float32
 	// SET for the mirror of this reason; this is the probe half, and it needs
 	// the declared type the value list cannot show.
-	if t, c := physical.NodeDeclaredType(in.Left, decls); c == expr.Decided && t.ID == parquet.TypeFloat32 {
+	if t, c := p.PlanContext.NodeDeclaredType(in.Left, decls); c == expr.Decided && t.ID == parquet.TypeFloat32 {
 		p.refuseInSubquery(fmt.Errorf("%w: the probe is REAL, and PostgreSQL compares a "+
 			"multi-element IN list at real width while a subquery widens it to double "+
 			"precision — inlining the set would change the predicate",
@@ -85,7 +85,7 @@ func (p *StagePlanner) materializeInSubquery(ctx context.Context, in *plansql.In
 			"which has no set-producer lowering", ErrInSubqueryDistributed))
 		return nil, false
 	}
-	bound := physical.InlinedInSetRowCap()
+	bound := p.PlanContext.InlinedInSetRowCap()
 	if bound == 0 {
 		p.refuseInSubquery(fmt.Errorf("%w: materialization disabled (WADJET_IN_SET_MAX=0)",
 			ErrInSubqueryDistributed))

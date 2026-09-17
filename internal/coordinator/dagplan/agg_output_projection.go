@@ -95,7 +95,7 @@ func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) map[st
 	needed := false
 	for i := range project.Projections {
 		p := &project.Projections[i]
-		alias := physical.ProjectionOutputName(*p)
+		alias := localPlanFacts.ProjectionOutputName(*p)
 		if alias == "" {
 			return nil
 		}
@@ -116,15 +116,15 @@ func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) map[st
 			if !complete && referencesDecimalAggregate(p.ASTExpr, stage) {
 				return nil
 			}
-			decl := physical.InferProjectionDeclType(p.ASTExpr, parquet.TypeString, nil, aggDecls)
-			materialized := physical.DeclTypeParts(decl)
+			decl := localPlanFacts.InferProjectionDeclType(p.ASTExpr, parquet.TypeString, nil, aggDecls)
+			materialized := localPlanFacts.DeclTypeParts(decl)
 			typ, prec, scale, fields := materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
 			specs = append(specs, physical.ProjectExprSpec{
 				Expr: src, Name: strings.ToLower(alias),
 				Type: typ, TypeKnown: true, Precision: prec, Scale: scale, Fields: fields,
 			})
 			needed = true
-		case !physical.NameIsPlainColumn(src):
+		case !localPlanFacts.NameIsPlainColumn(src):
 			// The stage emits it under an expression TEXT, which no
 			// consumer can name. The alias is the only usable spelling.
 			//
@@ -170,7 +170,7 @@ func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) map[st
 			// both costs one column and keeps this projection purely
 			// ADDITIVE (#656 F1/F2).
 			expr := real
-			if !physical.NameIsPlainColumn(real) {
+			if !localPlanFacts.NameIsPlainColumn(real) {
 				expr = plansql.QuoteIdent(real)
 			}
 			// The EXACT spelling, not the lowercased key: this is a
@@ -396,7 +396,7 @@ func bareGroupKeyDecls(decls physical.ColDecls, stage *Stage, project *logical.N
 	if agg == nil || len(agg.Children) != 1 {
 		return decls
 	}
-	in := physical.InputColDecls(agg.Children[0])
+	in := localPlanFacts.InputColDecls(agg.Children[0])
 	if len(in.Types) == 0 {
 		return decls
 	}
@@ -506,7 +506,7 @@ func referencesDecimalAggregate(n plansql.Node, stage *Stage) bool {
 	if len(dec) == 0 {
 		return false
 	}
-	for _, ref := range physical.CollectColRefs(n) {
+	for _, ref := range localPlanFacts.CollectColRefs(n) {
 		if dec[strings.ToLower(ref.Column)] {
 			return true
 		}

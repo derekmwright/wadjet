@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // ErrLateralProjectionDistributed refuses star-read blocks whose projection
@@ -32,7 +31,7 @@ func refuseUnpublishedStarBlock(candidates map[*logical.Node]blockDivergence,
 		if published[block] {
 			continue
 		}
-		names := physical.EmittedColumnNames(block)
+		names := localPlanFacts.EmittedColumnNames(block)
 		if len(names) == 0 {
 			names = []string{"<unnamed>"}
 		}

@@ -8,7 +8,6 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // groupKeysByIdentity indexes a STAGE's published output names by the
@@ -47,7 +46,7 @@ func aggregateUnderOutput(root *logical.Node) *logical.Node {
 		switch {
 		case n.Type == logical.NodeAggregate:
 			return n
-		case n.Type == logical.NodeProject, physical.AggScopePreservingWrapper(n.Type):
+		case n.Type == logical.NodeProject, localPlanFacts.AggScopePreservingWrapper(n.Type):
 		default:
 			return nil
 		}

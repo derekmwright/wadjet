@@ -29,7 +29,7 @@ import (
 // every string it is handed — 1 group where there are 25 (#331/#333). The
 // caller's fallback stands in those cases, exactly as before.
 func ProjectionOutputType(node plansql.Node, fallback parquet.TypeID) expr.DeclType {
-	if t, c := physical.NodeDeclaredType(node, physical.ColDecls{}); c == expr.Decided {
+	if t, c := localPlanFacts.NodeDeclaredType(node, physical.ColDecls{}); c == expr.Decided {
 		return t
 	}
 	return expr.Decl(fallback)
@@ -63,8 +63,8 @@ func inferRenameExprDecl(astExpr plansql.Node, scope *logical.Node) (expr.DeclTy
 	// and the single-process path say `2014-05-05`. An undecided rename keeps
 	// `evalExprColumn`'s float64 arm — what it had before the declaration
 	// existed — so a shape this walk cannot type is never made worse by it.
-	d, conf := physical.InferProjectionDeclTypeConf(astExpr, parquet.TypeString,
-		physical.StrictIntArithCols(child), physical.EmittedColDecls(child))
+	d, conf := localPlanFacts.InferProjectionDeclTypeConf(astExpr, parquet.TypeString,
+		localPlanFacts.StrictIntArithCols(child), localPlanFacts.EmittedColDecls(child))
 	if conf == expr.Undecided {
 		return expr.DeclType{}, false
 	}

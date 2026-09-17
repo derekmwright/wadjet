@@ -11,7 +11,6 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // ScalarDeferToggle gates deferring ALL uncorrelated scalar subqueries to
@@ -39,7 +38,7 @@ var ProbeSplitMinBytes int64 = 64 * 1024 * 1024
 func init() {
 	if v := os.Getenv("WADJET_REVERSE_BLOOM_INNER_THRESHOLD"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			physical.ReverseBloomInnerThreshold = n
+			localPlanFacts.SetReverseBloomInnerThreshold(n)
 		}
 	}
 }
@@ -56,7 +55,7 @@ func init() {
 var maxFusedBuildBytes int64 = 1 * 1024 * 1024 * 1024
 
 func init() {
-	physical.SemiAntiNE.Store(os.Getenv("WADJET_SEMIANTI_NE") != "0")
+	localPlanFacts.SemiAntiNE().Store(os.Getenv("WADJET_SEMIANTI_NE") != "0")
 }
 
 func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) ([]Stage, error) {
@@ -74,7 +73,7 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	logical.ExpandStarProjections(node)
 	node = logical.ElideUnstatedJoinStar(node)
 	logical.ResolveStarJoinOrdinalSortKeys(node)
-	if err := physical.RefuseUnexpandedStarAnywhere(node); err != nil {
+	if err := p.PlanContext.RefuseUnexpandedStarAnywhere(node); err != nil {
 		return nil, err
 	}
 	// …and the same for a COLUMN-ALIAS LIST longer than the `SELECT *` body it
@@ -121,7 +120,7 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	// PLAN-time error in PostgreSQL, raised whether or not the predicate is
 	// ever reached (#631 follow-up). Refuse it here so the DAG cannot answer
 	// rows for a query PostgreSQL refuses.
-	if err := physical.RefuseUnrepresentableRealInList(node); err != nil {
+	if err := p.PlanContext.RefuseUnrepresentableRealInList(node); err != nil {
 		return nil, err
 	}
 	// A SELECT with no FROM emits a `dual` stage with no dependencies and no
@@ -368,7 +367,7 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 		// to the column the streams actually carry, because no stage ever
 		// applies the rename itself.
 		var renameChild *logical.Node
-		if pn := physical.FindOutputProjectionNode(node); pn != nil && len(pn.Children) == 1 {
+		if pn := p.PlanContext.FindOutputProjectionNode(node); pn != nil && len(pn.Children) == 1 {
 			renameChild = pn.Children[0]
 		}
 		// A name some stage's projection already MATERIALIZES is the name
@@ -408,7 +407,7 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	}
 	// The projection whose names the CLIENT reads: the three plan-time
 	// declarations below are all looked up by that name (#732).
-	outputProj := physical.FindOutputProjectionNode(node)
+	outputProj := p.PlanContext.FindOutputProjectionNode(node)
 
 	// The gather also carries the PLAN's answer for the output schema, which
 	// is what a zero-row DAG result has instead of a batch to read it off:
@@ -416,7 +415,7 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	// gives it their TYPES, so pgwire declares the same OIDs for an empty
 	// result as for a full one (#416).
 	if outSchema := republishDeclaredSchema(outputProj,
-		physical.DeclaredOutputSchema(node, p.SubqueryOutputColumn)); len(outSchema) > 0 {
+		p.PlanContext.OutputSchema(node, p.SubqueryOutputColumn)); len(outSchema) > 0 {
 		for i := range stages {
 			if stages[i].Type == StageExchangeGather {
 				stages[i].OutputSchema = outSchema
@@ -428,8 +427,7 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	// SchemaHintWireUnconstrainedDecimal (FIX 2, #457/#458 fold-in):
 	// unlike OutputSchema above, consulted on every result, not only a
 	// zero-row one.
-	if wireUnconstrained := physical.RepublishDeclaredNames(outputProj,
-		physical.DeclaredWireUnconstrainedDecimal(node)); len(wireUnconstrained) > 0 {
+	if wireUnconstrained := p.PlanContext.PublishedWireUnconstrainedDecimal(outputProj, node); len(wireUnconstrained) > 0 {
 		for i := range stages {
 			if stages[i].Type == StageExchangeGather {
 				stages[i].OutputWireUnconstrainedDecimal = wireUnconstrained
@@ -440,8 +438,7 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	// The string family's modifier, on the same stage and for the same reason
 	// (#838). Both paths read the same plan-time answer, so a CAST's declared
 	// length cannot depend on which one ran.
-	if lengths := physical.RepublishDeclaredNames(outputProj,
-		physical.DeclaredStringLengths(node)); len(lengths) > 0 {
+	if lengths := p.PlanContext.PublishedStringLengths(outputProj, node); len(lengths) > 0 {
 		for i := range stages {
 			if stages[i].Type == StageExchangeGather {
 				stages[i].OutputStringLength = lengths

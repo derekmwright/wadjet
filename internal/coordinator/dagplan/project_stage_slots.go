@@ -101,7 +101,7 @@ func aggregateEmittedSlots(s *Stage) (names []string, isAgg []bool, ok bool) {
 	if len(resolve) != len(keys) {
 		resolve = nil
 	}
-	keys = physical.EmittedKeyNames(keys, resolve, stageAggOutNames(s))
+	keys = localPlanFacts.EmittedKeyNames(keys, resolve, stageAggOutNames(s))
 	for _, k := range keys {
 		names = append(names, k)
 		isAgg = append(isAgg, false)

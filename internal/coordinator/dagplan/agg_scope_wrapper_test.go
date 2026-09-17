@@ -114,7 +114,7 @@ func TestAggScopePreservingWrapperIsReadByEveryWalk(t *testing.T) {
 			len(names), names, len(want))
 	}
 	for typ, w := range want {
-		if got := physical.AggScopePreservingWrapper(typ); got != w {
+		if got := localPlanFacts.AggScopePreservingWrapper(typ); got != w {
 			t.Errorf("AggScopePreservingWrapper(%v) = %v, want %v", typ, got, w)
 		}
 		// The physical predicate is a DELEGATION to the logical one, which is
@@ -152,7 +152,7 @@ func TestAggScopePreservingWrapperIsReadByEveryWalk(t *testing.T) {
 			t.Errorf("aggregateUnderOutput through %v found=%v, want %v — the gather's walk "+
 				"stopped reading physical.AggScopePreservingWrapper", typ, found != nil, w)
 		}
-		if found := physical.FindAggregateAncestor(wrapped); (found != nil) != w {
+		if found := localPlanFacts.FindAggregateAncestor(wrapped); (found != nil) != w {
 			t.Errorf("FindAggregateAncestor through %v found=%v, want %v — the single-process "+
 				"walk stopped reading physical.AggScopePreservingWrapper", typ, found != nil, w)
 		}

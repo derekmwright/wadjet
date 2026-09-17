@@ -413,7 +413,7 @@ func annotateDerivedAliasSortKey(key *SortKeySpec, child *logical.Node) {
 	if key.Column == "" || logical.IsHiddenSortColumn(key.Column) {
 		return // the synthetic-key mechanism above owns those
 	}
-	if src := physical.DerivedAliasSourceColumn(key.Column, child); src != "" {
+	if src := localPlanFacts.DerivedAliasSourceColumn(key.Column, child); src != "" {
 		key.AliasSource = src
 		return
 	}
@@ -425,9 +425,9 @@ func annotateDerivedAliasSortKey(key *SortKeySpec, child *logical.Node) {
 	if def, owner := derivedAliasDefinition(key.Column, child); def != nil {
 		key.AliasExpr = def.String()
 		if owner != nil && len(owner.Children) == 1 {
-			materialized := physical.DeclTypeParts(
-				physical.InferProjectionDeclType(def, parquet.TypeString,
-					physical.StrictIntArithCols(owner.Children[0]), physical.InputColDecls(owner.Children[0])))
+			materialized := localPlanFacts.DeclTypeParts(
+				localPlanFacts.InferProjectionDeclType(def, parquet.TypeString,
+					localPlanFacts.StrictIntArithCols(owner.Children[0]), localPlanFacts.InputColDecls(owner.Children[0])))
 			key.AliasExprType, key.AliasExprPrecision, key.AliasExprScale, key.AliasExprFields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
 			key.AliasExprTypeKnown = true
 		}
@@ -459,8 +459,8 @@ func derivedAliasDefinition(name string, child *logical.Node) (plansql.Node, *lo
 	for n := child; n != nil; {
 		switch n.Type {
 		case logical.NodeProject:
-			bare := physical.DerivedScopeBareName(resolved, n)
-			proj := physical.ProjectionForName(n.Projections, resolved, bare)
+			bare := localPlanFacts.DerivedScopeBareName(resolved, n)
+			proj := localPlanFacts.ProjectionForName(n.Projections, resolved, bare)
 			if proj == nil {
 				return nil, nil
 			}
@@ -616,7 +616,7 @@ func annotateHiddenSortSource(key *SortKeySpec, child *logical.Node) {
 	if key.SourceExpr == "" && proj.ASTExpr != nil {
 		key.SourceExpr = proj.ASTExpr.String()
 	}
-	if proj.ASTExpr != nil && physical.IsSimpleColRefForRename(proj.ASTExpr) {
+	if proj.ASTExpr != nil && localPlanFacts.IsSimpleColRefForRename(proj.ASTExpr) {
 		key.SourceColumn = proj.Column
 		if key.SourceColumn == "" {
 			key.SourceColumn = key.SourceExpr
@@ -629,10 +629,10 @@ func annotateHiddenSortSource(key *SortKeySpec, child *logical.Node) {
 		// #445): without it, `ORDER BY s_suppkey + 1` inside a derived
 		// table declares FLOAT64 here where the same term at the query's
 		// root gets INT64 through attachScanSelectProjections (#472).
-		strictInt := physical.StrictIntArithCols(owner.Children[0])
-		materialized := physical.DeclTypeParts(
-			physical.InferProjectionDeclType(proj.ASTExpr, parquet.TypeString,
-				strictInt, physical.InputColDecls(owner.Children[0])))
+		strictInt := localPlanFacts.StrictIntArithCols(owner.Children[0])
+		materialized := localPlanFacts.DeclTypeParts(
+			localPlanFacts.InferProjectionDeclType(proj.ASTExpr, parquet.TypeString,
+				strictInt, localPlanFacts.InputColDecls(owner.Children[0])))
 		key.SourceType, key.SourcePrecision, key.SourceScale, key.SourceFields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
 		key.SourceTypeKnown = true
 	}
@@ -795,9 +795,9 @@ func derivedAliasColumnFor(name string, child *logical.Node) aliasColumn {
 	}
 	out := aliasColumn{Name: stripQualifier(name), Expr: def.String()}
 	if owner != nil && len(owner.Children) == 1 {
-		materialized := physical.DeclTypeParts(
-			physical.InferProjectionDeclType(def, parquet.TypeString,
-				physical.StrictIntArithCols(owner.Children[0]), physical.InputColDecls(owner.Children[0])))
+		materialized := localPlanFacts.DeclTypeParts(
+			localPlanFacts.InferProjectionDeclType(def, parquet.TypeString,
+				localPlanFacts.StrictIntArithCols(owner.Children[0]), localPlanFacts.InputColDecls(owner.Children[0])))
 		out.Type, out.Precision, out.Scale, out.Fields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
 		out.TypeKnown = true
 	}

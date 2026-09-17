@@ -250,7 +250,7 @@ func respellDefOverArm(def string, in []streamCol, arm string, constrained bool)
 			ok = false
 			return nil, false
 		}
-		if strings.EqualFold(name, physical.QualifiedColumn(ref)) {
+		if strings.EqualFold(name, localPlanFacts.QualifiedColumn(ref)) {
 			return nil, false // already spelled the way the stream carries it
 		}
 		if dot := strings.IndexByte(name, '.'); dot > 0 {
@@ -290,7 +290,7 @@ func defResolvesOverStream(def string, in []streamCol) bool {
 	if len(emitted) == 0 {
 		return false
 	}
-	for _, ref := range physical.CollectColRefs(node) {
+	for _, ref := range localPlanFacts.CollectColRefs(node) {
 		if !columnResolves(ref, emitted) {
 			return false
 		}

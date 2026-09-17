@@ -317,7 +317,7 @@ func respellSpecsOverProducerOutput(stages []Stage, producerIdx int, specs []phy
 		// already resolves against the producer's output, and decline only
 		// when one does not — that is the case where leaving it alone would
 		// answer NULL for the column.
-		for _, ref := range physical.CollectColRefs(ast) {
+		for _, ref := range localPlanFacts.CollectColRefs(ast) {
 			if !columnResolves(ref, emitted) {
 				return nil, false
 			}

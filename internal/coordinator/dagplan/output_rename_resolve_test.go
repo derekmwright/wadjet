@@ -300,7 +300,7 @@ func TestScopePreservingWrapperMatchesTheRenameWalk(t *testing.T) {
 			}
 			// The rename walk descends iff it resolves `w` to the source
 			// column the Project below renames.
-			descends := physical.ResolveOutputRenameSource("w", n) == "a"
+			descends := localPlanFacts.ResolveOutputRenameSource("w", n) == "a"
 			if descends != want.wrapper {
 				t.Errorf("ResolveRenameSource descends through %s = %v while "+
 					"scopePreservingWrapper says %v — the two walks disagree about "+

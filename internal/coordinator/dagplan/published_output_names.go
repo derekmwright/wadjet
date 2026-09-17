@@ -4,7 +4,6 @@ package dagplan
 
 import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -12,7 +11,7 @@ import (
 // the published names, positionally — the same rename CollectSink.OutputNames
 // applies to the sink's own schema, for the copy the GATHER carries.
 func republishDeclaredSchema(projNode *logical.Node, cols []parquet.Column) []parquet.Column {
-	names := physical.PublishedNamesOfProjection(projNode)
+	names := localPlanFacts.PublishedNamesOfProjection(projNode)
 	if len(names) == 0 || len(names) != len(cols) {
 		return cols
 	}

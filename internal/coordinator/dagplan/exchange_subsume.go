@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"sync/atomic"
 
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // ExchangeSubsume gates dedupeSubsumedScanExchanges. Kill switch
@@ -93,7 +93,7 @@ func dedupeSubsumedScanExchanges(stages []Stage) []Stage {
 				continue
 			}
 			// Rewrite: flag col on A, consumer build reads A + filter.
-			flag := fmt.Sprintf("%s%d", physical.SlotSubsumeFlag, flagSeq)
+			flag := fmt.Sprintf("%s%d", plansql.SlotSubsumeFlag, flagSeq)
 			flagSeq++
 			residual := conjoin(scanB.FilterExprs)
 			a.Exchange.ComputedCols = append(a.Exchange.ComputedCols, ComputedCol{

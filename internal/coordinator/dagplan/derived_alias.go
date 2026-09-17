@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // projectionPublishingName is physical.ProjectionForName widened to an item the SELECT
@@ -28,7 +27,7 @@ import (
 // gather's duplicate-name pairing then took the first column of the name —
 // the group KEY (#785, ADR-0026 §3a).
 func projectionPublishingName(projs []logical.Projection, name, bare string) *logical.Projection {
-	if p := physical.ProjectionForName(projs, name, bare); p != nil {
+	if p := localPlanFacts.ProjectionForName(projs, name, bare); p != nil {
 		return p
 	}
 	for _, want := range []string{name, bare} {

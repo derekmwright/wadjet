@@ -5,7 +5,6 @@ package dagplan
 import (
 	"strings"
 
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -98,7 +97,7 @@ func streamSpellingFor(in []streamCol, declared string) (string, bool) {
 	if want == "" {
 		return "", false
 	}
-	bare := physical.WantBareName(want)
+	bare := localPlanFacts.WantBareName(want)
 	written := want
 	if dot := strings.LastIndexByte(written, '.'); dot >= 0 {
 		written = written[dot+1:]
@@ -111,7 +110,7 @@ func streamSpellingFor(in []streamCol, declared string) (string, bool) {
 		if strings.EqualFold(strings.TrimSpace(c.Name), want) {
 			return "", false // the stream already spells it this way
 		}
-		if physical.WantBareName(c.Name) == bare {
+		if localPlanFacts.WantBareName(c.Name) == bare {
 			match, hits = strings.TrimSpace(c.Name), hits+1
 		}
 	}

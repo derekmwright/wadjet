@@ -443,7 +443,7 @@ func exprColumnRefs(groups ...[]string) []string {
 			if err != nil {
 				continue
 			}
-			for _, ref := range physical.CollectColRefs(ast) {
+			for _, ref := range localPlanFacts.CollectColRefs(ast) {
 				if strings.HasPrefix(ref.Column, windowKeyColPrefix) ||
 					strings.HasPrefix(ref.Column, ":") {
 					continue
@@ -699,7 +699,7 @@ func assertJoinFiltersAreBacked(stages []Stage) error {
 			if err != nil {
 				continue
 			}
-			for _, ref := range physical.CollectColRefs(ast) {
+			for _, ref := range localPlanFacts.CollectColRefs(ast) {
 				if strings.HasPrefix(ref.Column, windowKeyColPrefix) ||
 					strings.HasPrefix(ref.Column, ":") {
 					continue

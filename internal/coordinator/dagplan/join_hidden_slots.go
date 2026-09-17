@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // LateralEmptyDefaultSpec is one output column's empty-input RULE on a join
@@ -43,17 +42,17 @@ func stageHiddenPositions(node *logical.Node, published map[*logical.Node]bool) 
 	if node == nil || len(node.HiddenJoinCols) == 0 || len(node.Children) < 2 {
 		return nil
 	}
-	side := physical.LateralSideOf(node)
+	side := localPlanFacts.LateralSideOf(node)
 	if side < 0 {
 		return nil
 	}
 	var out []HiddenJoinCol
 	if block := materializedBlockUnder(node.Children[side], published); block != nil {
 		for _, hidden := range node.HiddenJoinCols {
-			if physical.LateralMarkerDroppedAbove(node, hidden) {
+			if localPlanFacts.LateralMarkerDroppedAbove(node, hidden) {
 				continue
 			}
-			for i, name := range physical.EmittedColumnNames(block) {
+			for i, name := range localPlanFacts.EmittedColumnNames(block) {
 				if !strings.EqualFold(name, hidden) {
 					continue
 				}
@@ -63,9 +62,9 @@ func stageHiddenPositions(node *logical.Node, published map[*logical.Node]bool) 
 		}
 		return out
 	}
-	declared := physical.DeclaredJoinSchema(node.Children[side], nil, nil, nil)
+	declared := localPlanFacts.DeclaredJoinSchema(node.Children[side], nil, nil, nil)
 	for _, hidden := range node.HiddenJoinCols {
-		if physical.LateralMarkerDroppedAbove(node, hidden) {
+		if localPlanFacts.LateralMarkerDroppedAbove(node, hidden) {
 			continue
 		}
 		for i, col := range declared {

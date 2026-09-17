@@ -47,7 +47,7 @@ func TestExtractOutputRenames_WrappedAggregate(t *testing.T) {
 	if r.Expr == nil {
 		t.Fatalf("Expr should be set for wrapped-aggregate projection")
 	}
-	if !physical.ReferencesSyntheticAgg(r.Expr) {
+	if !localPlanFacts.ReferencesSyntheticAgg(r.Expr) {
 		t.Errorf("Expr should reference a __agg_N column, got %s", r.Expr.String())
 	}
 }
@@ -73,7 +73,7 @@ func TestExtractOutputRenames_PureExpressionGetsRenameNotEval(t *testing.T) {
 		t.Fatalf("want 2 renames, got %v", renames)
 	}
 	for _, r := range renames {
-		if r.Expr != nil && !physical.ReferencesSyntheticAgg(r.Expr) {
+		if r.Expr != nil && !localPlanFacts.ReferencesSyntheticAgg(r.Expr) {
 			t.Errorf("rename %q has Expr but doesn't reference __agg_N: should be a name rename, got Expr=%s",
 				r.To, r.Expr.String())
 		}

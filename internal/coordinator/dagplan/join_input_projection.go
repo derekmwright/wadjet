@@ -41,7 +41,7 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 			if pr.IsAgg {
 				return false
 			}
-			if pr.Column == "" && pr.Alias != "" && pr.ASTExpr != nil && !physical.IsSimpleColRefForRename(pr.ASTExpr) {
+			if pr.Column == "" && pr.Alias != "" && pr.ASTExpr != nil && !localPlanFacts.IsSimpleColRefForRename(pr.ASTExpr) {
 				computes = true
 			}
 		}
@@ -113,14 +113,14 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 		if pr.IsAgg {
 			return false
 		}
-		if pr.Column != "" || pr.Alias == "" || pr.ASTExpr == nil || physical.IsSimpleColRefForRename(pr.ASTExpr) {
+		if pr.Column != "" || pr.Alias == "" || pr.ASTExpr == nil || localPlanFacts.IsSimpleColRefForRename(pr.ASTExpr) {
 			continue
 		}
-		if physical.ReferencesSyntheticAgg(pr.ASTExpr) {
+		if localPlanFacts.ReferencesSyntheticAgg(pr.ASTExpr) {
 			return false
 		}
 		if !haveTypes {
-			colTypes = physical.InputColDecls(proj.Children[0])
+			colTypes = localPlanFacts.InputColDecls(proj.Children[0])
 			if joinArm {
 				// A JOIN arm's declarations have to be read the way the
 				// EXECUTOR spells that stream: `physical.InputColDecls` merges the two
@@ -133,12 +133,12 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 				// `physical.EmittedColDecls` publishes the per-arm QUALIFIED entries
 				// beside the merged bare ones (withJoinArmQualifiers), which
 				// is exactly the spelling the arm's own SELECT list wrote.
-				colTypes = physical.EmittedColDecls(proj.Children[0])
+				colTypes = localPlanFacts.EmittedColDecls(proj.Children[0])
 			}
 			// Same integer-preserving-arithmetic hint as
 			// attachScanSelectProjections (#297, #445): without it, `id + 1`
 			// over a strict-int column declares (and computes) FLOAT64 here.
-			strictInt = physical.StrictIntArithCols(proj.Children[0])
+			strictInt = localPlanFacts.StrictIntArithCols(proj.Children[0])
 			haveTypes = true
 		}
 		expr := pr.Expr
@@ -152,7 +152,7 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 		// the resolvability check below is what refuses to attach it.
 		ast := pr.ASTExpr
 		respelled := false
-		if rewritten, ok := physical.SubstituteNestedRenameRefs(pr.ASTExpr, renameChild); ok && rewritten != nil {
+		if rewritten, ok := localPlanFacts.SubstituteNestedRenameRefs(pr.ASTExpr, renameChild); ok && rewritten != nil {
 			if rewritten != pr.ASTExpr {
 				expr = rewritten.String()
 				respelled = true
@@ -181,17 +181,17 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 		switch {
 		case windowArm:
 			declTypes = windowArmColDecls(below)
-			declStrict = physical.StrictIntArithCols(below.Children[0])
+			declStrict = localPlanFacts.StrictIntArithCols(below.Children[0])
 		case respelled:
 			declTypes = armSourceDecls(renameChild)
-			declStrict = physical.StrictIntArithColsThroughRenames(stripArmFilters(renameChild))
+			declStrict = localPlanFacts.StrictIntArithColsThroughRenames(stripArmFilters(renameChild))
 		}
-		decl := physical.InferProjectionDeclType(ast, parquet.TypeString, declStrict, declTypes)
+		decl := localPlanFacts.InferProjectionDeclType(ast, parquet.TypeString, declStrict, declTypes)
 		spec.Type, spec.TypeKnown = decl.ID, true
 		spec.Precision, spec.Scale = decl.Precision, decl.Scale
-		spec.Fields = physical.DeclTypeParts(decl).Fields
+		spec.Fields = localPlanFacts.DeclTypeParts(decl).Fields
 		computed = append(computed, spec)
-		physical.CollectASTCols(ast, needCols)
+		localPlanFacts.CollectASTCols(ast, needCols)
 	}
 	if len(computed) == 0 {
 		return false
@@ -462,7 +462,7 @@ func armSourceDecls(n *logical.Node) physical.ColDecls {
 		}
 		n = n.Children[0]
 	}
-	return physical.InputColDecls(n)
+	return localPlanFacts.InputColDecls(n)
 }
 
 // windowArmColDecls declares the columns visible ABOVE a window node: its
@@ -474,7 +474,7 @@ func windowArmColDecls(win *logical.Node) physical.ColDecls {
 	if win == nil || len(win.Children) != 1 {
 		return physical.ColDecls{}
 	}
-	base := physical.InputColDecls(win.Children[0])
+	base := localPlanFacts.InputColDecls(win.Children[0])
 	types := make(map[string]parquet.TypeID, len(base.Types)+len(win.WindowExprs))
 	for k, v := range base.Types {
 		types[k] = v
@@ -487,7 +487,7 @@ func windowArmColDecls(win *logical.Node) physical.ColDecls {
 		if we.OutputCol == "" {
 			continue
 		}
-		d := physical.WindowSpecOutputType(win, we)
+		d := localPlanFacts.WindowSpecOutputType(win, we)
 		name := strings.ToLower(we.OutputCol)
 		types[name] = d.ID
 		delete(dec, name)
@@ -522,7 +522,7 @@ func windowArmColDecls(win *logical.Node) physical.ColDecls {
 // Project RENAMES, and an un-materialized one emits no stage, so above it the
 // stream is no longer what the block publishes.
 func setOpArmPublishesItsOwnList(child *logical.Node) bool {
-	if physical.NamedArmScope(child) == "" {
+	if localPlanFacts.NamedArmScope(child) == "" {
 		return false
 	}
 	for n, hops := child, 0; n != nil && hops < 8; hops++ {

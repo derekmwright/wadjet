@@ -6,8 +6,6 @@ import (
 	"strings"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
-
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // carrierInputColumns returns the column names the stage at i evaluates its
@@ -115,7 +113,7 @@ func unresolvableColumnRefs(exprText string, emitted map[string]string) []string
 		_, ok := emitted[strings.ToLower(n.String())]
 		return ok
 	}
-	for _, ref := range physical.CollectColRefsBelow(ast, emittedName) {
+	for _, ref := range localPlanFacts.CollectColRefsBelow(ast, emittedName) {
 		if columnResolves(ref, emitted) {
 			continue
 		}

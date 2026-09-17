@@ -262,8 +262,8 @@ func TestParseSemiAntiNE(t *testing.T) {
 				c.filter, p, b, ok, c.wantProbe, c.wantBuild, c.wantOK)
 		}
 	}
-	physical.SemiAntiNE.Store(false)
-	defer physical.SemiAntiNE.Store(true)
+	localPlanFacts.SemiAntiNE().Store(false)
+	defer localPlanFacts.SemiAntiNE().Store(true)
 	if _, _, ok := (physical.PlanContext{}).ParseSemiAntiNE("a.x <> b.y"); ok {
 		t.Fatal("kill switch must disable recognition")
 	}

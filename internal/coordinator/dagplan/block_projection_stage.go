@@ -81,7 +81,7 @@ func blockProjectionLeavesItsStream(p *logical.Node) blockDivergence {
 		logical.HasStarProjection(p) || len(p.Projections) == 0 {
 		return blockAgrees
 	}
-	names := physical.EmittedColumnNames(p)
+	names := localPlanFacts.EmittedColumnNames(p)
 	if len(names) == 0 {
 		return blockAgrees
 	}
@@ -97,7 +97,7 @@ func blockProjectionLeavesItsStream(p *logical.Node) blockDivergence {
 	user := func(in []string) []string {
 		out := in[:0:0]
 		for _, n := range in {
-			if !strings.HasPrefix(strings.ToLower(physical.BlockBareName(n)), "__") {
+			if !strings.HasPrefix(strings.ToLower(localPlanFacts.BlockBareName(n)), "__") {
 				out = append(out, n)
 			}
 		}
@@ -129,7 +129,7 @@ func blockProjectionLeavesItsStream(p *logical.Node) blockDivergence {
 	// TWICE, because one stream column cannot answer to it twice.
 	have := make(map[string]bool, len(stream))
 	for _, s := range stream {
-		have[strings.ToLower(physical.BlockBareName(s))] = true
+		have[strings.ToLower(localPlanFacts.BlockBareName(s))] = true
 	}
 	// WHAT THE STREAM CARRIES IS MEASURED, never inferred from the producer's
 	// KIND. Round 3 read "a computed item over a scan, a window or a join is
@@ -142,7 +142,7 @@ func blockProjectionLeavesItsStream(p *logical.Node) blockDivergence {
 	// name, and it is asked of the stream.
 	seen := make(map[string]bool, len(names))
 	for _, name := range names {
-		bare := strings.ToLower(physical.BlockBareName(name))
+		bare := strings.ToLower(localPlanFacts.BlockBareName(name))
 		if bare == "" || seen[bare] || !have[bare] {
 			return blockIntroduces
 		}
@@ -210,7 +210,7 @@ func blockSortCarriesAMaterializedKey(p *logical.Node) bool {
 func blockStreamNames(n *logical.Node) []string {
 	for cur := n; cur != nil; {
 		if cur.Type != logical.NodeProject {
-			return physical.EmittedColumnNames(cur)
+			return localPlanFacts.EmittedColumnNames(cur)
 		}
 		if len(cur.Children) != 1 {
 			return nil
@@ -242,7 +242,7 @@ func publishBlockProjection(node *logical.Node, stages *[]Stage, from int,
 	if from < 0 || from >= len(*stages) {
 		return false
 	}
-	cols, ok := physical.BlockPublishedColumns(node, published, subqueryDecl)
+	cols, ok := localPlanFacts.BlockPublishedColumns(node, published, subqueryDecl)
 	if !ok || len(cols) == 0 {
 		return false
 	}
@@ -351,7 +351,7 @@ func (p *StagePlanner) referenceIntoPublishedBlock(ref string, child *logical.No
 	if dot <= 0 || dot == len(ref)-1 {
 		return false
 	}
-	scope := physical.RelationScopeSubtree(child, ref[:dot])
+	scope := p.PlanContext.RelationScopeSubtree(child, ref[:dot])
 	if scope == nil {
 		return false
 	}

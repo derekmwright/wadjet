@@ -4,7 +4,6 @@ package dagplan
 
 import (
 	"github.com/derekmwright/wadjet/internal/engine/exec"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // NewComputedColumnsOp returns an operator that passes every input column
@@ -18,5 +17,5 @@ import (
 // aggregate projection — cannot narrow the batch, since the window's output
 // is every input column plus its own.
 func NewComputedColumnsOp(cols []exec.ProjectColumn) exec.UnaryOperator {
-	return physical.NewComputedColumnsOpWithMeta(cols, nil)
+	return localPlanFacts.NewComputedColumnsOpWithMeta(cols, nil)
 }

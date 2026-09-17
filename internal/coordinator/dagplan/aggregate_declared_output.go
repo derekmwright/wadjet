@@ -4,7 +4,6 @@ package dagplan
 
 import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
@@ -34,5 +33,5 @@ func aggSpecInputDecimal(node *logical.Node, agg logical.AggExpr) (logical.Decim
 	// declared with nobody's scale — for a WINDOW SLOT (`SUM(__win_0)`), whose
 	// declaration lives in the emitted walk and in no scan at all, the scan-only
 	// walk answered (0,0) (#775).
-	return physical.AggInputColumnDecimal(node, agg.InputCol)
+	return localPlanFacts.AggInputColumnDecimal(node, agg.InputCol)
 }

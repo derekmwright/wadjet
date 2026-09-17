@@ -19,7 +19,7 @@ import (
 // of physical.Planner, which meant the embedded engine carried the stage emitter's
 // state on every query it planned.
 type StagePlanner struct {
-	*physical.Planner
+	*physical.PlanContext
 
 	WorkerCount int // number of distributed workers (for shuffle partitioning)
 
@@ -208,5 +208,5 @@ type StagePlanner struct {
 // declared-output logic; everything the DAG adds lives on the returned value
 // and is per-build scratch.
 func NewStagePlanner(p *physical.Planner) *StagePlanner {
-	return &StagePlanner{Planner: p}
+	return &StagePlanner{PlanContext: p.PlanContext()}
 }

@@ -9,7 +9,6 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // resolveShuffleKey follows Project aliases to the source columns ordinary
@@ -26,8 +25,8 @@ func resolveShuffleKey(key string, child *logical.Node, published map[*logical.N
 	resolved := key
 	for n := child; n != nil; {
 		if n.Type == logical.NodeProject {
-			bare := physical.DerivedScopeBareName(resolved, n)
-			proj := physical.ProjectionForName(n.Projections, resolved, bare)
+			bare := localPlanFacts.DerivedScopeBareName(resolved, n)
+			proj := localPlanFacts.ProjectionForName(n.Projections, resolved, bare)
 			// A key already spelled BARE names the same column; the scope
 			// stripper answers "" for it because there is no qualifier to
 			// strip, not because the name is unknown. Without this the stop
@@ -108,7 +107,7 @@ func projectsAMintedGroupKey(project *logical.Node, name string) bool {
 	// key's SOURCE column — `partitioned shuffle: key "order_id" not in
 	// schema` over a grouped LATERAL with an `ORDER BY` of its own.
 	for child := project.Children[0]; child != nil; {
-		if agg := physical.FindAggregateAncestor(child); agg != nil {
+		if agg := localPlanFacts.FindAggregateAncestor(child); agg != nil {
 			for i := range agg.GroupBy {
 				if i < len(agg.GroupByPublish) && agg.GroupByPublish[i] != "" &&
 					strings.EqualFold(agg.GroupByPublish[i], name) {
@@ -128,7 +127,7 @@ func projectsAMintedGroupKey(project *logical.Node, name string) bool {
 func passThroughProjectFor(n *logical.Node, name string) *logical.Node {
 	for cur := n; cur != nil && len(cur.Children) == 1; cur = cur.Children[0] {
 		if cur.Type != logical.NodeProject {
-			if !physical.AggScopePreservingWrapper(cur.Type) {
+			if !localPlanFacts.AggScopePreservingWrapper(cur.Type) {
 				return nil
 			}
 			continue
@@ -171,7 +170,7 @@ func aggStageGroupKey(key string, e plansql.Node, child *logical.Node) (string, 
 			return key, false
 		}
 	}
-	resolved, expr, _, renamed := physical.ResolveAggInputName(key, child)
+	resolved, expr, _, renamed := localPlanFacts.ResolveAggInputName(key, child)
 	if !renamed {
 		return key, false
 	}
@@ -211,7 +210,7 @@ func aggStageDispatchKey(key string, e plansql.Node, child *logical.Node) (strin
 	if resolved, renamed := aggStageGroupKey(key, e, child); renamed {
 		return resolved, true
 	}
-	return physical.AggDerivedGroupKey(key, child)
+	return localPlanFacts.AggDerivedGroupKey(key, child)
 }
 
 // resolveSortKeyColumn maps ORDER BY aliases to an aggregate's emitted
@@ -287,8 +286,8 @@ func aggregateOutputName(n *logical.Node, col string) (string, bool) {
 	if len(n.Children) == 1 {
 		child = n.Children[0]
 	}
-	published, resolve := physical.GroupKeyNames(n, child)
-	names := physical.EmittedKeyNames(published, resolve, physical.LogicalAggOutNames(n))
+	published, resolve := localPlanFacts.GroupKeyNames(n, child)
+	names := localPlanFacts.EmittedKeyNames(published, resolve, localPlanFacts.LogicalAggOutNames(n))
 	emit := func(i int, g string) (string, bool) {
 		if i >= 0 && i < len(names) {
 			return names[i], true
@@ -309,7 +308,7 @@ func aggregateOutputName(n *logical.Node, col string) (string, bool) {
 	// arbitrary side, so the key is left for the caller to give up on, the
 	// same call lookupEmittedColumn makes on the same ambiguity.
 	bare := func(name string) string {
-		if b := physical.DerivedScopeBareName(name, child); b != "" {
+		if b := localPlanFacts.DerivedScopeBareName(name, child); b != "" {
 			return b
 		}
 		return name
@@ -359,7 +358,7 @@ func aggregateOutputName(n *logical.Node, col string) (string, bool) {
 // join keys on the probe's column and loses NOT IN's NULL
 // (`TestTwoPathInvariance/NotInSubqueryDerivedInnerNullInList`).
 func projKeySpelling(proj *logical.Projection, block *logical.Node) string {
-	src := physical.ProjSourceName(proj)
+	src := localPlanFacts.ProjSourceName(proj)
 	dot := strings.LastIndexByte(src, '.')
 	if dot <= 0 || dot == len(src)-1 {
 		return proj.Column
@@ -392,13 +391,13 @@ func aggregatePublishesQualified(block *logical.Node, src string) bool {
 	if block == nil || len(block.Children) != 1 {
 		return false
 	}
-	agg := physical.FindAggregateAncestor(block.Children[0])
+	agg := localPlanFacts.FindAggregateAncestor(block.Children[0])
 	if agg == nil || len(agg.GroupBy) == 0 {
 		return false
 	}
 	want := strings.TrimSpace(src)
 	for _, n := range exec.PublishedGroupKeyNames(agg.GroupBy, agg.GroupByPublish,
-		physical.LogicalAggOutNames(agg), false) {
+		localPlanFacts.LogicalAggOutNames(agg), false) {
 		if strings.EqualFold(strings.TrimSpace(n), want) {
 			return true
 		}
@@ -415,7 +414,7 @@ func relationsPublishing(n *logical.Node, bare string) int {
 	}
 	lc := strings.ToLower(strings.TrimSpace(bare))
 	hits := 0
-	for _, cols := range physical.SubtreeNamingOf(n).AliasCols {
+	for _, cols := range localPlanFacts.SubtreeNamingOf(n).AliasCols {
 		if cols[lc] {
 			hits++
 		}

@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // A derived table's SELECT-list alias, at the consumers that resolve a name
@@ -302,7 +301,7 @@ func TestDerivedScopeBareNameOnlyStripsInsideItsOwnScope(t *testing.T) {
 		{"nil subtree", "v.c", nil, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := physical.DerivedScopeBareName(tc.ref, tc.subtree); got != tc.want {
+			if got := localPlanFacts.DerivedScopeBareName(tc.ref, tc.subtree); got != tc.want {
 				t.Errorf("DerivedScopeBareName(%q) = %q, want %q", tc.ref, got, tc.want)
 			}
 		})
@@ -315,7 +314,7 @@ func TestDerivedScopeBareNameOnlyStripsInsideItsOwnScope(t *testing.T) {
 		{Type: logical.NodeScan, TableName: "t", TableAlias: "t"},
 		derived("v"),
 	}}
-	if got, _, _, renamed := physical.ResolveAggInputName("t.c", join); renamed || got != "t.c" {
+	if got, _, _, renamed := localPlanFacts.ResolveAggInputName("t.c", join); renamed || got != "t.c" {
 		t.Errorf("ResolveAggInputName(%q) = %q (renamed=%v), want it left alone — "+
 			"the sibling arm's alias must not capture another relation's column", "t.c", got, renamed)
 	}

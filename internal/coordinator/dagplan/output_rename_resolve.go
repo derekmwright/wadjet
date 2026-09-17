@@ -6,14 +6,13 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // resolveOutputRenameSourceForGather additionally resolves a computed alias
 // over an AGGREGATE to the group key's expression TEXT, which is the name the
 // aggregate stage emits when nothing renamed it.
 func resolveOutputRenameSourceForGather(name string, child *logical.Node) string {
-	return physical.ResolveRenameSource(name, child, true)
+	return localPlanFacts.ResolveRenameSource(name, child, true)
 }
 
 // renameIsAggregateOutput reports whether the SELECT item named `name` is,
@@ -40,7 +39,7 @@ func renameIsAggregateOutput(name string, child *logical.Node) bool {
 	for n, hops := child, 0; n != nil && hops < 64; hops++ {
 		switch {
 		case n.Type == logical.NodeProject:
-			bare := physical.DerivedScopeBareName(resolved, n)
+			bare := localPlanFacts.DerivedScopeBareName(resolved, n)
 			proj := projectionPublishingName(n.Projections, resolved, bare)
 			if proj == nil {
 				return false
@@ -81,7 +80,7 @@ func renameIsAggregateOutput(name string, child *logical.Node) bool {
 			// there is no wrapper there is nothing to carry.
 			return false
 		case n.Type == logical.NodeJoin && len(n.Children) == 2:
-			if own := physical.OwnedJoinArm(n, resolved); own != nil {
+			if own := localPlanFacts.OwnedJoinArm(n, resolved); own != nil {
 				return renameIsAggregateOutput(resolved, own)
 			}
 			return renameIsAggregateOutput(resolved, n.Children[0]) ||
@@ -111,11 +110,11 @@ func resolveRenameSourceInScope(name string, child *logical.Node) (string, bool)
 		return "", false
 	}
 	qual, bare := name[:dot], name[dot+1:]
-	scope := physical.RelationScopeSubtree(child, qual)
+	scope := localPlanFacts.RelationScopeSubtree(child, qual)
 	if scope == nil {
 		return "", false
 	}
-	src := physical.ResolveOutputRenameSource(bare, scope)
+	src := localPlanFacts.ResolveOutputRenameSource(bare, scope)
 	if strings.EqualFold(src, bare) {
 		return "", true // the scope exists and renames nothing: not a miss
 	}
@@ -137,11 +136,11 @@ func windowArgSourceInScope(name string, child *logical.Node) (string, bool) {
 		return "", false
 	}
 	qual, bare := name[:dot], name[dot+1:]
-	scope := physical.RelationScopeSubtree(child, qual)
+	scope := localPlanFacts.RelationScopeSubtree(child, qual)
 	if scope == nil {
 		return "", false
 	}
-	return physical.DerivedAliasSourceColumn(bare, scope), true
+	return localPlanFacts.DerivedAliasSourceColumn(bare, scope), true
 }
 
 // resolveJoinNeededColumns maps each entry of a join node's NeededColumns

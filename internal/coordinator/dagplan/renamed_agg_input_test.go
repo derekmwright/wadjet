@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // TestAggregateOutputNameFollowsRename pins the other half: what a sort keyed
@@ -43,7 +42,7 @@ func TestAggregateOutputNameFollowsRename(t *testing.T) {
 		t.Errorf("aggregateOutputName = %q, want %q — the aggregate publishes the key under the "+
 			"name the query wrote, so a sort keyed on the alias resolves to it", got, "k")
 	}
-	published, resolve := physical.GroupKeyNames(agg, inner)
+	published, resolve := localPlanFacts.GroupKeyNames(agg, inner)
 	if len(published) != 1 || published[0] != "k" {
 		t.Errorf("published names %v, want [k]", published)
 	}
