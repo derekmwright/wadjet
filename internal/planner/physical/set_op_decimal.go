@@ -16,7 +16,7 @@ const (
 	setOpInt64Digits = batch.Int64DecimalDigits
 )
 
-// SetOpDecimalTarget requires every DECIMAL arm to carry one common (p,s):
+// setOpDecimalTarget requires every DECIMAL arm to carry one common (p,s):
 // scale=max(scales), precision=max(integer digits)+scale, capped at 38.
 // Never narrow scale or use max(precision) alone (#533, #532; ADR-0018 §4).
 // Values not representable in Int128 at output scale fail during DecimalCoerce,
@@ -25,7 +25,7 @@ const (
 // The shuffle writer's check sees only one writer and cannot catch cross-file
 // scale disagreements.
 // See docs/internals/set-operation-decimal-target.md for the design.
-func SetOpDecimalTarget(arms []SetOpColType) (logical.DecimalMeta, bool) {
+func setOpDecimalTarget(arms []SetOpColType) (logical.DecimalMeta, bool) {
 	if len(arms) == 0 {
 		return logical.DecimalMeta{}, false
 	}

@@ -103,7 +103,7 @@ func TestUnifySetOpSchemasWidensEveryRung(t *testing.T) {
 			if !ok1 || !ok2 {
 				t.Fatalf("the ladder must resolve both arms")
 			}
-			dagType, ok := SetOpWiden(lc.Typ, rc.Typ)
+			dagType, ok := setOpWiden(lc.Typ, rc.Typ)
 			if !ok || dagType != got.Type {
 				t.Fatalf("the stage DAG resolves %s, the local path %s", dagType, got.Type)
 			}

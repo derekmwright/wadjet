@@ -893,3 +893,34 @@ on dagplan's initialization of a shared setting, which the planner test gate
 identified. Its assertions remain unchanged and it reaches the helper through
 the context. Test entry points and interface implementations stay exported;
 a direct-reference count alone is insufficient to change their contracts.
+
+## Final declaration counts
+
+| Category | Before | After |
+|---|---:|---:|
+| Production export declarations, including members | 424 | 375 |
+| Package-scope exports | 197 | 35 |
+| a: dagplan production package-qualified names | 117 | 11 |
+| b: additional dagplan test names | 29 | 4 |
+| c: other AGPL package-qualified names | 16 | 8 |
+| d: other MIT package-qualified names | 22 | 22 |
+| e: declarations without a direct outside reference | 165 | 145 |
+| All dagplan package-qualified names | 146 | 15 |
+| All AGPL package-qualified names | 152 | 16 |
+
+Every remaining package-scope export has an outside reference. Category e is
+now 101 interface methods and 44 fields. Interface method names retain their
+contracts; fields retain the shape of returned values, embedded state and
+records. They are not counted as unused helper functions.
+
+After context callers were in place, another 134 package-scope declarations
+became private. Three ordinary helper methods also became private:
+`Planner.BuildTopN`, `Planner.CteKeyColTypes` and `SubtreeNaming.OwnsKey`.
+The baseline did have a dagplan caller of `CteKeyColTypes`; the context now
+supplies that callback internally. Its output-schema operation likewise uses
+the same planner's subquery resolver. Two newly introduced context methods
+that the combined metadata operations did not need were removed.
+
+The final c list is `GroupKeyResolution`, `NewManifestSnapshot`, `NewPlanner`,
+`NewPlannerForContext`, `PlanContext`, `Planner`, `ProjectExprSpec` and
+`QueryLimitSQLState`. The d list is unchanged from the baseline section.

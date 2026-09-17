@@ -286,7 +286,7 @@ func substituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql
 	switch e := expr.(type) {
 	case *plansql.ColRef:
 		if emittedColDecls(child).isFieldPath(e) {
-			if _, def, _, renamed := ResolveAggInputName(qualifiedColumn(e), child); renamed && def != nil {
+			if _, def, _, renamed := resolveAggInputName(qualifiedColumn(e), child); renamed && def != nil {
 				return def, true
 			}
 		}

@@ -115,9 +115,9 @@ func (PlanContext) DeclaredJoinSchema(n *logical.Node, want []string, published 
 	return declaredJoinSchema(n, want, published, subqueryDecl)
 }
 
-func (PlanContext) OutputSchema(root *logical.Node,
-	subqueryDecl func(string) (parquet.Column, bool)) []parquet.Column {
-	return declaredOutputSchema(root, subqueryDecl)
+// OutputSchema declares columns using this planner's subquery resolver.
+func (c PlanContext) OutputSchema(root *logical.Node) []parquet.Column {
+	return declaredOutputSchema(root, c.SubqueryOutputColumn)
 }
 
 func (PlanContext) DerivedAliasSourceColumn(name string, child *logical.Node) string {
@@ -299,11 +299,12 @@ func (PlanContext) RelationScopeSubtree(n *logical.Node, name string) *logical.N
 }
 
 func (PlanContext) ResolveAggInputName(name string, child *logical.Node) (resolved string, expr plansql.Node, exprInput *logical.Node, alias bool) {
-	return ResolveAggInputName(name, child)
+	return resolveAggInputName(name, child)
 }
 
-func (PlanContext) ResolveJoinKeyTypes(node *logical.Node, leftKeys, rightKeys []string, cte cteColTypes) []parquet.TypeID {
-	return resolveJoinKeyTypes(node, leftKeys, rightKeys, cte)
+// ResolveJoinKeyTypes uses this planner's CTE column declarations.
+func (c PlanContext) ResolveJoinKeyTypes(node *logical.Node, leftKeys, rightKeys []string) []parquet.TypeID {
+	return resolveJoinKeyTypes(node, leftKeys, rightKeys, c.cteKeyColTypes)
 }
 
 func (PlanContext) ResolveNullsLast(ob logical.OrderExpr) bool {
@@ -329,7 +330,7 @@ func (PlanContext) RespellDerivedAliasRefs(n plansql.Node, child *logical.Node) 
 func (PlanContext) RewriteColRefs(n plansql.Node, sub func(*plansql.ColRef) (plansql.Node, bool)) (
 	out plansql.Node, changed, complete bool,
 ) {
-	return RewriteColRefs(n, sub)
+	return rewriteColRefs(n, sub)
 }
 
 func (PlanContext) SetOpArmIsUnknownLit(unknown [][]bool, i, col int) bool {

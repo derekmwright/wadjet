@@ -128,7 +128,7 @@ func setOpDeclaredOutputSchema(root *logical.Node) ([]parquet.Column, bool) {
 			if unknown[ai] != nil && i < len(unknown[ai]) && unknown[ai][i] {
 				continue
 			}
-			t, ok := SetOpWiden(out[i].Type, arm[i].Type)
+			t, ok := setOpWiden(out[i].Type, arm[i].Type)
 			if !ok {
 				// Two types the ladder does not reconcile (two strings, two
 				// dates, a mismatch): the first arm's declaration stands,

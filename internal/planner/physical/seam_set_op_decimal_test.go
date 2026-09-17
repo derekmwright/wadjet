@@ -64,7 +64,7 @@ func TestSetOpWidenLadder(t *testing.T) {
 		{d, parquet.TypeTimestamp, 0, false},
 		{parquet.TypeString, parquet.TypeString, parquet.TypeString, true},
 	} {
-		got, ok := SetOpWiden(tc.a, tc.b)
+		got, ok := setOpWiden(tc.a, tc.b)
 		if ok != tc.ok || (ok && got != tc.want) {
 			t.Errorf("setOpWiden(%s, %s) = (%s, %v), want (%s, %v)", tc.a, tc.b, got, ok, tc.want, tc.ok)
 		}
@@ -117,7 +117,7 @@ func TestSetOpDecimalTarget(t *testing.T) {
 		{"no_arms", nil, 0, 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := SetOpDecimalTarget(tc.arms)
+			got, ok := setOpDecimalTarget(tc.arms)
 			if ok != tc.wantOk {
 				t.Fatalf("setOpDecimalTarget ok = %v, want %v", ok, tc.wantOk)
 			}
@@ -141,7 +141,7 @@ func TestSetOpDecimalTargetNeverNarrowsAnArm(t *testing.T) {
 		{{Typ: parquet.TypeInt32, Known: true},
 			{Typ: parquet.TypeDecimal, Known: true, DecKnown: true, Dec: logical.DecimalMeta{Precision: 38, Scale: 38}}},
 	} {
-		want, ok := SetOpDecimalTarget(arms)
+		want, ok := setOpDecimalTarget(arms)
 		if !ok {
 			t.Fatalf("setOpDecimalTarget declined for %v", arms)
 		}

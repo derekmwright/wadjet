@@ -26,7 +26,7 @@ func TestBuildTopN_WiresSpillManager(t *testing.T) {
 	node := logical.NewScan("events", "e")
 	sortNode := logical.NewSort(node, []logical.OrderExpr{{Column: "event_id"}})
 
-	src, _, _, err := p.BuildTopN(ctx, sortNode, 10)
+	src, _, _, err := p.buildTopN(ctx, sortNode, 10)
 	if err != nil {
 		t.Fatalf("buildTopN: %v", err)
 	}

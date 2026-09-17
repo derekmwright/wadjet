@@ -219,14 +219,14 @@ func (p *Planner) buildLimit(ctx context.Context, node *logical.Node) (exec.Sour
 
 	// Optimization: Limit(Sort(...)) → TopN sort (heap-based, keeps only N rows)
 	if child.Type == logical.NodeSort && node.OffsetVal == 0 && node.LimitVal != logical.NoLimit {
-		return p.BuildTopN(ctx, child, node.LimitVal)
+		return p.buildTopN(ctx, child, node.LimitVal)
 	}
 	// LIMIT n OFFSET m over a sort: same Top-K machinery with n+m kept
 	// rows, plus the Limit operator above to skip the offset. Without
 	// this, OFFSET queries (ClickBench Q40-43) fully materialized the
 	// sort input.
 	if child.Type == logical.NodeSort && node.OffsetVal > 0 && node.LimitVal > 0 {
-		source, ops, sink, err := p.BuildTopN(ctx, child, node.LimitVal+node.OffsetVal)
+		source, ops, sink, err := p.buildTopN(ctx, child, node.LimitVal+node.OffsetVal)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -258,7 +258,7 @@ func (p *Planner) buildLimit(ctx context.Context, node *logical.Node) (exec.Sour
 	return source, ops, sink, nil
 }
 
-func (p *Planner) BuildTopN(ctx context.Context, sortNode *logical.Node, n int) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
+func (p *Planner) buildTopN(ctx context.Context, sortNode *logical.Node, n int) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
 	childSource, childOps, _, err := p.buildPipeline(ctx, sortNode.Children[0])
 	if err != nil {
 		return nil, nil, nil, err

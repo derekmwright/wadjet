@@ -171,7 +171,7 @@ func setOpNoCarrier(a, b parquet.TypeID) bool {
 	if setOpWireIntegerCarrier(b) && a == parquet.TypeDecimal {
 		return true
 	}
-	if _, ok := SetOpWiden(a, b); ok {
+	if _, ok := setOpWiden(a, b); ok {
 		return false
 	}
 	if setOpTypeCategory(a) != setOpTypeCategory(b) {
@@ -466,7 +466,7 @@ func setOpArmTypeConflict(node *logical.Node) error {
 				}
 				break
 			}
-			widened, ok := SetOpWiden(want.Typ, ct.Typ)
+			widened, ok := setOpWiden(want.Typ, ct.Typ)
 			if !ok {
 				if setOpNoCommonType(want.Typ, ct.Typ) {
 					return setOpTypeMismatch(op, outNames[col], want.Typ, ct.Typ)
@@ -937,7 +937,7 @@ func setOpTargetType(plans []SetOpArmPlan, col int, name, op string, unknown [][
 			want = ct
 			continue
 		}
-		widened, ok := SetOpWiden(want.Typ, ct.Typ)
+		widened, ok := setOpWiden(want.Typ, ct.Typ)
 		if !ok {
 			if setOpNoCommonType(want.Typ, ct.Typ) {
 				// PostgreSQL's own 42804. SetOpArmTypeConflict raises the same
@@ -969,7 +969,7 @@ func setOpTargetType(plans []SetOpArmPlan, col int, name, op string, unknown [][
 			}
 			arms = append(arms, plan.Types[col])
 		}
-		want.Dec, want.DecKnown = SetOpDecimalTarget(arms)
+		want.Dec, want.DecKnown = setOpDecimalTarget(arms)
 	}
 	return want, allKnown, nil
 }
@@ -1011,12 +1011,12 @@ func setOpNodeResultTypes(n *logical.Node) []SetOpColType {
 	return out
 }
 
-// SetOpWiden resolves INT32 → INT64 → DECIMAL → FLOAT32 → FLOAT64,
+// setOpWiden resolves INT32 → INT64 → DECIMAL → FLOAT32 → FLOAT64,
 // independent of arm order. Both float types beat exact numeric types; only
 // FLOAT64 beats FLOAT32. Keep REAL's separate rung: widening its stored value
 // to double changes its rendering as well as its OID. FLOAT in DDL is FLOAT32.
 // See docs/internals/set-operation-numeric-widening.md for the design.
-func SetOpWiden(a, b parquet.TypeID) (parquet.TypeID, bool) {
+func setOpWiden(a, b parquet.TypeID) (parquet.TypeID, bool) {
 	if a == b {
 		return a, true
 	}

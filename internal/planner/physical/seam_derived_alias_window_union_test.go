@@ -28,16 +28,16 @@ func TestOwnsKeyRecognizesADerivedTablesOutputColumn(t *testing.T) {
 	y := subtreeNamingOf(derived("y", "n_nationkey", "b"))
 	z := subtreeNamingOf(derived("z", "r_regionkey", "c"))
 
-	if !y.OwnsKey("y.b") {
+	if !y.ownsKey("y.b") {
 		t.Errorf("the y arm does not own y.b — its own output column")
 	}
-	if y.OwnsKey("z.c") {
+	if y.ownsKey("z.c") {
 		t.Errorf("the y arm claims z.c — a qualifier naming nothing in it")
 	}
-	if !z.OwnsKey("z.c") {
+	if !z.ownsKey("z.c") {
 		t.Errorf("the z arm does not own z.c — its own output column")
 	}
-	if z.OwnsKey("y.b") {
+	if z.ownsKey("y.b") {
 		t.Errorf("the z arm claims y.b")
 	}
 
@@ -56,10 +56,10 @@ func TestOwnsKeyRecognizesADerivedTablesOutputColumn(t *testing.T) {
 func TestOwnsKeyStillRefusesTheOtherSelfJoinCopy(t *testing.T) {
 	n1 := subtreeNamingOf(&logical.Node{Type: logical.NodeScan, TableName: "n", TableAlias: "n1",
 		ScanColumns: []string{"id", "nm"}})
-	if !n1.OwnsKey("n1.nm") {
+	if !n1.ownsKey("n1.nm") {
 		t.Errorf("the n1 subtree does not own n1.nm")
 	}
-	if n1.OwnsKey("n2.nm") {
+	if n1.ownsKey("n2.nm") {
 		t.Errorf("the n1 subtree claims n2.nm — the other copy of a self-joined table")
 	}
 }

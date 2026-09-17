@@ -117,14 +117,14 @@ func setOpUnifyColumn(l, r parquet.Column) (parquet.Column, bool) {
 		}
 		return parquet.Column{}, false
 	}
-	widened, ok := SetOpWiden(lc.Typ, rc.Typ)
+	widened, ok := setOpWiden(lc.Typ, rc.Typ)
 	if !ok {
 		return parquet.Column{}, false
 	}
 	col := l // the result takes the FIRST arm's NAME
 	switch widened {
 	case parquet.TypeDecimal:
-		meta, ok := SetOpDecimalTarget([]SetOpColType{lc, rc})
+		meta, ok := setOpDecimalTarget([]SetOpColType{lc, rc})
 		if !ok {
 			if l.Type == parquet.TypeDecimal && r.Type == parquet.TypeDecimal {
 				return setOpUnifyDecimalFallback(l, r)
@@ -166,7 +166,7 @@ func setOpUnifyColumn(l, r parquet.Column) (parquet.Column, bool) {
 }
 
 // setOpUnifyDecimalFallback is the DECIMAL ∪ DECIMAL rule for the pair
-// SetOpDecimalTarget declines: max(scale) so no arm's digits are dropped
+// setOpDecimalTarget declines: max(scale) so no arm's digits are dropped
 // (#532), max(precision) because there is no declared integer part to rebuild
 // one from. It is deliberately the PRE-existing behaviour of this path —
 // leaving an unresolvable pair alone entirely would reopen #532 for it.

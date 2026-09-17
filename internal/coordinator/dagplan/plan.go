@@ -415,7 +415,7 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	// gives it their TYPES, so pgwire declares the same OIDs for an empty
 	// result as for a full one (#416).
 	if outSchema := republishDeclaredSchema(outputProj,
-		p.PlanContext.OutputSchema(node, p.SubqueryOutputColumn)); len(outSchema) > 0 {
+		p.PlanContext.OutputSchema(node)); len(outSchema) > 0 {
 		for i := range stages {
 			if stages[i].Type == StageExchangeGather {
 				stages[i].OutputSchema = outSchema

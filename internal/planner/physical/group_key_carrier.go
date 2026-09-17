@@ -129,7 +129,7 @@ func groupKeyNames(agg, child *logical.Node) (published []string, resolve []Grou
 			// to a fragment that has no column of that name.
 			published[i] = k.Name
 			resolve[i] = GroupKeyResolution{Expr: k.Slot}
-			resolved, def, defScope, renamed := ResolveAggInputName(gb, child)
+			resolved, def, defScope, renamed := resolveAggInputName(gb, child)
 			if !renamed {
 				execRule[i] = agg.LateralAggregate && !k.Minted && !k.Delimited
 				break

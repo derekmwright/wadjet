@@ -128,7 +128,7 @@ func (s *SubtreeNaming) collect(n *logical.Node) {
 // mistake is invisible (the arms' keys are symmetric); in a three-way one it
 // reached the worker verbatim and the shuffle failed loud with `partitioned
 // shuffle: key "y.b" not in schema` (#490).
-func (s *SubtreeNaming) OwnsKey(key string) bool {
+func (s *SubtreeNaming) ownsKey(key string) bool {
 	k := strings.ToLower(strings.TrimSpace(key))
 	if dot := strings.IndexByte(k, '.'); dot >= 0 {
 		if cols, ok := s.AliasCols[k[:dot]]; ok && cols[k[dot+1:]] {
@@ -207,8 +207,8 @@ func (s *SubtreeNaming) MaterializedBuildColOrigins() map[string]string {
 // safety net (FixKeyAssignment) remains the last resort.
 func assignJoinKeySides(leftKeys, rightKeys []string, probe, build *SubtreeNaming) {
 	for i := range leftKeys {
-		lProbe, lBuild := probe.OwnsKey(leftKeys[i]), build.OwnsKey(leftKeys[i])
-		rProbe, rBuild := probe.OwnsKey(rightKeys[i]), build.OwnsKey(rightKeys[i])
+		lProbe, lBuild := probe.ownsKey(leftKeys[i]), build.ownsKey(leftKeys[i])
+		rProbe, rBuild := probe.ownsKey(rightKeys[i]), build.ownsKey(rightKeys[i])
 		lExclBuild := lBuild && !lProbe
 		rExclBuild := rBuild && !rProbe
 		switch {

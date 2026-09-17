@@ -16,7 +16,7 @@ import (
 // — `DerivedAliasSourceColumn` answers "" for one — and the expression that
 // defines it is what respellAggInputExpr substitutes instead.
 func respellDerivedAliasRefs(n plansql.Node, child *logical.Node) (plansql.Node, bool) {
-	out, changed, complete := RewriteColRefs(n, func(ref *plansql.ColRef) (plansql.Node, bool) {
+	out, changed, complete := rewriteColRefs(n, func(ref *plansql.ColRef) (plansql.Node, bool) {
 		src := derivedAliasSourceColumn(ref.String(), child)
 		if src == "" && ref.Table == "" {
 			src = derivedAliasSourceColumn(ref.Column, child)

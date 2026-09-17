@@ -226,7 +226,7 @@ func foldArgTypes(scope *colScope, args []plansql.Node) (parquet.TypeID, argKind
 			common, have = typ, true
 			continue
 		}
-		w, ok := SetOpWiden(common, typ)
+		w, ok := setOpWiden(common, typ)
 		if !ok {
 			return 0, argUntyped
 		}

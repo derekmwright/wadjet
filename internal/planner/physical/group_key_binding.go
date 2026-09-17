@@ -12,7 +12,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// ResolveAggInputName resolves aggregate arguments/group keys through Project
+// resolveAggInputName resolves aggregate arguments/group keys through Project
 // renames to the columns the stage below emits (#355). Unchanged/alias=false
 // means no rename; rewritten/alias=true reads a renamed plain column.
 // Non-nil expr/alias=true means a computed alias: attach derived InputExpr
@@ -20,7 +20,7 @@ import (
 // where its references resolve (#333). Stop at an Aggregate: its own GroupBy
 // and OutputCol names define the schema the parent reads.
 // See docs/internals/aggregate-input-name-resolution.md for the design.
-func ResolveAggInputName(name string, child *logical.Node) (resolved string, expr plansql.Node, exprInput *logical.Node, alias bool) {
+func resolveAggInputName(name string, child *logical.Node) (resolved string, expr plansql.Node, exprInput *logical.Node, alias bool) {
 	resolved = name
 	if ref, err := plansql.ParseExpression(name); err == nil {
 		if field, ok := ref.(*plansql.ColRef); ok && emittedColDecls(child).isFieldPath(field) {
@@ -42,7 +42,7 @@ func ResolveAggInputName(name string, child *logical.Node) (resolved string, exp
 				return name, nil, nil, false
 			}
 
-			parent, def, scope, renamed := ResolveAggInputName(field.Table, child)
+			parent, def, scope, renamed := resolveAggInputName(field.Table, child)
 			if renamed {
 				if def == nil {
 					def = &plansql.ColRef{Column: parent}
@@ -94,7 +94,7 @@ func ResolveAggInputName(name string, child *logical.Node) (resolved string, exp
 			return resolved, nil, nil, alias
 		case n.Type == logical.NodeJoin && len(n.Children) == 2:
 			// Mirror resolveShuffleKey: a rename can sit under either arm.
-			left, lexpr, lin, lok := ResolveAggInputName(resolved, n.Children[0])
+			left, lexpr, lin, lok := resolveAggInputName(resolved, n.Children[0])
 			if lok {
 				return left, lexpr, lin, true
 			}
@@ -102,7 +102,7 @@ func ResolveAggInputName(name string, child *logical.Node) (resolved string, exp
 			if jt == "semi" || jt == "anti" {
 				return resolved, nil, nil, alias
 			}
-			right, rexpr, rin, rok := ResolveAggInputName(resolved, n.Children[1])
+			right, rexpr, rin, rok := resolveAggInputName(resolved, n.Children[1])
 			if rok {
 				return right, rexpr, rin, true
 			}
@@ -248,14 +248,14 @@ func aggDerivedGroupKey(key string, child *logical.Node) (string, bool) {
 		}
 
 		if emittedColDecls(child).isFieldPath(ref) {
-			_, def, _, renamed := ResolveAggInputName(qualifiedColumn(ref), child)
+			_, def, _, renamed := resolveAggInputName(qualifiedColumn(ref), child)
 			if !renamed || def == nil {
 				return nil, false
 			}
 			changed = true
 			return def, true
 		}
-		resolved, expr, _, renamed := ResolveAggInputName(qualifiedColumn(ref), child)
+		resolved, expr, _, renamed := resolveAggInputName(qualifiedColumn(ref), child)
 		if !renamed {
 			return nil, false
 		}

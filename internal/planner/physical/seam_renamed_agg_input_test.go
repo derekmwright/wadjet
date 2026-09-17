@@ -130,7 +130,7 @@ func TestResolveAggInputName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, expr, _, alias := ResolveAggInputName(tt.in, tt.child)
+			got, expr, _, alias := resolveAggInputName(tt.in, tt.child)
 			if got != tt.want {
 				t.Errorf("ResolveAggInputName(%q) = %q, want %q", tt.in, got, tt.want)
 			}

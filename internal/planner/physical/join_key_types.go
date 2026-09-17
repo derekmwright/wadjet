@@ -116,7 +116,7 @@ func joinKeyLookupName(key string) string {
 // joinSideColTypes merges shared declared types under both emitted names and
 // source names visible below renames (#615). Use EmittedColTypes for
 // aggregate/window/projection/DISTINCT, and setOpDeclaredOutputSchema with
-// SetOpWiden for set operations. Computed projections bind only their alias;
+// setOpWiden for set operations. Computed projections bind only their alias;
 // their inputs retain their own types under source names. Delete conflicting
 // names rather than choosing: exec.joinKeyEncodingMismatch remains the
 // runtime backstop. See docs/internals/join-side-declared-types.md for the design.
@@ -269,7 +269,7 @@ func joinSideSourceTypes(n *logical.Node) map[string]parquet.TypeID {
 // MATERIALIZED at, keyed by lower-cased column name. A name the cache does
 // not hold — a recursive reference this block has not materialized yet —
 // declines, and the key pair stays unresolved exactly as it was.
-func (p *Planner) CteKeyColTypes(ref *logical.Node) (map[string]parquet.TypeID, bool) {
+func (p *Planner) cteKeyColTypes(ref *logical.Node) (map[string]parquet.TypeID, bool) {
 	if p == nil || ref == nil {
 		return nil, false
 	}

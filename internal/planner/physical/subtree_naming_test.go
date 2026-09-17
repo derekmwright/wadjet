@@ -43,7 +43,7 @@ func TestSubtreeNamingScanOwnership(t *testing.T) {
 		{"extract(year from o_orderdate)", false}, // expression key
 	}
 	for _, tt := range tests {
-		if got := s.OwnsKey(tt.key); got != tt.want {
+		if got := s.ownsKey(tt.key); got != tt.want {
 			t.Errorf("ownsKey(%q) = %v, want %v", tt.key, got, tt.want)
 		}
 	}
@@ -51,10 +51,10 @@ func TestSubtreeNamingScanOwnership(t *testing.T) {
 
 func TestSubtreeNamingTableNameFallback(t *testing.T) {
 	s := subtreeNamingOf(scanNode("region", "", "r_regionkey", "r_name"))
-	if !s.OwnsKey("region.r_regionkey") {
+	if !s.ownsKey("region.r_regionkey") {
 		t.Error("unaliased scan should own table-qualified key")
 	}
-	if !s.OwnsKey("r_name") {
+	if !s.ownsKey("r_name") {
 		t.Error("unaliased scan should own bare key")
 	}
 }
@@ -66,13 +66,13 @@ func TestSubtreeNamingSemiAntiBuildInvisible(t *testing.T) {
 		scanNode("lineitem", "", "l_orderkey", "l_suppkey"),
 		"o_orderkey = l_orderkey")
 	s := subtreeNamingOf(semi)
-	if !s.OwnsKey("o_custkey") {
+	if !s.ownsKey("o_custkey") {
 		t.Error("semi join must own probe columns")
 	}
-	if s.OwnsKey("l_suppkey") {
+	if s.ownsKey("l_suppkey") {
 		t.Error("semi join must NOT own build-only columns")
 	}
-	if s.OwnsKey("lineitem.l_orderkey") {
+	if s.ownsKey("lineitem.l_orderkey") {
 		t.Error("semi join must NOT own qualified build columns")
 	}
 }
@@ -84,11 +84,11 @@ func TestSubtreeNamingInnerJoinBothSidesVisible(t *testing.T) {
 		"n_regionkey = r_regionkey")
 	s := subtreeNamingOf(inner)
 	for _, key := range []string{"n2.n_name", "r_name", "n_nationkey", "r_regionkey"} {
-		if !s.OwnsKey(key) {
+		if !s.ownsKey(key) {
 			t.Errorf("inner join subtree should own %q", key)
 		}
 	}
-	if s.OwnsKey("n1.n_name") {
+	if s.ownsKey("n1.n_name") {
 		t.Error("must not own the other self-join copy's qualified key")
 	}
 }
@@ -106,13 +106,13 @@ func TestSubtreeNamingProjectAndAggregateOutputs(t *testing.T) {
 		Children:    []*logical.Node{agg},
 	}
 	s := subtreeNamingOf(proj)
-	if !s.OwnsKey("total_revenue") {
+	if !s.ownsKey("total_revenue") {
 		t.Error("aggregate output name should be owned")
 	}
-	if !s.OwnsKey("supplier_no") {
+	if !s.ownsKey("supplier_no") {
 		t.Error("projection alias should be owned")
 	}
-	if !s.OwnsKey("l_suppkey") {
+	if !s.ownsKey("l_suppkey") {
 		t.Error("underlying scan column should remain owned")
 	}
 }

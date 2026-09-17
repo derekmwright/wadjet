@@ -234,7 +234,7 @@ func applySlotRenameNodeOnly(n *logical.Node, rename map[string]string, stored m
 // renameColRefs is RewriteColRefs with a name map, for a projection whose
 // slot the SlotSource branch has already identified.
 func renameColRefs(node plansql.Node, rename map[string]string) (plansql.Node, bool) {
-	out, changed, _ := RewriteColRefs(node, func(ref *plansql.ColRef) (plansql.Node, bool) {
+	out, changed, _ := rewriteColRefs(node, func(ref *plansql.ColRef) (plansql.Node, bool) {
 		to, ok := rename[strings.ToLower(ref.Column)]
 		if !ok || ref.Table != "" {
 			return nil, false
@@ -252,7 +252,7 @@ func renameColRefs(node plansql.Node, rename map[string]string) (plansql.Node, b
 // provenance is not recorded moves only if the name is stored nowhere, which is
 // the rule this branch had for every reference before provenance existed.
 func renameSlotColRefs(node plansql.Node, rename map[string]string, stored map[string]bool) (plansql.Node, bool) {
-	out, changed, _ := RewriteColRefs(node, func(ref *plansql.ColRef) (plansql.Node, bool) {
+	out, changed, _ := rewriteColRefs(node, func(ref *plansql.ColRef) (plansql.Node, bool) {
 		if ref.Table != "" {
 			return nil, false
 		}
