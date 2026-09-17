@@ -62,18 +62,18 @@ func windowComputedArgDecl(node *logical.Node, we logical.WindowExpr) (expr.Decl
 	if _, bare := we.InputExpr.(*plansql.ColRef); bare {
 		return expr.DeclType{}, false, false
 	}
-	if CleanExpr(we.InputExpr.String()) != CleanExpr(we.InputCol) {
+	if cleanExpr(we.InputExpr.String()) != cleanExpr(we.InputCol) {
 		return expr.DeclType{}, false, false
 	}
-	decls := withSubqueryDecls(InputColDecls(node.Children[0]), node)
+	decls := withSubqueryDecls(inputColDecls(node.Children[0]), node)
 	if len(decls.Types) == 0 {
-		decls = withSubqueryDecls(EmittedColDecls(node.Children[0]), node)
+		decls = withSubqueryDecls(emittedColDecls(node.Children[0]), node)
 	}
 	d, c := NodeDeclaredType(we.InputExpr, decls)
 	if c == expr.Undecided {
 		return expr.DeclType{}, false, false
 	}
-	return d, AggInputIsWideInteger(we.InputExpr, decls), true
+	return d, aggInputIsWideInteger(we.InputExpr, decls), true
 }
 
 // integerAccArgWidth maps a computed argument's DECLARED type plus the width
@@ -110,7 +110,7 @@ func WindowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 	}
 	// The same spelling buildWindow hands exec as the input column, so the
 	// declaration always describes the vector the operator will read.
-	col := CleanExpr(we.InputColumn())
+	col := cleanExpr(we.InputColumn())
 	if col == "" || len(node.Children) != 1 {
 		return expr.Decl(windowOutputType(fn))
 	}
@@ -122,7 +122,7 @@ func WindowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 	// Zero-row results have no vector and depend solely on this declaration (#587);
 	// projection callers cannot rely on window runtime correction.
 	// See docs/internals/window-input-declaration-through-derived-plans.md for the design.
-	inDecls := EmittedColDecls(node.Children[0])
+	inDecls := emittedColDecls(node.Children[0])
 	t, conf := colRefDeclaredType(&plansql.ColRef{Column: col}, inDecls)
 	if conf != expr.Decided {
 		// A COMPUTED argument has no column declaration to read: the
@@ -243,7 +243,7 @@ func WindowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 	return t
 }
 
-// WindowExecColumn resolves one logical WindowExpr into the executable
+// windowExecColumn resolves one logical WindowExpr into the executable
 // column spec, over the Window node that owns it.
 //
 // It is the single place window arguments are read: the column out of the
@@ -265,10 +265,10 @@ func windowInputCol(node *logical.Node, we logical.WindowExpr) string {
 	if len(node.Children) == 1 && windowArgKeepsItsQualifier(arg, node.Children[0]) {
 		return arg
 	}
-	return CleanExpr(arg)
+	return cleanExpr(arg)
 }
 
-func WindowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string]windowKey) exec.WindowColumn {
+func windowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string]windowKey) exec.WindowColumn {
 	// ResolveWindowKeys binds a qualified reference to the input column and
 	// renames an expression to the column the pre-window projection computes
 	// under; a term it left alone keeps its own spelling (#585).
@@ -287,7 +287,7 @@ func WindowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string
 		orderKeys = append(orderKeys, exec.SortKey{
 			Column:    keyName(ob.Column),
 			Order:     order,
-			NullsLast: ResolveNullsLast(ob),
+			NullsLast: resolveNullsLast(ob),
 			// A WINDOW reads its keys by NAME off the input batch, and a name
 			// stops being an address the moment the producer emits it twice.
 			// `SELECT x.a AS b, SUM(x.b) AS a, RANK() OVER (ORDER BY SUM(x.b))

@@ -11,11 +11,11 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// IsSimpleColRefForRename is the OutputRenames-specific variant of
+// isSimpleColRefForRename is the OutputRenames-specific variant of
 // isSimpleColRef. The base helper at line 4308 also returns true for Lit
 // nodes; here we only want to skip the eval path when the projection is
 // strictly a column reference (or a parenthesized one).
-func IsSimpleColRefForRename(n plansql.Node) bool {
+func isSimpleColRefForRename(n plansql.Node) bool {
 	if n == nil {
 		return false
 	}
@@ -23,12 +23,12 @@ func IsSimpleColRefForRename(n plansql.Node) bool {
 		return true
 	}
 	if p, ok := n.(*plansql.ParenNode); ok {
-		return IsSimpleColRefForRename(p.Inner)
+		return isSimpleColRefForRename(p.Inner)
 	}
 	return false
 }
 
-// ReferencesSynthetic reports whether an AST contains any ColRef whose name
+// referencesSynthetic reports whether an AST contains any ColRef whose name
 // starts with prefix — "__agg_" for the nested-aggregate rewrite, "__win_" for
 // the nested-window rewrite (#610). It MUST traverse exactly the node set the
 // logical rewrites do (plansql.ReplaceAllAggregates / ReplaceWindowFuncs):
@@ -38,7 +38,7 @@ func IsSimpleColRefForRename(n plansql.Node) bool {
 // rename. The gather then emitted the internal synthetic column (and the raw
 // base columns beside it) to the client instead of evaluating the wrapper —
 // the exact "wrong answer, right shape" leak #610 set out to kill, on the DAG.
-func ReferencesSynthetic(n plansql.Node, prefix string) bool {
+func referencesSynthetic(n plansql.Node, prefix string) bool {
 	if n == nil {
 		return false
 	}
@@ -46,71 +46,71 @@ func ReferencesSynthetic(n plansql.Node, prefix string) bool {
 	case *plansql.ColRef:
 		return strings.HasPrefix(x.Column, prefix)
 	case *plansql.BinaryOp:
-		return ReferencesSynthetic(x.Left, prefix) || ReferencesSynthetic(x.Right, prefix)
+		return referencesSynthetic(x.Left, prefix) || referencesSynthetic(x.Right, prefix)
 	case *plansql.UnaryOp:
-		return ReferencesSynthetic(x.Inner, prefix)
+		return referencesSynthetic(x.Inner, prefix)
 	case *plansql.CmpExpr:
-		return ReferencesSynthetic(x.Left, prefix) || ReferencesSynthetic(x.Right, prefix)
+		return referencesSynthetic(x.Left, prefix) || referencesSynthetic(x.Right, prefix)
 	case *plansql.ParenNode:
-		return ReferencesSynthetic(x.Inner, prefix)
+		return referencesSynthetic(x.Inner, prefix)
 	case *plansql.CastNode:
-		return ReferencesSynthetic(x.Inner, prefix)
+		return referencesSynthetic(x.Inner, prefix)
 	case *plansql.FuncCallNode:
 		for _, a := range x.Args {
-			if ReferencesSynthetic(a, prefix) {
+			if referencesSynthetic(a, prefix) {
 				return true
 			}
 		}
 	case *plansql.CaseNode:
-		if ReferencesSynthetic(x.Subject, prefix) {
+		if referencesSynthetic(x.Subject, prefix) {
 			return true
 		}
 		for _, w := range x.Whens {
-			if ReferencesSynthetic(w.Cond, prefix) || ReferencesSynthetic(w.Result, prefix) {
+			if referencesSynthetic(w.Cond, prefix) || referencesSynthetic(w.Result, prefix) {
 				return true
 			}
 		}
-		return ReferencesSynthetic(x.Else, prefix)
+		return referencesSynthetic(x.Else, prefix)
 	case *plansql.IsExpr:
-		return ReferencesSynthetic(x.Left, prefix)
+		return referencesSynthetic(x.Left, prefix)
 	case *plansql.NotNode:
-		return ReferencesSynthetic(x.Inner, prefix)
+		return referencesSynthetic(x.Inner, prefix)
 	case *plansql.AndNode:
-		return ReferencesSynthetic(x.Left, prefix) || ReferencesSynthetic(x.Right, prefix)
+		return referencesSynthetic(x.Left, prefix) || referencesSynthetic(x.Right, prefix)
 	case *plansql.OrNode:
-		return ReferencesSynthetic(x.Left, prefix) || ReferencesSynthetic(x.Right, prefix)
+		return referencesSynthetic(x.Left, prefix) || referencesSynthetic(x.Right, prefix)
 	case *plansql.InExpr:
-		if ReferencesSynthetic(x.Left, prefix) {
+		if referencesSynthetic(x.Left, prefix) {
 			return true
 		}
 		for _, v := range x.Values {
-			if ReferencesSynthetic(v, prefix) {
+			if referencesSynthetic(v, prefix) {
 				return true
 			}
 		}
 	case *plansql.BetweenExpr:
-		return ReferencesSynthetic(x.Left, prefix) ||
-			ReferencesSynthetic(x.Low, prefix) || ReferencesSynthetic(x.High, prefix)
+		return referencesSynthetic(x.Left, prefix) ||
+			referencesSynthetic(x.Low, prefix) || referencesSynthetic(x.High, prefix)
 	case *plansql.LikeExpr:
-		return ReferencesSynthetic(x.Left, prefix) || ReferencesSynthetic(x.Pattern, prefix)
+		return referencesSynthetic(x.Left, prefix) || referencesSynthetic(x.Pattern, prefix)
 	case *plansql.AnyAllExpr:
-		if ReferencesSynthetic(x.Left, prefix) {
+		if referencesSynthetic(x.Left, prefix) {
 			return true
 		}
 		for _, v := range x.Values {
-			if ReferencesSynthetic(v, prefix) {
+			if referencesSynthetic(v, prefix) {
 				return true
 			}
 		}
 	case *plansql.TupleNode:
 		for _, e := range x.Elements {
-			if ReferencesSynthetic(e, prefix) {
+			if referencesSynthetic(e, prefix) {
 				return true
 			}
 		}
 	case *plansql.ArrayLitNode:
 		for _, e := range x.Elements {
-			if ReferencesSynthetic(e, prefix) {
+			if referencesSynthetic(e, prefix) {
 				return true
 			}
 		}
@@ -118,19 +118,19 @@ func ReferencesSynthetic(n plansql.Node, prefix string) bool {
 	return false
 }
 
-// ReferencesSyntheticAgg reports whether an AST references a nested-aggregate
+// referencesSyntheticAgg reports whether an AST references a nested-aggregate
 // synthetic column (__agg_N). Lets the gather rewrite distinguish "SUM(x)/7.0"
 // (rewritten to "__agg_0/7.0", needs eval) from "SUBSTR(o_orderdate, 1, 4)"
 // (worker-computed, needs rename).
-func ReferencesSyntheticAgg(n plansql.Node) bool {
-	return ReferencesSynthetic(n, "__agg_")
+func referencesSyntheticAgg(n plansql.Node) bool {
+	return referencesSynthetic(n, "__agg_")
 }
 
-// FindOutputProjectionsForRename walks down through Sort/Limit/Filter wrappers
+// findOutputProjectionsForRename walks down through Sort/Limit/Filter wrappers
 // to the outermost NodeProject and returns its projections. Returns nil when
 // the outermost emitting node is not a projection (e.g., a top-level scan or
 // aggregate without a SELECT-list rename layer).
-func FindOutputProjectionsForRename(n *logical.Node) []logical.Projection {
+func findOutputProjectionsForRename(n *logical.Node) []logical.Projection {
 	if p := FindOutputProjectionNode(n); p != nil {
 		return p.Projections
 	}
@@ -175,7 +175,7 @@ func FindOutputProjectionNode(n *logical.Node) *logical.Node {
 // differs from its source, which is what buildProject's needsProject test
 // looks for), so the names resolved here are the ones the pipeline emits.
 func HiddenSortTrimOp(root *logical.Node) exec.UnaryOperator {
-	projs := FindOutputProjectionsForRename(root)
+	projs := findOutputProjectionsForRename(root)
 	if !logical.HasHiddenProjection(projs) {
 		return nil
 	}
@@ -189,7 +189,7 @@ func HiddenSortTrimOp(root *logical.Node) exec.UnaryOperator {
 			name = p.Column
 		}
 		if name == "" {
-			name = CleanExpr(p.Expr)
+			name = cleanExpr(p.Expr)
 		}
 		if name == "" || name == "*" || strings.HasSuffix(name, ".*") {
 			// An unexpanded star (no catalog to resolve it against) has no

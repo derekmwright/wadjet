@@ -12,7 +12,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
-// SortKeySlotPos is the input column index (1-based) a sort key addresses, or
+// sortKeySlotPos is the input column index (1-based) a sort key addresses, or
 // 0 to resolve it by name.
 //
 // It answers only when the Sort's input PROVABLY publishes the select list in
@@ -21,12 +21,12 @@ import (
 // the name is the address it always was; a position guessed against a schema
 // this layer cannot enumerate would sort by the wrong column, which is the
 // defect rather than the fix.
-func SortKeySlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
+func sortKeySlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 	if ob.SlotPos <= 0 || sortNode == nil || len(sortNode.Children) == 0 {
 		return 0
 	}
 	child := sortNode.Children[0]
-	if width, ok := SortInputSetOpWidth(child); ok {
+	if width, ok := sortInputSetOpWidth(child); ok {
 		if ob.SlotPos > width {
 			return 0
 		}
@@ -51,7 +51,7 @@ func SortKeySlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 	return ob.SlotPos
 }
 
-// SortInputSetOpWidth reports the number of result columns when a Sort reads a
+// sortInputSetOpWidth reports the number of result columns when a Sort reads a
 // SET OPERATION directly, and false otherwise.
 //
 // A set operation needs no proof that a position addresses its stream: its
@@ -68,11 +68,11 @@ func SortKeySlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 // no position both keys resolved to the first column and key 2 was never
 // applied — on every arm, 7 rows in PostgreSQL's key-1 order with key 2
 // ignored (#1022).
-func SortInputSetOpWidth(child *logical.Node) (int, bool) {
+func sortInputSetOpWidth(child *logical.Node) (int, bool) {
 	if !isSetOpNode(setOpUnwrap(child)) {
 		return 0, false
 	}
-	n := len(SetOpOutputNames(child))
+	n := len(setOpOutputNames(child))
 	return n, n > 0
 }
 
@@ -85,13 +85,13 @@ func SortInputSetOpWidth(child *logical.Node) (int, bool) {
 // and require that function's separate SELECT-list proof.
 // See docs/internals/local-sort-visible-item-positions.md for the design.
 func sortKeyLocalSlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
-	if pos := SortKeySlotPos(ob, sortNode); pos > 0 {
+	if pos := sortKeySlotPos(ob, sortNode); pos > 0 {
 		return pos
 	}
-	return SortKeyWrittenSlotPos(ob, sortNode)
+	return sortKeyWrittenSlotPos(ob, sortNode)
 }
 
-// SortKeyWrittenSlotPos is the visible SELECT-list position a WRITTEN sort term
+// sortKeyWrittenSlotPos is the visible SELECT-list position a WRITTEN sort term
 // names — by its alias, else by the expression the item was written as — or 0
 // where no position is provable.
 //
@@ -107,7 +107,7 @@ func sortKeyLocalSlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 // the two callers do NOT share is the PROOF that the position addresses their
 // stream; each still makes its own (sortKeySlotPosStage's is measured against
 // the producing stage).
-func SortKeyWrittenSlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
+func sortKeyWrittenSlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 	term := strings.TrimSpace(ob.Column)
 	if term == "" || sortNode == nil || len(sortNode.Children) == 0 {
 		return 0
@@ -139,7 +139,7 @@ func SortKeyWrittenSlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
 		return match
 	}
 	for i := range visible {
-		if !strings.EqualFold(strings.TrimSpace(ProjSourceName(&visible[i])), term) {
+		if !strings.EqualFold(strings.TrimSpace(projSourceName(&visible[i])), term) {
 			continue
 		}
 		if match > 0 {
@@ -169,7 +169,7 @@ func (p *Planner) buildSort(ctx context.Context, node *logical.Node) (exec.Sourc
 		keys = append(keys, exec.SortKey{
 			Column:    sortKeyLocalColumn(ob),
 			Order:     order,
-			NullsLast: ResolveNullsLast(ob),
+			NullsLast: resolveNullsLast(ob),
 			// The select-list POSITION: the Project below a Sort narrows the
 			// schema to exactly its visible outputs in order, so position i of
 			// the select list is column i of this operator's input — and it is
@@ -273,7 +273,7 @@ func (p *Planner) BuildTopN(ctx context.Context, sortNode *logical.Node, n int) 
 		keys = append(keys, exec.SortKey{
 			Column:    sortKeyLocalColumn(ob),
 			Order:     order,
-			NullsLast: ResolveNullsLast(ob),
+			NullsLast: resolveNullsLast(ob),
 			SlotPos:   sortKeyLocalSlotPos(ob, sortNode),
 		})
 	}
@@ -305,7 +305,7 @@ func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Sou
 		return nil, nil, nil, err
 	}
 
-	winKeys := ResolveWindowKeys(node)
+	winKeys := resolveWindowKeys(node)
 	keyProjections, keyMeta, err := p.windowKeyProjections(winKeys)
 	if err != nil {
 		return nil, nil, nil, err
@@ -323,7 +323,7 @@ func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Sou
 	}
 	var winCols []exec.WindowColumn
 	for _, we := range node.WindowExprs {
-		winCols = append(winCols, WindowExecColumn(node, we, winKeys))
+		winCols = append(winCols, windowExecColumn(node, we, winKeys))
 	}
 
 	winOp := exec.NewWindow(winCols)

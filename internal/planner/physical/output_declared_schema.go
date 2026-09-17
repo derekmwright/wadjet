@@ -357,7 +357,7 @@ func declaredTypmod(node plansql.Node, decls ColDecls, computed map[string]bool)
 		}
 		return p, s, true
 	case *plansql.ColRef:
-		if computed[strings.ToLower(CleanExpr(n.String()))] || computed[strings.ToLower(n.Column)] {
+		if computed[strings.ToLower(cleanExpr(n.String()))] || computed[strings.ToLower(n.Column)] {
 			return 0, 0, false
 		}
 		c, ok := decls.colDecl(n)
@@ -554,7 +554,7 @@ func foldTypmod(arms []plansql.Node, decls ColDecls, computed map[string]bool) (
 // exec.Project draws with ProjectColumn.Computed, and the one PostgreSQL
 // draws when it decides whether a numeric result keeps its typmod.
 func projectionIsComputed(proj logical.Projection) bool {
-	return proj.ASTExpr != nil && !IsSimpleColRefForRename(proj.ASTExpr)
+	return proj.ASTExpr != nil && !isSimpleColRefForRename(proj.ASTExpr)
 }
 
 // sourceRefName is the input column a bare (or renamed) projection copies.
@@ -562,7 +562,7 @@ func sourceRefName(proj logical.Projection) string {
 	if proj.Column != "" {
 		return proj.Column
 	}
-	return CleanExpr(proj.Expr)
+	return cleanExpr(proj.Expr)
 }
 
 // emittedComputedCols names the columns a subtree emits that are NOT a bare
@@ -796,7 +796,7 @@ func declaredProjectionInputs(root *logical.Node) (projs []logical.Projection, c
 		// either resolves against nothing anyway. Everything else passes
 		// its input through, which is exactly inputColFields' walk (#568).
 		childTypes = ColDecls{
-			Types:  EmittedColTypes(pn.Children[0]),
+			Types:  emittedColTypes(pn.Children[0]),
 			Fields: inputColFields(pn.Children[0]),
 			// The (p,s) beside the TypeIDs, so a DECIMAL projection is
 			// resolved by ONE walk instead of two hand-mirrored ones
@@ -807,7 +807,7 @@ func declaredProjectionInputs(root *logical.Node) (projs []logical.Projection, c
 		// passes: without it `id + 1` declares FLOAT64 here where the
 		// operator emits INT64 (#297's rule), so an empty result would
 		// disagree with a full one about the type of its own column.
-		strictInt = StrictIntArithCols(pn.Children[0])
+		strictInt = strictIntArithCols(pn.Children[0])
 	}
 	return projs, childTypes, strictInt, true
 }
@@ -822,7 +822,7 @@ func declaredProjectionName(proj logical.Projection) string {
 	if proj.Column != "" {
 		return proj.Column
 	}
-	return CleanExpr(proj.Expr)
+	return cleanExpr(proj.Expr)
 }
 
 // declaredProjectionType answers what exec.Project will emit for one
@@ -884,7 +884,7 @@ func declaredProjectionDecl(proj logical.Projection, decls ColDecls, strictInt m
 		}
 		return expr.DeclType{ID: fc.Type, Schema: &fc}
 	}
-	if proj.ASTExpr != nil && !IsSimpleColRefForRename(proj.ASTExpr) {
+	if proj.ASTExpr != nil && !isSimpleColRefForRename(proj.ASTExpr) {
 		// The producer may PUBLISH this expression as a column, under its own
 		// text. That is what an aggregate does with a derived GROUP BY key,
 		// and the DISTINCT lowering makes every SELECT item one:
@@ -911,7 +911,7 @@ func declaredProjectionDecl(proj logical.Projection, decls ColDecls, strictInt m
 				return expr.DeclType{ID: t, Schema: &parquet.Column{Type: t, Fields: decls.Fields[strings.ToLower(name)]}}
 			}
 		}
-		return InferProjectionDeclType(proj.ASTExpr, parquet.TypeString, strictInt, decls)
+		return inferProjectionDeclType(proj.ASTExpr, parquet.TypeString, strictInt, decls)
 	}
 	// A PARENTHESIZED bare reference — `SELECT (a)` — is a bare reference,
 	// which IsSimpleColRefForRename already says and the name resolution
@@ -929,7 +929,7 @@ func declaredProjectionDecl(proj logical.Projection, decls ColDecls, strictInt m
 	}
 	ref := proj.Column
 	if ref == "" {
-		ref = CleanExpr(proj.Expr)
+		ref = cleanExpr(proj.Expr)
 	}
 	t, ok := lookupColType(decls.Types, ref)
 	if !ok {
@@ -1034,7 +1034,7 @@ func lookupColType(colTypes map[string]parquet.TypeID, name string) (parquet.Typ
 	return 0, false
 }
 
-// EmittedColTypes describes the columns a node EMITS, by name.
+// emittedColTypes describes the columns a node EMITS, by name.
 //
 // inputColTypes answers the same question for the nodes that pass their
 // input through unchanged, and deliberately STOPS at anything that rebinds a
@@ -1042,10 +1042,10 @@ func lookupColType(colTypes map[string]parquet.TypeID, name string) (parquet.Typ
 // past one of those would answer with the wrong value's type. This adds the
 // two rebinding nodes whose output IS derivable: an Aggregate emits its group
 // columns at their input types plus one column per aggregate at the type
-// AggSpecOutputType declares, and a Project emits its own projections.
+// aggSpecOutputType declares, and a Project emits its own projections.
 // Everything else still answers nil, and a nil map means every column falls
 // back to STRING rather than to a guess.
-func EmittedColTypes(n *logical.Node) map[string]parquet.TypeID {
+func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 	if n == nil {
 		return nil
 	}
@@ -1054,7 +1054,7 @@ func EmittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		in := EmittedColTypes(n.Children[0])
+		in := emittedColTypes(n.Children[0])
 		out := make(map[string]parquet.TypeID, len(n.GroupBy)+len(n.AggExprs))
 		// A DERIVED key is emitted under its expression TEXT, which is not a
 		// name the input carries, so the bare lookup finds nothing and the
@@ -1079,7 +1079,7 @@ func EmittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 			if name == "" {
 				continue
 			}
-			if t, known := AggSpecOutputType(n, agg); known {
+			if t, known := aggSpecOutputType(n, agg); known {
 				out[name] = t
 			}
 		}
@@ -1088,8 +1088,8 @@ func EmittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		in := EmittedColTypes(n.Children[0])
-		strictInt := StrictIntArithCols(n.Children[0])
+		in := emittedColTypes(n.Children[0])
+		strictInt := strictIntArithCols(n.Children[0])
 		// A SCALAR SUBQUERY's type is a CATALOG fact this walk cannot ask
 		// for — it holds no Planner — so it is stamped on the plan's nodes
 		// by annotateSubqueryColumnDecls and installed here as the resolver
@@ -1109,7 +1109,7 @@ func EmittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		return EmittedColTypes(n.Children[0])
+		return emittedColTypes(n.Children[0])
 	case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
 		// Use setOpDeclaredOutputSchema's common types above a set operation (#867):
 		// leaving differing arm declarations untyped makes arithmetic fall to FLOAT64
@@ -1143,7 +1143,7 @@ func EmittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		in := EmittedColTypes(n.Children[0])
+		in := emittedColTypes(n.Children[0])
 		out := make(map[string]parquet.TypeID, len(in)+len(n.WindowExprs))
 		for k, t := range in {
 			out[k] = t
@@ -1167,8 +1167,8 @@ func EmittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 			return nil
 		}
 		return withJoinArmQualifiers(n,
-			EmittedColTypes(n.Children[0]), EmittedColTypes(n.Children[1]),
-			mergeJoinSides(EmittedColTypes(n.Children[0]), EmittedColTypes(n.Children[1])))
+			emittedColTypes(n.Children[0]), emittedColTypes(n.Children[1]),
+			mergeJoinSides(emittedColTypes(n.Children[0]), emittedColTypes(n.Children[1])))
 	}
 	return inputColTypes(n)
 }
@@ -1352,7 +1352,7 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 			if name == "" {
 				continue
 			}
-			if m, known := AggSpecOutputDecimal(n, agg); known {
+			if m, known := aggSpecOutputDecimal(n, agg); known {
 				out[name] = m
 			}
 		}
@@ -1362,7 +1362,7 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 			return nil
 		}
 		in := emittedColDecimal(n.Children[0])
-		fieldDecls := withSubqueryDecls(ColDecls{Types: EmittedColTypes(n.Children[0]),
+		fieldDecls := withSubqueryDecls(ColDecls{Types: emittedColTypes(n.Children[0]),
 			Fields: inputColFields(n.Children[0]), Dec: in}, n)
 		out := make(map[string]logical.DecimalMeta, len(n.Projections))
 		for _, proj := range n.Projections {

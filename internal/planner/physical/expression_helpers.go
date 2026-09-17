@@ -30,7 +30,7 @@ func parseSimplePredicate(raw string) exec.UnaryOperator {
 	for _, o := range operators {
 		parts := strings.SplitN(raw, o.sql, 2)
 		if len(parts) == 2 {
-			col := CleanExpr(strings.TrimSpace(parts[0]))
+			col := cleanExpr(strings.TrimSpace(parts[0]))
 			valStr := strings.TrimSpace(parts[1])
 			val := parseValue(valStr)
 			return kernelOrNothing(col, o.op, val, numericLitText(valStr))
@@ -40,13 +40,13 @@ func parseSimplePredicate(raw string) exec.UnaryOperator {
 	// LIKE / NOT LIKE
 	upper := strings.ToUpper(raw)
 	if idx := strings.Index(upper, " NOT LIKE "); idx >= 0 {
-		col := CleanExpr(strings.TrimSpace(raw[:idx]))
+		col := cleanExpr(strings.TrimSpace(raw[:idx]))
 		pattern := strings.TrimSpace(raw[idx+len(" NOT LIKE "):])
 		pattern = strings.Trim(pattern, "'")
 		return exec.NewLikeFilter(col, pattern, true)
 	}
 	if idx := strings.Index(upper, " LIKE "); idx >= 0 {
-		col := CleanExpr(strings.TrimSpace(raw[:idx]))
+		col := cleanExpr(strings.TrimSpace(raw[:idx]))
 		pattern := strings.TrimSpace(raw[idx+len(" LIKE "):])
 		pattern = strings.Trim(pattern, "'")
 		return exec.NewLikeFilter(col, pattern, false)
@@ -54,17 +54,17 @@ func parseSimplePredicate(raw string) exec.UnaryOperator {
 
 	// IS NULL / IS NOT NULL — vectorized null bitmap scan
 	if strings.Contains(upper, "IS NOT NULL") {
-		col := CleanExpr(strings.TrimSpace(raw[:strings.Index(upper, "IS NOT NULL")]))
+		col := cleanExpr(strings.TrimSpace(raw[:strings.Index(upper, "IS NOT NULL")]))
 		return exec.NewNullCheckFilter(col, false)
 	}
 	if strings.Contains(upper, "IS NULL") {
-		col := CleanExpr(strings.TrimSpace(raw[:strings.Index(upper, "IS NULL")]))
+		col := cleanExpr(strings.TrimSpace(raw[:strings.Index(upper, "IS NULL")]))
 		return exec.NewNullCheckFilter(col, true)
 	}
 
 	// BETWEEN: "col between X and Y" → col >= X AND col <= Y
 	if idx := strings.Index(upper, " BETWEEN "); idx >= 0 {
-		col := CleanExpr(strings.TrimSpace(raw[:idx]))
+		col := cleanExpr(strings.TrimSpace(raw[:idx]))
 		rest := strings.TrimSpace(raw[idx+len(" BETWEEN "):])
 		andIdx := strings.Index(strings.ToUpper(rest), " AND ")
 		if andIdx >= 0 {
@@ -80,7 +80,7 @@ func parseSimplePredicate(raw string) exec.UnaryOperator {
 
 	// IN: "col in (v1, v2, v3)" → vectorized set membership
 	if idx := strings.Index(upper, " IN "); idx >= 0 {
-		col := CleanExpr(strings.TrimSpace(raw[:idx]))
+		col := cleanExpr(strings.TrimSpace(raw[:idx]))
 		rest := strings.TrimSpace(raw[idx+len(" IN "):])
 		rest = strings.TrimPrefix(rest, "(")
 		rest = strings.TrimSuffix(rest, ")")

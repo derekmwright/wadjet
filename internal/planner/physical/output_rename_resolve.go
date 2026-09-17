@@ -9,7 +9,7 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// ResolveOutputRenameSource maps nested aliases to DAG stream SOURCE names
+// resolveOutputRenameSource maps nested aliases to DAG stream SOURCE names
 // for gather OutputRenames (#385). Start below the outermost Project;
 // substitute at most once per simultaneous projection list, resolving nested
 // Projects level by level through order/cardinality-preserving wrappers.
@@ -19,12 +19,12 @@ import (
 // substitution wins. See resolveOutputRenameSourceForGather for caller differences.
 // See docs/internals/gather-output-rename-resolution.md for the design.
 
-// AggregateGroupKeyName returns the name an aggregate stage emits for a
+// aggregateGroupKeyName returns the name an aggregate stage emits for a
 // computed SELECT-list item that IS one of its GROUP BY keys — the key's own
 // expression text, which is what the worker's pre-aggregate projection
 // computes it under. ok=false for anything else, including an aggregate
 // output (whose AggSpec.OutputCol already IS the alias).
-func AggregateGroupKeyName(proj *logical.Projection, projectNode *logical.Node) (string, bool) {
+func aggregateGroupKeyName(proj *logical.Projection, projectNode *logical.Node) (string, bool) {
 	if proj.IsAgg || proj.Expr == "" {
 		return "", false
 	}
@@ -47,13 +47,13 @@ func AggregateGroupKeyName(proj *logical.Projection, projectNode *logical.Node) 
 	return "", false
 }
 
-// ResolveOutputRenameSource is the EXPRESSION-rewriting form: it resolves only
+// resolveOutputRenameSource is the EXPRESSION-rewriting form: it resolves only
 // the renames a stage really performs.
-func ResolveOutputRenameSource(name string, child *logical.Node) string {
-	return ResolveRenameSource(name, child, false)
+func resolveOutputRenameSource(name string, child *logical.Node) string {
+	return resolveRenameSource(name, child, false)
 }
 
-func ResolveRenameSource(name string, child *logical.Node, forGather bool) string {
+func resolveRenameSource(name string, child *logical.Node, forGather bool) string {
 	resolved := name
 	if child == nil || name == "" {
 		return resolved
@@ -67,8 +67,8 @@ func ResolveRenameSource(name string, child *logical.Node, forGather bool) strin
 			// Without it the gather could not resolve the source, degraded
 			// to its rename-only fallback, and the client saw the join's
 			// full upstream width under source names instead of `k` (#467).
-			bare := DerivedScopeBareName(resolved, n)
-			if proj := ProjectionForName(n.Projections, resolved, bare); proj != nil {
+			bare := derivedScopeBareName(resolved, n)
+			if proj := projectionForName(n.Projections, resolved, bare); proj != nil {
 				if proj.IsAgg || proj.Column == "" {
 					// A computed alias over an AGGREGATE is the exception,
 					// and only for the GATHER's rename: the aggregate stage
@@ -84,7 +84,7 @@ func ResolveRenameSource(name string, child *logical.Node, forGather bool) strin
 					// really does carry `gk` — an expression re-spelled to
 					// `"g + 1" * 10` would name the column that projection
 					// renamed away, and answered NULL on every row.
-					if src, ok := AggregateGroupKeyName(proj, n); ok && forGather {
+					if src, ok := aggregateGroupKeyName(proj, n); ok && forGather {
 						return src
 					}
 					// Otherwise: the stage that evaluates it emits it under
@@ -120,23 +120,23 @@ func ResolveRenameSource(name string, child *logical.Node, forGather bool) strin
 			// (an alias this walk cannot see) or both (two spellings of one
 			// name) keep the old behaviour, which is the conservative side:
 			// the walk then resolves nothing new.
-			if own := OwnedJoinArm(n, resolved); own != nil {
+			if own := ownedJoinArm(n, resolved); own != nil {
 				if (jt == "semi" || jt == "anti") && own == n.Children[1] {
 					return resolved // the build side is not output-visible
 				}
-				src := ResolveRenameSource(resolved, own, forGather)
+				src := resolveRenameSource(resolved, own, forGather)
 				if forGather && own == n.Children[1] {
 					src = buildArmQualified(own, src)
 				}
 				return src
 			}
-			if r := ResolveRenameSource(resolved, n.Children[0], forGather); !strings.EqualFold(r, resolved) {
+			if r := resolveRenameSource(resolved, n.Children[0], forGather); !strings.EqualFold(r, resolved) {
 				return r
 			}
 			if jt == "semi" || jt == "anti" {
 				return resolved
 			}
-			return ResolveRenameSource(resolved, n.Children[1], forGather)
+			return resolveRenameSource(resolved, n.Children[1], forGather)
 		}
 		if len(n.Children) == 1 {
 			n = n.Children[0]
@@ -147,13 +147,13 @@ func ResolveRenameSource(name string, child *logical.Node, forGather bool) strin
 	return resolved
 }
 
-// OwnedJoinArm returns the join arm whose subtree answers to a QUALIFIED
+// ownedJoinArm returns the join arm whose subtree answers to a QUALIFIED
 // name's qualifier, or nil when the qualifier is not exactly one arm's.
 //
 // `subtreeNamesRelation` is the same scope test DerivedScopeBareName uses: a
 // derived table's alias is stamped on every scan below it and a CTE's name
 // sits on the subtree root, so both spellings of a named scope are covered.
-func OwnedJoinArm(n *logical.Node, name string) *logical.Node {
+func ownedJoinArm(n *logical.Node, name string) *logical.Node {
 	dot := strings.LastIndexByte(name, '.')
 	if dot <= 0 || dot == len(name)-1 || len(n.Children) != 2 {
 		return nil
@@ -182,7 +182,7 @@ func windowArgKeepsItsQualifier(arg string, child *logical.Node) bool {
 		return false
 	}
 	qual, bare := arg[:dot], arg[dot+1:]
-	if RelationScopeSubtree(child, qual) == nil {
+	if relationScopeSubtree(child, qual) == nil {
 		return false // the qualifier names no relation of this input
 	}
 	return armsPublishingBareName(child, bare) > 1
@@ -207,7 +207,7 @@ func armsPublishingBareName(n *logical.Node, bare string) int {
 	return 0
 }
 
-// RelationScopeSubtree descends through two-arm JOINs to the named relation
+// relationScopeSubtree descends through two-arm JOINs to the named relation
 // and through ScopePreservingWrapper: Filter, Sort, Limit, Distinct and Window.
 // These narrow rows or append columns without renaming existing ones; Filter
 // and Window must not hide a join and let a sibling capture a reference (#742).
@@ -215,7 +215,7 @@ func armsPublishingBareName(n *logical.Node, bare string) int {
 // set operations (multiple arms with output names rooted in the first arm).
 // Unlike ResolveRenameSource, this walk does not consume the scope's Project.
 // See docs/internals/relation-scope-through-wrappers.md for the design.
-func RelationScopeSubtree(n *logical.Node, name string) *logical.Node {
+func relationScopeSubtree(n *logical.Node, name string) *logical.Node {
 	if n == nil || name == "" || !subtreeNamesRelation(n, name) {
 		return nil
 	}
@@ -272,26 +272,26 @@ func ScopePreservingWrapper(n *logical.Node) bool {
 	return false
 }
 
-// SubstituteNestedRenameRefs resolves nested subquery aliases to scan SOURCE
+// substituteNestedRenameRefs resolves nested subquery aliases to scan SOURCE
 // columns using the #385 walk (#387), dropping the subquery's table qualifier.
 // Copy-on-write like logical.substituteColRefs (#384): reuse unchanged subtrees
 // and return the input itself if no reference changes. Decline the whole rewrite
 // (ok=false) for subquery-bearing nodes, window functions or unknown node kinds.
 // Callers leave declined specs untouched, preserving loud unknown-column errors
 // rather than inventing an expression across an unsupported scope.
-func SubstituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql.Node, bool) {
+func substituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql.Node, bool) {
 	if expr == nil || child == nil {
 		return expr, true
 	}
 	switch e := expr.(type) {
 	case *plansql.ColRef:
-		if EmittedColDecls(child).isFieldPath(e) {
-			if _, def, _, renamed := ResolveAggInputName(QualifiedColumn(e), child); renamed && def != nil {
+		if emittedColDecls(child).isFieldPath(e) {
+			if _, def, _, renamed := ResolveAggInputName(qualifiedColumn(e), child); renamed && def != nil {
 				return def, true
 			}
 		}
 
-		src := ResolveOutputRenameSource(strings.ToLower(e.Column), child)
+		src := resolveOutputRenameSource(strings.ToLower(e.Column), child)
 		if strings.EqualFold(src, e.Column) {
 			return expr, true
 		}
@@ -299,8 +299,8 @@ func SubstituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql
 	case *plansql.Lit, *plansql.IntervalLit, *plansql.LiteralPlaceholder, *plansql.StarNode:
 		return expr, true
 	case *plansql.CmpExpr:
-		l, lok := SubstituteNestedRenameRefs(e.Left, child)
-		r, rok := SubstituteNestedRenameRefs(e.Right, child)
+		l, lok := substituteNestedRenameRefs(e.Left, child)
+		r, rok := substituteNestedRenameRefs(e.Right, child)
 		if !lok || !rok {
 			return nil, false
 		}
@@ -309,8 +309,8 @@ func SubstituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql
 		}
 		return &plansql.CmpExpr{Left: l, Op: e.Op, Right: r}, true
 	case *plansql.AndNode:
-		l, lok := SubstituteNestedRenameRefs(e.Left, child)
-		r, rok := SubstituteNestedRenameRefs(e.Right, child)
+		l, lok := substituteNestedRenameRefs(e.Left, child)
+		r, rok := substituteNestedRenameRefs(e.Right, child)
 		if !lok || !rok {
 			return nil, false
 		}
@@ -319,8 +319,8 @@ func SubstituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql
 		}
 		return &plansql.AndNode{Left: l, Right: r}, true
 	case *plansql.OrNode:
-		l, lok := SubstituteNestedRenameRefs(e.Left, child)
-		r, rok := SubstituteNestedRenameRefs(e.Right, child)
+		l, lok := substituteNestedRenameRefs(e.Left, child)
+		r, rok := substituteNestedRenameRefs(e.Right, child)
 		if !lok || !rok {
 			return nil, false
 		}
@@ -329,8 +329,8 @@ func SubstituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql
 		}
 		return &plansql.OrNode{Left: l, Right: r}, true
 	case *plansql.BinaryOp:
-		l, lok := SubstituteNestedRenameRefs(e.Left, child)
-		r, rok := SubstituteNestedRenameRefs(e.Right, child)
+		l, lok := substituteNestedRenameRefs(e.Left, child)
+		r, rok := substituteNestedRenameRefs(e.Right, child)
 		if !lok || !rok {
 			return nil, false
 		}
@@ -339,7 +339,7 @@ func SubstituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql
 		}
 		return &plansql.BinaryOp{Left: l, Op: e.Op, Right: r}, true
 	case *plansql.UnaryOp:
-		in, ok := SubstituteNestedRenameRefs(e.Inner, child)
+		in, ok := substituteNestedRenameRefs(e.Inner, child)
 		if !ok {
 			return nil, false
 		}
@@ -348,7 +348,7 @@ func SubstituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql
 		}
 		return &plansql.UnaryOp{Op: e.Op, Inner: in}, true
 	case *plansql.NotNode:
-		in, ok := SubstituteNestedRenameRefs(e.Inner, child)
+		in, ok := substituteNestedRenameRefs(e.Inner, child)
 		if !ok {
 			return nil, false
 		}
@@ -357,7 +357,7 @@ func SubstituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql
 		}
 		return &plansql.NotNode{Inner: in}, true
 	case *plansql.ParenNode:
-		in, ok := SubstituteNestedRenameRefs(e.Inner, child)
+		in, ok := substituteNestedRenameRefs(e.Inner, child)
 		if !ok {
 			return nil, false
 		}
@@ -366,7 +366,7 @@ func SubstituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql
 		}
 		return &plansql.ParenNode{Inner: in}, true
 	case *plansql.CastNode:
-		in, ok := SubstituteNestedRenameRefs(e.Inner, child)
+		in, ok := substituteNestedRenameRefs(e.Inner, child)
 		if !ok {
 			return nil, false
 		}
@@ -384,7 +384,7 @@ func SubstituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql
 		}
 		return &plansql.FuncCallNode{Name: e.Name, Args: newArgs, Distinct: e.Distinct, Star: e.Star}, true
 	case *plansql.InExpr:
-		l, lok := SubstituteNestedRenameRefs(e.Left, child)
+		l, lok := substituteNestedRenameRefs(e.Left, child)
 		newVals, changed, ok := substituteNestedRenameList(e.Values, child)
 		if !lok || !ok {
 			return nil, false
@@ -394,9 +394,9 @@ func SubstituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql
 		}
 		return &plansql.InExpr{Left: l, Not: e.Not, Values: newVals}, true
 	case *plansql.BetweenExpr:
-		l, lok := SubstituteNestedRenameRefs(e.Left, child)
-		lo, look := SubstituteNestedRenameRefs(e.Low, child)
-		hi, hok := SubstituteNestedRenameRefs(e.High, child)
+		l, lok := substituteNestedRenameRefs(e.Left, child)
+		lo, look := substituteNestedRenameRefs(e.Low, child)
+		hi, hok := substituteNestedRenameRefs(e.High, child)
 		if !lok || !look || !hok {
 			return nil, false
 		}
@@ -405,8 +405,8 @@ func SubstituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql
 		}
 		return &plansql.BetweenExpr{Left: l, Not: e.Not, Low: lo, High: hi}, true
 	case *plansql.LikeExpr:
-		l, lok := SubstituteNestedRenameRefs(e.Left, child)
-		p, pok := SubstituteNestedRenameRefs(e.Pattern, child)
+		l, lok := substituteNestedRenameRefs(e.Left, child)
+		p, pok := substituteNestedRenameRefs(e.Pattern, child)
 		if !lok || !pok {
 			return nil, false
 		}
@@ -415,7 +415,7 @@ func SubstituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql
 		}
 		return &plansql.LikeExpr{Left: l, Not: e.Not, Pattern: p}, true
 	case *plansql.IsExpr:
-		l, ok := SubstituteNestedRenameRefs(e.Left, child)
+		l, ok := substituteNestedRenameRefs(e.Left, child)
 		if !ok {
 			return nil, false
 		}
@@ -427,7 +427,7 @@ func SubstituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql
 		changed := false
 		var subj plansql.Node
 		if e.Subject != nil {
-			s, ok := SubstituteNestedRenameRefs(e.Subject, child)
+			s, ok := substituteNestedRenameRefs(e.Subject, child)
 			if !ok {
 				return nil, false
 			}
@@ -436,8 +436,8 @@ func SubstituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql
 		}
 		whens := make([]plansql.WhenClause, len(e.Whens))
 		for i, w := range e.Whens {
-			c, cok := SubstituteNestedRenameRefs(w.Cond, child)
-			r, rok := SubstituteNestedRenameRefs(w.Result, child)
+			c, cok := substituteNestedRenameRefs(w.Cond, child)
+			r, rok := substituteNestedRenameRefs(w.Result, child)
 			if !cok || !rok {
 				return nil, false
 			}
@@ -446,7 +446,7 @@ func SubstituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql
 		}
 		var els plansql.Node
 		if e.Else != nil {
-			el, ok := SubstituteNestedRenameRefs(e.Else, child)
+			el, ok := substituteNestedRenameRefs(e.Else, child)
 			if !ok {
 				return nil, false
 			}
@@ -488,7 +488,7 @@ func substituteNestedRenameList(nodes []plansql.Node, child *logical.Node) ([]pl
 	out := make([]plansql.Node, len(nodes))
 	changed := false
 	for i, n := range nodes {
-		nn, ok := SubstituteNestedRenameRefs(n, child)
+		nn, ok := substituteNestedRenameRefs(n, child)
 		if !ok {
 			return nil, false, false
 		}

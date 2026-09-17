@@ -59,7 +59,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	// so materialize them through the synthetic pre-projection at their declared
 	// type (#568). Derived computed arguments must retain their types through
 	// CASE rather than taking an ELSE type that fails the #361 store guard.
-	aggInputDecls := EmittedColDecls(node.Children[0])
+	aggInputDecls := emittedColDecls(node.Children[0])
 	// A SCALAR SUBQUERY written DIRECTLY as the argument — `SUM((SELECT …))` —
 	// has no column for that walk to read: its declaration is the CATALOG fact
 	// annotateSubqueryColumnDecls stamps on the plan. Without it
@@ -75,7 +75,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	aggInputDecls = withSubqueryDecls(aggInputDecls, node)
 
 	for i, agg := range node.AggExprs {
-		if agg.InputExpr != nil && (!isSimpleColRef(agg.InputExpr) || AstIsFieldPath(agg.InputExpr, aggInputDecls)) {
+		if agg.InputExpr != nil && (!isSimpleColRef(agg.InputExpr) || astIsFieldPath(agg.InputExpr, aggInputDecls)) {
 			exprStr := agg.InputExpr.String()
 			if existing, ok := exprDedup[exprStr]; ok {
 				// Reuse previously compiled expression
@@ -94,7 +94,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 			// re-run loud (#734, ADR-0021 §1c). The identical expression one
 			// level down — in a derived table's SELECT list — has always
 			// answered, because that site does ask.
-			aggOuterTables := CollectTableAliases(node.Children[0])
+			aggOuterTables := collectTableAliases(node.Children[0])
 			aggOuterCols := CollectOuterColumns(node.Children[0])
 			var compiled expr.Expr
 			var compErr error
@@ -110,7 +110,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				return nil, nil, nil, compErr
 			}
 			if compErr == nil {
-				aggDecl := InferProjectionDeclType(agg.InputExpr, parquet.TypeFloat64, nil, aggInputDecls)
+				aggDecl := inferProjectionDeclType(agg.InputExpr, parquet.TypeFloat64, nil, aggInputDecls)
 				pc := exec.ProjectColumn{
 					Name: synName,
 					// Aggregate inputs are usually numeric, so Float64 is the
@@ -124,7 +124,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 					// materialized vector truncates at scale 0 (ADR-0024
 					// item 2).
 					Type:      aggDecl.ID,
-					Fields:    DeclTypeParts(aggDecl).Fields,
+					Fields:    declTypeParts(aggDecl).Fields,
 					Precision: aggDecl.Precision,
 					Scale:     aggDecl.Scale,
 					Expr:      wrapExpr(compiled),
@@ -259,7 +259,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		// MIN/MAX from the vector it observes anyway, so this only decides
 		// the type of the identity row an empty input produces — which is
 		// exactly where the two paths would otherwise disagree.
-		outType, outTypeKnown := AggSpecOutputType(node, agg)
+		outType, outTypeKnown := aggSpecOutputType(node, agg)
 		if !outTypeKnown {
 			outType = aggOutputType(agg.Func, agg.Distinct)
 		}
@@ -290,13 +290,13 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		// a whole partial task's .wshf file (#685); here it is the zero-row
 		// result's schema, and the two paths declare the same thing only if
 		// both read this function.
-		if m, known := AggSpecOutputDecimal(node, agg); known {
+		if m, known := aggSpecOutputDecimal(node, agg); known {
 			ac.OutputPrecision, ac.OutputScale = m.Precision, m.Scale
 		}
 		// A ROW-valued aggregate's FIELDS, which a bare TypeID cannot carry
 		// either. Same function the stage spec uses, so the two paths declare
 		// one bar (#965).
-		if fields, ok := AggOhlcvOutputFields(node, agg); ok {
+		if fields, ok := aggOhlcvOutputFields(node, agg); ok {
 			ac.OutputFields = fields
 		}
 		// A COMPUTED argument is declared from the projection this path
@@ -305,9 +305,9 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		// zero-row SUM(a * (1 - b)) declared float64 here and DECIMAL there.
 		if synName, ok := syntheticNames[i]; ok {
 			if d, ok := synDecl[synName]; ok {
-				if t, prec, sc, known := AggOutputFromInputDecl(
+				if t, prec, sc, known := aggOutputFromInputDecl(
 					agg.Func, agg.Distinct, d.Type, d.Precision, d.Scale,
-					AggInputIsWideInteger(agg.InputExpr, aggInputDecls)); known {
+					aggInputIsWideInteger(agg.InputExpr, aggInputDecls)); known {
 					ac.OutputType = t
 					ac.OutputPrecision, ac.OutputScale = prec, sc
 				}
@@ -318,8 +318,8 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 
 	// Catalog types of the aggregate's input, for typing derived GROUP BY
 	// key expressions (see NodeDeclaredType, #333). Resolved once.
-	aggChildStrictInt := StrictIntArithCols(node.Children[0])
-	aggChildColTypes := InputColDecls(node.Children[0])
+	aggChildStrictInt := strictIntArithCols(node.Children[0])
+	aggChildColTypes := inputColDecls(node.Children[0])
 
 	groupByCols := make([]string, len(node.GroupBy))
 	for i, gb := range node.GroupBy {
@@ -375,7 +375,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				if compErr != nil {
 					continue
 				}
-				litDecl := InferProjectionDeclType(gbExpr, parquet.TypeString, aggChildStrictInt, aggChildColTypes)
+				litDecl := inferProjectionDeclType(gbExpr, parquet.TypeString, aggChildStrictInt, aggChildColTypes)
 				litPostOps = append(litPostOps, &aggPreProject{computed: []exec.ProjectColumn{{
 					Name:      keyOuts[i].Name,
 					Type:      litDecl.ID,
@@ -416,7 +416,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 					return nil, nil, nil, compErr
 				}
 				if compErr == nil {
-					gbDecl := DerivedGroupKeyDecl(node.GroupBy[i], gbExpr, node.Children[0])
+					gbDecl := derivedGroupKeyDecl(node.GroupBy[i], gbExpr, node.Children[0])
 					pc := exec.ProjectColumn{
 						Name: synName,
 						// Numeric expressions (abs(x), x-1, …) must get a
@@ -430,7 +430,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 						// item 2).
 						Precision: gbDecl.Precision,
 						Scale:     gbDecl.Scale,
-						Fields:    DeclTypeParts(gbDecl).Fields,
+						Fields:    declTypeParts(gbDecl).Fields,
 						Expr:      wrapExpr(compiled),
 					}
 					// Batched evaluation when available — beyond the vec

@@ -116,7 +116,7 @@ func (p *Planner) tryBuildTopNLateMat(ctx context.Context, sortNode *logical.Nod
 	// columns + scan-level pruning predicate columns.
 	narrow := make(map[string]bool, 8)
 	for _, ob := range sortNode.OrderBy {
-		name, ok := canon[strings.ToLower(CleanExpr(ob.Column))]
+		name, ok := canon[strings.ToLower(cleanExpr(ob.Column))]
 		if !ok {
 			return nil, false, nil // expression or unknown key — not this rewrite
 		}
@@ -178,7 +178,7 @@ func (p *Planner) tryBuildTopNLateMat(ctx context.Context, sortNode *logical.Nod
 		keys = append(keys, exec.SortKey{
 			Column:    sortKeyLocalColumn(ob),
 			Order:     order,
-			NullsLast: ResolveNullsLast(ob),
+			NullsLast: resolveNullsLast(ob),
 		})
 	}
 	sortOp := exec.NewSort(keys)

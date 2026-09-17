@@ -153,7 +153,7 @@ func TestAggSpecOutputType(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, known := AggSpecOutputType(tt.node, tt.agg)
+			got, known := aggSpecOutputType(tt.node, tt.agg)
 			if known == tt.undeclared {
 				t.Fatalf("AggSpecOutputType(%s(%s)) declared=%v, want declared=%v",
 					tt.agg.Func, tt.agg.InputCol, known, !tt.undeclared)

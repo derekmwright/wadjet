@@ -33,7 +33,7 @@ func walkRealInLists(n *logical.Node) error {
 		return nil
 	}
 	if len(n.Predicates) > 0 {
-		d := InputColDecls(n)
+		d := inputColDecls(n)
 		for i := range n.Predicates {
 			if err := refuseRealInNode(n.Predicates[i].ASTExpr, d); err != nil {
 				return err

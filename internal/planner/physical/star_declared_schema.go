@@ -150,8 +150,8 @@ func starJoinDeclaredOutputSchema(root *logical.Node,
 	// `s.id`, `product` and `qty` invented and a rename's alias missing
 	// (round-1 B3). That is #984's own defect living inside #978's answer.
 	published := sideBlockProjections(join)
-	probe := DeclaredJoinSchema(join.Children[0], nil, published, subqueryDecl)
-	build := DeclaredJoinSchema(join.Children[1], nil, published, subqueryDecl)
+	probe := declaredJoinSchema(join.Children[0], nil, published, subqueryDecl)
+	build := declaredJoinSchema(join.Children[1], nil, published, subqueryDecl)
 	if len(probe) == 0 || len(build) == 0 {
 		return nil, false
 	}
@@ -174,7 +174,7 @@ func starJoinDeclaredOutputSchema(root *logical.Node,
 	// declaration beats a wrong one.
 	for _, col := range out {
 		if plansql.ReservedSlotFamily(col.Name) != "" ||
-			plansql.ReservedSlotFamily(BlockBareName(col.Name)) != "" {
+			plansql.ReservedSlotFamily(blockBareName(col.Name)) != "" {
 			return nil, false
 		}
 	}
@@ -231,7 +231,7 @@ func containsJoin(n *logical.Node) bool {
 }
 
 // sideBlockProjections marks the block Project on each side of this join, so
-// DeclaredJoinSchema describes the side by the relation it PUBLISHES.
+// declaredJoinSchema describes the side by the relation it PUBLISHES.
 //
 // It is not `Planner.publishedBlocks`: that set answers "did the DAG's stage
 // materialize this projection", and the question here is the other one — what

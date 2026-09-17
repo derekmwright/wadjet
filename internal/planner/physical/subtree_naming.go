@@ -138,7 +138,7 @@ func (s *SubtreeNaming) OwnsKey(key string) bool {
 		// the column after it is that table's OUTPUT name — resolved here the
 		// way a bare key is, inside the scope that owns the qualifier and
 		// nowhere else (DerivedScopeBareName).
-		if bare := DerivedScopeBareName(k, s.root); bare != "" {
+		if bare := derivedScopeBareName(k, s.root); bare != "" {
 			return s.ownsBareName(bare)
 		}
 		return false

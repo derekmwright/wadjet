@@ -10,11 +10,11 @@ import (
 
 // Ordinary Projects emit no DAG stage; consumers resolve SELECT-list aliases
 // back to source names (shuffle/aggregate/sort keys and gather renames).
-// DerivedScopeBareName drops a derived-table qualifier ONLY when this subtree
+// derivedScopeBareName drops a derived-table qualifier ONLY when this subtree
 // contains the named relation. BuildFromTable's setSubtreeAlias stamps that
 // alias onto its scans; join-recursing resolvers examine one arm at a time.
 // Never strip unconditionally: a qualified sibling column must keep its scope.
-func DerivedScopeBareName(name string, subtree *logical.Node) string {
+func derivedScopeBareName(name string, subtree *logical.Node) string {
 	dot := strings.LastIndexByte(name, '.')
 	if dot <= 0 || dot == len(name)-1 {
 		return ""
@@ -77,7 +77,7 @@ func subtreeNamesRelation(n *logical.Node, name string) bool {
 	return false
 }
 
-// ProjSourceName is the spelling of the column a PLAIN rename reads, keeping
+// projSourceName is the spelling of the column a PLAIN rename reads, keeping
 // the table qualifier when the projection has one.
 //
 // Projection.Column is the bare name, which is enough everywhere one relation
@@ -85,21 +85,21 @@ func subtreeNamesRelation(n *logical.Node, name string) bool {
 // both arms answer to `n_name`, and only `n2.n_name` names one of them. Expr
 // is the reference as WRITTEN, so it carries the qualifier when the query did;
 // where it did not, the two agree and this is Column.
-func ProjSourceName(proj *logical.Projection) string {
+func projSourceName(proj *logical.Projection) string {
 	if proj.Expr != "" {
 		return proj.Expr
 	}
 	return proj.Column
 }
 
-// ProjectionForName finds the SELECT-list item of a Project that a consumer's
+// projectionForName finds the SELECT-list item of a Project that a consumer's
 // name refers to: the alias as written first, then — for a reference
 // qualified by the derived table this Project belongs to — its bare form.
 //
 // Exact-first matters: a projection that aliases the qualified spelling
 // itself (`n1.n_name AS "n1.n_name"`) owns the name outright, and the bare
 // fallback must not overtake it.
-func ProjectionForName(projs []logical.Projection, name, bare string) *logical.Projection {
+func projectionForName(projs []logical.Projection, name, bare string) *logical.Projection {
 	for i := range projs {
 		if projs[i].Alias != "" && strings.EqualFold(projs[i].Alias, name) {
 			return &projs[i]

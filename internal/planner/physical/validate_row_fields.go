@@ -38,7 +38,7 @@ func rowFieldScopeDecls(scope *colScope) ColDecls {
 			decls.Types[k] = d.ID
 			decls.Fields[k] = d.RowFields()
 			if d.ID == parquet.TypeDecimal {
-				col := DeclTypeParts(d)
+				col := declTypeParts(d)
 				if d.Schema != nil {
 					col = *d.Schema
 				}
@@ -84,7 +84,7 @@ func fieldContainerDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclTyp
 			if c != expr.Decided {
 				return expr.DeclType{}, expr.Undecided
 			}
-			typ, p, s, known := AggOutputFromInputDecl(call.Name, call.Distinct, in.ID, in.Precision, in.Scale, AggInputIsWideInteger(call.Args[0], decls))
+			typ, p, s, known := aggOutputFromInputDecl(call.Name, call.Distinct, in.ID, in.Precision, in.Scale, aggInputIsWideInteger(call.Args[0], decls))
 			if !known {
 				return expr.DeclType{}, expr.Undecided
 			}

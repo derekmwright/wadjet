@@ -9,21 +9,21 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// DeclaredJoinSchema derives one join side's plan-time schema from annotated
+// declaredJoinSchema derives one join side's plan-time schema from annotated
 // scan names/order/types, narrowed by want (NeededColumns plus join keys).
 // Empty want retains every scan column. Match buildReadSchema order: table
 // schema per scan, then scans in walk order. exec.HashJoin consults this
 // advisory schema only when the side produces no batch, so approximations for
 // untypable subtrees do not affect non-empty joins. Empty outer-join sides
 // must have present NULL columns, not absent columns (#348, #352).
-func DeclaredJoinSchema(n *logical.Node, want []string, published map[*logical.Node]bool,
+func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.Node]bool,
 	subqueryDecl func(string) (parquet.Column, bool)) []parquet.Column {
 	if n == nil {
 		return nil
 	}
 	wantSet := make(map[string]bool, len(want))
 	for _, w := range want {
-		if w = WantBareName(w); w != "" {
+		if w = wantBareName(w); w != "" {
 			wantSet[w] = true
 		}
 	}
@@ -51,7 +51,7 @@ func DeclaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 			// write a file of a different WIDTH from its siblings' —
 			// ADR-0010's `one stage's files describe one relation`.
 			for _, col := range declaredBlockSchema(cur, wantSet, published, subqueryDecl) {
-				lc := strings.ToLower(BlockBareName(col.Name))
+				lc := strings.ToLower(blockBareName(col.Name))
 				if seen[lc] {
 					continue
 				}
@@ -73,7 +73,7 @@ func DeclaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 			haveTypes := false
 			for _, pr := range cur.Projections {
 				if pr.IsAgg || pr.Column != "" || pr.Alias == "" ||
-					pr.ASTExpr == nil || IsSimpleColRefForRename(pr.ASTExpr) {
+					pr.ASTExpr == nil || isSimpleColRefForRename(pr.ASTExpr) {
 					continue
 				}
 				lc := strings.ToLower(pr.Alias)
@@ -81,7 +81,7 @@ func DeclaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 					continue
 				}
 				if !haveTypes && len(cur.Children) == 1 {
-					colTypes = InputColDecls(cur.Children[0])
+					colTypes = inputColDecls(cur.Children[0])
 					// Same integer-preserving-arithmetic hint
 					// absorbComputedSubqueryProjection passes when it
 					// materializes this same computed column into the scan
@@ -89,11 +89,11 @@ func DeclaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 					// FLOAT64 here but INT64 there, and a join over an empty
 					// side disagrees with a join over a full one about the
 					// type of its own column (#473).
-					strictInt = StrictIntArithCols(cur.Children[0])
+					strictInt = strictIntArithCols(cur.Children[0])
 					haveTypes = true
 				}
 				seen[lc] = true
-				decl := InferProjectionDeclType(pr.ASTExpr, parquet.TypeString, strictInt, colTypes)
+				decl := inferProjectionDeclType(pr.ASTExpr, parquet.TypeString, strictInt, colTypes)
 				out = append(out, parquet.Column{
 					Name:      pr.Alias,
 					Type:      decl.ID,
@@ -121,14 +121,14 @@ func DeclaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 					}
 					pub := strings.ToLower(strings.TrimSpace(pr.Alias))
 					if pub == "" {
-						pub = WantBareName(pr.Column)
+						pub = wantBareName(pr.Column)
 					}
 					if !wantSet[pub] {
 						continue
 					}
-					wantSet[WantBareName(pr.Column)] = true
+					wantSet[wantBareName(pr.Column)] = true
 					if pr.Expr != "" {
-						wantSet[WantBareName(pr.Expr)] = true
+						wantSet[wantBareName(pr.Expr)] = true
 					}
 				}
 			}
@@ -140,9 +140,9 @@ func DeclaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 			// Declare keys first using GroupKeyNames and EmittedKeyNames
 			// (exec.PublishedGroupKeyNames), then each aggregate under its OutputCol,
 			// in the operator's emission order.
-			in := EmittedColTypes(cur.Children[0])
-			published, resolve := GroupKeyNames(cur, cur.Children[0])
-			emitted := EmittedKeyNames(published, resolve, LogicalAggOutNames(cur))
+			in := emittedColTypes(cur.Children[0])
+			published, resolve := groupKeyNames(cur, cur.Children[0])
+			emitted := emittedKeyNames(published, resolve, logicalAggOutNames(cur))
 			keyTypes, _ := derivedGroupKeyTypes(cur.GroupBy, cur.Children[0])
 			for i, name := range emitted {
 				lc := strings.ToLower(name)
@@ -168,7 +168,7 @@ func DeclaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 				if agg.OutputCol == "" || seen[lc] || (len(wantSet) > 0 && !wantSet[lc]) {
 					continue
 				}
-				t, known := AggSpecOutputType(cur, agg)
+				t, known := aggSpecOutputType(cur, agg)
 				if !known {
 					continue
 				}
@@ -180,7 +180,7 @@ func DeclaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 					// exactly the disagreement the shuffle guard refuses, so a
 					// DECIMAL aggregate whose (p,s) is not known at plan time
 					// is left out rather than declared at scale 0.
-					m, known := AggSpecOutputDecimal(cur, agg)
+					m, known := aggSpecOutputDecimal(cur, agg)
 					if !known {
 						continue
 					}
@@ -287,21 +287,21 @@ func JoinSideSchemas(node *logical.Node, leftKeys, rightKeys []string,
 	// on every star over a decorrelated LATERAL. An empty want keeps every
 	// column, which is what a star asks for.
 	if len(node.NeededColumns) == 0 {
-		return DeclaredJoinSchema(node.Children[0], nil, published, subqueryDecl),
-			DeclaredJoinSchema(node.Children[1], nil, published, subqueryDecl)
+		return declaredJoinSchema(node.Children[0], nil, published, subqueryDecl),
+			declaredJoinSchema(node.Children[1], nil, published, subqueryDecl)
 	}
 	want := make([]string, 0, len(node.NeededColumns)+len(leftKeys)+len(rightKeys))
 	want = append(want, node.NeededColumns...)
 	want = append(want, leftKeys...)
 	want = append(want, rightKeys...)
-	return DeclaredJoinSchema(node.Children[0], want, published, subqueryDecl),
-		DeclaredJoinSchema(node.Children[1], want, published, subqueryDecl)
+	return declaredJoinSchema(node.Children[0], want, published, subqueryDecl),
+		declaredJoinSchema(node.Children[1], want, published, subqueryDecl)
 }
 
 // wantSetBareName is the spelling DeclaredJoinSchema's want set is keyed by: a
 // qualified reference ("o.o_orderstatus") names the same column as its bare
 // form in the scan's schema.
-func WantBareName(name string) string {
+func wantBareName(name string) string {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if dot := strings.LastIndexByte(name, '.'); dot >= 0 {
 		name = name[dot+1:]

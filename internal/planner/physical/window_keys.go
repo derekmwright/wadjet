@@ -14,7 +14,7 @@ import (
 )
 
 // Window keys must name input columns on both paths: WindowExecColumn uses
-// ResolveWindowKeys for local operators and DAG specs (#585).
+// resolveWindowKeys for local operators and DAG specs (#585).
 // Bind qualified references in FROM scope at plan time, independently of
 // SELECT aliases, so DAG clustering also uses emitted names (#488).
 // Materialize expressions as __winkey_N, never their SQL text: Project type
@@ -50,7 +50,7 @@ type windowKey struct {
 	Scale     int
 }
 
-// ResolveWindowKeys resolves the PARTITION BY / ORDER BY terms of the window
+// resolveWindowKeys resolves the PARTITION BY / ORDER BY terms of the window
 // expressions on node, keyed by the term's original text.
 //
 // The map is keyed by text and not by position because one window stage
@@ -58,7 +58,7 @@ type windowKey struct {
 // must resolve to one column: two clauses partitioning on `id % 3` compute it
 // once, and two spelling `g` and `p.g` end up on the same group (which is
 // what lets exec.Window run them in a single pass).
-func ResolveWindowKeys(node *logical.Node) map[string]windowKey {
+func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 	if node == nil || len(node.Children) != 1 {
 		return nil
 	}
@@ -101,7 +101,7 @@ func ResolveWindowKeys(node *logical.Node) map[string]windowKey {
 		// to reach the operator as the bare `g` and work — right up until a
 		// join made two columns share that bare name. The cases below only
 		// ever narrow it further.
-		k := windowKey{Name: CleanExpr(term)}
+		k := windowKey{Name: cleanExpr(term)}
 		if ast, err := plansql.ParseExpression(term); err == nil {
 			ref, isCol := ast.(*plansql.ColRef)
 			switch {
@@ -186,7 +186,7 @@ func ResolveWindowKeys(node *logical.Node) map[string]windowKey {
 				// well, where that Project emits no stage (#672, #656).
 				typed := k.Expr
 				if node != nil && len(node.Children) == 1 {
-					if r, ok := RespellDerivedAliasRefs(k.Expr, node.Children[0]); ok {
+					if r, ok := respellDerivedAliasRefs(k.Expr, node.Children[0]); ok {
 						typed = r
 					}
 				}
@@ -199,8 +199,8 @@ func ResolveWindowKeys(node *logical.Node) map[string]windowKey {
 				// every row where PostgreSQL answers 9 — while `MAX` of the
 				// same argument answered the right digits under OID 25
 				// (#1018 round 7, B3's window half).
-				materialized := DeclTypeParts(
-					InferProjectionDeclType(typed, parquet.TypeString, strictInt,
+				materialized := declTypeParts(
+					inferProjectionDeclType(typed, parquet.TypeString, strictInt,
 						withSubqueryDecls(ColDecls{Types: typeCols, Dec: typeDec}, node)))
 				k.Type, k.Precision, k.Scale, k.Fields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
 			}
@@ -272,7 +272,7 @@ func fieldOf(colFields map[string][]parquet.Column, ref *plansql.ColRef) *parque
 // declared outputs laid over the top.
 func windowKeyInputTypes(child *logical.Node) (map[string]parquet.TypeID, map[string]bool) {
 	if t := inputColTypes(child); len(t) > 0 {
-		return t, StrictIntArithCols(child)
+		return t, strictIntArithCols(child)
 	}
 	// A DERIVED TABLE between the window and its producer: inputColTypes
 	// answers nothing for a Project, so a materialized key over one of its
@@ -282,7 +282,7 @@ func windowKeyInputTypes(child *logical.Node) (map[string]parquet.TypeID, map[st
 	// paths, for `SUM(v * 2) OVER ()` over `SELECT d_4 AS v`. These are the
 	// declarations the key is respelled against (#672, #656).
 	if t := sourceColTypesThroughRenames(child); len(t) > 0 {
-		return t, StrictIntArithColsThroughRenames(child)
+		return t, strictIntArithColsThroughRenames(child)
 	}
 	if agg := aggregateUnderWindow(child); agg != nil && len(agg.Children) == 1 {
 		if base := inputColTypes(agg.Children[0]); len(base) > 0 {
@@ -291,11 +291,11 @@ func windowKeyInputTypes(child *logical.Node) (map[string]parquet.TypeID, map[st
 				types[name] = t
 			}
 			for _, a := range agg.AggExprs {
-				if t, known := AggSpecOutputType(agg, a); known {
+				if t, known := aggSpecOutputType(agg, a); known {
 					types[strings.ToLower(a.OutputCol)] = t
 				}
 			}
-			return types, StrictIntArithCols(agg.Children[0])
+			return types, strictIntArithCols(agg.Children[0])
 		}
 	}
 	// The EMITTED walk, which is the only one of the four that crosses a SET
@@ -313,7 +313,7 @@ func windowKeyInputTypes(child *logical.Node) (map[string]parquet.TypeID, map[st
 	// them can see through. It carries no strict-int hint, which is the
 	// honest answer — that hint is a SCAN annotation and there is no single
 	// scan below a set operation.
-	return EmittedColTypes(child), nil
+	return emittedColTypes(child), nil
 }
 
 // windowKeyInputDecimal is windowKeyInputTypes' companion for DECIMAL
@@ -326,7 +326,7 @@ func windowKeyInputDecimal(child *logical.Node) map[string]logical.DecimalMeta {
 	// windowKeyInputTypes' derived-table fallback, for the (p,s) half: a
 	// DECIMAL declared without its scale is not a declaration at all
 	// (ADR-0024 item 2), so the two have to come from the same place.
-	if d := SourceColDeclsThroughRenames(child).Dec; len(d) > 0 {
+	if d := sourceColDeclsThroughRenames(child).Dec; len(d) > 0 {
 		return d
 	}
 	if agg := aggregateUnderWindow(child); agg != nil && len(agg.Children) == 1 {
@@ -336,7 +336,7 @@ func windowKeyInputDecimal(child *logical.Node) map[string]logical.DecimalMeta {
 			out[name] = m
 		}
 		for _, a := range agg.AggExprs {
-			if m, known := AggSpecOutputDecimal(agg, a); known {
+			if m, known := aggSpecOutputDecimal(agg, a); known {
 				out[strings.ToLower(a.OutputCol)] = m
 			}
 		}
@@ -385,14 +385,14 @@ func windowKeyPublishedGroupKey(child *logical.Node, col string) (string, bool) 
 	if agg == nil || col == "" || len(agg.GroupBy) == 0 {
 		return "", false
 	}
-	published, resolve := GroupKeyNames(agg, aggInput(agg))
-	emitted := EmittedKeyNames(published, resolve, LogicalAggOutNames(agg))
+	published, resolve := groupKeyNames(agg, aggInput(agg))
+	emitted := emittedKeyNames(published, resolve, logicalAggOutNames(agg))
 	match, count := "", 0
 	for i, g := range agg.GroupBy {
 		if i >= len(emitted) {
 			break
 		}
-		if strings.EqualFold(BlockBareName(g), col) {
+		if strings.EqualFold(blockBareName(g), col) {
 			match, count = emitted[i], count+1
 		}
 	}
@@ -503,13 +503,13 @@ func inputColRowFields(n *logical.Node) map[string][]parquet.Column {
 	return nil
 }
 
-// WindowKeySpecs lists the materialized keys of a window node, for the DAG's
+// windowKeySpecs lists the materialized keys of a window node, for the DAG's
 // stage spec and for the single-process pre-projection.
 //
 // The order is __winkey_N's own, which ResolveWindowKeys assigns by first
 // encounter over the window's expressions — a slice, so the numbering (and
 // therefore the plan) is deterministic where iterating the map would not be.
-func WindowKeySpecs(keys map[string]windowKey) []ProjectExprSpec {
+func windowKeySpecs(keys map[string]windowKey) []ProjectExprSpec {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -549,7 +549,7 @@ func WindowKeySpecs(keys map[string]windowKey) []ProjectExprSpec {
 // pre-window operator builds its output vector from whichever of the two it is
 // given (#568's `meta`, plan.go's aggPreProject).
 func (p *Planner) windowKeyProjections(keys map[string]windowKey) ([]exec.ProjectColumn, []parquet.Column, error) {
-	specs := WindowKeySpecs(keys)
+	specs := windowKeySpecs(keys)
 	if len(specs) == 0 {
 		return nil, nil, nil
 	}

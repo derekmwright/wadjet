@@ -16,41 +16,41 @@ import (
 )
 
 func (PlanContext) AggDerivedGroupKey(key string, child *logical.Node) (string, bool) {
-	return AggDerivedGroupKey(key, child)
+	return aggDerivedGroupKey(key, child)
 }
 
 func (PlanContext) AggInputColumnDecimal(node *logical.Node, col string) (logical.DecimalMeta, bool) {
-	return AggInputColumnDecimal(node, col)
+	return aggInputColumnDecimal(node, col)
 }
 
 func (PlanContext) AggInputIsWideInteger(node plansql.Node, decls ColDecls) bool {
-	return AggInputIsWideInteger(node, decls)
+	return aggInputIsWideInteger(node, decls)
 }
 
 func (PlanContext) AggOhlcvOutputFields(node *logical.Node, agg logical.AggExpr) ([]parquet.Column, bool) {
-	return AggOhlcvOutputFields(node, agg)
+	return aggOhlcvOutputFields(node, agg)
 }
 
 func (PlanContext) AggOutputFromInputDecl(fn string, distinct bool, in parquet.TypeID, precision, scale int, wideInt bool) (
 	out parquet.TypeID, outPrecision, outScale int, ok bool,
 ) {
-	return AggOutputFromInputDecl(fn, distinct, in, precision, scale, wideInt)
+	return aggOutputFromInputDecl(fn, distinct, in, precision, scale, wideInt)
 }
 
 func (PlanContext) AggScopePreservingWrapper(t logical.NodeType) bool {
-	return AggScopePreservingWrapper(t)
+	return aggScopePreservingWrapper(t)
 }
 
 func (PlanContext) AggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.DecimalMeta, bool) {
-	return AggSpecOutputDecimal(node, agg)
+	return aggSpecOutputDecimal(node, agg)
 }
 
 func (PlanContext) AggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID, bool) {
-	return AggSpecOutputType(node, agg)
+	return aggSpecOutputType(node, agg)
 }
 
 func (PlanContext) AggregateGroupKeyName(proj *logical.Projection, projectNode *logical.Node) (string, bool) {
-	return AggregateGroupKeyName(proj, projectNode)
+	return aggregateGroupKeyName(proj, projectNode)
 }
 
 func (PlanContext) AssignJoinKeySides(leftKeys, rightKeys []string, probe, build *SubtreeNaming) {
@@ -58,16 +58,16 @@ func (PlanContext) AssignJoinKeySides(leftKeys, rightKeys []string, probe, build
 }
 
 func (PlanContext) AstIsFieldPath(node plansql.Node, decls ColDecls) bool {
-	return AstIsFieldPath(node, decls)
+	return astIsFieldPath(node, decls)
 }
 
 func (PlanContext) BlockBareName(s string) string {
-	return BlockBareName(s)
+	return blockBareName(s)
 }
 
 func (PlanContext) BlockPublishedColumns(p *logical.Node, published map[*logical.Node]bool,
 	subqueryDecl func(string) (parquet.Column, bool)) ([]blockColumn, bool) {
-	return BlockPublishedColumns(p, published, subqueryDecl)
+	return blockPublishedColumns(p, published, subqueryDecl)
 }
 
 func (PlanContext) BuildJoinResidualFilter(filter, buildAlias string) func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {
@@ -79,7 +79,7 @@ func (PlanContext) BuildStreamAlias(node *logical.Node) string {
 }
 
 func (PlanContext) CleanExpr(s string) string {
-	return CleanExpr(s)
+	return cleanExpr(s)
 }
 
 func (PlanContext) ColSet(cols []string) map[string]bool {
@@ -103,16 +103,16 @@ func (PlanContext) CollectOuterColumns(node *logical.Node) map[string]string {
 }
 
 func (PlanContext) CollectTableAliases(node *logical.Node) map[string]bool {
-	return CollectTableAliases(node)
+	return collectTableAliases(node)
 }
 
 func (PlanContext) DeclTypeParts(d expr.DeclType) parquet.Column {
-	return DeclTypeParts(d)
+	return declTypeParts(d)
 }
 
 func (PlanContext) DeclaredJoinSchema(n *logical.Node, want []string, published map[*logical.Node]bool,
 	subqueryDecl func(string) (parquet.Column, bool)) []parquet.Column {
-	return DeclaredJoinSchema(n, want, published, subqueryDecl)
+	return declaredJoinSchema(n, want, published, subqueryDecl)
 }
 
 func (PlanContext) OutputSchema(root *logical.Node,
@@ -120,40 +120,32 @@ func (PlanContext) OutputSchema(root *logical.Node,
 	return DeclaredOutputSchema(root, subqueryDecl)
 }
 
-func (PlanContext) DeclaredStringLengths(root *logical.Node) map[string]int {
-	return DeclaredStringLengths(root)
-}
-
-func (PlanContext) DeclaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
-	return DeclaredWireUnconstrainedDecimal(root)
-}
-
 func (PlanContext) DerivedAliasSourceColumn(name string, child *logical.Node) string {
-	return DerivedAliasSourceColumn(name, child)
+	return derivedAliasSourceColumn(name, child)
 }
 
 func (PlanContext) DerivedGroupKeyDecl(key string, node plansql.Node, child *logical.Node) expr.DeclType {
-	return DerivedGroupKeyDecl(key, node, child)
+	return derivedGroupKeyDecl(key, node, child)
 }
 
 func (PlanContext) DerivedScopeBareName(name string, subtree *logical.Node) string {
-	return DerivedScopeBareName(name, subtree)
+	return derivedScopeBareName(name, subtree)
 }
 
 func (PlanContext) EmittedColDecls(n *logical.Node) ColDecls {
-	return EmittedColDecls(n)
+	return emittedColDecls(n)
 }
 
 func (PlanContext) EmittedColTypes(n *logical.Node) map[string]parquet.TypeID {
-	return EmittedColTypes(n)
+	return emittedColTypes(n)
 }
 
 func (PlanContext) EmittedColumnNames(n *logical.Node) []string {
-	return EmittedColumnNames(n)
+	return emittedColumnNames(n)
 }
 
 func (PlanContext) EmittedKeyNames(published []string, resolve []GroupKeyResolution, aggOut []string) []string {
-	return EmittedKeyNames(published, resolve, aggOut)
+	return emittedKeyNames(published, resolve, aggOut)
 }
 
 func (PlanContext) FindAggregateAncestor(node *logical.Node) *logical.Node {
@@ -165,15 +157,15 @@ func (PlanContext) FindOutputProjectionNode(n *logical.Node) *logical.Node {
 }
 
 func (PlanContext) FindOutputProjectionsForRename(n *logical.Node) []logical.Projection {
-	return FindOutputProjectionsForRename(n)
+	return findOutputProjectionsForRename(n)
 }
 
 func (PlanContext) GroupKeyByIdentity(agg *logical.Node) map[string]string {
-	return GroupKeyByIdentity(agg)
+	return groupKeyByIdentity(agg)
 }
 
 func (PlanContext) GroupKeyNames(agg, child *logical.Node) (published []string, resolve []GroupKeyResolution) {
-	return GroupKeyNames(agg, child)
+	return groupKeyNames(agg, child)
 }
 
 func (PlanContext) HasFilterOrPartition(n *logical.Node) bool {
@@ -185,12 +177,12 @@ func (PlanContext) HasLimit(n *logical.Node) bool {
 }
 
 func (PlanContext) InferProjectionDeclType(node plansql.Node, fallback parquet.TypeID, strictInt map[string]bool, decls ColDecls) expr.DeclType {
-	return InferProjectionDeclType(node, fallback, strictInt, decls)
+	return inferProjectionDeclType(node, fallback, strictInt, decls)
 }
 
 func (PlanContext) InferProjectionDeclTypeConf(node plansql.Node, fallback parquet.TypeID,
 	strictInt map[string]bool, decls ColDecls) (expr.DeclType, expr.Confidence) {
-	return InferProjectionDeclTypeConf(node, fallback, strictInt, decls)
+	return inferProjectionDeclTypeConf(node, fallback, strictInt, decls)
 }
 
 func (PlanContext) InlinedInSetRowCap() int {
@@ -198,11 +190,11 @@ func (PlanContext) InlinedInSetRowCap() int {
 }
 
 func (PlanContext) InputColDecls(n *logical.Node) ColDecls {
-	return InputColDecls(n)
+	return inputColDecls(n)
 }
 
 func (PlanContext) IsSimpleColRefForRename(n plansql.Node) bool {
-	return IsSimpleColRefForRename(n)
+	return isSimpleColRefForRename(n)
 }
 
 func (PlanContext) JoinArmAlias(node *logical.Node) string {
@@ -215,19 +207,19 @@ func (PlanContext) JoinSideSchemas(node *logical.Node, leftKeys, rightKeys []str
 }
 
 func (PlanContext) LateralEmptySpec(node *logical.Node) (marker string, cols []exec.LateralDefault, drop bool) {
-	return LateralEmptySpec(node)
+	return lateralEmptySpec(node)
 }
 
 func (PlanContext) LateralMarkerDroppedAbove(node *logical.Node, name string) bool {
-	return LateralMarkerDroppedAbove(node, name)
+	return lateralMarkerDroppedAbove(node, name)
 }
 
 func (PlanContext) LateralSideOf(node *logical.Node) int {
-	return LateralSideOf(node)
+	return lateralSideOf(node)
 }
 
 func (PlanContext) LogicalAggOutNames(agg *logical.Node) []string {
-	return LogicalAggOutNames(agg)
+	return logicalAggOutNames(agg)
 }
 
 func (PlanContext) MapJoinType(vt string) string {
@@ -255,7 +247,7 @@ func (PlanContext) NodeDeclaredType(node plansql.Node, decls ColDecls) (expr.Dec
 }
 
 func (PlanContext) OwnedJoinArm(n *logical.Node, name string) *logical.Node {
-	return OwnedJoinArm(n, name)
+	return ownedJoinArm(n, name)
 }
 
 func (PlanContext) ParseJoinKeys(cond string) (leftKeys, rightKeys, residual []string) {
@@ -263,11 +255,11 @@ func (PlanContext) ParseJoinKeys(cond string) (leftKeys, rightKeys, residual []s
 }
 
 func (PlanContext) ProjSourceName(proj *logical.Projection) string {
-	return ProjSourceName(proj)
+	return projSourceName(proj)
 }
 
 func (PlanContext) ProjectionForName(projs []logical.Projection, name, bare string) *logical.Projection {
-	return ProjectionForName(projs, name, bare)
+	return projectionForName(projs, name, bare)
 }
 
 func (PlanContext) ProjectionOutputName(proj logical.Projection) string {
@@ -279,15 +271,15 @@ func (PlanContext) PublishedNamesOfProjection(projNode *logical.Node) []string {
 }
 
 func (PlanContext) QualifiedColumn(ref *plansql.ColRef) string {
-	return QualifiedColumn(ref)
+	return qualifiedColumn(ref)
 }
 
 func (PlanContext) ReferencesSynthetic(n plansql.Node, prefix string) bool {
-	return ReferencesSynthetic(n, prefix)
+	return referencesSynthetic(n, prefix)
 }
 
 func (PlanContext) ReferencesSyntheticAgg(n plansql.Node) bool {
-	return ReferencesSyntheticAgg(n)
+	return referencesSyntheticAgg(n)
 }
 
 func (PlanContext) RefuseJoinCond(joinType, cond string, residual []string) error {
@@ -303,7 +295,7 @@ func (PlanContext) RefuseUnrepresentableRealInList(root *logical.Node) error {
 }
 
 func (PlanContext) RelationScopeSubtree(n *logical.Node, name string) *logical.Node {
-	return RelationScopeSubtree(n, name)
+	return relationScopeSubtree(n, name)
 }
 
 func (PlanContext) ResolveAggInputName(name string, child *logical.Node) (resolved string, expr plansql.Node, exprInput *logical.Node, alias bool) {
@@ -315,23 +307,23 @@ func (PlanContext) ResolveJoinKeyTypes(node *logical.Node, leftKeys, rightKeys [
 }
 
 func (PlanContext) ResolveNullsLast(ob logical.OrderExpr) bool {
-	return ResolveNullsLast(ob)
+	return resolveNullsLast(ob)
 }
 
 func (PlanContext) ResolveOutputRenameSource(name string, child *logical.Node) string {
-	return ResolveOutputRenameSource(name, child)
+	return resolveOutputRenameSource(name, child)
 }
 
 func (PlanContext) ResolveRenameSource(name string, child *logical.Node, forGather bool) string {
-	return ResolveRenameSource(name, child, forGather)
+	return resolveRenameSource(name, child, forGather)
 }
 
 func (PlanContext) ResolveWindowKeys(node *logical.Node) map[string]windowKey {
-	return ResolveWindowKeys(node)
+	return resolveWindowKeys(node)
 }
 
 func (PlanContext) RespellDerivedAliasRefs(n plansql.Node, child *logical.Node) (plansql.Node, bool) {
-	return RespellDerivedAliasRefs(n, child)
+	return respellDerivedAliasRefs(n, child)
 }
 
 func (PlanContext) RewriteColRefs(n plansql.Node, sub func(*plansql.ColRef) (plansql.Node, bool)) (
@@ -341,11 +333,11 @@ func (PlanContext) RewriteColRefs(n plansql.Node, sub func(*plansql.ColRef) (pla
 }
 
 func (PlanContext) SetOpArmIsUnknownLit(unknown [][]bool, i, col int) bool {
-	return SetOpArmIsUnknownLit(unknown, i, col)
+	return setOpArmIsUnknownLit(unknown, i, col)
 }
 
 func (PlanContext) SetOpArmProjection(arm *logical.Node, outNames []string) (SetOpArmPlan, error) {
-	return SetOpArmProjection(arm, outNames)
+	return setOpArmProjection(arm, outNames)
 }
 
 func (PlanContext) SetOpArmTypeConflict(node *logical.Node) error {
@@ -353,19 +345,19 @@ func (PlanContext) SetOpArmTypeConflict(node *logical.Node) error {
 }
 
 func (PlanContext) SetOpBaseName(node *logical.Node) string {
-	return SetOpBaseName(node)
+	return setOpBaseName(node)
 }
 
 func (PlanContext) SetOpName(node *logical.Node) string {
-	return SetOpName(node)
+	return setOpName(node)
 }
 
 func (PlanContext) SetOpOutputNames(arm *logical.Node) []string {
-	return SetOpOutputNames(arm)
+	return setOpOutputNames(arm)
 }
 
 func (PlanContext) SetOpTargetType(plans []SetOpArmPlan, col int, name, op string, unknown [][]bool) (SetOpColType, bool, error) {
-	return SetOpTargetType(plans, col, name, op, unknown)
+	return setOpTargetType(plans, col, name, op, unknown)
 }
 
 func (PlanContext) SetOpUnknownLiteralArms(arm *logical.Node, cols int) []bool {
@@ -373,31 +365,31 @@ func (PlanContext) SetOpUnknownLiteralArms(arm *logical.Node, cols int) []bool {
 }
 
 func (PlanContext) SortInputSetOpWidth(child *logical.Node) (int, bool) {
-	return SortInputSetOpWidth(child)
+	return sortInputSetOpWidth(child)
 }
 
 func (PlanContext) SortKeySlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
-	return SortKeySlotPos(ob, sortNode)
+	return sortKeySlotPos(ob, sortNode)
 }
 
 func (PlanContext) SortKeyWrittenSlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
-	return SortKeyWrittenSlotPos(ob, sortNode)
+	return sortKeyWrittenSlotPos(ob, sortNode)
 }
 
 func (PlanContext) SourceColDeclsThroughRenames(n *logical.Node) ColDecls {
-	return SourceColDeclsThroughRenames(n)
+	return sourceColDeclsThroughRenames(n)
 }
 
 func (PlanContext) StrictIntArithCols(n *logical.Node) map[string]bool {
-	return StrictIntArithCols(n)
+	return strictIntArithCols(n)
 }
 
 func (PlanContext) StrictIntArithColsThroughRenames(n *logical.Node) map[string]bool {
-	return StrictIntArithColsThroughRenames(n)
+	return strictIntArithColsThroughRenames(n)
 }
 
 func (PlanContext) SubstituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql.Node, bool) {
-	return SubstituteNestedRenameRefs(expr, child)
+	return substituteNestedRenameRefs(expr, child)
 }
 
 func (PlanContext) SubtreeNamingOf(n *logical.Node) *SubtreeNaming {
@@ -410,15 +402,15 @@ func (PlanContext) ValidateColumnsUnderPolicy(ctx context.Context, cat *catalog.
 }
 
 func (PlanContext) WantBareName(name string) string {
-	return WantBareName(name)
+	return wantBareName(name)
 }
 
 func (PlanContext) WindowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string]windowKey) exec.WindowColumn {
-	return WindowExecColumn(node, we, keys)
+	return windowExecColumn(node, we, keys)
 }
 
 func (PlanContext) WindowKeySpecs(keys map[string]windowKey) []ProjectExprSpec {
-	return WindowKeySpecs(keys)
+	return windowKeySpecs(keys)
 }
 
 func (PlanContext) WindowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclType {
@@ -445,6 +437,6 @@ func (PlanContext) SemiAntiBuildStoreCols(keys []string, filter string) []string
 	return SemiAntiBuildStoreCols(keys, filter)
 }
 func (PlanContext) SetOpCarrierGapPairs() [][2]parquet.TypeID {
-	return SetOpCarrierGapPairs()
+	return setOpCarrierGapPairs()
 }
 func (PlanContext) ReverseBloomInnerThreshold() *int64 { return &ReverseBloomInnerThreshold }

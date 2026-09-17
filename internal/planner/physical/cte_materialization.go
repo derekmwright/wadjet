@@ -439,7 +439,7 @@ func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDe
 			for _, col := range ri.Columns {
 				name := col.Alias
 				if name == "" {
-					name = CleanExpr(col.Expr)
+					name = cleanExpr(col.Expr)
 				}
 				recursiveColNames = append(recursiveColNames, name)
 			}

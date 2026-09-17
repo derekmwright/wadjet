@@ -60,7 +60,7 @@ type GroupKeyResolution struct {
 // candidate spellings that only the finished stage graph can settle.
 func (r GroupKeyResolution) Deferred() bool { return r.Alias != "" }
 
-// GroupKeyNames computes both names of every GROUP BY key of one logical
+// groupKeyNames computes both names of every GROUP BY key of one logical
 // Aggregate: what the stage PUBLISHES it as, and what the computing fragment
 // RESOLVES it by.
 //
@@ -71,7 +71,7 @@ func (r GroupKeyResolution) Deferred() bool { return r.Alias != "" }
 // key published under the text the query wrote. Publishing it under the
 // single path's slot name would name a column the DAG's own consumers do not
 // ask for.
-func GroupKeyNames(agg, child *logical.Node) (published []string, resolve []GroupKeyResolution) {
+func groupKeyNames(agg, child *logical.Node) (published []string, resolve []GroupKeyResolution) {
 	keys := groupKeyOutputs(agg)
 	published = make([]string, len(agg.GroupBy))
 	resolve = make([]GroupKeyResolution, len(agg.GroupBy))
@@ -112,7 +112,7 @@ func GroupKeyNames(agg, child *logical.Node) (published []string, resolve []Grou
 			// differed from the published name only by them would make every
 			// reader that compares the two say "these are two names".
 			expr := k.Name
-			if respelled, ok := AggDerivedGroupKey(k.Name, child); ok {
+			if respelled, ok := aggDerivedGroupKey(k.Name, child); ok {
 				expr = respelled
 			}
 			resolve[i] = GroupKeyResolution{Expr: expr, Computed: true}
@@ -154,7 +154,7 @@ func GroupKeyNames(agg, child *logical.Node) (published []string, resolve []Grou
 				// columns. Typing it against the aggregate's own child leaves
 				// a DECIMAL key on the FLOAT rule, and the exact value then
 				// meets the #361 store guard on both DAG arms.
-				Decl: DerivedGroupKeyDecl(def.String(), def, defScope),
+				Decl: derivedGroupKeyDecl(def.String(), def, defScope),
 			}
 		}
 	}
@@ -167,7 +167,7 @@ func GroupKeyNames(agg, child *logical.Node) (published []string, resolve []Grou
 	// keys) already carry planner-chosen GroupByOutNames and bypass exec's strip
 	// (#467, #480, #740; ADR-0026 §2).
 	if anyExecRule(execRule) {
-		emitted := exec.PublishedGroupKeyNames(published, nil, LogicalAggOutNames(agg), false)
+		emitted := exec.PublishedGroupKeyNames(published, nil, logicalAggOutNames(agg), false)
 		for i := range published {
 			if execRule[i] {
 				published[i] = emitted[i]
@@ -187,7 +187,7 @@ func anyExecRule(flags []bool) bool {
 	return false
 }
 
-// EmittedKeyNames is the column name the aggregate's FRAGMENT emits for
+// emittedKeyNames is the column name the aggregate's FRAGMENT emits for
 // each key — the published list run through `exec.PublishedGroupKeyNames`,
 // which is the same rule and the same call the worker makes and the
 // single-process operator applies to its own key list.
@@ -198,7 +198,7 @@ func anyExecRule(flags []bool) bool {
 // slot placeholder here is not the slot the worker allocates — that index is a
 // runtime fact — but the rule only reads a name's qualifier and its collisions,
 // and a reserved-family name has neither.
-func EmittedKeyNames(published []string, resolve []GroupKeyResolution, aggOut []string) []string {
+func emittedKeyNames(published []string, resolve []GroupKeyResolution, aggOut []string) []string {
 	byRule := make([]string, len(published))
 	overrides := make([]string, len(published))
 	for i := range published {
@@ -212,9 +212,9 @@ func EmittedKeyNames(published []string, resolve []GroupKeyResolution, aggOut []
 	return exec.PublishedGroupKeyNames(byRule, overrides, aggOut, false)
 }
 
-// LogicalAggOutNames is an Aggregate node's OUTPUT column names, the list
+// logicalAggOutNames is an Aggregate node's OUTPUT column names, the list
 // `exec.PublishedGroupKeyNames` asks about (ADR-0026 §2b).
-func LogicalAggOutNames(agg *logical.Node) []string {
+func logicalAggOutNames(agg *logical.Node) []string {
 	if agg == nil || len(agg.AggExprs) == 0 {
 		return nil
 	}

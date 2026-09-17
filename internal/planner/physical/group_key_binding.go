@@ -23,13 +23,13 @@ import (
 func ResolveAggInputName(name string, child *logical.Node) (resolved string, expr plansql.Node, exprInput *logical.Node, alias bool) {
 	resolved = name
 	if ref, err := plansql.ParseExpression(name); err == nil {
-		if field, ok := ref.(*plansql.ColRef); ok && EmittedColDecls(child).isFieldPath(field) {
+		if field, ok := ref.(*plansql.ColRef); ok && emittedColDecls(child).isFieldPath(field) {
 			// A join publishes its own container identities. Resolve only an
 			// alias owned by this unary scope, never a rename inside another
 			// join arm (where the source may collide with the other arm).
 			ownsParent := false
 			for scope := child; scope != nil; {
-				if scope.Type == logical.NodeProject && ProjectionForName(scope.Projections, field.Table, DerivedScopeBareName(field.Table, scope)) != nil {
+				if scope.Type == logical.NodeProject && projectionForName(scope.Projections, field.Table, derivedScopeBareName(field.Table, scope)) != nil {
 					ownsParent = true
 					break
 				}
@@ -66,10 +66,10 @@ func ResolveAggInputName(name string, child *logical.Node) (resolved string, exp
 			// DerivedScopeBareName. Without it the key reached the worker
 			// as `u.k` and the task failed loud: `hash aggregate: GROUP BY
 			// key "u.k" is not a column of its input` (#467).
-			bare := DerivedScopeBareName(resolved, n)
-			if proj := ProjectionForName(n.Projections, resolved, bare); proj != nil {
+			bare := derivedScopeBareName(resolved, n)
+			if proj := projectionForName(n.Projections, resolved, bare); proj != nil {
 				switch {
-				case proj.Column != "" && !strings.EqualFold(ProjSourceName(proj), resolved):
+				case proj.Column != "" && !strings.EqualFold(projSourceName(proj), resolved):
 					// The QUALIFIER-PRESERVING spelling, for the reason
 					// resolveSortKeyColumn and annotateDerivedAliasSortKey
 					// both prefer it: a self-joined table gives both arms the
@@ -81,7 +81,7 @@ func ResolveAggInputName(name string, child *logical.Node) (resolved string, exp
 					// which arm, and the worker's own lookup applies the
 					// qualified↔bare fallback where the stream spells it the
 					// other way.
-					resolved, alias = ProjSourceName(proj), true
+					resolved, alias = projSourceName(proj), true
 				case proj.Column == "" && !proj.IsAgg && proj.ASTExpr != nil:
 					var below *logical.Node
 					if len(n.Children) == 1 {
@@ -117,7 +117,7 @@ func ResolveAggInputName(name string, child *logical.Node) (resolved string, exp
 	return resolved, expr, exprInput, alias
 }
 
-// DerivedGroupKeyDecl is the declared type of a computed GROUP BY key.
+// derivedGroupKeyDecl is the declared type of a computed GROUP BY key.
 //
 // A key's leaves may be bound by a rename Project, and InputColDecls STOPS at
 // one — a rename can bind a name to a different value, so the walk refuses to
@@ -132,26 +132,26 @@ func ResolveAggInputName(name string, child *logical.Node) (resolved string, exp
 // rebinds names and not values. AggDerivedGroupKey performs exactly that
 // re-spelling, and the key the DAG dispatches has already had it done, so the
 // second arm catches that case too.
-func DerivedGroupKeyDecl(key string, node plansql.Node, child *logical.Node) expr.DeclType {
+func derivedGroupKeyDecl(key string, node plansql.Node, child *logical.Node) expr.DeclType {
 	// The form the WORKER computes. A key whose leaves a rename Project binds
 	// is dispatched re-spelled into source columns (AggDerivedGroupKey), and
 	// typing the spelling the query wrote instead types an expression nothing
 	// evaluates.
 	typed := node
-	if respelled, changed := AggDerivedGroupKey(key, child); changed {
+	if respelled, changed := aggDerivedGroupKey(key, child); changed {
 		if n, err := plansql.ParseExpression(respelled); err == nil {
 			typed = n
 		}
 	}
 	// The scope that can NAME the key's columns is the one that types it.
 	if decls, scope, ok := namingScopeDecls(typed, child); ok {
-		return InferProjectionDeclType(typed, parquet.TypeString,
-			StrictIntArithCols(scope), decls)
+		return inferProjectionDeclType(typed, parquet.TypeString,
+			strictIntArithCols(scope), decls)
 	}
 	// No level of the chain names them: keep the answer this had before, which
 	// is the float rule over the aggregate's input decls.
-	return InferProjectionDeclType(node, parquet.TypeString,
-		StrictIntArithCols(child), InputColDecls(child))
+	return inferProjectionDeclType(node, parquet.TypeString,
+		strictIntArithCols(child), inputColDecls(child))
 }
 
 // namingScopeDecls finds the first emitted scope covering EVERY reference in
@@ -163,7 +163,7 @@ func DerivedGroupKeyDecl(key string, node plansql.Node, child *logical.Node) exp
 // the expression; never read a rebound name past its rebinding.
 func namingScopeDecls(node plansql.Node, child *logical.Node) (ColDecls, *logical.Node, bool) {
 	for n := child; n != nil; {
-		d := EmittedColDecls(n)
+		d := emittedColDecls(n)
 		if declsCoverEveryColRef(node, d) {
 			return d, n, true
 		}
@@ -222,7 +222,7 @@ func declsCoverEveryColRef(node plansql.Node, decls ColDecls) bool {
 	return true
 }
 
-// AggDerivedGroupKey re-spells a COMPUTED GROUP BY key's column references
+// aggDerivedGroupKey re-spells a COMPUTED GROUP BY key's column references
 // into the columns the aggregate's input really emits, the way
 // dagplan.aggStageGroupKey does for a bare one. ok=false leaves the key
 // exactly as it was — which is every key whose leaves are already source
@@ -232,12 +232,12 @@ func declsCoverEveryColRef(node plansql.Node, decls ColDecls) bool {
 // input, the stage emitter to a column of its producer stage — so it stays on
 // the MIT side. It was spelled AggStageDerivedKey, which named one of those
 // two callers (LS review round 2, P2).
-func AggDerivedGroupKey(key string, child *logical.Node) (string, bool) {
+func aggDerivedGroupKey(key string, child *logical.Node) (string, bool) {
 	node, err := plansql.ParseExpression(key)
 	if err != nil {
 		return key, false
 	}
-	if ref, bare := node.(*plansql.ColRef); bare && !EmittedColDecls(child).isFieldPath(ref) {
+	if ref, bare := node.(*plansql.ColRef); bare && !emittedColDecls(child).isFieldPath(ref) {
 		return key, false
 	}
 	changed := false
@@ -247,15 +247,15 @@ func AggDerivedGroupKey(key string, child *logical.Node) (string, bool) {
 			return nil, false
 		}
 
-		if EmittedColDecls(child).isFieldPath(ref) {
-			_, def, _, renamed := ResolveAggInputName(QualifiedColumn(ref), child)
+		if emittedColDecls(child).isFieldPath(ref) {
+			_, def, _, renamed := ResolveAggInputName(qualifiedColumn(ref), child)
 			if !renamed || def == nil {
 				return nil, false
 			}
 			changed = true
 			return def, true
 		}
-		resolved, expr, _, renamed := ResolveAggInputName(QualifiedColumn(ref), child)
+		resolved, expr, _, renamed := ResolveAggInputName(qualifiedColumn(ref), child)
 		if !renamed {
 			return nil, false
 		}
@@ -275,9 +275,9 @@ func AggDerivedGroupKey(key string, child *logical.Node) (string, bool) {
 	return out.String(), true
 }
 
-// QualifiedColumn renders a column reference the way ResolveAggInputName
+// qualifiedColumn renders a column reference the way ResolveAggInputName
 // expects to receive it.
-func QualifiedColumn(ref *plansql.ColRef) string {
+func qualifiedColumn(ref *plansql.ColRef) string {
 	if ref.Table != "" {
 		return ref.Table + "." + ref.Column
 	}
@@ -308,8 +308,8 @@ func derivedGroupKeyTypes(groupBy []string, child *logical.Node) (map[string]par
 			continue
 		}
 		if !resolved {
-			colTypes = InputColDecls(child)
-			strictInt = StrictIntArithCols(child)
+			colTypes = inputColDecls(child)
+			strictInt = strictIntArithCols(child)
 			resolved = true
 		}
 		// A bare column reference needs no derived key — except a ROW FIELD
@@ -319,13 +319,13 @@ func derivedGroupKeyTypes(groupBy []string, child *logical.Node) (map[string]par
 		// planner's "this key is derived, and this is its type"). Without it
 		// the key reached HashAggregate as a name and failed to resolve
 		// (#568).
-		if _, bare := node.(*plansql.ColRef); bare && !AstIsFieldPath(node, colTypes) {
+		if _, bare := node.(*plansql.ColRef); bare && !astIsFieldPath(node, colTypes) {
 			continue
 		}
 		if out == nil {
 			out = make(map[string]parquet.TypeID)
 		}
-		d := DerivedGroupKeyDecl(key, node, child)
+		d := derivedGroupKeyDecl(key, node, child)
 		_, _ = strictInt, colTypes
 		out[key] = d.ID
 		if d.ID == parquet.TypeDecimal && d.DecKnown {

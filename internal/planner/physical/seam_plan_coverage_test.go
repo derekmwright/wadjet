@@ -435,7 +435,7 @@ func TestResolveNullsLast(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := ResolveNullsLast(tc.ob); got != tc.want {
+			if got := resolveNullsLast(tc.ob); got != tc.want {
 				t.Errorf("ResolveNullsLast = %v, want %v", got, tc.want)
 			}
 		})
@@ -477,13 +477,13 @@ func TestExtractFilterBuildColumns(t *testing.T) {
 }
 
 func TestCleanExpr(t *testing.T) {
-	if CleanExpr("t.col") != "col" {
+	if cleanExpr("t.col") != "col" {
 		t.Error("expected 'col' for 't.col'")
 	}
-	if CleanExpr("col") != "col" {
+	if cleanExpr("col") != "col" {
 		t.Error("expected 'col' for 'col'")
 	}
-	if CleanExpr("  t.col  ") != "col" {
+	if cleanExpr("  t.col  ") != "col" {
 		t.Error("expected 'col' for '  t.col  '")
 	}
 }
@@ -506,7 +506,7 @@ func TestCleanExprLeavesExpressionsAlone(t *testing.T) {
 		// A delimited identifier is ONE name, dot included (#304).
 		{`"id.orig_h"`, "id.orig_h"},
 	} {
-		if got := CleanExpr(tc.in); got != tc.want {
+		if got := cleanExpr(tc.in); got != tc.want {
 			t.Errorf("CleanExpr(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}

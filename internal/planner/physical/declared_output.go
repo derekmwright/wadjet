@@ -42,21 +42,21 @@ func inferProjectionTypeCols(node plansql.Node, fallback parquet.TypeID, strictI
 // than read off a scan (EmittedColTypes and friends), where there are no
 // fields to carry.
 func inferProjectionTypeDecls(node plansql.Node, fallback parquet.TypeID, strictInt map[string]bool, decls ColDecls) parquet.TypeID {
-	return InferProjectionDeclType(node, fallback, strictInt, decls).ID
+	return inferProjectionDeclType(node, fallback, strictInt, decls).ID
 }
 
-// InferProjectionDeclType is inferProjectionTypeDecls with the parameterized
+// inferProjectionDeclType is inferProjectionTypeDecls with the parameterized
 // part of the answer kept — a DECIMAL's (precision, scale), which a bare
 // parquet.TypeID cannot carry and which the output vector must have or every
 // value in it reads back at the wrong power of ten (ADR-0024 item 2).
 // Callers that materialize a vector from the answer take this one; callers
 // that only need the TypeID keep the wrapper above.
-func InferProjectionDeclType(node plansql.Node, fallback parquet.TypeID, strictInt map[string]bool, decls ColDecls) expr.DeclType {
-	t, _ := InferProjectionDeclTypeConf(node, fallback, strictInt, decls)
+func inferProjectionDeclType(node plansql.Node, fallback parquet.TypeID, strictInt map[string]bool, decls ColDecls) expr.DeclType {
+	t, _ := inferProjectionDeclTypeConf(node, fallback, strictInt, decls)
 	return t
 }
 
-// InferProjectionDeclTypeConf is InferProjectionDeclType with the CONFIDENCE
+// inferProjectionDeclTypeConf is InferProjectionDeclType with the CONFIDENCE
 // it reached. It holds the BODY, and the wrapper above is one line, because
 // two copies of the two arms below — integer-preserving arithmetic, and the
 // declarations withheld for a bare reference — is how two callers come to
@@ -68,7 +68,7 @@ func InferProjectionDeclType(node plansql.Node, fallback parquet.TypeID, strictI
 // box arrives into it, so an UNDECIDED answer dressed as the STRING fallback
 // turns a DATE into its epoch day (#831 review). That caller asks for the
 // confidence and declines on Undecided.
-func InferProjectionDeclTypeConf(node plansql.Node, fallback parquet.TypeID,
+func inferProjectionDeclTypeConf(node plansql.Node, fallback parquet.TypeID,
 	strictInt map[string]bool, decls ColDecls) (expr.DeclType, expr.Confidence) {
 	if strictInt != nil && expr.IntArithOn() {
 		inner := node
@@ -101,7 +101,7 @@ func InferProjectionDeclTypeConf(node plansql.Node, fallback parquet.TypeID,
 		}
 	}
 	_, bareRef := node.(*plansql.ColRef)
-	if bareRef && !AstIsFieldPath(node, decls) {
+	if bareRef && !astIsFieldPath(node, decls) {
 		// A bare reference copies its input column; exec.Project uses the input
 		// schema, including renames/derived inputs. Withhold declarations to leave
 		// the caller's fallback in charge (#333 concerns computed arguments).
@@ -301,12 +301,12 @@ func intArithAllInt(node plansql.Node, strictInt map[string]bool, decls ColDecls
 	return t.ID == parquet.TypeInt64 || t.ID == parquet.TypeInt32
 }
 
-// StrictIntArithCols resolves the strictly-int column set feeding a node,
+// strictIntArithCols resolves the strictly-int column set feeding a node,
 // walking only shape-preserving single-child steps. It deliberately stops
 // at Project nodes: a projection may rebind a name to a non-int value,
 // and a wrong int claim corrupts (see inferProjectionTypeCols); declining
 // just keeps the Float64 declaration.
-func StrictIntArithCols(n *logical.Node) map[string]bool {
+func strictIntArithCols(n *logical.Node) map[string]bool {
 	for n != nil {
 		switch n.Type {
 		case logical.NodeScan:
@@ -425,15 +425,15 @@ func aggregateProjectionFields(project *logical.Node, p logical.Projection) ([]p
 	if agg == nil {
 		return nil, false
 	}
-	want := strings.ToLower(CleanExpr(p.Alias))
+	want := strings.ToLower(cleanExpr(p.Alias))
 	if want == "" {
-		want = strings.ToLower(CleanExpr(p.Column))
+		want = strings.ToLower(cleanExpr(p.Column))
 	}
 	for _, a := range agg.AggExprs {
-		if strings.ToLower(CleanExpr(a.OutputCol)) != want {
+		if strings.ToLower(cleanExpr(a.OutputCol)) != want {
 			continue
 		}
-		return AggOhlcvOutputFields(agg, a)
+		return aggOhlcvOutputFields(agg, a)
 	}
 	return nil, false
 }
@@ -501,9 +501,9 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 				// ROW, #965), and SHADOW the name otherwise, which is the
 				// precise statement of "the fields below no longer describe
 				// this name".
-				name := strings.ToLower(CleanExpr(p.Alias))
+				name := strings.ToLower(cleanExpr(p.Alias))
 				if name == "" {
-					name = strings.ToLower(CleanExpr(p.Column))
+					name = strings.ToLower(cleanExpr(p.Column))
 				}
 				if name == "" {
 					return nil
@@ -524,9 +524,9 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 				// when a computed group key sits beside OHLCV; WSHF child metadata retains
 				// scale without precision. As with the aggregate arm, refuse the map if
 				// this item's name cannot be spelled: a stale unshadowed entry is unsafe.
-				name := strings.ToLower(CleanExpr(p.Alias))
+				name := strings.ToLower(cleanExpr(p.Alias))
 				if name == "" {
-					name = strings.ToLower(CleanExpr(p.Expr))
+					name = strings.ToLower(cleanExpr(p.Expr))
 				}
 				if name == "" {
 					return nil
@@ -538,7 +538,7 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 				out[name] = d.RowFields()
 				continue
 			}
-			f, ok := below[strings.ToLower(CleanExpr(p.Column))]
+			f, ok := below[strings.ToLower(cleanExpr(p.Column))]
 			if !ok {
 				continue
 			}
@@ -549,7 +549,7 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 			if out == nil {
 				out = make(map[string][]parquet.Column)
 			}
-			out[strings.ToLower(CleanExpr(name))] = f
+			out[strings.ToLower(cleanExpr(name))] = f
 		}
 		return out
 	case logical.NodeAggregate:
@@ -569,24 +569,24 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 				if ast == nil {
 					ast, _ = plansql.ParseExpression(n.GroupBy[i])
 				}
-				d := DerivedGroupKeyDecl(n.GroupBy[i], ast, n.Children[0])
+				d := derivedGroupKeyDecl(n.GroupBy[i], ast, n.Children[0])
 				if len(d.RowFields()) > 0 {
 					if out == nil {
 						out = map[string][]parquet.Column{}
 					}
-					out[strings.ToLower(CleanExpr(k.Name))] = d.RowFields()
+					out[strings.ToLower(cleanExpr(k.Name))] = d.RowFields()
 				}
 			}
 		}
 		for i := range n.AggExprs {
-			f, ok := AggOhlcvOutputFields(n, n.AggExprs[i])
+			f, ok := aggOhlcvOutputFields(n, n.AggExprs[i])
 			if !ok {
 				continue
 			}
 			if out == nil {
 				out = make(map[string][]parquet.Column)
 			}
-			out[strings.ToLower(CleanExpr(n.AggExprs[i].OutputCol))] = f
+			out[strings.ToLower(cleanExpr(n.AggExprs[i].OutputCol))] = f
 		}
 		return out
 	case logical.NodeJoin:
@@ -648,11 +648,11 @@ func sameRowFields(a, b []parquet.Column) bool {
 	return true
 }
 
-// InputColDecls is the pair of walks above taken together: what a node's
+// inputColDecls is the pair of walks above taken together: what a node's
 // output columns declare, ready to hand to NodeDeclaredType. Callers that
 // hold the logical node an expression reads should build the context here
 // rather than passing inputColTypes alone, which cannot type a field path.
-func InputColDecls(n *logical.Node) ColDecls {
+func inputColDecls(n *logical.Node) ColDecls {
 	return ColDecls{Types: inputColTypes(n), Fields: inputColFields(n), Dec: inputColDecimal(n)}
 }
 
@@ -783,10 +783,10 @@ func inputColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 // column-forwarders (every item a plain column reference); a computed or
 // aggregate item stops it with nil, because past that point a name may be
 // rebound to a different value and inputColTypes' own warning applies.
-// SourceColDeclsThroughRenames is sourceColTypesThroughRenames paired with
+// sourceColDeclsThroughRenames is sourceColTypesThroughRenames paired with
 // the ROW fields visible at the same point, so an expression rewritten
 // through a rename chain can still type a field path (#568).
-func SourceColDeclsThroughRenames(n *logical.Node) ColDecls {
+func sourceColDeclsThroughRenames(n *logical.Node) ColDecls {
 	for n != nil && n.Type == logical.NodeProject && len(n.Children) == 1 {
 		for _, p := range n.Projections {
 			if p.IsAgg || p.Column == "" {
@@ -795,7 +795,7 @@ func SourceColDeclsThroughRenames(n *logical.Node) ColDecls {
 		}
 		n = n.Children[0]
 	}
-	return InputColDecls(n)
+	return inputColDecls(n)
 }
 
 func sourceColTypesThroughRenames(n *logical.Node) map[string]parquet.TypeID {
@@ -810,13 +810,13 @@ func sourceColTypesThroughRenames(n *logical.Node) map[string]parquet.TypeID {
 	return inputColTypes(n)
 }
 
-// StrictIntArithColsThroughRenames mirrors sourceColTypesThroughRenames for
+// strictIntArithColsThroughRenames mirrors sourceColTypesThroughRenames for
 // the integer-preserving-arithmetic hint (#297): an expression rewritten by
-// SubstituteNestedRenameRefs names only SOURCE columns, so the strict-int set
+// substituteNestedRenameRefs names only SOURCE columns, so the strict-int set
 // visible BELOW the rename chain is the one to check the rewritten expression
 // against (#445) — a plain rename forwards the exact int column, it does not
 // rebind it to a different value.
-func StrictIntArithColsThroughRenames(n *logical.Node) map[string]bool {
+func strictIntArithColsThroughRenames(n *logical.Node) map[string]bool {
 	for n != nil && n.Type == logical.NodeProject && len(n.Children) == 1 {
 		for _, p := range n.Projections {
 			if p.IsAgg || p.Column == "" {
@@ -825,7 +825,7 @@ func StrictIntArithColsThroughRenames(n *logical.Node) map[string]bool {
 		}
 		n = n.Children[0]
 	}
-	return StrictIntArithCols(n)
+	return strictIntArithCols(n)
 }
 
 // ColDecls is what a node's output columns declare, as far as the planner can
@@ -1017,9 +1017,9 @@ func (d ColDecls) isFieldPath(n *plansql.ColRef) bool {
 	return ok
 }
 
-// AstIsFieldPath is isFieldPath over an expression node, seeing through
+// astIsFieldPath is isFieldPath over an expression node, seeing through
 // parentheses the way isComputedProjection does.
-func AstIsFieldPath(node plansql.Node, decls ColDecls) bool {
+func astIsFieldPath(node plansql.Node, decls ColDecls) bool {
 	_, ok := fieldPathRef(node, decls)
 	return ok
 }
@@ -1103,13 +1103,13 @@ func colRefDeclaredType(n *plansql.ColRef, decls ColDecls) (expr.DeclType, expr.
 	return expr.Decl(c.Type), expr.Decided
 }
 
-// DeclTypeParts carries the complete allocation declaration across every
+// declTypeParts carries the complete allocation declaration across every
 // materialization boundary, including a fixed ROW's child fields.
-func DeclTypeParts(d expr.DeclType) parquet.Column {
+func declTypeParts(d expr.DeclType) parquet.Column {
 	return parquet.Column{Type: d.ID, Precision: d.Precision, Scale: d.Scale, Fields: d.RowFields()}
 }
 
-// EmittedColDecls is InputColDecls over what a node EMITS rather than what it
+// emittedColDecls is InputColDecls over what a node EMITS rather than what it
 // passes through: it descends INTO a Project, an Aggregate and a Window
 // instead of stopping at them, which is the difference between seeing a
 // DERIVED TABLE's columns and seeing nothing.
@@ -1121,9 +1121,9 @@ func DeclTypeParts(d expr.DeclType) parquet.Column {
 // query that names its DECIMAL through a subquery. It is the same walk
 // DeclaredOutputSchema already resolves the OUTPUT projection against, so the
 // SELECT list and the plan-declared schema now answer from one map.
-func EmittedColDecls(n *logical.Node) ColDecls {
+func emittedColDecls(n *logical.Node) ColDecls {
 	return ColDecls{
-		Types:    EmittedColTypes(n),
+		Types:    emittedColTypes(n),
 		Fields:   inputColFields(n),
 		Dec:      emittedColDecimal(n),
 		intWidth: emittedColIntWidth(n),

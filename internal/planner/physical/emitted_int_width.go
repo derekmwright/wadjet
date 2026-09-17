@@ -41,7 +41,7 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 		}
 		child := n.Children[0]
 		in := withSubqueryDecls(ColDecls{
-			Types:    EmittedColTypes(child),
+			Types:    emittedColTypes(child),
 			Fields:   inputColFields(child),
 			Dec:      emittedColDecimal(child),
 			intWidth: emittedColIntWidth(child),
@@ -78,7 +78,7 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 			if name == "" {
 				continue
 			}
-			t, known := AggSpecOutputType(n, agg)
+			t, known := aggSpecOutputType(n, agg)
 			if !known || !carriesIntWidth(t) {
 				continue
 			}
@@ -102,9 +102,9 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 			return nil
 		}
 		child := n.Children[0]
-		strictInt := StrictIntArithCols(child)
+		strictInt := strictIntArithCols(child)
 		decls := withSubqueryDecls(ColDecls{
-			Types:    EmittedColTypes(child),
+			Types:    emittedColTypes(child),
 			Fields:   inputColFields(child),
 			Dec:      emittedColDecimal(child),
 			intWidth: emittedColIntWidth(child),
@@ -176,7 +176,7 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 		}
 		child := n.Children[0]
 		in := ColDecls{
-			Types:    EmittedColTypes(child),
+			Types:    emittedColTypes(child),
 			Fields:   inputColFields(child),
 			Dec:      emittedColDecimal(child),
 			intWidth: emittedColIntWidth(child),
@@ -200,7 +200,7 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 			// accumulating or ranking slot answers in its own declared type.
 			fn := strings.ToLower(strings.TrimSpace(we.Func))
 			if windowValueFunc(fn) || fn == "min" || fn == "max" {
-				if col := CleanExpr(we.InputColumn()); col != "" {
+				if col := cleanExpr(we.InputColumn()); col != "" {
 					if w, ok := in.colIntWidth(&plansql.ColRef{Column: col}); ok {
 						out[name] = w
 						continue
@@ -278,7 +278,7 @@ func setOpArmIntWidths(n *logical.Node) [][]intWidth {
 //
 // A COMPUTED argument takes the same walk every other declared width takes.
 // Declining it was not silence: the caller then recorded `catalogIntWidth` of
-// AggSpecOutputType, which is the INT64 CARRIER every integer expression is
+// aggSpecOutputType, which is the INT64 CARRIER every integer expression is
 // computed in, so `MIN(BITWISE_AND(int4_col, 3))` positively declared int8 and
 // every reader above it made its SUM numeric — where PostgreSQL 17.11 answers
 // `integer` for the MIN (measured: `min(id & 3)`, `max(id & 3)`,
@@ -345,7 +345,7 @@ func declaredProjectionIntWidth(proj logical.Projection, decls ColDecls, strictI
 	if fc, ok := declaredFieldPath(proj, decls); ok {
 		return catalogIntWidth(fc.Type)
 	}
-	if proj.ASTExpr != nil && !IsSimpleColRefForRename(proj.ASTExpr) {
+	if proj.ASTExpr != nil && !isSimpleColRefForRename(proj.ASTExpr) {
 		// The producer may PUBLISH this expression as a column under its own
 		// TEXT (a derived GROUP BY key, the DISTINCT lowering). Above such a
 		// producer the expression is a NAME, and its width is the one the
@@ -366,7 +366,7 @@ func declaredProjectionIntWidth(proj logical.Projection, decls ColDecls, strictI
 	}
 	ref := proj.Column
 	if ref == "" {
-		ref = CleanExpr(proj.Expr)
+		ref = cleanExpr(proj.Expr)
 	}
 	if w, ok := lookupColIntWidth(decls.intWidth, ref); ok {
 		return w

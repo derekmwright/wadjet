@@ -101,14 +101,14 @@ func groupKeyOutputs(agg *logical.Node) []groupKeyOut {
 	var decls, emitted ColDecls
 	var below map[string]string
 	if len(agg.Children) == 1 {
-		decls = InputColDecls(agg.Children[0])
+		decls = inputColDecls(agg.Children[0])
 		// The names already in scope, for MINTING: a slot is only hidden if
 		// nothing else answers to it, and a stored column named `__gb_expr_0`
 		// is a legal column that must keep working. The reservation refuses
 		// user-minted names at the query and DDL doors; minting skips what
 		// is in scope regardless, so the two do not have to agree for the
 		// slot to be safe.
-		emitted = EmittedColDecls(agg.Children[0])
+		emitted = emittedColDecls(agg.Children[0])
 		// The keys an aggregate DIRECTLY BELOW this one already publishes,
 		// by identity. `SELECT DISTINCT g + 1 AS k … GROUP BY g + 1` lowers
 		// to two aggregates keyed alike, and the outer one reads the inner
@@ -263,7 +263,7 @@ func declNames(d ColDecls) []string {
 	return out
 }
 
-// GroupKeyByIdentity indexes the DERIVED keys of an aggregate by identity, so
+// groupKeyByIdentity indexes the DERIVED keys of an aggregate by identity, so
 // a SELECT item, a HAVING term or a sort key spelled any way at all resolves
 // to the one column the aggregate publishes it under.
 //
@@ -273,7 +273,7 @@ func declNames(d ColDecls) []string {
 // shape it would repair — a SELECT item that spells the column in a different
 // CASE — is broken with no GROUP BY in sight (`SELECT G FROM t`), so it
 // belongs to the identifier-folding defect and not to this one.
-func GroupKeyByIdentity(agg *logical.Node) map[string]string {
+func groupKeyByIdentity(agg *logical.Node) map[string]string {
 	keys := groupKeyOutputs(agg)
 	if len(keys) == 0 {
 		return nil
@@ -302,13 +302,13 @@ func GroupKeyByIdentity(agg *logical.Node) map[string]string {
 	return m
 }
 
-// AggScopePreservingWrapper asks whether a wrapper keeps the aggregate's
+// aggScopePreservingWrapper asks whether a wrapper keeps the aggregate's
 // OWN output columns visible under their own names. Delegate to
 // logical.AggScopePreservingWrapper so physical and logical readers share
 // one list (#774; ADR-0026 §4). Include Window: it APPENDS columns without
 // renaming existing ones; stopping there can re-evaluate a published group
 // key as arithmetic against absent inputs (#737).
-func AggScopePreservingWrapper(t logical.NodeType) bool {
+func aggScopePreservingWrapper(t logical.NodeType) bool {
 	return logical.AggScopePreservingWrapper(t)
 }
 
@@ -399,7 +399,7 @@ func GroupKeysPublishedBelow(n *logical.Node) map[string]string {
 			// that the inner already publishes the key, materialized it again
 			// over a schema with no `g`, and collapsed the table into one NULL
 			// group on the single-process path.
-			if !AggScopePreservingWrapper(n.Type) {
+			if !aggScopePreservingWrapper(n.Type) {
 				return nil
 			}
 		}

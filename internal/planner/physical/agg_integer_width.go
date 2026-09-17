@@ -73,7 +73,7 @@ func carriesIntWidth(t parquet.TypeID) bool {
 	return catalogIntWidth(t) != intWidthUnknown
 }
 
-// AggInputIsWideInteger answers wide only for a provable int8-domain operand.
+// aggInputIsWideInteger answers wide only for a provable int8-domain operand.
 // It is the BOOLEAN FACE of declaredIntWidth, so the grouped aggregate
 // (aggComputedInputDecl), the window (windowComputedArgDecl) and the column
 // declaration a derived table publishes (emittedColIntWidth) cannot disagree:
@@ -82,7 +82,7 @@ func carriesIntWidth(t parquet.TypeID) bool {
 // PORT/PROTOCOL arithmetic is deliberately excluded: expr.operandIsInt and
 // intArithAllInt keep it on the FLOAT path; bare columns use int4's table.
 // See docs/internals/computed-integer-aggregate-width.md for the design.
-func AggInputIsWideInteger(node plansql.Node, decls ColDecls) bool {
+func aggInputIsWideInteger(node plansql.Node, decls ColDecls) bool {
 	return declaredIntWidth(node, decls) == intWidth8
 }
 

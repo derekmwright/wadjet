@@ -84,7 +84,7 @@ func setOpArmDeclsInScope(n *logical.Node, scope []string) ColDecls {
 	// An Aggregate or a Window: the existing emitted walk is the answer,
 	// unchanged. Its STRING fallback cannot reach a column this walk claims,
 	// because that fallback lives in the Project arm handled above.
-	return EmittedColDecls(n)
+	return emittedColDecls(n)
 }
 
 // scanArmDecls is a scan's own declarations, keyed bare AND under each
@@ -216,7 +216,7 @@ func joinArmDecls(left, right ColDecls) ColDecls {
 // column names at the types ITS arms are reconciled to, which is exactly what
 // the enclosing operation will read out of its files.
 func setOpNodeDecls(n *logical.Node) ColDecls {
-	names := SetOpOutputNames(n)
+	names := setOpOutputNames(n)
 	inferred := setOpNodeResultTypes(n)
 	if len(names) == 0 || len(inferred) != len(names) {
 		return ColDecls{}
@@ -252,7 +252,7 @@ func setOpNodeDecls(n *logical.Node) ColDecls {
 // the ladder refuse a union of two numbers, and an arm confidently typed with
 // the wrong DECIMAL scale moves values by a power of ten.
 func projectArmDecls(n *logical.Node, in ColDecls, quals []string) ColDecls {
-	strictInt := StrictIntArithCols(n.Children[0])
+	strictInt := strictIntArithCols(n.Children[0])
 	types := make(map[string]parquet.TypeID, len(n.Projections))
 	var dec map[string]logical.DecimalMeta
 	put := func(name string, d expr.DeclType) {
@@ -366,7 +366,7 @@ func projectionArmDecl(proj logical.Projection, decls ColDecls, strictInt map[st
 		}
 		return expr.Decl(fc.Type), true
 	}
-	if proj.ASTExpr != nil && !IsSimpleColRefForRename(proj.ASTExpr) {
+	if proj.ASTExpr != nil && !isSimpleColRefForRename(proj.ASTExpr) {
 		d, c := NodeDeclaredType(proj.ASTExpr, decls)
 		if c != expr.Decided {
 			return expr.DeclType{}, false
@@ -375,7 +375,7 @@ func projectionArmDecl(proj logical.Projection, decls ColDecls, strictInt map[st
 			// The integer-preserving-arithmetic hint, the same one
 			// InferProjectionDeclType applies (#297, #445): an all-int
 			// expression stays INT64 rather than becoming FLOAT64.
-			if d2 := InferProjectionDeclType(proj.ASTExpr, parquet.TypeString, strictInt, decls); d2.ID == parquet.TypeInt64 {
+			if d2 := inferProjectionDeclType(proj.ASTExpr, parquet.TypeString, strictInt, decls); d2.ID == parquet.TypeInt64 {
 				return d2, true
 			}
 		}
@@ -395,7 +395,7 @@ func projectionArmDecl(proj logical.Projection, decls ColDecls, strictInt map[st
 	}
 	ref := proj.Column
 	if ref == "" {
-		ref = CleanExpr(proj.Expr)
+		ref = cleanExpr(proj.Expr)
 	}
 	key, ok := lookupColKey(decls.Types, ref)
 	if !ok {
@@ -463,8 +463,8 @@ func setOpArmComputedSource(name string, n *logical.Node) (plansql.Node, bool) {
 	for n != nil {
 		switch {
 		case n.Type == logical.NodeProject:
-			bare := DerivedScopeBareName(resolved, n)
-			if proj := ProjectionForName(n.Projections, resolved, bare); proj != nil {
+			bare := derivedScopeBareName(resolved, n)
+			if proj := projectionForName(n.Projections, resolved, bare); proj != nil {
 				if proj.IsAgg {
 					return nil, false
 				}
@@ -472,7 +472,7 @@ func setOpArmComputedSource(name string, n *logical.Node) (plansql.Node, bool) {
 					if proj.ASTExpr == nil || len(n.Children) != 1 {
 						return nil, false
 					}
-					if sub, ok := SubstituteNestedRenameRefs(proj.ASTExpr, n.Children[0]); ok && sub != nil {
+					if sub, ok := substituteNestedRenameRefs(proj.ASTExpr, n.Children[0]); ok && sub != nil {
 						return sub, true
 					}
 					return proj.ASTExpr, true

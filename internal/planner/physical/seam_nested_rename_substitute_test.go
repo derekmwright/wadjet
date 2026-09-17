@@ -27,7 +27,7 @@ func TestSubstituteNestedRenameRefs(t *testing.T) {
 	t.Run("binary op over a rename", func(t *testing.T) {
 		in := &plansql.BinaryOp{Left: &plansql.ColRef{Column: "k"}, Op: "+",
 			Right: &plansql.Lit{Value: "1", Kind: plansql.LitNumber}}
-		out, ok := SubstituteNestedRenameRefs(in, child)
+		out, ok := substituteNestedRenameRefs(in, child)
 		if !ok {
 			t.Fatal("rewrite declined")
 		}
@@ -39,7 +39,7 @@ func TestSubstituteNestedRenameRefs(t *testing.T) {
 		}
 	})
 	t.Run("chained rename resolves to the scan column", func(t *testing.T) {
-		out, ok := SubstituteNestedRenameRefs(&plansql.ColRef{Column: "a"}, chained)
+		out, ok := substituteNestedRenameRefs(&plansql.ColRef{Column: "a"}, chained)
 		if !ok {
 			t.Fatal("rewrite declined")
 		}
@@ -48,7 +48,7 @@ func TestSubstituteNestedRenameRefs(t *testing.T) {
 		}
 	})
 	t.Run("qualifier drops with the rewrite", func(t *testing.T) {
-		out, ok := SubstituteNestedRenameRefs(&plansql.ColRef{Table: "t", Column: "k"}, child)
+		out, ok := substituteNestedRenameRefs(&plansql.ColRef{Table: "t", Column: "k"}, child)
 		if !ok {
 			t.Fatal("rewrite declined")
 		}
@@ -60,7 +60,7 @@ func TestSubstituteNestedRenameRefs(t *testing.T) {
 	t.Run("untouched expression returns the same node", func(t *testing.T) {
 		in := &plansql.BinaryOp{Left: &plansql.ColRef{Column: "r_name"}, Op: "+",
 			Right: &plansql.Lit{Value: "1", Kind: plansql.LitNumber}}
-		out, ok := SubstituteNestedRenameRefs(in, child)
+		out, ok := substituteNestedRenameRefs(in, child)
 		if !ok || out != plansql.Node(in) {
 			t.Errorf("no reference resolves, the input node itself must come back (ok=%v)", ok)
 		}
@@ -68,7 +68,7 @@ func TestSubstituteNestedRenameRefs(t *testing.T) {
 	t.Run("subquery declines", func(t *testing.T) {
 		in := &plansql.BinaryOp{Left: &plansql.ColRef{Column: "k"}, Op: "+",
 			Right: &plansql.SubqueryNode{SQL: "select max(r_regionkey) from region"}}
-		if _, ok := SubstituteNestedRenameRefs(in, child); ok {
+		if _, ok := substituteNestedRenameRefs(in, child); ok {
 			t.Error("a subquery-bearing expression must decline the rewrite")
 		}
 	})

@@ -27,7 +27,7 @@ func (p *Planner) buildFilter(ctx context.Context, node *logical.Node) (exec.Sou
 	}
 
 	// Collect outer table aliases and columns for correlated subquery detection
-	outerTables := CollectTableAliases(node.Children[0])
+	outerTables := collectTableAliases(node.Children[0])
 	outerCols := CollectOuterColumns(node.Children[0])
 
 	// Scan-level filter pushdown: when the filter sits directly on a
@@ -92,7 +92,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		// output carries neither.
 		var elideKeyDecls ColDecls
 		if agg := FindAggregateAncestor(child); agg != nil && len(agg.Children) == 1 {
-			elideKeyDecls = InputColDecls(agg.Children[0])
+			elideKeyDecls = inputColDecls(agg.Children[0])
 		}
 		needsProject := false
 		for _, proj := range node.Projections {
@@ -164,7 +164,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	// `(g + 1)` against `g + 1`, `G + 1` against `g + 1` — and comparing the
 	// renderings made which spelling was used decide whether the query
 	// answered or came back with a NULL key column (#723).
-	gbExprToSyn := GroupKeyByIdentity(aggNode)
+	gbExprToSyn := groupKeyByIdentity(aggNode)
 
 	// Catalog types of what feeds these projections, resolved once for the
 	// whole list: a bare column reference inside a projection expression
@@ -172,13 +172,13 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	// map is for a SELECT expression that maps to a synthetic group column —
 	// a rename of a value computed BELOW the aggregate, so it types against
 	// the aggregate's input rather than its output.
-	childColTypes := EmittedColDecls(child)
+	childColTypes := emittedColDecls(child)
 	// A SELECT-list scalar subquery types against its OWN plan, not against
 	// this projection's input columns (#874).
 	childColTypes.subqueryDecl = p.SubqueryOutputColumn
 	var aggInputColTypes ColDecls
 	if isOverAggregate && len(aggNode.Children) > 0 {
-		aggInputColTypes = InputColDecls(aggNode.Children[0])
+		aggInputColTypes = inputColDecls(aggNode.Children[0])
 		aggInputColTypes.subqueryDecl = p.SubqueryOutputColumn
 
 	}
@@ -242,7 +242,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	for _, proj := range node.Projections {
 		colRef := proj.Column
 		if colRef == "" {
-			colRef = CleanExpr(proj.Expr)
+			colRef = cleanExpr(proj.Expr)
 		}
 		name := proj.Alias
 		if name == "" {
@@ -335,7 +335,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			// the Project then references, or (b) compiling each
 			// projection independently. (b) is what we do — recompiling
 			// a literal or already-compiled expression is cheap.
-			outerTables := CollectTableAliases(child)
+			outerTables := collectTableAliases(child)
 			outerCols := CollectOuterColumns(child)
 			var compiled expr.Expr
 			var compErr error
@@ -380,7 +380,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			// RENAME of a value computed BELOW the aggregate — type it
 			// against the aggregate's input, or the declared Float64
 			// coerces the pre-projected int64 keys on the copy (#297).
-			strictInt := StrictIntArithCols(child)
+			strictInt := strictIntArithCols(child)
 			colTypes := childColTypes
 			// The RESPELLED expression is the one that gets evaluated, so it
 			// is the one to type. `(c_dec + 1) * 2` over `GROUP BY c_dec + 1`
@@ -396,12 +396,12 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 					// BELOW the aggregate, so it types against the
 					// aggregate's input or the declared Float64 coerces the
 					// pre-projected int64 keys on the copy (#297).
-					strictInt = StrictIntArithCols(aggNode.Children[0])
+					strictInt = strictIntArithCols(aggNode.Children[0])
 					colTypes = aggInputColTypes
 					typeExpr = proj.ASTExpr
 				}
 			}
-			outDecl = InferProjectionDeclType(typeExpr, outDecl.ID, strictInt, colTypes)
+			outDecl = inferProjectionDeclType(typeExpr, outDecl.ID, strictInt, colTypes)
 		}
 		outType := outDecl.ID
 		// The planner's declaration is the AUTHORITY for this projection's

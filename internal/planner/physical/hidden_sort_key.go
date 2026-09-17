@@ -17,7 +17,7 @@ import (
 // Leave unrecognized shapes unchanged to preserve loud failure, never invent order.
 // See docs/internals/hidden-sort-key-materialization.md for the design.
 
-// DerivedAliasSourceColumn resolves a name that may be a DERIVED TABLE's or
+// derivedAliasSourceColumn resolves a name that may be a DERIVED TABLE's or
 // CTE's SELECT-list alias to the column the DAG's streams actually carry,
 // walking the Projects between the consumer and its producer. It returns ""
 // when the name is not such an alias, when it names an aggregate output or a
@@ -27,7 +27,7 @@ import (
 // Chained renames resolve level by level (`j` → `k` → `s_nationkey`), each
 // Project substituting at most once because a projection list is
 // simultaneous.
-func DerivedAliasSourceColumn(name string, child *logical.Node) string {
+func derivedAliasSourceColumn(name string, child *logical.Node) string {
 	if name == "" {
 		return ""
 	}
@@ -35,8 +35,8 @@ func DerivedAliasSourceColumn(name string, child *logical.Node) string {
 	for n := child; n != nil; {
 		switch n.Type {
 		case logical.NodeProject:
-			bare := DerivedScopeBareName(resolved, n)
-			proj := ProjectionForName(n.Projections, resolved, bare)
+			bare := derivedScopeBareName(resolved, n)
+			proj := projectionForName(n.Projections, resolved, bare)
 			if proj == nil {
 				break
 			}
@@ -47,7 +47,7 @@ func DerivedAliasSourceColumn(name string, child *logical.Node) string {
 				// above `SELECT g + 1 AS k … GROUP BY g + 1` keyed on `k`,
 				// which nothing between the aggregate and the gather emits,
 				// and the task failed loud (#656 F2).
-				if src, hit := AggregateGroupKeyName(proj, n); hit {
+				if src, hit := aggregateGroupKeyName(proj, n); hit {
 					return src
 				}
 				return "" // aggregate output or genuinely computed alias

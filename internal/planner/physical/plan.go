@@ -59,7 +59,7 @@ var ReverseBloomsInstalled atomic.Int64
 // (exec/join_semianti_ne.go). Kill switch WADJET_SEMIANTI_NE=0.
 var SemiAntiNE atomic.Bool
 
-// ResolveNullsLast determines whether nulls should sort last for a given order
+// resolveNullsLast determines whether nulls should sort last for a given order
 // expression. An explicit NULLS FIRST / NULLS LAST always wins; otherwise the
 // engine default applies: NULLS LAST for ASC, NULLS FIRST for DESC.
 //
@@ -72,7 +72,7 @@ var SemiAntiNE atomic.Bool
 //
 // See distributed.SortKeySpec.PlaceNullsLast, which has to agree with this
 // function key for key or the two execution paths sort differently.
-func ResolveNullsLast(ob logical.OrderExpr) bool {
+func resolveNullsLast(ob logical.OrderExpr) bool {
 	if ob.NullsFirst != nil {
 		return !*ob.NullsFirst // NullsFirst=true => NullsLast=false, and vice versa
 	}
@@ -103,7 +103,7 @@ func isComputedProjection(e plansql.Node) bool {
 	}
 }
 
-// CleanExpr drops the table qualifier from a COLUMN REFERENCE, and leaves
+// cleanExpr drops the table qualifier from a COLUMN REFERENCE, and leaves
 // everything else exactly as written.
 //
 // The distinction is the whole of the function. Its callers hand it text that
@@ -120,7 +120,7 @@ func isComputedProjection(e plansql.Node) bool {
 // flat Zeek JSON column with no qualifier — #304) and rejects anything that
 // does not end after the identifier, which is every function call, operator
 // expression and literal.
-func CleanExpr(s string) string {
+func cleanExpr(s string) string {
 	s = strings.TrimSpace(s)
 	if _, name, ok := plansql.SplitIdentRef(s); ok {
 		return name

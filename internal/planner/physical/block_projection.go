@@ -23,9 +23,9 @@ import (
 // refuseLateralProjection).
 // See docs/internals/star-read-block-projections.md for the design.
 
-// BlockBareName drops a qualifier: the projection spells `s.oid` where the
+// blockBareName drops a qualifier: the projection spells `s.oid` where the
 // stream spells `oid`, and that is not a divergence.
-func BlockBareName(s string) string {
+func blockBareName(s string) string {
 	s = strings.TrimSpace(s)
 	if dot := strings.LastIndexByte(s, '.'); dot >= 0 && dot < len(s)-1 {
 		return s[dot+1:]
@@ -56,14 +56,14 @@ type blockColumn struct {
 	DeclKnown bool
 }
 
-// BlockPublishedColumns is the relation a derived block publishes, or ok=false
+// blockPublishedColumns is the relation a derived block publishes, or ok=false
 // when the plan cannot state it.
 //
 // ok=false is a real answer and not a shrug: a column with no plan-time type
 // would be COMPUTED by the fragment and MISSING from the empty side's
 // declaration, which is the width disagreement ADR-0010 refuses. Declining
 // leaves the plan exactly as it was.
-func BlockPublishedColumns(p *logical.Node, published map[*logical.Node]bool,
+func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool,
 	subqueryDecl func(string) (parquet.Column, bool)) ([]blockColumn, bool) {
 	if p == nil || len(p.Children) != 1 || len(p.Projections) == 0 {
 		return nil, false
@@ -73,16 +73,16 @@ func BlockPublishedColumns(p *logical.Node, published map[*logical.Node]bool,
 	// the scan arm reads the catalog annotation. A minted correlation slot and
 	// an `__agg_N` have a type only their producer can state, and a second
 	// rule for them is the disagreement ADR-0026 exists to prevent.
-	stream := DeclaredJoinSchema(p.Children[0], nil, published, subqueryDecl)
+	stream := declaredJoinSchema(p.Children[0], nil, published, subqueryDecl)
 	byName := make(map[string]parquet.Column, len(stream))
 	for _, col := range stream {
-		byName[strings.ToLower(BlockBareName(col.Name))] = col
+		byName[strings.ToLower(blockBareName(col.Name))] = col
 	}
 	// A COMPUTED item is typed against what the stage's input EMITS, not
 	// against what the block's child reads: above an aggregate the operands
 	// are `__agg_N` and a minted slot, and typing `COUNT(*) + 1` against the
 	// scan's columns answers nothing at all.
-	decls := InputColDecls(p.Children[0])
+	decls := inputColDecls(p.Children[0])
 	// THE SCALAR-SUBQUERY RESOLVER IS PART OF THE INFERENCE, not an extra.
 	// `DeclaredOutputSchema` hands it to the same walk for the statement's own
 	// SELECT list, and without it here `(SELECT MAX(amount) FROM lat_item) AS
@@ -94,12 +94,12 @@ func BlockPublishedColumns(p *logical.Node, published map[*logical.Node]bool,
 	if decls.Types == nil {
 		decls.Types = map[string]parquet.TypeID{}
 	}
-	strictInt := StrictIntArithCols(p.Children[0])
+	strictInt := strictIntArithCols(p.Children[0])
 	if strictInt == nil {
 		strictInt = map[string]bool{}
 	}
 	for _, col := range stream {
-		lc := strings.ToLower(BlockBareName(col.Name))
+		lc := strings.ToLower(blockBareName(col.Name))
 		if _, ok := decls.Types[lc]; !ok {
 			decls.Types[lc] = col.Type
 			if col.Type == parquet.TypeDecimal {
@@ -141,7 +141,7 @@ func BlockPublishedColumns(p *logical.Node, published map[*logical.Node]bool,
 		if name == "" {
 			name = strings.TrimSpace(pr.Expr)
 		}
-		bare := strings.ToLower(BlockBareName(name))
+		bare := strings.ToLower(blockBareName(name))
 		if bare == "" {
 			return nil, false
 		}
@@ -155,7 +155,7 @@ func BlockPublishedColumns(p *logical.Node, published map[*logical.Node]bool,
 		if plansql.ReservedSlotFamily(bare) == sortKeyFamily {
 			continue
 		}
-		if pr.ASTExpr != nil && !IsSimpleColRefForRename(pr.ASTExpr) {
+		if pr.ASTExpr != nil && !isSimpleColRefForRename(pr.ASTExpr) {
 			// ONE INFERENCE, and it is the SINGLE PATH'S. This is the call
 			// `DeclaredJoinSchema`'s own computed-column arm makes and the
 			// call `attachScanSelectProjections` makes for the statement's own
@@ -173,8 +173,8 @@ func BlockPublishedColumns(p *logical.Node, published map[*logical.Node]bool,
 			// reaches it with its own (20, through `subqueryDecl`). Whatever
 			// that walk answers is what this stage publishes, so the two paths
 			// describe one relation by construction.
-			materialized := DeclTypeParts(
-				InferProjectionDeclType(pr.ASTExpr, parquet.TypeString, strictInt, decls))
+			materialized := declTypeParts(
+				inferProjectionDeclType(pr.ASTExpr, parquet.TypeString, strictInt, decls))
 			t, prec, scale, fields := materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
 			out = append(out, blockColumn{
 				Name: name, Expr: pr.ASTExpr.String(),
@@ -194,7 +194,7 @@ func BlockPublishedColumns(p *logical.Node, published map[*logical.Node]bool,
 		if src == "" {
 			src = strings.TrimSpace(pr.Expr)
 		}
-		spelling := strings.ToLower(BlockBareName(src))
+		spelling := strings.ToLower(blockBareName(src))
 		col, ok := byName[spelling]
 		if !ok {
 			spelling = bare
@@ -224,13 +224,13 @@ func BlockPublishedColumns(p *logical.Node, published map[*logical.Node]bool,
 // route stops standing in front of it.
 func declaredBlockSchema(p *logical.Node, wantSet map[string]bool,
 	published map[*logical.Node]bool, subqueryDecl func(string) (parquet.Column, bool)) []parquet.Column {
-	cols, ok := BlockPublishedColumns(p, published, subqueryDecl)
+	cols, ok := blockPublishedColumns(p, published, subqueryDecl)
 	if !ok {
 		return nil
 	}
 	out := make([]parquet.Column, 0, len(cols))
 	for _, c := range cols {
-		if len(wantSet) > 0 && !wantSet[strings.ToLower(BlockBareName(c.Name))] {
+		if len(wantSet) > 0 && !wantSet[strings.ToLower(blockBareName(c.Name))] {
 			continue
 		}
 		out = append(out, c.Decl)

@@ -65,7 +65,7 @@ func compileLateralDualItems(items []logical.Projection, outer *logical.Node) (
 	[]exec.LateralOuterColumn, error) {
 
 	decls := lateralOuterDecls(outer)
-	strictInt := StrictIntArithCols(outer)
+	strictInt := strictIntArithCols(outer)
 	out := make([]exec.LateralOuterColumn, 0, len(items))
 	for _, item := range items {
 		name := item.Alias
@@ -114,7 +114,7 @@ func lateralDualItemDecl(item logical.Projection, decls ColDecls,
 			return t
 		}
 	}
-	return InferProjectionDeclType(item.ASTExpr, parquet.TypeString, strictInt, decls)
+	return inferProjectionDeclType(item.ASTExpr, parquet.TypeString, strictInt, decls)
 }
 
 // lateralDualItemDecls is every item's declaration, keyed by the LOWER-CASED
@@ -132,7 +132,7 @@ func lateralDualItemDecls(join *logical.Node) map[string]expr.DeclType {
 	}
 	outer := join.Children[0]
 	decls := lateralOuterDecls(outer)
-	strictInt := StrictIntArithCols(outer)
+	strictInt := strictIntArithCols(outer)
 	out := make(map[string]expr.DeclType, len(join.LateralDualItems))
 	for _, item := range join.LateralDualItems {
 		name := item.Alias
@@ -172,8 +172,8 @@ func lateralDualItemDecls(join *logical.Node) map[string]expr.DeclType {
 // the shapes it does not cover. Merged rather than chosen so neither can lose a
 // name the other has.
 func lateralOuterDecls(outer *logical.Node) ColDecls {
-	in := InputColDecls(outer)
-	emitted := EmittedColDecls(outer)
+	in := inputColDecls(outer)
+	emitted := emittedColDecls(outer)
 	if len(emitted.Types) == 0 {
 		return in
 	}

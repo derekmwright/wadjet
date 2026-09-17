@@ -63,7 +63,7 @@ func TestResolveOutputRenameSource(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := ResolveOutputRenameSource(tc.in, tc.child); got != tc.want {
+			if got := resolveOutputRenameSource(tc.in, tc.child); got != tc.want {
 				t.Errorf("ResolveOutputRenameSource(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})

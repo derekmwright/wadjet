@@ -618,10 +618,10 @@ func flipOp(op exec.CompareOp) exec.CompareOp {
 	}
 }
 
-// CollectTableAliases recursively collects all table names and aliases from
+// collectTableAliases recursively collects all table names and aliases from
 // scan nodes in a logical plan subtree. Used to provide outer scope context
 // for correlated subquery detection.
-func CollectTableAliases(node *logical.Node) map[string]bool {
+func collectTableAliases(node *logical.Node) map[string]bool {
 	aliases := make(map[string]bool)
 	var walk func(n *logical.Node)
 	walk = func(n *logical.Node) {

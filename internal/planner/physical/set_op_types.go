@@ -18,17 +18,17 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-func SetOpName(node *logical.Node) string {
+func setOpName(node *logical.Node) string {
 	if node.UnionAll {
-		return SetOpBaseName(node) + " ALL"
+		return setOpBaseName(node) + " ALL"
 	}
-	return SetOpBaseName(node)
+	return setOpBaseName(node)
 }
 
-// SetOpBaseName is the operation without ALL, which is how PostgreSQL names it
+// setOpBaseName is the operation without ALL, which is how PostgreSQL names it
 // in the 42804 message: `UNION ALL` of two incompatible arms is reported as
 // "UNION types … cannot be matched" (measured live on 17.11).
-func SetOpBaseName(node *logical.Node) string {
+func setOpBaseName(node *logical.Node) string {
 	switch node.Type {
 	case logical.NodeIntersect:
 		return "INTERSECT"
@@ -258,13 +258,13 @@ func setOpQuotedLiteralArms(arm *logical.Node, cols int) []bool {
 	return out
 }
 
-// SetOpCarrierGapPairs is every ordered pair this engine refuses with
+// setOpCarrierGapPairs is every ordered pair this engine refuses with
 // setOpCarrierGap: PostgreSQL resolves it and there is no carrier here. It is
 // COMPUTED from setOpNoCarrier over the whole type list rather than written
 // down, because the hand-written version of this list is what ADR-0012 and
 // docs/sql-reference.md described when the code refused twenty pairs and the
 // docs named two.
-func SetOpCarrierGapPairs() [][2]parquet.TypeID {
+func setOpCarrierGapPairs() [][2]parquet.TypeID {
 	all := []parquet.TypeID{
 		parquet.TypeBool, parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat32,
 		parquet.TypeFloat64, parquet.TypeString, parquet.TypeBytes, parquet.TypeTimestamp,
@@ -407,7 +407,7 @@ func SetOpArmTypeConflict(node *logical.Node) error {
 			}
 		}
 	}
-	outNames := SetOpOutputNames(node.Children[0])
+	outNames := setOpOutputNames(node.Children[0])
 	if len(outNames) == 0 {
 		return nil
 	}
@@ -416,7 +416,7 @@ func SetOpArmTypeConflict(node *logical.Node) error {
 	quoted := make([][]bool, 0, len(node.Children))
 	oversize := make([][]bool, 0, len(node.Children))
 	for _, child := range node.Children {
-		plan, err := SetOpArmProjection(child, outNames)
+		plan, err := setOpArmProjection(child, outNames)
 		if err != nil {
 			return nil // a shape this walk cannot read is not a conflict
 		}
@@ -425,7 +425,7 @@ func SetOpArmTypeConflict(node *logical.Node) error {
 		quoted = append(quoted, setOpQuotedLiteralArms(child, len(outNames)))
 		oversize = append(oversize, setOpOversizeLiteralArms(child, len(outNames)))
 	}
-	op := SetOpBaseName(node)
+	op := setOpBaseName(node)
 	// PostgreSQL's refusal wins over wadjet's. A column with NO COMMON TYPE is
 	// a fact about the QUERY and is 42804 wherever it sits; a column whose
 	// common type this engine cannot carry is a fact about this engine. So
@@ -443,7 +443,7 @@ func SetOpArmTypeConflict(node *logical.Node) error {
 				// the other arms' (PostgreSQL's algorithm, steps 3 and 5).
 				continue
 			}
-			if SetOpArmIsUnknownLit(oversize, i, col) {
+			if setOpArmIsUnknownLit(oversize, i, col) {
 				// A numeric literal wider than any DECIMAL this engine
 				// declares. PostgreSQL types it `numeric`, not float8, so it
 				// must not drag the union onto the float rung — the arm walk
@@ -505,7 +505,7 @@ func SetOpArmTypeConflict(node *logical.Node) error {
 		// outranks it.
 		if want.Known && !batch.VectorAcceptsText(want.Typ) {
 			for i := range plans {
-				if !SetOpArmIsUnknownLit(quoted, i, col) {
+				if !setOpArmIsUnknownLit(quoted, i, col) {
 					continue
 				}
 				if carrierGap == nil {
@@ -521,7 +521,7 @@ func SetOpArmTypeConflict(node *logical.Node) error {
 		// (ADR-0024 items 1 and 4).
 		if want.Known && setOpExactNumeric(want.Typ) {
 			for i := range plans {
-				if !SetOpArmIsUnknownLit(oversize, i, col) {
+				if !setOpArmIsUnknownLit(oversize, i, col) {
 					continue
 				}
 				return sqlerr.New("22003",
@@ -559,16 +559,16 @@ func setOpUnwrap(n *logical.Node) *logical.Node {
 	return nil
 }
 
-// SetOpOutputNames takes the first arm's names, descending nested set operations
+// setOpOutputNames takes the first arm's names, descending nested set operations
 // to the whole chain's leftmost arm. Use declaredProjectionName: alias, then
 // column's own unqualified name, then rendered expression (#743).
 // Do not lowercase again: lexer folding already handled unquoted identifiers;
 // delimited aliases and expression rendering must survive verbatim (#731).
 // SELECT * keeps catalog spelling, matching the arm stream and local output.
-func SetOpOutputNames(arm *logical.Node) []string {
+func setOpOutputNames(arm *logical.Node) []string {
 	inner := setOpUnwrap(arm)
 	if isSetOpNode(inner) && len(inner.Children) > 0 {
-		return SetOpOutputNames(inner.Children[0])
+		return setOpOutputNames(inner.Children[0])
 	}
 	// `SELECT * FROM t` builds no Project at all — the arm IS the scan, and
 	// its output columns are the table's, in catalog order.
@@ -633,7 +633,7 @@ type SetOpColType struct {
 	DecKnown bool
 }
 
-// SetOpArmProjection builds the OpProject spec list that puts one arm's
+// setOpArmProjection builds the OpProject spec list that puts one arm's
 // output under the set operation's result column names, plus each column's
 // plan-time type.
 //
@@ -642,16 +642,16 @@ type SetOpColType struct {
 // a filter-scan, a join or a sort. Aggregate outputs are the exception: they
 // exist under names the aggregate machinery chose, not under the SELECT
 // list's expression text, so those arms are refused rather than guessed at.
-func SetOpArmProjection(arm *logical.Node, outNames []string) (SetOpArmPlan, error) {
+func setOpArmProjection(arm *logical.Node, outNames []string) (SetOpArmPlan, error) {
 	inner := setOpUnwrap(arm)
 	// A nested set operation already projected ITS arms onto ITS OWN result
 	// names; read the arm through those, not through a projection it does
 	// not have.
 	if isSetOpNode(inner) {
-		innerNames := SetOpOutputNames(inner)
+		innerNames := setOpOutputNames(inner)
 		if len(innerNames) != len(outNames) {
 			return SetOpArmPlan{}, fmt.Errorf("nested %s emits %d columns, the enclosing set operation has %d",
-				SetOpName(inner), len(innerNames), len(outNames))
+				setOpName(inner), len(innerNames), len(outNames))
 		}
 		plan := SetOpArmPlan{
 			Specs: make([]ProjectExprSpec, len(outNames)),
@@ -739,7 +739,7 @@ func SetOpArmProjection(arm *logical.Node, outNames []string) (SetOpArmPlan, err
 		colTypes = setOpArmDecls(below)
 		// Same integer-preserving-arithmetic hint as
 		// attachScanSelectProjections (#297, #445).
-		strictInt = StrictIntArithCols(below)
+		strictInt = strictIntArithCols(below)
 	}
 	plan := SetOpArmPlan{
 		Specs: make([]ProjectExprSpec, 0, len(outNames)),
@@ -773,8 +773,8 @@ func SetOpArmProjection(arm *logical.Node, outNames []string) (SetOpArmPlan, err
 		// declared type instead of copying a column (#554).
 		forwardedComputed := false
 		if below != nil {
-			if pr.ASTExpr != nil && !IsSimpleColRefForRename(pr.ASTExpr) {
-				if sub, ok := SubstituteNestedRenameRefs(pr.ASTExpr, below); ok && sub != nil {
+			if pr.ASTExpr != nil && !isSimpleColRefForRename(pr.ASTExpr) {
+				if sub, ok := substituteNestedRenameRefs(pr.ASTExpr, below); ok && sub != nil {
 					ast = sub
 					e = sub.String()
 				}
@@ -793,20 +793,20 @@ func SetOpArmProjection(arm *logical.Node, outNames []string) (SetOpArmPlan, err
 					ast = sub
 					e = sub.String()
 					forwardedComputed = true
-				} else if src := ResolveOutputRenameSource(strings.ToLower(e), below); src != "" {
+				} else if src := resolveOutputRenameSource(strings.ToLower(e), below); src != "" {
 					e = src
 				}
 			}
 		}
 		spec := ProjectExprSpec{Expr: e, Name: outNames[i]}
 		ct := SetOpColType{}
-		if pr.ASTExpr != nil && !IsSimpleColRefForRename(pr.ASTExpr) {
-			if ReferencesSyntheticAgg(pr.ASTExpr) {
+		if pr.ASTExpr != nil && !isSimpleColRefForRename(pr.ASTExpr) {
+			if referencesSyntheticAgg(pr.ASTExpr) {
 				return SetOpArmPlan{}, fmt.Errorf("select item %d references an aggregate the gather evaluates", i+1)
 			}
 			// A computed column's declared type IS its runtime type: the
 			// worker builds the output vector from it.
-			decl := InferProjectionDeclType(ast, parquet.TypeString, strictInt, colTypes)
+			decl := inferProjectionDeclType(ast, parquet.TypeString, strictInt, colTypes)
 			// A numeric LITERAL arm carries the (p,s) of its SPELLING, which
 			// PostgreSQL reads as numeric and this walk otherwise read as
 			// float8 — so `SELECT d FROM t UNION ALL SELECT 1.23456`
@@ -825,7 +825,7 @@ func SetOpArmProjection(arm *logical.Node, outNames []string) (SetOpArmPlan, err
 				e = "'" + d.text + "'"
 				spec.Expr = e
 			}
-			materialized := DeclTypeParts(decl)
+			materialized := declTypeParts(decl)
 			spec.Type, spec.Precision, spec.Scale, spec.Fields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
 			spec.TypeKnown = true
 			ct = SetOpColType{Typ: spec.Type, Known: true, Fields: materialized.Fields}
@@ -896,7 +896,7 @@ func setOpRefDecl(decls ColDecls, resolved string, pr logical.Projection) (SetOp
 			continue
 		}
 		d := declFromKey(decls, key)
-		ct := SetOpColType{Typ: d.ID, Known: true, Fields: DeclTypeParts(d).Fields}
+		ct := SetOpColType{Typ: d.ID, Known: true, Fields: declTypeParts(d).Fields}
 		if d.ID == parquet.TypeDecimal && d.DecKnown && d.Precision > 0 {
 			ct.Dec = logical.DecimalMeta{Precision: d.Precision, Scale: d.Scale}
 			ct.DecKnown = true
@@ -911,21 +911,21 @@ func setOpRefDecl(decls ColDecls, resolved string, pr logical.Projection) (SetOp
 // shrug: two arms nothing typed are the pre-existing "leave it alone" case and
 // carry no scale to disagree about, while a typed DECIMAL beside an untyped
 // arm is the reinterpretation #551 is about.
-// SetOpArmIsUnknownLit reports whether arm i's select item at this column is an
+// setOpArmIsUnknownLit reports whether arm i's select item at this column is an
 // UNKNOWN-typed literal.
-func SetOpArmIsUnknownLit(unknown [][]bool, i, col int) bool {
+func setOpArmIsUnknownLit(unknown [][]bool, i, col int) bool {
 	return unknown != nil && i < len(unknown) && unknown[i] != nil &&
 		col < len(unknown[i]) && unknown[i][col]
 }
 
-// SetOpTargetType folds one result column's arms into the type they must all
+// setOpTargetType folds one result column's arms into the type they must all
 // emit. allKnown is false when some arm carries no type at all, which is the
 // caller's signal to leave the column alone.
-func SetOpTargetType(plans []SetOpArmPlan, col int, name, op string, unknown [][]bool) (SetOpColType, bool, error) {
+func setOpTargetType(plans []SetOpArmPlan, col int, name, op string, unknown [][]bool) (SetOpColType, bool, error) {
 	var want SetOpColType
 	allKnown := true
 	for i, plan := range plans {
-		if SetOpArmIsUnknownLit(unknown, i, col) {
+		if setOpArmIsUnknownLit(unknown, i, col) {
 			continue // an unknown literal takes the other arms' type
 		}
 		ct := plan.Types[col]
@@ -961,7 +961,7 @@ func SetOpTargetType(plans []SetOpArmPlan, col int, name, op string, unknown [][
 	if want.Known && want.Typ == parquet.TypeDecimal && allKnown {
 		arms := make([]SetOpColType, 0, len(plans))
 		for i, plan := range plans {
-			if SetOpArmIsUnknownLit(unknown, i, col) {
+			if setOpArmIsUnknownLit(unknown, i, col) {
 				// It contributes no type, so it contributes no (p,s) either;
 				// counting its STRING here made the target unresolvable and
 				// refused a union PostgreSQL answers as numeric.
@@ -979,14 +979,14 @@ func SetOpTargetType(plans []SetOpArmPlan, col int, name, op string, unknown [][
 // computed without emitting anything. nil when the shape is one this walk
 // cannot type, which the caller reads as "unknown", the answer it had before.
 func setOpNodeResultTypes(n *logical.Node) []SetOpColType {
-	names := SetOpOutputNames(n)
+	names := setOpOutputNames(n)
 	if len(names) == 0 || len(n.Children) < 2 {
 		return nil
 	}
 	plans := make([]SetOpArmPlan, 0, len(n.Children))
 	unknown := make([][]bool, 0, len(n.Children))
 	for _, child := range n.Children {
-		plan, err := SetOpArmProjection(child, names)
+		plan, err := setOpArmProjection(child, names)
 		if err != nil {
 			return nil
 		}
@@ -1002,7 +1002,7 @@ func setOpNodeResultTypes(n *logical.Node) []SetOpColType {
 	}
 	out := make([]SetOpColType, len(names))
 	for col := range names {
-		want, allKnown, err := SetOpTargetType(plans, col, names[col], SetOpBaseName(n), unknown)
+		want, allKnown, err := setOpTargetType(plans, col, names[col], setOpBaseName(n), unknown)
 		if err != nil || !allKnown {
 			continue
 		}

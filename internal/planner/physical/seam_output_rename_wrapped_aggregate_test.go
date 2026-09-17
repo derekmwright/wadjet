@@ -27,7 +27,7 @@ func TestReferencesSyntheticAgg(t *testing.T) {
 			t.Errorf("parse %q: %v", c.expr, err)
 			continue
 		}
-		got := ReferencesSyntheticAgg(ast)
+		got := referencesSyntheticAgg(ast)
 		if got != c.want {
 			t.Errorf("ReferencesSyntheticAgg(%q) = %v, want %v", c.expr, got, c.want)
 		}

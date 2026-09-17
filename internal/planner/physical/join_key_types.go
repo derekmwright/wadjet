@@ -103,7 +103,7 @@ func ResolveJoinKeyTypes(node *logical.Node, leftKeys, rightKeys []string, cte c
 }
 
 // joinKeyLookupName strips a qualifier and lower-cases, the same reading
-// DeclaredJoinSchema gives a wanted column: "a.w_i32" and "w_i32" name one
+// declaredJoinSchema gives a wanted column: "a.w_i32" and "w_i32" name one
 // column of one side.
 func joinKeyLookupName(key string) string {
 	k := strings.ToLower(strings.TrimSpace(key))
@@ -163,7 +163,7 @@ func JoinSideColTypes(n *logical.Node, cte cteColTypes) map[string]parquet.TypeI
 // are called and what they carry.
 //
 // The Project arm is spelled out rather than delegated because
-// EmittedColTypes' own Project arm asks EmittedColTypes for its child, and
+// emittedColTypes' own Project arm asks EmittedColTypes for its child, and
 // that one answers nil for a set operation — so `SELECT k FROM (A UNION ALL
 // B)` would type every projection from an empty map. Recursing through THIS
 // function instead closes that hole; everything else defers.
@@ -199,10 +199,10 @@ func joinSideEmittedTypes(n *logical.Node, cte cteColTypes) map[string]parquet.T
 	if n.Type == logical.NodeProject && len(n.Children) == 1 {
 		in := joinSideEmittedTypes(n.Children[0], cte)
 		if in == nil {
-			return EmittedColTypes(n)
+			return emittedColTypes(n)
 		}
 		decls := ColDecls{Types: in, Dec: emittedColDecimal(n.Children[0])}
-		strictInt := StrictIntArithCols(n.Children[0])
+		strictInt := strictIntArithCols(n.Children[0])
 		out := make(map[string]parquet.TypeID, len(n.Projections))
 		for _, proj := range n.Projections {
 			name := declaredProjectionName(proj)
@@ -213,7 +213,7 @@ func joinSideEmittedTypes(n *logical.Node, cte cteColTypes) map[string]parquet.T
 		}
 		return out
 	}
-	return EmittedColTypes(n)
+	return emittedColTypes(n)
 }
 
 // joinSideSourceTypes is question 2: the catalog types of the scan columns
