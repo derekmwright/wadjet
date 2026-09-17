@@ -88,7 +88,7 @@ func qualifySharedRenameSource(name, src string, proj []logical.Projection, chil
 		if od <= 0 || strings.EqualFold(other[:od], qual) {
 			continue // unqualified, or this item's own qualifier
 		}
-		if !strings.EqualFold(physical.ResolveOutputRenameSource(other, child), src) {
+		if !strings.EqualFold(localPlanFacts.ResolveOutputRenameSource(other, child), src) {
 			continue
 		}
 		return qual + "." + src
@@ -116,7 +116,7 @@ func qualifySharedRenameSource(name, src string, proj []logical.Projection, chil
 // this pass owns it: it runs last, and only it knows whether the producing
 // fragment will carry an alias-naming OpProject.
 func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
-	projNode := physical.FindOutputProjectionNode(root)
+	projNode := p.PlanContext.FindOutputProjectionNode(root)
 	if projNode == nil {
 		return stages
 	}
@@ -132,13 +132,13 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 	var colTypes physical.ColDecls
 	var strictInt map[string]bool
 	if len(projNode.Children) == 1 {
-		colTypes = physical.InputColDecls(projNode.Children[0])
+		colTypes = p.PlanContext.InputColDecls(projNode.Children[0])
 		// The same integer-preserving-arithmetic hint the single-process
 		// path resolves via physical.EmittedColTypes/declaredProjectionType (#297):
 		// without it, `id + 1` over a strict-int column declares (and
 		// COMPUTES) FLOAT64 here, where the single-process engine answers
 		// INT64 for the identical SQL (#443, #445).
-		strictInt = physical.StrictIntArithCols(projNode.Children[0])
+		strictInt = p.PlanContext.StrictIntArithCols(projNode.Children[0])
 	}
 	hasExpr := false
 	specs := make([]physical.ProjectExprSpec, 0, len(proj))
@@ -170,8 +170,8 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 		// to COMPUTE it, and its type has to be declared here — nothing
 		// downstream can correct a spec the way exec.Project corrects a
 		// placeholder (#568).
-		if it.ASTExpr != nil && (!physical.IsSimpleColRefForRename(it.ASTExpr) || physical.AstIsFieldPath(it.ASTExpr, colTypes)) {
-			if physical.ReferencesSyntheticAgg(it.ASTExpr) || referencesSyntheticWindow(it.ASTExpr) {
+		if it.ASTExpr != nil && (!p.PlanContext.IsSimpleColRefForRename(it.ASTExpr) || p.PlanContext.AstIsFieldPath(it.ASTExpr, colTypes)) {
+			if p.PlanContext.ReferencesSyntheticAgg(it.ASTExpr) || referencesSyntheticWindow(it.ASTExpr) {
 				// Wrapped aggregate/window items are evaluated at gather from synthetic slots;
 				// their abbreviated Expr text is not parseable (#610, #656). Do not attach that
 				// item's expression, but do not abandon other SELECT items either (#776).
@@ -210,13 +210,13 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 				p.loweredScalarProjExprs[&proj[j]] = true
 				specs = append(specs, physical.ProjectExprSpec{Expr: lowered, Name: name,
 					Type: ldecl.ID, TypeKnown: ldeclKnown,
-					Precision: ldecl.Precision, Scale: ldecl.Scale, Fields: physical.DeclTypeParts(ldecl).Fields})
+					Precision: ldecl.Precision, Scale: ldecl.Scale, Fields: p.PlanContext.DeclTypeParts(ldecl).Fields})
 				continue
 			}
-			decl := physical.InferProjectionDeclType(it.ASTExpr, parquet.TypeString, strictInt, colTypes)
+			decl := p.PlanContext.InferProjectionDeclType(it.ASTExpr, parquet.TypeString, strictInt, colTypes)
 			typ = decl.ID
 			prec, scale = decl.Precision, decl.Scale
-			fields = physical.DeclTypeParts(decl).Fields
+			fields = p.PlanContext.DeclTypeParts(decl).Fields
 			typeKnown = true
 		}
 		specs = append(specs, physical.ProjectExprSpec{Expr: itemExpr, Name: name, Type: typ,
@@ -263,7 +263,7 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 			// outright (#776).
 			continue
 		}
-		if proj[j].ASTExpr != nil && (!physical.IsSimpleColRefForRename(proj[j].ASTExpr) || physical.AstIsFieldPath(proj[j].ASTExpr, colTypes)) {
+		if proj[j].ASTExpr != nil && (!p.PlanContext.IsSimpleColRefForRename(proj[j].ASTExpr) || p.PlanContext.AstIsFieldPath(proj[j].ASTExpr, colTypes)) {
 			// #387: an EXPRESSION referencing a nested rename (`k + 1` over
 			// `r_regionkey AS k`) was attached verbatim, so the fragment
 			// compiled it against a schema with no `k` and the task
@@ -277,16 +277,16 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 			// written against it. A declined rewrite (subquery/window
 			// bearing, unknown node) leaves the spec untouched, keeping
 			// today's loud failure over a silently different expression.
-			if rewritten, ok := physical.SubstituteNestedRenameRefs(proj[j].ASTExpr, renameChild); ok && rewritten != proj[j].ASTExpr {
+			if rewritten, ok := p.PlanContext.SubstituteNestedRenameRefs(proj[j].ASTExpr, renameChild); ok && rewritten != proj[j].ASTExpr {
 				specs[j].Expr = rewritten.String()
 				// physical.StrictIntArithColsThroughRenames mirrors the colTypes call
 				// just below it: the rewritten expression names only SOURCE
 				// columns, so the strict-int set to check it against is the
 				// one visible BELOW the rename chain, same as #445 above.
-				materialized := physical.DeclTypeParts(
-					physical.InferProjectionDeclType(rewritten, parquet.TypeString,
-						physical.StrictIntArithColsThroughRenames(renameChild),
-						physical.SourceColDeclsThroughRenames(renameChild)))
+				materialized := p.PlanContext.DeclTypeParts(
+					p.PlanContext.InferProjectionDeclType(rewritten, parquet.TypeString,
+						p.PlanContext.StrictIntArithColsThroughRenames(renameChild),
+						p.PlanContext.SourceColDeclsThroughRenames(renameChild)))
 				specs[j].Type, specs[j].Precision, specs[j].Scale, specs[j].Fields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
 				specs[j].TypeKnown = true
 				anyNestedRename = true
@@ -296,14 +296,14 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 		if def, owner := derivedAliasDefinition(specs[j].Name, renameChild); def != nil && owner != nil && len(owner.Children) == 1 {
 			// A GROUP BY expression is already a published column. Its
 			// identity, not its text, decides whether it needs evaluation.
-			_, published := physical.AggregateGroupKeyName(&logical.Projection{Expr: def.String(), ASTExpr: def}, owner)
+			_, published := p.PlanContext.AggregateGroupKeyName(&logical.Projection{Expr: def.String(), ASTExpr: def}, owner)
 			if !published {
 
 				// Gather-owned aggregate/window slots cannot be materialized by a fragment.
-				if physical.ReferencesSyntheticAgg(def) || referencesSyntheticWindow(def) || exprCarriesSubquery(def) {
+				if p.PlanContext.ReferencesSyntheticAgg(def) || referencesSyntheticWindow(def) || exprCarriesSubquery(def) {
 					continue
 				}
-				d := physical.DeclTypeParts(physical.InferProjectionDeclType(def, parquet.TypeString, physical.StrictIntArithCols(owner.Children[0]), physical.EmittedColDecls(owner.Children[0])))
+				d := p.PlanContext.DeclTypeParts(p.PlanContext.InferProjectionDeclType(def, parquet.TypeString, p.PlanContext.StrictIntArithCols(owner.Children[0]), p.PlanContext.EmittedColDecls(owner.Children[0])))
 				specs[j].Expr = def.String()
 				specs[j].Type, specs[j].Precision, specs[j].Scale, specs[j].Fields = d.Type, d.Precision, d.Scale, d.Fields
 				specs[j].TypeKnown = true
@@ -319,7 +319,7 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 		if p.referenceIntoPublishedBlock(specs[j].Name, renameChild) {
 			continue
 		}
-		src := physical.ResolveOutputRenameSource(specs[j].Name, renameChild)
+		src := p.PlanContext.ResolveOutputRenameSource(specs[j].Name, renameChild)
 		if strings.EqualFold(src, specs[j].Name) && strings.Contains(specs[j].Name, ".") {
 			// Qualified spelling: the nested Project's alias is bare — the
 			// same qualified↔bare fallback the gather applies.
@@ -336,7 +336,7 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 					src = r
 				}
 			} else if bare := specs[j].Name[strings.LastIndexByte(specs[j].Name, '.')+1:]; bare != "" {
-				if r := physical.ResolveOutputRenameSource(bare, renameChild); !strings.EqualFold(r, bare) {
+				if r := p.PlanContext.ResolveOutputRenameSource(bare, renameChild); !strings.EqualFold(r, bare) {
 					src = r
 				}
 			}

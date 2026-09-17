@@ -35,7 +35,7 @@ const (
 func (p *StagePlanner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 	if len(node.Children) < 2 {
 		p.refuseSetOp(fmt.Errorf("distributed planning: %s has %d arms, expected at least 2",
-			physical.SetOpName(node), len(node.Children)))
+			p.PlanContext.SetOpName(node), len(node.Children)))
 		return
 	}
 	counting := node.Type != logical.NodeUnion
@@ -43,7 +43,7 @@ func (p *StagePlanner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 		// INTERSECT/EXCEPT are built binary (left-deep chains nest as
 		// arms); anything else is a malformed plan, not a shape to guess at.
 		p.refuseSetOp(fmt.Errorf("distributed planning: %s has %d arms, expected exactly 2. See issue #346",
-			physical.SetOpName(node), len(node.Children)))
+			p.PlanContext.SetOpName(node), len(node.Children)))
 		return
 	}
 
@@ -56,7 +56,7 @@ func (p *StagePlanner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 	// column happened to produce, and the single-process path (which calls
 	// this same walk from buildSetOp) took a different one. One query, one
 	// answer (#648).
-	if err := physical.SetOpArmTypeConflict(node); err != nil {
+	if err := p.PlanContext.SetOpArmTypeConflict(node); err != nil {
 		p.refuseSetOp(err)
 		return
 	}
@@ -64,12 +64,12 @@ func (p *StagePlanner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 	// SQL takes the result column names from the FIRST arm; every arm is
 	// projected onto them so the arms' outputs are one schema and the
 	// concatenation is well defined.
-	outNames := physical.SetOpOutputNames(node.Children[0])
+	outNames := p.PlanContext.SetOpOutputNames(node.Children[0])
 	if len(outNames) == 0 {
 		p.refuseSetOp(fmt.Errorf(
 			"%s is not supported by distributed (stage-DAG) execution for this shape: the first "+
 				"arm has no resolvable output column list, so the arms cannot be projected onto a "+
-				"common schema. See issue #346", physical.SetOpName(node)))
+				"common schema. See issue #346", p.PlanContext.SetOpName(node)))
 		return
 	}
 	if counting {
@@ -77,7 +77,7 @@ func (p *StagePlanner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 			if n == SetOpLeftCountCol || n == SetOpRightCountCol {
 				p.refuseSetOp(fmt.Errorf(
 					"%s: result column %q collides with the operation's internal count column. See issue #346",
-					physical.SetOpName(node), n))
+					p.PlanContext.SetOpName(node), n))
 				return
 			}
 		}
@@ -93,12 +93,12 @@ func (p *StagePlanner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 			p.refuseSetOp(fmt.Errorf(
 				"%s is not supported by distributed (stage-DAG) execution for this shape: arm %d "+
 					"lowered to %d terminal stages, expected exactly 1. See issue #346",
-				physical.SetOpName(node), i+1, len(leaves)))
+				p.PlanContext.SetOpName(node), i+1, len(leaves)))
 			return
 		}
-		plan, err := physical.SetOpArmProjection(child, outNames)
+		plan, err := p.PlanContext.SetOpArmProjection(child, outNames)
 		if err != nil {
-			p.refuseSetOp(fmt.Errorf("%s: arm %d: %w. See issue #346", physical.SetOpName(node), i+1, err))
+			p.refuseSetOp(fmt.Errorf("%s: arm %d: %w. See issue #346", p.PlanContext.SetOpName(node), i+1, err))
 			return
 		}
 		plans = append(plans, plan)
@@ -106,9 +106,9 @@ func (p *StagePlanner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 	}
 	unknownLits := make([][]bool, 0, len(node.Children))
 	for _, child := range node.Children {
-		unknownLits = append(unknownLits, physical.SetOpUnknownLiteralArms(child, len(outNames)))
+		unknownLits = append(unknownLits, p.PlanContext.SetOpUnknownLiteralArms(child, len(outNames)))
 	}
-	if err := reconcileSetOpArmTypes(plans, outNames, physical.SetOpBaseName(node), unknownLits); err != nil {
+	if err := reconcileSetOpArmTypes(plans, outNames, p.PlanContext.SetOpBaseName(node), unknownLits); err != nil {
 		if sqlerr.StateOf(err) != "" {
 			// A refusal that already carries PostgreSQL's SQLSTATE and wording
 			// is the client's answer as written, with no distributed-planning
@@ -116,7 +116,7 @@ func (p *StagePlanner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 			p.refuseSetOp(err)
 			return
 		}
-		p.refuseSetOp(fmt.Errorf("%s: %w. See issue #346", physical.SetOpName(node), err))
+		p.refuseSetOp(fmt.Errorf("%s: %w. See issue #346", p.PlanContext.SetOpName(node), err))
 		return
 	}
 
@@ -255,7 +255,7 @@ func reconcileSetOpArmTypes(plans []physical.SetOpArmPlan, outNames []string, op
 		return nil
 	}
 	for col := range outNames {
-		want, allKnown, err := physical.SetOpTargetType(plans, col, outNames[col], op, unknown)
+		want, allKnown, err := localPlanFacts.SetOpTargetType(plans, col, outNames[col], op, unknown)
 		if err != nil {
 			return err
 		}
@@ -306,7 +306,7 @@ func reconcileSetOpArmTypes(plans []physical.SetOpArmPlan, outNames []string, op
 					outNames[col], setOpUnresolvedArmsDesc(plans, col))
 			}
 			for i := range plans {
-				if physical.SetOpArmIsUnknownLit(unknown, i, col) {
+				if localPlanFacts.SetOpArmIsUnknownLit(unknown, i, col) {
 					// An UNKNOWN literal takes the resolved type, and the ARM'S
 					// OWN STAGE has to say so: the union arm's projection is
 					// what the worker builds the .wshf column from, and a
@@ -346,7 +346,7 @@ func reconcileSetOpArmTypes(plans []physical.SetOpArmPlan, outNames []string, op
 			continue
 		}
 		for i := range plans {
-			if physical.SetOpArmIsUnknownLit(unknown, i, col) {
+			if localPlanFacts.SetOpArmIsUnknownLit(unknown, i, col) {
 				// The resolved type, DECLARED on the arm's own projection, and
 				// no CAST: SetValueChecked parses the literal's text into
 				// whatever vector the spec names, which is what PostgreSQL

@@ -46,7 +46,7 @@ func TestDistributedTPCHSortMergeJoin(t *testing.T) {
 			want := mustRows(t, hashResult)
 
 			coord.config.SortMergeJoinBytes = 1
-			before := physical.SortMergeJoinsPlanned.Load()
+			before := (physical.PlanContext{}).SortMergeJoinsPlanned().Load()
 			smjResult, err := coord.ExecuteSQL(ctx, q.SQL)
 			if err != nil {
 				t.Fatalf("SMJ arm: %v", err)
@@ -55,7 +55,7 @@ func TestDistributedTPCHSortMergeJoin(t *testing.T) {
 				t.Fatalf("SMJ arm error: %s", smjResult.Error)
 			}
 			got := mustRows(t, smjResult)
-			if planned := physical.SortMergeJoinsPlanned.Load() - before; planned == 0 {
+			if planned := (physical.PlanContext{}).SortMergeJoinsPlanned().Load() - before; planned == 0 {
 				t.Fatal("SMJ arm planned zero sort-merge joins — the gate never fired")
 			} else {
 				t.Logf("Q%02d: %d sort-merge join(s) planned, %d rows", qn, planned, len(got))

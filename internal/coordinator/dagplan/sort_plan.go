@@ -8,7 +8,6 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // sortKeySlotPosStage may use a SELECT-list position only when it addresses
@@ -20,12 +19,12 @@ import (
 // The duplicate_name_dag and collide_two_path gates test both sides of it.
 // See docs/internals/dag-sort-select-list-positions.md for the design.
 func sortKeySlotPosStage(ob logical.OrderExpr, sortNode *logical.Node, produced []Stage) int {
-	if pos := physical.SortKeySlotPos(ob, sortNode); pos != 0 {
+	if pos := localPlanFacts.SortKeySlotPos(ob, sortNode); pos != 0 {
 		// A set operation carries its own proof (physical.SortInputSetOpWidth): its
 		// stage publishes the result column list and nothing else, so the
 		// subtree bound below — which exists because a JOIN stage emits both
 		// arms' whole schemas — has nothing to say about it (#1022).
-		if _, ok := physical.SortInputSetOpWidth(sortNode.Children[0]); ok {
+		if _, ok := localPlanFacts.SortInputSetOpWidth(sortNode.Children[0]); ok {
 			return pos
 		}
 		if !subtreeJoinsRelations(sortNode) {
@@ -58,7 +57,7 @@ func sortKeySlotPosStage(ob logical.OrderExpr, sortNode *logical.Node, produced 
 	// does the producing stage publish the select list as the ordered prefix
 	// of its own output — and it answers it the same way for both spellings
 	// (ADR-0026 §8).
-	pos := physical.SortKeyWrittenSlotPos(ob, sortNode)
+	pos := localPlanFacts.SortKeyWrittenSlotPos(ob, sortNode)
 	if pos == 0 || !producerPublishesSelectList(produced, sortNode) {
 		return 0
 	}
@@ -89,7 +88,7 @@ func producerPublishesSelectList(produced []Stage, sortNode *logical.Node) bool 
 		return false
 	}
 	for i, pr := range visible {
-		src := physical.CleanExpr(pr.Expr)
+		src := localPlanFacts.CleanExpr(pr.Expr)
 		if src == "" {
 			src = pr.Column
 		}
@@ -117,15 +116,15 @@ func producerPublishesSelectList(produced []Stage, sortNode *logical.Node) bool 
 // both sides carry a qualifier they must agree on it, so two arms of a
 // self-join are never taken for one another.
 func sameProjectionSource(specExpr, projExpr string) bool {
-	a := plansql.NormalizeIdentRef(physical.CleanExpr(specExpr))
-	b := plansql.NormalizeIdentRef(physical.CleanExpr(projExpr))
+	a := plansql.NormalizeIdentRef(localPlanFacts.CleanExpr(specExpr))
+	b := plansql.NormalizeIdentRef(localPlanFacts.CleanExpr(projExpr))
 	if a == "" || b == "" {
 		return false
 	}
 	if strings.EqualFold(a, b) {
 		return true
 	}
-	ab, bb := physical.BlockBareName(a), physical.BlockBareName(b)
+	ab, bb := localPlanFacts.BlockBareName(a), localPlanFacts.BlockBareName(b)
 	if !strings.EqualFold(ab, bb) {
 		return false
 	}
@@ -140,7 +139,7 @@ func projectionAnswersToName(pr logical.Projection, name string) bool {
 		return false
 	}
 	name = plansql.NormalizeIdentRef(name)
-	for _, cand := range []string{pr.PublishedName, pr.Alias, pr.Column, physical.CleanExpr(pr.Expr)} {
+	for _, cand := range []string{pr.PublishedName, pr.Alias, pr.Column, localPlanFacts.CleanExpr(pr.Expr)} {
 		if cand != "" && strings.EqualFold(plansql.NormalizeIdentRef(cand), name) {
 			return true
 		}

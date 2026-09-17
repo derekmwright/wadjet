@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // windowKeyColPrefix names a materialized window key. The "__" marks it
 // derived, the same convention as __sortkey_N and __gb_expr_N.
-const windowKeyColPrefix = string(physical.SlotWindowKey)
+const windowKeyColPrefix = string(plansql.SlotWindowKey)
 
 // validateWindowKeyExprs checks that every materialized key a window stage
 // names is one its fragment can compute. See the StageWindow case in

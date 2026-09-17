@@ -5,9 +5,10 @@ package worker
 import (
 	"testing"
 
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -38,7 +39,7 @@ func TestAggInputProjectionDeclaredGroupKeyType(t *testing.T) {
 		// which one won differed between the two engines (ADR-0026). The
 		// key is published under its own text by the aggregate's
 		// GroupByOutNames, one operator later.
-		slot := physical.SlotName(physical.SlotGroupKey, 0)
+		slot := plansql.SlotName(plansql.SlotGroupKey, 0)
 		for _, pc := range project.Projections {
 			if pc.Name == slot {
 				return pc

@@ -473,7 +473,7 @@ func (p *StagePlanner) emitScalarProducerStagesTyped(stages *[]Stage, subquerySQ
 			// nil table hook: applyContextColumnPolicies below asks the
 			// ACCESS decision for every relation this plan reads (#945), so
 			// the binder's own refusal would be a second copy of it.
-			if err := physical.ValidateColumnsUnderPolicy(ctx, p.Catalog, info, func(table string) map[string]bool {
+			if err := p.PlanContext.ValidateColumnsUnderPolicy(ctx, p.Catalog, info, func(table string) map[string]bool {
 				return denied[strings.ToLower(table)]
 			}, nil); err != nil {
 				return "", 0, false, err
@@ -524,7 +524,7 @@ func (p *StagePlanner) emitScalarProducerStagesTyped(stages *[]Stage, subquerySQ
 	// emits anything else names nothing, and the caller declines.
 	var valueType parquet.TypeID
 	typeKnown := false
-	if emitted := physical.EmittedColTypes(logicalPlan); len(emitted) == 1 {
+	if emitted := p.PlanContext.EmittedColTypes(logicalPlan); len(emitted) == 1 {
 		for _, id := range emitted {
 			valueType, typeKnown = id, true
 		}

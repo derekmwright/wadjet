@@ -112,7 +112,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 		if meta, err := p.GetManifest(context.Background(), node.TableName); err == nil {
 			for _, part := range meta.Partitions {
 				if len(partFilter) > 0 && len(part.Values) > 0 {
-					if !physical.MatchesPartitionFilter(part.Values, partFilter) {
+					if !p.PlanContext.MatchesPartitionFilter(part.Values, partFilter) {
 						continue
 					}
 				}
@@ -210,7 +210,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			agg.InputCol3 = plansql.NormalizeIdentRef(strings.TrimSpace(agg.InputCol3))
 			inputExpr := agg.InputExpr
 			exprCols := aggChild
-			if resolved, expr, exprInput, renamed := physical.ResolveAggInputName(agg.InputCol, aggChild); renamed {
+			if resolved, expr, exprInput, renamed := p.PlanContext.ResolveAggInputName(agg.InputCol, aggChild); renamed {
 				if expr != nil {
 					// If no producer materializes the alias's expression, send InputExpr to the
 					// worker's pre-aggregate projection, keep InputCol as its alias, and resolve
@@ -251,13 +251,13 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 					}
 				}
 			}
-			if resolved, expr, _, renamed := physical.ResolveAggInputName(agg.InputCol2, aggChild); renamed && expr == nil {
+			if resolved, expr, _, renamed := p.PlanContext.ResolveAggInputName(agg.InputCol2, aggChild); renamed && expr == nil {
 				agg.InputCol2 = resolved
 			}
-			if resolved, expr, _, renamed := physical.ResolveAggInputName(agg.InputCol3, aggChild); renamed && expr == nil {
+			if resolved, expr, _, renamed := p.PlanContext.ResolveAggInputName(agg.InputCol3, aggChild); renamed && expr == nil {
 				agg.InputCol3 = resolved
 			}
-			outType, outTypeKnown := physical.AggSpecOutputType(node, agg)
+			outType, outTypeKnown := p.PlanContext.AggSpecOutputType(node, agg)
 			spec := AggSpec{
 				Func:            agg.Func,
 				InputCol:        agg.InputCol,
@@ -269,13 +269,13 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				Separator:       agg.Separator,
 				Percentile:      agg.Percentile,
 			}
-			if fields, ok := physical.AggOhlcvOutputFields(node, agg); ok {
+			if fields, ok := p.PlanContext.AggOhlcvOutputFields(node, agg); ok {
 				spec.OutputFields = fields
 			}
 			// The (p,s) that goes with a DECIMAL OutputType. See the field's
 			// comment: without it a partial task whose filter matched nothing
 			// writes a .wshf header declaring DECIMAL(0,0) (#685).
-			if m, known := physical.AggSpecOutputDecimal(node, agg); known {
+			if m, known := p.PlanContext.AggSpecOutputDecimal(node, agg); known {
 				spec.OutputPrecision, spec.OutputScale = m.Precision, m.Scale
 			}
 			// And the INPUT's (p,s) for a bare DECIMAL column argument. The
@@ -316,7 +316,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				// columnIndexFallback, which has no ROW arm, so it has to be
 				// pre-projected exactly like a computed argument (#568).
 				_, bare := agg.InputExpr.(*plansql.ColRef)
-				if !bare || physical.AstIsFieldPath(agg.InputExpr, physical.InputColDecls(exprCols)) {
+				if !bare || p.PlanContext.AstIsFieldPath(agg.InputExpr, p.PlanContext.InputColDecls(exprCols)) {
 					// Every reference INSIDE the expression gets the same
 					// resolution physical.ResolveAggInputName gave the argument as a
 					// whole. Without it the worker compiles the text against a
@@ -356,8 +356,8 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 					// vector from the text alone, and the branch's DECIMAL box
 					// was DROPPED: the DAG answered 0 where the single-process
 					// path refused the store outright. Two paths, one walk.
-					materialized := physical.DeclTypeParts(
-						physical.InferProjectionDeclType(agg.InputExpr, parquet.TypeFloat64, nil, physical.EmittedColDecls(exprCols)))
+					materialized := p.PlanContext.DeclTypeParts(
+						p.PlanContext.InferProjectionDeclType(agg.InputExpr, parquet.TypeFloat64, nil, p.PlanContext.EmittedColDecls(exprCols)))
 					spec.InputType, spec.InputPrecision, spec.InputScale, spec.InputFields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
 					// And the OUTPUT declaration from that same triple. The
 					// worker materializes this projection from it, so the
@@ -376,9 +376,9 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 					// Before #695 that triple was FLOAT64 for every derived
 					// aggregate input, so #685's output declaration inherited
 					// the same wrong carrier.
-					if t, p, sc, known := physical.AggOutputFromInputDecl(
+					if t, p, sc, known := p.PlanContext.AggOutputFromInputDecl(
 						agg.Func, agg.Distinct, spec.InputType, spec.InputPrecision, spec.InputScale,
-						physical.AggInputIsWideInteger(agg.InputExpr, physical.EmittedColDecls(exprCols))); known {
+						p.PlanContext.AggInputIsWideInteger(agg.InputExpr, p.PlanContext.EmittedColDecls(exprCols))); known {
 						spec.OutputType, spec.OutputTypeKnown = t, true
 						spec.OutputPrecision, spec.OutputScale = p, sc
 					}
@@ -400,14 +400,14 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 		// NULL group of every row — and the key an aggregate BELOW already
 		// published was recomputed against a schema without its leaves, which
 		// is the same collapse one shape over (ADR-0026 §2, #736, #794).
-		groupBy, groupByResolve := physical.GroupKeyNames(node, aggChild)
+		groupBy, groupByResolve := p.PlanContext.GroupKeyNames(node, aggChild)
 		// The gather's output renames read the LOGICAL name and need the name
 		// the stage's fragment actually EMITS for it. That used to be the
 		// dispatch re-spelling, because the dispatch spelling was also the
 		// published one; now it is exec's own output rule over the published
 		// list, which is what the single-process aggregate emits for the same
 		// query (#355, #467, ADR-0026 §2b).
-		emitted := physical.EmittedKeyNames(groupBy, groupByResolve, physical.LogicalAggOutNames(node))
+		emitted := p.PlanContext.EmittedKeyNames(groupBy, groupByResolve, p.PlanContext.LogicalAggOutNames(node))
 		haveGBExprs := len(node.GroupByExprs) == len(node.GroupBy)
 		for i, key := range node.GroupBy {
 			var keyExpr plansql.Node
@@ -426,7 +426,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// derived table's alias (`GROUP BY u.k`) is the BARE one
 			// (`SELECT k`). Record both spellings or the lookup misses
 			// and the result comes back at full upstream width (#467).
-			if bare := physical.DerivedScopeBareName(key, aggChild); bare != "" {
+			if bare := p.PlanContext.DerivedScopeBareName(key, aggChild); bare != "" {
 				if _, taken := p.aggStageRenames[strings.ToLower(bare)]; !taken {
 					p.aggStageRenames[strings.ToLower(bare)] = emitted[i]
 				}
@@ -564,7 +564,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			key := SortKeySpec{
 				Column:               resolveSortKeyColumn(ob.Column, sortChild),
 				Desc:                 ob.Desc,
-				NullsLast:            physical.ResolveNullsLast(ob),
+				NullsLast:            p.PlanContext.ResolveNullsLast(ob),
 				SlotPos:              sortKeySlotPosStage(ob, node, (*stages)[preCount:]),
 				WrittenTerm:          strings.TrimSpace(ob.Column),
 				NamesAggregateOutput: sortTermNamesAggregateItem(ob.Column, sortChild),
@@ -577,7 +577,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			if !strings.EqualFold(key.Column, ob.Column) &&
 				!producerEmitsName((*stages)[preCount:], key.Column) &&
 				producerMaterializesName((*stages)[preCount:], ob.Column) {
-				key.Column = physical.CleanExpr(ob.Column)
+				key.Column = p.PlanContext.CleanExpr(ob.Column)
 			}
 			// A key still spelled __sortkey_N names a column the logical
 			// Project materializes and no stage does. Record what defines
@@ -778,7 +778,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 		// Map logical join type to canonical short form. Needed before the
 		// broadcast decision: a join that preserves its BUILD side cannot
 		// replicate it.
-		jt := physical.MapJoinType(node.JoinType)
+		jt := p.PlanContext.MapJoinType(node.JoinType)
 		// An inner join with no condition at all IS a cross join (#376) —
 		// same normalization as buildJoin, or the stage below would carry a
 		// keyless hash_join the worker rejects.
@@ -839,17 +839,17 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 		var leftKeys, rightKeys []string
 		var buildNaming *physical.SubtreeNaming
 		if len(node.Children) >= 2 {
-			buildNaming = physical.SubtreeNamingOf(node.Children[1])
+			buildNaming = p.PlanContext.SubtreeNamingOf(node.Children[1])
 		}
 		if jt != "cross" {
 			var residual []string
-			leftKeys, rightKeys, residual = physical.ParseJoinKeys(node.JoinCond)
+			leftKeys, rightKeys, residual = p.PlanContext.ParseJoinKeys(node.JoinCond)
 			if len(residual) > 0 {
 				// walkStages has no error return; park the refusal the way
 				// a set-operation refusal is parked (#346) and let
 				// PlanDistributed raise it. Emitting a join keyed on a name
 				// that is not a column is what made this silent.
-				p.refuseJoin(physical.RefuseJoinCond(jt, node.JoinCond, residual))
+				p.refuseJoin(p.PlanContext.RefuseJoinCond(jt, node.JoinCond, residual))
 			}
 			// An outer join's ON residual (#358) rides stage.JoinFilter to the
 			// worker, which compiles it there. Compile-check it NOW so an
@@ -858,9 +858,9 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			if node.JoinFilter != "" && (jt == "left" || jt == "right" || jt == "full") {
 				alias := ""
 				if len(node.Children) >= 2 {
-					alias = physical.JoinArmAlias(node.Children[1])
+					alias = p.PlanContext.JoinArmAlias(node.Children[1])
 				}
-				if physical.BuildJoinResidualFilter(node.JoinFilter, alias) == nil {
+				if p.PlanContext.BuildJoinResidualFilter(node.JoinFilter, alias) == nil {
 					p.refuseJoin(fmt.Errorf("join ON residual %q on a %s join: "+
 						"not evaluable as a probe residual (columns, literals, arithmetic and "+
 						"comparisons are; function calls and subqueries are not)",
@@ -872,8 +872,8 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// Fix the assignment so leftKeys are from the probe (left) child
 			// and rightKeys are from the build (right) child.
 			if buildNaming != nil {
-				physical.AssignJoinKeySides(leftKeys, rightKeys,
-					physical.SubtreeNamingOf(node.Children[0]), buildNaming)
+				p.PlanContext.AssignJoinKeySides(leftKeys, rightKeys,
+					p.PlanContext.SubtreeNamingOf(node.Children[0]), buildNaming)
 			}
 		}
 
@@ -897,14 +897,14 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 		if joinType == StageHashJoin && jt == "inner" && node.JoinFilter == "" &&
 			len(leftKeys) > 0 && p.ShouldSortMergeJoin(node, leftKeys, rightKeys) {
 			joinType = StageSortMergeJoin
-			physical.SortMergeJoinsPlanned.Add(1)
+			p.PlanContext.SortMergeJoinsPlanned().Add(1)
 		}
 
 		// The key pair's resolved common type (#615), shared by the join
 		// stage below and by the two exchange-repartition stages that feed
 		// it — the SAME list, so the partition hash and the join key cannot
 		// be built at two different types.
-		stageKeyTypes := physical.ResolveJoinKeyTypes(node, leftKeys, rightKeys, p.CteKeyColTypes)
+		stageKeyTypes := p.PlanContext.ResolveJoinKeyTypes(node, leftKeys, rightKeys, p.CteKeyColTypes)
 
 		// Insert shuffle stages for non-broadcast joins when distributed
 		numPartitions := 0
@@ -1002,7 +1002,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			joinTasks = p.WorkerCount
 		}
 		stageID := fmt.Sprintf("join-%d", len(*stages))
-		probeSchema, buildSchema := physical.JoinSideSchemas(node, leftKeys, rightKeys,
+		probeSchema, buildSchema := p.PlanContext.JoinSideSchemas(node, leftKeys, rightKeys,
 			p.publishedBlocks, p.SubqueryOutputColumn)
 		stage := Stage{
 			ID:                 stageID,
@@ -1036,12 +1036,12 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// does not publish, and the enclosing `m.a` then bound the PROBE
 			// arm's `a` by the qualifier strip: a silent wrong value.
 			if armMaterialized[1] {
-				if alias := physical.JoinArmAlias(node.Children[1]); alias != "" {
+				if alias := p.PlanContext.JoinArmAlias(node.Children[1]); alias != "" {
 					stage.BuildTableAlias = alias
 				}
 				stage.BuildColOrigins = buildNaming.MaterializedBuildColOrigins()
 			} else {
-				if alias := physical.BuildStreamAlias(node.Children[1]); alias != "" {
+				if alias := p.PlanContext.BuildStreamAlias(node.Children[1]); alias != "" {
 					stage.BuildTableAlias = alias
 				}
 				// Multi-table build subtrees additionally carry per-column origin
@@ -1055,7 +1055,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 		// single-process planner does, so the two paths publish one column
 		// set (ADR-0026 3c).
 		stage.HiddenJoinCols = stageHiddenPositions(node, p.publishedBlocks)
-		if marker, _, drop := physical.LateralEmptySpec(node); marker != "" {
+		if marker, _, drop := p.PlanContext.LateralEmptySpec(node); marker != "" {
 			stage.LateralPadMarker = marker
 			stage.LateralDropMarker = drop
 			for _, d := range node.LateralEmptyDefaults {
@@ -1174,7 +1174,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				// would change (#615 F2).
 				filterDecls := physical.ColDecls{}
 				if len(node.Children) == 1 {
-					filterDecls = physical.InputColDecls(node.Children[0])
+					filterDecls = p.PlanContext.InputColDecls(node.Children[0])
 				}
 				resolvedExpr, deferred := p.resolveFilterSubqueries(exprStr, filterDecls)
 				for _, d := range deferred {
@@ -1288,7 +1288,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			p.walkStages(child, stages, nil)
 		}
 		stageID := fmt.Sprintf("window-%d", len(*stages))
-		winKeys := physical.ResolveWindowKeys(node)
+		winKeys := p.PlanContext.ResolveWindowKeys(node)
 		var winChild *logical.Node
 		if len(node.Children) == 1 {
 			winChild = node.Children[0]
@@ -1299,7 +1299,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// spec and the single-process operator describe one computation
 			// — including the output type, which nothing downstream of the
 			// worker can correct (#345).
-			ec := physical.WindowExecColumn(node, we, winKeys)
+			ec := p.PlanContext.WindowExecColumn(node, we, winKeys)
 			var orderBy []SortKeySpec
 			for i, ob := range we.OrderBy {
 				// ec.OrderBy carries the RESOLVED spelling; ob.Column is
@@ -1311,7 +1311,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				// window binds the key by NAME where the single-process one
 				// binds it by position (#968).
 				orderBy = append(orderBy, SortKeySpec{Column: ec.OrderBy[i].Column, Desc: ob.Desc,
-					NullsLast: physical.ResolveNullsLast(ob), SlotPos: ec.OrderBy[i].SlotPos})
+					NullsLast: p.PlanContext.ResolveNullsLast(ob), SlotPos: ec.OrderBy[i].SlotPos})
 			}
 			// A key naming a derived table's or CTE's SELECT-list alias
 			// (`PARTITION BY gk` over `SELECT g AS gk`) is bound by neither
@@ -1340,11 +1340,11 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				// them because the scoping ran left `PARTITION BY z.gk` over a
 				// single derived relation refusing its own plan.
 				if src, scoped := windowArgSourceInScope(pb, winChild); scoped && src != "" {
-					partitionBy[i] = physical.CleanExpr(src)
+					partitionBy[i] = p.PlanContext.CleanExpr(src)
 					continue
 				}
-				if src := physical.DerivedAliasSourceColumn(pb, winChild); src != "" {
-					partitionBy[i] = physical.CleanExpr(src)
+				if src := p.PlanContext.DerivedAliasSourceColumn(pb, winChild); src != "" {
+					partitionBy[i] = p.PlanContext.CleanExpr(src)
 					continue
 				}
 				if c := derivedAliasColumnFor(pb, winChild); c.Expr != "" {
@@ -1354,11 +1354,11 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			}
 			for i := range orderBy {
 				if src, scoped := windowArgSourceInScope(orderBy[i].Column, winChild); scoped && src != "" {
-					orderBy[i].Column = physical.CleanExpr(src)
+					orderBy[i].Column = p.PlanContext.CleanExpr(src)
 					continue
 				}
-				if src := physical.DerivedAliasSourceColumn(orderBy[i].Column, winChild); src != "" {
-					orderBy[i].Column = physical.CleanExpr(src)
+				if src := p.PlanContext.DerivedAliasSourceColumn(orderBy[i].Column, winChild); src != "" {
+					orderBy[i].Column = p.PlanContext.CleanExpr(src)
 					continue
 				}
 				if c := derivedAliasColumnFor(orderBy[i].Column, winChild); c.Expr != "" {
@@ -1381,10 +1381,10 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			inputCol := ec.InputCol
 			if src, scoped := windowArgSourceInScope(inputCol, winChild); scoped {
 				if src != "" {
-					inputCol = physical.CleanExpr(src)
+					inputCol = p.PlanContext.CleanExpr(src)
 				}
-			} else if src := physical.DerivedAliasSourceColumn(inputCol, winChild); src != "" {
-				inputCol = physical.CleanExpr(src)
+			} else if src := p.PlanContext.DerivedAliasSourceColumn(inputCol, winChild); src != "" {
+				inputCol = p.PlanContext.CleanExpr(src)
 			} else if c := derivedAliasColumnFor(inputCol, winChild); c.Expr != "" {
 				// A COMPUTED derived alias has no source column to rewrite
 				// to, so until now the argument travelled as a name the
@@ -1435,7 +1435,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// for the whole stage: the keys are shared across its OVER
 			// clauses, and computing a shared key twice would put two
 			// columns of one name on the batch.
-			WindowKeyExprs: respellWindowKeyExprs(physical.WindowKeySpecs(winKeys), winChild),
+			WindowKeyExprs: respellWindowKeyExprs(p.PlanContext.WindowKeySpecs(winKeys), winChild),
 			WindowCols:     winCols,
 		}
 		// Only depend on leaf stages from subtree (not transitive deps like scan).
@@ -1572,7 +1572,7 @@ func absorbSecurityBarrier(node, scan *logical.Node, stages *[]Stage) {
 		if expr == "" {
 			expr = pr.Column
 		}
-		isExpr := pr.ASTExpr != nil && !physical.IsSimpleColRefForRename(pr.ASTExpr)
+		isExpr := pr.ASTExpr != nil && !localPlanFacts.IsSimpleColRefForRename(pr.ASTExpr)
 		// Trim passthroughs the scan doesn't read; masks are computed from
 		// literals (the scan never reads the raw column), so they always stay.
 		if !isExpr && len(need) > 0 && !need[name] {
@@ -1584,8 +1584,8 @@ func absorbSecurityBarrier(node, scan *logical.Node, stages *[]Stage) {
 		if isExpr {
 			// Same integer-preserving-arithmetic hint as
 			// attachScanSelectProjections (#297, #445).
-			materialized := physical.DeclTypeParts(physical.InferProjectionDeclType(pr.ASTExpr, parquet.TypeString,
-				physical.StrictIntArithCols(scan),
+			materialized := localPlanFacts.DeclTypeParts(localPlanFacts.InferProjectionDeclType(pr.ASTExpr, parquet.TypeString,
+				localPlanFacts.StrictIntArithCols(scan),
 				physical.ColDecls{Types: scan.ScanColTypes, Fields: scan.ScanColFields, Dec: scan.ScanColDecimal}))
 			typ, prec, scale, fields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
 		}

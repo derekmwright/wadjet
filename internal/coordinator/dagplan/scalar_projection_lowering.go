@@ -130,7 +130,7 @@ func (p *StagePlanner) lowerProjectionSubquery(stages *[]Stage, item *logical.Pr
 	// TypeID could lose.
 	phDecls := decls
 	phDecls.PlaceholderTypes = placeholderTypes
-	decl = physical.InferProjectionDeclType(resolved, parquet.TypeString, nil, phDecls)
+	decl = p.PlanContext.InferProjectionDeclType(resolved, parquet.TypeString, nil, phDecls)
 	return resolved.String(), decl, true, true
 }
 

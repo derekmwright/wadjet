@@ -34,7 +34,7 @@ func respellWindowKeyExprs(specs []physical.ProjectExprSpec, child *logical.Node
 		if err != nil {
 			continue
 		}
-		if rewritten, changed := physical.RespellDerivedAliasRefs(ast, child); changed {
+		if rewritten, changed := localPlanFacts.RespellDerivedAliasRefs(ast, child); changed {
 			specs[i].Expr = rewritten.String()
 		}
 	}
@@ -63,8 +63,8 @@ func respellAggInputExprAt(n plansql.Node, child *logical.Node, depth int) (plan
 	if !aggInputRespellable(child) {
 		return n, false
 	}
-	out, changed, complete := physical.RewriteColRefs(n, func(ref *plansql.ColRef) (plansql.Node, bool) {
-		if resolved, expr, below, renamed := physical.ResolveAggInputName(ref.String(), child); renamed {
+	out, changed, complete := localPlanFacts.RewriteColRefs(n, func(ref *plansql.ColRef) (plansql.Node, bool) {
+		if resolved, expr, below, renamed := localPlanFacts.ResolveAggInputName(ref.String(), child); renamed {
 			if expr != nil {
 				// The definition may name aliases of its OWN input:
 				// `SELECT twice * 3 AS t FROM (SELECT id * 2 AS twice …)`
@@ -79,7 +79,7 @@ func respellAggInputExprAt(n plansql.Node, child *logical.Node, depth int) (plan
 				return &plansql.ParenNode{Inner: inner}, true
 			}
 			if !strings.EqualFold(resolved, ref.String()) {
-				return &plansql.ColRef{Column: physical.CleanExpr(resolved)}, true
+				return &plansql.ColRef{Column: localPlanFacts.CleanExpr(resolved)}, true
 			}
 			return nil, false
 		}
@@ -98,11 +98,11 @@ func respellAggInputExprAt(n plansql.Node, child *logical.Node, depth int) (plan
 		if ref.Table == "" {
 			return nil, false
 		}
-		qual, qexpr, _, qrenamed := physical.ResolveAggInputName(ref.Table, child)
+		qual, qexpr, _, qrenamed := localPlanFacts.ResolveAggInputName(ref.Table, child)
 		if !qrenamed || qexpr != nil || strings.EqualFold(qual, ref.Table) {
 			return nil, false
 		}
-		return &plansql.ColRef{Table: physical.CleanExpr(qual), Column: ref.Column}, true
+		return &plansql.ColRef{Table: localPlanFacts.CleanExpr(qual), Column: ref.Column}, true
 	})
 	if !complete {
 		// Same rule as above, and here it has teeth: an argument carrying a
@@ -232,15 +232,15 @@ func respellWindowSlotAliasRefs(n plansql.Node, child *logical.Node) (plansql.No
 	if n == nil || child == nil {
 		return n, false
 	}
-	out, changed, complete := physical.RewriteColRefs(n, func(ref *plansql.ColRef) (plansql.Node, bool) {
-		resolved, expr, _, renamed := physical.ResolveAggInputName(ref.String(), child)
+	out, changed, complete := localPlanFacts.RewriteColRefs(n, func(ref *plansql.ColRef) (plansql.Node, bool) {
+		resolved, expr, _, renamed := localPlanFacts.ResolveAggInputName(ref.String(), child)
 		if !renamed || expr != nil {
 			return nil, false
 		}
 		if plansql.ReservedSlotFamily(resolved) != string(plansql.SlotWindowOutput) {
 			return nil, false
 		}
-		return &plansql.ColRef{Column: physical.CleanExpr(resolved)}, true
+		return &plansql.ColRef{Column: localPlanFacts.CleanExpr(resolved)}, true
 	})
 	if !complete {
 		// Same rule as physical.RespellDerivedAliasRefs: a walk that met a node kind it

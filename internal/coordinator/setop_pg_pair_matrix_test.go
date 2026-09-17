@@ -334,7 +334,7 @@ func setOpPairRefRows(t *testing.T, run func(string) (*oracle.Result, error),
 // paragraph nothing keeps true, so this one reads it.
 func TestTheCarrierGapListIsTheCodes(t *testing.T) {
 	code := map[[2]parquet.TypeID]bool{}
-	for _, p := range physical.SetOpCarrierGapPairs() {
+	for _, p := range (physical.PlanContext{}).SetOpCarrierGapPairs() {
 		code[p] = true
 	}
 	for p := range setOpPairNoCarrierPairs {

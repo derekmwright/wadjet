@@ -653,9 +653,9 @@ func TestDistributedTPCHBuildCacheSF100Sample(t *testing.T) {
 	// At SF100, orders has ~150M rows so reverse-bloom (>50M build inner)
 	// fires for the customer×orders join. With our 10M-row sample we'd miss
 	// that path. Force it on for realism.
-	origRev := physical.ReverseBloomInnerThreshold
-	physical.ReverseBloomInnerThreshold = 1
-	t.Cleanup(func() { physical.ReverseBloomInnerThreshold = origRev })
+	origRev := *(physical.PlanContext{}).ReverseBloomInnerThreshold()
+	*(physical.PlanContext{}).ReverseBloomInnerThreshold() = 1
+	t.Cleanup(func() { *(physical.PlanContext{}).ReverseBloomInnerThreshold() = origRev })
 
 	// SF100 splits the orders source files into 9 cache files (groupSize=2,
 	// 17 source files). With our local sample of 1 orders source file, the
@@ -895,9 +895,9 @@ func sf100SampleClusterN(t *testing.T, memoryBudget int64, wantWorkers, maxConcu
 	dagplan.ProbeSplitMinBytes = 1
 	t.Cleanup(func() { dagplan.ProbeSplitMinBytes = origMinBytes })
 
-	origRev := physical.ReverseBloomInnerThreshold
-	physical.ReverseBloomInnerThreshold = 1
-	t.Cleanup(func() { physical.ReverseBloomInnerThreshold = origRev })
+	origRev := *(physical.PlanContext{}).ReverseBloomInnerThreshold()
+	*(physical.PlanContext{}).ReverseBloomInnerThreshold() = 1
+	t.Cleanup(func() { *(physical.PlanContext{}).ReverseBloomInnerThreshold() = origRev })
 
 	origGroupSize := buildCacheGroupSize
 	buildCacheGroupSize = 1
@@ -1191,9 +1191,9 @@ func TestDistributedTPCHBuildCachePolarsQ05(t *testing.T) {
 	// path is silently skipped locally and SF100-only bugs in the bloom
 	// injection path can hide indefinitely. Setting both thresholds to 1
 	// makes every inner-join build pass through reverse-bloom.
-	origRev := physical.ReverseBloomInnerThreshold
-	physical.ReverseBloomInnerThreshold = 1
-	t.Cleanup(func() { physical.ReverseBloomInnerThreshold = origRev })
+	origRev := *(physical.PlanContext{}).ReverseBloomInnerThreshold()
+	*(physical.PlanContext{}).ReverseBloomInnerThreshold() = 1
+	t.Cleanup(func() { *(physical.PlanContext{}).ReverseBloomInnerThreshold() = origRev })
 
 	ctx, coord := setupTPCHDistributedPolars(t)
 	// Dump per-table estimated sizes so we can pick a threshold that caches

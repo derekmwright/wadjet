@@ -437,3 +437,14 @@ func (PlanContext) WithManifestSnapshot(ctx context.Context, snapshot *ManifestS
 func (PlanContext) SetReverseBloomInnerThreshold(n int64) { ReverseBloomInnerThreshold = n }
 func (PlanContext) SemiAntiNE() *atomic.Bool              { return &SemiAntiNE }
 func (PlanContext) SortMergeJoinsPlanned() *atomic.Int64  { return &SortMergeJoinsPlanned }
+
+func (PlanContext) BuildSemiAntiFilter(filter string) func(*batch.RecordBatch, int, *batch.RecordBatch, int) bool {
+	return BuildSemiAntiFilter(filter)
+}
+func (PlanContext) SemiAntiBuildStoreCols(keys []string, filter string) []string {
+	return SemiAntiBuildStoreCols(keys, filter)
+}
+func (PlanContext) SetOpCarrierGapPairs() [][2]parquet.TypeID {
+	return SetOpCarrierGapPairs()
+}
+func (PlanContext) ReverseBloomInnerThreshold() *int64 { return &ReverseBloomInnerThreshold }

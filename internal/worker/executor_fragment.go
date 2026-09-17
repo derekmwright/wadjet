@@ -2945,21 +2945,21 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 			// per key candidate, with the unmatched semantics that keeps a
 			// residual-failed probe row NULL-padded. NOT SemiAntiFilter —
 			// that one only runs on the semi/anti probe path.
-			hj.Residual = physical.BuildJoinResidualFilter(spec.JoinFilter, spec.BuildAlias)
+			hj.Residual = (physical.PlanContext{}).BuildJoinResidualFilter(spec.JoinFilter, spec.BuildAlias)
 			if hj.Residual == nil {
 				return nil, fmt.Errorf("hash_join_probe: join residual %q is not evaluable", spec.JoinFilter)
 			}
 		case spec.JoinFilter != "":
-			hj.SemiAntiFilter = physical.BuildSemiAntiFilter(spec.JoinFilter)
+			hj.SemiAntiFilter = (physical.PlanContext{}).BuildSemiAntiFilter(spec.JoinFilter)
 			// Filtered semi/anti builds store only keys + filter columns —
 			// the worker has no post-build prune at all, so without this a
 			// broadcast lineitem build retains every scanned column.
 			if hj.JoinType == exec.SemiJoin || hj.JoinType == exec.AntiJoin {
-				hj.BuildStoreCols = physical.SemiAntiBuildStoreCols(spec.RightKeys, spec.JoinFilter)
+				hj.BuildStoreCols = (physical.PlanContext{}).SemiAntiBuildStoreCols(spec.RightKeys, spec.JoinFilter)
 				// Distinct-pair fast path for `probe.col <> build.col`
 				// filters (exec/join_semianti_ne.go): the build collapses
 				// to key -> ≤2 distinct values, no batch storage.
-				if pc, bc, ok := physical.ParseSemiAntiNE(spec.JoinFilter); ok {
+				if pc, bc, ok := (physical.PlanContext{}).ParseSemiAntiNE(spec.JoinFilter); ok {
 					hj.SemiAntiNEProbeCol, hj.SemiAntiNEBuildCol = pc, bc
 				}
 			}

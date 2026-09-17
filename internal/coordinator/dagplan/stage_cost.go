@@ -17,8 +17,8 @@ func EstimateCost(stages []Stage, node *logical.Node) physical.QueryCost {
 			cost.TotalFiles += len(s.ScanFiles)
 		}
 	}
-	cost.HasFilter = physical.HasFilterOrPartition(node)
-	cost.HasLimit = physical.HasLimit(node)
+	cost.HasFilter = localPlanFacts.HasFilterOrPartition(node)
+	cost.HasLimit = localPlanFacts.HasLimit(node)
 	return cost
 }
 

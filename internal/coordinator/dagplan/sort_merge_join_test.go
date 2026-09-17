@@ -144,12 +144,12 @@ func TestSortMergeJoinGate_DormantByDefault(t *testing.T) {
 	cat := setupJoinTables(t)
 	sql := "SELECT id, val, rval FROM smj_l JOIN smj_r ON smj_l.id = smj_r.rid"
 
-	before := physical.SortMergeJoinsPlanned.Load()
+	before := localPlanFacts.SortMergeJoinsPlanned().Load()
 	plan := planSQL(t, cat, sql, 0)
 	if (physical.PlanContext{}).IsSortMergeSource(plan.Pipeline.Source) {
 		t.Fatal("SMJ planned with threshold 0 — the gate must be dormant by default")
 	}
-	if got := physical.SortMergeJoinsPlanned.Load(); got != before {
+	if got := localPlanFacts.SortMergeJoinsPlanned().Load(); got != before {
 		t.Fatalf("SortMergeJoinsPlanned moved %d→%d on the default config", before, got)
 	}
 	if err := plan.Pipeline.Run(context.Background()); err != nil {

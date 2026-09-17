@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // ExpandFederatedScans checks if scan stages reference tables that exist on
@@ -71,7 +70,7 @@ func (p *StagePlanner) ExpandFederatedScans(stages []Stage) []Stage {
 				var fileSizes []int64
 				for _, part := range manifest.Partitions {
 					if len(stage.PartitionFilter) > 0 && len(part.Values) > 0 {
-						if !physical.MatchesPartitionFilter(part.Values, stage.PartitionFilter) {
+						if !p.PlanContext.MatchesPartitionFilter(part.Values, stage.PartitionFilter) {
 							continue
 						}
 					}

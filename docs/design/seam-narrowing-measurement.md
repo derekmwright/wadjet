@@ -830,3 +830,66 @@ tableColumnSource.GetTable (internal/planner/physical/validate.go:24)
 tableNameResolver.AmbiguousTableNames (internal/planner/physical/validate.go:31)
 tableNameResolver.ResolveTableName (internal/planner/physical/validate.go:30)
 ```
+
+## Narrowed package-qualified boundary
+
+The context callers reference 11 names in dagplan production code and 11 in
+its tests; four test names are additional. The union is **146 → 15**. On the
+production-only definition it is **117 → 11**. Other AGPL packages name eight
+physical exports, for an all-AGPL union of **152 → 16**. The budget is 16,
+because it covers every AGPL package and includes tests. MIT callers still
+name the same 22 package-qualified exports.
+
+`StagePlanner` obtains `Planner.PlanContext()` and shares that planner's
+state. The context methods delegate to the same local operations. The zero
+value serves argument-only walks and access to existing package settings;
+its construction creates no planner or snapshot. No derived fact is cached
+or recomputed at a different planning phase. The two published metadata maps
+use concrete context methods around the existing generic republishing walk,
+because Go methods cannot introduce type parameters.
+
+Constructors remain ordinary named constructors: creating the first planner
+or snapshot does not require a pre-existing context. Stored or passed values
+retain their concrete type names; the shared error classification retains its
+constant. These are the remaining separate names, not separate helper
+functions for individual planning walks.
+
+| Survivor | Why it remains a separate name |
+|---|---|
+| `ColDecls` | Column declarations appear in parameters and stored maps. |
+| `DecimalCoercion` | Planned decimal conversions are stored in typed stage and execution specifications. |
+| `GroupKeyResolution` | Group-key identities and resolution spellings travel as typed records. |
+| `ManifestSnapshot` | Multiple planners share this snapshot value for one statement. |
+| `NewManifestSnapshot` | Constructs the shared snapshot before a planner context exists. |
+| `NewPlanner` | Constructs a local planner and its initial resources. |
+| `NewPlannerForContext` | Constructs a local planner with the statement's existing snapshot and query limits. |
+| `PhysicalPlan` | The local executable plan is a returned and passed value, including in mixed-planner tests. |
+| `PlanContext` | The shared local planner state and planning operations. |
+| `Planner` | The local planner is the borrowed input to the context and to `NewStagePlanner`. |
+| `ProjectExprSpec` | Typed projected expressions are stored and passed to execution. |
+| `QueryCost` | The cost walk returns a structured estimate. |
+| `QueryLimitSQLState` | Callers classify the shared query-limit refusal by its canonical constant. |
+| `SetOpArmPlan` | Arm plans cross the context as typed slices. |
+| `SetOpColType` | Type reconciliation produces a stored target-column declaration. |
+| `SubtreeNaming` | Join planning stores and passes the subtree's naming record. |
+
+The dagplan production list is the table minus `NewManifestSnapshot`,
+`NewPlanner`, `NewPlannerForContext`, `PhysicalPlan` and `QueryLimitSQLState`.
+Its test-only additions are the three constructors and `PhysicalPlan`.
+`QueryLimitSQLState` is referenced by other AGPL packages.
+
+## Test placement and declaration renames
+
+Step 2 lowercased the 29 package-scope declarations in category e, using only
+physical files. Two names needed distinct local spellings because the direct
+lowercase spelling was already declared: `RefuseReservedSlotName` became
+`checkReservedSlotName`, and `PoisonReleasedSlabs` became
+`setPoisonReleasedSlabs`.
+
+43 tests of physical behavior moved into physical with their assertions
+unchanged. The mixed-planner tests use the same context methods. A proposed
+44th move, `TestParseSemiAntiNE`, was returned to dagplan: that test depends
+on dagplan's initialization of a shared setting, which the planner test gate
+identified. Its assertions remain unchanged and it reaches the helper through
+the context. Test entry points and interface implementations stay exported;
+a direct-reference count alone is insufficient to change their contracts.

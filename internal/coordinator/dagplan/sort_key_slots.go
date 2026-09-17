@@ -8,7 +8,6 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // sortTermNamesAggregateItem reports whether the SELECT item an ORDER BY term
@@ -27,7 +26,7 @@ func sortTermNamesAggregateItem(term string, sortChild *logical.Node) bool {
 	match, hits := -1, 0
 	for i, proj := range items {
 		if !strings.EqualFold(proj.Alias, term) &&
-			!strings.EqualFold(physical.ProjectionOutputName(proj), term) {
+			!strings.EqualFold(localPlanFacts.ProjectionOutputName(proj), term) {
 			continue
 		}
 		match, hits = i, hits+1

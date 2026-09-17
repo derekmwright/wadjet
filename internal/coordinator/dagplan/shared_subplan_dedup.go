@@ -11,8 +11,6 @@ import (
 	"os"
 	"sort"
 	"sync/atomic"
-
-	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // SharedSubplanDedup gates dedupeSharedSubplans. Kill switch
@@ -473,8 +471,8 @@ func (d *subplanDeduper) coverageDirection(aID, bID string) (int, bool) {
 		}
 		a, b := &d.stages[ai], &d.stages[bi]
 		if a.Type == StageScan {
-			aSet := physical.ColSet(a.Columns)
-			bSet := physical.ColSet(b.Columns)
+			aSet := localPlanFacts.ColSet(a.Columns)
+			bSet := localPlanFacts.ColSet(b.Columns)
 			aCovers, bCovers := covers(aSet, bSet), covers(bSet, aSet)
 			switch {
 			case aCovers && bCovers:
@@ -601,7 +599,7 @@ func (d *subplanDeduper) pairExtraCols(kID, dID string) map[string]bool {
 		}
 		k, dd := &d.stages[ki], &d.stages[di]
 		if k.Type == StageScan {
-			dCols := physical.ColSet(dd.Columns)
+			dCols := localPlanFacts.ColSet(dd.Columns)
 			for _, c := range k.Columns {
 				if !dCols[c] {
 					extras[c] = true
@@ -655,7 +653,7 @@ func semiConsumerDuplicationInvariant(c *Stage, probeKeys []string) bool {
 	if len(c.GroupByCols) == 0 || len(probeKeys) == 0 {
 		return false
 	}
-	group := physical.ColSet(c.GroupByCols)
+	group := localPlanFacts.ColSet(c.GroupByCols)
 	for _, k := range probeKeys {
 		if !group[k] {
 			return false
