@@ -44,7 +44,15 @@ func LoadKnownDifferences(rd io.Reader) (KnownDifferences, error) {
 		entry := &result[len(result)-1]
 		prose := referenceSuffix.ReplaceAllString(body.String(), "")
 		entry.SQLStates = stateToken.FindAllString(prose, -1)
-		text := strings.ToUpper(entry.Heading + " " + prose)
+		// Keywords come from the HEADING only. An entry's prose names the
+		// types and functions of its examples ("returns varchar `-5`"), and
+		// an engine message that echoes a refused expression ("join ON
+		// (cast(t3.c2 as varchar)) between ...") meets those words by
+		// accident: on the first MIT run (2026-09-17) prose keywords filed
+		// 11 join refusals under "Unary minus accepts numeric text". The
+		// heading is what the entry is about; SQLSTATEs still come from
+		// the prose, where they are exact.
+		text := strings.ToUpper(entry.Heading)
 		terms := strings.Fields("BYTEA MONEY INET IPV4 IPV6 CIDR MACADDR PROTOCOL DURATION VECTOR DECIMAL VARCHAR SMALLINT INT2 TIMESTAMP TIMESTAMPTZ JSON XML QUALIFY LATERAL RETURNING CURRENT_TIMESTAMP CURRENT_DATE")
 		terms = append(terms, "NATURAL JOIN", "JOIN USING", "PARTITION BY", "CREATE VIEW", "DROP VIEW", "ALTER TABLE")
 		for _, keyword := range terms {
@@ -52,7 +60,7 @@ func LoadKnownDifferences(rd io.Reader) (KnownDifferences, error) {
 				entry.Keywords = append(entry.Keywords, keyword)
 			}
 		}
-		for _, m := range functionToken.FindAllStringSubmatch(prose, -1) {
+		for _, m := range functionToken.FindAllStringSubmatch(entry.Heading, -1) {
 			fn := strings.ToUpper(m[1])
 			switch fn {
 			case "CAST", "COUNT", "SUM", "MIN", "MAX", "COALESCE", "SELECT", "IN", "OVER", "AS", "NUMERIC", "DECIMAL", "VARCHAR", "CHAR":

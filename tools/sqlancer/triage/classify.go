@@ -441,15 +441,47 @@ func (r *Report) classifyAssertion(source string, lines []string, i int) int {
 		}
 	}
 done:
+	// A "Found a potential bug" header carries no message of its own: the
+	// engine's error and the two queries sit further down the same round's
+	// reproduction block, on "-- On the database ... unexpected error with
+	// message: <text>;" and "-- optimized: ..." / "-- unoptimized: ..."
+	// lines. Attach them so the report and the known-difference match read
+	// the engine's text rather than Java's.
+	message, roundQueries := roundMessage(lines, j)
+	if message != "" {
+		detailLines = append(detailLines, message)
+	}
 	detail := strings.Join(detailLines, "\n")
 	reason, reference := "", ""
-	if entry, ok := r.KnownDifferences.Match(detail, strings.Join(causes, "\n")); ok {
+	// A refusal is matched on the engine's error text alone. Matching it on
+	// its generated SQL as well classified 58 of the first MIT run's 200
+	// refusals under "Unary minus accepts numeric text" through nothing
+	// more than a "::VARCHAR" cast in the query (2026-09-17). An oracle
+	// violation has no error text of its own, so its queries are what the
+	// page's vocabulary is matched against.
+	// The engine quotes the expression it refused inside the message
+	// ("join ON residual \"cast((t1.c6) as varchar)\" ..."), and that quoted
+	// text is the query echoed back, not the engine's own vocabulary: with
+	// it left in, 28 of the same run's refusals still matched the same entry
+	// through the "varchar" inside the quotes, and 11 more through the
+	// reformatted repeat of the same expression that follows the colon.
+	// Only the sentence before the first quote is matched.
+	matchSQL := detail + "\n" + strings.Join(roundQueries, "\n")
+	if category == CategoryUnexpectedError {
+		matchSQL = ""
+	}
+	matchErrors := withoutEchoedText(message) + "\n" + strings.Join(causes, "\n")
+	if entry, ok := r.KnownDifferences.Match(matchSQL, matchErrors); ok {
 		category = CategoryKnownDifference
 		reason = entry.Heading
 		reference = fmt.Sprintf("docs/postgres-differences.md:%d", entry.Line)
 	}
 	if len(causes) > 0 {
 		detail += "\n" + strings.Join(causes, "\n")
+	}
+	queries := extractQueries(detail)
+	if len(roundQueries) > 0 {
+		queries = roundQueries
 	}
 	r.incr(category)
 	r.Findings = append(r.Findings, Finding{
@@ -460,7 +492,7 @@ done:
 		Line:        i + 1,
 		Header:      header,
 		Detail:      detail,
-		Queries:     extractQueries(detail),
+		Queries:     queries,
 		OracleCheck: oracleCheck,
 	})
 	return j - 1
@@ -509,4 +541,43 @@ func extractQueries(detail string) []string {
 	}
 	firstLine = strings.TrimPrefix(firstLine, assertionHeaderPrefix)
 	return []string{strings.TrimSpace(firstLine)}
+}
+
+// roundMessage scans the rest of the round's block that starts at lines[j]
+// (up to the next AssertionError header) for the engine's error text and the
+// queries SQLancer recorded with it. The message is returned as
+// "unexpected error with message: <text>" and the queries as their
+// "optimized: ..." / "unoptimized: ..." lines, both without the "-- " echo
+// prefix; empty when the block has neither.
+func roundMessage(lines []string, j int) (string, []string) {
+	const marker = "unexpected error with message: "
+	message := ""
+	var queries []string
+	for ; j < len(lines); j++ {
+		l := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[j]), "--"))
+		if strings.HasPrefix(l, assertionHeaderPrefix) {
+			break
+		}
+		switch {
+		case message == "" && strings.Contains(l, marker):
+			message = l[strings.Index(l, marker):]
+		case strings.HasPrefix(l, "optimized: "), strings.HasPrefix(l, "unoptimized: "):
+			queries = append(queries, l)
+		}
+	}
+	return message, queries
+}
+
+// withoutEchoedText keeps the part of an engine message that is the
+// engine's own sentence: everything before its first double-quoted segment.
+// The quoted segment is the query echoed back, and what follows it restates
+// that expression in a reformatted spelling (the join planner writes
+// `join ON "(<expr>)": <conjunct>, <conjunct> cannot ...`), so neither is
+// vocabulary a known-difference keyword may match. A message with no quoted
+// segment is returned whole.
+func withoutEchoedText(message string) string {
+	if i := strings.Index(message, `"`); i >= 0 {
+		return message[:i] + `"…"`
+	}
+	return message
 }

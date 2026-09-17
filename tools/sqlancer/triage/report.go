@@ -60,6 +60,9 @@ func (r *Report) Print(w io.Writer) {
 			for _, line := range strings.Split(f.Detail, "\n") {
 				fmt.Fprintf(w, "    %s\n", line)
 			}
+			for _, q := range f.Queries {
+				fmt.Fprintf(w, "    query: %s\n", q)
+			}
 		}
 		fmt.Fprintln(w)
 	}
