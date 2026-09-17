@@ -62,7 +62,7 @@ stage, the exchange, the distribution property; see
 SQL text
   → Parser (internal/planner/sql/)        — recursive descent, custom AST
   → Logical Plan (internal/planner/logical/) — tree of typed nodes + rule-based optimizer
-  → Physical Plan (internal/planner/physical/) — executable pipeline(s) + distributed stages
+  → Physical Plan (internal/planner/physical/) — executable local pipeline (ADR-0037 §6)
   → Execution (internal/engine/exec/)      — push-based: Source → [UnaryOps] → Sink
   → Results
 ```

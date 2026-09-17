@@ -233,7 +233,8 @@ func containsJoin(n *logical.Node) bool {
 // sideBlockProjections marks the block Project on each side of this join, so
 // declaredJoinSchema describes the side by the relation it PUBLISHES.
 //
-// It is not `Planner.publishedBlocks`: that set answers "did the DAG's stage
+// It is not `dagplan.StagePlanner.publishedBlocks` (ADR-0037 §6): that set
+// answers "did the DAG's stage
 // materialize this projection", and the question here is the other one — what
 // does this side EMIT — whose answer is the same on both paths, because a
 // Project the DAG did not materialize is still a real operator on the

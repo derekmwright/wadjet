@@ -187,7 +187,7 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 	// The `query_limit` obligations, as one ceiling on the context. The
 	// planner merges it with the deployment's guard where that guard runs, so
 	// there is one enforcement point for both and every door carries it —
-	// including the DAG, which plans through the same Planner.
+	// including dagplan, which shares the local cost walk (ADR-0037 §6).
 	ctx = physical.WithIdentityQueryLimits(ctx, limits)
 	return ctx, plan, nil
 }

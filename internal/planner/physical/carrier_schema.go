@@ -6,22 +6,22 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// Does the stage carrying a predicate or a projection have the COLUMNS to
-// evaluate it?
+// Which column references does a predicate or projection read? These walks
+// collect them from the expression, with an optional stop at a computed column.
 //
-// stageRunsFilterExprs answers a weaker question — does the fragment read the
-// field at all — and a stage can pass that and still answer nothing, because
-// the expression names a column its input does not carry. That is the whole
+// The distributed caller checks whether its fragment receives those columns;
+// that check lives in dagplan/carrier_schema.go after the split (ADR-0037 §6).
+// An expression can name a column its input does not carry. That is the whole
 // #653/#656 failure mode: `expr.ColRef.Eval` returns nil for a name it cannot
 // resolve, the predicate is UNKNOWN on every row, and a WHERE admits only
-// TRUE. Every silent shape in the family looks identical at the stage-type
-// level and different here.
+// TRUE. Collecting the references supplies the caller with the names it needs
+// to compare against the producer's output.
 //
-// The check is deliberately partial. A JOIN's input is the QUALIFIED union of
-// two sides, with per-column origin rules (BuildColOrigins, QualifyAllBuildCols)
-// that only the executor resolves; asserting over it would produce false
-// refusals, which are worse than a narrower gate. Join stages are therefore
-// excluded and named as excluded, rather than silently passing.
+// Collection itself does not decide how a JOIN names its output. A join has
+// two sides, with per-column origin rules that the executor resolves. The
+// caller supplies that interpretation; the walks below only traverse the
+// expression. A stop predicate lets a caller treat a computed expression as
+// one published column instead of reading its original operands again.
 
 // collectColRefs lists every column reference in an expression.
 func collectColRefs(n plansql.Node) []*plansql.ColRef {

@@ -16,7 +16,7 @@ stated.
 |---|---|---|
 | SQL parser | hand-written recursive descent, no parser generator | `internal/planner/sql/`, [ADR-0003](adr/0003-recursive-descent-parser.md) |
 | Logical plan + optimizer | typed node tree, rule-based rewrites, and cost-based join reordering (DP up to 16 relations, greedy beyond) over column statistics populated at ingest or by `ANALYZE TABLE`, with min/max and heuristic fallbacks when neither ran | `internal/planner/logical/optimizer.go:3848`, `stats.go:143-144` (the two populators) and `:152-162` (the min/max fallback) |
-| Physical plan | executable pipelines, and for distributed queries a DAG of stages | `internal/planner/physical/` |
+| Physical plan | executable local pipelines; distributed stage planning is separate (ADR-0037 §6) | `internal/planner/physical/`, `internal/coordinator/dagplan/` |
 | Push-based vectorized execution | Source → UnaryOperator chain → Sink over 2048-row batches, selection vectors instead of copies, type dispatch resolved once per batch into typed kernels | `internal/engine/exec/`, [ADR-0002](adr/0002-push-based-vectorized-execution.md) |
 | Pipeline breakers with spill | hash join (grace partition-on-arrival), hash aggregate (partial-state k-way merge), sort and window (external sorted-run merge) | `internal/engine/exec/`, [ADR-0027](adr/0027-a-spill-gate-proves-it-spilled.md) |
 | Memory budget, never-OOM | shared per-process pool, per-task charges, ownership ledger, OS-facing relief valves | `internal/engine/memory/`, [ADR-0006](adr/0006-never-oom-memory-model.md) |
@@ -84,7 +84,7 @@ github.com/derekmwright/wadjet/
 │   ├── planner/
 │   │   ├── sql/            # Recursive descent SQL parser → SelectInfo
 │   │   ├── logical/        # Logical plan tree + optimizer
-│   │   └── physical/       # Physical plan + distributed stages
+│   │   └── physical/       # Local pipeline planner (ADR-0037 §6)
 │   ├── cli/                # The command tree, persistent flags, config precedence
 │   ├── clid/               # The distributed serve modes (standalone/coordinator/worker)
 │   ├── queryroute/         # The seam pgwire routes SELECT through (coordinator or nothing)
@@ -219,7 +219,7 @@ The optimizer applies rule-based transformations:
 
 ### 4. Physical Planning
 
-The logical plan is converted into executable pipeline stages. In distributed mode, stages are assigned task IDs and dependencies for parallel execution.
+The local planner converts the logical plan into an executable pipeline. The distributed planner in `internal/coordinator/dagplan` builds stages with dependencies for parallel execution (ADR-0037 §6).
 
 ### 5. Pipeline Execution
 
@@ -488,7 +488,8 @@ asynchronously. Any failure falls through to the durable copy. How eagerly those
 [design note](design/shuffle-durability.md)).
 
 Joins take one of three shapes, chosen in the physical planner
-(`internal/planner/physical/join_plan.go` and `stage_emission.go`,
+(`internal/planner/physical/join_plan.go` for size estimates and
+`internal/coordinator/dagplan/stage_emission.go` for placement (ADR-0037 §6),
 sort-merge gate at `sort_merge_join.go:24-45`) from a broadcast threshold the
 coordinator derives from the live worker pool before planning
 (`coordinator.go:1016, 3278`):
