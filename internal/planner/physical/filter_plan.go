@@ -14,7 +14,7 @@ import (
 )
 
 // RecordBatch type alias for convenience
-type RecordBatch = batch.RecordBatch
+type recordBatch = batch.RecordBatch
 
 // buildFilterOp compiles one predicate into a filter operator. It returns an
 // error only for a predicate naming a function that does not exist: every other

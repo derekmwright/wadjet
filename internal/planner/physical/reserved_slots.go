@@ -21,39 +21,39 @@ import (
 // `internal/planner/sql/reserved_slots.go` is therefore the one copy, and it
 // is what a caller outside this package should import. These aliases exist so
 // the code already written against them keeps reading naturally.
-type SlotFamily = plansql.SlotFamily
+type slotFamily = plansql.SlotFamily
 
 const (
-	SlotWindowOutput = plansql.SlotWindowOutput
+	slotWindowOutput = plansql.SlotWindowOutput
 	SlotWindowKey    = plansql.SlotWindowKey
-	SlotSortKey      = plansql.SlotSortKey
+	slotSortKey      = plansql.SlotSortKey
 	SlotGroupKey     = plansql.SlotGroupKey
-	SlotAggInput     = plansql.SlotAggInput
-	SlotNestedAgg    = plansql.SlotNestedAgg
-	SlotScalar       = plansql.SlotScalar
-	SlotHaving       = plansql.SlotHaving
-	SlotTwoLevel     = plansql.SlotTwoLevel
-	SlotSetOpCount   = plansql.SlotSetOpCount
-	SlotAvgSum       = plansql.SlotAvgSum
-	SlotAvgCount     = plansql.SlotAvgCount
-	SlotVarState     = plansql.SlotVarState
-	SlotCovarState   = plansql.SlotCovarState
+	slotAggInput     = plansql.SlotAggInput
+	slotNestedAgg    = plansql.SlotNestedAgg
+	slotScalar       = plansql.SlotScalar
+	slotHaving       = plansql.SlotHaving
+	slotTwoLevel     = plansql.SlotTwoLevel
+	slotSetOpCount   = plansql.SlotSetOpCount
+	slotAvgSum       = plansql.SlotAvgSum
+	slotAvgCount     = plansql.SlotAvgCount
+	slotVarState     = plansql.SlotVarState
+	slotCovarState   = plansql.SlotCovarState
 
-	SlotPreComputedAgg = plansql.SlotPreComputedAgg
+	slotPreComputedAgg = plansql.SlotPreComputedAgg
 	SlotSubsumeFlag    = plansql.SlotSubsumeFlag
-	SlotRowLocator     = plansql.SlotRowLocator
-	SlotRowCountOnly   = plansql.SlotRowCountOnly
-	SlotDefaultPart    = plansql.SlotDefaultPart
+	slotRowLocator     = plansql.SlotRowLocator
+	slotRowCountOnly   = plansql.SlotRowCountOnly
+	slotDefaultPart    = plansql.SlotDefaultPart
 )
 
 // SlotName mints the Nth slot of a family.
-func SlotName(family SlotFamily, n int) string { return plansql.SlotName(family, n) }
+func SlotName(family slotFamily, n int) string { return plansql.SlotName(family, n) }
 
 // ReservedSlotFamily returns the slot prefix name collides with, or "".
-func ReservedSlotFamily(name string) string { return plansql.ReservedSlotFamily(name) }
+func reservedSlotFamily(name string) string { return plansql.ReservedSlotFamily(name) }
 
 // RefuseReservedSlotName is the 42939 refusal for a name a user is CREATING.
-func RefuseReservedSlotName(name, where string) error {
+func checkReservedSlotName(name, where string) error {
 	return plansql.RefuseReservedSlotName(name, where)
 }
 
@@ -62,7 +62,7 @@ func RefuseReservedSlotNames(names []string, where string) error {
 	return plansql.RefuseReservedSlotNames(names, where)
 }
 
-func refuseReservedSlotName(name, where string) error { return RefuseReservedSlotName(name, where) }
+func refuseReservedSlotName(name, where string) error { return checkReservedSlotName(name, where) }
 
 func refuseReservedSlotNames(names []string, where string) error {
 	return RefuseReservedSlotNames(names, where)

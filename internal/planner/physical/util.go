@@ -1253,7 +1253,7 @@ func stampRowLoc(b *batch.RecordBatch, unitIdx int) {
 		loc.Int64Data[i] = base | int64(i)
 	}
 	b.Columns = append(b.Columns[:len(b.Columns):len(b.Columns)], loc)
-	b.Schema = append(b.Schema[:len(b.Schema):len(b.Schema)], parquet.Column{Name: RowLocColumn, Type: parquet.TypeInt64})
+	b.Schema = append(b.Schema[:len(b.Schema):len(b.Schema)], parquet.Column{Name: rowLocColumn, Type: parquet.TypeInt64})
 }
 
 // RefetchRows reads back the full-width rows named by __row_loc values, in

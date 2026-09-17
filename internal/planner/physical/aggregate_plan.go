@@ -82,7 +82,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				syntheticNames[i] = existing
 				continue
 			}
-			synName := SlotName(SlotAggInput, i)
+			synName := SlotName(slotAggInput, i)
 			// WITH THE OUTER SCOPE, exactly as the SELECT-list projection
 			// site compiles its own expressions (see the CompileWith*
 			// ladder above). Without it this site asked for none, so a

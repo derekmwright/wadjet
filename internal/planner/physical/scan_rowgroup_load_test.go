@@ -448,7 +448,7 @@ func TestSlabsAreReusedAcrossFilesOfSimilarShape(t *testing.T) {
 	// rounding costs a fraction of every buffer forever.
 	inner := &scanSourceInner{}
 	for _, n := range append(append([]int{}, sameShape...), 1, 4095, 1<<20) {
-		ResetSlabPoolsForTest() // so this getSlab is an allocation, not a reuse
+		resetSlabPoolsForTest() // so this getSlab is an allocation, not a reuse
 		buf := inner.getSlab(n)
 		if cap(buf) != n {
 			t.Fatalf("a %d-byte row group was allocated with cap %d — a fresh buffer is the row "+

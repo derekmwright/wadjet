@@ -81,20 +81,20 @@ func TestTightestLimitsNarrowsAndNeverWidens(t *testing.T) {
 // auth.EnforcePlanPolicies puts the ceiling on the context after every planner
 // has been built, and enforceQueryLimits reads it back where the guard runs.
 func TestIdentityQueryLimitsRideTheContext(t *testing.T) {
-	if got := IdentityQueryLimitsFromContext(context.Background()); got != nil {
+	if got := identityQueryLimitsFromContext(context.Background()); got != nil {
 		t.Errorf("a bare context carries %+v, want nil", got)
 	}
-	if got := IdentityQueryLimitsFromContext(nil); got != nil { //nolint:staticcheck // nil is a caller shape
+	if got := identityQueryLimitsFromContext(nil); got != nil { //nolint:staticcheck // nil is a caller shape
 		t.Errorf("a nil context carries %+v, want nil", got)
 	}
 	// A nil ceiling does not put a typed nil on the context, which would make
 	// the merge see a guard of all zeroes rather than no guard at all.
-	if ctx := WithIdentityQueryLimits(context.Background(), nil); IdentityQueryLimitsFromContext(ctx) != nil {
+	if ctx := WithIdentityQueryLimits(context.Background(), nil); identityQueryLimitsFromContext(ctx) != nil {
 		t.Error("WithIdentityQueryLimits(ctx, nil) put something on the context")
 	}
 	lim := &config.QueryLimits{MaxScanRows: 3}
 	ctx := WithIdentityQueryLimits(context.Background(), lim)
-	if got := IdentityQueryLimitsFromContext(ctx); got != lim {
+	if got := identityQueryLimitsFromContext(ctx); got != lim {
 		t.Errorf("the context carries %+v, want the ceiling that was put on it", got)
 	}
 }

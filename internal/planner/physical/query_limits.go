@@ -70,7 +70,7 @@ const QueryLimitSQLState = "53400"
 // obligation puts on the context. See identity_limits.go for why the two
 // arrive by different routes and meet here.
 func (p *Planner) EnforceQueryLimits(ctx context.Context, node *logical.Node) error {
-	limits := tightestLimits(p.QueryLimits, IdentityQueryLimitsFromContext(ctx))
+	limits := tightestLimits(p.QueryLimits, identityQueryLimitsFromContext(ctx))
 	if limits == nil {
 		return nil
 	}

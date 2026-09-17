@@ -27,7 +27,7 @@ import (
 
 // ScanRowGroupBuffers is the kill switch for row-group-at-a-time file loads.
 // Off, every scan takes the whole-file read this replaced.
-var ScanRowGroupBuffers = optswitch.Register("scan-rg-buffers", "WADJET_SCAN_RG_BUFFERS",
+var scanRowGroupBuffers = optswitch.Register("scan-rg-buffers", "WADJET_SCAN_RG_BUFFERS",
 	"land a scan's parquet file into one buffer per row group, charged and released per row group, instead of one whole-file buffer")
 
 // Engagement counters. A row set cannot tell "read row group at a time" from
@@ -60,18 +60,18 @@ var (
 
 // RowGroupSlabReleases is how many row-group buffers this process has returned
 // to the pool. See rgSlabReleases.
-func RowGroupSlabReleases() int64 { return rgSlabReleases.Load() }
+func rowGroupSlabReleases() int64 { return rgSlabReleases.Load() }
 
 // RowGroupSlabAllocs is how many row-group buffers this process has allocated
 // rather than taken from a pool. See rgSlabAllocs.
-func RowGroupSlabAllocs() int64 { return rgSlabAllocs.Load() }
+func rowGroupSlabAllocs() int64 { return rgSlabAllocs.Load() }
 
 // ResetSlabPoolsForTest empties every size-class bucket. TEST-ONLY: the pool is
 // process-wide, so a gate that asserts an exact reuse or allocation count has
 // to start from a state it owns — otherwise it reads whatever the test before
 // it left in the bucket, which made the reuse gate fail two runs in three
 // under -race.
-func ResetSlabPoolsForTest() {
+func resetSlabPoolsForTest() {
 	slabPoolMu.Lock()
 	defer slabPoolMu.Unlock()
 	slabPools = map[int]*sync.Pool{}
@@ -79,7 +79,7 @@ func ResetSlabPoolsForTest() {
 
 // RowGroupSlabReuses is how many row-group buffers this process has taken back
 // out of a pool. See rgSlabReuses.
-func RowGroupSlabReuses() int64 { return rgSlabReuses.Load() }
+func rowGroupSlabReuses() int64 { return rgSlabReuses.Load() }
 
 // RowGroupLoadStats returns how many parquet file loads this process has done
 // row group at a time and how many took the whole-file read, since start.
@@ -374,7 +374,7 @@ var poisonReleasedSlabs atomic.Bool
 
 // PoisonReleasedSlabs turns that on and returns the previous setting.
 // Test-only in spirit; production never calls it.
-func PoisonReleasedSlabs(on bool) (prev bool) { return poisonReleasedSlabs.Swap(on) }
+func setPoisonReleasedSlabs(on bool) (prev bool) { return poisonReleasedSlabs.Swap(on) }
 
 // getSlab/putSlab reuse buffers within one scan source using power-of-two
 // classes of each ROW GROUP's own byte range, with no minimum size.
@@ -485,7 +485,7 @@ func slabBucket(class int) *sync.Pool {
 // caller should take the whole-file path instead. It installs nothing on the
 // slot — the caller does that once it has the load gate's admission.
 func (s *fileSlot) tryRowGroupLoad(inner *scanSourceInner, ctx context.Context) (*parquet.FileReader, *rgSlabs) {
-	if !ScanRowGroupBuffers.On() || len(s.wantRG) == 0 || s.entry.SizeBytes <= 0 || inner.cat == nil {
+	if !scanRowGroupBuffers.On() || len(s.wantRG) == 0 || s.entry.SizeBytes <= 0 || inner.cat == nil {
 		return nil, nil
 	}
 	// The footer must already be decoded: reading it from the object here

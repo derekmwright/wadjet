@@ -186,7 +186,7 @@ type ManifestSnapshotCtxKey struct{}
 
 // ManifestSnapshotFromContext returns the snapshot WithManifestSnapshot
 // attached, or nil if ctx carries none.
-func ManifestSnapshotFromContext(ctx context.Context) *ManifestSnapshot {
+func manifestSnapshotFromContext(ctx context.Context) *ManifestSnapshot {
 	snap, _ := ctx.Value(ManifestSnapshotCtxKey{}).(*ManifestSnapshot)
 	return snap
 }
@@ -199,7 +199,7 @@ func ManifestSnapshotFromContext(ctx context.Context) *ManifestSnapshot {
 // silently opts that Planner instance out of the statement's pin.
 func NewPlannerForContext(ctx context.Context, cat *catalog.Catalog) *Planner {
 	p := NewPlanner(cat)
-	if snap := ManifestSnapshotFromContext(ctx); snap != nil {
+	if snap := manifestSnapshotFromContext(ctx); snap != nil {
 		p.ManifestSnapshot = snap
 	}
 	return p

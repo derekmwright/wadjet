@@ -105,8 +105,8 @@ func aliasFixture(t *testing.T, rowSets ...[]map[string]any) (*catalog.Catalog, 
 
 func TestABatchOutlivesItsRowGroupsBuffer(t *testing.T) {
 	const rgs, rowsPerRG = 8, 150
-	prevPoison := PoisonReleasedSlabs(true)
-	defer PoisonReleasedSlabs(prevPoison)
+	prevPoison := setPoisonReleasedSlabs(true)
+	defer setPoisonReleasedSlabs(prevPoison)
 
 	sets := make([][]map[string]any, rgs)
 	for i := range sets {
@@ -121,7 +121,7 @@ func TestABatchOutlivesItsRowGroupsBuffer(t *testing.T) {
 		errCh:   make(chan error, 1),
 	}
 	slot := rowGroupSlot(t, inner, cat, entry, rgs)
-	releasesBefore := RowGroupSlabReleases()
+	releasesBefore := rowGroupSlabReleases()
 
 	var rowOff int64
 	for i := 0; i < rgs; i++ {
@@ -177,7 +177,7 @@ func TestABatchOutlivesItsRowGroupsBuffer(t *testing.T) {
 			}
 		}
 	}
-	if rel := RowGroupSlabReleases() - releasesBefore; rel < int64(rgs) {
+	if rel := rowGroupSlabReleases() - releasesBefore; rel < int64(rgs) {
 		t.Fatalf("%d of %d row-group buffers were released during this scan — every batch below "+
 			"has to have been live while its own buffer went back to the pool, or nothing is "+
 			"being tested", rel, rgs)
@@ -208,8 +208,8 @@ func TestABatchOutlivesItsRowGroupsBuffer(t *testing.T) {
 // assumed — and it depends on nothing but putSlab, so it cannot flake on
 // sync.Pool's willingness to hand a buffer back.
 func TestAReleasedSlabIsActuallyPoisoned(t *testing.T) {
-	prevPoison := PoisonReleasedSlabs(true)
-	defer PoisonReleasedSlabs(prevPoison)
+	prevPoison := setPoisonReleasedSlabs(true)
+	defer setPoisonReleasedSlabs(prevPoison)
 	inner := &scanSourceInner{}
 	buf := inner.getSlab(4096)
 	for i := range buf {

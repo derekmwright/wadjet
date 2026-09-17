@@ -35,7 +35,7 @@ import (
 // RowLocColumn is the synthetic column carrying (rgUnit ordinal << 32 |
 // row-in-group) through the narrow phase. The "__" prefix keeps it out of
 // user column namespaces (sanitizeScanNeeds already passes such names).
-const RowLocColumn = "__row_loc"
+const rowLocColumn = "__row_loc"
 
 const (
 	// lateMatMinSavedCols: engage only when the narrow phase avoids
@@ -245,13 +245,13 @@ func (s *topNLateMatSource) Next(ctx context.Context) (*batch.RecordBatch, error
 			}
 			if locIdx < 0 {
 				for i, c := range b.Schema {
-					if c.Name == RowLocColumn {
+					if c.Name == rowLocColumn {
 						locIdx = i
 						break
 					}
 				}
 				if locIdx < 0 {
-					return nil, fmt.Errorf("top-N late materialization: %s column missing from sorted output", RowLocColumn)
+					return nil, fmt.Errorf("top-N late materialization: %s column missing from sorted output", rowLocColumn)
 				}
 			}
 			vec := b.Columns[locIdx]
