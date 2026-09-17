@@ -40,10 +40,11 @@ go build -o wadjetd ./cmd/wadjetd       # the distributed server
 
 Two binaries, two licenses ([LICENSING.md](../LICENSING.md)). `wadjet`
 carries the command line and the embedded server — `query`, `shell`,
-`tables`, `serve` — and is MIT. `wadjetd` carries the distributed server,
-`serve --mode=standalone|coordinator|worker`, and is AGPL-3.0 with a
-commercial option. Everything below that does not start a cluster works with
-`wadjet` alone.
+`tables`, `serve` — plus `create-table`, `drop-table`, `compact`, `catalog`,
+`clusters` and `mcp`. `wadjetd` carries all the same CLI commands and the
+distributed server: `serve --mode=standalone`, `serve --mode=coordinator` or
+`serve --mode=worker`. The HTTP and gRPC examples below need `wadjetd`; the
+embedded server and the other CLI commands work with `wadjet` alone.
 
 ### As a Go Library
 
@@ -194,8 +195,8 @@ and is one of the two settings with no out-of-tree constructor; see
 The rest of this guide covers the **server** deployment — the same engine
 behind a `serve` command, speaking the PostgreSQL wire protocol, HTTP, and
 gRPC, backed by managed object storage. `wadjet serve` answers the wire
-protocol from one process; `wadjetd serve --mode=...` adds the coordinator,
-the workers and the HTTP and gRPC listeners.
+protocol from one process; `wadjetd serve --mode=standalone` adds the coordinator,
+the worker and the HTTP and gRPC listeners.
 
 ## Start MinIO (Local Development)
 

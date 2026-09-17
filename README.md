@@ -9,7 +9,7 @@ Wadjet is a distributed SQL analytics engine for Go. Embed it directly in your G
 - **No coordinator bottleneck** — the coordinator plans queries and schedules tasks; workers read from and write results to object storage directly. The one exception is the small-query fast path, which executes queries under `--local-fastpath-bytes` in-process on the coordinator.
 - **Fast start, small idle footprint** — a standalone process (embedded NATS + coordinator + worker) answers on the PostgreSQL wire protocol a measured 43 ms after exec and idles at ~46 MiB RSS; a worker process idles at ~33 MiB. Method and machine: [Benchmarks index § Local process measurements](docs/benchmarks/README.md#local-process-measurements-2026-09-03).
 - **Memory is a budget, not a requirement** — every pipeline breaker (hash join, hash aggregate, sort, window) spills to disk past its per-task `--memory-budget`, and a heap-pressure valve spills again if the process itself is running out of room, so degradation is slowdown rather than process death ([ADR-0006](docs/adr/0006-never-oom-memory-model.md), [ADR-0027](docs/adr/0027-a-spill-gate-proves-it-spilled.md)). Measured: the 22-query TPC-H SF1 suite completes single-process with the Go heap capped at 1 GiB — 10 pressure spills, 1.35 GiB peak RSS, identical answers, 3.2–5.0× the query time of the same suite uncapped (two single runs) ([method](docs/benchmarks/README.md#local-process-measurements-2026-09-03)).
-- **Single binary** — run standalone for development or split into coordinator + workers for production.
+- **Two binaries** — `wadjet` runs the embedded server; `wadjetd` runs standalone for development or splits into coordinator + workers for production ([LICENSING.md](LICENSING.md)).
 - **Pure Go** — no JVM, no CGo, no external query engine dependencies. Custom recursive descent SQL parser, vectorized batch execution, typed kernel dispatch.
 - **Network-native types** — first-class IPv4, IPv6, CIDR, MAC, Port, and Protocol column types with 100+ network functions covering CIDR math, deep packet inspection, ICMP analysis, IPv6 tunneling, JA3/JA3S TLS fingerprinting, payload search, and GeoIP/ASN enrichment (MaxMind).
 - **Nested types** — ARRAY, ROW/STRUCT, and MAP column types with dot-notation field access, array functions, and full Parquet round-trip.
@@ -46,8 +46,8 @@ the roles when one machine stops being enough:
 
 ```bash
 wadjetd serve --mode=standalone                       # embedded NATS + coordinator + worker
-wadjetd serve --mode=coordinator --nats-url=...       # plans, dispatches, merges
-wadjetd serve --mode=worker      --nats-url=...       # executes fragments, scale horizontally
+wadjetd serve --mode=coordinator --nats-url=nats://localhost:4222       # plans, dispatches, merges
+wadjetd serve --mode=worker      --nats-url=nats://localhost:4222       # executes fragments, scale horizontally
 ```
 
 Both paths consume the identical optimized logical plan; what changes is
