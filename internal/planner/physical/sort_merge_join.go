@@ -34,7 +34,7 @@ func (p *Planner) ShouldSortMergeJoin(node *logical.Node, leftKeys, rightKeys []
 	// (exec.SortMergeJoin.resolveCompareKernels); it has no equivalent of the
 	// hash path's per-side widened key encoder. Declining routes the query to
 	// the hash join, which answers it — a plan choice, not a refusal.
-	for _, t := range ResolveJoinKeyTypes(node, leftKeys, rightKeys, p.CteKeyColTypes) {
+	for _, t := range resolveJoinKeyTypes(node, leftKeys, rightKeys, p.CteKeyColTypes) {
 		if t != exec.KeyTypeUnresolved {
 			return false
 		}
@@ -61,7 +61,7 @@ func (p *Planner) buildSortMergeJoin(ctx context.Context, node *logical.Node, le
 	j := exec.NewSortMergeJoin(leftKeys, rightKeys)
 
 	// Set build-side table alias for column disambiguation in self-joins
-	if alias := JoinArmAlias(node.Children[1]); alias != "" {
+	if alias := joinArmAlias(node.Children[1]); alias != "" {
 		j.BuildTableAlias = alias
 	}
 	// Multi-table build subtrees carry per-column origin aliases so each

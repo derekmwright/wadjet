@@ -22,9 +22,9 @@ import (
 // fragments compiled from older coordinator plans.
 // See docs/internals/real-in-list-plan-time-refusal.md for the design.
 
-// RefuseUnrepresentableRealInList reports the first `real IN (...)` list in the
+// refuseUnrepresentableRealInList reports the first `real IN (...)` list in the
 // plan holding a finite literal past real's range.
-func RefuseUnrepresentableRealInList(root *logical.Node) error {
+func refuseUnrepresentableRealInList(root *logical.Node) error {
 	return walkRealInLists(root)
 }
 

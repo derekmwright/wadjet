@@ -23,12 +23,12 @@ import (
 // refusals, which are worse than a narrower gate. Join stages are therefore
 // excluded and named as excluded, rather than silently passing.
 
-// CollectColRefs lists every column reference in an expression.
-func CollectColRefs(n plansql.Node) []*plansql.ColRef {
-	return CollectColRefsBelow(n, nil)
+// collectColRefs lists every column reference in an expression.
+func collectColRefs(n plansql.Node) []*plansql.ColRef {
+	return collectColRefsBelow(n, nil)
 }
 
-// CollectColRefsBelow is CollectColRefs with a STOP predicate: a node the
+// collectColRefsBelow is CollectColRefs with a STOP predicate: a node the
 // predicate accepts is a column in its own right, and its children are not
 // references at all.
 //
@@ -41,7 +41,7 @@ func CollectColRefs(n plansql.Node) []*plansql.ColRef {
 // `WITH a AS (SELECT g+1 AS gk, COUNT(*) AS n FROM t GROUP BY g+1 HAVING
 // g+1 > 2) SELECT gk, n FROM a WHERE gk > 3` outright, on a plan whose
 // fragment computes it correctly.
-func CollectColRefsBelow(n plansql.Node, stop func(plansql.Node) bool) []*plansql.ColRef {
+func collectColRefsBelow(n plansql.Node, stop func(plansql.Node) bool) []*plansql.ColRef {
 	var out []*plansql.ColRef
 	var walk func(plansql.Node)
 	walk = func(n plansql.Node) {

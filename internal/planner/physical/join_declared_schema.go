@@ -270,10 +270,10 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 	return out
 }
 
-// JoinSideSchemas returns the declared probe- and build-side schemas for a
+// joinSideSchemas returns the declared probe- and build-side schemas for a
 // join node: the columns downstream needs plus the join keys, which is
 // exactly what the shuffle carries for each side.
-func JoinSideSchemas(node *logical.Node, leftKeys, rightKeys []string,
+func joinSideSchemas(node *logical.Node, leftKeys, rightKeys []string,
 	published map[*logical.Node]bool, subqueryDecl func(string) (parquet.Column, bool)) (probe, build []parquet.Column) {
 	if node == nil || len(node.Children) < 2 {
 		return nil, nil

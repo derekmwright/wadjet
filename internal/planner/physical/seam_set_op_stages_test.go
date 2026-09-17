@@ -18,7 +18,7 @@ func TestAlignSetOpRows(t *testing.T) {
 	right := []parquet.Column{{Name: "x", Type: parquet.TypeInt64}, {Name: "y", Type: parquet.TypeString}}
 	rows := []map[string]any{{"x": int64(1), "y": "one"}, {"x": int64(2), "y": "two"}}
 
-	got := AlignSetOpRows(left, right, rows)
+	got := alignSetOpRows(left, right, rows)
 	if len(got) != 2 {
 		t.Fatalf("got %d rows, want 2", len(got))
 	}
@@ -30,12 +30,12 @@ func TestAlignSetOpRows(t *testing.T) {
 	}
 
 	// Identical schemas are returned untouched (same backing slice).
-	same := AlignSetOpRows(left, left, rows)
+	same := alignSetOpRows(left, left, rows)
 	if &same[0] != &rows[0] {
 		t.Error("matching schemas were needlessly re-keyed")
 	}
 	// A width mismatch is malformed, not something to paper over.
-	if got := AlignSetOpRows(left, right[:1], rows); &got[0] != &rows[0] {
+	if got := alignSetOpRows(left, right[:1], rows); &got[0] != &rows[0] {
 		t.Error("mismatched widths were re-keyed")
 	}
 }

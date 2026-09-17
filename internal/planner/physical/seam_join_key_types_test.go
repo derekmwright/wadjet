@@ -73,7 +73,7 @@ func TestJoinKeyLadderMatchesPostgresOperatorResolution(t *testing.T) {
 		{parquet.TypeBool, i32, 0, false},
 	}
 	for _, c := range cases {
-		got, ok := JoinKeyCommonType(c.a, c.b)
+		got, ok := joinKeyCommonType(c.a, c.b)
 		if ok != c.ok || (ok && got != c.want) {
 			t.Errorf("joinKeyCommonType(%v, %v) = (%v, %v), want (%v, %v)",
 				c.a, c.b, got, ok, c.want, c.ok)
@@ -84,8 +84,8 @@ func TestJoinKeyLadderMatchesPostgresOperatorResolution(t *testing.T) {
 	// physical.AssignJoinKeySides' swap would change the answer.
 	for _, a := range []parquet.TypeID{i32, i64, f32, f64, dec} {
 		for _, b := range []parquet.TypeID{i32, i64, f32, f64, dec} {
-			ab, aok := JoinKeyCommonType(a, b)
-			ba, bok := JoinKeyCommonType(b, a)
+			ab, aok := joinKeyCommonType(a, b)
+			ba, bok := joinKeyCommonType(b, a)
 			if aok != bok || ab != ba {
 				t.Errorf("asymmetric: (%v,%v)=(%v,%v) but (%v,%v)=(%v,%v)",
 					a, b, ab, aok, b, a, ba, bok)
@@ -116,7 +116,7 @@ func TestResolveJoinKeyTypesDeclinesWhatItCannotType(t *testing.T) {
 		n := join(
 			scan("a", map[string]parquet.TypeID{"x": parquet.TypeInt64}),
 			scan("b", map[string]parquet.TypeID{"y": parquet.TypeInt64}))
-		if got := ResolveJoinKeyTypes(n, []string{"a.x"}, []string{"b.y"}, nil); got != nil {
+		if got := resolveJoinKeyTypes(n, []string{"a.x"}, []string{"b.y"}, nil); got != nil {
 			t.Errorf("a same-type pair resolved %v, want nil — the operator must keep "+
 				"the exact path it had before", got)
 		}
@@ -125,7 +125,7 @@ func TestResolveJoinKeyTypesDeclinesWhatItCannotType(t *testing.T) {
 		n := join(
 			scan("a", map[string]parquet.TypeID{"x": parquet.TypeInt64}),
 			scan("b", map[string]parquet.TypeID{"y": parquet.TypeDecimal}))
-		got := ResolveJoinKeyTypes(n, []string{"a.x"}, []string{"b.y"}, nil)
+		got := resolveJoinKeyTypes(n, []string{"a.x"}, []string{"b.y"}, nil)
 		if len(got) != 1 || got[0] != parquet.TypeDecimal {
 			t.Errorf("int64 vs DECIMAL resolved %v, want [DECIMAL]", got)
 		}
@@ -134,7 +134,7 @@ func TestResolveJoinKeyTypesDeclinesWhatItCannotType(t *testing.T) {
 		n := join(
 			scan("a", map[string]parquet.TypeID{"x": parquet.TypeInt64}),
 			scan("b", map[string]parquet.TypeID{"y": parquet.TypeDecimal}))
-		if got := ResolveJoinKeyTypes(n, []string{"a.nosuch"}, []string{"b.y"}, nil); got != nil {
+		if got := resolveJoinKeyTypes(n, []string{"a.nosuch"}, []string{"b.y"}, nil); got != nil {
 			t.Errorf("an unresolvable key resolved %v, want nil", got)
 		}
 	})
@@ -147,7 +147,7 @@ func TestResolveJoinKeyTypesDeclinesWhatItCannotType(t *testing.T) {
 			scan("a1", map[string]parquet.TypeID{"x": parquet.TypeInt64}),
 			scan("a2", map[string]parquet.TypeID{"x": parquet.TypeFloat32}))
 		n := join(inner, scan("b", map[string]parquet.TypeID{"y": parquet.TypeDecimal}))
-		if got := ResolveJoinKeyTypes(n, []string{"x"}, []string{"b.y"}, nil); got != nil {
+		if got := resolveJoinKeyTypes(n, []string{"x"}, []string{"b.y"}, nil); got != nil {
 			t.Errorf("an ambiguous key resolved %v, want nil", got)
 		}
 	})
@@ -158,7 +158,7 @@ func TestResolveJoinKeyTypesDeclinesWhatItCannotType(t *testing.T) {
 		n := join(
 			scan("a", map[string]parquet.TypeID{"x": parquet.TypeInt64, "s": parquet.TypeString}),
 			scan("b", map[string]parquet.TypeID{"y": parquet.TypeFloat64, "t": parquet.TypeString}))
-		got := ResolveJoinKeyTypes(n, []string{"a.x", "a.s"}, []string{"b.y", "b.t"}, nil)
+		got := resolveJoinKeyTypes(n, []string{"a.x", "a.s"}, []string{"b.y", "b.t"}, nil)
 		if len(got) != 2 || got[0] != parquet.TypeFloat64 || got[1] != exec.KeyTypeUnresolved {
 			t.Errorf("resolved %v, want [FLOAT64 unresolved]", got)
 		}
@@ -178,7 +178,7 @@ func TestResolveJoinKeyTypesDeclinesWhatItCannotType(t *testing.T) {
 			},
 		}
 		n := join(scan("a", map[string]parquet.TypeID{"x": parquet.TypeDecimal}), build)
-		got := ResolveJoinKeyTypes(n, []string{"a.x"}, []string{"b.y"}, nil)
+		got := resolveJoinKeyTypes(n, []string{"a.x"}, []string{"b.y"}, nil)
 		if len(got) != 1 || got[0] != parquet.TypeDecimal {
 			t.Errorf("a DECIMAL probe against a projected BIGINT build resolved %v, "+
 				"want [DECIMAL] — a nil here is the panic coming back", got)
@@ -248,7 +248,7 @@ func TestJoinSideColTypesSeesThroughRebindingNodes(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := JoinSideColTypes(c.side, nil)
+			got := joinSideColTypes(c.side, nil)
 			if got == nil {
 				t.Fatalf("resolved nothing; a nil map here is the pre-review decline that "+
 					"reinstates isIntKeyColumn(own) — the gate #615 replaces (key %q)", c.key)
@@ -275,7 +275,7 @@ func TestJoinSideColTypesDropsANameTwoScansDisagreeAbout(t *testing.T) {
 	side := &logical.Node{Type: logical.NodeJoin, JoinType: "inner", Children: []*logical.Node{
 		mk("x", parquet.TypeInt64), mk("x", parquet.TypeFloat32),
 	}}
-	if tp, ok := JoinSideColTypes(side, nil)["x"]; ok {
+	if tp, ok := joinSideColTypes(side, nil)["x"]; ok {
 		t.Errorf("a name two scans disagree about resolved to %v; it must be dropped", tp)
 	}
 }

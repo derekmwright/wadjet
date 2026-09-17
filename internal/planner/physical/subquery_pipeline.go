@@ -77,7 +77,7 @@ func (p *Planner) forSubquery() *Planner {
 // the type the subquery answers rather than by the bytes of the box (#696).
 //
 // It plans the subquery's SQL — parse, logical build, annotate — and reads
-// DeclaredOutputSchema, the same walk the top-level statement's own output
+// declaredOutputSchema, the same walk the top-level statement's own output
 // schema comes from. No execution: the question is the TYPE, and the value is
 // resolved once at evaluation as it always was. A subquery that does not
 // resolve to exactly one column answers ok=false and the comparison keeps the
@@ -142,7 +142,7 @@ func (p *Planner) SubqueryOutputArity(sql string) (n int, ok bool) {
 		return 0, false
 	}
 	p.AnnotateScanColumns(ctx, plan)
-	schema := DeclaredOutputSchema(plan, p.SubqueryOutputColumn)
+	schema := declaredOutputSchema(plan, p.SubqueryOutputColumn)
 	if len(schema) == 0 {
 		// A shape this walk cannot name — a star it could not expand, a
 		// projection it cannot read. Not-known, and the row-count backstop
@@ -152,7 +152,7 @@ func (p *Planner) SubqueryOutputArity(sql string) (n int, ok bool) {
 	return len(schema), true
 }
 
-// DeclaredOutputSchema is the PLAN-TIME declaration of a statement's output
+// declaredOutputSchema is the PLAN-TIME declaration of a statement's output
 // columns — the same walk `Plan` stamps on a single-process pipeline as
 // `Plan.OutputSchema` — for a door that assembles a result set from batches it
 // may not have.
@@ -196,7 +196,7 @@ func (p *Planner) DeclaredOutputSchema(plan *logical.Node) []parquet.Column {
 		p.Ctes = plan.CTEs
 		defer func() { p.Ctes = saved }()
 	}
-	return DeclaredOutputSchema(plan, p.SubqueryOutputColumn)
+	return declaredOutputSchema(plan, p.SubqueryOutputColumn)
 }
 
 // subqueryOutputColumn resolves a scalar subquery's single declared output
@@ -213,7 +213,7 @@ func (p *Planner) SubqueryOutputColumn(sql string) (col parquet.Column, ok bool)
 	if plan == nil {
 		return parquet.Column{}, false
 	}
-	schema := DeclaredOutputSchema(plan, p.SubqueryOutputColumn)
+	schema := declaredOutputSchema(plan, p.SubqueryOutputColumn)
 	if len(schema) != 1 {
 		// Not a scalar subquery's shape. Declining is the honest answer: a
 		// wrong declaration here would pick a comparison RULE, which is worse
@@ -395,7 +395,7 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 	// The trim is the same operator the top-level statement gets, from the
 	// same plan, so the two paths cannot disagree about which columns a
 	// SELECT list has.
-	if trim := HiddenSortTrimOp(logicalPlan); trim != nil {
+	if trim := hiddenSortTrimOp(logicalPlan); trim != nil {
 		ops = append(ops, trim)
 	}
 	return source, ops, sink, nil

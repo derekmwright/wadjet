@@ -168,7 +168,7 @@ func TestDecimalChoiceExpressionsDeclareTheCommonType(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse %q: %v", tc.sql, err)
 			}
-			got, c := NodeDeclaredType(node, decls)
+			got, c := nodeDeclaredType(node, decls)
 			if got != tc.want || c != tc.wantC {
 				t.Errorf("%s\n  declared (%v, %s), want (%v, %s)", tc.sql, got, c, tc.want, tc.wantC)
 			}
@@ -255,7 +255,7 @@ func TestDecimalArithmeticDeclaresTheResultType(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse %q: %v", tc.sql, err)
 			}
-			got, c := NodeDeclaredType(node, decls)
+			got, c := nodeDeclaredType(node, decls)
 			if got != tc.want || c != expr.Decided {
 				t.Errorf("%s: declared (%v, %s), want (%v, DECIDED)", tc.sql, got, c, tc.want)
 			}
@@ -307,7 +307,7 @@ func TestDecimalCastDeclaresItsDestination(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse %q: %v", tc.sql, err)
 			}
-			got, c := NodeDeclaredType(node, decls)
+			got, c := nodeDeclaredType(node, decls)
 			if got != tc.want || c != expr.Decided {
 				t.Errorf("%s: declared (%v, %s), want (%v, DECIDED)", tc.sql, got, c, tc.want)
 			}
@@ -358,7 +358,7 @@ func TestWindowSpecOutputTypeResolvesDecimal(t *testing.T) {
 		{"avg over an int8 is numeric", "avg", "n", expr.DeclDecimal(38, 4)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := WindowSpecOutputType(win, logical.WindowExpr{Func: tc.fn, InputCol: tc.input, OutputCol: "w"})
+			got := windowSpecOutputType(win, logical.WindowExpr{Func: tc.fn, InputCol: tc.input, OutputCol: "w"})
 			if got != tc.want {
 				t.Errorf("%s(%s) declared %v, want %v", tc.fn, tc.input, got, tc.want)
 			}
@@ -407,7 +407,7 @@ func TestDecimalFoldDeclinesOverAnUnknownProducer(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse %q: %v", tc.sql, err)
 			}
-			got, c := NodeDeclaredType(node, decls)
+			got, c := nodeDeclaredType(node, decls)
 			if got != tc.want || c != tc.wantC {
 				t.Errorf("%s\n  declared (%v, %s), want (%v, %s)", tc.sql, got, c, tc.want, tc.wantC)
 			}
@@ -446,7 +446,7 @@ func TestNestedChoiceDeclarationIsLinearInDepth(t *testing.T) {
 				t.Fatalf("parse %s depth %d: %v", fn, depth, err)
 			}
 			start := time.Now()
-			got, c := NodeDeclaredType(node, decls)
+			got, c := nodeDeclaredType(node, decls)
 			if elapsed := time.Since(start); elapsed > time.Second {
 				t.Fatalf("%s nested %d deep took %v to declare — the argument walk is "+
 					"exponential in depth again", fn, depth, elapsed)
@@ -469,7 +469,7 @@ func TestNestedChoiceDeclarationIsLinearInDepth(t *testing.T) {
 		t.Fatalf("parse nested CASE: %v", err)
 	}
 	start := time.Now()
-	if got, c := NodeDeclaredType(node, decls); got != expr.DeclDecimal(18, 4) || c != expr.Decided {
+	if got, c := nodeDeclaredType(node, decls); got != expr.DeclDecimal(18, 4) || c != expr.Decided {
 		t.Errorf("nested CASE declared (%v, %s), want (DECIMAL(18,4), DECIDED)", got, c)
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {

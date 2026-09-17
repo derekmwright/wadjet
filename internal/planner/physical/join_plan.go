@@ -230,7 +230,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		var residual []string
 		leftKeys, rightKeys, residual = ParseJoinKeys(node.JoinCond)
 		if len(residual) > 0 {
-			return nil, nil, nil, RefuseJoinCond(jt, node.JoinCond, residual)
+			return nil, nil, nil, refuseJoinCond(jt, node.JoinCond, residual)
 		}
 		if len(leftKeys) == 0 && !outerResidual {
 			return nil, nil, nil, fmt.Errorf("could not extract join keys from: %s", node.JoinCond)
@@ -257,10 +257,10 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// which the integer / bloom fast paths are gated on (#615, ADR-0023).
 	// Nil for every join whose key types already agree — every TPC-H join —
 	// and the operator then behaves exactly as it did.
-	hj.KeyTypes = ResolveJoinKeyTypes(node, leftKeys, rightKeys, p.CteKeyColTypes)
+	hj.KeyTypes = resolveJoinKeyTypes(node, leftKeys, rightKeys, p.CteKeyColTypes)
 
 	// Set build-side table alias for column disambiguation in self-joins
-	if alias := JoinArmAlias(node.Children[1]); alias != "" {
+	if alias := joinArmAlias(node.Children[1]); alias != "" {
 		hj.BuildTableAlias = alias
 	}
 	// Multi-table build subtrees carry per-column origin aliases so each
@@ -322,7 +322,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		AssignJoinKeySides(leftKeys, rightKeys,
 			SubtreeNamingOf(node.Children[0]), SubtreeNamingOf(node.Children[1]))
 		// Update build-side alias + origins after swap
-		if alias := JoinArmAlias(node.Children[1]); alias != "" {
+		if alias := joinArmAlias(node.Children[1]); alias != "" {
 			hj.BuildTableAlias = alias
 		}
 		hj.BuildColOrigins = SubtreeNamingOf(node.Children[1]).MaterializedBuildColOrigins()
@@ -336,7 +336,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// Project is a real operator, so a hint read from the scan below it
 	// described an EMPTY side by columns the full side never emits — eight
 	// columns for PostgreSQL's five (round-1 P2).
-	hj.ProbeSchemaHint, hj.BuildSchemaHint = JoinSideSchemas(node, hj.LeftKeys, hj.RightKeys,
+	hj.ProbeSchemaHint, hj.BuildSchemaHint = joinSideSchemas(node, hj.LeftKeys, hj.RightKeys,
 		sideBlockProjections(node), p.SubqueryOutputColumn)
 
 	// For semi/anti joins without a filter, enable key-only build:
@@ -353,7 +353,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// build PruneBuildColumns below is a no-op for partition-on-arrival
 	// builds, i.e. for every spill-eligible build).
 	if (joinType == exec.SemiJoin || joinType == exec.AntiJoin) && node.JoinFilter != "" {
-		hj.BuildStoreCols = SemiAntiBuildStoreCols(hj.RightKeys, node.JoinFilter)
+		hj.BuildStoreCols = semiAntiBuildStoreCols(hj.RightKeys, node.JoinFilter)
 	}
 
 	// Pass build-side row estimate to pre-allocate arena and hash table.

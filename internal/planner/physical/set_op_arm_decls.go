@@ -367,7 +367,7 @@ func projectionArmDecl(proj logical.Projection, decls ColDecls, strictInt map[st
 		return expr.Decl(fc.Type), true
 	}
 	if proj.ASTExpr != nil && !isSimpleColRefForRename(proj.ASTExpr) {
-		d, c := NodeDeclaredType(proj.ASTExpr, decls)
+		d, c := nodeDeclaredType(proj.ASTExpr, decls)
 		if c != expr.Decided {
 			return expr.DeclType{}, false
 		}

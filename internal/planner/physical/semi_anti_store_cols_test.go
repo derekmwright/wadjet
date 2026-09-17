@@ -42,7 +42,7 @@ func TestSemiAntiBuildStoreCols(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := SemiAntiBuildStoreCols(tt.rightKeys, tt.filter)
+			got := semiAntiBuildStoreCols(tt.rightKeys, tt.filter)
 			if tt.want == nil {
 				if got != nil {
 					t.Fatalf("got %v, want nil", got)

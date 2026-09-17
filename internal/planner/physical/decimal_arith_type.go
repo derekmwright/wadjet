@@ -198,7 +198,7 @@ func decimalArithOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, 
 // exactly those and the runtime would then run the float path the plan had
 // stopped declaring.
 func choiceDecimalArithOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, bool, bool) {
-	t, c := NodeDeclaredType(node, decls)
+	t, c := nodeDeclaredType(node, decls)
 	if c != expr.Decided || t.ID != parquet.TypeDecimal || !t.DecKnown {
 		return batch.DecimalType{}, false, false
 	}
@@ -241,7 +241,7 @@ func scalarFnDeclaredNumericDomain(n *plansql.FuncCallNode, decls ColDecls) (exp
 	}
 	args := make([]batch.TypeID, 0, want)
 	for i, a := range n.Args {
-		t, c := NodeDeclaredType(a, decls)
+		t, c := nodeDeclaredType(a, decls)
 		if c != expr.Decided {
 			return expr.DeclType{}, false
 		}

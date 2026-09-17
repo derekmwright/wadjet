@@ -60,7 +60,7 @@ func nfdDeclared(t *testing.T, sql string) (expr.DeclType, expr.Confidence) {
 	if err != nil {
 		t.Fatalf("parse %q: %v", sql, err)
 	}
-	return NodeDeclaredType(node, nfdDecls())
+	return nodeDeclaredType(node, nfdDecls())
 }
 
 // TestQuotedLiteralIsUnknownInTheFold is #724 at the layer the defect lives
@@ -266,7 +266,7 @@ func TestDeclaredFoldAgreesWithTheComparisonFold(t *testing.T) {
 					if err != nil {
 						t.Fatalf("parse %q: %v", sql, err)
 					}
-					declared, c := NodeDeclaredType(node, nfdDecls())
+					declared, c := nodeDeclaredType(node, nfdDecls())
 					if c != expr.Decided {
 						t.Fatalf("%s declared nothing (%s)", sql, c)
 					}

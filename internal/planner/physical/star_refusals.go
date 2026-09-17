@@ -47,10 +47,10 @@ func refuseUnexpandedStarBesideItems(node *logical.Node) error {
 	return nil
 }
 
-// RefuseUnexpandedStarAnywhere is refuseUnexpandedStarBesideItems over a whole
+// refuseUnexpandedStarAnywhere is refuseUnexpandedStarBesideItems over a whole
 // plan, for the DISTRIBUTED entry: the stage planner does not go through
 // buildProject, and the rule is the plan's, not one path's.
-func RefuseUnexpandedStarAnywhere(node *logical.Node) error {
+func refuseUnexpandedStarAnywhere(node *logical.Node) error {
 	if node == nil {
 		return nil
 	}
@@ -58,7 +58,7 @@ func RefuseUnexpandedStarAnywhere(node *logical.Node) error {
 		return err
 	}
 	for _, child := range node.Children {
-		if err := RefuseUnexpandedStarAnywhere(child); err != nil {
+		if err := refuseUnexpandedStarAnywhere(child); err != nil {
 			return err
 		}
 	}

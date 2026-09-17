@@ -190,7 +190,7 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 			if name == "" {
 				continue
 			}
-			d := WindowSpecOutputType(n, we)
+			d := windowSpecOutputType(n, we)
 			if !carriesIntWidth(d.ID) {
 				delete(out, name)
 				continue
@@ -255,7 +255,7 @@ func setOpArmIntWidths(n *logical.Node) [][]intWidth {
 			out = append(out, nested...)
 			continue
 		}
-		schema := DeclaredOutputSchema(c, nil)
+		schema := declaredOutputSchema(c, nil)
 		if len(schema) == 0 {
 			return nil
 		}

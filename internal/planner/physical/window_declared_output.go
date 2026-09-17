@@ -16,7 +16,7 @@ import (
 
 // windowOutputType declares input-independent rank/ratio functions and COUNT
 // (int64 regardless of input). Other names use the float64 fallback.
-// WindowSpecOutputType resolves input-dependent value functions and MIN/MAX
+// windowSpecOutputType resolves input-dependent value functions and MIN/MAX
 // from their argument, and SUM/AVG through accumulator typing; DECIMAL matches
 // the grouped result (#586, ADR-0012 item 9). Unresolved inputs keep fallback.
 // Value functions must copy the input type (#345); MIN/MAX use
@@ -51,7 +51,7 @@ func windowValueFunc(fn string) bool {
 // integer expressions compute in int64; SUM(int4-domain) is bigint, SUM(int8-domain)
 // is numeric, and non-integers retain fallback. Bare columns, missing/undecided
 // nodes and AST/InputCol spelling mismatches decline, never guess after respelling.
-// WindowSpecOutputType resolves input-dependent types in the owning window's
+// windowSpecOutputType resolves input-dependent types in the owning window's
 // schema; rebinding and unavailable parameter metadata bound lookup (#345).
 // Undecidable arguments keep windowOutputType's fallback.
 // See docs/internals/computed-window-argument-declarations.md for the design.
@@ -69,7 +69,7 @@ func windowComputedArgDecl(node *logical.Node, we logical.WindowExpr) (expr.Decl
 	if len(decls.Types) == 0 {
 		decls = withSubqueryDecls(emittedColDecls(node.Children[0]), node)
 	}
-	d, c := NodeDeclaredType(we.InputExpr, decls)
+	d, c := nodeDeclaredType(we.InputExpr, decls)
 	if c == expr.Undecided {
 		return expr.DeclType{}, false, false
 	}
@@ -101,7 +101,7 @@ func windowBareArgWidth(decls ColDecls, col string, carrier parquet.TypeID) parq
 	return carrier
 }
 
-func WindowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclType {
+func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclType {
 	fn := strings.ToLower(strings.TrimSpace(we.Func))
 	minMax := fn == "min" || fn == "max"
 	sumAvg := fn == "sum" || fn == "avg"
@@ -315,7 +315,7 @@ func windowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string
 		// returned "5" as the input column.
 		InputCol:    windowInputCol(node, we),
 		OutputCol:   we.OutputCol,
-		OutputType:  WindowSpecOutputType(node, we).ID,
+		OutputType:  windowSpecOutputType(node, we).ID,
 		PartitionBy: partBy,
 		OrderBy:     orderKeys,
 	}

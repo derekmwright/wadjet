@@ -19,7 +19,7 @@ import (
 // scale, including integer scale 0 (#474); no (p,s) or column-range overflow.
 // See docs/internals/equi-join-key-common-types.md for the design.
 
-// JoinKeyCommonType is the ladder above for one pair of DECLARED types.
+// joinKeyCommonType is the ladder above for one pair of DECLARED types.
 //
 // ok=false means "leave this pair alone", which is the answer for every pair
 // that already agrees and for every pair the ladder does not describe — a
@@ -27,7 +27,7 @@ import (
 // keep exactly the encoding they had; widening them is a different question
 // with a different authority, and guessing here would move rows under a rule
 // nobody stated.
-func JoinKeyCommonType(a, b parquet.TypeID) (parquet.TypeID, bool) {
+func joinKeyCommonType(a, b parquet.TypeID) (parquet.TypeID, bool) {
 	if a == b || !joinKeyNumeric(a) || !joinKeyNumeric(b) {
 		return 0, false
 	}
@@ -57,7 +57,7 @@ func joinKeyNumeric(t parquet.TypeID) bool {
 	return false
 }
 
-// ResolveJoinKeyTypes returns one entry per key PAIR: the type both sides'
+// resolveJoinKeyTypes returns one entry per key PAIR: the type both sides'
 // key bytes must be built at, or exec.KeyTypeUnresolved where no widening
 // applies. A nil result means "no pair needs widening", which is every
 // same-type join and the whole of TPC-H — the caller then sets nothing and
@@ -73,13 +73,13 @@ func joinKeyNumeric(t parquet.TypeID) bool {
 // with no cache to ask — every test, and any site that has no Planner.
 type cteColTypes func(ref *logical.Node) (map[string]parquet.TypeID, bool)
 
-func ResolveJoinKeyTypes(node *logical.Node, leftKeys, rightKeys []string, cte cteColTypes) []parquet.TypeID {
+func resolveJoinKeyTypes(node *logical.Node, leftKeys, rightKeys []string, cte cteColTypes) []parquet.TypeID {
 	if node == nil || len(node.Children) < 2 ||
 		len(leftKeys) == 0 || len(leftKeys) != len(rightKeys) {
 		return nil
 	}
-	left := JoinSideColTypes(node.Children[0], cte)
-	right := JoinSideColTypes(node.Children[1], cte)
+	left := joinSideColTypes(node.Children[0], cte)
+	right := joinSideColTypes(node.Children[1], cte)
 	if left == nil || right == nil {
 		return nil
 	}
@@ -92,7 +92,7 @@ func ResolveJoinKeyTypes(node *logical.Node, leftKeys, rightKeys []string, cte c
 		if !lok || !rok {
 			continue
 		}
-		if common, ok := JoinKeyCommonType(lt, rt); ok {
+		if common, ok := joinKeyCommonType(lt, rt); ok {
 			out[i], any = common, true
 		}
 	}
@@ -113,14 +113,14 @@ func joinKeyLookupName(key string) string {
 	return k
 }
 
-// JoinSideColTypes merges shared declared types under both emitted names and
+// joinSideColTypes merges shared declared types under both emitted names and
 // source names visible below renames (#615). Use EmittedColTypes for
 // aggregate/window/projection/DISTINCT, and setOpDeclaredOutputSchema with
 // SetOpWiden for set operations. Computed projections bind only their alias;
 // their inputs retain their own types under source names. Delete conflicting
 // names rather than choosing: exec.joinKeyEncodingMismatch remains the
 // runtime backstop. See docs/internals/join-side-declared-types.md for the design.
-func JoinSideColTypes(n *logical.Node, cte cteColTypes) map[string]parquet.TypeID {
+func joinSideColTypes(n *logical.Node, cte cteColTypes) map[string]parquet.TypeID {
 	if n == nil {
 		return nil
 	}
@@ -334,7 +334,7 @@ func (p *Planner) cteBodyColTypes(def plansql.CTEDef) (types map[string]parquet.
 	if plan == nil {
 		return nil, false
 	}
-	schema := DeclaredOutputSchema(plan, p.SubqueryOutputColumn)
+	schema := declaredOutputSchema(plan, p.SubqueryOutputColumn)
 	if len(schema) == 0 {
 		return nil, false
 	}

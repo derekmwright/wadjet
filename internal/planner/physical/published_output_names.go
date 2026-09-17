@@ -43,10 +43,10 @@ import (
 // and so does an empty entry inside it; a caller renames only the positions
 // this names.
 func PublishedOutputNames(plan *logical.Node) []string {
-	return PublishedNamesOfProjection(FindOutputProjectionNode(plan))
+	return publishedNamesOfProjection(findOutputProjectionNode(plan))
 }
 
-// PublishedNamesOfProjection is the published name of each visible column of
+// publishedNamesOfProjection is the published name of each visible column of
 // the OUTPUT projection, positionally, or nil when the projection publishes
 // what it always did.
 //
@@ -59,7 +59,7 @@ func PublishedOutputNames(plan *logical.Node) []string {
 // Nil rather than a copy of the current names, because the sink applies the
 // list only when it is non-empty: a query whose every item is aliased or is a
 // bare column costs nothing.
-func PublishedNamesOfProjection(projNode *logical.Node) []string {
+func publishedNamesOfProjection(projNode *logical.Node) []string {
 	if projNode == nil || projNode.Type != logical.NodeProject {
 		return nil
 	}
@@ -75,7 +75,7 @@ func PublishedNamesOfProjection(projNode *logical.Node) []string {
 		if names[i] == "" {
 			continue
 		}
-		if !strings.EqualFold(names[i], ProjectionOutputName(p)) {
+		if !strings.EqualFold(names[i], projectionOutputName(p)) {
 			differs = true
 		}
 	}
@@ -85,7 +85,7 @@ func PublishedNamesOfProjection(projNode *logical.Node) []string {
 	return names
 }
 
-// RepublishDeclaredNames re-keys a PLAN-TIME declaration map from the
+// republishDeclaredNames re-keys a PLAN-TIME declaration map from the
 // resolution spelling to the published name.
 //
 // `DeclaredWireUnconstrainedDecimal` and `DeclaredStringLengths` answer "what
@@ -99,7 +99,7 @@ func PublishedNamesOfProjection(projNode *logical.Node) []string {
 // The entry is MOVED, not copied: keeping both would leave a stale key that a
 // later column of that name would collide with. Only the output projection's
 // own names are re-keyed — a nested block's declaration is not this map.
-func RepublishDeclaredNames[T any](projNode *logical.Node, m map[string]T) map[string]T {
+func republishDeclaredNames[T any](projNode *logical.Node, m map[string]T) map[string]T {
 	if projNode == nil || len(m) == 0 {
 		return m
 	}

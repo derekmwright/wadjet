@@ -113,7 +113,7 @@ func inferProjectionDeclTypeConf(node plansql.Node, fallback parquet.TypeID,
 	// A guess is still the answer here: nothing is left to consult, and a
 	// polymorphic function's fallback is what types SELECT NULLIF(int_col, 1)
 	// numeric. Only expr.Undecided leaves the type to the caller.
-	if t, c := NodeDeclaredType(node, decls); c != expr.Undecided {
+	if t, c := nodeDeclaredType(node, decls); c != expr.Undecided {
 		return t, c
 	}
 	return expr.Decl(fallback), expr.Undecided
@@ -146,7 +146,7 @@ func realArithBothReal(n *plansql.BinaryOp, decls ColDecls) bool {
 		return false
 	}
 	isReal := func(side plansql.Node) bool {
-		d, c := NodeDeclaredType(side, decls)
+		d, c := nodeDeclaredType(side, decls)
 		return c == expr.Decided && d.ID == parquet.TypeFloat32
 	}
 	return isReal(n.Left) && isReal(n.Right)
@@ -294,7 +294,7 @@ func intArithAllInt(node plansql.Node, strictInt map[string]bool, decls ColDecls
 	// fallback over arguments nothing resolved, and a wrong int claim here
 	// declares an INT64 vector for a float the kernel will produce.
 	// expr.binOpIntOperand is the runtime mirror and reads the same Ret.
-	t, c := NodeDeclaredType(node, decls)
+	t, c := nodeDeclaredType(node, decls)
 	if c != expr.Decided {
 		return false
 	}
@@ -534,7 +534,7 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 				if out == nil {
 					out = make(map[string][]parquet.Column)
 				}
-				d, _ := NodeDeclaredType(p.ASTExpr, ColDecls{Types: inputColTypes(n.Children[0]), Fields: below, Dec: inputColDecimal(n.Children[0])})
+				d, _ := nodeDeclaredType(p.ASTExpr, ColDecls{Types: inputColTypes(n.Children[0]), Fields: below, Dec: inputColDecimal(n.Children[0])})
 				out[name] = d.RowFields()
 				continue
 			}
@@ -672,7 +672,7 @@ func windowOutputColTypes(n *logical.Node, in map[string]parquet.TypeID) map[str
 				out[k] = v
 			}
 		}
-		out[name] = WindowSpecOutputType(n, we).ID
+		out[name] = windowSpecOutputType(n, we).ID
 	}
 	if out == nil {
 		return in
@@ -690,7 +690,7 @@ func windowOutputColDecimal(n *logical.Node, in map[string]logical.DecimalMeta) 
 		if name == "" {
 			continue
 		}
-		d := WindowSpecOutputType(n, we)
+		d := windowSpecOutputType(n, we)
 		if d.ID != parquet.TypeDecimal || !d.DecKnown {
 			continue
 		}
@@ -1119,7 +1119,7 @@ func declTypeParts(d expr.DeclType) parquet.Column {
 // decided a type, GREATEST fell to its FLOAT64 fallback and the query failed
 // with "cannot store string into FLOAT64 vector" — #529 unclosed for every
 // query that names its DECIMAL through a subquery. It is the same walk
-// DeclaredOutputSchema already resolves the OUTPUT projection against, so the
+// declaredOutputSchema already resolves the OUTPUT projection against, so the
 // SELECT list and the plan-declared schema now answer from one map.
 func emittedColDecls(n *logical.Node) ColDecls {
 	return ColDecls{
@@ -1141,7 +1141,7 @@ func inferProjectionType(node plansql.Node, fallback parquet.TypeID) parquet.Typ
 // columns, using the query path's inference. DML must use the declaration,
 // not the float64 box shared by float8 and numeric: assignment rounds float8
 // half to EVEN and numeric half AWAY FROM ZERO (#699).
-// NodeDeclaredType leaves missing column declarations undecided (#333).
+// nodeDeclaredType leaves missing column declarations undecided (#333).
 // Nested function callers must keep looking past a guessed type for a
 // decided candidate (expr.Confidence, #331).
 func DeclaredTypeOfNode(node plansql.Node, schema []parquet.Column) (expr.DeclType, expr.Confidence) {
@@ -1160,10 +1160,10 @@ func DeclaredTypeOfNode(node plansql.Node, schema []parquet.Column) (expr.DeclTy
 			decls.Fields[name] = c.Fields
 		}
 	}
-	return NodeDeclaredType(node, decls)
+	return nodeDeclaredType(node, decls)
 }
 
-func NodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Confidence) {
+func nodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Confidence) {
 	switch n := node.(type) {
 	case *plansql.ColRef:
 		return colRefDeclaredType(n, decls)
@@ -1231,7 +1231,7 @@ func NodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Co
 		// the hidden key materializes into a typed vector rather than into
 		// text, where "-0" vs "0" rendering used to decide the order.
 		if n.Op == "-" || n.Op == "+" {
-			t, c := NodeDeclaredType(n.Inner, decls)
+			t, c := nodeDeclaredType(n.Inner, decls)
 			if c != expr.Undecided {
 				// A negated numeric LITERAL keeps the exact fixed-point
 				// contribution its spelling carries: negation moves no digit,
@@ -1273,7 +1273,7 @@ func NodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Co
 	case *plansql.FuncCallNode:
 		return funcReturnType(n, decls)
 	case *plansql.ParenNode:
-		return NodeDeclaredType(n.Inner, decls)
+		return nodeDeclaredType(n.Inner, decls)
 	case *plansql.CaseNode:
 		return caseDeclaredType(n, decls)
 	case *plansql.LiteralPlaceholder:
@@ -1419,7 +1419,7 @@ func caseDeclaredType(n *plansql.CaseNode, decls ColDecls) (expr.DeclType, expr.
 			// it neither decides nor blocks a DECIMAL fold.
 			return
 		}
-		t, c := NodeDeclaredType(branch, decls)
+		t, c := nodeDeclaredType(branch, decls)
 		switch c {
 		case expr.Decided:
 			decided = append(decided, t)
@@ -1462,12 +1462,12 @@ func caseDeclaredType(n *plansql.CaseNode, decls ColDecls) (expr.DeclType, expr.
 // Undecided leaves the caller's fallback; Guessed is usable but a calling
 // polymorphic function must prefer a decided candidate it still has (#331).
 func stringOperand(n plansql.Node, decls ColDecls) bool {
-	d, c := NodeDeclaredType(n, decls)
+	d, c := nodeDeclaredType(n, decls)
 	return c != expr.Undecided && d.ID == parquet.TypeString && !d.Quoted
 }
 
 func bytesOperand(n plansql.Node, decls ColDecls) bool {
-	d, c := NodeDeclaredType(n, decls)
+	d, c := nodeDeclaredType(n, decls)
 	return c != expr.Undecided && d.ID == parquet.TypeBytes
 }
 
@@ -1497,7 +1497,7 @@ func bytesPreservingReturn(n *plansql.FuncCallNode, decls ColDecls) (expr.DeclTy
 
 func funcReturnType(n *plansql.FuncCallNode, decls ColDecls) (expr.DeclType, expr.Confidence) {
 	if strings.EqualFold(n.Name, "row_field") && len(n.Args) == 2 {
-		parent, confidence := NodeDeclaredType(n.Args[0], decls)
+		parent, confidence := nodeDeclaredType(n.Args[0], decls)
 		if field, ok := n.Args[1].(*plansql.Lit); ok && parent.Schema != nil {
 			if c, found := parent.Schema.Field(field.Value); found {
 				// Extracting a parameterized non-ROW value remains on the
@@ -1537,7 +1537,7 @@ func funcReturnType(n *plansql.FuncCallNode, decls ColDecls) (expr.DeclType, exp
 		return t, expr.Decided
 	}
 	t, c := expr.DefaultRegistry.ReturnType(n.Name).Resolve(len(n.Args), func(i int) (expr.DeclType, expr.Confidence) {
-		return NodeDeclaredType(n.Args[i], decls)
+		return nodeDeclaredType(n.Args[i], decls)
 	})
 	if c == expr.Undecided {
 		return expr.DeclType{}, expr.Undecided

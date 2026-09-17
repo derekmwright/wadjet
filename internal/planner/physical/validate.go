@@ -603,7 +603,7 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		declarations = nil
 		if names, known := b.blockColumns(ctx, info); known && len(info.Columns) == 1 {
 			for _, name := range names {
-				d, c := NodeDeclaredType(&plansql.ColRef{Column: name}, fieldInputs)
+				d, c := nodeDeclaredType(&plansql.ColRef{Column: name}, fieldInputs)
 				if c != expr.Decided {
 					d = expr.DeclType{Untyped: true}
 				}

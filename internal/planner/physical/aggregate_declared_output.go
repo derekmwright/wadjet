@@ -189,7 +189,7 @@ func aggComputedInputDecl(node *logical.Node, agg logical.AggExpr) (parquet.Type
 	// … ))` — has no column for the walk to read; its declaration is the
 	// stamp on the plan (subquery_decl_annotation.go).
 	decls = withSubqueryDecls(decls, node)
-	d, c := NodeDeclaredType(agg.InputExpr, decls)
+	d, c := nodeDeclaredType(agg.InputExpr, decls)
 	if c == expr.Undecided {
 		return 0, 0, 0, false
 	}
@@ -219,7 +219,7 @@ func aggComputedInputExprDecl(node *logical.Node, agg logical.AggExpr) (parquet.
 	// … ))` — has no column for the walk to read; its declaration is the
 	// stamp on the plan (subquery_decl_annotation.go).
 	decls = withSubqueryDecls(decls, node)
-	d, c := NodeDeclaredType(agg.InputExpr, decls)
+	d, c := nodeDeclaredType(agg.InputExpr, decls)
 	if c == expr.Undecided {
 		return 0, 0, 0, false
 	}
@@ -251,7 +251,7 @@ func aggComputedInputOutputType(node *logical.Node, agg logical.AggExpr) (parque
 // only NAME and TYPE, not (precision, scale) (fold-in to #457/#458, FIX 2).
 // The WIRE typmod for these is a separate question, answered unconditionally
 // -1 for every aggregate regardless of this function's answer — see
-// DeclaredWireUnconstrainedDecimal.
+// declaredWireUnconstrainedDecimal.
 func aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.DecimalMeta, bool) {
 	fn := strings.ToLower(strings.TrimSpace(agg.Func))
 	switch fn {
@@ -744,7 +744,7 @@ func aggregateOutputNameList(node *logical.Node, emitted bool) ([]string, bool) 
 		}
 		names := make([]string, 0, len(node.Projections))
 		for i := range node.Projections {
-			names = append(names, ProjectionOutputName(node.Projections[i]))
+			names = append(names, projectionOutputName(node.Projections[i]))
 		}
 		return names, true
 	case node.Type == logical.NodeAggregate:
@@ -806,9 +806,9 @@ func WrapsAWindow(n *logical.Node) bool {
 	return false
 }
 
-// ProjectionOutputName is the column name a projection publishes, resolved the
+// projectionOutputName is the column name a projection publishes, resolved the
 // same way buildProject's own ProjectColumn naming resolves it.
-func ProjectionOutputName(proj logical.Projection) string {
+func projectionOutputName(proj logical.Projection) string {
 	name := proj.Alias
 	if name == "" {
 		name = proj.Column
@@ -829,7 +829,7 @@ func namesMatchProjections(names []string, projections []logical.Projection) boo
 	}
 	for i := range names {
 		if !strings.EqualFold(plansql.NormalizeIdentRef(strings.TrimSpace(names[i])),
-			ProjectionOutputName(projections[i])) {
+			projectionOutputName(projections[i])) {
 			return false
 		}
 	}

@@ -239,7 +239,7 @@ func (p *Planner) subqueryOutputIntWidth(sql string, carrier parquet.TypeID) int
 	if plan == nil {
 		return 0
 	}
-	schema := DeclaredOutputSchema(plan, p.SubqueryOutputColumn)
+	schema := declaredOutputSchema(plan, p.SubqueryOutputColumn)
 	if len(schema) != 1 {
 		return 0
 	}

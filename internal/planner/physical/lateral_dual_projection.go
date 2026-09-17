@@ -110,7 +110,7 @@ func lateralDualItemDecl(item logical.Projection, decls ColDecls,
 		return expr.Decl(parquet.TypeString)
 	}
 	if _, bare := item.ASTExpr.(*plansql.ColRef); bare {
-		if t, c := NodeDeclaredType(item.ASTExpr, decls); c != expr.Undecided {
+		if t, c := nodeDeclaredType(item.ASTExpr, decls); c != expr.Undecided {
 			return t
 		}
 	}

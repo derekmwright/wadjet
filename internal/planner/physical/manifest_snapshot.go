@@ -179,15 +179,15 @@ func getManifestWith(ctx context.Context, snap *ManifestSnapshot, cat *catalog.C
 	return cat.GetManifest(ctx, table)
 }
 
-// ManifestSnapshotCtxKey types the context key WithManifestSnapshot and
+// manifestSnapshotCtxKey types the context key WithManifestSnapshot and
 // ManifestSnapshotFromContext use, so it cannot collide with a key any
 // other package defines.
-type ManifestSnapshotCtxKey struct{}
+type manifestSnapshotCtxKey struct{}
 
 // ManifestSnapshotFromContext returns the snapshot WithManifestSnapshot
 // attached, or nil if ctx carries none.
 func manifestSnapshotFromContext(ctx context.Context) *ManifestSnapshot {
-	snap, _ := ctx.Value(ManifestSnapshotCtxKey{}).(*ManifestSnapshot)
+	snap, _ := ctx.Value(manifestSnapshotCtxKey{}).(*ManifestSnapshot)
 	return snap
 }
 

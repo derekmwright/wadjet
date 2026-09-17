@@ -109,17 +109,17 @@ func joinKeyName(n plansql.Node) (string, bool) {
 	return "", false
 }
 
-// RefuseJoinCond is the error a join whose ON clause the key representation
+// refuseJoinCond is the error a join whose ON clause the key representation
 // cannot express. Both planning entry points raise it rather than let an
 // unrepresentable conjunct reach the executor as a column name.
-func RefuseJoinCond(joinType, cond string, residual []string) error {
+func refuseJoinCond(joinType, cond string, residual []string) error {
 	return fmt.Errorf("join ON %q: %s cannot be represented as an equi-join key "+
 		"(the %s join executor matches on column names, and only an equality between two "+
 		"bare columns is one); it must be lifted into a filter above the join, which is legal "+
 		"for an inner join only", cond, strings.Join(residual, ", "), joinType)
 }
 
-// JoinArmAlias is the MATERIALIZED arm's enclosing-query identity, the only
+// joinArmAlias is the MATERIALIZED arm's enclosing-query identity, the only
 // alias allowed to qualify that arm's duplicate columns. Base/derived tables
 // use findScanAlias (setSubtreeAlias stamps scans); CTE references name their
 // subtree root via CTEName/CTERefAlias, preserving inner relation identities.
@@ -127,12 +127,12 @@ func RefuseJoinCond(joinType, cond string, residual []string) error {
 // not run, so raw inner streams use BuildStreamAlias. Do not qualify a
 // raw inner column as the arm's selected output (ADR-0025, #773, #706).
 // See docs/internals/join-arm-aliases.md for the design.
-func JoinArmAlias(node *logical.Node) string {
+func joinArmAlias(node *logical.Node) string {
 	// The name is on the arm's SUBTREE ROOT — CTERefAlias for `FROM c AS x`,
 	// CTEName for `FROM c`, DerivedAlias for `FROM (SELECT …) q` — and a pass
 	// that wraps the arm (a pushed-down Filter, a Sort) leaves it one or more
 	// single-child nodes down, so `NamedArmScope` descends to find it.
-	if name := NamedArmScope(node); name != "" {
+	if name := namedArmScope(node); name != "" {
 		return name
 	}
 	// A base-table arm answers to its own alias, which the scan carries.
@@ -181,14 +181,14 @@ func findScanAlias(node *logical.Node) string {
 	return ""
 }
 
-// SemiAntiBuildStoreCols returns the build-side columns a filtered semi/anti
+// semiAntiBuildStoreCols returns the build-side columns a filtered semi/anti
 // join must retain in stored build batches: the join keys (required to
 // re-index spilled partitions and to survive FixKeyAssignment's rebuild)
 // plus the JoinFilter's build-side columns. Returns nil when the filter is
 // empty — unfiltered semi/anti builds are key-only and store nothing. Shared
 // by the single-process planner and the worker fragment executor so both
 // paths narrow their builds identically.
-func SemiAntiBuildStoreCols(rightKeys []string, joinFilter string) []string {
+func semiAntiBuildStoreCols(rightKeys []string, joinFilter string) []string {
 	if joinFilter == "" {
 		return nil
 	}

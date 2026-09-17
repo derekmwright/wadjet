@@ -190,7 +190,7 @@ func (s *SubtreeNaming) BuildColOrigins() map[string]string {
 // The DAG keeps the raw answer, because there the Project emits no stage and
 // the inner names are exactly what the stream carries (JoinArmAlias).
 func (s *SubtreeNaming) MaterializedBuildColOrigins() map[string]string {
-	if NamedArmScope(s.root) != "" {
+	if namedArmScope(s.root) != "" {
 		return nil
 	}
 	return s.BuildColOrigins()

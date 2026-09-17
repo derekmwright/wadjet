@@ -234,7 +234,7 @@ func setOpQuotedLiteralGap(column string, arm int, t parquet.TypeID) error {
 // bare NULLs: both are UNKNOWN-typed to PostgreSQL and take the other arms'
 // type, but only a quoted one carries TEXT that has to reach a typed vector.
 func setOpQuotedLiteralArms(arm *logical.Node, cols int) []bool {
-	proj := FindOutputProjectionNode(arm)
+	proj := findOutputProjectionNode(arm)
 	if proj == nil || len(proj.Projections) != cols {
 		return nil
 	}
@@ -298,7 +298,7 @@ func setOpCarrierGapPairs() [][2]parquet.TypeID {
 // EXACT; beside a float arm PostgreSQL resolves double precision and the
 // float8 the literal folds to is that type's own answer.
 func setOpOversizeLiteralArms(arm *logical.Node, cols int) []bool {
-	proj := FindOutputProjectionNode(arm)
+	proj := findOutputProjectionNode(arm)
 	if proj == nil || len(proj.Projections) != cols {
 		return nil
 	}
@@ -355,7 +355,7 @@ func setOpExactNumeric(t parquet.TypeID) bool {
 	return false
 }
 
-// SetOpUnknownLiteralArms marks, per OUTPUT POSITION, the select items of one
+// setOpUnknownLiteralArms marks, per OUTPUT POSITION, the select items of one
 // arm that are UNKNOWN-typed literals — a quoted string or NULL, which
 // PostgreSQL gives no type of its own and resolves to the other arms' type
 // (algorithm steps 3 and 5).
@@ -364,8 +364,8 @@ func setOpExactNumeric(t parquet.TypeID) bool {
 // arm as TEXT and refused inet ∪ text, which PostgreSQL answers as inet; the
 // same for a mac, a date, a uuid and a numeric column beside a quoted literal,
 // and for a quoted literal in the FIRST arm.
-func SetOpUnknownLiteralArms(arm *logical.Node, cols int) []bool {
-	proj := FindOutputProjectionNode(arm)
+func setOpUnknownLiteralArms(arm *logical.Node, cols int) []bool {
+	proj := findOutputProjectionNode(arm)
 	if proj == nil || len(proj.Projections) != cols {
 		return nil
 	}
@@ -389,20 +389,20 @@ func SetOpUnknownLiteralArms(arm *logical.Node, cols int) []bool {
 	return out
 }
 
-// SetOpArmTypeConflict is the no-common-type refusal, computed WITHOUT
+// setOpArmTypeConflict is the no-common-type refusal, computed WITHOUT
 // emitting any stage, so the single-process path takes the same plan-time
 // answer the stage DAG does. It walks the same arm projections
 // reconcileSetOpArmTypes walks, and reports ONLY the type conflict: an arm the
 // walk cannot type is not a conflict, and every other refusal
 // reconcileSetOpArmTypes makes is about the DAG's own materialization rather
 // than about the query's meaning, so neither is raised here.
-func SetOpArmTypeConflict(node *logical.Node) error {
+func setOpArmTypeConflict(node *logical.Node) error {
 	if !isSetOpNode(node) || len(node.Children) < 2 {
 		return nil
 	}
 	for _, child := range node.Children {
 		if inner := setOpUnwrap(child); isSetOpNode(inner) {
-			if err := SetOpArmTypeConflict(inner); err != nil {
+			if err := setOpArmTypeConflict(inner); err != nil {
 				return err
 			}
 		}
@@ -421,7 +421,7 @@ func SetOpArmTypeConflict(node *logical.Node) error {
 			return nil // a shape this walk cannot read is not a conflict
 		}
 		plans = append(plans, plan)
-		unknown = append(unknown, SetOpUnknownLiteralArms(child, len(outNames)))
+		unknown = append(unknown, setOpUnknownLiteralArms(child, len(outNames)))
 		quoted = append(quoted, setOpQuotedLiteralArms(child, len(outNames)))
 		oversize = append(oversize, setOpOversizeLiteralArms(child, len(outNames)))
 	}
@@ -577,7 +577,7 @@ func setOpOutputNames(arm *logical.Node) []string {
 		copy(names, inner.ScanColumns)
 		return names
 	}
-	proj := FindOutputProjectionNode(arm)
+	proj := findOutputProjectionNode(arm)
 	if proj == nil || len(proj.Projections) == 0 {
 		return nil
 	}
@@ -713,7 +713,7 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (SetOpArmPlan, err
 		return plan, nil
 	}
 
-	projNode := FindOutputProjectionNode(arm)
+	projNode := findOutputProjectionNode(arm)
 	if projNode == nil {
 		return SetOpArmPlan{}, fmt.Errorf("no resolvable SELECT list to project onto the result columns %v", outNames)
 	}
@@ -998,7 +998,7 @@ func setOpNodeResultTypes(n *logical.Node) []SetOpColType {
 		// arms nest as (literal ∪ a) ∪ a, reached reconcileSetOpArmTypes with
 		// an untyped arm beside a DECIMAL one and was REFUSED, while the
 		// single-process path answered it. PostgreSQL answers it numeric.
-		unknown = append(unknown, SetOpUnknownLiteralArms(child, len(names)))
+		unknown = append(unknown, setOpUnknownLiteralArms(child, len(names)))
 	}
 	out := make([]SetOpColType, len(names))
 	for col := range names {

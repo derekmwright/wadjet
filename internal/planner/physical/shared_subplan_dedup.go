@@ -2,7 +2,7 @@
 
 package physical
 
-func ColSet(cols []string) map[string]bool {
+func colSet(cols []string) map[string]bool {
 	m := make(map[string]bool, len(cols))
 	for _, c := range cols {
 		m[c] = true

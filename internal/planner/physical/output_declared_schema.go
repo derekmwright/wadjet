@@ -12,14 +12,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// DeclaredOutputSchema derives plan-time output names from the SELECT list
+// declaredOutputSchema derives plan-time output names from the SELECT list
 // and types from AnnotateScanColumns catalog annotations (#416).
 // The schema is advisory: CollectSink.SchemaHint applies only if nothing was
 // consumed. Unresolved types fall back to STRING; non-empty results use data flow.
 // Names match projection building: alias, unqualified column, then cleaned text.
 // subqueryDecl resolves scalar-subquery output declarations; nil means unavailable.
 // Zero-row and non-empty scalar-subquery columns must agree (#416, #874).
-func DeclaredOutputSchema(root *logical.Node,
+func declaredOutputSchema(root *logical.Node,
 	subqueryDecl func(string) (parquet.Column, bool)) []parquet.Column {
 	// A caller with no Planner passes nil — the set-operation arm walk and
 	// emittedColIntWidth's do. The STAMP answers for them: it is the same
@@ -191,7 +191,7 @@ func setOpArmUnknownLiteralSchemas(n *logical.Node, arms, cols int) [][]bool {
 				walk(inner)
 				continue
 			}
-			out = append(out, SetOpUnknownLiteralArms(c, cols))
+			out = append(out, setOpUnknownLiteralArms(c, cols))
 		}
 	}
 	walk(n)
@@ -238,17 +238,17 @@ func setOpArmSchemasAndTypmods(n *logical.Node) ([][]parquet.Column, []map[strin
 		}
 		// nil: this walk has no planner to ask, so a scalar subquery in a
 		// SET-OPERATION ARM declares what it always did.
-		schema := DeclaredOutputSchema(c, nil)
+		schema := declaredOutputSchema(c, nil)
 		if len(schema) == 0 {
 			return nil, nil
 		}
 		out = append(out, schema)
-		mods = append(mods, DeclaredWireUnconstrainedDecimal(c))
+		mods = append(mods, declaredWireUnconstrainedDecimal(c))
 	}
 	return out, mods
 }
 
-// DeclaredWireUnconstrainedDecimal marks outputs whose wire typmod is -1;
+// declaredWireUnconstrainedDecimal marks outputs whose wire typmod is -1;
 // keep real (p,s) in execution/storage declarations to preserve vector allocation
 // and parquet encoding. Only pgTypeMod consults this map (#457/#458).
 // Bare references and choice folds keep a modifier only when all candidate inputs
@@ -256,7 +256,7 @@ func setOpArmSchemasAndTypmods(n *logical.Node) ([][]parquet.Column, []map[strin
 // Aggregates, windows, arithmetic and other calls lose typmod (#587, #542).
 // See declaredTypmod for CAST handling and ADR-0024 item 5 for the rule.
 // See docs/internals/decimal-wire-and-carrier-modifiers.md for the design.
-func DeclaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
+func declaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
 	if out := setOpWireUnconstrainedDecimal(root); out != nil {
 		return out
 	}
@@ -265,7 +265,7 @@ func DeclaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
 		return nil
 	}
 	var computed map[string]bool
-	if pn := FindOutputProjectionNode(root); pn != nil && len(pn.Children) == 1 {
+	if pn := findOutputProjectionNode(root); pn != nil && len(pn.Children) == 1 {
 		computed = emittedComputedCols(pn.Children[0])
 	}
 	var out map[string]bool
@@ -485,18 +485,18 @@ func foldStringLength(arms []plansql.Node, decls ColDecls, computed map[string]b
 	return first, have
 }
 
-// DeclaredStringLengths names the output columns whose declaration carries a
+// declaredStringLengths names the output columns whose declaration carries a
 // string LENGTH, and what it is. It is the string family's answer to
-// DeclaredWireUnconstrainedDecimal: wire metadata only, computed at plan time,
+// declaredWireUnconstrainedDecimal: wire metadata only, computed at plan time,
 // and empty for every query that casts to no parameterized string type.
-func DeclaredStringLengths(root *logical.Node) map[string]int {
+func declaredStringLengths(root *logical.Node) map[string]int {
 	projs, childTypes, strictInt, ok := declaredProjectionInputs(root)
 	if !ok {
 		return nil
 	}
 	_ = strictInt
 	var computed map[string]bool
-	if pn := FindOutputProjectionNode(root); pn != nil && len(pn.Children) == 1 {
+	if pn := findOutputProjectionNode(root); pn != nil && len(pn.Children) == 1 {
 		computed = emittedComputedCols(pn.Children[0])
 	}
 	var out map[string]int
@@ -776,12 +776,12 @@ func setOpAllDecimalUnconstrained(arms [][]parquet.Column) map[string]bool {
 }
 
 // declaredProjectionInputs is DeclaredOutputSchema's and
-// DeclaredWireUnconstrainedDecimal's shared setup: the visible projection
+// declaredWireUnconstrainedDecimal's shared setup: the visible projection
 // list plus the child's declarations each projection is resolved against. ok is false when there is nothing to declare (no output
 // projection node, or an empty SELECT list) — callers return their own
 // empty answer in that case rather than proceeding with nil maps.
 func declaredProjectionInputs(root *logical.Node) (projs []logical.Projection, childTypes ColDecls, strictInt map[string]bool, ok bool) {
-	pn := FindOutputProjectionNode(root)
+	pn := findOutputProjectionNode(root)
 	if pn == nil {
 		return nil, ColDecls{}, nil, false
 	}
@@ -1153,7 +1153,7 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 			if name == "" {
 				continue
 			}
-			out[name] = WindowSpecOutputType(n, we).ID
+			out[name] = windowSpecOutputType(n, we).ID
 		}
 		return out
 	case logical.NodeJoin:
@@ -1219,7 +1219,7 @@ func withJoinArmQualifiers[V comparable](n *logical.Node, left, right, merged ma
 	return merged
 }
 
-// NamedArmScope is the name a CTE reference or a DERIVED table gives its whole
+// namedArmScope is the name a CTE reference or a DERIVED table gives its whole
 // subtree, or "" for a subtree the enclosing query names relation by relation.
 //
 // It is the boundary the arc's doctrine rests on: inside such an arm the
@@ -1231,7 +1231,7 @@ func withJoinArmQualifiers[V comparable](n *logical.Node, left, right, merged ma
 // spelling. Those three have to agree: the executor publishing `m.w` while the
 // planner asks for `g.w` is one output described two ways, which is the defect
 // this arc exists to remove, pointing inward.
-func NamedArmScope(n *logical.Node) string {
+func namedArmScope(n *logical.Node) string {
 	for cur := n; cur != nil; {
 		if cur.CTERefAlias != "" {
 			return cur.CTERefAlias
@@ -1260,7 +1260,7 @@ func joinArmSoleName(n *logical.Node) string {
 	if n == nil {
 		return ""
 	}
-	if name := NamedArmScope(n); name != "" {
+	if name := namedArmScope(n); name != "" {
 		return name
 	}
 	var scans []*logical.Node
@@ -1426,7 +1426,7 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 			if name == "" {
 				continue
 			}
-			d := WindowSpecOutputType(n, we)
+			d := windowSpecOutputType(n, we)
 			if d.ID != parquet.TypeDecimal || !d.DecKnown {
 				continue
 			}

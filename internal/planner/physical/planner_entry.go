@@ -99,7 +99,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// sentence BEFORE the ordinal one — the order dagplan.PlanDistributed uses, so
 	// both engines say the same thing about `SELECT s.* … ORDER BY 1`: the
 	// star is the reason and the un-countable ordinal is its consequence.
-	if err := RefuseUnexpandedStarAnywhere(node); err != nil {
+	if err := refuseUnexpandedStarAnywhere(node); err != nil {
 		return nil, err
 	}
 	// A `SELECT * ... ORDER BY <n>` whose star never expanded (#810). Refused
@@ -117,7 +117,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	}
 
 	// The projection whose names the CLIENT reads, resolved once (#732).
-	p.outputProjection = FindOutputProjectionNode(node)
+	p.outputProjection = findOutputProjectionNode(node)
 
 	// Materialize CTEs referenced multiple times. Each CTE is computed once
 	// and cached so that all references (main query + subqueries) see the
@@ -133,7 +133,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// engine and the small-query fast path raise it too — and raise it for a
 	// predicate no row ever reaches, which the operator-level check cannot
 	// (#631 follow-up).
-	if err := RefuseUnrepresentableRealInList(node); err != nil {
+	if err := refuseUnrepresentableRealInList(node); err != nil {
 		p.resources().releaseSubqueryCharges()
 		p.releaseCTECache()
 		p.releaseScanCache()
@@ -150,7 +150,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 
 	// Drop the columns the logical builder materialized for its own use so the
 	// client sees exactly the columns it selected (#320).
-	if trim := HiddenSortTrimOp(node); trim != nil {
+	if trim := hiddenSortTrimOp(node); trim != nil {
 		ops = append(ops, trim)
 	}
 
@@ -175,7 +175,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 			Sink:    sink,
 			Workers: pipelineWorkers,
 		},
-		OutputSchema: DeclaredOutputSchema(node, p.SubqueryOutputColumn),
+		OutputSchema: declaredOutputSchema(node, p.SubqueryOutputColumn),
 	}
 	// Hand the sink the plan's answer for the case where no batch will ever
 	// tell it: a zero-row result. It is consulted only then (#416).
@@ -186,7 +186,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		// rather than inside the plan, because inside the plan a name is also
 		// a HANDLE — a sort key, a HAVING reference, an aggregate's OutputCol
 		// — and the two are not the same string.
-		cs.OutputNames = PublishedNamesOfProjection(p.outputProjection)
+		cs.OutputNames = publishedNamesOfProjection(p.outputProjection)
 		// Unlike SchemaHint, this is consulted on EVERY result, zero-row or
 		// not: which DECIMAL columns are aggregate output is a property of
 		// the PLAN, not of whether a batch arrived (FIX 2, #457/#458 fold-in).
@@ -195,15 +195,15 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		// PUBLISHED one (#732): filed under the resolution spelling they miss,
 		// and an unaliased `s_acctbal + 1` goes out with a DECIMAL typmod
 		// PostgreSQL sends -1 for.
-		rawWire, rawLens := DeclaredWireUnconstrainedDecimal(node), DeclaredStringLengths(node)
+		rawWire, rawLens := declaredWireUnconstrainedDecimal(node), declaredStringLengths(node)
 		// POSITIONAL first, and it is the authority: a name is not an address
 		// when two output columns publish one (#732, round-1 review B2).
 		cs.SchemaHintWireUnconstrainedPos, cs.SchemaHintStringLengthPos =
 			publishedOutputDecls(p.outputProjection, rawWire, rawLens)
-		cs.SchemaHintWireUnconstrainedDecimal = RepublishDeclaredNames(p.outputProjection, rawWire)
+		cs.SchemaHintWireUnconstrainedDecimal = republishDeclaredNames(p.outputProjection, rawWire)
 		// And the string family's modifier, which is a LENGTH rather than a
 		// (p,s) — same lifecycle, same reason (#838).
-		cs.SchemaHintStringLength = RepublishDeclaredNames(p.outputProjection, rawLens)
+		cs.SchemaHintStringLength = republishDeclaredNames(p.outputProjection, rawLens)
 	}
 
 	// Attach spill file cleanup. CTE collectors and the scan cache

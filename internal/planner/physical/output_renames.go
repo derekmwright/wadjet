@@ -131,16 +131,16 @@ func referencesSyntheticAgg(n plansql.Node) bool {
 // the outermost emitting node is not a projection (e.g., a top-level scan or
 // aggregate without a SELECT-list rename layer).
 func findOutputProjectionsForRename(n *logical.Node) []logical.Projection {
-	if p := FindOutputProjectionNode(n); p != nil {
+	if p := findOutputProjectionNode(n); p != nil {
 		return p.Projections
 	}
 	return nil
 }
 
-// FindOutputProjectionNode is FindOutputProjectionsForRename returning the
+// findOutputProjectionNode is FindOutputProjectionsForRename returning the
 // Project node itself, for callers that also need what feeds it — typing a
 // projection expression takes the input's column types (inputColTypes).
-func FindOutputProjectionNode(n *logical.Node) *logical.Node {
+func findOutputProjectionNode(n *logical.Node) *logical.Node {
 	for n != nil {
 		switch n.Type {
 		case logical.NodeProject:
@@ -162,7 +162,7 @@ func FindOutputProjectionNode(n *logical.Node) *logical.Node {
 	return nil
 }
 
-// HiddenSortTrimOp returns the projection that drops a materialized ORDER BY
+// hiddenSortTrimOp returns the projection that drops a materialized ORDER BY
 // term from the single-process pipeline's output, or nil when the plan carries
 // none.
 //
@@ -174,7 +174,7 @@ func FindOutputProjectionNode(n *logical.Node) *logical.Node {
 // the Sort is never elided when it carries a hidden column (its alias always
 // differs from its source, which is what buildProject's needsProject test
 // looks for), so the names resolved here are the ones the pipeline emits.
-func HiddenSortTrimOp(root *logical.Node) exec.UnaryOperator {
+func hiddenSortTrimOp(root *logical.Node) exec.UnaryOperator {
 	projs := findOutputProjectionsForRename(root)
 	if !logical.HasHiddenProjection(projs) {
 		return nil

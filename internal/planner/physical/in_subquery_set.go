@@ -17,7 +17,7 @@ import (
 // correlated subqueries and unstageable DISTINCT (#359, #466).
 // See docs/internals/in-subquery-literal-sets.md for the design.
 
-// InlinedInSetRowCap bounds the set an IN-subquery may be materialized into.
+// inlinedInSetRowCap bounds the set an IN-subquery may be materialized into.
 //
 // The number is a plan-text budget, not a memory one: every row becomes a
 // literal in a filter expression that is serialized into each task, so the
@@ -42,13 +42,13 @@ const defaultInlinedInSetRows = 10000
 // The number means the same thing at both sites — how many rows a subquery
 // result may become a set of — even though what it protects differs (plan
 // text here, a hash map there). One knob, one meaning; two would be two.
-func MaxInlinedInSetRows() int { return InlinedInSetRowCap() }
+func MaxInlinedInSetRows() int { return inlinedInSetRowCap() }
 
-// InlinedInSetRowCap is the resolved cap. Both planners read it — the local
+// inlinedInSetRowCap is the resolved cap. Both planners read it — the local
 // one to bound the plan text it writes, the distributed one to bound the hash
 // map a fragment builds — which is why it is exported from the MIT side
 // rather than moved (LS review round 2, P2).
-func InlinedInSetRowCap() int {
+func inlinedInSetRowCap() int {
 	if v := os.Getenv("WADJET_IN_SET_MAX"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			return n

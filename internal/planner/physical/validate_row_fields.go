@@ -80,7 +80,7 @@ func fieldContainerDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclTyp
 			if len(call.Args) == 0 {
 				return expr.DeclType{}, expr.Undecided
 			}
-			in, c := NodeDeclaredType(call.Args[0], decls)
+			in, c := nodeDeclaredType(call.Args[0], decls)
 			if c != expr.Decided {
 				return expr.DeclType{}, expr.Undecided
 			}
@@ -99,5 +99,5 @@ func fieldContainerDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclTyp
 			return expr.Decl(aggOutputType(call.Name, call.Distinct)), expr.Decided
 		}
 	}
-	return NodeDeclaredType(node, decls)
+	return nodeDeclaredType(node, decls)
 }

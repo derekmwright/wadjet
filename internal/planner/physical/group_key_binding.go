@@ -214,7 +214,7 @@ func groupKeyScopeDescends(t logical.NodeType) bool {
 // A term with no column references at all (a literal, `now()`) is covered
 // vacuously, which is correct: there is nothing for a decl set to know.
 func declsCoverEveryColRef(node plansql.Node, decls ColDecls) bool {
-	for _, ref := range CollectColRefs(node) {
+	for _, ref := range collectColRefs(node) {
 		if _, ok := decls.colDecl(ref); !ok {
 			return false
 		}

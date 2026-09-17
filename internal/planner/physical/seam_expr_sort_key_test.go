@@ -20,7 +20,7 @@ func TestHiddenSortTrimOpDropsMaterializedColumns(t *testing.T) {
 	plan := &logical.Node{Type: logical.NodeSort, Children: []*logical.Node{
 		{Type: logical.NodeProject, Projections: []logical.Projection{visible, hidden}},
 	}}
-	op := HiddenSortTrimOp(plan)
+	op := hiddenSortTrimOp(plan)
 	if op == nil {
 		t.Fatal("no trim operator for a plan carrying a materialized sort column")
 	}
@@ -37,7 +37,7 @@ func TestHiddenSortTrimOpDropsMaterializedColumns(t *testing.T) {
 	plain := &logical.Node{Type: logical.NodeSort, Children: []*logical.Node{
 		{Type: logical.NodeProject, Projections: []logical.Projection{visible}},
 	}}
-	if HiddenSortTrimOp(plain) != nil {
+	if hiddenSortTrimOp(plain) != nil {
 		t.Error("plan with no materialized sort column grew a trim operator")
 	}
 
@@ -46,7 +46,7 @@ func TestHiddenSortTrimOpDropsMaterializedColumns(t *testing.T) {
 	star := &logical.Node{Type: logical.NodeSort, Children: []*logical.Node{
 		{Type: logical.NodeProject, Projections: []logical.Projection{{Expr: "*", Column: "*"}, hidden}},
 	}}
-	if HiddenSortTrimOp(star) != nil {
+	if hiddenSortTrimOp(star) != nil {
 		t.Error("unexpanded star grew a trim operator; it would project every row to nulls")
 	}
 }

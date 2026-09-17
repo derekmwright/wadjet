@@ -11,7 +11,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// NodeDeclaredType is where a projection's output vector type comes from, so a
+// nodeDeclaredType is where a projection's output vector type comes from, so a
 // wrong answer here is a kernel writing values into a vector that cannot hold
 // them — silently, since the write is simply dropped.
 //
@@ -103,7 +103,7 @@ func TestNodeDeclaredTypeThroughNestedCalls(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: parse %q: %v", tc.name, tc.sql, err)
 		}
-		got, c := NodeDeclaredType(node, ColDecls{})
+		got, c := nodeDeclaredType(node, ColDecls{})
 		if got.ID != tc.want || c != tc.wantC {
 			t.Errorf("%s\n  %s\n  declared (%s, %s), want (%s, %s)",
 				tc.name, tc.sql, got.ID, c, tc.want, tc.wantC)
@@ -299,7 +299,7 @@ func TestNodeDeclaredTypeFromColumnTypes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: parse %q: %v", tc.name, tc.sql, err)
 		}
-		got, c := NodeDeclaredType(node, ColDecls{Types: nationColTypes})
+		got, c := nodeDeclaredType(node, ColDecls{Types: nationColTypes})
 		if got.ID != tc.want || c != tc.wantC {
 			t.Errorf("%s\n  %s\n  declared (%s, %s), want (%s, %s)",
 				tc.name, tc.sql, got.ID, c, tc.want, tc.wantC)
@@ -419,7 +419,7 @@ func TestInputColTypesStopsAtRebindingNodes(t *testing.T) {
 	}
 }
 
-// WindowSpecOutputType is the window operator's half of the same problem
+// windowSpecOutputType is the window operator's half of the same problem
 // (#345). exec.Window allocates batch.NewVector(OutputType) and had no runtime
 // correction, so a value function declared float64 over a string column
 // dropped every write for the integer 0:
@@ -527,7 +527,7 @@ func TestWindowSpecOutputType(t *testing.T) {
 		{"a window with no child", &logical.Node{Type: logical.NodeWindow}, "lag", "n_name", parquet.TypeFloat64},
 	}
 	for _, tc := range tests {
-		got := WindowSpecOutputType(tc.node, logical.WindowExpr{Func: tc.fn, InputCol: tc.input, OutputCol: "w"}).ID
+		got := windowSpecOutputType(tc.node, logical.WindowExpr{Func: tc.fn, InputCol: tc.input, OutputCol: "w"}).ID
 		if got != tc.want {
 			t.Errorf("%s: %s(%s) declared %s, want %s", tc.name, tc.fn, tc.input, got, tc.want)
 		}

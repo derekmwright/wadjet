@@ -85,7 +85,7 @@ func scanColumnSpelling(scan *logical.Node, ref string) (string, bool) {
 // Sort, Limit or Distinct above the scan passes its input through unchanged,
 // which is why `SELECT * FROM t WHERE false`, `... ORDER BY c0` and `...
 // LIMIT 10` all publish the table's own columns. Reaching a Project means
-// FindOutputProjectionNode owns the answer; reaching anything else means the
+// findOutputProjectionNode owns the answer; reaching anything else means the
 // emitted columns are not the scan's.
 //
 // The one node that changes the answer without leaving the star's world is a
@@ -157,7 +157,7 @@ func starJoinDeclaredOutputSchema(root *logical.Node,
 	}
 	excludeProbe, excludeBuild := joinHiddenPositions(join)
 	out := exec.JoinOutputSchema(MapExecJoinType(strings.ToLower(join.JoinType)),
-		probe, build, JoinArmAlias(join.Children[1]),
+		probe, build, joinArmAlias(join.Children[1]),
 		SubtreeNamingOf(join.Children[1]).MaterializedBuildColOrigins(),
 		false, joinProbeOutputFilter(join), excludeProbe, excludeBuild)
 	if len(out) == 0 {
