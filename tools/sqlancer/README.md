@@ -169,7 +169,7 @@ Every command needs `source ~/tools/sqlancer-env.sh` first (or your own
 ```bash
 task build
 mkdir -p /tmp/wadjet-sqlancer-data
-dist/wadjet serve --mode=standalone --pg-addr=:15432 \
+dist/wadjetd serve --mode=standalone --pg-addr=:15432 \
   --storage-type=file --data-dir=/tmp/wadjet-sqlancer-data
 ```
 
