@@ -272,6 +272,10 @@ Casts/writes enforce 0–65535 and 0–255 (22003); arithmetic may leave those r
 
 Storage and wire use bigint nanoseconds, OID 20, versus PostgreSQL’s microsecond interval. (ADR-0012 §5/#834)
 
+**A FULL JOIN on a non-equi ON condition answers.**
+
+`FULL JOIN b ON a.n < b.n` raises `FULL JOIN is only supported with merge-joinable or hash-joinable join conditions` on PostgreSQL, which has no executor for it. The join is still DEFINED there — the LEFT JOIN plus the build rows no probe row satisfies — and that is what this engine answers. Superset, kept; the 14 shapes are cells of `coordinator.TestJRAOuterJoinOnResidualsAgreeOnFiveArms`. (ADR-0012 §13/#1153)
+
 **MIN/MAX accepts additional types.**
 
 BOOL, UUID, MAC, BYTES and ROW have defined orders here; PostgreSQL lacks these aggregates. BYTES uses bytewise order and retains bytea OID 17. (ADR-0012 §5/#569, #570)
@@ -348,9 +352,9 @@ It raises 0A000 where PostgreSQL answers: the keys are whatever columns the two 
 
 `FROM t a(k, k)` raises 42701 where PostgreSQL accepts the list and refuses only a reference to `k` (42702). This planner renames positionally and cannot publish one name for two columns; refusing the list is narrower than PostgreSQL, never a wrong value. (ADR-0012 §5/#959)
 
-**A BETWEEN inside a JOIN ON clause is refused.**
+**A subquery inside an OUTER join's ON clause is refused.**
 
-`ON a.id = b.id AND a.id BETWEEN 2 AND 3` fails while building the physical plan where PostgreSQL answers: the planner splits an ON clause into conjuncts on the literal text `" AND "`, and BETWEEN carries one. The same predicate in a WHERE clause answers. (ADR-0012 §5/#655)
+`LEFT JOIN b ON a.x = (SELECT max(y) FROM c)` raises where PostgreSQL answers. An outer join's ON is evaluated AT the join, per probe row against each candidate build row, because a conjunct lifted above it would delete the rows the join preserves — and a subquery's value is not available there. The refusal names the construct. An INNER join lifts the same ON into a filter above the join and answers it. (ADR-0012 §5/#1153)
 
 **Integer XOR has no spelling.**
 

@@ -745,8 +745,8 @@ with a NULL operand answers NULL and none answers `false`. (With a NULL bound
 the two disjuncts cannot both be false — one needs `a > c` and the other
 `a < c` — and with a NULL left operand everything is NULL.)
 
-A BETWEEN of any spelling inside a `JOIN ... ON` clause is refused — see
-**Limitations**.
+A BETWEEN inside a `JOIN ... ON` clause is evaluated like any other `ON`
+condition, on every join kind.
 
 ### EXISTS Predicate
 
@@ -4362,10 +4362,11 @@ and `internal/storage/parquet/wide_decimal_test.go`.)
   that earlier join is itself an inner `JOIN ... USING` naming the same columns
   — rejected (`0A000`); the column could otherwise come from either relation on
   the left. PostgreSQL refuses the `ON`-join form of this too (`42702`)
-- A `BETWEEN` of any spelling inside a `JOIN ... ON` clause — rejected while
-  building the physical plan. The planner splits an `ON` clause into conjuncts
-  on the literal text `" AND "`, and `BETWEEN low AND high` carries one. The
-  same predicate in a `WHERE` clause answers
+- A SUBQUERY inside a `JOIN ... ON` clause of an OUTER join — rejected while
+  building the physical plan, naming the construct. An outer join's `ON` is
+  evaluated AT the join, per probe row against each candidate build row, and a
+  subquery's value is not available there. An INNER join lifts the same `ON`
+  into a filter above the join and answers it
 - A column-alias list on a reference to a `WITH` query — rejected (`0A000`);
   put the list on the definition
 - A column-alias list that REPEATS a name — rejected (`42701`)

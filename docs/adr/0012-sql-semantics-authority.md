@@ -815,17 +815,41 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      right one, and it cannot tell the two fixtures apart without the data.
      Measured both ways by the round-2 review (P1-r2).
 
-   - **A `BETWEEN` of any spelling inside a `JOIN … ON` clause is refused.**
-     (Added 2026-09-18 by arc PS, #655/#1154.)
+   - ~~**A `BETWEEN` of any spelling inside a `JOIN … ON` clause is
+     refused.**~~ (Added 2026-09-18 by arc PS, #655/#1154; **CLOSED the same
+     day by arc JR, #1178**.)
 
-     `logical.splitOnAnd` splits a rendered ON clause into conjuncts on the
-     literal text `" AND "`, and `BETWEEN low AND high` carries one — so the
-     fragments do not parse and the physical planner refuses the clause. It is
-     PRE-EXISTING and identical for the plain spelling; `BETWEEN SYMMETRIC`
-     inherits it. The same predicate in a WHERE clause answers, and `IN (…)`
-     in the same position answers. Closing it means splitting the ON clause on
-     its AST — `physical.flattenJoinConjuncts` already does exactly that one
-     layer down — rather than on its text.
+     `logical.splitOnAnd` split a rendered ON clause into conjuncts on the
+     literal text `" AND "`, and `BETWEEN low AND high` carries one, so the
+     fragments did not parse and the physical planner refused the clause. The
+     four join sites split on the AST now (`logical.splitJoinConjuncts`), the
+     way `physical.flattenJoinConjuncts` already did one layer down. Every
+     spelling that carries the word AND inside ONE condition is a cell of
+     `logical.TestSplitJoinConjunctsSplitsOnTheASTNotTheText`, and the
+     end-to-end shapes are in `coordinator.TestJRAOuterJoinOnResidualsAgreeOnFiveArms`.
+
+   - **A SUBQUERY inside an OUTER join's `ON` clause is refused.**
+     (Added 2026-09-18 by arc JR, #1153.)
+
+     An outer join's `ON` is evaluated AT the join, per probe row against each
+     candidate build row, because a conjunct lifted above it would delete the
+     rows the join preserves (ADR-0006's 2026-09-18 amendment). A subquery's
+     value is not available there. The refusal NAMES the construct; an INNER
+     join lifts the same `ON` into a filter above the join and answers it. What
+     would close it is a per-candidate subquery runner at the join, which does
+     not exist.
+
+   - **A `FULL JOIN` on a non-equi `ON` condition ANSWERS, where PostgreSQL
+     refuses.** (Added 2026-09-18 by arc JR, #1153.)
+
+     `FULL JOIN b ON a.n < b.n` raises `FULL JOIN is only supported with
+     merge-joinable or hash-joinable join conditions` on PostgreSQL 17.11,
+     which has no executor for the shape. The join is still DEFINED there —
+     `(a LEFT JOIN b ON p) UNION ALL (b WHERE NOT EXISTS (a WHERE p))` — and
+     that definition is what this engine answers; all fourteen shapes were
+     measured against it. A superset, kept (the PG-rejects-but-we-answer
+     class), and each cell says so in
+     `coordinator.TestJRAOuterJoinOnResidualsAgreeOnFiveArms`.
 
    - **The `^` operator answers two spellings PostgreSQL's lexer and operator
      table reject.** (Added 2026-09-18 by arc PS's round-1 review, N10; recorded

@@ -25,59 +25,22 @@ const residualColPrefix = "_wj_on_"
 // conjunct that is not an equi-join key pair — into a FACTORY of predicates
 // over the COMBINED row: the probe row plus one candidate build row (#358).
 //
-// An outer join's ON runs BEFORE the NULL-padding, so this residual cannot be
-// a filter above the join (that deletes the preserved rows) and cannot be
-// pushed into a preserved side's scan (that deletes the rows the join owes
-// unmatched). The executor evaluates it per key-matched candidate; see
-// exec.HashJoin.NewResidual for the unmatched semantics it feeds.
+// An outer join's ON runs BEFORE the NULL-padding, so the residual is
+// evaluated AT the join and cannot be lifted above it or pushed into a
+// preserved side's scan (ADR-0006's 2026-09-18 amendment). The expression is
+// the ENGINE'S OWN: each distinct reference binds to a side and a column here,
+// the AST is rewritten to read that binding by position, and expr.Compile
+// compiles the rest — the same compiler the inner join's lifted filter runs
+// above the join, so a predicate means the same thing on both sides (#1153).
 //
-// THE EXPRESSION IS THE ENGINE'S OWN (#1153). What this used to be was a
-// second expression evaluator — a small AST interpreter that accepted columns,
-// literals, arithmetic and comparisons and REFUSED everything else, so
-// `a LEFT JOIN b ON CAST(a.x AS VARCHAR) = b.y`, `ON b.y LIKE '1%'` and every
-// other ON PostgreSQL evaluates came back as a plan refusal. Two evaluators for
-// one seam is also two semantics: whichever of them a query reached decided
-// what its ON meant. There is one now. The residual's references are bound to a
-// side and a column at plan time, renamed to positional `_wj_on_<i>` columns,
-// and `expr.Compile` compiles the rest — the same compiler the inner join's
-// lifted filter runs above the join, so a predicate means the same thing on
-// both sides of that lift.
+// A FACTORY because an evaluator owns the combined-row scratch it rewrites per
+// candidate: exec.HashJoin.Probe mints one per clone. The compiled tree is
+// shared, as every predicate closure in this engine is.
 //
-// BuildSemiAntiFilter is not reusable here: it only expresses
-// `probeCol OP buildCol`, while a residual takes literals, arithmetic,
-// functions and SQL three-valued logic (a residual evaluating to NULL rejects
-// the candidate, but NOT of it must not accept).
-//
-// Column resolution against the two sides is by name, decided lazily on the
-// first evaluated pair and cached: a qualified name is looked up in the probe
-// then the build schema (self-join chains carry qualified columns); a
-// qualifier equal to buildAlias forces the build side; otherwise the bare
-// name resolves probe-first. A `row.field` path is asked BEFORE the qualifier
-// is stripped (ADR-0022 rule 1, #769) and binds to the CONTAINER'S CHILD, so
-// the combined row carries the field's own value under the field's own
-// declared type. Every one of those lookups is ResolveColumnIndex, not
-// ColumnIndex: the names here are REFERENCES off the ON clause, so they arrive
-// folded from the lexer (#731), while the batch carries the catalog's own
-// spelling — `RegionName`, not `regionname`, for a parquet-registered table.
-// A byte-exact probe misses every CamelCase column, and because an
-// unresolvable column makes the residual UNKNOWN the failure mode is not a
-// loud one: the join rejects every candidate and NULL-pads each preserved row,
-// so a LEFT JOIN whose ON carries a residual answers all-NULL on the
-// null-supplying side. The rule the resolver applies (fold only a reference
-// that is itself folded; a delimited name stays byte-exact) is in
-// internal/engine/batch/schema.go.
-//
-// An unresolvable column still makes every evaluation UNKNOWN (candidate
-// rejected) and logs once — the planner ships JoinFilter columns through
-// NeededColumns, so a miss here is a plan bug, not user error.
-//
-// The error is the plan's refusal and NAMES THE CONSTRUCT that cannot be
-// evaluated at a join: a subquery in ON (plansql.ColumnRefs refuses it,
-// because a subquery's columns are not resolvable from here), a window
-// function, an AST node nothing here knows, or a function the expression
-// compiler itself refuses. The caller must raise it rather than drop the
-// conjunct — the pre-#351 silent drop is the defect class this path exists to
-// bury.
+// The error is the plan's refusal and NAMES the construct — a subquery in ON,
+// a window function, a function or type the compiler refuses. The caller raises
+// it rather than dropping the conjunct (#351).
+// See docs/internals/outer-join-residual-evaluation.md for the design.
 func buildJoinResidualFilter(filter, buildAlias string) (func() exec.JoinResidual, error) {
 	node := parseJoinCondExpr(filter)
 	if node == nil {

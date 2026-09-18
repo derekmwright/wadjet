@@ -16,24 +16,18 @@ type joinConjunct struct {
 }
 
 // splitJoinConjuncts splits an ON clause into its top-level AND terms ON THE
-// AST, which is what tells an AND that JOINS two conditions from an AND that
-// is PART OF one.
+// AST, which is what tells an AND that JOINS two conditions from an AND that is
+// PART of one. The textual split it replaces cut `ON a.x BETWEEN b.lo AND b.hi`
+// into `a.x BETWEEN b.lo` and `b.hi`, and the join was refused for a condition
+// PostgreSQL evaluates (#1178).
 //
-// splitOnAnd, which this replaces at the join sites, cuts the RENDERED text at
-// every " AND ". BETWEEN carries one of its own: `ON a.x BETWEEN b.lo AND
-// b.hi` was cut into `a.x BETWEEN b.lo` and `b.hi`, the first of which parses
-// as nothing and the second as a literal, so the join was refused for a
-// condition PostgreSQL evaluates and the same predicate in WHERE answers
-// (#1178). A string literal containing ' AND ', a parenthesised OR, and a CASE
-// with an AND inside it are the same cut on other spellings.
-//
-// A conjunct is rendered back from its node, which round-trips: QuoteIdent
-// keeps a delimited or CamelCase name re-parseable (#731), and an OR conjunct
-// is re-parenthesised so re-joining the terms with " AND " cannot change how
-// they associate. An expression that does not parse at all keeps the textual
-// split — the physical key parser still refuses it loudly there — and a
-// condition with nothing to split keeps its ORIGINAL text, so the common case
-// is byte-identical to what the planner carried before.
+// A term is rendered back from its node, which round-trips, and an OR term is
+// re-parenthesised so re-joining with " AND " cannot re-associate. A clause
+// that does not parse keeps the textual split, where the physical key parser
+// still refuses it loudly; a clause with nothing to split keeps its ORIGINAL
+// text byte for byte, so the common case reaches the physical planner exactly
+// as the parser handed it over.
+// See docs/internals/join-on-conjunct-split.md for the design.
 func splitJoinConjuncts(cond string) []joinConjunct {
 	root := tryParseExpr(cond)
 	if root == nil {

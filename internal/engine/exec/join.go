@@ -120,20 +120,16 @@ type HashJoin struct {
 	// all fail the residual is UNMATCHED — a LEFT/FULL join still emits it
 	// NULL-padded rather than dropping it — and a build row counts as matched
 	// only when some probe row passed BOTH key and residual, which is what
-	// FlushUnmatched consults for RIGHT/FULL. A residual returning false OR
-	// NULL rejects the candidate (the compiled evaluator folds UNKNOWN to
-	// false, which is the SQL ON semantics).
+	// FlushUnmatched consults for RIGHT/FULL. FALSE and UNKNOWN both reject.
 	//
 	// With no join keys at all (`LEFT JOIN r ON n.x = r.y + 3` — no conjunct
 	// is a bare-column equality) the build degenerates to a single empty-key
-	// chain holding every build row, so each probe row's candidate set is the
-	// whole build side and the residual does all of the work.
+	// chain holding every build row, so the residual does all of the work.
+	// That is still a hash join, not a cross join: its probe routes by that
+	// key, so the build grace-partitions and spills (ADR-0006, 2026-09-18).
 	//
-	// It is a FACTORY, not one shared closure: an evaluator owns a
-	// combined-row scratch batch it rewrites per candidate (the probe row's
-	// and the candidate build row's values, under the synthetic names the
-	// compiled expression reads), so every parallel probe mints its own.
-	// HashJoin.Probe does that once per clone; nothing else may call it.
+	// A FACTORY, not one shared closure: an evaluator owns a combined-row
+	// scratch it rewrites per candidate, so Probe mints one per clone.
 	NewResidual func() JoinResidual
 
 	// rowMatched tracks matched build rows per (batchIdx, rowIdx) when
