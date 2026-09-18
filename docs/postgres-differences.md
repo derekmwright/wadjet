@@ -326,7 +326,7 @@ It raises 0A000 where PostgreSQL answers: the merged value is COALESCE of the tw
 
 **A window key naming a FULL JOIN … USING merged column is refused.**
 
-It raises 0A000 where PostgreSQL answers: the merged value is a COALESCE and a window PARTITION BY / ORDER BY key here is a column name. Write the expression. (ADR-0012 §5/#655)
+It raises 0A000 where PostgreSQL answers: the merged value is a COALESCE and a window PARTITION BY / ORDER BY key here is a column name. Write the expression. A window ARGUMENT is an expression and binds the merge on RIGHT and FULL alike. The refusal is drawn on the SHAPE, so on data where the merged and left-arm partitionings coincide it withdraws an answer that would have been right. (ADR-0012 §5/#655)
 
 **NATURAL JOIN is refused.**
 

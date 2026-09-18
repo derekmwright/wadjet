@@ -4326,7 +4326,11 @@ and `internal/storage/parquet/wide_decimal_test.go`.)
   is the same refusal
 - A WINDOW `PARTITION BY` or window `ORDER BY` key naming a `FULL JOIN ...
   USING` merged column — rejected (`0A000`); the merged value is a `COALESCE`
-  and a window key here is a column name. Write the expression
+  and a window key here is a column name. Write the expression. A window
+  ARGUMENT is an expression and needs no workaround: `SUM(id) OVER (...)` binds
+  the merge on a `RIGHT` and a `FULL` join alike. The refusal is drawn on the
+  SHAPE, so on data where the merged and left-arm partitionings happen to
+  coincide it withdraws an answer that would have been right
 - `JOIN ... USING` that follows another join on the same `FROM` item, unless
   that earlier join is itself an inner `JOIN ... USING` naming the same columns
   — rejected (`0A000`); the column could otherwise come from either relation on

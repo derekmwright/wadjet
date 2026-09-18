@@ -788,7 +788,21 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      arm. A named select list carries it and answers; the same statement
      without the ORDER BY answers; a RIGHT join's merged key is a plain
      reference and answers. The same applies to a window PARTITION BY or
-     window ORDER BY key, whose slot holds a column NAME.
+     window ORDER BY key, whose slot holds a column NAME — though a window
+     ARGUMENT is an EXPRESSION and does take the merge, for a FULL join as
+     readily as for a RIGHT one.
+
+     THE REFUSAL IS DRAWN ON THE SHAPE, not on the data, and on a fixture where
+     the merged partitioning and the left arm's COINCIDE it withdraws an answer
+     that happened to be right. `COUNT(*) OVER (PARTITION BY id)` over
+     `psb FULL JOIN psa USING (id)` answered PostgreSQL's 1, 1, 1 at base,
+     because every partition there is one row whichever side the key binds; it
+     is 0A000 now. The SHAPE is wrong at base in general — with two rows the
+     left arm does not match, the same statement answered 2, 2 for
+     PostgreSQL's 1, 1, and `ROW_NUMBER() OVER (ORDER BY id)` answered 1, 2, 3
+     for 2, 3, 1 — so the refusal replaces a base-WRONG answer rather than a
+     right one, and it cannot tell the two fixtures apart without the data.
+     Measured both ways by the round-2 review (P1-r2).
 
    - **A `BETWEEN` of any spelling inside a `JOIN … ON` clause is refused.**
      (Added 2026-09-18 by arc PS, #655/#1154.)
