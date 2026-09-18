@@ -76,12 +76,11 @@ func (d ArgDomain) String() string {
 // arguments it takes, and what each position accepts.
 //
 // It exists because the registry recorded neither. Every entry is
-// `func(args []any) any`, so a call with the wrong count could not be refused
-// at bind time and each body read `args[i]` defensively: `semver_cmp('1.0.0')`
-// answered NULL, `semver_major('1.2.3','x')` answered NULL and `upper('a','b')`
-// answered 'A' with the extra argument dropped, where PostgreSQL answers 42883
-// for all three (#1053). A filter over a mis-called function then evaluated
-// NULL for every row and dropped the whole relation silently.
+// `func(args []any) any`, so a wrong count could not be refused at bind time
+// and each body read `args[i]` defensively: `semver_cmp('1.0.0')` and
+// `semver_major('1.2.3','x')` answered NULL and `upper('a','b')` answered 'A',
+// where PostgreSQL answers 42883 for all three (#1053) — and a filter over a
+// mis-called function then dropped the whole relation silently.
 //
 // The DOMAIN half is the same defect one layer down. FuncCall.EvalVec's `*Lit`
 // branch built a constant vector for a numeric literal with no text arena and
@@ -245,20 +244,17 @@ var textDomains = map[string][]ArgDomain{
 // Each arity is its DOCUMENTED signature (docs/sql-reference.md's function
 // tables, whose `f(a, b)` / `f(a [, b])` / `f(a, ...)` spellings say exactly
 // this), reconciled against the implementation's own argument use; for the
-// pg_catalog shims it is PostgreSQL's own, read out of that server's pg_proc,
-// because the contract those exist to satisfy is what a client calls them
-// with. Where wadjet implements FEWER overloads than PostgreSQL — `ltrim(s)`
-// but not `ltrim(s, chars)`, `regexp_replace(s, p, r)` but not its four
-// further forms — the declaration is what this engine HAS, and the missing
+// pg_catalog shims it is PostgreSQL's own, read out of that server's pg_proc.
+// Where wadjet implements FEWER overloads than PostgreSQL — `ltrim(s)` but not
+// `ltrim(s, chars)` — the declaration is what this engine HAS, and the missing
 // overload is 42883, which is what the server answers for a signature it does
 // not have either.
-// THE ONE FAMILY WHOSE MISSING ARGUMENTS ARE NOT THIS TABLE'S BUSINESS. The
-// TCP flag functions own a refusal for an empty NAME LIST —
-// `22023 tcp_flag_mask requires at least one TCP flag name`, settled by #1018
-// with its own binder half — and that refusal says which function and what it
-// wanted, where a generic `function tcp_flag_mask() does not exist` says
-// neither. Their minimum here is therefore the count that carries NO names, so
-// the family's own refusal is the one a user reads.
+//
+// ONE FAMILY'S MISSING ARGUMENTS ARE NOT THIS TABLE'S BUSINESS: the TCP flag
+// functions own a refusal for an empty NAME LIST (`22023 tcp_flag_mask
+// requires at least one TCP flag name`, #1018, with its own binder half),
+// which says which function and what it wanted where a generic 42883 says
+// neither. Their minimum here is the count that carries NO names.
 var funcSignatures = map[string]Signature{
 	"abs":                            {Min: 1, Max: 1},
 	"acos":                           {Min: 1, Max: 1},

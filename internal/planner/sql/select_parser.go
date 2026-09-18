@@ -1816,22 +1816,20 @@ func (p *selectParser) parseComparison() (Node, error) {
 //
 //	(a BETWEEN b AND c) OR (a BETWEEN c AND b)
 //
-// NOT the `BETWEEN least(b,c) AND greatest(b,c)` the prose suggests. The two
-// agree on every non-NULL operand and disagree whenever a bound is NULL,
-// because least/greatest IGNORE NULLs: `SELECT 1 BETWEEN SYMMETRIC NULL AND 1`
-// is NULL in PostgreSQL 17.11 and the least/greatest form answers TRUE
-// (least(NULL,1) = greatest(NULL,1) = 1). Measured, not remembered.
+// NOT the `BETWEEN least(b,c) AND greatest(b,c)` the prose suggests: the two
+// disagree whenever a bound is NULL, because least/greatest IGNORE NULLs, so
+// `1 BETWEEN SYMMETRIC NULL AND 1` is NULL on PostgreSQL 17.11 and TRUE in
+// that form. Measured, not remembered.
 //
-// The expansion happens HERE rather than as a flag on BetweenExpr because the
-// node is rebuilt by seven rewriters (canonicalization, correlation, the
-// lateral walks, filter/project pushdown), and a rebuild that forgot to copy
-// the flag would silently answer an ASYMMETRIC range — a wrong answer with no
-// refusal. The OR-of-two-BETWEENs shape is one every consumer already handles,
-// which is the same reason ILIKE, SIMILAR TO, `= ANY (subquery)` and a VALUES
-// table source are expanded in this parser too.
+// The expansion happens HERE rather than as a flag on BetweenExpr because
+// seven rewriters rebuild that node (canonicalization, correlation, the
+// lateral walks, filter/project pushdown) and a rebuild that forgot to copy
+// the flag would silently answer an ASYMMETRIC range. The disjunction is a
+// shape every consumer already handles, which is why ILIKE, SIMILAR TO,
+// `= ANY (subquery)` and a VALUES table source are expanded here too.
 //
-// `NOT BETWEEN SYMMETRIC` negates the whole disjunction, which is PostgreSQL's
-// association and keeps three-valued logic: NOT NULL is NULL.
+// `NOT BETWEEN SYMMETRIC` negates the whole disjunction, PostgreSQL's
+// association, which keeps three-valued logic: NOT NULL is NULL.
 func symmetricBetween(left, low, high Node, not bool) Node {
 	// PARENTHESIZED, because the expansion is what `String()` renders and an
 	// unparenthesized disjunction does not survive a re-parse: `a AND b

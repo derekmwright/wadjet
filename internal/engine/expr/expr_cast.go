@@ -86,79 +86,48 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		return castToNetwork(b, row, e.Operand, v, nt)
 	}
 	switch dest {
-	// Keep this label list and IsIntegerCastDest in step: that predicate is
-	// what tells the DAG's gather materialization to build an INT64 vector
-	// for this destination (#813), and a label here it does not know would
-	// put the same query's answer in a float64 one.
-	// INT32, PORT and PROTOCOL are here because they are integer destinations
-	// this engine HAS and this switch did not implement: all three fell to
-	// `default: return v` and answered the operand unchanged under a STRING
-	// declaration, so `3000000000::INT32` answered 3000000000 where
-	// PostgreSQL raises `integer out of range` for the same magnitude, and
-	// `3000000000::PORT` answered it under a type whose whole carrier is a
-	// signed 32-bit field (#901). castIntInRange carries their bound; PORT
-	// and PROTOCOL then reach a PORT/PROTOCOL vector, whose own int4 guard is
-	// the second net (batch.IntegerRangeError).
+	// Keep this label list and IsIntegerCastDest in step: that predicate tells
+	// the DAG's gather materialization to build an INT64 vector for this
+	// destination (#813), and a label here it does not know would put the same
+	// query's answer in a float64 one.
 	//
-	// INT64 is the same hole one spelling over, and it survived #901.
-	// physical.inferCastType has read it as an integer destination all along
-	// — it is BIGINT's wadjet spelling — so the projection allocated an INT64
-	// vector while this switch fell to `default: return v` and handed it the
-	// operand untouched: `CAST('2.5' AS INT64)` and `CAST(dec_col AS INT64)`
-	// reached the store as a Go STRING and died on the #361 silent-write
-	// guard, a message about a vector where the answer is 22P02 or a rounded
-	// number. Found by re-running arc NT's own review probes at this arc's
-	// tip (ntrev3_fractional, "cast quoted lit -> int").
+	// INT32, PORT and PROTOCOL are integer destinations this engine HAS and
+	// this switch did not implement: all three fell to `default: return v` and
+	// answered the operand unchanged under a STRING declaration, so
+	// `3000000000::INT32` answered where PostgreSQL raises `integer out of
+	// range`, and `3000000000::PORT` answered under a signed 32-bit carrier
+	// (#901). castIntInRange carries their bound; a PORT/PROTOCOL vector's own
+	// int4 guard is the second net (batch.IntegerRangeError). INT64 is the
+	// same hole one spelling over and survived #901: physical.inferCastType
+	// has read it as an integer destination all along — BIGINT's wadjet
+	// spelling — so the projection allocated an INT64 vector while this switch
+	// handed it the operand untouched, and `CAST('2.5' AS INT64)` died on the
+	// #361 silent-write guard.
 	//
-	// A PROTOCOL destination reads ONE thing this arm's integer grammar does
-	// not: the IANA NAME, which is the type's own text form and what
-	// `protocol_name()` prints, so `CAST('udp' AS PROTOCOL)` is 17 and
-	// `CAST(CAST(p AS TEXT) AS PROTOCOL)` round-trips (#986). The NUMBER
-	// keeps int4's domain and int4's message.
+	// A PROTOCOL destination also reads the IANA NAME, the type's own text
+	// form (`CAST('udp' AS PROTOCOL)` is 17, #986); the NUMBER keeps int4's.
 	case "int", "integer", "int4", "int32", "int64", "bigint", "int8", "signed",
 		"smallint", "int2", "port", "protocol":
 		// A string that does not read as a number is refused, not coerced to
-		// 0: PostgreSQL raises 22P02 invalid_text_representation and ADR-0012
-		// makes it the authority on error-versus-not. The per-row error
-		// channel #340 lacked exists now — FatalEvalPanic, #347 — which is
-		// what this raise rides.
+		// 0: PostgreSQL raises 22P02 and ADR-0012 makes it the authority on
+		// error-versus-not; the raise rides FatalEvalPanic (#347).
 		//
-		// A value that DOES read as a number then follows PostgreSQL's other
-		// rule (#373): a fractional cast to an integer type ROUNDS, half away
-		// from zero. TRUNC() is how a caller asks for truncation. An
-		// already-integral value passes through untouched.
-		// An exact DECIMAL is read on its own carrier, not through a double:
-		// strconv.ParseFloat loses every digit past the sixteenth, so a
-		// DECIMAL(38,10) holding 493827160549382.7160549350 came back as the
-		// nearest double's integer part, and a value past the destination's
-		// range came back as whatever the float conversion produced instead
-		// of the refusal PostgreSQL gives (ADR-0024 item 4).
-		// A TEXT operand for PORT or PROTOCOL is read by the TYPE's input
-		// function BEFORE the decimal reader gets it, because those two are
-		// different questions and PostgreSQL keeps them apart: `'2.5'::integer`
-		// is 22P02 there while `numeric_col::integer` ROUNDS. castDecimalToInt
-		// reads text with no type knowledge, so with it first
-		// `CAST('2.5' AS PORT)` was 3 — and `INSERT … SELECT '2.5'` put that 3
-		// at REST in a PORT column whose text doors say 22P02 (review NT
-		// round 2, P). The operand's SHAPE is what separates them: a quoted
-		// literal or a STRING column is text, a DECIMAL column is not.
+		// A value that DOES read as a number follows PostgreSQL's other rule
+		// (#373): a fractional cast to an integer type ROUNDS, half away from
+		// zero, and TRUNC() is how a caller asks for truncation. An exact
+		// DECIMAL is read on its own carrier, never through a double —
+		// ParseFloat loses every digit past the sixteenth (ADR-0024 item 4).
+		//
 		// A TEXT operand is read by the DESTINATION TYPE'S INPUT FUNCTION and
-		// by nothing else. PostgreSQL has two casts here and they are not the
-		// same cast: `'2.5'::integer` is 22P02 invalid_text_representation,
-		// because int4in's grammar has no fractional part, while
-		// `numeric_col::integer` ROUNDS half away from zero. Measured on
-		// 17.11: `'2.5'`, `'2.0'`, `'26.7'`, `'-0.4'` and `'1e3'` are all
-		// 22P02 for integer, bigint and smallint alike, and `2.5` (numeric)
-		// is 3.
-		//
-		// castDecimalToInt reads the BOX, and a text box and a decimal box
-		// are the same Go string here, so with it first every quoted
-		// fractional literal took the numeric cast's rounding and answered a
-		// number PostgreSQL refuses (#1141). The operand's SHAPE is what
-		// separates them — castOperandDeclaresText decides from the EXPRESSION's
-		// own declaration — so the routing happens before either reader,
-		// once, for every integer destination rather than for PORT and
-		// PROTOCOL alone.
+		// by nothing else: PostgreSQL's two casts here are not the same cast,
+		// `'2.5'::integer` being 22P02 where `numeric_col::integer` rounds to
+		// 3 (measured on 17.11 for '2.5', '2.0', '26.7', '-0.4' and '1e3', at
+		// integer, bigint and smallint alike). castDecimalToInt reads the BOX,
+		// and a text box and a decimal box are the same Go string here, so
+		// with it first every quoted fractional literal took the rounding cast
+		// (#1141). castOperandDeclaresText decides from the EXPRESSION's own
+		// declaration instead — before either reader, once, for every integer
+		// destination rather than for PORT and PROTOCOL alone.
 		if castOperandDeclaresText(e.Operand, b) {
 			if s, ok := stringOperand(v); ok {
 				return castTextToInt(s, dest)

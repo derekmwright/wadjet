@@ -10,84 +10,24 @@ import (
 
 // THE WINDOW-KEY / NAME-OWNERSHIP SEAM, ENUMERATED ONCE — arc WK.
 //
-// ADR-0026 §8j recorded this seam as NOT SETTLED after three bounded repairs
-// were written and measured back out. The rule that settles it is in
-// docs/design/window-key-ownership.md: **a window key, a sort key, a lifted
-// predicate column and a join-arm reference bind by IDENTITY — the OCCURRENCE
-// that produced the column, and the column within that occurrence — carried
-// from binding through every rewrite; a NAME is derived from the identity for
-// publication, never the reverse.**
+// The rule that settles it is docs/design/window-key-ownership.md (ADR-0026
+// §8j): a window key, a sort key, a lifted predicate column and a join-arm
+// reference bind by IDENTITY — the OCCURRENCE that produced the column — and a
+// NAME is derived from the identity for publication, never the reverse.
 //
-// This table is the seam enumerated ONCE, by measurement, rather than one
-// position per round. It crosses every CONSUMER of a column reference with
-// every PRODUCER an arm can be, on five arms, against live PostgreSQL 17.11:
+// The table crosses every CONSUMER with every PRODUCER an arm can be, on five
+// arms, against live PostgreSQL 17.11:
 //
 //	{window PARTITION BY, window ORDER BY, window ARGUMENT, sort key,
-//	 join-arm reference, star}
-//	  × {base scan, derived block, LATERAL, set operation, grouped block,
-//	     nested block}
-//	  + {lifted predicate column} × {LATERAL} × three spellings
-//	  × {single, spilled512k, dag, dag-shuffled, dag-morsel4}
+//	 join-arm reference, star} × {base scan, derived block, LATERAL, set
+//	 operation, grouped block, nested block}
+//	  + {lifted predicate} × {LATERAL} × three spellings
 //
-// 50 cells × 5 arms = 250 (cell, arm) results. Every producer publishes `id`,
-// which `lat_ord o` also publishes, so the ownership question is LIVE in every
-// cell: a consumer that erases the occurrence binds `o.id` and the cell says
-// so. A corpus whose producer publishes a name nothing else spells answers
-// correctly by luck — that is what arc R2 measured about its own
-// name-collision dimension, and it is why this one is built the other way.
-//
-// The PostgreSQL answers were taken from a postgres:17-alpine container
-// standing alone (`--locale=C`, text columns `COLLATE "C"`), loaded with this
-// package's own lat_ord / lat_item rows; the command and every answer are in
-// the arc's `pg_corpus.log`.
-//
-// WHAT MOVED. Before this arc, `PARTITION BY o.id`, `ORDER BY o.id` and
-// `SUM(o.total) OVER (PARTITION BY o.id)` over two BASE-SCAN arms bound
-// whichever arm the reorderer put bare — seven pinned cells of
-// TestArcL1AWindowKeyBindsItsOwnJoinArm and one of
-// TestArcL1QualifyAnswersDuckDBOnEveryArm, on all five arms, in silence. Those
-// pins are DELETED; see that gate's header for the mechanism.
-//
-// WHAT REMAINS. One COLUMN of this table, the LATERAL producer, and one
-// KEY SHAPE, an expression whose two leaves name two occurrences — the cell
-// docs/design/window-key-ownership.md §(a) M2 names, added here with its
-// measured mechanism. Both are DAG-only and `distributed`.
-//
-// The LATERAL producer first.
-// Five consumers × three DAG arms bind the outer occurrence, because a
-// decorrelated body's Project emits no stage and the DAG's join publishes the
-// body's inner-scan spelling where the single-process join publishes the arm's
-// own alias. Right on the engine's own arm, wrong only on the distributed
-// ones: pinned per arm with that mechanism, labelled `distributed`, and NOT
-// chased here (engine-first, Derek 2026-09-16). The star over a LATERAL is a
-// refusal on all five arms and the contested lifted predicate is #1130 on the
-// two single arms — each pinned with its own sentence.
-//
-// EXCLUDED DIMENSIONS, and why (the reviewer starts here):
-//
-//   - A lifted predicate column over a NON-LATERAL producer: there is no such
-//     consumer. A lifted predicate exists only where the decorrelation lifts a
-//     correlated body's non-equality out of it, so its producer is always a
-//     LATERAL body. Three lateral spellings stand in its row instead.
-//   - The window FRAME (`ROWS`/`RANGE`/`GROUPS` bounds): a frame names no
-//     relation, so it has no occurrence to own. ADR-0026 §4b's territory.
-//   - The WIRE declaration of a window output over a published slot: #1135,
-//     `distributed`, a fact about a DECLARATION rather than a value.
-//     `pgwire.TestWKTheWireDeclaresTheSeamsOwnColumns` carries this table's
-//     wire half instead.
-//   - The 22 data TYPES: the ownership question is about which column a name
-//     IS, and every cell here would ask it identically under any type. The
-//     type matrix is `wadjet.TestTypeMatrix*`'s and ADR-0024's.
-//   - A SPILLED window's own re-read: `exec/window_external.go` resolves its
-//     keys through the same `columnIndexFallback` as the in-memory path, so
-//     `spilled512k` replicates `single`'s binding rather than being a sixth
-//     mechanism — which every row of this table shows by answering identically
-//     on the two.
-//   - CROSS and OUTER join shapes over the same producers: the arm's
-//     publication convention is the same and ADR-0026 §8i's own table already
-//     crosses {LEFT, RIGHT, FULL} with the five producer classes.
-//
-// A pin that starts agreeing FAILS. Deleting it is the fix's proof.
+// 50 cells × 5 arms = 250 results, 216 agreeing. Every producer publishes `id`,
+// which `lat_ord o` also publishes, so ownership is LIVE in every cell. What
+// remains is the LATERAL producer and an expression key naming two occurrences
+// — DAG-only, `distributed`, pinned per arm (#1126). Excluded dimensions: the
+// memo's own list. A pin that starts agreeing FAILS.
 func TestWKASeamConsumerBindsItsOwnOccurrence(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: five arms over the ownership seam's own table")

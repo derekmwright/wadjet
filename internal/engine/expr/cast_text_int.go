@@ -8,33 +8,24 @@ import (
 )
 
 // castTextToInt reads TEXT with an integer destination's own INPUT FUNCTION,
-// and with nothing else.
+// and with nothing else. PostgreSQL has TWO casts to an integer type and they answer differently for
+// the same characters: int4in/int8in/int2in read a whole number and refuse
+// anything else (measured on 17.11, `'2.5'`, `'2.0'`, `'26.7'`, `'-0.4'` and
+// `'1e3'` are each `22P02` at integer, bigint and smallint alike), while
+// numeric→int ROUNDS half away from zero. A DECIMAL column takes the second
+// cast; a quoted literal and a STRING column take this one.
 //
-// PostgreSQL has TWO casts to an integer type and they answer differently for
-// the same characters. int4in/int8in/int2in read a whole number and refuse
-// anything else — measured on 17.11, `'2.5'`, `'2.0'`, `'26.7'`, `'-0.4'` and
-// `'1e3'` are each `22P02 invalid input syntax for type <T>` for integer,
-// bigint and smallint alike — while numeric→int ROUNDS half away from zero, so
-// `2.5` is 3 and `-2.5` is -3. A DECIMAL COLUMN takes the second cast; a quoted
-// literal and a STRING column take this one.
+// The grammar is kernel.IntLitText, PostgreSQL's and a strict superset of Go's
+// base-10 one — `'0x1A'` 26, `'0o17'` 15, `'1_000'` 1000, `'017'` seventeen, C
+// whitespace trimmed — the one reader the comparison kernels, the row path and
+// the plan-time refusal share (#634).
 //
-// The grammar is kernel.IntLitText, which is PostgreSQL's and a strict superset
-// of Go's base-10 one: `'0x1A'` is 26, `'0o17'` 15, `'0b101'` 5, `'1_000'` 1000,
-// `'017'` decimal seventeen, and C whitespace is trimmed at both ends so
-// `' 12 '` is 12. It is the one reader the comparison kernels, the row path and
-// the plan-time refusal already share, so the CAST door cannot disagree with
-// them about which strings name an integer (#634).
-//
-// PORT and PROTOCOL are routed to their OWN input function instead, because
-// they are types with a text form of their own: PROTOCOL reads the IANA name
-// `protocol_name()` prints, and neither reads int4's radix prefixes or
-// underscores, which the writer refuses. One grammar per type, arc NT's rule.
-// Their DOMAIN is still int4's carrier held to the type's range — that split is
-// ADR-0012's and #901's.
-//
-// There is deliberately NO float fallback. The one that stood here claimed
-// `'26.7'::integer` rounds to 27 on the server; it does not, and the claim made
-// every quoted fractional literal answer a number PostgreSQL refuses (#1141).
+// PORT and PROTOCOL route to their OWN input function: PROTOCOL reads the IANA
+// name `protocol_name()` prints, and neither reads int4's radix prefixes or
+// underscores. One grammar per type (arc NT); their DOMAIN is still int4's
+// carrier held to the type's range (ADR-0012, #901).
+// There is NO float fallback: the one that stood here claimed the server
+// rounds `'26.7'::integer` to 27, and it does not (#1141).
 func castTextToInt(s, dest string) any {
 	if dest == "port" || dest == "protocol" {
 		return castPortProtocolText(s, dest)
@@ -69,39 +60,25 @@ func intCastTypeName(dest string) string {
 }
 
 // castOperandDeclaresText reports whether an expression's own DECLARATION says
-// its values are TEXT — without looking at any value.
+// its values are TEXT — without looking at any value. It is what
+// `CAST(x AS INTEGER)` must answer before it reads x, because a DECIMAL and a
+// STRING arrive at Cast.Eval in the SAME Go box: asking the box cannot
+// separate them, asking the expression can. The shapes that decide:
 //
-// It is the question `CAST(x AS INTEGER)` has to answer before it reads x,
-// because a DECIMAL and a STRING arrive at Cast.Eval in the SAME Go box (both
-// are a string), and the two take different casts. Asking the box cannot
-// separate them; asking the expression can.
-//
-// The shapes that decide:
-//
-//	'2.5'                  a quoted literal — SQL's `unknown`, read as text here
+//	'2.5'                  a quoted literal — SQL's `unknown`, read as text
 //	s                      a STRING column
 //	CAST(x AS STRING)      a cast whose destination is a text type
 //	UPPER(s)               a call whose registered return type is fixed STRING
 //	COALESCE(s, 'x')       a choice all of whose arms are themselves text
-//	CASE … THEN s ELSE 'x' END
 //	arr[1]                 a container whose ELEMENT is declared STRING
 //	ELEMENT_AT(m, 'a')     a MAP whose VALUE is declared STRING
 //	(SELECT s FROM …)      a scalar subquery whose output column is STRING
 //
-// The last three need the BATCH, which is why this takes one: a container's
-// element type lives on the child vector and a subquery's on the node the
-// planner resolved, neither of which is readable from the expression alone.
-// Without them `CAST(arr[1] AS INTEGER)` over an ARRAY OF TEXT holding '2.5'
-// answered 3 and `INSERT … SELECT CAST(arr[1] AS PORT)` put that 3 at rest,
-// which is #1141's own symptom sentence surviving through a container
-// (round-1 review, P2). A container of DECIMAL still rounds, because its
-// element type says decimal.
-//
-// Everything else answers false and keeps the numeric reading, which is the
-// safe direction: a DECIMAL column and an arithmetic result box as something
-// this cannot claim is text, and the value path reaches castTextToInt anyway
-// when the box turns out to hold a string. The DECLARATION decides which cast;
-// the box only decides whether there is text to read at all.
+// The last three need the BATCH, which is why this takes one. Without them
+// `CAST(arr[1] AS INTEGER)` over an ARRAY OF TEXT holding '2.5' answered 3 and
+// a write put that 3 at rest (round-1 review P2); a container of DECIMAL still
+// rounds. Everything else answers false and keeps the numeric reading: the
+// DECLARATION decides which cast, the box only whether there is text at all.
 func castOperandDeclaresText(operand Expr, b *batch.RecordBatch) bool {
 	switch v := operand.(type) {
 	case *Lit:

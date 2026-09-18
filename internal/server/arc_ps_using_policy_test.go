@@ -12,28 +12,23 @@ import (
 // ARC PS's MASKING GATE, on all nine doors: a `JOIN … USING` key over a
 // POLICED column, and a column-alias list over a policed relation.
 //
-// COMMON.md requires it because this arc REWRITES over a relation's columns in
-// two places, and each is a place a security projection could be bypassed:
+// The arc REWRITES over a relation's columns in two places, and each is a
+// place a security projection could be bypassed:
 //
 //   - the USING merge is the ONE star item in this engine that is not a plain
 //     qualified reference. A FULL join's merged key is a `COALESCE(l.c, r.c)`
-//     the star expansion MINTS (logical.mergedUsingItem), written by the
-//     planner rather than read off a relation's published list — so "the star
-//     reads the barrier's list" is an argument about the OTHER items;
+//     the star expansion MINTS (logical.mergedUsingItem), so "the star reads
+//     the barrier's list" is an argument about the OTHER items;
 //   - a column-alias list on a named relation is LOWERED into a derived table
 //     in the parser, and a derived body is a second place a scan's policed
-//     list has to survive before the positional rename lands on it. A rename
-//     over a policed relation renames the POLICED width, which is what the
-//     `alias_list_*` cells assert.
+//     list has to survive before the positional rename lands on it — a rename
+//     over a policed relation renames the POLICED width (`alias_list_*`).
 //
-// Round 1 of this arc argued the gate away in prose and the review measured it
-// instead (162 cells, no leak). Reasoning is not a gate: this is the gate.
-//
-// The assertion per cell is threefold — no TRUE value of a masked column
-// reaches any door, no DENIED column appears in any output, and a statement
-// naming a denied column REFUSES — and the whole table asserts a NON-VACUOUS
-// count of (cell, door) pairs that actually ANSWERED, so a future change that
-// turns every shape into a refusal cannot pass by emptiness.
+// Round 1 argued the gate away in prose and the review measured it instead
+// (162 cells, no leak). Per cell: no TRUE value of a masked column reaches any
+// door, no DENIED column appears in any output, and a statement naming a
+// denied column REFUSES. The table asserts a NON-VACUOUS count of (cell, door)
+// pairs that ANSWERED, so turning every shape into a refusal cannot pass.
 func TestArcPSAUsingMergedKeyOverAPolicedColumnOnEveryDoor(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster and three servers")

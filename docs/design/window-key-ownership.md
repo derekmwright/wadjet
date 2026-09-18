@@ -741,3 +741,13 @@ A deferral is a claim and carries its measurement.
   spilled arm replicates the single arm's binding rather than being a sixth
   mechanism — which is what `spilled512k` answering identically in every cell
   above already shows.
+- **A lifted predicate column over a NON-LATERAL producer**: there is no such
+  consumer. A lifted predicate exists only where the decorrelation lifts a
+  correlated body's non-equality out of it, so its producer is always a LATERAL
+  body; three lateral spellings stand in its row in the seam gate instead.
+- **The 22 data TYPES**: ownership is about which column a name IS, and every
+  cell would ask it identically under any type. The type matrix is
+  `wadjet.TestTypeMatrix*`'s and ADR-0024's.
+- **CROSS and OUTER join shapes over the same producers**: an arm's publication
+  convention does not change with the join kind, and ADR-0026 §8i's own table
+  already crosses {LEFT, RIGHT, FULL} with the five producer classes.

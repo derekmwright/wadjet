@@ -1366,36 +1366,26 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 					orderBy[i].Column = c.Name
 				}
 			}
-			// …and the ARGUMENT, which exec.Window also reads by name off
-			// the input batch: `SUM(v) OVER ()` over `SELECT c_i64 AS v`
-			// found no vector called `v` and wrote NULL in every row, the
-			// silent half of the same defect. A materialized argument is
-			// already a __winkey_N the fragment computes, and
-			// physical.PlanContext.DerivedAliasSourceColumn leaves those (and `*`) alone.
-			// …and a QUALIFIED argument resolves inside the arm its
-			// qualifier names, because physical.PlanContext.DerivedAliasSourceColumn stops at a
-			// Join and answered nothing for it (round 4 of #742). Without
-			// the scoping `SUM(x.w) OVER ()` over two arms both publishing
-			// `w` reached the worker as the bare `w` and summed the OTHER
-			// arm's column.
+			// …and the ARGUMENT, which exec.Window also reads by name off the
+			// input batch: `SUM(v) OVER ()` over `SELECT c_i64 AS v` found no
+			// vector called `v` and wrote NULL in every row. A materialized
+			// argument is already a __winkey_N the fragment computes, and
+			// DerivedAliasSourceColumn leaves those (and `*`) alone; a
+			// QUALIFIED argument resolves inside the arm its qualifier names,
+			// which that helper cannot do because it stops at a Join (#742
+			// round 4) — without the scoping, `SUM(x.w) OVER ()` over two arms
+			// both publishing `w` summed the OTHER arm's column.
 			//
-			// THE ARGUMENT'S LADDER IS NOT THE KEYS' LADDER, AND THE
-			// DIFFERENCE IS DELIBERATE. The two loops above continue only on
-			// `scoped && src != ""` and otherwise FALL THROUGH to the unscoped
-			// source lookup and the materialization; this one STOPS as soon as
-			// the qualifier names an arm, whether or not that arm answered a
-			// source column. `scoped` with an empty `src` is a COMPUTED
-			// join-arm alias, and for an argument that is the case
-			// `WindowColSpec.InputRefs` exists to serve: the argument travels
-			// as the alias and `bindConsumersToPublishedIdentity` respells it
-			// against the stream the fragment will really see, at the END of
-			// planning (ADR-0026 §6, #770/#1028). A key cannot wait that long
-			// — a PARTITION BY key is also the stage's DISTRIBUTION, so
-			// EnsureDistribution has consumed it by then and the exchange and
-			// the operator would end up keyed on different columns — which is
-			// why the keys materialize here and the argument does not.
-			// Collapsing the two ladders would delete the argument's late
-			// carrier path (docs/design/window-key-ownership.md §(c)).
+			// THE ARGUMENT'S LADDER IS NOT THE KEYS' LADDER, DELIBERATELY. The
+			// two loops above continue only on `scoped && src != ""` and
+			// otherwise fall through to the unscoped lookup and the
+			// materialization; this one STOPS as soon as the qualifier names an
+			// arm. `scoped` with an empty `src` is a COMPUTED join-arm alias,
+			// which for an argument is what `WindowColSpec.InputRefs` serves:
+			// it travels as the alias and `bindConsumersToPublishedIdentity`
+			// respells it at the END of planning (ADR-0026 §6, #770/#1028). A
+			// key cannot wait — it is also the stage's DISTRIBUTION, consumed
+			// by EnsureDistribution (docs/design/window-key-ownership.md §(c)).
 			inputCol := ec.InputCol
 			if src, scoped := windowArgSourceInScope(inputCol, winChild); scoped {
 				if src != "" {

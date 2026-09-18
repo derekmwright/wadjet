@@ -21,8 +21,11 @@ import (
 //   - the key was dropped to its BARE form, which is safe only while one
 //     column answers to it;
 //   - the bind that would have narrowed it further reads `inputColTypes`,
-//     which declines a JOIN outright — so over the one input shape where two
-//     columns DO answer to a bare name, nothing ran.
+//     which over two DERIVED arms answers nothing at all and over two BASE
+//     SCANS answers a map MERGED from both sides and keyed by the BARE name —
+//     so over either input shape where two columns DO answer to a bare name,
+//     the qualifier was gone (corrected 2026-09-18 by arc WK; ADR-0026 §8j and
+//     docs/design/window-key-ownership.md carry the measurement).
 //
 // `PARTITION BY x.w` over two arms that both publish `w` therefore bound the
 // other arm's column. That column is distinct on every row, so every row

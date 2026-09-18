@@ -11,31 +11,23 @@ import (
 // A BARE REFERENCE TO A `JOIN … USING` MERGED COLUMN IN A SORT OR WINDOW KEY
 // BINDS THE MERGE, NOT THE LEFT ARM.
 //
-// `USING (c)` merges the joined column into ONE output column. For an INNER or
-// LEFT join that column's VALUE is the left arm's `c` — the side that is never
-// NULL-extended — so a key that resolves to the left arm's column is already
-// the merged value and nothing here has to move. For a RIGHT join it is the
-// RIGHT arm's, and for a FULL join it is `COALESCE(left.c, right.c)`, because
-// either side may be the NULL-extended one.
+// `USING (c)` merges the joined column into ONE output column whose value is
+// the left arm's for an INNER or LEFT join (the side never NULL-extended), the
+// right arm's for a RIGHT join and `COALESCE(left.c, right.c)` for a FULL one.
+// Only RIGHT and FULL are rewritten: rewriting an INNER or LEFT key would
+// change the rendering of every existing USING query for no change in meaning.
 //
 // `ORDER BY c` is resolved and planned BELOW the projection that states the
 // merge, against the join's own stream, where the only column of that name is
-// the LEFT arm's. So `psb FULL JOIN psa USING (id) ORDER BY id` sorted by
-// `psb.id`, whose NULL is exactly the row whose merged value came from the
-// other side: rows 2, 3, 1 for PostgreSQL 17.11's 1, 2, 3, and under
-// `LIMIT 1` a different ROW, and under `OFFSET 1` a different ROW SET
-// (measured by the round-1 review, B1).
+// the LEFT arm's — whose NULL is exactly the row whose merged value came from
+// the other side. `psb FULL JOIN psa USING (id) ORDER BY id` answered 2, 3, 1
+// for PostgreSQL 17.11's 1, 2, 3, and other rows under `LIMIT`/`OFFSET`.
 //
-// The binding is fixed HERE, at the one place the clause is read and the two
-// sides' names are known without a catalog: the key is rewritten onto the
-// merged EXPRESSION. What the engine can then do with that expression is not
-// this pass's question — a RIGHT join's merged key is a plain qualified column
-// and sorts on every arm; a FULL join's is computed, which a bare `SELECT *`
-// over more than one relation cannot carry (order_by_keys.go's own bound) and
-// which a named select list carries fine.
-//
-// Only RIGHT and FULL are rewritten. Rewriting an INNER or LEFT key would
-// change the rendering of every existing USING query for no change in meaning.
+// The binding is fixed HERE, where the clause is read and both sides' names
+// are known without a catalog: the key is rewritten onto the merged
+// EXPRESSION. A RIGHT join's merged key is then a plain qualified column and
+// sorts on every arm; a FULL join's is computed, which a bare `SELECT *`
+// cannot carry (order_by_keys.go's own bound) and a named select list can.
 
 // bindMergedUsingKeys rewrites every bare sort or window key naming a column
 // merged by a RIGHT or FULL `JOIN … USING` onto that merge's expression.

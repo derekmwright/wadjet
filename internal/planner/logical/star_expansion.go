@@ -410,34 +410,26 @@ func projectionOutputNames(n *Node) []StarColumn {
 		}
 		out = append(out, StarColumn{Resolve: resolve, Publish: publish})
 	}
-	// TWO ITEMS OF ONE RESOLUTION NAME cannot be enumerated by NAME. The
-	// expansion emits one reference per published column, and two references
+	// TWO ITEMS OF ONE RESOLUTION NAME cannot be enumerated by NAME: the
+	// expansion emits one reference per published column and two references
 	// spelled alike both bind the FIRST column of that name
-	// (`batch.RecordBatch.ColumnIndex`), so `SELECT x.* FROM (SELECT a.id,
-	// b.id FROM lat_item a JOIN lat_item b …) x` published the first `id`
-	// TWICE where PostgreSQL publishes the pair — a wrong VALUE, and a wrong
-	// TYPE where the two items differ in type (`order_id AS k, amount AS k`).
+	// (`batch.RecordBatch.ColumnIndex`), so `SELECT x.*` over a block
+	// publishing `a.id, b.id` published the first `id` TWICE where PostgreSQL
+	// publishes the pair — a wrong VALUE, and a wrong TYPE where the two
+	// differ. A list this pass cannot state is answered nil, so the star
+	// stays unexpanded and the query is REFUSED, until the block's
+	// published list travels by POSITION (`ProjectExprSpec.SourceSlot`, one
+	// relation out): loud beats a plausible wrong value (#1076).
 	//
-	// A list this pass cannot state is answered nil, which is the direction
-	// the loop above already takes for an item with no name at all: the star
-	// stays unexpanded and the query is REFUSED. Closing it properly means the
-	// block's published list travelling by POSITION rather than by name —
-	// `ProjectExprSpec.SourceSlot` one relation out — and until it does, loud
-	// beats a plausible wrong value (#1076).
 	// A PENDING COLUMN-ALIAS LIST is part of what this block publishes.
-	//
 	// `ApplyDeferredColumnAliases` renames the leading items of a star Project
-	// carrying one, and it runs AFTER this expansion — so a star ABOVE such a
-	// block read the names the block had BEFORE the rename and referenced
-	// columns that were about to stop existing. `SELECT b.* FROM zzp b(k, v)`
-	// published `id, d92` and answered NULL for both, and a bare star over a
-	// join whose arm carried a list did the same for that arm (#959, #1158).
-	// Overlaying it here is what makes the two passes agree; once the rename
-	// has run the field is cleared, so it is applied exactly once.
-	//
-	// An OVERLONG list states nothing: the width is now known and is smaller
-	// than the list, which is PostgreSQL's 42P10 and
-	// `RefuseUnappliedColumnAliasLists`' to raise.
+	// carrying one and runs AFTER this expansion, so a star ABOVE such a block
+	// read names that were about to stop existing: `SELECT b.* FROM zzp b(k,
+	// v)` published `id, d92` and answered NULL for both (#959, #1158).
+	// Overlaying it here is what makes the two passes agree; the field is
+	// cleared once the rename has run, so it applies exactly once. An OVERLONG
+	// list states nothing — PostgreSQL's 42P10, which
+	// `RefuseUnappliedColumnAliasLists` raises.
 	if len(n.DeferredColumnAliases) > 0 {
 		if len(n.DeferredColumnAliases) > len(out) {
 			return nil

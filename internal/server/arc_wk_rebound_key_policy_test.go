@@ -11,47 +11,24 @@ import (
 
 // A RE-BOUND KEY OVER A POLICED COLUMN READS THE MASK — arc WK, NINE DOORS.
 //
-// Arc WK changes which OCCURRENCE a window key and a sort key bind: a
-// qualified key now carries the spelling the query wrote wherever more than
-// one occurrence of the input publishes its bare name, instead of being
-// dropped to the bare name and bound to whichever arm the join publishes bare
-// (docs/design/window-key-ownership.md). An arc that rewrites BINDING has to
-// prove the binding it produces is still the POLICY'S column, on every door —
-// a sentence in a definition of done is not a gate.
+// The arc changes which OCCURRENCE a window key and a sort key bind
+// (docs/design/window-key-ownership.md), so it must prove the binding it
+// produces is still the POLICY's column on every door.
 //
-// The instrument is `e7bal`, whose `bal` is masked to 0 while its stored
-// values are ±100…±800 (`pmBalFixture`). Under the mask every row shares one
-// key, so a window PARTITIONED on it has ONE partition of eight and a window
-// ORDERED by it has eight peers; reading the STORED column instead gives eight
-// SINGLETON partitions and a rank per row — the row set is then arithmetic on
-// the value the policy hides, which is the class #859 round 2 named and the
-// one arc L1's withdrawn per-outer-row rewrite reached through a
-// planner-minted window (ADR-0021 §1q). `e7emp`'s `ssn` and `acct` are the
-// same instrument for a STRING and a second numeric mask, and `salary` is
-// DENIED.
+// The instrument is `e7bal`, masked to 0 while its stored values are ±100…±800
+// (`pmBalFixture`): under the mask every row shares one key, so a window
+// partitioned on it has ONE partition of eight where the STORED column gives
+// eight SINGLETONS — arithmetic on the value the policy hides (#859 round 2).
+// `e7emp`'s `ssn` and `acct` are the same instrument for a string and a second
+// numeric mask, and `salary` is DENIED. Every cell qualifies its key over a
+// join whose two arms publish that bare name, the shape this arc re-binds;
+// `winpart_bal_derived` takes #975's route, and the unpoliced sibling is the
+// control.
 //
-// Every cell names its key with a QUALIFIER over a join whose two arms both
-// publish that bare name, because that is exactly the shape this arc re-binds.
-// `winpart_bal_derived` is the derived-arm spelling, which takes the other
-// mechanism (#975's qualified-name route). `winpart_bal_unpoliced_sibling` is
-// the control: the same window over an UNPOLICED sibling column answers one
-// row per partition, so a cell answering `n=8` is the mask and not the shape.
-//
-// Two assertions per (cell, door), and a third over the whole run:
-//
-//  1. the cell's ANSWER is the mask's, exactly — not merely "no leak";
-//  2. no rendered value anywhere contains a stored policed value
-//     (`pmTrueValues`), which also catches a leak through a column this
-//     table's `want` does not name;
-//  3. the count of (cell, door) pairs that ANSWERED is non-vacuous. A gate
-//     whose cells all refuse proves nothing, and a future change that turns
-//     them into refusals fails here rather than passing silently.
-//
-// The DENIED cell is the exception and its disposition is a REFUSAL on all
-// nine doors: `salary` never reaches the scan's projection, so the window
-// cannot find its key and says so. Its wording differs per door — the shuffle
-// arm refuses at the exchange instead — so the assertion is the class, not the
-// sentence.
+// Per (cell, door): the ANSWER is the mask's exactly and no rendered value
+// contains a stored policed value (`pmTrueValues`); over the run, the count of
+// pairs that ANSWERED is non-vacuous. The DENIED cell refuses on all nine
+// doors with wording that differs per door, so that assertion is the class.
 func TestArcWKAReboundKeyOverAPolicedColumnReadsTheMask(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: nine doors over the policed corpus")

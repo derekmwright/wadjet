@@ -24,15 +24,12 @@ import (
 //	ON x.d = y.f  (float8, numeric) Merge Cond: (x.d = ((y.f)::double precision))
 //	ON x.e = y.f  (numeric(9,2), numeric(18,4)) Merge Cond: (x.e = y.f)
 //
-// Two readings need stating because the cast printed is not always the whole
-// answer. `((x.a)::double precision) = y.c` is float8 = float4, which
-// PostgreSQL resolves with float84eq — the float4 side widens too, so the
-// comparison happens at float8. `x.c = y.d` prints no cast at all and is
-// float48eq, which likewise compares at float8. Both are float8 rungs here.
-//
-// This is the OPERATOR ladder. The SET-OPERATION ladder (setOpWiden,
-// TestSetOpWidenLadder) is different where float4 is involved — `numeric ∪
-// real` is real and `int ∪ real` is real — and the two must not be merged.
+// The printed cast is not always the whole answer: `((x.a)::double precision)
+// = y.c` is float8 = float4, which PostgreSQL resolves with float84eq (the
+// float4 side widens too), and `x.c = y.d` prints no cast and is float48eq.
+// Both are float8 rungs here. This is the OPERATOR ladder; the SET-OPERATION
+// ladder (setOpWiden, TestSetOpWidenLadder) differs where float4 is involved
+// — `numeric ∪ real` and `int ∪ real` are real — and must not be merged with it.
 func TestJoinKeyLadderMatchesPostgresOperatorResolution(t *testing.T) {
 	const (
 		i32 = parquet.TypeInt32
