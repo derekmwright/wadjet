@@ -497,12 +497,27 @@ func srStarCases() []c1Case {
 			want: srChainRows(9),
 		},
 		{
-			// The positional key is the half `projectOutputNamesBelow`
-			// answers, and the written-key twin answered at every depth —
-			// which is what said the bound, not the shape, was the refusal.
-			name: "naming/set-op-chain-9-arms-in-a-cte-written-key",
+			// A written key BESIDE a positional one still needs the walk —
+			// the ordinal is what `projectOutputNamesBelow` resolves, so this
+			// cell is refused past the bound exactly as the all-positional
+			// one is. It is here because a mixed key is the ordinary
+			// spelling, not because it is a control.
+			name: "naming/set-op-chain-9-arms-in-a-cte-written-key-beside-an-ordinal",
 			sql:  "WITH c AS (" + srSetOpChain(9) + ") SELECT * FROM c ORDER BY id, 2",
 			want: srChainRows(9),
+		},
+		{
+			// THE CONTROL that localises the refusal to the BOUND and not to
+			// the shape: the same nine-arm chain, the same CTE, the same
+			// depth — with the second item ALIASED so both keys are written
+			// names and no ordinal is resolved. It answers at every depth
+			// with the bound in place and without it. A cell that fails only
+			// when a POSITION must be counted says the walk, not the query,
+			// was the refusal.
+			name: "naming/set-op-chain-9-arms-in-a-cte-named-key",
+			sql: "WITH c AS (" + strings.Replace(srSetOpChain(9), "total + 1 FROM", "total + 1 AS t FROM", 1) +
+				") SELECT * FROM c ORDER BY id, t",
+			want: strings.Replace(srChainRows(9), "?column?", "t", 1),
 		},
 		{
 			// The ARM spelling: past the bound the star could not state this
