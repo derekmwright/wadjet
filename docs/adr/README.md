@@ -55,3 +55,4 @@ Conventions:
 | [0035](0035-mergeable-aggregate-states.md) | A summarizing aggregate ships a mergeable STATE, not its answer | Accepted |
 | [0036](0036-a-query-sourced-write-is-one-statement-one-commit.md) | A query-sourced write is one statement with one commit, and its schema is the plan's declared output | Accepted |
 | [0037](0037-one-module-two-licenses.md) | One module, two licenses: the embedded engine MIT, the distributed engine AGPL-3.0, and three gates — imports, SPDX headers, and the DAG vocabulary a package may DECLARE | Accepted |
+| [0038](0038-a-call-is-resolved-by-its-name-and-its-arguments.md) | A call is resolved by its name AND its arguments, at bind time: the registry is the signature table, and every grammar rewrite lands on a call it accepts | Accepted |

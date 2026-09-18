@@ -5458,7 +5458,9 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     `semver_cmp('1.0.0')` answered NULL while `upper('a','b')` answered 'A'
     with the extra argument dropped; a numeric literal reached a STRING vec
     kernel with no text arena and took the query to XX000; and a BYTES operand
-    was read through `expr.toString` as whatever text those bytes spell.
+    was read through `expr.toString` as whatever text those bytes spell. Where
+    the check lives, and what keeps the table honest, is
+    [ADR-0038](0038-a-call-is-resolved-by-its-name-and-its-arguments.md).
 
     `expr.Signature` declares the arity of every registered builtin — the
     table is closed against the registry in BOTH directions — and the argument
