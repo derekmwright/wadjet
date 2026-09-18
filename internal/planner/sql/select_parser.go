@@ -977,8 +977,13 @@ func (p *selectParser) parseValuesTableRef() (TableRef, error) {
 
 	// Alias and optional column alias list — same grammar parseTableFunction
 	// accepts for AS alias(col1, col2, ...).
+	//
+	// WITH or WITHOUT `AS`: both spellings take the list. Only the AS arm
+	// read one, so `(VALUES (1),(2)) a(x)` was 42601 while
+	// `(VALUES (1),(2)) AS a(x)` answered — the same grammar diverging by a
+	// keyword this parser reads as optional everywhere else (#1158).
 	alias := ""
-	var colAliases []string
+	var listRef TableRef
 	if p.isKeyword(TokenKWAs) {
 		p.advance()
 		aliasTok, err := p.expect(TokenIdent)
@@ -986,26 +991,15 @@ func (p *selectParser) parseValuesTableRef() (TableRef, error) {
 			return TableRef{}, fmt.Errorf("expected alias after AS")
 		}
 		alias = aliasTok.val
-		if p.peek() == TokenLParen {
-			p.advance()
-			for {
-				colTok, err := p.expect(TokenIdent)
-				if err != nil {
-					return TableRef{}, fmt.Errorf("expected column alias")
-				}
-				colAliases = append(colAliases, colTok.val)
-				if p.peek() != TokenComma {
-					break
-				}
-				p.advance()
-			}
-			if _, err := p.expect(TokenRParen); err != nil {
-				return TableRef{}, fmt.Errorf("expected ) after column aliases")
-			}
-		}
 	} else if p.peek() == TokenIdent && !p.isJoinKeyword() {
 		alias = p.advance().val
 	}
+	if alias != "" {
+		if err := p.parseColumnAliasList(&listRef); err != nil {
+			return TableRef{}, err
+		}
+	}
+	colAliases := listRef.ColumnAliases
 	if len(colAliases) > ncols {
 		// PostgreSQL's own message and class for the shape, verbatim: a
 		// VALUES list used as a table source is a "table" there, and too many
@@ -1109,7 +1103,19 @@ func (p *selectParser) parseTableRefTail() (TableRef, error) {
 		}
 	}
 
-	// Optional alias
+	// Optional alias, and the COLUMN-ALIAS LIST that may follow it.
+	//
+	// `FROM t [AS] a (c1, c2, …)` renames the relation's columns positionally
+	// on ANY FROM item — PostgreSQL's §7.2.1.2 grammar has one alias_clause
+	// and every item takes it. This arm accepted no list at all, so a base
+	// table and a CTE reference (which reach the planner through this same
+	// path) were 42601 for a statement PostgreSQL answers (#959, #1158).
+	//
+	// The list is read only when an alias was WRITTEN: `FROM t (c)` is not an
+	// alias clause in PostgreSQL either — it reads `t(c)` as a call — and
+	// tr.Alias is pre-filled with the table's own name, so the flag is what
+	// tells the two apart.
+	aliased := false
 	if p.isKeyword(TokenKWAs) {
 		p.advance()
 		aliasTok, err := p.expect(TokenIdent)
@@ -1117,10 +1123,54 @@ func (p *selectParser) parseTableRefTail() (TableRef, error) {
 			return TableRef{}, fmt.Errorf("expected alias after AS")
 		}
 		tr.Alias = aliasTok.val
+		aliased = true
 	} else if p.peek() == TokenIdent && !p.isJoinKeyword() {
 		tr.Alias = p.advance().val
+		aliased = true
+	}
+	if aliased {
+		if err := p.parseColumnAliasList(&tr); err != nil {
+			return TableRef{}, err
+		}
+		if len(tr.ColumnAliases) > 0 {
+			lowerNamedRelationColumnAliases(&tr)
+		}
 	}
 	return tr, nil
+}
+
+// lowerNamedRelationColumnAliases rewrites `FROM t [AS] a (c1, …)` into the
+// DERIVED-TABLE spelling `FROM (SELECT * FROM t) AS a (c1, …)`, which this
+// engine has always accepted and which is what the construct MEANS: an alias
+// clause with a column list opens a new relation namespace where the columns
+// are the named ones and the relation's own names are gone.
+//
+// It happens in the PARSER, at the one place the item is read, because the
+// derived body is parsed once per reference and both the binder that builds
+// the enclosing query's SCOPE and the logical builder that plans it read that
+// same memo (sub_block.go, #851). Lowering it later — in the logical builder —
+// leaves the binder resolving against the base relation's own column names, so
+// `SELECT k FROM zzp a(k, v)` stayed `unknown column "k"` and `SELECT id FROM
+// zzp a(k, v)` answered NULL for a column PostgreSQL says does not exist.
+// Measured both ways; this is the one that resolves.
+//
+// A TABLESAMPLE clause is carried into the body, where it applies to the same
+// relation. A table function, a derived table and a VALUES list never reach
+// here: each already carries its own list through a path that publishes a
+// select list of its own.
+func lowerNamedRelationColumnAliases(tr *TableRef) {
+	name := tr.Name
+	if tr.Qualifier != "" {
+		name = tr.Qualifier + "." + name
+	}
+	body := "SELECT * FROM " + name
+	if tr.SampleMethod != "" {
+		body += " TABLESAMPLE " + tr.SampleMethod + "(" + tr.SamplePercent + ")"
+	}
+	tr.Name = "(" + body + ")"
+	tr.Qualifier = ""
+	tr.SampleMethod = ""
+	tr.SamplePercent = ""
 }
 
 // parseTableFunction parses a table function call: name(arg1, key=val, ...) [AS alias]
@@ -1225,12 +1275,32 @@ func (p *selectParser) parseColumnAliasList(tr *TableRef) error {
 	if p.peek() != TokenLParen {
 		return nil
 	}
+	listPos := p.cur.pos
 	p.advance() // consume (
+	seen := make(map[string]bool, 4)
 	for {
 		colTok, err := p.expect(TokenIdent)
 		if err != nil {
 			return fmt.Errorf("expected column alias")
 		}
+		// A REPEATED NAME. PostgreSQL accepts the list and refuses every
+		// reference to the name with 42702 ("column reference is ambiguous"),
+		// which needs a scope that knows two columns answer to one name.
+		// This planner renames POSITIONALLY and has no such scope: a star
+		// over `a(k, k)` expanded to the same qualified reference twice and
+		// answered the SECOND column's values under both names, which is a
+		// wrong VALUE where PostgreSQL answers the right ones. Refused here
+		// instead, loudly and at the spelling — a narrower answer than
+		// PostgreSQL's and a recorded divergence (ADR-0012), never a wrong
+		// one.
+		lc := strings.ToLower(colTok.val)
+		if seen[lc] {
+			return sqlerr.New("42701",
+				"column alias %q is specified more than once in the list at position %d; "+
+					"this engine renames a relation's columns positionally and cannot publish "+
+					"one name for two columns", colTok.val, listPos)
+		}
+		seen[lc] = true
 		tr.ColumnAliases = append(tr.ColumnAliases, colTok.val)
 		if p.peek() != TokenComma {
 			break

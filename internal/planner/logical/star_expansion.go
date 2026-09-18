@@ -415,6 +415,28 @@ func projectionOutputNames(n *Node) []StarColumn {
 	// block's published list travelling by POSITION rather than by name —
 	// `ProjectExprSpec.SourceSlot` one relation out — and until it does, loud
 	// beats a plausible wrong value (#1076).
+	// A PENDING COLUMN-ALIAS LIST is part of what this block publishes.
+	//
+	// `ApplyDeferredColumnAliases` renames the leading items of a star Project
+	// carrying one, and it runs AFTER this expansion — so a star ABOVE such a
+	// block read the names the block had BEFORE the rename and referenced
+	// columns that were about to stop existing. `SELECT b.* FROM zzp b(k, v)`
+	// published `id, d92` and answered NULL for both, and a bare star over a
+	// join whose arm carried a list did the same for that arm (#959, #1158).
+	// Overlaying it here is what makes the two passes agree; once the rename
+	// has run the field is cleared, so it is applied exactly once.
+	//
+	// An OVERLONG list states nothing: the width is now known and is smaller
+	// than the list, which is PostgreSQL's 42P10 and
+	// `RefuseUnappliedColumnAliasLists`' to raise.
+	if len(n.DeferredColumnAliases) > 0 {
+		if len(n.DeferredColumnAliases) > len(out) {
+			return nil
+		}
+		for i, name := range n.DeferredColumnAliases {
+			out[i] = StarColumn{Resolve: name, Publish: name}
+		}
+	}
 	seen := make(map[string]bool, len(out))
 	for _, c := range out {
 		k := strings.ToLower(c.Resolve)
