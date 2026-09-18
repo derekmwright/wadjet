@@ -576,19 +576,13 @@ func TestO1AStarOverAJoinPublishesTheQueryNotThePlan(t *testing.T) {
 			name: "using-star",
 			sql:  "SELECT * FROM lat_ord o JOIN lat_item i USING (id) ORDER BY i.id",
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING amount:FLOAT64] rows=3 | 1,Alice,150,1,Widget,50 | 2,Bob,200,1,Gadget,100 | 3,Carol,0,2,Widget,75",
-			pin: map[string]string{
-				"single":       "ERR SELECT * over a JOIN ... USING at position 40 is not supported",
-				"spilled512k":  "ERR SELECT * over a JOIN ... USING at position 40 is not supported",
-				"dag":          "ERR SELECT * over a JOIN ... USING at position 40 is not supported",
-				"dag-shuffled": "ERR SELECT * over a JOIN ... USING at position 40 is not supported",
-				"dag-morsel4":  "ERR SELECT * over a JOIN ... USING at position 40 is not supported",
-			},
-			why: "REFUSED, and it is the ONE place `every arm's own list, concatenated` is " +
-				"not PostgreSQL's rule: USING MERGES the joined column into one output " +
-				"column (PostgreSQL publishes six here, not seven). The list is knowable " +
-				"now — the merge is not implemented — so the refusal states that rather " +
-				"than the pre-arc `not resolvable here`. Pre-existing, identical at " +
-				"0193c4e9 (#655).",
+			why: "ANSWERS on all five arms since arc PS (#655). This is the ONE place " +
+				"`every arm's own list, concatenated` is not PostgreSQL's rule — USING " +
+				"MERGES the joined column into one output column, six here and not seven " +
+				"— and the merge is stated by the star expansion, the one layer that " +
+				"reads both arms' lists (logical.usingJoinStarColumns). The pin that " +
+				"stood here is deleted rather than relaxed, which is the fix's proof " +
+				"(ADR-0013).",
 		},
 		{
 			name: "natural-star",
