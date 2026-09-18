@@ -482,6 +482,20 @@ func parseSelectStatement(stmt, body string) (*ParsedQuery, error) {
 	// fromless_scalar.go for why a parser standing on the subquery cannot
 	// decide it, and what happened when it tried.
 	unfoldFromlessScalars(info)
+	// THE ORDER HERE IS LOAD-BEARING. `unfoldFromlessScalars` REBUILDS every
+	// window item's `WindowSpec` from its `WindowFuncNode`
+	// (fromless_scalar.go), so any pass that edits a spec before this line has
+	// its edit discarded — which is what happened to the merged-key binding,
+	// and a RIGHT `JOIN … USING` window key went back to the left arm and
+	// answered wrong values on all five arms (review round 2, B1-r2; repair
+	// measured by that review). The binding rewrites the NODE as well as the
+	// spec now, and it runs again HERE so a spec rebuilt from a node it could
+	// not reach is bound too. Running it twice is the no-op
+	// using_merged_keys.go documents: it only ever touches a BARE key, and a
+	// key it rewrote is qualified.
+	if err := bindMergedUsingKeys(info); err != nil {
+		return nil, err
+	}
 
 	// An UNKNOWN-typed literal used as a truth value becomes the boolean it
 	// names, or is refused with PostgreSQL's own 22P02 (#599).

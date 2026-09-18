@@ -117,34 +117,80 @@ func bindMergedUsingKeys(info *SelectInfo) error {
 		info.OrderBy[i].Column = rewritten.String()
 	}
 
-	// WINDOW keys, which carry TEXT alone. A RIGHT join's merged key is a
-	// plain qualified column and is written as one; a FULL join's is a
-	// COALESCE, which a partition or window-order key here cannot be, so that
-	// spelling is REFUSED rather than silently bound to the left arm.
+	// WINDOW items live in TWO places that have to agree: the `WindowSpec`
+	// the planner reads, and the `WindowFuncNode` that spec is DERIVED from.
+	// Rewriting only the spec is thrown away — `unfoldFromlessScalars` rebuilds
+	// every window item's spec from its node one call later
+	// (fromless_scalar.go), which is how a RIGHT join's window key went back to
+	// the left arm and answered wrong VALUES on all five arms for a shape this
+	// pass claimed to bind (review round 2, B1-r2). Both are rewritten here,
+	// and parser.go runs this pass again after the rebuild.
+	//
+	// A window's ARGUMENT carries the same bare reference — `SUM(id) OVER (…)`
+	// read the left arm's column and summed NULLs where PostgreSQL sums the
+	// merged key — and an argument is an EXPRESSION, so it takes the merged
+	// expression for a FULL join as readily as for a RIGHT one.
+	//
+	// A window KEY is not: its slot in `WindowSpec` holds a column NAME, so a
+	// RIGHT join's merged key (a plain qualified column) is written there and a
+	// FULL join's (a COALESCE) is REFUSED rather than silently bound to the
+	// left arm.
 	for i := range info.Columns {
 		ws := info.Columns[i].WindowSpec
 		if ws == nil {
 			continue
 		}
-		for j, key := range ws.PartitionBy {
-			name, ok := mergedWindowKey(key, merged)
-			if !ok {
-				continue
+		if full {
+			for _, key := range ws.PartitionBy {
+				if name, ok := mergedWindowKey(key, merged); ok {
+					return refuseFullMergedWindowKey(name, "PARTITION BY", leftQual, rightQual)
+				}
 			}
-			if full {
-				return refuseFullMergedWindowKey(name, "PARTITION BY", leftQual, rightQual)
+			for _, key := range ws.OrderBy {
+				if name, ok := mergedWindowKey(key.Column, merged); ok {
+					return refuseFullMergedWindowKey(name, "ORDER BY", leftQual, rightQual)
+				}
 			}
-			ws.PartitionBy[j] = rightQual + "." + name
+		} else {
+			for j, key := range ws.PartitionBy {
+				if name, ok := mergedWindowKey(key, merged); ok {
+					ws.PartitionBy[j] = rightQual + "." + name
+				}
+			}
+			for j, key := range ws.OrderBy {
+				if name, ok := mergedWindowKey(key.Column, merged); ok {
+					ws.OrderBy[j].Column = rightQual + "." + name
+				}
+			}
 		}
-		for j, key := range ws.OrderBy {
-			name, ok := mergedWindowKey(key.Column, merged)
-			if !ok {
-				continue
+		wfn, ok := info.Columns[i].ASTExpr.(*WindowFuncNode)
+		if !ok {
+			continue
+		}
+		bind := func(n Node) Node {
+			if n == nil {
+				return nil
 			}
-			if full {
-				return refuseFullMergedWindowKey(name, "ORDER BY", leftQual, rightQual)
+			return RewriteExpr(n, func(x Node) (Node, bool) {
+				cr, isCol := x.(*ColRef)
+				if !isCol || cr.Table != "" || !merged[strings.ToLower(cr.Column)] {
+					return nil, false
+				}
+				return mergedExpr(cr.Column), true
+			})
+		}
+		if wfn.Func != nil {
+			for j := range wfn.Func.Args {
+				wfn.Func.Args[j] = bind(wfn.Func.Args[j])
 			}
-			ws.OrderBy[j].Column = rightQual + "." + name
+		}
+		if !full {
+			for j := range wfn.PartitionBy {
+				wfn.PartitionBy[j] = bind(wfn.PartitionBy[j])
+			}
+			for j := range wfn.OrderBy {
+				wfn.OrderBy[j].Expr = bind(wfn.OrderBy[j].Expr)
+			}
 		}
 	}
 	return nil
