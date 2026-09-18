@@ -158,10 +158,21 @@ func NetworkTextTypeName(typ TypeID) string {
 		return "macaddr"
 	case TypeUUID:
 		return "uuid"
-	case TypePort:
-		return "port"
-	case TypeProtocol:
-		return "protocol"
+	case TypePort, TypeProtocol:
+		// The DECLARED wire type, not the internal one. These two columns
+		// declare OID 23 (#834), so a client can look `integer` up in pg_type
+		// and `port` / `protocol` resolve to nothing there. The comparison
+		// door, the CAST door and the plan-time refusal have all named
+		// `integer` since #1137; naming the type here meant ONE bad literal
+		// was reported two ways depending on which door saw it — a filter
+		// said `type integer` and the writer said `type port` for the same
+		// characters (round-1 review, N1).
+		//
+		// The RANGE message is deliberately NOT unified with it: this type's
+		// bound sentence names the bound (`PORT value 70000 out of range
+		// [0, 65535]`), which is arc NT's settled wording and says more than
+		// PostgreSQL's shape would.
+		return "integer"
 	}
 	return typ.String()
 }

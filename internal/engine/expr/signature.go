@@ -49,6 +49,15 @@ const (
 	// functions PostgreSQL DOES have over bytea: `length`, `octet_length`,
 	// `bit_length`, `substring`, `md5`, `sha256`. A number is still 42883.
 	ArgTextOrBytes
+	// ArgBytes takes BYTES and not text, which is `encode`'s own accept-set:
+	// `encode('hi'::text, 'hex')` is `42883 function encode(text, unknown)
+	// does not exist` on 17.11 — measured — while `md5(text)`,
+	// `length(text)` and `substring(text)` all answer there. The asymmetry is
+	// PostgreSQL's, and it is the position this engine answered at where the
+	// server refuses (round-1 review, N6). An unknown-typed LITERAL still
+	// fits, because the server coerces it to bytea: `encode('hi','hex')` is
+	// `6869` there.
+	ArgBytes
 )
 
 func (d ArgDomain) String() string {
@@ -57,6 +66,8 @@ func (d ArgDomain) String() string {
 		return "text"
 	case ArgTextOrBytes:
 		return "text or bytea"
+	case ArgBytes:
+		return "bytea"
 	}
 	return "any"
 }
@@ -219,8 +230,9 @@ var textDomains = map[string][]ArgDomain{
 	"strpos":   {ArgTextOrBytes, ArgTextOrBytes},
 	"position": {ArgTextOrBytes, ArgTextOrBytes},
 	// The bridge: encode takes the BYTES side and decode the TEXT side, which
-	// is the whole point of having both.
-	"encode":   {ArgTextOrBytes, ArgText},
+	// is the whole point of having both. encode is BYTES-ONLY, which is the
+	// server's own accept-set and not this table's tidiness — see ArgBytes.
+	"encode":   {ArgBytes, ArgText},
 	"decode":   {ArgText, ArgText},
 	"get_byte": {ArgTextOrBytes, ArgAny},
 	"set_byte": {ArgTextOrBytes, ArgAny, ArgAny},
@@ -733,8 +745,9 @@ func RefuseUnresolvableCall(n *plansql.FuncCallNode, decl func(plansql.Node) (De
 			}
 			return &WrongSignatureError{Name: name, Args: types}
 		}
-		// A COLUMN or a derived value. Only ONE declared type is refused
-		// here, and deliberately: BYTES in a TEXT-ONLY position.
+		// A COLUMN or a derived value. Two declared types are refused here,
+		// and each is a WRONG VALUE rather than a missing superset: BYTES in
+		// a TEXT-ONLY position, and TEXT in a BYTES-ONLY one.
 		//
 		// PostgreSQL has no `upper(bytea)` and answering one is the wrong
 		// VALUE — the bytes reinterpreted as whatever Go string they spell,
@@ -750,6 +763,14 @@ func RefuseUnresolvableCall(n *plansql.FuncCallNode, decl func(plansql.Node) (De
 		if d == ArgText && t.ID == batch.TypeBytes {
 			return &WrongSignatureError{Name: name, Args: types}
 		}
+		// TEXT in a BYTES-ONLY position. `encode(text, …)` is 42883 on the
+		// server while `md5(text)` and `length(text)` answer, so this is not
+		// the superset the paragraph above keeps — it is one function's own
+		// accept-set, and answering there made docs/sql-reference.md's row
+		// ("a BYTES value") untrue (round-1 review, N6).
+		if d == ArgBytes && t.ID == batch.TypeString {
+			return &WrongSignatureError{Name: name, Args: types}
+		}
 	}
 	return nil
 }
@@ -761,7 +782,12 @@ func RefuseUnresolvableCall(n *plansql.FuncCallNode, decl func(plansql.Node) (De
 // domain.
 func literalFitsDomain(d ArgDomain, t batch.TypeID) bool {
 	switch d {
-	case ArgText, ArgTextOrBytes:
+	case ArgText, ArgTextOrBytes, ArgBytes:
+		// An unknown-typed literal reaches here as Undecided and never gets
+		// this far; what does is a NUMBER or a BOOLEAN, which no text or
+		// bytes position takes. ArgBytes is with them because the server
+		// coerces an unknown literal to bytea — `encode('hi','hex')` is 6869
+		// on 17.11 — so a quoted literal fits a bytes position too.
 		return t == batch.TypeString
 	}
 	return true

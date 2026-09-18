@@ -2052,9 +2052,56 @@ func assignLiteralToColumn(text string, col parquet.Column) (any, error) {
 		// and 22003 for a magnitude the column cannot hold.
 		// A LITERAL, so the numeric rule: PostgreSQL reads an unadorned
 		// `2.5` as numeric and rounds it half away from zero (#699).
-		return assignEvaluatedValue(text, col, false)
+		v, cerr := assignEvaluatedValue(text, col, false)
+		if cerr == nil {
+			return v, nil
+		}
+		// BOTH readings failed, so the one the user is told about is the
+		// TYPE'S OWN. The second reader is handed the STILL-QUOTED text and
+		// names its own type, so `VALUES ('zzz')` into a PORT column reported
+		// `invalid input syntax for type numeric: "'zzz'"` — a different type
+		// name, and the literal with its quotes in it — where every other
+		// door says `invalid input syntax for type integer: "zzz"`. One
+		// refusal has one sentence (round-1 review, N1).
+		//
+		// Only for a QUOTED literal: an unquoted number is a NUMBER and the
+		// cast's refusal is the right one for it, the same split #1141 makes
+		// at the CAST door.
+		if inner, quoted := dmlUnquotedLiteral(text); quoted {
+			if nerr := parquet.NetworkTextError(col.Type, inner,
+				netTextStatusOf(col.Type, inner)); nerr != nil {
+				return nil, nerr
+			}
+		}
+		return nil, cerr
 	}
 	return nil, err
+}
+
+// dmlUnquotedLiteral is convertValue's quoting rule, asked of a literal's
+// source text: a leading and trailing apostrophe are quoting, and the
+// apostrophes inside were doubled by it. It reports false for everything that
+// is not a quoted literal, which is what separates `'zzz'` — text, and read by
+// the column type's own input function — from `2.5`, a number the assignment
+// cast still has a reading for.
+func dmlUnquotedLiteral(text string) (string, bool) {
+	s := strings.TrimSpace(text)
+	if len(s) < 2 || s[0] != '\'' || s[len(s)-1] != '\'' {
+		return "", false
+	}
+	return strings.ReplaceAll(s[1:len(s)-1], "''", "'"), true
+}
+
+// netTextStatusOf re-asks the column type's own reader for the status of a
+// literal it has already refused, so the message names what that reader
+// refused it for — 22P02 for text naming no value, 22003 for a number outside
+// the type's range.
+func netTextStatusOf(typ parquet.TypeID, s string) parquet.NetTextStatus {
+	_, st, ok := parquet.NetworkTextValue(typ, s)
+	if !ok {
+		return parquet.NetTextSyntax
+	}
+	return st
 }
 
 // checkValueForColumn is ConvertValueForColumn's half for a value that is

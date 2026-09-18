@@ -172,6 +172,57 @@ func TestAnUnknownLiteralBesideANetworkColumnResolvesAsTheColumnsType(t *testing
 	}
 }
 
+// TestOneBadNetworkLiteralIsReportedOneWayAtEveryDoor is the round-1 review's
+// N1. The arc unified the READ side on `integer` — the name a client can look
+// up in pg_type for a column that declares OID 23 — and left the writer's door
+// and the vector store naming the type itself, so ONE bad literal was reported
+// two ways depending on which evaluator saw it first.
+//
+// The SQLSTATE was already one; this is the sentence.
+func TestOneBadNetworkLiteralIsReportedOneWayAtEveryDoor(t *testing.T) {
+	ctx := context.Background()
+	db := nlpOpen(t)
+	if _, err := db.Query(ctx, `CREATE TABLE nlpsink (k BIGINT, c_port PORT)`); err != nil {
+		t.Fatalf("create sink: %v", err)
+	}
+
+	const want = `invalid input syntax for type integer: "zzz"`
+	for _, c := range []struct{ door, sql string }{
+		{"filter", `SELECT COUNT(*) AS n FROM nlp WHERE c_port = 'zzz'`},
+		{"in-list", `SELECT COUNT(*) AS n FROM nlp WHERE c_port IN ('zzz')`},
+		{"between", `SELECT COUNT(*) AS n FROM nlp WHERE c_port BETWEEN 'zzz' AND 'zzz'`},
+		{"cast", `SELECT CAST('zzz' AS PORT) AS v FROM nlp`},
+		{"case-arm", `SELECT CASE WHEN k = 2 THEN c_port ELSE 'zzz' END AS v FROM nlp`},
+		{"coalesce-arm", `SELECT COALESCE(c_port, 'zzz') AS v FROM nlp`},
+		{"having", `SELECT c_port AS v FROM nlp GROUP BY c_port HAVING c_port = 'zzz'`},
+		{"join-on", `SELECT COUNT(*) AS n FROM nlp a JOIN nlp b ON a.c_port = b.c_port AND a.c_port = 'zzz'`},
+		{"set-operation", `SELECT c_port AS v FROM nlp UNION ALL SELECT 'zzz' FROM nlp`},
+		{"insert-select", `INSERT INTO nlpsink (k, c_port) SELECT k, 'zzz' FROM nlp`},
+		{"insert-values", `INSERT INTO nlpsink (k, c_port) VALUES (9, 'zzz')`},
+		{"ctas", `CREATE TABLE nlpctas AS SELECT CAST('zzz' AS PORT) AS v FROM nlp`},
+	} {
+		t.Run(c.door, func(t *testing.T) {
+			var err error
+			if strings.HasPrefix(c.sql, "INSERT") {
+				_, err = db.Execute(ctx, c.sql)
+			} else {
+				_, err = db.Query(ctx, c.sql)
+			}
+			if err == nil {
+				t.Fatalf("%s door ANSWERED a literal that names no PORT\n  SQL: %s", c.door, c.sql)
+			}
+			if got := sqlerr.StateOf(err); got != "22P02" {
+				t.Errorf("%s door: SQLSTATE %q, want 22P02\n  err: %v\n  SQL: %s", c.door, got, err, c.sql)
+			}
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s door says %q; every other door says %q. ONE refusal has ONE "+
+					"sentence, and `port` is a name no client can resolve in pg_type for a "+
+					"column that declares OID 23\n  SQL: %s", c.door, err.Error(), want, c.sql)
+			}
+		})
+	}
+}
+
 func nlpCount(t *testing.T, ctx context.Context, db *DB, sql string) int {
 	t.Helper()
 	res, err := db.Query(ctx, sql)

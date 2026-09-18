@@ -179,6 +179,18 @@ func TestACallResolvesByItsArgumentsOrIs42883(t *testing.T) {
 			want: `\377\376\000A`, pg: `\377\376\000A`},
 		{name: "encode_unknown", sql: `SELECT ENCODE(b,'zzz') AS v FROM fsc WHERE k=1`, state: "22023",
 			pg: `22023 unrecognized encoding: "zzz"`},
+		// ENCODE is BYTES-ONLY on the server, which is its own accept-set and
+		// not the family's: `encode('hi'::text,'hex')` is 42883 there while
+		// `md5(text)`, `length(text)` and `substring(text)` all answer. This
+		// engine answered it, and docs/sql-reference.md's row said "a BYTES
+		// value" (round-1 review, N6).
+		{name: "encode_over_a_text_column", sql: `SELECT ENCODE(name,'hex') AS v FROM fsc WHERE k=1`,
+			state: "42883", pg: `42883 function encode(text, unknown) does not exist`,
+			msg: `function encode(text, unknown) does not exist`},
+		// An unknown-typed LITERAL still fits, because the server coerces it
+		// to bytea: `encode('hi','hex')` is 6869 on 17.11.
+		{name: "encode_over_an_unknown_literal", sql: `SELECT ENCODE('hi','hex') AS v`,
+			want: "6869", pg: `6869`},
 		{name: "decode_hex", sql: `SELECT DECODE('6869','hex') AS v`, want: []byte("hi"), pg: `\x6869`},
 		{name: "decode_base64", sql: `SELECT DECODE('aGk=','base64') AS v`, want: []byte("hi"), pg: `\x6869`},
 		{name: "decode_escape", sql: `SELECT DECODE('hi','escape') AS v`, want: []byte("hi"), pg: `\x6869`},
