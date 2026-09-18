@@ -1529,6 +1529,20 @@ func (p *selectParser) parseComparison() (Node, error) {
 
 	if p.isKeyword(TokenKWBetween) {
 		p.advance()
+		// `[NOT] BETWEEN [ASYMMETRIC | SYMMETRIC] low AND high`. Neither word
+		// is a keyword token in this lexer, so both arrive as bare
+		// identifiers; a QUOTED "symmetric" is a column reference and is left
+		// alone, which is what the double quotes mean.
+		symmetric := false
+		switch {
+		case p.isBareWord(0, "SYMMETRIC"):
+			symmetric = true
+			p.advance()
+		case p.isBareWord(0, "ASYMMETRIC"):
+			// PostgreSQL's default and the only behaviour this engine had:
+			// the word is consumed and changes nothing.
+			p.advance()
+		}
 		low, err := p.parseAddition()
 		if err != nil {
 			return nil, err
@@ -1539,6 +1553,9 @@ func (p *selectParser) parseComparison() (Node, error) {
 		high, err := p.parseAddition()
 		if err != nil {
 			return nil, err
+		}
+		if symmetric {
+			return symmetricBetween(left, low, high, not), nil
 		}
 		return &BetweenExpr{Left: left, Not: not, Low: low, High: high}, nil
 	}
@@ -1676,6 +1693,44 @@ func (p *selectParser) parseComparison() (Node, error) {
 	return &CmpExpr{Left: left, Op: op, Right: right}, nil
 }
 
+// symmetricBetween is `a BETWEEN SYMMETRIC b AND c`, expanded to the pair of
+// ordinary BETWEENs PostgreSQL's own grammar expands it to:
+//
+//	(a BETWEEN b AND c) OR (a BETWEEN c AND b)
+//
+// NOT the `BETWEEN least(b,c) AND greatest(b,c)` the prose suggests. The two
+// agree on every non-NULL operand and disagree whenever a bound is NULL,
+// because least/greatest IGNORE NULLs: `SELECT 1 BETWEEN SYMMETRIC NULL AND 1`
+// is NULL in PostgreSQL 17.11 and the least/greatest form answers TRUE
+// (least(NULL,1) = greatest(NULL,1) = 1). Measured, not remembered.
+//
+// The expansion happens HERE rather than as a flag on BetweenExpr because the
+// node is rebuilt by seven rewriters (canonicalization, correlation, the
+// lateral walks, filter/project pushdown), and a rebuild that forgot to copy
+// the flag would silently answer an ASYMMETRIC range — a wrong answer with no
+// refusal. The OR-of-two-BETWEENs shape is one every consumer already handles,
+// which is the same reason ILIKE, SIMILAR TO, `= ANY (subquery)` and a VALUES
+// table source are expanded in this parser too.
+//
+// `NOT BETWEEN SYMMETRIC` negates the whole disjunction, which is PostgreSQL's
+// association and keeps three-valued logic: NOT NULL is NULL.
+func symmetricBetween(left, low, high Node, not bool) Node {
+	// PARENTHESIZED, because the expansion is what `String()` renders and an
+	// unparenthesized disjunction does not survive a re-parse: `a AND b
+	// BETWEEN SYMMETRIC x AND y` would render `a and b between x and y or b
+	// between y and x`, which re-reads as `(a AND …) OR …` — AND binds
+	// tighter than OR. The join clause re-parses its own rendered condition,
+	// so a rendering that regroups is a wrong answer, not a cosmetic one.
+	var node Node = &ParenNode{Inner: &OrNode{
+		Left:  &BetweenExpr{Left: left, Low: low, High: high},
+		Right: &BetweenExpr{Left: left, Low: high, High: low},
+	}}
+	if not {
+		node = &ParenNode{Inner: &NotNode{Inner: node}}
+	}
+	return node
+}
+
 func (p *selectParser) parseAddition() (Node, error) {
 	left, err := p.parseMultiplication()
 	if err != nil {
@@ -1703,7 +1758,7 @@ func (p *selectParser) parseAddition() (Node, error) {
 }
 
 func (p *selectParser) parseMultiplication() (Node, error) {
-	left, err := p.parseAtTimeZone()
+	left, err := p.parsePower()
 	if err != nil {
 		return nil, err
 	}
@@ -1720,12 +1775,53 @@ func (p *selectParser) parseMultiplication() (Node, error) {
 			return left, nil
 		}
 		p.advance()
-		right, err := p.parseAtTimeZone()
+		right, err := p.parsePower()
 		if err != nil {
 			return nil, err
 		}
 		left = &BinaryOp{Left: left, Op: op, Right: right}
 	}
+}
+
+// parsePower parses PostgreSQL's `^` exponentiation operator.
+//
+// Precedence is PostgreSQL's documented table (§4.1.6): `^` binds TIGHTER than
+// `*` `/` `%` and LOOSER than `AT TIME ZONE` and unary minus, so this level
+// sits between parseMultiplication and parseAtTimeZone:
+//
+//	2 ^ 3 * 2   →  (2 ^ 3) * 2   = 16      (^ tighter than *)
+//	2 + 3 ^ 2   →  2 + (3 ^ 2)   = 11
+//	-2 ^ 2      →  (-2) ^ 2      = 4       (unary minus tighter than ^)
+//
+// And it is LEFT associative there, which is not the mathematical convention:
+// `2 ^ 3 ^ 2` is `(2 ^ 3) ^ 2` = 64, not 512. All measured on PostgreSQL
+// 17.11.
+//
+// The node is the `power(a, b)` call, not a new BinaryOp operator: power()'s
+// kernel already answers PostgreSQL's values AND its error classes — 2201F for
+// a negative base with a non-integer exponent and for zero to a negative
+// power, 22003 on overflow — and declares what PostgreSQL declares. A second
+// spelling with its own kernel is how the two would come to disagree.
+func (p *selectParser) parsePower() (Node, error) {
+	left, err := p.parseAtTimeZone()
+	if err != nil {
+		return nil, err
+	}
+	for p.peek() == TokenCaret {
+		p.advance()
+		right, err := p.parseAtTimeZone()
+		if err != nil {
+			return nil, err
+		}
+		// PostgreSQL publishes an OPERATOR result under `?column?`, not under
+		// the name of the function the operator is implemented by, and the
+		// published name is what a client reads out of RowDescription. The
+		// same label carries `extract` and `position` through their own
+		// rewrites.
+		left = &FuncCallNode{Name: "power", Args: []Node{left, right},
+			OutputLabel: UnnamedOutputColumn}
+	}
+	return left, nil
 }
 
 // parseAtTimeZone parses the infix `<expr> AT TIME ZONE <zone>` operator and
