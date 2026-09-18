@@ -29,7 +29,7 @@ import (
 //	  + {lifted predicate column} × {LATERAL} × three spellings
 //	  × {single, spilled512k, dag, dag-shuffled, dag-morsel4}
 //
-// 39 cells × 5 arms = 195 (cell, arm) results. Every producer publishes `id`,
+// 50 cells × 5 arms = 250 (cell, arm) results. Every producer publishes `id`,
 // which `lat_ord o` also publishes, so the ownership question is LIVE in every
 // cell: a consumer that erases the occurrence binds `o.id` and the cell says
 // so. A corpus whose producer publishes a name nothing else spells answers
@@ -48,7 +48,12 @@ import (
 // TestArcL1QualifyAnswersDuckDBOnEveryArm, on all five arms, in silence. Those
 // pins are DELETED; see that gate's header for the mechanism.
 //
-// WHAT REMAINS, and it is ONE COLUMN of this table: the LATERAL producer.
+// WHAT REMAINS. One COLUMN of this table, the LATERAL producer, and one
+// KEY SHAPE, an expression whose two leaves name two occurrences — the cell
+// docs/design/window-key-ownership.md §(a) M2 names, added here with its
+// measured mechanism. Both are DAG-only and `distributed`.
+//
+// The LATERAL producer first.
 // Five consumers × three DAG arms bind the outer occurrence, because a
 // decorrelated body's Project emits no stage and the DAG's join publishes the
 // body's inner-scan spelling where the single-process join publishes the arm's
@@ -311,6 +316,105 @@ func wkSeamCells() []c1Case {
 			name: "star/nested",
 			sql:  "SELECT * FROM lat_ord o JOIN (SELECT n.id, n.order_id, n.amount FROM (SELECT id, order_id, amount FROM lat_item) n) p ON p.order_id = o.id ORDER BY 1, 4",
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 id:INT64 order_id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,1,1,50 | 1,Alice,150,2,1,100 | 2,Bob,200,3,2,75 | 2,Bob,200,4,2,125",
+		},
+		{
+			// THE LEAF CELL the memo names (§(a) M2): an EXPRESSION key
+			// whose two LEAVES name two different occurrences. The mint gives
+			// the RESULT a name nothing else owns; it says nothing about the
+			// leaves, and each leaf is bound by the ordinary reference rules.
+			// x.w is `amount` and y.w is `200 - amount`, so the correct sum is
+			// 200 on every row — ONE partition of four — and a leaf bound to
+			// the other occurrence gives four singletons.
+			name: "winpart/exprTwoOccurrences",
+			sql:  "SELECT x.id AS a, COUNT(*) OVER (PARTITION BY x.w + y.w) AS n FROM (SELECT id, amount AS w FROM lat_item) x JOIN (SELECT id, 200 - amount AS w FROM lat_item) y ON y.id = x.id ORDER BY a",
+			want: "cols=[a:INT64 n:INT64] rows=4 | 1,4 | 2,4 | 3,4 | 4,4",
+			pin: map[string]string{
+				"dag":          "cols=[a:INT64 n:INT64] rows=4 | 1,1 | 2,1 | 3,1 | 4,1",
+				"dag-shuffled": "cols=[a:INT64 n:INT64] rows=4 | 1,1 | 2,1 | 3,1 | 4,1",
+				"dag-morsel4":  "cols=[a:INT64 n:INT64] rows=4 | 1,1 | 2,1 | 3,1 | 4,1",
+			},
+			why: "DAG-ONLY, pre-existing, `distributed`: both leaves of the key expression bind ONE occurrence's `w` on the three DAG arms, so the computed slot holds the wrong value under a correctly-minted name. Corollary 1 reaches a key that IS a reference; a key that CONTAINS one is the same question one layer down, and the arm whose spelling the stage's stream carries decides it. Right on single and spilled512k. Identical at aed447e3.",
+		},
+		{
+			// The same leaves through the window's ARGUMENT: the sum is 800
+			// and a leaf bound to y on both sides gives 900.
+			name: "winarg/exprTwoOccurrences",
+			sql:  "SELECT SUM(x.w + y.w) OVER () AS s FROM (SELECT id, amount AS w FROM lat_item) x JOIN (SELECT id, 200 - amount AS w FROM lat_item) y ON y.id = x.id ORDER BY s",
+			want: "cols=[s:FLOAT64] rows=4 | 800 | 800 | 800 | 800",
+			pin: map[string]string{
+				"dag":          "cols=[s:FLOAT64] rows=4 | 900 | 900 | 900 | 900",
+				"dag-shuffled": "cols=[s:FLOAT64] rows=4 | 900 | 900 | 900 | 900",
+				"dag-morsel4":  "cols=[s:FLOAT64] rows=4 | 900 | 900 | 900 | 900",
+			},
+			why: "DAG-ONLY, pre-existing, `distributed`: 900 is y.w + y.w summed, so BOTH leaves bound y's occurrence. The same fact as winpart/exprTwoOccurrences through the ARGUMENT. Right on single and spilled512k. Identical at aed447e3.",
+		},
+		{
+			// And the same leaves in a plain SELECT item, which is the
+			// narrowest form: no window at all, so the mint is not in the
+			// picture and only the leaf binding is.
+			name: "armref/exprTwoOccurrences",
+			sql:  "SELECT x.id AS a, x.w + y.w AS k FROM (SELECT id, amount AS w FROM lat_item) x JOIN (SELECT id, 200 - amount AS w FROM lat_item) y ON y.id = x.id ORDER BY a",
+			want: "cols=[a:INT64 k:FLOAT64] rows=4 | 1,200 | 2,200 | 3,200 | 4,200",
+			pin: map[string]string{
+				"dag":          "cols=[a:INT64 k:FLOAT64] rows=4 | 1,100 | 2,200 | 3,150 | 4,250",
+				"dag-shuffled": "cols=[a:INT64 k:FLOAT64] rows=4 | 1,100 | 2,200 | 3,150 | 4,250",
+				"dag-morsel4":  "cols=[a:INT64 k:FLOAT64] rows=4 | 1,100 | 2,200 | 3,150 | 4,250",
+			},
+			why: "DAG-ONLY, pre-existing, `distributed`: 2×amount, so both leaves bound x's occurrence here. No window is involved, which localises the leaf binding to the join-arm REFERENCE consumer rather than to the window. Right on single and spilled512k. Identical at aed447e3.",
+		},
+		// THE MIRROR SPELLING. Every cell above keys on `p.id`, the arm the
+		// plan publishes BARE, and the whole table therefore answers
+		// identically at aed447e3 — measured. These six key the same window
+		// on the OUTER occurrence, which is #1028’s own spelling, so the
+		// table moves for the defect it enumerates.
+		{
+			name: "winpartOuter/base",
+			sql:  "SELECT o.id AS a, p.id AS b, COUNT(*) OVER (PARTITION BY o.id) AS n FROM lat_ord o JOIN lat_item p ON p.order_id = o.id ORDER BY a, b",
+			want: "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,2 | 1,2,2 | 2,3,2 | 2,4,2",
+		},
+		{
+			// The window's OTHER TWO positions on the same mirror, so the
+			// discriminating dimension is not one cell wide. Both fail at
+			// `aed447e3` on all five arms.
+			name: "winorderOuter/base",
+			sql:  "SELECT o.id AS a, p.id AS b, COUNT(*) OVER (ORDER BY o.id) AS n FROM lat_ord o JOIN lat_item p ON p.order_id = o.id ORDER BY a, b",
+			want: "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,2 | 1,2,2 | 2,3,4 | 2,4,4",
+		},
+		{
+			name: "winargOuter/base",
+			sql:  "SELECT o.id AS a, p.id AS b, SUM(o.total) OVER (PARTITION BY o.id) AS n FROM lat_ord o JOIN lat_item p ON p.order_id = o.id ORDER BY a, b",
+			want: "cols=[a:INT64 b:INT64 n:FLOAT64] rows=4 | 1,1,300 | 1,2,300 | 2,3,400 | 2,4,400",
+		},
+		{
+			name: "winpartOuter/derived",
+			sql:  "SELECT o.id AS a, p.id AS b, COUNT(*) OVER (PARTITION BY o.id) AS n FROM lat_ord o JOIN (SELECT id, order_id, amount FROM lat_item) p ON p.order_id = o.id ORDER BY a, b",
+			want: "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,2 | 1,2,2 | 2,3,2 | 2,4,2",
+		},
+		{
+			name: "winpartOuter/lateral",
+			sql:  "SELECT o.id AS a, p.id AS b, COUNT(*) OVER (PARTITION BY o.id) AS n FROM lat_ord o JOIN LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) p ON true ORDER BY a, b",
+			want: "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,2 | 1,2,2 | 2,3,2 | 2,4,2",
+			pin: map[string]string{
+				"dag":          "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,2 | 1,1,2 | 2,2,2 | 2,2,2",
+				"dag-shuffled": "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,2 | 1,1,2 | 2,2,2 | 2,2,2",
+				"dag-morsel4":  "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,2 | 1,1,2 | 2,2,2 | 2,2,2",
+			},
+			why: "DAG-ONLY, pre-existing, `distributed`: the LATERAL column of this table, same mechanism as the `p.id` spelling beside it. Identical at aed447e3.",
+		},
+		{
+			name: "winpartOuter/setop",
+			sql:  "SELECT o.id AS a, p.id AS b, COUNT(*) OVER (PARTITION BY o.id) AS n FROM lat_ord o JOIN (SELECT id, order_id, amount FROM lat_item UNION ALL SELECT id, order_id, amount FROM lat_item WHERE 1=0) p ON p.order_id = o.id ORDER BY a, b",
+			want: "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,2 | 1,2,2 | 2,3,2 | 2,4,2",
+		},
+		{
+			name: "winpartOuter/grouped",
+			sql:  "SELECT o.id AS a, p.id AS b, COUNT(*) OVER (PARTITION BY o.id) AS n FROM lat_ord o JOIN (SELECT MIN(id) AS id, order_id, SUM(amount) AS amount FROM lat_item GROUP BY order_id) p ON p.order_id = o.id ORDER BY a, b",
+			want: "cols=[a:INT64 b:INT64 n:INT64] rows=2 | 1,1,1 | 2,3,1",
+		},
+		{
+			name: "winpartOuter/nested",
+			sql:  "SELECT o.id AS a, p.id AS b, COUNT(*) OVER (PARTITION BY o.id) AS n FROM lat_ord o JOIN (SELECT n.id, n.order_id, n.amount FROM (SELECT id, order_id, amount FROM lat_item) n) p ON p.order_id = o.id ORDER BY a, b",
+			want: "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,2 | 1,2,2 | 2,3,2 | 2,4,2",
 		},
 		{
 			name: "lifted/lateral",
