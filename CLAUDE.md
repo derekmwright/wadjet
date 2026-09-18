@@ -80,7 +80,7 @@ SQL text
 | `internal/natsconn/` | Opening NATS: the embedded server, the connections, the JetStream context |
 | `internal/engine/batch/` | Record batches, vectors, selection vectors, batch pooling |
 | `internal/engine/exec/` | Pipeline executor, operators (filter, project, join, sort, aggregate, window); aggregate seams in `agg_consume.go`, `agg_accumulators.go`, `agg_partial_merge.go`, `agg_spill.go` |
-| `internal/engine/expr/` | Expression compiler, 379 scalar functions; sections in `expr_arith.go`, `expr_compare.go`, `expr_scalar_fns.go`, `expr_string_fns.go` |
+| `internal/engine/expr/` | Expression compiler, 383 scalar functions; sections in `expr_arith.go`, `expr_compare.go`, `expr_scalar_fns.go`, `expr_string_fns.go` |
 | `internal/engine/scan/` | 3-level predicate pushdown scanner |
 | `internal/engine/memory/` | Per-task memory budget, spill-to-disk |
 | `internal/planner/sql/` | SQL parser + AST types |
