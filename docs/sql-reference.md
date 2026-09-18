@@ -725,6 +725,27 @@ SELECT * FROM flow_logs WHERE dst_port BETWEEN 1024 AND 65535
 SELECT * FROM flow_logs WHERE bytes_in NOT BETWEEN 0 AND 100
 ```
 
+`SYMMETRIC` and `ASYMMETRIC` are both accepted, with or without `NOT`.
+`ASYMMETRIC` is the default and changes nothing; `SYMMETRIC` does not require
+the lower bound to be written first:
+
+```sql
+SELECT 5 BETWEEN SYMMETRIC 10 AND 1        -- true
+SELECT 5 BETWEEN ASYMMETRIC 10 AND 1       -- false
+SELECT 5 NOT BETWEEN SYMMETRIC 10 AND 1    -- false
+```
+
+`a BETWEEN SYMMETRIC b AND c` is `(a BETWEEN b AND c) OR (a BETWEEN c AND b)`,
+which is PostgreSQL's own expansion. It is NOT `BETWEEN least(b,c) AND
+greatest(b,c)`: `least` and `greatest` ignore NULL operands, so that reading
+answers `true` for `1 BETWEEN SYMMETRIC NULL AND 1` where PostgreSQL — and this
+engine — answer NULL. A NULL operand anywhere makes the answer NULL or, where
+the other disjunct already decided it, `false`, exactly as three-valued logic
+requires.
+
+A BETWEEN of any spelling inside a `JOIN ... ON` clause is refused — see
+**Limitations**.
+
 ### EXISTS Predicate
 
 ```sql
@@ -926,9 +947,14 @@ an arm is published only where its own names address its columns:
   - a `LATERAL` arm, a table function, and an arm whose own list this planner
     does not enumerate.
 
-A `SELECT *` over `JOIN … USING` or `NATURAL JOIN` is refused (`0A000`): USING
-MERGES the joined column into one output column, which is the one place where
-"every arm's own list" is not PostgreSQL's rule.
+A `SELECT *` over `JOIN … USING` is the one place where "every arm's own list"
+is not PostgreSQL's rule: USING MERGES the joined column into ONE output
+column, published once and first, and the expansion states that where it can
+read both arms' lists (see [Join conditions](#join-conditions)). It DECLINES —
+and the statement is then refused with `0A000` — where a reference by name
+would bind the wrong relation: two arms that share a column name OUTSIDE the
+USING list, an arm that publishes one name twice, or a chain of joins.
+`NATURAL JOIN` is refused outright.
 
 Subqueries that reference columns from the outer query. The optimizer decorrelates them where it can — EXISTS / NOT EXISTS and IN become semi/anti joins, and a correlated scalar subquery becomes a join against a grouped aggregate — so they are not re-executed per outer row. Either side may be a CTE, a derived table, a comma-joined list or a base table: the subquery's own FROM clause is planned the way a top-level FROM clause is.
 
@@ -1795,15 +1821,35 @@ derived table, as do an explicit column list, aliased columns, and a nested
 derived table inside one. A position past the end is `42P10`, as PostgreSQL
 raises it.
 
-## Derived tables and CTE column lists
+## Column-alias lists
 
-A derived table or a CTE may rename its output columns positionally with a
-column-alias list:
+ANY `FROM` item may rename its columns positionally with a column-alias list —
+a base table, a derived table, a `VALUES` block, a table function and a `WITH`
+query alike. The `AS` is optional everywhere:
 
 ```sql
+SELECT k, v FROM flow_logs AS f(k, v)
+SELECT k, v FROM flow_logs f(k, v)
 SELECT kk, nn FROM (SELECT s, n FROM t) AS b(kk, nn)
+SELECT n FROM (VALUES (1), (2)) v(n)
 WITH c(kk, nn) AS (SELECT s, n FROM t) SELECT kk FROM c
 ```
+
+The list opens a NEW relation namespace: the named columns are the relation's,
+and the names it renamed AWAY are gone. `SELECT id FROM flow_logs a(k)` is
+`42703` where `id` was the first column, and `SELECT flow_logs.id FROM
+flow_logs a(k)` is `42P01` — the relation answers only to its alias once one is
+written. Both are PostgreSQL's rules.
+
+A name REPEATED in the list is refused with `42701`. PostgreSQL accepts the
+list and refuses every reference to the repeated name with `42702`; this
+planner renames positionally and cannot publish one name for two columns, so it
+refuses the list itself. See [PostgreSQL differences](postgres-differences.md).
+
+A list on a reference to a `WITH` query — `FROM c z(x, y)` — is refused with
+`0A000`; put the list on the definition, `WITH c(x, y) AS (…)`, which answers.
+
+### Derived tables and CTE column lists
 
 Fewer aliases than columns rename a **prefix** — `AS b(kk)` over a two-column
 subquery publishes `kk` and the second column's own name. More aliases than the
@@ -2201,7 +2247,33 @@ FROM flow_logs f JOIN device_inventory d USING (device_id)
 
 `USING` accepts several columns — `USING (device_id, day)` — and both sides
 remain addressable by their qualified names (`f.device_id`, `d.device_id`).
-See **Limitations** for the two `USING` shapes that are refused.
+
+`USING` MERGES the joined column into ONE output column, which `SELECT *`
+publishes ONCE and FIRST, followed by the left arm's remaining columns and then
+the right arm's — three output columns for two two-column tables where the same
+join written with `ON` publishes four:
+
+```sql
+-- fa(id, a), fb(id, b)
+SELECT * FROM fa JOIN fb USING (id)   -- id, a, b
+SELECT * FROM fa JOIN fb ON fa.id = fb.id  -- id, a, id, b
+```
+
+The merged value is the left arm's column for an `INNER` or `LEFT` join and the
+right arm's for a `RIGHT` join — the side that is never NULL-extended — and
+`COALESCE(left.c, right.c)` for a `FULL` join, where either side may be. A
+QUALIFIED star names one side and merges nothing: `SELECT fa.*` over the join
+above publishes `id, a`.
+
+A `USING` clause may follow another join on the same `FROM` item when that
+earlier join is itself an inner `JOIN ... USING` naming the same columns, so
+the name on the left is already merged:
+
+```sql
+SELECT COUNT(*) FROM fa x JOIN fb y USING (id) JOIN fb z USING (id)
+```
+
+See **Limitations** for the `USING` and `NATURAL JOIN` shapes that are refused.
 
 ### Inner Join
 
@@ -2269,6 +2341,7 @@ FROM flow_logs
 | `*` | Multiplication |
 | `/` | Division |
 | `%` | Modulo |
+| `^` | Exponentiation. `2 ^ 3` is 8. It binds TIGHTER than `*` `/` `%` and LOOSER than unary minus (`-2 ^ 2` is 4), and it is LEFT associative, so `2 ^ 3 ^ 2` is 64 and not 512 — PostgreSQL's documented precedence table, which is not the mathematical convention. It is the `POWER(a, b)` function under another spelling and shares its answers and its errors: `0 ^ -1` and a negative base with a non-integer exponent are `2201F`, an overflow is `22003`. PostgreSQL has no `^` XOR operator; integer XOR is spelled `#` and this engine does not implement it |
 | `\|\|` | String concatenation — NULL in either operand makes the result NULL (use `CONCAT` to ignore NULLs) |
 
 ## DISTINCT
@@ -4217,12 +4290,31 @@ and `internal/storage/parquet/wide_decimal_test.go`.)
 
 ## Limitations
 
-- `NATURAL JOIN` — rejected (SQLSTATE `0A000`); write the join condition with `ON`
-- `SELECT *` over a `JOIN ... USING` — rejected (`0A000`): `USING` merges the
-  joined column into one output column, and a star's column set over a join is
-  not resolved by the planner. Name the columns, or join with `ON`
-- `JOIN ... USING` that follows another join on the same `FROM` item —
-  rejected (`0A000`); the column could come from either relation on the left
+- `NATURAL JOIN` — rejected (SQLSTATE `0A000`); write the join condition with
+  `ON` or with `USING`. Its keys ARE the columns the two sides happen to share,
+  which is a catalog question the parser cannot answer, and dropping the clause
+  would answer `FROM a NATURAL JOIN b` as plain `FROM a`
+- `SELECT *` over a `JOIN ... USING` whose merged output cannot be stated —
+  rejected (`0A000`). The merge itself is supported (see
+  [Join conditions](#join-conditions)); it declines where a reference by name
+  would bind the wrong relation: two arms sharing a column name OUTSIDE the
+  USING list, an arm publishing one name twice, or a chain of joins. Name the
+  columns, or join with `ON`
+- A BARE reference to a `USING` join's merged column — `SELECT id FROM a JOIN b
+  USING (id)` — is `42702 column reference "id" is ambiguous`. PostgreSQL
+  answers it, because USING merges the column and the reference is not
+  ambiguous there. Qualify it (`a.id`), which resolves
+- `JOIN ... USING` that follows another join on the same `FROM` item, unless
+  that earlier join is itself an inner `JOIN ... USING` naming the same columns
+  — rejected (`0A000`); the column could otherwise come from either relation on
+  the left. PostgreSQL refuses the `ON`-join form of this too (`42702`)
+- A `BETWEEN` of any spelling inside a `JOIN ... ON` clause — rejected while
+  building the physical plan. The planner splits an `ON` clause into conjuncts
+  on the literal text `" AND "`, and `BETWEEN low AND high` carries one. The
+  same predicate in a `WHERE` clause answers
+- A column-alias list on a reference to a `WITH` query — rejected (`0A000`);
+  put the list on the definition
+- A column-alias list that REPEATS a name — rejected (`42701`)
 - A SUBQUERY in an `UPDATE`'s `SET` list — `SET n = (SELECT max(n) FROM s)` — SQLSTATE 0A000. A subquery in a `DELETE` / `UPDATE` / `MERGE` PREDICATE is supported — see [A subquery in a DML predicate](#a-subquery-in-a-dml-predicate) — and an assignment is a different site.
 - `RETURNING` on INSERT/UPDATE/DELETE/MERGE — SQLSTATE 0A000
 - `MERGE ... WHEN NOT MATCHED BY SOURCE` / `BY TARGET` — SQLSTATE 0A000. `BY TARGET` is PostgreSQL 17's spelling of the ordinary `NOT MATCHED`; `BY SOURCE` walks the target rows no source row matched, which is how a MERGE expresses the delete half of a full-sync upsert. Eleven cells in the DML census carry PostgreSQL 17's answer for both forms beside the refusal.

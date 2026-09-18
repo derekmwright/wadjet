@@ -720,6 +720,60 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      dropped. Gated by
      `coordinator.TestArcK1AColumnAliasListRenamesPositionally`.
 
+   - **A column-alias list that REPEATS a name is refused (42701), where
+     PostgreSQL accepts the list.** (Added 2026-09-18 by arc PS, #959.)
+
+     PostgreSQL accepts `FROM t a(k, k)` and refuses every REFERENCE to `k`
+     with 42702 `column reference "k" is ambiguous` — a scope that holds two
+     columns under one name and answers a star over them. This planner renames
+     POSITIONALLY and has no such scope: the star over that relation expanded
+     to the same qualified reference twice and published the SECOND column's
+     values under both names, which is a wrong VALUE where PostgreSQL answers
+     the right ones. The list is refused at the spelling instead. Narrower
+     than PostgreSQL, loud, and recorded; closing it means the block's
+     published list travelling by POSITION rather than by name, which is the
+     same work `logical.projectionOutputNames` names for #1076. Gated by
+     `sql.TestArcPSParserReadsTheColumnAliasListGrammar`.
+
+   - **A column-alias list on a reference to a `WITH` query is refused
+     (0A000).** (Added 2026-09-18 by arc PS, #959/#1158.)
+
+     `WITH c AS (…) SELECT * FROM c z(x, y)` renames the query's output in the
+     ENCLOSING scope. A list on a NAMED relation is lowered to the
+     derived-table spelling at parse time — which is what an alias clause with
+     a column list means, and which puts the binder that builds the enclosing
+     scope and the logical builder on one tree (`sub_block.go`, #851) — but a
+     CTE reference's block is MATERIALIZED, so the rename lands on a Project
+     above it and every renamed reference resolves against the block's own
+     columns and reads NULL. Refused rather than answered wrong; the
+     definition's list, `WITH c(x, y) AS (…)`, is PostgreSQL's other spelling
+     and answers. Gated by
+     `coordinator.TestArcPSGrammarAnswersTheSameOnEveryArm`.
+
+   - **A BARE reference to a `JOIN … USING` join's MERGED column is 42702,
+     where PostgreSQL answers.** (Added 2026-09-18 by arc PS, #655.)
+
+     USING merges the joined column into one, so `SELECT id FROM a JOIN b
+     USING (id)` is not ambiguous in PostgreSQL. The merge is stated here for
+     the STAR — the parser records the USING list on the join and
+     `logical.usingJoinStarColumns` publishes the merged column once and first
+     — but a bare reference is resolved by the binder's scope in
+     `internal/planner/physical`, which reads the two arms' columns and sees
+     two `id`s. Qualifying the reference (`a.id`) answers. Loud, never a wrong
+     value.
+
+   - **A `BETWEEN` of any spelling inside a `JOIN … ON` clause is refused.**
+     (Added 2026-09-18 by arc PS, #655/#1154.)
+
+     `logical.splitOnAnd` splits a rendered ON clause into conjuncts on the
+     literal text `" AND "`, and `BETWEEN low AND high` carries one — so the
+     fragments do not parse and the physical planner refuses the clause. It is
+     PRE-EXISTING and identical for the plain spelling; `BETWEEN SYMMETRIC`
+     inherits it. The same predicate in a WHERE clause answers, and `IN (…)`
+     in the same position answers. Closing it means splitting the ON clause on
+     its AST — `physical.flattenJoinConjuncts` already does exactly that one
+     layer down — rather than on its text.
+
    - **`ORDER BY <name>` over two output columns of that name is answered,
      not refused.** (Added 2026-09-03, #557.) An output slot's identity is its
      POSITION: two output columns may share a NAME — PostgreSQL answers

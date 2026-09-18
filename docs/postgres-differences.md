@@ -312,9 +312,33 @@ A star without a known width cannot be renamed positionally: 0A000 where Postgre
 
 Unknown types/scales cause distributed refusal to avoid decimal reinterpretation; local execution and PostgreSQL can answer. (ADR-0012 §12/#551)
 
-**JOIN USING has output limitations.**
+**JOIN USING merges, but not for every shape.**
 
-Stars over USING, or USING after another join, raise 0A000: wadjet cannot merge columns as PostgreSQL does. (ADR-0012 §5/#810, #655)
+`SELECT *` over a `JOIN … USING` publishes the joined column once and first, as PostgreSQL does. It raises 0A000 where the merge cannot be stated by name: two arms sharing a column name outside the USING list, an arm publishing one name twice, or a chain of joins. (ADR-0012 §5/#810, #655)
+
+**A bare reference to a USING join's merged column is ambiguous here.**
+
+`SELECT id FROM a JOIN b USING (id)` raises 42702 where PostgreSQL answers, because USING merges the column and the reference is not ambiguous there. Qualify it (`a.id`). (ADR-0012 §5/#655)
+
+**NATURAL JOIN is refused.**
+
+It raises 0A000 where PostgreSQL answers: the keys are whatever columns the two sides share, which is a catalog question the parser cannot answer. Write the condition with ON or USING. (ADR-0012 §5/#655)
+
+**A column-alias list on a WITH-query REFERENCE is refused.**
+
+`FROM c z(x, y)` raises 0A000 where PostgreSQL answers; the rename would land above the query's own block and every renamed reference would read NULL. Put the list on the definition, `WITH c(x, y) AS (…)`. (ADR-0012 §5/#959)
+
+**A column-alias list that repeats a name is refused.**
+
+`FROM t a(k, k)` raises 42701 where PostgreSQL accepts the list and refuses only a reference to `k` (42702). This planner renames positionally and cannot publish one name for two columns; refusing the list is narrower than PostgreSQL, never a wrong value. (ADR-0012 §5/#959)
+
+**A BETWEEN inside a JOIN ON clause is refused.**
+
+`ON a.id = b.id AND a.id BETWEEN 2 AND 3` fails while building the physical plan where PostgreSQL answers: the planner splits an ON clause into conjuncts on the literal text `" AND "`, and BETWEEN carries one. The same predicate in a WHERE clause answers. (ADR-0012 §5/#655)
+
+**Integer XOR has no spelling.**
+
+PostgreSQL's `#` operator is not lexed: `5 # 3` is 42601 where PostgreSQL answers 6. `^` is exponentiation in both engines, not XOR. (ADR-0012 §5/#1155)
 
 **BYTEA, MONEY and INET type names are refused.**
 
