@@ -620,6 +620,18 @@ type TableRef struct {
 	ColumnAliases  []string          // AS alias(col1, col2, ...)
 	SampleMethod   string            // TABLESAMPLE method: BERNOULLI, SYSTEM
 	SamplePercent  string            // percentage for TABLESAMPLE
+	// ColumnAliasSource is the relation this derived body was LOWERED from,
+	// for the one rewrite that builds a derived table out of a named
+	// relation: `FROM t [AS] a (c1, …)` becomes `FROM (SELECT * FROM t) AS a
+	// (c1, …)`, which is what an alias clause with a column list means
+	// (lowerNamedRelationColumnAliases). Empty for a derived table the query
+	// actually wrote.
+	//
+	// The parser cannot tell a base table from a CTE REFERENCE — an enclosing
+	// block's WITH list is not in its scope — so it records the name and the
+	// logical builder, which has the CTE scope, decides. A CTE reference's
+	// column-alias list is refused there rather than answered wrong.
+	ColumnAliasSource string
 
 	// The DERIVED TABLE body, parsed at most once per reference. See
 	// sub_block.go: a nested block is parsed once so the binder and the

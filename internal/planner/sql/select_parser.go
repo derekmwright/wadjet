@@ -1168,6 +1168,7 @@ func lowerNamedRelationColumnAliases(tr *TableRef) {
 		body += " TABLESAMPLE " + tr.SampleMethod + "(" + tr.SamplePercent + ")"
 	}
 	tr.Name = "(" + body + ")"
+	tr.ColumnAliasSource = name
 	tr.Qualifier = ""
 	tr.SampleMethod = ""
 	tr.SamplePercent = ""

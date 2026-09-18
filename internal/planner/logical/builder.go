@@ -1581,7 +1581,12 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 					// preserved side changes which rows survive.
 					left = crossFold(idx)
 				}
-				items[idx] = NewJoin(left, right, join.Type, join.Condition)
+				jn := NewJoin(left, right, join.Type, join.Condition)
+				// The USING column list travels to the node, where the star
+				// expansion is the one pass that can state the MERGED output
+				// (Node.JoinUsing, #655).
+				jn.JoinUsing = append([]string(nil), join.Using...)
+				items[idx] = jn
 			}
 		}
 		for _, item := range items {
@@ -1769,6 +1774,30 @@ func resolveTableOrCTE(table *plansql.TableRef, ctes []plansql.CTEDef) (*Node, e
 			return renamed, nil
 		}
 	}
+	// A COLUMN-ALIAS LIST the parser lowered out of a NAMED relation, where
+	// the name turns out to be a CTE REFERENCE. Refused rather than answered:
+	// the rename would land on a Project above the CTE's materialized block
+	// and every renamed reference read NULL, for a statement PostgreSQL
+	// answers. The parser cannot make this call — an enclosing block's WITH
+	// list is not in its scope — and this is the layer that can (#959).
+	//
+	// The workaround is PostgreSQL's own other spelling and it works here:
+	// put the list on the DEFINITION, `WITH w(x, y) AS (…)`.
+	if table.ColumnAliasSource != "" && len(table.ColumnAliases) > 0 {
+		for i := range ctes {
+			if !strings.EqualFold(ctes[i].Name, table.ColumnAliasSource) {
+				continue
+			}
+			return nil, sqlerr.New("0A000",
+				"a column-alias list on a reference to WITH query %q is not supported: the "+
+					"rename would be applied above the query's own block, where a reference to "+
+					"a renamed name resolves against the block's own columns. Put the list on "+
+					"the WITH query itself — `WITH %s(%s) AS (…)`",
+				table.ColumnAliasSource, table.ColumnAliasSource,
+				strings.Join(table.ColumnAliases, ", "))
+		}
+	}
+
 	// Check for derived table (subquery in FROM): name starts with "("
 	if strings.HasPrefix(table.Name, "(") {
 		// The derived body, from the memo the binder validated.
