@@ -56,9 +56,12 @@ func TestArcPSAUsingMergedKeyOverAPolicedColumnOnEveryDoor(t *testing.T) {
 		// ---- the merged key IS the masked column --------------------------
 		//
 		// Over the BASE relation the two arms share every other column name
-		// too, so the merge declines and the statement is refused — that is
-		// the arc's own shared-tail-name bound, and it is asserted here so
-		// the refusal is on the record for a policed relation as well.
+		// too. That was this arc's own shared-tail-name bound and a refusal;
+		// arc SR removed it (#1177), so these ANSWER now — eleven published
+		// columns, ten of them from a policed arm — and the no-leak
+		// assertions below are what they are for. The cells stay: a shape
+		// that changes disposition is exactly the one a masking gate must
+		// keep watching.
 		{name: "inner_using_a_masked_key", sql: `SELECT * FROM e7emp x JOIN e7emp y USING (ssn)`},
 		{name: "full_using_a_masked_key", sql: `SELECT * FROM e7emp x FULL JOIN e7emp y USING (ssn)`},
 		// Over DERIVED arms that share the policed name and NOTHING else, the

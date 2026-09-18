@@ -487,8 +487,9 @@ func tmdTables() []tmdTable {
 		// be measured over. Rides along for the same reason as the fixtures
 		// above — only the arc-PS grammar gate names it, and no type-matrix
 		// corpus entry does. zzp/zzj cannot stand in for it: they share `d92`
-		// outside the USING list, and a star over such a pair binds one side
-		// for both (#706), which is a different defect wearing the same face.
+		// outside the USING list, so one cell over that pair measures the
+		// merge AND what a reference to the shared name binds at once, and a
+		// merge gate has to isolate the first.
 		{psaTable, psaSchema(), psaData()},
 		{psbTable, psbSchema(), psbData()},
 		{pscTable, pscSchema(), pscData()},

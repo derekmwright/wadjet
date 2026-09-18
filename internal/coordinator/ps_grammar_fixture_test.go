@@ -8,11 +8,16 @@ import "github.com/derekmwright/wadjet/internal/storage/parquet"
 // nothing else.
 //
 // That is the whole point of it. Every other two-relation fixture in this
-// package — zzp/zzj, lat_ord/lat_item — shares a second column name, and a
-// bare `*` over a join expands to QUALIFIED references, so a reference to a
-// name BOTH arms publish binds whichever side the plan put it on (#706's
-// standing family, visible with no USING clause at all). A USING merge
-// measured over such a pair cannot tell a right merge from a wrong binding.
+// package — zzp/zzj, lat_ord/lat_item — shares a second column name, so a
+// merge measured over one of those pairs is also measuring what a reference
+// to the SHARED name binds, and the two questions cannot be told apart in one
+// cell. This pair separates them.
+//
+// The stronger claim this comment used to make — that such a reference "binds
+// whichever side the plan put it on" (#706 read through a star) — is false at
+// 563aa517 and arc SR measured it out: over zzp/zzj, whose two `d92` columns
+// differ in VALUE and in SCALE, a bare star publishes each arm's own column
+// on all five arms, with `ON` and with `USING` (#1177).
 //
 // The rows are the ones arc PS measured against live PostgreSQL 17.11: one id
 // only on the left, one on both, one only on the right, so an INNER, LEFT,

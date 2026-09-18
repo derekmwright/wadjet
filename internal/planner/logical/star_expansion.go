@@ -286,6 +286,7 @@ func relationOutputColumns(n *Node, alias string) []StarColumn {
 			// carries one, and the query was refused where PostgreSQL answers
 			// it — `SELECT x.* FROM (SELECT order_id, product FROM lat_item
 			// ORDER BY product) x`.
+			//
 			if proj := blockOutputProjection(cur); proj != nil {
 				found = starColumnsWithout(projectionOutputNames(proj), hidden)
 				return
@@ -562,9 +563,9 @@ func RefuseUnmergedJoinUsingStar(n *Node) error {
 		return sqlerr.New("0A000",
 			"`SELECT *` over a JOIN ... USING is not supported for this shape: USING merges "+
 				"the joined column into ONE output column, and the arms' own column lists "+
-				"could not both be read here — a relation that publishes one name twice, or "+
-				"two arms that share a column name outside the USING list, or a chain of "+
-				"joins. Name the columns, or write the join condition with ON")
+				"could not both be read here — a relation that publishes one name twice, a "+
+				"chain of joins, or an arm whose own list is not knowable here. Name the "+
+				"columns, or write the join condition with ON")
 	}
 	for _, child := range n.Children {
 		if err := RefuseUnmergedJoinUsingStar(child); err != nil {

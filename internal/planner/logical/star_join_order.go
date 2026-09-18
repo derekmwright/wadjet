@@ -125,28 +125,29 @@ func usingJoinStarColumns(join *Node) ([]joinStarItem, bool) {
 		merged = append(merged, item)
 	}
 	items := merged
-	tail := map[string]bool{}
 	for _, arm := range []struct {
 		name string
 		cols []StarColumn
 	}{{leftName, leftCols}, {rightName, rightCols}} {
 		for _, c := range arm.cols {
-			lc := strings.ToLower(strings.TrimSpace(c.Resolve))
-			if using[lc] {
+			if using[strings.ToLower(strings.TrimSpace(c.Resolve))] {
 				continue
 			}
-			// A NON-USING COLUMN NAME THE TWO ARMS SHARE. Every item here is
-			// a QUALIFIED reference, and a reference to a name BOTH arms of a
-			// join publish binds one of them wherever the plan put it — the
-			// standing #706 family, which `SELECT * FROM zzp a JOIN zzj b ON
-			// a.id = b.id` already shows without any USING clause. The merge
-			// declines rather than publish the right NAMES over one side's
-			// VALUES: the star stays unexpanded and the statement is refused
-			// (0A000), which is the answer this spelling already had.
-			if tail[lc] {
-				return nil, true
-			}
-			tail[lc] = true
+			// A NON-USING COLUMN NAME THE TWO ARMS SHARE is published TWICE,
+			// which is PostgreSQL's answer, and each item is the QUALIFIED
+			// reference its own arm owns. This used to decline on the claim
+			// that such a reference "binds one of them wherever the plan put
+			// it" — the #706 family read through a star (#1177). Measured at
+			// 563aa517 over 43 shapes on five arms, it does not: the same
+			// pair spelled `zzp a JOIN zzj b ON a.id = b.id` answers
+			// PostgreSQL's values AND its two DECIMAL declarations on every
+			// arm, because the expansion emits `a.d92` and `b.d92` and
+			// ResolveColumnRef binds each exactly where the join qualified
+			// that side and through the qualifier strip where it qualified
+			// the other. The decline therefore refused (0A000) a statement
+			// PostgreSQL answers, over a premise its own ON spelling
+			// disproves. An arm that publishes one name TWICE is still
+			// declined above — there the reference cannot name its column.
 			items = append(items, joinStarItem{qualifier: arm.name, column: c})
 		}
 	}

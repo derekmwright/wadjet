@@ -32,13 +32,21 @@ import (
 //     merges it in the star expansion, which is the one layer that can read
 //     both arms' column lists (logical.usingJoinStarColumns): the USING
 //     columns once and first, then each arm's remaining columns. It declines
-//     where a reference by name would bind the wrong relation — two arms that
-//     share a column name outside the USING list, a relation publishing one
-//     name twice, a chain — and the plan is then refused rather than
+//     where a reference by name could not name its own column — a relation
+//     publishing one name twice, a chain of USING joins, an arm whose own
+//     list is not knowable here — and the plan is then refused rather than
 //     published unmerged. 0A000.
+//
+//     Arc SR removed one entry from that list: two arms that share a column
+//     name OUTSIDE the USING list are published twice now, which is
+//     PostgreSQL's answer. The decline's premise — that a qualified reference
+//     to such a name binds whichever arm the plan put it on — is false at
+//     563aa517 and the same pair spelled with `ON` proves it (#1177).
+//
 //   - NATURAL JOIN, whose keys ARE the shared columns and so need the catalog
 //     outright. Still refused; its class moves from 42601 to 0A000, because
 //     PostgreSQL answers it and a client is owed "not implemented here".
+//
 //   - A BARE reference to the merged column (`SELECT id FROM a JOIN b USING
 //     (id)`), which resolves through the binder's scope in
 //     internal/planner/physical rather than through the parsed join. 42702.
