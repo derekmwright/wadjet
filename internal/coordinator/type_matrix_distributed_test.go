@@ -473,9 +473,6 @@ func tmdTables() []tmdTable {
 		// stand in for it — its join shapes are all bare-column equalities, so
 		// nothing over it ever reaches an outer join's residual evaluator, and
 		// it has no EMPTY relation to be an empty build or probe side.
-		{jrProbeTable, jrSchema(), jrProbeData()},
-		{jrBuildTable, jrSchema(), jrBuildData()},
-		{jrEmptyTable, jrSchema(), nil},
 		{"a3b_rows", rowdecl.Schema(), rowdecl.Data()},
 		{"a3b_nullable_rows", parquet.Schema{Columns: []parquet.Column{
 			{Name: "id", Type: parquet.TypeInt64},
@@ -695,11 +692,23 @@ func tmdInfra(t *testing.T, ctx context.Context) tmdInfraT {
 // actually stored, so the rewrite may change the length.
 func tmdWriteTables(t *testing.T, ctx context.Context, infra tmdInfraT, rewrite func(*testing.T, []byte) []byte) {
 	t.Helper()
+	tmdWriteTableList(t, ctx, infra, rewrite, tmdTables())
+}
+
+// tmdWriteTableList is tmdWriteTables over a NAMED list rather than the whole
+// shared corpus. A gate stands its own fixture up through this one when the
+// fixture must NOT join the shared corpus — a budgeted arm over that corpus
+// already sits close to its budget, so a table added there changes what every
+// other budgeted gate has left (see n1SpillBudget's note).
+func tmdWriteTableList(t *testing.T, ctx context.Context, infra tmdInfraT,
+	rewrite func(*testing.T, []byte) []byte, tables []tmdTable,
+) {
+	t.Helper()
 	store, cat := infra.store, infra.cat
 	// Several files per table so the DAG really fans scans out across tasks —
 	// a single-file table hides a per-task defect by accident.
 	const chunks = 4
-	for _, tbl := range tmdTables() {
+	for _, tbl := range tables {
 		if err := cat.CreateTable(ctx, tbl.name, tbl.schema, nil); err != nil {
 			t.Fatalf("create %s: %v", tbl.name, err)
 		}

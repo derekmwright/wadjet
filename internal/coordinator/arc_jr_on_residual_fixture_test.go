@@ -2,7 +2,16 @@
 
 package coordinator
 
-import "github.com/derekmwright/wadjet/internal/storage/parquet"
+import (
+	"context"
+	"testing"
+
+	"github.com/derekmwright/wadjet/internal/storage/ingest"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/worker"
+	"github.com/derekmwright/wadjet/wadjet"
+)
 
 // THE ARC JR FIXTURE — an outer join's ON residual, on five arms.
 //
@@ -67,5 +76,81 @@ func jrBuildData() []map[string]any {
 		jrRow(104, int64(4), "zeta", int64(61)),
 		jrRow(105, int64(5), "omega", int64(70)),
 		jrRow(106, nil, nil, nil),
+	}
+}
+
+// jrTables is this arc's fixture, and it rides its OWN arms rather than the
+// shared type-matrix corpus. That is a measurement, not a preference: a
+// budgeted arm over the shared corpus already sits near its 512 KiB (the
+// outstanding forced bytes of its scans; see n1SpillBudget's note), so three
+// tables added there are three tables' worth of headroom taken away from every
+// other budgeted gate in this package. Measured — with these three in
+// tmdTables the nested-grouped-LATERAL cells of TestN1A* refused
+// `memory budget exceeded` in 2 of 2 full-package runs, a different cell each
+// time, and passed alone; with them out, the same package run is green.
+func jrTables() []tmdTable {
+	return []tmdTable{
+		{jrProbeTable, jrSchema(), jrProbeData()},
+		{jrBuildTable, jrSchema(), jrBuildData()},
+		{jrEmptyTable, jrSchema(), nil},
+	}
+}
+
+// jrStandalone is one embedded engine over the JR fixture alone, at the given
+// memory budget (0 = none).
+func jrStandalone(t *testing.T, ctx context.Context, budget int64) *wadjet.DB {
+	t.Helper()
+	cfg := wadjet.Config{Store: objstore.NewMemStore(), Bucket: "test"}
+	if budget > 0 {
+		cfg.MemoryBudget = budget
+		cfg.SpillDir = t.TempDir()
+	}
+	db, err := wadjet.Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("open standalone: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	for _, tbl := range jrTables() {
+		if err := db.CreateTable(ctx, tbl.name, tbl.schema, nil); err != nil {
+			t.Fatalf("create %s: %v", tbl.name, err)
+		}
+		if len(tbl.rows) == 0 {
+			continue
+		}
+		ing := db.NewIngester(tbl.name, tbl.schema, nil, ingest.Config{
+			MaxBufferRows: len(tbl.rows) + 1, RowGroupSize: 2,
+		})
+		if err := ing.Ingest(ctx, tbl.rows); err != nil {
+			t.Fatalf("ingest %s: %v", tbl.name, err)
+		}
+		if err := ing.FlushAll(ctx); err != nil {
+			t.Fatalf("flush %s: %v", tbl.name, err)
+		}
+	}
+	return db
+}
+
+// jrArms is c1Arms' five arms over the JR fixture alone.
+func jrArms(t *testing.T, ctx context.Context) []c1Arm {
+	t.Helper()
+	single := jrStandalone(t, ctx, 0)
+	spilled := jrStandalone(t, ctx, 512*1024)
+	stand := func(opts ...func(*Config)) *Coordinator {
+		infra := tmdInfra(t, ctx)
+		tmdWriteTableList(t, ctx, infra, nil, jrTables())
+		return tmdCoordinator(t, ctx, infra, opts...)
+	}
+	coord := stand()
+	coordB := stand(func(c *Config) { c.BroadcastBytesOverride = 1 })
+	infraM := tmdInfra(t, ctx)
+	tmdWriteTableList(t, ctx, infraM, nil, jrTables())
+	coordM := tmdCoordinatorWithWorkers(t, ctx, infraM,
+		func(w *worker.Config) { w.MorselWorkers = 4 })
+	return []c1Arm{
+		{"single", func(s string) (string, error) { return f1RenderSingle(ctx, single, s) }, nil},
+		{"spilled512k", func(s string) (string, error) { return f1RenderSingle(ctx, spilled, s) }, nil},
+		{"dag", func(s string) (string, error) { return f1RenderDAG(ctx, coord, s) }, coord},
+		{"dag-shuffled", func(s string) (string, error) { return f1RenderDAG(ctx, coordB, s) }, coordB},
+		{"dag-morsel4", func(s string) (string, error) { return f1RenderDAG(ctx, coordM, s) }, coordM},
 	}
 }
