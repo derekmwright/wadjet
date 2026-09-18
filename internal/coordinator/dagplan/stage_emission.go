@@ -1378,6 +1378,24 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// the scoping `SUM(x.w) OVER ()` over two arms both publishing
 			// `w` reached the worker as the bare `w` and summed the OTHER
 			// arm's column.
+			//
+			// THE ARGUMENT'S LADDER IS NOT THE KEYS' LADDER, AND THE
+			// DIFFERENCE IS DELIBERATE. The two loops above continue only on
+			// `scoped && src != ""` and otherwise FALL THROUGH to the unscoped
+			// source lookup and the materialization; this one STOPS as soon as
+			// the qualifier names an arm, whether or not that arm answered a
+			// source column. `scoped` with an empty `src` is a COMPUTED
+			// join-arm alias, and for an argument that is the case
+			// `WindowColSpec.InputRefs` exists to serve: the argument travels
+			// as the alias and `bindConsumersToPublishedIdentity` respells it
+			// against the stream the fragment will really see, at the END of
+			// planning (ADR-0026 §6, #770/#1028). A key cannot wait that long
+			// — a PARTITION BY key is also the stage's DISTRIBUTION, so
+			// EnsureDistribution has consumed it by then and the exchange and
+			// the operator would end up keyed on different columns — which is
+			// why the keys materialize here and the argument does not.
+			// Collapsing the two ladders would delete the argument's late
+			// carrier path (docs/design/window-key-ownership.md §(c)).
 			inputCol := ec.InputCol
 			if src, scoped := windowArgSourceInScope(inputCol, winChild); scoped {
 				if src != "" {

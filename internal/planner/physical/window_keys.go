@@ -136,28 +136,57 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 					}
 				}
 			case ref.Table != "":
-				// A QUALIFIED reference KEEPS its qualifier where the input's
-				// column set cannot settle it. Dropping to the bare name is
-				// safe only while one column answers to it, and over a JOIN —
-				// the input shape `inputColTypes` declines outright, so the
-				// bind below never even runs there — two arms routinely do:
-				// `PARTITION BY x.w` over arms that both publish `w` reached
-				// the operator as `w`, bound the OTHER arm's column, made
-				// every row its own partition and answered its own value
-				// where PostgreSQL answers the partition's total — on all
-				// four arms, in silence (#975).
+				// A QUALIFIED reference KEEPS the spelling the query wrote
+				// wherever more than one OCCURRENCE of the window's input
+				// publishes its bare name. The qualifier is how the query
+				// addresses the occurrence that produced the column, and a
+				// pass that drops it addresses less than the identity
+				// (docs/design/window-key-ownership.md, corollary 1).
 				//
-				// The qualified spelling is what a join PUBLISHES for a
-				// contested bare name (`joinOutputSchemaWithMapping` qualifies
-				// every duplicate by its owning alias), and it costs nothing
-				// where the name is not contested: `exec.columnIndexFallback`
-				// tries the exact spelling, then the bare part, then a unique
-				// `.bare` suffix, so `x.w` still finds a lone `w`.
-				if bound, ok := bindWindowColRef(ref, colTypes); ok {
-					k.Name = bound
-				} else if ref.Column != "" {
+				// Two shapes reach here and they used to take different
+				// mechanisms for the same written key:
+				//
+				//   - over two DERIVED arms `inputColTypes` answers nothing
+				//     (it has no NodeProject case), so `bindWindowColRef`
+				//     declines and the qualified spelling survived. That is
+				//     what #975 settled, and it is right.
+				//   - over two BASE-SCAN arms it answers a map MERGED from
+				//     both sides and keyed by the BARE name, so `o.id` is not
+				//     a key of it, the bare `id` is, and the bind returned
+				//     `id`. The arm was erased at plan time, after which the
+				//     runtime can only answer whichever occurrence the join
+				//     publishes bare — the PROBE, which is a cost decision.
+				//     `PARTITION BY o.id` over `lat_ord o JOIN lat_item i`
+				//     therefore put every row in its own partition and
+				//     answered 1 where PostgreSQL 17.11 answers 2, on all
+				//     five arms, in silence (#1028).
+				//
+				// `windowArgKeepsItsQualifier` is the test, and it is the one
+				// the window's own ARGUMENT has used since #742 round 4: the
+				// qualifier names an input relation AND more than one arm
+				// publishes the bare column. Keeping it costs nothing where
+				// the name is uncontested, because that is exactly where the
+				// bind below already answers the bare name.
+				//
+				// The carried spelling is then an ADDRESS rather than a
+				// guess: a join publishes the probe's columns bare and
+				// qualifies every duplicate build column by its owning alias
+				// (`joinOutputSchemaWithMapping`), so `exec.ColumnIndexFallback`
+				// hits `o.id` exactly when the join qualified o's side and
+				// hits through its qualifier strip when it qualified i's
+				// instead. It needs no model of which side built, which is
+				// what ADR-0026 §6a's sort-key rule already relies on.
+				switch {
+				case windowArgKeepsItsQualifier(term, child):
 					k.Name = plansql.NormalizeIdentRef(ref.Table) + "." +
 						plansql.NormalizeIdentRef(ref.Column)
+				default:
+					if bound, ok := bindWindowColRef(ref, colTypes); ok {
+						k.Name = bound
+					} else if ref.Column != "" {
+						k.Name = plansql.NormalizeIdentRef(ref.Table) + "." +
+							plansql.NormalizeIdentRef(ref.Column)
+					}
 				}
 			}
 		}

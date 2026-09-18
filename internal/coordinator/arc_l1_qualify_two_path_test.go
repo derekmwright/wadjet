@@ -25,18 +25,18 @@ import (
 // projection, whose bare names bind the INPUT relation first and a SELECT-list
 // alias second.
 //
-// Two cells are not row sets:
+// One cell is not a row set: `noWindow` is a REFUSAL both engines raise.
+// DuckDB's binder says "at least one window function must appear in the
+// SELECT column or QUALIFY clause"; wadjet says the same thing in its own
+// words, and the assertion is that it refuses rather than filtering, because
+// a QUALIFY no window reaches means something WHERE already means.
 //
-//   - `noWindow` is a REFUSAL both engines raise. DuckDB's binder says "at
-//     least one window function must appear in the SELECT column or QUALIFY
-//     clause"; wadjet says the same thing in its own words, and the assertion
-//     is that it refuses rather than filtering, because a QUALIFY no window
-//     reaches means something WHERE already means.
-//   - `overJoin` is a PIN, and it is not a QUALIFY defect:
-//     a window whose PARTITION BY names a join arm's column binds the other
-//     arm's column of that bare name, so the filter admits every row. Both
-//     reproduce with no QUALIFY in the query. See
-//     TestArcL1AWindowKeyBindsItsOwnJoinArm.
+// `overJoin` WAS a pin — a window whose PARTITION BY named a join arm's
+// column bound the other arm's column of that bare name, so the filter
+// admitted every row — and arc WK deleted it: a qualified key now carries the
+// occurrence the query named (docs/design/window-key-ownership.md). It was
+// never a QUALIFY defect and reproduced with no QUALIFY in the query; the
+// seam's own table is TestArcL1AWindowKeyBindsItsOwnJoinArm.
 
 type l1QCase struct{ name, sql string }
 
@@ -132,18 +132,6 @@ var l1QualifyPins = map[string]string{
 	// DuckDB keeps each order's smallest. The clause itself is right: the same
 	// QUALIFY over an UNBOUNDED body answers DuckDB's rows.
 	"boundAndOuterQualify": "rows=2 1,100 | 2,125",
-	// A window PARTITION BY naming a join arm's column binds the arm the
-	// reorderer emitted BARE, so every row lands in its own partition and
-	// `ROW_NUMBER() = 1` admits all four. It reproduces with no QUALIFY in
-	// the query, and the repair was measured back out —
-	// TestArcL1AWindowKeyBindsItsOwnJoinArm holds the seam and the two
-	// mechanisms that disagree with it.
-	// The LEFT spelling beside it is NOT pinned and answers DuckDB's rows:
-	// a LEFT join emits the probe arm's `id` bare, which is the arm the
-	// PARTITION BY names, so the bare-name bind lands on it by luck. That
-	// pair is the discriminator — the defect is which arm the name reaches,
-	// not the clause.
-	"overJoin": "rows=4 1,1 | 1,2 | 2,3 | 2,4",
 }
 
 func TestArcL1QualifyAnswersDuckDBOnEveryArm(t *testing.T) {

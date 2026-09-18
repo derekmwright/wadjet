@@ -8,57 +8,55 @@ import (
 	"time"
 )
 
-// A WINDOW KEY AND ITS JOIN ARM — #1028, on FIVE ARMS, with the repair that
-// was tried and MEASURED BACK OUT.
+// A WINDOW KEY AND ITS JOIN ARM — #1028, on FIVE ARMS. SETTLED by arc WK.
 //
-// `PARTITION BY o.id` over `lat_ord o JOIN lat_item i` reaches the operator as
-// the BARE `id`: `bindWindowColRef` falls back to the bare name when the
-// qualified spelling is not in the input's type map, and a map keyed by name
-// folds two arms' `id` into one entry. The join emits one arm's duplicate bare
-// and the other's qualified, so the key binds whichever arm the reorderer put
-// bare — every row lands in its own partition and the window answers 1 where
-// PostgreSQL 17.11 answers 2, on all five arms, in silence. `SUM(o.total) OVER
-// (PARTITION BY o.id)` and `ORDER BY o.id` are the same fact through the
-// window's other two positions. Seven cells below are PINNED on it.
+// `PARTITION BY o.id` over `lat_ord o JOIN lat_item i` used to reach the
+// operator as the BARE `id`: `bindWindowColRef` fell back to the bare name
+// when the qualified spelling was not in the input's type map, and that map
+// is MERGED from both arms and keyed by the bare name, so it folds two arms'
+// `id` into one entry. The join emits one arm's duplicate bare and the other's
+// qualified, so the key bound whichever arm the reorderer put bare — every row
+// landed in its own partition and the window answered 1 where PostgreSQL 17.11
+// answers 2, on all five arms, in silence. `SUM(o.total) OVER (PARTITION BY
+// o.id)` and `ORDER BY o.id` were the same fact through the window's other two
+// positions. Seven cells below were PINNED on it and the pins are DELETED.
 //
-// **The repair was written, measured and taken out, and that measurement is
-// the finding.** `PARTITION BY o.id + 0` — one character away, and an
-// EXPRESSION, so it is MATERIALIZED into a slot the projection below the
-// window computes — is right, which says the loss is in the NAME. Routing a
-// qualified reference the input cannot settle down that same route fixes these
-// seven cells and breaks three gates that were green, and THAT is the whole of
-// the deferral's reason:
+// **What the three prior repairs got wrong, and why this one holds.** They
+// routed a qualified reference the input cannot settle down the MATERIALIZATION
+// route — `PARTITION BY o.id + 0` is one character away, is an EXPRESSION, is
+// computed into a slot, and is right — which fixed these seven cells and broke
+// three gates that were green:
 //
 //   - `coordinator.TestArcK1AWindowPartitionKeyBindsItsOwnArm` (#975): over two
 //     DERIVED arms that both publish `w`, `PARTITION BY x.w` is right as a
 //     NAME — the join qualifies the build arm's copy by the alias the query
-//     wrote — and MATERIALIZING it answers each row its own partition. The
-//     base-table and derived-table resolutions are DIFFERENT mechanisms, and
-//     narrowing the route to a base-scan arm still left
-//     `TestADerivedTablesComputedAliasIsNotASortOrWindowKeyOnTheDAG` (#658)
-//     and `TestJ2AJoinConsumerBindsThePublishedIdentity` (#770) failing.
+//     wrote — and MATERIALIZING it answers each row its own partition;
+//   - `TestADerivedTablesComputedAliasIsNotASortOrWindowKeyOnTheDAG` (#658)
+//     and `TestJ2AJoinConsumerBindsThePublishedIdentity` (#770) failed even
+//     after the route was narrowed to a BASE-SCAN arm.
 //
-// An earlier version of this header added a second reason — that materializing
-// an ORDER BY term INVERTS the window's direction, "a prerequisite either way"
-// — and it is FALSE. Measured two ways by the round-2 review and re-measured
-// here: `ORDER BY i.amount + 0 DESC` over the same join, an EXPRESSION and so
+// The seam was one question — which occurrence owns a window key — answered by
+// three mechanisms that disagreed: the bare-name bind, the qualified name #975
+// settled for derived arms, and the materialized slot. Arc WK closes it with
+// ONE resolution rather than a fourth beside them, and it is not the
+// materialization route: the key KEEPS the spelling the query wrote wherever
+// the bare name is contested, which is the rule the window's own ARGUMENT has
+// followed since #742 round 4 (`physical.windowArgKeepsItsQualifier`). The
+// three gates above stay green because nothing is recomputed.
+//
+// An earlier version of the deferral added a second reason — that
+// materializing an ORDER BY term INVERTS the window's direction, "a
+// prerequisite either way" — and it is FALSE, measured two ways:
+// `ORDER BY i.amount + 0 DESC` over the same join, an EXPRESSION and so
 // already on the materialization route, answers PostgreSQL's DESCENDING
 // numbering on all five arms (`orderDescExprOverJoin`, with its
-// single-relation control), and re-applying the repair verbatim makes
-// `orderDescOverJoin` and `orderAscOverJoin` ANSWER PostgreSQL rather than
-// invert. Those two are pinned on the SAME bare-name bind as the rest of the
-// seven, and the two expression cells are here so the claim cannot drift back.
-//
-// So the seam is one question — which arm owns a window key — answered today
-// by three mechanisms that disagree (the bare-name bind, the qualified name
-// arc K1 settled for derived arms, and the materialized slot), and closing it
-// is one resolution for all three, not a fourth. Pinned here, with
-// PostgreSQL's answer beside every cell.
+// single-relation control). Those two cells stay so the claim cannot drift
+// back.
 //
 // #1028 was filed for the DERIVED-ALIAS spelling — a window argument naming a
 // computed alias published by one ARM — and that family answers on all five
-// arms at this arc's base (`derivedAlias*` below); it is gated here because an
-// unreproduced issue with no gate is one nobody re-checks.
+// arms (`derivedAlias*` below); it is gated here because an unreproduced issue
+// with no gate is one nobody re-checks.
 //
 // `windowUnderGroupKeySubset` is a third shape and a different mechanism: a
 // window partitioned on a SUBSET of the GROUP BY keys below it was REFUSED on
@@ -127,18 +125,18 @@ func TestArcL1AWindowKeyBindsItsOwnJoinArm(t *testing.T) {
 	}
 }
 
-// l1WindowKeyPins are the seven cells a window key's bare-name bind gets
-// wrong, with the mechanism in the header above. A pin that starts agreeing
-// FAILS.
-var l1WindowKeyPins = map[string]string{
-	"partOuterArm":      "rows=4 1,1,1 | 1,2,1 | 2,3,1 | 2,4,1",
-	"partArmsSwapped":   "rows=4 1,1,1 | 1,2,1 | 2,3,1 | 2,4,1",
-	"argOverArm":        "rows=4 1,1,150 | 1,2,150 | 2,3,200 | 2,4,200",
-	"orderOverArm":      "rows=4 1,1,1 | 1,2,2 | 2,3,3 | 2,4,4",
-	"threeWay":          "rows=8 1,2 | 1,2 | 1,2 | 1,2 | 2,2 | 2,2 | 2,2 | 2,2",
-	"orderDescOverJoin": "rows=4 1,1,1 | 1,2,1 | 2,3,1 | 2,4,1",
-	"orderAscOverJoin":  "rows=4 1,1,1 | 1,2,1 | 2,3,1 | 2,4,1",
-}
+// l1WindowKeyPins is EMPTY, and that is arc WK's proof.
+//
+// It held the seven cells a window key's bare-name bind got wrong on all five
+// arms. `physical.resolveWindowKeys` now keeps the spelling the query wrote
+// wherever more than one occurrence of the window's input publishes the bare
+// name, so `PARTITION BY o.id` addresses o and not the arm the reorderer put
+// bare (docs/design/window-key-ownership.md, corollary 1; ADR-0026 §8j).
+// Reverting that branch fails every cell below that names a contested column.
+//
+// The map stays declared so the gate's pin arm keeps its fixture: a cell added
+// here later is a divergence, and a pin that starts agreeing still FAILS.
+var l1WindowKeyPins = map[string]string{}
 
 var l1WindowKeyPostgres = map[string]string{
 	"orderDescExprOverJoin":     "rows=4 1,4 | 2,2 | 3,3 | 4,1",
