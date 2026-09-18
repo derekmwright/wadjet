@@ -27,10 +27,15 @@ import (
 //     an unaliased expression `sum(a) over (...) + 1` against that path's
 //     `sum(a) OVER (...) + 1`.
 //
-// `pgName` records PostgreSQL 17.11's own names, measured live. Where wadjet
-// diverges it is #732 — PostgreSQL names an unaliased expression `?column?`
-// and an unaliased CAST after its argument — a naming RULE and a product
-// decision; what this gate holds is that the two wadjet paths agree, which is
+// `pgName` records PostgreSQL 17.11's own names, measured live, and since arc
+// SR (#1079) every cell's `want` IS its `pgName`: a set operation publishes
+// the PUBLISHED half of its leftmost arm's names as well as their order, so an
+// unaliased expression is `?column?` and an unaliased CAST takes its
+// argument's name, on both engines. The three cells that recorded the old
+// divergence — an unaliased window arithmetic, an unaliased CAST and an
+// unaliased addition — assert PostgreSQL's names now; that they used to differ
+// is what made them the discriminating cells. What this gate also holds, and
+// held before, is that the two wadjet paths agree with EACH OTHER, which is
 // what a client keying a result set by column name depends on.
 type setOpNameCell struct {
 	issue, name, sql string
@@ -67,7 +72,7 @@ func setOpNameCells() []setOpNameCell {
 			want: []string{"MyId", "a"}, pgName: []string{"MyId", "a"}},
 		{issue: "#731", name: "unaliased_expression_keeps_its_spelling",
 			sql:  `SELECT id, SUM(a) OVER () + 1 FROM decpair UNION ALL SELECT id, a FROM decpair`,
-			want: []string{"id", "sum(a) OVER (...) + 1"}, pgName: []string{"id", "?column?"}},
+			want: []string{"id", "?column?"}, pgName: []string{"id", "?column?"}},
 		// The controls that already agreed and must keep agreeing: an alias, a
 		// bare reference, a star, an unaliased window, an unaliased cast, an
 		// unaliased arithmetic expression, and a NESTED set operation, whose
@@ -83,10 +88,10 @@ func setOpNameCells() []setOpNameCell {
 			want: []string{"id", "sum"}, pgName: []string{"id", "sum"}},
 		{issue: "#743", name: "ctl_unaliased_cast",
 			sql:  `SELECT CAST(id AS BIGINT), a FROM decpair UNION ALL SELECT id, a FROM decpair`,
-			want: []string{"cast(id as bigint)", "a"}, pgName: []string{"id", "a"}},
+			want: []string{"id", "a"}, pgName: []string{"id", "a"}},
 		{issue: "#743", name: "ctl_unaliased_arithmetic",
 			sql:  `SELECT id + 1, a FROM decpair UNION ALL SELECT id, a FROM decpair`,
-			want: []string{"id + 1", "a"}, pgName: []string{"?column?", "a"}},
+			want: []string{"?column?", "a"}, pgName: []string{"?column?", "a"}},
 		{issue: "#743", name: "ctl_union_chain_takes_the_leftmost_arms_names",
 			sql: `SELECT x.id AS q FROM decpair x UNION ALL SELECT id FROM decpair ` +
 				`UNION ALL SELECT id FROM decpair`,

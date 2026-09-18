@@ -54,6 +54,10 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 	for _, tc := range []struct {
 		name, sql, want string
 		budgeted        bool
+		// wantErrLike, when non-empty, is a substring of the refusal this
+		// shape must carry on EVERY arm. A cell that answers instead fails,
+		// which is how the entry gets deleted if the disposition moves again.
+		wantErrLike string
 		// routes, when non-empty, is the local-route counter this shape MUST
 		// move on both DAG arms. Rows alone cannot tell an executed query from
 		// a refused-and-routed one.
@@ -227,22 +231,18 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 				`SELECT t.g, COUNT(*) AS c FROM typemx t WHERE t.g = d.k ` +
 				`GROUP BY t.g) s ON true ORDER BY d.k`,
 			want: `k,g,c | 0,0,660 | 1,1,660 | 2,2,659 | 3,3,659 | 4,4,659 | 5,5,659 | 6,6,660`},
-		// RECORDED, NOT CLOSED: the key under its OWN name BESIDE an
-		// aggregate of that name. The lateral publishes two columns called
-		// `g` and PostgreSQL refuses the outer `s.g` as ambiguous (42702);
-		// this engine answers one of them, which is a superset either way.
-		//
-		// WHICH one moved in round 2: the collision now takes the full mint,
-		// so the key leaves under the slot and the only `g` the projection
-		// publishes is the AGGREGATE's. It was the KEY before. Both are
-		// divergences from a refusal and this one is the more useful reading
-		// — `MAX(t.id) AS g` is what the query wrote `g` for — but it is
-		// recorded as a MOVE rather than presented as a fix.
-		{name: "956/pinned-ambiguous-own-name-answers-the-aggregate", budgeted: true,
+		// CLOSED, and the pin is deleted (arc SR, #1094). The key under its
+		// OWN name BESIDE an aggregate of that name: the lateral publishes
+		// two columns called `g`, PostgreSQL 17.11 refuses the outer `s.g`
+		// with 42702 (measured), and this engine used to answer one of them —
+		// which one being a property of the mint rather than of the query.
+		// A reference into a relation that publishes one name twice names
+		// neither column, and it is refused now, on every arm.
+		{name: "956/ambiguous-own-name-is-refused", budgeted: true,
 			sql: `SELECT d.k AS k, s.g AS g FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT t.g, MAX(t.id) AS g FROM typemx t WHERE t.g = d.k ` +
 				`GROUP BY t.g) s ON true ORDER BY d.k`,
-			want: `k,g | 0,4998 | 1,4999 | 2,4993 | 3,4994 | 4,4995 | 5,4996 | 6,4997`},
+			wantErrLike: `column reference "g" is ambiguous`},
 		{name: "767/ctl-aliased-key-H1-s-published-name-path", budgeted: true,
 			sql: `SELECT d.k AS k, s.gg AS gg, s.c AS c FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT t.g AS gg, COUNT(*) AS c FROM typemx t WHERE t.g = d.k GROUP BY t.g) s ` +
@@ -268,8 +268,20 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 						strings.Contains(err.Error(), "memory budget exceeded") {
 						continue
 					}
+					if tc.wantErrLike != "" {
+						if !strings.Contains(err.Error(), tc.wantErrLike) {
+							t.Fatalf("%s arm: refused with %v\n  want a refusal naming %q\n  SQL: %s",
+								arm.name, err, tc.wantErrLike, tc.sql)
+						}
+						continue
+					}
 					t.Fatalf("%s arm: %v\n  want %s (live PostgreSQL 17)\n  SQL: %s",
 						arm.name, err, tc.want, tc.sql)
+				}
+				if tc.wantErrLike != "" {
+					t.Fatalf("%s arm: ANSWERED %s\n  want a refusal naming %q, which is "+
+						"PostgreSQL 17.11's own answer\n  SQL: %s",
+						arm.name, e3Render(cols, rows), tc.wantErrLike, tc.sql)
 				}
 				if got := e3Render(cols, rows); got != tc.want {
 					t.Fatalf("%s arm: %s\n  want %s (live PostgreSQL 17)\n  SQL: %s",

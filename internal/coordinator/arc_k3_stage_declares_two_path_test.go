@@ -50,6 +50,10 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 
 	for _, tc := range []struct {
 		name, sql, want, wantDAG string
+		// wantErrLike, when non-empty, is a substring of the refusal this
+		// shape must carry on EVERY arm. A cell that answers instead fails,
+		// which is how the entry gets deleted if the disposition moves again.
+		wantErrLike string
 		// wantRouted says the DISTRIBUTED arms answer by handing the query to
 		// the coordinator-local pipeline rather than by running the DAG. It is
 		// asserted on EVERY cell, in both directions, because the ROWS cannot
@@ -433,13 +437,17 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 				`ON s.order_id = o.id ORDER BY o.id, s.order_id`,
 			want: `id,customer,total,order_id,c | 1,Alice,150,1,NULL | 1,Alice,150,1,NULL | ` +
 				`2,Bob,200,2,NULL | 2,Bob,200,2,NULL`},
-		// SILENT WRONG at bb8635a4 (`order_id,amount` — both aliases lost).
-		// It EXECUTES distributed, which round 1's docs denied.
-		{name: "boundary/one-name-published-twice-executes",
+		// SILENT WRONG at bb8635a4 (`order_id,amount` — both aliases lost),
+		// then EXECUTING, and REFUSED since arc SR (#1094). The block
+		// publishes `k` TWICE and the join's own `ON s.k = o.id` names
+		// neither of them; PostgreSQL 17.11 raises 42702 for exactly this
+		// statement (measured). A reference into a relation that publishes
+		// one name twice is ambiguous, and which column answered used to be a
+		// property of the block's item order.
+		{name: "boundary/one-name-published-twice-is-refused",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id AS k, amount AS k ` +
 				`FROM lat_item) s ON s.k = o.id ORDER BY o.id`,
-			want: `k,k,id,customer,total | 1,50,1,Alice,150 | 1,100,1,Alice,150 | ` +
-				`2,75,2,Bob,200 | 2,125,2,Bob,200`},
+			wantErrLike: `column reference "k" is ambiguous`},
 
 		// AN EMPTY DERIVED BUILD IS SHAPED BY WHAT THE BLOCK PUBLISHES. A
 		// LEFT join over a derived side that matches NOTHING has no batch to
@@ -509,7 +517,19 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 					}
 				}
 				if err != nil {
+					if tc.wantErrLike != "" {
+						if !strings.Contains(err.Error(), tc.wantErrLike) {
+							t.Fatalf("%s arm: refused with %v\n  want a refusal naming %q\n  SQL: %s",
+								arm.name, err, tc.wantErrLike, tc.sql)
+						}
+						return
+					}
 					t.Fatalf("%s arm: %v\n  want %s\n  SQL: %s", arm.name, err, tc.want, tc.sql)
+				}
+				if tc.wantErrLike != "" {
+					t.Fatalf("%s arm: ANSWERED %s\n  want a refusal naming %q, which is "+
+						"PostgreSQL 17.11's own answer\n  SQL: %s",
+						arm.name, e3Render(cols, rows), tc.wantErrLike, tc.sql)
 				}
 				got := e3Render(cols, rows)
 				want := tc.want

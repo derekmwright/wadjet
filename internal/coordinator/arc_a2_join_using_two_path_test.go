@@ -145,23 +145,33 @@ func a2JoinCells() []a2JoinCell {
 
 		// ---- the shapes still refused, with their classes -----------------
 		//
-		// `SELECT *` over a USING join MERGES now (arc PS, #655): the USING
+		// `SELECT *` over a USING join MERGES (arc PS, #655): the USING
 		// columns once and first, then each arm's remaining columns. This
-		// fixture is the one shape the merge declines — zzp and zzj BOTH
-		// publish `d92` outside the USING list, and every expanded item is a
-		// qualified reference, so a reference to a name both arms publish
-		// binds whichever side the plan put it on (the standing #706 family,
-		// which `SELECT * FROM zzp a JOIN zzj b ON a.id = b.id` shows with no
-		// USING clause at all). The refusal is what keeps the right NAMES
-		// from being published over one side's VALUES.
+		// fixture used to be the one shape the merge declined — zzp and zzj
+		// BOTH publish `d92` outside the USING list, and the decline rested
+		// on the claim that a qualified reference to a name both arms publish
+		// "binds whichever side the plan put it on" (the #706 family read
+		// through a star, #1177). Arc SR measured that claim out: the same
+		// pair spelled with `ON` answers PostgreSQL's values and BOTH of its
+		// DECIMAL declarations on five arms, so the decline refused a
+		// statement PostgreSQL answers. The tail is published twice now.
+		//
+		// zzp and zzj are the discriminating pair for it — `d92` is
+		// DECIMAL(9,2) on one side and DECIMAL(18,4) on the other, with
+		// values that differ per row — so a reference bound to the wrong arm
+		// renders differently. That is also why `na2Run` had to start reading
+		// RowValues: keyed by NAME, both `d92` cells rendered as the LAST
+		// one and the cell compared two copies of one value.
 		// coordinator.TestArcPSJoinUsingStarMergesOnEveryArm carries the
-		// merge itself, over two relations whose other columns differ.
-		{issue: "#655", name: "boundary_star_over_using_with_a_shared_tail_name",
-			sql:         `SELECT * FROM zzp JOIN zzj USING (id) ORDER BY id`,
-			wantErrLike: "`SELECT *` over a JOIN ... USING is not supported for this shape",
-			wantState:   "0A000",
-			pgSays: "PostgreSQL ANSWERS: 3 rows, THREE columns (id, zzp.d92, zzj.d92) — " +
-				"refused here because the two arms share `d92`"},
+		// merge over two relations whose other columns differ.
+		{issue: "#655", name: "star_over_using_publishes_a_shared_tail_name_twice",
+			sql: `SELECT * FROM zzp JOIN zzj USING (id) ORDER BY id`,
+			want: []string{
+				`id=int64:1|d92=-3.50|d92=1.1111`,
+				`id=int64:2|d92=0.00|d92=12345678.1234`,
+				`id=int64:3|d92=12.75|d92=3.3333`,
+			},
+			pgSays: "PostgreSQL ANSWERS: 3 rows, THREE columns (id, zzp.d92, zzj.d92)"},
 		// ANSWERS NOW. A chain whose earlier join on the same FROM item is
 		// itself an inner `JOIN … USING` naming the same column resolves
 		// against that clause's MERGED column, which is the left arm's — so

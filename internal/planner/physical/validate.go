@@ -98,14 +98,21 @@ type colScope struct {
 	cols       map[string]bool
 	quals      map[string]map[string]bool
 	srcCount   map[string]int
-	// qualCount is srcCount one relation in: how many columns ONE FROM
-	// source publishes under each name. A relation may legally publish two
-	// columns of one name — `(SELECT a.id, b.id FROM t a JOIN t b ON …) x`
-	// is a legal relation and a star over it answers both BY POSITION — but a
-	// REFERENCE into it names neither, and PostgreSQL 17.11 raises 42702 for
-	// `SELECT x.id` over exactly that block (measured). srcCount cannot say
-	// it: it counts SOURCES, and this is one source counted twice.
-	qualCount map[string]map[string]int
+	// dupQualified records, per qualifier, the names ONE FROM source
+	// publishes TWICE. A relation may legally publish two columns of one name
+	// — `(SELECT a.id, b.id FROM t a JOIN t b ON …) x` is a legal relation and
+	// a star over it answers both BY POSITION — but a REFERENCE into it names
+	// neither, and PostgreSQL 17.11 raises 42702 for `SELECT x.id` over
+	// exactly that block (measured).
+	//
+	// srcCount cannot say it: it counts SOURCES, and this is one source
+	// counted twice. Nor can a per-(qualifier, column) COUNT, because `quals`
+	// is keyed on the FOLDED qualifier and two DIFFERENT relations may fold to
+	// one key — `FROM clt1 t, clt2 "T"` is two sources under `t`, and counting
+	// their columns together refused `t.c1`, which PostgreSQL answers
+	// (measured; `TestCollidingBareNamesOnEveryArm`). So the duplicate is
+	// decided WITHIN one source's own list and only the verdict is recorded.
+	dupQualified map[string]map[string]bool
 	// colTypes / qualColTypes record the declared parquet.TypeID of the
 	// columns a BASE TABLE provides, for the plan-time literal refusal
 	// (validate_literal.go). A bare name two sources declare with DIFFERENT
@@ -166,8 +173,8 @@ func (s *colScope) providesBareColumn(name string) bool {
 
 func newColScope() *colScope {
 	return &colScope{cols: map[string]bool{}, quals: map[string]map[string]bool{}, srcCount: map[string]int{},
-		qualCount: map[string]map[string]int{},
-		colTypes:  map[string]parquet.TypeID{}, qualColTypes: map[string]map[string]parquet.TypeID{},
+		dupQualified: map[string]map[string]bool{},
+		colTypes:     map[string]parquet.TypeID{}, qualColTypes: map[string]map[string]parquet.TypeID{},
 		rowFields: map[string][]parquet.Column{}, exact: map[string]bool{},
 		exactQuals: map[string]bool{}}
 }
@@ -206,10 +213,29 @@ func (s *colScope) addQualified(qual, col string) {
 		s.quals[q] = map[string]bool{}
 	}
 	s.quals[q][c] = true
-	if s.qualCount[q] == nil {
-		s.qualCount[q] = map[string]int{}
+}
+
+// noteSourceDuplicates records the names ONE FROM source publishes twice, from
+// that source's own list. It is called once per source, after its columns are
+// registered, and it is the only thing that can decide the question: the
+// scope's maps are keyed on the FOLDED qualifier and two relations may share
+// one key.
+func (s *colScope) noteSourceDuplicates(qual string, names []string) {
+	if s == nil || qual == "" {
+		return
 	}
-	s.qualCount[q][c]++
+	q := strings.ToLower(qual)
+	seen := make(map[string]bool, len(names))
+	for _, n := range names {
+		c := strings.ToLower(n)
+		if seen[c] {
+			if s.dupQualified[q] == nil {
+				s.dupQualified[q] = map[string]bool{}
+			}
+			s.dupQualified[q][c] = true
+		}
+		seen[c] = true
+	}
 }
 
 // addQualifiedTyped is addQualified for a source whose column TYPES are known
@@ -331,12 +357,12 @@ func (s *colScope) clone() *colScope {
 	for col, n := range s.srcCount {
 		c.srcCount[col] = n
 	}
-	for q, cs := range s.qualCount {
-		if c.qualCount[q] == nil {
-			c.qualCount[q] = map[string]int{}
+	for q, cs := range s.dupQualified {
+		if c.dupQualified[q] == nil {
+			c.dupQualified[q] = map[string]bool{}
 		}
-		for col, n := range cs {
-			c.qualCount[q][col] = n
+		for col := range cs {
+			c.dupQualified[q][col] = true
 		}
 	}
 	c.outerDiag = s.outerDiag
@@ -394,7 +420,7 @@ func (s *colScope) resolveRef(ref *plansql.ColRef) error {
 				// the other half of §9's duplicate-published-name rule: the
 				// qualified STAR over such a block already declines rather
 				// than bind the first twice (arc O2, c8d94fe3).
-				if s.qualCount[q][col] > 1 {
+				if s.dupQualified[q][col] {
 					return sqlerr.New("42702", "column reference %q is ambiguous", ref.Column)
 				}
 				return s.refuseDelimitedMiss(ref)
@@ -890,6 +916,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 				into.addFieldDecl(qual, n, ds[i])
 			}
 		}
+		into.noteSourceDuplicates(qual, names)
 		return nil
 	}
 
@@ -905,6 +932,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 				into.addFieldDecl(qual, n, e.decls[i])
 			}
 		}
+		into.noteSourceDuplicates(qual, e.cols)
 		return nil
 	}
 

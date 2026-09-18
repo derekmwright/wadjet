@@ -1100,10 +1100,20 @@ func na2Run(res *oracle.Result, err error) ([]string, error) {
 		return nil, err
 	}
 	out := make([]string, 0, len(res.Rows))
-	for _, r := range res.Rows {
+	for i, r := range res.Rows {
 		parts := make([]string, 0, len(res.Columns))
-		for _, c := range res.Columns {
+		for ci, c := range res.Columns {
+			// POSITIONALLY where the names repeat. A result may legally carry
+			// two columns of one name, and `r[c]` then answers the LAST of
+			// them for both — so a shape whose whole subject is a duplicate
+			// name rendered as two copies of one cell and compared equal to
+			// itself. `Result.RowValues` is non-nil exactly then (its own doc
+			// records the ClickBench Q30 case), and every caller that
+			// transports values has to consult it first.
 			v := r[c]
+			if res.RowValues != nil && i < len(res.RowValues) && ci < len(res.RowValues[i]) {
+				v = res.RowValues[i][ci]
+			}
 			switch t := v.(type) {
 			case nil:
 				parts = append(parts, c+"=NULL")

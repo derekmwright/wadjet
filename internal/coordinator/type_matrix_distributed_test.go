@@ -250,7 +250,13 @@ func tmdRunSingle(ctx context.Context, db *wadjet.DB, sql string) (res *oracle.R
 	if qerr != nil {
 		return nil, qerr
 	}
-	return &oracle.Result{Columns: out.Columns, Rows: out.Rows}, nil
+	// RowValues travels, because a result may legally carry two columns of
+	// one name and the map cannot hold both: without it every renderer built
+	// on this harness reads the LAST of the two for BOTH positions, and a
+	// shape whose whole subject is a duplicate name compares two copies of
+	// one cell and agrees with itself (oracle.Result.RowValues' own doc, and
+	// `SELECT * FROM zzp JOIN zzj USING (id)` since arc SR).
+	return &oracle.Result{Columns: out.Columns, Rows: out.Rows, RowValues: out.RowValues}, nil
 }
 
 func tmdRunDAG(ctx context.Context, coord *Coordinator, sql string) (res *oracle.Result, err error) {
@@ -266,11 +272,36 @@ func tmdRunDAG(ctx context.Context, coord *Coordinator, sql string) (res *oracle
 	if out.Error != "" {
 		return nil, fmt.Errorf("%s", out.Error)
 	}
-	rows, rerr := out.Rows()
-	if rerr != nil {
-		return nil, fmt.Errorf("materializing distributed rows: %w", rerr)
+	// BOTH renderings, off ONE pass of the stream — a result stream is
+	// single-pass, so `Rows()` cannot be called beside it. The positional
+	// half is what tmdRunSingle's comment records: a duplicate output name is
+	// ordinary and a name-keyed row loses one of the two.
+	var rows []map[string]any
+	var cells [][]any
+	st := out.Stream()
+	if st == nil {
+		var rerr error
+		if rows, rerr = out.Rows(); rerr != nil {
+			return nil, fmt.Errorf("materializing distributed rows: %w", rerr)
+		}
+		return &oracle.Result{Columns: out.Columns, Rows: rows}, nil
 	}
-	return &oracle.Result{Columns: out.Columns, Rows: rows}, nil
+	defer st.Close()
+	for {
+		bb, berr := st.Next(ctx)
+		if berr != nil {
+			return nil, fmt.Errorf("materializing distributed rows: %w", berr)
+		}
+		if bb == nil {
+			break
+		}
+		rows = append(rows, bb.ToRows()...)
+		cells = append(cells, bb.ToRowValues()...)
+	}
+	if len(cells) != len(rows) {
+		cells = nil
+	}
+	return &oracle.Result{Columns: out.Columns, Rows: rows, RowValues: cells}, nil
 }
 
 // tmdStandalone is arm A: the embedded single-process engine over the same
