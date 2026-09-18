@@ -310,6 +310,30 @@ type Node struct {
 	// star is what makes the slot unreachable rather than usually-hidden
 	// (ADR-0026 §3c). Empty on every other join.
 	HiddenJoinCols []string
+	// JoinUsing, on a JOIN node, is the column list of the `JOIN … USING (a,
+	// b)` this node was built from, lower-cased, in the order written; empty
+	// on every other join.
+	//
+	// USING is the ONE place where "the arms concatenated" is not what a bare
+	// `SELECT *` publishes: the joined column appears ONCE, FIRST, unqualified
+	// — three output columns for two two-column tables where an ON join emits
+	// four. The parser desugars the CONDITION to `<left>.c = <right>.c`, which
+	// is all a predicate needs and needs no catalog; the OUTPUT half needs the
+	// arms' column lists, which is what the star expansion has (ADR-0026 §9).
+	// A star over a join carrying this list that the expansion cannot state is
+	// left unexpanded and refused, never published unmerged (#655).
+	JoinUsing []string
+	// UnmergedJoinUsingStar marks a Project whose bare `*` sits over a
+	// `JOIN … USING` the expansion could NOT state the merged output of.
+	//
+	// The marker exists because `ExpandStarProjections` cannot return an
+	// error and an unexpanded join star does NOT refuse on its own — it
+	// publishes the join operator's stream, which for a USING join is the
+	// UNMERGED list and therefore a column the statement does not have.
+	// `RefuseUnmergedJoinUsingStar` turns the marker into that refusal at
+	// both planner entries, the way `RefuseUnappliedColumnAliasLists` does
+	// for a column-alias list the same pass could not apply.
+	UnmergedJoinUsingStar bool
 	// StarLiftedRefCols, on a JOIN node, names slots the LATERAL lowering
 	// materialized so a LIFTED correlated predicate could be evaluated — and
 	// which a STAR must not publish, but which the join must still EMIT.

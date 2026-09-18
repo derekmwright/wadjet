@@ -95,6 +95,13 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		p.Ctes = node.CTEs
 	}
 
+	// A bare `*` over a `JOIN … USING` whose merged output the star expansion
+	// could not state, refused BEFORE the general unexpanded-star sentence
+	// for the reason that one is raised before the ordinal one: USING is the
+	// reason and the unexpanded star is its consequence (#655).
+	if err := logical.RefuseUnmergedJoinUsingStar(node); err != nil {
+		return nil, err
+	}
 	// A star that could not be expanded, refused with the planner's own
 	// sentence BEFORE the ordinal one — the order dagplan.PlanDistributed uses, so
 	// both engines say the same thing about `SELECT s.* … ORDER BY 1`: the

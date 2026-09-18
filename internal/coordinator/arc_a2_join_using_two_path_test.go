@@ -28,20 +28,22 @@ import (
 //
 // What this does NOT fix, and refuses instead of answering wrong:
 //
-//   - `SELECT *` over a USING join. USING merges the joined column into ONE
-//     output column — three columns for two two-column tables where an ON join
-//     emits four. Join stars now expand the FROM arms in written order
-//     (ADR-0026 §9), but that concatenation does not merge USING columns.
-//     The parser therefore still refuses this spelling: answering four
-//     would be a wrong answer in kind. 0A000.
-//   - A USING clause following another join on the same FROM item, where the
-//     column could come from either relation on the left and picking one
-//     without the catalog is a guess that changes the answer. 0A000.
+//   - `SELECT *` over a USING join, WHERE THE MERGE CANNOT BE STATED. Arc PS
+//     merges it in the star expansion, which is the one layer that can read
+//     both arms' column lists (logical.usingJoinStarColumns): the USING
+//     columns once and first, then each arm's remaining columns. It declines
+//     where a reference by name would bind the wrong relation — two arms that
+//     share a column name outside the USING list, a relation publishing one
+//     name twice, a chain — and the plan is then refused rather than
+//     published unmerged. 0A000.
 //   - NATURAL JOIN, whose keys ARE the shared columns and so need the catalog
 //     outright. Still refused; its class moves from 42601 to 0A000, because
 //     PostgreSQL answers it and a client is owed "not implemented here".
+//   - A BARE reference to the merged column (`SELECT id FROM a JOIN b USING
+//     (id)`), which resolves through the binder's scope in
+//     internal/planner/physical rather than through the parsed join. 42702.
 //
-// #655 stays open on those three. Every expectation below is live
+// #655 stays open on those. Every expectation below is live
 // PostgreSQL 17's, measured rather than remembered.
 type a2JoinCell struct {
 	issue, name, sql string
@@ -133,17 +135,34 @@ func a2JoinCells() []a2JoinCell {
 			want:   []string{"v=float:0.5|w=1.5"},
 			pgSays: "0.5, 1.5 — byte-identical to the leading-dot spelling above"},
 
-		// ---- the three shapes still refused, with their classes -----------
-		{issue: "#655", name: "boundary_star_over_using",
+		// ---- the shapes still refused, with their classes -----------------
+		//
+		// `SELECT *` over a USING join MERGES now (arc PS, #655): the USING
+		// columns once and first, then each arm's remaining columns. This
+		// fixture is the one shape the merge declines — zzp and zzj BOTH
+		// publish `d92` outside the USING list, and every expanded item is a
+		// qualified reference, so a reference to a name both arms publish
+		// binds whichever side the plan put it on (the standing #706 family,
+		// which `SELECT * FROM zzp a JOIN zzj b ON a.id = b.id` shows with no
+		// USING clause at all). The refusal is what keeps the right NAMES
+		// from being published over one side's VALUES.
+		// coordinator.TestArcPSJoinUsingStarMergesOnEveryArm carries the
+		// merge itself, over two relations whose other columns differ.
+		{issue: "#655", name: "boundary_star_over_using_with_a_shared_tail_name",
 			sql:         `SELECT * FROM zzp JOIN zzj USING (id) ORDER BY id`,
-			wantErrLike: "USING merges the joined column into ONE output column",
+			wantErrLike: "`SELECT *` over a JOIN ... USING is not supported for this shape",
 			wantState:   "0A000",
-			pgSays:      "PostgreSQL ANSWERS: 3 rows, THREE columns (id, zzp.d92, zzj.d92)"},
-		{issue: "#655", name: "boundary_using_after_another_join",
-			sql:         `SELECT COUNT(*) AS c FROM zzp a JOIN zzj b USING (id) JOIN zzj c USING (id)`,
-			wantErrLike: "follows another join on the same FROM item",
-			wantState:   "0A000",
-			pgSays: "PostgreSQL ANSWERS 3: after the first USING there is one merged `id` " +
+			pgSays: "PostgreSQL ANSWERS: 3 rows, THREE columns (id, zzp.d92, zzj.d92) — " +
+				"refused here because the two arms share `d92`"},
+		// ANSWERS NOW. A chain whose earlier join on the same FROM item is
+		// itself an inner `JOIN … USING` naming the same column resolves
+		// against that clause's MERGED column, which is the left arm's — so
+		// the qualifier this clause picks is the right one, and PostgreSQL's
+		// own answer is 3. Deleting the pin is the fix's proof (ADR-0013).
+		{issue: "#655", name: "using_after_another_using_on_the_same_item",
+			sql:  `SELECT COUNT(*) AS c FROM zzp a JOIN zzj b USING (id) JOIN zzj c USING (id)`,
+			want: []string{"c=int64:3"},
+			pgSays: "3 — after the first USING there is one merged `id` " +
 				"on the left, so the second resolves against it"},
 		// PostgreSQL refuses the OTHER chained shape, and for the reason this
 		// bound exists: `zzp a JOIN zzp b ON ... JOIN zzj d USING (id)` is

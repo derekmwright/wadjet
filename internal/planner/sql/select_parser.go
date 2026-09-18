@@ -789,6 +789,16 @@ func (p *selectParser) parseFromClause(info *SelectInfo) error {
 // is a projection question the parser cannot answer.
 func (p *selectParser) parseJoinUsing(info *SelectInfo, ji *JoinInfo) error {
 	usingPos := p.cur.pos
+	// A CROSS JOIN takes no join condition of any kind: PostgreSQL's grammar
+	// has `CROSS JOIN` and `JOIN … join_qual` as separate productions, and
+	// `a CROSS JOIN b USING (c)` is 42601 `syntax error at or near "USING"`
+	// there. Reading it as an ordinary join would answer a DIFFERENT query
+	// than the one written.
+	if strings.EqualFold(strings.TrimSpace(ji.Type), "cross join") {
+		return sqlerr.New("42601",
+			"syntax error at or near \"USING\" at position %d: a CROSS JOIN takes no join condition",
+			usingPos)
+	}
 	p.advance() // consume USING
 	if _, err := p.expect(TokenLParen); err != nil {
 		return fmt.Errorf("expected ( after USING at position %d", usingPos)
@@ -808,18 +818,34 @@ func (p *selectParser) parseJoinUsing(info *SelectInfo, ji *JoinInfo) error {
 		return fmt.Errorf("expected ) to close USING at position %d", usingPos)
 	}
 
-	// The left side's qualifier. A join CHAIN — `a JOIN b USING (c) JOIN d
-	// USING (c)`, or `a JOIN b ON ... JOIN d USING (c)` — puts more than one
-	// relation on the left, and which of them carries `c` is a catalog
-	// question. Refused rather than guessed: qualifying against the wrong one
-	// answers a DIFFERENT query, and this clause is being added precisely so
-	// a client stops getting an answer it cannot check.
+	// The left side's qualifier. A join CHAIN puts more than one relation on
+	// the left, and which of them carries `c` is in general a catalog
+	// question — except in the one case where the chain ANSWERS it itself: if
+	// every prior join on this FROM item is an INNER `JOIN … USING` that
+	// already names `c`, then `c` is that earlier clause's MERGED column, and
+	// PostgreSQL resolves this one against it. `a JOIN b USING (id) JOIN c
+	// USING (id)` answers there; the merged column for an inner join IS the
+	// left arm's, so the qualifier below is right for this clause too.
+	//
+	// The other chain shape is one PostgreSQL REFUSES: `a JOIN b ON … JOIN d
+	// USING (id)` is `common column name "id" appears more than once in left
+	// table` (42702). Both sides of the bound are measured, so the refusal
+	// covers what it says it covers and no more.
+	//
+	// OUTER joins in the chain are excluded: a LEFT join's merged column is
+	// still the left arm's, but a RIGHT or FULL join's is not, and a mixed
+	// chain's merged column is a question this clause does not answer.
 	for _, prior := range info.Joins {
-		if prior.FromItem == ji.FromItem {
+		if prior.FromItem != ji.FromItem {
+			continue
+		}
+		if !priorUsingCovers(prior, cols) || !isPlainInnerJoin(prior.Type) ||
+			!isPlainInnerJoin(ji.Type) {
 			return sqlerr.New("0A000",
-				"JOIN ... USING at position %d follows another join on the same FROM item; the "+
-					"column could come from either relation on the left, which needs the catalog "+
-					"— write the join condition with ON", usingPos)
+				"JOIN ... USING at position %d follows another join on the same FROM item that "+
+					"does not already merge these columns; the column could come from either "+
+					"relation on the left, which needs the catalog — write the join condition "+
+					"with ON", usingPos)
 		}
 	}
 	if ji.FromItem < 0 || ji.FromItem >= len(info.Tables) {
@@ -854,33 +880,39 @@ func (p *selectParser) parseJoinUsing(info *SelectInfo, ji *JoinInfo) error {
 		}
 		cond = &AndNode{Left: cond, Right: eq}
 	}
-	// The OUTPUT half, which this clause does NOT implement and must not
-	// answer wrong. `SELECT *` over a USING join emits the joined column
-	// ONCE — three output columns for two two-column tables, where an ON join
-	// emits four. The star's column set over a join IS knowable now (every
-	// arm's own list, in the FROM clause's written order — ADR-0026 §9), and
-	// that list is the UNMERGED one: USING is the single place where "the
-	// arms concatenated" is not PostgreSQL's answer. Publishing it would be a
-	// wrong answer in kind, so the shape is REFUSED and #655 stays open on
-	// the merge.
-	//
-	// Only a BARE star merges. `aa.*` names one side and needs no merge, so
-	// it is admitted.
-	for _, c := range info.Columns {
-		if c.Star && c.TableRef == "" {
-			return sqlerr.New("0A000",
-				"SELECT * over a JOIN ... USING at position %d is not supported: USING merges the "+
-					"joined column into ONE output column, and a star over a join publishes every "+
-					"arm's own list — which is the UNMERGED one, so it would answer a column this "+
-					"statement does not have. Name the columns, or write the join condition with ON",
-				usingPos)
-		}
-	}
-
 	ji.Using = cols
 	ji.Condition = cond.String()
 	ji.CondExpr = cond
 	return nil
+}
+
+// priorUsingCovers reports whether an earlier join on the same FROM item
+// already merged every column this USING clause names, so the name on the left
+// is that merge rather than two relations' columns.
+func priorUsingCovers(prior JoinInfo, cols []string) bool {
+	if len(prior.Using) == 0 {
+		return false
+	}
+	have := make(map[string]bool, len(prior.Using))
+	for _, c := range prior.Using {
+		have[strings.ToLower(c)] = true
+	}
+	for _, c := range cols {
+		if !have[strings.ToLower(c)] {
+			return false
+		}
+	}
+	return true
+}
+
+// isPlainInnerJoin reports whether a join type is the one whose merged USING
+// column is the LEFT arm's column and nothing else.
+func isPlainInnerJoin(joinType string) bool {
+	switch strings.ToLower(strings.TrimSpace(joinType)) {
+	case "join", "inner join", "inner", "":
+		return true
+	}
+	return false
 }
 
 func (p *selectParser) parseTableRef() (TableRef, error) {

@@ -40,6 +40,11 @@ import (
 type joinStarItem struct {
 	qualifier string
 	column    StarColumn
+	// merged is the EXPRESSION a `JOIN … USING (c)` output column is, where
+	// that is not a plain reference to one side: a FULL join's merged key is
+	// `COALESCE(l.c, r.c)`, because either side may be the NULL-extended one.
+	// nil for every ordinary star item, which is a qualified reference.
+	merged plansql.Node
 }
 
 // joinStarColumns is the list a bare `*` over a JOIN publishes, or nil when
@@ -57,7 +62,138 @@ func joinStarColumns(input *Node) []joinStarItem {
 	if join == nil {
 		return nil
 	}
+	if items, isUsing := usingJoinStarColumns(join); isUsing {
+		return items
+	}
 	return joinArmColumns(join)
+}
+
+// usingJoinStarColumns is the list a bare `*` over a `JOIN … USING (c1, …)`
+// publishes: the USING columns ONCE and FIRST, then the left arm's remaining
+// columns, then the right arm's — PostgreSQL's §7.2.1.1 rule, measured on
+// 17.11. `SELECT * FROM zzp JOIN zzj USING (id)` is THREE columns there where
+// an ON join emits four.
+//
+// The second return says the join IS a USING join, so the caller must not fall
+// through to the unmerged arm concatenation: a nil list then leaves the star
+// unexpanded, and an unexpanded star is refused at both planner entries
+// (physical.refuseUnexpandedStarAnywhere, 0A000). Publishing the unmerged list
+// would answer a column the statement does not have, which is the wrong answer
+// in kind this shape was refused in the parser to avoid (#655).
+//
+// The MERGED value is the left arm's column for an INNER or LEFT join and the
+// right arm's for a RIGHT join — the side that is never NULL-extended — and
+// `COALESCE(l.c, r.c)` for a FULL join, where either side may be. Measured:
+// `SELECT * FROM fa FULL JOIN fb USING (id)` publishes id 3 for the row fa
+// does not have.
+func usingJoinStarColumns(join *Node) ([]joinStarItem, bool) {
+	if len(join.JoinUsing) == 0 {
+		return nil, false
+	}
+	if len(join.Children) != 2 || !joinPublishesBothArms(join) {
+		return nil, true
+	}
+	leftName, leftCols := armRelationColumns(join.Children[0])
+	rightName, rightCols := armRelationColumns(join.Children[1])
+	if leftName == "" || rightName == "" || len(leftCols) == 0 || len(rightCols) == 0 {
+		return nil, true
+	}
+	if repeatsAName(leftCols) || repeatsAName(rightCols) ||
+		strings.EqualFold(leftName, rightName) {
+		return nil, true
+	}
+	using := make(map[string]bool, len(join.JoinUsing))
+	var merged []joinStarItem
+	for _, c := range join.JoinUsing {
+		lc := strings.ToLower(strings.TrimSpace(c))
+		if lc == "" || using[lc] {
+			return nil, true
+		}
+		left, okL := findStarColumn(leftCols, lc)
+		right, okR := findStarColumn(rightCols, lc)
+		if !okL || !okR {
+			// PostgreSQL's 42703: the column is not on both sides. The
+			// condition the parser desugared names it anyway, so the query is
+			// refused below rather than answered without it.
+			return nil, true
+		}
+		using[lc] = true
+		item, ok := mergedUsingItem(join.JoinType, leftName, left, rightName, right)
+		if !ok {
+			return nil, true
+		}
+		merged = append(merged, item)
+	}
+	items := merged
+	tail := map[string]bool{}
+	for _, arm := range []struct {
+		name string
+		cols []StarColumn
+	}{{leftName, leftCols}, {rightName, rightCols}} {
+		for _, c := range arm.cols {
+			lc := strings.ToLower(strings.TrimSpace(c.Resolve))
+			if using[lc] {
+				continue
+			}
+			// A NON-USING COLUMN NAME THE TWO ARMS SHARE. Every item here is
+			// a QUALIFIED reference, and a reference to a name BOTH arms of a
+			// join publish binds one of them wherever the plan put it — the
+			// standing #706 family, which `SELECT * FROM zzp a JOIN zzj b ON
+			// a.id = b.id` already shows without any USING clause. The merge
+			// declines rather than publish the right NAMES over one side's
+			// VALUES: the star stays unexpanded and the statement is refused
+			// (0A000), which is the answer this spelling already had.
+			if tail[lc] {
+				return nil, true
+			}
+			tail[lc] = true
+			items = append(items, joinStarItem{qualifier: arm.name, column: c})
+		}
+	}
+	return items, true
+}
+
+// findStarColumn is one arm's column of that RESOLUTION name, folded.
+func findStarColumn(cols []StarColumn, name string) (StarColumn, bool) {
+	for _, c := range cols {
+		if strings.EqualFold(strings.TrimSpace(c.Resolve), name) {
+			return c, true
+		}
+	}
+	return StarColumn{}, false
+}
+
+// mergedUsingItem is the ONE output column a USING key publishes, per join
+// kind. It reports false for a kind whose merged value this pass cannot
+// state, which leaves the star unexpanded and the query refused.
+func mergedUsingItem(joinType, leftName string, left StarColumn,
+	rightName string, right StarColumn) (joinStarItem, bool) {
+	pub := left.Publish
+	if pub == "" {
+		pub = left.Resolve
+	}
+	switch joinKind(joinType) {
+	case "inner", "cross", "":
+		return joinStarItem{qualifier: leftName, column: StarColumn{Resolve: left.Resolve, Publish: pub}}, true
+	case "left":
+		return joinStarItem{qualifier: leftName, column: StarColumn{Resolve: left.Resolve, Publish: pub}}, true
+	case "right":
+		return joinStarItem{qualifier: rightName,
+			column: StarColumn{Resolve: right.Resolve, Publish: pub}}, true
+	case "full":
+		return joinStarItem{
+			column: StarColumn{Resolve: pub, Publish: pub},
+			merged: &plansql.FuncCallNode{
+				Name:        "coalesce",
+				OutputLabel: pub,
+				Args: []plansql.Node{
+					&plansql.ColRef{Table: leftName, Column: left.Resolve},
+					&plansql.ColRef{Table: rightName, Column: right.Resolve},
+				},
+			},
+		}, true
+	}
+	return joinStarItem{}, false
 }
 
 // starJoinSource is the JOIN a bare `*` over input publishes the arms of, or
@@ -169,6 +305,13 @@ func ElideUnstatedJoinStar(n *Node) *Node {
 	if !n.StarJoinArms || len(n.Children) != 1 || !HasStarProjection(n) {
 		return n
 	}
+	// A star over a `JOIN … USING` the expansion could not state is NOT taken
+	// back out: "the answer it had" is the join operator's stream, which
+	// carries the joined column twice, and this node is what carries the
+	// marker RefuseUnmergedJoinUsingStar turns into the refusal (#655).
+	if n.UnmergedJoinUsingStar {
+		return n
+	}
 	// The naming the ENCLOSING query stamped on this node belongs to the
 	// relation, not to the projection: a derived table's alias, a CTE's name
 	// and the reference's rename are all recorded on a block's subtree ROOT
@@ -206,6 +349,13 @@ func joinArmColumns(join *Node) []joinStarItem {
 			return
 		}
 		if n.Type == NodeJoin {
+			if len(n.JoinUsing) > 0 {
+				// A USING join inside a CHAIN. Its merged output is stated by
+				// usingJoinStarColumns for a two-arm join only; publishing the
+				// arms concatenated here would emit the joined column twice.
+				ok = false
+				return
+			}
 			if len(n.Children) != 2 || !joinPublishesBothArms(n) {
 				// A chain whose inner join publishes something other than its
 				// two arms side by side is not stated here at all: the star
@@ -459,4 +609,18 @@ func starItemProjection(qualifier string, col StarColumn) Projection {
 		item.PublishedName = col.Publish
 	}
 	return item
+}
+
+// joinStarProjection is starItemProjection for one item of a join star,
+// honouring the EXPRESSION a `USING` merge carries where the column is not a
+// plain reference to one side (a FULL join's `COALESCE`).
+func joinStarProjection(it joinStarItem) Projection {
+	if it.merged == nil {
+		return starItemProjection(it.qualifier, it.column)
+	}
+	expr := it.merged.String()
+	return Projection{
+		Column: expr, Alias: it.column.Publish, Expr: expr,
+		ASTExpr: it.merged, PublishedName: it.column.Publish,
+	}
 }

@@ -482,6 +482,15 @@ func tmdTables() []tmdTable {
 		// resolved against the wrong side renders identically.
 		{zzpTable, zzpSchema(), zzpData()},
 		{zzjTable, zzjSchema(), zzjData()},
+		// The ARC PS fixture: two relations sharing EXACTLY the join key's
+		// name and nothing else, which is what a `JOIN … USING` merge has to
+		// be measured over. Rides along for the same reason as the fixtures
+		// above — only the arc-PS grammar gate names it, and no type-matrix
+		// corpus entry does. zzp/zzj cannot stand in for it: they share `d92`
+		// outside the USING list, and a star over such a pair binds one side
+		// for both (#706), which is a different defect wearing the same face.
+		{psaTable, psaSchema(), psaData()},
+		{psbTable, psbSchema(), psbData()},
 		// The LATERAL fixture (#767). Rides along for the same reason as the
 		// fixtures above: only the arc-A census names it, and no type-matrix
 		// corpus entry does. The type matrix cannot stand in for it — nothing

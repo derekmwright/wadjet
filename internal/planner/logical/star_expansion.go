@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // ExpandStarProjections rewrites every `*` / `alias.*` select item into one
@@ -64,9 +65,17 @@ func ExpandStarProjections(n *Node) {
 			if items := joinStarColumns(n.Children[0]); len(items) > 0 {
 				changed = true
 				for _, it := range items {
-					expanded = append(expanded, starItemProjection(it.qualifier, it.column))
+					expanded = append(expanded, joinStarProjection(it))
 				}
 				continue
+			}
+			// A `JOIN … USING` whose merged output this pass could not state.
+			// Leaving the star alone is not neutral here: an unexpanded join
+			// star publishes the join OPERATOR's stream, which carries the
+			// joined column TWICE. The marker is what turns that into a
+			// refusal a pass later (#655).
+			if subtreeJoinCarriesUsing(n.Children[0]) {
+				n.UnmergedJoinUsingStar = true
 			}
 		}
 		cols := StarSourceColumns(n.Children[0], qual)
@@ -501,4 +510,66 @@ func loneScan(n *Node) (scan, barrier *Node) {
 		return nil, nil
 	}
 	return scan, barrier
+}
+
+// subtreeJoinCarriesUsing reports whether the relation a bare star publishes is
+// built by a join chain any of whose joins was written `JOIN … USING (…)`.
+// The descent is starJoinSource's — the operators that pass their input
+// through unchanged — because that is the subtree the star publishes.
+func subtreeJoinCarriesUsing(input *Node) bool {
+	n := input
+	for n != nil {
+		switch n.Type {
+		case NodeFilter, NodeSort, NodeLimit, NodeDistinct:
+			if len(n.Children) != 1 {
+				return false
+			}
+			n = n.Children[0]
+		case NodeJoin:
+			if len(n.JoinUsing) > 0 {
+				return true
+			}
+			for _, c := range n.Children {
+				if subtreeJoinCarriesUsing(c) {
+					return true
+				}
+			}
+			return false
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// RefuseUnmergedJoinUsingStar raises the refusal for a bare `*` over a
+// `JOIN … USING` whose merged output the star expansion could not state.
+//
+// PostgreSQL publishes the USING columns ONCE and FIRST and then each arm's
+// remaining columns; this engine states that where it can read both arms'
+// lists (usingJoinStarColumns) and refuses where it cannot, because the answer
+// it would otherwise publish is the join operator's stream — the joined column
+// TWICE, which is a column the statement does not have. Both planner entries
+// raise it, the way both raise RefuseUnappliedColumnAliasLists.
+//
+// 0A000 and not 42601: PostgreSQL ANSWERS this statement. The class a client is
+// owed is "this engine does not implement it here", not "your SQL is wrong".
+func RefuseUnmergedJoinUsingStar(n *Node) error {
+	if n == nil {
+		return nil
+	}
+	if n.UnmergedJoinUsingStar {
+		return sqlerr.New("0A000",
+			"`SELECT *` over a JOIN ... USING is not supported for this shape: USING merges "+
+				"the joined column into ONE output column, and the arms' own column lists "+
+				"could not both be read here — a relation that publishes one name twice, or "+
+				"two arms that share a column name outside the USING list, or a chain of "+
+				"joins. Name the columns, or write the join condition with ON")
+	}
+	for _, child := range n.Children {
+		if err := RefuseUnmergedJoinUsingStar(child); err != nil {
+			return err
+		}
+	}
+	return nil
 }

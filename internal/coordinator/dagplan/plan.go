@@ -73,6 +73,14 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	logical.ExpandStarProjections(node)
 	node = logical.ElideUnstatedJoinStar(node)
 	logical.ResolveStarJoinOrdinalSortKeys(node)
+	// A bare `*` over a `JOIN … USING` whose merged output the star expansion
+	// could not state is refused BEFORE the general unexpanded-star sentence,
+	// the order physical.Planner.Plan uses, so both engines say the same thing
+	// about the same query: USING is the reason and the unexpanded star is its
+	// consequence (#655).
+	if err := logical.RefuseUnmergedJoinUsingStar(node); err != nil {
+		return nil, err
+	}
 	if err := p.PlanContext.RefuseUnexpandedStarAnywhere(node); err != nil {
 		return nil, err
 	}
