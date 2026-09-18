@@ -1032,8 +1032,10 @@ because it would publish a relation whose row count is not the one the query
 wrote. Honouring the bound means it travelling with the correlation key as a
 per-key top-N; that rewrite was written and taken out again after measurement
 (it partitioned on a value the DAG bound to the wrong relation, which over a
-policed column disclosed the stored value's equivalence classes), so the shape
-is the one described here until the window key binds its own arm.
+policed column disclosed the stored value's equivalence classes). The key
+binding it needed is settled now — a window key carries the relation the query
+named — but the rewrite has two measured faults of its own beyond it, so the
+shape is still the one described here.
 
 `LIMIT ALL` is not accepted by the parser at all — `expected number after
 LIMIT` — in a lateral body or anywhere else; PostgreSQL treats it as "no
@@ -2528,6 +2530,33 @@ the query with an internal error instead of saying what was wrong.
 
 The workaround is the grouped spelling with a join back, or a self-join on the
 frame's bounds.
+
+### Which relation a window key names
+
+A window's `PARTITION BY` term, its `ORDER BY` term and its function argument
+are evaluated over the window's INPUT — the FROM clause's relations, not the
+SELECT list's aliases, which is what PostgreSQL does too. A term written with a
+table qualifier names THAT relation's column, and it keeps doing so when the
+same bare column name exists on another relation of the same join:
+
+```sql
+SELECT o.id, i.id, COUNT(*) OVER (PARTITION BY o.id)
+FROM orders o JOIN line_items i ON i.order_id = o.id
+```
+
+partitions on the ORDER's id, whichever side of the join the planner chooses to
+build. Writing the FROM clause the other way round does not change the answer,
+and neither does a predicate that changes the plan's cost estimate.
+
+A term written BARE where two relations of the join publish that name is a
+different case: PostgreSQL raises `42702 column reference … is ambiguous`, and
+this engine answers by binding one of them. That superset is recorded in
+ADR-0012's divergence list.
+
+A term that is an EXPRESSION — `PARTITION BY o.id + 0`, `ORDER BY amount * 2`,
+a `ROW` field path — is computed into a column of its own before the window
+runs, and a key the engine cannot resolve at all is a loud refusal rather than
+a silent single partition.
 
 ### The type a window aggregate answers
 

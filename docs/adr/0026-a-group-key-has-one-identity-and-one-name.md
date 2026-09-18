@@ -16,6 +16,13 @@ A key whose expression is an AGGREGATE or WINDOW call was refused there too,
 and that refusal is retired: the DISTINCT lowering was RECORDING one, and no
 query can write one. §3b.)
 
+Amended 2026-09-18 by arc WK — **§8j is SETTLED**: a window key, a sort key, a
+lifted predicate column and a join-arm reference bind by the OCCURRENCE that
+produced the column, and a NAME is derived from that identity for publication,
+never the reverse (#1028). `exec.ColumnIndexFallback` is NOT deleted — its
+qualifier strip is the join's own publication convention read back, measured —
+and what became unreachable is the PLAN-TIME erasure in front of it.
+
 ## Context
 
 A grouped query says the same expression more than once. `GROUP BY g + 1`
@@ -1113,6 +1120,10 @@ builder, and its TEXT is stale. Both spellings run as stages now, and the two
 `routed=true` pins that recorded the refusal are deleted.
 
 ### 4. A WINDOW above the aggregate is spelled against what it publishes (2026-09-01, #737)
+
+§8j is this section's other direction, SETTLED 2026-09-18: which OCCURRENCE a
+window key, a sort key, a lifted predicate column or a join-arm reference binds,
+and why a name is derived from that identity rather than the reverse.
 
 `SELECT g + 1 AS k, ROW_NUMBER() OVER (ORDER BY g + 1) FROM t GROUP BY g + 1`
 answered the right eight rows with the key NULL on every one of them, on all
@@ -2415,69 +2426,135 @@ therefore not an address, and it was the only one in use in three places:
    columns answer to it", §3a), and the positions are the inner operation's
    own by the same construction the rest of this item rests on.
 
-### 8j. A WINDOW key's ARM is asked THREE ways, and they disagree (2026-09-14, arc L1: #1028) — NOT SETTLED, with the measurement
+### 8j. A WINDOW key, a SORT key and a join-arm reference bind by OCCURRENCE (2026-09-14, arc L1: #1028; SETTLED 2026-09-18, arc WK)
 
 A window key is a key, and §4's rule holds for it: the identity of a column is
-the relation that produced it, never the bare name two relations share. Today
-three mechanisms answer "which arm owns this key" and they do not agree, which
-is why this section records a seam rather than a decision.
+the relation that produced it, never the bare name two relations share. Three
+mechanisms used to answer "which arm owns this key" and they did not agree.
+This section recorded the seam; arc WK closes it with ONE resolution.
 
-**The defect.** `resolveWindowKeys` keeps a QUALIFIED reference's qualifier
-where the input's column set cannot settle it (#975) and hands the operator a
-NAME to resolve. `exec.columnIndexFallback` tries the exact spelling and then
-the BARE one — and a join emits one arm's duplicate bare and the other's
-qualified — so `PARTITION BY o.id` over `lat_ord o JOIN lat_item i` binds
-`i.id`, puts every row in its own partition, and answers 1 where PostgreSQL
-17.11 answers 2, on all five arms, in silence. `SUM(o.total) OVER (PARTITION BY
-o.id)` and `ORDER BY o.id` are the same fact through the window's other two
-positions, and the LEFT spelling of the same query is right by luck, because a
-LEFT join emits the probe arm bare and that is the arm the key names. The
-fallback cannot be narrowed by inspecting the type map: it is keyed by name and
-folds the two arms' `id` into one entry.
+**THE RULE.** A window key, a sort key, a lifted predicate column and a
+join-arm reference bind by IDENTITY — the OCCURRENCE that produced the column,
+and the column within that occurrence — carried from binding through every
+rewrite. **A NAME is derived from the identity for publication; an identity is
+never derived from a name.** It is §4 stated for the consumers this section
+left open, and it is §9's `StarColumn{Resolve, Publish}` pair one consumer
+over: a key is a (resolve, publish) pair whose resolve half names an
+occurrence. "Occurrence" and not "arm" deliberately — two references to one
+table are two occurrences, a written alias is a SPELLING of one rather than the
+occurrence itself, and an occurrence with no written alias still produces
+columns.
 
-**The repair was written and measured BACK OUT.** `PARTITION BY o.id + 0` —
-one character away, and an EXPRESSION, so it is MATERIALIZED into a slot the
-projection below the window computes — is right, which localises the loss to
-the NAME. Routing a qualified reference the input cannot settle down that same
-route fixes seven cells and breaks three green gates — and THAT is the whole
-of the deferral's reason:
+Two corollaries are what the code obeys.
 
-- over two DERIVED arms that both publish `w`, `PARTITION BY x.w` is right as a
-  NAME — the join qualifies the build arm's copy by the alias the query wrote,
-  which is what §4 and #975 settled — and MATERIALIZING it answers each row its
-  own partition (`coordinator.TestArcK1AWindowPartitionKeyBindsItsOwnArm`).
-  Narrowing the route to a BASE-SCAN arm still leaves
-  `TestADerivedTablesComputedAliasIsNotASortOrWindowKeyOnTheDAG` (#658) and
-  `TestJ2AJoinConsumerBindsThePublishedIdentity` (#770) failing.
+1. **No pass may narrow a reference to a spelling that names less than the
+   identity.** The planner never widens a qualified reference to a bare one
+   because some column answers to the bare name.
+2. **A resolver may bind a slot by name only where the planner has established
+   that the slot IS this occurrence's carrier in THIS stream.** Where it has
+   not, the reference is TRANSLATED through the producer mapping, the carrier
+   is SUPPLIED, or the plan REFUSES — never bound to another occurrence's
+   column.
 
-An earlier version of this section gave a SECOND reason — that materializing an
-`ORDER BY` term inverts the window's direction, "a prerequisite either way" —
-and it is FALSE, measured two ways. `ORDER BY i.amount + 0 DESC` over the same
-join, an EXPRESSION and so already on the materialization route, answers
-PostgreSQL's DESCENDING numbering on all five arms; and re-applying the repair
-verbatim makes the two direction cells ANSWER PostgreSQL rather than invert.
-What was seen while the repair was being narrowed was the bare-name bind moving
-under it, not the route. `orderDescExprOverJoin` and `orderDescSingleRel` are
-gate cells so the claim cannot drift back.
+**The defect corollary 1 closes.** `resolveWindowKeys` dropped a qualified
+reference to its bare spelling whenever `bindWindowColRef` found the bare name
+in the input's type map — and `inputColTypes` over a join MERGES both arms into
+one map keyed by the bare name (it drops only a name the two sides type
+differently), so `o.id` was not a key of it and `id` was. The occurrence was
+erased at plan time, after which the runtime can only answer whichever arm the
+join publishes bare: `joinOutputSchemaWithMapping` emits the probe's columns
+bare and qualifies every duplicate build column by its owning alias, and which
+side probes is a cost decision. `PARTITION BY o.id` over `lat_ord o JOIN
+lat_item i` therefore put every row in its own partition and answered 1 where
+PostgreSQL 17.11 answers 2, on all five arms, in silence (#1028); `SUM(o.total)
+OVER (PARTITION BY o.id)` and `ORDER BY o.id` were the same fact through the
+window's other two positions, and `QUALIFY` was a fourth spelling of it.
 
-So the seam is one question answered three ways — the bare-name bind, the
-qualified name #975 settled for derived arms, and the materialized slot — and
-closing it is ONE resolution for all three, not a fourth beside them. There is
-no prerequisite in front of it.
-`coordinator.TestArcL1AWindowKeyBindsItsOwnJoinArm` is the gate: 23 cells on
-five arms, seven PINNED with PostgreSQL's answer beside them — the two
-direction cells among them, pinned on the SAME bare-name bind as the rest — and
-#1028's own DERIVED-ALIAS family, which answers on all five arms, gated for the
-first time.
+An earlier version of this section said `inputColTypes` "declines a JOIN
+outright, so the bind below never even runs there". That is true of a join of
+DERIVED arms — the walk has no `NodeProject` case — and FALSE of a join of base
+scans. **The fold is the merge**, and it is why one written key took two
+different mechanisms depending on whether a Project stood between the window
+and the scans.
 
-**A PLANNER-MINTED window inherits all three.** Arc L1 built the per-outer-row
-LATERAL bound (#1019) on a minted `ROW_NUMBER() OVER (PARTITION BY <the inner
-correlation column>)` and withdrew it: on the three DAG arms that partition did
-not bind the body's own column, so over a SELF-correlated body every row became
-its own partition — and over a POLICED column that is a per-row disclosure of
-the stored value's equivalence classes on four of the nine doors (ADR-0021
-§1q, ADR-0033). A window the PLANNER writes is not safer than one the user
-writes: it is the same key resolution, reached where no user can see it.
+The repair is `windowArgKeepsItsQualifier`, which is the rule the window's own
+ARGUMENT has followed since #742 round 4, applied to the PARTITION BY and ORDER
+BY terms thirty lines away in the same file: a qualified term keeps the
+spelling the query wrote wherever more than one occurrence of the input
+publishes its bare name. The carried spelling is then an ADDRESS rather than a
+guess — `exec.ColumnIndexFallback` hits `o.id` exactly when the join qualified
+o's side and hits through its qualifier strip when it qualified i's instead, so
+it needs no model of which side built, which is the composition §6a's sort-key
+rule already relies on.
+
+**It is NOT the materialization route, and that is why it holds.** Three prior
+repairs routed a qualified reference the input cannot settle into a
+`__winkey_N` slot — `PARTITION BY o.id + 0`, one character away and an
+EXPRESSION, is right — and each fixed those cells and broke three green gates:
+`coordinator.TestArcK1AWindowPartitionKeyBindsItsOwnArm` (#975), where
+`PARTITION BY x.w` over two derived arms is right AS A NAME and materializing
+it gives every row its own partition; and
+`TestADerivedTablesComputedAliasIsNotASortOrWindowKeyOnTheDAG` (#658) and
+`TestJ2AJoinConsumerBindsThePublishedIdentity` (#770), which failed even after
+the route was narrowed to a base-scan arm. Nothing is recomputed under the
+rule, so all three stay green. The direction claim an earlier version added —
+that materializing an ORDER BY term inverts the window's numbering — was FALSE
+and is withdrawn; `orderDescExprOverJoin` and `orderDescSingleRel` are gate
+cells so it cannot drift back.
+
+**`exec.ColumnIndexFallback` is NOT deleted.** Measured: removing only its
+qualifier-strip step fails nine top-level tests across `internal/engine/exec`
+and `internal/planner/physical` — the hash join's key assignment, the
+sort-merge join's keys, the hash aggregate's group keys, a projection over a
+self-join and the sort's own keys. Over a join's own output its first two steps
+ARE that convention read back. What becomes unreachable is the PLAN-TIME
+erasure in front of it, and — corollary 2 — a reference reaching it in a stream
+whose carrier the planner has not established.
+
+**What corollary 2 still owes, measured.** The seam's own table enumerates
+every consumer against every producer on five arms
+(`coordinator.TestWKASeamConsumerBindsItsOwnOccurrence`, 39 cells, 195 (cell,
+arm) results against live PostgreSQL 17.11; the wire half is
+`pgwire.TestWKTheWireDeclaresTheSeamsOwnColumns`). 173 agree. The 22 that do
+not are ONE COLUMN of it, the LATERAL producer:
+
+- **five consumers × three DAG arms.** A decorrelated body's Project emits no
+  stage, so the DAG's join publishes the body's INNER SCAN spelling where the
+  single-process join publishes the arm's own alias. `p.id` misses exactly and
+  the qualifier strip binds the OUTER `id` — corollary 2's precondition
+  failing, not its lookup working. Right on the engine's arm and wrong only on
+  the distributed ones, so it is pinned per arm, labelled `distributed`, and
+  left to the distributed campaign (engine-first). Closing it is the rule's DAG
+  half: translate the reference to the body's carrier INSIDE the occurrence the
+  qualifier names, before the consumer binds it — `windowArgSourceInScope`
+  composed with `derivedAliasSourceColumn`, which is how a window key already
+  reaches a derived arm. #1126 is the same fact seen as two published
+  SPELLINGS, and both halves — the resolution and the published name — have to
+  land together: renaming the output to the bare `id` leaves the DAG's sort
+  still bound to the outer column.
+- **a star over a LATERAL**, refused on all five arms: the arm's list carries
+  the correlation slot the join drops (§3c), so it is not expanded and a
+  positional `ORDER BY` has no position to count. §9's decline list.
+- **the contested lifted predicate on the two single arms**, which is #1130;
+  the three DAG arms answer PostgreSQL's rows. Not a key-binding question —
+  ADR-0021 §1q measured both available routes out.
+
+**A PLANNER-MINTED window inherited all three, and that is why #1019's rewrite
+was withdrawn.** Arc L1 built the per-outer-row LATERAL bound on a minted
+`ROW_NUMBER() OVER (PARTITION BY <the inner correlation column>)`: on the three
+DAG arms that partition did not bind the body's own column, so over a
+SELF-correlated body every row became its own partition — and over a POLICED
+column that is a per-row disclosure of the stored value's equivalence classes
+on four of the nine doors (ADR-0021 §1q, ADR-0033). A window the PLANNER writes
+is not safer than one the user writes: it is the same key resolution, reached
+where no user can see it. Corollary 1 removes that fault for a base-scan
+occurrence; the rewrite itself stays ADR-0021 §1q's, with its own two measured
+faults. Because this arc rewrites BINDING,
+`server.TestArcWKAReboundKeyOverAPolicedColumnReadsTheMask` holds the class on
+all nine doors — a window keyed on a masked column has ONE partition under the
+mask and eight singletons under the stored values, and the gate asserts the
+mask's answer, the absence of every stored policed value, and a non-vacuous
+(cell, door) answered count.
 
 ### 8i. A join ARM that is not a base scan is named by the query (2026-09-14, arc R2: #1102, #1099, #1095)
 
@@ -2943,7 +3020,10 @@ every row. The one term that addresses the OUTPUT list is a POSITIONAL one, and
 item's SOURCE spelling; `ORDER BY 4` over a star join was refused with 42P10
 before this arc, for a statement PostgreSQL answers.
 
-**A STAR ITEM IS A (RESOLVE, PUBLISH) PAIR, and that is the invariant.** The
+**A STAR ITEM IS A (RESOLVE, PUBLISH) PAIR, and that is the invariant.** §8j
+generalizes exactly this pair to the window key, the sort key, the lifted
+predicate column and the join-arm reference, whose resolve half names an
+OCCURRENCE (SETTLED 2026-09-18, arc WK). The
 expanded list carries NAMES — `(FROM-clause relation, column name)` — resolved
 later against whatever tree the optimizer ends up with, not positions in the
 step-1 tree and not stable column handles. Measured (round-2 review), the pair
@@ -3010,6 +3090,9 @@ The design, with every measurement, is
 
 | gate | what it holds |
 |---|---|
+| `coordinator.TestWKASeamConsumerBindsItsOwnOccurrence` | §8j's rule: the name-ownership seam enumerated ONCE — {window PARTITION BY, window ORDER BY, window ARGUMENT, sort key, join-arm reference, star} × {base scan, derived block, LATERAL, set operation, grouped block, nested block} + {lifted predicate} × {LATERAL} × three spellings, on five arms against live PostgreSQL 17.11. 39 cells, 195 (cell, arm) results; every producer publishes a name the outer relation also publishes, so the ownership question is live in every cell |
+| `pgwire.TestWKTheWireDeclaresTheSeamsOwnColumns` | §8j on the wire: RowDescription NAMES and type OIDs for the same consumers, the window's own declaration, and the reserved-name property |
+| `server.TestArcWKAReboundKeyOverAPolicedColumnReadsTheMask` | §8j's masking class on all nine doors: a window or sort key over a MASKED column has one partition under the mask and eight singletons under the stored values; the mask's answer, no stored policed value anywhere, and a non-vacuous (cell, door) count |
 | `coordinator.TestO1AStarOverAJoinPublishesTheQueryNotThePlan` | the seam: 74 shapes — inner / left / right / full / cross / comma / self / three-way / derived block / CTE × no, selective and zero-row predicates × both FROM orders × `*`, `t.*`, `*` beside an item × no sort, a written key, a positional key, DISTINCT, LIMIT × a derived arm's ROOT (Sort, LIMIT, DISTINCT, GROUP BY, set operation) × its ITEM KIND (aliased, unaliased expression, aggregate, literal, CAST) — on FIVE arms against PostgreSQL 17.11 |
 | `pgwire.TestO1TheWireDeclaresAStarJoinsOwnArms` | the same rule on the wire: RowDescription names AND type OIDs, including the three #997 predicates and the zero-row declaration |
 | `logical.TestABareStarOverAJoinExpandsToTheFromClausesArms` | the list per shape, and that every item keeps its qualifier |
