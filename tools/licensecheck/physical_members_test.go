@@ -33,7 +33,15 @@ import (
 // receiver is the same operation. docs/design/seam-narrowing-measurement.md
 // records the same set keyed by the receiver expression's type instead, which
 // spells six of these twice and so reports 215.
-const maxAGPLPhysicalMembers = 209
+//
+// 209 → 210 (2026-09-18, arc SR, #1079): `PublishedOutputProjectionNode`, the
+// question "whose names does the CLIENT read", which a set operation answers
+// one node lower than `FindOutputProjectionNode` does. The alternative was to
+// let dagplan descend the set operation itself, which puts a COPY of
+// ADR-0026 §8b's rule on the AGPL side of the seam — and a copy of a naming
+// rule in the distributed planner is how the two engines drift apart (§2b).
+// One member is the smaller cost.
+const maxAGPLPhysicalMembers = 210
 
 // measuredPhysicalMembers are the members reached through values. With the 16
 // package-scope names of measuredPhysicalNames they are the whole surface, and
@@ -79,6 +87,7 @@ PlanContext.EmittedKeyNames
 PlanContext.FindAggregateAncestor
 PlanContext.FindOutputProjectionNode
 PlanContext.FindOutputProjectionsForRename
+PlanContext.PublishedOutputProjectionNode
 PlanContext.GroupKeyByIdentity
 PlanContext.GroupKeyNames
 PlanContext.GroupKeysPublishedBelow

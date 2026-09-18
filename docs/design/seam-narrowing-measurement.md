@@ -926,7 +926,9 @@ Two budgets hold the two halves, because a method added to the context moves
 one and not the other. `TestAGPLPhysicalReferenceBudget` holds the
 package-qualified count at `maxAGPLPhysicalNames` = 16.
 `TestAGPLPhysicalMemberBudget` holds the reached-identifier count at
-`maxAGPLPhysicalMembers` = 209 and lists the 193 members by name, so a new
+`maxAGPLPhysicalMembers` = 210 (209 until arc SR added
+`PlanContext.PublishedOutputProjectionNode`, ADR-0026 §9a) and lists the
+members by name, so a new
 operation behind the context fails a gate that names it rather than passing one
 that cannot see it. Both are in `tools/licensecheck`.
 
