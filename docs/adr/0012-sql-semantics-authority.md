@@ -750,17 +750,45 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      and answers. Gated by
      `coordinator.TestArcPSGrammarAnswersTheSameOnEveryArm`.
 
-   - **A BARE reference to a `JOIN … USING` join's MERGED column is 42702,
-     where PostgreSQL answers.** (Added 2026-09-18 by arc PS, #655.)
+   - **A BARE reference to a `JOIN … USING` join's MERGED column is 42702
+     outside a sort or window key, where PostgreSQL answers.** (Added
+     2026-09-18 by arc PS, #655; narrowed the same day by the round-1 review's
+     B1.)
 
      USING merges the joined column into one, so `SELECT id FROM a JOIN b
      USING (id)` is not ambiguous in PostgreSQL. The merge is stated here for
      the STAR — the parser records the USING list on the join and
      `logical.usingJoinStarColumns` publishes the merged column once and first
-     — but a bare reference is resolved by the binder's scope in
+     — but a bare reference in a SELECT item, a WHERE, a GROUP BY, a HAVING or
+     a DISTINCT is resolved by the binder's scope in
      `internal/planner/physical`, which reads the two arms' columns and sees
      two `id`s. Qualifying the reference (`a.id`) answers. Loud, never a wrong
      value.
+
+     A SORT or WINDOW key is the exception and it had to be: those two are the
+     only places a bare reference was BOUND rather than refused, and it was
+     bound to the LEFT arm. For an INNER or LEFT join that is the merged value
+     and the answer was right; for a RIGHT or FULL join it is not, and
+     `psb FULL JOIN psa USING (id) ORDER BY id` came back in the order 2, 3, 1
+     where PostgreSQL 17.11 answers 1, 2, 3 — under `LIMIT 1` a different ROW
+     and under `OFFSET 1` a different ROW SET. `plansql.bindMergedUsingKeys`
+     now binds such a key to the merged EXPRESSION at parse time, where both
+     sides' names are known without a catalog.
+
+   - **A bare `SELECT *` over a FULL `JOIN … USING` cannot be ORDERED BY the
+     merged column (0A000), where PostgreSQL answers.** (Added 2026-09-18 by
+     arc PS, #655.)
+
+     The consequence of the entry above. A FULL join's merged value is
+     `COALESCE(l.c, r.c)` — a COMPUTED key — and `logical.hiddenSortProjection`
+     materializes a computed sort key beside a NAMED select list, which a
+     star-only list is not (its own bound, whose comment already records that
+     lifting it for a star over a join is a measured follow-up). So the key is
+     bound correctly and then refused, loudly, rather than bound to the left
+     arm. A named select list carries it and answers; the same statement
+     without the ORDER BY answers; a RIGHT join's merged key is a plain
+     reference and answers. The same applies to a window PARTITION BY or
+     window ORDER BY key, whose slot holds a column NAME.
 
    - **A `BETWEEN` of any spelling inside a `JOIN … ON` clause is refused.**
      (Added 2026-09-18 by arc PS, #655/#1154.)

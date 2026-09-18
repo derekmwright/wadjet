@@ -739,9 +739,11 @@ SELECT 5 NOT BETWEEN SYMMETRIC 10 AND 1    -- false
 which is PostgreSQL's own expansion. It is NOT `BETWEEN least(b,c) AND
 greatest(b,c)`: `least` and `greatest` ignore NULL operands, so that reading
 answers `true` for `1 BETWEEN SYMMETRIC NULL AND 1` where PostgreSQL — and this
-engine — answer NULL. A NULL operand anywhere makes the answer NULL or, where
-the other disjunct already decided it, `false`, exactly as three-valued logic
-requires.
+engine — answer NULL. A NULL operand anywhere makes the answer NULL: swept over
+`a IN {0, 1, 5, 10, NULL} x b, c IN {1, 5, NULL}` on PostgreSQL 17.11, every row
+with a NULL operand answers NULL and none answers `false`. (With a NULL bound
+the two disjuncts cannot both be false — one needs `a > c` and the other
+`a < c` — and with a NULL left operand everything is NULL.)
 
 A BETWEEN of any spelling inside a `JOIN ... ON` clause is refused — see
 **Limitations**.
@@ -2264,6 +2266,15 @@ right arm's for a `RIGHT` join — the side that is never NULL-extended — and
 `COALESCE(left.c, right.c)` for a `FULL` join, where either side may be. A
 QUALIFIED star names one side and merges nothing: `SELECT fa.*` over the join
 above publishes `id, a`.
+
+A bare reference to the merged column in an `ORDER BY` or a window key binds
+the MERGE, not the left arm. That matters for a `RIGHT` join, whose merged
+value is the right arm's column, and for a `FULL` join, whose merged value is
+`COALESCE(left.c, right.c)` — the left arm's `c` is NULL on exactly the rows
+the merge took from the other side, so ordering by it puts them in the wrong
+place, and under `LIMIT` or `OFFSET` returns different rows. A `FULL` join's
+merged key is a computed value: a bare `SELECT *` over one cannot be ordered by
+it (see **Limitations**), while a named select list can.
 
 A `USING` clause may follow another join on the same `FROM` item when that
 earlier join is itself an inner `JOIN ... USING` naming the same columns, so
@@ -4300,10 +4311,22 @@ and `internal/storage/parquet/wide_decimal_test.go`.)
   would bind the wrong relation: two arms sharing a column name OUTSIDE the
   USING list, an arm publishing one name twice, or a chain of joins. Name the
   columns, or join with `ON`
-- A BARE reference to a `USING` join's merged column — `SELECT id FROM a JOIN b
+- A BARE reference to a `USING` join's merged column in a SELECT item, a
+  `WHERE`, a `GROUP BY`, a `HAVING` or a `DISTINCT` — `SELECT id FROM a JOIN b
   USING (id)` — is `42702 column reference "id" is ambiguous`. PostgreSQL
   answers it, because USING merges the column and the reference is not
-  ambiguous there. Qualify it (`a.id`), which resolves
+  ambiguous there. Qualify it (`a.id`), which resolves. The same reference in
+  an `ORDER BY` or a window key BINDS THE MERGE and answers
+- A bare `SELECT *` over a `FULL JOIN ... USING` ordered by the merged column —
+  rejected (`0A000`). The merged value is `COALESCE` of the two sides, computed
+  by the projection the star expands into, and this planner materializes a
+  computed sort key beside a NAMED select list, which a star-only list is not.
+  Name the columns, which answers; the same statement without the `ORDER BY`
+  answers too. The positional spelling (`ORDER BY 1` naming the merged column)
+  is the same refusal
+- A WINDOW `PARTITION BY` or window `ORDER BY` key naming a `FULL JOIN ...
+  USING` merged column — rejected (`0A000`); the merged value is a `COALESCE`
+  and a window key here is a column name. Write the expression
 - `JOIN ... USING` that follows another join on the same `FROM` item, unless
   that earlier join is itself an inner `JOIN ... USING` naming the same columns
   — rejected (`0A000`); the column could otherwise come from either relation on

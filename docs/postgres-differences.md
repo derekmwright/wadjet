@@ -316,9 +316,17 @@ Unknown types/scales cause distributed refusal to avoid decimal reinterpretation
 
 `SELECT *` over a `JOIN … USING` publishes the joined column once and first, as PostgreSQL does. It raises 0A000 where the merge cannot be stated by name: two arms sharing a column name outside the USING list, an arm publishing one name twice, or a chain of joins. (ADR-0012 §5/#810, #655)
 
-**A bare reference to a USING join's merged column is ambiguous here.**
+**A bare reference to a USING join's merged column is ambiguous here, outside a sort or window key.**
 
-`SELECT id FROM a JOIN b USING (id)` raises 42702 where PostgreSQL answers, because USING merges the column and the reference is not ambiguous there. Qualify it (`a.id`). (ADR-0012 §5/#655)
+`SELECT id FROM a JOIN b USING (id)` raises 42702 where PostgreSQL answers, because USING merges the column and the reference is not ambiguous there; the same for a WHERE, a GROUP BY, a HAVING and a DISTINCT. Qualify it (`a.id`). In an ORDER BY or a window key the same reference BINDS THE MERGE and answers. (ADR-0012 §5/#655)
+
+**A bare SELECT * over a FULL JOIN … USING cannot be ordered by the merged column.**
+
+It raises 0A000 where PostgreSQL answers: the merged value is COALESCE of the two sides, computed by the projection the star expands into, and this planner materializes a computed sort key beside a NAMED select list. Name the columns, which answers; so does the same statement without the ORDER BY. The positional spelling is the same refusal. (ADR-0012 §5/#655)
+
+**A window key naming a FULL JOIN … USING merged column is refused.**
+
+It raises 0A000 where PostgreSQL answers: the merged value is a COALESCE and a window PARTITION BY / ORDER BY key here is a column name. Write the expression. (ADR-0012 §5/#655)
 
 **NATURAL JOIN is refused.**
 
