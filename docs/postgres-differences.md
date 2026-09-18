@@ -216,9 +216,13 @@ Unknown argument width leaves bigint results: totals beyond bigint raise 22003 v
 
 `2147483647 + 1` returns `2147483648` versus PostgreSQL 22003. Widening also permits ABS predicates at int4’s minimum. (ADR-0012 §5/#1070; int4-store-residual)
 
-**Text functions accept BYTES.**
+**Text functions over BYTES refuse, except `strpos`.**
 
-`upper(b)`, `lower(b)`, `trim(b)`, `reverse(b)`, `char_length(b)` and `strpos(bytea,bytea)` answer here versus PostgreSQL 42883. Functions read the bytes; character length counts bytes. (ADR-0012 §5/#583)
+`upper(b)`, `lower(b)`, `trim(b)`, `reverse(b)`, `replace(b,…)`, `starts_with(b,…)`, `split_part(b,…)`, `lpad(b,…)`, `repeat(b,…)` and `char_length(b)` raise 42883 here as they do on PostgreSQL. `strpos(bytea,bytea)` still answers, because `POSITION(sub IN b)` — which PostgreSQL DOES have over bytea — is rewritten into it; one spelling answering where the other refuses is the residue. `ENCODE`/`DECODE` are the supported bridge. (ADR-0012 §5/#583)
+
+**Text functions render a non-text COLUMN.**
+
+`upper(mac_col)`, `substr(date_col, 1, 4)`, `length(ipv4_col)` and `upper(int_col)` answer here versus PostgreSQL 42883: a column of another type is rendered as its text before a string function reads it, which is what makes the network-analytics shapes work. A numeric LITERAL in the same position is 42883 on both. (ADR-0012 §5/#500, #1056)
 
 **Planner column-name prefixes are reserved.**
 

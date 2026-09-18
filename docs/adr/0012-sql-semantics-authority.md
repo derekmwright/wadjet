@@ -2103,16 +2103,26 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      refusal is 0A000 at all six sites, and
      `coordinator.TestArcF3ExprTypingOnEveryArm`'s census asserts the SQLSTATE
      on three arms across nine sites.
-   - **A text-only function over a BYTES argument answers where PostgreSQL
-     raises 42883.** (Added 2026-09-05, #583.) `upper(b)`, `lower(b)`,
-     `trim(b)`, `reverse(b)`, `char_length(b)` / `character_length(b)` and
-     `strpos(bytea, bytea)` have no bytea overload on the server —
-     `function upper(bytea) does not exist` — and this engine answers the text
-     those bytes spell. `char_length` joined that list when `length(b)` was
-     given the byte count: the two spellings have one kernel, and a
-     `char_length` that kept counting runes would have made one expression
-     answer two numbers. It answers the byte count now, where the server
-     answers nothing at all.
+   - **A text-only function over a BYTES argument raises 42883.** (Added
+     2026-09-05, #583; CLOSED 2026-09-18, arc EX.) `upper(b)`, `lower(b)`,
+     `trim(b)`, `reverse(b)`, `replace(b, ...)`, `starts_with(b, ...)`,
+     `split_part(b, ...)`, `lpad(b, ...)`, `repeat(b, ...)` and `char_length(b)` /
+     `character_length(b)` have no bytea overload on the server —
+     `function upper(bytea) does not exist` — and this engine answered the text
+     those bytes spell. They refuse now, with the server's own code and message
+     shape, from a PLAN-TIME check over the argument's DECLARED type
+     (`expr.RefuseUnresolvableCall`, run from the binder so every arm reaches
+     one answer).
+
+     `strpos(bytea, bytea)` is the ONE that still answers, and deliberately:
+     `POSITION(sub IN b)` — which PostgreSQL DOES have over bytea — is
+     rewritten into `strpos` by the parser, so refusing `strpos` over bytes
+     would refuse a spelling the server answers. One spelling answering where
+     the other refuses is the residue, recorded in docs/postgres-differences.md.
+
+     `ENCODE` and `DECODE` are the bridge the entry below asked for and this
+     engine now has, in all three of PostgreSQL's formats (hex, base64,
+     escape), with `GET_BYTE` and `SET_BYTE` beside them.
 
      The functions the server DOES have over bytea agree since #583:
      `length` is the byte count — over a bare column as well as a derived
@@ -2121,13 +2131,13 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      by bytes, and `bytea || bytea` is bytea under OID 17. `text || bytea` is
      TEXT there and here: the server resolves that pair through
      `text || anynonarray`, and declaring it bytea was a wrong class this arc
-     briefly introduced and its review caught. Closing the rest needs a
-     PLAN-TIME
-     argument-type check every compile site reaches — the argument's declared
-     type is available to `expr.CompileWithColumnTypes` and not to
-     `expr.Compile` — and a per-row refusal would be the data-dependent shape
-     #627 just closed. The model is `exec.likeConstError`, which refuses at
-     kernel-resolution time from the column's declared type.
+     briefly introduced and its review caught. The plan-time
+     argument-type check the rest needed is `expr.RefuseUnresolvableCall`, run
+     from the binder's own walk (`physical.refuseInvalidRowFields`), which BOTH
+     `Plan` and `dagplan.PlanDistributed` reach before any stage exists — so the
+     refusal is one answer for every arm, and `expr.compileFuncCallNamed` keeps
+     the same call as the backstop for the doors that walk does not see
+     (2026-09-18, arc EX).
 
      TWO value divergences ride with it, both pinned by
      `wadjet.TestByteaFunctionsAnswerInBytes`.
@@ -4768,6 +4778,11 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     its operand through `expr.toString`, so `UPPER(b)` ANSWERS where
     PostgreSQL raises 42883 (#583, `ByteaTextFunctionOverBytes`).
 
+    (Corrected 2026-09-18, arc EX.) The second half is no longer true:
+    `UPPER(b)` is 42883 here now, from a plan-time check over the argument's
+    declared type, and `ByteaTextFunctionOverBytes`'s pin in the wire arm's
+    error list is deleted. The BYTES LITERAL half stands.
+
     (Corrected 2026-09-05, #583's second pass.) Two claims in this paragraph
     are no longer true and were stale when the fix landed: `b || b` returns
     **bytea under OID 17** now, not TEXT, and `OCTET_LENGTH(b)` declares
@@ -5293,6 +5308,18 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     - **DECIMAL** keeps its own grammar (ADR-0024 item 6) and is the only one
       with no RANGE failure: a literal past the Int128 carrier SATURATES into
       its place in the order rather than erroring (#462).
+    - **PORT and PROTOCOL** read their OWN input function, not the `integer`
+      they declare on the wire. (Added 2026-09-18, #1137, closing arc NT's
+      deferral 1.) PROTOCOL takes the IANA NAME `protocol_name()` prints —
+      `'udp'` is 17 — and neither takes int4's radix prefixes or underscores,
+      which the writer refuses; the range is the TYPE's, 0..65535 and 0..255.
+      They sat in the int32 arm because they are CARRIED in an int32, which is
+      a storage fact and not a grammar one, so `WHERE c_proto = 'udp'` was
+      22P02 while `CAST('udp' AS PROTOCOL)` answered 17, and
+      `WHERE c_port = '0x1bb'` MATCHED port 443. `kernel.NetworkIntLitText` is
+      the one reader, over `parquet.NetworkTextValue` — the same function the
+      CAST and every writer door read, which is what makes the one-grammar
+      claim hold at the comparison door as well.
 
     **Two SQLSTATEs, and they are different answers.** 22P02 for text that
     names no value, 22003 for a number the type cannot carry. The wording
@@ -5303,6 +5330,64 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     numeric->real cast names the numeric's DIGITS — so `real IN ('1e40',3.1)`
     says `"1e40"` and `real IN (1e40,3.1)` says the forty-one digits, both
     verified live.
+
+    **A CALL is resolved by its NAME and its ARGUMENTS, and every failure of
+    that is 42883.** (Added 2026-09-18, #1053 / #1056 / #583.) PostgreSQL
+    reports the wrong COUNT, a number in a text position and a bytea in a
+    text-only position with the identical code and message shape —
+    `function upper(unknown, unknown) does not exist`,
+    `function upper(integer) does not exist`,
+    `function upper(bytea) does not exist` — because they are one failure:
+    no overload takes these arguments. This engine answered all three. The
+    registry recorded no arity, so every body read `args[i]` defensively and
+    `semver_cmp('1.0.0')` answered NULL while `upper('a','b')` answered 'A'
+    with the extra argument dropped; a numeric literal reached a STRING vec
+    kernel with no text arena and took the query to XX000; and a BYTES operand
+    was read through `expr.toString` as whatever text those bytes spell.
+
+    `expr.Signature` declares the arity of every registered builtin — the
+    table is closed against the registry in BOTH directions — and the argument
+    DOMAIN wherever PostgreSQL restricts one, in three values: any, text, text
+    or bytes. `expr.RefuseUnresolvableCall` is the check, run from the binder's
+    own walk so every arm reaches ONE answer, with
+    `expr.compileFuncCallNamed` as the backstop for the doors that walk does
+    not see.
+
+    **What is deliberately NOT refused, and why.** A COLUMN of a non-text type
+    in a text position: a DATE, a TIMESTAMP, an IPV4, a MAC and an integer
+    column are RENDERED as their text before a string function reads them
+    (`expr.stringInputFuncs`, #273/#500/#544/#568), so `UPPER(mac_col)` and
+    `SUBSTR(date_col, 1, 4)` answer here where PostgreSQL raises 42883. That is
+    the SUPERSET class this ADR already records, and it is what the
+    network-analytics shapes are built out of; narrowing it would delete a
+    documented feature rather than close a defect. A numeric LITERAL in the
+    same position is 42883 on both engines, because there the engine answered
+    an internal error rather than a value. BYTES is the one declared type that
+    IS refused, because reading bytes as text is a wrong VALUE with #570's
+    embedded-NUL hazard behind it.
+
+    A second exclusion is mechanical: `batch.TypeBool` is ZERO, so a
+    `parquet.Column` carrying no type information is indistinguishable from one
+    declaring boolean, and a declaration layer that answers Decided from such a
+    column would hand this check a boolean for every column it knows only the
+    name of. BOOL is therefore excluded from the negative side of the domain
+    test (`expr.trustedArgType`); `UPPER(bool_col)` is not refused, while
+    `UPPER(TRUE)` is.
+
+    **The CAST to an integer type is TWO casts, and the operand's DECLARATION
+    chooses.** (Added 2026-09-18, #1141.) `'2.5'::integer` is 22P02 — int4in
+    has no fractional part, and so is `'2.0'`, `'26.7'`, `'-0.4'` and `'1e3'`,
+    measured — while `numeric_col::integer` ROUNDS half away from zero and
+    `float8_col::integer` rounds half to EVEN. A DECIMAL and a STRING arrive at
+    the evaluator in the SAME Go box, so choosing from the box gave every
+    quoted fractional literal the rounding cast: `CAST('2.5' AS INTEGER)`
+    answered 3 and reached REST that way through `INSERT … SELECT`.
+    `expr.castOperandDeclaresText` decides from the EXPRESSION — a quoted
+    literal, a STRING column, a cast to a text type, a call whose registered
+    return type is fixed STRING, or a CASE/COALESCE all of whose arms are one
+    of those — and a text operand reads `castTextToInt`, the destination's
+    input function and nothing else. There is no float fallback: the one that
+    stood there claimed the server rounds `'26.7'::integer` to 27.
 
     **One predicate serves every site**, which is the property rather than the
     coverage: `kernel.QuotedLitStatus(typ, text)` is read by the plan-time

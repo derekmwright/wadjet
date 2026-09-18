@@ -2783,7 +2783,32 @@ FROM flow_logs
 
 ## Built-in Functions
 
-Wadjet includes 379 built-in scalar functions across several categories.
+Wadjet includes 383 built-in scalar functions across several categories.
+
+### A call is resolved by its name AND its arguments
+
+Every function below takes the number of arguments its signature shows:
+`UPPER(s)` exactly one, `LPAD(s, n [, pad])` two or three, `CONCAT(a, b, ...)`
+one or more. A call with any other count is **SQLSTATE 42883**, PostgreSQL's
+`undefined_function`, reported at plan time with the same message shape the
+server uses:
+
+```
+SELECT UPPER('a', 'b');   -- ERROR: function upper(unknown, unknown) does not exist
+SELECT SUBSTR('abc');     -- ERROR: function substr(unknown) does not exist
+```
+
+A **numeric literal in a text position** is the same refusal, because no
+overload takes it — `UPPER(1)`, `LPAD(1, 3, '0')` and `REPLACE(name, 1, 'x')`
+are each 42883. `CONCAT`, `CONCAT_WS` and `||` are the exception and render any
+argument, exactly as PostgreSQL does: `CONCAT(1, name)` is `1<name>`.
+
+A **COLUMN** of a non-text type is not refused: a `DATE`, a `TIMESTAMP`, an
+`IPV4`, a `MAC` or an integer column is rendered as its text before a string
+function reads it, so `UPPER(mac_col)` and `SUBSTR(date_col, 1, 4)` answer here
+where PostgreSQL raises. That is a deliberate superset, recorded in
+[ADR-0012](adr/0012-sql-semantics-authority.md). `BYTES` is the one exception:
+see the Encoding Functions section.
 
 ### String Functions
 
@@ -3124,7 +3149,7 @@ SELECT host, agent_version
 | `IP_TO_STRING(ip)` | Convert binary IP to string | `IP_TO_STRING(src_ip)` |
 | `CIDR_CONTAINS(cidr, ip)` | Test if IP is in CIDR range | `CIDR_CONTAINS('10.0.0.0/8', src_ip)` |
 | `IP_VERSION(ip)` | Return IP version (4 or 6) | `IP_VERSION(src_ip)` |
-| `MASK_IP(ip)` | Mask an IP address | `MASK_IP(src_ip)` |
+| `MASK_IP(ip, octets)` | Mask the last `octets` octets of an IPv4 address, or the last `octets` groups of an IPv6 one | `MASK_IP(src_ip, 1)` |
 | `MAC_TO_STRING(mac)` | Convert binary MAC to string | `MAC_TO_STRING(src_mac)` |
 | `IP_SUBNET(ip)` | Extract subnet from IP | `IP_SUBNET(src_ip)` |
 | `IP_NETMASK(cidr)` | Extract netmask from CIDR | `IP_NETMASK(src_cidr)` |
@@ -3593,6 +3618,19 @@ See [data-types.md](data-types.md) §Timestamp, "One rendering".
 | `TO_BASE(n, base)` | Convert int to string in given base, SIGNED — unlike `TO_HEX`, which renders the unsigned pattern. `base` outside `[2, 36]` is NULL | `TO_BASE(255, 16)` → `'ff'`, `TO_BASE(-255, 16)` → `'-ff'` |
 | `TO_BASE32(s)` | Encode string to Base32 | `TO_BASE32('hello')` → `'NBSWY3DP'` |
 | `FROM_BASE32(s)` | Decode Base32 string | `FROM_BASE32('NBSWY3DP')` → `'hello'` |
+| `ENCODE(b, format)` | Render a `BYTES` value as TEXT. `format` is `hex`, `base64` or `escape` (a printable byte as itself, a backslash doubled, everything else as a three-digit octal escape). Any other format is SQLSTATE 22023 | `ENCODE(payload, 'hex')` → `'6869'`, `ENCODE(payload, 'escape')` → `'\377\376\000A'` |
+| `DECODE(s, format)` | Read TEXT back into `BYTES`, the inverse of `ENCODE`. Input the format cannot read is SQLSTATE 22023 — not NULL, which is where this pair differs from `FROM_HEX` | `DECODE('6869', 'hex')` → the two bytes `hi` |
+| `GET_BYTE(b, n)` | The `n`th byte of a `BYTES` value as a number, 0-based. An index outside the value is SQLSTATE 2202E naming the valid range | `GET_BYTE(payload, 0)` → `104` |
+| `SET_BYTE(b, n, v)` | A copy of `b` with its `n`th byte set to `v & 255`. The index is bounded the same way `GET_BYTE`'s is | `SET_BYTE(payload, 0, 65)` → the bytes `Ai` |
+
+`ENCODE` and `DECODE` are the bridge between the text family and the bytes
+family. The text-only functions — `UPPER`, `LOWER`, `TRIM`, `REVERSE`,
+`REPLACE`, `STARTS_WITH`, `SPLIT_PART`, `LPAD`, `REPEAT`, `CHAR_LENGTH` and the
+regular-expression family — **refuse a `BYTES` argument** with SQLSTATE 42883,
+which is what PostgreSQL answers for `upper(bytea)`; reading those bytes as
+whatever text they spell is a wrong value, not a convenience. The functions
+PostgreSQL DOES have over `bytea` keep working over `BYTES`: `LENGTH`,
+`OCTET_LENGTH`, `BIT_LENGTH`, `SUBSTRING`, `MD5`, `POSITION` and `||`.
 
 ### JSON Functions
 
