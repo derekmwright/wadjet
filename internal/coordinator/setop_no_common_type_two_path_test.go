@@ -232,8 +232,9 @@ func setOpNoTypeCells() []setOpNoTypeCell {
 		// 22P02). Wadjet's literal arm produces a STRING box, and nine of the
 		// 22 vector types have no text arm to store it in
 		// (batch.VectorAcceptsText, which is checked against SetValue itself):
-		// BOOL, INT32, INT64, FLOAT32, FLOAT64, TIMESTAMP, PORT, PROTOCOL,
-		// DURATION.
+		// BOOL, INT32, INT64, FLOAT32, FLOAT64, TIMESTAMP and DURATION.
+		// PORT and PROTOCOL were in that list until #1137 gave their vectors
+		// the type's own text form; see the two cells below.
 		//
 		// Measured at ee778066, every one of them failed the #361 silent-write
 		// guard with NO SQLSTATE — "batch: cannot store string into TIMESTAMP
@@ -252,10 +253,6 @@ func setOpNoTypeCells() []setOpNoTypeCell {
 			sql: `SELECT c_bool AS v FROM typemx WHERE id < 3 UNION ALL ` +
 				`SELECT 'true' FROM typemx WHERE id = 0`,
 			wantErr: `resolves to BOOL and arm 2 selects a QUOTED literal`},
-		{issue: "#648", name: "a_quoted_literal_beside_a_port",
-			sql: `SELECT c_port AS v FROM typemx WHERE id < 3 UNION ALL ` +
-				`SELECT '443' FROM typemx WHERE id = 0`,
-			wantErr: `resolves to PORT and arm 2 selects a QUOTED literal`},
 		{issue: "#648", name: "a_quoted_literal_beside_a_bigint",
 			sql: `SELECT c_i64 AS v FROM typemx WHERE id < 3 UNION ALL ` +
 				`SELECT '7' FROM typemx WHERE id = 0`,
@@ -274,6 +271,23 @@ func setOpNoTypeCells() []setOpNoTypeCell {
 		{issue: "#648", name: "ctl_an_unquoted_literal_beside_a_port",
 			sql: `SELECT c_port AS v FROM typemx WHERE id < 3 UNION ALL ` +
 				`SELECT 443 FROM typemx WHERE id = 0`,
+			wantRows: 4},
+		// PORT AND PROTOCOL LEFT THE REFUSED LIST, and this cell is the proof.
+		// They were in it because their VECTOR had no text arm — the same
+		// reason the other seven are — and they read their own text form now:
+		// the IANA name for PROTOCOL, decimal digits for PORT, held to the
+		// type's range (#1137). PostgreSQL answers this shape for its own
+		// types, so agreeing is the fix. The other seven are unchanged, and
+		// their cells above still hold. A literal the TYPE refuses is 22P02
+		// rather than this table's 0A000 — a different class, so it is
+		// asserted below the table rather than inside it.
+		{issue: "#1137", name: "a_quoted_literal_beside_a_port_now_answers",
+			sql: `SELECT c_port AS v FROM typemx WHERE id < 3 UNION ALL ` +
+				`SELECT '443' FROM typemx WHERE id = 0`,
+			wantRows: 4},
+		{issue: "#1137", name: "a_protocol_name_beside_a_protocol_now_answers",
+			sql: `SELECT c_proto AS v FROM typemx WHERE id < 3 UNION ALL ` +
+				`SELECT 'udp' FROM typemx WHERE id = 0`,
 			wantRows: 4},
 
 		// --- PostgreSQL matches the pair and this engine has NO CARRIER ----
@@ -404,4 +418,33 @@ func TestASetOperationWithNoCommonTypeIsRefusedAtPlanTime(t *testing.T) {
 			}
 		})
 	}
+
+	// A literal the resolved TYPE refuses is 22P02, not this table's 0A000 —
+	// a different class, so it is asserted here rather than inside the table.
+	// PORT's text form is decimal digits and has no radix prefix, which is
+	// what the writer takes and what #1137 made the comparison door take; a
+	// set operation is one more door onto the same grammar.
+	t.Run("#1137/a_quoted_literal_the_port_type_refuses", func(t *testing.T) {
+		const sql = `SELECT c_port AS v FROM typemx WHERE id < 3 UNION ALL ` +
+			`SELECT '0x1bb' FROM typemx WHERE id = 0`
+		for _, arm := range []struct {
+			name string
+			run  func() (*oracle.Result, error)
+		}{
+			{"single", func() (*oracle.Result, error) { return tmdRunSingle(ctx, single, sql) }},
+			{"dag", func() (*oracle.Result, error) { return tmdRunDAG(ctx, coord, sql) }},
+			{"dag-shuffled", func() (*oracle.Result, error) { return tmdRunDAG(ctx, coordB, sql) }},
+		} {
+			res, err := arm.run()
+			if err == nil {
+				t.Errorf("%s arm ANSWERED %d rows; `0x1bb` names no PORT and the writer "+
+					"refuses the same text\n  SQL: %s", arm.name, len(res.Rows), sql)
+				continue
+			}
+			if got := sqlerr.StateOf(err); got != "22P02" {
+				t.Errorf("%s arm: SQLSTATE %q, want 22P02\n  err: %v\n  SQL: %s",
+					arm.name, got, err, sql)
+			}
+		}
+	})
 }
