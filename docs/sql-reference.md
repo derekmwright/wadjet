@@ -2558,6 +2558,14 @@ a `ROW` field path — is computed into a column of its own before the window
 runs, and a key the engine cannot resolve at all is a loud refusal rather than
 a silent single partition.
 
+**One exception, on the distributed binary.** A qualified term naming a
+correlated `LATERAL` arm binds the OUTER relation's column of that bare name
+when `wadjetd` runs the query through its stage DAG; the embedded binary and
+PostgreSQL bind the lateral body's own. It is recorded in
+[PostgreSQL differences](postgres-differences.md) with its mechanism. The same
+exception covers an expression key whose two leaves name two different
+relations, which binds one of them for both leaves there.
+
 ### The type a window aggregate answers
 
 `SUM(x) OVER (…)` declares and answers exactly what `SUM(x) … GROUP BY`

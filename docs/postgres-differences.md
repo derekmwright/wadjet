@@ -8,6 +8,18 @@ PostgreSQL 17.11 is the SQL semantics authority. Its wire protocol is the contra
 
 `AVG` over an integer or a `DECIMAL` column declares `numeric` with no fixed modifier, as PostgreSQL does, and the value is the same number; the rendered text carries scale 4 for an integer input and `min(s+4, 38)` for a decimal one, where PostgreSQL prints up to sixteen significant digits. `AVG(c_i32)`: wadjet `7497.6450`; PostgreSQL `7497.6449875724937862` for the same rows. (ADR-0012 §9/AVG)
 
+**A reference into a decorrelated LATERAL arm reads the outer relation on the distributed binary.**
+
+A qualified reference into a correlated `LATERAL` arm — a window `PARTITION BY`
+or `ORDER BY`, a sort key, a select item, or a star — binds the OUTER
+relation's column of that bare name on `wadjetd`'s distributed paths, where the
+embedded binary and PostgreSQL bind the lateral body's own. `SELECT o.id AS a,
+l.id AS b FROM lat_ord o, LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE
+i.order_id = o.id) l ORDER BY a, b`: wadjetd `1,1 | 1,1 | 2,2 | 2,2`; wadjet
+and PostgreSQL `1,1 | 1,2 | 2,3 | 2,4`. The decorrelated body's projection
+emits no stage, so the join publishes the body's inner-scan spelling rather
+than the arm's alias. (ADR-0026 §8j, #1126)
+
 **Decimal statistics use double precision.**
 
 Decimal statistics (`STDDEV`, `VARIANCE`, `CORR`, `COVAR`, `MEDIAN`, `PERCENTILE`) use float64; PostgreSQL uses numeric. Fixed-point roots and running means are unavailable. (ADR-0012 §9/statistics)

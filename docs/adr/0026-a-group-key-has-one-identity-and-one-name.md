@@ -2507,16 +2507,28 @@ qualifier-strip step fails nine top-level tests across `internal/engine/exec`
 and `internal/planner/physical` — the hash join's key assignment, the
 sort-merge join's keys, the hash aggregate's group keys, a projection over a
 self-join and the sort's own keys. Over a join's own output its first two steps
-ARE that convention read back. What becomes unreachable is the PLAN-TIME
-erasure in front of it, and — corollary 2 — a reference reaching it in a stream
-whose carrier the planner has not established.
+ARE that convention read back.
+
+**What became unreachable is ONE thing, and the second is owed.** The PLAN-TIME
+erasure is gone: no pass widens a qualified reference to a bare one because the
+folded type map answers the bare name. Corollary 2's precondition — that a
+reference reaches the resolver only in a stream whose carrier the planner has
+ESTABLISHED — is the contract phase 2 states, not yet a mechanical guarantee.
+It holds wherever a producer contract exists (a base scan's own columns, a
+derived arm's rename, a set operation's own list since §8i item 1) and it does
+NOT hold for a decorrelated LATERAL arm on the three DAG arms, where the strip
+still adjudicates and binds the outer occurrence — measured in the seam's own
+table below, retained and pinned per arm. Nothing enforces the precondition
+structurally today; what enforces it is the gate.
 
 **What corollary 2 still owes, measured.** The seam's own table enumerates
 every consumer against every producer on five arms
-(`coordinator.TestWKASeamConsumerBindsItsOwnOccurrence`, 39 cells, 195 (cell,
+(`coordinator.TestWKASeamConsumerBindsItsOwnOccurrence`, 50 cells, 250 (cell,
 arm) results against live PostgreSQL 17.11; the wire half is
-`pgwire.TestWKTheWireDeclaresTheSeamsOwnColumns`). 173 agree. The 22 that do
-not are ONE COLUMN of it, the LATERAL producer:
+`pgwire.TestWKTheWireDeclaresTheSeamsOwnColumns`). 216 agree. The 34 that do
+not are one COLUMN of it, the LATERAL producer, and one KEY SHAPE, an
+expression whose two leaves name two occurrences — both DAG-only, both
+`distributed`. The LATERAL column:
 
 - **five consumers × three DAG arms.** A decorrelated body's Project emits no
   stage, so the DAG's join publishes the body's INNER SCAN spelling where the
@@ -2538,6 +2550,15 @@ not are ONE COLUMN of it, the LATERAL producer:
 - **the contested lifted predicate on the two single arms**, which is #1130;
   the three DAG arms answer PostgreSQL's rows. Not a key-binding question —
   ADR-0021 §1q measured both available routes out.
+- **an EXPRESSION key whose two LEAVES name two occurrences**, on the three DAG
+  arms. The mint gives the RESULT a name nothing else owns and says nothing
+  about the leaves, which the ordinary reference rules bind: over two derived
+  arms publishing `w`, `PARTITION BY x.w + y.w` computes `y.w + y.w` where the
+  answer is `x.w + y.w`, and the plain `x.w + y.w AS k` — no window at all —
+  computes `x.w + x.w`, which localises it to the join-arm REFERENCE consumer
+  rather than to the window. Corollary 1 reaches a key that IS a reference; a
+  key that CONTAINS one is the same question one layer down. Right on the two
+  single arms, `distributed`, pinned per arm (measured by the round-1 review).
 
 **A PLANNER-MINTED window inherited all three, and that is why #1019's rewrite
 was withdrawn.** Arc L1 built the per-outer-row LATERAL bound on a minted
@@ -3090,7 +3111,7 @@ The design, with every measurement, is
 
 | gate | what it holds |
 |---|---|
-| `coordinator.TestWKASeamConsumerBindsItsOwnOccurrence` | §8j's rule: the name-ownership seam enumerated ONCE — {window PARTITION BY, window ORDER BY, window ARGUMENT, sort key, join-arm reference, star} × {base scan, derived block, LATERAL, set operation, grouped block, nested block} + {lifted predicate} × {LATERAL} × three spellings, on five arms against live PostgreSQL 17.11. 39 cells, 195 (cell, arm) results; every producer publishes a name the outer relation also publishes, so the ownership question is live in every cell |
+| `coordinator.TestWKASeamConsumerBindsItsOwnOccurrence` | §8j's rule: the name-ownership seam enumerated ONCE — {window PARTITION BY, window ORDER BY, window ARGUMENT, sort key, join-arm reference, star} × {base scan, derived block, LATERAL, set operation, grouped block, nested block} + {lifted predicate} × {LATERAL} × three spellings, plus the MIRROR spelling that keys the window on the OUTER occurrence and the expression key whose two leaves name two occurrences, on five arms against live PostgreSQL 17.11. 50 cells, 250 (cell, arm) results; the mirror is what makes the table FAIL at `aed447e3` — a corpus keyed only on the arm the plan publishes bare answers correctly by luck there |
 | `pgwire.TestWKTheWireDeclaresTheSeamsOwnColumns` | §8j on the wire: RowDescription NAMES and type OIDs for the same consumers, the window's own declaration, and the reserved-name property |
 | `server.TestArcWKAReboundKeyOverAPolicedColumnReadsTheMask` | §8j's masking class on all nine doors: a window or sort key over a MASKED column has one partition under the mask and eight singletons under the stored values; the mask's answer, no stored policed value anywhere, and a non-vacuous (cell, door) count |
 | `coordinator.TestO1AStarOverAJoinPublishesTheQueryNotThePlan` | the seam: 74 shapes — inner / left / right / full / cross / comma / self / three-way / derived block / CTE × no, selective and zero-row predicates × both FROM orders × `*`, `t.*`, `*` beside an item × no sort, a written key, a positional key, DISTINCT, LIMIT × a derived arm's ROOT (Sort, LIMIT, DISTINCT, GROUP BY, set operation) × its ITEM KIND (aliased, unaliased expression, aggregate, literal, CAST) — on FIVE arms against PostgreSQL 17.11 |

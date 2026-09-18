@@ -137,7 +137,11 @@ two arms that both publish `w` can still bind one leaf to the wrong occurrence
 and then compute the wrong value into a correctly-named slot. `o.id + 0` over
 one contested pair and J2's `control: an expression over TWO window arms` are
 the nearest corpus shapes and neither is that spelling; the leaf-binding premise
-is corollary 1's, not the mint's, and phase 2 adds the cell.
+is corollary 1's, not the mint's. The cell is in the seam's own table as
+`winpart/exprTwoOccurrences`, with `winarg/exprTwoOccurrences` and
+`armref/exprTwoOccurrences` beside it: all three answer on `single` and
+`spilled512k` and bind ONE occurrence's `w` for both leaves on the three
+DAG arms, so they are pinned per arm as `distributed` (§(e) item 12).
 
 M2 has no measured wrong cell. Its bound is that it cannot be reached FROM a
 name — and routing a name down it is precisely the repair that was measured
@@ -533,15 +537,22 @@ join's keys, the hash aggregate's group keys, a projection over a self-join and
 the sort's own keys — every operator resolves a name this way, and M2's
 consumers need it. It is not deleted and not narrowed globally.
 
-What changes is the PRECONDITION in front of it. Two things become unreachable
-rather than one:
+What changes is the PRECONDITION in front of it, and **exactly one of the two
+things is unreachable at this tip**:
 
-1. the PLAN-TIME erasure — `bindWindowColRef` widening a qualified reference to
-   a bare one because the folded map answers the bare name (corollary 1);
-2. a reference reaching the resolver in a stream where the planner has NOT
-   established the carrier — the decisive cell. There the planner translates,
-   supplies or refuses BEFORE the lookup, so the strip never adjudicates an
-   ownership question it cannot see.
+1. **Unreachable.** The PLAN-TIME erasure — `bindWindowColRef` widening a
+   qualified reference to a bare one because the folded map answers the bare
+   name (corollary 1). No pass does that any more.
+2. **Owed, not achieved.** A reference reaching the resolver in a stream where
+   the planner has NOT established the carrier. Corollary 2 says the planner
+   translates, supplies or refuses BEFORE the lookup; that is the contract
+   phase 2 states, and it holds wherever a producer contract exists — a base
+   scan's own columns, a derived arm's rename, a set operation's own list since
+   ADR-0026 §8i item 1. It does NOT hold for a decorrelated LATERAL arm on the
+   three DAG arms: the decisive cell still reaches the strip, which still binds
+   the outer occurrence, measured in the seam's own table and in §(e) item 9.
+   Nothing enforces the precondition structurally today; what enforces it is
+   the gate, and closing the gap is the rule's DAG half.
 
 The suffix scan stays the resolver's one guessing step, bounded by its decline
 on more than one match, and is where a phase-2 review should look next.
@@ -557,15 +568,16 @@ Corollary 1, and the gates that hold the rule. Measured at the arc's tip:
 | the change | `physical.resolveWindowKeys` keeps a qualified PARTITION BY / ORDER BY term's spelling wherever more than one occurrence of the window's input publishes its bare name (`windowArgKeepsItsQualifier`, the window ARGUMENT's own rule since #742 round 4) |
 | pins DELETED | the seven of `TestArcL1AWindowKeyBindsItsOwnJoinArm` and `TestArcL1QualifyAnswersDuckDBOnEveryArm`'s `overJoin`, on all five arms — 40 (cell, arm) pairs |
 | the three that broke every prior repair | #975, #658, #770 green |
-| the seam, enumerated once | `coordinator.TestWKASeamConsumerBindsItsOwnOccurrence` — 39 cells × 5 arms, 173 of 195 agree with PostgreSQL 17.11 |
+| the seam, enumerated once | `coordinator.TestWKASeamConsumerBindsItsOwnOccurrence` — 50 cells × 5 arms, 216 of 250 agree with PostgreSQL 17.11, and it FAILS at base `aed447e3` |
 | the wire half | `pgwire.TestWKTheWireDeclaresTheSeamsOwnColumns` |
 | the masking class | `server.TestArcWKAReboundKeyOverAPolicedColumnReadsTheMask` — 72 (cell, door) pairs answer the mask, 9 refuse the denied column, over nine doors |
 | ADR-0026 §8j | rewritten from NOT SETTLED to the rule, §4 and §9 cross-referenced |
 
 Corollary 2's precondition is STATED and its disposition ladder is named to the
-functions that implement each step, but the one family that needs the TRANSLATE
-step — a reference into a decorrelated LATERAL arm on the three DAG arms — is
-not closed here. It is right on the engine's own arm and wrong only on the
+functions that implement each step, but it is a contract rather than a
+mechanical guarantee: the one family that needs the TRANSLATE step — a
+reference into a decorrelated LATERAL arm on the three DAG arms — still reaches
+the strip and is not closed here. It is right on the engine's own arm and wrong only on the
 distributed ones, so under engine-first it is pinned per arm with its mechanism
 in the seam's table and carried as a `distributed` filing candidate. §(e) item 9
 records it.
