@@ -262,6 +262,19 @@ func ResolveStarJoinOrdinalSortKeys(n *Node) {
 					continue
 				}
 				src := items[k.Position-1]
+				if _, plain := src.ASTExpr.(*plansql.ColRef); !plain {
+					n.MergedUsingOrdinalKey = true
+					// A MINTED item — a `JOIN … USING` FULL merge's
+					// `COALESCE(l.c, r.c)` is the only one this expansion
+					// makes. Its VALUE exists only in this projection, and
+					// the Sort below reads the join's stream by NAME, so
+					// rewriting the position onto the expression produced
+					// `sort: key column "coalesce(…)" does not exist in the
+					// input schema` at EXECUTION. Left unresolved, the
+					// ordinal is refused at PLAN time instead, which is the
+					// same fact a client can act on (review round 1, B1).
+					continue
+				}
 				cur.OrderBy[i].Column = src.Expr
 				if cur.OrderBy[i].Column == "" {
 					cur.OrderBy[i].Column = src.Column

@@ -558,6 +558,14 @@ func RefuseUnmergedJoinUsingStar(n *Node) error {
 	if n == nil {
 		return nil
 	}
+	if n.MergedUsingOrdinalKey {
+		return sqlerr.New("0A000",
+			"a POSITIONAL `ORDER BY` term naming the merged column of a FULL JOIN ... USING "+
+				"is not supported: that column's value is COALESCE of the two sides and is "+
+				"computed by the projection this star expands into, while the sort reads the "+
+				"join's own stream. Name the merged expression, or write the join condition "+
+				"with ON")
+	}
 	if n.UnmergedJoinUsingStar {
 		return sqlerr.New("0A000",
 			"`SELECT *` over a JOIN ... USING is not supported for this shape: USING merges "+

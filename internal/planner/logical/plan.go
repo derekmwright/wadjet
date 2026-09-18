@@ -334,6 +334,17 @@ type Node struct {
 	// both planner entries, the way `RefuseUnappliedColumnAliasLists` does
 	// for a column-alias list the same pass could not apply.
 	UnmergedJoinUsingStar bool
+	// MergedUsingOrdinalKey marks a Project whose bare `*` STATED a
+	// `JOIN … USING` merge and below which a POSITIONAL sort key names the
+	// merged column — the one star item that is a MINTED expression (a FULL
+	// join's `COALESCE(l.c, r.c)`) rather than a reference.
+	//
+	// Its value exists only in this projection and the Sort below reads its
+	// input by NAME, so rewriting the position onto the expression produced an
+	// EXECUTION-time `key column "coalesce(…)" does not exist in the input
+	// schema`. The marker turns it into the plan-time refusal that says so
+	// (review round 1, B1).
+	MergedUsingOrdinalKey bool
 	// StarLiftedRefCols, on a JOIN node, names slots the LATERAL lowering
 	// materialized so a LIFTED correlated predicate could be evaluated — and
 	// which a STAR must not publish, but which the join must still EMIT.

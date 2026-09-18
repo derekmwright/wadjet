@@ -191,6 +191,22 @@ func hiddenSortProjection(ob plansql.OrderByItem, child, project *Node, name str
 			// expanded (ADR-0026 §9), one pass later than this one, so the
 			// list a hidden key could ride beside does come to exist. Lifting
 			// the refusal is a measured follow-up, not a comment change.
+			if subtreeJoinCarriesUsing(child) {
+				// The one computed key this engine MINTS rather than reads
+				// from the query: a FULL `JOIN … USING` merges its joined
+				// column to `COALESCE(l.c, r.c)`, and a bare `ORDER BY c`
+				// over such a join is bound to that expression
+				// (plansql.bindMergedUsingKeys) precisely so it is not bound
+				// to the left arm, whose NULL is the row the merge took from
+				// the other side. The bound below is the one that stops it
+				// here, and naming the construct is what a client can act on.
+				return Projection{}, orderByError(ob, "0A000",
+					"a bare `SELECT *` over a FULL JOIN ... USING cannot be ORDERED BY the "+
+						"merged column: its value is COALESCE of the two sides, computed by the "+
+						"projection the star expands into, and this builder materializes a "+
+						"computed sort key beside a named SELECT list, which a star-only list "+
+						"is not. Name the columns, or write the join condition with ON")
+			}
 			return Projection{}, orderByError(ob, "0A000",
 				"`SELECT *` over more than one relation cannot carry a computed sort key — name the columns, or select the sort expression")
 		}

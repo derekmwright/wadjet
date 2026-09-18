@@ -169,6 +169,14 @@ done:
 			return nil, err
 		}
 		left.OrderBy = orderBy
+		// The statement's ORDER BY is read HERE, above the set-operation arm,
+		// so the merged-key binding has to run here too: the call inside the
+		// arm sees an empty OrderBy. Running it twice is a no-op — a key it
+		// rewrote is qualified, and this pass only ever touches a BARE one
+		// (using_merged_keys.go).
+		if err := bindMergedUsingKeys(left); err != nil {
+			return nil, err
+		}
 	}
 
 	// LIMIT and OFFSET, in either order, each at most once. PostgreSQL and
@@ -398,6 +406,13 @@ func (p *selectParser) parseSingleSelect() (*SelectInfo, error) {
 		}
 		info.Qualify = qualifyExpr.String()
 		info.QualifyExpr = qualifyExpr
+	}
+
+	// A bare sort or window key naming a column a RIGHT or FULL
+	// `JOIN … USING` MERGES binds the merge, not the left arm
+	// (using_merged_keys.go).
+	if err := bindMergedUsingKeys(info); err != nil {
+		return nil, err
 	}
 
 	return info, nil
