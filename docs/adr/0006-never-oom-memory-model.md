@@ -1,6 +1,6 @@
 # ADR-0006: Never-OOM memory — shared pool, ownership ledger, spill-everywhere
 
-Status: Accepted (accounting overhaul landed 2026-05-30, 35f6730; recorded 2026-07-25; amended 2026-08-17, 2026-09-03 and 2026-09-04 — see Amendments)
+Status: Accepted (accounting overhaul landed 2026-05-30, 35f6730; recorded 2026-07-25; amended 2026-08-17, 2026-09-03, 2026-09-04 and 2026-09-18 — see Amendments)
 
 ## Context
 
@@ -420,3 +420,46 @@ the build side were rejected. The bloom stays valid for the IN-MEMORY probe
 path, whose key set is exactly what the index holds, so what declines is the
 pushdown and not the filter (`exec.TestASpilledBuildDoesNotPublishItsBloom`).
 
+### 2026-09-18 (arc JR): an outer join's ON RESIDUAL is evaluated AT the join, and a keyless outer join is not a cross join
+
+Two positions this arc settled, both about WHERE a predicate runs and therefore
+about which build the memory model has to account for.
+
+**The residual's evaluation point.** PostgreSQL evaluates ANY `ON` expression
+for any join kind. An INNER join may lift a non-equality conjunct into a filter
+ABOVE the join, because an inner join has no padded rows to lose; an OUTER join
+may not, and may not push it into the preserved side's scan either — both
+delete rows the join owes. The conjunct is therefore evaluated **at the join,
+per probe row against each candidate build row, before the padding is
+decided**: a probe row whose whole candidate chain fails the residual is
+UNMATCHED and a LEFT/FULL join still emits it NULL-padded, and a build row
+counts as matched only when some probe row passed BOTH the key and the
+residual, which is what the RIGHT/FULL unmatched flush consults.
+
+That point is not negotiable, so the only question left is what may be
+evaluated there. The answer is the ENGINE'S OWN EXPRESSION COMPILER — the same
+`expr.Compile` the inner join's lifted filter runs above the join — rather than
+a second, smaller interpreter beside it. A seam with two evaluators has two
+semantics, and which one a query reaches is then decided by its join kind
+(#1153: a `CAST`, a function call and `LIKE` were a plan refusal on all three
+outer kinds and answered on the inner one). What remains unevaluable is a
+predicate whose value depends on a RELATION the join does not have — a subquery
+in `ON` — and that refuses loudly, naming the construct.
+
+**A keyless outer join is a hash join, not a cross join.** The 2026-09-03
+amendment above says grace partitioning requires a routed probe, and that a
+CROSS join's does not route. An outer join whose `ON` contains no bare-column
+equality is keyless, which LOOKS like the same shape and is not: the build
+degenerates to ONE empty-key chain, the probe still looks that key up, so
+`probeRoutesByPartition` (`JoinType != CrossJoin`) holds and the build
+grace-partitions, evicts and spills exactly as a keyed one does. Measured at
+the boundary: the keyless outer residual ANSWERS at the 256 KiB budget where
+#832's cross join refuses, both cells in the type-matrix spill sweep
+(`join_residual_keyless_at_the_cross_join_budget` beside
+`join_computed_wide_refuses_when_the_build_does_not_fit`).
+
+The cross join's refusal is unchanged, and so is its reason: an INNER join on
+an expression has its ON lifted into a filter above a CROSS join, whose probe
+reads every build row, so its build must fit the budget and says so loudly when
+it cannot. Widening what a residual may contain does not move that boundary —
+it moves shapes off the refusal and onto the routed-probe side of it.
