@@ -36,18 +36,28 @@ func TestACallResolvesByItsArgumentsOrIs42883(t *testing.T) {
 		want  any
 		state string
 		pg    string
+		// msg is a substring the refusal must carry. It is set where the
+		// server's sentence is one this engine reproduces exactly; two
+		// families deliberately differ and are recorded rather than asserted
+		// (the arc's notes, residual 7): PostgreSQL names the CONSTRUCT's
+		// underlying function for `TRIM` (`pg_catalog.btrim`) where this
+		// engine names the spelling a user can write, and it resolves an
+		// `unknown` argument to the type of its closest candidate overload
+		// (`replace(bytea, bytea, bytea)`) where this engine has no candidate
+		// list to resolve against and says `unknown`.
+		msg string
 	}{
 		// --- #1053: the COUNT -------------------------------------------
 		{name: "upper_two_args", sql: `SELECT UPPER('a','b') AS v`, state: "42883",
-			pg: `42883 function upper(unknown, unknown) does not exist`},
+			pg: `42883 function upper(unknown, unknown) does not exist`, msg: `function upper(unknown, unknown) does not exist`},
 		{name: "upper_no_args", sql: `SELECT UPPER() AS v`, state: "42883",
 			pg: `42883 function upper() does not exist`},
 		{name: "abs_two_args", sql: `SELECT ABS(1,2) AS v`, state: "42883",
-			pg: `42883 function abs(integer, integer) does not exist`},
+			pg: `42883 function abs(integer, integer) does not exist`, msg: `function abs(integer, integer) does not exist`},
 		{name: "replace_two_args", sql: `SELECT REPLACE('a','b') AS v`, state: "42883",
 			pg: `42883 function replace(unknown, unknown) does not exist`},
 		{name: "substr_one_arg", sql: `SELECT SUBSTR('abc') AS v`, state: "42883",
-			pg: `42883 function substr(unknown) does not exist`},
+			pg: `42883 function substr(unknown) does not exist`, msg: `function substr(unknown) does not exist`},
 		{name: "md5_two_args", sql: `SELECT MD5('a','b') AS v`, state: "42883",
 			pg: `42883 function md5(unknown, unknown) does not exist`},
 		{name: "semver_major_two_args", sql: `SELECT SEMVER_MAJOR('1.2.3','x') AS v`, state: "42883",
@@ -85,11 +95,11 @@ func TestACallResolvesByItsArgumentsOrIs42883(t *testing.T) {
 		{name: "replace_number", sql: `SELECT REPLACE(name, 1, 'x') AS v FROM fsc WHERE k=1`,
 			state: "42883", pg: `42883 function replace(text, integer, unknown) does not exist`},
 		{name: "upper_number", sql: `SELECT UPPER(1) AS v`, state: "42883",
-			pg: `42883 function upper(integer) does not exist`},
+			pg: `42883 function upper(integer) does not exist`, msg: `function upper(integer) does not exist`},
 		{name: "lower_fractional", sql: `SELECT LOWER(1.5) AS v`, state: "42883",
-			pg: `42883 function lower(numeric) does not exist`},
+			pg: `42883 function lower(numeric) does not exist`, msg: `function lower(numeric) does not exist`},
 		{name: "length_number", sql: `SELECT LENGTH(1) AS v`, state: "42883",
-			pg: `42883 function length(integer) does not exist`},
+			pg: `42883 function length(integer) does not exist`, msg: `function length(integer) does not exist`},
 		{name: "lpad_number", sql: `SELECT LPAD(1,3,'0') AS v`, state: "42883",
 			pg: `42883 function lpad(integer, integer, unknown) does not exist`},
 		{name: "split_part_number", sql: `SELECT SPLIT_PART(1,'a',1) AS v`, state: "42883",
@@ -108,17 +118,38 @@ func TestACallResolvesByItsArgumentsOrIs42883(t *testing.T) {
 			pg: `42883 function pg_catalog.btrim(integer) does not exist`},
 		{name: "md5_number", sql: `SELECT MD5(1) AS v`, state: "42883",
 			pg: `42883 function md5(integer) does not exist`},
+		// THE LITERAL'S OWN NAME, which PostgreSQL decides by magnitude and
+		// spelling: int4 if it fits, int8 if it fits that, numeric otherwise,
+		// and numeric for anything with a point or an exponent. The arc named
+		// every bare integer `bigint` — this engine's own widening — where the
+		// server names `integer`, which was the one exception to "PostgreSQL's
+		// own message shape" (round-1 review, N7).
+		{name: "literal_name_int4_edge", sql: `SELECT UPPER(2147483647) AS v`, state: "42883",
+			pg: `42883 function upper(integer) does not exist`, msg: `function upper(integer) does not exist`},
+		{name: "literal_name_past_int4", sql: `SELECT UPPER(2147483648) AS v`, state: "42883",
+			pg: `42883 function upper(bigint) does not exist`, msg: `function upper(bigint) does not exist`},
+		{name: "literal_name_past_int8", sql: `SELECT UPPER(9223372036854775808) AS v`, state: "42883",
+			pg: `42883 function upper(numeric) does not exist`, msg: `function upper(numeric) does not exist`},
+		{name: "literal_name_exponent", sql: `SELECT UPPER(1e3) AS v`, state: "42883",
+			pg: `42883 function upper(numeric) does not exist`, msg: `function upper(numeric) does not exist`},
+		{name: "literal_name_boolean", sql: `SELECT UPPER(TRUE) AS v`, state: "42883",
+			pg: `42883 function upper(boolean) does not exist`, msg: `function upper(boolean) does not exist`},
+		// A UNARY SIGN over a literal is still that literal: `upper(-1)` is
+		// `function upper(integer) does not exist` on the server and ANSWERED
+		// here while the sign hid the literal from the check.
+		{name: "literal_name_negative", sql: `SELECT UPPER(-1) AS v`, state: "42883",
+			pg: `42883 function upper(integer) does not exist`, msg: `function upper(integer) does not exist`},
 
 		// --- #583: a BYTES value in a text position ---------------------
 		// PostgreSQL has none of these over bytea.
 		{name: "upper_bytes", sql: `SELECT UPPER(b) AS v FROM fsc WHERE k=1`, state: "42883",
-			pg: `42883 function upper(bytea) does not exist`},
+			pg: `42883 function upper(bytea) does not exist`, msg: `function upper(bytea) does not exist`},
 		{name: "lower_bytes", sql: `SELECT LOWER(b) AS v FROM fsc WHERE k=1`, state: "42883",
-			pg: `42883 function lower(bytea) does not exist`},
+			pg: `42883 function lower(bytea) does not exist`, msg: `function lower(bytea) does not exist`},
 		{name: "trim_bytes", sql: `SELECT TRIM(b) AS v FROM fsc WHERE k=1`, state: "42883",
 			pg: `42883 function pg_catalog.btrim(bytea) does not exist`},
 		{name: "reverse_bytes", sql: `SELECT REVERSE(b) AS v FROM fsc WHERE k=1`, state: "42883",
-			pg: `42883 function reverse(bytea) does not exist`},
+			pg: `42883 function reverse(bytea) does not exist`, msg: `function reverse(bytea) does not exist`},
 		{name: "replace_bytes", sql: `SELECT REPLACE(b,'h','z') AS v FROM fsc WHERE k=1`, state: "42883",
 			pg: `42883 function replace(bytea, bytea, bytea) does not exist`},
 		{name: "starts_with_bytes", sql: `SELECT STARTS_WITH(b,'h') AS v FROM fsc WHERE k=1`, state: "42883",
@@ -155,7 +186,7 @@ func TestACallResolvesByItsArgumentsOrIs42883(t *testing.T) {
 			pg: `22023 invalid hexadecimal digit: "z"`},
 		{name: "decode_unknown", sql: `SELECT DECODE('hi','zzz') AS v`, state: "22023",
 			pg: `22023 unrecognized encoding: "zzz"`},
-		{name: "get_byte", sql: `SELECT GET_BYTE(b,0) AS v FROM fsc WHERE k=1`, want: int64(104), pg: `104`},
+		{name: "get_byte", sql: `SELECT GET_BYTE(b,0) AS v FROM fsc WHERE k=1`, want: int32(104), pg: `104, declared integer`},
 		{name: "get_byte_past_end", sql: `SELECT GET_BYTE(b,5) AS v FROM fsc WHERE k=1`, state: "2202E",
 			pg: `2202E index 5 out of valid range, 0..1`},
 		{name: "get_byte_negative", sql: `SELECT GET_BYTE(b,-1) AS v FROM fsc WHERE k=1`, state: "2202E",
@@ -176,6 +207,13 @@ func TestACallResolvesByItsArgumentsOrIs42883(t *testing.T) {
 				if got := sqlerr.StateOf(err); got != c.state {
 					t.Errorf("SQLSTATE %q, want %q\n  err: %v\n  PostgreSQL 17.11: %s\n  SQL: %s",
 						got, c.state, err, c.pg, c.sql)
+				}
+				// The MESSAGE, where a cell names one: a 42883 that names the
+				// wrong ARGUMENT TYPE sends the reader looking for the wrong
+				// overload, which is the whole of N7.
+				if c.msg != "" && !strings.Contains(err.Error(), c.msg) {
+					t.Errorf("message %q does not carry %q\n  PostgreSQL 17.11: %s\n  SQL: %s",
+						err.Error(), c.msg, c.pg, c.sql)
 				}
 				// XX000 is the one answer this whole family must never give
 				// again: an internal error tells the client nothing about its

@@ -18,7 +18,7 @@ import (
 //
 //	encode(bytea, format)   text    (OID 25)
 //	decode(text, format)    bytea   (OID 17)
-//	get_byte(bytea, int)    integer
+//	get_byte(bytea, int)    integer (OID 23)
 //	set_byte(bytea, int, i) bytea   (OID 17)
 func TestTheByteaBridgeDeclaresItsTypesOnTheWire(t *testing.T) {
 	_, srv := setupRealDB(t)
@@ -31,7 +31,10 @@ func TestTheByteaBridgeDeclaresItsTypesOnTheWire(t *testing.T) {
 		{"encode_base64", `SELECT ENCODE(TO_UTF8('hi'), 'base64') AS v`, 25, "aGk="},
 		{"decode_hex", `SELECT DECODE('6869', 'hex') AS v`, 17, `\x6869`},
 		{"decode_base64", `SELECT DECODE('aGk=', 'base64') AS v`, 17, `\x6869`},
-		{"get_byte", `SELECT GET_BYTE(TO_UTF8('hi'), 0) AS v`, 20, "104"},
+		// 23, not 20: this cell PINNED int8 while the header comment above it
+		// said integer, which is what the server declares (round-1 review,
+		// P1). RetInt32 is `length`'s own answer for the same reason.
+		{"get_byte", `SELECT GET_BYTE(TO_UTF8('hi'), 0) AS v`, 23, "104"},
 		{"set_byte", `SELECT SET_BYTE(TO_UTF8('hi'), 0, 65) AS v`, 17, `\x4169`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -87,6 +90,11 @@ func decodeBinaryUnderOID(t *testing.T, oid uint32, raw []byte) string {
 			t.Fatalf("int8 binary cell is %d bytes, want 8", len(raw))
 		}
 		return strconv.FormatInt(int64(binary.BigEndian.Uint64(raw)), 10)
+	case 23: // int4
+		if len(raw) != 4 {
+			t.Fatalf("int4 binary cell is %d bytes, want 4", len(raw))
+		}
+		return strconv.FormatInt(int64(int32(binary.BigEndian.Uint32(raw))), 10)
 	}
 	return string(raw)
 }
@@ -100,7 +108,7 @@ func TestTheCallResolutionRefusalsCarryTheirSQLStateOnTheWire(t *testing.T) {
 		{"wrong_arity", `SELECT UPPER('a','b') AS v`, "42883",
 			"function upper(unknown, unknown) does not exist"},
 		{"numeric_literal_in_a_text_position", `SELECT UPPER(1) AS v`, "42883",
-			"function upper(bigint) does not exist"},
+			"function upper(integer) does not exist"},
 		// TO_UTF8 is the one builtin declared RetBytes, so it is how a query
 		// produces a BYTES value without a column. `CAST(x AS BYTES)` is
 		// deliberately NOT used here: that destination is a pass-through the

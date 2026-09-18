@@ -713,7 +713,7 @@ func init() {
 		// types, measured with pg_typeof.
 		"encode":   {fnEncode, RetString},
 		"decode":   {fnDecode, RetBytes},
-		"get_byte": {fnGetByte, RetInt64},
+		"get_byte": {fnGetByte, RetInt32},
 		"set_byte": {fnSetByte, RetBytes},
 
 		// Byte/rate formatting

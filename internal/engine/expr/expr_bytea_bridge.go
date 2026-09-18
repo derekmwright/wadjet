@@ -82,6 +82,11 @@ func fnDecode(args []any) any {
 // value — `2202E index 5 out of valid range, 0..1` on the server, which is a
 // different class from 22P02 and names the bound. Answering NULL for it would
 // make a scan past the end look like a NULL byte.
+//
+// The result is an INT32, because `pg_typeof(get_byte('hi'::bytea,0))` is
+// `integer` on 17.11 and the wire declares what Ret says: RetInt64 put OID 20
+// on a column the server declares 23, beside three siblings that do declare
+// PostgreSQL's type (round-1 review, P1). A byte is 0..255 and always fits.
 func fnGetByte(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
@@ -91,7 +96,7 @@ func fnGetByte(args []any) any {
 	if i < 0 || i >= int64(len(raw)) {
 		raiseByteaIndexOutOfRange(i, len(raw))
 	}
-	return int64(raw[i])
+	return int32(raw[i])
 }
 
 // fnSetByte writes ONE byte and answers the new value. The byte is taken mod

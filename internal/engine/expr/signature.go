@@ -5,7 +5,9 @@ package expr
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -719,7 +721,7 @@ func RefuseUnresolvableCall(n *plansql.FuncCallNode, decl func(plansql.Node) (De
 		if c != Decided {
 			continue
 		}
-		if _, isLit := arg.(*plansql.Lit); isLit {
+		if _, isLit := literalArg(arg); isLit {
 			// A LITERAL's type is SYNTACTIC — the query wrote it — so this
 			// refuses on it with no schema and no guess. It is also the shape
 			// PostgreSQL's own message describes: `upper(1)` is `function
@@ -765,11 +767,16 @@ func literalFitsDomain(d ArgDomain, t batch.TypeID) bool {
 	return true
 }
 
-// argDeclType is decl with the two shapes this layer can decide on its own
-// first: a quoted literal is SQL's `unknown` and names no type at all, and a
-// numeric or boolean literal names one without any schema.
+// argDeclType is decl with the shapes this layer can decide on its own first:
+// a quoted literal is SQL's `unknown` and names no type at all, and a numeric
+// or boolean literal names one without any schema.
+//
+// A UNARY SIGN over a numeric literal is still that literal. PostgreSQL says
+// `function upper(integer) does not exist` for `upper(-1)` exactly as it does
+// for `upper(1)`, and leaving the sign undecided here let `UPPER(-1)` answer
+// where the server refuses (round-1 review, N7's neighbour).
 func argDeclType(arg plansql.Node, decl func(plansql.Node) (DeclType, Confidence)) (DeclType, Confidence) {
-	if lit, ok := arg.(*plansql.Lit); ok {
+	if lit, ok := literalArg(arg); ok {
 		switch lit.Kind {
 		case plansql.LitString:
 			// `unknown`: it takes the type its position demands.
@@ -777,14 +784,7 @@ func argDeclType(arg plansql.Node, decl func(plansql.Node) (DeclType, Confidence
 		case plansql.LitNull:
 			return DeclType{Untyped: true}, Undecided
 		case plansql.LitNumber:
-			// PostgreSQL types a bare `1` integer and a bare `1.5` numeric,
-			// and refuses both in a text position — the SPELLING is what says
-			// which name the message carries (`upper(1)` says integer,
-			// `lower(1.5)` says numeric, measured).
-			if strings.ContainsAny(lit.Value, ".eE") {
-				return Decl(batch.TypeDecimal), Decided
-			}
-			return Decl(batch.TypeInt64), Decided
+			return Decl(numericLitDeclaredType(lit.Value)), Decided
 		case plansql.LitBool:
 			return Decl(batch.TypeBool), Decided
 		}
@@ -793,6 +793,50 @@ func argDeclType(arg plansql.Node, decl func(plansql.Node) (DeclType, Confidence
 		return DeclType{}, Undecided
 	}
 	return decl(arg)
+}
+
+// literalArg unwraps an argument to the LITERAL it is, seeing through a unary
+// sign: `-1` parses as a UnaryOp over `1` and PostgreSQL types it exactly as it
+// types `1`, so `upper(-1)` is `function upper(integer) does not exist` there
+// and answered here while the sign hid the literal from this layer. It is the
+// same unwrap physical.isConstNumericLitNode and expr.isConstNumericOperand
+// make, for the same reason.
+func literalArg(arg plansql.Node) (*plansql.Lit, bool) {
+	if u, ok := arg.(*plansql.UnaryOp); ok && (u.Op == "-" || u.Op == "+") {
+		arg = u.Inner
+	}
+	lit, ok := arg.(*plansql.Lit)
+	return lit, ok
+}
+
+// numericLitDeclaredType is the type PostgreSQL gives a bare numeric literal,
+// which is what its 42883 message names. Measured on 17.11:
+//
+//	1, -1, 2147483647   integer
+//	2147483648          bigint
+//	9223372036854775808 numeric
+//	1.5, 1e3            numeric
+//
+// It is the LITERAL's rule and not this engine's own widening (ADR-0024 types a
+// bare integer literal INT64), because the only thing reading it is the
+// message a client sees — naming `bigint` where the server names `integer` was
+// the one exception to "PostgreSQL's own message shape" the arc claimed
+// (round-1 review, N7). The DOMAIN decision is unchanged: every one of these
+// is a number and no text position takes one.
+func numericLitDeclaredType(text string) batch.TypeID {
+	t := strings.TrimSpace(text)
+	if strings.ContainsAny(t, ".eE") {
+		return batch.TypeDecimal
+	}
+	n, err := strconv.ParseInt(strings.TrimPrefix(t, "+"), 10, 64)
+	if err != nil {
+		// Past int8: PostgreSQL types it numeric.
+		return batch.TypeDecimal
+	}
+	if n >= math.MinInt32 && n <= math.MaxInt32 {
+		return batch.TypeInt32
+	}
+	return batch.TypeInt64
 }
 
 // callArgTypeNames renders a call's argument types the way PostgreSQL's 42883
