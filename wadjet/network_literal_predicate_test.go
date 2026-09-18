@@ -223,6 +223,86 @@ func TestOneBadNetworkLiteralIsReportedOneWayAtEveryDoor(t *testing.T) {
 	}
 }
 
+// TestARefusalNeverNamesAnInternalTypeIdentifier is the round-2 review's P3.
+//
+// N1's repair asks the COLUMN TYPE's own text reader for the sentence when
+// both readings of a quoted literal have failed, and
+// parquet.NetworkTextTypeName falls back to `typ.String()` for every type it
+// does not name — so an INT64 column's INSERT began reporting
+// `invalid input syntax for type INT64`, the engine's own identifier, which no
+// client can look up in pg_type and which this engine's eleven other doors
+// spell `bigint` for the same column. The repair takes the new refusal only
+// for a type that HAS such a reader; everything else keeps the message it had.
+func TestARefusalNeverNamesAnInternalTypeIdentifier(t *testing.T) {
+	ctx := context.Background()
+	db := nlpOpen(t)
+	mustDDL(t, db, `CREATE TABLE nlpint (c_i64 INT64, c_i32 INT32, c_port PORT)`)
+
+	// No refusal at any door may name an internal identifier. The list is the
+	// TypeID spellings a fallback would produce for the types this table has.
+	internal := []string{"INT64", "INT32", "PORT", "PROTOCOL", "FLOAT64", "DECIMAL"}
+	for _, c := range []struct{ door, sql string }{
+		{"insert-values-bigint", `INSERT INTO nlpint (c_i64) VALUES ('zzz')`},
+		{"insert-values-bigint-fraction", `INSERT INTO nlpint (c_i64) VALUES ('2.5')`},
+		{"insert-values-integer", `INSERT INTO nlpint (c_i32) VALUES ('zzz')`},
+		{"insert-values-port", `INSERT INTO nlpint (c_port) VALUES ('zzz')`},
+		{"update-port", `UPDATE nlpint SET c_port = 'zzz'`},
+		// The two SELECT doors read `nlp`, which HOLDS a row: a projection
+		// over an empty relation evaluates nothing, so the cast door would
+		// answer zero rows rather than refuse and this cell would measure
+		// nothing.
+		{"filter-bigint", `SELECT COUNT(*) AS n FROM nlp WHERE k = CAST('zzz' AS BIGINT)`},
+		{"cast-bigint", `SELECT CAST('zzz' AS BIGINT) AS v FROM nlp`},
+	} {
+		t.Run(c.door, func(t *testing.T) {
+			var err error
+			if strings.HasPrefix(c.sql, "SELECT") {
+				_, err = db.Query(ctx, c.sql)
+			} else {
+				_, err = db.Execute(ctx, c.sql)
+			}
+			if err == nil {
+				t.Fatalf("%s door ANSWERED a literal that names no value of the column's type"+
+					"\n  SQL: %s", c.door, c.sql)
+			}
+			for _, id := range internal {
+				if strings.Contains(err.Error(), id) {
+					t.Errorf("%s door names the INTERNAL identifier %q: %v. A refusal names a "+
+						"type a client can resolve in pg_type — `bigint`, `integer` — or the "+
+						"message the door already gave\n  SQL: %s", c.door, id, err, c.sql)
+				}
+			}
+		})
+	}
+
+	// And the gain N1 made is kept: the two types that DO have their own text
+	// reader still say `integer` rather than falling back to the second
+	// reading's `numeric` with the quotes in the literal.
+	for _, c := range []struct{ door, sql string }{
+		{"insert-values-port", `INSERT INTO nlpint (c_port) VALUES ('zzz')`},
+		{"update-port", `UPDATE nlpint SET c_port = 'zzz'`},
+	} {
+		t.Run("keeps/"+c.door, func(t *testing.T) {
+			_, err := db.Execute(ctx, c.sql)
+			if err == nil {
+				t.Fatalf("answered\n  SQL: %s", c.sql)
+			}
+			if !strings.Contains(err.Error(), `invalid input syntax for type integer: "zzz"`) {
+				t.Errorf("%s door says %q; the type's own reader classified this literal and its "+
+					"sentence is the one the other ten doors give\n  SQL: %s",
+					c.door, err.Error(), c.sql)
+			}
+		})
+	}
+
+	// A NUMBER is not a quoted literal and keeps the assignment cast, which is
+	// what makes the repair a message change and not a behaviour one.
+	if _, err := db.Execute(ctx, `INSERT INTO nlpint (c_i64) VALUES (2.5)`); err != nil {
+		t.Errorf("an unquoted 2.5 into an INT64 column was refused (%v); PostgreSQL rounds it "+
+			"and so does this engine (#699)", err)
+	}
+}
+
 func nlpCount(t *testing.T, ctx context.Context, db *DB, sql string) int {
 	t.Helper()
 	res, err := db.Query(ctx, sql)

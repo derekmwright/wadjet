@@ -2068,9 +2068,16 @@ func assignLiteralToColumn(text string, col parquet.Column) (any, error) {
 		// cast's refusal is the right one for it, the same split #1141 makes
 		// at the CAST door.
 		if inner, quoted := dmlUnquotedLiteral(text); quoted {
-			if nerr := parquet.NetworkTextError(col.Type, inner,
-				netTextStatusOf(col.Type, inner)); nerr != nil {
-				return nil, nerr
+			// ONLY a type whose own text reader exists. parquet.NetworkTextError
+			// names NetworkTextTypeName(typ), which falls back to the INTERNAL
+			// identifier for everything else — so an INT64 column reported
+			// `invalid input syntax for type INT64`, a name no client can look
+			// up in pg_type and not the `bigint` this engine's other doors
+			// give for the same column (round-2 review).
+			if st, known := netTextStatusOf(col.Type, inner); known {
+				if nerr := parquet.NetworkTextError(col.Type, inner, st); nerr != nil {
+					return nil, nerr
+				}
 			}
 		}
 		return nil, cerr
@@ -2096,12 +2103,12 @@ func dmlUnquotedLiteral(text string) (string, bool) {
 // literal it has already refused, so the message names what that reader
 // refused it for — 22P02 for text naming no value, 22003 for a number outside
 // the type's range.
-func netTextStatusOf(typ parquet.TypeID, s string) parquet.NetTextStatus {
+func netTextStatusOf(typ parquet.TypeID, s string) (parquet.NetTextStatus, bool) {
 	_, st, ok := parquet.NetworkTextValue(typ, s)
 	if !ok {
-		return parquet.NetTextSyntax
+		return parquet.NetTextSyntax, false
 	}
-	return st
+	return st, true
 }
 
 // checkValueForColumn is ConvertValueForColumn's half for a value that is
