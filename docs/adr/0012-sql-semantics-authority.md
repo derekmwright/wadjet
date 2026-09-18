@@ -872,8 +872,14 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      reference resolved against that instead.
 
      It raises 42702 now. `colScope.srcCount` could not say it — it counts
-     SOURCES, and this is ONE source counted twice — so the scope carries
-     `qualCount`, the same census one relation in, and the qualified branch of
+     SOURCES, and this is ONE source counted twice — and neither could a
+     per-(qualifier, column) COUNT, because `quals` is keyed on the FOLDED
+     qualifier and two DIFFERENT relations may fold to one key (`FROM clt1 t,
+     clt2 "T"` is two sources under `t`, and counting their columns together
+     refused `t.c1`, which PostgreSQL answers). So the duplicate is decided
+     WITHIN one source's own list — `colScope.noteSourceDuplicates`, once per
+     source, after its columns are registered — and only the VERDICT is
+     recorded, in `colScope.dupQualified`; the qualified branch of
      `resolveRef` refuses on it. The message names the COLUMN, because the
      qualifier names exactly one relation. It is the other half of ADR-0026
      §9's duplicate-published-name rule: the qualified STAR over such a block

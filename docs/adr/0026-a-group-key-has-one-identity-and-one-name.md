@@ -3140,9 +3140,12 @@ publishes twice is not addressable at all.**
    the explicit list answering the FIRST column on all five arms, which is a
    value chosen by the block's item order and never disclosed. That was the
    WRONG-VALUE half. `colScope.srcCount` cannot say it — it counts SOURCES,
-   and this is one source counted twice — so the scope carries `qualCount`,
-   the same census one relation in, and `resolveRef`'s qualified branch
-   refuses on it. The message names the COLUMN, because the qualifier names
+   and this is one source counted twice — and neither can a per-(qualifier,
+   column) COUNT, because `quals` is keyed on the FOLDED qualifier and two
+   DIFFERENT relations may fold to one key. So the duplicate is decided WITHIN
+   one source's own list (`noteSourceDuplicates`, once per source) and only the
+   VERDICT is recorded, in `colScope.dupQualified`; `resolveRef`'s qualified
+   branch refuses on it. The message names the COLUMN, because the qualifier names
    exactly one relation. The BARE star over the same block is untouched: it
    reads the relation by POSITION and answers both columns, which is
    PostgreSQL's answer.

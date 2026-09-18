@@ -87,7 +87,6 @@ PlanContext.EmittedKeyNames
 PlanContext.FindAggregateAncestor
 PlanContext.FindOutputProjectionNode
 PlanContext.FindOutputProjectionsForRename
-PlanContext.PublishedOutputProjectionNode
 PlanContext.GroupKeyByIdentity
 PlanContext.GroupKeyNames
 PlanContext.GroupKeysPublishedBelow
@@ -119,6 +118,7 @@ PlanContext.ProjSourceName
 PlanContext.ProjectionForName
 PlanContext.ProjectionOutputName
 PlanContext.PublishedNamesOfProjection
+PlanContext.PublishedOutputProjectionNode
 PlanContext.PublishedStringLengths
 PlanContext.PublishedWireUnconstrainedDecimal
 PlanContext.QualifiedColumn

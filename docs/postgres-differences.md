@@ -314,7 +314,11 @@ Unknown types/scales cause distributed refusal to avoid decimal reinterpretation
 
 **JOIN USING merges, but not for every shape.**
 
-`SELECT *` over a `JOIN … USING` publishes the joined column once and first, as PostgreSQL does, and publishes a name the two arms share OUTSIDE the USING list twice, as PostgreSQL does. It raises 0A000 where a reference by name could not name its own column: an arm publishing one name twice, a chain of joins, or an arm whose own list this planner does not enumerate. (ADR-0012 §5/#810, #655, #1177)
+`SELECT *` over a `JOIN … USING` publishes the joined column once and first, as PostgreSQL does, and publishes a name the two arms share OUTSIDE the USING list twice, as PostgreSQL does. A chain of joins raises 0A000 where PostgreSQL answers. An arm publishing one name twice raises 42702 naming the column, which is PostgreSQL's own class for it. (ADR-0012 §5/#810, #655, #1177)
+
+**A `SELECT *` over a `JOIN … USING` with a LATERAL arm publishes the joined column twice.**
+
+`SELECT * FROM lat_ord o JOIN LATERAL (SELECT i.id FROM lat_item i WHERE i.order_id = o.id) l USING (id)` publishes `id, customer, total, l.id` where PostgreSQL publishes `id, customer, total`: a LATERAL arm's own list is not enumerated, so the star stays unexpanded and the join operator's stream — which carries the joined column twice — is published instead of the merged list. The merge's own refusal does not fire because the marker is set only where the star's pass sees the USING list under it. (ADR-0012 §5/#1177-lateral-using)
 
 **A USING merge of two DECIMAL columns at different scales declares the left arm's.**
 

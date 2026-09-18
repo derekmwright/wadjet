@@ -955,10 +955,17 @@ column, published once and first, and the expansion states that where it can
 read both arms' lists (see [Join conditions](#join-conditions)). A column name
 the two arms share OUTSIDE the USING list is published TWICE, which is
 PostgreSQL's answer: each item is the qualified reference its own arm owns.
-The expansion DECLINES — and the statement is then refused with `0A000` —
-where a reference by name could not name its own column at all: an arm that
-publishes one name twice, a chain of joins, or an arm whose own list this
-planner does not enumerate. `NATURAL JOIN` is refused outright.
+The expansion DECLINES where a reference by name could not name its own column
+at all, and the three cases do not share one class. A CHAIN of `JOIN … USING`
+is refused with `0A000`. An arm that publishes one name TWICE is refused with
+`42702`, naming the column, which is PostgreSQL's own class for it. An arm
+whose own list this planner does not enumerate — a LATERAL arm, a table
+function — is NOT refused: the star is left unexpanded and the join operator's
+stream is published UNMERGED, so the result carries the joined column twice
+(`SELECT * FROM lat_ord o JOIN LATERAL (SELECT i.id FROM lat_item i WHERE
+i.order_id = o.id) l USING (id)` publishes `id, customer, total, l.id` where
+PostgreSQL publishes `id, customer, total`). `NATURAL JOIN` is refused
+outright.
 
 Subqueries that reference columns from the outer query. The optimizer decorrelates them where it can — EXISTS / NOT EXISTS and IN become semi/anti joins, and a correlated scalar subquery becomes a join against a grouped aggregate — so they are not re-executed per outer row. Either side may be a CTE, a derived table, a comma-joined list or a base table: the subquery's own FROM clause is planned the way a top-level FROM clause is.
 
