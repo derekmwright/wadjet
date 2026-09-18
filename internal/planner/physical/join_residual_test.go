@@ -140,6 +140,62 @@ func TestBuildJoinResidualFilterRefusesWhatItCannotEvaluate(t *testing.T) {
 	}
 }
 
+// A SLOT CARRIES THE DECLARATION ITS STORAGE DEPENDS ON: a DECIMAL's SCALE and
+// a VECTOR's DIMENSION. Both are read off the source VECTOR, because a batch's
+// schema entry and its vector can disagree about them — an operator that mints
+// a derived column sets the vector's and leaves the schema's at zero — and a
+// scale of zero on a DECIMAL slot is not a rounding difference but a different
+// NUMBER: the value is written as a raw Int128 and read back divided by the
+// slot's scale.
+func TestBuildJoinResidualFilterCarriesDecimalScaleAndVectorDimension(t *testing.T) {
+	probe := residualBatch(t, []parquet.Column{
+		{Name: "p_dec", Type: parquet.TypeDecimal, Precision: 18, Scale: 4},
+		{Name: "p_vec", Type: parquet.TypeVector, Dimension: 3},
+	}, []map[string]any{
+		{"p_dec": "12.5000", "p_vec": []float32{1, 2, 3}},
+		{"p_dec": "2.0000", "p_vec": []float32{9, 9, 9}},
+	})
+	build := residualBatch(t, []parquet.Column{
+		{Name: "b_dec", Type: parquet.TypeDecimal, Precision: 18, Scale: 4},
+		{Name: "b_vec", Type: parquet.TypeVector, Dimension: 3},
+	}, []map[string]any{
+		{"b_dec": "12.5000", "b_vec": []float32{1, 2, 3}},
+		{"b_dec": "3.0000", "b_vec": []float32{0, 0, 0}},
+	})
+	// The SCHEMA entries are then BLANKED, which is the state an operator that
+	// mints a derived column leaves behind: the vector knows its scale and its
+	// dimension, the schema beside it does not. Without residualCarrierFromVector
+	// the combined row's DECIMAL slot is built at scale 0 and reads the raw
+	// Int128 as a whole number (125000 where the value is 12.5), and its VECTOR
+	// slot is built at dimension 0 and copies no floats at all.
+	for _, b := range []*batch.RecordBatch{probe, build} {
+		for i := range b.Schema {
+			b.Schema[i].Scale, b.Schema[i].Precision, b.Schema[i].Dimension = 0, 0, 0
+		}
+	}
+	for _, tc := range []struct {
+		filter     string
+		pRow, bRow int
+		want       bool
+	}{
+		{"p_dec = b_dec", 0, 0, true},
+		{"p_dec = b_dec", 0, 1, false},
+		{"p_dec > b_dec", 0, 1, true}, // 12.5 > 3.0
+		{"p_dec < b_dec", 1, 1, true}, // 2.0 < 3.0
+		{"p_dec + 0.5 = 13", 0, 0, true},
+		{"COSINE_SIMILARITY(p_vec, b_vec) > 0.99", 0, 0, true},
+		{"COSINE_SIMILARITY(p_vec, b_vec) > 0.99", 1, 0, false}, // (9,9,9) vs (1,2,3) is 0.926
+	} {
+		t.Run(tc.filter, func(t *testing.T) {
+			f := residualFilter(t, tc.filter, "b")
+			if got := f(probe, tc.pRow, build, tc.bRow); got != tc.want {
+				t.Fatalf("%q on probe[%d] x build[%d]: got %v, want %v",
+					tc.filter, tc.pRow, tc.bRow, got, tc.want)
+			}
+		})
+	}
+}
+
 // A REFERENCE THAT RESOLVES ON NEITHER SIDE MAKES THE RESIDUAL UNKNOWN, and
 // UNKNOWN REJECTS.
 //

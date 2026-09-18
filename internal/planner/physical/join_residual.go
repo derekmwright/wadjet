@@ -331,11 +331,45 @@ func residualSlot(src *batch.RecordBatch, b *residualBind, name string) (parquet
 	if b.field >= 0 {
 		col = residualFieldSlot(src.Columns[b.idx], col, b.field, name)
 	}
+	residualCarrierFromVector(&col, src.Columns[b.idx], b.field)
 	switch col.Type {
 	case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow:
 		return col, true
 	}
 	return col, false
+}
+
+// residualCarrierFromVector takes the two declarations a slot's STORAGE
+// depends on — a DECIMAL's scale and a VECTOR's dimension — from the source
+// VECTOR rather than from the schema entry beside it.
+//
+// They must come from the vector because a batch's schema and its vectors can
+// disagree about them: an operator that mints a derived column sets the
+// vector's scale and leaves the schema's at zero. A scale of zero on a
+// DECIMAL slot is not a rounding difference, it is a different NUMBER —
+// CopyValueFrom writes the source's raw Int128 and the reader divides it by
+// the slot's scale — and a VECTOR slot of dimension zero copies no floats at
+// all.
+func residualCarrierFromVector(col *parquet.Column, v *batch.Vector, field int) {
+	for v != nil && v.Base != nil {
+		v = v.Base
+	}
+	if v != nil && field >= 0 && field < len(v.Children) {
+		v = v.Children[field]
+	}
+	if v == nil {
+		return
+	}
+	switch col.Type {
+	case parquet.TypeDecimal:
+		if v.DecimalData.Scale != 0 {
+			col.Scale = v.DecimalData.Scale
+		}
+	case parquet.TypeVector:
+		if v.VectorDim != 0 {
+			col.Dimension = v.VectorDim
+		}
+	}
 }
 
 // residualFieldSlot is the declaration of one ROW field: the parquet
