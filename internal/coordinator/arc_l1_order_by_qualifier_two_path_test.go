@@ -134,8 +134,8 @@ func TestL1AQualifiedOrderByTermBindsTheReferenceItNames(t *testing.T) {
 			// this tree has it: PostgreSQL publishes `id, order_id, product,
 			// amount, id, order_id, product, amount` for BOTH this cell and
 			// the one above, in the FROM clause's order. #997 is deferred
-			// with its mechanism (see TestL1AStarOverAJoinPublishesThePlanNotTheQuery in
-			// arc_l1_star_join_names_two_path_test.go)
+			// with its mechanism (see TestO1AStarOverAJoinPublishesTheQueryNotThePlan
+			// in arc_o1_star_join_identity_two_path_test.go)
 			// and its fix restates this cell's `want`.
 			name: "989 boundary: a predicate that swaps the arms leaves the ORDER alone",
 			sql: "SELECT * FROM lat_item a JOIN lat_item b ON b.order_id = a.order_id " +

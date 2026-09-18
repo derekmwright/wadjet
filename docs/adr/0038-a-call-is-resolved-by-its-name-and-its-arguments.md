@@ -41,7 +41,11 @@ declaration to refuse against.
    (`expr.TestEveryRegisteredFunctionDeclaresItsArity`), and each declared
    arity is checked against the signature `docs/sql-reference.md` documents
    (`TestTheDocumentedSignatureIsTheDeclaredArity`). A new builtin cannot be
-   added without declaring what it takes.
+   added without declaring what it takes. Three rows name a function this
+   package does not register — `embed`, `embed_dim`, `embed_model`, which
+   `internal/embedding` registers only when a provider is wired — and they are
+   allowed BY NAME in that gate's `registeredElsewhere` list, named rather than
+   silently tolerated.
 3. `expr.RefuseUnresolvableCall` runs from the binder's own per-call walk
    (`physical.refuseInvalidRowFields`), which BOTH planner entries reach before
    any stage or pipeline exists, with `expr.compileFuncCallNamed` as the
@@ -52,11 +56,16 @@ declaration to refuse against.
    functions, `AT TIME ZONE`, a computed ROW field, `ILIKE`, `SIMILAR TO`, the
    `^` operator's `power(a, b)` and a `JOIN … USING` merge's
    `COALESCE(l.c, r.c)` all land on a name the table declares
-   (`physical.TestEveryGrammarRewriteProducesACallItsSignatureAccepts`). Its
-   second direction reads the planner's sources and fails on a minted name no
-   spelling covers, which is how a rewrite that outruns the table is caught:
-   the arity rows had `trim` at one argument while the grammar produced two, so
-   a statement the engine used to answer became `42883`.
+   (`physical.TestEveryGrammarRewriteProducesACallItsSignatureAccepts`). What
+   that gate asks of each is the produced NAME and ARITY: the merge's entry is
+   a two-argument `COALESCE` written as an expression, because the gate parses
+   an expression and a `USING` clause needs a FROM clause, so it stands in for
+   the call `logical.mergedUsingItem` and `plansql.bindMergedUsingKeys` mint
+   rather than reproducing the statement. Its second direction reads the
+   planner's sources and fails on a minted name no spelling covers, which is
+   how a rewrite that outruns the table is caught: the arity rows had `trim` at
+   one argument while the grammar produced two, so a statement the engine used
+   to answer became `42883`.
 
 ## Consequences
 

@@ -53,11 +53,12 @@ through the window's input.
 | an EXPRESSION term (`o.id + 0`), any input | irrelevant | `__winkey_0` | **M2, the materialized slot** |
 | ONE relation (`lat_item p`) | `[amount id order_id]` | `order_id` | M1, and right — there is one arm |
 
-**A correction this memo makes to ADR-0026 §8j.** §8j and the header of
-`coordinator.TestArcK1AWindowPartitionKeyBindsItsOwnArm` both say the bind
+**A correction this memo made to ADR-0026 §8j.** §8j and the header of
+`coordinator.TestArcK1AWindowPartitionKeyBindsItsOwnArm` both SAID the bind
 "reads `inputColTypes`, which declines a JOIN outright — so over the one input
-shape where two columns DO answer to a bare name, nothing ran." That is true of
-a join of DERIVED arms and **false** of a join of BASE SCANS.
+shape where two columns DO answer to a bare name, nothing ran." (Both now carry
+the corrected sentence; this paragraph is the measurement behind it.) That is
+true of a join of DERIVED arms and **false** of a join of BASE SCANS.
 `declared_output.go`'s `NodeJoin` arm merges both sides into one map and keeps a
 duplicate whose two sides agree on TYPE; it drops only a name the two sides
 type differently. `o.id` is not a key of that map, the bare `id` is, and
