@@ -126,6 +126,26 @@ func grammarRewriteSpellings() []grammarRewrite {
 		{"rtrim_one_arg", `RTRIM(s)`, "rtrim", 1},
 		// --- POSITION(needle IN haystack) -> strpos(haystack, needle)
 		{"position_in", `POSITION('a' IN s)`, "strpos", 2},
+		// --- `a ^ b` -> power(a, b). PostgreSQL's exponentiation operator is
+		// this engine's POWER() under another spelling (arc PS, #1155), and it
+		// is a rewrite in exactly this table's sense: the query writes an
+		// OPERATOR and the planner hands the binder a call.
+		{"power_operator", `2 ^ 3`, "power", 2},
+		{"power_operator_left_associative", `2 ^ 3 ^ 2`, "power", 2},
+		{"power_operator_over_columns", `s ^ n`, "power", 2},
+		// --- a FULL `JOIN … USING (c)` merges its joined column to
+		// COALESCE(left.c, right.c), minted in TWO places: the star
+		// expansion's merged output item (logical.mergedUsingItem) and the
+		// binding of a bare sort or window key onto the merge
+		// (plansql.bindMergedUsingKeys). Both mint exactly two arguments.
+		//
+		// The mint is STATEMENT-level — it needs a FROM clause with that join,
+		// which `ParseExpressionComplete` has no room for — so the spelling
+		// here is the call those sites build, which is what this table exists
+		// to compare with the arity declaration. The statement shapes
+		// themselves are gated on five arms by
+		// coordinator.TestArcPSGrammarAnswersTheSameOnEveryArm's `#655` cells.
+		{"full_using_merged_key", `COALESCE(s, n)`, "coalesce", 2},
 		// --- EXTRACT(field FROM x) -> field(x). The FIELD names the function,
 		// so every field this parser maps is its own door onto the table.
 		{"extract_year", `EXTRACT(YEAR FROM ts)`, "year", 1},
