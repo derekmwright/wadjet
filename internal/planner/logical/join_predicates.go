@@ -231,7 +231,7 @@ func takeJoinCondResiduals(join *Node) []Predicate {
 		return nil
 	}
 
-	parts := splitOnAnd(join.JoinCond, strings.ToUpper(join.JoinCond))
+	parts := splitJoinConjuncts(join.JoinCond)
 	if len(parts) == 0 {
 		return nil
 	}
@@ -239,12 +239,15 @@ func takeJoinCondResiduals(join *Node) []Predicate {
 
 	var keyParts []string
 	var residuals []Predicate
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
+	for _, conj := range parts {
+		part := strings.TrimSpace(conj.text)
 		if part == "" {
 			continue
 		}
-		expr := tryParseExpr(part)
+		expr := conj.expr
+		if expr == nil {
+			expr = tryParseExpr(part)
+		}
 		if expr == nil || isJoinKeyEquality(expr, rowFields) {
 			// An equality between two bare columns is what parseJoinKeys
 			// turns into a key pair, and an unparseable fragment is not
@@ -294,15 +297,18 @@ func routeOuterJoinOnResiduals(n *Node) *Node {
 		return n
 	}
 
-	parts := splitOnAnd(n.JoinCond, strings.ToUpper(n.JoinCond))
+	parts := splitJoinConjuncts(n.JoinCond)
 	rowFields := subtreeRowFields(n)
 	var keyParts, residuals []string
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
+	for _, conj := range parts {
+		part := strings.TrimSpace(conj.text)
 		if part == "" {
 			continue
 		}
-		expr := tryParseExpr(part)
+		expr := conj.expr
+		if expr == nil {
+			expr = tryParseExpr(part)
+		}
 		if expr == nil || isJoinKeyEquality(expr, rowFields) {
 			keyParts = append(keyParts, part)
 			continue

@@ -2293,8 +2293,7 @@ func extractJoinCondPredicates(join *Node) *Node {
 		return join
 	}
 
-	upper := strings.ToUpper(join.JoinCond)
-	parts := splitOnAnd(join.JoinCond, upper)
+	parts := splitJoinConjuncts(join.JoinCond)
 	if len(parts) < 2 {
 		return join // single condition, nothing to split
 	}
@@ -2310,15 +2309,15 @@ func extractJoinCondPredicates(join *Node) *Node {
 	}
 
 	var joinParts, leftParts, rightParts []string
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
+	for _, conj := range parts {
+		part := strings.TrimSpace(conj.text)
 		if part == "" {
 			continue
 		}
 		// Try to parse this part as an AST predicate to resolve table refs
-		pred := Predicate{Raw: part}
-		if parsed := tryParseExpr(part); parsed != nil {
-			pred.ASTExpr = parsed
+		pred := Predicate{Raw: part, ASTExpr: conj.expr}
+		if pred.ASTExpr == nil {
+			pred.ASTExpr = tryParseExpr(part)
 		}
 		refs := predicateTableRefs(pred, allColMap)
 		if refs == nil || len(refs) == 0 {
@@ -3982,13 +3981,13 @@ func flattenJoinChain(n *Node, rels *[]*Node, edges *[]joinEdge) {
 	// the two relations it actually names — including the cycle edge, which
 	// the DP applies once both its endpoints are joined.
 	//
-	// Splitting is only safe when every part is a self-contained comparison:
-	// splitOnAnd is textual and would cut through a parenthesised OR.
-	upper := strings.ToUpper(n.JoinCond)
-	parts := splitOnAnd(n.JoinCond, upper)
+	// Splitting is only safe when every part is a self-contained comparison.
+	// The split is on the AST (splitJoinConjuncts), so a parenthesised OR and
+	// a BETWEEN arrive whole and simply fail the comparison test below.
+	parts := splitJoinConjuncts(n.JoinCond)
 	splittable := len(parts) > 1
-	for _, part := range parts {
-		if _, ok := tryParseExpr(part).(*plansql.CmpExpr); !ok {
+	for _, conj := range parts {
+		if _, ok := conj.expr.(*plansql.CmpExpr); !ok {
 			splittable = false
 			break
 		}
@@ -4007,13 +4006,13 @@ func flattenJoinChain(n *Node, rels *[]*Node, edges *[]joinEdge) {
 	type edgeKey struct{ l, r int }
 	grouped := make(map[edgeKey][]string, len(parts))
 	order := make([]edgeKey, 0, len(parts))
-	for _, part := range parts {
-		l, r := endpoints(part)
+	for _, conj := range parts {
+		l, r := endpoints(conj.text)
 		k := edgeKey{l, r}
 		if _, seen := grouped[k]; !seen {
 			order = append(order, k)
 		}
-		grouped[k] = append(grouped[k], strings.TrimSpace(part))
+		grouped[k] = append(grouped[k], strings.TrimSpace(conj.text))
 	}
 	for _, k := range order {
 		*edges = append(*edges, joinEdge{
