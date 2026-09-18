@@ -556,7 +556,13 @@ func (c spillMxCell) family() string {
 		return "rawrow"
 	case strings.HasPrefix(c.name, "join_computed_"):
 		return "crossjoin"
-	case strings.HasPrefix(c.name, "join_group_by_"):
+	case strings.HasPrefix(c.name, "join_group_by_"), strings.HasPrefix(c.name, "join_residual_"):
+		// An outer join's ON RESIDUAL rides the SAME grace-partitioned build
+		// as join_group_by_: its probe routes by the partition key, because
+		// probeRoutesByPartition is `JoinType != CrossJoin` and an outer join
+		// with no equi-key is a hash join over one empty-key chain, not a
+		// cross join. The counter to assert is therefore the eviction, not
+		// #832's flat-build diversion.
 		return "join"
 	default:
 		return "aggregate"
@@ -768,6 +774,50 @@ func spillMxCells() []spillMxCell {
 		knownError:  "cannot be grace-partitioned and cannot spill",
 		sql: fmt.Sprintf(
 			`SELECT COUNT(*) AS n FROM %[1]s a JOIN %[1]s b ON UPPER(a.c_str) = UPPER(b.c_str)`, tbl)})
+	// ARC JR — an OUTER join's ON RESIDUAL, at the same budget.
+	//
+	// The residual is evaluated AT the join, per probe row against each build
+	// candidate, so it rides the grace-partitioned build the cells above
+	// exercise — and unlike #832's cross join, an outer join's probe DOES
+	// route by the partition key (probeRoutesByPartition is
+	// `JoinType != CrossJoin`), so the partitioned build and its evictions are
+	// live under it. Three arrivals at that build have to agree with the
+	// unbudgeted answer: an equality PLUS a residual, a KEYLESS residual (no
+	// conjunct is a bare-column equality, so the whole build is one empty-key
+	// chain and the residual does all of the work), and the RIGHT/FULL
+	// unmatched FLUSH, which consults per-ROW match marks that only exist when
+	// a residual is active (HashJoin.rowMatched).
+	//
+	// The probe is bounded and the build is not: the build is what spills.
+	for _, tc := range []struct{ name, sql string }{
+		{"left_eq_plus_residual", fmt.Sprintf(
+			`SELECT COUNT(*) AS n, COUNT(b.id) AS nb, MIN(b.c_str) AS lo, MAX(b.c_str) AS hi `+
+				`FROM %[1]s a LEFT JOIN %[1]s b ON a.id = b.id AND UPPER(b.c_str) = UPPER(a.c_str)`, tbl)},
+		{"left_keyless_residual", fmt.Sprintf(
+			`SELECT COUNT(*) AS n, COUNT(b.id) AS nb, MIN(b.id) AS lo, MAX(b.id) AS hi `+
+				`FROM %[1]s a LEFT JOIN %[1]s b ON UPPER(b.c_str) = UPPER(a.c_str) WHERE a.id < 40`, tbl)},
+		{"right_residual_flush", fmt.Sprintf(
+			`SELECT COUNT(*) AS n, COUNT(a.id) AS na, MIN(b.id) AS lo, MAX(b.id) AS hi `+
+				`FROM %[1]s a RIGHT JOIN %[1]s b ON a.id = b.id AND a.id < 40 AND UPPER(b.c_str) = UPPER(a.c_str)`, tbl)},
+		{"full_residual_flush", fmt.Sprintf(
+			`SELECT COUNT(*) AS n, COUNT(a.id) AS na, COUNT(b.id) AS nb `+
+				`FROM %[1]s a FULL JOIN %[1]s b ON a.id = b.id AND a.id < 40 AND UPPER(b.c_str) = UPPER(a.c_str)`, tbl)},
+	} {
+		add(spillMxCell{name: "join_residual_" + tc.name, sql: tc.sql})
+	}
+	// The SAME keyless residual at the budget #832's cross join cannot fit.
+	// This is the boundary the two paths are on opposite sides of, and the
+	// reason the arc could state it rather than assume it: an outer join with
+	// no equi-key is NOT a cross join — it is a hash join over one empty-key
+	// chain, its probe routes by that key, so its build grace-partitions and
+	// spills and it ANSWERS where #832's shape refuses. If this cell ever
+	// starts refusing, the routed-probe precondition has changed and
+	// ADR-0006's 2026-09-18 amendment is what to re-read.
+	add(spillMxCell{name: "join_residual_keyless_at_the_cross_join_budget",
+		budgetBytes: spillMxCrossJoinBudget,
+		sql: fmt.Sprintf(
+			`SELECT COUNT(*) AS n, COUNT(b.id) AS nb, MIN(b.id) AS lo, MAX(b.id) AS hi `+
+				`FROM %[1]s a LEFT JOIN %[1]s b ON UPPER(b.c_str) = UPPER(a.c_str) WHERE a.id < 40`, tbl)})
 	// Scalar (ungrouped) aggregates: no GROUP BY, so no external merge — the
 	// shape #779 lives on, where a shape-only column reached the row buffer.
 	// One cell over every flat column at once, because the defect was in how
