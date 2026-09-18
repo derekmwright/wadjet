@@ -98,6 +98,14 @@ type colScope struct {
 	cols       map[string]bool
 	quals      map[string]map[string]bool
 	srcCount   map[string]int
+	// qualCount is srcCount one relation in: how many columns ONE FROM
+	// source publishes under each name. A relation may legally publish two
+	// columns of one name — `(SELECT a.id, b.id FROM t a JOIN t b ON …) x`
+	// is a legal relation and a star over it answers both BY POSITION — but a
+	// REFERENCE into it names neither, and PostgreSQL 17.11 raises 42702 for
+	// `SELECT x.id` over exactly that block (measured). srcCount cannot say
+	// it: it counts SOURCES, and this is one source counted twice.
+	qualCount map[string]map[string]int
 	// colTypes / qualColTypes record the declared parquet.TypeID of the
 	// columns a BASE TABLE provides, for the plan-time literal refusal
 	// (validate_literal.go). A bare name two sources declare with DIFFERENT
@@ -158,7 +166,8 @@ func (s *colScope) providesBareColumn(name string) bool {
 
 func newColScope() *colScope {
 	return &colScope{cols: map[string]bool{}, quals: map[string]map[string]bool{}, srcCount: map[string]int{},
-		colTypes: map[string]parquet.TypeID{}, qualColTypes: map[string]map[string]parquet.TypeID{},
+		qualCount: map[string]map[string]int{},
+		colTypes:  map[string]parquet.TypeID{}, qualColTypes: map[string]map[string]parquet.TypeID{},
 		rowFields: map[string][]parquet.Column{}, exact: map[string]bool{},
 		exactQuals: map[string]bool{}}
 }
@@ -197,6 +206,10 @@ func (s *colScope) addQualified(qual, col string) {
 		s.quals[q] = map[string]bool{}
 	}
 	s.quals[q][c] = true
+	if s.qualCount[q] == nil {
+		s.qualCount[q] = map[string]int{}
+	}
+	s.qualCount[q][c]++
 }
 
 // addQualifiedTyped is addQualified for a source whose column TYPES are known
@@ -318,6 +331,14 @@ func (s *colScope) clone() *colScope {
 	for col, n := range s.srcCount {
 		c.srcCount[col] = n
 	}
+	for q, cs := range s.qualCount {
+		if c.qualCount[q] == nil {
+			c.qualCount[q] = map[string]int{}
+		}
+		for col, n := range cs {
+			c.qualCount[q][col] = n
+		}
+	}
 	c.outerDiag = s.outerDiag
 	return c
 }
@@ -358,6 +379,24 @@ func (s *colScope) resolveRef(ref *plansql.ColRef) error {
 		if cols, ok := s.quals[q]; ok {
 			// Qualifier is a known table/alias: a miss iff the column is absent.
 			if cols[col] {
+				// ONE SOURCE, TWO COLUMNS OF THIS NAME. The relation is
+				// legal and a star over it publishes both by position; the
+				// reference names neither, and answering the FIRST is a
+				// value chosen by the block's item order that the client is
+				// never told about (#1094). PostgreSQL 17.11, measured:
+				//
+				//	SELECT x.id FROM (SELECT a.id, b.id FROM lat_item a
+				//	                  JOIN lat_item b ON a.id = b.id) x
+				//	ERROR:  42702: column reference "id" is ambiguous
+				//
+				// The message names the COLUMN, which is what is ambiguous
+				// here — the qualifier names exactly one relation. That is
+				// the other half of §9's duplicate-published-name rule: the
+				// qualified STAR over such a block already declines rather
+				// than bind the first twice (arc O2, c8d94fe3).
+				if s.qualCount[q][col] > 1 {
+					return sqlerr.New("42702", "column reference %q is ambiguous", ref.Column)
+				}
 				return s.refuseDelimitedMiss(ref)
 			}
 			return s.unknownColumn(ref)
