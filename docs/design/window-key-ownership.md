@@ -214,13 +214,41 @@ y's copy on both engines; `PARTITION BY y.w` over the same input does not.
 > NAME is derived from the identity for publication; an identity is never
 > derived from a name.**
 
-"Occurrence" and not "arm" deliberately (P2): two references to one table are
-two occurrences, a written alias is a *spelling* of an occurrence rather than
-the occurrence itself, and an occurrence with no written alias still produces
-columns. The plan already has a handle for one — the node
-`physical.ownedJoinArm` returns, which is the same node identity
-`Node.HiddenJoinCols` keys its drops on. A qualifier is how an occurrence is
-addressed in TEXT, and text is a carrier, not the identity.
+"Occurrence" and not "arm" deliberately: two references to one table are two
+occurrences, a written alias is a *spelling* of an occurrence rather than the
+occurrence itself, and an occurrence with no written alias still produces
+columns. A qualifier is how an occurrence is addressed in TEXT, and text is a
+carrier, not the identity.
+
+**What the implementation settled about an UNNAMED occurrence, measured.** The
+first draft said the plan "already has a handle" and pointed at the node
+`physical.ownedJoinArm` returns and at `Node.HiddenJoinCols`. That was too
+compressed and the round-2 review was right to say so: `ownedJoinArm` requires
+a qualified name and answers nil without one, and `HiddenJoinCols` is a string
+list on a join rather than a map keyed by that node. The rule does not need a
+new handle, and the reason is a disposition rather than a representation —
+measured at `78a0a671` on five arms (`probe_unnamed_occurrence.log`,
+`probe_unnamed_occurrence_pg.log`):
+
+| shape | wadjet, five arms | PostgreSQL 17.11 |
+|---|---|---|
+| `FROM lat_ord o, LATERAL (SELECT i.id AS w …)` — no alias — with `PARTITION BY w` | REFUSED at plan time: `join ON "o.id = (SELECT …).__key_0"` | 4 rows |
+| the same, its column named BARE and contested (`SELECT i.id`) with `PARTITION BY id` | the same refusal | `42702 column reference "id" is ambiguous` |
+| the same, read as a plain select item (`SELECT w AS b`) | the same refusal | 4 rows |
+
+An alias-less LATERAL is refused BEFORE any consumer binds anything: the
+decorrelation has no name for the arm, so the join key it mints cannot be
+resolved. So there is no shape in which a MISSING textual qualifier is used as
+an identity — corollary 1 fires only for a reference the query wrote WITH a
+qualifier, and an unnamed occurrence's columns are reachable only bare, where
+either exactly one column answers (SQL has resolved it) or two do and
+PostgreSQL raises 42702 (the ADR-0012 superset in §(e) item 6). The refusal
+itself is a gap — PostgreSQL answers two of those three — and it is recorded as
+a filing candidate, not closed here.
+
+Where an occurrence IS named, the handle is the name the query wrote, and the
+walks that resolve it into a producer's subtree (`relationScopeSubtree`,
+`ownedJoinArm`, `namedArmScope`) are the ones already in the tree.
 
 This is ADR-0026 §4 ("the identity of a column is the relation that produced
 it, never a bare name two relations share") stated for the consumers §8j left
@@ -400,10 +428,15 @@ conflated them (P1). Measured in `dagplan/stage_emission.go` and
 |---|---|---|
 | `PartitionBy[i]` | a three-step ladder AT EMISSION: (1) `windowArgSourceInScope` — resolve inside the occurrence the qualifier names, then `CleanExpr`; (2) `DerivedAliasSourceColumn` unscoped; (3) `derivedAliasColumnFor` → `materializeWindowAliasKeys`, which computes the value on the producing stage under its own name | **EMISSION, final.** No late correction exists |
 | `OrderBy[i].Column` | the same ladder, same loop | **EMISSION, final** |
-| `InputCol` (the ARGUMENT) | the same ladder, PLUS `WindowColSpec.InputRefs` — candidates recorded at emission and settled at the END of planning by `bindConsumersToPublishedIdentity`, which rewrites `InputCol` alone | emission, with a late correction |
+| `InputCol` (the ARGUMENT) | a DIFFERENT ladder. It STOPS as soon as the qualifier names an arm — `scoped` true with an empty `src`, which is a COMPUTED join-arm alias, does NOT fall through to the unscoped lookup or the materialization the keys take. The argument then travels as the alias and `WindowColSpec.InputRefs` carries its candidates, settled at the END of planning by `bindConsumersToPublishedIdentity`, which rewrites `InputCol` alone | emission, with a late correction |
 
 `WindowColSpec.InputRefs` is therefore the ARGUMENT's channel and nothing else;
-the first draft's claim that it carries the keys is withdrawn. **The deadline is
+the first draft's claim that it carries the keys is withdrawn. And the two
+ladders' DIFFERENCE is load-bearing rather than incidental: collapsing them —
+making the argument fall through the way the keys do — would delete the late
+carrier path a computed join-arm argument depends on. That is recorded at the
+branch itself in `dagplan`'s window emission, so the next change cannot erase
+it by tidying. **The deadline is
 the contract**: a PARTITION BY key is also the stage's DISTRIBUTION, so
 `EnsureDistribution` consumes it and the exchange and the operator must already
 agree on one name — which is why the arm-aware choice is made at emission
@@ -514,6 +547,28 @@ The suffix scan stays the resolver's one guessing step, bounded by its decline
 on more than one match, and is where a phase-2 review should look next.
 
 ---
+
+## What phase 2 landed
+
+Corollary 1, and the gates that hold the rule. Measured at the arc's tip:
+
+| | |
+|---|---|
+| the change | `physical.resolveWindowKeys` keeps a qualified PARTITION BY / ORDER BY term's spelling wherever more than one occurrence of the window's input publishes its bare name (`windowArgKeepsItsQualifier`, the window ARGUMENT's own rule since #742 round 4) |
+| pins DELETED | the seven of `TestArcL1AWindowKeyBindsItsOwnJoinArm` and `TestArcL1QualifyAnswersDuckDBOnEveryArm`'s `overJoin`, on all five arms — 40 (cell, arm) pairs |
+| the three that broke every prior repair | #975, #658, #770 green |
+| the seam, enumerated once | `coordinator.TestWKASeamConsumerBindsItsOwnOccurrence` — 39 cells × 5 arms, 173 of 195 agree with PostgreSQL 17.11 |
+| the wire half | `pgwire.TestWKTheWireDeclaresTheSeamsOwnColumns` |
+| the masking class | `server.TestArcWKAReboundKeyOverAPolicedColumnReadsTheMask` — 72 (cell, door) pairs answer the mask, 9 refuse the denied column, over nine doors |
+| ADR-0026 §8j | rewritten from NOT SETTLED to the rule, §4 and §9 cross-referenced |
+
+Corollary 2's precondition is STATED and its disposition ladder is named to the
+functions that implement each step, but the one family that needs the TRANSLATE
+step — a reference into a decorrelated LATERAL arm on the three DAG arms — is
+not closed here. It is right on the engine's own arm and wrong only on the
+distributed ones, so under engine-first it is pinned per arm with its mechanism
+in the seam's table and carried as a `distributed` filing candidate. §(e) item 9
+records it.
 
 ## (d) The cells the change must move, and the gates it must keep
 
@@ -633,6 +688,31 @@ A deferral is a claim and carries its measurement.
    `missing FROM-clause entry for table "i"` on all five. One out-of-scope
    reference, two dispositions decided by the enclosing SELECT list.
    Pre-existing, not a binding question, recorded as a filing candidate.
+
+9. **The rule's DAG half for a LATERAL arm — the seam's remaining column.**
+   Five consumers × three DAG arms, measured in
+   `TestWKASeamConsumerBindsItsOwnOccurrence`: a decorrelated body's Project
+   emits no stage, so the DAG's join publishes the body's INNER SCAN spelling
+   where the single-process join publishes the arm's own alias; the reference
+   misses exactly and the qualifier strip binds the OUTER column. Right on
+   `single` and `spilled512k`, wrong on `dag`, `dag-shuffled` and
+   `dag-morsel4`, so it is `distributed` by the arm rule and pinned per arm
+   rather than chased (engine-first, Derek 2026-09-16). #1126 is the same fact
+   seen as two published SPELLINGS, and its pin stays for the reason §(c)
+   gives: the published-name half alone cannot retire it.
+
+10. **An alias-less LATERAL is refused on all five arms**, where PostgreSQL
+    answers — the decorrelation has no name for the arm, so the join key it
+    mints cannot be resolved. Measured beside the unnamed-occurrence
+    disposition in §(b). Pre-existing, not a binding question, filing
+    candidate.
+
+11. **A `*` standing BESIDE another item over a join is refused**, where
+    PostgreSQL answers eight fields. The expansion mints its projection on
+    SHAPE alone and takes it back out when the arms cannot be stated, and a
+    star beside an item is left for the physical planner, which has no relation
+    to expand it from. Pinned with PostgreSQL's own list in
+    `pgwire.TestWKTheWireDeclaresTheSeamsOwnColumns`; filing candidate.
 
 ### Dimensions deliberately left out of (a)
 
