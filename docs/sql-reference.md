@@ -2819,9 +2819,9 @@ see the Encoding Functions section.
 | `CONCAT(a, b, ...)` | Concatenate strings; **NULL arguments are ignored** (all-NULL gives `''`, never NULL) — `\|\|` propagates NULL instead | `CONCAT(src_ip, ':', src_port)` |
 | `LENGTH(s)` / `LEN(s)` | String length in **characters**, the synonym of `CHAR_LENGTH` (use `OCTET_LENGTH` for bytes). Over a `BYTES` argument it is the **byte** count, as `length(bytea)` is on the server — for a bare column and a derived value alike | `LENGTH(message)` |
 | `SUBSTR(s, start, len)` / `SUBSTRING` | Extract substring; `start` and `len` count **characters**, and a negative `len` is SQLSTATE 22011. Over a `BYTES` argument it returns `BYTES` and counts **bytes** | `SUBSTR(message, 1, 50)` |
-| `TRIM(s)` | Remove leading/trailing whitespace | `TRIM(hostname)` |
-| `LTRIM(s)` | Remove leading whitespace | `LTRIM(message)` |
-| `RTRIM(s)` | Remove trailing whitespace | `RTRIM(message)` |
+| `TRIM(s [, characters])` | Remove leading and trailing whitespace, or every leading and trailing character that is IN the given SET. The SQL-standard `TRIM([BOTH] [characters] FROM s)` spelling is the same function | `TRIM(hostname)`, `TRIM(BOTH '0' FROM '007')` → `'7'`, `TRIM(BOTH 'ab' FROM 'baXab')` → `'X'` |
+| `LTRIM(s [, characters])` | Remove leading whitespace, or every leading character in the given SET. `TRIM(LEADING [characters] FROM s)` is the same function | `LTRIM(message)`, `LTRIM('007', '0')` → `'7'` |
+| `RTRIM(s [, characters])` | Remove trailing whitespace, or every trailing character in the given SET. `TRIM(TRAILING [characters] FROM s)` is the same function | `RTRIM(message)`, `RTRIM('007', '0')` → `'007'` |
 | `REPLACE(s, old, new)` | Replace occurrences | `REPLACE(message, 'error', 'ERROR')` |
 | `REVERSE(s)` | Reverse string, by character | `REVERSE(hostname)` |
 | `LEFT(s, n)` | First n characters | `LEFT(hostname, 3)` |

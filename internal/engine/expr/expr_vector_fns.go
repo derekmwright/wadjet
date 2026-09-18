@@ -83,6 +83,10 @@ func vecLower(args []*batch.Vector, out *batch.Vector, n int) {
 
 func vecTrim(args []*batch.Vector, out *batch.Vector, n int) {
 	src := args[0]
+	if len(args) > 1 {
+		vecTrimCutset(args, out, n, true, true)
+		return
+	}
 	hasNulls := src.Nulls.HasNulls()
 	for i := 0; i < n; i++ {
 		if hasNulls && src.Nulls.IsNullFast(i) {
@@ -105,6 +109,10 @@ func vecTrim(args []*batch.Vector, out *batch.Vector, n int) {
 
 func vecLTrim(args []*batch.Vector, out *batch.Vector, n int) {
 	src := args[0]
+	if len(args) > 1 {
+		vecTrimCutset(args, out, n, true, false)
+		return
+	}
 	hasNulls := src.Nulls.HasNulls()
 	for i := 0; i < n; i++ {
 		if hasNulls && src.Nulls.IsNullFast(i) {
@@ -123,6 +131,10 @@ func vecLTrim(args []*batch.Vector, out *batch.Vector, n int) {
 
 func vecRTrim(args []*batch.Vector, out *batch.Vector, n int) {
 	src := args[0]
+	if len(args) > 1 {
+		vecTrimCutset(args, out, n, false, true)
+		return
+	}
 	hasNulls := src.Nulls.HasNulls()
 	for i := 0; i < n; i++ {
 		if hasNulls && src.Nulls.IsNullFast(i) {
@@ -403,5 +415,32 @@ func vecContains(args []*batch.Vector, out *batch.Vector, n int) {
 		s := src.BytesData.StringValue(i)
 		p := sub.BytesData.StringValue(i)
 		out.BoolData[i] = strings.Contains(s, p)
+	}
+}
+
+// vecTrimCutset is the two-argument TRIM the SQL-standard spellings compile to:
+// the second argument is a SET of characters, read per row so a column of
+// cutsets works the way a constant one does.
+func vecTrimCutset(args []*batch.Vector, out *batch.Vector, n int, left, right bool) {
+	src, cut := args[0], args[1]
+	hasNulls := src.Nulls.HasNulls()
+	cutNulls := cut.Nulls.HasNulls()
+	for i := 0; i < n; i++ {
+		if (hasNulls && src.Nulls.IsNullFast(i)) || (cutNulls && cut.Nulls.IsNullFast(i)) {
+			out.Nulls.SetNull(i)
+			out.BytesData.Set(i, nil)
+			continue
+		}
+		b := string(src.BytesData.Value(i))
+		set := string(cut.BytesData.Value(i))
+		switch {
+		case left && right:
+			b = strings.Trim(b, set)
+		case left:
+			b = strings.TrimLeft(b, set)
+		default:
+			b = strings.TrimRight(b, set)
+		}
+		out.BytesData.Set(i, []byte(b))
 	}
 }

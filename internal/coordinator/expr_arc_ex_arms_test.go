@@ -107,6 +107,10 @@ func TestArcEXAnswersTheSameOnEveryArm(t *testing.T) {
 			`SELECT COUNT(*) AS n FROM typemx WHERE c_port = '0x1bb'`, "22P02"},
 		{"#1137", "protocol_literal_that_names_no_protocol",
 			`SELECT COUNT(*) AS n FROM typemx WHERE c_proto = 'nosuchproto'`, "22P02"},
+		// B1's other half: widening the three TRIM rows to two arguments did
+		// not widen them to any count. PostgreSQL has no three-argument btrim
+		// either.
+		{"B1", "trim_with_three_arguments", `SELECT TRIM('a','b','c') AS v FROM typemx WHERE id = 1`, "42883"},
 	} {
 		t.Run(tc.issue+"/"+tc.name, func(t *testing.T) {
 			for _, arm := range arms() {
@@ -157,6 +161,27 @@ func TestArcEXAnswersTheSameOnEveryArm(t *testing.T) {
 			`SELECT ENCODE(c_bytes,'hex') AS v FROM typemx WHERE id = 1`, []string{"v=62797465732d3030303030312d78"}},
 		{"#1053", "an_optional_trailing_argument_still_answers",
 			`SELECT SUBSTR('abcdef',2) AS v FROM typemx WHERE id = 1`, []string{"v=bcdef"}},
+		// B1 (round-1 review): the SQL-standard TRIM spellings are rewritten
+		// into a TWO-argument call the documentation never writes as one, and
+		// the arity table refused them at the binder — which is one answer on
+		// every arm, so a five-arm table is exactly how a table-driven refusal
+		// has to be held. The values are PostgreSQL 17.11's.
+		{"B1", "trim_both_from_is_the_servers_value",
+			`SELECT TRIM(BOTH ' ' FROM '  padded  ') AS v FROM typemx WHERE id = 1`,
+			[]string{"v=padded"}},
+		{"B1", "trim_leading_cutset",
+			`SELECT TRIM(LEADING '0' FROM '007') AS v FROM typemx WHERE id = 1`, []string{"v=7"}},
+		{"B1", "trim_trailing_cutset_matches_nothing",
+			`SELECT TRIM(TRAILING '0' FROM '007') AS v FROM typemx WHERE id = 1`, []string{"v=007"}},
+		{"B1", "the_cutset_is_a_set_not_a_prefix",
+			`SELECT TRIM(BOTH 'ab' FROM 'baXab') AS v FROM typemx WHERE id = 1`, []string{"v=X"}},
+		{"B1", "ltrim_two_arguments",
+			`SELECT LTRIM('007','0') AS v FROM typemx WHERE id = 1`, []string{"v=7"}},
+		{"B1", "trim_over_a_column_and_a_column_cutset",
+			`SELECT TRIM(c_str, c_str) AS v FROM typemx WHERE id = 1`, []string{"v="}},
+		{"B1", "position_in_is_the_servers_one_based_index",
+			`SELECT POSITION('d' IN '  padded  ') AS v FROM typemx WHERE id = 1`,
+			[]string{"v=int32:5"}},
 	} {
 		t.Run(tc.issue+"/"+tc.name, func(t *testing.T) {
 			for _, arm := range arms() {

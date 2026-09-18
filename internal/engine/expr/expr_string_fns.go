@@ -213,6 +213,16 @@ func fnTrim(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
+	// The SQL-standard TRIM spellings arrive here as a TWO-argument call: the
+	// grammar rewrites `TRIM(BOTH c FROM s)` into `trim(s, c)`
+	// (planner/sql.parseTrimExpr). The second argument is a SET of characters,
+	// which is what btrim(text, text) takes on PostgreSQL 17.11.
+	if len(args) > 1 {
+		if args[1] == nil {
+			return nil
+		}
+		return strings.Trim(toString(args[0]), toString(args[1]))
+	}
 	return strings.TrimSpace(toString(args[0]))
 }
 
@@ -220,12 +230,24 @@ func fnLTrim(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
+	if len(args) > 1 {
+		if args[1] == nil {
+			return nil
+		}
+		return strings.TrimLeft(toString(args[0]), toString(args[1]))
+	}
 	return strings.TrimLeft(toString(args[0]), " \t\n\r")
 }
 
 func fnRTrim(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
+	}
+	if len(args) > 1 {
+		if args[1] == nil {
+			return nil
+		}
+		return strings.TrimRight(toString(args[0]), toString(args[1]))
 	}
 	return strings.TrimRight(toString(args[0]), " \t\n\r")
 }

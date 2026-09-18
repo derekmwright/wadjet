@@ -97,6 +97,12 @@ func (s Signature) domain(i int) ArgDomain {
 	return s.Rest
 }
 
+// Accepts reports whether n arguments satisfy this signature's arity. It is
+// exported for the GRAMMAR-side closure: physical's rewrite gate parses every
+// spelling this engine turns into a call the query did not write as one, and
+// asks this about the call it produced (the round-1 review's B1).
+func (s Signature) Accepts(n int) bool { return s.accepts(n) }
+
 // accepts reports whether n arguments satisfy this signature's arity.
 func (s Signature) accepts(n int) bool {
 	if n < s.Min {
@@ -168,9 +174,9 @@ var textDomains = map[string][]ArgDomain{
 	"ucase":            {ArgText},
 	"char_length":      {ArgText},
 	"character_length": {ArgText},
-	"trim":             {ArgText},
-	"ltrim":            {ArgText},
-	"rtrim":            {ArgText},
+	"trim":             {ArgText, ArgText},
+	"ltrim":            {ArgText, ArgText},
+	"rtrim":            {ArgText, ArgText},
 	"reverse":          {ArgText},
 	"replace":          {ArgText, ArgText, ArgText},
 	"starts_with":      {ArgText, ArgText},
@@ -453,7 +459,7 @@ var funcSignatures = map[string]Signature{
 	"log2":                           {Min: 1, Max: 1},
 	"lower":                          {Min: 1, Max: 1},
 	"lpad":                           {Min: 2, Max: 3},
-	"ltrim":                          {Min: 1, Max: 1},
+	"ltrim":                          {Min: 1, Max: 2},
 	"mac_format":                     {Min: 1, Max: 2},
 	"mac_is_local":                   {Min: 1, Max: 1},
 	"mac_is_unicast":                 {Min: 1, Max: 1},
@@ -531,7 +537,7 @@ var funcSignatures = map[string]Signature{
 	"round_half_even":                {Min: 1, Max: 2},
 	"row_field":                      {Min: 2, Max: 2},
 	"rpad":                           {Min: 2, Max: 3},
-	"rtrim":                          {Min: 1, Max: 1},
+	"rtrim":                          {Min: 1, Max: 2},
 	"same_subnet":                    {Min: 3, Max: 3},
 	"second":                         {Min: 1, Max: 1},
 	"semver_build":                   {Min: 1, Max: 1},
@@ -598,7 +604,7 @@ var funcSignatures = map[string]Signature{
 	"to_unixtime":                    {Min: 1, Max: 1},
 	"to_utf8":                        {Min: 1, Max: 1},
 	"translate":                      {Min: 3, Max: 3},
-	"trim":                           {Min: 1, Max: 1},
+	"trim":                           {Min: 1, Max: 2},
 	"trunc":                          {Min: 1, Max: 2},
 	"truncate":                       {Min: 1, Max: 2},
 	"txid_current":                   {Min: 0, Max: 0},
