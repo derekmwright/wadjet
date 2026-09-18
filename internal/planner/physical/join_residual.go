@@ -278,6 +278,22 @@ func (e *residualEval) resolve(probe, build *batch.RecordBatch) {
 	e.row = batch.NewRecordBatch(schema, 1)
 	for i := range e.binds {
 		e.binds[i].dst = e.row.Columns[i]
+		if e.binds[i].idx < 0 {
+			// AN UNBOUND REFERENCE IS SQL NULL, and it has to be written as
+			// one HERE: refresh never touches this slot again, and a freshly
+			// minted vector's null bitmap is all NON-NULL (batch.NewBitmap),
+			// so the slot would otherwise read a zero value — an empty string
+			// — and the residual would compare against it instead of being
+			// UNKNOWN. That inverts the documented failure mode from
+			// "rejects every candidate and NULL-pads each preserved row" to
+			// "accepts every candidate", which is a join's whole cross
+			// product. Caught by arc L1's own pins: `LEFT JOIN LATERAL (…) s
+			// ON true` under an enclosing star DECLINES the lifted
+			// predicate's materialization, so the residual names a column the
+			// join does not publish, and five pinned cells went from three
+			// NULL-padded rows to twelve.
+			e.binds[i].dst.Nulls.SetNull(0)
+		}
 	}
 }
 

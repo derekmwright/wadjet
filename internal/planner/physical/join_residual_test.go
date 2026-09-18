@@ -140,6 +140,50 @@ func TestBuildJoinResidualFilterRefusesWhatItCannotEvaluate(t *testing.T) {
 	}
 }
 
+// A REFERENCE THAT RESOLVES ON NEITHER SIDE MAKES THE RESIDUAL UNKNOWN, and
+// UNKNOWN REJECTS.
+//
+// The planner ships a residual's columns through NeededColumns, so a miss here
+// is a plan bug — but the DISPOSITION of that bug is the thing to pin, because
+// the two directions are opposites. Rejecting every candidate NULL-pads each
+// preserved row of a LEFT join; accepting every candidate emits the join's
+// whole CROSS PRODUCT. A materialization that declines (arc L1's lifted
+// predicate under an enclosing star) reaches exactly this path, and five of
+// that arc's pinned cells went from three padded rows to twelve when an
+// unbound slot read its zero value instead of NULL.
+func TestBuildJoinResidualFilterRejectsWhenAReferenceResolvesOnNeitherSide(t *testing.T) {
+	probe := residualBatch(t, []parquet.Column{{Name: "p", Type: parquet.TypeInt64}},
+		[]map[string]any{{"p": int64(1)}, {"p": int64(2)}})
+	build := residualBatch(t, []parquet.Column{{Name: "b", Type: parquet.TypeInt64}},
+		[]map[string]any{{"b": int64(1)}, {"b": int64(9)}})
+	for _, tc := range []struct {
+		filter string
+		accept bool
+	}{
+		{"nosuchcol < b", false},           // one side unbound
+		{"p < nosuchcol", false},           // the other side
+		{"nosuchcol = othernosuch", false}, // both
+		{"UPPER(nosuchcol) = 'X'", false},  // through a function
+		{"nosuchcol IS NOT NULL", false},   // a predicate that is TRUE on a value
+		// The reference is NULL, not "absent": what an expression DOES with a
+		// NULL is the expression's business, and COALESCE answers 1. The claim
+		// is that the slot reads NULL, not that every shape rejects.
+		{"COALESCE(nosuchcol, 1) = 1", true},
+	} {
+		t.Run(tc.filter, func(t *testing.T) {
+			f := residualFilter(t, tc.filter, "r")
+			for pr := 0; pr < 2; pr++ {
+				for br := 0; br < 2; br++ {
+					if got := f(probe, pr, build, br); got != tc.accept {
+						t.Fatalf("%q on probe[%d] x build[%d]: got %v, want %v — an unbound "+
+							"reference is SQL NULL", tc.filter, pr, br, got, tc.accept)
+					}
+				}
+			}
+		})
+	}
+}
+
 // A self-join residual: both sides expose the same bare column names, so the
 // build alias is what decides sidedness for its qualified references while
 // the probe alias's references fall through to the probe by bare name.
