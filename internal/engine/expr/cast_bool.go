@@ -340,6 +340,31 @@ func castDestType(dest string) (batch.TypeID, bool) {
 		return batch.TypeDate, true
 	case "TIMESTAMP", "DATETIME", "TIMESTAMPTZ":
 		return batch.TypeTimestamp, true
+	// The NETWORK destinations. They answer here for the same reason the rest
+	// do — these are the VALUES an enclosing expression will read — and the
+	// caller that needed them is the comparison layer: an ABAC `mask_column`
+	// whose value is `CAST(6 AS PROTOCOL)` REPLACES the column with that node,
+	// so `WHERE c_proto = 'tcp'` over the masked relation had no declared type
+	// to resolve the literal against and selected NO rows where the same
+	// predicate beside the column itself selects every row (#1137 at an
+	// EXPRESSION rather than a column).
+	//
+	// classifyOperand claims only these six and BOOLEAN from this answer; the
+	// bool cast's own arm (castBoolDeclared) reaches them as a SOURCE it has
+	// no conversion for, which is the 42846 refusal it already gives every
+	// other source it cannot convert.
+	case "IPV4":
+		return batch.TypeIPv4, true
+	case "IPV6":
+		return batch.TypeIPv6, true
+	case "CIDR":
+		return batch.TypeCIDR, true
+	case "MAC", "MACADDR":
+		return batch.TypeMAC, true
+	case "PORT":
+		return batch.TypePort, true
+	case "PROTOCOL":
+		return batch.TypeProtocol, true
 	}
 	return 0, false
 }

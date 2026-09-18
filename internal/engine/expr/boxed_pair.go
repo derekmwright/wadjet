@@ -604,8 +604,31 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 		if k := castNumericKind(v); k != boxUnknown {
 			return k, true
 		}
-		if t, ok := castDestType(v.DestType); ok && t == batch.TypeBool {
-			return boxBool, true
+		if t, ok := castDestType(v.DestType); ok {
+			switch t {
+			case batch.TypeBool:
+				return boxBool, true
+			// The NETWORK family, for the same reason BOOL is here: the pair's
+			// rule is "read the other side's literal with THIS type's input
+			// function", and a cast is the one operand whose type the query
+			// itself writes down.
+			//
+			// The shape that found the hole is a POLICY MASK. An ABAC
+			// `mask_column` whose value is `CAST(6 AS PROTOCOL)` REPLACES the
+			// column with this node, so `WHERE c_proto = 'tcp'` over the
+			// masked relation compared a number against four characters and
+			// selected NO rows, where the same predicate beside the column
+			// itself selects every row (#1137's resolution rule at an
+			// EXPRESSION rather than a column). A mask that changes which rows
+			// a predicate selects is what the masking gate exists to catch,
+			// even when the answer discloses nothing — it is a statement about
+			// neither the mask nor the value.
+			case batch.TypePort, batch.TypeProtocol, batch.TypeIPv4,
+				batch.TypeIPv6, batch.TypeCIDR, batch.TypeMAC:
+				if k, ok := declaredBoxKind(t); ok {
+					return k, true
+				}
+			}
 		}
 		return boxUnknown, true
 	}
