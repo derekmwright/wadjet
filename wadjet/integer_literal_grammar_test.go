@@ -85,8 +85,13 @@ func TestIntegerLiteralGrammar(t *testing.T) {
 		{name: "cast underscore", sql: "SELECT CAST('1_000' AS BIGINT) AS v", rows: []string{"[1000]"}},
 		{name: "cast leading zero", sql: "SELECT CAST('017' AS BIGINT) AS v", rows: []string{"[17]"}},
 		{name: "cast signed hex", sql: "SELECT CAST('-0x1A' AS BIGINT) AS v", rows: []string{"[-26]"}},
-		{name: "cast a fraction still ROUNDS", sql: "SELECT CAST('26.7' AS BIGINT) AS v",
-			rows: []string{"[27]"}},
+		// A FRACTION is not an int8 spelling. `'26.7'::bigint` is
+		// `22P02 invalid input syntax for type bigint: "26.7"` on 17.11,
+		// measured; this cell claimed the server rounds it to 27, which it
+		// does only for the NUMERIC cast (#1141). The numeric cast's rounding
+		// is gated by wadjet.TestACastToAnIntegerTypeReadsItsOperandsOwnGrammar.
+		{name: "cast a fraction is not an integer spelling", sql: "SELECT CAST('26.7' AS BIGINT) AS v",
+			state: "22P02", msg: `invalid input syntax for type bigint: "26.7"`},
 		{name: "cast a non-number", sql: "SELECT CAST('abc' AS BIGINT) AS v",
 			state: "22P02", msg: `invalid input syntax for type bigint: "abc"`},
 
