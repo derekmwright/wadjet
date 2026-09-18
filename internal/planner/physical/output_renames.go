@@ -181,8 +181,16 @@ func findOutputProjectionNode(n *logical.Node) *logical.Node {
 // answer for every consumer that asks where the pipeline's output projection
 // IS — the gather's rename target, the distinct dedup, the stage projection —
 // because a set operation's arms each have one and the operation has none.
+// The walk carries NO hop bound. Every iteration descends to a CHILD of the
+// node it just read, so it terminates on a finite tree, and a bound is
+// reachable with ordinary SQL: a LEFT-DEEP chain of set operations costs one
+// hop per arm, so at eight hops `SELECT id, total+1 FROM t UNION ALL …`
+// answered nil again from the ninth arm on — the eighth under an `ORDER BY` —
+// and published the arm's RESOLUTION spelling, which is the divergence #1079
+// closes. Measured: nine arms declared `total + 1` on all five arms and in
+// RowDescription where PostgreSQL 17.11 declares `?column?`.
 func publishedOutputProjectionNode(n *logical.Node) *logical.Node {
-	for hops := 0; n != nil && hops < 8; hops++ {
+	for n != nil {
 		switch n.Type {
 		case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
 			if len(n.Children) != 2 {

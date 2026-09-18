@@ -502,8 +502,20 @@ func armRelationColumns(arm *Node) (string, []StarColumn) {
 // Everything else answers nil: an Aggregate, a Window or a table function
 // publishes something this walk cannot state, and a block still carrying an
 // unexpanded star has no list at all.
+//
+// NO HOP BOUND, and the bound this used to carry was a CLIFF. Every iteration
+// descends to a CHILD of the node it just read, so the walk terminates on a
+// finite tree; `hops < 8` instead made it answer nil on ordinary SQL, because
+// a LEFT-DEEP chain of set operations costs one hop per arm. Measured: a NINE
+// arm `UNION ALL` inside a block made `SELECT c.* FROM c` 42703 "column c.*
+// does not exist" where the eight-arm twin answers, and made the BARE star
+// over the same block as a join arm publish `total + 1` and the PLAN's
+// qualified `b.id` where PostgreSQL publishes `?column?` and `id` — the arm
+// could not be stated, so the whole star fell back to the join's stream. It is
+// the same cliff the review found one function over in
+// `physical.publishedOutputProjectionNode` (#1079), and the same repair.
 func blockOwnProjection(block *Node) *Node {
-	for n, hops := block, 0; n != nil && hops < 8; hops++ {
+	for n := block; n != nil; {
 		switch n.Type {
 		case NodeProject:
 			if HasStarProjection(n) || len(n.Projections) == 0 {
@@ -541,8 +553,11 @@ func blockOwnProjection(block *Node) *Node {
 // amount, amount AS a2 FROM lat_item ORDER BY id LIMIT 4) s ON …`, measured on
 // five arms). The list comes from the wrapper — it is what the block
 // publishes — and the name from the block under it.
+// It carries no hop bound either, and for `blockOwnProjection`'s reason: the
+// one case that continues descends to a CHILD, so the walk terminates, and an
+// arbitrary bound can only turn a deeper tree into a silently unnamed block.
 func blockRelationName(n *Node) string {
-	for hops := 0; n != nil && hops < 4; hops++ {
+	for n != nil {
 		switch {
 		case n.CTERefAlias != "":
 			return n.CTERefAlias

@@ -143,8 +143,19 @@ func hasOrdinalKey(keys []OrderExpr) bool {
 // without renaming them, so the walk descends through those; anything else
 // stops it, because a node that DERIVES rows decides its own output names and
 // guessing them is how a sort key silently matches nothing.
+//
+// NO HOP BOUND. Every iteration descends to a CHILD of the node it just read,
+// so the walk terminates on a finite tree, and the `i < 8` it used to carry
+// was a CLIFF ordinary SQL reaches: a LEFT-DEEP chain of set operations costs
+// one hop per arm, so `WITH c AS (<nine-arm UNION ALL>) SELECT * FROM c ORDER
+// BY 1, 2` answered nil, the ordinal resolved to nothing and the statement was
+// refused 0A000 for a query PostgreSQL answers — while its eight-arm twin and
+// its written-key twin (`ORDER BY id`) both answered. Measured on five arms at
+// depths 2, 3, 8 and 9. It is the same bound arc SR removed from
+// `blockOwnProjection`, `blockRelationName` and
+// `physical.publishedOutputProjectionNode` (#1079's B4), one walk over.
 func projectOutputNamesBelow(n *Node) []string {
-	for i := 0; n != nil && i < 8; i++ {
+	for n != nil {
 		switch n.Type {
 		case NodeProject:
 			if HasStarProjection(n) {
