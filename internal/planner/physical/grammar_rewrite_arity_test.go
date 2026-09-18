@@ -87,7 +87,7 @@ func TestEveryGrammarRewriteProducesACallItsSignatureAccepts(t *testing.T) {
 	// would be B1 again — a call the table has never been asked about.
 	for _, name := range parserMintedFuncNames(t) {
 		if !produced[name] {
-			t.Errorf("internal/planner/sql/select_parser.go mints a call to %q and no spelling "+
+			t.Errorf("a file under internal/planner mints a call to %q and no spelling "+
 				"in grammarRewriteSpellings produces one, so its arity is never compared with "+
 				"the table — which is exactly how B1 reached a tip", name)
 		}
@@ -186,14 +186,42 @@ func parserMintedFuncNames(t *testing.T) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := os.ReadFile(filepath.Join(root, "internal", "planner", "sql", "select_parser.go"))
-	if err != nil {
-		t.Fatalf("read select_parser.go: %v", err)
-	}
+	// EVERY planner file, not one: internal/planner/physical/group_key_binding.go
+	// already mints a literal `row_field` call, and a rewrite added in any of
+	// these packages is B1's mechanism again. Test files are skipped, and so
+	// are directories the Go toolchain itself skips (`.`/`_`), so a worktree
+	// under .claude/ is not read twice.
 	re := regexp.MustCompile(`FuncCallNode\{Name:\s*"([a-z_][a-z0-9_]*)"`)
 	set := map[string]bool{}
-	for _, m := range re.FindAllStringSubmatch(string(body), -1) {
-		set[m[1]] = true
+	files := 0
+	walkErr := filepath.Walk(filepath.Join(root, "internal", "planner"), func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if n := info.Name(); n != "planner" && (strings.HasPrefix(n, ".") || strings.HasPrefix(n, "_")) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		files++
+		for _, m := range re.FindAllStringSubmatch(string(body), -1) {
+			set[m[1]] = true
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("walk internal/planner: %v", walkErr)
+	}
+	if files < 20 {
+		t.Errorf("only %d planner source files were read; the walk has stopped reaching them", files)
 	}
 	// TRIM's three names and EXTRACT's fields are built from VARIABLES, so the
 	// regex cannot see them; the spelling table covers those and this guard
