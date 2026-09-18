@@ -302,7 +302,7 @@ Full analytical SQL via a custom recursive descent parser:
 - `CREATE TABLE [IF NOT EXISTS] t [(a, b)] AS <query> [WITH [NO] DATA]` and `INSERT INTO t [(a, b)] <query>` — a query's result becomes a table, its schema taken from the query's declared output; `IF NOT EXISTS` works on both forms of `CREATE TABLE`
 - CTEs (`WITH ... AS`, and `WITH RECURSIVE` — the recursive form is answered in-process), UNION / INTERSECT / EXCEPT (with ALL variants)
 - INNER, LEFT, RIGHT, FULL OUTER, CROSS JOINs, with `ON` or `USING (col, ...)` — `USING` merges the joined column, which `SELECT *` publishes once and first
-- A column-alias list on any FROM item — `FROM t a(k, v)`, a derived table, a `VALUES` block, a table function — with or without `AS`
+- A column-alias list on a base table, a derived table or a `VALUES` block — `FROM t a(k, v)` — with or without `AS`
 - Subqueries: scalar, IN, EXISTS, correlated subqueries (over a base table, a derived table or a CTE), and `LATERAL` joins — including a scalar subquery with no `FROM` clause, which is its `SELECT` expression evaluated in the enclosing row's scope (`SELECT (SELECT u.x) FROM ... u`), and the same shape as a `LATERAL` body
 - 16 window functions (the rank family, SUM/COUNT/AVG/MIN/MAX, LAG/LEAD, FIRST_VALUE/LAST_VALUE/NTH_VALUE, NTILE, PERCENT_RANK, CUME_DIST) with PARTITION BY, ORDER BY, NULLS FIRST/LAST, and ROWS/RANGE frame specs; any other aggregate in the window position is refused `0A000` with the supported set named
 - GROUP BY, GROUPING SETS, CUBE, ROLLUP, and ORDER BY with positional references (including over `SELECT *`)

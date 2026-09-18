@@ -1825,9 +1825,12 @@ raises it.
 
 ## Column-alias lists
 
-ANY `FROM` item may rename its columns positionally with a column-alias list —
-a base table, a derived table, a `VALUES` block, a table function and a `WITH`
-query alike. The `AS` is optional everywhere:
+A `FROM` item may rename its columns positionally with a column-alias list —
+a base table, a derived table, a `VALUES` block and a `WITH` query alike. The
+`AS` is optional on all four. A table function takes the list only after `AS`
+and does NOT apply it: the relation keeps its own column names, a reference to a
+renamed one answers NULL, and `read_json('…') f(k, v)` without `AS` is a syntax
+error.
 
 ```sql
 SELECT k, v FROM flow_logs AS f(k, v)
