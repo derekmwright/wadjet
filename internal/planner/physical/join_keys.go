@@ -245,3 +245,15 @@ func extractFilterBuildColumns(filter string) []string {
 	}
 	return cols
 }
+
+// refuseJoinResidual is the error an outer join whose ON residual cannot be
+// evaluated at the join. It NAMES the construct rather than listing what the
+// evaluator happens to support: the evaluator is the engine's own expression
+// compiler now (#1153), so what remains unevaluable is a subquery in ON, a
+// window function, or a function the compiler itself refuses — and err says
+// which. Both planning entry points raise it rather than let the conjunct be
+// dropped, which is the silent wrong answer this path exists to bury.
+func refuseJoinResidual(filter, joinType string, err error) error {
+	return fmt.Errorf("join ON residual %q on a %s join is not evaluable at the join: %w",
+		filter, joinType, err)
+}

@@ -860,11 +860,8 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				if len(node.Children) >= 2 {
 					alias = p.PlanContext.JoinArmAlias(node.Children[1])
 				}
-				if p.PlanContext.BuildJoinResidualFilter(node.JoinFilter, alias) == nil {
-					p.refuseJoin(fmt.Errorf("join ON residual %q on a %s join: "+
-						"not evaluable as a probe residual (columns, literals, arithmetic and "+
-						"comparisons are; function calls and subqueries are not)",
-						node.JoinFilter, jt))
+				if _, err := p.PlanContext.BuildJoinResidualFilter(node.JoinFilter, alias); err != nil {
+					p.refuseJoin(p.PlanContext.RefuseJoinResidual(node.JoinFilter, jt, err))
 				}
 			}
 			// physical.PlanContext.ParseJoinKeys assigns left/right based on position in the "="

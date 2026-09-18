@@ -12,7 +12,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// The outer-join ON residual (#358): HashJoin.Residual runs on the combined
+// The outer-join ON residual (#358): HashJoin.NewResidual's evaluator runs on the combined
 // row before a key match is accepted. The semantics under test, per join
 // type:
 //
@@ -53,7 +53,7 @@ func residGreater(probe *batch.RecordBatch, probeRow int, build *batch.RecordBat
 func buildResidJoin(t *testing.T, jt JoinType, leftKeys, rightKeys []string, buildRows []map[string]any) *HashJoin {
 	t.Helper()
 	hj := NewHashJoin(jt, leftKeys, rightKeys)
-	hj.Residual = residGreater
+	hj.NewResidual = func() JoinResidual { return residGreater }
 	hj.BuildSchemaHint = residBuildSchema
 	hj.ProbeSchemaHint = residProbeSchema
 	if err := hj.Build(context.Background(), NewSliceSource(residBuildSchema, buildRows)); err != nil {

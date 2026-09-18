@@ -4,6 +4,7 @@ package physical
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -17,6 +18,21 @@ import (
 // literal and arithmetic operands with integer division truncating the way
 // the engine's `/` does, and SQL three-valued logic — UNKNOWN rejects, and
 // NOT of UNKNOWN stays UNKNOWN.
+//
+// Since #1153 the evaluator IS the engine's expression compiler, so the same
+// rules have to hold for a function call, a CAST, LIKE, IN, BETWEEN and CASE
+// as well — the cells for those are in jrResidualFn below.
+
+// residualFilter is the factory this file's cells evaluate through: one
+// evaluator per call, the way exec.HashJoin.Probe mints one per probe.
+func residualFilter(t *testing.T, filter, buildAlias string) exec.JoinResidual {
+	t.Helper()
+	newResidual, err := buildJoinResidualFilter(filter, buildAlias)
+	if err != nil {
+		t.Fatalf("filter %q did not compile: %v", filter, err)
+	}
+	return newResidual()
+}
 
 func residualBatch(t *testing.T, schema []parquet.Column, rows []map[string]any) *batch.RecordBatch {
 	t.Helper()
@@ -89,10 +105,7 @@ func TestBuildJoinResidualFilter(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := buildJoinResidualFilter(tc.filter, "r")
-			if f == nil {
-				t.Fatalf("filter %q did not compile", tc.filter)
-			}
+			f := residualFilter(t, tc.filter, "r")
 			if got := f(probe, tc.pRow, build, tc.bRow); got != tc.want {
 				t.Fatalf("%q on probe[%d] × build[%d]: got %v, want %v", tc.filter, tc.pRow, tc.bRow, got, tc.want)
 			}
@@ -100,20 +113,30 @@ func TestBuildJoinResidualFilter(t *testing.T) {
 	}
 }
 
-// A shape the interpreter does not evaluate must fail to COMPILE — the
-// planner then refuses the query loudly, never drops the conjunct (the
-// pre-#351 silent-drop is the defect class this whole path exists to bury).
-func TestBuildJoinResidualFilterRefusesUnsupported(t *testing.T) {
-	for _, filter := range []string{
-		"lower(n_name) = r_name",                             // function call
-		"n_name LIKE 'A%'",                                   // LIKE
-		"n_nationkey IN (1, 2)",                              // IN
-		"n_nationkey BETWEEN 1 AND 5",                        // BETWEEN
-		"CASE WHEN n_nationkey > 1 THEN true ELSE false END", // CASE
+// What CANNOT be evaluated at a join must fail to COMPILE, and the refusal
+// must NAME the construct — the planner then refuses the query loudly, never
+// drops the conjunct (the pre-#351 silent-drop is the defect class this whole
+// path exists to bury). Since #1153 the list is short: a residual whose value
+// depends on a RELATION this join does not have.
+func TestBuildJoinResidualFilterRefusesWhatItCannotEvaluate(t *testing.T) {
+	for _, tc := range []struct {
+		name, filter, wantErr string
+	}{
+		{"scalar subquery", "n_nationkey = (SELECT max(r_regionkey) FROM region)", "subquery"},
+		{"IN subquery", "n_nationkey IN (SELECT r_regionkey FROM region)", "subquery"},
+		{"EXISTS", "EXISTS (SELECT 1 FROM region)", "EXISTS"},
+		{"unparseable", "n_nationkey >", "does not parse"},
+		{"unknown function", "no_such_function(n_name) = r_name", "no_such_function"},
 	} {
-		if f := buildJoinResidualFilter(filter, "r"); f != nil {
-			t.Errorf("filter %q compiled; it must be refused so the planner can error loudly", filter)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := buildJoinResidualFilter(tc.filter, "r")
+			if err == nil {
+				t.Fatalf("filter %q compiled to %v; it must be refused so the planner can error loudly", tc.filter, f != nil)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("filter %q refused with %q, which does not name %q", tc.filter, err, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -132,10 +155,7 @@ func TestBuildJoinResidualFilterSelfJoinAliases(t *testing.T) {
 		{"s_suppkey": int64(9), "s_nationkey": int64(5)},
 		{"s_suppkey": int64(0), "s_nationkey": int64(5)},
 	})
-	f := buildJoinResidualFilter("a.s_suppkey < b.s_suppkey", "b")
-	if f == nil {
-		t.Fatal("self-join residual did not compile")
-	}
+	f := residualFilter(t, "a.s_suppkey < b.s_suppkey", "b")
 	if !f(probe, 0, build, 0) { // 1 < 9
 		t.Error("probe 1 < build 9 rejected")
 	}

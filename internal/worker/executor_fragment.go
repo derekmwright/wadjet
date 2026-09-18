@@ -2945,10 +2945,12 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 			// per key candidate, with the unmatched semantics that keeps a
 			// residual-failed probe row NULL-padded. NOT SemiAntiFilter —
 			// that one only runs on the semi/anti probe path.
-			hj.Residual = (physical.PlanContext{}).BuildJoinResidualFilter(spec.JoinFilter, spec.BuildAlias)
-			if hj.Residual == nil {
-				return nil, fmt.Errorf("hash_join_probe: join residual %q is not evaluable", spec.JoinFilter)
+			newResidual, err := (physical.PlanContext{}).BuildJoinResidualFilter(spec.JoinFilter, spec.BuildAlias)
+			if err != nil {
+				return nil, fmt.Errorf("hash_join_probe: %w",
+					(physical.PlanContext{}).RefuseJoinResidual(spec.JoinFilter, spec.JoinType, err))
 			}
+			hj.NewResidual = newResidual
 		case spec.JoinFilter != "":
 			hj.SemiAntiFilter = (physical.PlanContext{}).BuildSemiAntiFilter(spec.JoinFilter)
 			// Filtered semi/anti builds store only keys + filter columns —

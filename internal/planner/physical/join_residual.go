@@ -3,278 +3,384 @@
 package physical
 
 import (
+	"fmt"
 	"log/slog"
-	"math"
-	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// buildJoinResidualFilter evaluates non-equi ON conjuncts over each combined
-// probe/build candidate before NULL-padding (#358); never filter above the join
-// or push into a preserved scan. Literals, arithmetic and SQL three-valued logic
-// are required: UNKNOWN rejects a candidate, and NOT UNKNOWN must not accept.
-// Bindings cache the first pair's schemas: qualified probe then build, buildAlias
-// forces build, otherwise bare probe-first. Use ResolveColumnIndex's reference
-// folding/delimited exactness (#731). Missing columns yield UNKNOWN and log once;
-// NeededColumns must ship them. Unsupported shapes return nil: callers must refuse.
-// The camel-case battery's folded residual names do not distinguish this resolver.
-// See docs/internals/outer-join-residual-evaluation.md for the design.
-func buildJoinResidualFilter(filter, buildAlias string) func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {
-	expr := parseJoinCondExpr(filter)
-	if expr == nil || !residualSupported(expr) {
-		return nil
-	}
-	buildAlias = strings.ToLower(buildAlias)
+// residualColPrefix names the columns of the COMBINED row a residual is
+// evaluated over. The reference the query wrote is resolved to a SIDE and a
+// column here, at plan time; the compiled expression then reads position i of
+// the combined row under this name and never resolves a user name itself.
+// residualSyntheticNames widens the prefix if a query happens to spell one.
+const residualColPrefix = "_wj_on_"
 
-	// Column bindings, resolved once against the first pair's schemas.
-	type colBinding struct {
-		fromBuild bool
-		idx       int
-		// field is the CHILD index when idx names a ROW CONTAINER and the
-		// reference is a field path into it, or -1 for a plain column.
-		field int
+// buildJoinResidualFilter compiles an outer join's ON-clause residual — every
+// conjunct that is not an equi-join key pair — into a FACTORY of predicates
+// over the COMBINED row: the probe row plus one candidate build row (#358).
+//
+// An outer join's ON runs BEFORE the NULL-padding, so this residual cannot be
+// a filter above the join (that deletes the preserved rows) and cannot be
+// pushed into a preserved side's scan (that deletes the rows the join owes
+// unmatched). The executor evaluates it per key-matched candidate; see
+// exec.HashJoin.NewResidual for the unmatched semantics it feeds.
+//
+// THE EXPRESSION IS THE ENGINE'S OWN (#1153). What this used to be was a
+// second expression evaluator — a small AST interpreter that accepted columns,
+// literals, arithmetic and comparisons and REFUSED everything else, so
+// `a LEFT JOIN b ON CAST(a.x AS VARCHAR) = b.y`, `ON b.y LIKE '1%'` and every
+// other ON PostgreSQL evaluates came back as a plan refusal. Two evaluators for
+// one seam is also two semantics: whichever of them a query reached decided
+// what its ON meant. There is one now. The residual's references are bound to a
+// side and a column at plan time, renamed to positional `_wj_on_<i>` columns,
+// and `expr.Compile` compiles the rest — the same compiler the inner join's
+// lifted filter runs above the join, so a predicate means the same thing on
+// both sides of that lift.
+//
+// BuildSemiAntiFilter is not reusable here: it only expresses
+// `probeCol OP buildCol`, while a residual takes literals, arithmetic,
+// functions and SQL three-valued logic (a residual evaluating to NULL rejects
+// the candidate, but NOT of it must not accept).
+//
+// Column resolution against the two sides is by name, decided lazily on the
+// first evaluated pair and cached: a qualified name is looked up in the probe
+// then the build schema (self-join chains carry qualified columns); a
+// qualifier equal to buildAlias forces the build side; otherwise the bare
+// name resolves probe-first. A `row.field` path is asked BEFORE the qualifier
+// is stripped (ADR-0022 rule 1, #769) and binds to the CONTAINER'S CHILD, so
+// the combined row carries the field's own value under the field's own
+// declared type. Every one of those lookups is ResolveColumnIndex, not
+// ColumnIndex: the names here are REFERENCES off the ON clause, so they arrive
+// folded from the lexer (#731), while the batch carries the catalog's own
+// spelling — `RegionName`, not `regionname`, for a parquet-registered table.
+// A byte-exact probe misses every CamelCase column, and because an
+// unresolvable column makes the residual UNKNOWN the failure mode is not a
+// loud one: the join rejects every candidate and NULL-pads each preserved row,
+// so a LEFT JOIN whose ON carries a residual answers all-NULL on the
+// null-supplying side. The rule the resolver applies (fold only a reference
+// that is itself folded; a delimited name stays byte-exact) is in
+// internal/engine/batch/schema.go.
+//
+// An unresolvable column still makes every evaluation UNKNOWN (candidate
+// rejected) and logs once — the planner ships JoinFilter columns through
+// NeededColumns, so a miss here is a plan bug, not user error.
+//
+// The error is the plan's refusal and NAMES THE CONSTRUCT that cannot be
+// evaluated at a join: a subquery in ON (plansql.ColumnRefs refuses it,
+// because a subquery's columns are not resolvable from here), a window
+// function, an AST node nothing here knows, or a function the expression
+// compiler itself refuses. The caller must raise it rather than drop the
+// conjunct — the pre-#351 silent drop is the defect class this path exists to
+// bury.
+func buildJoinResidualFilter(filter, buildAlias string) (func() exec.JoinResidual, error) {
+	node := parseJoinCondExpr(filter)
+	if node == nil {
+		return nil, fmt.Errorf("%q does not parse as an expression", filter)
 	}
-	bindings := map[*plansql.ColRef]*colBinding{}
-	collectResidualColRefs(expr, func(c *plansql.ColRef) {
-		bindings[c] = &colBinding{field: -1}
-	})
-	var resolveOnce sync.Once
+	refs, err := plansql.ColumnRefs(node)
+	if err != nil {
+		return nil, err
+	}
+	binds, prefix := residualBindings(refs)
+	// The compiled tree is SHARED by every evaluator this factory mints: it is
+	// a predicate closure, which this engine already requires to be stateless
+	// across parallel workers (exec.Filter.Clone shares Pred for the same
+	// reason). Only the combined-row scratch is per evaluator.
+	compiled, err := expr.Compile(node)
+	if err != nil {
+		return nil, err
+	}
+	alias := strings.ToLower(buildAlias)
+	return func() exec.JoinResidual {
+		e := &residualEval{filter: filter, buildAlias: alias, compiled: compiled, prefix: prefix}
+		e.binds = make([]residualBind, len(binds))
+		copy(e.binds, binds)
+		return e.eval
+	}, nil
+}
 
-	resolve := func(probe, build *batch.RecordBatch) {
-		for c, b := range bindings {
-			col := strings.ToLower(c.Column)
-			b.field = -1
-			if c.Table != "" {
-				qual := strings.ToLower(c.Table) + "." + col
-				// ADR-0022 rule 1, at this resolver: ask whether the dotted
-				// reference is a ROW FIELD PATH *before* the qualifier is
-				// stripped. Stripping first bound `c_row.b` to whatever OTHER
-				// side published a column of the FIELD's name — under
-				// `LEFT JOIN decpair d ON c_row.b = d.b` the build's own `b`
-				// answered for the field, so the residual read `d.b = d.b`,
-				// was TRUE for every candidate, and the join returned the full
-				// cross product on all four arms where PostgreSQL returns 12
-				// rows. That is #769's silent-wrong-value one operator over,
-				// arriving as a silent wrong ROW SET.
-				if pi, fj, ok := probe.RowFieldPath(qual); ok {
-					b.fromBuild, b.idx, b.field = false, pi, fj
-					continue
-				}
-				if pi, fj, ok := build.RowFieldPath(qual); ok {
-					b.fromBuild, b.idx, b.field = true, pi, fj
-					continue
-				}
-				if idx := probe.ResolveColumnIndex(qual); idx >= 0 {
-					b.fromBuild, b.idx = false, idx
-					continue
-				}
-				if idx := build.ResolveColumnIndex(qual); idx >= 0 {
-					b.fromBuild, b.idx = true, idx
-					continue
-				}
-				if strings.ToLower(c.Table) == buildAlias {
-					b.fromBuild, b.idx = true, build.ResolveColumnIndex(col)
-					continue
-				}
+// residualBind is one distinct column reference of the residual: the spelling
+// the query wrote, and — once the first candidate pair has been seen — the
+// side, column index and ROW-field index it binds to, with the scratch vector
+// its value is written into for the compiled expression to read.
+type residualBind struct {
+	table   string
+	column  string
+	spelled string // as written, for the "resolves on neither side" warning
+
+	fromBuild bool
+	idx       int
+	// field is the CHILD index when idx names a ROW CONTAINER and the
+	// reference is a field path into it, or -1 for a plain column.
+	field int
+	// dst is this binding's slot in the combined row. Reused across
+	// candidates for every type whose storage can be reset in place; the
+	// append-built nested types (ARRAY, MAP, ROW) are minted per refresh,
+	// which is what batch.Vector.ResetForWrite refuses to do.
+	dst      *batch.Vector
+	declared parquet.Column
+	nested   bool
+}
+
+// residualBindings assigns each DISTINCT reference of the residual a position
+// in the combined row and rewrites the AST to read that position. The rewrite
+// is why the compiled expression never resolves a user name: two arms of a
+// self-join publish the same bare names, and a compiler asked to choose
+// between them would be a THIRD resolution rule beside this file's and
+// exec.ColRef's. Deduplication is by the spelling as written, folded the way
+// the resolver folds it, so `b.y` twice is one slot and `b.y`/`y` are two.
+func residualBindings(refs []*plansql.ColRef) ([]residualBind, string) {
+	prefix := residualSyntheticNames(refs)
+	var binds []residualBind
+	seen := map[string]int{}
+	for _, r := range refs {
+		spelled := r.Column
+		if r.Table != "" {
+			spelled = r.Table + "." + r.Column
+		}
+		key := strings.ToLower(spelled)
+		i, ok := seen[key]
+		if !ok {
+			i = len(binds)
+			seen[key] = i
+			binds = append(binds, residualBind{
+				table: r.Table, column: r.Column, spelled: spelled, field: -1,
+			})
+		}
+		r.Table = ""
+		r.Column = fmt.Sprintf("%s%d", prefix, i)
+	}
+	// A residual over no columns at all (`ON true`) is still a predicate; it
+	// simply reads nothing from the combined row.
+	return binds, prefix
+}
+
+// residualSyntheticNames returns a combined-row column prefix that no
+// reference in the residual spells, so a table whose own column is called
+// `_wj_on_0` cannot be shadowed by the slot that carries it.
+func residualSyntheticNames(refs []*plansql.ColRef) string {
+	prefix := residualColPrefix
+	for {
+		clash := false
+		for _, r := range refs {
+			if strings.HasPrefix(strings.ToLower(r.Column), prefix) {
+				clash = true
+				break
 			}
-			if idx := probe.ResolveColumnIndex(col); idx >= 0 {
-				b.fromBuild, b.idx = false, idx
+		}
+		if !clash {
+			return prefix
+		}
+		prefix = "_" + prefix
+	}
+}
+
+// residualEval is ONE evaluator's state: the bindings with their scratch
+// vectors and the combined-row batch built over them. Every parallel probe
+// mints its own (exec.HashJoin.Probe), because the combined row is rewritten
+// per candidate.
+type residualEval struct {
+	filter     string
+	buildAlias string
+	compiled   expr.Expr
+	prefix     string
+	binds      []residualBind
+
+	row      *batch.RecordBatch
+	resolved bool
+}
+
+func (e *residualEval) eval(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {
+	if !e.resolved {
+		e.resolve(probe, build)
+		e.resolved = true
+	}
+	// BOTH halves, every candidate. Caching the probe half on the batch
+	// pointer would be wrong rather than merely stale: probe batches are
+	// POOLED, so the same pointer carrying different rows is the ordinary
+	// case and pointer identity is not freshness.
+	e.refresh(false, probe, probeRow)
+	e.refresh(true, build, buildRow)
+
+	// SQL ON semantics: a residual that is FALSE or UNKNOWN rejects. Both
+	// boolean protocols collapse UNKNOWN to false; the boxed fall-through is
+	// for an expression with no native boolean form (a function call), where
+	// nil is the UNKNOWN.
+	switch c := e.compiled.(type) {
+	case expr.BoolNullExpr:
+		val, null := c.EvalBoolNull(e.row, 0)
+		return val && !null
+	case expr.BoolExpr:
+		return c.EvalBool(e.row, 0)
+	}
+	v, ok := e.compiled.Eval(e.row, 0).(bool)
+	return ok && v
+}
+
+// refresh writes one side's half of the combined row.
+func (e *residualEval) refresh(fromBuild bool, src *batch.RecordBatch, row int) {
+	for i := range e.binds {
+		b := &e.binds[i]
+		if b.fromBuild != fromBuild || b.idx < 0 {
+			continue
+		}
+		v := src.Columns[b.idx]
+		if b.field >= 0 {
+			fv, frow, ok := residualFieldVector(v, b.field, row)
+			if !ok {
+				// A NULL container has no field, and a field the container
+				// does not declare has no value: the combined row carries
+				// NULL, which rejects the candidate.
+				e.writeNull(i, b)
 				continue
 			}
+			v, row = fv, frow
+		}
+		if b.nested {
+			// ARRAY/MAP/ROW element storage is append-built, so the slot is
+			// minted fresh rather than reset (batch.Vector.ResetForWrite
+			// panics on these).
+			dst := batch.NewVectorLike(v)
+			dst.AppendFrom(v, row)
+			b.dst = dst
+			e.row.SetColumn(i, dst)
+			continue
+		}
+		b.dst.ResetForWrite(1)
+		b.dst.CopyValueFrom(0, v, row)
+	}
+}
+
+// writeNull puts SQL NULL in one slot of the combined row.
+func (e *residualEval) writeNull(i int, b *residualBind) {
+	if b.nested {
+		b.dst = batch.NewColumnVector(b.declared, 1)
+		b.dst.Nulls.SetNull(0)
+		e.row.SetColumn(i, b.dst)
+		return
+	}
+	b.dst.ResetForWrite(1)
+	b.dst.Nulls.SetNull(0)
+}
+
+// resolve binds every reference to a side and a column, using the first
+// candidate pair's schemas, and builds the combined row over them.
+func (e *residualEval) resolve(probe, build *batch.RecordBatch) {
+	schema := make([]parquet.Column, len(e.binds))
+	for i := range e.binds {
+		b := &e.binds[i]
+		b.idx, b.field = -1, -1
+		col := strings.ToLower(b.column)
+		if b.table != "" {
+			qual := strings.ToLower(b.table) + "." + col
+			// ADR-0022 rule 1, at this resolver: ask whether the dotted
+			// reference is a ROW FIELD PATH *before* the qualifier is
+			// stripped. Stripping first bound `c_row.b` to whatever OTHER
+			// side published a column of the FIELD's name — under
+			// `LEFT JOIN decpair d ON c_row.b = d.b` the build's own `b`
+			// answered for the field, so the residual read `d.b = d.b`, was
+			// TRUE for every candidate, and the join returned the full cross
+			// product on all four arms where PostgreSQL returns 12 rows.
+			// That is #769's silent-wrong-value one operator over, arriving
+			// as a silent wrong ROW SET.
+			switch {
+			case bindRowField(b, probe, qual, false):
+			case bindRowField(b, build, qual, true):
+			case bindColumn(b, probe, qual, false):
+			case bindColumn(b, build, qual, true):
+			case strings.ToLower(b.table) == e.buildAlias:
+				b.fromBuild, b.idx = true, build.ResolveColumnIndex(col)
+			}
+		}
+		if b.idx < 0 && !bindColumn(b, probe, col, false) {
 			b.fromBuild, b.idx = true, build.ResolveColumnIndex(col)
-			if b.idx < 0 {
-				slog.Warn("join residual column resolves on neither side — every candidate will be rejected",
-					"column", c.String(), "filter", filter)
-			}
 		}
-	}
-
-	var eval func(n plansql.Node, probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) resVal
-	eval = func(n plansql.Node, probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) resVal {
-		switch e := n.(type) {
-		case *plansql.ParenNode:
-			return eval(e.Inner, probe, probeRow, build, buildRow)
-		case *plansql.ColRef:
-			b := bindings[e]
-			if b == nil || b.idx < 0 {
-				return resNull
-			}
-			src, row := probe, probeRow
-			if b.fromBuild {
-				src, row = build, buildRow
-			}
-			v := src.Columns[b.idx]
-			if b.field >= 0 {
-				fv, frow, ok := residualFieldVector(v, b.field, row)
-				if !ok {
-					return resNull
-				}
-				return residualValue(fv, frow)
-			}
-			return residualValue(v, row)
-		case *plansql.Lit:
-			switch e.Kind {
-			case plansql.LitNull:
-				return resNull
-			case plansql.LitString:
-				return resVal{kind: resStr, str: e.Value}
-			case plansql.LitBool:
-				return resVal{kind: resBool, b: strings.EqualFold(e.Value, "true")}
-			default: // LitNumber
-				if i, err := strconv.ParseInt(e.Value, 10, 64); err == nil {
-					return resVal{kind: resNum, i: i, f: float64(i), isInt: true}
-				}
-				f, err := strconv.ParseFloat(e.Value, 64)
-				if err != nil {
-					return resNull
-				}
-				return resVal{kind: resNum, f: f}
-			}
-		case *plansql.UnaryOp:
-			v := eval(e.Inner, probe, probeRow, build, buildRow)
-			if v.kind != resNum {
-				return resNull
-			}
-			if e.Op == "-" {
-				return resVal{kind: resNum, i: -v.i, f: -v.f, isInt: v.isInt}
-			}
-			return v
-		case *plansql.BinaryOp:
-			return residualArith(
-				eval(e.Left, probe, probeRow, build, buildRow),
-				e.Op,
-				eval(e.Right, probe, probeRow, build, buildRow))
-		case *plansql.CmpExpr:
-			return residualCompare(
-				eval(e.Left, probe, probeRow, build, buildRow),
-				e.Op,
-				eval(e.Right, probe, probeRow, build, buildRow))
-		case *plansql.IsExpr:
-			v := eval(e.Left, probe, probeRow, build, buildRow)
-			switch strings.ToLower(e.Check) {
-			case "null":
-				return resVal{kind: resBool, b: (v.kind == resNullKind) != e.Not}
-			case "true":
-				return resVal{kind: resBool, b: (v.kind == resBool && v.b) != e.Not}
-			case "false":
-				return resVal{kind: resBool, b: (v.kind == resBool && !v.b) != e.Not}
-			}
-			return resNull
-		case *plansql.AndNode:
-			l := eval(e.Left, probe, probeRow, build, buildRow)
-			r := eval(e.Right, probe, probeRow, build, buildRow)
-			return residual3VL(l, r, true)
-		case *plansql.OrNode:
-			l := eval(e.Left, probe, probeRow, build, buildRow)
-			r := eval(e.Right, probe, probeRow, build, buildRow)
-			return residual3VL(l, r, false)
-		case *plansql.NotNode:
-			v := eval(e.Inner, probe, probeRow, build, buildRow)
-			if v.kind != resBool {
-				return resNull
-			}
-			return resVal{kind: resBool, b: !v.b}
+		src := probe
+		if b.fromBuild {
+			src = build
 		}
-		return resNull
+		if b.idx < 0 {
+			slog.Warn("join residual column resolves on neither side — every candidate will be rejected",
+				"column", b.spelled, "filter", e.filter)
+		}
+		schema[i], b.nested = residualSlot(src, b, fmt.Sprintf("%s%d", e.prefix, i))
+		b.declared = schema[i]
 	}
-
-	return func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {
-		resolveOnce.Do(func() { resolve(probe, build) })
-		v := eval(expr, probe, probeRow, build, buildRow)
-		// SQL ON semantics: a residual that is FALSE or UNKNOWN rejects.
-		return v.kind == resBool && v.b
-	}
-}
-
-// residualSupported walks the AST and reports whether every node is one the
-// interpreter evaluates. Anything else (function calls, CASE, IN, BETWEEN,
-// LIKE, subqueries, casts) makes the caller refuse the plan — loud, exactly
-// as before this capability existed — rather than mis-evaluate.
-func residualSupported(n plansql.Node) bool {
-	switch e := n.(type) {
-	case *plansql.ParenNode:
-		return residualSupported(e.Inner)
-	case *plansql.ColRef, *plansql.Lit:
-		return true
-	case *plansql.UnaryOp:
-		return residualSupported(e.Inner)
-	case *plansql.BinaryOp:
-		return residualSupported(e.Left) && residualSupported(e.Right)
-	case *plansql.CmpExpr:
-		return residualSupported(e.Left) && residualSupported(e.Right)
-	case *plansql.IsExpr:
-		return residualSupported(e.Left)
-	case *plansql.AndNode:
-		return residualSupported(e.Left) && residualSupported(e.Right)
-	case *plansql.OrNode:
-		return residualSupported(e.Left) && residualSupported(e.Right)
-	case *plansql.NotNode:
-		return residualSupported(e.Inner)
-	}
-	return false
-}
-
-// collectResidualColRefs visits every ColRef in the (already validated) AST.
-func collectResidualColRefs(n plansql.Node, visit func(*plansql.ColRef)) {
-	switch e := n.(type) {
-	case *plansql.ParenNode:
-		collectResidualColRefs(e.Inner, visit)
-	case *plansql.ColRef:
-		visit(e)
-	case *plansql.UnaryOp:
-		collectResidualColRefs(e.Inner, visit)
-	case *plansql.BinaryOp:
-		collectResidualColRefs(e.Left, visit)
-		collectResidualColRefs(e.Right, visit)
-	case *plansql.CmpExpr:
-		collectResidualColRefs(e.Left, visit)
-		collectResidualColRefs(e.Right, visit)
-	case *plansql.IsExpr:
-		collectResidualColRefs(e.Left, visit)
-	case *plansql.AndNode:
-		collectResidualColRefs(e.Left, visit)
-		collectResidualColRefs(e.Right, visit)
-	case *plansql.OrNode:
-		collectResidualColRefs(e.Left, visit)
-		collectResidualColRefs(e.Right, visit)
-	case *plansql.NotNode:
-		collectResidualColRefs(e.Inner, visit)
+	e.row = batch.NewRecordBatch(schema, 1)
+	for i := range e.binds {
+		e.binds[i].dst = e.row.Columns[i]
 	}
 }
 
-// resVal is the interpreter's value: NULL, a number (int-ness tracked so
-// integer division truncates the way the engine's `/` does, #369), a string,
-// or a boolean.
-type resVal struct {
-	kind  byte
-	i     int64
-	f     float64
-	isInt bool
-	str   string
-	b     bool
+func bindRowField(b *residualBind, src *batch.RecordBatch, qual string, fromBuild bool) bool {
+	pi, fj, ok := src.RowFieldPath(qual)
+	if !ok {
+		return false
+	}
+	b.fromBuild, b.idx, b.field = fromBuild, pi, fj
+	return true
 }
 
-const (
-	resNullKind byte = iota
-	resNum
-	resStr
-	resBool
-)
+func bindColumn(b *residualBind, src *batch.RecordBatch, name string, fromBuild bool) bool {
+	idx := src.ResolveColumnIndex(name)
+	if idx < 0 {
+		return false
+	}
+	b.fromBuild, b.idx = fromBuild, idx
+	return true
+}
 
-var resNull = resVal{kind: resNullKind}
+// residualSlot declares the combined row's column i: the DECLARATION of what
+// the reference yields, which for a ROW field path is the FIELD's and not the
+// container's (#568). An unresolvable reference gets a STRING slot that is
+// never written, so every evaluation reads NULL.
+func residualSlot(src *batch.RecordBatch, b *residualBind, name string) (parquet.Column, bool) {
+	if b.idx < 0 || b.idx >= len(src.Columns) {
+		return parquet.Column{Name: name, Type: parquet.TypeString, Nullable: true}, false
+	}
+	col := parquet.Column{Name: name, Type: src.Columns[b.idx].Type, Nullable: true}
+	if b.idx < len(src.Schema) {
+		col = src.Schema[b.idx].Clone()
+		col.Name, col.Nullable = name, true
+	}
+	if b.field >= 0 {
+		col = residualFieldSlot(src.Columns[b.idx], col, b.field, name)
+	}
+	switch col.Type {
+	case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow:
+		return col, true
+	}
+	return col, false
+}
 
-// residualValue reads one cell as a resVal. GetValue already resolves views
-// and NULL bitmaps; DATE boxes as its ISO string, which compares correctly
-// against both another DATE and a date literal.
+// residualFieldSlot is the declaration of one ROW field: the parquet
+// declaration when the container carries one, and the child VECTOR's own type
+// otherwise (a container assembled at run time may out-declare its schema).
+func residualFieldSlot(v *batch.Vector, container parquet.Column, field int, name string) parquet.Column {
+	if field < len(container.Fields) {
+		col := container.Fields[field].Clone()
+		col.Name, col.Nullable = name, true
+		return col
+	}
+	col := parquet.Column{Name: name, Type: parquet.TypeString, Nullable: true}
+	if field < len(v.Children) && v.Children[field] != nil {
+		col.Type = v.Children[field].Type
+		col.Scale = v.Children[field].DecimalData.Scale
+		col.Dimension = v.Children[field].VectorDim
+	}
+	return col
+}
+
 // residualFieldVector follows a container vector's views down to its base and
 // returns the child vector for field j together with the row index THAT base
-// is addressed by, so residualValue can box a field exactly as it boxes a
-// column — the DECIMAL branch reads the vector's own Type, so the child has to
-// be the thing passed in rather than a pre-boxed value.
+// is addressed by, so the combined row carries a field exactly as it carries a
+// column.
 //
 // A view's children are not addressable by the view's own row index, which is
 // the walk exec.rowFieldValue makes for the same reason. A NULL container has
@@ -295,174 +401,4 @@ func residualFieldVector(v *batch.Vector, field, row int) (*batch.Vector, int, b
 		return nil, 0, false
 	}
 	return v.Children[field], row, true
-}
-
-func residualValue(v *batch.Vector, row int) resVal {
-	switch x := v.GetValue(row).(type) {
-	case nil:
-		return resNull
-	case int64:
-		return resVal{kind: resNum, i: x, f: float64(x), isInt: true}
-	case int32:
-		return resVal{kind: resNum, i: int64(x), f: float64(x), isInt: true}
-	case float64:
-		return resVal{kind: resNum, f: x}
-	case float32:
-		return resVal{kind: resNum, f: float64(x)}
-	case bool:
-		return resVal{kind: resBool, b: x}
-	case string:
-		// A decimal column boxes as its formatted string; residual arithmetic
-		// and numeric comparison need the number back.
-		if v.Type == batch.TypeDecimal {
-			if f, err := strconv.ParseFloat(x, 64); err == nil {
-				return resVal{kind: resNum, f: f}
-			}
-		}
-		return resVal{kind: resStr, str: x}
-	case []byte:
-		return resVal{kind: resStr, str: string(x)}
-	}
-	return resNull
-}
-
-// residualArith evaluates l op r with NULL propagation. Integer inputs stay
-// integer through + - * % and truncating / (PostgreSQL semantics, ADR-0012);
-// any float operand promotes the result to float. || concatenates strings.
-func residualArith(l resVal, op string, r resVal) resVal {
-	if op == "||" {
-		if l.kind == resStr && r.kind == resStr {
-			return resVal{kind: resStr, str: l.str + r.str}
-		}
-		return resNull
-	}
-	if l.kind != resNum || r.kind != resNum {
-		return resNull
-	}
-	if l.isInt && r.isInt {
-		switch op {
-		case "+":
-			return resVal{kind: resNum, i: l.i + r.i, f: float64(l.i + r.i), isInt: true}
-		case "-":
-			return resVal{kind: resNum, i: l.i - r.i, f: float64(l.i - r.i), isInt: true}
-		case "*":
-			return resVal{kind: resNum, i: l.i * r.i, f: float64(l.i * r.i), isInt: true}
-		case "/":
-			if r.i == 0 {
-				return resNull
-			}
-			q := l.i / r.i // Go truncates toward zero, same as PostgreSQL
-			return resVal{kind: resNum, i: q, f: float64(q), isInt: true}
-		case "%":
-			if r.i == 0 {
-				return resNull
-			}
-			m := l.i % r.i
-			return resVal{kind: resNum, i: m, f: float64(m), isInt: true}
-		}
-		return resNull
-	}
-	switch op {
-	case "+":
-		return resVal{kind: resNum, f: l.f + r.f}
-	case "-":
-		return resVal{kind: resNum, f: l.f - r.f}
-	case "*":
-		return resVal{kind: resNum, f: l.f * r.f}
-	case "/":
-		if r.f == 0 {
-			return resNull
-		}
-		return resVal{kind: resNum, f: l.f / r.f}
-	case "%":
-		if r.f == 0 {
-			return resNull
-		}
-		return resVal{kind: resNum, f: math.Mod(l.f, r.f)}
-	}
-	return resNull
-}
-
-// residualCompare evaluates l op r under SQL comparison rules: NULL on either
-// side is UNKNOWN, and a type mismatch is UNKNOWN rather than false so that a
-// NOT above it stays UNKNOWN too.
-func residualCompare(l resVal, op string, r resVal) resVal {
-	if l.kind == resNullKind || r.kind == resNullKind || l.kind != r.kind {
-		return resNull
-	}
-	var cmp int
-	switch l.kind {
-	case resNum:
-		switch {
-		case l.isInt && r.isInt:
-			cmp = cmpOrdered(l.i, r.i)
-		default:
-			cmp = cmpOrdered(l.f, r.f)
-		}
-	case resStr:
-		cmp = strings.Compare(l.str, r.str)
-	case resBool:
-		li, ri := 0, 0
-		if l.b {
-			li = 1
-		}
-		if r.b {
-			ri = 1
-		}
-		cmp = cmpOrdered(li, ri)
-	default:
-		return resNull
-	}
-	var out bool
-	switch op {
-	case "=":
-		out = cmp == 0
-	case "!=", "<>":
-		out = cmp != 0
-	case "<":
-		out = cmp < 0
-	case "<=":
-		out = cmp <= 0
-	case ">":
-		out = cmp > 0
-	case ">=":
-		out = cmp >= 0
-	default:
-		return resNull
-	}
-	return resVal{kind: resBool, b: out}
-}
-
-func cmpOrdered[T int | int64 | float64](a, b T) int {
-	switch {
-	case a < b:
-		return -1
-	case a > b:
-		return 1
-	}
-	return 0
-}
-
-// residual3VL folds two operands under AND (isAnd) or OR with SQL
-// three-valued logic: FALSE AND UNKNOWN is FALSE, TRUE OR UNKNOWN is TRUE,
-// and the rest of the UNKNOWN row stays UNKNOWN.
-func residual3VL(l, r resVal, isAnd bool) resVal {
-	lb, lok := l.kind == resBool && l.b, l.kind == resBool
-	rb, rok := r.kind == resBool && r.b, r.kind == resBool
-	if isAnd {
-		if (lok && !lb) || (rok && !rb) {
-			return resVal{kind: resBool, b: false}
-		}
-		if lok && rok {
-			return resVal{kind: resBool, b: true}
-		}
-		return resNull
-	}
-	if (lok && lb) || (rok && rb) {
-		return resVal{kind: resBool, b: true}
-	}
-	if lok && rok {
-		return resVal{kind: resBool, b: false}
-	}
-	return resNull
 }

@@ -397,15 +397,13 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		}
 	}
 	if outerResidual {
-		hj.Residual = buildJoinResidualFilter(node.JoinFilter, hj.BuildTableAlias)
-		if hj.Residual == nil {
+		newResidual, err := buildJoinResidualFilter(node.JoinFilter, hj.BuildTableAlias)
+		if err != nil {
 			// Refuse loudly rather than answer with the conjunct dropped —
 			// the pre-#358 failure mode this path replaced.
-			return nil, nil, nil, fmt.Errorf("join ON residual %q on a %s join: "+
-				"not evaluable as a probe residual (columns, literals, arithmetic and "+
-				"comparisons are; function calls and subqueries are not)",
-				node.JoinFilter, jt)
+			return nil, nil, nil, refuseJoinResidual(node.JoinFilter, jt, err)
 		}
+		hj.NewResidual = newResidual
 	}
 
 	// Build right side (small table) into hash table

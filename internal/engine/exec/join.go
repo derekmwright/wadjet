@@ -42,6 +42,12 @@ type buildRef struct {
 // Build side is stored in columnar RecordBatches, indexed by a hash map
 // of join keys to batch/row references. This avoids the ~10x memory overhead
 // of storing build-side rows as map[string]any.
+// JoinResidual answers whether one candidate pair — a probe row and one build
+// row — satisfies the part of a join's ON clause the hash keys do not express.
+// FALSE and SQL's UNKNOWN both answer false: an ON that is not TRUE rejects the
+// candidate, and a probe row whose whole chain is rejected is UNMATCHED.
+type JoinResidual = func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool
+
 type HashJoin struct {
 	JoinType  JoinType
 	LeftKeys  []string // join key columns from left (probe) side
@@ -104,10 +110,10 @@ type HashJoin struct {
 	// SemiAntiFilter is an optional predicate applied during semi/anti join probe.
 	// When set, each candidate build row is checked in addition to hash key equality.
 	// This enables non-equality join conditions (e.g., "!=") from decorrelated EXISTS.
-	SemiAntiFilter func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool
+	SemiAntiFilter JoinResidual
 
-	// Residual is the ON-clause residual predicate of a LEFT, RIGHT or FULL
-	// OUTER join (#358): every ON conjunct that is not an equi-join key,
+	// NewResidual mints the ON-clause residual predicate of a LEFT, RIGHT or
+	// FULL OUTER join (#358): every ON conjunct that is not an equi-join key,
 	// evaluated on the COMBINED row (probe row + candidate build row) before a
 	// key match is accepted. An outer join's ON runs BEFORE the NULL-padding,
 	// so this cannot be a filter above the join: a probe row whose candidates
@@ -122,10 +128,16 @@ type HashJoin struct {
 	// is a bare-column equality) the build degenerates to a single empty-key
 	// chain holding every build row, so each probe row's candidate set is the
 	// whole build side and the residual does all of the work.
-	Residual func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool
+	//
+	// It is a FACTORY, not one shared closure: an evaluator owns a
+	// combined-row scratch batch it rewrites per candidate (the probe row's
+	// and the candidate build row's values, under the synthetic names the
+	// compiled expression reads), so every parallel probe mints its own.
+	// HashJoin.Probe does that once per clone; nothing else may call it.
+	NewResidual func() JoinResidual
 
 	// rowMatched tracks matched build rows per (batchIdx, rowIdx) when
-	// Residual is active on a RIGHT/FULL join. arenaMatched cannot carry
+	// a residual is active on a RIGHT/FULL join. arenaMatched cannot carry
 	// this: markKeyMatched marks a whole key CHAIN, while a residual accepts
 	// or rejects individual candidates of that chain. Allocated lazily on
 	// first mark; guarded by mu like arenaMatched.
@@ -2477,12 +2489,16 @@ func (h *HashJoin) Probe() *HashJoinProbe {
 	// parallel pipeline execution. Each clone gets its own buffers.
 	// pairsBuf sized at 16x batch size to handle 1:N join fan-out without
 	// growslice (avg ~4:1 for TPC-H lineitem→orders, with skew up to 8-10x).
-	return &HashJoinProbe{
+	p := &HashJoinProbe{
 		join:     h,
 		pairsBuf: make([]matchPair, 0, 16*batch.DefaultBatchSize),
 		indexBuf: make([]int, 0, 16*batch.DefaultBatchSize),
 		keyBuf:   make([]byte, 0, 128),
 	}
+	if h.NewResidual != nil {
+		p.residual = h.NewResidual()
+	}
+	return p
 }
 
 // buildKeyFromBatch fills h.keyBuf with the serialized build-side key for a row.
@@ -2624,6 +2640,10 @@ type HashJoinProbe struct {
 	indexBuf      []int       // reusable buffer for probe-side gather indices
 	buildIndexBuf []int       // reusable buffer for build-side gather indices
 	keyBuf        []byte      // per-probe key serialization buffer (avoids race on shared h.keyBuf)
+	// residual is this probe's OWN outer-join ON residual evaluator, minted
+	// from HashJoin.NewResidual in Probe. It owns a combined-row scratch it
+	// rewrites per candidate, so it must never be shared with another probe.
+	residual JoinResidual
 
 	// Cached output schema and column mapping (computed once on first batch)
 	cachedSchema  []parquet.Column
@@ -2850,7 +2870,7 @@ func (p *HashJoinProbe) prepareViewInput(in *batch.RecordBatch) {
 	// whole probe rows to spill files; right/full outer take the eager
 	// gather path (they never emit views); inner/left without the flag
 	// likewise gather eagerly.
-	lazyKeys := h.SemiAntiFilter == nil && h.Residual == nil &&
+	lazyKeys := h.SemiAntiFilter == nil && h.NewResidual == nil &&
 		!(h.spillState != nil && len(h.spillState.spilledParts) > 0) &&
 		((p.LateMaterialize && (h.JoinType == InnerJoin || h.JoinType == LeftJoin)) ||
 			h.JoinType == SemiJoin || h.JoinType == AntiJoin ||
@@ -3001,8 +3021,8 @@ func (p *HashJoinProbe) nextProbeChunk(_ context.Context) (*batch.RecordBatch, e
 	// Fast path: single int key inner join without right/full outer tracking.
 	// Inlines hash table lookup + typed data access, eliminating 4 levels of
 	// per-row function calls (probeRow → lookupBuild → intProbeKey → intKeyFromVector).
-	inlineInt := h.useIntKey && h.JoinType == InnerJoin && !h.matchedAlloc && h.Residual == nil
-	inlineDual := !inlineInt && h.useDualIntKey && h.JoinType == InnerJoin && !h.matchedAlloc && h.Residual == nil
+	inlineInt := h.useIntKey && h.JoinType == InnerJoin && !h.matchedAlloc && h.NewResidual == nil
+	inlineDual := !inlineInt && h.useDualIntKey && h.JoinType == InnerJoin && !h.matchedAlloc && h.NewResidual == nil
 	if inlineInt || inlineDual {
 		h.resolveProbeKeyIdx(in)
 	}
@@ -3838,7 +3858,7 @@ func (p *HashJoinProbe) genericProbe(in *batch.RecordBatch, pairs []matchPair, l
 		p.res.mid = false
 	}
 
-	residual := h.Residual
+	residual := p.residual
 	for pos := p.res.pos; pos < n; pos++ {
 		row := pos
 		if sel != nil {
@@ -4541,7 +4561,7 @@ func (p *HashJoinProbe) FlushUnmatched(leftSchema []parquet.Column) *batch.Recor
 	// matched bit lives per build ROW (rowMatched), because a residual accepts
 	// individual chain candidates; without one it lives per arena entry.
 	var refs []buildRef
-	if p.join.Residual != nil {
+	if p.join.NewResidual != nil {
 		p.join.forEachArenaEntry(func(_ *joinIndexPart, _ int, ref buildRef) {
 			if p.join.refMatched(ref) {
 				return

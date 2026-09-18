@@ -70,8 +70,12 @@ func (PlanContext) BlockPublishedColumns(p *logical.Node, published map[*logical
 	return blockPublishedColumns(p, published, subqueryDecl)
 }
 
-func (PlanContext) BuildJoinResidualFilter(filter, buildAlias string) func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {
+func (PlanContext) BuildJoinResidualFilter(filter, buildAlias string) (func() exec.JoinResidual, error) {
 	return buildJoinResidualFilter(filter, buildAlias)
+}
+
+func (PlanContext) RefuseJoinResidual(filter, joinType string, err error) error {
+	return refuseJoinResidual(filter, joinType, err)
 }
 
 func (PlanContext) BuildStreamAlias(node *logical.Node) string {

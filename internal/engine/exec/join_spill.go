@@ -1150,7 +1150,7 @@ func (h *HashJoin) buildTempJoinFromBatches(buildBatches []*batch.RecordBatch) (
 		// to see, and the one ADR-0023 exists to keep out of this path.
 		KeyTypes:        h.KeyTypes,
 		SemiAntiFilter:  h.SemiAntiFilter,
-		Residual:        h.Residual,
+		NewResidual:     h.NewResidual,
 		SemiAntiKeyOnly: h.SemiAntiKeyOnly,
 		BuildTableAlias: h.BuildTableAlias,
 		keyBuf:          make([]byte, 0, 128),
