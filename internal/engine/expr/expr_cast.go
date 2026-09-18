@@ -6,7 +6,6 @@ package expr
 import (
 	"encoding/hex"
 	"fmt"
-	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -133,55 +132,39 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		// at REST in a PORT column whose text doors say 22P02 (review NT
 		// round 2, P). The operand's SHAPE is what separates them: a quoted
 		// literal or a STRING column is text, a DECIMAL column is not.
-		if dest == "port" || dest == "protocol" {
-			if s, ok := stringOperand(v); ok && castOperandIsText(e.Operand) {
-				return castPortProtocolText(s, dest)
+		// A TEXT operand is read by the DESTINATION TYPE'S INPUT FUNCTION and
+		// by nothing else. PostgreSQL has two casts here and they are not the
+		// same cast: `'2.5'::integer` is 22P02 invalid_text_representation,
+		// because int4in's grammar has no fractional part, while
+		// `numeric_col::integer` ROUNDS half away from zero. Measured on
+		// 17.11: `'2.5'`, `'2.0'`, `'26.7'`, `'-0.4'` and `'1e3'` are all
+		// 22P02 for integer, bigint and smallint alike, and `2.5` (numeric)
+		// is 3.
+		//
+		// castDecimalToInt reads the BOX, and a text box and a decimal box
+		// are the same Go string here, so with it first every quoted
+		// fractional literal took the numeric cast's rounding and answered a
+		// number PostgreSQL refuses (#1141). The operand's SHAPE is what
+		// separates them — castOperandDeclaresText decides from the EXPRESSION's
+		// own declaration — so the routing happens before either reader,
+		// once, for every integer destination rather than for PORT and
+		// PROTOCOL alone.
+		if castOperandDeclaresText(e.Operand) {
+			if s, ok := stringOperand(v); ok {
+				return castTextToInt(s, dest)
 			}
 		}
 		if i, ok := castDecimalToInt(v, dest); ok {
 			return i
 		}
 		if s, ok := stringOperand(v); ok {
-			if dest == "port" || dest == "protocol" {
-				// These two have a TEXT FORM OF THEIR OWN, and it is not
-				// int4's: PROTOCOL reads the IANA name `protocol_name()`
-				// prints, and neither reads int4's `0x1bb` / `0o17` /
-				// `1_000`, which the writer refuses. One grammar per type,
-				// parquet.DecimalIntegerText, read here and at the writer
-				// (review NT P4). The DOMAIN below is still int4's — that
-				// split is ADR-0012's, and #901's.
-				if dest == "protocol" {
-					if n, named := parquet.ProtocolNumberFromName(s); named {
-						return int64(n)
-					}
-				}
-				return castPortProtocolText(s, dest)
-			}
-			typ := "integer"
-			if dest == "bigint" || dest == "int8" || dest == "signed" {
-				typ = "bigint"
-			}
-			// PostgreSQL's INTEGER input grammar FIRST, which is a strict
-			// superset of Go's base-10 one: `'0x1A'::integer` is 26 there,
-			// `'0o17'` 15, `'0b101'` 5, `'1_000'` 1000 and `'017'` decimal
-			// seventeen. kernel.IntLitText is the one reader the comparison
-			// kernels, the row path and the plan-time refusal already share,
-			// so the CAST door cannot disagree with them about which strings
-			// name an integer (#634).
-			switch n, st := kernel.IntLitText(s); st {
-			case kernel.NumConstOK:
-				return castIntInRange(n, dest)
-			case kernel.NumConstRange:
-				raiseNumericOutOfRange(typ, s)
-			}
-			// Not an integer under that grammar. A FRACTIONAL string still
-			// casts — PostgreSQL rounds `'26.7'::integer` to 27 — so the
-			// float reader is the fallback, not the first try.
-			f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
-			if err != nil {
-				raiseInvalidTextRepresentation(typ, s)
-			}
-			return castIntInRange(castFloatToInt64(f, dest), dest)
+			// A box this arm could not decide from the expression, holding
+			// text. It reads the SAME grammar a declared-text operand reads:
+			// the destination's input function, one reader, so a value that
+			// arrives through a MAP entry, a ROW field or a scalar subquery
+			// cannot mean a different number than the same text written as a
+			// literal.
+			return castTextToInt(s, dest)
 		}
 		// EVERY source gets the destination's range, integers included:
 		// `CAST(99999 AS SMALLINT)` answered 99999 because an integer box
@@ -274,21 +257,6 @@ func castPortProtocolText(s, dest string) any {
 	}
 	raiseInvalidTextRepresentation("integer", s)
 	return nil
-}
-
-// castOperandIsText reports whether the operand's own DECLARATION says its
-// values are text: a bare quoted literal (SQL's `unknown`) or a STRING column.
-// A DECIMAL column's box is text too — that is the whole reason this question
-// has to be asked of the EXPRESSION rather than of the box.
-func castOperandIsText(operand Expr) bool {
-	switch v := operand.(type) {
-	case *Lit:
-		_, isText := v.Val.(string)
-		return isText && v.Text == ""
-	case *ColRef:
-		return v.valueType() == batch.TypeString
-	}
-	return false
 }
 
 // castToReal narrows a value to float4, which is what `REAL`, `FLOAT4` and

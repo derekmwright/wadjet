@@ -873,6 +873,16 @@ func (r Ret) Integer() bool {
 	return r.kind == retFixed && (r.typ == batch.TypeInt32 || r.typ == batch.TypeInt64)
 }
 
+// Text reports whether a function always returns TEXT — declared RetString.
+// Only a FIXED declaration answers, for Integer's reason: the CAST layer reads
+// it to decide which of PostgreSQL's two casts to an integer type a call's
+// result takes (`'2.5'::integer` is 22P02, `numeric::integer` rounds), and a
+// polymorphic declaration mirrors an argument whose type no batch has decided
+// yet.
+func (r Ret) Text() bool {
+	return r.kind == retFixed && r.typ == batch.TypeString
+}
+
 // Boolean reports whether a function always returns a BOOLEAN. Only a FIXED
 // declaration answers, for Integer's reason: the operand-classification layer
 // reads it to apply PostgreSQL's boolean input grammar to whatever the result

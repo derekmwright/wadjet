@@ -102,6 +102,17 @@ func TestCastInvalidTextToIntegerRaises22P02(t *testing.T) {
 		{"trailing garbage", "12abc", "integer"},
 		{"bigint spelling", "abc", "bigint"},
 		{"byte slice", []byte("abc"), "int"},
+		// FRACTIONAL TEXT. int4in has no fractional part, so PostgreSQL 17.11
+		// answers `22P02 invalid input syntax for type integer: "3.9"` for
+		// this and for `'2.5'`, `'2.0'`, `'-0.4'` and `'1e3'` — measured. The
+		// lenient float fallback that rounded it to 4 was this cast reading a
+		// text box with the NUMERIC cast's rule (#1141); the numeric cast
+		// still rounds, and TestCastValidTextToIntegerStillConverts keeps its
+		// cells.
+		{"fractional text", "3.9", "integer"},
+		{"fractional text bigint", "2.5", "bigint"},
+		{"fractional text smallint", "2.5", "smallint"},
+		{"exponent text", "1e3", "integer"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -120,9 +131,6 @@ func TestCastValidTextToIntegerStillConverts(t *testing.T) {
 		{"12", "integer", 12},
 		{" 42 ", "integer", 42},
 		{"-7", "bigint", -7},
-		// The lenient numeric path is unchanged: fractions truncate (#373
-		// tracks the truncate-vs-round divergence).
-		{"3.9", "integer", 4}, // rounds, matching the numeric cast (#373); PG itself rejects fractional text, and the lenient parse is deliberate
 		{int64(5), "integer", 5},
 		{float64(2.9), "integer", 3}, // PostgreSQL rounds half away from zero (#373)
 	}
