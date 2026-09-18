@@ -301,11 +301,12 @@ Full analytical SQL via a custom recursive descent parser:
 - CREATE/DROP TABLE, CREATE/DROP FUNCTION, CREATE/ALTER/DROP ALERT
 - `CREATE TABLE [IF NOT EXISTS] t [(a, b)] AS <query> [WITH [NO] DATA]` and `INSERT INTO t [(a, b)] <query>` — a query's result becomes a table, its schema taken from the query's declared output; `IF NOT EXISTS` works on both forms of `CREATE TABLE`
 - CTEs (`WITH ... AS`, and `WITH RECURSIVE` — the recursive form is answered in-process), UNION / INTERSECT / EXCEPT (with ALL variants)
-- INNER, LEFT, RIGHT, FULL OUTER, CROSS JOINs, with `ON` or `USING (col, ...)`
+- INNER, LEFT, RIGHT, FULL OUTER, CROSS JOINs, with `ON` or `USING (col, ...)` — `USING` merges the joined column, which `SELECT *` publishes once and first
+- A column-alias list on any FROM item — `FROM t a(k, v)`, a derived table, a `VALUES` block, a table function — with or without `AS`
 - Subqueries: scalar, IN, EXISTS, correlated subqueries (over a base table, a derived table or a CTE), and `LATERAL` joins — including a scalar subquery with no `FROM` clause, which is its `SELECT` expression evaluated in the enclosing row's scope (`SELECT (SELECT u.x) FROM ... u`), and the same shape as a `LATERAL` body
 - 16 window functions (the rank family, SUM/COUNT/AVG/MIN/MAX, LAG/LEAD, FIRST_VALUE/LAST_VALUE/NTH_VALUE, NTILE, PERCENT_RANK, CUME_DIST) with PARTITION BY, ORDER BY, NULLS FIRST/LAST, and ROWS/RANGE frame specs; any other aggregate in the window position is refused `0A000` with the supported set named
 - GROUP BY, GROUPING SETS, CUBE, ROLLUP, and ORDER BY with positional references (including over `SELECT *`)
-- CASE, CAST, LIKE, BETWEEN, IN, IS NULL/TRUE/FALSE, `= ANY`/`= SOME`/`<> ALL`, row-value comparison `(a, b) < (c, d)`
+- CASE, CAST, LIKE, `BETWEEN [SYMMETRIC|ASYMMETRIC]`, IN, IS NULL/TRUE/FALSE, `= ANY`/`= SOME`/`<> ALL`, row-value comparison `(a, b) < (c, d)`, and the `^` exponentiation operator at PostgreSQL's precedence
 - Fixed-point DECIMAL(p,s) type with Int128 arithmetic (DuckDB-style scaled integers)
 - Nested types: ARRAY, ROW/STRUCT, MAP with `person.name` dot-notation, `element_at()`, `map_keys()`
 - Table functions: `read_json()`, `read_csv()`, `read_parquet()` with glob patterns and named parameters

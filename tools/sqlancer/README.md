@@ -289,8 +289,10 @@ oracle violations, 0 crashes, 0 known differences, 200 unexpected errors —
 every database stopped at its first refused shape, almost all of them an
 outer join whose `ON` clause is not a bare column equality (a cast, a
 function call or a `LIKE`), then `BETWEEN SYMMETRIC`, `int4range`, and two
-parser gaps. Those are the refusal shapes to file before NoREC can get past
-the first query of a database.
+parser gaps. Those are the refusal shapes to close before NoREC can get past
+the first query of a database; they are filed as #1153 (the outer-join `ON`
+residual), #1154, #1156 and #1157. `BETWEEN SYMMETRIC` parses as of v0.21.0,
+so the next run gets further on the 14 databases that stopped there.
 
 ## Reproducing a finding from a seed
 

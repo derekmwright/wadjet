@@ -1171,7 +1171,8 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `INSERT … VALUES`, `COPY` and `UPDATE` TRIMMED, so `' 10.0.0.1'` and
      `'<uuid> '` were stored at three doors and refused at every other.
 
-     Four DELIBERATE readings remain and are this family's residual:
+     Four DELIBERATE readings were this family's residual. Two remain (1
+     and 2); two are closed and say so:
 
      1. **`''` is absence at the embedded ingester and 22P02 at every SQL
         door.** An empty CSV or JSON field means NULL, which is what the Go
@@ -1204,51 +1205,52 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
         `expr.TestAValueEnteringPortOrProtocolIsHeldToTheTypesRange`, on five
         arms in `coordinator.TestNetworkTextGrammarAnswersTheSameOnEveryArm`,
         and on the wire in `pgwire.TestANetworkCastOnTheWire`.
-     3. **PORT and PROTOCOL beside a COLUMN are read as the `integer` they
-        DECLARE.** `CAST('udp' AS PROTOCOL)` is 17 because the cast resolves
-        against the TYPE; `WHERE c_proto = 'udp'` is 22P02, and
-        `WHERE c_port = '0x1bb'` answers, because a comparison resolves an
-        unknown literal against the column's declared wire type (OID 23,
-        #834) — int4's whole grammar, not only its range. Closing it means
-        teaching `kernel.ResolveFilterKernel`, `exec/filter.go` and the
-        boxed-pair layer a type-specific literal reading at five sites, and
-        deciding which of the two the type MEANS; measured, not guessed, and
-        left as a filing candidate rather than half-done.
-     4. **A FRACTIONAL value whose DECLARATION is text but whose SHAPE is
-        neither a quoted literal nor a column reference rounds at an
-        integer-domain cast.** (Narrowed twice, 2026-09-15.) The cast decides
-        between the TYPE's input function and the numeric→int conversion by
-        the operand's SHAPE: a bare quoted literal or a STRING column is TEXT
-        (`'2.5'::PORT` and `CAST(string_col AS PORT)` are 22P02, as
-        `'2.5'::integer` is on the server), and a DECIMAL column or a numeric
-        literal is a NUMBER (`CAST(d AS PORT)` and `CAST(2.5 AS PORT)` round,
-        as PG's numeric→int does). A STRING-typed EXPRESSION is neither, so
+     3. **CLOSED 2026-09-18 by arc EX (#1137): PORT and PROTOCOL beside a
+        COLUMN read their OWN input function.** What this recorded: a
+        comparison resolved an unknown literal against the column's declared
+        wire type (OID 23, #834) — int4's whole grammar — so
+        `WHERE c_proto = 'udp'` was 22P02 while `CAST('udp' AS PROTOCOL)`
+        answered 17, and `WHERE c_port = '0x1bb'` MATCHED port 443. The five
+        sites it named all read one function now
+        (`kernel.NetworkIntLitText` over `parquet.NetworkTextValue`, the
+        reader the CAST and every writer door already used), and the entry
+        that states the settled rule is **PORT and PROTOCOL read their OWN
+        input function** in §5's literal-resolution list below.
+     4. **CLOSED 2026-09-18 by arc EX (#1141): a fractional value whose
+        DECLARATION is text reads the destination's input function, whatever
+        shape it arrives in.** (Narrowed twice 2026-09-15; closed
+        2026-09-18.) What this recorded: the cast chose between the TYPE's
+        input function and the numeric→int conversion by the operand's
+        SHAPE, so a bare quoted literal and a STRING column took the text
+        reader while a STRING-typed EXPRESSION took neither —
         `CAST(CONCAT('2','.5') AS PORT)`, `CAST(TRIM(s) AS PORT)`,
-        `CAST(SUBSTRING(…) AS PORT)` and `CAST(CAST(2.5 AS TEXT) AS PORT)` are
-        3 where PostgreSQL is 22P02 — for PORT and PROTOCOL as well as
-        INTEGER, and through `INSERT … SELECT` and CTAS to REST. Only
-        FRACTIONAL text slips through: the RANGE and the hex spelling already
-        take the text path at those shapes.
+        `CAST(SUBSTRING(…) AS PORT)` and `CAST(CAST(2.5 AS TEXT) AS PORT)`
+        answered 3 where PostgreSQL is 22P02, for PORT and PROTOCOL as well
+        as INTEGER, and reached REST through `INSERT … SELECT` and CTAS.
 
-        It is NOT repaired, and the reason is measured rather than asserted:
-        widening the shape test to "any operand that arrives as a Go string"
-        fixes those cells and then refuses `CAST(d + 1 AS PORT)` with
-        `invalid input syntax for type integer: "3.50"`, where PostgreSQL
-        answers 4 — a new wrong answer for an old one. Telling the two apart
-        needs the operand's DECLARED type across the whole integer family,
-        which is FC-7's seam in the numeric lane. Pinned by
-        `wadjet.TestAStringTypedExpressionCastToPortIsFC7sOpenCell`, which
-        FAILS the day it starts agreeing.
+        The SHAPE test is gone, and what replaced it is the DECLARATION:
+        `expr.castOperandDeclaresText` asks the expression — a quoted
+        literal, a STRING column, a cast to a text type, a call whose
+        registered return type is fixed STRING, a container element, a MAP
+        value, a scalar subquery, or a CASE/COALESCE all of whose arms are
+        one of those — so `CAST(CONCAT('2','.5') AS PORT)`,
+        `CAST(TRIM(s) AS PORT)` and `CAST(CAST(2.5 AS TEXT) AS PORT)` are
+        22P02 while `CAST(d + 1 AS PORT)` over a DECIMAL column still ROUNDS
+        to 4, which is PostgreSQL's numeric→int answer and the half a wider
+        repair would have broken. The pin
+        (`wadjet.TestAStringTypedExpressionCastToPortIsFC7sOpenCell`) is
+        deleted, which is the proof; its positive form is
+        `wadjet.TestAStringTypedExpressionCastToPortReadsTheTypesGrammar`,
+        and the settled rule is **The CAST to an integer type is TWO casts**
+        in §5 below.
 
-        What was ALSO in this residual and is now FIXED: the same text reached
-        REST. `CAST('2.5' AS PORT)`, `CAST(string_col AS PORT)`,
+        The WRITE doors were the first half of this, closed 2026-09-15:
+        `CAST('2.5' AS PORT)`, `CAST(string_col AS PORT)`,
         `INSERT INTO t (port_col) SELECT '2.5'` and a CTAS over the cast all
-        stored 3, while the VALUES, COPY, UPDATE and ingester doors said
-        22P02. The cast now asks the operand's SHAPE — a quoted literal or a
-        STRING column is text and takes the type's own reader; a DECIMAL
-        column or a numeric literal still rounds — and the assignment path
-        coerces an unknown-typed literal with the TARGET's input function,
-        which is the rule #1088 relies on everywhere else.
+        stored 3 while the VALUES, COPY, UPDATE and ingester doors said
+        22P02. The assignment path coerces an unknown-typed literal with the
+        TARGET's input function, which is the rule #1088 relies on
+        everywhere else.
 
      **PostgreSQL-valid text a bare-address column has no room for is 0A000,
      ONE class at every door.** (Amended 2026-09-15.) It has two reasons — the
@@ -2454,7 +2456,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `dedupSemiAntiBuildSide`, `physical.buildJoin`, `walkStages`, the worker
      fragment builder and `exec.joinOutputSchemaWithMapping` all reading that
      property. Pinned per predicate — none, selective, zero-row — in
-     `coordinator.TestL1AStarOverAJoinPublishesThePlanNotTheQuery`, so the
+     `coordinator.TestO1AStarOverAJoinPublishesTheQueryNotThePlan`, so the
      arc's proof is deleting the pin.
 
      EXTENDED 2026-09-08 by arc M1 (#993): there is a SECOND producer of the

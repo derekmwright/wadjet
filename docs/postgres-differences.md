@@ -266,7 +266,7 @@ PostgreSQL has no QUALIFY. It filters after windows, can read unprojected inputs
 
 **PORT/PROTOCOL constrain casts and writes.**
 
-Casts/writes enforce 0–65535 and 0–255 (22003); arithmetic may leave those ranges. Both declare int4. `CAST('udp' AS PROTOCOL)` → 17; comparison literals instead use integer grammar. (ADR-0012 §5/#1092-residuals-2–3)
+Casts/writes enforce 0–65535 and 0–255 (22003); arithmetic may leave those ranges. Both declare int4. Their own text grammar is read at every door, the comparison included: `CAST('udp' AS PROTOCOL)` and `WHERE proto = 'udp'` are both 17, and int4's radix spellings are not theirs — `WHERE port = '0x1bb'` is 22P02. (ADR-0012 §5/#1092-residual-2, §5/#1137)
 
 **DURATION counts nanoseconds.**
 

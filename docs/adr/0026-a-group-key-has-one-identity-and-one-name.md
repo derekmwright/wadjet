@@ -2078,7 +2078,7 @@ broadcast arm finds ONE `lat_ord` build and the shuffle arm finds TWO, so only
 the shuffle arm marks. That is §6a's rule broken by a second producer — which
 side builds is a cost decision and must not decide a NAME — so it rides #997's
 arc rather than a second pass here. Pinned per DAG arm, in both spellings, in
-`coordinator.TestL1AStarOverAJoinPublishesThePlanNotTheQuery`.
+`coordinator.TestO1AStarOverAJoinPublishesTheQueryNotThePlan`.
 
 A block whose own `ORDER BY` was materialized publishes its `__sortkey_N` — the
 sort below still reads that key, so the projection cannot drop it — and what
