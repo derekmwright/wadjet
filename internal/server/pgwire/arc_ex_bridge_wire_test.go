@@ -4,6 +4,9 @@ package pgwire
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/hex"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -40,8 +43,52 @@ func TestTheByteaBridgeDeclaresItsTypesOnTheWire(t *testing.T) {
 			if val != c.wantVal {
 				t.Errorf("%s sent %q, want %q", c.sql, val, c.wantVal)
 			}
+			// BOTH RESULT FORMATS. A declaration is only half-checked under
+			// text: a client that asks for BINARY is handed the bytes to
+			// decode under the OID the server declared, and the two must be
+			// the same value. The server must also SAY it honoured the
+			// request rather than silently answering in text.
+			conn := connectPgconn(t, srv.Addr())
+			res := conn.ExecParams(context.Background(), c.sql, nil, nil, nil, []int16{1}).Read()
+			if res.Err != nil {
+				t.Fatalf("binary format: %v\n  SQL: %s", res.Err, c.sql)
+			}
+			if len(res.FieldDescriptions) != 1 {
+				t.Fatalf("binary format: %d fields\n  SQL: %s", len(res.FieldDescriptions), c.sql)
+			}
+			if got := res.FieldDescriptions[0].Format; got != 1 {
+				t.Errorf("binary format requested, field answered format %d\n  SQL: %s", got, c.sql)
+			}
+			if got := res.FieldDescriptions[0].DataTypeOID; got != c.wantOID {
+				t.Errorf("binary format declared OID %d, want %d — one statement, two "+
+					"declarations\n  SQL: %s", got, c.wantOID, c.sql)
+			}
+			if len(res.Rows) != 1 || len(res.Rows[0]) != 1 {
+				t.Fatalf("binary format: no row\n  SQL: %s", c.sql)
+			}
+			if got := decodeBinaryUnderOID(t, c.wantOID, res.Rows[0][0]); got != c.wantVal {
+				t.Errorf("binary format decoded %q under OID %d, want %q — the same value the "+
+					"text format sent\n  SQL: %s", got, c.wantOID, c.wantVal, c.sql)
+			}
 		})
 	}
+}
+
+// decodeBinaryUnderOID reads a binary-format cell the way a client that trusts
+// the declared OID would: bytea's bytes as PostgreSQL's own \x hex rendering,
+// int8's eight bytes big-endian, text's bytes as themselves.
+func decodeBinaryUnderOID(t *testing.T, oid uint32, raw []byte) string {
+	t.Helper()
+	switch oid {
+	case 17: // bytea
+		return `\x` + hex.EncodeToString(raw)
+	case 20: // int8
+		if len(raw) != 8 {
+			t.Fatalf("int8 binary cell is %d bytes, want 8", len(raw))
+		}
+		return strconv.FormatInt(int64(binary.BigEndian.Uint64(raw)), 10)
+	}
+	return string(raw)
 }
 
 // The refusals this arc added reach the wire with PostgreSQL's own class, not
