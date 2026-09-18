@@ -11,6 +11,54 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
+// setOpPublishedRenames is the gather's rename for a SET OPERATION, which has
+// no projection of its own and therefore no entry in the walk above.
+//
+// A set operation's result columns are its LEFTMOST arm's (ADR-0026 §8b), and
+// the PUBLISHED half of each is the arm's `Projection.PublishedName` — §2's
+// pair. Without this the gather renamed nothing and the operation's columns
+// reached the client under the arm's RESOLUTION spelling: `SELECT id, total+1
+// FROM t UNION ALL …` published `total + 1` on the three DAG arms where the
+// single-process sink publishes PostgreSQL's `?column?`, and
+// `CAST(total AS VARCHAR)` published its own text where PostgreSQL publishes
+// `total` (#1079). One statement, two engines, two column lists.
+//
+// It is NAMES ONLY and one per visible item, never a projection: the union
+// stage already emits exactly the arm's list, so there is nothing to drop,
+// nothing to evaluate and no class to pair (#575's IsAgg). A rename is
+// emitted only where the two names DIFFER — everything else keeps the
+// spelling it had, so an ordinary set operation's gather is unchanged.
+func setOpPublishedRenames(root *logical.Node) []OutputRename {
+	node := localPlanFacts.PublishedOutputProjectionNode(root)
+	if node == nil {
+		return nil
+	}
+	proj := logical.VisibleProjections(node.Projections)
+	if len(proj) == 0 {
+		return nil
+	}
+	renames := make([]OutputRename, 0, len(proj))
+	differs := false
+	for _, p := range proj {
+		from := localPlanFacts.ProjectionOutputName(p)
+		if from == "" {
+			return nil
+		}
+		to := from
+		if p.PublishedName != "" {
+			to = p.PublishedName
+		}
+		if !strings.EqualFold(from, to) {
+			differs = true
+		}
+		renames = append(renames, OutputRename{From: from, To: to})
+	}
+	if !differs {
+		return nil
+	}
+	return renames
+}
+
 // extractOutputRenames inspects the logical plan tree's outermost projection
 // node and returns one (source-column → alias) pair per SELECT-list item — in
 // SELECT-list order — describing the final output schema. The coordinator
@@ -35,7 +83,7 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 	// exactly the columns named here.
 	proj := logical.VisibleProjections(localPlanFacts.FindOutputProjectionsForRename(root))
 	if len(proj) == 0 {
-		return nil
+		return setOpPublishedRenames(root)
 	}
 	// An expression the gather EVALUATES is evaluated over the producer's
 	// output, where a derived GROUP BY key is one column and the input

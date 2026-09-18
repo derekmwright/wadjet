@@ -124,7 +124,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	}
 
 	// The projection whose names the CLIENT reads, resolved once (#732).
-	p.outputProjection = findOutputProjectionNode(node)
+	p.outputProjection = publishedOutputProjectionNode(node)
 
 	// Materialize CTEs referenced multiple times. Each CTE is computed once
 	// and cached so that all references (main query + subqueries) see the

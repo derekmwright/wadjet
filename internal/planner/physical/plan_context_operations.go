@@ -156,6 +156,14 @@ func (PlanContext) FindOutputProjectionNode(n *logical.Node) *logical.Node {
 	return findOutputProjectionNode(n)
 }
 
+// PublishedOutputProjectionNode is FindOutputProjectionNode for the question
+// "whose names does the CLIENT read", which a SET OPERATION answers one node
+// lower — its leftmost arm's (ADR-0026 §8b). The two engines must agree on it
+// or the same statement publishes two different column lists (#1079).
+func (PlanContext) PublishedOutputProjectionNode(n *logical.Node) *logical.Node {
+	return publishedOutputProjectionNode(n)
+}
+
 func (PlanContext) FindOutputProjectionsForRename(n *logical.Node) []logical.Projection {
 	return findOutputProjectionsForRename(n)
 }

@@ -287,7 +287,14 @@ func relationOutputColumns(n *Node, alias string) []StarColumn {
 			// it — `SELECT x.* FROM (SELECT order_id, product FROM lat_item
 			// ORDER BY product) x`.
 			//
-			if proj := blockOutputProjection(cur); proj != nil {
+			// blockOwnProjection and not blockOutputProjection, because a SET
+			// OPERATION is one of those nodes too: it publishes its LEFTMOST
+			// arm's list (ADR-0026 §8b), which is what the bare star over the
+			// same block already reads. Without the descent `SELECT c.* FROM
+			// c` over a `UNION ALL` CTE was 42703 "column c.* does not exist"
+			// where PostgreSQL answers it and the BARE star over the same
+			// block answers it here (#1079's other spelling).
+			if proj := blockOwnProjection(cur); proj != nil {
 				found = starColumnsWithout(projectionOutputNames(proj), hidden)
 				return
 			}

@@ -43,7 +43,7 @@ import (
 // and so does an empty entry inside it; a caller renames only the positions
 // this names.
 func PublishedOutputNames(plan *logical.Node) []string {
-	return publishedNamesOfProjection(findOutputProjectionNode(plan))
+	return publishedNamesOfProjection(publishedOutputProjectionNode(plan))
 }
 
 // publishedNamesOfProjection is the published name of each visible column of

@@ -162,6 +162,45 @@ func findOutputProjectionNode(n *logical.Node) *logical.Node {
 	return nil
 }
 
+// publishedOutputProjectionNode is findOutputProjectionNode for the question
+// "which projection's names does the CLIENT read", which a SET OPERATION
+// answers one node lower.
+//
+// A set operation's result columns are its LEFTMOST arm's — ADR-0026 §8b, and
+// PostgreSQL's own rule — so the arm's projection is where the operation's
+// PUBLISHED names live (§2's pair: `SELECT id, g+1 FROM shp UNION ALL SELECT
+// id, g+2 FROM shp` publishes `id, ?column?`). findOutputProjectionNode
+// answers nil for a set-operation root, so nothing applied the published half
+// and the operation went out under the arm's RESOLUTION spelling — `g + 1`,
+// `count(*)`, `cast(g as varchar)` — on every arm and in RowDescription, for
+// the spelling PostgreSQL publishes `?column?`, `count` and `g` (#1079; the
+// derived-table and CTE spellings of the same statement were right, which is
+// how it survived: only the set operation reaches this node).
+//
+// It descends ONLY to state the names. findOutputProjectionNode keeps its own
+// answer for every consumer that asks where the pipeline's output projection
+// IS — the gather's rename target, the distinct dedup, the stage projection —
+// because a set operation's arms each have one and the operation has none.
+func publishedOutputProjectionNode(n *logical.Node) *logical.Node {
+	for hops := 0; n != nil && hops < 8; hops++ {
+		switch n.Type {
+		case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
+			if len(n.Children) != 2 {
+				return nil
+			}
+			n = n.Children[0]
+		case logical.NodeSort, logical.NodeLimit, logical.NodeFilter, logical.NodeDistinct:
+			if len(n.Children) != 1 {
+				return nil
+			}
+			n = n.Children[0]
+		default:
+			return findOutputProjectionNode(n)
+		}
+	}
+	return nil
+}
+
 // hiddenSortTrimOp returns the projection that drops a materialized ORDER BY
 // term from the single-process pipeline's output, or nil when the plan carries
 // none.

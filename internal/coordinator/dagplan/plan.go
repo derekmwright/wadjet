@@ -415,7 +415,16 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	}
 	// The projection whose names the CLIENT reads: the three plan-time
 	// declarations below are all looked up by that name (#732).
-	outputProj := p.PlanContext.FindOutputProjectionNode(node)
+	//
+	// PublishedOutputProjectionNode and not FindOutputProjectionNode, because
+	// a SET OPERATION has no projection of its own and its result columns are
+	// its LEFTMOST arm's (ADR-0026 §8b). With nil here the gather carried no
+	// published half at all and a `UNION ALL` of unaliased items went out
+	// under the arm's RESOLUTION spelling — `total + 1`, `cast(total as
+	// varchar)` — where the single-process sink publishes PostgreSQL's
+	// `?column?` and `total` (#1079). Two engines, one statement, two column
+	// lists is the thing §2's pair exists to prevent.
+	outputProj := p.PlanContext.PublishedOutputProjectionNode(node)
 
 	// The gather also carries the PLAN's answer for the output schema, which
 	// is what a zero-row DAG result has instead of a batch to read it off:
