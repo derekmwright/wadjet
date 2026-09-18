@@ -277,10 +277,54 @@ func pmProvider(t *testing.T) *auth.Provider {
 type pmResult struct {
 	cols []string
 	rows []map[string]string
+	// vals is the SAME rows positionally, cells aligned with cols, and it is
+	// what a cell whose two columns share a NAME is read through: the map
+	// above holds one of the two, so a leak scan over it inspects one value
+	// and a rendering repeats it (the blindness arc SR repaired in `na2Run`
+	// and `tmdRunSingle`, measured here at `ssn=n1|ssn=n1` for a pair that is
+	// really `***` and `n1`).
+	//
+	// Non-nil only where the DOOR can produce it. The embedded, DAG and
+	// pgwire doors can; the HTTP door's JSON body is one OBJECT per row, so
+	// two columns of one name cannot both cross it — that is the door's own
+	// shape, recorded rather than faked, and it is why a cell that turns on
+	// duplicate names says so.
+	vals [][]string
+}
+
+// cells is one row's values, positionally where the door produced them and by
+// name otherwise. It is what every value assertion reads.
+func (r pmResult) cells(i int) []string {
+	if i < len(r.vals) {
+		return r.vals[i]
+	}
+	if i >= len(r.rows) {
+		return nil
+	}
+	out := make([]string, 0, len(r.cols))
+	for _, c := range r.cols {
+		out = append(out, r.rows[i][c])
+	}
+	return out
 }
 
 func (r pmResult) canon() []string {
 	out := make([]string, 0, len(r.rows))
+	if r.vals != nil {
+		for i := range r.rows {
+			parts := make([]string, 0, len(r.cols))
+			for j, c := range r.cols {
+				v := ""
+				if j < len(r.vals[i]) {
+					v = r.vals[i][j]
+				}
+				parts = append(parts, c+"="+v)
+			}
+			out = append(out, strings.Join(parts, "|"))
+		}
+		sort.Strings(out)
+		return out
+	}
 	names := append([]string(nil), r.cols...)
 	sort.Strings(names)
 	for _, row := range r.rows {
@@ -323,6 +367,24 @@ func pmRender(v any) string {
 	default:
 		return fmt.Sprint(v)
 	}
+}
+
+// pmFromRowValues is pmFromRows with the door's POSITIONAL cells beside the
+// map, for the doors that have them.
+func pmFromRowValues(cols []string, rows []map[string]any, cells [][]any) pmResult {
+	out := pmFromRows(cols, rows)
+	if len(cells) != len(rows) {
+		return out
+	}
+	out.vals = make([][]string, 0, len(cells))
+	for _, r := range cells {
+		row := make([]string, 0, len(r))
+		for _, v := range r {
+			row = append(row, pmRender(v))
+		}
+		out.vals = append(out.vals, row)
+	}
+	return out
 }
 
 func pmFromRows(cols []string, rows []map[string]any) pmResult {
@@ -492,7 +554,7 @@ func pmRigUpWith(t *testing.T, ctx context.Context, provider *auth.Provider) pmR
 			if qerr != nil {
 				return pmResult{}, qerr
 			}
-			return pmFromRows(out.Columns, out.Rows), nil
+			return pmFromRowValues(out.Columns, out.Rows, out.RowValues), nil
 		}
 	}
 	doors = append(doors,
@@ -612,11 +674,30 @@ func pmRigUpWith(t *testing.T, ctx context.Context, provider *auth.Provider) pmR
 			if out.Error != "" {
 				return pmResult{}, fmt.Errorf("%s", out.Error)
 			}
-			rows, rerr := out.Rows()
-			if rerr != nil {
-				return pmResult{}, rerr
+			// BOTH renderings off ONE pass: a result stream is single-pass,
+			// so `Rows()` cannot be called beside it.
+			var rows []map[string]any
+			var cells [][]any
+			if st := out.Stream(); st != nil {
+				defer st.Close()
+				for {
+					bb, berr := st.Next(ctx)
+					if berr != nil {
+						return pmResult{}, berr
+					}
+					if bb == nil {
+						break
+					}
+					rows = append(rows, bb.ToRows()...)
+					cells = append(cells, bb.ToRowValues()...)
+				}
+			} else {
+				var rerr error
+				if rows, rerr = out.Rows(); rerr != nil {
+					return pmResult{}, rerr
+				}
 			}
-			return pmFromRows(out.Columns, rows), nil
+			return pmFromRowValues(out.Columns, rows, cells), nil
 		}
 	}
 	// The ninth door ASSERTS ITS OWN ENGAGEMENT. A door that silently stopped
@@ -695,12 +776,15 @@ func pmRigUpWith(t *testing.T, ctx context.Context, provider *auth.Provider) pmR
 					return pmResult{}, err
 				}
 				m := make(map[string]string, len(vals))
+				pos := make([]string, 0, len(vals))
 				for i, v := range vals {
 					if i < len(out.cols) {
 						m[out.cols[i]] = pmRender(v)
 					}
+					pos = append(pos, pmRender(v))
 				}
 				out.rows = append(out.rows, m)
+				out.vals = append(out.vals, pos)
 			}
 			if err := rows.Err(); err != nil {
 				return pmResult{}, err

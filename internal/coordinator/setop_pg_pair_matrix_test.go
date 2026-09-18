@@ -263,7 +263,10 @@ func tmdRunSingleDecl(ctx context.Context, db *wadjet.DB, sql string) (
 		m := out.ColumnMetas[0]
 		decl = sudDecl(m.Name, m.TypeID, m.Precision, m.Scale)
 	}
-	return decl, &oracle.Result{Columns: out.Columns, Rows: out.Rows}, nil
+	// RowValues travels, for tmdRunSingle's reason: a set operation whose arms
+	// publish one name twice is exactly this matrix's territory, and a
+	// map-keyed row reads the LAST of the two for both positions.
+	return decl, &oracle.Result{Columns: out.Columns, Rows: out.Rows, RowValues: out.RowValues}, nil
 }
 
 func tmdRunDAGDecl(ctx context.Context, coord *Coordinator, sql string) (
@@ -286,11 +289,35 @@ func tmdRunDAGDecl(ctx context.Context, coord *Coordinator, sql string) (
 	if schema := out.OutputSchema(); len(schema) > 0 {
 		decl = sudDecl(schema[0].Name, schema[0].Type, schema[0].Precision, schema[0].Scale)
 	}
-	rows, rerr := out.Rows()
-	if rerr != nil {
-		return "", nil, fmt.Errorf("materializing distributed rows: %w", rerr)
+	// BOTH renderings off ONE pass of the stream, for tmdRunDAG's reason: a
+	// result stream is single-pass, so `Rows()` cannot be called beside it,
+	// and a map-keyed row loses one of two columns that share a name.
+	var rows []map[string]any
+	var cells [][]any
+	st := out.Stream()
+	if st == nil {
+		var rerr error
+		if rows, rerr = out.Rows(); rerr != nil {
+			return "", nil, fmt.Errorf("materializing distributed rows: %w", rerr)
+		}
+		return decl, &oracle.Result{Columns: out.Columns, Rows: rows}, nil
 	}
-	return decl, &oracle.Result{Columns: out.Columns, Rows: rows}, nil
+	defer st.Close()
+	for {
+		bb, berr := st.Next(ctx)
+		if berr != nil {
+			return "", nil, fmt.Errorf("materializing distributed rows: %w", berr)
+		}
+		if bb == nil {
+			break
+		}
+		rows = append(rows, bb.ToRows()...)
+		cells = append(cells, bb.ToRowValues()...)
+	}
+	if len(cells) != len(rows) {
+		cells = nil
+	}
+	return decl, &oracle.Result{Columns: out.Columns, Rows: rows, RowValues: cells}, nil
 }
 
 // setOpPairRefRows is one arm's own values, alone, rendered at the COMMON type

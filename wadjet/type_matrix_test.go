@@ -125,7 +125,12 @@ func tmRun(ctx context.Context, db *DB, sql string) (res *oracle.Result, err err
 	if qerr != nil {
 		return nil, qerr
 	}
-	return &oracle.Result{Columns: out.Columns, Rows: out.Rows}, nil
+	// RowValues travels: a result may legally carry two columns of one name
+	// and the map cannot hold both, so without it the comparison reads the
+	// LAST of the two for BOTH positions and a duplicate-name entry agrees
+	// with itself (oracle.Result.RowValues' own doc). The twin one package
+	// over — coordinator.tmdRunSingle — carries it.
+	return &oracle.Result{Columns: out.Columns, Rows: out.Rows, RowValues: out.RowValues}, nil
 }
 
 // tmPinFor returns the pin covering an entry, if any.

@@ -30,9 +30,22 @@ import (
 //     A refusal is a read too (#994): it must not be reachable only after the
 //     policed column has been read, and it must not name what it refuses.
 //
-// The assertion per cell is threefold — no TRUE value of a masked column
-// reaches any door, no DENIED column appears in any output, and a statement
-// naming a denied column REFUSES — and the whole table asserts a NON-VACUOUS
+// THE PROPERTY THE BRIEF NAMED IS "the mask stays on the arm that OWNS it",
+// and round 1 of the review measured that the first version of this table
+// could not see it: every `using_*` cell joined a policed relation to ITSELF,
+// where a mask that migrated from one arm to the other renders identically,
+// and the one mixed cell shared nothing but the USING key. The `armmask_*`
+// cells below are the discriminating dimension — two columns of ONE name, one
+// of them policed and the other not, in both written orders — and each one
+// names the value that must appear on EACH side. A mask that migrated arms
+// changes one of those two, which is a failure; the mutation proof is in the
+// arc's notes.
+//
+// The assertion per cell is fourfold — no TRUE value of a masked column
+// reaches any door, no DENIED column appears in any output, a statement naming
+// a denied column REFUSES, and a cell that names its per-arm values gets them
+// POSITIONALLY (`pmResult.cells`), because two columns of one name cannot both
+// be read out of a row keyed by name. The whole table asserts a NON-VACUOUS
 // count of (cell, door) pairs that actually ANSWERED, so a change that turns
 // every shape into a refusal cannot pass by emptiness.
 func TestArcSRAStarOverAPolicedArmNeverPublishesTheOtherArmsValue(t *testing.T) {
@@ -58,6 +71,16 @@ func TestArcSRAStarOverAPolicedArmNeverPublishesTheOtherArmsValue(t *testing.T) 
 		// answering fails, which is how the entry gets deleted when the
 		// divergence closes.
 		refuses string
+		// arm is the value each OUTPUT POSITION must carry, per row, read
+		// positionally. It is what makes a migrated mask a failure rather than
+		// an identical rendering: `***` on the policed side and the other
+		// relation's own value on the unpoliced one. An empty entry is a
+		// position this cell does not pin.
+		arm [][]string
+		// cols, when set, is the output column list this cell must publish,
+		// in order — asserted where two of them share a name, which a
+		// name-keyed reading cannot check.
+		cols []string
 	}{
 		// ---- the shape this arc UNLOCKED: a USING star over two policed arms
 		//
@@ -94,6 +117,52 @@ func TestArcSRAStarOverAPolicedArmNeverPublishesTheOtherArmsValue(t *testing.T) 
 			sql: `SELECT * FROM e7emp a JOIN e7emp b ON a.id = b.id`},
 		{name: "ctl_on_over_two_masked_numeric_arms", answers: true,
 			sql: `SELECT * FROM e7bal a JOIN e7bal b ON a.id = b.id`},
+
+		// ---- THE MASK'S ARM, which is the property the brief named --------
+		//
+		// e7other is UNPOLICED, so `(SELECT id, note AS ssn FROM e7other)`
+		// publishes a column called `ssn` that must NOT be masked, beside
+		// e7emp's `ssn`, which must be. A mask that migrated arms shows up as
+		// `***` where `n1` belongs or the true `true-ssn-01` where `***`
+		// does — either way the cell fails. Both written orders, because
+		// which side the plan builds is a cost decision.
+		{name: "armmask_policed_first", answers: true,
+			sql: `SELECT a.ssn AS asn, b.ssn AS bsn FROM e7emp a ` +
+				`JOIN (SELECT id, note AS ssn FROM e7other) b ON a.id = b.id ORDER BY b.ssn`,
+			cols: []string{"asn", "bsn"},
+			arm:  [][]string{{"***", "n1"}, {"***", "n2"}, {"***", "n3"}}},
+		{name: "armmask_unpoliced_first", answers: true,
+			sql: `SELECT b.ssn AS bsn, a.ssn AS asn FROM (SELECT id, note AS ssn FROM e7other) b ` +
+				`JOIN e7emp a ON a.id = b.id ORDER BY b.ssn`,
+			cols: []string{"bsn", "asn"},
+			arm:  [][]string{{"n1", "***"}, {"n2", "***"}, {"n3", "***"}}},
+		// The masked NUMERIC, whose mask is 0 and whose unpoliced twin is a
+		// computed multiple — so a migration is a different number, not a
+		// different string.
+		{name: "armmask_numeric", answers: true,
+			sql: `SELECT a.acct AS aacct, b.acct AS bacct FROM e7emp a ` +
+				`JOIN (SELECT id, id * 7 AS acct FROM e7other) b ON a.id = b.id ORDER BY b.acct`,
+			cols: []string{"aacct", "bacct"},
+			arm:  [][]string{{"0", "7"}, {"0", "14"}, {"0", "21"}}},
+		// THE STAR spelling, where the two columns really do share a name:
+		// the star publishes e7emp's policed `ssn` and the aliased item
+		// carries the unpoliced one. This is the cell the name-keyed reading
+		// could not see, and it is read positionally.
+		{name: "armmask_star_publishes_the_policed_arm", answers: true,
+			sql: `SELECT a.ssn, b.ssn FROM e7emp a ` +
+				`JOIN (SELECT id, note AS ssn FROM e7other) b ON a.id = b.id ORDER BY b.ssn`,
+			cols: []string{"ssn", "ssn"},
+			arm:  [][]string{{"***", "n1"}, {"***", "n2"}, {"***", "n3"}}},
+		{name: "armmask_star_publishes_the_unpoliced_arm_first", answers: true,
+			sql: `SELECT b.ssn, a.ssn FROM (SELECT id, note AS ssn FROM e7other) b ` +
+				`JOIN e7emp a ON a.id = b.id ORDER BY b.ssn`,
+			cols: []string{"ssn", "ssn"},
+			arm:  [][]string{{"n1", "***"}, {"n2", "***"}, {"n3", "***"}}},
+		// The same pair through the MERGE this arc unlocked: the USING key is
+		// unpoliced and the shared tail name `ssn` is policed on one side.
+		{name: "armmask_using_a_shared_policed_tail_name", answers: true,
+			sql: `SELECT * FROM e7emp a JOIN (SELECT id, note AS ssn FROM e7other) b USING (id) ` +
+				`ORDER BY b.ssn`},
 
 		// ---- a DENIED column reached through the new list ------------------
 		{name: "using_a_denied_key", denied: "salary",
@@ -165,12 +234,54 @@ func TestArcSRAStarOverAPolicedArmNeverPublishesTheOtherArmsValue(t *testing.T) 
 						cell.denied, cell.sql, strings.Join(got.canon(), " ; "))
 				}
 				answered++
-				for _, row := range got.rows {
-					for c, v := range row {
+				// POSITIONALLY: a row keyed by NAME holds one of two columns
+				// that share one, so a leak scan over the map inspects one
+				// value and a migration between them is invisible.
+				for i := range got.rows {
+					for j, v := range got.cells(i) {
+						name := ""
+						if j < len(got.cols) {
+							name = got.cols[j]
+						}
 						for _, bad := range leaks {
 							if strings.Contains(v, bad) {
 								t.Fatalf("the analyst identity received the TRUE value (%s=%s)\n"+
-									"  SQL: %s\n  got: %s", c, v, cell.sql,
+									"  SQL: %s\n  got: %s", name, v, cell.sql,
+									strings.Join(got.canon(), " ; "))
+							}
+						}
+					}
+				}
+				if cell.cols != nil && strings.Join(got.cols, ",") != strings.Join(cell.cols, ",") {
+					t.Fatalf("published %v, want %v — the list is what the mask sits on\n  SQL: %s",
+						got.cols, cell.cols, cell.sql)
+				}
+				// THE MASK STAYS ON ITS OWN ARM. Each pinned position names
+				// the value that side must carry; a mask that migrated to the
+				// other arm changes one of them.
+				if cell.arm != nil {
+					if got.vals == nil {
+						// The HTTP door's JSON body is one object per row, so
+						// it cannot carry two columns of one name. A cell
+						// whose list has no duplicate is still readable there.
+						if hasDup(got.cols) {
+							return
+						}
+					}
+					if len(got.rows) != len(cell.arm) {
+						t.Fatalf("%d rows, want %d\n  SQL: %s\n  got: %s", len(got.rows),
+							len(cell.arm), cell.sql, strings.Join(got.canon(), " ; "))
+					}
+					for i, want := range cell.arm {
+						have := got.cells(i)
+						for j, w := range want {
+							if w == "" {
+								continue
+							}
+							if j >= len(have) || have[j] != w {
+								t.Fatalf("row %d position %d is %q, want %q — the mask must "+
+									"stay on the arm that owns it\n  SQL: %s\n  got: %s",
+									i, j, strings.Join(have, "|"), w, cell.sql,
 									strings.Join(got.canon(), " ; "))
 							}
 						}
@@ -189,11 +300,25 @@ func TestArcSRAStarOverAPolicedArmNeverPublishesTheOtherArmsValue(t *testing.T) 
 		}
 	}
 
-	// NON-VACUOUS. Sixteen cells must answer on each of the nine doors; a
+	// NON-VACUOUS. Twenty-two cells must answer on each of the nine doors; a
 	// table that refuses everything proves nothing about masking, which is the
 	// failure mode a sentence in a definition of done cannot catch.
-	if want := 16 * len(rig.doors); answered < want {
+	if want := 22 * len(rig.doors); answered < want {
 		t.Errorf("only %d (cell, door) pairs ANSWERED; want at least %d — a masking gate over "+
 			"refusals is vacuous", answered, want)
 	}
+}
+
+// hasDup reports whether two of these column names are the same, folded — the
+// shape a row keyed by NAME cannot carry.
+func hasDup(cols []string) bool {
+	seen := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		lc := strings.ToLower(c)
+		if seen[lc] {
+			return true
+		}
+		seen[lc] = true
+	}
+	return false
 }
