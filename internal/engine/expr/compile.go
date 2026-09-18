@@ -1191,6 +1191,24 @@ func compileLit(n *plansql.Lit) (Expr, error) {
 	}
 }
 
+// compileCtxDeclType is the declared type of one argument node from whatever
+// the compile context knows: the input's column types when the caller passed
+// them, nothing otherwise. Undecided means "this layer cannot say", which every
+// refusal here treats as "do not refuse".
+func compileCtxDeclType(node plansql.Node, ctx *compileContext) (DeclType, Confidence) {
+	ref, ok := node.(*plansql.ColRef)
+	if !ok || ctx == nil {
+		return DeclType{}, Undecided
+	}
+	if t, ok := ctx.colTypes[strings.ToLower(ref.String())]; ok {
+		return Decl(t), Decided
+	}
+	if t, ok := ctx.colTypes[strings.ToLower(ref.Column)]; ok {
+		return Decl(t), Decided
+	}
+	return DeclType{}, Undecided
+}
+
 func compileFuncCallNode(n *plansql.FuncCallNode, ctx *compileContext) (Expr, error) {
 	return compileFuncCallNamed(n, ctx, true)
 }
@@ -1206,15 +1224,7 @@ func compileFuncCallNode(n *plansql.FuncCallNode, ctx *compileContext) (Expr, er
 func compileFuncCallNamed(n *plansql.FuncCallNode, ctx *compileContext, checked bool) (Expr, error) {
 	name := strings.ToLower(n.Name)
 	if err := RefuseInvalidFixedRowField(n, func(node plansql.Node) (DeclType, Confidence) {
-		if ref, ok := node.(*plansql.ColRef); ok && ctx != nil {
-			if t, ok := ctx.colTypes[strings.ToLower(ref.String())]; ok {
-				return Decl(t), Decided
-			}
-			if t, ok := ctx.colTypes[strings.ToLower(ref.Column)]; ok {
-				return Decl(t), Decided
-			}
-		}
-		return DeclType{}, Undecided
+		return compileCtxDeclType(node, ctx)
 	}); err != nil {
 		return nil, err
 	}
@@ -1239,6 +1249,24 @@ func compileFuncCallNamed(n *plansql.FuncCallNode, ctx *compileContext, checked 
 
 	if checked {
 		if err := checkKnown(name); err != nil {
+			return nil, err
+		}
+		// The ARGUMENTS, once the name resolves. This is the BACKSTOP half of
+		// the signature check — physical.refuseUnresolvableCalls is the
+		// deciding site, for the reason refuseUnknownFlagNames states: a stage
+		// DAG compiles its fragment only when a task RUNS, so a position whose
+		// stage receives no rows would never be compiled at all and the same
+		// call would be 42883 in one process and a silent NULL on three DAG
+		// arms. This site covers the doors that walk does not see (the DML
+		// predicate, a catalog-less plan) and a direct expr.Compile.
+		//
+		// ctx.colTypes is what it has; a caller with no schema decides the
+		// ARITY here and leaves the argument DOMAINS to the binder, which is
+		// the same asymmetry RefuseInvalidFixedRowField is compiled with two
+		// dozen lines above.
+		if err := RefuseUnresolvableCall(n, func(node plansql.Node) (DeclType, Confidence) {
+			return compileCtxDeclType(node, ctx)
+		}); err != nil {
 			return nil, err
 		}
 	}

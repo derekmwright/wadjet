@@ -52,14 +52,6 @@ func TestByteaFunctionsAnswerInBytes(t *testing.T) {
 		{"length_multibyte_column", `LENGTH(b)`, 6, int32(2), parquet.TypeInt32},
 		{"length_multibyte_derived", `LENGTH(b || CAST('' AS BYTES))`, 6, int32(2), parquet.TypeInt32},
 		{"octet_length_multibyte", `OCTET_LENGTH(b)`, 6, int32(2), parquet.TypeInt32},
-		// RESIDUAL: the server has no `char_length(bytea)` at all —
-		// `function char_length(bytea) does not exist`, 42883, measured — so
-		// this cell records an ANSWER where PostgreSQL raises. It answers the
-		// BYTE count because `length` and `char_length` share one kernel and
-		// a rune count here would make one expression give two numbers; the
-		// refusal is the text-only-function family's, deferred with it in
-		// ADR-0012. Delete this cell when that plan-time check lands.
-		{"residual_char_length_answers_where_pg_raises", `CHAR_LENGTH(b)`, 6, int32(2), parquet.TypeInt32},
 		{"length_multibyte_word", `LENGTH(b)`, 7, int32(6), parquet.TypeInt32},
 		{"octet_length_multibyte_word", `OCTET_LENGTH(b)`, 7, int32(6), parquet.TypeInt32},
 		// The TEXT family keeps CHARACTERS over the same bytes, which is the

@@ -662,6 +662,29 @@ func (e *FuncCall) EvalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
 				e.evalVecPerRow(b, out, n)
 				return
 			}
+			// THE SAME GUARD THE COLUMN ARM ABOVE MAKES, at the one branch
+			// that did not make it. makeConstVector builds an INT64, FLOAT64
+			// or BOOL vector for a non-string literal, and those carry no
+			// BytesData arena at all — so a STRING kernel handed one indexed
+			// an absent offsets array and took the whole query to XX000:
+			// `concat(1, name)`, `starts_with(name, 1)`, `ends_with(name, 1)`,
+			// `contains(name, 1)` and `replace(name, 1, 'x')` were each an
+			// internal error where PostgreSQL either renders the value
+			// (`concat(1, name)` is `1<name>`) or says 42883 (#1056).
+			//
+			// The 42883 half is the binder's since #1053 — RefuseUnresolvableCall
+			// refuses a numeric literal in a declared-text position before any
+			// vector exists — and this is what is left: the positions whose
+			// domain really is ANY, where PostgreSQL ANSWERS and the kernel
+			// still cannot read the operand. The per-row path can, because it
+			// renders through toString, so the answer is the value rather than
+			// an internal error. A guard here covers every present and future
+			// STRING kernel, which is what putting it at the dispatcher rather
+			// than inside each kernel buys.
+			if e.vecTextFn && !e.vecTypedArgs[i] && !vecTextReadable(cv, n) {
+				e.evalVecPerRow(b, out, n)
+				return
+			}
 			argVecs[i] = cv
 		default:
 			// Complex expression arg (nested functions, CASE, etc.) —
@@ -952,6 +975,13 @@ type FuncRegistry struct {
 	rets       map[string]Ret // declared return type, one per registered function
 	vecFuncs   map[string]VecScalarFunc
 	vecReturns map[string]func() int // funcs returning VECTOR; value yields the dimension
+	// udfs marks the entries a CREATE FUNCTION put here rather than a
+	// builtin table. A UDF SHADOWS into this registry so that name resolution
+	// is one lookup, and until #1053 nothing could tell the two apart
+	// afterwards — which matters now that a builtin's ARITY is declared and a
+	// UDF's is its own parameter list. Recording it at registration is the
+	// only place the answer is known for certain.
+	udfs map[string]bool
 }
 
 // NewFuncRegistry creates a new empty function registry.
@@ -961,6 +991,7 @@ func NewFuncRegistry() *FuncRegistry {
 		rets:       make(map[string]Ret),
 		vecFuncs:   make(map[string]VecScalarFunc),
 		vecReturns: make(map[string]func() int),
+		udfs:       make(map[string]bool),
 	}
 }
 
@@ -979,12 +1010,33 @@ func (r *FuncRegistry) Register(name string, fn ScalarFunc, ret Ret) {
 	r.mu.Unlock()
 }
 
+// RegisterUDF adds a function this package's builtin tables do not declare —
+// a CREATE FUNCTION's body, or a caller's own extension through RegisterFunc.
+// Its ARITY is its own (a UDF's parameter list, checked by the UDF layer), so
+// the registry's signature table neither holds nor needs a row for it.
+func (r *FuncRegistry) RegisterUDF(name string, fn ScalarFunc, ret Ret) {
+	r.Register(name, fn, ret)
+	r.mu.Lock()
+	r.udfs[strings.ToLower(name)] = true
+	r.mu.Unlock()
+}
+
+// IsUDF reports whether this entry came from a CREATE FUNCTION or from a
+// caller's RegisterFunc rather than from this package's builtin tables.
+func (r *FuncRegistry) IsUDF(name string) bool {
+	r.mu.RLock()
+	ok := r.udfs[strings.ToLower(name)]
+	r.mu.RUnlock()
+	return ok
+}
+
 // Unregister removes a scalar function. Returns true if it existed.
 func (r *FuncRegistry) Unregister(name string) bool {
 	r.mu.Lock()
 	_, existed := r.funcs[strings.ToLower(name)]
 	delete(r.funcs, strings.ToLower(name))
 	delete(r.rets, strings.ToLower(name))
+	delete(r.udfs, strings.ToLower(name))
 	r.mu.Unlock()
 	return existed
 }
@@ -1084,5 +1136,10 @@ type builtin struct {
 // RegisterFunc registers a custom scalar function in the default registry.
 // ret declares what the function returns; see Ret.
 func RegisterFunc(name string, fn ScalarFunc, ret Ret) {
-	DefaultRegistry.Register(name, fn, ret)
+	// An EXTENSION, not a builtin: it is registered by a caller after this
+	// package's own tables, so there is no documented signature for it to
+	// declare. Marked the way a UDF is, and for the same reason — the arity
+	// table is closed against the BUILTINS, and a name a caller added would
+	// otherwise read as a hole in it (#1053).
+	DefaultRegistry.RegisterUDF(name, fn, ret)
 }

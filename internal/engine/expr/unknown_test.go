@@ -80,19 +80,31 @@ func TestKnownAggregatesStillCompile(t *testing.T) {
 // TestKnownScalarsStillCompile covers resolution itself: mixed case, and the
 // alias pairs that share one implementation under two registry entries.
 func TestKnownScalarsStillCompile(t *testing.T) {
-	cases := []struct{ name, why string }{
-		{"upper", "plain lowercase"},
-		{"UPPER", "uppercase — the registry lowercases on both write and read"},
-		{"UpPeR", "mixed case"},
-		{"substr", "alias pair with substring"},
-		{"substring", "alias pair with substr"},
-		{"len", "alias pair with length"},
-		{"length", "alias pair with len"},
-		{"ucase", "alias of upper"},
-		{"character_length", "alias of char_length"},
+	// Each call is spelled at an arity its DOCUMENTED signature takes: since
+	// #1053 the registry records one, and a call with the wrong count is
+	// 42883 before the name check's answer can matter. `substr('abc')` was
+	// here as a name probe and is now a refusal on its own merits, which is
+	// why the argument lists below differ per function rather than being one
+	// literal for all of them.
+	cases := []struct {
+		name, why string
+		args      []plansql.Node
+	}{
+		{"upper", "plain lowercase", []plansql.Node{&plansql.Lit{Value: "abc"}}},
+		{"UPPER", "uppercase — the registry lowercases on both write and read",
+			[]plansql.Node{&plansql.Lit{Value: "abc"}}},
+		{"UpPeR", "mixed case", []plansql.Node{&plansql.Lit{Value: "abc"}}},
+		{"substr", "alias pair with substring", []plansql.Node{
+			&plansql.Lit{Value: "abc"}, &plansql.Lit{Value: "1", Kind: plansql.LitNumber}}},
+		{"substring", "alias pair with substr", []plansql.Node{
+			&plansql.Lit{Value: "abc"}, &plansql.Lit{Value: "1", Kind: plansql.LitNumber}}},
+		{"len", "alias pair with length", []plansql.Node{&plansql.Lit{Value: "abc"}}},
+		{"length", "alias pair with len", []plansql.Node{&plansql.Lit{Value: "abc"}}},
+		{"ucase", "alias of upper", []plansql.Node{&plansql.Lit{Value: "abc"}}},
+		{"character_length", "alias of char_length", []plansql.Node{&plansql.Lit{Value: "abc"}}},
 	}
 	for _, c := range cases {
-		if err := compileCall(t, c.name, &plansql.Lit{Value: "abc"}); err != nil {
+		if err := compileCall(t, c.name, c.args...); err != nil {
 			t.Errorf("%s (%s): must compile, got %v", c.name, c.why, err)
 		}
 	}
@@ -103,12 +115,24 @@ func TestKnownScalarsStillCompile(t *testing.T) {
 // them error: each is an ordinary spelling of a function the engine already
 // had (date_part is EXTRACT, ceiling is ceil), or a one-line builtin (ascii).
 func TestIssueFunctionsNowRegistered(t *testing.T) {
-	for _, name := range []string{"date_part", "ascii", "ceiling", "trunc", "strlen"} {
-		if !DefaultRegistry.Has(name) {
-			t.Errorf("%s must be registered", name)
+	// date_part is EXTRACT's function spelling and takes the unit AND the
+	// instant, so its probe is two arguments since #1053 gave the registry an
+	// arity; the other four take one.
+	for _, c := range []struct {
+		name string
+		args []plansql.Node
+	}{
+		{"date_part", []plansql.Node{&plansql.Lit{Value: "year"}, &plansql.Lit{Value: "1996-01-10"}}},
+		{"ascii", []plansql.Node{&plansql.Lit{Value: "x"}}},
+		{"ceiling", []plansql.Node{&plansql.Lit{Value: "1", Kind: plansql.LitNumber}}},
+		{"trunc", []plansql.Node{&plansql.Lit{Value: "1", Kind: plansql.LitNumber}}},
+		{"strlen", []plansql.Node{&plansql.Lit{Value: "x"}}},
+	} {
+		if !DefaultRegistry.Has(c.name) {
+			t.Errorf("%s must be registered", c.name)
 		}
-		if err := compileCall(t, name, &plansql.Lit{Value: "x"}); err != nil {
-			t.Errorf("%s: must compile, got %v", name, err)
+		if err := compileCall(t, c.name, c.args...); err != nil {
+			t.Errorf("%s: must compile, got %v", c.name, err)
 		}
 	}
 }

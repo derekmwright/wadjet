@@ -64,7 +64,31 @@ func refuseInvalidRowFields(node plansql.Node, scope *colScope) error {
 	var calls []*plansql.FuncCallNode
 	walkExpr(node, nil, nil, &calls)
 	for _, fc := range calls {
-		if err := expr.RefuseInvalidFixedRowField(fc, func(n plansql.Node) (expr.DeclType, expr.Confidence) { return fieldContainerDeclaredType(n, decls) }); err != nil {
+		declOf := func(n plansql.Node) (expr.DeclType, expr.Confidence) {
+			return fieldContainerDeclaredType(n, decls)
+		}
+		if err := expr.RefuseInvalidFixedRowField(fc, declOf); err != nil {
+			return err
+		}
+		// THE BINDER'S HALF of the signature check, and the half that decides
+		// whether the query is refused at all.
+		//
+		// PostgreSQL resolves a function during parse analysis, so
+		// `SELECT upper(a, b) FROM t WHERE false` is 42883 there and does not
+		// wait for a row. Folding that into expr.compileFuncCallNamed alone
+		// gives it on the single-process path, where Plan compiles the whole
+		// expression tree while it builds the physical plan — and NOT on the
+		// stage DAG, where a stage's fragment compiles its own expressions
+		// WHEN A TASK RUNS, so a position whose stage receives no rows is
+		// never compiled and the wrong-arity call answers NULL. That is
+		// refuseUnknownFlagNames's argument verbatim (#1018 round 6, B1), for
+		// the same walk and the same four positions.
+		//
+		// It rides THIS walk rather than a new one because this is the walk
+		// that already has the declarations: an argument DOMAIN is a question
+		// about a column's type, which refuseUnknownFlagNames deliberately
+		// does not carry.
+		if err := expr.RefuseUnresolvableCall(fc, declOf); err != nil {
 			return err
 		}
 	}

@@ -181,7 +181,7 @@ func (s *UDFStore) Register(def UDFDef, isAdmin bool) error {
 	// arbitrary SQL over the call's arguments — RetDynamic says so, and the
 	// planner keeps its own fallback for the projection. A UDF has no vec
 	// kernel, so nothing writes a typed slice on the strength of this.
-	DefaultRegistry.Register(def.Name, s.makeScalarFunc(def.Name), RetDynamic)
+	DefaultRegistry.RegisterUDF(def.Name, s.makeScalarFunc(def.Name), RetDynamic)
 
 	return nil
 }

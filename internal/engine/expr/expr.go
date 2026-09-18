@@ -708,6 +708,14 @@ func init() {
 		"geoip_asn":          {fnGeoipASN, RetInt64},
 		"geoip_org":          {fnGeoipOrg, RetString},
 
+		// The bytes/text bridge (#583). encode answers TEXT, decode and
+		// set_byte answer BYTES, get_byte a number — PostgreSQL's own result
+		// types, measured with pg_typeof.
+		"encode":   {fnEncode, RetString},
+		"decode":   {fnDecode, RetBytes},
+		"get_byte": {fnGetByte, RetInt64},
+		"set_byte": {fnSetByte, RetBytes},
+
 		// Byte/rate formatting
 		"format_bytes": {fnFormatBytes, RetString},
 		"parse_bytes":  {fnParseBytes, RetInt64},

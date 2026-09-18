@@ -130,6 +130,9 @@ var pgIntegerResultWidths = map[string]PGIntegerResult{
 	// codepoint is ascii(): a code point is 0..0x10FFFF.
 	"codepoint":    {Width: PGIntWidth4},
 	"regexp_count": {Width: PGIntWidth4},
+	// get_byte is one BYTE as a number, 0..255. `pg_typeof(get_byte('hi'::bytea,0))`
+	// is integer on 17.11, measured (#583's bridge).
+	"get_byte": {Width: PGIntWidth4},
 	// prefix_length IS masklen: a prefix length is 0..128.
 	"prefix_length":  {Width: PGIntWidth4},
 	"pg_backend_pid": {Width: PGIntWidth4},

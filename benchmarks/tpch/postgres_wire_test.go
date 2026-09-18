@@ -2360,11 +2360,11 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 				"reading it MDY, refuses it as an out-of-range month (22008). Both refuse; the code differs " +
 				"until wadjet implements DateStyle-ordered parsing (#639)."},
 		// A TEXT-only function over bytea. PostgreSQL has no upper(bytea) —
-		// 42883, the same shape as min(boolean) — and wadjet answers,
-		// because expr reads every operand through toString (#583).
-		{name: "ByteaTextFunctionOverBytes", sql: `SELECT UPPER(b_val) FROM bytea_probe WHERE b_key = 3`,
-			pin: missingValidationPin + " Specifically: UPPER reads the BYTES operand through " +
-				"expr.toString and answers the text those bytes spell. (#583)"},
+		// 42883, the same shape as min(boolean) — and this entry was PINNED
+		// as a wadjet answer until #583's second half landed: the plan-time
+		// argument-type check refuses it now with the server's own code, so
+		// the pin is deleted and the statement is GATED like any other.
+		{name: "ByteaTextFunctionOverBytes", sql: `SELECT UPPER(b_val) FROM bytea_probe WHERE b_key = 3`},
 		// MIN/MAX over bytea, which PostgreSQL genuinely does not have
 		// either — verified live, "function min(bytea) does not exist".
 		// This one is a DELIBERATE extension rather than a defect, in the
