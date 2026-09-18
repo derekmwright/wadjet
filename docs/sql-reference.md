@@ -2431,6 +2431,20 @@ while `port + 70000` is plain `int4` arithmetic and answers. `PORT` and `PROTOCO
 NAME as well — `CAST('udp' AS PROTOCOL)` is 17, which is the text form
 `protocol_name()` prints.
 
+**A cast to an integer type reads its operand's own grammar.** PostgreSQL has
+two casts here and they are not the same cast: TEXT is read by the
+destination's own input function, which has no fractional part, while a NUMBER
+is rounded half away from zero. So `CAST('2.5' AS INTEGER)`,
+`CAST(string_col AS BIGINT)` and `CAST(TRIM(s) AS PORT)` are `22P02`, exactly
+as `'2.5'::integer` is on the server, while `CAST(2.5 AS INTEGER)` is 3 and
+`CAST(decimal_col AS PORT)` rounds. What decides is the operand's
+DECLARATION — a quoted literal, a `STRING` column, a cast to a text type, a
+call whose return type is text, a container element, a MAP value, a scalar
+subquery, or a `CASE`/`COALESCE` all of whose arms are one of those — and not
+the value it happens to hold. It covers `INTEGER`, `BIGINT`, `SMALLINT`,
+`INT32`, `INT64`, `PORT` and `PROTOCOL`, at every door: a projection, a
+predicate, `INSERT … SELECT` and `CREATE TABLE … AS`.
+
 `IPV4`, `IPV6`, `CIDR`, `MACADDR` and `UUID` **parse** their operand with the
 type's own text grammar — PostgreSQL's `inet`, `macaddr` and `uuid` input
 functions, the same accept-set the writer and a comparison read (see
@@ -2477,6 +2491,7 @@ are different answers — a client branches on them:
 | `CAST('2020-02-30 12:00' AS TIMESTAMP)` | `22008` | date/time field value out of range: … |
 | `CAST('abc' AS UUID)` | `22P02` | invalid input syntax for type uuid: "abc" |
 | `CAST('abc' AS INTEGER \| BIGINT \| REAL \| DOUBLE PRECISION \| NUMERIC \| BOOLEAN)` | `22P02` | invalid input syntax for type … |
+| `CAST('2.5' AS INTEGER \| BIGINT \| SMALLINT \| INT32 \| INT64 \| PORT \| PROTOCOL)` — a FRACTION is not an integer spelling | `22P02` | invalid input syntax for type integer: "2.5" |
 | `CAST('1e400' AS DOUBLE PRECISION)` | `22003` | "1e400" is out of range for type double precision |
 | `CAST(1e40 AS REAL)` | `22003` | … is out of range for type real |
 | `CAST('abcdef' AS VARCHAR(0))` / `CHAR(0)` | `22023` | length for type varchar \| char must be at least 1 |
