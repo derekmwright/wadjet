@@ -4,6 +4,8 @@ package coordinator
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -69,6 +71,35 @@ func TestSRAStarPublishesItsArmsOwnColumns(t *testing.T) {
 	arms := c1Arms(t, ctx)
 
 	c1Run(t, arms, srStarCases())
+}
+
+// srSetOpChain is a LEFT-DEEP chain of n `UNION ALL` arms over one row, whose
+// second item is UNALIASED — so the operation's published name is the question
+// and the depth is the variable.
+//
+// It exists because every `naming/*` cell above is TWO arms deep, and the walk
+// that answers "whose names does the client read" used to carry a hop bound:
+// one hop per arm, so from the ninth arm on it answered nil and the operation
+// published the arm's RESOLUTION spelling again — the divergence #1079 closes,
+// reappearing on ordinary SQL with nothing recorded that said so (round-1
+// review, B4). The filter keeps one row per arm so the whole answer is legible.
+func srSetOpChain(n int) string {
+	arms := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		arms = append(arms, fmt.Sprintf("SELECT id, total + %d FROM lat_ord WHERE id = 1", i+1))
+	}
+	return strings.Join(arms, " UNION ALL ")
+}
+
+// srChainRows is the rendering all five arms and PostgreSQL 17.11 give for
+// `srSetOpChain(n)`: `?column?` for the unaliased item, one row per arm.
+func srChainRows(n int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "cols=[id:INT64 ?column?:FLOAT64] rows=%d", n)
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&b, " | 1,%d", 151+i)
+	}
+	return b.String()
 }
 
 // srUnreachable is the disposition a cell takes when the stage planner cannot
@@ -400,6 +431,50 @@ func srStarCases() []c1Case {
 			name: "ctl/arms-share-one-name-zero-row",
 			sql:  "SELECT * FROM psa a JOIN psb b ON a.id = b.id WHERE a.id < 0",
 			want: "cols=[id:INT64 a:INT64 id:INT64 b:INT64] rows=0",
+		},
+		// ---- THE DEPTH the walk used to stop at (round-1 review, B4) -------
+		//
+		// A set operation's published name is its LEFTMOST arm's, and the
+		// walks that reach that arm descend one node per arm. Each of the four
+		// carried an arbitrary hop bound and each turned into a different
+		// wrong answer past it: the operation published `total + 1` again
+		// (`publishedOutputProjectionNode`), a qualified star over the block
+		// became 42703 and a bare star over it as a join ARM published the
+		// PLAN's `b.id` (`blockOwnProjection`), and a positional ORDER BY over
+		// the CTE spelling was refused 0A000 (`projectOutputNamesBelow`). The
+		// cells below sit PAST every one of those bounds; the `naming/*` cells
+		// above are all two arms deep, which is why the cliff shipped.
+		{
+			name: "naming/set-op-chain-9-arms",
+			sql:  srSetOpChain(9) + " ORDER BY 1, 2",
+			want: srChainRows(9),
+		},
+		{
+			name: "naming/set-op-chain-16-arms",
+			sql:  srSetOpChain(16) + " ORDER BY 1, 2",
+			want: srChainRows(16),
+		},
+		{
+			name: "naming/set-op-chain-9-arms-in-a-cte",
+			sql:  "WITH c AS (" + srSetOpChain(9) + ") SELECT * FROM c ORDER BY 1, 2",
+			want: srChainRows(9),
+		},
+		{
+			// The positional key is the half `projectOutputNamesBelow`
+			// answers, and the written-key twin answered at every depth —
+			// which is what said the bound, not the shape, was the refusal.
+			name: "naming/set-op-chain-9-arms-in-a-cte-written-key",
+			sql:  "WITH c AS (" + srSetOpChain(9) + ") SELECT * FROM c ORDER BY id, 2",
+			want: srChainRows(9),
+		},
+		{
+			// The ARM spelling: past the bound the star could not state this
+			// arm at all, so the whole expansion fell back to the join
+			// operator's stream and published `b.id`.
+			name: "naming/9-arm-set-op-block-as-a-join-arm",
+			sql:  "SELECT * FROM (" + srSetOpChain(9) + ") a JOIN psa b ON a.id = b.id ORDER BY 2",
+			want: "cols=[id:INT64 ?column?:FLOAT64 id:INT64 a:INT64] rows=9 | 1,151,1,10 | 1,152,1,10 | " +
+				"1,153,1,10 | 1,154,1,10 | 1,155,1,10 | 1,156,1,10 | 1,157,1,10 | 1,158,1,10 | 1,159,1,10",
 		},
 	}
 }

@@ -126,6 +126,34 @@ func TestSRTheWireDeclaresAStarsOwnArms(t *testing.T) {
 		{"a_bare_star_over_a_block_publishing_one_name_twice",
 			"SELECT * FROM (SELECT a.id, b.id FROM j1item a JOIN j1item b ON a.id = b.id) x",
 			"id:20,id:20", ""},
+		// ---- PAST THE HOP BOUND (round-1 review, B4) ----------------------
+		//
+		// The walk that answers "whose names does the CLIENT read" descends
+		// one node per set-operation arm, and it used to stop at eight: from
+		// the ninth arm on the operation went out under the arm's RESOLUTION
+		// spelling again — `total + 1` in RowDescription, which is exactly the
+		// divergence #1079 closes and which this arc's differences-page entry
+		// was deleted for. Every other set-operation cell here is two arms
+		// deep. The wire is where the cliff was visible to a client.
+		{"a_nine_arm_set_operation_chain",
+			"SELECT id, total + 1 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 2 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 3 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 4 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 5 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 6 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 7 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 8 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 9 FROM j1ord WHERE id = 1",
+			"id:20,?column?:701", ""},
+		{"a_sixteen_arm_set_operation_chain",
+			"SELECT id, total + 1 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 2 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 3 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 4 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 5 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 6 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 7 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 8 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 9 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 10 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 11 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 12 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 13 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 14 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 15 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 16 FROM j1ord WHERE id = 1",
+			"id:20,?column?:701", ""},
+		{"a_nine_arm_chain_in_a_cte",
+			"WITH c AS (SELECT id, total + 1 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 2 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 3 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 4 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 5 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 6 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 7 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 8 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 9 FROM j1ord WHERE id = 1) SELECT * FROM c",
+			"id:20,?column?:701", ""},
+		{"a_qualified_star_over_a_nine_arm_chain_in_a_cte",
+			"WITH c AS (SELECT id, total + 1 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 2 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 3 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 4 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 5 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 6 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 7 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 8 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 9 FROM j1ord WHERE id = 1) SELECT c.* FROM c",
+			"id:20,?column?:701",
+			"past the bound this was 42703 `column c.* does not exist`: the block's own " +
+				"list could not be reached, one walk over"},
+		{"a_nine_arm_chain_as_a_join_arm",
+			"SELECT * FROM (SELECT id, total + 1 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 2 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 3 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 4 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 5 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 6 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 7 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 8 FROM j1ord WHERE id = 1 UNION ALL SELECT id, total + 9 FROM j1ord WHERE id = 1) a JOIN j1item b ON a.id = b.id",
+			"id:20,?column?:701,id:20,order_id:20,product:25,amount:701",
+			"past the bound the arm could not be stated, so the whole star fell back to " +
+				"the join operator's stream and published its qualified spelling"},
 	} {
 		c := c
 		t.Run(c.name, func(t *testing.T) {

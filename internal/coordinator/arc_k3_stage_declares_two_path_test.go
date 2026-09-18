@@ -522,7 +522,7 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 							t.Fatalf("%s arm: refused with %v\n  want a refusal naming %q\n  SQL: %s",
 								arm.name, err, tc.wantErrLike, tc.sql)
 						}
-						return
+						continue
 					}
 					t.Fatalf("%s arm: %v\n  want %s\n  SQL: %s", arm.name, err, tc.want, tc.sql)
 				}
