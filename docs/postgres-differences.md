@@ -268,6 +268,10 @@ PostgreSQL has no QUALIFY. It filters after windows, can read unprojected inputs
 
 Casts/writes enforce 0–65535 and 0–255 (22003); arithmetic may leave those ranges. Both declare int4. Their own text grammar is read at every door, the comparison included: `CAST('udp' AS PROTOCOL)` and `WHERE proto = 'udp'` are both 17, and int4's radix spellings are not theirs — `WHERE port = '0x1bb'` is 22P02. (ADR-0012 §5/#1092-residual-2, §5/#1137)
 
+**The `^` operator answers two spellings PostgreSQL rejects.**
+
+`2 ^ -1` is 0.5 here; PostgreSQL lexes `^-` as one operator name and answers `operator does not exist: integer ^- integer` — write `2 ^ (-1)`, which both answer. `2 ^ 3 % 5` is 3 here, because `^` binds tighter and this engine's `%` takes the float result; PostgreSQL has no `double precision % integer`. The values, the `2201F`/`22003` error classes and the declared type are `POWER()`'s. (ADR-0012 §5/#1155)
+
 **DURATION counts nanoseconds.**
 
 Storage and wire use bigint nanoseconds, OID 20, versus PostgreSQL’s microsecond interval. (ADR-0012 §5/#834)

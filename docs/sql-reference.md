@@ -2355,7 +2355,7 @@ FROM flow_logs
 | `*` | Multiplication |
 | `/` | Division |
 | `%` | Modulo |
-| `^` | Exponentiation. `2 ^ 3` is 8. It binds TIGHTER than `*` `/` `%` and LOOSER than unary minus (`-2 ^ 2` is 4), and it is LEFT associative, so `2 ^ 3 ^ 2` is 64 and not 512 — PostgreSQL's documented precedence table, which is not the mathematical convention. It is the `POWER(a, b)` function under another spelling and shares its answers and its errors: `0 ^ -1` and a negative base with a non-integer exponent are `2201F`, an overflow is `22003`. PostgreSQL has no `^` XOR operator; integer XOR is spelled `#` and this engine does not implement it |
+| `^` | Exponentiation. `2 ^ 3` is 8. It binds TIGHTER than `*` `/` `%` and LOOSER than unary minus (`-2 ^ 2` is 4), and it is LEFT associative, so `2 ^ 3 ^ 2` is 64 and not 512 — PostgreSQL's documented precedence table, which is not the mathematical convention. It is the `POWER(a, b)` function under another spelling and shares its answers and its errors: `POWER(0, -1)` and a negative base with a non-integer exponent are `2201F`, an overflow is `22003`. Two spellings are supersets — `2 ^ -1` is 0.5 here where PostgreSQL lexes `^-` as one operator name, and `2 ^ 3 % 5` is 3 here where PostgreSQL has no `double precision % integer` — see [PostgreSQL differences](postgres-differences.md). PostgreSQL has no `^` XOR operator; integer XOR is spelled `#` and this engine does not implement it |
 | `\|\|` | String concatenation — NULL in either operand makes the result NULL (use `CONCAT` to ignore NULLs) |
 
 ## DISTINCT

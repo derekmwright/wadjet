@@ -816,6 +816,22 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      its AST — `physical.flattenJoinConjuncts` already does exactly that one
      layer down — rather than on its text.
 
+   - **The `^` operator answers two spellings PostgreSQL's lexer and operator
+     table reject.** (Added 2026-09-18 by arc PS's round-1 review, N10; recorded
+     2026-09-18, #1155.)
+
+     `SELECT 2 ^ -1` is 0.5 here. PostgreSQL lexes `^-` as ONE operator name —
+     operator characters run together — and answers `operator does not exist:
+     integer ^- integer`; the spelling it reads is `2 ^ (-1)`, which both
+     engines answer. `SELECT 2 ^ 3 % 5` is 3 here: `^` binds tighter, so `%`
+     takes the result, and this engine's `%` accepts a float operand where
+     PostgreSQL has no `double precision % integer`. Both are SUPERSETS — a
+     statement PostgreSQL declines is answered, never answered differently —
+     and neither touches what `^` shares with `POWER()`: the values, the
+     2201F/22003 error classes and the declared type. Recorded rather than
+     narrowed: refusing them would mean a second precedence table for an
+     operator whose whole point is that it is `POWER()` under another spelling.
+
    - **`ORDER BY <name>` over two output columns of that name is answered,
      not refused.** (Added 2026-09-03, #557.) An output slot's identity is its
      POSITION: two output columns may share a NAME — PostgreSQL answers
