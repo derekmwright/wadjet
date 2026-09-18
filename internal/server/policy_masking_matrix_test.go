@@ -81,6 +81,49 @@ func pmBalFixture() []map[string]any {
 	return rows
 }
 
+// pmNet is a FOURTH table with policed NETWORK columns. It exists because a
+// literal beside a network column is resolved AS THAT COLUMN'S TYPE since
+// #1137 — a re-typing that happens at the predicate, which is exactly where a
+// mask has to be read instead of the stored value. With `c_proto` masked to
+// TCP, `WHERE c_proto = 'udp'` must select NOTHING however many rows really
+// hold UDP, and `WHERE c_proto = 'tcp'` must select them all: the row set is
+// then a statement about the mask and not about the value the policy hides,
+// which is the same disclosure e7bal makes visible for a number.
+const pmNet = "e7net"
+
+const (
+	pmMaskProto = 6   // tcp
+	pmMaskPort  = 443 // https
+)
+
+func pmNetSchema() parquet.Schema {
+	return parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "c_proto", Type: parquet.TypeProtocol},
+		{Name: "c_port", Type: parquet.TypePort},
+		{Name: "c_ip", Type: parquet.TypeIPv4},
+	}}
+}
+
+// pmNetFixture holds values the mask is NOT: UDP and ICMP, ports nothing
+// masks to, and addresses outside the masked one. A row that agreed with the
+// mask by accident would make a leak invisible.
+func pmNetFixture() []map[string]any {
+	rows := make([]map[string]any, 0, 6)
+	for i := 1; i <= 6; i++ {
+		proto := int32(17) // udp
+		if i%2 == 0 {
+			proto = 1 // icmp
+		}
+		rows = append(rows, map[string]any{
+			"id": int64(i), "c_proto": proto,
+			"c_port": int32(9000 + i),
+			"c_ip":   fmt.Sprintf("10.0.0.%d", i),
+		})
+	}
+	return rows
+}
+
 func pmOtherSchema() parquet.Schema {
 	return parquet.Schema{Columns: []parquet.Column{
 		{Name: "id", Type: parquet.TypeInt64},
@@ -136,6 +179,15 @@ func pmTrueValues() []string {
 	for _, r := range pmBalFixture() {
 		out = append(out, fmt.Sprint(r["bal"]))
 	}
+	// The network table's stored values, rendered the way a result carries
+	// them. Only the PORTS: a PROTOCOL number is one or two digits and would
+	// match a task id, a row count or a date inside an unrelated string, so a
+	// leak list holding it would fail on text that discloses nothing. The
+	// ports are five digits and distinctive, and they are the per-row value
+	// this table exists to police.
+	for _, r := range pmNetFixture() {
+		out = append(out, fmt.Sprint(r["c_port"]))
+	}
 	return out
 }
 
@@ -153,6 +205,26 @@ func pmProvider(t *testing.T) *auth.Provider {
 					{Type: "deny_column", Target: "salary"},
 					{Type: "mask_column", Target: "ssn", Value: "'" + pmMaskSSN + "'"},
 					{Type: "mask_column", Target: "acct", Value: pmMaskAcct},
+				},
+			},
+			{
+				ID: "analyst-net", EffectStr: "allow", Priority: 10,
+				Subjects:  []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: "analyst"}},
+				Resources: []auth.Condition{{Attribute: "resource.name", Op: "eq", Value: pmNet}},
+				Actions:   []auth.Action{auth.ActionRead},
+				Obligations: []auth.Obligation{
+					// The mask EXPRESSION carries the masked column's declared
+					// type, and it has to: a bare `6` declares an integer, and
+					// every downstream type decision then follows the MASK's
+					// type rather than the column's — so `c_proto = 'tcp'`
+					// beside a masked column read int4's grammar and was
+					// 22P02 where the same predicate beside the column itself
+					// is 6 (#1137's own resolution rule, one layer up). The
+					// CAST is how a policy says "a value of this column's
+					// type"; FC-6 is the filing candidate for a policy layer
+					// that should refuse a mask which is not one.
+					{Type: "mask_column", Target: "c_proto", Value: "CAST(6 AS PROTOCOL)"},
+					{Type: "mask_column", Target: "c_port", Value: "CAST(443 AS PORT)"},
 				},
 			},
 			{
@@ -303,6 +375,7 @@ func pmWriteFixture(t *testing.T, ctx context.Context, store objstore.Store, cat
 	pmWriteTable(t, ctx, store, cat, pmTable, pmSchema(), pmFixture())
 	pmWriteTable(t, ctx, store, cat, pmOther, pmOtherSchema(), pmOtherFixture())
 	pmWriteTable(t, ctx, store, cat, pmBal, pmBalSchema(), pmBalFixture())
+	pmWriteTable(t, ctx, store, cat, pmNet, pmNetSchema(), pmNetFixture())
 }
 
 func pmWriteTable(t *testing.T, ctx context.Context, store objstore.Store, cat *catalog.Catalog,
@@ -372,6 +445,7 @@ func pmEmbeddedDB(t *testing.T, ctx context.Context, budget int64) *wadjet.DB {
 	ingest1(pmTable, pmSchema(), pmFixture())
 	ingest1(pmOther, pmOtherSchema(), pmOtherFixture())
 	ingest1(pmBal, pmBalSchema(), pmBalFixture())
+	ingest1(pmNet, pmNetSchema(), pmNetFixture())
 	return db
 }
 

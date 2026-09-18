@@ -46,9 +46,16 @@ func TestTheFlagNameFoldRefusesOnlyWhatPostgresWould(t *testing.T) {
 		// literal is a literal.
 		{"parenthesized_literal_is_folded", `SELECT tcp_flags_has_all(visits, ('BOGUS')) AS v FROM users WHERE id<0`,
 			`TCP flag name "BOGUS" not recognized`},
-		// has_tcp_flag reads exactly ONE name, so the misspelling it reports
-		// is the first — the extra argument is not a name it looks at.
-		{"legacy_spelling_reads_one_name", `SELECT has_tcp_flag(visits,'BOGUS','EXTRA') AS v FROM users WHERE id<0`,
+		// has_tcp_flag reads exactly ONE name, and the cell that stood here
+		// passed it TWO and asserted the misspelling in the first — because
+		// the extra argument was silently dropped, which is #1053's own
+		// defect. The call itself is unresolvable now
+		// (`function has_tcp_flag(bigint, unknown, unknown) does not exist`,
+		// 42883, PostgreSQL's order: a function is resolved at parse analysis
+		// before any literal in it is read), and that cell moved to the
+		// arity table below. The NAME refusal keeps its own cell at the
+		// arity the function has.
+		{"legacy_spelling_one_name", `SELECT has_tcp_flag(visits,'BOGUS') AS v FROM users WHERE id<0`,
 			`TCP flag name "BOGUS" not recognized`},
 		// The refusal does not care how the row set was emptied, or whether
 		// the call sits under a NOT, or whether there is a table at all.
@@ -70,6 +77,30 @@ func TestTheFlagNameFoldRefusesOnlyWhatPostgresWould(t *testing.T) {
 			}
 			if got := pgErrCode(res.Err); got != "22023" {
 				t.Errorf("SQLSTATE %s, want 22023\n  err: %v\n  SQL: %s", got, res.Err, tc.sql)
+			}
+			if !strings.Contains(res.Err.Error(), tc.msg) {
+				t.Errorf("%q does not carry %q\n  SQL: %s", res.Err, tc.msg, tc.sql)
+			}
+		})
+	}
+
+	// TOO MANY ARGUMENTS is a different refusal from a bad NAME, and it comes
+	// FIRST — PostgreSQL resolves the function at parse analysis and only then
+	// reads what is in it. `has_tcp_flag` takes a mask and ONE name; an extra
+	// argument used to be dropped in silence, which is what #1053 is.
+	for _, tc := range []struct{ name, sql, msg string }{
+		{"extra_argument_has_tcp_flag", `SELECT has_tcp_flag(visits,'SYN','EXTRA') AS v FROM users WHERE id<0`,
+			"function has_tcp_flag(bigint, unknown, unknown) does not exist"},
+		{"extra_argument_with_a_bad_name", `SELECT has_tcp_flag(visits,'BOGUS','EXTRA') AS v FROM users WHERE id<0`,
+			"function has_tcp_flag(bigint, unknown, unknown) does not exist"},
+	} {
+		t.Run("refuses42883/"+tc.name, func(t *testing.T) {
+			res := conn.ExecParams(context.Background(), tc.sql, nil, nil, nil, []int16{0}).Read()
+			if res.Err == nil {
+				t.Fatalf("ANSWERED %d rows; 42883 is due\n  SQL: %s", len(res.Rows), tc.sql)
+			}
+			if got := pgErrCode(res.Err); got != "42883" {
+				t.Errorf("SQLSTATE %s, want 42883\n  err: %v\n  SQL: %s", got, res.Err, tc.sql)
 			}
 			if !strings.Contains(res.Err.Error(), tc.msg) {
 				t.Errorf("%q does not carry %q\n  SQL: %s", res.Err, tc.msg, tc.sql)

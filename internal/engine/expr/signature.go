@@ -232,6 +232,13 @@ var textDomains = map[string][]ArgDomain{
 // further forms — the declaration is what this engine HAS, and the missing
 // overload is 42883, which is what the server answers for a signature it does
 // not have either.
+// THE ONE FAMILY WHOSE MISSING ARGUMENTS ARE NOT THIS TABLE'S BUSINESS. The
+// TCP flag functions own a refusal for an empty NAME LIST —
+// `22023 tcp_flag_mask requires at least one TCP flag name`, settled by #1018
+// with its own binder half — and that refusal says which function and what it
+// wanted, where a generic `function tcp_flag_mask() does not exist` says
+// neither. Their minimum here is therefore the count that carries NO names, so
+// the family's own refusal is the one a user reads.
 var funcSignatures = map[string]Signature{
 	"abs":                            {Min: 1, Max: 1},
 	"acos":                           {Min: 1, Max: 1},
@@ -357,7 +364,7 @@ var funcSignatures = map[string]Signature{
 	"has_sequence_privilege":         {Min: 2, Max: 3},
 	"has_table_privilege":            {Min: 2, Max: 3},
 	"has_tablespace_privilege":       {Min: 2, Max: 3},
-	"has_tcp_flag":                   {Min: 2, Max: 2},
+	"has_tcp_flag":                   {Min: 1, Max: 2},
 	"hmac_sha256":                    {Min: 2, Max: 2},
 	"hmac_sha512":                    {Min: 2, Max: 2},
 	"hosts_in_cidr":                  {Min: 1, Max: 1},
@@ -561,7 +568,7 @@ var funcSignatures = map[string]Signature{
 	"substr":                         {Min: 2, Max: 3},
 	"substring":                      {Min: 2, Max: 3},
 	"tan":                            {Min: 1, Max: 1},
-	"tcp_flag_mask":                  {Min: 1, Max: Variadic},
+	"tcp_flag_mask":                  {Min: 0, Max: Variadic},
 	"tcp_flags":                      {Min: 1, Max: 1},
 	"tcp_flags_from_string":          {Min: 1, Max: 1},
 	"tcp_flags_has_all":              {Min: 1, Max: Variadic},
