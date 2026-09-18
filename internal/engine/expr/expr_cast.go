@@ -159,7 +159,7 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		// own declaration — so the routing happens before either reader,
 		// once, for every integer destination rather than for PORT and
 		// PROTOCOL alone.
-		if castOperandDeclaresText(e.Operand) {
+		if castOperandDeclaresText(e.Operand, b) {
 			if s, ok := stringOperand(v); ok {
 				return castTextToInt(s, dest)
 			}

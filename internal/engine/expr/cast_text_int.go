@@ -84,14 +84,25 @@ func intCastTypeName(dest string) string {
 //	UPPER(s)               a call whose registered return type is fixed STRING
 //	COALESCE(s, 'x')       a choice all of whose arms are themselves text
 //	CASE … THEN s ELSE 'x' END
+//	arr[1]                 a container whose ELEMENT is declared STRING
+//	ELEMENT_AT(m, 'a')     a MAP whose VALUE is declared STRING
+//	(SELECT s FROM …)      a scalar subquery whose output column is STRING
+//
+// The last three need the BATCH, which is why this takes one: a container's
+// element type lives on the child vector and a subquery's on the node the
+// planner resolved, neither of which is readable from the expression alone.
+// Without them `CAST(arr[1] AS INTEGER)` over an ARRAY OF TEXT holding '2.5'
+// answered 3 and `INSERT … SELECT CAST(arr[1] AS PORT)` put that 3 at rest,
+// which is #1141's own symptom sentence surviving through a container
+// (round-1 review, P2). A container of DECIMAL still rounds, because its
+// element type says decimal.
 //
 // Everything else answers false and keeps the numeric reading, which is the
-// safe direction: a DECIMAL column, an arithmetic result, a scalar subquery and
-// a container element all box as something this cannot claim is text, and the
-// value path reaches castTextToInt anyway when the box turns out to hold a
-// string (see Cast.Eval's integer arm). The DECLARATION decides which cast; the
-// box only decides whether there is text to read at all.
-func castOperandDeclaresText(operand Expr) bool {
+// safe direction: a DECIMAL column and an arithmetic result box as something
+// this cannot claim is text, and the value path reaches castTextToInt anyway
+// when the box turns out to hold a string. The DECLARATION decides which cast;
+// the box only decides whether there is text to read at all.
+func castOperandDeclaresText(operand Expr, b *batch.RecordBatch) bool {
 	switch v := operand.(type) {
 	case *Lit:
 		_, isText := v.Val.(string)
@@ -104,7 +115,7 @@ func castOperandDeclaresText(operand Expr) bool {
 	case *FuncCall:
 		return DefaultRegistry.ReturnType(v.Name).Text()
 	case *Coalesce:
-		return allDeclareText(v.Args)
+		return allDeclareText(v.Args, b)
 	case *Case:
 		arms := make([]Expr, 0, len(v.Whens)+1)
 		for _, w := range v.Whens {
@@ -113,7 +124,17 @@ func castOperandDeclaresText(operand Expr) bool {
 		if v.Else != nil {
 			arms = append(arms, v.Else)
 		}
-		return allDeclareText(arms)
+		return allDeclareText(arms, b)
+	case *elementAtExpr:
+		if b == nil {
+			return false
+		}
+		k, ok := elementOperandKind(v.arg0, b)
+		return ok && k == boxText
+	case *ScalarSubquery:
+		return v.DeclKnown && v.Decl == batch.TypeString
+	case *CorrelatedScalarSubquery:
+		return v.DeclKnown && v.Decl == batch.TypeString
 	}
 	return false
 }
@@ -122,7 +143,7 @@ func castOperandDeclaresText(operand Expr) bool {
 // chosen from: every arm must declare text, and an empty set declares nothing.
 // A NULL arm is skipped, because `COALESCE(s, NULL)` is as much a text
 // expression as `s` is — the rule joinCastBoolDeclared states for its own join.
-func allDeclareText(args []Expr) bool {
+func allDeclareText(args []Expr, b *batch.RecordBatch) bool {
 	seen := false
 	for _, a := range args {
 		if a == nil {
@@ -131,7 +152,7 @@ func allDeclareText(args []Expr) bool {
 		if lit, ok := a.(*Lit); ok && lit.Val == nil {
 			continue
 		}
-		if !castOperandDeclaresText(a) {
+		if !castOperandDeclaresText(a, b) {
 			return false
 		}
 		seen = true
