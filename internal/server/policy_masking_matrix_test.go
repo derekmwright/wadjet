@@ -308,29 +308,30 @@ func (r pmResult) cells(i int) []string {
 	return out
 }
 
+// canon renders the rows in ONE canonical spelling for every door: the cells
+// by NAME ascending, ties (two output columns of one name) left in the order
+// the door produced them. It reads `cells`, so a duplicated name renders
+// TWICE with its two values rather than once with whichever the map kept —
+// and because the sort is by name and STABLE, a result whose names are
+// distinct renders exactly as the name-keyed rendering always did. That
+// equality is load-bearing: every `want` in this file and in the EX and WK
+// policy tables is written in name order.
 func (r pmResult) canon() []string {
 	out := make([]string, 0, len(r.rows))
-	if r.vals != nil {
-		for i := range r.rows {
-			parts := make([]string, 0, len(r.cols))
-			for j, c := range r.cols {
-				v := ""
-				if j < len(r.vals[i]) {
-					v = r.vals[i][j]
-				}
-				parts = append(parts, c+"="+v)
-			}
-			out = append(out, strings.Join(parts, "|"))
-		}
-		sort.Strings(out)
-		return out
+	order := make([]int, 0, len(r.cols))
+	for j := range r.cols {
+		order = append(order, j)
 	}
-	names := append([]string(nil), r.cols...)
-	sort.Strings(names)
-	for _, row := range r.rows {
-		parts := make([]string, 0, len(names))
-		for _, c := range names {
-			parts = append(parts, c+"="+row[c])
+	sort.SliceStable(order, func(a, b int) bool { return r.cols[order[a]] < r.cols[order[b]] })
+	for i := range r.rows {
+		cells := r.cells(i)
+		parts := make([]string, 0, len(order))
+		for _, j := range order {
+			v := ""
+			if j < len(cells) {
+				v = cells[j]
+			}
+			parts = append(parts, r.cols[j]+"="+v)
 		}
 		out = append(out, strings.Join(parts, "|"))
 	}
