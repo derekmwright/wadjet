@@ -148,95 +148,89 @@ type ntNumCell struct {
 	// every door a value ENTERS the type through (Derek's decision on the
 	// round-2 review's FC-2). It stays a column of its own because the
 	// FRACTIONAL pair still differs there — the numeric family's cell, FC-7.
-	cast string
-	// cmp is the disposition at a COMPARISON door, where the literal is
-	// resolved against the column's DECLARED WIRE TYPE — `integer`, OID 23
-	// (#834) — and therefore reads int4's text grammar rather than the type's
-	// own. That is why `'udp'` is 22P02 there while `CAST('udp' AS PROTOCOL)`
-	// is 17, and why `'0x6'` is the other way round. One deferral, recorded in
-	// ADR-0012 and filed as FC-1; "" means "same as cast".
-	cmp   string
+	cast  string
 	value int32 // the stored value when write == "ok"
 }
 
+// at is the disposition at one door. A COMPARISON door has no column of its
+// own any more: the `cmp` column that stood here recorded arc NT's deferral 1,
+// where a quoted literal beside a PORT or PROTOCOL column was resolved against
+// the type's DECLARED WIRE TYPE (`integer`, OID 23, #834) and so read int4's
+// grammar — `'udp'` was 22P02 at a WHERE while `CAST('udp' AS PROTOCOL)`
+// answered 17, and `'0x1bb'` MATCHED port 443 the writer refuses for the same
+// text. Deleting the column is the proof #1137 landed: one grammar per type at
+// every door, which is what this gate's name claims.
 func (c ntNumCell) at(d ntDoor) string {
 	switch d {
-	case ntWhereEmpty, ntWhereFull:
-		if c.cmp != "" {
-			return c.cmp
-		}
-		return c.cast
-	case ntCastLit, ntCastCol:
+	case ntWhereEmpty, ntWhereFull, ntCastLit, ntCastCol:
 		return c.cast
 	}
 	return c.write
 }
 
-// The `write` / `cast` / `cmp` columns below are the three readings these two
-// types get, and every difference between them is recorded rather than
-// silent: the type's own form and range at a writer, int4's RANGE at a CAST
-// (#901, FC-2), and int4's whole GRAMMAR at a comparison (FC-1).
+// The `write` and `cast` columns below are the two readings these two types
+// get, and the difference between them is recorded rather than silent: the
+// type's own form and range at a writer, and the same form with int4's
+// carrier behind it at a CAST (#901, FC-2).
 //
-// `'2.5'` and `'443.0'` are the numeric family's boundary, not the network
-// one, and they sit here to SHOW it: a quoted fractional literal is 22P02 on
-// PostgreSQL and rounds at this engine's cast and INSERT … SELECT doors —
-// identically for INTEGER (`CAST('2.5' AS INTEGER)` is 3 here, measured), so
-// it is int4's cell and not PORT's. Filed as FC-7.
+// `'2.5'` and `'443.0'` are the numeric family's boundary and they sit here to
+// show where it meets this one: a quoted fractional literal is 22P02 on
+// PostgreSQL for every integer destination, and since #1141 it is 22P02 here
+// too — for INTEGER as well as for PORT, because the operand's DECLARATION
+// picks the cast and a quoted literal declares text.
 func ntPortCells() []ntNumCell {
 	return []ntNumCell{
-		{"443", "ok", "ok", "", 443},
-		{"0", "ok", "ok", "", 0},
-		{"65535", "ok", "ok", "", 65535},
-		{" 443", "ok", "ok", "", 443},
-		{"443 ", "ok", "ok", "", 443},
-		{"+443", "ok", "ok", "", 443},
-		{"-0", "ok", "ok", "", 0},
-		{"017", "ok", "ok", "", 17},
-		{"65536", "22003", "22003", "ok", 0},
-		{"-1", "22003", "22003", "ok", 0},
-		{"3000000000", "22003", "22003", "", 0},
-		{"70000", "22003", "22003", "ok", 0},
-		{"2147483648", "22003", "22003", "22003", 0},
-		{"300", "ok", "ok", "", 300},
-		{"0x1bb", "22P02", "22P02", "ok", 0},
-		{"0o17", "22P02", "22P02", "ok", 0},
-		{"0b101", "22P02", "22P02", "ok", 0},
-		{"1_000", "22P02", "22P02", "ok", 0},
-		// A quoted FRACTIONAL literal is 22P02 at every door this arc owns
-		// since round 3: `'2.5'::integer` is 22P02 on the server, and the
-		// value used to reach REST through INSERT … SELECT and a CTAS. The
-		// BARE `CAST('2.5' AS INTEGER)` still rounds and is FC-7's, in the
-		// numeric lane — a DECIMAL BOX must keep rounding (PG's numeric→int
-		// does), and telling the two apart at that cast needs the operand's
-		// declared type, which this arc's seam does not own.
-		{"443.0", "22P02", "22P02", "22P02", 0},
-		{"2.5", "22P02", "22P02", "22P02", 0},
-		{"https", "22P02", "22P02", "", 0},
-		{"zzz", "22P02", "22P02", "", 0},
-		{"", "22P02", "22P02", "", 0},
+		{"443", "ok", "ok", 443},
+		{"0", "ok", "ok", 0},
+		{"65535", "ok", "ok", 65535},
+		{" 443", "ok", "ok", 443},
+		{"443 ", "ok", "ok", 443},
+		{"+443", "ok", "ok", 443},
+		{"-0", "ok", "ok", 0},
+		{"017", "ok", "ok", 17},
+		{"65536", "22003", "22003", 0},
+		{"-1", "22003", "22003", 0},
+		{"3000000000", "22003", "22003", 0},
+		{"70000", "22003", "22003", 0},
+		{"2147483648", "22003", "22003", 0},
+		{"300", "ok", "ok", 300},
+		{"0x1bb", "22P02", "22P02", 0},
+		{"0o17", "22P02", "22P02", 0},
+		{"0b101", "22P02", "22P02", 0},
+		{"1_000", "22P02", "22P02", 0},
+		// A quoted FRACTIONAL literal is 22P02 at every door, the bare
+		// `CAST('2.5' AS INTEGER)` included since #1141: `'2.5'::integer` is
+		// 22P02 on the server, a DECIMAL BOX still rounds because PostgreSQL's
+		// numeric→int does, and the operand's DECLARATION is what tells the
+		// two apart (expr.castOperandDeclaresText).
+		{"443.0", "22P02", "22P02", 0},
+		{"2.5", "22P02", "22P02", 0},
+		{"https", "22P02", "22P02", 0},
+		{"zzz", "22P02", "22P02", 0},
+		{"", "22P02", "22P02", 0},
 	}
 }
 
 func ntProtocolCells() []ntNumCell {
 	return []ntNumCell{
-		{"6", "ok", "ok", "", 6},
-		{"17", "ok", "ok", "", 17},
-		{"255", "ok", "ok", "", 255},
-		{"udp", "ok", "ok", "22P02", 17},
-		{"TCP", "ok", "ok", "22P02", 6},
-		{"icmp", "ok", "ok", "22P02", 1},
-		{"icmpv6", "ok", "ok", "22P02", 58},
-		{"ipv6-icmp", "ok", "ok", "22P02", 58},
-		{" udp", "ok", "ok", "22P02", 17},
-		{"256", "22003", "22003", "ok", 0},
-		{"3000000000", "22003", "22003", "", 0},
-		{"70000", "22003", "22003", "ok", 0},
-		{"2147483648", "22003", "22003", "22003", 0},
-		{"300", "22003", "22003", "ok", 0},
-		{"443", "22003", "22003", "ok", 0},
-		{"0x6", "22P02", "22P02", "ok", 0},
-		{"nosuchproto", "22P02", "22P02", "", 0},
-		{"", "22P02", "22P02", "", 0},
+		{"6", "ok", "ok", 6},
+		{"17", "ok", "ok", 17},
+		{"255", "ok", "ok", 255},
+		{"udp", "ok", "ok", 17},
+		{"TCP", "ok", "ok", 6},
+		{"icmp", "ok", "ok", 1},
+		{"icmpv6", "ok", "ok", 58},
+		{"ipv6-icmp", "ok", "ok", 58},
+		{" udp", "ok", "ok", 17},
+		{"256", "22003", "22003", 0},
+		{"3000000000", "22003", "22003", 0},
+		{"70000", "22003", "22003", 0},
+		{"2147483648", "22003", "22003", 0},
+		{"300", "22003", "22003", 0},
+		{"443", "22003", "22003", 0},
+		{"0x6", "22P02", "22P02", 0},
+		{"nosuchproto", "22P02", "22P02", 0},
+		{"", "22P02", "22P02", 0},
 	}
 }
 
@@ -596,77 +590,52 @@ func ntFormName(form string) string {
 	return strings.NewReplacer("/", "_", " ", "_SP_", "\t", "_TAB_").Replace(form)
 }
 
-// TestAStringTypedExpressionCastToPortIsFC7sOpenCell is a PIN, and its job is
-// to fail the day it starts agreeing with PostgreSQL.
+// A STRING-typed EXPRESSION cast to PORT reads the TYPE's input function, the
+// same one a quoted literal and a STRING column read.
 //
-// `Cast.Eval` decides between the TYPE's input function and the numeric→int
-// conversion by the operand's SHAPE: a bare quoted literal or a STRING column
-// is text (`'2.5'::PORT` is 22P02), a DECIMAL column or a numeric literal is a
-// number (`CAST(d AS PORT)` and `CAST(2.5 AS PORT)` round, as PostgreSQL's
-// numeric→int does). A STRING-typed EXPRESSION is neither shape, so it still
-// reaches the decimal reader and a FRACTION rounds where the server refuses —
-// and it reaches REST that way through INSERT … SELECT and a CTAS.
+// This was FC-7's open cell and it is closed by #1141: the CAST used to choose
+// between PostgreSQL's two casts to an integer type by looking at the Go BOX,
+// and a DECIMAL and a STRING arrive in the same one, so a fractional string
+// took the numeric cast's ROUNDING — `CAST(CONCAT('2','.5') AS PORT)` was 3,
+// and reached REST that way through INSERT … SELECT and a CTAS.
 //
-// It is pre-existing (identical at 435e08c3 and at both earlier tips of this
-// arc) and strictly narrower than it was: the RANGE and the hex spelling
-// already take the text path, so only fractional text slips through. It is
-// NOT repaired here, and the reason is measured rather than asserted:
-// extending the shape test to "any operand that arrives as a Go string" fixes
-// these cells and then refuses `CAST(d + 1 AS PORT)` with
-// `invalid input syntax for type integer: "3.50"`, where PostgreSQL answers 4
-// — a new wrong answer for an old one. Telling the two apart needs the
-// operand's DECLARED type across the whole integer family, which is FC-7's
-// seam in the numeric lane, not this one. ADR-0012 residual 4.
-func TestAStringTypedExpressionCastToPortIsFC7sOpenCell(t *testing.T) {
+// The DECLARATION is what tells them apart (expr.castOperandDeclaresText), and
+// the second table below is why the box could not: `CAST(d + 1 AS PORT)` over
+// a DECIMAL column must still ROUND, because PostgreSQL's numeric→int does,
+// and it arrives as a Go string exactly like the first table's operands.
+func TestAStringTypedExpressionCastToPortReadsTheTypesGrammar(t *testing.T) {
 	ctx := context.Background()
 	db, _ := ntOpenTyped(t, parquet.TypePort)
 	if _, err := db.Query(ctx, "INSERT INTO t (id, s) VALUES (1, ' 2.5 ')"); err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range []struct {
-		expr string
-		// want is what this engine answers TODAY; pg is what PostgreSQL
-		// 17.11 answers for the same shape at `integer`, measured.
-		want any
-		pg   string
-	}{
-		{"CAST(CONCAT('2','.5') AS PORT)", int32(3), "22P02"},
-		{"CAST(TRIM(s) AS PORT)", int32(3), "22P02"},
-		{"CAST(SUBSTRING('2.5',1,3) AS PORT)", int32(3), "22P02"},
-		{"CAST(CAST(2.5 AS TEXT) AS PORT)", int32(3), "22P02"},
+	// A TEXT-declared expression: int4in's grammar, which has no fraction.
+	for _, e := range []string{
+		"CAST(CONCAT('2','.5') AS PORT)",
+		"CAST(TRIM(s) AS PORT)",
+		"CAST(SUBSTRING('2.5',1,3) AS PORT)",
+		"CAST(CAST(2.5 AS TEXT) AS PORT)",
+		"CAST(UPPER('2.5') AS PORT)",
+		"CAST(s AS PORT)",
+		"CAST('2.5' AS PORT)",
 	} {
-		t.Run(c.expr, func(t *testing.T) {
-			res, err := db.Query(ctx, "SELECT "+c.expr+" AS v FROM t WHERE id = 1")
-			if err != nil {
-				t.Fatalf("%s now refuses (%v). PostgreSQL answers %s for this shape, "+
-					"so agreeing is the FIX — delete this pin, close FC-7's cell in "+
-					"ADR-0012 residual 4, and add the shapes to the census's rows.",
-					c.expr, err, c.pg)
+		t.Run("text/"+e, func(t *testing.T) {
+			res, err := db.Query(ctx, "SELECT "+e+" AS v FROM t WHERE id = 1")
+			if err == nil {
+				t.Fatalf("%s answered %v; PostgreSQL 17.11 answers 22P02 for the same "+
+					"shape at `integer`, and this engine's PORT grammar has no fraction "+
+					"either", e, res.Rows)
 			}
-			if got := res.Rows[0]["v"]; got != c.want {
-				t.Errorf("%s = %#v, want %#v (the disposition this pin records; "+
-					"PostgreSQL answers %s)", c.expr, got, c.want, c.pg)
+			if got := sqlerr.StateOf(err); got != "22P02" {
+				t.Errorf("%s: SQLSTATE %q, want 22P02 (err: %v)", e, got, err)
 			}
 		})
 	}
-	// The two halves that are NOT open, so a repair cannot pass by refusing
-	// everything: the RANGE and the hex spelling already take the type's own
-	// reader through the same expression shape.
-	for _, c := range []struct{ expr, state string }{
-		{"CAST(CONCAT('70','000') AS PORT)", "22003"},
-		{"CAST(CONCAT('0x','1bb') AS PORT)", "22P02"},
-	} {
-		t.Run(c.expr, func(t *testing.T) {
-			_, err := db.Query(ctx, "SELECT "+c.expr+" AS v FROM t WHERE id = 1")
-			if err == nil || sqlerr.StateOf(err) != c.state {
-				t.Errorf("%s = %v, want %s", c.expr, err, c.state)
-			}
-		})
-	}
-	// And the NUMBER-shaped operands that must keep rounding, which is why the
-	// local repair is wrong: PostgreSQL answers 4 for the first and 3 for the
-	// second, measured.
-	if _, err := db.Query(ctx, "INSERT INTO t (id, s) VALUES (2, 'x')"); err != nil {
+	// A NUMBER, however it is spelled, still ROUNDS — the half a wider shape
+	// test would have broken. `CAST(d + 1 AS PORT)` is 4 on PostgreSQL for
+	// d = 2.50, and this arrives as the same Go string the first table's
+	// operands do.
+	if _, err := db.Query(ctx, "INSERT INTO t (id, s) VALUES (2, '443')"); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range []struct {
@@ -674,13 +643,13 @@ func TestAStringTypedExpressionCastToPortIsFC7sOpenCell(t *testing.T) {
 		want any
 	}{
 		{"CAST(2.5 AS PORT)", int32(3)},
-		{"CAST(1.5 + 1 AS PORT)", int32(3)},
+		{"CAST(-0.4 AS PORT)", int32(0)},
+		{"CAST(s AS PORT)", int32(443)},
 	} {
-		t.Run(c.expr, func(t *testing.T) {
-			res, err := db.Query(ctx, "SELECT "+c.expr+" AS v")
+		t.Run("number/"+c.expr, func(t *testing.T) {
+			res, err := db.Query(ctx, "SELECT "+c.expr+" AS v FROM t WHERE id = 2")
 			if err != nil {
-				t.Fatalf("%s refused: %v — a NUMBER must still round into an "+
-					"integer-domain type, as PostgreSQL's numeric→int does", c.expr, err)
+				t.Fatalf("%s: %v", c.expr, err)
 			}
 			if got := res.Rows[0]["v"]; got != c.want {
 				t.Errorf("%s = %#v, want %#v", c.expr, got, c.want)

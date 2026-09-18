@@ -567,7 +567,7 @@ func PgProtocolText(s string) (int32, NetTextStatus) {
 // (review NT P4). The two DOMAINS still differ by door and that is ADR-0012's
 // recorded split, not this function's business.
 func DecimalIntegerText(s string) (int64, NetTextStatus) {
-	t := strings.TrimSpace(s)
+	t := trimPgSpace(s)
 	if t == "" {
 		return 0, NetTextSyntax
 	}
@@ -594,6 +594,37 @@ func DecimalIntegerText(s string) (int64, NetTextStatus) {
 		v = -v
 	}
 	return v, NetTextOK
+}
+
+// trimPgSpace strips the whitespace PostgreSQL's own numeric input skips —
+// C isspace() in the default locale: space, tab, newline, vertical tab, form
+// feed, carriage return — and nothing else.
+//
+// It is spelled out rather than being strings.TrimSpace because that function
+// also strips Unicode spaces, NBSP (U+00A0) among them, and PostgreSQL treats
+// NBSP as an ordinary non-whitespace byte and refuses `<NBSP>42`. Trimming it
+// accepted a literal the server refuses — the same six-byte set
+// kernel.pgIntWhitespace names for int4's input, which is where this grammar's
+// whitespace rule has to agree with int4's even though the rest of it is
+// deliberately narrower. Found when the comparison door started reading PORT
+// and PROTOCOL with this grammar (#1137): exec.TestKernelFilterIntNBSPRaises22P02
+// is the cell.
+func trimPgSpace(s string) string {
+	isSpace := func(c byte) bool {
+		switch c {
+		case ' ', '\t', '\n', '\v', '\f', '\r':
+			return true
+		}
+		return false
+	}
+	i, j := 0, len(s)
+	for i < j && isSpace(s[i]) {
+		i++
+	}
+	for j > i && isSpace(s[j-1]) {
+		j--
+	}
+	return s[i:j]
 }
 
 func boundedDecimal(s string, lo, hi int64) (int32, NetTextStatus) {

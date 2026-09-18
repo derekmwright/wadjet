@@ -28,8 +28,16 @@ func intGuardCases() []intGuardCase {
 	return []intGuardCase{
 		{"int64", parquet.TypeInt64, int64(0), int64(42), "bigint"},
 		{"int32", parquet.TypeInt32, int32(0), int32(42), "integer"},
-		{"port", parquet.TypePort, int32(0), int32(42), "port"},
-		{"protocol", parquet.TypeProtocol, int32(0), int32(42), "protocol"},
+		// ONE NAME PER REFUSAL. PORT and PROTOCOL declare OID 23 on the wire
+		// (#834), so the plan-time refusal has always named `integer` —
+		// kernel.NumericTypeName's arm says so, with the reason — and the CAST
+		// door says `integer` too (expr.castPortProtocolText). This backstop
+		// said `port` / `protocol`, names no client can resolve in pg_type, so
+		// the same bad literal was reported two ways depending on which
+		// evaluator reached it first. exec.intTypeName now gives the one name
+		// (#1137).
+		{"port", parquet.TypePort, int32(0), int32(42), "integer"},
+		{"protocol", parquet.TypeProtocol, int32(0), int32(42), "integer"},
 		{"duration", parquet.TypeDuration, int64(0), int64(42), "duration"},
 	}
 }

@@ -130,11 +130,29 @@ func QuotedLitStatus(typ batch.TypeID, text string) (NumConstStatus, bool) {
 	case batch.TypeInt64, batch.TypeDuration:
 		_, st := parseIntText(text)
 		return st, true
-	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol:
+	case batch.TypeInt32:
 		n, st := parseIntText(text)
 		if st == NumConstOK && (n < math.MinInt32 || n > math.MaxInt32) {
 			return NumConstRange, true
 		}
+		return st, true
+	case batch.TypePort, batch.TypeProtocol:
+		// The TYPE's own input function, not int4's. These two are types with
+		// a text form of their own — PROTOCOL reads the IANA name
+		// `protocol_name()` prints, and neither reads int4's `0x1bb` / `0o17`
+		// / `1_000` — and arc NT's rule is ONE grammar per type at every
+		// door. They sat in the int32 arm above because they are CARRIED in an
+		// int32, which is a storage fact and not a grammar one: an unknown
+		// literal beside a PROTOCOL column was read as the `integer` the
+		// column DECLARES on the wire, so `WHERE c_proto = 'udp'` was 22P02
+		// while `CAST('udp' AS PROTOCOL)` answered 17 (#1137).
+		//
+		// parquet.NetworkTextValue is the reader the CAST and every writer
+		// door already use, so the comparison door cannot disagree with them
+		// about which text names a value of this type. The RANGE class is
+		// the TYPE's — 0..65535 and 0..255 — which is the same bound the
+		// writer and the cast check (ADR-0012, #901).
+		_, st, _ := NetworkIntLitText(typ, text)
 		return st, true
 	case batch.TypeFloat64:
 		_, st := FloatLitText(text, 64)
@@ -227,6 +245,40 @@ func QuotedLitStatus(typ batch.TypeID, text string) (NumConstStatus, bool) {
 		return NumConstSyntax, true
 	}
 	return NumConstOK, false
+}
+
+// NetworkIntLitText reads a QUOTED literal beside an int32-carried NETWORK
+// column — PORT or PROTOCOL — with THAT TYPE's own input function.
+//
+// It is the one reader for the comparison door, the IN-list door, the
+// row-group prune and the plan-time refusal, and it is the same
+// parquet.NetworkTextValue the CAST (expr.castPortProtocolText) and every
+// writer door read. Before it, all four of those went through parseIntText,
+// int4's grammar, because the column's TypeID was widened to "an int32 thing"
+// at the point the literal was converted: `WHERE c_proto = 'udp'` answered
+// 22P02 and `WHERE c_port = '0x1bb'` MATCHED port 443 — one type reading two
+// grammars depending on which door the text arrived at (#1137, arc NT
+// deferral 1).
+//
+// ok=false for every type that is not PORT or PROTOCOL; the caller keeps the
+// reader it has. A status of NumConstRange is the TYPE's range (0..65535,
+// 0..255), not the carrier's, which is the rule Derek settled on 2026-09-15:
+// the range is checked wherever a value ENTERS the type.
+func NetworkIntLitText(typ batch.TypeID, text string) (int32, NumConstStatus, bool) {
+	switch typ {
+	case batch.TypePort, batch.TypeProtocol:
+	default:
+		return 0, NumConstOK, false
+	}
+	v, st, _ := parquet.NetworkTextValue(typ, text)
+	switch st {
+	case parquet.NetTextOK:
+		n, _ := v.(int32)
+		return n, NumConstOK, true
+	case parquet.NetTextRange:
+		return 0, NumConstRange, true
+	}
+	return 0, NumConstSyntax, true
 }
 
 // FloatLitText parses at double width, then uses Float32FitOf for bits=32;

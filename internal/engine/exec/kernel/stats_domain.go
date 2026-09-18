@@ -45,8 +45,7 @@ func StatsDomainValue(typ batch.TypeID, scale int, v any) (any, bool) {
 	// Before this, a quoted literal reached scan.compareValuesOK as a Go string
 	// against a numeric bound, which that function declines: safe, but no prune
 	// at all for `WHERE f > '3.1'`.
-	case batch.TypeInt32, batch.TypeInt64,
-		batch.TypePort, batch.TypeProtocol, batch.TypeDuration:
+	case batch.TypeInt32, batch.TypeInt64, batch.TypeDuration:
 		text, quoted := QuotedConstText(v)
 		if !quoted {
 			return v, true
@@ -60,6 +59,22 @@ func StatsDomainValue(typ batch.TypeID, scale int, v any) (any, bool) {
 			return nil, false
 		}
 		return n, true
+	case batch.TypePort, batch.TypeProtocol:
+		// The TYPE's own reader, the same one the kernel takes since #1137.
+		// With int4's here instead, `WHERE c_proto = 'udp'` would prune away
+		// every row group whose PROTOCOL statistics do not span the digits of
+		// "udp" — which is none of them, so the prune would withhold rows the
+		// filter matches. A prune must not read the predicate differently
+		// from the filter (ADR-0018).
+		text, quoted := QuotedConstText(v)
+		if !quoted {
+			return v, true
+		}
+		n, st, _ := NetworkIntLitText(typ, text)
+		if st != NumConstOK {
+			return nil, false
+		}
+		return int64(n), true
 	case batch.TypeFloat32, batch.TypeFloat64:
 		text, quoted := QuotedConstText(v)
 		if !quoted {

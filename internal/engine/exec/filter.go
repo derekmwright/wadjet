@@ -227,6 +227,17 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 	macVal := parseMACFilterVal(value)
 	ipv6Val := parseIPv6FilterVal(value)
 	uuidVal, uuidOK := kernel.UUIDLiteralToRaw(strVal)
+	// PORT and PROTOCOL get their own hoisted slot beside the five address
+	// types, for the reason those have one: they are types with a text form of
+	// their own, and reading a quoted literal beside them with int4's grammar
+	// made `c_proto = 'udp'` 22P02 while `CAST('udp' AS PROTOCOL)` answered 17,
+	// and made `c_port = '0x1bb'` match the port 443 the writer refuses for the
+	// same text (#1137). Hoisted, like every constant here, because
+	// Filter.Clone hands this closure to every parallel worker and a lazily
+	// cached parse was a data race. Both are resolved speculatively; the arm
+	// picks by the column's own type.
+	portVal, portStatus, _ := kernel.NetworkIntLitText(batch.TypePort, strVal)
+	protoVal, protoStatus, _ := kernel.NetworkIntLitText(batch.TypeProtocol, strVal)
 	// A BOOL column's literal is read through PostgreSQL's boolean input
 	// grammar, exactly as the vectorized kernel does (#574). boolOK false
 	// means the text names no boolean; the arm below raises 22P02 the same
@@ -334,6 +345,25 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 		case batch.TypeCIDR:
 			return compareString(v.BytesData.UnsafeStringValue(row), strVal, op)
 		case batch.TypePort, batch.TypeProtocol:
+			// A QUOTED literal reads the TYPE's own input function — the same
+			// reader kernel.ResolveFilterKernel, the row-group prune, the CAST
+			// and every writer door take. Reading it with int4's grammar made
+			// `c_proto = 'udp'` 22P02 while `CAST('udp' AS PROTOCOL)` answered
+			// 17, and made `c_port = '0x1bb'` match the port 443 that the same
+			// text is refused for at the writer (#1137).
+			//
+			// A NUMERIC box is already a number and keeps int32's reading and
+			// its whole-column operator rewrite (#704, #536).
+			if _, quoted := kernel.QuotedConstText(value); quoted {
+				nv, nst := portVal, portStatus
+				if v.Type == batch.TypeProtocol {
+					nv, nst = protoVal, protoStatus
+				}
+				if nst != kernel.NumConstOK {
+					panic(fatalEvalError{intLitError(v.Type, nst, strVal)})
+				}
+				return compareInt64(int64(v.Int32Data[row]), int64(nv), op)
+			}
 			if int32Status != kernel.IntConstOK {
 				panic(fatalEvalError{intLitError(v.Type, int32Status, strVal)})
 			}
@@ -722,10 +752,16 @@ func intTypeName(typ batch.TypeID) (string, bool) {
 		return "bigint", true
 	case batch.TypeInt32:
 		return "integer", true
-	case batch.TypePort:
-		return "port", true
-	case batch.TypeProtocol:
-		return "protocol", true
+	case batch.TypePort, batch.TypeProtocol:
+		// The DECLARED wire type, not the internal one — the same answer
+		// kernel.NumericTypeName gives for the same two types, and the same
+		// name expr.castPortProtocolText puts in the CAST door's refusal.
+		// These columns declare OID 23 (#834), so a client can look `integer`
+		// up in pg_type; `port` and `protocol` are names no client can
+		// resolve, and having two names for one refusal meant the same bad
+		// literal was reported differently depending on which evaluator saw
+		// it first.
+		return "integer", true
 	case batch.TypeDuration:
 		return "duration", true
 	}
@@ -821,8 +857,17 @@ func intConstError(typ batch.TypeID, value any) error {
 	switch typ {
 	case batch.TypeInt64, batch.TypeDuration:
 		_, st = kernel.Int64FilterConst(value)
-	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol:
+	case batch.TypeInt32:
 		_, st = kernel.Int32FilterConst(value)
+	case batch.TypePort, batch.TypeProtocol:
+		// The TYPE's own reader for a QUOTED literal, so the refusal names the
+		// same set of bad literals the kernel declined to build a kernel for
+		// (#1137). A numeric box keeps int32's.
+		if text, quoted := kernel.QuotedConstText(value); quoted {
+			_, st, _ = kernel.NetworkIntLitText(typ, text)
+		} else {
+			_, st = kernel.Int32FilterConst(value)
+		}
 	}
 	return intStatusError(st, name, fmt.Sprint(value))
 }

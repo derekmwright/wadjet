@@ -61,7 +61,14 @@ func TestSetValueGuardPanicsOnUnholdableValues(t *testing.T) {
 		{"int into IPv6", TypeIPv6, 7},
 		{"int into CIDR", TypeCIDR, 7},
 		{"bool into MAC", TypeMAC, true},
-		{"string into Port", TypePort, "443"},
+		// `"443"` was here as an unholdable value until #1137: a PORT vector
+		// now reads the TYPE's own text form, so that string IS a port and is
+		// stored, exactly as `"10.0.0.1"` is stored into an IPV4 vector. The
+		// guard's claim is unchanged for a value the type cannot take — a
+		// BOOL, and text that names no port, which NetworkTextWriteError
+		// refuses rather than leaving as the zero that reads as port 0.
+		{"bool into Port", TypePort, true},
+		{"bool into Protocol", TypeProtocol, true},
 		{"int into UUID", TypeUUID, 7},
 		{"string into Vector", TypeVector, "not a vector"},
 		{"scalar into Array", TypeArray, int64(3)},

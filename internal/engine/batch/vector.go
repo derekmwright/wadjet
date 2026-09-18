@@ -1275,6 +1275,21 @@ func (v *Vector) SetValue(i int, val any) {
 		switch tv := val.(type) {
 		case int32:
 			v.Int32Data[i] = tv
+		case string:
+			// The TYPE's own text form, which is what the five sibling
+			// network arms above already read: a PROTOCOL reads the IANA
+			// name `protocol_name()` prints, a PORT decimal digits, both
+			// held to the type's range (parquet.NetworkTextValue, the one
+			// reader the CAST, the writer and the comparison door share).
+			//
+			// Without it a boxed value that arrived as TEXT could not be
+			// stored at all, so `CASE WHEN … THEN c_port ELSE '80' END`
+			// reached this guard and failed the query where the same shape
+			// over IPV4, MAC, UUID, CIDR or IPV6 answers — the one network
+			// pair whose vector had no text arm (#1137).
+			v.Int32Data[i] = v.netIntFromTextOrRaise(tv)
+		case []byte:
+			v.Int32Data[i] = v.netIntFromTextOrRaise(string(tv))
 		case int:
 			// The same guard TypeInt32 takes above, for the same reason: PORT
 			// and PROTOCOL are int4-backed, a widened box narrows back here,

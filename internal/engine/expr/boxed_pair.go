@@ -82,6 +82,22 @@ const (
 	// zero-padded hex, whose byte order IS its numeric one, so only the raw
 	// box needed a rule.
 	boxMAC
+	// boxPort/boxProtocol: values from here are PORT or PROTOCOL, the two
+	// network types carried in an int32. ColRef.Eval boxes the NUMBER, so a
+	// quoted literal beside one had no rule at all here — not even int4's —
+	// and fell to compare(), which reads "udp" as the number ZERO: inside a
+	// CASE or a COALESCE, `c_proto = 'udp'` answered FALSE for every row while
+	// the same predicate in a WHERE answered the row. One comparison, two
+	// answers, decided by which evaluator saw it (#1137).
+	//
+	// They are two kinds rather than one for the reason the four numeric
+	// kinds are four: the rule for a quoted literal meeting them is the
+	// COLUMN'S OWN INPUT FUNCTION, and these two do not have the same one —
+	// PROTOCOL reads the IANA name and holds 0..255, PORT reads decimal
+	// digits and holds 0..65535. The kind has to carry which, because
+	// orderByKinds sees only the kinds.
+	boxPort
+	boxProtocol
 	// boxBool: values from here are BOOL. A BOOL column against a QUOTED
 	// literal reads the literal through PostgreSQL's boolean input grammar
 	// (parse_bool: t/f/true/false/yes/no/y/n/on/off/1/0 and word prefixes),
@@ -373,6 +389,10 @@ func declaredBoxKind(t batch.TypeID) (boxKind, bool) {
 		return boxIPv4, true
 	case batch.TypeMAC:
 		return boxMAC, true
+	case batch.TypePort:
+		return boxPort, true
+	case batch.TypeProtocol:
+		return boxProtocol, true
 	case batch.TypeBool:
 		return boxBool, true
 	case batch.TypeBytes:
@@ -839,6 +859,17 @@ func newBoxedPair(left, right Expr) *boxedPair {
 	}
 }
 
+// netIntKindType is the TypeID a boxPort/boxProtocol kind names, so the
+// literal on the other side is read by that type's own input function and not
+// by the other's: PROTOCOL's accepts the IANA name and holds 0..255, PORT's
+// does not and holds 0..65535.
+func netIntKindType(k boxKind) batch.TypeID {
+	if k == boxPort {
+		return batch.TypePort
+	}
+	return batch.TypeProtocol
+}
+
 // operandLitText is a LITERAL operand's source text, for either spelling a
 // user can write a value in: the verbatim digits of a numeric literal
 // (`Lit.Text`, set by compileLit) or the contents of a quoted string. Empty
@@ -907,6 +938,17 @@ func pairApplies(lk, rk boxKind, lText, rText string) bool {
 	case (lk == boxCidr || lk == boxIPv6 || lk == boxIPv4 || lk == boxMAC) && rk == boxQuoted && rText != "":
 		return true
 	case (rk == boxCidr || rk == boxIPv6 || rk == boxIPv4 || rk == boxMAC) && lk == boxQuoted && lText != "":
+		return true
+	// PORT or PROTOCOL against another of its own type, or against a quoted
+	// literal read by that type's own input function (#1137). Without these
+	// arms the pair had no rule and fell to compare(), which reads "udp" as
+	// zero — so the boxed sites answered a DIFFERENT boolean from the
+	// vectorized filter for the same predicate.
+	case lk == boxPort && rk == boxPort, lk == boxProtocol && rk == boxProtocol:
+		return true
+	case (lk == boxPort || lk == boxProtocol) && rk == boxQuoted && rText != "":
+		return true
+	case (rk == boxPort || rk == boxProtocol) && lk == boxQuoted && lText != "":
 		return true
 	// A BYTES column against a QUOTED literal, or against another BYTES
 	// operand: the literal goes through byteain, so its hex spelling names
@@ -1148,6 +1190,55 @@ func macOrder(lv, rv any) (c int, ok, unknown bool) {
 	return strings.Compare(lk, rk), true, false
 }
 
+// netIntOrder compares two PORT or PROTOCOL operands as the NUMBERS the type
+// carries. A side that is text is read by typ's own input function; a side that
+// is already a number is taken as it is.
+//
+// ok=false hands the pair back to compare(), which is the conservative side —
+// it can only cost a missed rule, never a wrong reading at a width nothing
+// resolved. `unknown` is never produced: a literal this type refuses is
+// refused, not made UNKNOWN, because the refusal mask raises for it at the
+// plan-time site and the two must agree.
+func netIntOrder(typ batch.TypeID, lv, rv any) (c int, ok, unknown bool) {
+	l, lok := netIntBoxValue(typ, lv)
+	r, rok := netIntBoxValue(typ, rv)
+	if !lok || !rok {
+		return 0, false, false
+	}
+	switch {
+	case l < r:
+		return -1, true, false
+	case l > r:
+		return 1, true, false
+	}
+	return 0, true, false
+}
+
+// netIntBoxValue reads one side of a PORT/PROTOCOL comparison: a number as
+// itself, TEXT through kernel.NetworkIntLitText — PROTOCOL's IANA name
+// included. Text the type refuses answers ok=false, which sends the pair to
+// compare(); the REFUSAL for that literal is raised by the quoted-literal mask,
+// the one site that classifies it (quotedLitMask).
+func netIntBoxValue(typ batch.TypeID, v any) (int64, bool) {
+	switch n := v.(type) {
+	case int32:
+		return int64(n), true
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	case string:
+		val, st, ok := kernel.NetworkIntLitText(typ, n)
+		if !ok || st != kernel.NumConstOK {
+			return 0, false
+		}
+		return int64(val), true
+	case []byte:
+		return netIntBoxValue(typ, string(n))
+	}
+	return 0, false
+}
+
 func ipv4Order(lv, rv any) (c int, ok, unknown bool) {
 	lk, lShaped, lParsed := ipv4BoxKey(lv)
 	rk, rShaped, rParsed := ipv4BoxKey(rv)
@@ -1289,6 +1380,19 @@ func orderByKindsFold(lk, rk, lFold, rFold boxKind, lv, rv any, lText, rText str
 		return macOrder(lv, rText)
 	case rk == boxMAC && lk == boxQuoted:
 		c, ok, unknown := macOrder(rv, lText)
+		return -c, ok, unknown
+	// PORT / PROTOCOL: both sides end up the int32 the column carries, and a
+	// quoted literal gets there through the TYPE's own input function — the
+	// same kernel.NetworkIntLitText the vectorized filter, the row-group prune
+	// and the CAST read (#1137). A literal that names no value of the type
+	// RAISES rather than ordering, which is what the refusal mask does for it
+	// at every other site.
+	case lk == boxPort && rk == boxPort, lk == boxProtocol && rk == boxProtocol:
+		return netIntOrder(netIntKindType(lk), lv, rv)
+	case (lk == boxPort || lk == boxProtocol) && rk == boxQuoted:
+		return netIntOrder(netIntKindType(lk), lv, rText)
+	case (rk == boxPort || rk == boxProtocol) && lk == boxQuoted:
+		c, ok, unknown := netIntOrder(netIntKindType(rk), rv, lText)
 		return -c, ok, unknown
 	case lk == boxCidr && rk == boxCidr, lk == boxIPv6 && rk == boxIPv6:
 		return netOrder(netKeyFor(lk, false), netKeyFor(rk, false), lv, rv)

@@ -458,8 +458,22 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 		// package asks the caller to raise — see compareFilterDecimal.
 		return nil
 	case batch.TypePort, batch.TypeProtocol:
-		// int32-backed integer types: same silent-zero as TypeInt32 (#536),
-		// and the same fractional-constant rewrite (#704).
+		// A QUOTED literal is read by the TYPE'S OWN input function, the way
+		// every other network arm above reads its own: `c_proto = 'udp'` is
+		// PROTOCOL 17 and `c_port = '0x1bb'` names no port at all, because
+		// neither type reads int4's radix prefixes and PROTOCOL reads the
+		// IANA name (#1137). A nil kernel is how this package asks the caller
+		// to raise, the CIDR/UUID arms' convention.
+		if text, quoted := QuotedConstText(value); quoted {
+			n, st, _ := NetworkIntLitText(typ, text)
+			if st != NumConstOK {
+				return nil
+			}
+			return compareFilterImpl(getInt32Data, n, op)
+		}
+		// A NUMERIC box is not a literal of the type's text grammar — it is
+		// already a number — so it keeps int32's reading, the silent-zero
+		// refusal (#536) and the fractional-constant operator rewrite (#704).
 		n, op2, verdict, st := Int32FilterBound(value, op)
 		if st != IntConstOK {
 			return nil
@@ -1025,11 +1039,21 @@ func ResolveInFilterKernelArity(typ batch.TypeID, values []any, negate bool, syn
 			set[days] = struct{}{}
 		}
 		return inFilterInt32(getInt32Data, set, negate)
-	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol:
+	case batch.TypeInt32:
 		// int32InSet, not int32(toInt64(v)): a member outside int32's range
 		// WRAPPED onto a value the column can hold, which is #536's silent-wrong
 		// class through the set rather than through `=`.
 		set, st := int32InSet(values)
+		if st != NumConstOK {
+			return nil
+		}
+		return inFilterInt32(getInt32Data, set, negate)
+	case batch.TypePort, batch.TypeProtocol:
+		// One member, one grammar: the same reader `=` takes, so
+		// `c_proto IN ('udp','tcp')` cannot mean something `c_proto = 'udp'`
+		// does not (#1137). The IPv4/MAC/UUID arms below each loop with their
+		// own parser for the same reason.
+		set, st := netIntInSet(typ, values)
 		if st != NumConstOK {
 			return nil
 		}
@@ -1269,6 +1293,35 @@ func int64InSet(values []any) (map[int64]struct{}, NumConstStatus) {
 func int32InSet(values []any) (map[int32]struct{}, NumConstStatus) {
 	set := make(map[int32]struct{}, len(values))
 	for _, v := range values {
+		n, _, verdict, st := Int32FilterBound(v, OpEq)
+		if st != NumConstOK {
+			return nil, st
+		}
+		if verdict != IntBoundCompare {
+			continue
+		}
+		set[n] = struct{}{}
+	}
+	return set, NumConstOK
+}
+
+// netIntInSet is int32InSet for an int32-carried NETWORK column: a QUOTED
+// member reads the TYPE's own input function (NetworkIntLitText) and a numeric
+// one keeps int32's reading, which is exactly the split `=` makes one arm up.
+// Built separately from int32InSet so the two cannot drift: a set member and
+// the same text beside `=` must name the same value or `IN` stops meaning a
+// disjunction of equalities (#1137).
+func netIntInSet(typ batch.TypeID, values []any) (map[int32]struct{}, NumConstStatus) {
+	set := make(map[int32]struct{}, len(values))
+	for _, v := range values {
+		if text, quoted := QuotedConstText(v); quoted {
+			n, st, _ := NetworkIntLitText(typ, text)
+			if st != NumConstOK {
+				return nil, st
+			}
+			set[n] = struct{}{}
+			continue
+		}
 		n, _, verdict, st := Int32FilterBound(v, OpEq)
 		if st != NumConstOK {
 			return nil, st

@@ -12,7 +12,12 @@ package batch
 func VectorAcceptsText(t TypeID) bool {
 	switch t {
 	case TypeString, TypeBytes, TypeIPv4, TypeIPv6, TypeCIDR, TypeMAC,
-		TypeUUID, TypeDate, TypeDecimal:
+		TypeUUID, TypeDate, TypeDecimal,
+		// PORT and PROTOCOL read their own text form since #1137 — the IANA
+		// name and decimal digits, parquet.NetworkTextValue — so a set
+		// operation whose resolved type is one of them no longer has to refuse
+		// an UNKNOWN literal arm with 0A000.
+		TypePort, TypeProtocol:
 		return true
 	}
 	return false

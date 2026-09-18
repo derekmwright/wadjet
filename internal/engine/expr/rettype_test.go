@@ -118,6 +118,18 @@ func TestVecFuncsSurviveEveryOutputType(t *testing.T) {
 				if _, ok := r.(*batch.IntegerRangeError); ok {
 					return
 				}
+				// batch.NetworkTextWriteError is the THIRD guard on the same
+				// seam (#1137): a PORT or PROTOCOL vector reads its own text
+				// form, and text that names no value of the type is refused
+				// rather than stored as the zero that reads as port 0. It
+				// carries the identical contract — a query error every
+				// pipeline driver converts, the server intact — so it is
+				// sanctioned here for the identical reason. It fires on this
+				// sweep because the sweep hands a PORT output vector to
+				// kernels whose probe values are English words.
+				if _, ok := r.(*batch.NetworkTextWriteError); ok {
+					return
+				}
 				msg = fmt.Sprint(r)
 			}
 		}()

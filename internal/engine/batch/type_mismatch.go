@@ -3,8 +3,11 @@
 package batch
 
 import (
+	"errors"
 	"fmt"
 	"math"
+
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // TypeMismatchError panics when a writer's Go type has no storage conversion
@@ -187,4 +190,58 @@ func (v *Vector) int32FromFloatOrRaise(f float64) int32 {
 		panic(&IntegerRangeError{Dst: v.Type, Val: f})
 	}
 	return int32(f)
+}
+
+// NetworkTextWriteError reports TEXT written into a PORT or PROTOCOL vector
+// that names no value of that type — the third guard on this seam, beside
+// TypeMismatchError (the Go type has nowhere to go) and IntegerRangeError (the
+// type converts, the number does not fit). Here the type converts and the TEXT
+// does not name a value.
+//
+// It exists because these two types are the only network pair whose vector
+// carries a NUMBER, so the sibling arms' convention — IPv4/MAC/UUID leave a
+// null-ish result for text they cannot parse — would put a silent ZERO in a
+// PORT column, which reads as port 0, a real port. The five address types'
+// zero is not a value anyone writes; 0 is. Loud, with the same sentence the
+// writer's door and the CAST give for the same characters
+// (parquet.NetworkTextError), and carrying the exec.FatalEvalPanic contract so
+// a pipeline driver turns it into a query error rather than a process exit.
+type NetworkTextWriteError struct {
+	Dst TypeID
+	Val string
+	err error
+}
+
+func (e *NetworkTextWriteError) Error() string { return e.err.Error() }
+
+// FatalEvalError implements the exec.FatalEvalPanic contract.
+func (e *NetworkTextWriteError) FatalEvalError() error { return e.err }
+
+// SQLState forwards the wrapped refusal's code — 22P02 for text that names no
+// value of the type, 22003 for a number outside its range — so the wire reports
+// what the writer's own door reports.
+func (e *NetworkTextWriteError) SQLState() string {
+	var c interface{ SQLState() string }
+	if errors.As(e.err, &c) {
+		return c.SQLState()
+	}
+	return "22P02"
+}
+
+// netIntFromTextOrRaise reads a PORT or PROTOCOL value out of its own TEXT
+// form, or refuses with the same error the writer's door and the CAST raise for
+// the same characters.
+//
+// It exists so a PORT or PROTOCOL vector reads text the way the IPV4, IPV6,
+// CIDR, MAC and UUID vectors already do. A boxed value that reached SetValue as
+// TEXT — the arm of a CASE or COALESCE that a query wrote as a literal — could
+// not be stored at all before it, and `CASE WHEN … THEN c_port ELSE '80' END`
+// failed the query where the same shape over the other five answers (#1137).
+func (v *Vector) netIntFromTextOrRaise(s string) int32 {
+	n, st, ok := parquet.NetworkTextValue(v.Type, s)
+	if !ok || st != parquet.NetTextOK {
+		panic(&NetworkTextWriteError{Dst: v.Type, Val: s, err: parquet.NetworkTextError(v.Type, s, st)})
+	}
+	out, _ := n.(int32)
+	return out
 }
