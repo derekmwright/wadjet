@@ -40,6 +40,7 @@ const (
 	TokenMinus           // -
 	TokenSlash           // /
 	TokenPercent         // %
+	TokenCaret           // ^ (exponentiation, PostgreSQL's spelling of power())
 	TokenConcat          // ||
 	TokenDoubleColon     // ::
 	TokenJSONArrow       // ->
@@ -685,6 +686,13 @@ func lexStart(l *lexer) stateFn {
 		return nil
 	case r == '%':
 		l.emit(TokenPercent)
+		return nil
+	case r == '^':
+		// PostgreSQL's `^` is EXPONENTIATION, not XOR — there is no `^` XOR
+		// operator in PostgreSQL at all; integer XOR is spelled `#`. The
+		// character was unlexed, so `SELECT 2 ^ 3` was `unexpected character:
+		// ^` for a statement PostgreSQL answers 8 (#1155).
+		l.emit(TokenCaret)
 		return nil
 	case r == '=':
 		l.emit(TokenEq)
