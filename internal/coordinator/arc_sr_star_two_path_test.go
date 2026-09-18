@@ -400,26 +400,63 @@ func srStarCases() []c1Case {
 			sql:  "SELECT * FROM (SELECT a.id, b.id FROM lat_item a JOIN lat_item b ON a.id = b.id) x ORDER BY 1",
 			want: "cols=[id:INT64 id:INT64] rows=4 | 1,1 | 2,2 | 3,3 | 4,4",
 		},
-		// The VALUES are PostgreSQL's on every arm; the fourth column's NAME
-		// is not. A LATERAL arm is on §9's decline list — its subtree carries
-		// the correlation slot the join drops (§3c) — so the star is not
-		// expanded and reads the JOIN OPERATOR's stream, where
-		// `joinOutputSchemaWithMapping` qualifies the duplicate `id` by its
-		// owning alias. Which alias that is differs per arm, which is the
-		// point: `l.id` on the two single-process arms and `i.id` — the
-		// body's INNER SCAN spelling — on the three DAG ones, because a
-		// decorrelated body's Project emits no stage (ADR-0026 §8j, #1126).
-		// PostgreSQL publishes the column's own name, `id`. Pinned per arm,
-		// names only.
+		// TWO DIVERGENCES, and only one of them is a name. A LATERAL arm is on
+		// §9's decline list — its subtree carries the correlation slot the
+		// join drops (§3c) — so the star is not expanded and reads the JOIN
+		// OPERATOR's stream, where `joinOutputSchemaWithMapping` qualifies the
+		// duplicate `id` by its owning alias. That is the NAME half:
+		// PostgreSQL publishes the column's own `id`, the two single-process
+		// arms publish `l.id`, the three DAG arms publish `i.id` — the body's
+		// INNER SCAN spelling, because a decorrelated body's Project emits no
+		// stage (ADR-0026 §8j, #1126).
+		//
+		// The DAG pins below are NOT that. They are a per-arm `distributed`
+		// pin over a wrong ROW ORDER, and the mechanism is #1126's family one
+		// consumer over: `ORDER BY o.id, l.id` is a TOTAL key over this
+		// fixture, and on the three DAG arms the secondary term `l.id` binds
+		// the OUTER relation's `id` — the qualifier strip adjudicating where
+		// corollary 2's precondition fails, because the DAG's join publishes
+		// the body's inner-scan spelling and `l.id` misses it exactly
+		// (ADR-0026 §8j's LATERAL column, five consumers × three DAG arms).
+		// So every row of one order carries the same key and the rows come
+		// back in the arm's own sequence. The single and spilled arms assert
+		// PostgreSQL 17.11's SEQUENCE, row for row, which is what makes the
+		// pinned arms a measured divergence rather than an unordered compare.
+		// PRE-EXISTING (identical at 563aa517 and at c393cfaa), `distributed`
+		// by the arm rule, not this arc's to chase; the review's round-1 probe
+		// isolated it with no star in the statement at all.
 		// PG: cols=[id:INT64 customer:STRING total:FLOAT64 id:INT64 amount:FLOAT64] rows=4 1|Alice|150|1|50 · 1|Alice|150|2|100 · 2|Bob|200|3|75 · 2|Bob|200|4|125
 		{
 			name: "lateral/a-star-over-a-lateral-arm",
 			sql:  "SELECT * FROM lat_ord o, LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) l ORDER BY o.id, l.id",
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 l.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,1,50 | 1,Alice,150,2,100 | 2,Bob,200,3,75 | 2,Bob,200,4,125",
+			why: "distributed, PRE-EXISTING: the published NAME is #1126's two spellings, and the " +
+				"ROW ORDER is #1126's column — `l.id` binds the OUTER relation's `id` on the three " +
+				"DAG arms, so the written secondary key does not order. The two single-process arms " +
+				"assert PostgreSQL's own sequence.",
 			pin: map[string]string{
 				"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 i.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,2,100 | 1,Alice,150,1,50 | 2,Bob,200,4,125 | 2,Bob,200,3,75",
 				"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 i.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,2,100 | 1,Alice,150,1,50 | 2,Bob,200,4,125 | 2,Bob,200,3,75",
 				"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 i.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,2,100 | 1,Alice,150,1,50 | 2,Bob,200,4,125 | 2,Bob,200,3,75",
+			},
+		},
+		// The SAME defect with no star in the statement at all, which is what
+		// localises it to the reference rather than to the star's decline:
+		// `l.id` is 1,1,2,2 on the three DAG arms where it is 1,2,3,4 on the
+		// two single-process ones and in PostgreSQL. A wrong VALUE, pinned
+		// per arm, `distributed`, PRE-EXISTING (round-1 review, B2).
+		// PG: cols=[id:INT64 id:INT64 amount:FLOAT64] rows=4 1|1|50 · 1|2|100 · 2|3|75 · 2|4|125
+		{
+			name: "lateral/a-reference-into-a-lateral-arm",
+			sql:  "SELECT o.id, l.id, l.amount FROM lat_ord o, LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) l ORDER BY o.id, l.id",
+			want: "cols=[id:INT64 id:INT64 amount:FLOAT64] rows=4 | 1,1,50 | 1,2,100 | 2,3,75 | 2,4,125",
+			why: "distributed, PRE-EXISTING: on the three DAG arms `l.id` answers the OUTER `o.id` — " +
+				"the qualifier strip binds the outer occurrence because the DAG's join publishes the " +
+				"body's inner-scan spelling (ADR-0026 §8j, #1126). It is a wrong VALUE, not a name.",
+			pin: map[string]string{
+				"dag":          "cols=[id:INT64 id:INT64 amount:FLOAT64] rows=4 | 1,1,100 | 1,1,50 | 2,2,125 | 2,2,75",
+				"dag-shuffled": "cols=[id:INT64 id:INT64 amount:FLOAT64] rows=4 | 1,1,100 | 1,1,50 | 2,2,125 | 2,2,75",
+				"dag-morsel4":  "cols=[id:INT64 id:INT64 amount:FLOAT64] rows=4 | 1,1,100 | 1,1,50 | 2,2,125 | 2,2,75",
 			},
 		},
 		{
