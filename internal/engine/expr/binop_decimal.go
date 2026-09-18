@@ -1025,7 +1025,8 @@ func Int64ResultOf(e Expr, b *batch.RecordBatch) bool {
 // not that everything answering an int64 is here.
 func IsIntegerCastDest(dest string) bool {
 	switch strings.ToLower(strings.TrimSpace(dest)) {
-	case "int", "integer", "int4", "int32", "bigint", "int8", "signed", "smallint", "int2":
+	case "int", "integer", "int4", "int32", "int64", "bigint", "int8", "signed",
+		"smallint", "int2":
 		return true
 	}
 	return false

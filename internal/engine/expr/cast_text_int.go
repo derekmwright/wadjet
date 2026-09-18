@@ -57,7 +57,10 @@ func castTextToInt(s, dest string) any {
 // uses, so that each message keeps the wording of the operation that raised it.
 func intCastTypeName(dest string) string {
 	switch dest {
-	case "bigint", "int8", "signed":
+	case "bigint", "int8", "int64", "signed":
+		// INT64 is BIGINT's wadjet spelling, and physical.inferCastType has
+		// always read it as one; the message has to agree, or a client sees
+		// `type integer` for a cast whose declared OID is int8.
 		return "bigint"
 	case "smallint", "int2":
 		return "smallint"

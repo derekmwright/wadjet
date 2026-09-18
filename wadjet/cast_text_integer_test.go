@@ -54,6 +54,15 @@ func TestACastToAnIntegerTypeReadsItsOperandsOwnGrammar(t *testing.T) {
 		{form: `'2.5'`, dest: "BIGINT", state: "22P02", pg: `22P02 invalid input syntax for type bigint: "2.5"`},
 		{form: `'2.5'`, dest: "SMALLINT", state: "22P02", pg: `22P02 invalid input syntax for type smallint: "2.5"`},
 		{form: `'2.5'`, dest: "INT32", state: "22P02", pg: `int4 under another name`},
+		// INT64 is BIGINT's wadjet spelling, and it matched no label in the
+		// cast's own switch until this arc: the projection allocated an INT64
+		// vector while the cast answered the operand UNTOUCHED, so a string
+		// reached the store and died on the #361 silent-write guard — a
+		// message about a vector where the answer is 22P02. Found by
+		// re-running arc NT's review probes at this arc's tip.
+		{form: `'2.5'`, dest: "INT64", state: "22P02", pg: `bigint under another name`},
+		{form: `'12'`, dest: "INT64", want: 12, pg: `12`},
+		{form: `'9223372036854775808'`, dest: "INT64", state: "22003", pg: `22003, and the message says bigint`},
 		// EXPONENT text. `'1e3'` is a float8 spelling, not an int4 one.
 		{form: `'1e3'`, dest: "INTEGER", state: "22P02", pg: `22P02 invalid input syntax for type integer: "1e3"`},
 		{form: `'1e3'`, dest: "BIGINT", state: "22P02", pg: `22P02 invalid input syntax for type bigint: "1e3"`},
@@ -122,6 +131,8 @@ func TestACastToAnIntegerTypeReadsItsOperandsOwnGrammar(t *testing.T) {
 		{"numeric_literal_rounds_half_away", `CAST(2.5 AS INTEGER)`, 3, `CAST(2.5 AS int) -> 3`},
 		{"numeric_literal_rounds_half_away_negative", `CAST(-2.5 AS INTEGER)`, -3, `CAST(-2.5 AS int) -> -3`},
 		{"decimal_cast_of_text_then_int_rounds", `CAST(CAST('2.5' AS DECIMAL(4,1)) AS INTEGER)`, 3, `('2.5'::numeric)::int -> 3`},
+		{"decimal_column_to_int64_rounds", `CAST(d AS INT64)`, 3, `numeric 2.5 -> 3 at bigint too`},
+		{"numeric_literal_to_int64_rounds", `CAST(2.5 AS INT64)`, 3, `CAST(2.5 AS bigint) -> 3`},
 		{"integer_column_passes_through", `CAST(i AS INTEGER)`, 7, `7`},
 		// A DERIVED text value takes the TEXT cast, because its declaration is
 		// text: PostgreSQL's `(s||'')::integer` and `substr(s,1,3)::integer`

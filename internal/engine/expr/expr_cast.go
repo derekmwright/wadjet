@@ -100,13 +100,23 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	// and PROTOCOL then reach a PORT/PROTOCOL vector, whose own int4 guard is
 	// the second net (batch.IntegerRangeError).
 	//
+	// INT64 is the same hole one spelling over, and it survived #901.
+	// physical.inferCastType has read it as an integer destination all along
+	// — it is BIGINT's wadjet spelling — so the projection allocated an INT64
+	// vector while this switch fell to `default: return v` and handed it the
+	// operand untouched: `CAST('2.5' AS INT64)` and `CAST(dec_col AS INT64)`
+	// reached the store as a Go STRING and died on the #361 silent-write
+	// guard, a message about a vector where the answer is 22P02 or a rounded
+	// number. Found by re-running arc NT's own review probes at this arc's
+	// tip (ntrev3_fractional, "cast quoted lit -> int").
+	//
 	// A PROTOCOL destination reads ONE thing this arm's integer grammar does
 	// not: the IANA NAME, which is the type's own text form and what
 	// `protocol_name()` prints, so `CAST('udp' AS PROTOCOL)` is 17 and
 	// `CAST(CAST(p AS TEXT) AS PROTOCOL)` round-trips (#986). The NUMBER
 	// keeps int4's domain and int4's message.
-	case "int", "integer", "int4", "int32", "bigint", "int8", "signed", "smallint", "int2",
-		"port", "protocol":
+	case "int", "integer", "int4", "int32", "int64", "bigint", "int8", "signed",
+		"smallint", "int2", "port", "protocol":
 		// A string that does not read as a number is refused, not coerced to
 		// 0: PostgreSQL raises 22P02 invalid_text_representation and ADR-0012
 		// makes it the authority on error-versus-not. The per-row error
