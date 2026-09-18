@@ -123,8 +123,16 @@ the star covers every arm or none of them.
     wrong value is worse than a wrong name. Closing it needs a block's column
     addressed by POSITION. Two items that merely PUBLISH one name are fine:
     each references its own producer spelling.
-  - **Two arms of one name.** Both would expand to the same qualified
+  - **Two arms of one ALIAS.** Both would expand to the same qualified
     reference. PostgreSQL refuses the spelling outright.
+
+    Two arms sharing a COLUMN name are NOT one of these, and the `USING`
+    merge's decline on that property was removed (arc SR, #1177). Each arm's
+    column is a qualified reference to its own relation, and the composition
+    above binds it: measured over zzp/zzj, whose two `d92` columns differ in
+    value and in scale, the `ON` spelling answers PostgreSQL's values and both
+    declarations on all five arms, so the premise the decline rested on —
+    "such a reference binds whichever side the plan put it on" — is false.
   - **A LATERAL arm, or a join carrying a manufactured lateral's lowering.**
     Its projection carries the correlation slot the join is about to drop
     (ADR-0026 §3c), and the arms are not the relations the query wrote.
@@ -174,3 +182,5 @@ plan's order: the two rules compose or neither holds.
 | `logical.TestABareStarOverAJoinDeclinesWhatItCannotState` | the declines above |
 | `logical.TestAnUnstatedStarProjectionIsTakenBackOut` | the hypothesis, and the naming that travels with it |
 | `logical.TestAPositionalSortKeyOverAStarJoinBindsItsItemsSource` | the ordinal, in the input's spelling |
+| `coordinator.TestSRAStarPublishesItsArmsOwnColumns` | ADR-0026 §9a: the same rule over a `USING` merge, over a set operation and over a block that publishes one name twice — 48 shapes × five arms |
+| `pgwire.TestSRTheWireDeclaresAStarsOwnArms` | §9a on the wire, in both result formats |

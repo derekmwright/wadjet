@@ -247,19 +247,30 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      every keyed operation, plus the bucket on `List` / `BucketExists` /
      `MakeBucket`).
    - **A SET OPERATION does not take PostgreSQL's output-column names.**
-     (Added 2026-09-05, #732 round 2.) The naming rule is applied at the two
-     places a query's values leave the engine — the collecting sink and the
-     gather's rename target — and both are reached through the statement's
-     OUTPUT PROJECTION. A set-op root has none (`findOutputProjectionNode`
-     answers nil for it), so `SELECT g + 1 FROM t UNION ALL SELECT g + 2 FROM t`
-     publishes `g + 1` where PostgreSQL publishes `?column?`, and
-     `SELECT CAST(g AS BIGINT) … UNION ALL …` publishes the cast's text where
-     PostgreSQL publishes `g`. Every arm and both doors agree with each other,
-     so it is a uniform divergence rather than a two-path split. Closing it
-     means the set operation publishing its LEFTMOST arm's names — PostgreSQL's
-     own rule — on both engines at once, which is a change to what a union
-     stage's output identity IS. Pinned fail-on-agree at
-     `coordinator.TestArcF4BoundariesArePinned` (`732/set-op-*`).
+     (Added 2026-09-05, #732 round 2. **CLOSED 2026-09-18 by arc SR, #1079;
+     the pins are deleted and that is the proof.**) The naming rule is applied
+     at the two places a query's values leave the engine — the collecting sink
+     and the gather's rename target — and both were reached through the
+     statement's OUTPUT PROJECTION. A set-op root has none
+     (`findOutputProjectionNode` answers nil for it), so
+     `SELECT g + 1 FROM t UNION ALL SELECT g + 2 FROM t` published `g + 1`
+     where PostgreSQL publishes `?column?`, and `SELECT CAST(g AS BIGINT) …
+     UNION ALL …` published the cast's text where PostgreSQL publishes `g`.
+
+     It publishes its LEFTMOST arm's names now — PostgreSQL's own rule and
+     §8b's — on both engines at once. `publishedOutputProjectionNode` answers
+     the question "whose names does the CLIENT read" and passes a set
+     operation to its leftmost arm; `findOutputProjectionNode` keeps its own
+     answer for every consumer that asks where the pipeline's output
+     projection IS. The DAG carries it as a gather rename of the same node's
+     visible items (`dagplan.setOpPublishedRenames`) — names only, one per
+     item, emitted only where the two names differ — because a copy of the
+     rule in one engine is how the two would drift (§2b). The two
+     `732/set-op-*` pins in
+     `coordinator.TestArcF4BoundariesArePinned` assert PostgreSQL's names
+     now, and the gate is `coordinator.TestSRAStarPublishesItsArmsOwnColumns`'s
+     `naming/*` cells with `pgwire.TestSRTheWireDeclaresAStarsOwnArms` on the
+     wire.
    - **A call PostgreSQL rewrites keeps the name the query wrote, except where
      the rewrite is measured.** (Added 2026-09-04, #732; amended 2026-09-05.)
      PostgreSQL labels an unaliased call after the function it RESOLVED to, and
@@ -850,18 +861,31 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      now.
 
    - **A QUALIFIED reference into a block that publishes the name TWICE binds
-     the first, where PostgreSQL refuses it.** (Added 2026-09-13, arc O1.)
+     the first, where PostgreSQL refuses it.** (Added 2026-09-13, arc O1.
+     **CLOSED 2026-09-18 by arc SR, #1094.**)
      `SELECT d.*, x.id FROM (SELECT * FROM lat_ord o JOIN lat_item li ON …) d
      JOIN lat_ord x ON x.id = d.id` is 42702 `column reference "id" is
      ambiguous` on postgres:17 — `d` publishes `id` twice, because a star over
      a join publishes every arm's own list (ADR-0026 §9) — and this binder
-     resolves `d.id` to the FIRST of the two and answers. It is the same
-     superset as the two entries below and it became REACHABLE with §9: before
-     it, such a block published the join's stream and the reference resolved
-     against that instead. Recorded in
-     `coordinator.TestArcJ1AQualifiedStarExpandsFromTheRelationsOutput`, whose
-     cell uses the unambiguous key so the gate asserts values rather than the
-     divergence.
+     resolved `d.id` to the FIRST of the two and answered. It became REACHABLE
+     with §9: before it, such a block published the join's stream and the
+     reference resolved against that instead.
+
+     It raises 42702 now. `colScope.srcCount` could not say it — it counts
+     SOURCES, and this is ONE source counted twice — so the scope carries
+     `qualCount`, the same census one relation in, and the qualified branch of
+     `resolveRef` refuses on it. The message names the COLUMN, because the
+     qualifier names exactly one relation. It is the other half of ADR-0026
+     §9's duplicate-published-name rule: the qualified STAR over such a block
+     already declined rather than bind the first item twice, and the explicit
+     list was the half left open — the wrong-VALUE one, since which column
+     answered was the block's item order. The BARE star over the same block is
+     untouched and still answers both columns by position, which is
+     PostgreSQL's answer. Gate:
+     `coordinator.TestSRAStarPublishesItsArmsOwnColumns`'s `dupname/*` cells,
+     `pgwire.TestSRTheWireDeclaresAStarsOwnArms` and
+     `server.TestArcSRAStarOverAPolicedArmNeverPublishesTheOtherArmsValue`'s
+     `dupname_reference_into_a_policed_block`.
 
    - **`PARTITION BY <bare name>` over two join arms that both publish it is
      answered, not refused.** (Added 2026-09-07, #975.) PostgreSQL raises
@@ -1734,10 +1758,22 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      names one column and the published name may name two). Gated by
      `coordinator.TestOrderByResolvesAPositionAfterTheStarExpands`'s
      `boundary_star_over_join` cell, which used to pin the refusal, and by the
-     O1 gate's positional cells on five arms. The two USING refusals are
-     unchanged: USING MERGES the joined column into one output column, which
-     is a different rule from the arms' concatenation and not something the
-     expansion decides.
+     O1 gate's positional cells on five arms.
+
+     **The SECOND is CLOSED TOO (2026-09-18, arcs PS and SR).** USING MERGES
+     the joined column into one output column — a different rule from the
+     arms' concatenation — and `logical.usingJoinStarColumns` states it: the
+     USING columns once and first, then each arm's remaining columns, with the
+     merged VALUE being the side that is never NULL-extended and
+     `COALESCE(l.c, r.c)` for a FULL join. Arc SR then removed the last
+     decline that was not about a name being unnameable: a column name the two
+     arms share OUTSIDE the USING list is published TWICE, which is
+     PostgreSQL's answer. What is left refused (0A000) is an arm that
+     publishes one name twice, a CHAIN of USING joins, and an arm whose own
+     list this expansion cannot state — each one a shape where a reference by
+     name could not name its own column. Gated by
+     `coordinator.TestSRAStarPublishesItsArmsOwnColumns`'s `using/*` cells and
+     `pgwire.TestSRTheWireDeclaresAStarsOwnArms`.
 
      **The bound is narrower than "not a single base-table scan", and the
      record said the wider thing.** Measured on all three arms, `routed=none`:
@@ -1757,10 +1793,12 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      its LEFTMOST arm's names, which is the rule `plansql.BlockOutputColumns`
      and `applyColumnAliases` already read, so `projectOutputNamesBelow`
      descends it. A VALUES derived table is covered by the same step, since the
-     parser desugars `VALUES` into a UNION ALL of SELECTs. The JOIN cases above
-     are unchanged and are what is left of #810's residual: lifting them needs
-     an ORDERED model of a join's emitted columns, and the three refusals lift
-     together. Gated by
+     parser desugars `VALUES` into a UNION ALL of SELECTs. The third of
+     #810's shapes — a `USING` clause following another join on the same FROM
+     item, where the star must state a CHAIN of merges — is the one still
+     refused; the other two are closed above, which is the "lift them
+     together" prediction coming apart in the order the measurements allowed
+     rather than all at once. Gated by
      `coordinator.TestArcK1AStarIsItsSourceInItsPosition`.
 
    - **Abbreviated CIDR and inet literals.** (Added 2026-09-03, #627. CLOSED

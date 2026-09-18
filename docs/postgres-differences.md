@@ -98,13 +98,13 @@ Stored columns require `(p,s)`. A CTAS over `COALESCE(numeric(15,2), numeric(38,
 
 Fields retain storage types. `(b).open` over DECIMAL(9,2) has typmod 589830; PostgreSQL’s corresponding composite aggregate field has −1. (ADR-0012 §9/#965-field-typmod)
 
-**Set-operation column labels use expression text.**
-
-Set operations lack naming projections. `SELECT g + 1 FROM t UNION ALL SELECT g + 2 FROM t` labels its column `g + 1`; PostgreSQL uses `?column?`. (ADR-0012 §5/#732-set-operations)
-
 **An unaliased expression inside a block a LATERAL reads is named by its text.**
 
 `SELECT * FROM lat_ord o JOIN LATERAL (SELECT order_id, i.amount + 1 FROM lat_item i WHERE i.order_id = o.id) s ON true` names the second column `i.amount + 1` where PostgreSQL names it `?column?`. Values, types and positions agree; only the name differs. The same item inside a plain derived table or a join is named `?column?` as PostgreSQL names it. (ADR-0012 §5/LATERAL-labels)
+
+**A star over a LATERAL arm qualifies a name the two arms share.**
+
+`SELECT * FROM lat_ord o, LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) l` names the fourth column `l.id` on the single-process arms and `i.id` — the body's inner scan spelling — on the three distributed ones, where PostgreSQL names it `id`. A LATERAL arm is not expanded (its subtree carries the correlation slot the join drops), so the star reads the join operator's stream, which qualifies a duplicate name by its owning alias. Values, types and positions agree. (ADR-0012 §5/#1126)
 
 ## Errors and refusals
 
@@ -139,10 +139,6 @@ Wadjet raises 42622 instead of PostgreSQL’s truncation and notice, to keep sto
 **Ambiguous ORDER BY names select the first output.**
 
 First-match binding means `ORDER BY u` over two outputs called `u` answers here, versus PostgreSQL 42702. (ADR-0012 §5/#557)
-
-**Qualified duplicate names select the first.**
-
-First-match lookup means `d.id` over two published `id` columns answers here; PostgreSQL raises 42702. (ADR-0012 §5/2026-09-13/duplicate-names)
 
 **Ambiguous PARTITION BY names can answer.**
 
@@ -318,7 +314,11 @@ Unknown types/scales cause distributed refusal to avoid decimal reinterpretation
 
 **JOIN USING merges, but not for every shape.**
 
-`SELECT *` over a `JOIN … USING` publishes the joined column once and first, as PostgreSQL does. It raises 0A000 where the merge cannot be stated by name: two arms sharing a column name outside the USING list, an arm publishing one name twice, or a chain of joins. (ADR-0012 §5/#810, #655)
+`SELECT *` over a `JOIN … USING` publishes the joined column once and first, as PostgreSQL does, and publishes a name the two arms share OUTSIDE the USING list twice, as PostgreSQL does. It raises 0A000 where a reference by name could not name its own column: an arm publishing one name twice, a chain of joins, or an arm whose own list this planner does not enumerate. (ADR-0012 §5/#810, #655, #1177)
+
+**A USING merge of two DECIMAL columns at different scales declares the left arm's.**
+
+`SELECT * FROM zzp JOIN zzj USING (id, d92)` declares the merged `d92` at the left arm's DECIMAL(9,2) where PostgreSQL declares unconstrained `numeric`, the common type of the two. The merged column's VALUE is the left arm's by the same rule on both engines; only the declaration differs. (ADR-0012 §5/#1177)
 
 **A bare reference to a USING join's merged column is ambiguous here, outside a sort or window key.**
 

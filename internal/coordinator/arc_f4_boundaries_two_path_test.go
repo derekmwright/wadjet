@@ -75,19 +75,18 @@ func TestArcF4BoundariesArePinned(t *testing.T) {
 		},
 
 		// --- #732 over a SET OPERATION -------------------------------------
-		// Every arm agrees with every other and none agrees with PostgreSQL,
-		// which is what makes this an EXCEPTION to state rather than a split.
+		// THE PINS ARE DELETED AND THAT IS THE PROOF (arc SR, #1079). Every
+		// arm used to agree with every other and none with PostgreSQL: a
+		// set-op root has no output projection, so the published half of
+		// ADR-0026 §2's pair was applied by nobody and the operation went out
+		// under the arm's RESOLUTION spelling. It publishes its LEFTMOST
+		// arm's names now, on both engines — the sink through
+		// `PublishedOutputNames`, the gather through `setOpPublishedRenames`.
 		{
 			name: "732/set-op-arithmetic",
 			sql: "SELECT g + 1 FROM typemx WHERE id < 2 " +
 				"UNION ALL SELECT g + 2 FROM typemx WHERE id < 1",
 			want: "?column? | 1 | 2 | 2",
-			pin: map[string]string{
-				"single":   "g + 1 | 1 | 2 | 2",
-				spilledArm: "g + 1 | 1 | 2 | 2",
-				"dag":      "g + 1 | 1 | 2 | 2",
-				"dagshuf":  "g + 1 | 1 | 2 | 2",
-			},
 		},
 		// A CAST rather than an aggregate, because an aggregate SELECTED
 		// directly by a union arm is refused on the DAG for a reason of its
@@ -98,12 +97,6 @@ func TestArcF4BoundariesArePinned(t *testing.T) {
 			sql: "SELECT CAST(g AS BIGINT) FROM typemx WHERE id < 2 " +
 				"UNION ALL SELECT CAST(g AS BIGINT) FROM typemx WHERE id < 1",
 			want: "g | 0 | 0 | 1",
-			pin: map[string]string{
-				"single":   "cast(g as bigint) | 0 | 0 | 1",
-				spilledArm: "cast(g as bigint) | 0 | 0 | 1",
-				"dag":      "cast(g as bigint) | 0 | 0 | 1",
-				"dagshuf":  "cast(g as bigint) | 0 | 0 | 1",
-			},
 		},
 	}
 

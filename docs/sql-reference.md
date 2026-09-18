@@ -952,11 +952,13 @@ an arm is published only where its own names address its columns:
 A `SELECT *` over `JOIN … USING` is the one place where "every arm's own list"
 is not PostgreSQL's rule: USING MERGES the joined column into ONE output
 column, published once and first, and the expansion states that where it can
-read both arms' lists (see [Join conditions](#join-conditions)). It DECLINES —
-and the statement is then refused with `0A000` — where a reference by name
-would bind the wrong relation: two arms that share a column name OUTSIDE the
-USING list, an arm that publishes one name twice, or a chain of joins.
-`NATURAL JOIN` is refused outright.
+read both arms' lists (see [Join conditions](#join-conditions)). A column name
+the two arms share OUTSIDE the USING list is published TWICE, which is
+PostgreSQL's answer: each item is the qualified reference its own arm owns.
+The expansion DECLINES — and the statement is then refused with `0A000` —
+where a reference by name could not name its own column at all: an arm that
+publishes one name twice, a chain of joins, or an arm whose own list this
+planner does not enumerate. `NATURAL JOIN` is refused outright.
 
 Subqueries that reference columns from the outer query. The optimizer decorrelates them where it can — EXISTS / NOT EXISTS and IN become semi/anti joins, and a correlated scalar subquery becomes a join against a grouped aggregate — so they are not re-executed per outer row. Either side may be a CTE, a derived table, a comma-joined list or a base table: the subquery's own FROM clause is planned the way a top-level FROM clause is.
 
