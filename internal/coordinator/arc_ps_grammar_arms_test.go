@@ -81,7 +81,13 @@ func TestArcPSGrammarAnswersTheSameOnEveryArm(t *testing.T) {
 		ordered bool
 		code    string // the SQLSTATE when want is nil
 		errLike string
-		pg      string
+		// dagPin is a PRE-EXISTING `distributed` divergence: the three DAG
+		// arms answer this instead of `want`, and it is PINNED rather than
+		// chased (engine first). A DAG arm is allowed either answer and at
+		// least one must produce the pinned one, so a pin that closes FAILS
+		// and gets deleted, which is its proof (ADR-0013).
+		dagPin string
+		pg     string
 	}{
 		// ---- #1154: BETWEEN [SYMMETRIC|ASYMMETRIC] -----------------------
 		{issue: "#1154", name: "symmetric_in_where_reversed_bounds",
@@ -373,6 +379,130 @@ func TestArcPSGrammarAnswersTheSameOnEveryArm(t *testing.T) {
 			code:    "0A000",
 			errLike: "window PARTITION BY key naming",
 			pg:      "ANSWERS one row per merged key"},
+		// ---- B1-r2: the WINDOW half, on a fixture that DISCRIMINATES -------
+		//
+		// `psc` has DUPLICATE keys and no key `psb` matches, so over
+		// `psb RIGHT JOIN psc USING (id)` the merged key partitions {5,5} and
+		// {6} while the left arm's is ONE partition of three NULLs. Round 2's
+		// only RIGHT window cell was over `psa`, where both partitionings are
+		// size one and every answer is 1 — it could not fail. These can:
+		// every cell below answered a WRONG VALUE on all five arms at
+		// `bf4300b8`, where `bindMergedUsingKeys` rewrote the WindowSpec and
+		// `unfoldFromlessScalars` rebuilt it from the un-rewritten
+		// WindowFuncNode one call later (review round 2, B1-r2).
+		{issue: "#655", name: "b1r2_right_using_window_partition_by_the_merged_key",
+			sql: `SELECT c, COUNT(*) OVER (PARTITION BY id) AS n ` +
+				`FROM psb RIGHT JOIN psc USING (id) ORDER BY c`,
+			ordered: true,
+			want: []string{
+				"c=int64:50|n=int64:2", "c=int64:51|n=int64:2", "c=int64:60|n=int64:1"},
+			pg: "2, 2, 1 — the merged key; the left arm's is one partition of three NULLs (3,3,3)"},
+		{issue: "#655", name: "b1r2_right_using_window_order_by_the_merged_key",
+			sql: `SELECT c, RANK() OVER (ORDER BY id) AS r ` +
+				`FROM psb RIGHT JOIN psc USING (id) ORDER BY c`,
+			ordered: true,
+			want: []string{
+				"c=int64:50|r=int64:1", "c=int64:51|r=int64:1", "c=int64:60|r=int64:3"},
+			pg: "1, 1, 3 — RANK over the merged key; over the left arm's NULLs it is 1, 1, 1"},
+		// The window ARGUMENT carries the same bare reference, and it is a
+		// third place the merged column lives: `SUM(id)` read the left arm and
+		// summed NULLs.
+		{issue: "#655", name: "b1r2_right_using_window_argument_is_the_merged_key",
+			sql: `SELECT c, SUM(id) OVER (PARTITION BY c) AS s ` +
+				`FROM psb RIGHT JOIN psc USING (id) ORDER BY c`,
+			ordered: true,
+			want: []string{
+				"c=int64:50|s=5", "c=int64:51|s=5", "c=int64:60|s=6"},
+			pg: "5, 5, 6 — the merged key; the left arm's is NULL on every row"},
+		{issue: "#655", name: "b1r2_right_using_window_argument_over_the_whole_frame",
+			sql:     `SELECT c, SUM(id) OVER () AS s FROM psb RIGHT JOIN psc USING (id) ORDER BY c`,
+			ordered: true,
+			want: []string{
+				"c=int64:50|s=16", "c=int64:51|s=16", "c=int64:60|s=16"},
+			pg: "16 on every row — 5 + 5 + 6"},
+		// A FULL join's window KEY is refused (its merged value is a COALESCE
+		// and a key slot holds a NAME), but its ARGUMENT is an EXPRESSION and
+		// takes the merge.
+		{issue: "#655", name: "b1r2_full_using_window_argument_is_the_merged_key",
+			sql: `SELECT c, SUM(id) OVER (PARTITION BY c) AS s ` +
+				`FROM psb FULL JOIN psc USING (id) ORDER BY c NULLS LAST`,
+			ordered: true,
+			want: []string{
+				"c=int64:50|s=5", "c=int64:51|s=5", "c=int64:60|s=6",
+				"c=NULL|s=5", "c=NULL|s=5"},
+			pg: "5, 5, 6, 5, 5 — COALESCE(psb.id, psc.id) per row"},
+		{issue: "#655", name: "b1r2_full_using_window_partition_by_is_refused",
+			sql: `SELECT c, COUNT(*) OVER (PARTITION BY id) AS n ` +
+				`FROM psb FULL JOIN psc USING (id) ORDER BY c NULLS LAST`,
+			code:    "0A000",
+			errLike: "window PARTITION BY key naming",
+			pg:      "ANSWERS 2, 2, 1, 1, 1"},
+		{issue: "#655", name: "b1r2_full_using_window_order_by_is_refused",
+			sql: `SELECT c, RANK() OVER (ORDER BY id) AS r ` +
+				`FROM psb FULL JOIN psc USING (id) ORDER BY c NULLS LAST`,
+			code:    "0A000",
+			errLike: "window ORDER BY key naming",
+			pg:      "ANSWERS 3, 3, 5, 1, 2"},
+		// The documented escape for a FULL window key, measured.
+		{issue: "#655", name: "b1r2_ctl_full_using_window_key_written_out",
+			sql: `SELECT c, COUNT(*) OVER (PARTITION BY coalesce(psb.id, psc.id)) AS n ` +
+				`FROM psb FULL JOIN psc USING (id) ORDER BY c NULLS LAST`,
+			ordered: true,
+			want: []string{
+				"c=int64:50|n=int64:2", "c=int64:51|n=int64:2", "c=int64:60|n=int64:1",
+				"c=NULL|n=int64:1", "c=NULL|n=int64:1"},
+			pg: "2, 2, 1, 1, 1 — `Write the expression` is what the refusal offers"},
+		// CONTROLS. A QUALIFIED key names a side and is left alone — one of
+		// them is the merged side and one is not, and both must keep their own
+		// answer. These are what make B1-r2 a BINDING defect rather than an
+		// execution one.
+		{issue: "#655", name: "b1r2_ctl_window_key_qualified_to_the_merged_side",
+			sql: `SELECT c, COUNT(*) OVER (PARTITION BY psc.id) AS n ` +
+				`FROM psb RIGHT JOIN psc USING (id) ORDER BY c`,
+			ordered: true,
+			want: []string{
+				"c=int64:50|n=int64:2", "c=int64:51|n=int64:2", "c=int64:60|n=int64:1"},
+			pg: "2, 2, 1"},
+		// A QUALIFIED window key over a RIGHT join carries a PRE-EXISTING
+		// `distributed` divergence: the single-process arms partition the
+		// three NULL `psb.id` rows together (PostgreSQL's answer, 3) and a DAG
+		// arm splits them (2). Measured at base `4105fb4f` with every source
+		// of this arc reverted — all three DAG arms answer 2 there — so it is
+		// not this lane's and is PINNED, not chased (engine first).
+		{issue: "#655", name: "b1r2_ctl_window_key_qualified_to_the_other_side",
+			sql: `SELECT c, COUNT(*) OVER (PARTITION BY psb.id) AS n ` +
+				`FROM psb RIGHT JOIN psc USING (id) ORDER BY c`,
+			ordered: true,
+			want: []string{
+				"c=int64:50|n=int64:3", "c=int64:51|n=int64:3", "c=int64:60|n=int64:3"},
+			dagPin: "c=int64:50|n=int64:2",
+			pg:     "3, 3, 3 — psb.id is NULL on every row, which is ONE partition"},
+		{issue: "#655", name: "b1r2_ctl_left_using_window_argument",
+			sql: `SELECT c, SUM(id) OVER (PARTITION BY c) AS s ` +
+				`FROM psb LEFT JOIN psc USING (id) ORDER BY c NULLS LAST`,
+			ordered: true,
+			want:    []string{"c=NULL|s=5", "c=NULL|s=5"},
+			pg:      "5, 5 — a LEFT join's merged value IS the left arm's"},
+		// THE REBUILD ITSELF, pinned. A window item whose spec is rebuilt from
+		// its node after the binding ran is the mechanism B1-r2 was: this cell
+		// carries a FROM-less scalar subquery beside the window, which is what
+		// `unfoldFromlessScalars` exists for, so the rebuild definitely runs.
+		{issue: "#655", name: "b1r2_window_key_survives_the_fromless_scalar_rebuild",
+			sql: `SELECT c, (SELECT 1) AS one, COUNT(*) OVER (PARTITION BY id) AS n ` +
+				`FROM psb RIGHT JOIN psc USING (id) ORDER BY c`,
+			ordered: true,
+			want: []string{
+				"c=int64:50|one=int32:1|n=int64:2",
+				"c=int64:51|one=int32:1|n=int64:2",
+				"c=int64:60|one=int32:1|n=int64:1"},
+			pg: "2, 2, 1 — the spec is REBUILT from its node here, and the binding has to survive it"},
+		{issue: "#655", name: "b1r2_right_using_window_over_a_derived_left_arm",
+			sql: `SELECT c, COUNT(*) OVER (PARTITION BY id) AS n ` +
+				`FROM (SELECT * FROM psb) q RIGHT JOIN psc USING (id) ORDER BY c`,
+			ordered: true,
+			want: []string{
+				"c=int64:50|n=int64:2", "c=int64:51|n=int64:2", "c=int64:60|n=int64:1"},
+			pg: "2, 2, 1"},
 		{issue: "#655", name: "b1_right_using_window_partition_by_the_merged_key",
 			sql: `SELECT psa.a AS v, COUNT(*) OVER (PARTITION BY id) AS n ` +
 				`FROM psb RIGHT JOIN psa USING (id) ORDER BY psa.a`,
@@ -409,10 +539,17 @@ func TestArcPSGrammarAnswersTheSameOnEveryArm(t *testing.T) {
 			if !c.ordered {
 				sort.Strings(want)
 			}
+			dagPinSeen := false
 			for _, arm := range arms {
 				got, err := arm.run(c.sql)
 				if !c.ordered {
 					sort.Strings(got)
+				}
+				if c.dagPin != "" && strings.HasPrefix(arm.name, "dag") &&
+					len(got) > 0 && got[0] == c.dagPin {
+					// The pinned pre-existing divergence, on this arm.
+					dagPinSeen = true
+					continue
 				}
 				if c.want == nil {
 					if err == nil {
@@ -448,6 +585,10 @@ func TestArcPSGrammarAnswersTheSameOnEveryArm(t *testing.T) {
 						break
 					}
 				}
+			}
+			if c.dagPin != "" && !dagPinSeen {
+				t.Errorf("the pinned pre-existing DAG divergence no longer happens — delete the "+
+					"pin, which is its proof\n  SQL: %s", c.sql)
 			}
 		})
 	}

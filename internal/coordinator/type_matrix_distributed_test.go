@@ -491,6 +491,7 @@ func tmdTables() []tmdTable {
 		// for both (#706), which is a different defect wearing the same face.
 		{psaTable, psaSchema(), psaData()},
 		{psbTable, psbSchema(), psbData()},
+		{pscTable, pscSchema(), pscData()},
 		// The LATERAL fixture (#767). Rides along for the same reason as the
 		// fixtures above: only the arc-A census names it, and no type-matrix
 		// corpus entry does. The type matrix cannot stand in for it — nothing

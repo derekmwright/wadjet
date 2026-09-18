@@ -21,6 +21,7 @@ import "github.com/derekmwright/wadjet/internal/storage/parquet"
 const (
 	psaTable = "psa"
 	psbTable = "psb"
+	pscTable = "psc"
 )
 
 func psaSchema() parquet.Schema {
@@ -48,5 +49,31 @@ func psbData() []map[string]any {
 	return []map[string]any{
 		{"id": int64(2), "b": int64(200)},
 		{"id": int64(3), "b": int64(300)},
+	}
+}
+
+// psc is the DISCRIMINATING window fixture: DUPLICATE keys on the right arm,
+// and no key the left arm matches.
+//
+// It exists because a window key over `psb RIGHT JOIN psa USING (id)` cannot
+// tell a right binding from a wrong one — `psa.id` is 1, 2 and `psb.id` is
+// NULL, 2, and BOTH give partitions of size one, so `COUNT(*) OVER (PARTITION
+// BY id)` answers 1 either way. Over `psb RIGHT JOIN psc USING (id)` the
+// merged key partitions {5,5} and {6} while the left arm's is one partition of
+// three NULLs, and the two answers are 2,2,1 against 3,3,3. That is the
+// fixture the round-2 review's B1-r2 needed and this arc's round-2 table did
+// not have (review round 2).
+func pscSchema() parquet.Schema {
+	return parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64, Nullable: true},
+		{Name: "c", Type: parquet.TypeInt64, Nullable: true},
+	}}
+}
+
+func pscData() []map[string]any {
+	return []map[string]any{
+		{"id": int64(5), "c": int64(50)},
+		{"id": int64(5), "c": int64(51)},
+		{"id": int64(6), "c": int64(60)},
 	}
 }
