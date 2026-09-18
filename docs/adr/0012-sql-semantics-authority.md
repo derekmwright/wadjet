@@ -2103,6 +2103,14 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      refusal is 0A000 at all six sites, and
      `coordinator.TestArcF3ExprTypingOnEveryArm`'s census asserts the SQLSTATE
      on three arms across nine sites.
+   - **`ENCODE` takes BYTES and not text.** (Added 2026-09-18, arc EX's
+     round-1 review, N6.) `encode('hi'::text, 'hex')` is
+     `42883 function encode(text, unknown) does not exist` on 17.11 while
+     `md5(text)`, `length(text)` and `substring(text)` all answer there — the
+     asymmetry is PostgreSQL's own, so `encode`'s first position is
+     `expr.ArgBytes` rather than the family's `ArgTextOrBytes`. An
+     unknown-typed LITERAL still fits, because the server coerces it to bytea:
+     `encode('hi','hex')` is `6869`.
    - **A text-only function over a BYTES argument raises 42883.** (Added
      2026-09-05, #583; CLOSED 2026-09-18, arc EX.) `upper(b)`, `lower(b)`,
      `trim(b)`, `reverse(b)`, `replace(b, ...)`, `starts_with(b, ...)`,
@@ -5321,6 +5329,15 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
       CAST and every writer door read, which is what makes the one-grammar
       claim hold at the comparison door as well.
 
+      The refusal NAMES `integer` at every one of the twelve doors, which is
+      the type these columns declare on the wire (OID 23, #834) and the only
+      name a client can resolve in pg_type; `port` and `protocol` resolve to
+      nothing there. The RANGE refusal deliberately keeps its own sentence —
+      `PORT value 70000 out of range [0, 65535]` — which names the bound and
+      says more than PostgreSQL's shape would. Arc EX's round-1 review (N1)
+      measured the split: eleven doors said `integer` and the writer said
+      `port`.
+
     **Two SQLSTATEs, and they are different answers.** 22P02 for text that
     names no value, 22003 for a number the type cannot carry. The wording
     differs by family too, and it is reproduced rather than tidied: the integer
@@ -5370,9 +5387,14 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     `parquet.Column` carrying no type information is indistinguishable from one
     declaring boolean, and a declaration layer that answers Decided from such a
     column would hand this check a boolean for every column it knows only the
-    name of. BOOL is therefore excluded from the negative side of the domain
-    test (`expr.trustedArgType`); `UPPER(bool_col)` is not refused, while
-    `UPPER(TRUE)` is.
+    name of. The exclusion is therefore the SHAPE of the column-side test in
+    `expr.RefuseUnresolvableCall`: it refuses on a POSITIVE identification —
+    `ArgText` meeting `batch.TypeBytes`, or `ArgBytes` meeting
+    `batch.TypeString` — and never on "this is not text", so a column that
+    answers `Decided(bool)` is never refused. `UPPER(bool_col)` answers and
+    `UPPER(TRUE)` is 42883, because a LITERAL's type is syntactic. (This
+    paragraph named `expr.trustedArgType` until 2026-09-18; no such symbol
+    exists, and arc EX's round-1 review caught it — N2.)
 
     **The CAST to an integer type is TWO casts, and the operand's DECLARATION
     chooses.** (Added 2026-09-18, #1141.) `'2.5'::integer` is 22P02 — int4in

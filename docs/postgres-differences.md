@@ -222,7 +222,7 @@ Unknown argument width leaves bigint results: totals beyond bigint raise 22003 v
 
 **Text functions render a non-text COLUMN.**
 
-`upper(mac_col)`, `substr(date_col, 1, 4)`, `length(ipv4_col)` and `upper(int_col)` answer here versus PostgreSQL 42883: a column of another type is rendered as its text before a string function reads it, which is what makes the network-analytics shapes work. A numeric LITERAL in the same position is 42883 on both. (ADR-0012 §5/#500, #1056)
+`upper(mac_col)`, `substr(date_col, 1, 4)`, `length(ipv4_col)` and `upper(int_col)` answer here versus PostgreSQL 42883: a column of another type is rendered as its text before a string function reads it, which is what makes the network-analytics shapes work. A numeric LITERAL in the same position is 42883 on both, and so are a `BYTES` operand in a text-only position and a TEXT operand in `ENCODE`'s. (ADR-0012 §5/#500, #1056)
 
 **Planner column-name prefixes are reserved.**
 

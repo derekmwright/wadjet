@@ -106,7 +106,14 @@ func TestArcEXAMaskedColumnAnswersItsMaskAtEveryDoor(t *testing.T) {
 			sql: `SELECT UPPER(salary) AS v FROM e7emp`, wantRefused: true},
 	}
 
+	// PER CELL, PER DOOR. The round-1 review's N5: a cell that SPECIFIES an
+	// answer and was refused on some door was only LOGGED, and the
+	// non-vacuity counters were global — so one door that refused every
+	// answering cell would still have passed while the other eight answered.
+	// An answer means an answer and a refusal means a refusal, at each door.
 	answered, refused := 0, 0
+	perCell := map[string]int{}
+	perDoor := map[string]int{}
 	for _, cell := range cells {
 		for _, door := range rig.doors {
 			got, err := door.run(t, "analyst-key", cell.sql)
@@ -122,7 +129,12 @@ func TestArcEXAMaskedColumnAnswersItsMaskAtEveryDoor(t *testing.T) {
 					}
 				}
 				if !cell.wantRefused {
-					t.Logf("%s / %s: refused (%v)", cell.name, door.name, err)
+					t.Errorf("%s / %s was REFUSED (%v), and this cell SPECIFIES an answer. A "+
+						"door that refuses where the others answer is a door the mask is not "+
+						"being read on\n  %s", cell.name, door.name, err, cell.sql)
+				} else {
+					perCell[cell.name]++
+					perDoor[door.name]++
 				}
 				continue
 			}
@@ -133,6 +145,8 @@ func TestArcEXAMaskedColumnAnswersItsMaskAtEveryDoor(t *testing.T) {
 				continue
 			}
 			answered++
+			perCell[cell.name]++
+			perDoor[door.name]++
 			for _, c := range got.cols {
 				if strings.EqualFold(c, "salary") {
 					t.Errorf("%s / %s: the DENIED column %q is in the published list\n  %s",
@@ -159,8 +173,25 @@ func TestArcEXAMaskedColumnAnswersItsMaskAtEveryDoor(t *testing.T) {
 			}
 		}
 	}
-	// A GATE WHOSE CELLS ALL REFUSE PROVES NOTHING, and one whose cells all
-	// answer proves nothing about the refusals.
+	// EVERY CELL ON EVERY DOOR, counted in both directions. A gate whose
+	// cells all refuse proves nothing, one whose cells all answer proves
+	// nothing about the refusals, and a GLOBAL count hides a single door that
+	// disagrees with the other eight — which is what the round-1 review's N5
+	// measured.
+	for _, cell := range cells {
+		if got := perCell[cell.name]; got != len(rig.doors) {
+			t.Errorf("%s reached its specified disposition on %d of %d doors; every door has "+
+				"to give the same answer to the same statement over the same policy",
+				cell.name, got, len(rig.doors))
+		}
+	}
+	for _, door := range rig.doors {
+		if got := perDoor[door.name]; got != len(cells) {
+			t.Errorf("door %s gave the specified disposition for %d of %d cells; a door that "+
+				"refuses where the others answer is a door the mask is not being read on",
+				door.name, got, len(cells))
+		}
+	}
 	if answered == 0 {
 		t.Fatalf("no (cell, door) pair answered: this gate's leak test cannot fail, and %d "+
 			"shapes over policed relations were refused on every door", len(cells))
