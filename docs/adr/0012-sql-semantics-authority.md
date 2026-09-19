@@ -5844,9 +5844,10 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     literal have no grammar at all (a TIME type, a postfix predicate and a
     lexer form this engine does not have). `NORMALIZE(s, 'NFC')` with a QUOTED
     form answers here and is a syntax error there — a superset, kept.
-    `#` inherits the bitwise family's recorded widening: `int4 # int4` is
-    bigint here and integer there, and a non-integer operand answers where
-    PostgreSQL raises 42883/42725. And the pattern language's own two:
+    `#` accepts operands PostgreSQL refuses — a non-integer one answers where
+    the server raises 42883/42725 — and its declared WIDTH agrees with the
+    server's: `int4 # int4` is integer and a bigint operand makes it bigint,
+    measured on four of four widths through the wire. And the pattern language's own two:
     `LIKE` does not honour the DEFAULT backslash escape (`'a%b' LIKE 'a\%b'`
     is `f` where PostgreSQL answers `t`) while the explicit `ESCAPE` clause is
     read exactly as PostgreSQL reads it; a SIMILAR TO pattern whose
