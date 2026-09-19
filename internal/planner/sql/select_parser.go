@@ -1297,7 +1297,21 @@ func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
 		}
 	}
 
-	// Optional alias with column list: AS alias(col1, col2)
+	// The alias clause, with or without AS, and the COLUMN-ALIAS LIST that
+	// may follow it — `FROM read_json(…) [AS] f(k, v)`.
+	//
+	// PostgreSQL applies one alias_clause to EVERY FROM item (§7.2.1.4: a
+	// function in FROM takes a column alias list), and the list is read only
+	// where an alias was WRITTEN: `FROM generate_series(1,3) (x)` is 42601 on
+	// 17.11, because `(x)` after a complete function call is not an alias
+	// clause. The bare-alias arm read no list at all, so
+	// `FROM read_json(…) f(k, v)` was a syntax error while the AS spelling
+	// parsed — and the list it parsed was then dropped, which is #1184's
+	// silent NULL. The list is APPLIED at the source (physical/table_func.go):
+	// a table function's width is only knowable once it has produced a batch,
+	// which is why this item is not lowered to the derived-table spelling the
+	// way a named relation's list is (lowerNamedRelationColumnAliases).
+	aliased := false
 	if p.isKeyword(TokenKWAs) {
 		p.advance()
 		aliasTok, err := p.expect(TokenIdent)
@@ -1305,11 +1319,15 @@ func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
 			return TableRef{}, fmt.Errorf("expected alias after AS")
 		}
 		tr.Alias = aliasTok.val
+		aliased = true
+	} else if p.peek() == TokenIdent && !p.isJoinKeyword() {
+		tr.Alias = p.advance().val
+		aliased = true
+	}
+	if aliased {
 		if err := p.parseColumnAliasList(&tr); err != nil {
 			return TableRef{}, err
 		}
-	} else if p.peek() == TokenIdent && !p.isJoinKeyword() {
-		tr.Alias = p.advance().val
 	}
 	return tr, nil
 }

@@ -18,6 +18,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	csvreader "github.com/derekmwright/wadjet/internal/storage/csv"
 	"github.com/derekmwright/wadjet/internal/storage/dbscan"
 	jsonreader "github.com/derekmwright/wadjet/internal/storage/json"
@@ -27,6 +28,70 @@ import (
 	_ "github.com/go-sql-driver/mysql" // MySQL driver
 	_ "github.com/lib/pq"              // PostgreSQL driver
 )
+
+// withColumnAliases applies a FROM item's COLUMN-ALIAS LIST — `FROM
+// read_json(…) [AS] f(k, v)` — to a table function's output.
+//
+// PostgreSQL gives every FROM item one alias clause (§7.2.1.4), and a
+// function's is applied POSITIONALLY: fewer names rename a prefix
+// (`unnest(…) WITH ORDINALITY AS u(v)` publishes v and ordinality), more names
+// than the relation has is `42P10 table "f" has N columns available but M
+// columns specified`.
+//
+// It is applied HERE, over the source, rather than lowered in the parser to
+// the derived-table spelling a NAMED relation's list takes
+// (plansql.lowerNamedRelationColumnAliases): a table function's column list is
+// not knowable until it has read its input — read_json infers it from the file
+// — and the plan-time rename refuses with "renames the columns of a `SELECT *`
+// this planner did not expand" for exactly that reason. This is the one layer
+// that has the width. Before it, the list was parsed and then dropped for
+// every function but unnest, so `SELECT k FROM read_json(…) AS f(k, v)`
+// answered NULL for every row (#1184).
+//
+// The boundary: a function that produces NO batch (an empty file) is never
+// measured against its list, so an over-long list there answers zero rows
+// where PostgreSQL raises 42P10.
+func withColumnAliases(src exec.Source, aliases []string, relName string) exec.Source {
+	if len(aliases) == 0 {
+		return src
+	}
+	if relName == "" {
+		relName = "table"
+	}
+	return &aliasedTableFuncSource{src: src, aliases: aliases, relName: relName}
+}
+
+type aliasedTableFuncSource struct {
+	src     exec.Source
+	aliases []string
+	relName string
+}
+
+func (s *aliasedTableFuncSource) Init(ctx context.Context) error { return s.src.Init(ctx) }
+
+func (s *aliasedTableFuncSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
+	b, err := s.src.Next(ctx)
+	if err != nil || b == nil {
+		return b, err
+	}
+	if len(s.aliases) > len(b.Schema) {
+		return nil, sqlerr.New("42P10",
+			"table %q has %d columns available but %d columns specified",
+			s.relName, len(b.Schema), len(s.aliases))
+	}
+	// The schema is COPIED rather than renamed in place: the source keeps its
+	// own schema across calls (the CSV and JSON readers index into it while
+	// decoding), and a batch may be pooled and handed back to it.
+	sch := make([]parquet.Column, len(b.Schema))
+	copy(sch, b.Schema)
+	for i, name := range s.aliases {
+		sch[i].Name = name
+	}
+	b.Schema = sch
+	return b, nil
+}
+
+func (s *aliasedTableFuncSource) Close() error { return s.src.Close() }
 
 // buildTableFunctionSource creates an exec.Source for a table function like
 // read_json('path_or_url'). The source reads data on Init and produces
@@ -584,18 +649,16 @@ type unnestSource struct {
 	done           bool
 }
 
-func newUnnestSource(args []string, withOrdinality bool, colAliases []string) (*unnestSource, error) {
+// newUnnestSource builds the source for `unnest(…) [WITH ORDINALITY]`. The
+// columns are PostgreSQL's own default names; a FROM item's column-alias list
+// is applied over the source by withColumnAliases, which is the one layer that
+// applies it for every table function (#1184).
+func newUnnestSource(args []string, withOrdinality bool) (*unnestSource, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("unnest requires at least 1 argument")
 	}
 	colName := "unnest"
 	ordColName := "ordinality"
-	if len(colAliases) > 0 {
-		colName = colAliases[0]
-	}
-	if len(colAliases) > 1 {
-		ordColName = colAliases[1]
-	}
 	return &unnestSource{
 		values:         args,
 		withOrdinality: withOrdinality,

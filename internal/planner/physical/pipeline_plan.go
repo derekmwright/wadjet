@@ -117,17 +117,19 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 			}
 		}
 		if node.FuncName == "unnest" {
-			source, err := newUnnestSource(node.FuncArgs, node.WithOrdinality, node.FuncColAliases)
+			source, err := newUnnestSource(node.FuncArgs, node.WithOrdinality)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("unnest: %w", err)
 			}
-			return source, nil, &exec.CollectSink{}, nil
+			return withColumnAliases(source, node.FuncColAliases, node.TableAlias), nil, &exec.CollectSink{}, nil
 		}
 		source, err := buildTableFunctionSource(node.FuncName, node.FuncArgs, node.FuncNamedArgs)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("table function %s: %w", node.FuncName, err)
 		}
-		return source, nil, &exec.CollectSink{}, nil
+		// The FROM item's column-alias list, applied at the one layer that
+		// knows the function's width (#1184).
+		return withColumnAliases(source, node.FuncColAliases, node.TableAlias), nil, &exec.CollectSink{}, nil
 	}
 	scanner := p.newScanner(ctx, node.TableName, node.PartitionFilter, node.RequiredColumns, node.ScanPredicates)
 
