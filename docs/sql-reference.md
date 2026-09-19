@@ -2240,22 +2240,30 @@ the planner carries, a numeric literal, arithmetic, `COUNT`, a CALL whose
 return type the registry DECLARES (`WHERE upper(s)` is `42804 … not type
 text`, and so is an OPERATOR the parser rewrites into a call, `a # b` and
 `a ^ b` among them), a CAST (its declared target), a CASE (its branch
-results), an ARRAY constructor, an INTERVAL literal, and a POLYMORPHIC call
-typed through the argument its declaration mirrors (`COALESCE(n, 1)` and
-`GREATEST(n, 1)` are `bigint`). A column of a derived table or a CTE is not
+results), an ARRAY constructor, an INTERVAL literal, a ROW FIELD PATH
+(`(r).a` is the field's declared type), a container SUBSCRIPT (`arr[1]` is the
+ELEMENT type, so an `ARRAY<BOOL>`'s element is still a boolean), and a
+POLYMORPHIC call typed through the argument its declaration mirrors
+(`COALESCE(n, 1)` and `GREATEST(n, 1)` are `bigint`). A column of a derived table or a CTE is not
 refused, and neither is a polymorphic call whose mirrored argument this layer
 cannot type.
 
 A `DELETE`'s and an `UPDATE`'s `WHERE`, and a `MERGE`'s `WHEN … AND`
 condition, are held to the same rule, with the same SQLSTATE and the same
-message, for EVERY expression kind: a literal, a column, a call (fixed or
+message, for every expression kind whose type this planner can PROVE: a
+literal, a column, a ROW field path, a container SUBSCRIPT, a call (fixed or
 polymorphic — `COALESCE`, `GREATEST`, `LEAST`, `NULLIF`), a `CASE` (searched
 or simple), a `CAST`, arithmetic, an `ARRAY` constructor, an `INTERVAL`
-literal and a scalar subquery. A clause that is not a boolean removes and
-changes nothing. An aggregate there is `42803` and a window function `42P20`,
-as they are in a `SELECT`'s `WHERE`; a quoted literal is read with the boolean
-input function, so `WHERE 'true'` removes every row and `WHERE 'abc'` is
-`22P02`.
+literal and a scalar subquery. **Where the type is provable, a clause that is
+not a boolean removes and changes nothing**; where it is not — a derived
+table's or a CTE's column, a polymorphic call whose mirrored argument this
+layer cannot type — the clause is evaluated and a non-boolean value is read
+as false, which selects no row rather than refusing. An aggregate in such a
+clause is `42803` and a window function `42P20`, as they are in a `SELECT`'s
+`WHERE`, and in the server's own ORDER: the window is refused before names
+are resolved and the aggregate after, so `WHERE SUM(nosuchcolumn)` is `42703`.
+A quoted literal is read with the boolean input function, so `WHERE 'true'`
+removes every row and `WHERE 'abc'` is `22P02`.
 
 The same input function applies when a boolean is COMPARED against a quoted
 literal, and it applies to a boolean the query COMPUTED, not only to a boolean

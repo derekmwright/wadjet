@@ -135,6 +135,48 @@ func TestArcPTTheDMLTruthContextRefusesEveryNodeKindOnEveryDoor(t *testing.T) {
 		{kind: "subquery/scalar_aggregate", sql: `DELETE FROM %s WHERE (SELECT COUNT(*) FROM %s)`,
 			state: "42804", pg: "42804 … not type bigint"},
 
+		// ---- containers: a field path, a subscript, the container itself
+		// (round-2 review, P2-r2: `(r).a` reaches the walk as a ColRef whose
+		// QUALIFIER is a ROW column, so the relation lookup missed it and
+		// `WHERE id > 0 AND (r).a` removed a row PostgreSQL refuses to touch).
+		{kind: "rowfield/bigint", sql: `DELETE FROM %s WHERE (r).a`,
+			state: "42804", pg: "42804 … not type bigint"},
+		{kind: "rowfield/boolean", sql: `DELETE FROM %s WHERE (r).ok`,
+			tag: "DELETE 2", surviving: 2, pg: "answers — a boolean field IS a boolean"},
+		{kind: "rowfield/under_a_conjunction", sql: `DELETE FROM %s WHERE id > 0 AND (r).a`,
+			state: "42804", pg: "42804 argument of AND … not type bigint"},
+		{kind: "rowfield/boolean_under_a_conjunction",
+			sql: `DELETE FROM %s WHERE id > 0 AND (r).ok`,
+			tag: "DELETE 2", surviving: 2, pg: "answers"},
+		{kind: "row/column", sql: `DELETE FROM %s WHERE r`,
+			state: "42804", pg: "42804 … not type record"},
+		{kind: "array/column", sql: `DELETE FROM %s WHERE arr`,
+			state: "42804", pg: "42804 … not type bigint[]"},
+		{kind: "array/subscript", sql: `DELETE FROM %s WHERE arr[1]`,
+			state: "42804", pg: "42804 … not type bigint (the ELEMENT type)"},
+		{kind: "array/subscript_under_a_conjunction",
+			sql:   `DELETE FROM %s WHERE id > 0 AND arr[1]`,
+			state: "42804", pg: "42804 argument of AND … not type bigint"},
+		{kind: "map/column", sql: `DELETE FROM %s WHERE m`,
+			state: "42804", pg: "42804 (wadjet-native; a map is not boolean)"},
+		{kind: "map/subscript", sql: `DELETE FROM %s WHERE m['k']`,
+			state: "42804", pg: "42804 … not type bigint (the VALUE type)"},
+
+		// ---- the refusal ORDER, which is PostgreSQL's (round-2 review,
+		// P3-r2): a WINDOW is refused before names resolve and an AGGREGATE
+		// after, and the DML and SELECT doors report the same class.
+		{kind: "order/aggregate_over_an_unknown_column",
+			sql:   `DELETE FROM %s WHERE SUM(zz)`,
+			state: "42703", pg: `42703 column "zz" does not exist`},
+		{kind: "order/unknown_column_left_of_an_aggregate",
+			sql:   `DELETE FROM %s WHERE zz > 0 AND SUM(n)`,
+			state: "42703", pg: `42703 column "zz" does not exist`},
+		{kind: "order/window_over_an_unknown_column",
+			sql:   `DELETE FROM %s WHERE COUNT(*) OVER (PARTITION BY zz)`,
+			state: "42P20", pg: "42P20 — the window is refused BEFORE names resolve"},
+		{kind: "order/unknown_column_alone", sql: `DELETE FROM %s WHERE zz`,
+			state: "42703", pg: `42703 column "zz" does not exist`},
+
 		// ---- the same kinds UNDER a conjunction, which is the lethal
 		// position: the per-row closure reads a non-boolean as false only at
 		// the TOP of the clause, so an integer under an AND matched EVERY row.
@@ -247,6 +289,18 @@ func TestArcPTTheSELECTWhereTakesTheSameRule(t *testing.T) {
 			"42P20", "42P20 window functions are not allowed in JOIN conditions"},
 		{"aggregate", `SELECT COUNT(*) AS v FROM %s WHERE SUM(n)`,
 			"42803", "42803 aggregate functions are not allowed in WHERE"},
+		{"rowfield", `SELECT COUNT(*) AS v FROM %s WHERE (r).a`, "42804", "42804 bigint"},
+		{"array_subscript", `SELECT COUNT(*) AS v FROM %s WHERE arr[1]`, "42804", "42804 bigint"},
+		{"map_subscript", `SELECT COUNT(*) AS v FROM %s WHERE m['k']`, "42804", "42804 bigint"},
+		{"row_column", `SELECT COUNT(*) AS v FROM %s WHERE r`, "42804", "42804 record"},
+		// The ORDER, on this door too: the same classes the DML door reports.
+		{"order_aggregate_over_an_unknown_column",
+			`SELECT COUNT(*) AS v FROM %s WHERE SUM(zz)`, "42703", `42703 column "zz" does not exist`},
+		{"order_unknown_column_left_of_an_aggregate",
+			`SELECT COUNT(*) AS v FROM %s WHERE zz > 0 AND SUM(n)`, "42703", "42703"},
+		{"order_window_over_an_unknown_column",
+			`SELECT COUNT(*) AS v FROM %s WHERE COUNT(*) OVER (PARTITION BY zz)`,
+			"42P20", "42P20 — before names resolve"},
 	} {
 		t.Run(c.kind, func(t *testing.T) {
 			sql := c.sql
@@ -404,16 +458,35 @@ func ptDoorTable(t *testing.T, rig *ptDoorRig, kind, door string) string {
 		{Name: "n", Type: parquet.TypeInt64},
 		{Name: "s", Type: parquet.TypeString},
 		{Name: "b", Type: parquet.TypeBool},
+		// The CONTAINER columns: a ROW whose fields are a bigint and a
+		// boolean, an ARRAY of bigint and a MAP of text→bigint. A field path,
+		// a subscript and the container itself are three more node kinds, and
+		// the boolean field is the one shape that must still ANSWER.
+		{Name: "r", Type: parquet.TypeRow, Fields: []parquet.Column{
+			{Name: "a", Type: parquet.TypeInt64},
+			{Name: "ok", Type: parquet.TypeBool},
+		}},
+		{Name: "arr", Type: parquet.TypeArray,
+			ElementType: &parquet.Column{Name: "e", Type: parquet.TypeInt64}},
+		{Name: "m", Type: parquet.TypeMap, ElementType: &parquet.Column{
+			Name: "entry", Type: parquet.TypeRow, Fields: []parquet.Column{
+				{Name: "key", Type: parquet.TypeString},
+				{Name: "value", Type: parquet.TypeInt64},
+			}}},
 	}}
 	if err := rig.db.CreateTable(rig.ctx, name, sch, nil); err != nil {
 		t.Fatal(err)
 	}
 	ing := rig.db.NewIngester(name, sch, nil, ingest.Config{MaxBufferRows: 8, RowGroupSize: 8})
+	row := func(id, n int64, s string, b bool) map[string]any {
+		return map[string]any{"id": id, "n": n, "s": s, "b": b,
+			"r":   map[string]any{"a": n, "ok": b},
+			"arr": []any{n, int64(9)},
+			"m":   map[string]any{"k": n}}
+	}
 	if err := ing.Ingest(rig.ctx, []map[string]any{
-		{"id": int64(1), "n": int64(5), "s": "a", "b": true},
-		{"id": int64(2), "n": int64(0), "s": "b", "b": false},
-		{"id": int64(3), "n": int64(7), "s": "c", "b": true},
-		{"id": int64(4), "n": int64(1), "s": "d", "b": false},
+		row(1, 5, "a", true), row(2, 0, "b", false),
+		row(3, 7, "c", true), row(4, 1, "d", false),
 	}); err != nil {
 		t.Fatal(err)
 	}
