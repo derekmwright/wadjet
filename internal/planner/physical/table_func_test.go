@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -462,7 +463,7 @@ func TestGenerateSeries_Basic(t *testing.T) {
 		t.Fatalf("expected 5 rows, got %d", b.Len)
 	}
 	for i := 0; i < 5; i++ {
-		got := b.Columns[0].Int64Data[i]
+		got := seriesAt(b, i)
 		want := int64(i + 1)
 		if got != want {
 			t.Errorf("row %d: got %d, want %d", i, got, want)
@@ -504,10 +505,20 @@ func TestGenerateSeries_WithStep(t *testing.T) {
 	}
 	expected := []int64{0, 3, 6, 9}
 	for i, want := range expected {
-		if b.Columns[0].Int64Data[i] != want {
-			t.Errorf("row %d: got %d, want %d", i, b.Columns[0].Int64Data[i], want)
+		if got := seriesAt(b, i); got != want {
+			t.Errorf("row %d: got %d, want %d", i, got, want)
 		}
 	}
+}
+
+// seriesAt reads one value of the series column whichever integer width the
+// call resolved: int4 for arguments that fit it — PostgreSQL's own overload
+// choice for the same call — and int8 otherwise.
+func seriesAt(b *batch.RecordBatch, i int) int64 {
+	if b.Schema[0].Type == parquet.TypeInt32 {
+		return int64(b.Columns[0].Int32Data[i])
+	}
+	return b.Columns[0].Int64Data[i]
 }
 
 // A descending pair of bounds with the DEFAULT step is an EMPTY series on
@@ -556,8 +567,8 @@ func TestGenerateSeries_NegativeStep(t *testing.T) {
 	}
 	expected := []int64{10, 8, 6, 4, 2, 0}
 	for i, want := range expected {
-		if b.Columns[0].Int64Data[i] != want {
-			t.Errorf("row %d: got %d, want %d", i, b.Columns[0].Int64Data[i], want)
+		if got := seriesAt(b, i); got != want {
+			t.Errorf("row %d: got %d, want %d", i, got, want)
 		}
 	}
 }
@@ -582,8 +593,8 @@ func TestGenerateSeries_SingleValue(t *testing.T) {
 	if b.Len != 1 {
 		t.Fatalf("expected 1 row, got %d", b.Len)
 	}
-	if b.Columns[0].Int64Data[0] != 5 {
-		t.Errorf("expected 5, got %d", b.Columns[0].Int64Data[0])
+	if got := seriesAt(b, 0); got != 5 {
+		t.Errorf("expected 5, got %d", got)
 	}
 }
 
