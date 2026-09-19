@@ -55,6 +55,7 @@ func (c *Coordinator) runRefusedLocal(
 	planner.MemoryBudget = 8 * base
 	planner.SortMergeJoinBytes = c.config.SortMergeJoinBytes
 	planner.LateMaterialization = c.config.LateMaterialization
+	planner.BushyJoinReorder = c.config.BushyJoinReorder
 	planner.QueryLimits = c.resolveQueryLimits(ctx)
 	physPlan, err := planner.Plan(ctx, logicalPlan)
 	if err != nil {

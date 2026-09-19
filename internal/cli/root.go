@@ -27,7 +27,6 @@ import (
 	"github.com/derekmwright/wadjet/internal/format"
 	"github.com/derekmwright/wadjet/internal/geoip"
 	"github.com/derekmwright/wadjet/internal/natsconn"
-	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/server/mcp"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/compaction"
@@ -171,13 +170,7 @@ func NewRootCmd(serve *cobra.Command) *cobra.Command {
 			// the flags the operator actually typed. Every command runs it,
 			// so no code path can read a value the resolution disagrees
 			// with (ADR-0029, #808).
-			if err := resolveConfiguration(cmd); err != nil {
-				return err
-			}
-			// Process-wide planner knobs (package-level state read at plan
-			// time; the logical optimizer has no per-query config surface).
-			logical.BushyJoinReorder.Store(bushyJoinReorder)
-			return nil
+			return resolveConfiguration(cmd)
 		},
 	}
 
@@ -235,7 +228,7 @@ func NewRootCmd(serve *cobra.Command) *cobra.Command {
 	rootCmd.PersistentFlags().BoolVar(&lateMaterialization, "late-materialization", true, "Emit inner/left hash-join output as view (dictionary) columns over the probe input and build batches, deferring the column gather to the first consumer that needs owned storage — join chains compose the indirection so a column is copied once, at its final consumer or the shuffle encode. Default true (validated 2026-07-09: SF10 −6.2%, SF100 −4.9% suite wall, Q08 −36%/−44%, row-identical both scales); --late-materialization=false restores eager join-output gather. See docs/design/late-materialization.md.")
 	rootCmd.PersistentFlags().BoolVar(&skewSplit, "skew-split", true, "Adaptive skew-aware shuffle layout: when a shuffled hash join's per-partition input bytes (reported by the shuffle stages) show a hot partition group (over the absolute floor AND >=2x the mean group), split it into k sub-tasks that divide the group's probe files and replicate its build files, bounding the straggler task's input and memory footprint. Default true (validated 2026-07-11: SF10 hot-key fixture -41% straggler wall, row-identical; plan-identical on uniform workloads via the ratio gate); --skew-split=false is the kill switch. See docs/design/skew-aware-shuffle.md.")
 	rootCmd.PersistentFlags().BoolVar(&aggPartialSplit, "agg-partial-split", true, "Fan out partial (pre-merge) aggregate stages over a non-trivial multi-file upstream into at most workerCount tasks aggregating disjoint file slices, instead of one task reading the entire upstream. Gated on the upstream's worker-reported output size so trivial aggregates stay single-task (per-task scheduling overhead otherwise dominates). --agg-partial-split=false is the kill switch.")
-	rootCmd.PersistentFlags().BoolVar(&bushyJoinReorder, "bushy-join-reorder", false, "Let the cost-based join reorder emit BUSHY plans (joins of two composite intermediates — e.g. pre-joining a snowflake dimension chain before it meets the fact stream) when strictly cheaper than every left-deep order. Cost ties keep the left-deep shape. Process-wide, default false. See docs/design/bushy-join-cbo.md.")
+	rootCmd.PersistentFlags().BoolVar(&bushyJoinReorder, "bushy-join-reorder", false, "Let the cost-based join reorder emit BUSHY plans (joins of two composite intermediates — e.g. pre-joining a snowflake dimension chain before it meets the fact stream) when strictly cheaper than every left-deep order. Cost ties keep the left-deep shape. Default false. See docs/design/bushy-join-cbo.md.")
 	rootCmd.PersistentFlags().Int64Var(&localFastPathBytes, "local-fastpath-bytes", config.DefaultLocalFastPathBytes, "Queries whose post-pruning catalog scan bytes stay under this threshold execute in-process on the coordinator (skipping the distributed stage DAG and its per-stage object-store round trips). 0 = disabled.")
 	rootCmd.PersistentFlags().BoolVar(&streamingExchange, "streaming-exchange", true, "Streaming exchange: consumers fetch stage outputs from the producing workers' local disk over gRPC with async S3 upload; every failure falls through to the durable S3 path. Default true (validated 2026-07-02: SF10 −10%, SF100 −23% suite wall, row-identical, zero fault-tolerance events); --streaming-exchange=false restores synchronous S3-only shuffle. See docs/design/streaming-exchange.md.")
 	rootCmd.PersistentFlags().BoolVar(&eagerDispatch, "eager-dispatch", false, "Eager consumer dispatch (Phase C1): eligible non-join consumer stages (aggregate/sort over a standalone repartition) start before their producer stage fully drains, consuming per-producer-task file manifests as tasks finish. Requires --streaming-exchange. Default false until SF100 validation (kill switch thereafter). See docs/design/eager-consumer-dispatch.md.")

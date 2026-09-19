@@ -47,6 +47,7 @@ func (c *Coordinator) StagePlanTextForExplain(ctx context.Context, planner *phys
 	}
 	sp.SortMergeJoinBytes = c.config.SortMergeJoinBytes
 	sp.LateMaterialization = c.config.LateMaterialization
+	sp.BushyJoinReorder = c.config.BushyJoinReorder
 	sp.DynamicFiltersEnabled = c.config.DynamicFilters
 	stages, err := sp.PlanDistributed(ctx, logicalPlan)
 	if err != nil || len(stages) == 0 {

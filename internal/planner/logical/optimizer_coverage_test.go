@@ -1058,7 +1058,7 @@ func TestExtractCommonORPredicates_NonFilter(t *testing.T) {
 // --- reorderJoins edge cases ---
 
 func TestReorderJoins_NilNode(t *testing.T) {
-	result := reorderJoins(nil)
+	result := reorderJoins(nil, Options{})
 	if result != nil {
 		t.Error("expected nil for nil input")
 	}
@@ -1066,7 +1066,7 @@ func TestReorderJoins_NilNode(t *testing.T) {
 
 func TestReorderJoins_NonJoin(t *testing.T) {
 	scan := NewScan("events", "e")
-	result := reorderJoins(scan)
+	result := reorderJoins(scan, Options{})
 	if result.Type != NodeScan {
 		t.Errorf("expected scan unchanged, got %s", result.Type)
 	}

@@ -1011,11 +1011,17 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 		return fmt.Errorf("logical plan: %w", err)
 	}
 	planner := physical.NewPlanner(cat)
+	// The coordinator's planner option, not this worker process's: the task
+	// was shaped by a plan the coordinator made under it, and re-optimizing
+	// the same text under a different one reorders the joins underneath a
+	// probe split that divides a relation this plan no longer probes
+	// (#1223). Absent on the wire = off, the shipped default.
+	planner.BushyJoinReorder = task.BushyJoinReorder
 	planner.AnnotateScanColumns(ctx, logicalPlan)
 	scanAnnotator := func(plan *logical.Node) {
 		planner.AnnotateScanColumns(ctx, plan)
 	}
-	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
+	logicalPlan = logical.OptimizeWith(logicalPlan, planner.LogicalOptions(), scanAnnotator)
 
 	// Shuffle-distributed aggregate (spec: 2026-04-18-shuffle-distributed-
 	// aggregate.md): when the coordinator pre-computed derived aggregate

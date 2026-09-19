@@ -347,7 +347,7 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 
 	// Optimize — pass scan annotator so new scans created by IN-to-SemiJoin
 	// conversion get column metadata for scalar subquery decorrelation.
-	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
+	logicalPlan = logical.OptimizeWith(logicalPlan, p.LogicalOptions(), func(plan *logical.Node) {
 		p.AnnotateScanColumns(ctx, plan)
 	})
 	// The optimizer MINTS scans, after the policy went in above (#859).

@@ -485,7 +485,7 @@ func (p *StagePlanner) emitScalarProducerStagesTyped(stages *[]Stage, subquerySQ
 		}
 	}
 
-	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
+	logicalPlan = logical.OptimizeWith(logicalPlan, p.LogicalOptions(), func(plan *logical.Node) {
 		p.AnnotateScanColumns(ctx, plan)
 	})
 	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 || logical.PolicyLookupFromContext(ctx) != nil {

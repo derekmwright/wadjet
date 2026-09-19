@@ -51,6 +51,14 @@ type Scheduler struct {
 	// (#859 round 3). Nil = nothing is policed.
 	PolicedQuery func(queryID string) bool
 
+	// BushyJoinReorder is the coordinator's planner option, stamped onto
+	// every task that carries SQL TEXT for a worker to re-plan. It is
+	// stamped at this choke point for the same reason the SQL-text guard is
+	// — seven dispatchers build such a task, and one that forgot the stamp
+	// would be a worker planning the query a different way than the
+	// coordinator that shaped its inputs (#1223).
+	BushyJoinReorder bool
+
 	// dpSrv is the optional data-plane gRPC server. When set, PublishTasks
 	// pushes each task over a per-worker gRPC stream instead of NATS.
 	// Placement: bin-packed by estimated memory fit when the task carries
@@ -204,6 +212,9 @@ func (s *Scheduler) PublishTasks(ctx context.Context, tasks []distributed.Task) 
 			s.annotate(&task)
 		}
 		stampTaskDeleteMarkers(&task, queryDeletes)
+		if task.SQLText != "" {
+			task.BushyJoinReorder = s.BushyJoinReorder
+		}
 		data, err := distributed.Marshal(task)
 		if err != nil {
 			return fmt.Errorf("marshaling task %s: %w", task.ID, err)

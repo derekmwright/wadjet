@@ -83,6 +83,15 @@ type Task struct {
 	// Pipeline-specific (full query on one worker)
 	SQLText    string `json:"sql_text,omitempty"`    // SQL query to execute as standalone pipeline
 	DataBucket string `json:"data_bucket,omitempty"` // bucket containing source data (tables)
+	// BushyJoinReorder is the COORDINATOR's planner option, carried to the
+	// worker that re-plans SQLText. The coordinator chose this task's shape
+	// — which alias the probe split divides, which side of a join is the
+	// build — from a plan it made under its own option; a worker that
+	// re-optimized under a different one would order the joins differently
+	// and split the wrong relation. One query is planned under one option
+	// wherever it is planned (#1223). Absent = off, which is both the
+	// default and what a worker predating the field does.
+	BushyJoinReorder bool `json:"bushy_join_reorder,omitempty"`
 
 	// Scan-split pipeline: table scans distributed across workers, compute on one worker.
 	// Maps scan alias → result file paths from pre-scanned data.

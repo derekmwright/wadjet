@@ -54,6 +54,7 @@ type Config struct {
 	RoleLimits          map[string]*config.QueryLimits // per-role overrides (nil = use global)
 	SortMergeJoinBytes  int64                          // local sort-merge-join gate (0 = disabled)
 	LateMaterialization bool                           // view-column join output, deferred gather (default off)
+	BushyJoinReorder    bool                           // bushy join enumeration for this server's planners (default off)
 }
 
 // Server is the Wadjet HTTP API server.
@@ -171,6 +172,7 @@ func (s *Server) newPlanner(r *http.Request) *physical.Planner {
 	p := physical.NewPlanner(s.catalog)
 	p.SortMergeJoinBytes = s.config.SortMergeJoinBytes
 	p.LateMaterialization = s.config.LateMaterialization
+	p.BushyJoinReorder = s.config.BushyJoinReorder
 	p.QueryLimits = s.resolveQueryLimits(r)
 	return p
 }
@@ -557,7 +559,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Optimize — pass scan annotator for new scans created during IN decorrelation
-	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
+	logicalPlan = logical.OptimizeWith(logicalPlan, planner.LogicalOptions(), func(plan *logical.Node) {
 		planner.AnnotateScanColumns(execCtx, plan)
 	})
 	// The optimizer MINTS scans; those are created after enforcement (#859).
@@ -1200,7 +1202,7 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, parsed *p
 		writeSQLError(w, http.StatusForbidden, err.Error(), err)
 		return
 	}
-	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
+	logicalPlan = logical.OptimizeWith(logicalPlan, planner.LogicalOptions(), func(plan *logical.Node) {
 		planner.AnnotateScanColumns(explainCtx, plan)
 	})
 	logicalPlan, err = auth.EnforceOptimizedPlan(explainCtx, s.catalog, logicalPlan)

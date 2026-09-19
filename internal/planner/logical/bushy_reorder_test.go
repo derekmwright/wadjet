@@ -65,11 +65,11 @@ func countBushyJoins(n *Node) int {
 }
 
 func TestBushyReorder_DormantByDefault(t *testing.T) {
-	if BushyJoinReorder.Load() {
-		t.Fatal("BushyJoinReorder must default to off")
+	if (Options{}).BushyJoinReorder {
+		t.Fatal("Options.BushyJoinReorder must default to off")
 	}
 	before := BushyJoinsPlanned.Load()
-	plan := reorderJoins(expandingChain())
+	plan := reorderJoins(expandingChain(), Options{})
 	if got := countBushyJoins(plan); got != 0 {
 		t.Fatalf("flag off: plan contains %d bushy join(s), want pure left-deep", got)
 	}
@@ -79,11 +79,8 @@ func TestBushyReorder_DormantByDefault(t *testing.T) {
 }
 
 func TestBushyReorder_ExpandingJoinDeferred(t *testing.T) {
-	BushyJoinReorder.Store(true)
-	defer BushyJoinReorder.Store(false)
-
 	before := BushyJoinsPlanned.Load()
-	plan := reorderJoins(expandingChain())
+	plan := reorderJoins(expandingChain(), Options{BushyJoinReorder: true})
 	if got := countBushyJoins(plan); got != 1 {
 		t.Fatalf("expanding-join shape: got %d bushy joins, want exactly 1", got)
 	}
@@ -108,9 +105,6 @@ func TestBushyReorder_ExpandingJoinDeferred(t *testing.T) {
 // disconnected side — so the STRICT-improvement rule keeps today's
 // left-deep shape. No plan churn on plain star joins.
 func TestBushyReorder_StarSchemaKeepsLeftDeep(t *testing.T) {
-	BushyJoinReorder.Store(true)
-	defer BushyJoinReorder.Store(false)
-
 	fact := statScan("fact", 1000, map[string]int64{"f_id": 1000, "f_d1": 100, "f_d2": 10})
 	d1 := statScan("dim1", 100, map[string]int64{"d1_id": 100})
 	d2 := statScan("dim2", 10, map[string]int64{"d2_id": 10})
@@ -119,7 +113,7 @@ func TestBushyReorder_StarSchemaKeepsLeftDeep(t *testing.T) {
 		d2, "f_d2 = d2_id")
 
 	before := BushyJoinsPlanned.Load()
-	plan := reorderJoins(star)
+	plan := reorderJoins(star, Options{BushyJoinReorder: true})
 	if got := countBushyJoins(plan); got != 0 {
 		t.Fatalf("star schema: got %d bushy joins, want left-deep (tie must not flip)", got)
 	}
@@ -134,9 +128,6 @@ func TestBushyReorder_StarSchemaKeepsLeftDeep(t *testing.T) {
 // passes ONE join instead of two. This is the memo's headline payoff shape —
 // the cost model must find it.
 func TestBushyReorder_SnowflakeDimChain(t *testing.T) {
-	BushyJoinReorder.Store(true)
-	defer BushyJoinReorder.Store(false)
-
 	fact := statScan("fact", 1000, map[string]int64{"f_id": 1000, "f_d1": 100})
 	d1 := statScan("dim1", 100, map[string]int64{"d1_id": 100, "d1_d2": 10})
 	d2 := statScan("dim2", 10, map[string]int64{"d2_id": 10})
@@ -145,7 +136,7 @@ func TestBushyReorder_SnowflakeDimChain(t *testing.T) {
 		d2, "d1_d2 = d2_id")
 
 	before := BushyJoinsPlanned.Load()
-	plan := reorderJoins(snowflake)
+	plan := reorderJoins(snowflake, Options{BushyJoinReorder: true})
 	if got := countBushyJoins(plan); got != 1 {
 		t.Fatalf("snowflake chain: got %d bushy joins, want 1 (fact ⋈ (d1 ⋈ d2))", got)
 	}

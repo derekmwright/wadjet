@@ -415,7 +415,7 @@ func (db *DB) declaredOutputFor(ctx context.Context, parsed *plansql.ParsedQuery
 	if err != nil {
 		return nil, err
 	}
-	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
+	logicalPlan = logical.OptimizeWith(logicalPlan, planner.LogicalOptions(), func(plan *logical.Node) {
 		planner.AnnotateScanColumns(ctx, plan)
 	})
 	logicalPlan, err = auth.EnforceOptimizedPlan(ctx, db.catalog, logicalPlan)

@@ -49,7 +49,19 @@ import (
 // (ADR-0006, 2026-09-19). Four members for one loud floor; the translation
 // itself (`dagplan.residualWithStageSpellings`) lives on the AGPL side and
 // adds nothing here.
-const maxAGPLPhysicalMembers = 214
+// 214 → 216 (2026-09-19, arc BJ, #1223): `Planner.BushyJoinReorder` and
+// `Planner.LogicalOptions`. The first is the instance's copy of the bushy
+// option, set the way every AGPL caller already sets `LateMaterialization`.
+// The second is the whole option set as the logical optimizer takes it, for
+// the three AGPL sites that RE-OPTIMIZE a plan — the worker's pipeline
+// re-plan, the HTTP server's two entries, and dagplan's subquery
+// resolution. The alternative was to let each of them build a
+// `logical.Options` from the field by hand, which is a COPY of the
+// planner's configuration on the AGPL side: when Options grows a second
+// field, every hand-built copy silently drops it and the second query of a
+// statement is planned under settings the first one did not have. One
+// member is the smaller cost, and it is the same member forever.
+const maxAGPLPhysicalMembers = 216
 
 // measuredPhysicalMembers are the members reached through values. With the 16
 // package-scope names of measuredPhysicalNames they are the whole surface, and
@@ -198,6 +210,7 @@ PlanContext.WrapsAWindow
 Planner.AnnotateScanColumns
 Planner.ApplyContextColumnPolicies
 Planner.ApplyContextColumnPoliciesToNewScans
+Planner.BushyJoinReorder
 Planner.Catalog
 Planner.CheckPolicyPlanOrderFromContext
 Planner.Ctes
@@ -210,6 +223,7 @@ Planner.ExecuteSubquerySchema
 Planner.GetAggregateColumnStats
 Planner.GetManifest
 Planner.LateMaterialization
+Planner.LogicalOptions
 Planner.ManifestSnapshot
 Planner.MemoryBudget
 Planner.Plan

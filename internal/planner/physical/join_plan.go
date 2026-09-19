@@ -19,13 +19,13 @@ import (
 // Returns ok=false when the subtree has no scan root (e.g. another join) or
 // the manifest is unavailable — callers must treat "unknown" conservatively.
 //
-// Under BushyJoinReorder, join-shaped subtrees (composite build sides) are
+// Under Planner.BushyJoinReorder, join-shaped subtrees (composite build sides) are
 // estimated too: output bytes ≈ estimated output rows × the combined
 // per-row width of the join's visible inputs. Without this, a 25-row
 // nation ⋈ region pre-join is "unknown" → never broadcast-eligible → the
 // whole composite pays exchange-repartition for both sides (the Q08 SF10
 // regression, 2026-07-09: +135% from shuffling what should replicate).
-// Gated on the flag: flag-off keeps semi/anti-leaf builds on their
+// Gated on the instance's option: off keeps semi/anti-leaf builds on their
 // SF100-validated shuffle plans.
 func (p *Planner) EstimateSubtreeBytes(n *logical.Node) (int64, bool) {
 	// Distinct(Project[keys]) build sides (IN/EXISTS decorrelation and
@@ -43,7 +43,7 @@ func (p *Planner) EstimateSubtreeBytes(n *logical.Node) (int64, bool) {
 	}
 	scan := findScanNode(n)
 	if scan == nil {
-		if logical.BushyJoinReorder.Load() {
+		if p.BushyJoinReorder {
 			return p.estimateJoinSubtreeBytes(n)
 		}
 		return 0, false

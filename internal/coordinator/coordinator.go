@@ -97,6 +97,14 @@ type Config struct {
 	// (docs/design/late-materialization.md), on the local fast path and in
 	// worker fragments alike (rides the join-probe OpSpec). Off by default.
 	LateMaterialization bool
+	// BushyJoinReorder lets the cost-based join reorder emit bushy plans
+	// when strictly cheaper than every left-deep order
+	// (docs/design/bushy-join-cbo.md §3.2). It reaches the logical
+	// optimizer as this coordinator's own logical.Options, its planners as
+	// physical.Planner.BushyJoinReorder, and the workers that RE-PLAN a
+	// whole query from its text as Task.BushyJoinReorder — one value for
+	// one query, wherever it is planned (#1223). Off by default.
+	BushyJoinReorder bool
 	// SkewSplit enables adaptive skew-aware task layout for shuffled hash
 	// joins (docs/design/skew-aware-shuffle.md): hot partition groups —
 	// detected from the worker-reported per-partition shuffle output bytes
@@ -191,6 +199,15 @@ func (c *Coordinator) SetAuthProvider(p *auth.Provider) error {
 func (c *Coordinator) SetQueryLimits(global *config.QueryLimits, perRole map[string]*config.QueryLimits) {
 	c.queryLimits = global
 	c.roleQueryLimits = perRole
+}
+
+// logicalOptions is this coordinator's planner configuration as the logical
+// optimizer takes it. Its two entries optimize before they build a planner,
+// so they read it here; the planners they then build carry the same values
+// as fields, and a pipeline task carries them to the worker that re-plans
+// the statement (#1223).
+func (c *Coordinator) logicalOptions() logical.Options {
+	return logical.Options{BushyJoinReorder: c.config.BushyJoinReorder}
 }
 
 // resolveQueryLimits returns the limits that apply to the identity in ctx:
@@ -461,6 +478,9 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 	// rather than the dispatching context, which a dispatcher may have
 	// derived from context.Background() (#859 round 3).
 	c.scheduler.PolicedQuery = c.queryIsPoliced
+	// …and the planner option a re-planning worker must plan under, stamped
+	// at the same choke point (#1223).
+	c.scheduler.BushyJoinReorder = cfg.BushyJoinReorder
 	// Input-locality placement rides the streaming-exchange hints; without
 	// them no task ever carries InputLocations and the tier is inert.
 	if cfg.LocalityPlacement && cfg.StreamingExchange {
@@ -1082,7 +1102,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		}
 	}
 
-	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
+	logicalPlan = logical.OptimizeWith(logicalPlan, c.logicalOptions(), scanAnnotator)
 	// The optimizer MINTS scans; those are created after enforcement (#859).
 	logicalPlan, err = auth.EnforceOptimizedPlan(ctx, c.catalog, logicalPlan)
 	if err != nil {
@@ -1128,6 +1148,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	}
 	planner.SortMergeJoinBytes = c.config.SortMergeJoinBytes
 	planner.LateMaterialization = c.config.LateMaterialization
+	planner.BushyJoinReorder = c.config.BushyJoinReorder
 	planner.DynamicFiltersEnabled = c.config.DynamicFilters
 	planner.QueryLimits = c.resolveQueryLimits(ctx)
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
@@ -3605,7 +3626,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		}
 	}
 
-	logicalPlan = logical.Optimize(logicalPlan, explainAnnotator)
+	logicalPlan = logical.OptimizeWith(logicalPlan, c.logicalOptions(), explainAnnotator)
 	logicalPlan, err = auth.EnforceOptimizedPlan(ctx, c.catalog, logicalPlan)
 	if err != nil {
 		return "", "", err
@@ -3642,6 +3663,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	}
 	planner.SortMergeJoinBytes = c.config.SortMergeJoinBytes
 	planner.LateMaterialization = c.config.LateMaterialization
+	planner.BushyJoinReorder = c.config.BushyJoinReorder
 	planner.DynamicFiltersEnabled = c.config.DynamicFilters
 	planner.QueryLimits = c.resolveQueryLimits(ctx)
 	// The PLAN's own declaration of this statement's columns, taken before the

@@ -17,8 +17,12 @@ import (
 // TestTPCHQueriesBushyForced is the Layer B parity gate from
 // docs/design/bushy-join-cbo.md §4: with BushyJoinReorder enabled, every
 // query must return the same rows as the left-deep default over identical
-// data. One DB serves both runs — the flag is process-wide, so it is
-// toggled around each query pair.
+// data. TWO DBs serve the two arms — same MemStore, same bucket, same
+// rows, opposite Config.BushyJoinReorder — because the setting is the
+// instance's, so the arms are two instances rather than one instance and a
+// package flag toggled between queries (#1223). The dormancy assertion is
+// then a live property of the default instance while the bushy one is open
+// beside it, not a property of the moment between two Stores.
 //
 // Q02/Q22 compare row counts with the same tolerance as TestTPCHQueries:
 // their float-threshold predicates admit borderline rows that legitimately
@@ -26,8 +30,9 @@ import (
 func TestTPCHQueriesBushyForced(t *testing.T) {
 	ctx := context.Background()
 
+	store := objstore.NewMemStore()
 	db, err := wadjet.Open(ctx, wadjet.Config{
-		Store:  objstore.NewMemStore(),
+		Store:  store,
 		Bucket: "tpch",
 	})
 	if err != nil {
@@ -55,7 +60,17 @@ func TestTPCHQueriesBushyForced(t *testing.T) {
 		}
 	}
 
-	defer logical.BushyJoinReorder.Store(false)
+	// The second instance over the same data, asking for bushy. Opened
+	// after ingest so its catalog sees every table the first one wrote.
+	bushyDB, err := wadjet.Open(ctx, wadjet.Config{
+		Store:            store,
+		Bucket:           "tpch",
+		BushyJoinReorder: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bushyDB.Close()
 
 	queryNums := make([]int, 0, len(TPCHQueries))
 	for n := range TPCHQueries {
@@ -67,19 +82,16 @@ func TestTPCHQueriesBushyForced(t *testing.T) {
 	for _, qNum := range queryNums {
 		q := TPCHQueries[qNum]
 		t.Run(fmt.Sprintf("Q%02d_%s", qNum, q.Name), func(t *testing.T) {
-			logical.BushyJoinReorder.Store(false)
 			baseCount := logical.BushyJoinsPlanned.Load()
 			want, err := db.Query(ctx, q.SQL)
 			if err != nil {
 				t.Fatalf("baseline Q%d failed: %v", qNum, err)
 			}
 			if got := logical.BushyJoinsPlanned.Load(); got != baseCount {
-				t.Fatalf("dormancy broken: flag-off run planned %d bushy joins", got-baseCount)
+				t.Fatalf("dormancy broken: the default instance planned %d bushy joins", got-baseCount)
 			}
 
-			logical.BushyJoinReorder.Store(true)
-			got, err := db.Query(ctx, q.SQL)
-			logical.BushyJoinReorder.Store(false)
+			got, err := bushyDB.Query(ctx, q.SQL)
 			if err != nil {
 				t.Fatalf("bushy-forced Q%d failed: %v", qNum, err)
 			}
@@ -104,7 +116,7 @@ func TestTPCHQueriesBushyForced(t *testing.T) {
 		})
 	}
 	if planned := logical.BushyJoinsPlanned.Load() - plannedBefore; planned == 0 {
-		t.Fatal("bushy flag planned zero bushy joins across the suite — the enumeration never fired and this test proved nothing")
+		t.Fatal("the bushy instance planned zero bushy joins across the suite — the enumeration never fired and this test proved nothing")
 	} else {
 		t.Logf("bushy join orders chosen across the suite: %d", planned)
 	}

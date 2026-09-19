@@ -226,7 +226,7 @@ func TestReorderJoins_CBO_FactTableProbes(t *testing.T) {
 	join1 := NewJoin(scanA, scanB, "inner", "a.id = b.id")
 	join2 := NewJoin(join1, scanC, "inner", "b.id = c.id")
 
-	result := reorderJoins(join2)
+	result := reorderJoins(join2, Options{})
 
 	if result.Type != NodeJoin {
 		t.Fatalf("expected join, got %s", result.Type)
@@ -257,7 +257,7 @@ func TestReorderJoins_SkipsOuterJoins(t *testing.T) {
 	join1 := NewJoin(scanA, scanB, "left", "a.id = b.id")
 	join2 := NewJoin(join1, scanC, "inner", "b.id = c.id")
 
-	result := reorderJoins(join2)
+	result := reorderJoins(join2, Options{})
 
 	if result.Type != NodeJoin {
 		t.Fatalf("expected join, got %s", result.Type)
@@ -274,7 +274,7 @@ func TestReorderJoins_TwoTableEqualCost(t *testing.T) {
 	scanB := NewScan("t2", "")
 	join := NewJoin(scanA, scanB, "inner", "t1.id = t2.id")
 
-	result := reorderJoins(join)
+	result := reorderJoins(join, Options{})
 	if result.Type != NodeJoin {
 		t.Fatalf("expected join, got %s", result.Type)
 	}
@@ -294,7 +294,7 @@ func TestReorderJoins_TwoTableSwap(t *testing.T) {
 
 	join := NewJoin(scanSmall, scanLarge, "inner", "small.id = large.id")
 
-	result := reorderJoins(join)
+	result := reorderJoins(join, Options{})
 	if result.Type != NodeJoin {
 		t.Fatalf("expected join, got %s", result.Type)
 	}
@@ -330,7 +330,7 @@ func TestReorderJoins_CBO_AvoidsBuildingFactTable(t *testing.T) {
 	// ... JOIN part ON l_partkey = p_partkey (with filter on part)
 	j2 := NewJoin(j1, partFiltered, "inner", "l_partkey = p_partkey")
 
-	result := reorderJoins(j2)
+	result := reorderJoins(j2, Options{})
 
 	// Verify all tables present
 	tables := collectAllTables(result)

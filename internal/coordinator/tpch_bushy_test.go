@@ -22,10 +22,13 @@ func TestTPCHNativeDAG_BushyForced(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping TPCH SF0.01 bushy native-DAG suite in short mode")
 	}
-	logical.BushyJoinReorder.Store(true)
-	defer logical.BushyJoinReorder.Store(false)
-
 	_, coord, store := setupDistributed(t)
+	// The coordinator's own option, which is what the two fields cfg
+	// reaches are: the planners it builds, and the stamp PublishTasks puts
+	// on every task carrying SQL text for a worker to re-plan (#1223). Set
+	// together here for the same reason Coordinator.New sets them together.
+	coord.config.BushyJoinReorder = true
+	coord.scheduler.BushyJoinReorder = true
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	cat := coord.catalog
@@ -81,7 +84,7 @@ func TestTPCHNativeDAG_BushyForced(t *testing.T) {
 		t.Logf("failing queries summary:\n  %v", failures)
 	}
 	if planned := logical.BushyJoinsPlanned.Load() - plannedBefore; planned == 0 {
-		t.Fatal("bushy flag planned zero bushy joins across the distributed suite — gate proved nothing")
+		t.Fatal("the bushy coordinator planned zero bushy joins across the distributed suite — gate proved nothing")
 	} else {
 		t.Logf("bushy join orders chosen across the distributed suite: %d", planned)
 	}

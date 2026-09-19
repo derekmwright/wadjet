@@ -24,6 +24,7 @@ type ServeOptions struct {
 	BoundedDirtyWrites    bool
 	BroadcastBytes        int64
 	Bucket                string
+	BushyJoinReorder      bool
 	CacheBytes            int64
 	ClusterID             string
 	ConfigFile            string
@@ -83,6 +84,7 @@ func ServeOptionsNow() ServeOptions {
 		BoundedDirtyWrites:    boundedDirtyWrites,
 		BroadcastBytes:        broadcastBytes,
 		Bucket:                bucket,
+		BushyJoinReorder:      bushyJoinReorder,
 		CacheBytes:            cacheBytes,
 		ClusterID:             clusterID,
 		ConfigFile:            configFile,

@@ -38,7 +38,6 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/memory"
 	"github.com/derekmwright/wadjet/internal/harness"
 	"github.com/derekmwright/wadjet/internal/logio"
-	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
@@ -499,12 +498,6 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 		fatalf("catalog init: %v", err)
 	}
 
-	// Bushy join reorder (docs/design/bushy-join-cbo.md): process-wide
-	// planner knob — the join order is decided here at plan time, so the
-	// coordinator process is the only one that needs it. Default off.
-	logical.BushyJoinReorder.Store(os.Getenv("WADJET_BUSHY_JOIN_REORDER") == "1" ||
-		strings.EqualFold(os.Getenv("WADJET_BUSHY_JOIN_REORDER"), "true"))
-
 	// Coordinator — no embedded worker so it stays out of the data path.
 	// All data tasks run on the remote workers.
 	coord := coordinator.New(coordinator.Config{
@@ -520,6 +513,12 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 		// first touch. Default ON (matches the wadjet CLI default;
 		// SF10/SF100 validated 2026-07-09); set 0/false as the kill switch.
 		LateMaterialization: os.Getenv("WADJET_LATE_MATERIALIZATION") != "0" && !strings.EqualFold(os.Getenv("WADJET_LATE_MATERIALIZATION"), "false"),
+		// Bushy join reorder (docs/design/bushy-join-cbo.md §3.2): the join
+		// order is decided at plan time, so this coordinator's setting is
+		// the one that matters — and it rides every re-planned pipeline
+		// task to the workers (#1223). Default off.
+		BushyJoinReorder: os.Getenv("WADJET_BUSHY_JOIN_REORDER") == "1" ||
+			strings.EqualFold(os.Getenv("WADJET_BUSHY_JOIN_REORDER"), "true"),
 		// Skew-aware shuffle layout (docs/design/skew-aware-shuffle.md):
 		// split hot partition groups at join dispatch. Default ON (matches
 		// the wadjet CLI default; SF10 validated 2026-07-11); set 0/false

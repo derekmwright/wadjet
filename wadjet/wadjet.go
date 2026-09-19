@@ -44,6 +44,7 @@ type DB struct {
 	alertSchedulerStop  context.CancelFunc
 	sortMergeJoinBytes  int64
 	lateMaterialization bool
+	bushyJoinReorder    bool
 	queryLimits         *config.QueryLimits
 	roleQueryLimits     map[string]*config.QueryLimits
 	// dmlRedos counts DML statements redone because the table changed under
@@ -70,9 +71,10 @@ type Config struct {
 	LateMaterialization bool
 	// BushyJoinReorder lets the cost-based join reorder emit bushy plans
 	// when strictly cheaper than every left-deep order
-	// (docs/design/bushy-join-cbo.md). PROCESS-WIDE: the logical optimizer
-	// has no per-query config surface, so Open stores this into a package
-	// flag shared by every DB in the process. Off by default.
+	// (docs/design/bushy-join-cbo.md). INSTANCE-SCOPED: it reaches the
+	// optimizer as this DB's own logical.Options, so two DBs open in one
+	// process plan by their own settings and Close takes this one's with
+	// it (#1223). Off by default.
 	BushyJoinReorder bool
 	// EnableAlerts turns on the CREATE ALERT scheduler in embedded mode.
 	// When true, Open() creates a Scheduler that evaluates alerts on cadence.
@@ -122,6 +124,7 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		roleQueryLimits:     cfg.RoleLimits,
 		sortMergeJoinBytes:  cfg.SortMergeJoinBytes,
 		lateMaterialization: cfg.LateMaterialization,
+		bushyJoinReorder:    cfg.BushyJoinReorder,
 	}
 
 	// Attaching a policy set to a catalog is what BINDS its names to that
@@ -134,11 +137,6 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 	// open, exactly as it refuses to start under `wadjet serve`.
 	if err := db.authProvider.BindToCatalog(ctx, cat); err != nil {
 		return nil, fmt.Errorf("attaching the auth policy set: %w", err)
-	}
-
-	if cfg.BushyJoinReorder {
-		// Process-wide planner knob — see the Config field doc.
-		logical.BushyJoinReorder.Store(true)
 	}
 
 	if cfg.EnableAlerts {
@@ -216,6 +214,7 @@ func (db *DB) newPlanner(ctx context.Context) *physical.Planner {
 	p.SpillDir = db.spillDir
 	p.SortMergeJoinBytes = db.sortMergeJoinBytes
 	p.LateMaterialization = db.lateMaterialization
+	p.BushyJoinReorder = db.bushyJoinReorder
 	p.QueryLimits = db.resolveQueryLimits(ctx)
 	return p
 }
@@ -538,7 +537,7 @@ func (db *DB) query(ctx context.Context, sql string, gatherBytes int64) (res *Qu
 	if err != nil {
 		return nil, err
 	}
-	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
+	logicalPlan = logical.OptimizeWith(logicalPlan, planner.LogicalOptions(), func(plan *logical.Node) {
 		planner.AnnotateScanColumns(ctx, plan)
 	})
 	// The optimizer MINTS scans (decorrelation re-parses a subquery and
@@ -688,7 +687,7 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 	if err != nil {
 		return nil, err
 	}
-	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
+	logicalPlan = logical.OptimizeWith(logicalPlan, planner.LogicalOptions(), func(plan *logical.Node) {
 		planner.AnnotateScanColumns(ctx, plan)
 	})
 	logicalPlan, err = auth.EnforceOptimizedPlan(ctx, db.catalog, logicalPlan)

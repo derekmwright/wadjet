@@ -173,6 +173,7 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 	planner.MemoryBudget = 8 * threshold
 	planner.SortMergeJoinBytes = c.config.SortMergeJoinBytes
 	planner.LateMaterialization = c.config.LateMaterialization
+	planner.BushyJoinReorder = c.config.BushyJoinReorder
 	planner.QueryLimits = c.resolveQueryLimits(ctx)
 	physPlan, err := planner.Plan(ctx, logicalPlan)
 	if err != nil {

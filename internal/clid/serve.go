@@ -245,6 +245,7 @@ func runStandalone(ctx context.Context, o cli.ServeOptions, store objstore.Store
 		BroadcastBytesOverride: o.BroadcastBytes,
 		SortMergeJoinBytes:     o.SortMergeJoinBytes,
 		LateMaterialization:    o.LateMaterialization,
+		BushyJoinReorder:       o.BushyJoinReorder,
 		SkewSplit:              o.SkewSplit,
 		AggPartialSplit:        o.AggPartialSplit,
 		StreamingExchange:      o.StreamingExchange,
@@ -342,6 +343,7 @@ func runStandalone(ctx context.Context, o cli.ServeOptions, store objstore.Store
 		Metrics:             m,
 		SortMergeJoinBytes:  o.SortMergeJoinBytes,
 		LateMaterialization: o.LateMaterialization,
+		BushyJoinReorder:    o.BushyJoinReorder,
 	}
 
 	var cfgMgr *config.Manager
@@ -422,13 +424,18 @@ func runStandalone(ctx context.Context, o cli.ServeOptions, store objstore.Store
 	}, logger)
 
 	// Start PostgreSQL wire protocol server
+	// The pgwire fallback DB is a planner of this server's too — every
+	// statement the routing gate declines is planned here — so it carries
+	// the server's planner option rather than inheriting one from whichever
+	// other instance happened to be opened first (#1223).
 	pgDB, err := wadjet.Open(ctx, wadjet.Config{
-		Store:        store,
-		Bucket:       o.Bucket,
-		MetaKV:       kv,
-		AuthProvider: provider,
-		QueryLimits:  globalLimits,
-		RoleLimits:   roleLimits,
+		Store:            store,
+		Bucket:           o.Bucket,
+		MetaKV:           kv,
+		AuthProvider:     provider,
+		QueryLimits:      globalLimits,
+		RoleLimits:       roleLimits,
+		BushyJoinReorder: o.BushyJoinReorder,
 	})
 	if err != nil {
 		return fmt.Errorf("opening DB for pgwire: %w", err)
@@ -550,6 +557,7 @@ func runCoordinator(ctx context.Context, o cli.ServeOptions, store objstore.Stor
 		BroadcastBytesOverride: o.BroadcastBytes,
 		SortMergeJoinBytes:     o.SortMergeJoinBytes,
 		LateMaterialization:    o.LateMaterialization,
+		BushyJoinReorder:       o.BushyJoinReorder,
 		SkewSplit:              o.SkewSplit,
 		AggPartialSplit:        o.AggPartialSplit,
 		StreamingExchange:      o.StreamingExchange,
@@ -633,6 +641,7 @@ func runCoordinator(ctx context.Context, o cli.ServeOptions, store objstore.Stor
 		Metrics:             m,
 		SortMergeJoinBytes:  o.SortMergeJoinBytes,
 		LateMaterialization: o.LateMaterialization,
+		BushyJoinReorder:    o.BushyJoinReorder,
 	}
 
 	var cfgMgr *config.Manager

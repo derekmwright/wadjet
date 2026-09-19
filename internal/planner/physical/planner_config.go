@@ -118,6 +118,15 @@ type Planner struct {
 	// (docs/design/late-materialization.md). Off by default.
 	LateMaterialization bool
 
+	// BushyJoinReorder is this planner instance's copy of the logical
+	// option of the same name (docs/design/bushy-join-cbo.md §3.2). The
+	// physical side reads it for one decision — EstimateSubtreeBytes sizes
+	// a JOIN-shaped build subtree only in the bushy regime — and hands it
+	// back to the logical optimizer through LogicalOptions for the second
+	// query a subquery pipeline plans. It is a field, not a package flag,
+	// so two planners in one process can disagree (#1223). Off by default.
+	BushyJoinReorder bool
+
 	// MaterializedInputs holds pre-scanned data for scan-split pipeline mode.
 	// When populated, buildScan uses these batches instead of reading from the
 	// object store, allowing parallel scan I/O with single-worker compute.

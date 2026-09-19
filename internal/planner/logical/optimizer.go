@@ -21,7 +21,10 @@ var partitionKeys = map[string]bool{
 	"year": true, "month": true, "day": true, "hour": true,
 }
 
-// Optimize applies logical optimizations to the plan tree.
+// Optimize applies logical optimizations to the plan tree under the DEFAULT
+// planner options. Callers that hold an instance's configuration must use
+// OptimizeWith and pass it: a defaulted Optimize plans the shipped regime,
+// never another instance's settings (#1223).
 //
 // An optional ScanAnnotator function may be provided to populate scan metadata
 // (ScanColumns) on newly created scan nodes after IN-to-SemiJoin conversion.
@@ -29,6 +32,13 @@ var partitionKeys = map[string]bool{
 // column references. Without an annotator, scalar decorrelation may fail for
 // subqueries that use unqualified outer column references.
 func Optimize(plan *Node, annotators ...func(*Node)) *Node {
+	return OptimizeWith(plan, Options{}, annotators...)
+}
+
+// OptimizeWith applies logical optimizations to the plan tree under opts —
+// the planner configuration of the instance this plan belongs to. See
+// Options.
+func OptimizeWith(plan *Node, opts Options, annotators ...func(*Node)) *Node {
 	// Before every rule that reads the SELECT list — computeRequiredColumns
 	// most of all. An unexpanded star names no columns, so column pruning
 	// narrowed the scan to whatever else the SELECT list mentioned and the
@@ -108,7 +118,7 @@ func Optimize(plan *Node, annotators ...func(*Node)) *Node {
 	// (15.8s, 8.8 GB materialized) before filtering to 6,398. Kill switch
 	// WADJET_SEMI_PUSHDOWN=0.
 	plan = pushSemiAntiBelowInnerJoins(plan)
-	plan = reorderJoins(plan)
+	plan = reorderJoins(plan, opts)
 	// Immediately after reorderJoins, which is what decides — from estimated
 	// row counts — which relation's columns each inner join emits BARE and
 	// which it qualifies. The IN / EXISTS decorrelations run at steps 35/36
@@ -3772,12 +3782,12 @@ type joinEdge struct {
 
 // reorderJoins recursively looks for chains of INNER JOINs and reorders them
 // so that smaller (filtered) relations are joined first.
-func reorderJoins(n *Node) *Node {
+func reorderJoins(n *Node, opts Options) *Node {
 	if n == nil {
 		return nil
 	}
 	for i, child := range n.Children {
-		n.Children[i] = reorderJoins(child)
+		n.Children[i] = reorderJoins(child, opts)
 	}
 	if n.Type != NodeJoin {
 		return n
@@ -3811,7 +3821,7 @@ func reorderJoins(n *Node) *Node {
 		}
 		return n
 	}
-	return costBasedJoinReorder(rels, edges)
+	return costBasedJoinReorder(rels, edges, opts)
 }
 
 // hasCTERef returns true if the subtree contains a CTE reference scan.
@@ -4250,9 +4260,9 @@ func greedyJoinReorder(rels []*Node, edges []joinEdge) *Node {
 // costBasedJoinReorder uses dynamic programming (for up to 16 relations) or
 // enhanced greedy to find the join order that minimizes total hash join cost,
 // estimated from cardinality propagation through the join tree.
-func costBasedJoinReorder(rels []*Node, edges []joinEdge) *Node {
+func costBasedJoinReorder(rels []*Node, edges []joinEdge, opts Options) *Node {
 	if len(rels) <= 16 {
-		plan, bushyJoins := dpJoinReorder(rels, edges)
+		plan, bushyJoins := dpJoinReorder(rels, edges, opts)
 		// Validate: if the DP produced any inner join with an empty
 		// condition (cross join where one shouldn't be), fall back to
 		// the greedy algorithm which handles disconnected components.
@@ -4282,12 +4292,6 @@ func hasEmptyJoinCond(n *Node) bool {
 	}
 	return false
 }
-
-// BushyJoinReorder enables bushy subset-partition transitions in the DP join
-// reorder (docs/design/bushy-join-cbo.md §3.2). Process-wide, set once at
-// startup from --bushy-join-reorder / wadjet.Config; default off. Read at
-// plan time, so tests may toggle it around a planning call.
-var BushyJoinReorder atomic.Bool
 
 // BushyJoinsPlanned counts queries whose FINAL chosen join order contains at
 // least one bushy join (a join of two composite intermediates). Mechanism
@@ -4322,14 +4326,14 @@ type dpEntry struct {
 // dpJoinReorder uses bitmask dynamic programming to find the optimal join
 // order. For N relations, the left-deep pass evaluates O(2^N × N) states —
 // each transition adds one relation as the build side of a new hash join.
-// With BushyJoinReorder enabled (and N ≤ bushyMaxRels), each subset is
+// With Options.BushyJoinReorder set (and N ≤ bushyMaxRels), each subset is
 // additionally offered every connected two-way partition of itself
 // (composite ⋈ composite), accepted only on STRICT cost improvement so
 // FK→PK cost ties keep today's left-deep shapes.
 //
 // Returns the chosen plan and the number of bushy joins it contains
 // (0 for pure left-deep plans).
-func dpJoinReorder(rels []*Node, edges []joinEdge) (*Node, int) {
+func dpJoinReorder(rels []*Node, edges []joinEdge, opts Options) (*Node, int) {
 	n := len(rels)
 
 	// Pre-compute statistics for each base relation
@@ -4358,7 +4362,7 @@ func dpJoinReorder(rels []*Node, edges []joinEdge) (*Node, int) {
 		}
 	}
 
-	bushy := BushyJoinReorder.Load() && n <= bushyMaxRels
+	bushy := opts.BushyJoinReorder && n <= bushyMaxRels
 
 	// Fill DP table bottom-up by extending each reachable subset
 	for mask := 1; mask < maxMask; mask++ {

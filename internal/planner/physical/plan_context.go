@@ -17,6 +17,19 @@ type PlanContext struct {
 // PlanContext returns the context for this planner's current statement.
 func (p *Planner) PlanContext() *PlanContext { return &PlanContext{Planner: p} }
 
+// LogicalOptions is this planner's configuration as the logical optimizer
+// takes it. Any caller that re-optimizes a plan under this planner — the
+// local subquery pipeline, and the stage planner's DAG counterpart — passes
+// it to logical.OptimizeWith so the second query is planned by the same
+// instance settings as the first (#1223). One accessor rather than a field
+// per option: a new Options field then costs nothing at the seam.
+func (p *Planner) LogicalOptions() logical.Options {
+	if p == nil {
+		return logical.Options{}
+	}
+	return logical.Options{BushyJoinReorder: p.BushyJoinReorder}
+}
+
 func (PlanContext) AggregateOutputNames(node *logical.Node) ([]string, bool) {
 	return aggregateOutputNames(node)
 }

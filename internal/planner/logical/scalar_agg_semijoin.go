@@ -10,10 +10,12 @@ import (
 
 // ScalarAggSemijoin gates reduceDecorrelatedScalarAggs.
 // Kill switch: WADJET_SCALAR_AGG_SEMIJOIN=0 (mirrors WADJET_SCALAR_DEFER /
-// WADJET_EXCHANGE_ELIDE). Default on. Exported as an atomic (the
-// BushyJoinReorder pattern) so tests that exercise the UNreduced
-// decorrelated shape — aggregate-shuffle and dynamic-filter fixtures built
-// on Q17/Q20 — can flip it with a defer-restore.
+// WADJET_EXCHANGE_ELIDE). Default on, and env-set for a whole process — a
+// kill switch, not an instance setting, which is why it stays an atomic
+// while the instance settings live on Options. Tests that exercise the
+// UNreduced decorrelated shape — aggregate-shuffle and dynamic-filter
+// fixtures built on Q17/Q20 — flip it with a defer-restore. It has no
+// Config path today; giving it one means moving it onto Options (#1223).
 var ScalarAggSemijoin atomic.Bool
 
 func init() {
