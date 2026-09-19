@@ -332,13 +332,17 @@ PostgreSQL has none. SemVer 2.0.0 defines precedence; node-semver defines ranges
 
 `NORMALIZE(s, 'NFC')` answers here and is a syntax error on PostgreSQL 17.11, which admits only the bare keyword. Both spellings mean the same thing. (ADR-0012 §5/#1169)
 
-**`#` accepts operands PostgreSQL refuses, and answers bigint for int4 operands.**
+**`#` accepts operands PostgreSQL refuses.**
 
-`5.0 # 3` and `'a' # 'b'` answer here (the bitwise family reads its operands as integers) where PostgreSQL raises 42883 and 42725; `int4 # int4` is declared bigint here and integer there. Both are the bitwise family's existing widening, which `#` inherits rather than introduces. (ADR-0012 §5/#1179)
+`5.0 # 3` and `'a' # 'b'` answer here (the bitwise family reads its operands as integers) where PostgreSQL raises 42883 and 42725. The declared WIDTH agrees: `int4 # int4` is `integer` and a bigint operand makes it `bigint`, on both engines. (ADR-0012 §5/#1179)
 
 ## Not supported
 
 [SQL reference](sql-reference.md).
+
+**`LOCALTIMESTAMP(p)`'s precision is accepted and ignored.**
+
+`LOCALTIMESTAMP(0) = LOCALTIMESTAMP(6)` is `f` on PostgreSQL 17.11, which truncates the value to the requested precision, and `t` here: this engine renders an instant to milliseconds and has no per-call precision. The wire declares the base type either way. (ADR-0012 §5/#1169-localtimestamp-precision)
 
 **`LOCALTIME`, `IS [form] NORMALIZED` and the `U&'…'` literal have no grammar.**
 

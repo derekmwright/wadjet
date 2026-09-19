@@ -92,8 +92,38 @@ func TestArcPTTheStandardSpellingsAnswerPostgresValues(t *testing.T) {
 		// word-boundary escape there and answers FALSE, not "literal b".
 		{name: "similar_escape_before_a_letter_is_the_regex_escape",
 			sql: `SELECT 'abc' SIMILAR TO 'a#bc' ESCAPE '#' AS v`, want: "false", pg: "f"},
+		// A DANGLING escape contributes NOTHING on the server: the pattern is
+		// the rest of it. The round-1 notes reasoned from `'abc' SIMILAR TO
+		// 'a\'` alone, which does not discriminate — `a` does not match `abc`
+		// either way — and the engine matched NOTHING for every dangling
+		// pattern, including a `WHERE` that selects every non-NULL row on
+		// 17.11 (round-1 review, B2).
+		{name: "similar_dangling_escape_after_a_full_match",
+			sql: `SELECT 'abc' SIMILAR TO 'abc!' ESCAPE '!' AS v`, want: "true", pg: "t"},
+		{name: "similar_dangling_default_escape",
+			sql: `SELECT 'abc' SIMILAR TO 'abc\' AS v`, want: "true", pg: "t"},
+		{name: "similar_dangling_escape_after_a_wildcard",
+			sql: `SELECT 'abc' SIMILAR TO '%!' ESCAPE '!' AS v`, want: "true", pg: "t"},
+		{name: "similar_dangling_escape_after_a_prefix_wildcard",
+			sql: `SELECT 'abc' SIMILAR TO 'a%!' ESCAPE '!' AS v`, want: "true", pg: "t"},
+		{name: "similar_dangling_escape_over_the_empty_string",
+			sql: `SELECT '' SIMILAR TO '!' ESCAPE '!' AS v`, want: "true", pg: "t"},
+		{name: "similar_dangling_escape_one_character",
+			sql: `SELECT 'a' SIMILAR TO 'a\' AS v`, want: "true", pg: "t"},
+		{name: "not_similar_dangling_escape",
+			sql: `SELECT 'abc' NOT SIMILAR TO 'abc!' ESCAPE '!' AS v`, want: "false", pg: "f"},
+		{name: "similar_dangling_escape_alone_does_not_match",
+			sql: `SELECT 'abc' SIMILAR TO '!' ESCAPE '!' AS v`, want: "false", pg: "f"},
 		{name: "similar_trailing_escape_matches_nothing",
 			sql: `SELECT 'abc' SIMILAR TO 'a\' AS v`, want: "false", pg: "f"},
+		{name: "similar_escaped_escape", sql: `SELECT 'a!b' SIMILAR TO 'a!!b' ESCAPE '!' AS v`,
+			want: "true", pg: "t"},
+		{name: "similar_escape_before_a_metacharacter",
+			sql: `SELECT 'a(b' SIMILAR TO 'a!(b' ESCAPE '!' AS v`, want: "true", pg: "t"},
+		{name: "similar_escape_before_an_underscore",
+			sql: `SELECT 'a_b' SIMILAR TO 'a!_b' ESCAPE '!' AS v`, want: "true", pg: "t"},
+		{name: "similar_null_escape", sql: `SELECT ('abc' SIMILAR TO 'abc' ESCAPE NULL) IS NULL AS v`,
+			want: "true", pg: "NULL"},
 		// A pattern the language cannot express is a REFUSAL, never NULL.
 		{name: "similar_bad_quantifier_refuses", sql: `SELECT 'abc' SIMILAR TO '*' AS v`,
 			code: "2201B", pg: "2201B invalid regular expression: quantifier operand invalid"},
@@ -172,8 +202,25 @@ func TestArcPTTheStandardSpellingsAnswerPostgresValues(t *testing.T) {
 			want: "true", pg: "t"},
 		{name: "like_escape_empty_disables_escaping",
 			sql: `SELECT 'a%b' LIKE 'a%b' ESCAPE '' AS v`, want: "true", pg: "t"},
+		// 22025 is the server's class for BOTH escape-string failures: a
+		// too-long escape and a pattern that ends with one. The arc shipped
+		// 22019 for the first (round-1 review, P1).
 		{name: "like_escape_too_long_refuses", sql: `SELECT 'a%b' LIKE 'a!%b' ESCAPE '!!' AS v`,
-			code: "22019", pg: "22019 invalid escape string"},
+			code: "22025", pg: "22025 invalid escape string"},
+		{name: "similar_escape_too_long_refuses",
+			sql:  `SELECT 'a%b' SIMILAR TO 'a!%b' ESCAPE '!!' AS v`,
+			code: "22025", pg: "22025 invalid escape string"},
+		// A LIKE pattern ending in the escape is 22025 only where the matcher
+		// REACHES it: the server short-circuits to FALSE when the string is
+		// exhausted first (round-1 review, N6).
+		{name: "like_dangling_escape_after_a_full_match",
+			sql: `SELECT 'abc' LIKE 'abc!' ESCAPE '!' AS v`, want: "false", pg: "f"},
+		{name: "like_dangling_escape_with_input_left",
+			sql: `SELECT 'abcd' LIKE 'abc!' ESCAPE '!' AS v`, code: "22025",
+			pg: "22025 LIKE pattern must not end with escape character"},
+		{name: "like_dangling_escape_after_a_wildcard",
+			sql: `SELECT 'abc' LIKE '%!' ESCAPE '!' AS v`, code: "22025",
+			pg: "22025 LIKE pattern must not end with escape character"},
 		{name: "like_escape_null", sql: `SELECT 'a%b' LIKE 'a!%b' ESCAPE NULL AS v`,
 			want: "NULL", pg: "NULL"},
 		{name: "like_escape_in_a_where",

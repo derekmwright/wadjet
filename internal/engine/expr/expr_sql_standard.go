@@ -83,8 +83,9 @@ func fnOverlay(args []any) any {
 // and ILIKE are expanded at parse time rather than flagged.
 //
 // PostgreSQL's rules, measured: an escape string of more than one character
-// is 22019; the EMPTY string disables escaping entirely; a NULL escape (or a
-// NULL operand, or a NULL pattern) makes the whole predicate NULL.
+// is 22025 (`invalid escape string`), the same class as a pattern that ends
+// with the escape; the EMPTY string disables escaping entirely; a NULL escape
+// (or a NULL operand, or a NULL pattern) makes the whole predicate NULL.
 func fnLikeEscape(args []any) any {
 	if len(args) < 3 {
 		return nil
@@ -94,7 +95,7 @@ func fnLikeEscape(args []any) any {
 	}
 	esc := toString(args[2])
 	if len([]rune(esc)) > 1 {
-		panic(fatalEval{sqlerr.New("22019", "invalid escape string")})
+		panic(fatalEval{sqlerr.New("22025", "invalid escape string")})
 	}
 	var e byte
 	if esc != "" {
@@ -118,8 +119,14 @@ func matchLikeEscRecur(s, pattern string, si, pi int, hasEsc bool, esc byte) boo
 		if hasEsc && c == esc {
 			// The escape character makes the NEXT character literal. A
 			// trailing escape is 22025 on the server ("LIKE pattern must not
-			// end with escape character").
+			// end with escape character") — but only where the matcher
+			// REACHES it: PostgreSQL short-circuits to FALSE when the string
+			// is exhausted first, so `'abc' LIKE 'abc!' ESCAPE '!'` is `f`
+			// there and was a refusal here (round-1 review, N6).
 			if pi+1 >= len(pattern) {
+				if si >= len(s) {
+					return false
+				}
 				panic(fatalEval{sqlerr.New("22025",
 					"LIKE pattern must not end with escape character")})
 			}
@@ -198,7 +205,7 @@ func fnSimilarTo(args []any) any {
 		}
 		esc = toString(args[2])
 		if len([]rune(esc)) > 1 {
-			panic(fatalEval{sqlerr.New("22019", "invalid escape string")})
+			panic(fatalEval{sqlerr.New("22025", "invalid escape string")})
 		}
 	}
 	pattern := toString(args[1])
@@ -259,11 +266,14 @@ func SimilarToRegexp(pattern, escape string) string {
 			// for all three.
 			//
 			// A DANGLING escape is the one place the passthrough cannot be
-			// verbatim: a trailing backslash does not compile, while
-			// `'abc' SIMILAR TO 'a\'` is FALSE on the server. A character
-			// class that matches nothing carries that.
+			// verbatim: a trailing backslash does not compile. It contributes
+			// NOTHING on the server, measured on 17.11 — `'a' SIMILAR TO 'a\'`
+			// and `'abc' SIMILAR TO 'abc!' ESCAPE '!'` are both TRUE, and
+			// `'' SIMILAR TO '!' ESCAPE '!'` is TRUE. (`'abc' SIMILAR TO 'a\'`
+			// is FALSE there because `a` does not match `abc`, not because a
+			// dangling escape matches nothing — the cell this arc's round-1
+			// notes reasoned from, which does not discriminate.)
 			if i+1 >= len(runes) {
-				b.WriteString(`[^\s\S]`)
 				break
 			}
 			i++
