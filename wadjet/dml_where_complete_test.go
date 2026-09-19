@@ -40,13 +40,11 @@ func TestDMLWhereMustParseInFull(t *testing.T) {
 		sql  string
 	}{
 		{"unsupported text-search operator", `DELETE FROM pr WHERE id > 0 AND name @@ 'zzz'`},
-		{"unsupported arithmetic operator", `DELETE FROM pr WHERE id > 0 AND n # 3`},
 		{"PostgreSQL ISNULL suffix", `DELETE FROM pr WHERE name <> 'zzz' AND id ISNULL`},
 		{"stray token after a parenthesised term", `DELETE FROM pr WHERE (id = 1) garbage AND name = 'zzz'`},
 		{"stray token after the whole predicate", `DELETE FROM pr WHERE id = 1 garbage`},
 		{"regex match operator", `DELETE FROM pr WHERE name ~ 'zzz' AND id = 1`},
 		{"COLLATE", `DELETE FROM pr WHERE id > 0 AND name = 'zzz' COLLATE "C"`},
-		{"SIMILAR TO ... ESCAPE", `DELETE FROM pr WHERE id > 0 AND name SIMILAR TO 'zzz' ESCAPE '\'`},
 		{"LIMIT on a DELETE", `DELETE FROM pr WHERE id = 1 LIMIT 1`},
 		// A second statement after the first is not part of the first
 		// statement's WHERE. It used to be swallowed by the clause text and
@@ -69,6 +67,54 @@ func TestDMLWhereMustParseInFull(t *testing.T) {
 			}
 			if after := aliasRows686(t, db); strings.Join(after, " ") != strings.Join(before, " ") {
 				t.Errorf("the refused statement changed pr: %v -> %v", before, after)
+			}
+		})
+	}
+}
+
+// The two clauses this server LEARNED to read in full (arc PT): the
+// completeness requirement is satisfied, so the row set is decided by what the
+// clause MEANS — and both agree with PostgreSQL 17.11 over these rows.
+//
+// `n # 3` is a bigint in a truth context, which PostgreSQL refuses with 42804
+// ("argument of AND must be type boolean"), and so does this server now that
+// the declared return type of a call is read there: before that, the operator
+// parsed and the integer was evaluated as a condition, and the DELETE emptied
+// a table the server leaves untouched. `SIMILAR TO 'zzz' ESCAPE '\'` matches
+// no row on either engine, so both answer DELETE 0.
+func TestDMLWhereThePTSpellingsAreReadInFull(t *testing.T) {
+	for _, tc := range []struct {
+		name, sql, state, tag string
+	}{
+		{name: "an integer conjunct is 42804, not a deletion",
+			sql:   `DELETE FROM pr WHERE id > 0 AND n # 3`,
+			state: "42804"},
+		{name: "SIMILAR TO ... ESCAPE matches nothing",
+			sql: `DELETE FROM pr WHERE id > 0 AND name SIMILAR TO 'zzz' ESCAPE '\'`,
+			tag: "DELETE 0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := aliasDB686(t)
+			before := aliasRows686(t, db)
+			res, err := db.Execute(context.Background(), tc.sql)
+			if tc.state != "" {
+				if err == nil {
+					t.Fatalf("%s answered %s %d; PostgreSQL 17.11 refuses it with %s. pr is now %v",
+						tc.sql, res.Command, res.RowsAffected, tc.state, aliasRows686(t, db))
+				}
+				if got := sqlerr.StateOf(err); got != tc.state {
+					t.Errorf("%s: SQLSTATE %q, want %q (err: %v)", tc.sql, got, tc.state, err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("%s: %v — PostgreSQL 17.11 answers %s", tc.sql, err, tc.tag)
+				}
+				if got := fmt.Sprintf("%s %d", res.Command, res.RowsAffected); got != tc.tag {
+					t.Errorf("%s: command tag %q, want %q", tc.sql, got, tc.tag)
+				}
+			}
+			if after := aliasRows686(t, db); strings.Join(after, " ") != strings.Join(before, " ") {
+				t.Errorf("the statement changed pr: %v -> %v", before, after)
 			}
 		})
 	}

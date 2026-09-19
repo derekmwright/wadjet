@@ -5,6 +5,7 @@ package physical
 import (
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -155,12 +156,26 @@ func provableNonBooleanType(node plansql.Node, scope *colScope) (parquet.TypeID,
 	case *plansql.UnaryOp:
 		return provableNonBooleanType(n.Inner, scope)
 	case *plansql.FuncCallNode:
-		// Only the AGGREGATES whose result type is fixed regardless of input.
-		// A scalar function's return type is not carried here, and guessing
-		// one is how a false positive gets in.
+		// The AGGREGATES whose result type is fixed regardless of input...
 		switch strings.ToLower(n.Name) {
 		case "count":
 			return parquet.TypeInt64, "bigint", true
+		}
+		// ...and every registered scalar function whose return type is
+		// DECLARED and fixed. The declaration is the contract (ADR-0038), not
+		// a guess: `upper(s)` is text on this engine and on the server, which
+		// refuses `WHERE upper(s)` with 42804 naming it. A POLYMORPHIC
+		// declaration mirrors an argument whose type no batch has decided yet
+		// and is left alone, which is the bound the rest of this function
+		// keeps.
+		//
+		// The reason it is here: an OPERATOR the parser rewrites into a call
+		// reaches this walk as a call. `a # b` is `bitwise_xor(a, b)` and
+		// `a ^ b` is `power(a, b)`, and an untyped call in a truth context
+		// meant `DELETE FROM t WHERE id > 0 AND n # 3` deleted every row
+		// where PostgreSQL raises 42804 (#1179).
+		if typ, ok := expr.FuncFixedNonBooleanType(strings.ToLower(n.Name)); ok {
+			return parquet.TypeID(typ), pgTypeName(parquet.TypeID(typ)), true
 		}
 		return 0, "", false
 	case *plansql.SubqueryNode:
@@ -256,4 +271,33 @@ func pgTypeName(t parquet.TypeID) string {
 	// therefore no name for it. The refusal still fires — neither is a boolean
 	// — and names what wadjet calls it.
 	return strings.ToLower(t.String())
+}
+
+// RefuseNonBooleanDMLPredicate holds a DELETE's or an UPDATE's WHERE clause to
+// the same truth-context rule a SELECT's is held to: `argument of WHERE must
+// be type boolean`, SQLSTATE 42804, PostgreSQL's own sentence.
+//
+// A DML predicate is COMPILED and not planned (ADR-0031), so nothing on that
+// path ran this check — and the per-row closure reads a non-boolean value as
+// FALSE only at the TOP: an integer under an AND was evaluated as a condition
+// and matched every row, so `DELETE FROM t WHERE id > 0 AND n # 3` emptied a
+// table PostgreSQL leaves untouched (#1179; the operator made the clause
+// parseable, and the hole under it had been reachable through any non-boolean
+// CALL). This is a VALIDATION over the clause the door already parsed, not a
+// plan: the target's own columns are the scope, and nothing else is consulted.
+func RefuseNonBooleanDMLPredicate(node plansql.Node, alias string, schema []parquet.Column) error {
+	if node == nil {
+		return nil
+	}
+	scope := newColScope()
+	for _, c := range schema {
+		scope.addQualifiedTyped("", c.Name, c.Type)
+		if alias != "" {
+			scope.addQualifiedTyped(alias, c.Name, c.Type)
+		}
+	}
+	if err := checkBooleanContext(node, scope, "WHERE"); err != nil {
+		return err
+	}
+	return checkCaseWhenContexts(node, scope)
 }

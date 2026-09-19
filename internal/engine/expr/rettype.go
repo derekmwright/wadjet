@@ -900,6 +900,29 @@ func FuncReturnsInteger(name string) bool {
 	return DefaultRegistry.ReturnType(name).Integer()
 }
 
+// FuncFixedNonBooleanType reports the type a registered function ALWAYS
+// returns, when that type is fixed and is not boolean.
+//
+// It is the third reader of the same declaration (`Integer`, `Text`,
+// `Boolean` are the others) and it exists for the truth-context check: a call
+// in a WHERE, an AND, an OR or a searched CASE's WHEN must be boolean, and
+// PostgreSQL refuses `WHERE upper(s)` with 42804 naming `text`. The planner
+// could not type a call at all before, so a non-boolean one passed — and an
+// OPERATOR the parser rewrites into a call (`a # b`, `a ^ b`) passed with it,
+// which made `DELETE … WHERE id > 0 AND n # 3` empty a table the server
+// leaves untouched (#1179).
+//
+// Only a FIXED declaration answers, for Integer's reason: a polymorphic one
+// mirrors an argument whose type no batch has decided yet, and a wrong claim
+// here REFUSES a statement that is legal.
+func FuncFixedNonBooleanType(name string) (batch.TypeID, bool) {
+	r := DefaultRegistry.ReturnType(name)
+	if r.kind != retFixed || r.typ == batch.TypeBool {
+		return 0, false
+	}
+	return r.typ, true
+}
+
 // RetRow declares the complete child schema needed to allocate a ROW result.
 func RetRow(fields []parquet.Column) Ret {
 	return Ret{kind: retFixed, typ: batch.TypeRow, schema: &parquet.Column{Type: parquet.TypeRow, Fields: fields}}

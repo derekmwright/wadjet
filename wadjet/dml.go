@@ -2678,6 +2678,13 @@ func BuildDMLPredicate(target plansql.DMLTarget, schema []parquet.Column, sub *D
 	if err := refuseDMLLiteralPairs(node, schema); err != nil {
 		return nil, err
 	}
+	// A TRUTH CONTEXT, held to the same rule a SELECT's WHERE is held to:
+	// `DELETE FROM t WHERE id > 0 AND n # 3` is 42804 on the server and
+	// deleted every row here, because the per-row closure reads a non-boolean
+	// as false only at the TOP of the clause (#1179).
+	if err := physical.RefuseNonBooleanDMLPredicate(node, target.Alias, schema); err != nil {
+		return nil, err
+	}
 
 	compiled, err := compileDMLPredicate(node, target, schema, sub)
 	if err != nil {
