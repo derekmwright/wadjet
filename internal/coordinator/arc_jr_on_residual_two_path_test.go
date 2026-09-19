@@ -864,8 +864,6 @@ func jrCells() []c1Case {
 			name: "inner/resonly/inlist",
 			sql:  "SELECT l.id AS a, r.id AS b, r.n AS rn FROM jr_l l JOIN jr_r r ON r.s IN ('alpha', 'zeta') ORDER BY 1, 2, 3",
 			want: "cols=[a:INT64 b:INT64 rn:INT64] rows=12 | 1,101,10 | 1,104,61 | 2,101,10 | 2,104,61 | 3,101,10 | 3,104,61 | 4,101,10 | 4,104,61 | 5,101,10 | 5,104,61 | 6,101,10 | 6,104,61",
-			pin:  jrCrossJoinFilterPin("cols=[a:INT64 b:INT64 rn:INT64] rows=24 | 1,101,10 | 1,102,15 | 1,103,30 | 1,104,61 | 2,101,10 | 2,102,15 | 2,103,30 | 2,104,61 | 3,101,10 | 3,102,15 | 3,103,30 | 3,104,61 | 4,101,10 | 4,102,15 | 4,103,30 | 4,104,61 | 5,101,10 | 5,102,15 | 5,103,30 | 5,104,61 | 6,101,10 | 6,102,15 | 6,103,30 | 6,104,61"),
-			why:  jrCrossJoinFilterWhy,
 		},
 		{
 			name: "inner/resonly/inexpr",
@@ -901,15 +899,11 @@ func jrCells() []c1Case {
 			name: "inner/resonly/notlike",
 			sql:  "SELECT l.id AS a, r.id AS b, r.n AS rn FROM jr_l l JOIN jr_r r ON r.s NOT LIKE 'a%' ORDER BY 1, 2, 3",
 			want: "cols=[a:INT64 b:INT64 rn:INT64] rows=24 | 1,102,15 | 1,103,30 | 1,104,61 | 1,105,70 | 2,102,15 | 2,103,30 | 2,104,61 | 2,105,70 | 3,102,15 | 3,103,30 | 3,104,61 | 3,105,70 | 4,102,15 | 4,103,30 | 4,104,61 | 4,105,70 | 5,102,15 | 5,103,30 | 5,104,61 | 5,105,70 | 6,102,15 | 6,103,30 | 6,104,61 | 6,105,70",
-			pin:  jrCrossJoinFilterPin("cols=[a:INT64 b:INT64 rn:INT64] rows=36 | 1,101,10 | 1,102,15 | 1,103,30 | 1,104,61 | 1,105,70 | 1,106,NULL | 2,101,10 | 2,102,15 | 2,103,30 | 2,104,61 | 2,105,70 | 2,106,NULL | 3,101,10 | 3,102,15 | 3,103,30 | 3,104,61 | 3,105,70 | 3,106,NULL | 4,101,10 | 4,102,15 | 4,103,30 | 4,104,61 | 4,105,70 | 4,106,NULL | 5,101,10 | 5,102,15 | 5,103,30 | 5,104,61 | 5,105,70 | 5,106,NULL | 6,101,10 | 6,102,15 | 6,103,30 | 6,104,61 | 6,105,70 | 6,106,NULL"),
-			why:  jrCrossJoinFilterWhy,
 		},
 		{
 			name: "inner/resonly/notin",
 			sql:  "SELECT l.id AS a, r.id AS b, r.n AS rn FROM jr_l l JOIN jr_r r ON r.s NOT IN ('alpha', 'zeta') ORDER BY 1, 2, 3",
 			want: "cols=[a:INT64 b:INT64 rn:INT64] rows=18 | 1,102,15 | 1,103,30 | 1,105,70 | 2,102,15 | 2,103,30 | 2,105,70 | 3,102,15 | 3,103,30 | 3,105,70 | 4,102,15 | 4,103,30 | 4,105,70 | 5,102,15 | 5,103,30 | 5,105,70 | 6,102,15 | 6,103,30 | 6,105,70",
-			pin:  jrCrossJoinFilterPin("cols=[a:INT64 b:INT64 rn:INT64] rows=36 | 1,101,10 | 1,102,15 | 1,103,30 | 1,104,61 | 1,105,70 | 1,106,NULL | 2,101,10 | 2,102,15 | 2,103,30 | 2,104,61 | 2,105,70 | 2,106,NULL | 3,101,10 | 3,102,15 | 3,103,30 | 3,104,61 | 3,105,70 | 3,106,NULL | 4,101,10 | 4,102,15 | 4,103,30 | 4,104,61 | 4,105,70 | 4,106,NULL | 5,101,10 | 5,102,15 | 5,103,30 | 5,104,61 | 5,105,70 | 5,106,NULL | 6,101,10 | 6,102,15 | 6,103,30 | 6,104,61 | 6,105,70 | 6,106,NULL"),
-			why:  jrCrossJoinFilterWhy,
 		},
 		{
 			name: "inner/resonly/notbetween",
@@ -930,8 +924,6 @@ func jrCells() []c1Case {
 			name: "inner/resonly/strand",
 			sql:  "SELECT l.id AS a, r.id AS b, r.n AS rn FROM jr_l l JOIN jr_r r ON r.s <> ' AND ' ORDER BY 1, 2, 3",
 			want: "cols=[a:INT64 b:INT64 rn:INT64] rows=30 | 1,101,10 | 1,102,15 | 1,103,30 | 1,104,61 | 1,105,70 | 2,101,10 | 2,102,15 | 2,103,30 | 2,104,61 | 2,105,70 | 3,101,10 | 3,102,15 | 3,103,30 | 3,104,61 | 3,105,70 | 4,101,10 | 4,102,15 | 4,103,30 | 4,104,61 | 4,105,70 | 5,101,10 | 5,102,15 | 5,103,30 | 5,104,61 | 5,105,70 | 6,101,10 | 6,102,15 | 6,103,30 | 6,104,61 | 6,105,70",
-			pin:  jrCrossJoinFilterPin("cols=[a:INT64 b:INT64 rn:INT64] rows=36 | 1,101,10 | 1,102,15 | 1,103,30 | 1,104,61 | 1,105,70 | 1,106,NULL | 2,101,10 | 2,102,15 | 2,103,30 | 2,104,61 | 2,105,70 | 2,106,NULL | 3,101,10 | 3,102,15 | 3,103,30 | 3,104,61 | 3,105,70 | 3,106,NULL | 4,101,10 | 4,102,15 | 4,103,30 | 4,104,61 | 4,105,70 | 4,106,NULL | 5,101,10 | 5,102,15 | 5,103,30 | 5,104,61 | 5,105,70 | 5,106,NULL | 6,101,10 | 6,102,15 | 6,103,30 | 6,104,61 | 6,105,70 | 6,106,NULL"),
-			why:  jrCrossJoinFilterWhy,
 		},
 		{
 			name: "inner/tworesid",
@@ -979,41 +971,16 @@ func jrEmptyRelationPin(stage int) map[string]string {
 const jrEmptyRelationWhy = "a relation with no files has no distributed scan stage; " +
 	"`SELECT id FROM jr_e` fails identically on these three arms with no join in the query at all"
 
-// jrCrossJoinFilterPin is the two single-process arms' answer for the four
-// INNER cells whose ON has NO equality at all.
-//
-// An inner join LIFTS its ON residual into a filter ABOVE the join, and with no
-// equality left the join is a CROSS join — so those four cells measure a filter
-// over a cross join, which is a PRE-EXISTING defect and not this seam: when the
-// build side spans more than one BATCH, rejected rows survive the predicate —
-// one batch's worth, or all of them. It has nothing to do with an ON clause,
-// and the minimal form needs none:
-//
-//	jl(id) = 1..6 in one file; jr(id, s, f) = six rows written as THREE files
-//	SELECT COUNT(*) FROM jl l CROSS JOIN jr r WHERE r.f    -- wadjet 36, PG 18
-//	SELECT COUNT(*) FROM jl l JOIN jr r ON r.s IN ('alpha', 'zeta')
-//	  wadjet 24, PostgreSQL 17.11 12 — six probe rows x FOUR accepted build
-//	  rows where only two match, and the two extra are one file's worth
-//	SELECT COUNT(*) FROM jr r WHERE r.f                    -- 3 on both
-//
-// With a BOOLEAN column EVERY build row survives (36 is the whole cross
-// product, not one batch's excess), which is round 1's N2 and is why the filed
-// issue says "one or more batches, up to all of them".
-//
-// Identical at 563aa517 and at the tip, so it is not this arc's; `engine` under
-// the arm rule, because the two SINGLE-PROCESS arms are the wrong ones and the
-// three DAG arms answer PostgreSQL's rows. The same mechanism is what 58 of the
-// 66 SQLancer NoREC mismatches in this arc's after-run reduce to. Recorded as a
-// filing candidate in the arc's landing notes.
-//
-// The corpus does NOT hide it by writing the fixture as one row group: a
-// pinned cell that names its mechanism is worth more than a cell that passes
-// because the fixture was shaped to make it pass. A pin that starts agreeing
-// FAILS — when the filter reaches every build batch, these four are the proof.
-func jrCrossJoinFilterPin(got string) map[string]string {
-	return map[string]string{"single": got, "spilled512k": got}
-}
-
-const jrCrossJoinFilterWhy = "an INNER join with no equality in its ON is a CROSS join with the " +
-	"residual lifted into a filter above it, and a filter over a cross join whose build spans " +
-	"more than one batch keeps one batch's rejected rows — pre-existing at 563aa517, no ON clause needed"
+	// THE FOUR CROSS-JOIN-FILTER PINS ARE GONE, AND THAT IS ARC CJ'S PROOF (#1189).
+	//
+	// `inner/resonly/inlist`, `/notlike`, `/notin` and `/strand` have an ON with no
+	// equality at all, so the planner lifts the whole condition into a filter above
+	// a CROSS join. Their two single-process arms were pinned here to the answer a
+	// cross join gives when its build spans more than one batch and the filter's
+	// rejected rows come back — up to the whole build relation per probe row. This
+	// file's pin said what deleting it would mean: "a pin that starts agreeing
+	// FAILS — when the filter reaches every build batch, these four are the proof."
+	//
+	// The build now owns the row set it stores (ADR-0006, 2026-09-19 amendment), so
+	// all four answer PostgreSQL 17.11's rows on all five arms and their `want`
+	// stands unpinned above.
