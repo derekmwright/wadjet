@@ -4,6 +4,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -292,4 +293,64 @@ func TestAJoinsBuildOwnsTheRowSetItStores(t *testing.T) {
 				hj.buildRows)
 		}
 	})
+}
+
+// A CROSS JOIN'S BUILD STILL REFUSES LOUDLY WHEN THE BUDGET CANNOT HOLD IT.
+//
+// ADR-0006's 2026-09-03 routed-probe amendment: a cross join's probe reads
+// every build row, so its build cannot be grace-partitioned and cannot spill,
+// and a build the budget cannot hold REFUSES with a message naming the reason.
+// The row-set fix adds one allocation to that path — the merged selection
+// vector, bounded by the LIVE row count — so the boundary is re-measured here
+// rather than assumed, on a FILTERED build (the shape that now allocates) and
+// replicated, because a memory verdict taken once is a coin toss (ADR-0027).
+func TestACrossJoinBuildOverTheBudgetStillRefusesLoudly(t *testing.T) {
+	const runs = 5
+	ctx := context.Background()
+	schema := []parquet.Column{{Name: "rk", Type: parquet.TypeInt64}, {Name: "pad", Type: parquet.TypeString}}
+	// A filter that accepts every row: the build then stores a selection
+	// vector for every batch, which is what the fix's merge walks, and the
+	// BYTES it must hold are the same as the unfiltered build's.
+	keepAll := func() *Filter {
+		return NewFilter(func(b *batch.RecordBatch, row int) bool { return true })
+	}
+
+	for run := 0; run < runs; run++ {
+		tracker := memory.NewTracker("cross-build-tiny", 64<<10) // 64 KiB
+		sm, serr := memory.NewSpillManager(t.TempDir(), tracker)
+		if serr != nil {
+			t.Fatalf("spill manager: %v", serr)
+		}
+		hj := NewHashJoin(CrossJoin, nil, nil)
+		hj.MemTracker = tracker
+		// WITH a spill manager attached, so the refusal is the one a real
+		// spill-eligible caller gets and the message names the cross join
+		// rather than the flat path's older "no spill configured".
+		hj.Spill = sm
+		src := &cjFilteredSource{
+			inner: NewBatchSource(rowsToBatchesForProbe(schema, crossRows(20000, "rk", true))),
+			f:     keepAll(),
+		}
+		err := hj.Build(ctx, src)
+		if err == nil {
+			t.Fatalf("run %d: a 20k-row filtered build under a 64 KiB budget succeeded — "+
+				"the budget is not being charged", run)
+		}
+		if !errors.Is(err, memory.ErrMemoryExceeded) {
+			t.Fatalf("run %d: build failed with %v, want a memory-budget error", run, err)
+		}
+		if !strings.Contains(err.Error(), "cross join") {
+			t.Errorf("run %d: the refusal does not name the reason: %v", run, err)
+		}
+	}
+
+	// The other direction, replicated with it: a build the budget CAN hold
+	// still answers, and answers the filter's rows.
+	for run := 0; run < runs; run++ {
+		tracker := memory.NewTracker("cross-build-room", 8<<20)
+		hj := cjBuiltCross(t, [][]int64{{1, 2, 3}, {4, 5, 6}}, cjKeepSet(1, 4, 6), tracker)
+		if got, want := cjCrossBuildIDs(t, hj), "1,4,6"; got != want {
+			t.Fatalf("run %d: a build inside the budget published %q, want %q", run, got, want)
+		}
+	}
 }
