@@ -5858,6 +5858,30 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     rebuild that dropped the escape would answer the UNESCAPED pattern — the
     same reasoning that expands `BETWEEN SYMMETRIC` and `ILIKE` at parse time.
 
+  - **A truth context types EVERY expression kind, and a DML predicate is a
+    truth context.** (Added 2026-09-19, arc PT round 2 / #1179.) A `WHERE`, a
+    `HAVING`, a `JOIN … ON`, the operands of `NOT`/`AND`/`OR`, a searched
+    `CASE`'s `WHEN`, a `DELETE`'s and an `UPDATE`'s `WHERE` and a `MERGE`'s
+    `WHEN … AND` all require a boolean, and the type is proved from whatever
+    the parser produced: a literal, a column, a call whose declaration is
+    FIXED, a call whose declaration is POLYMORPHIC (through the argument it
+    mirrors), a `CASE` (its branch results), a `CAST` (its declared target),
+    arithmetic, an `ARRAY` constructor, an `INTERVAL` literal and a scalar
+    subquery. What cannot be proved is left alone, which is the rule's bound:
+    a derived table's or a CTE's column, and a polymorphic call whose mirrored
+    argument this layer cannot type.
+
+    The reason it is a POSITION and not an implementation note: the DML
+    predicate is compiled and never planned (ADR-0031), and its per-row
+    closure reads a non-boolean as false only at the TOP of the clause — so an
+    integer under an `AND` matched every row and `DELETE FROM t WHERE id > 0
+    AND CASE WHEN id > 0 THEN 1 ELSE 0 END` EMPTIED a table PostgreSQL 17.11
+    leaves untouched, while the same predicate selected zero rows through
+    SELECT. One statement, two answers, and the destructive one was the DML
+    door. An aggregate in such a clause is 42803 and a window function 42P20,
+    both refused before column resolution, which is the order the server
+    reports in.
+
   - **A table function's column-alias list is applied at its SOURCE.**
     (Added 2026-09-18, arc PT / #1184.) `FROM read_json(…) [AS] f(k, v)` now
     renames positionally like every other FROM item. The rename happens where

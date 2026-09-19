@@ -60,6 +60,10 @@ Declared CREATE/DROP TABLE uses row results; PostgreSQL sends DDL tags without r
 
 `'a%b' LIKE 'a\%b'` answers `f` where PostgreSQL 17.11 answers `t`: this engine's LIKE reads `\` as an ordinary character, so a pattern that escapes a wildcard with the DEFAULT escape matches nothing. Write the escape explicitly — `LIKE 'a!%b' ESCAPE '!'` — which is read exactly as PostgreSQL reads it (#1169). Four matchers implement the pattern language (the scan's pushdown filter, the exec filter, the comparison kernel and the expression evaluator) and all four agree with each other; the default escape belongs to all four. (ADR-0012 §5/#1169-like-default-escape)
 
+**`LOCALTIMESTAMP(p)`'s precision is accepted and ignored.**
+
+`LOCALTIMESTAMP(0) = LOCALTIMESTAMP(6)` is `f` on PostgreSQL 17.11, which truncates the value to the requested precision, and `t` here: this engine renders an instant to milliseconds and has no per-call precision. The wire declares the base type either way. (ADR-0012 §5/#1169-localtimestamp-precision)
+
 **`LOCALTIMESTAMP`, `CURRENT_TIMESTAMP` and `NOW()` are read PER ROW.**
 
 PostgreSQL answers the statement's start time for every row, so `WHERE LOCALTIMESTAMP >= LOCALTIMESTAMP` selects every row. Here the clock is read where the expression is evaluated, so a row that straddles a millisecond can answer FALSE. (ADR-0012 §5/#1169-per-row-clock)
@@ -339,10 +343,6 @@ PostgreSQL has none. SemVer 2.0.0 defines precedence; node-semver defines ranges
 ## Not supported
 
 [SQL reference](sql-reference.md).
-
-**`LOCALTIMESTAMP(p)`'s precision is accepted and ignored.**
-
-`LOCALTIMESTAMP(0) = LOCALTIMESTAMP(6)` is `f` on PostgreSQL 17.11, which truncates the value to the requested precision, and `t` here: this engine renders an instant to milliseconds and has no per-call precision. The wire declares the base type either way. (ADR-0012 §5/#1169-localtimestamp-precision)
 
 **`LOCALTIME`, `IS [form] NORMALIZED` and the `U&'…'` literal have no grammar.**
 
