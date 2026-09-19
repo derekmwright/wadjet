@@ -467,12 +467,6 @@ func tmdTables() []tmdTable {
 		// at all, and the whole claim is about an ORDER over 5000 of them
 		// spread across four files.
 		{svTable, svSchema(), svData()},
-		// The ON-RESIDUAL fixture (#1153, #1178, arc JR). Rides along for the
-		// same reason as the fixtures above: only TestJRA* names these three
-		// tables, and no type-matrix corpus entry does. The type matrix cannot
-		// stand in for it — its join shapes are all bare-column equalities, so
-		// nothing over it ever reaches an outer join's residual evaluator, and
-		// it has no EMPTY relation to be an empty build or probe side.
 		{"a3b_rows", rowdecl.Schema(), rowdecl.Data()},
 		{"a3b_nullable_rows", parquet.Schema{Columns: []parquet.Column{
 			{Name: "id", Type: parquet.TypeInt64},

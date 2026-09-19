@@ -680,6 +680,19 @@ var l1ArmPins = map[string]map[string]string{
 		"single":      "rows=3 1,NULL | 2,NULL | 3,NULL",
 		"spilled512k": "rows=3 1,NULL | 2,NULL | 3,NULL",
 	},
+	// R4/bareStar's three DAG arms REFUSE since arc JR (#1153): the lift's
+	// materialization declines under the enclosing star, so the residual names
+	// a column the fragment's declared sides do not publish, and the worker
+	// now says so instead of padding the preserved side in silence. The value
+	// pin below still holds for the two single-process arms, where the NULL
+	// disposition is what makes the answer right — a loud refusal replacing a
+	// base-WRONG answer is not a regression, and PostgreSQL's nine rows are
+	// recorded beside both.
+	"R4/bareStar": {
+		"dag":          `ERR ~join ON residual "i.amount < o.total" on a left join is not evaluable at the join: its reference i.amount resolves on neither side`,
+		"dag-shuffled": `ERR ~join ON residual "i.amount < o.total" on a left join is not evaluable at the join: its reference i.amount resolves on neither side`,
+		"dag-morsel4":  `ERR ~join ON residual "i.amount < o.total" on a left join is not evaluable at the join: its reference i.amount resolves on neither side`,
+	},
 	"R4/outerStar": {
 		"single":      "rows=3 1,Alice,150 | 2,Bob,200 | 3,Carol,0",
 		"spilled512k": "rows=3 1,Alice,150 | 2,Bob,200 | 3,Carol,0",

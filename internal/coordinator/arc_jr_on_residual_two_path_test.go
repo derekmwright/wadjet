@@ -985,14 +985,20 @@ const jrEmptyRelationWhy = "a relation with no files has no distributed scan sta
 // An inner join LIFTS its ON residual into a filter ABOVE the join, and with no
 // equality left the join is a CROSS join — so those four cells measure a filter
 // over a cross join, which is a PRE-EXISTING defect and not this seam: when the
-// build side spans more than one BATCH, one batch's rows survive a predicate
-// that rejects them. It has nothing to do with an ON clause:
+// build side spans more than one BATCH, rejected rows survive the predicate —
+// one batch's worth, or all of them. It has nothing to do with an ON clause,
+// and the minimal form needs none:
 //
-//	jl(id) = 1..6 in one file; jr(id, s) = six rows written as THREE files
+//	jl(id) = 1..6 in one file; jr(id, s, f) = six rows written as THREE files
+//	SELECT COUNT(*) FROM jl l CROSS JOIN jr r WHERE r.f    -- wadjet 36, PG 18
 //	SELECT COUNT(*) FROM jl l JOIN jr r ON r.s IN ('alpha', 'zeta')
 //	  wadjet 24, PostgreSQL 17.11 12 — six probe rows x FOUR accepted build
 //	  rows where only two match, and the two extra are one file's worth
-//	SELECT COUNT(*) FROM jr r WHERE r.s IN ('alpha', 'zeta')   -- 2 on both
+//	SELECT COUNT(*) FROM jr r WHERE r.f                    -- 3 on both
+//
+// With a BOOLEAN column EVERY build row survives (36 is the whole cross
+// product, not one batch's excess), which is round 1's N2 and is why the filed
+// issue says "one or more batches, up to all of them".
 //
 // Identical at 563aa517 and at the tip, so it is not this arc's; `engine` under
 // the arm rule, because the two SINGLE-PROCESS arms are the wrong ones and the

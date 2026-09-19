@@ -420,7 +420,7 @@ the build side were rejected. The bloom stays valid for the IN-MEMORY probe
 path, whose key set is exactly what the index holds, so what declines is the
 pushdown and not the filter (`exec.TestASpilledBuildDoesNotPublishItsBloom`).
 
-### 2026-09-18 (arc JR): an outer join's ON RESIDUAL is evaluated AT the join, and a keyless outer join is not a cross join
+### 2026-09-18 (arc JR): an outer join's ON RESIDUAL is evaluated AT the join, crosses a stage boundary by IDENTITY, and a keyless outer join is not a cross join
 
 Two positions this arc settled, both about WHERE a predicate runs and therefore
 about which build the memory model has to account for.
@@ -445,6 +445,26 @@ semantics, and which one a query reaches is then decided by its join kind
 outer kinds and answered on the inner one). What remains unevaluable is a
 predicate whose value depends on a RELATION the join does not have — a subquery
 in `ON` — and that refuses loudly, naming the construct.
+
+**The residual crosses the stage boundary by IDENTITY.** The evaluation point
+above is WHERE the predicate runs; what it runs OVER is the other half, and on
+the distributed path the two are decided in different places. A residual is the
+only part of an `ON` clause that travels to a worker as TEXT, and a `Project`
+emits no stage — so a residual over a renamed relation (a derived table, a CTE)
+arrived at a fragment whose sides publish the BASE column names while the text
+still spelled the subquery's aliases. Nothing resolved, the evaluator's unbound
+slot is SQL NULL, and a LEFT join answered its whole preserved side padded, in
+silence, on shapes that had been a loud refusal.
+
+The rule is `docs/design/window-key-ownership.md`'s: a reference binds by the
+OCCURRENCE that produced it, and a name is derived from the identity for
+publication, never the reverse. The join's equi-keys already made this trip
+re-spelled (`resolveShuffleKey`); the residual's leaves take the same path, and
+the SIDE travels with the name, because two arms of one join routinely re-spell
+to the same source column and a bare name binds probe-first. Under it,
+`physical.JoinResidualUnresolved` refuses at the fragment when a leaf the
+rewrite could not reach does not resolve against either DECLARED side: an
+unbound residual leaf is a REFUSAL, never a NULL at run time.
 
 **A keyless outer join is a hash join, not a cross join.** The 2026-09-03
 amendment above says grace partitioning requires a routed probe, and that a
