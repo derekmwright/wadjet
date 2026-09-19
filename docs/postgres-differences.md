@@ -396,10 +396,6 @@ It raises 0A000 where PostgreSQL answers: the keys are whatever columns the two 
 
 `LEFT JOIN b ON a.x = (SELECT max(y) FROM c)` raises where PostgreSQL answers. An outer join's ON is evaluated AT the join, per probe row against each candidate build row, because a conjunct lifted above it would delete the rows the join preserves — and a subquery's value is not available there. The refusal names the construct. An INNER join lifts the same ON into a filter above the join and answers it. (ADR-0012 §5/#1153)
 
-**Integer XOR has no spelling.**
-
-PostgreSQL's `#` operator is not lexed: `5 # 3` is 42601 where PostgreSQL answers 6. `^` is exponentiation in both engines, not XOR. (ADR-0012 §5/#1155)
-
 **BYTEA, MONEY and INET type names are refused.**
 
 These types lack representations: casts/declarations raise 42704 versus PostgreSQL values. (ADR-0012 §5/#652)

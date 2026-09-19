@@ -301,12 +301,13 @@ Full analytical SQL via a custom recursive descent parser:
 - CREATE/DROP TABLE, CREATE/DROP FUNCTION, CREATE/ALTER/DROP ALERT
 - `CREATE TABLE [IF NOT EXISTS] t [(a, b)] AS <query> [WITH [NO] DATA]` and `INSERT INTO t [(a, b)] <query>` — a query's result becomes a table, its schema taken from the query's declared output; `IF NOT EXISTS` works on both forms of `CREATE TABLE`
 - CTEs (`WITH ... AS`, and `WITH RECURSIVE` — the recursive form is answered in-process), UNION / INTERSECT / EXCEPT (with ALL variants)
-- INNER, LEFT, RIGHT, FULL OUTER, CROSS JOINs, with `ON` or `USING (col, ...)` — `USING` merges the joined column, which `SELECT *` publishes once and first
-- A column-alias list on a base table, a derived table or a `VALUES` block — `FROM t a(k, v)` — with or without `AS`
+- INNER, LEFT, RIGHT, FULL OUTER, CROSS JOINs, with `ON` or `USING (col, ...)` — `USING` merges the joined column, which `SELECT *` publishes once and first; an `ON` clause is any expression (a function call, a `CAST`, `LIKE`, `IN`, `CASE`, `BETWEEN`, `IS DISTINCT FROM`) on every join kind, a subquery excepted
+- A column-alias list on a base table, a derived table, a `VALUES` block, a `WITH` query's definition (`WITH c(x, y) AS (…)`) or a table function — `FROM t a(k, v)`, `FROM read_json('events.json') f(k, v)` — with or without `AS`
 - Subqueries: scalar, IN, EXISTS, correlated subqueries (over a base table, a derived table or a CTE), and `LATERAL` joins — including a scalar subquery with no `FROM` clause, which is its `SELECT` expression evaluated in the enclosing row's scope (`SELECT (SELECT u.x) FROM ... u`), and the same shape as a `LATERAL` body
 - 16 window functions (the rank family, SUM/COUNT/AVG/MIN/MAX, LAG/LEAD, FIRST_VALUE/LAST_VALUE/NTH_VALUE, NTILE, PERCENT_RANK, CUME_DIST) with PARTITION BY, ORDER BY, NULLS FIRST/LAST, and ROWS/RANGE frame specs; any other aggregate in the window position is refused `0A000` with the supported set named
 - GROUP BY, GROUPING SETS, CUBE, ROLLUP, and ORDER BY with positional references (including over `SELECT *`)
-- CASE, CAST, LIKE, `BETWEEN [SYMMETRIC|ASYMMETRIC]`, IN, IS NULL/TRUE/FALSE, `= ANY`/`= SOME`/`<> ALL`, row-value comparison `(a, b) < (c, d)`, and the `^` exponentiation operator at PostgreSQL's precedence
+- CASE, CAST, `LIKE`/`ILIKE` (with `ESCAPE`), `SIMILAR TO` (the SQL standard's pattern language, with `ESCAPE`), `BETWEEN [SYMMETRIC|ASYMMETRIC]`, IN, IS NULL/TRUE/FALSE/UNKNOWN, `IS DISTINCT FROM`, `= ANY`/`= SOME`/`<> ALL`, row-value comparison `(a, b) < (c, d)`, and the `^` exponentiation and `#` integer-XOR operators — the whole predicate band at PostgreSQL's own precedence, so `5 BETWEEN 10 AND 1 = true` and `1 = 1 IS TRUE` parse and mean what they mean there
+- The SQL-standard function spellings: `SUBSTRING(s FROM n FOR m)`, `SUBSTRING(s FROM pattern)`, `OVERLAY(s PLACING r FROM n)`, `NORMALIZE(s, NFC)`, `LOCALTIMESTAMP`, and `LEFT`/`RIGHT` as function names
 - Fixed-point DECIMAL(p,s) type with Int128 arithmetic (DuckDB-style scaled integers)
 - Nested types: ARRAY, ROW/STRUCT, MAP with `person.name` dot-notation, `element_at()`, `map_keys()`
 - Table functions: `read_json()`, `read_csv()`, `read_parquet()` with glob patterns and named parameters

@@ -2389,7 +2389,9 @@ CROSS JOIN protocols p
 
 The join implementation uses a **hash join** strategy: the right side is loaded into a hash table (build phase), then the left side is probed against it (probe phase). For inner joins the optimizer picks the build side itself from cardinality estimates — the smaller relation builds, the larger probes — and cost-reorders chains of three or more relations. Only outer joins keep the order you wrote, because their order is semantically significant.
 
-A join whose `ON` clause equates two **expressions** rather than two columns — `ON UPPER(a.name) = UPPER(b.name)`, `ON a.id + 1 = b.id + 1`, `ON CONCAT('x', a.g) = CONCAT('x', b.g)` — has no equi-key for the hash table, so it is executed as a cross join with the condition applied to each pair. That is correct but quadratic, and it is also the one join shape whose build side cannot spill: a cross join's every probe row needs every build row, so the build must fit the task's memory budget. Under a budget it fails with `memory budget exceeded` naming that reason. Where the expression can be computed as a column before the join — a stored or projected column joined on directly — the hash path is available and both limits go away.
+An INNER join whose `ON` clause equates two **expressions** rather than two columns — `ON UPPER(a.name) = UPPER(b.name)`, `ON a.id + 1 = b.id + 1`, `ON CONCAT('x', a.g) = CONCAT('x', b.g)` — has no equi-key for the hash table, so the condition is lifted into a filter above a cross join and applied to each pair. That is correct but quadratic, and it is also the one join shape whose build side cannot spill: a cross join's every probe row needs every build row, so the build must fit the task's memory budget. Under a budget it fails with `memory budget exceeded` naming that reason. Where the expression can be computed as a column before the join — a stored or projected column joined on directly — the hash path is available and both limits go away.
+
+An OUTER join's condition is not lifted, because a conjunct above the join would delete the rows the join preserves: it is evaluated AT the join, per probe row against each candidate build row, and the join runs as a keyless hash join. That build grace-partitions and spills like any keyed one, so the cross join's budget refusal does not apply to it ([ADR-0006](adr/0006-never-oom-memory-model.md)).
 
 ## Arithmetic Expressions
 
@@ -2412,7 +2414,8 @@ FROM flow_logs
 | `*` | Multiplication |
 | `/` | Division |
 | `%` | Modulo |
-| `^` | Exponentiation. `2 ^ 3` is 8. It binds TIGHTER than `*` `/` `%` and LOOSER than unary minus (`-2 ^ 2` is 4), and it is LEFT associative, so `2 ^ 3 ^ 2` is 64 and not 512 — PostgreSQL's documented precedence table, which is not the mathematical convention. It is the `POWER(a, b)` function under another spelling and shares its answers and its errors: `POWER(0, -1)` and a negative base with a non-integer exponent are `2201F`, an overflow is `22003`. Two spellings are supersets — `2 ^ -1` is 0.5 here where PostgreSQL lexes `^-` as one operator name, and `2 ^ 3 % 5` is 3 here where PostgreSQL has no `double precision % integer` — see [PostgreSQL differences](postgres-differences.md). PostgreSQL has no `^` XOR operator; integer XOR is spelled `#` and this engine does not implement it |
+| `^` | Exponentiation. `2 ^ 3` is 8. It binds TIGHTER than `*` `/` `%` and LOOSER than unary minus (`-2 ^ 2` is 4), and it is LEFT associative, so `2 ^ 3 ^ 2` is 64 and not 512 — PostgreSQL's documented precedence table, which is not the mathematical convention. It is the `POWER(a, b)` function under another spelling and shares its answers and its errors: `POWER(0, -1)` and a negative base with a non-integer exponent are `2201F`, an overflow is `22003`. Two spellings are supersets — `2 ^ -1` is 0.5 here where PostgreSQL lexes `^-` as one operator name, and `2 ^ 3 % 5` is 3 here where PostgreSQL has no `double precision % integer` — see [PostgreSQL differences](postgres-differences.md). PostgreSQL has no `^` XOR operator; integer XOR is spelled `#`, which this engine reads at PostgreSQL's own precedence (below) |
+| `#` | Integer bitwise XOR. `5 # 3` is 6. It is PostgreSQL's spelling of the operator — `^` is exponentiation on both engines — at PostgreSQL's precedence: LOOSER than `+` and `-`, tighter than every comparison, and LEFT associative. It is `BITWISE_XOR(a, b)` under another spelling and its result follows its operands' width. A non-integer operand answers here where PostgreSQL raises — see [PostgreSQL differences](postgres-differences.md) |
 | `\|\|` | String concatenation — NULL in either operand makes the result NULL (use `CONCAT` to ignore NULLs) |
 
 ## DISTINCT
@@ -3253,11 +3256,11 @@ SELECT host, agent_version
 | `SIGN(n)` | Sign of number (-1, 0, 1) | `SIGN(profit)` |
 | `GREATEST(a, b, ...)` | Largest value | `GREATEST(bytes_in, bytes_out)` |
 | `LEAST(a, b, ...)` | Smallest value | `LEAST(bytes_in, bytes_out)` |
-| `BITWISE_AND(a, b)` | Bitwise AND. Exact over the full 64-bit pattern; answers BIGINT | `BITWISE_AND(flags, 0xFF)` |
-| `BITWISE_OR(a, b)` | Bitwise OR. Answers BIGINT | `BITWISE_OR(flags, 0x01)` |
-| `BITWISE_XOR(a, b)` / `a # b` | Bitwise XOR. `#` is PostgreSQL's spelling of the operator — `^` is exponentiation there and here — at the same precedence: looser than `+` and `-`, tighter than every comparison, left associative. Answers BIGINT | `BITWISE_XOR(a, b)`, `5 # 3` → `6` |
-| `BITWISE_NOT(a)` | Bitwise NOT. Answers BIGINT | `BITWISE_NOT(mask)` |
-| `BITWISE_LEFT_SHIFT(a, n)` | Shift bits left by n positions. A count outside `[0, 64)` is NULL | `BITWISE_LEFT_SHIFT(1, 4)` → `16` |
+| `BITWISE_AND(a, b)` | Bitwise AND. Exact over the full 64-bit pattern; the result follows its operands, so two `INT32` operands answer `INT32` and a `BIGINT` operand makes it `BIGINT` | `BITWISE_AND(flags, 0xFF)` |
+| `BITWISE_OR(a, b)` | Bitwise OR. The result follows its operands (`INT32` over two `INT32`s, otherwise `BIGINT`) | `BITWISE_OR(flags, 0x01)` |
+| `BITWISE_XOR(a, b)` / `a # b` | Bitwise XOR. `#` is PostgreSQL's spelling of the operator — `^` is exponentiation there and here — at the same precedence: looser than `+` and `-`, tighter than every comparison, left associative. The result follows its operands (`INT32` over two `INT32`s, otherwise `BIGINT`), as PostgreSQL's does. A non-integer operand answers here where PostgreSQL raises — see [PostgreSQL differences](postgres-differences.md) | `BITWISE_XOR(a, b)`, `5 # 3` → `6` |
+| `BITWISE_NOT(a)` | Bitwise NOT. The result follows its operand (`INT32` for an `INT32`, otherwise `BIGINT`) | `BITWISE_NOT(mask)` |
+| `BITWISE_LEFT_SHIFT(a, n)` | Shift bits left by n positions; answers BIGINT for every operand width, because the shift is performed on the 64-bit carrier. A count outside `[0, 64)` is NULL | `BITWISE_LEFT_SHIFT(1, 4)` → `16` |
 | `BITWISE_RIGHT_SHIFT(a, n)` | Logical shift bits right by n positions. A count outside `[0, 64)` is NULL | `BITWISE_RIGHT_SHIFT(16, 4)` → `1` |
 | `BITWISE_ARITHMETIC_SHIFT_RIGHT(a, n)` | Arithmetic right shift (sign-preserving). A count outside `[0, 64)` is NULL | `BITWISE_ARITHMETIC_SHIFT_RIGHT(-16, 2)` → `-4` |
 | `PI()` | Pi constant | `PI()` → `3.14159...` |

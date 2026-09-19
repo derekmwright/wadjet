@@ -284,15 +284,28 @@ an oracle violation is a wrong answer; an unexpected error is a shape the
 engine refuses that PostgreSQL accepts, filed as a refusal, not fixed
 silently.
 
-First run on the MIT target (2026-09-17, seed 1, 200 databases, NoREC): 0
-oracle violations, 0 crashes, 0 known differences, 200 unexpected errors —
-every database stopped at its first refused shape, almost all of them an
-outer join whose `ON` clause is not a bare column equality (a cast, a
-function call or a `LIKE`), then `BETWEEN SYMMETRIC`, `int4range`, and two
-parser gaps. Those are the refusal shapes to close before NoREC can get past
-the first query of a database; they are filed as #1153 (the outer-join `ON`
-residual), #1154, #1156 and #1157. `BETWEEN SYMMETRIC` parses as of v0.21.0,
-so the next run gets further on the 14 databases that stopped there.
+**Runs on the MIT target**, all with the same command as above — one thread,
+`--random-seed 1`, 200 generated databases, the NoREC oracle.
+
+| run | what the 200 databases did |
+|---|---|
+| 2026-09-17 (v0.21.0 line) | 200 stopped at a refused shape before any oracle ran; the largest family was an outer join whose `ON` is not a bare column equality — a cast, a function call, a `LIKE` (#1153) — then `BETWEEN SYMMETRIC` (#1154), `int4range` (#1157) and two parser gaps (#1156) |
+| 2026-09-19, after the outer-join `ON` residual landed | the blanket `ON`-residual refusal is gone (95 databases → 0) and **66 reach an oracle verdict** instead of a refusal, up from 22 |
+| 2026-09-19, after the cross-join build fix | those verdicts go from **66 NoREC row-count mismatches to 1**; the other 65 were one defect (a filter over a cross join's multi-batch build, #1189) |
+
+The one mismatch left is `database48`, a `FULL` join whose `ON` residual is
+combined with a tautological `WHERE` (#1207); it is present in every run above.
+The refusal families still stopping databases are an `ON` that references a
+relation outside its own join pair (82 databases — PostgreSQL raises `42P01`
+on the same text), the missing `money`/`int4range`/`bit` type names, and the
+`B'…'` bit-string literal (#1156). `IS [NOT] UNKNOWN`, which stopped 20
+databases in the second run, parses as of v0.22.0.
+
+**Read the row counts from the logs, not from the triage report's violation
+bucket.** `cmd/sqlancer-triage` keys on SQLancer's `AssertionError` line, and a
+NoREC row-count mismatch is not written as one — so the runs above report 0
+oracle violations and 200 "unexpected error" in both arms while the logs hold
+the mismatches the table counts.
 
 ## Reproducing a finding from a seed
 
