@@ -516,11 +516,17 @@ Four sites touch those batches, and three of them broke the rule:
 | partition-on-arrival (`join_partition_arrival.go`) | already compacts rows out of the arrival, so a frozen batch is dense by construction | unchanged |
 
 What it cost while it was open: `b2 CROSS JOIN b1 WHERE b1.f` over a
-three-file build answered 52 rows where PostgreSQL 17.11 answers 39 — the
-WHOLE unfiltered build relation per probe row, with `GROUP BY b1.f` reporting
-thirteen surviving rows whose own `f` is FALSE. Fifty-seven of the sixty-six
-NoREC row-count mismatches a 200-database SQLancer run reached were this one
-shape; sixty-five of the sixty-six are gone.
+three-file build answered 52 rows where PostgreSQL 17.11 answers 39 — every
+RAW row of every batch that REACHED the build, which is four of that
+relation's five rows, since the third file holds one FALSE row and a batch the
+filter empties never arrives at all (`exec.Filter` returns nil for it). `GROUP
+BY b1.f` reports thirteen surviving rows whose own `f` is FALSE: one rejected
+build row per probe row. Where every arriving batch keeps at least one row —
+the ordinary case, and the one arc JR's four pinned cells measured — what
+comes back IS the whole unfiltered relation per probe row. (The 52 is 13 x 4,
+not 13 x 5 — measured by the round-1 review of this amendment.) Fifty-seven of
+the sixty-six NoREC row-count mismatches a 200-database SQLancer run reached
+were this one shape; sixty-five of the sixty-six are gone.
 
 **Boundary, measured.** A policed relation's build side was never at risk: the
 security projection standing between the scan and the join materialises the

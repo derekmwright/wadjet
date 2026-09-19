@@ -29,9 +29,20 @@ import (
 // distinct string per row. Three batches, six of nine rows accepted — so a
 // cell's ROWS are the fix's subject and its OIDs are this gate's.
 //
-// At 1c2b4d25 every cell's ROWS are wrong in both formats (nine build rows
-// where six were accepted) and the OIDs are unchanged, which is the
+// At 1c2b4d25 the first two cells' ROWS are wrong in both formats (nine build
+// rows where six were accepted) and their OIDs are unchanged, which is the
 // distinction a wire gate exists to draw: cj_author/gate_cj_wire_at_base_FAILS.log.
+//
+// The third cell is a CONTROL and is right at base. Over THESE two relations —
+// a probe of two rows against a build of nine — the planner puts the filtered
+// relation on the `JOIN ... ON <expr>` spelling's LEFT child, which is the
+// PROBE, so its row set is read as it arrives and was never stored. The swap
+// is fixture-dependent rather than a property of the spelling: with a
+// three-row probe over the same build both spellings leave the filtered
+// relation on the build side and both are wrong at base, which is what
+// coordinator.TestCJTheBuildRowSetSurvivesTheBatchBoundary's `c_onexpr` cell
+// measures (18 at base where PostgreSQL answers 6). Measured by the round-1
+// review.
 func TestCJACrossJoinsBuildColumnDeclaresItsOwnType(t *testing.T) {
 	srv := setupCJCrossDB(t)
 
