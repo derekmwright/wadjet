@@ -179,9 +179,42 @@ func grammarRewriteSpellings() []grammarRewrite {
 		// --- ILIKE -> lower() on BOTH sides
 		{"ilike", `s ILIKE 'A%'`, "lower", 1},
 		{"not_ilike", `s NOT ILIKE 'A%'`, "lower", 1},
-		// --- SIMILAR TO -> regexp_like(left, pattern)
-		{"similar_to", `s SIMILAR TO 'a'`, "regexp_like", 2},
-		{"not_similar_to", `s NOT SIMILAR TO 'a'`, "regexp_like", 2},
+		// --- SIMILAR TO -> similar_to(left, pattern[, escape]). It used to
+		// rewrite to regexp_like, which is a DIFFERENT pattern language
+		// matched against a substring rather than the whole string (#1168).
+		{"similar_to", `s SIMILAR TO 'a'`, "similar_to", 2},
+		{"not_similar_to", `s NOT SIMILAR TO 'a'`, "similar_to", 2},
+		{"similar_to_escape", `s SIMILAR TO 'a' ESCAPE '#'`, "similar_to", 3},
+		{"not_similar_to_escape", `s NOT SIMILAR TO 'a' ESCAPE '#'`, "similar_to", 3},
+		// --- `x LIKE p ESCAPE e` -> like_escape(x, p, e). The escape cannot
+		// ride on LikeExpr (seven rewriters rebuild that node), so the
+		// spelling with an ESCAPE clause is a call and the spelling without
+		// one stays the node the scan can push (#1169).
+		{"like_escape", `s LIKE 'a' ESCAPE '#'`, "like_escape", 3},
+		{"not_like_escape", `s NOT LIKE 'a' ESCAPE '#'`, "like_escape", 3},
+		{"ilike_escape", `s ILIKE 'A' ESCAPE '#'`, "like_escape", 3},
+		// --- `a # b` -> bitwise_xor(a, b), PostgreSQL's integer XOR (#1179).
+		{"hash_xor_operator", `5 # 3`, "bitwise_xor", 2},
+		{"hash_xor_left_associative", `5 # 3 # 2`, "bitwise_xor", 2},
+		{"hash_xor_over_columns", `n # n`, "bitwise_xor", 2},
+		// --- the SQL-standard function spellings, whose grammar is keywords
+		// rather than commas (#1169).
+		{"substring_from_for", `SUBSTRING(s FROM 2 FOR 3)`, "substring", 3},
+		{"substring_from", `SUBSTRING(s FROM 2)`, "substring", 2},
+		{"substring_for", `SUBSTRING(s FOR 3)`, "substring", 3},
+		{"substring_from_pattern", `SUBSTRING(s FROM 'b.d')`, "substring", 2},
+		{"substring_comma", `SUBSTRING(s, 2, 3)`, "substring", 3},
+		{"overlay_placing_from_for", `OVERLAY(s PLACING 'X' FROM 2 FOR 3)`, "overlay", 4},
+		{"overlay_placing_from", `OVERLAY(s PLACING 'X' FROM 2)`, "overlay", 3},
+		{"overlay_comma", `OVERLAY(s, 'X', 2)`, "overlay", 3},
+		{"normalize_bare", `NORMALIZE(s)`, "normalize", 1},
+		{"normalize_form", `NORMALIZE(s, NFC)`, "normalize", 2},
+		{"localtimestamp", `LOCALTIMESTAMP`, "localtimestamp", 0},
+		{"localtimestamp_precision", `LOCALTIMESTAMP(3)`, "localtimestamp", 0},
+		// --- LEFT and RIGHT are keyword tokens for the JOIN clause and
+		// FUNCTION NAMES in an expression, which is PostgreSQL's own rule.
+		{"left_call", `LEFT(s, 2)`, "left", 2},
+		{"right_call", `RIGHT(s, 2)`, "right", 2},
 	}
 }
 

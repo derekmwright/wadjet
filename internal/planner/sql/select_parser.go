@@ -1538,63 +1538,141 @@ func (p *selectParser) parseExists(not bool) (Node, error) {
 	return &ExistsNode{Not: not, SQL: subSQL}, nil
 }
 
+// parseComparison is PostgreSQL's PREDICATE band, and it is a LOOP rather
+// than a chain of early returns (#1180, #1183).
+//
+// §4.1.6's table, from tighter to looser:
+//
+//	(any other operator)          — parseBitwise, `#`
+//	BETWEEN IN LIKE ILIKE SIMILAR — parsePredicateOperand's postfixes
+//	< > = <= >= <>                — NONASSOCIATIVE, one per level
+//	IS ISNULL NOTNULL             — postfix, and it may be followed by a comparison
+//
+// Every one of those constructs used to RETURN as soon as it was read, so a
+// statement that continued past it was a syntax error where PostgreSQL 17.11
+// answers: `5 BETWEEN 10 AND 1 = true` is `(5 BETWEEN 10 AND 1) = true` = f
+// (#1180), `1 = 1 IS TRUE` is `(1 = 1) IS TRUE` = t, `1 IS NULL = false` is
+// `(1 IS NULL) = false` = t (#1183). Measured form by form on 17.11,
+// including the forms it REFUSES: comparison is nonassociative there, so
+// `1 = 1 = true` and `1 IS NULL = false = true` are syntax errors here too —
+// which is what `cmpSeen` holds, reset by an IS postfix because that is where
+// the server's own grammar reduces.
 func (p *selectParser) parseComparison() (Node, error) {
-	left, err := p.parseAddition()
+	left, err := p.parsePredicateOperand()
+	if err != nil {
+		return nil, err
+	}
+	cmpSeen := false
+	for {
+		if p.isKeyword(TokenKWIs) {
+			node, err := p.parseIsPostfix(left)
+			if err != nil {
+				return nil, err
+			}
+			left = node
+			cmpSeen = false
+			continue
+		}
+		op := comparisonOpFor(p.peek())
+		if op == "" || cmpSeen {
+			return left, nil
+		}
+		p.advance()
+		cmpSeen = true
+		node, err := p.finishComparison(left, op)
+		if err != nil {
+			return nil, err
+		}
+		left = node
+	}
+}
+
+// comparisonOpFor names the comparison operator a token spells, or "" when
+// the token is not one.
+func comparisonOpFor(t TokenType) string {
+	switch t {
+	case TokenEq:
+		return "="
+	case TokenNotEq:
+		return "!="
+	case TokenLT:
+		return "<"
+	case TokenLTEq:
+		return "<="
+	case TokenGT:
+		return ">"
+	case TokenGTEq:
+		return ">="
+	}
+	return ""
+}
+
+// parseIsPostfix reads `IS [NOT] NULL|TRUE|FALSE|UNKNOWN|DISTINCT FROM x`
+// over an expression already parsed.
+func (p *selectParser) parseIsPostfix(left Node) (Node, error) {
+	p.advance() // consume IS
+	not := false
+	if p.isKeyword(TokenKWNot) {
+		p.advance()
+		not = true
+	}
+	switch p.peek() {
+	case TokenKWNull:
+		p.advance()
+		return &IsExpr{Left: left, Not: not, Check: "null"}, nil
+	case TokenKWTrue:
+		p.advance()
+		return &IsExpr{Left: left, Not: not, Check: "true"}, nil
+	case TokenKWFalse:
+		p.advance()
+		return &IsExpr{Left: left, Not: not, Check: "false"}, nil
+	case TokenKWDistinct:
+		// IS [NOT] DISTINCT FROM: SQL's NULL-safe (in)equality — the
+		// only correct way to write "these differ, counting NULL as a
+		// value" (#374). NULL IS DISTINCT FROM NULL is FALSE, never
+		// NULL/UNKNOWN, which is why this compiles to a comparison
+		// rather than reusing IsExpr's NULL/TRUE/FALSE check shape.
+		p.advance() // consume DISTINCT
+		if _, err := p.expect(TokenKWFrom); err != nil {
+			return nil, fmt.Errorf("expected FROM after IS [NOT] DISTINCT")
+		}
+		right, err := p.parseBitwise()
+		if err != nil {
+			return nil, fmt.Errorf("parsing IS [NOT] DISTINCT FROM: %w", err)
+		}
+		op := "is distinct from"
+		if not {
+			op = "is not distinct from"
+		}
+		return &CmpExpr{Left: left, Op: op, Right: right}, nil
+	default:
+		// IS [NOT] UNKNOWN is IS [NOT] NULL over a boolean expression —
+		// PostgreSQL's own definition, and the third arm every TLP-WHERE
+		// query issues (#592). UNKNOWN is not a keyword token here, so it
+		// arrives as a plain identifier.
+		if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "unknown") {
+			p.advance()
+			return &IsExpr{Left: left, Not: not, Check: "null"}, nil
+		}
+		return nil, fmt.Errorf("expected NULL, TRUE, FALSE, UNKNOWN, or DISTINCT FROM after IS [NOT]")
+	}
+}
+
+// parsePredicateOperand is one operand of a comparison: the `#` band, and the
+// BETWEEN / IN / LIKE / ILIKE / SIMILAR TO postfixes that bind TIGHTER than a
+// comparison on the server — `true = 1 BETWEEN 0 AND 2` is
+// `true = (1 BETWEEN 0 AND 2)`, measured.
+//
+// At most one such postfix is read, which is PostgreSQL's own
+// nonassociativity: `5 BETWEEN 3 AND 10 BETWEEN 0 AND 1` is a syntax error
+// there.
+func (p *selectParser) parsePredicateOperand() (Node, error) {
+	left, err := p.parseBitwise()
 	if err != nil {
 		return nil, err
 	}
 
-	// IS [NOT] NULL / IS [NOT] TRUE / IS [NOT] FALSE / IS [NOT] DISTINCT FROM
-	if p.isKeyword(TokenKWIs) {
-		p.advance()
-		not := false
-		if p.isKeyword(TokenKWNot) {
-			p.advance()
-			not = true
-		}
-		switch p.peek() {
-		case TokenKWNull:
-			p.advance()
-			return &IsExpr{Left: left, Not: not, Check: "null"}, nil
-		case TokenKWTrue:
-			p.advance()
-			return &IsExpr{Left: left, Not: not, Check: "true"}, nil
-		case TokenKWFalse:
-			p.advance()
-			return &IsExpr{Left: left, Not: not, Check: "false"}, nil
-		case TokenKWDistinct:
-			// IS [NOT] DISTINCT FROM: SQL's NULL-safe (in)equality — the
-			// only correct way to write "these differ, counting NULL as a
-			// value" (#374). NULL IS DISTINCT FROM NULL is FALSE, never
-			// NULL/UNKNOWN, which is why this compiles to a comparison
-			// rather than reusing IsExpr's NULL/TRUE/FALSE check shape.
-			p.advance() // consume DISTINCT
-			if _, err := p.expect(TokenKWFrom); err != nil {
-				return nil, fmt.Errorf("expected FROM after IS [NOT] DISTINCT")
-			}
-			right, err := p.parseAddition()
-			if err != nil {
-				return nil, fmt.Errorf("parsing IS [NOT] DISTINCT FROM: %w", err)
-			}
-			op := "is distinct from"
-			if not {
-				op = "is not distinct from"
-			}
-			return &CmpExpr{Left: left, Op: op, Right: right}, nil
-		default:
-			// IS [NOT] UNKNOWN is IS [NOT] NULL over a boolean expression —
-			// PostgreSQL's own definition, and the third arm every TLP-WHERE
-			// query issues (#592). UNKNOWN is not a keyword token here, so it
-			// arrives as a plain identifier.
-			if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "unknown") {
-				p.advance()
-				return &IsExpr{Left: left, Not: not, Check: "null"}, nil
-			}
-			return nil, fmt.Errorf("expected NULL, TRUE, FALSE, UNKNOWN, or DISTINCT FROM after IS [NOT]")
-		}
-	}
-
-	// [NOT] IN
+	// [NOT] IN / BETWEEN / LIKE / ILIKE / SIMILAR TO
 	not := false
 	if p.isKeyword(TokenKWNot) {
 		// Peek ahead to see if this is NOT IN, NOT BETWEEN, or NOT LIKE
@@ -1679,14 +1757,14 @@ func (p *selectParser) parseComparison() (Node, error) {
 			// the word is consumed and changes nothing.
 			p.advance()
 		}
-		low, err := p.parseAddition()
+		low, err := p.parseBitwise()
 		if err != nil {
 			return nil, err
 		}
 		if _, err := p.expect(TokenKWAnd); err != nil {
 			return nil, fmt.Errorf("expected AND in BETWEEN")
 		}
-		high, err := p.parseAddition()
+		high, err := p.parseBitwise()
 		if err != nil {
 			return nil, err
 		}
@@ -1698,9 +1776,14 @@ func (p *selectParser) parseComparison() (Node, error) {
 
 	if p.isKeyword(TokenKWLike) {
 		p.advance()
-		pattern, err := p.parseAddition()
+		pattern, err := p.parseBitwise()
 		if err != nil {
 			return nil, err
+		}
+		if esc, ok, err := p.parseEscapeClause(); err != nil {
+			return nil, err
+		} else if ok {
+			return likeEscapeCall(left, pattern, esc, not), nil
 		}
 		return &LikeExpr{Left: left, Not: not, Pattern: pattern}, nil
 	}
@@ -1708,18 +1791,26 @@ func (p *selectParser) parseComparison() (Node, error) {
 	// ILIKE — case-insensitive LIKE, rewritten to LOWER(left) LIKE LOWER(pattern)
 	if p.isKeyword(TokenKWILike) {
 		p.advance()
-		pattern, err := p.parseAddition()
+		pattern, err := p.parseBitwise()
 		if err != nil {
 			return nil, err
 		}
+		lowered := &FuncCallNode{Name: "lower", Args: []Node{left}}
+		loweredPattern := &FuncCallNode{Name: "lower", Args: []Node{pattern}}
+		if esc, ok, err := p.parseEscapeClause(); err != nil {
+			return nil, err
+		} else if ok {
+			return likeEscapeCall(lowered, loweredPattern, esc, not), nil
+		}
 		return &LikeExpr{
-			Left:    &FuncCallNode{Name: "lower", Args: []Node{left}},
+			Left:    lowered,
 			Not:     not,
-			Pattern: &FuncCallNode{Name: "lower", Args: []Node{pattern}},
+			Pattern: loweredPattern,
 		}, nil
 	}
 
-	// SIMILAR TO — rewrite to regexp_like(left, pattern)
+	// SIMILAR TO — the SQL standard's own pattern language, rewritten to the
+	// similar_to(x, pattern[, escape]) call that implements it (#1168).
 	if p.peek() == TokenIdent && !p.cur.quoted && strings.EqualFold(p.cur.val, "SIMILAR") {
 		savedSim := p.cur
 		savedSimPos := p.lex.pos
@@ -1728,11 +1819,18 @@ func (p *selectParser) parseComparison() (Node, error) {
 		p.advance() // consume SIMILAR
 		if (p.peek() == TokenIdent || p.peek() == TokenKWTo) && strings.EqualFold(p.cur.val, "TO") {
 			p.advance() // consume TO
-			pattern, err := p.parseAddition()
+			pattern, err := p.parseBitwise()
 			if err != nil {
 				return nil, err
 			}
-			var node Node = &FuncCallNode{Name: "regexp_like", Args: []Node{left, pattern}}
+			args := []Node{left, pattern}
+			if esc, ok, err := p.parseEscapeClause(); err != nil {
+				return nil, err
+			} else if ok {
+				args = append(args, esc)
+			}
+			var node Node = &FuncCallNode{Name: "similar_to", Args: args,
+				OutputLabel: UnnamedOutputColumn}
 			if not {
 				node = &NotNode{Inner: node}
 			}
@@ -1745,31 +1843,44 @@ func (p *selectParser) parseComparison() (Node, error) {
 		p.lex.width = savedSimWidth
 	}
 
-	// Comparison operators
-	var op string
-	switch p.peek() {
-	case TokenEq:
-		op = "="
-		p.advance()
-	case TokenNotEq:
-		op = "!="
-		p.advance()
-	case TokenLT:
-		op = "<"
-		p.advance()
-	case TokenLTEq:
-		op = "<="
-		p.advance()
-	case TokenGT:
-		op = ">"
-		p.advance()
-	case TokenGTEq:
-		op = ">="
-		p.advance()
-	default:
-		return left, nil
-	}
+	return left, nil
+}
 
+// parseEscapeClause reads the optional `ESCAPE <expr>` that may follow a
+// LIKE, ILIKE or SIMILAR TO pattern. ESCAPE is not a keyword token in this
+// lexer, so it arrives as a bare word; a QUOTED "escape" is a column
+// reference and is left alone.
+func (p *selectParser) parseEscapeClause() (Node, bool, error) {
+	if !p.isBareWord(0, "ESCAPE") {
+		return nil, false, nil
+	}
+	p.advance()
+	esc, err := p.parseBitwise()
+	if err != nil {
+		return nil, false, fmt.Errorf("parsing ESCAPE: %w", err)
+	}
+	return esc, true, nil
+}
+
+// likeEscapeCall is `x [NOT] LIKE pattern ESCAPE escape`, expanded at parse
+// time into the call that carries all three operands (#1169).
+//
+// The expansion happens HERE, not as a field on LikeExpr, because that node
+// is rebuilt by seven rewriters and a rebuild that dropped the escape would
+// silently answer the UNESCAPED pattern — the reason BETWEEN SYMMETRIC and
+// ILIKE are expanded at parse time too.
+func likeEscapeCall(left, pattern, escape Node, not bool) Node {
+	var node Node = &FuncCallNode{Name: "like_escape",
+		Args: []Node{left, pattern, escape}, OutputLabel: UnnamedOutputColumn}
+	if not {
+		node = &NotNode{Inner: node}
+	}
+	return node
+}
+
+// finishComparison reads the right-hand side of a comparison operator, and
+// the ANY/ALL/SOME modifier that may stand in its place.
+func (p *selectParser) finishComparison(left Node, op string) (Node, error) {
 	// Check for ANY/ALL/SOME modifier: expr op ANY(...) / ALL(...) / SOME(...)
 	if p.peek() == TokenIdent || p.peek() == TokenKWAll {
 		upper := strings.ToUpper(p.cur.val)
@@ -1822,11 +1933,50 @@ func (p *selectParser) parseComparison() (Node, error) {
 		}
 	}
 
-	right, err := p.parseAddition()
+	right, err := p.parsePredicateOperand()
 	if err != nil {
 		return nil, err
 	}
 	return &CmpExpr{Left: left, Op: op, Right: right}, nil
+}
+
+// parseBitwise is PostgreSQL's "any other operator" precedence band: LOOSER
+// than `+` and `-`, TIGHTER than BETWEEN / IN / LIKE and every comparison,
+// and LEFT associative. Measured on 17.11:
+//
+//	1 + 2 # 3   →  (1 + 2) # 3   = 0
+//	2 * 3 # 1   →  (2 * 3) # 1   = 7
+//	1 | 2 # 3   →  (1 | 2) # 3   = 0      (one band, left to right)
+//	5 # 3 = 6   →  (5 # 3) = 6   = t
+//	5 # 3 BETWEEN 6 AND 6        = t
+//
+// `#` is PostgreSQL's INTEGER XOR — `^` is exponentiation there and is
+// already parsed as `power()` (#1155) — and it was unlexed entirely, so
+// `SELECT 5 # 3` was `unexpected character: #` for a statement the server
+// answers 6 (#1179).
+//
+// It lowers to the `bitwise_xor(a, b)` call rather than to a second kernel of
+// its own: that body reads its operands EXACTLY (bitwise_exact.go, #1031) and
+// answers int64 for both int4 and int8 operands, which is the family's
+// recorded widening (ADR-0012) and not a new one.
+func (p *selectParser) parseBitwise() (Node, error) {
+	left, err := p.parseAddition()
+	if err != nil {
+		return nil, err
+	}
+	for p.peek() == TokenHash {
+		p.advance()
+		right, err := p.parseAddition()
+		if err != nil {
+			return nil, err
+		}
+		// An OPERATOR's unaliased result is `?column?` on the server, never
+		// the implementing function's name — the same label `^`, EXTRACT and
+		// POSITION carry through their own rewrites.
+		left = &FuncCallNode{Name: "bitwise_xor", Args: []Node{left, right},
+			OutputLabel: UnnamedOutputColumn}
+	}
+	return left, nil
 }
 
 // symmetricBetween is `a BETWEEN SYMMETRIC b AND c`, expanded to the pair of
@@ -2302,6 +2452,25 @@ func (p *selectParser) parsePrimary() (Node, error) {
 	case TokenKWCast:
 		return p.parseCastExpr()
 
+	case TokenKWLeft, TokenKWRight:
+		// `left(s, n)` and `right(s, n)` are ordinary functions on the
+		// server even though LEFT and RIGHT are reserved words there too:
+		// PostgreSQL's grammar admits a reserved type_func_name_keyword as a
+		// FUNCTION NAME, so `SELECT left('abcdef', 2)` answers `ab`. This
+		// lexer makes them keyword tokens for the JOIN clause, so the call
+		// spelling failed to parse at all (#1169) while the functions were
+		// registered and reachable under no spelling.
+		//
+		// Gated on a following '(' — the same guard EVERY, GROUPING and
+		// REPLACE use — so `LEFT JOIN` and `RIGHT OUTER JOIN`, which are read
+		// by the FROM clause before any expression is parsed, are untouched.
+		if p.peekN(1) == TokenLParen {
+			name := strings.ToLower(p.cur.val)
+			p.advance()
+			return p.parseFuncCall(name)
+		}
+		return nil, fmt.Errorf("unexpected token %q at position %d", p.cur.val, p.cur.pos)
+
 	case TokenLParen:
 		p.advance()
 		// Check for subquery
@@ -2403,6 +2572,37 @@ func (p *selectParser) parsePrimary() (Node, error) {
 		// "expected ( after IN" error this rewrite exists to avoid.
 		if upper == "POSITION" && p.peekN(1) == TokenLParen {
 			return p.parsePositionExpr()
+		}
+
+		// SUBSTRING(s FROM n FOR m) — the SQL-standard spelling of
+		// substring(s, n, m), and the one the standard's own examples use
+		// (#1169). The FROM and FOR inside the call are this operator's
+		// grammar, not clauses, so the generic argument-list path cannot read
+		// it: it hands `s` to the expression parser, which then meets FROM
+		// where it expects a comma.
+		if upper == "SUBSTRING" && p.peekN(1) == TokenLParen {
+			return p.parseSubstringExpr()
+		}
+
+		// OVERLAY(s PLACING r FROM n [FOR m]) — the standard's string-splice
+		// operator, rewritten to the overlay(s, r, n[, m]) call (#1169).
+		if upper == "OVERLAY" && p.peekN(1) == TokenLParen {
+			return p.parseOverlayExpr()
+		}
+
+		// NORMALIZE(s [, NFC|NFD|NFKC|NFKD]) — the form is a bare KEYWORD in
+		// the standard's grammar, not a string, so the generic path read it
+		// as a column reference and answered `unknown column "nfc"` (#1169).
+		if upper == "NORMALIZE" && p.peekN(1) == TokenLParen {
+			return p.parseNormalizeExpr()
+		}
+
+		// LOCALTIMESTAMP [(precision)] — CURRENT_TIMESTAMP's value with
+		// PostgreSQL's other DECLARATION, timestamp without time zone. Spelled
+		// with or without parentheses; the precision is accepted and ignored,
+		// as the server's own seconds-precision output already is here.
+		if upper == "LOCALTIMESTAMP" {
+			return p.parseLocalTimestamp()
 		}
 
 		// ARRAY[...] literal

@@ -41,6 +41,7 @@ const (
 	TokenSlash           // /
 	TokenPercent         // %
 	TokenCaret           // ^ (exponentiation, PostgreSQL's spelling of power())
+	TokenHash            // # (integer XOR, PostgreSQL's spelling of bitwise_xor())
 	TokenConcat          // ||
 	TokenDoubleColon     // ::
 	TokenJSONArrow       // ->
@@ -693,6 +694,13 @@ func lexStart(l *lexer) stateFn {
 		// character was unlexed, so `SELECT 2 ^ 3` was `unexpected character:
 		// ^` for a statement PostgreSQL answers 8 (#1155).
 		l.emit(TokenCaret)
+		return nil
+	case r == '#':
+		// PostgreSQL's INTEGER XOR. `^` is exponentiation there, so the two
+		// characters are not interchangeable: `5 # 3` is 6 and `5 ^ 3` is
+		// 125. The character was unlexed, so the statement was `unexpected
+		// character: #` (#1179).
+		l.emit(TokenHash)
 		return nil
 	case r == '=':
 		l.emit(TokenEq)

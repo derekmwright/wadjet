@@ -97,7 +97,9 @@ func TestLexQuotedIdentErrors(t *testing.T) {
 // emitting its format string verbatim: an unsupported character used to be
 // reported as the literal text "unexpected character: %c".
 func TestLexErrorfInterpolatesArgs(t *testing.T) {
-	tokens := collectTokens("SELECT # FROM t")
+	// `~` rather than `#`: `#` is the integer XOR operator as of #1179 and
+	// lexes to a token of its own, so it no longer reaches errorf.
+	tokens := collectTokens("SELECT ~ FROM t")
 	last := tokens[len(tokens)-1]
 	if last.typ != TokenError {
 		t.Fatalf("expected TokenError, got %d (%q)", last.typ, last.val)
@@ -105,7 +107,7 @@ func TestLexErrorfInterpolatesArgs(t *testing.T) {
 	if strings.Contains(last.val, "%c") || strings.Contains(last.val, "%") {
 		t.Fatalf("format verb reached the message: %q", last.val)
 	}
-	if !strings.Contains(last.val, "#") {
+	if !strings.Contains(last.val, "~") {
 		t.Errorf("message does not name the offending character: %q", last.val)
 	}
 }

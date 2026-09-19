@@ -94,10 +94,14 @@ func TestParseRejectsTrailingInput(t *testing.T) {
 			stopsAt: "COLLATE",
 		},
 		{
-			// A user-supplied LIKE escape character. Dropping it evaluates a
-			// different predicate than the one written.
-			name:    "LIKE ... ESCAPE",
-			sql:     `SELECT n_name FROM nation WHERE n_name LIKE 'A%' ESCAPE '\'`,
+			// `LIKE … ESCAPE` used to be trailing input — the escape was
+			// DROPPED and a different predicate evaluated, which is why it
+			// was pinned here. The clause is read now (#1169), so what this
+			// case holds is the NEXT thing that must not be silently
+			// discarded: a second escape clause is not a spelling PostgreSQL
+			// has.
+			name:    "LIKE ... ESCAPE ... ESCAPE",
+			sql:     `SELECT n_name FROM nation WHERE n_name LIKE 'A%' ESCAPE '\' ESCAPE '!'`,
 			stopsAt: "ESCAPE",
 		},
 		{

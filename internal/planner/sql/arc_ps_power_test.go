@@ -47,11 +47,13 @@ func psPowerForms() []psForm {
 		{name: "reject_dangling", sql: `SELECT 2 ^`, reject: true, pg: "42601 syntax error at end of input"},
 		{name: "reject_doubled", sql: `SELECT 2 ^^ 3`, reject: true,
 			pg: "42883 operator does not exist: integer ^^ integer"},
-		// `#` is PostgreSQL's integer XOR and is a DIFFERENT operator: `^` must
-		// not have taken its meaning. This engine has neither spelling of XOR,
-		// so the assertion is that `#` is still refused, never answered as 6.
-		{name: "reject_hash_is_not_power", sql: `SELECT 5 # 3`, reject: true,
-			pg: "6 — PostgreSQL's integer XOR, which this engine does not implement"},
+		// `#` is PostgreSQL's integer XOR and is a DIFFERENT operator: `^`
+		// must not have taken its meaning. Arc PS asserted that `#` was
+		// REFUSED, because this engine had no XOR spelling at all; it has one
+		// now (#1179), so the assertion is the one that still discriminates —
+		// the two operators answer their own values, never each other's.
+		{name: "hash_is_xor_not_power", sql: `SELECT 5 # 3`,
+			pg: "6 — PostgreSQL's integer XOR; `5 ^ 3` is 125"},
 	}
 }
 

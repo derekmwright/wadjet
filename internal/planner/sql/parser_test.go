@@ -1553,8 +1553,11 @@ func TestSimilarTo(t *testing.T) {
 		sql  string
 		want string
 	}{
-		{"basic", "SELECT * FROM t WHERE name SIMILAR TO '%(john|jane)%'", "regexp_like(name, '%(john|jane)%')"},
-		{"not similar to", "SELECT * FROM t WHERE name NOT SIMILAR TO 'test.*'", "not regexp_like(name, 'test.*')"},
+		// SIMILAR TO lowers to `similar_to`, the call that implements the SQL
+		// standard's pattern language, and no longer to `regexp_like`, which
+		// is a DIFFERENT language matched against a substring (#1168).
+		{"basic", "SELECT * FROM t WHERE name SIMILAR TO '%(john|jane)%'", "similar_to(name, '%(john|jane)%')"},
+		{"not similar to", "SELECT * FROM t WHERE name NOT SIMILAR TO 'test.*'", "not similar_to(name, 'test.*')"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

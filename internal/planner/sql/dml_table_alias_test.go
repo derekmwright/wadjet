@@ -257,7 +257,10 @@ func TestParseExpressionCompleteRefusesTrailingText(t *testing.T) {
 		{sql: "(id = 1) garbage AND name = 'zzz'"},
 		{sql: "name <> 'zzz' AND id ISNULL"},
 		{sql: "id > 0 AND name @@ 'zzz'"},
-		{sql: "id > 0 AND n # 3"},
+		// `#` is the integer XOR operator as of #1179, so the character that
+		// stands for "text this parser does not consume" here is one that is
+		// still unlexed.
+		{sql: "id > 0 AND n ~ 3"},
 		{sql: "id = 1 LIMIT 1"},
 		{sql: "id = 1; DELETE FROM pr"},
 	} {
