@@ -1253,6 +1253,21 @@ func rebuildSQLFull(info *SelectInfo, cols []string, rewrittenWhere Node, having
 				sb.WriteString(", ")
 			}
 			sb.WriteString(t.Name)
+			// A TABLE FUNCTION'S FROM ITEM IS ITS CALL. The name alone is
+			// not the relation: re-emitting `generate_series(1,2) AS g(x)`
+			// as `generate_series g(x)` hands the re-parsed statement a base
+			// table nothing declares, so every outer row read an empty
+			// relation and the correlated subquery answered 0 (or NULL)
+			// where PostgreSQL answers the correlated value (#1203). The
+			// argument list is the text the client wrote, because the lexer
+			// strips a string literal's quotes and FuncArgs cannot be
+			// written back out.
+			if t.IsFunction && t.FuncCallText != "" {
+				sb.WriteString(t.FuncCallText)
+				if t.WithOrdinality {
+					sb.WriteString(" WITH ORDINALITY")
+				}
+			}
 			if t.Alias != "" && t.Alias != t.Name {
 				sb.WriteString(" ")
 				sb.WriteString(t.Alias)

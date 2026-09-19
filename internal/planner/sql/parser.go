@@ -638,9 +638,22 @@ type TableRef struct {
 	FuncArgs       []string          // positional arguments
 	FuncNamedArgs  map[string]string // named arguments (key=value)
 	WithOrdinality bool              // UNNEST(...) WITH ORDINALITY
-	ColumnAliases  []string          // AS alias(col1, col2, ...)
-	SampleMethod   string            // TABLESAMPLE method: BERNOULLI, SYSTEM
-	SamplePercent  string            // percentage for TABLESAMPLE
+	// FuncCallText is the VERBATIM argument list of a table function's call,
+	// parentheses included — `(1, 0, -1)`, `('x.json')`, `('x.csv', delim='|')`.
+	//
+	// It exists because a CORRELATED subquery is re-run per outer row from a
+	// REBUILT statement (RebuildSQLForRerun), and the rebuild wrote a FROM
+	// item as its NAME. For a table function the name alone is not the
+	// relation: `FROM generate_series(1,2) AS g(x)` was re-emitted as `FROM
+	// generate_series g(x)`, which resolves as a base table nothing declares
+	// — so every outer row read an empty relation and the subquery answered 0
+	// where PostgreSQL answers the correlated count (#1203). The arguments
+	// cannot be rebuilt from FuncArgs: the lexer strips a string literal's
+	// quotes, so a path and an identifier are the same bytes by then.
+	FuncCallText  string
+	ColumnAliases []string // AS alias(col1, col2, ...)
+	SampleMethod  string   // TABLESAMPLE method: BERNOULLI, SYSTEM
+	SamplePercent string   // percentage for TABLESAMPLE
 	// ColumnAliasSource is the relation this derived body was LOWERED from,
 	// for the one rewrite that builds a derived table out of a named
 	// relation: `FROM t [AS] a (c1, …)` becomes `FROM (SELECT * FROM t) AS a

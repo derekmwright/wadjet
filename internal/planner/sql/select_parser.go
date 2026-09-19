@@ -1224,6 +1224,7 @@ func lowerNamedRelationColumnAliases(tr *TableRef) {
 // parseTableFunction parses a table function call: name(arg1, key=val, ...) [AS alias]
 // Supports both positional arguments and named parameters (key=value).
 func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
+	lparen := p.cur
 	p.advance() // consume (
 
 	var args []string
@@ -1283,8 +1284,16 @@ func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
 		}
 	}
 
-	if _, err := p.expect(TokenRParen); err != nil {
+	rparen, err := p.expect(TokenRParen)
+	if err != nil {
 		return TableRef{}, fmt.Errorf("expected ) after function arguments")
+	}
+
+	// The call's argument list as WRITTEN, for the rebuild a correlated
+	// re-run does (TableRef.FuncCallText).
+	callText := "()"
+	if lparen.typ == TokenLParen && rparen.pos >= lparen.pos && rparen.pos < len(p.lex.input) {
+		callText = p.lex.input[lparen.pos : rparen.pos+1]
 	}
 
 	tr := TableRef{
@@ -1293,6 +1302,7 @@ func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
 		IsFunction:    true,
 		FuncArgs:      args,
 		FuncNamedArgs: namedArgs,
+		FuncCallText:  callText,
 	}
 
 	// Optional WITH ORDINALITY (for UNNEST)

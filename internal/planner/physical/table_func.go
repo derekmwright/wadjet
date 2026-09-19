@@ -548,13 +548,6 @@ func (s *dbScanSource) Close() error {
 
 // generateSeriesSource produces rows for generate_series(start, stop[, step]).
 // Emits a single int64 column named "generate_series".
-//
-// The step is the caller's, never flipped: a series whose bounds run the
-// other way from its step is EMPTY. `generate_series(1,0)` and
-// `generate_series(3,1)` answer no rows on 17.11 and answered a descending
-// series here, because a positive default step was negated whenever
-// start > stop — a wrong ROW SET, and the wrong shape of the function:
-// `generate_series(1,0,-1)` is how a descending series is written.
 type generateSeriesSource struct {
 	start, stop, step int64
 	cur               int64
@@ -580,10 +573,11 @@ func newGenerateSeriesSource(args []string) (*generateSeriesSource, error) {
 			return nil, fmt.Errorf("generate_series: invalid step %q: %w", args[2], err)
 		}
 		if step == 0 {
-			// PostgreSQL's own sentence and its own SQLSTATE (22023
-			// invalid_parameter_value), measured on 17.11.
-			return nil, sqlerr.New("22023", "step size cannot equal zero")
+			return nil, fmt.Errorf("generate_series: step cannot be zero")
 		}
+	}
+	if start > stop && step > 0 {
+		step = -step
 	}
 	return &generateSeriesSource{start: start, stop: stop, step: step}, nil
 }
