@@ -40,7 +40,7 @@ func TestArcPTParserReadsTheStandardFunctionSpellings(t *testing.T) {
 		// The standard's OTHER spelling, refused by name: the `#"` capture
 		// markers have no expression in this engine's SIMILAR TO translation.
 		{name: "substring_similar_is_refused",
-			sql: `SELECT substring('abcdef' SIMILAR 'a#"b_d#"ef' ESCAPE '#')`,
+			sql:    `SELECT substring('abcdef' SIMILAR 'a#"b_d#"ef' ESCAPE '#')`,
 			reject: true, code: "0A000", pg: "bcd — a spelling this engine refuses by name"},
 		{name: "reject_substring_from_nothing", sql: `SELECT substring('abcdef' FROM)`,
 			reject: true, pg: "42601 syntax error"},
@@ -87,6 +87,15 @@ func TestArcPTParserReadsTheStandardFunctionSpellings(t *testing.T) {
 		{name: "localtimestamp_cast", sql: `SELECT localtimestamp::date`, pg: "today"},
 		{name: "reject_localtimestamp_text_precision", sql: `SELECT localtimestamp('x')`,
 			reject: true, pg: "42601 syntax error"},
+		// The RENDERED form. A worker fragment re-parses the filter text this
+		// planner rendered, so a spelling the renderer emits and the parser
+		// refuses fails the query on the DAG arms and answers on the single
+		// one — which is what the five-arm gate found.
+		{name: "localtimestamp_rendered_form", sql: `SELECT localtimestamp()`,
+			pg: "42601 there; this engine's own rendering of the niladic call"},
+		{name: "localtimestamp_rendered_in_a_predicate",
+			sql: `SELECT id FROM t WHERE localtimestamp() >= localtimestamp()`,
+			pg: "the rendering a worker fragment re-parses"},
 
 		// ---- NORMALIZE ---------------------------------------------------
 		{name: "normalize_bare", sql: `SELECT normalize('abc')`, pg: "abc"},

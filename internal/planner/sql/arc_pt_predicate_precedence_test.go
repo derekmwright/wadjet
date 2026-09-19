@@ -136,6 +136,22 @@ func TestArcPTThePredicateBandRendersBackAtItsOwnPrecedence(t *testing.T) {
 			`similar_to(a, 'x%')`},
 		{"similar_to_escape", `SELECT 1 FROM t WHERE a SIMILAR TO 'x#%' ESCAPE '#'`,
 			`similar_to(a, 'x#%', '#')`},
+		// The SQL-standard spellings render as the CALLS they lower to, and a
+		// worker fragment re-parses that text: `localtimestamp()` is the
+		// rendering of a niladic call and the parser refused it, so the DAG
+		// arms failed a query the single arm answered (five-arm gate).
+		{"substring_from_for", `SELECT 1 FROM t WHERE substring(a FROM 2 FOR 3) = 'x'`,
+			`substring(a, 2, 3) = 'x'`},
+		{"substring_for", `SELECT 1 FROM t WHERE substring(a FOR 3) = 'x'`,
+			`substring(a, 1, 3) = 'x'`},
+		{"overlay", `SELECT 1 FROM t WHERE overlay(a PLACING 'X' FROM 2) = 'x'`,
+			`overlay(a, 'X', 2) = 'x'`},
+		{"normalize_form", `SELECT 1 FROM t WHERE normalize(a, NFD) = 'x'`,
+			`normalize(a, 'NFD') = 'x'`},
+		{"localtimestamp", `SELECT 1 FROM t WHERE a < localtimestamp`,
+			`a < localtimestamp()`},
+		{"left_call", `SELECT 1 FROM t WHERE left(a, 2) = 'x'`, `left(a, 2) = 'x'`},
+		{"right_call", `SELECT 1 FROM t WHERE right(a, 2) = 'x'`, `right(a, 2) = 'x'`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			info := psWhere(t, tc.sql)

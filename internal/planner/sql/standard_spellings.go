@@ -225,8 +225,16 @@ func (p *selectParser) parseLocalTimestamp() (Node, error) {
 	p.advance() // consume LOCALTIMESTAMP
 	if p.peek() == TokenLParen {
 		p.advance()
-		if _, err := p.expect(TokenNumber); err != nil {
-			return nil, fmt.Errorf("expected a precision in LOCALTIMESTAMP(p)")
+		// The EMPTY parentheses are this engine's own rendering of the
+		// niladic call, and the rendering has to re-read: a worker fragment
+		// re-parses the filter text the planner rendered
+		// (`localtimestamp() >= localtimestamp()`), so a spelling the
+		// renderer emits and the parser refuses fails the query on the DAG
+		// arms and answers on the single one. Found by the five-arm gate.
+		if p.peek() != TokenRParen {
+			if _, err := p.expect(TokenNumber); err != nil {
+				return nil, fmt.Errorf("expected a precision in LOCALTIMESTAMP(p)")
+			}
 		}
 		if _, err := p.expect(TokenRParen); err != nil {
 			return nil, fmt.Errorf("expected ) after LOCALTIMESTAMP(p)")
