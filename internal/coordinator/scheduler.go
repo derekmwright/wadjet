@@ -168,6 +168,22 @@ type preparedTask struct {
 	task    distributed.Task
 }
 
+// stampTaskPlannerOptions gives a task that a worker will RE-PLAN the
+// coordinator's own planner options. A task carrying SQL text is a whole
+// query the worker parses, optimizes and plans again
+// (worker.Executor.executePipeline); the coordinator chose that task's
+// shape — which alias the probe split divides, which side of a join is the
+// build — from a plan it made under these options, so a worker that
+// re-optimized under its own process's would order the joins differently
+// and split a relation its plan does not probe (#1223). A task with no SQL
+// text re-plans nothing and is left alone.
+func stampTaskPlannerOptions(t *distributed.Task, bushyJoinReorder bool) {
+	if t == nil || t.SQLText == "" {
+		return
+	}
+	t.BushyJoinReorder = bushyJoinReorder
+}
+
 // PublishTasks publishes a set of tasks for worker consumption. Routes
 // via gRPC TaskDispatch (data-plane server) when configured, otherwise
 // falls back to NATS JetStream publish. Tasks are serialized in batch
@@ -212,9 +228,7 @@ func (s *Scheduler) PublishTasks(ctx context.Context, tasks []distributed.Task) 
 			s.annotate(&task)
 		}
 		stampTaskDeleteMarkers(&task, queryDeletes)
-		if task.SQLText != "" {
-			task.BushyJoinReorder = s.BushyJoinReorder
-		}
+		stampTaskPlannerOptions(&task, s.BushyJoinReorder)
 		data, err := distributed.Marshal(task)
 		if err != nil {
 			return fmt.Errorf("marshaling task %s: %w", task.ID, err)
