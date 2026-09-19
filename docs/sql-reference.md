@@ -669,7 +669,9 @@ SELECT * FROM syslog WHERE message ILIKE '%ERROR%'
 
 -- ESCAPE names the character that makes the NEXT one literal, so a pattern
 -- can match a per cent sign or an underscore. An escape string longer than
--- one character is SQLSTATE 22019; the empty string disables escaping.
+-- one character is SQLSTATE 22025; the empty string disables escaping. A LIKE
+-- pattern that ENDS with the escape is 22025 as well, where the matcher
+-- reaches it; SIMILAR TO reads a dangling escape as contributing nothing.
 SELECT * FROM syslog WHERE path LIKE 'a!%b' ESCAPE '!'
 
 -- SIMILAR TO is the SQL standard's own pattern language, and it is neither
@@ -2234,17 +2236,26 @@ returns no rows; and a string naming no boolean is SQLSTATE `22P02`
 (`invalid input syntax for type boolean: "abc"`).
 
 The refusal is made where the type is PROVABLE — a column whose declaration
-the planner carries, a numeric literal, arithmetic, `COUNT`, and a CALL whose
-return type the registry DECLARES: `WHERE upper(s)` is `42804 … not type
+the planner carries, a numeric literal, arithmetic, `COUNT`, a CALL whose
+return type the registry DECLARES (`WHERE upper(s)` is `42804 … not type
 text`, and so is an OPERATOR the parser rewrites into a call, `a # b` and
-`a ^ b` among them. A function whose declared return type is POLYMORPHIC — it
-mirrors an argument, as `COALESCE` and `GREATEST` do — is not refused, because
-no batch has decided that type yet. A column of a derived table or a CTE is
-not refused either.
+`a ^ b` among them), a CAST (its declared target), a CASE (its branch
+results), an ARRAY constructor, an INTERVAL literal, and a POLYMORPHIC call
+typed through the argument its declaration mirrors (`COALESCE(n, 1)` and
+`GREATEST(n, 1)` are `bigint`). A column of a derived table or a CTE is not
+refused, and neither is a polymorphic call whose mirrored argument this layer
+cannot type.
 
-A `DELETE`'s and an `UPDATE`'s `WHERE` are held to the same rule, with the
-same SQLSTATE and the same message: a clause that is not a boolean removes and
-changes nothing.
+A `DELETE`'s and an `UPDATE`'s `WHERE`, and a `MERGE`'s `WHEN … AND`
+condition, are held to the same rule, with the same SQLSTATE and the same
+message, for EVERY expression kind: a literal, a column, a call (fixed or
+polymorphic — `COALESCE`, `GREATEST`, `LEAST`, `NULLIF`), a `CASE` (searched
+or simple), a `CAST`, arithmetic, an `ARRAY` constructor, an `INTERVAL`
+literal and a scalar subquery. A clause that is not a boolean removes and
+changes nothing. An aggregate there is `42803` and a window function `42P20`,
+as they are in a `SELECT`'s `WHERE`; a quoted literal is read with the boolean
+input function, so `WHERE 'true'` removes every row and `WHERE 'abc'` is
+`22P02`.
 
 The same input function applies when a boolean is COMPARED against a quoted
 literal, and it applies to a boolean the query COMPUTED, not only to a boolean

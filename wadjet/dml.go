@@ -1720,14 +1720,17 @@ func (ev *mergeEvaluator) checkConditionType(node plansql.Node, matched bool) er
 		// Arithmetic and concatenation are never boolean.
 		return sqlerr.New("42804", "argument of WHEN must be type boolean, not type %s",
 			binaryOpResultName(n.Op))
-	case *plansql.CastNode:
-		if strings.EqualFold(strings.TrimSpace(n.TypeName), "BOOL") ||
-			strings.EqualFold(strings.TrimSpace(n.TypeName), "BOOLEAN") {
-			return nil
-		}
-		return sqlerr.New("42804", "argument of WHEN must be type boolean, not type %s", n.TypeName)
 	}
-	return nil
+	// Every OTHER node kind is typed by the walk the other three DML verbs
+	// use, with WHEN as the site: a CALL, a CASE, a CAST, an ARRAY, an
+	// INTERVAL, a polymorphic call and a scalar subquery all reach it, and a
+	// misplaced aggregate or window is its own class. The bespoke arms above
+	// stay because they resolve a MERGE-qualified name (`s.n`) that a plain
+	// column scope cannot (#1179 round 2).
+	if err := physical.RefuseMisplacedDMLFunctions(node); err != nil {
+		return err
+	}
+	return physical.RefuseNonBooleanClause(node, "WHEN", ev.mergedCols)
 }
 
 // parseSQLBoolText reads the spellings PostgreSQL accepts when it casts an
@@ -2671,6 +2674,20 @@ func BuildDMLPredicate(target plansql.DMLTarget, schema []parquet.Column, sub *D
 	node, err := plansql.ParseExpressionComplete(whereSQL)
 	if err != nil {
 		return nil, sqlerr.Wrap("42601", fmt.Errorf("parsing WHERE %q: %w", whereSQL, err))
+	}
+	// A quoted literal in a truth context is read with PostgreSQL's boolean
+	// INPUT function, exactly as a SELECT's WHERE reads it: `WHERE 'true'`
+	// removes every row, `WHERE 'no'` removes none, and `WHERE 'abc'` is
+	// 22P02. This clause never reached that walk (ADR-0031), so all three
+	// removed nothing (#1179 round 2).
+	node, err = plansql.CoerceBooleanNode(node)
+	if err != nil {
+		return nil, err
+	}
+	// An aggregate or a window in a WHERE is refused BEFORE the columns are
+	// resolved, which is the order the server reports in.
+	if err := physical.RefuseMisplacedDMLFunctions(node); err != nil {
+		return nil, err
 	}
 	if err := checkDMLColumns(node, target, schema); err != nil {
 		return nil, err

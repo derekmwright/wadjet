@@ -61,6 +61,26 @@ func CoerceBooleanLiterals(info *SelectInfo) error {
 	return coerceBoolInCases(info.WhereExpr)
 }
 
+// CoerceBooleanNode is CoerceBooleanLiterals for a single TRUTH CONTEXT that
+// is not a SELECT's clause — a DELETE's or an UPDATE's WHERE, which is parsed
+// and compiled on its own (ADR-0031) and therefore never reached the
+// SelectInfo walk. Without it `DELETE FROM t WHERE 'true'` removed NOTHING
+// where PostgreSQL 17.11 removes every row, and `WHERE 'abc'` removed nothing
+// where the server raises 22P02 (#1179 round 2).
+//
+// It returns the rewritten node, so the caller evaluates the COERCED literal
+// rather than the text.
+func CoerceBooleanNode(n Node) (Node, error) {
+	out, _, err := coerceBoolNode(n)
+	if err != nil {
+		return nil, err
+	}
+	if err := coerceBoolInCases(out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // coerceBoolNode rewrites a node that IS a boolean context, returning the
 // replacement and whether anything changed.
 func coerceBoolNode(n Node) (Node, bool, error) {

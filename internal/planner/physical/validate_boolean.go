@@ -41,15 +41,18 @@ func checkBooleanContext(node plansql.Node, scope *colScope, site string) error 
 		// Only a SEARCHED CASE's WHEN is a boolean context. `CASE x WHEN 1`
 		// compares x against 1 and its WHEN is a VALUE, which is why the
 		// Subject test comes first.
-		if n.Subject != nil {
-			return nil
-		}
-		for _, w := range n.Whens {
-			if err := checkBooleanContext(w.Cond, scope, "CASE/WHEN"); err != nil {
-				return err
+		if n.Subject == nil {
+			for _, w := range n.Whens {
+				if err := checkBooleanContext(w.Cond, scope, "CASE/WHEN"); err != nil {
+					return err
+				}
 			}
 		}
-		return nil
+		// ...and the CASE's own VALUE is what the ENCLOSING site reads, so it
+		// falls through to the type check below rather than returning here:
+		// `WHERE id > 0 AND CASE WHEN id > 0 THEN 1 ELSE 0 END` is 42804
+		// integer on the server and DELETED every row here (round-1 review,
+		// B1; the arm below is the reviewer's, with credit in the commit).
 	}
 	_, name, ok := provableNonBooleanType(node, scope)
 	if !ok {
@@ -179,7 +182,53 @@ func provableNonBooleanType(node plansql.Node, scope *colScope) (parquet.TypeID,
 		if typ, ok := expr.FuncFixedNonBooleanType(strings.ToLower(n.Name)); ok {
 			return typ, pgTypeName(typ), true
 		}
+		// A POLYMORPHIC declaration mirrors an argument, so the call is typed
+		// by the positions it mirrors: `COALESCE(n, 1)` and `GREATEST(n, 1)`
+		// are bigint on 17.11, and a DELETE whose WHERE was one of them
+		// removed every row here. Only a candidate that is itself PROVABLY
+		// non-boolean answers; one that is boolean, or that this scope cannot
+		// type, leaves the call alone.
+		if positions, ok := expr.FuncPolymorphicArgPositions(strings.ToLower(n.Name)); ok {
+			for i, arg := range n.Args {
+				if !polymorphicCandidate(positions, i) {
+					continue
+				}
+				if typ, name, ok := provableNonBooleanType(arg, scope); ok {
+					return typ, name, true
+				}
+			}
+		}
 		return 0, "", false
+	case *plansql.CastNode:
+		// A CAST DECLARES its result type, which is the strongest declaration
+		// in the language: `WHERE CAST(n AS BIGINT)` is 42804 bigint on
+		// 17.11 and removed three of four rows here through a DELETE.
+		// inferCastType is this package's one reading of a destination name.
+		if typ := inferCastType(n.TypeName); typ != parquet.TypeBool {
+			return typ, pgTypeName(typ), true
+		}
+		return 0, "", false
+	case *plansql.CaseNode:
+		// A CASE's VALUE is its branch results — for a SEARCHED case and for
+		// a simple one alike, which is why the Subject is not consulted here.
+		// One provably non-boolean branch is enough: a CASE whose branches
+		// disagree on type is refused for that reason first.
+		for _, w := range n.Whens {
+			if typ, name, ok := provableNonBooleanType(w.Result, scope); ok {
+				return typ, name, true
+			}
+		}
+		if n.Else != nil {
+			return provableNonBooleanType(n.Else, scope)
+		}
+		return 0, "", false
+	case *plansql.ArrayLitNode:
+		// An ARRAY constructor is never a boolean. PostgreSQL names the
+		// element type — `integer[]` — and this engine has one ARRAY type,
+		// so the name it can state truthfully is that.
+		return parquet.TypeArray, pgTypeName(parquet.TypeArray), true
+	case *plansql.IntervalLit:
+		return parquet.TypeDuration, "interval", true
 	case *plansql.SubqueryNode:
 		// A SCALAR SUBQUERY used as a predicate is typed by its single select
 		// item, and the same rule applies to it — `WHERE (SELECT COUNT(*)
@@ -275,6 +324,30 @@ func pgTypeName(t parquet.TypeID) string {
 	return strings.ToLower(t.String())
 }
 
+// RefuseNonBooleanClause is the truth-context rule over a clause whose scope
+// is a plain column list and whose SITE has its own name — MERGE's
+// `WHEN … AND <cond>`, which PostgreSQL reports as `argument of WHEN must be
+// type boolean, not type bigint`.
+//
+// It exists so the fourth DML verb reads the SAME walk as the other three: the
+// bespoke check MERGE had typed a literal, a column, arithmetic and a CAST and
+// nothing else, so a CALL, a CASE, an ARRAY or a polymorphic call in a WHEN
+// condition fell through and the clause FIRED — destroying a row PostgreSQL
+// refuses to touch (#1179 round 2, the node-kind census).
+func RefuseNonBooleanClause(node plansql.Node, site string, cols []parquet.Column) error {
+	if node == nil {
+		return nil
+	}
+	scope := newColScope()
+	for _, c := range cols {
+		scope.addQualifiedTyped("", c.Name, c.Type)
+	}
+	if err := checkBooleanContext(node, scope, site); err != nil {
+		return err
+	}
+	return checkCaseWhenContexts(node, scope)
+}
+
 // RefuseNonBooleanDMLPredicate holds a DELETE's or an UPDATE's WHERE clause to
 // the same truth-context rule a SELECT's is held to: `argument of WHERE must
 // be type boolean`, SQLSTATE 42804, PostgreSQL's own sentence.
@@ -304,4 +377,46 @@ func RefuseNonBooleanDMLPredicate(node plansql.Node, alias string, schema []parq
 		return err
 	}
 	return checkCaseWhenContexts(node, scope)
+}
+
+// polymorphicCandidate reports whether argument i is one of the positions a
+// polymorphic declaration mirrors. An EMPTY list means every argument, which
+// is what the declaration itself means (expr.FuncPolymorphicArgPositions).
+func polymorphicCandidate(positions []int, i int) bool {
+	if len(positions) == 0 {
+		return true
+	}
+	for _, p := range positions {
+		if p == i {
+			return true
+		}
+	}
+	return false
+}
+
+// RefuseMisplacedDMLFunctions refuses an AGGREGATE (42803) or a WINDOW
+// function (42P20) in a DELETE's or an UPDATE's WHERE, which is where
+// PostgreSQL refuses them and where the SELECT path already refuses the
+// first (logical.checkAggregatePlacement).
+//
+// It is separate from the type walk, and it runs BEFORE column resolution,
+// because that is the order the server reports in: a window in a WHERE is
+// 42P20 whatever the columns under it are, while an unknown column is 42703
+// before anything is typed. Without it `DELETE FROM t WHERE SUM(n)` answered
+// DELETE 0 for a statement the server refuses (#1179 round 2).
+func RefuseMisplacedDMLFunctions(node plansql.Node) error {
+	if node == nil {
+		return nil
+	}
+	if found := plansql.FindAllAggregates(node); len(found) > 0 {
+		kind := "aggregate functions"
+		if strings.EqualFold(found[0].Name, "grouping") {
+			kind = "grouping operations"
+		}
+		return sqlerr.New("42803", "%s are not allowed in WHERE", kind)
+	}
+	if len(plansql.FindAllWindowFuncs(node)) > 0 {
+		return sqlerr.New("42P20", "window functions are not allowed in WHERE")
+	}
+	return nil
 }

@@ -923,6 +923,26 @@ func FuncFixedNonBooleanType(name string) (batch.TypeID, bool) {
 	return r.typ, true
 }
 
+// FuncPolymorphicArgPositions reports the argument positions a POLYMORPHIC
+// declaration mirrors — `COALESCE`, `GREATEST`, `LEAST`, `NULLIF`, `IF`, `ABS`
+// and the rest of RetSameAsArg's family — and whether the name has one at all.
+// An empty slice with ok=true means "every argument is a candidate", which is
+// what the declaration itself means.
+//
+// The truth-context check reads it for the same reason it reads
+// FuncFixedNonBooleanType: `WHERE COALESCE(n, 1)` is `42804 … not type bigint`
+// on PostgreSQL 17.11, and a DELETE whose WHERE is that removed every row
+// here. A polymorphic call cannot be typed from the declaration alone, but it
+// CAN be typed from the arguments the declaration says it mirrors — which is
+// the caller's job, one level up, where the scope is (#1179 round 2).
+func FuncPolymorphicArgPositions(name string) ([]int, bool) {
+	r := DefaultRegistry.ReturnType(name)
+	if r.kind != retSameAsArg {
+		return nil, false
+	}
+	return r.args, true
+}
+
 // RetRow declares the complete child schema needed to allocate a ROW result.
 func RetRow(fields []parquet.Column) Ret {
 	return Ret{kind: retFixed, typ: batch.TypeRow, schema: &parquet.Column{Type: parquet.TypeRow, Fields: fields}}
