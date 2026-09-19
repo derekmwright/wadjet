@@ -510,7 +510,11 @@ func TestGenerateSeries_WithStep(t *testing.T) {
 	}
 }
 
-func TestGenerateSeries_Descending(t *testing.T) {
+// A descending pair of bounds with the DEFAULT step is an EMPTY series on
+// PostgreSQL 17.11 (measured), not a descending one: the step is the caller's
+// and is never negated for them. `generate_series(5,1,-1)` is how the
+// descending series is written, and TestGenerateSeries_NegativeStep is it.
+func TestGenerateSeries_DescendingBoundsWithTheDefaultStepAreEmpty(t *testing.T) {
 	source, err := buildTableFunctionSource("generate_series", []string{"5", "1"}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -524,17 +528,8 @@ func TestGenerateSeries_Descending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b == nil {
-		t.Fatal("expected batch")
-	}
-	if b.Len != 5 {
-		t.Fatalf("expected 5 rows, got %d", b.Len)
-	}
-	expected := []int64{5, 4, 3, 2, 1}
-	for i, want := range expected {
-		if b.Columns[0].Int64Data[i] != want {
-			t.Errorf("row %d: got %d, want %d", i, b.Columns[0].Int64Data[i], want)
-		}
+	if b != nil {
+		t.Fatalf("expected no batch, got %d rows", b.Len)
 	}
 }
 

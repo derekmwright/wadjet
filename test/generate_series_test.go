@@ -22,6 +22,14 @@ func TestGenerateSeriesE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Every `rows`/`first`/`last` below is PostgreSQL 17.11's answer for the
+	// same call, measured live. One of them changed and the old expectation
+	// was this engine's own:
+	//
+	//   - a call whose bounds run the other way from its step is EMPTY. The
+	//     step was negated whenever start > stop, so `generate_series(5,1)`
+	//     answered five rows where 17.11 answers none; the descending series
+	//     is written `generate_series(5,1,-1)`, which now parses.
 	tests := []struct {
 		name  string
 		query string
@@ -40,8 +48,8 @@ func TestGenerateSeriesE2E(t *testing.T) {
 			rows:  4, first: 0, last: 9,
 		},
 		{
-			name:  "descending auto-step",
-			query: "SELECT * FROM generate_series(5, 1)",
+			name:  "descending with an explicit negative step",
+			query: "SELECT * FROM generate_series(5, 1, -1)",
 			rows:  5, first: 5, last: 1,
 		},
 		{

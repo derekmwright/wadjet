@@ -1238,6 +1238,23 @@ func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
 		argCount++
 
 		tok := p.cur
+		// A SIGNED number is ONE argument. The lexer emits the sign as its
+		// own operator token, and the loop below read it as a whole argument
+		// and then demanded a comma — so `generate_series(1, 0, -1)`, the
+		// only spelling of a DESCENDING series, was 42601 where PostgreSQL
+		// answers two rows. Only a sign directly in front of a NUMBER is
+		// folded; anything else keeps the old reading.
+		if tok.typ == TokenMinus || tok.typ == TokenPlus {
+			sign := tok.val
+			save, savePos, saveStart, saveWidth := p.cur, p.lex.pos, p.lex.start, p.lex.width
+			p.advance()
+			if p.cur.typ == TokenNumber {
+				args = append(args, sign+p.cur.val)
+				p.advance()
+				continue
+			}
+			p.cur, p.lex.pos, p.lex.start, p.lex.width = save, savePos, saveStart, saveWidth
+		}
 		switch tok.typ {
 		case TokenIdent:
 			// Advance past ident, then check if next is = (named param) or . (qualified name)
