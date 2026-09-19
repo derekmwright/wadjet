@@ -30,23 +30,19 @@ import (
 )
 
 // withColumnAliases applies a FROM item's COLUMN-ALIAS LIST — `FROM
-// read_json(…) [AS] f(k, v)` — to a table function's output.
+// read_json(…) [AS] f(k, v)` — to a table function's output, POSITIONALLY:
+// fewer names rename a prefix (`unnest(…) WITH ORDINALITY AS u(v)` publishes v
+// and ordinality), more names than the relation has is `42P10 table "f" has N
+// columns available but M columns specified` (PostgreSQL §7.2.1.4).
 //
-// PostgreSQL gives every FROM item one alias clause (§7.2.1.4), and a
-// function's is applied POSITIONALLY: fewer names rename a prefix
-// (`unnest(…) WITH ORDINALITY AS u(v)` publishes v and ordinality), more names
-// than the relation has is `42P10 table "f" has N columns available but M
-// columns specified`.
-//
-// It is applied HERE, over the source, rather than lowered in the parser to
-// the derived-table spelling a NAMED relation's list takes
-// (plansql.lowerNamedRelationColumnAliases): a table function's column list is
-// not knowable until it has read its input — read_json infers it from the file
-// — and the plan-time rename refuses with "renames the columns of a `SELECT *`
-// this planner did not expand" for exactly that reason. This is the one layer
-// that has the width. Before it, the list was parsed and then dropped for
-// every function but unnest, so `SELECT k FROM read_json(…) AS f(k, v)`
-// answered NULL for every row (#1184).
+// It is applied HERE rather than lowered in the parser to the derived-table
+// spelling a NAMED relation's list takes (plansql.lowerNamedRelationColumnAliases):
+// a table function's column list is not knowable until it has read its input —
+// read_json infers it from the file — and that plan-time rename refuses with
+// "renames the columns of a `SELECT *` this planner did not expand" for
+// exactly that reason. This is the one layer with the width. Before it, the
+// list was parsed and then dropped for every function but unnest, so
+// `SELECT k FROM read_json(…) AS f(k, v)` answered NULL for every row (#1184).
 //
 // The boundary: a function that produces NO batch (an empty file) is never
 // measured against its list, so an over-long list there answers zero rows
