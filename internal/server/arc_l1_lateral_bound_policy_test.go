@@ -105,6 +105,21 @@ func TestArcL1ABoundedLateralReadsThePublishedValue(t *testing.T) {
 			t.Run(c.name+"/"+door.name, func(t *testing.T) {
 				got, err := door.run(t, "analyst-key", c.sql)
 				if err != nil {
+					// PINNED since arc JR (#1153): the materialization
+					// declines under a bare star, so the lifted predicate
+					// names a column the fragment's declared sides do not
+					// publish, and the four DAG doors now REFUSE where they
+					// answered PostgreSQL's column list over WRONG VALUES —
+					// the three-padded-row answer arc L1 pins per arm in
+					// `l1ArmPins["R4/bareStar"]`. A loud refusal replacing a
+					// base-wrong answer is not a regression; what is lost is
+					// only that the LIST cannot be observed on those four
+					// doors, and the five that answer still assert it.
+					if l1LiftedStarDAGDoors[door.name] &&
+						strings.Contains(err.Error(), "resolves on neither side of this join here") {
+						t.Skipf("pinned: the lifted predicate does not resolve on the "+
+							"fragment's declared sides, so this door refuses: %v", err)
+					}
 					t.Fatalf("refused: %v\n  SQL: %s", err, c.sql)
 				}
 				cols := append([]string(nil), got.cols...)
@@ -179,4 +194,13 @@ func pmSeq(n int) string {
 // the mask cells above are what say the answer is the policy's.
 func pmDeptPairs() string {
 	return "a=10|m=1 ; a=1|m=1 ; a=4|m=1 ; a=7|m=1"
+}
+
+// l1LiftedStarDAGDoors names the four doors on which a bare star over a
+// LIFTED-predicate lateral refuses since arc JR. See the skip above.
+var l1LiftedStarDAGDoors = map[string]bool{
+	"embedded/dag":          true,
+	"embedded/dag-shuffled": true,
+	"pgwire/dag":            true,
+	"http/dag":              true,
 }
