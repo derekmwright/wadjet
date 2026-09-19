@@ -119,6 +119,16 @@ func TestArcPTADMLPredicateIsHeldToTheSameRule(t *testing.T) {
 		{name: "the_rule_survives_an_alias",
 			sql:   `DELETE FROM bc AS a WHERE a.id > 0 AND a.n # 3`,
 			state: "42804", msg: "argument of AND must be type boolean, not type bigint"},
+		// A BARE name under an alias. The scope registers each column ONCE:
+		// registering it twice (bare and qualified) made it look AMBIGUOUS to
+		// the type lookup, which turned this refusal off for every aliased
+		// statement.
+		{name: "a_bare_name_under_an_alias",
+			sql:   `DELETE FROM bc AS a WHERE n`,
+			state: "42804", msg: "argument of WHERE must be type boolean, not type bigint"},
+		{name: "a_bare_call_under_an_alias",
+			sql:   `DELETE FROM bc AS a WHERE upper(s)`,
+			state: "42804", msg: "argument of WHERE must be type boolean, not type text"},
 		// And the ordinary predicates still run, the new spellings included.
 		{name: "an_ordinary_predicate_still_deletes",
 			sql: `DELETE FROM bc WHERE id = 1`, tag: "DELETE 1", rows: []string{"2:0:b"}},

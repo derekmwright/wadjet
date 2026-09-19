@@ -291,12 +291,14 @@ func RefuseNonBooleanDMLPredicate(node plansql.Node, alias string, schema []parq
 	if node == nil {
 		return nil
 	}
+	// ONE registration per column. addQualifiedTyped counts sources, and a
+	// column registered twice looks AMBIGUOUS to provableColType — which
+	// silently turned the refusal off for a bare name whenever the statement
+	// wrote an alias (`DELETE FROM t AS a WHERE n`). The qualified form
+	// registers the bare name too.
 	scope := newColScope()
 	for _, c := range schema {
-		scope.addQualifiedTyped("", c.Name, c.Type)
-		if alias != "" {
-			scope.addQualifiedTyped(alias, c.Name, c.Type)
-		}
+		scope.addQualifiedTyped(alias, c.Name, c.Type)
 	}
 	if err := checkBooleanContext(node, scope, "WHERE"); err != nil {
 		return err
