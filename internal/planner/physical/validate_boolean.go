@@ -131,6 +131,15 @@ func provableNonBooleanType(node plansql.Node, scope *colScope) (parquet.TypeID,
 	switch n := plansql.Unparen(node).(type) {
 	case *plansql.ColRef:
 		typ, known := scope.provableColType(n)
+		if !known {
+			// A ROW FIELD PATH reaches this walk as a ColRef whose QUALIFIER
+			// is a ROW column rather than a relation (ADR-0022), so the
+			// relation lookup above misses it. The field's declared type is
+			// the one the scope already records for #604's field-existence
+			// check: `WHERE (r).a` is 42804 bigint on 17.11 and removed a row
+			// here (round-2 review, P2-r2).
+			typ, known = scope.provableRowFieldType(n)
+		}
 		if !known || typ == parquet.TypeBool {
 			return 0, "", false
 		}
@@ -188,6 +197,21 @@ func provableNonBooleanType(node plansql.Node, scope *colScope) (parquet.TypeID,
 		// removed every row here. Only a candidate that is itself PROVABLY
 		// non-boolean answers; one that is boolean, or that this scope cannot
 		// type, leaves the call alone.
+		// A SUBSCRIPT — `arr[1]`, `m['k']` — is lowered to `element_at`, whose
+		// declaration mirrors the CONTAINER, so the polymorphic arm below
+		// would name the container's type where PostgreSQL names the ELEMENT's
+		// (42804 bigint for a bigint[]). The scope records the element type of
+		// the columns it was built from, and where it has one, that is the
+		// type this position holds — including when the element IS boolean,
+		// which is the one shape that must NOT be refused.
+		if strings.EqualFold(n.Name, "element_at") && len(n.Args) > 0 {
+			if typ, ok := scope.provableElementType(n.Args[0]); ok {
+				if typ == parquet.TypeBool {
+					return 0, "", false
+				}
+				return typ, pgTypeName(typ), true
+			}
+		}
 		if positions, ok := expr.FuncPolymorphicArgPositions(strings.ToLower(n.Name)); ok {
 			for i, arg := range n.Args {
 				if !polymorphicCandidate(positions, i) {
@@ -341,6 +365,8 @@ func RefuseNonBooleanClause(node plansql.Node, site string, cols []parquet.Colum
 	scope := newColScope()
 	for _, c := range cols {
 		scope.addQualifiedTyped("", c.Name, c.Type)
+		scope.addRowColumn(c)
+		scope.addElementType(c)
 	}
 	if err := checkBooleanContext(node, scope, site); err != nil {
 		return err
@@ -372,6 +398,8 @@ func RefuseNonBooleanDMLPredicate(node plansql.Node, alias string, schema []parq
 	scope := newColScope()
 	for _, c := range schema {
 		scope.addQualifiedTyped(alias, c.Name, c.Type)
+		scope.addRowColumn(c)
+		scope.addElementType(c)
 	}
 	if err := checkBooleanContext(node, scope, "WHERE"); err != nil {
 		return err
@@ -394,29 +422,36 @@ func polymorphicCandidate(positions []int, i int) bool {
 	return false
 }
 
-// RefuseMisplacedDMLFunctions refuses an AGGREGATE (42803) or a WINDOW
-// function (42P20) in a DELETE's or an UPDATE's WHERE, which is where
-// PostgreSQL refuses them and where the SELECT path already refuses the
-// first (logical.checkAggregatePlacement).
-//
-// It is separate from the type walk, and it runs BEFORE column resolution,
-// because that is the order the server reports in: a window in a WHERE is
-// 42P20 whatever the columns under it are, while an unknown column is 42703
-// before anything is typed. Without it `DELETE FROM t WHERE SUM(n)` answered
-// DELETE 0 for a statement the server refuses (#1179 round 2).
-func RefuseMisplacedDMLFunctions(node plansql.Node) error {
+// RefuseWindowInADMLPredicate refuses a WINDOW function in a DELETE's or an
+// UPDATE's WHERE — 42P20, BEFORE column resolution, which is the server's
+// order: `WHERE COUNT(*) OVER (PARTITION BY zz)` is 42P20 there even though
+// `zz` does not exist. Its SELECT twin is
+// plansql.RefuseWindowInARowFilteringClause, which runs in the parser's own
+// post-extract hook for the same reason.
+func RefuseWindowInADMLPredicate(node plansql.Node) error {
+	if node == nil || len(plansql.FindAllWindowFuncs(node)) == 0 {
+		return nil
+	}
+	return sqlerr.New("42P20", "window functions are not allowed in WHERE")
+}
+
+// RefuseAggregateInADMLPredicate refuses an AGGREGATE in the same clause —
+// 42803, but AFTER column resolution, which is the other half of the server's
+// order and the half round 2 got wrong: `DELETE … WHERE SUM(zz)` is
+// `42703 column "zz" does not exist` on 17.11 and on the SELECT door here,
+// and running the aggregate check first made it 42803, so the two doors
+// disagreed about the same statement (round-2 review, P3-r2).
+func RefuseAggregateInADMLPredicate(node plansql.Node) error {
 	if node == nil {
 		return nil
 	}
-	if found := plansql.FindAllAggregates(node); len(found) > 0 {
-		kind := "aggregate functions"
-		if strings.EqualFold(found[0].Name, "grouping") {
-			kind = "grouping operations"
-		}
-		return sqlerr.New("42803", "%s are not allowed in WHERE", kind)
+	found := plansql.FindAllAggregates(node)
+	if len(found) == 0 {
+		return nil
 	}
-	if len(plansql.FindAllWindowFuncs(node)) > 0 {
-		return sqlerr.New("42P20", "window functions are not allowed in WHERE")
+	kind := "aggregate functions"
+	if strings.EqualFold(found[0].Name, "grouping") {
+		kind = "grouping operations"
 	}
-	return nil
+	return sqlerr.New("42803", "%s are not allowed in WHERE", kind)
 }

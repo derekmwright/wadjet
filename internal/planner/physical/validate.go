@@ -129,6 +129,13 @@ type colScope struct {
 	// whose field shape this binder does not carry, is never in the map and so
 	// is never refused. Only ROW columns with a non-empty field list appear.
 	rowFields map[string][]parquet.Column
+	// elemTypes records the ELEMENT type of the ARRAY and MAP columns the
+	// scope was built from, keyed by bare column name, so a SUBSCRIPT —
+	// lowered to `element_at(container, i)` — can be typed by what it
+	// PRODUCES rather than by the container it reads (round-2 review,
+	// P2-r2). Absent for a container whose element type the source does not
+	// declare, which leaves the subscript untyped rather than guessed.
+	elemTypes map[string]parquet.TypeID
 	// exactQuals records the SPELLING each FROM source declared its qualifier
 	// under, for the same reason exact does it for columns: a DELIMITED alias
 	// is byte-exact. `FROM rvc t, rvd2 "T"` declares two relations, and
@@ -175,7 +182,8 @@ func newColScope() *colScope {
 	return &colScope{cols: map[string]bool{}, quals: map[string]map[string]bool{}, srcCount: map[string]int{},
 		dupQualified: map[string]map[string]bool{},
 		colTypes:     map[string]parquet.TypeID{}, qualColTypes: map[string]map[string]parquet.TypeID{},
-		rowFields: map[string][]parquet.Column{}, exact: map[string]bool{},
+		rowFields: map[string][]parquet.Column{}, elemTypes: map[string]parquet.TypeID{},
+		exact:      map[string]bool{},
 		exactQuals: map[string]bool{}}
 }
 
@@ -348,6 +356,18 @@ func (s *colScope) merge(o *colScope) {
 			continue
 		}
 		s.rowFields[c] = fields
+	}
+	// Element types travel with the rest, under the same certainty rule: two
+	// sources declaring one container name with different element types leave
+	// the subscript untyped. A map that did not travel left the scope the
+	// WHERE check runs against empty, so the subscript rule could not fire at
+	// all (round-2 review, P2-r2).
+	for c, typ := range o.elemTypes {
+		if prev, seen := s.elemTypes[c]; seen && prev != typ {
+			delete(s.elemTypes, c)
+			continue
+		}
+		s.elemTypes[c] = typ
 	}
 }
 
@@ -980,6 +1000,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 		// (renameCollidingSlots) so the two can coexist in one query.
 		into.addQualifiedTyped(qual, c.Name, c.Type)
 		into.addRowColumn(c)
+		into.addElementType(c)
 		into.addFieldDecl(qual, c.Name, expr.DeclType{ID: c.Type, Schema: &c})
 	}
 	return nil
@@ -990,6 +1011,77 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 // is recorded; anything else leaves field existence to the runtime resolver.
 // A second source declaring the same bare name with a DIFFERENT shape removes
 // the entry, so the refusal is never made on an uncertain shape.
+// addElementType records an ARRAY's or a MAP's element type, for the subscript
+// rule provableElementType states. A MAP's element is its entry ROW, whose
+// `value` field is what a subscript yields, so that field is what is recorded.
+func (s *colScope) addElementType(c parquet.Column) {
+	if c.ElementType == nil {
+		return
+	}
+	el := *c.ElementType
+	if c.Type == parquet.TypeMap {
+		for _, f := range el.Fields {
+			if strings.EqualFold(f.Name, "value") {
+				el = f
+				break
+			}
+		}
+	}
+	name := strings.ToLower(c.Name)
+	if prev, seen := s.elemTypes[name]; seen && prev != el.Type {
+		delete(s.elemTypes, name)
+		return
+	}
+	s.elemTypes[name] = el.Type
+}
+
+// provableRowFieldType types a ROW FIELD PATH — a ColRef whose qualifier names
+// a ROW column rather than a relation (ADR-0022) — from the field list the
+// scope already records for #604's field-existence check.
+func (s *colScope) provableRowFieldType(ref *plansql.ColRef) (parquet.TypeID, bool) {
+	if s == nil || s.open || ref.Table == "" {
+		return 0, false
+	}
+	fields, ok := s.rowFields[strings.ToLower(ref.Table)]
+	if !ok {
+		return 0, false
+	}
+	for _, f := range fields {
+		if strings.EqualFold(f.Name, ref.Column) {
+			return f.Type, true
+		}
+	}
+	return 0, false
+}
+
+// provableElementType types a SUBSCRIPT's result: the element type of the
+// container the first argument names, when that container is a column this
+// scope was built from.
+func (s *colScope) provableElementType(container plansql.Node) (parquet.TypeID, bool) {
+	if s == nil || s.open {
+		return 0, false
+	}
+	ref, ok := plansql.Unparen(container).(*plansql.ColRef)
+	if !ok {
+		return 0, false
+	}
+	// A QUALIFIED container (`t.arr[1]`) is the same column: the qualifier has
+	// to name a relation that provides it, and the bare entry is dropped
+	// whenever two sources disagree about the element type, so reading it
+	// here cannot be uncertain.
+	if ref.Table != "" {
+		cols, ok := s.qualColTypes[strings.ToLower(ref.Table)]
+		if !ok {
+			return 0, false
+		}
+		if _, ok := cols[strings.ToLower(ref.Column)]; !ok {
+			return 0, false
+		}
+	}
+	typ, ok := s.elemTypes[strings.ToLower(ref.Column)]
+	return typ, ok
+}
+
 func (s *colScope) addRowColumn(c parquet.Column) {
 	if c.Type != parquet.TypeRow || len(c.Fields) == 0 {
 		return
