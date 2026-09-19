@@ -62,6 +62,16 @@ func TestArcPTTheP4PredicateBandParsesAtPostgresPrecedence(t *testing.T) {
 		{name: "between_then_is_true", sql: `SELECT 5 BETWEEN 10 AND 1 IS TRUE`, pg: "f"},
 		{name: "between_then_is_not_true", sql: `SELECT 5 BETWEEN 10 AND 1 IS NOT TRUE`, pg: "t"},
 		{name: "in_then_is_true", sql: `SELECT 1 IN (1) IS TRUE`, pg: "t"},
+		// IS DISTINCT FROM's right operand is a FULL predicate operand,
+		// comparison included: 17.11 reads `1 IS DISTINCT FROM 2 = true` as
+		// `1 IS DISTINCT FROM (2 = true)` and reports `operator does not
+		// exist: integer = boolean`, which is the grouping saying so.
+		{name: "is_distinct_from_takes_the_comparison",
+			sql: `SELECT 1 IS DISTINCT FROM 2 = true`,
+			pg:  "42883 operator does not exist: integer = boolean — the RIGHT grouping"},
+		{name: "is_distinct_from_a_plain_operand", sql: `SELECT 1 IS DISTINCT FROM 2`, pg: "t"},
+		{name: "is_distinct_from_under_a_conjunction",
+			sql: `SELECT 1 FROM t WHERE a IS DISTINCT FROM b AND c`, pg: "a conjunction"},
 
 		// ---- IS [NOT] UNKNOWN over a parenthesized predicate (#1183) ----
 		{name: "paren_predicate_is_not_unknown", sql: `SELECT (1=1) IS NOT UNKNOWN`, pg: "t"},

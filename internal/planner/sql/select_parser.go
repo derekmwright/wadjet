@@ -1636,9 +1636,22 @@ func (p *selectParser) parseIsPostfix(left Node) (Node, error) {
 		if _, err := p.expect(TokenKWFrom); err != nil {
 			return nil, fmt.Errorf("expected FROM after IS [NOT] DISTINCT")
 		}
-		right, err := p.parseBitwise()
+		// The right operand is a FULL predicate operand, comparison included:
+		// `1 IS DISTINCT FROM 2 = true` is `1 IS DISTINCT FROM (2 = true)` on
+		// 17.11 (measured — it reports `operator does not exist: integer =
+		// boolean`, which is the grouping saying so). Reading it at the
+		// operand level instead would group it the other way and ANSWER,
+		// which is a different statement under the same text.
+		right, err := p.parsePredicateOperand()
 		if err != nil {
 			return nil, fmt.Errorf("parsing IS [NOT] DISTINCT FROM: %w", err)
+		}
+		if op := comparisonOpFor(p.peek()); op != "" {
+			p.advance()
+			right, err = p.finishComparison(right, op)
+			if err != nil {
+				return nil, fmt.Errorf("parsing IS [NOT] DISTINCT FROM: %w", err)
+			}
 		}
 		op := "is distinct from"
 		if not {
