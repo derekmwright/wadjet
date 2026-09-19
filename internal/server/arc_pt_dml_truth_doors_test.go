@@ -301,6 +301,16 @@ func TestArcPTTheSELECTWhereTakesTheSameRule(t *testing.T) {
 		{"order_window_over_an_unknown_column",
 			`SELECT COUNT(*) AS v FROM %s WHERE COUNT(*) OVER (PARTITION BY zz)`,
 			"42P20", "42P20 — before names resolve"},
+		// A SUBQUERY's own row-filtering clause is the same clause one level
+		// down, and the server refuses it there too (#1125). The class is the
+		// subquery's, not the outer statement's, and it is raised at plan
+		// time — the five-arm half is the L1 table's EXISTS/*/winarg cells.
+		{"window_in_an_exists_subquerys_where",
+			`SELECT COUNT(*) AS v FROM %s WHERE EXISTS (SELECT 1 FROM %s z WHERE SUM(z.n) OVER () > 0)`,
+			"42P20", "42P20 window functions are not allowed in WHERE"},
+		{"window_in_an_in_subquerys_where",
+			`SELECT COUNT(*) AS v FROM %s WHERE n IN (SELECT z.n FROM %s z WHERE SUM(z.n) OVER () > 0)`,
+			"42P20", "42P20 window functions are not allowed in WHERE"},
 	} {
 		t.Run(c.kind, func(t *testing.T) {
 			sql := c.sql

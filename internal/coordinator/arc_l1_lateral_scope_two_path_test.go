@@ -661,10 +661,10 @@ var l1RefusalPins = map[string][]string{
 // l1ValuePins are the cells that answer a wrong VALUE rather than refusing,
 // with PostgreSQL's answer recorded above beside them. Each is a boundary with
 // a mechanism, not a shrug.
-// The two EXISTS cells are an ENGINE SUPERSET and not a wrong value: a window
-// function in a WHERE clause is an ERROR in PostgreSQL ("window functions are
-// not allowed in WHERE") and this engine evaluates it. Recorded here rather
-// than in a refusal list because the cell's disposition is a ROW SET.
+// The two EXISTS/*/winarg cells were here as an engine SUPERSET — a window
+// function in the subquery's WHERE is 42P20 on the server and this engine
+// answered — until arc PT refused it at plan time (#1125). They moved to
+// l1RefusesLikePostgres, where agreement is asserted rather than divergence.
 // l1ArmPins is a divergence that is NOT the same on every arm, so it is
 // recorded per arm. A pin that starts agreeing FAILS.
 var l1ArmPins = map[string]map[string]string{
@@ -771,12 +771,23 @@ var l1ArmPins = map[string]map[string]string{
 	},
 }
 
+// l1RefusesLikePostgres names the cells where EVERY arm refuses and
+// PostgreSQL refuses too, with the SAME class. The answer recorded in
+// l1Postgres is the server's full message, which carries a LINE/caret
+// decoration this engine does not write, so the cell is held to the class both
+// engines state rather than to text only one of them produces.
+//
+// A cell that stops refusing FAILS here the way a value pin that starts
+// agreeing does: the entry is the proof of the fix, not a waiver.
+var l1RefusesLikePostgres = map[string]string{
+	"EXISTS/noJoin/winarg": "window functions are not allowed in WHERE",
+	"EXISTS/inner/winarg":  "window functions are not allowed in WHERE",
+}
+
 var l1ValuePins = map[string]string{
 	"R4/bareStar":                "rows=3 1,Alice,150,NULL | 2,Bob,200,NULL | 3,Carol,0,NULL",
 	"R4/distinctBody":            "rows=3 1,NULL | 2,NULL | 3,NULL",
 	"R4/groupedBody":             "rows=3 1,NULL | 2,NULL | 3,NULL",
-	"EXISTS/inner/winarg":        "rows=4 1,1 | 1,2 | 2,3 | 2,4",
-	"EXISTS/noJoin/winarg":       "rows=2 1 | 2",
 	"LAT/comma/groupedLimit":     "rows=1 2,Doohickey,125",
 	"LAT/comma/groupedOffset":    "rows=3 1,Gadget,100 | 1,Widget,50 | 2,Widget,75",
 	"LAT/comma/limitOffset":      "rows=1 2,75",
@@ -827,6 +838,19 @@ func TestArcL1LateralAndWindowScopeAnswersPostgresOnEveryArm(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {
 				got := arm.run(tc.sql)
+				if class, agreed := l1RefusesLikePostgres[tc.name]; agreed {
+					if !strings.Contains(want, class) {
+						t.Fatalf("%s: the cell is recorded as refusing like PostgreSQL, "+
+							"but the measured server answer %s does not state %q",
+							tc.name, want, class)
+					}
+					if !strings.HasPrefix(got, "ERR ") || !strings.Contains(got, class) {
+						t.Errorf("%s\n  arm  %s\n  got  %s\n  every arm must refuse with "+
+							"PostgreSQL's own class %q (PostgreSQL answers %s)",
+							tc.sql, arm.name, got, class, want)
+					}
+					continue
+				}
 				if classes, pinned := l1RefusalPins[tc.name]; pinned {
 					hit := false
 					for _, c := range classes {
