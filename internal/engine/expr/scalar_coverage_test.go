@@ -192,8 +192,14 @@ func TestFnLeft(t *testing.T) {
 		t.Error("nil count")
 	}
 	// Negative returns empty
-	if fnLeft([]any{"hello", int64(-1)}) != "" {
+	// A NEGATIVE count removes that many characters from the OTHER end on
+	// PostgreSQL 17.11 — `left('hello', -1)` is `hell` — which is what this
+	// answers as of #1169, when the LEFT(…) spelling became reachable.
+	if fnLeft([]any{"hello", int64(-1)}) != "hell" {
 		t.Error("negative")
+	}
+	if fnLeft([]any{"hello", int64(-10)}) != "" {
+		t.Error("negative past the length")
 	}
 	// n >= len
 	if fnLeft([]any{"hi", int64(10)}) != "hi" {
@@ -208,8 +214,12 @@ func TestFnRight(t *testing.T) {
 	if fnRight(nil) != nil {
 		t.Error("nil")
 	}
-	if fnRight([]any{"hello", int64(-1)}) != "" {
+	// `right('hello', -1)` is `ello` on PostgreSQL 17.11.
+	if fnRight([]any{"hello", int64(-1)}) != "ello" {
 		t.Error("negative")
+	}
+	if fnRight([]any{"hello", int64(-10)}) != "" {
+		t.Error("negative past the length")
 	}
 	if fnRight([]any{"hi", int64(10)}) != "hi" {
 		t.Error("n >= len")

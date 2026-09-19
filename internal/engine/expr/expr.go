@@ -95,6 +95,7 @@ var stringInputFuncs = map[string]bool{
 	"left": true, "right": true, "starts_with": true, "ends_with": true,
 	"contains": true, "split_part": true, "strpos": true, "lpad": true,
 	"rpad": true, "cast_string": true,
+	"overlay": true, "like_escape": true, "similar_to": true,
 	// `format` renders its arguments, so a TIMESTAMP/DATE/IPv4/MAC column
 	// reaching it must arrive as the text the wire carries rather than as its
 	// raw box: `FORMAT('%s', c_ts)` answered `%!s(int64=1700000000000)` — the
@@ -128,6 +129,7 @@ var typedArgPositions = map[string]map[int]bool{
 	"split_part": {2: true}, // (text, delimiter, field)
 	"lpad":       {1: true}, // (text, width, fill)
 	"rpad":       {1: true},
+	"overlay":    {2: true, 3: true}, // (text, newsub, start, count)
 }
 
 // networkTextFuncs are the scalar functions whose bodies parse an argument
@@ -279,6 +281,12 @@ func init() {
 		"reverse":      {fnReverse, RetString},
 		"left":         {fnLeft, RetString},
 		"right":        {fnRight, RetString},
+		// The SQL-standard spellings the grammar rewrites into calls
+		// (#1169, #1168): OVERLAY(s PLACING r FROM n [FOR m]),
+		// `x LIKE p ESCAPE e`, `x SIMILAR TO p [ESCAPE e]`.
+		"overlay":     {fnOverlay, RetString},
+		"like_escape": {fnLikeEscape, RetBool},
+		"similar_to":  {fnSimilarTo, RetBool},
 
 		// Math functions
 		"abs":   {fnAbs, RetFloat64},
@@ -525,7 +533,10 @@ func init() {
 		"day_of_year":       {fnDayOfYear, RetFloat64},
 		"last_day_of_month": {fnLastDayOfMonth, RetString},
 		"current_timestamp": {fnCurrentTimestamp, RetTimestamp},
-		"at_timezone":       {fnAtTimezone, RetString},
+		// LOCALTIMESTAMP is CURRENT_TIMESTAMP's value with PostgreSQL's
+		// OTHER declaration: timestamp without time zone (#1169).
+		"localtimestamp": {fnLocalTimestamp, RetTimestamp},
+		"at_timezone":    {fnAtTimezone, RetString},
 		// epoch: the rewrite target of EXTRACT(EPOCH FROM ts).
 		// timezone: the rewrite target of `ts AT TIME ZONE zone`, zone first,
 		// matching PostgreSQL's own canonical form.

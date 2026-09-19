@@ -6,8 +6,11 @@ package expr
 import (
 	"fmt"
 	"strings"
-	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // --- String: distance and utility ---
@@ -109,19 +112,47 @@ func fnHamming(args []any) any {
 	return float64(dist)
 }
 
+// fnNormalize is NORMALIZE(text [, NFC | NFD | NFKC | NFKD]) — the Unicode
+// normalization the SQL standard spells with a bare form keyword and the
+// grammar rewrites into this call's second argument (#1169).
+//
+// It used to STRIP every non-printing character and call that NFC, which is
+// neither normalization nor a form the standard has: the combining sequence
+// U+0065 U+0301 came back unchanged (length 2) where PostgreSQL 17.11 answers
+// the composed character (length 1), and a legitimate control character was
+// deleted from the value. golang.org/x/text/unicode/norm is the normalizer,
+// and the form defaults to NFC exactly as the one-argument spelling does on
+// the server.
 func fnNormalize(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	s := toString(args[0])
-	// NFC normalization: collapse combining characters
-	var sb strings.Builder
-	for _, r := range s {
-		if unicode.IsPrint(r) {
-			sb.WriteRune(r)
+	form := "NFC"
+	if len(args) >= 2 {
+		if args[1] == nil {
+			return nil
 		}
+		form = strings.ToUpper(strings.TrimSpace(toString(args[1])))
 	}
-	return sb.String()
+	var f norm.Form
+	switch form {
+	case "NFC":
+		f = norm.NFC
+	case "NFD":
+		f = norm.NFD
+	case "NFKC":
+		f = norm.NFKC
+	case "NFKD":
+		f = norm.NFKD
+	default:
+		// The grammar admits only the four forms, so this is reachable only
+		// through the function spelling with a computed argument. The server
+		// refuses the unknown form at parse time; this refuses it loudly with
+		// the class it uses for a bad function argument.
+		panic(fatalEval{sqlerr.New("22023",
+			"invalid normalization form: %s", sqlerr.Quote(form))})
+	}
+	return f.String(toString(args[0]))
 }
 
 func fnFormat(args []any) any {

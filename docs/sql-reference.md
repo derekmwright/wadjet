@@ -2894,7 +2894,7 @@ FROM flow_logs
 
 ## Built-in Functions
 
-Wadjet includes 383 built-in scalar functions across several categories.
+Wadjet includes 387 built-in scalar functions across several categories.
 
 ### A call is resolved by its name AND its arguments
 

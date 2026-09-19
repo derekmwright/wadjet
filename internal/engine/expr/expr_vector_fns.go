@@ -155,13 +155,46 @@ func vecSubstr(args []*batch.Vector, out *batch.Vector, n int) {
 	src := args[0]
 	hasNulls := src.Nulls.HasNulls()
 	hasLen := len(args) >= 3
+	// The REGEX reading, when the second operand is text: the same rule
+	// fnSubstr states, in the kernel that runs when every operand arrives as
+	// a vector. Without it this read a pattern with vecReadFloat64 and
+	// answered a position (#1169).
+	if !hasLen && len(args) == 2 && args[1].Type == batch.TypeString {
+		for i := 0; i < n; i++ {
+			if (hasNulls && src.Nulls.IsNullFast(i)) || args[1].Nulls.IsNullFast(i) {
+				out.Nulls.SetNull(i)
+				out.BytesData.Set(i, nil)
+				continue
+			}
+			v := substringRegex(string(src.BytesData.Value(i)),
+				string(args[1].BytesData.Value(i)))
+			if v == nil {
+				out.Nulls.SetNull(i)
+				out.BytesData.Set(i, nil)
+				continue
+			}
+			out.BytesData.Set(i, []byte(v.(string)))
+		}
+		return
+	}
 	// bytea has no characters: substring over it indexes BYTES on the server,
 	// and reading its bytes as UTF-8 replaced every invalid one with U+FFFD —
 	// a value the column does not hold (#583). Same rule as fnSubstr's bytea
 	// arm, because the two evaluators must not answer differently.
+	// A NULL START or LENGTH makes the result NULL — the rule fnSubstr states
+	// and this kernel did not, so `SUBSTRING(s FROM NULL FOR 3)` answered the
+	// first three characters where the server answers NULL (#1169).
+	nullArg := func(i int) bool {
+		for _, a := range args[1:] {
+			if a.Nulls.HasNulls() && a.Nulls.IsNullFast(i) {
+				return true
+			}
+		}
+		return false
+	}
 	if src.Type == batch.TypeBytes {
 		for i := 0; i < n; i++ {
-			if hasNulls && src.Nulls.IsNullFast(i) {
+			if (hasNulls && src.Nulls.IsNullFast(i)) || nullArg(i) {
 				out.Nulls.SetNull(i)
 				out.BytesData.Set(i, nil)
 				continue
@@ -190,7 +223,7 @@ func vecSubstr(args []*batch.Vector, out *batch.Vector, n int) {
 	}
 
 	for i := 0; i < n; i++ {
-		if hasNulls && src.Nulls.IsNullFast(i) {
+		if (hasNulls && src.Nulls.IsNullFast(i)) || nullArg(i) {
 			out.Nulls.SetNull(i)
 			out.BytesData.Set(i, nil)
 			continue
@@ -263,42 +296,39 @@ func vecReverse(args []*batch.Vector, out *batch.Vector, n int) {
 func vecLeft(args []*batch.Vector, out *batch.Vector, n int) {
 	src := args[0]
 	hasNulls := src.Nulls.HasNulls()
+	countNulls := args[1].Nulls.HasNulls()
 	for i := 0; i < n; i++ {
-		if hasNulls && src.Nulls.IsNullFast(i) {
+		// A NULL COUNT makes the result NULL, as it does on the row path and
+		// on the server. This kernel read only the string's nulls, so
+		// `LEFT(s, NULL)` answered the EMPTY STRING — a value, where
+		// PostgreSQL 17.11 answers NULL (#1169).
+		if (hasNulls && src.Nulls.IsNullFast(i)) || (countNulls && args[1].Nulls.IsNullFast(i)) {
 			out.Nulls.SetNull(i)
 			out.BytesData.Set(i, nil)
 			continue
 		}
-		b := src.BytesData.Value(i)
-		count := int(vecReadFloat64(args[1], i))
-		if count < 0 {
-			out.BytesData.Set(i, nil)
-		} else if count >= len(b) {
-			out.BytesData.Set(i, b)
-		} else {
-			out.BytesData.Set(i, b[:count])
-		}
+		// CHARACTERS, not bytes, and the same negative-count rule the row
+		// path states (fnLeft): this kernel indexed the byte slice, so
+		// `LEFT(c, 2)` over a multibyte column cut a character in half — the
+		// two-implementation drift #856's own comment warned about, reachable
+		// from SQL as of #1169.
+		out.BytesData.Set(i, []byte(leftRunes(string(src.BytesData.Value(i)),
+			int(vecReadFloat64(args[1], i)))))
 	}
 }
 
 func vecRight(args []*batch.Vector, out *batch.Vector, n int) {
 	src := args[0]
 	hasNulls := src.Nulls.HasNulls()
+	countNulls := args[1].Nulls.HasNulls()
 	for i := 0; i < n; i++ {
-		if hasNulls && src.Nulls.IsNullFast(i) {
+		if (hasNulls && src.Nulls.IsNullFast(i)) || (countNulls && args[1].Nulls.IsNullFast(i)) {
 			out.Nulls.SetNull(i)
 			out.BytesData.Set(i, nil)
 			continue
 		}
-		b := src.BytesData.Value(i)
-		count := int(vecReadFloat64(args[1], i))
-		if count < 0 {
-			out.BytesData.Set(i, nil)
-		} else if count >= len(b) {
-			out.BytesData.Set(i, b)
-		} else {
-			out.BytesData.Set(i, b[len(b)-count:])
-		}
+		out.BytesData.Set(i, []byte(rightRunes(string(src.BytesData.Value(i)),
+			int(vecReadFloat64(args[1], i)))))
 	}
 }
 

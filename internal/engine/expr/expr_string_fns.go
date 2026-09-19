@@ -101,8 +101,12 @@ func fnConcatOp(args []any) any {
 // the same window rule and the same 22011 refusal for a negative length, over
 // BYTES rather than characters.
 func substrBytes(raw []byte, args []any) any {
+	// A NULL length is NULL here too, the same rule the text arm states.
+	if len(args) >= 3 && args[2] == nil {
+		return nil
+	}
 	start := int(ToFloat64(args[1])) - 1
-	if len(args) >= 3 && args[2] != nil {
+	if len(args) >= 3 {
 		length := int(ToFloat64(args[2]))
 		if length < 0 {
 			raiseNegativeSubstringLength()
@@ -158,9 +162,27 @@ func fnSubstr(args []any) any {
 	if raw, ok := args[0].([]byte); ok {
 		return substrBytes(raw, args)
 	}
+	// `substring(text FROM pattern)` — the REGEX reading, which PostgreSQL
+	// chooses by the second operand's TYPE and not by the spelling:
+	// `substring('abcdef', '2')` is the pattern reading and answers NULL,
+	// while `substring('abcdef', 2)` answers `bcdef`. The decision is made
+	// here rather than in the parser because only this layer sees the
+	// operand's type, and it is made in the vec kernel too (vecSubstr) —
+	// two evaluators, one rule (#1169).
+	if len(args) == 2 {
+		if pat, ok := args[1].(string); ok {
+			return substringRegex(toString(args[0]), pat)
+		}
+	}
+	// A NULL LENGTH makes the result NULL on the server — `substring('abcdef'
+	// from 2 for null)` is NULL, not `bcdef` — and this read it as "no length
+	// given" and answered the rest of the string (#1169).
+	if len(args) >= 3 && args[2] == nil {
+		return nil
+	}
 	r := []rune(toString(args[0]))
 	start := int(ToFloat64(args[1])) - 1 // SQL is 1-indexed
-	if len(args) >= 3 && args[2] != nil {
+	if len(args) >= 3 {
 		length := int(ToFloat64(args[2]))
 		// PostgreSQL refuses a NEGATIVE length with 22011 rather than
 		// answering the empty string, which is what substrWindow's own doc
@@ -279,15 +301,12 @@ func fnLeft(args []any) any {
 	// with the rest of the family anyway, because a byte-indexing sibling left
 	// behind is exactly the two-implementation drift this class keeps
 	// producing.
-	r := []rune(toString(args[0]))
-	n := int(ToFloat64(args[1]))
-	if n < 0 {
-		return ""
-	}
-	if n >= len(r) {
-		return string(r)
-	}
-	return string(r[:n])
+	// A NEGATIVE count is not "nothing": PostgreSQL returns all but the LAST
+	// |n| characters, so `left('abcdef', -2)` is `abcd`. The empty string this
+	// answered was unreachable from SQL while the parser reserved LEFT and
+	// RIGHT for the join keywords; the call spelling is admitted now (#1169),
+	// so the value ships with it. leftRunes is shared with the vec kernel.
+	return leftRunes(toString(args[0]), int(ToFloat64(args[1])))
 }
 
 func fnRight(args []any) any {
@@ -295,15 +314,9 @@ func fnRight(args []any) any {
 		return nil
 	}
 	// CHARACTERS, like LEFT above (#856).
-	r := []rune(toString(args[0]))
-	n := int(ToFloat64(args[1]))
-	if n < 0 {
-		return ""
-	}
-	if n >= len(r) {
-		return string(r)
-	}
-	return string(r[len(r)-n:])
+	// All but the FIRST |n| characters for a negative count, PostgreSQL's
+	// mirror of LEFT's rule: `right('abcdef', -2)` is `cdef`.
+	return rightRunes(toString(args[0]), int(ToFloat64(args[1])))
 }
 
 func fnStartsWith(args []any) any {
@@ -336,4 +349,56 @@ func fnRepeat(args []any) any {
 		return ""
 	}
 	return strings.Repeat(toString(args[0]), n)
+}
+
+// leftRunes and rightRunes are LEFT's and RIGHT's rule over characters, so
+// the row path and the vec kernel answer one thing. PostgreSQL 17.11:
+// a count past the end is the whole string, and a NEGATIVE count removes that
+// many characters from the other end.
+func leftRunes(s string, n int) string {
+	r := []rune(s)
+	if n < 0 {
+		if -n >= len(r) {
+			return ""
+		}
+		return string(r[:len(r)+n])
+	}
+	if n >= len(r) {
+		return s
+	}
+	return string(r[:n])
+}
+
+func rightRunes(s string, n int) string {
+	r := []rune(s)
+	if n < 0 {
+		if -n >= len(r) {
+			return ""
+		}
+		return string(r[-n:])
+	}
+	if n >= len(r) {
+		return s
+	}
+	return string(r[len(r)-n:])
+}
+
+// substringRegex is `substring(text FROM pattern)`: the part of the string
+// the pattern matches, and — when the pattern has a parenthesized
+// subexpression — the FIRST capture group rather than the whole match.
+// PostgreSQL 17.11: `substring('abcdef' from '(b)(c)')` is `b`, not `bc`.
+// No match is NULL.
+func substringRegex(s, pattern string) any {
+	re := compileRegexpCached(pattern)
+	if re == nil {
+		return nil
+	}
+	m := re.FindStringSubmatch(s)
+	if m == nil {
+		return nil
+	}
+	if len(m) > 1 {
+		return m[1]
+	}
+	return m[0]
 }
