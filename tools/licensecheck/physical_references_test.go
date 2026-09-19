@@ -17,7 +17,12 @@ import (
 
 // This budget includes production and test files in every declared AGPL region.
 // The measured names and their reasons are in docs/design/seam-narrowing-measurement.md.
-const maxAGPLPhysicalNames = 16
+// 16 → 18 (2026-09-19, arc JR): `physical.JoinResidualUnresolved` and
+// `physical.RefuseUnresolvedJoinResidual`, the refusal an outer join's ON
+// residual raises in the worker when a leaf cannot be re-spelled across the
+// stage (ADR-0006, the identity half) — a loud refusal is the seam's floor,
+// and the worker is the AGPL side that has to name it.
+const maxAGPLPhysicalNames = 18
 
 var measuredPhysicalNames = strings.Fields(`
 ColDecls

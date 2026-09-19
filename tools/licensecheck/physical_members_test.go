@@ -41,26 +41,52 @@ import (
 // ADR-0026 §8b's rule on the AGPL side of the seam — and a copy of a naming
 // rule in the distributed planner is how the two engines drift apart (§2b).
 // One member is the smaller cost.
-const maxAGPLPhysicalMembers = 210
+// 210 → 214 (2026-09-19, arc JR): `JoinResidualUnresolved`,
+// `RefuseUnresolvedJoinResidual`, `PlanContext.ParseJoinCondExpr` and
+// `PlanContext.RefuseJoinResidual` — the outer-join ON residual's refusal
+// API, read by dagplan's stage emission and the worker's fragment executor
+// (ADR-0006, 2026-09-19). Four members for one loud floor; the translation
+// itself (`dagplan.residualWithStageSpellings`) lives on the AGPL side and
+// adds nothing here.
+const maxAGPLPhysicalMembers = 214
 
 // measuredPhysicalMembers are the members reached through values. With the 16
 // package-scope names of measuredPhysicalNames they are the whole surface, and
 // the budget above is their count.
 var measuredPhysicalMembers = strings.Fields(`
+blockColumn.Decl
+blockColumn.DeclKnown
+blockColumn.Expr
+blockColumn.Name
+ColDecls.Dec
+ColDecls.Fields
+ColDecls.PlaceholderTypes
+ColDecls.Types
+DecimalCoercion.Name
+DecimalCoercion.Precision
+DecimalCoercion.Scale
+GroupKeyResolution.Alias
+GroupKeyResolution.Computed
+GroupKeyResolution.Decl
+GroupKeyResolution.Def
 GroupKeyResolution.Deferred
+GroupKeyResolution.Expr
+JoinResidualUnresolved
 ManifestSnapshot.AggregateColumnStats
 ManifestSnapshot.Get
+PhysicalPlan.Cleanup
+PhysicalPlan.Pipeline
 PhysicalPlan.PrettyPrint
 PlanContext.AggDerivedGroupKey
 PlanContext.AggInputColumnDecimal
 PlanContext.AggInputIsWideInteger
 PlanContext.AggOhlcvOutputFields
 PlanContext.AggOutputFromInputDecl
+PlanContext.AggregateGroupKeyName
+PlanContext.AggregateOutputNames
 PlanContext.AggScopePreservingWrapper
 PlanContext.AggSpecOutputDecimal
 PlanContext.AggSpecOutputType
-PlanContext.AggregateGroupKeyName
-PlanContext.AggregateOutputNames
 PlanContext.AssignJoinKeySides
 PlanContext.AstIsFieldPath
 PlanContext.BlockBareName
@@ -69,14 +95,14 @@ PlanContext.BuildJoinResidualFilter
 PlanContext.BuildSemiAntiFilter
 PlanContext.BuildStreamAlias
 PlanContext.CleanExpr
-PlanContext.ColSet
 PlanContext.CollectASTCols
 PlanContext.CollectColRefs
 PlanContext.CollectColRefsBelow
 PlanContext.CollectOuterColumns
 PlanContext.CollectTableAliases
-PlanContext.DeclTypeParts
+PlanContext.ColSet
 PlanContext.DeclaredJoinSchema
+PlanContext.DeclTypeParts
 PlanContext.DerivedAliasSourceColumn
 PlanContext.DerivedGroupKeyDecl
 PlanContext.DerivedScopeBareName
@@ -106,17 +132,18 @@ PlanContext.LateralSideOf
 PlanContext.LogicalAggOutNames
 PlanContext.MapJoinType
 PlanContext.MatchesPartitionFilter
-PlanContext.NameIsPlainColumn
 PlanContext.NamedArmScope
+PlanContext.NameIsPlainColumn
 PlanContext.NewComputedColumnsOpWithMeta
 PlanContext.NodeDeclaredType
 PlanContext.OutputSchema
 PlanContext.OwnedJoinArm
+PlanContext.ParseJoinCondExpr
 PlanContext.ParseJoinKeys
 PlanContext.ParseSemiAntiNE
-PlanContext.ProjSourceName
 PlanContext.ProjectionForName
 PlanContext.ProjectionOutputName
+PlanContext.ProjSourceName
 PlanContext.PublishedNamesOfProjection
 PlanContext.PublishedOutputProjectionNode
 PlanContext.PublishedStringLengths
@@ -125,6 +152,7 @@ PlanContext.QualifiedColumn
 PlanContext.ReferencesSynthetic
 PlanContext.ReferencesSyntheticAgg
 PlanContext.RefuseJoinCond
+PlanContext.RefuseJoinResidual
 PlanContext.RefuseUnexpandedStarAnywhere
 PlanContext.RefuseUnrepresentableRealInList
 PlanContext.RelationScopeSubtree
@@ -169,7 +197,9 @@ PlanContext.WrapsAWindow
 Planner.AnnotateScanColumns
 Planner.ApplyContextColumnPolicies
 Planner.ApplyContextColumnPoliciesToNewScans
+Planner.Catalog
 Planner.CheckPolicyPlanOrderFromContext
+Planner.Ctes
 Planner.DeclaredOutputSchema
 Planner.EnforceQueryLimits
 Planner.EstimatePlanScanBytes
@@ -178,43 +208,24 @@ Planner.EstimateSubtreeBytes
 Planner.ExecuteSubquerySchema
 Planner.GetAggregateColumnStats
 Planner.GetManifest
-Planner.Plan
-Planner.PlanContext
-Planner.ShouldSortMergeJoin
-Planner.SubqueryInnerColumns
-Planner.SubqueryOutputArity
-Planner.SubqueryOutputColumn
-Planner.ValidateColumns
-SubtreeNaming.BuildColOrigins
-SubtreeNaming.MaterializedBuildColOrigins
-
-ColDecls.Dec
-ColDecls.Fields
-ColDecls.PlaceholderTypes
-ColDecls.Types
-DecimalCoercion.Name
-DecimalCoercion.Precision
-DecimalCoercion.Scale
-GroupKeyResolution.Alias
-GroupKeyResolution.Computed
-GroupKeyResolution.Decl
-GroupKeyResolution.Def
-GroupKeyResolution.Expr
-PhysicalPlan.Cleanup
-PhysicalPlan.Pipeline
-Planner.Catalog
-Planner.Ctes
 Planner.LateMaterialization
 Planner.ManifestSnapshot
 Planner.MemoryBudget
+Planner.Plan
+Planner.PlanContext
 Planner.PlanCtx
 Planner.QueryLimits
 Planner.ScanFileFilter
 Planner.SharedSpillMgr
 Planner.SharedTracker
+Planner.ShouldSortMergeJoin
 Planner.SortMergeJoinBytes
 Planner.SpillDir
 Planner.StreamingSources
+Planner.SubqueryInnerColumns
+Planner.SubqueryOutputArity
+Planner.SubqueryOutputColumn
+Planner.ValidateColumns
 ProjectExprSpec.Expr
 ProjectExprSpec.Fields
 ProjectExprSpec.Name
@@ -229,6 +240,7 @@ QueryCost.HasLimit
 QueryCost.TotalBytes
 QueryCost.TotalFiles
 QueryCost.TotalRows
+RefuseUnresolvedJoinResidual
 SetOpArmPlan.Coerce
 SetOpArmPlan.Specs
 SetOpArmPlan.Types
@@ -238,10 +250,8 @@ SetOpColType.Fields
 SetOpColType.Known
 SetOpColType.Typ
 SubtreeNaming.AliasCols
-blockColumn.Decl
-blockColumn.DeclKnown
-blockColumn.Expr
-blockColumn.Name
+SubtreeNaming.BuildColOrigins
+SubtreeNaming.MaterializedBuildColOrigins
 `)
 
 // physicalMemberPkg is the part of `go list -json` this gate reads.
