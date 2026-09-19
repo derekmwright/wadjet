@@ -19,8 +19,8 @@ import (
 // Returns ok=false when the subtree has no scan root (e.g. another join) or
 // the manifest is unavailable — callers must treat "unknown" conservatively.
 //
-// Under Planner.BushyJoinReorder, join-shaped subtrees (composite build sides) are
-// estimated too: output bytes ≈ estimated output rows × the combined
+// Under Planner.BushyJoinReorder, join-shaped subtrees (composite build
+// sides) are estimated too: output bytes ≈ estimated output rows × the combined
 // per-row width of the join's visible inputs. Without this, a 25-row
 // nation ⋈ region pre-join is "unknown" → never broadcast-eligible → the
 // whole composite pays exchange-repartition for both sides (the Q08 SF10
