@@ -1,6 +1,6 @@
 # ADR-0006: Never-OOM memory — shared pool, ownership ledger, spill-everywhere
 
-Status: Accepted (accounting overhaul landed 2026-05-30, 35f6730; recorded 2026-07-25; amended 2026-08-17, 2026-09-03, 2026-09-04 and 2026-09-18 — see Amendments)
+Status: Accepted (accounting overhaul landed 2026-05-30, 35f6730; recorded 2026-07-25; amended 2026-08-17, 2026-09-03, 2026-09-04, 2026-09-18 and 2026-09-19 — see Amendments)
 
 ## Context
 
@@ -483,3 +483,58 @@ an expression has its ON lifted into a filter above a CROSS join, whose probe
 reads every build row, so its build must fit the budget and says so loudly when
 it cannot. Widening what a residual may contain does not move that boundary —
 it moves shapes off the refusal and onto the routed-probe side of it.
+
+### 2026-09-19 (arc CJ): a join's build OWNS the row set it stores (#1189)
+
+The 2026-09-03 amendment above establishes that a CROSS join's probe does not
+route by a key and therefore walks `buildBatches` DIRECTLY, entry by entry, for
+every probe row. That is a second consumer of the stored build, and it reads
+something the arena-driven consumers never look at: each stored batch's
+SELECTION VECTOR.
+
+A build batch's live rows ARE its selection vector. A filter pushed onto the
+build side marks the rejected rows rather than copying the survivors out
+(CLAUDE.md, "selection vectors over copying"), and every predicate over one
+side of a cross join is pushed there — `EXPLAIN SELECT … FROM c2 CROSS JOIN c1
+WHERE c1.f` plans `Join: cross join` over `Filter: [c1.f]` over `Scan: c1`.
+
+**Decision: the build owns the row set from the moment it stores the batch,
+and every rewrite or re-walk of the stored batches reads that same row set.**
+Identity here is ADR-0026 §4's — the producing relation and row, never a slot
+number that drifts — applied to the build relation as a whole: which ROWS the
+build holds is a property of the build, not of whichever operator produced the
+batch or of the representation the build later chooses for it.
+
+Four sites touch those batches, and three of them broke the rule:
+
+| site | what it did | what it does |
+|---|---|---|
+| the flat store (`join.go`, `Build`) | kept the PRODUCER's selection slice — `exec.Filter` hands out a slice of one reusable buffer and overwrites it on the next batch; `Detach` claims the column vectors (ADR-0016) and says nothing about the row set | copies the row set into the join's own memory (`ownBuildRowSet`) |
+| `consolidateBuild` | merged the batches, copying RAW rows at cumulative offsets so the arena's refs stay valid, and dropped the selection vector | carries a merged ascending selection vector forward |
+| `PruneBuildColumns` | rebuilt each stored batch without its `Sel` | carries it |
+| the key-swap rebuild (`FixKeyAssignment`) | re-indexed raw rows | walks the row set (`buildRowAt`) |
+| partition-on-arrival (`join_partition_arrival.go`) | already compacts rows out of the arrival, so a frozen batch is dense by construction | unchanged |
+
+What it cost while it was open: `b2 CROSS JOIN b1 WHERE b1.f` over a
+three-file build answered 52 rows where PostgreSQL 17.11 answers 39 — the
+WHOLE unfiltered build relation per probe row, with `GROUP BY b1.f` reporting
+thirteen surviving rows whose own `f` is FALSE. Fifty-seven of the sixty-six
+NoREC row-count mismatches a 200-database SQLancer run reached were this one
+shape; sixty-five of the sixty-six are gone.
+
+**Boundary, measured.** A policed relation's build side was never at risk: the
+security projection standing between the scan and the join materialises the
+filtered rows, so those batches are dense and carry no selection vector at all
+(the same relation, predicate and doors answer 15 rows as a masked analyst at
+`1c2b4d25` and 24 as the admin). The refusal this amendment's 2026-09-03
+predecessor describes is unchanged — the merged selection vector is bounded by
+the LIVE row count, so a build that fit the budget still fits, and one that did
+not still refuses, re-measured five times over a filtered build in
+`exec.TestACrossJoinBuildOverTheBudgetStillRefusesLoudly`.
+
+Gates: `exec.TestAJoinsBuildOwnsTheRowSetItStores` (one cell per site above),
+`coordinator.TestCJTheBuildRowSetSurvivesTheBatchBoundary` (45 cells on five
+arms against PostgreSQL 17.11),
+`server.TestCJALiftedFilterOverAPolicedBuildPublishesOnlyThePolicysRows` and
+`server.TestCJARowFilterOverACrossJoinsBuildKeepsItsRowsOut` (nine doors),
+`pgwire.TestCJACrossJoinsBuildColumnDeclaresItsOwnType` (both format codes).
