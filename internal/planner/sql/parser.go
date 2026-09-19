@@ -503,6 +503,13 @@ func parseSelectStatement(stmt, body string) (*ParsedQuery, error) {
 		return nil, err
 	}
 
+	// A WINDOW function in a WHERE or a JOIN condition is 42P20, and the
+	// server refuses it BEFORE it resolves names — so this runs here, where
+	// both planner entries reach it ahead of any binding (#1179 round 2).
+	if err := RefuseWindowInARowFilteringClause(info); err != nil {
+		return nil, err
+	}
+
 	// Propagate CTE definitions
 	info.CTEs = cteDefs
 

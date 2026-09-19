@@ -247,3 +247,37 @@ func ParseBoolText(s string) (bool, bool) {
 	}
 	return false, false
 }
+
+// RefuseWindowInARowFilteringClause refuses a WINDOW function in a WHERE or a
+// JOIN condition, PostgreSQL's 42P20 (windowing_error).
+//
+// It is SYNTACTIC — a window is not allowed there whatever the columns under
+// it are — so it runs here, in the one post-parse hook both planner entries
+// reach, and therefore BEFORE name resolution on every door. That is the
+// server's own order: `WHERE COUNT(*) OVER (PARTITION BY zz)` is 42P20 there
+// even though `zz` does not exist, while `WHERE zz` is 42703 (round-2 review,
+// P3-r2). Before this it was refused after resolution on the SELECT door and
+// before it on the DML door, so the two doors answered the same statement
+// with different classes.
+func RefuseWindowInARowFilteringClause(info *SelectInfo) error {
+	if info == nil {
+		return nil
+	}
+	if info.Union != nil {
+		if err := RefuseWindowInARowFilteringClause(info.Union.Left); err != nil {
+			return err
+		}
+		if err := RefuseWindowInARowFilteringClause(info.Union.Right); err != nil {
+			return err
+		}
+	}
+	if len(FindAllWindowFuncs(info.WhereExpr)) > 0 {
+		return sqlerr.New("42P20", "window functions are not allowed in WHERE")
+	}
+	for i := range info.Joins {
+		if len(FindAllWindowFuncs(info.Joins[i].CondExpr)) > 0 {
+			return sqlerr.New("42P20", "window functions are not allowed in JOIN conditions")
+		}
+	}
+	return nil
+}

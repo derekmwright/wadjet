@@ -24,26 +24,11 @@ func checkAggregatePlacement(info *plansql.SelectInfo) error {
 			return aggPlacementError(found[0], "WHERE")
 		}
 	}
-	// A WINDOW function is not allowed in a WHERE or a JOIN condition either
-	// — 42P20 on the server, its own class and not 42803, because a window is
-	// evaluated AFTER the rows are chosen. It was not refused at all here, and
-	// a window in a WHERE was read as TRUE: `SELECT COUNT(*) FROM t WHERE
-	// COUNT(*) OVER ()` answered every row where 17.11 raises (#1179 round 2,
-	// the truth-context census).
-	if info.WhereExpr != nil {
-		if len(plansql.FindAllWindowFuncs(info.WhereExpr)) > 0 {
-			return sqlerr.New(windowPlacementSQLState, "window functions are not allowed in WHERE")
-		}
-	}
-	for _, j := range info.Joins {
-		if j.CondExpr == nil {
-			continue
-		}
-		if len(plansql.FindAllWindowFuncs(j.CondExpr)) > 0 {
-			return sqlerr.New(windowPlacementSQLState,
-				"window functions are not allowed in JOIN conditions")
-		}
-	}
+	// The WINDOW half of this rule lives in plansql.RefuseWindowInARowFilteringClause,
+	// which both planner entries reach BEFORE name resolution — the server's
+	// order, and the only place the two doors can agree on it (#1179 round 2,
+	// P3-r2). The AGGREGATE half stays here, AFTER resolution, which is where
+	// the server reports it and where this door always did.
 	for _, j := range info.Joins {
 		if j.CondExpr == nil {
 			continue
@@ -300,10 +285,6 @@ func checkNoNestedAggregate(expr plansql.Node) error {
 
 // aggPlacementError words the refusal the way PostgreSQL does: a GROUPING call
 // is a "grouping operation", everything else an "aggregate function".
-// windowPlacementSQLState is PostgreSQL's class for a window function in a
-// clause evaluated BEFORE the window would be: 42P20 (windowing_error).
-const windowPlacementSQLState = "42P20"
-
 func aggPlacementError(fn *plansql.FuncCallNode, clause string) error {
 	kind := "aggregate functions"
 	if strings.EqualFold(fn.Name, "grouping") {

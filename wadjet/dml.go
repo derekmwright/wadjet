@@ -1727,7 +1727,7 @@ func (ev *mergeEvaluator) checkConditionType(node plansql.Node, matched bool) er
 	// misplaced aggregate or window is its own class. The bespoke arms above
 	// stay because they resolve a MERGE-qualified name (`s.n`) that a plain
 	// column scope cannot (#1179 round 2).
-	if err := physical.RefuseMisplacedDMLFunctions(node); err != nil {
+	if err := physical.RefuseAggregateInADMLPredicate(node); err != nil {
 		return err
 	}
 	return physical.RefuseNonBooleanClause(node, "WHEN", ev.mergedCols)
@@ -2684,12 +2684,16 @@ func BuildDMLPredicate(target plansql.DMLTarget, schema []parquet.Column, sub *D
 	if err != nil {
 		return nil, err
 	}
-	// An aggregate or a window in a WHERE is refused BEFORE the columns are
-	// resolved, which is the order the server reports in.
-	if err := physical.RefuseMisplacedDMLFunctions(node); err != nil {
+	// A WINDOW is refused BEFORE the columns are resolved and an AGGREGATE
+	// AFTER — the server's own order, and the order the SELECT door keeps
+	// (round-2 review, P3-r2).
+	if err := physical.RefuseWindowInADMLPredicate(node); err != nil {
 		return nil, err
 	}
 	if err := checkDMLColumns(node, target, schema); err != nil {
+		return nil, err
+	}
+	if err := physical.RefuseAggregateInADMLPredicate(node); err != nil {
 		return nil, err
 	}
 	if err := refuseDMLLiteralPairs(node, schema); err != nil {
