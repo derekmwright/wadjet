@@ -1948,12 +1948,28 @@ func holdsSubqueryNode(n Node) bool {
 
 // collectSubqueryNode calls f for every scalar subquery under n.
 func collectSubqueryNode(n Node, f func(*SubqueryNode)) {
+	collectNestedQueries(n, func(x Node) {
+		if sq, ok := x.(*SubqueryNode); ok {
+			f(sq)
+		}
+	})
+}
+
+// collectNestedQueries calls f for every SUBQUERY written under n — a scalar
+// one (*SubqueryNode) and an EXISTS one (*ExistsNode) alike. Both hold their
+// body as raw SQL rather than as an AST, so neither has children to descend
+// into and the walk stops at each.
+func collectNestedQueries(n Node, f func(Node)) {
 	var walk func(Node)
 	walk = func(x Node) {
 		if x == nil {
 			return
 		}
-		if sq, ok := x.(*SubqueryNode); ok {
+		switch sq := x.(type) {
+		case *SubqueryNode:
+			f(sq)
+			return
+		case *ExistsNode:
 			f(sq)
 			return
 		}

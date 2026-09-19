@@ -274,10 +274,62 @@ func RefuseWindowInARowFilteringClause(info *SelectInfo) error {
 	if len(FindAllWindowFuncs(info.WhereExpr)) > 0 {
 		return sqlerr.New("42P20", "window functions are not allowed in WHERE")
 	}
+	if err := refuseWindowInANestedFilteringClause(info.WhereExpr); err != nil {
+		return err
+	}
 	for i := range info.Joins {
 		if len(FindAllWindowFuncs(info.Joins[i].CondExpr)) > 0 {
 			return sqlerr.New("42P20", "window functions are not allowed in JOIN conditions")
 		}
+		if err := refuseWindowInANestedFilteringClause(info.Joins[i].CondExpr); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// refuseWindowInANestedFilteringClause carries the rule into the SUBQUERIES a
+// row-filtering clause writes.
+//
+// A subquery keeps its body as RAW SQL (SubqueryNode, ExistsNode), so the walk
+// above sees no window inside `WHERE EXISTS (SELECT 1 FROM z WHERE SUM(x)
+// OVER () > 0)` — the clause holding the window is the SUBQUERY'S OWN WHERE,
+// one parse away. Parsing it here runs this same hook over it, so the refusal
+// is made at PLAN TIME on every arm.
+//
+// It has to be plan time, not execution: the decorrelator parses the same body
+// and DECLINES on any error, so a runtime-only refusal left the EXISTS standing
+// as a filter expression — which the single-process arms evaluate through a
+// subquery runner (refusing late) while a DAG fragment has no runner at all and
+// failed with a message about the runner rather than about the window (#1125).
+//
+// Only THIS rule's SQLSTATE is surfaced. A nested body can fail to parse for
+// reasons that are not this clause's business — and those are the subquery
+// executor's to report, in its own context — so anything else is left alone
+// and the statement proceeds exactly as it did before.
+func refuseWindowInANestedFilteringClause(n Node) error {
+	var found error
+	collectNestedQueries(n, func(q Node) {
+		if found != nil {
+			return
+		}
+		sql := ""
+		switch s := q.(type) {
+		case *SubqueryNode:
+			sql = s.SQL
+		case *ExistsNode:
+			sql = s.SQL
+		}
+		// A window function cannot be written without OVER, so a body without
+		// that text cannot hold one. The test is an over-approximation — the
+		// word can appear in a string literal or an identifier — and the cost
+		// of a false positive is one parse whose result is discarded.
+		if !strings.Contains(strings.ToLower(sql), "over") {
+			return
+		}
+		if _, err := Parse(sql); err != nil && sqlerr.StateOf(err) == "42P20" {
+			found = err
+		}
+	})
+	return found
 }
