@@ -1459,15 +1459,25 @@ func (p *selectParser) parseOrderByList() ([]OrderByItem, error) {
 
 // --- Expression parser (precedence climbing) ---
 
-// Precedence levels (low to high):
-// 1: OR
-// 2: AND
-// 3: NOT
-// 4: IS, comparison (=, !=, <, <=, >, >=), IN, BETWEEN, LIKE
-// 5: addition (+, -, ||)
-// 6: multiplication (*, /, %)
-// 7: unary (-, +)
-// 8: primary (literal, column, function, paren, case, cast, exists)
+// Precedence levels (low to high), PostgreSQL 17.11's own table (§4.1.6), one
+// function per level:
+//
+//	1 parseOr · 2 parseAnd · 3 parseNot
+//	4 parseComparison       the IS postfixes and the comparisons
+//	                        (=, !=, <>, <, <=, >, >=). The comparisons are
+//	                        NONASSOCIATIVE — `1 = 1 = true` is a syntax error,
+//	                        as it is on the server — and the band is a LOOP, so
+//	                        a statement may continue past one (`1 = 1 IS TRUE`)
+//	5 parsePredicateOperand IN, BETWEEN [SYMMETRIC|ASYMMETRIC], LIKE, ILIKE,
+//	                        SIMILAR TO: tighter than a comparison, so
+//	                        `5 BETWEEN 10 AND 1 = true` is
+//	                        `(5 BETWEEN 10 AND 1) = true`
+//	6 parseBitwise          `#` (integer XOR)
+//	7 parseAddition         + - ||
+//	8 parseMultiplication   * / %
+//	9 parsePower            `^` (exponentiation, LEFT associative)
+//	10 parseAtTimeZone · 11 parseUnary (unary - +) · 12 primary (literal,
+//	   column, function, paren, case, cast, exists)
 
 func (p *selectParser) parseExpr() (Node, error) {
 	return p.parseOr()

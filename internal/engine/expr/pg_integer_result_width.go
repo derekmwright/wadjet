@@ -27,9 +27,9 @@ import "strings"
 // `SUM(regexp_count(…))` numeric where PostgreSQL declares bigint — twelve
 // wire cells, grouped and windowed, text and binary (#966 round 3 review B1).
 //
-// So this file is the table, and `physical.aggInputIsWideInteger` is its only
-// reader today: ONE table, and both the grouped and the windowed spelling ask
-// it through the walk they already share.
+// So this file is the table and its readers ask IT rather than keeping second
+// lists: physical.aggInputIsWideInteger (an accumulating aggregate's result
+// type), physical.bitwiseInt4Result (#1018), RefuseInvalidFixedRowField.
 //
 // HOW AN ENTRY IS DECIDED, in this order:
 //

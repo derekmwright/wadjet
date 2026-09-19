@@ -152,8 +152,9 @@ func a2JoinCells() []a2JoinCell {
 		// reference bound to the wrong arm renders differently. That is also
 		// why `na2Run` reads RowValues: keyed by NAME, both `d92` cells
 		// rendered as the LAST one and the cell compared two copies of one
-		// value. coordinator.TestArcPSJoinUsingStarMergesOnEveryArm carries
-		// the merge over two relations whose other columns differ.
+		// value. TestArcPSGrammarAnswersTheSameOnEveryArm's `#655`
+		// `star_over_a_*_using_join` cells carry the merge over psa/psb, two
+		// relations whose other columns differ.
 		{issue: "#655", name: "star_over_using_publishes_a_shared_tail_name_twice",
 			sql: `SELECT * FROM zzp JOIN zzj USING (id) ORDER BY id`,
 			want: []string{
