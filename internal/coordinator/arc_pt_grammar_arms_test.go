@@ -239,6 +239,21 @@ func TestArcPTGrammarAnswersTheSameOnEveryArm(t *testing.T) {
 			sql:  `SELECT COUNT(*) AS n FROM typemx WHERE id = 1 IS TRUE`,
 			want: []string{"n=int64:1"}, pg: "1"},
 
+		// ---- the TRUTH CONTEXT, which the DML gate found through `#` ----
+		// A refusal that depends on which evaluator ran is the two-path class
+		// these arms exist for: the worker's fragment compiles the filter
+		// again, so a refusal made at the planner has to be made at BOTH
+		// entries.
+		{issue: "#1179", name: "an_integer_conjunct_is_refused",
+			sql:   `SELECT COUNT(*) AS n FROM typemx WHERE id > 0 AND c_i64 # 3`,
+			state: "42804", pg: "42804 argument of AND must be type boolean, not type bigint"},
+		{issue: "#1179", name: "a_text_call_in_a_where_is_refused",
+			sql:   `SELECT COUNT(*) AS n FROM typemx WHERE UPPER(c_str)`,
+			state: "42804", pg: "42804 argument of WHERE must be type boolean, not type text"},
+		{issue: "#1179", name: "a_power_operator_conjunct_is_refused",
+			sql:   `SELECT COUNT(*) AS n FROM typemx WHERE id > 0 AND 2 ^ 3`,
+			state: "42804", pg: "42804 argument of AND must be type boolean, not type double precision"},
+
 		// ---- #1184: a table function's column-alias list ----------------
 		// A table function as the ONLY FROM item is not a DAG stage on this
 		// engine — `stage scan-0 has no dependencies and no ScanFiles` — and
