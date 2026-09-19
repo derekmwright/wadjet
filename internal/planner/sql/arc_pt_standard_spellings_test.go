@@ -95,7 +95,7 @@ func TestArcPTParserReadsTheStandardFunctionSpellings(t *testing.T) {
 			pg: "42601 there; this engine's own rendering of the niladic call"},
 		{name: "localtimestamp_rendered_in_a_predicate",
 			sql: `SELECT id FROM t WHERE localtimestamp() >= localtimestamp()`,
-			pg: "the rendering a worker fragment re-parses"},
+			pg:  "the rendering a worker fragment re-parses"},
 
 		// ---- NORMALIZE ---------------------------------------------------
 		{name: "normalize_bare", sql: `SELECT normalize('abc')`, pg: "abc"},
