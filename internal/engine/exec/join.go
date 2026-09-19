@@ -1346,6 +1346,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		// vectors, and a pooled arrival recycled under the view would corrupt
 		// the stored build data. When projection is off, arrival == b.
 		arrival.Detach() // prevent pooled batches from being recycled — build stores references
+		ownBuildRowSet(b)
 		batchIdx := int32(len(h.buildBatches))
 		h.buildBatches = append(h.buildBatches, b)
 
@@ -1978,6 +1979,44 @@ func (h *HashJoin) consolidateBuild() {
 		}
 	}
 
+	// Carry the ROW SET forward. The copy above is raw — every row of every
+	// batch at its cumulative offset — so that the arena's (batchIdx, rowIdx)
+	// refs stay valid at their new positions, which means the merged batch
+	// also holds rows the build-side filter REJECTED. Every keyed consumer
+	// reads those rows through the arena, which only ever indexed the selected
+	// ones, so the extra rows are unreachable there. A CROSS join's probe has
+	// no key to route by: nextCrossChunk walks buildBatches directly and
+	// honours each batch's Sel, so dropping the selection vector here
+	// republished every rejected row as a live build row — `b2 CROSS JOIN b1
+	// WHERE b1.f` answered 52 rows where PostgreSQL answers 39, one whole
+	// unfiltered build relation per probe row (#1189). Merged ascending: each
+	// batch's Sel is ascending and the offsets increase, which the probe's
+	// forward walk requires.
+	filtered := false
+	selected := 0
+	for _, b := range h.buildBatches {
+		selected += b.ActiveLen()
+		if b.Sel != nil {
+			filtered = true
+		}
+	}
+	if filtered {
+		sel := make([]uint32, 0, selected)
+		for i, b := range h.buildBatches {
+			off := uint32(offsets[i])
+			if b.Sel == nil {
+				for r := 0; r < b.Len; r++ {
+					sel = append(sel, off+uint32(r))
+				}
+				continue
+			}
+			for _, si := range b.Sel {
+				sel = append(sel, off+si)
+			}
+		}
+		consolidated.Sel = sel
+	}
+
 	// Remap arena entries: all point to batch 0 with offset-adjusted row indices.
 	for pi := range h.parts {
 		arena := h.parts[pi].arena
@@ -2071,6 +2110,41 @@ func bloomHashBytes(key []byte) uint64 {
 		h *= 16777619
 	}
 	return h ^ (h >> 32)
+}
+
+// ownBuildRowSet makes the build the owner of an arrival batch's LIVE ROW SET.
+//
+// A batch's live rows are its selection vector, and a selection vector belongs
+// to the operator that produced it: exec.Filter hands out a slice of one
+// reusable buffer and overwrites that buffer on the next batch. Detach claims
+// the batch's column VECTORS (ADR-0016, detach is the ownership claim) and
+// says nothing about the row set, so a stored build batch that keeps the
+// producer's slice reads a LATER batch's selection by the time the probe walks
+// it — three filtered build files answered build rows 1,3,4,6,7 where the
+// filter had accepted 1,3,5,6,7, file two's selection having overwritten file
+// one's backing array. The build stores rows, so it stores the row set with
+// them (#1189).
+//
+// Masked on the flat path today by consolidateBuild, which merges the batches
+// and carries the row set forward itself; live whenever that merge is skipped
+// (a build over 2M rows, or a tracker past 30% of its budget).
+func ownBuildRowSet(b *batch.RecordBatch) {
+	if b.Sel == nil {
+		return
+	}
+	sel := make([]uint32, len(b.Sel))
+	copy(sel, b.Sel)
+	b.Sel = sel
+}
+
+// buildRowAt maps a position in a stored build batch's live row set to the row
+// index the batch's columns are addressed by. The two differ exactly when the
+// batch arrived under a pushed-down filter.
+func buildRowAt(b *batch.RecordBatch, pos int) int {
+	if b.Sel == nil {
+		return pos
+	}
+	return int(b.Sel[pos])
 }
 
 // projectForStore narrows an arrival build batch to BuildStoreCols before it
@@ -2207,6 +2281,8 @@ func (h *HashJoin) PruneBuildColumns(keepCols []string) {
 			Columns: newCols,
 			Schema:  newSchema,
 			Len:     b.Len,
+			// Narrowing the columns does not change which rows are live.
+			Sel: b.Sel,
 		}
 	}
 }
@@ -2397,10 +2473,13 @@ func (h *HashJoin) FixKeyAssignment() bool {
 		// The key columns just changed sides, so which rows have a NULL key is
 		// a different question than it was. Recompute it with the rest (#507).
 		h.buildHasNullKey = false
-		// Count total rows across build batches for pre-sizing
+		// Count total rows across build batches for pre-sizing. The LIVE rows:
+		// a build batch that arrived under a pushed-down filter carries a
+		// selection vector, and the rebuild below re-indexes the same row set
+		// the arrival-time index held, never the raw rows behind it (#1189).
 		totalBuildRows := 0
 		for _, b := range h.buildBatches {
-			totalBuildRows += b.Len
+			totalBuildRows += b.ActiveLen()
 		}
 		// The keys just changed sides, so the whole index is rebuilt from
 		// scratch — and FLAT, into ONE part, because this path re-indexes
@@ -2427,7 +2506,8 @@ func (h *HashJoin) FixKeyAssignment() bool {
 		if h.useIntKey {
 			for batchIdx, b := range h.buildBatches {
 				col := b.Columns[h.buildKeyIdx[0]]
-				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+				for pos := 0; pos < b.ActiveLen(); pos++ {
+					rowIdx := buildRowAt(b, pos)
 					key, ok := intKeyFromVector(col, rowIdx)
 					if !ok {
 						h.nullBuildKey(buildRef{batchIdx: int32(batchIdx), rowIdx: int32(rowIdx)})
@@ -2441,7 +2521,8 @@ func (h *HashJoin) FixKeyAssignment() bool {
 		} else if h.useDualIntKey {
 			for batchIdx, b := range h.buildBatches {
 				col0, col1 := b.Columns[h.buildKeyIdx[0]], b.Columns[h.buildKeyIdx[1]]
-				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+				for pos := 0; pos < b.ActiveLen(); pos++ {
+					rowIdx := buildRowAt(b, pos)
 					a, bb, ok := dualIntKeyFromVectors(col0, col1, rowIdx)
 					if !ok {
 						h.nullBuildKey(buildRef{batchIdx: int32(batchIdx), rowIdx: int32(rowIdx)})
@@ -2454,7 +2535,8 @@ func (h *HashJoin) FixKeyAssignment() bool {
 			}
 		} else {
 			for batchIdx, b := range h.buildBatches {
-				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+				for pos := 0; pos < b.ActiveLen(); pos++ {
+					rowIdx := buildRowAt(b, pos)
 					if !h.buildKeyFromBatch(b, rowIdx) {
 						h.buildHasNullKey = true
 					}
