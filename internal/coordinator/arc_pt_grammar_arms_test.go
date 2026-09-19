@@ -185,10 +185,13 @@ func TestArcPTGrammarAnswersTheSameOnEveryArm(t *testing.T) {
 				`HAVING MIN(c_str) LIKE 's!-%' ESCAPE '!'`,
 			want: []string{fmt.Sprintf("g=int32:0|n=int64:%d", typematrixGroupCount(t, 0))},
 			pg:   "the group survives the HAVING"},
+		// 22025 is the server's class for BOTH escape-string failures — a
+		// too-long escape and a pattern that ends with one. This row pinned
+		// 22019, so correcting the engine would have failed the gate
+		// (round-1 review, P1: the inverted-pin shape).
 		{issue: "#1169", name: "like_escape_too_long_refuses",
 			sql:   `SELECT COUNT(*) AS n FROM typemx WHERE c_str LIKE 's!-%' ESCAPE '!!'`,
-			state: "22025", pg: "22025 invalid escape string — the server's class for BOTH " +
-				"escape-string failures, which this gate pinned as 22019 (round-1 review, P1)"},
+			state: "22025", pg: "22025 invalid escape string"},
 		{issue: "#1169", name: "substring_from_for_over_a_column",
 			sql:  `SELECT SUBSTRING(c_str FROM 1 FOR 2) AS v FROM typemx WHERE id = 1`,
 			want: []string{"v=s-"}, pg: "s-"},
