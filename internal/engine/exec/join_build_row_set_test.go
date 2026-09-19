@@ -146,6 +146,56 @@ func cjCrossBuildIDs(t *testing.T, hj *HashJoin) string {
 	return strings.Join(parts, ",")
 }
 
+// cjStoredBuildIDs is the build's live rows read STRAIGHT off the stored
+// batches, honouring each one's selection vector, as "2,4,6". It reads the
+// identities rather than counting them, and it works after a column prune has
+// narrowed the stored schema, which a probe-driven reading would not.
+func cjStoredBuildIDs(t *testing.T, hj *HashJoin) string {
+	t.Helper()
+	var ids []int
+	for _, b := range hj.buildBatches {
+		if b == nil {
+			continue
+		}
+		col := b.Columns[columnIndexFallback(b, "bid")]
+		// The Sel is resolved here rather than through the package's own
+		// buildRowAt, so this file compiles and runs VERBATIM against a tree
+		// that does not have the fix (COMMON: a new gate must fail at base).
+		for pos := 0; pos < b.ActiveLen(); pos++ {
+			row := pos
+			if b.Sel != nil {
+				row = int(b.Sel[pos])
+			}
+			ids = append(ids, int(col.Int64Data[row]))
+		}
+	}
+	return cjJoinIDs(ids)
+}
+
+// cjArenaBuildIDs is the build's live rows as the INDEX holds them — one entry
+// per indexed row, read through its (batchIdx, rowIdx) ref. It is what a keyed
+// probe would reach, so a rebuild that re-indexed raw rows shows up here as
+// identities and not only as a count.
+func cjArenaBuildIDs(t *testing.T, hj *HashJoin) string {
+	t.Helper()
+	var ids []int
+	hj.forEachArenaEntry(func(_ *joinIndexPart, _ int, ref buildRef) {
+		b := hj.buildBatches[ref.batchIdx]
+		col := b.Columns[columnIndexFallback(b, "bid")]
+		ids = append(ids, int(col.Int64Data[ref.rowIdx]))
+	})
+	return cjJoinIDs(ids)
+}
+
+func cjJoinIDs(ids []int) string {
+	sort.Ints(ids)
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = fmt.Sprint(id)
+	}
+	return strings.Join(parts, ",")
+}
+
 // cjBuiltCross builds a CROSS join over the given batches behind one Filter.
 func cjBuiltCross(t *testing.T, groups [][]int64, keep map[int64]bool, tracker *memory.Tracker) *HashJoin {
 	t.Helper()
@@ -245,25 +295,21 @@ func TestAJoinsBuildOwnsTheRowSetItStores(t *testing.T) {
 		hj := cjBuiltCross(t,
 			[][]int64{{1, 2, 3}, {4, 5, 6}},
 			cjKeepSet(2, 4, 6), nil)
-		before := cjCrossBuildIDs(t, hj)
-		live := make([]int, 0, 8)
-		for _, b := range hj.buildBatches {
-			live = append(live, b.ActiveLen())
+		// The control is the ROWS, read two ways before the prune: what the
+		// cross probe publishes, and what the stored batches hold.
+		if got := cjCrossBuildIDs(t, hj); got != "2,4,6" {
+			t.Fatalf("the pre-prune control published %q, want 2,4,6", got)
+		}
+		if got := cjStoredBuildIDs(t, hj); got != "2,4,6" {
+			t.Fatalf("the pre-prune stored rows are %q, want 2,4,6", got)
 		}
 		hj.PruneBuildColumns([]string{"bid"})
-		after := 0
-		for _, b := range hj.buildBatches {
-			after += b.ActiveLen()
-		}
-		total := 0
-		for _, n := range live {
-			total += n
-		}
-		if after != total {
-			t.Errorf("pruning changed the live row count from %d to %d", total, after)
-		}
-		if before != "2,4,6" {
-			t.Fatalf("the pre-prune control published %q, want 2,4,6", before)
+		// And the ROWS after it — identities, not a count: a prune that
+		// dropped the row set would answer 1,2,3,4,5,6 here, which a count of
+		// live rows would also catch, but one that SHIFTED it (a Sel carried
+		// onto the wrong batch) would keep the count and change these.
+		if got := cjStoredBuildIDs(t, hj); got != "2,4,6" {
+			t.Errorf("pruning the stored columns changed the live rows to %q, want 2,4,6", got)
 		}
 	})
 
@@ -285,12 +331,27 @@ func TestAJoinsBuildOwnsTheRowSetItStores(t *testing.T) {
 		if err := hj.Build(ctx, src); err != nil {
 			t.Fatalf("build: %v", err)
 		}
+		// The arena BEFORE the rebuild, so the cell says what it is comparing
+		// against and cannot pass by indexing nothing.
+		if got := cjArenaBuildIDs(t, hj); got != "2,5" {
+			t.Fatalf("the arrival-time index holds %q, want 2,5 — the filter accepted 2 and 5", got)
+		}
+		// NOT a skip. This cell is built so the repair fires — RightKeys names
+		// a column the build does not have — so a run where it does not fire
+		// is a cell that has stopped measuring the rebuild, and that is a
+		// failure rather than a pass.
 		if !hj.FixKeyAssignment() {
-			t.Skip("the key assignment needed no repair on this build — the rebuild is unreached")
+			t.Fatalf("the key repair did not fire, so the rebuild under test never ran: " +
+				"this cell is no longer measuring anything")
+		}
+		// The ROWS the rebuild indexed, not their count: re-indexing the raw
+		// rows behind the row set answers 1,2,3,4,5,6 here, and re-indexing
+		// the WRONG two would keep the count 2 and change these.
+		if got := cjArenaBuildIDs(t, hj); got != "2,5" {
+			t.Errorf("the rebuild indexed %q, want 2,5 — the filter accepted 2 and 5", got)
 		}
 		if hj.buildRows != 2 {
-			t.Errorf("the rebuild indexed %d build rows, want 2 — the filter accepted 2 and 5",
-				hj.buildRows)
+			t.Errorf("the rebuild counted %d build rows, want 2", hj.buildRows)
 		}
 	})
 }
