@@ -2234,9 +2234,17 @@ returns no rows; and a string naming no boolean is SQLSTATE `22P02`
 (`invalid input syntax for type boolean: "abc"`).
 
 The refusal is made where the type is PROVABLE — a column whose declaration
-the planner carries, a numeric literal, arithmetic, or `COUNT`. A predicate
-whose type the planner cannot prove (a scalar function's result, a column of a
-derived table or CTE) is not refused.
+the planner carries, a numeric literal, arithmetic, `COUNT`, and a CALL whose
+return type the registry DECLARES: `WHERE upper(s)` is `42804 … not type
+text`, and so is an OPERATOR the parser rewrites into a call, `a # b` and
+`a ^ b` among them. A function whose declared return type is POLYMORPHIC — it
+mirrors an argument, as `COALESCE` and `GREATEST` do — is not refused, because
+no batch has decided that type yet. A column of a derived table or a CTE is
+not refused either.
+
+A `DELETE`'s and an `UPDATE`'s `WHERE` are held to the same rule, with the
+same SQLSTATE and the same message: a clause that is not a boolean removes and
+changes nothing.
 
 The same input function applies when a boolean is COMPARED against a quoted
 literal, and it applies to a boolean the query COMPUTED, not only to a boolean
