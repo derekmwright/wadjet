@@ -117,6 +117,7 @@ passing `--result-store`.
 | `--local-fastpath-bytes` | Queries under this post-pruning scan size run in-process on the coordinator (0 = disabled) | `64 MiB` |
 | `--shuffle-durability` | Stage-output durability: `eager`, `lazy`, `off` | `eager` |
 | `--skew-split` | Adaptive skew-aware shuffle layout | `true` |
+| `--bushy-join-reorder` | Let the cost-based join reorder emit BUSHY plans (joins of two composite intermediates) when strictly cheaper than every left-deep order; cost ties keep the left-deep shape | `false` |
 | `--drain-timeout` | Bound on graceful worker drain (0 = unbounded) | `0` |
 | `--storage-circuit-threshold` | Consecutive object-store failures **in one operation class** (read / write / delete) before that class's circuit breaker opens | `5` |
 | `--storage-circuit-reset` | How long an open object-store breaker stays open before admitting one half-open probe | `30s` |
@@ -124,6 +125,15 @@ passing `--result-store`.
 | `--query-intermediate-ttl` | Age at which the periodic sweep reclaims a `queries/<id>/*` prefix the per-query cleanup missed (`serve` modes only — see below) | `1h` |
 | `--query-intermediate-sweep` | How often that sweep runs | `10m` |
 | `--config` | Path to YAML config file | none |
+
+#### Planner configuration is per instance
+
+`--bushy-join-reorder` configures the planners of the process it is given to:
+the coordinator's, the HTTP server's, and the PostgreSQL wire door's fallback
+database. It is not a process-wide switch — embedding the engine, two
+`wadjet.DB`s open at once hold different values and closing one takes its
+value with it — and a worker that re-plans a whole query from its text plans it
+under the setting of the COORDINATOR that dispatched it, not its own.
 
 #### Object-store circuit breaker
 

@@ -213,6 +213,23 @@ log per query naming the partition chosen (mirrors SortMergeJoinsPlanned /
 DynamicFiltersPlanned — the same-window A/B discipline requires a mechanism
 marker proving the treatment engaged).
 
+**The setting belongs to the INSTANCE, not the process** (corrected
+2026-09-19, #1223 — it was a package `atomic.Bool` read at plan time, which
+made "set once at startup" true of the process and not of the database that
+asked for it: the first `wadjet.Open` with the flag on enabled the regime for
+every other `wadjet.DB` in the process and for the rest of its life). It
+travels as `logical.Options`, from the instance that holds it —
+`wadjet.DB`, `server.Config`, `coordinator.Config` — into
+`logical.OptimizeWith` and onto `physical.Planner.BushyJoinReorder`, which is
+what `EstimateSubtreeBytes` reads for the composite-build sizing above.
+Two DBs in one process plan by their own settings and `Close` releases one.
+The one place two PROCESSES have to agree is the worker's pipeline re-plan
+(`worker.Executor.executePipeline` parses `Task.SQLText` and optimizes it
+again): the coordinator chose that task's probe split and build sides from a
+plan made under its own option, so the option rides the task
+(`Task.BushyJoinReorder`, stamped at `Scheduler.PublishTasks`) and the worker
+plans under the coordinator's value rather than its own process's.
+
 ### 3.3 Scope exclusions (v1)
 
 - Semi/anti joins stay leaf relations (current `flattenJoinChain` handling).

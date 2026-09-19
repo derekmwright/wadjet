@@ -73,7 +73,9 @@ The `Config` struct accepts:
 - `MemoryBudget` — per-query memory budget in bytes (0 = unlimited); pipeline breakers spill past it
 - `SpillDir` — directory for spill-to-disk files (empty = OS temp dir)
 - `AuthProvider` — optional `*auth.Provider`, enables ABAC enforcement at query level
-- `SortMergeJoinBytes`, `LateMaterialization`, `BushyJoinReorder` — planner knobs (0/false = off)
+- `SortMergeJoinBytes`, `LateMaterialization`, `BushyJoinReorder` — planner knobs (0/false = off).
+  They configure THIS database: two `wadjet.DB`s open in one process plan by their
+  own settings, and `Close` takes a database's settings with it.
 - `EnableAlerts` — turns on the CREATE ALERT scheduler; call `db.Close()` to stop it.
   It also gates the alert DDL: `CREATE`/`ALTER`/`DROP ALERT` are refused on a `DB`
   that does not carry a scheduler. That coupling is why `wadjetd serve` does not give
