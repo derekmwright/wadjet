@@ -174,8 +174,10 @@ func provableNonBooleanType(node plansql.Node, scope *colScope) (parquet.TypeID,
 		// `a ^ b` is `power(a, b)`, and an untyped call in a truth context
 		// meant `DELETE FROM t WHERE id > 0 AND n # 3` deleted every row
 		// where PostgreSQL raises 42804 (#1179).
+		// batch.TypeID is an alias of parquet.TypeID, so the declaration's
+		// type is this walk's type with no conversion.
 		if typ, ok := expr.FuncFixedNonBooleanType(strings.ToLower(n.Name)); ok {
-			return parquet.TypeID(typ), pgTypeName(parquet.TypeID(typ)), true
+			return typ, pgTypeName(typ), true
 		}
 		return 0, "", false
 	case *plansql.SubqueryNode:
