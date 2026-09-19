@@ -665,6 +665,21 @@ WHERE (dst_port = 443 OR dst_port = 8443)
 SELECT * FROM syslog WHERE message LIKE '%error%'
 SELECT * FROM syslog WHERE hostname LIKE 'fw-%'
 SELECT * FROM syslog WHERE message NOT LIKE '%debug%'
+SELECT * FROM syslog WHERE message ILIKE '%ERROR%'
+
+-- ESCAPE names the character that makes the NEXT one literal, so a pattern
+-- can match a per cent sign or an underscore. An escape string longer than
+-- one character is SQLSTATE 22019; the empty string disables escaping.
+SELECT * FROM syslog WHERE path LIKE 'a!%b' ESCAPE '!'
+
+-- SIMILAR TO is the SQL standard's own pattern language, and it is neither
+-- LIKE nor a regular expression: `%` and `_` are LIKE's wildcards, `|`, `*`,
+-- `+`, `?`, `{m,n}`, `()` and `[]` are the regex metacharacters, every other
+-- character — `.`, `^`, `$` included — is a literal, and the match is against
+-- the WHOLE string. The escape character is `\` unless ESCAPE says otherwise.
+SELECT * FROM syslog WHERE hostname SIMILAR TO 'fw-(1|2)%'
+SELECT * FROM syslog WHERE hostname NOT SIMILAR TO '%[0-9]'
+SELECT * FROM syslog WHERE path SIMILAR TO 'a#%b' ESCAPE '#'
 ```
 
 ### NULL Handling
@@ -1835,11 +1850,8 @@ raises it.
 ## Column-alias lists
 
 A `FROM` item may rename its columns positionally with a column-alias list —
-a base table, a derived table, a `VALUES` block and a `WITH` query alike. The
-`AS` is optional on all four. A table function takes the list only after `AS`
-and does NOT apply it: the relation keeps its own column names, a reference to a
-renamed one answers NULL, and `read_json('…') f(k, v)` without `AS` is a syntax
-error.
+a base table, a derived table, a `VALUES` block, a `WITH` query and a TABLE
+FUNCTION alike. The `AS` is optional on all five.
 
 ```sql
 SELECT k, v FROM flow_logs AS f(k, v)
@@ -1847,7 +1859,16 @@ SELECT k, v FROM flow_logs f(k, v)
 SELECT kk, nn FROM (SELECT s, n FROM t) AS b(kk, nn)
 SELECT n FROM (VALUES (1), (2)) v(n)
 WITH c(kk, nn) AS (SELECT s, n FROM t) SELECT kk FROM c
+SELECT k, v FROM read_json('events.json') AS f(k, v)
+SELECT x FROM generate_series(1, 3) g(x)
+SELECT val, ord FROM unnest(7, 8) WITH ORDINALITY u(val, ord)
 ```
+
+On a table function the list is applied where the relation's width is known —
+when the function produces its first batch, because `read_json` infers its
+columns from the file — so a list LONGER than the relation is `42P10` at
+execution rather than at plan time, and a function that produces no rows at all
+is never measured against its list.
 
 The list opens a NEW relation namespace: the named columns are the relation's,
 and the names it renamed AWAY are gone. `SELECT id FROM flow_logs a(k)` is
@@ -2943,6 +2964,9 @@ see the Encoding Functions section.
 | `REPEAT(s, n)` | Repeat string n times | `REPEAT('*', 10)` |
 | `SPLIT_PART(s, delim, n)` | Extract nth part from delimited string; 1-based, and a NEGATIVE n counts from the end. Position 0 is SQLSTATE 22023; a position past either end is the empty string | `SPLIT_PART(url, '/', 3)`, `SPLIT_PART(url, '/', -1)` |
 | `STRPOS(s, sub)` / `POSITION(sub IN s)` | Position of substring in **characters** (1-based, 0 if not found) | `STRPOS(message, 'error')` |
+| `SUBSTRING(s FROM start [FOR count])` | The SQL-standard spelling of `SUBSTRING(s, start, count)`. A TEXT second operand is a regular expression instead — `SUBSTRING(s FROM '(b)(c)')` answers the first capture group, `b` — which is how PostgreSQL chooses between the two readings. A negative count is SQLSTATE 22011 | `SUBSTRING(hostname FROM 2 FOR 3)`, `SUBSTRING(url FROM '[0-9]+')` |
+| `OVERLAY(s PLACING new FROM start [FOR count])` / `OVERLAY(s, new, start [, count])` | Replace `count` characters of `s` from `start` with `new`; `count` defaults to the length of `new`. `FROM 0` is SQLSTATE 22011 | `OVERLAY('Txxxxas' PLACING 'hom' FROM 2 FOR 4)` → `'Thomas'` |
+| `NORMALIZE(s [, NFC \| NFD \| NFKC \| NFKD])` | Unicode normalization; the form is a bare keyword and defaults to NFC | `NORMALIZE(name, NFD)` |
 | `REGEXP_LIKE(s, pattern)` | Test if string matches regex | `REGEXP_LIKE(src_ip, '^\d+\.\d+')` |
 | `REGEXP_EXTRACT(s, pattern [, group])` | Extract regex match or capture group | `REGEXP_EXTRACT(url, '(\w+)://(\w+)', 2)` |
 | `REGEXP_REPLACE(s, pattern, repl)` | Replace regex matches | `REGEXP_REPLACE(message, '\s+', ' ')` |
@@ -3204,7 +3228,7 @@ SELECT host, agent_version
 | `LEAST(a, b, ...)` | Smallest value | `LEAST(bytes_in, bytes_out)` |
 | `BITWISE_AND(a, b)` | Bitwise AND. Exact over the full 64-bit pattern; answers BIGINT | `BITWISE_AND(flags, 0xFF)` |
 | `BITWISE_OR(a, b)` | Bitwise OR. Answers BIGINT | `BITWISE_OR(flags, 0x01)` |
-| `BITWISE_XOR(a, b)` | Bitwise XOR. Answers BIGINT | `BITWISE_XOR(a, b)` |
+| `BITWISE_XOR(a, b)` / `a # b` | Bitwise XOR. `#` is PostgreSQL's spelling of the operator — `^` is exponentiation there and here — at the same precedence: looser than `+` and `-`, tighter than every comparison, left associative. Answers BIGINT | `BITWISE_XOR(a, b)`, `5 # 3` → `6` |
 | `BITWISE_NOT(a)` | Bitwise NOT. Answers BIGINT | `BITWISE_NOT(mask)` |
 | `BITWISE_LEFT_SHIFT(a, n)` | Shift bits left by n positions. A count outside `[0, 64)` is NULL | `BITWISE_LEFT_SHIFT(1, 4)` → `16` |
 | `BITWISE_RIGHT_SHIFT(a, n)` | Logical shift bits right by n positions. A count outside `[0, 64)` is NULL | `BITWISE_RIGHT_SHIFT(16, 4)` → `1` |
@@ -3627,6 +3651,7 @@ LIMIT 10
 | `DAY_OF_YEAR(ts)` | Day of year (1-366) | `DAY_OF_YEAR(timestamp)` |
 | `LAST_DAY_OF_MONTH(ts)` | Last day of the month | `LAST_DAY_OF_MONTH(timestamp)` |
 | `CURRENT_TIMESTAMP()` | Current timestamp (alias for NOW) | `CURRENT_TIMESTAMP()` |
+| `LOCALTIMESTAMP [(precision)]` | Current timestamp, declared WITHOUT time zone. Spelled with or without parentheses; the precision is accepted and ignored | `SELECT LOCALTIMESTAMP` |
 | `FROM_ISO8601_TIMESTAMP(s)` | Parse ISO 8601 timestamp to epoch millis | `FROM_ISO8601_TIMESTAMP('2026-03-15T10:30:00Z')` |
 | `FROM_ISO8601_DATE(s)` | Parse and validate ISO 8601 date | `FROM_ISO8601_DATE('2026-03-15')` |
 | `TO_ISO8601(epoch_ms)` | Convert epoch millis to ISO 8601 string | `TO_ISO8601(1773570600000)` → `'2026-03-15T10:30:00Z'` |
@@ -4065,10 +4090,20 @@ From lowest to highest:
 | 1 (lowest) | `OR` |
 | 2 | `AND` |
 | 3 | `NOT` |
-| 4 | `IS`, `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`, `IN`, `BETWEEN`, `LIKE` |
-| 5 | `+`, `-`, `\|\|` |
-| 6 | `*`, `/`, `%` |
-| 7 (highest) | Unary `-`, `+` |
+| 4 | `IS NULL`, `IS TRUE`, `IS FALSE`, `IS UNKNOWN`, `IS DISTINCT FROM` |
+| 5 | `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=` — **nonassociative**: `1 = 1 = true` is a syntax error, as it is on PostgreSQL |
+| 6 | `IN`, `BETWEEN`, `LIKE`, `ILIKE`, `SIMILAR TO` |
+| 7 | `#` (integer XOR) |
+| 8 | `+`, `-`, `\|\|` |
+| 9 | `*`, `/`, `%` |
+| 10 | `^` (exponentiation) |
+| 11 (highest) | Unary `-`, `+` |
+
+This is PostgreSQL 17.11's own table (§4.1.6), and the levels between 4 and 6
+are the ones that decide what a statement MEANS: `5 BETWEEN 10 AND 1 = true`
+is `(5 BETWEEN 10 AND 1) = true`, and `1 = 1 IS TRUE` is `(1 = 1) IS TRUE`.
+An `IS` postfix may be followed by a comparison (`1 IS NULL = false`), and a
+comparison's right-hand side may be a `BETWEEN` (`true = 1 BETWEEN 0 AND 2`).
 
 ## Data Manipulation (DML)
 

@@ -56,6 +56,14 @@ Integer arguments arrive widened. `TO_HEX(int32_col)` for −1 returns `ffffffff
 
 Declared CREATE/DROP TABLE uses row results; PostgreSQL sends DDL tags without rows. (ADR-0012 §13/#1024-tags)
 
+**`LIKE` does not honour the default backslash escape.**
+
+`'a%b' LIKE 'a\%b'` answers `f` where PostgreSQL 17.11 answers `t`: this engine's LIKE reads `\` as an ordinary character, so a pattern that escapes a wildcard with the DEFAULT escape matches nothing. Write the escape explicitly — `LIKE 'a!%b' ESCAPE '!'` — which is read exactly as PostgreSQL reads it (#1169). Four matchers implement the pattern language (the scan's pushdown filter, the exec filter, the comparison kernel and the expression evaluator) and all four agree with each other; the default escape belongs to all four. (ADR-0012 §5/#1169-like-default-escape)
+
+**`LOCALTIMESTAMP`, `CURRENT_TIMESTAMP` and `NOW()` are read PER ROW.**
+
+PostgreSQL answers the statement's start time for every row, so `WHERE LOCALTIMESTAMP >= LOCALTIMESTAMP` selects every row. Here the clock is read where the expression is evaluated, so a row that straddles a millisecond can answer FALSE. (ADR-0012 §5/#1169-per-row-clock)
+
 ## Declared types
 
 **Array-returning functions can publish text.**
@@ -107,6 +115,22 @@ Fields retain storage types. `(b).open` over DECIMAL(9,2) has typmod 589830; Pos
 `SELECT * FROM lat_ord o, LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) l` names the fourth column `l.id` on the single-process arms and `i.id` — the body's inner scan spelling — on the three distributed ones, where PostgreSQL names it `id`. A LATERAL arm is not expanded (its subtree carries the correlation slot the join drops), so the star reads the join operator's stream, which qualifies a duplicate name by its owning alias. Values, types and positions agree. (ADR-0012 §5/#1126)
 
 ## Errors and refusals
+
+**`SUBSTRING(text SIMILAR pattern ESCAPE escape)` is refused.**
+
+The standard's capture-marker spelling raises 0A000 naming the construct, where PostgreSQL 17.11 answers the part of the string between the pattern's `#"` markers: this engine translates a SIMILAR TO pattern into a regular expression and that translation has no notion of a returned portion. `SUBSTRING(text FROM regexp)` and `REGEXP_EXTRACT(text, regexp, group)` both answer. (ADR-0012 §5/#1169-substring-similar)
+
+**A SIMILAR TO pattern the translation cannot compile is 2201B with this engine's own message.**
+
+`'abc' SIMILAR TO '*'` and `'abc' SIMILAR TO '['` raise 2201B on both engines; the message names the pattern here and names the regex engine's own complaint there. (ADR-0012 §5/#1168)
+
+**A repeated name in a column-alias list is refused at the list.**
+
+`FROM t AS a(k, k)` raises 42701 naming the spelling, where PostgreSQL accepts the list and raises 42702 at every reference. This engine renames positionally and cannot publish one name for two columns. On a TABLE FUNCTION whose relation is narrower than the list, PostgreSQL raises 42P10 for the same statement. (ADR-0012 §5/#959, #1184)
+
+**A table function's column-alias list is measured when the function produces its first batch.**
+
+`FROM read_json(…) AS f(a, b, c)` over a file with two columns raises 42P10 with PostgreSQL's own sentence, but at execution rather than at plan time: a table function's width is not knowable before it reads its input. A function that produces NO batch is never measured against its list. (ADR-0012 §5/#1184)
 
 **Some known casts leave values unchanged.**
 
@@ -304,9 +328,21 @@ PostgreSQL requires separate aggregates. VWAP uses AVG’s scale; zero volume re
 
 PostgreSQL has none. SemVer 2.0.0 defines precedence; node-semver defines ranges. Leading v/V is accepted; components stop at int64. Malformed versions return NULL (strict normalization: 22023). Empty ranges, partial-version suffixes, leading zeros and oversized components raise 22023. (ADR-0012 §5/#967)
 
+**`NORMALIZE` accepts a quoted form.**
+
+`NORMALIZE(s, 'NFC')` answers here and is a syntax error on PostgreSQL 17.11, which admits only the bare keyword. Both spellings mean the same thing. (ADR-0012 §5/#1169)
+
+**`#` accepts operands PostgreSQL refuses, and answers bigint for int4 operands.**
+
+`5.0 # 3` and `'a' # 'b'` answer here (the bitwise family reads its operands as integers) where PostgreSQL raises 42883 and 42725; `int4 # int4` is declared bigint here and integer there. Both are the bitwise family's existing widening, which `#` inherits rather than introduces. (ADR-0012 §5/#1179)
+
 ## Not supported
 
 [SQL reference](sql-reference.md).
+
+**`LOCALTIME`, `IS [form] NORMALIZED` and the `U&'…'` literal have no grammar.**
+
+`LOCALTIME` needs a TIME type this engine does not have; `'abc' IS NORMALIZED` and `U&'\0065\0301'` are 42601 where PostgreSQL answers. `LOCALTIMESTAMP` and `NORMALIZE(s, form)` are supported. (ADR-0012 §5/#1169)
 
 **A column-alias list over a star whose width is not known is refused.**
 

@@ -53,8 +53,11 @@ declaration to refuse against.
 4. **Every grammar spelling this engine rewrites into a call the query did not
    write is enumerated against that table.** `TRIM(BOTH c FROM s)`,
    `POSITION(x IN y)`, `EXTRACT(f FROM t)`, the niladic no-parenthesis
-   functions, `AT TIME ZONE`, a computed ROW field, `ILIKE`, `SIMILAR TO`, the
-   `^` operator's `power(a, b)` and a `JOIN … USING` merge's
+   functions, `AT TIME ZONE`, a computed ROW field, `ILIKE`, `SIMILAR TO`'s
+   `similar_to(x, p[, e])`, `LIKE … ESCAPE`'s `like_escape(x, p, e)`, the
+   SQL-standard `SUBSTRING`/`OVERLAY`/`NORMALIZE`/`LOCALTIMESTAMP` spellings,
+   `LEFT`/`RIGHT` read as function names, the `^` operator's `power(a, b)`,
+   the `#` operator's `bitwise_xor(a, b)` and a `JOIN … USING` merge's
    `COALESCE(l.c, r.c)` all land on a name the table declares
    (`physical.TestEveryGrammarRewriteProducesACallItsSignatureAccepts`). What
    that gate asks of each is the produced NAME and ARITY: the merge's entry is

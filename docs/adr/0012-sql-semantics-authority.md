@@ -5828,6 +5828,47 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     That is a pre-existing property of declared DDL on this wire and not of the
     clause; the skip is consistent with the form it belongs to.
 
+  - **The SQL-standard spellings, and what this engine does NOT read of
+    them.** (Added 2026-09-18, arc PT / #1169, #1168, #1179, #1180, #1183.)
+    `SUBSTRING(s FROM n FOR m)`, `SUBSTRING(s FROM pattern)`, `OVERLAY(s
+    PLACING r FROM n [FOR m])`, `NORMALIZE(s [, NFC|NFD|NFKC|NFKD])`,
+    `LOCALTIMESTAMP [(p)]`, `LIKE|ILIKE|SIMILAR TO … ESCAPE`, `LEFT`/`RIGHT`
+    as function names and the `#` integer XOR operator answer PostgreSQL
+    17.11's values, measured form by form. Six things around them do not, and
+    each is on the differences page:
+
+    `SUBSTRING(text SIMILAR pattern ESCAPE escape)` is refused with `0A000`
+    naming the construct — the `#"` capture markers have no expression in the
+    SIMILAR TO translation this engine does, and a loud refusal beats a
+    plausible substring. `LOCALTIME`, `'x' IS NORMALIZED` and the `U&'…'`
+    literal have no grammar at all (a TIME type, a postfix predicate and a
+    lexer form this engine does not have). `NORMALIZE(s, 'NFC')` with a QUOTED
+    form answers here and is a syntax error there — a superset, kept.
+    `#` inherits the bitwise family's recorded widening: `int4 # int4` is
+    bigint here and integer there, and a non-integer operand answers where
+    PostgreSQL raises 42883/42725. And the pattern language's own two:
+    `LIKE` does not honour the DEFAULT backslash escape (`'a%b' LIKE 'a\%b'`
+    is `f` where PostgreSQL answers `t`) while the explicit `ESCAPE` clause is
+    read exactly as PostgreSQL reads it; a SIMILAR TO pattern whose
+    translation cannot compile is `2201B` on both engines with different
+    message text.
+
+    The ESCAPE clause is a CALL (`like_escape`, `similar_to`) rather than a
+    field on the LIKE node, because seven rewriters rebuild that node and a
+    rebuild that dropped the escape would answer the UNESCAPED pattern — the
+    same reasoning that expands `BETWEEN SYMMETRIC` and `ILIKE` at parse time.
+
+  - **A table function's column-alias list is applied at its SOURCE.**
+    (Added 2026-09-18, arc PT / #1184.) `FROM read_json(…) [AS] f(k, v)` now
+    renames positionally like every other FROM item. The rename happens where
+    the relation's WIDTH is known — when the function produces its first batch
+    — not at plan time, because a table function's columns come from the file
+    it reads. Two consequences are recorded rather than hidden: a list longer
+    than the relation is `42P10` with PostgreSQL's own sentence but at
+    EXECUTION, and a function that produces no batch at all is never measured
+    against its list. A repeated name in the list is `42701` at the list, the
+    same narrower refusal arc PS recorded for a base table.
+
   - **`QUALIFY` has no PostgreSQL, and DUCKDB 1.1.3 IS THE ORACLE FOR IT.**
     (Added 2026-09-14, #1076.) The clause originates in Snowflake/BigQuery and
     has a second, checkable implementation in DuckDB; PostgreSQL has none, so
