@@ -20,30 +20,22 @@ import (
 // A stored build batch's LIVE rows are its selection vector — a filter pushed
 // onto the build side marks rejected rows instead of copying the survivors out
 // (CLAUDE.md, "selection vectors over copying"). Four sites in this package
-// rewrite or re-walk those stored batches, and each one is a position where
-// the row set can be lost:
+// rewrite or re-walk those stored batches, and each is a position where the row
+// set can be lost: the flat STORE appends the arrival batch, whose Sel belongs
+// to the producer (Filter.selBuf is one reusable buffer); CONSOLIDATE merges
+// the batches, copying raw rows so the arena's (batchIdx, rowIdx) refs survive
+// at new offsets; PRUNE rebuilds each batch with fewer columns; REBUILD
+// re-indexes them after a key swap. Three of the four lost it.
 //
-//	store        the flat build appends the ARRIVAL batch, whose Sel belongs
-//	             to the producer (Filter.selBuf is one reusable buffer)
-//	consolidate  consolidateBuild merges the batches, copying raw rows so the
-//	             arena's (batchIdx, rowIdx) refs survive at new offsets
-//	prune        PruneBuildColumns rebuilds each stored batch with fewer columns
-//	rebuild      FixKeyAssignment re-indexes every stored batch after a key swap
-//
-// Three of the four lost it. It is invisible to every KEYED consumer, because
-// the arena only ever indexed the selected rows, so a rejected row sitting in
-// a stored batch is simply never referenced. It is not invisible to a CROSS
-// join: its probe has no key to route by, so nextCrossChunk walks buildBatches
-// directly and reads each batch's Sel — and a batch that lost its Sel hands
-// back the whole unfiltered relation.
-//
-// Every cell below is driven through a REAL exec.Filter rather than a
-// hand-set Sel, because the producer's buffer reuse is half of what is under
-// test, and a hand-written selection vector would own its own memory and hide
-// it.
-//
-// At 1c2b4d25 this file fails; the log is
-// cj_author/gate_exec_rowset_at_base_FAILS.log.
+// It is invisible to every KEYED consumer, because the arena only ever indexed
+// the selected rows, so a rejected row in a stored batch is never referenced.
+// It is not invisible to a CROSS join: its probe has no key to route by, so
+// nextCrossChunk walks buildBatches directly and reads each batch's Sel — and a
+// batch that lost its Sel hands back the whole unfiltered relation.
+
+// Every cell is driven through a REAL exec.Filter rather than a hand-set Sel,
+// because the producer's buffer reuse is half of what is under test. At
+// 1c2b4d25 this file fails: cj_author/gate_exec_rowset_at_base_FAILS.log.
 
 // cjRowSetSchema is one identity column and one boolean the filter reads, so a
 // cell's answer names the build rows it published rather than counting them.

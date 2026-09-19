@@ -12,42 +12,31 @@ import (
 
 // A RESIDUAL CROSSES THE STAGE BOUNDARY WITH ITS IDENTITY (arc JR round 2, B1).
 //
-// Every cell of the arc's 156-cell table joins two BASE TABLES, so no cell of
-// it reaches a stage that publishes a column under another name. Round 1's
+// Every cell of the arc's 156-cell table joins two BASE TABLES, so none of them
+// reaches a stage that publishes a column under another name. Round 1's
 // reviewer varied the RELATION instead of the residual's spelling and found the
-// hole: on the three DAG arms
-//
-//	FROM (SELECT id AS a, k AS kk, s AS ss, n AS nn FROM jr_l) x
-//	LEFT JOIN (SELECT id AS b, k AS kk2, s AS ss2, n AS nn2 FROM jr_r) y
-//	  ON x.kk = y.kk2 AND LOWER(y.ss2) = x.ss
-//
-// answered six all-padded rows where PostgreSQL answers seven. A Project emits
-// no stage, so the fragment's two sides publish `[id k s n]` while the residual
-// text still spells `y.ss2` and `x.ss`; neither reference resolved, the
-// evaluator's unbound slot is SQL NULL, the residual was UNKNOWN for every
-// candidate pair, and the LEFT join padded its whole probe side. Only a
-// slog.Warn marked it. Sixteen (cell, arm) results went from a LOUD REFUSAL at
-// `563aa517` to a SILENT WRONG ROW SET.
-//
-// The join's equi-KEYS already made this trip re-spelled — `resolveShuffleKey`
-// walks each key down the arm it belongs to — and the residual's leaves take
-// the same path now (`dagplan.residualWithStageSpellings`). The SIDE travels
-// with the name, because both arms here re-spell to `s`: a build-side reference
-// is re-spelled qualified by the stage's own build alias, the one the evaluator
-// forces to the build side, and a probe-side one is left bare. A reference
-// neither arm re-spells is left exactly as written, which is why every cell of
-// the base-table corpus is byte-identical to what it was.
-//
-// The FLOOR under it is `worker`'s own refusal: a residual reference the
-// fragment's two DECLARED schemas do not publish is refused there, loudly,
-// naming the references — so a leaf this rewrite cannot reach is never a NULL
-// slot at run time. That check is round 1's reviewer's, measured and credited.
+// hole: on the three DAG arms, a LEFT JOIN of two RENAMING derived arms
+// (`SELECT id AS a, s AS ss FROM jr_l` against `… AS ss2 FROM jr_r`, ON
+// `x.kk = y.kk2 AND LOWER(y.ss2) = x.ss`) answered six all-padded rows where
+// PostgreSQL answers seven. A Project emits no stage, so the fragment's sides
+// publish the base names while the residual text still spells the aliases;
+// neither reference resolved, the unbound slot is SQL NULL, the residual was
+// UNKNOWN for every candidate pair, and the LEFT join padded its whole probe
+// side with only a slog.Warn. Sixteen (cell, arm) results went from a LOUD
+// REFUSAL at `563aa517` to a SILENT WRONG ROW SET.
+
+// The join's equi-KEYS already made this trip re-spelled (`resolveShuffleKey`)
+// and the residual's leaves take the same path now
+// (`dagplan.residualWithStageSpellings`). The SIDE travels with the name,
+// because both arms here re-spell to `s`. The FLOOR under it is `worker`'s own
+// refusal: a residual reference the fragment's two DECLARED schemas do not
+// publish is refused there, naming the references, so a leaf the rewrite cannot
+// reach is never a NULL slot at run time.
 //
 // Every answer below is PostgreSQL 17.11's, measured live over jrProbeData /
-// jrBuildData in a `--locale=C` container with `COLLATE "C"` text columns
-// (`jr_author/b1/pg.tsv`). The base-beside-tip run is `jr_author/b1/base.tsv`
-// and `jr_author/b1/tip.tsv`; at `0ecb2348` this gate FAILS
-// (`jr_author/b1/g_b1_at_base.log`).
+// jrBuildData in a --locale=C container with COLLATE "C" text columns
+// (jr_author/b1/pg.tsv); at `0ecb2348` this gate FAILS
+// (jr_author/b1/g_b1_at_base.log).
 func TestJRBAResidualKeepsItsIdentityAcrossTheStage(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: five arms over renamed relations")

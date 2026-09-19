@@ -13,27 +13,26 @@ import (
 // AN OUTER JOIN'S ON RESIDUAL READS THE MASK, NOT THE STORED VALUE — on all
 // nine doors (arc JR, #1153).
 //
-// This arc makes an ON clause EVALUATE a general expression over a relation's
-// columns at the join, per probe row against each build candidate. That is a
-// new predicate site over a policed relation, and a predicate site is where a
-// mask has to be read instead of the value the policy hides: the join's ROW
-// SET is arithmetic on whatever the residual read. A residual reading the
-// stored column would disclose it WITHOUT EVER PUBLISHING IT — a predicate over
-// a column masked to 0 answers "which rows are negative" in the shape of which
-// probe rows came back padded, and no leak test over the returned VALUES can
-// see that.
-//
-// So each cell asserts the ANSWER, not only the absence of a true value. The
+// This arc makes an ON clause EVALUATE a general expression at the join, per
+// probe row against each build candidate. That is a new predicate site over a
+// policed relation, and a predicate site is where a mask has to be read instead
+// of the value the policy hides: the join's ROW SET is arithmetic on whatever
+// the residual read. A residual reading the stored column would disclose it
+// WITHOUT EVER PUBLISHING IT — a predicate over a column masked to 0 answers
+// "which rows are negative" in the shape of which probe rows came back padded,
+// and no leak test over the returned VALUES can see that.
+
+// So each cell asserts the ANSWER, not only the absence of a true value: the
 // mask's answer is written beside the STORED answer the same query gives an
-// unpoliced identity, and they differ in every cell: a residual reading the
-// stored column fails on the first door.
+// unpoliced identity, and the two differ in every cell, so a residual reading
+// the stored column fails on the first door.
 //
-// EVERY CELL IS A REAL RESIDUAL. A conjunct that names only the NULL-SUPPLYING
-// side of an outer join has a better home — `pushdownPredicates` puts it in
-// that side's scan — so a cell spelled that way would gate the SCAN's masking
-// and not this arc's seam at all. The LEFT cells are therefore CROSS-SIDE
-// (they name the probe too), and the RIGHT and FULL cells name the PRESERVED
-// side, which cannot be pushed anywhere.
+// EVERY CELL IS A REAL RESIDUAL. A conjunct naming only the NULL-SUPPLYING side
+// of an outer join has a better home — `pushdownPredicates` puts it in that
+// side's scan — so a cell spelled that way would gate the SCAN's masking and
+// not this seam. The LEFT cells are therefore CROSS-SIDE (they name the probe
+// too), and the RIGHT and FULL cells name the PRESERVED side, which cannot be
+// pushed anywhere.
 //
 // THE FOUR DAG DOORS DIVERGE, and the divergence is PRE-EXISTING and is not a
 // disclosure. See jrPolicyDAGDoors.
@@ -193,26 +192,21 @@ func TestJRAnOuterJoinResidualOverAPolicedColumnReadsTheMask(t *testing.T) {
 // the answer with the RESIDUAL ABSENT, not the answer the mask gives.
 //
 // PRE-EXISTING and `distributed` under the arm rule. Two mechanisms sit behind
-// it, and both are visible with no residual in the query at all:
-//
-//   - A policy-rewritten predicate over the masked column is not applied on
-//     these doors. At 563aa517, `LEFT JOIN e7bal b ON o.id = b.id AND b.bal < 0`
-//     — arithmetic, which the residual evaluator of the day could evaluate —
-//     already answered "every candidate matched" here while the five
-//     single-process doors answered the mask's "every probe row padded".
-//   - The RIGHT/FULL unmatched FLUSH publishes NULL for the build columns on
-//     these doors. `RIGHT JOIN e7bal b ON o.id = b.id`, with no residual and
-//     nothing for a policy to rewrite in the ON clause, answers
-//     `a=NULL|c=NULL` for the five unmatched build rows here and
-//     `a=NULL|c=4..8` on the single-process doors — at 563aa517 as well.
+// it, both visible with no residual in the query at all. A policy-rewritten
+// predicate over the masked column is not applied here: at 563aa517,
+// `LEFT JOIN e7bal b ON o.id = b.id AND b.bal < 0` already answered "every
+// candidate matched" on these doors while the five single-process doors
+// answered the mask's "every probe row padded". And the RIGHT/FULL unmatched
+// FLUSH publishes NULL for the build columns here — `RIGHT JOIN e7bal b ON
+// o.id = b.id`, nothing for a policy to rewrite, answers `a=NULL|c=NULL` for
+// the five unmatched build rows against `a=NULL|c=4..8` single-process, at
+// 563aa517 as well.
 //
 // Neither discloses anything: the pinned answer is measured to EQUAL the same
 // query with its residual removed, which cannot be a function of the value the
-// policy hides. Not chased here (engine-first, Derek 2026-09-16); recorded as a
-// filing candidate in the arc's landing notes.
-//
-// A pin that starts agreeing FAILS — when these doors apply a policed
-// residual, this map is what gets deleted.
+// policy hides. Not chased here (engine-first); filed as a candidate in the
+// arc's landing notes. A pin that starts agreeing FAILS — when these doors
+// apply a policed residual, this map is what gets deleted.
 var jrPolicyDAGDoors = map[string]bool{
 	"embedded/dag":          true,
 	"embedded/dag-shuffled": true,

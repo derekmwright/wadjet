@@ -16,27 +16,21 @@ import (
 // THE ARC JR FIXTURE — an outer join's ON residual, on five arms.
 //
 // Three relations of one shape, so every join kind can be spelled over the
-// same two sides and the empty-side cells differ only in which table the
-// alias names. The ROWS are chosen so that one query exercises every match
-// disposition at once, rather than needing a fixture per disposition:
+// same two sides and the empty-side cells differ only in which table the alias
+// names. The ROWS make one query exercise every match disposition at once:
+// l.id 1 and 2 share key 1 against 101/102 on the build, so one probe row's
+// candidate chain can be PARTIALLY accepted; l.id 3 has one candidate, accepted
+// or rejected whole; l.id 4 has NO candidate and a NULL `n`; l.id 5 has a NULL
+// key, so it is padded on every LEFT/FULL; l.id 6 has a NULL `s`, so a residual
+// over it is UNKNOWN, which REJECTS and pads the probe row rather than dropping
+// it; r.id 105 has no probe partner, for the RIGHT/FULL unmatched flush; r.id
+// 106 has a NULL key and a NULL `s`. jr_e is empty, and is the empty BUILD side
+// and the empty PROBE side of the same query text.
 //
-//	l.id 1, 2   duplicate key 1 on the probe, against 101/102 on the build:
-//	            one probe row's chain can be PARTIALLY accepted.
-//	l.id 3      key 2, one candidate (103) — accepted or rejected whole.
-//	l.id 4      key 3, NO candidate at all, and a NULL `n`.
-//	l.id 5      NULL key: never matches, so it is padded on every LEFT/FULL.
-//	l.id 6      NULL `s`: a residual over it is UNKNOWN, which REJECTS, and
-//	            the probe row is then padded — not dropped.
-//	r.id 105    key 5, no probe partner: the RIGHT/FULL unmatched flush.
-//	r.id 106    NULL key and NULL `s`.
-//
-// jr_e is empty, and is the empty BUILD side and the empty PROBE side of the
-// same query text.
-//
-// PostgreSQL 17.11's answers for every cell were taken from a
-// postgres:17-alpine container standing alone (`--locale=C`, text columns
-// `COLLATE "C"`, since wadjet compares strings by bytes), loaded with exactly
-// these rows; the commands and answers are in the arc's pg_answers.tsv.
+// PostgreSQL 17.11's answers for every cell were taken from a postgres:17-alpine
+// container standing alone (--locale=C, text columns COLLATE "C", since wadjet
+// compares strings by bytes) loaded with exactly these rows; the commands and
+// answers are in the arc's pg_answers.tsv.
 
 const (
 	jrProbeTable = "jr_l"

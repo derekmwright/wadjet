@@ -20,26 +20,23 @@ import (
 //
 // The arc changes which build rows a cross join publishes, and a build row
 // carries its own columns out through the projection. A value oracle cannot
-// see a right value under a wrong OID, so the declaration is read here, in
-// both format codes, over the shape whose row set moved: a filter over a build
-// side that spans three row groups.
-//
-// The relations are `cjw_p(pid)` = {1, 2} and `cjw_b(bid, f, s)` = nine rows
-// written with RowGroupSize 3, `f` true for bid 1,3,4,6,7,9 and `s` one
-// distinct string per row. Three batches, six of nine rows accepted — so a
-// cell's ROWS are the fix's subject and its OIDs are this gate's.
-//
-// At 1c2b4d25 the first two cells' ROWS are wrong in both formats (nine build
-// rows where six were accepted) and their OIDs are unchanged, which is the
-// distinction a wire gate exists to draw: cj_author/gate_cj_wire_at_base_FAILS.log.
-//
+// see a right value under a wrong OID, so the declaration is read here, in both
+// format codes, over the shape whose row set moved: a filter over a build side
+// that spans three row groups. `cjw_p(pid)` = {1, 2} and `cjw_b(bid, f, s)` =
+// nine rows at RowGroupSize 3, `f` true for bid 1,3,4,6,7,9 — three batches,
+// six of nine rows accepted, so a cell's ROWS are the fix's subject and its
+// OIDs are this gate's. At 1c2b4d25 the first two cells' ROWS are wrong in both
+// formats (nine build rows where six were accepted) and their OIDs are
+// unchanged, which is the distinction a wire gate exists to draw:
+// cj_author/gate_cj_wire_at_base_FAILS.log.
+
 // The third cell is a CONTROL and is right at base. Over THESE two relations —
 // a probe of two rows against a build of nine — the planner puts the filtered
-// relation on the `JOIN ... ON <expr>` spelling's LEFT child, which is the
-// PROBE, so its row set is read as it arrives and was never stored. The swap
-// is fixture-dependent rather than a property of the spelling: with a
-// three-row probe over the same build both spellings leave the filtered
-// relation on the build side and both are wrong at base, which is what
+// relation on the `JOIN … ON <expr>` spelling's LEFT child, which is the PROBE,
+// so its row set is read as it arrives and was never stored. The swap is
+// fixture-dependent rather than a property of the spelling: with a three-row
+// probe over the same build both spellings leave the filtered relation on the
+// build side and both are wrong at base, which is what
 // coordinator.TestCJTheBuildRowSetSurvivesTheBatchBoundary's `c_onexpr` cell
 // measures (18 at base where PostgreSQL answers 6). Measured by the round-1
 // review.

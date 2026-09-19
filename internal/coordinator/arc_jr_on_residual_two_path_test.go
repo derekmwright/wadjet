@@ -10,71 +10,58 @@ import (
 
 // ARC JR — AN OUTER JOIN'S ON RESIDUAL, ENUMERATED ONCE, ON FIVE ARMS.
 //
-// #1153  an outer join whose ON holds a function call, a CAST or LIKE was
+// #1153: an outer join whose ON holds a function call, a CAST or LIKE was
+// REFUSED. PostgreSQL evaluates any ON expression for any join kind. An inner
+// join lifts a non-equality conjunct into a filter above the join; an outer
+// join cannot (the padded rows would go with it), so the conjunct is evaluated
+// AT the join, per probe row against each build candidate, and the padding is
+// decided from its result. The evaluator that did that was a second, smaller
+// expression implementation — columns, literals, arithmetic, comparisons — and
+// everything else came back as a plan refusal. It is the engine's own
+// expression compiler now.
 //
-//	REFUSED. PostgreSQL evaluates any ON expression for any join kind. An
-//	inner join lifts a non-equality conjunct into a filter above the join;
-//	an outer join cannot (the padded rows would go with it), so the conjunct
-//	is evaluated AT the join, per probe row against each build candidate,
-//	and the padding is decided from its result. The evaluator that did that
-//	was a second, smaller expression implementation — columns, literals,
-//	arithmetic and comparisons — and everything else came back as a plan
-//	refusal. It is the engine's own expression compiler now.
-//
-// #1178  a BETWEEN of any spelling inside ON was REFUSED, because the ON
-//
-//	clause was split into conjuncts by cutting its rendered text at every
-//	" AND " and BETWEEN carries one. The split is on the AST now.
-//
+// #1178: a BETWEEN of any spelling inside ON was REFUSED, because the clause
+// was split into conjuncts by cutting its rendered TEXT at every " AND " and
+// BETWEEN carries one. The split is on the AST now.
+
 // THE TABLE. {LEFT, RIGHT, FULL, INNER control} × {ON = equality + residual,
-// ON = residual only} × 18 residual spellings, plus a two-residual ON, an
-// empty BUILD side and an empty PROBE side per join kind: 156 cells × 5 arms
-// = 780 (cell, arm) results. The fixture (arc_jr_on_residual_fixture_test.go)
-// puts every match disposition inside each cell — a probe row with no
-// candidate, one whose chain is partially accepted, one whose chain is wholly
-// rejected and is therefore PADDED rather than dropped, duplicate keys on both
-// sides, NULL keys and NULL values on both sides, and a build row no probe row
-// matches for the RIGHT/FULL unmatched flush.
+// ON = residual only} × 18 residual spellings, plus a two-residual ON, an empty
+// BUILD side and an empty PROBE side per join kind: 156 cells × 5 arms = 780
+// (cell, arm) results. The fixture puts every match disposition inside each
+// cell (arc_jr_on_residual_fixture_test.go).
 //
-// WHAT MOVED. At 563aa517, 95 of these 156 cells were a plan REFUSAL and 12
-// answered a WRONG ROW SET in silence: `IS DISTINCT FROM` and `IS NOT DISTINCT
-// FROM` parse to a comparison whose operator the old interpreter's operator
-// switch did not carry, so it returned SQL UNKNOWN for every candidate pair,
-// every candidate was rejected, and a LEFT JOIN answered its whole probe side
-// NULL-padded where PostgreSQL matches. That was on all three outer kinds and
-// on every arm — `engine` under the arm rule. The remaining 49 cells were
-// right at the base and are unchanged here, which is the "no new refusal on a
-// base-right shape" half of the definition of done.
+// WHAT MOVED. At 563aa517, 95 of the 156 cells were a plan REFUSAL and 12
+// answered a WRONG ROW SET in silence: `IS [NOT] DISTINCT FROM` parses to a
+// comparison whose operator the old interpreter did not carry, so it returned
+// UNKNOWN for every candidate pair, every candidate was rejected, and a LEFT
+// JOIN answered its whole probe side NULL-padded where PostgreSQL matches — on
+// all three outer kinds and every arm, `engine` under the arm rule. The other
+// 49 cells were right at the base and are unchanged, which is the "no new
+// refusal on a base-right shape" half of the definition of done.
+
+// THE ORACLE. Every answer is PostgreSQL 17.11's, measured live (--locale=C,
+// COLLATE "C"). Fourteen cells are the one place it cannot be asked directly:
+// it REFUSES `FULL JOIN … ON <non-equi>` for want of an executor, while the
+// join stays DEFINED and definable — `(l LEFT JOIN r ON p) UNION ALL (r WHERE
+// NOT EXISTS (l WHERE p))` — and all fourteen agree with that. The cells are
+// marked `PG refuses`; the superset class is ADR-0012's.
+
+// EXCLUDED DIMENSIONS, and why (the reviewer starts here):
 //
-// THE ORACLE. Every cell's answer is PostgreSQL 17.11's, measured live
-// (`--locale=C`, `COLLATE "C"`). Fourteen cells are the one place PostgreSQL
-// cannot be asked directly: it REFUSES `FULL JOIN ... ON <non-equi>` with
-// "FULL JOIN is only supported with merge-joinable or hash-joinable join
-// conditions". A full outer join is still DEFINED there, and definable —
-// `(l LEFT JOIN r ON p) UNION ALL (r WHERE NOT EXISTS (l WHERE p))` — and all
-// fourteen agree with that. PG-rejects-but-we-answer is the superset class
-// ADR-0012 keeps; the cells are marked `PG refuses` below.
-//
-// EXCLUDED DIMENSIONS, and why (the reviewer starts there):
-//
-//   - NULL ORDERING. Every cell orders by COALESCE(id, -1) so that where a
-//     padded NULL sorts is not one of this table's questions. ADR-0012's
-//     divergence list owns that, and `wadjet` orders it identically anyway.
-//   - THE 22 DATA TYPES. A residual is an EXPRESSION, and which types an
-//     expression may be written over is the expression compiler's question,
-//     not the join's — the combined row this evaluator builds is typed from
-//     the source column's own declaration, so a type it could get wrong is a
-//     type the compiler gets wrong everywhere. `wadjet.TestTypeMatrix*` and
-//     ADR-0024 own that; the ROW-FIELD path through a residual, which IS
-//     join-specific (#769), is pinned in physical's own gate instead.
-//   - SEMI / ANTI joins. Their ON residual is SemiAntiFilter, a different
-//     seam with different unmatched semantics, and neither issue names it.
+//   - NULL ORDERING. Every cell orders by COALESCE(id, -1), so where a padded
+//     NULL sorts is not this table's question; ADR-0012's list owns it.
+//   - THE 22 DATA TYPES. A residual is an EXPRESSION, and the combined row is
+//     typed from the source column's own declaration, so a type this could get
+//     wrong is one the compiler gets wrong everywhere (wadjet.TestTypeMatrix*,
+//     ADR-0024). The ROW-FIELD path, which IS join-specific (#769), is pinned
+//     in physical's own gate.
+//   - SEMI / ANTI joins. Their residual is SemiAntiFilter, a different seam
+//     with different unmatched semantics, and neither issue names it.
 //   - THE WIRE. The padded row's DECLARATION is pgwire's
 //     TestJRThePaddedRowDeclaresItsBuildSideType, on both format codes.
-//   - A SUBQUERY IN ON. Refused, loudly, and named as such by the refusal —
-//     physical.TestBuildJoinResidualFilterRefusesWhatItCannotEvaluate pins
-//     that boundary. Making it evaluable is a different capability (a
-//     per-candidate subquery runner) and is recorded as a residue.
+//   - A SUBQUERY IN ON. Refused loudly and named as such
+//     (physical.TestBuildJoinResidualFilterRefusesWhatItCannotEvaluate).
+//     Making it evaluable needs a per-candidate subquery runner: a residue.
 //
 // A pin that starts agreeing FAILS. Deleting it is the fix's proof.
 func TestJRAOuterJoinOnResidualsAgreeOnFiveArms(t *testing.T) {

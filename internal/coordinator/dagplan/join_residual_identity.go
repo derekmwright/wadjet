@@ -13,36 +13,22 @@ import (
 // names the STAGE publishes, so the residual crosses the stage boundary with
 // its identity (docs/design/window-key-ownership.md).
 //
-// A residual is evaluated AT the join, over the combined probe/build row, and
-// it is the only part of an ON clause that travels to the worker as TEXT. The
-// join's equi-KEYS already make this trip re-spelled — `resolveShuffleKey`
-// walks each key down the arm it belongs to and answers the name the producing
-// stream really carries — but the residual's leaves did not, and a Project
-// emits no stage of its own, so
+// A residual is evaluated AT the join and is the only part of an ON clause
+// that travels to the worker as TEXT. The join's equi-KEYS already make that
+// trip re-spelled (`resolveShuffleKey`); the residual's leaves did not, and a
+// Project emits no stage of its own, so a residual over two RENAMING derived
+// arms reached a fragment whose sides publish the source names. Nothing
+// resolved, the evaluator's unbound slot is SQL NULL, the residual was UNKNOWN
+// for every candidate pair, and a LEFT join answered its whole probe side
+// NULL-padded — in silence, on a shape the base refused loudly.
 //
-//	FROM (SELECT id AS a, k AS kk, s AS ss FROM jr_l) x
-//	LEFT JOIN (SELECT id AS b, k AS kk2, s AS ss2 FROM jr_r) y
-//	  ON x.kk = y.kk2 AND LOWER(y.ss2) = x.ss
-//
-// reached a fragment whose two sides publish `[id k s]` with a residual
-// spelling `y.ss2` and `x.ss`. Neither resolved, the evaluator's unbound slot
-// is SQL NULL, the residual was UNKNOWN for every candidate pair, and the LEFT
-// join answered its whole probe side NULL-padded — six rows where PostgreSQL
-// answers seven, in silence, on a shape the base refused loudly.
-//
-// THE SIDE IS PART OF THE IDENTITY, not just the name. Both references above
-// re-spell to `s`, because both arms select the same source column under
-// different aliases, and a bare `s` in the residual binds PROBE-first — so
-// re-spelling by NAME alone would bind the build's reference to the probe's
-// column, which is the wrong value one operator over. A build-side reference is
-// therefore re-spelled QUALIFIED BY THE STAGE'S OWN BUILD ALIAS, the one the
-// evaluator forces to the build side (`buildAlias`, and the same string the
-// fragment carries as `spec.BuildAlias`); a probe-side one is left bare.
-//
-// A reference neither arm re-spells is left exactly as written: the walk
-// answers the input unchanged when it finds nothing to translate, and a
-// residual over two base tables — every cell of the arc's own corpus — is
-// therefore byte-identical to what it was.
+// THE SIDE IS PART OF THE IDENTITY, not just the name: two arms of one join
+// routinely re-spell to the same source column, and a bare name in the
+// residual binds PROBE-first. A build-side reference is therefore re-spelled
+// QUALIFIED BY THE STAGE'S OWN BUILD ALIAS (`spec.BuildAlias`, the side the
+// evaluator forces); a probe-side one is left bare. A reference neither arm
+// re-spells is left exactly as written, so a residual over two base tables is
+// byte-identical to what it was.
 func (p *StagePlanner) residualWithStageSpellings(node *logical.Node, buildAlias, filter string) string {
 	if filter == "" || node == nil || len(node.Children) != 2 {
 		return filter

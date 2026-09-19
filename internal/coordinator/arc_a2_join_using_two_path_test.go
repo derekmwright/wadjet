@@ -25,34 +25,27 @@ import (
 // end-of-statement guard and was reported as trailing input. The desugaring is
 // `<left>.c = <right>.c` per column, which is what USING means and needs no
 // catalog.
-//
+
 // What this does NOT fix, and refuses instead of answering wrong:
 //
-//   - `SELECT *` over a USING join, WHERE THE MERGE CANNOT BE STATED. Arc PS
-//     merges it in the star expansion, which is the one layer that can read
-//     both arms' column lists (logical.usingJoinStarColumns): the USING
-//     columns once and first, then each arm's remaining columns. It declines
-//     where a reference by name could not name its own column — a relation
-//     publishing one name twice, a chain of USING joins, an arm whose own
-//     list is not knowable here — and the plan is then refused rather than
-//     published unmerged. 0A000.
-//
-//     Arc SR removed one entry from that list: two arms that share a column
-//     name OUTSIDE the USING list are published twice now, which is
-//     PostgreSQL's answer. The decline's premise — that a qualified reference
-//     to such a name binds whichever arm the plan put it on — is false at
-//     563aa517 and the same pair spelled with `ON` proves it (#1177).
-//
+//   - `SELECT *` over a USING join WHERE THE MERGE CANNOT BE STATED. Arc PS
+//     merges it in the star expansion, the one layer that can read both arms'
+//     lists (logical.usingJoinStarColumns), and declines where a reference by
+//     name could not name its own column: a relation publishing one name
+//     twice, a chain of USING joins, an arm whose own list is not knowable
+//     here. 0A000. Arc SR removed one entry from that list — two arms sharing
+//     a name OUTSIDE the USING list publish it twice now, which is
+//     PostgreSQL's answer, and the `ON` spelling of the same pair disproved
+//     the decline's premise (#1177).
 //   - NATURAL JOIN, whose keys ARE the shared columns and so need the catalog
 //     outright. Still refused; its class moves from 42601 to 0A000, because
 //     PostgreSQL answers it and a client is owed "not implemented here".
-//
 //   - A BARE reference to the merged column (`SELECT id FROM a JOIN b USING
 //     (id)`), which resolves through the binder's scope in
 //     internal/planner/physical rather than through the parsed join. 42702.
 //
-// #655 stays open on those. Every expectation below is live
-// PostgreSQL 17's, measured rather than remembered.
+// #655 stays open on those. Every expectation below is live PostgreSQL 17's,
+// measured rather than remembered.
 type a2JoinCell struct {
 	issue, name, sql string
 	want             []string
@@ -148,22 +141,19 @@ func a2JoinCells() []a2JoinCell {
 		// `SELECT *` over a USING join MERGES (arc PS, #655): the USING
 		// columns once and first, then each arm's remaining columns. This
 		// fixture used to be the one shape the merge declined — zzp and zzj
-		// BOTH publish `d92` outside the USING list, and the decline rested
-		// on the claim that a qualified reference to a name both arms publish
-		// "binds whichever side the plan put it on" (the #706 family read
-		// through a star, #1177). Arc SR measured that claim out: the same
-		// pair spelled with `ON` answers PostgreSQL's values and BOTH of its
-		// DECIMAL declarations on five arms, so the decline refused a
-		// statement PostgreSQL answers. The tail is published twice now.
+		// BOTH publish `d92` outside the USING list — and arc SR measured the
+		// decline's premise out: the same pair spelled with `ON` answers
+		// PostgreSQL's values and BOTH DECIMAL declarations on five arms, so
+		// the decline refused a statement PostgreSQL answers (#1177). The tail
+		// is published twice now.
 		//
-		// zzp and zzj are the discriminating pair for it — `d92` is
-		// DECIMAL(9,2) on one side and DECIMAL(18,4) on the other, with
-		// values that differ per row — so a reference bound to the wrong arm
-		// renders differently. That is also why `na2Run` had to start reading
-		// RowValues: keyed by NAME, both `d92` cells rendered as the LAST
-		// one and the cell compared two copies of one value.
-		// coordinator.TestArcPSJoinUsingStarMergesOnEveryArm carries the
-		// merge over two relations whose other columns differ.
+		// zzp/zzj is the discriminating pair — `d92` is DECIMAL(9,2) on one
+		// side and DECIMAL(18,4) on the other, values differing per row — so a
+		// reference bound to the wrong arm renders differently. That is also
+		// why `na2Run` reads RowValues: keyed by NAME, both `d92` cells
+		// rendered as the LAST one and the cell compared two copies of one
+		// value. coordinator.TestArcPSJoinUsingStarMergesOnEveryArm carries
+		// the merge over two relations whose other columns differ.
 		{issue: "#655", name: "star_over_using_publishes_a_shared_tail_name_twice",
 			sql: `SELECT * FROM zzp JOIN zzj USING (id) ORDER BY id`,
 			want: []string{

@@ -13,64 +13,35 @@ import (
 // THE BUILD'S ROW SET SURVIVES THE BATCH BOUNDARY (#1189), on five arms.
 //
 // A predicate over one side of a cross join is PUSHED DOWN onto that side's
-// scan — `EXPLAIN SELECT … FROM c2 CROSS JOIN c1 WHERE c1.f` plans
-// `Join: cross join` over `Filter: [c1.f]` over `Scan: c1` — so the question
-// this table asks is not whether a filter above a join runs, but whether the
-// rows it rejected are still in the build relation when the probe walks it.
-// At 1c2b4d25 they were, as soon as the build arrived in more than one batch.
+// scan — `EXPLAIN` plans `Join: cross join` over `Filter` over `Scan` — so the
+// question is not whether a filter above a join runs, but whether the rows it
+// rejected are still in the build relation when the probe walks it. At
+// 1c2b4d25 they were, as soon as the build arrived in more than one batch.
 //
-// The table varies four things against each other, and what each one is for:
-//
-//	A  the build's BATCH LAYOUT — one row, three files, three row groups in
-//	   one file, and the 2047/2048/2049/4097 crossing of
-//	   batch.DefaultBatchSize. This is the dimension the defect turns on, and
-//	   cj_b1/cj_b2047/cj_b2048 are the controls that were already right.
-//	B  the PREDICATE — a bare boolean, a comparison, a comparison that yields
-//	   UNKNOWN over a NULL, an IN list, a BETWEEN, IS NULL, an OR, a predicate
-//	   over the PROBE side instead, and one over both. A predicate over the
-//	   probe is the other control: a probe batch is consumed as it arrives and
-//	   never stored, so its row set was never at risk.
-//	C  the SHAPE above the join — a comma join, an INNER join whose ON is an
-//	   EXPRESSION (which the planner spells as this same cross join with the
-//	   condition lifted into a filter, ADR-0006's routed-probe amendment), a
-//	   LEFT join whose ON is non-equi (arc JR's residual path, which must be
-//	   byte-identical to base), and a cross join under an aggregate, a GROUP
-//	   BY, a DISTINCT, an ORDER BY LIMIT and a window.
-//	D  which relation the planner BUILDS, forced by writing the big or the
-//	   filtered relation first, plus the cell where BOTH sides are filtered
-//	   and both span batches.
-//	E  the shape crossed with the 2048-row boundary, because a shape that
-//	   reads the join's output through a breaker could mask a wrong row set
-//	   that a bare COUNT shows.
-//
-// THIRTEEN CELLS PASS AT 1c2b4d25, and each is a CONTROL rather than a gap.
-// They are what makes the other thirty-two evidence:
-//
-//	a_b1, a_b2047, a_b2048          a build of ONE batch: nothing to merge
-//	b_probecmp, d_probe_filtered    the filter is over the PROBE side, which
-//	                                is consumed as it arrives and never stored
-//	c_left, c_leftresid             arc JR's residual path, which must be —
-//	                                and is — byte-identical to base
-//	d_filtered_first, d_big_first,  the filtered relation is the join's LEFT
-//	d_left_is_build(_sum)           input. Measured with EXPLAIN
-//	                                (cj_author/replay/sides.sql): the planner
-//	                                leaves a cross join's children as written
-//	                                and builds the RIGHT one, so a filtered
-//	                                LEFT input is the probe. The other
-//	                                assignment — the filtered side as the
-//	                                build with the sides swapped — is driven
-//	                                at the operator in
-//	                                exec.TestAJoinsBuildOwnsTheRowSetItStores.
-//	e_between4097, e_inlist2049     the predicate PRUNES row groups down to
-//	                                one, so the build arrives in one batch
-//	                                after all. e_between_wide and e_inlist4097
-//	                                are the same two predicates widened to
-//	                                span row groups, and both fail at base.
+// Four dimensions vary against each other: the build's BATCH LAYOUT (one row,
+// three files, three row groups in one file, and 2047/2048/2049/4097 across
+// batch.DefaultBatchSize — the dimension the defect turns on); the PREDICATE
+// (bare boolean, comparison, UNKNOWN over a NULL, IN, BETWEEN, IS NULL, OR);
+// the SHAPE above the join (comma join, an INNER join whose ON is an
+// EXPRESSION — the same cross join with the condition lifted, ADR-0006 — a
+// LEFT join with a non-equi ON, which is arc JR's residual path, and a breaker
+// above the join: aggregate, GROUP BY, DISTINCT, ORDER BY LIMIT, window); and
+// which side the planner BUILDS, forced by the FROM order and measured with
+// EXPLAIN (cj_author/replay/sides.sql — a cross join's children are left as
+// written and the RIGHT one is built, so the other assignment is driven at the
+// operator, in exec.TestAJoinsBuildOwnsTheRowSetItStores).
+
+// Thirteen cells pass at 1c2b4d25 and each is a CONTROL, not a gap: a build of
+// ONE batch (nothing to merge), a filter over the PROBE side (consumed on
+// arrival, never stored), JR's residual path (which must be byte-identical to
+// base), the cells whose filtered relation is the join's probe, and two whose
+// predicate prunes the build back to one row group — widened in
+// e_between_wide and e_inlist4097, which both fail at base.
 //
 // Every `want` is PostgreSQL 17.11's answer over the same rows
-// (cj_author/pg/pg.tsv). No cell is pinned: the three DAG arms answer
-// PostgreSQL's rows at 1c2b4d25 as well, which is why #1189 is labelled
-// `engine` and not `distributed`.
+// (cj_author/pg/pg.tsv). No cell is pinned: the three DAG arms answer those
+// rows at 1c2b4d25 as well, which is why #1189 is labelled `engine` and not
+// `distributed`.
 func TestCJTheBuildRowSetSurvivesTheBatchBoundary(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: five arms over seven build layouts")

@@ -33,7 +33,7 @@ import (
 // receiver is the same operation. docs/design/seam-narrowing-measurement.md
 // records the same set keyed by the receiver expression's type instead, which
 // spells six of these twice and so reports 215.
-//
+
 // 209 → 210 (2026-09-18, arc SR, #1079): `PublishedOutputProjectionNode`, the
 // question "whose names does the CLIENT read", which a set operation answers
 // one node lower than `FindOutputProjectionNode` does. The alternative was to
@@ -41,6 +41,7 @@ import (
 // ADR-0026 §8b's rule on the AGPL side of the seam — and a copy of a naming
 // rule in the distributed planner is how the two engines drift apart (§2b).
 // One member is the smaller cost.
+//
 // 210 → 214 (2026-09-19, arc JR): `JoinResidualUnresolved`,
 // `RefuseUnresolvedJoinResidual`, `PlanContext.ParseJoinCondExpr` and
 // `PlanContext.RefuseJoinResidual` — the outer-join ON residual's refusal

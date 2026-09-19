@@ -6,19 +6,18 @@ package pgwire
 // zero-row join and over a set operation.
 //
 // A value oracle cannot see a right value under a wrong label or a wrong OID
-// (ADR-0012), and a client keys on LABELS — JDBC by label, DataGrip, Superset.
-// This is the door that sees both halves of ADR-0026 §2's pair.
+// (ADR-0012), and a client keys on LABELS — JDBC, DataGrip, Superset. This is
+// the door that sees both halves of ADR-0026 §2's pair. Every want below is
+// PostgreSQL 17.11's own RowDescription for the same statement over the same
+// rows, read off the READER with pgconn against a live server.
+
+// What this arc moved:
 //
-// Every want below is PostgreSQL 17.11's own RowDescription for the same
-// statement over the same rows, read off the READER with pgconn against a
-// live server (the log names the command). What this arc moved:
-//
-//   - the `using_*` cells over a SELF JOIN were REFUSED at 563aa517 (0A000,
-//     "the arms' own column lists could not both be read here"), because the
-//     USING merge declined whenever the two arms shared a column name outside
-//     the USING list. The `ctl_on_*` cells are the same pair spelled with
-//     `ON`, which already answered — which is what says the decline's premise
-//     was false (#1177).
+//   - the `using_*` cells over a SELF JOIN were REFUSED at 563aa517 (0A000),
+//     because the USING merge declined whenever the two arms shared a column
+//     name outside the USING list. The `ctl_on_*` cells are the same pair
+//     spelled with `ON`, which already answered — which is what says the
+//     decline's premise was false (#1177).
 //   - the set-operation cells declared the leftmost arm's RESOLUTION spelling
 //     (`total + 1`, `cast(total as varchar)`) where PostgreSQL declares
 //     `?column?` and `total` (#1079).

@@ -13,41 +13,33 @@ import (
 // NAME twice, where one of the two is POLICED.
 //
 // COMMON.md requires it because this arc rewrites what a star PUBLISHES over a
-// relation, in three places where a security projection could be bypassed:
-//
-//   - the `JOIN … USING` merge now states its list wherever the two arms share
-//     a column name OUTSIDE the USING list. That decline was the ONLY thing
-//     standing between a star over `e7emp a JOIN e7emp b USING (id)` and an
-//     answer, so every one of these cells was a plan-time refusal before this
-//     arc and is a real published relation after it — eleven columns, five of
-//     them from each policed arm.
-//   - a SET OPERATION now carries a published name to the client on all five
-//     arms, through the sink on the single-process path and through a new
-//     gather rename on the DAG. A rename list the gather applies is also a
-//     list it DROPS by, so a widened one would publish a column the security
-//     projection removed.
-//   - a REFERENCE into a block that publishes one name twice is 42702 now.
-//     A refusal is a read too (#994): it must not be reachable only after the
-//     policed column has been read, and it must not name what it refuses.
-//
+// relation, in three places where a security projection could be bypassed. The
+// `JOIN … USING` merge now states its list wherever the two arms share a name
+// OUTSIDE the USING list — that decline was the ONLY thing standing between a
+// star over `e7emp a JOIN e7emp b USING (id)` and an answer, so every cell here
+// was a plan-time refusal before the arc and is a real published relation after
+// it. A SET OPERATION now carries a published name to the client on all five
+// arms, through a new gather rename on the DAG, and a rename list the gather
+// applies is also a list it DROPS by. And a REFERENCE into a block publishing
+// one name twice is 42702 now — a refusal is a read too (#994): it must not be
+// reachable only after the policed column has been read, and must not name
+// what it refuses.
+
 // THE PROPERTY THE BRIEF NAMED IS "the mask stays on the arm that OWNS it",
-// and round 1 of the review measured that the first version of this table
-// could not see it: every `using_*` cell joined a policed relation to ITSELF,
-// where a mask that migrated from one arm to the other renders identically,
-// and the one mixed cell shared nothing but the USING key. The `armmask_*`
-// cells below are the discriminating dimension — two columns of ONE name, one
-// of them policed and the other not, in both written orders — and each one
-// names the value that must appear on EACH side. A mask that migrated arms
-// changes one of those two, which is a failure; the mutation proof is in the
-// arc's notes.
+// and round 1 measured that the first version of this table could not see it:
+// every `using_*` cell joined a policed relation to ITSELF, where a mask that
+// migrated between arms renders identically. The `armmask_*` cells are the
+// discriminating dimension — two columns of ONE name, one policed and one not,
+// in both written orders — and each names the value that must appear on EACH
+// side, so a migrated mask changes one of the two.
 //
-// The assertion per cell is fourfold — no TRUE value of a masked column
-// reaches any door, no DENIED column appears in any output, a statement naming
-// a denied column REFUSES, and a cell that names its per-arm values gets them
-// POSITIONALLY (`pmResult.cells`), because two columns of one name cannot both
-// be read out of a row keyed by name. The whole table asserts a NON-VACUOUS
-// count of (cell, door) pairs that actually ANSWERED, so a change that turns
-// every shape into a refusal cannot pass by emptiness.
+// The assertion per cell is fourfold: no TRUE value of a masked column reaches
+// any door, no DENIED column appears in any output, a statement naming a denied
+// column REFUSES, and a cell naming its per-arm values gets them POSITIONALLY
+// (`pmResult.cells`), because two columns of one name cannot both be read out
+// of a row keyed by name. The table asserts a NON-VACUOUS count of (cell, door)
+// pairs that actually ANSWERED, so a change turning every shape into a refusal
+// cannot pass by emptiness.
 func TestArcSRAStarOverAPolicedArmNeverPublishesTheOtherArmsValue(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster and three servers")

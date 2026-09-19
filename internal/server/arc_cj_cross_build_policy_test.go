@@ -16,33 +16,29 @@ import (
 // all nine doors (arc CJ, #1189).
 //
 // A predicate over one side of a cross join is pushed onto that side's SCAN,
-// and a scan under a policy is exactly where the mask and the row filter live
+// and a scan under a policy is where the mask and the row filter live
 // (ADR-0033). The arc's defect was that the rows such a filter REJECTED came
 // back as live build rows once the build spanned more than one batch — and
-// under a policy the rejected rows include the ones the POLICY removed. This
-// is therefore a disclosure shape and not only a wrong count: at 1c2b4d25, a
-// clerk whose row filter leaves three of twelve employees reads all twelve
-// through `e7other CROSS JOIN e7emp`.
-//
-// The fixture makes both readings VISIBLE, which is what a policy gate needs:
-//
-//   - `bal` is masked to 0 and `ssn` to '***', so a predicate written against
-//     the MASK (`b.bal = 0`) accepts every row while the same predicate
-//     against the STORED value accepts none. `stored` beside each cell is
-//     what an unpoliced identity gets, and it differs from `want` in every
-//     mask cell — a cell where the two agreed could not tell a mask read from
-//     a value read.
-//   - each cell also carries `leaked`, the answer the ROW SET would have if
-//     the build republished the rows the filter rejected. It differs from
-//     `want` in every cell, which is what makes this gate fail at base rather
-//     than pass over an unfixed defect.
+// under a policy the rejected rows include the ones the POLICY removed. So
+// this is a disclosure shape, not only a wrong count: at 1c2b4d25 a clerk
+// whose row filter leaves three of twelve employees reads all twelve through
+// `e7other CROSS JOIN e7emp`.
+
+// The fixture makes both readings VISIBLE, which is what a policy gate needs.
+// `bal` is masked to 0 and `ssn` to '***', so a predicate written against the
+// MASK (`b.bal = 0`) accepts every row while the same predicate against the
+// STORED value accepts none; `stored` beside each cell is what an unpoliced
+// identity gets, and it differs from `want` in every mask cell — a cell where
+// the two agreed could not tell a mask read from a value read. Each cell also
+// carries `leaked`, the row set the build would republish if it kept the
+// filter's rejects; it differs from `want` in every cell, which is what makes
+// this gate fail at base rather than pass over an unfixed defect.
 //
 // e7emp is written with RowGroupSize 4 over twelve rows and e7bal over eight,
 // so both builds arrive in more than one batch on the single-process doors:
 // the condition the defect needs is present, deliberately, in the fixture
-// these cells already use.
-//
-// At 1c2b4d25 this gate FAILS: cj_author/gate_cj_policy_at_base_FAILS.log.
+// these cells already use. At 1c2b4d25 this gate FAILS
+// (cj_author/gate_cj_policy_at_base_FAILS.log).
 func TestCJALiftedFilterOverAPolicedBuildPublishesOnlyThePolicysRows(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster and three servers")

@@ -552,6 +552,11 @@ func subtreeJoinCarriesUsing(input *Node) bool {
 // TWICE, which is a column the statement does not have. Both planner entries
 // raise it, the way both raise RefuseUnappliedColumnAliasLists.
 //
+// BOUNDARY: the marker this reads is set where the star's own pass SEES a
+// USING list under it, so an arm whose list that pass never enumerates — a
+// LATERAL body — does not reach the refusal and publishes the joined column
+// twice. That residue is on docs/postgres-differences.md with its mechanism.
+//
 // 0A000 and not 42601: PostgreSQL ANSWERS this statement. The class a client is
 // owed is "this engine does not implement it here", not "your SQL is wrong".
 func RefuseUnmergedJoinUsingStar(n *Node) error {

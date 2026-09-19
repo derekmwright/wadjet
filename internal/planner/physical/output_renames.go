@@ -166,29 +166,22 @@ func findOutputProjectionNode(n *logical.Node) *logical.Node {
 // "which projection's names does the CLIENT read", which a SET OPERATION
 // answers one node lower.
 //
-// A set operation's result columns are its LEFTMOST arm's — ADR-0026 §8b, and
-// PostgreSQL's own rule — so the arm's projection is where the operation's
-// PUBLISHED names live (§2's pair: `SELECT id, g+1 FROM shp UNION ALL SELECT
-// id, g+2 FROM shp` publishes `id, ?column?`). findOutputProjectionNode
-// answers nil for a set-operation root, so nothing applied the published half
-// and the operation went out under the arm's RESOLUTION spelling — `g + 1`,
-// `count(*)`, `cast(g as varchar)` — on every arm and in RowDescription, for
-// the spelling PostgreSQL publishes `?column?`, `count` and `g` (#1079; the
-// derived-table and CTE spellings of the same statement were right, which is
-// how it survived: only the set operation reaches this node).
+// A set operation's result columns are its LEFTMOST arm's (ADR-0026 §8b, and
+// PostgreSQL's own rule), so that arm's projection holds the operation's
+// PUBLISHED names. findOutputProjectionNode answers nil for a set-operation
+// root, so nothing applied the published half and the operation went out under
+// the arm's RESOLUTION spelling — `g + 1`, `count(*)`, `cast(g as varchar)` —
+// on every arm and in RowDescription, where PostgreSQL publishes `?column?`,
+// `count` and `g` (#1079).
 //
-// It descends ONLY to state the names. findOutputProjectionNode keeps its own
-// answer for every consumer that asks where the pipeline's output projection
-// IS — the gather's rename target, the distinct dedup, the stage projection —
-// because a set operation's arms each have one and the operation has none.
-// The walk carries NO hop bound. Every iteration descends to a CHILD of the
-// node it just read, so it terminates on a finite tree, and a bound is
-// reachable with ordinary SQL: a LEFT-DEEP chain of set operations costs one
-// hop per arm, so at eight hops `SELECT id, total+1 FROM t UNION ALL …`
-// answered nil again from the ninth arm on — the eighth under an `ORDER BY` —
-// and published the arm's RESOLUTION spelling, which is the divergence #1079
-// closes. Measured: nine arms declared `total + 1` on all five arms and in
-// RowDescription where PostgreSQL 17.11 declares `?column?`.
+// It descends ONLY to state the names: findOutputProjectionNode keeps its own
+// answer for every consumer that asks where the output projection IS (the
+// gather's rename target, the distinct dedup, the stage projection). The walk
+// carries NO hop bound, and must not: every iteration descends to a CHILD of
+// the node it just read, so it terminates on a finite tree, while a bound is
+// reachable with ordinary SQL — a left-deep chain of set operations costs one
+// hop per arm, and at eight hops the ninth arm published the resolution
+// spelling again.
 func publishedOutputProjectionNode(n *logical.Node) *logical.Node {
 	for n != nil {
 		switch n.Type {

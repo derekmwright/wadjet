@@ -15,39 +15,25 @@ import (
 )
 
 // THE ARC CJ FIXTURE — a filter over a build side that spans more than one
-// BATCH, on five arms.
+// BATCH, on five arms. The LAYOUT is the dimension #1189 turns on: a build
+// side arrives as one batch per ROW GROUP, and the defect needs two of them.
 //
-// One probe relation of three rows, and seven build relations that differ
-// ONLY in how their rows are laid out on storage, because the layout is the
-// dimension #1189 turns on: a build side arrives as one batch per ROW GROUP,
-// and the defect needs two of them.
-//
-//	cj_b1     1 row, one file           — one batch; the control that was
-//	                                      already right at 1c2b4d25
-//	cj_b3f    9 rows, THREE files       — three batches
-//	cj_brg    9 rows, one file, rg 3    — three batches from ONE file, the
-//	                                      same rows as cj_b3f, so a cell that
-//	                                      answers differently between them
-//	                                      names the file boundary rather than
-//	                                      the batch boundary
-//	cj_b2047  2047 rows, rg 2048        — one batch (the boundary from below)
-//	cj_b2048  2048 rows, rg 2048        — one batch (the boundary)
-//	cj_b2049  2049 rows, rg 2048        — two batches (the boundary from above)
-//	cj_b4097  4097 rows, rg 2048        — three batches
+// Seven builds differing only in layout: cj_b1 (1 row, one file — the control
+// that was already right at 1c2b4d25); cj_b3f (9 rows, THREE files) beside
+// cj_brg (the same 9 rows in ONE file at rg 3), so a cell that answers
+// differently between the two names the FILE boundary rather than the batch
+// boundary; and cj_b2047 / cj_b2048 / cj_b2049 / cj_b4097 at rg 2048 — one,
+// one, two and three batches, the batch boundary from below, at and above.
 //
 // The nine-row builds carry one row of each disposition a predicate can meet:
+// f is TRUE at bid 1,3,4,6,7,9 and FALSE at 2,5,8; n is NULL at bid 4 and 8,
+// so `n > k` is UNKNOWN and REJECTS there; s is nine distinct strings, for an
+// IN list and a DISTINCT.
 //
-//	bid 1,3,4,6,7,9  f TRUE     bid 2,5,8  f FALSE
-//	bid 4 and 8      n NULL, so `n > k` is UNKNOWN there and REJECTS
-//	s                nine distinct strings, for an IN list and a DISTINCT
-//
-// Every `want` below is PostgreSQL 17.11's own answer over exactly these
-// rows, transcribed from a postgres:17-alpine container standing alone
-// (`--locale=C`, text columns `COLLATE "C"`, since wadjet compares strings by
-// bytes). The transcript, the loader and the cell texts it was driven with
-// are cj_author/pg/ (pg.tsv, run_pg.py, cells.py).
-//
-// At 1c2b4d25 this gate FAILS: cj_author/gate_cj_table_at_base_FAILS.log.
+// Every `want` below is PostgreSQL 17.11's own answer over exactly these rows,
+// transcribed from a postgres:17-alpine container standing alone (--locale=C,
+// text columns COLLATE "C", since wadjet compares strings by bytes):
+// cj_author/pg/. At 1c2b4d25 this gate FAILS, cj_author/gate_cj_table_at_base_FAILS.log.
 
 func cjSchema() parquet.Schema {
 	return parquet.Schema{Columns: []parquet.Column{

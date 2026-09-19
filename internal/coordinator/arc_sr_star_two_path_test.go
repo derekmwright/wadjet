@@ -15,9 +15,9 @@ import (
 // this fixture.
 //
 // Arc O1 settled the ORDER a bare star publishes (§9: the FROM clause's arms,
-// left arm first) and arc O2 settled what a derived BLOCK publishes (§9: its
-// visible list, under `StarColumn{Resolve, Publish}`). This table is the same
-// rule's remaining faces, enumerated once:
+// left arm first) and arc O2 what a derived BLOCK publishes (§9: its visible
+// list, under `StarColumn{Resolve, Publish}`). This table is the same rule's
+// remaining faces, enumerated once:
 //
 //	{`*`, `t.*`, `*` beside an item, `t.*, u.*`} ×
 //	{base×base, derived×derived, three-way, four-way, self-join, set-op arm,
@@ -26,35 +26,32 @@ import (
 //	{value, declared name, declared (p,s), row order, zero-row declaration} ×
 //	{single, spilled512k, dag, dag-shuffled, dag-morsel4}
 //
-// zzp/zzj is the discriminating pair and that is why the table is built on it:
-// its two arms share BOTH column names and declare `d92` at two different
-// scales, so a reference bound to the wrong arm shows up as a wrong VALUE and
-// a wrong DECLARATION at once. psa/psb share exactly the join key and nothing
-// else — the control that says a cell can fail.
-//
+// zzp/zzj is the DISCRIMINATING pair: its two arms share BOTH column names and
+// declare `d92` at two different scales, so a reference bound to the wrong arm
+// is a wrong VALUE and a wrong DECLARATION at once. psa/psb share exactly the
+// join key and nothing else — the control that says a cell can fail.
+
 // What this arc changed, and the cell that fails without it:
 //
 //   - #1177 / the USING merge's shared-tail-name decline. `usingJoinStarColumns`
-//     refused (0A000) whenever the two arms shared a column name outside the
-//     USING list, on the claim that a qualified reference to such a name
-//     "binds one of them wherever the plan put it" — the #706 family read
-//     through a star. Measured over this fixture at 563aa517 the claim is
-//     FALSE: the `on/*` cells, which are the same pair spelled with `ON`,
-//     answer PostgreSQL's values and both of its DECIMAL declarations on every
-//     arm. Every `using/*` cell over zzp/zzj was a refusal at base.
-//   - #1079 / the set operation's published names. A set operation's result
-//     columns are its LEFTMOST arm's (ADR-0026 §8b) and the PUBLISHED half of
-//     each was applied by nobody: `findOutputProjectionNode` answers nil for a
-//     set-op root, so the operation went out under the arm's RESOLUTION
-//     spelling — `total + 1`, `count(*)`, `cast(total as varchar)` — on all
+//     refused (0A000) whenever the arms shared a name outside the USING list,
+//     on the claim that a qualified reference "binds one of them wherever the
+//     plan put it". Measured at 563aa517 the claim is FALSE: the `on/*` cells,
+//     the same pair spelled with `ON`, answer PostgreSQL's values and both
+//     DECIMAL declarations on every arm. Every `using/*` cell over zzp/zzj was
+//     a refusal at base.
+//   - #1079 / the set operation's published names. Its result columns are its
+//     LEFTMOST arm's (ADR-0026 §8b) and the PUBLISHED half was applied by
+//     nobody, because `findOutputProjectionNode` answers nil for a set-op root
+//     — so the operation went out under the arm's RESOLUTION spelling on all
 //     five arms and in RowDescription. The `naming/*-set-op-*` cells failed at
-//     base; the derived-table and CTE spellings of the same statement were
-//     already right, which is how it survived.
-//   - #1094 / a reference into a block that publishes one name twice. Such a
-//     block is a legal relation and a star over it answers both columns BY
-//     POSITION, but a REFERENCE names neither and PostgreSQL raises 42702.
+//     base; the derived-table and CTE spellings were already right, which is
+//     how it survived.
+//   - #1094 / a reference into a block publishing one name twice. The block is
+//     a legal relation and a star over it answers both columns BY POSITION, but
+//     a REFERENCE names neither and PostgreSQL raises 42702.
 //     `dupname/a-reference-into-the-block` ANSWERED the first column at base.
-//
+
 // #1164, #1001, #1078, #1097 and #1124 are CLOSED BY MEASUREMENT: their cells
 // agree at 563aa517 (arcs O1, O2 and R2 closed them without naming them) and
 // are carried here so the agreement is gated rather than assumed.
@@ -404,28 +401,22 @@ func srStarCases() []c1Case {
 		// §9's decline list — its subtree carries the correlation slot the
 		// join drops (§3c) — so the star is not expanded and reads the JOIN
 		// OPERATOR's stream, where `joinOutputSchemaWithMapping` qualifies the
-		// duplicate `id` by its owning alias. That is the NAME half:
-		// PostgreSQL publishes the column's own `id`, the two single-process
-		// arms publish `l.id`, the three DAG arms publish `i.id` — the body's
-		// INNER SCAN spelling, because a decorrelated body's Project emits no
-		// stage (ADR-0026 §8j, #1126).
+		// duplicate `id` by its owning alias: PostgreSQL publishes `id`, the
+		// two single-process arms `l.id`, the three DAG arms `i.id` (the
+		// body's inner-scan spelling, because a decorrelated body's Project
+		// emits no stage — ADR-0026 §8j, #1126).
 		//
-		// The DAG pins below are NOT that. They are a per-arm `distributed`
-		// pin over a wrong ROW ORDER, and the mechanism is #1126's family one
-		// consumer over: `ORDER BY o.id, l.id` is a TOTAL key over this
-		// fixture, and on the three DAG arms the secondary term `l.id` binds
-		// the OUTER relation's `id` — the qualifier strip adjudicating where
-		// corollary 2's precondition fails, because the DAG's join publishes
-		// the body's inner-scan spelling and `l.id` misses it exactly
-		// (ADR-0026 §8j's LATERAL column, five consumers × three DAG arms).
-		// So every row of one order carries the same key and the rows come
-		// back in the arm's own sequence. The single and spilled arms assert
-		// PostgreSQL 17.11's SEQUENCE, row for row, which is what makes the
-		// pinned arms a measured divergence rather than an unordered compare.
-		// PRE-EXISTING (identical at 563aa517 and at c393cfaa), `distributed`
-		// by the arm rule, not this arc's to chase; the review's round-1 probe
-		// isolated it with no star in the statement at all.
-		// PG: cols=[id:INT64 customer:STRING total:FLOAT64 id:INT64 amount:FLOAT64] rows=4 1|Alice|150|1|50 · 1|Alice|150|2|100 · 2|Bob|200|3|75 · 2|Bob|200|4|125
+		// The DAG pins below are NOT that: they are a per-arm `distributed`
+		// pin over a wrong ROW ORDER, one consumer over. `ORDER BY o.id, l.id`
+		// is a TOTAL key here, and on the DAG arms the secondary term binds the
+		// OUTER relation's `id` (the qualifier strip, where corollary 2's
+		// precondition fails), so every row of one order carries the same key
+		// and the rows come back in the arm's own sequence. The single and
+		// spilled arms assert PostgreSQL 17.11's SEQUENCE row for row, which is
+		// what makes the pinned arms a measured divergence rather than an
+		// unordered compare. PRE-EXISTING (identical at 563aa517 and c393cfaa),
+		// `distributed` by the arm rule; the review's round-1 probe isolated it
+		// with no star in the statement at all.
 		{
 			name: "lateral/a-star-over-a-lateral-arm",
 			sql:  "SELECT * FROM lat_ord o, LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) l ORDER BY o.id, l.id",
