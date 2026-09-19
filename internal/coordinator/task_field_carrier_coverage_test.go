@@ -51,6 +51,9 @@ func TestTaskFieldCarrierCoverage(t *testing.T) {
 		// reason for being exempt from a wire-level stamp (see the
 		// comment above asyncCtx in SubmitSQL, coordinator.go).
 		"SQLText": notFile, "DataBucket": notFile,
+		// The planner option that rides beside SQLText for the worker
+		// that re-plans it (#1223): a bool, no path of any kind.
+		"BushyJoinReorder": notFile,
 
 		// The file-carrying fields both walkers cover today.
 		"PreScannedInputs": walked, "ScanFileFilter": walked, "Files": walked,
