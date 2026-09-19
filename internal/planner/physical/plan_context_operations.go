@@ -78,6 +78,14 @@ func (PlanContext) RefuseJoinResidual(filter, joinType string, err error) error 
 	return refuseJoinResidual(filter, joinType, err)
 }
 
+// ParseJoinCondExpr parses an ON clause (or one of its conjuncts) into an
+// expression AST, for a caller that has to REWRITE the clause rather than
+// evaluate it — the stage planner, which must re-spell a residual's references
+// into what the stage it emits publishes.
+func (PlanContext) ParseJoinCondExpr(cond string) plansql.Node {
+	return parseJoinCondExpr(cond)
+}
+
 func (PlanContext) BuildStreamAlias(node *logical.Node) string {
 	return buildStreamAlias(node)
 }

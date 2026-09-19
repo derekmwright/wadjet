@@ -1063,9 +1063,15 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 					LateralEmptyDefaultSpec{Column: d.Column, ExprSQL: d.ExprSQL})
 			}
 		}
-		// Propagate semi/anti join inequality filters
+		// Propagate semi/anti join inequality filters, and an outer join's ON
+		// RESIDUAL — the latter re-spelled into what THIS stage publishes, so
+		// it crosses the boundary with its identity the way the equi-keys just
+		// did (join_residual_identity.go). node.JoinFilter itself is left
+		// alone: the single-process planner reads it against the logical
+		// stream, where the arm's own spelling is what resolves.
 		if node.JoinFilter != "" {
-			stage.JoinFilter = node.JoinFilter
+			stage.JoinFilter = p.residualWithStageSpellings(
+				node, stage.BuildTableAlias, node.JoinFilter)
 		}
 		// …and NOT IN's three-valued rule, which is a property of the
 		// PREDICATE this anti join came from and unknowable from the stage

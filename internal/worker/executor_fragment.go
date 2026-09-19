@@ -2950,6 +2950,17 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 				return nil, fmt.Errorf("hash_join_probe: %w",
 					(physical.PlanContext{}).RefuseJoinResidual(spec.JoinFilter, spec.JoinType, err))
 			}
+			// A residual reference the fragment's two DECLARED sides do not
+			// publish is a plan bug whose run-time disposition is SILENT: the
+			// slot reads SQL NULL, the residual is UNKNOWN for every candidate
+			// pair, and a LEFT/FULL join answers its whole preserved side
+			// NULL-padded. Refuse it here, where both declarations are in hand.
+			if bad := physical.JoinResidualUnresolved(spec.JoinFilter, spec.BuildAlias,
+				hj.ProbeSchemaHint, hj.BuildSchemaHint); len(bad) > 0 {
+				return nil, fmt.Errorf("hash_join_probe: %w",
+					(physical.PlanContext{}).RefuseJoinResidual(spec.JoinFilter, spec.JoinType,
+						physical.RefuseUnresolvedJoinResidual(bad)))
+			}
 			hj.NewResidual = newResidual
 		case spec.JoinFilter != "":
 			hj.SemiAntiFilter = (physical.PlanContext{}).BuildSemiAntiFilter(spec.JoinFilter)
