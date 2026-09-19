@@ -1,11 +1,14 @@
 # ADR-0031: A DML predicate is compiled, not planned — and closing that needs a projectable row identity
 
-Status: Accepted (2026-09-03, arc D3), AMENDED 2026-09-04 (arc E6). The
-POSITION stands: a DML predicate is compiled, not planned, and the
-projectable-row-identity work below is still blocked and still unstarted. What
-the amendment changes is the CONCLUSION drawn from it — #688 is closed, because
-answering a subquery in a DML predicate never needed the predicate to be
-planned. See "What the deferral got wrong" at the end.
+Status: Accepted (2026-09-03, arc D3), AMENDED 2026-09-04 (arc E6) and
+2026-09-19 (arc PT). The POSITION stands: a DML predicate is compiled, not
+planned, and the projectable-row-identity work below is still blocked and still
+unstarted. The 2026-09-04 amendment changes the CONCLUSION drawn from it — #688
+is closed, because answering a subquery in a DML predicate never needed the
+predicate to be planned (see "What the deferral got wrong"). The 2026-09-19
+amendment records the second guarantee the compiled path had to be given for
+itself: a DML predicate is a TRUTH CONTEXT and is TYPED, on every door, before
+it removes anything.
 
 ## Context
 
@@ -248,3 +251,61 @@ census cell pins it with PostgreSQL's answer.
 correlated one runs once per candidate row, which is the query path's own cost
 model for a correlated subquery it cannot express as a join. The DML door does
 not decorrelate, and cannot: it has no join to lower into.
+
+
+## Amendment, 2026-09-19 (arc PT): a DML predicate is not planned, but it IS typed
+
+A predicate that is not a boolean is a type error in SQL, and the planner had
+said so for a `SELECT`'s `WHERE` since #599. The DML door does not reach the
+planner — that is this record's whole subject — so it reached `expr.Compile`
+instead, where the per-row closure reads a non-boolean value as false. It did
+that only at the TOP of the clause, so a non-boolean UNDER an `AND` matched
+every row:
+
+```sql
+DELETE FROM t WHERE id > 0 AND CASE WHEN id > 0 THEN 1 ELSE 0 END
+```
+
+EMPTIED the table on all three DML doors — the embedded API, the PostgreSQL
+wire and the HTTP endpoint — where PostgreSQL 17.11 raises `42804` and removes
+nothing, and where the same predicate written as a `SELECT` here selected zero
+rows. One statement, two answers, and the destructive one was the write door.
+
+**Decision: every clause that decides whether a row is acted on is a truth
+context, and its type is proved from whatever the parser produced, at the layer
+that owns the clause — the DML door included.** A `WHERE`, a `HAVING`, a
+`JOIN … ON`, the operands of `NOT`/`AND`/`OR`, a searched `CASE`'s `WHEN`, a
+`DELETE`'s and an `UPDATE`'s `WHERE` and a `MERGE`'s `WHEN … AND` are held to
+one rule with one message and one SQLSTATE. The rule is TOTAL over the kinds
+whose type is provable: a literal (a quoted one through the boolean input
+function), a column, a call whose declaration is fixed or polymorphic (through
+the argument it mirrors), a `CASE`, a `CAST`, arithmetic, an `ARRAY`
+constructor, an `INTERVAL` literal, a scalar subquery, a `ROW` field path and a
+container subscript — the element's type for the subscript, so an
+`ARRAY<BOOL>`'s element is still a boolean and must NOT be refused.
+
+**Its bound is stated, not hidden.** Where the type cannot be proved at this
+layer — a derived table's or a CTE's column, a polymorphic call whose mirrored
+argument this layer cannot type — the clause is evaluated as before and a
+non-boolean reads as false, selecting no row rather than refusing. An aggregate
+in such a clause is `42803` and a window `42P20`, in the server's own ORDER:
+the window is refused before names resolve (in the parser's post-extract hook,
+the one place both planner entries reach) and the aggregate after, so
+`WHERE SUM(nosuchcolumn) > 0` is `42703` on both doors.
+
+**Why it belongs to this record.** The compiled path has no planner to inherit
+a guarantee from, so every guarantee the planner gives a `SELECT` must be given
+to it explicitly or it is absent — this is the second one (the first was
+ADR-0021 §1c's "a subquery that cannot be run fails the statement", above).
+A refusal that arrives only for some spellings of a clause is worse on a write
+door than on a read one, because what it does instead is destructive.
+
+Gates: `server.TestArcPTTheDMLTruthContextRefusesEveryNodeKindOnEveryDoor` (67
+expression node kinds × 3 doors = 201 cells, each over its own fresh table,
+asserting the SQLSTATE AND that the rows are still there),
+`server.TestArcPTTheSELECTWhereTakesTheSameRule` (20 cells) and
+`server.TestArcPTAMergeWhenConditionTakesTheSameRule` (7). The arc's review ran
+an independent census of 342 (kind, verb, door) cells and found no door
+disagreeing with another. ADR-0012 carries the rule in its list of positions
+PostgreSQL decides; the differences page carries the two spellings where this
+engine still answers.
