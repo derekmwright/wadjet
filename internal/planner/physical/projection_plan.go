@@ -25,6 +25,10 @@ func (p *Planner) buildFilter(ctx context.Context, node *logical.Node) (exec.Sou
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	// A predicate naming a column a DYNAMIC-schema table function does not
+	// publish is 42703 at the first batch, with the column named and the
+	// relation's own columns listed (#1210) — see table_func_required.go.
+	source = p.guardTableFuncColumns(node, node.Children[0], source)
 
 	// Collect outer table aliases and columns for correlated subquery detection
 	outerTables := collectTableAliases(node.Children[0])
@@ -150,6 +154,10 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	// A column a DYNAMIC-schema table function does not publish is 42703 at
+	// its first batch, never a NULL for every row (#1210) — see
+	// table_func_required.go.
+	source = p.guardTableFuncColumns(node, child, source)
 
 	aggNode := findAggregateAncestor(child)
 	isOverAggregate := aggNode != nil

@@ -882,9 +882,32 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 		qual = tr.Name
 	}
 
-	// Table function (read_json, read_csv, unnest, ...) → open schema.
+	// A table function in FROM is a RELATION. When its SIGNATURE declares its
+	// columns — generate_series and unnest, whose lists come from the call and
+	// not from anything they read — it is a CLOSED source here, so a reference
+	// to a column it does not publish is 42703 at plan time the way it is over
+	// a base table (#1210), its column TYPES reach the literal refusal, and an
+	// over-long column-alias list is 42P10 before anything runs.
+	//
+	// A function whose columns are its INPUT's stays OPEN: this binder runs
+	// before the table-function capability is authorized, so it must not read
+	// the input to find out (tableFuncDeclaredSchema's header).
 	if tr.IsFunction {
-		into.open = true
+		cols, known := tableFuncDeclaredSchema(tr.Name, tr.FuncArgs, tr.WithOrdinality)
+		if !known {
+			into.open = true
+			return nil
+		}
+		cols, err := applyFuncColumnAliases(cols, tr.ColumnAliases, qual)
+		if err != nil {
+			return err
+		}
+		names := make([]string, len(cols))
+		for i, c := range cols {
+			names[i] = c.Name
+			into.addQualifiedTyped(qual, c.Name, c.Type)
+		}
+		into.noteSourceDuplicates(qual, names)
 		return nil
 	}
 

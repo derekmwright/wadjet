@@ -89,6 +89,58 @@ func (s *aliasedTableFuncSource) Next(ctx context.Context) (*batch.RecordBatch, 
 
 func (s *aliasedTableFuncSource) Close() error { return s.src.Close() }
 
+// withDeclaredSchema makes a table function that produced NO batch still
+// publish its columns, by emitting ONE empty batch carrying the schema its
+// signature declares.
+//
+// A relation with no rows is still a relation: `SELECT * FROM
+// generate_series(1,0)` is zero rows of one column `generate_series` on
+// PostgreSQL 17.11. Without this the pipeline saw no schema at all and the
+// door raised XX000 "the result has no columns at all" — the engine failing to
+// describe its own output where the answer is an empty result set. It wraps
+// only a function whose columns tableFuncDeclaredSchema knows; one whose
+// schema is its input's has nothing to publish when the input is empty, which
+// is the boundary recorded on the differences page.
+func withDeclaredSchema(src exec.Source, cols []parquet.Column) exec.Source {
+	if len(cols) == 0 {
+		return src
+	}
+	return &declaredSchemaSource{src: src, cols: cols}
+}
+
+type declaredSchemaSource struct {
+	src      exec.Source
+	cols     []parquet.Column
+	produced bool
+	done     bool
+}
+
+func (s *declaredSchemaSource) Init(ctx context.Context) error { return s.src.Init(ctx) }
+
+func (s *declaredSchemaSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
+	if s.done {
+		return nil, nil
+	}
+	b, err := s.src.Next(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if b != nil {
+		s.produced = true
+		return b, nil
+	}
+	s.done = true
+	if s.produced {
+		return nil, nil
+	}
+	s.produced = true
+	empty := batch.NewRecordBatch(s.cols, 0)
+	empty.Len = 0
+	return empty, nil
+}
+
+func (s *declaredSchemaSource) Close() error { return s.src.Close() }
+
 // buildTableFunctionSource creates an exec.Source for a table function like
 // read_json('path_or_url'). The source reads data on Init and produces
 // RecordBatch results via Next.
@@ -547,11 +599,25 @@ func (s *dbScanSource) Close() error {
 }
 
 // generateSeriesSource produces rows for generate_series(start, stop[, step]).
-// Emits a single int64 column named "generate_series".
+// Emits a single column named "generate_series", declared by
+// tableFuncDeclaredSchema — int4 when every argument fits int4 and int8
+// otherwise, which is the overload PostgreSQL resolves for the same call.
+//
+// The step is the caller's, never flipped: a series whose bounds run the
+// other way from its step is EMPTY. `generate_series(1,0)` and
+// `generate_series(3,1)` answer no rows on 17.11 and answered a descending
+// series here, because a positive default step was negated whenever
+// start > stop — a wrong ROW SET, and the wrong shape of the function:
+// `generate_series(1,0,-1)` is how a descending series is written.
 type generateSeriesSource struct {
 	start, stop, step int64
-	cur               int64
-	done              bool
+	// typ is the DECLARED column type, tableFuncDeclaredSchema's, so the
+	// vector this source fills is the one the plan annotated and the wire
+	// declares. A source that emitted int8 under an int4 declaration is a
+	// carrier the reader cannot read (ADR-0024 §2a).
+	typ  parquet.TypeID
+	cur  int64
+	done bool
 }
 
 func newGenerateSeriesSource(args []string) (*generateSeriesSource, error) {
@@ -573,13 +639,16 @@ func newGenerateSeriesSource(args []string) (*generateSeriesSource, error) {
 			return nil, fmt.Errorf("generate_series: invalid step %q: %w", args[2], err)
 		}
 		if step == 0 {
-			return nil, fmt.Errorf("generate_series: step cannot be zero")
+			// PostgreSQL's own sentence and its own SQLSTATE (22023
+			// invalid_parameter_value), measured on 17.11.
+			return nil, sqlerr.New("22023", "step size cannot equal zero")
 		}
 	}
-	if start > stop && step > 0 {
-		step = -step
+	typ := parquet.TypeInt64
+	if cols, ok := tableFuncDeclaredSchema("generate_series", args, false); ok {
+		typ = cols[0].Type
 	}
-	return &generateSeriesSource{start: start, stop: stop, step: step}, nil
+	return &generateSeriesSource{start: start, stop: stop, step: step, typ: typ}, nil
 }
 
 func (s *generateSeriesSource) Init(_ context.Context) error {
@@ -594,7 +663,7 @@ func (s *generateSeriesSource) Next(_ context.Context) (*batch.RecordBatch, erro
 	}
 
 	schema := []parquet.Column{
-		{Name: "generate_series", Type: parquet.TypeInt64},
+		{Name: "generate_series", Type: s.typ},
 	}
 
 	// Generate up to DefaultBatchSize rows per batch
@@ -618,7 +687,13 @@ func (s *generateSeriesSource) Next(_ context.Context) (*batch.RecordBatch, erro
 	}
 
 	b := batch.NewRecordBatch(schema, n)
-	copy(b.Columns[0].Int64Data[:n], vals)
+	if s.typ == parquet.TypeInt32 {
+		for i, v := range vals {
+			b.Columns[0].Int32Data[i] = int32(v)
+		}
+	} else {
+		copy(b.Columns[0].Int64Data[:n], vals)
+	}
 	b.Len = n
 
 	// Check if we've exhausted the series
@@ -689,6 +764,9 @@ func (s *unnestSource) Next(_ context.Context) (*batch.RecordBatch, error) {
 	for i, raw := range s.values {
 		v := strings.TrimSpace(raw)
 		switch typ {
+		case parquet.TypeInt32:
+			val, _ := strconv.ParseInt(v, 10, 64)
+			b.Columns[0].Int32Data[i] = int32(val)
 		case parquet.TypeInt64:
 			val, _ := strconv.ParseInt(v, 10, 64)
 			b.Columns[0].Int64Data[i] = val
@@ -725,8 +803,16 @@ func inferUnnestType(vals []string) parquet.TypeID {
 	if len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'' {
 		return parquet.TypeString
 	}
-	// Try integer
-	if _, err := strconv.ParseInt(v, 10, 64); err == nil {
+	// Try integer. An integer that fits int4 declares `integer`, and one that
+	// does not declares `bigint` — the width PostgreSQL 17.11 resolves for
+	// `unnest(ARRAY[1,2,3])`, whose column is `integer` and whose SUM is
+	// therefore bigint and not numeric (#1211, ADR-0024). The width has to be
+	// decided from the ARGUMENTS because it is read at plan time, by
+	// tableFuncDeclaredSchema, before anything runs.
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+		if n >= -2147483648 && n <= 2147483647 {
+			return parquet.TypeInt32
+		}
 		return parquet.TypeInt64
 	}
 	// Try float

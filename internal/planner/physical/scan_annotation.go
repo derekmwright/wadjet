@@ -32,6 +32,21 @@ func (p *Planner) annotateScanColumns(ctx context.Context, node *logical.Node) {
 	if node == nil {
 		return
 	}
+	// A TABLE FUNCTION whose signature declares its columns is annotated the
+	// way a base table is, from that declaration rather than from the catalog:
+	// the aggregate and arithmetic result-type rules then see an integer as an
+	// integer (`SUM(x) FROM generate_series(1,3) gs(x)` is bigint, not float8
+	// — #1211, ADR-0024 §2a), a qualified star has a column list to expand,
+	// and a call that produces NO batch still publishes its column. The
+	// FROM item's column-alias list is applied first, because the names the
+	// plan above uses are the RENAMED ones (#1184).
+	if node.Type == logical.NodeScan && node.IsTableFunc {
+		if cols, known := tableFuncDeclaredSchema(node.FuncName, node.FuncArgs, node.WithOrdinality); known {
+			if renamed, err := applyFuncColumnAliases(cols, node.FuncColAliases, node.TableAlias); err == nil {
+				stampScanSchema(node, renamed)
+			}
+		}
+	}
 	if node.Type == logical.NodeScan && node.TableName != "" && !node.IsTableFunc {
 		// CANONICALIZE first, once, in place: everything below this pass keys
 		// off Node.TableName — the manifest lookup, the pruner, the worker's
@@ -43,50 +58,7 @@ func (p *Planner) annotateScanColumns(ctx context.Context, node *logical.Node) {
 		}
 		table, err := p.Catalog.GetTable(ctx, node.TableName)
 		if err == nil {
-			cols := make([]string, len(table.Schema.Columns))
-			intCols := make(map[string]bool, len(table.Schema.Columns))
-			colTypes := make(map[string]parquet.TypeID, len(table.Schema.Columns))
-			colDecimal := make(map[string]logical.DecimalMeta)
-			var colFields map[string][]parquet.Column
-			for i, c := range table.Schema.Columns {
-				cols[i] = c.Name
-				colTypes[strings.ToLower(c.Name)] = c.Type
-				if c.Type == parquet.TypeDecimal {
-					colDecimal[strings.ToLower(c.Name)] = logical.DecimalMeta{Precision: c.Precision, Scale: c.Scale}
-				}
-				if c.Type == parquet.TypeRow && len(c.Fields) > 0 {
-					// A ROW's fields are the only declaration a field path
-					// has; they live nowhere in a map keyed by column name
-					// (#568). Kept as their full parquet.Column so a
-					// DECIMAL field keeps its (p,s) and a nested container
-					// field keeps its own shape.
-					if colFields == nil {
-						colFields = make(map[string][]parquet.Column)
-					}
-					colFields[strings.ToLower(c.Name)] = c.Fields
-				}
-				switch c.Type {
-				case parquet.TypeInt64, parquet.TypeInt32, parquet.TypeTimestamp,
-					parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration,
-					parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
-					intCols[strings.ToLower(c.Name)] = true
-				}
-			}
-			strictInt := make(map[string]bool, len(table.Schema.Columns))
-			for _, c := range table.Schema.Columns {
-				// The set expr.operandIsInt's ColRef arm accepts, PORT and
-				// PROTOCOL included since their arithmetic moved to the int4
-				// kernels (#1000) — see physical.intArithColumnType.
-				if intArithColumnType(c.Type) {
-					strictInt[strings.ToLower(c.Name)] = true
-				}
-			}
-			node.ScanColumns = cols
-			node.ScanIntCols = intCols
-			node.ScanStrictIntCols = strictInt
-			node.ScanColTypes = colTypes
-			node.ScanColDecimal = colDecimal
-			node.ScanColFields = colFields
+			stampScanSchema(node, table.Schema.Columns)
 		}
 		// Estimate row count from manifest for join reordering
 		if manifest, err := p.GetManifest(ctx, node.TableName); err == nil {
@@ -122,4 +94,58 @@ func (p *Planner) annotateScanColumns(ctx context.Context, node *logical.Node) {
 	for _, child := range node.Children {
 		p.annotateScanColumns(ctx, child)
 	}
+}
+
+// stampScanSchema records one relation's column list on a Scan node: the names
+// the plan resolves against, the integer sets the arithmetic rules read, the
+// declared types the aggregate result-type rules read, and the DECIMAL and ROW
+// metadata a declaration cannot be rebuilt without.
+//
+// One body for the two relations a Scan can be — a catalog table and a table
+// function that declares its own columns — so a column of a given type is
+// annotated identically whichever it came from, which is what makes "a table
+// function in FROM is a relation" true of the TYPE rules and not only of the
+// names.
+func stampScanSchema(node *logical.Node, columns []parquet.Column) {
+	cols := make([]string, len(columns))
+	intCols := make(map[string]bool, len(columns))
+	colTypes := make(map[string]parquet.TypeID, len(columns))
+	colDecimal := make(map[string]logical.DecimalMeta)
+	strictInt := make(map[string]bool, len(columns))
+	var colFields map[string][]parquet.Column
+	for i, c := range columns {
+		cols[i] = c.Name
+		colTypes[strings.ToLower(c.Name)] = c.Type
+		if c.Type == parquet.TypeDecimal {
+			colDecimal[strings.ToLower(c.Name)] = logical.DecimalMeta{Precision: c.Precision, Scale: c.Scale}
+		}
+		if c.Type == parquet.TypeRow && len(c.Fields) > 0 {
+			// A ROW's fields are the only declaration a field path has; they
+			// live nowhere in a map keyed by column name (#568). Kept as
+			// their full parquet.Column so a DECIMAL field keeps its (p,s)
+			// and a nested container field keeps its own shape.
+			if colFields == nil {
+				colFields = make(map[string][]parquet.Column)
+			}
+			colFields[strings.ToLower(c.Name)] = c.Fields
+		}
+		switch c.Type {
+		case parquet.TypeInt64, parquet.TypeInt32, parquet.TypeTimestamp,
+			parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration,
+			parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
+			intCols[strings.ToLower(c.Name)] = true
+		}
+		// The set expr.operandIsInt's ColRef arm accepts, PORT and PROTOCOL
+		// included since their arithmetic moved to the int4 kernels (#1000) —
+		// see physical.intArithColumnType.
+		if intArithColumnType(c.Type) {
+			strictInt[strings.ToLower(c.Name)] = true
+		}
+	}
+	node.ScanColumns = cols
+	node.ScanIntCols = intCols
+	node.ScanStrictIntCols = strictInt
+	node.ScanColTypes = colTypes
+	node.ScanColDecimal = colDecimal
+	node.ScanColFields = colFields
 }

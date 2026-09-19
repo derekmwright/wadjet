@@ -30,9 +30,9 @@ func TestUnnest_IntValues(t *testing.T) {
 	}
 
 	for i, row := range r.Rows {
-		val, ok := row["val"].(int64)
+		val, ok := unnestInt(row["val"])
 		if !ok {
-			t.Errorf("row %d: expected int64, got %T (%v)", i, row["val"], row["val"])
+			t.Errorf("row %d: expected an integer, got %T (%v)", i, row["val"], row["val"])
 			continue
 		}
 		if val != int64(i+1) {
@@ -85,8 +85,8 @@ func TestUnnest_WithOrdinality(t *testing.T) {
 	}
 
 	for i, row := range r.Rows {
-		val, _ := row["val"].(int64)
-		idx, _ := row["idx"].(int64)
+		val, _ := unnestInt(row["val"])
+		idx, _ := unnestInt(row["idx"])
 		expectedVal := int64((i + 1) * 10)
 		expectedIdx := int64(i + 1)
 		if val != expectedVal {
@@ -181,11 +181,25 @@ func TestUnnest_DefaultColumnName(t *testing.T) {
 	}
 
 	// Default column name should be "unnest"
-	val, ok := r.Rows[0]["unnest"].(int64)
+	val, ok := unnestInt(r.Rows[0]["unnest"])
 	if !ok {
-		t.Fatalf("expected column 'unnest' with int64, got %v", r.Rows[0])
+		t.Fatalf("expected column 'unnest' with an integer, got %v", r.Rows[0])
 	}
 	if val != 42 {
 		t.Errorf("first row: unnest=%d, want 42", val)
 	}
+}
+
+// unnestInt reads a value column whichever integer width the ARGUMENTS
+// resolved. An integer that fits int4 publishes `integer` — the width
+// PostgreSQL 17.11 gives `unnest(ARRAY[1,2,3])`, and therefore the width that
+// makes a SUM over it bigint rather than numeric (#1211, ADR-0024).
+func unnestInt(v any) (int64, bool) {
+	switch t := v.(type) {
+	case int32:
+		return int64(t), true
+	case int64:
+		return t, true
+	}
+	return 0, false
 }

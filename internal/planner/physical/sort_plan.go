@@ -159,6 +159,7 @@ func (p *Planner) buildSort(ctx context.Context, node *logical.Node) (exec.Sourc
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	childSource = p.guardTableFuncColumns(node, node.Children[0], childSource)
 
 	var keys []exec.SortKey
 	for _, ob := range node.OrderBy {

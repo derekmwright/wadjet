@@ -116,20 +116,33 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 				return nil, nil, nil, err
 			}
 		}
+		var source exec.Source
 		if node.FuncName == "unnest" {
-			source, err := newUnnestSource(node.FuncArgs, node.WithOrdinality)
+			us, err := newUnnestSource(node.FuncArgs, node.WithOrdinality)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("unnest: %w", err)
 			}
-			return withColumnAliases(source, node.FuncColAliases, node.TableAlias), nil, &exec.CollectSink{}, nil
-		}
-		source, err := buildTableFunctionSource(node.FuncName, node.FuncArgs, node.FuncNamedArgs)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("table function %s: %w", node.FuncName, err)
+			source = us
+		} else {
+			ts, err := buildTableFunctionSource(node.FuncName, node.FuncArgs, node.FuncNamedArgs)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("table function %s: %w", node.FuncName, err)
+			}
+			source = ts
 		}
 		// The FROM item's column-alias list, applied at the one layer that
-		// knows the function's width (#1184).
-		return withColumnAliases(source, node.FuncColAliases, node.TableAlias), nil, &exec.CollectSink{}, nil
+		// knows the function's width (#1184), and — for a function whose
+		// signature declares its columns — the declared schema, so a call
+		// that produces no rows still publishes them.
+		source = withColumnAliases(source, node.FuncColAliases, node.TableAlias)
+		if cols, known := tableFuncDeclaredSchema(node.FuncName, node.FuncArgs, node.WithOrdinality); known {
+			renamed, err := applyFuncColumnAliases(cols, node.FuncColAliases, node.TableAlias)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			source = withDeclaredSchema(source, renamed)
+		}
+		return source, nil, &exec.CollectSink{}, nil
 	}
 	scanner := p.newScanner(ctx, node.TableName, node.PartitionFilter, node.RequiredColumns, node.ScanPredicates)
 

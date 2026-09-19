@@ -37,6 +37,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	childSource = p.guardTableFuncColumns(node, node.Children[0], childSource)
 
 	// Detect aggregate inputs that are expressions (not simple column refs).
 	// For each, compile the expression and add a pre-aggregate projection
