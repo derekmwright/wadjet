@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/wadjet"
@@ -30,10 +31,15 @@ import (
 func TestTPCHQueriesBushyForced(t *testing.T) {
 	ctx := context.Background()
 
+	// One store and one catalog, so the two instances below differ in
+	// exactly one thing. A nil MetaKV would give each DB its own in-memory
+	// catalog and the second would see no tables at all.
 	store := objstore.NewMemStore()
+	meta := catalog.NewMemKV()
 	db, err := wadjet.Open(ctx, wadjet.Config{
 		Store:  store,
 		Bucket: "tpch",
+		MetaKV: meta,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -65,6 +71,7 @@ func TestTPCHQueriesBushyForced(t *testing.T) {
 	bushyDB, err := wadjet.Open(ctx, wadjet.Config{
 		Store:            store,
 		Bucket:           "tpch",
+		MetaKV:           meta,
 		BushyJoinReorder: true,
 	})
 	if err != nil {
