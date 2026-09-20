@@ -14,11 +14,11 @@ import (
 //
 // The corpus is arc_dc_decorrelation_cases_test.go: {IN, NOT IN, = ANY,
 // <> ALL, EXISTS, NOT EXISTS, a scalar subquery in WHERE, a scalar subquery in
-// the SELECT list} × {the fifty places an outer reference can sit in a body —
-// its WHERE with an inner column, its WHERE naming only the outer row, a JOIN's
-// ON, a LEFT/RIGHT JOIN's ON, a comma join's WHERE, the HAVING, the SELECT
-// list, a nested derived table, a nested subquery, two references in two
-// places} × {equality, inequality, a function over the outer column, a CAST,
+// the SELECT list} × {the forty-nine places an outer reference can sit in a
+// body — its WHERE with an inner column, its WHERE naming only the outer row,
+// a JOIN's ON, a LEFT/RIGHT JOIN's ON, a comma join's WHERE, the HAVING, the
+// SELECT list, a nested derived table, a nested subquery, two references in
+// two places} × {equality, inequality, a function over the outer column, a CAST,
 // IS DISTINCT FROM, a NULL-yielding predicate, an outer row with NULL in the
 // referenced column, an empty inner, duplicate inner keys} × {an enclosing
 // query that is ONE relation, and one that is a JOIN whose two arms both
@@ -35,16 +35,18 @@ import (
 //	       lat_item c ON c.id = b.id AND o.total > b.amount)` lives, so the
 //	       body's join was built with `o.total` in a condition whose scope
 //	       does not contain `o`: ZERO rows for PostgreSQL's two, silently.
-//	       109 wrong cells at base; an INNER join's ON conjunct is now a
-//	       WHERE conjunct and an outer join's ON declines the rewrite.
+//	       An INNER join's ON conjunct is now a WHERE conjunct, and an outer
+//	       join's ON — where a conjunct is not one — declines the rewrite.
 //	#1104  a condition naming ONLY the outer row was added to the build
 //	       side's filter with its qualifier STRIPPED (IN) or dropped outright
 //	       (EXISTS). It now gates the OUTER rows, which is what PostgreSQL
 //	       does with it, and the negated operators — for which that is not a
 //	       conjunction — decline and re-run per outer row.
 //
-// 193 of this table's 776 cells changed. None of the other 583 moved, and no
-// cell that agreed with PostgreSQL at base is refused at the tip.
+// Between them, 109 cells answered a WRONG ROW SET at base and 128 were
+// refused; 193 cells changed, 583 did not, and no cell that agreed with
+// PostgreSQL at base is wrong or refused at the tip. 221 of the 776 fail at
+// 6b9c7acf on five arms, and 221 at 0c0d33b6.
 //
 // The three PINS below are boundaries, not answers, and each names what
 // closes it. A pin that starts agreeing FAILS: PostgreSQL's row set for the

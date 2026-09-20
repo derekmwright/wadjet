@@ -14,9 +14,13 @@ import (
 // the type matrix nor the LATERAL fixture can stand in for it:
 //
 //   - lat_ord/lat_item have no NULL anywhere, so no cell over them can say what
-//     a NULL outer key, a NULL inner key or NOT IN's three-valued answer does;
-//   - lat_item's order_id has no key present TWICE with different payloads, so a
-//     semi join's build side cannot be told from a deduplicated one;
+//     a NULL outer key, a NULL inner key or NOT IN's three-valued answer does.
+//     dc_out.id and dc_nul.k supply both, on the probe side and on the build
+//     side, with dc_in kept NULL-free so the NOT IN cells over it are not all
+//     UNKNOWN;
+//   - dc_in holds k=1 TWICE with DIFFERENT amounts, so a residual over the
+//     payload keeps one of the two and drops the other — a build side that
+//     deduplicates its key answers differently;
 //   - dc_in holds a key (5) the join partner dc_side does not, which is what
 //     makes an inner JOIN inside the body drop a row and a LEFT JOIN pad one —
 //     the difference an outer reference written in the ON changes.

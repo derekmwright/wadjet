@@ -2162,11 +2162,12 @@ is doing the protecting rather than luck.
 
 `coordinator.TestArcDCADecorrelatedBodyKeepsEveryOuterReferenceOnEveryArm` is
 the gate: 776 cells of {IN, NOT IN, = ANY, <> ALL, EXISTS, NOT EXISTS, a
-scalar subquery in WHERE, a scalar subquery in the SELECT list} × {the fifty
-places an outer reference can sit} × {an enclosing query that is one relation
-and one that is a join whose arms share a column name} on five arms, every
-want live PostgreSQL 17.11, with three boundaries pinned by the sentence each
-refusal says. 221 of its cells fail at `6b9c7acf`.
+scalar subquery in WHERE, a scalar subquery in the SELECT list} × {the
+forty-nine places an outer reference can sit} × {an enclosing query that is
+one relation and one that is a join whose arms share a column name} on five
+arms, every want live PostgreSQL 17.11, with three boundaries pinned by the
+sentence each refusal says. 221 of its cells fail at `6b9c7acf`, and 221 at
+`0c0d33b6`.
 `server.TestArcDCARelocatedBodyConditionReadsTheMaskOnEveryDoor` is the other
 half: this rewrite moves a predicate ACROSS a relation boundary, and over a
 policed relation the answer is the ROW SET rather than a cell, so the mask's
