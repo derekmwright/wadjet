@@ -2308,6 +2308,29 @@ func pushFilterThroughJoin(filter, join *Node) *Node {
 
 	if demoteLeft || demoteRight {
 		join.JoinType = demoteJoinKind(kind, demoteLeft, demoteRight)
+		// THE DEMOTION CHANGES WHERE THE ON CLAUSE MAY BE EVALUATED. An
+		// outer join's ON runs BEFORE the padding, so a conjunct the key
+		// representation cannot express is routed to the join's own residual
+		// (routeOuterJoinOnResiduals, #358); an INNER join's ON is a WHERE,
+		// so the same conjunct is lifted above the join instead
+		// (liftInnerJoinOnResiduals, #336). liftInnerJoinOnResiduals has
+		// already run by the time this demotion fires, and the route that
+		// runs next skips a join that is no longer outer — so the conjunct
+		// sat in the ON of an inner join with nothing left to place it, and
+		// the physical planner refused the statement:
+		//
+		//	SELECT b.k FROM dc_in b RIGHT JOIN dc_side c
+		//	  ON c.j = b.k AND 100 > 100 WHERE b.tag = 10
+		//	  → join ON "c.j = b.k and 100 > 100": 100 > 100 cannot be
+		//	    represented as an equi-join key …
+		//
+		// while the same ON without the WHERE answers (the route places it)
+		// and the same ON written INNER answers (the lift places it). The
+		// demotion is the one site that knows the kind just changed, so it
+		// does the inner treatment here.
+		if res := takeJoinCondResiduals(join); len(res) > 0 {
+			remainingPreds = append(remainingPreds, res...)
+		}
 	}
 
 	if len(leftPreds) > 0 {
