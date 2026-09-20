@@ -138,7 +138,15 @@ The standard's capture-marker spelling raises 0A000 naming the construct, where 
 
 **An unknown column over a file or database reader is refused at the reader's first batch, not at plan time.**
 
-`SELECT zz FROM read_json('x.json')` raises `42703 column "zz" does not exist: the table function "read_json" publishes a, b` — PostgreSQL's class and a diagnosis naming the column, but made when the reader publishes its schema rather than while the statement is bound. The statement's column binding runs before the table-function capability is authorized, so the planner does not open the input to find out what it publishes (ADR-0034, #943). Two consequences: a reader that produces NO batch answers zero rows where PostgreSQL raises, and `EXPLAIN` over such a statement does not refuse. `generate_series` and `unnest` are refused at plan time like a base table. (ADR-0012 §5/#1210)
+`SELECT zz FROM read_json('x.json')` raises `42703 column "zz" does not exist: the table function "read_json" publishes a, b` — PostgreSQL's class and a diagnosis naming the column, but made when the reader publishes its schema rather than while the statement is bound. The statement's column binding runs before the table-function capability is authorized, so the planner does not open the input to find out what it publishes (ADR-0034, #943). Two consequences: a reader that produces NO batch answers zero rows where PostgreSQL raises, and `EXPLAIN` over such a statement does not refuse. The check reaches a reader used as a JOIN ARM for the names that are certain there — a reference qualified by the arm's alias, the join's own ON condition, and a bare name no other arm can provide — but a join holding TWO readers can decide nothing about a bare name and does not check one. `generate_series` and `unnest` are refused at plan time like a base table. (ADR-0012 §5/#1210)
+
+**A FROM alias does not rename a single-column table function's column.**
+
+`SELECT * FROM generate_series(1,2) AS g` publishes `generate_series` here and `g` on PostgreSQL 17.11, which names a single-column function in FROM after its alias; so `SELECT g FROM generate_series(1,2) AS g` is 42703 here and answers there, and `SELECT generate_series FROM … AS g` is the other way round. The column-alias list, `AS g(x)`, is applied by both. (ADR-0012 §5/#1210-alias-naming)
+
+**`generate_series(…) WITH ORDINALITY` publishes one column.**
+
+PostgreSQL adds a second `ordinality` column to any function in FROM; this engine adds it for `unnest` only, so `generate_series(1,2) WITH ORDINALITY` publishes `generate_series` alone — and a two-name column-alias list over it is 42P10. (ADR-0012 §5/#1210-ordinality)
 
 **An aggregate over a file or database reader's column declares double precision.**
 

@@ -1,6 +1,7 @@
 # ADR-0039: A table function in FROM is a relation, and where its columns come from decides where a reference to a missing one is refused
 
-Status: Accepted (2026-09-19, #1210 / #1203 / #1211, arc TF)
+Status: Accepted (2026-09-19, #1210 / #1203 / #1211, arc TF; amended the same
+day after the arc's round-1 review — §4a, §6a and the Consequences)
 
 ## Context
 
@@ -86,6 +87,37 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    text — makes NO check, because a refusal built from an incomplete
    enumeration refuses a column that is there.
 
+   **A TERM IS NOT A COLUMN NAME.** The plan carries some of those needs as
+   rendered TEXT — a GROUP BY term is the term's text, and an ordinal or a
+   select alias arrives already resolved to the select item's text — so every
+   such field is PARSED and the references it actually makes are taken. Read
+   as names they ask for a column no relation has: `GROUP BY a + 1` over a
+   reader was `42703 column "a + 1" does not exist`, a new refusal on eight
+   spellings PostgreSQL answers and this engine answered right (the round-1
+   review's B3). A term that will not parse cannot be enumerated with
+   certainty, and takes the same exit as everything else that cannot.
+
+4a. **A JOIN ARM is held to its columns too** (added after round 1;
+   `physical.stampTableFuncRequiredColumns`). Over a join the consumer's
+   input is the join's OUTPUT and a bare name there may belong to either arm,
+   so round 1 made no check at all and a reference to a column a reader does
+   not publish answered NULL for every row — the very thing this ADR's rule
+   forbids. Two classes of name are certain directly above a join:
+
+   - a reference QUALIFIED by the arm's own alias. The consumer sits DIRECTLY
+     above the join, so nothing between them has minted a column under that
+     qualifier — which is what separates this from the accumulated need set
+     ADR-0026 §4b warns about, where a derived alias can qualify a
+     projection's output.
+   - a BARE reference no OTHER arm can provide, decidable only when every
+     other arm declares its columns. With a SECOND reader in the join neither
+     can be held to a bare name, and the check is declined outright.
+
+   The join's own condition is qualified per arm by construction and is read
+   the same way. The names travel on the logical Scan
+   (`logical.Node.FuncRequiredColumns`), because a join arm's source is
+   wrapped where the arm is built and not above the join.
+
 5. **An integer table function publishes the width PostgreSQL's overload
    publishes.** `generate_series(int4,int4)` and `unnest` over int4-fitting
    literals declare `integer`; wider arguments declare `bigint`. The
@@ -101,6 +133,26 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    strips a string literal's quotes, so by then a path and an identifier are
    the same bytes.
 
+6a. **A JOIN ARM IS A FROM ITEM**, and §6 applies to it unchanged (added
+   after round 1). The rebuild wrote a join's right arm as its bare NAME
+   while writing the comma-separated items as calls, so a correlated subquery
+   whose table function is a join ARM answered 0 for every outer row — §6's
+   own defect, one clause lower. `JoinInfo.RightTableRef` carries the whole
+   item, so the arm is emitted exactly as a FROM item is.
+
+7. **A DECLARED int4 key meeting a relation with no declarations at all is
+   keyed at int8.** The pair cannot be widened from declarations — a reader
+   has none, by §3 — so an int4 key met an int8 vector at the operator and
+   was refused (#615). This is ADR-0024 §2a's rule for an unknown integer
+   width applied to a join key: guessing narrow is the unsafe direction, and
+   the wide key holds every value the narrow one does.
+
+8. **A series ends at the CARRIER's edge.** `s.cur += s.step` wraps at
+   int64's boundary and a wrapped counter sits on the other side of the
+   bound, so neither loop exit was reached and the source emitted batches
+   forever, every row after the wrap a value the series does not contain. The
+   step is taken only when it stays inside the carrier.
+
 ## Consequences
 
 The boundaries this leaves are recorded on `docs/postgres-differences.md`, and
@@ -112,15 +164,14 @@ each is a consequence of (3), not an oversight:
 - an aggregate over a reader's column declares `double precision`, and a
   qualified star over one is `0A000`, because both need the column list at
   plan time;
-- a QUALIFIED reference to a reader's column through a JOIN arm is still a
-  NULL: the consumer of a join arm is the join, whose bare names belong to
-  both arms, and the join node's accumulated need set can name a projection
-  OUTPUT through a derived alias (ADR-0026 §4b), so a refusal built from it
-  would not meet (4)'s certainty rule.
+- a bare reference to a reader's column through a join that holds a SECOND
+  reader makes no check: neither arm can be held to a bare name when both
+  have unknown column lists, which is §4a's certainty rule declining rather
+  than guessing. A QUALIFIED reference in that join is still checked.
 
-Closing all three is one change — a post-authorization annotation pass both
-doors reach — and it moves a coordinator call site, which is why this ADR
-states the ordering rather than working around it.
+Closing the first three is one change — a post-authorization annotation pass
+both doors reach — and it moves a coordinator call site, which is why this
+ADR states the ordering rather than working around it.
 
 `generate_series` also stopped negating the caller's step: a call whose bounds
 run the other way from its step is an EMPTY relation on 17.11, and a positive
@@ -130,10 +181,15 @@ function, not of this position, and it lives with the rest of them in
 
 ## Gates
 
-- `wadjet.TestArcTFATableFunctionInFromIsARelation` — 24 value/refusal cells
-  and 9 declaration cells over `generate_series`, `unnest`, `read_json`,
-  `read_csv` and `read_parquet`, every expectation measured on PostgreSQL
-  17.11.
+- `wadjet.TestArcTFATableFunctionInFromIsARelation` — 31 value/refusal
+  subtests and 9 declaration subtests over `generate_series`, `unnest`,
+  `read_json`, `read_csv` and `read_parquet`, every expectation measured on
+  PostgreSQL 17.11.
+- `wadjet.TestArcTFAnExpressionTermOverAReaderIsNotAColumnName` (§4's term
+  rule), `wadjet.TestArcTFAReaderAsAJoinArmIsHeldToItsColumns` (§4a),
+  `wadjet.TestArcTFACorrelatedSubqueryOverAJoinArmBindsTheOuterRow` (§6a and
+  §7), `wadjet.TestArcTFANegatedSortTermSortsByTheNegation`,
+  `physical.TestArcTFTheSeriesEndsAtTheCarriersEdge` (§8).
 - `coordinator.TestArcTFATableFunctionIsARelationOnEveryArm` — the same
   property on single / single+budget / dag / dag-shuffled / dag+morsel4, with
   the pre-existing `distributed` pin (a table function as the only FROM item

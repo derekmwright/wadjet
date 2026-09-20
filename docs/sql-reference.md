@@ -254,6 +254,12 @@ ERROR:  column "zz" does not exist: the table function "read_json" publishes a, 
 SQLSTATE: 42703
 ```
 
+The check reaches a reader used as a JOIN ARM as well, for the names that are
+certain there: a reference qualified by the arm's own alias, the join's own
+`ON` condition, and a bare reference no other arm of the join can provide. A
+join holding TWO readers can decide nothing about a bare name, so a bare
+reference there is not checked.
+
 Two consequences of that timing, both deliberate:
 
 - a reader that produces **no batch at all** (an empty file) is never measured
@@ -283,7 +289,15 @@ SELECT x FROM generate_series(1, 3) AS g(x)  -- the column renamed to x
 The **step is the caller's and is never flipped for them**: a call whose
 bounds run the other way from its step is an EMPTY relation — zero rows of one
 column — and the descending series is written with a negative step. A zero
-step is `22023 step size cannot equal zero`.
+step is `22023 step size cannot equal zero`. The series ends at the carrier's
+edge: a step that would leave the 64-bit range ends it there rather than
+wrapping.
+
+A FROM alias does not rename the column. `SELECT * FROM generate_series(1,2)
+AS g` publishes `generate_series`, where PostgreSQL publishes `g` — a
+single-column function in FROM takes its column's name from the alias there.
+Use the column-alias list, `AS g(x)`, which both engines apply. The same holds
+for `unnest`.
 
 The column is `integer` when every argument fits a 32-bit integer and `bigint`
 otherwise, which is the overload PostgreSQL resolves for the same call. The
