@@ -1310,9 +1310,20 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 		}
 	}
 
+	// A body is larger than its WHERE, here too: an INNER join's ON conjunct
+	// that names the enclosing query is lifted into the classification below,
+	// and a reference this rewrite cannot carry declines it — the scalar
+	// subquery then runs per outer row, which is right by construction
+	// (#1232, decorrelation_body_refs.go).
+	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTableSet)
+	if blocked != "" {
+		return nil, pred, false
+	}
+
 	// Flatten subquery WHERE into individual conditions
 	var whereNodes []plansql.Node
 	flattenASTNodes(info.WhereExpr, &whereNodes)
+	whereNodes = append(whereNodes, liftedON...)
 
 	// Classify each condition as correlated or inner-only.
 	//
@@ -1329,6 +1340,17 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 	var innerFilterNodes []plansql.Node
 
 	for _, node := range whereNodes {
+		if provablyOuterOnly(node, outerTables, innerTableSet) {
+			// A condition naming ONLY the enclosing row is not a correlation
+			// key: it decides whether this outer row's body produces a row at
+			// all. This rewrite builds a LEFT join and a rewritten
+			// comparison, and has nowhere to put such a gate, so it declines
+			// and the scalar subquery is re-run per outer row (#1104). The
+			// name-only test below cannot tell the case apart: `o.id = o.grp`
+			// reports "correlated" and was built as a key on an inner column
+			// named `grp` that the body's relation does not have.
+			return nil, pred, false
+		}
 		if refsOuterColumn(node, outerRefCols) {
 			// Correlation condition: must be an equality comparison
 			cmpNode, ok := node.(*plansql.CmpExpr)
@@ -1632,11 +1654,20 @@ func decorrelateInSubqueries(n *Node, ctes []plansql.CTEDef, annotate func(*Node
 			continue
 		}
 
-		joinNode := tryDecorrelateInSubquery(inExpr, subq, outerTables, outerColMap, ctes,
+		joinNode, outerOnly := tryDecorrelateInSubquery(inExpr, subq, outerTables, outerColMap, ctes,
 			annotate, subtreeRowFields(n.Children[0]))
 		if joinNode == nil {
 			remainingPreds = append(remainingPreds, pred)
 			continue
+		}
+		// A condition inside the body that names ONLY the enclosing row is
+		// applied per outer row by PostgreSQL, so it gates which outer rows
+		// can match at all: `o.id IN (SELECT … WHERE P(o))` is `P(o) AND o.id
+		// IN (SELECT …)`. It comes back here rather than going into the build
+		// side, where its qualifier used to be stripped and it filtered the
+		// SUBQUERY's relation instead (#1104). See outerOnlyDisposition.
+		for _, node := range outerOnly {
+			remainingPreds = append(remainingPreds, Predicate{Raw: node.String(), ASTExpr: node})
 		}
 
 		// Wire the current plan as the left (probe) child, through the one
@@ -1805,20 +1836,24 @@ func innerGroupKey(info *plansql.SelectInfo, term string) KeyRef {
 // SemiJoin (IN) or AntiJoin (NOT IN) node. Handles uncorrelated IN with
 // optional GROUP BY + HAVING, and correlated IN with equality keys.
 // Returns nil if decorrelation is not possible.
-func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode, outerTables map[string]bool, outerColMap map[string]string, ctes []plansql.CTEDef, annotate func(*Node), rowFields map[string][]parquet.Column) *Node {
+// A SECOND RESULT: the conditions inside the body that name ONLY the
+// enclosing query. They are NOT part of the join this builds — PostgreSQL
+// applies them per outer row — so the caller adds them to the enclosing
+// query's own predicate list (#1104, outerOnlyDisposition).
+func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode, outerTables map[string]bool, outerColMap map[string]string, ctes []plansql.CTEDef, annotate func(*Node), rowFields map[string][]parquet.Column) (*Node, []plansql.Node) {
 	parsed, err := plansql.Parse(subq.SQL)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	info, err := plansql.ExtractSelect(parsed)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 
 	// Must have exactly one SELECT column and at least one table.
 	// Skip UNION/set-op subqueries.
 	if len(info.Columns) != 1 || len(info.Tables) == 0 || info.Union != nil {
-		return nil
+		return nil, nil
 	}
 
 	// A LIMIT/OFFSET says WHICH rows the subquery yields, and the semi join
@@ -1831,7 +1866,7 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 	// membership set. Deciding a bound here instead would mean re-deriving
 	// the subquery's own ordering, and a per-task bound is not a global one.
 	if strings.TrimSpace(info.Limit) != "" || strings.TrimSpace(info.Offset) != "" {
-		return nil
+		return nil, nil
 	}
 
 	// Name the inner key the way the inner plan built below actually emits
@@ -1839,7 +1874,7 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 	// correct answer for every shape this cannot name (#516).
 	innerSelectRef, ok := innerSemiJoinKey(info)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 
 	// A ROW FIELD PATH as the outer key. `colRefName` returns the ColRef's
@@ -1858,7 +1893,7 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 	// same one `logical.isBareColRef` takes for an ordinary join key: a field
 	// path is materialized, never passed on as a name.
 	if ref, ok := inExpr.Left.(*plansql.ColRef); ok && isRowFieldPath(ref, rowFields) {
-		return nil
+		return nil, nil
 	}
 
 	// Get outer key from InExpr.Left — must be a simple column reference.
@@ -1867,7 +1902,7 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 	// arm's column (#1098). repairDecorrelatedSpelling settles the text.
 	outerKey, ok := outerProbeKey(inExpr.Left)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 
 	// Build inner table set for classifying WHERE conditions
@@ -1885,6 +1920,17 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 		}
 	}
 
+	// A body is larger than its WHERE. An INNER join's ON conjunct that names
+	// the enclosing query is lifted here and classified below exactly as the
+	// same text written in the WHERE is; a reference anywhere this rewrite
+	// cannot carry it declines the whole thing, and the subquery stays an
+	// executable predicate re-run per outer row (#1232,
+	// decorrelation_body_refs.go).
+	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTableSet)
+	if blocked != "" {
+		return nil, nil
+	}
+
 	// Decline a ROW FIELD PATH as the inner IN/NOT IN key (#866): the build plan
 	// publishes the ROW column, not a separate field column, so the join key is absent.
 	// Here the subquery is uncorrelated; a qualifier naming no inner relation identifies
@@ -1897,34 +1943,46 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 	// See docs/internals/in-subquery-inner-row-field-boundary.md for the design.
 	if ref := plainColRef(info.Columns[0].ASTExpr); ref != nil && ref.Table != "" &&
 		!innerTableSet[strings.ToLower(ref.Table)] {
-		return nil
+		return nil, nil
 	}
 
-	// Classify WHERE conditions into inner-only vs correlated
+	// Classify the body's conditions — its WHERE, plus what the ON lift
+	// handed over — into correlated, OUTER-ONLY and inner-only.
 	var innerFilterNodes []plansql.Node
 	var correlationKeys []DecorrelatedKey
+	var outerOnlyNodes []plansql.Node
 
+	var whereNodes []plansql.Node
 	if info.WhereExpr != nil {
-		var whereNodes []plansql.Node
 		flattenASTNodes(info.WhereExpr, &whereNodes)
+	}
+	whereNodes = append(whereNodes, liftedON...)
 
-		for _, node := range whereNodes {
-			hasOuter, hasInner := nodeTableRefs(node, outerTables, innerTableSet, outerColMap)
-			if hasOuter && hasInner {
-				// Correlated equality condition
-				cmp, ok := node.(*plansql.CmpExpr)
-				if !ok || cmp.Op != "=" {
-					return nil
-				}
-				outerRef, innerRef, ok := extractCorrelatedRefs(cmp, outerTables, innerTableSet, outerColMap)
-				if !ok {
-					return nil
-				}
-				correlationKeys = append(correlationKeys, DecorrelatedKey{Outer: outerRef, Op: "=", Inner: innerRef})
-			} else {
-				// Inner-only condition (including subquery expressions)
-				innerFilterNodes = append(innerFilterNodes, node)
+	for _, node := range whereNodes {
+		hasOuter, hasInner := nodeTableRefs(node, outerTables, innerTableSet, outerColMap)
+		switch {
+		case hasOuter && hasInner:
+			// Correlated equality condition
+			cmp, ok := node.(*plansql.CmpExpr)
+			if !ok || cmp.Op != "=" {
+				return nil, nil
 			}
+			outerRef, innerRef, ok := extractCorrelatedRefs(cmp, outerTables, innerTableSet, outerColMap)
+			if !ok {
+				return nil, nil
+			}
+			correlationKeys = append(correlationKeys, DecorrelatedKey{Outer: outerRef, Op: "=", Inner: innerRef})
+		case provablyOuterOnly(node, outerTables, innerTableSet):
+			// It gates which OUTER rows can match. NOT IN is not a
+			// conjunction of the two, so it declines instead.
+			if !outerOnlyDisposition(inExpr.Not) {
+				return nil, nil
+			}
+			outerOnlyNodes = append(outerOnlyNodes, node)
+		default:
+			// Inner-only condition (including subquery expressions), and the
+			// unqualified spelling provablyOuterOnly cannot decide.
+			innerFilterNodes = append(innerFilterNodes, node)
 		}
 	}
 
@@ -1932,7 +1990,7 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 	// inner-only WHERE conditions above it — see decorrelated_inner_plan.go.
 	innerPlan, ok := decorrelatedInnerPlan(info, innerFilterNodes, ctes, annotate)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	// Handle GROUP BY + HAVING
 	var groupRefs []KeyRef
@@ -1967,7 +2025,7 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 			// whose extra arguments this rewrite cannot carry declines the
 			// rewrite instead of losing them (#353).
 			if err := parseAggExtraArgs(&ae, info.Columns[0].AggArgs); err != nil {
-				return nil
+				return nil, nil
 			}
 			aggs = append(aggs, ae)
 			aggCounter++
@@ -2002,7 +2060,7 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 					InputExpr: aggInputExpr,
 				}
 				if err := parseAggExtraArgs(&ae, agg.Args); err != nil {
-					return nil
+					return nil, nil
 				}
 				aggs = append(aggs, ae)
 				replacements[strings.ToLower(agg.String())] = synName
@@ -2054,7 +2112,7 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 		NullAwareAnti: inExpr.Not && len(correlationKeys) == 0,
 	}
 	if !inExpr.Not || len(correlationKeys) == 0 {
-		return miss
+		return miss, outerOnlyNodes
 	}
 
 	// Do not lower correlated NOT IN to this join (#538, #578): NULL facts belong to
@@ -2067,7 +2125,7 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 	// text-based residual compilation/narrowing cannot safely express that boundary
 	// (#562); the two-join design and #539 replication comparison are in the essay.
 	// See docs/internals/correlated-not-in-local-boundary.md for the design.
-	return nil
+	return nil, nil
 }
 
 // pushdownPredicates pushes filter predicates closer to scan nodes.
@@ -3160,10 +3218,17 @@ func decorrelateExists(n *Node, ctes []plansql.CTEDef, annotate func(*Node)) *No
 			continue
 		}
 
-		joinNode := tryDecorrelateExists(existsNode, outerTables, outerColMap, ctes, annotate)
+		joinNode, outerOnly := tryDecorrelateExists(existsNode, outerTables, outerColMap, ctes, annotate)
 		if joinNode == nil {
 			remainingPreds = append(remainingPreds, pred)
 			continue
+		}
+		// The body's outer-ONLY conditions: PostgreSQL applies them per outer
+		// row, so `EXISTS (SELECT … WHERE Q(z) AND P(o))` is `P(o) AND EXISTS
+		// (SELECT … WHERE Q(z))`. They used to be dropped here under a comment
+		// saying the shape "shouldn't happen" (#1104).
+		for _, node := range outerOnly {
+			remainingPreds = append(remainingPreds, Predicate{Raw: node.String(), ASTExpr: node})
 		}
 
 		// Wire the current plan as the left (probe) child, through the one
@@ -3186,18 +3251,22 @@ func decorrelateExists(n *Node, ctes []plansql.CTEDef, annotate func(*Node)) *No
 // tryDecorrelateExists attempts to convert an EXISTS/NOT EXISTS subquery
 // into a SemiJoin/AntiJoin node. Returns nil if decorrelation is not possible.
 // The returned join node has a nil left child (to be filled by the caller).
-func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]bool, outerColMap map[string]string, ctes []plansql.CTEDef, annotate func(*Node)) *Node {
+//
+// A SECOND RESULT: the body's conditions that name ONLY the enclosing query.
+// They are not part of the join — PostgreSQL applies them per outer row — and
+// the caller conjoins them with it (#1104, outerOnlyDisposition).
+func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]bool, outerColMap map[string]string, ctes []plansql.CTEDef, annotate func(*Node)) (*Node, []plansql.Node) {
 	parsed, err := plansql.Parse(exists.SQL)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	info, err := plansql.ExtractSelect(parsed)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 
 	if len(info.Tables) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Check for correlated references — use column-aware version to
@@ -3206,11 +3275,11 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 	refs, err := plansql.FindCorrelatedRefsWithScope(exists.SQL, outerTables, outerColMap,
 		plansql.CTEColumns(scopeCTEs(ctes, info.CTEs), nil))
 	if err != nil || len(refs) == 0 {
-		return nil // uncorrelated, keep as-is
+		return nil, nil // uncorrelated, keep as-is
 	}
 
 	if info.WhereExpr == nil {
-		return nil
+		return nil, nil
 	}
 
 	// Build inner table set from all tables and joins in the subquery
@@ -3228,14 +3297,25 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 		}
 	}
 
+	// A body is larger than its WHERE: an INNER join's ON conjunct that names
+	// the enclosing query is lifted into the classification below, and a
+	// reference this rewrite cannot carry declines it (#1232,
+	// decorrelation_body_refs.go).
+	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTables)
+	if blocked != "" {
+		return nil, nil
+	}
+
 	// Flatten the subquery WHERE into individual conditions
 	var whereNodes []plansql.Node
 	flattenASTNodes(info.WhereExpr, &whereNodes)
+	whereNodes = append(whereNodes, liftedON...)
 
 	// Classify each condition
 	var eqKeys []DecorrelatedKey        // equality: outer_col = inner_col, the hash join keys
 	var filterConds []DecorrelatedKey   // non-equality correlated: outer_col != inner_col
 	var innerFilterNodes []plansql.Node // inner-only conditions for scan filter
+	var outerOnlyNodes []plansql.Node   // conditions naming ONLY the enclosing row
 
 	for _, node := range whereNodes {
 		hasOuter, hasInner := nodeTableRefs(node, outerTables, innerTables, outerColMap)
@@ -3244,11 +3324,11 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 			// Cross-table predicate: must be a simple comparison
 			cmp, ok := node.(*plansql.CmpExpr)
 			if !ok {
-				return nil // can't decorrelate complex cross-table predicates
+				return nil, nil // can't decorrelate complex cross-table predicates
 			}
 			outerRef, innerRef, ok := extractCorrelatedRefs(cmp, outerTables, innerTables, outerColMap)
 			if !ok {
-				return nil
+				return nil, nil
 			}
 			if cmp.Op == "=" {
 				eqKeys = append(eqKeys, DecorrelatedKey{Outer: outerRef, Op: "=", Inner: innerRef})
@@ -3265,21 +3345,30 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 				}
 				filterConds = append(filterConds, DecorrelatedKey{Outer: outerRef, Op: op, Inner: innerRef})
 			}
-		} else if hasInner {
+		} else if provablyOuterOnly(node, outerTables, innerTables) {
+			// It gates which OUTER rows the body can answer for. NOT EXISTS
+			// is not a conjunction of the two, so it declines and the
+			// subquery is re-run per outer row (outerOnlyDisposition).
+			if !outerOnlyDisposition(exists.Not) {
+				return nil, nil
+			}
+			outerOnlyNodes = append(outerOnlyNodes, node)
+		} else {
+			// Inner-only, and the unqualified spelling provablyOuterOnly
+			// cannot decide — both belong to the build side's filter.
 			innerFilterNodes = append(innerFilterNodes, node)
 		}
-		// Outer-only conditions in subquery WHERE shouldn't happen, skip
 	}
 
 	if len(eqKeys) == 0 {
-		return nil // no equality keys → can't use hash join
+		return nil, nil // no equality keys → can't use hash join
 	}
 
 	// The build side is the subquery's OWN FROM clause as a plan, with its
 	// inner-only WHERE conditions above it — see decorrelated_inner_plan.go.
 	innerPlan, ok := decorrelatedInnerPlan(info, innerFilterNodes, ctes, annotate)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 
 	// Build semi/anti join
@@ -3306,7 +3395,7 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 		joinNode.InnerFilterKeys = filterConds
 	}
 
-	return joinNode
+	return joinNode, outerOnlyNodes
 }
 
 // HasRemainingSubqueries walks an optimized logical plan and returns true if
