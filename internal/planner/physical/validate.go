@@ -807,6 +807,7 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	}
 	// SELECT expressions (skip stars and window functions — window outputs and
 	// star expansion add no enumerable refs the binder can reason about safely).
+	usingMerged := mergedUsingNames(info)
 	for i := range info.Columns {
 		col := info.Columns[i]
 		if col.IsWindow {
@@ -823,7 +824,7 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 			// accident (#1162). The same window written INSIDE a larger
 			// expression was already checked, through checkExpr below, which
 			// is what made the two spellings disagree.
-			if err := resolveExprNames(col.ASTExpr, resolve); err != nil {
+			if err := resolveExprNamesExcept(col.ASTExpr, resolve, usingMerged); err != nil {
 				return err
 			}
 			if err := refuseInvalidRowFields(col.ASTExpr, resolve); err != nil {
@@ -965,6 +966,20 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 // `PARTITION BY g` naming a SELECT alias is 42703, both measured on 17.11
 // (#1161, #1162).
 func resolveExprNames(expr plansql.Node, scope *colScope) error {
+	return resolveExprNamesExcept(expr, scope, nil)
+}
+
+// resolveExprNamesExcept is resolveExprNames with a set of BARE names left
+// alone. The only caller that passes one is the WINDOW item, and the set is
+// this block's `JOIN … USING` merge list: USING merges the joined column into
+// ONE, so the bare name is not ambiguous in PostgreSQL, and a SORT or WINDOW
+// key is the one place this engine already bound it rather than refusing it
+// (ADR-0012 §5 #655, whose entry states that exception). Resolving a window
+// item's names must not undo that — `SELECT c, SUM(id) OVER (PARTITION BY c)
+// FROM psb LEFT JOIN psc USING (id)` answers PostgreSQL's rows and must keep
+// answering them. A QUALIFIED reference is never exempt: both arms remain
+// addressable by their qualified names through a USING join.
+func resolveExprNamesExcept(expr plansql.Node, scope *colScope, skipBare map[string]bool) error {
 	if expr == nil || scope == nil {
 		return nil
 	}
@@ -978,11 +993,30 @@ func resolveExprNames(expr plansql.Node, scope *colScope) error {
 		if pgSystemColumns[strings.ToLower(r.Column)] {
 			continue
 		}
+		if r.Table == "" && skipBare[strings.ToLower(r.Column)] {
+			continue
+		}
 		if err := scope.resolveRef(r); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// mergedUsingNames is the set of bare column names this block's `JOIN … USING`
+// clauses merge. Recorded on the join at parse time (JoinInfo.Using), so no
+// catalog is needed to state it.
+func mergedUsingNames(info *plansql.SelectInfo) map[string]bool {
+	var out map[string]bool
+	for i := range info.Joins {
+		for _, c := range info.Joins[i].Using {
+			if out == nil {
+				out = map[string]bool{}
+			}
+			out[strings.ToLower(c)] = true
+		}
+	}
+	return out
 }
 
 // resolveSource resolves one FROM source into `into`. lateralOuter is the scope a

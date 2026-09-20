@@ -64,6 +64,18 @@ func rsCells() []rsCell {
 			"42P01", `invalid reference to FROM-clause entry for table "a"`},
 		{"on/tableNameBehindAlias", "SELECT a.id FROM lat_ord a JOIN lat_item b ON lat_ord.id = b.order_id",
 			"42P01", `invalid reference to FROM-clause entry for table "lat_ord"`},
+		// The DISCRIMINATOR between case 2 and case 3, which every cell above
+		// missed because each aliased its relations to a DIFFERENT name: an
+		// UNALIASED relation that is out of scope earns the ordinary case-2
+		// sentence, not the alias one. The parser records an alias equal to
+		// the table's own name for several spellings that wrote none, and an
+		// alias equal to the name hides nothing. SQLancer found it: 178 of
+		// 200 generated databases stopped on the alias sentence naming a
+		// table as its own alias, where PostgreSQL's DETAIL — and SQLancer's
+		// expected-error list — carry the case-2 wording.
+		{"on/unaliasedRelationOutOfScope",
+			"SELECT lat_ord.id FROM lat_ord, lat_item b JOIN lat_item c ON lat_ord.id = c.order_id",
+			"42P01", `there is an entry for table "lat_ord", but it cannot be referenced from this part of the query`},
 		{"on/sqlancerThreeWay", "SELECT COUNT(*) AS n FROM lat_ord t0 JOIN lat_item t1 ON t2.amount = t1.amount JOIN lat_item t2 ON t2.id = t0.id",
 			"42P01", `missing FROM-clause entry for table "t2"`},
 		// The CONTROLS, which decide whether the rule is a rule or a ban.
@@ -117,6 +129,19 @@ func rsCells() []rsCell {
 		{"winOk/overDerived", "SELECT x.id, SUM(x.total) OVER (PARTITION BY x.id) AS n FROM (SELECT id, total FROM lat_ord) x", "", ""},
 		{"winOk/grouped", "SELECT o.id AS g, SUM(o.total) AS s, ROW_NUMBER() OVER (PARTITION BY o.id ORDER BY SUM(o.total)) AS rn FROM lat_ord o GROUP BY o.id", "", ""},
 		{"winOk/frameOffset", "SELECT o.id, SUM(o.total) OVER (ORDER BY o.id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS n FROM lat_ord o", "", ""},
+		// A `JOIN … USING` MERGES the joined column into one, so the bare name
+		// is not ambiguous — PostgreSQL answers, and a sort or window key is
+		// the one place this engine already bound it rather than refusing it
+		// (ADR-0012 §5 #655). Resolving a window item's names must not undo
+		// that; the contested cell below is the discriminator, where the two
+		// `w` are NOT a merge and 42702 is PostgreSQL's own answer.
+		{"winOk/usingMergedArgument",
+			"SELECT b.product AS c, SUM(id) OVER (PARTITION BY b.product) AS s FROM lat_item a LEFT JOIN lat_item b USING (id)", "", ""},
+		{"winOk/usingMergedPartitionKey",
+			"SELECT COUNT(*) OVER (PARTITION BY id) AS s FROM lat_item a LEFT JOIN lat_item b USING (id)", "", ""},
+		{"win/bareContestedAcrossArms",
+			"SELECT x.w AS xw, y.w AS yw, SUM(y.w) OVER (PARTITION BY w) AS s FROM (SELECT id, total AS w FROM lat_ord) x JOIN (SELECT id, amount AS w FROM lat_item) y ON x.id = y.id",
+			"42702", `column reference "w" is ambiguous`},
 
 		// --- the other positions, one cell per clause ---------------------
 		{"pos/select", "SELECT zz.id FROM lat_ord o", "42P01", `missing FROM-clause entry for table "zz"`},
@@ -211,7 +236,7 @@ func TestArcRSAQualifiedReferenceNamesOneRelationInScope(t *testing.T) {
 	// A TABLE WHOSE EVERY CELL REFUSES PROVES ONLY THAT THE BINDER IS LOUD.
 	// The controls are what say the rule is a rule: each is a statement
 	// PostgreSQL answers and one edit from a refusing cell above.
-	if answered < 18 {
+	if answered < 20 {
 		t.Fatalf("only %d control cells were answered — the table has stopped "+
 			"discriminating between a reference in scope and one out of it", answered)
 	}

@@ -140,6 +140,15 @@ func (c *relationCensus) noteAliasedTable(name, alias string) {
 	if c == nil || name == "" || alias == "" {
 		return
 	}
+	// An alias EQUAL to the table's own name hides nothing, and the parser
+	// records one for several spellings that wrote none. Without this test the
+	// out-of-scope `t3` of `FROM t0, t3, t1 JOIN t2 ON t3.c4` earned the ALIAS
+	// sentence naming `t3` as its own alias — PostgreSQL's is the ordinary
+	// case-2 one, and SQLancer's expected-error list carries that one and not
+	// this (measured: 178 of 200 generated databases stopped on it).
+	if strings.EqualFold(name, alias) {
+		return
+	}
 	n := strings.ToLower(name)
 	if _, taken := c.hidden[n]; taken {
 		return
