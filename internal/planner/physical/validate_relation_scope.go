@@ -51,10 +51,21 @@ import (
 // relationSite is one relation the block's FROM declares: the name it answers
 // to, the comma-separated FROM item it belongs to, and the JOIN that
 // introduced it (-1 for the item's own table).
+//
+// `qual` is FOLDED, because every scope map is and an unquoted reference
+// arrives folded from the lexer. `spelled` is the name AS DECLARED, and the
+// duplicate-name verdict is the one thing that must read it: `FROM qa t, qb
+// "T"` declares TWO relations in PostgreSQL — a delimited identifier keeps its
+// bytes — and a verdict taken on the folded key would refuse a statement
+// PostgreSQL answers. The scope has never distinguished two sources under one
+// folded key; a verdict need not inherit that (#731, and arc SR's round-2
+// finding that a COUNT taken on the folded key refused `SELECT t.c1 FROM clt1
+// t, clt2 "T"`).
 type relationSite struct {
-	qual string
-	item int
-	join int
+	qual    string
+	spelled string
+	item    int
+	join    int
 }
 
 // relationCensus is every relationSite of one block, in PARSE ORDER — FROM
@@ -70,16 +81,22 @@ type relationCensus struct {
 	hidden map[string]string
 }
 
-// relationQualName is the name a FROM source answers to: its alias, or its own
-// name when it has none. Folded, because every scope map here is.
-func relationQualName(tr *plansql.TableRef) string {
+// relationDeclaredName is the name a FROM source answers to, AS DECLARED: its
+// alias, or its own name when it has none.
+func relationDeclaredName(tr *plansql.TableRef) string {
 	if tr == nil {
 		return ""
 	}
 	if tr.Alias != "" {
-		return strings.ToLower(tr.Alias)
+		return tr.Alias
 	}
-	return strings.ToLower(tr.Name)
+	return tr.Name
+}
+
+// relationSiteFor builds one site from a FROM source.
+func relationSiteFor(tr *plansql.TableRef, item, join int) relationSite {
+	name := relationDeclaredName(tr)
+	return relationSite{qual: strings.ToLower(name), spelled: name, item: item, join: join}
 }
 
 // newRelationCensus reads the block's FROM positionally. It declines (nil)
@@ -97,13 +114,12 @@ func newRelationCensus(info *plansql.SelectInfo) *relationCensus {
 	}
 	c := &relationCensus{hidden: map[string]string{}}
 	for k := range info.Tables {
-		c.sites = append(c.sites, relationSite{qual: relationQualName(&info.Tables[k]), item: k, join: -1})
+		c.sites = append(c.sites, relationSiteFor(&info.Tables[k], k, -1))
 		for j := range info.Joins {
 			if info.Joins[j].FromItem != k {
 				continue
 			}
-			c.sites = append(c.sites, relationSite{
-				qual: relationQualName(joinRightRef(&info.Joins[j])), item: k, join: j})
+			c.sites = append(c.sites, relationSiteFor(joinRightRef(&info.Joins[j]), k, j))
 		}
 	}
 	return c
@@ -236,6 +252,66 @@ func fromCensusSites(c *relationCensus) []relationSite {
 		return nil
 	}
 	return c.sites
+}
+
+// resolveStarQualifier holds a QUALIFIED STAR to the same rule as any other
+// qualified reference: `q.*` names one relation in scope or it names nothing.
+//
+// A star was the one SELECT-list item the binder skipped entirely, so
+// `SELECT lat_ord.* FROM lat_ord o` ANSWERED the aliased relation's rows —
+// PostgreSQL refuses it, because an alias is the only name the relation has —
+// and `SELECT zz.*` reached the star expander, which said the relation's
+// column list was not known rather than that no such relation exists
+// (measured on 17.11: 42P01 `missing FROM-clause entry for table "zz"`).
+//
+// A qualifier that is itself a COLUMN is left alone: `(rw).*` over a ROW
+// column is a different construct and this rule has nothing to say about it.
+func (s *colScope) resolveStarQualifier(table string) error {
+	if s == nil || s.open || table == "" {
+		return nil
+	}
+	q := strings.ToLower(table)
+	if s.quals[q] != nil || s.cols[q] || strings.Contains(q, ".") {
+		return nil
+	}
+	ref := &plansql.ColRef{Table: table, Column: "*"}
+	if err := s.refuseOuterLevelReference(ref); err != nil {
+		return err
+	}
+	return s.refuseUnmatchedQualifier(ref)
+}
+
+// refuseDuplicateRelationName is PostgreSQL's 42712 for a FROM list that names
+// one relation twice under one name — `FROM t, t`, `FROM t JOIN t ON …`, or two
+// derived tables sharing an alias. The name would answer to two relations, so
+// every reference through it is ambiguous before any column is looked at, and
+// PostgreSQL refuses the FROM clause itself:
+//
+//	SELECT 1 FROM lat_item JOIN lat_item ON true
+//	ERROR:  42712: table name "lat_item" specified more than once
+//
+// This engine answered the cross product and refused only the REFERENCES into
+// it, as 42702 on the column — a different question with a different answer.
+// The comparison is on the name AS DECLARED, not on the folded key: a
+// DELIMITED alias keeps its bytes, so `FROM qa t, qb "T"` declares two
+// relations and PostgreSQL answers it. An empty qualifier (a derived table
+// written without an alias, which this parser can produce) is skipped: it is
+// not a name anything can be written through.
+func (c *relationCensus) refuseDuplicateRelationName() error {
+	if c == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	for _, s := range c.sites {
+		if s.spelled == "" || strings.HasPrefix(s.spelled, "(") {
+			continue
+		}
+		if seen[s.spelled] {
+			return sqlerr.New("42712", "table name %q specified more than once", s.spelled)
+		}
+		seen[s.spelled] = true
+	}
+	return nil
 }
 
 // refuseSiblingReference is PostgreSQL's sentence for a plain derived table

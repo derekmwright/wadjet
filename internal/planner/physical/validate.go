@@ -667,6 +667,10 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	from.siblingDiag = b.siblingDiag
 	from.relations = newRelationCensus(info)
 	from.parsedThrough = len(fromCensusSites(from.relations))
+	// One name answers to one relation, before any column is looked at.
+	if err := from.relations.refuseDuplicateRelationName(); err != nil {
+		return err
+	}
 	callerDiag := b.outerDiag
 	b.outerDiag = outerDiagScope(callerDiag, outer)
 	callerSibling := b.siblingDiag
@@ -801,6 +805,11 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 				return err
 			}
 			if err := refuseInvalidSemverRanges(col.ASTExpr); err != nil {
+				return err
+			}
+		}
+		if col.Star {
+			if err := resolve.resolveStarQualifier(col.TableRef); err != nil {
 				return err
 			}
 		}

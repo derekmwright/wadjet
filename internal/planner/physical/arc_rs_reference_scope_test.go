@@ -130,6 +130,24 @@ func rsCells() []rsCell {
 		{"pos/setOpArm", "SELECT o.id FROM lat_ord o UNION ALL SELECT i.id FROM lat_item i WHERE o.id = 1",
 			"42P01", `missing FROM-clause entry for table "o"`},
 
+		// --- a qualified STAR is a qualified reference --------------------
+		{"star/namesNothing", "SELECT zz.* FROM lat_ord o", "42P01", `missing FROM-clause entry for table "zz"`},
+		{"star/tableBehindAlias", "SELECT lat_ord.* FROM lat_ord o", "42P01", `invalid reference to FROM-clause entry for table "lat_ord"`},
+		{"starOk/ownAlias", "SELECT o.* FROM lat_ord o", "", ""},
+		{"starOk/laterJoinIsVisibleInTheSelectList", "SELECT j.* FROM lat_ord a JOIN lat_item b ON a.id = b.order_id JOIN lat_item j ON j.id = a.id", "", ""},
+
+		// --- one name, one relation (42712) -------------------------------
+		{"dup/commaSelfJoin", "SELECT 1 AS k FROM lat_item, lat_item", "42712", `table name "lat_item" specified more than once`},
+		{"dup/joinSelfJoin", "SELECT 1 AS k FROM lat_item JOIN lat_item ON true", "42712", `table name "lat_item" specified more than once`},
+		{"dup/derivedSharedAlias", "SELECT 1 AS k FROM (SELECT id FROM lat_ord) x, (SELECT id FROM lat_item) x", "42712", `table name "x" specified more than once`},
+		{"dupOk/oneAliasedOneNot", "SELECT lat_item.order_id FROM lat_item JOIN lat_item b ON lat_item.id = b.id", "", ""},
+		{"dupOk/derivedAliasEqualsBaseName", "SELECT lat_item.id FROM (SELECT id FROM lat_ord) lat_item JOIN lat_item b ON lat_item.id = b.id", "", ""},
+		// A DELIMITED alias keeps its bytes, so `t` and `"T"` are two names:
+		// PostgreSQL answers this, and a duplicate verdict taken on the
+		// FOLDED key would refuse it. The discriminator for #731's rule
+		// reaching this verdict too.
+		{"dupOk/delimitedAliasIsADifferentName", `SELECT t.id FROM lat_ord t, lat_item "T"`, "", ""},
+
 		// --- a sibling FROM item is out of scope without LATERAL ----------
 		{"sibling/withoutLateral", "SELECT s.m FROM lat_ord o, (SELECT o.id AS m) s", "42P01",
 			`invalid reference to FROM-clause entry for table "o"`},
@@ -173,7 +191,7 @@ func TestArcRSAQualifiedReferenceNamesOneRelationInScope(t *testing.T) {
 	// A TABLE WHOSE EVERY CELL REFUSES PROVES ONLY THAT THE BINDER IS LOUD.
 	// The controls are what say the rule is a rule: each is a statement
 	// PostgreSQL answers and one edit from a refusing cell above.
-	if answered < 13 {
+	if answered < 16 {
 		t.Fatalf("only %d control cells were answered — the table has stopped "+
 			"discriminating between a reference in scope and one out of it", answered)
 	}
