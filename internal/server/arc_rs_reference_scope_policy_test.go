@@ -28,8 +28,9 @@ import (
 // masking matrix's: nothing policed reaches a client, on any door.
 //
 // A GATE WHOSE CELLS ALL REFUSE PROVES NOTHING, so the count of (cell, door)
-// pairs that ANSWERED is asserted too — a future change that turns these into
-// refusals fails here rather than passing vacuously.
+// pairs that ANSWERED is asserted too — at its REAL value, per cell and per
+// door, so a change that turns any ONE of these shapes into a refusal fails
+// here and is named rather than hiding behind the nine pairs of another cell.
 func TestArcRSAScopedReferenceNeverPublishesAPolicedValue(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: embedded cluster")
@@ -52,13 +53,12 @@ func TestArcRSAScopedReferenceNeverPublishesAPolicedValue(t *testing.T) {
 		{"derived-arm-window-key", `SELECT COUNT(*) OVER (PARTITION BY x.dept) AS n, x.ssn AS s FROM (SELECT dept, ssn FROM e7emp) x`},
 	}
 	answered := 0
+	refused := map[string]int{}
 	for _, cell := range cells {
 		for _, door := range rig.doors {
 			got, err := door.run(t, "analyst-key", cell.sql)
 			if err != nil {
-				// A refusal is a disposition this cell accepts: the claim is
-				// that nothing POLICED reaches a client, not that every shape
-				// answers.
+				refused[cell.name]++
 				continue
 			}
 			answered++
@@ -80,10 +80,21 @@ func TestArcRSAScopedReferenceNeverPublishesAPolicedValue(t *testing.T) {
 			}
 		}
 	}
-	if answered < len(rig.doors) {
-		t.Fatalf("only %d (cell, door) pairs answered over %d cells and %d doors: "+
-			"this gate's leak test cannot fail", answered, len(cells), len(rig.doors))
+	// THE FLOOR IS THE REAL NUMBER, not a tenth of it. It was
+	// `len(rig.doors)` — nine — which a change that turned NINE of the ten
+	// cells into refusals passes, leaving one cell's nine doors to carry a
+	// claim the notes made about ninety (round-1 review, P2). Every cell must
+	// answer on every door, and a cell that stops answering is named.
+	for _, cell := range cells {
+		if n := refused[cell.name]; n > 0 {
+			t.Errorf("%s: refused on %d of %d doors — every cell of this gate "+
+				"must ANSWER over the policed relations, or its leak test cannot "+
+				"fail for that shape\n  %s", cell.name, n, len(rig.doors), cell.sql)
+		}
 	}
-	t.Logf("%d of %d (cell, door) pairs answered; the rest refused",
-		answered, len(cells)*len(rig.doors))
+	if want := len(cells) * len(rig.doors); answered != want {
+		t.Fatalf("%d of %d (cell, door) pairs answered: this gate's leak test "+
+			"is vacuous for the %d that did not", answered, want, want-answered)
+	}
+	t.Logf("%d of %d (cell, door) pairs answered", answered, len(cells)*len(rig.doors))
 }
