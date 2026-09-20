@@ -694,13 +694,24 @@ A deferral is a claim and carries its measurement.
    in §(c): removing the strip step in front of it fails nine tests across two
    packages, so narrowing this resolver is its own arc, not a rider on this one.
 
-8. **An out-of-scope qualifier answered under a star and refused under a list.**
-   Measured beside the decisive cell (`probe_b1_lateral_sort.log`):
-   `SELECT * FROM … l ORDER BY o.id, i.id` ANSWERS on all five arms, while
-   `SELECT o.id AS a, l.id AS b FROM … l ORDER BY a, i.id` refuses with
+8. ~~**An out-of-scope qualifier answered under a star and refused under a
+   list.**~~ **CLOSED 2026-09-20 by arc RS.** Measured beside the decisive
+   cell (`probe_b1_lateral_sort.log`):
+   `SELECT * FROM … l ORDER BY o.id, i.id` ANSWERED on all five arms, while
+   `SELECT o.id AS a, l.id AS b FROM … l ORDER BY a, i.id` refused with
    `missing FROM-clause entry for table "i"` on all five. One out-of-scope
    reference, two dispositions decided by the enclosing SELECT list.
-   Pre-existing, not a binding question, recorded as a filing candidate.
+
+   The mechanism was `colScope.open`, which had two causes and could not tell
+   them apart: a FROM SOURCE this binder cannot enumerate settles nothing,
+   but a STAR OUTPUT list only means the OUTPUT names are unknown. A star
+   never mints a QUALIFIER and does not change which relations the FROM
+   declares, so the qualifier half of the reference rule holds under one.
+   `colScope.sourceOpen` records the first cause and `resolveRef` consults it;
+   the GROUP BY, WHERE and window-key spellings of the same shape were
+   measured with it and all four now answer PostgreSQL 17.11's 42P01.
+   Gated by `physical.TestArcRSAQualifiedReferenceNamesOneRelationInScope`'s
+   `starScope/*` cells.
 
 9. **The rule's DAG half for a LATERAL arm — the seam's remaining column.**
    Five consumers × three DAG arms, measured in

@@ -196,10 +196,6 @@ Wadjet raises 42622 instead of PostgreSQL’s truncation and notice, to keep sto
 
 First-match binding means `ORDER BY u` over two outputs called `u` answers here, versus PostgreSQL 42702. (ADR-0012 §5/#557)
 
-**Ambiguous PARTITION BY names can answer.**
-
-Binding chooses one input. `SUM(y.w) OVER (PARTITION BY w)` over duplicate `w` inputs answers here; PostgreSQL raises 42702. (ADR-0012 §5/#975)
-
 **Name lookup tolerates case differences.**
 
 For imported names, `SELECT WatchID FROM hits` can read `WatchID` where PostgreSQL raises 42703. Tables/lowercase quoted names also qualify; case-colliding join columns cause 42702 where PostgreSQL answers. (ADR-0012 §5/#731)
@@ -239,10 +235,6 @@ The int4 rule extends to int8: zero=false, otherwise=true. PostgreSQL refuses th
 **DECIMAL cannot store NaN or infinities.**
 
 Finite storage raises 22003 versus unconstrained PostgreSQL numeric values. Comparisons remain available. (ADR-0012 §5/#534; 12/carrier)
-
-**JOIN ON sees comma-join siblings.**
-
-The planner has no corresponding scope restriction. `FROM a, b JOIN c ON a.k = c.k` answers here; PostgreSQL refuses the reference. (ADR-0012 §5/#617)
 
 **Decimal arithmetic stops at 38 digits.**
 

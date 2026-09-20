@@ -2468,6 +2468,40 @@ SELECT COUNT(*) FROM fa x JOIN fb y USING (id) JOIN fb z USING (id)
 
 See **Limitations** for the `USING` and `NATURAL JOIN` shapes that are refused.
 
+### What an ON clause may name
+
+An `ON` clause is scoped to ITS OWN join: the relations it may name are the
+ones already joined inside its `FROM` item — that item's own table, and every
+join of that item up to and including this one. A relation joined LATER, and a
+relation of a different comma-separated `FROM` item, are both out of scope
+there, exactly as in PostgreSQL:
+
+```sql
+-- refused: `c` is joined AFTER the ON that names it
+--   42P01  missing FROM-clause entry for table "c"
+SELECT a.id FROM ord a JOIN item b ON c.id = a.id JOIN item c ON c.id = b.id
+
+-- refused: `a` is a DIFFERENT FROM item
+--   42P01  invalid reference to FROM-clause entry for table "a"
+SELECT a.id FROM ord a, item b JOIN item c ON a.id = c.order_id
+
+-- both answer: the second ON sees the first join's relations
+SELECT a.id FROM ord a JOIN item b ON a.id = b.order_id JOIN item c ON a.id = c.order_id
+SELECT a.id FROM ord a JOIN item b ON a.id = b.order_id JOIN item c ON b.id = c.id
+```
+
+The two sentences are not interchangeable. `invalid reference` says the
+statement HAS such an entry and this position cannot reach it, which can only
+be said about an entry written earlier; a relation a later join introduces has
+not been written yet, so it is `missing`. A reference to an enclosing query's
+relation is legal and unaffected — a correlated `ON` still resolves.
+
+A `FROM` clause names each relation once: `FROM t, t`, `FROM t JOIN t ON …`
+and two derived tables sharing an alias are `42712`
+(`table name "t" specified more than once`), because the name would answer to
+two relations. Aliasing one side — `FROM t JOIN t b ON …` — is the fix, and a
+DELIMITED alias is a different name, so `FROM qa t, qb "T"` declares two.
+
 ### Inner Join
 
 ```sql
@@ -2832,15 +2866,31 @@ partitions on the ORDER's id, whichever side of the join the planner chooses to
 build. Writing the FROM clause the other way round does not change the answer,
 and neither does a predicate that changes the plan's cost estimate.
 
-A term written BARE where two relations of the join publish that name is a
-different case: PostgreSQL raises `42702 column reference … is ambiguous`, and
-this engine answers by binding one of them. That superset is recorded in
-ADR-0012's divergence list.
+A term written BARE where two relations of the join publish that name names
+neither, and it is `42702 column reference … is ambiguous` — PostgreSQL's own
+answer. Qualify it.
+
+A term whose QUALIFIER names no relation in scope is `42P01`, in the window's
+`PARTITION BY`, its `ORDER BY` and its function argument alike:
+
+```sql
+-- 42P01  missing FROM-clause entry for table "zz"
+SELECT o.id, COUNT(*) OVER (PARTITION BY zz.id) FROM orders o
+
+-- 42P01  invalid reference to FROM-clause entry for table "orders"
+--        (the FROM clause reads that table under the alias "o")
+SELECT COUNT(*) OVER (PARTITION BY orders.id) FROM orders o
+```
+
+A window key resolves against the window's INPUT, so a term naming a SELECT
+alias is `42703 column "g" does not exist` — again PostgreSQL's answer — and
+so is a qualified term naming a column the relation does not have. All of
+these are decided at PLAN time, before a row is read, so they are the same on
+every execution path.
 
 A term that is an EXPRESSION — `PARTITION BY o.id + 0`, `ORDER BY amount * 2`,
 a `ROW` field path — is computed into a column of its own before the window
-runs, and a key the engine cannot resolve at all is a loud refusal rather than
-a silent single partition.
+runs.
 
 **One exception, on the distributed binary.** A qualified term naming a
 correlated `LATERAL` arm binds the OUTER relation's column of that bare name

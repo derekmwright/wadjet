@@ -917,17 +917,21 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `server.TestArcSRAStarOverAPolicedArmNeverPublishesTheOtherArmsValue`'s
      `dupname_reference_into_a_policed_block`.
 
-   - **`PARTITION BY <bare name>` over two join arms that both publish it is
-     answered, not refused.** (Added 2026-09-07, #975.) PostgreSQL raises
-     42702 `column reference "w" is ambiguous` for
-     `SUM(y.w) OVER (PARTITION BY w)` where two FROM items publish `w`,
-     verified live; wadjet binds one of them and answers. It is the same
-     superset as the `ORDER BY <name>` entry above and it is the BOUNDARY of
-     #975's fix rather than a residual of it: that fix makes a QUALIFIED key
-     bind the arm its qualifier names, and a key with no qualifier names no
-     arm. `coordinator.TestArcK1AWindowPartitionKeyBindsItsOwnArm`'s
-     `975 ctl the BARE contested spelling PostgreSQL refuses` records which
-     column it binds, so a change there is a diff rather than a surprise.
+   - ~~**`PARTITION BY <bare name>` over two join arms that both publish it is
+     answered, not refused.**~~ (Added 2026-09-07, #975; **CLOSED 2026-09-20
+     by arc RS, #1161/#1162.**) PostgreSQL raises 42702 `column reference "w"
+     is ambiguous` for `SUM(y.w) OVER (PARTITION BY w)` where two FROM items
+     publish `w`, verified live; wadjet bound one of them and answered.
+
+     It closed as a consequence rather than as a target. A SELECT-list WINDOW
+     item was the one spelling the binder never resolved a name in, so no
+     window key reached the scope's ambiguity census at all. Now that a window
+     key is resolved like any other reference, a bare name two of the block's
+     own sources provide reaches the same `srcCount > 1` rule every other
+     clause has used since #367, and the statement is 42702 — PostgreSQL's own
+     answer, re-measured on 17.11. `coordinator.TestArcK1AWindowPartitionKeyBindsItsOwnArm`'s
+     `975 ctl the BARE contested spelling PostgreSQL refuses` asserts the
+     refusal now; the row set it used to record is gone, which is the proof.
 
    - **A FOLDED identifier resolves case-insensitively when exactly one
      column matches.** (Added 2026-09-03, #731.) An UNQUOTED identifier folds
@@ -1683,7 +1687,11 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      whitespace trimmed — so `'+NaN'`, `'Infin'` and `'abc'` all stay 22P02.
      `ORDER BY` and `GROUP BY` need nothing: no such value can be stored, so
      no comparator or key ever meets one.
-   - **A JOIN's ON condition can reference comma-join siblings; PostgreSQL rejects this.** (Closed #617.) A join predicate like `SELECT ... FROM a, b JOIN c ON a.k = c.k WHERE ...` references a sibling of the comma join in its ON clause. PostgreSQL 17 rejects this with "invalid reference to FROM-clause entry"; wadjet answers it, matching DuckDB. This is a strict SUPERSET: errors on PostgreSQL, runs on wadjet; not a value divergence and not a wire-protocol violation. Gated against DuckDB and the two-path oracle (PostgreSQL offers no value to assert). #593 fixed the prior silent-zero wrong answer in this shape. The reject-like-PostgreSQL alternative was considered and declined because no client should rely on the error and the planner lacks the ON-scope validation it would require.
+   - ~~**A JOIN's ON condition can reference comma-join siblings; PostgreSQL rejects this.**~~ (Closed #617; **REVERSED 2026-09-20 by arc RS, #1220.**) A join predicate like `SELECT ... FROM a, b JOIN c ON a.k = c.k` referenced a sibling of the comma join in its ON clause, and wadjet answered it where PostgreSQL 17 raises 42P01 `invalid reference to FROM-clause entry`. The entry declined the reject-like-PostgreSQL alternative on two grounds, and this arc's measurement retired both.
+
+     The first was that no client should rely on the error. The SHAPE is wider than the entry's example: the same missing restriction let an ON clause name a relation the statement joins LATER (`FROM a JOIN b ON c.x = a.x JOIN c ON …`), which is not a superset of anything — it is a typo answered with rows. 82 of 200 SQLancer databases at seed 1 stop on that shape, so a generator's expected-error list is exactly the client relying on it, and ADR-0012's own rule applies: an answered statement PostgreSQL refuses for an unresolvable NAME is not a useful superset, because it hides typos.
+
+     The second was that the planner lacked the ON-scope validation. It has it now: `physical.relationCensus` records every relation the FROM declares in parse order with the comma item and join that introduced it, and `visibleAtJoin` is the set an ON may name. Both of PostgreSQL's sentences are matched, and the split between them is positional — a relation joined LATER is `missing FROM-clause entry`, one written EARLIER in another FROM item is `invalid reference to FROM-clause entry` — measured live on 17.11. #593's silent-zero wrong answer in this shape stays fixed; the statement is now refused before it plans. Gated by `physical.TestArcRSAQualifiedReferenceNamesOneRelationInScope` and `coordinator.TestArcRSAQualifiedReferenceNamesOneRelationOnEveryArm`.
 
    - **An aggregate of the OUTER level inside a subquery's WHERE is refused;
      PostgreSQL accepts it.** (Added 2026-09-03, #809.) `HAVING (SELECT MAX(k)
