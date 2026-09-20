@@ -81,7 +81,7 @@ func (s *outerRefScope) nest(info *SelectInfo) *outerRefScope {
 		inner[t] = true
 	}
 	var cols map[string]bool
-	if nestedCols := collectInnerColumns(info, s.resolve); nestedCols != nil || s.innerCols != nil {
+	if nestedCols := collectInnerColumns(info, s.resolve, nil); nestedCols != nil || s.innerCols != nil {
 		cols = make(map[string]bool, len(s.innerCols)+len(nestedCols))
 		for c := range s.innerCols {
 			cols[c] = true
@@ -219,7 +219,7 @@ func findCorrelatedRefs(subquerySQL string, outerTables map[string]bool, outerCo
 		outerTables: outerTables,
 		innerTables: collectInnerTables(info),
 		outerCols:   outerCols,
-		innerCols:   collectInnerColumns(info, resolve),
+		innerCols:   collectInnerColumns(info, resolve, nil),
 		resolve:     resolve,
 	}
 
@@ -354,7 +354,7 @@ func collectInnerTables(info *SelectInfo) map[string]bool {
 // ENCLOSING query, the subquery was classified CORRELATED, the outer row's
 // value was substituted into the predicate — making it constant TRUE — and
 // every arm answered the unfiltered aggregate in silence (#955).
-func collectInnerColumns(info *SelectInfo, resolve TableColumns) map[string]bool {
+func collectInnerColumns(info *SelectInfo, resolve TableColumns, fn FromItemColumns) map[string]bool {
 	var m map[string]bool
 	add := func(cols []string) {
 		for _, col := range cols {
@@ -368,10 +368,10 @@ func collectInnerColumns(info *SelectInfo, resolve TableColumns) map[string]bool
 		}
 	}
 	for i := range info.Tables {
-		add(sourceColumns(&info.Tables[i], resolve))
+		add(sourceColumns(&info.Tables[i], resolve, fn))
 	}
 	for i := range info.Joins {
-		add(sourceColumns(joinRightSource(&info.Joins[i]), resolve))
+		add(sourceColumns(joinRightSource(&info.Joins[i]), resolve, fn))
 	}
 	return m
 }
@@ -385,18 +385,26 @@ func collectInnerColumns(info *SelectInfo, resolve TableColumns) map[string]bool
 // a name for the resolver. A COLUMN-ALIAS LIST renames the leading outputs
 // positionally and HIDES the names it replaces, which is why it is applied over
 // a complete list and is the whole answer when there is none.
-func sourceColumns(t *TableRef, resolve TableColumns) []string {
+func sourceColumns(t *TableRef, resolve TableColumns, fn FromItemColumns) []string {
 	if t == nil {
 		return nil
 	}
 	var names []string
 	switch {
 	case t.IsFunction:
-		// A table function's namespace is open to this package; only an
-		// explicit alias list can name any of it.
+		// A table function's namespace is not knowable in this package: for
+		// `generate_series` it is the CALL's, and for a file reader it is the
+		// INPUT's, and neither is a name a catalog answers. A caller that CAN
+		// name it — the physical binder, which reads a declared signature and,
+		// after the door has authorized the capability, a reader's own schema
+		// (ADR-0039 §1 and §3) — passes `fn` and the star over it expands.
+		// Without one the namespace stays open, exactly as it was.
+		if fn != nil {
+			names = fn(t)
+		}
 	case strings.HasPrefix(t.Name, "("):
 		if body, err := t.SubSelect(); err == nil && body != nil {
-			names = blockPublishedColumns(body, resolve)
+			names = blockPublishedColumns(body, resolve, fn)
 		}
 	default:
 		if resolve != nil && t.Name != "" {
@@ -453,7 +461,23 @@ func OverlayColumnAliases(aliases, names []string) []string {
 // function the correlation classifier already resolves a CTE reference with,
 // exported rather than reimplemented.
 func BlockPublishedColumns(info *SelectInfo, resolve TableColumns) []string {
-	return blockPublishedColumns(info, resolve)
+	return blockPublishedColumns(info, resolve, nil)
+}
+
+// FromItemColumns answers what ONE FROM item publishes, for the items a name
+// cannot resolve — a table function, whose columns are its CALL's or its
+// INPUT's. nil is the honest answer for one this caller cannot name, and the
+// same "unknown" a nil TableColumns means.
+type FromItemColumns func(t *TableRef) []string
+
+// BlockPublishedColumnsWithFuncs is BlockPublishedColumns for a caller that
+// can also name a TABLE FUNCTION's columns — the physical binder, once the
+// door has authorized the table-function capability (ADR-0039 §3). Without
+// one a star over a table function leaves the block's namespace unknown, and
+// an unknown namespace is an open scope: a reference to a column the block
+// does not publish answers NULL for every row instead of 42703 (#1231).
+func BlockPublishedColumnsWithFuncs(info *SelectInfo, resolve TableColumns, fn FromItemColumns) []string {
+	return blockPublishedColumns(info, resolve, fn)
 }
 
 // blockPublishedColumns is one query block's output namespace, IN THE ORDER the
@@ -472,13 +496,13 @@ func BlockPublishedColumns(info *SelectInfo, resolve TableColumns) []string {
 // Order is load-bearing rather than cosmetic: sourceColumns overlays a
 // column-alias list POSITIONALLY over this list, so `SELECT a, t.*, b` has to
 // publish the star's columns between `a` and `b` and not after them (B1/P3).
-func blockPublishedColumns(info *SelectInfo, resolve TableColumns) []string {
+func blockPublishedColumns(info *SelectInfo, resolve TableColumns, fn FromItemColumns) []string {
 	if info == nil {
 		return nil
 	}
 	if info.Union != nil {
 		// A set operation publishes its LEFT arm's names, PostgreSQL's rule.
-		return blockPublishedColumns(info.Union.Left, resolve)
+		return blockPublishedColumns(info.Union.Left, resolve, fn)
 	}
 	out := make([]string, 0, len(info.Columns))
 	for i := range info.Columns {
@@ -489,7 +513,7 @@ func blockPublishedColumns(info *SelectInfo, resolve TableColumns) []string {
 			}
 			continue
 		}
-		cols, ok := starColumns(info, c.TableRef, resolve)
+		cols, ok := starColumns(info, c.TableRef, resolve, fn)
 		if !ok {
 			return nil
 		}
@@ -504,19 +528,19 @@ func blockPublishedColumns(info *SelectInfo, resolve TableColumns) []string {
 // qualifier that matches no FROM item this layer can see — because a partial
 // answer here is a claim about a relation's schema and the caller's contract
 // is complete-or-nothing.
-func starColumns(info *SelectInfo, qualifier string, resolve TableColumns) ([]string, bool) {
+func starColumns(info *SelectInfo, qualifier string, resolve TableColumns, fn FromItemColumns) ([]string, bool) {
 	if qualifier != "" {
 		q := strings.ToLower(strings.TrimSuffix(qualifier, "."))
 		for i := range info.Tables {
 			if sourceIdentifier(&info.Tables[i]) == q {
-				cols := sourceColumns(&info.Tables[i], resolve)
+				cols := sourceColumns(&info.Tables[i], resolve, fn)
 				return cols, cols != nil
 			}
 		}
 		for i := range info.Joins {
 			ref := joinRightSource(&info.Joins[i])
 			if sourceIdentifier(ref) == q {
-				cols := sourceColumns(ref, resolve)
+				cols := sourceColumns(ref, resolve, fn)
 				return cols, cols != nil
 			}
 		}
@@ -524,14 +548,14 @@ func starColumns(info *SelectInfo, qualifier string, resolve TableColumns) ([]st
 	}
 	var out []string
 	for i := range info.Tables {
-		cols := sourceColumns(&info.Tables[i], resolve)
+		cols := sourceColumns(&info.Tables[i], resolve, fn)
 		if cols == nil {
 			return nil, false
 		}
 		out = append(out, cols...)
 	}
 	for i := range info.Joins {
-		cols := sourceColumns(joinRightSource(&info.Joins[i]), resolve)
+		cols := sourceColumns(joinRightSource(&info.Joins[i]), resolve, fn)
 		if cols == nil {
 			return nil, false
 		}
@@ -572,6 +596,13 @@ func joinRightSource(j *JoinInfo) *TableRef {
 // rule, and what keeps a self-referencing body from resolving against the item
 // it is defining.
 func CTEColumns(ctes []CTEDef, base TableColumns) TableColumns {
+	return CTEColumnsWithFuncs(ctes, base, nil)
+}
+
+// CTEColumnsWithFuncs is CTEColumns for a caller that can also name a TABLE
+// FUNCTION's columns, so a WITH item whose body is `SELECT * FROM
+// read_json(…)` publishes the reader's columns rather than nothing.
+func CTEColumnsWithFuncs(ctes []CTEDef, base TableColumns, fn FromItemColumns) TableColumns {
 	if len(ctes) == 0 {
 		return base
 	}
@@ -617,7 +648,7 @@ func CTEColumns(ctes []CTEDef, base TableColumns) TableColumns {
 			// substituted — `9, 0` for PostgreSQL's `1, 1` (#958). One rule,
 			// the same `OverlayColumnAliases` a derived table's list takes.
 			return OverlayColumnAliases(c.Columns,
-				blockPublishedColumns(body, resolveAt(i)))
+				blockPublishedColumns(body, resolveAt(i), fn))
 		}
 	}
 	return resolveAt(len(ctes))

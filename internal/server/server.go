@@ -525,15 +525,24 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// Annotate scan columns from catalog so optimizer can resolve unqualified refs
 	planner := s.newPlanner(r)
 
+	// The table-function CAPABILITY, BEFORE the binder and before the scan
+	// annotation (ADR-0034, ADR-0039 §3). A denied identity is refused here
+	// with nothing opened, and the context this returns is what lets the
+	// planner read a reader's schema at all.
+	execCtx, err := auth.AuthorizeTableFunctions(r.Context(), s.provider, "http", selectInfo)
+	if err != nil {
+		writeSQLError(w, http.StatusForbidden, err.Error(), err)
+		return
+	}
+
 	// Reject references to columns that resolve to no source (plan-time name
 	// binding), under the calling identity's schema: a denied column is not
 	// in this caller's table, so it is not in the "available:" hint (#859).
-	if err := auth.ValidateStatementColumns(r.Context(), s.provider, s.catalog, selectInfo, "http"); err != nil {
+	if err := auth.ValidateStatementColumns(execCtx, s.provider, s.catalog, selectInfo, "http"); err != nil {
 		writeSQLError(w, http.StatusBadRequest, err.Error(), err)
 		return
 	}
 
-	execCtx := r.Context()
 	planner.AnnotateScanColumns(execCtx, logicalPlan)
 
 	// ABAC at plan level, through the SAME auth.EnforcePlanPolicies the
@@ -1187,11 +1196,19 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, parsed *p
 		return
 	}
 	planner := s.newPlanner(r)
-	if err := auth.ValidateStatementColumns(r.Context(), s.provider, s.catalog, selectInfo, "http"); err != nil {
+	// The table-function CAPABILITY, BEFORE the binder and before the scan
+	// annotation (ADR-0034, ADR-0039 §3). A denied identity is refused here
+	// with nothing opened, and the context this returns is what lets the
+	// planner read a reader's schema at all.
+	explainCtx, err := auth.AuthorizeTableFunctions(r.Context(), s.provider, "http", selectInfo)
+	if err != nil {
+		writeSQLError(w, http.StatusForbidden, err.Error(), err)
+		return
+	}
+	if err := auth.ValidateStatementColumns(explainCtx, s.provider, s.catalog, selectInfo, "http"); err != nil {
 		writeSQLError(w, http.StatusBadRequest, err.Error(), err)
 		return
 	}
-	explainCtx := r.Context()
 	planner.AnnotateScanColumns(explainCtx, logicalPlan)
 	// EXPLAIN plans what the query would RUN, so it enforces what the query
 	// would run under: without this the plan text showed a bare scan where

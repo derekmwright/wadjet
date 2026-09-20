@@ -505,6 +505,15 @@ func (db *DB) query(ctx context.Context, sql string, gatherBytes int64) (res *Qu
 
 	planner := db.newPlanner(ctx)
 
+	// The table-function CAPABILITY, BEFORE the binder and before the scan
+	// annotation (ADR-0034, ADR-0039 §3). A denied identity is refused here
+	// with nothing opened, and the context this returns is what lets the
+	// planner read a reader's schema at all.
+	ctx, err = auth.AuthorizeTableFunctions(ctx, db.authProvider, "embedded", selectInfo)
+	if err != nil {
+		return nil, err
+	}
+
 	// Reject references to columns that resolve to no source (plan-time name
 	// binding) before annotation/optimization rewrite the plan.
 	//
@@ -667,6 +676,16 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 	}
 
 	planner := db.newPlanner(ctx)
+
+	// The table-function CAPABILITY, BEFORE the binder and before the scan
+	// annotation (ADR-0034, ADR-0039 §3). A denied identity is refused here
+	// with nothing opened, and the context this returns is what lets the
+	// planner read a reader's schema at all.
+	ctx, err = auth.AuthorizeTableFunctions(ctx, db.authProvider, "embedded", selectInfo)
+	if err != nil {
+		return nil, err
+	}
+
 	// Before the build, for the reason Query's own call site records: the
 	// builder's own refusals carry no SQLSTATE (#590). Under the calling
 	// identity's schema, for the reason it records too (#859).

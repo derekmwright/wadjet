@@ -10,6 +10,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
@@ -117,6 +118,7 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 			}
 		}
 		var source exec.Source
+		var readerSchema []parquet.Column
 		if node.FuncName == "unnest" {
 			us, err := newUnnestSource(node.FuncArgs, node.WithOrdinality)
 			if err != nil {
@@ -129,6 +131,21 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 				return nil, nil, nil, fmt.Errorf("table function %s: %w", node.FuncName, err)
 			}
 			source = ts
+			// What the PLAN read of this reader's input, and the backstop
+			// that holds the batches to it. The same cached answer the
+			// binder and the annotation pass bound against, so nothing is
+			// read twice and nothing can disagree with them here.
+			if cols, known := readerPlanTimeSchema(ctx, node.FuncName, node.FuncArgs, node.FuncNamedArgs); known {
+				relName := node.TableAlias
+				if relName == "" {
+					relName = node.FuncName
+				}
+				if len(cols) == 0 {
+					return nil, nil, nil, emptyReaderRefusal(node.FuncName, node.FuncArgs)
+				}
+				source = withPlanTimeSchema(source, cols, relName)
+				readerSchema = cols
+			}
 		}
 		// The FROM item's column-alias list, applied at the one layer that
 		// knows the function's width (#1184), and — for a function whose
@@ -146,8 +163,17 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 			}
 			source = withRequiredColumns(source, node.FuncRequiredColumns, relName)
 		}
-		if cols, known := tableFuncDeclaredSchema(node.FuncName, node.FuncArgs, node.WithOrdinality); known {
-			renamed, err := applyFuncColumnAliases(cols, node.FuncColAliases, node.TableAlias)
+		// A relation with no rows still publishes its columns — for a
+		// function whose SIGNATURE declares them, and now for a READER whose
+		// input declares them too (a Parquet footer, a CSV header row).
+		// Without it a reader that produced no batch reached the door as
+		// `XX000 the result has no columns at all` (#1230).
+		declared, known := tableFuncDeclaredSchema(node.FuncName, node.FuncArgs, node.WithOrdinality)
+		if !known && len(readerSchema) > 0 {
+			declared, known = readerSchema, true
+		}
+		if known {
+			renamed, err := applyFuncColumnAliases(declared, node.FuncColAliases, node.TableAlias)
 			if err != nil {
 				return nil, nil, nil, err
 			}

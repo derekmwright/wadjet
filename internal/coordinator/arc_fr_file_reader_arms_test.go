@@ -4,12 +4,16 @@ package coordinator
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/auth"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/worker"
 )
 
@@ -153,6 +157,127 @@ func TestArcFRAFileReaderIsARelationOnEveryArm(t *testing.T) {
 			if tc.dagPin != "" && pinnedArms == 0 {
 				t.Errorf("the pinned distributed refusal %q was produced by NO arm; delete the pin",
 					tc.dagPin)
+			}
+		})
+	}
+}
+
+// ARC FR — THE COORDINATOR DOOR AUTHORIZES BEFORE IT READS.
+//
+// `internal/server`'s own gate holds the embedded, pgwire, HTTP and gRPC
+// doors to it. This is the same property for the two doors that live here:
+// `ExecuteSQL` (the small-query fast path AND the stage DAG) and the async /
+// EXPLAIN entry, both of which plan a statement of their own and both of
+// which call `auth.AuthorizeTableFunctions` before the binder.
+//
+// `physical.ReaderSchemaReads` counts the times the planner OPENED a reader's
+// input. The counter is the discriminator, because the 42501 alone is not
+// one: a plan that read the file and THEN refused answers 42501 too.
+func TestArcFRTheCoordinatorDoorAuthorizesBeforeItReads(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	t.Cleanup(cancel)
+
+	dir := t.TempDir()
+	csvPath := filepath.Join(dir, "frcoord.csv")
+	if err := os.WriteFile(csvPath, []byte("secret\nserver-local-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// `reader` holds every RELATION and no table-function capability; `ops`
+	// holds `admin`, which is what the legacy-role path requires.
+	authn, authz := auth.New(auth.Config{
+		Enabled: true,
+		APIKeys: []auth.APIKeyDef{
+			{Key: "fr-reader", Name: "reader", Role: "reader"},
+			{Key: "fr-ops", Name: "ops", Role: "ops"},
+		},
+		Roles: []auth.RoleConfig{
+			{Name: "reader", Tables: []string{"*"}, Allow: []string{"read"}},
+			{Name: "ops", Tables: []string{"*"}, Allow: []string{"read", "write", "admin"}},
+		},
+	})
+	provider := auth.NewProvider(authn, authz, nil, nil)
+	readerCtx := auth.ContextWithIdentity(ctx, &auth.Identity{
+		Name: "reader", Role: "reader", Method: "apikey",
+		Tables: []string{"*"}, Perms: []string{"read"}})
+	opsCtx := auth.ContextWithIdentity(ctx, &auth.Identity{
+		Name: "ops", Role: "ops", Method: "apikey",
+		Tables: []string{"*"}, Perms: []string{"read", "write", "admin"}})
+
+	infra := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infra, nil)
+	fast := tmdCoordinator(t, ctx, infra, func(c *Config) { c.LocalFastPathBytes = DefaultLocalFastPathBytes })
+	fast.SetAuthProvider(provider)
+	dag := tmdCoordinator(t, ctx, infra)
+	dag.SetAuthProvider(provider)
+
+	doors := []struct {
+		name string
+		run  func(context.Context, string) error
+	}{
+		{"coordinator/fastpath", func(c context.Context, sql string) error {
+			res, err := fast.ExecuteSQL(c, sql)
+			if err != nil {
+				return err
+			}
+			if res != nil && res.Error != "" {
+				return fmt.Errorf("%s", res.Error)
+			}
+			return nil
+		}},
+		{"coordinator/dag", func(c context.Context, sql string) error {
+			res, err := dag.ExecuteSQL(c, sql)
+			if err != nil {
+				return err
+			}
+			if res != nil && res.Error != "" {
+				return fmt.Errorf("%s", res.Error)
+			}
+			return nil
+		}},
+	}
+
+	cells := []struct{ name, sql string }{
+		{"direct", `SELECT * FROM read_csv('` + csvPath + `')`},
+		{"star_qualified", `SELECT f.* FROM read_csv('` + csvPath + `') AS f`},
+		{"cte", `WITH c AS (SELECT * FROM read_csv('` + csvPath + `')) SELECT * FROM c`},
+		{"derived_table", `SELECT * FROM (SELECT * FROM read_csv('` + csvPath + `')) d`},
+		{"scalar_subquery", `SELECT (SELECT COUNT(*) FROM read_csv('` + csvPath + `')) AS c`},
+		{"join_arm", `SELECT t.id FROM typemx t JOIN read_csv('` + csvPath +
+			`') f ON t.c_str = f.secret`},
+	}
+
+	for _, d := range doors {
+		d := d
+		t.Run("refused-identity-opens-nothing/"+d.name, func(t *testing.T) {
+			for _, c := range cells {
+				before := physical.ReaderSchemaReads.Load()
+				err := d.run(readerCtx, c.sql)
+				if err == nil {
+					t.Errorf("%s/%s: answered where the policy grants no table-function capability",
+						d.name, c.name)
+				} else if state := sqlerr.StateOf(err); state != "42501" {
+					t.Errorf("%s/%s: SQLSTATE %q, want 42501: %v", d.name, c.name, state, err)
+				}
+				if after := physical.ReaderSchemaReads.Load(); after != before {
+					t.Errorf("%s/%s: the planner opened the reader's input %d time(s) for an "+
+						"identity the policy refuses — the capability must be decided first",
+						d.name, c.name, after-before)
+				}
+			}
+		})
+		t.Run("authorized-identity-reads/"+d.name, func(t *testing.T) {
+			before := physical.ReaderSchemaReads.Load()
+			if err := d.run(opsCtx, `SELECT f.* FROM read_csv('`+csvPath+`') AS f`); err != nil &&
+				!strings.Contains(err.Error(), "no dependencies and no ScanFiles") {
+				t.Fatalf("%s: an admin identity must read the file: %v", d.name, err)
+			}
+			if physical.ReaderSchemaReads.Load() == before {
+				t.Errorf("%s: the planner read NO schema for an authorized identity, so the "+
+					"zero above proves nothing — the counter is not wired to this door", d.name)
 			}
 		})
 	}

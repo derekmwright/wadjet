@@ -403,6 +403,14 @@ func (db *DB) declaredOutputFor(ctx context.Context, parsed *plansql.ParsedQuery
 		return nil, fmt.Errorf("extracting SELECT: %w", err)
 	}
 	planner := db.newPlanner(ctx)
+	// The table-function CAPABILITY, BEFORE the binder and before the scan
+	// annotation (ADR-0034, ADR-0039 §3). A denied identity is refused here
+	// with nothing opened, and the context this returns is what lets the
+	// planner read a reader's schema at all.
+	ctx, err = auth.AuthorizeTableFunctions(ctx, db.authProvider, "embedded", selectInfo)
+	if err != nil {
+		return nil, err
+	}
 	if err := auth.ValidateStatementColumns(ctx, db.authProvider, db.catalog, selectInfo, "embedded"); err != nil {
 		return nil, err
 	}

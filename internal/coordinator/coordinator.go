@@ -1059,6 +1059,15 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		res.Error = err.Error()
 	}()
 
+	// The table-function CAPABILITY, BEFORE the binder and before the scan
+	// annotation (ADR-0034, ADR-0039 §3). A denied identity is refused here
+	// with nothing opened, and the context this returns is what lets the
+	// planner read a reader's schema at all.
+	ctx, err = auth.AuthorizeTableFunctions(ctx, c.authProvider, "coordinator", selectInfo)
+	if err != nil {
+		return nil, err
+	}
+
 	// Reject references to columns that resolve to no source (plan-time name
 	// binding), against the schema the CALLING IDENTITY can see — a column an
 	// ABAC policy denies is not in this caller's table, so it is not in the
@@ -3591,6 +3600,15 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	selectInfo, err := plansql.ExtractSelect(parsed)
 	if err != nil {
 		return "", "", fmt.Errorf("extract: %w", err)
+	}
+
+	// The table-function CAPABILITY, BEFORE the binder and before the scan
+	// annotation (ADR-0034, ADR-0039 §3). A denied identity is refused here
+	// with nothing opened, and the context this returns is what lets the
+	// planner read a reader's schema at all.
+	ctx, err = auth.AuthorizeTableFunctions(ctx, c.authProvider, "coordinator", selectInfo)
+	if err != nil {
+		return "", "", err
 	}
 
 	// Reject references to columns that resolve to no source (plan-time name

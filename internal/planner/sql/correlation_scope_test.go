@@ -237,7 +237,7 @@ func TestAColumnAliasListRenamesPositionally(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse: %v", err)
 			}
-			got := sourceColumns(&info.Tables[0], TableColumns(i1Catalog))
+			got := sourceColumns(&info.Tables[0], TableColumns(i1Catalog), nil)
 			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
 				t.Fatalf("sourceColumns = %v, want %v\n  SQL: %s", got, tc.want, tc.sql)
 			}
@@ -301,7 +301,7 @@ func TestAStarPublishesWhatItStandsFor(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse: %v", err)
 			}
-			got := blockPublishedColumns(info, resolve)
+			got := blockPublishedColumns(info, resolve, nil)
 			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
 				t.Fatalf("blockPublishedColumns = %v, want %v\n  SQL: %s", got, tc.want, tc.sql)
 			}
@@ -322,7 +322,7 @@ func TestAColumnAliasListOverlaysTheStarInPosition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	got := sourceColumns(&info.Tables[0], resolve)
+	got := sourceColumns(&info.Tables[0], resolve, nil)
 	want := []string{"p", "q", "a", "b", "s", "a"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("sourceColumns = %v, want %v — the list renames the LEADING columns, "+

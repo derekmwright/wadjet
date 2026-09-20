@@ -1042,6 +1042,20 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 	if tr.IsFunction {
 		cols, known := tableFuncDeclaredSchema(tr.Name, tr.FuncArgs, tr.WithOrdinality)
 		if !known {
+			// A FILE READER's columns are its INPUT's. The door authorizes
+			// the table-function capability BEFORE this binder runs, so the
+			// input may be read here — bounded, and only under a context
+			// carrying that authorization (reader_schema.go). With a column
+			// list the reader is an ordinary relation: an unknown column is
+			// 42703 at plan time through any path, including through a join
+			// arm, a CTE and a derived table (#1231, #1230).
+			cols, known = readerPlanTimeSchema(ctx, tr.Name, tr.FuncArgs, tr.FuncNamedArgs)
+			// Zero columns is an EMPTY input. It is refused by name where the
+			// pipeline is built, and closing a scope over nothing here would
+			// make every reference to it 42703 with the wrong reason.
+			known = known && len(cols) > 0
+		}
+		if !known {
 			into.open = true
 			into.sourceOpen = true
 			return nil
@@ -1971,8 +1985,40 @@ func (b *binder) blockColumns(ctx context.Context, info *plansql.SelectInfo) ([]
 	if names, star := blockOutputs(info); !star {
 		return names, len(names) > 0
 	}
-	names := plansql.BlockPublishedColumns(info, b.tableColumns(ctx))
+	names := plansql.BlockPublishedColumnsWithFuncs(info, b.tableColumns(ctx), b.tableFuncColumns(ctx))
 	return names, len(names) > 0
+}
+
+// tableFuncColumns is the binder's TABLE FUNCTION scope as a
+// plansql.FromItemColumns resolver: what one call publishes, from its
+// SIGNATURE where the signature declares it and from its INPUT where the door
+// has authorized reading it (reader_schema.go).
+//
+// It is what makes a star over a table function EXPAND inside a derived table
+// or a CTE body. Without it `SELECT zz FROM (SELECT * FROM read_json(…)) t
+// JOIN …` published an unknown namespace, the derived scope stayed OPEN, and
+// the reference answered NULL for every row where PostgreSQL raises 42703
+// (#1231). The alias list is NOT applied here — `sourceColumns` overlays it,
+// the one place that rule lives.
+func (b *binder) tableFuncColumns(ctx context.Context) plansql.FromItemColumns {
+	return func(t *plansql.TableRef) []string {
+		if t == nil || !t.IsFunction {
+			return nil
+		}
+		cols, known := tableFuncDeclaredSchema(t.Name, t.FuncArgs, t.WithOrdinality)
+		if !known {
+			cols, known = readerPlanTimeSchema(ctx, t.Name, t.FuncArgs, t.FuncNamedArgs)
+			known = known && len(cols) > 0
+		}
+		if !known {
+			return nil
+		}
+		out := make([]string, len(cols))
+		for i, c := range cols {
+			out[i] = c.Name
+		}
+		return out
+	}
 }
 
 // tableColumns is the binder's catalog and CTE scope as a plansql.TableColumns

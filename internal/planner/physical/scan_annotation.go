@@ -43,7 +43,23 @@ func (p *Planner) annotateScanColumns(ctx context.Context, node *logical.Node) {
 	// FROM item's column-alias list is applied first, because the names the
 	// plan above uses are the RENAMED ones (#1184).
 	if node.Type == logical.NodeScan && node.IsTableFunc {
-		if cols, known := tableFuncDeclaredSchema(node.FuncName, node.FuncArgs, node.WithOrdinality); known {
+		cols, known := tableFuncDeclaredSchema(node.FuncName, node.FuncArgs, node.WithOrdinality)
+		if !known {
+			// A FILE READER's columns are its INPUT's, and the door has
+			// authorized the capability before this pass runs (ADR-0034,
+			// ADR-0039 §3 as this arc rewrote it), so they can be read here
+			// — bounded, and only under a context that carries the
+			// authorization (reader_schema.go). A context without one, or an
+			// input this resolver does not read, leaves the relation exactly
+			// as it was: no annotation, and the first-batch refusal.
+			cols, known = readerPlanTimeSchema(ctx, node.FuncName, node.FuncArgs, node.FuncNamedArgs)
+			// A reader with no columns at all is an EMPTY input, and it is
+			// refused by name where the pipeline is built. Annotating a
+			// zero-column relation here would put an empty list where "not
+			// known" is meant and close a scope over nothing.
+			known = known && len(cols) > 0
+		}
+		if known {
 			if renamed, err := applyFuncColumnAliases(cols, node.FuncColAliases, node.TableAlias); err == nil {
 				stampScanSchema(node, renamed)
 			}

@@ -103,13 +103,15 @@ func TestArcTFATableFunctionIsARelationOnEveryArm(t *testing.T) {
 			pg: "42703"},
 		{issue: "#1210", name: "an_unknown_column_in_an_aggregate",
 			sql: `SELECT COUNT(zz) AS n FROM generate_series(1,2)`, state: "42703", pg: "42703"},
-		// A READER's refusal is made at the FIRST BATCH, which is after stage
-		// emission — so the three DAG arms meet the pin first. The single
-		// arms make the same 42703 the declared functions make at plan time.
+		// A LOCAL FILE READER's refusal is made at PLAN time since arc FR
+		// (#1230): the table-function capability is authorized before the
+		// statement binds, so the planner reads the file's columns and the
+		// binder closes the scope. The pin this cell carried — arc PT's "a
+		// table function is not a DAG stage" — started agreeing on all three
+		// DAG arms, and deleting it is the proof (ADR-0039 §3).
 		{issue: "#1210", name: "an_unknown_column_over_a_reader",
-			sql:    `SELECT zz FROM read_json('` + jsonPath + `')`,
-			state:  "42703",
-			dagPin: seriesPin, pg: "42703"},
+			sql:   `SELECT zz FROM read_json('` + jsonPath + `')`,
+			state: "42703", pg: "42703"},
 		{issue: "#1184", name: "an_over_long_alias_list_refuses_on_every_arm",
 			sql: `SELECT * FROM generate_series(1,3) AS gs(x, y)`, state: "42P10",
 			pg: `42P10 table "gs" has 1 columns available but 2 columns specified`},

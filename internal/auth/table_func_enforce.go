@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -217,4 +219,74 @@ func enforceTableFunctionScans(ctx context.Context, provider *Provider, plan *lo
 		return AuthorizeTableFunction(ctx, provider, protocol, funcName, args, namedArgs)
 	}
 	return logical.ContextWithTableFuncGuard(ctx, guard), nil
+}
+
+// AuthorizeTableFunctions is the FIRST thing a statement door does, before the
+// binder and before the scan annotation (ADR-0034, ADR-0039 §3).
+//
+// Two things happen here and the ORDER between them and everything after is
+// the safety property:
+//
+//  1. Every table function the statement's own FROM items name is DECIDED.
+//     A denied identity gets 42501 before any layer has looked at a path, a
+//     URL or a connection string.
+//  2. The guard and the plan-time SCHEMA PROBE are installed on the context.
+//     The guard is what a call this pass cannot see from the parse — inside a
+//     scalar subquery, an IN list, a CTE body, a scan the optimizer mints —
+//     is decided by when it is reached. The probe is the RECORD that this
+//     door authorized, and `physical.readerPlanTimeSchema` reads a file only
+//     when it finds one and only after asking the guard about that very call.
+//     A door that does not call this function gets no probe, so its planner
+//     opens nothing and the relation keeps the first-batch refusal it had.
+//
+// The plan-level pass inside EnforcePlanPolicies still runs afterwards and is
+// still load-bearing: it sees the scans the BUILDER produced, which is the
+// complete set for the statement's own plan, and it re-installs the same
+// guard for the physical planner's separate subquery plans.
+//
+// Nil/disabled auth authorizes nothing and still installs the probe: with no
+// provider there is no identity to be refused, and reading a file the caller
+// named in their own statement is what the statement asks for.
+func AuthorizeTableFunctions(ctx context.Context, provider *Provider, protocol string,
+	info *plansql.SelectInfo,
+) (context.Context, error) {
+	if provider != nil && provider.Enabled() {
+		for _, tr := range statementTableFunctions(info) {
+			if err := AuthorizeTableFunction(ctx, provider, protocol,
+				tr.Name, tr.FuncArgs, tr.FuncNamedArgs); err != nil {
+				return ctx, err
+			}
+		}
+		ctx = logical.ContextWithTableFuncGuard(ctx,
+			func(funcName string, args []string, namedArgs map[string]string) error {
+				return AuthorizeTableFunction(ctx, provider, protocol, funcName, args, namedArgs)
+			})
+	}
+	return physical.ContextWithReaderSchemaProbe(ctx), nil
+}
+
+// statementTableFunctions lists the table-function FROM items of the block
+// this door parsed — its own items and its joins' right arms.
+//
+// It is deliberately NOT a deep walk. A nested block is SQL text at this
+// point (that is the whole reason ADR-0039 §3 existed), and the guard above
+// is what decides those where they are built. What this list buys is the
+// EARLY refusal for the shapes a caller writes directly, made before anything
+// binds.
+func statementTableFunctions(info *plansql.SelectInfo) []plansql.TableRef {
+	if info == nil {
+		return nil
+	}
+	var out []plansql.TableRef
+	for _, t := range info.Tables {
+		if t.IsFunction && t.Name != "" {
+			out = append(out, t)
+		}
+	}
+	for _, j := range info.Joins {
+		if tr := j.RightTableRef; tr != nil && tr.IsFunction && tr.Name != "" {
+			out = append(out, *tr)
+		}
+	}
+	return out
 }
