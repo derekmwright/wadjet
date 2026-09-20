@@ -80,7 +80,13 @@ func resolveJoinKeyTypes(node *logical.Node, leftKeys, rightKeys []string, cte c
 	}
 	left := joinSideColTypes(node.Children[0], cte)
 	right := joinSideColTypes(node.Children[1], cte)
-	if left == nil || right == nil {
+	// A side that types NOTHING is normally the end of the question. The one
+	// exception is a file or database reader, whose columns are its input's
+	// and which this planner may not open to find out (ADR-0039 §3): the pair
+	// below widens against it rather than leaving an int4 key to meet an int8
+	// vector at the operator.
+	if (left == nil && !sideHasUntypedTableFunc(node.Children[0])) ||
+		(right == nil && !sideHasUntypedTableFunc(node.Children[1])) {
 		return nil
 	}
 	out := make([]parquet.TypeID, len(leftKeys))
@@ -89,6 +95,30 @@ func resolveJoinKeyTypes(node *logical.Node, leftKeys, rightKeys []string, cte c
 		out[i] = exec.KeyTypeUnresolved
 		lt, lok := left[joinKeyLookupName(leftKeys[i])]
 		rt, rok := right[joinKeyLookupName(rightKeys[i])]
+		// ONE SIDE DECLARED int4, THE OTHER A RELATION WITH NO PLAN-TIME
+		// TYPES AT ALL. That is a file or database reader, whose columns are
+		// its input's and which this planner may not open to find out
+		// (ADR-0039 §3) — so the pair cannot be widened from declarations and
+		// the operator would meet an int4 vector against an int8 one and
+		// refuse (exec.joinKeyEncodingMismatch, #615).
+		//
+		// Key it at int8. This is ADR-0024 §2a's rule for an UNKNOWN integer
+		// width applied to a join key: guessing narrow is the unsafe
+		// direction, and the wide key holds every value the narrow one does.
+		// Without it `generate_series(1,2) g(x) JOIN read_json(…) f(k,v) ON
+		// g.x = f.k` refused where it answered before the series declared
+		// int4 — a right shape lost to a declaration (round-1 review's B2
+		// cell measured it).
+		if lok != rok {
+			known, untypedSide := lt, node.Children[1]
+			if rok {
+				known, untypedSide = rt, node.Children[0]
+			}
+			if known == parquet.TypeInt32 && sideHasUntypedTableFunc(untypedSide) {
+				out[i], any = parquet.TypeInt64, true
+			}
+			continue
+		}
 		if !lok || !rok {
 			continue
 		}
@@ -349,4 +379,15 @@ func (p *Planner) cteBodyColTypes(def plansql.CTEDef) (types map[string]parquet.
 		out[strings.ToLower(n)] = c.Type
 	}
 	return out, true
+}
+
+// sideHasUntypedTableFunc reports that this join side reads a table function
+// whose columns are its INPUT's — the one relation in the engine that reaches
+// a join with no declared column types at all, because the planner does not
+// open its input to bind the statement (ADR-0039 §3). The walk crosses only
+// the operators that publish their input's schema unchanged, which is where
+// such a relation can still be the side's whole source.
+func sideHasUntypedTableFunc(n *logical.Node) bool {
+	_, ok := tableFuncSourceRelation(n)
+	return ok
 }

@@ -1297,9 +1297,35 @@ func rebuildSQLFull(info *SelectInfo, cols []string, rewrittenWhere Node, having
 		sb.WriteString(strings.ToUpper(j.Type))
 		sb.WriteString(" ")
 		sb.WriteString(j.RightTable)
+		// A JOIN ARM IS A FROM ITEM, and a table function's FROM item is its
+		// CALL — the same rule the comma-separated items above follow. The
+		// name alone re-parses as a base table nothing declares, so the arm
+		// read empty and a correlated subquery over it answered 0 for every
+		// outer row: #1203's own defect, one clause lower, left open when the
+		// FROM-item half was fixed. Measured by the round-1 review.
+		if tr := j.RightTableRef; tr != nil && tr.IsFunction && tr.FuncCallText != "" {
+			sb.WriteString(tr.FuncCallText)
+			if tr.WithOrdinality {
+				sb.WriteString(" WITH ORDINALITY")
+			}
+		}
 		if j.RightAlias != "" && j.RightAlias != j.RightTable {
 			sb.WriteString(" ")
 			sb.WriteString(j.RightAlias)
+		}
+		// The arm's COLUMN-ALIAS LIST is part of its source, exactly as it is
+		// for a comma item: without it the re-parsed arm publishes the
+		// function's own names and the rewritten predicate names a column
+		// that is not there.
+		if tr := j.RightTableRef; tr != nil && len(tr.ColumnAliases) > 0 {
+			sb.WriteString("(")
+			for k, c := range tr.ColumnAliases {
+				if k > 0 {
+					sb.WriteString(", ")
+				}
+				sb.WriteString(QuoteIdent(c))
+			}
+			sb.WriteString(")")
 		}
 		cond := j.Condition
 		if i < len(joins) && joins[i] != "" {
