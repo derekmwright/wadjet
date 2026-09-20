@@ -148,6 +148,26 @@ func rsCells() []rsCell {
 		// reaching this verdict too.
 		{"dupOk/delimitedAliasIsADifferentName", `SELECT t.id FROM lat_ord t, lat_item "T"`, "", ""},
 
+		// --- a STAR OUTPUT does not open the FROM clause ------------------
+		//
+		// `SELECT *` mints output names the binder cannot enumerate, so an
+		// ORDER BY or GROUP BY naming one of them must not be refused — but a
+		// star never mints a QUALIFIER. One out-of-scope reference had two
+		// dispositions decided by the enclosing SELECT list
+		// (docs/design/window-key-ownership.md §(e) item 8).
+		{"starScope/orderByUnderStar", "SELECT * FROM lat_ord o ORDER BY zz.id",
+			"42P01", `missing FROM-clause entry for table "zz"`},
+		{"starScope/groupByUnderStar", "SELECT * FROM lat_ord o GROUP BY zz.id",
+			"42P01", `missing FROM-clause entry for table "zz"`},
+		{"starScope/whereUnderStar", "SELECT * FROM lat_ord o WHERE zz.id = 1",
+			"42P01", `missing FROM-clause entry for table "zz"`},
+		{"starScope/windowKeyUnderStar", "SELECT *, COUNT(*) OVER (PARTITION BY zz.id) AS n FROM lat_ord o",
+			"42P01", `missing FROM-clause entry for table "zz"`},
+		// The control the openness exists for: a BARE name under a star is
+		// still not refusable, because the star may have minted it.
+		{"starScopeOk/bareOutputNameUnderStar", "SELECT * FROM lat_ord o ORDER BY id", "", ""},
+		{"starScopeOk/qualifiedInScopeUnderStar", "SELECT * FROM lat_ord o ORDER BY o.id", "", ""},
+
 		// --- a sibling FROM item is out of scope without LATERAL ----------
 		{"sibling/withoutLateral", "SELECT s.m FROM lat_ord o, (SELECT o.id AS m) s", "42P01",
 			`invalid reference to FROM-clause entry for table "o"`},
@@ -191,7 +211,7 @@ func TestArcRSAQualifiedReferenceNamesOneRelationInScope(t *testing.T) {
 	// A TABLE WHOSE EVERY CELL REFUSES PROVES ONLY THAT THE BINDER IS LOUD.
 	// The controls are what say the rule is a rule: each is a statement
 	// PostgreSQL answers and one edit from a refusing cell above.
-	if answered < 16 {
+	if answered < 18 {
 		t.Fatalf("only %d control cells were answered — the table has stopped "+
 			"discriminating between a reference in scope and one out of it", answered)
 	}

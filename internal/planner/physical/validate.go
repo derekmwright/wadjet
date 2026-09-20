@@ -95,6 +95,16 @@ type colScope struct {
 	// fieldDecls retains complete derived declarations for postfix binding.
 	fieldDecls map[string]expr.DeclType
 	open       bool
+	// sourceOpen says WHY the scope is open: a FROM SOURCE this binder cannot
+	// enumerate (a table function, a table the catalog does not have, a
+	// derived body it could not read). `open` alone — without this — means a
+	// STAR output list, which mints names the binder cannot enumerate but
+	// never mints a QUALIFIER and never changes which relations the FROM
+	// declares, so the qualifier half of the reference rule still holds there
+	// (arc RS; docs/design/window-key-ownership.md §(e) item 8, where one
+	// out-of-scope reference had two dispositions decided by the enclosing
+	// SELECT list).
+	sourceOpen bool
 	cols       map[string]bool
 	quals      map[string]map[string]bool
 	srcCount   map[string]int
@@ -323,6 +333,9 @@ func (s *colScope) merge(o *colScope) {
 	if o.open {
 		s.open = true
 	}
+	if o.sourceOpen {
+		s.sourceOpen = true
+	}
 	for c := range o.cols {
 		s.cols[c] = true
 	}
@@ -426,8 +439,23 @@ func (s *colScope) refuseDelimitedMiss(ref *plansql.ColRef) error {
 }
 
 func (s *colScope) resolveRef(ref *plansql.ColRef) error {
-	if s == nil || s.open {
+	if s == nil {
 		return nil
+	}
+	if s.open {
+		// A STAR OUTPUT opens the scope for BARE names only. `SELECT *` mints
+		// output names this binder cannot enumerate, so an ORDER BY or GROUP
+		// BY naming one of them must not be refused — but a star never mints
+		// a QUALIFIED name, and it does not change which relations the FROM
+		// declares, so `ORDER BY zz.id` over `SELECT *` is the same 42P01 it
+		// is over a named list. One reference had two dispositions decided by
+		// the enclosing SELECT list before this (window-key-ownership §(e)
+		// item 8). A source this binder cannot enumerate is the other cause
+		// of openness and still settles nothing.
+		if s.sourceOpen || ref.Table == "" {
+			return nil
+		}
+		return s.refuseUnknownRelationQualifier(ref.Table)
 	}
 	col := strings.ToLower(ref.Column)
 	if ref.Table != "" {
@@ -937,9 +965,13 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 // `PARTITION BY g` naming a SELECT alias is 42703, both measured on 17.11
 // (#1161, #1162).
 func resolveExprNames(expr plansql.Node, scope *colScope) error {
-	if expr == nil || scope == nil || scope.open {
+	if expr == nil || scope == nil {
 		return nil
 	}
+	// No `scope.open` guard: resolveRef decides what an OPEN scope can still
+	// settle, and a scope opened by a STAR OUTPUT can still settle a
+	// QUALIFIER. Guarding here returned before it was asked.
+
 	var refs []*plansql.ColRef
 	walkExpr(expr, &refs, nil, nil)
 	for _, r := range refs {
@@ -976,6 +1008,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 		cols, known := tableFuncDeclaredSchema(tr.Name, tr.FuncArgs, tr.WithOrdinality)
 		if !known {
 			into.open = true
+			into.sourceOpen = true
 			return nil
 		}
 		cols, err := applyFuncColumnAliases(cols, tr.ColumnAliases, qual)
@@ -1000,6 +1033,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 		inner, perr := tr.SubSelect()
 		if perr != nil || inner == nil {
 			into.open = true
+			into.sourceOpen = true
 			return nil
 		}
 		// Validate the derived block's internals. A LATERAL derived table
@@ -1016,6 +1050,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 		names, known := b.blockColumns(ctx, inner)
 		if !known {
 			into.open = true
+			into.sourceOpen = true
 			return nil
 		}
 		// The COLUMN-ALIAS LIST renames those outputs positionally, and this
@@ -1047,6 +1082,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 	if e, ok := b.ctes[strings.ToLower(tr.Name)]; ok {
 		if e.open {
 			into.open = true
+			into.sourceOpen = true
 			return nil
 		}
 		for i, n := range e.cols {
@@ -1093,10 +1129,12 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 			return sqlerr.New("42P01", "relation %q does not exist", tr.Name)
 		}
 		into.open = true
+		into.sourceOpen = true
 		return nil
 	}
 	if meta == nil {
 		into.open = true
+		into.sourceOpen = true
 		return nil
 	}
 	for _, c := range meta.Schema.Columns {

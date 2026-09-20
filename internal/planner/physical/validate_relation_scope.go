@@ -270,6 +270,20 @@ func (s *colScope) resolveStarQualifier(table string) error {
 	if s == nil || s.open || table == "" {
 		return nil
 	}
+	return s.refuseUnknownRelationQualifier(table)
+}
+
+// refuseUnknownRelationQualifier is the QUALIFIER half of the reference rule
+// on its own: the name before the dot either answers to something this scope
+// knows, or it earns one of PostgreSQL's 42P01 sentences. It is separate from
+// resolveRef because two callers need exactly this and not the column half —
+// a qualified STAR, which has no column to check, and a reference in a scope
+// opened by a STAR OUTPUT, where the FROM's relations are still known even
+// though the output names are not.
+func (s *colScope) refuseUnknownRelationQualifier(table string) error {
+	if s == nil || table == "" {
+		return nil
+	}
 	q := strings.ToLower(table)
 	if s.quals[q] != nil || s.cols[q] || strings.Contains(q, ".") {
 		return nil
