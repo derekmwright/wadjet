@@ -3,12 +3,18 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/format"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 func TestIsCatalogFreeQuery(t *testing.T) {
@@ -98,8 +104,89 @@ func TestQueryCmdTableFunctionNoObjectStore(t *testing.T) {
 	if got := rows[0]["id_orig_h"]; got != "10.0.0.2" {
 		t.Errorf("first row id_orig_h = %v, want 10.0.0.2 (%q)", got, out)
 	}
-	if got := rows[1]["total"]; got != float64(150) {
-		t.Errorf("second row total = %v, want 150 (%q)", got, out)
+	// `total` is a JSON STRING, not a number, and that is the right answer:
+	// `orig_bytes` is a whole number so the reader publishes it as BIGINT,
+	// `SUM` over a bigint is PostgreSQL's `numeric` (measured on 17.11), and
+	// the CLI renders numeric as a string so its digits survive — exactly
+	// what `SUM` over a catalog BIGINT column has always rendered here
+	// (TestQueryCmdReaderAndCatalogSumRenderTheSame below is that twin).
+	// Before the reader had a plan-time schema its column had no declared
+	// type, the aggregate rules fell to float64, and this read 150 as a
+	// number — a float where the relation holds integers.
+	if got := rows[1]["total"]; got != "150" {
+		t.Errorf("second row total = %#v, want \"150\" (%q)", got, out)
+	}
+}
+
+// TestQueryCmdReaderAndCatalogSumRenderTheSame is the cell that makes the
+// expectation above a RULE rather than a number somebody wrote down: the same
+// aggregate over a reader's column and over a catalog BIGINT column reaches
+// the CLI's renderer in the same Go box and prints the same JSON.
+//
+// It goes through `format.WriteTyped` with `columnTypes`/`resultRows` — the
+// three the `query` command itself calls — rather than through `runQueryCmd`,
+// because the catalog half needs an object store and that rig deliberately
+// points at a dead one (TestQueryCmdCatalogTableStillNeedsStore).
+//
+// Measured at 0c0d33b6: the catalog half already rendered `"250"` / `"150"`
+// and the reader half rendered `250` / `150`. The reader half is what moved.
+func TestQueryCmdReaderAndCatalogSumRenderTheSame(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "conn.log")
+	if err := os.WriteFile(logPath, []byte(
+		"{\"h\":\"10.0.0.1\",\"b\":100}\n{\"h\":\"10.0.0.2\",\"b\":250}\n{\"h\":\"10.0.0.1\",\"b\":50}\n"),
+		0o600); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+
+	db, err := wadjet.Open(ctx, wadjet.Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	for _, ddl := range []string{
+		`CREATE TABLE zsum (h VARCHAR, b BIGINT)`,
+		`INSERT INTO zsum VALUES ('10.0.0.1',100),('10.0.0.2',250),('10.0.0.1',50)`,
+	} {
+		if _, err := db.Query(ctx, ddl); err != nil {
+			t.Fatalf("%s: %v", ddl, err)
+		}
+	}
+
+	render := func(sql string) string {
+		t.Helper()
+		res, err := db.Query(ctx, sql)
+		if err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+		var buf bytes.Buffer
+		if err := format.WriteTyped(&buf, format.JSON, res.Columns,
+			columnTypes(res), resultRows(res)); err != nil {
+			t.Fatalf("rendering: %v", err)
+		}
+		return buf.String()
+	}
+
+	for _, agg := range []struct{ name, expr, want string }{
+		{"sum", "SUM(b)", `"400"`},
+		// MIN/MAX keep the input's width, so they stay JSON numbers on both
+		// relations — the cell that shows this is about the aggregate's
+		// result type and not about readers rendering everything as text.
+		{"max", "MAX(b)", `250`},
+	} {
+		t.Run(agg.name, func(t *testing.T) {
+			catalog := render(`SELECT ` + agg.expr + ` AS total FROM zsum`)
+			reader := render(`SELECT ` + agg.expr + ` AS total FROM read_json('` + logPath + `')`)
+			if catalog != reader {
+				t.Errorf("the same aggregate renders two ways\n  catalog %s\n  reader  %s",
+					catalog, reader)
+			}
+			if !strings.Contains(catalog, agg.want) {
+				t.Errorf("catalog %s rendered %s, want it to contain %s",
+					agg.expr, catalog, agg.want)
+			}
+		})
 	}
 }
 
