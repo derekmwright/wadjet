@@ -532,6 +532,17 @@ func tmdTables() []tmdTable {
 		// items is the row every one of #767's shapes turns on.
 		{latOrdTable, latOrdSchema(), latOrdData()},
 		{latItemTable, latItemSchema(), latItemData()},
+		// The ARC DC fixture (#1232, #1104). Rides along for the same reason
+		// as the fixtures above: only the arc-DC gate names these four, and no
+		// type-matrix corpus entry does. The LATERAL fixture beside it cannot
+		// stand in — it holds no NULL at all, no key present twice, and no key
+		// its join partner lacks, which are the three things that make an
+		// outer reference written in a body's ON, or a condition naming only
+		// the outer row, answer differently from one that is dropped.
+		{dcOutTable, dcOutSchema(), dcOutData()},
+		{dcInTable, dcInSchema(), dcInData()},
+		{dcSideTable, dcSideSchema(), dcSideData()},
+		{dcNulTable, dcNulSchema(), dcNulData()},
 		// The MIXED-CASE RELATION fixture. Every other table name in every
 		// two-path corpus is already its own folded form, so the case
 		// concession for a RELATION name (ADR-0012) had no fixture on the DAG
