@@ -142,7 +142,11 @@ The standard's capture-marker spelling raises 0A000 naming the construct, where 
 
 **An unqualified reference to an unknown column in a join of TWO readers answers NULL for every row.**
 
-`SELECT zz FROM read_json('a.json') b JOIN read_json('a.json') c ON b.a = c.a` returns rows whose `zz` is NULL; PostgreSQL 17.11 raises 42703. This is a silent WRONG VALUE and not a superset — the one shape where a table function's missing column is still answered rather than refused. Neither arm can be held to a bare name when both have unknown column lists, so the first-batch guard declines the check (ADR-0039 §4a). The QUALIFIED spelling in the same join IS refused with 42703. Filed as #1229. (ADR-0012 §5/#1229)
+`SELECT zz FROM read_json('a.json') b JOIN read_json('a.json') c ON b.a = c.a` returns rows whose `zz` is NULL; PostgreSQL 17.11 raises 42703. This is a silent WRONG VALUE and not a superset. Neither arm can be held to a bare name when both have unknown column lists, so the first-batch guard declines the check (ADR-0039 §4a). The QUALIFIED spelling in the same join IS refused with 42703. Reading one of the arms through a CTE or a derived table does NOT restore the check — neither declares a column list either, and a catalog table read through a CTE loses a check it has when it is named directly. Filed as #1229. (ADR-0012 §5/#1229)
+
+**A join between TWO readers whose ON names the right arm's column first answers the CROSS PRODUCT.**
+
+`SELECT COUNT(*) FROM read_json('q1.json') r1 JOIN read_json('q2.json') r2 ON r2.c = r1.a` over a four-row and a two-row file answers 8 where PostgreSQL 17.11 answers 2; written `ON r1.a = r2.c` it answers 2. A join key pair neither side can type — two readers have no plan-time column types — is left unresolved, and the condition is dropped rather than refused. A silent wrong ROW SET, pre-existing and unchanged by v0.23.0, and the same shape as the NULL above: loading one arm into a table (`CREATE TABLE t AS SELECT * FROM read_json(…)`) makes both right. Filed as #1229. (ADR-0012 §5/#1229)
 
 **A FROM alias does not rename a single-column table function's column.**
 

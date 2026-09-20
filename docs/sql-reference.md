@@ -258,10 +258,12 @@ The check reaches a reader used as a JOIN ARM as well, for the names that are
 certain there: a reference qualified by the arm's own alias, the join's own
 `ON` condition, and a bare reference no other arm of the join can provide.
 
-**One shape is still wrong.** A join holding TWO readers can decide nothing
-about a bare name, so an UNQUALIFIED reference to a column neither publishes
-is not checked — and it answers NULL for every row where PostgreSQL raises
-`42703`:
+**Two shapes of a join between TWO readers are still wrong** (#1229). Such a
+join can decide nothing about a bare name, so an UNQUALIFIED reference to a
+column neither publishes is not checked — and it answers NULL for every row
+where PostgreSQL raises `42703`. And its key types can be resolved from
+neither side, so an `ON` that names the RIGHT arm's column first drops the
+condition and answers the CROSS PRODUCT:
 
 ```sql
 -- NULL for every row; PostgreSQL raises 42703
@@ -269,10 +271,16 @@ SELECT zz FROM read_json('a.json') b JOIN read_json('a.json') c ON b.a = c.a
 
 -- 42703, naming the column: qualify the reference
 SELECT b.zz FROM read_json('a.json') b JOIN read_json('a.json') c ON b.a = c.a
+
+-- every pair, not the matching ones: 8 rows over a 4-row and a 2-row file
+SELECT COUNT(*) FROM read_json('q1.json') r1 JOIN read_json('q2.json') r2
+  ON r2.c = r1.a
 ```
 
-Qualify the reference, or read one of the two through a CTE, until this is
-fixed.
+Qualify the reference, and write the left arm's column first, until this is
+fixed. Reading one of the two through a CTE or a derived table does not help —
+neither declares a column list either — but loading one into a table does:
+`CREATE TABLE t AS SELECT * FROM read_json(…)` makes both shapes right.
 
 Two consequences of that timing, both deliberate:
 

@@ -180,8 +180,15 @@ each is a consequence of (3), not an oversight:
   answer a guard built on certainty can give — but declining to CHECK is not
   the same as being right, and this consequence is the one place the ADR's own
   rule ("never a NULL at run time") does not yet hold. Filed as #1229. A
-  QUALIFIED reference in that join IS refused, which is the workaround and the
-  measurement that isolates it.
+  QUALIFIED reference in that join IS refused, which is the measurement that
+  isolates it; routing an arm through a CTE or a derived table does NOT
+  restore the check, because neither declares a column list either — a
+  catalog table read through a CTE loses a check it has when it is named
+  directly. The same join has a second wrong answer from §7's side, filed
+  under the same number: a key pair neither arm can type leaves the condition
+  unresolved, so `ON r2.c = r1.a` between two readers drops it and answers the
+  cross product. §7's widening closes the reader-meets-declared-function pair
+  and has nothing to widen when both sides are readers.
 
 Closing the first three is one change — a post-authorization annotation pass
 both doors reach — and it moves a coordinator call site, which is why this

@@ -5914,11 +5914,14 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     because both need a plan-time column list; a FROM alias does not rename a
     single-column function's column, which PostgreSQL does; and
     `generate_series(…) WITH ORDINALITY` publishes one column where
-    PostgreSQL publishes two. One shape is a silent WRONG VALUE rather than a
-    divergence and is filed as such (#1229): a BARE reference to an unknown
-    column in a join holding TWO readers answers NULL for every row, because
-    neither arm can be held to a bare name; the qualified spelling is
-    refused. The declared functions' own value rules follow PostgreSQL
+    PostgreSQL publishes two. TWO shapes of one join are silent WRONG VALUES
+    rather than divergences and are filed as such (#1229): in a join holding
+    TWO readers, a BARE reference to an unknown column answers NULL for every
+    row, because neither arm can be held to a bare name (the qualified
+    spelling is refused, and routing an arm through a CTE or a derived table
+    does not restore the check); and an `ON` that names the RIGHT arm's column
+    first drops the condition and answers the cross product, because the key
+    pair can be typed from neither side. The declared functions' own value rules follow PostgreSQL
     exactly: the step is never flipped for the caller, `generate_series(5,1)`
     is an empty relation, a zero step is `22023`, a series ends at the 64-bit
     carrier's edge rather than wrapping, and the column is `integer` for
