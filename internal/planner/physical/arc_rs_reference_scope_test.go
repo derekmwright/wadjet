@@ -193,6 +193,24 @@ func rsCells() []rsCell {
 		{"starScopeOk/bareOutputNameUnderStar", "SELECT * FROM lat_ord o ORDER BY id", "", ""},
 		{"starScopeOk/qualifiedInScopeUnderStar", "SELECT * FROM lat_ord o ORDER BY o.id", "", ""},
 
+		// --- a TABLE FUNCTION in FROM is a relation, and this rule reaches it
+		//
+		// Since arc TF (ADR-0039) a table function with a declared schema
+		// leaves the scope CLOSED, so a qualifier naming no relation is
+		// provably absent there too. These four are the interaction, measured
+		// on PostgreSQL 17.11 over `generate_series`.
+		{"tf/joinedLater",
+			"SELECT o.id FROM lat_ord o JOIN generate_series(1, 3) g ON h.generate_series = o.id JOIN generate_series(1, 2) h ON true",
+			"42P01", `missing FROM-clause entry for table "h"`},
+		{"tf/windowKeyOutOfScope",
+			"SELECT COUNT(*) OVER (PARTITION BY zz.v) AS n FROM generate_series(1, 3) AS g(v)",
+			"42P01", `missing FROM-clause entry for table "zz"`},
+		{"tf/starOutOfScope", "SELECT zz.* FROM generate_series(1, 3) g",
+			"42P01", `missing FROM-clause entry for table "zz"`},
+		{"tf/duplicateName", "SELECT 1 AS k FROM generate_series(1, 3) g, generate_series(1, 2) g",
+			"42712", `table name "g" specified more than once`},
+		{"tfOk/columnAliasList", "SELECT g.v FROM generate_series(1, 3) AS g(v)", "", ""},
+
 		// --- a sibling FROM item is out of scope without LATERAL ----------
 		{"sibling/withoutLateral", "SELECT s.m FROM lat_ord o, (SELECT o.id AS m) s", "42P01",
 			`invalid reference to FROM-clause entry for table "o"`},
@@ -236,7 +254,7 @@ func TestArcRSAQualifiedReferenceNamesOneRelationInScope(t *testing.T) {
 	// A TABLE WHOSE EVERY CELL REFUSES PROVES ONLY THAT THE BINDER IS LOUD.
 	// The controls are what say the rule is a rule: each is a statement
 	// PostgreSQL answers and one edit from a refusing cell above.
-	if answered < 20 {
+	if answered < 21 {
 		t.Fatalf("only %d control cells were answered — the table has stopped "+
 			"discriminating between a reference in scope and one out of it", answered)
 	}
