@@ -780,6 +780,20 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		if col.IsWindow {
 			// Window arguments and frame terms still require declaration checks
 			// against the input scope, before any window rows are evaluated.
+			//
+			// The NAMES are checked here too, and that is this position's
+			// whole defect: a window item was the one SELECT-list spelling the
+			// binder skipped, so `COUNT(*) OVER (PARTITION BY zz.id)` was
+			// stripped to its bare `id` and ANSWERED where PostgreSQL raises
+			// 42P01, on every arm (#1161) — and a qualifier naming a relation
+			// BOTH join arms scan was satisfied by the join node rather than
+			// by one relation, which is the same reference answered by
+			// accident (#1162). The same window written INSIDE a larger
+			// expression was already checked, through checkExpr below, which
+			// is what made the two spellings disagree.
+			if err := resolveExprNames(col.ASTExpr, resolve); err != nil {
+				return err
+			}
 			if err := refuseInvalidRowFields(col.ASTExpr, resolve); err != nil {
 				return err
 			}

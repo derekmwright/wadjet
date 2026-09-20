@@ -78,6 +78,46 @@ func rsCells() []rsCell {
 		{"onOk/unaliased", "SELECT lat_ord.id FROM lat_ord JOIN lat_item ON lat_ord.id = lat_item.order_id", "", ""},
 		{"onOk/correlatedOuterLevel", "SELECT o.id FROM lat_ord o WHERE EXISTS (SELECT 1 FROM lat_item b JOIN lat_item c ON b.id = c.id AND o.id = b.order_id)", "", ""},
 
+		// --- #1161 / #1162: a window key is a reference too ---------------
+		{"win/partitionNamesNothing", "SELECT o.id, COUNT(*) OVER (PARTITION BY zz.id) AS n FROM lat_ord o",
+			"42P01", `missing FROM-clause entry for table "zz"`},
+		{"win/orderNamesNothing", "SELECT o.id, COUNT(*) OVER (ORDER BY zz.id) AS n FROM lat_ord o",
+			"42P01", `missing FROM-clause entry for table "zz"`},
+		{"win/argNamesNothing", "SELECT o.id, SUM(zz.total) OVER () AS n FROM lat_ord o",
+			"42P01", `missing FROM-clause entry for table "zz"`},
+		{"win/orderExprNamesNothing", "SELECT o.id, SUM(o.total) OVER (ORDER BY zz.total + 1) AS n FROM lat_ord o",
+			"42P01", `missing FROM-clause entry for table "zz"`},
+		{"win/partitionOverJoin", "SELECT COUNT(*) AS n FROM lat_ord a JOIN lat_item b ON a.id = b.order_id",
+			"", ""},
+		// #1162's two shapes. A qualifier BOTH arms answer to names no one
+		// relation, and the two spellings earn PostgreSQL's two sentences.
+		{"win/ambiguousAcrossDerivedArms", "SELECT COUNT(*) OVER (PARTITION BY lat_item.id) AS n FROM (SELECT id FROM lat_item) x JOIN (SELECT id FROM lat_item) y ON x.id = y.id",
+			"42P01", `missing FROM-clause entry for table "lat_item"`},
+		{"win/ambiguousAcrossSelfJoin", "SELECT COUNT(*) OVER (PARTITION BY lat_item.order_id) AS n FROM lat_item a JOIN lat_item b ON a.id = b.id",
+			"42P01", `invalid reference to FROM-clause entry for table "lat_item"`},
+		{"win/partitionTableBehindAlias", "SELECT COUNT(*) OVER (PARTITION BY lat_ord.id) AS n FROM lat_ord o",
+			"42P01", `invalid reference to FROM-clause entry for table "lat_ord"`},
+		{"win/orderTableBehindAlias", "SELECT COUNT(*) OVER (ORDER BY lat_ord.id) AS n FROM lat_ord o",
+			"42P01", `invalid reference to FROM-clause entry for table "lat_ord"`},
+		{"win/argTableBehindAlias", "SELECT SUM(lat_ord.total) OVER () AS n FROM lat_ord o",
+			"42P01", `invalid reference to FROM-clause entry for table "lat_ord"`},
+		{"win/partitionDerivedInner", "SELECT x.id, SUM(x.total) OVER (PARTITION BY lat_ord.id) AS n FROM (SELECT id, total FROM lat_ord) x",
+			"42P01", `missing FROM-clause entry for table "lat_ord"`},
+		{"win/partitionOutputAliasQualified", "SELECT o.id AS g, COUNT(*) OVER (PARTITION BY g.id) AS n FROM lat_ord o",
+			"42P01", `missing FROM-clause entry for table "g"`},
+		// A window key sees the INPUT relation, never the SELECT list: PG
+		// 42703 for the bare alias, which is the discriminator that says the
+		// fix resolves against `resolve` and not against the output scope.
+		{"win/partitionOutputAliasBare", "SELECT o.id AS g, COUNT(*) OVER (PARTITION BY g) AS n FROM lat_ord o",
+			"42703", ""},
+		{"win/partitionUnknownColumn", "SELECT o.id, COUNT(*) OVER (PARTITION BY o.nosuch) AS n FROM lat_ord o",
+			"42703", ""},
+		{"winOk/partition", "SELECT o.id, COUNT(*) OVER (PARTITION BY o.id) AS n FROM lat_ord o", "", ""},
+		{"winOk/argOverJoin", "SELECT SUM(b.amount) OVER (PARTITION BY a.id) AS n FROM lat_ord a JOIN lat_item b ON a.id = b.order_id", "", ""},
+		{"winOk/overDerived", "SELECT x.id, SUM(x.total) OVER (PARTITION BY x.id) AS n FROM (SELECT id, total FROM lat_ord) x", "", ""},
+		{"winOk/grouped", "SELECT o.id AS g, SUM(o.total) AS s, ROW_NUMBER() OVER (PARTITION BY o.id ORDER BY SUM(o.total)) AS rn FROM lat_ord o GROUP BY o.id", "", ""},
+		{"winOk/frameOffset", "SELECT o.id, SUM(o.total) OVER (ORDER BY o.id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS n FROM lat_ord o", "", ""},
+
 		// --- the other positions, one cell per clause ---------------------
 		{"pos/select", "SELECT zz.id FROM lat_ord o", "42P01", `missing FROM-clause entry for table "zz"`},
 		{"pos/where", "SELECT o.id FROM lat_ord o WHERE zz.id = 1", "42P01", `missing FROM-clause entry for table "zz"`},
@@ -133,7 +173,7 @@ func TestArcRSAQualifiedReferenceNamesOneRelationInScope(t *testing.T) {
 	// A TABLE WHOSE EVERY CELL REFUSES PROVES ONLY THAT THE BINDER IS LOUD.
 	// The controls are what say the rule is a rule: each is a statement
 	// PostgreSQL answers and one edit from a refusing cell above.
-	if answered < 8 {
+	if answered < 13 {
 		t.Fatalf("only %d control cells were answered — the table has stopped "+
 			"discriminating between a reference in scope and one out of it", answered)
 	}
