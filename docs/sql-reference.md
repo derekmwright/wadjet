@@ -1222,7 +1222,25 @@ SELECT COUNT(*) FROM recent r
 WHERE EXISTS (SELECT 1 FROM customer c WHERE c.c_custkey = r.cust)
 ```
 
-Two shapes are deliberately NOT turned into a join, and run as a per-row
+The outer reference may sit anywhere in the body — its `WHERE`, a `JOIN`'s
+`ON`, a nested subquery — and it is read wherever it is written:
+
+```sql
+-- the correlation is in the body's JOIN ON, not its WHERE
+SELECT o.id FROM orders o
+WHERE o.id IN (SELECT i.order_id FROM items i
+               JOIN items j ON j.id = i.id AND o.total > i.amount)
+```
+
+A condition inside the body that names ONLY the outer query is applied per
+outer row, exactly as PostgreSQL applies it: `… WHERE o.id IN (SELECT z.id
+FROM t z WHERE o.total > 100)` answers for the outer rows whose `total`
+exceeds 100 and for no others. Written inside a `NOT IN` or a `NOT EXISTS` it
+is not a conjunction of the two — an outer row the condition rejects passes
+the negated predicate, because the body it would have to contradict is empty
+— so those spellings run as a per-row subquery instead.
+
+Shapes that are deliberately NOT turned into a join, and run as a per-row
 subquery instead — a slower right answer:
 
 - **A correlated `NOT IN`.** `NOT IN` is three-valued and its third value is
@@ -1232,9 +1250,21 @@ subquery instead — a slower right answer:
 - **A subquery whose correlation is not a simple equality of two columns**,
   whose own FROM reads a **RECURSIVE** CTE, or whose own FROM JOINS a derived
   table or a CTE reference to another relation.
+- **A subquery whose outer reference sits in an OUTER join's `ON`, its
+  `HAVING`, its `GROUP BY`, its `SELECT` list, its `ORDER BY` or its
+  `QUALIFY`.** An INNER join's `ON` conjunct means what the same text in the
+  `WHERE` means and is carried into the join; an outer join's does not,
+  because the preserved side keeps its row NULL-extended either way.
 
-Both stay correct on every execution path; on a distributed cluster the query
+All stay correct on every execution path; on a distributed cluster the query
 runs on the coordinator rather than across workers.
+
+**An outer reference must be QUALIFIED to be read as one.** This engine
+resolves a correlated subquery's names before it has the body's relations'
+column lists, so `WHERE total > 100` written inside a body whose own relation
+has no `total` is read as the body's column and fails with
+`filter column "total" does not exist in the input schema`, where PostgreSQL
+binds it to the enclosing row. Write `o.total > 100`.
 
 A derived table, an ordinary CTE reference and a comma-joined FROM list in the
 subquery are decorrelated like a base table. They used to run as a per-row

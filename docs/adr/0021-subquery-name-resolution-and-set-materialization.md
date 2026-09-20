@@ -25,6 +25,10 @@ uncorrelated scalar subquery and an IN-subquery already had (#955).
 its own WITH scope in the parse, the build and the rebuild, makes the nested
 correlation walk the same walk as the top-level one, and gives a recursive CTE
 reference the column list a join key needs (#1098, #1067, #1072, #1066).
+§1r (2026-09-20) is the half those sections assumed: WHICH references the
+rewrite finds. A body's JOIN ON was never read, and a condition naming only
+the outer row was stripped or dropped — so the outer references are now a SET
+collected over the whole body, each one carried or declined (#1232, #1104).
 
 ## Context
 
@@ -2066,6 +2070,107 @@ lateral. Both are cells of
 is this section's gate: 196 cells of {LATERAL, scalar subquery, EXISTS, IN} ×
 {where the outer reference sits} × {INNER, LEFT, comma, a join below, a star
 over} on five arms, every want live PostgreSQL 17.11.
+
+### 1r. A decorrelated subquery's outer references are a SET over the WHOLE body
+
+(Added 2026-09-20, #1232, #1104, arc DC.)
+
+Every section above is about what a correlated reference MEANS once the
+rewrite has found it. This one is about FINDING it. All three decorrelations
+— IN/NOT IN, EXISTS/NOT EXISTS and the scalar comparison — classified
+`info.WhereExpr` and nothing else, and a body is larger than its WHERE. A
+JOIN's `ON`, the HAVING, the GROUP BY, the SELECT list, the ORDER BY and the
+QUALIFY can each name the enclosing row, and PostgreSQL evaluates the whole
+body once per outer row, so a reference in any of them decides the answer.
+
+**THE RULE.** The outer references are collected over the whole body, and
+each one is either CARRIED into the join the rewrite builds — as a key when
+it is an equality with an inner column, as a residual over the (outer, inner)
+row otherwise, as a filter on the OUTER side when it names outer columns
+alone — or the rewrite DECLINES and the subquery runs per outer row, which is
+right by construction. Never dropped, and never stripped.
+
+**A JOIN'S ON WAS INVISIBLE.** The rewrite built the body's FROM from
+`info.Joins` verbatim, so an outer reference written there went into a join
+condition whose scope does not contain the enclosing relation:
+
+```sql
+SELECT o.id FROM lat_ord o
+WHERE o.id IN (SELECT b.order_id FROM lat_item b
+               JOIN lat_item c ON c.id = b.id AND o.total > b.amount)
+-- PostgreSQL 17.11: 1 ; 2        was: 0 rows
+```
+
+silently, on all five arms, with three discriminators right beside it — the
+same correlation in a plain join, the same correlation moved to the body's
+WHERE, and the EXISTS spelling (#1232, localised to the PLAN and not the
+binder by arc RS's review). An INNER join's ON conjunct IS a WHERE conjunct,
+so a conjunct of one that names the enclosing query is LIFTED into the
+classification the rewrite already runs, and becomes a key, a residual or an
+outer-side filter exactly as the same text written in the WHERE does. An
+OUTER join's ON is not a WHERE conjunct — its conjunct decides which rows
+PAIR while the preserved side keeps its row NULL-extended either way — so it
+declines, and so does a reference in the HAVING, the GROUP BY, the SELECT
+list, the ORDER BY or the QUALIFY, none of which this rewrite has a place for.
+
+**A CONDITION THAT NAMES ONLY THE OUTER ROW IS NOT AN INNER FILTER.** The IN
+rewrite added it to the build side's filter with its QUALIFIER STRIPPED — so
+`o.total > 100` became `total > 100` read against the subquery's own relation,
+which answers the subquery's rows where that relation happens to have the
+column and fails loudly where it does not — and the EXISTS rewrite dropped it
+outright under a comment saying the shape "shouldn't happen" (#1104). The
+scalar rewrite's name-only test could not tell `o.id = o.grp` from a
+correlation and built a key on an inner column the body's relation does not
+have.
+
+PostgreSQL applies such a condition per outer row, so it gates WHICH outer
+rows can match at all. In a WHERE, where only TRUE passes, that is a
+conjunction:
+
+```
+WHERE o.id IN (SELECT z.id FROM t z WHERE P(o))
+    ≡ WHERE P(o) AND o.id IN (SELECT z.id FROM t z)
+WHERE EXISTS (SELECT 1 FROM t z WHERE Q(z) AND P(o))
+    ≡ WHERE P(o) AND EXISTS (SELECT 1 FROM t z WHERE Q(z))
+```
+
+— when `P(o)` is false the body is empty, IN over an empty set is FALSE and
+EXISTS is FALSE, which is what the conjunction says, NULL included. The
+NEGATED spellings are NOT that conjunction and there is nothing to hoist them
+into: an outer row for which `P` is false passes `NOT IN` and `NOT EXISTS`,
+because the body it would have to contradict is empty. So `NOT IN`, `<> ALL`
+and `NOT EXISTS` decline, and the condition stays where the query wrote it.
+
+**THE HOIST READS A QUALIFIER, NEVER A BARE NAME.** The logical classifier has
+no catalog for the body's own relations, and `nodeTableRefs` decides an
+UNQUALIFIED name from the ENCLOSING query's column map alone. TPC-H Q02's
+official spelling writes every correlated key unqualified — `p_partkey =
+ps_partkey` — with BOTH names in that map, because the enclosing query reads
+those relations too; reading an unqualified name as outer would move Q02's
+conjuncts onto the outer side and change its row set. So only a reference
+whose qualifier names an enclosing relation and NO inner one is read as outer.
+The unqualified spelling keeps the disposition it had: it goes to the build
+side, where the column is absent and the failure is LOUD
+(`filter column "total" does not exist in the input schema`). Closing that is
+a catalog at the classifier, not a spelling rule, and it is pinned in the
+gate with PostgreSQL's row set recorded beside it.
+
+**WHAT MOVES AND WHAT DOES NOT.** The optimized logical plans of TPC-H Q02,
+Q04, Q17, Q20, Q21 and Q22 — the six that decorrelate — are byte-identical to
+the ones at `6b9c7acf`, which is the measurement that says the qualifier rule
+is doing the protecting rather than luck.
+
+`coordinator.TestArcDCADecorrelatedBodyKeepsEveryOuterReferenceOnEveryArm` is
+the gate: 776 cells of {IN, NOT IN, = ANY, <> ALL, EXISTS, NOT EXISTS, a
+scalar subquery in WHERE, a scalar subquery in the SELECT list} × {the fifty
+places an outer reference can sit} × {an enclosing query that is one relation
+and one that is a join whose arms share a column name} on five arms, every
+want live PostgreSQL 17.11, with three boundaries pinned by the sentence each
+refusal says. 221 of its cells fail at `6b9c7acf`.
+`server.TestArcDCARelocatedBodyConditionReadsTheMaskOnEveryDoor` is the other
+half: this rewrite moves a predicate ACROSS a relation boundary, and over a
+policed relation the answer is the ROW SET rather than a cell, so the mask's
+reading is asserted on all nine doors.
 
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 

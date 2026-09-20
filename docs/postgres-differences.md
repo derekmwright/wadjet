@@ -442,6 +442,10 @@ Reconstructing their window clauses is unsupported: 0A000 where PostgreSQL answe
 
 Set-operation/LATERAL bodies and outer-level aggregates lack the required evaluation form: 0A000 where PostgreSQL answers. (ADR-0012 §5/#1044)
 
+**An UNQUALIFIED outer reference inside a correlated subquery's body is refused.**
+
+`o.id IN (SELECT b.k FROM dc_in b WHERE total > 100)` binds `total` to the enclosing row on PostgreSQL, which has no such column in `dc_in`; here the condition goes to the subquery's own relation and the query fails with `filter column "total" does not exist in the input schema`. The classifier runs before the body's relations have column lists and cannot tell the two apart, and reading an unqualified name as outer would change TPC-H Q02, whose correlated keys are all unqualified. Write the qualifier — `o.total > 100` — and the condition is applied per outer row as PostgreSQL applies it. (ADR-0012 §5/#1104, ADR-0021 §1r)
+
 **Outer aggregates in subquery WHERE are refused.**
 
 The standalone subquery cannot retain the aggregate’s outer scope: 42803 where PostgreSQL answers. (ADR-0012 §5/#809)
