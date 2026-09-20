@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/planner/physical"
@@ -50,10 +51,34 @@ func TestArcFRNoDoorOpensAReaderBeforeTheIdentityIsAuthorized(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// An input that can be read ONCE. The resolver DECLINES it even for an
+	// authorized identity — a FIFO cannot be opened twice — but deciding that
+	// means expanding and stat'ing the path, which moves
+	// `physical.ReaderSchemaReads`. So the cell below is the one that shows
+	// the guard runs BEFORE the path is touched at all: a refused identity
+	// moves the counter by zero for a path that would have been stat'd
+	// anyway. Without the guard check it moves by one.
+	deniedFifo := filepath.Join(dir, "frorder_denied.fifo")
+	if err := syscall.Mkfifo(deniedFifo, 0o600); err != nil {
+		t.Skipf("this platform has no FIFO: %v", err)
+	}
+
 	// Every shape a door can be asked, including the ones whose reader is not
 	// in the statement's own plan when the capability pass runs.
 	cells := []struct{ name, sql string }{
 		{"direct", fmt.Sprintf("SELECT * FROM read_csv('%s')", real)},
+		// The read-once shapes are written INSIDE a CTE and a derived table on
+		// purpose. A reader in the statement's own FROM list is refused by
+		// the early pass before the planner is reached at all, so it cannot
+		// tell whether the resolver would have touched the path; a nested one
+		// is SQL text at that moment and reaches the resolver, where the
+		// context guard is the only thing between the identity and the stat.
+		// Those are the cells the guard-removal mutation fails.
+		{"a_read_once_input_in_a_cte", fmt.Sprintf(
+			"WITH c AS (SELECT * FROM read_csv('%s')) SELECT * FROM c", deniedFifo)},
+		{"a_glob_holding_a_read_once_input_in_a_derived_table", fmt.Sprintf(
+			"SELECT * FROM (SELECT * FROM read_csv('%s')) d",
+			filepath.Join(dir, "frorder*.fifo"))},
 		{"direct_json", fmt.Sprintf("SELECT * FROM read_json('%s')", realJSON)},
 		{"star_qualified", fmt.Sprintf("SELECT f.* FROM read_csv('%s') AS f", real)},
 		{"aggregate", fmt.Sprintf("SELECT COUNT(*) AS n FROM read_csv('%s')", real)},

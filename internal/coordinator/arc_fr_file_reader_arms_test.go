@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -240,8 +241,27 @@ func TestArcFRTheCoordinatorDoorAuthorizesBeforeItReads(t *testing.T) {
 		}},
 	}
 
+	// An input that can be read ONCE. The resolver declines it even for an
+	// authorized identity, but deciding that expands and stats the path,
+	// which moves `physical.ReaderSchemaReads` — so a ZERO here is the guard
+	// running before the path is touched at all, not the resolver declining.
+	deniedFifo := filepath.Join(dir, "frcoord_denied.fifo")
+	if err := syscall.Mkfifo(deniedFifo, 0o600); err != nil {
+		t.Skipf("this platform has no FIFO: %v", err)
+	}
+
 	cells := []struct{ name, sql string }{
 		{"direct", `SELECT * FROM read_csv('` + csvPath + `')`},
+		// Nested on purpose: a reader in the statement's own FROM list is
+		// refused by the early pass before the planner is reached, so it
+		// cannot tell whether the resolver would have stat'd the path. A
+		// nested one is SQL text then and reaches the resolver, where the
+		// context guard is the only thing between the identity and the stat.
+		{"a_read_once_input_in_a_cte",
+			`WITH c AS (SELECT * FROM read_csv('` + deniedFifo + `')) SELECT * FROM c`},
+		{"a_glob_holding_a_read_once_input_in_a_derived_table",
+			`SELECT * FROM (SELECT * FROM read_csv('` +
+				filepath.Join(dir, "frcoord*.fifo") + `')) d`},
 		{"star_qualified", `SELECT f.* FROM read_csv('` + csvPath + `') AS f`},
 		{"cte", `WITH c AS (SELECT * FROM read_csv('` + csvPath + `')) SELECT * FROM c`},
 		{"derived_table", `SELECT * FROM (SELECT * FROM read_csv('` + csvPath + `')) d`},

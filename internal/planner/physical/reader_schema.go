@@ -190,14 +190,21 @@ func readerSchemaKey(name string, args []string, namedArgs map[string]string) st
 	return b.String()
 }
 
-// ReaderSchemaReads counts the times the planner has OPENED a reader's input
-// to learn its columns. It is the capability order made measurable: a gate
-// asserts it does not move for an identity the policy refuses, on any door,
-// which is the property #943's own gate states with a path that would error
-// if opened and a loopback server that must never be hit (ADR-0034).
+// ReaderSchemaReads counts the times the planner has TOUCHED a path a caller
+// named, to learn a reader's columns. It is the capability order made
+// measurable: a gate asserts it does not move for an identity the policy
+// refuses, on any door, which is the property #943's own gate states with a
+// path that would error if opened and a loopback server that must never be
+// hit (ADR-0034).
 //
-// It counts the REAL reads only — a cached answer, a declined shape and a
-// refused identity all leave it alone.
+// TOUCHED, not sampled: it goes up before the rereadable check stats the
+// path, so an input this resolver ends up DECLINING — a FIFO, a device, a
+// glob holding one — still moves it. A counter that only counted successful
+// samples would read zero for exactly the inputs whose paths were stat'd
+// anyway, which is the measurement the door gates depend on.
+//
+// A URL, a connector, a cached answer and a refused identity leave it alone:
+// none of them reaches this body.
 var ReaderSchemaReads atomic.Int64
 
 // readReaderSchema is the read itself, with no cache and no authorization: a
@@ -217,6 +224,15 @@ func readReaderSchema(name string, args []string, namedArgs map[string]string) (
 	if isURL(path) {
 		return nil, false
 	}
+	// THE COUNTER GOES UP HERE, before anything below touches the path.
+	//
+	// It means "the plan-time reader touched a path the caller named", not
+	// "it sampled one". The rereadable check below expands a glob and stats
+	// every match, and a stat IS a touch: counting after it would let a
+	// FIFO or a device path be stat'd for an identity nobody authorized while
+	// every capability-order gate still read zero. The instrument has to
+	// move for every path this body reaches, or it measures the wrong thing.
+	ReaderSchemaReads.Add(1)
 	// A plan-time read OPENS the input and the execution opens it AGAIN, so it
 	// is only sound for an input that reads the same bytes twice. A FIFO, a
 	// character device (`/dev/stdin`), a socket or a process substitution
@@ -228,12 +244,11 @@ func readReaderSchema(name string, args []string, namedArgs map[string]string) (
 	// unseekable ones keep the first-batch stance every reader had through
 	// v0.23.0: no plan-time schema, and exactly ONE open.
 	//
-	// The stat runs AFTER the capability decision above, so it names no path
-	// on behalf of an identity that has not been authorized.
+	// This runs AFTER the capability decision in readerPlanTimeSchema, so it
+	// names no path on behalf of an identity that has not been authorized.
 	if !readerInputIsRereadable(path) {
 		return nil, false
 	}
-	ReaderSchemaReads.Add(1)
 	if name == "read_parquet" {
 		return parquetFooterSchema(path)
 	}

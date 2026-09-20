@@ -105,11 +105,17 @@ func TestArcFRAReaderSchemaIsReadOnlyUnderAnAuthorizedContext(t *testing.T) {
 		}
 	})
 
-	t.Run("an_input_that_can_be_read_once_reads_nothing_at_plan_time", func(t *testing.T) {
-		// A FIFO is ONE stream: reading it here would leave the execution
+	t.Run("an_input_that_can_be_read_once_is_declined_but_counted", func(t *testing.T) {
+		// A FIFO is ONE stream: sampling it here would leave the execution
 		// with a different one, or with an open(2) that never returns. The
 		// SQL-door cells are wadjet.TestArcFRAnInputThatCanBeReadOnceIsReadOnce
 		// and server.TestArcFRAFifoFedReaderAnswersOnTheWire.
+		//
+		// The schema is DECLINED and the counter MOVES. That pairing is the
+		// point: deciding to decline means stat'ing the path, and a counter
+		// that stayed at zero here would read zero for exactly the inputs the
+		// resolver touched — so a door gate asserting "zero for a refused
+		// identity" would pass over a FIFO path that had been stat'd anyway.
 		fifo := filepath.Join(dir, "fr.fifo")
 		if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 			t.Skipf("this platform has no FIFO: %v", err)
@@ -119,8 +125,9 @@ func TestArcFRAReaderSchemaIsReadOnlyUnderAnAuthorizedContext(t *testing.T) {
 		if cols, ok := readerPlanTimeSchema(ctx, "read_csv", []string{fifo}, nil); ok {
 			t.Errorf("a FIFO was sampled at plan time: %v", cols)
 		}
-		if after := ReaderSchemaReads.Load(); after != before {
-			t.Errorf("the planner opened a FIFO %d time(s) at plan time", after-before)
+		if got := ReaderSchemaReads.Load() - before; got != 1 {
+			t.Errorf("the counter moved by %d for a FIFO the resolver stat'd, want 1 — "+
+				"it counts a path TOUCHED, not a schema sampled", got)
 		}
 		// And a GLOB is judged by EVERY match, because the source
 		// concatenates all of them.
@@ -135,8 +142,33 @@ func TestArcFRAReaderSchemaIsReadOnlyUnderAnAuthorizedContext(t *testing.T) {
 			[]string{filepath.Join(dir, "g*.csv")}, nil); ok {
 			t.Errorf("a glob holding a FIFO was sampled at plan time: %v", cols)
 		}
+		if got := ReaderSchemaReads.Load() - before; got != 1 {
+			t.Errorf("the counter moved by %d for a glob the resolver expanded and stat'd, "+
+				"want 1", got)
+		}
+	})
+
+	t.Run("a_refused_identity_does_not_even_stat_a_fifo", func(t *testing.T) {
+		// The cell the counter move above makes meaningful: the guard is
+		// asked BEFORE the path is expanded or stat'd, so a refused identity
+		// moves it by zero for an input the resolver would have declined
+		// anyway. Without the guard check this reads 1.
+		fifo := filepath.Join(dir, "fr_denied.fifo")
+		if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+			t.Skipf("this platform has no FIFO: %v", err)
+		}
+		ctx := ContextWithReaderSchemaProbe(context.Background())
+		ctx = logical.ContextWithTableFuncGuard(ctx,
+			func(string, []string, map[string]string) error {
+				return sqlerr.New("42501", "permission denied for table function")
+			})
+		before := ReaderSchemaReads.Load()
+		if cols, ok := readerPlanTimeSchema(ctx, "read_csv", []string{fifo}, nil); ok {
+			t.Errorf("a refused identity's FIFO was sampled: %v", cols)
+		}
 		if after := ReaderSchemaReads.Load(); after != before {
-			t.Errorf("the planner opened a glob holding a FIFO %d time(s)", after-before)
+			t.Errorf("the planner touched a refused identity's FIFO path %d time(s)",
+				after-before)
 		}
 	})
 
