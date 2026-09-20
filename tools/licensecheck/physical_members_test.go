@@ -49,6 +49,7 @@ import (
 // (ADR-0006, 2026-09-19). Four members for one loud floor; the translation
 // itself (`dagplan.residualWithStageSpellings`) lives on the AGPL side and
 // adds nothing here.
+
 // 214 → 216 (2026-09-19, arc BJ, #1223): `Planner.BushyJoinReorder` and
 // `Planner.LogicalOptions`. The first is the instance's copy of the bushy
 // option, set the way every AGPL caller already sets `LateMaterialization`.

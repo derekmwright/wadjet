@@ -37,14 +37,16 @@ import (
 //
 // It is applied HERE rather than lowered in the parser to the derived-table
 // spelling a NAMED relation's list takes (plansql.lowerNamedRelationColumnAliases):
-// a table function's column list is not knowable until it has read its input —
+// a READER's column list is not knowable until it has read its input —
 // read_json infers it from the file — and that plan-time rename refuses with
 // "renames the columns of a `SELECT *` this planner did not expand" for
-// exactly that reason. This is the one layer with the width. Before it, the
-// list was parsed and then dropped for every function but unnest, so
-// `SELECT k FROM read_json(…) AS f(k, v)` answered NULL for every row (#1184).
+// exactly that reason. This is the layer with the width FOR A READER; a
+// function whose signature declares its columns is renamed at plan time
+// instead (applyFuncColumnAliases, #1210). Before this, the list was parsed and
+// then dropped for every function but unnest, so `SELECT k FROM read_json(…)
+// AS f(k, v)` answered NULL for every row (#1184).
 //
-// The boundary: a function that produces NO batch (an empty file) is never
+// The boundary: a READER that produces NO batch (an empty file) is never
 // measured against its list, so an over-long list there answers zero rows
 // where PostgreSQL raises 42P10.
 func withColumnAliases(src exec.Source, aliases []string, relName string) exec.Source {
@@ -739,8 +741,9 @@ type unnestSource struct {
 
 // newUnnestSource builds the source for `unnest(…) [WITH ORDINALITY]`. The
 // columns are PostgreSQL's own default names; a FROM item's column-alias list
-// is applied over the source by withColumnAliases, which is the one layer that
-// applies it for every table function (#1184).
+// is applied over the source by withColumnAliases (#1184) and, since unnest
+// declares its columns from the call, over that declaration at plan time by
+// applyFuncColumnAliases (#1210).
 func newUnnestSource(args []string, withOrdinality bool) (*unnestSource, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("unnest requires at least 1 argument")

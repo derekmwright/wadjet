@@ -167,10 +167,12 @@ type colScope struct {
 const typeAmbiguous = parquet.TypeID(-1)
 
 // providesBareColumn reports, with CERTAINTY, that one of this scope's own
-// sources carries the bare column name. An open scope — a table function, a
-// SELECT *, a table the catalog does not have — answers false for everything,
-// because nothing there is certain and the caller's fallback is the behaviour
-// that existed before it asked (#739).
+// sources carries the bare column name. An open scope — a table function whose
+// columns are its INPUT's, a SELECT *, a table the catalog does not have —
+// answers false for everything, because nothing there is certain and the
+// caller's fallback is the behaviour that existed before it asked (#739). A
+// table function whose SIGNATURE declares its columns is a closed source here,
+// like a base table (resolveSource, #1210).
 func (s *colScope) providesBareColumn(name string) bool {
 	if s == nil || s.open {
 		return false

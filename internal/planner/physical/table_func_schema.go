@@ -14,25 +14,22 @@ import (
 // its SIGNATURE declares them — the function's NAME and its ARGUMENTS alone,
 // with no access to whatever the function reads.
 //
-// It is the plan-time half of "a table function in FROM is a relation like any
-// other". With it the binder holds a reference to a column the function does
-// not publish to 42703 exactly as it does over a base table, instead of
-// leaving the scope open and answering NULL for every row (#1210); the
-// aggregate result-type rules see an integer as an integer, so `SUM(x) FROM
+// It is the plan-time half of "a table function in FROM is a relation"
+// (ADR-0039 §1): the binder refuses a reference to a column the function does
+// not publish with 42703 as it does over a base table, instead of leaving the
+// scope open and answering NULL for every row (#1210); the aggregate
+// result-type rules see an integer as an integer, so `SUM(x) FROM
 // generate_series(1,3) gs(x)` declares bigint rather than float8 (#1211,
 // ADR-0024 §2a); a qualified star expands; and a relation that produces NO
 // batch still publishes its columns.
 //
 // A function whose columns are its INPUT's — every file and database reader —
-// is deliberately NOT here. Its schema is read from the input, and the binder
-// runs BEFORE the table-function capability is authorized
-// (auth.ValidateStatementColumns precedes auth.EnforcePlanPolicies on every
-// door), so opening a file here would read it for an identity that may not be
-// allowed to (#943, ADR-0034). Those schemas are sampled after authorization
-// instead — see tableFuncSampledSchema.
-//
-// ok=false means "this function's column list is not knowable from its call",
-// which is the caller's signal to keep the open-scope stance it had before.
+// is deliberately NOT here and has NO plan-time schema at all: the binder runs
+// BEFORE the table-function capability is authorized, so opening the input
+// here would read it for an identity that may not be allowed to (#943,
+// ADR-0034, ADR-0039 §3). A reference over one is refused at its FIRST BATCH
+// instead (table_func_required.go). ok=false means "not knowable from the
+// call", the caller's signal to keep the open-scope stance it had before.
 func tableFuncDeclaredSchema(funcName string, args []string, withOrdinality bool) ([]parquet.Column, bool) {
 	switch strings.ToLower(funcName) {
 	case "generate_series":

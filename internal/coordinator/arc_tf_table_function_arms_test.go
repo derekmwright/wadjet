@@ -20,10 +20,9 @@ import (
 // ARC TF ON FIVE ARMS — a table function in FROM is a relation.
 //
 // The wadjet package asserts what each spelling ANSWERS against live
-// PostgreSQL 17.11 and the planner packages assert where the refusal is MADE.
-// This file asserts the property neither can see: that the answer, the
-// SQLSTATE and the CARRIER are the same on single / single+budget / dag /
-// dag-shuffled / dag+morsel4.
+// PostgreSQL 17.11 and the planner packages where the refusal is MADE. This
+// file asserts what neither can see: that the answer, the SQLSTATE and the
+// CARRIER agree on single / single+budget / dag / dag-shuffled / dag+morsel4.
 //
 // It is not a formality here. The declaration this arc gives a table
 // function's column — `integer` for a call whose arguments fit int4, which is
@@ -35,10 +34,9 @@ import (
 // THE PIN. A table function as the ONLY FROM item is not a DAG stage on this
 // engine: `stage scan-0 has no dependencies and no ScanFiles`. That is
 // PRE-EXISTING and `distributed` (arc PT measured it with a control cell), so
-// every cell whose statement ANSWERS carries it and it is not chased here.
-// A cell whose statement is REFUSED AT PLAN TIME carries no pin, because the
-// refusal is made before any stage is emitted — which is itself the property
-// worth asserting: the plan-time half of this arc reaches all five arms.
+// every cell whose statement ANSWERS carries it and it is not chased here. A
+// cell REFUSED AT PLAN TIME carries no pin, because the refusal is made before
+// any stage is emitted — itself the property worth asserting.
 func TestArcTFATableFunctionIsARelationOnEveryArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")

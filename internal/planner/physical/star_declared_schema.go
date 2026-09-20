@@ -101,8 +101,10 @@ func starOnlySourceScan(n *logical.Node) (*logical.Node, []string) {
 		switch n.Type {
 		case logical.NodeScan:
 			if n.IsTableFunc {
-				// AnnotateScanColumns leaves no catalog annotation on a
-				// table function, so there is nothing to declare from.
+				// A table function is declined here: a READER carries no
+				// column annotation at all, and a signature-declared one
+				// (generate_series, unnest) is annotated but is outside
+				// this walk's boundary.
 				return nil, nil
 			}
 			return n, names

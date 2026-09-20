@@ -1141,7 +1141,8 @@ func inferProjectionType(node plansql.Node, fallback parquet.TypeID) parquet.Typ
 // columns, using the query path's inference. DML must use the declaration,
 // not the float64 box shared by float8 and numeric: assignment rounds float8
 // half to EVEN and numeric half AWAY FROM ZERO (#699).
-// nodeDeclaredType leaves missing column declarations undecided (#333).
+// nodeDeclaredType leaves missing column declarations undecided (#333), except
+// under a UNARY SIGN, which declares float8 whatever its operand decided.
 // Nested function callers must keep looking past a guessed type for a
 // decided candidate (expr.Confidence, #331).
 func DeclaredTypeOfNode(node plansql.Node, schema []parquet.Column) (expr.DeclType, expr.Confidence) {

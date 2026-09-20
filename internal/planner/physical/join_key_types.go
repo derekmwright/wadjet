@@ -65,9 +65,12 @@ func joinKeyNumeric(t parquet.TypeID) bool {
 //
 // leftKeys name columns of node.Children[0] and rightKeys of
 // node.Children[1]; the caller has already run AssignJoinKeySides, so the
-// sides are final. A key either side cannot be typed is unresolved: declining
-// leaves the pre-existing behaviour, and the pre-existing behaviour is
-// correct for every pair whose two sides agree.
+// sides are final. A key either side cannot be typed is unresolved, with ONE
+// exception: a DECLARED int4 key meeting a relation with no plan-time types at
+// all — a file or database reader — is keyed at int8 (ADR-0024 §2a, ADR-0039
+// §7; see sideHasUntypedTableFunc below). Declining otherwise leaves the
+// pre-existing behaviour, and the pre-existing behaviour is correct for every
+// pair whose two sides agree.
 // cteColTypes answers what a MATERIALIZED CTE's columns are called and what
 // they carry, or false for a name the caller cannot resolve. nil is a caller
 // with no cache to ask — every test, and any site that has no Planner.

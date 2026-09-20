@@ -16,29 +16,25 @@ import (
 )
 
 // A reference to a column a table function does not publish is 42703 — LOUDLY,
-// naming the column — and never a NULL for every row (#1210).
+// naming the column — and never a NULL for every row (#1210, ADR-0039).
 //
 // For a function whose SIGNATURE declares its columns the refusal is made at
-// plan time, by the binder, exactly as it is over a base table
-// (tableFuncDeclaredSchema). A function whose columns are its INPUT's — every
-// file and database reader — has no plan-time column list this engine may ask
-// for: the binder runs BEFORE the table-function capability is authorized on
-// every door (auth.ValidateStatementColumns precedes auth.EnforcePlanPolicies,
-// and on the coordinator door physical.AnnotateScanColumns does too), so
-// reading the file there would open it for an identity that may not be allowed
-// to — the property #943 and ADR-0034 hold. So the refusal for THOSE is made
-// where the schema first exists: at the FIRST BATCH.
+// plan time, by the binder, exactly as over a base table
+// (tableFuncDeclaredSchema). A file or database reader has no plan-time column
+// list this engine may ask for — the binder runs BEFORE the table-function
+// capability is authorized on every door, so reading the input there would
+// open it for an identity that may not be allowed to (#943, ADR-0034,
+// ADR-0039 §3) — so ITS refusal is made where the schema first exists: at the
+// FIRST BATCH.
 //
 // The names checked are the ones the operators DIRECTLY ABOVE the relation ask
 // of it. That position is what makes them certain: the batch the source
 // publishes IS the relation, nothing has renamed or minted anything yet, and a
 // reference that resolves to no column of it resolves to nothing at all. A
-// consumer further up reads a schema some operator has already changed, and
-// its names are not this relation's to answer for.
+// consumer further up reads a schema some operator has already changed.
 //
-// The boundary, recorded on the differences page: a function that produces NO
-// batch is never measured — the same boundary the column-alias list's 42P10
-// has (#1184) and for the same reason.
+// The boundary, on the differences page: a reader that produces NO batch is
+// never measured — the column-alias list's 42P10 boundary (#1184), same reason.
 
 // tableFuncSourceRelation reports the table-function Scan whose OWN OUTPUT is
 // the input of n, or ok=false when it is not one. The walk descends only
@@ -299,23 +295,20 @@ func (p *Planner) guardTableFuncColumns(consumer, input *logical.Node, src exec.
 // The direct case — a consumer whose input IS the relation — is handled by
 // guardTableFuncColumns above, where every name is certain because the batch
 // the source publishes is the relation. Over a JOIN the consumer's input is
-// the join's output, and a name there may belong to either arm; the arc's
-// first round therefore made no check at all and a reference to a column a
-// reader does not publish answered NULL for every row. Two classes of name
-// ARE certain in this position, and both are taken:
+// the join's output and a name there may belong to either arm, so only two
+// classes of name are certain here (ADR-0039 §4a), and both are taken:
 //
 //   - a reference QUALIFIED by the arm's own alias. The consumer sits
 //     DIRECTLY above the join, so nothing between them has minted a column
-//     under that qualifier — which is what makes this different from the
-//     accumulated need set ADR-0026 §4b warns about, where a derived alias
-//     can qualify a projection's output.
-//   - a BARE reference that NO OTHER arm of the join can provide. That is
-//     decidable only when every other arm declares its columns — a catalog
-//     table or a signature-declared function — and it is declined outright
-//     when any other arm is itself a reader.
+//     under that qualifier — which is what separates this from the
+//     accumulated need set ADR-0026 §4b warns about.
+//   - a BARE reference that NO OTHER arm of the join can provide, decidable
+//     only when every other arm declares its columns — a catalog table or a
+//     signature-declared function — and declined outright when any other arm
+//     is itself a reader.
 //
-// The JOIN's own condition is read the same way: it is qualified per arm by
-// construction, so a reader arm named in an ON clause is checked too.
+// The JOIN's own condition is qualified per arm by construction and is read
+// the same way, so a reader arm named in an ON clause is checked too.
 func (p *Planner) stampTableFuncRequiredColumns(consumer, input *logical.Node) {
 	join := schemaPreservingJoinBelow(input)
 	if join == nil {

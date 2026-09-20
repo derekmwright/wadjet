@@ -159,9 +159,11 @@ type Node struct {
 	ScanRowEstimate int64                      // estimated row count from manifest (0 = unknown)
 	ScanColStats    map[string]ScanColumnStats // aggregated column stats from catalog (nil = unavailable)
 	// ScanColTypes maps this scan's lower-cased column names to their
-	// catalog types (populated by physical.AnnotateScanColumns alongside
-	// ScanColumns). It is what lets the planner declare a MIN/MAX output
-	// type, which follows the input column rather than the function.
+	// DECLARED types — the catalog's for a base table, the CALL's own for a
+	// signature-declared table function (populated by
+	// physical.AnnotateScanColumns alongside ScanColumns). It is what lets the
+	// planner declare a MIN/MAX output type, which follows the input column
+	// rather than the function.
 	ScanColTypes map[string]parquet.TypeID
 	// ScanColDecimal maps this scan's lower-cased column names to their
 	// DECIMAL precision/scale — entries exist only for TypeDecimal columns.

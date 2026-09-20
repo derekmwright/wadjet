@@ -194,7 +194,8 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 
 // EnforceOptimizedPlan re-applies the column policies the context carries to
 // any policed scan the OPTIMIZER minted. Call it immediately after
-// logical.Optimize, at every entry point that optimizes a plan.
+// logical.OptimizeWith — or logical.Optimize, its defaults-only wrapper — at
+// every entry point that optimizes a plan.
 //
 // The decorrelation passes re-parse a subquery from its SQL text and build a
 // fresh Scan for it, after enforcement has run. Those scans read the stored

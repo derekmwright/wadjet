@@ -11,9 +11,11 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// AnnotateScanColumns walks the logical plan tree and populates ScanColumns
-// on Scan nodes from the catalog. This enables the logical optimizer to resolve
-// unqualified column references for filter pushdown through joins.
+// AnnotateScanColumns walks the logical plan tree and populates ScanColumns on
+// Scan nodes: from the catalog for a base table, and from the CALL itself for a
+// table function whose signature declares its columns (tableFuncDeclaredSchema).
+// This enables the logical optimizer to resolve unqualified column references
+// for filter pushdown through joins.
 func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 	p.annotateScanColumns(ctx, node)
 	// With the catalog's real column lists now on the Scan nodes, move any of

@@ -1334,10 +1334,12 @@ func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
 	// clause. The bare-alias arm read no list at all, so
 	// `FROM read_json(…) f(k, v)` was a syntax error while the AS spelling
 	// parsed — and the list it parsed was then dropped, which is #1184's
-	// silent NULL. The list is APPLIED at the source (physical/table_func.go):
-	// a table function's width is only knowable once it has produced a batch,
-	// which is why this item is not lowered to the derived-table spelling the
-	// way a named relation's list is (lowerNamedRelationColumnAliases).
+	// silent NULL. The list is APPLIED at the source for a READER
+	// (physical/table_func.go), whose width is only knowable once it has
+	// produced a batch, and at plan time for a function whose signature
+	// declares its columns (physical.applyFuncColumnAliases) — which is why
+	// this item is not lowered to the derived-table spelling the way a named
+	// relation's list is (lowerNamedRelationColumnAliases).
 	aliased := false
 	if p.isKeyword(TokenKWAs) {
 		p.advance()

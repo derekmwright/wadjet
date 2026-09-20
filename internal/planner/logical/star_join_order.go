@@ -583,8 +583,10 @@ func armRelationName(n *Node) string {
 		switch {
 		case n.Type == NodeScan:
 			if n.IsTableFunc {
-				// A table function carries no catalog annotation to publish
-				// a list from (StarSourceColumns's own boundary).
+				// A table function is not named as a relation arm here: a
+				// READER carries no column annotation at all, and a
+				// signature-declared one is annotated but outside this
+				// walk's boundary (StarSourceColumns's own).
 				return ""
 			}
 			if n.TableAlias != "" {

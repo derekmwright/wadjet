@@ -54,9 +54,9 @@ type Scheduler struct {
 	// BushyJoinReorder is the coordinator's planner option, stamped onto
 	// every task that carries SQL TEXT for a worker to re-plan. It is
 	// stamped at this choke point for the same reason the SQL-text guard is
-	// — seven dispatchers build such a task, and one that forgot the stamp
-	// would be a worker planning the query a different way than the
-	// coordinator that shaped its inputs (#1223).
+	// — six sites build such a task, and one that forgot the stamp would be
+	// a worker planning the query a different way than the coordinator that
+	// shaped its inputs (#1223).
 	BushyJoinReorder bool
 
 	// dpSrv is the optional data-plane gRPC server. When set, PublishTasks
