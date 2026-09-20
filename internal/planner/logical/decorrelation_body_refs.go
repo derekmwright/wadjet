@@ -122,7 +122,11 @@ func liftBodyOuterConditions(info *plansql.SelectInfo, outerTables, innerTables 
 	for i := range info.Joins {
 		j := &info.Joins[i]
 		if j.CondExpr == nil {
-			if namesEnclosingQuery(rawCondNode(j.Condition), outerTables, innerTables) {
+			// An ON the parser kept only as TEXT. Parse it to ask the
+			// question; a clause that will not parse is one that may name
+			// anything, so it blocks rather than reading as "names nothing".
+			cond, ok := parseCondText(j.Condition)
+			if !ok || namesEnclosingQuery(cond, outerTables, innerTables) {
 				return nil, "a JOIN's ON"
 			}
 			continue
@@ -187,18 +191,19 @@ func liftBodyOuterConditions(info *plansql.SelectInfo, outerTables, innerTables 
 	return lifted, ""
 }
 
-// rawCondNode parses an ON clause the parser kept only as TEXT. A clause that
-// will not parse is treated as one that may name anything, which is what the
-// caller's decline is for.
-func rawCondNode(text string) plansql.Node {
+// parseCondText parses an ON clause the parser kept only as TEXT. ok=false
+// means it could not be read at all, which the caller treats as "may name
+// anything" — an empty clause (a cross join) reads as naming nothing, which it
+// does.
+func parseCondText(text string) (plansql.Node, bool) {
 	if strings.TrimSpace(text) == "" {
-		return nil
+		return nil, true
 	}
 	expr, err := plansql.ParseExpression(text)
 	if err != nil {
-		return &plansql.ColRef{Table: "\x00unparsed", Column: "\x00"}
+		return nil, false
 	}
-	return expr
+	return expr, true
 }
 
 // andAll rebuilds a conjunction from its parts.
