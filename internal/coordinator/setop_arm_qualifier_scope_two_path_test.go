@@ -91,14 +91,20 @@ func setOpQualCells() []setOpQualCell {
 		// --- the boundary, attempted -------------------------------------
 		//
 		// A table name BEHIND an alias is not a spelling either engine
-		// executes: PostgreSQL 17.11 says "invalid reference to FROM-clause
-		// entry for table zzp" and wadjet says "missing FROM-clause entry".
-		// The cell is here because the fix above stops DECLARING a type for
-		// it, and a declaration for a spelling that cannot run is what made
-		// the two shapes at the top refuse.
+		// executes. The cell is here because the fix above stops DECLARING a
+		// type for it, and a declaration for a spelling that cannot run is
+		// what made the two shapes at the top refuse.
+		//
+		// Both engines now give the SAME refusal. PostgreSQL 17.11 says
+		// `invalid reference to FROM-clause entry for table "zzp"` with
+		// `HINT: Perhaps you meant to reference the table alias "a".`, and
+		// this engine said `missing FROM-clause entry` until arc RS
+		// (2026-09-20) — the sentence that says the statement names nothing,
+		// for a relation the FROM reads two words away. The old expectation
+		// is deleted, which is the proof.
 		{issue: "#682", name: "boundary_a_table_name_behind_an_alias_is_refused",
 			sql:     `SELECT zzp.d92 AS v FROM zzp a UNION ALL SELECT d92 FROM zzj`,
-			wantErr: `missing FROM-clause entry for table "zzp"`},
+			wantErr: `invalid reference to FROM-clause entry for table "zzp"`},
 
 		// --- the issue's own spellings ------------------------------------
 		//

@@ -144,18 +144,25 @@ func TestArcK1AWindowPartitionKeyBindsItsOwnArm(t *testing.T) {
 		},
 		{
 			// The BARE spelling of a contested name, which no qualifier can
-			// disambiguate. PostgreSQL 17 REFUSES it — 42702 `column reference
-			// "w" is ambiguous`, measured — and wadjet answers by binding one
-			// of the two: a superset, recorded in ADR-0012 with this cell as
-			// its record of WHICH column it binds. It is the boundary of the
-			// fix attempted from the side the fix does not act on: a key with
-			// no qualifier has no arm to be scoped to.
+			// disambiguate. PostgreSQL 17 REFUSES it — 42702 `column
+			// reference "w" is ambiguous`, measured — and so does this engine
+			// since arc RS (2026-09-20): the superset this cell recorded is
+			// retired and its row set is gone, which is the proof.
+			//
+			// It closed as a consequence rather than as a target. A
+			// SELECT-list WINDOW item was the one spelling the binder never
+			// resolved a name in, so no window key reached the scope's
+			// ambiguity census at all; a window key is resolved like any
+			// other reference now, and a bare name two of the block's own
+			// sources provide meets the same `srcCount > 1` rule every other
+			// clause has used since #367. The boundary this cell states is
+			// unchanged: a key with no qualifier has no arm to be scoped to —
+			// what changed is that naming no arm is refused rather than bound
+			// to one.
 			name: "975 ctl the BARE contested spelling PostgreSQL refuses",
 			sql: "SELECT x.w AS xw, y.w AS yw, SUM(y.w) OVER (PARTITION BY w) AS s " +
 				arm3 + " ORDER BY xw, yw",
-			want: cols + " rows=5 | 2.00,1000.0000,1000.0000 | " +
-				"12.75,1274.9900,1274.9900 | 12.75,1275.0000,1275.0000 | " +
-				"12.75,1275.0100,1275.0100 | 12.75,NULL,NULL",
+			want: `ERR column reference "w" is ambiguous`,
 		},
 		{
 			// A QUALIFIED key over a single relation, where the bare name is

@@ -33,6 +33,10 @@ import (
 // What WAS wrong is the class: 42P01 `missing FROM-clause entry for table "a"`
 // says the query is malformed, and ADR-0021 §1i said the same in prose. Both are
 // corrected: 0A000 naming the two workarounds, for the LEGAL spellings only.
+//
+// The SIBLING half's 42P01 was also the wrong one of PostgreSQL's two, and arc
+// RS corrected it: `invalid reference to FROM-clause entry for table "a"`, with
+// PostgreSQL's own DETAIL and its LATERAL hint.
 func TestArcF4DerivedTableCorrelationIsRefusedNotMisread(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
@@ -80,6 +84,20 @@ func TestArcF4DerivedTableCorrelationIsRefusedNotMisread(t *testing.T) {
 	// A SIBLING reference without LATERAL is what LATERAL actually governs,
 	// and PostgreSQL refuses it too. It keeps 42P01, so the new class cannot
 	// be read as "any unresolved qualifier under a derived table".
+	//
+	// Which 42P01 was WRONG until arc RS (2026-09-20), and this assertion
+	// records the correction. PostgreSQL 17.11, measured on the same text:
+	//
+	//	ERROR:  42P01: invalid reference to FROM-clause entry for table "a"
+	//	DETAIL: There is an entry for table "a", but it cannot be referenced
+	//	        from this part of the query.
+	//	HINT:   To reference that table, you must mark this subquery with
+	//	        LATERAL.
+	//
+	// "missing FROM-clause entry" says the statement names nothing; the entry
+	// is written three words away, and the sentence sent a reader at the
+	// wrong fix. The engine carries PostgreSQL's DETAIL and HINT after a
+	// colon, because sqlerr.Error has one message field.
 	t.Run("sibling-reference-stays-42P01", func(t *testing.T) {
 		const sql = "SELECT COUNT(*) FROM typemx a, (SELECT id FROM typemx b WHERE b.g = a.g) d"
 		for _, arm := range arms {
@@ -88,9 +106,15 @@ func TestArcF4DerivedTableCorrelationIsRefusedNotMisread(t *testing.T) {
 				t.Fatalf("%s arm answered a sibling reference PostgreSQL refuses\n  SQL: %s",
 					arm.name, sql)
 			}
-			if !strings.Contains(err.Error(), "missing FROM-clause entry") {
-				t.Fatalf("%s arm: %v\n  want PostgreSQL's own 42P01 for a sibling reference\n"+
-					"  SQL: %s", arm.name, err, sql)
+			for _, want := range []string{
+				`invalid reference to FROM-clause entry for table "a"`,
+				"but it cannot be referenced from this part of the query",
+				"LATERAL",
+			} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("%s arm: %v\n  want PostgreSQL's own 42P01 for a sibling "+
+						"reference, carrying %q\n  SQL: %s", arm.name, err, want, sql)
+				}
 			}
 		}
 	})

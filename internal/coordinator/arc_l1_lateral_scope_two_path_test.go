@@ -382,6 +382,13 @@ const (
 	// publishing it would put it in the GROUP BY (lateral_correlated_refs.go).
 	// The UNAGGREGATED spellings ANSWER since round 3.
 	l1LiftedRefNotPublished = `AGGREGATES and its correlated predicate`
+	// A DERIVED TABLE in a subquery's FROM naming a relation of an ENCLOSING
+	// query level. It is the #614 refusal the non-window spelling of the same
+	// shape has always given, and arc RS made the WINDOW spelling reach it:
+	// a SELECT-list window item was the one place the binder resolved no
+	// names at all (#1161), so `SUM(u.id) OVER ()` inside that body answered
+	// a constant for every outer row where the bare `u.id` refused.
+	l1DerivedOuterLevel = `from an enclosing query is not supported`
 )
 
 // l1Postgres is PostgreSQL 17.11's answer for every cell, rendered by
@@ -589,16 +596,24 @@ var l1Postgres = map[string]string{
 // l1RefusalPins names the refusal classes a cell's arms may raise. Every arm's
 // answer must contain one of them.
 var l1RefusalPins = map[string][]string{
-	"R4/groupedBody":           {l1LiftedRefNotPublished},
-	"R4/setopBody":             {l1FromlessSetOpBody},
-	"R5/aggUnderBareStar":      {l1LiftedRefNotPublished},
-	"R5/aggUnderBareStarTop":   {l1LiftedRefNotPublished},
-	"R5/aggUnderQStar":         {l1LiftedRefNotPublished},
-	"R5/aggUnderCteStar":       {l1LiftedRefNotPublished},
-	"R5/aggGroupedUnderStar":   {l1LiftedRefNotPublished},
-	"R5/aggCountUnderStar":     {l1LiftedRefNotPublished},
-	"R5/ctlAggNoStar":          {l1LiftedRefNotPublished},
-	"R3/outerRefExpr":          {l1OuterRefOutsideWhere},
+	"R4/groupedBody":         {l1LiftedRefNotPublished},
+	"R4/setopBody":           {l1FromlessSetOpBody},
+	"R5/aggUnderBareStar":    {l1LiftedRefNotPublished},
+	"R5/aggUnderBareStarTop": {l1LiftedRefNotPublished},
+	"R5/aggUnderQStar":       {l1LiftedRefNotPublished},
+	"R5/aggUnderCteStar":     {l1LiftedRefNotPublished},
+	"R5/aggGroupedUnderStar": {l1LiftedRefNotPublished},
+	"R5/aggCountUnderStar":   {l1LiftedRefNotPublished},
+	"R5/ctlAggNoStar":        {l1LiftedRefNotPublished},
+	"R3/outerRefExpr":        {l1OuterRefOutsideWhere},
+	// The window spelling of a derived table naming an enclosing level.
+	// Its VALUE pin is DELETED: it answered `1,1 | 2,1 | 3,1` for
+	// PostgreSQL's `1,1 | 2,2 | 3,3` at `753970c0` — #1045's silent constant
+	// one level down — and arc RS made the window item's names resolve, so it
+	// reaches the same 0A000 the non-window spelling has always given. A loud
+	// refusal replacing a base-WRONG answer, and the two spellings agree for
+	// the first time.
+	"R2/winargNested":          {l1DerivedOuterLevel},
 	"R3/outerRefOnlyOuter":     {l1OuterRefOutsideWhere},
 	"R3/outerRefTwoOuter":      {l1OuterRefOutsideWhere},
 	"IN/noJoin/winsel":         {l1WindowInSubquery},
@@ -817,7 +832,6 @@ var l1ValuePins = map[string]string{
 	"R2/boundLiftedPlain":        "rows=1 2,125",
 	"R2/noCollideWinBound":       "rows=2 1,100,1 | 2,125,1",
 	"R2/twoBounds":               "rows=0 ",
-	"R2/winargNested":            "rows=3 1,1 | 2,1 | 3,1",
 }
 
 func TestArcL1LateralAndWindowScopeAnswersPostgresOnEveryArm(t *testing.T) {
