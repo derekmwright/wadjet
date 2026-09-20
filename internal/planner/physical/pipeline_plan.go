@@ -135,6 +135,17 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 		// signature declares its columns — the declared schema, so a call
 		// that produces no rows still publishes them.
 		source = withColumnAliases(source, node.FuncColAliases, node.TableAlias)
+		// The columns a consumer ABOVE a join asks of THIS arm, stamped by
+		// stampTableFuncRequiredColumns before this pipeline was built. A
+		// reader that is a join arm is reached only here: the join's output
+		// is what the consumer sees, so the wrapper cannot go on top of it.
+		if len(node.FuncRequiredColumns) > 0 {
+			relName := node.TableAlias
+			if relName == "" {
+				relName = node.FuncName
+			}
+			source = withRequiredColumns(source, node.FuncRequiredColumns, relName)
+		}
 		if cols, known := tableFuncDeclaredSchema(node.FuncName, node.FuncArgs, node.WithOrdinality); known {
 			renamed, err := applyFuncColumnAliases(cols, node.FuncColAliases, node.TableAlias)
 			if err != nil {

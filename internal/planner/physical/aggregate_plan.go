@@ -33,6 +33,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		return src, nil, &exec.CollectSink{}, nil
 	}
 
+	p.stampTableFuncRequiredColumns(node, node.Children[0])
 	childSource, childOps, _, err := p.buildPipeline(ctx, node.Children[0])
 	if err != nil {
 		return nil, nil, nil, err

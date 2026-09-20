@@ -188,6 +188,17 @@ func nodeInputColumnRefs(n *logical.Node) ([]string, bool) {
 				return nil, false
 			}
 		}
+	case logical.NodeJoin:
+		// A JOIN's own condition is QUALIFIED per arm by construction, which
+		// is what makes it readable here: `ON t.k = b.zz` names b's column
+		// and nothing else. Both clauses are carried as TEXT, so both go
+		// through the parser like every other rendered term.
+		if !addTerm(n.JoinCond) {
+			return nil, false
+		}
+		if !addTerm(n.JoinFilter) {
+			return nil, false
+		}
 	case logical.NodeAggregate:
 		if len(n.GroupingSets) > 0 || len(n.GroupingCalls) > 0 {
 			return nil, false
@@ -280,4 +291,150 @@ func (p *Planner) guardTableFuncColumns(consumer, input *logical.Node, src exec.
 		return src
 	}
 	return withRequiredColumns(src, refs, relName)
+}
+
+// stampTableFuncRequiredColumns records, on each reader that is an ARM of the
+// join below consumer, the names this consumer asks of THAT ARM.
+//
+// The direct case — a consumer whose input IS the relation — is handled by
+// guardTableFuncColumns above, where every name is certain because the batch
+// the source publishes is the relation. Over a JOIN the consumer's input is
+// the join's output, and a name there may belong to either arm; the arc's
+// first round therefore made no check at all and a reference to a column a
+// reader does not publish answered NULL for every row. Two classes of name
+// ARE certain in this position, and both are taken:
+//
+//   - a reference QUALIFIED by the arm's own alias. The consumer sits
+//     DIRECTLY above the join, so nothing between them has minted a column
+//     under that qualifier — which is what makes this different from the
+//     accumulated need set ADR-0026 §4b warns about, where a derived alias
+//     can qualify a projection's output.
+//   - a BARE reference that NO OTHER arm of the join can provide. That is
+//     decidable only when every other arm declares its columns — a catalog
+//     table or a signature-declared function — and it is declined outright
+//     when any other arm is itself a reader.
+//
+// The JOIN's own condition is read the same way: it is qualified per arm by
+// construction, so a reader arm named in an ON clause is checked too.
+func (p *Planner) stampTableFuncRequiredColumns(consumer, input *logical.Node) {
+	join := schemaPreservingJoinBelow(input)
+	if join == nil {
+		return
+	}
+	arms := joinRelationArms(join)
+	var readers []*logical.Node
+	othersAllDeclared := true
+	for _, a := range arms {
+		if _, ok := tableFuncSourceRelation(a); ok {
+			readers = append(readers, a)
+			continue
+		}
+		if len(a.ScanColumns) == 0 {
+			othersAllDeclared = false
+		}
+	}
+	if len(readers) == 0 {
+		return
+	}
+	refs, ok := nodeInputColumnRefs(consumer)
+	if !ok {
+		refs = nil
+	}
+	if cond, condOK := nodeInputColumnRefs(join); condOK {
+		refs = append(refs, cond...)
+	}
+	if len(refs) == 0 {
+		return
+	}
+	// A bare name is this reader's only when no OTHER arm declares it and
+	// every other arm's list is known — and never when a second reader is in
+	// the join, because then neither can be held to it.
+	bareIsCertain := othersAllDeclared && len(readers) == 1
+	declaredElsewhere := map[string]bool{}
+	for _, a := range arms {
+		if _, ok := tableFuncSourceRelation(a); ok {
+			continue
+		}
+		for _, c := range a.ScanColumns {
+			declaredElsewhere[strings.ToLower(c)] = true
+		}
+	}
+	for _, r := range readers {
+		alias := strings.ToLower(r.TableAlias)
+		if alias == "" {
+			alias = strings.ToLower(r.FuncName)
+		}
+		var mine []string
+		for _, ref := range refs {
+			qual, col, isQualified := strings.Cut(ref, ".")
+			if isQualified && !strings.Contains(ref, `"`) {
+				if strings.ToLower(qual) == alias {
+					mine = append(mine, col)
+				}
+				continue
+			}
+			if bareIsCertain && !declaredElsewhere[strings.ToLower(ref)] {
+				mine = append(mine, ref)
+			}
+		}
+		r.FuncRequiredColumns = appendUnique(r.FuncRequiredColumns, mine)
+	}
+}
+
+func appendUnique(dst, add []string) []string {
+	seen := make(map[string]bool, len(dst))
+	for _, d := range dst {
+		seen[strings.ToLower(d)] = true
+	}
+	for _, a := range add {
+		if k := strings.ToLower(a); !seen[k] {
+			seen[k] = true
+			dst = append(dst, a)
+		}
+	}
+	return dst
+}
+
+// schemaPreservingJoinBelow returns the JOIN that produces n's input, or nil
+// when the chain does not reach one through operators that publish their
+// input's schema unchanged.
+func schemaPreservingJoinBelow(n *logical.Node) *logical.Node {
+	for n != nil {
+		switch n.Type {
+		case logical.NodeJoin:
+			return n
+		case logical.NodeFilter, logical.NodeLimit:
+			if len(n.Children) != 1 {
+				return nil
+			}
+			n = n.Children[0]
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
+// joinRelationArms lists the RELATIONS a join tree reads, crossing nested
+// joins and schema-preserving operators and stopping at anything else — a
+// derived body the optimizer left as a Project or an Aggregate publishes
+// names of its own, and this walk must not claim those for an arm.
+func joinRelationArms(n *logical.Node) []*logical.Node {
+	var out []*logical.Node
+	var walk func(*logical.Node)
+	walk = func(x *logical.Node) {
+		if x == nil {
+			return
+		}
+		switch x.Type {
+		case logical.NodeScan:
+			out = append(out, x)
+		case logical.NodeJoin, logical.NodeFilter, logical.NodeLimit:
+			for _, c := range x.Children {
+				walk(c)
+			}
+		}
+	}
+	walk(n)
+	return out
 }

@@ -21,13 +21,14 @@ func (p *Planner) buildFilter(ctx context.Context, node *logical.Node) (exec.Sou
 		return nil, nil, nil, fmt.Errorf("filter has no child")
 	}
 
+	// A predicate naming a column a DYNAMIC-schema table function does not
+	// publish is 42703 at the first batch, with the column named and the
+	// relation's own columns listed (#1210) — see table_func_required.go.
+	p.stampTableFuncRequiredColumns(node, node.Children[0])
 	source, ops, sink, err := p.buildPipeline(ctx, node.Children[0])
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	// A predicate naming a column a DYNAMIC-schema table function does not
-	// publish is 42703 at the first batch, with the column named and the
-	// relation's own columns listed (#1210) — see table_func_required.go.
 	source = p.guardTableFuncColumns(node, node.Children[0], source)
 
 	// Collect outer table aliases and columns for correlated subquery detection
@@ -150,13 +151,15 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		}
 	}
 
+	// A column a DYNAMIC-schema table function does not publish is 42703 at
+	// its first batch, never a NULL for every row (#1210) — see
+	// table_func_required.go. The stamp runs BEFORE the pipeline is built,
+	// because a reader that is a JOIN ARM is wrapped where its own source is.
+	p.stampTableFuncRequiredColumns(node, child)
 	source, ops, sink, err := p.buildPipeline(ctx, child)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	// A column a DYNAMIC-schema table function does not publish is 42703 at
-	// its first batch, never a NULL for every row (#1210) — see
-	// table_func_required.go.
 	source = p.guardTableFuncColumns(node, child, source)
 
 	aggNode := findAggregateAncestor(child)
