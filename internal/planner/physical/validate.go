@@ -151,6 +151,19 @@ type colScope struct {
 	// quoted one: `SELECT "G"` over a column `g` is 42703 in PostgreSQL, not
 	// a read of `g`.
 	exact map[string]bool
+	// relations is this block's relation CENSUS — every relation its FROM
+	// declares, in parse order — and parsedThrough is how much of that census
+	// had been read at the point this scope describes. Together they decide
+	// which of PostgreSQL's two 42P01 sentences an unmatched qualifier gets,
+	// and an ON scope carries a parsedThrough short of the whole block.
+	// See validate_relation_scope.go (#1220).
+	relations     *relationCensus
+	parsedThrough int
+	// siblingDiag is the enclosing block's FROM scope AS BUILT SO FAR, when
+	// this scope is a plain (non-LATERAL) derived table's body. Like
+	// outerDiag it never resolves anything — a sibling is out of scope, which
+	// is the point — it only says WHICH 42P01 the reference earns.
+	siblingDiag *colScope
 	// outerDiag is the ENCLOSING QUERY LEVELS this scope sits under, when this
 	// scope is a plain derived table's body. It is consulted only to CLASSIFY
 	// a reference this scope cannot resolve: one that names a relation of an
@@ -388,6 +401,9 @@ func (s *colScope) clone() *colScope {
 		}
 	}
 	c.outerDiag = s.outerDiag
+	c.relations = s.relations
+	c.parsedThrough = s.parsedThrough
+	c.siblingDiag = s.siblingDiag
 	return c
 }
 
@@ -513,7 +529,7 @@ func (s *colScope) resolveRef(ref *plansql.ColRef) error {
 		if err := s.refuseOuterLevelReference(ref); err != nil {
 			return err
 		}
-		return sqlerr.New("42P01", "missing FROM-clause entry for table %q", ref.Table)
+		return s.refuseUnmatchedQualifier(ref)
 	}
 	if !s.cols[col] {
 		return s.unknownColumn(ref)
@@ -584,6 +600,10 @@ type binder struct {
 	// under, carried for DIAGNOSIS and never for resolution (#614). See
 	// outerDiagScope. Nil everywhere but inside a plain derived table's block.
 	outerDiag *colScope
+	// siblingDiag is the enclosing block's FROM scope as built so far, carried
+	// the same way and for the same purpose: a derived table naming a SIBLING
+	// item earns PostgreSQL's LATERAL sentence rather than "missing".
+	siblingDiag *colScope
 }
 
 func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, outer *colScope) error {
@@ -644,8 +664,17 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	// deliberately absent from both: PostgreSQL refuses a sibling reference
 	// without LATERAL too, so that spelling keeps 42P01.
 	from.outerDiag = b.outerDiag
+	from.siblingDiag = b.siblingDiag
+	from.relations = newRelationCensus(info)
+	from.parsedThrough = len(fromCensusSites(from.relations))
 	callerDiag := b.outerDiag
 	b.outerDiag = outerDiagScope(callerDiag, outer)
+	callerSibling := b.siblingDiag
+	// A source of THIS block sees the items written before it, and only for
+	// the diagnosis: `FROM a, (SELECT a.x) s` is PostgreSQL's LATERAL sentence
+	// and `FROM (SELECT a.x) s, a` is its "missing", because the parser has
+	// not read `a` yet.
+	b.siblingDiag = from
 	err := func() error {
 		for i := range info.Tables {
 			if err := b.resolveSource(ctx, &info.Tables[i], nil, from); err != nil {
@@ -668,6 +697,7 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		return nil
 	}()
 	b.outerDiag = callerDiag
+	b.siblingDiag = callerSibling
 	if err != nil {
 		return err
 	}
@@ -724,13 +754,22 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	if err := checkBooleanContext(info.WhereExpr, resolve, "WHERE"); err != nil {
 		return err
 	}
-	// JOIN conditions reference columns from the joined sources (all already in
-	// `resolve`). USING/NATURAL/CROSS joins have no CondExpr → skipped.
+	// JOIN conditions reference the two sides of THEIR OWN join, which is not
+	// the block's flat scope: a relation a later join introduces, and a
+	// relation of another comma-separated FROM item, are both out of scope
+	// there and PostgreSQL refuses each with its own 42P01 sentence (#1220).
+	// An outer level is merged back in, so a correlated ON still resolves.
+	// USING/NATURAL/CROSS joins have no CondExpr → skipped.
 	for i := range info.Joins {
-		if err := b.checkExpr(info.Joins[i].CondExpr, resolve); err != nil {
+		onScope := resolve
+		if visible, through, ok := from.relations.visibleAtJoin(i); ok {
+			onScope = from.scopeAtJoin(visible, through)
+			onScope.merge(outer)
+		}
+		if err := b.checkExpr(info.Joins[i].CondExpr, onScope); err != nil {
 			return err
 		}
-		if err := checkBooleanContext(info.Joins[i].CondExpr, resolve, "JOIN/ON"); err != nil {
+		if err := checkBooleanContext(info.Joins[i].CondExpr, onScope, "JOIN/ON"); err != nil {
 			return err
 		}
 	}
@@ -838,20 +877,11 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 	if expr == nil {
 		return nil
 	}
-	if scope != nil && !scope.open {
-		var refs []*plansql.ColRef
-		walkExpr(expr, &refs, nil, nil)
-		for _, r := range refs {
-			if pgSystemColumns[strings.ToLower(r.Column)] {
-				continue
-			}
-			// Names first, then the constants: a reference that resolves to
-			// nothing has no declared type to refuse a literal against, and
-			// reporting the name is the more useful of the two errors.
-			if err := scope.resolveRef(r); err != nil {
-				return err
-			}
-		}
+	// Names first, then the constants: a reference that resolves to nothing has
+	// no declared type to refuse a literal against, and reporting the name is
+	// the more useful of the two errors.
+	if err := resolveExprNames(expr, scope); err != nil {
+		return err
 	}
 	if err := refuseInvalidRowFields(expr, scope); err != nil {
 		return err
@@ -873,6 +903,31 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 		return nil
 	}
 	return checkLiteralTypes(expr, scope)
+}
+
+// resolveExprNames refuses the first column reference in expr that the scope
+// proves names nothing. It is checkExpr's name half, split out because a
+// WINDOW item needs exactly this and not the literal-type half: a window
+// function's ARGUMENT, its PARTITION BY / ORDER BY terms and its frame offsets
+// are references into the INPUT relation, and PostgreSQL resolves them there —
+// `COUNT(*) OVER (PARTITION BY zz.id)` with no relation `zz` is 42P01, and
+// `PARTITION BY g` naming a SELECT alias is 42703, both measured on 17.11
+// (#1161, #1162).
+func resolveExprNames(expr plansql.Node, scope *colScope) error {
+	if expr == nil || scope == nil || scope.open {
+		return nil
+	}
+	var refs []*plansql.ColRef
+	walkExpr(expr, &refs, nil, nil)
+	for _, r := range refs {
+		if pgSystemColumns[strings.ToLower(r.Column)] {
+			continue
+		}
+		if err := scope.resolveRef(r); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // resolveSource resolves one FROM source into `into`. lateralOuter is the scope a
@@ -1003,6 +1058,13 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 	}
 	stored := resolveTableSpelling(b.src, tr.Name)
 	meta, err := b.src.GetTable(ctx, stored)
+	if err == nil && meta != nil && tr.Alias != "" {
+		// The relation exists and the FROM reads it under an alias, so its
+		// own name is out of scope — PostgreSQL's "Perhaps you meant to
+		// reference the table alias" case. Recorded only for a table the
+		// catalog really has, which is PostgreSQL's own test for it.
+		into.relations.noteAliasedTable(tr.Name, tr.Alias)
+	}
 	if err != nil {
 		if errors.Is(err, catalog.ErrTableNotFound) {
 			return sqlerr.New("42P01", "relation %q does not exist", tr.Name)
