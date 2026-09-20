@@ -120,6 +120,29 @@ func nodeInputColumnRefs(n *logical.Node) ([]string, bool) {
 		}
 		return true
 	}
+	// A TERM IS A TERM, NOT A COLUMN NAME, wherever the plan carries one as
+	// TEXT. `GROUP BY a + 1` reaches the logical node as the string "a + 1",
+	// `GROUP BY UPPER(b)` as "upper(b)", and an ordinal or a select alias
+	// arrives already resolved to the select item's text — so asking the
+	// relation for a column of that name refuses a column that IS there.
+	// Eight base-right spellings over a file reader were newly 42703 for
+	// exactly that (round-1 review, B3, whose repair this generalizes).
+	//
+	// Every such field goes through here: the text is PARSED and the
+	// references it actually makes are taken. A term that will not parse
+	// cannot be enumerated with certainty, and the rule for that is this
+	// file's rule everywhere — no check at all, never a guess.
+	addTerm := func(text string) bool {
+		text = strings.TrimSpace(text)
+		if text == "" || text == "*" || strings.HasPrefix(text, "__") {
+			return true
+		}
+		node, err := plansql.ParseExpression(text)
+		if err != nil || node == nil {
+			return false
+		}
+		return addExpr(node)
+	}
 	switch n.Type {
 	case logical.NodeFilter:
 		for _, pred := range n.Predicates {
@@ -134,7 +157,9 @@ func nodeInputColumnRefs(n *logical.Node) ([]string, bool) {
 				// enumerated with certainty from here.
 				return nil, false
 			}
-			add(pred.Column)
+			if !addTerm(pred.Column) {
+				return nil, false
+			}
 		}
 	case logical.NodeProject:
 		for _, proj := range n.Projections {
@@ -150,21 +175,27 @@ func nodeInputColumnRefs(n *logical.Node) ([]string, bool) {
 			if proj.IsAgg {
 				return nil, false
 			}
-			add(proj.Column)
+			if !addTerm(proj.Column) {
+				return nil, false
+			}
 		}
 	case logical.NodeSort:
 		for _, ob := range n.OrderBy {
 			if ob.Position != 0 {
 				return nil, false
 			}
-			add(ob.Column)
+			if !addTerm(ob.Column) {
+				return nil, false
+			}
 		}
 	case logical.NodeAggregate:
 		if len(n.GroupingSets) > 0 || len(n.GroupingCalls) > 0 {
 			return nil, false
 		}
 		for _, gb := range n.GroupBy {
-			add(gb)
+			if !addTerm(gb) {
+				return nil, false
+			}
 		}
 		for _, e := range n.GroupByExprs {
 			if !addExpr(e) {
@@ -178,7 +209,9 @@ func nodeInputColumnRefs(n *logical.Node) ([]string, bool) {
 				}
 				continue
 			}
-			add(a.InputCol)
+			if !addTerm(a.InputCol) {
+				return nil, false
+			}
 		}
 	default:
 		return nil, false
