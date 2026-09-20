@@ -71,6 +71,13 @@ SELECT g AS "Foo" FROM t          -- published as `Foo`
 SELECT "id.orig_h" FROM conn      -- one column, not conn.orig_h
 ```
 
+**A column whose NAME contains a dot is written quoted.** `"id.orig_h"` is
+that column; unquoted `id.orig_h` is a QUALIFIED REFERENCE — the column
+`orig_h` of a relation `id` — exactly as in PostgreSQL, and it is
+`42P01 missing FROM-clause entry for table "id"` when no relation called `id`
+is in scope. That holds over every relation, a `read_json` / `read_csv` /
+`read_parquet` file whose keys carry dots (Zeek's connection 4-tuple) included.
+
 The fold is ASCII `A`–`Z` only, which is what PostgreSQL does in a UTF-8
 database: `Ä` is not folded to `ä`.
 

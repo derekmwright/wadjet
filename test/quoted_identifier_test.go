@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -103,57 +104,126 @@ func TestQuotedIdentifierZeekDottedColumns(t *testing.T) {
 		}
 	})
 
-	t.Run("quoted and unquoted agree", func(t *testing.T) {
+	// A QUALIFIED REFERENCE IS A QUALIFIED REFERENCE, on every relation.
+	//
+	// `id.orig_h` unquoted is `id` . `orig_h` — PostgreSQL's reading, and this
+	// engine's — so it needs a relation called `id` in scope and is 42P01
+	// without one. A flat column whose NAME contains a dot is spelled
+	// `"id.orig_h"`, which is the whole reason delimited identifiers exist
+	// here and the motivating Zeek case.
+	//
+	// This subtest used to pin the opposite for a file reader: the unquoted
+	// spelling resolved to the flat column. That was never a rule of the
+	// engine — a CATALOG table with the same literal column has always
+	// refused it (the `catalog` cells below, identical at 0c0d33b6) — it was
+	// an artefact of a relation with NO plan-time schema. The binder could
+	// prove nothing absent over an open scope, so it declined; the reference
+	// reached the executor, and `columnIndexFallback`'s qualifier-stripping
+	// suffix match (`"." + bare`) found `id.orig_h` from `orig_h`. A reader
+	// was the only relation that ever got there. Now that a reader publishes
+	// its columns at plan time the binder answers first, and both relations
+	// give PostgreSQL's answer.
+	t.Run("a dotted column is quoted; unquoted is a qualifier", func(t *testing.T) {
+		// The QUOTED spelling — unchanged, and the one users write.
 		quoted := checkedRows(t, ctx, db, src(`SELECT "id.orig_h", COUNT(*) AS n, SUM("orig_bytes") AS bytes FROM read_json('%s') GROUP BY "id.orig_h" ORDER BY n DESC, "id.orig_h"`))
-		// The unquoted spelling reads id.orig_h as a qualified reference and
-		// still resolves to the flat column — pinned here so the quoted path
-		// cannot be introduced by breaking it.
-		unquoted := checkedRows(t, ctx, db, src(`SELECT id.orig_h, COUNT(*) AS n, SUM(orig_bytes) AS bytes FROM read_json('%s') GROUP BY id.orig_h ORDER BY n DESC, id.orig_h`))
-
-		if len(quoted) != 3 || len(unquoted) != 3 {
-			t.Fatalf("expected 3 groups each, got quoted=%d unquoted=%d", len(quoted), len(unquoted))
+		if len(quoted) != 3 {
+			t.Fatalf("expected 3 groups, got %d", len(quoted))
 		}
 		wantHosts := []string{"10.0.0.1", "10.0.0.9", "10.0.0.5"}
 		wantCounts := []string{"2", "2", "1"}
 		wantBytes := []string{"2000", "200", "4000"}
-
-		// Both spellings report the aggregate's own column name, so read the
-		// host column by whichever name each result carries.
-		hostCol := func(rows []map[string]any) string {
-			for _, cand := range []string{"id.orig_h", "orig_h"} {
-				if _, ok := rows[0][cand]; ok {
-					return cand
-				}
-			}
-			t.Fatalf("no host column in result: %v", keysOf(rows[0]))
-			return ""
-		}
-		qHosts := valuesInOrder(quoted, hostCol(quoted))
-		uHosts := valuesInOrder(unquoted, hostCol(unquoted))
+		qHosts := valuesInOrder(quoted, "id.orig_h")
 		for i := range wantHosts {
 			if qHosts[i] != wantHosts[i] {
 				t.Errorf("quoted host %d: got %q, want %q", i, qHosts[i], wantHosts[i])
 			}
-			if uHosts[i] != wantHosts[i] {
-				t.Errorf("unquoted host %d: got %q, want %q", i, uHosts[i], wantHosts[i])
-			}
 			if got := valuesInOrder(quoted, "n")[i]; got != wantCounts[i] {
 				t.Errorf("quoted count %d: got %q, want %q", i, got, wantCounts[i])
-			}
-			if got := valuesInOrder(unquoted, "n")[i]; got != wantCounts[i] {
-				t.Errorf("unquoted count %d: got %q, want %q", i, got, wantCounts[i])
 			}
 			if got := valuesInOrder(quoted, "bytes")[i]; got != wantBytes[i] {
 				t.Errorf("quoted bytes %d: got %q, want %q", i, got, wantBytes[i])
 			}
 		}
-		if len(qHosts) != len(uHosts) {
-			t.Fatalf("row count differs: quoted %d, unquoted %d", len(qHosts), len(uHosts))
-		}
-		for i := range qHosts {
-			if qHosts[i] != uHosts[i] {
-				t.Errorf("row %d differs: quoted %q, unquoted %q", i, qHosts[i], uHosts[i])
+
+		// A CATALOG table holding the same literal columns, so each refusal
+		// below is asserted on BOTH relations and neither has a rule of its
+		// own. The `catalog` half passes at 0c0d33b6 too; the `reader` half
+		// is what this arc changed.
+		for _, ddl := range []string{
+			`CREATE TABLE zeekcat ("id.orig_h" VARCHAR, "id.resp_p" BIGINT, orig_bytes BIGINT)`,
+			`INSERT INTO zeekcat VALUES ('10.0.0.1',443,1200),('10.0.0.9',53,90),('10.0.0.5',443,4000)`,
+			`CREATE TABLE id (orig_h VARCHAR)`,
+			`INSERT INTO id VALUES ('from-the-relation-called-id')`,
+		} {
+			if _, err := db.Query(ctx, ddl); err != nil {
+				t.Fatalf("%s: %v", ddl, err)
 			}
+		}
+
+		reader := fmt.Sprintf(`read_json('%s')`, path)
+		for _, rel := range []struct{ name, from string }{
+			{"catalog", "zeekcat"},
+			{"reader", reader},
+		} {
+			for _, c := range []struct{ clause, sql string }{
+				{"select list", `SELECT id.orig_h FROM ` + rel.from},
+				{"group by", `SELECT id.orig_h, COUNT(*) AS n FROM ` + rel.from + ` GROUP BY id.orig_h`},
+				{"where", `SELECT orig_bytes FROM ` + rel.from + ` WHERE id.resp_p = 443`},
+				{"order by", `SELECT orig_bytes FROM ` + rel.from + ` ORDER BY id.orig_h`},
+				{"join on", `SELECT COUNT(*) AS n FROM ` + rel.from +
+					` x JOIN zeekcat y ON id.orig_h = y."id.orig_h"`},
+			} {
+				t.Run(rel.name+"/"+c.clause, func(t *testing.T) {
+					res, err := db.Query(ctx, c.sql)
+					if err == nil {
+						t.Fatalf("answered %v rows; `id.orig_h` unquoted names a relation "+
+							"`id` that is not in scope, which PostgreSQL refuses\n  SQL: %s",
+							len(res.Rows), c.sql)
+					}
+					if st := sqlerr.StateOf(err); st != "42P01" {
+						t.Errorf("SQLSTATE %q, want 42P01: %v\n  SQL: %s", st, err, c.sql)
+					}
+					if !strings.Contains(err.Error(), `missing FROM-clause entry for table "id"`) {
+						t.Errorf("the refusal does not name the missing relation: %v", err)
+					}
+				})
+			}
+
+			// THE CONTROL that makes the refusals above a rule about SCOPE
+			// and not about the spelling: with a relation actually called
+			// `id` in the FROM clause the reference is legal and answers.
+			//
+			// WHICH column it answers with is a PIN, not the rule. Beside a
+			// relation that carries a FLAT column literally named
+			// `id.orig_h`, the executor's exact-name match finds that column
+			// first and the qualified reading loses: this answers the flat
+			// column's value where PostgreSQL 17.11 answers the relation
+			// `id`'s `orig_h`. Measured identically at 0c0d33b6 on BOTH
+			// relations, so it is pre-existing and no part of this arc; it is
+			// recorded as a filing candidate. If it starts answering
+			// `from-the-relation-called-id`, that is the fix and this pin is
+			// deleted as its proof.
+			t.Run(rel.name+"/a real relation named id makes it legal", func(t *testing.T) {
+				rows := checkedRows(t, ctx, db,
+					`SELECT id.orig_h FROM `+rel.from+`, id`)
+				if len(rows) == 0 {
+					t.Fatal("the reference is legal with `id` in scope and must answer")
+				}
+				const fromTheRelation = "from-the-relation-called-id"
+				for i, r := range rows {
+					got := fmt.Sprint(r["orig_h"])
+					if got == fromTheRelation {
+						t.Errorf("row %d answered the relation `id`'s column, which is "+
+							"PostgreSQL 17.11's reading — the pin below has been fixed, "+
+							"delete it and this branch", i)
+						continue
+					}
+					if !strings.HasPrefix(got, "10.0.0.") {
+						t.Errorf("row %d: got %q, which is neither the flat column's value "+
+							"nor the relation `id`'s", i, got)
+					}
+				}
+			})
 		}
 	})
 
