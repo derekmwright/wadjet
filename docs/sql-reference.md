@@ -225,6 +225,89 @@ nothing, so they are not part of this and remain available to every identity.
 See [Security](security.md#table-functions-as-a-capability) for how to write
 the policy, including scoping it to a path or a host.
 
+### A table function in FROM is a relation
+
+A table function publishes a column list, and every rule that applies to a
+base table's columns applies to its: a reference to a column it does not
+publish is `42703` with the column named, its columns carry their declared
+TYPE into aggregates and arithmetic, an alias clause with a column list
+renames them positionally, and a correlated reference from inside a scalar
+subquery over it binds the outer row.
+
+WHERE the refusal is made depends on whether the function's columns come from
+its CALL or from its INPUT.
+
+| function | column list | an unknown column |
+|---|---|---|
+| `generate_series`, `unnest` | declared by the call | `42703` at plan time |
+| `read_json`, `read_csv`, `read_parquet`, `postgres_*`, `mysql_*` | read from the input | `42703` at the first batch |
+
+A reader's columns are its file's or its remote query's, and the planner does
+not open either to find out: the statement's column binding runs before the
+table-function capability is authorized, so reading the input there would open
+it for an identity that may not be allowed to. The refusal is therefore made
+where the schema first exists — when the function produces its first batch —
+and it names the column and lists what the relation publishes:
+
+```
+ERROR:  column "zz" does not exist: the table function "read_json" publishes a, b
+SQLSTATE: 42703
+```
+
+Two consequences of that timing, both deliberate:
+
+- a reader that produces **no batch at all** (an empty file) is never measured
+  against the statement, so an unknown column over one answers zero rows
+  rather than refusing — the same boundary the column-alias list's `42P10`
+  has;
+- a reader's column has no declared type at plan time, so an aggregate over
+  one declares `double precision`. `SELECT SUM(a) FROM read_json('x.json')` is
+  float8 where the same column through a catalog table is an exact type, and
+  `SELECT f.* FROM read_json('x.json') AS f` is `0A000` where a qualified star
+  over `generate_series` answers. Both are recorded on the
+  [PostgreSQL differences](postgres-differences.md) page.
+
+### generate_series
+
+`generate_series(start, stop[, step])` over integers produces one column named
+`generate_series`.
+
+```sql
+SELECT * FROM generate_series(1, 5)          -- 1 2 3 4 5
+SELECT * FROM generate_series(0, 10, 3)      -- 0 3 6 9
+SELECT * FROM generate_series(5, 1, -1)      -- 5 4 3 2 1
+SELECT * FROM generate_series(5, 1)          -- no rows
+SELECT x FROM generate_series(1, 3) AS g(x)  -- the column renamed to x
+```
+
+The **step is the caller's and is never flipped for them**: a call whose
+bounds run the other way from its step is an EMPTY relation — zero rows of one
+column — and the descending series is written with a negative step. A zero
+step is `22023 step size cannot equal zero`.
+
+The column is `integer` when every argument fits a 32-bit integer and `bigint`
+otherwise, which is the overload PostgreSQL resolves for the same call. The
+declaration is what the consumers read, so `SELECT SUM(x) FROM
+generate_series(1,3) gs(x)` is `bigint`, `AVG` is `numeric`, and `MIN`/`MAX`
+keep `integer`.
+
+### unnest
+
+`unnest(v1, v2, …)` expands its arguments into rows of one column named
+`unnest`; `WITH ORDINALITY` adds a second column named `ordinality`, a
+1-based `bigint` index.
+
+```sql
+SELECT * FROM unnest(1, 2, 3)                       -- 1 2 3
+SELECT v FROM unnest('a', 'b') AS u(v)              -- a b
+SELECT * FROM unnest(7, 8) WITH ORDINALITY AS u(v, o)
+```
+
+The column's type is inferred from the first argument. An integer that fits a
+32-bit integer publishes `integer` and a wider one `bigint`, so a `SUM` over
+the first is `bigint` — the same rule `generate_series` follows. This spelling
+takes a VALUE LIST rather than PostgreSQL's array argument.
+
 ### read_json
 
 Reads JSON files (JSONL or JSON array) with automatic schema inference and a custom direct-to-columnar byte scanner.
@@ -1866,11 +1949,12 @@ SELECT x FROM generate_series(1, 3) g(x)
 SELECT val, ord FROM unnest(7, 8) WITH ORDINALITY u(val, ord)
 ```
 
-On a table function the list is applied where the relation's width is known —
-when the function produces its first batch, because `read_json` infers its
-columns from the file — so a list LONGER than the relation is `42P10` at
-execution rather than at plan time, and a function that produces no rows at all
-is never measured against its list.
+On a table function the list is applied where the relation's width is known.
+For `generate_series` and `unnest` that is PLAN time — their columns come from
+the call — so a list LONGER than the relation is `42P10` before anything runs.
+For a reader it is the FIRST BATCH, because `read_json` infers its columns
+from the file, so the `42P10` is raised at execution and a reader that
+produces no rows at all is never measured against its list.
 
 The list opens a NEW relation namespace: the named columns are the relation's,
 and the names it renamed AWAY are gone. `SELECT id FROM flow_logs a(k)` is

@@ -132,9 +132,21 @@ The standard's capture-marker spelling raises 0A000 naming the construct, where 
 
 `FROM t AS a(k, k)` raises 42701 naming the spelling, where PostgreSQL accepts the list and raises 42702 at every reference. This engine renames positionally and cannot publish one name for two columns. On a TABLE FUNCTION whose relation is narrower than the list, PostgreSQL raises 42P10 for the same statement. (ADR-0012 §5/#959, #1184)
 
-**A table function's column-alias list is measured when the function produces its first batch.**
+**A file or database reader's column-alias list is measured when it produces its first batch.**
 
-`FROM read_json(…) AS f(a, b, c)` over a file with two columns raises 42P10 with PostgreSQL's own sentence, but at execution rather than at plan time: a table function's width is not knowable before it reads its input. A function that produces NO batch is never measured against its list. (ADR-0012 §5/#1184)
+`FROM read_json(…) AS f(a, b, c)` over a file with two columns raises 42P10 with PostgreSQL's own sentence, but at execution rather than at plan time: a reader's width is not knowable before it reads its input. A reader that produces NO batch is never measured against its list. `generate_series` and `unnest` declare their columns from the CALL, so their 42P10 is raised at plan time. (ADR-0012 §5/#1184, #1210)
+
+**An unknown column over a file or database reader is refused at the reader's first batch, not at plan time.**
+
+`SELECT zz FROM read_json('x.json')` raises `42703 column "zz" does not exist: the table function "read_json" publishes a, b` — PostgreSQL's class and a diagnosis naming the column, but made when the reader publishes its schema rather than while the statement is bound. The statement's column binding runs before the table-function capability is authorized, so the planner does not open the input to find out what it publishes (ADR-0034, #943). Two consequences: a reader that produces NO batch answers zero rows where PostgreSQL raises, and `EXPLAIN` over such a statement does not refuse. `generate_series` and `unnest` are refused at plan time like a base table. (ADR-0012 §5/#1210)
+
+**An aggregate over a file or database reader's column declares double precision.**
+
+`SELECT SUM(a) FROM read_json('x.json')` declares and boxes float8 where the same integer column through a catalog table declares an exact type, because a reader has no plan-time column list for the result-type rules to read. `SELECT f.* FROM read_json('x.json') AS f` is 0A000 for the same reason, while a qualified star over `generate_series` answers. The declared functions carry their width: `generate_series(1,3)` publishes `integer` and its SUM is `bigint`, as PostgreSQL declares. (ADR-0012 §5/#1211)
+
+**`generate_series` never flips the caller's step.**
+
+`generate_series(5,1)` is an EMPTY relation — zero rows of one column — on both engines; the descending series is `generate_series(5,1,-1)`. Through v0.22.0 this engine negated a positive default step whenever start > stop and answered the descending series instead. A zero step is 22023 with PostgreSQL's own sentence. (ADR-0012 §5/#1210-series)
 
 **Some known casts leave values unchanged.**
 

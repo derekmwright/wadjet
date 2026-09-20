@@ -56,3 +56,4 @@ Conventions:
 | [0036](0036-a-query-sourced-write-is-one-statement-one-commit.md) | A query-sourced write is one statement with one commit, and its schema is the plan's declared output | Accepted |
 | [0037](0037-one-module-two-licenses.md) | One module, two licenses: the embedded engine MIT, the distributed engine AGPL-3.0, and three gates — imports, SPDX headers, and the DAG vocabulary a package may DECLARE | Accepted |
 | [0038](0038-a-call-is-resolved-by-its-name-and-its-arguments.md) | A call is resolved by its name AND its arguments, at bind time: the registry is the signature table, and every grammar rewrite lands on a call it accepts | Accepted |
+| [0039](0039-a-table-function-in-from-is-a-relation.md) | A table function in FROM is a relation: a signature-declared column list is refused at plan time, a reader's at its first batch, because the binder runs before the capability is authorized | Accepted |
