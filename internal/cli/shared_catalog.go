@@ -410,6 +410,12 @@ func openSharedDB(ctx context.Context, logger *slog.Logger) (*wadjet.DB, func(),
 		Bucket: bucket,
 		MetaKV: kv,
 		Logger: logger,
+		// The planner flags are this DB's configuration now, not a
+		// package variable the root command stored for the whole
+		// process: a command that does not carry them here is a
+		// command whose typed --bushy-join-reorder does nothing
+		// (#1223).
+		BushyJoinReorder: bushyJoinReorder,
 	})
 	if err != nil {
 		release()

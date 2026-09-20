@@ -314,6 +314,7 @@ func queryCmd() *cobra.Command {
 			if isCatalogFreeQuery(args[0]) {
 				db, err := wadjet.Open(ctx, wadjet.Config{
 					Store: objstore.NewMemStore(), Bucket: bucket,
+					BushyJoinReorder: bushyJoinReorder,
 				})
 				if err != nil {
 					return err
