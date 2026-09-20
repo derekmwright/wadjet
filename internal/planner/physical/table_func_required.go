@@ -321,9 +321,9 @@ func (p *Planner) stampTableFuncRequiredColumns(consumer, input *logical.Node) {
 	if join == nil {
 		return
 	}
-	arms := joinRelationArms(join)
+	arms, armsComplete := joinRelationArms(join)
 	var readers []*logical.Node
-	othersAllDeclared := true
+	othersAllDeclared := armsComplete
 	for _, a := range arms {
 		if _, ok := tableFuncSourceRelation(a); ok {
 			readers = append(readers, a)
@@ -416,11 +416,20 @@ func schemaPreservingJoinBelow(n *logical.Node) *logical.Node {
 }
 
 // joinRelationArms lists the RELATIONS a join tree reads, crossing nested
-// joins and schema-preserving operators and stopping at anything else — a
-// derived body the optimizer left as a Project or an Aggregate publishes
-// names of its own, and this walk must not claim those for an arm.
-func joinRelationArms(n *logical.Node) []*logical.Node {
-	var out []*logical.Node
+// joins and schema-preserving operators, and reports whether that list is
+// COMPLETE.
+//
+// It stops at anything else — a derived body the optimizer left as a Project
+// or an Aggregate, the inner side a decorrelated `IN (SELECT …)` mints —
+// because such a node publishes names of its own and this walk must not claim
+// those for an arm. An incomplete list makes a BARE name undecidable, and the
+// caller declines the check rather than attributing the name to the reader:
+// `SELECT a FROM read_json(…) WHERE a IN (SELECT k FROM t)` decorrelates into
+// a semi-join whose right side is a Project, and asking the reader for `k`
+// refused a statement that answers (found by running the round-1 review's own
+// false-refusal probe on the round-2 tip).
+func joinRelationArms(n *logical.Node) (arms []*logical.Node, complete bool) {
+	complete = true
 	var walk func(*logical.Node)
 	walk = func(x *logical.Node) {
 		if x == nil {
@@ -428,13 +437,15 @@ func joinRelationArms(n *logical.Node) []*logical.Node {
 		}
 		switch x.Type {
 		case logical.NodeScan:
-			out = append(out, x)
+			arms = append(arms, x)
 		case logical.NodeJoin, logical.NodeFilter, logical.NodeLimit:
 			for _, c := range x.Children {
 				walk(c)
 			}
+		default:
+			complete = false
 		}
 	}
 	walk(n)
-	return out
+	return arms, complete
 }

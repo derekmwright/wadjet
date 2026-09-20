@@ -111,6 +111,19 @@ func TestArcTFAReaderAsAJoinArmIsHeldToItsColumns(t *testing.T) {
 			sql: `SELECT b.a FROM ` + rj + ` AS b JOIN (SELECT k AS a FROM tkj) s ` +
 				`ON s.a = b.a ORDER BY b.a`,
 			want: "[a] 1;2", pg: "1;2"},
+		// A DECORRELATED `IN (SELECT …)` becomes a SEMI JOIN whose inner side
+		// is a Project, which this walk does not cross — so the arm list is
+		// INCOMPLETE and no bare name is decidable. Declining is the rule;
+		// attributing `k` to the reader refused a statement that answers
+		// (found by running the round-1 review's own false-refusal probe on
+		// the round-2 tip).
+		{name: "control_a_decorrelated_in_subquery_declines_the_bare_check",
+			sql:  `SELECT a FROM ` + rj + ` WHERE a IN (SELECT k FROM tkj) ORDER BY a`,
+			want: "[a] 1;2", pg: "1;2"},
+		{name: "control_an_exists_subquery_declines_the_bare_check",
+			sql: `SELECT a FROM ` + rj + ` AS b WHERE EXISTS ` +
+				`(SELECT 1 FROM tkj WHERE tkj.k = b.a) ORDER BY a`,
+			want: "[a] 1;2", pg: "1;2"},
 		{name: "control_an_expression_over_the_arm",
 			sql:  `SELECT b.a + 1 AS v FROM ` + rj + ` AS b JOIN tkj ON tkj.k = b.a ORDER BY v`,
 			want: "[v] 2;3", pg: "2;3"},
