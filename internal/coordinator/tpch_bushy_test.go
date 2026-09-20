@@ -22,16 +22,19 @@ func TestTPCHNativeDAG_BushyForced(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping TPCH SF0.01 bushy native-DAG suite in short mode")
 	}
-	_, coord, store := setupDistributed(t)
-	// The coordinator's own option, which is what the two fields cfg
-	// reaches are: the planners it builds, and the stamp PublishTasks puts
-	// on every task carrying SQL text for a worker to re-plan (#1223). Set
-	// together here for the same reason Coordinator.New sets them together.
-	coord.config.BushyJoinReorder = true
-	coord.scheduler.BushyJoinReorder = true
+	_, base, store := setupDistributed(t)
+	cat := base.catalog
+	// Built through New, not configured by hand afterwards: the suite is
+	// then a statement about Config reaching everything New derives from it
+	// — the planners and the task stamp alike — so it cannot stay green if
+	// that wiring is removed (round-1 review, N3; #1223).
+	coord := New(Config{
+		NATSUrl:          base.config.NATSUrl,
+		ResultBucket:     "test",
+		BushyJoinReorder: true,
+	}, cat, base.nc, base.js, base.logger)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	cat := coord.catalog
 
 	data := tpch.Generate(tpch.SF001)
 	tableOrder := []string{"region", "nation", "supplier", "part", "partsupp", "customer", "orders", "lineitem"}

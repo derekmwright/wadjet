@@ -4,7 +4,12 @@ package coordinator
 
 import (
 	"fmt"
+	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/nats-io/nats.go"
 
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
@@ -115,12 +120,97 @@ func TestTwoCoordinatorsPlanByTheirOwnBushyOption(t *testing.T) {
 	}
 }
 
-// TestAPipelineTaskCarriesTheCoordinatorsPlannerOption pins the ONE
-// cross-process half of #1223. worker.Executor.executePipeline re-plans a
-// whole query from Task.SQLText, and the coordinator chose that task's probe
-// split and build sides from a plan made under its own option — so the
-// option must reach the worker with the task rather than from the worker
-// process's own configuration.
+// TestTheWireCarriesTheCoordinatorsPlannerOption is the END of the carrier:
+// a coordinator built by New publishes a pipeline task, and the bytes that
+// actually leave carry its option. It exists because the two cells below and
+// the DAG bushy suite all survive the deletion of `Coordinator.New`'s
+// `c.scheduler.BushyJoinReorder = cfg.BushyJoinReorder` — they reach the
+// stamp another way — and a gate that survives the deletion of the thing it
+// guards is not a gate (round-1 review, N3). This one fails there, because
+// the only path from Config to the wire runs through that line.
+func TestTheWireCarriesTheCoordinatorsPlannerOption(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping the wire-carrier gate in short mode")
+	}
+	ctx, plain, _ := setupDistributed(t)
+	bushy := New(Config{
+		NATSUrl:          plain.config.NATSUrl,
+		ResultBucket:     "test",
+		BushyJoinReorder: true,
+	}, plain.catalog, plain.nc, plain.js, plain.logger)
+
+	var mu sync.Mutex
+	seen := map[string][]byte{}
+	sub, err := plain.nc.Subscribe("wadjet.tasks.>", func(m *nats.Msg) {
+		var task distributed.Task
+		if err := distributed.Unmarshal(m.Data, &task); err != nil {
+			return
+		}
+		mu.Lock()
+		seen[task.ID] = append([]byte(nil), m.Data...)
+		mu.Unlock()
+	})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer sub.Unsubscribe() //nolint:errcheck // test teardown
+
+	publish := func(c *Coordinator, id string) {
+		t.Helper()
+		task := distributed.Task{
+			ID: id, QueryID: "q-" + id, StageID: "s-0",
+			Type: distributed.TaskTypePipeline, SQLText: "SELECT 1",
+			ResultBucket: "test", ResultPrefix: "queries/q-" + id + "/",
+		}
+		if err := c.scheduler.PublishTasks(ctx, []distributed.Task{task}); err != nil {
+			t.Fatalf("PublishTasks(%s): %v", id, err)
+		}
+	}
+	publish(bushy, "bushy")
+	publish(plain, "plain")
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		mu.Lock()
+		n := len(seen)
+		mu.Unlock()
+		if n >= 2 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, want := range []struct {
+		id     string
+		option bool
+	}{{"bushy", true}, {"plain", false}} {
+		data, ok := seen[want.id]
+		if !ok {
+			t.Fatalf("no published payload captured for the %s coordinator's task", want.id)
+		}
+		var back distributed.Task
+		if err := distributed.Unmarshal(data, &back); err != nil {
+			t.Fatalf("unmarshal %s: %v", want.id, err)
+		}
+		if back.BushyJoinReorder != want.option {
+			t.Fatalf("the %s coordinator published a pipeline task with BushyJoinReorder=%v, want %v —"+
+				" Config did not reach the wire (Coordinator.New wires the scheduler; #1223)",
+				want.id, back.BushyJoinReorder, want.option)
+		}
+		// The key is omitted, not written false, so a worker predating the
+		// field reads the shipped default.
+		if !want.option && strings.Contains(string(data), "bushy_join_reorder") {
+			t.Fatalf("the default coordinator's payload names bushy_join_reorder: %s", data)
+		}
+	}
+}
+
+// TestAPipelineTaskCarriesTheCoordinatorsPlannerOption pins the stamp itself:
+// which tasks it touches, and that the value survives the wire both ways.
+// The coordinator-to-wire half is TestTheWireCarriesTheCoordinatorsPlannerOption
+// above — this one deliberately calls the stamp directly, so it stays a
+// statement about the stamp's RULE rather than about the wiring.
 //
 // The stamp lives at Scheduler.PublishTasks, the choke point every
 // dispatcher passes through (seven sites build a pipeline task), so this
