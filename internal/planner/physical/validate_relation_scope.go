@@ -133,9 +133,12 @@ func newRelationCensus(info *plansql.SelectInfo) *relationCensus {
 
 // noteAliasedTable records that a BASE TABLE of this block is reachable only
 // through an alias, so a reference to its own name gets PostgreSQL's alias
-// sentence rather than "missing". A name already answering to something in
-// this block is left alone: `FROM (SELECT …) lat_item JOIN lat_item b` is a
-// statement PostgreSQL ANSWERS, because the derived table owns the name.
+// sentence rather than "missing".
+//
+// What it records is only ever a DIAGNOSIS: refuseUnmatchedQualifier is
+// reached only where no relation in scope answers to the name at all, so
+// `FROM (SELECT …) lat_item JOIN lat_item b` — where a derived table owns the
+// name and PostgreSQL ANSWERS the statement — never gets here.
 func (c *relationCensus) noteAliasedTable(name, alias string) {
 	if c == nil || name == "" || alias == "" {
 		return

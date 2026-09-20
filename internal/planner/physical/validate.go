@@ -688,9 +688,10 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	from := newColScope()
 	// This block's OWN scope carries the diagnosis its caller set; the SOURCES
 	// it is about to resolve carry this block's enclosing levels, because a
-	// derived table's body sits one level further in (#614). A SIBLING is
-	// deliberately absent from both: PostgreSQL refuses a sibling reference
-	// without LATERAL too, so that spelling keeps 42P01.
+	// derived table's body sits one level further in (#614). A SIBLING is a
+	// diagnosis of its own and never a resolution: PostgreSQL refuses a
+	// sibling reference without LATERAL too, so the spelling keeps 42P01 —
+	// which 42P01 is what siblingDiag decides (arc RS).
 	from.outerDiag = b.outerDiag
 	from.siblingDiag = b.siblingDiag
 	from.relations = newRelationCensus(info)
