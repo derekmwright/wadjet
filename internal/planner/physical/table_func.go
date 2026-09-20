@@ -618,6 +618,15 @@ type generateSeriesSource struct {
 	typ  parquet.TypeID
 	cur  int64
 	done bool
+	// exhausted records that the NEXT step would leave int64, which is the
+	// end of the series on this carrier. Without it `s.cur += s.step` wraps
+	// at the edge, the wrapped value sits on the other side of the bound and
+	// neither exit is reached: generate_series(9223372036854775805,
+	// 9223372036854775807) emitted 2048-row batches forever — every row after
+	// the wrap a value the series does not contain — and the embedded query
+	// was OOM-killed at 43 s where PostgreSQL 17.11 answers three rows.
+	// Measured by the round-1 review.
+	exhausted bool
 }
 
 func newGenerateSeriesSource(args []string) (*generateSeriesSource, error) {
@@ -669,7 +678,7 @@ func (s *generateSeriesSource) Next(_ context.Context) (*batch.RecordBatch, erro
 	// Generate up to DefaultBatchSize rows per batch
 	n := 0
 	vals := make([]int64, 0, batch.DefaultBatchSize)
-	for n < batch.DefaultBatchSize {
+	for n < batch.DefaultBatchSize && !s.exhausted {
 		if s.step > 0 && s.cur > s.stop {
 			break
 		}
@@ -677,8 +686,13 @@ func (s *generateSeriesSource) Next(_ context.Context) (*batch.RecordBatch, erro
 			break
 		}
 		vals = append(vals, s.cur)
-		s.cur += s.step
 		n++
+		next := s.cur + s.step
+		if (s.step > 0 && next < s.cur) || (s.step < 0 && next > s.cur) {
+			s.exhausted = true
+			break
+		}
+		s.cur = next
 	}
 
 	if n == 0 {
@@ -697,6 +711,9 @@ func (s *generateSeriesSource) Next(_ context.Context) (*batch.RecordBatch, erro
 	b.Len = n
 
 	// Check if we've exhausted the series
+	if s.exhausted {
+		s.done = true
+	}
 	if s.step > 0 && s.cur > s.stop {
 		s.done = true
 	}
