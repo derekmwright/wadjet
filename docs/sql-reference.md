@@ -256,9 +256,23 @@ SQLSTATE: 42703
 
 The check reaches a reader used as a JOIN ARM as well, for the names that are
 certain there: a reference qualified by the arm's own alias, the join's own
-`ON` condition, and a bare reference no other arm of the join can provide. A
-join holding TWO readers can decide nothing about a bare name, so a bare
-reference there is not checked.
+`ON` condition, and a bare reference no other arm of the join can provide.
+
+**One shape is still wrong.** A join holding TWO readers can decide nothing
+about a bare name, so an UNQUALIFIED reference to a column neither publishes
+is not checked — and it answers NULL for every row where PostgreSQL raises
+`42703`:
+
+```sql
+-- NULL for every row; PostgreSQL raises 42703
+SELECT zz FROM read_json('a.json') b JOIN read_json('a.json') c ON b.a = c.a
+
+-- 42703, naming the column: qualify the reference
+SELECT b.zz FROM read_json('a.json') b JOIN read_json('a.json') c ON b.a = c.a
+```
+
+Qualify the reference, or read one of the two through a CTE, until this is
+fixed.
 
 Two consequences of that timing, both deliberate:
 

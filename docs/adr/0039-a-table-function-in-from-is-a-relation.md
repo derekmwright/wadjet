@@ -165,9 +165,16 @@ each is a consequence of (3), not an oversight:
   qualified star over one is `0A000`, because both need the column list at
   plan time;
 - a bare reference to a reader's column through a join that holds a SECOND
-  reader makes no check: neither arm can be held to a bare name when both
-  have unknown column lists, which is §4a's certainty rule declining rather
-  than guessing. A QUALIFIED reference in that join is still checked.
+  reader **answers NULL for every row** where PostgreSQL raises 42703. That
+  is a silent WRONG VALUE, not a superset: `SELECT zz FROM read_json('a.json')
+  b JOIN read_json('a.json') c ON b.a = c.a` returns rows with a NULL `zz`.
+  §4a's certainty rule is what leaves it — neither arm can be held to a bare
+  name when both have unknown column lists, and declining is the only honest
+  answer a guard built on certainty can give — but declining to CHECK is not
+  the same as being right, and this consequence is the one place the ADR's own
+  rule ("never a NULL at run time") does not yet hold. Filed as #1229. A
+  QUALIFIED reference in that join IS refused, which is the workaround and the
+  measurement that isolates it.
 
 Closing the first three is one change — a post-authorization annotation pass
 both doors reach — and it moves a coordinator call site, which is why this
