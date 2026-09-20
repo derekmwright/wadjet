@@ -5884,15 +5884,46 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     reports in.
 
   - **A table function's column-alias list is applied at its SOURCE.**
-    (Added 2026-09-18, arc PT / #1184.) `FROM read_json(…) [AS] f(k, v)` now
-    renames positionally like every other FROM item. The rename happens where
-    the relation's WIDTH is known — when the function produces its first batch
-    — not at plan time, because a table function's columns come from the file
-    it reads. Two consequences are recorded rather than hidden: a list longer
+    (Added 2026-09-18, arc PT / #1184; narrowed 2026-09-19, arc TF / #1210.)
+    `FROM read_json(…) [AS] f(k, v)` now renames positionally like every other
+    FROM item. The rename happens where the relation's WIDTH is known. For a
+    FILE or DATABASE READER that is when the function produces its first
+    batch, because its columns come from the input it reads: a list longer
     than the relation is `42P10` with PostgreSQL's own sentence but at
-    EXECUTION, and a function that produces no batch at all is never measured
-    against its list. A repeated name in the list is `42701` at the list, the
+    EXECUTION, and a reader that produces no batch at all is never measured
+    against its list. For `generate_series` and `unnest` the width is a
+    function of the CALL, so their `42P10` is raised at plan time like
+    PostgreSQL's. A repeated name in the list is `42701` at the list, the
     same narrower refusal arc PS recorded for a base table.
+
+  - **A TABLE FUNCTION IN FROM IS A RELATION, AND WHERE ITS COLUMNS COME FROM
+    DECIDES WHERE A MISSING ONE IS REFUSED.** (Added 2026-09-19, arc TF /
+    #1210 #1203 #1211 #1202; the position is ADR-0039.) A reference to a
+    column a table function does not publish is `42703` naming the column, as
+    it is over a base table — where it used to answer NULL for every row.
+    `generate_series` and `unnest` declare their columns from the call, so
+    their refusal is made at plan time; a file or database reader's columns
+    are its input's, and this engine does not open the input to bind the
+    statement (the column binding runs before the table-function capability
+    is authorized — ADR-0034, #943), so a reader's refusal is made at its
+    FIRST BATCH. Five divergences follow from that timing or from the
+    function's own naming rules, each on the differences page: a reader that
+    produces NO batch answers zero rows where PostgreSQL raises, and `EXPLAIN`
+    over such a statement does not refuse; an aggregate over a reader's column
+    declares `double precision` and a qualified star over one is `0A000`,
+    because both need a plan-time column list; a FROM alias does not rename a
+    single-column function's column, which PostgreSQL does; and
+    `generate_series(…) WITH ORDINALITY` publishes one column where
+    PostgreSQL publishes two. One shape is a silent WRONG VALUE rather than a
+    divergence and is filed as such (#1229): a BARE reference to an unknown
+    column in a join holding TWO readers answers NULL for every row, because
+    neither arm can be held to a bare name; the qualified spelling is
+    refused. The declared functions' own value rules follow PostgreSQL
+    exactly: the step is never flipped for the caller, `generate_series(5,1)`
+    is an empty relation, a zero step is `22023`, a series ends at the 64-bit
+    carrier's edge rather than wrapping, and the column is `integer` for
+    arguments that fit int4 and `bigint` otherwise — so its `SUM` is `bigint`
+    and not a float8 that loses the value.
 
   - **`QUALIFY` has no PostgreSQL, and DUCKDB 1.1.3 IS THE ORACLE FOR IT.**
     (Added 2026-09-14, #1076.) The clause originates in Snowflake/BigQuery and

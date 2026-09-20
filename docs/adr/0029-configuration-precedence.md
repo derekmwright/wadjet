@@ -2,7 +2,7 @@
 
 - **Status**: Accepted (2026-09-03)
 - **Supersedes**: nothing. Settles the question #808 raised and #827/#828 are faces of.
-- **Related**: ADR-0028 (operational invariants — the breaker keys this ADR makes configurable), #802 (an unreadable config file is a startup error), #827 (the NATS TLS file tier), #828 (the admin config endpoint).
+- **Related**: ADR-0028 (operational invariants — the breaker keys this ADR makes configurable), ADR-0040 (where the resolved value LIVES once this ADR has resolved it: on the instance that uses it, never in a package variable), #802 (an unreadable config file is a startup error), #827 (the NATS TLS file tier), #828 (the admin config endpoint).
 
 ## Context
 

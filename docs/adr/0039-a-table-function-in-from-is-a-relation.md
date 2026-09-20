@@ -1,7 +1,14 @@
 # ADR-0039: A table function in FROM is a relation, and where its columns come from decides where a reference to a missing one is refused
 
-Status: Accepted (2026-09-19, #1210 / #1203 / #1211, arc TF; amended the same
-day after the arc's round-1 review — §4a, §6a and the Consequences)
+Status: Accepted (2026-09-19, #1210 / #1203 / #1211 / #1202, arc TF; amended
+the same day after the arc's round-1 review — §4a, §6a, §7, §8 and the
+Consequences; the Consequences amended again after the closure review, which
+measured the two-reader residue as a silent wrong VALUE rather than an
+unchecked shape — #1229)
+
+Related: ADR-0034 (the authorization ordering §3 rests on), ADR-0024 (§5's
+declared width and §7's key widening), ADR-0012 §5 (the divergences this
+position leaves, each on the differences page).
 
 ## Context
 
