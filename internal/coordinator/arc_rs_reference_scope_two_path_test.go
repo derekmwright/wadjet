@@ -163,6 +163,20 @@ func rsArmCells() []rsArmCell {
 		{name: "sibling/bodyWithoutThatRelationKeepsLateral",
 			sql:    `SELECT s.m AS v FROM lat_ord, (SELECT lat_ord.id AS m FROM lat_item q) s`,
 			refuse: `you must mark this subquery with LATERAL`},
+		// A DELIMITED qualifier is byte-exact under a STAR too — the spelling
+		// whose FOLD matches a relation in scope kept two dispositions decided
+		// by the enclosing SELECT list until the round-1 review's P3.
+		{name: "delimStar/foldMatchesARelation", sql: `SELECT * FROM lat_ord o ORDER BY "O".id`,
+			refuse: `missing FROM-clause entry for table "O"`},
+		{name: "delimStar/windowKey",
+			sql:    `SELECT *, COUNT(*) OVER (PARTITION BY "O".id) AS n FROM lat_ord o`,
+			refuse: `missing FROM-clause entry for table "O"`},
+		{name: "delimStar/namedListMirror", sql: `SELECT o.id AS v FROM lat_ord o ORDER BY "O".id`,
+			refuse: `missing FROM-clause entry for table "O"`},
+		{name: "delimStarOk/declaredDelimited", sql: `SELECT * FROM lat_ord "O" ORDER BY "O".id`,
+			want: "rows=3 1,Alice,150 | 2,Bob,200 | 3,Carol,0"},
+		{name: "delimStarOk/unquotedUnderStar", sql: `SELECT * FROM lat_ord o ORDER BY o.id`,
+			want: "rows=3 1,Alice,150 | 2,Bob,200 | 3,Carol,0"},
 
 		// A STAR OUTPUT opens the scope for BARE names only: it mints output
 		// names the binder cannot enumerate, and never a QUALIFIER. Before
@@ -302,7 +316,7 @@ func TestArcRSAQualifiedReferenceNamesOneRelationOnEveryArm(t *testing.T) {
 		})
 	}
 	// A TABLE WHOSE EVERY CELL REFUSES PROVES ONLY THAT THE ENGINE IS LOUD.
-	if want := 25 * len(arms); answered != want {
+	if want := 27 * len(arms); answered != want {
 		t.Fatalf("%d (control, arm) pairs answered, want %d: the controls are what "+
 			"say this rule is a rule and not a ban", answered, want)
 	}

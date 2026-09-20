@@ -229,6 +229,27 @@ func rsCells() []rsCell {
 		{"sibling/bodyWithoutThatRelationKeepsLateral",
 			`SELECT s.m FROM lat_ord, (SELECT lat_ord.id AS m FROM lat_item q) s`,
 			"42P01", `you must mark this subquery with LATERAL`},
+
+		// --- a DELIMITED qualifier is byte-exact under a star too ---------
+		//
+		// resolveRef's CLOSED path has refused `"O".id` over `FROM lat_ord o`
+		// since #731. The STAR-opened scope reaches the qualifier rule through
+		// refuseUnknownRelationQualifier, which folded the name back — so the
+		// delimited spelling kept exactly the two-dispositions split §(e) item
+		// 8 records as closed (round-1 review, P3).
+		{"delimStar/foldMatchesARelation", `SELECT * FROM lat_ord o ORDER BY "O".id`,
+			"42P01", `missing FROM-clause entry for table "O"`},
+		{"delimStar/groupBy", `SELECT * FROM lat_ord o GROUP BY "O".id`,
+			"42P01", `missing FROM-clause entry for table "O"`},
+		{"delimStar/where", `SELECT * FROM lat_ord o WHERE "O".id = 1`,
+			"42P01", `missing FROM-clause entry for table "O"`},
+		{"delimStar/windowKey", `SELECT *, COUNT(*) OVER (PARTITION BY "O".id) AS n FROM lat_ord o`,
+			"42P01", `missing FROM-clause entry for table "O"`},
+		{"delimStar/namedListMirror", `SELECT o.id AS v FROM lat_ord o ORDER BY "O".id`,
+			"42P01", `missing FROM-clause entry for table "O"`},
+		{"delimStarOk/declaredDelimited", `SELECT * FROM lat_ord "O" ORDER BY "O".id`, "", ""},
+		{"delimStarOk/unquotedUnderStar", `SELECT * FROM lat_ord o ORDER BY o.id`, "", ""},
+		{"delimStarOk/bareUnderStar", `SELECT * FROM lat_ord o ORDER BY id`, "", ""},
 	}
 }
 
@@ -267,7 +288,7 @@ func TestArcRSAQualifiedReferenceNamesOneRelationInScope(t *testing.T) {
 	// A TABLE WHOSE EVERY CELL REFUSES PROVES ONLY THAT THE BINDER IS LOUD.
 	// The controls are what say the rule is a rule: each is a statement
 	// PostgreSQL answers and one edit from a refusing cell above.
-	if answered < 21 {
+	if answered < 24 {
 		t.Fatalf("only %d control cells were answered — the table has stopped "+
 			"discriminating between a reference in scope and one out of it", answered)
 	}

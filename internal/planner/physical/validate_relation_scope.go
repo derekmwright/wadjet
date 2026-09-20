@@ -317,6 +317,17 @@ func (s *colScope) refuseUnknownRelationQualifier(table string) error {
 		return nil
 	}
 	q := strings.ToLower(table)
+	// A DELIMITED qualifier is byte-exact here too. resolveRef's CLOSED path
+	// already refuses `"O".id` over `FROM lat_ord o` (#731), and this helper
+	// is the STAR-opened scope's way in — folding it back left ONE reference
+	// with two dispositions decided by the enclosing SELECT list, which is
+	// the very split docs/design/window-key-ownership.md §(e) item 8 records
+	// as closed (measured by the round-1 review, P3). It fires only where the
+	// FOLD would have resolved and no FROM source declared those bytes, so a
+	// scope that lost a spelling cannot manufacture a refusal.
+	if plansql.FoldIdent(table) != table && !s.exactQuals[table] && s.quals[q] != nil {
+		return sqlerr.New("42P01", "missing FROM-clause entry for table %q", table)
+	}
 	if s.quals[q] != nil || s.cols[q] || strings.Contains(q, ".") {
 		return nil
 	}
