@@ -1269,6 +1269,20 @@ func nodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Co
 					}
 				}
 			}
+			// AN UNDECIDED OPERAND IS STILL A NUMBER UNDER A UNARY SIGN.
+			// The String fallback below is what `ORDER BY -a` over a relation
+			// with no plan-time column types — a file or database reader —
+			// used to take: the hidden sort key materialized as TEXT and the
+			// rows came back in the order "-1" < "-2" < "-3" gives, which is
+			// ASCENDING by `a` where PostgreSQL sorts descending. A wrong
+			// ORDER, silently (round-1 review, N10).
+			//
+			// Float64 is the same declaration a BINARY arithmetic node over
+			// the same undecided operand already takes, which is why
+			// `ORDER BY 0 - a` and `ORDER BY a * -1` were right over the same
+			// relation while `ORDER BY -a` was not. One rule for the sign,
+			// whichever way it is written.
+			return expr.Decl(parquet.TypeFloat64), expr.Decided
 		}
 	case *plansql.FuncCallNode:
 		return funcReturnType(n, decls)
