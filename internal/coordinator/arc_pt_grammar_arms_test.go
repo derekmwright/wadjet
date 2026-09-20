@@ -302,27 +302,40 @@ func TestArcPTGrammarAnswersTheSameOnEveryArm(t *testing.T) {
 		// below measures. The alias list is applied at the SOURCE, so
 		// whichever process opens the function applies it; the pin is the
 		// stage planner's, not this arc's, and it is recorded `distributed`.
+		// The series column is INT4 for a call whose arguments fit it:
+		// PostgreSQL 17.11 resolves generate_series(int4,int4) and declares
+		// `integer` (measured). These cells read int64 when this file was
+		// written, which was this engine's own carrier and not 17.11's
+		// declaration; arc TF made the declaration the overload's (#1211).
 		{issue: "#1184", name: "control_a_table_function_with_no_list",
 			sql:    `SELECT generate_series AS v FROM generate_series(1,2) ORDER BY v`,
-			want:   []string{"v=int64:1", "v=int64:2"},
+			want:   []string{"v=int32:1", "v=int32:2"},
 			dagPin: "no dependencies and no ScanFiles",
-			pg:     "1;2"},
+			pg:     "1;2, declared integer"},
 		{issue: "#1184", name: "generate_series_renamed",
 			sql:    `SELECT x FROM generate_series(1,3) AS gs(x) ORDER BY x`,
-			want:   []string{"x=int64:1", "x=int64:2", "x=int64:3"},
-			dagPin: "no dependencies and no ScanFiles", pg: "1;2;3"},
-		// COUNT rather than SUM: an integer SUM over a TABLE FUNCTION's column
-		// is float64 here with or without the alias list — a numeric
-		// DECLARATION gap (ADR-0024 says an integer SUM is bigint) that this
-		// arc measured and recorded rather than widened a cell to hide.
+			want:   []string{"x=int32:1", "x=int32:2", "x=int32:3"},
+			dagPin: "no dependencies and no ScanFiles", pg: "1;2;3, declared integer"},
+		// SUM, not COUNT. When this file was written an integer SUM over a
+		// table function's column was float64 — the DECLARATION gap #1211
+		// recorded — and this cell used COUNT rather than widen itself to
+		// hide it. The gap is closed: the column declares `integer`, so its
+		// SUM declares `bigint`, which is what 17.11 declares here.
 		{issue: "#1184", name: "generate_series_renamed_without_as",
-			sql:    `SELECT COUNT(x) AS n FROM generate_series(1,3) gs(x)`,
-			want:   []string{"n=int64:3"},
-			dagPin: "no dependencies and no ScanFiles", pg: "3"},
+			sql:    `SELECT SUM(x) AS n FROM generate_series(1,3) gs(x)`,
+			want:   []string{"n=int64:6"},
+			dagPin: "no dependencies and no ScanFiles", pg: "6, declared bigint"},
+		// NO dagPin. The column-alias list is applied over the DECLARED
+		// column list at PLAN time now, so an over-long list is 42P10 before
+		// any stage is emitted and all five arms refuse with PostgreSQL's own
+		// sentence. The pin that stood here — "a table function as the only
+		// FROM item is not a DAG stage" — started AGREEING for this cell, and
+		// a pin that agrees is deleted as the proof, never re-pinned. It
+		// still stands on the three cells above, which ANSWER on the single
+		// arms and so still reach stage emission on the DAG ones.
 		{issue: "#1184", name: "too_many_names_refuses",
 			sql: `SELECT * FROM generate_series(1,3) AS gs(x, y)`, state: "42P10",
-			dagPin: "no dependencies and no ScanFiles",
-			pg:     `42P10 table "gs" has 1 columns available but 2 columns specified`},
+			pg: `42P10 table "gs" has 1 columns available but 2 columns specified`},
 	} {
 		t.Run(tc.issue+"/"+tc.name, func(t *testing.T) {
 			pinnedArms := 0
