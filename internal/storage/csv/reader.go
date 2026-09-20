@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -45,11 +46,12 @@ func DefaultConfig() ReaderConfig {
 
 // Reader reads CSV data into columnar RecordBatches.
 type Reader struct {
-	schema []parquet.Column
-	colIdx map[string]int
-	rows   [][]string // all data rows (excluding header) — used for []byte path
-	offset int
-	cr     *csv.Reader // streaming csv reader — used for io.Reader path
+	schema   []parquet.Column
+	colIdx   map[string]int
+	rows     [][]string // all data rows (excluding header) — used for []byte path
+	offset   int
+	readRows int
+	cr       *csv.Reader // streaming csv reader — used for io.Reader path
 }
 
 // NewReader creates a CSV reader from raw bytes with the given config.
@@ -193,7 +195,7 @@ func (r *Reader) Next() (*batch.RecordBatch, error) {
 		}
 		chunk := r.rows[r.offset:end]
 		r.offset = end
-		return r.buildBatch(chunk), nil
+		return r.buildBatch(chunk)
 	}
 
 	// If we have a streaming csv.Reader, read the next batch from it
@@ -205,7 +207,7 @@ func (r *Reader) Next() (*batch.RecordBatch, error) {
 		if len(chunk) == 0 {
 			return nil, nil // EOF
 		}
-		return r.buildBatch(chunk), nil
+		return r.buildBatch(chunk)
 	}
 
 	return nil, nil
@@ -230,7 +232,7 @@ func (r *Reader) readStreamBatch() ([][]string, error) {
 }
 
 // buildBatch creates a RecordBatch from a slice of string rows.
-func (r *Reader) buildBatch(chunk [][]string) *batch.RecordBatch {
+func (r *Reader) buildBatch(chunk [][]string) (*batch.RecordBatch, error) {
 	numRows := len(chunk)
 	b := batch.NewRecordBatch(r.schema, numRows)
 
@@ -251,58 +253,68 @@ func (r *Reader) buildBatch(chunk [][]string) *batch.RecordBatch {
 				}
 				continue
 			}
-			writeCSVValue(b.Columns[col], row, val, sc.Type)
+			if err := writeCSVValue(b.Columns[col], row, val, sc.Type); err != nil && r.readRows+row+1 > 100 {
+				return nil, sqlerr.New("22P02", "read_csv: row %d column %q: value %q (%s) is not a %s (the column's type was inferred from the file's first 100 rows)", r.readRows+row+1, sc.Name, val, detectStringType(val), sc.Type)
+			}
 		}
 	}
-	return b
+	r.readRows += numRows
+	return b, nil
 }
 
-func writeCSVValue(vec *batch.Vector, row int, val string, typ parquet.TypeID) {
+func writeCSVValue(vec *batch.Vector, row int, val string, typ parquet.TypeID) error {
+	if row < 0 || row >= vec.Len || (typ == parquet.TypeString && row+1 >= len(vec.BytesData.Offsets)) {
+		return fmt.Errorf("CSV row index %d outside vector length %d", row, vec.Len)
+	}
 	switch typ {
 	case parquet.TypeBool:
 		switch val {
 		case "true", "TRUE", "True", "1", "yes", "YES":
 			vec.BoolData[row] = true
-		default:
+		case "false", "FALSE", "False", "0", "no", "NO":
 			vec.BoolData[row] = false
+		default:
+			return fmt.Errorf("invalid boolean")
 		}
 	case parquet.TypeInt64:
 		n, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
 			vec.Nulls.SetNull(row)
-			return
+			return fmt.Errorf("invalid %s", typ)
 		}
 		vec.Int64Data[row] = n
 	case parquet.TypeFloat64:
 		f, err := strconv.ParseFloat(val, 64)
 		if err != nil {
 			vec.Nulls.SetNull(row)
-			return
+			return fmt.Errorf("invalid %s", typ)
 		}
 		vec.Float64Data[row] = f
 	case parquet.TypeIPv4:
 		ip := net.ParseIP(val)
 		if ip == nil {
 			vec.Nulls.SetNull(row)
-			return
+			return fmt.Errorf("invalid %s", typ)
 		}
 		ip4 := ip.To4()
 		if ip4 == nil {
 			vec.Nulls.SetNull(row)
-			return
+			return fmt.Errorf("invalid %s", typ)
 		}
 		vec.Int64Data[row] = int64(uint32(ip4[0])<<24 | uint32(ip4[1])<<16 | uint32(ip4[2])<<8 | uint32(ip4[3]))
 	case parquet.TypeTimestamp:
 		for _, layout := range timestampPatterns {
 			if t, err := time.Parse(layout, val); err == nil {
 				vec.Int64Data[row] = t.UnixMicro()
-				return
+				return nil
 			}
 		}
 		vec.Nulls.SetNull(row)
+		return fmt.Errorf("invalid timestamp")
 	default: // TypeString and everything else
 		vec.BytesData.Set(row, []byte(val))
 	}
+	return nil
 }
 
 func inferCSVSchema(header []string, rows [][]string) []parquet.Column {

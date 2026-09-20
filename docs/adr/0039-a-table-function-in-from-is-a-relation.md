@@ -106,12 +106,15 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    schema are the same inference rather than two guesses — but that inference
    is the readers' own 100-ROW sample (`csv.sampleSize`,
    `json.defaultSampleSize`), and it describes the whole file. A row past the
-   sample that does not fit it is NOT refused: its value reads NULL while the
-   row is still counted, a key that first appears there is not a column at
-   all, and a JSON number that becomes a string fails as a recovered panic.
-   That is the readers' pre-existing behaviour, unchanged by this position and
-   identical at 0c0d33b6; it is stated on `docs/sql-reference.md` and filed as
-   a `priority:high` candidate rather than claimed as handled here.
+   sample with a non-NULL value that does not fit its column refuses with
+   SQLSTATE `22P02` (arc RP, #1242, #1243). Every CSV and JSON read path
+   checks before conversion or vector writes. The error names the reader,
+   input, 1-based data row, column, value and types. Integer to fractional
+   number is a mismatch; string columns accept numbers as text. JSON null
+   and empty CSV fields remain NULL, and inference within the sample is
+   unchanged. COUNT(*) refuses when the reader reaches the row; a LIMIT
+   that stops reading before it need not refuse. A key first seen past the
+   sample remains absent from the inferred column list.
 
    **Nor is the plan-time read taken over an input that can be read ONCE.**
    It opens the input and the execution opens it again, so it is taken only

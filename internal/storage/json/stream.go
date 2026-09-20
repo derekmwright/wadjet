@@ -44,6 +44,7 @@ type StreamReader struct {
 
 	isArray     bool
 	openSkipped bool // leading '[' consumed
+	fileRow     int
 	done        bool
 
 	chunkSize int // test hook; defaults to streamChunkBytes
@@ -123,9 +124,10 @@ func (sr *StreamReader) Next() (*batch.RecordBatch, error) {
 			sr.done = true
 			break
 		}
-		sc := &jsonScanner{data: sr.buf[:objEnd], pos: objStart}
+		sr.fileRow++
+		sc := &jsonScanner{data: sr.buf[:objEnd], pos: objStart, fileRow: sr.fileRow}
 		if err := scanObjectInto(sc, rb, row, sr.schema, sr.colIdx, sr.seen); err != nil {
-			return nil, fmt.Errorf("row %d: %w", row, err)
+			return nil, fmt.Errorf("row %d: %w", sc.fileRow, err)
 		}
 		sr.start = objEnd
 		row++

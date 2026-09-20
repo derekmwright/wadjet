@@ -96,8 +96,9 @@ func (r *ColumnarReader) Next() (*batch.RecordBatch, error) {
 // jsonScanner is a minimal JSON scanner that operates on raw bytes.
 // It extracts string keys and values without allocating intermediate objects.
 type jsonScanner struct {
-	data []byte
-	pos  int
+	data    []byte
+	pos     int
+	fileRow int
 }
 
 func (s *jsonScanner) skipWhitespace() {
@@ -375,8 +376,9 @@ func parseColumnarDirect(data []byte, isArray bool, schema []parquet.Column, col
 				break
 			}
 
+			sc.fileRow++
 			if err := scanObjectInto(sc, rb, row, schema, colIdx, seen); err != nil {
-				return nil, fmt.Errorf("row %d: %w", row, err)
+				return nil, fmt.Errorf("row %d: %w", sc.fileRow, err)
 			}
 			row++
 		}
@@ -401,6 +403,9 @@ func parseColumnarDirect(data []byte, isArray bool, schema []parquet.Column, col
 func scanObjectInto(sc *jsonScanner, rb *batch.RecordBatch, row int, schema []parquet.Column, colIdx map[string]int, seen []bool) error {
 	if sc.advance() != '{' {
 		return fmt.Errorf("expected '{'")
+	}
+	if row < 0 || row >= rb.Len {
+		return fmt.Errorf("JSON row index %d outside batch length %d", row, rb.Len)
 	}
 
 	for i := range seen {
@@ -438,6 +443,9 @@ func scanObjectInto(sc *jsonScanner, rb *batch.RecordBatch, row int, schema []pa
 		seen[colI] = true
 		vec := rb.Columns[colI]
 		colType := schema[colI].Type
+		if row >= vec.Len || (colType == parquet.TypeString && row+1 >= len(vec.BytesData.Offsets)) {
+			return fmt.Errorf("JSON column %q row index %d outside vector", schema[colI].Name, row)
+		}
 
 		// Read value directly into typed vector
 		valByte := sc.peek()
@@ -451,33 +459,66 @@ func scanObjectInto(sc *jsonScanner, rb *batch.RecordBatch, row int, schema []pa
 			vec.WriteNullAt(row)
 
 		case valByte == '"': // string
+			if sc.fileRow > defaultSampleSize && colType != parquet.TypeString {
+				copyScanner := *sc
+				value, err := copyScanner.readString()
+				if err != nil {
+					return err
+				}
+				if err := checkValue(value, schema[colI], sc.fileRow); err != nil {
+					return err
+				}
+			}
+			// A sampled numeric column can contain boolean values, but never text.
+			if colType != parquet.TypeString && colType != parquet.TypeIPv4 && colType != parquet.TypeTimestamp {
+				return valueError("string", parquet.TypeString, schema[colI], sc.fileRow)
+			}
 			writeStringValue(sc, vec, row, colType)
 
 		case valByte == 't': // true
+			if sc.fileRow > defaultSampleSize && colType != parquet.TypeBool && colType != parquet.TypeString {
+				return valueError(true, parquet.TypeBool, schema[colI], sc.fileRow)
+			}
 			sc.pos += 4
 			vec.Nulls.SetValid(row)
 			writeBoolTrue(vec, row, colType)
 
 		case valByte == 'f': // false
+			if sc.fileRow > defaultSampleSize && colType != parquet.TypeBool && colType != parquet.TypeString {
+				return valueError(false, parquet.TypeBool, schema[colI], sc.fileRow)
+			}
 			sc.pos += 5
 			vec.Nulls.SetValid(row)
 			writeBoolFalse(vec, row, colType)
 
 		case valByte == '{' || valByte == '[': // nested object or array
+			if colType != parquet.TypeArray && colType != parquet.TypeRow && colType != parquet.TypeMap && colType != parquet.TypeString {
+				return valueError(string(sc.readRawValue()), parquet.TypeString, schema[colI], sc.fileRow)
+			}
 			if colType == parquet.TypeArray || colType == parquet.TypeRow || colType == parquet.TypeMap {
 				raw := sc.readRawValue()
+				if sc.fileRow > defaultSampleSize {
+					dec := json.NewDecoder(bytes.NewReader(raw))
+					dec.UseNumber()
+					var value any
+					if err := dec.Decode(&value); err != nil {
+						return fmt.Errorf("JSON column %q: %w", schema[colI].Name, err)
+					}
+					if err := checkValue(value, schema[colI], sc.fileRow); err != nil {
+						return err
+					}
+				}
 				var decoded any
 				if err := json.Unmarshal(raw, &decoded); err != nil {
 					vec.WriteNullAt(row)
 				} else {
 					// Coerced per the inferred schema BEFORE the write:
 					// Vector.SetValue guards against values it cannot hold
-					// (#361), and inference is best-effort — a later row
-					// may not match the type an earlier row taught it.
+					// (#361). Values past the sample have already been checked.
 					// Timestamp strings inside nested values parse here
 					// exactly as the scalar path parses them (they used to
-					// be dropped for 0); a genuinely unholdable value
-					// becomes NULL, the same answer a missing key gets.
+					// be dropped for 0). Within the sample, a value that cannot
+					// be stored retains the existing NULL behavior.
 					decoded = coerceToColumn(decoded, schema[colI])
 					if decoded == nil {
 						vec.WriteNullAt(row)
@@ -496,7 +537,9 @@ func scanObjectInto(sc *jsonScanner, rb *batch.RecordBatch, row int, schema []pa
 		default: // number
 			numBytes := sc.readNumber()
 			vec.Nulls.SetValid(row)
-			writeNumberValue(vec, row, colType, numBytes)
+			if !writeNumberValue(vec, row, colType, numBytes) && sc.fileRow > defaultSampleSize {
+				return valueError(string(numBytes), detectTokenType(json.Number(numBytes)), schema[colI], sc.fileRow)
+			}
 		}
 	}
 
@@ -516,10 +559,9 @@ func scanObjectInto(sc *jsonScanner, rb *batch.RecordBatch, row int, schema []pa
 // mismatched nested cell silently became 0 AND, for ARRAY/ROW shapes,
 // desynced the column's offsets so later rows read back shifted.
 //
-// Policy: inference is best-effort (a column is typed from the rows the
-// sampler saw), so a later value of an incompatible type is the CELL's
-// problem, not the ingest's — it becomes NULL, the same answer a missing
-// key gets. Values SetValue can already convert pass through untouched.
+// Values past the sample are checked before calling this conversion.
+// Within the sample, incompatible values retain the existing NULL behavior.
+// Values SetValue can already convert pass through untouched.
 // TIMESTAMP strings are the one enrichment: they parse with the same
 // patterns the scalar path uses; they used to be dropped for 0.
 func coerceToColumn(val any, col parquet.Column) any {
@@ -657,19 +699,26 @@ func writeStringValue(sc *jsonScanner, vec *batch.Vector, row int, colType parqu
 	}
 }
 
-func writeNumberValue(vec *batch.Vector, row int, colType parquet.TypeID, numBytes []byte) {
+func writeNumberValue(vec *batch.Vector, row int, colType parquet.TypeID, numBytes []byte) bool {
+	if len(numBytes) == 0 {
+		return false
+	}
 	switch colType {
 	case parquet.TypeInt64:
 		if i, err := strconv.ParseInt(unsafe.String(&numBytes[0], len(numBytes)), 10, 64); err == nil {
 			vec.Int64Data[row] = i
+			return true
 		}
 	case parquet.TypeFloat64:
 		if f, err := strconv.ParseFloat(unsafe.String(&numBytes[0], len(numBytes)), 64); err == nil {
 			vec.Float64Data[row] = f
+			return true
 		}
 	case parquet.TypeString:
 		vec.BytesData.Set(row, numBytes)
+		return true
 	}
+	return false
 }
 
 func writeBoolTrue(vec *batch.Vector, row int, colType parquet.TypeID) {

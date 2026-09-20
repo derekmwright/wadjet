@@ -270,20 +270,22 @@ than two guesses.
 That inference is a SAMPLE, and its window is the file's first **100 rows**
 (`read_csv`) or first 100 objects (`read_json`) — not the whole batch. The
 column list and the column types are whatever those rows say, for the whole
-file. A row PAST the sample that disagrees is not refused today:
+file. A non-NULL value past the sample that does not fit the inferred type
+refuses the statement with SQLSTATE `22P02`:
 
-- a value that does not parse as the sampled type reads as NULL while the row
-  is still counted, so an aggregate over the column is short by exactly those
-  values and nothing says so;
+- the error names the reader, input file, 1-based data row, column, value and
+  types. An integer column receiving `0.75` is an error, including for
+  `COUNT(*)`. JSON `null` and an empty CSV field remain NULL;
 - a key that first appears past the sample is not a column of the relation at
   all, and a reference to it is `42703`;
-- a `read_json` value that changes from a number to a string past the sample
-  fails the statement as `XX000 internal error in pipeline: runtime error:
-  index out of range`, which is loud but is not a type diagnosis.
+- a `read_json` number column receiving a string also reports `22P02` before
+  writing the value. String columns accept numbers as text in both readers.
 
-A file whose rows are not described by its first 100 is therefore a file to
-load into a table (`CREATE TABLE t AS SELECT * FROM read_json(…)`) or to hand
-to `read_parquet`, whose footer is exact.
+Inference within the sample still widens types as before. A `LIMIT` that
+stops the reader before the disagreeing row may return rows. The pipeline
+can request another batch before stopping: `LIMIT 1` refuses a change at
+row 101 for both readers. With a change at row 5000 it returns the first
+value for both, because neither reader reaches that row.
 
 Nor is the plan-time read taken over an input that can only be read ONCE. It
 opens the input and the execution opens it again, so it is taken only over a

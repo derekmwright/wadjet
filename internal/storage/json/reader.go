@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -83,6 +84,16 @@ func (r *Reader) Next() (*batch.RecordBatch, error) {
 		end = len(r.rows)
 	}
 	chunk := r.rows[r.offset:end]
+	for i, values := range chunk {
+		if r.offset+i+1 <= defaultSampleSize {
+			continue
+		}
+		for _, col := range r.schema {
+			if err := checkValue(values[col.Name], col, r.offset+i+1); err != nil {
+				return nil, err
+			}
+		}
+	}
 	r.offset = end
 	return batch.FromRows(r.schema, chunk), nil
 }
@@ -386,9 +397,58 @@ func NewReaderFromBytesWithCoercion(data []byte) (*Reader, error) {
 		return nil, err
 	}
 	schema := inferSchema(rows, defaultSampleSize)
+	for i := defaultSampleSize; i < len(rows); i++ {
+		for _, col := range schema {
+			if err := checkValue(rows[i][col.Name], col, i+1); err != nil {
+				return nil, err
+			}
+		}
+	}
 	rows = coerceRows(rows, schema)
 	return &Reader{
 		schema: schema,
 		rows:   rows,
 	}, nil
+}
+
+// checkValue checks a non-null value against the sampled column before conversion.
+// String columns accept every value through its text form.
+func checkValue(v any, col parquet.Column, row int) error {
+	if v == nil || col.Type == parquet.TypeString {
+		return nil
+	}
+	observed := detectType(v)
+	switch value := v.(type) {
+	case json.Number:
+		observed = detectTokenType(value)
+		if _, err := value.Float64(); err != nil {
+			return valueError(value, observed, col, row)
+		}
+	case []any:
+		observed = parquet.TypeArray
+		if col.Type == parquet.TypeArray && col.ElementType != nil {
+			for _, element := range value {
+				if err := checkValue(element, *col.ElementType, row); err != nil {
+					return fmt.Errorf("column %q: %w", col.Name, err)
+				}
+			}
+		}
+	case map[string]any:
+		observed = parquet.TypeRow
+		if col.Type == parquet.TypeRow {
+			for _, field := range col.Fields {
+				if err := checkValue(value[field.Name], field, row); err != nil {
+					return fmt.Errorf("column %q: %w", col.Name, err)
+				}
+			}
+		}
+	}
+	if observed == col.Type || (col.Type == parquet.TypeFloat64 && observed == parquet.TypeInt64) {
+		return nil
+	}
+	return valueError(v, observed, col, row)
+}
+
+func valueError(v any, observed parquet.TypeID, col parquet.Column, row int) error {
+	return sqlerr.New("22P02", "read_json: row %d column %q: value %v (%s) is not a %s (the column's type was inferred from the file's first 100 rows)", row, col.Name, v, observed, col.Type)
 }

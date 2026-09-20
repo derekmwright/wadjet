@@ -90,11 +90,9 @@ func readerSchemaProbeFromContext(ctx context.Context) *readerSchemaProbe {
 //     the same answer rather than two guesses about one file — and that
 //     inference is the readers' own 100-ROW SAMPLE (csv.sampleSize,
 //     json.defaultSampleSize), which describes the whole file. A row past it
-//     that does not fit is NOT refused: the value reads NULL with the row
-//     still counted, a key first seen there is not a column at all, and a
-//     JSON number that becomes a string fails as a recovered panic. That is
-//     the readers' pre-existing behaviour, identical at 0c0d33b6, stated on
-//     docs/sql-reference.md and filed rather than claimed as handled.
+//     with a non-NULL value that does not fit is refused by the reader with
+//     22P02, naming the input, row, column and types. A key first seen past
+//     the sample remains absent. See docs/sql-reference.md.
 //   - an HTTP(S) source reads NOTHING here and keeps the first-batch stance.
 //     A plan-time fetch would be a second request for every statement and
 //     would make EXPLAIN reach the network, which is a cost and a surprise

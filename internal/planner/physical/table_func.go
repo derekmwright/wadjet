@@ -236,7 +236,11 @@ func (s *jsonTableFuncSource) Init(_ context.Context) error {
 }
 
 func (s *jsonTableFuncSource) Next(_ context.Context) (*batch.RecordBatch, error) {
-	return s.reader.Next()
+	b, err := s.reader.Next()
+	if err != nil {
+		return nil, fmt.Errorf("read_json: %s: %w", s.path, err)
+	}
+	return b, nil
 }
 
 func (s *jsonTableFuncSource) Close() error {
@@ -356,7 +360,11 @@ func (s *csvTableFuncSource) Init(_ context.Context) error {
 }
 
 func (s *csvTableFuncSource) Next(_ context.Context) (*batch.RecordBatch, error) {
-	return s.reader.Next()
+	b, err := s.reader.Next()
+	if err != nil {
+		return nil, fmt.Errorf("read_csv: %s: %w", s.path, err)
+	}
+	return b, nil
 }
 
 func (s *csvTableFuncSource) Close() error {
