@@ -117,6 +117,8 @@ passing `--result-store`.
 | `--local-fastpath-bytes` | Queries under this post-pruning scan size run in-process on the coordinator (0 = disabled) | `64 MiB` |
 | `--shuffle-durability` | Stage-output durability: `eager`, `lazy`, `off` | `eager` |
 | `--skew-split` | Adaptive skew-aware shuffle layout | `true` |
+| `--sort-merge-join-bytes` | Inner equi-joins whose sides BOTH exceed this estimated size run as sort-merge joins instead of hash joins (0 = never) | `0` |
+| `--late-materialization` | Emit inner/left hash-join output as view columns over the probe and build batches, deferring the column gather to the first consumer that needs owned storage | `true` |
 | `--bushy-join-reorder` | Let the cost-based join reorder emit BUSHY plans (joins of two composite intermediates) when strictly cheaper than every left-deep order; cost ties keep the left-deep shape | `false` |
 | `--drain-timeout` | Bound on graceful worker drain (0 = unbounded) | `0` |
 | `--storage-circuit-threshold` | Consecutive object-store failures **in one operation class** (read / write / delete) before that class's circuit breaker opens | `5` |
@@ -128,12 +130,16 @@ passing `--result-store`.
 
 #### Planner configuration is per instance
 
-`--bushy-join-reorder` configures the planners of the process it is given to:
-the coordinator's, the HTTP server's, and the PostgreSQL wire door's fallback
-database. It is not a process-wide switch — embedding the engine, two
-`wadjet.DB`s open at once hold different values and closing one takes its
-value with it — and a worker that re-plans a whole query from its text plans it
-under the setting of the COORDINATOR that dispatched it, not its own.
+The planner and engine flags — `--bushy-join-reorder`,
+`--sort-merge-join-bytes`, `--late-materialization`, `--memory-budget` and
+`--spill-dir` — configure every database the process they are given to opens:
+the coordinator's planner, the HTTP server's, and the PostgreSQL wire door's
+fallback database, which runs late materialization at its documented default
+like every other. `--bushy-join-reorder` is not a process-wide switch —
+embedding the engine, two `wadjet.DB`s open at once hold different values and
+closing one takes its value with it — and a worker that re-plans a whole query
+from its text plans it under the setting of the COORDINATOR that dispatched it,
+not its own.
 
 #### Object-store circuit breaker
 
@@ -187,7 +193,9 @@ heading, repeating the heading; the JSON form emits BOTH keys in column order,
 `{"u": 1, "u": 2}` for `SELECT 1 AS u, 2 AS u`, which is what PostgreSQL's
 `row_to_json` answers for the same row. Duplicate keys in one JSON object are
 legal JSON; a reader that keeps only the last occurrence of a key sees the last
-column of that name.
+column of that name. JSON keys follow COLUMN order for every result, duplicate
+names or not — the order `row_to_json` uses, and the only order duplicates can
+be written in; they were sorted alphabetically before.
 
 `query`, `shell`, `mcp`, `create-table` and `drop-table` honour the persistent
 planner and engine flags — `--memory-budget`, `--spill-dir`,

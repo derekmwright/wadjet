@@ -13,7 +13,7 @@ Wadjet is a distributed SQL analytics engine for Go. Embed it directly in your G
 - **Pure Go** — no JVM, no CGo, no external query engine dependencies. Custom recursive descent SQL parser, vectorized batch execution, typed kernel dispatch.
 - **Network-native types** — first-class IPv4, IPv6, CIDR, MAC, Port, and Protocol column types with 100+ network functions covering CIDR math, deep packet inspection, ICMP analysis, IPv6 tunneling, JA3/JA3S TLS fingerprinting, payload search, and GeoIP/ASN enrichment (MaxMind).
 - **Nested types** — ARRAY, ROW/STRUCT, and MAP column types with dot-notation field access, array functions, and full Parquet round-trip.
-- **Table functions** — `read_json()`, `read_csv()`, `read_parquet()` query local files and HTTP URLs directly from SQL, with glob patterns and named parameters.
+- **Table functions** — `read_json()`, `read_csv()`, `read_parquet()` query local files and HTTP URLs directly from SQL, with glob patterns and named parameters; `generate_series()` and `unnest()` generate rows. A table function in `FROM` is a relation: it publishes a column list, a reference to a column it does not publish is `42703` naming the column, and its columns carry their declared type into aggregates.
 - **GeoIP enrichment** — optional MaxMind GeoLite2/GeoIP2 integration with 11 functions for IP geolocation (country, city, subdivision, coordinates, timezone, continent) and ASN lookup (AS number, organization).
 
 ## Start embedded, scale distributed
@@ -134,7 +134,7 @@ go build -o wadjetd ./cmd/wadjetd       # the distributed server (AGPL-3.0)
 ./wadjet-bin query "SELECT id_orig_h, SUM(orig_bytes) AS total FROM read_json('conn.log') GROUP BY 1 ORDER BY 2 DESC LIMIT 10"
 ```
 
-`read_json()`, `read_csv()`, and `read_parquet()` take local paths, `~/` paths, glob patterns, and HTTP URLs. Add `--format table` for human-readable output.
+`read_json()`, `read_csv()`, and `read_parquet()` take local paths, `~/` paths, glob patterns, and HTTP URLs. Add `--format table` for human-readable output; every format renders by column position, so a result carrying two output columns of one name prints both values. The persistent planner and engine flags (`--memory-budget`, `--spill-dir`, `--sort-merge-join-bytes`, `--late-materialization`, `--bushy-join-reorder`) apply to `query`, `shell` and `mcp` exactly as they do to `serve`.
 
 ### With object storage
 
