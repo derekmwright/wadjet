@@ -256,13 +256,36 @@ An identity the policy refuses gets `42501` and its file is never opened.
 
 What is read is bounded. `read_parquet` reads the file's FOOTER and no page —
 the file declares its own schema. `read_json` and `read_csv` read ONE BATCH
-(at most 2048 rows) through the same reader the query itself uses, so the
-schema the plan binds against and the schema the rows arrive under are the
-same inference rather than two guesses. A file whose LATER rows disagree with
-that schema is a loud error naming the column, never a NULL and never a silent
-re-type.
+through the same reader the query itself uses, so the schema the plan binds
+against and the schema the rows arrive under are the same inference rather
+than two guesses.
 
-Two input kinds are NOT read at plan time. An `http(s)` source is not, because
+That inference is a SAMPLE, and its window is the file's first **100 rows**
+(`read_csv`) or first 100 objects (`read_json`) — not the whole batch. The
+column list and the column types are whatever those rows say, for the whole
+file. A row PAST the sample that disagrees is not refused today:
+
+- a value that does not parse as the sampled type reads as NULL while the row
+  is still counted, so an aggregate over the column is short by exactly those
+  values and nothing says so;
+- a key that first appears past the sample is not a column of the relation at
+  all, and a reference to it is `42703`;
+- a `read_json` value that changes from a number to a string past the sample
+  fails the statement as `XX000 internal error in pipeline: runtime error:
+  index out of range`, which is loud but is not a type diagnosis.
+
+A file whose rows are not described by its first 100 is therefore a file to
+load into a table (`CREATE TABLE t AS SELECT * FROM read_json(…)`) or to hand
+to `read_parquet`, whose footer is exact.
+
+Nor is the plan-time read taken over an input that can only be read ONCE. It
+opens the input and the execution opens it again, so it is taken only over a
+REGULAR file (and, for a glob, only when every match is one). A FIFO, a
+character device such as `/dev/stdin`, a socket or a process substitution
+publishes no plan-time schema, is opened exactly once, and keeps the
+first-batch behaviour below.
+
+Two further input kinds are NOT read at plan time. An `http(s)` source is not, because
 a plan-time fetch would be a second request for every statement and would make
 `EXPLAIN` reach the network; a database connector is not, because its schema
 is a remote query's. For those the refusal is made where the schema first

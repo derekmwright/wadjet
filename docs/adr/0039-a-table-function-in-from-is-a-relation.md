@@ -100,18 +100,39 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    opens, and the gates assert it does not move for a refused identity on any
    door.
 
-   **What is read is bounded.** A Parquet footer is exact and no page is
-   decoded. `read_json` and `read_csv` read ONE BATCH through the very reader
-   the query uses, so the plan-time schema and the run-time schema are the
-   same inference rather than two guesses. An `http(s)` source is NOT read at
-   plan time — a plan-time fetch is a second request for every statement and
-   would make `EXPLAIN` reach the network — and neither is a database
-   connector, whose schema is a remote query's; both keep (2).
+   **What is read is bounded, and it is a SAMPLE.** A Parquet footer is exact
+   and no page is decoded. `read_json` and `read_csv` read ONE BATCH through
+   the very reader the query uses, so the plan-time schema and the run-time
+   schema are the same inference rather than two guesses — but that inference
+   is the readers' own 100-ROW sample (`csv.sampleSize`,
+   `json.defaultSampleSize`), and it describes the whole file. A row past the
+   sample that does not fit it is NOT refused: its value reads NULL while the
+   row is still counted, a key that first appears there is not a column at
+   all, and a JSON number that becomes a string fails as a recovered panic.
+   That is the readers' pre-existing behaviour, unchanged by this position and
+   identical at 0c0d33b6; it is stated on `docs/sql-reference.md` and filed as
+   a `priority:high` candidate rather than claimed as handled here.
 
-   **A later batch that disagrees is LOUD** (`physical.withPlanTimeSchema`):
-   a column the plan read and a batch does not publish is 42703 naming it, a
-   column that arrives at another type is 42804 naming both types. Never a
-   NULL, never a silent re-type.
+   **Nor is the plan-time read taken over an input that can be read ONCE.**
+   It opens the input and the execution opens it again, so it is taken only
+   over a REGULAR file — and, for a glob, only when EVERY match is one. A
+   FIFO, a character device, a socket or a process substitution publishes no
+   plan-time schema and is opened exactly once; consuming its first batch here
+   left the execution reading a different stream (zero rows where the
+   statement answered three) or blocking forever on an `open(2)` the
+   statement's context cannot interrupt. An `http(s)` source is NOT read at
+   plan time either — a plan-time fetch is a second request for every
+   statement and would make `EXPLAIN` reach the network — and neither is a
+   database connector, whose schema is a remote query's. All of them keep (2).
+
+   **An input that CHANGES between the plan's read and the run's is LOUD**
+   (`physical.withPlanTimeSchema`): a column the plan read that the arriving
+   batch does not publish is 42703 naming it, a column that arrives at another
+   type is 42804 naming both. It is a guard on the BATCH SCHEMA — a file
+   replaced or truncated between the two opens — and not on a value inside a
+   batch: both readers infer once per file, so the later rows of ONE file
+   never carry another schema, and the paragraph above is what happens to
+   them.
 
    **An EMPTY input is not the same as an absent column list.** A Parquet
    footer and a CSV header row declare columns with no rows, and that is an
@@ -295,11 +316,18 @@ Arc FR's, for §3 and §9:
   at 0c0d33b6.
 - `exec.TestArcFRAJoinKeyPairThatResolvesToNothingRefuses` — §9's backstop
   and the ON-TRUE sentinel that must still cross.
-- `physical.TestArcFRAReaderSchemaIsReadOnlyUnderAnAuthorizedContext` and
-  `physical.TestArcFRALaterBatchThatDisagreesWithThePlanIsLoud` — the seam:
-  a bare context reads nothing, a refusing guard reads nothing, an HTTP
-  source and a connector read nothing, the answer is cached per call, and a
-  disagreeing batch is 42703 / 42804 naming the column.
+- `physical.TestArcFRAReaderSchemaIsReadOnlyUnderAnAuthorizedContext` — the
+  seam: a bare context reads nothing, a refusing guard reads nothing, an HTTP
+  source, a connector and a non-regular input read nothing, and the answer is
+  cached per call.
+- `physical.TestArcFRAnInputThatChangesBetweenThePlanAndTheRunIsLoud` — the
+  batch-schema backstop, driven DIRECTLY because the condition it guards (the
+  input changing between the two opens) cannot be forced from the SQL door
+  inside one statement. It makes no claim about a value past the sample.
+- `wadjet.TestArcFRAnInputThatCanBeReadOnceIsReadOnce` and
+  `server.TestArcFRAFifoFedReaderAnswersOnTheWire` — a FIFO-fed `read_json`
+  and `read_csv` answer their rows on the embedded door and on the wire, with
+  a regular-file control that still gets its schema.
 - `server.TestArcFRNoDoorOpensAReaderBeforeTheIdentityIsAuthorized` and
   `coordinator.TestArcFRTheCoordinatorDoorAuthorizesBeforeItReads` — the
   ORDER, per door (embedded, pgwire, HTTP, gRPC, coordinator fast path,

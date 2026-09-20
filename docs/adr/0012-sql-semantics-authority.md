@@ -5915,8 +5915,12 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     it is fixed rather than worked around: the table-function capability is
     authorized FIRST, before the statement binds, so the planner may read the
     input — a Parquet FOOTER, or ONE BATCH of a JSON or CSV file through the
-    same reader the query uses — without reading it for an identity that may
-    not be allowed to (ADR-0034's amendment). With a column list the reader is
+    same reader the query uses, and only when the input is a REGULAR file it
+    can open twice — without reading it for an identity that may not be
+    allowed to (ADR-0034's amendment). The JSON and CSV inference is the
+    readers' own 100-ROW SAMPLE and describes the whole file; a row past it
+    that does not fit is not refused, which is pre-existing behaviour stated
+    on the SQL reference and filed rather than claimed as handled. With a column list the reader is
     an ordinary relation: an unknown column is `42703` at plan time through
     ANY path, `f.*` expands, and `SUM` over a whole-number column is `numeric`
     and `MIN`/`MAX` keep its width, which is what PostgreSQL declares for the

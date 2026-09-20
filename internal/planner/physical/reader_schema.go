@@ -84,18 +84,27 @@ func readerSchemaProbeFromContext(ctx context.Context) *readerSchemaProbe {
 //   - `read_parquet` reads the FOOTER and no page. It is exact — the file
 //     declares its own schema — and it is the same `reader.Schema().Columns`
 //     the source itself publishes.
-//   - `read_json` and `read_csv` read ONE BATCH (at most
-//     batch.DefaultBatchSize rows) through the very reader the source uses,
-//     and take that batch's schema. Sampling through the same inference is
-//     what makes the plan-time answer and the run-time answer the same answer
-//     for that batch rather than two guesses about one file.
+//   - `read_json` and `read_csv` read ONE BATCH through the very reader the
+//     source uses, and take that batch's schema. Taking it through the same
+//     inference is what makes the plan-time answer and the run-time answer
+//     the same answer rather than two guesses about one file — and that
+//     inference is the readers' own 100-ROW SAMPLE (csv.sampleSize,
+//     json.defaultSampleSize), which describes the whole file. A row past it
+//     that does not fit is NOT refused: the value reads NULL with the row
+//     still counted, a key first seen there is not a column at all, and a
+//     JSON number that becomes a string fails as a recovered panic. That is
+//     the readers' pre-existing behaviour, identical at 0c0d33b6, stated on
+//     docs/sql-reference.md and filed rather than claimed as handled.
 //   - an HTTP(S) source reads NOTHING here and keeps the first-batch stance.
 //     A plan-time fetch would be a second request for every statement and
 //     would make EXPLAIN reach the network, which is a cost and a surprise
 //     this schema is not worth.
+//   - an input that can be read ONCE reads nothing here either
+//     (readerInputIsRereadable): this read opens the input and the execution
+//     opens it AGAIN.
 //
-// A later batch whose schema disagrees with this one is a LOUD error naming
-// the column (withPlanTimeSchema), never a NULL and never a silent re-type.
+// An input that CHANGES between this read and the execution's — a file
+// replaced or truncated in between — is caught by withPlanTimeSchema, loudly.
 //
 // ok=false means "not knowable here", the caller's signal to keep the open
 // scope and the first-batch refusal.
@@ -208,6 +217,22 @@ func readReaderSchema(name string, args []string, namedArgs map[string]string) (
 	if isURL(path) {
 		return nil, false
 	}
+	// A plan-time read OPENS the input and the execution opens it AGAIN, so it
+	// is only sound for an input that reads the same bytes twice. A FIFO, a
+	// character device (`/dev/stdin`), a socket or a process substitution
+	// (`/dev/fd/63`) is ONE stream: consuming its first batch here leaves the
+	// execution reading a different one — zero rows for a shape that answered
+	// three — and a second open no writer will meet BLOCKS FOREVER, because
+	// `open(2)` is not interruptible by the statement's context. Nothing in
+	// the reader or its documentation says an input must be seekable, so the
+	// unseekable ones keep the first-batch stance every reader had through
+	// v0.23.0: no plan-time schema, and exactly ONE open.
+	//
+	// The stat runs AFTER the capability decision above, so it names no path
+	// on behalf of an identity that has not been authorized.
+	if !readerInputIsRereadable(path) {
+		return nil, false
+	}
 	ReaderSchemaReads.Add(1)
 	if name == "read_parquet" {
 		return parquetFooterSchema(path)
@@ -258,6 +283,33 @@ func readReaderSchema(name string, args []string, namedArgs map[string]string) (
 	return []parquet.Column{}, true
 }
 
+// readerInputIsRereadable reports whether opening this input twice reads the
+// same bytes twice. Only a REGULAR file does.
+//
+// A GLOB is judged by EVERY match, not by the first: the JSON and CSV sources
+// concatenate all of them (`multiFileReadCloser`), so one FIFO anywhere in the
+// expansion is a stream the execution cannot read again. A match that cannot
+// be stat'd declines too — an input this cannot describe is one it must not
+// consume.
+func readerInputIsRereadable(path string) bool {
+	paths := []string{path}
+	if isGlob(path) {
+		matches, err := filepath.Glob(path)
+		if err != nil || len(matches) == 0 {
+			return false
+		}
+		sort.Strings(matches)
+		paths = matches
+	}
+	for _, p := range paths {
+		fi, err := os.Stat(p)
+		if err != nil || !fi.Mode().IsRegular() {
+			return false
+		}
+	}
+	return true
+}
+
 // parquetFooterSchema reads a Parquet file's own declaration and no page of
 // its data. A GLOB takes the FIRST match in sorted order, which is the file
 // the source's own concatenation starts with.
@@ -292,13 +344,21 @@ func parquetFooterSchema(path string) ([]parquet.Column, bool) {
 // withPlanTimeSchema is the BACKSTOP under the plan-time schema: the batch
 // that actually arrives is held to what the plan read.
 //
-// The plan-time answer is one batch's (or, for Parquet, the footer's), and a
-// file whose LATER rows disagree — a column gone, a column that was an
-// integer arriving as a string — would otherwise be read through a projection
-// built for a schema it does not have: a NULL for a column that is really
-// there under another type, or a value read at the wrong width. ADR-0039's
-// rule is that a reader never answers a silent NULL, so a disagreement is an
-// error naming the column, the type the plan declared and the type that came.
+// The condition it guards is the INPUT CHANGING between the two opens — the
+// plan reads a file's schema, the file is replaced or truncated, and the
+// execution opens a relation with another one. Read through a projection
+// built for the schema the plan saw, that is a NULL for a column that is
+// really there under another type, or a value read at the wrong width; so it
+// is an error naming the column, the type the plan declared and the type that
+// came.
+//
+// It is NOT a guard on a value inside a batch. Both readers infer their
+// schema ONCE per file from a 100-row sample, so the later rows of ONE file
+// never carry a different schema; what happens to a row that does not fit the
+// sample is the readers' own behaviour, recorded in readerPlanTimeSchema's
+// header and on docs/sql-reference.md. The gate drives this wrapper directly
+// for that reason: the condition cannot be forced from the SQL door inside
+// one statement.
 func withPlanTimeSchema(src exec.Source, cols []parquet.Column, relName string) exec.Source {
 	if len(cols) == 0 {
 		return src
@@ -331,7 +391,7 @@ func (s *planTimeSchemaSource) Next(ctx context.Context) (*batch.RecordBatch, er
 					"publish it: the relation's column list changed while it was being read",
 				s.relName, want.Name)
 		}
-		if got != want.Type && !readerTypeCompatible(want.Type, got) {
+		if got != want.Type && !readerTypeCompatible(want.Type) {
 			return nil, sqlerr.New("42804",
 				"the table function %q declared column %q as %s at plan time and a later batch "+
 					"carries %s: the declaration every consumer above this relation was built "+
@@ -345,12 +405,17 @@ func (s *planTimeSchemaSource) Next(ctx context.Context) (*batch.RecordBatch, er
 func (s *planTimeSchemaSource) Close() error { return s.src.Close() }
 
 // readerTypeCompatible reports the ONE disagreement that is not one: a column
-// whose plan-time batch held only NULLs has no type to declare, and the
-// readers spell that as a STRING. Nothing is read at the wrong width through
-// it, because a column the plan declared STRING is read as a string wherever
-// it goes.
-func readerTypeCompatible(declared, arrived parquet.TypeID) bool {
-	return declared == parquet.TypeString && arrived == parquet.TypeString
+// whose plan-time sample held only NULLs has no type to declare, and both
+// readers spell that as a STRING. Whatever type it really turns out to be,
+// nothing is read at the wrong width through it, because every consumer above
+// the relation was built from the STRING declaration and reads a string.
+//
+// The condition is the DECLARED side alone. Requiring the arrived side to be
+// STRING too made the function unreachable — its one call site is already
+// guarded by `got != want.Type` — so the exemption this comment describes was
+// refused with 42804 instead of allowed (the review's P1).
+func readerTypeCompatible(declared parquet.TypeID) bool {
+	return declared == parquet.TypeString
 }
 
 // emptyReaderRefusal is what a reader whose input is EMPTY answers.

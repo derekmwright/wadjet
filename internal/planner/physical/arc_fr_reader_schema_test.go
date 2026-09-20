@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -21,9 +22,18 @@ import (
 // The SQL-door gates measure what a statement ANSWERS. These two measure the
 // seam itself, which no statement can reach on purpose: the context test
 // because the fail-closed direction has no visible symptom (the relation just
-// keeps the behaviour it had), and the backstop because the readers this
-// engine ships keep one inferred schema for every batch of one file, so the
-// disagreement it catches is a file that CHANGED between plan and execution.
+// keeps the behaviour it had), and the backstop because the condition it
+// guards is the INPUT CHANGING between the plan's open and the execution's —
+// a file replaced or truncated in between — which cannot be forced from the
+// SQL door inside one statement.
+//
+// WHAT THE BACKSTOP DOES NOT COVER, said here so this file claims nothing it
+// does not hold: both readers infer their schema ONCE per file, from a
+// 100-row sample, so the later rows of ONE file never carry a different batch
+// schema. A row past that sample whose value does not fit it reads NULL with
+// the row still counted, and this wrapper never sees it. That is the readers'
+// own pre-existing behaviour, identical at 0c0d33b6, stated on
+// docs/sql-reference.md and filed as a priority:high candidate.
 func TestArcFRAReaderSchemaIsReadOnlyUnderAnAuthorizedContext(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "fr.json")
@@ -95,6 +105,41 @@ func TestArcFRAReaderSchemaIsReadOnlyUnderAnAuthorizedContext(t *testing.T) {
 		}
 	})
 
+	t.Run("an_input_that_can_be_read_once_reads_nothing_at_plan_time", func(t *testing.T) {
+		// A FIFO is ONE stream: reading it here would leave the execution
+		// with a different one, or with an open(2) that never returns. The
+		// SQL-door cells are wadjet.TestArcFRAnInputThatCanBeReadOnceIsReadOnce
+		// and server.TestArcFRAFifoFedReaderAnswersOnTheWire.
+		fifo := filepath.Join(dir, "fr.fifo")
+		if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+			t.Skipf("this platform has no FIFO: %v", err)
+		}
+		ctx := ContextWithReaderSchemaProbe(context.Background())
+		before := ReaderSchemaReads.Load()
+		if cols, ok := readerPlanTimeSchema(ctx, "read_csv", []string{fifo}, nil); ok {
+			t.Errorf("a FIFO was sampled at plan time: %v", cols)
+		}
+		if after := ReaderSchemaReads.Load(); after != before {
+			t.Errorf("the planner opened a FIFO %d time(s) at plan time", after-before)
+		}
+		// And a GLOB is judged by EVERY match, because the source
+		// concatenates all of them.
+		if err := os.WriteFile(filepath.Join(dir, "g1.csv"), []byte("a\n1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Mkfifo(filepath.Join(dir, "g2.csv"), 0o600); err != nil {
+			t.Skipf("this platform has no FIFO: %v", err)
+		}
+		before = ReaderSchemaReads.Load()
+		if cols, ok := readerPlanTimeSchema(ctx, "read_csv",
+			[]string{filepath.Join(dir, "g*.csv")}, nil); ok {
+			t.Errorf("a glob holding a FIFO was sampled at plan time: %v", cols)
+		}
+		if after := ReaderSchemaReads.Load(); after != before {
+			t.Errorf("the planner opened a glob holding a FIFO %d time(s)", after-before)
+		}
+	})
+
 	t.Run("an_http_source_reads_nothing_at_plan_time", func(t *testing.T) {
 		ctx := ContextWithReaderSchemaProbe(context.Background())
 		before := ReaderSchemaReads.Load()
@@ -121,8 +166,9 @@ func TestArcFRAReaderSchemaIsReadOnlyUnderAnAuthorizedContext(t *testing.T) {
 }
 
 // driftSource publishes one batch at the plan-time schema and then one whose
-// column `a` carries another type — the file that changed between the plan
-// and the run.
+// column `a` carries another type — the input that changed between the plan
+// and the run. No file this engine's readers produce behaves this way, which
+// is why the source is synthetic and why the doc above says so.
 type driftSource struct{ n int }
 
 func (s *driftSource) Init(context.Context) error { return nil }
@@ -165,7 +211,7 @@ func (s *goneSource) Next(context.Context) (*batch.RecordBatch, error) {
 
 func (s *goneSource) Close() error { return nil }
 
-func TestArcFRALaterBatchThatDisagreesWithThePlanIsLoud(t *testing.T) {
+func TestArcFRAnInputThatChangesBetweenThePlanAndTheRunIsLoud(t *testing.T) {
 	planned := []parquet.Column{
 		{Name: "a", Type: parquet.TypeInt64}, {Name: "b", Type: parquet.TypeString},
 	}

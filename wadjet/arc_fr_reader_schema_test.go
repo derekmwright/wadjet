@@ -314,18 +314,22 @@ func TestArcFRAFileReaderIsARelationWithASchema(t *testing.T) {
 		}
 	})
 
-	// A LATER batch that disagrees with the schema the plan read never
-	// answers a silent value. `physical.TestArcFRALaterBatchThatDisagrees…`
-	// drives the backstop directly; this is the same question at the SQL
-	// door, over a JSON file whose column `a` turns from a number into a
-	// string after the first batch.
+	// A JSON file whose column `a` turns from a number into a string past the
+	// readers' 100-row sample. The rule this cell holds is the weak one it
+	// can hold: the statement FAILS rather than answering a number the file
+	// does not contain.
 	//
-	// THE PIN, pre-existing and measured identically at 0c0d33b6: the JSON
-	// reader does not reach the backstop for this file — it writes the string
+	// It does NOT reach `physical.withPlanTimeSchema`, and this file claims
+	// no such coverage: both readers infer once per file, so the later rows
+	// of one file never carry a different BATCH SCHEMA, which is what that
+	// backstop guards (`physical.TestArcFRAnInputThatChangesBetweenThePlan…`
+	// drives it directly). What happens here is the JSON reader's own,
+	// pre-existing and measured identically at 0c0d33b6: it writes the string
 	// into the integer column's storage and the query fails as a recovered
-	// panic rather than as a named type error. It is LOUD, which is the rule
-	// this cell holds, and the class is the reader's own; recorded as a
-	// filing candidate rather than chased here.
+	// panic rather than as a named type error. The sibling shape — a value
+	// that merely does not PARSE as the sampled type — is a silent NULL with
+	// the row still counted, which is on docs/sql-reference.md and is a
+	// priority:high filing candidate, not something this arc fixes.
 	t.Run("a_later_batch_that_disagrees_never_answers_a_silent_value", func(t *testing.T) {
 		var b strings.Builder
 		for i := 0; i < 2100; i++ {
