@@ -924,13 +924,18 @@ not need to.
 
 Two budgets hold the two halves, because a method added to the context moves
 one and not the other. `TestAGPLPhysicalReferenceBudget` holds the
-package-qualified count at `maxAGPLPhysicalNames` = 16.
+package-qualified count at `maxAGPLPhysicalNames` and
 `TestAGPLPhysicalMemberBudget` holds the reached-identifier count at
-`maxAGPLPhysicalMembers` = 210 (209 until arc SR added
-`PlanContext.PublishedOutputProjectionNode`, ADR-0026 §9a) and lists the 194
-members by name, so a new
-operation behind the context fails a gate that names it rather than passing one
-that cannot see it. Both are in `tools/licensecheck`.
+`maxAGPLPhysicalMembers`, which lists every member by name — so a new
+operation behind the context fails a gate that names it rather than passing
+one that cannot see it. Both are in `tools/licensecheck`, and each raise is
+recorded there beside the constant with the member and its reason: 16/209 at
+this measurement, 16/210 (arc SR, `PlanContext.PublishedOutputProjectionNode`,
+ADR-0026 §9a), 18/214 (arc JR, the outer-join residual refusal), 18/216 (arc
+BJ, the planner's bushy option and its option set) and 19/217 (arc FR,
+`ReaderSchemaReads` — the counter the door gates read to prove a refused
+identity's file was never opened, ADR-0034). The change log lives with the
+constants because that is where the next raise is written.
 
 ## Test placement and declaration renames
 

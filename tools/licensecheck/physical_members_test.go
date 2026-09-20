@@ -62,16 +62,16 @@ import (
 // field, every hand-built copy silently drops it and the second query of a
 // statement is planned under settings the first one did not have. One
 // member is the smaller cost, and it is the same member forever.
-const maxAGPLPhysicalMembers = 216
+//
+// 216 → 217 (2026-09-20, arc FR, #1230): `ReaderSchemaReads` — the same one
+// member the reference budget above records, and for the same reason. It is
+// a package-scope counter, so it appears in both counts.
+const maxAGPLPhysicalMembers = 217
 
 // measuredPhysicalMembers are the members reached through values. With the 16
 // package-scope names of measuredPhysicalNames they are the whole surface, and
 // the budget above is their count.
 var measuredPhysicalMembers = strings.Fields(`
-blockColumn.Decl
-blockColumn.DeclKnown
-blockColumn.Expr
-blockColumn.Name
 ColDecls.Dec
 ColDecls.Fields
 ColDecls.PlaceholderTypes
@@ -96,11 +96,11 @@ PlanContext.AggInputColumnDecimal
 PlanContext.AggInputIsWideInteger
 PlanContext.AggOhlcvOutputFields
 PlanContext.AggOutputFromInputDecl
-PlanContext.AggregateGroupKeyName
-PlanContext.AggregateOutputNames
 PlanContext.AggScopePreservingWrapper
 PlanContext.AggSpecOutputDecimal
 PlanContext.AggSpecOutputType
+PlanContext.AggregateGroupKeyName
+PlanContext.AggregateOutputNames
 PlanContext.AssignJoinKeySides
 PlanContext.AstIsFieldPath
 PlanContext.BlockBareName
@@ -109,14 +109,14 @@ PlanContext.BuildJoinResidualFilter
 PlanContext.BuildSemiAntiFilter
 PlanContext.BuildStreamAlias
 PlanContext.CleanExpr
+PlanContext.ColSet
 PlanContext.CollectASTCols
 PlanContext.CollectColRefs
 PlanContext.CollectColRefsBelow
 PlanContext.CollectOuterColumns
 PlanContext.CollectTableAliases
-PlanContext.ColSet
-PlanContext.DeclaredJoinSchema
 PlanContext.DeclTypeParts
+PlanContext.DeclaredJoinSchema
 PlanContext.DerivedAliasSourceColumn
 PlanContext.DerivedGroupKeyDecl
 PlanContext.DerivedScopeBareName
@@ -146,8 +146,8 @@ PlanContext.LateralSideOf
 PlanContext.LogicalAggOutNames
 PlanContext.MapJoinType
 PlanContext.MatchesPartitionFilter
-PlanContext.NamedArmScope
 PlanContext.NameIsPlainColumn
+PlanContext.NamedArmScope
 PlanContext.NewComputedColumnsOpWithMeta
 PlanContext.NodeDeclaredType
 PlanContext.OutputSchema
@@ -155,9 +155,9 @@ PlanContext.OwnedJoinArm
 PlanContext.ParseJoinCondExpr
 PlanContext.ParseJoinKeys
 PlanContext.ParseSemiAntiNE
+PlanContext.ProjSourceName
 PlanContext.ProjectionForName
 PlanContext.ProjectionOutputName
-PlanContext.ProjSourceName
 PlanContext.PublishedNamesOfProjection
 PlanContext.PublishedOutputProjectionNode
 PlanContext.PublishedStringLengths
@@ -256,6 +256,7 @@ QueryCost.HasLimit
 QueryCost.TotalBytes
 QueryCost.TotalFiles
 QueryCost.TotalRows
+ReaderSchemaReads
 RefuseUnresolvedJoinResidual
 SetOpArmPlan.Coerce
 SetOpArmPlan.Specs
@@ -268,6 +269,10 @@ SetOpColType.Typ
 SubtreeNaming.AliasCols
 SubtreeNaming.BuildColOrigins
 SubtreeNaming.MaterializedBuildColOrigins
+blockColumn.Decl
+blockColumn.DeclKnown
+blockColumn.Expr
+blockColumn.Name
 `)
 
 // physicalMemberPkg is the part of `go list -json` this gate reads.

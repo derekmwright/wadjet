@@ -22,7 +22,17 @@ import (
 // residual raises in the worker when a leaf cannot be re-spelled across the
 // stage (ADR-0006, the identity half) — a loud refusal is the seam's floor,
 // and the worker is the AGPL side that has to name it.
-const maxAGPLPhysicalNames = 18
+//
+// 18 → 19 (2026-09-20, arc FR, #1230): `physical.ReaderSchemaReads`, the
+// count of times the planner OPENED a file reader's input to learn its
+// columns. It is read by the coordinator's and the HTTP/gRPC doors' GATES
+// and by nothing else — a refused identity must move it by zero, which is
+// the only discriminator there is for "the file was not opened before the
+// capability was decided" (ADR-0034's 2026-09-20 amendment, #943). The
+// refusal alone is not one: a plan that read the file and THEN refused
+// answers 42501 too. The counter lives where the read happens, which is the
+// MIT side; the doors that must prove the order are the AGPL side.
+const maxAGPLPhysicalNames = 19
 
 var measuredPhysicalNames = strings.Fields(`
 ColDecls
