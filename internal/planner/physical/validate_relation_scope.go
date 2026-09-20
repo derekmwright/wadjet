@@ -28,7 +28,13 @@ import (
 //   - which of PostgreSQL's two 42P01 sentences an unmatched qualifier gets.
 //
 // The sentences are PostgreSQL's own, measured on 17.11 over this package's
-// lat_ord / lat_item fixture:
+// lat_ord / lat_item fixture. So is the explanatory clause after the colon,
+// verbatim from PostgreSQL's DETAIL or HINT: `sqlerr.Error` carries one
+// message and no detail field, and a client that matches on PostgreSQL's
+// wording — SQLancer's `PostgresCommon.getCommonFetchErrors` lists the string
+// "but it cannot be referenced from this part of the query" — then matches
+// this engine's refusal too, which is what lets a generated corpus get PAST
+// the shape instead of stopping on it.
 //
 //	FROM lat_ord a JOIN lat_item b ON j.id = a.id JOIN lat_item j ON …
 //	  ERROR:  42P01: missing FROM-clause entry for table "j"
@@ -229,8 +235,8 @@ func (s *colScope) refuseUnmatchedQualifier(ref *plansql.ColRef) error {
 		if alias, hidden := s.relations.hidden[q]; hidden {
 			if at, declared := s.relations.declaredAt(strings.ToLower(alias)); !declared || at < s.parsedThrough {
 				return sqlerr.New("42P01",
-					"invalid reference to FROM-clause entry for table %q: the FROM clause reads "+
-						"that table under the alias %q, and an alias is the only name it answers to",
+					"invalid reference to FROM-clause entry for table %q: perhaps you meant to "+
+						"reference the table alias %q",
 					ref.Table, alias)
 			}
 		}
@@ -349,8 +355,8 @@ func (s *colScope) refuseSiblingReference(ref *plansql.ColRef) error {
 		return nil
 	}
 	return sqlerr.New("42P01",
-		"invalid reference to FROM-clause entry for table %q: there is an entry for table %q "+
-			"in the enclosing FROM clause, but a derived table cannot reference it — "+
-			"mark the subquery LATERAL",
+		"invalid reference to FROM-clause entry for table %q: there is an entry for table %q, "+
+			"but it cannot be referenced from this part of the query — to reference that table, "+
+			"you must mark this subquery with LATERAL",
 		ref.Table, ref.Table)
 }
