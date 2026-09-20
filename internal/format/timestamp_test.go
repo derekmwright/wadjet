@@ -15,7 +15,7 @@ import (
 func TestWriteTypedRendersTimestamp(t *testing.T) {
 	columns := []string{"id", "ts"}
 	types := []parquet.TypeID{parquet.TypeInt64, parquet.TypeTimestamp}
-	rows := []map[string]any{{"id": int64(1), "ts": int64(826727136000)}}
+	rows := [][]any{{int64(1), int64(826727136000)}}
 
 	for _, f := range []Format{Table, JSON, CSV} {
 		var buf bytes.Buffer
@@ -40,13 +40,13 @@ func TestWriteTypedRendersTimestamp(t *testing.T) {
 // The caller's rows may be the query result the program goes on to use, so
 // rendering must not rewrite them in place.
 func TestWriteTypedDoesNotMutateCaller(t *testing.T) {
-	rows := []map[string]any{{"ts": int64(826727136000)}}
+	rows := [][]any{{int64(826727136000)}}
 	var buf bytes.Buffer
 	if err := WriteTyped(&buf, Table, []string{"ts"}, []parquet.TypeID{parquet.TypeTimestamp}, rows); err != nil {
 		t.Fatal(err)
 	}
-	if got, ok := rows[0]["ts"].(int64); !ok || got != 826727136000 {
-		t.Errorf("caller's row was mutated: ts = %v (%T), want int64(826727136000)", rows[0]["ts"], rows[0]["ts"])
+	if got, ok := rows[0][0].(int64); !ok || got != 826727136000 {
+		t.Errorf("caller's row was mutated: ts = %v (%T), want int64(826727136000)", rows[0][0], rows[0][0])
 	}
 }
 
@@ -54,7 +54,7 @@ func TestWriteTypedDoesNotMutateCaller(t *testing.T) {
 // work from, so it must leave values exactly as the engine boxed them.
 func TestWriteUntypedUnchanged(t *testing.T) {
 	var buf bytes.Buffer
-	rows := []map[string]any{{"ts": int64(826727136000)}}
+	rows := [][]any{{int64(826727136000)}}
 	if err := Write(&buf, CSV, []string{"ts"}, rows); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestWriteUntypedUnchanged(t *testing.T) {
 func TestWriteTypedShortTypes(t *testing.T) {
 	var buf bytes.Buffer
 	columns := []string{"ts", "extra"}
-	rows := []map[string]any{{"ts": int64(0), "extra": int64(7)}}
+	rows := [][]any{{int64(0), int64(7)}}
 	if err := WriteTyped(&buf, CSV, columns, []parquet.TypeID{parquet.TypeTimestamp}, rows); err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestWriteTypedShortTypes(t *testing.T) {
 // TestWriteTypedNullTimestamp: a NULL must stay NULL, not become the epoch.
 func TestWriteTypedNullTimestamp(t *testing.T) {
 	var buf bytes.Buffer
-	rows := []map[string]any{{"ts": nil}, {"ts": int64(0)}}
+	rows := [][]any{{nil}, {int64(0)}}
 	if err := WriteTyped(&buf, CSV, []string{"ts"}, []parquet.TypeID{parquet.TypeTimestamp}, rows); err != nil {
 		t.Fatal(err)
 	}

@@ -324,7 +324,7 @@ func queryCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return format.WriteTyped(os.Stdout, f, result.Columns, columnTypes(result), result.Rows)
+				return format.WriteTyped(os.Stdout, f, result.Columns, columnTypes(result), resultRows(result))
 			}
 
 			db, release, err := openSharedDB(ctx, logger)
@@ -338,7 +338,7 @@ func queryCmd() *cobra.Command {
 				return err
 			}
 
-			return format.WriteTyped(os.Stdout, f, result.Columns, columnTypes(result), result.Rows)
+			return format.WriteTyped(os.Stdout, f, result.Columns, columnTypes(result), resultRows(result))
 		},
 	}
 
@@ -663,6 +663,40 @@ func historyPath() string {
 	return filepath.Join(dir, "history")
 }
 
+// resultRows returns the result POSITIONALLY — one slice per row, cells
+// aligned with result.Columns — which is the only form a renderer can print.
+//
+// QueryResult.Rows is keyed by column NAME and a result may legally carry two
+// output columns of one name: `SELECT abs(a), abs(b)` is two columns called
+// `abs`, and a star over a `JOIN … USING` whose arms share a tail name
+// publishes that name twice. The map holds the LAST of them, so rendering
+// from it printed one value under both headings in the table and CSV forms
+// and emitted a single key — dropping the other column — in JSON, while psql
+// against the same server showed both (#1218). Cells reads the positional
+// form the engine materialises for exactly this case and falls back to the
+// map lookup when the names are unique, so an ordinary result renders
+// byte-identically to before.
+//
+// The row count is the longer of the two forms, the way wadjet's own CTAS
+// door reads it: neither is authoritative on its own once one of them is the
+// populated one.
+func resultRows(result *wadjet.QueryResult) [][]any {
+	if result == nil {
+		return nil
+	}
+	n := len(result.Rows)
+	if len(result.RowValues) > n {
+		n = len(result.RowValues)
+	}
+	rows := make([][]any, n)
+	for i := range rows {
+		cells := make([]any, len(result.Columns))
+		copy(cells, result.Cells(i))
+		rows[i] = cells
+	}
+	return rows
+}
+
 // columnTypes returns the declared type of each result column, positionally
 // aligned with result.Columns, or nil when the query carried no typed
 // metadata (introspection answers). The formatter needs it to render
@@ -769,12 +803,13 @@ func runShell(ctx context.Context, db *wadjet.DB, f format.Format) error {
 			continue
 		}
 
-		if len(result.Rows) == 0 {
+		rows := resultRows(result)
+		if len(rows) == 0 {
 			fmt.Println("(0 rows)")
 			continue
 		}
 
-		format.WriteTyped(os.Stdout, f, result.Columns, columnTypes(result), result.Rows)
+		format.WriteTyped(os.Stdout, f, result.Columns, columnTypes(result), rows)
 	}
 
 	return nil

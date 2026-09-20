@@ -179,6 +179,16 @@ effect.
 
 Usage: `wadjet query --format=table "SELECT 1"`
 
+**Every output format renders by POSITION.** A result may carry two output
+columns of one name — `SELECT abs(a), abs(b)` is two columns called `abs`, and
+a star over a `JOIN … USING` whose arms share a tail name publishes that name
+twice. The table and CSV forms print each column's own value under its own
+heading, repeating the heading; the JSON form emits BOTH keys in column order,
+`{"u": 1, "u": 2}` for `SELECT 1 AS u, 2 AS u`, which is what PostgreSQL's
+`row_to_json` answers for the same row. Duplicate keys in one JSON object are
+legal JSON; a reader that keeps only the last occurrence of a key sees the last
+column of that name.
+
 `query`, `create-table`, `drop-table`, `shell` and `tables` share ONE
 persisted catalog with `serve`. `--nats-url` names a server explicitly;
 otherwise the catalog is this deployment's own store directory, which the

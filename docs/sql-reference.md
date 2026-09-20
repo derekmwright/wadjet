@@ -2071,7 +2071,9 @@ write the ordinal for both keys.
 
 Reading a result by column name cannot represent both columns; the embedded
 API exposes the positional form (`QueryResult.Cells`) for exactly this case,
-and the wire protocol sends every column regardless.
+and the wire protocol sends every column regardless. The `wadjet` CLI renders
+by position in every `--format`, and its JSON form emits both keys in column
+order the way PostgreSQL's `row_to_json` does.
 
 ## Every result declares its columns
 

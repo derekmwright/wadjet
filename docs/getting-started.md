@@ -309,7 +309,10 @@ This starts an embedded coordinator and worker in a single process — ideal for
   "SELECT * FROM my_table LIMIT 10"
 ```
 
-Supports `--format` flag: `json` (default), `table`, or `csv`.
+Supports `--format` flag: `json` (default), `table`, or `csv`. Every format
+renders by column POSITION, so a result carrying two output columns of one name
+prints both values — and the JSON form emits both keys, as PostgreSQL's
+`row_to_json` does. See [Configuration](configuration.md#query-command).
 
 ### Interactive Shell
 

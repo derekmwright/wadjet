@@ -9,10 +9,13 @@ import (
 )
 
 var testColumns = []string{"id", "name", "amount"}
-var testRows = []map[string]any{
-	{"id": int64(1), "name": "alice", "amount": 95.5},
-	{"id": int64(2), "name": "bob", "amount": nil},
-	{"id": int64(3), "name": "carol", "amount": 78.0},
+
+// testRows are values BY POSITION, cells aligned with testColumns — the
+// shape every renderer here takes (#1218).
+var testRows = [][]any{
+	{int64(1), "alice", 95.5},
+	{int64(2), "bob", nil},
+	{int64(3), "carol", 78.0},
 }
 
 func TestTableFormat(t *testing.T) {
@@ -54,8 +57,8 @@ func TestTableFormatEmpty(t *testing.T) {
 
 func TestTableFormatTruncation(t *testing.T) {
 	cols := []string{"val"}
-	rows := []map[string]any{
-		{"val": strings.Repeat("x", 100)},
+	rows := [][]any{
+		{strings.Repeat("x", 100)},
 	}
 	var buf bytes.Buffer
 	Write(&buf, Table, cols, rows)
@@ -104,10 +107,10 @@ func TestCSVFormat(t *testing.T) {
 
 func TestTableFormatVisual(t *testing.T) {
 	cols := []string{"id", "name", "amount", "status"}
-	rows := []map[string]any{
-		{"id": int64(1), "name": "alice", "amount": 95.5, "status": "active"},
-		{"id": int64(2), "name": "bob", "amount": nil, "status": "inactive"},
-		{"id": int64(3), "name": "carol_with_a_really_long_name_that_should_truncate", "amount": 78.0, "status": "active"},
+	rows := [][]any{
+		{int64(1), "alice", 95.5, "active"},
+		{int64(2), "bob", nil, "inactive"},
+		{int64(3), "carol_with_a_really_long_name_that_should_truncate", 78.0, "active"},
 	}
 	var buf bytes.Buffer
 	Write(&buf, Table, cols, rows)
