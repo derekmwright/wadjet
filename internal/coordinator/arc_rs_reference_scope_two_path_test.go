@@ -155,6 +155,14 @@ func rsArmCells() []rsArmCell {
 			refuse: `invalid reference to FROM-clause entry for table "o"`},
 		{name: "sibling/writtenBefore", sql: "SELECT s.m AS v FROM (SELECT o.id AS m) s, lat_ord o",
 			refuse: `missing FROM-clause entry for table "o"`},
+		// The ORDER of the three cases is PostgreSQL's: this block's own FROM
+		// first, the sibling only where it says nothing (round-1 review, P1).
+		{name: "sibling/bodyAliasWinsOverSibling",
+			sql:    `SELECT s.m AS v FROM lat_ord, (SELECT lat_ord.id AS m FROM lat_ord q) s`,
+			refuse: `perhaps you meant to reference the table alias "q"`},
+		{name: "sibling/bodyWithoutThatRelationKeepsLateral",
+			sql:    `SELECT s.m AS v FROM lat_ord, (SELECT lat_ord.id AS m FROM lat_item q) s`,
+			refuse: `you must mark this subquery with LATERAL`},
 
 		// A STAR OUTPUT opens the scope for BARE names only: it mints output
 		// names the binder cannot enumerate, and never a QUALIFIER. Before

@@ -240,9 +240,6 @@ func (s *colScope) scopeAtJoin(visible map[string]bool, through int) *colScope {
 //     LATER join introduces, which the parser has not read yet.
 func (s *colScope) refuseUnmatchedQualifier(ref *plansql.ColRef) error {
 	q := strings.ToLower(ref.Table)
-	if err := s.refuseSiblingReference(ref); err != nil {
-		return err
-	}
 	if s.relations != nil {
 		if alias, hidden := s.relations.hidden[q]; hidden {
 			if at, declared := s.relations.declaredAt(strings.ToLower(alias)); !declared || at < s.parsedThrough {
@@ -258,6 +255,23 @@ func (s *colScope) refuseUnmatchedQualifier(ref *plansql.ColRef) error {
 					"but it cannot be referenced from this part of the query",
 				ref.Table, ref.Table)
 		}
+	}
+	// The SIBLING diagnosis is asked LAST, which is PostgreSQL's own order.
+	// It was asked first, and then a derived table whose OWN FROM reads the
+	// named table under an alias, sitting beside an outer FROM item of that
+	// same name, earned the LATERAL hint where PostgreSQL gives the alias one:
+	//
+	//	SELECT s.m FROM lat_ord, (SELECT lat_ord.id AS m FROM lat_ord q) s
+	//	HINT:  Perhaps you meant to reference the table alias "q".
+	//
+	// and the same statement with the OUTER item aliased — which puts nothing
+	// of that name in siblingDiag — already earned the alias hint. One
+	// reference, two hints, decided by whether the ENCLOSING block happened to
+	// alias its own copy: the arc's own defect one level up (measured by the
+	// round-1 review, P1). This block's own FROM is asked about first now, and
+	// the sibling only where it says nothing.
+	if err := s.refuseSiblingReference(ref); err != nil {
+		return err
 	}
 	return sqlerr.New("42P01", "missing FROM-clause entry for table %q", ref.Table)
 }

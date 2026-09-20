@@ -216,6 +216,19 @@ func rsCells() []rsCell {
 			`invalid reference to FROM-clause entry for table "o"`},
 		{"sibling/writtenBefore", "SELECT s.m FROM (SELECT o.id AS m) s, lat_ord o", "42P01",
 			`missing FROM-clause entry for table "o"`},
+		// THE ORDER of the three cases is PostgreSQL's, and these two say so.
+		// A derived table whose OWN FROM reads the named table under an alias
+		// earns the ALIAS hint even when an outer FROM item of that same name
+		// sits beside it; the sibling is consulted only where this block's own
+		// FROM says nothing. Asked the other way round, one reference had two
+		// hints decided by whether the ENCLOSING block aliased its own copy
+		// (measured by the round-1 review, P1).
+		{"sibling/bodyAliasWinsOverSibling",
+			`SELECT s.m FROM lat_ord, (SELECT lat_ord.id AS m FROM lat_ord q) s`,
+			"42P01", `perhaps you meant to reference the table alias "q"`},
+		{"sibling/bodyWithoutThatRelationKeepsLateral",
+			`SELECT s.m FROM lat_ord, (SELECT lat_ord.id AS m FROM lat_item q) s`,
+			"42P01", `you must mark this subquery with LATERAL`},
 	}
 }
 
