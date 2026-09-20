@@ -40,6 +40,14 @@ type SubtreeNaming struct {
 	// question the three maps cannot answer: whether a qualifier names a
 	// DERIVED TABLE this subtree is, rather than a scan it contains.
 	root *logical.Node
+	// unknownCols holds the aliases (lowercased) whose COLUMN LIST is not
+	// known at plan time — a file or database reader whose columns are its
+	// input's and whose schema this plan could not read (ADR-0039 §3). Their
+	// entry in AliasCols is EMPTY, which is indistinguishable from "a scan
+	// that publishes nothing" by the maps alone, and the difference decides a
+	// join: a qualifier naming such an alias OWNS every column written under
+	// it, because nothing else in the subtree can answer for that qualifier.
+	unknownCols map[string]bool
 }
 
 // subtreeNamingOf computes the naming facts for a logical subtree.
@@ -48,6 +56,7 @@ func subtreeNamingOf(n *logical.Node) *SubtreeNaming {
 		AliasCols:   make(map[string]map[string]bool),
 		outputNames: make(map[string]bool),
 		origins:     make(map[string]string),
+		unknownCols: make(map[string]bool),
 		root:        n,
 	}
 	s.collect(n)
@@ -69,6 +78,21 @@ func (s *SubtreeNaming) collect(n *logical.Node) {
 		if cols == nil {
 			cols = make(map[string]bool, len(n.ScanColumns))
 			s.AliasCols[key] = cols
+		}
+		// A relation whose column list this plan could not read publishes an
+		// EMPTY set here — a file or database reader (ADR-0039 §3), and a
+		// CTE reference or derived arm over one. Record EVERY name the
+		// enclosing query can qualify it by, so ownsKey can answer for it by
+		// QUALIFIER: `r2.c` is r2's column whether or not this planner knows
+		// what r2 publishes. A relation whose columns ARE known is not
+		// recorded: there the column set is the better answer and the
+		// qualifier alone would claim a name the relation does not have.
+		if len(n.ScanColumns) == 0 {
+			for _, name := range []string{alias, n.CTERefAlias, n.CTEName, n.DerivedAlias} {
+				if lc := strings.ToLower(strings.TrimSpace(name)); lc != "" {
+					s.unknownCols[lc] = true
+				}
+			}
 		}
 		for _, col := range n.ScanColumns {
 			lc := strings.ToLower(col)
@@ -132,6 +156,18 @@ func (s *SubtreeNaming) ownsKey(key string) bool {
 	k := strings.ToLower(strings.TrimSpace(key))
 	if dot := strings.IndexByte(k, '.'); dot >= 0 {
 		if cols, ok := s.AliasCols[k[:dot]]; ok && cols[k[dot+1:]] {
+			return true
+		}
+		// The qualifier names a relation in this subtree whose COLUMN LIST is
+		// unknown at plan time. The column set cannot confirm the name, but
+		// the QUALIFIER already decided the side: `r2.c` is a column of r2
+		// and of nothing else, so the arm holding r2 owns the key. Without
+		// this, a join between two such relations had NEITHER side owning
+		// EITHER key, assignJoinKeySides left the pair in its written order,
+		// and an `ON r2.c = r1.a` resolved each key against the arm that does
+		// not have it — both indices missed, every row keyed to the same
+		// constant, and the join answered the CROSS PRODUCT (#1229).
+		if s.unknownCols[k[:dot]] {
 			return true
 		}
 		// The qualifier may name a DERIVED TABLE rather than a scan, and then

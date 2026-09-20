@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // Join keys use the pair's common type so comparator equality and key equality
@@ -214,6 +216,9 @@ func keyEncodingClass(t batch.TypeID) int {
 func (h *HashJoin) checkProbeKeyTypes(b *batch.RecordBatch) error {
 	for i, pi := range h.probeKeyIdx {
 		if pi < 0 || pi >= len(b.Columns) {
+			if err := h.checkKeyPairResolved(b, i, pi); err != nil {
+				return err
+			}
 			continue
 		}
 		probeT := b.Columns[pi].Type
@@ -254,6 +259,83 @@ func (h *HashJoin) checkProbeKeyTypes(b *batch.RecordBatch) error {
 			h.LeftKeys[i], probeT, h.RightKeys[i], buildT)
 	}
 	return nil
+}
+
+// checkKeyPairResolved is the refusal for an ON clause that would be DROPPED.
+//
+// A key column that resolves to no column of its side is encoded as one flag
+// byte for every row, and when NEITHER side resolves both sides encode the
+// same byte: every probe row matches every build row and the join answers the
+// CROSS PRODUCT with no error at all. That was #1229 — two file readers whose
+// `ON r2.c = r1.a` was keyed against the arms the names do not belong to, four
+// rows against two answering eight where PostgreSQL answers two.
+//
+// The plan-time repair is SubtreeNaming.ownsKey, which decides the side by
+// QUALIFIER for a relation whose column list is unknown. This is the backstop
+// under it, and it refuses rather than guessing: a key naming a column is a
+// key that must find one.
+//
+// The ON-TRUE sentinel the optimizer writes (`1 = 1`) is the one pair whose
+// keys are LITERALS rather than column names, and it resolves to nothing on
+// both sides ON PURPOSE — that is how a cross product is spelled here. It is
+// told apart by the key's own text, which is the only record of the
+// difference that reaches this layer.
+func (h *HashJoin) checkKeyPairResolved(b *batch.RecordBatch, i, probeIdx int) error {
+	if probeIdx >= 0 || i >= len(h.buildKeyIdx) || h.buildKeyIdx[i] >= 0 {
+		// Either side resolved: the key pair still has a column to key at,
+		// and a one-sided miss is a different question with its own answer
+		// (no match) rather than a cross product.
+		return nil
+	}
+	left, right := "", ""
+	if i < len(h.LeftKeys) {
+		left = h.LeftKeys[i]
+	}
+	if i < len(h.RightKeys) {
+		right = h.RightKeys[i]
+	}
+	if !joinKeyNamesAColumn(left) || !joinKeyNamesAColumn(right) {
+		return nil
+	}
+	return fmt.Errorf("join key pair %q = %q resolves to no column on either side: "+
+		"the probe side publishes %s and the build side %s, so the condition would be "+
+		"dropped and the join would answer the cross product (#1229)",
+		left, right, joinSideColumnList(schemaColumnNames(b.Schema)),
+		joinSideColumnList(schemaColumnNames(h.buildSchema)))
+}
+
+// joinKeyNamesAColumn reports whether a key's text is a column REFERENCE
+// rather than the literal of an ON-TRUE sentinel. Everything a column
+// reference can be spelled as — bare, qualified, delimited — begins with a
+// letter, an underscore or a double quote; a numeric or string literal does
+// not.
+func joinKeyNamesAColumn(key string) bool {
+	k := strings.TrimSpace(key)
+	if k == "" {
+		return false
+	}
+	switch c := k[0]; {
+	case c >= '0' && c <= '9', c == '-', c == '+', c == '.', c == '\'':
+		return false
+	}
+	return true
+}
+
+// schemaColumnNames names what a side actually published, so the refusal
+// above tells the caller which spelling to write.
+func schemaColumnNames(schema []parquet.Column) []string {
+	out := make([]string, 0, len(schema))
+	for _, c := range schema {
+		out = append(out, c.Name)
+	}
+	return out
+}
+
+func joinSideColumnList(names []string) string {
+	if len(names) == 0 {
+		return "no columns"
+	}
+	return strings.Join(names, ", ")
 }
 
 // joinKeyLadderType reports whether a type is on the numeric ladder
