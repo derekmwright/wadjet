@@ -525,6 +525,13 @@ Notes an operator needs:
   the request is sent, in every position a table function can appear: a CTE, a
   derived table, a join or `UNION` arm, a scalar / `IN` / `EXISTS` subquery,
   the subquery in a DML predicate, and `EXPLAIN`.
+- The decision is the FIRST thing a statement door does — before the
+  statement's columns are bound, before the planner annotates anything. That
+  is what lets the planner read a local file reader's schema at plan time so
+  the reader is an ordinary relation, without reading it for an identity that
+  may not be allowed to. A refused identity's file is never opened, which is
+  asserted per door by a counter of the planner's own reads rather than by
+  the refusal alone (ADR-0034).
 
 ## Cell-Level Policies
 

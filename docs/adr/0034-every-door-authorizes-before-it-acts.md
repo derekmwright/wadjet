@@ -321,6 +321,40 @@ With auth enabled a context carrying no identity is refused at every row; with n
 
 **A table function is a capability, and an external read is not a relation.** `read_csv`, `read_json`, `read_parquet`, `postgres_scan`, `postgres_query`, `mysql_scan`, `mysql_query` read what the catalog does not hold. `PolicedScanTables` and `StatementBaseTables` both skip a function scan — correctly, since a column policy binds to a relation's schema — and the consequence was that such a scan was not a resource of ANY kind. It is one now: `Resource{Type:"table_function", Name:"<func>", Attributes:{path (~/-expanded, Clean'd), url, host, arg_<k>}}` evaluated with `ActionRead`; the connection string is never an attribute because it carries a password. Default DENY under auth (deny-overrides' closed world doing its job), `admin` under legacy roles, unchanged with auth disabled. Enforcement is in two places and both are load-bearing: the plan-time pass so a denial opens no file and sends no request, and the context guard `physical.buildScan` asks, which covers the scalar/`IN`/`EXISTS` subquery and CTE body that are SQL *text* when the statement's plan is enforced. **PG divergence and precedent**: PostgreSQL has no analogue, but its equivalent primitives are privileged — an ordinary role gets `42501 permission denied for function pg_read_file`, and `COPY … FROM PROGRAM` answers `42501 permission denied to COPY to or from an external program` (only `pg_execute_server_program`). Server-side file and program access being a privilege is PostgreSQL's own position.
 
+**The capability is decided BEFORE the statement binds** (amended 2026-09-20,
+arc FR, #1230 / #1231). Through v0.23.0 the decision was made inside
+`EnforcePlanPolicies`, which runs AFTER `ValidateStatementColumns` and after
+`physical.AnnotateScanColumns`. That was safe — nothing before it opened
+anything — but it fixed a cost on the LANGUAGE: a file reader's columns are
+its input's, so with the capability undecided the planner could not read them,
+and a reader in `FROM` was a relation with no schema (ADR-0039 §3 as it was
+first written). The order is the answer, not the deferral.
+
+`auth.AuthorizeTableFunctions` is now the first thing every statement door
+does. It decides the statement's own FROM items and returns a context carrying
+two things: the `logical.TableFuncGuard` that every later-built plan asks
+(unchanged, and still the only thing that can see a table function inside a
+subquery's TEXT), and `physical.ContextWithReaderSchemaProbe` — the RECORD
+that this door authorized. The reader-schema resolver is fail-closed on that
+record: no probe, no read; and with one it still asks the guard about that
+very call before it opens anything.
+
+The doors, from the code: `wadjet.DB.Query`, `wadjet.DB.explain` and
+`wadjet.DB.declaredOutputFor` (the CTAS / `INSERT … SELECT` declaration);
+`coordinator.ExecuteSQL` and its async / `EXPLAIN` entry; the HTTP query and
+`EXPLAIN` handlers. pgwire, gRPC and MCP reach the engine through the first
+two and inherit the order. `EnforcePlanPolicies` still runs its own pass
+afterwards and is still load-bearing: it sees the scans the BUILDER produced,
+which is the complete set for the statement's own plan.
+
+The property is measured, not asserted: `physical.ReaderSchemaReads` counts
+the times the planner opened a reader's input, and
+`server.TestArcFRNoDoorOpensAReaderBeforeTheIdentityIsAuthorized` and
+`coordinator.TestArcFRTheCoordinatorDoorAuthorizesBeforeItReads` assert it
+does not move for a refused identity, per door, over eleven shapes — beside
+#943's own two proofs, a path that would error if opened and a loopback server
+that fails the test if it is hit.
+
 **A subquery is a second query, and it asks the same decision.** The physical
 planner turns an expression subquery's TEXT into a plan of its own — after
 `EnforcePlanPolicies` has run over the statement's plan, which cannot contain

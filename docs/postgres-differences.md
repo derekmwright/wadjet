@@ -132,21 +132,15 @@ The standard's capture-marker spelling raises 0A000 naming the construct, where 
 
 `FROM t AS a(k, k)` raises 42701 naming the spelling, where PostgreSQL accepts the list and raises 42702 at every reference. This engine renames positionally and cannot publish one name for two columns. On a TABLE FUNCTION whose relation is narrower than the list, PostgreSQL raises 42P10 for the same statement. (ADR-0012 §5/#959, #1184)
 
-**A file or database reader's column-alias list is measured when it produces its first batch.**
+**A file or database reader whose input is not readable at plan time is measured when it produces its first batch.**
 
-`FROM read_json(…) AS f(a, b, c)` over a file with two columns raises 42P10 with PostgreSQL's own sentence, but at execution rather than at plan time: a reader's width is not knowable before it reads its input. A reader that produces NO batch is never measured against its list. `generate_series` and `unnest` declare their columns from the CALL, so their 42P10 is raised at plan time. (ADR-0012 §5/#1184, #1210)
+A reader publishes its columns at PLAN time: `read_parquet` from the file's footer, `read_json` and `read_csv` from the first batch their own reader infers, read before the statement binds and only after the table-function capability has been authorized for the calling identity (ADR-0039 §3, ADR-0034). Over such a reader `FROM read_json(…) AS f(a, b, c)` is 42P10 at plan time and an unknown column is 42703 at plan time, exactly as over a base table.
 
-**An unknown column over a file or database reader is refused at the reader's first batch, not at plan time.**
+Two inputs are not read at plan time and keep the first-batch behaviour: an `http(s)` source — a plan-time fetch would be a second request for every statement and would make `EXPLAIN` reach the network — and the database connectors (`postgres_scan`, `postgres_query`, `mysql_scan`, `mysql_query`), whose schema is a remote query's. For those, `42P10` and `42703` are raised at execution rather than while the statement is bound, a reader that produces NO batch is never measured against its alias list, and `EXPLAIN` over such a statement does not refuse. (ADR-0012 §5/#1184, #1210, #1230)
 
-`SELECT zz FROM read_json('x.json')` raises `42703 column "zz" does not exist: the table function "read_json" publishes a, b` — PostgreSQL's class and a diagnosis naming the column, but made when the reader publishes its schema rather than while the statement is bound. The statement's column binding runs before the table-function capability is authorized, so the planner does not open the input to find out what it publishes (ADR-0034, #943). Two consequences: a reader that produces NO batch answers zero rows where PostgreSQL raises, and `EXPLAIN` over such a statement does not refuse. The check reaches a reader used as a JOIN ARM for the names that are certain there — a reference qualified by the arm's alias, the join's own ON condition, and a bare name no other arm can provide. `generate_series` and `unnest` are refused at plan time like a base table. (ADR-0012 §5/#1210)
+**A reader whose input declares no columns at all is a named refusal, where PostgreSQL has a zero-column relation.**
 
-**An unqualified reference to an unknown column in a join of TWO readers answers NULL for every row.**
-
-`SELECT zz FROM read_json('a.json') b JOIN read_json('a.json') c ON b.a = c.a` returns rows whose `zz` is NULL; PostgreSQL 17.11 raises 42703. This is a silent WRONG VALUE and not a superset. Neither arm can be held to a bare name when both have unknown column lists, so the first-batch guard declines the check (ADR-0039 §4a). The QUALIFIED spelling in the same join IS refused with 42703. Reading one of the arms through a CTE or a derived table does NOT restore the check — neither declares a column list either, and a catalog table read through a CTE loses a check it has when it is named directly. Filed as #1229. (ADR-0012 §5/#1229)
-
-**A join between TWO readers whose ON names the right arm's column first answers the CROSS PRODUCT.**
-
-`SELECT COUNT(*) FROM read_json('q1.json') r1 JOIN read_json('q2.json') r2 ON r2.c = r1.a` over a four-row and a two-row file answers 8 where PostgreSQL 17.11 answers 2; written `ON r1.a = r2.c` it answers 2. A join key pair neither side can type — two readers have no plan-time column types — is left unresolved, and the condition is dropped rather than refused. A silent wrong ROW SET, pre-existing and unchanged by v0.23.0, and the same shape as the NULL above: loading one arm into a table (`CREATE TABLE t AS SELECT * FROM read_json(…)`) makes both right. Filed as #1229. (ADR-0012 §5/#1229)
+`SELECT * FROM read_json('<zero-byte file>')` raises `0A000 the table function "read_json" published no columns: its input "…" is empty`. PostgreSQL permits a relation with zero columns (`CREATE TABLE t (); SELECT * FROM t` answers zero rows of zero columns) and this engine does not, at any door — a result that declares no columns is not an answer it has. A Parquet file carries its schema in the footer and a CSV in its header row, so an empty file of either kind is an ordinary empty relation: zero rows, columns declared. (ADR-0012 §5/#1230)
 
 **A FROM alias does not rename a single-column table function's column.**
 
@@ -156,9 +150,9 @@ The standard's capture-marker spelling raises 0A000 naming the construct, where 
 
 PostgreSQL adds a second `ordinality` column to any function in FROM; this engine adds it for `unnest` only, so `generate_series(1,2) WITH ORDINALITY` publishes `generate_series` alone — and a two-name column-alias list over it is 42P10. (ADR-0012 §5/#1210-ordinality)
 
-**An aggregate over a file or database reader's column declares double precision.**
+**An aggregate over an HTTP or database reader's column declares double precision.**
 
-`SELECT SUM(a) FROM read_json('x.json')` declares and boxes float8 where the same integer column through a catalog table declares an exact type, because a reader has no plan-time column list for the result-type rules to read. `SELECT f.* FROM read_json('x.json') AS f` is 0A000 for the same reason, while a qualified star over `generate_series` answers. The declared functions carry their width: `generate_series(1,3)` publishes `integer` and its SUM is `bigint`, as PostgreSQL declares. (ADR-0012 §5/#1211)
+`SELECT SUM(a) FROM read_json('http://…')` declares and boxes float8, and `SELECT f.* FROM read_json('http://…') AS f` is 0A000, because those two input kinds are the ones with no plan-time column list for the result-type rules to read (above). Over a LOCAL file the reader's column carries its type: `SUM` over a whole-number column is `numeric` and `MIN`/`MAX` keep its width, which is what PostgreSQL declares for the same `bigint` column. The declared functions carry their width too: `generate_series(1,3)` publishes `integer` and its SUM is `bigint`. (ADR-0012 §5/#1211, #1230)
 
 **`generate_series` never flips the caller's step.**
 

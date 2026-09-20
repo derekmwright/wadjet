@@ -4,7 +4,10 @@ Status: Accepted (2026-09-19, #1210 / #1203 / #1211 / #1202, arc TF; amended
 the same day after the arc's round-1 review — §4a, §6a, §7, §8 and the
 Consequences; the Consequences amended again after the closure review, which
 measured the two-reader residue as a silent wrong VALUE rather than an
-unchecked shape — #1229)
+unchecked shape — #1229; amended 2026-09-20 by arc FR, which CLOSED §3's
+deferral: §3 is now the authorization ORDER and the plan-time schema it
+buys, §9 is the join key's side, and the Consequences are the boundaries that
+remain — #1229 / #1230 / #1231)
 
 Related: ADR-0034 (the authorization ordering §3 rests on), ADR-0024 (§5's
 declared width and §7's key widening), ADR-0012 §5 (the divergences this
@@ -62,25 +65,61 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    one body for both (`physical.stampScanSchema`), so a column of a given
    type is annotated identically whichever relation it came from.
 
-2. **A function whose columns are its INPUT's is refused at its FIRST
-   BATCH, loudly.** Every file and database reader is in this class. The
-   refusal names the column and lists what the relation publishes, and its
-   class is PostgreSQL's:
+2. **A function whose columns are its INPUT's AND whose input is not read at
+   plan time is refused at its FIRST BATCH, loudly.** After §3 that is an
+   `http(s)` source and the database readers; a LOCAL file reader is refused
+   at plan time like a base table. The refusal names the column and lists
+   what the relation publishes, and its class is PostgreSQL's:
 
        42703 column "zz" does not exist: the table function "read_json" publishes a, b
 
-3. **The planner does not open a reader's input to learn its schema.** This
-   is the reason for (2), and it is ADR-0034's ordering, not an efficiency
-   argument. The statement's column binding runs BEFORE the table-function
-   capability is authorized on every door: `auth.ValidateStatementColumns`
-   precedes `auth.EnforcePlanPolicies` on the embedded, coordinator and HTTP
-   doors, and on the coordinator door `physical.AnnotateScanColumns` does
-   too. Sampling the file or the remote query at either point would read it
-   for an identity that may not be allowed to — the property #943's gate
-   asserts with a path that errors if opened and an httptest server that
-   fails the test if it is hit. A plan-time schema for readers is therefore
-   not available until that ordering changes, and until it does the
-   first-batch refusal is the honest answer.
+3. **THE CAPABILITY IS AUTHORIZED FIRST, AND THEN THE PLANNER READS THE
+   INPUT.** Through v0.23.0 this clause said the opposite, and it was right
+   about the ordering it found: the statement's column binding ran BEFORE the
+   table-function capability was authorized on every door, so sampling the
+   file there would have read it for an identity that may not be allowed to.
+   The answer is to fix the ORDER, not to leave the relation without a
+   schema, and this clause now states the order.
+
+   `auth.AuthorizeTableFunctions` is the FIRST thing every statement door
+   does — the embedded `Query`, `EXPLAIN` and the CTAS / `INSERT … SELECT`
+   declaration; the coordinator's `ExecuteSQL` and its async / `EXPLAIN`
+   entry; the HTTP query and `EXPLAIN` doors, which pgwire, gRPC and MCP
+   reach through the first two. It decides the statement's own FROM items and
+   installs two things on the context: the `logical.TableFuncGuard` that
+   every LATER call is decided by (a scalar / `IN` / `EXISTS` subquery, a CTE
+   body, a scan the optimizer mints — all of them SQL text at this point),
+   and `physical.ContextWithReaderSchemaProbe`, the record that this door
+   authorized.
+
+   The reader-schema resolver is **fail-closed on that record**: with no
+   probe on the context it reads nothing and the relation keeps the open
+   scope and the first-batch refusal of (2), and with one it still asks the
+   guard about THAT call before it opens anything. The property is
+   measurable, not only structural: `physical.ReaderSchemaReads` counts the
+   opens, and the gates assert it does not move for a refused identity on any
+   door.
+
+   **What is read is bounded.** A Parquet footer is exact and no page is
+   decoded. `read_json` and `read_csv` read ONE BATCH through the very reader
+   the query uses, so the plan-time schema and the run-time schema are the
+   same inference rather than two guesses. An `http(s)` source is NOT read at
+   plan time — a plan-time fetch is a second request for every statement and
+   would make `EXPLAIN` reach the network — and neither is a database
+   connector, whose schema is a remote query's; both keep (2).
+
+   **A later batch that disagrees is LOUD** (`physical.withPlanTimeSchema`):
+   a column the plan read and a batch does not publish is 42703 naming it, a
+   column that arrives at another type is 42804 naming both types. Never a
+   NULL, never a silent re-type.
+
+   **An EMPTY input is not the same as an absent column list.** A Parquet
+   footer and a CSV header row declare columns with no rows, and that is an
+   ordinary empty relation. An input that declares nothing at all — a
+   zero-byte JSON or CSV — is `0A000` naming the function and its input,
+   because a result with no columns is not an answer this engine has at any
+   door. PostgreSQL permits a zero-column relation and this engine does not;
+   the divergence is ADR-0012's, not this position's.
 
 4. **The names checked at the first batch are the ones the operator DIRECTLY
    ABOVE the relation asks of it** — a Filter, a Project, a Sort, an
@@ -160,39 +199,62 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    forever, every row after the wrap a value the series does not contain. The
    step is taken only when it stays inside the carrier.
 
+9. **A JOIN KEY'S SIDE IS ITS QUALIFIER WHEN THE RELATION'S COLUMNS ARE
+   UNKNOWN** (added 2026-09-20, #1229). `physical.SubtreeNaming.ownsKey`
+   decided a key's side from the column SETS, and a relation this planner
+   could not read at plan time contributes an EMPTY set. So in a join between
+   two such relations NEITHER arm owned EITHER key, `assignJoinKeySides` left
+   the pair in the order the `ON` was written, and each key was resolved
+   against the arm that does not have it. Two misses encode the same flag
+   byte for every row, so every probe row matched every build row: `ON r2.c =
+   r1.a` between a four-row and a two-row reader answered EIGHT where
+   PostgreSQL answers two, while `ON r1.a = r2.c` answered two — the same
+   condition, two row sets.
+
+   The QUALIFIER already decided the side. `r2.c` is r2's column whether or
+   not the planner knows what r2 publishes, so a qualifier naming a relation
+   with an unknown column list OWNS the key, under every name the enclosing
+   query can write it by: the FROM alias, a CTE reference's alias and name, a
+   derived alias. A relation whose columns ARE known is unchanged — there the
+   column set is the better answer, and the qualifier alone would claim a
+   name the relation does not have.
+
+   This is INDEPENDENT of §3: it holds for a relation with no plan-time
+   schema, which is what the gate forces with
+   `WADJET_TEST_NO_READER_SCHEMA=1`. The backstop under it is
+   `exec.HashJoin.checkKeyPairResolved`: a key pair that names columns and
+   resolves to none on EITHER side refuses, naming both keys and what each
+   side publishes. The optimizer's ON-TRUE sentinel (`1 = 1`) is the one pair
+   whose keys are LITERALS and resolve to nothing on purpose; it is told
+   apart by the key's own text and still crosses.
+
 ## Consequences
 
 The boundaries this leaves are recorded on `docs/postgres-differences.md`, and
-each is a consequence of (3), not an oversight:
+each is a consequence of where a column list comes from:
 
-- a reader that produces NO batch is never measured, so an unknown column over
-  an empty file answers zero rows where PostgreSQL raises, and `EXPLAIN` over
-  such a statement does not refuse — the same boundary #1184's `42P10` has;
-- an aggregate over a reader's column declares `double precision`, and a
-  qualified star over one is `0A000`, because both need the column list at
-  plan time;
-- a bare reference to a reader's column through a join that holds a SECOND
-  reader **answers NULL for every row** where PostgreSQL raises 42703. That
-  is a silent WRONG VALUE, not a superset: `SELECT zz FROM read_json('a.json')
-  b JOIN read_json('a.json') c ON b.a = c.a` returns rows with a NULL `zz`.
-  §4a's certainty rule is what leaves it — neither arm can be held to a bare
-  name when both have unknown column lists, and declining is the only honest
-  answer a guard built on certainty can give — but declining to CHECK is not
-  the same as being right, and this consequence is the one place the ADR's own
-  rule ("never a NULL at run time") does not yet hold. Filed as #1229. A
-  QUALIFIED reference in that join IS refused, which is the measurement that
-  isolates it; routing an arm through a CTE or a derived table does NOT
-  restore the check, because neither declares a column list either — a
-  catalog table read through a CTE loses a check it has when it is named
-  directly. The same join has a second wrong answer from §7's side, filed
-  under the same number: a key pair neither arm can type leaves the condition
-  unresolved, so `ON r2.c = r1.a` between two readers drops it and answers the
-  cross product. §7's widening closes the reader-meets-declared-function pair
-  and has nothing to widen when both sides are readers.
-
-Closing the first three is one change — a post-authorization annotation pass
-both doors reach — and it moves a coordinator call site, which is why this
-ADR states the ordering rather than working around it.
+- an `http(s)` reader and a database connector keep §2 whole: their unknown
+  column is 42703 at the FIRST BATCH, their over-long alias list is 42P10
+  there, one that produces no batch is never measured, and an aggregate over
+  their column declares `double precision` because the result-type rules have
+  nothing to read. `EXPLAIN` over such a statement does not refuse;
+- a reader whose input declares NO columns is `0A000` naming the function and
+  the input. PostgreSQL permits a zero-column relation (`CREATE TABLE t ()`)
+  and this engine does not, at any door. Through v0.23.0 the same shape was
+  `XX000 the result has no columns at all` — the engine reporting an internal
+  invariant for a file the caller can see is empty;
+- a file whose LATER rows carry a type the plan-time batch did not is a loud
+  error, but the JSON reader does not reach that check for one shape: it
+  writes the value into the column's storage and the query fails as a
+  RECOVERED PANIC rather than as a named type error. Pre-existing, measured
+  identically at 0c0d33b6, and recorded as a filing candidate;
+- a table function is still not a DAG stage (`stage scan-0 has no
+  dependencies and no ScanFiles`). That is `distributed` and arc PT's pin;
+  the five-arm gates carry it per cell rather than chasing it. A DAG fragment
+  re-planned on a WORKER has no authorization record on its context, so a
+  reader replanned there would take the first-batch path — unreachable while
+  the pin stands, and named here so it is not discovered as a surprise when
+  the pin is closed.
 
 `generate_series` also stopped negating the caller's step: a call whose bounds
 run the other way from its step is an EMPTY relation on 17.11, and a positive
@@ -217,3 +279,31 @@ function, not of this position, and it lives with the rest of them in
   is not a DAG stage) carried per cell rather than chased.
 - `sql.TestArcTFATableFunctionReadsASignedNumberAsOneArgument`,
   `physical.TestGenerateSeries_DescendingBoundsWithTheDefaultStepAreEmpty`.
+
+Arc FR's, for §3 and §9:
+
+- `wadjet.TestArcFRAFileReaderIsARelationWithASchema` — the qualified star,
+  the empty relation, the zero-byte refusal, an unknown column through eleven
+  paths with a mirror set of the same paths answering, and the declarations
+  (SUM numeric, MIN/MAX bigint, AVG numeric, COUNT bigint), every expectation
+  measured on PostgreSQL 17.11 over an ordinary relation of the same schema.
+  24 of its cells fail at 0c0d33b6.
+- `wadjet.TestArcFRAJoinBetweenTwoReadersKeysOnItsCondition` — §9, 96 cells
+  over three readers and their mixes × both operand orders × INNER / LEFT /
+  comma / CTE / derived, run with `WADJET_TEST_NO_READER_SCHEMA=1` so the
+  repair is exercised on a relation with NO plan-time schema. 50 cells fail
+  at 0c0d33b6.
+- `exec.TestArcFRAJoinKeyPairThatResolvesToNothingRefuses` — §9's backstop
+  and the ON-TRUE sentinel that must still cross.
+- `physical.TestArcFRAReaderSchemaIsReadOnlyUnderAnAuthorizedContext` and
+  `physical.TestArcFRALaterBatchThatDisagreesWithThePlanIsLoud` — the seam:
+  a bare context reads nothing, a refusing guard reads nothing, an HTTP
+  source and a connector read nothing, the answer is cached per call, and a
+  disagreeing batch is 42703 / 42804 naming the column.
+- `server.TestArcFRNoDoorOpensAReaderBeforeTheIdentityIsAuthorized` and
+  `coordinator.TestArcFRTheCoordinatorDoorAuthorizesBeforeItReads` — the
+  ORDER, per door (embedded, pgwire, HTTP, gRPC, coordinator fast path,
+  coordinator DAG) × eleven shapes, asserted with `ReaderSchemaReads`.
+- `coordinator.TestArcFRAFileReaderIsARelationOnEveryArm` — §9 on single /
+  single+budget / dag / dag-shuffled / dag+morsel4, with arc PT's
+  `distributed` pin carried per cell.

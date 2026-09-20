@@ -5894,15 +5894,15 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
   - **A table function's column-alias list is applied at its SOURCE.**
     (Added 2026-09-18, arc PT / #1184; narrowed 2026-09-19, arc TF / #1210.)
     `FROM read_json(…) [AS] f(k, v)` now renames positionally like every other
-    FROM item. The rename happens where the relation's WIDTH is known. For a
-    FILE or DATABASE READER that is when the function produces its first
-    batch, because its columns come from the input it reads: a list longer
-    than the relation is `42P10` with PostgreSQL's own sentence but at
-    EXECUTION, and a reader that produces no batch at all is never measured
-    against its list. For `generate_series` and `unnest` the width is a
-    function of the CALL, so their `42P10` is raised at plan time like
-    PostgreSQL's. A repeated name in the list is `42701` at the list, the
-    same narrower refusal arc PS recorded for a base table.
+    FROM item. The rename happens where the relation's WIDTH is known, and
+    since arc FR (2026-09-20, #1230) that is PLAN time for a LOCAL file
+    reader: `42P10` is raised before anything runs, like PostgreSQL's. It is
+    still EXECUTION for an `http(s)` source and for the database readers,
+    whose inputs the planner does not read (ADR-0039 §3), and one of those
+    that produces no batch at all is never measured against its list. For
+    `generate_series` and `unnest` the width is a function of the CALL. A
+    repeated name in the list is `42701` at the list, the same narrower
+    refusal arc PS recorded for a base table.
 
   - **A TABLE FUNCTION IN FROM IS A RELATION, AND WHERE ITS COLUMNS COME FROM
     DECIDES WHERE A MISSING ONE IS REFUSED.** (Added 2026-09-19, arc TF /
@@ -5910,26 +5910,55 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     column a table function does not publish is `42703` naming the column, as
     it is over a base table — where it used to answer NULL for every row.
     `generate_series` and `unnest` declare their columns from the call, so
-    their refusal is made at plan time; a file or database reader's columns
-    are its input's, and this engine does not open the input to bind the
-    statement (the column binding runs before the table-function capability
-    is authorized — ADR-0034, #943), so a reader's refusal is made at its
-    FIRST BATCH. Five divergences follow from that timing or from the
-    function's own naming rules, each on the differences page: a reader that
-    produces NO batch answers zero rows where PostgreSQL raises, and `EXPLAIN`
-    over such a statement does not refuse; an aggregate over a reader's column
-    declares `double precision` and a qualified star over one is `0A000`,
-    because both need a plan-time column list; a FROM alias does not rename a
-    single-column function's column, which PostgreSQL does; and
-    `generate_series(…) WITH ORDINALITY` publishes one column where
-    PostgreSQL publishes two. TWO shapes of one join are silent WRONG VALUES
-    rather than divergences and are filed as such (#1229): in a join holding
-    TWO readers, a BARE reference to an unknown column answers NULL for every
-    row, because neither arm can be held to a bare name (the qualified
-    spelling is refused, and routing an arm through a CTE or a derived table
-    does not restore the check); and an `ON` that names the RIGHT arm's column
-    first drops the condition and answers the cross product, because the key
-    pair can be typed from neither side. The declared functions' own value rules follow PostgreSQL
+    their refusal is made at plan time — and since arc FR (2026-09-20,
+    #1229/#1230/#1231) so is a LOCAL FILE reader's. The ordering that stopped
+    it is fixed rather than worked around: the table-function capability is
+    authorized FIRST, before the statement binds, so the planner may read the
+    input — a Parquet FOOTER, or ONE BATCH of a JSON or CSV file through the
+    same reader the query uses — without reading it for an identity that may
+    not be allowed to (ADR-0034's amendment). With a column list the reader is
+    an ordinary relation: an unknown column is `42703` at plan time through
+    ANY path, `f.*` expands, and `SUM` over a whole-number column is `numeric`
+    and `MIN`/`MAX` keep its width, which is what PostgreSQL declares for the
+    same `bigint` column.
+
+    The divergences that remain, each on the differences page: an `http(s)`
+    source and a database connector are NOT read at plan time (a plan-time
+    fetch is a second request for every statement and would make `EXPLAIN`
+    reach the network), so for those the `42703` and the `42P10` are made at
+    the FIRST BATCH, one that produces no batch answers zero rows where
+    PostgreSQL raises, `EXPLAIN` over such a statement does not refuse, an
+    aggregate over their column declares `double precision` and a qualified
+    star over one is `0A000`; a FROM alias does not rename a single-column
+    function's column, which PostgreSQL does; and `generate_series(…) WITH
+    ORDINALITY` publishes one column where PostgreSQL publishes two.
+
+  - **A FILE READER WHOSE INPUT DECLARES NO COLUMNS IS `0A000`, WHERE
+    POSTGRESQL HAS A ZERO-COLUMN RELATION.** (Added 2026-09-20, arc FR /
+    #1230.) `SELECT * FROM read_json('<zero-byte file>')` raises `0A000 the
+    table function "read_json" published no columns: its input … is empty`.
+    PostgreSQL permits a relation with zero columns — `CREATE TABLE t ();
+    SELECT * FROM t` answers zero rows of zero columns, measured on 17.11 —
+    and this engine does not, at ANY door: a result that declares no columns
+    is not an answer it has. It used to reach the door as `XX000 the result
+    has no columns at all`, the engine reporting an internal invariant for a
+    file the caller can see is empty; the class and the sentence are the
+    change. A Parquet file carries its schema in the footer and a CSV in its
+    header row, so an empty file of either kind is an ordinary empty relation:
+    zero rows, columns declared.
+
+    TWO SHAPES THAT WERE SILENT WRONG VALUES ARE CLOSED by the same arc.
+    A BARE reference to an unknown column in a join holding two readers
+    answered NULL for every row and is `42703` now, through the direct
+    spelling, the comma spelling, a `LEFT JOIN`, a CTE over either arm and a
+    derived table over either arm. And an `ON` that names the RIGHT arm's
+    column first dropped the condition and answered the CROSS PRODUCT — eight
+    rows over a four-row and a two-row file where PostgreSQL answers two; the
+    key's side is its QUALIFIER now, which holds even for a relation with no
+    plan-time schema at all (ADR-0039 §9). Neither is a divergence any more
+    and #1229's pins are deleted rather than re-pinned.
+
+    The declared functions' own value rules follow PostgreSQL
     exactly: the step is never flipped for the caller, `generate_series(5,1)`
     is an empty relation, a zero step is `22023`, a series ends at the 64-bit
     carrier's edge rather than wrapping, and the column is `integer` for

@@ -219,6 +219,11 @@ file is never read and the URL is never fetched. It applies wherever the
 function appears — a CTE, a derived table, a join arm, a `UNION` arm, a scalar
 / `IN` / `EXISTS` subquery, the subquery in a DML predicate, and `EXPLAIN`.
 
+The decision is the FIRST thing every door does, before the statement's
+columns are bound and before the planner annotates anything. That ordering is
+what lets the planner read a file reader's schema at plan time (below) without
+reading it for an identity that may not be allowed to.
+
 `generate_series` and `unnest` compute over their own arguments and open
 nothing, so they are not part of this and remain available to every identity.
 
@@ -234,66 +239,56 @@ TYPE into aggregates and arithmetic, an alias clause with a column list
 renames them positionally, and a correlated reference from inside a scalar
 subquery over it binds the outer row.
 
-WHERE the refusal is made depends on whether the function's columns come from
-its CALL or from its INPUT.
+WHERE the column list comes from decides WHEN a missing column is refused.
 
 | function | column list | an unknown column |
 |---|---|---|
 | `generate_series`, `unnest` | declared by the call | `42703` at plan time |
-| `read_json`, `read_csv`, `read_parquet`, `postgres_*`, `mysql_*` | read from the input | `42703` at the first batch |
+| `read_json`, `read_csv`, `read_parquet` over a LOCAL path or glob | read from the input at plan time | `42703` at plan time |
+| the same three over an `http(s)` URL | read from the input at execution | `42703` at the first batch |
+| `postgres_*`, `mysql_*` | read from the remote query at execution | `42703` at the first batch |
 
-A reader's columns are its file's or its remote query's, and the planner does
-not open either to find out: the statement's column binding runs before the
-table-function capability is authorized, so reading the input there would open
-it for an identity that may not be allowed to. The refusal is therefore made
-where the schema first exists — when the function produces its first batch —
-and it names the column and lists what the relation publishes:
+A file reader's columns are its FILE's, and the planner reads them before the
+statement binds — but only after the table-function capability has been
+authorized for the calling identity (see
+[Table functions are a privileged capability](#table-functions-are-a-privileged-capability) above).
+An identity the policy refuses gets `42501` and its file is never opened.
+
+What is read is bounded. `read_parquet` reads the file's FOOTER and no page —
+the file declares its own schema. `read_json` and `read_csv` read ONE BATCH
+(at most 2048 rows) through the same reader the query itself uses, so the
+schema the plan binds against and the schema the rows arrive under are the
+same inference rather than two guesses. A file whose LATER rows disagree with
+that schema is a loud error naming the column, never a NULL and never a silent
+re-type.
+
+Two input kinds are NOT read at plan time. An `http(s)` source is not, because
+a plan-time fetch would be a second request for every statement and would make
+`EXPLAIN` reach the network; a database connector is not, because its schema
+is a remote query's. For those the refusal is made where the schema first
+exists — when the function produces its first batch — and it names the column
+and lists what the relation publishes:
 
 ```
 ERROR:  column "zz" does not exist: the table function "read_json" publishes a, b
 SQLSTATE: 42703
 ```
 
-The check reaches a reader used as a JOIN ARM as well, for the names that are
-certain there: a reference qualified by the arm's own alias, the join's own
-`ON` condition, and a bare reference no other arm of the join can provide.
+The first-batch check reaches a reader used as a JOIN ARM as well, for the
+names that are certain there: a reference qualified by the arm's own alias,
+the join's own `ON` condition, and a bare reference no other arm of the join
+can provide.
 
-**Two shapes of a join between TWO readers are still wrong** (#1229). Such a
-join can decide nothing about a bare name, so an UNQUALIFIED reference to a
-column neither publishes is not checked — and it answers NULL for every row
-where PostgreSQL raises `42703`. And its key types can be resolved from
-neither side, so an `ON` that names the RIGHT arm's column first drops the
-condition and answers the CROSS PRODUCT:
+An EMPTY relation still publishes its columns. A Parquet file carries its
+schema in the footer and a CSV carries it in the header row, so a file with no
+rows is zero rows of the columns it declares. A file that declares nothing at
+all — a zero-byte JSON or CSV — is a named refusal, because a result with no
+columns is not an answer this engine has at any door:
 
-```sql
--- NULL for every row; PostgreSQL raises 42703
-SELECT zz FROM read_json('a.json') b JOIN read_json('a.json') c ON b.a = c.a
-
--- 42703, naming the column: qualify the reference
-SELECT b.zz FROM read_json('a.json') b JOIN read_json('a.json') c ON b.a = c.a
-
--- every pair, not the matching ones: 8 rows over a 4-row and a 2-row file
-SELECT COUNT(*) FROM read_json('q1.json') r1 JOIN read_json('q2.json') r2
-  ON r2.c = r1.a
 ```
-
-Qualify the reference, and write the left arm's column first, until this is
-fixed. Reading one of the two through a CTE or a derived table does not help —
-neither declares a column list either — but loading one into a table does:
-`CREATE TABLE t AS SELECT * FROM read_json(…)` makes both shapes right.
-
-Two consequences of that timing, both deliberate:
-
-- a reader that produces **no batch at all** (an empty file) is never measured
-  against the statement, so an unknown column over one answers zero rows
-  rather than refusing — the same boundary the column-alias list's `42P10`
-  has;
-- a reader's column has no declared type at plan time, so an aggregate over
-  one declares `double precision`. `SELECT SUM(a) FROM read_json('x.json')` is
-  float8 where the same column through a catalog table is an exact type, and
-  `SELECT f.* FROM read_json('x.json') AS f` is `0A000` where a qualified star
-  over `generate_series` answers. Both are recorded on the
-  [PostgreSQL differences](postgres-differences.md) page.
+ERROR:  the table function "read_json" published no columns: its input "x.json" is empty
+SQLSTATE: 0A000
+```
 
 ### generate_series
 
