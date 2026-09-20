@@ -189,6 +189,12 @@ heading, repeating the heading; the JSON form emits BOTH keys in column order,
 legal JSON; a reader that keeps only the last occurrence of a key sees the last
 column of that name.
 
+`query`, `shell`, `mcp`, `create-table` and `drop-table` honour the persistent
+planner and engine flags — `--memory-budget`, `--spill-dir`,
+`--sort-merge-join-bytes`, `--late-materialization` and `--bushy-join-reorder`
+— exactly as `serve` does, so a budget that refuses a query on the server
+refuses it here too.
+
 `query`, `create-table`, `drop-table`, `shell` and `tables` share ONE
 persisted catalog with `serve`. `--nats-url` names a server explicitly;
 otherwise the catalog is this deployment's own store directory, which the

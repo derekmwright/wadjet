@@ -425,17 +425,26 @@ func runStandalone(ctx context.Context, o cli.ServeOptions, store objstore.Store
 
 	// Start PostgreSQL wire protocol server
 	// The pgwire fallback DB is a planner of this server's too — every
-	// statement the routing gate declines is planned here — so it carries
-	// the server's planner option rather than inheriting one from whichever
-	// other instance happened to be opened first (#1223).
+	// statement the routing gate declines is planned here (a leading
+	// comment, TABLE, VALUES, and every statement when a provider is
+	// present but routing is disabled) — so it carries the server's OWN
+	// planner and engine options rather than inheriting one from whichever
+	// other instance happened to be opened first (#1223), and rather than
+	// running the other four on their zero values while the coordinator and
+	// worker it sits beside run on the resolved ones — which is what made
+	// --late-materialization false here and true there (#1226).
 	pgDB, err := wadjet.Open(ctx, wadjet.Config{
-		Store:            store,
-		Bucket:           o.Bucket,
-		MetaKV:           kv,
-		AuthProvider:     provider,
-		QueryLimits:      globalLimits,
-		RoleLimits:       roleLimits,
-		BushyJoinReorder: o.BushyJoinReorder,
+		Store:               store,
+		Bucket:              o.Bucket,
+		MetaKV:              kv,
+		AuthProvider:        provider,
+		QueryLimits:         globalLimits,
+		RoleLimits:          roleLimits,
+		SortMergeJoinBytes:  o.SortMergeJoinBytes,
+		LateMaterialization: o.LateMaterialization,
+		BushyJoinReorder:    o.BushyJoinReorder,
+		MemoryBudget:        o.MemoryBudget,
+		SpillDir:            o.SpillDir,
 	})
 	if err != nil {
 		return fmt.Errorf("opening DB for pgwire: %w", err)

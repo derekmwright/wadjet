@@ -410,12 +410,20 @@ func openSharedDB(ctx context.Context, logger *slog.Logger) (*wadjet.DB, func(),
 		Bucket: bucket,
 		MetaKV: kv,
 		Logger: logger,
-		// The planner flags are this DB's configuration now, not a
-		// package variable the root command stored for the whole
-		// process: a command that does not carry them here is a
-		// command whose typed --bushy-join-reorder does nothing
-		// (#1223).
-		BushyJoinReorder: bushyJoinReorder,
+		// The planner and engine flags are this DB's configuration now,
+		// not a package variable the root command stored for the whole
+		// process: a command that does not carry them here is a command
+		// whose typed --bushy-join-reorder does nothing (#1223). The
+		// other four were never global at all, so `query --memory-budget`
+		// was accepted and ignored on this door while `serve` honoured it
+		// — and --late-materialization's documented default of true was
+		// false here, because the field nobody set is the zero value
+		// (#1226). Every flag `serve` carries, this door carries.
+		SortMergeJoinBytes:  sortMergeJoinBytes,
+		LateMaterialization: lateMaterialization,
+		BushyJoinReorder:    bushyJoinReorder,
+		MemoryBudget:        memoryBudget,
+		SpillDir:            spillDir,
 	})
 	if err != nil {
 		release()

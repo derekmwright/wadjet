@@ -314,7 +314,14 @@ func queryCmd() *cobra.Command {
 			if isCatalogFreeQuery(args[0]) {
 				db, err := wadjet.Open(ctx, wadjet.Config{
 					Store: objstore.NewMemStore(), Bucket: bucket,
-					BushyJoinReorder: bushyJoinReorder,
+					// Every planner/engine flag `serve` carries, so a
+					// typed --memory-budget or --late-materialization
+					// means here what it means there (#1223, #1226).
+					SortMergeJoinBytes:  sortMergeJoinBytes,
+					LateMaterialization: lateMaterialization,
+					BushyJoinReorder:    bushyJoinReorder,
+					MemoryBudget:        memoryBudget,
+					SpillDir:            spillDir,
 				})
 				if err != nil {
 					return err
