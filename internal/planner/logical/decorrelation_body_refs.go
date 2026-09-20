@@ -44,34 +44,28 @@ import (
 // column reference QUALIFIED by a relation the ENCLOSING query reads and the
 // body does not.
 //
-// It is deliberately strict in both directions:
+// A qualifier is read only when it names an outer relation and NO inner one:
+// `dc_out o` outside and `dc_out z` inside makes `o.total` outer and `z.id`
+// inner, while `dc_out.total` names both and is not decided here.
 //
-//   - a qualifier is read only when it names an outer relation and NO inner
-//     one. `dc_out o` outside and `dc_out z` inside makes `o.total` outer and
-//     `z.id` inner; `dc_out.total` names both and is not decided here.
-//   - plansql.ColumnRefs REFUSES a node it does not know and the three nodes
-//     that carry raw SQL rather than a parsed subtree (a subquery, an EXISTS,
-//     a window call). An error therefore means "this clause may hold a
-//     reference I cannot see", and the answer is true — the rewrite declines
-//     rather than proceeding over a clause it has not read.
+// It asks nodeTableRefs — the correlation classifier's own reader — with a NIL
+// column map, which is what makes the answer qualifier-only: an unqualified
+// name reports neither side there. Reading the clause any other way costs a
+// right answer. plansql.ColumnRefs is the strict walker and REFUSES the three
+// nodes that carry raw SQL rather than a parsed subtree (a subquery, an
+// EXISTS, a window call), so a clause holding one would have to be treated as
+// "may name anything" — and `EXISTS (SELECT 1 FROM z WHERE z.k = o.id ORDER BY
+// ROW_NUMBER() OVER ())`, whose ORDER BY names nothing outer at all, would
+// stop decorrelating and be refused by the per-row rebuild instead of
+// answering PostgreSQL's rows (arc L1's `EXISTS/*/winord`). nodeTableRefs has
+// a case for a window call and for a nested block, which is the reader this
+// question needs.
 func namesEnclosingQuery(node plansql.Node, outerTables, innerTables map[string]bool) bool {
 	if node == nil {
 		return false
 	}
-	refs, err := plansql.ColumnRefs(node)
-	if err != nil {
-		return true
-	}
-	for _, r := range refs {
-		if r.Table == "" {
-			continue
-		}
-		t := strings.ToLower(r.Table)
-		if outerTables[t] && !innerTables[t] {
-			return true
-		}
-	}
-	return false
+	hasOuter, _ := nodeTableRefs(node, outerTables, innerTables, nil)
+	return hasOuter
 }
 
 // provablyOuterOnly reports whether EVERY column reference in node is
@@ -115,7 +109,15 @@ func provablyOuterOnly(node plansql.Node, outerTables, innerTables map[string]bo
 // info is the caller's own fresh parse of the subquery text, so rewriting the
 // ON here is local to this attempt: a decline leaves the original SQL, which
 // is what the per-outer-row re-run reads.
-func liftBodyOuterConditions(info *plansql.SelectInfo, outerTables, innerTables map[string]bool) (lifted []plansql.Node, blocked string) {
+// readsSelectList says whether the CALLER reads the body's SELECT list. An IN
+// and a scalar comparison do — the item is the membership value or the value
+// itself — and an EXISTS does not: it asks whether a row exists, PostgreSQL
+// does not evaluate the target list for it, and the plan this rewrite builds
+// (Scan → [Join …] → [Filter]) never materializes it. Checking it for an
+// EXISTS costs a right answer: `EXISTS (SELECT SUM(o.id) OVER () FROM z WHERE
+// z.k = o.id)` decorrelates and answers PostgreSQL's rows, and blocking on the
+// outer reference in that item refuses it (arc L1's `EXISTS/*/winsel`).
+func liftBodyOuterConditions(info *plansql.SelectInfo, outerTables, innerTables map[string]bool, readsSelectList bool) (lifted []plansql.Node, blocked string) {
 	if info == nil {
 		return nil, ""
 	}
@@ -178,14 +180,22 @@ func liftBodyOuterConditions(info *plansql.SelectInfo, outerTables, innerTables 
 			return nil, "GROUP BY"
 		}
 	}
-	for _, ob := range info.OrderBy {
-		if namesEnclosingQuery(ob.Expr, outerTables, innerTables) {
-			return nil, "ORDER BY"
+	// An ORDER BY decides WHICH rows only beside a bound. Without one it
+	// changes neither a membership set, nor whether a row exists, nor an
+	// aggregate — so an outer reference there is not a reference this rewrite
+	// has to carry, and blocking on it would decline a shape that answers.
+	if strings.TrimSpace(info.Limit) != "" || strings.TrimSpace(info.Offset) != "" {
+		for _, ob := range info.OrderBy {
+			if namesEnclosingQuery(ob.Expr, outerTables, innerTables) {
+				return nil, "ORDER BY beside a bound"
+			}
 		}
 	}
-	for _, c := range info.Columns {
-		if namesEnclosingQuery(c.ASTExpr, outerTables, innerTables) {
-			return nil, "the SELECT list"
+	if readsSelectList {
+		for _, c := range info.Columns {
+			if namesEnclosingQuery(c.ASTExpr, outerTables, innerTables) {
+				return nil, "the SELECT list"
+			}
 		}
 	}
 	return lifted, ""

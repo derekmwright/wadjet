@@ -19,6 +19,8 @@ import (
 // from an answer — so a future change that stops LIFTING an inner join's ON,
 // or starts lifting an OUTER one, names the clause here rather than showing up
 // as a row count somewhere else.
+func boolPtr(b bool) *bool { return &b }
+
 func TestEveryBodyClauseSaysWhatItDoesWithAnOuterReference(t *testing.T) {
 	outer := map[string]bool{"dc_out": true, "o": true}
 	inner := map[string]bool{"dc_in": true, "b": true, "dc_side": true, "c": true}
@@ -30,6 +32,10 @@ func TestEveryBodyClauseSaysWhatItDoesWithAnOuterReference(t *testing.T) {
 		// classification; blocked is the clause that declines the rewrite.
 		lifted  []string
 		blocked string
+		// readsSelectList is the caller's own question — an IN and a scalar
+		// comparison read the body's SELECT item, an EXISTS does not. Default
+		// true, so a row says so only when it is testing the EXISTS side.
+		readsSelectList *bool
 	}{
 		{name: "whereOnly", body: "SELECT b.k FROM dc_in b WHERE b.k = o.id"},
 		{name: "innerJoinON",
@@ -64,9 +70,31 @@ func TestEveryBodyClauseSaysWhatItDoesWithAnOuterReference(t *testing.T) {
 		{name: "selectList",
 			body:    "SELECT o.grp FROM dc_in b",
 			blocked: "the SELECT list"},
-		{name: "orderBy",
-			body:    "SELECT b.k FROM dc_in b ORDER BY o.total",
-			blocked: "ORDER BY"},
+		// …and an EXISTS does not read it, so the same body blocks nothing
+		// for the caller that discards the item.
+		{name: "selectListUnreadByExists",
+			body:            "SELECT o.grp FROM dc_in b",
+			readsSelectList: boolPtr(false)},
+		{name: "selectListWindowUnreadByExists",
+			body:            "SELECT SUM(o.id) OVER () FROM dc_in b",
+			readsSelectList: boolPtr(false)},
+		{name: "selectListWindowReadByIn",
+			body:            "SELECT SUM(o.id) OVER () FROM dc_in b",
+			readsSelectList: boolPtr(true),
+			blocked:         "the SELECT list"},
+		// A window call with NO outer reference in a clause the walker reads
+		// must not block: the strict walker refuses a window node outright,
+		// which is what made arc L1's EXISTS/*/winord stop answering.
+		{name: "orderByWindowNoOuterRef",
+			body: "SELECT 1 FROM dc_in b ORDER BY ROW_NUMBER() OVER () LIMIT 1"},
+		// An ORDER BY with no bound under it changes no membership set, no
+		// existence and no aggregate, so an outer reference there is not one
+		// this rewrite has to carry. Beside a LIMIT it is.
+		{name: "orderByNoBound",
+			body: "SELECT b.k FROM dc_in b ORDER BY o.total"},
+		{name: "orderByBounded",
+			body:    "SELECT b.k FROM dc_in b ORDER BY o.total LIMIT 1",
+			blocked: "ORDER BY beside a bound"},
 		{name: "qualify",
 			body:    "SELECT b.k FROM dc_in b QUALIFY ROW_NUMBER() OVER (PARTITION BY b.k) > o.total",
 			blocked: "QUALIFY"},
@@ -89,7 +117,11 @@ func TestEveryBodyClauseSaysWhatItDoesWithAnOuterReference(t *testing.T) {
 			if err != nil {
 				t.Fatalf("extract: %v", err)
 			}
-			lifted, blocked := liftBodyOuterConditions(info, outer, inner)
+			reads := true
+			if tc.readsSelectList != nil {
+				reads = *tc.readsSelectList
+			}
+			lifted, blocked := liftBodyOuterConditions(info, outer, inner, reads)
 			if blocked != tc.blocked {
 				t.Fatalf("blocked = %q, want %q", blocked, tc.blocked)
 			}

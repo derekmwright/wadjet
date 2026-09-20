@@ -1315,7 +1315,7 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 	// and a reference this rewrite cannot carry declines it — the scalar
 	// subquery then runs per outer row, which is right by construction
 	// (#1232, decorrelation_body_refs.go).
-	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTableSet)
+	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTableSet, true)
 	if blocked != "" {
 		return nil, pred, false
 	}
@@ -1926,7 +1926,7 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 	// cannot carry it declines the whole thing, and the subquery stays an
 	// executable predicate re-run per outer row (#1232,
 	// decorrelation_body_refs.go).
-	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTableSet)
+	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTableSet, true)
 	if blocked != "" {
 		return nil, nil
 	}
@@ -3301,7 +3301,7 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 	// the enclosing query is lifted into the classification below, and a
 	// reference this rewrite cannot carry declines it (#1232,
 	// decorrelation_body_refs.go).
-	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTables)
+	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTables, false)
 	if blocked != "" {
 		return nil, nil
 	}
