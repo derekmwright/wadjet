@@ -2212,11 +2212,49 @@ A `WITH RECURSIVE` whose body does NOT name itself is not recursive at all and
 is answered as the ordinary query it is, including a plain `UNION` between its
 arms.
 
-The fixed point runs at most **1000 iterations**. A body that has not reached
-one by then stops there and the CTE holds the rows produced so far — a
-truncation, not an error — so a recursion written without a terminating
-predicate answers a prefix rather than running forever. Write the termination
-into the recursive arm's `WHERE`.
+The recursive term is iterated until it produces no rows, as in PostgreSQL:
+there is no silent cap, and the CTE holds its WHOLE closure — a date series,
+a hierarchy or a walk of any depth answers every row. The closure is held like
+any other materialized result and spills to disk past the memory budget. Three
+things end a recursion that never reaches a fixed point, each with an error
+and never with the rows produced so far:
+
+* a cancelled statement — `statement_timeout` or a CancelRequest (`57014`) —
+  between iterations;
+* one iteration producing more rows than the memory budget holds (`53200`), so
+  a recursion whose rows grow at every step is stopped by the budget;
+* **1,000,000 iterations** (`54000`, `recursive query "r" did not reach a fixed
+  point within 1000000 iterations`). PostgreSQL has no such limit and runs
+  until `statement_timeout` or `temp_file_limit`; a recursion whose rows do not
+  grow — `SELECT n + 1 FROM r` with no `WHERE` — is bounded by nothing else.
+
+An error in the seed or in any iteration of the recursive term is the
+statement's error, with its own SQLSTATE: a division by zero on the third step
+is `22012`, never the two steps before it.
+
+The seed (the non-recursive term) DECIDES the CTE's column types, whether or
+not it produces a row, as it does in PostgreSQL: `SELECT DATE '2020-01-01'
+UNION ALL SELECT x + 1 FROM d …` is a date series, a zero-row seed over a
+bigint column declares bigint, and a text seed stays text. The recursive term's
+values must have those types: an integer seed with a fractional term (`SELECT 1
+UNION ALL SELECT n + 0.5 FROM r …`) is `42804` with PostgreSQL's sentence. An
+integer term into an integer column of another width is range-checked into the
+seed's width (`22003` when it does not fit) and an integer or real term into a
+double precision seed is widened.
+
+The recursive term's shape follows PostgreSQL's rules, with its class (`42P19`)
+and sentence: it may not contain an aggregate function, may not name the CTE
+inside a subquery expression (`EXISTS`, `IN`, a scalar subquery), on the
+nullable side of an outer join (the right of a `LEFT JOIN`, the left of a
+`RIGHT JOIN`, either side of a `FULL JOIN`), or more than once. `r LEFT JOIN t`,
+a `GROUP BY` with no aggregate and an aggregate inside a subquery of the term
+are answered.
+
+A recursive CTE publishes the SEED's column names, renamed positionally by its
+column list; a name only the recursive term spells (`SELECT v + 1 AS w FROM r`)
+is `42703` outside it. In a `WITH RECURSIVE` list, only an item whose body
+names itself is recursive: the others are ordinary CTEs and publish their names
+by the ordinary rule (`?column?` for an unaliased expression).
 
 A recursive CTE is answered by the single-process engine; the distributed
 engine has no stage lowering for one and refuses such a query rather than

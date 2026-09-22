@@ -3955,6 +3955,19 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `star_over_a_non_aggregated_lateral` cell wants
      `{id, customer, total, amount}` with no divergence beside it.
 
+   - **A recursive CTE's fixed point is bounded, and a few recursive shapes
+     PostgreSQL refuses are answered.** (Added 2026-09-22, arc RC; ADR-0021
+     §1o-b.) PostgreSQL iterates without limit; this engine raises 54000 at
+     1,000,000 iterations and 53200 for one iteration larger than the budget,
+     and never returns the rows so far. PostgreSQL evaluates a recursive CTE
+     lazily, so a LIMIT over a recursion with no stop answers there and is
+     54000 here. A forward reference inside a `WITH RECURSIVE` list is 42P01
+     here (PostgreSQL answers), and mutual recursion is 42P01 here where it is
+     0A000 there. SUPERSET, kept: an ORDER BY or LIMIT on the whole recursive
+     body, an integer term of another width than the seed (range-checked into
+     the seed's width), and a mistyped term that never produces a row. Gated in
+     `wadjet.TestArcRCRecursiveCTEAnswersItsWholeClosureOrFails`.
+
 6. **A numeric literal's carrier is its TEXT, not a float64.** (Added
    2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as
    `numeric` and compares it at full precision, so `WHERE d = 493827160549382.7160549350`

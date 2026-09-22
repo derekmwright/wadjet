@@ -522,6 +522,22 @@ Containers, non-text BYTES and non-finite numbers lack reconstructable literals:
 
 It raises 0A000 where PostgreSQL deduplicates each step; this recursive evaluation form is unavailable. (ADR-0012 §5—unlocated)
 
+**A recursive CTE stops at 1,000,000 iterations with 54000.**
+
+PostgreSQL has no iteration limit and runs a recursion that never reaches a fixed point until `statement_timeout` or `temp_file_limit` ends it. This engine iterates to the fixed point the same way and raises 54000 at the millionth iteration of a recursive term that still produces rows; one iteration larger than the memory budget is 53200. Nothing is truncated: the error replaces the answer. (ADR-0021 §1o-b, ADR-0012 §5/#1246)
+
+**A LIMIT does not stop a recursion early.**
+
+PostgreSQL evaluates a recursive CTE lazily, so `WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r) SELECT n FROM r LIMIT 5` answers five rows there. This engine materializes the closure before it is read, so the same statement is 54000 at the iteration limit. Write the stop into the recursive term's WHERE. (ADR-0021 §1o-b)
+
+**A forward reference in a WITH RECURSIVE list is refused.**
+
+PostgreSQL lets any item of a `WITH RECURSIVE` list name a LATER item; this engine resolves an item's body against the items before it, so the later name is 42P01. Mutual recursion between items is 42P01 here and 0A000 there. Both are refusals; reorder the items. (ADR-0012 §5/arc RC)
+
+**Some recursive terms PostgreSQL refuses are answered.**
+
+An `ORDER BY` or `LIMIT` on the whole recursive body (0A000 there), a term whose integer width differs from the seed's (`SELECT 1 UNION ALL SELECT (n + 1)::bigint …`, 42804 there — the value is range-checked into the seed's width here), and a term of the wrong type that never produces a row (42804 there at parse time; this engine checks the values the term produces) are answered here. Superset, kept: none of them answers a value PostgreSQL would answer differently. (ADR-0012 §5/arc RC)
+
 **Catalog regex support is limited.**
 
 Only psql’s anchored literal-name patterns work; other patterns/operators raise 0A000 versus PostgreSQL results. (ADR-0012 §5—unlocated)

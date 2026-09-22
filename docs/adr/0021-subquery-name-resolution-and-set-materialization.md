@@ -25,6 +25,9 @@ uncorrelated scalar subquery and an IN-subquery already had (#955).
 its own WITH scope in the parse, the build and the rebuild, makes the nested
 correlation walk the same walk as the top-level one, and gives a recursive CTE
 reference the column list a join key needs (#1098, #1067, #1072, #1066).
+§1o-b (2026-09-22, arc RC) settles how a recursive CTE's fixed point ENDS — at
+the fixed point or with an error, never with the rows so far — and what types
+and names it publishes (#1246, #1041, #1074, #1193).
 §1r (2026-09-20) is the half those sections assumed: WHICH references the
 rewrite finds. A body's JOIN ON was never read, and a condition naming only
 the outer row was stripped or dropped — so the outer references are now a SET
@@ -1691,6 +1694,89 @@ dependencies and the dispatcher fails it, loudly. The census pins that on the
 three distributed arms with the ROOT shape beside them as the proof it is not
 this position's. (A `WITH` written inside a scalar or `IN` subquery was a second
 NOT-SETTLED here, `42601` at the parser; §1p closed it.)
+
+### 1o-b. A recursive CTE answers its whole closure or fails
+
+(Added 2026-09-22, arc RC: #1246, #1041, #1074, #1193; the recursive half of
+#1013.)
+
+§1o settled WHERE a recursive CTE is materialized; this settles what the
+materialization IS. The loop it replaced boxed every row into a map, re-derived
+the CTE's schema from the Go values of the seed's first row, dropped any error
+the recursive term raised, and stopped after 1000 iterations — and in each of
+those four places it returned the rows it had as if they were the answer.
+`WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5000)`
+answered 1001 rows; a five-year date series added 1 to a string; a term that
+divided by zero on its third step answered the two steps before it.
+
+**THE POSITION: the fixed point, or an error.** There is no silent cap. The
+recursive term is iterated until it produces no rows, which is PostgreSQL's
+rule, and the CTE holds the whole closure. Three bounds end a recursion that has
+no fixed point, and each is an ERROR that replaces the answer:
+
+* a **cancelled** statement, checked between iterations (statement_timeout and
+  CancelRequest are 57014 at the door);
+* **one iteration** producing more than the memory budget (53200). The working
+  table — the last iteration's rows, which the self-reference reads — is held
+  in memory, so a recursion whose rows grow at every step meets the budget in
+  a few dozen iterations;
+* **1,000,000 iterations** (54000, program_limit_exceeded). The closure spills
+  past the budget like any materialized result, so a recursion whose rows do
+  NOT grow — `SELECT n+1 FROM r` with no WHERE — is bounded by nothing else and
+  would run until the disk filled.
+
+The mechanism was chosen by measurement, against the two alternatives the
+position allowed. A BUDGET-ONLY bound (the closure charged and not spilled)
+cannot end a one-row-per-iteration recursion on an engine whose budget is most
+of the machine, and at 512 KiB it refuses a legitimate 100 000-row series;
+PostgreSQL answers both of those or runs them until a limit the operator set. An
+ITERATION bound alone lets a doubling recursion take the process before it is
+reached. So both, each where it is the honest one. The iteration costs were
+measured on the tip: 20–45 µs for a term over the working table alone, ~440 µs
+for a term that joins a catalog table every step — so the limit is reached in
+20–45 s for the first shape and minutes for the second, and 100 000 iterations
+answer in about 3 s. The number sits two orders of magnitude above any date
+series or hierarchy an application writes (a minute-per-row year is 525 600).
+PostgreSQL measured once for the record: the no-WHERE recursion is 53400 under
+a 256 MB `temp_file_limit` after 4.9 s.
+
+**THE SEED DECIDES THE TYPES.** Each arm is planned and run as its own
+pipeline, columnar, and the CTE's schema is the seed's — its batches' when a
+row arrives, its plan's declaration when none does. The reference is typed from
+the materialization (`Planner.stampRecursiveReference`), so an expression over
+it is declared from the real column types rather than falling to the untyped
+rule (`n + 1` over an integer was declared float8 and the old loop truncated it
+back). The recursive term's values are restated under the seed's types:
+integer-to-integer is range-checked into the seed's width (this engine declares
+`n + 1` bigint where PostgreSQL declares integer, so refusing the width would
+refuse the most common recursive CTE there is, and the range check IS
+PostgreSQL's integer arithmetic), integer or real into double precision widens,
+and anything else is PostgreSQL's 42804.
+
+**THE FORM IS PostgreSQL's.** §1o-a decided the set-operation form; the
+recursive term's own shape is decided before anything runs, with PostgreSQL's
+42P19 and sentence: no aggregate, no self-reference inside a subquery
+expression, on the nullable side of an outer join, or more than once. Each of
+those, iterated, reaches no fixed point or the wrong one.
+
+**THE NAMES ARE THE SEED's.** The binder closes a recursive CTE's scope over
+the seed's published names overlaid by the column list, so a name only the
+recursive term spells is 42703 (#1074), and validates the body again under the
+closed scope. The parser marks an item recursive only when its body names
+itself, so a plain sibling in a `WITH RECURSIVE` list is an ordinary CTE with
+the ordinary published names (#1193). A reference carries the alias it was
+written under, so two references to one CTE in a join are two relations.
+
+**Per-iteration resources are per-iteration.** A join's build reservation and
+an IN-set's charge are released when the iteration that built them ends; the
+plan's Cleanup ran once, at statement end, so a term that joined held every
+iteration's build until then.
+
+**NOT SETTLED:** PostgreSQL's lazy evaluation — `… SELECT n FROM r LIMIT 5`
+over a recursion with no stop answers five rows there and is 54000 here — and
+a forward reference inside a `WITH RECURSIVE` list (42P01 here). Both are
+refusals, listed in docs/postgres-differences.md. The DAG still cannot run a
+recursive CTE (#1042).
 
 ### 1p. A decorrelated join's key has TWO references, and a block declares its own scope
 
