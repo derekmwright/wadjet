@@ -82,10 +82,31 @@ func TestArcDCARelocatedBodyConditionReadsTheMaskOnEveryDoor(t *testing.T) {
 		{"exists-on-masked-outer",
 			`SELECT o.id AS a FROM e7bal o WHERE EXISTS (SELECT 1 FROM e7emp b JOIN e7other c ON c.id = b.id AND b.id = o.id AND o.bal < 0) ORDER BY a`,
 			[]string{}},
+		// The same positions spelled WITHOUT a qualifier (round 2, B1). The
+		// body's relation has no `bal` / `ssn`, so the name binds to the
+		// enclosing row and is now read as an outer reference in every
+		// position — the WHERE hoist, the ON lift, and the HAVING and the
+		// SELECT list, which decline to the per-row rerun. Each must still
+		// read the MASK.
+		{"in-outer-only-bare-masked-number",
+			`SELECT o.id AS a FROM e7bal o WHERE o.id IN (SELECT t.id FROM e7other t WHERE bal < 0) ORDER BY a`,
+			[]string{}},
+		{"in-on-bare-masked-outer",
+			`SELECT o.id AS a FROM e7bal o WHERE o.id IN (SELECT b.id FROM e7emp b JOIN e7other c ON c.id = b.id AND bal < b.acct) ORDER BY a`,
+			[]string{}},
+		{"exists-having-bare-mask-value",
+			`SELECT o.id AS a FROM e7emp o WHERE EXISTS (SELECT 1 FROM e7other t WHERE t.id = o.id GROUP BY t.id HAVING ssn = '***') ORDER BY a`,
+			[]string{"a=1", "a=2", "a=3"}},
+		{"in-select-bare-mask-value",
+			`SELECT o.id AS a FROM e7emp o WHERE '***' IN (SELECT ssn FROM e7other t WHERE t.id = o.id) ORDER BY a`,
+			[]string{"a=1", "a=2", "a=3"}},
 		// A DENIED column named from inside a body is not made readable by
 		// being relocated: every door refuses.
 		{"in-outer-only-denied-column",
 			`SELECT o.id AS a FROM e7emp o WHERE o.id IN (SELECT t.id FROM e7other t WHERE o.salary > 0) ORDER BY a`,
+			nil},
+		{"in-outer-only-bare-denied-column",
+			`SELECT o.id AS a FROM e7emp o WHERE o.id IN (SELECT t.id FROM e7other t WHERE salary > 0) ORDER BY a`,
 			nil},
 	}
 

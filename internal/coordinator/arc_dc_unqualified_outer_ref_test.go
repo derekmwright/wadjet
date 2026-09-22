@@ -1,0 +1,473 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package coordinator
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+)
+
+// AN UNQUALIFIED NAME THE BODY CANNOT SUPPLY IS AN OUTER REFERENCE, IN EVERY
+// POSITION OF THE BODY (arc DC review round 1, B1 and N1).
+//
+// PostgreSQL resolves a column name innermost-first: `total` inside a body
+// over dc_in, which has no `total`, binds to the enclosing dc_out row. The
+// decorrelations read an outer reference by its QUALIFIER only, because the
+// logical classifier had no catalog for the body's relations and TPC-H Q02
+// writes every correlated key unqualified with both names in the enclosing
+// map. So an unqualified outer reference was invisible to the body walker: in
+// a JOIN's ON it became a join key no relation publishes (zero rows), in a
+// HAVING it was dropped by the aggregate rewrite (every row), in the SELECT
+// list it became a key the build side does not have (zero rows), and only in
+// the WHERE did it fail loudly.
+//
+// bodyOuterColumns now asks the catalog — through a throwaway Scan, never the
+// plan being built — what the body's own FROM clause publishes, and the part
+// of the enclosing column map the body cannot supply is read as outer by the
+// body walker and by provablyOuterOnly. A name the body DOES publish stays the
+// body's (the shadow* cells), and a body whose namespace cannot be named
+// completely keeps the qualifier-only reading.
+//
+// Cells: {IN, NOT IN, EXISTS, NOT EXISTS, scalar in WHERE, scalar in SELECT} ×
+// every position the name can sit in, plus the reviewer's statements (A09 is
+// IN/selfJoinBareCorr, B04 IN/onCorrEq, B06 IN/onCorrNe, B08 EXISTS/havingAgg,
+// B10 EXISTS/havingOnly, B14 IN/selectBare, B17 IN/twoPlaces). Wants are live
+// PostgreSQL 17.11 over the fixture this package writes. At 16b924d1, 51 of
+// the first 115 statements disagreed with PostgreSQL (27 a wrong row set, 24 a
+// refusal); four of those are pins, so 47 of them fail there — and so do five
+// of the six table-function cells (TF/IN/onQual is #1232 itself).
+func TestArcDCAnUnqualifiedOuterReferenceBindsWhereTheBodyCannotSupplyIt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: five arms")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	t.Cleanup(cancel)
+	arms := dcArms(t, ctx)
+
+	// The PINS — boundaries, each with PostgreSQL's row set beside it. A pin
+	// that starts agreeing FAILS: assert the row set and delete the pin.
+	var (
+		// A derived table in the body's FROM whose own body names the
+		// enclosing row: the standing 0A000 class (#614/#1045, ADR-0021
+		// §1p). Spelled unqualified, the derived table's block reports the
+		// name it cannot find; spelled qualified, it names the class.
+		dcUnqualifiedDerivedRefusal = []string{`unknown column "total"`}
+		// A scalar subquery whose body holds a nested EXISTS naming the
+		// enclosing row two levels out. The per-row rerun cannot substitute
+		// it and the stage DAG does not run a correlated nested EXISTS;
+		// qualified and unqualified refuse alike, on every arm, at 16b924d1
+		// too.
+		// An unqualified enclosing name in the WHERE of a body whose namespace
+		// is UNKNOWN (a table function in its FROM): it goes to the build
+		// side, where no relation publishes it, and fails by name. Loud, and
+		// the qualified spelling answers (TF/IN/onQual is its sibling).
+		dcUnknownNamespaceWhereRefusal = []string{
+			"does not exist in the input schema",
+			"NO stage in the plan computes",
+		}
+		dcScalarNestedTwoLevelRefusal = []string{
+			"does not exist in the input schema",
+			"re-run cannot substitute",
+			"correlated subquery requires single-process execution",
+		}
+	)
+
+	cases := []struct {
+		name, sql, want string
+		pin             []string
+	}{
+		{name: "IN/whereOuterOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b WHERE total > 100) ORDER BY a",
+			want: "rows=1 2"},
+		{name: "NOTIN/whereOuterOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id NOT IN (SELECT b.k FROM dc_in b WHERE total > 100) ORDER BY a",
+			want: "rows=3 1 | 3 | 9"},
+		{name: "EXISTS/whereOuterOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM dc_in b WHERE total > 100) ORDER BY a",
+			want: "rows=2 2 | NULL"},
+		{name: "NOTEXISTS/whereOuterOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE NOT EXISTS (SELECT 1 FROM dc_in b WHERE total > 100) ORDER BY a",
+			want: "rows=3 1 | 3 | 9"},
+		{name: "SCALARWHERE/whereOuterOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id = (SELECT MAX(b.k) FROM dc_in b WHERE total > 100) ORDER BY a",
+			want: "rows=0 "},
+		{name: "SCALARSELECT/whereOuterOnly",
+			sql:  "SELECT o.id AS a, (SELECT MAX(b.k) FROM dc_in b WHERE total > 100) AS v FROM dc_out o ORDER BY a, v",
+			want: "rows=5 1,NULL | 2,5 | 3,NULL | 9,NULL | NULL,5"},
+		{name: "IN/whereCorrEq",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b WHERE b.k = id) ORDER BY a",
+			want: "rows=2 1 | 2"},
+		{name: "NOTIN/whereCorrEq",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id NOT IN (SELECT b.k FROM dc_in b WHERE b.k = id) ORDER BY a",
+			want: "rows=3 3 | 9 | NULL"},
+		{name: "EXISTS/whereCorrEq",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM dc_in b WHERE b.k = id) ORDER BY a",
+			want: "rows=2 1 | 2"},
+		{name: "NOTEXISTS/whereCorrEq",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE NOT EXISTS (SELECT 1 FROM dc_in b WHERE b.k = id) ORDER BY a",
+			want: "rows=3 3 | 9 | NULL"},
+		{name: "SCALARWHERE/whereCorrEq",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id = (SELECT MAX(b.k) FROM dc_in b WHERE b.k = id) ORDER BY a",
+			want: "rows=2 1 | 2"},
+		{name: "SCALARSELECT/whereCorrEq",
+			sql:  "SELECT o.id AS a, (SELECT MAX(b.k) FROM dc_in b WHERE b.k = id) AS v FROM dc_out o ORDER BY a, v",
+			want: "rows=5 1,1 | 2,2 | 3,NULL | 9,NULL | NULL,NULL"},
+		{name: "IN/whereCorrNe",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b WHERE b.amt > total) ORDER BY a",
+			want: "rows=2 1 | 2"},
+		{name: "NOTIN/whereCorrNe",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id NOT IN (SELECT b.k FROM dc_in b WHERE b.amt > total) ORDER BY a",
+			want: "rows=3 3 | 9 | NULL"},
+		{name: "EXISTS/whereCorrNe",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM dc_in b WHERE b.amt > total) ORDER BY a",
+			want: "rows=4 1 | 2 | 3 | 9"},
+		{name: "NOTEXISTS/whereCorrNe",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE NOT EXISTS (SELECT 1 FROM dc_in b WHERE b.amt > total) ORDER BY a",
+			want: "rows=1 NULL"},
+		{name: "SCALARWHERE/whereCorrNe",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id = (SELECT MAX(b.k) FROM dc_in b WHERE b.amt > total) ORDER BY a",
+			want: "rows=1 2"},
+		{name: "SCALARSELECT/whereCorrNe",
+			sql:  "SELECT o.id AS a, (SELECT MAX(b.k) FROM dc_in b WHERE b.amt > total) AS v FROM dc_out o ORDER BY a, v",
+			want: "rows=5 1,2 | 2,2 | 3,2 | 9,5 | NULL,NULL"},
+		{name: "IN/whereBoth",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b WHERE b.k = o.id AND total > 100) ORDER BY a",
+			want: "rows=1 2"},
+		{name: "NOTIN/whereBoth",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id NOT IN (SELECT b.k FROM dc_in b WHERE b.k = o.id AND total > 100) ORDER BY a",
+			want: "rows=4 1 | 3 | 9 | NULL"},
+		{name: "EXISTS/whereBoth",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM dc_in b WHERE b.k = o.id AND total > 100) ORDER BY a",
+			want: "rows=1 2"},
+		{name: "NOTEXISTS/whereBoth",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE NOT EXISTS (SELECT 1 FROM dc_in b WHERE b.k = o.id AND total > 100) ORDER BY a",
+			want: "rows=4 1 | 3 | 9 | NULL"},
+		{name: "SCALARWHERE/whereBoth",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id = (SELECT MAX(b.k) FROM dc_in b WHERE b.k = o.id AND total > 100) ORDER BY a",
+			want: "rows=1 2"},
+		{name: "SCALARSELECT/whereBoth",
+			sql:  "SELECT o.id AS a, (SELECT MAX(b.k) FROM dc_in b WHERE b.k = o.id AND total > 100) AS v FROM dc_out o ORDER BY a, v",
+			want: "rows=5 1,NULL | 2,2 | 3,NULL | 9,NULL | NULL,NULL"},
+		{name: "IN/whereDistinct",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b WHERE b.k = o.id AND total IS DISTINCT FROM 200) ORDER BY a",
+			want: "rows=1 1"},
+		{name: "NOTIN/whereDistinct",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id NOT IN (SELECT b.k FROM dc_in b WHERE b.k = o.id AND total IS DISTINCT FROM 200) ORDER BY a",
+			want: "rows=4 2 | 3 | 9 | NULL"},
+		{name: "EXISTS/whereDistinct",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM dc_in b WHERE b.k = o.id AND total IS DISTINCT FROM 200) ORDER BY a",
+			want: "rows=1 1"},
+		{name: "NOTEXISTS/whereDistinct",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE NOT EXISTS (SELECT 1 FROM dc_in b WHERE b.k = o.id AND total IS DISTINCT FROM 200) ORDER BY a",
+			want: "rows=4 2 | 3 | 9 | NULL"},
+		{name: "SCALARWHERE/whereDistinct",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id = (SELECT MAX(b.k) FROM dc_in b WHERE b.k = o.id AND total IS DISTINCT FROM 200) ORDER BY a",
+			want: "rows=1 1"},
+		{name: "SCALARSELECT/whereDistinct",
+			sql:  "SELECT o.id AS a, (SELECT MAX(b.k) FROM dc_in b WHERE b.k = o.id AND total IS DISTINCT FROM 200) AS v FROM dc_out o ORDER BY a, v",
+			want: "rows=5 1,1 | 2,NULL | 3,NULL | 9,NULL | NULL,NULL"},
+		{name: "IN/onCorrEq",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b JOIN dc_nul n ON n.k = b.k AND b.k = id) ORDER BY a",
+			want: "rows=1 1"},
+		{name: "NOTIN/onCorrEq",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id NOT IN (SELECT b.k FROM dc_in b JOIN dc_nul n ON n.k = b.k AND b.k = id) ORDER BY a",
+			want: "rows=4 2 | 3 | 9 | NULL"},
+		{name: "EXISTS/onCorrEq",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM dc_in b JOIN dc_nul n ON n.k = b.k AND b.k = id) ORDER BY a",
+			want: "rows=1 1"},
+		{name: "NOTEXISTS/onCorrEq",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE NOT EXISTS (SELECT 1 FROM dc_in b JOIN dc_nul n ON n.k = b.k AND b.k = id) ORDER BY a",
+			want: "rows=4 2 | 3 | 9 | NULL"},
+		{name: "SCALARWHERE/onCorrEq",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id = (SELECT MAX(b.k) FROM dc_in b JOIN dc_nul n ON n.k = b.k AND b.k = id) ORDER BY a",
+			want: "rows=1 1"},
+		{name: "SCALARSELECT/onCorrEq",
+			sql:  "SELECT o.id AS a, (SELECT MAX(b.k) FROM dc_in b JOIN dc_nul n ON n.k = b.k AND b.k = id) AS v FROM dc_out o ORDER BY a, v",
+			want: "rows=5 1,1 | 2,NULL | 3,NULL | 9,NULL | NULL,NULL"},
+		{name: "IN/onCorrNe",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b JOIN dc_nul n ON n.k = b.k AND b.amt > total) ORDER BY a",
+			want: "rows=1 1"},
+		{name: "NOTIN/onCorrNe",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id NOT IN (SELECT b.k FROM dc_in b JOIN dc_nul n ON n.k = b.k AND b.amt > total) ORDER BY a",
+			want: "rows=4 2 | 3 | 9 | NULL"},
+		{name: "EXISTS/onCorrNe",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM dc_in b JOIN dc_nul n ON n.k = b.k AND b.amt > total) ORDER BY a",
+			want: "rows=3 1 | 3 | 9"},
+		{name: "NOTEXISTS/onCorrNe",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE NOT EXISTS (SELECT 1 FROM dc_in b JOIN dc_nul n ON n.k = b.k AND b.amt > total) ORDER BY a",
+			want: "rows=2 2 | NULL"},
+		{name: "SCALARWHERE/onCorrNe",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id = (SELECT MAX(b.k) FROM dc_in b JOIN dc_nul n ON n.k = b.k AND b.amt > total) ORDER BY a",
+			want: "rows=1 1"},
+		{name: "SCALARSELECT/onCorrNe",
+			sql:  "SELECT o.id AS a, (SELECT MAX(b.k) FROM dc_in b JOIN dc_nul n ON n.k = b.k AND b.amt > total) AS v FROM dc_out o ORDER BY a, v",
+			want: "rows=5 1,1 | 2,NULL | 3,1 | 9,1 | NULL,NULL"},
+		{name: "IN/onOuterOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b JOIN dc_nul n ON n.k = b.k AND total > 100) ORDER BY a",
+			want: "rows=0 "},
+		{name: "NOTIN/onOuterOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id NOT IN (SELECT b.k FROM dc_in b JOIN dc_nul n ON n.k = b.k AND total > 100) ORDER BY a",
+			want: "rows=4 1 | 2 | 3 | 9"},
+		{name: "EXISTS/onOuterOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM dc_in b JOIN dc_nul n ON n.k = b.k AND total > 100) ORDER BY a",
+			want: "rows=2 2 | NULL"},
+		{name: "NOTEXISTS/onOuterOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE NOT EXISTS (SELECT 1 FROM dc_in b JOIN dc_nul n ON n.k = b.k AND total > 100) ORDER BY a",
+			want: "rows=3 1 | 3 | 9"},
+		{name: "SCALARWHERE/onOuterOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id = (SELECT MAX(b.k) FROM dc_in b JOIN dc_nul n ON n.k = b.k AND total > 100) ORDER BY a",
+			want: "rows=0 "},
+		{name: "SCALARSELECT/onOuterOnly",
+			sql:  "SELECT o.id AS a, (SELECT MAX(b.k) FROM dc_in b JOIN dc_nul n ON n.k = b.k AND total > 100) AS v FROM dc_out o ORDER BY a, v",
+			want: "rows=5 1,NULL | 2,1 | 3,NULL | 9,NULL | NULL,1"},
+		{name: "IN/leftOnOuterOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b LEFT JOIN dc_nul n ON n.k = b.k AND total > 100 WHERE b.k = o.id) ORDER BY a",
+			want: "rows=2 1 | 2"},
+		{name: "NOTIN/leftOnOuterOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id NOT IN (SELECT b.k FROM dc_in b LEFT JOIN dc_nul n ON n.k = b.k AND total > 100 WHERE b.k = o.id) ORDER BY a",
+			want: "rows=3 3 | 9 | NULL"},
+		{name: "EXISTS/leftOnOuterOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM dc_in b LEFT JOIN dc_nul n ON n.k = b.k AND total > 100 WHERE b.k = o.id) ORDER BY a",
+			want: "rows=2 1 | 2"},
+		{name: "NOTEXISTS/leftOnOuterOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE NOT EXISTS (SELECT 1 FROM dc_in b LEFT JOIN dc_nul n ON n.k = b.k AND total > 100 WHERE b.k = o.id) ORDER BY a",
+			want: "rows=3 3 | 9 | NULL"},
+		{name: "SCALARWHERE/leftOnOuterOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id = (SELECT MAX(b.k) FROM dc_in b LEFT JOIN dc_nul n ON n.k = b.k AND total > 100 WHERE b.k = o.id) ORDER BY a",
+			want: "rows=2 1 | 2"},
+		{name: "SCALARSELECT/leftOnOuterOnly",
+			sql:  "SELECT o.id AS a, (SELECT MAX(b.k) FROM dc_in b LEFT JOIN dc_nul n ON n.k = b.k AND total > 100 WHERE b.k = o.id) AS v FROM dc_out o ORDER BY a, v",
+			want: "rows=5 1,1 | 2,2 | 3,NULL | 9,NULL | NULL,NULL"},
+		{name: "IN/leftOnCorr",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b LEFT JOIN dc_nul n ON n.k = b.k AND n.amt < total WHERE b.k = o.id) ORDER BY a",
+			want: "rows=2 1 | 2"},
+		{name: "NOTIN/leftOnCorr",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id NOT IN (SELECT b.k FROM dc_in b LEFT JOIN dc_nul n ON n.k = b.k AND n.amt < total WHERE b.k = o.id) ORDER BY a",
+			want: "rows=3 3 | 9 | NULL"},
+		{name: "EXISTS/leftOnCorr",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM dc_in b LEFT JOIN dc_nul n ON n.k = b.k AND n.amt < total WHERE b.k = o.id) ORDER BY a",
+			want: "rows=2 1 | 2"},
+		{name: "NOTEXISTS/leftOnCorr",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE NOT EXISTS (SELECT 1 FROM dc_in b LEFT JOIN dc_nul n ON n.k = b.k AND n.amt < total WHERE b.k = o.id) ORDER BY a",
+			want: "rows=3 3 | 9 | NULL"},
+		{name: "SCALARWHERE/leftOnCorr",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id = (SELECT MAX(b.k) FROM dc_in b LEFT JOIN dc_nul n ON n.k = b.k AND n.amt < total WHERE b.k = o.id) ORDER BY a",
+			want: "rows=2 1 | 2"},
+		{name: "SCALARSELECT/leftOnCorr",
+			sql:  "SELECT o.id AS a, (SELECT MAX(b.k) FROM dc_in b LEFT JOIN dc_nul n ON n.k = b.k AND n.amt < total WHERE b.k = o.id) AS v FROM dc_out o ORDER BY a, v",
+			want: "rows=5 1,1 | 2,2 | 3,NULL | 9,NULL | NULL,NULL"},
+		{name: "IN/rightOnOuterOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b RIGHT JOIN dc_side c ON c.j = b.k AND total > 100 WHERE b.tag = o.grp) ORDER BY a",
+			want: "rows=0 "},
+		{name: "NOTIN/rightOnOuterOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id NOT IN (SELECT b.k FROM dc_in b RIGHT JOIN dc_side c ON c.j = b.k AND total > 100 WHERE b.tag = o.grp) ORDER BY a",
+			want: "rows=4 1 | 2 | 3 | 9"},
+		{name: "EXISTS/rightOnOuterOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM dc_in b RIGHT JOIN dc_side c ON c.j = b.k AND total > 100 WHERE b.tag = o.grp) ORDER BY a",
+			want: "rows=2 2 | NULL"},
+		{name: "NOTEXISTS/rightOnOuterOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE NOT EXISTS (SELECT 1 FROM dc_in b RIGHT JOIN dc_side c ON c.j = b.k AND total > 100 WHERE b.tag = o.grp) ORDER BY a",
+			want: "rows=3 1 | 3 | 9"},
+		{name: "SCALARWHERE/rightOnOuterOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id = (SELECT MAX(b.k) FROM dc_in b RIGHT JOIN dc_side c ON c.j = b.k AND total > 100 WHERE b.tag = o.grp) ORDER BY a",
+			want: "rows=0 "},
+		{name: "SCALARSELECT/rightOnOuterOnly",
+			sql:  "SELECT o.id AS a, (SELECT MAX(b.k) FROM dc_in b RIGHT JOIN dc_side c ON c.j = b.k AND total > 100 WHERE b.tag = o.grp) AS v FROM dc_out o ORDER BY a, v",
+			want: "rows=5 1,NULL | 2,1 | 3,NULL | 9,NULL | NULL,2"},
+		{name: "IN/havingAgg",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b WHERE b.tag = o.grp GROUP BY b.k HAVING SUM(b.amt) > total) ORDER BY a",
+			want: "rows=1 1"},
+		{name: "NOTIN/havingAgg",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id NOT IN (SELECT b.k FROM dc_in b WHERE b.tag = o.grp GROUP BY b.k HAVING SUM(b.amt) > total) ORDER BY a",
+			want: "rows=4 2 | 3 | 9 | NULL"},
+		{name: "EXISTS/havingAgg",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM dc_in b WHERE b.tag = o.grp GROUP BY b.k HAVING SUM(b.amt) > total) ORDER BY a",
+			want: "rows=3 1 | 3 | 9"},
+		{name: "NOTEXISTS/havingAgg",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE NOT EXISTS (SELECT 1 FROM dc_in b WHERE b.tag = o.grp GROUP BY b.k HAVING SUM(b.amt) > total) ORDER BY a",
+			want: "rows=2 2 | NULL"},
+		{name: "IN/havingOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b WHERE b.tag = o.grp GROUP BY b.k HAVING total > 100) ORDER BY a",
+			want: "rows=0 "},
+		{name: "NOTIN/havingOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id NOT IN (SELECT b.k FROM dc_in b WHERE b.tag = o.grp GROUP BY b.k HAVING total > 100) ORDER BY a",
+			want: "rows=4 1 | 2 | 3 | 9"},
+		{name: "EXISTS/havingOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM dc_in b WHERE b.tag = o.grp GROUP BY b.k HAVING total > 100) ORDER BY a",
+			want: "rows=2 2 | NULL"},
+		{name: "NOTEXISTS/havingOnly",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE NOT EXISTS (SELECT 1 FROM dc_in b WHERE b.tag = o.grp GROUP BY b.k HAVING total > 100) ORDER BY a",
+			want: "rows=3 1 | 3 | 9"},
+		{name: "IN/groupBy",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b WHERE b.tag = o.grp GROUP BY b.k, total) ORDER BY a",
+			want: "rows=1 1"},
+		{name: "NOTIN/groupBy",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id NOT IN (SELECT b.k FROM dc_in b WHERE b.tag = o.grp GROUP BY b.k, total) ORDER BY a",
+			want: "rows=3 2 | 3 | 9"},
+		{name: "EXISTS/groupBy",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM dc_in b WHERE b.tag = o.grp GROUP BY b.k, total) ORDER BY a",
+			want: "rows=5 1 | 2 | 3 | 9 | NULL"},
+		{name: "NOTEXISTS/groupBy",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE NOT EXISTS (SELECT 1 FROM dc_in b WHERE b.tag = o.grp GROUP BY b.k, total) ORDER BY a",
+			want: "rows=0 "},
+		{name: "IN/orderLimit",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b WHERE b.tag = o.grp ORDER BY ABS(b.amt - total), b.k LIMIT 1) ORDER BY a",
+			want: "rows=1 1"},
+		{name: "NOTIN/orderLimit",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id NOT IN (SELECT b.k FROM dc_in b WHERE b.tag = o.grp ORDER BY ABS(b.amt - total), b.k LIMIT 1) ORDER BY a",
+			want: "rows=3 2 | 3 | 9"},
+		{name: "EXISTS/orderLimit",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM dc_in b WHERE b.tag = o.grp ORDER BY ABS(b.amt - total), b.k LIMIT 1) ORDER BY a",
+			want: "rows=5 1 | 2 | 3 | 9 | NULL"},
+		{name: "NOTEXISTS/orderLimit",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE NOT EXISTS (SELECT 1 FROM dc_in b WHERE b.tag = o.grp ORDER BY ABS(b.amt - total), b.k LIMIT 1) ORDER BY a",
+			want: "rows=0 "},
+		{name: "IN/shadowInner",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.j FROM dc_side b WHERE id > 7) ORDER BY a",
+			want: "rows=2 2 | 9"},
+		{name: "NOTIN/shadowInner",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id NOT IN (SELECT b.j FROM dc_side b WHERE id > 7) ORDER BY a",
+			want: "rows=2 1 | 3"},
+		{name: "EXISTS/shadowInner",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM dc_side b WHERE id > 7) ORDER BY a",
+			want: "rows=5 1 | 2 | 3 | 9 | NULL"},
+		{name: "NOTEXISTS/shadowInner",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE NOT EXISTS (SELECT 1 FROM dc_side b WHERE id > 7) ORDER BY a",
+			want: "rows=0 "},
+		{name: "SCALARWHERE/shadowInner",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id = (SELECT MAX(b.j) FROM dc_side b WHERE id > 7) ORDER BY a",
+			want: "rows=1 9"},
+		{name: "SCALARSELECT/shadowInner",
+			sql:  "SELECT o.id AS a, (SELECT MAX(b.j) FROM dc_side b WHERE id > 7) AS v FROM dc_out o ORDER BY a, v",
+			want: "rows=5 1,9 | 2,9 | 3,9 | 9,9 | NULL,9"},
+		{name: "IN/shadowOnSide",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b JOIN dc_side c ON c.j = b.k AND b.k = id) ORDER BY a",
+			want: "rows=0 "},
+		{name: "NOTIN/shadowOnSide",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id NOT IN (SELECT b.k FROM dc_in b JOIN dc_side c ON c.j = b.k AND b.k = id) ORDER BY a",
+			want: "rows=5 1 | 2 | 3 | 9 | NULL"},
+		{name: "EXISTS/shadowOnSide",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM dc_in b JOIN dc_side c ON c.j = b.k AND b.k = id) ORDER BY a",
+			want: "rows=0 "},
+		{name: "NOTEXISTS/shadowOnSide",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE NOT EXISTS (SELECT 1 FROM dc_in b JOIN dc_side c ON c.j = b.k AND b.k = id) ORDER BY a",
+			want: "rows=5 1 | 2 | 3 | 9 | NULL"},
+		{name: "SCALARWHERE/shadowOnSide",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id = (SELECT MAX(b.k) FROM dc_in b JOIN dc_side c ON c.j = b.k AND b.k = id) ORDER BY a",
+			want: "rows=0 "},
+		{name: "SCALARSELECT/shadowOnSide",
+			sql:  "SELECT o.id AS a, (SELECT MAX(b.k) FROM dc_in b JOIN dc_side c ON c.j = b.k AND b.k = id) AS v FROM dc_out o ORDER BY a, v",
+			want: "rows=5 1,NULL | 2,NULL | 3,NULL | 9,NULL | NULL,NULL"},
+		{name: "IN/twoPlaces",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b JOIN dc_nul n ON n.k = b.k AND b.amt > total WHERE b.k = id) ORDER BY a",
+			want: "rows=1 1"},
+		{name: "NOTIN/twoPlaces",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id NOT IN (SELECT b.k FROM dc_in b JOIN dc_nul n ON n.k = b.k AND b.amt > total WHERE b.k = id) ORDER BY a",
+			want: "rows=4 2 | 3 | 9 | NULL"},
+		{name: "EXISTS/twoPlaces",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM dc_in b JOIN dc_nul n ON n.k = b.k AND b.amt > total WHERE b.k = id) ORDER BY a",
+			want: "rows=1 1"},
+		{name: "NOTEXISTS/twoPlaces",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE NOT EXISTS (SELECT 1 FROM dc_in b JOIN dc_nul n ON n.k = b.k AND b.amt > total WHERE b.k = id) ORDER BY a",
+			want: "rows=4 2 | 3 | 9 | NULL"},
+		{name: "SCALARWHERE/twoPlaces",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id = (SELECT MAX(b.k) FROM dc_in b JOIN dc_nul n ON n.k = b.k AND b.amt > total WHERE b.k = id) ORDER BY a",
+			want: "rows=1 1"},
+		{name: "SCALARSELECT/twoPlaces",
+			sql:  "SELECT o.id AS a, (SELECT MAX(b.k) FROM dc_in b JOIN dc_nul n ON n.k = b.k AND b.amt > total WHERE b.k = id) AS v FROM dc_out o ORDER BY a, v",
+			want: "rows=5 1,1 | 2,NULL | 3,NULL | 9,NULL | NULL,NULL"},
+		{name: "IN/nestedExists",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b WHERE b.k = o.id AND EXISTS (SELECT 1 FROM dc_nul n WHERE n.k = b.k AND total > 100)) ORDER BY a",
+			want: "rows=0 "},
+		{name: "NOTIN/nestedExists",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id NOT IN (SELECT b.k FROM dc_in b WHERE b.k = o.id AND EXISTS (SELECT 1 FROM dc_nul n WHERE n.k = b.k AND total > 100)) ORDER BY a",
+			want: "rows=5 1 | 2 | 3 | 9 | NULL"},
+		{name: "EXISTS/nestedExists",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM dc_in b WHERE b.k = o.id AND EXISTS (SELECT 1 FROM dc_nul n WHERE n.k = b.k AND total > 100)) ORDER BY a",
+			want: "rows=0 "},
+		{name: "NOTEXISTS/nestedExists",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE NOT EXISTS (SELECT 1 FROM dc_in b WHERE b.k = o.id AND EXISTS (SELECT 1 FROM dc_nul n WHERE n.k = b.k AND total > 100)) ORDER BY a",
+			want: "rows=5 1 | 2 | 3 | 9 | NULL"},
+		{name: "SCALARWHERE/nestedExists",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id = (SELECT MAX(b.k) FROM dc_in b WHERE b.k = o.id AND EXISTS (SELECT 1 FROM dc_nul n WHERE n.k = b.k AND total > 100)) ORDER BY a",
+			want: "rows=0 ", pin: dcScalarNestedTwoLevelRefusal},
+		{name: "SCALARSELECT/nestedExists",
+			sql:  "SELECT o.id AS a, (SELECT MAX(b.k) FROM dc_in b WHERE b.k = o.id AND EXISTS (SELECT 1 FROM dc_nul n WHERE n.k = b.k AND total > 100)) AS v FROM dc_out o ORDER BY a, v",
+			want: "rows=5 1,NULL | 2,NULL | 3,NULL | 9,NULL | NULL,NULL"},
+		{name: "IN/selectBare",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.total IN (SELECT total FROM dc_in b WHERE b.k = o.id) ORDER BY a",
+			want: "rows=2 1 | 2"},
+		{name: "NOTIN/selectBare",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.total NOT IN (SELECT total FROM dc_in b WHERE b.k = o.id) ORDER BY a",
+			want: "rows=3 3 | 9 | NULL"},
+		{name: "SCALARWHERE/selectBareExpr",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.total < (SELECT MAX(b.amt) + total FROM dc_in b WHERE b.k = o.id) ORDER BY a",
+			want: "rows=2 1 | 2"},
+		{name: "SCALARSELECT/selectBareExpr",
+			sql:  "SELECT o.id AS a, (SELECT MAX(b.amt) + total FROM dc_in b WHERE b.k = o.id) AS v FROM dc_out o ORDER BY a, v",
+			want: "rows=5 1,250 | 2,450 | 3,NULL | 9,NULL | NULL,NULL"},
+		{name: "IN/selfJoinBareCorr",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b JOIN dc_in c ON c.k = b.k AND b.k = id) ORDER BY a",
+			want: "rows=2 1 | 2"},
+		{name: "EXISTS/derivedBare",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM (SELECT d.k FROM dc_in d WHERE d.amt > total) x WHERE x.k = o.id) ORDER BY a",
+			want: "rows=2 1 | 2", pin: dcUnqualifiedDerivedRefusal},
+		{name: "EXISTS/derivedQual",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM (SELECT d.k FROM dc_in d WHERE d.amt > o.total) x WHERE x.k = o.id) ORDER BY a",
+			want: "rows=2 1 | 2", pin: []string{dcCorrelatedDerivedRefusal}},
+		{name: "SCALARWHERE/nestedExistsQual",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id = (SELECT MAX(b.k) FROM dc_in b WHERE b.k = o.id AND EXISTS (SELECT 1 FROM dc_nul n WHERE n.k = b.k AND o.total > 100)) ORDER BY a",
+			want: "rows=0 ", pin: dcScalarNestedTwoLevelRefusal},
+		{name: "SCALARSELECT/nestedExistsQual",
+			sql:  "SELECT o.id AS a, (SELECT MAX(b.k) FROM dc_in b WHERE b.k = o.id AND EXISTS (SELECT 1 FROM dc_nul n WHERE n.k = b.k AND o.total > 100)) AS v FROM dc_out o ORDER BY a, v",
+			want: "rows=5 1,NULL | 2,NULL | 3,NULL | 9,NULL | NULL,NULL"},
+		// A TABLE FUNCTION in the body: its columns are its call's, and this
+		// pass does not re-read an input to learn them, so the namespace is
+		// UNKNOWN and an unqualified enclosing name in a clause the rewrite
+		// cannot classify declines to the per-row rerun (the undecided half of
+		// bodyOuterColumns). At 16b924d1 five of the six were wrong.
+		{name: "TF/IN/onBare",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b JOIN generate_series(1, 9) g(x) ON g.x = b.k AND b.amt > total) ORDER BY a",
+			want: "rows=2 1 | 2"},
+		{name: "TF/IN/onQual",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b JOIN generate_series(1, 9) g(x) ON g.x = b.k AND b.amt > o.total) ORDER BY a",
+			want: "rows=2 1 | 2"},
+		{name: "TF/EXISTS/havingBare",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE EXISTS (SELECT 1 FROM dc_in b JOIN generate_series(1, 9) g(x) ON g.x = b.k WHERE b.tag = o.grp GROUP BY b.k HAVING SUM(b.amt) > total) ORDER BY a",
+			want: "rows=3 1 | 3 | 9"},
+		{name: "TF/IN/whereBare",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b JOIN generate_series(1, 9) g(x) ON g.x = b.k WHERE total > 100) ORDER BY a",
+			want: "rows=1 2", pin: dcUnknownNamespaceWhereRefusal},
+		{name: "TF/IN/selectBare",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.total IN (SELECT total FROM dc_in b JOIN generate_series(1, 9) g(x) ON g.x = b.k WHERE b.k = o.id) ORDER BY a",
+			want: "rows=2 1 | 2"},
+		{name: "TF/IN/onCorrBare",
+			sql:  "SELECT o.id AS a FROM dc_out o WHERE o.id IN (SELECT b.k FROM dc_in b JOIN generate_series(1, 9) g(x) ON g.x = b.k AND b.k = id) ORDER BY a",
+			want: "rows=2 1 | 2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				got := arm.run(tc.sql)
+				if tc.pin != nil {
+					refused := false
+					for _, p := range tc.pin {
+						refused = refused || strings.Contains(got, p)
+					}
+					if !refused {
+						t.Errorf("%s\n  arm  %s\n  got  %s\n  the pinned refusal is gone: "+
+							"assert PostgreSQL's row set %s and delete this cell's pin",
+							tc.sql, arm.name, got, tc.want)
+					}
+					continue
+				}
+				if got != tc.want {
+					t.Errorf("%s\n  arm  %s\n  got  %s\n  want %s (PostgreSQL 17.11)",
+						tc.sql, arm.name, got, tc.want)
+				}
+			}
+		})
+	}
+}
