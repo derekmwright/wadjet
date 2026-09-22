@@ -273,6 +273,13 @@ objects exceed 8 MiB, in which case the sample is the objects that fit) — not
 the whole batch. The column list and the column types are whatever those rows
 say, for the whole file. Inside the sample the types widen as they always
 have (an integer column that meets `0.75` there becomes `double precision`).
+A number is recognised with the same PostgreSQL input functions that read
+the rows past the sample (`int8in`, then `float8in`), so a spelling the
+sample types is read the same way in every later row: in `read_csv`, `' 5'`,
+`0x1F`, `0o17`, `0b101` and `1_000` are `bigint`; `' 1.5'` is
+`double precision`; `1e-400`, `1e400` and `1_000.5`, which neither type
+holds, are `text` (in `read_json`, a number no `double precision` holds is
+`text`). Only `true`/`false` in their three spellings infer `boolean`.
 PAST the sample:
 
 - a non-NULL value that does not fit the column's type refuses the statement
