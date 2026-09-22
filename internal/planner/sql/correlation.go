@@ -80,8 +80,11 @@ func (s *outerRefScope) nest(info *SelectInfo) *outerRefScope {
 	for t := range collectInnerTables(info) {
 		inner[t] = true
 	}
+	// The nested block's OWN WITH items are relations of its FROM, the same
+	// as at the top (see blockScopeResolver).
+	resolve := blockScopeResolver(info, s.resolve)
 	var cols map[string]bool
-	if nestedCols := collectInnerColumns(info, s.resolve, nil); nestedCols != nil || s.innerCols != nil {
+	if nestedCols := collectInnerColumns(info, resolve, nil); nestedCols != nil || s.innerCols != nil {
 		cols = make(map[string]bool, len(s.innerCols)+len(nestedCols))
 		for c := range s.innerCols {
 			cols[c] = true
@@ -205,6 +208,21 @@ func dropFieldPathRefs(refs []OuterRef, info *SelectInfo, resolve TableColumns) 
 	return out
 }
 
+// blockScopeResolver extends resolve with the block's OWN WITH items, which
+// are relations of its FROM and scope innermost-first over the caller's. A
+// caller hands this package the ENCLOSING scope (its WITH items over the
+// catalog); without the block's own, `WITH d AS (SELECT k, amt AS total FROM
+// dc_in) SELECT … FROM d b … total > 100` did not see `total` as the body's,
+// classified it as the enclosing row's, and the per-row re-run substituted the
+// enclosing value for it — `2` where PostgreSQL answers `1 | 2` (arc DC round
+// 4; the Codex review's N4 / round-2 N4).
+func blockScopeResolver(info *SelectInfo, resolve TableColumns) TableColumns {
+	if info == nil || len(info.CTEs) == 0 {
+		return resolve
+	}
+	return CTEColumns(info.CTEs, resolve)
+}
+
 func findCorrelatedRefs(subquerySQL string, outerTables map[string]bool, outerCols map[string]string, resolve TableColumns) ([]OuterRef, error) {
 	parsed, err := Parse(subquerySQL)
 	if err != nil {
@@ -215,6 +233,7 @@ func findCorrelatedRefs(subquerySQL string, outerTables map[string]bool, outerCo
 		return nil, err
 	}
 
+	resolve = blockScopeResolver(info, resolve)
 	scope := &outerRefScope{
 		outerTables: outerTables,
 		innerTables: collectInnerTables(info),
