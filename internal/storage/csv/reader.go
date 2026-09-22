@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -26,9 +27,21 @@ const defaultBatchSize = 2048
 // a 22P02 (see buildBatch).
 const sampleSize = 100
 
-// errNotType is writeCSVValue's answer for a field that does not parse as
-// the column's type.
-var errNotType = errors.New("value does not parse as the column's type")
+// errNotType and errOutOfRange are writeCSVValue's answers for a field that
+// does not parse as the column's type, and for a number that parses but lies
+// outside it — PostgreSQL's 22P02 and 22003 for the same text.
+var (
+	errNotType    = errors.New("value does not parse as the column's type")
+	errOutOfRange = errors.New("value is out of range for the column's type")
+)
+
+// Locator is implemented by an input that is several files read as one
+// stream (read_csv over a glob): Segment names the file holding the input
+// offset, where that file starts, and an offset before which every later
+// offset still lies in the same file.
+type Locator interface {
+	Segment(offset int64) (file string, start, next int64)
+}
 
 var (
 	ipv4Re            = regexp.MustCompile(`^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$`)
@@ -63,6 +76,16 @@ type Reader struct {
 	offset   int
 	readRows int         // data rows already built into batches
 	cr       *csv.Reader // streaming csv reader — used for io.Reader path
+
+	// starts are the input offsets of the buffered rows (streaming path).
+	// loc, for a glob, names the file an offset lies in; seg* follow the file
+	// of the current row so a refusal names that file and its own row.
+	starts      []int64
+	loc         Locator
+	segFile     string
+	segStart    int64
+	segNext     int64
+	segRowsSeen int
 }
 
 // NewReader creates a CSV reader from raw bytes with the given config.
@@ -157,8 +180,15 @@ func NewStreamReader(r io.Reader, cfg ReaderConfig) (*Reader, error) {
 		sampleRows = append(sampleRows, row)
 	}
 
+	// Row offsets are kept only for a glob, where they name a row's file.
+	loc, _ := r.(Locator)
+	var starts []int64
+	if loc != nil && !cfg.HasHeader {
+		starts = append(starts, 0)
+	}
 	// Read sample rows for schema inference (up to sampleSize)
 	for len(sampleRows) < sampleSize {
+		start := cr.InputOffset()
 		record, err := cr.Read()
 		if err != nil {
 			break // EOF or error — use what we have
@@ -166,6 +196,9 @@ func NewStreamReader(r io.Reader, cfg ReaderConfig) (*Reader, error) {
 		row := make([]string, len(record))
 		copy(row, record)
 		sampleRows = append(sampleRows, row)
+		if loc != nil {
+			starts = append(starts, start)
+		}
 	}
 
 	if len(sampleRows) == 0 && len(header) > 0 {
@@ -186,7 +219,9 @@ func NewStreamReader(r io.Reader, cfg ReaderConfig) (*Reader, error) {
 		schema: schema,
 		colIdx: makeColIdx(schema),
 		rows:   sampleRows, // buffered sample rows returned first
-		cr:     cr,         // then stream remaining from here
+		starts: starts,
+		cr:     cr, // then stream remaining from here
+		loc:    loc,
 	}, nil
 }
 
@@ -204,49 +239,65 @@ func (r *Reader) Next() (*batch.RecordBatch, error) {
 			end = len(r.rows)
 		}
 		chunk := r.rows[r.offset:end]
+		var starts []int64
+		if r.starts != nil {
+			starts = r.starts[r.offset:end]
+		}
 		r.offset = end
-		return r.buildBatch(chunk)
+		return r.buildBatch(chunk, starts)
 	}
 
 	// If we have a streaming csv.Reader, read the next batch from it
 	if r.cr != nil {
-		chunk, err := r.readStreamBatch()
+		chunk, starts, err := r.readStreamBatch()
 		if err != nil {
 			return nil, err
 		}
 		if len(chunk) == 0 {
 			return nil, nil // EOF
 		}
-		return r.buildBatch(chunk)
+		return r.buildBatch(chunk, starts)
 	}
 
 	return nil, nil
 }
 
 // readStreamBatch reads up to defaultBatchSize rows from the streaming csv.Reader.
-func (r *Reader) readStreamBatch() ([][]string, error) {
+func (r *Reader) readStreamBatch() ([][]string, []int64, error) {
 	var rows [][]string
+	var starts []int64
 	for len(rows) < defaultBatchSize {
+		start := r.cr.InputOffset()
 		record, err := r.cr.Read()
 		if err != nil {
 			if err == io.EOF {
 				break
 			}
-			return nil, fmt.Errorf("reading CSV row: %w", err)
+			return nil, nil, fmt.Errorf("reading CSV row: %w", err)
 		}
 		row := make([]string, len(record))
 		copy(row, record)
 		rows = append(rows, row)
+		if r.loc != nil {
+			starts = append(starts, start)
+		}
 	}
-	return rows, nil
+	return rows, starts, nil
 }
 
 // buildBatch creates a RecordBatch from a slice of string rows.
-func (r *Reader) buildBatch(chunk [][]string) (*batch.RecordBatch, error) {
+//
+// Every vector of the batch is numRows long (NewRecordBatch) and row ranges
+// over the chunk, so no write below indexes past a vector; a field reaches a
+// typed vector only through writeCSVValue's parse.
+func (r *Reader) buildBatch(chunk [][]string, starts []int64) (*batch.RecordBatch, error) {
 	numRows := len(chunk)
 	b := batch.NewRecordBatch(r.schema, numRows)
 
 	for row, fields := range chunk {
+		if r.loc != nil && starts != nil && starts[row] >= r.segNext {
+			r.enterSegment(starts[row], r.readRows+row+1)
+		}
 		for col, sc := range r.schema {
 			if col >= len(fields) {
 				b.Columns[col].Nulls.SetNull(row)
@@ -271,13 +322,11 @@ func (r *Reader) buildBatch(chunk [][]string) (*batch.RecordBatch, error) {
 			// NULL it has always read as (a "true" in a column the sample
 			// widened to bigint); past it the field is refused, as
 			// PostgreSQL's COPY refuses it.
-			if !errors.Is(err, errNotType) {
+			if !errors.Is(err, errNotType) && !errors.Is(err, errOutOfRange) {
 				return nil, err
 			}
-			if fileRow := r.readRows + row + 1; fileRow > sampleSize {
-				return nil, sqlerr.New("22P02",
-					"row %d column %q: value %q (%s) is not of type %s (the column's type was inferred from the file's first %d rows)",
-					fileRow, sc.Name, val, sqlTypeName(detectStringType(val)), sqlTypeName(sc.Type), sampleSize)
+			if inputRow := r.readRows + row + 1; inputRow > sampleSize {
+				return nil, r.refusal(err, inputRow, sc, val)
 			}
 		}
 	}
@@ -285,36 +334,86 @@ func (r *Reader) buildBatch(chunk [][]string) (*batch.RecordBatch, error) {
 	return b, nil
 }
 
+// enterSegment moves the file tracking to the file holding off, the input
+// offset of data row inputRow: a new file's first row makes every earlier
+// row belong to earlier files.
+func (r *Reader) enterSegment(off int64, inputRow int) {
+	file, start, next := r.loc.Segment(off)
+	if file != r.segFile || start != r.segStart {
+		r.segFile, r.segStart = file, start
+		r.segRowsSeen = inputRow - 1
+	}
+	r.segNext = next
+}
+
+// refusal is the error for field val of column sc in data row inputRow past
+// the sample, with PostgreSQL's SQLSTATE for the same text in COPY: 22003 for
+// a number outside the type, 22007 for a timestamp, 22P02 otherwise. Across
+// a glob it names the file and the row within it. The caller (read_csv)
+// prefixes the reader and the input.
+func (r *Reader) refusal(err error, inputRow int, sc parquet.Column, val string) error {
+	where := fmt.Sprintf("row %d column %q", inputRow-r.segRowsSeen, sc.Name)
+	sample := fmt.Sprintf("the file's first %d rows", sampleSize)
+	if r.segFile != "" {
+		where = r.segFile + " " + where
+		sample = fmt.Sprintf("the first %d rows of the input", sampleSize)
+	}
+	if errors.Is(err, errOutOfRange) {
+		return sqlerr.New("22003", "%s: value %q is out of range for type %s", where, val, sqlTypeName(sc.Type))
+	}
+	code := "22P02"
+	if sc.Type == parquet.TypeTimestamp {
+		code = "22007" // PostgreSQL's invalid_datetime_format
+	}
+	return sqlerr.New(code, "%s: value %q (%s) is not of type %s (the column's type was inferred from %s)",
+		where, val, sqlTypeName(detectStringType(val)), sqlTypeName(sc.Type), sample)
+}
+
 // writeCSVValue parses val as typ into vec at row. A field that does not
 // parse is set NULL and answers errNotType; the caller decides whether that
 // is the NULL (inside the sample) or a refusal (past it).
 func writeCSVValue(vec *batch.Vector, row int, val string, typ parquet.TypeID) error {
-	if row < 0 || row >= vec.Len || (typ == parquet.TypeString && row+1 >= len(vec.BytesData.Offsets)) {
-		return fmt.Errorf("CSV row index %d outside vector length %d", row, vec.Len)
-	}
 	switch typ {
+	// Bool, bigint and double precision read a field with PostgreSQL's own
+	// input grammar for the type (the kernel's, which CAST uses): surrounding
+	// whitespace, t/f/y/n/on/off prefixes, 0x/0o/0b and digit underscores,
+	// NaN/Infinity, and 22003 for a number the type cannot hold. The plain
+	// spelling is tried first so the common field pays one strconv call.
 	case parquet.TypeBool:
 		switch val {
-		case "true", "TRUE", "True", "1", "yes", "YES":
+		case "true", "TRUE", "True":
 			vec.BoolData[row] = true
-		case "false", "FALSE", "False", "0", "no", "NO":
+		case "false", "FALSE", "False":
 			vec.BoolData[row] = false
 		default:
-			vec.Nulls.SetNull(row)
-			return errNotType
+			v, ok := kernel.ParseBoolText(val)
+			if !ok {
+				vec.Nulls.SetNull(row)
+				return errNotType
+			}
+			vec.BoolData[row] = v
 		}
 	case parquet.TypeInt64:
 		n, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
-			vec.Nulls.SetNull(row)
-			return errNotType
+			var st kernel.NumConstStatus
+			if n, st = kernel.IntLitText(val); st != kernel.NumConstOK {
+				vec.Nulls.SetNull(row)
+				return numStatusError(st)
+			}
 		}
 		vec.Int64Data[row] = n
 	case parquet.TypeFloat64:
 		f, err := strconv.ParseFloat(val, 64)
-		if err != nil {
-			vec.Nulls.SetNull(row)
-			return errNotType
+		if err != nil || f == 0 || strings.IndexByte(val, '_') >= 0 {
+			// Re-read by PostgreSQL's grammar: a 0 (Go reads a nonzero
+			// 1e-400 as 0, PostgreSQL as 22003) and an underscore (Go's
+			// float syntax allows 1_000, PostgreSQL's float8in does not).
+			var st kernel.NumConstStatus
+			if f, st = kernel.FloatLitText(val, 64); st != kernel.NumConstOK {
+				vec.Nulls.SetNull(row)
+				return numStatusError(st)
+			}
 		}
 		vec.Float64Data[row] = f
 	case parquet.TypeIPv4:
@@ -330,6 +429,9 @@ func writeCSVValue(vec *batch.Vector, row int, val string, typ parquet.TypeID) e
 		}
 		vec.Int64Data[row] = int64(uint32(ip4[0])<<24 | uint32(ip4[1])<<16 | uint32(ip4[2])<<8 | uint32(ip4[3]))
 	case parquet.TypeTimestamp:
+		if isPGSpace(val[0]) || isPGSpace(val[len(val)-1]) {
+			val = strings.Trim(val, " \t\n\v\f\r") // PostgreSQL ignores surrounding whitespace
+		}
 		for _, layout := range timestampPatterns {
 			if t, err := time.Parse(layout, val); err == nil {
 				vec.Int64Data[row] = t.UnixMicro()
@@ -342,6 +444,18 @@ func writeCSVValue(vec *batch.Vector, row int, val string, typ parquet.TypeID) e
 		vec.BytesData.Set(row, []byte(val))
 	}
 	return nil
+}
+
+// isPGSpace is C isspace, the whitespace PostgreSQL's input functions skip.
+func isPGSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r'
+}
+
+func numStatusError(st kernel.NumConstStatus) error {
+	if st == kernel.NumConstRange {
+		return errOutOfRange
+	}
+	return errNotType
 }
 
 func inferCSVSchema(header []string, rows [][]string) []parquet.Column {
