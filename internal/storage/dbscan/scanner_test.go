@@ -197,9 +197,34 @@ func TestWriteValue_Date(t *testing.T) {
 	writeValue(b.Columns[0], 0, val, parquet.TypeDate)
 
 	got := b.Columns[0].Int32Data[0]
-	want := int32(dt.Sub(epochDate).Hours() / 24)
+	const want = int32(20529) // 2026-03-17
 	if got != want {
 		t.Errorf("expected %d days, got %d", want, got)
+	}
+}
+
+// TestArcTSScannerStoresEveryCalendarDate: a DATE more than ~292 years from
+// 1970 is its own day count. The scanner derived it from a time.Duration,
+// which saturates, so 0001-01-01 and 1600-02-29 both stored 1677-09-22 (the
+// census of #1266 measured it through postgres_scan against 17.11).
+func TestArcTSScannerStoresEveryCalendarDate(t *testing.T) {
+	for _, tc := range []struct {
+		in   time.Time
+		want string
+	}{
+		{time.Date(1, 1, 1, 0, 0, 0, 0, time.UTC), "0001-01-01"},
+		{time.Date(1600, 2, 29, 0, 0, 0, 0, time.UTC), "1600-02-29"},
+		{time.Date(1969, 12, 31, 0, 0, 0, 0, time.UTC), "1969-12-31"},
+		{time.Date(2262, 4, 12, 0, 0, 0, 0, time.UTC), "2262-04-12"},
+		{time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC), "9999-12-31"},
+		// A driver that hands a DATE back in a zone: the date is its fields.
+		{time.Date(2024, 6, 15, 0, 0, 0, 0, time.FixedZone("", -7*3600)), "2024-06-15"},
+	} {
+		b := batch.NewRecordBatch([]parquet.Column{{Name: "d", Type: parquet.TypeDate, Nullable: true}}, 1)
+		writeValue(b.Columns[0], 0, &sql.NullTime{Time: tc.in, Valid: true}, parquet.TypeDate)
+		if got := batch.FormatDate(b.Columns[0].Int32Data[0]); got != tc.want {
+			t.Errorf("%v stored %s, want %s", tc.in, got, tc.want)
+		}
 	}
 }
 

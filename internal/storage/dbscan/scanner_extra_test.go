@@ -175,7 +175,7 @@ func TestWriteValue_Date_SpecificValue(t *testing.T) {
 	val := &sql.NullTime{Time: dt, Valid: true}
 	writeValue(b.Columns[0], 0, val, parquet.TypeDate)
 
-	expectedDays := int32(dt.Sub(epochDate).Hours() / 24)
+	const expectedDays = int32(19723) // 2024-01-01
 	if b.Columns[0].Int32Data[0] != expectedDays {
 		t.Errorf("expected %d days, got %d", expectedDays, b.Columns[0].Int32Data[0])
 	}

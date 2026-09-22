@@ -185,8 +185,6 @@ func scanDest(typ parquet.TypeID) any {
 	}
 }
 
-var epochDate = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
-
 // writeValue writes a scanned Go value into a vector column.
 func writeValue(vec *batch.Vector, row int, dest any, typ parquet.TypeID) {
 	switch typ {
@@ -236,7 +234,13 @@ func writeValue(vec *batch.Vector, row int, dest any, typ parquet.TypeID) {
 			vec.Nulls.SetNull(row)
 			return
 		}
-		vec.Int32Data[row] = int32(v.Time.Sub(epochDate).Hours() / 24)
+		// The calendar date the driver named, as whole days since
+		// 1970-01-01, from Unix seconds: v.Time.Sub(1970-01-01) is a
+		// time.Duration, which saturates ~292 years from 1970, so every date
+		// before 1677-09-22 (and after 2262-04-11) stored that bound instead
+		// of itself. Midnight UTC is an exact multiple of a day.
+		y, m, d := v.Time.Date()
+		vec.Int32Data[row] = int32(time.Date(y, m, d, 0, 0, 0, 0, time.UTC).Unix() / 86400)
 
 	case parquet.TypeBytes:
 		v := dest.(*sql.RawBytes)
