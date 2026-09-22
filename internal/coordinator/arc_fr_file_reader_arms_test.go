@@ -51,6 +51,11 @@ func TestArcFRAFileReaderIsARelationOnEveryArm(t *testing.T) {
 	j2 := write("r2.json", "{\"c\":2,\"d\":\"x\"}\n{\"c\":3,\"d\":\"y\"}\n")
 	c1 := write("r1.csv", "a,b\n1,p\n2,q\n3,r\n4,s\n")
 	c2 := write("r2.csv", "c,d\n2,x\n3,y\n")
+	// #1266: a reader's TIMESTAMP in the engine's unit (epoch ms). At
+	// 260fc569 both readers stored microseconds and these read 56425-08-29.
+	tsc := write("ts.csv", "k,ts\n1,2024-06-15 12:30:45.5\n2,1969-07-20 20:17:40.123\n")
+	tsj := write("ts.json", "{\"k\":1,\"ts\":\"2024-06-15T12:30:45.5Z\"}\n"+
+		"{\"k\":2,\"ts\":\"1969-07-20T20:17:40.123Z\"}\n")
 
 	single := tmdStandalone(t, ctx)
 	spilled := na2Standalone(t, ctx, 512*1024)
@@ -125,6 +130,17 @@ func TestArcFRAFileReaderIsARelationOnEveryArm(t *testing.T) {
 			sql:    `SELECT COUNT(*) AS n FROM typemx t JOIN ` + rj1 + ` r1 ON t.id = r1.a`,
 			want:   []string{"n=int64:4"},
 			dagPin: readerPin, pg: "4"},
+		// ---- #1266: the reader's TIMESTAMP is the engine's unit ---------
+		{issue: "#1266", name: "read_csv_timestamp_is_epoch_millis",
+			sql: `SELECT k, CAST(ts AS VARCHAR) AS s, ts = TIMESTAMP '2024-06-15 12:30:45.5' AS eq FROM read_csv('` +
+				tsc + `') ORDER BY ts`,
+			want:   []string{"k=int64:2|s=1969-07-20 20:17:40.123|eq=bool:false", "k=int64:1|s=2024-06-15 12:30:45.5|eq=bool:true"},
+			dagPin: readerPin, pg: "2 | 1969-07-20 20:17:40.123 | f, 1 | 2024-06-15 12:30:45.5 | t"},
+		{issue: "#1266", name: "read_json_timestamp_is_epoch_millis",
+			sql: `SELECT k, CAST(ts AS VARCHAR) AS s, ts = TIMESTAMP '2024-06-15 12:30:45.5' AS eq FROM read_json('` +
+				tsj + `') ORDER BY ts`,
+			want:   []string{"k=int64:2|s=1969-07-20 20:17:40.123|eq=bool:false", "k=int64:1|s=2024-06-15 12:30:45.5|eq=bool:true"},
+			dagPin: readerPin, pg: "2 | 1969-07-20 20:17:40.123 | f, 1 | 2024-06-15 12:30:45.5 | t"},
 	} {
 		t.Run(tc.issue+"/"+tc.name, func(t *testing.T) {
 			pinnedArms := 0
