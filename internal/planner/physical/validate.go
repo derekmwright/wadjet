@@ -1320,11 +1320,25 @@ func (b *binder) registerCTE(ctx context.Context, cte *plansql.CTEDef) error {
 		// sentence for both: `WITH RECURSIVE r(w,x,y) AS (SELECT 1 AS a, 2 AS
 		// b UNION ALL ...) SELECT r.w FROM r` is 42P10 there and answered one
 		// row of NULL here.
-		if len(cte.Columns) > 0 {
-			if names, known := b.blockColumns(ctx, body); known && len(cte.Columns) > len(names) {
-				return sqlerr.New("42P10",
-					"WITH query %q has %d columns available but %d columns specified",
-					cte.Name, len(names), len(cte.Columns))
+		names, known := b.blockColumns(ctx, body)
+		if len(cte.Columns) > 0 && known && len(cte.Columns) > len(names) {
+			return sqlerr.New("42P10",
+				"WITH query %q has %d columns available but %d columns specified",
+				cte.Name, len(names), len(cte.Columns))
+		}
+		// THE PUBLISHED LIST CLOSES THE SCOPE (#1074). A recursive CTE
+		// publishes its NON-RECURSIVE term's names — a set operation's left
+		// arm, `blockColumns`' rule — renamed positionally by its column
+		// list, and nothing else: `SELECT v+1 AS w FROM r` names `w` inside
+		// the recursive term only. Left open, a reference to `w` outside
+		// bound nothing, was never refused, and answered a NULL per row
+		// where PostgreSQL 17.11 raises 42703. The body is validated AGAIN
+		// under the closed scope so the recursive term's own reference to a
+		// name the CTE does not publish is refused the same way.
+		if known {
+			b.ctes[name] = cteEntry{cols: plansql.OverlayColumnAliases(cte.Columns, names)}
+			if err := b.validateBlock(ctx, body, nil); err != nil {
+				return err
 			}
 		}
 		return nil
