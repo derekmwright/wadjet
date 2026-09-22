@@ -198,7 +198,7 @@ func (tp TablePolicies) applyToNewScans(plan *Node, columnsOf func(table string)
 		for i, c := range n.Children {
 			n.Children[i] = walk(c, childCovered)
 		}
-		if covered || n.Type != NodeScan || n.TableName == "" || n.IsTableFunc {
+		if covered || n.Type != NodeScan || n.TableName == "" || n.IsTableFunc || n.RecursiveCTE != nil {
 			return n
 		}
 		policies := tp.For(n.TableName)
@@ -302,7 +302,7 @@ func CheckPolicyPlanOrder(plan *Node, policed func(table string) []ColumnPolicy)
 		switch {
 		case n.Type == NodeProject && n.SecurityBarrier:
 			barrier = n
-		case n.Type == NodeScan && n.TableName != "" && !n.IsTableFunc:
+		case n.Type == NodeScan && n.TableName != "" && !n.IsTableFunc && n.RecursiveCTE == nil:
 			cols := policed(n.TableName)
 			if len(cols) == 0 {
 				return nil

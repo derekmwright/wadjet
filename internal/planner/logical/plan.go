@@ -1006,7 +1006,7 @@ func injectRowFilter(n *Node, tableName, raw string, ast plansql.Node) *Node {
 // to the catalog's own spelling (#731, catalog.ResolveTableName). A policy that
 // stopped matching because the client wrote `E7EMP` would be a silent grant.
 func policedScan(n *Node, tableName string) bool {
-	if n == nil || tableName == "" || n.IsTableFunc {
+	if n == nil || tableName == "" || n.IsTableFunc || n.RecursiveCTE != nil {
 		return false
 	}
 	return strings.EqualFold(n.TableName, tableName)
@@ -1021,6 +1021,13 @@ func policedScan(n *Node, tableName string) bool {
 // by it polices none of those (#859) — and default-denies the two names that
 // are not tables. Every one of those shapes reaches the same base-table Scan
 // here.
+//
+// A RECURSIVE CTE reference is a tagged Scan and not a relation: its rows are
+// the closure of the CTE's own arms, which are planned — and policed, through
+// the context's policies and lookup — when the physical planner materializes
+// them. Treating its NAME as a table default-denied every recursive CTE under a
+// policy (`permission denied for table "r"`, arc RC), and would mask the
+// CTE's columns with a policed table's mask wherever the two names met.
 func PolicedScanTables(n *Node) []string {
 	var out []string
 	seen := map[string]bool{}
@@ -1029,7 +1036,7 @@ func PolicedScanTables(n *Node) []string {
 		if x == nil {
 			return
 		}
-		if x.Type == NodeScan && x.TableName != "" && !x.IsTableFunc {
+		if x.Type == NodeScan && x.TableName != "" && !x.IsTableFunc && x.RecursiveCTE == nil {
 			key := strings.ToLower(x.TableName)
 			if !seen[key] {
 				seen[key] = true

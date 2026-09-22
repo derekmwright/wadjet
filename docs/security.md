@@ -216,7 +216,7 @@ A statement needs the permission for what it DOES, which is PostgreSQL's rule:
 
 | statement | needs |
 |---|---|
-| `SELECT`, and every relation the plan reads (derived tables, CTE bodies, set-operation arms, subquery sources) | `read` |
+| `SELECT`, and every relation the plan reads (derived tables, CTE bodies — a recursive CTE's seed and recursive term included — set-operation arms, subquery sources) | `read` |
 | `INSERT`, and a `DELETE` / `UPDATE` whose predicate names no column | `write` |
 | a `DELETE` / `UPDATE` that READS the relation — a `WHERE` naming a column, a `SET` value naming one — and `MERGE` | `write` **and** `read`, because a predicate is how a stored value is observed |
 | `CREATE TABLE`, `DROP TABLE`, `COPY`, creating or replacing a UDF | `write` |

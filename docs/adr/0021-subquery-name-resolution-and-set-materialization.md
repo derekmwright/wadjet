@@ -1767,6 +1767,19 @@ itself, so a plain sibling in a `WITH RECURSIVE` list is an ordinary CTE with
 the ordinary published names (#1193). A reference carries the alias it was
 written under, so two references to one CTE in a join are two relations.
 
+**A recursive CTE reference is not a policed relation.** The policy layer
+read the tagged scan's NAME as a table and default-denied it, so under ABAC
+every recursive CTE was 42501 (`permission denied for table "r"`) on every
+door. The reference is the closure of its arms, and the arms are planned
+through the subquery path that applies the context's policies and lookup —
+access, masks and row filters — to every relation they read; so the reference
+is skipped by `logical.PolicedScanTables`, the new-scan pass and the
+plan-order check, and a relation the identity may not read is still refused
+where an arm names it. Gated on every door by
+`server.TestArcRCARecursiveCTEOverAPolicedRelationNeverPublishesAPolicedValue`
+(24 of 63 pairs answer, all masked) and
+`server.TestArcRCARecursiveCTEArmReadingAnUnreadableRelationIsRefused`.
+
 **Per-iteration resources are per-iteration.** A join's build reservation and
 an IN-set's charge are released when the iteration that built them ends; the
 plan's Cleanup ran once, at statement end, so a term that joined held every
