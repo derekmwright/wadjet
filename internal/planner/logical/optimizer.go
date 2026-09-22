@@ -3605,16 +3605,86 @@ func residualSidesCollide(outer, inner KeyRef, info *plansql.SelectInfo, ctes []
 	if outer.Column == "" || !strings.EqualFold(outer.Column, inner.Column) {
 		return false
 	}
-	if fromHasDerivedOrCTE(info, ctes) {
-		return true
+	return bodyRenamesColumn(info, ctes, inner.Qualifier, inner.Column)
+}
+
+// bodyRenamesColumn reports whether a FROM item of the body that may publish
+// `col` publishes it under a name that is NOT its source column's — the
+// only shape whose stage re-spelling moves the name. A pass-through (`SELECT
+// id FROM t`, `WITH u AS (SELECT g AS did, id …)` for `id`) is not a rename
+// and keeps lowering on the DAG (arc D5's `control_cte_on_both_sides` is
+// that shape). Anything this cannot read — a star over a derived table's
+// own star, an unparseable body — counts as a rename, which only costs a
+// decline.
+func bodyRenamesColumn(info *plansql.SelectInfo, ctes []plansql.CTEDef, qualifier, col string) bool {
+	cteByName := map[string]*plansql.CTEDef{}
+	for i := range ctes {
+		cteByName[strings.ToLower(ctes[i].Name)] = &ctes[i]
 	}
-	for _, t := range info.Tables {
-		if len(t.ColumnAliases) > 0 {
+	for i := range info.CTEs {
+		cteByName[strings.ToLower(info.CTEs[i].Name)] = &info.CTEs[i]
+	}
+	col = strings.ToLower(col)
+	bodyRenames := func(body *plansql.SelectInfo, err error) bool {
+		if err != nil || body == nil {
+			return true
+		}
+		for _, c := range body.Columns {
+			if c.Star {
+				continue // a star publishes its source names unchanged
+			}
+			name := strings.ToLower(c.Alias)
+			ref, isRef := c.ASTExpr.(*plansql.ColRef)
+			if name == "" && isRef {
+				name = strings.ToLower(ref.Column)
+			}
+			if name != col {
+				continue
+			}
+			return !isRef || !strings.EqualFold(ref.Column, col)
+		}
+		return false
+	}
+	item := func(t *plansql.TableRef) bool {
+		if qualifier != "" {
+			id := t.Alias
+			if id == "" {
+				id = t.Name
+			}
+			if !strings.EqualFold(id, qualifier) {
+				return false
+			}
+		}
+		for _, a := range t.ColumnAliases {
+			if strings.EqualFold(a, col) {
+				return true // a column-alias list renames positionally
+			}
+		}
+		name := strings.TrimSpace(t.Name)
+		if strings.HasPrefix(name, "(") {
+			return bodyRenames(t.SubSelect())
+		}
+		if c, ok := cteByName[strings.ToLower(name)]; ok {
+			for _, a := range c.Columns {
+				if strings.EqualFold(a, col) {
+					return true
+				}
+			}
+			return bodyRenames(c.BodySelect())
+		}
+		return false
+	}
+	for i := range info.Tables {
+		if item(&info.Tables[i]) {
 			return true
 		}
 	}
 	for i := range info.Joins {
-		if r := info.Joins[i].RightTableRef; r != nil && len(r.ColumnAliases) > 0 {
+		r := info.Joins[i].RightTableRef
+		if r == nil {
+			r = &plansql.TableRef{Name: info.Joins[i].RightTable, Alias: info.Joins[i].RightAlias}
+		}
+		if item(r) {
 			return true
 		}
 	}
