@@ -1316,6 +1316,23 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 	// subquery then runs per outer row, which answers PostgreSQL's rows
 	// (#1232, decorrelation_body_refs.go).
 	bodyOuter, undecided := bodyOuterColumns(info, outerColMap, ctes, annotate)
+	if bodyOuter != nil {
+		// INNERMOST-FIRST, in both directions: with the body's namespace
+		// known, the classifier below reads the enclosing map RESTRICTED to
+		// the names the body cannot supply. A name the body's own FROM
+		// publishes is the body's even when the enclosing query has one too
+		// (`EXISTS (SELECT 1 FROM dc_side c WHERE id = c.j)` is c.id = c.j,
+		// not o.id = c.j) — and it is TPC-H Q2's rule: `ps_partkey` is the
+		// body's, `p_partkey` is not (arc DC round 3, B2).
+		outerColMap = bodyOuter
+		if refs2, err2 := plansql.FindCorrelatedRefsWithScope(subq.SQL, outerTables, outerColMap,
+			plansql.CTEColumns(scopeCTEs(ctes, info.CTEs), nil)); err2 == nil {
+			outerRefCols = make(map[string]bool, len(refs2))
+			for _, ref := range refs2 {
+				outerRefCols[ref.Column] = true
+			}
+		}
+	}
 	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTableSet, bodyOuter, undecided, true)
 	if blocked != "" {
 		return nil, pred, false
@@ -1928,6 +1945,16 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 	// executable predicate re-run per outer row (#1232,
 	// decorrelation_body_refs.go).
 	bodyOuter, undecided := bodyOuterColumns(info, outerColMap, ctes, annotate)
+	if bodyOuter != nil {
+		// INNERMOST-FIRST, in both directions: with the body's namespace
+		// known, the classifier below reads the enclosing map RESTRICTED to
+		// the names the body cannot supply. A name the body's own FROM
+		// publishes is the body's even when the enclosing query has one too
+		// (`EXISTS (SELECT 1 FROM dc_side c WHERE id = c.j)` is c.id = c.j,
+		// not o.id = c.j) — and it is TPC-H Q2's rule: `ps_partkey` is the
+		// body's, `p_partkey` is not (arc DC round 3, B2).
+		outerColMap = bodyOuter
+	}
 	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTableSet, bodyOuter, undecided, true)
 	if blocked != "" {
 		return nil, nil
@@ -3327,6 +3354,16 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 	// reference this rewrite cannot carry declines it (#1232,
 	// decorrelation_body_refs.go).
 	bodyOuter, undecided := bodyOuterColumns(info, outerColMap, ctes, annotate)
+	if bodyOuter != nil {
+		// INNERMOST-FIRST, in both directions: with the body's namespace
+		// known, the classifier below reads the enclosing map RESTRICTED to
+		// the names the body cannot supply. A name the body's own FROM
+		// publishes is the body's even when the enclosing query has one too
+		// (`EXISTS (SELECT 1 FROM dc_side c WHERE id = c.j)` is c.id = c.j,
+		// not o.id = c.j) — and it is TPC-H Q2's rule: `ps_partkey` is the
+		// body's, `p_partkey` is not (arc DC round 3, B2).
+		outerColMap = bodyOuter
+	}
 	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTables, bodyOuter, undecided, false)
 	if blocked != "" {
 		return nil, nil
