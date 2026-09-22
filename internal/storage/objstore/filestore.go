@@ -31,18 +31,25 @@ type FileStore struct {
 
 // NewFileStore creates a FileStore rooted at the given directory.
 // The directory is created if it does not exist.
+//
+// The root is made ABSOLUTE at construction, and every object path is built
+// from that. A store that kept the relative spelling resolved each Put
+// against the working directory of the moment: a program that opened
+// `DataDir: "data"` and later changed directory wrote its next flushed
+// object under the NEW cwd while the catalog it had opened kept naming the
+// old root — a manifest entry for a file that is not there, and a committed
+// row that vanished on reopen with no error (arc EC review B5). The
+// identifier was already absolute for the same reason (two stores over one
+// directory ARE one store); now the paths agree with it.
 func NewFileStore(rootDir string) (*FileStore, error) {
-	if err := os.MkdirAll(rootDir, 0o755); err != nil {
-		return nil, fmt.Errorf("creating filestore root %q: %w", rootDir, err)
-	}
-	// Absolute root: two FileStores over one directory ARE one store and must
-	// share a namespace; two over different directories must not. A relative
-	// root would alias them under a changed working directory.
 	abs, err := filepath.Abs(rootDir)
 	if err != nil {
-		abs = rootDir
+		return nil, fmt.Errorf("resolving filestore root %q: %w", rootDir, err)
 	}
-	return &FileStore{rootDir: rootDir, id: "file:" + abs}, nil
+	if err := os.MkdirAll(abs, 0o755); err != nil {
+		return nil, fmt.Errorf("creating filestore root %q: %w", rootDir, err)
+	}
+	return &FileStore{rootDir: abs, id: "file:" + abs}, nil
 }
 
 // StoreID implements IdentifiedStore.
