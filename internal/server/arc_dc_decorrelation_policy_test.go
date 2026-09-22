@@ -100,6 +100,19 @@ func TestArcDCARelocatedBodyConditionReadsTheMaskOnEveryDoor(t *testing.T) {
 		{"in-select-bare-mask-value",
 			`SELECT o.id AS a FROM e7emp o WHERE '***' IN (SELECT ssn FROM e7other t WHERE t.id = o.id) ORDER BY a`,
 			[]string{"a=1", "a=2", "a=3"}},
+		// A correlated IN over a body that joins e7emp to e7other, with an
+		// outer-only condition in the ON (round 3, review B1): the hoist plans
+		// a two-integer-key semi join, and the single-process doors answered
+		// EMPTY (a RIGHT SEMI join marked nothing on a two-integer key, N6)
+		// where PostgreSQL answers 2 | 3. The second spelling names the
+		// enclosing derived column `salary`, which the policed body relation
+		// ALSO has — qualified, it is the enclosing row's.
+		{"in-on-outer-only-self-join-key",
+			`SELECT o.id AS a FROM (SELECT id, id * 10 AS sal2 FROM e7other) o WHERE o.id IN (SELECT b.id FROM e7emp b JOIN e7other c ON c.id = b.id AND o.sal2 > 15 WHERE b.id = o.id) ORDER BY a`,
+			[]string{"a=2", "a=3"}},
+		{"in-on-outer-only-shadowing-a-denied-name",
+			`SELECT o.id AS a FROM (SELECT id, id * 10 AS salary FROM e7other) o WHERE o.id IN (SELECT b.id FROM e7emp b JOIN e7other c ON c.id = b.id AND o.salary > 15 WHERE b.id = o.id) ORDER BY a`,
+			[]string{"a=2", "a=3"}},
 		// A DENIED column named from inside a body is not made readable by
 		// being relocated: every door refuses.
 		{"in-outer-only-denied-column",
