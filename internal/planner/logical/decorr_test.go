@@ -42,7 +42,12 @@ func TestQ17Decorrelation(t *testing.T) {
 	t.Log("=== Before optimize ===")
 	printPlanT(t, plan, 0)
 
-	optimized := Optimize(plan)
+	// …and hand Optimize the annotator too, as every production caller does:
+	// the decorrelation reads the SUBQUERY BODY's namespace from it, and
+	// without one an unqualified name in the body's SELECT list that the
+	// enclosing query also has (`l_quantity` — the enclosing query reads
+	// lineitem too) cannot be placed, so the rewrite declines (arc DC, B1).
+	optimized := Optimize(plan, annotateScanColumnsForTest)
 	t.Log("\n=== After optimize ===")
 	printPlanT(t, optimized, 0)
 

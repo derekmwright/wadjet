@@ -3,6 +3,7 @@
 package logical
 
 import (
+	"sort"
 	"strings"
 	"testing"
 
@@ -21,6 +22,15 @@ import (
 // as a row count somewhere else.
 func boolPtr(b bool) *bool { return &b }
 
+// dcBodyOuter is bodyOuterColumns' answer for a dc_out (id, grp, total)
+// enclosing query over a body reading dc_in (k, tag, amt) and dc_nul (k, amt):
+// all three enclosing names are absent from the body. dcBodyOuterSide is the
+// answer when the body reads dc_side (id, j, amt2) instead — `id` is the
+// body's there, so it is not outer.
+var dcBodyOuterSide = map[string]string{"total": "dc_out", "grp": "dc_out"}
+
+var dcBodyOuter = map[string]string{"total": "dc_out", "grp": "dc_out", "id": "dc_out"}
+
 func TestEveryBodyClauseSaysWhatItDoesWithAnOuterReference(t *testing.T) {
 	outer := map[string]bool{"dc_out": true, "o": true}
 	inner := map[string]bool{"dc_in": true, "b": true, "dc_side": true, "c": true}
@@ -36,6 +46,9 @@ func TestEveryBodyClauseSaysWhatItDoesWithAnOuterReference(t *testing.T) {
 		// comparison read the body's SELECT item, an EXISTS does not. Default
 		// true, so a row says so only when it is testing the EXISTS side.
 		readsSelectList *bool
+		// bodyOuter is the enclosing columns the body cannot supply
+		// (bodyOuterColumns); nil is the qualifier-only reading.
+		bodyOuter map[string]string
 	}{
 		{name: "whereOnly", body: "SELECT b.k FROM dc_in b WHERE b.k = o.id"},
 		{name: "innerJoinON",
@@ -105,6 +118,37 @@ func TestEveryBodyClauseSaysWhatItDoesWithAnOuterReference(t *testing.T) {
 			body: "SELECT b.k FROM dc_in b JOIN dc_side c ON c.j = b.k AND b.amt > 10"},
 		{name: "havingInnerOnly",
 			body: "SELECT b.k FROM dc_in b GROUP BY b.k HAVING SUM(b.amt) > 10"},
+		// An UNQUALIFIED name the body cannot supply is an outer reference in
+		// every clause (round 2, B1): lifted from an inner join's ON, and
+		// blocking where the rewrite cannot carry it.
+		{name: "innerJoinONUnqualifiedOuter",
+			body:      "SELECT b.k FROM dc_in b JOIN dc_nul n ON n.k = b.k AND b.k = id",
+			bodyOuter: dcBodyOuter,
+			lifted:    []string{"b.k = id"}},
+		{name: "leftJoinONUnqualifiedOuter",
+			body:      "SELECT b.k FROM dc_in b LEFT JOIN dc_side c ON c.j = b.k AND total > 100",
+			bodyOuter: dcBodyOuterSide,
+			blocked:   "an outer join's ON"},
+		{name: "havingUnqualifiedOuter",
+			body:      "SELECT b.k FROM dc_in b GROUP BY b.k HAVING SUM(b.amt) > total",
+			bodyOuter: dcBodyOuter,
+			blocked:   "HAVING"},
+		{name: "groupByUnqualifiedOuter",
+			body:      "SELECT b.k FROM dc_in b GROUP BY b.k, total",
+			bodyOuter: dcBodyOuter,
+			blocked:   "GROUP BY"},
+		{name: "selectListUnqualifiedOuter",
+			body:      "SELECT total FROM dc_in b",
+			bodyOuter: dcBodyOuter,
+			blocked:   "the SELECT list"},
+		// …and a name the body DOES publish is the body's, even though the
+		// enclosing query has one too: bodyOuterColumns leaves it out.
+		{name: "innerJoinONUnqualifiedShadowed",
+			body:      "SELECT b.k FROM dc_in b JOIN dc_side c ON c.j = b.k AND id > 7",
+			bodyOuter: dcBodyOuterSide},
+		{name: "havingUnqualifiedInner",
+			body:      "SELECT b.k FROM dc_in b GROUP BY b.k HAVING SUM(amt) > 10",
+			bodyOuter: dcBodyOuter},
 	}
 
 	for _, tc := range cases {
@@ -121,7 +165,7 @@ func TestEveryBodyClauseSaysWhatItDoesWithAnOuterReference(t *testing.T) {
 			if tc.readsSelectList != nil {
 				reads = *tc.readsSelectList
 			}
-			lifted, blocked := liftBodyOuterConditions(info, outer, inner, reads)
+			lifted, blocked := liftBodyOuterConditions(info, outer, inner, tc.bodyOuter, nil, reads)
 			if blocked != tc.blocked {
 				t.Fatalf("blocked = %q, want %q", blocked, tc.blocked)
 			}
@@ -153,19 +197,29 @@ func TestOnlyAQualifiedReferenceIsReadAsOuterOnly(t *testing.T) {
 	inner := map[string]bool{"dc_in": true, "b": true}
 
 	cases := []struct {
-		name string
-		expr string
-		want bool
+		name      string
+		expr      string
+		want      bool
+		bodyOuter map[string]string
 	}{
-		{"qualifiedOuterOnly", "o.total > 100", true},
-		{"qualifiedOuterOnlyTwoColumns", "o.id = o.grp", true},
-		{"qualifiedOuterOnlyFunction", "ABS(o.total) > 100", true},
-		{"qualifiedOuterOnlyIsNull", "o.id IS NULL", true},
-		{"unqualified", "total > 100", false},
-		{"mixed", "o.total > b.amt", false},
-		{"innerOnly", "b.amt > 10", false},
-		{"noColumnAtAll", "1 = 1", false},
-		{"holdsASubquery", "o.id IN (SELECT b.k FROM dc_in b)", false},
+		{"qualifiedOuterOnly", "o.total > 100", true, nil},
+		{"qualifiedOuterOnlyTwoColumns", "o.id = o.grp", true, nil},
+		{"qualifiedOuterOnlyFunction", "ABS(o.total) > 100", true, nil},
+		{"qualifiedOuterOnlyIsNull", "o.id IS NULL", true, nil},
+		{"unqualified", "total > 100", false, nil},
+		{"mixed", "o.total > b.amt", false, nil},
+		{"innerOnly", "b.amt > 10", false, nil},
+		{"noColumnAtAll", "1 = 1", false, nil},
+		{"holdsASubquery", "o.id IN (SELECT b.k FROM dc_in b)", false, nil},
+		// With the body's namespace known, an unqualified name the body
+		// cannot supply is provably the enclosing row's (round 2, B1)…
+		{"unqualifiedBodyCannotSupply", "total > 100", true, dcBodyOuter},
+		{"unqualifiedAndQualified", "total > o.grp", true, dcBodyOuter},
+		// …and one the body DOES supply is not, whatever the enclosing
+		// query also has.
+		{"unqualifiedBodySupplies", "amt > 10", false, dcBodyOuter},
+		{"unqualifiedShadowed", "id > 7", false, dcBodyOuterSide},
+		{"unqualifiedMixed", "total > b.amt", false, dcBodyOuter},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -173,7 +227,7 @@ func TestOnlyAQualifiedReferenceIsReadAsOuterOnly(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse %q: %v", tc.expr, err)
 			}
-			if got := provablyOuterOnly(node, outer, inner); got != tc.want {
+			if got := provablyOuterOnly(node, outer, inner, tc.bodyOuter); got != tc.want {
 				t.Fatalf("provablyOuterOnly(%q) = %v, want %v", tc.expr, got, tc.want)
 			}
 		})
@@ -189,5 +243,70 @@ func TestOnlyTheUnnegatedOperatorHoistsAnOuterOnlyCondition(t *testing.T) {
 	if outerOnlyDisposition(true) {
 		t.Error("NOT IN / NOT EXISTS must decline: an outer row P rejects PASSES them, " +
 			"because the body it would have to contradict is empty")
+	}
+}
+
+// bodyOuterColumns reads the body's namespace from the catalog and answers
+// only when it can name ALL of it: a name absent from a partial list is not
+// absent from the body.
+func TestTheBodysNamespaceIsCompleteOrUnknown(t *testing.T) {
+	catalog := map[string][]string{
+		"dc_in":   {"k", "tag", "amt"},
+		"dc_side": {"id", "j", "amt2"},
+	}
+	annotate := func(n *Node) {
+		if n.Type == NodeScan {
+			n.ScanColumns = catalog[n.TableName]
+		}
+	}
+	outer := map[string]string{"id": "dc_out", "grp": "dc_out", "total": "dc_out", "k": "dc_out"}
+	cases := []struct {
+		name, body string
+		ctes       []plansql.CTEDef
+		want       string // sorted keys, "<nil>" for unknown
+	}{
+		{name: "oneTable", body: "SELECT 1 FROM dc_in b", want: "grp id total"},
+		{name: "join", body: "SELECT 1 FROM dc_in b JOIN dc_side c ON c.j = b.k", want: "grp total"},
+		{name: "unknownTable", body: "SELECT 1 FROM dc_in b JOIN nowhere z ON z.k = b.k", want: "<nil>"},
+		{name: "derived", body: "SELECT 1 FROM (SELECT k AS id FROM dc_in) d", want: "grp k total"},
+		{name: "aliasListOverUnknown", body: "SELECT 1 FROM nowhere AS z(total)", want: "<nil>"},
+		{name: "aliasListRenames", body: "SELECT 1 FROM dc_in AS z(id)", want: "grp k total"},
+		{name: "tableFunction", body: "SELECT 1 FROM generate_series(1, 3) g", want: "<nil>"},
+		// A WITH item in scope is a relation with a schema: `c` publishes
+		// `total`, so the enclosing `total` is not outer in its body.
+		{name: "cteInScope", body: "SELECT 1 FROM c",
+			ctes: []plansql.CTEDef{{Name: "c", SQL: "SELECT k AS total FROM dc_in"}},
+			want: "grp id k"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := plansql.Parse(tc.body)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			info, err := plansql.ExtractSelect(parsed)
+			if err != nil {
+				t.Fatalf("extract: %v", err)
+			}
+			got, _ := bodyOuterColumns(info, outer, tc.ctes, annotate)
+			s := "<nil>"
+			if got != nil {
+				keys := make([]string, 0, len(got))
+				for k := range got {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				s = strings.Join(keys, " ")
+			}
+			if s != tc.want {
+				t.Fatalf("bodyOuterColumns = %s, want %s", s, tc.want)
+			}
+		})
+	}
+	if b, u := bodyOuterColumns(nil, outer, nil, annotate); b != nil || u != nil {
+		t.Fatal("no body: nothing to decide")
+	}
+	if b, u := bodyOuterColumns(&plansql.SelectInfo{}, outer, nil, nil); b != nil || len(u) != len(outer) {
+		t.Fatal("no catalog: nothing is provably outer and every enclosing name is undecided")
 	}
 }

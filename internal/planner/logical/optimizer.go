@@ -1315,7 +1315,8 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 	// and a reference this rewrite cannot carry declines it — the scalar
 	// subquery then runs per outer row, which is right by construction
 	// (#1232, decorrelation_body_refs.go).
-	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTableSet, true)
+	bodyOuter, undecided := bodyOuterColumns(info, outerColMap, ctes, annotate)
+	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTableSet, bodyOuter, undecided, true)
 	if blocked != "" {
 		return nil, pred, false
 	}
@@ -1340,7 +1341,7 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 	var innerFilterNodes []plansql.Node
 
 	for _, node := range whereNodes {
-		if provablyOuterOnly(node, outerTables, innerTableSet) {
+		if provablyOuterOnly(node, outerTables, innerTableSet, bodyOuter) {
 			// A condition naming ONLY the enclosing row is not a correlation
 			// key: it decides whether this outer row's body produces a row at
 			// all. This rewrite builds a LEFT join and a rewritten
@@ -1926,7 +1927,8 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 	// cannot carry it declines the whole thing, and the subquery stays an
 	// executable predicate re-run per outer row (#1232,
 	// decorrelation_body_refs.go).
-	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTableSet, true)
+	bodyOuter, undecided := bodyOuterColumns(info, outerColMap, ctes, annotate)
+	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTableSet, bodyOuter, undecided, true)
 	if blocked != "" {
 		return nil, nil
 	}
@@ -1972,7 +1974,7 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 				return nil, nil
 			}
 			correlationKeys = append(correlationKeys, DecorrelatedKey{Outer: outerRef, Op: "=", Inner: innerRef})
-		case provablyOuterOnly(node, outerTables, innerTableSet):
+		case provablyOuterOnly(node, outerTables, innerTableSet, bodyOuter):
 			// It gates which OUTER rows can match. NOT IN is not a
 			// conjunction of the two, so it declines instead.
 			if !outerOnlyDisposition(inExpr.Not) {
@@ -3324,7 +3326,8 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 	// the enclosing query is lifted into the classification below, and a
 	// reference this rewrite cannot carry declines it (#1232,
 	// decorrelation_body_refs.go).
-	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTables, false)
+	bodyOuter, undecided := bodyOuterColumns(info, outerColMap, ctes, annotate)
+	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTables, bodyOuter, undecided, false)
 	if blocked != "" {
 		return nil, nil
 	}
@@ -3368,7 +3371,7 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 				}
 				filterConds = append(filterConds, DecorrelatedKey{Outer: outerRef, Op: op, Inner: innerRef})
 			}
-		} else if provablyOuterOnly(node, outerTables, innerTables) {
+		} else if provablyOuterOnly(node, outerTables, innerTables, bodyOuter) {
 			// It gates which OUTER rows the body can answer for. NOT EXISTS
 			// is not a conjunction of the two, so it declines and the
 			// subquery is re-run per outer row (outerOnlyDisposition).

@@ -389,6 +389,54 @@ func sourceColumns(t *TableRef, resolve TableColumns, fn FromItemColumns) []stri
 	if t == nil {
 		return nil
 	}
+	return OverlayColumnAliases(t.ColumnAliases, rawSourceColumns(t, resolve, fn))
+}
+
+// FromClauseColumns is the COMPLETE column namespace of a block's own FROM
+// clause — every name an UNQUALIFIED reference in that block can bind to
+// before the lookup moves out to an enclosing query — or nil when any one
+// item cannot be named exactly.
+//
+// Complete-or-nothing is the whole contract, and it is stricter than
+// collectInnerColumns, which unions what it can name: a caller of this one
+// concludes that a name ABSENT from the answer belongs to an enclosing query,
+// so a partial list would move an inner column outward. An alias list over an
+// unknown relation is therefore unknown here, not the aliases alone.
+func FromClauseColumns(info *SelectInfo, resolve TableColumns) map[string]bool {
+	if info == nil || resolve == nil {
+		return nil
+	}
+	m := make(map[string]bool)
+	item := func(t *TableRef) bool {
+		raw := rawSourceColumns(t, resolve, nil)
+		if len(raw) == 0 {
+			return false
+		}
+		cols := OverlayColumnAliases(t.ColumnAliases, raw)
+		if len(cols) == 0 {
+			return false
+		}
+		for _, c := range cols {
+			m[strings.ToLower(c)] = true
+		}
+		return true
+	}
+	for i := range info.Tables {
+		if !item(&info.Tables[i]) {
+			return nil
+		}
+	}
+	for i := range info.Joins {
+		if !item(joinRightSource(&info.Joins[i])) {
+			return nil
+		}
+	}
+	return m
+}
+
+// rawSourceColumns is sourceColumns before the item's column-alias list is
+// applied: what the relation itself publishes, or nil when it is unknown.
+func rawSourceColumns(t *TableRef, resolve TableColumns, fn FromItemColumns) []string {
 	var names []string
 	switch {
 	case t.IsFunction:
@@ -411,7 +459,7 @@ func sourceColumns(t *TableRef, resolve TableColumns, fn FromItemColumns) []stri
 			names = resolve(t.Name)
 		}
 	}
-	return OverlayColumnAliases(t.ColumnAliases, names)
+	return names
 }
 
 // OverlayColumnAliases applies a COLUMN-ALIAS LIST — `(…) AS b(kk, nn)`,

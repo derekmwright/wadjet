@@ -60,11 +60,84 @@ import (
 // answering PostgreSQL's rows (arc L1's `EXISTS/*/winord`). nodeTableRefs has
 // a case for a window call and for a nested block, which is the reader this
 // question needs.
-func namesEnclosingQuery(node plansql.Node, outerTables, innerTables map[string]bool) bool {
+//
+// bodyOuter is the one exception, and it is exact rather than name-only: the
+// enclosing columns the body's OWN relations cannot supply (see
+// bodyOuterColumns). An unqualified name in it binds to the enclosing row in
+// PostgreSQL, and reading it that way here is what keeps `ON b.k = id`, `HAVING
+// SUM(b.amt) > total` and `SELECT total` from travelling into the body as a
+// name no relation of the body publishes. nil means "not known", which is the
+// qualifier-only reading.
+func namesEnclosingQuery(node plansql.Node, outerTables, innerTables map[string]bool, bodyOuter map[string]string) bool {
 	if node == nil {
 		return false
 	}
-	hasOuter, _ := nodeTableRefs(node, outerTables, innerTables, nil)
+	hasOuter, _ := nodeTableRefs(node, outerTables, innerTables, bodyOuter)
+	return hasOuter
+}
+
+// bodyOuterColumns is the part of the enclosing query's column map that names
+// a column the subquery body's OWN FROM clause does not publish — the
+// unqualified names PostgreSQL binds to the enclosing row, because it resolves
+// a name innermost-first and the body has nothing of that name.
+//
+// It is nil when the body's namespace cannot be named COMPLETELY (a table the
+// catalog does not answer, a table function, a star over one): absent from a
+// partial list is not absent from the body, and reading it as outer would move
+// an inner column outward. nil keeps the qualifier-only reading every caller
+// had before.
+//
+// The namespace is read from the catalog through annotate, run on a throwaway
+// Scan per relation and never on the plan being built: annotating the real
+// inner subtree hands reorderJoins statistics it did not have and moved TPC-H
+// Q2's join order (decorrelatedInnerPlan). The rule cannot be the enclosing
+// map alone either — Q2 writes `p_partkey = ps_partkey` unqualified with BOTH
+// names in it — and it is not: `ps_partkey` is the body's, so it is not here.
+//
+// undecided is the other half of the answer: when the namespace is NOT known,
+// it is the whole enclosing map, and an unqualified name in it is one this
+// pass cannot place. The body walker then DECLINES wherever such a name sits
+// in a clause the rewrite has no classification for (see
+// liftBodyOuterConditions) — the per-row rerun resolves it with the binder's
+// own scope — rather than let it travel into the body as a column no relation
+// there may publish. A table function in the body's FROM is the ordinary way
+// to get here: its columns are its CALL's or its INPUT's, and reading an input
+// a second time to answer this question is not a cost this pass may impose.
+func bodyOuterColumns(info *plansql.SelectInfo, outerColMap map[string]string,
+	ctes []plansql.CTEDef, annotate func(*Node)) (bodyOuter, undecided map[string]string) {
+	if info == nil || len(outerColMap) == 0 {
+		return nil, nil
+	}
+	if annotate == nil {
+		return nil, outerColMap
+	}
+	catalog := func(table string) []string {
+		n := &Node{Type: NodeScan, TableName: table}
+		annotate(n)
+		return n.ScanColumns
+	}
+	own := plansql.FromClauseColumns(info,
+		plansql.CTEColumns(scopeCTEs(ctes, info.CTEs), catalog))
+	if own == nil {
+		return nil, outerColMap
+	}
+	bodyOuter = make(map[string]string)
+	for col, tbl := range outerColMap {
+		if !own[strings.ToLower(col)] {
+			bodyOuter[col] = tbl
+		}
+	}
+	return bodyOuter, nil
+}
+
+// namesUndecided reports whether node holds an UNQUALIFIED name in undecided —
+// a name the enclosing query has and the body's namespace, being unknown,
+// cannot be asked about.
+func namesUndecided(node plansql.Node, undecided map[string]string) bool {
+	if node == nil || undecided == nil {
+		return false
+	}
+	hasOuter, _ := nodeTableRefs(node, nil, nil, undecided)
 	return hasOuter
 }
 
@@ -81,7 +154,12 @@ func namesEnclosingQuery(node plansql.Node, outerTables, innerTables map[string]
 // reads those relations too. Hoisting such a conjunct onto the outer side
 // would change Q2's row set. So the unqualified spelling keeps the
 // disposition it had — see the boundary recorded in ADR-0021 §1r.
-func provablyOuterOnly(node plansql.Node, outerTables, innerTables map[string]bool) bool {
+//
+// bodyOuter (bodyOuterColumns) is what makes an unqualified name provable too:
+// a name the body's own relations cannot supply binds to the enclosing row,
+// so `WHERE total > 100` over a body with no `total` is the same condition as
+// `WHERE o.total > 100`. nil proves nothing unqualified.
+func provablyOuterOnly(node plansql.Node, outerTables, innerTables map[string]bool, bodyOuter map[string]string) bool {
 	if node == nil {
 		return false
 	}
@@ -91,6 +169,9 @@ func provablyOuterOnly(node plansql.Node, outerTables, innerTables map[string]bo
 	}
 	for _, r := range refs {
 		if r.Table == "" {
+			if _, ok := bodyOuter[strings.ToLower(r.Column)]; ok {
+				continue
+			}
 			return false
 		}
 		t := strings.ToLower(r.Table)
@@ -117,7 +198,7 @@ func provablyOuterOnly(node plansql.Node, outerTables, innerTables map[string]bo
 // EXISTS costs a right answer: `EXISTS (SELECT SUM(o.id) OVER () FROM z WHERE
 // z.k = o.id)` decorrelates and answers PostgreSQL's rows, and blocking on the
 // outer reference in that item refuses it (arc L1's `EXISTS/*/winsel`).
-func liftBodyOuterConditions(info *plansql.SelectInfo, outerTables, innerTables map[string]bool, readsSelectList bool) (lifted []plansql.Node, blocked string) {
+func liftBodyOuterConditions(info *plansql.SelectInfo, outerTables, innerTables map[string]bool, bodyOuter, undecided map[string]string, readsSelectList bool) (lifted []plansql.Node, blocked string) {
 	if info == nil {
 		return nil, ""
 	}
@@ -128,7 +209,8 @@ func liftBodyOuterConditions(info *plansql.SelectInfo, outerTables, innerTables 
 			// question; a clause that will not parse is one that may name
 			// anything, so it blocks rather than reading as "names nothing".
 			cond, ok := parseCondText(j.Condition)
-			if !ok || namesEnclosingQuery(cond, outerTables, innerTables) {
+			if !ok || namesEnclosingQuery(cond, outerTables, innerTables, bodyOuter) ||
+				namesUndecided(cond, undecided) {
 				return nil, "a JOIN's ON"
 			}
 			continue
@@ -137,9 +219,12 @@ func liftBodyOuterConditions(info *plansql.SelectInfo, outerTables, innerTables 
 		flattenASTNodes(j.CondExpr, &conjuncts)
 		var keep, take []plansql.Node
 		for _, c := range conjuncts {
-			if namesEnclosingQuery(c, outerTables, innerTables) {
+			if namesEnclosingQuery(c, outerTables, innerTables, bodyOuter) {
 				take = append(take, c)
 				continue
+			}
+			if namesUndecided(c, undecided) {
+				return nil, "an unqualified name in a JOIN's ON the body's namespace cannot place"
 			}
 			keep = append(keep, c)
 		}
@@ -169,14 +254,14 @@ func liftBodyOuterConditions(info *plansql.SelectInfo, outerTables, innerTables 
 	}
 	// Everything else a body can hold. Each is a place PostgreSQL reads the
 	// outer row and this rewrite has nowhere to put it.
-	if namesEnclosingQuery(info.HavingExpr, outerTables, innerTables) {
+	if namesEnclosingQuery(info.HavingExpr, outerTables, innerTables, bodyOuter) || namesUndecided(info.HavingExpr, undecided) {
 		return nil, "HAVING"
 	}
-	if namesEnclosingQuery(info.QualifyExpr, outerTables, innerTables) {
+	if namesEnclosingQuery(info.QualifyExpr, outerTables, innerTables, bodyOuter) || namesUndecided(info.QualifyExpr, undecided) {
 		return nil, "QUALIFY"
 	}
 	for _, g := range info.GroupByExprs {
-		if namesEnclosingQuery(g, outerTables, innerTables) {
+		if namesEnclosingQuery(g, outerTables, innerTables, bodyOuter) || namesUndecided(g, undecided) {
 			return nil, "GROUP BY"
 		}
 	}
@@ -186,14 +271,14 @@ func liftBodyOuterConditions(info *plansql.SelectInfo, outerTables, innerTables 
 	// has to carry, and blocking on it would decline a shape that answers.
 	if strings.TrimSpace(info.Limit) != "" || strings.TrimSpace(info.Offset) != "" {
 		for _, ob := range info.OrderBy {
-			if namesEnclosingQuery(ob.Expr, outerTables, innerTables) {
+			if namesEnclosingQuery(ob.Expr, outerTables, innerTables, bodyOuter) || namesUndecided(ob.Expr, undecided) {
 				return nil, "ORDER BY beside a bound"
 			}
 		}
 	}
 	if readsSelectList {
 		for _, c := range info.Columns {
-			if namesEnclosingQuery(c.ASTExpr, outerTables, innerTables) {
+			if namesEnclosingQuery(c.ASTExpr, outerTables, innerTables, bodyOuter) || namesUndecided(c.ASTExpr, undecided) {
 				return nil, "the SELECT list"
 			}
 		}

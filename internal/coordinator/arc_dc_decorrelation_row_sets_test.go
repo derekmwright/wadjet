@@ -58,17 +58,6 @@ const (
 	// (#614/#1045, ADR-0021 §1p), refused with its two workarounds named.
 	// Pre-existing at 6b9c7acf on all five arms.
 	dcCorrelatedDerivedRefusal = "from an enclosing query is not supported"
-	// An outer reference written WITHOUT a qualifier. The logical classifier
-	// has no catalog for the body's own relations, so it cannot tell the
-	// enclosing `total` from an inner column of the same name — and TPC-H
-	// Q02's official spelling writes every correlated key unqualified, with
-	// both names in the enclosing map, so reading an unqualified name as
-	// outer would change Q02's row set. The unqualified spelling therefore
-	// keeps the disposition it had: it goes to the build side, where the
-	// column is absent and the failure is LOUD. Closing it is a catalog at
-	// the classifier, not a spelling rule (ADR-0021 §1r). Pre-existing at
-	// 6b9c7acf.
-	dcBareOuterRefRefusal = "does not exist in the input schema"
 	// An aggregate inside a subquery whose ARGUMENT names only the enclosing
 	// query. PostgreSQL puts such an aggregate at the ENCLOSING query's
 	// level and then raises 42803 for these statements; this engine refuses
@@ -878,28 +867,6 @@ var dcRefusedCorrelatedDerived = []string{
 	"SCALARWHERE/onOuter/nestedDerived",
 }
 
-// dcRefusedBareOuterRef: the cells whose outer reference is written with NO
-// qualifier, which the classifier cannot tell from an inner column of the same
-// name. Pre-existing on all five arms at 6b9c7acf.
-var dcRefusedBareOuterRef = []string{
-	"ALL/noJoin/onBareOuter",
-	"ALL/noJoin/whereOuterBare",
-	"ALL/onOuter/onBareOuter",
-	"ALL/onOuter/whereOuterBare",
-	"ANY/noJoin/onBareOuter",
-	"ANY/noJoin/whereOuterBare",
-	"ANY/onOuter/onBareOuter",
-	"ANY/onOuter/whereOuterBare",
-	"IN/noJoin/onBareOuter",
-	"IN/noJoin/whereOuterBare",
-	"IN/onOuter/onBareOuter",
-	"IN/onOuter/whereOuterBare",
-	"NOTIN/noJoin/onBareOuter",
-	"NOTIN/noJoin/whereOuterBare",
-	"NOTIN/onOuter/onBareOuter",
-	"NOTIN/onOuter/whereOuterBare",
-}
-
 // dcRefusedOuterAggregate: the cells whose subquery aggregates an argument
 // naming only the enclosing query. PostgreSQL raises 42803 for each.
 var dcRefusedOuterAggregate = []string{
@@ -933,7 +900,6 @@ func TestArcDCADecorrelatedBodyKeepsEveryOuterReferenceOnEveryArm(t *testing.T) 
 	t.Cleanup(cancel)
 	arms := dcArms(t, ctx)
 	derived := r1Set(dcRefusedCorrelatedDerived)
-	bare := r1Set(dcRefusedBareOuterRef)
 	outerAgg := r1Set(dcRefusedOuterAggregate)
 
 	seen := make(map[string]bool, len(dcPostgresRowSets))
@@ -951,8 +917,6 @@ func TestArcDCADecorrelatedBodyKeepsEveryOuterReferenceOnEveryArm(t *testing.T) 
 				switch {
 				case derived[tc.name]:
 					refusal = dcCorrelatedDerivedRefusal
-				case bare[tc.name]:
-					refusal = dcBareOuterRefRefusal
 				case outerAgg[tc.name]:
 					refusal = dcOuterAggregateRefusal
 				}
