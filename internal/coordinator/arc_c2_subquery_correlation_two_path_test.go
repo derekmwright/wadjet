@@ -1028,18 +1028,16 @@ func c2Cells() []c2Cell {
 				`ON t.name = u.name WHERE x.id = 1) AS v FROM c2users u ORDER BY id`,
 			want:   `id,v | 1,100 | 2,42 | 3,200`,
 			routes: a2Routes{Correlated: 1}},
-		// The RIGHT JOIN twin is LOUD for a reason that is not this arc's: a
-		// substituted ON condition is `t.name = 'alice'`, which is not an
-		// equality between two bare columns, and this engine lifts such a
-		// condition into a filter above the join — legal for an INNER join
-		// only. PostgreSQL answers 100, 42, 200; main answered 100, 100, 100,
-		// the qualifier strip's constant, because the ON clause was not walked
-		// at all. Wrong to loud, with PostgreSQL's value beside it.
-		{name: "119_the_RIGHT_JOIN_twin_is_loud", // PostgreSQL: 100, 42, 200
+		// The RIGHT JOIN twin. It was LOUD here once: the substituted ON
+		// condition `t.name = 'alice'` sat in the ON of a join the body's
+		// WHERE had demoted to inner, where nothing placed it. Arc DC round 2
+		// made the demotion lift it, and the pin started agreeing with
+		// PostgreSQL on all five arms — deleted as the proof.
+		{name: "119_the_RIGHT_JOIN_twin",
 			sql: `SELECT id, (SELECT t.visits FROM c2users x RIGHT JOIN c2users t ` +
 				`ON t.name = u.name WHERE x.id = 1) AS v FROM c2users u ORDER BY id`,
-			wantErr: `cannot be represented as an equi-join key`,
-			routes:  a2Routes{Correlated: 1}},
+			want:   `id,v | 1,100 | 2,42 | 3,200`,
+			routes: a2Routes{Correlated: 1}},
 		{name: "120_ctl_the_same_ORDER_BY_with_the_column_projected",
 			sql: `SELECT id, name, (SELECT x.visits FROM c2users x ORDER BY u.name, x.id LIMIT 1) AS v ` +
 				`FROM c2users u ORDER BY id`,
