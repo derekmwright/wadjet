@@ -228,7 +228,7 @@ func writeValue(vec *batch.Vector, row int, dest any, typ parquet.TypeID) {
 			vec.Nulls.SetNull(row)
 			return
 		}
-		vec.Int64Data[row] = v.Time.UnixMicro()
+		vec.Int64Data[row] = v.Time.UnixMilli()
 
 	case parquet.TypeDate:
 		v := dest.(*sql.NullTime)

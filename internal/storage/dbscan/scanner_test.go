@@ -149,10 +149,42 @@ func TestWriteValue_Timestamp(t *testing.T) {
 	val := &sql.NullTime{Time: ts, Valid: true}
 	writeValue(b.Columns[0], 0, val, parquet.TypeTimestamp)
 
+	// The engine's TIMESTAMP carrier is epoch MILLISECONDS
+	// (batch.FormatTimestamp). This pin asserted ts.UnixMicro() — the
+	// scanner's wrong unit, 1000x — until #1266; the literal keeps the
+	// expectation from following the implementation again.
 	got := b.Columns[0].Int64Data[0]
-	want := ts.UnixMicro()
+	const want = int64(1773748800000) // 2026-03-17 12:00:00 UTC in ms
 	if got != want {
 		t.Errorf("expected %d, got %d", want, got)
+	}
+}
+
+// TestArcTSScannerStoresEpochMillis: every instant a driver hands back is
+// stored in the engine's TIMESTAMP unit, epoch MILLISECONDS — pre-1970 and
+// fractional values included, sub-millisecond digits floored toward the past
+// as the literal floors them, and a zoned value (a timestamptz in a session
+// zone) stored as its instant (#1266; the scanner stored UnixMicro).
+func TestArcTSScannerStoresEpochMillis(t *testing.T) {
+	plus2 := time.FixedZone("", 2*3600)
+	for _, tc := range []struct {
+		in   time.Time
+		want int64
+	}{
+		{time.Date(2024, 6, 15, 12, 30, 45, 0, time.UTC), 1718454645000},
+		{time.Date(2024, 6, 15, 12, 30, 45, 500_000_000, time.UTC), 1718454645500},
+		{time.Date(1969, 7, 20, 20, 17, 40, 123_000_000, time.UTC), -14182939877},
+		{time.Date(1969, 12, 31, 23, 59, 59, 999_500_000, time.UTC), -1},
+		{time.Date(1600, 2, 29, 6, 0, 0, 250_000_000, time.UTC), -11670976799750},
+		{time.Date(9999, 12, 31, 23, 59, 59, 999_000_000, time.UTC), 253402300799999},
+		{time.Date(2024, 6, 15, 14, 30, 45, 0, plus2), 1718454645000},
+	} {
+		b := batch.NewRecordBatch([]parquet.Column{{Name: "ts", Type: parquet.TypeTimestamp, Nullable: true}}, 1)
+		writeValue(b.Columns[0], 0, &sql.NullTime{Time: tc.in, Valid: true}, parquet.TypeTimestamp)
+		if got := b.Columns[0].Int64Data[0]; got != tc.want {
+			t.Errorf("%v stored %d (%s), want %d (%s)", tc.in, got, batch.FormatTimestamp(got),
+				tc.want, batch.FormatTimestamp(tc.want))
+		}
 	}
 }
 
