@@ -33,13 +33,16 @@ func TestArcRPSampleAndPastSampleShareOneGrammar(t *testing.T) {
 	cells := []struct {
 		kind, spelling, want string
 	}{
-		// read_csv: bigint by int8in
-		{"csv", "1_000", "1000"}, {"csv", " 5", "5"}, {"csv", "5 ", "5"}, {"csv", "\t5", "5"},
-		{"csv", "0x10", "16"}, {"csv", "0X1F", "31"}, {"csv", "0o17", "15"}, {"csv", "0b101", "5"},
+		// read_csv: bigint by int8in (plain decimal spellings)
+		{"csv", " 5", "5"}, {"csv", "5 ", "5"}, {"csv", "\t5", "5"}, {"csv", "+5", "5"},
 		{"csv", "017", "17"}, {"csv", "-0", "0"}, {"csv", "-9223372036854775808", "-9223372036854775808"},
+		// read_csv: a radix prefix or a digit underscore keeps the field
+		// text — usually an identifier or a flag string (0x12 TCP flags)
+		{"csv", "1_000", "1_000"}, {"csv", "0x10", "0x10"}, {"csv", "0X1F", "0X1F"},
+		{"csv", "0o17", "0o17"}, {"csv", "0b101", "0b101"}, {"csv", "0x1p-2", "0x1p-2"},
 		// read_csv: double precision by float8in
 		{"csv", "1e3", "1000"}, {"csv", "1.0", "1"}, {"csv", " 1.5 ", "1.5"}, {"csv", ".5", "0.5"},
-		{"csv", "0x1p-2", "0.25"}, {"csv", "Infinity", "+Inf"}, {"csv", "-inf", "-Inf"}, {"csv", "NaN", "NaN"},
+		{"csv", "Infinity", "+Inf"}, {"csv", "-inf", "-Inf"}, {"csv", "NaN", "NaN"},
 		{"csv", "9223372036854775808", "9.223372036854776e+18"},
 		// read_csv: text — both input functions refuse the spelling
 		{"csv", "1e-400", "1e-400"}, {"csv", "1e400", "1e400"}, {"csv", "1_000.5", "1_000.5"},
@@ -75,6 +78,46 @@ func TestArcRPSampleAndPastSampleShareOneGrammar(t *testing.T) {
 			first, last := fmt.Sprint(res.Rows[0]["c"]), fmt.Sprint(res.Rows[149]["c"])
 			if first != cell.want || last != cell.want {
 				t.Fatalf("row 1 = %q, row 150 = %q, want %q for both", first, last, cell.want)
+			}
+		})
+	}
+}
+
+// TestArcRPPastSampleReadsPostgreSQLGrammar: a column the sample typed from
+// plain decimals reads a later 0x1F, 0o17, 0b101, 1_000 or ' 5' the way
+// PostgreSQL's COPY into that type does (int8in / float8in), while the same
+// spellings in the sample would have kept the column text (above).
+func TestArcRPPastSampleReadsPostgreSQLGrammar(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, cell := range []struct{ sample, past, want string }{
+		{"7", "0x1F", "31"}, {"7", "0o17", "15"}, {"7", "0b101", "5"}, {"7", "1_000", "1000"}, {"7", " 5 ", "5"},
+		{"1.5", "0x1p-2", "0.25"}, {"1.5", "0x10", "16"}, {"1.5", " inf", "+Inf"},
+	} {
+		t.Run(cell.sample+"/"+cell.past, func(t *testing.T) {
+			var b strings.Builder
+			b.WriteString("id,c\n")
+			for i := 1; i <= 150; i++ {
+				v := cell.sample
+				if i == 120 {
+					v = cell.past
+				}
+				fmt.Fprintf(&b, "%d,\"%s\"\n", i, v)
+			}
+			path := filepath.Join(t.TempDir(), "past.csv")
+			if err := os.WriteFile(path, []byte(b.String()), 0600); err != nil {
+				t.Fatal(err)
+			}
+			res, err := db.Query(ctx, fmt.Sprintf("SELECT c FROM read_csv('%s') WHERE id = 120", path))
+			if err != nil || len(res.Rows) != 1 {
+				t.Fatalf("got %v, %v", res, err)
+			}
+			if got := fmt.Sprint(res.Rows[0]["c"]); got != cell.want {
+				t.Fatalf("row 120 %q in a column sampled from %q = %s, want %s", cell.past, cell.sample, got, cell.want)
 			}
 		})
 	}

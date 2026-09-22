@@ -446,6 +446,52 @@ func writeCSVValue(vec *batch.Vector, row int, val string, typ parquet.TypeID) e
 	return nil
 }
 
+// plainDecimal reports whether s is a number in plain decimal notation:
+// optional surrounding whitespace, an optional sign, digits with an
+// optional fraction, and an optional exponent — no radix prefix, no
+// underscore, at least one digit.
+func plainDecimal(s string) bool {
+	i, j := 0, len(s)
+	for i < j && isPGSpace(s[i]) {
+		i++
+	}
+	for j > i && isPGSpace(s[j-1]) {
+		j--
+	}
+	t := s[i:j]
+	if t != "" && (t[0] == '+' || t[0] == '-') {
+		t = t[1:]
+	}
+	digits := 0
+	k := 0
+	for k < len(t) && t[k] >= '0' && t[k] <= '9' {
+		k, digits = k+1, digits+1
+	}
+	if k < len(t) && t[k] == '.' {
+		k++
+		for k < len(t) && t[k] >= '0' && t[k] <= '9' {
+			k, digits = k+1, digits+1
+		}
+	}
+	if digits == 0 {
+		return false
+	}
+	if k < len(t) && (t[k] == 'e' || t[k] == 'E') {
+		k++
+		if k < len(t) && (t[k] == '+' || t[k] == '-') {
+			k++
+		}
+		exp := 0
+		for k < len(t) && t[k] >= '0' && t[k] <= '9' {
+			k, exp = k+1, exp+1
+		}
+		if exp == 0 {
+			return false
+		}
+	}
+	return k == len(t)
+}
+
 // isPGSpace is C isspace, the whitespace PostgreSQL's input functions skip.
 func isPGSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r'
@@ -487,14 +533,21 @@ func inferCSVSchema(header []string, rows [][]string) []parquet.Column {
 	return cols
 }
 
-// detectStringType is the inference's type for one sampled field. A number
-// is recognised with the SAME PostgreSQL input functions writeCSVValue reads
-// a field with (the kernel's int8in/float8in), so a spelling the sample
-// types as bigint or double precision is read as that type, to the same
-// value, in every later row too: ' 5', 0x1F and 1_000 are bigint; 1e-400
-// and 1e400 (outside float8) and 1_000.5 are text. Only the six true/false
-// spellings infer boolean — a narrower set than the reader accepts (it takes
-// t, yes, on, 1 …), never a wider one, so a 0/1 column stays bigint.
+// detectStringType is the inference's type for one sampled field.
+//
+// A number is recognised only in its PLAIN decimal spelling (plainDecimal:
+// surrounding whitespace, a sign, digits, a fraction, an exponent) or as
+// NaN/Infinity, and then typed and range-checked with the SAME PostgreSQL
+// input functions writeCSVValue reads later rows with (the kernel's int8in,
+// then float8in). So a spelling the sample types is read as that type, to
+// the same value, in every later row, and one neither type holds (1e-400,
+// 1e400) is text. The prefixes 0x/0o/0b and digit underscores make the
+// field text: such columns are usually identifiers or flag strings (a hex
+// id, TCP flags 0x12), and reading them as a number would reinterpret what
+// the file says — though a number column meeting 0x1F past the sample
+// reads 31, as PostgreSQL's COPY into bigint does. Only the six true/false
+// spellings infer boolean, a subset of what the reader accepts, so a 0/1
+// column stays bigint.
 func detectStringType(s string) parquet.TypeID {
 	// Try bool
 	switch s {
@@ -502,11 +555,16 @@ func detectStringType(s string) parquet.TypeID {
 		return parquet.TypeBool
 	}
 
-	// Try integer, then float, by PostgreSQL's grammar.
-	if _, st := kernel.IntLitText(s); st == kernel.NumConstOK {
-		return parquet.TypeInt64
-	}
-	if _, st := kernel.FloatLitText(s, 64); st == kernel.NumConstOK {
+	// Try integer, then float: a plain decimal (or NaN/Infinity), typed by
+	// PostgreSQL's grammar.
+	if plainDecimal(s) {
+		if _, st := kernel.IntLitText(s); st == kernel.NumConstOK {
+			return parquet.TypeInt64
+		}
+		if _, st := kernel.FloatLitText(s, 64); st == kernel.NumConstOK {
+			return parquet.TypeFloat64
+		}
+	} else if _, ok := kernel.FloatSpecialText(s); ok {
 		return parquet.TypeFloat64
 	}
 

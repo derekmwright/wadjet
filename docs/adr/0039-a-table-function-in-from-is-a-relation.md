@@ -116,9 +116,11 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    matched file and its own row), 1-based data row, column, value and both
    types. A CSV field is read with PostgreSQL's input function for bigint,
    double precision and boolean (the kernel's, which CAST uses), and the
-   sample infers a number with the same int8/float8 functions, so a spelling
-   inside the sample and its twin past it never disagree (a spelling neither
-   holds, such as `1e-400`, infers text). Integer to
+   sample infers a number — only in plain decimal spelling; `0x`/`0o`/`0b`
+   prefixes and digit underscores keep an identifier-like column text — with
+   the same int8/float8 functions, so a spelling inside the sample and its
+   twin past it never disagree (a spelling neither holds, such as `1e-400`,
+   infers text). Integer to
    fractional number is a mismatch; text columns accept every value as text.
    JSON null and empty CSV fields remain NULL, and inference within the
    sample is unchanged. COUNT(*) refuses when the reader reaches the row; a
