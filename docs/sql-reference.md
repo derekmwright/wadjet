@@ -1256,12 +1256,17 @@ subquery instead — a slower right answer:
   `WHERE` means and is carried into the join; an outer join's does not,
   because the preserved side keeps its row NULL-extended either way.
 
-All answer PostgreSQL's rows on every execution path; on a distributed
-cluster the query runs on the coordinator rather than across workers.
+All answer PostgreSQL's rows on every execution path, with one known
+exception: a subquery whose own `WITH` item or table-function alias supplies
+an unqualified name the outer query also has reads the OUTER value there —
+qualify it (`b.total`). On a distributed cluster these queries run on the
+coordinator rather than across workers.
 
 **An unqualified name binds innermost-first**, as on PostgreSQL: `WHERE total
 > 100` inside a subquery whose own relations have no `total` reads the outer
-query's `total`, wherever in the subquery it is written. The one exception is
+query's `total`, wherever in the subquery it is written — and a name the
+subquery's own tables DO have is theirs, even when the outer query has one of
+the same name. The one exception is
 a subquery that reads a table function: its columns are not known when the
 subquery is planned, so an unqualified outer name in its `WHERE` fails with
 `filter column "total" does not exist in the input schema`. Write

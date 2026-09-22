@@ -2155,7 +2155,11 @@ Q02's join order). A name the body cannot supply is read as outer in every
 clause — lifted from an inner join's `ON`, hoisted from the `WHERE`, and
 blocking in the `HAVING`, the `GROUP BY`, the SELECT list, a bounded `ORDER BY`
 and the `QUALIFY`. A name the body does publish stays the body's, whatever the
-enclosing query also has. When the namespace cannot be named completely — a
+enclosing query also has: with the namespace known, the classifier reads the
+enclosing column map RESTRICTED to the names the body cannot supply, so
+`EXISTS (SELECT 1 FROM dc_side c WHERE id = c.j)` is `c.id = c.j` and not
+`o.id = c.j` (round 3; round 2 applied the rule in the outward direction only
+and answered 3 rows for PostgreSQL's 5). When the namespace cannot be named completely — a
 table function in the body's FROM, whose columns are its call's or its input's
 and are not re-read to answer this — an unqualified enclosing name in a clause
 the rewrite cannot classify declines to the per-row rerun; in the `WHERE` it
@@ -2167,6 +2171,15 @@ a `HAVING` the aggregate rewrite dropped it (every row), in the SELECT list it
 became a key the build side lacks (zero rows) — silent, on every arm (arc DC
 round 1, B1).
 
+**TWO KEYS, ONE BUILD.** A correlated IN whose IN key and correlation key are
+two integer pairs (`semi ON j = id AND j = id`) is a two-integer-key join, and
+when the reorderer builds the enclosing side (RIGHT SEMI) the probe arm that
+marks matched build rows had no two-integer case and marked nothing — the
+single-process arms answered EMPTY for a self-join body. Round 2's hoist took
+shapes that used to be refused onto that path; the executor arm is fixed
+(`markKeyMatchedLocked` now IS `markKeyMatched`) and the review's cells are
+gated on five arms and nine doors.
+
 **A DECLINE IS RIGHT BECAUSE THE RERUN CAN EXECUTE IT.** The per-row rerun
 substitutes the outer values, so `o.total > 100` in a body `RIGHT JOIN`'s `ON`
 becomes `100 > 100`. When the body's `WHERE` rejects that join's padding,
@@ -2177,6 +2190,13 @@ inner join's `ON` with nothing to place it, and the physical planner refused
 the statement. The demotion now lifts it itself, as the inner join it has
 become; the same fix answers the plain `RIGHT JOIN … ON c.j = b.k AND 100 >
 100 WHERE b.tag = 10`, which refused before any subquery was involved.
+
+One rerun boundary is known and filed rather than claimed: the per-row rerun
+substitutes the enclosing value for a name the body supplies through its OWN
+`WITH` item or a table function's alias (`o.id IN (WITH d AS (SELECT k, amt AS
+total FROM dc_in) SELECT b.k FROM d b JOIN dc_side c ON c.j = b.k AND total >
+100 WHERE b.k = o.id)` answers `2` for PostgreSQL's `1 | 2`), because the
+rerun's substitution walk does not see those names as the body's.
 
 **WHAT MOVES AND WHAT DOES NOT.** The optimized logical plans of all 22
 TPC-H queries, under the catalog annotator, are byte-identical to the ones at
