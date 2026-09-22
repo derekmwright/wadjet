@@ -5,11 +5,13 @@ package csv
 import (
 	"bytes"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -18,6 +20,15 @@ import (
 )
 
 const defaultBatchSize = 2048
+
+// sampleSize is the number of leading data rows a column's type is
+// inferred from. A value in a later row that does not parse as that type is
+// a 22P02 (see buildBatch).
+const sampleSize = 100
+
+// errNotType is writeCSVValue's answer for a field that does not parse as
+// the column's type.
+var errNotType = errors.New("value does not parse as the column's type")
 
 var (
 	ipv4Re            = regexp.MustCompile(`^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$`)
@@ -50,7 +61,7 @@ type Reader struct {
 	colIdx   map[string]int
 	rows     [][]string // all data rows (excluding header) — used for []byte path
 	offset   int
-	readRows int
+	readRows int         // data rows already built into batches
 	cr       *csv.Reader // streaming csv reader — used for io.Reader path
 }
 
@@ -146,8 +157,7 @@ func NewStreamReader(r io.Reader, cfg ReaderConfig) (*Reader, error) {
 		sampleRows = append(sampleRows, row)
 	}
 
-	// Read sample rows for schema inference (up to 100)
-	const sampleSize = 100
+	// Read sample rows for schema inference (up to sampleSize)
 	for len(sampleRows) < sampleSize {
 		record, err := cr.Read()
 		if err != nil {
@@ -253,8 +263,21 @@ func (r *Reader) buildBatch(chunk [][]string) (*batch.RecordBatch, error) {
 				}
 				continue
 			}
-			if err := writeCSVValue(b.Columns[col], row, val, sc.Type); err != nil && r.readRows+row+1 > 100 {
-				return nil, sqlerr.New("22P02", "read_csv: row %d column %q: value %q (%s) is not a %s (the column's type was inferred from the file's first 100 rows)", r.readRows+row+1, sc.Name, val, detectStringType(val), sc.Type)
+			err := writeCSVValue(b.Columns[col], row, val, sc.Type)
+			if err == nil {
+				continue
+			}
+			// Inside the sample a field that does not parse keeps the
+			// NULL it has always read as (a "true" in a column the sample
+			// widened to bigint); past it the field is refused, as
+			// PostgreSQL's COPY refuses it.
+			if !errors.Is(err, errNotType) {
+				return nil, err
+			}
+			if fileRow := r.readRows + row + 1; fileRow > sampleSize {
+				return nil, sqlerr.New("22P02",
+					"row %d column %q: value %q (%s) is not of type %s (the column's type was inferred from the file's first %d rows)",
+					fileRow, sc.Name, val, sqlTypeName(detectStringType(val)), sqlTypeName(sc.Type), sampleSize)
 			}
 		}
 	}
@@ -262,6 +285,9 @@ func (r *Reader) buildBatch(chunk [][]string) (*batch.RecordBatch, error) {
 	return b, nil
 }
 
+// writeCSVValue parses val as typ into vec at row. A field that does not
+// parse is set NULL and answers errNotType; the caller decides whether that
+// is the NULL (inside the sample) or a refusal (past it).
 func writeCSVValue(vec *batch.Vector, row int, val string, typ parquet.TypeID) error {
 	if row < 0 || row >= vec.Len || (typ == parquet.TypeString && row+1 >= len(vec.BytesData.Offsets)) {
 		return fmt.Errorf("CSV row index %d outside vector length %d", row, vec.Len)
@@ -274,32 +300,33 @@ func writeCSVValue(vec *batch.Vector, row int, val string, typ parquet.TypeID) e
 		case "false", "FALSE", "False", "0", "no", "NO":
 			vec.BoolData[row] = false
 		default:
-			return fmt.Errorf("invalid boolean")
+			vec.Nulls.SetNull(row)
+			return errNotType
 		}
 	case parquet.TypeInt64:
 		n, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
 			vec.Nulls.SetNull(row)
-			return fmt.Errorf("invalid %s", typ)
+			return errNotType
 		}
 		vec.Int64Data[row] = n
 	case parquet.TypeFloat64:
 		f, err := strconv.ParseFloat(val, 64)
 		if err != nil {
 			vec.Nulls.SetNull(row)
-			return fmt.Errorf("invalid %s", typ)
+			return errNotType
 		}
 		vec.Float64Data[row] = f
 	case parquet.TypeIPv4:
 		ip := net.ParseIP(val)
 		if ip == nil {
 			vec.Nulls.SetNull(row)
-			return fmt.Errorf("invalid %s", typ)
+			return errNotType
 		}
 		ip4 := ip.To4()
 		if ip4 == nil {
 			vec.Nulls.SetNull(row)
-			return fmt.Errorf("invalid %s", typ)
+			return errNotType
 		}
 		vec.Int64Data[row] = int64(uint32(ip4[0])<<24 | uint32(ip4[1])<<16 | uint32(ip4[2])<<8 | uint32(ip4[3]))
 	case parquet.TypeTimestamp:
@@ -310,7 +337,7 @@ func writeCSVValue(vec *batch.Vector, row int, val string, typ parquet.TypeID) e
 			}
 		}
 		vec.Nulls.SetNull(row)
-		return fmt.Errorf("invalid timestamp")
+		return errNotType
 	default: // TypeString and everything else
 		vec.BytesData.Set(row, []byte(val))
 	}
@@ -318,11 +345,7 @@ func writeCSVValue(vec *batch.Vector, row int, val string, typ parquet.TypeID) e
 }
 
 func inferCSVSchema(header []string, rows [][]string) []parquet.Column {
-	sampleSize := 100
-	if len(rows) < sampleSize {
-		sampleSize = len(rows)
-	}
-	sample := rows[:sampleSize]
+	sample := rows[:min(sampleSize, len(rows))]
 
 	cols := make([]parquet.Column, len(header))
 	for i, name := range header {
@@ -401,6 +424,26 @@ func promoteType(a, b parquet.TypeID) parquet.TypeID {
 	}
 	// Everything else falls back to string
 	return parquet.TypeString
+}
+
+// sqlTypeName is the SQL name of a type the reader infers, as the relation
+// declares it to a client.
+func sqlTypeName(t parquet.TypeID) string {
+	switch t {
+	case parquet.TypeBool:
+		return "boolean"
+	case parquet.TypeInt64:
+		return "bigint"
+	case parquet.TypeFloat64:
+		return "double precision"
+	case parquet.TypeString:
+		return "text"
+	case parquet.TypeIPv4:
+		return "inet"
+	case parquet.TypeTimestamp:
+		return "timestamp"
+	}
+	return strings.ToLower(t.String())
 }
 
 func isNumeric(t parquet.TypeID) bool {

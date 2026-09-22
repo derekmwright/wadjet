@@ -12,6 +12,7 @@ import (
 	"math"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -89,7 +90,7 @@ func (r *Reader) Next() (*batch.RecordBatch, error) {
 			continue
 		}
 		for _, col := range r.schema {
-			if err := checkValue(values[col.Name], col, r.offset+i+1); err != nil {
+			if err := checkValue(values[col.Name], col, columnLabel(col.Name), r.offset+i+1, defaultSampleSize); err != nil {
 				return nil, err
 			}
 		}
@@ -399,7 +400,7 @@ func NewReaderFromBytesWithCoercion(data []byte) (*Reader, error) {
 	schema := inferSchema(rows, defaultSampleSize)
 	for i := defaultSampleSize; i < len(rows); i++ {
 		for _, col := range schema {
-			if err := checkValue(rows[i][col.Name], col, i+1); err != nil {
+			if err := checkValue(rows[i][col.Name], col, columnLabel(col.Name), i+1, defaultSampleSize); err != nil {
 				return nil, err
 			}
 		}
@@ -411,44 +412,104 @@ func NewReaderFromBytesWithCoercion(data []byte) (*Reader, error) {
 	}, nil
 }
 
-// checkValue checks a non-null value against the sampled column before conversion.
-// String columns accept every value through its text form.
-func checkValue(v any, col parquet.Column, row int) error {
+// checkValue reports whether a non-NULL value read past the inference sample
+// fits the column the sample inferred, BEFORE anything converts or writes
+// it. A value that does not fit is a 22P02 naming the 1-based row, the
+// column (and the nested element or field), the value and both types; the
+// sample itself keeps the widening inference gave it, so only rows past
+// `sampled` reach this. A string column accepts every value as its text
+// form, and a double precision column accepts a whole number. Everything
+// else must be the inferred type exactly: an integer column meeting 0.75 or
+// true is a mismatch, as PostgreSQL's COPY refuses '0.75' for a bigint.
+func checkValue(v any, col parquet.Column, label string, row, sampled int) error {
 	if v == nil || col.Type == parquet.TypeString {
 		return nil
 	}
-	observed := detectType(v)
+	var observed parquet.TypeID
 	switch value := v.(type) {
 	case json.Number:
 		observed = detectTokenType(value)
-		if _, err := value.Float64(); err != nil {
-			return valueError(value, observed, col, row)
+		if observed == parquet.TypeFloat64 {
+			// A number no float64 holds (1e999) fits no column but text.
+			if _, err := value.Float64(); err != nil {
+				return valueError(displayValue(v), "numeric", col, label, row, sampled)
+			}
 		}
 	case []any:
-		observed = parquet.TypeArray
-		if col.Type == parquet.TypeArray && col.ElementType != nil {
+		if col.Type != parquet.TypeArray {
+			return valueError(displayValue(v), "array", col, label, row, sampled)
+		}
+		if col.ElementType != nil {
 			for _, element := range value {
-				if err := checkValue(element, *col.ElementType, row); err != nil {
-					return fmt.Errorf("column %q: %w", col.Name, err)
+				if err := checkValue(element, *col.ElementType, label+" element", row, sampled); err != nil {
+					return err
 				}
 			}
 		}
+		return nil
 	case map[string]any:
-		observed = parquet.TypeRow
-		if col.Type == parquet.TypeRow {
-			for _, field := range col.Fields {
-				if err := checkValue(value[field.Name], field, row); err != nil {
-					return fmt.Errorf("column %q: %w", col.Name, err)
-				}
+		if col.Type != parquet.TypeRow {
+			return valueError(displayValue(v), "object", col, label, row, sampled)
+		}
+		for _, field := range col.Fields {
+			if err := checkValue(value[field.Name], field, fmt.Sprintf("%s field %q", label, field.Name), row, sampled); err != nil {
+				return err
 			}
 		}
+		return nil
+	default:
+		observed = detectType(v)
 	}
 	if observed == col.Type || (col.Type == parquet.TypeFloat64 && observed == parquet.TypeInt64) {
 		return nil
 	}
-	return valueError(v, observed, col, row)
+	return valueError(displayValue(v), sqlTypeName(observed), col, label, row, sampled)
 }
 
-func valueError(v any, observed parquet.TypeID, col parquet.Column, row int) error {
-	return sqlerr.New("22P02", "read_json: row %d column %q: value %v (%s) is not a %s (the column's type was inferred from the file's first 100 rows)", row, col.Name, v, observed, col.Type)
+// valueError is the refusal for a value past the sample that does not fit
+// its column. The caller (read_json) prefixes the reader and the input.
+func valueError(value, observed string, col parquet.Column, label string, row, sampled int) error {
+	return sqlerr.New("22P02",
+		"row %d %s: value %s (%s) is not of type %s (the column's type was inferred from the file's first %d rows)",
+		row, label, value, observed, sqlTypeName(col.Type), sampled)
+}
+
+func columnLabel(name string) string { return fmt.Sprintf("column %q", name) }
+
+// displayValue renders a JSON value the way it appears in the input: a
+// string quoted, a number and a boolean bare, an array or object as JSON.
+func displayValue(v any) string {
+	switch value := v.(type) {
+	case string:
+		return strconv.Quote(value)
+	case []any, map[string]any:
+		if raw, err := json.Marshal(value); err == nil {
+			return string(raw)
+		}
+	}
+	return fmt.Sprint(v)
+}
+
+// sqlTypeName is the SQL name of a type the reader infers, as the relation
+// declares it to a client.
+func sqlTypeName(t parquet.TypeID) string {
+	switch t {
+	case parquet.TypeBool:
+		return "boolean"
+	case parquet.TypeInt64:
+		return "bigint"
+	case parquet.TypeFloat64:
+		return "double precision"
+	case parquet.TypeString:
+		return "text"
+	case parquet.TypeIPv4:
+		return "inet"
+	case parquet.TypeTimestamp:
+		return "timestamp"
+	case parquet.TypeArray:
+		return "array"
+	case parquet.TypeRow:
+		return "record"
+	}
+	return strings.ToLower(t.String())
 }

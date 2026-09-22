@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -26,11 +27,13 @@ const (
 // of the whole file plus a full columnar copy (issue #130 — read_json
 // materialized ~2-3× the input in heap).
 //
-// Schema semantics match the eager reader exactly: inferred from the first
+// Schema semantics match the eager reader's: inferred from the first
 // defaultSampleSize complete objects (the eager path samples the same
-// prefix), capped at maxSampleBytes of buffered input. Values are parsed by
-// the same scanObjectInto byte scanner, so output batches are identical to
-// NewColumnarReader's for the same input.
+// prefix), except that buffering stops at maxSampleBytes — then the sample
+// is the complete objects that fit, and `sampled` records how many, since
+// every row past it is checked against the schema (22P02 on a mismatch).
+// Values are parsed by the same scanObjectInto byte scanner, so output
+// batches are identical to NewColumnarReader's whenever the samples agree.
 type StreamReader struct {
 	r      io.Reader
 	schema []parquet.Column
@@ -44,7 +47,8 @@ type StreamReader struct {
 
 	isArray     bool
 	openSkipped bool // leading '[' consumed
-	fileRow     int
+	fileRow     int  // 1-based row of the last object scanned
+	sampled     int  // leading rows the schema was inferred from
 	done        bool
 
 	chunkSize int // test hook; defaults to streamChunkBytes
@@ -89,6 +93,9 @@ func newStreamReaderSized(r io.Reader, chunkSize int) (*StreamReader, error) {
 		prefixEnd = sr.filled
 	}
 	schema, err := inferSchemaTokens(sr.buf[sr.start:prefixEnd], sr.isArray, defaultSampleSize)
+	// The sample is the complete objects inference saw: 100, or fewer when
+	// the first 100 exceed maxSampleBytes. Every row past it is checked.
+	sr.sampled = min(nObjs, defaultSampleSize)
 	if err != nil {
 		return nil, fmt.Errorf("schema inference: %w", err)
 	}
@@ -125,8 +132,11 @@ func (sr *StreamReader) Next() (*batch.RecordBatch, error) {
 			break
 		}
 		sr.fileRow++
-		sc := &jsonScanner{data: sr.buf[:objEnd], pos: objStart, fileRow: sr.fileRow}
+		sc := &jsonScanner{data: sr.buf[:objEnd], pos: objStart, fileRow: sr.fileRow, sampled: sr.sampled}
 		if err := scanObjectInto(sc, rb, row, sr.schema, sr.colIdx, sr.seen); err != nil {
+			if sqlerr.StateOf(err) != "" {
+				return nil, err // already names its row
+			}
 			return nil, fmt.Errorf("row %d: %w", sc.fileRow, err)
 		}
 		sr.start = objEnd

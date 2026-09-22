@@ -14,6 +14,17 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
+// TestArcRPPastSampleQueries: the 5050.75 fixture of #1242 through the
+// embedded API — 100 whole numbers, then 0.75 — answers 22P02 for SUM and
+// COUNT(*), naming the reader, the file, the row and the column; at 16b924d1
+// SUM answered 5050 and COUNT(*) 101.
+//
+// A LIMIT answers rows when the reader never reaches the row. The pipeline
+// reads ONE batch past the batch that satisfies the LIMIT (exec.Limit reports
+// Done on the push after the one that fills it), so LIMIT 1 reads the
+// reader's first two batches: rows 1-2048 and 2049-4096 of read_json, and
+// rows 1-100 (the CSV reader's buffered sample) and 101-2148 of read_csv. A
+// change inside those refuses; one past them is never read.
 func TestArcRPPastSampleQueries(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
@@ -49,7 +60,6 @@ func TestArcRPPastSampleQueries(t *testing.T) {
 						sql += " LIMIT 1"
 					}
 					result, err := db.Query(ctx, sql)
-					// The pipeline pulls another batch before the LIMIT stops execution.
 					stopsBefore := query == "SELECT a" && ((kind == "csv" && row > 2148) || row > 4096)
 					if stopsBefore {
 						if err != nil {
@@ -63,7 +73,11 @@ func TestArcRPPastSampleQueries(t *testing.T) {
 					if sqlerr.StateOf(err) != "22P02" {
 						t.Fatalf("want 22P02, got result=%+v err=%v", result, err)
 					}
-					for _, part := range []string{"read_" + kind, path, fmt.Sprintf("row %d", row), `column "a"`} {
+					want := []string{
+						fmt.Sprintf("read_%s: %s: row %d column \"a\": value ", kind, path, row),
+						"(double precision) is not of type bigint (the column's type was inferred from the file's first 100 rows)",
+					}
+					for _, part := range want {
 						if !strings.Contains(err.Error(), part) {
 							t.Errorf("missing %q: %v", part, err)
 						}
