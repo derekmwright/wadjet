@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
@@ -214,7 +213,7 @@ func TestArcRPCSVFieldGrammar(t *testing.T) {
 				case v.Nulls.IsNull(rb.Len - 1):
 					got = "NULL"
 				case len(v.Int64Data) > 0 && rb.Schema[0].Type == parquet.TypeTimestamp:
-					got = time.UnixMicro(v.Int64Data[rb.Len-1]).UTC().Format("2006-01-02")
+					got = batch.FormatTimestamp(v.Int64Data[rb.Len-1])[:10] // the engine's unit (#1266)
 				case len(v.Int64Data) > 0:
 					got = fmt.Sprint(v.Int64Data[rb.Len-1])
 				case len(v.Float64Data) > 0:

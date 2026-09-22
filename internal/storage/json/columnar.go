@@ -821,7 +821,7 @@ func coerceToColumn(val any, col parquet.Column) any {
 		case string:
 			for _, layout := range timestampPatterns {
 				if t, err := time.Parse(layout, tv); err == nil {
-					return t.UnixMicro() // the scalar path's unit
+					return parquet.WallClockMillis(t)
 				}
 			}
 			return nil
@@ -881,7 +881,7 @@ func writeStringValue(sc *jsonScanner, vec *batch.Vector, row int, colType parqu
 		}
 		for _, layout := range timestampPatterns {
 			if t, err := time.Parse(layout, str); err == nil {
-				vec.Int64Data[row] = t.UnixMicro()
+				vec.Int64Data[row] = parquet.WallClockMillis(t)
 				return true
 			}
 		}

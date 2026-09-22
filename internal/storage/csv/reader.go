@@ -434,7 +434,7 @@ func writeCSVValue(vec *batch.Vector, row int, val string, typ parquet.TypeID) e
 		}
 		for _, layout := range timestampPatterns {
 			if t, err := time.Parse(layout, val); err == nil {
-				vec.Int64Data[row] = t.UnixMicro()
+				vec.Int64Data[row] = parquet.WallClockMillis(t)
 				return nil
 			}
 		}

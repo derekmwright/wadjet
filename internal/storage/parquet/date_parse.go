@@ -548,24 +548,28 @@ func ParseTimestampMillisOrZero(s string) int64 {
 	return ms
 }
 
-// timestampWallClockMillis reads a parsed timestamp as PostgreSQL's
-// `timestamp without time zone` does: the WALL-CLOCK FIELDS are the value and
-// any offset the literal carried is DISCARDED.
+// WallClockMillis reads a parsed timestamp as PostgreSQL's
+// `timestamp without time zone` does and returns it in the engine's ONE
+// TIMESTAMP unit, epoch MILLISECONDS: the WALL-CLOCK FIELDS are the value and
+// any offset the text carried is DISCARDED.
 //
 // `time.Parse(RFC3339, "2020-01-01T05:30:00+05:30")` yields 05:30 in a fixed
 // +05:30 zone, and UnixMilli then converts it to the UTC INSTANT — midnight —
-// so wadjet stored a different timestamp than the literal spells. PostgreSQL
-// stores 05:30:00, and `'…+05:30'::timestamp` = `2020-01-01 05:30:00` is
-// verifiable on any server. This engine's TIMESTAMP is declared as
-// `timestamp without time zone` on the wire, so it has to mean what that type
-// means (ADR-0012: PostgreSQL decides). A literal spelling `Z` is unaffected —
-// discarding a zero offset changes nothing.
-func timestampWallClockMillis(t time.Time) int64 {
+// so a producer that stops there stores a different timestamp than the text
+// spells. PostgreSQL stores 05:30:00, and `'…+05:30'::timestamp` =
+// `2020-01-01 05:30:00` is verifiable on any server. A text spelling `Z` is
+// unaffected — discarding a zero offset changes nothing.
+//
+// It is the write the file readers (read_csv, read_json) make after matching
+// one of their own layouts, so a field and the TIMESTAMP literal with the same
+// text are the same stored value (#1266: they stored t.UnixMicro(), 1000x the
+// carrier). Sub-millisecond digits are FLOORED — UnixMilli counts whole
+// milliseconds toward the past, pre-1970 included — the same as
+// ParseTimestampMillis.
+func WallClockMillis(t time.Time) int64 {
 	return time.Date(t.Year(), t.Month(), t.Day(),
 		t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC).UnixMilli()
 }
-
-var _ = timestampWallClockMillis
 
 // timestampFieldsOutOfRange reports whether text SHAPED like a timestamp names
 // field values no calendar or clock has — 2020-02-30, month 13, hour 25 —
