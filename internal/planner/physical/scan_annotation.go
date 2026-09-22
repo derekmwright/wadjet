@@ -65,7 +65,15 @@ func (p *Planner) annotateScanColumns(ctx context.Context, node *logical.Node) {
 			}
 		}
 	}
-	if node.Type == logical.NodeScan && node.TableName != "" && !node.IsTableFunc {
+	if node.Type == logical.NodeScan && node.RecursiveCTE != nil {
+		// A RECURSIVE CTE reference is not a catalog table, even when a table
+		// of the same name exists, and its column types are the ones its
+		// materialization DECLARED — the anchor's. Without them every
+		// expression over the reference fell to the untyped rule: `n + 1`
+		// over an integer column was declared float8, which the old boxed
+		// loop then truncated back into the anchor's integer (#1246's arc).
+		p.stampRecursiveReference(node)
+	} else if node.Type == logical.NodeScan && node.TableName != "" && !node.IsTableFunc {
 		// CANONICALIZE first, once, in place: everything below this pass keys
 		// off Node.TableName — the manifest lookup, the pruner, the worker's
 		// scan — so conceding at each door would be a different name at each
@@ -112,6 +120,24 @@ func (p *Planner) annotateScanColumns(ctx context.Context, node *logical.Node) {
 	for _, child := range node.Children {
 		p.annotateScanColumns(ctx, child)
 	}
+}
+
+// stampRecursiveReference types a recursive CTE reference from the
+// materialization the planner holds for it — the working table while the
+// fixed point iterates, the closure afterwards — and leaves it untouched when
+// there is none yet.
+func (p *Planner) stampRecursiveReference(node *logical.Node) {
+	if node == nil || node.Type != logical.NodeScan || node.RecursiveCTE == nil {
+		return
+	}
+	mat := p.nestedCTECache[node.RecursiveCTE]
+	if mat == nil {
+		mat = p.cteCache[node.CTEName]
+	}
+	if mat == nil || len(mat.schema) == 0 {
+		return
+	}
+	stampScanSchema(node, mat.schema)
 }
 
 // stampScanSchema records one relation's column list on a Scan node: the names

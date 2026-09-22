@@ -299,6 +299,15 @@ func (p *Planner) buildSubqueryPipeline(ctx context.Context, sql string) (exec.S
 // decision recorded there — PostgreSQL's GROUP BY precedence, which needs a
 // schema the parser does not have — reaches this path too (#851).
 func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.SelectInfo) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
+	source, ops, sink, _, err := p.buildSubqueryPipelineForPlan(ctx, info)
+	return source, ops, sink, err
+}
+
+// buildSubqueryPipelineForPlan is buildSubqueryPipelineFor that also hands back
+// the optimized LOGICAL plan, for a caller that needs what the plan DECLARES —
+// its output types and published names — and not only what a run emits: a
+// recursive CTE's arms, whose zero-row answer still has a schema.
+func (p *Planner) buildSubqueryPipelineForPlan(ctx context.Context, info *plansql.SelectInfo) (exec.Source, []exec.UnaryOperator, exec.Sink, *logical.Node, error) {
 	var err error
 
 	// Build logical plan — merge outer CTEs so subqueries can reference
@@ -311,7 +320,7 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 		logicalPlan, err = logical.BuildFromSelect(info)
 	}
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("subquery plan error: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("subquery plan error: %w", err)
 	}
 
 	// Annotate scan nodes with column metadata so the optimizer can resolve
@@ -341,12 +350,12 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 			if err := ValidateColumnsUnderPolicy(ctx, p.Catalog, info, func(table string) map[string]bool {
 				return denied[strings.ToLower(table)]
 			}, nil); err != nil {
-				return nil, nil, nil, err
+				return nil, nil, nil, nil, err
 			}
 		}
 		logicalPlan, err = p.ApplyContextColumnPolicies(ctx, logicalPlan)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 	}
 
@@ -359,14 +368,14 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 || logical.PolicyLookupFromContext(ctx) != nil {
 		logicalPlan, err = p.ApplyContextColumnPoliciesToNewScans(ctx, logicalPlan)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 		// The invariant over THIS plan too. A subquery's predicates are
 		// pushed here, and one that ends up between a security projection and
 		// its scan reads the stored column exactly as it would in the outer
 		// plan (#859 round 4).
 		if err := p.CheckPolicyPlanOrderFromContext(ctx, logicalPlan); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 	}
 
@@ -378,9 +387,9 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 		// here — is the decision's own sentence, not a planning narrative
 		// about the subquery (ADR-0034 item 6; round-1 P1).
 		if sqlerr.StateOf(err) == "42501" {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
-		return nil, nil, nil, fmt.Errorf("subquery execution plan error: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("subquery execution plan error: %w", err)
 	}
 
 	// A SUBQUERY'S RESULT IS ITS SELECT LIST, and nothing else (#875).
@@ -403,7 +412,7 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 	if trim := hiddenSortTrimOp(logicalPlan); trim != nil {
 		ops = append(ops, trim)
 	}
-	return source, ops, sink, nil
+	return source, ops, sink, logicalPlan, nil
 }
 
 // executeSubquery parses and executes a SQL subquery, returning result rows.
@@ -451,8 +460,8 @@ func (p *Planner) ExecuteSubquerySchema(ctx context.Context, sql string) ([]map[
 // Use CollectSink.ToRowValues for duplicate names; unique names cost no conversion.
 // Duplicate keys gain :N (column position), outside binder-resolvable identifiers.
 // Consumers of these rows iterate; materializeInSubquery first requires one column.
-// This is not a rule for all runner rows: recursive-CTE materialization reads by
-// name, bypasses this seam and has its own duplicate-name collapse limitation.
+// A recursive CTE's materialization does not come this way at all: it runs its
+// arms columnar and reads positions, never names (recursive_cte_iteration.go).
 // See docs/internals/positional-subquery-row-boxing.md for the design.
 func subqueryRowsPerColumn(schema []parquet.Column, sink *exec.CollectSink) []map[string]any {
 	rows := sink.ToRows()

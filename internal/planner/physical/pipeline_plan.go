@@ -21,6 +21,10 @@ func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.S
 	// same data; the boxed form (recursive work table) keeps SliceSource.
 	if node.CTEName != "" {
 		if mat, ok := p.cteCache[node.CTEName]; ok {
+			// The reference's declared types are the materialization's, and
+			// every declaration walk above reads them off this node after it
+			// is built (scan_annotation.go's stampRecursiveReference).
+			p.stampRecursiveReference(node)
 			if mat.coll != nil {
 				return mat.coll.NewReplaySource(), nil, &exec.CollectSink{}, nil
 			}

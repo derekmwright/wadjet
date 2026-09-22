@@ -39,6 +39,7 @@ func (p *Planner) buildNestedRecursiveCTE(ctx context.Context, node *logical.Nod
 	}
 	def := node.RecursiveCTE
 	if mat, ok := p.nestedCTECache[def]; ok {
+		p.stampRecursiveReference(node)
 		return nestedCTESource(mat), nil, &exec.CollectSink{}, nil, true
 	}
 	if p.cteCache == nil {
@@ -99,6 +100,7 @@ func (p *Planner) buildNestedRecursiveCTE(ctx context.Context, node *logical.Nod
 		p.nestedCTECache = make(map[*plansql.CTEDef]*cteMaterialized)
 	}
 	p.nestedCTECache[def] = mat
+	p.stampRecursiveReference(node)
 	return nestedCTESource(mat), nil, &exec.CollectSink{}, nil, true
 }
 

@@ -27,6 +27,14 @@ import (
 // from the owner's Close and error paths.
 type SpillableBatchCollector struct {
 	Spill *memory.SpillManager // optional; nil = plain in-memory buffering
+	// RunBytes, when >0 and below the sort-run floor, is the least a drain
+	// writes. The floor keeps a merged spill's runs I/O-friendly; a collector
+	// whose runs are only ever replayed in order has no merge to keep cheap,
+	// and one that holds a result under a SMALL budget must drain well before
+	// the floor, or everything else in the query is refused while it holds
+	// the budget in forced tracking (a recursive CTE's closure,
+	// physical/recursive_cte_iteration.go).
+	RunBytes int64
 
 	mu         sync.Mutex
 	schema     []parquet.Column
@@ -68,7 +76,11 @@ func (c *SpillableBatchCollector) Consume(_ context.Context, b *batch.RecordBatc
 	c.trackedMem += cost
 	// Same drain shape as Sort.Consume: accumulate at least a run's worth
 	// before flushing so spill files stay I/O-friendly.
-	if c.Spill.ShouldSpillFor(memory.SpillCheap) && c.trackedMem >= minSortRunBytes {
+	floor := minSortRunBytes
+	if c.RunBytes > 0 && c.RunBytes < floor {
+		floor = c.RunBytes
+	}
+	if c.Spill.ShouldSpillFor(memory.SpillCheap) && c.trackedMem >= floor {
 		return c.drainToDiskLocked()
 	}
 	return nil

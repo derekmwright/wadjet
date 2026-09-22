@@ -5,8 +5,6 @@ package physical
 
 import (
 	"context"
-	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -128,7 +126,7 @@ func (p *Planner) materializeCTEColumnar(ctx context.Context, sql string,
 		// Empty result: no batch ever arrived, so derive column names from
 		// the SQL like the boxed path did — downstream projection still
 		// needs the names to resolve.
-		schema = p.inferCTESchema(sql, nil)
+		schema = p.inferCTESchema(sql)
 	}
 	return coll, schema, nil
 }
@@ -221,8 +219,11 @@ func (s *cteMaterializingSink) Finalize(ctx context.Context) error { return s.co
 
 func (s *cteMaterializingSink) Close() error { return s.coll.Close() }
 
-// inferCTESchema derives column types from a CTE's SQL and data rows.
-func (p *Planner) inferCTESchema(sql string, rows []map[string]any) []parquet.Column {
+// inferCTESchema derives a CTE's column NAMES from its SQL, for a
+// non-recursive materialization whose body produced no batch. The types are
+// not known here and are declared text; a recursive CTE never comes this way —
+// its schema is its seed's (recursive_cte_iteration.go).
+func (p *Planner) inferCTESchema(sql string) []parquet.Column {
 	pq, err := plansql.Parse(sql)
 	if err != nil {
 		return nil
@@ -233,77 +234,22 @@ func (p *Planner) inferCTESchema(sql string, rows []map[string]any) []parquet.Co
 	}
 	// A SET OPERATION publishes its LEFT arm's names, which is PostgreSQL's
 	// rule and the one `plansql.BlockOutputColumns` already states. The union
-	// node itself carries no SELECT list, so a multi-arm anchor —
-	// `SELECT 1 AS v UNION ALL SELECT 2`, which the left-associative form test
-	// makes the non-recursive term of a three-arm body — gave a schema of
+	// node itself carries no SELECT list, so a multi-arm body gave a schema of
 	// ZERO columns and the reference answered "the result has no columns"
 	// (round-2 review, B3).
 	for info.Union != nil && info.Union.Left != nil {
 		info = info.Union.Left
 	}
 	schema := make([]parquet.Column, len(info.Columns))
-	names := make([]string, len(info.Columns))
 	for i, col := range info.Columns {
-		names[i] = col.Alias
-		if names[i] == "" {
-			names[i] = col.Expr
+		name := col.Alias
+		if name == "" {
+			name = col.Expr
 		}
-	}
-	// The key each POSITION appears under in the rows executeSubquery
-	// returns. Two output columns may share a name — `SELECT 1 AS x, 10 AS x`
-	// is legal SQL — and a row is a Go map, so the second would overwrite the
-	// first; subqueryRowsPerColumn suffixes every later duplicate with its
-	// position for exactly that reason. Reading by the bare NAME here made
-	// both positions answer with the FIRST column's value, which is #957.
-	keys := subqueryRowKeys(names)
-	for i := range info.Columns {
-		name := names[i]
-		key := keys[i]
-		typ := parquet.TypeString
-		if len(rows) > 0 {
-			if v, ok := rows[0][key]; ok {
-				switch v.(type) {
-				case int64:
-					typ = parquet.TypeInt64
-				case int32:
-					typ = parquet.TypeInt32
-				case float64:
-					typ = parquet.TypeFloat64
-				case bool:
-					typ = parquet.TypeBool
-				case string:
-					// Check if the string value is actually a numeric literal
-					// (SELECT 1 returns "1" as a string from the expression evaluator)
-					s := v.(string)
-					if _, err := strconv.ParseInt(s, 10, 64); err == nil {
-						typ = parquet.TypeInt64
-						// Convert all rows' values from string to int64
-						for _, row := range rows {
-							if sv, ok := row[key].(string); ok {
-								if iv, err := strconv.ParseInt(sv, 10, 64); err == nil {
-									row[key] = iv
-								}
-							}
-						}
-					} else if _, err := strconv.ParseFloat(s, 64); err == nil {
-						typ = parquet.TypeFloat64
-						for _, row := range rows {
-							if sv, ok := row[key].(string); ok {
-								if fv, err := strconv.ParseFloat(sv, 64); err == nil {
-									row[key] = fv
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-		schema[i] = parquet.Column{Name: name, Type: typ, Nullable: true}
+		schema[i] = parquet.Column{Name: name, Type: parquet.TypeString, Nullable: true}
 	}
 	return schema
 }
-
-const maxRecursiveIterations = 1000
 
 // materializeRecursiveCTE executes a recursive CTE using fixed-point iteration.
 // The CTE body must contain UNION ALL separating the anchor query from the
@@ -362,126 +308,7 @@ func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDe
 		return nil
 	}
 
-	// Step 1: Execute anchor query
-	anchorRows, err2 := p.executeSubquery(ctx, anchorSQL)
-	if err2 != nil {
-		return err2
-	}
-	if len(anchorRows) == 0 {
-		schema := p.inferCTESchema(anchorSQL, nil)
-		if schema == nil {
-			return errNoCTESchema(cte.Name)
-		}
-		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, rows: nil}
-		return nil
-	}
-
-	// Infer schema from anchor results
-	schema := p.inferCTESchema(anchorSQL, anchorRows)
-	if schema == nil {
-		return errNoCTESchema(cte.Name)
-	}
-
-	// Apply column aliases if specified: WITH t(a, b) AS (...)
-	//
-	// POSITIONALLY, through the key each column really appears under. A
-	// column list is what makes a duplicate-name body legal and useful —
-	// `WITH RECURSIVE t(a, b) AS (SELECT 1 AS x, 10 AS x …)` — and reading
-	// both positions by the bare name `x` gave both aliases the FIRST
-	// column's value, so the working row collapsed and every later iteration
-	// read it: `1,10 | 2,100 | 3,10000` in PostgreSQL 17 came back
-	// `1,1 | 2,1 | 3,1` (#957).
-	if len(cte.Columns) > 0 && len(cte.Columns) <= len(schema) {
-		anchorRows = renameRowColumnsPositional(anchorRows, schema, cte.Columns)
-		for i, name := range cte.Columns {
-			schema[i].Name = name
-		}
-	}
-
-	// Accumulate iteration results columnar into a tracker-charged,
-	// spill-backed collector instead of an unbounded boxed slice — the
-	// iteration count was bounded (1000) but the row count was not, and
-	// every accumulated row lived as a map[string]any until Plan returned.
-	// The per-iteration work table stays boxed: it is one iteration's
-	// delta (inherent to the fixed-point algorithm) and is re-seeded into
-	// the cache each step for the recursive query's self-reference.
-	coll := &exec.SpillableBatchCollector{Spill: p.getSpillManager()}
-	appendRowsColumnar := func(rs []map[string]any) error {
-		for off := 0; off < len(rs); off += batch.DefaultBatchSize {
-			end := off + batch.DefaultBatchSize
-			if end > len(rs) {
-				end = len(rs)
-			}
-			if err := coll.Consume(ctx, batch.FromRows(schema, rs[off:end])); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if err := appendRowsColumnar(anchorRows); err != nil {
-		coll.Release()
-		return err
-	}
-
-	// Derive the expected column names from the schema (aliases already applied).
-	schemaNames := make([]string, len(schema))
-	for i, col := range schema {
-		schemaNames[i] = col.Name
-	}
-
-	// Parse the recursive SQL to get its output column names so we can
-	// positionally rename them to match the CTE schema. Strip table alias
-	// prefixes (e.g., "e.id" → "id") because the Project operator outputs
-	// unqualified column names.
-	var recursiveColNames []string
-	if rpq, err := plansql.Parse(recursiveSQL); err == nil {
-		if ri, err := plansql.ExtractSelect(rpq); err == nil {
-			for _, col := range ri.Columns {
-				name := col.Alias
-				if name == "" {
-					name = cleanExpr(col.Expr)
-				}
-				recursiveColNames = append(recursiveColNames, name)
-			}
-		}
-	}
-	// …and the keys those names really occupy, for the same reason the anchor
-	// needs them: two recursive-term outputs may share a name.
-	recursiveRowKeys := subqueryRowKeys(recursiveColNames)
-
-	// Step 2: Fixed-point iteration
-	workTable := anchorRows
-	for iter := 0; iter < maxRecursiveIterations; iter++ {
-		// Seed the CTE cache with the current work table so the recursive
-		// query's reference to the CTE name resolves to these rows.
-		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, rows: workTable}
-
-		newRows, err := p.executeSubquery(ctx, recursiveSQL)
-		if err != nil {
-			break
-		}
-		if len(newRows) == 0 {
-			break
-		}
-
-		// Rename output columns to match CTE schema. The recursive SQL may
-		// produce different column names (e.g., "n + 1" vs "n").
-		newRows = renameRowColumnsFromTo(newRows, recursiveRowKeys, schemaNames)
-
-		if err := appendRowsColumnar(newRows); err != nil {
-			// Spill scratch failure mid-iteration: abandon materialization.
-			// Without a cache entry the recursive reference cannot resolve
-			// and the query errors — same failure mode as an anchor error.
-			coll.Release()
-			delete(p.cteCache, cte.Name)
-			return err
-		}
-		workTable = newRows
-	}
-
-	// Store final accumulated results (columnar; replayed per reference).
-	p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: coll}
-	return nil
+	return p.iterateRecursiveCTE(ctx, cte, anchorSQL, recursiveSQL)
 }
 
 // errNoCTESchema is what a materialization that produced NO column list says.
@@ -554,7 +381,7 @@ func classifyRecursiveBody(cte plansql.CTEDef) (recursiveForm, string, string, e
 		cte.Name)
 
 	if body.Union == nil {
-		if selectNamesRelation(body, name) {
+		if plansql.SelectNamesRelation(body, name) {
 			return recursiveFormNotRecursive, "", "", notTheForm
 		}
 		return recursiveFormNotRecursive, "", "", nil
@@ -562,10 +389,10 @@ func classifyRecursiveBody(cte plansql.CTEDef) (recursiveForm, string, string, e
 	// THE TOP NODE IS THE LAST OPERATOR, because the parse is left-associative:
 	// its Left is every earlier arm together and its Right is the last one.
 	top := body.Union
-	if selectNamesRelation(top.Left, name) {
+	if plansql.SelectNamesRelation(top.Left, name) {
 		return recursiveFormNotRecursive, "", "", inNonRecursiveTerm
 	}
-	if !selectNamesRelation(top.Right, name) {
+	if !plansql.SelectNamesRelation(top.Right, name) {
 		return recursiveFormNotRecursive, "", "", nil
 	}
 	if top.Op != plansql.SetOpUnion {
@@ -602,161 +429,5 @@ func selectTextNamesRelation(sql, want string) bool {
 	if err != nil || info == nil {
 		return true
 	}
-	return selectNamesRelation(info, want)
-}
-
-// selectNamesRelation reports whether info's FROM — at any nesting, through a
-// derived table and through both arms of a set operation — names `want`.
-func selectNamesRelation(info *plansql.SelectInfo, want string) bool {
-	if info == nil {
-		return false
-	}
-	if info.Union != nil {
-		if selectNamesRelation(info.Union.Left, want) || selectNamesRelation(info.Union.Right, want) {
-			return true
-		}
-	}
-	refNames := func(t plansql.TableRef) bool {
-		if strings.HasPrefix(t.Name, "(") {
-			sub, err := t.SubSelect()
-			if err != nil {
-				return false
-			}
-			return selectNamesRelation(sub, want)
-		}
-		return strings.EqualFold(strings.TrimSpace(t.Name), want)
-	}
-	for i := range info.Tables {
-		if refNames(info.Tables[i]) {
-			return true
-		}
-	}
-	for i := range info.Joins {
-		ref := plansql.TableRef{Name: info.Joins[i].RightTable}
-		if info.Joins[i].RightTableRef != nil {
-			ref = *info.Joins[i].RightTableRef
-		}
-		if refNames(ref) {
-			return true
-		}
-	}
-	// A nested block's OWN `WITH` may shadow the name; this walk deliberately
-	// does not, because a shadowing item is answered from the enclosing scope
-	// here anyway (docs/internals/nested-with-scope-precedence.md) and a
-	// false positive costs a refusal where a wrong answer would otherwise
-	// stand.
-	for i := range info.CTEs {
-		if b, err := info.CTEs[i].BodySelect(); err == nil && selectNamesRelation(b, want) {
-			return true
-		}
-	}
-	return false
-}
-
-// renameRowColumnsFromTo remaps row keys from srcNames[i] to dstNames[i].
-func renameRowColumnsFromTo(rows []map[string]any, srcNames, dstNames []string) []map[string]any {
-	if len(rows) == 0 || len(srcNames) == 0 || len(dstNames) == 0 {
-		return rows
-	}
-	needsRename := false
-	for i := range srcNames {
-		if i < len(dstNames) && srcNames[i] != dstNames[i] {
-			needsRename = true
-			break
-		}
-	}
-	if !needsRename {
-		return rows
-	}
-	result := make([]map[string]any, len(rows))
-	for ri, row := range rows {
-		newRow := make(map[string]any, len(row))
-		for k, v := range row {
-			newRow[k] = v
-		}
-		for i, src := range srcNames {
-			if i < len(dstNames) && src != dstNames[i] {
-				newRow[dstNames[i]] = row[src]
-				delete(newRow, src)
-			}
-		}
-		result[ri] = newRow
-	}
-	return result
-}
-
-// subqueryRowKeys is the map key each POSITION of a result occupies in the
-// rows executeSubquery returns.
-//
-// It states subqueryRowsPerColumn's rule once so the readers cannot drift from
-// the writer: the first occurrence of a name keeps the name, and every later
-// column of that name carries `:<position>`. A colon cannot appear in an
-// identifier the binder resolves, so a disambiguated key collides with
-// nothing.
-func subqueryRowKeys(names []string) []string {
-	keys := make([]string, len(names))
-	seen := make(map[string]bool, len(names))
-	for i, n := range names {
-		k := n
-		if seen[k] {
-			k = fmt.Sprintf("%s:%d", n, i)
-		}
-		seen[k] = true
-		keys[i] = k
-	}
-	return keys
-}
-
-// renameRowColumnsPositional rebuilds each row under the target aliases,
-// reading column i by the key POSITION i occupies rather than by the schema's
-// name. A shorter alias list renames the LEADING columns and the rest keep
-// their own names, which is PostgreSQL's rule for a column list.
-func renameRowColumnsPositional(rows []map[string]any, schema []parquet.Column, aliases []string) []map[string]any {
-	keys := make([]string, len(schema))
-	names := make([]string, len(schema))
-	for i, c := range schema {
-		names[i] = c.Name
-	}
-	copy(keys, subqueryRowKeys(names))
-	out := make([]map[string]any, len(rows))
-	for ri, row := range rows {
-		nr := make(map[string]any, len(schema))
-		for i := range schema {
-			name := schema[i].Name
-			if i < len(aliases) {
-				name = aliases[i]
-			}
-			nr[name] = row[keys[i]]
-		}
-		out[ri] = nr
-	}
-	return out
-}
-
-// renameRowColumns remaps row keys from schema column names to the target aliases.
-func renameRowColumns(rows []map[string]any, schema []parquet.Column, aliases []string) []map[string]any {
-	// Check if rename is needed
-	needsRename := false
-	for i, alias := range aliases {
-		if i < len(schema) && schema[i].Name != alias {
-			needsRename = true
-			break
-		}
-	}
-	if !needsRename {
-		return rows
-	}
-	result := make([]map[string]any, len(rows))
-	for ri, row := range rows {
-		newRow := make(map[string]any, len(row))
-		for i, col := range schema {
-			if i < len(aliases) {
-				newRow[aliases[i]] = row[col.Name]
-			} else {
-				newRow[col.Name] = row[col.Name]
-			}
-		}
-		result[ri] = newRow
-	}
-	return result
+	return plansql.SelectNamesRelation(info, want)
 }

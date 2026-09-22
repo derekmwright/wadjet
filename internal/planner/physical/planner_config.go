@@ -291,6 +291,29 @@ func (r *queryResources) releaseSubqueryCharges() {
 	}
 }
 
+// subqueryChargeCount is a MARK for releaseSubqueryChargesSince.
+func (r *queryResources) subqueryChargeCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.inSubqueries)
+}
+
+// releaseSubqueryChargesSince releases the IN-subquery charges recorded after
+// mark, for a caller that ran one pipeline of a statement to completion and
+// will not run it again — a recursive CTE's iteration (recursive_cte_iteration.go).
+func (r *queryResources) releaseSubqueryChargesSince(mark int) {
+	r.mu.Lock()
+	if mark > len(r.inSubqueries) {
+		mark = len(r.inSubqueries)
+	}
+	nodes := append([]*expr.InSubquery(nil), r.inSubqueries[mark:]...)
+	r.inSubqueries = r.inSubqueries[:mark]
+	r.mu.Unlock()
+	for _, in := range nodes {
+		in.Release()
+	}
+}
+
 // hasSubqueryCharges reports whether anything is waiting for
 // releaseSubqueryCharges, so Plan can attach a Cleanup for it alone.
 func (r *queryResources) hasSubqueryCharges() bool {
