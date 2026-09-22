@@ -41,6 +41,7 @@ type StreamReader struct {
 	seen   []bool
 
 	buf    []byte // window; buf[start:filled] is unconsumed input
+	base   int64  // input offset of buf[0]
 	start  int
 	filled int
 	eof    bool
@@ -52,6 +53,23 @@ type StreamReader struct {
 	done        bool
 
 	chunkSize int // test hook; defaults to streamChunkBytes
+
+	// loc, when the input is several files read as one stream, names the
+	// file an input offset lies in; seg* follow the file of the current row
+	// so a refusal names that file and its own row number.
+	loc         Locator
+	segFile     string
+	segStart    int64
+	segNext     int64
+	segRowsSeen int
+}
+
+// Locator is implemented by an input that is several files read as one
+// stream (read_json over a glob): Segment names the file holding the input
+// offset, where that file starts, and an offset before which every later
+// offset still lies in the same file.
+type Locator interface {
+	Segment(offset int64) (file string, start, next int64)
 }
 
 // NewStreamReader buffers just enough input to infer the schema, then
@@ -63,6 +81,9 @@ func NewStreamReader(r io.Reader) (*StreamReader, error) {
 
 func newStreamReaderSized(r io.Reader, chunkSize int) (*StreamReader, error) {
 	sr := &StreamReader{r: r, chunkSize: chunkSize}
+	if loc, ok := r.(Locator); ok {
+		sr.loc = loc
+	}
 
 	// Fill until the window covers defaultSampleSize complete objects, EOF,
 	// or the sample cap. Schema inference sees the same prefix the eager
@@ -133,6 +154,12 @@ func (sr *StreamReader) Next() (*batch.RecordBatch, error) {
 		}
 		sr.fileRow++
 		sc := &jsonScanner{data: sr.buf[:objEnd], pos: objStart, fileRow: sr.fileRow, sampled: sr.sampled}
+		if sr.loc != nil {
+			if off := sr.base + int64(objStart); off >= sr.segNext {
+				sr.enterSegment(off)
+			}
+			sc.file, sc.fileRowBase = sr.segFile, sr.segRowsSeen
+		}
 		if err := scanObjectInto(sc, rb, row, sr.schema, sr.colIdx, sr.seen); err != nil {
 			if sqlerr.StateOf(err) != "" {
 				return nil, err // already names its row
@@ -152,6 +179,18 @@ func (sr *StreamReader) Next() (*batch.RecordBatch, error) {
 		}
 	}
 	return rb, nil
+}
+
+// enterSegment moves the file tracking to the file holding off, the input
+// offset of the row about to be scanned: a new file's first row makes every
+// earlier row belong to earlier files.
+func (sr *StreamReader) enterSegment(off int64) {
+	file, start, next := sr.loc.Segment(off)
+	if file != sr.segFile || start != sr.segStart {
+		sr.segFile, sr.segStart = file, start
+		sr.segRowsSeen = sr.fileRow - 1
+	}
+	sr.segNext = next
 }
 
 // nextObjectSpan positions the window on the next complete top-level
@@ -209,6 +248,7 @@ func (sr *StreamReader) nextObjectSpan() (int, int, error) {
 func (sr *StreamReader) refill() error {
 	if sr.start > 0 {
 		copy(sr.buf, sr.buf[sr.start:sr.filled])
+		sr.base += int64(sr.start)
 		sr.filled -= sr.start
 		sr.start = 0
 	}

@@ -91,7 +91,7 @@ func (r *Reader) Next() (*batch.RecordBatch, error) {
 		}
 		for _, col := range r.schema {
 			if m := checkValue(values[col.Name], col); m != nil {
-				return nil, m.refusal(col.Name, r.offset+i+1, defaultSampleSize)
+				return nil, m.refusal(col.Name, r.offset+i+1, defaultSampleSize, "")
 			}
 		}
 	}
@@ -401,7 +401,7 @@ func NewReaderFromBytesWithCoercion(data []byte) (*Reader, error) {
 	for i := defaultSampleSize; i < len(rows); i++ {
 		for _, col := range schema {
 			if m := checkValue(rows[i][col.Name], col); m != nil {
-				return nil, m.refusal(col.Name, i+1, defaultSampleSize)
+				return nil, m.refusal(col.Name, i+1, defaultSampleSize, "")
 			}
 		}
 	}
@@ -432,7 +432,7 @@ func checkValue(v any, col parquet.Column) *mismatch {
 		if observed == parquet.TypeFloat64 {
 			// A number no float64 holds (1e999) fits no column but text.
 			if _, err := value.Float64(); err != nil {
-				return &mismatch{value: displayValue(v), observed: "numeric", want: col.Type}
+				return &mismatch{value: displayValue(v), observed: "numeric", want: col.Type, code: "22003"}
 			}
 		}
 	case []any:
@@ -465,24 +465,49 @@ func checkValue(v any, col parquet.Column) *mismatch {
 	if observed == col.Type || (col.Type == parquet.TypeFloat64 && observed == parquet.TypeInt64) {
 		return nil
 	}
-	return &mismatch{value: displayValue(v), observed: sqlTypeName(observed), want: col.Type}
+	m := &mismatch{value: displayValue(v), observed: sqlTypeName(observed), want: col.Type}
+	if f, isFloat := v.(float64); isFloat && col.Type == parquet.TypeInt64 && f == math.Trunc(f) && (f >= 1<<63 || f < -(1<<63)) {
+		m.code = "22003" // an integer the eager decode could only hold as a float
+	}
+	if _, isString := v.(string); isString && col.Type == parquet.TypeTimestamp {
+		m.code = "22007" // PostgreSQL's invalid_datetime_format
+	}
+	return m
 }
 
 // mismatch is a value that does not fit its column: the value as the input
 // spelled it, its own type, the column's, and — inside an ARRAY or ROW
-// column — the element or field it sits at.
+// column — the element or field it sits at. code is the SQLSTATE
+// PostgreSQL's input function for the column's type raises for the same
+// text: 22P02 (invalid_text_representation) unless set — 22003 for a
+// number outside the type's range, 22007 for a timestamp that does not
+// parse.
 type mismatch struct {
 	value, observed string
 	want            parquet.TypeID
 	path            string
+	code            string
 }
 
-// refusal is the 22P02 for a mismatch in column `name` of 1-based row `row`.
-// The caller (read_json) prefixes the reader and the input.
-func (m *mismatch) refusal(name string, row, sampled int) error {
-	return sqlerr.New("22P02",
-		"row %d column %q%s: value %s (%s) is not of type %s (the column's type was inferred from the file's first %d rows)",
-		row, name, m.path, m.value, m.observed, sqlTypeName(m.want), sampled)
+// refusal is the error for a mismatch in column `name` of 1-based row `row`
+// of `file` (empty for a single input, whose name the caller supplies: it
+// prefixes the reader and the input).
+func (m *mismatch) refusal(name string, row, sampled int, file string) error {
+	where := fmt.Sprintf("row %d column %q%s", row, name, m.path)
+	sample := fmt.Sprintf("the file's first %d rows", sampled)
+	if file != "" {
+		where = file + " " + where
+		sample = fmt.Sprintf("the first %d rows of the input", sampled)
+	}
+	if m.code == "22003" {
+		return sqlerr.New("22003", "%s: value %s is out of range for type %s", where, m.value, sqlTypeName(m.want))
+	}
+	code := m.code
+	if code == "" {
+		code = "22P02"
+	}
+	return sqlerr.New(code, "%s: value %s (%s) is not of type %s (the column's type was inferred from %s)",
+		where, m.value, m.observed, sqlTypeName(m.want), sample)
 }
 
 // displayValue renders a JSON value the way it appears in the input: a

@@ -100,32 +100,33 @@ func rpRead(tb testing.TB, path string, data []byte) (int, int64, int, error) {
 type rpCell struct {
 	name, first, last string
 	want              []string
+	code              string // "" = 22P02
 }
 
 var rpCells = []rpCell{
-	{"int_float", "7", "0.75", []string{"value 0.75 (double precision) is not of type bigint"}},
-	{"int_string", "7", `"oops"`, []string{`value "oops" (text) is not of type bigint`}},
-	{"int_bool", "7", "true", []string{"value true (boolean) is not of type bigint"}},
-	// The eager row reader has already decoded the number to float64, so
-	// only the types are pinned here.
-	{"int_overflow", "7", "99999999999999999999", []string{"(double precision) is not of type bigint"}},
-	{"int_object", "7", `{"b":1}`, []string{`value {"b":1} (object) is not of type bigint`}},
-	{"float_string", "1.25", `"oops"`, []string{`value "oops" (text) is not of type double precision`}},
-	{"float_bool", "1.25", "false", []string{"value false (boolean) is not of type double precision"}},
-	{"bool_string", "true", `"oops"`, []string{`value "oops" (text) is not of type boolean`}},
-	{"bool_number", "true", "1", []string{"value 1 (bigint) is not of type boolean"}},
-	{"timestamp_string", `"2024-01-02"`, `"oops"`, []string{`value "oops" (text) is not of type timestamp`}},
-	{"timestamp_number", `"2024-01-02"`, "5", []string{"value 5 (bigint) is not of type timestamp"}},
-	{"ipv4_string", `"10.0.0.1"`, `"oops"`, []string{`value "oops" (text) is not of type inet`}},
+	{"int_float", "7", "0.75", []string{"value 0.75 (double precision) is not of type bigint"}, ""},
+	{"int_string", "7", `"oops"`, []string{`value "oops" (text) is not of type bigint`}, ""},
+	{"int_bool", "7", "true", []string{"value true (boolean) is not of type bigint"}, ""},
+	{"int_overflow", "7", "99999999999999999999", []string{"is out of range for type bigint"}, "22003"},
+	{"float_overflow", "1.25", "1e999", []string{"value 1e999 is out of range for type double precision"}, "22003"},
+	{"float_underflow", "1.25", "1e-400", []string{"value 1e-400 is out of range for type double precision"}, "22003"},
+	{"int_object", "7", `{"b":1}`, []string{`value {"b":1} (object) is not of type bigint`}, ""},
+	{"float_string", "1.25", `"oops"`, []string{`value "oops" (text) is not of type double precision`}, ""},
+	{"float_bool", "1.25", "false", []string{"value false (boolean) is not of type double precision"}, ""},
+	{"bool_string", "true", `"oops"`, []string{`value "oops" (text) is not of type boolean`}, ""},
+	{"bool_number", "true", "1", []string{"value 1 (bigint) is not of type boolean"}, ""},
+	{"timestamp_string", `"2024-01-02"`, `"oops"`, []string{`value "oops" (text) is not of type timestamp`}, "22007"},
+	{"timestamp_number", `"2024-01-02"`, "5", []string{"value 5 (bigint) is not of type timestamp"}, ""},
+	{"ipv4_string", `"10.0.0.1"`, `"oops"`, []string{`value "oops" (text) is not of type inet`}, ""},
 	// The empty string: the columnar scanner's readString indexed past it
 	// (found by FuzzArcRPPastSample, corpus 8f3a76b44871d1bd).
-	{"timestamp_empty", `"2024-01-02"`, `""`, []string{`value "" (text) is not of type timestamp`}},
-	{"ipv4_empty", `"10.0.0.1"`, `""`, []string{`value "" (text) is not of type inet`}},
+	{"timestamp_empty", `"2024-01-02"`, `""`, []string{`value "" (text) is not of type timestamp`}, "22007"},
+	{"ipv4_empty", `"10.0.0.1"`, `""`, []string{`value "" (text) is not of type inet`}, ""},
 	// A string column holds every value as its text, in every reader.
-	{"string_number", `"oops"`, "42", nil},
-	{"string_bool", `"oops"`, "true", nil},
+	{"string_number", `"oops"`, "42", nil, ""},
+	{"string_bool", `"oops"`, "true", nil, ""},
 	// A double precision column holds a whole number.
-	{"float_int", "1.25", "3", nil},
+	{"float_int", "1.25", "3", nil, ""},
 }
 
 // TestArcRPPastSample: a non-NULL value past the 100-row sample that does not
@@ -139,6 +140,12 @@ func TestArcRPPastSample(t *testing.T) {
 		for _, row := range []int{101, 2049, 2200} {
 			for _, cell := range rpCells {
 				t.Run(fmt.Sprintf("%s/%d/%s", path, row, cell.name), func(t *testing.T) {
+					if cell.name == "float_underflow" && (path == "eager" || path == "eager_stream" || path == "coercion") {
+						// The eager row readers (tests only; read_json runs
+						// the StreamReader) decode through encoding/json,
+						// which already reads 1e-400 as 0 — no spelling left.
+						t.Skip("eager decode loses the spelling")
+					}
 					n, _, _, err := rpRead(t, path, rpFixture(t, row, row, cell.first, cell.last))
 					if cell.want == nil {
 						if err != nil || n != row {
@@ -146,10 +153,17 @@ func TestArcRPPastSample(t *testing.T) {
 						}
 						return
 					}
-					if sqlerr.StateOf(err) != "22P02" {
-						t.Fatalf("rows=%d err=%v, want 22P02", n, err)
+					code := cell.code
+					if code == "" {
+						code = "22P02"
 					}
-					want := append([]string{fmt.Sprintf("row %d column \"a\": ", row), "inferred from the file's first 100 rows"}, cell.want...)
+					if sqlerr.StateOf(err) != code {
+						t.Fatalf("rows=%d err=%v (%s), want %s", n, err, sqlerr.StateOf(err), code)
+					}
+					want := append([]string{fmt.Sprintf("row %d column \"a\": ", row)}, cell.want...)
+					if code != "22003" {
+						want = append(want, "inferred from the file's first 100 rows")
+					}
 					for _, part := range want {
 						if !strings.Contains(err.Error(), part) {
 							t.Errorf("missing %q in: %v", part, err)
@@ -312,10 +326,10 @@ func FuzzArcRPPastSample(f *testing.F) {
 				if n != row {
 					t.Fatalf("%s: %d rows, want %d", path, n, row)
 				}
-			case sqlerr.StateOf(err) == "22P02":
+			case sqlerr.StateOf(err) == "22P02" || sqlerr.StateOf(err) == "22003" || sqlerr.StateOf(err) == "22007":
 				refused[path] = true
 			default:
-				t.Fatalf("%s: %v, want rows or 22P02", path, err)
+				t.Fatalf("%s: %v, want rows or 22P02/22003/22007", path, err)
 			}
 		}
 		// The two columnar readers share one scanner and must agree; the
