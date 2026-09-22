@@ -337,6 +337,15 @@ only the spellings the sample recognises (`2024-01-02`, `2024-01-02 03:04:05`,
 inferred from dotted quads refuses `10.0.0.1/32` and `010.0.0.1`, which
 PostgreSQL's `inet` accepts.
 
+A timestamp field stores the same value a `TIMESTAMP` literal of the same text
+does, in the engine's one timestamp unit (epoch milliseconds): an offset is
+discarded, as PostgreSQL's `timestamp` input discards it, so
+`2001-02-03T04:05:06-07:00` reads `2001-02-03 04:05:06`, and digits past the
+millisecond are floored (see [data types](data-types.md)). The same holds for
+a `read_json` value nested in an array or object. `postgres_scan` /
+`mysql_scan` store the instant the driver returns in the same unit, a
+`timestamptz` as its UTC instant.
+
 Nor is the plan-time read taken over an input that can only be read ONCE. It
 opens the input and the execution opens it again, so it is taken only over a
 REGULAR file (and, for a glob, only when every match is one). A FIFO, a

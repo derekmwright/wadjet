@@ -484,8 +484,9 @@ a rendered instant carries at most three fractional digits: `.5`, `.25`,
 `.123` — never `.123456`. PostgreSQL's `timestamp` holds microseconds and
 prints all six when they are there, so a value that reaches this engine with
 finer precision (a microsecond literal, a Parquet column written at
-microsecond or nanosecond resolution) is truncated to the millisecond on the
-way in, and every rendering of it — the wire, a cast, a function result —
+microsecond or nanosecond resolution, a `read_csv` / `read_json` field, a
+`postgres_scan` value, a binary wire parameter) is floored to the millisecond
+on the way in, and every rendering of it — the wire, a cast, a function result —
 shows the truncated value consistently. It is one rendering of one stored
 instant, not a rounding applied at print time.
 
