@@ -3406,6 +3406,9 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 				if _, leftIsOuter := getColRefInfo(cmp.Left, outerTables, innerTables, outerColMap); !leftIsOuter {
 					op = flipCmpOp(op)
 				}
+				if residualSidesCollide(outerRef, innerRef, info, ctes) {
+					return nil, nil
+				}
 				filterConds = append(filterConds, DecorrelatedKey{Outer: outerRef, Op: op, Inner: innerRef})
 			}
 		} else if provablyOuterOnly(node, outerTables, innerTables, bodyOuter) {
@@ -3549,6 +3552,45 @@ func flattenASTNodes(node plansql.Node, result *[]plansql.Node) {
 	default:
 		*result = append(*result, node)
 	}
+}
+
+// residualSidesCollide reports whether a correlated NON-equality condition
+// would reach the join's residual as two references that differ by SIDE only.
+//
+// The residual travels to the stage DAG as TEXT, rendered `outer OP inner`
+// with each side spelled as its arm emits it. When the inner column carries
+// the same bare name as the outer one and the body's FROM RENAMES what it
+// publishes (a derived table, a CTE reference, a column-alias list), both
+// references render as the same bare name — `total < total` — and the stage
+// re-spelling asks each arm which one moved it: only the renaming build arm
+// does, so BOTH leaves were re-spelled to the build's source column,
+// `b.amt < b.amt`, false for every pair. The DAG arms answered EXISTS with no
+// rows and NOT EXISTS with every row, where the single-process evaluator (which
+// binds the two leaves by position) and PostgreSQL answer `1 | 2` (arc DC
+// round 4, Codex review B2; the qualified `b.total > o.total` spelling reached
+// the same collapse before this arc). Such a condition DECLINES the rewrite, and
+// the subquery runs per outer row, which answers PostgreSQL's rows on every arm.
+// The same names over base tables (TPC-H Q21's `l3.l_suppkey <> l1.l_suppkey`)
+// are not renamed by either arm and keep their spelling, so they are not this
+// case and still lower.
+func residualSidesCollide(outer, inner KeyRef, info *plansql.SelectInfo, ctes []plansql.CTEDef) bool {
+	if outer.Column == "" || !strings.EqualFold(outer.Column, inner.Column) {
+		return false
+	}
+	if fromHasDerivedOrCTE(info, ctes) {
+		return true
+	}
+	for _, t := range info.Tables {
+		if len(t.ColumnAliases) > 0 {
+			return true
+		}
+	}
+	for i := range info.Joins {
+		if r := info.Joins[i].RightTableRef; r != nil && len(r.ColumnAliases) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // nodeTableRefs checks if an AST node references outer and/or inner tables.
