@@ -2087,8 +2087,9 @@ body once per outer row, so a reference in any of them decides the answer.
 each one is either CARRIED into the join the rewrite builds — as a key when
 it is an equality with an inner column, as a residual over the (outer, inner)
 row otherwise, as a filter on the OUTER side when it names outer columns
-alone — or the rewrite DECLINES and the subquery runs per outer row, which is
-right by construction. Never dropped, and never stripped.
+alone — or the rewrite DECLINES and the subquery runs per outer row, which the
+rerun executes (see below for the one family that needed a fix to do so).
+Never dropped, and never stripped.
 
 **A JOIN'S ON WAS INVISIBLE.** The rewrite built the body's FROM from
 `info.Joins` verbatim, so an outer reference written there went into a join
@@ -2141,33 +2142,60 @@ into: an outer row for which `P` is false passes `NOT IN` and `NOT EXISTS`,
 because the body it would have to contradict is empty. So `NOT IN`, `<> ALL`
 and `NOT EXISTS` decline, and the condition stays where the query wrote it.
 
-**THE HOIST READS A QUALIFIER, NEVER A BARE NAME.** The logical classifier has
-no catalog for the body's own relations, and `nodeTableRefs` decides an
-UNQUALIFIED name from the ENCLOSING query's column map alone. TPC-H Q02's
-official spelling writes every correlated key unqualified — `p_partkey =
-ps_partkey` — with BOTH names in that map, because the enclosing query reads
-those relations too; reading an unqualified name as outer would move Q02's
-conjuncts onto the outer side and change its row set. So only a reference
-whose qualifier names an enclosing relation and NO inner one is read as outer.
-The unqualified spelling keeps the disposition it had: it goes to the build
-side, where the column is absent and the failure is LOUD
-(`filter column "total" does not exist in the input schema`). Closing that is
-a catalog at the classifier, not a spelling rule, and it is pinned in the
-gate with PostgreSQL's row set recorded beside it.
+**AN UNQUALIFIED NAME IS DECIDED BY THE BODY'S OWN NAMESPACE.** PostgreSQL
+binds a name innermost-first: an unqualified name the body's relations do not
+publish is the enclosing row's. The enclosing column map alone cannot decide
+that — TPC-H Q02's official spelling writes `p_partkey = ps_partkey` inside the
+body with BOTH names in the map, because the enclosing query reads those
+relations too — so the rewrite asks the catalog what the body's own FROM
+publishes (`bodyOuterColumns`, through the annotator, on a throwaway Scan per
+relation and never on the plan being built: annotating the real inner subtree
+hands the join reorderer statistics it did not have, which is what once moved
+Q02's join order). A name the body cannot supply is read as outer in every
+clause — lifted from an inner join's `ON`, hoisted from the `WHERE`, and
+blocking in the `HAVING`, the `GROUP BY`, the SELECT list, a bounded `ORDER BY`
+and the `QUALIFY`. A name the body does publish stays the body's, whatever the
+enclosing query also has. When the namespace cannot be named completely — a
+table function in the body's FROM, whose columns are its call's or its input's
+and are not re-read to answer this — an unqualified enclosing name in a clause
+the rewrite cannot classify declines to the per-row rerun; in the `WHERE` it
+keeps the build-side disposition and fails loudly by name.
 
-**WHAT MOVES AND WHAT DOES NOT.** The optimized logical plans of TPC-H Q02,
-Q04, Q17, Q20, Q21 and Q22 — the six that decorrelate — are byte-identical to
-the ones at `6b9c7acf`, which is the measurement that says the qualifier rule
-is doing the protecting rather than luck.
+Before this, the unqualified spelling was invisible outside the `WHERE`: in a
+body `JOIN`'s `ON` it became a join key no relation publishes (zero rows), in
+a `HAVING` the aggregate rewrite dropped it (every row), in the SELECT list it
+became a key the build side lacks (zero rows) — silent, on every arm (arc DC
+round 1, B1).
+
+**A DECLINE IS RIGHT BECAUSE THE RERUN CAN EXECUTE IT.** The per-row rerun
+substitutes the outer values, so `o.total > 100` in a body `RIGHT JOIN`'s `ON`
+becomes `100 > 100`. When the body's `WHERE` rejects that join's padding,
+`pushFilterThroughJoin` demotes it to inner (#335) after
+`liftInnerJoinOnResiduals` (#336) has run, and `routeOuterJoinOnResiduals`
+(#358) skips a join that is no longer outer — so a non-key conjunct sat in an
+inner join's `ON` with nothing to place it, and the physical planner refused
+the statement. The demotion now lifts it itself, as the inner join it has
+become; the same fix answers the plain `RIGHT JOIN … ON c.j = b.k AND 100 >
+100 WHERE b.tag = 10`, which refused before any subquery was involved.
+
+**WHAT MOVES AND WHAT DOES NOT.** The optimized logical plans of all 22
+TPC-H queries, under the catalog annotator, are byte-identical to the ones at
+`16b924d1` — the six that decorrelate (Q02, Q04, Q17, Q20, Q21, Q22) included —
+which is the measurement that says the namespace rule reads Q02's unqualified
+keys as the body's.
 
 `coordinator.TestArcDCADecorrelatedBodyKeepsEveryOuterReferenceOnEveryArm` is
 the gate: 776 cells of {IN, NOT IN, = ANY, <> ALL, EXISTS, NOT EXISTS, a
 scalar subquery in WHERE, a scalar subquery in the SELECT list} × {the
 forty-nine places an outer reference can sit} × {an enclosing query that is
 one relation and one that is a join whose arms share a column name} on five
-arms, every want live PostgreSQL 17.11, with three boundaries pinned by the
+arms, every want live PostgreSQL 17.11, with two boundaries pinned by the
 sentence each refusal says. 221 of its cells fail at `6b9c7acf`, and 221 at
-`0c0d33b6`.
+`0c0d33b6`. `coordinator.TestArcDCAnUnqualifiedOuterReferenceBindsWhereTheBodyCannotSupplyIt`
+(121 statements, every position spelled unqualified) and
+`coordinator.TestArcDCAnOuterJoinsOnBesideACorrelatedWhere` (27, an outer
+join's `ON` beside a `WHERE` that rejects its padding, with and without a
+subquery) are the round-2 halves.
 `server.TestArcDCARelocatedBodyConditionReadsTheMaskOnEveryDoor` is the other
 half: this rewrite moves a predicate ACROSS a relation boundary, and over a
 policed relation the answer is the ROW SET rather than a cell, so the mask's

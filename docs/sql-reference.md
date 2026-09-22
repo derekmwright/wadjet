@@ -1256,15 +1256,16 @@ subquery instead — a slower right answer:
   `WHERE` means and is carried into the join; an outer join's does not,
   because the preserved side keeps its row NULL-extended either way.
 
-All stay correct on every execution path; on a distributed cluster the query
-runs on the coordinator rather than across workers.
+All answer PostgreSQL's rows on every execution path; on a distributed
+cluster the query runs on the coordinator rather than across workers.
 
-**An outer reference must be QUALIFIED to be read as one.** This engine
-resolves a correlated subquery's names before it has the body's relations'
-column lists, so `WHERE total > 100` written inside a body whose own relation
-has no `total` is read as the body's column and fails with
-`filter column "total" does not exist in the input schema`, where PostgreSQL
-binds it to the enclosing row. Write `o.total > 100`.
+**An unqualified name binds innermost-first**, as on PostgreSQL: `WHERE total
+> 100` inside a subquery whose own relations have no `total` reads the outer
+query's `total`, wherever in the subquery it is written. The one exception is
+a subquery that reads a table function: its columns are not known when the
+subquery is planned, so an unqualified outer name in its `WHERE` fails with
+`filter column "total" does not exist in the input schema`. Write
+`o.total > 100`.
 
 A derived table, an ordinary CTE reference and a comma-joined FROM list in the
 subquery are decorrelated like a base table. They used to run as a per-row

@@ -1313,7 +1313,7 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 	// A body is larger than its WHERE, here too: an INNER join's ON conjunct
 	// that names the enclosing query is lifted into the classification below,
 	// and a reference this rewrite cannot carry declines it — the scalar
-	// subquery then runs per outer row, which is right by construction
+	// subquery then runs per outer row, which answers PostgreSQL's rows
 	// (#1232, decorrelation_body_refs.go).
 	bodyOuter, undecided := bodyOuterColumns(info, outerColMap, ctes, annotate)
 	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTableSet, bodyOuter, undecided, true)
@@ -1982,8 +1982,8 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 			}
 			outerOnlyNodes = append(outerOnlyNodes, node)
 		default:
-			// Inner-only condition (including subquery expressions), and the
-			// unqualified spelling provablyOuterOnly cannot decide.
+			// Inner-only condition (including subquery expressions), and an
+			// unqualified name over a body namespace that cannot be named.
 			innerFilterNodes = append(innerFilterNodes, node)
 		}
 	}
@@ -3380,8 +3380,8 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 			}
 			outerOnlyNodes = append(outerOnlyNodes, node)
 		} else {
-			// Inner-only, and the unqualified spelling provablyOuterOnly
-			// cannot decide — both belong to the build side's filter.
+			// Inner-only, and an unqualified name over a body namespace that
+			// cannot be named — both belong to the build side's filter.
 			innerFilterNodes = append(innerFilterNodes, node)
 		}
 	}

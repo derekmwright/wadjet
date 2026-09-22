@@ -30,7 +30,7 @@ import (
 //     conjunct does not; the HAVING, which is read after the grouping the
 //     build side performs; the GROUP BY; the SELECT list; the ORDER BY; the
 //     QUALIFY — BLOCKS the rewrite, and the subquery stays an executable
-//     predicate re-run per outer row, which is right by construction;
+//     predicate re-run per outer row, which answers PostgreSQL's rows;
 //   - a condition that PROVABLY names only the enclosing query is neither a
 //     key nor an inner filter. PostgreSQL applies it per outer row, so it
 //     gates WHICH outer rows can match at all. See outerOnlyDisposition.
@@ -48,9 +48,9 @@ import (
 // `dc_out o` outside and `dc_out z` inside makes `o.total` outer and `z.id`
 // inner, while `dc_out.total` names both and is not decided here.
 //
-// It asks nodeTableRefs — the correlation classifier's own reader — with a NIL
-// column map, which is what makes the answer qualifier-only: an unqualified
-// name reports neither side there. Reading the clause any other way costs a
+// It asks nodeTableRefs — the correlation classifier's own reader — with
+// bodyOuter as the column map rather than the enclosing one, so an unqualified
+// name counts only when the body provably cannot supply it. Reading the clause any other way costs a
 // right answer. plansql.ColumnRefs is the strict walker and REFUSES the three
 // nodes that carry raw SQL rather than a parsed subtree (a subquery, an
 // EXISTS, a window call), so a clause holding one would have to be treated as
@@ -145,15 +145,12 @@ func namesUndecided(node plansql.Node, undecided map[string]string) bool {
 // qualified by an enclosing-only relation — the one spelling this pass can
 // prove names the outer row and nothing else.
 //
-// The qualifier is what makes it provable. An UNQUALIFIED name is decided by
-// nodeTableRefs from the enclosing query's column map, which has no catalog
-// for the body's own relations and therefore cannot tell the outer column
-// `total` from an inner one of the same name: TPC-H Q2's official spelling
-// writes `p_partkey = ps_partkey` inside the subquery with no qualifier at
-// all, and BOTH names are in the enclosing map because the enclosing query
-// reads those relations too. Hoisting such a conjunct onto the outer side
-// would change Q2's row set. So the unqualified spelling keeps the
-// disposition it had — see the boundary recorded in ADR-0021 §1r.
+// A qualifier makes it provable. The enclosing query's column map alone does
+// NOT: it cannot tell the outer column `total` from an inner one of the same
+// name — TPC-H Q2's official spelling writes `p_partkey = ps_partkey` inside
+// the subquery with no qualifier, and BOTH names are in the enclosing map
+// because the enclosing query reads those relations too, so hoisting on the
+// map alone would change Q2's row set (ADR-0021 §1r).
 //
 // bodyOuter (bodyOuterColumns) is what makes an unqualified name provable too:
 // a name the body's own relations cannot supply binds to the enclosing row,

@@ -2714,24 +2714,21 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      ADR-0021 §1l states what closing each one costs.
 
    - **An UNQUALIFIED outer reference inside a correlated subquery's body is
-     read as the body's own column, and is LOUD when the body has no such
-     column.** (Added 2026-09-20, arc DC, #1104.) PostgreSQL binds an
-     unqualified name to the innermost scope that supplies it and to the
-     enclosing row when none does, so `o.id IN (SELECT b.k FROM dc_in b WHERE
-     total > 100)` reads the ENCLOSING `total` there. This engine classifies a
-     subquery's conditions in the LOGICAL planner, before the body's relations
-     have column lists, so it cannot tell that `total` is not `dc_in`'s: the
-     condition goes to the build side and the query fails with
-     `filter column "total" does not exist in the input schema` where
-     PostgreSQL answers one row. The qualified spelling — `o.total > 100` — is
-     read as the enclosing row's and answers PostgreSQL's rows on all five
-     arms. The rule cannot simply be inverted: TPC-H Q02's official spelling
-     writes every correlated key unqualified with both names in the enclosing
-     column map, so reading an unqualified name as outer would change Q02's
-     row set. Closing it is a catalog at the classifier. Pinned with
-     PostgreSQL's row set beside it in
-     `coordinator.TestArcDCADecorrelatedBodyKeepsEveryOuterReferenceOnEveryArm`
-     (`*/whereOuterBare`, `*/onBareOuter`); ADR-0021 §1r states the rule.
+     bound as PostgreSQL binds it, except where the body's namespace cannot
+     be named.** (Added 2026-09-20, arc DC, #1104; narrowed 2026-09-22, arc
+     DC round 2.) PostgreSQL binds an unqualified name to the innermost scope
+     that supplies it, so `total` in a body over `dc_in` is the enclosing
+     row's. The decorrelation reads the body's own FROM namespace from the
+     catalog and binds the same way in every clause. Two spellings remain
+     boundaries, both LOUD: a derived table in the body whose own body names
+     the enclosing row (the standing 0A000 class, unqualified or not), and an
+     unqualified enclosing name in the `WHERE` of a body that reads a table
+     function, whose columns this pass does not re-read — that one fails with
+     `filter column "…" does not exist in the input schema` where PostgreSQL
+     answers; the qualified spelling answers. Pinned with PostgreSQL's row set
+     beside each in
+     `coordinator.TestArcDCAnUnqualifiedOuterReferenceBindsWhereTheBodyCannotSupplyIt`;
+     ADR-0021 §1r states the rule.
 
    - **`OHLCV` and `TIME_BUCKET` are EXTENSIONS, and their oracle is
      PostgreSQL spelled out.** (Added 2026-09-08, arc A1, #965, ADR-0035.)

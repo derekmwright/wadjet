@@ -48,7 +48,7 @@ import (
 // PostgreSQL at base is wrong or refused at the tip. 221 of the 776 fail at
 // 6b9c7acf on five arms, and 221 at 0c0d33b6.
 //
-// The three PINS below are boundaries, not answers, and each names what
+// The two PINS below are boundaries, not answers, and each names what
 // closes it. A pin that starts agreeing FAILS: PostgreSQL's row set for the
 // cell is already recorded above it.
 const (

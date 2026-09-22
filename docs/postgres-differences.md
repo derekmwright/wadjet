@@ -442,9 +442,9 @@ Reconstructing their window clauses is unsupported: 0A000 where PostgreSQL answe
 
 Set-operation/LATERAL bodies and outer-level aggregates lack the required evaluation form: 0A000 where PostgreSQL answers. (ADR-0012 §5/#1044)
 
-**An UNQUALIFIED outer reference inside a correlated subquery's body is refused.**
+**An UNQUALIFIED outer reference over a table function is refused in the subquery's WHERE.**
 
-`o.id IN (SELECT b.k FROM dc_in b WHERE total > 100)` binds `total` to the enclosing row on PostgreSQL, which has no such column in `dc_in`; here the condition goes to the subquery's own relation and the query fails with `filter column "total" does not exist in the input schema`. The classifier runs before the body's relations have column lists and cannot tell the two apart, and reading an unqualified name as outer would change TPC-H Q02, whose correlated keys are all unqualified. Write the qualifier — `o.total > 100` — and the condition is applied per outer row as PostgreSQL applies it. (ADR-0012 §5/#1104, ADR-0021 §1r)
+An unqualified name inside a correlated subquery binds to the enclosing row when the subquery's own relations do not have it, as on PostgreSQL. When the subquery's FROM reads a table function, its columns are not known at that point: `o.id IN (SELECT b.k FROM dc_in b JOIN generate_series(1, 9) g(x) ON g.x = b.k WHERE total > 100)` fails with `filter column "total" does not exist in the input schema` where PostgreSQL answers. Write the qualifier — `o.total > 100`. (ADR-0012 §5/#1104, ADR-0021 §1r)
 
 **Outer aggregates in subquery WHERE are refused.**
 
