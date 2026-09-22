@@ -24,22 +24,26 @@ gates that assert the same answers on both.
 **Embedded — a Go library.** Open a store, open a database, query it:
 
 ```go
-store, _ := wadjet.NewFileStore("/var/lib/wadjet")  // or NewS3Store(...) for S3
-db, _ := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "analytics"})
+db, _ := wadjet.Open(ctx, wadjet.Config{DataDir: "/var/lib/wadjet"}) // tables survive a restart
 res, _ := db.Query(ctx, "SELECT src_ip, SUM(bytes_in) FROM flow_logs GROUP BY 1")
 ```
 
-Local disk or object storage is the only choice to make — same engine either
-way. (This snippet is compiled as an example in `wadjet/example_readme_test.go`,
-so it cannot drift from the API.)
+Local disk or object storage (`Store: wadjet.NewS3Store(...)` with a
+`CatalogDir`) is the only choice to make — same engine either way. (This
+snippet is compiled as an example in `wadjet/example_readme_test.go`, so it
+cannot drift from the API.)
 
 **Embedded — a server, too.** The same engine behind the PostgreSQL wire
 protocol, in one process:
 
 ```bash
-wadjet serve --pg-addr=:5432        # pgwire over the in-process engine
+wadjet serve --storage-type=file --data-dir=./wadjet-data --pg-addr=:5432   # pgwire over the in-process engine
 psql -h localhost -p 5432 -U wadjet
 ```
+
+(`--storage-type` defaults to `s3`; the two flags are what "no S3, no
+MinIO" means, and the directory is the one an embedded program's
+`Config.DataDir` names — the same tables.)
 
 **Distributed — one flag, one binary further.** Start all-in-one, then split
 the roles when one machine stops being enough:
@@ -72,11 +76,10 @@ licensed differently — see [Licensing](#licensing).
   (`internal/coordinator/spill_arc_shapes_two_path_test.go:50`) hold the
   answers steady when memory forces spilling, on both arms.
 
-**Two honest clauses.** The Go API is pre-1.0, and today `wadjet.Config` is
-typed in terms of `internal/` packages, which Go forbids an out-of-tree module
-from importing — embedding therefore lives inside this repository until that is
-fixed ([#805](https://github.com/derekmwright/wadjet/issues/805), and see
-[Embedding](docs/embedding.md)). And "fault-tolerant" here means the exchange is
+**Two honest clauses.** The Go API is pre-1.0: one import,
+`github.com/derekmwright/wadjet/wadjet`, is the whole embedded surface and it
+is built and run from a separate module on every test pass, but its names may
+still move before 1.0 (see [Embedding](docs/embedding.md)). And "fault-tolerant" here means the exchange is
 durable: every stage's output lands in object storage, task retries are
 idempotent overwrites, but a worker lost before its durable copy has landed
 costs a one-shot re-execution of the **query**, not of the task
@@ -689,10 +692,10 @@ result, _ := db.Query(ctx, "SELECT src_ip, COUNT(*) FROM flow_logs GROUP BY src_
 ```
 
 That one import is the whole surface: the store constructors,
-`wadjet.Schema` / `wadjet.Column` / the `Type*` constants, and
-`wadjet.IngestConfig`. A catalog shared with a running server
-(`Config.MetaKV`) and in-process ABAC (`Config.AuthProvider`) are the two
-settings that stay in-repo — see [Embedding](docs/embedding.md).
+`wadjet.Schema` / `wadjet.Column` / the `Type*` constants,
+`wadjet.IngestConfig`, and `Config.DataDir` / `CatalogDir` for a catalog
+that survives a restart. In-process ABAC (`Config.AuthProvider`) is the one
+setting that stays in-repo — see [Embedding](docs/embedding.md).
 
 ## Documentation
 

@@ -30,8 +30,8 @@ go test -bench=. -benchmem ./internal/engine/exec
 go test -bench=. -benchmem ./internal/engine/scan
 go test -bench=. -benchmem ./internal/engine/batch
 
-# Run the embedded server (pgwire over the in-process engine)
-wadjet serve --pg-addr=:5432
+# Run the embedded server (pgwire over the in-process engine, no S3)
+wadjet serve --storage-type=file --data-dir=./wadjet-data --pg-addr=:5432
 
 # Run the distributed server
 wadjetd serve --mode=standalone --pg-addr=:5432
@@ -78,6 +78,7 @@ SQL text
 | `internal/clid/` | The distributed serve modes (runStandalone / runCoordinator / runWorker) |
 | `internal/queryroute/` | The interface pgwire routes SELECT through (the coordinator satisfies it; the embedded server installs none) |
 | `internal/natsconn/` | Opening NATS: the embedded server, the connections, the JetStream context |
+| `internal/catalogdir/` | The catalog DIRECTORY (`<data-dir>/_catalog`): the flock, the embedded JetStream store, the published holder — one mechanism under `wadjet.Config.DataDir`, the CLI commands and `wadjet serve` (ADR-0041) |
 | `internal/engine/batch/` | Record batches, vectors, selection vectors, batch pooling |
 | `internal/engine/exec/` | Pipeline executor, operators (filter, project, join, sort, aggregate, window); aggregate seams in `agg_consume.go`, `agg_accumulators.go`, `agg_partial_merge.go`, `agg_spill.go` |
 | `internal/engine/expr/` | Expression compiler, 387 scalar functions; sections in `expr_arith.go`, `expr_compare.go`, `expr_scalar_fns.go`, `expr_string_fns.go` |
@@ -285,8 +286,8 @@ The `internal/storage/parquet/` package is **critical infrastructure** — any d
 ## Run Modes
 
 ```bash
-# Embedded (one process, pgwire over the in-process engine)
-wadjet serve --pg-addr=:5432
+# Embedded (one process, pgwire over the in-process engine, no S3)
+wadjet serve --storage-type=file --data-dir=./wadjet-data --pg-addr=:5432
 
 # Development (all-in-one)
 wadjetd serve --mode=standalone --pg-addr=:5432

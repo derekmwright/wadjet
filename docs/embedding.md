@@ -19,6 +19,7 @@ query them:
 | Name | What it is |
 |---|---|
 | `Open`, `Config`, `DB` | the database |
+| `Config.DataDir`, `Config.CatalogDir`, `ErrCatalogHeld` | a catalog that survives a restart (see [Persistence](#persistence-a-catalog-that-survives-a-restart)) |
 | `NewMemStore()`, `NewFileStore(dir)`, `NewS3Store(S3Config)` | the object store `Config.Store` takes |
 | `Schema`, `Column`, `ColumnType`, the 22 `Type*` constants | a table's columns |
 | `IngestConfig`, `DefaultIngestConfig()` | the ingester's flush policy |
@@ -28,12 +29,12 @@ query them:
 that package and runs the guide's program; the test suite builds and runs it,
 so this table is checked rather than asserted.
 
-**Deliberately not exposed.** `Config.MetaKV` (a catalog shared with a
-`serve` process, built from NATS JetStream) and `Config.AuthProvider`
-(in-process ABAC) name types under `internal/` and have no public
-constructor. A program needing either has to live inside this repository, or
-reach the engine through a server door — the PostgreSQL wire protocol, HTTP or
-gRPC — instead of embedding it.
+**Deliberately not exposed.** `Config.MetaKV` (the catalog KV a process
+that already runs one hands over — the servers in this repository) and
+`Config.AuthProvider` (in-process ABAC) name types under `internal/` and have
+no public constructor. Neither is needed out of tree: a persistent catalog is
+`Config.DataDir` or `Config.CatalogDir`, and access policy is enforced at the
+server doors — the PostgreSQL wire protocol, HTTP or gRPC.
 
 ## Installation
 
@@ -48,7 +49,16 @@ go get github.com/derekmwright/wadjet/wadjet
 ```go
 import "github.com/derekmwright/wadjet/wadjet"
 
-// First create an object store client
+// One local directory for the data and the catalog: the tables survive a
+// restart, and `wadjet serve --storage-type=file --data-dir=./wadjet-data`
+// opens the same ones.
+db, err := wadjet.Open(ctx, wadjet.Config{DataDir: "./wadjet-data"})
+```
+
+Over an S3-compatible store, the store is built first and the catalog
+directory is named separately:
+
+```go
 store, err := wadjet.NewS3Store(wadjet.S3Config{
     Endpoint:  "localhost:9000",
     AccessKey: "minioadmin",
@@ -60,15 +70,18 @@ if err != nil {
 }
 
 db, err := wadjet.Open(ctx, wadjet.Config{
-    Store:  store,
-    Bucket: "wadjet",
+    Store:      store,
+    Bucket:     "wadjet",
+    CatalogDir: "/var/lib/wadjet/catalog", // local disk; the tables survive a restart
 })
 ```
 
 The `Config` struct accepts:
+- `DataDir` — the zero-configuration persistent database: a local directory holding the Parquet objects (a file store, under `Bucket`, default `wadjet`) and the catalog (under `<DataDir>/_catalog`). Leave `Store` nil.
+- `CatalogDir` — the directory the catalog persists in, beside any `Store`. `DataDir` defaults it.
 - `Store` — the object store, from `wadjet.NewS3Store` (production), `wadjet.NewFileStore` (local dev) or `wadjet.NewMemStore` (testing)
 - `Bucket` — S3 bucket name
-- `MetaKV` — catalog KV. **nil means an in-memory catalog**: every table you create is process-local and gone at exit, and a `serve` process cannot see it. Pass `catalog.NewNATSKV(js)` to share the catalog with a server.
+- `MetaKV` — the catalog KV of a process that already holds one (the servers in this repository pass theirs). **With no `DataDir`, no `CatalogDir` and a nil `MetaKV` the catalog is in memory**: every table you create is process-local and gone at exit, and a `serve` process cannot see it. It names an internal type; an out-of-tree program uses `DataDir` or `CatalogDir`.
 - `Logger` — Optional `*slog.Logger` (defaults to slog.Default)
 - `MemoryBudget` — per-query memory budget in bytes (0 = unlimited); pipeline breakers spill past it
 - `SpillDir` — directory for spill-to-disk files (empty = OS temp dir)
@@ -144,7 +157,7 @@ The ingester automatically:
 - Partitions rows based on partition keys
 - Buffers rows in per-partition accumulators
 - Flushes to Parquet on S3 when thresholds are hit (size, rows, or time)
-- Updates the catalog manifest atomically via revision-based CAS on `Config.MetaKV` (NATS KV in production; an in-process map when `MetaKV` is nil)
+- Updates the catalog manifest atomically via revision-based CAS on the catalog KV (JetStream KV under `DataDir` / `CatalogDir` and under the servers; an in-process map when no catalog directory is named)
 
 ### Querying
 
@@ -365,6 +378,51 @@ func ingestFromQueue(ctx context.Context) {
 }
 ```
 
+## Persistence: a catalog that survives a restart
+
+A table is its Parquet objects plus its catalog entry, and the entry is what
+decides whether the table is there after a restart. `Config.DataDir` keeps
+both in one local directory:
+
+```
+./wadjet-data/
+  _catalog/            the catalog: a JetStream file store, and wadjet.lock
+  wadjet/tables/<t>/   the Parquet objects (the bucket is Config.Bucket, default "wadjet")
+```
+
+That is byte for byte the layout `wadjet --storage-type=file
+--data-dir=./wadjet-data` and `wadjet serve` use, so a program, the CLI
+commands and a server over one directory hold ONE set of tables: run the
+program, stop it, start `wadjet serve --storage-type=file
+--data-dir=./wadjet-data`, and the server answers the program's tables on the
+wire. `Config.CatalogDir` names the catalog directory alone, for a persistent
+catalog beside an S3 store. With neither, the catalog is in memory and every
+table is process-local — a `NewFileStore` opened that way logs a warning,
+because the Parquet objects it received stay behind with nothing naming them.
+
+**One holder at a time.** A directory is held exclusively by the `DB` that
+opened it, for the life of that `DB`; `Close` releases it. A second `Open` of
+a held directory — from the same process or another, including a `wadjet
+serve` — is refused with `wadjet.ErrCatalogHeld`, naming the directory and
+the holder's pid. It is a refusal rather than a second opener because two
+processes writing one JetStream store write over each other's metadata. The
+short-lived CLI commands (`wadjet tables`, `query`, …) are the exception in
+the other direction: they reach a running holder's catalog live, through the
+address it publishes in `wadjet.lock`, so `wadjet tables
+--data-dir=./wadjet-data` beside your running program lists its tables. A
+process that exits without `Close` leaves the directory to the kernel: the
+lock drops with the process, and the catalog store recovers on the next open
+(JetStream logs a rebuild). Nothing committed is lost.
+
+**A kill during a flush.** The ingester writes the Parquet object before it
+commits the manifest, so a process killed in that window leaves the table
+with no entry for that file and the object behind as an orphan — bytes, not
+rows; the scan resolves files from the manifest and never reads it, and
+nothing reclaims it (see [Ingestion](ingestion.md#exactly-once-considerations)).
+A kill after the commit leaves the table with its rows. The catalog never
+names a file that is not there. Across a power loss (not a process kill) the
+order is not guaranteed — neither the object nor the catalog write is fsynced.
+
 ## When to Embed vs. Run the Server
 
 | Use Case | Recommendation |
@@ -379,6 +437,6 @@ func ingestFromQueue(ctx context.Context) {
 ## Thread Safety
 
 - `DB.Query()` is safe to call concurrently from multiple goroutines
-- `DB.CreateTable()` and `DB.DropTable()` use revision-based optimistic concurrency (CAS) on the configured `MetaKV` — NATS KV in production, an in-process map when `Config.MetaKV` is nil
+- `DB.CreateTable()` and `DB.DropTable()` use revision-based optimistic concurrency (CAS) on the catalog KV — JetStream KV under `DataDir` / `CatalogDir` and under the servers, an in-process map when no catalog directory is named
 - `Ingester.Ingest()` is safe for concurrent calls from multiple goroutines within the same ingester
 - Do not share an `Ingester` across multiple processes writing to the same table — use separate ingesters (catalog revision concurrency will prevent corruption but may cause flush retries)

@@ -6,9 +6,9 @@ cluster) speaking the PostgreSQL wire protocol, HTTP, and gRPC. Both paths
 run the same SQL engine over Apache Parquet tables on local disk or
 S3-compatible object storage — that storage choice is independent of
 embedding vs. deploying — with first-class network-telemetry types (IPv4,
-IPv6, CIDR, MAC, Port, Protocol) on top. Embedding is source-level within
-this repository today (see [Embedding](embedding.md) below for what that
-means). This guide walks through installing the CLI, querying files on
+IPv6, CIDR, MAC, Port, Protocol) on top. Embedding is one import,
+`github.com/derekmwright/wadjet/wadjet`, from your own module (see
+[Embedding](embedding.md)). This guide walks through installing the CLI, querying files on
 disk, the embedded path, and then running the server: creating a table,
 ingesting data, and querying managed storage.
 
@@ -94,6 +94,7 @@ import (
     "context"
     "fmt"
     "log"
+    "slices"
     "time"
 
     "github.com/derekmwright/wadjet/wadjet"
@@ -102,21 +103,15 @@ import (
 func main() {
     ctx := context.Background()
 
-    // Local disk needs no server. Swap in wadjet.NewS3Store(...) to point
-    // at an S3-compatible store instead — the rest of this program is
-    // unchanged either way.
-    store, err := wadjet.NewFileStore("./wadjet-data")
+    // One local directory holds the data AND the catalog, so the table
+    // this program creates is still there the next time it runs. Over an
+    // S3-compatible store it is wadjet.NewS3Store(...) as Config.Store plus
+    // Config.CatalogDir — the rest of this program is unchanged either way.
+    db, err := wadjet.Open(ctx, wadjet.Config{DataDir: "./wadjet-data"})
     if err != nil {
         log.Fatal(err)
     }
-
-    db, err := wadjet.Open(ctx, wadjet.Config{
-        Store:  store,
-        Bucket: "wadjet",
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
+    defer db.Close()
 
     // Define a schema for network flow logs
     schema := wadjet.Schema{
@@ -133,10 +128,16 @@ func main() {
         },
     }
 
-    // Create the table, partitioned by date
-    err = db.CreateTable(ctx, "flow_logs", schema, []string{"date"})
+    // Create the table, partitioned by date — on the first run. The
+    // directory remembers it; a second CreateTable would be refused (42P07).
+    tables, err := db.ListTables(ctx)
     if err != nil {
         log.Fatal(err)
+    }
+    if !slices.Contains(tables, "flow_logs") {
+        if err := db.CreateTable(ctx, "flow_logs", schema, []string{"date"}); err != nil {
+            log.Fatal(err)
+        }
     }
 
     // Set up an ingester (no error return)
@@ -183,14 +184,15 @@ func main() {
 }
 ```
 
-This table's catalog registration lives only in this one process:
-`wadjet.Open` here has no `Config.MetaKV`, so it gets an in-memory catalog
-that dies with the process — running the program a second time starts from
-an empty catalog again (the Parquet data itself does land under
-`./wadjet-data/wadjet/tables/flow_logs/...` and simply accumulates). A
-persistent catalog needs `Config.MetaKV`, which is built from NATS JetStream
-and is one of the two settings with no out-of-tree constructor; see
-[Embedding](embedding.md).
+Run it twice: the second run finds `flow_logs` in the directory, skips the
+`CreateTable`, and its query answers the first run's row as well as its
+own. The directory holds the Parquet data under
+`./wadjet-data/wadjet/tables/flow_logs/...` and the catalog under
+`./wadjet-data/_catalog/`, which is exactly what `wadjet serve
+--storage-type=file --data-dir=./wadjet-data` opens — stop the program and
+start the server, and the table is on the wire. One process holds the
+directory at a time; a second `Open` is refused with `wadjet.ErrCatalogHeld`.
+See [Persistence](embedding.md#persistence-a-catalog-that-survives-a-restart).
 
 The rest of this guide covers the **server** deployment — the same engine
 behind a `serve` command, speaking the PostgreSQL wire protocol, HTTP, and
@@ -409,7 +411,7 @@ See [gRPC API](grpc-api.md) for the full service reference.
 
 ## Next Steps
 
-- [Embedding](embedding.md) — The full embedded API reference, and what "Not consumable from an out-of-tree Go module today" means in practice
+- [Embedding](embedding.md) — The full embedded API reference: the one import, the persistent catalog, and what stays in-repo
 - [Ingestion Guide](ingestion.md) — Bento pipelines, partitioning strategies, tuning flush thresholds
 - [SQL Reference](sql-reference.md) — Supported syntax, aggregates, joins
 - [gRPC API](grpc-api.md) — Generate type-safe clients for any language

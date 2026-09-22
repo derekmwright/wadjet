@@ -23,10 +23,11 @@ The fix is deliberately the SMALLEST one that makes the guide true:
   - The stores are CONSTRUCTORS returning objstore.Store, the interface
     Config.Store takes. A caller assigns the result and never names the
     type, which is what the internal rule actually forbids.
-  - Nothing else is exported. Config.MetaKV (a persistent catalog) and
-    Config.AuthProvider still name internal types with no public
-    constructor, so a persistent catalog and in-process ABAC remain
-    in-repo-only; docs/embedding.md says so.
+  - A persistent catalog is a DIRECTORY, not a type: Config.DataDir and
+    Config.CatalogDir are strings, and Open takes the same lock and runs
+    the same JetStream file store `wadjet serve` does (#1255, ADR-0041).
+    Config.MetaKV and Config.AuthProvider still name internal types with
+    no public constructor; only in-process ABAC remains in-repo-only.
 
 The claim that this is enough is not an argument, it is a build:
 test/embed/ is a separate module with its own go.mod that imports only

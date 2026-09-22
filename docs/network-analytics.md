@@ -327,14 +327,14 @@ output:
 
 After Bento starts writing data, register the tables so Wadjet can query them.
 
-> **Registration still needs code inside this repository**, for one reason
-> rather than the three that used to apply:
+> **Registration still needs code inside this repository**, for one reason:
 >
-> 1. `wadjet.Open` with no `MetaKV` gets an in-memory catalog. Anything it
->    registers dies with the process and is invisible to a `serve` process, whose
->    catalog is NATS-backed. Pass `Config.MetaKV` built from the same NATS
->    JetStream the server uses — and `MetaKV` has no out-of-tree constructor,
->    which is what keeps this program in-repo.
+> 1. `wadjet.Open` over the server's data directory (`Config.DataDir`, the
+>    same `--data-dir` the file-backed server uses) shares its catalog, so a
+>    table this program registers is one the server sees — but the directory
+>    is held by one process at a time, so the program runs while the server is
+>    stopped. A server over S3 keeps its catalog in its own NATS JetStream,
+>    which `Config.MetaKV` names and has no out-of-tree constructor.
 > 2. `CreateTable` writes an EMPTY manifest. Queries resolve data files from
 >    the manifest only — there is no prefix discovery — so Bento-written
 >    objects must additionally be registered with `catalog.AddFiles`.
