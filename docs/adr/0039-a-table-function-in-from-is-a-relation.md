@@ -108,13 +108,17 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    `json.defaultSampleSize`), and it describes the whole file. A row past the
    sample with a non-NULL value that does not fit its column refuses with
    SQLSTATE `22P02` (arc RP, #1242, #1243). Every CSV and JSON read path
-   checks before conversion or vector writes. The error names the reader,
-   input, 1-based data row, column, value and types. Integer to fractional
-   number is a mismatch; string columns accept numbers as text. JSON null
-   and empty CSV fields remain NULL, and inference within the sample is
-   unchanged. COUNT(*) refuses when the reader reaches the row; a LIMIT
-   that stops reading before it need not refuse. A key first seen past the
-   sample remains absent from the inferred column list.
+   checks before conversion or vector writes, against the sample the schema
+   was ACTUALLY inferred from (the JSON stream reader's sample stops at
+   8 MiB, so it can be fewer than 100 rows). The error names the reader,
+   input, 1-based data row, column, value and both types. Integer to
+   fractional number is a mismatch; text columns accept every value as text.
+   JSON null and empty CSV fields remain NULL, and inference within the
+   sample is unchanged. COUNT(*) refuses when the reader reaches the row; a
+   LIMIT that stops reading before it need not refuse. A key first seen past
+   the sample remains absent from the inferred column list. A CSV glob skips
+   a later file's first record when it repeats the first file's header,
+   rather than reading it as a data row.
 
    **Nor is the plan-time read taken over an input that can be read ONCE.**
    It opens the input and the execution opens it again, so it is taken only

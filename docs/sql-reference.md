@@ -268,24 +268,42 @@ against and the schema the rows arrive under are the same inference rather
 than two guesses.
 
 That inference is a SAMPLE, and its window is the file's first **100 rows**
-(`read_csv`) or first 100 objects (`read_json`) — not the whole batch. The
-column list and the column types are whatever those rows say, for the whole
-file. A non-NULL value past the sample that does not fit the inferred type
-refuses the statement with SQLSTATE `22P02`:
+(`read_csv`) or first 100 objects (`read_json`; fewer when those first
+objects exceed 8 MiB, in which case the sample is the objects that fit) — not
+the whole batch. The column list and the column types are whatever those rows
+say, for the whole file. Inside the sample the types widen as they always
+have (an integer column that meets `0.75` there becomes `double precision`).
+PAST the sample:
 
-- the error names the reader, input file, 1-based data row, column, value and
-  types. An integer column receiving `0.75` is an error, including for
-  `COUNT(*)`. JSON `null` and an empty CSV field remain NULL;
+- a non-NULL value that does not fit the column's type refuses the statement
+  with SQLSTATE `22P02`, as PostgreSQL's `COPY` refuses such a field. The
+  message names the reader, the input, the 1-based data row (for a glob,
+  counted across the matched files in name order), the column (and, for a
+  nested value, the element or field), the value and both types:
+
+  ```
+  read_json: /data/f.json: row 101 column "a": value 0.75 (double precision) is not of type bigint (the column's type was inferred from the file's first 100 rows)
+  ```
+
+  The type must match exactly: a `bigint` column meeting `0.75`, `true` or
+  `"7"` refuses, and so does a `boolean` column meeting `1`. A `text` column
+  holds every value as its text, and a `double precision` column holds a
+  whole number. The refusal applies to every statement that reads the row,
+  `COUNT(*)` included;
+- a JSON `null` and an empty CSV field are NULL, as they always were;
 - a key that first appears past the sample is not a column of the relation at
-  all, and a reference to it is `42703`;
-- a `read_json` number column receiving a string also reports `22P02` before
-  writing the value. String columns accept numbers as text in both readers.
+  all, and a reference to it is `42703`.
 
-Inference within the sample still widens types as before. A `LIMIT` that
-stops the reader before the disagreeing row may return rows. The pipeline
-can request another batch before stopping: `LIMIT 1` refuses a change at
-row 101 for both readers. With a change at row 5000 it returns the first
-value for both, because neither reader reaches that row.
+A `LIMIT` answers rows when the reader never reaches the disagreeing row. The
+reader is read in batches, and a `LIMIT` reads one batch past the batch that
+satisfies it, so `LIMIT 1` reads rows 1–4096 of a `read_json` input and rows
+1–2148 of a `read_csv` input (its first batch is the 100-row sample): a change
+inside those refuses, and one past them is never read.
+
+A glob of CSV files with a header reads the first file's first record as the
+header; a later file whose first record repeats it exactly has that record
+skipped, and a later file that does not is read whole, as the continuation of
+a split file.
 
 Nor is the plan-time read taken over an input that can only be read ONCE. It
 opens the input and the execution opens it again, so it is taken only over a
@@ -427,7 +445,7 @@ All table functions support local file paths and HTTP/HTTPS URLs, fetched throug
 
 ### Streaming I/O
 
-CSV and JSON files are read in streaming mode from every source — local paths, glob patterns (expanded lazily, one file open at a time) and HTTP/HTTPS URLs — so only the current batch of rows is held in memory and files larger than available RAM are queryable. Schema is inferred from the first 100 rows.
+CSV and JSON files are read in streaming mode from every source — local paths, glob patterns (expanded lazily, one file open at a time) and HTTP/HTTPS URLs — so only the current batch of rows is held in memory and files larger than available RAM are queryable. Schema is inferred from the first 100 rows, and a later value that does not fit it is a `22P02` (see [A table function in FROM is a relation](#a-table-function-in-from-is-a-relation)).
 
 Local Parquet files are opened as file handles (`io.ReaderAt`), enabling page-level random access without reading the entire file into memory. For `read_parquet()` only, HTTP sources and glob patterns are still buffered in full, because Parquet needs random access.
 
