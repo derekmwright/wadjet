@@ -167,6 +167,20 @@ func zrShapes() []struct{ name, empty, full string } {
 				"ON b.c0 = a.c0 WHERE a.c0 = 999",
 			"WITH q AS (SELECT c0, d1 FROM zrother) SELECT * FROM zrfull a JOIN q b " +
 				"ON b.c0 = a.c0 WHERE a.c0 = 1"},
+		// A RECURSIVE CTE (#1013's recursive half, arc RC). Its columns are
+		// the seed's, declared by the seed's PLAN, so a seed that produces
+		// no row and a closure the outer WHERE empties still describe them —
+		// the base described NOTHING and the door refused XX000.
+		{"star_recursive_cte_empty_seed",
+			"WITH RECURSIVE r(n, s, d) AS (SELECT c0, c1, c2 FROM zrfull WHERE c0 = 999 " +
+				"UNION ALL SELECT n + 1, s, d FROM r WHERE n < 3) SELECT * FROM r",
+			"WITH RECURSIVE r(n, s, d) AS (SELECT c0, c1, c2 FROM zrfull WHERE c0 = 1 " +
+				"UNION ALL SELECT n + 1, s, d FROM r WHERE n < 3) SELECT * FROM r"},
+		{"star_recursive_cte_filtered_out",
+			"WITH RECURSIVE r(n) AS (SELECT c0 FROM zrfull WHERE c0 = 1 " +
+				"UNION ALL SELECT n + 1 FROM r WHERE n < 3) SELECT * FROM r WHERE n > 99",
+			"WITH RECURSIVE r(n) AS (SELECT c0 FROM zrfull WHERE c0 = 1 " +
+				"UNION ALL SELECT n + 1 FROM r WHERE n < 3) SELECT * FROM r WHERE n > 0"},
 		// The controls: written-out select lists, which #416 already covered.
 		// They are here so a regression that took the declaration away from
 		// EVERY zero-row result is not read as a star-only one.
