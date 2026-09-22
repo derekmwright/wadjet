@@ -112,24 +112,25 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 		{
 			// RECURSIVE with a UNION and NO self-reference is not recursive at
 			// all, and PostgreSQL answers it. It must keep answering.
+			// Not recursive, so an ordinary CTE since #1193, and the DAG arms
+			// answer it in-process like any table-less statement: the #1042
+			// pin started agreeing and was deleted (arc RC).
 			name:   "control: UNION without ALL and no self-reference answers",
 			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION SELECT 2) SELECT v FROM r ORDER BY 1",
 			want:   "cols=[v:INT32] rows=2 | 1 | 2",
-			pin:    c1RecDAGPins(),
-			why:    "#1042 fires first on the DAG arms",
-			routed: c1RecRoutes,
+			routed: c1TableLess,
 		},
 		{
 			// A UNION ALL whose second arm names no CTE is an ordinary set
-			// operation. PostgreSQL answers two rows; the iteration re-ran
-			// that arm until `maxRecursiveIterations` and answered 1001.
-			name: "a UNION ALL arm that names no CTE is not a recursive term",
-			sql:  "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT 1) SELECT v FROM r ORDER BY 1",
-			want: "cols=[v:INT32] rows=2 | 1 | 1",
-			pin:  c1RecDAGPins(),
-			why: "PostgreSQL 17.11: two rows; the fixed-point loop answered 1001 before the form test. " +
-				"#1042 fires first on the DAG arms",
-			routed: c1RecRoutes,
+			// operation. PostgreSQL answers two rows; the iteration once re-ran
+			// that arm until its 1000-iteration cap and answered 1001. An
+			// ordinary CTE since #1193, so the DAG arms answer too (arc RC
+			// deleted their #1042 pin).
+			name:   "a UNION ALL arm that names no CTE is not a recursive term",
+			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT 1) SELECT v FROM r ORDER BY 1",
+			want:   "cols=[v:INT32] rows=2 | 1 | 1",
+			why:    "PostgreSQL 17.11: two rows; the fixed-point loop answered 1001 before the form test",
+			routed: c1TableLess,
 		},
 		{
 			// CONTROL: the ordinary UNION ALL recursion, at the root and
@@ -203,9 +204,8 @@ func TestC1DARecursiveCTEFormIsDecidedBeforeTheBodyIsPlanned(t *testing.T) {
 			name:   "multi-arm: 3 arms, NO self-reference, UNION ALL",
 			sql:    "WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT 2 UNION ALL SELECT 3) SELECT v FROM r ORDER BY 1",
 			want:   "cols=[v:INT32] rows=3 | 1 | 2 | 3",
-			pin:    c1RecDAGPins(),
-			why:    "#1042 fires first on the DAG arms",
-			routed: c1RecRoutes,
+			why:    "an ordinary CTE since #1193; the DAG arms' #1042 pin started agreeing and was deleted (arc RC)",
+			routed: c1TableLess,
 		},
 		{
 			name:   "multi-arm: 4 arms, self-reference LAST, UNION ALL",

@@ -171,14 +171,14 @@ func TestC1CARecursiveCTEIsMaterializedWhereItsBlockIsPlanned(t *testing.T) {
 				"(WITH RECURSIVE r AS (SELECT 1 AS v UNION ALL SELECT v+1 FROM r WHERE v<2) SELECT v FROM r) a, " +
 				"(WITH RECURSIVE r AS (SELECT 10 AS v UNION ALL SELECT v+1 FROM r WHERE v<11) SELECT v FROM r) b " +
 				"ORDER BY 1",
-			// PostgreSQL 17.11 declares integer; every computed integer in
-			// this engine is carried in an int64 and declared float8 through a
-			// materialized block (ADR-0024's recorded widening, #1018) — the
-			// VALUES are the claim here and they are PostgreSQL's.
-			want: "cols=[s:FLOAT64] rows=4 | 11 | 12 | 12 | 13",
-			pin:  c1RecDAGPins(),
-			why: "#1042 on the DAG arms; the computed-integer declaration through a " +
-				"materialized block is #1018's, not this one's",
+			// PostgreSQL 17.11 declares integer; this engine declares the sum
+			// of two integers bigint (ADR-0024's recorded widening). It was
+			// float8 until arc RC typed a recursive reference from its
+			// materialization: with no types on the reference, `a.v + b.v`
+			// fell to the untyped rule. The VALUES are PostgreSQL's.
+			want:   "cols=[s:INT64] rows=4 | 11 | 12 | 12 | 13",
+			pin:    c1RecDAGPins(),
+			why:    "#1042 on the DAG arms",
 			routed: c1RecRoutes,
 		},
 		{
@@ -205,11 +205,13 @@ func TestC1CARecursiveCTEIsMaterializedWhereItsBlockIsPlanned(t *testing.T) {
 			// CONTROL: `WITH RECURSIVE` with no self-reference. The keyword
 			// alone routes it through the recursive path, and it answered ZERO
 			// ROWS nested at this arc's base.
+			// NOT A RECURSIVE CTE since #1193: an item whose body does not
+			// name itself is an ordinary CTE under WITH RECURSIVE, and the DAG
+			// arms answer it — the #1042 pin that stood here started agreeing
+			// with PostgreSQL and was deleted as the proof (arc RC).
 			name:   "control: WITH RECURSIVE with no self-reference, nested",
 			sql:    "SELECT q.v FROM (WITH RECURSIVE n AS (SELECT id AS v FROM lat_ord WHERE id<=3) SELECT v FROM n) q ORDER BY 1",
 			want:   "cols=[v:INT64] rows=3 | 1 | 2 | 3",
-			pin:    c1RecDAGPins(),
-			why:    "#1042: the DAG cannot run any recursive CTE, at the root or nested",
 			routed: c1RecRoutes,
 		},
 		{
