@@ -389,10 +389,19 @@ func classifyRecursiveBody(cte plansql.CTEDef) (recursiveForm, string, string, e
 	// THE TOP NODE IS THE LAST OPERATOR, because the parse is left-associative:
 	// its Left is every earlier arm together and its Right is the last one.
 	top := body.Union
-	if plansql.SelectNamesRelation(top.Left, name) {
+	if plansql.SelectNamesRelation(top.Left, name) || plansql.SublinkNamesRelation(top.Left, name) {
 		return recursiveFormNotRecursive, "", "", inNonRecursiveTerm
 	}
 	if !plansql.SelectNamesRelation(top.Right, name) {
+		// A self-reference that only a SUBQUERY EXPRESSION in the last arm
+		// makes is still a self-reference: PostgreSQL's 42P19, "within a
+		// subquery". Read as "not recursive", the body was materialized as
+		// an ordinary union whose subquery read the name while it was being
+		// defined, and `SELECT (SELECT max(n) FROM r) + 1 …` answered a NULL.
+		if plansql.SublinkNamesRelation(top.Right, name) {
+			return recursiveFormNotRecursive, "", "", sqlerr.New("42P19",
+				"recursive reference to query %q must not appear within a subquery", cte.Name)
+		}
 		return recursiveFormNotRecursive, "", "", nil
 	}
 	if top.Op != plansql.SetOpUnion {
@@ -404,6 +413,9 @@ func classifyRecursiveBody(cte plansql.CTEDef) (recursiveForm, string, string, e
 				"PostgreSQL answers %q by removing duplicates at every step, and this "+
 				"engine has no fixed-point form for that. Write UNION ALL, or remove the "+
 				"duplicates in the query that reads it", cte.Name)
+	}
+	if err := refuseRecursiveTermShape(cte.Name, top.Right); err != nil {
+		return recursiveFormNotRecursive, "", "", err
 	}
 	anchorSQL, recursiveSQL, ok := plansql.SplitLastTopLevelUnionAll(cte.SQL)
 	if !ok ||
