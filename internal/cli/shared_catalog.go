@@ -8,15 +8,13 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"golang.org/x/sys/unix"
 
+	"github.com/derekmwright/wadjet/internal/catalogdir"
 	"github.com/derekmwright/wadjet/internal/config"
 	"github.com/derekmwright/wadjet/internal/natsconn"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
@@ -120,7 +118,7 @@ func sharedCatalogKV(ctx context.Context, logger *slog.Logger) (catalog.MetaKV, 
 	// LIVE holder that has not published. There the flock keeps failing and
 	// the file keeps being empty, and the deadline is reached.
 	var lock *CatalogLock
-	var lastHolder catalogLockHolder
+	var lastHolder catalogdir.Holder
 	var lastDialErr error
 	deadline := time.Now().Add(catalogLockWait)
 	for {
@@ -130,7 +128,7 @@ func sharedCatalogKV(ctx context.Context, logger *slog.Logger) (catalog.MetaKV, 
 			break
 		}
 		if holder, ok := readCatalogLockHolder(cfg.StoreDir); ok {
-			kv, release, dialErr := dialCatalogKV(holder.url)
+			kv, release, dialErr := dialCatalogKV(holder.URL)
 			if dialErr == nil {
 				return kv, release, nil
 			}
@@ -144,7 +142,7 @@ func sharedCatalogKV(ctx context.Context, logger *slog.Logger) (catalog.MetaKV, 
 					"which is not answering at the address it published, %s (%w).\n"+
 					"Wait for that process to finish — the lock clears itself when it exits — or "+
 					"use --nats-url to name a server directly",
-					cfg.StoreDir, lastHolder.pid, lastHolder.url, lastDialErr)
+					cfg.StoreDir, lastHolder.PID, lastHolder.URL, lastDialErr)
 			}
 			return nil, nil, fmt.Errorf("the catalog store directory %s is held by another wadjet "+
 				"process that has not published an address to reach it at (%s is empty).\n"+
@@ -156,43 +154,11 @@ func sharedCatalogKV(ctx context.Context, logger *slog.Logger) (catalog.MetaKV, 
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	unlock := lock.Release
-	embedded, err := natsconn.NewEmbeddedNATS(cfg, logger)
+	h, err := catalogdir.OpenLocked(lock, cfg, logger)
 	if err != nil {
-		unlock()
-		return nil, nil, fmt.Errorf("opening the catalog under %s: %w", cfg.StoreDir, err)
+		return nil, nil, err
 	}
-	// Published BEFORE this command does any work, so a second process that
-	// loses the lock race has an address to reach as soon as there is one to
-	// reach. The port is ephemeral, which is exactly why it has to be
-	// written down: no other process could guess it.
-	if err := lock.Publish(embedded.ClientURL()); err != nil {
-		embedded.Shutdown()
-		unlock()
-		return nil, nil, fmt.Errorf("recording the catalog holder in %s: %w",
-			CatalogLockPath(cfg.StoreDir), err)
-	}
-	nc, err := natsconn.ConnectInProcess(embedded.Server())
-	if err != nil {
-		embedded.Shutdown()
-		unlock()
-		return nil, nil, fmt.Errorf("connecting to the embedded catalog server: %w", err)
-	}
-	js, err := natsconn.NewJetStream(nc)
-	if err != nil {
-		nc.Close()
-		embedded.Shutdown()
-		unlock()
-		return nil, nil, fmt.Errorf("creating JetStream: %w", err)
-	}
-	kv, err := catalog.NewNATSKV(js)
-	if err != nil {
-		nc.Close()
-		embedded.Shutdown()
-		unlock()
-		return nil, nil, fmt.Errorf("opening the catalog under %s: %w", cfg.StoreDir, err)
-	}
-	return kv, releaseOnSignal(func() { nc.Close(); embedded.Shutdown(); unlock() }), nil
+	return h.KV, releaseOnSignal(h.Close), nil
 }
 
 // releaseOnSignal runs release exactly once — on the caller's `defer`, or on
@@ -269,80 +235,17 @@ func dialCatalogKV(natsAddr string) (catalog.MetaKV, func(), error) {
 	return kv, nc.Close, nil
 }
 
-// LockCatalogStoreDir takes an exclusive, non-blocking advisory lock on the
-// JetStream store directory, and returns the function that drops it.
-//
-// Nothing else does. nats-server does not lock its store directory, so two
-// processes can open the same JetStream file store and write over each other's
-// metadata — which is a thing this engine could not reach before #842, when
-// only `serve` ran an embedded server, and which the CLI's embedded fallback
-// makes reachable the moment two commands run at once. A refusal naming the
-// other process is the answer; corrupting a catalog silently is not.
-//
-// It is advisory (flock), so it binds only wadjet processes, and it is taken
-// by BOTH the CLI fallback and `serve` — a lock one of the two skipped would
-// be no lock at all.
-func LockCatalogStoreDir(dir string) (*CatalogLock, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("creating %s: %w", dir, err)
-	}
-	path := CatalogLockPath(dir)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return nil, fmt.Errorf("opening %s: %w", path, err)
-	}
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("%s is locked: %w", path, err)
-	}
-	// Any address a DEAD holder left is a lie the moment we take the lock,
-	// so clear it before anyone can read it as ours.
-	if err := f.Truncate(0); err != nil {
-		unix.Flock(int(f.Fd()), unix.LOCK_UN)
-		f.Close()
-		return nil, fmt.Errorf("clearing %s: %w", path, err)
-	}
-	return &CatalogLock{f: f, path: path}, nil
-}
+// LockCatalogStoreDir, CatalogLock and CatalogLockPath are the catalog
+// directory lock, which lives in internal/catalogdir since #1255 so that
+// wadjet.Open can take the same lock the CLI and `serve` take. The names
+// stay here because internal/clid's `serve` calls them.
+type CatalogLock = catalogdir.Lock
 
-// CatalogLock is a held catalog-store lock, and the place its holder publishes
-// the address other processes can reach it at.
-type CatalogLock struct {
-	f    *os.File
-	path string
-}
+func LockCatalogStoreDir(dir string) (*CatalogLock, error) { return catalogdir.TakeLock(dir) }
 
-// publish records this process's pid and the client URL of the catalog server
-// it is running, so a process that loses the lock race can reach THE HOLDER
-// rather than whatever answers a well-known port.
-func (l *CatalogLock) Publish(url string) error {
-	if _, err := l.f.WriteAt([]byte(fmt.Sprintf("%d\n%s\n", os.Getpid(), url)), 0); err != nil {
-		return err
-	}
-	return l.f.Sync()
-}
+func CatalogLockPath(dir string) string { return catalogdir.LockPath(dir) }
 
-// release clears the published address and drops the lock.
-//
-// It TRUNCATES rather than unlinks. Removing the file would break the flock
-// rendezvous itself: a third process would create a fresh inode, flock that,
-// and believe it held a lock the survivor also holds. An emptied file says
-// "nobody is publishing an address here", which is what a reader needs, and a
-// process killed outright leaves a stale address instead — which is why a
-// reader must dial before trusting it.
-func (l *CatalogLock) Release() {
-	l.f.Truncate(0)
-	unix.Flock(int(l.f.Fd()), unix.LOCK_UN)
-	l.f.Close()
-}
-
-func CatalogLockPath(dir string) string { return filepath.Join(dir, "wadjet.lock") }
-
-// catalogLockHolder is what a lock file says about the process holding it.
-type catalogLockHolder struct {
-	pid int
-	url string
-}
+func readCatalogLockHolder(dir string) (catalogdir.Holder, bool) { return catalogdir.ReadHolder(dir) }
 
 // catalogLockWait bounds how long a process that lost the lock race keeps
 // trying, alternating between taking the flock and reaching the holder.
@@ -354,23 +257,6 @@ type catalogLockHolder struct {
 // holder that is not publishing one, and that is a refusal rather than
 // something to wait out.
 const catalogLockWait = 5 * time.Second
-
-// readCatalogLockHolder reads the address a holder published, if it has.
-// ok=false means the file is absent, empty or half-written — all of which say
-// "no address to dial right now", which the caller answers by trying the flock
-// again rather than by giving up.
-func readCatalogLockHolder(dir string) (catalogLockHolder, bool) {
-	data, err := os.ReadFile(CatalogLockPath(dir))
-	if err != nil {
-		return catalogLockHolder{}, false
-	}
-	lines := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)
-	if len(lines) != 2 || strings.TrimSpace(lines[1]) == "" {
-		return catalogLockHolder{}, false
-	}
-	pid, _ := strconv.Atoi(strings.TrimSpace(lines[0]))
-	return catalogLockHolder{pid: pid, url: strings.TrimSpace(lines[1])}, true
-}
 
 // sharedCatalog is sharedCatalogKV with the Catalog built and INITIALIZED over
 // the given object store. Init is the half `tables` was missing.

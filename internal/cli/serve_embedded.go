@@ -14,9 +14,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/derekmwright/wadjet/internal/auth"
+	"github.com/derekmwright/wadjet/internal/catalogdir"
 	"github.com/derekmwright/wadjet/internal/config"
 	"github.com/derekmwright/wadjet/internal/geoip"
-	"github.com/derekmwright/wadjet/internal/natsconn"
 	"github.com/derekmwright/wadjet/internal/server/pgwire"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/wadjet"
@@ -198,38 +198,9 @@ func openServerCatalogKV(logger *slog.Logger) (catalog.MetaKV, func(), error) {
 		return nil, nil, fmt.Errorf("the catalog store directory %s is held by another wadjet process "+
 			"(%w); stop it, or give this one its own --nats-store-dir", cfg.StoreDir, err)
 	}
-	embedded, err := natsconn.NewEmbeddedNATS(cfg, logger)
+	h, err := catalogdir.OpenLocked(lock, cfg, logger)
 	if err != nil {
-		lock.Release()
-		return nil, nil, fmt.Errorf("opening the catalog under %s: %w", cfg.StoreDir, err)
+		return nil, nil, err
 	}
-	// Publish where this catalog can be reached, so a CLI command that loses
-	// the lock race reaches THIS one rather than whatever answers a
-	// well-known port.
-	if err := lock.Publish(embedded.ClientURL()); err != nil {
-		embedded.Shutdown()
-		lock.Release()
-		return nil, nil, fmt.Errorf("recording the catalog holder in %s: %w", CatalogLockPath(cfg.StoreDir), err)
-	}
-	nc, err := natsconn.ConnectInProcess(embedded.Server())
-	if err != nil {
-		embedded.Shutdown()
-		lock.Release()
-		return nil, nil, fmt.Errorf("connecting to the catalog: %w", err)
-	}
-	js, err := natsconn.NewJetStream(nc)
-	if err != nil {
-		nc.Close()
-		embedded.Shutdown()
-		lock.Release()
-		return nil, nil, fmt.Errorf("creating JetStream: %w", err)
-	}
-	kv, err := catalog.NewNATSKV(js)
-	if err != nil {
-		nc.Close()
-		embedded.Shutdown()
-		lock.Release()
-		return nil, nil, fmt.Errorf("creating catalog KV: %w", err)
-	}
-	return kv, func() { nc.Close(); embedded.Shutdown(); lock.Release() }, nil
+	return h.KV, h.Close, nil
 }
