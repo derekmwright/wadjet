@@ -200,6 +200,35 @@ func renderTextParam(s string, oid uint32) (string, error) {
 	}
 }
 
+// binaryTimestampInstant reads a binary timestamp/timestamptz parameter —
+// int64 microseconds since 2000-01-01 UTC — as the instant it names.
+//
+// Two things the obvious `pgEpoch.Add(time.Duration(micros) *
+// time.Microsecond)` gets wrong (#1266's producer census): time.Duration
+// holds nanoseconds, so the multiply wraps silently for any instant more than
+// ~292 years from 2000 (before 1708, after 2292) and the parameter named a
+// different year; and the literal it was rendered into dropped the fraction,
+// so `12:30:45.5` bound as `12:30:45`. The seconds and the remainder are
+// split with a FLOORED division here instead, and the caller keeps the
+// fraction to the microsecond (the engine then floors it to its millisecond
+// carrier, exactly as it does the same literal typed as text).
+//
+// PostgreSQL's `infinity` / `-infinity` are the int64 extremes on the wire.
+// The engine's TIMESTAMP has no infinity, so they are refused rather than
+// bound as the year 294247 they would otherwise decode to.
+func binaryTimestampInstant(micros int64) (time.Time, error) {
+	if micros == math.MaxInt64 || micros == math.MinInt64 {
+		return time.Time{}, fmt.Errorf("timestamp parameter is infinity, which a TIMESTAMP cannot hold")
+	}
+	secs := micros / 1_000_000
+	rem := micros % 1_000_000
+	if rem < 0 {
+		secs--
+		rem += 1_000_000
+	}
+	return time.Unix(pgEpoch.Unix()+secs, rem*1000).UTC(), nil
+}
+
 // renderBinaryParam handles the binary format, where the bytes are
 // PostgreSQL's network representation: big endian throughout, integers
 // two's complement, floats IEEE 754, date/time counted from 2000-01-01 UTC.
@@ -265,8 +294,11 @@ func renderBinaryParam(raw []byte, oid uint32) (string, error) {
 			return "", fmt.Errorf("timestamp parameter has %d bytes, want 8", len(raw))
 		}
 		micros := int64(binary.BigEndian.Uint64(raw))
-		return quoteLiteral(pgEpoch.Add(time.Duration(micros) * time.Microsecond).
-			Format("2006-01-02T15:04:05Z07:00")), nil
+		t, err := binaryTimestampInstant(micros)
+		if err != nil {
+			return "", err
+		}
+		return quoteLiteral(t.Format("2006-01-02T15:04:05.999999Z07:00")), nil
 
 	case oidTime:
 		if len(raw) != 8 {

@@ -1430,6 +1430,12 @@ func (c *pgConn) handleBind(payload []byte) {
 				lit, err := renderParam(raw, binaryFmt, oid)
 				if err != nil {
 					c.sendError("ERROR", "22023", fmt.Sprintf("binding parameter $%d: %v", i+1, err))
+					// The extended protocol's error state, as for every other
+					// refusal here: without it the client's Describe/Execute
+					// ran the PREVIOUS portal's SQL (c.portalSQL is untouched)
+					// and its CommandComplete followed this error — a refused
+					// Bind answered another statement's rows (#1266 census).
+					c.skipUntilSync = true
 					return
 				}
 				literals[i] = lit
