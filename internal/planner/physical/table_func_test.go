@@ -356,11 +356,11 @@ func TestTableFuncReadCSV_Glob(t *testing.T) {
 	if b == nil {
 		t.Fatal("expected batch")
 	}
-	// 2 files x (1 header + 1 data row) — the header of the second file
-	// gets concatenated as data. For CSV glob, the second file's header
-	// becomes a data row. This is a known limitation (same as DuckDB).
-	if b.Len < 2 {
-		t.Fatalf("expected at least 2 rows from glob, got %d", b.Len)
+	// 2 files x (1 header + 1 data row): each file's header is a header,
+	// so the glob reads the two data rows (the second header used to be a
+	// third row; see wadjet.TestArcRPCSVGlobReadsEachHeaderOnce).
+	if b.Len != 2 {
+		t.Fatalf("expected 2 rows from glob, got %d", b.Len)
 	}
 }
 

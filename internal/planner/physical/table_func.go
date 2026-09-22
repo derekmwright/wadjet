@@ -5,11 +5,13 @@ package physical
 import (
 	"bytes"
 	"context"
+	"encoding/csv"
 	"fmt"
 	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -348,6 +350,9 @@ func (s *csvTableFuncSource) Init(_ context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read_csv: %w", err)
 	}
+	if m, ok := rc.(*multiFileReadCloser); ok && cfg.HasHeader {
+		m.csvHeaderComma = cfg.Delimiter
+	}
 	s.closer = rc
 	r, err := csvreader.NewStreamReader(rc, cfg)
 	if err != nil {
@@ -400,6 +405,15 @@ func openData(path string) (io.ReadCloser, error) {
 // multiFileReadCloser streams a sorted glob expansion file-by-file. At most
 // one file is open at a time; a '\n' is injected after any file that does
 // not end with one (matching fetchGlob's concatenation framing).
+//
+// For a CSV with a header (csvHeaderComma set to its delimiter) the first
+// file's first record is THE header, and a later file whose first record is
+// that same header has it skipped rather than read as a data row. Read as
+// data it was a row of header names — counted by COUNT(*), a text value in
+// every text column, and, inside the 100-row sample, enough to infer every
+// column as text; past the sample it is a 22P02, since "age" is not a
+// bigint. A later file that does not repeat the header is a continuation
+// (a file split after its header) and is read whole, as it always was.
 type multiFileReadCloser struct {
 	paths     []string
 	idx       int
@@ -407,6 +421,9 @@ type multiFileReadCloser struct {
 	hadData   bool
 	lastByte  byte
 	pendingNL bool
+
+	csvHeaderComma rune     // 0: not a CSV with a header
+	csvHeader      []string // the first file's header record, once read
 }
 
 func (m *multiFileReadCloser) Read(p []byte) (int, error) {
@@ -430,6 +447,11 @@ func (m *multiFileReadCloser) Read(p []byte) (int, error) {
 			m.idx++
 			m.cur = f
 			m.hadData = false
+			if m.csvHeaderComma != 0 {
+				if err := m.positionAfterCSVHeader(); err != nil {
+					return 0, err
+				}
+			}
 		}
 		n, err := m.cur.Read(p)
 		if n > 0 {
@@ -449,6 +471,32 @@ func (m *multiFileReadCloser) Read(p []byte) (int, error) {
 		m.cur = nil
 		return 0, err
 	}
+}
+
+// positionAfterCSVHeader leaves the file just opened where its data starts:
+// at its beginning, unless an earlier file supplied the header and this
+// file's first record repeats it exactly, in which case just past that
+// record. The record is parsed as CSV, so a quoted field holding a newline
+// is one record; a file with no record contributes nothing either way.
+func (m *multiFileReadCloser) positionAfterCSVHeader() error {
+	cr := csv.NewReader(m.cur)
+	cr.Comma = m.csvHeaderComma
+	cr.FieldsPerRecord = -1
+	var offset int64
+	record, err := cr.Read()
+	switch {
+	case err == io.EOF:
+	case err != nil:
+		return fmt.Errorf("reading the header of %s: %w", m.cur.Name(), err)
+	case m.csvHeader == nil:
+		m.csvHeader = record
+	case slices.Equal(record, m.csvHeader):
+		offset = cr.InputOffset()
+	}
+	if _, err := m.cur.Seek(offset, io.SeekStart); err != nil {
+		return fmt.Errorf("reading %s: %w", m.cur.Name(), err)
+	}
+	return nil
 }
 
 func (m *multiFileReadCloser) Close() error {
