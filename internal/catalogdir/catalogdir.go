@@ -37,10 +37,25 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 )
 
-// ErrHeld is the refusal a second opener of a held directory gets. The
+// ErrHeld is the refusal a second opener of a held directory gets — and
+// ONLY that: a lock another process holds. A directory that cannot be
+// created, opened or written (permissions, a regular file where the
+// directory should be) is reported with its own cause, so
+// errors.Is(err, os.ErrPermission) still answers (arc EC review P1). The
 // error that wraps it names the directory and, when the holder has
 // published, its pid.
 var ErrHeld = errors.New("catalog directory is held by another process")
+
+// HeldError is the one refusal every door raises for a held directory:
+// ErrHeld, the directory, the holder's pid when it has published, and the
+// lock error. `wadjet.Open`, the CLI commands and `wadjet serve` all say
+// the same thing (arc EC review B4).
+func HeldError(dir string, lockErr error) error {
+	if holder, ok := ReadHolder(dir); ok {
+		return fmt.Errorf("%w: %s is held by process %d (%w)", ErrHeld, dir, holder.PID, lockErr)
+	}
+	return fmt.Errorf("%w: %s (%w)", ErrHeld, dir, lockErr)
+}
 
 // Handle is an opened catalog directory: the KV the catalog reads and
 // writes, and everything that has to be released with it.
@@ -85,10 +100,10 @@ func (h *Handle) Close() {
 func Open(cfg natsconn.NATSConfig, logger *slog.Logger) (*Handle, error) {
 	lock, err := TakeLock(cfg.StoreDir)
 	if err != nil {
-		if holder, ok := ReadHolder(cfg.StoreDir); ok {
-			return nil, fmt.Errorf("%w: %s is held by process %d (%v)", ErrHeld, cfg.StoreDir, holder.PID, err)
+		if errors.Is(err, ErrHeld) {
+			return nil, HeldError(cfg.StoreDir, err)
 		}
-		return nil, fmt.Errorf("%w: %s (%v)", ErrHeld, cfg.StoreDir, err)
+		return nil, fmt.Errorf("opening the catalog directory %s: %w", cfg.StoreDir, err)
 	}
 	return OpenLocked(lock, cfg, logger)
 }
@@ -136,7 +151,8 @@ func OpenLocked(lock *Lock, cfg natsconn.NATSConfig, logger *slog.Logger) (*Hand
 }
 
 // TakeLock takes an exclusive, non-blocking advisory lock on the catalog store
-// directory, creating it if needed.
+// directory, creating it if needed. A lock another process holds is ErrHeld;
+// any other failure is the file error itself.
 //
 // It is advisory (flock), so it binds only wadjet processes, and it is
 // taken by every door — a lock one of them skipped would be no lock at all.
@@ -153,7 +169,10 @@ func TakeLock(dir string) (*Lock, error) {
 	}
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		f.Close()
-		return nil, fmt.Errorf("%s is locked: %w", path, err)
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return nil, fmt.Errorf("%w: %s is locked", ErrHeld, path)
+		}
+		return nil, fmt.Errorf("locking %s: %w", path, err)
 	}
 	// Any address a DEAD holder left is a lie the moment we take the lock,
 	// so clear it before anyone can read it as ours.

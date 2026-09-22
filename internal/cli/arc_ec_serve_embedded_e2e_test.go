@@ -74,8 +74,10 @@ func TestAnEmbeddedProgramAndServeShareOneDataDir(t *testing.T) {
 	if rerr == nil {
 		t.Fatalf("`wadjet serve` started over a directory an embedded program holds:\n%s", rout)
 	}
-	if !strings.Contains(string(rout), "held by another wadjet process") {
-		t.Fatalf("the serve refusal does not name the holder:\n%s", rout)
+	// One refusal on every door: serve names the holder's pid exactly as
+	// wadjet.ErrCatalogHeld does (review B4).
+	if !strings.Contains(string(rout), fmt.Sprintf("held by process %d", os.Getpid())) {
+		t.Fatalf("the serve refusal does not name the holder's pid %d:\n%s", os.Getpid(), rout)
 	}
 	db.Close()
 

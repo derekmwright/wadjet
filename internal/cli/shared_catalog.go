@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -126,6 +127,11 @@ func sharedCatalogKV(ctx context.Context, logger *slog.Logger) (catalog.MetaKV, 
 		if lockErr == nil {
 			lock = l
 			break
+		}
+		if !errors.Is(lockErr, catalogdir.ErrHeld) {
+			// Not a holder to wait for: a directory that cannot be created
+			// or locked. Its own cause, at once.
+			return nil, nil, fmt.Errorf("opening the catalog directory %s: %w", cfg.StoreDir, lockErr)
 		}
 		if holder, ok := readCatalogLockHolder(cfg.StoreDir); ok {
 			kv, release, dialErr := dialCatalogKV(holder.URL)

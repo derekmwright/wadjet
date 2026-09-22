@@ -249,10 +249,29 @@ func (db *DB) Close() {
 // in one place, and so a contradictory Config — two stores, two catalogs —
 // is refused before anything is opened.
 func resolveCatalogAndStore(cfg *Config) (*catalogdir.Handle, error) {
+	// Every refusal comes BEFORE the filesystem is touched: a refused Config
+	// creates no directory (arc EC review B2).
+	switch {
+	case cfg.DataDir != "" && cfg.Store != nil:
+		return nil, errors.New("wadjet.Config: DataDir and Store both name where the data lives; set one")
+	case cfg.DataDir != "" && cfg.MetaKV != nil:
+		return nil, errors.New("wadjet.Config: DataDir and MetaKV both name the catalog; set one")
+	case cfg.CatalogDir != "" && cfg.MetaKV != nil:
+		return nil, errors.New("wadjet.Config: CatalogDir and MetaKV both name the catalog; set one")
+	case cfg.CatalogDir != "" && cfg.DataDir == "" && cfg.Store == nil:
+		return nil, errors.New("wadjet.Config: CatalogDir without a Store; set DataDir for a local database, or Store")
+	case cfg.DataDir == "" && cfg.Store == nil:
+		return nil, errors.New("wadjet.Config: no Store and no DataDir; set DataDir for a local database, Store otherwise")
+	}
 	if cfg.DataDir != "" {
-		if cfg.Store != nil {
-			return nil, errors.New("wadjet.Config: DataDir and Store both name where the data lives; set one")
+		// Absolute from here on: the store and the catalog are opened against
+		// the directory the caller named at Open, not against whatever the
+		// working directory is at the next flush (arc EC review B5).
+		abs, err := filepath.Abs(cfg.DataDir)
+		if err != nil {
+			return nil, fmt.Errorf("resolving the data directory %s: %w", cfg.DataDir, err)
 		}
+		cfg.DataDir = abs
 		store, err := objstore.NewFileStore(cfg.DataDir)
 		if err != nil {
 			return nil, fmt.Errorf("opening the data directory %s: %w", cfg.DataDir, err)
@@ -274,12 +293,11 @@ func resolveCatalogAndStore(cfg *Config) (*catalogdir.Handle, error) {
 		}
 		return nil, nil
 	}
-	if cfg.MetaKV != nil {
-		return nil, errors.New("wadjet.Config: CatalogDir and MetaKV both name the catalog; set one")
+	abs, err := filepath.Abs(cfg.CatalogDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolving the catalog directory %s: %w", cfg.CatalogDir, err)
 	}
-	if cfg.Store == nil {
-		return nil, errors.New("wadjet.Config: CatalogDir without a Store; set DataDir for a local database, or Store")
-	}
+	cfg.CatalogDir = abs
 	nats := natsconn.DefaultNATSConfig()
 	nats.StoreDir = cfg.CatalogDir
 	// Ephemeral: the port is published in the lock file for the CLI commands

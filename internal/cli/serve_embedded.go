@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/signal"
@@ -195,8 +196,12 @@ func openServerCatalogKV(logger *slog.Logger) (catalog.MetaKV, func(), error) {
 	cfg := NATSServerConfig()
 	lock, err := LockCatalogStoreDir(cfg.StoreDir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("the catalog store directory %s is held by another wadjet process "+
-			"(%w); stop it, or give this one its own --nats-store-dir", cfg.StoreDir, err)
+		if errors.Is(err, catalogdir.ErrHeld) {
+			// The same refusal wadjet.Open raises, holder pid included.
+			return nil, nil, fmt.Errorf("%w; stop it, or give this one its own --nats-store-dir",
+				catalogdir.HeldError(cfg.StoreDir, err))
+		}
+		return nil, nil, fmt.Errorf("opening the catalog directory %s: %w", cfg.StoreDir, err)
 	}
 	h, err := catalogdir.OpenLocked(lock, cfg, logger)
 	if err != nil {
