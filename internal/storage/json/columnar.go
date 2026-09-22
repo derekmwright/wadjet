@@ -163,6 +163,9 @@ func (s *jsonScanner) readString() (string, error) {
 				}
 				return unescaped, nil
 			}
+			if len(val) == 0 {
+				return "", nil // &val[0] of the empty string "" indexes past it
+			}
 			return unsafe.String(&val[0], len(val)), nil
 		}
 		s.pos++

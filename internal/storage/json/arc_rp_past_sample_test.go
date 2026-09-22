@@ -117,6 +117,10 @@ var rpCells = []rpCell{
 	{"timestamp_string", `"2024-01-02"`, `"oops"`, []string{`value "oops" (text) is not of type timestamp`}},
 	{"timestamp_number", `"2024-01-02"`, "5", []string{"value 5 (bigint) is not of type timestamp"}},
 	{"ipv4_string", `"10.0.0.1"`, `"oops"`, []string{`value "oops" (text) is not of type inet`}},
+	// The empty string: the columnar scanner's readString indexed past it
+	// (found by FuzzArcRPPastSample, corpus 8f3a76b44871d1bd).
+	{"timestamp_empty", `"2024-01-02"`, `""`, []string{`value "" (text) is not of type timestamp`}},
+	{"ipv4_empty", `"10.0.0.1"`, `""`, []string{`value "" (text) is not of type inet`}},
 	// A string column holds every value as its text, in every reader.
 	{"string_number", `"oops"`, "42", nil},
 	{"string_bool", `"oops"`, "true", nil},
@@ -253,6 +257,30 @@ func TestArcRPByteCappedSample(t *testing.T) {
 				}
 				if rb == nil {
 					t.Fatal("read every row; want a 22P02 at row 70")
+				}
+			}
+		})
+	}
+}
+
+// TestArcRPEmptyKey: an object key that is the empty string names a column
+// like any other. The columnar scanner reads keys with readString, which
+// indexed past an empty string: at 16b924d1 read_json over {"":1} failed
+// as a recovered index-out-of-range.
+func TestArcRPEmptyKey(t *testing.T) {
+	for _, path := range rpPaths {
+		t.Run(path, func(t *testing.T) {
+			r, err := rpOpen(t, path, []byte("{\"\":1,\"a\":2}\n{\"\":3,\"a\":4}\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := r.Next()
+			if err != nil || b == nil || b.Len != 2 {
+				t.Fatalf("batch=%v err=%v, want 2 rows", b, err)
+			}
+			for i, col := range b.Schema {
+				if col.Name == "" && b.Columns[i].Int64Data[1] != 3 {
+					t.Fatalf("column \"\" row 2 = %d, want 3", b.Columns[i].Int64Data[1])
 				}
 			}
 		})
