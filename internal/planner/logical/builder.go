@@ -1706,6 +1706,15 @@ func resolveTableOrCTE(table *plansql.TableRef, ctes []plansql.CTEDef) (*Node, e
 				// operation publishes its LEFT arm's names, and an explicit
 				// column list renames them positionally.
 				node.ScanColumns = recursiveCTEColumns(cte, ctes[:i])
+				// AND THE NAME THIS REFERENCE GIVES IT, as a non-recursive
+				// reference records it below: `FROM r a JOIN r b` is two
+				// relations, and without the alias both arms answered to `r`,
+				// so the join qualified neither side's `n` apart and
+				// `b.n = a.n + 1` compared a row's `n` with itself — zero
+				// rows where PostgreSQL 17.11 answers three.
+				if table.Alias != "" && !strings.EqualFold(table.Alias, cte.Name) {
+					node.CTERefAlias = table.Alias
+				}
 				return node, nil
 			}
 
