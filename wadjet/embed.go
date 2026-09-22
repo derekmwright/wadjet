@@ -12,9 +12,10 @@ import (
 // queries used by docs/getting-started.md (#805).
 // Public types alias their internal types, without wrappers or conversions;
 // store constructors return Config.Store's interface without callers naming it.
-// Config.MetaKV and Config.AuthProvider still require internal types without
-// public constructors; persistent catalog and in-process ABAC remain
-// in-repo-only (docs/embedding.md).
+// A persistent catalog is Config.DataDir / Config.CatalogDir (#1255,
+// ADR-0041). Config.MetaKV and Config.AuthProvider still require internal
+// types without public constructors; in-process ABAC remains in-repo-only
+// (docs/embedding.md).
 // TestTheGuidesProgramBuildsAndRunsOutOfTree builds/runs test/embed's separate
 // module importing only github.com/derekmwright/wadjet/wadjet.
 // See docs/internals/public-embedding-surface-boundary.md for the design.

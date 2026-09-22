@@ -9,9 +9,11 @@
 // import github.com/derekmwright/wadjet/internal/... — Go refuses to build it
 // if anything tries, which is exactly the property under test.
 //
-// It uses the in-memory store rather than the guide's ./wadjet-data directory
-// so it leaves nothing behind; the guide's own line is one call away
-// (wadjet.NewFileStore) and is exercised below too.
+// It is also the guide's RESTART: the program opens its data directory,
+// writes a table, closes, and opens the same directory again — the second
+// Open has nothing but the directory, and the table is there (#1255). It
+// uses a temporary directory rather than the guide's ./wadjet-data so it
+// leaves nothing behind.
 package main
 
 import (
@@ -27,26 +29,19 @@ import (
 func main() {
 	ctx := context.Background()
 
-	// Local disk needs no server; NewS3Store points at an S3-compatible store
-	// instead, and the rest of this program is unchanged either way.
 	dir, err := os.MkdirTemp("", "embedcheck")
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
-	if _, err := wadjet.NewFileStore(dir); err != nil {
-		log.Fatal(err)
-	}
-	store := wadjet.NewMemStore()
 
-	db, err := wadjet.Open(ctx, wadjet.Config{
-		Store:  store,
-		Bucket: "wadjet",
-	})
+	// One local directory holds the data AND the catalog, so the tables
+	// survive a restart. wadjet.NewS3Store + Config.CatalogDir is the same
+	// program over an S3-compatible store.
+	db, err := wadjet.Open(ctx, wadjet.Config{DataDir: dir})
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
 
 	// A schema for network flow logs. Every type the engine has is nameable
 	// from here; these are the ones the guide uses.
@@ -86,31 +81,34 @@ func main() {
 		"bytes_in":  int64(2048),
 		"bytes_out": int64(512),
 		"amount":    "12.34",
-		"date":      now,
+		"date":      now.Format("2006-01-02"),
 	}})
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := ingester.FlushAll(ctx); err != nil {
+	if err := ingester.Stop(ctx); err != nil {
 		log.Fatal(err)
 	}
-	ingester.Stop(ctx)
 
-	result, err := db.Query(ctx,
-		"SELECT src_ip, dst_ip, bytes_in, amount FROM flow_logs LIMIT 10")
+	// Close releases the directory; the "restart" is the next Open of it.
+	db.Close()
+	db, err = wadjet.Open(ctx, wadjet.Config{DataDir: dir})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	result, err := db.Query(ctx, "SELECT src_ip, bytes_in, amount FROM flow_logs")
 	if err != nil {
 		log.Fatal(err)
 	}
 	for _, row := range result.Rows {
-		fmt.Printf("%v %v %v %v\n", row["src_ip"], row["dst_ip"], row["bytes_in"], row["amount"])
+		fmt.Println(row["src_ip"], row["bytes_in"], row["amount"])
 	}
 
 	tables, err := db.ListTables(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("tables:", tables)
-
-	// The defaults, for a caller that wants to change one of them.
-	fmt.Println("default flush rows:", wadjet.DefaultIngestConfig().MaxBufferRows)
+	fmt.Println("tables after the restart:", tables)
 }

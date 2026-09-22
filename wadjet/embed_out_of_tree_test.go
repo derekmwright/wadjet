@@ -62,7 +62,7 @@ func TestTheGuidesProgramBuildsAndRunsOutOfTree(t *testing.T) {
 		t.Fatalf("the guide's program builds out of tree and then fails to run:\n%s\n%v", out, err)
 	}
 	// The row it ingested, read back through the public API.
-	for _, want := range []string{"10.0.1.50", "12.34", "tables: [flow_logs]"} {
+	for _, want := range []string{"10.0.1.50", "12.34", "tables after the restart: [flow_logs]"} {
 		if !strings.Contains(string(out), want) {
 			t.Errorf("the out-of-tree program's output does not contain %q:\n%s", want, out)
 		}

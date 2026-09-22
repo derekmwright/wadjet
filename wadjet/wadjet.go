@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -18,9 +19,11 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/alerts"
 	"github.com/derekmwright/wadjet/internal/auth"
+	"github.com/derekmwright/wadjet/internal/catalogdir"
 	"github.com/derekmwright/wadjet/internal/config"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
+	"github.com/derekmwright/wadjet/internal/natsconn"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -33,15 +36,18 @@ import (
 
 // DB is the main entry point for embedded usage of Wadjet.
 type DB struct {
-	store               objstore.Store
-	catalog             *catalog.Catalog
-	bucket              string
-	memoryBudget        int64
-	spillDir            string
-	logger              *slog.Logger
-	authProvider        *auth.Provider    // nil = no auth enforcement
-	alertScheduler      *alerts.Scheduler // non-nil when EnableAlerts is set
-	alertSchedulerStop  context.CancelFunc
+	store              objstore.Store
+	catalog            *catalog.Catalog
+	bucket             string
+	memoryBudget       int64
+	spillDir           string
+	logger             *slog.Logger
+	authProvider       *auth.Provider    // nil = no auth enforcement
+	alertScheduler     *alerts.Scheduler // non-nil when EnableAlerts is set
+	alertSchedulerStop context.CancelFunc
+	// catalogDir is the catalog directory this DB holds when Config.DataDir
+	// or Config.CatalogDir named one; Close releases it. Nil otherwise.
+	catalogDir          *catalogdir.Handle
 	sortMergeJoinBytes  int64
 	lateMaterialization bool
 	bushyJoinReorder    bool
@@ -52,12 +58,47 @@ type DB struct {
 	dmlRedos atomic.Uint64
 }
 
+// ErrCatalogHeld is the refusal Open returns when the catalog directory it
+// was given is held by another DB — in this process or another. The error
+// names the directory and, when the holder has published, its pid. It is
+// never a silent second catalog: two processes writing one JetStream store
+// write over each other's metadata.
+var ErrCatalogHeld = catalogdir.ErrHeld
+
 // Config holds configuration for creating a DB instance.
+//
+// Where a table's METADATA lives decides whether it survives the process:
+//
+//   - DataDir names a directory. The Parquet objects go to a file store
+//     rooted there under Bucket (default "wadjet") and the catalog persists
+//     under <DataDir>/_catalog — the layout `wadjet --storage-type=file
+//     --data-dir=<DataDir>` and `wadjet serve` use, so a program, the CLI
+//     commands and a server over one directory hold ONE set of tables.
+//     Store must be nil.
+//   - CatalogDir names the catalog directory alone, for a persistent catalog
+//     beside any Store (an S3 store, say). DataDir defaults it.
+//   - Neither: the catalog is IN MEMORY. Every table is process-local and
+//     gone at exit, while the objects a durable Store received stay behind
+//     unreferenced (#1255). It is the right shape for a test over
+//     NewMemStore; over a file store it logs a warning naming the two fields.
+//
+// A DB that holds a catalog directory holds it exclusively — see
+// ErrCatalogHeld — and Close releases it.
 type Config struct {
-	Store        objstore.Store
-	Bucket       string
-	Logger       *slog.Logger
-	MetaKV       catalog.MetaKV // optional: NATS KV for production, nil = in-memory
+	Store  objstore.Store
+	Bucket string
+	Logger *slog.Logger
+	// DataDir is the zero-configuration persistent database: one local
+	// directory for the data and the catalog. See the type comment.
+	DataDir string
+	// CatalogDir is the directory the catalog persists in. Empty with an
+	// empty DataDir means an in-memory catalog.
+	CatalogDir string
+	// MetaKV is the catalog's KV for a process that already holds one (the
+	// servers in this repository). nil, with no CatalogDir or DataDir, is
+	// the in-memory catalog. It names an internal type and has no public
+	// constructor; an out-of-tree program uses DataDir or CatalogDir.
+	MetaKV       catalog.MetaKV
 	MemoryBudget int64          // per-query memory budget in bytes (0 = unlimited)
 	SpillDir     string         // directory for spill-to-disk files (empty = os temp dir)
 	AuthProvider *auth.Provider // optional: enables ABAC enforcement at query level
@@ -102,6 +143,19 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		cfg.Logger = slog.Default()
 	}
 
+	handle, err := resolveCatalogAndStore(&cfg)
+	if err != nil {
+		return nil, err
+	}
+	// Every failure below this line hands the directory back, so a caller
+	// that retries Open is not refused by the lock its own failed attempt
+	// still held.
+	release := func() {
+		if handle != nil {
+			handle.Close()
+		}
+	}
+
 	var cat *catalog.Catalog
 	if cfg.MetaKV != nil {
 		cat = catalog.New(cfg.MetaKV, cfg.Store, cfg.Bucket)
@@ -109,10 +163,12 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		cat = catalog.NewWithStore(cfg.Store, cfg.Bucket)
 	}
 	if err := cat.Init(ctx); err != nil {
+		release()
 		return nil, fmt.Errorf("initializing catalog: %w", err)
 	}
 
 	db := &DB{
+		catalogDir:          handle,
 		store:               cfg.Store,
 		catalog:             cat,
 		bucket:              cfg.Bucket,
@@ -136,6 +192,7 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 	// A policy that names a relation the catalog does not hold refuses to
 	// open, exactly as it refuses to start under `wadjet serve`.
 	if err := db.authProvider.BindToCatalog(ctx, cat); err != nil {
+		release()
 		return nil, fmt.Errorf("attaching the auth policy set: %w", err)
 	}
 
@@ -161,8 +218,14 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 	return db, nil
 }
 
-// Close shuts down any background goroutines started by Open (e.g. alert scheduler).
-// It is safe to call Close multiple times.
+// Close shuts down any background goroutines started by Open (e.g. alert
+// scheduler) and releases the catalog directory Open holds when Config named
+// one, so the next Open of that directory — in this process or another — is
+// not refused. It is safe to call Close multiple times.
+//
+// A program that exits without Close leaves the directory to the kernel: the
+// lock drops with the process and the catalog store recovers on the next
+// open (JetStream logs a rebuild). Nothing committed is lost either way.
 func (db *DB) Close() {
 	if db.alertSchedulerStop != nil {
 		db.alertSchedulerStop()
@@ -172,6 +235,62 @@ func (db *DB) Close() {
 		db.alertScheduler.Wait()
 		db.alertScheduler = nil
 	}
+	if db.catalogDir != nil {
+		db.catalogDir.Close()
+		db.catalogDir = nil
+	}
+}
+
+// resolveCatalogAndStore turns Config.DataDir / Config.CatalogDir into the
+// Store and MetaKV the rest of Open runs on, and returns the catalog
+// directory handle Close must release (nil when no directory was named).
+//
+// It is one function so the three shapes the type comment lists are decided
+// in one place, and so a contradictory Config — two stores, two catalogs —
+// is refused before anything is opened.
+func resolveCatalogAndStore(cfg *Config) (*catalogdir.Handle, error) {
+	if cfg.DataDir != "" {
+		if cfg.Store != nil {
+			return nil, errors.New("wadjet.Config: DataDir and Store both name where the data lives; set one")
+		}
+		store, err := objstore.NewFileStore(cfg.DataDir)
+		if err != nil {
+			return nil, fmt.Errorf("opening the data directory %s: %w", cfg.DataDir, err)
+		}
+		cfg.Store = store
+		if cfg.Bucket == "" {
+			cfg.Bucket = "wadjet"
+		}
+		if cfg.CatalogDir == "" {
+			// `_catalog`, the CLI's name for it: an object-store bucket cannot
+			// begin with an underscore, so it never collides with Bucket.
+			cfg.CatalogDir = filepath.Join(cfg.DataDir, "_catalog")
+		}
+	}
+	if cfg.CatalogDir == "" {
+		if _, onDisk := cfg.Store.(*objstore.FileStore); onDisk && cfg.MetaKV == nil {
+			cfg.Logger.Warn("wadjet.Open: a file store with an in-memory catalog: every table is gone at exit " +
+				"while its files stay behind; set Config.DataDir (or CatalogDir) to keep tables across restarts")
+		}
+		return nil, nil
+	}
+	if cfg.MetaKV != nil {
+		return nil, errors.New("wadjet.Config: CatalogDir and MetaKV both name the catalog; set one")
+	}
+	if cfg.Store == nil {
+		return nil, errors.New("wadjet.Config: CatalogDir without a Store; set DataDir for a local database, or Store")
+	}
+	nats := natsconn.DefaultNATSConfig()
+	nats.StoreDir = cfg.CatalogDir
+	// Ephemeral: the port is published in the lock file for the CLI commands
+	// that reach a running program's catalog; nothing else needs to guess it.
+	nats.Port = -1
+	handle, err := catalogdir.Open(nats, cfg.Logger)
+	if err != nil {
+		return nil, fmt.Errorf("opening the catalog: %w", err)
+	}
+	cfg.MetaKV = handle.KV
+	return handle, nil
 }
 
 // dbExecutor adapts *DB to the alerts.SQLExecutor interface so the alert

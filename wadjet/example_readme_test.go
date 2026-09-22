@@ -21,8 +21,7 @@ import (
 func ExampleOpen() {
 	ctx := context.Background()
 
-	store, _ := wadjet.NewFileStore("/var/lib/wadjet") // or NewS3Store(...) for S3
-	db, _ := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "analytics"})
+	db, _ := wadjet.Open(ctx, wadjet.Config{DataDir: "/var/lib/wadjet"}) // tables survive a restart
 	res, _ := db.Query(ctx, "SELECT src_ip, SUM(bytes_in) FROM flow_logs GROUP BY 1")
 
 	_ = res
