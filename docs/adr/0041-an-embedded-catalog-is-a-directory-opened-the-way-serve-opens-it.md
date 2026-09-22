@@ -58,7 +58,7 @@ than whatever answers a well-known port. That mechanism lived in
    short-lived command does: a long-lived program whose catalog vanished
    when an unrelated process exited would be a worse contract than a
    refusal at `Open`. The CLI commands still dial, so `wadjet tables
-   --data-dir=D` beside a running program lists its tables live. `Close`
+   --storage-type=file --data-dir=D` beside a running program lists its tables live. `Close`
    releases the directory; a killed process leaves the flock to the kernel
    and the JetStream store to its own recovery.
 

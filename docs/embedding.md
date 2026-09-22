@@ -408,8 +408,10 @@ the holder's pid. It is a refusal rather than a second opener because two
 processes writing one JetStream store write over each other's metadata. The
 short-lived CLI commands (`wadjet tables`, `query`, …) are the exception in
 the other direction: they reach a running holder's catalog live, through the
-address it publishes in `wadjet.lock`, so `wadjet tables
---data-dir=./wadjet-data` beside your running program lists its tables. A
+address it publishes in `wadjet.lock`, so `wadjet tables --storage-type=file
+--data-dir=./wadjet-data` beside your running program lists its tables
+(`--storage-type` defaults to `s3`; without the flag the command opens the
+machine-wide S3 catalog under `~/.wadjet/nats` instead). A
 process that exits without `Close` leaves the directory to the kernel: the
 lock drops with the process, and the catalog store recovers on the next open
 (JetStream logs a rebuild). Nothing committed is lost.
