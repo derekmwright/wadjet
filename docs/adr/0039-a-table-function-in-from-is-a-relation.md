@@ -110,8 +110,12 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    SQLSTATE `22P02` (arc RP, #1242, #1243). Every CSV and JSON read path
    checks before conversion or vector writes, against the sample the schema
    was ACTUALLY inferred from (the JSON stream reader's sample stops at
-   8 MiB, so it can be fewer than 100 rows). The error names the reader,
-   input, 1-based data row, column, value and both types. Integer to
+   8 MiB, so it can be fewer than 100 rows). The error carries the SQLSTATE
+   PostgreSQL's COPY raises for the same field (22P02; 22003 out of range;
+   22007 for a timestamp) and names the reader, input (across a glob, the
+   matched file and its own row), 1-based data row, column, value and both
+   types. A CSV field is read with PostgreSQL's input function for bigint,
+   double precision and boolean (the kernel's, which CAST uses). Integer to
    fractional number is a mismatch; text columns accept every value as text.
    JSON null and empty CSV fields remain NULL, and inference within the
    sample is unchanged. COUNT(*) refuses when the reader reaches the row; a

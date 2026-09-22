@@ -5919,8 +5919,12 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     can open twice — without reading it for an identity that may not be
     allowed to (ADR-0034's amendment). The JSON and CSV inference is the
     readers' own 100-ROW SAMPLE and describes the whole file; a row past it
-    with a non-NULL value that does not fit refuses with `22P02`, naming the
-    reader, file, row, column and types (arc RP, #1242, #1243). A key first
+    with a non-NULL value that does not fit refuses with COPY's SQLSTATE for
+    the field (`22P02`, `22003`, `22007`), naming the reader, file, row,
+    column and types (arc RP, #1242, #1243); a CSV field is read with
+    PostgreSQL's bigint/float8/bool input functions. Divergences: a timestamp
+    column takes only the sample's spellings and an inet column no prefix
+    length (both on the differences page). A key first
     seen past the sample remains absent. With a column list the reader is
     an ordinary relation: an unknown column is `42703` at plan time through
     ANY path, `f.*` expands, and `SUM` over a whole-number column is `numeric`

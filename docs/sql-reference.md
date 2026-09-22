@@ -276,16 +276,29 @@ have (an integer column that meets `0.75` there becomes `double precision`).
 PAST the sample:
 
 - a non-NULL value that does not fit the column's type refuses the statement
-  with SQLSTATE `22P02`, as PostgreSQL's `COPY` refuses such a field. The
-  message names the reader, the input, the 1-based data row (for a glob,
-  counted across the matched files in name order), the column (and, for a
-  nested value, the element or field), the value and both types:
+  with the SQLSTATE PostgreSQL's `COPY` raises for the same field: `22P02`,
+  `22003` for a number outside the type's range, `22007` for a timestamp
+  that does not parse. The message names the reader, the input, the 1-based
+  data row, the column (and, for a nested value, the element or field), the
+  value and both types:
 
   ```
   read_json: /data/f.json: row 101 column "a": value 0.75 (double precision) is not of type bigint (the column's type was inferred from the file's first 100 rows)
   ```
 
-  The type must match exactly: a `bigint` column meeting `0.75`, `true` or
+  Over a glob it names the matched FILE and the row within that file (the
+  sample is the first 100 rows of the files read in name order):
+
+  ```
+  read_csv: /data/*.csv: /data/g2.csv row 5 column "a": value "0.75" (double precision) is not of type bigint (the column's type was inferred from the first 100 rows of the input)
+  ```
+
+  A `read_csv` field is read with PostgreSQL's input function for the
+  column's type: a `bigint` takes `' 5'`, `+5`, `0x1F`, `0o17`, `0b101` and
+  `1_000` but not `1.0` or `1e3`; a `double precision` takes `' 1.5'`,
+  `inf`, `NaN` and `0x1p-2` but not `1_000`; a `boolean` takes `t`, `tr`,
+  `yes`, `y`, `on`, `of`, `1`, `0` in any case. A `read_json` value must be
+  the column's JSON kind: a `bigint` column meeting `0.75`, `1e3`, `true` or
   `"7"` refuses, and so does a `boolean` column meeting `1`. A `text` column
   holds every value as its text, and a `double precision` column holds a
   whole number. The refusal applies to every statement that reads the row,
@@ -304,6 +317,13 @@ A glob of CSV files with a header reads the first file's first record as the
 header; a later file whose first record repeats it exactly has that record
 skipped, and a later file that does not is read whole, as the continuation of
 a split file.
+
+Two differences from `COPY` remain past the sample: a timestamp column takes
+only the spellings the sample recognises (`2024-01-02`, `2024-01-02 03:04:05`,
+`2024-01-02T03:04:05` and RFC 3339, with surrounding whitespace), so
+`Jan 2 2024` is `22007` where PostgreSQL reads it; and an `inet` column
+inferred from dotted quads refuses `10.0.0.1/32` and `010.0.0.1`, which
+PostgreSQL's `inet` accepts.
 
 Nor is the plan-time read taken over an input that can only be read ONCE. It
 opens the input and the execution opens it again, so it is taken only over a
