@@ -429,7 +429,7 @@ func checkValue(v any, col parquet.Column) *mismatch {
 	switch value := v.(type) {
 	case json.Number:
 		observed = detectTokenType(value)
-		if observed == parquet.TypeFloat64 {
+		if observed != parquet.TypeInt64 {
 			// A number no float64 holds (1e999) fits no column but text.
 			if _, err := value.Float64(); err != nil {
 				return &mismatch{value: displayValue(v), observed: "numeric", want: col.Type, code: "22003"}

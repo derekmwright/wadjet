@@ -1070,6 +1070,12 @@ func detectTokenType(tok json.Token) parquet.TypeID {
 				return parquet.TypeInt64
 			}
 		}
+		// A number float8 cannot hold (1e999, a nonzero 1e-400) infers
+		// text, the one type that holds it: typed double precision it read
+		// 0 inside the sample and was 22003 past it (checkNumber).
+		if _, st := kernel.FloatLitText(s, 64); st != kernel.NumConstOK {
+			return parquet.TypeString
+		}
 		return parquet.TypeFloat64
 	case string:
 		return detectStringType(v)

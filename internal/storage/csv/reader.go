@@ -487,6 +487,14 @@ func inferCSVSchema(header []string, rows [][]string) []parquet.Column {
 	return cols
 }
 
+// detectStringType is the inference's type for one sampled field. A number
+// is recognised with the SAME PostgreSQL input functions writeCSVValue reads
+// a field with (the kernel's int8in/float8in), so a spelling the sample
+// types as bigint or double precision is read as that type, to the same
+// value, in every later row too: ' 5', 0x1F and 1_000 are bigint; 1e-400
+// and 1e400 (outside float8) and 1_000.5 are text. Only the six true/false
+// spellings infer boolean — a narrower set than the reader accepts (it takes
+// t, yes, on, 1 …), never a wider one, so a 0/1 column stays bigint.
 func detectStringType(s string) parquet.TypeID {
 	// Try bool
 	switch s {
@@ -494,13 +502,11 @@ func detectStringType(s string) parquet.TypeID {
 		return parquet.TypeBool
 	}
 
-	// Try integer
-	if _, err := strconv.ParseInt(s, 10, 64); err == nil {
+	// Try integer, then float, by PostgreSQL's grammar.
+	if _, st := kernel.IntLitText(s); st == kernel.NumConstOK {
 		return parquet.TypeInt64
 	}
-
-	// Try float
-	if _, err := strconv.ParseFloat(s, 64); err == nil {
+	if _, st := kernel.FloatLitText(s, 64); st == kernel.NumConstOK {
 		return parquet.TypeFloat64
 	}
 
