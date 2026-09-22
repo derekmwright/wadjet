@@ -4361,42 +4361,22 @@ func (p *HashJoinProbe) markMatchedBuildEntries(in *batch.RecordBatch) {
 	}
 }
 
-// markKeyMatchedLocked is markKeyMatched without locking — caller must hold h.mu.
+// markKeyMatchedLocked is markKeyMatched for the RIGHT SEMI / RIGHT ANTI probe,
+// whose caller has already resolved the probe key indices (so the resolve
+// inside markKeyMatched returns at its fast check and takes no lock).
+//
+// It used to be a COPY of markKeyMatched with the int and string arms only.
+// A two-integer key builds neither of those indexes (tryEnableIntKey nils the
+// string one), so its arm fell to the string lookup, found no table, and
+// marked NOTHING: a RIGHT SEMI join on two integer keys answered zero rows and
+// a RIGHT ANTI join every build row. `o.j IN (SELECT b.id FROM dc_out b JOIN
+// dc_out c ON c.id = b.id WHERE b.id = o.j)` plans exactly that — the IN key
+// and the correlation key are two pairs — and answered empty on the
+// single-process arms where PostgreSQL answers `1 | 2 | 9` (arc DC round 3,
+// review N6). One body now serves both callers, so the arms cannot drift
+// apart again.
 func (p *HashJoinProbe) markKeyMatchedLocked(in *batch.RecordBatch, row int) {
-	h := p.join
-	if h.useIntKey {
-		key, ok := h.intProbeKey(in, row)
-		if !ok {
-			return
-		}
-		pt := h.idxPart(key)
-		if pt.ints == nil {
-			return
-		}
-		head, ok := pt.ints.Get(key)
-		if !ok {
-			return
-		}
-		for idx := head; idx >= 0; idx = pt.next[idx] {
-			pt.matched[idx] = true
-		}
-	} else {
-		if !p.buildProbeKey(in, row) {
-			return // NULL key: matches nothing, so it marks nothing
-		}
-		hash := strHash(p.keyBuf)
-		pt := h.idxPartAt(hash)
-		if pt.strs == nil {
-			return
-		}
-		head, ok := pt.strs.GetAt(p.keyBuf, hash)
-		if !ok {
-			return
-		}
-		for idx := head; idx >= 0; idx = pt.next[idx] {
-			pt.matched[idx] = true
-		}
-	}
+	p.markKeyMatched(in, row)
 }
 
 // nextCrossChunk emits the next bounded slice of a cross join's output. A
