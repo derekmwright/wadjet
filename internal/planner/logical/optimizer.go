@@ -1208,7 +1208,7 @@ func decorrelateScalarSubqueries(n *Node, ctes []plansql.CTEDef, annotate func(*
 		return n
 	}
 
-	_, outerColMap := collectScanInfo(n.Children[0])
+	_, outerColMap := collectEnclosingScope(n.Children[0])
 	flatPreds := flattenANDPredicates(n.Predicates)
 
 	var remainingPreds []Predicate
@@ -1659,7 +1659,7 @@ func decorrelateInSubqueries(n *Node, ctes []plansql.CTEDef, annotate func(*Node
 	outerTables := make(map[string]bool)
 	collectTableNames(n.Children[0], outerTables)
 
-	_, outerColMap := collectScanInfo(n.Children[0])
+	_, outerColMap := collectEnclosingScope(n.Children[0])
 	flatPreds := flattenANDPredicates(n.Predicates)
 
 	var remainingPreds []Predicate
@@ -2866,11 +2866,22 @@ func buildORTree(nodes []plansql.Node) plansql.Node {
 func collectScanInfo(n *Node) (tables map[string]bool, colToTable map[string]string) {
 	tables = make(map[string]bool)
 	colToTable = make(map[string]string)
-	collectScanInfoRec(n, tables, colToTable)
+	collectScanInfoRec(n, tables, colToTable, false)
 	return
 }
 
-func collectScanInfoRec(n *Node, tables map[string]bool, colToTable map[string]string) {
+// collectEnclosingScope is collectScanInfo for the three decorrelations'
+// ENCLOSING query: it also publishes a derived table's computed output names
+// (see the branch in collectScanInfoRec). It is a separate entry point so the
+// join-pushdown callers of collectScanInfo keep the attribution they had.
+func collectEnclosingScope(n *Node) (tables map[string]bool, colToTable map[string]string) {
+	tables = make(map[string]bool)
+	colToTable = make(map[string]string)
+	collectScanInfoRec(n, tables, colToTable, true)
+	return
+}
+
+func collectScanInfoRec(n *Node, tables map[string]bool, colToTable map[string]string, derivedOutputs bool) {
 	if n == nil {
 		return
 	}
@@ -2922,8 +2933,25 @@ func collectScanInfoRec(n *Node, tables map[string]bool, colToTable map[string]s
 			colToTable[strings.ToLower(col)] = scope
 		}
 	}
+	// A DERIVED TABLE is the same kind of scope: the enclosing query names its
+	// OUTPUT columns bare, and a computed one (`total * 1 AS t2`) has no scan
+	// below it to publish the name. Without it an unqualified `t2` inside a
+	// correlated subquery over this relation was not an enclosing column at
+	// all, so the body walk never read it as one: `HAVING SUM(b.amt) > t2`
+	// was dropped by the EXISTS rewrite and answered every row (arc DC round
+	// 4; Codex review B1 / N5). The CTE spelling of the same relation already
+	// answered, through the branch above.
+	if derivedOutputs && n.DerivedAlias != "" && len(cteScopeNames(n)) == 0 {
+		scope := strings.ToLower(n.DerivedAlias)
+		tables[scope] = true
+		for _, col := range subtreeOutputNames(n) {
+			if _, taken := colToTable[strings.ToLower(col)]; !taken {
+				colToTable[strings.ToLower(col)] = scope
+			}
+		}
+	}
 	for _, child := range n.Children {
-		collectScanInfoRec(child, tables, colToTable)
+		collectScanInfoRec(child, tables, colToTable, derivedOutputs)
 	}
 }
 
@@ -3255,7 +3283,7 @@ func decorrelateExists(n *Node, ctes []plansql.CTEDef, annotate func(*Node)) *No
 	}
 
 	// Collect column-to-table mapping for resolving unqualified column references
-	_, outerColMap := collectScanInfo(n.Children[0])
+	_, outerColMap := collectEnclosingScope(n.Children[0])
 
 	// Flatten AND predicates so each EXISTS is a separate predicate
 	flatPreds := flattenANDPredicates(n.Predicates)

@@ -37,6 +37,19 @@ func collectOuterColumns(node *logical.Node) map[string]string {
 			for _, col := range cteOutputNames(n) {
 				colMap[strings.ToLower(col)] = scope
 			}
+		} else if n.DerivedAlias != "" {
+			// A DERIVED TABLE's output names answer to its alias the same
+			// way, and a COMPUTED one (`total * 1 AS t2`) has no scan below
+			// it to publish it — so an unqualified `t2` inside a correlated
+			// subquery over this relation was not an outer column here, the
+			// per-row re-run left it in place, and it failed to resolve (arc
+			// DC round 4, the logical twin in collectScanInfoRec).
+			scope := strings.ToLower(n.DerivedAlias)
+			for _, col := range cteOutputNames(n) {
+				if _, taken := colMap[strings.ToLower(col)]; !taken {
+					colMap[strings.ToLower(col)] = scope
+				}
+			}
 		}
 		for _, child := range n.Children {
 			walk(child)
