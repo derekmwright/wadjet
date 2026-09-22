@@ -415,6 +415,11 @@ func scanObjectInto(sc *jsonScanner, rb *batch.RecordBatch, row int, schema []pa
 	if sc.advance() != '{' {
 		return fmt.Errorf("expected '{'")
 	}
+	// Every vector of rb is rb.Len long (NewRecordBatch), so this one check
+	// bounds every write below. A value only reaches a vector that holds its
+	// kind — a string a string-like column, a nested value a nested or text
+	// column — which is what kept a string out of a bigint vector's empty
+	// BytesData (the index-out-of-range of #1243).
 	if row < 0 || row >= rb.Len {
 		return fmt.Errorf("JSON row index %d outside batch length %d", row, rb.Len)
 	}
@@ -454,9 +459,6 @@ func scanObjectInto(sc *jsonScanner, rb *batch.RecordBatch, row int, schema []pa
 		seen[colI] = true
 		vec := rb.Columns[colI]
 		colType := schema[colI].Type
-		if row >= vec.Len || (colType == parquet.TypeString && row+1 >= len(vec.BytesData.Offsets)) {
-			return fmt.Errorf("JSON column %q row index %d outside vector", schema[colI].Name, row)
-		}
 
 		// Read value directly into typed vector
 		valByte := sc.peek()
@@ -470,40 +472,31 @@ func scanObjectInto(sc *jsonScanner, rb *batch.RecordBatch, row int, schema []pa
 			vec.WriteNullAt(row)
 
 		case valByte == '"': // string
-			// Only a string-like column holds a string; past the sample the
-			// string must also parse as the column's type (an IPv4 column
-			// meeting "oops"). Checked on a copy of the scanner, so a string
-			// that fits is then read exactly as before.
-			pastSample := sc.fileRow > sc.sampled
-			if colType != parquet.TypeString && (pastSample || !isStringLike(colType)) {
-				peek := *sc
-				value, err := peek.readString()
-				if err != nil {
-					return fmt.Errorf("%s: %w", columnLabel(schema[colI].Name), err)
-				}
-				err = checkValue(value, schema[colI], columnLabel(schema[colI].Name), sc.fileRow, sc.sampled)
-				if err == nil && !isStringLike(colType) {
-					err = valueError(displayValue(value), sqlTypeName(detectStringType(value)), schema[colI], columnLabel(schema[colI].Name), sc.fileRow, sc.sampled)
-				}
-				if err != nil {
+			// Only a string-like column holds a string, and past the sample
+			// it must also parse as the column's type (an inet column
+			// meeting "oops").
+			if colType != parquet.TypeString && (!isStringLike(colType) || sc.fileRow > sc.sampled) {
+				if err := sc.checkString(schema[colI]); err != nil {
 					return err
 				}
 			}
 			writeStringValue(sc, vec, row, colType)
 
-		case valByte == 't' || valByte == 'f': // true / false
-			value := valByte == 't'
+		case valByte == 't': // true
 			if colType != parquet.TypeBool && colType != parquet.TypeString && sc.fileRow > sc.sampled {
-				return valueError(displayValue(value), "boolean", schema[colI], columnLabel(schema[colI].Name), sc.fileRow, sc.sampled)
+				return sc.refuse("true", "boolean", schema[colI])
 			}
+			sc.pos += 4
 			vec.Nulls.SetValid(row)
-			if value {
-				sc.pos += 4
-				writeBoolTrue(vec, row, colType)
-			} else {
-				sc.pos += 5
-				writeBoolFalse(vec, row, colType)
+			writeBoolTrue(vec, row, colType)
+
+		case valByte == 'f': // false
+			if colType != parquet.TypeBool && colType != parquet.TypeString && sc.fileRow > sc.sampled {
+				return sc.refuse("false", "boolean", schema[colI])
 			}
+			sc.pos += 5
+			vec.Nulls.SetValid(row)
+			writeBoolFalse(vec, row, colType)
 
 		case valByte == '{' || valByte == '[': // nested object or array
 			raw := sc.readRawValue()
@@ -513,17 +506,11 @@ func scanObjectInto(sc *jsonScanner, rb *batch.RecordBatch, row int, schema []pa
 				if valByte == '[' {
 					kind = "array"
 				}
-				return valueError(string(raw), kind, schema[colI], columnLabel(schema[colI].Name), sc.fileRow, sc.sampled)
+				return sc.refuse(string(raw), kind, schema[colI])
 			}
 			if nested {
 				if sc.fileRow > sc.sampled {
-					dec := json.NewDecoder(bytes.NewReader(raw))
-					dec.UseNumber()
-					var value any
-					if err := dec.Decode(&value); err != nil {
-						return fmt.Errorf("%s: %w", columnLabel(schema[colI].Name), err)
-					}
-					if err := checkValue(value, schema[colI], columnLabel(schema[colI].Name), sc.fileRow, sc.sampled); err != nil {
+					if err := sc.checkNested(raw, schema[colI]); err != nil {
 						return err
 					}
 				}
@@ -555,8 +542,7 @@ func scanObjectInto(sc *jsonScanner, rb *batch.RecordBatch, row int, schema []pa
 			numBytes := sc.readNumber()
 			vec.Nulls.SetValid(row)
 			if !writeNumberValue(vec, row, colType, numBytes) && sc.fileRow > sc.sampled {
-				observed := sqlTypeName(detectTokenType(json.Number(numBytes)))
-				return valueError(string(numBytes), observed, schema[colI], columnLabel(schema[colI].Name), sc.fileRow, sc.sampled)
+				return sc.refuseNumber(numBytes, schema[colI])
 			}
 		}
 	}
@@ -569,6 +555,49 @@ func scanObjectInto(sc *jsonScanner, rb *batch.RecordBatch, row int, schema []pa
 	}
 
 	return nil
+}
+
+// The checks below are the scanner's cold paths, kept out of scanObjectInto
+// so the per-value loop stays as small as it was.
+
+// checkString checks the string at the scanner against col, on a copy of
+// the scanner so a string that fits is then read exactly as before.
+func (sc *jsonScanner) checkString(col parquet.Column) error {
+	peek := *sc
+	value, err := peek.readString()
+	if err != nil {
+		return fmt.Errorf("column %q: %w", col.Name, err)
+	}
+	if m := checkValue(value, col); m != nil {
+		return m.refusal(col.Name, sc.fileRow, sc.sampled)
+	}
+	if !isStringLike(col.Type) {
+		return sc.refuse(displayValue(value), sqlTypeName(detectStringType(value)), col)
+	}
+	return nil
+}
+
+// checkNested checks a nested value's elements or fields against col.
+func (sc *jsonScanner) checkNested(raw []byte, col parquet.Column) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var value any
+	if err := dec.Decode(&value); err != nil {
+		return fmt.Errorf("column %q: %w", col.Name, err)
+	}
+	if m := checkValue(value, col); m != nil {
+		return m.refusal(col.Name, sc.fileRow, sc.sampled)
+	}
+	return nil
+}
+
+func (sc *jsonScanner) refuseNumber(numBytes []byte, col parquet.Column) error {
+	return sc.refuse(string(numBytes), sqlTypeName(detectTokenType(json.Number(numBytes))), col)
+}
+
+func (sc *jsonScanner) refuse(value, observed string, col parquet.Column) error {
+	m := &mismatch{value: value, observed: observed, want: col.Type}
+	return m.refusal(col.Name, sc.fileRow, sc.sampled)
 }
 
 // coerceToColumn makes a json.Unmarshal'd value storable in col's vector,

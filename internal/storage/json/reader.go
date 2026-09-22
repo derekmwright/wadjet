@@ -90,8 +90,8 @@ func (r *Reader) Next() (*batch.RecordBatch, error) {
 			continue
 		}
 		for _, col := range r.schema {
-			if err := checkValue(values[col.Name], col, columnLabel(col.Name), r.offset+i+1, defaultSampleSize); err != nil {
-				return nil, err
+			if m := checkValue(values[col.Name], col); m != nil {
+				return nil, m.refusal(col.Name, r.offset+i+1, defaultSampleSize)
 			}
 		}
 	}
@@ -400,8 +400,8 @@ func NewReaderFromBytesWithCoercion(data []byte) (*Reader, error) {
 	schema := inferSchema(rows, defaultSampleSize)
 	for i := defaultSampleSize; i < len(rows); i++ {
 		for _, col := range schema {
-			if err := checkValue(rows[i][col.Name], col, columnLabel(col.Name), i+1, defaultSampleSize); err != nil {
-				return nil, err
+			if m := checkValue(rows[i][col.Name], col); m != nil {
+				return nil, m.refusal(col.Name, i+1, defaultSampleSize)
 			}
 		}
 	}
@@ -414,14 +414,14 @@ func NewReaderFromBytesWithCoercion(data []byte) (*Reader, error) {
 
 // checkValue reports whether a non-NULL value read past the inference sample
 // fits the column the sample inferred, BEFORE anything converts or writes
-// it. A value that does not fit is a 22P02 naming the 1-based row, the
-// column (and the nested element or field), the value and both types; the
-// sample itself keeps the widening inference gave it, so only rows past
-// `sampled` reach this. A string column accepts every value as its text
+// it; nil means it fits. A string column accepts every value as its text
 // form, and a double precision column accepts a whole number. Everything
 // else must be the inferred type exactly: an integer column meeting 0.75 or
-// true is a mismatch, as PostgreSQL's COPY refuses '0.75' for a bigint.
-func checkValue(v any, col parquet.Column, label string, row, sampled int) error {
+// true is a mismatch, as PostgreSQL's COPY refuses '0.75' for a bigint. An
+// ARRAY's elements and a ROW's fields are checked the same way. Nothing is
+// formatted unless the value does not fit — this runs for every value past
+// the sample.
+func checkValue(v any, col parquet.Column) *mismatch {
 	if v == nil || col.Type == parquet.TypeString {
 		return nil
 	}
@@ -432,28 +432,30 @@ func checkValue(v any, col parquet.Column, label string, row, sampled int) error
 		if observed == parquet.TypeFloat64 {
 			// A number no float64 holds (1e999) fits no column but text.
 			if _, err := value.Float64(); err != nil {
-				return valueError(displayValue(v), "numeric", col, label, row, sampled)
+				return &mismatch{value: displayValue(v), observed: "numeric", want: col.Type}
 			}
 		}
 	case []any:
 		if col.Type != parquet.TypeArray {
-			return valueError(displayValue(v), "array", col, label, row, sampled)
+			return &mismatch{value: displayValue(v), observed: "array", want: col.Type}
 		}
 		if col.ElementType != nil {
 			for _, element := range value {
-				if err := checkValue(element, *col.ElementType, label+" element", row, sampled); err != nil {
-					return err
+				if m := checkValue(element, *col.ElementType); m != nil {
+					m.path = " element" + m.path
+					return m
 				}
 			}
 		}
 		return nil
 	case map[string]any:
 		if col.Type != parquet.TypeRow {
-			return valueError(displayValue(v), "object", col, label, row, sampled)
+			return &mismatch{value: displayValue(v), observed: "object", want: col.Type}
 		}
 		for _, field := range col.Fields {
-			if err := checkValue(value[field.Name], field, fmt.Sprintf("%s field %q", label, field.Name), row, sampled); err != nil {
-				return err
+			if m := checkValue(value[field.Name], field); m != nil {
+				m.path = fmt.Sprintf(" field %q", field.Name) + m.path
+				return m
 			}
 		}
 		return nil
@@ -463,18 +465,25 @@ func checkValue(v any, col parquet.Column, label string, row, sampled int) error
 	if observed == col.Type || (col.Type == parquet.TypeFloat64 && observed == parquet.TypeInt64) {
 		return nil
 	}
-	return valueError(displayValue(v), sqlTypeName(observed), col, label, row, sampled)
+	return &mismatch{value: displayValue(v), observed: sqlTypeName(observed), want: col.Type}
 }
 
-// valueError is the refusal for a value past the sample that does not fit
-// its column. The caller (read_json) prefixes the reader and the input.
-func valueError(value, observed string, col parquet.Column, label string, row, sampled int) error {
+// mismatch is a value that does not fit its column: the value as the input
+// spelled it, its own type, the column's, and — inside an ARRAY or ROW
+// column — the element or field it sits at.
+type mismatch struct {
+	value, observed string
+	want            parquet.TypeID
+	path            string
+}
+
+// refusal is the 22P02 for a mismatch in column `name` of 1-based row `row`.
+// The caller (read_json) prefixes the reader and the input.
+func (m *mismatch) refusal(name string, row, sampled int) error {
 	return sqlerr.New("22P02",
-		"row %d %s: value %s (%s) is not of type %s (the column's type was inferred from the file's first %d rows)",
-		row, label, value, observed, sqlTypeName(col.Type), sampled)
+		"row %d column %q%s: value %s (%s) is not of type %s (the column's type was inferred from the file's first %d rows)",
+		row, name, m.path, m.value, m.observed, sqlTypeName(m.want), sampled)
 }
-
-func columnLabel(name string) string { return fmt.Sprintf("column %q", name) }
 
 // displayValue renders a JSON value the way it appears in the input: a
 // string quoted, a number and a boolean bare, an array or object as JSON.
