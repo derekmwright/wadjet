@@ -53,7 +53,8 @@ func TestArcRPPastSampleWire(t *testing.T) {
 				if !errors.As(err, &pe) || pe.Code != "22P02" {
 					t.Fatalf("want 22P02, got %v", err)
 				}
-				for _, part := range []string{path, fmt.Sprintf("row %d", row), `column "a"`} {
+				want := []string{fmt.Sprintf("read_%s: %s: row %d column \"a\": ", kind, path, row), `value "oops" (text) is not of type bigint`}
+				for _, part := range want {
 					if !strings.Contains(pe.Message, part) {
 						t.Errorf("missing %q: %s", part, pe.Message)
 					}
