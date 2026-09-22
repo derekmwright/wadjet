@@ -2191,12 +2191,26 @@ the statement. The demotion now lifts it itself, as the inner join it has
 become; the same fix answers the plain `RIGHT JOIN … ON c.j = b.k AND 100 >
 100 WHERE b.tag = 10`, which refused before any subquery was involved.
 
-One rerun boundary is known and filed rather than claimed: the per-row rerun
-substitutes the enclosing value for a name the body supplies through its OWN
-`WITH` item or a table function's alias (`o.id IN (WITH d AS (SELECT k, amt AS
-total FROM dc_in) SELECT b.k FROM d b JOIN dc_side c ON c.j = b.k AND total >
-100 WHERE b.k = o.id)` answers `2` for PostgreSQL's `1 | 2`), because the
-rerun's substitution walk does not see those names as the body's.
+**THE BOUNDARY, AS MEASURED (round 4).** Three closures and the cells that
+are still open, rather than a claim over all of them:
+
+- The rerun now scopes the body's OWN `WITH` items over its FROM
+  (`blockScopeResolver`): `o.id IN (WITH d AS (SELECT k, amt AS total FROM
+  dc_in) SELECT b.k FROM d b JOIN dc_side c ON c.j = b.k AND total > 100 WHERE
+  b.k = o.id)` answers PostgreSQL's `1 | 2`, where it used to substitute the
+  enclosing value.
+- A computed output column of an ENCLOSING derived table (`total * 1 AS t2`)
+  is an outer name in both enclosing column maps (the logical decorrelations'
+  and the physical rerun's), as a CTE's already was.
+- A correlated non-equality whose two sides render with the same bare name
+  over a body that RENAMES its columns declines to the rerun: the stage DAG
+  re-spells a residual leaf by asking which arm moves the name, and a renaming
+  build arm moved both leaves (`total < total` became `b.amt < b.amt`).
+- Still open, filed: a name supplied by a table function's alias is read as
+  outer; a `HAVING` or `LIMIT` inside an `EXISTS` body is ignored; a `LATERAL`
+  item in the body answers no rows; a column-alias list over a catalog table
+  and a `USING`-merged column refuse; the case concession of ADR-0012 §5
+  applies to mixed-case names.
 
 **WHAT MOVES AND WHAT DOES NOT.** The optimized logical plans of all 22
 TPC-H queries, under the catalog annotator, are byte-identical to the ones at

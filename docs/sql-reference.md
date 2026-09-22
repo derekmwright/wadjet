@@ -1256,11 +1256,12 @@ subquery instead — a slower right answer:
   `WHERE` means and is carried into the join; an outer join's does not,
   because the preserved side keeps its row NULL-extended either way.
 
-All answer PostgreSQL's rows on every execution path, with one known
-exception: a subquery whose own `WITH` item or table-function alias supplies
-an unqualified name the outer query also has reads the OUTER value there —
-qualify it (`b.total`). On a distributed cluster these queries run on the
-coordinator rather than across workers.
+They answer PostgreSQL's rows on every execution path, apart from the known
+open defects listed below; on a distributed cluster these queries run on the
+coordinator rather than across workers. A correlated comparison other than `=`
+whose two sides carry the same column name, over a subquery that renames its
+columns (`(SELECT k, amt AS total FROM t) b … WHERE total > o.total`), also
+runs this way.
 
 **An unqualified name binds innermost-first**, as on PostgreSQL: `WHERE total
 > 100` inside a subquery whose own relations have no `total` reads the outer
@@ -1271,6 +1272,19 @@ a subquery that reads a table function: its columns are not known when the
 subquery is planned, so an unqualified outer name in its `WHERE` fails with
 `filter column "total" does not exist in the input schema`. Write
 `o.total > 100`.
+
+Known open defects in correlated subquery bodies (each measured against
+PostgreSQL and filed; qualify the name or restate the query as noted):
+
+- a name supplied by a table function's ALIAS (`FROM generate_series(1, 3)
+  total`) is read as the outer query's column — alias the column instead
+  (`generate_series(1, 3) g(total)`);
+- a `HAVING` or a `LIMIT` inside an `EXISTS` body is ignored;
+- a `LATERAL` item inside an `EXISTS` or `IN` body answers no rows;
+- a column-alias list over a table in the body (`FROM t AS b(k, total)`) and
+  a `USING`-merged column that shares the outer query's name are refused;
+- mixed-case and quoted names follow the case concession on the differences
+  page.
 
 A derived table, an ordinary CTE reference and a comma-joined FROM list in the
 subquery are decorrelated like a base table. They used to run as a per-row
