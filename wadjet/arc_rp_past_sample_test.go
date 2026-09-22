@@ -87,3 +87,88 @@ func TestArcRPPastSampleQueries(t *testing.T) {
 		}
 	}
 }
+
+// TestArcRPGlobRefusalNamesTheFileAndItsRow: across a glob the refusal names
+// the FILE holding the value and the row within that file, not the glob and
+// the row of the concatenated stream (review N3: file 2's 5th row was "row
+// 155" of the glob at f58a653e).
+func TestArcRPGlobRefusalNamesTheFileAndItsRow(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, kind := range []string{"csv", "json"} {
+		for _, first := range []int{150, 3000} {
+			t.Run(fmt.Sprintf("%s/%d", kind, first), func(t *testing.T) {
+				dir := t.TempDir()
+				write := func(name string, from, to, bad int) string {
+					var b strings.Builder
+					if kind == "csv" {
+						b.WriteString("a\n")
+					}
+					for i := from; i <= to; i++ {
+						v := fmt.Sprint(i)
+						if i == bad {
+							v = "0.75"
+						}
+						if kind == "csv" {
+							fmt.Fprintln(&b, v)
+						} else {
+							fmt.Fprintf(&b, "{\"a\":%s}\n", v)
+						}
+					}
+					p := filepath.Join(dir, name+"."+kind)
+					if err := os.WriteFile(p, []byte(b.String()), 0600); err != nil {
+						t.Fatal(err)
+					}
+					return p
+				}
+				write("f1", 1, first, 0)
+				f2 := write("f2", first+1, first+10, first+5)
+				_, err := db.Query(ctx, fmt.Sprintf("SELECT SUM(a) FROM read_%s('%s')", kind, filepath.Join(dir, "*."+kind)))
+				if sqlerr.StateOf(err) != "22P02" {
+					t.Fatalf("want 22P02, got %v", err)
+				}
+				want := fmt.Sprintf("%s row 5 column \"a\": value ", f2)
+				if !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "the first 100 rows of the input") {
+					t.Fatalf("missing %q in: %v", want, err)
+				}
+			})
+		}
+	}
+}
+
+// TestArcRPByteCappedSampleQuery: the review's B2 fixture through read_json —
+// 150 objects of ~120 KiB, so the 8 MiB sample holds fewer than 100 of them —
+// with 0.75 at row 90 or 100 of a bigint column. At f58a653e both read 0.
+func TestArcRPByteCappedSampleQuery(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	pad := strings.Repeat("x", 120<<10)
+	for _, bad := range []int{90, 100} {
+		t.Run(fmt.Sprint(bad), func(t *testing.T) {
+			var b strings.Builder
+			for i := 1; i <= 150; i++ {
+				v := fmt.Sprint(i)
+				if i == bad {
+					v = "0.75"
+				}
+				fmt.Fprintf(&b, "{\"a\":%s,\"pad\":\"%s\"}\n", v, pad)
+			}
+			path := filepath.Join(t.TempDir(), "big.json")
+			if err := os.WriteFile(path, []byte(b.String()), 0600); err != nil {
+				t.Fatal(err)
+			}
+			res, err := db.Query(ctx, fmt.Sprintf("SELECT SUM(a) AS s FROM read_json('%s')", path))
+			if sqlerr.StateOf(err) != "22P02" || !strings.Contains(err.Error(), fmt.Sprintf("row %d column \"a\": value 0.75", bad)) {
+				t.Fatalf("got %v (result %v), want 22P02 at row %d", err, res, bad)
+			}
+		})
+	}
+}

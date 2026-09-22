@@ -424,6 +424,33 @@ type multiFileReadCloser struct {
 
 	csvHeaderComma rune     // 0: not a CSV with a header
 	csvHeader      []string // the first file's header record, once read
+
+	// emitted counts the bytes Read has returned; segments records, for
+	// every file opened, the stream offset its bytes start at, so a reader
+	// can name the file (and its own row) an offset lies in (Segment).
+	emitted  int64
+	segments []streamSegment
+}
+
+type streamSegment struct {
+	start int64
+	path  string
+}
+
+// Segment implements the csv and json readers' Locator: the file whose
+// bytes hold stream offset off, the offset they start at, and an offset
+// before which every later offset is still in that file (the next file's
+// start, or the bytes emitted so far while the file is still being read).
+func (m *multiFileReadCloser) Segment(off int64) (string, int64, int64) {
+	i := sort.Search(len(m.segments), func(i int) bool { return m.segments[i].start > off }) - 1
+	if i < 0 {
+		return "", 0, 0
+	}
+	next := m.emitted
+	if i+1 < len(m.segments) {
+		next = m.segments[i+1].start
+	}
+	return m.segments[i].path, m.segments[i].start, next
 }
 
 func (m *multiFileReadCloser) Read(p []byte) (int, error) {
@@ -434,6 +461,7 @@ func (m *multiFileReadCloser) Read(p []byte) (int, error) {
 		if m.pendingNL {
 			m.pendingNL = false
 			p[0] = '\n'
+			m.emitted++
 			return 1, nil
 		}
 		if m.cur == nil {
@@ -452,11 +480,13 @@ func (m *multiFileReadCloser) Read(p []byte) (int, error) {
 					return 0, err
 				}
 			}
+			m.segments = append(m.segments, streamSegment{start: m.emitted, path: m.paths[m.idx-1]})
 		}
 		n, err := m.cur.Read(p)
 		if n > 0 {
 			m.hadData = true
 			m.lastByte = p[n-1]
+			m.emitted += int64(n)
 			return n, nil
 		}
 		if err == io.EOF || err == nil {

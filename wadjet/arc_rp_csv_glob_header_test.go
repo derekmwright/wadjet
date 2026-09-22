@@ -35,6 +35,11 @@ func TestArcRPCSVGlobReadsEachHeaderOnce(t *testing.T) {
 		{"past_sample", []string{"name,age\n" + rpCSVRows(150), "name,age\nz,7\n"}, 151, 11332},
 		{"three_files_no_trailing_newline", []string{"name,age\na,1", "name,age\nb,2", "name,age\nc,3"}, 3, 6},
 		{"empty_first_file", []string{"", "name,age\nb,2\n", "name,age\nc,3\n"}, 2, 5},
+		// The review's fixture (B1): at f58a653e the second header, past row
+		// 100, was a 22P02 on "a"; PostgreSQL's two COPY … HEADER answer
+		// 12880 / 160 / 160.
+		{"review_150_10", []string{"name,age\n" + rpCSVRows(150), "name,age\n" + rpCSVRowsFrom(151, 160)}, 160, 12880},
+		{"review_3000_10", []string{"name,age\n" + rpCSVRows(3000), "name,age\n" + rpCSVRowsFrom(3001, 3010)}, 3010, 4531555},
 		// A later file that does not repeat the header continues the first.
 		{"continuation", []string{"name,age\n" + rpCSVRows(150), "z,7\n"}, 151, 11332},
 		{"quoted_header", []string{"\"name\",\"age\"\na,1\n", "\"name\",\"age\"\nb,2\n"}, 2, 3},
@@ -46,12 +51,15 @@ func TestArcRPCSVGlobReadsEachHeaderOnce(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			sql := fmt.Sprintf("SELECT COUNT(*) AS n, SUM(age) AS s FROM read_csv('%s')", filepath.Join(dir, "*.csv"))
+			sql := fmt.Sprintf("SELECT COUNT(*) AS n, SUM(age) AS s, COUNT(age) AS na FROM read_csv('%s')", filepath.Join(dir, "*.csv"))
 			result, err := db.Query(ctx, sql)
 			if err != nil {
 				t.Fatal(err)
 			}
 			got := fmt.Sprint(result.Rows[0]["n"], " ", result.Rows[0]["s"])
+			if na := fmt.Sprint(result.Rows[0]["na"]); na != fmt.Sprint(cell.count) {
+				t.Fatalf("COUNT(age) = %s, want %d (every row has an age)", na, cell.count)
+			}
 			if want := fmt.Sprint(cell.count, " ", cell.sumAge); got != want {
 				t.Fatalf("COUNT(*), SUM(age) = %s, want %s", got, want)
 			}
@@ -59,9 +67,11 @@ func TestArcRPCSVGlobReadsEachHeaderOnce(t *testing.T) {
 	}
 }
 
-func rpCSVRows(n int) string {
+func rpCSVRows(n int) string { return rpCSVRowsFrom(1, n) }
+
+func rpCSVRowsFrom(from, to int) string {
 	var b strings.Builder
-	for i := 1; i <= n; i++ {
+	for i := from; i <= to; i++ {
 		fmt.Fprintf(&b, "n%d,%d\n", i, i)
 	}
 	return b.String()
