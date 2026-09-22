@@ -1700,6 +1700,23 @@ func lexParseCTEs(l *lexer) ([]CTEDef, error) {
 		break
 	}
 
+	// RECURSIVE marks the CLAUSE; an ITEM is recursive only when its body
+	// names itself, which is PostgreSQL's rule (#1193). Stamping every item
+	// sent a plain sibling through the fixed-point materialization, which
+	// published `total + 1` where PostgreSQL publishes `?column?`. A body this
+	// cannot parse keeps the mark: whoever plans it reports the parse, and
+	// the self-reference question is not asked of a tree nobody has.
+	if recursive {
+		for i := range defs {
+			body, err := defs[i].BodySelect()
+			if err != nil || body == nil {
+				continue
+			}
+			defs[i].Recursive = SelectNamesRelation(body, defs[i].Name) ||
+				SublinkNamesRelation(body, defs[i].Name)
+		}
+	}
+
 	return defs, nil
 }
 
