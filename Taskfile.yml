@@ -70,6 +70,13 @@ tasks:
     cmds:
       - go run ./tools/testquiet -log "{{.LOG}}"
 
+  affected:
+    desc: 'Print the packages a git diff could affect (transitive reverse deps), e.g. go test -p 2 $(task affected BASE=main)'
+    vars:
+      BASE: '{{.BASE | default "main"}}'
+    cmds:
+      - go run ./tools/affected -base "{{.BASE}}"
+
   bench:
     desc: Run benchmarks
     cmds:
