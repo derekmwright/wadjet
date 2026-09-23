@@ -261,9 +261,18 @@ type pgConn struct {
 	sessionVars map[string]string
 
 	// Extended Query protocol state
-	preparedSQL     string              // last parsed statement SQL
-	preparedOIDs    []uint32            // parameter type OIDs Parse declared for it
-	portalSQL       string              // last bound portal SQL
+	preparedSQL  string   // last parsed statement SQL
+	preparedOIDs []uint32 // parameter type OIDs Parse declared for it
+	portalSQL    string   // last bound portal SQL
+	// portalOpen / portalName are whether a portal EXISTS and what it is
+	// called. This connection holds one portal; PostgreSQL destroys it at the
+	// Sync that ends an implicit transaction, at a simple Query (the unnamed
+	// one), at Close, and never creates it when Bind is refused. Execute and
+	// Describe of a portal that does not exist answer 34000. Without this an
+	// Execute after Sync, with no new Bind, re-ran the previous statement
+	// (#1266 review B7).
+	portalOpen      bool
+	portalName      string
 	stmts           map[string]string   // named prepared statements
 	stmtOIDs        map[string][]uint32 // their declared parameter type OIDs
 	described       bool                // true if Describe was sent for current portal
@@ -395,6 +404,9 @@ func (c *pgConn) dispatch(msgType byte, payload []byte) (keepGoing bool) {
 		// Ends any extended-query error state and emits the single
 		// ReadyForQuery the client has been waiting for.
 		c.skipUntilSync = false
+		if c.txState != 'T' {
+			c.closePortal()
+		}
 		c.sendReadyForQuery()
 	case 'C': // Close (prepared statement or portal)
 		c.handleClose(payload)
@@ -1020,6 +1032,9 @@ func unescapeCopyText(s string) string {
 // invariant that function documents and which a second Z would break for every
 // client on the connection.
 func (c *pgConn) handleQuery(sql string) {
+	if c.portalName == "" {
+		c.closePortal() // a simple Query destroys the unnamed portal
+	}
 	c.runSimpleQuery(sql)
 	c.sendReadyForQuery()
 }
@@ -1360,6 +1375,8 @@ func (c *pgConn) handleBind(payload []byte) {
 	payload = payload[len(portal)+1:]
 	stmtName := readCString(payload)
 	payload = payload[len(stmtName)+1:]
+	// Bind replaces the portal; a refused Bind leaves none.
+	c.closePortal()
 
 	sql := c.preparedSQL
 	oids := c.preparedOIDs
@@ -1459,8 +1476,27 @@ func (c *pgConn) handleBind(payload []byte) {
 		}
 	}
 
+	c.portalOpen, c.portalName = true, portal
+
 	// Send BindComplete ('2')
 	c.sendMsg('2', nil)
+}
+
+// closePortal destroys the connection's portal (see portalOpen).
+func (c *pgConn) closePortal() {
+	c.portalOpen, c.portalName, c.portalSQL = false, "", ""
+}
+
+// refuseMissingPortal answers PostgreSQL's 34000 for an Execute or Describe
+// naming a portal that does not exist, and enters the error state, so the
+// statement a closed portal held can never run again.
+func (c *pgConn) refuseMissingPortal(name string) bool {
+	if c.portalOpen && name == c.portalName {
+		return false
+	}
+	c.sendError("ERROR", "34000", fmt.Sprintf("portal \"%s\" does not exist", name))
+	c.skipUntilSync = true
+	return true
 }
 
 func (c *pgConn) handleDescribe(payload []byte) {
@@ -1502,6 +1538,9 @@ func (c *pgConn) handleDescribe(payload []byte) {
 		// carries the Bind's result format codes (#362).
 		c.describeSQL(sql, nil)
 	} else {
+		if c.refuseMissingPortal(readCString(payload[1:])) {
+			return
+		}
 		// Portal describe — send RowDescription based on portal SQL, declaring
 		// the result format codes the portal's Bind requested (#362).
 		c.describeSQL(c.portalSQL, c.resultFmtCodes)
@@ -1681,6 +1720,9 @@ func (c *pgConn) sendNoData() {
 
 func (c *pgConn) handleExecute(payload []byte) {
 	// Execute: portal\0 + int32(maxRows)
+	if c.refuseMissingPortal(readCString(payload)) {
+		return
+	}
 	sql := strings.TrimSpace(c.portalSQL)
 	if c.logger != nil {
 		c.logger.Debug("pgwire execute", "sql", sql, "described", c.described)
@@ -1950,6 +1992,9 @@ func (c *pgConn) handleClose(payload []byte) {
 		name := readCString(payload[1:])
 		delete(c.stmts, name)
 		delete(c.stmtOIDs, name)
+	}
+	if len(payload) >= 1 && payload[0] == 'P' && c.portalOpen && readCString(payload[1:]) == c.portalName {
+		c.closePortal()
 	}
 	// Send CloseComplete ('3')
 	c.sendMsg('3', nil)

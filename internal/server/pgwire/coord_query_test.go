@@ -107,6 +107,7 @@ func TestExecuteReplaysDescribeError(t *testing.T) {
 	// would see a fresh table-not-found message instead.
 	c.describeErr = errors.New("sentinel: describe-time failure replayed")
 	rc.buf.Reset()
+	c.portalOpen = true // the unnamed portal a Bind would have opened
 	c.handleExecute(nil)
 
 	wire := rc.buf.Bytes()

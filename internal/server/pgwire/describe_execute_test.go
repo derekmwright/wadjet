@@ -840,6 +840,7 @@ func TestStaleDescribeErrorDoesNotReplay(t *testing.T) {
 	c.describeErr = errors.New("sentinel: stale describe failure")
 	// ...and Execute then answers the portal from the introspection layer.
 	c.portalSQL = "select version()"
+	c.portalOpen = true // the unnamed portal a Bind would have opened
 	c.handleExecute(nil)
 
 	wire := rc.buf.Bytes()
@@ -859,6 +860,7 @@ func TestStaleDescribeErrorDoesNotReplay(t *testing.T) {
 	// The next statement on this connection must not inherit anything.
 	rc.buf.Reset()
 	c.portalSQL = "SELECT current_schema()"
+	c.portalOpen = true
 	c.handleExecute(nil)
 	if got := countMsgs(rc.buf.Bytes(), 'E'); got != 0 {
 		t.Errorf("next statement got %d ErrorResponse messages, want 0; wire = %q",
