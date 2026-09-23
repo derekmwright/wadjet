@@ -5,67 +5,37 @@ Columnar analytics engine in Go with network-native operations, distributed exec
 ## Build & Test
 
 ```bash
-# Build — every binary goes to dist/ (gitignored). Use the Taskfile:
-task build          # dist/wadjet (MIT) and dist/wadjetd (AGPL-3.0)
-task build-all      # every ./cmd/... into dist/
-task clean          # remove dist/
-task licensecheck   # hold the license boundary (LICENSING.md)
-#
-# Never `go build -o wadjet`: wadjet/ is the API package directory and go
-# writes the binary INTO it rather than refusing. That is why /wadjet was
-# once gitignored — which hid new source files in that package from
-# `git status` and lost two test files.
+# Build — every binary goes to dist/ (gitignored):
+task build            # dist/wadjet (MIT) and dist/wadjetd (AGPL-3.0)
+task build-all         # every ./cmd/... into dist/
+task clean             # remove dist/
+task licensecheck      # hold the license boundary (LICENSING.md)
+# Never `go build -o wadjet`: wadjet/ is the API package dir and go writes the binary INTO it rather than refusing (cost two lost test files once — always build to dist/).
 
-# Unit tests
-go test ./internal/...
+go test ./internal/...                                  # unit tests
+task test-quiet PKGS="./internal/... ./wadjet/"          # quiet: per-package ok/FAIL, failing tests' names + last ~40 lines only [RUN=pattern]
+task test-quiet-log LOG=path.txt                         # filters an existing text log the same way
+task affected [BASE=sha]                                 # packages a diff could affect (reverse deps) — feed to `go test -p 2 $(task affected)`
 
-# TPC-H correctness (SF0.01, ~5s)
-go test -v -run TestTPCHQueries ./benchmarks/tpch/
-
-# TPC-H performance (SF1, ~66s baseline)
-TPCH_SCALE=1 go test -v -run TestTPCHQueriesLarge -timeout 30m ./benchmarks/tpch/
-
-# Micro-benchmarks
-go test -bench=. -benchmem ./internal/engine/exec
+go test -v -run TestTPCHQueries ./benchmarks/tpch/                                  # TPC-H correctness (SF0.01, ~5s)
+TPCH_SCALE=1 go test -v -run TestTPCHQueriesLarge -timeout 30m ./benchmarks/tpch/    # TPC-H performance (SF1, ~66s baseline)
+go test -bench=. -benchmem ./internal/engine/exec        # micro-benchmarks
 go test -bench=. -benchmem ./internal/engine/scan
 go test -bench=. -benchmem ./internal/engine/batch
 
-# Run the embedded server (pgwire over the in-process engine, no S3)
-wadjet serve --storage-type=file --data-dir=./wadjet-data --pg-addr=:5432
-
-# Run the distributed server
-wadjetd serve --mode=standalone --pg-addr=:5432
+wadjet serve --storage-type=file --data-dir=./wadjet-data --pg-addr=:5432   # embedded server (pgwire over the in-process engine, no S3)
+wadjetd serve --mode=standalone --pg-addr=:5432                              # distributed server
 ```
 
 ## Licensing
 
-ONE repo, ONE module, TWO licenses (`LICENSING.md`): the embedded engine and
-`cmd/wadjet` are MIT; `internal/coordinator`, `internal/worker`,
-`internal/coordinator/dagplan` (the stage-DAG planner), `internal/distributed`,
-`internal/dataplane`, `internal/wshf`,
-`internal/server` (not its `pgwire/` and `mcp/` subdirectories),
-`internal/clid`, `internal/harness`, `cmd/wadjetd` and the cluster-standing
-benchmark commands are AGPL-3.0 with a commercial option. Every .go file
-carries an SPDX header naming its region, every AGPL directory carries a
-verbatim `LICENSE` copy, and `go run ./tools/licensecheck .` (CI, `task
-housekeeping`) fails if an MIT package reaches AGPL code through a non-test
-import at ANY depth — or DECLARES the distributed planner's vocabulary (the
-stage, the exchange, the distribution property; see
-`tools/licensecheck/dagvocabulary.go`). A new package inherits MIT unless it is declared in
-`tools/licensecheck/regions.go`.
+ONE repo, ONE module, TWO licenses (`LICENSING.md`): the embedded engine and `cmd/wadjet` are MIT; `internal/coordinator`, `internal/worker`, `internal/coordinator/dagplan` (the stage-DAG planner), `internal/distributed`, `internal/dataplane`, `internal/wshf`, `internal/server` (not its `pgwire/` and `mcp/` subdirectories), `internal/clid`, `internal/harness`, `cmd/wadjetd` and the cluster-standing benchmark commands are AGPL-3.0 with a commercial option. Every .go file carries an SPDX header naming its region, every AGPL directory carries a verbatim `LICENSE` copy, and `go run ./tools/licensecheck .` (CI, `task housekeeping`) fails if an MIT package reaches AGPL code through a non-test import at ANY depth — or DECLARES the distributed planner's vocabulary (the stage, the exchange, the distribution property; see `tools/licensecheck/dagvocabulary.go`). A new package inherits MIT unless it is declared in `tools/licensecheck/regions.go`.
 
 ## Architecture
 
 ### Query Pipeline
 
-```
-SQL text
-  → Parser (internal/planner/sql/)        — recursive descent, custom AST
-  → Logical Plan (internal/planner/logical/) — tree of typed nodes + rule-based optimizer
-  → Physical Plan (internal/planner/physical/) — executable local pipeline (ADR-0037 §6)
-  → Execution (internal/engine/exec/)      — push-based: Source → [UnaryOps] → Sink
-  → Results
-```
+SQL text → Parser (`internal/planner/sql/`, recursive descent, custom AST) → Logical Plan (`internal/planner/logical/`, tree of typed nodes + rule-based optimizer) → Physical Plan (`internal/planner/physical/`, executable local pipeline, ADR-0037 §6) → Execution (`internal/engine/exec/`, push-based: Source → [UnaryOps] → Sink) → Results.
 
 ### Key Packages
 
@@ -89,9 +59,9 @@ SQL text
 | `internal/planner/physical/` | LOCAL pipeline planner (MIT): `planner_entry.go`, `pipeline_plan.go`, `declared_output.go`, `join_plan.go`, the query-limit cost walk. The stage DAG is `internal/coordinator/dagplan` |
 | `internal/storage/objstore/` | S3-compatible object store (MemStore, MinIOStore, FileStore) |
 | `internal/storage/catalog/` | Metadata in NATS KV |
-| `internal/storage/parquet/` | Parquet reader/writer |
+| `internal/storage/parquet/` | Parquet reader/writer — see its own `CLAUDE.md` for package-safety rules |
 | `internal/storage/ingest/` | Micro-batch accumulator + partitioner |
-| `internal/coordinator/` | Query coordinator (plan, dispatch, merge); `dag_dispatch.go`, `dag_compute.go`, `dag_fragments.go`, `dag_merge.go` |
+| `internal/coordinator/` | Query coordinator (plan, dispatch, merge); `dag_dispatch.go`, `dag_compute.go`, `dag_fragments.go`, `dag_merge.go` — see its own `CLAUDE.md` for the native-DAG map |
 | `internal/coordinator/dagplan/` | The distributed PLANNER (AGPL): stage emission, distribution/exchange assignment, shuffle fusion, set-op stage planning, DAG validation and refusals |
 | `internal/worker/` | Distributed task executor |
 | `internal/server/pgwire/` | PostgreSQL wire protocol |
@@ -112,27 +82,9 @@ SQL text
 ### Core Interfaces
 
 ```go
-// Source produces batches
-type Source interface {
-    Init(ctx context.Context) error
-    Next(ctx context.Context) (*batch.RecordBatch, error)
-    Close() error
-}
-
-// UnaryOperator transforms batches in-place (non-blocking)
-type UnaryOperator interface {
-    Init(ctx context.Context) error
-    Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error)
-    Close() error
-}
-
-// Sink consumes all input (pipeline breaker)
-type Sink interface {
-    Init(ctx context.Context) error
-    Consume(ctx context.Context, b *batch.RecordBatch) error
-    Finalize(ctx context.Context) error
-    Close() error
-}
+type Source interface { Init(ctx context.Context) error; Next(ctx context.Context) (*batch.RecordBatch, error); Close() error }                                                  // produces batches
+type UnaryOperator interface { Init(ctx context.Context) error; Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error); Close() error }                  // transforms in-place, non-blocking
+type Sink interface { Init(ctx context.Context) error; Consume(ctx context.Context, b *batch.RecordBatch) error; Finalize(ctx context.Context) error; Close() error }             // consumes all input, pipeline breaker
 ```
 
 ### Type System
@@ -157,29 +109,16 @@ Network-native types (IPv4, IPv6, CIDR, MAC, Port, Protocol) are first-class wit
 - **Skew-aware shuffle** (`--skew-split`, default on; `=false` = kill switch): at join dispatch, a partition group whose probe bytes exceed 256 MiB AND ≥2× the mean group splits into k sub-tasks dividing its probe files and replicating its build files. Uniform-heavy stages never split (ratio gate). See `docs/design/skew-aware-shuffle.md`; A/B fixture: `benchmarks/skew`.
 - **NATS JetStream**: Task queues with request/reply result delivery, metadata KV
 - **Federation**: NATS leaf nodes connect edge clusters to central
-- **Internals map**: `docs/internals/native-dag-execution.md` — file-anchored map of the native-DAG path (two coordinator entry paths, `walkStages` per-node stage emission, Stage→fragment conversion, the distribution-property/shuffle system, and inspection recipes). Start here before navigating coordinator/planner/worker distribution code.
+- **Internals map**: see `internal/coordinator/CLAUDE.md` for the native-DAG file map and navigation notes.
 - **Decision records**: `docs/adr/` — the settled architectural positions (execution model, exchange design, durability/placement/scratch policies, measurement methodology) with the alternatives they beat. Read the relevant ADR before proposing changes in its territory; reopening one requires new evidence.
 
 ## Commit Convention
 
-Use [Conventional Commits](https://www.conventionalcommits.org/):
+Use [Conventional Commits](https://www.conventionalcommits.org/): `<type>(<scope>): <description>`, optionally followed by a blank line + body and/or a blank line + footer(s).
 
-```
-<type>(<scope>): <description>
+**Sign-off required:** commit with `git commit -s` so every commit carries a `Signed-off-by:` trailer (the CLA consent mechanism — see CLA.md §6). Do NOT add `Co-Authored-By` trailers naming AI tools: the human committer is the sole author (see CONTRIBUTING.md, "AI-Assisted Development").
 
-[optional body]
-
-[optional footer(s)]
-```
-
-**Sign-off required:** commit with `git commit -s` so every commit carries a
-`Signed-off-by:` trailer (the CLA consent mechanism — see CLA.md §6).
-Do NOT add `Co-Authored-By` trailers naming AI tools: the human committer
-is the sole author (see CONTRIBUTING.md, "AI-Assisted Development").
-
-**Types:** `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore`
-
-**Scopes:** `planner`, `engine`, `exec`, `expr`, `batch`, `scan`, `storage`, `parquet`, `catalog`, `pgwire`, `auth`, `worker`, `coordinator`, `ingest`, `iceberg`, `embedding`, `tpch`
+**Types:** `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore` — **Scopes:** `planner`, `engine`, `exec`, `expr`, `batch`, `scan`, `storage`, `parquet`, `catalog`, `pgwire`, `auth`, `worker`, `coordinator`, `ingest`, `iceberg`, `embedding`, `tpch`
 
 Examples:
 ```
@@ -194,57 +133,7 @@ refactor(scan): extract predicate pushdown into separate module
 
 ### Testing Requirements
 
-- **All bug fixes must include a regression test.** The test should fail before the fix and pass after.
-- **New features must include unit tests** covering expected behavior and edge cases.
-- **Performance-sensitive changes must include benchmark comparison.** Run TPC-H SF1 before and after to measure impact:
-  ```bash
-  # Before (on main or parent commit)
-  TPCH_SCALE=1 go test -v -run TestTPCHQueriesLarge -timeout 30m ./benchmarks/tpch/ 2>&1 | tee /tmp/bench-before.txt
-
-  # After (on feature branch)
-  TPCH_SCALE=1 go test -v -run TestTPCHQueriesLarge -timeout 30m ./benchmarks/tpch/ 2>&1 | tee /tmp/bench-after.txt
-  ```
-- **Optimizations that can change the row set must register a kill switch** in `internal/optswitch` (env convention: `WADJET_<NAME>=0` disables) and pass the optimization-invariance oracle, which runs every corpus query with each switch individually disabled and asserts identical results:
-  ```bash
-  # TPC-H arm (SF0.01, ~30s, runs in CI)
-  go test -run TestTPCHOptimizationInvariance ./benchmarks/tpch/
-  # ClickBench arm (needs a local hits part)
-  WADJET_HITS_PART=/path/to/hits_0.parquet go test -run TestHitsOptimizationInvariance ./benchmarks/clickbench/
-  ```
-  A divergence names the disabled toggle — that is the defect localization. Registering the switch extends the oracle for free; this is part of the definition of done for optimization work (#287).
-- **PostgreSQL is the authority on SEMANTICS; DuckDB is the performance goal and a second correctness oracle.** Wadjet ships the PostgreSQL wire protocol, so "is this what a PostgreSQL client expects" is a question only PostgreSQL can answer. Changes to expression semantics, NULL handling, type resolution, error reporting or anything in `internal/server/pgwire/` run the PostgreSQL differential oracle:
-  ```bash
-  task pg-oracle:test                      # SF0.01, ~15s; starts and tears down its own postgres:17-alpine
-  task pg-oracle:test-large SCALE=0.1      # generated tier (~60s), one source feeds both engines
-  ```
-  A third, generated arm is the SQLancer harness (`tools/sqlancer/README.md`): `task sqlancer:run-mit ARGS=...` runs NoREC/TLP against `dist/wadjet serve` and `task sqlancer:triage` classifies the findings, with `docs/postgres-differences.md` as its known-difference list.
-  Two arms: `EngineSemantics` compares values through the embedded API, and `WireProtocol` compares what the WIRE carries (type OIDs, result format codes, RowDescription, NULL representation, SQLSTATE, command tag, CancelRequest) through pgx against both servers. The wire arm is the one DuckDB cannot provide — a value oracle cannot see a right value under a wrong OID. It **skips** under `-short` or when no server is reachable, so CI is unaffected. Divergences are pinned per entry (`knownBug`) or per wire PROPERTY (`pins`), and a pin that starts agreeing FAILS — deleting it is the fix's proof. Never exempt a divergence by narrowing the corpus: configure the oracle instead (the fixture is loaded into a `--locale=C` database with `COLLATE "C"` text columns, because wadjet compares strings by bytes; `TestPostgresOracleIsConfiguredForByteCollation` guards that and runs without a server).
-- **DECIMAL gate**: the TPC-H fixture has a spec-conformant `DECIMAL(15,2)` variant (ADR-0024) — the same dbgen rows with the specification's eight monetary columns as exact fixed-point. It compares DIGIT FOR DIGIT where the answer is decimal, which the FLOAT64 gate's six-significant-digit quantum cannot. Run it after any change to decimal typing, arithmetic, aggregation or the wire declaration:
-  ```bash
-  go test -run 'TestTPCHQueriesDecimal|TestTPCHDecimalDeclaredTypes' ./benchmarks/tpch/
-  go test -run 'TestTPCHOptimizationInvarianceDecimal|TestTwoPathInvarianceDecimal' ./benchmarks/tpch/
-  task pg-oracle:test-decimal        # both oracle arms over the decimal fixture
-  ```
-  The FLOAT64 schema stays the default and the published-number benchmark; the variant is opt-in (`TPCH_DECIMAL=1`, or an explicit `Fixture`). Baseline numbers: `docs/benchmarks/tpch-decimal-baseline-2026-08-29.md`.
-- **Spill gate**: the spilled path is a fifth execution arm no shape corpus reaches on purpose — a spill is a condition, not a query shape (ADR-0027). After any change to a pipeline breaker's spill, drain, merge or clone path (`exec/aggregate*.go`, `exec/agg_*.go`, `pipeline.go`, `partitioned_agg.go`, `sort_external.go`, `window_external.go`, `join_spill.go`, `memory/spill.go`) run the type-matrix spill sweep, which asserts per family that the operator actually spilled and replicates every budgeted cell five times:
-  ```bash
-  go test -run 'TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget' ./wadjet/
-  go test -run 'TestSpillArcShapesAgreeOnBothDistributionArms' ./internal/coordinator/   # DAG arms, forced drain
-  go test -run 'TestEveryGroupKeyProducerWritesTheSameBytes' ./internal/engine/exec/     # the seam, per type per producer
-  go test -run 'TestContainerWindowKeysAnswerTheSameAcrossAWindowSpill' ./wadjet/        # containers through a window spill
-  ```
-  The container window gate runs at a 256 KiB budget, not the sweep's 512 KiB, and that is load-bearing: at 512 KiB the ARRAY and MAP columns never reach the spill threshold, so those cells would compare two in-memory runs. It asserts engagement PER CELL for that reason.
-  The third is the SEAM gate and it is the one to run first after touching a group key's encoding: a HashAggregate writes the merge key from four producers holding three different Go boxes, and it asserts that all of them write the SAME bytes for every flat type (ADR-0023 item 8, #788). It needs no budget and no plan, which is the point — a gate whose trigger is a CONDITION cannot be relied on to fire, and #788 survived four investigation rounds behind one.
-  Condition-triggered defects are gated with the test-only knobs `exec.ForceAggDrainEvery(N)` / `WADJET_TEST_FORCE_AGG_DRAIN_EVERY=N` and `exec.ForceSmallSpillRuns` — take the reference arm DISARMED (arming both sides cancels the defect, #790). A single passing spilled run proves nothing: replicate.
-- **Numeric typing gate**: a number means the same thing in every spelling and on every path, and the WIRE declares what PostgreSQL declares (ADR-0024 item 2, ADR-0012). After any change to numeric typing, DECIMAL arithmetic, aggregate result types, integer accumulators or the comparison kernels, run the five-arm census and BOTH oracle arms — the wire arm is the only one that sees a right value under a wrong OID:
-  ```bash
-  go test -run 'TestNumericArc2' ./internal/coordinator/     # single / spilled / DAG / DAG-shuffled / DAG-morsel
-  task pg-oracle:test && task pg-oracle:test-decimal
-  ```
-  Integer SUM/AVG are EXACT types (bigint / numeric), not float64, and a sum that would wrap is an error, never a wrapped number. A DECIMAL result that does not fit the 128-bit carrier at PostgreSQL's scale is 22003, never a silently narrower scale. Deliberate divergences live in ADR-0012's list; a pin that starts agreeing FAILS.
-
-- **Test patterns**: Table-driven tests preferred. Use `tb.Helper()` in test helpers. Use `objstore.NewMemStore()` for storage in tests (no real S3).
-- **A gate that walks the filesystem must skip directory names starting with `.` or `_`** (what the Go toolchain itself skips) or enumerate packages with `go list` / `golang.org/x/tools/go/packages` instead. A git worktree lives at `.claude/worktrees/<name>/`, NESTED inside the module root, and is a full second copy of the source — a walking gate sees every file in it a second time, so its verdict depends on whether anybody happens to have a worktree open. This has now been the defect twice (`61eba248`, then the #798 breaker-scope pin).
+See `docs/testing/GATES.md` for the full gate catalogue — regression/unit test requirements, the kill-switch optimization-invariance oracle, the PostgreSQL/DuckDB differential oracles, and the DECIMAL/spill/numeric-typing gates with their exact commands and rationale. Read it before any change to `internal/optswitch`, `internal/server/pgwire/`, numeric/decimal typing, or a pipeline breaker's spill/drain/merge/clone path.
 
 ### Code Style
 
@@ -255,26 +144,9 @@ refactor(scan): extract predicate pushdown into separate module
 - **Typed kernels**: Resolve type once per batch/column, dispatch to typed function. No per-row type switches in hot paths.
 - **Batch size**: 2048 rows (`batch.DefaultBatchSize`). Do not change without benchmarking.
 
-### Parquet Package Safety
+### Documentation & Release Housekeeping
 
-The `internal/storage/parquet/` package is **critical infrastructure** — any data corruption here is catastrophic and could silently affect every query. Changes to this package require:
-
-- **Exhaustive unit tests**: Every encoding/decoding path must be round-trip tested with edge cases (empty data, single value, max values, NaN, zero-length strings, etc.)
-- **Fuzz testing**: Decoders that parse untrusted data (Thrift metadata, page data) should have fuzz tests
-- **Bit-exact verification**: Verify output against files produced by Apache Parquet reference implementations (parquet-go, PyArrow)
-- **No unsafe shortcuts**: Validate lengths and offsets before `unsafe.Slice` casts — an off-by-one corrupts memory silently
-- **TPC-H correctness gate**: All 22 queries must pass at SF0.01 after any parquet change, before merging
-- **Compaction gate**: `TestCompactionIsIdempotentOverTheTypeMatrix` (`internal/storage/compaction`) — all 22 types plus DECIMAL(9,2)/(18,4)/(38,10) and containers nested in containers, ingest → compact ×3, asserted on both read paths (row reader and native scan) with a PyArrow cross-check. Compaction REPLACES its inputs, so every read→write asymmetry there is silent data loss; run it after any change to the reader, the writer, or the compactor. It asserts VALUES and the declared SCHEMA, deliberately NOT the footer's statistics — a statistics defect is a wrong answer through the row-group prune, which `wadjet.TestTypeMatrixPruningNeverChangesTheAnswer` gates instead (ADR-0018).
-- **ANALYZE gate**: `TestAnalyzeCoversEveryTypeMatrixColumn` (same package) — every type the sampler supports must produce a sketch, and the ones it does not are an explicit list asserted in both directions, so coverage cannot be lost by accident.
-- **Writer-contract gates** (ADR-0018 §14): a writer that cannot write the file exactly refuses, and never finalizes a file a reader cannot read. After any change to `NewWriter`/`NewNativeWriter`, `ValidateWriteSchema`, the schema-element builders or `writeFooter`, run `go test -run 'TestAClosedWriterIsClosed|TestTheWriterOwnsItsSchema|TestEveryConstructorRefusesASchemaItCannotWrite|TestTheValidBoundaryDeclarationsStillWrite|TestVectorAndDecimalBoundaries|TestFooterTrailerLengthBoundary|TestAnOversizeFooterIsRefused|FuzzWriteSchemaShape' ./internal/storage/parquet/`. Both exported constructors are held to ONE validation; `Close` is terminal (`parquet.ErrWriterClosed`); the schema is deep-copied at construction. `FuzzWriteSchemaShape` is the writer's own untrusted-input target — an arbitrary schema declaration, not decoder bytes.
-
-### Documentation Is Part of Done
-
-- **User-facing docs move with the code.** An arc that changes a flag, a default, a config key, a type rule, a refusal, a supported-SQL statement or a benchmark number updates `docs/*.md` and the README in the same branch — the way ADRs already ship with the code. The 2026-09-02 drift audit (`docs/testing/docs-drift-audit-2026-09-02.md`) found 130 drifted and 29 unsupported claims across 20 docs after twelve releases that kept only CLAUDE.md and the ADRs current; it is the baseline the next audit diffs against.
-
-### Release Housekeeping
-
-- **Every tag is preceded by a housekeeping pass over the whole bundle.** Arcs merge tag-less; a release batches them into something cohesive, and before `release.sh` runs, one pass over the bundle's diff checks what no single arc can see: (1) every flag, default, config key, type rule, refusal, supported statement or benchmark number the bundle touched is reflected in `docs/*.md` and the README, and `go run ./tools/docscheck .` is green; (2) the doc comment of every function the bundle changed states the CURRENT invariant, boundary and pointers — no stale claim, and the count of comment blocks over twenty lines in touched files does not grow; (3) every settled position has an ADR, new or amended, superseded ADRs say `Status: Superseded by ADR-NNNN`, and ADR-0012's divergence list and ADR-0013's nondeterminism classes are current; (4) every issue the bundle closes is closed with a comment and every filing candidate from the landing notes is filed and labeled; (5) the release notes read as a user would read them, one section per arc, no process narration; (6) gofmt, `go vet`, `go mod tidy` are no-ops and no stray binary or orphaned worktree remains. The mechanical checks are `task housekeeping`; the judgement checks are an authored pass reviewed like any other arc (Derek, 2026-09-11).
+See `docs/testing/RELEASE.md` for the documentation-moves-with-the-code rule and the full pre-tag housekeeping pass (docs, doc comments, ADRs, issue closes, release notes, `task housekeeping`).
 
 ### What NOT to Do
 
@@ -286,18 +158,11 @@ The `internal/storage/parquet/` package is **critical infrastructure** — any d
 ## Run Modes
 
 ```bash
-# Embedded (one process, pgwire over the in-process engine, no S3)
-wadjet serve --storage-type=file --data-dir=./wadjet-data --pg-addr=:5432
-
-# Development (all-in-one)
-wadjetd serve --mode=standalone --pg-addr=:5432
-
-# Production distributed
-wadjetd serve --mode=coordinator --pg-addr=:5432 --nats-url=nats://nats:4222
-wadjetd serve --mode=worker --nats-url=nats://nats:4222
-
-# Query interface
-psql -h localhost -p 5432 -U wadjet -d wadjet
+wadjet serve --storage-type=file --data-dir=./wadjet-data --pg-addr=:5432    # embedded (one process, no S3)
+wadjetd serve --mode=standalone --pg-addr=:5432                               # development (all-in-one)
+wadjetd serve --mode=coordinator --pg-addr=:5432 --nats-url=nats://nats:4222  # production: coordinator
+wadjetd serve --mode=worker --nats-url=nats://nats:4222                       # production: worker
+psql -h localhost -p 5432 -U wadjet -d wadjet                                 # query interface
 ```
 
 ## CI/CD Automation
@@ -312,17 +177,4 @@ psql -h localhost -p 5432 -U wadjet -d wadjet
 
 ### Issue-to-PR Flow
 
-All Claude workflows are **label-gated** — only maintainers can add labels, so no external user can trigger API costs.
-
-1. Issue opened → maintainer reviews, adds `needs-triage` label
-2. Claude triages: comments with analysis, root cause, complexity estimate
-3. Maintainer adds `auto-fix` label → Claude creates branch, fixes, writes tests, opens PR
-4. Maintainer adds `needs-review` label on PR → Claude reviews the diff
-5. CI runs tests + SF1 benchmark automatically on all PRs
-6. Human approves and merges
-
-Concurrency limits ensure only one Claude workflow runs at a time.
-
-### Required Secrets
-
-- `ANTHROPIC_API_KEY` — Claude API key (set at repo or org level in Settings → Secrets → Actions)
+All Claude workflows are **label-gated** (only maintainers add labels, so no external user can trigger API costs): `needs-triage` → Claude triages, commenting analysis/root-cause/complexity → maintainer adds `auto-fix` → Claude branches, fixes, writes tests, opens a PR → maintainer adds `needs-review` on the PR → Claude reviews the diff → CI runs tests + the SF1 benchmark on every PR → a human approves and merges. Concurrency limits keep only one Claude workflow running at a time. Requires `ANTHROPIC_API_KEY` (repo or org Settings → Secrets → Actions).
