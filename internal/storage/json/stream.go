@@ -31,7 +31,8 @@ const (
 // defaultSampleSize complete objects (the eager path samples the same
 // prefix), except that buffering stops at maxSampleBytes — then the sample
 // is the complete objects that fit, and `sampled` records how many, since
-// every row past it is checked against the schema (22P02 on a mismatch).
+// every row past it is checked against the schema (22P02 on a mismatch,
+// 22003 out of range, 22007 for a timestamp).
 // Values are parsed by the same scanObjectInto byte scanner, so output
 // batches are identical to NewColumnarReader's whenever the samples agree.
 type StreamReader struct {

@@ -71,38 +71,20 @@ func readerSchemaProbeFromContext(ctx context.Context) *readerSchemaProbe {
 }
 
 // readerPlanTimeSchema is the column list a FILE READER publishes, read from
-// its input at PLAN time — the half of "a table function in FROM is a
-// relation" that ADR-0039 §3 deferred (#1230).
+// its input at PLAN time (ADR-0039 §3, #1230). With it the reader is an
+// ordinary relation: an unknown column is 42703 at plan time through any
+// path (#1231), `f.*` expands, and the aggregate rules read the real type —
+// SUM over the bigint a whole-number column infers is numeric, MAX keeps it.
 //
-// With it the reader is an ordinary relation: the binder closes its scope, so
-// an unknown column is 42703 at plan time through any path (#1231); `f.*`
-// expands; and the aggregate result-type rules read the column's real type,
-// so an integer SUM is bigint and a MAX keeps the input's width (ADR-0024).
-//
-// THE BOUND. Nothing here reads more than it must:
-//
-//   - `read_parquet` reads the FOOTER and no page. It is exact — the file
-//     declares its own schema — and it is the same `reader.Schema().Columns`
-//     the source itself publishes.
-//   - `read_json` and `read_csv` read ONE BATCH through the very reader the
-//     source uses, and take that batch's schema. Taking it through the same
-//     inference is what makes the plan-time answer and the run-time answer
-//     the same answer rather than two guesses about one file — and that
-//     inference is the readers' own 100-ROW SAMPLE (csv.sampleSize,
-//     json.defaultSampleSize), which describes the whole file. A row past it
-//     with a non-NULL value that does not fit is refused by the reader with
-//     22P02, naming the input, row, column and types. A key first seen past
-//     the sample remains absent. See docs/sql-reference.md.
-//   - an HTTP(S) source reads NOTHING here and keeps the first-batch stance.
-//     A plan-time fetch would be a second request for every statement and
-//     would make EXPLAIN reach the network, which is a cost and a surprise
-//     this schema is not worth.
-//   - an input that can be read ONCE reads nothing here either
-//     (readerInputIsRereadable): this read opens the input and the execution
-//     opens it AGAIN.
-//
-// An input that CHANGES between this read and the execution's — a file
-// replaced or truncated in between — is caught by withPlanTimeSchema, loudly.
+// THE BOUND: `read_parquet` reads the FOOTER and no page; `read_json` and
+// `read_csv` read ONE BATCH through the very reader the source uses, so the
+// plan-time and run-time schemas are one inference — the readers' 100-ROW
+// SAMPLE, whose later misfits the reader refuses (22P02 / 22003 / 22007;
+// docs/sql-reference.md). An HTTP(S) source reads NOTHING here (a second
+// request per statement, and EXPLAIN would reach the network), and neither
+// does an input that can be read only ONCE (readerInputIsRereadable). An
+// input that CHANGES between this read and the execution's is caught,
+// loudly, by withPlanTimeSchema.
 //
 // ok=false means "not knowable here", the caller's signal to keep the open
 // scope and the first-batch refusal.
@@ -324,8 +306,9 @@ func readerInputIsRereadable(path string) bool {
 }
 
 // parquetFooterSchema reads a Parquet file's own declaration and no page of
-// its data. A GLOB takes the FIRST match in sorted order, which is the file
-// the source's own concatenation starts with.
+// its data. A GLOB takes the FIRST match in sorted order. The execution reads
+// a glob through fetchGlob's concatenation, which a Parquet reader can parse
+// only when the glob matches ONE file (#1240), so the two agree exactly there.
 func parquetFooterSchema(path string) ([]parquet.Column, bool) {
 	if isGlob(path) {
 		matches, err := filepath.Glob(path)

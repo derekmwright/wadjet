@@ -199,7 +199,7 @@ func (e *FuncCall) formatNetworkArgs(b *batch.RecordBatch, row int, args []any) 
 type civilDate struct{ t time.Time }
 
 // resolveTemporalArgs rewrites a boxed DATE/TIMESTAMP column argument to the
-// instant it denotes, so the function body's parseTime sees an unambiguous
+// instant it denotes, so the function body's parseTimeOK sees an unambiguous
 // time.Time instead of a unit-less number. Resolution goes through
 // columnInstant — the same resolver the vectorized kernels use — which is what
 // makes the two paths agree by construction rather than by coincidence.

@@ -12,19 +12,12 @@ import (
 // A REFERENCE-SCOPE REFUSAL NEVER PUBLISHES A POLICED VALUE — arc RS's
 // masking gate, on all nine doors.
 //
-// The arc changes which scope a QUALIFIED reference is resolved against: an
-// ON clause sees its own join, a window key is resolved at all, a qualified
-// star names one relation, and one FROM name answers to one relation. Every
-// one of those decisions is made in `physical.validateColumns`, which the
-// POLICY door re-enters through `ValidateColumnsUnderPolicy` with the schema
-// THIS identity may see — so a scope narrowed for the reference rule is a
-// scope the mask is applied against, and getting it wrong is not merely a
-// wrong error message.
-//
-// The shapes below are this arc's own, written over the policed relations:
-// a join whose ON is scoped, a window key qualified by the policed relation's
-// alias, a qualified star over that alias, a self-join of the policed
-// relation, and the row-filtered table in each position. The claim is the
+// Every scope decision the arc changes is made in `physical.validateColumns`,
+// which the POLICY door re-enters through `ValidateColumnsUnderPolicy` with
+// the schema THIS identity may see, so a narrowed scope is one the mask is
+// applied against. The shapes are the arc's own over the policed relations —
+// a scoped ON, a window key and a qualified star over the policed alias, a
+// self-join, the row-filtered table in each position — and the claim is the
 // masking matrix's: nothing policed reaches a client, on any door.
 //
 // A GATE WHOSE CELLS ALL REFUSE PROVES NOTHING, so the count of (cell, door)

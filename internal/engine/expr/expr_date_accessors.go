@@ -100,7 +100,7 @@ func ProcessStart() time.Time { return processStart }
 // answer. The value is a timestamp in the representation now() and
 // current_timestamp use — formatInstant text, the engine's one instant
 // rendering: the scalar registry is func([]any) any with no type channel, and
-// every temporal function downstream (parseTime, epoch, timezone) reads that
+// every temporal function downstream (parseTimeOK, epoch, timezone) reads that
 // form. It carries the MILLISECOND now, where RFC3339 second-truncated it.
 func fnPgPostmasterStartTime(args []any) any {
 	return formatInstant(processStart)
@@ -112,7 +112,7 @@ func fnPgPostmasterStartTime(args []any) any {
 // holds days and a TIMESTAMP column holds milliseconds, so passing the stored
 // value through unchanged answered 9568 for a 1996 date (issue #319).
 // resolveTemporalArgs converts those columns to a time.Time before this runs;
-// text timestamps are parsed by parseTime as they always were.
+// text timestamps are parsed by parseTimeOK as they always were.
 func fnEpoch(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil

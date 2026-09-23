@@ -17,24 +17,17 @@ import (
 
 // ARC FR — A FILE READER IS A RELATION WITH A SCHEMA (#1230, #1231).
 //
-// ADR-0039 §3 deferred this: the binder ran BEFORE the table-function
-// capability was authorized, so the planner could not open a reader's input
-// to learn its columns without reading it for an identity that may not be
-// allowed to. The order is the other way round now — every statement door
-// calls `auth.AuthorizeTableFunctions` first — and the reader is an ordinary
-// relation from plan time on.
-//
-// THE ORACLE. PostgreSQL has no `read_json`, `read_csv` or `read_parquet`, so
-// every expectation below is 17.11's answer for an ORDINARY RELATION of the
-// schema the reader publishes, measured live on postgres:17.11-alpine
-// (--locale=C, text COLLATE "C"):
+// Every statement door calls `auth.AuthorizeTableFunctions` before binding,
+// so the reader is an ordinary relation from plan time on (ADR-0039 §3).
+// PostgreSQL has no readers: every expectation is 17.11's answer for an
+// ORDINARY RELATION of the schema the reader publishes (--locale=C; r1.a is
+// bigint because the readers infer BIGINT for a whole number):
 //
 //	CREATE TABLE r1 (a bigint, b text);   1,p  2,q  3,r  4,s
 //	CREATE TABLE r2 (c bigint, d text);   2,x  3,y
 //	CREATE TABLE empt (a bigint, b text); no rows
 //
-//	pg_typeof over r1.a:  SUM numeric · MIN bigint · MAX bigint ·
-//	                      AVG numeric · COUNT bigint
+//	pg_typeof over r1.a:  SUM, AVG numeric · MIN, MAX, COUNT bigint
 //	SELECT f.* FROM r1 AS f              → a, b
 //	SELECT * FROM empt                   → zero rows, columns a and b
 //	SELECT zz FROM empt                  → 42703
@@ -42,10 +35,6 @@ import (
 //	SELECT zz FROM r1 JOIN r2 …          → 42703
 //	WITH t AS (SELECT * FROM r2) SELECT zz FROM r1 b JOIN t … → 42703
 //	SELECT zz FROM (SELECT * FROM r2) t JOIN r1 b …           → 42703
-//
-// The readers infer BIGINT for a whole-number column, which is why r1.a is
-// declared bigint above rather than integer: the oracle is asked about the
-// type the relation actually publishes.
 func TestArcFRAFileReaderIsARelationWithASchema(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

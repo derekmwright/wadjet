@@ -172,12 +172,12 @@ var networkTextFuncs = map[string]bool{
 }
 
 // temporalInputFuncs are the scalar functions that read an argument as an
-// INSTANT — every function whose body reaches parseTime/toTime/parseDateArg.
+// INSTANT — every function whose body reaches parseTimeOK/toTime/parseDateArg.
 // They are the counterpart of stringInputFuncs and exist for the same reason:
 // ColRef.Eval
 // boxes a temporal column as a bare number (epoch DAYS for TypeDate, epoch
 // MILLISECONDS for TypeTimestamp), and a bare number has lost its unit.
-// parseTime reads an int64 as SECONDS, so 9568 days became 9568 seconds and
+// parseTimeOK reads an int64 as SECONDS, so 9568 days became 9568 seconds and
 // YEAR(l_shipdate) answered 1970 for every row of a decade — no error, no
 // null, one bogus GROUP BY bucket (issue #319).
 //
@@ -199,7 +199,7 @@ var temporalInputFuncs = map[string]bool{
 	"date_trunc":        true, "extract": true,
 	// time_bucket reads its SOURCE and its ORIGIN as column instants for the
 	// same reason date_trunc does: a TIMESTAMP column boxes epoch
-	// MILLISECONDS and a DATE column epoch DAYS, and parseTime reads a bare
+	// MILLISECONDS and a DATE column epoch DAYS, and parseTimeOK reads a bare
 	// int64 as epoch SECONDS. Without this entry every bucket over a
 	// timestamp column would land in 1970 (#319's shape).
 	"time_bucket": true,

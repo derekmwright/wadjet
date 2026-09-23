@@ -23,21 +23,12 @@ import (
 // OPERAND ORDER of the ON clause changes nothing: `ON r2.c = r1.a` and
 // `ON r1.a = r2.c` are the same condition.
 //
-// This engine answered EIGHT — the cross product — for every spelling that
-// writes the right arm's column first. The mechanism is positional, not
-// typed: `SubtreeNaming.ownsKey` decided a key's side from the column SETS,
-// and a reader whose schema the plan could not read contributes an EMPTY set,
-// so NEITHER arm owned EITHER key, `assignJoinKeySides` left the pair in its
-// written order, and each key was then resolved against the arm that does not
-// have it. Two misses encode the same flag byte for every row, so every probe
-// row matched every build row and the ON was silently gone.
-//
-// The gate runs with WADJET_TEST_NO_READER_SCHEMA=1, which makes a reader
-// publish NO plan-time schema. That is what the engine did for every reader
-// before this arc, and it is what this cell must keep exercising afterwards:
-// the repair is the QUALIFIER deciding the side, and it must hold for a
-// relation whose column list is unknown — otherwise the plan-time schema
-// would merely be hiding the defect.
+// This engine answered EIGHT — the cross product — whenever the right arm's
+// column came first: with no column SET for either reader neither arm owned
+// either key, each key resolved against the wrong arm, and two misses match
+// every row (ADR-0039 §9). The gate runs with WADJET_TEST_NO_READER_SCHEMA=1,
+// so the repair — the QUALIFIER decides the side — is exercised on a relation
+// with no column list and the plan-time schema cannot hide the defect.
 func TestArcFRAJoinBetweenTwoReadersKeysOnItsCondition(t *testing.T) {
 	t.Setenv("WADJET_TEST_NO_READER_SCHEMA", "1")
 	ctx := context.Background()

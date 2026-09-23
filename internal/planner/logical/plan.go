@@ -222,10 +222,10 @@ type Node struct {
 	// pipeline is built (physical.stampTableFuncRequiredColumns) and read by
 	// the source wrapper that makes a missing one 42703 at the first batch.
 	//
-	// It exists because the relation whose columns are its INPUT's cannot be
-	// bound at plan time — the planner does not open a reader's input to bind
-	// a statement (ADR-0039 §3) — so the check has to travel to the place the
-	// schema first exists. It is a FACT about the plan, computed once from
+	// It exists because a relation whose columns are its INPUT's is not bound
+	// at plan time when the planner read no schema for it (an http(s) or
+	// read-once input, a database reader, no authorization record — ADR-0039
+	// §3), so the check has to travel to the place the schema first exists. It is a FACT about the plan, computed once from
 	// the consumer that is about to read this relation, not an optimization:
 	// every name in it is one the plan provably requires of THIS relation.
 	FuncRequiredColumns []string

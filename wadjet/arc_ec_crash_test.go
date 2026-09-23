@@ -22,22 +22,13 @@ import (
 // rows and an orphan object — never a catalog entry naming a file that is
 // not there.
 //
-// The order is the ingester's: the object is Put (temp file + rename) BEFORE
-// the manifest is committed by CAS, so the catalog can be BEHIND the store
-// but never ahead of it. This gate kills a child process at both sides of
-// that window and reopens the directory through the public API:
-//
-//   - "before": the child exits the instant the Parquet object has landed,
-//     before the manifest commit. The parent finds the table, zero rows, no
-//     manifest entry, and exactly ONE object under tables/<t>/ the manifest
-//     does not name — the orphan. It is bytes, not rows: the scan resolves
-//     files from the manifest and never reads it.
-//   - "after": the child exits the instant FlushAll has returned — the
-//     manifest is committed — without Close, so the catalog store is left
-//     as a killed process leaves it. The parent finds every row.
-//
-// Both cells assert that every path the manifest names exists on disk.
-// Neither leaves the lock held: the kernel drops a flock with the process.
+// The ingester Puts the object BEFORE it commits the manifest by CAS, so the
+// catalog can be behind the store but never ahead of it (ADR-0041 §5). A
+// child is killed on both sides of that window and the parent reopens the
+// directory through the public API: "before" (the object landed, no commit)
+// finds the table, zero rows and exactly ONE orphan object the manifest does
+// not name; "after" (FlushAll returned, no Close) finds every row. Both
+// assert every manifest path exists on disk; the kernel drops the flock.
 
 const ecCrashEnv = "WADJET_EC_CRASH_MODE"
 

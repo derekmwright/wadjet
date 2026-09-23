@@ -37,7 +37,7 @@ type SubtreeNaming struct {
 	// get qualified, so the probe-most scan owns the bare name.
 	origins map[string]string
 	// root is the subtree itself, kept so ownsKey can ask the derived-scope
-	// question the three maps cannot answer: whether a qualifier names a
+	// question the maps cannot answer: whether a qualifier names a
 	// DERIVED TABLE this subtree is, rather than a scan it contains.
 	root *logical.Node
 	// unknownCols holds the aliases (lowercased) whose COLUMN LIST is not
@@ -139,8 +139,10 @@ func (s *SubtreeNaming) collect(n *logical.Node) {
 // when the qualifier is one of the subtree's scan aliases and the column
 // belongs to that scan — a self-join's other copy does NOT own them — or when
 // the qualifier names a DERIVED TABLE this subtree is and the column is one of
-// its outputs. Bare keys are owned when any scan in the subtree provides the
-// column or the subtree exposes it as a projection/aggregate output name.
+// its outputs, or when the qualifier names a relation whose column list is
+// unknown at plan time (unknownCols; the qualifier alone decides, #1229).
+// Bare keys are owned when any scan in the subtree provides the column or
+// the subtree exposes it as a projection/aggregate output name.
 // Expression keys (anything that isn't a plain column reference) resolve to
 // not-owned, matching the previous membership test's behavior.
 //

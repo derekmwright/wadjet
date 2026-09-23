@@ -224,25 +224,19 @@ func enforceTableFunctionScans(ctx context.Context, provider *Provider, plan *lo
 // AuthorizeTableFunctions is the FIRST thing a statement door does, before the
 // binder and before the scan annotation (ADR-0034, ADR-0039 §3).
 //
-// Two things happen here and the ORDER between them and everything after is
-// the safety property:
+// The ORDER is the safety property. (1) Every table function the statement's
+// own FROM items name is DECIDED: a denied identity gets 42501 before any
+// layer has looked at a path, a URL or a connection string. (2) The guard —
+// what decides a call this pass cannot see from the parse (a subquery, a CTE
+// body, a scan the optimizer mints) when it is reached — and the plan-time
+// SCHEMA PROBE, the RECORD that this door authorized, go on the context.
+// `physical.readerPlanTimeSchema` reads a file only under that record and
+// after asking the guard about that very call; a door that skips this
+// function gets no probe, and its relation keeps the first-batch refusal.
 //
-//  1. Every table function the statement's own FROM items name is DECIDED.
-//     A denied identity gets 42501 before any layer has looked at a path, a
-//     URL or a connection string.
-//  2. The guard and the plan-time SCHEMA PROBE are installed on the context.
-//     The guard is what a call this pass cannot see from the parse — inside a
-//     scalar subquery, an IN list, a CTE body, a scan the optimizer mints —
-//     is decided by when it is reached. The probe is the RECORD that this
-//     door authorized, and `physical.readerPlanTimeSchema` reads a file only
-//     when it finds one and only after asking the guard about that very call.
-//     A door that does not call this function gets no probe, so its planner
-//     opens nothing and the relation keeps the first-batch refusal it had.
-//
-// The plan-level pass inside EnforcePlanPolicies still runs afterwards and is
-// still load-bearing: it sees the scans the BUILDER produced, which is the
-// complete set for the statement's own plan, and it re-installs the same
-// guard for the physical planner's separate subquery plans.
+// EnforcePlanPolicies' own pass still runs afterwards and is load-bearing: it
+// sees the scans the BUILDER produced and re-installs the guard for the
+// physical planner's separate subquery plans.
 //
 // Nil/disabled auth authorizes nothing and still installs the probe: with no
 // provider there is no identity to be refused, and reading a file the caller

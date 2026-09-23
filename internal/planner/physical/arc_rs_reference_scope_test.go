@@ -13,28 +13,14 @@ import (
 // A QUALIFIED REFERENCE NAMES ONE RELATION IN SCOPE, OR IT IS REFUSED AS
 // PostgreSQL REFUSES IT — arc RS's plan-time table (#1220, #1161, #1162).
 //
-// Every `want` below is live PostgreSQL 17.11 (postgres:17-alpine, --locale=C)
-// over a fixture holding the same two relations as this repo's `lat_ord` /
-// `lat_item`, measured before any code changed and re-measured at the tip.
-// The columns asserted are the SQLSTATE and PostgreSQL's PRIMARY SENTENCE;
-// PostgreSQL's DETAIL/HINT is carried in this engine's message as explanatory
-// text after a colon and is deliberately not asserted byte for byte.
-//
-// The three cases the table separates, and why the split is not cosmetic:
-//
-//	missing FROM-clause entry   nothing at this level declares that name, and
-//	                            a relation a LATER join introduces has not
-//	                            been read yet — so a forward ON reference is
-//	                            MISSING, which is the opposite of what #1220
-//	                            expected and what PostgreSQL actually says;
-//	invalid reference …         the statement HAS that entry, written earlier,
-//	                            and this position cannot reach it;
-//	table name … more than once one name would answer to two relations, which
-//	                            PostgreSQL refuses at the FROM clause (42712).
-//
-// This gate is plan-time only and needs no storage, which is the point: the
-// refusal it asserts is a property of the STATEMENT, so it must hold before a
-// row is read and identically on every execution arm. The five-arm table is
+// Every `want` is live PostgreSQL 17.11 (--locale=C) over the same two
+// relations as `lat_ord` / `lat_item`: the SQLSTATE and PostgreSQL's PRIMARY
+// sentence (its DETAIL/HINT rides after a colon and is not asserted). The
+// three cases: `missing FROM-clause entry` — nothing at this level declares
+// the name, including a relation a LATER join introduces; `invalid
+// reference` — the entry was written earlier and this position cannot reach
+// it; `specified more than once` (42712) — one name, two relations. Plan-time
+// only, needing no storage; the five-arm table is
 // `coordinator.TestArcRSAQualifiedReferenceNamesOneRelationOnEveryArm`.
 type rsCell struct {
 	name, sql string

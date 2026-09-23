@@ -38,7 +38,8 @@ import (
 )
 
 // ErrHeld is the refusal a second opener of a held directory gets — and
-// ONLY that: a lock another process holds. A directory that cannot be
+// ONLY that: a lock another holder has, another DB in this process or
+// another process (flock binds per open file description). A directory that cannot be
 // created, opened or written (permissions, a regular file where the
 // directory should be) is reported with its own cause, so
 // errors.Is(err, os.ErrPermission) still answers (arc EC review P1). The
@@ -46,10 +47,10 @@ import (
 // published, its pid.
 var ErrHeld = errors.New("catalog directory is held by another process")
 
-// HeldError is the one refusal every door raises for a held directory:
-// ErrHeld, the directory, the holder's pid when it has published, and the
-// lock error. `wadjet.Open`, the CLI commands and `wadjet serve` all say
-// the same thing (arc EC review B4).
+// HeldError is the refusal `wadjet.Open` and `wadjet serve` raise for a held
+// directory: ErrHeld, the directory, the holder's pid when it has published,
+// and the lock error (arc EC review B4). The short-lived CLI commands dial
+// the holder instead, and refuse with their own message when that fails.
 func HeldError(dir string, lockErr error) error {
 	if holder, ok := ReadHolder(dir); ok {
 		return fmt.Errorf("%w: %s is held by process %d (%w)", ErrHeld, dir, holder.PID, lockErr)
@@ -151,7 +152,7 @@ func OpenLocked(lock *Lock, cfg natsconn.NATSConfig, logger *slog.Logger) (*Hand
 }
 
 // TakeLock takes an exclusive, non-blocking advisory lock on the catalog store
-// directory, creating it if needed. A lock another process holds is ErrHeld;
+// directory, creating it if needed. A lock another holder has is ErrHeld;
 // any other failure is the file error itself.
 //
 // It is advisory (flock), so it binds only wadjet processes, and it is

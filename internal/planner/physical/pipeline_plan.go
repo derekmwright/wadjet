@@ -105,7 +105,8 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 	// Table functions (read_json, read_csv, etc.) bypass the catalog scan
 	if node.IsTableFunc {
 		// ...and so they bypassed every access check, which is why they are
-		// authorized HERE, at the one place a table-function source is built.
+		// authorized HERE, where the query's table-function source is built
+		// (readerPlanTimeSchema builds one too, and asks the same guard first).
 		// A subquery and a CTE body are planned as SEPARATE plans inside this
 		// planner, so an authorization pass over the statement's plan alone
 		// cannot see the `read_csv` inside `(SELECT COUNT(*) FROM read_csv(…))`

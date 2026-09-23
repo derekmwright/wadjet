@@ -24,7 +24,8 @@ const defaultBatchSize = 2048
 
 // sampleSize is the number of leading data rows a column's type is
 // inferred from. A value in a later row that does not parse as that type is
-// a 22P02 (see buildBatch).
+// a 22P02 — 22003 for a number out of range, 22007 for a timestamp (see
+// buildBatch).
 const sampleSize = 100
 
 // errNotType and errOutOfRange are writeCSVValue's answers for a field that
@@ -370,8 +371,9 @@ func (r *Reader) refusal(err error, inputRow int, sc parquet.Column, val string)
 }
 
 // writeCSVValue parses val as typ into vec at row. A field that does not
-// parse is set NULL and answers errNotType; the caller decides whether that
-// is the NULL (inside the sample) or a refusal (past it).
+// parse is set NULL and answers errNotType (errOutOfRange for a number
+// outside the type); the caller decides whether that is the NULL (inside
+// the sample) or a refusal (past it).
 func writeCSVValue(vec *batch.Vector, row int, val string, typ parquet.TypeID) error {
 	switch typ {
 	// Bool, bigint and double precision read a field with PostgreSQL's own

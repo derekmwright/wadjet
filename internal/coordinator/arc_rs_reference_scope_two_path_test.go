@@ -20,20 +20,11 @@ import (
 //	   names a column the relation has not, in scope}
 //	x {single, spilled512k, dag, dag-shuffled, dag-morsel4}
 //
-// Every `want` is live PostgreSQL 17.11 (postgres:17-alpine, --locale=C) over
-// rows identical to this package's `lat_ord` / `lat_item` fixtures, measured
-// before any code changed and re-measured at the tip.
-//
-// The refusal is at PLAN time, which is why the same sentence has to appear on
-// all five arms: it is a property of the STATEMENT, decided before a row is
-// read, so an arm that answers it is an arm that never asked. That is exactly
-// what the base did — the ten `on/*` and twelve `win*/*` cells below ANSWERED
-// on every arm, which is worse than #1220's "wrong sentence" reading.
-//
-// The `*Ok/*` cells are not decoration. A rule that refuses everything is a
-// ban, and each control here is one edit away from a refusing cell: a second
-// ON that legally sees the first join's relations, a window key that names its
-// own input, a star over an alias, a self-join with ONE side aliased.
+// Every `want` is live PostgreSQL 17.11 (--locale=C) over rows identical to
+// `lat_ord` / `lat_item`. The refusal is at PLAN time, a property of the
+// STATEMENT, so an arm that answers it never asked — as every arm did at the
+// base for the `on/*` and `win*/*` cells. The `*Ok/*` controls are each one
+// edit away from a refusing cell, so a rule that refuses everything fails.
 type rsArmCell struct {
 	name, sql string
 	// refuse, when set, is PostgreSQL's primary sentence: every arm must

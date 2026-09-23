@@ -1036,9 +1036,10 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 	// a base table (#1210), its column TYPES reach the literal refusal, and an
 	// over-long column-alias list is 42P10 before anything runs.
 	//
-	// A function whose columns are its INPUT's stays OPEN: this binder runs
-	// before the table-function capability is authorized, so it must not read
-	// the input to find out (tableFuncDeclaredSchema's header).
+	// A function whose columns are its INPUT's is closed over the columns
+	// readerPlanTimeSchema reads once the door has authorized the capability,
+	// and stays OPEN only when it reads none: no authorization record on the
+	// context, an http(s) or read-once input, a database reader, an empty one.
 	if tr.IsFunction {
 		cols, known := tableFuncDeclaredSchema(tr.Name, tr.FuncArgs, tr.WithOrdinality)
 		if !known {

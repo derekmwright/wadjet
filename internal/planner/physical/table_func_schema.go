@@ -24,12 +24,11 @@ import (
 // batch still publishes its columns.
 //
 // A function whose columns are its INPUT's — every file and database reader —
-// is deliberately NOT here and has NO plan-time schema at all: the binder runs
-// BEFORE the table-function capability is authorized, so opening the input
-// here would read it for an identity that may not be allowed to (#943,
-// ADR-0034, ADR-0039 §3). A reference over one is refused at its FIRST BATCH
-// instead (table_func_required.go). ok=false means "not knowable from the
-// call", the caller's signal to keep the open-scope stance it had before.
+// is deliberately NOT here: this is a pure function of the call. A local file
+// reader's schema is read by readerPlanTimeSchema, only after the door has
+// authorized the capability (ADR-0039 §3); a reader that gets none there is
+// refused at its FIRST BATCH (table_func_required.go). ok=false means "not
+// knowable from the call", the caller's signal to ask the reader path.
 func tableFuncDeclaredSchema(funcName string, args []string, withOrdinality bool) ([]parquet.Column, bool) {
 	switch strings.ToLower(funcName) {
 	case "generate_series":

@@ -10,49 +10,24 @@ import (
 )
 
 // A QUALIFIED REFERENCE NAMES ONE RELATION IN SCOPE AT THE POINT IT IS
-// WRITTEN, and the point is not the whole query block.
+// WRITTEN, and the point is not the whole query block. The block's one flat
+// scope is right for WHERE, the SELECT list, GROUP BY, HAVING and ORDER BY,
+// and wrong for a JOIN's ON clause, which SQL scopes to its own join:
+// `FROM a JOIN b ON c.x = a.x JOIN c ON …` names `c` before it is joined, and
+// `FROM a, b JOIN c ON a.x = c.x` names another FROM item. PostgreSQL 17.11
+// refuses both; this binder answered both (#1220).
 //
-// The binder builds ONE scope per block from every FROM item and every JOIN,
-// which is the right scope for WHERE, the SELECT list, GROUP BY, HAVING and
-// ORDER BY — every relation of the block is visible in all of those. It is the
-// wrong scope for a JOIN's ON clause: SQL scopes an ON to the two sides of the
-// join it belongs to, so `FROM a JOIN b ON c.x = a.x JOIN c ON …` names `c`
-// where `c` is not yet in scope, and `FROM a, b JOIN c ON a.x = c.x` names `a`
-// where `a` is a DIFFERENT FROM item. PostgreSQL 17.11 refuses both; this
-// binder answered both, because `c` and `a` were in the one flat scope (#1220).
-//
-// This file is the block's relation CENSUS — every relation the FROM declares,
-// in the order the FROM writes them — and the two things it decides:
-//
-//   - which relations an ON clause may name (relationCensus.visibleAtJoin);
-//   - which of PostgreSQL's two 42P01 sentences an unmatched qualifier gets.
-//
-// The sentences are PostgreSQL's own, measured on 17.11 over this package's
-// lat_ord / lat_item fixture. So is the explanatory clause after the colon,
-// verbatim from PostgreSQL's DETAIL or HINT: `sqlerr.Error` carries one
-// message and no detail field, and a client that matches on PostgreSQL's
-// wording — SQLancer's `PostgresCommon.getCommonFetchErrors` lists the string
-// "but it cannot be referenced from this part of the query" — then matches
-// this engine's refusal too, which is what lets a generated corpus get PAST
-// the shape instead of stopping on it.
-//
-//	FROM lat_ord a JOIN lat_item b ON j.id = a.id JOIN lat_item j ON …
-//	  ERROR:  42P01: missing FROM-clause entry for table "j"
-//	FROM lat_ord a, lat_item b JOIN lat_item c ON a.id = c.order_id
-//	  ERROR:  42P01: invalid reference to FROM-clause entry for table "a"
-//	  DETAIL: There is an entry for table "a", but it cannot be referenced
-//	          from this part of the query.
-//	FROM lat_ord a … lat_ord.id
-//	  ERROR:  42P01: invalid reference to FROM-clause entry for table "lat_ord"
-//	  HINT:   Perhaps you meant to reference the table alias "a".
-//
-// The split is POSITIONAL and that is not an accident of PostgreSQL's
-// implementation, it is what the two sentences mean: "invalid reference" says
-// the statement HAS such an entry and this position cannot see it, and the
-// parser can only say that about an entry it has already read. A relation
-// introduced by a LATER join has not been read yet, so the same reference is
-// "missing" — measured above, and it is why a forward ON reference gets the
-// missing sentence rather than the invalid one the issue expected.
+// This file is the block's relation CENSUS, in FROM order, and what it
+// decides: which relations an ON may name (relationCensus.visibleAtJoin), and
+// which of PostgreSQL's 42P01 sentences an unmatched qualifier earns — each
+// with PostgreSQL's DETAIL or HINT after a colon, verbatim, because clients
+// match on it (SQLancer's getCommonFetchErrors lists "but it cannot be
+// referenced from this part of the query"). The split is POSITIONAL:
+// `invalid reference to FROM-clause entry` is said of an entry already read
+// that this position cannot reach; a relation a LATER join introduces has not
+// been read, so it is `missing FROM-clause entry`; a table name the FROM
+// reads under an alias earns the hint to use the alias. See
+// docs/sql-reference.md "What an ON clause may name" and ADR-0012 §5 #617.
 
 // relationSite is one relation the block's FROM declares: the name it answers
 // to, the comma-separated FROM item it belongs to, and the JOIN that

@@ -18,14 +18,13 @@ import (
 // A reference to a column a table function does not publish is 42703 — LOUDLY,
 // naming the column — and never a NULL for every row (#1210, ADR-0039).
 //
-// For a function whose SIGNATURE declares its columns the refusal is made at
-// plan time, by the binder, exactly as over a base table
-// (tableFuncDeclaredSchema). A file or database reader has no plan-time column
-// list this engine may ask for — the binder runs BEFORE the table-function
-// capability is authorized on every door, so reading the input there would
-// open it for an identity that may not be allowed to (#943, ADR-0034,
-// ADR-0039 §3) — so ITS refusal is made where the schema first exists: at the
-// FIRST BATCH.
+// For a function whose SIGNATURE declares its columns, and for a local file
+// reader whose schema readerPlanTimeSchema read after the door authorized the
+// capability, the refusal is made at plan time, by the binder, exactly as over
+// a base table. This is the FALLBACK for a reader with no plan-time column
+// list — no authorization record, an http(s) or read-once input, a database
+// reader (ADR-0039 §2, §3) — whose refusal is made where its schema first
+// exists: at the FIRST BATCH.
 //
 // The names checked are the ones the operators DIRECTLY ABOVE the relation ask
 // of it. That position is what makes them certain: the batch the source
