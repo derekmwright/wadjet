@@ -4320,7 +4320,7 @@ and cannot see the calling connection.
 | `CURRENT_DATABASE()` | Database name | `SELECT CURRENT_DATABASE()` → `'wadjet'` |
 | `CURRENT_SCHEMA` | Current schema | `SELECT CURRENT_SCHEMA` → `'public'` |
 | `CURRENT_SCHEMAS(implicit)` | Search path as a text array | `CURRENT_SCHEMAS(false)` → `'{public}'` |
-| `VERSION()` | Server version string | `SELECT VERSION()` → `'PostgreSQL 15.0 (Wadjet analytical query engine)'` |
+| `VERSION()` | Server version string | `SELECT VERSION()` → `'PostgreSQL 17.0 (Wadjet analytical query engine)'` |
 
 These names are reserved, as they are in PostgreSQL: a table column that is
 literally called `user` is referenced with the double-quoted spelling

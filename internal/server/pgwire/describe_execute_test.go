@@ -392,7 +392,7 @@ func TestDataGripOpeningSequenceSimpleProtocol(t *testing.T) {
 		{
 			"select version()",
 			[]string{"version"},
-			[]string{"PostgreSQL 15.0 (Wadjet analytical query engine)"},
+			[]string{"PostgreSQL 17.0 (Wadjet analytical query engine)"},
 		},
 		{
 			"SHOW TRANSACTION ISOLATION LEVEL",
@@ -646,7 +646,7 @@ func TestAliasedSessionQueryKeepsClientLabels(t *testing.T) {
 		wantCols []string
 		wantVals []string
 	}{
-		{"select version() as v", []string{"v"}, []string{"PostgreSQL 15.0 (Wadjet analytical query engine)"}},
+		{"select version() as v", []string{"v"}, []string{"PostgreSQL 17.0 (Wadjet analytical query engine)"}},
 		{"select current_user as whoami", []string{"whoami"}, []string{"wadjet"}},
 		{
 			"select current_database() as a, current_schemas(false) as b",

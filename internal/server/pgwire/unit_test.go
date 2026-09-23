@@ -650,11 +650,11 @@ func TestPGWireShowStatements(t *testing.T) {
 	}{
 		{"SHOW TRANSACTION ISOLATION LEVEL", "transaction_isolation", "read committed"},
 		{"SHOW standard_conforming_strings", "standard_conforming_strings", "on"},
-		{"SHOW server_version", "server_version", "15.0"},
+		{"SHOW server_version", "server_version", "17.0"},
 		{"SHOW server_encoding", "server_encoding", "UTF8"},
 		{"SHOW client_encoding", "client_encoding", "UTF8"},
 		{"SHOW DateStyle", "DateStyle", "ISO, MDY"},
-		{"SHOW server_version_num", "server_version_num", "150000"},
+		{"SHOW server_version_num", "server_version_num", "170000"},
 		{"SHOW some_unknown", "some_unknown", ""},
 	}
 	for _, tt := range tests {

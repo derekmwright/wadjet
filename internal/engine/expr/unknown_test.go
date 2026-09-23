@@ -230,7 +230,7 @@ func TestPgCompatShimsRegistered(t *testing.T) {
 func TestPgCompatValues(t *testing.T) {
 	// current_setting answers from the same vocabulary the wire protocol
 	// reports at startup, so a client asking twice gets one answer.
-	if got := fnCurrentSetting([]any{"server_version_num"}); got != "150000" {
+	if got := fnCurrentSetting([]any{"server_version_num"}); got != "170000" {
 		t.Errorf("current_setting(server_version_num): got %v", got)
 	}
 	// Case-insensitive: JDBC sends TimeZone, psycopg sends timezone.

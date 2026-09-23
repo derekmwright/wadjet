@@ -39,7 +39,18 @@ const (
 	// ServerVersion is the answer to version(). PostgreSQL drivers parse the
 	// leading "PostgreSQL <major>" to decide which protocol features and
 	// catalog queries they may use, so the string keeps that prefix.
-	ServerVersion = "PostgreSQL 15.0 (Wadjet analytical query engine)"
+	//
+	// The major version is the one pg_catalog models (syscatalog carries
+	// PostgreSQL 17's relations, ADR-0044): psql and pgJDBC pick their
+	// catalog spellings by the advertised version, so advertising any other
+	// major sends them column names the catalog does not have (psql 17 `\l`
+	// against an advertised 15 asks for pg_database.daticulocale, which
+	// PostgreSQL 17 renamed datlocale). ServerVersionShort and
+	// ServerVersionNum are the same version as server_version /
+	// server_version_num report it; every door reads these three.
+	ServerVersion      = "PostgreSQL 17.0 (Wadjet analytical query engine)"
+	ServerVersionShort = "17.0"
+	ServerVersionNum   = "170000"
 )
 
 func fnVersion(args []any) any { return ServerVersion }

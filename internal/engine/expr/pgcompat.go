@@ -106,8 +106,8 @@ func init() {
 // internal/server/pgwire, so a client that asks the same question two ways gets
 // one answer.
 var pgSettings = map[string]string{
-	"server_version":                "15.0",
-	"server_version_num":            "150000",
+	"server_version":                ServerVersionShort,
+	"server_version_num":            ServerVersionNum,
 	"server_encoding":               "UTF8",
 	"client_encoding":               "UTF8",
 	"datestyle":                     "ISO, MDY",

@@ -502,7 +502,7 @@ func (c *pgConn) handleStartup() error {
 	c.sendAuthOk()
 
 	// Send ParameterStatus messages (clients like psql expect these)
-	c.sendParamStatus("server_version", "15.0 (Wadjet)")
+	c.sendParamStatus("server_version", expr.ServerVersionShort+" (Wadjet)")
 	c.sendParamStatus("server_encoding", "UTF8")
 	c.sendParamStatus("client_encoding", "UTF8")
 	c.sendParamStatus("DateStyle", "ISO, MDY")
@@ -2292,8 +2292,8 @@ func (c *pgConn) matchSyntheticSelect(normalized string) *synthAnswer {
 var showDefaults = map[string]struct{ label, value string }{
 	"transaction_isolation":       {"transaction_isolation", "read committed"},
 	"standard_conforming_strings": {"standard_conforming_strings", "on"},
-	"server_version":              {"server_version", "15.0"},
-	"server_version_num":          {"server_version_num", "150000"},
+	"server_version":              {"server_version", expr.ServerVersionShort},
+	"server_version_num":          {"server_version_num", expr.ServerVersionNum},
 	"server_encoding":             {"server_encoding", "UTF8"},
 	"client_encoding":             {"client_encoding", "UTF8"},
 	"datestyle":                   {"DateStyle", "ISO, MDY"},
