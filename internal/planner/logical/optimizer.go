@@ -2232,8 +2232,9 @@ func pushFilterThroughJoin(filter, join *Node) *Node {
 		return filter
 	}
 
-	leftTables, leftColMap := collectScanInfo(join.Children[0])
-	rightTables, rightColMap := collectScanInfo(join.Children[1])
+	sideTables, sideCols := joinSidesScanInfo(join.Children[0], join.Children[1])
+	leftTables, leftColMap := sideTables[0], sideCols[0]
+	rightTables, rightColMap := sideTables[1], sideCols[1]
 
 	// A WHERE predicate sits ABOVE the join, so it sees whatever the join
 	// emitted — including the NULLs an outer join manufactures for a row
@@ -2428,8 +2429,9 @@ func extractJoinCondPredicates(join *Node) *Node {
 		return join // single condition, nothing to split
 	}
 
-	leftTables, leftColMap := collectScanInfo(join.Children[0])
-	rightTables, rightColMap := collectScanInfo(join.Children[1])
+	sideTables, sideCols := joinSidesScanInfo(join.Children[0], join.Children[1])
+	leftTables, leftColMap := sideTables[0], sideCols[0]
+	rightTables, rightColMap := sideTables[1], sideCols[1]
 	allColMap := make(map[string]string, len(leftColMap)+len(rightColMap))
 	for k, v := range leftColMap {
 		allColMap[k] = v
@@ -2876,8 +2878,74 @@ func buildORTree(nodes []plansql.Node) plansql.Node {
 func collectScanInfo(n *Node) (tables map[string]bool, colToTable map[string]string) {
 	tables = make(map[string]bool)
 	colToTable = make(map[string]string)
-	collectScanInfoRec(n, tables, colToTable, false)
+	collectScanInfoRec(n, tables, colToTable, false, nil)
 	return
+}
+
+// joinSidesScanInfo is collectScanInfo for the SIDES of one join (or the
+// relations of one join tree), asked to tell them apart.
+//
+// A derived table's alias is stamped on every scan inside it
+// (Node.DerivedAliases), so a join INSIDE `(… FROM t2 x JOIN t1 y …) d`
+// has `d` on both of its sides. Neither side is `d` — the whole join is — and
+// counting it as a name of each side made every predicate over `d`'s bare
+// columns look like it belonged to the LEFT side: `(SELECT … FROM t2 x JOIN t1
+// y ON … WHERE k = 'r') d` pushed `k = 'r'` onto x's scan, and a derived table
+// aliased like its own right arm — `(… JOIN t1 c … WHERE c.k = 'r') c`, the
+// shape pgJDBC's getColumns has — pushed `c.k` onto the left arm too. Both
+// failed `filter column … does not exist in the input schema` where
+// PostgreSQL answers (arc PC).
+//
+// So the names every scan of every side shares — the enclosing derived
+// tables — are AMBIENT and identify no side: a side keeps them only where
+// one of its scans is directly named so (a relation aliased like the derived
+// table), and a bare column is owned by the name its scan has at THIS join's
+// level: the outermost derived alias that is not ambient, else its own.
+func joinSidesScanInfo(sides ...*Node) (tables []map[string]bool, colToTable []map[string]string) {
+	ambient := ambientDerivedAliases(sides...)
+	for _, side := range sides {
+		t := make(map[string]bool)
+		c := make(map[string]string)
+		collectScanInfoRec(side, t, c, false, ambient)
+		tables = append(tables, t)
+		colToTable = append(colToTable, c)
+	}
+	return tables, colToTable
+}
+
+// ambientDerivedAliases is the set of derived aliases stamped on EVERY scan
+// under the given nodes: the derived tables that enclose all of them.
+func ambientDerivedAliases(nodes ...*Node) map[string]bool {
+	var common map[string]bool
+	seen := false
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type == NodeScan {
+			mine := make(map[string]bool, len(n.DerivedAliases))
+			for _, d := range n.DerivedAliases {
+				mine[d] = true
+			}
+			if !seen {
+				common, seen = mine, true
+			} else {
+				for d := range common {
+					if !mine[d] {
+						delete(common, d)
+					}
+				}
+			}
+		}
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	for _, n := range nodes {
+		walk(n)
+	}
+	return common
 }
 
 // collectEnclosingScope is collectScanInfo for the three decorrelations'
@@ -2887,11 +2955,15 @@ func collectScanInfo(n *Node) (tables map[string]bool, colToTable map[string]str
 func collectEnclosingScope(n *Node) (tables map[string]bool, colToTable map[string]string) {
 	tables = make(map[string]bool)
 	colToTable = make(map[string]string)
-	collectScanInfoRec(n, tables, colToTable, true)
+	collectScanInfoRec(n, tables, colToTable, true, nil)
 	return
 }
 
-func collectScanInfoRec(n *Node, tables map[string]bool, colToTable map[string]string, derivedOutputs bool) {
+// collectScanInfoRec walks one subtree. ambient, when set, holds the derived
+// aliases shared by every side of the join being attributed
+// (joinSidesScanInfo): they name no side, so a scan is known by the names it
+// has at that join's level.
+func collectScanInfoRec(n *Node, tables map[string]bool, colToTable map[string]string, derivedOutputs bool, ambient map[string]bool) {
 	if n == nil {
 		return
 	}
@@ -2915,6 +2987,9 @@ func collectScanInfoRec(n *Node, tables map[string]bool, colToTable map[string]s
 		// nothing at all. It is the identity rule the resolver and the join's
 		// output filter already hold: the column folds, the relation does not.
 		for _, name := range n.ScopeNames() {
+			if ambient[name] && name != n.TableAlias && name != n.TableName {
+				continue
+			}
 			tables[name] = true
 		}
 		// The BARE-column map names its owner the same way, because its
@@ -2924,6 +2999,18 @@ func collectScanInfoRec(n *Node, tables map[string]bool, colToTable map[string]s
 		// layer down. Every relation reachable unquoted already folds to
 		// itself, so only a DELIMITED name changes spelling here.
 		tableID := n.OuterTableID()
+		if ambient != nil {
+			tableID = n.TableAlias
+			if tableID == "" {
+				tableID = n.TableName
+			}
+			for i := len(n.DerivedAliases) - 1; i >= 0; i-- {
+				if !ambient[n.DerivedAliases[i]] {
+					tableID = n.DerivedAliases[i]
+					break
+				}
+			}
+		}
 		for _, col := range n.ScanColumns {
 			colToTable[strings.ToLower(col)] = tableID
 		}
@@ -2961,7 +3048,7 @@ func collectScanInfoRec(n *Node, tables map[string]bool, colToTable map[string]s
 		}
 	}
 	for _, child := range n.Children {
-		collectScanInfoRec(child, tables, colToTable, derivedOutputs)
+		collectScanInfoRec(child, tables, colToTable, derivedOutputs, ambient)
 	}
 }
 
@@ -4407,10 +4494,7 @@ func greedyJoinReorder(rels []*Node, edges []joinEdge) *Node {
 	}
 
 	// Track which table names each slot in the plan covers (for condition matching)
-	relTables := make([]map[string]bool, n)
-	for i, r := range rels {
-		relTables[i], _ = collectScanInfo(r)
-	}
+	relTables, _ := joinSidesScanInfo(rels...)
 
 	// Pick the MOST EXPENSIVE relation as the starting point (probe side).
 	// In a left-deep tree, the initial relation streams as the probe through
