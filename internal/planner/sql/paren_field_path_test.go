@@ -17,10 +17,10 @@ import (
 // bare spelling produces, so ADR-0022 rule 1's resolvers go on asking one
 // question rather than acquiring a second spelling to disagree about.
 //
-// The refusals are as load-bearing as the acceptances. A container the
-// reference QUALIFIES needs a three-part identity this engine does not carry,
-// and an earlier form of this change answered NULL for it on every arm; it is
-// 0A000 now, and `a.b.c` stays a syntax error, which is ADR-0022's position.
+// A container the reference QUALIFIES is read by row_field over the qualified
+// reference's value — the qualifier is kept, never stripped (an earlier form
+// stripped it and answered NULL on every arm). `a.b.c` stays a syntax error,
+// which is ADR-0022's position.
 func TestParenthesisedFieldPathIsTheSameReferenceAsTheBareOne(t *testing.T) {
 	for _, tc := range []struct {
 		name, sql string
@@ -37,6 +37,12 @@ func TestParenthesisedFieldPathIsTheSameReferenceAsTheBareOne(t *testing.T) {
 		// false about a container (round-3 review P2).
 		{"redundant parentheses", "SELECT ((c_row)).b FROM nested", "c_row.b"},
 		{"three parentheses", "SELECT (((c_row))).b FROM nested", "c_row.b"},
+		// A TWO-PART container — relation-qualified, or itself a path — reads
+		// the field from the reference's value (ADR-0022's 2026-09-23
+		// amendment): the reference keeps its qualifier, so nothing needs a
+		// three-part identity. pgJDBC's getPrimaryKeys spells `(result.KEYS).x`.
+		{"a relation-qualified container", "SELECT (x.c_row).b FROM nested x", `(x.c_row)."b"`},
+		{"a nested path", "SELECT ((c_rownest).s).x FROM nested", `(c_rownest.s)."x"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, err := Parse(tc.sql)
@@ -74,29 +80,6 @@ func TestParenthesisedFieldPathRefusesWhatItCannotResolve(t *testing.T) {
 	for _, tc := range []struct {
 		name, sql, wantMsg, wantState string
 	}{
-		{
-			// The three-part identity this engine does not carry. Answering it
-			// gave NULL on every arm, so it is refused instead — with the
-			// derived-table workaround named, because this is PostgreSQL's own
-			// escape hatch for a container two relations both publish.
-			//
-			// The WORDING covers both spellings that reach the rule, because
-			// the parser cannot tell them apart and an earlier text called the
-			// nested one "relation-qualified" when there is no relation in it
-			// (round-3 review P3). It also does not assert the qualified half
-			// IS a container: `(d.b).x` over a DECIMAL column has this shape
-			// and is not one.
-			name:      "a relation-qualified container",
-			sql:       "SELECT (x.c_row).b FROM nested x",
-			wantMsg:   "(x.c_row).b: a ROW field path names an UNQUALIFIED container here",
-			wantState: "0A000",
-		},
-		{
-			name:      "a nested path, whose container is itself a path",
-			sql:       "SELECT ((c_row).rw).k FROM nested",
-			wantMsg:   "(c_row.rw).k: a ROW field path names an UNQUALIFIED container here",
-			wantState: "0A000",
-		},
 		{
 			// PostgreSQL 17, measured: `column notation .b applied to type
 			// integer, which is not a composite type`, SQLSTATE 42809. The

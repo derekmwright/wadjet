@@ -28,11 +28,22 @@ func ProjectsASet(n *Node) bool {
 				name = strings.ToLower(inner.Name)
 			}
 		}
-		name = strings.TrimPrefix(strings.TrimPrefix(name, "pg_catalog."), "information_schema.")
-		switch name {
-		case "unnest", "generate_subscripts", "_pg_expandarray":
+		if isSetReturningName(name) {
 			return true
 		}
+	}
+	return false
+}
+
+// isSetReturningName reports whether a call of this name returns a SET when
+// it is a SELECT item — the names physical/set_returning.go expands, under
+// the schema qualifiers PostgreSQL resolves them in.
+func isSetReturningName(name string) bool {
+	name = strings.ToLower(name)
+	name = strings.TrimPrefix(strings.TrimPrefix(name, "pg_catalog."), "information_schema.")
+	switch name {
+	case "unnest", "generate_subscripts", "_pg_expandarray", "generate_series":
+		return true
 	}
 	return false
 }

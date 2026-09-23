@@ -161,6 +161,13 @@ func substitutionUnsafe(n plansql.Node) bool {
 		if volatileFuncs[strings.ToLower(e.Name)] {
 			return true
 		}
+		// A set-returning item is a SET, not a row-wise value: substituting
+		// its definition below the Project that expands it filters the
+		// ARRAY (a field of it reads NULL, a comparison fails to plan)
+		// instead of each element (arc PC round 3).
+		if isSetReturningName(e.Name) {
+			return true
+		}
 		for _, arg := range e.Args {
 			if substitutionUnsafe(arg) {
 				return true
@@ -544,7 +551,16 @@ func nodeScopeNames(n *Node) map[string]bool {
 // splitFilterForProjectPush partitions a Filter's predicates for the
 // Filter-Project swap: `pushed` may cross below the Project (rewritten where
 // they referenced renamed or computed outputs), `kept` must stay above it.
+//
+// A Project that expands a SET (ProjectsASet) keeps every predicate: below
+// it a set-returning output is still the ARRAY, so a predicate over it —
+// however it is spelled, `u`, `r.u` or `(r.k).x` — would filter arrays, not
+// elements (arc PC round 3: `(r.k).x = 3` over `_pg_expandarray` answered
+// zero rows, `r.u = 3` failed to plan).
 func splitFilterForProjectPush(preds []Predicate, project *Node) (pushed, kept []Predicate) {
+	if ProjectsASet(project) {
+		return nil, preds
+	}
 	p := newProjRefs(project)
 	for _, pred := range preds {
 		newAST, ok := rewritePredThroughProject(pred, p)

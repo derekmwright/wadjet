@@ -2676,20 +2676,18 @@ func (p *selectParser) parsePostfix() (Node, error) {
 				return nil, fmt.Errorf("expected field name after '.'")
 			}
 			if inner.Table != "" {
-				// A two-part container may be relation-qualified (x.c_row).b or itself a
-				// nested path ((c_row).rw).k; the message must describe both (ADR-0022).
-				// It is not necessarily composite at all, as (d.b).x over DECIMAL demonstrates.
-				// Both spellings need three-part identity; ColRef and its resolvers carry two.
-				// Refuse 0A000 while that limit holds, never strip a qualifier into silent NULL.
-				// ADR-0022 records the resolver changes required to support it.
-				// See docs/internals/sql-three-part-row-identity-refusal.md for the design.
-				return nil, sqlerr.New("0A000",
-					"(%s.%s).%s: a ROW field path names an UNQUALIFIED container here, "+
-						"so a two-part container reference — a relation-qualified "+
-						"container, or a nested path — is not supported. Write (%s).%s "+
-						"where that names the container; where two relations publish it, "+
-						"rename one through a derived table",
-					inner.Table, inner.Column, fieldTok.val, inner.Column, fieldTok.val)
+				// A two-part container: relation-qualified `(x.c_row).b`, or a
+				// nested path `((c_row).rw).k`. The parser cannot tell the two
+				// apart and does not need to — the two-part reference is an
+				// ORDINARY column reference, resolved as every other one is
+				// (a relation's column, or ADR-0022's row field path), and the
+				// field is read from its VALUE by row_field, exactly as the
+				// computed-container spelling above. The qualifier is never
+				// stripped, so the three-part identity ColRef cannot carry is
+				// not needed (ADR-0022's 2026-09-23 amendment).
+				expr = &FuncCallNode{Name: "row_field", OutputLabel: fieldTok.val,
+					Args: []Node{inner, &Lit{Value: fieldTok.val, Kind: LitString}}}
+				continue
 			}
 			// The container becomes the QUALIFIER of an ordinary ColRef, which
 			// is the node the bare spelling already produces: `(c_row).b` and

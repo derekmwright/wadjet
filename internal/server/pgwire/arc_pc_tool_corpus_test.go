@@ -70,9 +70,6 @@ var pcPins = map[string]string{
 	"psql \\d o #2": "pg_class.relam is 0 and pg_am is empty: a stored table here " +
 		"has no PostgreSQL access method, so \\d prints no 'Access method: heap' line",
 	"psql \\d+ o #2": "as psql \\d o #2 (relam)",
-	"pgjdbc getPrimaryKeys o": "`(result.KEYS).x` is a RELATION-QUALIFIED row field " +
-		"path, which ADR-0022 refuses 0A000 while a column reference carries a " +
-		"two-part identity; _pg_expandarray itself answers (arc PC round 2)",
 	"datagrip databases": "this server is ONE database: PostgreSQL also lists " +
 		"template0, template1 and postgres",
 	"pgjdbc getCatalogs": "as datagrip databases (one database)",

@@ -858,41 +858,59 @@ func TestRowFieldPathSurvivesAJoinFourArms(t *testing.T) {
 			// PostgreSQL's ESCAPE HATCH for the 42702 refusal above is to
 			// QUALIFY the container — `(x.c_row).b`, which answers
 			// `0,0 | 1,11 | 2, | 3, | 4,44` on PostgreSQL 17 over these rows.
-			// This engine parses it and REFUSES it, loudly, because a
-			// three-part identity is not something `plansql.ColRef`
-			// ({Table, Column}) can carry: measured on an attempt, the
-			// reference resolves to NULL on every arm with no join in the
-			// query at all, since each declaration site keys the container by
-			// its BARE name and the qualifier is stripped before the field is
-			// asked for.
-			//
-			// The refusal is the point. A silent NULL where PostgreSQL answers
-			// a value is the failure mode this whole arc exists to remove, and
-			// naming the workaround in the message is what keeps the 42702
-			// above from being a dead end. ADR-0022 carries the mechanism.
-			name: "parenthesised/a-qualified-container-is-refused-not-answered",
+			// The qualified reference is an ordinary column reference and
+			// row_field reads the field from its VALUE (ADR-0022's 2026-09-23
+			// amendment), so the qualifier is never stripped — the earlier
+			// attempt that stripped it answered NULL on every arm, which is
+			// why this was 0A000 until arc PC round 3.
+			name: "parenthesised/a-qualified-container-answers",
 			sql: "SELECT x.id AS xid, (x.c_row).b AS fb FROM " + nested + " x JOIN " + nested +
 				" y ON x.id = y.id WHERE x.id < 5 ORDER BY x.id",
-			cols:   []string{"xid", "fb"},
-			refuse: "(x.c_row).b: a ROW field path names an UNQUALIFIED container here",
+			cols: []string{"xid", "fb"},
+			want: "5 rows: 0|0;1|11;2|;3|;4|44;",
+			// The 512 KiB arm's hash-join build over this self-join does not
+			// fit and refuses LOUDLY at plan time — measured identically
+			// with the bare container `x.c_row` projected and no field path
+			// at all, so it is the build's size, not the path.
+			armErr: map[string]string{spilledArm: "memory budget exceeded"},
 		},
 		{
-			// The same refusal with NO join anywhere, which is what says the
-			// gap is the three-part identity and not the ambiguity: the
-			// container is unambiguous here and the spelling is still refused.
-			name:   "parenthesised/a-qualified-container-is-refused-without-a-join",
-			sql:    "SELECT (x.c_row).b AS fb FROM " + nested + " x",
-			cols:   []string{"fb"},
-			refuse: "(x.c_row).b: a ROW field path names an UNQUALIFIED container here",
+			// The DISCRIMINATING form: the two relations' containers hold
+			// different rows (y is shifted by one id), so a reading that
+			// stripped either qualifier answers the other's field.
+			// PostgreSQL 17: 1,11,0 | 2,,11 | 3,, | 4,44,.
+			name: "parenthesised/each-qualified-container-reads-its-own-relation",
+			sql: "SELECT x.id AS xid, (x.c_row).b AS xb, (y.c_row).b AS yb FROM " + nested +
+				" x JOIN " + nested + " y ON x.id = y.id + 1 WHERE x.id < 5 ORDER BY x.id",
+			cols:   []string{"xid", "xb", "yb"},
+			want:   "4 rows: 1|11|0;2||11;3||;4|44|;",
+			armErr: map[string]string{spilledArm: "memory budget exceeded"},
 		},
 		{
-			// The NESTED spelling reaches the same rule for the same reason —
-			// its container is itself a path — and is refused rather than
-			// silently answering the outer field.
-			name:   "parenthesised/a-nested-path-is-refused-not-answered",
+			// The same spelling with NO join, and the other relation's
+			// container: y's c_row is the same row here, so the two readings
+			// agree only if neither strips its qualifier into the other's.
+			name: "parenthesised/a-qualified-container-answers-without-a-join",
+			sql:  "SELECT x.id AS xid, (x.c_row).b AS fb FROM " + nested + " x WHERE x.id < 5 ORDER BY x.id",
+			cols: []string{"xid", "fb"},
+			want: "5 rows: 0|0;1|11;2|;3|;4|44;",
+		},
+		{
+			// The NESTED spelling: the container is itself a path. PostgreSQL
+			// answers `((c_rownest).s).x` as 0, NULL, NULL, 3, 4 over rows
+			// 0..4 (row 1's s holds a NULL x; row 2's s is NULL).
+			name: "parenthesised/a-nested-path-answers",
+			sql:  "SELECT id AS xid, ((c_rownest).s).x AS fx FROM " + nested + " WHERE id < 5 ORDER BY id",
+			cols: []string{"xid", "fx"},
+			want: "5 rows: 0|0;1|;2|;3|3;4|4;",
+		},
+		{
+			// A path through a field the ROW does not have is PostgreSQL's
+			// 42703, never NULL.
+			name:   "parenthesised/a-nested-path-through-an-unknown-field-is-refused",
 			sql:    "SELECT ((c_row).rw).k AS fk FROM " + nested,
 			cols:   []string{"fk"},
-			refuse: "(c_row.rw).k: a ROW field path names an UNQUALIFIED container here",
+			refuse: "rw",
 		},
 		{
 			// The CONTROL that bounds the refusal: ONE arm publishes the
