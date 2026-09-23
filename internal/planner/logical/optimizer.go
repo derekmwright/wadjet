@@ -3354,6 +3354,15 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 	if len(info.Tables) == 0 {
 		return nil, nil
 	}
+	// A body this rewrite does not REPRODUCE declines to the per-row rerun:
+	// a bound, a grouping, a HAVING, an ungrouped aggregate, a QUALIFY, a set
+	// operation (#1238, exists_body_clauses.go). Before the correlation test
+	// on purpose — an uncorrelated such body is a query-wide constant the
+	// coordinator evaluates as written (§2b), and it too was built here as a
+	// semi join over the bare FROM.
+	if !existsBodyIsReproduced(info) {
+		return nil, nil
+	}
 
 	// Check for correlated references — use column-aware version to
 	// detect unqualified outer refs (e.g., c_custkey from customer), with the
