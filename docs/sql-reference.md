@@ -3852,7 +3852,8 @@ GeoIP functions require [MaxMind GeoLite2](https://dev.maxmind.com/geoip/geolite
 
 ```bash
 # Start with GeoIP databases
-wadjet serve --geoip-city /path/to/GeoLite2-City.mmdb --geoip-asn /path/to/GeoLite2-ASN.mmdb
+wadjet serve --storage-type=file --data-dir=./wadjet-data \
+  --geoip-city /path/to/GeoLite2-City.mmdb --geoip-asn /path/to/GeoLite2-ASN.mmdb
 # (wadjetd serve --mode=... takes the same two flags)
 ```
 
@@ -3923,14 +3924,14 @@ LIMIT 10
 | `HOUR(ts)` | Extract hour | `HOUR(timestamp)` |
 | `MINUTE(ts)` | Extract minute | `MINUTE(timestamp)` |
 | `SECOND(ts)` | Extract second | `SECOND(timestamp)` |
-| `EXTRACT(part FROM ts)` | Extract date part | `EXTRACT(hour FROM timestamp)` |
+| `EXTRACT(part FROM ts)` | Extract date part; `EXTRACT(EPOCH FROM ts)` is seconds with the milliseconds as the fraction (`1718454645.5`) | `EXTRACT(hour FROM timestamp)` |
 | `DATE_TRUNC(part, ts)` | Truncate to precision. `part` is one of `microseconds`, `milliseconds`, `second`, `minute`, `hour`, `day`, `week`, `month`, `quarter`, `year`, `decade`, `century`, `millennium` (case-insensitive); anything else is SQLSTATE 22023 | `DATE_TRUNC('hour', timestamp)` |
 | `TIME_BUCKET(stride, ts)` / `TIME_BUCKET(stride, ts, origin)` | Floor `ts` to the largest multiple of `stride` measured from `origin` (default `1970-01-01`). PostgreSQL's `date_bin`, digit for digit. Returns TIMESTAMP | `TIME_BUCKET(INTERVAL '15' MINUTE, ts)` |
 | `DATE_DIFF(a, b)` | Whole days between two instants (a - b), truncated toward the past | `DATE_DIFF(end_ts, start_ts)` |
 | `DATE_ADD(ts, n)` / `DATE_ADD(ts, INTERVAL)` | Add n **days**, or an INTERVAL in its own unit, preserving time-of-day | `DATE_ADD(ts, 7)` |
 | `TO_DATE(s)` | Parse string to date | `TO_DATE('2026-03-15')` |
-| `FROM_UNIXTIME(epoch)` | Convert unix timestamp to datetime string | `FROM_UNIXTIME(1700000000)` |
-| `TO_UNIXTIME(ts)` | Convert datetime to unix epoch | `TO_UNIXTIME(timestamp)` |
+| `FROM_UNIXTIME(epoch)` | Convert unix epoch seconds to a TIMESTAMP; a fraction keeps its milliseconds | `FROM_UNIXTIME(1718454645.5)` → `2024-06-15 12:30:45.5` |
+| `TO_UNIXTIME(ts)` | Convert a timestamp to unix epoch seconds, the milliseconds as the fraction | `TO_UNIXTIME(timestamp)` |
 | `DATE_FORMAT(ts, fmt)` | Format timestamp with SQL format specifiers | `DATE_FORMAT(ts, '%Y-%m-%d')` |
 | `DATE_PARSE(s, fmt)` | Parse string to timestamp using format | `DATE_PARSE('2026-03-15', '%Y-%m-%d')` |
 | `QUARTER(ts)` | Extract quarter (1-4) | `QUARTER(timestamp)` |

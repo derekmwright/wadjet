@@ -37,7 +37,9 @@ in **worker** mode.
 
 For development without a cluster at all, `wadjet serve` (the other binary)
 runs the engine in ONE process behind pgwire only: no NATS task queues, no
-workers, no HTTP or gRPC listener. Same SQL, same answers
+workers, no HTTP or gRPC listener. Its `--storage-type` defaults to `s3`, so
+without an S3-compatible endpoint it is
+`wadjet serve --storage-type=file --data-dir=./wadjet-data --pg-addr=:5432`. Same SQL, same answers
 (`TestTwoPathInvariance`); see [LICENSING.md](../LICENSING.md) for which
 binary is which.
 
