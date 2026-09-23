@@ -43,6 +43,29 @@ func OutputColumnName(col SelectColumn) string {
 	return col.Expr
 }
 
+// strongOutputName is the name an expression publishes when PostgreSQL's
+// naming gives it full strength — a column reference, a function call, a
+// subquery, an ARRAY constructor, and a cast of any of those — and false for
+// everything that is named only by default (a literal, an operator, a cast of
+// a literal, a CASE).
+func strongOutputName(n Node) (string, bool) {
+	switch e := n.(type) {
+	case *ParenNode:
+		return strongOutputName(e.Inner)
+	case *ColRef:
+		return e.Column, true
+	case *FuncCallNode:
+		name := exprOutputName(e)
+		return name, name != "" && name != UnnamedOutputColumn
+	case *CastNode:
+		return strongOutputName(e.Inner)
+	case *SubqueryNode, *ArrayLitNode, *ExistsNode:
+		name := exprOutputName(n)
+		return name, name != "" && name != UnnamedOutputColumn
+	}
+	return "", false
+}
+
 // exprOutputName is OutputColumnName's recursion over the AST.
 func exprOutputName(n Node) string {
 	switch e := n.(type) {
@@ -66,6 +89,16 @@ func exprOutputName(n Node) string {
 		}
 		return castTypeOutputName(e.TypeName)
 	case *CaseNode:
+		// PostgreSQL names a CASE after its ELSE result when that result has a
+		// name of its own — a column, a function, a cast of either — and
+		// `case` otherwise (FigureColnameInternal's strength rule, measured
+		// on 17.11: psql's policy query labels its CASE … ELSE
+		// array_to_string(…) END column `array_to_string`).
+		if e.Else != nil {
+			if name, strong := strongOutputName(e.Else); strong {
+				return name
+			}
+		}
 		return "case"
 	case *WindowFuncNode:
 		if e.Func != nil {
