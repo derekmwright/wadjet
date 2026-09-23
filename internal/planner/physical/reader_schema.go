@@ -6,8 +6,8 @@ package physical
 
 import (
 	"context"
+	"errors"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -49,6 +49,7 @@ type readerSchemaProbe struct {
 type readerSchemaResult struct {
 	cols []parquet.Column
 	ok   bool
+	err  error
 }
 
 type readerSchemaProbeKey struct{}
@@ -87,45 +88,48 @@ func readerSchemaProbeFromContext(ctx context.Context) *readerSchemaProbe {
 // loudly, by withPlanTimeSchema.
 //
 // ok=false means "not knowable here", the caller's signal to keep the open
-// scope and the first-batch refusal.
+// scope and the first-batch refusal. err is a REFUSAL: the input does not
+// exist, may not be read, or is a directory (58P01 / 42501 / 42809,
+// readerInputReachable) — known at plan time, so the statement, and EXPLAIN
+// over it, is refused here as a statement over a missing relation is (#1245).
 func readerPlanTimeSchema(ctx context.Context, funcName string, args []string,
 	namedArgs map[string]string,
-) ([]parquet.Column, bool) {
+) ([]parquet.Column, bool, error) {
 	if !readerSchemaEnabled() {
-		return nil, false
+		return nil, false, nil
 	}
 	name := strings.ToLower(strings.TrimSpace(funcName))
 	if !readerSchemaFuncs[name] || len(args) == 0 {
-		return nil, false
+		return nil, false, nil
 	}
 	probe := readerSchemaProbeFromContext(ctx)
 	if probe == nil {
 		// No door authorized this statement's capability, so nothing here may
 		// open anything. This is the fail-CLOSED direction: the relation
 		// keeps the behaviour it had before a plan-time schema existed.
-		return nil, false
+		return nil, false, nil
 	}
 	// THE CAPABILITY, before the file. A denied identity gets its 42501 from
 	// the enforcement pass; what matters here is that the decision is asked
 	// before the input is opened, so the refused identity's file is never opened.
 	if guard := logical.TableFuncGuardFromContext(ctx); guard != nil {
 		if err := guard(funcName, args, namedArgs); err != nil {
-			return nil, false
+			return nil, false, nil
 		}
 	}
 	key := readerSchemaKey(name, args, namedArgs)
 	probe.mu.Lock()
 	if r, ok := probe.cache[key]; ok {
 		probe.mu.Unlock()
-		return r.cols, r.ok
+		return r.cols, r.ok, r.err
 	}
 	probe.mu.Unlock()
 
-	cols, ok := readReaderSchema(name, args, namedArgs)
+	cols, ok, err := readReaderSchema(name, args, namedArgs)
 	probe.mu.Lock()
-	probe.cache[key] = readerSchemaResult{cols: cols, ok: ok}
+	probe.cache[key] = readerSchemaResult{cols: cols, ok: ok, err: err}
 	probe.mu.Unlock()
-	return cols, ok
+	return cols, ok, err
 }
 
 // readerSchemaFuncs are the table functions whose columns are a FILE's and
@@ -189,20 +193,22 @@ var ReaderSchemaReads atomic.Int64
 
 // readReaderSchema is the read itself, with no cache and no authorization: a
 // PRIVATE body whose one caller has already asked both questions.
-func readReaderSchema(name string, args []string, namedArgs map[string]string) (cols []parquet.Column, ok bool) {
+func readReaderSchema(name string, args []string, namedArgs map[string]string) (cols []parquet.Column, ok bool, refusal error) {
 	// A reader's input is whatever the caller wrote. A malformed file, a
 	// truncated footer, a decoder that raises rather than returns — none of
 	// them is a reason to fail the STATEMENT here, because the statement's
 	// own execution will reach the same input and report it with the source's
-	// own error. Declining leaves that path exactly as it was.
+	// own error. Declining leaves that path exactly as it was. An input that
+	// cannot be OPENED is the exception: that is known without reading it,
+	// and it is the statement's answer (unopenable, below).
 	defer func() {
 		if r := recover(); r != nil {
-			cols, ok = nil, false
+			cols, ok, refusal = nil, false, nil
 		}
 	}()
 	path := expandHome(args[0])
 	if isURL(path) {
-		return nil, false
+		return nil, false, nil
 	}
 	// THE COUNTER GOES UP HERE, before anything below touches the path.
 	//
@@ -226,28 +232,37 @@ func readReaderSchema(name string, args []string, namedArgs map[string]string) (
 	//
 	// This runs AFTER the capability decision in readerPlanTimeSchema, so it
 	// names no path on behalf of an identity that has not been authorized.
+	//
+	// An input that does not exist, may not be read or is a directory is
+	// refused HERE, with the SQLSTATE COPY raises for it — before the
+	// rereadable check, which would otherwise decline it into a first-batch
+	// error, leaving EXPLAIN to print a plan over a relation that is not
+	// there (#1245).
+	if err := readerInputReachable(path); err != nil {
+		return nil, false, err
+	}
 	if !readerInputIsRereadable(path) {
-		return nil, false
+		return nil, false, nil
 	}
 	if name == "read_parquet" {
 		return parquetFooterSchema(path)
 	}
 	src, err := buildTableFunctionSource(name, args, namedArgs)
 	if err != nil {
-		return nil, false
+		return nil, false, nil
 	}
 	defer src.Close()
 	if err := src.Init(context.Background()); err != nil {
-		return nil, false
+		return nil, false, unopenable(err)
 	}
 	b, err := src.Next(context.Background())
 	if err != nil {
-		return nil, false
+		return nil, false, nil
 	}
 	if b != nil {
 		out := make([]parquet.Column, len(b.Schema))
 		copy(out, b.Schema)
-		return out, true
+		return out, true, nil
 	}
 	// The input produced NO batch. That is not the same as publishing no
 	// columns: a CSV whose header row is its only row declares its columns
@@ -259,7 +274,7 @@ func readReaderSchema(name string, args []string, namedArgs map[string]string) (
 			if cols := r.reader.Schema(); len(cols) > 0 {
 				out := make([]parquet.Column, len(cols))
 				copy(out, cols)
-				return out, true
+				return out, true, nil
 			}
 		}
 	case *jsonTableFuncSource:
@@ -267,7 +282,7 @@ func readReaderSchema(name string, args []string, namedArgs map[string]string) (
 			if cols := r.reader.Schema(); len(cols) > 0 {
 				out := make([]parquet.Column, len(cols))
 				copy(out, cols)
-				return out, true
+				return out, true, nil
 			}
 		}
 	}
@@ -275,7 +290,22 @@ func readReaderSchema(name string, args []string, namedArgs map[string]string) (
 	// knowledge, not a decline — the relation publishes nothing — and it is
 	// reported as a zero-column schema so the caller can refuse it by name
 	// rather than as the door's "the result has no columns at all" (#1230).
-	return []parquet.Column{}, true
+	return []parquet.Column{}, true, nil
+}
+
+// unopenable is err when it says the input could not be OPENED (58P01,
+// 42501, 42809 — openInputFile), and nil for anything else, which the
+// execution reaches and reports itself.
+func unopenable(err error) error {
+	var se *sqlerr.Error
+	if !errors.As(err, &se) {
+		return nil
+	}
+	switch se.Code {
+	case "58P01", "42501", "42809":
+		return se // the caller names the function; the source's own prefix is dropped
+	}
+	return nil
 }
 
 // readerInputIsRereadable reports whether opening this input twice reads the
@@ -287,14 +317,9 @@ func readReaderSchema(name string, args []string, namedArgs map[string]string) (
 // be stat'd declines too — an input this cannot describe is one it must not
 // consume.
 func readerInputIsRereadable(path string) bool {
-	paths := []string{path}
-	if isGlob(path) {
-		matches, err := filepath.Glob(path)
-		if err != nil || len(matches) == 0 {
-			return false
-		}
-		sort.Strings(matches)
-		paths = matches
+	paths, err := readerFiles(path)
+	if err != nil {
+		return false
 	}
 	for _, p := range paths {
 		fi, err := os.Stat(p)
@@ -309,32 +334,24 @@ func readerInputIsRereadable(path string) bool {
 // its data. A GLOB takes the FIRST match in sorted order, which is the
 // declaration the execution holds every later file to
 // (parquetTableFuncSource), so the two agree.
-func parquetFooterSchema(path string) ([]parquet.Column, bool) {
-	if isGlob(path) {
-		matches, err := filepath.Glob(path)
-		if err != nil || len(matches) == 0 {
-			return nil, false
-		}
-		sort.Strings(matches)
-		path = matches[0]
-	}
-	f, err := os.Open(path)
+func parquetFooterSchema(path string) ([]parquet.Column, bool, error) {
+	files, err := readerFiles(path)
 	if err != nil {
-		return nil, false
+		return nil, false, err
+	}
+	f, fi, err := openInputFile(files[0])
+	if err != nil {
+		return nil, false, unopenable(err)
 	}
 	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, false
-	}
 	r, err := parquet.NewReader(f, fi.Size())
 	if err != nil {
-		return nil, false
+		return nil, false, nil
 	}
 	cols := r.Schema().Columns
 	out := make([]parquet.Column, len(cols))
 	copy(out, cols)
-	return out, true
+	return out, true, nil
 }
 
 // withPlanTimeSchema is the BACKSTOP under the plan-time schema: the batch

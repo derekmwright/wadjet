@@ -140,7 +140,11 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 			// that holds the batches to it. The same cached answer the
 			// binder and the annotation pass bound against, so nothing is
 			// read twice and nothing can disagree with them here.
-			if cols, known := readerPlanTimeSchema(ctx, node.FuncName, node.FuncArgs, node.FuncNamedArgs); known {
+			cols, known, err := readerPlanTimeSchema(ctx, node.FuncName, node.FuncArgs, node.FuncNamedArgs)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("%s: %w", node.FuncName, err)
+			}
+			if known {
 				relName := node.TableAlias
 				if relName == "" {
 					relName = node.FuncName

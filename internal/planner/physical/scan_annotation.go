@@ -52,7 +52,9 @@ func (p *Planner) annotateScanColumns(ctx context.Context, node *logical.Node) {
 			// authorization (reader_schema.go). A context without one, or an
 			// input this resolver does not read, leaves the relation exactly
 			// as it was: no annotation, and the first-batch refusal.
-			cols, known = readerPlanTimeSchema(ctx, node.FuncName, node.FuncArgs, node.FuncNamedArgs)
+			// An unopenable input's refusal is the binder's and the
+			// pipeline builder's to raise; here it is only "not known".
+			cols, known, _ = readerPlanTimeSchema(ctx, node.FuncName, node.FuncArgs, node.FuncNamedArgs)
 			// A reader with no columns at all is an EMPTY input, and it is
 			// refused by name where the pipeline is built. Annotating a
 			// zero-column relation here would put an empty list where "not

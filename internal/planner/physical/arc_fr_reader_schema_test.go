@@ -44,7 +44,7 @@ func TestArcFRAReaderSchemaIsReadOnlyUnderAnAuthorizedContext(t *testing.T) {
 
 	t.Run("a_bare_context_reads_nothing", func(t *testing.T) {
 		before := ReaderSchemaReads.Load()
-		if cols, ok := readerPlanTimeSchema(context.Background(), "read_json", args, nil); ok {
+		if cols, ok, _ := readerPlanTimeSchema(context.Background(), "read_json", args, nil); ok {
 			t.Errorf("a context with no authorization record published %v", cols)
 		}
 		if after := ReaderSchemaReads.Load(); after != before {
@@ -56,7 +56,7 @@ func TestArcFRAReaderSchemaIsReadOnlyUnderAnAuthorizedContext(t *testing.T) {
 	t.Run("an_authorized_context_reads_once_per_call", func(t *testing.T) {
 		ctx := ContextWithReaderSchemaProbe(context.Background())
 		before := ReaderSchemaReads.Load()
-		cols, ok := readerPlanTimeSchema(ctx, "read_json", args, nil)
+		cols, ok, _ := readerPlanTimeSchema(ctx, "read_json", args, nil)
 		if !ok || len(cols) != 2 || cols[0].Name != "a" || cols[1].Name != "b" {
 			t.Fatalf("published %v (ok=%v), want columns a and b", cols, ok)
 		}
@@ -68,7 +68,7 @@ func TestArcFRAReaderSchemaIsReadOnlyUnderAnAuthorizedContext(t *testing.T) {
 		}
 		// The SAME call again is the cached answer: a reader named twice in
 		// one statement is read once.
-		if _, ok := readerPlanTimeSchema(ctx, "read_json", args, nil); !ok {
+		if _, ok, _ := readerPlanTimeSchema(ctx, "read_json", args, nil); !ok {
 			t.Fatal("the cached answer declined")
 		}
 		if got := ReaderSchemaReads.Load() - before; got != 1 {
@@ -83,7 +83,7 @@ func TestArcFRAReaderSchemaIsReadOnlyUnderAnAuthorizedContext(t *testing.T) {
 				return sqlerr.New("42501", "permission denied for table function")
 			})
 		before := ReaderSchemaReads.Load()
-		if cols, ok := readerPlanTimeSchema(ctx, "read_json", args, nil); ok {
+		if cols, ok, _ := readerPlanTimeSchema(ctx, "read_json", args, nil); ok {
 			t.Errorf("a refused identity's file was read: %v", cols)
 		}
 		if after := ReaderSchemaReads.Load(); after != before {
@@ -96,7 +96,7 @@ func TestArcFRAReaderSchemaIsReadOnlyUnderAnAuthorizedContext(t *testing.T) {
 		t.Setenv("WADJET_TEST_NO_READER_SCHEMA", "1")
 		ctx := ContextWithReaderSchemaProbe(context.Background())
 		before := ReaderSchemaReads.Load()
-		if cols, ok := readerPlanTimeSchema(ctx, "read_json", args, nil); ok {
+		if cols, ok, _ := readerPlanTimeSchema(ctx, "read_json", args, nil); ok {
 			t.Errorf("the kill switch did not force the untyped path: %v", cols)
 		}
 		if after := ReaderSchemaReads.Load(); after != before {
@@ -122,7 +122,7 @@ func TestArcFRAReaderSchemaIsReadOnlyUnderAnAuthorizedContext(t *testing.T) {
 		}
 		ctx := ContextWithReaderSchemaProbe(context.Background())
 		before := ReaderSchemaReads.Load()
-		if cols, ok := readerPlanTimeSchema(ctx, "read_csv", []string{fifo}, nil); ok {
+		if cols, ok, _ := readerPlanTimeSchema(ctx, "read_csv", []string{fifo}, nil); ok {
 			t.Errorf("a FIFO was sampled at plan time: %v", cols)
 		}
 		if got := ReaderSchemaReads.Load() - before; got != 1 {
@@ -138,7 +138,7 @@ func TestArcFRAReaderSchemaIsReadOnlyUnderAnAuthorizedContext(t *testing.T) {
 			t.Skipf("this platform has no FIFO: %v", err)
 		}
 		before = ReaderSchemaReads.Load()
-		if cols, ok := readerPlanTimeSchema(ctx, "read_csv",
+		if cols, ok, _ := readerPlanTimeSchema(ctx, "read_csv",
 			[]string{filepath.Join(dir, "g*.csv")}, nil); ok {
 			t.Errorf("a glob holding a FIFO was sampled at plan time: %v", cols)
 		}
@@ -163,7 +163,7 @@ func TestArcFRAReaderSchemaIsReadOnlyUnderAnAuthorizedContext(t *testing.T) {
 				return sqlerr.New("42501", "permission denied for table function")
 			})
 		before := ReaderSchemaReads.Load()
-		if cols, ok := readerPlanTimeSchema(ctx, "read_csv", []string{fifo}, nil); ok {
+		if cols, ok, _ := readerPlanTimeSchema(ctx, "read_csv", []string{fifo}, nil); ok {
 			t.Errorf("a refused identity's FIFO was sampled: %v", cols)
 		}
 		if after := ReaderSchemaReads.Load(); after != before {
@@ -175,7 +175,7 @@ func TestArcFRAReaderSchemaIsReadOnlyUnderAnAuthorizedContext(t *testing.T) {
 	t.Run("an_http_source_reads_nothing_at_plan_time", func(t *testing.T) {
 		ctx := ContextWithReaderSchemaProbe(context.Background())
 		before := ReaderSchemaReads.Load()
-		if cols, ok := readerPlanTimeSchema(ctx, "read_json",
+		if cols, ok, _ := readerPlanTimeSchema(ctx, "read_json",
 			[]string{"http://127.0.0.1:1/x.json"}, nil); ok {
 			t.Errorf("an HTTP source was fetched at plan time: %v", cols)
 		}
@@ -187,7 +187,7 @@ func TestArcFRAReaderSchemaIsReadOnlyUnderAnAuthorizedContext(t *testing.T) {
 	t.Run("a_database_connector_reads_nothing_at_plan_time", func(t *testing.T) {
 		ctx := ContextWithReaderSchemaProbe(context.Background())
 		before := ReaderSchemaReads.Load()
-		if _, ok := readerPlanTimeSchema(ctx, "postgres_scan",
+		if _, ok, _ := readerPlanTimeSchema(ctx, "postgres_scan",
 			[]string{"postgres://u:p@127.0.0.1:1/d", "t"}, nil); ok {
 			t.Error("a database connector was dialled at plan time")
 		}

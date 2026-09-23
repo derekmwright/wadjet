@@ -10,7 +10,6 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -21,7 +20,6 @@ import (
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	csvreader "github.com/derekmwright/wadjet/internal/storage/csv"
 	"github.com/derekmwright/wadjet/internal/storage/dbscan"
-	"github.com/derekmwright/wadjet/internal/storage/fileinput"
 	jsonreader "github.com/derekmwright/wadjet/internal/storage/json"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -227,7 +225,7 @@ func (s *jsonTableFuncSource) Init(_ context.Context) error {
 	}
 	r, err := jsonreader.NewFilesReader(inputs)
 	if err != nil {
-		return fmt.Errorf("read_json: parsing: %w", err)
+		return fmt.Errorf("read_json: %w", err)
 	}
 	s.reader = r
 	return nil
@@ -289,18 +287,11 @@ func (s *parquetTableFuncSource) Init(_ context.Context) error {
 		s.mem = b
 		return nil
 	}
-	s.files = []string{s.path}
-	if isGlob(s.path) {
-		matches, err := filepath.Glob(s.path)
-		if err != nil {
-			return fmt.Errorf("read_parquet: glob %s: %w", s.path, err)
-		}
-		if len(matches) == 0 {
-			return fmt.Errorf("read_parquet: glob %s: no matching files", s.path)
-		}
-		sort.Strings(matches)
-		s.files = matches
+	files, err := readerFiles(s.path)
+	if err != nil {
+		return fmt.Errorf("read_parquet: %w", err)
 	}
+	s.files = files
 	// The relation's columns: the first file's footer. Opening it here also
 	// reports an unreadable first file at Init, as a single file always was.
 	return s.withFile(s.files[0], func(r *parquet.Reader) error {
@@ -312,15 +303,11 @@ func (s *parquetTableFuncSource) Init(_ context.Context) error {
 // withFile opens one input file as a Parquet reader over io.ReaderAt, runs
 // fn, and closes it.
 func (s *parquetTableFuncSource) withFile(path string, fn func(*parquet.Reader) error) error {
-	f, err := os.Open(path)
+	f, fi, err := openInputFile(path)
 	if err != nil {
 		return fmt.Errorf("read_parquet: %w", err)
 	}
 	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return fmt.Errorf("read_parquet: stat: %w", err)
-	}
 	r, err := parquet.NewReader(f, fi.Size())
 	if err != nil {
 		if len(s.files) > 1 {
@@ -473,32 +460,6 @@ func (s *csvTableFuncSource) Close() error {
 		return s.reader.Close()
 	}
 	return nil
-}
-
-// readerInputs is a reader's input as the SEQUENCE of files it names: a URL
-// or a single path is one input the caller names in its errors; a glob is
-// every match in name order, each named, each opened only when the reader
-// reaches it. A reader decodes each file on its own (fileinput).
-func readerInputs(path string) ([]fileinput.Input, error) {
-	if isURL(path) {
-		return []fileinput.Input{{Open: func() (io.ReadCloser, error) { return openHTTP(path) }}}, nil
-	}
-	if !isGlob(path) {
-		return []fileinput.Input{{Open: func() (io.ReadCloser, error) { return os.Open(path) }}}, nil
-	}
-	matches, err := filepath.Glob(path)
-	if err != nil {
-		return nil, fmt.Errorf("glob %s: %w", path, err)
-	}
-	if len(matches) == 0 {
-		return nil, fmt.Errorf("glob %s: no matching files", path)
-	}
-	sort.Strings(matches)
-	inputs := make([]fileinput.Input, len(matches))
-	for i, m := range matches {
-		inputs[i] = fileinput.Input{Name: m, Open: func() (io.ReadCloser, error) { return os.Open(m) }}
-	}
-	return inputs, nil
 }
 
 // openHTTP returns the response body as a stream — no io.ReadAll, so a

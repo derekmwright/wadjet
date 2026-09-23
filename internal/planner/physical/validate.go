@@ -1214,7 +1214,13 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 			// list the reader is an ordinary relation: an unknown column is
 			// 42703 at plan time through any path, including through a join
 			// arm, a CTE and a derived table (#1231, #1230).
-			cols, known = readerPlanTimeSchema(ctx, tr.Name, tr.FuncArgs, tr.FuncNamedArgs)
+			// An input that cannot be opened is refused HERE, as a relation
+			// that does not exist is (58P01 / 42501 / 42809, #1245).
+			var err error
+			cols, known, err = readerPlanTimeSchema(ctx, tr.Name, tr.FuncArgs, tr.FuncNamedArgs)
+			if err != nil {
+				return fmt.Errorf("%s: %w", tr.Name, err)
+			}
 			// Zero columns is an EMPTY input. It is refused by name where the
 			// pipeline is built, and closing a scope over nothing here would
 			// make every reference to it 42703 with the wrong reason.
@@ -2251,7 +2257,7 @@ func (b *binder) tableFuncColumns(ctx context.Context) plansql.FromItemColumns {
 		}
 		cols, known := tableFuncDeclaredSchema(t.Name, t.FuncArgs, t.WithOrdinality)
 		if !known {
-			cols, known = readerPlanTimeSchema(ctx, t.Name, t.FuncArgs, t.FuncNamedArgs)
+			cols, known, _ = readerPlanTimeSchema(ctx, t.Name, t.FuncArgs, t.FuncNamedArgs)
 			known = known && len(cols) > 0
 		}
 		if !known {
