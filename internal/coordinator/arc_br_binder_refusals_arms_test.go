@@ -4,6 +4,7 @@ package coordinator
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +44,9 @@ type brArmCell struct {
 	same bool
 	// answers marks a control that must answer on every arm, values aside.
 	answers bool
+	// ordered compares want against the rows IN ORDER, each row's cells
+	// joined by ",", rows by " | ".
+	ordered bool
 }
 
 func brArmCells() []brArmCell {
@@ -80,9 +84,34 @@ func brArmCells() []brArmCell {
 		{name: "1236/qualifierNamesNothing",
 			sql:   "SELECT a.id FROM lat_ord a UNION ALL SELECT b.id FROM lat_item b ORDER BY zz.id",
 			state: "42P01", msg: `missing FROM-clause entry for table "zz"`},
-		{name: "1236/qualifierNamesAnArm",
-			sql:   "SELECT a.id FROM lat_ord a UNION ALL SELECT b.id FROM lat_item b ORDER BY a.id",
-			state: "42P01", msg: `missing FROM-clause entry for table "a"`},
+		// Kept superset (ADR-0012 §5): the FIRST arm's selected `a.id`, in
+		// ORDER — base answered this, correctly, on all five arms.
+		{name: "1236ok/qualifierNamesFirstArmsColumnDesc",
+			sql:     "SELECT a.id FROM lat_ord a UNION ALL SELECT b.id FROM lat_item b ORDER BY a.id DESC",
+			want:    "4 | 3 | 3 | 2 | 2 | 1 | 1",
+			ordered: true},
+		{name: "1236/qualifierNamesSecondArm",
+			sql:   "SELECT a.id FROM lat_ord a UNION ALL SELECT b.id FROM lat_item b ORDER BY b.id",
+			state: "42P01", msg: `missing FROM-clause entry for table "b"`},
+		{name: "1236ok/delimitedAliasOrdersByItsExactName",
+			sql:     `SELECT a.id AS "V" FROM lat_ord a UNION ALL SELECT b.id FROM lat_item b ORDER BY "V" DESC`,
+			want:    "4 | 3 | 3 | 2 | 2 | 1 | 1",
+			ordered: true},
+		{name: "1236/delimitedNameIsExact",
+			sql:   `SELECT a.id FROM lat_ord a UNION ALL SELECT b.id FROM lat_item b ORDER BY "ID"`,
+			state: "42703", msg: `column "ID" does not exist`},
+		{name: "1236/transformOperatorFirst",
+			sql:   "SELECT a.id FROM lat_ord a UNION ALL SELECT b.id FROM lat_item b ORDER BY id = true",
+			state: "42883", msg: "operator does not exist: bigint = boolean"},
+		{name: "1236/transformLiteralFirst",
+			sql:   "SELECT a.id FROM lat_ord a UNION ALL SELECT b.id FROM lat_item b ORDER BY id = 'x'",
+			state: "22P02", msg: `invalid input syntax for type bigint: "x"`},
+		{name: "1236/transformCastFirst",
+			sql:   "SELECT a.id FROM lat_ord a UNION ALL SELECT b.id FROM lat_item b ORDER BY CAST(id AS boolean)",
+			state: "42846", msg: "cannot cast type bigint to boolean"},
+		{name: "1236/transformSignatureFirst",
+			sql:   "SELECT a.id FROM lat_ord a UNION ALL SELECT b.id FROM lat_item b ORDER BY length(id)",
+			state: "42883", msg: "function length(bigint) does not exist"},
 		{name: "1236/qualifierNamesATable",
 			sql:   "SELECT a.id FROM lat_ord a UNION ALL SELECT b.id FROM lat_item b ORDER BY lat_ord.id",
 			state: "42P01", msg: `missing FROM-clause entry for table "lat_ord"`},
@@ -443,7 +472,7 @@ func brComparisonCells() []brArmCell {
 // error — keeping the error itself, not its text, so the SQLSTATE is read.
 type brArm struct {
 	name string
-	run  func(string) (string, error)
+	run  func(string) (*oracle.Result, error)
 }
 
 func brArms(t *testing.T, ctx context.Context) []brArm {
@@ -459,23 +488,11 @@ func brArms(t *testing.T, ctx context.Context) []brArm {
 	infraM := tmdInfra(t, ctx)
 	tmdWriteTables(t, ctx, infraM, nil)
 	coordM := tmdCoordinatorWithWorkers(t, ctx, infraM, func(w *worker.Config) { w.MorselWorkers = 4 })
-	runSingle := func(db *wadjet.DB) func(string) (string, error) {
-		return func(sql string) (string, error) {
-			res, err := tmdRunSingle(ctx, db, sql)
-			if err != nil {
-				return "", err
-			}
-			return brRender(res), nil
-		}
+	runSingle := func(db *wadjet.DB) func(string) (*oracle.Result, error) {
+		return func(sql string) (*oracle.Result, error) { return tmdRunSingle(ctx, db, sql) }
 	}
-	runDAG := func(c *Coordinator) func(string) (string, error) {
-		return func(sql string) (string, error) {
-			res, err := tmdRunDAG(ctx, c, sql)
-			if err != nil {
-				return "", err
-			}
-			return brRender(res), nil
-		}
+	runDAG := func(c *Coordinator) func(string) (*oracle.Result, error) {
+		return func(sql string) (*oracle.Result, error) { return tmdRunDAG(ctx, c, sql) }
 	}
 	return []brArm{
 		{"single", runSingle(single)},
@@ -489,7 +506,22 @@ func brArms(t *testing.T, ctx context.Context) []brArm {
 // brRender renders a result positionally: RowValues where the harness has
 // them (a duplicate output name), the name-keyed rows in column order
 // otherwise — the single path fills RowValues only for the first case.
-func brRender(res *oracle.Result) string {
+func brRender(res *oracle.Result) string { return r1RenderRows(brCells(res)) }
+
+// brRenderOrdered keeps the rows in the order the arm returned them.
+func brRenderOrdered(res *oracle.Result) string {
+	var rows []string
+	for _, r := range brCells(res) {
+		parts := make([]string, len(r))
+		for i, v := range r {
+			parts[i] = fmt.Sprint(v)
+		}
+		rows = append(rows, strings.Join(parts, ","))
+	}
+	return strings.Join(rows, " | ")
+}
+
+func brCells(res *oracle.Result) [][]any {
 	cells := res.RowValues
 	if len(cells) == 0 {
 		for _, r := range res.Rows {
@@ -500,7 +532,7 @@ func brRender(res *oracle.Result) string {
 			cells = append(cells, row)
 		}
 	}
-	return r1RenderRows(cells)
+	return cells
 }
 
 func TestArcBRWherePostgresRefusesEveryArmRefuses(t *testing.T) {
@@ -517,7 +549,11 @@ func TestArcBRWherePostgresRefusesEveryArmRefuses(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			first := ""
 			for i, arm := range arms {
-				got, err := arm.run(tc.sql)
+				res, err := arm.run(tc.sql)
+				got := ""
+				if err == nil {
+					got = brRender(res)
+				}
 				if tc.state != "" {
 					if err == nil {
 						t.Errorf("%s\n  arm  %s\n  got  %s\n  every arm must refuse: PostgreSQL 17.11 raises %s %s",
@@ -544,6 +580,9 @@ func TestArcBRWherePostgresRefusesEveryArmRefuses(t *testing.T) {
 						t.Errorf("%s\n  arm  %s\n  got  %s\n  single answered %s", tc.sql, arm.name, got, first)
 					}
 					continue
+				}
+				if tc.ordered {
+					got = brRenderOrdered(res)
 				}
 				if got != tc.want {
 					t.Errorf("%s\n  arm  %s\n  got  %s\n  want %s (PostgreSQL 17.11)", tc.sql, arm.name, got, tc.want)
