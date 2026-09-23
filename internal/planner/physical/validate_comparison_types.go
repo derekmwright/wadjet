@@ -382,9 +382,14 @@ func (c *comparisonTyper) walk(node plansql.Node) error {
 			// array's ELEMENTS — PostgreSQL's scalar-op-ANY(array) form, which
 			// every catalog query writes (`oid = ANY(pol.polroles)`,
 			// `a.attnum = ANY(ix.indkey)`). Pairing x with the array itself
-			// refused it 42883; the element pair is not checked here, and a
-			// mismatched element is compared at run time as any value pair is.
+			// refused it 42883; x is paired with the ELEMENT instead.
 			if _, isSub := plansql.Unparen(v).(*plansql.SubqueryNode); !isSub {
+				if te, ok := c.arrayElement(v); ok {
+					if err := c.elementPair(n.Left, te, pgComparisonOp(n.Op)); err != nil {
+						return err
+					}
+					continue
+				}
 				if t, ok := c.operand(v); ok && t == parquet.TypeArray {
 					continue
 				}
@@ -413,6 +418,56 @@ func (c *comparisonTyper) walk(node plansql.Node) error {
 		}
 	}
 	return nil
+}
+
+// elementPair is `x op ANY/ALL(arr)` over a TYPED array: x against the
+// array's declared ELEMENT, by PostgreSQL's rule and nothing wider — two
+// classes with no operator between them are 42883, a typed literal
+// included (`1 = ANY(text[])`, `'x'::text = ANY(bigint[])`). The text
+// conversions textConversionAnswers keeps and the unquoted-literal superset
+// were measured for DIRECT comparisons, not for an element read out of an
+// array at run time, so neither extends to this form (arc PC round 3: the
+// element pair was not checked at all, and a stored bigint[] against text
+// answered false where the base engine and PostgreSQL raise 42883). An
+// array whose element this layer cannot type — an ARRAY[…] of constants
+// included, as before — is never refused.
+func (c *comparisonTyper) elementPair(left plansql.Node, te parquet.TypeID, op string) error {
+	tl, ok := c.operand(left)
+	if !ok {
+		return nil
+	}
+	cl, ce := comparisonClass(tl), comparisonClass(te)
+	if cl == cmpUnknown || ce == cmpUnknown || cl == ce {
+		return nil
+	}
+	return sqlerr.New("42883", "operator does not exist: %s %s %s", cmpTypeName(tl), op, cmpTypeName(te))
+}
+
+// arrayElement is a typed array operand's declared ELEMENT: a column's
+// (qualified or bare), or a CAST's `T[]` target (`array(T)` as parsed).
+func (c *comparisonTyper) arrayElement(arr plansql.Node) (parquet.TypeID, bool) {
+	switch v := plansql.Unparen(arr).(type) {
+	case *plansql.ColRef:
+		return c.scope.provableElementType(v)
+	case *plansql.CastNode:
+		// The parser spells `T[]` as `array(T)`; a nested array's element
+		// is itself an array, which this layer does not type.
+		name := strings.TrimSpace(v.TypeName)
+		lower := strings.ToLower(name)
+		switch {
+		case strings.HasPrefix(lower, "array(") && strings.HasSuffix(lower, ")"):
+			name = strings.TrimSpace(name[len("array(") : len(name)-1])
+		case strings.HasSuffix(name, "[]"):
+			name = strings.TrimSpace(strings.TrimSuffix(name, "[]"))
+		default:
+			return 0, false
+		}
+		if l := strings.ToLower(name); strings.HasSuffix(l, "]") || strings.HasPrefix(l, "array(") {
+			return 0, false
+		}
+		return structuralCastType(name)
+	}
+	return 0, false
 }
 
 // inPair is one IN / ANY / ALL member: a row constructor against a
