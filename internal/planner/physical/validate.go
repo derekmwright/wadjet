@@ -780,7 +780,11 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		withOut.addOutputColumn(n)
 	}
 
-	// WHERE
+	// WHERE — an aggregate there is refused in PostgreSQL's node order,
+	// before the rest of the clause's names are (validate_clause_order.go).
+	if err := refuseMisplacedCallInOrder(info.WhereExpr, resolve, "WHERE", from); err != nil {
+		return err
+	}
 	if err := b.checkExpr(info.WhereExpr, resolve); err != nil {
 		return err
 	}
@@ -875,6 +879,11 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	// every name — nothing is certain there — so the substitution stands and
 	// the answer is the pre-#739 one, which is the binder's own stance that
 	// a false positive breaks a working query.
+	// A WINDOW function in HAVING is 42P20, in PostgreSQL's node order and
+	// before the grouping rule is asked of anything (#1205).
+	if err := refuseMisplacedCallInOrder(info.HavingExpr, withOut, "HAVING", from); err != nil {
+		return err
+	}
 	plansql.RevertGroupByAliasesShadowedByInput(info, from.providesBareColumn)
 	// A bare column beside an aggregate with no GROUP BY has no defined
 	// answer — which n_name should the single aggregate row carry?
