@@ -225,6 +225,35 @@ func applySlotRenameNodeOnly(n *logical.Node, rename map[string]string, stored m
 			}
 		}
 	}
+	// A FILTER reads the slot too: the QUALIFY clause is lowered to a Filter
+	// over the Window operator's output whose predicate names the window's
+	// slot (qualify.go), and the reference the lowering plants carries its
+	// provenance (`plansql.ColRef.Slot`) exactly as a nested window's does.
+	// Before this arm existed the rename moved the window's OUTPUT and left
+	// the filter reading the old name, so two blocks each carrying a
+	// QUALIFY under one join — `… JOIN (… QUALIFY ROW_NUMBER() OVER (…) <=
+	// 1) s ON … JOIN (… QUALIFY …) t ON …` — failed with `filter column
+	// "__win_0" does not exist in the input schema` on the single-process
+	// path: the second block's window had stepped to `__win_1` and its own
+	// filter had not (arc LT; the planner-minted per-outer-row bound reaches
+	// the same seam through a second spelling).
+	//
+	// Only a reference the planner planted moves. A user's own `WHERE
+	// __win_0 > 1` over a table that really stores that column is the #694
+	// shape and is left alone by the same rule renameSlotColRefs states.
+	for i := range n.Predicates {
+		pr := &n.Predicates[i]
+		if pr.ASTExpr == nil {
+			continue
+		}
+		if rewritten, changed := renameSlotColRefs(pr.ASTExpr, rename, stored); changed {
+			pr.ASTExpr = rewritten
+			pr.Raw = rewritten.String()
+			if to, ok := rename[strings.ToLower(pr.Column)]; ok && !stored[strings.ToLower(pr.Column)] {
+				pr.Column = to
+			}
+		}
+	}
 	// Deliberately NOT the ORDER BY terms. A sort above the Project keys on
 	// the PUBLISHED name (`w`, `sum`), never on the slot, and a term that
 	// really does spell `__win_0` is the user ordering by their own stored
