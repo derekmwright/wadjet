@@ -1,0 +1,5022 @@
+[
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'A' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'Z' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'z' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '[' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '_' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ']' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '^' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '`' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\\' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u000b' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00e9' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u00c9' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u212a' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'k' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '\u017f' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 's' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'word' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT ' word ' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'a\nb' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aa' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aaa' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '{' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '}' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ '[A-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* '[A-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* '[Z-a]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* '[A-_]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* '[a-z]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* '[[:alpha:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* '[[:lower:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* '[[:space:]]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* '\\s' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* '\\yword\\y' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* '\\Yword' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* '\\w' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ '[\\D]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* '[\\D]' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* 'a{' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* 'a{1' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* 'a{1,2' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* '^*' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* '$+' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* 'a**' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* '(?:a){1,2}' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* 'a{2,1}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* 'a{256}' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* '(?i)a' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* '\\x41' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~ '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT '1' COLLATE \"C\" ~* '\\u0041' AS v",
+"pg": "f"
+},
+{
+"sql": "SELECT 'aa' ~ '(a)\\1' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'ab' ~ 'a(?=b)' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT NULL::text ~ '[' AS v",
+"pg": "NULL"
+},
+{
+"sql": "SELECT 'a' !~* NULL::text AS v",
+"pg": "NULL"
+},
+{
+"sql": "SELECT 'a' ~ '[' AS v",
+"pg": "E:2201B"
+},
+{
+"sql": "SELECT 'word' ~ '\\yword\\y' AS v",
+"pg": "t"
+},
+{
+"sql": "SELECT 'abc' !~* '^Z' AS v",
+"pg": "t"
+}
+]

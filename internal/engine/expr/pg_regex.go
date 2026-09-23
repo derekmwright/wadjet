@@ -240,8 +240,12 @@ func aregexToRE2(p string, icase bool) (string, error) {
 				// takes its other case's range too.
 				lo, hi := r, runes[i+2]
 				b.WriteString(bracketLiteral(lo) + "-" + bracketLiteral(hi))
-				if icase && isASCIILetter(lo) && isASCIILetter(hi) {
-					b.WriteString(bracketLiteral(swapCase(lo)) + "-" + bracketLiteral(swapCase(hi)))
+				if icase {
+					// PostgreSQL folds a range letter by letter: the other
+					// case of every ASCII letter INSIDE it joins the set, so
+					// `[A-_]` takes a-z and `[Z-a]` takes z and A, whatever
+					// the endpoints are (measured on 17.11).
+					b.WriteString(foldedRangeCounterparts(lo, hi))
 				}
 				i += 2
 			default:
@@ -251,6 +255,12 @@ func aregexToRE2(p string, icase bool) (string, error) {
 				}
 			}
 			continue
+		}
+		// A quantifier directly after an anchor quantifies nothing:
+		// PostgreSQL's "quantifier operand invalid" (`^*`, `$+`, `^{2}`).
+		if (r == '*' || r == '+' || r == '?' || (r == '{' && i+1 < len(runes) && isDigit(runes[i+1]))) &&
+			i > 0 && (runes[i-1] == '^' || runes[i-1] == '$') && !escapedAt(runes, i-1) {
+			return "", invalidARE("quantifier operand invalid")
 		}
 		switch r {
 		case '\\':
@@ -302,6 +312,12 @@ func aregexToRE2(p string, icase bool) (string, error) {
 				end++
 			}
 			if end >= len(runes) || !isBound(string(runes[i+1:end])) {
+				// A `{` that begins with a digit is a bound, and an
+				// unfinished or malformed one is PostgreSQL's error
+				// (`a{1`, `a{1,2`, `a{1x}`); any other `{` is a literal.
+				if i+1 < len(runes) && isDigit(runes[i+1]) {
+					return "", invalidARE("invalid repetition count(s)")
+				}
 				b.WriteString(`\{`)
 				continue
 			}
@@ -461,9 +477,20 @@ func translateEscapeRaw(runes []rune, i int, inBracket bool, groups int) (string
 		return lit(0x09)
 	case 'v':
 		return lit(0x0B)
-	case 'd', 's', 'w':
+	case 's', 'S':
+		// PostgreSQL's \s is [[:space:]], which includes the vertical tab;
+		// RE2's \s does not. The POSIX class is the same in both.
+		class := "[:space:]"
+		if c == 'S' {
+			class = "[:^space:]"
+		}
+		if inBracket {
+			return class, 2, nil
+		}
+		return "[" + class + "]", 2, nil
+	case 'd', 'w':
 		return `\` + string(c), 2, nil
-	case 'D', 'S', 'W':
+	case 'D', 'W':
 		return `\` + string(c), 2, nil
 	case 'c':
 		if i+2 >= len(runes) {
@@ -553,4 +580,32 @@ func translateEscapeRaw(runes []rune, i int, inBracket bool, groups int) (string
 
 func isHexDigit(r rune) bool {
 	return r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F'
+}
+
+func isDigit(r rune) bool { return r >= '0' && r <= '9' }
+
+// escapedAt reports whether runes[i] is preceded by an odd run of
+// backslashes, i.e. is a literal rather than an operator.
+func escapedAt(runes []rune, i int) bool {
+	n := 0
+	for j := i - 1; j >= 0 && runes[j] == '\\'; j-- {
+		n++
+	}
+	return n%2 == 1
+}
+
+// foldedRangeCounterparts is the other-case range of every ASCII letter in
+// [lo, hi], as bracket-expression members.
+func foldedRangeCounterparts(lo, hi rune) string {
+	var b strings.Builder
+	add := func(from, to, base, other rune) {
+		a, z := max(lo, from), min(hi, to)
+		if a > z {
+			return
+		}
+		b.WriteString(bracketLiteral(a-base+other) + "-" + bracketLiteral(z-base+other))
+	}
+	add('A', 'Z', 'A', 'a')
+	add('a', 'z', 'a', 'A')
+	return b.String()
 }

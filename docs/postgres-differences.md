@@ -582,10 +582,6 @@ PostgreSQL lets any item of a `WITH RECURSIVE` list name a LATER item; this engi
 
 An `ORDER BY` or `LIMIT` on the whole recursive body (0A000 there), a term whose integer width differs from the seed's (`SELECT 1 UNION ALL SELECT (n + 1)::bigint …`, 42804 there — the value is range-checked into the seed's width here), a `text` term under a `varchar(n)` seed (one carrier here), a `real` or `double precision` term under a fractional-literal seed (`SELECT 1.5 …` is double precision here, numeric there), and a term of the wrong type that never produces a row (42804 there at parse time; this engine checks the values the term produces) are answered here. A quoted seed (`SELECT '5' UNION ALL SELECT 2 …`) is text here and resolved from the term there, so a non-text term under it is 42804 here. The measured table is `wadjet.TestArcRCRecursiveCTESeedTypeDecidesAgainstEveryTermType`. Superset, kept: none of them answers a value PostgreSQL would answer differently. (ADR-0012 §5/arc RC)
 
-**Catalog regex support is limited.**
-
-Only psql’s anchored literal-name patterns work; other patterns/operators raise 0A000 versus PostgreSQL results. (ADR-0012 §5—unlocated)
-
 ## What is NOT on this list
 
 A value, a row set, a declared type or an error that differs from PostgreSQL 17.11 and is not on this list is a defect: [report them](https://github.com/derekmwright/wadjet/issues/new/choose). EXPLAIN output and timing are not SQL semantics, and row order without ORDER BY is unspecified under [ADR-0013’s legal classes](adr/0013-correctness-gates-and-their-boundaries.md). The SQLancer harness (`task sqlancer:triage`) reads this page as its known-difference list: a generated query whose error matches an entry here is reported under that entry, and everything else it reports is a candidate defect.
