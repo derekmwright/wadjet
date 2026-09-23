@@ -691,6 +691,23 @@ func (c *Catalog) GetTable(_ context.Context, name string) (*TableMeta, error) {
 	return &meta, nil
 }
 
+// TableMetaRevision is the KV revision of a table's metadata key, for a
+// derived cache that must expire exactly when the table's definition does
+// (the system catalog's per-table descriptors, sysrows). ok=false when the
+// store offers no revision probe or the table is absent; the caller then
+// reads the table as if nothing were cached.
+func (c *Catalog) TableMetaRevision(name string) (uint64, bool) {
+	rr, ok := c.kv.(RevisionReader)
+	if !ok {
+		return 0, false
+	}
+	rev, err := rr.Revision(c.key("table." + name))
+	if err != nil {
+		return 0, false
+	}
+	return rev, true
+}
+
 // GetManifest validates the manifest key's KV REVISION on every call (#483).
 // The cache memoizes decoding only; never substitute a wall-clock staleness
 // window or rely on invalidations from this Catalog alone.

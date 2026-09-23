@@ -54,12 +54,7 @@ func (r *Resolver) snapshot() *snapshot {
 }
 
 func (r *Resolver) rel(oid int64) *relInfo {
-	for _, ri := range r.snapshot().rels {
-		if ri.oid == oid {
-			return ri
-		}
-	}
-	return nil
+	return r.snapshot().byOID[oid]
 }
 
 // RelationName is regclass's output: the bare name for a relation whose
@@ -98,16 +93,14 @@ func (r *Resolver) RelationOID(name string) (int64, bool) {
 }
 
 func (r *Resolver) find(schema, name string) (int64, bool) {
-	for _, ri := range r.snapshot().rels {
-		if ri.schema != schema {
-			continue
-		}
-		// The storage catalog keeps a user table's name as created and
-		// resolves it case-insensitively (#731); a system relation's name is
-		// exact.
-		if ri.name == name || (ri.user && strings.EqualFold(ri.name, name)) {
-			return ri.oid, true
-		}
+	s := r.snapshot()
+	// A system relation's name is exact; the storage catalog keeps a user
+	// table's name as created and resolves it case-insensitively (#731).
+	if ri, ok := s.byName[schema+"."+name]; ok && (!ri.user || ri.name == name) {
+		return ri.oid, true
+	}
+	if ri, ok := s.byName[schema+"."+strings.ToLower(name)]; ok && ri.user {
+		return ri.oid, true
 	}
 	return 0, false
 }

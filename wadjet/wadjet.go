@@ -1224,19 +1224,29 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 		outMap[c.Name] = c
 	}
 
-	// Try to match columns against catalog table schemas
-	ctx := context.Background()
-	schemaMap := make(map[string]parquet.Column)
-	if cat != nil {
-		if tableNames, err := cat.ListTables(ctx); err == nil {
-			for _, tableName := range tableNames {
-				if table, err := cat.GetTable(ctx, tableName); err == nil && table != nil {
-					for _, col := range table.Schema.Columns {
-						schemaMap[col.Name] = col
+	// The catalog's columns by bare name, the last rung before inference.
+	// Built only when a column reaches it: reading every table's definition
+	// for every result cost a JSON decode per table per statement, which over
+	// a 1,000-table catalog was most of a psql `\d` (arc PC round 2, P1).
+	var schemaMap map[string]parquet.Column
+	catalogColumns := func() map[string]parquet.Column {
+		if schemaMap != nil {
+			return schemaMap
+		}
+		schemaMap = make(map[string]parquet.Column)
+		ctx := context.Background()
+		if cat != nil {
+			if tableNames, err := cat.ListTables(ctx); err == nil {
+				for _, tableName := range tableNames {
+					if table, err := cat.GetTable(ctx, tableName); err == nil && table != nil {
+						for _, col := range table.Schema.Columns {
+							schemaMap[col.Name] = col
+						}
 					}
 				}
 			}
 		}
+		return schemaMap
 	}
 
 	for i, name := range columns {
@@ -1275,7 +1285,7 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 		}
 
 		// Then the catalog schema
-		if col, ok := schemaMap[name]; ok {
+		if col, ok := catalogColumns()[name]; ok {
 			metas[i].TypeID = col.Type
 			metas[i].TypeName = col.Type.String()
 			metas[i].Precision, metas[i].Scale = col.Precision, col.Scale

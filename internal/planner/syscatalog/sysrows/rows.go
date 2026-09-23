@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/syscatalog"
@@ -27,6 +28,95 @@ type snapshot struct {
 	user    string
 	session syscatalog.Session
 	rels    []*relInfo
+	// byOID and byName index rels for the catalog functions, which a
+	// statement evaluates once per ROW (`attrelid = 't'::regclass` over
+	// pg_attribute): a linear walk of every relation per row was the
+	// quadratic half of P1.
+	byOID  map[int64]*relInfo
+	byName map[string]*relInfo // schema + "." + name; a user table's name lower-cased
+}
+
+func (s *snapshot) index() {
+	s.byOID = make(map[int64]*relInfo, len(s.rels))
+	s.byName = make(map[string]*relInfo, len(s.rels))
+	for _, ri := range s.rels {
+		if _, dup := s.byOID[ri.oid]; !dup {
+			s.byOID[ri.oid] = ri
+		}
+		key := ri.schema + "." + ri.name
+		if ri.user {
+			key = ri.schema + "." + strings.ToLower(ri.name)
+		}
+		if _, dup := s.byName[key]; !dup {
+			s.byName[key] = ri
+		}
+	}
+}
+
+// systemRels is every system relation as the catalog describes it: fixed at
+// build time, so built once per process and shared (read-only) by every
+// snapshot.
+var (
+	systemRelsOnce sync.Once
+	systemRels     []*relInfo
+)
+
+func systemRelInfos() []*relInfo {
+	systemRelsOnce.Do(func() {
+		for _, sr := range syscatalog.Relations() {
+			ns := syscatalog.NamespacePgCatalog
+			if sr.Schema == syscatalog.SchemaInformationSchema {
+				ns = syscatalog.NamespaceInformationSchema
+			}
+			ri := &relInfo{schema: sr.Schema, nsOID: ns, name: sr.Name, oid: sr.OID, kind: string(sr.Kind)}
+			for i, c := range sr.Columns {
+				ri.cols = append(ri.cols, colInfo{attnum: int32(i + 1), name: c.Name, col: c,
+					info: syscatalog.TypeOf(c), notNull: sr.NotNull[i]})
+			}
+			systemRels = append(systemRels, ri)
+		}
+	})
+	return systemRels
+}
+
+// tableDescs caches a user table's column descriptors by the KV revision of
+// its metadata key (catalog.TableMetaRevision): a scan re-reads a table's
+// definition only when DDL changed it, so a catalog scan over a thousand
+// unchanged tables is a read of a thousand cached descriptors, not a
+// thousand JSON decodes (P1). Keyed by catalog as well, since tests and
+// embedders open several.
+var tableDescs sync.Map // tableDescKey -> tableDesc
+
+type tableDescKey struct {
+	cat  *catalog.Catalog
+	name string
+}
+
+type tableDesc struct {
+	rev  uint64
+	cols []colInfo // every declared column, before the identity's denials
+}
+
+func userTableCols(ctx context.Context, cat *catalog.Catalog, name string) ([]colInfo, bool) {
+	rev, revOK := cat.TableMetaRevision(name)
+	if revOK {
+		if v, ok := tableDescs.Load(tableDescKey{cat, name}); ok && v.(tableDesc).rev == rev {
+			return v.(tableDesc).cols, true
+		}
+	}
+	meta, err := cat.GetTable(ctx, name)
+	if err != nil || meta == nil {
+		return nil, false
+	}
+	cols := make([]colInfo, 0, len(meta.Schema.Columns))
+	for i, c := range meta.Schema.Columns {
+		cols = append(cols, colInfo{attnum: int32(i + 1), name: c.Name, col: c,
+			info: syscatalog.TypeOf(c), notNull: !c.Nullable})
+	}
+	if revOK {
+		tableDescs.Store(tableDescKey{cat, name}, tableDesc{rev: rev, cols: cols})
+	}
+	return cols, true
 }
 
 // relInfo is one relation as the catalog describes it.
@@ -83,8 +173,8 @@ func takeSnapshot(ctx context.Context, cat *catalog.Catalog, rel *syscatalog.Rel
 	}
 	sort.Strings(tables)
 	for _, name := range tables {
-		meta, err := cat.GetTable(ctx, name)
-		if err != nil || meta == nil {
+		all, ok := userTableCols(ctx, cat, name)
+		if !ok {
 			// Dropped between the listing and the read: not in this
 			// snapshot, as it would not be a moment later.
 			continue
@@ -94,28 +184,19 @@ func takeSnapshot(ctx context.Context, cat *catalog.Catalog, rel *syscatalog.Rel
 			denied = access.DeniedColumns(ctx, name)
 		}
 		ri := &relInfo{schema: "public", nsOID: syscatalog.NamespacePublic, name: name,
-			oid: syscatalog.ObjectOID(name), kind: "r", user: true}
-		for i, c := range meta.Schema.Columns {
-			if denied[strings.ToLower(c.Name)] {
-				continue
+			oid: syscatalog.ObjectOID(name), kind: "r", user: true, cols: all}
+		if len(denied) > 0 {
+			ri.cols = nil
+			for _, c := range all {
+				if !denied[strings.ToLower(c.name)] {
+					ri.cols = append(ri.cols, c)
+				}
 			}
-			ri.cols = append(ri.cols, colInfo{attnum: int32(i + 1), name: c.Name, col: c,
-				info: syscatalog.TypeOf(c), notNull: !c.Nullable})
 		}
 		s.rels = append(s.rels, ri)
 	}
-	for _, sr := range syscatalog.Relations() {
-		ns := syscatalog.NamespacePgCatalog
-		if sr.Schema == syscatalog.SchemaInformationSchema {
-			ns = syscatalog.NamespaceInformationSchema
-		}
-		ri := &relInfo{schema: sr.Schema, nsOID: ns, name: sr.Name, oid: sr.OID, kind: string(sr.Kind)}
-		for i, c := range sr.Columns {
-			ri.cols = append(ri.cols, colInfo{attnum: int32(i + 1), name: c.Name, col: c,
-				info: syscatalog.TypeOf(c), notNull: sr.NotNull[i]})
-		}
-		s.rels = append(s.rels, ri)
-	}
+	s.rels = append(s.rels, systemRelInfos()...)
+	s.index()
 	return s, nil
 }
 
