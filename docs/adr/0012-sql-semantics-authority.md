@@ -1138,6 +1138,15 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      millisecond the column stores — `.123456` reads back `.123` — which is a
      declared-type property of TIMESTAMP here and a stored-value divergence
      from PostgreSQL's microseconds.
+
+     **Residual, kept (2026-09-22, #1266).** TIMESTAMP has no infinity:
+     `'infinity'` / `'-infinity'` text is 22007 and a binary parameter carrying
+     PostgreSQL's infinity encoding (the int64 extremes) is 22023 at Bind,
+     where PostgreSQL stores and returns both. The millisecond carrier has no
+     value to hold it, and decoding the extremes as an instant named the year
+     294247. Every other producer FLOORS sub-millisecond digits toward the
+     past (UnixMilli, TimestampToEngineMillis), so "truncated" above means
+     floored; the two differ only before 1970.
    - **PORT and PROTOCOL are `int4` on the wire; DURATION is `int8`
      NANOSECONDS.** (Decided 2026-09-03, #834.) All three declared OID 25
      (`text`) while the engine compared them NUMERICALLY, which is item 2's

@@ -490,6 +490,11 @@ on the way in, and every rendering of it — the wire, a cast, a function result
 shows the truncated value consistently. It is one rendering of one stored
 instant, not a rounding applied at print time.
 
+**There is no infinity.** PostgreSQL's `timestamp` accepts `'infinity'` and
+`'-infinity'`; this engine's millisecond carrier has no such value, so the text
+is refused (`22007`) and so is a binary wire parameter carrying PostgreSQL's
+infinity encoding (`22023` at Bind), rather than stored as some far-off year.
+
 `Duration` is the exception, and deliberately: it declares `int8` on the wire
 counting nanoseconds, so `CAST(d AS TEXT)` renders that integer — the text
 agrees with the declaration and with the projection.

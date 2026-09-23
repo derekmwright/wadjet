@@ -28,6 +28,10 @@ Decimal statistics (`STDDEV`, `VARIANCE`, `CORR`, `COVAR`, `MEDIAN`, `PERCENTILE
 
 Millisecond storage truncates `.123456` return as `.123`; PostgreSQL retains `.123456`. (ADR-0012 §5/#692-residual)
 
+**TIMESTAMP has no infinity.**
+
+`'infinity'` and `'-infinity'` are refused as timestamp input (22007), and a binary timestamp parameter carrying PostgreSQL's infinity encoding (the int64 extremes) is refused at Bind (22023); PostgreSQL stores and returns both. (ADR-0012 §5/#1266)
+
 **Clock functions return zoneless UTC.**
 
 `NOW`, `CURRENT_TIMESTAMP`, `PG_POSTMASTER_START_TIME`: millisecond timestamp OID 1114 versus PostgreSQL’s microsecond timestamptz OID 1184. No session zone exists; `CURRENT_DATE` uses UTC. (ADR-0012 §5/#544, #870)
