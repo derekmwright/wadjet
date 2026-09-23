@@ -12,10 +12,16 @@ import (
 // A QUALIFIED REFERENCE NAMES ONE RELATION IN SCOPE AT THE POINT IT IS
 // WRITTEN, and the point is not the whole query block. The block's one flat
 // scope is right for WHERE, the SELECT list, GROUP BY, HAVING and ORDER BY,
-// and wrong for a JOIN's ON clause, which SQL scopes to its own join:
-// `FROM a JOIN b ON c.x = a.x JOIN c ON …` names `c` before it is joined, and
-// `FROM a, b JOIN c ON a.x = c.x` names another FROM item. PostgreSQL 17.11
-// refuses both; this binder answered both (#1220).
+// and wrong for a JOIN's ON clause, which SQL scopes an ON to what the FROM
+// clause has ALREADY DECLARED at that point: `FROM a JOIN b ON c.x = a.x
+// JOIN c ON …` names `c` before it is joined, which PostgreSQL refuses and
+// this binder refuses too (#1220) — that reference is a typo answered with
+// rows, not a superset. `FROM a, b JOIN c ON a.x = c.x` names an EARLIER
+// comma-separated FROM item, which PostgreSQL also refuses but this binder
+// deliberately answers, matching DuckDB (ADR-0012 §5 #617); an ON reaching
+// back across a comma sibling that is already on the page is not the same
+// defect as one reaching forward to a name the parser has not read yet, and
+// #1220 conflated the two until the BX hotfix told them apart again.
 //
 // This file is the block's relation CENSUS, in FROM order, and what it
 // decides: which relations an ON may name (relationCensus.visibleAtJoin), and
@@ -24,8 +30,10 @@ import (
 // match on it (SQLancer's getCommonFetchErrors lists "but it cannot be
 // referenced from this part of the query"). The split is POSITIONAL:
 // `invalid reference to FROM-clause entry` is said of an entry already read
-// that this position cannot reach; a relation a LATER join introduces has not
-// been read, so it is `missing FROM-clause entry`; a table name the FROM
+// that this position cannot reach (reserved now for the alias and
+// out-of-scope-derived-table cases below, since a plain earlier relation is
+// simply visible); a relation a LATER join or LATER comma item introduces has
+// not been read, so it is `missing FROM-clause entry`; a table name the FROM
 // reads under an alias earns the hint to use the alias. See
 // docs/sql-reference.md "What an ON clause may name" and ADR-0012 §5 #617.
 
@@ -119,11 +127,16 @@ func (c *relationCensus) noteAliasedTable(name, alias string) {
 		return
 	}
 	// An alias EQUAL to the table's own name hides nothing, and the parser
-	// records one for several spellings that wrote none. Without this test the
-	// out-of-scope `t3` of `FROM t0, t3, t1 JOIN t2 ON t3.c4` earned the ALIAS
-	// sentence naming `t3` as its own alias — PostgreSQL's is the ordinary
-	// case-2 one, and SQLancer's expected-error list carries that one and not
-	// this (measured: 178 of 200 generated databases stopped on it).
+	// records one for several spellings that wrote none. Without this test,
+	// an out-of-scope unaliased table earned the ALIAS sentence naming itself
+	// as its own alias — PostgreSQL's is the ordinary case-2 one, and
+	// SQLancer's expected-error list carries that one and not this (measured:
+	// 178 of 200 generated databases stopped on it). The motivating example,
+	// `FROM t0, t3, t1 JOIN t2 ON t3.c4`, is itself an EARLIER comma sibling
+	// of `t2`'s join now (ADR-0012 §5 #617, the BX hotfix) and so answers —
+	// this guard's remaining reach is WHERE/SELECT/etc. positions and a
+	// relation a later join or comma item introduces, where an unaliased name
+	// stays genuinely out of scope.
 	if strings.EqualFold(name, alias) {
 		return
 	}
@@ -152,11 +165,20 @@ func (c *relationCensus) declaredAt(qual string) (int, bool) {
 // number of declarations parsed at that point. ok=false when the census
 // cannot place the join, which leaves the caller with the flat scope.
 //
-// The rule is SQL's own: an ON belongs to one join, and the relations it can
-// name are the ones already joined INSIDE its own FROM item — the item's own
-// table and every join of that item up to and including this one. A relation
-// of another comma-separated item is a different FROM item and is not one of
-// them; a relation joined LATER has not been written yet.
+// The rule is POSITIONAL, not per-item: an ON may name anything the FROM
+// clause has already declared by the point it is written — the item's own
+// table, every join of that item up to and including this one, AND an
+// earlier comma-separated FROM item. That last part is a deliberate
+// DuckDB-matching superset PostgreSQL does not share (ADR-0012 §5 #617):
+// `FROM a, b JOIN c ON a.k = c.k` answers here. Only what is written LATER —
+// a relation a later join or a later comma item introduces — is out of
+// scope, because the parser has not read it yet.
+//
+// A prior version of this rule (arc RS, #1220) restricted visibility to the
+// join's own FROM item, which correctly refused a relation joined later but
+// also refused the earlier-comma-sibling case #617 had already settled as an
+// answered superset — conflating "not yet written" with "written elsewhere."
+// Restored by the BX hotfix.
 func (c *relationCensus) visibleAtJoin(j int) (map[string]bool, int, bool) {
 	if c == nil {
 		return nil, 0, false
@@ -171,12 +193,9 @@ func (c *relationCensus) visibleAtJoin(j int) (map[string]bool, int, bool) {
 	if at < 0 {
 		return nil, 0, false
 	}
-	item := c.sites[at].item
 	visible := map[string]bool{}
 	for i := 0; i <= at; i++ {
-		if c.sites[i].item == item {
-			visible[c.sites[i].qual] = true
-		}
+		visible[c.sites[i].qual] = true
 	}
 	return visible, at + 1, true
 }
