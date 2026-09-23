@@ -208,7 +208,7 @@ For imported names, `SELECT WatchID FROM hits` can read `WatchID` where PostgreS
 
 **Bare ROW field paths answer.**
 
-`c_row.b` resolves a field; PostgreSQL raises 42P01 and requires parentheses. Qualified `(x.c_row).b` instead raises 0A000 here because three-part identity is unavailable. (ADR-0012 §5/#769)
+`c_row.b` resolves a field; PostgreSQL raises 42P01 and requires parentheses. The parenthesised spellings, qualified `(x.c_row).b` and nested `((c_row).rw).k` included, answer as PostgreSQL does. (ADR-0012 §5/#769, ADR-0022)
 
 **Some temporal casts return NULL.**
 
@@ -394,15 +394,15 @@ PostgreSQL has none. SemVer 2.0.0 defines precedence; node-semver defines ranges
 
 **The system catalog describes one database, one role and this server's objects.**
 
-`pg_database` lists one database and `pg_roles` one role, the connection's identity, which is not a superuser; PostgreSQL also lists its templates and bootstrap superuser. `pg_class.relam` is 0 and `pg_am` is empty (a stored table has no PostgreSQL access method), `pg_type` lists the types the wire declares and their arrays but no DOMAIN types, `pg_proc` lists no functions, and the relations for objects this server does not have (indexes, triggers, rules, policies, publications, sequences) are empty. A column is typed by the engine type that carries it — an OID column declares `int8`, and `current_schemas()` is `text[]` where PostgreSQL's is `name[]`. A masked column's definition is listed and its values arrive masked; a denied column is absent. A string literal cast to `regclass` is read to its OID and prints as the OID where PostgreSQL prints the name. pgJDBC's `getPrimaryKeys` is refused 0A000 where PostgreSQL answers: it reads `(result.KEYS).x`, a relation-qualified row field path (ADR-0022). (ADR-0044, #1251)
+`pg_database` lists one database and `pg_roles` one role, the connection's identity, which is not a superuser; PostgreSQL also lists its templates and bootstrap superuser. `pg_class.relam` is 0 and `pg_am` is empty (a stored table has no PostgreSQL access method), `pg_type` lists the types the wire declares and their arrays but no DOMAIN types, `pg_proc` lists no functions, and the relations for objects this server does not have (indexes, triggers, rules, policies, publications, sequences) are empty. A column is typed by the engine type that carries it — an OID column declares `int8`, and `current_schemas()` is `text[]` where PostgreSQL's is `name[]`. A masked column's definition is listed and its values arrive masked; a denied column is absent. A string literal cast to `regclass` is read to its OID and prints as the OID where PostgreSQL prints the name. The server reports PostgreSQL 17 (`server_version` 17.0, `server_version_num` 170000), the major whose catalog it models, so psql and pgJDBC send the catalog spellings this catalog has. (ADR-0044, #1251)
 
-**A malformed escape string is a syntax error.**
+**A syntax error names no position in its text.**
 
-`E'…'` reads PostgreSQL's escapes. One whose result is not valid UTF-8 (`E'\xff'`, `E'\000'`) or a `\u` escape that is not a code point is 42601 here, where PostgreSQL raises 22021 / 22025. Both refuse. (ADR-0044)
+A statement the parser cannot read is 42601 with PostgreSQL's sentence — `syntax error at or near "…"`, `syntax error at end of input`, and for `E'…'` strings `invalid Unicode surrogate pair` (42601), `invalid Unicode escape` (22025), `invalid Unicode escape value` (42601) and `invalid byte sequence for encoding "UTF8": 0x…` (22021). PostgreSQL also sends the error's position, which psql renders as `LINE 1: …` with a caret, and appends `at or near "…"` to the escape errors; this server sends neither. Where the parser stops early inside a subquery, the token named is the `)` that closes it, as in PostgreSQL. (ADR-0044)
 
 **Set-returning functions answer only as a whole SELECT item.**
 
-`unnest(array)`, `generate_subscripts(array, dim)` and `information_schema._pg_expandarray(array)` expand each row when they ARE a SELECT item, by PostgreSQL 10's rule (the longest set decides the row count, shorter sets are padded with NULL). Inside an expression, in WHERE, beside an aggregate, a window function or DISTINCT they are refused 0A000 where PostgreSQL answers (or, in WHERE, refuses with the same code). `generate_subscripts`' dimension must be a constant, and a table function's arguments must be constants: `generate_series(1, t.n)` is 0A000. (ADR-0044)
+`unnest(array)`, `generate_subscripts(array, dim)` and `information_schema._pg_expandarray(array)` expand each row when they ARE a SELECT item, by PostgreSQL 10's rule (the longest set decides the row count, shorter sets are padded with NULL). Inside an expression, in WHERE, beside an aggregate, a window function or DISTINCT they are refused 0A000 where PostgreSQL answers (or, in WHERE, refuses with the same code). `generate_subscripts`' dimension must be a constant, and a table function's arguments must be constants: `generate_series(1, t.n)` is 0A000. An `ARRAY[…]` constructor's elements take one common type, as in PostgreSQL; a constructor of constants only is typed by ADR-0024's literal rule, so `unnest(ARRAY[1,2.5])` answers 1, 2.5 declared `double precision` where PostgreSQL declares `numeric`. (ADR-0044)
 
 **The pattern-match operators match with RE2.**
 

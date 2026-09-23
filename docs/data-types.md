@@ -642,13 +642,11 @@ Field notation on something that is not composite is refused with PostgreSQL's
 own 42809 — `(1+2).b`, and `(b).x` over a scalar column, which answered one
 NULL per row until 2026-09-04.
 
-A container the reference QUALIFIES needs a three-part identity that this
-engine does not yet carry, so `(x.c_row).b` — and, for the same reason, the
-nested `((c_row).rw).k` — is REFUSED rather than answered: a loud `0A000`
-naming the derived-table workaround, never a silent value. That
-is the one spelling PostgreSQL offers for an ambiguous container and wadjet
-does not; the derived-table rename above is the way to write it today.
-ADR-0022 carries the mechanism and what closing it takes.
+A container the reference QUALIFIES answers too: `(x.c_row).b` reads the field
+of `x`'s container — PostgreSQL's spelling for a container two relations both
+publish — and the nested `((c_rownest).s).x` reads a field of a field. The
+qualified reference is resolved as any column reference is and the field is
+read from its value (ADR-0022's 2026-09-23 amendment).
 
 **A ROW an aggregate CONSTRUCTS.** Until `OHLCV` (see
 [sql-reference.md](sql-reference.md) §OHLCV) every ROW value in a result had

@@ -1,5 +1,10 @@
 # Sql three part row identity refusal
 
+**Superseded 2026-09-23 (arc PC round 3, ADR-0022's amendment).** The refusal
+below is gone: a two-part container reference is lowered to `row_field` over
+the qualified reference's VALUE, keeping its qualifier, and answers. This page
+records the mechanism the refusal was built on.
+
 Source: internal/planner/sql/select_parser.go — return nil, sqlerr.New("0A000",, moved 2026-09-11 (#1026)
 
 A TWO-PART container reference. Two spellings reach here and

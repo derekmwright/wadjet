@@ -74,10 +74,36 @@ The recorded divergences are listed on the differences page and pinned in
 `pgwire.TestArcPCToolCatalogQueriesAnswerAsPostgreSQL`: one database and one
 role (PostgreSQL also lists templates and its superuser); `relam` is 0 and
 `pg_am` empty; no DOMAIN types in pg_type; a string literal cast to
-`regclass` is read to its OID and printed as it; pgJDBC's `getPrimaryKeys`
-reads `(result.KEYS).x`, a relation-qualified row field path ADR-0022
-refuses 0A000. Round 2 made the rest answer: `E'…'` strings, `x = ANY(array
-expression)`, set-returning functions as whole SELECT items (`unnest`,
-`generate_subscripts`, `information_schema._pg_expandarray`), constant
-expressions as `generate_series` arguments, and `current_schemas()` as an
-array.
+`regclass` is read to its OID and printed as it. Round 2 made the rest
+answer: `E'…'` strings, `x = ANY(array expression)`, set-returning functions
+as whole SELECT items (`unnest`, `generate_subscripts`,
+`information_schema._pg_expandarray`), constant expressions as
+`generate_series` arguments, and `current_schemas()` as an array.
+
+**Amended 2026-09-23 (round 3).**
+
+- *One PostgreSQL major, on the wire and in the catalog.* The catalog is
+  PostgreSQL 17's, so the server reports 17 everywhere it reports a version
+  (startup `server_version`, SHOW, `current_setting`, `version()`). A tool
+  chooses its catalog spellings by the advertised version: psql 17's `\l`
+  against an advertised 15 asked for `daticulocale`, which 17 renamed. A
+  future catalog revision moves the registry and the advertised version
+  together.
+- *pgJDBC `getPrimaryKeys` answers*: `(result.KEYS).x` is ADR-0022's
+  qualified row field, read by `row_field` from the reference's value; and
+  a predicate over a set-returning output stays above the set it filters
+  (below it the output is still the array).
+- *Values through the new surface*: an `ARRAY[…]` constructor read by a
+  set-returning item has one common element type (`unnest(ARRAY[1,2.5])` is
+  1, 2.5); `x op ANY/ALL(typed array)` pairs x with the ELEMENT type by
+  PostgreSQL's rule (42883 where no operator exists); `E'…'` combines a
+  surrogate pair and refuses a malformed escape with PostgreSQL's SQLSTATE.
+- *A syntax error is PostgreSQL's sentence*, chosen where the parser assigns
+  42601 from the token it stopped at, never the parser's stage labels.
+- *A catalog scan reads no key while the catalog is unchanged.* Every user
+  table's definition is cached per catalog GENERATION (NATS KV's bucket
+  sequence; MemKV's write counter), and the identity-viewed snapshot and its
+  rows per exact view within a generation. A DDL moves the generation; a
+  policy change is a different view; the session-dependent relation
+  (`pg_stat_ssl`) is built per scan. On a live file-backed server over 1,000
+  tables every psql `\d` command runs within 3x PostgreSQL 17.11's time.

@@ -271,6 +271,22 @@ excludes first — and both directions are gated.
   the field is asked for. That is rule 1's list again, one part wider, and it
   is its own change.
 
+  **Amended 2026-09-23 (arc PC round 3): the qualified container answers.**
+  The three-part identity was never needed. The earlier attempt answered NULL
+  because it FLATTENED the path into a three-part name and stripped the
+  qualifier; the fix keeps the two-part reference exactly as written —
+  `x.c_row` is an ordinary column reference, resolved by the ordinary
+  resolvers (a relation's column, or this ADR's field path when the qualifier
+  is itself a container, which is the nested spelling) — and reads the field
+  from its VALUE with `row_field`, the node the computed-container spelling
+  `(f(x)).b` already lowered to. `(x.c_row).b`, `((c_rownest).s).x` and
+  pgJDBC getPrimaryKeys' `(result.KEYS).x` answer PostgreSQL's rows on the
+  single, DAG and shuffled-DAG arms; a self-join reading BOTH relations'
+  containers over shifted ids reads each its own (the discriminating cell of
+  `TestRowFieldPathSurvivesAJoinFourArms`); a path through a field the ROW
+  does not declare is PostgreSQL's 42703, and one over a scalar its 42809.
+  The paragraph below records what was believed before the measurement.
+
   **The cost of not having it** is recorded here rather than left implicit:
   `(x.c_row).b` is PostgreSQL's disambiguation for a container two relations
   both publish, and that shape is refused 42702 (§the ambiguity, below). So
