@@ -543,6 +543,11 @@ func tmdTables() []tmdTable {
 		{dcInTable, dcInSchema(), dcInData()},
 		{dcSideTable, dcSideSchema(), dcSideData()},
 		{dcNulTable, dcNulSchema(), dcNulData()},
+		// The ARC LT fixture (#1019, #1238): a body evaluated once over the
+		// relation and one evaluated per outer row answer differently here in
+		// every shape the seam table writes (arc_lt_fixture_test.go).
+		{ltOTable, ltOSchema(), ltOData()},
+		{ltITable, ltISchema(), ltIData()},
 		// The MIXED-CASE RELATION fixture. Every other table name in every
 		// two-path corpus is already its own folded form, so the case
 		// concession for a RELATION name (ADR-0012) had no fixture on the DAG

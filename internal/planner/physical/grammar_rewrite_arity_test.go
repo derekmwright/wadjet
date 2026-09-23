@@ -146,6 +146,13 @@ func grammarRewriteSpellings() []grammarRewrite {
 		// themselves are gated on five arms by
 		// coordinator.TestArcPSGrammarAnswersTheSameOnEveryArm's `#655` cells.
 		{"full_using_merged_key", `COALESCE(s, n)`, "coalesce", 2},
+		// --- a correlated LATERAL's ORDER BY … LIMIT / OFFSET becomes a
+		// per-key `ROW_NUMBER() OVER (PARTITION BY <key> ORDER BY …)` and a
+		// QUALIFY over it (logical.lateralBoundPerOuterRow, arc LT, #1019).
+		// Statement-level like the merge above; the call it mints takes no
+		// argument, and the statement shapes are gated on five arms by
+		// coordinator.TestArcLTACorrelatedBodyIsEvaluatedPerOuterRowOnEveryArm.
+		{"lateral_per_row_bound", `ROW_NUMBER() OVER (PARTITION BY s ORDER BY n)`, "row_number", 0},
 		// --- EXTRACT(field FROM x) -> field(x). The FIELD names the function,
 		// so every field this parser maps is its own door onto the table.
 		{"extract_year", `EXTRACT(YEAR FROM ts)`, "year", 1},

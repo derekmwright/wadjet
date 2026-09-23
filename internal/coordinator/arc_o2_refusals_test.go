@@ -32,21 +32,9 @@ var o2Refuses = map[string]string{
 	"dupname/qstar-two-aliases": `column "x.*" does not exist in the input schema`,
 	"dupname/qstar-cte":         `column "x.*" does not exist in the input schema`,
 
-	// A QUALIFIED STAR OVER A CORRELATED LATERAL WHOSE OWN BOUND IS NOT
-	// APPLIED PER OUTER ROW (#1019). The body's COLUMNS are knowable; its ROW
-	// COUNT is not the one the query wrote, because the decorrelation applies
-	// the bound to the whole inner relation once. A star publishes a RELATION,
-	// so this is a relation this pass cannot state — the same rule as the four
-	// above, one property over — and the spelling keeps the refusal it had at
-	// base.
-	//
-	// Only this consumer declines. The named spellings (`SELECT *`, an
-	// explicit list) keep the disposition they had, with the row count PINNED
-	// and PostgreSQL's answer beside it: whether a bound BINDS is a property
-	// of the DATA, so refusing on a bound's existence turned `LIMIT 10` over a
-	// body that never yields ten rows for one key — right on five arms at base
-	// — into an error, which is the regression round 2 shipped and round 3
-	// took out.
-	"lateral/inner-order-pub-limit/qstar":    `column "x.*" does not exist in the input schema`,
-	"lateral/inner-order-hidden-limit/qstar": `column "x.*" does not exist in the input schema`,
+	// The QUALIFIED star over a correlated LATERAL with its own bound REFUSED
+	// here while #1019 was open — the body's row count was not the one the
+	// query wrote. Arc LT applies the bound per outer row (ADR-0021 §1s), the
+	// `lateral/inner-order-*-limit/qstar` refusals are deleted and both cells
+	// assert PostgreSQL's four rows; the deletion is the proof.
 }

@@ -107,6 +107,12 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	if err := logical.RefuseUnresolvedOrdinalSortKeys(node); err != nil {
 		return nil, err
 	}
+	// A lifted predicate whose column the enclosing relation also publishes
+	// (arc LT, #1130): decided on the ANNOTATED plan, the same door as the two
+	// refusals above.
+	if err := logical.RefuseContestedLiftedRefs(node); err != nil {
+		return nil, err
+	}
 	// A DISTINCT with no stage and no coordinator dedup is a DROPPED
 	// DISTINCT — the raw row set, returned confidently (#466). Refuse it
 	// here for the same reason: loud beats silently different.

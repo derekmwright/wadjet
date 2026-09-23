@@ -369,6 +369,11 @@ const (
 	// rewrite declines — does not PARSE. PostgreSQL accepts it and means "no
 	// bound"; this parser wants a number (round 2, P1).
 	l1LimitAllUnparsed = `expected number after LIMIT`
+	// ARC LT's three refusals (lateral_per_row_bound.go, lateral_correlated_refs.go,
+	// lateral_lifted_contested.go).
+	l1BoundNoKey             = `cannot apply that bound per outer row`
+	l1LiftedRefCannotPublish = `which would have to publish the column it names, and here it cannot`
+	l1LiftedRefContested     = `which the enclosing relation also publishes`
 	// A LATERAL body that is a SET OPERATION whose second arm has no FROM
 	// clause: the table-less lowering claims the whole body.
 	l1FromlessSetOpBody = `a LATERAL subquery with no FROM clause`
@@ -596,6 +601,28 @@ var l1Postgres = map[string]string{
 // l1RefusalPins names the refusal classes a cell's arms may raise. Every arm's
 // answer must contain one of them.
 var l1RefusalPins = map[string][]string{
+	// ARC LT — a body that is not KEY-PARTITIONABLE is refused, not answered
+	// (ADR-0021 §1s). Each of these answered a plausible wrong row set at
+	// 51addfb6 (the value pins that stood for them are deleted): a bound with
+	// no equality key to travel with (`boundLifted*`), a lifted predicate whose
+	// column the body cannot publish — under DISTINCT, under an enclosing BARE
+	// star (a QUALIFIED star reads one relation's own list, from which the slot
+	// is hidden: `R3/liftedStar` and `R4/outerStar` assert PostgreSQL's nine
+	// rows on five arms now, their `rows=3` pins deleted),
+	// beside an alias of the same name (`R4/aliasCollides`, which agreed with
+	// PostgreSQL at base by COINCIDENCE: `i.id < 150` and `i.amount < 150`
+	// select the same rows of lat_item; the LT seam table's `aliasCollides/ineq`
+	// cell shows the wrong value the decline produced) — and a lifted column
+	// the ENCLOSING relation also publishes (#1130), decided on the annotated
+	// plan so a base outer relation is seen too. The three DAG arms answered
+	// four of these before; a refusal is a property of the plan (§1q's rule).
+	"R2/boundLiftedFrac":     {l1BoundNoKey},
+	"R2/boundLiftedPlain":    {l1BoundNoKey},
+	"R4/distinctBody":        {l1LiftedRefCannotPublish},
+	"R4/aliasCollides":       {l1LiftedRefCannotPublish},
+	"R4/bareStar":            {l1LiftedRefCannotPublish},
+	"R5/ctlPlainUnderStar":   {l1LiftedRefCannotPublish},
+	"R4/outerContestsName":   {l1LiftedRefContested},
 	"R4/groupedBody":         {l1LiftedRefNotPublished},
 	"R4/setopBody":           {l1FromlessSetOpBody},
 	"R5/aggUnderBareStar":    {l1LiftedRefNotPublished},
@@ -637,8 +664,6 @@ var l1RefusalPins = map[string][]string{
 	"LAT/left/winarg":          {l1OuterRefOutsideWhere},
 	"LAT/left/winord":          {l1OuterRefOutsideWhere},
 	"LAT/left/winpart":         {l1OuterRefOutsideWhere},
-	"LAT/qstar/groupedLimit":   {l1QStarBoundNotPerRow},
-	"LAT/qstar/orderLimit":     {l1QStarBoundNotPerRow},
 	"LAT/star/agg":             {l1StarOrdinal},
 	"LAT/star/grouped":         {l1StarOrdinal},
 	"LAT/star/groupedLimit":    {l1StarOrdinal},
@@ -687,14 +712,6 @@ var l1ArmPins = map[string]map[string]string{
 	// writes a star over this join, so the materialization DECLINES (round 4)
 	// and the two single-process arms answer what they answered at c34cdbcb.
 	// The three DAG arms never needed it.
-	"R3/liftedStar": {
-		"single":      "rows=3 NULL | NULL | NULL",
-		"spilled512k": "rows=3 NULL | NULL | NULL",
-	},
-	"R4/outerContestsName": {
-		"single":      "rows=3 1,NULL | 2,NULL | 3,NULL",
-		"spilled512k": "rows=3 1,NULL | 2,NULL | 3,NULL",
-	},
 	// R4/bareStar's three DAG arms REFUSE since arc JR (#1153): the lift's
 	// materialization declines under the enclosing star, so the residual names
 	// a column the fragment's declared sides do not publish, and the worker
@@ -703,15 +720,6 @@ var l1ArmPins = map[string]map[string]string{
 	// disposition is what makes the answer right — a loud refusal replacing a
 	// base-WRONG answer is not a regression, and PostgreSQL's nine rows are
 	// recorded beside both.
-	"R4/bareStar": {
-		"dag":          `ERR ~join ON residual "i.amount < o.total" on a left join is not evaluable at the join: its reference i.amount resolves on neither side`,
-		"dag-shuffled": `ERR ~join ON residual "i.amount < o.total" on a left join is not evaluable at the join: its reference i.amount resolves on neither side`,
-		"dag-morsel4":  `ERR ~join ON residual "i.amount < o.total" on a left join is not evaluable at the join: its reference i.amount resolves on neither side`,
-	},
-	"R4/outerStar": {
-		"single":      "rows=3 1,Alice,150 | 2,Bob,200 | 3,Carol,0",
-		"spilled512k": "rows=3 1,Alice,150 | 2,Bob,200 | 3,Carol,0",
-	},
 	// ROUND 5's control: a NON-aggregated body under the same enclosing star.
 	// The star decline is CORRECT for it — the materialized column would enter
 	// the star's published list — so the two single-process arms keep the
@@ -720,10 +728,6 @@ var l1ArmPins = map[string]map[string]string{
 	// byte-identical here: moving the star test from a pre-loop return into
 	// the decline arm changed nothing about this cell, which is what makes it
 	// the control for B1 rather than a second finding.
-	"R5/ctlPlainUnderStar": {
-		"single":      "rows=3 1,NULL | 2,NULL | 3,NULL",
-		"spilled512k": "rows=3 1,NULL | 2,NULL | 3,NULL",
-	},
 	// A LIFTED non-equality predicate now ANSWERS on the two single-process
 	// arms (round 3): the inner columns it names are published by the body
 	// under their OWN names, which is the evaluation point the DAG's stage
@@ -750,19 +754,24 @@ var l1ArmPins = map[string]map[string]string{
 		"dag":         "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
 		"dag-morsel4": "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
 	},
+	// ARC LT: the two single-process arms answer PostgreSQL's rows for the
+	// bounded spellings now (the bound is per outer row), and the three DAG
+	// arms take the disposition their UNBOUNDED twin `R2/collideWinNoBound`
+	// has always had — the OUTER window keyed on `o.id` over a lateral join
+	// binds the wrong arm on the DAG (ADR-0026 §8j's LATERAL-producer residue,
+	// `distributed`). For `collideWinBound` that is a move from a DAG REFUSAL
+	// (`ORDER BY "s.m" is not a column of its input`, incidental to the
+	// whole-relation bound's stage shape) to the twin's wrong rows; recorded
+	// as such in arc LT's notes, not hidden.
 	"R2/collideWinArg": {
-		"dag":          "rows=2 1,NULL | 2,NULL",
-		"dag-morsel4":  "rows=2 1,NULL | 2,NULL",
-		"dag-shuffled": "rows=2 1,NULL | 2,NULL",
-		"single":       "rows=2 1,2 | 2,4",
-		"spilled512k":  "rows=2 1,2 | 2,4",
+		"dag":          "rows=4 1,NULL | 1,NULL | 2,NULL | 2,NULL",
+		"dag-morsel4":  "rows=4 1,NULL | 1,NULL | 2,NULL | 2,NULL",
+		"dag-shuffled": "rows=4 1,NULL | 1,NULL | 2,NULL | 2,NULL",
 	},
 	"R2/collideWinBound": {
-		"dag":          "ERR ~window: ORDER BY \"s.m\" is not a column of its input",
-		"dag-morsel4":  "ERR ~window: ORDER BY \"s.m\" is not a column of its input",
-		"dag-shuffled": "ERR ~window: ORDER BY \"s.m\" is not a column of its input",
-		"single":       "rows=2 1,2,1 | 2,4,1",
-		"spilled512k":  "rows=2 1,2,1 | 2,4,1",
+		"dag":          "rows=4 1,1,1 | 1,1,2 | 2,2,1 | 2,2,2",
+		"dag-morsel4":  "rows=4 1,1,1 | 1,1,2 | 2,2,1 | 2,2,2",
+		"dag-shuffled": "rows=4 1,1,1 | 1,1,2 | 2,2,1 | 2,2,2",
 	},
 	"R2/collideWinNoBound": {
 		"dag":          "rows=4 1,1,1 | 1,1,2 | 2,2,1 | 2,2,2",
@@ -800,38 +809,24 @@ var l1RefusesLikePostgres = map[string]string{
 }
 
 var l1ValuePins = map[string]string{
-	"R4/bareStar":                "rows=3 1,Alice,150,NULL | 2,Bob,200,NULL | 3,Carol,0,NULL",
-	"R4/distinctBody":            "rows=3 1,NULL | 2,NULL | 3,NULL",
-	"R4/groupedBody":             "rows=3 1,NULL | 2,NULL | 3,NULL",
-	"LAT/comma/groupedLimit":     "rows=1 2,Doohickey,125",
-	"LAT/comma/groupedOffset":    "rows=3 1,Gadget,100 | 1,Widget,50 | 2,Widget,75",
-	"LAT/comma/limitOffset":      "rows=1 2,75",
-	"LAT/comma/limitOnly":        "rows=1 1,50",
-	"LAT/comma/orderLimit":       "rows=1 2,125",
-	"LAT/comma/orderLimit2":      "rows=2 1,100 | 2,125",
-	"LAT/comma/orderOffset":      "rows=3 1,100 | 1,50 | 2,75",
-	"LAT/inner/groupedLimit":     "rows=1 2,Doohickey,125",
-	"LAT/inner/groupedOffset":    "rows=3 1,Gadget,100 | 1,Widget,50 | 2,Widget,75",
-	"LAT/inner/limitOffset":      "rows=1 2,75",
-	"LAT/inner/limitOnly":        "rows=1 1,50",
-	"LAT/inner/orderLimit":       "rows=1 2,125",
-	"LAT/inner/orderLimit2":      "rows=2 1,100 | 2,125",
-	"LAT/inner/orderOffset":      "rows=3 1,100 | 1,50 | 2,75",
-	"LAT/joinInner/groupedLimit": "rows=2 2,Doohickey,125 | 2,Doohickey,125",
-	"LAT/joinInner/orderLimit":   "rows=2 2,125 | 2,125",
-	"LAT/joinLeft/groupedLimit":  "rows=2 2,Doohickey,125 | 2,Doohickey,125",
-	"LAT/joinLeft/orderLimit":    "rows=2 2,125 | 2,125",
-	"LAT/left/groupedLimit":      "rows=3 1,NULL,NULL | 2,Doohickey,125 | 3,NULL,NULL",
-	"LAT/left/groupedOffset":     "rows=4 1,Gadget,100 | 1,Widget,50 | 2,Widget,75 | 3,NULL,NULL",
-	"LAT/left/limitOffset":       "rows=3 1,NULL | 2,75 | 3,NULL",
-	"LAT/left/limitOnly":         "rows=3 1,50 | 2,NULL | 3,NULL",
-	"LAT/left/orderLimit":        "rows=3 1,NULL | 2,125 | 3,NULL",
-	"LAT/left/orderLimit2":       "rows=3 1,100 | 2,125 | 3,NULL",
-	"LAT/left/orderOffset":       "rows=4 1,100 | 1,50 | 2,75 | 3,NULL",
-	"R2/boundLiftedFrac":         "rows=0 ",
-	"R2/boundLiftedPlain":        "rows=1 2,125",
-	"R2/noCollideWinBound":       "rows=2 1,100,1 | 2,125,1",
-	"R2/twoBounds":               "rows=0 ",
+	"R4/groupedBody": "rows=3 1,NULL | 2,NULL | 3,NULL",
+}
+
+// l1UnorderedBound names the cells whose body carries a LIMIT with NO ORDER
+// BY: which row survives is unspecified on both engines (ADR-0013's class),
+// so the ROW COUNT is asserted and the values are not. They answered a wrong
+// COUNT until arc LT (one row for PostgreSQL's two).
+var l1UnorderedBound = map[string]bool{
+	"LAT/inner/limitOnly": true,
+	"LAT/left/limitOnly":  true,
+	"LAT/comma/limitOnly": true,
+}
+
+func l1RowCount(s string) string {
+	if i := strings.Index(s, " "); i > 0 {
+		return s[:i]
+	}
+	return s
 }
 
 func TestArcL1LateralAndWindowScopeAnswersPostgresOnEveryArm(t *testing.T) {
@@ -913,6 +908,13 @@ func TestArcL1LateralAndWindowScopeAnswersPostgresOnEveryArm(t *testing.T) {
 					if got != pin {
 						t.Errorf("%s\n  arm  %s\n  got  %s\n  pinned %s (PostgreSQL answers %s)",
 							tc.sql, arm.name, got, pin, want)
+					}
+					continue
+				}
+				if l1UnorderedBound[tc.name] {
+					if l1RowCount(got) != l1RowCount(want) {
+						t.Errorf("%s\n  arm  %s\n  got  %s\n  want %s rows (PostgreSQL 17.11; the row is unspecified)",
+							tc.sql, arm.name, got, l1RowCount(want))
 					}
 					continue
 				}

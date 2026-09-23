@@ -272,3 +272,21 @@ func substituteEmptyInput(node plansql.Node) (plansql.Node, bool) {
 	}
 	return out, true
 }
+
+// lateralHavingHoldsOnEmpty evaluates an ungrouped body's HAVING over the
+// default row — every aggregate replaced by its empty-input value — and
+// reports whether it holds (keep) and whether it could be decided at all.
+// A NULL is a real answer and it does not hold, exactly as a HAVING that
+// evaluates to NULL removes the group in PostgreSQL.
+func lateralHavingHoldsOnEmpty(having plansql.Node) (keep, decided bool) {
+	sub, ok := substituteEmptyInput(having)
+	if !ok {
+		return false, false
+	}
+	val, ok := foldConstant(sub)
+	if !ok {
+		return false, false
+	}
+	b, isBool := val.(bool)
+	return isBool && b, true
+}

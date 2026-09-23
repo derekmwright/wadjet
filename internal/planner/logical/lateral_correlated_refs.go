@@ -110,10 +110,15 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 	if info == nil {
 		return nil, nil
 	}
+	// A BARE star only. A QUALIFIED star (`s.*`) reads the lateral's own
+	// published list, from which `Node.StarLiftedRefCols` hides the slot, so
+	// the materialization is clean under it (ADR-0021 §1q); reading it as an
+	// enclosing star refused — and, before arc LT, declined to NULL pads —
+	// a shape the DAG arms answered right (`R3/liftedStar`).
 	enclosingStar := false
 	if outer != nil {
 		for _, c := range outer.Columns {
-			if c.Star {
+			if c.Star && c.TableRef == "" {
 				enclosingStar = true
 			}
 		}
@@ -183,12 +188,35 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 				sqlerr.Quote(strings.TrimSpace(cp)))
 		}
 		// A CONTESTED NAME, a DISTINCT the widened projection would change, or
-		// an enclosing STAR whose published list it would enter, DECLINES: the
-		// query keeps the disposition it had before this repair existed, which
-		// is never a new wrong answer. (A GROUPED body needs no arm here — it
-		// aggregates, so the refusal above has already fired.)
+		// an enclosing STAR whose published list it would enter, is REFUSED
+		// (arc LT; #1131, #1130). Each used to DECLINE to the disposition it
+		// had before the materialization existed — and that disposition was a
+		// plausible wrong row set, not a right one: the predicate read a
+		// column the body dropped (`rows=0`, or a NULL pad per outer row), or
+		// an alias holding another value, on every arm, and the L1 fixture
+		// agreed with PostgreSQL by coincidence in one of them (`aliasCollides`,
+		// where `i.id < 150` and `i.amount < 150` select the same rows). The
+		// rule is ADR-0021 §1s's: a body with no equality key is not
+		// key-partitionable, PostgreSQL evaluates it per outer row, and a
+		// relation-valued body has no per-row runner here yet — so it is loud.
+		// (A GROUPED body needs no arm here — it aggregates, so the refusal
+		// above has already fired.)
 		if contested || info.Distinct || enclosingStar {
-			return nil, nil
+			why := "the enclosing query writes a star over this join, which would publish the materialized column"
+			switch {
+			case contested:
+				why = "the column it names is also published by the enclosing relation or by the body's own alias list, so the join could not tell the two apart"
+			case info.Distinct:
+				why = "the body carries DISTINCT, and materializing the column would change the DISTINCT key"
+			}
+			return nil, sqlerr.New("0A000",
+				"LATERAL body's correlated predicate %s is not an equality on an inner column: "+
+					"it is evaluated over the body's OUTPUT, which would have to publish the column it "+
+					"names, and here it cannot — %s. PostgreSQL evaluates the body per outer row, which "+
+					"this engine does not do for this shape. Correlate on an equality, name the columns "+
+					"instead of a star, or restate the predicate in the enclosing WHERE over the "+
+					"lateral's output",
+				sqlerr.Quote(strings.TrimSpace(cp)), why)
 		}
 		// PUBLISHED UNDER ITS OWN NAME, and the predicate is NOT respelled.
 		// The two paths resolve it differently and only the source name is

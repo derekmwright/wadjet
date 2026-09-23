@@ -81,11 +81,19 @@ func TestTheAggregatedRefusalPrecedesEveryLiftedRefDecline(t *testing.T) {
 					err, tc.agg)
 			}
 			// The CONTROL is the same trigger with a body that does NOT
-			// aggregate: there the decline is the right answer and the query
-			// must still plan.
+			// aggregate. Since arc LT the four declines are REFUSALS of their
+			// own (ADR-0021 §1s, `which would have to publish the column it
+			// names`), so the control either plans — the enclosing-relation
+			// trigger is decided on the ANNOTATED plan, which this builder
+			// does not produce — or refuses with the lifted-predicate sentence;
+			// what it must never carry is the AGGREGATED sentence, which is the
+			// order this test exists to hold.
 			if _, err := buildLiftedRefPlan(t, tc.ctl); err != nil {
-				t.Errorf("the NON-aggregated control under %s no longer plans: %v\n  %s",
-					tc.name, err, tc.ctl)
+				if strings.Contains(err.Error(), "AGGREGATES and its correlated predicate") ||
+					!strings.Contains(err.Error(), "which would have to publish the column it names") {
+					t.Errorf("the NON-aggregated control under %s refused with the wrong sentence: %v\n  %s",
+						tc.name, err, tc.ctl)
+				}
 			}
 		})
 	}

@@ -115,6 +115,12 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	if err := logical.RefuseUnresolvedOrdinalSortKeys(node); err != nil {
 		return nil, err
 	}
+	// A lifted predicate whose column the enclosing relation also publishes
+	// (arc LT, #1130): decided on the ANNOTATED plan, the same door as the two
+	// refusals above.
+	if err := logical.RefuseContestedLiftedRefs(node); err != nil {
+		return nil, err
+	}
 	// …and a COLUMN-ALIAS LIST longer than the `SELECT *` body it renames, for
 	// the same reason and at the same place: the width is a pass later than
 	// the builder, so PostgreSQL's 42P10 is raised a pass later too (#958,

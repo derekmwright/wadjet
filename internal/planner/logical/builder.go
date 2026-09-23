@@ -2171,6 +2171,36 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	// What an EMPTY inner input means for this lateral, decided BEFORE the
 	// key injection below adds a GROUP BY of its own. See lateralEmptyInput.
 	empty := lateralEmptyInputOf(subInfo, hasAgg, len(correlatedParts) > 0)
+	// An UNGROUPED aggregate with a HAVING yields its one row only where the
+	// HAVING holds over that row — and over an EMPTY input that row is the
+	// default row (COUNT 0, everything else NULL). The pad below is that row;
+	// keeping it under a HAVING the default row FAILS answered `1,NULL` for
+	// every unmatched outer row on the INNER spelling where PostgreSQL drops
+	// it (arc LT seam table, `aggHaving/eq`). So the HAVING is folded over the
+	// default row: FALSE or NULL removes the pad, which is then right on the
+	// INNER and the LEFT spelling alike (the LEFT join pads NULL where the
+	// HAVING removed the group, as PostgreSQL does).
+	//
+	// A HAVING the default row PASSES (`HAVING COUNT(*) < 2`) is REFUSED: the
+	// pad would have to be given to an outer row with NO group (PostgreSQL's
+	// default row, `4,0`) and withheld from one whose group EXISTED and failed
+	// the HAVING (PostgreSQL drops it, or pads NULL on LEFT) — and after the
+	// decorrelation the two are the same unmatched key. Measured: `1,0` for
+	// every such row where PostgreSQL answers nothing. A HAVING this cannot
+	// fold is refused for the same reason rather than guessed.
+	if empty.ungroupedAggregate && subInfo.HavingExpr != nil {
+		keep, decided := lateralHavingHoldsOnEmpty(subInfo.HavingExpr)
+		if !decided || keep {
+			return nil, "", lateralEmptyInput{}, nil, nil, sqlerr.New("0A000",
+				"LATERAL body is an ungrouped aggregate whose HAVING (%s) holds over an empty "+
+					"input: PostgreSQL then yields the body's one row for an outer row with no "+
+					"matches and no row for one whose matches fail the HAVING, and after the "+
+					"correlation is lowered to a join those two outer rows cannot be told apart. "+
+					"Write the condition in the enclosing WHERE over the lateral's output instead",
+				sqlerr.Quote(strings.TrimSpace(subInfo.Having)))
+		}
+		empty = lateralEmptyInput{}
+	}
 	// keyRename maps a correlated inner column to the name the subquery's
 	// SELECT list publishes it under, when the two differ. See the comment on
 	// lateralPublishedKeyName below.
@@ -2187,6 +2217,10 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	// starLifted are slots the join must EMIT (a lifted predicate above it
 	// reads them) and no STAR may publish. See publishLiftedRefs.
 	var starLifted []string
+	// injectedLead is how many items the injection PREPENDED to the body's
+	// list, so an ORDINAL in the body's own ORDER BY still counts the list
+	// the query wrote (lateralWindowOrder).
+	injectedLead := 0
 	if len(correlatedParts) > 0 {
 		// The inner correlation key must be SELECTED, for non-aggregated laterals too,
 		// and GROUPED only when the subquery aggregates (#591, #767 part 2).
@@ -2362,6 +2396,18 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 		// Keys first, mirroring the order buildAggregate emits them in, so
 		// the projection above stays elidable in the ordinary shape.
 		subInfo.Columns = append(injected, subInfo.Columns...)
+		injectedLead = len(injected)
+	}
+
+	// A BOUND IS APPLIED PER OUTER ROW by travelling with the correlation
+	// key: the body's ORDER BY / LIMIT / OFFSET become a per-key
+	// `ROW_NUMBER()` and a QUALIFY over it, and a bound with no equality key
+	// to travel with is refused (#1019, lateral_per_row_bound.go). Done HERE,
+	// after the key injection, because over an aggregated body the window
+	// reads what the AGGREGATE publishes the key under — which is what that
+	// loop just decided.
+	if err := lateralBoundPerOuterRow(subInfo, correlatedParts, leftAliases, aggregates, keyRename, injectedLead); err != nil {
+		return nil, "", lateralEmptyInput{}, nil, nil, err
 	}
 
 	if err := refuseDecorrelatedWindow(subInfo, correlatedParts, leftAliases); err != nil {
@@ -2372,17 +2418,12 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	if err != nil {
 		return nil, "", lateralEmptyInput{}, nil, nil, fmt.Errorf("building LATERAL subquery plan: %w", err)
 	}
-	// A BOUND THE DECORRELATION CANNOT APPLY PER OUTER ROW is recorded on the
-	// body rather than refused (#1079, #1019's class). See
-	// lateralBoundIsNotPerOuterRow.
-	boundNotPerRow := lateralBoundIsNotPerOuterRow(subInfo, correlatedParts)
 	// The body publishes its VISIBLE list, which for a LATERAL means the
 	// user's items and the correlation slot the join keys on — but never a key
 	// the body materialized for its own `ORDER BY`, which the sort below reads
 	// and nothing above does (#991, block_visible_output.go). Where there is
 	// none the plan is unchanged.
 	right = dropBlockHiddenSlots(right)
-	right.LateralBoundNotPerRow = boundNotPerRow
 	// An AGGREGATED lateral groups on the key, and an aggregate publishes a
 	// group key under the key's own text -- which is the collision the slot
 	// exists to avoid, one operator lower. Record the slot as the key's
@@ -2636,72 +2677,6 @@ func refuseDecorrelatedWindow(info *plansql.SelectInfo, correlatedParts []string
 			plansql.WindowOutputName(c), strings.Join(sortedKeyNames(keys), ", "))
 	}
 	return nil
-}
-
-// lateralBoundIsNotPerOuterRow reports whether this correlated LATERAL's body
-// carries a bound the decorrelation cannot honour.
-//
-// PostgreSQL evaluates a LATERAL body ONCE PER OUTER ROW, so its LIMIT bounds
-// each evaluation: `JOIN LATERAL (SELECT p FROM item WHERE order_id = o.id
-// ORDER BY amount LIMIT 1) s` yields one row for EVERY order. The
-// decorrelation turns the correlation into a join condition, which makes the
-// body ONE relation joined once — and the bound then applies to the whole of
-// it, so the same statement answered ONE row for PostgreSQL's two, silently,
-// on every arm and in every spelling of the consumer (`SELECT *`, an explicit
-// list, `s.*`).
-//
-// Honouring it means the bound travelling WITH the correlation key as a
-// per-key top-N, which is ADR-0021's territory and not a bound this pass can
-// move. Until then the shape is LOUD: a plausible wrong row count is the one
-// thing a client cannot detect, and `0A000` says the engine does not implement
-// what PostgreSQL answers rather than that the query is wrong (#1079).
-//
-// An UNCORRELATED lateral answers false: with no correlated part there is no
-// decorrelation, the body is evaluated once, and its own bound means exactly
-// what it says. So does a bound that cannot change any answer — `OFFSET 0`,
-// `LIMIT ALL`, an absent value — because the two forms then agree by
-// construction.
-//
-// IT IS NOT A REFUSAL, and round 2's was wrong for a measured reason: the
-// bound's EXISTENCE is not the defect. `… ORDER BY p LIMIT 10` over a body
-// that never yields ten rows for one outer key answers PostgreSQL's rows
-// either way, and refusing it replaced a right answer with an error on five
-// arms. Whether a bound BINDS is a property of the DATA, which no plan-time
-// test can decide, so the shape keeps the disposition it had — the row count
-// PINNED with PostgreSQL's answer recorded beside it — and only the consumer
-// that cannot state the block's relation at all declines: a QUALIFIED star
-// over the body, which would otherwise publish a relation whose row count is
-// not the one the query wrote (relationOutputColumns).
-//
-// Honouring the bound means it travelling WITH the correlation key as a
-// per-key top-N — a `ROW_NUMBER() OVER (PARTITION BY <key> …)` filter in place
-// of the LIMIT — which is ADR-0021's territory and #1019's own repair.
-func lateralBoundIsNotPerOuterRow(info *plansql.SelectInfo, correlatedParts []string) bool {
-	if info == nil || len(correlatedParts) == 0 {
-		return false
-	}
-	return limitCanBind(info.Limit) || offsetCanBind(info.Offset)
-}
-
-// limitCanBind reports whether a LIMIT text could remove a row: an absent
-// bound and `LIMIT ALL` cannot, `LIMIT 0` removes every row, and anything this
-// cannot read as a constant is assumed to bind.
-func limitCanBind(text string) bool {
-	t := strings.TrimSpace(text)
-	return t != "" && !strings.EqualFold(t, "ALL")
-}
-
-// offsetCanBind reports whether an OFFSET text could remove a row: `OFFSET 0`
-// skips nothing, and anything this cannot read as a constant is assumed to.
-func offsetCanBind(text string) bool {
-	t := strings.TrimSpace(text)
-	if t == "" {
-		return false
-	}
-	if n, err := strconv.Atoi(t); err == nil {
-		return n != 0
-	}
-	return true
 }
 
 // sortedKeyNames renders a correlation-key set in a stable order for a message.

@@ -74,53 +74,12 @@ var o2Pin = map[string]map[string]string{
 		"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 product:STRING count(*) + 1:INT64] rows=4 | 1,Alice,150,Gadget,2 | 1,Alice,150,Widget,2 | 2,Bob,200,Doohickey,2 | 2,Bob,200,Widget,2",
 	},
 
-	// A CORRELATED LATERAL'S OWN BOUND IS NOT APPLIED PER OUTER ROW (#1019).
-	// PostgreSQL evaluates the body once per outer row, so its `LIMIT` bounds
-	// each row's own result; the decorrelation makes the body ONE relation
-	// joined once and the bound applies to the whole of it — three rows for
-	// PostgreSQL's four. Honouring it means the bound travelling WITH the
-	// correlation key as a per-key top-N (a `ROW_NUMBER() OVER (PARTITION BY
-	// <key> …)` filter in place of the LIMIT), which is ADR-0021's territory.
-	//
-	// IT IS PINNED AND NOT REFUSED, and round 2's refusal was wrong for a
-	// measured reason: whether a bound BINDS is a property of the DATA, so a
-	// plan-time refusal on the bound's EXISTENCE turned `LIMIT 10` over a body
-	// that never yields ten rows for one key — right on five arms at base —
-	// into an error. Only the QUALIFIED star declines now, because it is the
-	// one consumer that would publish this body as a relation whose ROW COUNT
-	// is not the one the query wrote (o2Refuses).
-	//
-	// PRE-EXISTING: byte-identical at base on all five arms, except
-	// `inner-order-hidden-limit/star`, where base ALSO published `__sortkey_0`
-	// — that half is closed (#991) and the row count is what is left.
-	"lateral/inner-order-pub-limit/star": {
-		"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Doohickey",
-		"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Doohickey",
-		"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Doohickey",
-		"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Doohickey",
-		"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Doohickey",
-	},
-	"lateral/inner-order-pub-limit/list": {
-		"single":       "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Doohickey",
-		"spilled512k":  "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Doohickey",
-		"dag":          "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Doohickey",
-		"dag-shuffled": "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Doohickey",
-		"dag-morsel4":  "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Doohickey",
-	},
-	"lateral/inner-order-hidden-limit/star": {
-		"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Widget",
-		"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Widget",
-		"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Widget",
-		"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Widget",
-		"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 product:STRING] rows=3 | 1,Alice,150,1,Gadget | 1,Alice,150,1,Widget | 2,Bob,200,2,Widget",
-	},
-	"lateral/inner-order-hidden-limit/list": {
-		"single":       "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Widget",
-		"spilled512k":  "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Widget",
-		"dag":          "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Widget",
-		"dag-shuffled": "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Widget",
-		"dag-morsel4":  "cols=[order_id:INT64 product:STRING] rows=3 | 1,Gadget | 1,Widget | 2,Widget",
-	},
+	// A CORRELATED LATERAL'S OWN BOUND IS APPLIED PER OUTER ROW since arc LT
+	// (#1019, ADR-0021 §1s): the four `lateral/inner-order-*-limit/{star,list}`
+	// pins that stood here — three rows for PostgreSQL's four, byte-identical
+	// on five arms from base to 51addfb6 — are deleted, and the cells assert
+	// PostgreSQL's row set in arc_o2_postgres_answers_test.go. The deletion is
+	// the proof.
 
 	// A NESTED BLOCK'S RENAME WAS LOST ON THE DAG — the inner block publishes
 	// `product AS p`, the outer republishes `z.p`, and the three DAG arms

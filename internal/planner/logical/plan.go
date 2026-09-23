@@ -371,20 +371,6 @@ type Node struct {
 	// are the same slots under the first half of that rule only
 	// (ADR-0021 §1q, round 3).
 	StarLiftedRefCols []string
-	// LateralBoundNotPerRow marks a DECORRELATED LATERAL's body that carries
-	// a `LIMIT` or `OFFSET` the decorrelation cannot apply per outer row:
-	// PostgreSQL evaluates the body once per OUTER ROW, so its bound applies
-	// to each row's own result, and the join applies it to the whole inner
-	// relation once (#1019, #1079).
-	//
-	// It is a MARK and not a refusal, because whether the bound BINDS is a
-	// property of the data: `LIMIT 10` over a body that never yields ten rows
-	// for one key answers PostgreSQL's rows either way. The one consumer that
-	// declines on it is the QUALIFIED star, which would otherwise publish this
-	// body as a relation whose ROW COUNT is not the one the query wrote
-	// (relationOutputColumns) — every other spelling keeps the disposition it
-	// had, with the row count pinned and PostgreSQL's answer beside it.
-	LateralBoundNotPerRow bool
 	// LateralSubtree marks the node a DECORRELATED LATERAL's lowering built —
 	// the side of the join that carries the columns it MINTED.
 	//

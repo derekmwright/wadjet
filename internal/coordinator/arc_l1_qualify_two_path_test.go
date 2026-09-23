@@ -124,14 +124,10 @@ var l1QualifyRefuses = map[string]string{
 // l1QualifyPins holds a cell whose divergence is a DIFFERENT defect, with the
 // measurement that localises it. A pin that starts agreeing FAILS.
 var l1QualifyPins = map[string]string{
-	// A QUALIFY over a correlated LATERAL that carries its own bound. The
-	// bound is applied to the WHOLE inner relation (#1019 is deferred — see
-	// TestArcL1LateralAndWindowScopeAnswersPostgresOnEveryArm's `LAT/*/orderLimit*`
-	// pins), so the body hands the clause the two largest amounts overall
-	// rather than each order's two, and `rn <= 1` then keeps the largest where
-	// DuckDB keeps each order's smallest. The clause itself is right: the same
-	// QUALIFY over an UNBOUNDED body answers DuckDB's rows.
-	"boundAndOuterQualify": "rows=2 1,100 | 2,125",
+	// `boundAndOuterQualify` was pinned here while #1019 was open — the body's
+	// bound was applied to the whole inner relation, so the clause kept the
+	// largest amount overall. Arc LT applies the bound per outer row and the
+	// cell asserts DuckDB's `1,50 | 2,75` above; the deleted pin is the proof.
 }
 
 func TestArcL1QualifyAnswersDuckDBOnEveryArm(t *testing.T) {
