@@ -3,6 +3,7 @@
 package test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -38,10 +39,12 @@ func TestSessionFunctions(t *testing.T) {
 		{"SELECT current_database()", "current_database", "wadjet"},
 		{"SELECT current_schema", "current_schema", "public"},
 		{"SELECT current_schema()", "current_schema", "public"},
-		{"SELECT current_schemas(false)", "current_schemas", "{public}"},
-		{"SELECT current_schemas(true)", "current_schemas", "{pg_catalog,public}"},
-		{"SELECT version()", "version", "PostgreSQL 15.0 (Wadjet analytical query engine)"},
-		{"SELECT version() AS v", "v", "PostgreSQL 15.0 (Wadjet analytical query engine)"},
+		// current_schemas is text[] (arc PC); the embedded API hands the
+		// array back as a slice, so the expectation is its elements joined.
+		{"SELECT current_schemas(false)", "current_schemas", "public"},
+		{"SELECT current_schemas(true)", "current_schemas", "pg_catalog,public"},
+		{"SELECT version()", "version", "PostgreSQL 17.0 (Wadjet analytical query engine)"},
+		{"SELECT version() AS v", "v", "PostgreSQL 17.0 (Wadjet analytical query engine)"},
 	}
 
 	for _, tt := range tests {
@@ -54,7 +57,22 @@ func TestSessionFunctions(t *testing.T) {
 			if !ok {
 				t.Fatalf("column %q missing; row = %v", tt.wantCol, rows[0])
 			}
-			if s, _ := got.(string); s != tt.wantVal {
+			var s string
+			switch v := got.(type) {
+			case string:
+				s = v
+			case []string:
+				s = strings.Join(v, ",")
+			case []any:
+				parts := make([]string, len(v))
+				for i, e := range v {
+					parts[i] = fmt.Sprint(e)
+				}
+				s = strings.Join(parts, ",")
+			default:
+				s = fmt.Sprint(v)
+			}
+			if s != tt.wantVal {
 				t.Errorf("value = %v, want %q", got, tt.wantVal)
 			}
 		})
