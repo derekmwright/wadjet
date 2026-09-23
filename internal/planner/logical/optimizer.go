@@ -3582,68 +3582,37 @@ func flattenASTNodes(node plansql.Node, result *[]plansql.Node) {
 	}
 }
 
-// residualSidesCollide reports whether a correlated NON-equality condition
-// would reach the join's residual as two references that differ by SIDE only.
+// residualSidesCollide reports whether a correlated NON-equality condition's
+// inner column is published through a COLUMN-ALIAS LIST under the outer
+// column's name (`FROM dc_in AS b(k, tag, total) … total > o.total`).
 //
-// The residual travels to the stage DAG as TEXT, rendered `outer OP inner`
-// with each side spelled as its arm emits it. When the inner column carries
-// the same bare name as the outer one and the body's FROM RENAMES what it
-// publishes (a derived table, a CTE reference, a column-alias list), both
-// references render as the same bare name — `total < total` — and the stage
-// re-spelling asks each arm which one moved it: only the renaming build arm
-// does, so BOTH leaves were re-spelled to the build's source column,
-// `b.amt < b.amt`, false for every pair. The DAG arms answered EXISTS with no
-// rows and NOT EXISTS with every row, where the single-process evaluator (which
-// binds the two leaves by position) and PostgreSQL answer `1 | 2` (arc DC
-// round 4, Codex review B2; the qualified `b.total > o.total` spelling reached
-// the same collapse before this arc). Such a condition DECLINES the rewrite, and
-// the subquery runs per outer row, which answers PostgreSQL's rows on every arm.
-// The same names over base tables (TPC-H Q21's `l3.l_suppkey <> l1.l_suppkey`)
-// are not renamed by either arm and keep their spelling, so they are not this
-// case and still lower.
+// The collapse such a residual used to reach on the stage DAG — both leaves
+// re-spelled to one stage column — is guarded where it happens now
+// (dagplan.residualWithStageSpellings refuses the plan, and the coordinator
+// runs it single-process), and that guard covers every renaming spelling. It
+// does not cover this one: here the decorrelated build side itself cannot be
+// planned single-process (an alias list over a catalog table renames a `SELECT
+// *` the physical planner did not expand — a pre-existing refusal), so the
+// rewrite DECLINES and the subquery runs per outer row, which answers
+// PostgreSQL's rows on every arm (arc DC round 5; measured: without this,
+// only the `catalog_alias` cells regress, all to that refusal).
 func residualSidesCollide(outer, inner KeyRef, info *plansql.SelectInfo, ctes []plansql.CTEDef) bool {
 	if outer.Column == "" || !strings.EqualFold(outer.Column, inner.Column) {
 		return false
 	}
-	return bodyRenamesColumn(info, ctes, inner.Qualifier, inner.Column)
+	return aliasListPublishes(info, ctes, inner.Qualifier, inner.Column)
 }
 
-// bodyRenamesColumn reports whether a FROM item of the body that may publish
-// `col` publishes it under a name that is NOT its source column's — the
-// only shape whose stage re-spelling moves the name. A pass-through (`SELECT
-// id FROM t`, `WITH u AS (SELECT g AS did, id …)` for `id`) is not a rename
-// and keeps lowering on the DAG (arc D5's `control_cte_on_both_sides` is
-// that shape). Anything this cannot read — a star over a derived table's
-// own star, an unparseable body — counts as a rename, which only costs a
-// decline.
-func bodyRenamesColumn(info *plansql.SelectInfo, ctes []plansql.CTEDef, qualifier, col string) bool {
+// aliasListPublishes reports whether a FROM item of the body that may publish
+// `col` does so through a column-alias list — its own, or a referenced CTE's
+// column list.
+func aliasListPublishes(info *plansql.SelectInfo, ctes []plansql.CTEDef, qualifier, col string) bool {
 	cteByName := map[string]*plansql.CTEDef{}
 	for i := range ctes {
 		cteByName[strings.ToLower(ctes[i].Name)] = &ctes[i]
 	}
 	for i := range info.CTEs {
 		cteByName[strings.ToLower(info.CTEs[i].Name)] = &info.CTEs[i]
-	}
-	col = strings.ToLower(col)
-	bodyRenames := func(body *plansql.SelectInfo, err error) bool {
-		if err != nil || body == nil {
-			return true
-		}
-		for _, c := range body.Columns {
-			if c.Star {
-				continue // a star publishes its source names unchanged
-			}
-			name := strings.ToLower(c.Alias)
-			ref, isRef := c.ASTExpr.(*plansql.ColRef)
-			if name == "" && isRef {
-				name = strings.ToLower(ref.Column)
-			}
-			if name != col {
-				continue
-			}
-			return !isRef || !strings.EqualFold(ref.Column, col)
-		}
-		return false
 	}
 	item := func(t *plansql.TableRef) bool {
 		if qualifier != "" {
@@ -3657,20 +3626,15 @@ func bodyRenamesColumn(info *plansql.SelectInfo, ctes []plansql.CTEDef, qualifie
 		}
 		for _, a := range t.ColumnAliases {
 			if strings.EqualFold(a, col) {
-				return true // a column-alias list renames positionally
+				return true
 			}
 		}
-		name := strings.TrimSpace(t.Name)
-		if strings.HasPrefix(name, "(") {
-			return bodyRenames(t.SubSelect())
-		}
-		if c, ok := cteByName[strings.ToLower(name)]; ok {
+		if c, ok := cteByName[strings.ToLower(strings.TrimSpace(t.Name))]; ok {
 			for _, a := range c.Columns {
 				if strings.EqualFold(a, col) {
 					return true
 				}
 			}
-			return bodyRenames(c.BodySelect())
 		}
 		return false
 	}
