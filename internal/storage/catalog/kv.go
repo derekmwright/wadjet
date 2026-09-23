@@ -49,3 +49,14 @@ type RevisionReader interface {
 	// Revision returns the key's current revision, or ErrKeyNotFound.
 	Revision(key string) (uint64, error)
 }
+
+// GenerationReader is an OPTIONAL MetaKV capability: a number that changes
+// whenever ANY key in the store is written or deleted — the store's own
+// write sequence. It is what lets a cache derived from the WHOLE catalog
+// (the system catalog's snapshot of every table's definition, sysrows)
+// revalidate with one probe instead of a read per key. A store without it
+// leaves such a cache off; it never guesses with a clock.
+type GenerationReader interface {
+	// Generation returns the store's current write generation.
+	Generation() (uint64, error)
+}

@@ -708,6 +708,22 @@ func (c *Catalog) TableMetaRevision(name string) (uint64, bool) {
 	return rev, true
 }
 
+// Generation is the catalog store's write generation (GenerationReader): it
+// changes whenever any metadata key does, so a cache derived from every
+// table's definition is valid exactly while it holds. ok=false when the
+// store offers no generation; the caller then caches nothing.
+func (c *Catalog) Generation() (uint64, bool) {
+	gr, ok := c.kv.(GenerationReader)
+	if !ok {
+		return 0, false
+	}
+	gen, err := gr.Generation()
+	if err != nil {
+		return 0, false
+	}
+	return gen, true
+}
+
 // GetManifest validates the manifest key's KV REVISION on every call (#483).
 // The cache memoizes decoding only; never substitute a wall-clock staleness
 // window or rely on invalidations from this Catalog alone.

@@ -69,6 +69,22 @@ func (n *NATSKVAdapter) Delete(key string) error {
 	return nil
 }
 
+// Generation implements GenerationReader: the bucket's stream sequence,
+// which every put, update and delete of any key advances (a KV write is a
+// message on the bucket's stream, a delete a marker message). One stream
+// info request — not a read per key.
+func (n *NATSKVAdapter) Generation() (uint64, error) {
+	st, err := n.kv.Status(context.Background())
+	if err != nil {
+		return 0, fmt.Errorf("kv status: %w", err)
+	}
+	bs, ok := st.(*jetstream.KeyValueBucketStatus)
+	if !ok || bs.StreamInfo() == nil {
+		return 0, fmt.Errorf("kv status: no stream state")
+	}
+	return bs.StreamInfo().State.LastSeq, nil
+}
+
 func (n *NATSKVAdapter) List(prefix string) ([]string, error) {
 	allKeys, err := n.kv.Keys(context.Background())
 	if err != nil {

@@ -34,6 +34,77 @@ type snapshot struct {
 	// quadratic half of P1.
 	byOID  map[int64]*relInfo
 	byName map[string]*relInfo // schema + "." + name; a user table's name lower-cased
+	// populated memoizes each relation's rows over THIS snapshot (a
+	// pointer, so a per-session copy of the snapshot shares it). A cached
+	// snapshot is one catalog generation seen through one identity's view,
+	// so its rows are too; only a relation that reads the session is built
+	// per scan (sessionRelations).
+	populated *sync.Map // relation func name -> []map[string]any
+}
+
+// rowsOf is rel's rows over s, built once per snapshot. The rows are shared
+// by every scan that reads the same snapshot, which only converts them to
+// batches (Source.Next); nothing mutates them.
+func (s *snapshot) rowsOf(name string, pop func(*snapshot) []map[string]any) []map[string]any {
+	if s.populated == nil || sessionRelations[name] {
+		return pop(s)
+	}
+	if v, ok := s.populated.Load(name); ok {
+		return v.([]map[string]any)
+	}
+	rows := pop(s)
+	s.populated.Store(name, rows)
+	return rows
+}
+
+// sessionRelations read the SESSION (the connection's TLS state), which a
+// cached snapshot does not carry for anyone but the session that built it.
+var sessionRelations = map[string]bool{"pg_catalog.pg_stat_ssl": true}
+
+// snapshots caches the identity-viewed snapshot per catalog, for the
+// catalog's CURRENT generation only: a generation change drops every entry,
+// so the cache holds at most one generation's views and never serves a
+// definition a DDL replaced. Within a generation an entry is keyed by the
+// identity and the exact view it was built through (viewKey), so a policy
+// change — which changes the view — is a different key, never a stale hit.
+var snapshots sync.Map // *catalog.Catalog -> *snapshotsAt
+
+type snapshotsAt struct {
+	mu    sync.Mutex
+	gen   uint64
+	views map[string]*snapshot
+}
+
+// maxCachedViews bounds one generation's entries; past it the generation's
+// cache starts over rather than growing with every distinct identity.
+const maxCachedViews = 64
+
+func cachedSnapshot(cat *catalog.Catalog, gen uint64, key string) *snapshot {
+	v, ok := snapshots.Load(cat)
+	if !ok {
+		return nil
+	}
+	at := v.(*snapshotsAt)
+	at.mu.Lock()
+	defer at.mu.Unlock()
+	if at.gen != gen {
+		return nil
+	}
+	return at.views[key]
+}
+
+func storeSnapshot(cat *catalog.Catalog, gen uint64, key string, s *snapshot) {
+	v, _ := snapshots.LoadOrStore(cat, &snapshotsAt{gen: gen, views: map[string]*snapshot{}})
+	at := v.(*snapshotsAt)
+	at.mu.Lock()
+	defer at.mu.Unlock()
+	if at.gen != gen || len(at.views) >= maxCachedViews {
+		if gen < at.gen {
+			return // a slower scan of an older generation: keep the newer cache
+		}
+		at.gen, at.views = gen, map[string]*snapshot{}
+	}
+	at.views[key] = s
 }
 
 func (s *snapshot) index() {
@@ -119,6 +190,54 @@ func userTableCols(ctx context.Context, cat *catalog.Catalog, name string) ([]co
 	return cols, true
 }
 
+// userDefs is every user table's definition as of one catalog generation
+// (catalog.Generation): a scan whose generation is the cached one reads no
+// key at all — not the table list, not a revision per table — which is what
+// a live server over a thousand tables needs, since NATS KV has no
+// value-free revision probe and every listing is a keys consumer (P1, arc
+// PC round 3: `\d t` took 1.7 s against 36 ms for PostgreSQL). The
+// definitions are the identity-free half of the snapshot; which of them an
+// identity sees — VisibleTables, DeniedColumns, i.e. the policy — is applied
+// per scan in takeSnapshot and is never cached, so a policy change needs no
+// invalidation. Keyed by catalog, since tests and embedders open several.
+var userDefs sync.Map // *catalog.Catalog -> *userDefsAt
+
+type userDefsAt struct {
+	gen   uint64
+	names []string
+	cols  map[string][]colInfo
+}
+
+// userTables is the catalog's user tables and their column descriptors,
+// from the generation cache when the store's generation has not moved.
+// The generation is read BEFORE the catalog, so a write racing the read
+// can only make the cached entry newer than its generation, never older.
+func userTables(ctx context.Context, cat *catalog.Catalog) ([]string, map[string][]colInfo, uint64, bool, error) {
+	gen, genOK := cat.Generation()
+	if genOK {
+		if v, ok := userDefs.Load(cat); ok && v.(*userDefsAt).gen == gen {
+			d := v.(*userDefsAt)
+			return d.names, d.cols, gen, true, nil
+		}
+	}
+	names, err := cat.ListTables(ctx)
+	if err != nil {
+		return nil, nil, 0, false, err
+	}
+	cols := make(map[string][]colInfo, len(names))
+	kept := names[:0:0]
+	for _, name := range names {
+		if c, ok := userTableCols(ctx, cat, name); ok {
+			cols[name] = c
+			kept = append(kept, name)
+		}
+	}
+	if genOK {
+		userDefs.Store(cat, &userDefsAt{gen: gen, names: kept, cols: cols})
+	}
+	return kept, cols, gen, genOK, nil
+}
+
 // relInfo is one relation as the catalog describes it.
 type relInfo struct {
 	schema string
@@ -158,31 +277,69 @@ func takeSnapshot(ctx context.Context, cat *catalog.Catalog, rel *syscatalog.Rel
 	if user == "" {
 		user = expr.SessionUser
 	}
-	s := &snapshot{user: user, session: syscatalog.SessionFromContext(ctx)}
+	session := syscatalog.SessionFromContext(ctx)
 
 	var tables []string
+	var defs map[string][]colInfo
+	var gen uint64
+	cacheable := false
 	if cat != nil {
-		names, err := cat.ListTables(ctx)
+		names, cols, g, genOK, err := userTables(ctx, cat)
 		if err != nil {
 			return nil, fmt.Errorf("reading the catalog for %s.%s: %w", rel.Schema, rel.Name, err)
 		}
 		tables = append(tables, names...)
+		defs, gen, cacheable = cols, g, genOK
 	}
 	if access.VisibleTables != nil {
 		tables = access.VisibleTables(ctx, tables)
 	}
 	sort.Strings(tables)
+	// The VIEW this identity reads — every table it sees, and the columns of
+	// each it is denied — is the cache key within a generation: the same
+	// view is the same snapshot, and a policy change is a different view.
+	var view strings.Builder
+	view.WriteString(user)
+	denials := make(map[string]map[string]bool)
 	for _, name := range tables {
-		all, ok := userTableCols(ctx, cat, name)
+		if _, ok := defs[name]; !ok {
+			continue
+		}
+		view.WriteByte(0)
+		view.WriteString(name)
+		if access.DeniedColumns != nil {
+			if denied := access.DeniedColumns(ctx, name); len(denied) > 0 {
+				denials[name] = denied
+				cols := make([]string, 0, len(denied))
+				for c, d := range denied {
+					if d {
+						cols = append(cols, strings.ToLower(c))
+					}
+				}
+				sort.Strings(cols)
+				view.WriteByte(1)
+				view.WriteString(strings.Join(cols, "\x01"))
+			}
+		}
+	}
+	key := view.String()
+	if cacheable {
+		if c := cachedSnapshot(cat, gen, key); c != nil {
+			cp := *c
+			cp.session = session
+			return &cp, nil
+		}
+	}
+
+	s := &snapshot{user: user, session: session, populated: &sync.Map{}}
+	for _, name := range tables {
+		all, ok := defs[name]
 		if !ok {
 			// Dropped between the listing and the read: not in this
 			// snapshot, as it would not be a moment later.
 			continue
 		}
-		var denied map[string]bool
-		if access.DeniedColumns != nil {
-			denied = access.DeniedColumns(ctx, name)
-		}
+		denied := denials[name]
 		ri := &relInfo{schema: "public", nsOID: syscatalog.NamespacePublic, name: name,
 			oid: syscatalog.ObjectOID(name), kind: "r", user: true, cols: all}
 		if len(denied) > 0 {
@@ -197,6 +354,9 @@ func takeSnapshot(ctx context.Context, cat *catalog.Catalog, rel *syscatalog.Rel
 	}
 	s.rels = append(s.rels, systemRelInfos()...)
 	s.index()
+	if cacheable {
+		storeSnapshot(cat, gen, key, s)
+	}
 	return s, nil
 }
 
@@ -228,7 +388,7 @@ func rowsFor(ctx context.Context, cat *catalog.Catalog, rel *syscatalog.Relation
 	if err != nil {
 		return nil, err
 	}
-	return pop(s), nil
+	return s.rowsOf(rel.FuncName(), pop), nil
 }
 
 var populations = map[string]func(*snapshot) []map[string]any{

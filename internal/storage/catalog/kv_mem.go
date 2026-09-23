@@ -14,6 +14,9 @@ type MemKV struct {
 	data    map[string][]byte
 	revs    map[string]uint64
 	nextRev uint64
+	// gen counts every write and every delete of a present key
+	// (GenerationReader); nextRev alone does not move on a delete.
+	gen uint64
 }
 
 // NewMemKV creates a new in-memory KV store.
@@ -63,6 +66,7 @@ func (m *MemKV) Put(key string, value []byte) (uint64, error) {
 	rev := m.nextRev
 	m.revs[key] = rev
 	m.nextRev++
+	m.gen++
 	return rev, nil
 }
 
@@ -81,6 +85,7 @@ func (m *MemKV) Update(key string, value []byte, expectedRev uint64) (uint64, er
 	rev := m.nextRev
 	m.revs[key] = rev
 	m.nextRev++
+	m.gen++
 	return rev, nil
 }
 
@@ -88,9 +93,19 @@ func (m *MemKV) Delete(key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if _, ok := m.data[key]; ok {
+		m.gen++
+	}
 	delete(m.data, key)
 	delete(m.revs, key)
 	return nil
+}
+
+// Generation implements GenerationReader.
+func (m *MemKV) Generation() (uint64, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.gen, nil
 }
 
 func (m *MemKV) List(prefix string) ([]string, error) {
