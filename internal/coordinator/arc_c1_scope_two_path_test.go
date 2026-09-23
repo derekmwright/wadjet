@@ -699,7 +699,7 @@ func TestC1BTableLessLateralRefusesWhatItCannotProject(t *testing.T) {
 
 	// The SENTENCE, without the door's own wrapper — "building logical plan: …"
 	// through the embedded API and "logical plan: …" through the coordinator.
-	const refusal = "ERR logical plan: a LATERAL subquery with no FROM clause is " +
+	const refusal = "ERR a LATERAL subquery with no FROM clause is " +
 		"computed as a projection over the outer row"
 	noRoute := map[string]string{}
 	c1Run(t, arms, []c1Case{

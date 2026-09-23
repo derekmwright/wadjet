@@ -2616,7 +2616,13 @@ func isWriteSQL(sql string) bool {
 
 func isCommandSQL(sql string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(sql))
+	// The utility statements Execute acknowledges without running (see
+	// handleExecute): each describes as NoData, never as a query.
 	return strings.HasPrefix(upper, "SET ") ||
+		strings.HasPrefix(upper, "CLOSE") ||
+		strings.HasPrefix(upper, "RESET ") ||
+		strings.HasPrefix(upper, "DISCARD ") ||
+		strings.HasPrefix(upper, "DEALLOCATE") ||
 		strings.HasPrefix(upper, "RESET ") ||
 		strings.HasPrefix(upper, "BEGIN") ||
 		strings.HasPrefix(upper, "COMMIT") ||

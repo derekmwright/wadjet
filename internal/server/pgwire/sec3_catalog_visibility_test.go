@@ -271,7 +271,10 @@ func TestParameterInferenceIgnoresADeniedRelation(t *testing.T) {
 
 	// `secret_col` is `secret`'s STRING column and `public_t_col` is
 	// `public_t`'s; the statement mentions `secret` only inside a literal.
-	const probe = `SELECT id FROM public_t WHERE secret_col = $1 AND 'secret' <> ''`
+	// The probe reads the relation itself: a statement naming secret_col
+	// over public_t is 42703 at Describe for everyone (arc PC, #998), and
+	// a refusal proves nothing about inference.
+	const probe = `SELECT id FROM secret WHERE secret_col = $1`
 
 	analyst := sec3Pgconn(t, srv.Addr(), "analyst-user", "analyst-key")
 	desc, err := analyst.Prepare(context.Background(), "", probe, nil)
@@ -344,7 +347,7 @@ func TestParameterInferenceCarriesTheEnvironment(t *testing.T) {
 
 	conn := sec3Pgconn(t, srv.Addr(), "analyst-user", "analyst-key")
 	desc, err := conn.Prepare(context.Background(), "",
-		`SELECT id FROM public_t WHERE secret_col = $1 AND 'secret' <> ''`, nil)
+		`SELECT id FROM secret WHERE secret_col = $1`, nil)
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -380,7 +383,7 @@ func TestParameterInferenceCarriesTheEnvironment(t *testing.T) {
 
 	elsewhere := sec3Pgconn(t, srv.Addr(), "analyst-user", "analyst-key")
 	desc, err = elsewhere.Prepare(context.Background(), "",
-		`SELECT id FROM public_t WHERE secret_col = $1 AND 'secret' <> ''`, nil)
+		`SELECT id FROM secret WHERE secret_col = $1`, nil)
 	if err != nil {
 		t.Fatalf("Prepare under the non-matching deny: %v", err)
 	}

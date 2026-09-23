@@ -81,7 +81,9 @@ func TestArcFRAFileReaderIsARelationOnEveryArm(t *testing.T) {
 		{"dag+morsel4", func(sql string) ([]string, error) { return ptArmRun(tmdRunDAG(ctx, coordM, sql)) }},
 	}
 
-	const readerPin = "no dependencies and no ScanFiles"
+	// The DAG arms answer since arc PC routes a table-function scan to the
+	// coordinator-local pipeline; the pin that recorded their refusal is gone.
+	const readerPin = ""
 
 	rj1, rj2 := "read_json('"+j1+"')", "read_json('"+j2+"')"
 	rc1, rc2 := "read_csv('"+c1+"')", "read_csv('"+c2+"')"

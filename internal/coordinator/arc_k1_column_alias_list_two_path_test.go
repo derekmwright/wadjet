@@ -129,7 +129,7 @@ func TestArcK1AColumnAliasListRenamesPositionally(t *testing.T) {
 			name: "958 boundary a list over a star the expansion declines",
 			sql: `SELECT kk FROM (SELECT * FROM lat_ord o JOIN lat_item i ON i.order_id = o.id) ` +
 				`t(kk)`,
-			want: "ERR building physical plan: table \"t\" renames the columns of a `SELECT *` this planner did not expand",
+			want: "ERR table \"t\" renames the columns of a `SELECT *` this planner did not expand",
 			pin: map[string]string{
 				"dag":     "ERR physical plan: table \"t\" renames the columns of a `SELECT *` this planner did not expand",
 				"dagshuf": "ERR physical plan: table \"t\" renames the columns of a `SELECT *` this planner did not expand",

@@ -75,7 +75,8 @@ func TestArcTFATableFunctionIsARelationOnEveryArm(t *testing.T) {
 		{"dag+morsel4", func(sql string) ([]string, error) { return ptArmRun(tmdRunDAG(ctx, coordM, sql)) }},
 	}
 
-	const seriesPin = "no dependencies and no ScanFiles"
+	// The DAG arms answer since arc PC (see arc_fr_file_reader_arms_test.go).
+	const seriesPin = ""
 
 	for _, tc := range []struct {
 		issue, name, sql string

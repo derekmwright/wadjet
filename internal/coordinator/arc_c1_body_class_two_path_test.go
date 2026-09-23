@@ -46,7 +46,7 @@ func TestC1EATheBodyClassTable(t *testing.T) {
 	arms := c1Arms(t, ctx)
 
 	// The refusal, without the door's own wrapper (see c1Run).
-	const refused = "ERR logical plan: a LATERAL subquery with no FROM clause is " +
+	const refused = "ERR a LATERAL subquery with no FROM clause is " +
 		"computed as a projection over the outer row"
 
 	c1Run(t, arms, []c1Case{
@@ -310,7 +310,7 @@ func TestC1EBThePredicateInputTable(t *testing.T) {
 	t.Cleanup(cancel)
 	arms := c1Arms(t, ctx)
 
-	const refused = "ERR logical plan: a LATERAL subquery with no FROM clause is " +
+	const refused = "ERR a LATERAL subquery with no FROM clause is " +
 		"computed as a projection over the outer row"
 
 	c1Run(t, arms, []c1Case{

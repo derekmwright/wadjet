@@ -123,9 +123,9 @@ func ndCells() []ndCell {
 		{name: "1117/neg_real", sql: `SELECT -w_f32 AS v FROM numwidth WHERE w_key = 3`,
 			want: "v:FLOAT32 | -1.6777216e+07<f4>"},
 		{name: "1117/real_overflow_is_loud", sql: `SELECT CAST(1e38 AS REAL) * CAST(10.0 AS REAL) AS v`,
-			want: "ERR executing query: value out of range: overflow",
-			pin:  map[string]string{"dag": "ERR table-less SELECT with no distributed stage local execution: value out of range: overflow", "dagshuf": "ERR table-less SELECT with no distributed stage local execution: value out of range: overflow", "morsel": "ERR table-less SELECT with no distributed stage local execution: value out of range: overflow"},
-			why:  "One refusal, two sentences: the DAG cannot stage a table-less SELECT and says so before reporting the same 22003 value-out-of-range the local arms raise. PostgreSQL 17.11 raises `value out of range: overflow` for 1e38::real * 10.0::real."},
+			// The DAG arms' "two sentences" pin was deleted by arc PC: a coded
+			// refusal is its own sentence on every door (#1145).
+			want: "ERR value out of range: overflow"},
 		{name: "1117/sum_real_computed", sql: `SELECT SUM(w_f32 + CAST(1.0 AS REAL)) AS v FROM numwidth`,
 			want: "v:FLOAT32 | 1.6777232e+07<f4>"},
 		{name: "1117/avg_real_computed", sql: `SELECT AVG(w_f32 + CAST(1.0 AS REAL)) AS v FROM numwidth`,

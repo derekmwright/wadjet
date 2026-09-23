@@ -753,23 +753,23 @@ var l1ArmPins = map[string]map[string]string{
 	// `whereInequality`'s dag-shuffled, which shuffles on the equality and
 	// answers. `LIFTED/leftArm` is not here at all: it answers on all five.
 	"LIFTED/exprBothSides": {
-		"dag":          "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
-		"dag-morsel4":  "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
-		"dag-shuffled": "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
+		"dag":          "ERR ~sort: key column \"m\" does not exist in the input schema",
+		"dag-morsel4":  "ERR ~sort: key column \"m\" does not exist in the input schema",
+		"dag-shuffled": "ERR ~sort: key column \"m\" does not exist in the input schema",
 	},
 	"LIFTED/inequalityAlone": {
-		"dag":          "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
-		"dag-morsel4":  "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
-		"dag-shuffled": "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
+		"dag":          "ERR ~sort: key column \"m\" does not exist in the input schema",
+		"dag-morsel4":  "ERR ~sort: key column \"m\" does not exist in the input schema",
+		"dag-shuffled": "ERR ~sort: key column \"m\" does not exist in the input schema",
 	},
 	"LIFTED/twoColumns": {
-		"dag":          "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
-		"dag-morsel4":  "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
-		"dag-shuffled": "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
+		"dag":          "ERR ~sort: key column \"m\" does not exist in the input schema",
+		"dag-morsel4":  "ERR ~sort: key column \"m\" does not exist in the input schema",
+		"dag-shuffled": "ERR ~sort: key column \"m\" does not exist in the input schema",
 	},
 	"OUTERREF/whereInequality": {
-		"dag":         "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
-		"dag-morsel4": "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
+		"dag":         "ERR ~sort: key column \"m\" does not exist in the input schema",
+		"dag-morsel4": "ERR ~sort: key column \"m\" does not exist in the input schema",
 	},
 	// ARC LT round 2: an OUTER window above a lateral join is routed to the
 	// single-process pipeline on the DAG (dagplan.refuseWindowOverDependentJoin),

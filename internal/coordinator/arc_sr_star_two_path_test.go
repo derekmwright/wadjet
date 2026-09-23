@@ -251,11 +251,11 @@ func srStarCases() []c1Case {
 		{
 			name: "using/full-ordered-by-the-merged-key",
 			sql:  "SELECT * FROM psa a FULL JOIN psb b USING (id) ORDER BY id",
-			want: "ERR building logical plan: ORDER BY coalesce(a.id, b.id): a bare `SELECT *` over a FULL JOIN ... USING cannot be ORDERED BY the merged column: its value is COALESCE of the two sides, computed by the projection the star expands into, and this builder materializes a computed sort key beside a named SELECT list, which a star-only list is not. Name the columns, or write the join condition with ON",
+			want: "ERR ORDER BY coalesce(a.id, b.id): a bare `SELECT *` over a FULL JOIN ... USING cannot be ORDERED BY the merged column: its value is COALESCE of the two sides, computed by the projection the star expands into, and this builder materializes a computed sort key beside a named SELECT list, which a star-only list is not. Name the columns, or write the join condition with ON",
 			pin: map[string]string{
-				"dag":          "ERR logical plan: ORDER BY coalesce(a.id, b.id): a bare `SELECT *` over a FULL JOIN ... USING cannot be ORDERED BY the merged column: its value is COALESCE of the two sides, computed by the projection the star expands into, and this builder materializes a computed sort key beside a named SELECT list, which a star-only list is not. Name the columns, or write the join condition with ON",
-				"dag-shuffled": "ERR logical plan: ORDER BY coalesce(a.id, b.id): a bare `SELECT *` over a FULL JOIN ... USING cannot be ORDERED BY the merged column: its value is COALESCE of the two sides, computed by the projection the star expands into, and this builder materializes a computed sort key beside a named SELECT list, which a star-only list is not. Name the columns, or write the join condition with ON",
-				"dag-morsel4":  "ERR logical plan: ORDER BY coalesce(a.id, b.id): a bare `SELECT *` over a FULL JOIN ... USING cannot be ORDERED BY the merged column: its value is COALESCE of the two sides, computed by the projection the star expands into, and this builder materializes a computed sort key beside a named SELECT list, which a star-only list is not. Name the columns, or write the join condition with ON",
+				"dag":          "ERR ORDER BY coalesce(a.id, b.id): a bare `SELECT *` over a FULL JOIN ... USING cannot be ORDERED BY the merged column: its value is COALESCE of the two sides, computed by the projection the star expands into, and this builder materializes a computed sort key beside a named SELECT list, which a star-only list is not. Name the columns, or write the join condition with ON",
+				"dag-shuffled": "ERR ORDER BY coalesce(a.id, b.id): a bare `SELECT *` over a FULL JOIN ... USING cannot be ORDERED BY the merged column: its value is COALESCE of the two sides, computed by the projection the star expands into, and this builder materializes a computed sort key beside a named SELECT list, which a star-only list is not. Name the columns, or write the join condition with ON",
+				"dag-morsel4":  "ERR ORDER BY coalesce(a.id, b.id): a bare `SELECT *` over a FULL JOIN ... USING cannot be ORDERED BY the merged column: its value is COALESCE of the two sides, computed by the projection the star expands into, and this builder materializes a computed sort key beside a named SELECT list, which a star-only list is not. Name the columns, or write the join condition with ON",
 			},
 		},
 		{
@@ -385,7 +385,7 @@ func srStarCases() []c1Case {
 		{
 			name: "dupname/a-qualified-star-over-it",
 			sql:  "SELECT x.* FROM (SELECT a.id, b.id FROM lat_item a JOIN lat_item b ON a.id = b.id) x ORDER BY 1",
-			want: "ERR building physical plan: column \"x.*\" does not exist in the input schema: a `x.*` expands only from a relation whose column list is known — a base table, or a derived table or CTE whose own SELECT list names its columns — and this one's is not; name the columns",
+			want: "ERR column \"x.*\" does not exist in the input schema: a `x.*` expands only from a relation whose column list is known — a base table, or a derived table or CTE whose own SELECT list names its columns — and this one's is not; name the columns",
 			pin: map[string]string{
 				"dag":          "ERR physical plan: column \"x.*\" does not exist in the input schema: a `x.*` expands only from a relation whose column list is known — a base table, or a derived table or CTE whose own SELECT list names its columns — and this one's is not; name the columns",
 				"dag-shuffled": "ERR physical plan: column \"x.*\" does not exist in the input schema: a `x.*` expands only from a relation whose column list is known — a base table, or a derived table or CTE whose own SELECT list names its columns — and this one's is not; name the columns",

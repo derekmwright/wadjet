@@ -232,7 +232,7 @@ const jrRenamedOutputWhy = "the residual is right — the row count and the matc
 // jrInnerSortKeyErr is the loud failure the two non-shuffled DAG arms answer
 // for an INNER join over two renamed relations. Loud, so a refusal and not a
 // wrong value; pinned as a SUBSTRING because the task id changes every run.
-const jrInnerSortKeyErr = `ERR ~sort consume: sink consume: sort: key column "a" does not exist in the input schema`
+const jrInnerSortKeyErr = `ERR ~sort: key column "a" does not exist in the input schema`
 
 const jrLiftedFilterWhy = "an INNER join LIFTS its ON non-equality into a filter ABOVE the " +
 	"join, so it never reaches the residual path; that filter loses its identity at the stage " +

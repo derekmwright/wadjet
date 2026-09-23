@@ -1093,6 +1093,10 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	// Build logical plan
 	logicalPlan, err := logical.BuildFromSelect(selectInfo)
 	if err != nil {
+		if sqlerr.StateOf(err) != "" {
+			// A coded refusal is its own sentence (#1145).
+			return nil, err
+		}
 		return nil, fmt.Errorf("logical plan: %w", err)
 	}
 
@@ -3660,6 +3664,10 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	// Build logical plan
 	logicalPlan, err := logical.BuildFromSelect(selectInfo)
 	if err != nil {
+		if sqlerr.StateOf(err) != "" {
+			// A coded refusal is its own sentence (#1145).
+			return "", "", err
+		}
 		return "", "", fmt.Errorf("logical plan: %w", err)
 	}
 	explainAnnotator := func(plan *logical.Node) {
