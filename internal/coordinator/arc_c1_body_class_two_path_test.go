@@ -626,7 +626,7 @@ func TestC1EBThePredicateInputTable(t *testing.T) {
 			// limit / predicate inputs: outer name
 			name:   "limit_outer (outer name)",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v LIMIT u.id) l ORDER BY 1",
-			want:   "ERR expected number after LIMIT",
+			want:   `ERR syntax error at or near "u"`,
 			why:    "PostgreSQL answers 7,7,7; this parser takes only a number after LIMIT, loud and pre-existing",
 			routed: map[string]string{},
 		},

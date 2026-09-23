@@ -261,7 +261,11 @@ func TestArcPCADerivedTableRefusalIsOneSentenceOnEveryDoor(t *testing.T) {
 		{`SELECT id FROM e7emp WHERE id IN (SELECT id FROM e7emp WHERE)`, `syntax error at or near ")"`},
 		{`SELECT id FROM e7emp WHERE`, `syntax error at end of input`},
 		{`SELECT id FROM e7emp WHERE id = 1 GARBAGE`, `syntax error at or near "GARBAGE"`},
-		{`SELECT * FROM (SELECT nosuch FROM e7emp) d`, `column "nosuch" does not exist`},
+		// This engine's 42703 sentence names the columns in scope (policy-
+		// filtered, validate_policy.go) where PostgreSQL says `column
+		// "nosuch" does not exist` — a recorded difference; the point here
+		// is that nothing is wrapped around it.
+		{`SELECT * FROM (SELECT nosuch FROM e7emp) d`, `unknown column "nosuch" (available: acct, amt, dept, id, salary, ssn)`},
 		{`SELECT E'\uD83D' AS v`, `invalid Unicode surrogate pair`},
 		{`SELECT E'\u12' AS v`, `invalid Unicode escape`},
 	} {

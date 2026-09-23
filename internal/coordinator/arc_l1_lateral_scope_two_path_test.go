@@ -346,7 +346,7 @@ const (
 	// and the rebuild dies in the parser instead. Same root cause, different
 	// door — recorded separately so the day the rendering is fixed, both
 	// move together.
-	l1OverClauseRebuild = `expected ')' after OVER clause`
+	l1OverClauseRebuild = `syntax error at or near "."`
 	// `ORDER BY <ordinal>` over a `SELECT *` whose FROM is a JOIN — which a
 	// LATERAL always is once it is lowered. The star is not expanded over a
 	// join, so there is no position to count. It reproduces with an ordinary
@@ -368,7 +368,7 @@ const (
 	// `LIMIT ALL` — which the decline list named as a shape the per-key
 	// rewrite declines — does not PARSE. PostgreSQL accepts it and means "no
 	// bound"; this parser wants a number (round 2, P1).
-	l1LimitAllUnparsed = `expected number after LIMIT`
+	l1LimitAllUnparsed = `syntax error at or near "ALL"`
 	// ARC LT's three refusals (lateral_per_row_bound.go, lateral_correlated_refs.go,
 	// lateral_lifted_contested.go).
 	l1BoundNoKey             = `cannot apply that bound per outer row`

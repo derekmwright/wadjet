@@ -93,7 +93,7 @@ func TestC1FTheReadTestSeam(t *testing.T) {
 			name: "a window's FRAME BOUND -> refused by the parser, as PostgreSQL refuses it",
 			sql: "SELECT SUM(u.id) OVER (ORDER BY u.id ROWS BETWEEN l.w PRECEDING AND CURRENT ROW) AS s " +
 				lat + "ORDER BY 1",
-			want: "ERR unexpected frame bound token",
+			want: `ERR syntax error at or near "l"`,
 			why:  "PostgreSQL: argument of ROWS must not contain variables",
 		},
 		{
