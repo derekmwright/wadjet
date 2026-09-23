@@ -285,7 +285,7 @@ This is a deliberate divergence from PostgreSQL, which shows `\d` and `\dt` to
 any role regardless of privileges. Metadata visibility is a product decision
 rather than a wire-compatibility one, and it is recorded as such in ADR-0012's
 divergence list. A client using `pg_catalog` introspection rather than
-`DESCRIBE` is answered by the wire protocol's catalog emulation, which follows
+`DESCRIBE` is answered by the catalog relations, which follow
 the same decision — including the anchored relation lookup `psql`'s `\d`
 sends, where a denied relation answers no rows and `psql` reports "Did not find
 any relation".
@@ -957,21 +957,20 @@ could carry it.
 
 ### The PostgreSQL catalog views follow the same decision
 
-`pg_catalog.pg_class`, `pg_catalog.pg_attribute`, `pg_tables`,
-`information_schema.tables` and `information_schema.columns` are rendered from
-the relations the connected identity may read. A relation its policy denies is
+Every `pg_catalog` and `information_schema` relation is materialized from the
+relations — and, on each, the columns — the connected identity may read
+(ADR-0044). A relation its policy denies, and a column its policy denies, is
 absent from all of them, so `psql`'s `\d`, a BI tool's schema tree and a
 driver's `DatabaseMetaData` discovery see what the data path would let that
-identity read, and nothing else.
+identity read, and nothing else. A masked column is listed: it exists for the
+identity, with the masked value.
 
-The filter is applied once, to the relation set the views are built from, not
-per view: `\d` joins `pg_class` and `pg_attribute`, so hiding one and not the
-other would hide nothing. It applies on the RELATION LOOKUP too — `psql` finds
-a relation with the anchored pattern `relname OPERATOR(pg_catalog.~)
-'^(name)$'` rather than by equality — so a denied relation answers zero rows
-there and `psql` prints "Did not find any relation named …". That is the
-anti-enumeration answer on this path, deliberately not `42501`: the refusal a
-caller gets by NAME is the data door's.
+The view is taken once, where the statement's table functions are authorized,
+and every catalog relation and catalog function (`regclass`, `to_regclass`)
+reads it, so a join between them cannot see more than either. A denied
+relation answers zero rows to `\d`'s lookup and `psql` prints "Did not find
+any relation named …" — the anti-enumeration answer on this path, deliberately
+not `42501`: the refusal a caller gets by NAME is the data door's.
 
 ### A query belongs to the identity that submitted it
 

@@ -392,6 +392,18 @@ PostgreSQL has none. SemVer 2.0.0 defines precedence; node-semver defines ranges
 
 ## Not supported
 
+**The system catalog describes one database, one role and this server's objects.**
+
+`pg_database` lists one database and `pg_roles` one role, the connection's identity, which is not a superuser; PostgreSQL also lists its templates and bootstrap superuser. `pg_class.relam` is 0 and `pg_am` is empty (a stored table has no PostgreSQL access method), `pg_type` lists the types the wire declares and their arrays but no DOMAIN types, `pg_proc` lists no functions, and the relations for objects this server does not have (indexes, triggers, rules, policies, publications, sequences) are empty. A column is typed by the engine type that carries it — an OID column declares `int8`. `current_schemas()` answers text, not `name[]`. A string literal cast to `regclass` is read to its OID and prints as the OID where PostgreSQL prints the name. `E'…'` escape strings, set-returning functions in a SELECT list (`unnest(x)`, `generate_subscripts`) and `information_schema._pg_expandarray` are not implemented, so psql's `\l`, SQLAlchemy's `get_pk_constraint` and pgJDBC's `getPrimaryKeys` are refused where PostgreSQL answers. (ADR-0044, #1251)
+
+**The pattern-match operators match with RE2.**
+
+`~ ~* !~ !~*` translate PostgreSQL's ARE form by form; a back reference, lookahead/lookbehind, `\m`/`\M`, `[[:<:]]`, a collating element and the `b e n p w x` embedded options are refused 0A000. Case-insensitive matching folds ASCII letters only, as PostgreSQL does under the C collation. (ADR-0044)
+
+**COLLATE accepts the byte-order collations only.**
+
+`C`, `POSIX`, `ucs_basic` and `default` are this server's order and are accepted; any other collation is refused 0A000 rather than compared by bytes. (ADR-0044)
+
 [SQL reference](sql-reference.md).
 
 **`LOCALTIME`, `IS [form] NORMALIZED` and the `U&'…'` literal have no grammar.**

@@ -735,24 +735,28 @@ A relation is described under the spelling the CATALOG holds: an unquoted
 identifier folds at the lexer, and `DESCRIBE Ledger` finds the relation created
 as `Ledger` exactly as `SELECT * FROM Ledger` does.
 
-### psql's `\d` and the pg_catalog emulation
+### The system catalog: pg_catalog and information_schema
 
-`psql`'s `\d <name>` does not look a relation up by equality: it sends the
-anchored pattern `c.relname OPERATOR(pg_catalog.~) '^(name)$'`. The wire
-protocol's catalog emulation models THAT form — the whole-name pattern `psql`
-emits for a literal identifier, including the `E'^(a\\.b)$'` spelling for a
-quoted name containing a metacharacter — so `\d`, `\dt` and a BI tool's
-schema tree resolve the relation and print its columns.
+`pg_catalog` and `information_schema` are relations the engine scans
+(ADR-0044): PostgreSQL 17's own relations and columns, answered from this
+server's catalog when the statement runs, so `WHERE`, `JOIN`, aggregates,
+`ORDER BY` and `LIMIT` over them are ordinary queries. psql's `\d` family,
+pgJDBC's `DatabaseMetaData` and SQLAlchemy's inspector read them unchanged.
+An unqualified `pg_class` is `pg_catalog.pg_class`, as PostgreSQL's search
+path makes it; a WITH query of the same name is the WITH query.
 
-The GENERAL regular-expression operator is not implemented. A pattern this
-server cannot answer — an unanchored or wildcard one such as `\dt sec5*`, or
-the `!~` / `~*` operators — is refused with SQLSTATE `0A000` naming the form
-that works, rather than answered with the predicate silently ignored. List
-relations with `SHOW TABLES`, or spell the lookup `relname = 'name'`.
+The catalog functions those clients call are implemented: the pattern-match
+operators `~ ~* !~ !~*` (and `OPERATOR(pg_catalog.~)`; an ARE construct RE2
+cannot express — a back reference, lookaround, `\m`/`\M` — is refused
+`0A000`), `COLLATE` for the byte-order collations (`C`, `POSIX`,
+`ucs_basic`, `default`; any other is refused `0A000`), the `reg*` casts,
+`ARRAY(subquery)`, `format_type`, `pg_get_userbyid`, `to_regclass`,
+`pg_get_serial_sequence` and the `pg_get_*def` family.
 
-With auth enabled the emulation renders only the relations the identity may
-read, so `\d` on a denied relation answers nothing and `psql` reports "Did not
-find any relation named …".
+With auth enabled a relation or column the identity may not read is absent
+from every catalog relation, so `\d` on a denied relation answers nothing and
+`psql` reports "Did not find any relation named …". The differences from
+PostgreSQL's catalog are on [the differences page](postgres-differences.md).
 
 ## CREATE TABLE
 
