@@ -402,9 +402,31 @@ func sameColumnType(a, b parquet.Column) bool {
 	return true
 }
 
+// parquetColumnTypeName is a column's type as SQL spells it, for a message.
 func parquetColumnTypeName(c parquet.Column) string {
-	if c.Type == parquet.TypeDecimal {
-		return fmt.Sprintf("decimal(%d,%d)", c.Precision, c.Scale)
+	switch c.Type {
+	case parquet.TypeBool:
+		return "boolean"
+	case parquet.TypeInt32:
+		return "integer"
+	case parquet.TypeInt64:
+		return "bigint"
+	case parquet.TypeFloat32:
+		return "real"
+	case parquet.TypeFloat64:
+		return "double precision"
+	case parquet.TypeString:
+		return "text"
+	case parquet.TypeBytes:
+		return "bytea"
+	case parquet.TypeDecimal:
+		return fmt.Sprintf("numeric(%d,%d)", c.Precision, c.Scale)
+	case parquet.TypeArray:
+		if c.ElementType != nil {
+			return parquetColumnTypeName(*c.ElementType) + "[]"
+		}
+	case parquet.TypeRow:
+		return "record"
 	}
 	return strings.ToLower(c.Type.String())
 }
