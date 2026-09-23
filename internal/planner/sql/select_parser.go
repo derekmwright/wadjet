@@ -3429,7 +3429,7 @@ func (p *selectParser) parseWindowFrame() (*WindowFrame, error) {
 	// is not.
 	if frame.Mode == FrameRange {
 		if rangeOffsetBound(frame.Start) || (frame.End != nil && rangeOffsetBound(*frame.End)) {
-			return nil, sqlerr.New("0A000", "RANGE frame with a value offset is not supported; use ROWS for a row-count frame")
+			return nil, sqlerr.New("42601", "RANGE frame with a value offset is not supported; use ROWS for a row-count frame")
 		}
 	}
 
