@@ -1062,7 +1062,10 @@ func arcD5AggregatePlacementCells() []arcD5Cell {
 		{issue: "#809", name: "boundary_outer_level_aggregate_inside_a_subquery_is_refused",
 			sql: `SELECT g, COUNT(*) AS n FROM typemx WHERE id < 50 GROUP BY g ` +
 				`HAVING (SELECT MAX(d.k) FROM typemx_dim d WHERE d.k = SUM(typemx.g)) > 0 ORDER BY g`,
-			wantErrLike:    "could not be executed",
+			// The client receives the refusal's own sentence; the
+			// "could not be executed" stage label is stripped at the door
+			// (arc PC, the one-sentence rule).
+			wantErrLike:    "aggregate functions are not allowed in WHERE",
 			wantCorrRoutes: 1,
 			pgSays:         "one row, g=1 n=7 — an aggregate of the OUTER level is legal inside a subquery"},
 		// The controls: a subquery whose aggregate is in the SELECT list (the
@@ -1247,14 +1250,14 @@ func arcD5FailedSubquerySetCells() []arcD5Cell {
 		{issue: "#601", name: "failed_in_subquery_is_not_an_empty_set",
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i32 IN (` +
 				`SELECT b.w_i32 FROM numwidth b WHERE b.w_key / 0 > 0 LIMIT 5)`,
-			wantErrLike:          "IN subquery could not be executed",
+			wantErrLike:          "division by zero",
 			wantInSubqueryRoutes: 1,
 			pgSays: "division by zero — and the rows this used to decide are numwidth's " +
 				"NULL-keyed ones, which `x IN (empty)` would have answered FALSE for"},
 		{issue: "#601", name: "failed_not_in_subquery_is_not_an_empty_set",
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i32 NOT IN (` +
 				`SELECT b.w_i32 FROM numwidth b WHERE b.w_key / 0 > 0 LIMIT 5)`,
-			wantErrLike:          "IN subquery could not be executed",
+			wantErrLike:          "division by zero",
 			wantInSubqueryRoutes: 1,
 			pgSays:               "division by zero — `x NOT IN (empty)` would have answered TRUE for every one"},
 		// The CORRELATED spelling reaches the same rule in the other
@@ -1263,7 +1266,7 @@ func arcD5FailedSubquerySetCells() []arcD5Cell {
 		{issue: "#601", name: "failed_correlated_not_in_subquery_is_not_an_empty_set",
 			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.s NOT IN (` +
 				`SELECT b.s FROM mk_inner b WHERE b.n = a.n AND b.n / 0 > 0)`,
-			wantErrLike:    "IN subquery could not be executed",
+			wantErrLike:    "division by zero",
 			wantCorrRoutes: 1,
 			pgSays:         "division by zero"},
 		// The controls. A REAL empty set still decides the NULL-keyed rows —

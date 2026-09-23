@@ -356,9 +356,9 @@ func srStarCases() []c1Case {
 			sql:  "WITH c AS (SELECT id, COUNT(*) FROM lat_item GROUP BY id UNION ALL SELECT id, 1 FROM lat_item) SELECT * FROM c ORDER BY id, 2",
 			want: "cols=[id:INT64 count:INT64] rows=8 | 1,1 | 1,1 | 2,1 | 2,1 | 3,1 | 3,1 | 4,1 | 4,1",
 			pin: map[string]string{
-				"dag":          "ERR physical plan: UNION ALL: arm 1: selects the aggregate \"count(*)\", whose output the arm's aggregate stage names for itself — the union stage cannot project the SELECT list over it. See issue #346",
-				"dag-shuffled": "ERR physical plan: UNION ALL: arm 1: selects the aggregate \"count(*)\", whose output the arm's aggregate stage names for itself — the union stage cannot project the SELECT list over it. See issue #346",
-				"dag-morsel4":  "ERR physical plan: UNION ALL: arm 1: selects the aggregate \"count(*)\", whose output the arm's aggregate stage names for itself — the union stage cannot project the SELECT list over it. See issue #346",
+				"dag":          "ERR UNION ALL: arm 1: selects the aggregate \"count(*)\", whose output the arm's aggregate stage names for itself — the union stage cannot project the SELECT list over it. See issue #346",
+				"dag-shuffled": "ERR UNION ALL: arm 1: selects the aggregate \"count(*)\", whose output the arm's aggregate stage names for itself — the union stage cannot project the SELECT list over it. See issue #346",
+				"dag-morsel4":  "ERR UNION ALL: arm 1: selects the aggregate \"count(*)\", whose output the arm's aggregate stage names for itself — the union stage cannot project the SELECT list over it. See issue #346",
 			},
 		},
 		{
@@ -387,9 +387,9 @@ func srStarCases() []c1Case {
 			sql:  "SELECT x.* FROM (SELECT a.id, b.id FROM lat_item a JOIN lat_item b ON a.id = b.id) x ORDER BY 1",
 			want: "ERR column \"x.*\" does not exist in the input schema: a `x.*` expands only from a relation whose column list is known — a base table, or a derived table or CTE whose own SELECT list names its columns — and this one's is not; name the columns",
 			pin: map[string]string{
-				"dag":          "ERR physical plan: column \"x.*\" does not exist in the input schema: a `x.*` expands only from a relation whose column list is known — a base table, or a derived table or CTE whose own SELECT list names its columns — and this one's is not; name the columns",
-				"dag-shuffled": "ERR physical plan: column \"x.*\" does not exist in the input schema: a `x.*` expands only from a relation whose column list is known — a base table, or a derived table or CTE whose own SELECT list names its columns — and this one's is not; name the columns",
-				"dag-morsel4":  "ERR physical plan: column \"x.*\" does not exist in the input schema: a `x.*` expands only from a relation whose column list is known — a base table, or a derived table or CTE whose own SELECT list names its columns — and this one's is not; name the columns",
+				"dag":          "ERR column \"x.*\" does not exist in the input schema: a `x.*` expands only from a relation whose column list is known — a base table, or a derived table or CTE whose own SELECT list names its columns — and this one's is not; name the columns",
+				"dag-shuffled": "ERR column \"x.*\" does not exist in the input schema: a `x.*` expands only from a relation whose column list is known — a base table, or a derived table or CTE whose own SELECT list names its columns — and this one's is not; name the columns",
+				"dag-morsel4":  "ERR column \"x.*\" does not exist in the input schema: a `x.*` expands only from a relation whose column list is known — a base table, or a derived table or CTE whose own SELECT list names its columns — and this one's is not; name the columns",
 			},
 		},
 		{

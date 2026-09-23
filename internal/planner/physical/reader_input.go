@@ -58,7 +58,7 @@ func readerInitError(fn, path string, err error) error {
 	if unopenable(err) != nil {
 		return fmt.Errorf("%s: %w", fn, err)
 	}
-	return fmt.Errorf("%s: %s: %w", fn, path, err)
+	return readerError(fn, path, err)
 }
 
 // readerFiles is the local files a reader's path names: the path itself, or

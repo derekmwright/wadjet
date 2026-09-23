@@ -934,7 +934,7 @@ func (s *sampleOperator) Close() error { return nil }
 // content, not a stage label.
 func readerError(fn, path string, err error) error {
 	if code := sqlerr.StateOf(err); code != "" {
-		return sqlerr.New(code, "%s: %s: %s", fn, path, sqlerr.SentenceOf(err))
+		return sqlerr.New(code, "%s: %s: %s", fn, path, err.Error())
 	}
 	return fmt.Errorf("%s: %s: %w", fn, path, err)
 }

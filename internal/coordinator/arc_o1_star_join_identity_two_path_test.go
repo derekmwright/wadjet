@@ -253,7 +253,7 @@ func TestO1AStarOverAJoinPublishesTheQueryNotThePlan(t *testing.T) {
 		{
 			name: "paren-bushy-star",
 			sql:  "SELECT * FROM lat_ord o JOIN (lat_item i JOIN lat_ord o3 ON o3.id = i.order_id) ON i.order_id = o.id ORDER BY i.id",
-			want: "ERR parsing derived table: parsing SQL: expected SELECT",
+			want: "ERR parsing SQL: expected SELECT",
 			why: "NOT an identity question: the PARSER reads a parenthesised FROM item as " +
 				"a derived table, so a parenthesised JOIN is refused before any list is " +
 				"expanded. Identical at 0193c4e9; PostgreSQL answers the three arms in " +

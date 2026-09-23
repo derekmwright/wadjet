@@ -131,8 +131,8 @@ func TestArcK1AColumnAliasListRenamesPositionally(t *testing.T) {
 				`t(kk)`,
 			want: "ERR table \"t\" renames the columns of a `SELECT *` this planner did not expand",
 			pin: map[string]string{
-				"dag":     "ERR physical plan: table \"t\" renames the columns of a `SELECT *` this planner did not expand",
-				"dagshuf": "ERR physical plan: table \"t\" renames the columns of a `SELECT *` this planner did not expand",
+				"dag":     "ERR table \"t\" renames the columns of a `SELECT *` this planner did not expand",
+				"dagshuf": "ERR table \"t\" renames the columns of a `SELECT *` this planner did not expand",
 			},
 			why: "ONE refusal under the two engines' own error prefixes, not a divergence: " +
 				"PostgreSQL publishes `kk` and the join's remaining six columns, and the " +
