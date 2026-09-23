@@ -810,11 +810,14 @@ func TestExecuteErrorsWhenNothingCanAnswer(t *testing.T) {
 			t.Errorf("DataRow sent for an unanswerable statement; trace = %s", traceString(trace))
 		}
 	}
-	if !sawNoData {
-		t.Errorf("expected NoData from Describe; trace = %s", traceString(trace))
+	// An unknown column is an ANALYSIS failure, which PostgreSQL raises at
+	// Describe; NoData would say the statement returns no rows (#998).
+	if sawNoData {
+		t.Errorf("NoData from Describe for a statement that cannot be analyzed; trace = %s",
+			traceString(trace))
 	}
 	if !sawError {
-		t.Errorf("expected ErrorResponse from Execute; trace = %s", traceString(trace))
+		t.Errorf("expected ErrorResponse; trace = %s", traceString(trace))
 	}
 
 	// The connection stays usable, and the failure does not leak into the

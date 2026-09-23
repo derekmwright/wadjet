@@ -1557,6 +1557,37 @@ func (c *pgConn) handleDescribe(payload []byte) {
 	}
 }
 
+// analysisRefusal reports whether a Describe-time failure is one PostgreSQL
+// raises during PARSE ANALYSIS — class 42 (a syntax error, a missing
+// relation, column or function, a type the operator has no form for), 0A
+// (a feature the analyzer refuses), 3D/3F (a missing database or schema) —
+// rather than while the statement RUNS, which PostgreSQL reports at Execute
+// after describing the portal.
+//
+// Two exceptions keep today's answer. 42501 is a privilege check, which
+// PostgreSQL makes at executor start, after Describe. And a statement whose
+// parameters were probed with NULL (substituteNullParams) may fail on the
+// NULL where the bound value would not; there only the failures a NULL cannot
+// cause — syntax, a missing relation, a missing column — are refused here.
+func analysisRefusal(err error, parameterized bool) bool {
+	state := sqlerr.StateOf(err)
+	if state == "" || state == "42501" {
+		return false
+	}
+	if parameterized {
+		switch state {
+		case "42601", "42P01", "42703":
+			return true
+		}
+		return false
+	}
+	switch state[:2] {
+	case "42", "0A", "3D", "3F":
+		return true
+	}
+	return false
+}
+
 // describeSQL executes a SQL statement to discover its result columns
 // and sends either a typed RowDescription or NoData. fmtCodes are the result
 // format codes the RowDescription declares per field (see sendRowDescription).
@@ -1638,6 +1669,20 @@ func (c *pgConn) describeSQL(sql string, fmtCodes []int16) {
 		if err == nil {
 			nestedSchema = c.nestedColumnSchemas(shapeSQL, result.ColumnMetas)
 		}
+	}
+	if err != nil && analysisRefusal(err, parameterized) {
+		// A statement PostgreSQL cannot ANALYZE is refused at Describe, with
+		// its own SQLSTATE and sentence: that is where the server raises a
+		// missing relation, an unknown column or function, a syntax error —
+		// during parse analysis, before any portal exists (measured on 17.11
+		// for Describe of a statement and of a portal alike). NoData says
+		// "this statement returns no rows", which is DDL's answer and DML's
+		// without RETURNING, and a client that prepared a typo'd statement
+		// read "no columns" first and the error second (#998).
+		c.closeDescribeCache()
+		c.sendQueryError(ctx, "42000", err)
+		c.skipUntilSync = true
+		return
 	}
 	if err != nil {
 		// Can't describe — send NoData rather than error, and CACHE the

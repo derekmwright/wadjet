@@ -92,7 +92,11 @@ func TestExecuteReplaysDescribeError(t *testing.T) {
 
 	rc := &recordConn{}
 	c := &pgConn{conn: rc, db: db, stmts: map[string]string{}}
-	c.preparedSQL = "SELECT no_such_function(1) FROM (SELECT" // guaranteed parse failure
+	// A failure that happens while the statement RUNS — the kind PostgreSQL
+	// reports at Execute, after describing the portal. An ANALYSIS failure
+	// (a parse error, an unknown name) is refused at Describe instead and is
+	// never cached (#998).
+	c.preparedSQL = "SELECT 1/0"
 
 	c.describeSQL(c.preparedSQL, nil)
 	if c.describeErr == nil {
