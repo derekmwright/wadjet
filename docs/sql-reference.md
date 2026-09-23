@@ -1694,11 +1694,14 @@ Each aggregate takes the argument types PostgreSQL gives it, read over this
 engine's types by what the wire declares them (PORT and PROTOCOL are integers,
 DURATION a bigint): `SUM`, `AVG`, the `STDDEV`/`VARIANCE` family, `CORR`,
 `COVAR_*`, `MEDIAN`, `MODE` and the percentiles take a number; `BOOL_AND`,
-`BOOL_OR` and `EVERY` a boolean; `STRING_AGG` text; `MIN`/`MAX` and the
+`BOOL_OR` and `EVERY` a boolean; `STRING_AGG` text, or a boolean, number,
+network value, UUID or DATE rendered as its text; `MIN`/`MAX` and the
 ordering argument of `MIN_BY`/`MAX_BY` any type with an order — every type but
 `ROW`. Any other argument is refused before a row is read with PostgreSQL's
 `42883 function sum(text) does not exist` (a quoted or NULL literal to `SUM`/
-`AVG` is `42725 … is not unique`); `STRING_AGG` over `BYTES` is 0A000. A
+`AVG` is `42725 … is not unique`; `MODE` and the percentiles over a
+non-number are `42809 WITHIN GROUP is required`); `STRING_AGG` over `BYTES`
+is 0A000. A
 numeric-looking text column — a CSV field the reader inferred as text — must
 be cast: `SUM(CAST(n AS BIGINT))`.
 

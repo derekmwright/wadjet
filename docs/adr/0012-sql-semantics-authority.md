@@ -80,34 +80,53 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        them: PORT and PROTOCOL are int4 and DURATION is int8 (nanoseconds,
        #834), so SUM/AVG/STDDEV/VARIANCE/CORR/COVAR and the comparisons treat
        them as numbers where PostgreSQL's `interval` has no stddev.
-     - MEDIAN, MODE and QUANTILE_* are DuckDB's spellings (PostgreSQL has none,
-       or only the ordered-set form) and answer over numbers; over anything
-       else they are 42883, where they answered NULL.
-     - A TEXT operand compared DIRECTLY (`=`, `<`, BETWEEN, CASE … WHEN,
-       NULLIF) with a DATE, TIMESTAMP, UUID, IPV6, CIDR or BOOL operand is
-       read through that type's input function, identically on every arm
-       (#826's column spelling). Against a NUMBER it is refused: #504's
-       reading compared the RENDERINGS, so `'12.75' = 12.7500` was unequal —
-       and against IPV4, MACADDR and BYTEA it matched nothing where every row
-       matched. Every MEMBERSHIP test (IN, = ANY / ALL) between text and a
-       typed operand is refused too: it answered 0 rows on the single arm and
-       every row on the DAG.
+     - MEDIAN, MODE and QUANTILE_* are DuckDB's spellings (PostgreSQL has
+       none, or only the ordered-set form) and answer over numbers. Refused
+       they carry PostgreSQL's state: MODE and PERCENTILE_* are its
+       ordered-set aggregates, 42809 `WITHIN GROUP is required for
+       ordered-set aggregate mode`; MEDIAN and QUANTILE_* 42883.
+     - STRING_AGG renders a non-text argument as its own text — BOOL, the
+       integers, REAL, DOUBLE, DECIMAL, IPV4, IPV6, CIDR, MACADDR, PORT,
+       PROTOCOL, DURATION, UUID and DATE (ISO) — which base answered
+       identically on every arm (arc BR round 2). TIMESTAMP (epoch
+       milliseconds) and the containers (Go's `map[…]`) are 42883; BYTEA is
+       below.
+     - TEXT compared with a typed operand is decided PER PAIR, from what the
+       base engine answered for a value against its own text rendering over
+       20 rows on five arms (`physical.textConversionAnswers`):
+
+       | typed side | direct `=`/`<`/…, IN list | IN / = ANY (subquery) |
+       |---|---|---|
+       | int4, int8, float8, numeric, port, protocol, duration | kept | kept |
+       | uuid, ipv6, cidr | kept | kept |
+       | date, timestamp, boolean | kept | 42883 (0 rows single, 20 DAG) |
+       | real | 42883 (3 of 20 matched) | 42883 |
+       | bytea, ipv4, macaddr | 42883 (0 of 20 matched) | 42883 |
+
+       Two shapes keep no text reading for any type: a membership test
+       against a SET-OPERATION body (0 rows single, the DAG's cast failing,
+       #1073) and two plain COLUMNS as a JOIN key (the hash-join key path:
+       #615's error on three arms, 0 rows on the shuffled one).
      - An UNQUOTED numeric literal keeps its recorded readings: against TEXT
        its source text (#504), against a TIMESTAMP the epoch-millisecond
        instant the carrier holds. A literal is refused only against a
        BOOLEAN, and a boolean literal only against a number (`1 = true`,
        `id = true`, `(id > 1) = 1`).
-     - A set operation's ORDER BY matches a result name case-insensitively:
-       the published names arrive folded, so `ORDER BY "ID"` over `id`
-       answers where PostgreSQL raises 42703.
+     - A set operation's ORDER BY takes one qualified spelling PostgreSQL
+       does not: the FIRST arm's selected `q.col` under its own name
+       (`SELECT a.id … UNION ALL … ORDER BY a.id DESC`), which base answered
+       correctly on all five arms. Every other qualifier is 42P01; result
+       names match EXACTLY, as PostgreSQL's do (`ORDER BY "ID"` over `id` is
+       42703).
 
      Refused where PostgreSQL ANSWERS, loudly and by name: `string_agg` over
      BYTEA (0A000 — the accumulator renders each value with Go's fmt), a
      quoted literal written in a ROW's or ARRAY's own grammar inside a fold
      (0A000 — the fold answered the literal's TEXT), and two ROWs of
-     different SHAPES in a fold or a set operation (42804 — PostgreSQL's
-     anonymous records answer; this engine's ROW columns are typed like
-     PostgreSQL's NAMED composites, which refuse).
+     different SHAPES in a fold or a set operation (42846 `could not convert
+     type`, PostgreSQL's state for two named composites; its anonymous
+     `ROW(…)` records answer, and this engine's ROW columns are typed like
+     the named ones).
 
    - **A result with NO COLUMNS AT ALL is refused, where PostgreSQL answers
      with a header and zero rows.** (Added 2026-09-08, #1008 / #1010.)
