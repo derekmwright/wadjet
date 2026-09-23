@@ -61,7 +61,7 @@ func (p *Planner) ValidateColumns(ctx context.Context, info *plansql.SelectInfo)
 }
 
 func validateColumns(ctx context.Context, src tableColumnSource, info *plansql.SelectInfo) error {
-	b := &binder{src: src, ctes: map[string]cteEntry{}}
+	b := &binder{ctx: ctx, src: src, ctes: map[string]cteEntry{}}
 	return b.validateBlock(ctx, info, nil)
 }
 
@@ -322,7 +322,7 @@ func (s *colScope) provableColType(ref *plansql.ColRef) (parquet.TypeID, bool) {
 			return 0, false
 		}
 		t, ok := cols[col]
-		return t, ok
+		return t, ok && t != typeAmbiguous
 	}
 	if s.srcCount[col] > 1 {
 		return 0, false
@@ -632,9 +632,15 @@ type cteEntry struct {
 }
 
 type binder struct {
+	// ctx is the validation's context, for the questions a check asks of a
+	// SUBQUERY's output (comparisonTyper), which run below checkExpr.
+	ctx         context.Context
 	outputDecls map[*plansql.SelectInfo][]expr.DeclType
-	src         tableColumnSource
-	ctes        map[string]cteEntry
+	// structural is each block's output column TYPES as the comparison rule
+	// may read them (structuralTypeOf), typeAmbiguous where it cannot.
+	structural map[*plansql.SelectInfo][]parquet.TypeID
+	src        tableColumnSource
+	ctes       map[string]cteEntry
 	// outerDiag is the enclosing query levels a DERIVED TABLE's body sits
 	// under, carried for DIAGNOSIS and never for resolution (#614). See
 	// outerDiagScope. Nil everywhere but inside a plain derived table's block.
@@ -695,6 +701,10 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 			}
 		}
 		b.outputDecls[info] = out
+		if b.structural == nil {
+			b.structural = map[*plansql.SelectInfo][]parquet.TypeID{}
+		}
+		b.structural[info] = b.structural[info.Union.Left]
 		return nil
 	}
 
@@ -776,6 +786,23 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		}
 	}
 	b.outputDecls[info] = declarations
+	if b.structural == nil {
+		b.structural = map[*plansql.SelectInfo][]parquet.TypeID{}
+	}
+	if _, star := blockOutputs(info); !star {
+		typeOf := structuralTypeOf(fieldInputs)
+		st := make([]parquet.TypeID, len(info.Columns))
+		for i, col := range info.Columns {
+			st[i] = typeAmbiguous
+			if col.IsWindow || col.ASTExpr == nil {
+				continue
+			}
+			if t, ok := typeOf(col.ASTExpr); ok {
+				st[i] = t
+			}
+		}
+		b.structural[info] = st
+	}
 
 	// Resolution scope for WHERE and SELECT: FROM sources plus any outer scope
 	// (correlated subqueries). Output aliases are NOT visible here — a SELECT
@@ -853,6 +880,9 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 				return err
 			}
 			if err := refuseInvalidSemverRanges(col.ASTExpr); err != nil {
+				return err
+			}
+			if err := b.refuseIncomparableOperands(col.ASTExpr, resolve); err != nil {
 				return err
 			}
 		}
@@ -981,10 +1011,52 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 	if err := refuseInvalidSemverRanges(expr); err != nil {
 		return err
 	}
+	// Two TYPED operands of classes PostgreSQL has no operator between
+	// (validate_comparison_types.go, #1073).
+	if err := b.refuseIncomparableOperands(expr, scope); err != nil {
+		return err
+	}
+	// A container folded with something it cannot be (validate_container_fold.go,
+	// #1060).
+	if err := refuseContainerFold(expr, foldTypeOf(rowFieldScopeDecls(scope))); err != nil {
+		return err
+	}
 	if scope == nil || scope.open {
 		return nil
 	}
 	return checkLiteralTypes(expr, scope)
+}
+
+// refuseIncomparableOperands runs the comparison-class rule over one clause,
+// typing a subquery operand by validating its body against this scope.
+func (b *binder) refuseIncomparableOperands(node plansql.Node, scope *colScope) error {
+	if node == nil || scope == nil {
+		return nil
+	}
+	decls := rowFieldScopeDecls(scope)
+	c := &comparisonTyper{scope: scope, typeOf: structuralTypeOf(decls), shape: foldTypeOf(decls),
+		subquery: func(sql string) []parquet.TypeID { return b.subqueryOutputTypes(sql, scope) }}
+	return c.walk(node)
+}
+
+// subqueryOutputTypes is a subquery body's output column TYPES as the
+// comparison rule reads them (structuralTypeOf), in order, with typeAmbiguous
+// for a column it cannot type — or nil when the body cannot be read at all. The body is validated here against the enclosing
+// scope (it may correlate); an error is not this question's to report, and the
+// body's own validation reports it in turn.
+func (b *binder) subqueryOutputTypes(sql string, outer *colScope) []parquet.TypeID {
+	sub := parseSelect(sql)
+	if sub == nil {
+		return nil
+	}
+	ctx := b.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := b.validateBlock(ctx, sub, outer); err != nil {
+		return nil
+	}
+	return b.structural[sub]
 }
 
 // resolveExprNames refuses the first column reference in expr that the scope

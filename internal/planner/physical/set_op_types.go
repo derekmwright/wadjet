@@ -460,6 +460,20 @@ func setOpArmTypeConflict(node *logical.Node) error {
 				want = ct
 				continue
 			}
+			// TWO ROW SHAPES are two types. The TypeID comparison below sees
+			// ROW on both arms and resolves nothing, and the single-process
+			// path then read arm 2's rows under arm 1's field list while the
+			// DAG answered differently (#1065); PostgreSQL 17.11 refuses the
+			// pair at parse analysis. The shapes are spelled in the message:
+			// this engine's ROW has no type name to carry.
+			if want.Typ == parquet.TypeRow && ct.Typ == parquet.TypeRow {
+				a := parquet.Column{Type: parquet.TypeRow, Fields: want.Fields}
+				b := parquet.Column{Type: parquet.TypeRow, Fields: ct.Fields}
+				if !foldCompatible(a, b) {
+					return sqlerr.New("42804", "%s types %s and %s cannot be matched: result column %q",
+						op, foldTypeName(a), foldTypeName(b), outNames[col])
+				}
+			}
 			if setOpNoCarrier(want.Typ, ct.Typ) {
 				if carrierGap == nil {
 					carrierGap = setOpCarrierGap(outNames[col], want.Typ, ct.Typ)

@@ -32,7 +32,12 @@ func (f *fakeCatalog) GetTable(_ context.Context, name string) (*catalog.TableMe
 	}
 	schema := parquet.Schema{}
 	for _, c := range cols {
-		col := parquet.Column{Name: c}
+		// A NAME-ONLY column declares no type at all. Left at the zero
+		// TypeID it would declare BOOLEAN — a real type, and the binder's
+		// type rules (the aggregate argument class, the comparison class)
+		// would read `id > 90` as `boolean > integer`. typeAmbiguous is the
+		// binder's own "no provable type" marker.
+		col := parquet.Column{Name: c, Type: typeAmbiguous}
 		// `attrs` is this fixture's ROW CONTAINER — the dotted-access cases
 		// are about a FIELD PATH — and it has to SAY so. A column whose type
 		// nobody sets reads as the zero TypeID, which is TypeBool, and the

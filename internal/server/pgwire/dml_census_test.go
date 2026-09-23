@@ -174,10 +174,12 @@ func censusShapes() []censusShape {
 			pg:  "state=42883",
 			emb: "rows=[3]",
 			bug: "#721"},
+		// Agrees since arc BR: a number against a boolean is refused at plan
+		// time on every door (physical.comparisonTyper), where it was 22P02
+		// here and zero rows on the DAG.
 		{name: "#721 select int column = boolean", sql: "SELECT count(*) AS c FROM arcb_pr WHERE id = true",
 			pg:  "state=42883",
-			emb: "state=22P02",
-			bug: "#721"},
+			emb: "state=42883"},
 		{name: "#721 select int column = text garbage", sql: "SELECT count(*) AS c FROM arcb_pr WHERE id = 'abc'",
 			pg:  "state=22P02",
 			emb: "state=22P02"},

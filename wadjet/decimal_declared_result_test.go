@@ -1096,37 +1096,26 @@ func TestAggregateOverAChoiceCarriesNoTypmod(t *testing.T) {
 }
 
 // TestNullifOverAStringColumnStillComparesAsText is #504's rule at the site
-// the previous fix over-reached into.
+// the previous fix over-reached into, and its premise changed with arc BR.
 //
-// The numeric fallback evalNullIf gained is for a DECIMAL against an operand
-// this layer CANNOT CLASSIFY — a scalar subquery, a container element. Gated
-// on "either side is DECIMAL" it also fired for a DECIMAL against a genuine
-// TEXT column, and then NULLIF read "12.7500" as a number where `=`,
-// GREATEST, CASE … WHEN and IS DISTINCT FROM all read it as bytes: one
-// commit, five sites, two answers for one question.
-//
-// The assertion is that INTERNAL agreement, not a fixed row set: whatever
-// `s = a` decides, NULLIF must decide the same way, in both argument orders.
+// #504 made every site read a TEXT column against a DECIMAL column the same
+// way — as bytes — so `s = a` matched "12.75" and not "12.7500": the same
+// number, answered unequal. That internal agreement was real and the value
+// was still not one a client can use, and PostgreSQL refuses the pair outright
+// (42883 `operator does not exist: text = numeric`). Arc BR refuses it at
+// plan time (physical.comparisonTyper, #1073), so the agreement this test
+// asserts is now the REFUSAL, at every site: `=`, and NULLIF in both argument
+// orders.
 func TestNullifOverAStringColumnStillComparesAsText(t *testing.T) {
 	db := ddrOpen(t)
-	rowsOf := func(sql string) string {
-		return fmt.Sprintf("%v", ddrQuery(t, db, sql).Rows)
-	}
-	eq := rowsOf("SELECT id FROM " + ddrTable + " WHERE s = a ORDER BY id")
-	// s = a matches only where the two RENDERINGS are byte-identical:
-	// "12.75" on row 1 and "2.00" on row 4. Not row 2 ("12.7500"), not row 5
-	// ("-0.0100"), not row 7 ("12.750").
-	if eq != "[map[id:1] map[id:4]]" {
-		t.Fatalf("s = a matched %s — this test's premise is that a STRING column "+
-			"compares AS TEXT (#504); if that changed, every site below changes with it", eq)
-	}
-	for _, sql := range []string{
-		"SELECT id FROM " + ddrTable + " WHERE NULLIF(s, a) IS NULL AND s IS NOT NULL ORDER BY id",
-		"SELECT id FROM " + ddrTable + " WHERE NULLIF(a, s) IS NULL AND a IS NOT NULL ORDER BY id",
+	for _, tc := range []struct{ sql, msg string }{
+		{"SELECT id FROM " + ddrTable + " WHERE s = a ORDER BY id", "text = numeric"},
+		{"SELECT id FROM " + ddrTable + " WHERE NULLIF(s, a) IS NULL AND s IS NOT NULL ORDER BY id", "text = numeric"},
+		{"SELECT id FROM " + ddrTable + " WHERE NULLIF(a, s) IS NULL AND a IS NOT NULL ORDER BY id", "numeric = text"},
 	} {
-		if got := rowsOf(sql); got != eq {
-			t.Errorf("%s\n  got  %s\n  want %s (the rows `s = a` matches — NULLIF must read a "+
-				"STRING column the way every sibling site reads it)", sql, got, eq)
+		_, err := db.Query(context.Background(), tc.sql)
+		if err == nil || sqlerr.StateOf(err) != "42883" || !strings.Contains(err.Error(), tc.msg) {
+			t.Errorf("%s\n  got  %v\n  want 42883 operator does not exist: %s (PostgreSQL 17.11)", tc.sql, err, tc.msg)
 		}
 	}
 }

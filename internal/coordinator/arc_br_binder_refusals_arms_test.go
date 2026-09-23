@@ -163,6 +163,54 @@ func brArmCells() []brArmCell {
 			sql: "SELECT 1 AS k FROM lat_ord WHERE false HAVING true", want: "rows=1 1"},
 		{name: "1233ok/havingCountOverEmptyInput",
 			sql: "SELECT 1 AS k FROM lat_ord WHERE false HAVING COUNT(*) = 0", want: "rows=1 1"},
+		// --- #1060 / #1065: containers in folds and set operations ---------
+		{name: "1060/coalesceRowArray", sql: "SELECT COALESCE(c_row, c_arr) AS v FROM typemx_nested WHERE id < 3",
+			state: "42804", msg: "COALESCE types record("},
+		{name: "1060/coalesceRowInteger", sql: "SELECT COALESCE(c_row, id) AS v FROM typemx_nested WHERE id < 3",
+			state: "42804", msg: "and bigint cannot be matched"},
+		{name: "1060/coalesceArrayText", sql: "SELECT COALESCE(c_arr, CAST(id AS TEXT)) AS v FROM typemx_nested WHERE id < 3",
+			state: "42804", msg: "COALESCE types array and text cannot be matched"},
+		{name: "1060/coalesceArrayInteger", sql: "SELECT COALESCE(c_arr, id) AS v FROM typemx_nested WHERE id < 3",
+			state: "42804", msg: "COALESCE types array and bigint cannot be matched"},
+		{name: "1060/caseRowElseText",
+			sql:   "SELECT CASE WHEN id = 1 THEN c_row ELSE CAST(id AS TEXT) END AS v FROM typemx_nested WHERE id < 3",
+			state: "42804", msg: "CASE types text and record("},
+		{name: "1060/caseArrayElseText",
+			sql:   "SELECT CASE WHEN id = 1 THEN c_arr ELSE CAST(id AS TEXT) END AS v FROM typemx_nested WHERE id < 3",
+			state: "42804", msg: "CASE types text and array cannot be matched"},
+		{name: "1060/caseTwoRowShapes",
+			sql:   "SELECT CASE WHEN id = 1 THEN c_row ELSE c_rownest END AS v FROM typemx_nested WHERE id < 3",
+			state: "42804", msg: "CASE types record("},
+		{name: "1060/nullifTwoRowShapes", sql: "SELECT NULLIF(c_row, c_rownest) AS v FROM typemx_nested WHERE id < 3",
+			state: "42804", msg: "cannot compare record types with different numbers of columns"},
+		{name: "1060/coalesceRowMalformedLiteral", sql: "SELECT COALESCE(c_row, 'x') AS v FROM typemx_nested WHERE id < 3",
+			state: "22P02", msg: `malformed record literal: "x"`},
+		{name: "1060/greatestArrayMalformedLiteral", sql: "SELECT GREATEST(c_arr, 'x') AS v FROM typemx_nested WHERE id < 3",
+			state: "22P02", msg: `malformed array literal: "x"`},
+		{name: "1060/rowEqualsOtherShape", sql: "SELECT c_row = c_rownest AS v FROM typemx_nested WHERE id < 3",
+			state: "42804", msg: "cannot compare record types with different numbers of columns"},
+		{name: "1060ok/coalesceOneShape", sql: "SELECT COALESCE(c_row, c_row) AS v FROM typemx_nested WHERE id < 3", same: true},
+		{name: "1060ok/caseRowElseNull", sql: "SELECT CASE WHEN id = 1 THEN c_row ELSE NULL END AS v FROM typemx_nested WHERE id < 3", same: true},
+		{name: "1060ok/rowEqualsItself", sql: "SELECT c_row = c_row AS v FROM typemx_nested WHERE id < 3", same: true},
+		{name: "1065/unionAllTwoRowShapes",
+			sql:   "SELECT c_row AS p FROM typemx_nested WHERE id < 2 UNION ALL SELECT c_rownest AS p FROM typemx_nested WHERE id < 2",
+			state: "42804", msg: "UNION types record("},
+		{name: "1065/unionTwoRowShapes",
+			sql:   "SELECT c_row AS p FROM typemx_nested WHERE id < 2 UNION SELECT c_rownest AS p FROM typemx_nested WHERE id < 2",
+			state: "42804", msg: "UNION types record("},
+		{name: "1065/intersectTwoRowShapes",
+			sql:   "SELECT c_row AS p FROM typemx_nested WHERE id < 2 INTERSECT SELECT c_rownest AS p FROM typemx_nested WHERE id < 2",
+			state: "42804", msg: "INTERSECT types record("},
+		{name: "1065/exceptTwoRowShapes",
+			sql:   "SELECT c_row AS p FROM typemx_nested WHERE id < 2 EXCEPT SELECT c_rownest AS p FROM typemx_nested WHERE id < 2",
+			state: "42804", msg: "EXCEPT types record("},
+		{name: "1065ok/unionAllOneShape",
+			sql:  "SELECT c_row AS p FROM typemx_nested WHERE id < 2 UNION ALL SELECT c_row AS p FROM typemx_nested WHERE id < 2",
+			same: true},
+		{name: "1065ok/unionAllNestedShape",
+			sql:  "SELECT c_rownest AS p FROM typemx_nested WHERE id < 2 UNION ALL SELECT c_rownest AS p FROM typemx_nested WHERE id < 2",
+			same: true},
+
 		{name: "1233ok/havingMaxOrdered",
 			sql: "SELECT 'x' AS k FROM lat_ord HAVING MAX(id) > 0 ORDER BY 1", want: "rows=1 x"},
 	}
@@ -296,6 +344,83 @@ func brAggregateCells() []brArmCell {
 	return out
 }
 
+// brComparisonCells is the comparison seam on five arms (#1073, #1216 item 2):
+// the 18 flat types pairwise, as `=` between two columns and as IN over a
+// subquery, refused across classes and answered — identically on every arm
+// for `=` — within one. The IN controls assert only that they ANSWER: several
+// same-class IN pairs answer differently on the shuffled DAG arm at base and
+// here (recorded as a filing candidate in arc BR's notes).
+func brComparisonCells() []brArmCell {
+	class := []struct{ col, class string }{
+		{"c_bool", "bool"}, {"c_i32", "n"}, {"c_i64", "n"}, {"c_f32", "n"}, {"c_f64", "n"},
+		{"c_str", "text"}, {"c_bytes", "bytea"}, {"c_ts", "time"}, {"c_ipv4", "inet"},
+		{"c_ipv6", "inet"}, {"c_cidr", "inet"}, {"c_mac", "mac"}, {"c_port", "n"},
+		{"c_proto", "n"}, {"c_dur", "n"}, {"c_uuid", "uuid"}, {"c_date", "time"}, {"c_dec", "n"},
+	}
+	// The kept superset (ADR-0012 §5): text compared DIRECTLY with these reads
+	// through their input function, identically on every arm.
+	textInput := map[string]bool{"c_date": true, "c_ts": true, "c_uuid": true,
+		"c_ipv6": true, "c_cidr": true, "c_bool": true}
+	var out []brArmCell
+	for _, x := range class {
+		for _, y := range class {
+			eq := brArmCell{name: "cmpEq/" + x.col + "/" + y.col,
+				sql: "SELECT count(*) AS n FROM typemx a WHERE a." + x.col + " = a." + y.col}
+			in := brArmCell{name: "cmpIn/" + x.col + "/" + y.col,
+				sql: "SELECT count(*) AS n FROM typemx a WHERE a." + x.col + " IN (SELECT b." + y.col + " FROM typemx b)"}
+			if x.class == y.class {
+				eq.same = true
+				// Some same-class IN pairs FAIL at run time on every arm
+				// (the #615 join-key path: float/decimal against port,
+				// protocol, duration; ipv6/cidr against ipv4) — loud where
+				// PostgreSQL answers, pre-existing, recorded. Only the
+				// cross-class verdict is this table's.
+				in = brArmCell{}
+			} else {
+				eq.state, eq.msg = "42883", "operator does not exist: "
+				in.state, in.msg = "42883", "operator does not exist: "
+				if (x.col == "c_str" && textInput[y.col]) || (y.col == "c_str" && textInput[x.col]) {
+					eq = brArmCell{name: eq.name, sql: eq.sql, same: true}
+				}
+			}
+			out = append(out, eq)
+			if in.sql != "" {
+				out = append(out, in)
+			}
+		}
+	}
+	for _, c := range []struct{ name, sql, msg string }{
+		{"inSubquery", "SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT product FROM lat_item)", "operator does not exist: bigint = text"},
+		{"inSetOpSubquery", "SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT product FROM lat_item UNION ALL SELECT product FROM lat_item)", "operator does not exist: bigint = text"},
+		{"inSubqueryMirror", "SELECT o.customer FROM lat_ord o WHERE o.customer IN (SELECT id FROM lat_item)", "operator does not exist: text = bigint"},
+		{"notInSubquery", "SELECT o.id FROM lat_ord o WHERE o.id NOT IN (SELECT product FROM lat_item)", "operator does not exist: bigint = text"},
+		{"anySubquery", "SELECT o.id FROM lat_ord o WHERE o.id = ANY (SELECT product FROM lat_item)", "operator does not exist: bigint = text"},
+		{"inSubqueryInSelectList", "SELECT o.id, o.id IN (SELECT product FROM lat_item) AS v FROM lat_ord o", "operator does not exist: bigint = text"},
+		{"columnPair", "SELECT o.id FROM lat_ord o WHERE o.id = o.customer", "operator does not exist: bigint = text"},
+		{"joinOn", "SELECT o.id FROM lat_ord o JOIN lat_item i ON o.id = i.product", "operator does not exist: bigint = text"},
+		{"integerBoolean", "SELECT 1 = true AS v", "operator does not exist: integer = boolean"},
+		{"distinctFromBoolean", "SELECT 1 IS DISTINCT FROM 1 = true AS v", "operator does not exist: integer = boolean"},
+		{"columnBooleanLiteral", "SELECT id FROM lat_ord WHERE id = true", "operator does not exist: bigint = boolean"},
+		{"predicateInteger", "SELECT id FROM lat_ord WHERE (id > 1) = 1", "operator does not exist: boolean = integer"},
+	} {
+		out = append(out, brArmCell{name: "cmp/" + c.name, sql: c.sql, state: "42883", msg: c.msg})
+	}
+	out = append(out,
+		brArmCell{name: "cmpOk/inSameClassSubquery", sql: "SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT order_id FROM lat_item)",
+			want: "rows=2 1 | 2"},
+		brArmCell{name: "cmpOk/floatAgainstInteger", sql: "SELECT o.id FROM lat_ord o WHERE o.total = o.id", want: "rows=0 "},
+		brArmCell{name: "cmpOk/unknownLiteral", sql: "SELECT o.id FROM lat_ord o WHERE o.customer = 'Bob'", want: "rows=1 2"},
+		// The recorded literal superset (ADR-0012 §5): an unquoted number
+		// against text reads the number's text, which is PostgreSQL's reading
+		// of the QUOTED literal — `customer IN ('1', '2')` is 0 rows there.
+		brArmCell{name: "cmpOk/textInNumberLiteralList", sql: "SELECT o.id FROM lat_ord o WHERE o.customer IN (1, 2)",
+			want: "rows=0 "},
+		brArmCell{name: "cmpOk/notInSameClass", sql: "SELECT o.id FROM lat_ord o WHERE o.id NOT IN (SELECT order_id FROM lat_item)",
+			want: "rows=1 3"},
+	)
+	return out
+}
+
 // brRunArm runs one statement on one arm, returning the rendered rows or the
 // error — keeping the error itself, not its text, so the SQLSTATE is read.
 type brArm struct {
@@ -368,7 +493,9 @@ func TestArcBRWherePostgresRefusesEveryArmRefuses(t *testing.T) {
 	t.Cleanup(cancel)
 	arms := brArms(t, ctx)
 	controls := 0
-	for _, tc := range append(brArmCells(), brAggregateCells()...) {
+	cells := append(brArmCells(), brAggregateCells()...)
+	cells = append(cells, brComparisonCells()...)
+	for _, tc := range cells {
 		t.Run(tc.name, func(t *testing.T) {
 			first := ""
 			for i, arm := range arms {

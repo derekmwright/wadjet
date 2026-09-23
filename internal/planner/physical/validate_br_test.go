@@ -333,3 +333,131 @@ func contains(xs []string, x string) bool {
 	}
 	return false
 }
+
+// The comparison classes, written out from the 18 x 18 measurement: a pair
+// PostgreSQL 17.11 compares answers, every other pair is 42883 `operator does
+// not exist` (#1073, #1216 item 2). DURATION is measured as the bigint the
+// wire declares it.
+func TestArcBRComparisonOperandClassesMatchPostgres(t *testing.T) {
+	class := map[string]string{
+		"c_i32": "n", "c_i64": "n", "c_f32": "n", "c_f64": "n", "c_dec": "n", "c_port": "n",
+		"c_proto": "n", "c_dur": "n", "c_str": "text", "c_bytes": "bytea", "c_bool": "bool",
+		"c_ts": "time", "c_date": "time", "c_ipv4": "inet", "c_ipv6": "inet", "c_cidr": "inet",
+		"c_mac": "mac", "c_uuid": "uuid",
+	}
+	// The kept superset (ADR-0012 §5): a DIRECT comparison of text with one of
+	// these reads the text through that type's input, the same on every arm.
+	// A membership test (IN / = ANY) keeps no text reading.
+	textInput := map[string]bool{"c_date": true, "c_ts": true, "c_uuid": true,
+		"c_ipv6": true, "c_cidr": true, "c_bool": true}
+	var cells []brCell
+	for x, cx := range class {
+		for y, cy := range class {
+			direct := fmt.Sprintf("SELECT id FROM tm WHERE %s = %s", x, y)
+			member := fmt.Sprintf("SELECT id FROM tm a WHERE a.%s IN (SELECT b.%s FROM tm b)", x, y)
+			superset := (x == "c_str" && textInput[y]) || (y == "c_str" && textInput[x])
+			switch {
+			case cx == cy:
+				cells = append(cells, brCell{direct, "", ""}, brCell{member, "", ""})
+			case superset:
+				cells = append(cells, brCell{direct, "", ""},
+					brCell{member, "42883", "operator does not exist: "})
+			default:
+				cells = append(cells, brCell{direct, "42883", "operator does not exist: "},
+					brCell{member, "42883", "operator does not exist: "})
+			}
+		}
+	}
+	cells = append(cells,
+		// PostgreSQL's sentence, operator and operand order, verbatim.
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT product FROM lat_item)", "42883", "operator does not exist: bigint = text"},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id NOT IN (SELECT product FROM lat_item)", "42883", "operator does not exist: bigint = text"},
+		brCell{"SELECT o.customer FROM lat_ord o WHERE o.customer IN (SELECT id FROM lat_item)", "42883", "operator does not exist: text = bigint"},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT product FROM lat_item UNION ALL SELECT product FROM lat_item)", "42883", "operator does not exist: bigint = text"},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id = ANY (SELECT product FROM lat_item)", "42883", "operator does not exist: bigint = text"},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id > ALL (SELECT product FROM lat_item)", "42883", "operator does not exist: bigint > text"},
+		brCell{"SELECT o.id, o.id IN (SELECT product FROM lat_item) AS v FROM lat_ord o", "42883", "operator does not exist: bigint = text"},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT o.customer)", "42883", "operator does not exist: bigint = text"},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id = (SELECT product FROM lat_item LIMIT 1)", "42883", "operator does not exist: bigint = text"},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id <> o.customer", "42883", "operator does not exist: bigint <> text"},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id != o.customer", "42883", "operator does not exist: bigint <> text"},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id < o.customer", "42883", "operator does not exist: bigint < text"},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id BETWEEN o.customer AND o.customer", "42883", "operator does not exist: bigint >= text"},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id BETWEEN 1 AND o.customer", "42883", "operator does not exist: bigint <= text"},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IS DISTINCT FROM o.customer", "42883", "operator does not exist: bigint = text"},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IS NOT DISTINCT FROM o.customer", "42883", "operator does not exist: bigint = text"},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IN (o.customer, 1)", "42883", "operator does not exist: bigint = text"},
+		brCell{"SELECT o.id FROM lat_ord o JOIN lat_item i ON o.id = i.product", "42883", "operator does not exist: bigint = text"},
+		brCell{"SELECT o.id FROM lat_ord o WHERE (o.id, o.customer) IN (SELECT id, id FROM lat_item)", "42883", "operator does not exist: text = bigint"},
+		brCell{"SELECT CASE o.id WHEN o.customer THEN 1 END AS v FROM lat_ord o", "42883", "operator does not exist: bigint = text"},
+		brCell{"SELECT o.id FROM lat_ord o GROUP BY o.id HAVING o.id = MAX(o.customer)", "42883", "operator does not exist: bigint = text"},
+		brCell{"SELECT o.id FROM lat_ord o WHERE (o.id > 1) = 1", "42883", "operator does not exist: boolean = integer"},
+		brCell{"SELECT 1 = true AS v", "42883", "operator does not exist: integer = boolean"},
+		brCell{"SELECT 1 IS DISTINCT FROM 1 = true AS v", "42883", "operator does not exist: integer = boolean"},
+		brCell{"SELECT id FROM lat_ord WHERE id = true", "42883", "operator does not exist: bigint = boolean"},
+		brCell{"SELECT c_mac = c_str AS v FROM tm", "42883", "operator does not exist: macaddr = text"},
+		brCell{"SELECT c_arr = c_str AS v FROM tm", "42883", "operator does not exist: array = text"},
+		// Controls: every class PostgreSQL does compare within, an unknown
+		// literal on either side, and a subquery of the same class.
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.total = o.id", "", ""},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT amount FROM lat_item)", "", ""},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT order_id FROM lat_item)", "", ""},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.customer = 'Bob'", "", ""},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.customer = NULL", "", ""},
+		brCell{"SELECT c_ts = c_date AS v FROM tm", "", ""},
+		brCell{"SELECT c_ipv4 = c_cidr AS v FROM tm", "", ""},
+		brCell{"SELECT c_dur = c_i64 AS v FROM tm", "", ""},
+		brCell{"SELECT c_arr = c_arr AS v FROM tm", "", ""},
+		brCell{"SELECT c_arr[1] = c_str AS v FROM tm", "", ""},
+		brCell{"SELECT c_map['k'] = c_i64 AS v FROM tm", "", ""},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.total > 0 AND o.customer LIKE 'A%'", "", ""},
+		// The recorded literal supersets (ADR-0012 §5): an unquoted number
+		// against text reads the number's text, against a timestamp the epoch
+		// instant; a function whose registered return is text is not a type
+		// this rule reads.
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.customer IN (1, 2)", "", ""},
+		brCell{"SELECT o.id FROM lat_ord o WHERE (o.id, o.customer) = (1, 2)", "", ""},
+		brCell{"SELECT id FROM tm WHERE c_ts >= 1700000000000", "", ""},
+		brCell{"SELECT id FROM tm WHERE c_str = TRUE", "", ""},
+		brCell{"SELECT id FROM tm WHERE current_date = CAST(c_ts AS DATE)", "", ""},
+		brCell{"SELECT id FROM tm WHERE c_ipv4 = int_to_ip(c_i64)", "", ""},
+		// A CAST to a parameterized or unrecognised name is not TEXT.
+		brCell{"SELECT id FROM tm a WHERE a.c_i64 IN (SELECT CAST(b.c_f64 AS DECIMAL(9,2)) FROM tm b)", "", ""},
+		brCell{"SELECT id FROM tm WHERE c_f32 IN (CAST(3.1 AS DECIMAL(9,2)), 7.1)", "", ""},
+		brCell{"SELECT id FROM tm WHERE c_ipv4 = CAST(c_str AS INET)", "", ""},
+	)
+	runBRCells(t, cells)
+}
+
+// A container folded with something it cannot be is refused (#1060), and two
+// ROWs of different shapes are not compared (#1060/#1065). Verdicts measured
+// on 17.11 over typed columns of the same PostgreSQL types.
+func TestArcBRContainerFoldsAreRefused(t *testing.T) {
+	runBRCells(t, []brCell{
+		{"SELECT COALESCE(c_row, c_arr) AS v FROM tm", "42804", "COALESCE types record(a text, b bigint) and array cannot be matched"},
+		{"SELECT COALESCE(c_row, id) AS v FROM tm", "42804", "COALESCE types record(a text, b bigint) and bigint cannot be matched"},
+		{"SELECT COALESCE(c_arr, CAST(id AS TEXT)) AS v FROM tm", "42804", "COALESCE types array and text cannot be matched"},
+		{"SELECT COALESCE(c_arr, id) AS v FROM tm", "42804", "COALESCE types array and bigint cannot be matched"},
+		{"SELECT IFNULL(c_map, c_str) AS v FROM tm", "42804", "COALESCE types map and text cannot be matched"},
+		{"SELECT GREATEST(c_vec, c_f64) AS v FROM tm", "42804", "GREATEST types vector and double precision cannot be matched"},
+		{"SELECT LEAST(c_row, c_rownest) AS v FROM tm", "42804", "LEAST types record(a text, b bigint) and record(x bigint) cannot be matched"},
+		// A CASE's ELSE is read first, as the server does.
+		{"SELECT CASE WHEN id = 1 THEN c_row ELSE CAST(id AS TEXT) END AS v FROM tm", "42804", "CASE types text and record(a text, b bigint) cannot be matched"},
+		{"SELECT CASE WHEN id = 1 THEN c_arr ELSE CAST(id AS TEXT) END AS v FROM tm", "42804", "CASE types text and array cannot be matched"},
+		{"SELECT CASE WHEN id = 1 THEN c_row ELSE c_rownest END AS v FROM tm", "42804", "CASE types record(x bigint) and record(a text, b bigint) cannot be matched"},
+		{"SELECT COALESCE(c_row, 'x') AS v FROM tm", "22P02", `malformed record literal: "x"`},
+		{"SELECT GREATEST(c_arr, 'x') AS v FROM tm", "22P02", `malformed array literal: "x"`},
+		{"SELECT GREATEST(c_arr, '{x}') AS v FROM tm", "0A000", "a quoted ARRAY literal in GREATEST is not supported"},
+		{"SELECT NULLIF(c_row, c_rownest) AS v FROM tm", "42804", "cannot compare record types with different numbers of columns"},
+		{"SELECT c_row = c_rownest AS v FROM tm", "42804", "cannot compare record types with different numbers of columns"},
+		{"SELECT NULLIF(c_arr, c_str) AS v FROM tm", "42883", "operator does not exist: array = text"},
+		// Controls: one container kind, one shape, a NULL arm.
+		{"SELECT COALESCE(c_row, c_row) AS v FROM tm", "", ""},
+		{"SELECT CASE WHEN id = 1 THEN c_row ELSE NULL END AS v FROM tm", "", ""},
+		{"SELECT LEAST(c_row, c_row) AS v FROM tm", "", ""},
+		{"SELECT COALESCE(c_arr, c_arr) AS v FROM tm", "", ""},
+		{"SELECT c_row = c_row AS v FROM tm", "", ""},
+		{"SELECT COALESCE(c_str, 'x') AS v FROM tm", "", ""},
+		{"SELECT COALESCE(c_i32, c_f64) AS v FROM tm", "", ""},
+	})
+}
