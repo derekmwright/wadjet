@@ -369,11 +369,16 @@ func wkSeamCells() []c1Case {
 		{
 			name: "lifted/lateralContested",
 			sql:  "SELECT o.id AS a, p.m AS b FROM lat_ord o LEFT JOIN LATERAL (SELECT i.product AS m FROM lat_item i WHERE i.id < o.id) p ON true ORDER BY a, b",
-			want: "cols=[a:INT64 b:STRING] rows=4 | 1,NULL | 2,Widget | 3,Gadget | 3,Widget",
-			pin: map[string]string{
-				"single":      "cols=[a:INT64 b:STRING] rows=3 | 1,NULL | 2,NULL | 3,NULL",
-				"spilled512k": "cols=[a:INT64 b:STRING] rows=3 | 1,NULL | 2,NULL | 3,NULL",
-			},
-			why: "#1130, single-process only: the lifted non-equality predicate names an inner column the OUTER relation also carries, so the materialization DECLINES (ADR-0021 \u00a71q round 4) and the two single arms answer NULL pads where the three DAG arms \u2014 which read the column off a stream carrying the scan's own names \u2014 answer PostgreSQL's rows. Not a key-binding question: arc L1 measured both available routes out. Identical at aed447e3.",
+			// SINCE ARC LT this is a REFUSAL on every arm, not a per-arm
+			// pin (ADR-0021 §1s, logical.RefuseContestedLiftedRefs): the
+			// lifted column `id` is one the enclosing relation also
+			// publishes, and the two single arms answered NULL pads for
+			// PostgreSQL's `1,NULL | 2,Widget | 3,Gadget | 3,Widget` where
+			// the three DAG arms answered them — a refusal is a property of
+			// the plan, so the DAG arms move right → loud with the single
+			// arms' wrong → loud, stated in arc LT's notes. The closure is a
+			// dependent join (#1130 stays open on it).
+			want: "ERR which the enclosing relation also publishes",
+			why:  "#1130: refused uniformly since arc LT; PostgreSQL answers 1,NULL | 2,Widget | 3,Gadget | 3,Widget",
 		}}
 }
