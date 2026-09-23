@@ -639,6 +639,11 @@ type binder struct {
 	// structural is each block's output column TYPES as the comparison rule
 	// may read them (structuralTypeOf), typeAmbiguous where it cannot.
 	structural map[*plansql.SelectInfo][]parquet.TypeID
+	// textOrigin is, per output column that is TEXT made by a CAST, the
+	// structural type the cast read — typeAmbiguous otherwise. A set
+	// operation keeps an origin only where both arms carry one of one
+	// class (comparisonTyper's set-operation membership rule).
+	textOrigin map[*plansql.SelectInfo][]parquet.TypeID
 	// joinCond is set while a JOIN's ON clause is checked: a text/typed pair
 	// of two plain COLUMNS there is a hash-join key (comparisonTyper).
 	joinCond bool
@@ -708,6 +713,22 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 			b.structural = map[*plansql.SelectInfo][]parquet.TypeID{}
 		}
 		b.structural[info] = b.structural[info.Union.Left]
+		if b.textOrigin == nil {
+			b.textOrigin = map[*plansql.SelectInfo][]parquet.TypeID{}
+		}
+		lo, ro := b.textOrigin[info.Union.Left], b.textOrigin[info.Union.Right]
+		var org []parquet.TypeID
+		if len(lo) == len(ro) {
+			org = make([]parquet.TypeID, len(lo))
+			for i := range lo {
+				org[i] = typeAmbiguous
+				if lo[i] != typeAmbiguous && ro[i] != typeAmbiguous &&
+					comparisonClass(lo[i]) == comparisonClass(ro[i]) {
+					org[i] = lo[i]
+				}
+			}
+		}
+		b.textOrigin[info] = org
 		return nil
 	}
 
@@ -795,16 +816,22 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	if _, star := blockOutputs(info); !star {
 		typeOf := structuralTypeOf(fieldInputs)
 		st := make([]parquet.TypeID, len(info.Columns))
+		org := make([]parquet.TypeID, len(info.Columns))
 		for i, col := range info.Columns {
-			st[i] = typeAmbiguous
+			st[i], org[i] = typeAmbiguous, typeAmbiguous
 			if col.IsWindow || col.ASTExpr == nil {
 				continue
 			}
 			if t, ok := typeOf(col.ASTExpr); ok {
 				st[i] = t
 			}
+			org[i] = textCastOrigin(col.ASTExpr, typeOf)
 		}
 		b.structural[info] = st
+		if b.textOrigin == nil {
+			b.textOrigin = map[*plansql.SelectInfo][]parquet.TypeID{}
+		}
+		b.textOrigin[info] = org
 	}
 
 	// Resolution scope for WHERE and SELECT: FROM sources plus any outer scope
@@ -1049,7 +1076,8 @@ func (b *binder) refuseIncomparableOperands(node plansql.Node, scope *colScope) 
 	}
 	decls := rowFieldScopeDecls(scope)
 	c := &comparisonTyper{scope: scope, typeOf: structuralTypeOf(decls), shape: foldTypeOf(decls), joinKeys: b.joinCond,
-		subquery: func(sql string) []parquet.TypeID { return b.subqueryOutputTypes(sql, scope) }}
+		subquery:   func(sql string) []parquet.TypeID { return b.subqueryOutputTypes(sql, scope) },
+		setOrigins: func(sql string) []parquet.TypeID { return b.setOpTextOrigins(sql, scope) }}
 	return c.walk(node)
 }
 
@@ -1071,6 +1099,27 @@ func (b *binder) subqueryOutputTypes(sql string, outer *colScope) []parquet.Type
 		return nil
 	}
 	return b.structural[sub]
+}
+
+// setOpTextOrigins is, for a SET-OPERATION subquery body, the text-cast
+// origin of each output column (binder.textOrigin), or nil when the body is
+// not a set operation or cannot be read.
+func (b *binder) setOpTextOrigins(sql string, outer *colScope) []parquet.TypeID {
+	sub := parseSelect(sql)
+	if sub == nil || sub.Union == nil {
+		return nil
+	}
+	ctx := b.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := b.validateBlock(ctx, sub, outer); err != nil {
+		return nil
+	}
+	if o := b.textOrigin[sub]; o != nil {
+		return o
+	}
+	return []parquet.TypeID{}
 }
 
 // resolveExprNames refuses the first column reference in expr that the scope

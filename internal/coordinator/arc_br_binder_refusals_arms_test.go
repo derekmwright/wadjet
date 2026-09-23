@@ -522,6 +522,22 @@ func brComparisonCells() []brArmCell {
 			sql: "SELECT id FROM lat_ord WHERE id IN (SELECT CAST(id AS TEXT) FROM lat_item " + sp.op +
 				" SELECT CAST(id AS TEXT) FROM lat_item WHERE id < 3)"})
 	}
+	// #1073's own shape and its siblings: a set-operation body whose text is
+	// NOT a cast from the typed side's class converts data-dependently — 0
+	// rows on the single arms, the DAG's cast failing — so it is refused
+	// on every arm, PostgreSQL's 42883 (arc BR round 3b).
+	for _, op := range []string{"UNION ALL", "UNION", "INTERSECT", "EXCEPT"} {
+		out = append(out,
+			brArmCell{name: "1073/setOpTextBody/" + op, state: "42883", msg: "operator does not exist: bigint = text",
+				sql: "SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT product FROM lat_item " + op + " SELECT product FROM lat_item)"},
+			brArmCell{name: "1073/setOpTextBodyNotIn/" + op, state: "42883", msg: "operator does not exist: bigint = text",
+				sql: "SELECT o.id FROM lat_ord o WHERE o.id NOT IN (SELECT product FROM lat_item " + op + " SELECT product FROM lat_item)"},
+			brArmCell{name: "1073/setOpMixedOrigin/" + op, state: "42883", msg: "operator does not exist: bigint = text",
+				sql: "SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT CAST(id AS TEXT) FROM lat_item " + op + " SELECT product FROM lat_item)"},
+			brArmCell{name: "1073/setOpMirror/" + op, state: "42883", msg: "operator does not exist: text = bigint",
+				sql: "SELECT o.customer FROM lat_ord o WHERE o.customer IN (SELECT id FROM lat_item " + op + " SELECT id FROM lat_item)"},
+		)
+	}
 	out = append(out,
 		brArmCell{name: "cmpOk/textIdInSubquery",
 			sql:  "SELECT id FROM lat_ord WHERE id IN (SELECT CAST(id AS TEXT) FROM lat_item)",

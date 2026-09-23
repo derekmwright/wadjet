@@ -423,7 +423,11 @@ func TestArcBRComparisonOperandClassesMatchPostgres(t *testing.T) {
 		brCell{"SELECT a.c_date FROM tm a WHERE a.c_date IN (SELECT CAST(b.c_date AS TEXT) FROM tm b)", "42883", "operator does not exist: date = text"},
 		brCell{"SELECT a.c_f32 FROM tm a WHERE a.c_f32 = CAST(a.c_f32 AS TEXT)", "42883", "operator does not exist: real = text"},
 		// A set-operation body takes the same per-pair rule (round 3).
-		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT product FROM lat_item UNION ALL SELECT product FROM lat_item)", "", ""},
+		// #1073's own shape: text whose conversion is data-dependent in a
+		// set-operation body (0 rows single, a cast error on the DAG).
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT product FROM lat_item UNION ALL SELECT product FROM lat_item)", "42883", "operator does not exist: bigint = text"},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT CAST(id AS TEXT) FROM lat_item UNION SELECT product FROM lat_item)", "42883", "operator does not exist: bigint = text"},
+		brCell{"SELECT o.customer FROM lat_ord o WHERE o.customer IN (SELECT id FROM lat_item UNION ALL SELECT id FROM lat_item)", "42883", "operator does not exist: text = bigint"},
 		brCell{"SELECT id FROM tm WHERE c_i32 IN (SELECT CAST(c_i32 AS TEXT) FROM tm EXCEPT SELECT CAST(c_i32 AS TEXT) FROM tm WHERE id < 10)", "", ""},
 		brCell{"SELECT id FROM tm WHERE c_date IN (SELECT CAST(c_date AS TEXT) FROM tm UNION SELECT CAST(c_date AS TEXT) FROM tm)", "42883", "operator does not exist: date = text"},
 		brCell{"SELECT id FROM tm WHERE c_f32 IN (SELECT CAST(c_f32 AS TEXT) FROM tm UNION ALL SELECT CAST(c_f32 AS TEXT) FROM tm)", "42883", "operator does not exist: real = text"},

@@ -106,6 +106,9 @@ type comparisonTyper struct {
 	typeOf func(plansql.Node) (parquet.TypeID, bool)
 	// subquery types a subquery's output columns, or nil when it cannot.
 	subquery func(sql string) []parquet.TypeID
+	// setOrigins is a SET-OPERATION body's per-column text-cast origins
+	// (binder.textOrigin), nil when the body is not a set operation.
+	setOrigins func(sql string) []parquet.TypeID
 	// shape is an operand's full declaration, for two ROWs.
 	shape func(plansql.Node) (parquet.Column, bool)
 	// joinKeys is set for a JOIN's ON clause, where two plain COLUMNS of a
@@ -425,10 +428,57 @@ func (c *comparisonTyper) inPair(left, member plansql.Node, op string) error {
 		}
 		return nil
 	}
-	// A SET-OPERATION body takes the same per-pair rule as any subquery:
-	// measured (arc BR round 3, br_codex2 setin/*), the kept types answered
-	// identically on every arm through UNION ALL / UNION / INTERSECT /
-	// EXCEPT, and the refused ones were arm-dependent or wrong there too.
-	_, isSub := plansql.Unparen(member).(*plansql.SubqueryNode)
+	sub, isSub := plansql.Unparen(member).(*plansql.SubqueryNode)
+	if isSub && c.setOrigins != nil {
+		if origins := c.setOrigins(sub.SQL); origins != nil {
+			return c.setOpMemberPair(left, member, op, origins)
+		}
+	}
 	return c.pairOf(left, member, op, isSub)
+}
+
+// setOpMemberPair is a membership against a SET-OPERATION body. There the
+// DAG resolves the body's text to the typed side's type and CASTS every
+// value, while the single-process arms compare the text as it stands — so
+// whether the arms agree depends on the DATA, not on the type (#1073: a
+// bigint against `product` text answered 0 rows on the single arms and
+// failed the cast on the DAG; the same pair over `CAST(x AS TEXT)` text
+// answered identically everywhere, br_codex2 setin/*). The pair is kept only
+// where the text PROVABLY converts: it was made by a CAST from a value of
+// the typed side's own class in every arm of the body, and that class is a
+// kept one (textConversionAnswers). Anything else is PostgreSQL's 42883.
+func (c *comparisonTyper) setOpMemberPair(left, member plansql.Node, op string, origins []parquet.TypeID) error {
+	tl, ok := c.operand(left)
+	if !ok {
+		return nil
+	}
+	tr, ok := c.operand(member)
+	if !ok {
+		return nil
+	}
+	cl, cr := comparisonClass(tl), comparisonClass(tr)
+	if cl == cmpUnknown || cr == cmpUnknown || cl == cr || (cl != cmpText && cr != cmpText) {
+		return c.pairOf(left, member, op, true)
+	}
+	if cr == cmpText && len(origins) == 1 && origins[0] != typeAmbiguous &&
+		comparisonClass(origins[0]) == cl && textConversionAnswers(tl, true) {
+		return nil
+	}
+	return sqlerr.New("42883", "operator does not exist: %s %s %s", cmpTypeName(tl), op, cmpTypeName(tr))
+}
+
+// textCastOrigin is the structural type a `CAST(x AS text)` read, or
+// typeAmbiguous when the node is not such a cast of a typed value.
+func textCastOrigin(n plansql.Node, typeOf func(plansql.Node) (parquet.TypeID, bool)) parquet.TypeID {
+	c, ok := plansql.Unparen(n).(*plansql.CastNode)
+	if !ok {
+		return typeAmbiguous
+	}
+	if t, ok := structuralCastType(c.TypeName); !ok || t != parquet.TypeString {
+		return typeAmbiguous
+	}
+	if t, ok := typeOf(c.Inner); ok {
+		return t
+	}
+	return typeAmbiguous
 }
