@@ -118,7 +118,12 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// A lifted predicate whose column the enclosing relation also publishes
 	// (arc LT, #1130): decided on the ANNOTATED plan, the same door as the two
 	// refusals above.
-	if err := logical.RefuseContestedLiftedRefs(node); err != nil {
+	if err := logical.RefuseContestedLiftedRefs(node, false); err != nil {
+		return nil, err
+	}
+	// …and the lifted predicate that declined under a bare enclosing star,
+	// which THIS pipeline cannot evaluate (the DAG can).
+	if err := logical.RefuseDeclinedLiftedRefs(node); err != nil {
 		return nil, err
 	}
 	// …and a COLUMN-ALIAS LIST longer than the `SELECT *` body it renames, for

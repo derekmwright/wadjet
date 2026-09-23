@@ -28,11 +28,21 @@ import (
 // The mechanism that would close it instead of refusing it is ADR-0026 §8j's
 // corollary 2 for the LATERAL producer: the filter's reference translated to
 // the body's carrier inside the occurrence the qualifier names.
-func RefuseContestedLiftedRefs(n *Node) error {
+//
+// outerJoinsOnly is the stage DAG's door (round-2 review, B5): the DAG
+// evaluates an INNER or comma lateral's lifted predicate at the join off the
+// scan's own stream and answers PostgreSQL's rows (both fixtures), while its
+// LEFT spelling there is not one answer — it padded every outer row NULL on
+// the shuffled shape in one run and routed to this refusal in the next
+// (`r2_gates3.log` / `r2_gates4.log`; right on arc L1's fixture, wrong on
+// arc LT's) — so the DAG refuses the OUTER join uniformly, and the
+// single-process pipeline, wrong for every spelling, refuses them all.
+func RefuseContestedLiftedRefs(n *Node, outerJoinsOnly bool) error {
 	if n == nil {
 		return nil
 	}
-	if n.Type == NodeJoin && len(n.Children) == 2 && len(n.StarLiftedRefCols) > 0 {
+	if n.Type == NodeJoin && len(n.Children) == 2 && len(n.StarLiftedRefCols) > 0 &&
+		(!outerJoinsOnly || !lateralDualInnerJoin(n.JoinType)) {
 		probe, build := n.Children[0], n.Children[1]
 		if build != nil && !build.LateralSubtree && probe != nil && probe.LateralSubtree {
 			probe, build = build, probe
@@ -56,7 +66,34 @@ func RefuseContestedLiftedRefs(n *Node) error {
 		}
 	}
 	for _, c := range n.Children {
-		if err := RefuseContestedLiftedRefs(c); err != nil {
+		if err := RefuseContestedLiftedRefs(c, outerJoinsOnly); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RefuseDeclinedLiftedRefs is the single-process pipeline's refusal for a
+// lateral whose lifted predicate declined under a bare enclosing star
+// (Node.LiftedRefDeclinedUnderStar): that pipeline evaluates the predicate
+// above the join over a column the body did not publish and answered a
+// NULL-padded row per outer row for PostgreSQL's rows (arc L1 round 4, arc LT
+// round 2). Called from physical.Plan only; the stage DAG answers this shape.
+func RefuseDeclinedLiftedRefs(n *Node) error {
+	if n == nil {
+		return nil
+	}
+	if n.LiftedRefDeclinedUnderStar {
+		return sqlerr.New("0A000",
+			"LATERAL body's correlated predicate is not an equality on an inner column and the "+
+				"enclosing query writes a star over this join: the predicate is evaluated over the "+
+				"body's OUTPUT, which would have to publish the column it names, and a bare star "+
+				"would publish that column too. PostgreSQL evaluates the body per outer row, which "+
+				"this engine does not do for this shape on the single-process path. Name the columns "+
+				"instead of a star, or correlate on an equality")
+	}
+	for _, c := range n.Children {
+		if err := RefuseDeclinedLiftedRefs(c); err != nil {
 			return err
 		}
 	}

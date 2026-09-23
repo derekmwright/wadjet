@@ -107,10 +107,17 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	if err := logical.RefuseUnresolvedOrdinalSortKeys(node); err != nil {
 		return nil, err
 	}
+	// A WINDOW above a dependent (LATERAL) join binds the wrong arm on this
+	// path (arc LT round 2, B4); the coordinator runs the plan single-process.
+	if err := refuseWindowOverDependentJoin(node); err != nil {
+		return nil, err
+	}
 	// A lifted predicate whose column the enclosing relation also publishes
-	// (arc LT, #1130): decided on the ANNOTATED plan, the same door as the two
-	// refusals above.
-	if err := logical.RefuseContestedLiftedRefs(node); err != nil {
+	// (#1130): the INNER and comma spellings answer on this path (the
+	// predicate is evaluated at the join off the scan's own stream), the LEFT
+	// spelling is refused — it padded every row NULL on one stage shape and
+	// routed on another for the same statement (arc LT round 2).
+	if err := logical.RefuseContestedLiftedRefs(node, true); err != nil {
 		return nil, err
 	}
 	// A DISTINCT with no stage and no coordinator dedup is a DROPPED

@@ -305,3 +305,17 @@ func (c *Coordinator) runPolicedWindowLocal(ctx context.Context, queryID string,
 func (c *Coordinator) PolicedWindowLocalRoutes() int64 {
 	return c.localPolicedWindow.Load()
 }
+
+// runWindowOverLateralLocal runs a plan the stage DAG refused for a window
+// above a LATERAL join (dagplan.ErrWindowOverLateralDistributed) on the
+// coordinator-local single-process pipeline.
+func (c *Coordinator) runWindowOverLateralLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+		"a window above a LATERAL join", &c.localWindowOverLateral)
+}
+
+// WindowOverLateralLocalRoutes reports how many plans refused for a window
+// above a LATERAL join were routed to the coordinator-local pipeline.
+func (c *Coordinator) WindowOverLateralLocalRoutes() int64 {
+	return c.localWindowOverLateral.Load()
+}

@@ -3,6 +3,7 @@
 package logical
 
 import (
+	"errors"
 	"strings"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -201,12 +202,17 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 		// relation-valued body has no per-row runner here yet — so it is loud.
 		// (A GROUPED body needs no arm here — it aggregates, so the refusal
 		// above has already fired.)
-		if contested || info.Distinct || enclosingStar {
-			why := "the enclosing query writes a star over this join, which would publish the materialized column"
-			switch {
-			case contested:
-				why = "the column it names is also published by the enclosing relation or by the body's own alias list, so the join could not tell the two apart"
-			case info.Distinct:
+		// A BARE enclosing star DECLINES rather than refuses (round-2
+		// review, B5): the DAG evaluates the lifted predicate at the join
+		// off the scan's own stream and answered PostgreSQL's rows on both
+		// fixtures, so the refusal is the SINGLE-PROCESS pipeline's alone
+		// (Node.LiftedRefDeclinedUnderStar, RefuseDeclinedLiftedRefs).
+		if enclosingStar && !contested && !info.Distinct {
+			return nil, errLiftedRefDeclinedUnderStar
+		}
+		if contested || info.Distinct {
+			why := "the column it names is also published by the enclosing relation or by the body's own alias list, so the join could not tell the two apart"
+			if info.Distinct && !contested {
 				why = "the body carries DISTINCT, and materializing the column would change the DISTINCT key"
 			}
 			return nil, sqlerr.New("0A000",
@@ -243,6 +249,11 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 	}
 	return slots, nil
 }
+
+// errLiftedRefDeclinedUnderStar is publishLiftedRefs' private signal that the
+// materialization declined under a bare enclosing star; buildLateralSubquery
+// turns it into Node.LiftedRefDeclinedUnderStar.
+var errLiftedRefDeclinedUnderStar = errors.New("lifted predicate declined under an enclosing star")
 
 // lateralAliasPublishes reports whether one of the body's own output items
 // publishes `bare` as its ALIAS — a name the injection may not take.

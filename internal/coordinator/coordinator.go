@@ -368,6 +368,9 @@ type Coordinator struct {
 	// (dagplan.ErrPolicedWindowUnderJoinDistributed) and that ran on the
 	// coordinator-local pipeline instead.
 	localPolicedWindow atomic.Int64
+	// localWindowOverLateral counts queries whose plan the stage DAG refused
+	// for a window above a LATERAL join (dagplan.ErrWindowOverLateralDistributed).
+	localWindowOverLateral atomic.Int64
 	// local executions reported to the client instead of retried on the
 	// DAG (#308) — every increment is a query the two paths might have
 	// answered differently.
@@ -1274,6 +1277,12 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// The single-process pipeline answers the mask on every door.
 		if errors.Is(err, dagplan.ErrPolicedWindowUnderJoinDistributed) {
 			return c.runPolicedWindowLocal(ctx, queryID, logicalPlan, planStr, start, err)
+		}
+		// And a window above a LATERAL join (arc LT round 2): the DAG binds
+		// its key to the outer occurrence; the single-process pipeline
+		// answers PostgreSQL's rows.
+		if errors.Is(err, dagplan.ErrWindowOverLateralDistributed) {
+			return c.runWindowOverLateralLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		// An authorization refusal is not a planning narrative: it reaches
 		// the client as the decision's own sentence, the same one the
