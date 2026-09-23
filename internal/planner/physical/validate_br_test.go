@@ -309,6 +309,11 @@ func TestArcBRAggregateArgumentClassMatchesPostgres(t *testing.T) {
 		brCell{"SELECT MIN(c_row) AS v FROM tm", "42883", "function min(record) does not exist"},
 		brCell{"SELECT string_agg(c_ts, ',') AS v FROM tm", "42883", "function string_agg(timestamp without time zone, unknown) does not exist"},
 		brCell{"SELECT percentile_disc(0.5, c_str) AS v FROM tm", "42809", "WITHIN GROUP is required for ordered-set aggregate percentile_disc"},
+		// PERCENTILE_CONT resolves its overloads first: 42883 (round 3).
+		brCell{"SELECT percentile_cont(0.5, c_str) AS v FROM tm", "42883", "function percentile_cont(numeric, text) does not exist"},
+		brCell{"SELECT percentile_cont(0.5, c_date) AS v FROM tm", "42883", "function percentile_cont(numeric, date) does not exist"},
+		brCell{"SELECT percentile_cont(0.5, c_i32) AS v FROM tm", "", ""},
+		brCell{"SELECT percentile_disc(0.5, c_i32) AS v FROM tm", "", ""},
 		brCell{"SELECT corr(c_str, c_f64) AS v FROM tm", "42883", "function corr(text, double precision) does not exist"},
 		// Every position the argument can be written in.
 		brCell{"SELECT SUM(DISTINCT customer) AS v FROM lat_ord", "42883", "function sum(text)"},

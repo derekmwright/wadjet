@@ -219,7 +219,13 @@ func refuseAggregateArgument(fc *plansql.FuncCallNode, typeOf func(plansql.Node)
 // (a kept extension, ADR-0012 §5); where it is refused the state is the one
 // PostgreSQL gives the plain form, 42809 (measured on 17.11: `mode(c_str)`,
 // `percentile_disc(0.5, c_str)`).
-var aggOrderedSet = map[string]bool{"mode": true, "percentile_cont": true, "percentile_disc": true}
+//
+// PERCENTILE_CONT is not among them: PostgreSQL resolves its overloads first
+// — they take only a number or an interval — so `percentile_cont(0.5, text)`
+// is 42883 `function percentile_cont(numeric, text) does not exist` there,
+// while MODE and PERCENTILE_DISC (polymorphic) reach the WITHIN GROUP check
+// (measured on 17.11, br_codex2/pg_percentile_cont.log).
+var aggOrderedSet = map[string]bool{"mode": true, "percentile_disc": true}
 
 func orderedSetRefusal(name string) error {
 	return sqlerr.New("42809", "WITHIN GROUP is required for ordered-set aggregate %s", name)
