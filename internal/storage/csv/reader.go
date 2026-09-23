@@ -327,13 +327,12 @@ func (r *Reader) buildBatch(chunk []record) (*batch.RecordBatch, error) {
 			if !errors.Is(err, errNotType) && !errors.Is(err, errOutOfRange) {
 				return nil, err
 			}
-			// Inside the sample a field that does not parse keeps the
-			// NULL it has always read as (a "true" in a column the sample
-			// widened to bigint); past it the field is refused, as
-			// PostgreSQL's COPY refuses it.
-			if r.readRows+row+1 > sampleSize {
-				return nil, r.refusal(err, rec, sc, val)
-			}
+			// The sample's type reads every field the sample holds
+			// (inferCSVSchema types a field with the parse used here, and a
+			// mix no one type reads is text), so a field that does not
+			// parse is past the sample, and is refused as COPY refuses it.
+			// It was a NULL inside the sample through v0.24.0.
+			return nil, r.refusal(err, rec, sc, val)
 		}
 	}
 	r.readRows += numRows
@@ -597,14 +596,9 @@ func promoteType(a, b parquet.TypeID) parquet.TypeID {
 	if isNumeric(a) && isNumeric(b) {
 		return parquet.TypeFloat64
 	}
-	// bool + numeric -> numeric
-	if a == parquet.TypeBool && isNumeric(b) {
-		return b
-	}
-	if b == parquet.TypeBool && isNumeric(a) {
-		return a
-	}
-	// Everything else falls back to string
+	// Everything else — a boolean beside a number included — is text: no
+	// number type reads `true` (PostgreSQL's COPY refuses it for a bigint),
+	// and a column the sample typed must read every sampled field (#1260).
 	return parquet.TypeString
 }
 

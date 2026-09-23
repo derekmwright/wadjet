@@ -292,15 +292,10 @@ func promoteType(a, b parquet.TypeID) parquet.TypeID {
 		return parquet.TypeString
 	}
 
-	// Bool + numeric -> coerce to wider numeric.
-	if a == parquet.TypeBool && isNumeric(b) {
-		return b
-	}
-	if b == parquet.TypeBool && isNumeric(a) {
-		return a
-	}
-
-	// Anything else: fall back to string.
+	// Anything else — a boolean beside a number included — is text, the
+	// one type that holds both as the input spells them. A number column
+	// would read `true` as 1 (and PostgreSQL's COPY refuses 'true' for a
+	// bigint), so a sample mixing them cannot be typed numeric (#1260).
 	return parquet.TypeString
 }
 

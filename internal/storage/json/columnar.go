@@ -973,9 +973,7 @@ func inferSchemaTokens(data []byte, isArray bool, sampleSize int) ([]parquet.Col
 	}
 
 	var colOrder []string
-	colSet := make(map[string]struct{})
-	colTypes := make(map[string]parquet.TypeID)
-	nestedSchemas := make(map[string]parquet.Column) // full column defs for nested types
+	cols := make(map[string]*shape)
 	count := 0
 
 	for count < sampleSize && dec.More() {
@@ -996,42 +994,17 @@ func inferSchemaTokens(data []byte, isArray bool, sampleSize int) ([]parquet.Col
 			if !ok {
 				break
 			}
-
-			if _, exists := colSet[key]; !exists {
+			sh, exists := cols[key]
+			if !exists {
+				sh = &shape{}
+				cols[key] = sh
 				colOrder = append(colOrder, key)
-				colSet[key] = struct{}{}
 			}
-
 			valTok, err := dec.Token()
 			if err != nil {
 				break
 			}
-
-			if d, ok := valTok.(json.Delim); ok && (d == '{' || d == '[') {
-				nestedType := inferNestedType(dec, d)
-				if prev, has := colTypes[key]; has {
-					if prev != nestedType.Type {
-						colTypes[key] = parquet.TypeString // conflicting types fall back to string
-					}
-				} else {
-					colTypes[key] = nestedType.Type
-				}
-				if _, has := nestedSchemas[key]; !has {
-					nestedSchemas[key] = nestedType
-				}
-				continue
-			}
-
-			if valTok == nil {
-				continue
-			}
-
-			observed := detectTokenType(valTok)
-			if prev, has := colTypes[key]; has {
-				colTypes[key] = promoteType(prev, observed)
-			} else {
-				colTypes[key] = observed
-			}
+			sh.merge(tokenShape(dec, valTok))
 		}
 
 		dec.Token() // closing '}'
@@ -1040,23 +1013,127 @@ func inferSchemaTokens(data []byte, isArray bool, sampleSize int) ([]parquet.Col
 
 	schema := make([]parquet.Column, len(colOrder))
 	for i, name := range colOrder {
-		if nested, ok := nestedSchemas[name]; ok && (colTypes[name] == parquet.TypeArray || colTypes[name] == parquet.TypeRow || colTypes[name] == parquet.TypeMap) {
-			nested.Name = name
-			nested.Nullable = true
-			schema[i] = nested
-		} else {
-			typ, ok := colTypes[name]
-			if !ok {
-				typ = parquet.TypeString
-			}
-			schema[i] = parquet.Column{
-				Name:     name,
-				Type:     typ,
-				Nullable: true,
-			}
-		}
+		schema[i] = cols[name].column(name)
 	}
 	return schema, nil
+}
+
+// shape is what the inference sample has shown of one value position — a
+// column, an array's elements, a field of an object: nothing yet (only
+// NULLs, or an empty array's elements), a scalar type, an array of one
+// element shape, or an object of field shapes.
+//
+// Every occurrence in the sample is MERGED into it, at every depth, by the
+// rule a flat column has always used (promoteType): `[1]` then `[1.5]` is an
+// array of double precision, as `1` then `1.5` is. Through v0.24.0 a nested
+// column's type was its FIRST occurrence's, and a later sampled value was
+// coerced into it — `[1.5]` read back as `[1]` (#1261) — and an object field
+// holding a boolean inferred text, because the field's type was tested
+// against the zero TypeID, which is TypeBool.
+type shape struct {
+	seen   bool
+	typ    parquet.TypeID // a scalar type, TypeArray or TypeRow
+	elem   *shape         // TypeArray
+	order  []string       // TypeRow: field names by first appearance
+	fields map[string]*shape
+}
+
+// tokenShape is the shape of the value whose first token is tok, reading
+// the rest of a nested value from dec.
+func tokenShape(dec *json.Decoder, tok json.Token) *shape {
+	if tok == nil {
+		return &shape{}
+	}
+	d, ok := tok.(json.Delim)
+	if !ok {
+		return &shape{seen: true, typ: detectTokenType(tok)}
+	}
+	if d == '[' {
+		s := &shape{seen: true, typ: parquet.TypeArray, elem: &shape{}}
+		for dec.More() {
+			t, err := dec.Token()
+			if err != nil {
+				break
+			}
+			s.elem.merge(tokenShape(dec, t))
+		}
+		dec.Token() // closing ']'
+		return s
+	}
+	s := &shape{seen: true, typ: parquet.TypeRow, fields: make(map[string]*shape)}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			break
+		}
+		valTok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		f, exists := s.fields[key]
+		if !exists {
+			f = &shape{}
+			s.fields[key] = f
+			s.order = append(s.order, key)
+		}
+		f.merge(tokenShape(dec, valTok))
+	}
+	dec.Token() // closing '}'
+	return s
+}
+
+// merge widens s to hold o as well. Two scalars take promoteType; two arrays
+// merge their elements; two objects merge their fields (a field missing from
+// one is NULL there); anything else — an array beside an object, a nested
+// value beside a scalar — is text, which holds every JSON value as its text.
+func (s *shape) merge(o *shape) {
+	switch {
+	case !o.seen:
+		return
+	case !s.seen:
+		*s = *o
+	case s.typ == parquet.TypeArray && o.typ == parquet.TypeArray:
+		s.elem.merge(o.elem)
+	case s.typ == parquet.TypeRow && o.typ == parquet.TypeRow:
+		for _, name := range o.order {
+			f, exists := s.fields[name]
+			if !exists {
+				s.fields[name] = o.fields[name]
+				s.order = append(s.order, name)
+				continue
+			}
+			f.merge(o.fields[name])
+		}
+	case s.typ == parquet.TypeArray || s.typ == parquet.TypeRow || o.typ == parquet.TypeArray || o.typ == parquet.TypeRow:
+		*s = shape{seen: true, typ: parquet.TypeString}
+	default:
+		s.typ = promoteType(s.typ, o.typ)
+	}
+}
+
+// column is the column a shape declares. A position with no non-NULL value
+// in the sample is text, as an all-NULL column always was.
+func (s *shape) column(name string) parquet.Column {
+	col := parquet.Column{Name: name, Type: parquet.TypeString, Nullable: true}
+	if !s.seen {
+		return col
+	}
+	col.Type = s.typ
+	switch s.typ {
+	case parquet.TypeArray:
+		elem := s.elem.column("element")
+		col.ElementType = &elem
+	case parquet.TypeRow:
+		col.Fields = make([]parquet.Column, len(s.order))
+		for i, f := range s.order {
+			col.Fields[i] = s.fields[f].column(f)
+		}
+	}
+	return col
 }
 
 func detectTokenType(tok json.Token) parquet.TypeID {
@@ -1081,126 +1158,6 @@ func detectTokenType(tok json.Token) parquet.TypeID {
 		return detectStringType(v)
 	default:
 		return parquet.TypeString
-	}
-}
-
-// inferNestedType determines the schema for a nested JSON value.
-// The opening delimiter ('{' or '[') has already been consumed by Token().
-func inferNestedType(dec *json.Decoder, delim json.Delim) parquet.Column {
-	if delim == '[' {
-		return inferArrayType(dec)
-	}
-	return inferObjectType(dec)
-}
-
-// inferArrayType infers ARRAY element type by sampling array elements.
-func inferArrayType(dec *json.Decoder) parquet.Column {
-	var elemType parquet.TypeID
-	var elemCol *parquet.Column
-	first := true
-
-	for dec.More() {
-		tok, err := dec.Token()
-		if err != nil {
-			break
-		}
-		if d, ok := tok.(json.Delim); ok {
-			nested := inferNestedType(dec, d)
-			if first {
-				elemType = nested.Type
-				elemCol = &nested
-				first = false
-			}
-			continue
-		}
-		if tok == nil {
-			continue
-		}
-		observed := detectTokenType(tok)
-		if first {
-			elemType = observed
-			first = false
-		} else {
-			elemType = promoteType(elemType, observed)
-		}
-	}
-	// Consume closing ']'
-	dec.Token()
-
-	if first {
-		// Empty array
-		elemType = parquet.TypeString
-	}
-
-	elem := parquet.Column{Name: "element", Type: elemType, Nullable: true}
-	if elemCol != nil && (elemType == parquet.TypeRow || elemType == parquet.TypeArray) {
-		elemCol.Name = "element"
-		elemCol.Nullable = true
-		elem = *elemCol
-	}
-	return parquet.Column{
-		Type:        parquet.TypeArray,
-		ElementType: &elem,
-	}
-}
-
-// inferObjectType infers ROW field types from a JSON object.
-func inferObjectType(dec *json.Decoder) parquet.Column {
-	var fieldOrder []string
-	fieldSet := make(map[string]struct{})
-	fieldTypes := make(map[string]parquet.TypeID)
-	fieldNested := make(map[string]*parquet.Column)
-
-	for dec.More() {
-		keyTok, err := dec.Token()
-		if err != nil {
-			break
-		}
-		key, ok := keyTok.(string)
-		if !ok {
-			break
-		}
-		if _, exists := fieldSet[key]; !exists {
-			fieldOrder = append(fieldOrder, key)
-			fieldSet[key] = struct{}{}
-		}
-
-		valTok, err := dec.Token()
-		if err != nil {
-			break
-		}
-		if d, ok := valTok.(json.Delim); ok {
-			nested := inferNestedType(dec, d)
-			fieldTypes[key] = nested.Type
-			fieldNested[key] = &nested
-			continue
-		}
-		if valTok == nil {
-			continue
-		}
-		fieldTypes[key] = detectTokenType(valTok)
-	}
-	// Consume closing '}'
-	dec.Token()
-
-	fields := make([]parquet.Column, len(fieldOrder))
-	for i, name := range fieldOrder {
-		if nc, ok := fieldNested[name]; ok {
-			nc.Name = name
-			nc.Nullable = true
-			fields[i] = *nc
-		} else {
-			typ := fieldTypes[name]
-			if typ == 0 {
-				typ = parquet.TypeString
-			}
-			fields[i] = parquet.Column{Name: name, Type: typ, Nullable: true}
-		}
-	}
-
-	return parquet.Column{
-		Type:   parquet.TypeRow,
-		Fields: fields,
 	}
 }
 

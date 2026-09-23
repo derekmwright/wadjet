@@ -129,15 +129,14 @@ func TestPromoteTypeFloatFloat(t *testing.T) {
 	}
 }
 
+// A boolean beside a number is text (#1260): no number type reads true.
 func TestPromoteTypeBoolNumeric(t *testing.T) {
-	if promoteType(parquet.TypeBool, parquet.TypeInt64) != parquet.TypeInt64 {
-		t.Error("bool + int64 should promote to int64")
-	}
-	if promoteType(parquet.TypeBool, parquet.TypeFloat64) != parquet.TypeFloat64 {
-		t.Error("bool + float64 should promote to float64")
-	}
-	if promoteType(parquet.TypeInt64, parquet.TypeBool) != parquet.TypeInt64 {
-		t.Error("int64 + bool should promote to int64")
+	for _, pair := range [][2]parquet.TypeID{
+		{parquet.TypeBool, parquet.TypeInt64}, {parquet.TypeBool, parquet.TypeFloat64}, {parquet.TypeInt64, parquet.TypeBool},
+	} {
+		if got := promoteType(pair[0], pair[1]); got != parquet.TypeString {
+			t.Errorf("%v + %v = %v, want STRING", pair[0], pair[1], got)
+		}
 	}
 }
 

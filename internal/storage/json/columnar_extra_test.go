@@ -79,60 +79,30 @@ func TestColumnarReaderSkipValueEscapedStrings(t *testing.T) {
 	}
 }
 
-func TestColumnarReaderBoolToInt(t *testing.T) {
-	// First row: int, second row: bool -> schema promotes to Int64
-	// writeBoolTrue/writeBoolFalse with TypeInt64 target
-	data := `{"v":42}
-{"v":true}
-{"v":false}
-`
-	r, err := NewColumnarReader([]byte(data))
-	if err != nil {
-		t.Fatal(err)
-	}
-	schema := r.Schema()
-	if schema[0].Type != parquet.TypeInt64 {
-		t.Fatalf("expected TypeInt64, got %v", schema[0].Type)
-	}
-	b, err := r.Next()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b == nil || b.Len != 3 {
-		t.Fatal("expected 3 rows")
-	}
-	// true -> 1, false -> 0
-	if b.Columns[0].Int64Data[1] != 1 {
-		t.Errorf("expected true -> 1, got %d", b.Columns[0].Int64Data[1])
-	}
-	if b.Columns[0].Int64Data[2] != 0 {
-		t.Errorf("expected false -> 0, got %d", b.Columns[0].Int64Data[2])
-	}
-}
-
-func TestColumnarReaderBoolToFloat(t *testing.T) {
-	// First row: float, second: bool -> promotes to Float64
-	data := `{"v":3.14}
-{"v":true}
-{"v":false}
-`
-	r, err := NewColumnarReader([]byte(data))
-	if err != nil {
-		t.Fatal(err)
-	}
-	schema := r.Schema()
-	if schema[0].Type != parquet.TypeFloat64 {
-		t.Fatalf("expected TypeFloat64, got %v", schema[0].Type)
-	}
-	b, err := r.Next()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b.Columns[0].Float64Data[1] != 1 {
-		t.Errorf("expected true -> 1.0, got %f", b.Columns[0].Float64Data[1])
-	}
-	if b.Columns[0].Float64Data[2] != 0 {
-		t.Errorf("expected false -> 0.0, got %f", b.Columns[0].Float64Data[2])
+// A sample mixing numbers and booleans is TEXT, read back as the input
+// spells each value (#1260): typed bigint it read true as 1 and false as 0,
+// and PostgreSQL's COPY refuses 'true' for a bigint.
+func TestColumnarReaderBoolBesideANumberIsText(t *testing.T) {
+	for _, data := range []string{"{\"v\":42}\n{\"v\":true}\n{\"v\":false}\n", "{\"v\":3.14}\n{\"v\":true}\n{\"v\":false}\n"} {
+		r, err := NewColumnarReader([]byte(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if typ := r.Schema()[0].Type; typ != parquet.TypeString {
+			t.Fatalf("%q: type %v, want STRING", data, typ)
+		}
+		b, err := r.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b == nil || b.Len != 3 {
+			t.Fatal("expected 3 rows")
+		}
+		for i, want := range []string{strings.SplitN(strings.SplitN(data, ":", 2)[1], "}", 2)[0], "true", "false"} {
+			if got := fmt.Sprint(b.Columns[0].GetValue(i)); got != want {
+				t.Errorf("%q row %d = %q, want %q", data, i, got, want)
+			}
+		}
 	}
 }
 

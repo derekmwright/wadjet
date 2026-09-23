@@ -278,7 +278,7 @@ func TestNewReaderFromStream(t *testing.T) {
 }
 
 func TestPromoteTypeIntBool(t *testing.T) {
-	// Bool + int64 should promote to int64.
+	// Bool + int64 is text (#1260): no number type reads true.
 	input := `{"v":true}
 {"v":7}
 `
@@ -290,8 +290,8 @@ func TestPromoteTypeIntBool(t *testing.T) {
 	if len(schema) != 1 {
 		t.Fatalf("expected 1 column, got %d", len(schema))
 	}
-	if schema[0].Type != parquet.TypeInt64 {
-		t.Errorf("expected v=INT64 after bool+int promotion, got %v", schema[0].Type)
+	if schema[0].Type != parquet.TypeString {
+		t.Errorf("expected v=STRING after bool+int, got %v", schema[0].Type)
 	}
 }
 
