@@ -104,9 +104,11 @@ var ResidualState = map[string]string{
 
 func State(name, door string) string {
 	// registerCTE's additive name map skips a shadowing body's validation.
-	// The unused inner body never needs to compile. A UNION-level ORDER BY
-	// is also skipped by the binder before its expression loop.
-	if name == "set_order_by" || name == "cte_shadowed_body" {
+	// The unused inner body never needs to compile. (A UNION-level ORDER BY
+	// was skipped by the binder too, until arc BR held that term to
+	// PostgreSQL's rule and transformed it first: `set_order_by` is 22023
+	// now, and its pin is deleted as the proof.)
+	if name == "cte_shadowed_body" {
 		return ""
 	}
 	if door == "dag" {

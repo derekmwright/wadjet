@@ -673,6 +673,9 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		if err := b.validateBlock(ctx, info.Union.Right, outer); err != nil {
 			return err
 		}
+		if err := b.refuseSetOpOrderBy(ctx, info); err != nil {
+			return err
+		}
 		left, right := b.outputDecls[info.Union.Left], b.outputDecls[info.Union.Right]
 		out := append([]expr.DeclType(nil), left...)
 		for i := range out {

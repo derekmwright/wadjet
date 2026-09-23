@@ -160,3 +160,53 @@ func TestArcBRMisplacedCallsAreRefusedInPostgresOrder(t *testing.T) {
 		{"SELECT id, COUNT(*) AS n FROM lat_ord GROUP BY id HAVING (SELECT MAX(i.id) FROM lat_item i WHERE i.order_id = SUM(lat_ord.id)) > 0", "", ""},
 	})
 }
+
+// A set operation's own ORDER BY names a RESULT COLUMN or a position and
+// nothing else (#1236). Every verdict measured on 17.11.
+func TestArcBRSetOperationOrderByNamesAResultColumn(t *testing.T) {
+	const u = "SELECT a.id FROM lat_ord a UNION ALL SELECT b.id FROM lat_item b ORDER BY "
+	runBRCells(t, []brCell{
+		{u + "zz.id", "42P01", `missing FROM-clause entry for table "zz"`},
+		{u + "lat_ord.id", "42P01", `missing FROM-clause entry for table "lat_ord"`},
+		{u + "a.id", "42P01", `missing FROM-clause entry for table "a"`},
+		{u + "b.id", "42P01", `missing FROM-clause entry for table "b"`},
+		{u + `"zz".id`, "42P01", `missing FROM-clause entry for table "zz"`},
+		{u + "a.id + 1", "42P01", `missing FROM-clause entry for table "a"`},
+		{u + "zz.id, nosuch", "42P01", `missing FROM-clause entry for table "zz"`},
+		{u + "nosuch, zz.id", "42703", `column "nosuch" does not exist`},
+		{u + "nosuch", "42703", `column "nosuch" does not exist`},
+		{u + "-nosuch", "42703", `column "nosuch" does not exist`},
+		{u + "id + 1", "0A000", "invalid UNION/INTERSECT/EXCEPT ORDER BY clause"},
+		{u + "-id", "0A000", "invalid UNION/INTERSECT/EXCEPT ORDER BY clause"},
+		{u + "SUM(id)", "0A000", "invalid UNION/INTERSECT/EXCEPT ORDER BY clause"},
+		{u + "random()", "0A000", "invalid UNION/INTERSECT/EXCEPT ORDER BY clause"},
+		// The term is transformed before it is judged.
+		{u + "tcp_flag_mask('BOGUS')", "22023", "BOGUS"},
+		{u + "no_such_fn(id)", "42883", "no_such_fn"},
+		{"SELECT a.id FROM lat_ord a INTERSECT SELECT b.id FROM lat_item b ORDER BY zz.id",
+			"42P01", `missing FROM-clause entry for table "zz"`},
+		{"SELECT a.id FROM lat_ord a EXCEPT SELECT b.id FROM lat_item b ORDER BY zz.id",
+			"42P01", `missing FROM-clause entry for table "zz"`},
+		{"SELECT * FROM lat_ord a UNION ALL SELECT * FROM lat_ord b ORDER BY zz.id",
+			"42P01", `missing FROM-clause entry for table "zz"`},
+		{"SELECT a.id FROM lat_ord a UNION ALL SELECT b.id FROM lat_item b UNION ALL SELECT c.id FROM lat_ord c ORDER BY c.id",
+			"42P01", `missing FROM-clause entry for table "c"`},
+		{"SELECT * FROM (" + u + "zz.id) s", "42P01", `missing FROM-clause entry for table "zz"`},
+		{"WITH w AS (" + u + "zz.id) SELECT * FROM w", "42P01", `missing FROM-clause entry for table "zz"`},
+		{"SELECT a.id FROM lat_ord a WHERE a.id IN (SELECT b.id FROM lat_item b UNION SELECT c.id FROM lat_ord c ORDER BY zz.id)",
+			"42P01", `missing FROM-clause entry for table "zz"`},
+		// The right arm's names are not the result's.
+		{"SELECT id, total FROM lat_ord UNION ALL SELECT id, amount FROM lat_item ORDER BY amount",
+			"42703", `column "amount" does not exist`},
+
+		// Controls.
+		{u + "id", "", ""},
+		{u + "id DESC NULLS FIRST", "", ""},
+		{u + "1", "", ""},
+		{`SELECT a.id AS "V" FROM lat_ord a UNION ALL SELECT b.id FROM lat_item b ORDER BY "V"`, "", ""},
+		{"SELECT id, total FROM lat_ord UNION ALL SELECT id, amount FROM lat_item ORDER BY total", "", ""},
+		{"SELECT a.id, a.customer FROM lat_ord a UNION ALL SELECT b.id, b.product FROM lat_item b ORDER BY customer, 1", "", ""},
+		{"(SELECT a.id FROM lat_ord a ORDER BY a.id LIMIT 2) UNION ALL SELECT b.id FROM lat_item b", "", ""},
+		{"SELECT a.id FROM lat_ord a UNION ALL (SELECT b.id FROM lat_item b ORDER BY b.id LIMIT 2)", "", ""},
+	})
+}

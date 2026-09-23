@@ -68,22 +68,11 @@ func TestTCPFlagASTCoverage(t *testing.T) {
 				q = strings.ReplaceAll(q, "visits", "f8")
 				before := a2fReadRoutes(a.coord)
 				out, err := a.run(q)
-				if tc.Name == "set_order_by" && a.coord != nil {
-					// The set-level expression has no published output slot. The DAG
-					// routes this fixture locally, where the empty sort never evaluates it.
-					// This is a named residual, not a distributed refusal success.
-					after := a2fReadRoutes(a.coord)
-					for i, name := range before.names {
-						if name == "UnreachableOutput" {
-							delta := after.values[i] - before.values[i]
-							if delta != 1 {
-								t.Errorf("%s unreachable-output delta=%d", a.name, delta)
-							}
-							t.Logf("%s set_order_by UnreachableOutputLocalRoutes delta=%d", a.name, delta)
-							before.values[i] = after.values[i]
-						}
-					}
-				}
+				// `set_order_by` was a named residual here: the set-level term
+				// had no output slot, the DAG routed it locally and the empty
+				// sort never evaluated it. Since arc BR the binder holds that
+				// term to PostgreSQL's rule and transforms it first, so it is
+				// 22023 before any route — the residual is closed.
 				a2fCheckRoutes(t, a.name, a.coord, before, q)
 				door := "single"
 				if a.coord != nil {
