@@ -27,6 +27,9 @@ const pgNull = "\x00NULL"
 //
 // The deliberate differences (ADR-0012 §5, the superset rule: PostgreSQL
 // refuses, and base answered the same meaningful rows on every path):
+//   - a trailing delimiter's empty extra fields are dropped (COPY: 22P04
+//     "extra data"); a SHORT record stays refused, although base NULL-padded
+//     it: a stray unquoted line break splits one record into two short ones;
 //   - a BLANK line in a file of more than one column is skipped (COPY: 22P04
 //     "missing data"), a trailing one at the end of a file above all;
 //   - LF, CR and CRLF line endings may be mixed in one file (COPY: 22P04
@@ -79,7 +82,13 @@ func TestArcFR2CSVRecordGrammarIsPostgreSQLs(t *testing.T) {
 		{"backslash_is_not_an_escape", "a,b\n1,\"x\\\"y\"\n", nil, "22P04"},
 		{"quote_in_quoted_then_delim", "a,b\n\"1\"\",x\n", nil, "22P04"},
 		{"extra_column", "a,b\n1,x,z\n", nil, "22P04"},
-		{"trailing_delim", "a,b\n1,x,\n", nil, "22P04"},
+		// Superset (PG 17.11: 22P04 extra data): a trailing delimiter's
+		// EMPTY extra fields are dropped, as base dropped them — no value is
+		// lost. A nonempty or quoted extra field is still refused.
+		{"trailing_delim", "a,b\n1,x,\n", [][]string{{"1", "x"}}, ""},
+		{"trailing_delims", "a,b\n1,x,,\n2,y,\n", [][]string{{"1", "x"}, {"2", "y"}}, ""},
+		{"trailing_quoted_empty_extra", "a,b\n1,x,\"\"\n", nil, "22P04"},
+		{"trailing_delim_then_value", "a,b\n1,x,,z\n", nil, "22P04"},
 		{"missing_column", "a,b\n1\n", nil, "22P04"},
 		// Superset (PG 17.11: 22P04 missing data): a blank line is skipped.
 		{"blank_line", "a,b\n1,x\n\n2,y\n", [][]string{{"1", "x"}, {"2", "y"}}, ""},

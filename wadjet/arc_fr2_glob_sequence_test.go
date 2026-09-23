@@ -365,8 +365,12 @@ func TestArcFR2AMalformedCSVIsRefusedNamingTheInput(t *testing.T) {
 //   - a blank line (a trailing one above all) and mixed LF / CRLF / CR line
 //     endings are ANSWERED, as base 962117da answered them identically on
 //     every path — ADR-0012 §5's superset rule;
-//   - a record with more or fewer fields than the header is REFUSED: base
-//     NULL-padded a short record and truncated a long one, silently.
+//   - a trailing delimiter whose extra fields are EMPTY is answered (base
+//     dropped them and lost no value);
+//   - a SHORT record, or a long one with a value past the header, is
+//     REFUSED: base NULL-padded the first and dropped the value of the
+//     second, silently — and a stray unquoted line break splits one record
+//     into two short ones, so padding them answers rows the file lacks.
 func TestArcFR2CSVBlankLinesAndLineEndingsAreKeptRaggedRowsRefused(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
@@ -389,7 +393,9 @@ func TestArcFR2CSVBlankLinesAndLineEndingsAreKeptRaggedRowsRefused(t *testing.T)
 				{"cr_lf_crlf", "a,b\r1,x\n2,y\r\n", "2 3"},
 				{"short_record", "a,b\n1,x\n2\n", "22P04"},
 				{"long_record", "a,b\n1,x\n2,y,z\n", "22P04"},
-				{"trailing_delimiter", "a,b\n1,x,\n", "22P04"},
+				{"trailing_delimiter", "a,b\n1,x,\n2,y,\n", "2 3"},
+				{"trailing_delimiter_then_value", "a,b\n1,x,z\n", "22P04"},
+				{"dot_line_is_a_short_record", "a,b\n1,x\n\\.\n2,y\n", "22P04"},
 			} {
 				t.Run(c.name, func(t *testing.T) {
 					p := filepath.Join(dir, fmt.Sprintf("f%d.csv", i))
@@ -416,6 +422,78 @@ func TestArcFR2CSVBlankLinesAndLineEndingsAreKeptRaggedRowsRefused(t *testing.T)
 			}
 		})
 	}
+}
+
+// TestArcFR2ACSVGlobReadsAReorderedHeaderByName (review B4): a later CSV
+// file whose header names the first file's columns in another order is read
+// BY NAME. Through 784aac60 (and at base) its header was a data row and its
+// values landed in the other column — five rows, all text, where DuckDB
+// reads four by name. A later header naming some but not all of the columns
+// is 22P04 naming the file; a first record naming none of them is data (a
+// split file, arc RP).
+func TestArcFR2ACSVGlobReadsAReorderedHeaderByName(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, path := range []string{"plan_time_schema", "first_batch"} {
+		t.Run(path, func(t *testing.T) {
+			if path == "first_batch" {
+				t.Setenv("WADJET_TEST_NO_READER_SCHEMA", "1")
+			}
+			for _, c := range []struct {
+				name  string
+				files []string
+				want  string
+			}{
+				{"reordered", []string{"a,b\n1,101\n2,102\n", "b,a\n103,3\n104,4\n"}, "[1 101] [2 102] [3 103] [4 104]"},
+				{"reordered_three", []string{"a,b,c\n1,x,10\n", "c,a,b\n20,2,y\n"}, "[1 x 10] [2 y 20]"},
+				{"reordered_past_the_sample", []string{"a,b\n" + rpCSVRowsAB(150), "b,a\n9999,151\n"}, "rows=151 last=[151 9999]"},
+				{"other_names", []string{"a,b\n1,101\n", "a,c\n2,102\n"}, "22P04 p001"},
+				{"continuation", []string{"a,b\n1,101\n", "2,102\n"}, "[1 101] [2 102]"},
+			} {
+				t.Run(c.name, func(t *testing.T) {
+					dir := t.TempDir()
+					for i, body := range c.files {
+						if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("p%03d.csv", i)), []byte(body), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					res, err := db.Query(ctx, fmt.Sprintf("SELECT * FROM read_csv('%s') ORDER BY a", filepath.Join(dir, "*.csv")))
+					if strings.HasPrefix(c.want, "22P04") {
+						if err == nil || sqlerr.StateOf(err) != "22P04" || !strings.Contains(err.Error(), "p001.csv") {
+							t.Fatalf("got %v / %v, want 22P04 naming p001.csv", err, res)
+						}
+						return
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					var got []string
+					for i := range res.Rows {
+						got = append(got, fmt.Sprint(res.Cells(i)))
+					}
+					g := strings.Join(got, " ")
+					if strings.HasPrefix(c.want, "rows=") {
+						g = fmt.Sprintf("rows=%d last=%s", len(got), got[len(got)-1])
+					}
+					if g != c.want {
+						t.Fatalf("rows %s, want %s", g, c.want)
+					}
+				})
+			}
+		})
+	}
+}
+
+func rpCSVRowsAB(n int) string {
+	var b strings.Builder
+	for i := 1; i <= n; i++ {
+		fmt.Fprintf(&b, "%d,%d\n", i, 1000+i)
+	}
+	return b.String()
 }
 
 // TestArcFR2AMultibyteDelimiterThroughSQL (review B2): the `delimiter`

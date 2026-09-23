@@ -102,6 +102,7 @@ type Reader struct {
 	first   bool     // the next record is the current file's first
 	header  []string // the header record, once read (HasHeader)
 	width   int      // fields per record; 0 until the first record fixes it
+	perm    []int    // the current file's field for each header column; nil = in order
 	done    bool
 }
 
@@ -193,7 +194,7 @@ func (r *Reader) nextRecord() (record, error) {
 			if err != nil {
 				return record{}, err
 			}
-			r.cur, r.curName, r.curRows, r.first = rc, in.Name, 0, true
+			r.cur, r.curName, r.curRows, r.first, r.perm = rc, in.Name, 0, true, nil
 			r.sc = newRecordScanner(rc, r.cfg.Delimiter)
 		}
 		fields, nulls, line, err := r.sc.next()
@@ -224,17 +225,116 @@ func (r *Reader) nextRecord() (record, error) {
 				if slices.Equal(fields, r.header) {
 					continue
 				}
+				// …and one whose header names the same columns in another
+				// ORDER is read by name: its fields are mapped onto the first
+				// file's columns. Read positionally, its header was a data row
+				// and every value landed in the other column.
+				if perm := headerPermutation(r.header, fields); perm != nil {
+					r.perm = perm
+					continue
+				}
+				// A first record that names some of the header's columns but
+				// not the same set is a header that disagrees: a typed
+				// refusal naming the file, as COPY … HEADER MATCH refuses a
+				// header that is not the table's. One that names none of
+				// them is data — a file split after its header (arc RP).
+				if len(fields) == len(r.header) && sharesName(r.header, fields) {
+					return record{}, r.inFile(sqlerr.New("22P04",
+						"line %d: the header %q does not name the columns of the first file's header %q",
+						line, fields, r.header))
+				}
 			}
 		}
 		if r.width == 0 {
 			r.width = len(fields)
 		}
+		if len(fields) > r.width && emptyTail(fields, nulls, r.width) {
+			// A trailing delimiter (`x,y,`): the extra fields are empty and
+			// unquoted, no value is lost, and exporters write it — kept as
+			// base read it (ADR-0012 §5). COPY refuses it with 22P04.
+			fields = fields[:r.width]
+			if nulls != nil {
+				nulls = nulls[:r.width]
+			}
+		}
 		if len(fields) != r.width {
+			// A SHORT record stays refused although base NULL-padded it: a
+			// stray unquoted line break splits one record into two short
+			// ones, and padding them answers rows the file does not hold.
+			// A LONG one with a value past the header loses that value.
 			return record{}, r.inFile(r.widthError(len(fields), line))
+		}
+		if r.perm != nil {
+			fields, nulls = permute(fields, nulls, r.perm)
 		}
 		r.curRows++
 		return record{fields: fields, nulls: nulls, file: r.curName, row: r.curRows}, nil
 	}
+}
+
+// headerPermutation is, when rec names exactly the header's columns in
+// another order (and the header's names are distinct), rec's field index for
+// each header column; nil otherwise.
+func headerPermutation(header, rec []string) []int {
+	if len(rec) != len(header) {
+		return nil
+	}
+	at := make(map[string]int, len(rec))
+	for i, name := range rec {
+		if _, dup := at[name]; dup {
+			return nil
+		}
+		at[name] = i
+	}
+	perm := make([]int, len(header))
+	for i, name := range header {
+		j, ok := at[name]
+		if !ok {
+			return nil
+		}
+		perm[i] = j
+		delete(at, name)
+	}
+	return perm
+}
+
+func sharesName(header, rec []string) bool {
+	for _, f := range rec {
+		if slices.Contains(header, f) {
+			return true
+		}
+	}
+	return false
+}
+
+// permute puts a record's fields in the header's order.
+func permute(fields []string, nulls []bool, perm []int) ([]string, []bool) {
+	out := make([]string, len(perm))
+	var outNulls []bool
+	if nulls != nil {
+		outNulls = make([]bool, len(perm))
+	}
+	for i, j := range perm {
+		out[i] = fields[j]
+		if nulls != nil {
+			outNulls[i] = nulls[j]
+		}
+	}
+	return out, outNulls
+}
+
+// emptyTail reports whether every field past the first width is an
+// unquoted empty field (NULL).
+func emptyTail(fields []string, nulls []bool, width int) bool {
+	if nulls == nil {
+		return false
+	}
+	for i := width; i < len(fields); i++ {
+		if !nulls[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // widthError is PostgreSQL's COPY refusal of a record whose field count is
