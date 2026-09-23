@@ -55,22 +55,32 @@ func rsArmCells() []rsArmCell {
 		{name: "on/sqlancerThreeWay",
 			sql:    "SELECT COUNT(*) AS n FROM lat_ord t0 JOIN lat_item t1 ON t2.amount = t1.amount JOIN lat_item t2 ON t2.id = t0.id",
 			refuse: `missing FROM-clause entry for table "t2"`},
-		{name: "on/namesEarlierCommaItem",
-			sql:    "SELECT a.id AS v FROM lat_ord a, lat_item b JOIN lat_item c ON a.id = c.order_id",
-			refuse: `invalid reference to FROM-clause entry for table "a"`},
-		{name: "on/namesEarlierCommaItemOuter",
-			sql:    "SELECT a.id AS v FROM lat_ord a, lat_item b LEFT JOIN lat_item c ON a.total > c.amount",
-			refuse: `invalid reference to FROM-clause entry for table "a"`},
 		{name: "on/tableNameBehindAlias",
 			sql:    "SELECT a.id AS v FROM lat_ord a JOIN lat_item b ON lat_ord.id = b.order_id",
 			refuse: `invalid reference to FROM-clause entry for table "lat_ord"`},
-		// The discriminator between PostgreSQL's two "invalid reference"
-		// second lines: an UNALIASED relation out of scope earns the ordinary
-		// one, and an alias equal to the table's own name hides nothing.
-		// SQLancer found it (178 of 200 databases).
-		{name: "on/unaliasedRelationOutOfScope",
-			sql:    "SELECT lat_ord.id AS v FROM lat_ord, lat_item b JOIN lat_item c ON lat_ord.id = c.order_id",
-			refuse: `there is an entry for table "lat_ord", but it cannot be referenced from this part of the query`},
+		// An ON reaching back to an EARLIER comma-separated FROM item is the
+		// #617 DuckDB-matching superset (ADR-0012 §5), not PostgreSQL-legal —
+		// `want` here is wadjet's own answer, measured on this fixture, not a
+		// live PostgreSQL row set the way every other `want` in this table is.
+		// Arc RS (#1220) refused this alongside the genuinely out-of-scope
+		// "declared later" shapes above; the BX hotfix tells them apart again.
+		// `unaliasedEarlierCommaSibling` was the discriminator that an
+		// UNALIASED relation earns the ordinary "invalid reference" sentence
+		// rather than the alias one (`noteAliasedTable`'s EqualFold guard,
+		// SQLancer 178/200) — this exact shape was its only reachable
+		// vehicle, since that sentence is now unreachable on the ON path (a
+		// name declared earlier is always visible), so it answers instead;
+		// the guard itself is untouched and still needed for the alias-hidden
+		// case above.
+		{name: "onOk/earlierCommaSiblingInOn",
+			sql:  "SELECT a.id AS v FROM lat_ord a, lat_item b JOIN lat_item c ON a.id = c.order_id",
+			want: "rows=16 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2"},
+		{name: "onOk/earlierCommaSiblingInOuterOn",
+			sql:  "SELECT a.id AS v FROM lat_ord a, lat_item b LEFT JOIN lat_item c ON a.total > c.amount",
+			want: "rows=36 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 3 | 3 | 3 | 3"},
+		{name: "onOk/unaliasedEarlierCommaSiblingInOn",
+			sql:  "SELECT lat_ord.id AS v FROM lat_ord, lat_item b JOIN lat_item c ON lat_ord.id = c.order_id",
+			want: "rows=16 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2"},
 
 		// --- #1161 / #1162 -----------------------------------------------
 		{name: "win/partitionNamesNothing",
@@ -307,7 +317,7 @@ func TestArcRSAQualifiedReferenceNamesOneRelationOnEveryArm(t *testing.T) {
 		})
 	}
 	// A TABLE WHOSE EVERY CELL REFUSES PROVES ONLY THAT THE ENGINE IS LOUD.
-	if want := 27 * len(arms); answered != want {
+	if want := 30 * len(arms); answered != want {
 		t.Fatalf("%d (control, arm) pairs answered, want %d: the controls are what "+
 			"say this rule is a rule and not a ban", answered, want)
 	}

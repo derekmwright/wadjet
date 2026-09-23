@@ -11,16 +11,21 @@ import (
 )
 
 // A QUALIFIED REFERENCE NAMES ONE RELATION IN SCOPE, OR IT IS REFUSED AS
-// PostgreSQL REFUSES IT — arc RS's plan-time table (#1220, #1161, #1162).
+// PostgreSQL REFUSES IT — arc RS's plan-time table (#1220, #1161, #1162),
+// with the #617 comma-sibling-in-ON superset restored by the BX hotfix.
 //
-// Every `want` is live PostgreSQL 17.11 (--locale=C) over the same two
-// relations as `lat_ord` / `lat_item`: the SQLSTATE and PostgreSQL's PRIMARY
-// sentence (its DETAIL/HINT rides after a colon and is not asserted). The
-// three cases: `missing FROM-clause entry` — nothing at this level declares
-// the name, including a relation a LATER join introduces; `invalid
-// reference` — the entry was written earlier and this position cannot reach
-// it; `specified more than once` (42712) — one name, two relations. Plan-time
-// only, needing no storage; the five-arm table is
+// Every `want`/refused cell not marked otherwise is live PostgreSQL 17.11
+// (--locale=C) over the same two relations as `lat_ord` / `lat_item`: the
+// SQLSTATE and PostgreSQL's PRIMARY sentence (its DETAIL/HINT rides after a
+// colon and is not asserted). The three cases: `missing FROM-clause entry` —
+// nothing at this level declares the name, including a relation a LATER join
+// or a LATER comma item introduces; `invalid reference` — a base table
+// reachable only through an alias, named by its own hidden name; `specified
+// more than once` (42712) — one name, two relations. An ON may additionally
+// name any relation an EARLIER comma-separated FROM item declares — a
+// deliberate DuckDB-matching superset PostgreSQL does not share (ADR-0012 §5
+// #617), marked `onOk/*CommaSibling*` below since PostgreSQL has no answer to
+// assert. Plan-time only, needing no storage; the five-arm table is
 // `coordinator.TestArcRSAQualifiedReferenceNamesOneRelationOnEveryArm`.
 type rsCell struct {
 	name, sql string
@@ -44,29 +49,32 @@ func rsCells() []rsCell {
 			"42P01", `missing FROM-clause entry for table "c"`},
 		{"on/namesOwnRightSideLater", "SELECT a.id FROM lat_ord a JOIN lat_item b ON b.id = c.id JOIN lat_item c ON c.id = a.id",
 			"42P01", `missing FROM-clause entry for table "c"`},
-		{"on/namesEarlierCommaItem", "SELECT a.id FROM lat_ord a, lat_item b JOIN lat_item c ON a.id = c.order_id",
-			"42P01", `invalid reference to FROM-clause entry for table "a"`},
-		{"on/namesEarlierCommaItemOuter", "SELECT a.id FROM lat_ord a, lat_item b LEFT JOIN lat_item c ON a.total > c.amount",
-			"42P01", `invalid reference to FROM-clause entry for table "a"`},
 		{"on/tableNameBehindAlias", "SELECT a.id FROM lat_ord a JOIN lat_item b ON lat_ord.id = b.order_id",
 			"42P01", `invalid reference to FROM-clause entry for table "lat_ord"`},
-		// The DISCRIMINATOR between case 2 and case 3, which every cell above
-		// missed because each aliased its relations to a DIFFERENT name: an
-		// UNALIASED relation that is out of scope earns the ordinary case-2
-		// sentence, not the alias one. The parser records an alias equal to
-		// the table's own name for several spellings that wrote none, and an
-		// alias equal to the name hides nothing. SQLancer found it: 178 of
-		// 200 generated databases stopped on the alias sentence naming a
-		// table as its own alias, where PostgreSQL's DETAIL — and SQLancer's
-		// expected-error list — carry the case-2 wording.
-		{"on/unaliasedRelationOutOfScope",
-			"SELECT lat_ord.id FROM lat_ord, lat_item b JOIN lat_item c ON lat_ord.id = c.order_id",
-			"42P01", `there is an entry for table "lat_ord", but it cannot be referenced from this part of the query`},
 		{"on/sqlancerThreeWay", "SELECT COUNT(*) AS n FROM lat_ord t0 JOIN lat_item t1 ON t2.amount = t1.amount JOIN lat_item t2 ON t2.id = t0.id",
 			"42P01", `missing FROM-clause entry for table "t2"`},
 		// The CONTROLS, which decide whether the rule is a rule or a ban.
 		// Every one of these is a statement PostgreSQL ANSWERS, and each is
 		// one edit away from a cell above.
+		//
+		// An ON reaching back to an EARLIER comma-separated FROM item is the
+		// #617 DuckDB-matching superset (ADR-0012 §5), not PostgreSQL-legal —
+		// these three are controls against DuckDB, not PostgreSQL, and stay
+		// here rather than in `state: ""` above only because that field means
+		// "PostgreSQL answers this too." Arc RS (#1220) refused all three
+		// alongside the genuinely out-of-scope "declared later" shapes above;
+		// the BX hotfix tells them apart again. `unaliasedRelationOutOfScope`
+		// was the discriminator that an UNALIASED relation earns the ordinary
+		// case-2 sentence rather than the alias one (`noteAliasedTable`'s
+		// EqualFold guard, SQLancer 178/200) — this exact shape was its only
+		// reachable vehicle, since case 2 is now provably unreachable on the
+		// ON path (a name declared earlier is always visible), so the vehicle
+		// now answers instead of refusing; the guard itself is untouched and
+		// still needed for the alias-hidden case elsewhere in this table.
+		{"onOk/earlierCommaSiblingInOn", "SELECT a.id FROM lat_ord a, lat_item b JOIN lat_item c ON a.id = c.order_id", "", ""},
+		{"onOk/earlierCommaSiblingInOuterOn", "SELECT a.id FROM lat_ord a, lat_item b LEFT JOIN lat_item c ON a.total > c.amount", "", ""},
+		{"onOk/unaliasedEarlierCommaSiblingInOn",
+			"SELECT lat_ord.id FROM lat_ord, lat_item b JOIN lat_item c ON lat_ord.id = c.order_id", "", ""},
 		{"onOk/secondSeesFirst", "SELECT a.id FROM lat_ord a JOIN lat_item b ON a.id = b.order_id JOIN lat_item c ON a.id = c.order_id", "", ""},
 		{"onOk/leftDeep", "SELECT a.id FROM lat_ord a JOIN lat_item b ON a.id = b.order_id JOIN lat_item c ON b.id = c.id", "", ""},
 		{"onOk/thenComma", "SELECT a.id FROM lat_ord a JOIN lat_item b ON a.id = b.order_id, lat_item c", "", ""},
