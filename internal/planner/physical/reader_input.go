@@ -139,6 +139,17 @@ func readerInputReachable(path string) error {
 		if fi.IsDir() {
 			return sqlerr.New("42809", "%q is a directory", p)
 		}
+		// EVERY regular member is opened (and closed at once), not only
+		// stat'd: a later member that may not be read is 42501 here, for
+		// EXPLAIN too, rather than when the execution reaches it (review
+		// B5). A FIFO or device is not opened — an open can block.
+		if fi.Mode().IsRegular() {
+			f, err := os.Open(p)
+			if err != nil {
+				return inputOpenError(p, err)
+			}
+			f.Close()
+		}
 	}
 	return nil
 }

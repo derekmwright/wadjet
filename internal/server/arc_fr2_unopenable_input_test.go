@@ -94,3 +94,46 @@ func TestArcFR2AnUnopenableReaderInputIsRefusedOnEveryDoor(t *testing.T) {
 		}
 	})
 }
+
+// TestArcFR2ALaterUnreadableGlobMemberIsRefusedAtPlanTime (review B5): a
+// glob whose FIRST member is readable — and fills the 100-row sample, so
+// the plan-time read never reaches the second — and whose SECOND may not be
+// read is
+// 42501 at plan time — EXPLAIN included — for every reader. At 784aac60 the
+// plan-time check stat'd the later member without opening it, so SELECT was
+// 42501 at execution and EXPLAIN printed a plan.
+func TestArcFR2ALaterUnreadableGlobMemberIsRefusedAtPlanTime(t *testing.T) {
+	ctx := context.Background()
+	rig := sec4NewRig(t, ctx)
+	for _, fn := range []struct{ name, ext, first string }{
+		{"read_csv", "csv", "a\n" + strings.Repeat("1\n", 150)}, {"read_json", "json", strings.Repeat("{\"a\":1}\n", 150)},
+	} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "p000."+fn.ext), []byte(fn.first), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		later := filepath.Join(dir, "p001."+fn.ext)
+		if err := os.WriteFile(later, []byte(fn.first), 0o000); err != nil {
+			t.Fatal(err)
+		}
+		if f, err := os.Open(later); err == nil {
+			f.Close()
+			t.Skip("running as root: mode 000 does not stop the read")
+		}
+		for _, d := range rig.doors {
+			for _, sql := range []string{
+				fmt.Sprintf("SELECT COUNT(*) FROM %s('%s/*.%s')", fn.name, dir, fn.ext),
+				fmt.Sprintf("EXPLAIN SELECT * FROM %s('%s/*.%s')", fn.name, dir, fn.ext),
+			} {
+				rows, class, err := d.run(t, sec4Ops, sql)
+				if err == nil {
+					t.Errorf("%s: %s answered %v; want 42501", d.name, sql, rows)
+					continue
+				}
+				if class != "42501" || !strings.Contains(err.Error(), "p001") {
+					t.Errorf("%s: %s: %v (SQLSTATE %q), want 42501 naming p001", d.name, sql, err, class)
+				}
+			}
+		}
+	}
+}
