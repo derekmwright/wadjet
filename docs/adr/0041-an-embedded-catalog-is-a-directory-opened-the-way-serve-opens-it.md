@@ -96,10 +96,13 @@ than whatever answers a well-known port. That mechanism lived in
 ## Consequences
 
 - `wadjet.Open(ctx, wadjet.Config{DataDir: dir})` is the zero-configuration
-  persistent database, and `Open` on a directory costs milliseconds (7–24 ms
-  empty, 6–13 ms with two tables and a `ListTables`, against microseconds
-  for the in-memory catalog): an embedded nats-server starts on an ephemeral
-  port on every `Open`. A program that opens and closes a `DB` per request
+  persistent database, and `Open` on a directory costs milliseconds against
+  microseconds for the in-memory catalog: an embedded nats-server starts on
+  an ephemeral port on every `Open`. Measured WARM, repeated in one process:
+  7–24 ms empty, 6–13 ms with two tables and a `ListTables`. A whole fresh
+  process that opens a one-table directory, lists, counts and closes
+  measured 27–30 ms on an idle host, and single opens under a loaded host
+  measured 54–468 ms in the arc's review. A program that opens and closes a `DB` per request
   is holding it wrong; one `DB` per process is the contract.
 - An out-of-tree binary now links nats-server. Every package `wadjet`
   reaches is MIT; `tools/licensecheck` holds that.

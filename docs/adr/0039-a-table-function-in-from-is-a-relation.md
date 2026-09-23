@@ -7,7 +7,9 @@ measured the two-reader residue as a silent wrong VALUE rather than an
 unchecked shape — #1229; amended 2026-09-20 by arc FR, which CLOSED §3's
 deferral: §3 is now the authorization ORDER and the plan-time schema it
 buys, §9 is the join key's side, and the Consequences are the boundaries that
-remain — #1229 / #1230 / #1231)
+remain — #1229 / #1230 / #1231; amended 2026-09-22 by arc RP, whose paragraph
+in §3 is what a row past the readers' inference sample does — #1242 / #1243 /
+#1247)
 
 Related: ADR-0034 (the authorization ordering §3 rests on), ADR-0024 (§5's
 declared width and §7's key widening), ADR-0012 §5 (the divergences this
@@ -280,11 +282,12 @@ each is a consequence of where a column list comes from:
   and this engine does not, at any door. Through v0.23.0 the same shape was
   `XX000 the result has no columns at all` — the engine reporting an internal
   invariant for a file the caller can see is empty;
-- a file whose LATER rows carry a type the plan-time batch did not is a loud
-  error, but the JSON reader does not reach that check for one shape: it
-  writes the value into the column's storage and the query fails as a
-  RECOVERED PANIC rather than as a named type error. Pre-existing, measured
-  identically at 0c0d33b6, and recorded as a filing candidate;
+- a file whose LATER rows carry a value the sample did not type is refused
+  by the reader itself, with COPY's SQLSTATE for the field (§3's sample
+  paragraph). Through arc FR the JSON reader wrote a string past the sample
+  into a numeric column's storage and the query failed as a RECOVERED PANIC
+  (`XX000 index out of range`); arc RP made it `22P02` naming the file, row,
+  column and both types (#1243);
 - a table function is still not a DAG stage (`stage scan-0 has no
   dependencies and no ScanFiles`). That is `distributed` and arc PT's pin;
   the five-arm gates carry it per cell rather than chasing it. A DAG fragment
