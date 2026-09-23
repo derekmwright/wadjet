@@ -10,8 +10,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Always-run gate: a labeled event whose label is not ours would otherwise
+  # skip every job, and GitHub mails the actor "No jobs were run" for each
+  # such run (every label our tooling applies at filing). One 5-second job
+  # keeps the run non-empty; the real jobs still gate on the label below.
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "label=${LABEL}"
+        env:
+          LABEL: ${{ github.event.label.name }}
+
   triage:
     # Only runs when a maintainer adds the "needs-triage" label
+    needs: gate
     if: github.event.label.name == 'needs-triage'
     runs-on: ubuntu-latest
     permissions:
@@ -77,6 +89,7 @@ jobs:
 
   fix:
     # Only runs when a maintainer adds the "auto-fix" label
+    needs: gate
     if: github.event.label.name == 'auto-fix'
     runs-on: ubuntu-latest
     permissions:

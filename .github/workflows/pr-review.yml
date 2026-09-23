@@ -10,12 +10,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Always-run gate (see issue-worker.yml): keeps a non-matching label event
+  # from producing an empty run and a "No jobs were run" mail.
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "label=${LABEL}"
+        env:
+          LABEL: ${{ github.event.label.name }}
+
   review:
     # Only runs when a maintainer adds "needs-review" label.
     # pull_request_target gives the job secrets, so the PR's code is NEVER
     # checked out or executed here: the job checks out the BASE branch and reads
     # the PR as a diff through the API. CI (pull_request, no secrets) runs the
     # PR's tests; the reviewer reads that result instead of running them.
+    needs: gate
     if: github.event.label.name == 'needs-review'
     runs-on: ubuntu-latest
     permissions:
