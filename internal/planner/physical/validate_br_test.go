@@ -241,12 +241,22 @@ func TestArcBRAggregateArgumentClassMatchesPostgres(t *testing.T) {
 	accepts := map[string][]string{
 		"sum": numeric, "avg": numeric, "stddev": numeric, "stddev_samp": numeric,
 		"stddev_pop": numeric, "variance": numeric, "var_samp": numeric, "var_pop": numeric,
-		"median": numeric, "mode": numeric,
+		"median":   numeric,
 		"bool_and": {"c_bool"}, "bool_or": {"c_bool"}, "every": {"c_bool"},
 		"min": notRow, "max": notRow,
 		"count": all, "approx_distinct": all,
 	}
 	var cells []brCell
+	// mode is an ORDERED-SET aggregate in PostgreSQL: the plain call over a
+	// number is the kept DuckDB extension, and refused it is 42809.
+	for _, c := range all {
+		sql := fmt.Sprintf("SELECT mode(%s) AS v FROM tm", c)
+		if contains(numeric, c) {
+			cells = append(cells, brCell{sql, "", ""})
+		} else {
+			cells = append(cells, brCell{sql, "42809", "WITHIN GROUP is required for ordered-set aggregate mode"})
+		}
+	}
 	for agg, ok := range accepts {
 		okSet := map[string]bool{}
 		for _, c := range ok {
@@ -261,11 +271,16 @@ func TestArcBRAggregateArgumentClassMatchesPostgres(t *testing.T) {
 			cells = append(cells, brCell{sql, "42883", "function " + agg + "("})
 		}
 	}
+	// string_agg: text, and the kept renderings measured per type at base.
+	rendered := map[string]bool{"c_str": true, "c_bool": true, "c_i32": true, "c_i64": true,
+		"c_f32": true, "c_f64": true, "c_dec": true, "c_ipv4": true, "c_ipv6": true,
+		"c_cidr": true, "c_mac": true, "c_port": true, "c_proto": true, "c_dur": true,
+		"c_uuid": true, "c_date": true}
 	for _, c := range all {
-		switch c {
-		case "c_str":
-			cells = append(cells, brCell{"SELECT string_agg(c_str, ',') AS v FROM tm", "", ""})
-		case "c_bytes":
+		switch {
+		case rendered[c]:
+			cells = append(cells, brCell{"SELECT string_agg(" + c + ", ',') AS v FROM tm", "", ""})
+		case c == "c_bytes":
 			cells = append(cells, brCell{"SELECT string_agg(c_bytes, ',') AS v FROM tm", "0A000", "string_agg over bytea"})
 		default:
 			cells = append(cells, brCell{"SELECT string_agg(" + c + ", ',') AS v FROM tm", "42883", "function string_agg("})
@@ -292,7 +307,8 @@ func TestArcBRAggregateArgumentClassMatchesPostgres(t *testing.T) {
 		brCell{"SELECT AVG(c_ts) AS v FROM tm", "42883", "function avg(timestamp without time zone) does not exist"},
 		brCell{"SELECT bool_and(c_i32) AS v FROM tm", "42883", "function bool_and(integer) does not exist"},
 		brCell{"SELECT MIN(c_row) AS v FROM tm", "42883", "function min(record) does not exist"},
-		brCell{"SELECT string_agg(c_i32, ',') AS v FROM tm", "42883", "function string_agg(integer, unknown) does not exist"},
+		brCell{"SELECT string_agg(c_ts, ',') AS v FROM tm", "42883", "function string_agg(timestamp without time zone, unknown) does not exist"},
+		brCell{"SELECT percentile_disc(0.5, c_str) AS v FROM tm", "42809", "WITHIN GROUP is required for ordered-set aggregate percentile_disc"},
 		brCell{"SELECT corr(c_str, c_f64) AS v FROM tm", "42883", "function corr(text, double precision) does not exist"},
 		// Every position the argument can be written in.
 		brCell{"SELECT SUM(DISTINCT customer) AS v FROM lat_ord", "42883", "function sum(text)"},

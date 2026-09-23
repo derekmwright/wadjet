@@ -82,7 +82,7 @@ var aggArgPositions = map[string][]aggArgClass{
 // with no overload an unknown could take (42883).
 var (
 	aggUnknownIsNotUnique  = map[string]bool{"sum": true, "avg": true}
-	aggUnknownDoesNotExist = map[string]bool{"median": true, "mode": true,
+	aggUnknownDoesNotExist = map[string]bool{"median": true,
 		"quantile_cont": true, "quantile_disc": true}
 )
 
@@ -102,7 +102,20 @@ func aggArgFits(c aggArgClass, t parquet.TypeID) bool {
 	case aggArgBool:
 		return t == parquet.TypeBool
 	case aggArgText:
-		return t == parquet.TypeString
+		// TEXT is PostgreSQL's set. The rest is the KEPT superset, measured
+		// per type at base 260fc569 (arc BR round 2): each of these rendered
+		// every value as its own text — the ISO date, the dotted address, the
+		// number — identically on all five arms. TIMESTAMP rendered the epoch
+		// milliseconds and the containers Go's fmt (`map[…]`), so those stay
+		// refused; BYTEA is the 0A000 below.
+		switch t {
+		case parquet.TypeString, parquet.TypeBool, parquet.TypeInt32, parquet.TypeInt64,
+			parquet.TypeFloat32, parquet.TypeFloat64, parquet.TypeDecimal, parquet.TypeIPv4,
+			parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeMAC, parquet.TypePort,
+			parquet.TypeProtocol, parquet.TypeDuration, parquet.TypeUUID, parquet.TypeDate:
+			return true
+		}
+		return false
 	case aggArgOrdered:
 		return t != parquet.TypeRow
 	}
@@ -157,6 +170,8 @@ func refuseAggregateArgument(fc *plansql.FuncCallNode, typeOf func(plansql.Node)
 		arg := plansql.Unparen(fc.Args[i])
 		if lit, ok := arg.(*plansql.Lit); ok && (lit.Kind == plansql.LitString || lit.Kind == plansql.LitNull) {
 			switch {
+			case aggOrderedSet[name]:
+				return orderedSetRefusal(name)
 			case aggUnknownIsNotUnique[name]:
 				return sqlerr.New("42725", "function %s(%s) is not unique", name, names())
 			case aggUnknownDoesNotExist[name]:
@@ -191,9 +206,23 @@ func refuseAggregateArgument(fc *plansql.FuncCallNode, typeOf func(plansql.Node)
 			// answers — never that value.
 			return sqlerr.New("0A000", "string_agg over bytea is not supported")
 		}
+		if aggOrderedSet[name] {
+			return orderedSetRefusal(name)
+		}
 		return sqlerr.New("42883", "function %s(%s) does not exist", name, names())
 	}
 	return nil
+}
+
+// aggOrderedSet are PostgreSQL's ORDERED-SET aggregates, which this engine
+// also takes in DuckDB's plain call form. Over a number the plain form answers
+// (a kept extension, ADR-0012 §5); where it is refused the state is the one
+// PostgreSQL gives the plain form, 42809 (measured on 17.11: `mode(c_str)`,
+// `percentile_disc(0.5, c_str)`).
+var aggOrderedSet = map[string]bool{"mode": true, "percentile_cont": true, "percentile_disc": true}
+
+func orderedSetRefusal(name string) error {
+	return sqlerr.New("42809", "WITHIN GROUP is required for ordered-set aggregate %s", name)
 }
 
 // aggArgTypeName renders one argument the way PostgreSQL's 42883 message does:

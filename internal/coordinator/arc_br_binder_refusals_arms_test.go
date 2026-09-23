@@ -294,7 +294,12 @@ func brAggregateCells() []brArmCell {
 		case "bool_and", "bool_or", "every":
 			return c == "c_bool"
 		case "string_agg":
-			return c == "c_str"
+			// Text, and the renderings kept per type (ADR-0012 §5).
+			switch c {
+			case "c_ts", "c_bytes", "c_arr", "c_row", "c_rownest", "c_map", "c_vec":
+				return false
+			}
+			return true
 		case "min", "max":
 			return c != "c_row" && c != "c_rownest"
 		}
@@ -319,6 +324,8 @@ func brAggregateCells() []brArmCell {
 				cell.same = true
 			case agg == "string_agg" && c == "c_bytes":
 				cell.state, cell.msg = "0A000", "string_agg over bytea is not supported"
+			case agg == "mode":
+				cell.state, cell.msg = "42809", "WITHIN GROUP is required for ordered-set aggregate mode"
 			default:
 				cell.state, cell.msg = "42883", "function "+agg+"("
 			}
@@ -381,8 +388,10 @@ func brAggregateCells() []brArmCell {
 			state: "42883", msg: "function sum(boolean) does not exist"},
 		brArmCell{name: "aggLit/boolAndInteger", sql: "SELECT bool_and(1) AS v FROM lat_ord",
 			state: "42883", msg: "function bool_and(integer) does not exist"},
-		brArmCell{name: "aggLit/stringAggInteger", sql: "SELECT string_agg(1, ',') AS v FROM lat_ord",
-			state: "42883", msg: "function string_agg(integer, unknown) does not exist"},
+		brArmCell{name: "aggOk/stringAggIntegerRendering", sql: "SELECT string_agg(1, ',') AS v FROM lat_ord",
+			want: "rows=1 1,1,1"},
+		brArmCell{name: "aggLit/stringAggTimestamp", sql: "SELECT string_agg(c_ts, ',') AS v FROM typemx WHERE id < 3",
+			state: "42883", msg: "function string_agg(timestamp without time zone, unknown) does not exist"},
 		brArmCell{name: "aggOk/sumOne", sql: "SELECT SUM(1) AS v FROM lat_ord", want: "rows=1 3"},
 		brArmCell{name: "aggOk/sumTotal", sql: "SELECT SUM(total) AS v FROM lat_ord", want: "rows=1 350"},
 		brArmCell{name: "aggOk/sumCastText", sql: "SELECT SUM(CAST(CAST(id AS TEXT) AS BIGINT)) AS v FROM lat_ord", want: "rows=1 6"},
