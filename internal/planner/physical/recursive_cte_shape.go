@@ -15,8 +15,9 @@ import (
 // RECURSIVE term, with PostgreSQL's class (42P19) and sentence for each shape,
 // measured on 17.11:
 //
-//   - an aggregate in the recursive term — "aggregate functions are not
-//     allowed in a recursive query's recursive term";
+//   - an aggregate in a block of the recursive term whose own FROM names the
+//     reference — "aggregate functions are not allowed in a recursive
+//     query's recursive term" (aggregateOverTheReference);
 //   - the self-reference inside a subquery expression (EXISTS, IN, a scalar
 //     subquery) — "… must not appear within a subquery";
 //   - the self-reference on the NULLABLE side of an outer join — "… must not
@@ -36,7 +37,7 @@ import (
 // conservative to (a false refusal) and never answered as something else.
 func refuseRecursiveTermShape(cteName string, term *plansql.SelectInfo) error {
 	name := strings.ToLower(strings.TrimSpace(cteName))
-	if selectHasAggregate(term) {
+	if aggregateOverTheReference(term, name) {
 		return sqlerr.New("42P19",
 			"aggregate functions are not allowed in a recursive query's recursive term")
 	}
@@ -54,6 +55,59 @@ func refuseRecursiveTermShape(cteName string, term *plansql.SelectInfo) error {
 		return ref("more than once")
 	}
 	return nil
+}
+
+// aggregateOverTheReference is PostgreSQL's aggregate rule for a recursive
+// term, measured on 17.11: an aggregate is refused in a query block whose OWN
+// FROM names the recursive reference — the term itself, or a derived table at
+// any depth under it — and allowed in a block that reads the reference only
+// through a derived table below it (`SELECT max(m) FROM (SELECT n+1 AS m FROM
+// r …) q` answers there) or not at all (`… (SELECT count(*) FROM t) q`).
+// Checking only the term's own level missed `SELECT n FROM (SELECT max(n)+1
+// AS n FROM r …) q`, which PostgreSQL refuses (arc RC round 2, B2).
+func aggregateOverTheReference(info *plansql.SelectInfo, want string) bool {
+	if info == nil {
+		return false
+	}
+	if info.Union != nil {
+		return aggregateOverTheReference(info.Union.Left, want) ||
+			aggregateOverTheReference(info.Union.Right, want)
+	}
+	direct := false
+	var derived []*plansql.SelectInfo
+	visit := func(t *plansql.TableRef) {
+		if t == nil {
+			return
+		}
+		if strings.HasPrefix(t.Name, "(") {
+			if sub, err := t.SubSelect(); err == nil && sub != nil {
+				derived = append(derived, sub)
+			}
+			return
+		}
+		if strings.EqualFold(strings.TrimSpace(t.Name), want) {
+			direct = true
+		}
+	}
+	for i := range info.Tables {
+		visit(&info.Tables[i])
+	}
+	for i := range info.Joins {
+		ref := info.Joins[i].RightTableRef
+		if ref == nil {
+			ref = &plansql.TableRef{Name: info.Joins[i].RightTable}
+		}
+		visit(ref)
+	}
+	if direct && selectHasAggregate(info) {
+		return true
+	}
+	for _, sub := range derived {
+		if aggregateOverTheReference(sub, want) {
+			return true
+		}
+	}
+	return false
 }
 
 // selectHasAggregate reports an aggregate call at THIS block's level — its
