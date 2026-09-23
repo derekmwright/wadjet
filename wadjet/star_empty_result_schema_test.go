@@ -110,8 +110,16 @@ func TestStarOverAGroupingDeclaresItsGroupKeys(t *testing.T) {
 	ctx := context.Background()
 	db := mbOpen(t)
 
+	// EVERY column: a star over a grouping is legal only when each column it
+	// expands to is grouped — `GROUP BY id, g, c_str` under `SELECT *` is
+	// PostgreSQL's 42803 on the first ungrouped column, and it answered ONLY
+	// the three keys here before arc BR (#1233).
+	var every []string
+	for _, c := range mbSchema().Columns {
+		every = append(every, c.Name)
+	}
 	for _, tc := range []struct{ name, tmpl string }{
-		{"group_by_all", "SELECT * FROM mbtypes WHERE %s GROUP BY id, g, c_str"},
+		{"group_by_all", "SELECT * FROM mbtypes WHERE %s GROUP BY " + strings.Join(every, ", ")},
 		{"distinct_star", "SELECT DISTINCT * FROM mbtypes WHERE %s"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

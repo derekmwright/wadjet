@@ -123,6 +123,11 @@ type colScope struct {
 	// (measured; `TestCollidingBareNamesOnEveryArm`). So the duplicate is
 	// decided WITHIN one source's own list and only the verdict is recorded.
 	dupQualified map[string]map[string]bool
+	// qualCols is each qualifier's column list IN THE ORDER ITS SOURCE
+	// PUBLISHES IT, for the one question that needs an order: which column a
+	// STAR expands to first, when the grouping rule refuses a star (#1233).
+	// Only this block's own sources register here; it is not merged.
+	qualCols map[string][]string
 	// colTypes / qualColTypes record the declared parquet.TypeID of the
 	// columns a BASE TABLE provides, for the plan-time literal refusal
 	// (validate_literal.go). A bare name two sources declare with DIFFERENT
@@ -244,6 +249,12 @@ func (s *colScope) addQualified(qual, col string) {
 	s.exactQuals[qual] = true
 	if s.quals[q] == nil {
 		s.quals[q] = map[string]bool{}
+	}
+	if !s.quals[q][c] {
+		if s.qualCols == nil {
+			s.qualCols = map[string][]string{}
+		}
+		s.qualCols[q] = append(s.qualCols[q], col)
 	}
 	s.quals[q][c] = true
 }
@@ -888,11 +899,6 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		return err
 	}
 	plansql.RevertGroupByAliasesShadowedByInput(info, from.providesBareColumn)
-	// A bare column beside an aggregate with no GROUP BY has no defined
-	// answer — which n_name should the single aggregate row carry?
-	if err := checkUngrouped(info, from); err != nil {
-		return err
-	}
 	// GROUP BY expressions
 	for _, gb := range info.GroupByExprs {
 		if err := b.checkExpr(gb, withOut); err != nil {
@@ -918,6 +924,17 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		if err := b.checkExpr(expr, withOut); err != nil {
 			return err
 		}
+	}
+
+	// A bare column beside an aggregate with no GROUP BY has no defined
+	// answer — which n_name should the single aggregate row carry?
+	//
+	// AFTER every clause's names, which is PostgreSQL's order:
+	// parseCheckAggregates runs once the whole block is transformed, so
+	// `SELECT * FROM t GROUP BY zz.id` is 42P01 there, not the 42803 its
+	// star would otherwise earn (#1233).
+	if err := checkUngrouped(info, from); err != nil {
+		return err
 	}
 
 	// Recurse into subqueries embedded in this block's expressions. They run in
@@ -1473,7 +1490,21 @@ func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
 	// terms alone.
 	for i := range info.Columns {
 		col := info.Columns[i]
-		if col.Star || col.IsWindow || col.ASTExpr == nil {
+		if col.Star {
+			// A STAR in a grouped query expands to columns, and each is held
+			// to the rule like any other: `SELECT * FROM t HAVING COUNT(*) >
+			// 0` is `column "t.id" must appear in the GROUP BY clause` on
+			// 17.11, and answered every ungrouped row here (#1233). Not while
+			// a GROUP BY term names nothing this block can resolve: that is
+			// a name error, reported first by PostgreSQL and later here.
+			if groupTermsResolve(info, g) {
+				if err := g.checkStar(col.TableRef); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if col.IsWindow || col.ASTExpr == nil {
 			continue
 		}
 		// THE ITEM AS WRITTEN, when its spelling contains a term this block
@@ -1812,6 +1843,57 @@ func (g *groupCheck) check(node plansql.Node) error {
 	for _, child := range exprOperands(node) {
 		if err := g.check(child); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// groupTermsResolve reports whether every plain-column GROUP BY term names a
+// column of this block's own sources (or a select alias).
+func groupTermsResolve(info *plansql.SelectInfo, g *groupCheck) bool {
+	for _, gb := range info.GroupByExprs {
+		ref, ok := unparen(gb).(*plansql.ColRef)
+		if !ok {
+			continue
+		}
+		if _, resolved := g.resolveOwnTable(ref); resolved {
+			continue
+		}
+		if ref.Table == "" && selectItemForGroupTerm(info, ref) != nil {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// checkStar holds the columns a star expands to to the grouping rule, in the
+// order the star publishes them — this block's relations in FROM order, each
+// relation's columns in its own order — so the first ungrouped one is the one
+// PostgreSQL names. A qualified star (`o.*`) expands to that relation alone.
+// It declines (nil) where the expansion is not certain: no relation census,
+// or a qualifier this scope did not register.
+func (g *groupCheck) checkStar(qualifier string) error {
+	var quals []string
+	if qualifier != "" {
+		quals = []string{qualifier}
+	} else {
+		if g.from.relations == nil {
+			return nil
+		}
+		for _, site := range g.from.relations.sites {
+			quals = append(quals, site.spelled)
+		}
+	}
+	for _, q := range quals {
+		cols, ok := g.from.qualCols[strings.ToLower(q)]
+		if !ok {
+			return nil
+		}
+		for _, c := range cols {
+			if err := g.check(&plansql.ColRef{Table: q, Column: c}); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

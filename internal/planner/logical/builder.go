@@ -67,6 +67,15 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	if len(orderByAggs) > 0 {
 		hasAgg = true
 	}
+	// So does a HAVING clause, with or without an aggregate in it: it makes
+	// the whole input ONE group. Without this `SELECT 1 FROM t HAVING
+	// COUNT(*) > 5` built no Aggregate, the HAVING's aggregate had nothing to
+	// be computed by, and the query returned a row per input row where
+	// PostgreSQL 17.11 returns none — and `HAVING true` returned three rows
+	// where it returns one (#1233's neighbour).
+	if info.HavingExpr != nil {
+		hasAgg = true
+	}
 
 	// Track columns that need AST rewriting for nested aggregates.
 	// Key: column index, Value: rewritten AST with aggregate replaced by ColRef.
@@ -335,6 +344,17 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 					aggs = append(aggs, ae)
 					havingReplacements[hKey] = synName
 				}
+			}
+			// A HAVING with no aggregate anywhere and no GROUP BY still
+			// makes ONE group, and that group exists over an EMPTY input
+			// too: `SELECT 1 FROM t WHERE false HAVING true` is one row on
+			// 17.11. An Aggregate with no key and no aggregate emits nothing
+			// over an empty input, so the group is anchored by a COUNT(*)
+			// under a planner slot, which the projection drops.
+			if len(aggs) == 0 && len(info.GroupBy) == 0 && len(info.GroupingSets) == 0 {
+				aggs = append(aggs, AggExpr{Func: "count",
+					OutputCol: plansql.SlotName(plansql.SlotHaving, aggCounter)})
+				aggCounter++
 			}
 		}
 
