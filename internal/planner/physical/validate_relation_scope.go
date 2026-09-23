@@ -212,17 +212,27 @@ func (s *colScope) scopeAtJoin(visible map[string]bool, through int) *colScope {
 		return c
 	}
 	removed := map[string]bool{}
-	for _, site := range s.relations.sites {
+	for i, site := range s.relations.sites {
 		if site.qual == "" || visible[site.qual] || removed[site.qual] {
 			continue
 		}
 		removed[site.qual] = true
-		// Its BARE columns leave with it. A relation a later join
-		// introduces publishes no name to an earlier ON — PostgreSQL's
-		// `SELECT 1 FROM o JOIN ev ON a = o.id JOIN nn ON true`, where only
-		// nn has `a`, is 42703 there — and a name the scope kept anyway
-		// both resolved that reference (the statement answered) and read as
-		// a ROW container for `nn.x`'s qualifier.
+		// Its BARE columns leave with it when it is written LATER than this
+		// ON. A relation a later join introduces publishes no name to an
+		// earlier ON — PostgreSQL's `SELECT 1 FROM o JOIN ev ON a = o.id
+		// JOIN nn ON true`, where only nn has `a`, is 42703 there — and a
+		// name the scope kept anyway both resolved that reference (the
+		// statement answered) and read as a ROW container for `nn.x`'s
+		// qualifier. An EARLIER comma item keeps its bare columns: `FROM
+		// customer, orders JOIN nation ON c_nationkey = n_nationkey` is
+		// answered by folding the item into the join (#F1, a superset of
+		// PostgreSQL kept for DuckDB parity); only its qualifier leaves.
+		if i < through {
+			delete(c.quals, site.qual)
+			delete(c.qualColTypes, site.qual)
+			delete(c.dupQualified, site.qual)
+			continue
+		}
 		for col := range s.quals[site.qual] {
 			if c.srcCount[col] > 0 {
 				c.srcCount[col]--
