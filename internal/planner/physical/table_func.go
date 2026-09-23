@@ -217,19 +217,16 @@ func expandHome(path string) string {
 type jsonTableFuncSource struct {
 	path   string
 	reader *jsonreader.StreamReader
-	closer io.Closer
 }
 
 func (s *jsonTableFuncSource) Init(_ context.Context) error {
-	rc, err := openData(s.path)
+	// A glob is a SEQUENCE of files, each its own JSON document (fileinput).
+	inputs, err := readerInputs(s.path)
 	if err != nil {
 		return fmt.Errorf("read_json: %w", err)
 	}
-	s.closer = rc
-	r, err := jsonreader.NewStreamReader(rc)
+	r, err := jsonreader.NewFilesReader(inputs)
 	if err != nil {
-		rc.Close()
-		s.closer = nil
 		return fmt.Errorf("read_json: parsing: %w", err)
 	}
 	s.reader = r
@@ -245,8 +242,8 @@ func (s *jsonTableFuncSource) Next(_ context.Context) (*batch.RecordBatch, error
 }
 
 func (s *jsonTableFuncSource) Close() error {
-	if s.closer != nil {
-		return s.closer.Close()
+	if s.reader != nil {
+		return s.reader.Close()
 	}
 	return nil
 }

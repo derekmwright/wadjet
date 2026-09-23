@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/storage/fileinput"
 )
 
 // drainReader pulls all rows from either reader type via a Next() func.
@@ -88,7 +90,7 @@ func TestStreamReader_MatchesEagerAcrossChunkBoundaries(t *testing.T) {
 		for _, chunk := range []int{7, 64, 1024, streamChunkBytes} {
 			t.Run(fmt.Sprintf("%s_chunk%d", name, chunk), func(t *testing.T) {
 				want := eagerRows(t, []byte(input))
-				sr, err := newStreamReaderSized(strings.NewReader(input), chunk)
+				sr, err := newStreamReaderSized(fileinput.Reader(strings.NewReader(input)), chunk)
 				if err != nil {
 					t.Fatalf("NewStreamReader: %v", err)
 				}
@@ -108,7 +110,7 @@ func TestStreamReader_MatchesEagerAcrossChunkBoundaries(t *testing.T) {
 
 func TestStreamReader_EmptyAndTruncated(t *testing.T) {
 	for _, input := range []string{"", "   \n\t", "[]"} {
-		sr, err := newStreamReaderSized(strings.NewReader(input), 16)
+		sr, err := newStreamReaderSized(fileinput.Reader(strings.NewReader(input)), 16)
 		if err != nil {
 			t.Fatalf("empty input %q: %v", input, err)
 		}
@@ -119,7 +121,7 @@ func TestStreamReader_EmptyAndTruncated(t *testing.T) {
 	}
 
 	// Truncated object must error, not silently drop the tail.
-	sr, err := newStreamReaderSized(strings.NewReader(`{"a":1}`+"\n"+`{"a":2,"b":"trunc`), 8)
+	sr, err := newStreamReaderSized(fileinput.Reader(strings.NewReader(`{"a":1}`+"\n"+`{"a":2,"b":"trunc`)), 8)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +140,7 @@ func TestStreamReader_WindowStaysBounded(t *testing.T) {
 		fmt.Fprintf(&big, `{"id":%d,"pad":"%s"}`+"\n", i, strings.Repeat("x", 100))
 	}
 	total := big.Len()
-	sr, err := newStreamReaderSized(bytes.NewReader(big.Bytes()), chunk)
+	sr, err := newStreamReaderSized(fileinput.Reader(bytes.NewReader(big.Bytes())), chunk)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
+	"github.com/derekmwright/wadjet/internal/storage/fileinput"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -22,104 +23,129 @@ const (
 )
 
 // StreamReader is the incremental counterpart of ColumnarReader: it parses
-// JSON (top-level array of objects, or JSONL/concatenated objects) from an
-// io.Reader one batch at a time, holding only a bounded byte window instead
-// of the whole file plus a full columnar copy (issue #130 — read_json
-// materialized ~2-3× the input in heap).
+// JSON (a top-level array of objects, or JSONL/concatenated objects) one
+// batch at a time, holding only a bounded byte window instead of the whole
+// file plus a full columnar copy (issue #130 — read_json materialized ~2-3×
+// the input in heap).
+//
+// Its input is a SEQUENCE of files (fileinput): read_json over a glob hands
+// it the matched files in name order, and each is its own JSON DOCUMENT —
+// its own `[`…`]` or run of objects, its own row numbers — with at most one
+// open at a time. Through v0.24.0 the files' bytes were concatenated and the
+// first file's `]` ended the whole input, so a glob of array files read the
+// first file only (#1262). A document that is not one — content after the
+// closing `]`, a top-level value that is not an object, an array with no
+// `]` — is refused with 22P02, naming the file and row, rather than ending
+// the input early as if it were the end of the file.
 //
 // Schema semantics match the eager reader's: inferred from the first
-// defaultSampleSize complete objects (the eager path samples the same
-// prefix), except that buffering stops at maxSampleBytes — then the sample
-// is the complete objects that fit, and `sampled` records how many, since
-// every row past it is checked against the schema (22P02 on a mismatch,
-// 22003 out of range, 22007 for a timestamp).
+// defaultSampleSize complete objects of the SEQUENCE (crossing into later
+// files when the first is short), except that the sample stops at
+// maxSampleBytes — then it is the complete objects that fit, and `sampled`
+// records how many, since every row past it is checked against the schema
+// (22P02 on a mismatch, 22003 out of range, 22007 for a timestamp). The
+// sampled objects are copied out of their files, so a sample that crosses
+// files holds at most maxSampleBytes and still only one open file.
 // Values are parsed by the same scanObjectInto byte scanner, so output
 // batches are identical to NewColumnarReader's whenever the samples agree.
 type StreamReader struct {
-	r      io.Reader
+	inputs  []fileinput.Input
+	nextIn  int
+	cur     io.ReadCloser
+	curName string
+	named   bool
+
 	schema []parquet.Column
 	colIdx map[string]int
 	seen   []bool
 
-	buf    []byte // window; buf[start:filled] is unconsumed input
-	base   int64  // input offset of buf[0]
+	// The window over the CURRENT file: buf[start:filled] is unconsumed.
+	buf    []byte
 	start  int
 	filled int
 	eof    bool
 
-	isArray     bool
-	openSkipped bool // leading '[' consumed
-	fileRow     int  // 1-based row of the last object scanned
+	docStarted  bool // the file's first non-space byte has been seen
+	isArray     bool // …and it was '['
+	arrayClosed bool // the array's ']' has been consumed
+	fileRow     int  // 1-based row, within the current file, of the last object
+	rows        int  // rows scanned from the whole sequence
 	sampled     int  // leading rows the schema was inferred from
 	done        bool
 
+	// The sample: the leading objects, copied out of their files.
+	sampleBuf  []byte
+	sample     []sampledObject
+	nextSample int
+	sampleErr  error // what ended the sample early, reported in turn
+
 	chunkSize int // test hook; defaults to streamChunkBytes
-
-	// loc, when the input is several files read as one stream, names the
-	// file an input offset lies in; seg* follow the file of the current row
-	// so a refusal names that file and its own row number.
-	loc         Locator
-	segFile     string
-	segStart    int64
-	segNext     int64
-	segRowsSeen int
 }
 
-// Locator is implemented by an input that is several files read as one
-// stream (read_json over a glob): Segment names the file holding the input
-// offset, where that file starts, and an offset before which every later
-// offset still lies in the same file.
-type Locator interface {
-	Segment(offset int64) (file string, start, next int64)
+// sampledObject is one sampled object's bytes in sampleBuf and where it came
+// from.
+type sampledObject struct {
+	start, end int
+	file       string
+	fileRow    int
 }
 
-// NewStreamReader buffers just enough input to infer the schema, then
-// parses lazily. The caller retains ownership of r (close it after the
-// reader is exhausted or abandoned).
+// NewStreamReader reads one input. The caller retains ownership of r.
 func NewStreamReader(r io.Reader) (*StreamReader, error) {
-	return newStreamReaderSized(r, streamChunkBytes)
+	return newStreamReaderSized(fileinput.Reader(r), streamChunkBytes)
 }
 
-func newStreamReaderSized(r io.Reader, chunkSize int) (*StreamReader, error) {
-	sr := &StreamReader{r: r, chunkSize: chunkSize}
-	if loc, ok := r.(Locator); ok {
-		sr.loc = loc
+// NewFilesReader reads a sequence of files, each its own JSON document.
+// Close releases the file it holds.
+func NewFilesReader(inputs []fileinput.Input) (*StreamReader, error) {
+	return newStreamReaderSized(inputs, streamChunkBytes)
+}
+
+func newStreamReaderSized(inputs []fileinput.Input, chunkSize int) (*StreamReader, error) {
+	sr := &StreamReader{inputs: inputs, chunkSize: chunkSize, named: len(inputs) > 1}
+	for _, in := range inputs {
+		sr.named = sr.named || in.Name != ""
 	}
 
-	// Fill until the window covers defaultSampleSize complete objects, EOF,
-	// or the sample cap. Schema inference sees the same prefix the eager
-	// reader sampled.
-	for {
-		sr.skipLeadingSpace()
-		end, count := sr.completeValuesEnd()
-		if count >= defaultSampleSize || sr.eof || sr.filled-sr.start >= maxSampleBytes {
-			_ = end
+	// The sample: up to defaultSampleSize complete objects that fit in
+	// maxSampleBytes, across files. A malformed input met here is reported
+	// after the rows before it, as it would be past the sample.
+	for len(sr.sample) < defaultSampleSize {
+		objStart, objEnd, err := sr.nextObject()
+		if err != nil {
+			sr.sampleErr = err
 			break
 		}
-		if err := sr.refill(); err != nil {
-			return nil, err
+		if objStart < 0 {
+			break
+		}
+		obj := sr.buf[objStart:objEnd]
+		if len(sr.sampleBuf)+len(obj) > maxSampleBytes && len(sr.sample) > 0 {
+			break // the object stays in the window, the first row past the sample
+		}
+		sr.fileRow++
+		s := len(sr.sampleBuf)
+		sr.sampleBuf = append(sr.sampleBuf, obj...)
+		sr.sample = append(sr.sample, sampledObject{start: s, end: len(sr.sampleBuf), file: sr.curName, fileRow: sr.fileRow})
+		sr.sampleBuf = append(sr.sampleBuf, '\n')
+		sr.start = objEnd
+		if len(sr.sampleBuf) >= maxSampleBytes {
+			break
 		}
 	}
-	sr.skipLeadingSpace()
-	if sr.start >= sr.filled {
+	sr.sampled = len(sr.sample)
+	if sr.sampled == 0 {
+		if sr.sampleErr != nil {
+			sr.Close()
+			return nil, sr.sampleErr
+		}
 		sr.done = true // empty input → zero-column reader, like the eager path
 		return sr, nil
 	}
-
-	sr.isArray = sr.buf[sr.start] == '['
-	prefixEnd, nObjs := sr.completeValuesEnd()
-	if nObjs == 0 {
-		// No complete object buffered ("[]", or a truncated head): give
-		// inference the whole window, exactly what the eager reader saw —
-		// its token loop degrades gracefully at the cut.
-		prefixEnd = sr.filled
-	}
-	schema, err := inferSchemaTokens(sr.buf[sr.start:prefixEnd], sr.isArray, defaultSampleSize)
-	// The sample is the complete objects inference saw: 100, or fewer when
-	// the first 100 exceed maxSampleBytes. Every row past it is checked.
-	sr.sampled = min(nObjs, defaultSampleSize)
+	schema, err := inferSchemaTokens(sr.sampleBuf, false, defaultSampleSize)
 	if err != nil {
-		return nil, fmt.Errorf("schema inference: %w", err)
+		sr.Close()
+		return nil, sqlerr.New("22P02", "schema inference: %v", err)
 	}
 	if len(schema) == 0 {
 		sr.done = true
@@ -137,37 +163,74 @@ func newStreamReaderSized(r io.Reader, chunkSize int) (*StreamReader, error) {
 // Schema returns the inferred schema (nil for empty input).
 func (sr *StreamReader) Schema() []parquet.Column { return sr.schema }
 
+// Close releases the file the reader holds open, if any.
+func (sr *StreamReader) Close() error {
+	sr.closeCurrent()
+	sr.done = true
+	return nil
+}
+
+func (sr *StreamReader) closeCurrent() {
+	if sr.cur != nil {
+		sr.cur.Close()
+	}
+	sr.cur = nil
+}
+
 // Next parses and returns the next batch, or nil when exhausted.
 func (sr *StreamReader) Next() (*batch.RecordBatch, error) {
-	if sr.done {
+	if sr.done && sr.nextSample >= len(sr.sample) {
+		return nil, nil
+	}
+	if sr.schema == nil {
 		return nil, nil
 	}
 	rb := batch.NewRecordBatch(sr.schema, defaultBatchSize)
 	row := 0
 	for row < defaultBatchSize {
-		objStart, objEnd, err := sr.nextObjectSpan()
-		if err != nil {
-			return nil, err
-		}
-		if objStart < 0 {
-			sr.done = true
-			break
-		}
-		sr.fileRow++
-		sc := &jsonScanner{data: sr.buf[:objEnd], pos: objStart, fileRow: sr.fileRow, sampled: sr.sampled}
-		if sr.loc != nil {
-			if off := sr.base + int64(objStart); off >= sr.segNext {
-				sr.enterSegment(off)
+		var sc *jsonScanner
+		var file string
+		var fileRow int
+		if sr.nextSample < len(sr.sample) {
+			o := sr.sample[sr.nextSample]
+			sr.nextSample++
+			sc = &jsonScanner{data: sr.sampleBuf[:o.end], pos: o.start}
+			file, fileRow = o.file, o.fileRow
+		} else {
+			if sr.sampleErr != nil {
+				err := sr.sampleErr
+				sr.sampleErr, sr.done = nil, true
+				return nil, err
 			}
-			sc.file, sc.fileRowBase = sr.segFile, sr.segRowsSeen
+			if sr.done {
+				break
+			}
+			objStart, objEnd, err := sr.nextObject()
+			if err != nil {
+				sr.done = true
+				return nil, err
+			}
+			if objStart < 0 {
+				sr.done = true
+				break
+			}
+			sr.fileRow++
+			sc = &jsonScanner{data: sr.buf[:objEnd], pos: objStart}
+			file, fileRow = sr.curName, sr.fileRow
+			sr.start = objEnd
+		}
+		sr.rows++
+		sc.fileRow, sc.sampled = sr.rows, sr.sampled
+		sc.fileRowBase = sr.rows - fileRow
+		if sr.named {
+			sc.file = file
 		}
 		if err := scanObjectInto(sc, rb, row, sr.schema, sr.colIdx, sr.seen); err != nil {
 			if sqlerr.StateOf(err) != "" {
 				return nil, err // already names its row
 			}
-			return nil, fmt.Errorf("row %d: %w", sc.fileRow, err)
+			return nil, sr.syntaxError(file, fileRow, err)
 		}
-		sr.start = objEnd
 		row++
 	}
 	if row == 0 {
@@ -182,34 +245,65 @@ func (sr *StreamReader) Next() (*batch.RecordBatch, error) {
 	return rb, nil
 }
 
-// enterSegment moves the file tracking to the file holding off, the input
-// offset of the row about to be scanned: a new file's first row makes every
-// earlier row belong to earlier files.
-func (sr *StreamReader) enterSegment(off int64) {
-	file, start, next := sr.loc.Segment(off)
-	if file != sr.segFile || start != sr.segStart {
-		sr.segFile, sr.segStart = file, start
-		sr.segRowsSeen = sr.fileRow - 1
+// syntaxError is 22P02 for an object this reader cannot parse — what
+// PostgreSQL's json input function raises for the same text.
+func (sr *StreamReader) syntaxError(file string, fileRow int, err error) error {
+	where := fmt.Sprintf("row %d", fileRow)
+	if sr.named && file != "" {
+		where = file + " " + where
 	}
-	sr.segNext = next
+	return sqlerr.New("22P02", "%s: invalid JSON object: %v", where, err)
+}
+
+// nextObject positions the window on the next complete top-level object of
+// the sequence, opening the next file when one ends, and returns its
+// [start, end) offsets in sr.buf; objStart=-1 after the last file.
+func (sr *StreamReader) nextObject() (int, int, error) {
+	for {
+		if sr.cur == nil {
+			if sr.nextIn >= len(sr.inputs) {
+				return -1, 0, nil
+			}
+			in := sr.inputs[sr.nextIn]
+			sr.nextIn++
+			rc, err := in.Open()
+			if err != nil {
+				return -1, 0, err
+			}
+			sr.cur, sr.curName = rc, in.Name
+			sr.start, sr.filled, sr.eof = 0, 0, false
+			sr.docStarted, sr.isArray, sr.arrayClosed, sr.fileRow = false, false, false, 0
+		}
+		s, e, err := sr.nextObjectSpan()
+		if err != nil {
+			return -1, 0, sr.inFile(err)
+		}
+		if s >= 0 {
+			return s, e, nil
+		}
+		sr.closeCurrent()
+	}
+}
+
+// inFile names the current file in an error about it, across a glob.
+func (sr *StreamReader) inFile(err error) error {
+	if !sr.named || sr.curName == "" {
+		return err
+	}
+	return fmt.Errorf("%s: %w", sr.curName, err)
 }
 
 // nextObjectSpan positions the window on the next complete top-level
-// object, refilling as needed, and returns its [start, end) offsets in
-// sr.buf. Returns objStart=-1 at clean end of input (']', non-object
-// content, or EOF — same termination rules as parseColumnarDirect).
+// object of the CURRENT file, refilling as needed, and returns its
+// [start, end) offsets in sr.buf; objStart=-1 at the end of the file's
+// document. The document is one JSON array of objects, or objects one
+// after another; separators between them are whitespace and commas.
 func (sr *StreamReader) nextObjectSpan() (int, int, error) {
 	for {
-		// Skip inter-object separators.
 		i := sr.start
 		for i < sr.filled {
 			c := sr.buf[i]
-			if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == ',' {
-				i++
-				continue
-			}
-			if c == '[' && sr.isArray && !sr.openSkipped {
-				sr.openSkipped = true
+			if c == ' ' || c == '\t' || c == '\n' || c == '\r' || (c == ',' && !sr.arrayClosed) {
 				i++
 				continue
 			}
@@ -217,27 +311,46 @@ func (sr *StreamReader) nextObjectSpan() (int, int, error) {
 		}
 		sr.start = i
 		if i >= sr.filled {
-			if sr.eof {
-				return -1, 0, nil
+			if !sr.eof {
+				if err := sr.refill(); err != nil {
+					return -1, 0, err
+				}
+				continue
 			}
-			if err := sr.refill(); err != nil {
-				return -1, 0, err
+			if sr.isArray && !sr.arrayClosed {
+				return -1, 0, sqlerr.New("22P02", "row %d: the JSON array has no closing \"]\"", sr.fileRow+1)
 			}
+			return -1, 0, nil
+		}
+		c := sr.buf[i]
+		if sr.arrayClosed {
+			return -1, 0, sqlerr.New("22P02", "unexpected content %q after the JSON array's closing \"]\"", preview(sr.buf[i:sr.filled]))
+		}
+		if !sr.docStarted {
+			sr.docStarted = true
+			if c == '[' {
+				sr.isArray = true
+				sr.start = i + 1
+				continue
+			}
+		}
+		if c == ']' && sr.isArray {
+			sr.arrayClosed = true
+			sr.start = i + 1
 			continue
 		}
-		if sr.buf[i] != '{' {
-			// ']' (array close), or anything the eager parser stops at.
-			return -1, 0, nil
+		if c != '{' {
+			return -1, 0, sqlerr.New("22P02", "row %d: %q is not a JSON object", sr.fileRow+1, preview(sr.buf[i:sr.filled]))
 		}
 		end, ok := completeObjectEnd(sr.buf[i:sr.filled])
 		if ok {
 			return i, i + end, nil
 		}
 		if sr.eof {
-			return -1, 0, fmt.Errorf("truncated JSON object at end of input")
+			return -1, 0, sqlerr.New("22P02", "row %d: truncated JSON object at end of input", sr.fileRow+1)
 		}
 		if sr.filled-i > maxObjectBytes {
-			return -1, 0, fmt.Errorf("JSON object exceeds %d bytes", maxObjectBytes)
+			return -1, 0, sqlerr.New("54000", "row %d: JSON object exceeds %d bytes", sr.fileRow+1, maxObjectBytes)
 		}
 		if err := sr.refill(); err != nil {
 			return -1, 0, err
@@ -245,11 +358,18 @@ func (sr *StreamReader) nextObjectSpan() (int, int, error) {
 	}
 }
 
+// preview is the start of unexpected content, for a message.
+func preview(b []byte) string {
+	if len(b) > 20 {
+		b = b[:20]
+	}
+	return string(b)
+}
+
 // refill compacts the window and reads one more chunk.
 func (sr *StreamReader) refill() error {
 	if sr.start > 0 {
 		copy(sr.buf, sr.buf[sr.start:sr.filled])
-		sr.base += int64(sr.start)
 		sr.filled -= sr.start
 		sr.start = 0
 	}
@@ -258,59 +378,13 @@ func (sr *StreamReader) refill() error {
 		copy(grown, sr.buf[:sr.filled])
 		sr.buf = grown
 	}
-	n, err := io.ReadFull(sr.r, sr.buf[sr.filled:sr.filled+sr.chunkSize])
+	n, err := io.ReadFull(sr.cur, sr.buf[sr.filled:sr.filled+sr.chunkSize])
 	sr.filled += n
 	if err == io.EOF || err == io.ErrUnexpectedEOF {
 		sr.eof = true
 		return nil
 	}
 	return err
-}
-
-// skipLeadingSpace advances start past whitespace.
-func (sr *StreamReader) skipLeadingSpace() {
-	for sr.start < sr.filled {
-		switch sr.buf[sr.start] {
-		case ' ', '\t', '\n', '\r':
-			sr.start++
-		default:
-			return
-		}
-	}
-}
-
-// completeValuesEnd scans buf[start:filled] and returns the offset (in buf
-// coordinates) just past the last complete top-level object, plus the count
-// of complete objects. Understands strings/escapes and nesting; leading
-// '[' and separators belong to the prefix.
-func (sr *StreamReader) completeValuesEnd() (int, int) {
-	end := sr.start
-	count := 0
-	i := sr.start
-	openSkipped := sr.openSkipped
-	for i < sr.filled {
-		c := sr.buf[i]
-		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == ',' {
-			i++
-			continue
-		}
-		if c == '[' && !openSkipped {
-			openSkipped = true
-			i++
-			continue
-		}
-		if c != '{' {
-			break
-		}
-		objEnd, ok := completeObjectEnd(sr.buf[i:sr.filled])
-		if !ok {
-			break
-		}
-		i += objEnd
-		end = i
-		count++
-	}
-	return end, count
 }
 
 // completeObjectEnd returns the length of the complete JSON object starting
