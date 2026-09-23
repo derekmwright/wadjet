@@ -2560,6 +2560,16 @@ expression whose two leaves name two occurrences — both DAG-only, both
   key that CONTAINS one is the same question one layer down. Right on the two
   single arms, `distributed`, pinned per arm (measured by the round-1 review).
 
+*(2026-09-23, arc LT: the rewrite is back and the minted partition BINDS on
+the three DAG arms — measured over the arc's seam table and over
+self-correlated bodies, every equality-keyed bound cell agreeing with
+PostgreSQL 17.11. The four-door disclosure below was not the minted key's
+binding at all: it is the distributed path's own, for ANY window over a
+policed scan feeding a join — user-written included — and is guarded by
+`dagplan.CheckPolicedWindowUnderJoin` (routed single-process) until it is
+localised; ADR-0021 §1s records it. What follows is the record of the
+withdrawal; §1s is the current rule.)*
+
 **A PLANNER-MINTED window inherited all three, and that is why #1019's rewrite
 was withdrawn.** Arc L1 built the per-outer-row LATERAL bound on a minted
 `ROW_NUMBER() OVER (PARTITION BY <the inner correlation column>)`: on the three
@@ -2856,6 +2866,10 @@ with no name at all — while the BARE star over the same block, which reads the
 relation by POSITION, is untouched and right. Closing it means the block's
 published list travelling by position, `ProjectExprSpec.SourceSlot` one
 relation out, and it is recorded in ADR-0012 until it does.
+
+*(2026-09-23, arc LT: superseded by ADR-0021 §1s — the bound is applied per
+outer row, `Node.LateralBoundNotPerRow` and the qualified star's decline on it
+are deleted, and the two `qstar` refusals assert PostgreSQL's rows.)*
 
 **A BOUND INSIDE A CORRELATED LATERAL IS NOT APPLIED PER OUTER ROW (#1019), AND
 THE ONLY CONSUMER THAT DECLINES IS THE ONE THAT CANNOT STATE THE RELATION.**

@@ -788,6 +788,16 @@ item, a `WHERE`, a `CASE`, a CTE body. A relation the identity may not read
 refuses `42501` before the subquery's pipeline is built, on every door and on
 the distributed path, where the refusal precedes stage dispatch.
 
+**A window over a policed relation that feeds a join runs single-process on
+the distributed path.** `ROW_NUMBER() OVER (PARTITION BY bal …)` inside a
+`LATERAL` body, a `QUALIFY` derived table joined on a masked column, or the
+per-outer-row bound the planner mints for a correlated `LATERAL`'s `LIMIT`
+(ADR-0021 §1s) each produce a stage plan the distributed path refuses
+(`dagplan.CheckPolicedWindowUnderJoin`); the coordinator then runs the
+statement on its own single-process pipeline, which answers the mask on every
+door. The statement still answers, without the DAG's parallelism, and the
+coordinator's `PolicedWindowLocalRoutes` counter says how often.
+
 Admin roles are typically exempt from all policies (they see the raw data). An
 identity with no matching column obligations is unaffected.
 

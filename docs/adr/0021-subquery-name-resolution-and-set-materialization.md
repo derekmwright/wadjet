@@ -2006,6 +2006,10 @@ n` bounds each evaluation; the decorrelation makes the body ONE relation joined
 once and the bound applied to the whole of it, so the top-N-per-group idiom
 answers ONE row for PostgreSQL's two, silently, on every arm (#1019).
 
+*(2026-09-23, arc LT: superseded by §1s — the bound IS per outer row now, on
+every arm, through the rewrite below with its three faults closed at their
+seams; the paragraphs that follow are the record of why it was withdrawn.)*
+
 The repair §1h named — the bound travelling with the correlation key as a
 per-key top-N, `ROW_NUMBER() OVER (PARTITION BY <the inner column the
 correlation keys on> ORDER BY <the body's own ORDER BY>)` and a `QUALIFY` over
@@ -2369,6 +2373,117 @@ subquery) are the round-2 halves.
 half: this rewrite moves a predicate ACROSS a relation boundary, and over a
 policed relation the answer is the ROW SET rather than a cell, so the mask's
 reading is asserted on all nine doors.
+
+### 1s. A correlated body is decorrelated only where it is KEY-PARTITIONABLE, and evaluated per outer row otherwise
+
+(Added 2026-09-23, #1019, #1238, #1274, #1131, #1130, arc LT. Supersedes
+§1q's "THE BOUND IS STILL NOT PER OUTER ROW" and §2's LATERAL-bound mark.)
+
+Every decorrelation in this record replaces "the body evaluated once per outer
+row, with that row's values bound" by ONE evaluation of a body over the whole
+inner relation, joined to the outer rows. The two agree exactly when the
+body's result restricted to one outer key equals the body evaluated for that
+key:
+
+```
+σ_{K = v}( Body′(R) )  ==  Body(R, outer = v)        for every outer value v
+```
+
+which holds iff (1) every correlated predicate is an EQUALITY between an inner
+column and an expression over the outer row alone — the correlation IS a
+restriction on inner columns K — and (2) every operator between that
+restriction and the body's output commutes with `σ_{K=v}`: filters and
+projections always, a PIPELINE BREAKER only when it is partitioned by K (an
+aggregate grouped on K, a DISTINCT keyed on K, a window partitioned on K, a
+bound that is a PER-K bound). **That is the rule — key-partitionability of the
+body's plan — and it is a property of the plan, not a list of spellings.**
+§1h's GROUP BY injection, the DISTINCT body's key and `refuseDecorrelatedWindow`
+were already instances of making a breaker key-partitionable; the bound was
+the breaker nobody had made so, and the shapes with no K had no disposition
+but a plausible row set.
+
+**THE BOUND TRAVELS WITH THE KEY.** A correlated LATERAL whose correlated
+predicates are all equalities on inner columns carries its `ORDER BY … LIMIT n
+OFFSET m` as `ROW_NUMBER() OVER (PARTITION BY K ORDER BY <the body's own ORDER
+BY>)` and a QUALIFY `rn > m AND rn <= m+n` in place of the bound
+(`lateralBoundPerOuterRow`). Over an aggregated body the window sits above the
+aggregate and partitions on the name the aggregate publishes the key under; an
+ordinal in the body's ORDER BY counts the list the query wrote, past the
+injected slot. This is the rewrite §1q withdrew, and its three measured faults
+are each closed at their own seam: the DAG partition binds since ADR-0026
+§8j's corollary 1 (measured on the three DAG arms over two-relation AND
+self-correlated bodies, every equality-keyed cell agreeing); the decline list
+is the rule itself; the `__win_N` collision was a base defect of user-written
+QUALIFY in two blocks under one join, closed in the physical slot rename.
+The disclosure arc L1 measured on four doors is a different, PRE-EXISTING
+fault of the distributed path, not of the minted window: a WINDOW over a
+policed scan whose output feeds a JOIN answers the stored column's pairing
+on every DAG door — for a user-written window inside a lateral body, a user
+`QUALIFY` derived table joined on the masked column, and an uncorrelated
+windowed body alike, with the security projection present on both scans of
+the stage plan. Until it is localised (filed `distributed`, priority high)
+`dagplan.CheckPolicedWindowUnderJoin` refuses every such stage plan and the
+coordinator runs it on the single-process pipeline, which answers the mask
+on all nine doors (`server.TestArcLTAPerOuterRowBodyReadsThePublishedValueOnEveryDoor`).
+Cost: top-3-per-group over 100 000 outer rows × 10 inner each is 168 ms single
+and 1.08 s at a 512 KiB budget.
+
+**A BODY THAT IS NOT KEY-PARTITIONABLE IS EVALUATED PER OUTER ROW WHERE A
+RUNNER EXISTS, AND REFUSED WHERE NONE DOES.** EXISTS / NOT EXISTS decline the
+semi-join rewrite for a body it does not reproduce — a bound, an OFFSET, a
+GROUP BY, a HAVING, an ungrouped aggregate (one row even over an empty input,
+so `EXISTS (SELECT MAX(v) …)` is true for every outer row), a QUALIFY, a set
+operation — after stripping what existence is invariant under (`LIMIT n`, n ≥
+1, with no OFFSET); the compiled-predicate rerun answers, at 10.9 ms per outer
+row over a 1 000 000-row inner relation (linear; recorded). `EXISTS (… LIMIT
+0)` answered rows and `EXISTS (… GROUP BY … HAVING …)` ignored its HAVING on
+all five arms before (#1238, #1274). IN / NOT IN and the scalar rewrite
+already declined these. A LATERAL has no per-row runner: a bound with a
+correlated predicate that is not an equality on an inner column (`i.v >
+o.total`, or `i.k = o.k AND i.v > o.total`), a DISTINCT or set-operation body
+under a bound, a bound this planner cannot read as an integer, a DISTINCT body
+whose lifted predicate names a column it does not publish (#1131), a lifted
+column the body's own alias list or the ENCLOSING relation also publishes
+(#1130 — decided on the annotated plan, `RefuseContestedLiftedRefs`, so a base
+outer relation is seen), and a lifted predicate under an enclosing star are
+REFUSED, 0A000, one sentence each, on every arm. Each answered a plausible
+wrong row set at `51addfb6` (54 cells of the seam table), and one of §1q's
+declines agreed with PostgreSQL by coincidence of the L1 fixture
+(`aliasCollides`: `i.id < 150` and `i.amount < 150` select the same rows).
+
+**AN UNGROUPED AGGREGATE WITH A HAVING** is §1h's pad one clause further: the
+HAVING is folded over the default row (COUNT 0, NULL otherwise). FALSE or NULL
+removes the pad, which is right on the INNER and the LEFT spelling; TRUE is
+refused, because an outer row with no group (PostgreSQL's default row) and one
+whose group failed the HAVING are the same unmatched key after the join.
+
+**WHAT MOVED, MEASURED.** The seam table — `{IN, NOT IN, EXISTS, NOT EXISTS,
+scalar, JOIN / LEFT JOIN / comma LATERAL} × {17 body shapes} × {equality,
+inequality, mixed, shared name, none}`, 680 cells against live PostgreSQL
+17.11 — had 87 wrong and 61 refused cells at base; at the tip 0 wrong and 183
+refused, on five arms (`coordinator.TestArcLTACorrelatedBodyIsEvaluatedPerOuterRowOnEveryArm`).
+On arc L1's table 28 cells went wrong → right, 9 wrong → loud, 2 loud → right
+(the qualified star over a bounded body), and one right → loud
+(`R4/aliasCollides`, the coincidence above). N1's, O2's, L1's and the QUALIFY
+table's #1019 pins are deleted. Twelve (cell, arm) results moved right → loud
+on the three DAG arms, for four lifted-predicate cells the single arms
+answered wrong: a refusal is a property of the plan (§1q's rule). One cell
+moved loud → wrong on the three DAG arms: `R2/collideWinBound`'s OUTER window
+over the bounded lateral now takes the disposition its unbounded twin has
+always had — the LATERAL-producer residue of ADR-0026 §8j, `distributed`,
+pinned per arm, and the reason it refused before was incidental to the
+whole-relation bound's stage shape. All 22 TPC-H plans are byte-identical to
+`51addfb6` modulo Q19's brand-list order.
+
+**THE STRUCTURAL CLOSURE OF THE REFUSED SHAPES IS A DEPENDENT JOIN** — the
+body re-run per outer row with the outer values substituted, the way the
+scalar rerun does, emitting the joined rows — recorded as a filing candidate
+with its mechanism (a logical node the reorderer treats as a barrier, a
+physical operator over the subquery runner, a DAG refusal routed local, the
+nine-door masking gate). It is what closes #1131 and #1130 in full and the
+as-of idiom (`ev.host = o.host AND ev.ts < o.ts ORDER BY ev.ts DESC LIMIT 1`),
+which no partitioned bound can express. `docs/internals/lateral-per-outer-row-bound.md`
+is the design record with the alternatives that lost.
 
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 

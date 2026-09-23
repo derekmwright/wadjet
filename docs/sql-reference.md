@@ -1268,6 +1268,8 @@ outright.
 
 Subqueries that reference columns from the outer query. The optimizer decorrelates them where it can — EXISTS / NOT EXISTS and IN become semi/anti joins, and a correlated scalar subquery becomes a join against a grouped aggregate — so they are not re-executed per outer row. Either side may be a CTE, a derived table, a comma-joined list or a base table: the subquery's own FROM clause is planned the way a top-level FROM clause is.
 
+A body the semi join would not reproduce is evaluated per outer row instead: an `EXISTS` whose body carries a `LIMIT 0`, an `OFFSET`, a `GROUP BY`, a `HAVING`, an ungrouped aggregate (one row even over an empty input, so `EXISTS (SELECT MAX(v) FROM t WHERE t.k = o.k)` is true for every outer row), a `QUALIFY` or a set operation keeps PostgreSQL's answer at the cost of one body run per outer row (ADR-0021 §1s). `EXISTS (… LIMIT 1)` is the one bound existence cannot depend on, and it keeps the semi join.
+
 The outer column may sit on EITHER relation of a join, on a derived block or on
 a CTE reference, and the answer is the same either way: `… FROM orders o JOIN
 items i ON i.order_id = o.id WHERE o.id IN (SELECT id FROM orders)` reads `o`'s
@@ -1404,11 +1406,9 @@ JOIN LATERAL (
 `SELECT *` over a lateral join publishes the OUTER relation's columns first
 and the lateral's after them, which is PostgreSQL's order.
 
-**A correlated LATERAL's `ORDER BY … LIMIT`/`OFFSET` is NOT applied per outer
-row.** PostgreSQL evaluates the body once per outer row, so its bound applies
-to each row's own result; this engine lowers the correlation into a join, which
-makes the body ONE relation joined once, and the bound then applies to the
-whole of it. The top-N-per-group idiom
+**A correlated LATERAL's `ORDER BY … LIMIT`/`OFFSET` is applied per outer
+row** when the correlation is an equality on an inner column — the
+top-N-per-group idiom:
 
 ```sql
 SELECT o.customer, s.product FROM orders o
@@ -1416,16 +1416,21 @@ JOIN LATERAL (SELECT product, amount FROM line_items i
               WHERE i.order_id = o.id ORDER BY i.amount DESC LIMIT 1) s ON true
 ```
 
-therefore answers fewer rows than PostgreSQL does, on every path, and a
-qualified star (`s.*`) over such a body is refused rather than answered,
-because it would publish a relation whose row count is not the one the query
-wrote. Honouring the bound means it travelling with the correlation key as a
-per-key top-N; that rewrite was written and taken out again after measurement
-(it partitioned on a value the DAG bound to the wrong relation, which over a
-policed column disclosed the stored value's equivalence classes). The key
-binding it needed is settled now — a window key carries the relation the query
-named — but the rewrite has two measured faults of its own beyond it, so the
-shape is still the one described here.
+answers one row per order, as PostgreSQL does, on every path. The bound
+travels with the correlation key as a per-key `ROW_NUMBER()` over the inner
+relation (ADR-0021 §1s), so the cost is one pass over the inner relation and
+the join — 100 000 outer rows with ten line items each in well under a second
+— and the same holds for `OFFSET`, `LIMIT … OFFSET`, a grouped body bounded by
+its aggregate, and an ordinal in the body's `ORDER BY`. A bound with no `ORDER
+BY` keeps an arbitrary row per outer row, as in PostgreSQL.
+
+A bound the engine cannot apply per outer row is **refused** (`0A000`) rather
+than applied to the whole relation: a correlated predicate that is not an
+equality on an inner column (`WHERE i.amount > o.total … LIMIT 1`, or an
+equality beside one), a `DISTINCT` or set-operation body under a bound, or a
+`LIMIT`/`OFFSET` that is not an integer constant. PostgreSQL evaluates those
+per outer row and this engine has no per-row runner for a relation-valued
+body yet; correlate on an equality, or move the bound outside the `LATERAL`.
 
 `LIMIT ALL` is not accepted by the parser at all — `expected number after
 LIMIT` — in a lateral body or anywhere else; PostgreSQL treats it as "no
@@ -1451,17 +1456,24 @@ A correlated predicate that is NOT an equality is lifted to the join and
 evaluated over the body's OUTPUT. Every inner column it names is materialized
 by the body for that purpose — `WHERE i.amount < o.total` answers whether the
 body writes `SELECT i.amount`, `SELECT i.amount AS m` or `SELECT i.id AS m` —
-and the materialized column is not published by `s.*`. Because it IS a
-published column, it is only materialized where publishing it changes nothing
-else: a body carrying `DISTINCT`, a body whose own alias already publishes that
-name, an enclosing relation that publishes it, and an enclosing `SELECT *` over
-the join all keep the older behaviour instead, in which the
-predicate reads a column the body dropped and the lateral answers a NULL-padded
-row per outer row. Over an AGGREGATED body it is refused instead, in EVERY one
-of those spellings — an enclosing `SELECT *` included: there is no projection
-to publish the column in, and publishing it would put it in the `GROUP BY` and
-change what the aggregate computes. One statement never gets two dispositions
-from the enclosing SELECT list.
+and the materialized column is not published by `s.*`. Where publishing it
+would change something else the statement is **refused** (`0A000`): a body
+carrying `DISTINCT` (the column would join the DISTINCT key), a body whose own
+alias already publishes that name, an enclosing relation that publishes it
+(`WHERE i.id < o.id` over two relations that both have `id`), and an enclosing
+`SELECT *` over the join. Over an AGGREGATED body it is refused too, in every
+one of those spellings: there is no projection to publish the column in, and
+publishing it would put it in the `GROUP BY` and change what the aggregate
+computes. PostgreSQL evaluates each of these per outer row; restate the
+predicate in the enclosing `WHERE` over the lateral's output, or correlate on
+an equality.
+
+An ungrouped aggregate body with a `HAVING` yields its one row per outer row
+only where the `HAVING` holds — an outer row whose items all fail it is
+dropped (or NULL-padded by `LEFT JOIN LATERAL`), as in PostgreSQL. A `HAVING`
+that would hold over an EMPTY input (`HAVING COUNT(*) < 2`) is refused, because
+an outer row with no items and one whose items failed the `HAVING` cannot be
+told apart once the correlation is a join.
 
 A reference whose qualifier the body's OWN `FROM` item or `WITH` item shadows
 is not an outer reference and is not refused: `FROM orders x, LATERAL (SELECT
