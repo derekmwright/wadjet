@@ -50,6 +50,17 @@ func readerInputs(path string) ([]fileinput.Input, error) {
 	return inputs, nil
 }
 
+// readerInitError names the reader and its input in an error a reader's
+// constructor raised while reading its sample — as a later batch's error is
+// named (the source's Next) — unless it is an input that could not be
+// opened, whose message names the path already.
+func readerInitError(fn, path string, err error) error {
+	if unopenable(err) != nil {
+		return fmt.Errorf("%s: %w", fn, err)
+	}
+	return fmt.Errorf("%s: %s: %w", fn, path, err)
+}
+
 // readerFiles is the local files a reader's path names: the path itself, or
 // every FILE a glob matches, in name order. A directory a glob matches is not
 // one of its files (DuckDB reads the same glob the same way). A glob that

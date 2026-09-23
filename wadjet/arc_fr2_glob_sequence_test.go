@@ -298,3 +298,63 @@ func TestArcFR2EachFileIsItsOwnDocument(t *testing.T) {
 		})
 	}
 }
+
+// TestArcFR2AMalformedCSVIsRefusedNamingTheInput is #1248 and #1259 through
+// the query door: an unterminated quote inside the 100-row sample answered
+// COUNT 1 with no error, and past it the error carried no SQLSTATE; a quoted
+// empty field read NULL. PostgreSQL 17.11's COPY raises 22P04 for the first
+// and reads the empty string for the second.
+func TestArcFR2AMalformedCSVIsRefusedNamingTheInput(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	var past strings.Builder
+	past.WriteString("a,b\n")
+	for i := 1; i <= 300; i++ {
+		if i == 200 {
+			past.WriteString("200,\"unterminated\n")
+			continue
+		}
+		fmt.Fprintf(&past, "%d,x\n", i)
+	}
+	for _, c := range []struct{ name, path string }{
+		{"inside_the_sample", write("in.csv", "a,b\n1,x\n2,\"unterminated\n3,z\n")},
+		{"past_the_sample", write("past.csv", past.String())},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			res, err := db.Query(ctx, fmt.Sprintf("SELECT COUNT(*) AS n FROM read_csv('%s')", c.path))
+			if err == nil {
+				t.Fatalf("answered %v; PostgreSQL's COPY raises 22P04", res.Rows)
+			}
+			if st := sqlerr.StateOf(err); st != "22P04" || !strings.Contains(err.Error(), c.path) ||
+				!strings.Contains(err.Error(), "unterminated CSV quoted field") {
+				t.Fatalf("%v (SQLSTATE %q), want 22P04 naming %s", err, st, c.path)
+			}
+		})
+	}
+	t.Run("quoted_empty_is_the_empty_string", func(t *testing.T) {
+		p := write("q.csv", "id,b\n1,\"x\"\n2,\"\"\n3,\n")
+		res, err := db.Query(ctx, fmt.Sprintf("SELECT id, b IS NULL AS n, length(b) AS l FROM read_csv('%s') ORDER BY id", p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for i := range res.Rows {
+			got = append(got, fmt.Sprint(res.Cells(i)))
+		}
+		if g := strings.Join(got, " "); g != "[1 false 1] [2 false 0] [3 true <nil>]" {
+			t.Fatalf("rows %s; PostgreSQL answers [1 false 1] [2 false 0] [3 true <nil>]", g)
+		}
+	})
+}

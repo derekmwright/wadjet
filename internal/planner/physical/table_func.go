@@ -225,7 +225,7 @@ func (s *jsonTableFuncSource) Init(_ context.Context) error {
 	}
 	r, err := jsonreader.NewFilesReader(inputs)
 	if err != nil {
-		return fmt.Errorf("read_json: %w", err)
+		return readerInitError("read_json", s.path, err)
 	}
 	s.reader = r
 	return nil
@@ -441,7 +441,7 @@ func (s *csvTableFuncSource) Init(_ context.Context) error {
 	}
 	r, err := csvreader.NewFilesReader(inputs, cfg)
 	if err != nil {
-		return fmt.Errorf("read_csv: %w", err)
+		return readerInitError("read_csv", s.path, err)
 	}
 	s.reader = r
 	return nil
