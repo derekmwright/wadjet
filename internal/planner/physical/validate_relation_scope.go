@@ -211,9 +211,28 @@ func (s *colScope) scopeAtJoin(visible map[string]bool, through int) *colScope {
 	if s.relations == nil {
 		return c
 	}
+	removed := map[string]bool{}
 	for _, site := range s.relations.sites {
-		if site.qual == "" || visible[site.qual] {
+		if site.qual == "" || visible[site.qual] || removed[site.qual] {
 			continue
+		}
+		removed[site.qual] = true
+		// Its BARE columns leave with it. A relation a later join
+		// introduces publishes no name to an earlier ON — PostgreSQL's
+		// `SELECT 1 FROM o JOIN ev ON a = o.id JOIN nn ON true`, where only
+		// nn has `a`, is 42703 there — and a name the scope kept anyway
+		// both resolved that reference (the statement answered) and read as
+		// a ROW container for `nn.x`'s qualifier.
+		for col := range s.quals[site.qual] {
+			if c.srcCount[col] > 0 {
+				c.srcCount[col]--
+			}
+			if c.srcCount[col] == 0 {
+				delete(c.cols, col)
+				delete(c.colTypes, col)
+				delete(c.rowFields, col)
+				delete(c.elemTypes, col)
+			}
 		}
 		delete(c.quals, site.qual)
 		delete(c.qualColTypes, site.qual)
