@@ -2438,7 +2438,10 @@ operation — after stripping what existence is invariant under (`LIMIT n`, n �
 row over a 1 000 000-row inner relation (linear; recorded). `EXISTS (… LIMIT
 0)` answered rows and `EXISTS (… GROUP BY … HAVING …)` ignored its HAVING on
 all five arms before (#1238, #1274). IN / NOT IN and the scalar rewrite
-already declined these. A LATERAL has no per-row runner: a bound with a
+already declined a bound; a QUALIFY or a set operation in their body is
+declined by the shared build side since the round-2 review. The rerun's own
+boundaries stand: a correlated body holding a window function, or a set
+operation, is refused by the rerun's rebuild (§1m) on every consumer. A LATERAL has no per-row runner: a bound with a
 correlated predicate that is not an equality on an inner column (`i.v >
 o.total`, or `i.k = o.k AND i.v > o.total`), a DISTINCT or set-operation body
 under a bound, a bound this planner cannot read as an integer, a DISTINCT body
@@ -2474,6 +2477,33 @@ always had — the LATERAL-producer residue of ADR-0026 §8j, `distributed`,
 pinned per arm, and the reason it refused before was incidental to the
 whole-relation bound's stage shape. All 22 TPC-H plans are byte-identical to
 `51addfb6` modulo Q19's brand-list order.
+
+**WHAT THE ROUND-2 REVIEW MEASURED, AND WHAT MOVED (2026-09-24).** The rule
+as first implemented was both too loose and too narrow, and each finding is
+closed at its seam: the key is read off the PARSED predicate — `<inner
+expression over the body's relations> = <bare outer column>` — so a side
+mixing inner and outer references (`i.k = o.k + i.id - 3`) or an outer
+EXPRESSION (`o.k + 0`, a join key this engine does not bind: zero rows with
+or without a bound, filed) refuses instead of partitioning on a guess, while
+`i.k + 0` and `i.k % 2` partition; a bound over a body carrying its OWN
+QUALIFY refuses (the rank would number the rows before that clause removed
+any); `LIMIT 0` is left to the body (empty per row and per relation alike);
+`LIMIT n OFFSET m` saturates rather than wraps; a DISTINCT over exactly the
+key drops a `LIMIT n` (one row per key at most); an ungrouped aggregate whose
+one row the bound removes (`LIMIT 0`, any OFFSET) gets no §1h pad, so the
+INNER spelling answers nothing; an ORDER BY naming a SELECT alias reads the
+alias's expression; and the IN / scalar build side declines a QUALIFY or a
+set operation exactly as EXISTS does (`decorrelatedInnerPlan`), so a dropped
+`QUALIFY` no longer answers rows — the rerun refuses a window loudly. Where
+the three DAG arms were RIGHT and the two single arms wrong, the refusal is
+the single-process pipeline's alone: a lifted column the enclosing relation
+contests is refused by `physical.Plan` and, on the DAG, only for an OUTER
+join (whose residual padded every row there); a lifted predicate under a bare
+enclosing star DECLINES again and `RefuseDeclinedLiftedRefs` refuses it on
+the single path only. A window ABOVE a lateral join is refused on the DAG
+(`dagplan.refuseWindowOverDependentJoin`) and routed single-process, which
+answers PostgreSQL's rows — the loud → wrong move of `R2/collideWinBound` is
+withdrawn, and its unbounded twin is right for the first time.
 
 **THE STRUCTURAL CLOSURE OF THE REFUSED SHAPES IS A DEPENDENT JOIN** — the
 body re-run per outer row with the outer values substituted, the way the

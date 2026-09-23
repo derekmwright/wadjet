@@ -1268,7 +1268,7 @@ outright.
 
 Subqueries that reference columns from the outer query. The optimizer decorrelates them where it can — EXISTS / NOT EXISTS and IN become semi/anti joins, and a correlated scalar subquery becomes a join against a grouped aggregate — so they are not re-executed per outer row. Either side may be a CTE, a derived table, a comma-joined list or a base table: the subquery's own FROM clause is planned the way a top-level FROM clause is.
 
-A body the semi join would not reproduce is evaluated per outer row instead: an `EXISTS` whose body carries a `LIMIT 0`, an `OFFSET`, a `GROUP BY`, a `HAVING`, an ungrouped aggregate (one row even over an empty input, so `EXISTS (SELECT MAX(v) FROM t WHERE t.k = o.k)` is true for every outer row), a `QUALIFY` or a set operation keeps PostgreSQL's answer at the cost of one body run per outer row (ADR-0021 §1s). `EXISTS (… LIMIT 1)` is the one bound existence cannot depend on, and it keeps the semi join.
+A body the semi join would not reproduce is evaluated per outer row instead: an `EXISTS` whose body carries a `LIMIT 0`, an `OFFSET`, a `GROUP BY`, a `HAVING` or an ungrouped aggregate (one row even over an empty input, so `EXISTS (SELECT MAX(v) FROM t WHERE t.k = o.k)` is true for every outer row) keeps PostgreSQL's answer at the cost of one body run per outer row (ADR-0021 §1s); an `IN` or scalar body carrying a `QUALIFY` or a set operation is not lowered into the join either. `EXISTS (… LIMIT 1)` is the one bound existence cannot depend on, and it keeps the semi join. The per-row run's cost is linear in the outer rows — measured 5.6–11 ms per outer row over a 1 000 000-row inner relation (10 000 outer rows: about a minute) — and it is bounded only by the statement's deadline (`statement_timeout` on the PostgreSQL wire, the request context elsewhere) and the query cost limits; a correlated body the rerun cannot rebuild (a window function, a set operation) is refused. A body over a large inner relation should be written so the join can express it.
 
 The outer column may sit on EITHER relation of a join, on a derived block or on
 a CTE reference, and the answer is the same either way: `… FROM orders o JOIN
@@ -1419,16 +1419,23 @@ JOIN LATERAL (SELECT product, amount FROM line_items i
 answers one row per order, as PostgreSQL does, on every path. The bound
 travels with the correlation key as a per-key `ROW_NUMBER()` over the inner
 relation (ADR-0021 §1s), so the cost is one pass over the inner relation and
-the join — 100 000 outer rows with ten line items each in well under a second
-— and the same holds for `OFFSET`, `LIMIT … OFFSET`, a grouped body bounded by
-its aggregate, and an ordinal in the body's `ORDER BY`. A bound with no `ORDER
-BY` keeps an arbitrary row per outer row, as in PostgreSQL.
+the join — top-3-per-group over 100 000 outer rows with ten line items each
+measured 0.17 s single-process and 1.1–1.4 s under a 512 KiB memory budget —
+and the same holds for `OFFSET`, `LIMIT … OFFSET`, a grouped body bounded by
+its aggregate, an ordinal or a SELECT alias in the body's `ORDER BY`, and an
+inner expression on the key side (`i.k + 0 = o.k`). A bound with no `ORDER
+BY` keeps an arbitrary row per outer row, as in PostgreSQL; `LIMIT 0` is
+empty; an ungrouped aggregate whose one row the bound removes yields no row
+(`LEFT JOIN LATERAL` pads it).
 
 A bound the engine cannot apply per outer row is **refused** (`0A000`) rather
-than applied to the whole relation: a correlated predicate that is not an
-equality on an inner column (`WHERE i.amount > o.total … LIMIT 1`, or an
-equality beside one), a `DISTINCT` or set-operation body under a bound, or a
-`LIMIT`/`OFFSET` that is not an integer constant. PostgreSQL evaluates those
+than applied to the whole relation: a correlated predicate that is not
+`<inner expression> = <outer column>` (`WHERE i.amount > o.total … LIMIT 1`,
+an equality beside one, `i.k = o.k + i.id`, or an outer expression `o.k + 0`),
+a `DISTINCT` (other than over exactly the key) or set-operation body under a
+bound, a body carrying its own `QUALIFY`, or a `LIMIT`/`OFFSET` that is not
+an integer literal (a parameter or an expression there is a parse error
+today, as before). PostgreSQL evaluates those
 per outer row and this engine has no per-row runner for a relation-valued
 body yet; correlate on an equality, or move the bound outside the `LATERAL`.
 

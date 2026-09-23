@@ -120,6 +120,21 @@ decline to it.
   cannot express an inequality-correlated bound.
 - Keeping the keyless shapes pinned (silent). Loud beats plausible.
 
+## Round 2 (Codex review, 2026-09-24)
+
+Seven findings, each closed at its seam: the key rule is checked on the
+parsed predicate (`<inner expression> = <bare outer column>`; mixed sides and
+outer expressions refuse, `i.k + 0` partitions); a bound over the body's own
+QUALIFY refuses; `LIMIT 0` stays the body's; `LIMIT + OFFSET` saturates; a
+DISTINCT over exactly the key drops `LIMIT n`; an ungrouped aggregate whose
+row the bound removes gets no pad; ORDER BY resolves a SELECT alias; the
+shared build side declines a QUALIFY / set operation for IN and the scalar
+rewrite too. Where the DAG arms were right and the single arms wrong, the
+refusal is the single path's alone (a contested lifted column on an INNER or
+comma lateral; a bare-star decline), and a window above a lateral join is
+routed single-process on the DAG. The per-row runner's cost is stated in the
+SQL reference with the deadline that bounds it.
+
 ## Boundaries left
 
 - A hash aggregate (DISTINCT, GROUP BY) or a window over one on a hash join's
