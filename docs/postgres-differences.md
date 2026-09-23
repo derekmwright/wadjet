@@ -536,7 +536,7 @@ PostgreSQL lets any item of a `WITH RECURSIVE` list name a LATER item; this engi
 
 **Some recursive terms PostgreSQL refuses are answered.**
 
-An `ORDER BY` or `LIMIT` on the whole recursive body (0A000 there), a term whose integer width differs from the seed's (`SELECT 1 UNION ALL SELECT (n + 1)::bigint …`, 42804 there — the value is range-checked into the seed's width here), and a term of the wrong type that never produces a row (42804 there at parse time; this engine checks the values the term produces) are answered here. Superset, kept: none of them answers a value PostgreSQL would answer differently. (ADR-0012 §5/arc RC)
+An `ORDER BY` or `LIMIT` on the whole recursive body (0A000 there), a term whose integer width differs from the seed's (`SELECT 1 UNION ALL SELECT (n + 1)::bigint …`, 42804 there — the value is range-checked into the seed's width here), a `text` term under a `varchar(n)` seed (one carrier here), a `real` or `double precision` term under a fractional-literal seed (`SELECT 1.5 …` is double precision here, numeric there), and a term of the wrong type that never produces a row (42804 there at parse time; this engine checks the values the term produces) are answered here. A quoted seed (`SELECT '5' UNION ALL SELECT 2 …`) is text here and resolved from the term there, so a non-text term under it is 42804 here. The measured table is `wadjet.TestArcRCRecursiveCTESeedTypeDecidesAgainstEveryTermType`. Superset, kept: none of them answers a value PostgreSQL would answer differently. (ADR-0012 §5/arc RC)
 
 **Catalog regex support is limited.**
 

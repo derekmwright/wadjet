@@ -114,6 +114,27 @@ func TestArcRCRecursiveCTEAnswersItsWholeClosureOrFails(t *testing.T) {
 			want: "n:FLOAT64 => 1.5|2.5|3.5"},
 		{name: "a NULL column carried through", sql: "WITH RECURSIVE r(n, s) AS (SELECT 1, NULL::text UNION ALL SELECT n+1, s FROM r WHERE n<3) SELECT n, s IS NULL AS z FROM r ORDER BY 1",
 			want: "n:INT32,z:BOOL => 1,true|2,true|3,true"},
+		// Round 2 (B1): PostgreSQL's UNION resolution with the seed first —
+		// an integer or NULL term the seed's type accepts is converted, never
+		// refused. Round 1 answered 42804 for both of the first two.
+		{name: "an integer term under a numeric seed", sql: "WITH RECURSIVE r(n,k) AS (SELECT 1::numeric,1 UNION ALL SELECT 2,k+1 FROM r WHERE k<3) SELECT n FROM r ORDER BY k",
+			want: "n:DECIMAL => 1|2|2"},
+		{name: "a NULL term under an integer seed", sql: "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT NULL FROM r WHERE n IS NOT NULL) SELECT n FROM r ORDER BY n",
+			want: "n:INT32 => 1|<nil>"},
+		{name: "a numeric term under a double precision seed", sql: "WITH RECURSIVE r(n,k) AS (SELECT 1::float8,1 UNION ALL SELECT 2.5::numeric,k+1 FROM r WHERE k<3) SELECT n FROM r ORDER BY k",
+			want: "n:FLOAT64 => 1|2.5|2.5"},
+		{name: "an unconstrained numeric seed widens to its term's scale", sql: "WITH RECURSIVE r(n) AS (SELECT 1::numeric UNION ALL SELECT n + 0.5 FROM r WHERE n < 3) SELECT n FROM r ORDER BY n",
+			want: "n:DECIMAL => 1.0|1.5|2.0|2.5|3.0"},
+		{name: "a product's scale does not widen the column without end", sql: "WITH RECURSIVE r(n, k) AS (SELECT 1::numeric, 1 UNION ALL SELECT n * 0.5, k + 1 FROM r WHERE k < 4) SELECT n FROM r ORDER BY k",
+			want: "n:DECIMAL => 1.000|0.500|0.250|0.125"},
+		{name: "a quoted term read by the seed type's input function", sql: "WITH RECURSIVE r(n, k) AS (SELECT 1, 1 UNION ALL SELECT '7', k+1 FROM r WHERE k < 2) SELECT n FROM r ORDER BY k",
+			want: "n:INT32 => 1|7"},
+		{name: "a quoted term the seed type does not read", sql: "WITH RECURSIVE r(n, k) AS (SELECT 1, 1 UNION ALL SELECT 'x', k+1 FROM r WHERE k < 2) SELECT n FROM r ORDER BY k",
+			want: `ERR 22P02 invalid input syntax for type integer: "x"`},
+		{name: "a constrained numeric seed accepts only its own typmod", sql: "WITH RECURSIVE r(n, k) AS (SELECT 1.50::numeric(10,2), 1 UNION ALL SELECT 2, k+1 FROM r WHERE k < 2) SELECT n FROM r ORDER BY k",
+			want: "ERR 42804"},
+		{name: "control: a constrained numeric seed and its own typmod", sql: "WITH RECURSIVE r(n, k) AS (SELECT 1.50::numeric(10,2), 1 UNION ALL SELECT 2.25::numeric(10,2), k+1 FROM r WHERE k < 2) SELECT n FROM r ORDER BY k",
+			want: "n:DECIMAL => 1.50|2.25"},
 		{name: "an integer seed with a fractional term is 42804", sql: "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+0.5 FROM r WHERE n<3) SELECT n FROM r",
 			want: `ERR 42804 recursive query "r" column 1 has type integer in non-recursive term`},
 
@@ -184,6 +205,19 @@ func TestArcRCRecursiveCTEAnswersItsWholeClosureOrFails(t *testing.T) {
 			want: "ERR 42P19 must not appear within a subquery"},
 		{name: "the self-reference in a scalar subquery", sql: "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT (SELECT max(n) FROM r) + 1 FROM lat_ord WHERE id = 1 AND false) SELECT n FROM r ORDER BY 1",
 			want: "ERR 42P19 must not appear within a subquery"},
+		// Round 2 (B2): the aggregate rule is per QUERY BLOCK — refused in a
+		// block whose own FROM names the reference, at any depth; allowed in
+		// one that reads it only through a derived table.
+		{name: "an aggregate in a derived table over the reference", sql: "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n FROM (SELECT max(n)+1 AS n FROM r WHERE n<3) q WHERE n IS NOT NULL) SELECT n FROM r ORDER BY n",
+			want: "ERR 42P19 aggregate functions are not allowed"},
+		{name: "an aggregate two derived tables down", sql: "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT m FROM (SELECT x.m FROM (SELECT count(*)+n AS m FROM r WHERE n<3 GROUP BY n) x) q) SELECT n FROM r",
+			want: "ERR 42P19 aggregate functions are not allowed"},
+		{name: "an aggregate in a joined derived table", sql: "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT o.id FROM lat_ord o JOIN (SELECT max(n) AS mx FROM r) q ON o.id = q.mx + 1) SELECT n FROM r",
+			want: "ERR 42P19 aggregate functions are not allowed"},
+		{name: "control: an aggregate over a derived table that reads the reference", sql: "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT max(m) FROM (SELECT n+1 AS m FROM r WHERE n < 3) q HAVING max(m) IS NOT NULL) SELECT n FROM r ORDER BY 1",
+			want: "n:INT32 => 1|2|3"},
+		{name: "control: an aggregate in a derived table that does not read it", sql: "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + q.c::int FROM r, (SELECT count(*) AS c FROM lat_ord) q WHERE n < 5) SELECT n FROM r ORDER BY 1",
+			want: "n:INT32 => 1|4|7"},
 		{name: "control: the self-reference on the preserved side of a LEFT join", sql: "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r LEFT JOIN lat_ord o ON o.id = r.n WHERE n<3) SELECT n FROM r ORDER BY 1",
 			want: "n:INT32 => 1|2|3"},
 		{name: "control: a GROUP BY without an aggregate", sql: "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<3 GROUP BY n) SELECT n FROM r ORDER BY 1",

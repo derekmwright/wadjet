@@ -3965,8 +3965,12 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      here (PostgreSQL answers), and mutual recursion is 42P01 here where it is
      0A000 there. SUPERSET, kept: an ORDER BY or LIMIT on the whole recursive
      body, an integer term of another width than the seed (range-checked into
-     the seed's width), and a mistyped term that never produces a row. Gated in
-     `wadjet.TestArcRCRecursiveCTEAnswersItsWholeClosureOrFails`.
+     the seed's width), a text term under a varchar(n) seed, a float term under
+     a fractional-literal seed (double precision here), and a mistyped term
+     that never produces a row. A quoted seed is text here and resolved from the
+     term there (42804 here for a non-text term). Gated in
+     `wadjet.TestArcRCRecursiveCTEAnswersItsWholeClosureOrFails` and, cell by
+     cell against PostgreSQL, `…SeedTypeDecidesAgainstEveryTermType`.
 
 6. **A numeric literal's carrier is its TEXT, not a float64.** (Added
    2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as

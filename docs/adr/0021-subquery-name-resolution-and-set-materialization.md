@@ -1746,18 +1746,43 @@ row arrives, its plan's declaration when none does. The reference is typed from
 the materialization (`Planner.stampRecursiveReference`), so an expression over
 it is declared from the real column types rather than falling to the untyped
 rule (`n + 1` over an integer was declared float8 and the old loop truncated it
-back). The recursive term's values are restated under the seed's types:
-integer-to-integer is range-checked into the seed's width (this engine declares
-`n + 1` bigint where PostgreSQL declares integer, so refusing the width would
-refuse the most common recursive CTE there is, and the range check IS
-PostgreSQL's integer arithmetic), integer or real into double precision widens,
-and anything else is PostgreSQL's 42804.
+back). The recursive term's values are restated under the seed's types by
+PostgreSQL's own UNION resolution with the seed first — 42804 exactly when that
+resolution does not come back to the seed's type. The rule is the MEASURED
+table, 14 seed spellings × 16 term spellings on 17.11
+(`wadjet.TestArcRCRecursiveCTESeedTypeDecidesAgainstEveryTermType`, each cell
+carrying PostgreSQL's answer): an integer or bigint seed accepts either integer
+width (range-checked, 22003 — this engine declares `n + 1` bigint, a recorded
+superset); an unconstrained numeric seed accepts integers, numerics and a
+numeric literal; a CONSTRAINED numeric(p,s) seed only its own typmod; real
+accepts integers, numeric and a numeric literal; double precision also real;
+timestamp accepts date; and every seed accepts an UNKNOWN literal — a bare NULL,
+or a quoted string read by the seed type's input function (22P02 / 22007).
+
+An unconstrained numeric is one scale per VALUE in PostgreSQL and one per
+COLUMN here, and the seed decided it: `SELECT 1::numeric UNION ALL SELECT n +
+0.5 …` is DECIMAL(38,0) after the seed. A term value finer than the column
+restarts the fixed point with the column declared at the scale that value
+needs; a value exact at the column's scale is stored there (`1.0 * 0.5` is 0.50
+by its declared scale and 0.5 by its value), so a product does not widen the
+column without end. Scales only grow and stop at 38.
+
+Round 1 of this arc checked the term against a two-entry list (integer↔integer,
+integer/real→double) and refused shapes PostgreSQL and the base both answer —
+an integer term under a numeric seed, a bare NULL term (review B1). The table
+replaced the list; 0 of its 224 cells answered correctly at the base and
+differently at round 2's tip.
 
 **THE FORM IS PostgreSQL's.** §1o-a decided the set-operation form; the
 recursive term's own shape is decided before anything runs, with PostgreSQL's
-42P19 and sentence: no aggregate, no self-reference inside a subquery
-expression, on the nullable side of an outer join, or more than once. Each of
-those, iterated, reaches no fixed point or the wrong one.
+42P19 and sentence: no aggregate in a query block whose own FROM names the
+reference (the term, or a derived table at any depth under it — an aggregate
+over a derived table that reads the reference is answered, as PostgreSQL
+answers it), no self-reference inside a subquery expression, on the nullable
+side of an outer join, or more than once. Each of those, iterated, reaches no
+fixed point or the wrong one. (Round 1 checked the aggregate at the term's own
+level only, and `SELECT n FROM (SELECT max(n)+1 AS n FROM r …) q` answered —
+review B2.)
 
 **THE NAMES ARE THE SEED's.** The binder closes a recursive CTE's scope over
 the seed's published names overlaid by the column list, so a name only the

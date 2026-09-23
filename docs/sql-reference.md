@@ -2236,14 +2236,29 @@ The seed (the non-recursive term) DECIDES the CTE's column types, whether or
 not it produces a row, as it does in PostgreSQL: `SELECT DATE '2020-01-01'
 UNION ALL SELECT x + 1 FROM d …` is a date series, a zero-row seed over a
 bigint column declares bigint, and a text seed stays text. The recursive term's
-values must have those types: an integer seed with a fractional term (`SELECT 1
-UNION ALL SELECT n + 0.5 FROM r …`) is `42804` with PostgreSQL's sentence. An
-integer term into an integer column of another width is range-checked into the
-seed's width (`22003` when it does not fit) and an integer or real term into a
-double precision seed is widened.
+values are resolved to those types as PostgreSQL's UNION resolves them with the
+seed first:
+
+| seed | recursive term may produce |
+|---|---|
+| `integer`, `bigint` | `integer`, `bigint` (range-checked into the seed: `22003`) |
+| `numeric` | `integer`, `bigint`, `numeric`, a numeric literal |
+| `numeric(p,s)` | `numeric(p,s)` only |
+| `real` | `integer`, `bigint`, `numeric`, a numeric literal |
+| `double precision` | `integer`, `bigint`, `numeric`, `real` |
+| `timestamp` | `date`, `timestamp` |
+| any type | itself, and an untyped literal: `NULL`, or a quoted string read as the seed's type (`22P02` / `22007` when it is not one) |
+
+Anything else is `42804` with PostgreSQL's sentence — an integer seed with a
+fractional term (`SELECT 1 UNION ALL SELECT n + 0.5 FROM r …`), for instance.
+An unconstrained `numeric` seed carries one scale for the whole column: a term
+value with more digits after the point widens the column to them
+(`SELECT 1::numeric UNION ALL SELECT n + 0.5 …` answers `1.0, 1.5, 2.0, …`).
 
 The recursive term's shape follows PostgreSQL's rules, with its class (`42P19`)
-and sentence: it may not contain an aggregate function, may not name the CTE
+and sentence: an aggregate function may not appear in a query block whose own
+`FROM` names the CTE (the term itself or a derived table in it; an aggregate
+over a derived table that reads the CTE is answered), and the term may not name the CTE
 inside a subquery expression (`EXISTS`, `IN`, a scalar subquery), on the
 nullable side of an outer join (the right of a `LEFT JOIN`, the left of a
 `RIGHT JOIN`, either side of a `FULL JOIN`), or more than once. `r LEFT JOIN t`,
