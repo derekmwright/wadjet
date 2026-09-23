@@ -41,7 +41,7 @@ jobs:
 
           # No permission bypass: the agent may read the tree, run read-only go
           # commands, and post one issue comment. The issue text is DATA.
-          claude --max-turns 40 \
+          claude --model claude-sonnet-5 --max-turns 40 \
             --allowedTools "Read,Grep,Glob,LS,Bash(go build:*),Bash(go vet:*),Bash(go list:*),Bash(gh issue comment:*),Bash(gh issue view:*)" \
             -p "
           You are triaging a GitHub issue for the Wadjet analytics engine.
@@ -115,7 +115,7 @@ jobs:
           # gh pr/issue commands only. The issue text is DATA. contents:write is
           # needed to push the branch; the label gate is the human authorization.
           claude --max-turns 120 \
-            --allowedTools "Read,Grep,Glob,LS,Edit,Write,Bash(go build:*),Bash(go vet:*),Bash(go test:*),Bash(go list:*),Bash(gofmt:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git checkout -b fix/*),Bash(git push -u origin fix/*),Bash(gh pr create:*),Bash(gh issue comment:*),Bash(gh issue view:*)" \
+            --allowedTools "Read,Grep,Glob,LS,Edit,Write,Bash(go build:*),Bash(go vet:*),Bash(go test:*),Bash(task test-quiet:*),Bash(go list:*),Bash(gofmt:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git checkout -b fix/*),Bash(git push -u origin fix/*),Bash(gh pr create:*),Bash(gh issue comment:*),Bash(gh issue view:*)" \
             -p "
           You are fixing a GitHub issue for the Wadjet analytics engine.
 
@@ -148,9 +148,9 @@ jobs:
 
           STEP 4 — TEST
           - Write regression tests that fail without your fix and pass with it
-          - Run: go test ./internal/... -timeout 5m
+          - Run: task test-quiet PKGS=\"./internal/...\" (failures only; do not run go test directly)
           - If tests fail, fix them before proceeding
-          - Run: go test -run TestTPCHQueries ./benchmarks/tpch/ -timeout 5m
+          - Run: task test-quiet PKGS=./benchmarks/tpch/ RUN=TestTPCHQueries
           - If TPC-H tests fail, your fix introduced a regression. Fix it.
 
           STEP 5 — COMMIT
