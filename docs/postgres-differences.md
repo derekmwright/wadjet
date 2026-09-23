@@ -142,6 +142,14 @@ A reader over a REGULAR file publishes its columns at PLAN time: `read_parquet` 
 
 Four inputs are not read at plan time and keep the first-batch behaviour: an `http(s)` source — a plan-time fetch would be a second request for every statement and would make `EXPLAIN` reach the network; the database connectors (`postgres_scan`, `postgres_query`, `mysql_scan`, `mysql_query`), whose schema is a remote query's; an input that can only be read ONCE (a FIFO, `/dev/stdin`, a socket, a process substitution), because the plan-time read opens the input and the execution opens it again; and a glob any of whose matches is one of those. For those, `42P10` and `42703` are raised at execution rather than while the statement is bound, a reader that produces NO batch is never measured against its alias list, and `EXPLAIN` over such a statement does not refuse. (ADR-0012 §5/#1184, #1210, #1230)
 
+**`read_csv` reads `COPY … (FORMAT csv)`'s grammar, except that `\.` is data and a byte-order mark is skipped.**
+
+A field is NULL only when it is empty and unquoted (`""` is the empty string), a quote opens anywhere in a field, whitespace is data, and an unterminated quote, a mixed line ending, a blank line in a multi-column file and a record of the wrong width are `22P04` — as `COPY` reads the same bytes. A line holding `\.` is DATA here, where PostgreSQL 17 ends the input at it and reads no later row (PostgreSQL 18 no longer does in a file); a UTF-8 byte-order mark at a file's start is skipped, where `COPY` keeps it in the first field; and a NUL byte is stored where `COPY` raises `22021`. (ADR-0012 §5/#1248, #1259)
+
+**A reader whose input cannot be opened is `58P01` / `42501` / `42809` at plan time, and `EXPLAIN` over it is refused.**
+
+`SELECT * FROM read_json('/missing.json')` and `EXPLAIN` over it raise `58P01 could not open file "/missing.json" for reading: no such file or directory` — `COPY FROM`'s and `pg_read_file`'s class, as are `42501` for a file that may not be read and `42809` for a directory. PostgreSQL's `EXPLAIN` over a missing RELATION is `42P01`; the class here is the input's. An `http(s)` source is refused at its first batch (a 404 is `58P01`), so `EXPLAIN` over one prints a plan. (ADR-0012 §5/#1245)
+
 **A reader whose input declares no columns at all is a named refusal, where PostgreSQL has a zero-column relation.**
 
 `SELECT * FROM read_json('<zero-byte file>')` raises `0A000 the table function "read_json" published no columns: its input "…" is empty`. PostgreSQL permits a relation with zero columns (`CREATE TABLE t (); SELECT * FROM t` answers zero rows of zero columns) and this engine does not, at any door — a result that declares no columns is not an answer it has. A Parquet file carries its schema in the footer and a CSV in its header row, so an empty file of either kind is an ordinary empty relation: zero rows, columns declared. (ADR-0012 §5/#1230)

@@ -380,7 +380,7 @@ SELECT * FROM read_parquet('warehouse/sales.parquet')             -- Parquet fil
 - **read_csv** — configurable delimiter, header detection, type inference
 - **read_parquet** — column-at-a-time page reading with row-group stats pruning
 - **HTTP filesystem** — connection pooling, Range requests, configurable auth headers
-- **Glob patterns** — `read_json('data/*.json')` expands and concatenates matching files
+- **Glob patterns** — `read_json('data/*.json')` reads every matching file in name order, each by its own format's reader (a CSV header, a JSON document, a Parquet footer per file), one file open at a time
 
 ### Storage
 

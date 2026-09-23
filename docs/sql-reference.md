@@ -272,7 +272,15 @@ That inference is a SAMPLE, and its window is the file's first **100 rows**
 objects exceed 8 MiB, in which case the sample is the objects that fit) — not
 the whole batch. The column list and the column types are whatever those rows
 say, for the whole file. Inside the sample the types widen as they always
-have (an integer column that meets `0.75` there becomes `double precision`).
+have (an integer column that meets `0.75` there becomes `double precision`),
+and the type the sample settles on READS every value the sample holds: a
+column mixing booleans and numbers is `text`, each value read as the input
+spells it (no number type reads `true`, and `COPY` refuses it for a
+`bigint`), and a `read_json` array's element type and an object's field
+types widen across EVERY sampled occurrence at every depth — `[1]` then
+`[1.5]` is an array of `double precision`, and a field first seen in a later
+sampled object is a field. An array beside an object, or a nested value
+beside a scalar, is `text`.
 A number is recognised only in its plain decimal spelling (surrounding
 whitespace, a sign, digits, a fraction, an exponent) or as `NaN`/`Infinity`,
 and typed with the same PostgreSQL input functions that read the rows past
@@ -315,7 +323,9 @@ PAST the sample:
   holds every value as its text, and a `double precision` column holds a
   whole number. The refusal applies to every statement that reads the row,
   `COUNT(*)` included;
-- a JSON `null` and an empty CSV field are NULL, as they always were;
+- a JSON `null` and an UNQUOTED empty CSV field are NULL; a quoted empty
+  field (`""`) is the empty string, as `COPY` reads it, and a column of any
+  type but `text` refuses it;
 - a key that first appears past the sample is not a column of the relation at
   all, and a reference to it is `42703`.
 
@@ -325,10 +335,57 @@ satisfies it, so `LIMIT 1` reads rows 1–4096 of a `read_json` input and rows
 1–2148 of a `read_csv` input (its first batch is the 100-row sample): a change
 inside those refuses, and one past them is never read.
 
-A glob of CSV files with a header reads the first file's first record as the
-header; a later file whose first record repeats it exactly has that record
-skipped, and a later file that does not is read whole, as the continuation of
-a split file.
+A GLOB is the sequence of FILES it matches, in name order — a directory it
+matches is not one of them — and each file is read on its own by its format's
+reader: a CSV file with its own record state and header, a JSON file as its
+own document (one array, or objects one after another), a Parquet file
+through its own footer. One file is open at a time. The relation has ONE
+schema across the files:
+
+- for `read_csv` and `read_json` the sample is the first 100 rows of the
+  sequence (it crosses into later files when the first is short, as DuckDB's
+  does), and a later file's value past the sample that does not fit is
+  refused like any other, naming THAT file and its own row;
+- a CSV glob with a header reads the first file's first record as the
+  header; a later file whose first record repeats it exactly has that record
+  skipped, and a later file that does not is read whole, as the continuation
+  of a split file;
+- `read_parquet`'s columns are the FIRST file's footer's, and every later
+  file is held to them by NAME, in any order: a column it lacks is `42703`
+  and one it declares at another type is `42804`, each naming the file
+  (DuckDB casts the second silently). Columns a later file adds are not the
+  relation's;
+- an empty file contributes no rows (a zero-byte CSV or JSON file, `[]`, a
+  Parquet file with no rows), wherever it falls in the sequence.
+
+A JSON file that is not a document is refused with `22P02` naming the file
+and the row: content after its array's closing `]`, an array with no `]`, a
+top-level value that is not an object (`[1,2]`, a bare `7` on a line), a
+truncated object.
+
+A `read_csv` file is read with the grammar of PostgreSQL's
+`COPY … (FORMAT csv)`: a field is NULL only when it is empty and no part of
+it was quoted; a quote opens anywhere in a field (`x"y,z"w` is `xy,zw`) and a
+doubled quote inside one is a quote; whitespace is data; and a line ends at
+LF, CR or CRLF, the first one in the file fixing which. The forms `COPY`
+rejects are `22P04` (bad_copy_file_format) naming the line — an unterminated
+quote, a different unquoted line ending later in the file, a blank line in a
+file of more than one column, and a record with more or fewer fields than the
+header. Two differences: a line holding `\.` is data (PostgreSQL 17 ends the
+input there; PostgreSQL 18 does not, in a file), and a UTF-8 byte-order mark
+at the start of a file is skipped.
+
+An input that cannot be opened is refused when the statement is planned —
+`EXPLAIN` over it included — with the SQLSTATE `COPY FROM` raises for the
+same path: `58P01` for one that does not exist (and a glob that matches no
+file), `42501` for one that may not be read, `42809` for a directory.
+
+```
+ERROR:  read_json: could not open file "/data/missing.json" for reading: no such file or directory
+SQLSTATE: 58P01
+```
+
+An `http(s)` source is refused at its first batch instead (a 404 is `58P01`).
 
 Two differences from `COPY` remain past the sample: a timestamp column takes
 only the spellings the sample recognises (`2024-01-02`, `2024-01-02 03:04:05`,
@@ -441,7 +498,7 @@ SELECT * FROM read_json('/path/to/data.json')
 -- HTTP/HTTPS URL
 SELECT * FROM read_json('https://api.example.com/events.json')
 
--- Glob pattern (concatenates matching files)
+-- Glob pattern (every matching file, each its own document)
 SELECT * FROM read_json('logs/2026-03-*.json')
 
 -- With alias
@@ -480,6 +537,7 @@ Reads Parquet files with column-at-a-time page reading. Column projection and ro
 ```sql
 SELECT * FROM read_parquet('warehouse/sales.parquet')
 SELECT * FROM read_parquet('https://storage.example.com/data.parquet')
+SELECT * FROM read_parquet('warehouse/sales/*.parquet')   -- every file, held to the first file's columns
 ```
 
 All table functions support local file paths and HTTP/HTTPS URLs, fetched through a pooled HTTP client. Custom auth headers are not configurable from SQL.
@@ -488,7 +546,7 @@ All table functions support local file paths and HTTP/HTTPS URLs, fetched throug
 
 CSV and JSON files are read in streaming mode from every source — local paths, glob patterns (expanded lazily, one file open at a time) and HTTP/HTTPS URLs — so only the current batch of rows is held in memory and files larger than available RAM are queryable. Schema is inferred from the first 100 rows, and a later value that does not fit it is a `22P02` (see [A table function in FROM is a relation](#a-table-function-in-from-is-a-relation)).
 
-Local Parquet files are opened as file handles (`io.ReaderAt`), enabling page-level random access without reading the entire file into memory. For `read_parquet()` only, HTTP sources and glob patterns are still buffered in full, because Parquet needs random access.
+Local Parquet files — every file of a glob included, one at a time — are opened as file handles (`io.ReaderAt`), enabling page-level random access without reading the entire file into memory. For `read_parquet()` only, an HTTP source is still buffered in full, because Parquet needs random access.
 
 ### postgres_scan / postgres_query
 

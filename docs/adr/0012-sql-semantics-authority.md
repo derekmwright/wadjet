@@ -6106,6 +6106,33 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     arguments that fit int4 and `bigint` otherwise — so its `SUM` is `bigint`
     and not a float8 that loses the value.
 
+  - **`read_csv` READS THE GRAMMAR OF `COPY … (FORMAT csv)`, WITH TWO
+    DIFFERENCES.** (Added 2026-09-23, arc FR2 / #1248 #1259.) A field is NULL
+    only when it is empty and no part of it was quoted, so `""` is the empty
+    string; a quote opens anywhere in a field; whitespace is data; the first
+    line ending fixes LF, CR or CRLF; and an unterminated quote, a mixed line
+    ending, a blank line in a file of more than one column and a record of
+    the wrong width are `22P04` bad_copy_file_format naming the line — each
+    measured against 17.11's `COPY`. The differences: a line holding `\.` is
+    DATA, not PostgreSQL 17's end-of-data marker (which silently drops every
+    later row, and which PostgreSQL 18 no longer honours in a file either);
+    and a UTF-8 byte-order mark at the start of a file is skipped, where
+    `COPY` keeps it in the first field. Nor are a field's bytes checked
+    against the encoding: `COPY` refuses a NUL byte with `22021`, and this
+    reader stores it.
+
+  - **A FILE READER'S INPUT THAT CANNOT BE OPENED IS REFUSED WITH `COPY`'S
+    SQLSTATE, AND `EXPLAIN` OVER IT IS REFUSED TOO.** (Added 2026-09-23, arc
+    FR2 / #1245.) `58P01` for an input that does not exist (a glob matching
+    no file included), `42501` for one that may not be read, `42809` for a
+    directory — the classes 17.11's `COPY FROM` and `pg_read_file` raise for
+    the same path. The planner knows it without reading the input, so the
+    statement and `EXPLAIN` over it are refused at plan time, where
+    PostgreSQL's `EXPLAIN` over a relation that does not exist is `42P01`: the
+    class is the input's, not the catalog's. An `http(s)` source is not
+    reached at plan time (ADR-0039 §3), so its `58P01` (a 404) is raised at
+    the first batch and `EXPLAIN` over it prints a plan.
+
   - **`QUALIFY` has no PostgreSQL, and DUCKDB 1.1.3 IS THE ORACLE FOR IT.**
     (Added 2026-09-14, #1076.) The clause originates in Snowflake/BigQuery and
     has a second, checkable implementation in DuckDB; PostgreSQL has none, so

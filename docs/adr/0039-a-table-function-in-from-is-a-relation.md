@@ -9,7 +9,10 @@ deferral: §3 is now the authorization ORDER and the plan-time schema it
 buys, §9 is the join key's side, and the Consequences are the boundaries that
 remain — #1229 / #1230 / #1231; amended 2026-09-22 by arc RP, whose paragraph
 in §3 is what a row past the readers' inference sample does — #1242 / #1243 /
-#1247)
+#1247; amended 2026-09-23 by arc FR2, whose paragraphs in §3 are the glob as
+a sequence of files, the sample's type reading every sampled value, and the
+plan-time refusal of an input that cannot be opened — #1262 / #1240 / #1260 /
+#1261 / #1245 / #1248 / #1259)
 
 Related: ADR-0034 (the authorization ordering §3 rests on), ADR-0024 (§5's
 declared width and §7's key widening), ADR-0012 §5 (the divergences this
@@ -124,12 +127,49 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    twin past it never disagree (a spelling neither holds, such as `1e-400`,
    infers text). Integer to
    fractional number is a mismatch; text columns accept every value as text.
-   JSON null and empty CSV fields remain NULL, and inference within the
-   sample is unchanged. COUNT(*) refuses when the reader reaches the row; a
-   LIMIT that stops reading before it need not refuse. A key first seen past
-   the sample remains absent from the inferred column list. A CSV glob skips
-   a later file's first record when it repeats the first file's header,
-   rather than reading it as a data row.
+   JSON null and UNQUOTED empty CSV fields are NULL; a quoted empty CSV field
+   is the empty string, as COPY reads it (arc FR2, #1259, which reads CSV
+   with COPY's record grammar and refuses its rejected forms with 22P04,
+   #1248). COUNT(*) refuses when the reader reaches the row; a LIMIT that
+   stops reading before it need not refuse. A key first seen past the sample
+   remains absent from the inferred column list.
+
+   **THE SAMPLE'S TYPE READS EVERY VALUE THE SAMPLE HOLDS** (arc FR2). The
+   one-grammar rule holds INSIDE the sample as well as past it: a sample
+   mixing booleans and numbers is text (it inferred bigint and read the
+   boolean NULL or 1, #1260), and a nested column's element and field types
+   are merged across every sampled occurrence at every depth (they were the
+   first occurrence's, and `[1.5]` after `[1]` read `[1]`, #1261). So no
+   sampled value is converted into a type that cannot hold it, and read_csv
+   refuses a field that does not parse wherever it is.
+
+   **A GLOB IS A SEQUENCE OF FILES** (arc FR2, #1262, #1240). Through
+   v0.24.0 a glob was its matched files' BYTES run together and handed to a
+   single-file decoder: a CSV header per file had to be re-parsed out of the
+   stream (arc RP's special case), a JSON array glob stopped at the first
+   file's `]` and dropped every later file's rows, and a Parquet glob of two
+   files was unreadable. Every reader now takes the matched FILES in name
+   order and decodes each on its own — its own CSV record state and header,
+   its own JSON document, its own Parquet footer — one file open at a time,
+   with ONE schema across them: the CSV/JSON sample is the first 100 rows of
+   the sequence (crossing files when the first is short, as DuckDB's does),
+   a later file's value past it that does not fit is refused naming that
+   file and its row, and a Parquet glob's columns are the first file's
+   footer's, a later file held to them by name (42703 for a missing column,
+   42804 for another type — DuckDB casts). A directory a glob matches is not
+   one of its files. The plan-time read and the execution read the same
+   sequence, so this is not a new schema source: `parquetFooterSchema` has
+   read the first file's footer since arc FR.
+
+   **AN INPUT THAT CANNOT BE OPENED IS REFUSED AT PLAN TIME** (arc FR2,
+   #1245). The resolver used to DECLINE it — the rereadable check stat'd a
+   missing path and answered "not a regular file" — so the error came at the
+   first batch with no SQLSTATE, and EXPLAIN printed a plan. It now asks
+   first, after the capability guard, whether the input can be opened, and
+   one that cannot is the statement's answer with COPY FROM's class: 58P01
+   (missing, or a glob matching no file), 42501 (not readable), 42809 (a
+   directory). EXPLAIN is refused with it. The execution's open carries the
+   same classes for the inputs not read at plan time.
 
    **Nor is the plan-time read taken over an input that can be read ONCE.**
    It opens the input and the execution opens it again, so it is taken only
@@ -354,3 +394,18 @@ Arc FR's, for §3 and §9:
 - `coordinator.TestArcFRAFileReaderIsARelationOnEveryArm` — §9 on single /
   single+budget / dag / dag-shuffled / dag+morsel4, with arc PT's
   `distributed` pin carried per cell.
+
+Arc FR2's, for §3's glob, sample and unopenable-input paragraphs:
+
+- `wadjet.TestArcFR2AGlobIsASequenceOfFiles` — five reader formats × one
+  file, a glob of 2, a glob of 100, empty files first / middle / last, a
+  sample crossing files, a later file that disagrees × the plan-time and
+  first-batch schema paths; `wadjet.TestArcFR2EachFileIsItsOwnDocument`;
+  `physical.TestArcFR2AParquetGlobReadsEveryFileByItsOwnFooter` (PyArrow
+  files); `physical.TestArcFR2AGlobHoldsOneFileOpenAtATime`;
+  `json.TestArcFR2EveryFileIsItsOwnJSONDocument`; `physical.FuzzArcFR2Glob`.
+- `csv.TestArcFR2CSVRecordGrammarIsPostgreSQLs` (48 cells from 17.11's
+  COPY) and `csv.TestArcFR2AMalformedCSVIsRefusedWhereverItIs`.
+- `wadjet.TestArcFR2TheSampleReadsEveryValueItTyped`.
+- `server.TestArcFR2AnUnopenableReaderInputIsRefusedOnEveryDoor` and
+  `coordinator.TestArcFR2AnUnopenableReaderInputIsRefusedOnTheCoordinator`.
