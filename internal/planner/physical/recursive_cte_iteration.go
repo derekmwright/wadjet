@@ -6,8 +6,8 @@ package physical
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"math"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
@@ -53,13 +53,57 @@ const recursiveIterationLimit = 1_000_000
 // string; a text '1' became a bigint; a zero-row or NULL seed declared text.
 // PostgreSQL's rule is that the non-recursive term DECIDES the column types,
 // and the plan knows them whether or not a row ever arrives.
+//
+// AN UNCONSTRAINED NUMERIC COLUMN WIDENS. PostgreSQL carries each numeric
+// value at its own scale, so `SELECT 1::numeric UNION ALL SELECT n + 0.5 …`
+// answers 1, 1.5, 2; this engine carries a column at one scale, and the seed
+// decided it (0). A recursive term that produces a finer value restarts the
+// fixed point with that column declared at the finer scale — no value moves,
+// and nothing already produced is kept at the narrower one. The scale only
+// grows and is capped at 38, so the restarts are bounded.
 func (p *Planner) iterateRecursiveCTE(ctx context.Context, cte plansql.CTEDef, anchorSQL, recursiveSQL string) error {
-	anchorBatches, schema, err := p.runRecursiveArm(ctx, anchorSQL)
+	widen := map[int]int{}
+	for {
+		err := p.iterateRecursiveCTEAt(ctx, cte, anchorSQL, recursiveSQL, widen)
+		var w *errWidenRecursiveScale
+		if !errors.As(err, &w) {
+			return err
+		}
+		if w.scale <= widen[w.col] || w.scale > 38 {
+			return sqlerr.New("22003", "numeric field overflow: recursive query %q column %d "+
+				"needs %d digits after the point", cte.Name, w.col+1, w.scale)
+		}
+		widen[w.col] = w.scale
+	}
+}
+
+func (p *Planner) iterateRecursiveCTEAt(ctx context.Context, cte plansql.CTEDef, anchorSQL, recursiveSQL string,
+	widen map[int]int) error {
+	anchorBatches, schema, _, err := p.runRecursiveArm(ctx, anchorSQL)
 	if err != nil {
 		return err
 	}
 	if len(schema) == 0 {
 		return errNoCTESchema(cte.Name)
+	}
+	if len(widen) > 0 {
+		declared := append([]parquet.Column(nil), schema...)
+		for col, scale := range widen {
+			if col < len(schema) && schema[col].Type == parquet.TypeDecimal && scale > schema[col].Scale {
+				schema[col].Scale = scale
+			}
+		}
+		// The seed's own values, restated at the widened scale. Its batches
+		// carry the declared (narrower) scale, which the numeric-to-numeric
+		// rule rescales upward.
+		for i := range anchorBatches {
+			if anchorBatches[i] != nil && len(anchorBatches[i].Schema) == len(declared) {
+				anchorBatches[i].Schema = declared
+			}
+		}
+		if anchorBatches, err = coerceRecursiveTerm(cte.Name, schema, anchorBatches, recursiveArmLiterals{}); err != nil {
+			return err
+		}
 	}
 	// The CTE's names: its column list over the anchor's published names,
 	// positionally — the list a reference to it was built with.
@@ -119,12 +163,12 @@ func (p *Planner) iterateRecursiveCTE(ctx context.Context, cte plansql.CTEDef, a
 		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: work}
 		// An error is the STATEMENT's error (#1041): a term that fails on
 		// iteration k does not make iterations 1..k-1 the answer.
-		termBatches, _, err := p.runRecursiveArm(ctx, recursiveSQL)
+		termBatches, _, termLits, err := p.runRecursiveArm(ctx, recursiveSQL)
 		if err != nil {
 			work.Release()
 			return fail(err)
 		}
-		termBatches, err = coerceRecursiveTerm(cte.Name, schema, termBatches)
+		termBatches, err = coerceRecursiveTerm(cte.Name, schema, termBatches, termLits)
 		if err != nil {
 			work.Release()
 			return fail(err)
@@ -148,14 +192,15 @@ func (p *Planner) iterateRecursiveCTE(ctx context.Context, cte plansql.CTEDef, a
 // returning its batches and its schema: the batches' own when a row arrived —
 // the runtime saw the vectors — and the PLAN's declaration when none did,
 // because a zero-row arm still has column types.
-func (p *Planner) runRecursiveArm(ctx context.Context, sql string) ([]*batch.RecordBatch, []parquet.Column, error) {
+func (p *Planner) runRecursiveArm(ctx context.Context, sql string) ([]*batch.RecordBatch, []parquet.Column, recursiveArmLiterals, error) {
+	var lits recursiveArmLiterals
 	pq, err := plansql.Parse(sql)
 	if err != nil {
-		return nil, nil, fmt.Errorf("subquery parse error: %w", err)
+		return nil, nil, lits, fmt.Errorf("subquery parse error: %w", err)
 	}
 	info, err := plansql.ExtractSelect(pq)
 	if err != nil {
-		return nil, nil, fmt.Errorf("subquery extract error: %w", err)
+		return nil, nil, lits, fmt.Errorf("subquery extract error: %w", err)
 	}
 	// What this ONE run builds is released when it ends. The plan's Cleanup
 	// is the owner of a join's build reservation and of an IN-set's charge,
@@ -175,7 +220,7 @@ func (p *Planner) runRecursiveArm(ctx context.Context, sql string) ([]*batch.Rec
 	}()
 	source, ops, sink, plan, err := p.buildSubqueryPipelineForPlan(ctx, info)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, lits, err
 	}
 	cs, ok := sink.(*exec.CollectSink)
 	if !ok {
@@ -185,10 +230,11 @@ func (p *Planner) runRecursiveArm(ctx context.Context, sql string) ([]*batch.Rec
 	cs.SchemaHint = declaredOutputSchema(plan, p.SubqueryOutputColumn)
 	cs.OutputNames = publishedNamesOfProjection(publishedOutputProjectionNode(plan))
 	if err := (&exec.Pipeline{Source: source, Ops: ops, Sink: cs}).Run(ctx); err != nil {
-		return nil, nil, fmt.Errorf("subquery execution error: %w", err)
+		return nil, nil, lits, fmt.Errorf("subquery execution error: %w", err)
 	}
 	schema := append([]parquet.Column(nil), cs.Schema()...)
-	return cs.Batches(), schema, nil
+	lits = recursiveArmLiteralsOf(plan, len(schema))
+	return cs.Batches(), schema, lits, nil
 }
 
 // recursiveWorkTable holds one iteration's rows under the CTE's schema — its
@@ -284,124 +330,6 @@ func (w *closureWriter) flush(ctx context.Context) error {
 	}
 	w.pending, w.rows = w.pending[:0], 0
 	return w.coll.Consume(ctx, out)
-}
-
-// coerceRecursiveTerm restates the recursive term's batches under the anchor's
-// types, which is PostgreSQL's rule: the NON-RECURSIVE term decides a
-// recursive CTE's column types, and the recursive term's must resolve to them.
-// `SELECT 1 UNION ALL SELECT n + 0.5 FROM r` is 42804 there ("column 1 has
-// type integer in non-recursive term but type numeric overall"); storing the
-// term's values under the anchor's type instead — what the boxed loop did —
-// truncated 1.5 to 1 and recursed without end.
-//
-// Two conversions are the union's own and are applied, never refused:
-//
-//   - an INTEGER term into an INTEGER anchor. This engine declares `n + 1`
-//     over an integer column bigint where PostgreSQL declares integer, so
-//     refusing the width difference would refuse the most common recursive
-//     CTE there is. The value is range-checked into the anchor's width, which
-//     is exactly PostgreSQL's integer arithmetic: 22003 when it does not fit.
-//   - an integer or real term into a DOUBLE PRECISION anchor, which is what
-//     PostgreSQL's union resolves to the anchor's type.
-//
-// Everything else must be the anchor's carrier exactly, or it is 42804.
-//
-// It reads the types the term's BATCHES carry — what the runtime produced —
-// and not the term's plan-time declaration. A term that produces no row at all
-// is therefore not checked: there is no value to read under the wrong type,
-// where PostgreSQL refuses it at parse time. That is a refusal this engine does
-// not make, never a value it gets wrong.
-func coerceRecursiveTerm(name string, anchor []parquet.Column, batches []*batch.RecordBatch) ([]*batch.RecordBatch, error) {
-	out := make([]*batch.RecordBatch, 0, len(batches))
-	for _, b := range batches {
-		if b == nil || b.ActiveLen() == 0 {
-			continue
-		}
-		if len(b.Columns) != len(anchor) || len(b.Schema) != len(anchor) {
-			return nil, sqlerr.New("42601",
-				"each UNION query in recursive query %q must have the same number of columns", name)
-		}
-		converted := false
-		for i := range anchor {
-			if sameRecursiveCarrier(anchor[i], b.Schema[i]) {
-				continue
-			}
-			if !recursiveTermConvertible(anchor[i].Type, b.Schema[i].Type) {
-				return nil, sqlerr.New("42804",
-					"recursive query %q column %d has type %s in non-recursive term but type %s overall",
-					name, i+1, pgTypeName(anchor[i].Type), pgTypeName(b.Schema[i].Type))
-			}
-			if !converted {
-				if b.HasViews() {
-					b.FlattenViews()
-				}
-				b = b.Compact()
-				b = &batch.RecordBatch{Schema: b.Schema, Columns: append([]*batch.Vector(nil), b.Columns...), Len: b.Len}
-				converted = true
-			}
-			v, err := convertRecursiveColumn(b.Columns[i], anchor[i].Type, b.Len)
-			if err != nil {
-				return nil, err
-			}
-			b.Columns[i] = v
-		}
-		out = append(out, b)
-	}
-	return out, nil
-}
-
-func isIntegerCarrier(t parquet.TypeID) bool {
-	return t == parquet.TypeInt32 || t == parquet.TypeInt64
-}
-
-// recursiveTermConvertible names the two conversions coerceRecursiveTerm
-// applies; see there.
-func recursiveTermConvertible(anchor, term parquet.TypeID) bool {
-	switch {
-	case isIntegerCarrier(anchor) && isIntegerCarrier(term):
-		return true
-	case anchor == parquet.TypeFloat64 &&
-		(isIntegerCarrier(term) || term == parquet.TypeFloat32):
-		return true
-	}
-	return false
-}
-
-// convertRecursiveColumn copies the first n rows of v into a vector of type
-// to. A NULL stays NULL; an integer outside the target width is PostgreSQL's
-// 22003.
-func convertRecursiveColumn(v *batch.Vector, to parquet.TypeID, n int) (*batch.Vector, error) {
-	out := batch.NewVector(to, n)
-	out.Nulls.CopyFrom(&v.Nulls, n)
-	read := func(i int) (int64, float64) {
-		switch v.Type {
-		case parquet.TypeInt32:
-			return int64(v.Int32Data[i]), float64(v.Int32Data[i])
-		case parquet.TypeInt64:
-			return v.Int64Data[i], float64(v.Int64Data[i])
-		case parquet.TypeFloat32:
-			return 0, float64(v.Float32Data[i])
-		}
-		return 0, v.Float64Data[i]
-	}
-	for i := 0; i < n; i++ {
-		if v.Nulls.IsNull(i) {
-			continue
-		}
-		iv, fv := read(i)
-		switch to {
-		case parquet.TypeInt32:
-			if iv < math.MinInt32 || iv > math.MaxInt32 {
-				return nil, sqlerr.New("22003", "integer out of range")
-			}
-			out.Int32Data[i] = int32(iv)
-		case parquet.TypeInt64:
-			out.Int64Data[i] = iv
-		case parquet.TypeFloat64:
-			out.Float64Data[i] = fv
-		}
-	}
-	return out, nil
 }
 
 // sameRecursiveCarrier: the term's column holds values of exactly the anchor's
