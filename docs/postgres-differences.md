@@ -242,6 +242,10 @@ The int4 rule extends to int8: zero=false, otherwise=true. PostgreSQL refuses th
 
 Finite storage raises 22003 versus unconstrained PostgreSQL numeric values. Comparisons remain available. (ADR-0012 §5/#534; 12/carrier)
 
+**JOIN ON sees comma-join siblings.**
+
+An ON may name a relation an EARLIER comma-separated FROM item declares. `FROM a, b JOIN c ON a.k = c.k` answers here; PostgreSQL refuses the reference. (ADR-0012 §5/#617)
+
 **Decimal arithmetic stops at 38 digits.**
 
 Precision stops at 38 while exact operators retain scale. DECIMAL(38,10) multiplication produces DECIMAL(38,20), raising 22003 beyond its range where PostgreSQL numeric answers. (ADR-0012 §5/#749)

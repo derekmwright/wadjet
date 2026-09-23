@@ -2755,31 +2755,33 @@ See **Limitations** for the `USING` and `NATURAL JOIN` shapes that are refused.
 
 ### What an ON clause may name
 
-An `ON` clause is scoped to ITS OWN join: the relations it may name are the
-ones already joined inside its `FROM` item — that item's own table, and every
-join of that item up to and including this one. A relation joined LATER, and a
-relation of a different comma-separated `FROM` item, are both out of scope
-there, exactly as in PostgreSQL:
+An `ON` clause may name any relation the `FROM` clause has ALREADY DECLARED at
+the point it is written — that item's own table, every join of that item up
+to and including this one, and (a deliberate DuckDB-matching superset
+PostgreSQL does not share, ADR-0012 §5 #617) an EARLIER comma-separated `FROM`
+item. Only a relation the FROM clause has not reached YET — a later join, or a
+later comma item — is out of scope:
 
 ```sql
 -- refused: `c` is joined AFTER the ON that names it
 --   42P01  missing FROM-clause entry for table "c"
 SELECT a.id FROM ord a JOIN item b ON c.id = a.id JOIN item c ON c.id = b.id
 
--- refused: `a` is a DIFFERENT FROM item
---   42P01  invalid reference to FROM-clause entry for table "a"
+-- answers here (a superset of PostgreSQL, which refuses this reference):
+-- the second FROM item's join sees the first, EARLIER comma item
 SELECT a.id FROM ord a, item b JOIN item c ON a.id = c.order_id
 
--- both answer: the second ON sees the first join's relations
+-- both answer, and PostgreSQL agrees: the second ON sees the first join's
+-- relations
 SELECT a.id FROM ord a JOIN item b ON a.id = b.order_id JOIN item c ON a.id = c.order_id
 SELECT a.id FROM ord a JOIN item b ON a.id = b.order_id JOIN item c ON b.id = c.id
 ```
 
-The two sentences are not interchangeable. `invalid reference` says the
-statement HAS such an entry and this position cannot reach it, which can only
-be said about an entry written earlier; a relation a later join introduces has
-not been written yet, so it is `missing`. A reference to an enclosing query's
-relation is legal and unaffected — a correlated `ON` still resolves.
+`invalid reference to FROM-clause entry` is reserved for a base table
+reachable only through an alias, named by its own hidden name — the alias is
+the only name in scope, and the message hints at it. A reference to an
+enclosing query's relation is legal and unaffected — a correlated `ON` still
+resolves.
 
 A `FROM` clause names each relation once: `FROM t, t`, `FROM t JOIN t ON …`
 and two derived tables sharing an alias are `42712`
