@@ -129,8 +129,9 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    fractional number is a mismatch; text columns accept every value as text.
    JSON null and UNQUOTED empty CSV fields are NULL; a quoted empty CSV field
    is the empty string, as COPY reads it (arc FR2, #1259, which reads CSV
-   with COPY's record grammar and refuses its rejected forms with 22P04,
-   #1248). COUNT(*) refuses when the reader reaches the row; a LIMIT that
+   with COPY's record grammar and refuses an unterminated quote and a record
+   of the wrong width with 22P04, #1248; blank lines and mixed line endings
+   stay answered, ADR-0012 §5). COUNT(*) refuses when the reader reaches the row; a LIMIT that
    stops reading before it need not refuse. A key first seen past the sample
    remains absent from the inferred column list.
 

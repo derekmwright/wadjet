@@ -204,6 +204,14 @@ func (r *Reader) nextRecord() (record, error) {
 		if err != nil {
 			return record{}, r.inFile(err)
 		}
+		// A BLANK line (one empty unquoted field) is skipped unless the
+		// relation has exactly one column, where it is that column's NULL as
+		// COPY reads it. COPY refuses it with 22P04 in a wider file; this
+		// reader skipped it on every path through v0.24.0 — a trailing empty
+		// line ends nearly every exported file — and keeps that (ADR-0012 §5).
+		if len(fields) == 1 && nulls != nil && r.width != 1 {
+			continue
+		}
 		if r.first {
 			r.first = false
 			if r.cfg.HasHeader {

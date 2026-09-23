@@ -358,3 +358,62 @@ func TestArcFR2AMalformedCSVIsRefusedNamingTheInput(t *testing.T) {
 		}
 	})
 }
+
+// TestArcFR2CSVBlankLinesAndLineEndingsAreKeptRaggedRowsRefused holds the
+// three CSV record shapes where PostgreSQL 17.11's COPY refuses with 22P04,
+// on both schema paths:
+//   - a blank line (a trailing one above all) and mixed LF / CRLF / CR line
+//     endings are ANSWERED, as base 962117da answered them identically on
+//     every path — ADR-0012 §5's superset rule;
+//   - a record with more or fewer fields than the header is REFUSED: base
+//     NULL-padded a short record and truncated a long one, silently.
+func TestArcFR2CSVBlankLinesAndLineEndingsAreKeptRaggedRowsRefused(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, path := range []string{"plan_time_schema", "first_batch"} {
+		t.Run(path, func(t *testing.T) {
+			if path == "first_batch" {
+				t.Setenv("WADJET_TEST_NO_READER_SCHEMA", "1")
+			}
+			dir := t.TempDir()
+			for i, c := range []struct{ name, body, want string }{
+				{"trailing_blank_line", "a,b\n1,x\n2,y\n\n", "2 3"},
+				{"blank_lines_between_and_after", "a,b\n1,x\n\n\n2,y\n\n", "2 3"},
+				{"crlf_with_trailing_blank_line", "a,b\r\n1,x\r\n2,y\r\n\r\n", "2 3"},
+				{"lf_then_crlf", "a,b\n1,x\r\n2,y\n", "2 3"},
+				{"crlf_then_lf", "a,b\r\n1,x\n2,y\r\n", "2 3"},
+				{"cr_lf_crlf", "a,b\r1,x\n2,y\r\n", "2 3"},
+				{"short_record", "a,b\n1,x\n2\n", "22P04"},
+				{"long_record", "a,b\n1,x\n2,y,z\n", "22P04"},
+				{"trailing_delimiter", "a,b\n1,x,\n", "22P04"},
+			} {
+				t.Run(c.name, func(t *testing.T) {
+					p := filepath.Join(dir, fmt.Sprintf("f%d.csv", i))
+					if err := os.WriteFile(p, []byte(c.body), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					res, err := db.Query(ctx, fmt.Sprintf("SELECT COUNT(*) AS n, SUM(a) AS s FROM read_csv('%s')", p))
+					if c.want == "22P04" {
+						if err == nil {
+							t.Fatalf("answered %v; want 22P04 (base padded or truncated silently)", res.Rows)
+						}
+						if st := sqlerr.StateOf(err); st != "22P04" {
+							t.Fatalf("SQLSTATE %q (%v), want 22P04", st, err)
+						}
+						return
+					}
+					if err != nil {
+						t.Fatalf("refused (%v); base answered %s on every path", err, c.want)
+					}
+					if got := fmt.Sprint(res.Rows[0]["n"], " ", res.Rows[0]["s"]); got != c.want {
+						t.Fatalf("n s = %s, want %s", got, c.want)
+					}
+				})
+			}
+		})
+	}
+}

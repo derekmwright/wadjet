@@ -19,13 +19,15 @@ import (
 //     inside it a doubled quote is one quote and a delimiter or a line break
 //     is data (`x"y,z"w` is the field `xy,zw`; `"x" y` is `x y`);
 //   - whitespace is data, quoted or not;
-//   - a line ends at LF, CR or CRLF — the FIRST line ending in the file fixes
-//     which, and a different unquoted one later is 22P04 ("unquoted carriage
-//     return found in data" / "unquoted newline found in data");
+//   - a line ends at LF, CR or CRLF, and the three may be mixed in one file
+//     (COPY fixes the first one and refuses a different one later with 22P04;
+//     this reader answered them all as line ends through v0.24.0, on every
+//     path, and keeps that — ADR-0012 §5's superset rule);
 //   - a file that ends inside a quote is 22P04 "unterminated CSV quoted
 //     field" (#1248: encoding/csv's error ended the 100-row sample as if it
 //     were the end of the file, and the query answered the rows before it);
-//   - a blank line is ONE empty unquoted field.
+//   - a blank line is ONE empty unquoted field (the Reader skips it in a file
+//     of more than one column, as it always has, where COPY refuses it).
 //
 // Two differences from PostgreSQL 17 are deliberate (docs/postgres-differences.md):
 // a line holding `\.` is data, not an end-of-data marker (PostgreSQL 18 stopped
@@ -45,20 +47,12 @@ type recordScanner struct {
 	comma byte
 
 	line    int // 1-based line the scanner is on
-	eol     byte
 	started bool
 
 	rec   []byte // the current record's field bytes, unescaped
 	ends  []int  // end offset in rec of each field
 	nulls []bool // per field; only meaningful when anyNull
 }
-
-const (
-	eolNone byte = iota
-	eolNL
-	eolCR
-	eolCRNL
-)
 
 const scanChunk = 64 << 10
 
@@ -151,7 +145,7 @@ func (s *recordScanner) next() (fields []string, nulls []bool, line int, err err
 			// The run up to the next quote is data, line breaks included.
 			i := s.pos
 			for i < s.end && s.buf[i] != '"' {
-				if s.buf[i] == '\n' || (s.buf[i] == '\r' && s.eol == eolCR) {
+				if s.buf[i] == '\n' {
 					s.line++
 				}
 				i++
@@ -185,30 +179,16 @@ func (s *recordScanner) next() (fields []string, nulls []bool, line int, err err
 			continue
 		case '\n':
 			s.pos++
-			if s.eol == eolNone {
-				s.eol = eolNL
-			} else if s.eol != eolNL {
-				return nil, nil, 0, sqlerr.New("22P04", "line %d: unquoted newline found in data", s.line)
-			}
 			s.line++
 			endField()
 		case '\r':
 			s.pos++
-			kind := eolCR
-			if s.eol == eolNone || s.eol == eolCRNL {
-				nc, ok, err := s.peek()
-				if err != nil {
-					return nil, nil, 0, err
-				}
-				if ok && nc == '\n' {
-					s.pos++
-					kind = eolCRNL
-				}
+			nc, ok, err := s.peek()
+			if err != nil {
+				return nil, nil, 0, err
 			}
-			if s.eol == eolNone {
-				s.eol = kind
-			} else if s.eol != kind {
-				return nil, nil, 0, sqlerr.New("22P04", "line %d: unquoted carriage return found in data", s.line)
+			if ok && nc == '\n' {
+				s.pos++
 			}
 			s.line++
 			endField()

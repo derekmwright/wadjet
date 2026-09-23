@@ -6106,20 +6106,35 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     arguments that fit int4 and `bigint` otherwise — so its `SUM` is `bigint`
     and not a float8 that loses the value.
 
-  - **`read_csv` READS THE GRAMMAR OF `COPY … (FORMAT csv)`, WITH TWO
+  - **`read_csv` READS THE GRAMMAR OF `COPY … (FORMAT csv)`, WITH FOUR
     DIFFERENCES.** (Added 2026-09-23, arc FR2 / #1248 #1259.) A field is NULL
     only when it is empty and no part of it was quoted, so `""` is the empty
-    string; a quote opens anywhere in a field; whitespace is data; the first
-    line ending fixes LF, CR or CRLF; and an unterminated quote, a mixed line
-    ending, a blank line in a file of more than one column and a record of
-    the wrong width are `22P04` bad_copy_file_format naming the line — each
-    measured against 17.11's `COPY`. The differences: a line holding `\.` is
-    DATA, not PostgreSQL 17's end-of-data marker (which silently drops every
-    later row, and which PostgreSQL 18 no longer honours in a file either);
-    and a UTF-8 byte-order mark at the start of a file is skipped, where
-    `COPY` keeps it in the first field. Nor are a field's bytes checked
-    against the encoding: `COPY` refuses a NUL byte with `22021`, and this
-    reader stores it.
+    string; a quote opens anywhere in a field; whitespace is data; and an
+    unterminated quote and a record of the wrong width are `22P04`
+    bad_copy_file_format naming the line — each measured against 17.11's
+    `COPY`. The wrong width is refused although base answered it, because
+    base's answer was not meaningful: it NULL-padded a short record and
+    dropped a long record's extra fields, silently. The differences:
+    - A BLANK line in a file of more than one column is SKIPPED, a trailing
+      one at the end of the file above all, where `COPY` refuses it (`22P04
+      missing data`). This is the superset rule: base 962117da skipped it
+      identically on every read path and schema path, and nearly every
+      exported CSV ends with one. In a one-column file a blank line is that
+      column's NULL, as `COPY` reads it. A blank line inside a quoted field
+      is data.
+    - LF, CR and CRLF line endings may be MIXED in one file, where `COPY`
+      fixes the first one and refuses another (`22P04 unquoted carriage
+      return / newline found in data`). Same rule: base read LF and CRLF
+      mixed as record ends on every path (and DuckDB 1.5.5 accepts both). A
+      CR inside an unquoted field therefore ends the record, which is then
+      short and `22P04`; base kept the field with the CR dropped.
+    - A line holding `\.` is DATA, not PostgreSQL 17's end-of-data marker
+      (which silently drops every later row, and which PostgreSQL 18 no
+      longer honours in a file either).
+    - A UTF-8 byte-order mark at the start of a file is skipped, where `COPY`
+      keeps it in the first field.
+    Nor are a field's bytes checked against the encoding: `COPY` refuses a
+    NUL byte with `22021`, and this reader stores it.
 
   - **A FILE READER'S INPUT THAT CANNOT BE OPENED IS REFUSED WITH `COPY`'S
     SQLSTATE, AND `EXPLAIN` OVER IT IS REFUSED TOO.** (Added 2026-09-23, arc

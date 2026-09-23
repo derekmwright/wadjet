@@ -20,14 +20,22 @@ const pgNull = "\x00NULL"
 // pg_csv_grammar_extra_17.11.txt): the documented accepted forms (quoted and
 // unquoted empty fields, whitespace, quotes opening mid-field, doubled
 // quotes, line breaks inside quotes, LF/CR/CRLF line endings) and the
-// documented rejected ones, every one of which is 22P04 bad_copy_file_format
-// (an unterminated quote, a mixed line ending, a record whose field count is
-// not the relation's, a blank line in a two-column file).
+// documented rejected ones that are 22P04 bad_copy_file_format here too (an
+// unterminated quote, a record whose field count is not the relation's —
+// through v0.24.0 a short record was NULL-padded and a long one truncated,
+// silently, which is why those are refused rather than kept).
 //
-// The one deliberate difference is `\.`: PostgreSQL 17 ends the data at a
-// line holding it and reads NO later row; here it is data, as PostgreSQL 18
-// reads it from a file — so the two-column file's `\.` line is a record with
-// one field, which is 22P04 "missing data".
+// The deliberate differences (ADR-0012 §5, the superset rule: PostgreSQL
+// refuses, and base answered the same meaningful rows on every path):
+//   - a BLANK line in a file of more than one column is skipped (COPY: 22P04
+//     "missing data"), a trailing one at the end of a file above all;
+//   - LF, CR and CRLF line endings may be mixed in one file (COPY: 22P04
+//     "unquoted carriage return/newline found in data");
+//   - `\.` is data: PostgreSQL 17 ends the data at a line holding it and
+//     reads NO later row; PostgreSQL 18 reads it from a file as data — here a
+//     one-field record in a two-column file, which is 22P04 "missing data".
+//
+// A cell whose answer differs from 17.11's says so.
 func TestArcFR2CSVRecordGrammarIsPostgreSQLs(t *testing.T) {
 	cells := []struct {
 		name string
@@ -73,12 +81,20 @@ func TestArcFR2CSVRecordGrammarIsPostgreSQLs(t *testing.T) {
 		{"extra_column", "a,b\n1,x,z\n", nil, "22P04"},
 		{"trailing_delim", "a,b\n1,x,\n", nil, "22P04"},
 		{"missing_column", "a,b\n1\n", nil, "22P04"},
-		{"blank_line", "a,b\n1,x\n\n2,y\n", nil, "22P04"},
-		{"trailing_blank_line", "a,b\n1,x\n\n", nil, "22P04"},
-		{"only_blank_line", "a,b\n\n", nil, "22P04"},
+		// Superset (PG 17.11: 22P04 missing data): a blank line is skipped.
+		{"blank_line", "a,b\n1,x\n\n2,y\n", [][]string{{"1", "x"}, {"2", "y"}}, ""},
+		{"trailing_blank_line", "a,b\n1,x\n\n", [][]string{{"1", "x"}}, ""},
+		{"trailing_blank_lines_crlf", "a,b\r\n1,x\r\n\r\n\r\n", [][]string{{"1", "x"}}, ""},
+		{"only_blank_line", "a,b\n\n", [][]string{}, ""},
+		{"blank_line_before_header", "\na,b\n1,x\n", [][]string{{"1", "x"}}, ""},
+		{"blank_line_inside_quotes_is_data", "a,b\n1,\"x\n\ny\"\n", [][]string{{"1", "x\n\ny"}}, ""},
+		// Superset (PG 17.11: 22P04 unquoted CR / newline): line endings mix.
+		{"mixed_lf_then_crlf", "a,b\n1,x\r\n2,y\n", [][]string{{"1", "x"}, {"2", "y"}}, ""},
+		{"mixed_crlf_then_lf", "a,b\r\n1,x\n2,y\r\n", [][]string{{"1", "x"}, {"2", "y"}}, ""},
+		{"mixed_cr_lf_crlf", "a,b\r1,x\n2,y\r\n3,z\r", [][]string{{"1", "x"}, {"2", "y"}, {"3", "z"}}, ""},
+		// A lone CR inside a record ends it, leaving a short record: 22P04
+		// as on 17.11 (base read "xy", dropping the byte).
 		{"cr_in_unquoted_lf", "a,b\n1,x\ry\n", nil, "22P04"},
-		{"mixed_lf_then_crlf", "a,b\n1,x\r\n2,y\n", nil, "22P04"},
-		{"mixed_crlf_then_lf", "a,b\r\n1,x\n2,y\r\n", nil, "22P04"},
 		{"quoted_eod_marker", "a,b\n1,x\n\"\\.\"\n", nil, "22P04"},
 		// PostgreSQL 17 answers {1,x} (end of data); PostgreSQL 18 and this
 		// reader read `\.` as data, a one-field record in a two-column file.

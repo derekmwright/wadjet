@@ -366,14 +366,17 @@ truncated object.
 A `read_csv` file is read with the grammar of PostgreSQL's
 `COPY … (FORMAT csv)`: a field is NULL only when it is empty and no part of
 it was quoted; a quote opens anywhere in a field (`x"y,z"w` is `xy,zw`) and a
-doubled quote inside one is a quote; whitespace is data; and a line ends at
-LF, CR or CRLF, the first one in the file fixing which. The forms `COPY`
-rejects are `22P04` (bad_copy_file_format) naming the line — an unterminated
-quote, a different unquoted line ending later in the file, a blank line in a
-file of more than one column, and a record with more or fewer fields than the
-header. Two differences: a line holding `\.` is data (PostgreSQL 17 ends the
-input there; PostgreSQL 18 does not, in a file), and a UTF-8 byte-order mark
-at the start of a file is skipped.
+doubled quote inside one is a quote; and whitespace is data. An unterminated
+quote and a record with more or fewer fields than the header are `22P04`
+(bad_copy_file_format) naming the line, as `COPY` raises them. Four
+differences, each kept because this reader has always answered it: a line
+ends at LF, CR or CRLF and the three may be mixed in one file (`COPY` refuses
+a line ending other than the file's first); a blank line in a file of more
+than one column is skipped — a trailing one included — where `COPY` refuses
+it (in a one-column file it is that column's NULL, as in `COPY`); a line
+holding `\.` is data (PostgreSQL 17 ends the input there; PostgreSQL 18 does
+not, in a file); and a UTF-8 byte-order mark at the start of a file is
+skipped.
 
 An input that cannot be opened is refused when the statement is planned —
 `EXPLAIN` over it included — with the SQLSTATE `COPY FROM` raises for the
