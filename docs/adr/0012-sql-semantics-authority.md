@@ -6106,15 +6106,22 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     arguments that fit int4 and `bigint` otherwise — so its `SUM` is `bigint`
     and not a float8 that loses the value.
 
-  - **`read_csv` READS THE GRAMMAR OF `COPY … (FORMAT csv)`, WITH FOUR
+  - **`read_csv` READS THE GRAMMAR OF `COPY … (FORMAT csv)`, WITH FIVE
     DIFFERENCES.** (Added 2026-09-23, arc FR2 / #1248 #1259.) A field is NULL
     only when it is empty and no part of it was quoted, so `""` is the empty
     string; a quote opens anywhere in a field; whitespace is data; and an
     unterminated quote and a record of the wrong width are `22P04`
     bad_copy_file_format naming the line — each measured against 17.11's
-    `COPY`. The wrong width is refused although base answered it, because
-    base's answer was not meaningful: it NULL-padded a short record and
-    dropped a long record's extra fields, silently. The differences:
+    `COPY`. A SHORT record is refused although base NULL-padded it, because
+    a stray unquoted line break splits one record into two short ones and
+    padding them answers rows the file does not hold (loud beats plausible;
+    a `\.` line in a multi-column file is such a short record); a record
+    with a value past the header's last column is refused because base
+    dropped that value. The differences:
+    - A trailing delimiter whose extra fields are EMPTY and unquoted (`1,x,`)
+      reads as the record without them, where `COPY` raises `22P04 extra
+      data after last expected column`: base answered it on every path and
+      no value is lost; exporters write it.
     - A BLANK line in a file of more than one column is SKIPPED, a trailing
       one at the end of the file above all, where `COPY` refuses it (`22P04
       missing data`). This is the superset rule: base 962117da skipped it
@@ -6131,8 +6138,9 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     - A line holding `\.` is DATA, not PostgreSQL 17's end-of-data marker
       (which silently drops every later row, and which PostgreSQL 18 no
       longer honours in a file either).
-    - A UTF-8 byte-order mark at the start of a file is skipped, where `COPY`
-      keeps it in the first field.
+    - A UTF-8 byte-order mark at the start of a file is skipped — with
+      `header=false` from the first data value — where `COPY` keeps it in the
+      first field.
     Nor are a field's bytes checked against the encoding: `COPY` refuses a
     NUL byte with `22021`, and this reader stores it.
 

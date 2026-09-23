@@ -158,7 +158,10 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    file and its row, and a Parquet glob's columns are the first file's
    footer's, a later file held to them by name (42703 for a missing column,
    42804 for another type — DuckDB casts). A directory a glob matches is not
-   one of its files. The plan-time read and the execution read the same
+   one of its files. A later CSV file whose header names the first file's
+   columns in another order is read by name; one naming a different set is
+   22P04 naming the file. A Parquet member is read ROW GROUP by row group
+   through the staged reader, so memory follows the row group, not the file. The plan-time read and the execution read the same
    sequence, so this is not a new schema source: `parquetFooterSchema` has
    read the first file's footer since arc FR.
 
@@ -166,7 +169,8 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    #1245). The resolver used to DECLINE it — the rereadable check stat'd a
    missing path and answered "not a regular file" — so the error came at the
    first batch with no SQLSTATE, and EXPLAIN printed a plan. It now asks
-   first, after the capability guard, whether the input can be opened, and
+   first, after the capability guard, whether the input — every regular
+   member of a glob — can be opened, and
    one that cannot is the statement's answer with COPY FROM's class: 58P01
    (missing, or a glob matching no file), 42501 (not readable), 42809 (a
    directory). EXPLAIN is refused with it. The execution's open carries the

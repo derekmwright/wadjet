@@ -347,16 +347,23 @@ schema across the files:
   does), and a later file's value past the sample that does not fit is
   refused like any other, naming THAT file and its own row;
 - a CSV glob with a header reads the first file's first record as the
-  header; a later file whose first record repeats it exactly has that record
-  skipped, and a later file that does not is read whole, as the continuation
-  of a split file;
+  header. A later file whose first record repeats it has that record skipped;
+  one whose first record names the SAME columns in another order is read BY
+  NAME, each field mapped onto the first file's column; one whose first
+  record names some of the columns but not the same set is `22P04` naming
+  the file; and one whose first record names none of them is read whole, as
+  the continuation of a split file;
 - `read_parquet`'s columns are the FIRST file's footer's, and every later
   file is held to them by NAME, in any order: a column it lacks is `42703`
   and one it declares at another type is `42804`, each naming the file
   (DuckDB casts the second silently). Columns a later file adds are not the
   relation's;
 - an empty file contributes no rows (a zero-byte CSV or JSON file, `[]`, a
-  Parquet file with no rows), wherever it falls in the sequence.
+  Parquet file with no row groups), wherever it falls in the sequence. A
+  zero-row Parquet file of more than one column that carries one EMPTY row
+  group — how PyArrow writes an empty table — is refused by the footer
+  validator (`row group 0 column 0 … overlaps row group 0 column 1`), alone
+  or in a glob; that is a known gap of the Parquet reader, not a glob rule.
 
 A JSON file that is not a document is refused with `22P02` naming the file
 and the row: content after its array's closing `]`, an array with no `]`, a
@@ -367,20 +374,29 @@ A `read_csv` file is read with the grammar of PostgreSQL's
 `COPY … (FORMAT csv)`: a field is NULL only when it is empty and no part of
 it was quoted; a quote opens anywhere in a field (`x"y,z"w` is `xy,zw`) and a
 doubled quote inside one is a quote; and whitespace is data. An unterminated
-quote and a record with more or fewer fields than the header are `22P04`
-(bad_copy_file_format) naming the line, as `COPY` raises them. Four
-differences, each kept because this reader has always answered it: a line
+quote, a record with FEWER fields than the header, and a record with a value
+past the header's last column are `22P04` (bad_copy_file_format) naming the
+line, as `COPY` raises them — a short record is refused, not padded with
+NULLs, because a stray unquoted line break splits one record into two short
+ones, and padding them would answer rows the file does not hold. The
+delimiter (`delimiter=`) is one character, which may be any Unicode
+character (`§`, `界`). Five differences, each kept because this reader has
+always answered it: a trailing delimiter whose extra fields are EMPTY
+(`1,x,`) is read as the record without them, where `COPY` refuses "extra
+data"; a line
 ends at LF, CR or CRLF and the three may be mixed in one file (`COPY` refuses
 a line ending other than the file's first); a blank line in a file of more
 than one column is skipped — a trailing one included — where `COPY` refuses
 it (in a one-column file it is that column's NULL, as in `COPY`); a line
 holding `\.` is data (PostgreSQL 17 ends the input there; PostgreSQL 18 does
 not, in a file); and a UTF-8 byte-order mark at the start of a file is
-skipped.
+skipped — the first header name's, or, with `header=false`, the first data
+value's, where `COPY` keeps it in the value.
 
 An input that cannot be opened is refused when the statement is planned —
-`EXPLAIN` over it included — with the SQLSTATE `COPY FROM` raises for the
-same path: `58P01` for one that does not exist (and a glob that matches no
+`EXPLAIN` over it included, and for a glob EVERY matched file is checked,
+not only the one the sample reads — with the SQLSTATE `COPY FROM` raises
+for the same path: `58P01` for one that does not exist (and a glob that matches no
 file), `42501` for one that may not be read, `42809` for a directory.
 
 ```
@@ -549,7 +565,7 @@ All table functions support local file paths and HTTP/HTTPS URLs, fetched throug
 
 CSV and JSON files are read in streaming mode from every source — local paths, glob patterns (expanded lazily, one file open at a time) and HTTP/HTTPS URLs — so only the current batch of rows is held in memory and files larger than available RAM are queryable. Schema is inferred from the first 100 rows, and a later value that does not fit it is a `22P02` (see [A table function in FROM is a relation](#a-table-function-in-from-is-a-relation)).
 
-Local Parquet files — every file of a glob included, one at a time — are opened as file handles (`io.ReaderAt`), enabling page-level random access without reading the entire file into memory. For `read_parquet()` only, an HTTP source is still buffered in full, because Parquet needs random access.
+Local Parquet files — every file of a glob included, one at a time — are opened as file handles (`io.ReaderAt`) and read by ranged reads: the footer, then each column chunk as its ROW GROUP is decoded. The source emits one row group at a time and hands it on before decoding the next, so memory follows the largest row group, not the file (a 1 GB two-file glob of 5,000-row row groups peaks near 60 MiB RSS). For `read_parquet()` only, an HTTP source is still fetched whole, because Parquet needs random access; its row groups are decoded one at a time from that buffer.
 
 ### postgres_scan / postgres_query
 
