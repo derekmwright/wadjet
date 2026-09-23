@@ -933,3 +933,45 @@ func refuseUnrebuildableBody(kind, sql string, info *plansql.SelectInfo,
 	}
 	return nil
 }
+
+// ShadowingWithError refuses a correlated subquery whose OWN WITH item has the
+// name of a WITH item in scope around it.
+//
+// PostgreSQL reads the subquery's own item. This engine's per-row re-run plans
+// the body against the statement's CTE list with the body's items AFTER the
+// enclosing ones, and both the logical builder (first match) and the physical
+// CTE cache (keyed by name) then read the ENCLOSING item — a zero-row answer
+// where PostgreSQL answers `1 | 2` for same-schema items, a missing-column
+// refusal otherwise (arc DC round 5; docs/internals/nested-with-scope-precedence.md
+// records why the precedence cannot simply be reversed). Loud, with its
+// construct named, until the CTE identity is scope-aware.
+type ShadowingWithError struct {
+	Kind, Name, SQL string
+}
+
+func (e *ShadowingWithError) Error() string {
+	return fmt.Sprintf("a WITH item inside a correlated subquery that shadows an outer WITH "+
+		"item is not supported: the %s subquery's own WITH item %q has the name of a WITH item "+
+		"of the enclosing query; rename one of them\n  subquery: %s", e.Kind, e.Name, e.SQL)
+}
+
+// FatalEvalError satisfies the marker the pipeline drivers recover on.
+func (e *ShadowingWithError) FatalEvalError() error { return e }
+
+// SQLState is PostgreSQL's feature_not_supported.
+func (e *ShadowingWithError) SQLState() string { return "0A000" }
+
+// refuseShadowingWith answers the error when a correlated subquery's own WITH
+// shadows an enclosing WITH item, and nil otherwise.
+func refuseShadowingWith(kind, sql string, info *plansql.SelectInfo,
+	refs []plansql.OuterRef, enclosing map[string]bool) error {
+	if len(refs) == 0 || info == nil || len(enclosing) == 0 {
+		return nil
+	}
+	for _, c := range info.CTEs {
+		if enclosing[strings.ToLower(c.Name)] {
+			return &ShadowingWithError{Kind: kind, Name: c.Name, SQL: sql}
+		}
+	}
+	return nil
+}

@@ -97,7 +97,12 @@ func (p *Planner) subqueryDeclOption() expr.CompileOption {
 	// other two plan-time answers because it is the same question asked of
 	// the same plan, and a compile site that took only the first two would
 	// refuse `d.b IN (SELECT c_row.b FROM t)` — a query PostgreSQL answers.
-	return expr.Options(env, expr.WithSubqueryScope(p.SubqueryInnerColumns()))
+	names := make([]string, 0, len(p.Ctes))
+	for _, c := range p.Ctes {
+		names = append(names, c.Name)
+	}
+	return expr.Options(env, expr.WithSubqueryScope(p.SubqueryInnerColumns()),
+		expr.WithEnclosingCTEs(names))
 }
 
 // SubqueryOutputArity is how many columns a subquery's SELECT list has, from

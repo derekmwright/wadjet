@@ -1315,6 +1315,9 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 	// and a reference this rewrite cannot carry declines it — the scalar
 	// subquery then runs per outer row, which answers PostgreSQL's rows
 	// (#1232, decorrelation_body_refs.go).
+	if bodyWithShadowsEnclosing(info, ctes) {
+		return nil, pred, false
+	}
 	bodyOuter, undecided := bodyOuterColumns(info, outerColMap, ctes, annotate)
 	if bodyOuter != nil {
 		// INNERMOST-FIRST, in both directions: with the body's namespace
@@ -1944,6 +1947,9 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 	// cannot carry it declines the whole thing, and the subquery stays an
 	// executable predicate re-run per outer row (#1232,
 	// decorrelation_body_refs.go).
+	if bodyWithShadowsEnclosing(info, ctes) {
+		return nil, nil
+	}
 	bodyOuter, undecided := bodyOuterColumns(info, outerColMap, ctes, annotate)
 	if bodyOuter != nil {
 		// INNERMOST-FIRST, in both directions: with the body's namespace
@@ -3381,6 +3387,9 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 	// the enclosing query is lifted into the classification below, and a
 	// reference this rewrite cannot carry declines it (#1232,
 	// decorrelation_body_refs.go).
+	if bodyWithShadowsEnclosing(info, ctes) {
+		return nil, nil
+	}
 	bodyOuter, undecided := bodyOuterColumns(info, outerColMap, ctes, annotate)
 	if bodyOuter != nil {
 		// INNERMOST-FIRST, in both directions: with the body's namespace

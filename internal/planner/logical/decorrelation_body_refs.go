@@ -337,3 +337,26 @@ func andAll(parts []plansql.Node) plansql.Node {
 // against the subquery's own relation — and the EXISTS rewrite dropped it
 // outright under a comment saying the shape "shouldn't happen" (#1104).
 func outerOnlyDisposition(negated bool) (hoist bool) { return !negated }
+
+// bodyWithShadowsEnclosing reports whether the subquery's OWN WITH declares an
+// item with the name of an enclosing WITH item. Such a body is not
+// decorrelated: the build side would be planned with the enclosing item's
+// definition (scopeCTEs puts the body's items after the enclosing ones, and the
+// builder takes the first match), which is not the relation PostgreSQL reads.
+// Declined, the subquery reaches the per-row re-run, which refuses it by name
+// (expr.ShadowingWithError).
+func bodyWithShadowsEnclosing(info *plansql.SelectInfo, ctes []plansql.CTEDef) bool {
+	if info == nil || len(info.CTEs) == 0 || len(ctes) == 0 {
+		return false
+	}
+	outer := make(map[string]bool, len(ctes))
+	for _, c := range ctes {
+		outer[strings.ToLower(c.Name)] = true
+	}
+	for _, c := range info.CTEs {
+		if outer[strings.ToLower(c.Name)] {
+			return true
+		}
+	}
+	return false
+}
