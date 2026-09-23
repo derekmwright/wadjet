@@ -47,6 +47,13 @@ func refuseTableLessSelect(n *logical.Node) error {
 			" scan stage has no files the dispatcher can build task inputs from",
 			ErrTableLessSelectDistributed, n.FuncName)
 	}
+	if logical.ProjectsASet(n) {
+		// A set-returning SELECT item is expanded by the local planner's
+		// ProjectSet, which no stage fragment carries: the statement runs on
+		// the coordinator-local pipeline, as a table function does.
+		return fmt.Errorf("%w: a set-returning SELECT item is expanded by the local pipeline",
+			ErrTableLessSelectDistributed)
+	}
 	for _, child := range n.Children {
 		if err := refuseTableLessSelect(child); err != nil {
 			return err

@@ -28,7 +28,7 @@ func TestArcPCArraySetsAgreeOnBothPaths(t *testing.T) {
 		{"unnest and subscripts", `SELECT id, unnest(c_arr) AS e, generate_subscripts(c_arr, 1) AS o FROM typemx_nested WHERE id < 40 ORDER BY id, o`},
 		{"unnest counted", `SELECT count(*) AS c FROM (SELECT unnest(c_arr) AS e FROM typemx_nested) s`},
 		{"unnest grouped", `SELECT o, count(*) AS c FROM (SELECT generate_subscripts(c_arr, 1) AS o FROM typemx_nested) s GROUP BY o ORDER BY o`},
-		{"= ANY array column", `SELECT count(*) AS c FROM typemx_nested WHERE 'a' = ANY(c_arr)`},
+		{"= ANY array column", `SELECT count(*) AS c FROM typemx_nested WHERE 'a00005-1' = ANY(c_arr)`},
 		{"<> ALL array column", `SELECT count(*) AS c FROM typemx_nested WHERE 'zz' <> ALL(c_arr)`},
 		{"= ANY projected", `SELECT id, 'b' = ANY(c_arr) AS c FROM typemx_nested WHERE id BETWEEN 100 AND 104 ORDER BY id`},
 	} {
