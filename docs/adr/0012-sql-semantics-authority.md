@@ -59,6 +59,56 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
    to begin with, and are recorded here so a future gate does not mistake
    them for undecided.)
 
+   - **Where PostgreSQL refuses by TYPE, wadjet refuses — and the supersets it
+     keeps are the ones whose value is meaningful on every arm.** (Added
+     2026-09-22, arc BR: #1249 #1073 #1205 #1061 #1060 #1065 #1233 #1236
+     #1216.) The binder now asks, before any row, the type questions
+     PostgreSQL's parse analysis asks: an aggregate's argument class
+     (`function sum(text) does not exist`, 42883; `sum(unknown) is not
+     unique`, 42725), a comparison's operand classes (`operator does not
+     exist: bigint = text`, 42883), a fold's arms (`COALESCE types … cannot be
+     matched`, 42804), a window's placement in HAVING (42P20), a star's columns
+     under a grouping (42803) and a set operation's ORDER BY term (42P01 /
+     42703 / 0A000). Each of those answered a misleading value before — NULL
+     for a SUM over text, zero rows for a type mismatch, every row for a HAVING
+     that was never applied — measured over the 22-type matrix on five arms
+     (the tables are in the arc's landing notes and the gates are
+     `physical.TestArcBR*` and `coordinator.TestArcBRWherePostgresRefuses
+     EveryArmRefuses`). What stays WIDER than PostgreSQL, deliberately:
+
+     - The accept-sets read this engine's types by what the WIRE declares
+       them: PORT and PROTOCOL are int4 and DURATION is int8 (nanoseconds,
+       #834), so SUM/AVG/STDDEV/VARIANCE/CORR/COVAR and the comparisons treat
+       them as numbers where PostgreSQL's `interval` has no stddev.
+     - MEDIAN, MODE and QUANTILE_* are DuckDB's spellings (PostgreSQL has none,
+       or only the ordered-set form) and answer over numbers; over anything
+       else they are 42883, where they answered NULL.
+     - A TEXT operand compared DIRECTLY (`=`, `<`, BETWEEN, CASE … WHEN,
+       NULLIF) with a DATE, TIMESTAMP, UUID, IPV6, CIDR or BOOL operand is
+       read through that type's input function, identically on every arm
+       (#826's column spelling). Against a NUMBER it is refused: #504's
+       reading compared the RENDERINGS, so `'12.75' = 12.7500` was unequal —
+       and against IPV4, MACADDR and BYTEA it matched nothing where every row
+       matched. Every MEMBERSHIP test (IN, = ANY / ALL) between text and a
+       typed operand is refused too: it answered 0 rows on the single arm and
+       every row on the DAG.
+     - An UNQUOTED numeric literal keeps its recorded readings: against TEXT
+       its source text (#504), against a TIMESTAMP the epoch-millisecond
+       instant the carrier holds. A literal is refused only against a
+       BOOLEAN, and a boolean literal only against a number (`1 = true`,
+       `id = true`, `(id > 1) = 1`).
+     - A set operation's ORDER BY matches a result name case-insensitively:
+       the published names arrive folded, so `ORDER BY "ID"` over `id`
+       answers where PostgreSQL raises 42703.
+
+     Refused where PostgreSQL ANSWERS, loudly and by name: `string_agg` over
+     BYTEA (0A000 — the accumulator renders each value with Go's fmt), a
+     quoted literal written in a ROW's or ARRAY's own grammar inside a fold
+     (0A000 — the fold answered the literal's TEXT), and two ROWs of
+     different SHAPES in a fold or a set operation (42804 — PostgreSQL's
+     anonymous records answer; this engine's ROW columns are typed like
+     PostgreSQL's NAMED composites, which refuse).
+
    - **A result with NO COLUMNS AT ALL is refused, where PostgreSQL answers
      with a header and zero rows.** (Added 2026-09-08, #1008 / #1010.)
      PostgreSQL sends a RowDescription with fields for every statement that
@@ -303,9 +353,16 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      more than it helps, and no BI client depends on it. Where the oracle
      needs to agree, use a `C`-collation database rather than exempting
      string ordering.
-   - **MIN/MAX over BOOL, UUID, MACADDR, BYTEA and ROW.** (Widened
+   - **MIN/MAX over BOOL, UUID, MACADDR and BYTEA.** (Widened
      2026-08-25, #569: BOOL was the only one recorded, and the rest are the
-     same class.) PostgreSQL's `min`/`max` are defined over exactly 22 input
+     same class. ROW LEFT this list 2026-09-22, arc BR, #1061: its value was
+     a whole-row lexicographic extreme, but the field path over it declared
+     STRING on the single-process arms and FLOAT64 on the DAG, and the plain
+     aggregate declared a ROW with no fields on one arm and with them on the
+     other — an answer that differs by arm. It is 42883 `function min(record)
+     does not exist`, PostgreSQL's own refusal; re-admitting it needs the
+     aggregate's ROW declaration carried on the single path and the field
+     path over an aggregate slot typed from it.) PostgreSQL's `min`/`max` are defined over exactly 22 input
      types, enumerated live from `pg_proc` on postgres:17-alpine:
      `anyarray`, `anyenum`, `bigint`, `character`, `date`, `double
      precision`, `inet`, `integer`, `interval`, `money`, `numeric`, `oid`,
@@ -313,13 +370,12 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `timestamp`/`timestamptz`, `xid8`. `boolean`, `uuid`, `macaddr` and
      `bytea` are NOT among them — each errors with "function min(...) does
      not exist" — and neither is `record`: `min(ROW(…))` errors the same way
-     (verified live), so wadjet's MIN/MAX over its ROW type is in this set
-     too. All five are EXTENSIONS, not divergences PostgreSQL took a position
-     on. `bool_and`/`bool_or` remain available and are still the
+     (verified live). The four are EXTENSIONS, not divergences PostgreSQL
+     took a position on. `bool_and`/`bool_or` remain available and are still the
      PostgreSQL-idiomatic spelling for the boolean question.
 
      The consequence for the gates is the part worth writing down: those
-     five types cannot be gated against PostgreSQL at all, in any shape —
+     four types cannot be gated against PostgreSQL at all, in any shape —
      grouped, windowed or otherwise. `internal/oracle/typematrix` is their
      differential coverage (wadjet against itself across the stage DAG, the
      kill switches and the pooled/poisoned batch arms), and the four
@@ -330,8 +386,9 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      neither — so their total orders (`internal/engine/exec/kernel/
      container_sort.go`) are wadjet-defined, not a choice against a
      PostgreSQL answer. This bullet is ONLY MAP and VECTOR: ROW is `record`,
-     which PostgreSQL HAS as a type but offers no `min`/`max` over (it is in
-     the extension set above), and ARRAY maps to PostgreSQL's `anyarray`,
+     which PostgreSQL HAS as a type but offers no `min`/`max` over (and
+     wadjet's MIN/MAX over it is refused since arc BR, above; its ORDER BY is
+     unchanged), and ARRAY maps to PostgreSQL's `anyarray`,
      which DOES have `min`/`max` — so ARRAY is the one container whose
      ordering is a choice measurable against a PostgreSQL answer, even though
      no fixture gates it there today.

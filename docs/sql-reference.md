@@ -1690,6 +1690,18 @@ itself.
 | `MAX_BY(return_col, sort_col)` | Value at row where sort_col is maximum | Skips nulls |
 | `OHLCV(ts, price, volume)` | The whole bar as a ROW — see below | Skips a row where ANY argument is null |
 
+Each aggregate takes the argument types PostgreSQL gives it, read over this
+engine's types by what the wire declares them (PORT and PROTOCOL are integers,
+DURATION a bigint): `SUM`, `AVG`, the `STDDEV`/`VARIANCE` family, `CORR`,
+`COVAR_*`, `MEDIAN`, `MODE` and the percentiles take a number; `BOOL_AND`,
+`BOOL_OR` and `EVERY` a boolean; `STRING_AGG` text; `MIN`/`MAX` and the
+ordering argument of `MIN_BY`/`MAX_BY` any type with an order — every type but
+`ROW`. Any other argument is refused before a row is read with PostgreSQL's
+`42883 function sum(text) does not exist` (a quoted or NULL literal to `SUM`/
+`AVG` is `42725 … is not unique`); `STRING_AGG` over `BYTES` is 0A000. A
+numeric-looking text column — a CSV field the reader inferred as text — must
+be cast: `SUM(CAST(n AS BIGINT))`.
+
 `DISTINCT` is accepted by every aggregate in this table, not only `COUNT`:
 `SUM(DISTINCT x)`, `AVG(DISTINCT x)` and `STRING_AGG(DISTINCT x, ',')` each
 de-duplicate their input at the value's exact type before aggregating.

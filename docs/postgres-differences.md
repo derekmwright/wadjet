@@ -324,7 +324,27 @@ Storage and wire use bigint nanoseconds, OID 20, versus PostgreSQL’s microseco
 
 **MIN/MAX accepts additional types.**
 
-BOOL, UUID, MAC, BYTES and ROW have defined orders here; PostgreSQL lacks these aggregates. BYTES uses bytewise order and retains bytea OID 17. (ADR-0012 §5/#569, #570)
+BOOL, UUID, MAC, BYTES, MAP and VECTOR have defined orders here; PostgreSQL lacks these aggregates. BYTES uses bytewise order and retains bytea OID 17. MIN/MAX over a ROW is 42883, as on PostgreSQL. (ADR-0012 §5/#569, #570, #1061)
+
+**Aggregate arguments read the wire types.**
+
+SUM, AVG, STDDEV, VARIANCE, CORR and COVAR accept PORT, PROTOCOL and DURATION as the int4/int8 the wire declares them; PostgreSQL's `interval` has no STDDEV. MEDIAN, MODE and QUANTILE_* answer over numbers and raise 42883 over anything else. Every other argument PostgreSQL has no overload for raises its 42883 (`function sum(text) does not exist`), and `SUM('5')` / `SUM(NULL)` its 42725. `string_agg` over BYTEA raises 0A000 where PostgreSQL answers. (ADR-0012 §5/arc BR, #1249)
+
+**Text compares directly with dates, times, UUIDs, IPv6/CIDR and booleans.**
+
+`ts_col = text_col`, `uuid_col < text_col` and the other direct comparisons read the text through the typed side's input and answer; PostgreSQL raises 42883. Text against a number, an IPv4, a MAC or BYTEA raises 42883 here too, and so does every IN / = ANY between text and a typed operand. (ADR-0012 §5/arc BR, #826, #1073)
+
+**A number literal against a timestamp reads epoch milliseconds.**
+
+`c_ts >= 1700000000000` compares against the instant that many milliseconds after the epoch; PostgreSQL raises 42883. A number against a boolean, and a boolean literal against a number, raise 42883 on both. (ADR-0012 §5/arc BR, #1216)
+
+**Two ROW shapes do not fold.**
+
+A CASE, COALESCE, GREATEST, LEAST or set operation over two ROW columns of different shapes raises 42804, as PostgreSQL does for named composite types; its anonymous `ROW(…)` records answer. A quoted literal in a ROW's or ARRAY's own grammar inside such a fold raises 0A000 where PostgreSQL reads it. (ADR-0012 §5/arc BR, #1060, #1065)
+
+**A set operation's ORDER BY matches result names case-insensitively.**
+
+`ORDER BY "ID"` over a result column `id` answers; PostgreSQL raises 42703. Qualified names and expressions are refused as on PostgreSQL. (ADR-0012 §5/arc BR, #1236)
 
 **DISTINCT works on additional aggregates.**
 
