@@ -464,14 +464,15 @@ func setOpArmTypeConflict(node *logical.Node) error {
 			// ROW on both arms and resolves nothing, and the single-process
 			// path then read arm 2's rows under arm 1's field list while the
 			// DAG answered differently (#1065); PostgreSQL 17.11 refuses the
-			// pair at parse analysis. The shapes are spelled in the message:
-			// this engine's ROW has no type name to carry.
+			// pair at parse analysis with 42846 (`UNION could not convert
+			// type rownt to rowt`, measured). The shapes are spelled where
+			// the server names its composite types.
 			if want.Typ == parquet.TypeRow && ct.Typ == parquet.TypeRow {
 				a := parquet.Column{Type: parquet.TypeRow, Fields: want.Fields}
 				b := parquet.Column{Type: parquet.TypeRow, Fields: ct.Fields}
 				if !foldCompatible(a, b) {
-					return sqlerr.New("42804", "%s types %s and %s cannot be matched: result column %q",
-						op, foldTypeName(a), foldTypeName(b), outNames[col])
+					return sqlerr.New("42846", "%s could not convert type %s to %s: result column %q",
+						op, foldTypeName(b), foldTypeName(a), outNames[col])
 				}
 			}
 			if setOpNoCarrier(want.Typ, ct.Typ) {

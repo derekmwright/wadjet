@@ -35,9 +35,8 @@ import (
 // The pair a message names is PostgreSQL's: the type resolved so far against
 // the first arm that cannot join it, with a CASE's ELSE read FIRST (the
 // server puts the default result at the head of the list). Two ROWs of
-// different shapes are 42804 here — this engine's ROW is a structural type
-// with no name for the server's 42846 sentence to carry — and the message
-// spells each shape. A QUOTED literal beside a ROW or an ARRAY is that
+// different shapes are the server's 42846 `could not convert type`, with each
+// shape spelled where it would name a composite type. A QUOTED literal beside a ROW or an ARRAY is that
 // container's own input: text not written in its grammar (`(…)`, `{…}`) is
 // PostgreSQL's 22P02, and text that is is 0A000 here — PostgreSQL reads it and
 // this fold answered the literal's TEXT as the value (`GREATEST(c_arr, '{x}')`
@@ -114,6 +113,16 @@ func refuseFoldArms(kind string, arms []plansql.Node, typeOf func(plansql.Node) 
 		}
 		if foldCompatible(common, col) {
 			continue
+		}
+		if common.Type == parquet.TypeRow && col.Type == parquet.TypeRow {
+			// Two ROW SHAPES: PostgreSQL's two composite types, and its
+			// 42846 — measured, `COALESCE could not convert type rownt to
+			// rowt` (the later arm to the type resolved so far).
+			k := kind
+			if k == "CASE" {
+				k = "CASE/WHEN"
+			}
+			return sqlerr.New("42846", "%s could not convert type %s to %s", k, foldTypeName(col), foldTypeName(common))
 		}
 		return sqlerr.New("42804", "%s types %s and %s cannot be matched", kind, foldTypeName(common), foldTypeName(col))
 	}
