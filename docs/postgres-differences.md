@@ -332,7 +332,7 @@ SUM, AVG, STDDEV, VARIANCE, CORR and COVAR accept PORT, PROTOCOL and DURATION as
 
 **Text compares with typed values, pair by pair.**
 
-Text compared with an integer, double, numeric, PORT, PROTOCOL, DURATION, UUID, IPv6 or CIDR value — directly, in an IN list or against an IN subquery — answers through the value's text; with a DATE, TIMESTAMP or boolean it answers directly and in an IN list. PostgreSQL raises 42883 for all of them. A set-operation subquery body (UNION, INTERSECT, EXCEPT) follows the same types. Text against REAL, BYTEA, IPv4 or MAC, text membership against a DATE/TIMESTAMP/boolean subquery, and two text/typed COLUMNS as a JOIN key raise 42883 here too. (ADR-0012 §5/arc BR, #826, #1073)
+Text compared with an integer, double, numeric, PORT, PROTOCOL, DURATION, UUID, IPv6 or CIDR value — directly, in an IN list or against an IN subquery — answers through the value's text; with a DATE, TIMESTAMP or boolean it answers directly and in an IN list. PostgreSQL raises 42883 for all of them. A set-operation subquery body (UNION, INTERSECT, EXCEPT) is kept only when each arm selects `CAST(x AS TEXT)` of a value of the compared type; any other text there raises 42883. Text against REAL, BYTEA, IPv4 or MAC, text membership against a DATE/TIMESTAMP/boolean subquery, and two text/typed COLUMNS as a JOIN key raise 42883 here too. (ADR-0012 §5/arc BR, #826, #1073)
 
 **A number literal against a timestamp reads epoch milliseconds.**
 

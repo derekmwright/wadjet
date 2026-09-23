@@ -109,9 +109,13 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        | bytea, ipv4, macaddr | 42883 (0 of 20 matched) | 42883 (0 single, 20 DAG) |
 
        A SET-OPERATION subquery body (UNION ALL / UNION / INTERSECT /
-       EXCEPT) takes the subquery column: measured per type, the kept types
-       answered identically on every arm through each operation and the
-       refused ones were arm-dependent or wrong there too (arc BR round 3).
+       EXCEPT) is kept only where its text PROVABLY converts: every arm of
+       the body is `CAST(x AS TEXT)` of a value of the typed side's own
+       (kept) class. There the DAG casts the body's text to the typed side
+       while the single arms compare the text, so any other text converts
+       data-dependently — #1073's `id IN (SELECT product … UNION ALL …)`
+       answered 0 rows on the single arms and failed the cast on the DAG —
+       and is 42883 (arc BR round 3b).
        One shape keeps no text reading for any type: two plain COLUMNS as a
        JOIN key (the hash-join key path: #615's error on three arms, 0 rows
        on the shuffled one, and 0 rows for every text/typed derived-column
