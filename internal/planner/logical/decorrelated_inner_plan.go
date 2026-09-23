@@ -63,6 +63,16 @@ func decorrelatedInnerPlan(info *plansql.SelectInfo, innerOnly []plansql.Node,
 	if !innerRelationsAreBuildable(info, ctes) {
 		return nil, false
 	}
+	// A QUALIFY or a set operation is not carried by the build side this
+	// pass assembles, and a body it does not reproduce decides which rows
+	// the subquery yields: the IN rewrite dropped `QUALIFY ROW_NUMBER() OVER
+	// (…) > 3` and answered 1, 2, 3 for PostgreSQL's equivalent zero rows
+	// (round-2 review, B7; ADR-0021 §1s). Decline, on every consumer that
+	// builds here — IN, EXISTS and the scalar comparison — and the per-row
+	// rerun answers.
+	if info.QualifyExpr != nil || strings.TrimSpace(info.Qualify) != "" || info.Union != nil {
+		return nil, false
+	}
 	// Decline a derived table or CTE JOINED to another relation, on EITHER arm.
 	// Its Project publication and the join's collision renaming are two identities;
 	// the DAG carried-column model cannot safely express both (ADR-0021 §1).

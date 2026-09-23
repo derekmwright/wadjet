@@ -3,6 +3,7 @@
 package logical
 
 import (
+	"math"
 	"strconv"
 	"strings"
 
@@ -93,18 +94,41 @@ func lateralBoundPerOuterRow(info *plansql.SelectInfo, correlatedParts []string,
 	if !okL || !okO {
 		return lateralBoundRefusal(info, "its LIMIT/OFFSET is not a non-negative integer constant")
 	}
+	// `LIMIT 0` is empty for every outer row and for the whole relation
+	// alike, so the body keeps it as written (round-2 review, B5: the
+	// inequality-correlated and the DISTINCT `LIMIT 0` bodies were right on
+	// five arms before the rewrite refused them).
+	if hasLimit && limit == 0 {
+		return nil
+	}
 	if info.Union != nil {
 		return lateralBoundRefusal(info, "the body is a set operation")
 	}
-	if info.Distinct {
-		return lateralBoundRefusal(info, "the body carries DISTINCT")
+	// The body's OWN QUALIFY runs in the same window layer as the rank this
+	// rewrite mints, so the rank would number the rows BEFORE the QUALIFY
+	// removed any — `QUALIFY rn > 1 … LIMIT 1` became `rn > 1 AND rn <= 1`,
+	// zero rows for PostgreSQL's equivalent three (round-2 review, B1).
+	// Numbering the rows the QUALIFY leaves needs a second window layer
+	// above the first, which a single block cannot express; refused.
+	if info.QualifyExpr != nil || strings.TrimSpace(info.Qualify) != "" {
+		return lateralBoundRefusal(info, "the body carries its own QUALIFY, and the bound would number the rows before that clause removes any")
 	}
+	// THE KEY RULE, checked on the parsed predicate and not on its text
+	// (round-2 review, B6): every correlated part must be `<inner column> =
+	// <outer column>` — one side a bare column of the body's own relations,
+	// the other a bare column of the enclosing query. An opposite side that
+	// mixes inner and outer references (`i.k = o.k + i.id - 3`) is not a
+	// restriction on an inner column at all, and the partition it would name
+	// is not the one PostgreSQL evaluates per outer row; an outer EXPRESSION
+	// (`o.k + 0`) is a join key this engine does not yet bind (it answered
+	// zero rows with or without the bound; recorded), so it is refused here
+	// rather than partitioned on a guess.
 	parts := make([]plansql.Node, 0, len(correlatedParts))
 	for _, cp := range correlatedParts {
-		innerCol := extractInnerColumn(cp, leftAliases)
-		if innerCol == "" {
+		innerCol, ok := lateralEqualityKey(cp, leftAliases)
+		if !ok {
 			return lateralBoundRefusal(info, "its correlated predicate "+
-				sqlerr.Quote(strings.TrimSpace(cp))+" is not an equality on an inner column, so there is no key to partition the bound by")
+				sqlerr.Quote(strings.TrimSpace(cp))+" is not `<inner expression> = <outer column>`, so there is no key to partition the bound by")
 		}
 		term := strings.TrimSpace(innerCol)
 		if aggregates {
@@ -117,6 +141,18 @@ func lateralBoundPerOuterRow(info *plansql.SelectInfo, correlatedParts []string,
 			return lateralBoundRefusal(info, "its correlation key "+sqlerr.Quote(term)+" cannot be read as a column")
 		}
 		parts = append(parts, ref)
+	}
+	if info.Distinct {
+		// A DISTINCT over EXACTLY the correlation key yields at most one row
+		// per key, so `LIMIT n` (n >= 1, no OFFSET) is the identity and the
+		// bound is dropped; any other bound over a DISTINCT body is refused,
+		// because the QUALIFY filter runs below the DISTINCT (round-2 review,
+		// B5/B6).
+		if lateralDistinctOverKeyOnly(info, parts) && hasLimit && limit >= 1 && (!hasOffset || offset == 0) {
+			info.Limit, info.Offset, info.OrderBy = "", "", nil
+			return nil
+		}
+		return lateralBoundRefusal(info, "the body carries DISTINCT")
 	}
 	order, err := lateralWindowOrder(info, injectedLead)
 	if err != nil {
@@ -132,21 +168,88 @@ func lateralBoundPerOuterRow(info *plansql.SelectInfo, correlatedParts []string,
 		pred = &plansql.CmpExpr{Left: rank, Op: ">", Right: &plansql.Lit{Value: strconv.FormatInt(offset, 10), Kind: plansql.LitNumber}}
 	}
 	if hasLimit {
-		upper := &plansql.CmpExpr{Left: rank, Op: "<=",
-			Right: &plansql.Lit{Value: strconv.FormatInt(offset+limit, 10), Kind: plansql.LitNumber}}
-		if pred == nil {
-			pred = upper
-		} else {
-			pred = &plansql.AndNode{Left: pred, Right: upper}
+		// SATURATED: `LIMIT 9223372036854775807 OFFSET 1` is a valid bound
+		// whose sum wraps below zero (round-2 review, B3).
+		upper := offset + limit
+		if upper < offset {
+			upper = math.MaxInt64
 		}
-	}
-	if info.QualifyExpr != nil {
-		pred = &plansql.AndNode{Left: info.QualifyExpr, Right: pred}
+		up := &plansql.CmpExpr{Left: rank, Op: "<=",
+			Right: &plansql.Lit{Value: strconv.FormatInt(upper, 10), Kind: plansql.LitNumber}}
+		if pred == nil {
+			pred = up
+		} else {
+			pred = &plansql.AndNode{Left: pred, Right: up}
+		}
 	}
 	info.QualifyExpr = pred
 	info.Qualify = pred.String()
 	info.Limit, info.Offset, info.OrderBy = "", "", nil
 	return nil
+}
+
+// lateralEqualityKey reads a correlated part as `<inner expression> = <outer
+// column>` and returns the inner side's text. The OUTER side must be a bare
+// column of the enclosing query; the INNER side may be any expression over the
+// body's own relations alone (`i.k + 0`, `i.k % 2` partition correctly on
+// every arm) — a side that mixes inner and outer references, an inequality,
+// or an outer EXPRESSION is not a key this rewrite may partition by.
+func lateralEqualityKey(cp string, leftAliases map[string]bool) (string, bool) {
+	node, err := plansql.ParseExpression(cp)
+	if err != nil || node == nil {
+		return "", false
+	}
+	cmp, ok := node.(*plansql.CmpExpr)
+	if !ok || cmp.Op != "=" {
+		return "", false
+	}
+	outerCol := func(n plansql.Node) bool {
+		ref, ok := n.(*plansql.ColRef)
+		return ok && ref.Table != "" && leftAliases[strings.ToLower(ref.Table)]
+	}
+	innerOnly := func(n plansql.Node) bool {
+		refs, err := plansql.ColumnRefs(n)
+		if err != nil || len(refs) == 0 {
+			return false
+		}
+		for _, r := range refs {
+			if r.Table != "" && leftAliases[strings.ToLower(r.Table)] {
+				return false
+			}
+		}
+		return true
+	}
+	switch {
+	case outerCol(cmp.Left) && innerOnly(cmp.Right):
+		return cmp.Right.String(), true
+	case outerCol(cmp.Right) && innerOnly(cmp.Left):
+		return cmp.Left.String(), true
+	}
+	return "", false
+}
+
+// lateralDistinctOverKeyOnly reports whether a DISTINCT body's list is
+// exactly the correlation key(s) — one row per key at most.
+func lateralDistinctOverKeyOnly(info *plansql.SelectInfo, keys []plansql.Node) bool {
+	want := map[string]bool{}
+	for _, k := range keys {
+		if ref, ok := k.(*plansql.ColRef); ok {
+			want[strings.ToLower(ref.Column)] = true
+		}
+	}
+	if len(want) == 0 {
+		return false
+	}
+	for _, c := range info.Columns {
+		if c.Star || c.IsAgg || c.IsWindow || c.ASTExpr == nil {
+			return false
+		}
+		ref, ok := c.ASTExpr.(*plansql.ColRef)
+		if !ok || !want[strings.ToLower(ref.Column)] {
+			return false
+		}
+	}
+	return true
 }
 
 // lateralBoundRefusal is the one sentence every refused bound carries.
@@ -202,6 +305,23 @@ func lateralWindowOrder(info *plansql.SelectInfo, injectedLead int) ([]plansql.W
 				}
 			}
 		}
+		// A SELECT-list ALIAS (`… i.v * -1 AS v … ORDER BY v`) names the item's
+		// EXPRESSION, which PostgreSQL resolves before any input column of
+		// that name; the window reads its input, where the alias does not
+		// exist yet, so it read the source `v` instead (round-2 review, B2).
+		if ref, ok := term.(*plansql.ColRef); ok && ref.Table == "" && ordinal == 0 {
+			for _, col := range user {
+				if col.Alias != "" && strings.EqualFold(col.Alias, ref.Column) {
+					if col.Star || col.IsAgg && !info.Distinct && false {
+						break
+					}
+					if col.ASTExpr != nil {
+						term = col.ASTExpr
+					}
+					break
+				}
+			}
+		}
 		if ordinal > 0 {
 			if ordinal > len(user) {
 				return nil, sqlerr.New("42P10", "ORDER BY position %d is not in select list", ordinal)
@@ -243,4 +363,15 @@ func lateralConstBound(text string, isLimit bool) (int64, bool, bool) {
 		return 0, false, false
 	}
 	return n, true, true
+}
+
+// lateralBoundRemovesTheOneRow reports whether a body's bound leaves NO row
+// of a one-row body: `LIMIT 0`, or an OFFSET of one or more.
+func lateralBoundRemovesTheOneRow(info *plansql.SelectInfo) bool {
+	limit, hasLimit, okL := lateralConstBound(info.Limit, true)
+	offset, hasOffset, okO := lateralConstBound(info.Offset, false)
+	if !okL || !okO {
+		return false
+	}
+	return (hasLimit && limit == 0) || (hasOffset && offset >= 1)
 }

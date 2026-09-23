@@ -3,6 +3,7 @@
 package logical
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -2171,6 +2172,15 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	// What an EMPTY inner input means for this lateral, decided BEFORE the
 	// key injection below adds a GROUP BY of its own. See lateralEmptyInput.
 	empty := lateralEmptyInputOf(subInfo, hasAgg, len(correlatedParts) > 0)
+	// An ungrouped aggregate's one row is REMOVED by `LIMIT 0` or by any
+	// OFFSET, for every outer row, so there is no default row to pad and the
+	// INNER spelling answers nothing (round-2 review, B1: `COUNT(*) … LIMIT
+	// 0` answered five NULL pads for PostgreSQL's zero rows). The bound is
+	// decided here, before the pad, because the pad is what the bound
+	// removes.
+	if empty.ungroupedAggregate && lateralBoundRemovesTheOneRow(subInfo) {
+		empty = lateralEmptyInput{}
+	}
 	// An UNGROUPED aggregate with a HAVING yields its one row only where the
 	// HAVING holds over that row — and over an EMPTY input that row is the
 	// default row (COUNT 0, everything else NULL). The pad below is that row;
@@ -2221,6 +2231,9 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	// list, so an ORDINAL in the body's own ORDER BY still counts the list
 	// the query wrote (lateralWindowOrder).
 	injectedLead := 0
+	// declinedUnderStar records publishLiftedRefs' bare-star decline for the
+	// single-process refusal (Node.LiftedRefDeclinedUnderStar).
+	declinedUnderStar := false
 	if len(correlatedParts) > 0 {
 		// The inner correlation key must be SELECTED, for non-aggregated laterals too,
 		// and GROUPED only when the subquery aggregates (#591, #767 part 2).
@@ -2361,7 +2374,9 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 		// residual routes ABOVE it, they are emitted and hidden from a STAR.
 		lifted, lerr := publishLiftedRefs(subInfo, correlatedParts,
 			leftAliases, aggregates, outer, left, &injected)
-		if lerr != nil {
+		if errors.Is(lerr, errLiftedRefDeclinedUnderStar) {
+			declinedUnderStar = true
+		} else if lerr != nil {
 			return nil, "", lateralEmptyInput{}, nil, nil, lerr
 		}
 		starLifted = append(starLifted, lifted...)
@@ -2424,6 +2439,7 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	// and nothing above does (#991, block_visible_output.go). Where there is
 	// none the plan is unchanged.
 	right = dropBlockHiddenSlots(right)
+	right.LiftedRefDeclinedUnderStar = declinedUnderStar
 	// An AGGREGATED lateral groups on the key, and an aggregate publishes a
 	// group key under the key's own text -- which is the collision the slot
 	// exists to avoid, one operator lower. Record the slot as the key's
