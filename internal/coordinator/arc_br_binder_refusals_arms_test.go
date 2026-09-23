@@ -41,6 +41,8 @@ type brArmCell struct {
 	// same marks a control over the type matrix: it must answer, and every
 	// arm must answer the same.
 	same bool
+	// answers marks a control that must answer on every arm, values aside.
+	answers bool
 }
 
 func brArmCells() []brArmCell {
@@ -166,6 +168,134 @@ func brArmCells() []brArmCell {
 	}
 }
 
+// brAggregateCells is the aggregate seam x the 22-type matrix on five arms
+// (#1249, #1061): every aggregate the parser knows over every column type,
+// refused where PostgreSQL 17.11 has no overload and answered — identically
+// on every arm — where it has one (or where ADR-0012 §5 records the wider
+// set: MIN/MAX over BOOL, UUID, MACADDR, BYTEA, MAP and VECTOR). The accepted
+// sets are written out from the measurement, not derived from the rule.
+func brAggregateCells() []brArmCell {
+	flat := []string{"c_bool", "c_i32", "c_i64", "c_f32", "c_f64", "c_str", "c_bytes", "c_ts",
+		"c_ipv4", "c_ipv6", "c_cidr", "c_mac", "c_port", "c_proto", "c_dur", "c_uuid", "c_date", "c_dec"}
+	nested := []string{"c_arr", "c_row", "c_rownest", "c_map", "c_vec"}
+	numeric := map[string]bool{"c_i32": true, "c_i64": true, "c_f32": true, "c_f64": true,
+		"c_dec": true, "c_port": true, "c_proto": true, "c_dur": true}
+	table := func(c string) string {
+		for _, n := range nested {
+			if n == c {
+				return "typemx_nested"
+			}
+		}
+		return "typemx"
+	}
+	accepts := func(agg, c string) bool {
+		switch agg {
+		case "sum", "avg", "stddev", "stddev_samp", "stddev_pop", "variance", "var_samp",
+			"var_pop", "median", "mode", "corr", "covar_samp", "covar_pop":
+			return numeric[c]
+		case "bool_and", "bool_or", "every":
+			return c == "c_bool"
+		case "string_agg":
+			return c == "c_str"
+		case "min", "max":
+			return c != "c_row" && c != "c_rownest"
+		}
+		return true
+	}
+	var out []brArmCell
+	for _, agg := range []string{"sum", "avg", "min", "max", "count", "stddev", "stddev_samp",
+		"stddev_pop", "variance", "var_samp", "var_pop", "bool_and", "bool_or", "every",
+		"approx_distinct", "median", "mode", "string_agg", "corr", "covar_samp", "covar_pop"} {
+		for _, c := range append(append([]string{}, flat...), nested...) {
+			call := agg + "(" + c + ")"
+			switch agg {
+			case "string_agg":
+				call = "string_agg(" + c + ", ',')"
+			case "corr", "covar_samp", "covar_pop":
+				call = agg + "(" + c + ", " + c + ")"
+			}
+			cell := brArmCell{name: "agg/" + agg + "/" + c,
+				sql: "SELECT " + call + " AS v FROM " + table(c) + " WHERE id < 20"}
+			switch {
+			case accepts(agg, c):
+				cell.same = true
+			case agg == "string_agg" && c == "c_bytes":
+				cell.state, cell.msg = "0A000", "string_agg over bytea is not supported"
+			default:
+				cell.state, cell.msg = "42883", "function "+agg+"("
+			}
+			// approx_distinct answers a different count on the DAG arms, and
+			// AVG over REAL a different float, at base and at this tip — both
+			// PostgreSQL-valid shapes, recorded as filing candidates in arc
+			// BR's notes; this table asserts only that they ANSWER.
+			if agg == "approx_distinct" || (agg == "avg" && c == "c_f32") {
+				cell.same, cell.answers = false, true
+			}
+			out = append(out, cell)
+		}
+	}
+	// The positions an aggregate's argument can be written in, and PostgreSQL's
+	// own sentence for each spelling of `unknown`.
+	for _, pos := range []struct{ name, sql string }{
+		{"plain", "SELECT SUM(customer) AS v FROM lat_ord"},
+		{"distinct", "SELECT SUM(DISTINCT customer) AS v FROM lat_ord"},
+		{"grouped", "SELECT id, SUM(customer) AS v FROM lat_ord GROUP BY id"},
+		{"window", "SELECT id, SUM(customer) OVER () AS v FROM lat_ord"},
+		{"having", "SELECT id FROM lat_ord GROUP BY id HAVING SUM(customer) IS NULL"},
+		{"orderBy", "SELECT id FROM lat_ord GROUP BY id ORDER BY SUM(customer)"},
+		{"filter", "SELECT SUM(customer) FILTER (WHERE id > 1) AS v FROM lat_ord"},
+		{"concat", "SELECT SUM(customer || 'x') AS v FROM lat_ord"},
+		{"upper", "SELECT SUM(upper(customer)) AS v FROM lat_ord"},
+		{"castText", "SELECT SUM(CAST(id AS TEXT)) AS v FROM lat_ord"},
+		{"derived", "SELECT SUM(x.c) AS v FROM (SELECT customer AS c FROM lat_ord) x"},
+		{"cte", "WITH w AS (SELECT customer AS c FROM lat_ord) SELECT SUM(c) AS v FROM w"},
+		{"scalarSubquery", "SELECT (SELECT SUM(customer) FROM lat_ord) AS v"},
+		{"caseBranch", "SELECT SUM(CASE WHEN id > 1 THEN customer END) AS v FROM lat_ord"},
+		{"underCoalesce", "SELECT COALESCE(SUM(customer), 'none') AS v FROM lat_ord"},
+		{"arithmetic", "SELECT SUM(total) + SUM(customer) AS v FROM lat_ord"},
+	} {
+		out = append(out, brArmCell{name: "aggPos/" + pos.name, sql: pos.sql,
+			state: "42883", msg: "function sum(text) does not exist"})
+	}
+	out = append(out,
+		brArmCell{name: "aggRow/fieldOfMin", sql: "SELECT (min(c_row)).b AS v FROM typemx_nested WHERE id < 10",
+			state: "42883", msg: "function min(record) does not exist"},
+		brArmCell{name: "aggRow/groupedMax", sql: "SELECT g, MAX(c_row) AS v FROM typemx_nested WHERE id < 10 GROUP BY g",
+			state: "42883", msg: "function max(record) does not exist"},
+		brArmCell{name: "aggRow/windowMin", sql: "SELECT id, MIN(c_row) OVER () AS v FROM typemx_nested WHERE id < 3",
+			state: "42883", msg: "function min(record) does not exist"},
+		brArmCell{name: "aggRow/minByOrdering", sql: "SELECT min_by(id, c_row) AS v FROM typemx_nested WHERE id < 10",
+			state: "42883", msg: "function min_by(bigint, record) does not exist"},
+		brArmCell{name: "aggRowOk/maxByValue", sql: "SELECT max_by(c_row, id) AS v FROM typemx_nested WHERE id < 10", same: true},
+		brArmCell{name: "aggUnknown/sumQuoted", sql: "SELECT SUM('5') AS v",
+			state: "42725", msg: "function sum(unknown) is not unique"},
+		brArmCell{name: "aggUnknown/sumNull", sql: "SELECT SUM(NULL) AS v FROM lat_ord",
+			state: "42725", msg: "function sum(unknown) is not unique"},
+		brArmCell{name: "aggUnknown/avgQuoted", sql: "SELECT AVG('5') AS v",
+			state: "42725", msg: "function avg(unknown) is not unique"},
+		brArmCell{name: "aggUnknown/boolAndNotABoolean", sql: "SELECT bool_and('5') AS v FROM lat_ord",
+			state: "22P02", msg: `invalid input syntax for type boolean: "5"`},
+		brArmCell{name: "aggUnknown/stddevNotANumber", sql: "SELECT stddev('t') AS v FROM lat_ord",
+			state: "22P02", msg: `invalid input syntax for type double precision: "t"`},
+		brArmCell{name: "aggUnknown/medianQuoted", sql: "SELECT median('5') AS v FROM lat_ord",
+			state: "42883", msg: "function median(unknown) does not exist"},
+		brArmCell{name: "aggLit/sumBoolean", sql: "SELECT SUM(true) AS v FROM lat_ord",
+			state: "42883", msg: "function sum(boolean) does not exist"},
+		brArmCell{name: "aggLit/boolAndInteger", sql: "SELECT bool_and(1) AS v FROM lat_ord",
+			state: "42883", msg: "function bool_and(integer) does not exist"},
+		brArmCell{name: "aggLit/stringAggInteger", sql: "SELECT string_agg(1, ',') AS v FROM lat_ord",
+			state: "42883", msg: "function string_agg(integer, unknown) does not exist"},
+		brArmCell{name: "aggOk/sumOne", sql: "SELECT SUM(1) AS v FROM lat_ord", want: "rows=1 3"},
+		brArmCell{name: "aggOk/sumTotal", sql: "SELECT SUM(total) AS v FROM lat_ord", want: "rows=1 350"},
+		brArmCell{name: "aggOk/sumCastText", sql: "SELECT SUM(CAST(CAST(id AS TEXT) AS BIGINT)) AS v FROM lat_ord", want: "rows=1 6"},
+		brArmCell{name: "aggOk/minQuoted", sql: "SELECT min('5') AS v FROM lat_ord", want: "rows=1 5"},
+		brArmCell{name: "aggOk/stringAggText", sql: "SELECT string_agg(DISTINCT customer, ',') AS v FROM lat_ord",
+			want: "rows=1 Alice,Bob,Carol"},
+		brArmCell{name: "aggOk/boolAndPredicate", sql: "SELECT bool_and(total > 0) AS v FROM lat_ord", want: "rows=1 false"},
+	)
+	return out
+}
+
 // brRunArm runs one statement on one arm, returning the rendered rows or the
 // error — keeping the error itself, not its text, so the SQLSTATE is read.
 type brArm struct {
@@ -238,7 +368,7 @@ func TestArcBRWherePostgresRefusesEveryArmRefuses(t *testing.T) {
 	t.Cleanup(cancel)
 	arms := brArms(t, ctx)
 	controls := 0
-	for _, tc := range brArmCells() {
+	for _, tc := range append(brArmCells(), brAggregateCells()...) {
 		t.Run(tc.name, func(t *testing.T) {
 			first := ""
 			for i, arm := range arms {
@@ -257,6 +387,9 @@ func TestArcBRWherePostgresRefusesEveryArmRefuses(t *testing.T) {
 				}
 				if err != nil {
 					t.Errorf("%s\n  arm  %s\n  refused: %v\n  PostgreSQL 17.11 answers it", tc.sql, arm.name, err)
+					continue
+				}
+				if tc.answers {
 					continue
 				}
 				if tc.same {

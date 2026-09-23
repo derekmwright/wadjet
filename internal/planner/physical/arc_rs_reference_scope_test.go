@@ -240,10 +240,10 @@ func rsCells() []rsCell {
 }
 
 func TestArcRSAQualifiedReferenceNamesOneRelationInScope(t *testing.T) {
-	cat := &fakeCatalog{tables: map[string][]string{
-		"lat_ord":  {"id", "customer", "total"},
-		"lat_item": {"id", "order_id", "product", "amount"},
-	}}
+	// TYPED like the coordinator's fixture. The name-only fakeCatalog types
+	// every column it does not special-case as the zero TypeID — BOOLEAN —
+	// and `SUM(o.total)` over a boolean is a 42883 refusal since arc BR.
+	cat := brCatalog()
 	answered := 0
 	for _, tc := range rsCells() {
 		t.Run(tc.name, func(t *testing.T) {

@@ -141,6 +141,11 @@ func TestWindowedMinMaxEveryType(t *testing.T) {
 			for _, col := range mbTypeCols() {
 				col := col
 				t.Run(col.Name, func(t *testing.T) {
+					if col.Type == parquet.TypeRow {
+						mmAssertRowMinMaxRefused(t, db, fmt.Sprintf(
+							"SELECT MIN(%s) OVER () AS lo FROM mbtypes", col.Name))
+						return
+					}
 					ref := wmmPartitionRef(t, db, col.Name, where)
 
 					// The whole partition as an explicit ROWS frame: the
@@ -241,6 +246,11 @@ func TestWindowedMinMaxOverEverythingEveryType(t *testing.T) {
 			for _, col := range mbTypeCols() {
 				col := col
 				t.Run(col.Name, func(t *testing.T) {
+					if col.Type == parquet.TypeRow {
+						mmAssertRowMinMaxRefused(t, db, fmt.Sprintf(
+							"SELECT MIN(%s) OVER () AS lo FROM mbtypes", col.Name))
+						return
+					}
 					scalar, err := db.Query(ctx, fmt.Sprintf(
 						"SELECT MIN(%s) AS lo, MAX(%s) AS hi FROM mbtypes%s", col.Name, col.Name, where))
 					if err != nil {
@@ -289,6 +299,11 @@ func TestWindowedMinMaxIgnoresNullsPerPostgres(t *testing.T) {
 			for _, col := range mbTypeCols() {
 				col := col
 				t.Run(col.Name, func(t *testing.T) {
+					if col.Type == parquet.TypeRow {
+						mmAssertRowMinMaxRefused(t, db, fmt.Sprintf(
+							"SELECT MIN(%s) OVER () AS lo FROM mbtypes", col.Name))
+						return
+					}
 					where := wmmWhere(arm.rows,
 						fmt.Sprintf("((g = 0 AND %s IS NULL) OR (g = 1 AND id < 900))", col.Name))
 					ref, err := db.Query(ctx, fmt.Sprintf(

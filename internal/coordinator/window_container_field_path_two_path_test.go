@@ -4,6 +4,7 @@ package coordinator
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,13 +52,17 @@ func TestAWindowedContainerFieldPathAgreesOnEveryArm(t *testing.T) {
 	n := typematrix.Nested
 	for _, tc := range []struct {
 		name, sql, want string
+		// refuse, when set, is the refusal every arm must raise instead.
+		refuse string
 	}{
 		{
-			// The ROW field of a ROW: `c_rownest.s` is ROW(x INT64).
+			// The ROW field of a ROW: `c_rownest.s` is ROW(x INT64). MIN over
+			// a ROW is PostgreSQL's 42883 since arc BR (#1061) — the key's
+			// materialization is still asserted, through PARTITION BY below.
 			name: "row-field/min-over-an-empty-window",
 			sql: "SELECT x.id AS id, MIN(c_rownest.s) OVER () AS v FROM " + n +
 				" x WHERE x.id < 3 ORDER BY x.id",
-			want: "3 rows: 0|map[x:0];1|map[x:0];2|map[x:0];",
+			refuse: "function min(record) does not exist",
 		},
 		{
 			// The ARRAY field of a ROW: `c_rownest.l` is ARRAY(STRING).
@@ -97,15 +102,26 @@ func TestAWindowedContainerFieldPathAgreesOnEveryArm(t *testing.T) {
 			name: "ctl-whole-container-column/min-over-an-empty-window",
 			sql: "SELECT x.id AS id, MIN(c_rownest) OVER () AS v FROM " + n +
 				" x WHERE x.id < 3 ORDER BY x.id",
-			want: "3 rows: 0|map[l:[n00000] m:[map[key:k0 value:0]] s:map[x:0]];" +
-				"1|map[l:[n00000] m:[map[key:k0 value:0]] s:map[x:0]];" +
-				"2|map[l:[n00000] m:[map[key:k0 value:0]] s:map[x:0]];",
+			refuse: "function min(record) does not exist",
+		},
+		{
+			// The whole-container control over a container MIN still takes.
+			name: "ctl-whole-array-column/min-over-an-empty-window",
+			sql: "SELECT x.id AS id, MIN(c_arr) OVER () AS v FROM " + n +
+				" x WHERE x.id < 3 ORDER BY x.id",
+			want: "3 rows: 0|[];1|[];2|[];",
 		},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {
 				res, err := arm.run(tc.sql)
+				if tc.refuse != "" {
+					if err == nil || !strings.Contains(err.Error(), tc.refuse) {
+						t.Errorf("the %s arm: %v, want the refusal %q\n  SQL: %s", arm.name, err, tc.refuse, tc.sql)
+					}
+					continue
+				}
 				if err != nil {
 					t.Errorf("the %s arm refused: %v\n  SQL: %s", arm.name, err, tc.sql)
 					continue

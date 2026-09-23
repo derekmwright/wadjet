@@ -91,6 +91,11 @@ func refuseInvalidRowFields(node plansql.Node, scope *colScope) error {
 		if err := expr.RefuseUnresolvableCall(fc, declOf); err != nil {
 			return err
 		}
+		// An AGGREGATE's argument class, on the same walk and for the same
+		// reason (validate_aggregate_args.go, #1249).
+		if err := refuseAggregateArgument(fc, aggArgTypeOf(decls)); err != nil {
+			return err
+		}
 	}
 	return nil
 }

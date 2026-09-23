@@ -210,3 +210,126 @@ func TestArcBRSetOperationOrderByNamesAResultColumn(t *testing.T) {
 		{"SELECT a.id FROM lat_ord a UNION ALL (SELECT b.id FROM lat_item b ORDER BY b.id LIMIT 2)", "", ""},
 	})
 }
+
+// Every aggregate the parser knows x every column type of the matrix: the
+// argument class is refused where PostgreSQL 17.11 has no overload (#1249,
+// #1061). The accepted sets below are written out from the measurement, not
+// derived from the rule's own table.
+func TestArcBRAggregateArgumentClassMatchesPostgres(t *testing.T) {
+	numeric := []string{"c_i32", "c_i64", "c_f32", "c_f64", "c_dec", "c_port", "c_proto", "c_dur"}
+	all := []string{"c_bool", "c_i32", "c_i64", "c_f32", "c_f64", "c_str", "c_bytes", "c_ts",
+		"c_ipv4", "c_ipv6", "c_cidr", "c_mac", "c_port", "c_proto", "c_dur", "c_uuid", "c_date",
+		"c_dec", "c_arr", "c_row", "c_rownest", "c_map", "c_vec"}
+	notRow := []string{}
+	for _, c := range all {
+		if c != "c_row" && c != "c_rownest" {
+			notRow = append(notRow, c)
+		}
+	}
+	accepts := map[string][]string{
+		"sum": numeric, "avg": numeric, "stddev": numeric, "stddev_samp": numeric,
+		"stddev_pop": numeric, "variance": numeric, "var_samp": numeric, "var_pop": numeric,
+		"median": numeric, "mode": numeric,
+		"bool_and": {"c_bool"}, "bool_or": {"c_bool"}, "every": {"c_bool"},
+		"min": notRow, "max": notRow,
+		"count": all, "approx_distinct": all,
+	}
+	var cells []brCell
+	for agg, ok := range accepts {
+		okSet := map[string]bool{}
+		for _, c := range ok {
+			okSet[c] = true
+		}
+		for _, c := range all {
+			sql := fmt.Sprintf("SELECT %s(%s) AS v FROM tm", agg, c)
+			if okSet[c] {
+				cells = append(cells, brCell{sql, "", ""})
+				continue
+			}
+			cells = append(cells, brCell{sql, "42883", "function " + agg + "("})
+		}
+	}
+	for _, c := range all {
+		switch c {
+		case "c_str":
+			cells = append(cells, brCell{"SELECT string_agg(c_str, ',') AS v FROM tm", "", ""})
+		case "c_bytes":
+			cells = append(cells, brCell{"SELECT string_agg(c_bytes, ',') AS v FROM tm", "0A000", "string_agg over bytea"})
+		default:
+			cells = append(cells, brCell{"SELECT string_agg(" + c + ", ',') AS v FROM tm", "42883", "function string_agg("})
+		}
+		for _, f := range []string{"corr", "covar_samp", "covar_pop"} {
+			sql := fmt.Sprintf("SELECT %s(%s, c_f64) AS v FROM tm", f, c)
+			if contains(numeric, c) {
+				cells = append(cells, brCell{sql, "", ""})
+			} else {
+				cells = append(cells, brCell{sql, "42883", "function " + f + "("})
+			}
+		}
+		// min_by's ORDERING argument is the ordered position.
+		sql := "SELECT min_by(id, " + c + ") AS v FROM tm"
+		if c == "c_row" || c == "c_rownest" {
+			cells = append(cells, brCell{sql, "42883", "function min_by(bigint, record)"})
+		} else {
+			cells = append(cells, brCell{sql, "", ""})
+		}
+	}
+	cells = append(cells,
+		// PostgreSQL's own sentences, verbatim where the types have its names.
+		brCell{"SELECT SUM(customer) AS v FROM lat_ord", "42883", "function sum(text) does not exist"},
+		brCell{"SELECT AVG(c_ts) AS v FROM tm", "42883", "function avg(timestamp without time zone) does not exist"},
+		brCell{"SELECT bool_and(c_i32) AS v FROM tm", "42883", "function bool_and(integer) does not exist"},
+		brCell{"SELECT MIN(c_row) AS v FROM tm", "42883", "function min(record) does not exist"},
+		brCell{"SELECT string_agg(c_i32, ',') AS v FROM tm", "42883", "function string_agg(integer, unknown) does not exist"},
+		brCell{"SELECT corr(c_str, c_f64) AS v FROM tm", "42883", "function corr(text, double precision) does not exist"},
+		// Every position the argument can be written in.
+		brCell{"SELECT SUM(DISTINCT customer) AS v FROM lat_ord", "42883", "function sum(text)"},
+		brCell{"SELECT id, SUM(customer) AS v FROM lat_ord GROUP BY id", "42883", "function sum(text)"},
+		brCell{"SELECT id, SUM(customer) OVER () AS v FROM lat_ord", "42883", "function sum(text)"},
+		brCell{"SELECT id FROM lat_ord GROUP BY id HAVING SUM(customer) IS NULL", "42883", "function sum(text)"},
+		brCell{"SELECT id FROM lat_ord GROUP BY id ORDER BY SUM(customer)", "42883", "function sum(text)"},
+		brCell{"SELECT SUM(customer) FILTER (WHERE id > 1) AS v FROM lat_ord", "42883", "function sum(text)"},
+		brCell{"SELECT SUM(customer || 'x') AS v FROM lat_ord", "42883", "function sum(text)"},
+		brCell{"SELECT SUM(upper(customer)) AS v FROM lat_ord", "42883", "function sum(text)"},
+		brCell{"SELECT SUM(CAST(id AS TEXT)) AS v FROM lat_ord", "42883", "function sum(text)"},
+		brCell{"SELECT SUM(x.c) AS v FROM (SELECT customer AS c FROM lat_ord) x", "42883", "function sum(text)"},
+		brCell{"WITH w AS (SELECT customer AS c FROM lat_ord) SELECT SUM(c) AS v FROM w", "42883", "function sum(text)"},
+		brCell{"SELECT (SELECT SUM(customer) FROM lat_ord) AS v", "42883", "function sum(text)"},
+		brCell{"SELECT SUM(CASE WHEN id > 1 THEN customer END) AS v FROM lat_ord", "42883", "function sum(text)"},
+		brCell{"SELECT COALESCE(SUM(customer), 'none') AS v FROM lat_ord", "42883", "function sum(text)"},
+		brCell{"SELECT SUM(total) + SUM(customer) AS v FROM lat_ord", "42883", "function sum(text)"},
+		brCell{"SELECT (min(c_row)).b AS v FROM tm", "42883", "function min(record)"},
+		// SQL's `unknown`, resolved against the overloads.
+		brCell{"SELECT SUM('5') AS v", "42725", "function sum(unknown) is not unique"},
+		brCell{"SELECT AVG(NULL) AS v FROM lat_ord", "42725", "function avg(unknown) is not unique"},
+		brCell{"SELECT median('5') AS v FROM lat_ord", "42883", "function median(unknown) does not exist"},
+		brCell{"SELECT bool_and('5') AS v FROM lat_ord", "22P02", `invalid input syntax for type boolean: "5"`},
+		brCell{"SELECT stddev('t') AS v FROM lat_ord", "22P02", `invalid input syntax for type double precision: "t"`},
+		brCell{"SELECT SUM(true) AS v FROM lat_ord", "42883", "function sum(boolean) does not exist"},
+		brCell{"SELECT bool_and(1) AS v FROM lat_ord", "42883", "function bool_and(integer) does not exist"},
+		brCell{"SELECT bool_or(1.5) AS v FROM lat_ord", "42883", "function bool_or(numeric) does not exist"},
+		// Controls: the literal each overload DOES take.
+		brCell{"SELECT SUM(1) AS v FROM lat_ord", "", ""},
+		brCell{"SELECT SUM(1.5) AS v FROM lat_ord", "", ""},
+		brCell{"SELECT min('5') AS v FROM lat_ord", "", ""},
+		brCell{"SELECT bool_and('t') AS v FROM lat_ord", "", ""},
+		brCell{"SELECT count(NULL) AS v FROM lat_ord", "", ""},
+		brCell{"SELECT string_agg('5', ',') AS v FROM lat_ord", "", ""},
+		brCell{"SELECT SUM(CAST(customer AS BIGINT)) AS v FROM lat_ord", "", ""},
+		brCell{"SELECT SUM(CAST(total AS DECIMAL(9,2))) AS v FROM lat_ord", "", ""},
+		brCell{"SELECT SUM(CAST(customer AS INTERVAL)) AS v FROM lat_ord", "", ""},
+		brCell{"SELECT max_by(c_row, id) AS v FROM tm", "", ""},
+		brCell{"SELECT percentile_cont(0.5, c_f64) AS v FROM tm", "", ""},
+		brCell{"SELECT quantile_cont(c_str, 0.5) AS v FROM tm", "42883", "function quantile_cont(text"},
+	)
+	runBRCells(t, cells)
+}
+
+func contains(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}

@@ -5,8 +5,10 @@ package wadjet
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -42,6 +44,11 @@ func TestMinMaxEveryType(t *testing.T) {
 	for _, col := range mbTypeCols() {
 		col := col
 		t.Run(col.Name, func(t *testing.T) {
+			if col.Type == parquet.TypeRow {
+				mmAssertRowMinMaxRefused(t, db, fmt.Sprintf(
+					"SELECT MIN(%s) AS lo, MAX(%s) AS hi FROM mbtypes", col.Name, col.Name))
+				return
+			}
 			wantLo, wantHi, ok := mmOrderByReference(t, db, col.Name)
 
 			scalar, err := db.Query(ctx, fmt.Sprintf(
@@ -187,4 +194,15 @@ func mmOutputType(in parquet.TypeID) parquet.TypeID { return in }
 func mmWiden(t *testing.T, in parquet.TypeID, v any) any {
 	t.Helper()
 	return v
+}
+
+// mmAssertRowMinMaxRefused is MIN/MAX over a ROW since arc BR: PostgreSQL has
+// no min(record), and this engine's answer declared its field path STRING on
+// one arm and FLOAT64 on the other (#1061), so it is 42883 on every arm.
+func mmAssertRowMinMaxRefused(t *testing.T, db *DB, sql string) {
+	t.Helper()
+	_, err := db.Query(context.Background(), sql)
+	if err == nil || sqlerr.StateOf(err) != "42883" || !strings.Contains(err.Error(), "(record) does not exist") {
+		t.Fatalf("%s: got %v, want 42883 function min(record) does not exist (#1061)", sql, err)
+	}
 }

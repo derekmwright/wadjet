@@ -252,11 +252,15 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 			want: "cols=[v:FLOAT64] rows=1 | 1.234567e+13"},
 		{name: "953 boundary control: SUM(DURATION) grouped", sql: k2grp("SUM", "c_dur"),
 			want: "cols=[v:FLOAT64] rows=1 | 1.234567e+13"},
-		{name: "953 boundary: SUM(DATE) stays float8 in both spellings",
+		// SUM over a DATE answered the sum of the epoch DAYS under float8 —
+		// PostgreSQL has no sum(date) and raises 42883, which is what both
+		// spellings raise since arc BR (#1249); the pin that recorded the
+		// float8 answer is replaced by PostgreSQL's refusal.
+		{name: "953 boundary: SUM(DATE) is PostgreSQL's 42883 in both spellings",
 			sql:  k2win("SUM", "c_date"),
-			want: "cols=[v:FLOAT64] rows=1 | 8.583688e+07"},
+			want: "ERR function sum(date) does not exist"},
 		{name: "953 boundary control: SUM(DATE) grouped", sql: k2grp("SUM", "c_date"),
-			want: "cols=[v:FLOAT64] rows=1 | 8.583688e+07"},
+			want: "ERR function sum(date) does not exist"},
 
 		// #953's grouped half reaches the accumulator through FOUR producers
 		// and the whole-table cells above exercise only the ones a scalar

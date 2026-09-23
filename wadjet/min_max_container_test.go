@@ -47,6 +47,11 @@ func mmcQueryOne(t *testing.T, db *DB, sql, col string) any {
 
 func TestMinMaxOverContainers(t *testing.T) {
 	db := coOpen(t)
+	// ROW is not in this table since arc BR: PostgreSQL has no min(record),
+	// and the field path over this engine's answer declared a different type
+	// per arm (#1061). The ORDER BY over a ROW is unchanged.
+	mmAssertRowMinMaxRefused(t, db, "SELECT MIN(c_row) AS v FROM "+coTable)
+	mmAssertRowMinMaxRefused(t, db, "SELECT MAX(c_row) AS v FROM "+coTable)
 
 	cases := []struct {
 		col     string
@@ -57,12 +62,6 @@ func TestMinMaxOverContainers(t *testing.T) {
 		// array is a VALUE and the least one — it must not be confused with
 		// the NULL row, which MIN/MAX ignore.
 		{"c_arr", []any{}, []any{"b"}},
-		// ROW: field-wise in declaration order, a NULL field after a
-		// non-NULL one. a="x" beats a="y"; among the three a="x" rows,
-		// b=1 < b=2 < b=NULL.
-		{"c_row",
-			map[string]any{"a": "x", "b": int64(1)},
-			map[string]any{"a": "y", "b": int64(1)}},
 		// MAP: entry-wise over key-sorted entries, so the EMPTY map is least
 		// and {b:1} — whose first key is the largest — is greatest.
 		{"c_map",
@@ -112,7 +111,7 @@ func TestMinMaxOverContainers(t *testing.T) {
 // would surface an empty container instead.
 func TestMinMaxOverContainersEmptyInput(t *testing.T) {
 	db := coOpen(t)
-	for _, col := range []string{"c_arr", "c_row", "c_map", "c_vec"} {
+	for _, col := range []string{"c_arr", "c_map", "c_vec"} {
 		sql := fmt.Sprintf("SELECT MIN(%s) AS lo, MAX(%s) AS hi FROM %s WHERE id < 0",
 			col, col, coTable)
 		res, err := db.Query(context.Background(), sql)
@@ -179,7 +178,7 @@ func mmcOpenGrouped(t *testing.T) *DB {
 func TestMinMaxOverContainersGrouped(t *testing.T) {
 	db := mmcOpenGrouped(t)
 	res, err := db.Query(context.Background(),
-		"SELECT g, MIN(c_arr) AS lo, MAX(c_arr) AS hi, MIN(c_row) AS rlo, MAX(c_row) AS rhi "+
+		"SELECT g, MIN(c_arr) AS lo, MAX(c_arr) AS hi "+
 			"FROM "+mmcGroupTable+" GROUP BY g ORDER BY g")
 	if err != nil {
 		t.Fatalf("grouped min/max: %v", err)
@@ -192,22 +191,18 @@ func TestMinMaxOverContainersGrouped(t *testing.T) {
 			"g": int32(1),
 			// NULL rows are ignored, so the group's extremes come from the
 			// two live rows.
-			"lo":  []any{"a", "z"},
-			"hi":  []any{"m"},
-			"rlo": map[string]any{"a": "a", "b": nil},
-			"rhi": map[string]any{"a": "m", "b": int64(2)},
+			"lo": []any{"a", "z"},
+			"hi": []any{"m"},
 		},
 		{
 			// Every row NULL: MIN/MAX are NULL, not an empty container.
-			"g": int32(2), "lo": nil, "hi": nil, "rlo": nil, "rhi": nil,
+			"g": int32(2), "lo": nil, "hi": nil,
 		},
 		{
 			// Only EMPTY / all-null-field containers: a real value, not NULL.
-			"g":   int32(3),
-			"lo":  []any{},
-			"hi":  []any{},
-			"rlo": map[string]any{"a": nil, "b": nil},
-			"rhi": map[string]any{"a": nil, "b": nil},
+			"g":  int32(3),
+			"lo": []any{},
+			"hi": []any{},
 		},
 	}
 	for i, w := range want {
