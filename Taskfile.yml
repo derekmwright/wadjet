@@ -56,6 +56,20 @@ tasks:
     cmds:
       - go test -race ./internal/...
 
+  test-quiet:
+    desc: 'Run go test -json over PKGS and print only per-package ok/FAIL + failing tests'' last ~40 lines, e.g. task test-quiet PKGS="./internal/... ./wadjet/" RUN=TestFoo'
+    requires:
+      vars: [PKGS]
+    cmds:
+      - go run ./tools/testquiet -pkgs "{{.PKGS}}" {{if .RUN}}-run "{{.RUN}}"{{end}}
+
+  test-quiet-log:
+    desc: 'Filter an EXISTING go test text log (no -v, no -json — what the landing battery''s lanes write) the same way, e.g. task test-quiet-log LOG=tooling/logs-.../A.log'
+    requires:
+      vars: [LOG]
+    cmds:
+      - go run ./tools/testquiet -log "{{.LOG}}"
+
   bench:
     desc: Run benchmarks
     cmds:

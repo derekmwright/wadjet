@@ -1,0 +1,18 @@
+{"Time":"2026-09-23T09:00:59.373806447-04:00","Action":"start","Package":"sample/passpkg"}
+{"Time":"2026-09-23T09:00:59.374120057-04:00","Action":"start","Package":"sample/failpkg"}
+{"Time":"2026-09-23T09:00:59.377504988-04:00","Action":"run","Package":"sample/failpkg","Test":"TestBoom"}
+{"Time":"2026-09-23T09:00:59.377549056-04:00","Action":"output","Package":"sample/failpkg","Test":"TestBoom","Output":"=== RUN   TestBoom\n"}
+{"Time":"2026-09-23T09:00:59.377628988-04:00","Action":"output","Package":"sample/failpkg","Test":"TestBoom","Output":"    f_test.go:6: setting up\n"}
+{"Time":"2026-09-23T09:00:59.377647849-04:00","Action":"output","Package":"sample/failpkg","Test":"TestBoom","Output":"    f_test.go:7: kaboom\n"}
+{"Time":"2026-09-23T09:00:59.37765838-04:00","Action":"output","Package":"sample/failpkg","Test":"TestBoom","Output":"--- FAIL: TestBoom (0.00s)\n"}
+{"Time":"2026-09-23T09:00:59.37766321-04:00","Action":"fail","Package":"sample/failpkg","Test":"TestBoom","Elapsed":0}
+{"Time":"2026-09-23T09:00:59.377670338-04:00","Action":"output","Package":"sample/failpkg","Output":"FAIL\n"}
+{"Time":"2026-09-23T09:00:59.378149072-04:00","Action":"output","Package":"sample/failpkg","Output":"FAIL\tsample/failpkg\t0.003s\n"}
+{"Time":"2026-09-23T09:00:59.378194196-04:00","Action":"fail","Package":"sample/failpkg","Elapsed":0.004}
+{"Time":"2026-09-23T09:00:59.378661433-04:00","Action":"run","Package":"sample/passpkg","Test":"TestOK"}
+{"Time":"2026-09-23T09:00:59.378684743-04:00","Action":"output","Package":"sample/passpkg","Test":"TestOK","Output":"=== RUN   TestOK\n"}
+{"Time":"2026-09-23T09:00:59.378718446-04:00","Action":"output","Package":"sample/passpkg","Test":"TestOK","Output":"--- PASS: TestOK (0.00s)\n"}
+{"Time":"2026-09-23T09:00:59.378724675-04:00","Action":"pass","Package":"sample/passpkg","Test":"TestOK","Elapsed":0}
+{"Time":"2026-09-23T09:00:59.378732692-04:00","Action":"output","Package":"sample/passpkg","Output":"PASS\n"}
+{"Time":"2026-09-23T09:00:59.379299954-04:00","Action":"output","Package":"sample/passpkg","Output":"ok  \tsample/passpkg\t0.004s\n"}
+{"Time":"2026-09-23T09:00:59.381938712-04:00","Action":"pass","Package":"sample/passpkg","Elapsed":0.008}
