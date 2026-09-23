@@ -248,70 +248,178 @@ func (s *jsonTableFuncSource) Close() error {
 	return nil
 }
 
-// parquetTableFuncSource reads a Parquet file (local or HTTP) and produces batches.
-// Uses readBatchDirect for column-at-a-time page reading (no row reconstruction).
-// For local files, opens the file as io.ReaderAt to avoid loading into memory.
+// parquetTableFuncSource reads Parquet (a local file, a glob, or HTTP) and
+// produces one batch per file. Uses readBatchDirect for column-at-a-time
+// page reading (no row reconstruction); a local file is read through
+// io.ReaderAt and never loaded whole.
+//
+// A GLOB is a SEQUENCE of files, each read through its own footer, one at a
+// time (#1240: the matched files' bytes were concatenated, and a Parquet
+// reader parsed the concatenation's tail as one file's footer — `invalid
+// magic`). The relation's columns are the FIRST file's footer's — the same
+// declaration the plan-time schema reads (parquetFooterSchema) — and every
+// later file is held to it BY NAME: a column it lacks is 42703 and a column
+// it declares at another type is 42804, each naming the file. Columns a later
+// file adds are not part of the relation. A file's columns may come in any
+// order; they are read by name.
 type parquetTableFuncSource struct {
 	path   string
-	batch  *batch.RecordBatch
+	files  []string // local inputs, in name order
+	next   int
+	schema []parquet.Column
+	mem    *batch.RecordBatch // an http(s) input, read whole
 	done   bool
-	closer io.Closer // file handle to close when done
 }
 
 func (s *parquetTableFuncSource) Init(_ context.Context) error {
-	var ra io.ReaderAt
-	var size int64
-
-	if !isURL(s.path) && !isGlob(s.path) {
-		// Local file: open as io.ReaderAt (zero-copy, no memory allocation)
-		f, err := os.Open(s.path)
+	if isURL(s.path) {
+		// A URL is fetched into memory: a Parquet reader needs random access.
+		data, err := fetchHTTP(s.path)
 		if err != nil {
 			return fmt.Errorf("read_parquet: %w", err)
 		}
-		s.closer = f
-		fi, err := f.Stat()
-		if err != nil {
-			f.Close()
-			return fmt.Errorf("read_parquet: stat: %w", err)
-		}
-		ra = f
-		size = fi.Size()
-	} else {
-		// URLs and globs: fetch into memory
-		data, err := fetchData(s.path)
+		reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
 		if err != nil {
 			return fmt.Errorf("read_parquet: %w", err)
 		}
-		ra = bytes.NewReader(data)
-		size = int64(len(data))
+		b, err := readBatchDirect(reader, reader.Schema().Columns, nil)
+		if err != nil {
+			return fmt.Errorf("read_parquet: %w", err)
+		}
+		s.mem = b
+		return nil
 	}
+	s.files = []string{s.path}
+	if isGlob(s.path) {
+		matches, err := filepath.Glob(s.path)
+		if err != nil {
+			return fmt.Errorf("read_parquet: glob %s: %w", s.path, err)
+		}
+		if len(matches) == 0 {
+			return fmt.Errorf("read_parquet: glob %s: no matching files", s.path)
+		}
+		sort.Strings(matches)
+		s.files = matches
+	}
+	// The relation's columns: the first file's footer. Opening it here also
+	// reports an unreadable first file at Init, as a single file always was.
+	return s.withFile(s.files[0], func(r *parquet.Reader) error {
+		s.schema = r.Schema().Columns
+		return nil
+	})
+}
 
-	reader, err := parquet.NewReader(ra, size)
+// withFile opens one input file as a Parquet reader over io.ReaderAt, runs
+// fn, and closes it.
+func (s *parquetTableFuncSource) withFile(path string, fn func(*parquet.Reader) error) error {
+	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("read_parquet: %w", err)
 	}
-	schema := reader.Schema().Columns
-	b, err := readBatchDirect(reader, schema, nil)
+	defer f.Close()
+	fi, err := f.Stat()
 	if err != nil {
+		return fmt.Errorf("read_parquet: stat: %w", err)
+	}
+	r, err := parquet.NewReader(f, fi.Size())
+	if err != nil {
+		if len(s.files) > 1 {
+			return fmt.Errorf("read_parquet: %s: %w", path, err)
+		}
 		return fmt.Errorf("read_parquet: %w", err)
 	}
-	s.batch = b
-	return nil
+	return fn(r)
 }
 
 func (s *parquetTableFuncSource) Next(_ context.Context) (*batch.RecordBatch, error) {
-	if s.done || s.batch == nil {
-		return nil, nil
+	if s.mem != nil || s.done {
+		b := s.mem
+		s.mem, s.done = nil, true
+		return b, nil
+	}
+	for s.next < len(s.files) {
+		path := s.files[s.next]
+		s.next++
+		var out *batch.RecordBatch
+		err := s.withFile(path, func(r *parquet.Reader) error {
+			if s.next > 1 {
+				if err := sameParquetColumns(path, s.schema, r.Schema().Columns); err != nil {
+					return err
+				}
+			}
+			b, err := readBatchDirect(r, s.schema, nil)
+			if err != nil {
+				if len(s.files) > 1 {
+					return fmt.Errorf("read_parquet: %s: %w", path, err)
+				}
+				return fmt.Errorf("read_parquet: %w", err)
+			}
+			out = b
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		if out != nil && out.Len > 0 {
+			return out, nil
+		}
 	}
 	s.done = true
-	return s.batch, nil
+	return nil, nil
 }
 
-func (s *parquetTableFuncSource) Close() error {
-	if s.closer != nil {
-		return s.closer.Close()
+func (s *parquetTableFuncSource) Close() error { return nil }
+
+// sameParquetColumns holds a later file of a Parquet glob to the relation's
+// columns, which are the first file's: each by NAME, at the same type.
+func sameParquetColumns(path string, want, have []parquet.Column) error {
+	byName := make(map[string]parquet.Column, len(have))
+	for _, c := range have {
+		byName[c.Name] = c
+	}
+	for _, w := range want {
+		h, ok := byName[w.Name]
+		if !ok {
+			return sqlerr.New("42703",
+				"read_parquet: %s does not have column %q, which the glob's first file declares", path, w.Name)
+		}
+		if !sameColumnType(w, h) {
+			return sqlerr.New("42804",
+				"read_parquet: %s declares column %q as %s where the glob's first file declares %s",
+				path, w.Name, parquetColumnTypeName(h), parquetColumnTypeName(w))
+		}
 	}
 	return nil
+}
+
+// sameColumnType reports whether two columns carry the same type, nested
+// element and field types included (nullability aside).
+func sameColumnType(a, b parquet.Column) bool {
+	if a.Type != b.Type || a.Precision != b.Precision || a.Scale != b.Scale || a.Dimension != b.Dimension {
+		return false
+	}
+	if (a.ElementType == nil) != (b.ElementType == nil) {
+		return false
+	}
+	if a.ElementType != nil && !sameColumnType(*a.ElementType, *b.ElementType) {
+		return false
+	}
+	if len(a.Fields) != len(b.Fields) {
+		return false
+	}
+	for i := range a.Fields {
+		if a.Fields[i].Name != b.Fields[i].Name || !sameColumnType(a.Fields[i], b.Fields[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func parquetColumnTypeName(c parquet.Column) string {
+	if c.Type == parquet.TypeDecimal {
+		return fmt.Sprintf("decimal(%d,%d)", c.Precision, c.Scale)
+	}
+	return strings.ToLower(c.Type.String())
 }
 
 // csvTableFuncSource reads a CSV file (local or HTTP) and produces batches.
@@ -393,122 +501,6 @@ func readerInputs(path string) ([]fileinput.Input, error) {
 	return inputs, nil
 }
 
-// openData opens a local file path, glob pattern, or HTTP/HTTPS URL as a
-// stream. Globs expand to multiple files concatenated lazily (each opened
-// only when the previous is exhausted, with a newline injected between
-// files for JSONL/CSV continuity — same framing fetchGlob produced, without
-// buffering every file at once). The caller owns the ReadCloser.
-func openData(path string) (io.ReadCloser, error) {
-	if isURL(path) {
-		return openHTTP(path)
-	}
-	if isGlob(path) {
-		matches, err := filepath.Glob(path)
-		if err != nil {
-			return nil, fmt.Errorf("glob %s: %w", path, err)
-		}
-		if len(matches) == 0 {
-			return nil, fmt.Errorf("glob %s: no matching files", path)
-		}
-		sort.Strings(matches)
-		return &multiFileReadCloser{paths: matches}, nil
-	}
-	return os.Open(path)
-}
-
-// multiFileReadCloser streams a sorted glob expansion file-by-file. At most
-// one file is open at a time; a '\n' is injected after any file that does
-// not end with one (matching fetchGlob's concatenation framing).
-type multiFileReadCloser struct {
-	paths     []string
-	idx       int
-	cur       *os.File
-	hadData   bool
-	lastByte  byte
-	pendingNL bool
-
-	// emitted counts the bytes Read has returned; segments records, for
-	// every file opened, the stream offset its bytes start at, so a reader
-	// can name the file (and its own row) an offset lies in (Segment).
-	emitted  int64
-	segments []streamSegment
-}
-
-type streamSegment struct {
-	start int64
-	path  string
-}
-
-// Segment implements the csv and json readers' Locator: the file whose
-// bytes hold stream offset off, the offset they start at, and an offset
-// before which every later offset is still in that file (the next file's
-// start, or the bytes emitted so far while the file is still being read).
-func (m *multiFileReadCloser) Segment(off int64) (string, int64, int64) {
-	i := sort.Search(len(m.segments), func(i int) bool { return m.segments[i].start > off }) - 1
-	if i < 0 {
-		return "", 0, 0
-	}
-	next := m.emitted
-	if i+1 < len(m.segments) {
-		next = m.segments[i+1].start
-	}
-	return m.segments[i].path, m.segments[i].start, next
-}
-
-func (m *multiFileReadCloser) Read(p []byte) (int, error) {
-	if len(p) == 0 {
-		return 0, nil
-	}
-	for {
-		if m.pendingNL {
-			m.pendingNL = false
-			p[0] = '\n'
-			m.emitted++
-			return 1, nil
-		}
-		if m.cur == nil {
-			if m.idx >= len(m.paths) {
-				return 0, io.EOF
-			}
-			f, err := os.Open(m.paths[m.idx])
-			if err != nil {
-				return 0, fmt.Errorf("reading %s: %w", m.paths[m.idx], err)
-			}
-			m.idx++
-			m.cur = f
-			m.hadData = false
-			m.segments = append(m.segments, streamSegment{start: m.emitted, path: m.paths[m.idx-1]})
-		}
-		n, err := m.cur.Read(p)
-		if n > 0 {
-			m.hadData = true
-			m.lastByte = p[n-1]
-			m.emitted += int64(n)
-			return n, nil
-		}
-		if err == io.EOF || err == nil {
-			m.cur.Close()
-			m.cur = nil
-			if m.hadData && m.lastByte != '\n' {
-				m.pendingNL = true
-			}
-			continue
-		}
-		m.cur.Close()
-		m.cur = nil
-		return 0, err
-	}
-}
-
-func (m *multiFileReadCloser) Close() error {
-	if m.cur != nil {
-		err := m.cur.Close()
-		m.cur = nil
-		return err
-	}
-	return nil
-}
-
 // openHTTP returns the response body as a stream — no io.ReadAll, so a
 // large remote file never lands in heap at once.
 func openHTTP(url string) (io.ReadCloser, error) {
@@ -521,47 +513,8 @@ func openHTTP(url string) (io.ReadCloser, error) {
 	return rc, nil
 }
 
-// fetchData retrieves data from a local file path, glob pattern, or
-// HTTP/HTTPS URL fully into memory. Only read_parquet still uses this for
-// URLs/globs — parquet needs random access (io.ReaderAt), so buffering is
-// inherent there; JSON/CSV stream via openData.
-func fetchData(path string) ([]byte, error) {
-	if isURL(path) {
-		return fetchHTTP(path)
-	}
-	if isGlob(path) {
-		return fetchGlob(path)
-	}
-	return os.ReadFile(path)
-}
-
 func isGlob(s string) bool {
 	return strings.ContainsAny(s, "*?[")
-}
-
-func fetchGlob(pattern string) ([]byte, error) {
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return nil, fmt.Errorf("glob %s: %w", pattern, err)
-	}
-	if len(matches) == 0 {
-		return nil, fmt.Errorf("glob %s: no matching files", pattern)
-	}
-	sort.Strings(matches)
-
-	var buf bytes.Buffer
-	for _, path := range matches {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", path, err)
-		}
-		buf.Write(data)
-		// Ensure newline between files for JSONL/CSV concatenation
-		if len(data) > 0 && data[len(data)-1] != '\n' {
-			buf.WriteByte('\n')
-		}
-	}
-	return buf.Bytes(), nil
 }
 
 func isURL(s string) bool {

@@ -107,7 +107,7 @@ func readerPlanTimeSchema(ctx context.Context, funcName string, args []string,
 	}
 	// THE CAPABILITY, before the file. A denied identity gets its 42501 from
 	// the enforcement pass; what matters here is that the decision is asked
-	// before `openData`, so the refused identity's file is never opened.
+	// before the input is opened, so the refused identity's file is never opened.
 	if guard := logical.TableFuncGuardFromContext(ctx); guard != nil {
 		if err := guard(funcName, args, namedArgs); err != nil {
 			return nil, false
@@ -281,9 +281,9 @@ func readReaderSchema(name string, args []string, namedArgs map[string]string) (
 // readerInputIsRereadable reports whether opening this input twice reads the
 // same bytes twice. Only a REGULAR file does.
 //
-// A GLOB is judged by EVERY match, not by the first: the JSON and CSV sources
-// concatenate all of them (`multiFileReadCloser`), so one FIFO anywhere in the
-// expansion is a stream the execution cannot read again. A match that cannot
+// A GLOB is judged by EVERY match, not by the first: the sources read all of
+// them, in turn (readerInputs), so one FIFO anywhere in the expansion is a
+// stream the execution cannot read again. A match that cannot
 // be stat'd declines too — an input this cannot describe is one it must not
 // consume.
 func readerInputIsRereadable(path string) bool {
@@ -306,9 +306,9 @@ func readerInputIsRereadable(path string) bool {
 }
 
 // parquetFooterSchema reads a Parquet file's own declaration and no page of
-// its data. A GLOB takes the FIRST match in sorted order. The execution reads
-// a glob through fetchGlob's concatenation, which a Parquet reader can parse
-// only when the glob matches ONE file (#1240), so the two agree exactly there.
+// its data. A GLOB takes the FIRST match in sorted order, which is the
+// declaration the execution holds every later file to
+// (parquetTableFuncSource), so the two agree.
 func parquetFooterSchema(path string) ([]parquet.Column, bool) {
 	if isGlob(path) {
 		matches, err := filepath.Glob(path)

@@ -364,11 +364,10 @@ func TestTableFuncReadCSV_Glob(t *testing.T) {
 	}
 }
 
-func TestFetchGlob_NoMatch(t *testing.T) {
+func TestReaderInputs_GlobNoMatch(t *testing.T) {
 	dir := t.TempDir()
 	pattern := filepath.Join(dir, "*.nonexistent")
-	_, err := fetchGlob(pattern)
-	if err == nil {
+	if _, err := readerInputs(pattern); err == nil {
 		t.Error("expected error for no matching files")
 	}
 }
@@ -659,8 +658,8 @@ func drainTableFunc(t *testing.T, source exec.Source) []map[string]any {
 
 func TestTableFuncReadJSON_GlobStreams(t *testing.T) {
 	dir := t.TempDir()
-	// Three files; the middle one lacks a trailing newline — the lazy
-	// multi-file reader must inject the separator like fetchGlob did.
+	// Three files; the middle one lacks a trailing newline. Each file is
+	// its own document, so no separator is needed between them.
 	files := map[string]string{
 		"a.json": `{"id":1}` + "\n" + `{"id":2}` + "\n",
 		"b.json": `{"id":3}`, // no trailing newline
@@ -683,7 +682,7 @@ func TestTableFuncReadJSON_GlobStreams(t *testing.T) {
 
 	rows := drainTableFunc(t, source)
 	if len(rows) != 4 {
-		t.Fatalf("rows = %d, want 4 (missing newline injection merges objects or drops a file)", len(rows))
+		t.Fatalf("rows = %d, want 4 (a file's rows were dropped)", len(rows))
 	}
 	for i, want := range []int64{1, 2, 3, 4} {
 		if rows[i]["id"] != want {
@@ -743,31 +742,6 @@ func TestTableFuncReadJSON_HTTPStreams(t *testing.T) {
 	}
 	if rows[2999]["id"] != int64(2999) {
 		t.Fatalf("last row = %v", rows[2999])
-	}
-}
-
-func TestMultiFileReadCloser_NewlineFraming(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "p1"), []byte("abc"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "p2"), []byte(""), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "p3"), []byte("def\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	m := &multiFileReadCloser{paths: []string{
-		filepath.Join(dir, "p1"), filepath.Join(dir, "p2"), filepath.Join(dir, "p3"),
-	}}
-	defer m.Close()
-	got, err := io.ReadAll(m)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// p1 lacks newline → injected; p2 empty → no separator; p3 keeps its own.
-	if string(got) != "abc\ndef\n" {
-		t.Fatalf("framing = %q, want %q", got, "abc\ndef\n")
 	}
 }
 
