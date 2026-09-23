@@ -104,29 +104,32 @@ func TestArcL1ABoundedLateralReadsThePublishedValue(t *testing.T) {
 		for _, door := range rig.doors {
 			t.Run(c.name+"/"+door.name, func(t *testing.T) {
 				got, err := door.run(t, "analyst-key", c.sql)
-				if err != nil {
-					// PINNED since arc JR (#1153): the materialization
-					// declines under a bare star, so the lifted predicate
-					// names a column the fragment's declared sides do not
-					// publish, and the four DAG doors now REFUSE where they
-					// answered PostgreSQL's column list over WRONG VALUES —
-					// the three-padded-row answer arc L1 pins per arm in
-					// `l1ArmPins["R4/bareStar"]`. A loud refusal replacing a
-					// base-wrong answer is not a regression; what is lost is
-					// only that the LIST cannot be observed on those four
-					// doors, and the five that answer still assert it.
-					if l1LiftedStarDAGDoors[door.name] &&
-						strings.Contains(err.Error(), "resolves on neither side of this join here") {
-						t.Skipf("pinned: the lifted predicate does not resolve on the "+
-							"fragment's declared sides, so this door refuses: %v", err)
-					}
-					t.Fatalf("refused: %v\n  SQL: %s", err, c.sql)
+				// SINCE ARC LT the materialization no longer DECLINES under an
+				// enclosing BARE star — it REFUSES, on every door, because the
+				// declined shape answered a NULL-padded row per outer row for
+				// PostgreSQL's rows (ADR-0021 §1s; `ltLiftedRefCannotPublish`).
+				// The QUALIFIED star reads the body's own list and would
+				// answer, but THIS body's lifted column `bal` is one the
+				// enclosing e7bal publishes too, so it refuses with the
+				// contested-name sentence instead. Either way the declared
+				// list is not observable here any more, and what each cell
+				// holds now is the refusal itself and the absence of every
+				// policed value in its text.
+				want := "which would have to publish the column it names"
+				if c.name == "qualifiedStarOverLifted" {
+					want = "which the enclosing relation also publishes"
 				}
-				cols := append([]string(nil), got.cols...)
-				sort.Strings(cols)
-				if strings.Join(cols, ",") != c.want {
-					t.Errorf("%s\n  door %s\n  publishes %v\n  want %s (PostgreSQL's list)",
-						c.sql, door.name, cols, c.want)
+				if err == nil {
+					t.Fatalf("a star over a lifted-predicate lateral answered where "+
+						"arc LT refuses it: %v\n  SQL: %s", got.canon(), c.sql)
+				}
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("refused with a different sentence: %v\n  SQL: %s", err, c.sql)
+				}
+				for _, s := range pmTrueValues() {
+					if strings.Contains(err.Error(), s) {
+						t.Fatalf("a policed value reached the client in a refusal: %q\n  %v", s, err)
+					}
 				}
 			})
 		}
@@ -185,15 +188,23 @@ func pmSeq(n int) string {
 	return strings.Join(out, " ; ")
 }
 
-// pmDeptPairs is what e7emp's `dept` correlation answers on every door. It is
-// NOT PostgreSQL's per-outer-row answer — #1019 is open (ADR-0021 §1q), so the
-// `LIMIT 1` bounds the whole inner relation and only the outer rows in the one
-// surviving row's department match at all. What this cell holds is the two
-// properties that are this gate's subject: all nine doors agree, and none of
-// them reads a masked or denied value. It changes the day #1019 closes, and
-// the mask cells above are what say the answer is the policy's.
+// pmDeptPairs is PostgreSQL's per-outer-row answer for e7emp's `dept`
+// correlation: each outer row pairs with the SMALLEST id in its own
+// department (dept is `d<i%3>`, so ids 1,4,7,10 / 2,5,8 / 3,6,9). It held the
+// whole-relation bound's four pairs while #1019 was open; arc LT applies the
+// bound per outer row (ADR-0021 §1s) and the cell asserts PostgreSQL on every
+// door — and still none of them reads a masked or denied value.
 func pmDeptPairs() string {
-	return "a=10|m=1 ; a=1|m=1 ; a=4|m=1 ; a=7|m=1"
+	out := make([]string, 0, pmRows)
+	for a := 1; a <= pmRows; a++ {
+		m := 1 + ((a - 1) % 3)
+		if a%3 == 0 {
+			m = 3
+		}
+		out = append(out, fmt.Sprintf("a=%d|m=%d", a, m))
+	}
+	sort.Strings(out)
+	return strings.Join(out, " ; ")
 }
 
 // l1LiftedStarDAGDoors names the four doors on which a bare star over a

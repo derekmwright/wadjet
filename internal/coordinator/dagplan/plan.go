@@ -635,5 +635,11 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	if err := CheckSecurityFilterOrder(ctx, stages); err != nil {
 		return nil, err
 	}
+	// …and no WINDOW over a policed scan may feed a join on this path: the
+	// chain answered the stored column's pairing on every DAG door (arc LT,
+	// policed_window_guard.go). The coordinator runs the plan single-process.
+	if err := CheckPolicedWindowUnderJoin(stages); err != nil {
+		return nil, err
+	}
 	return stages, nil
 }

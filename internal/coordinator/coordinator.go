@@ -363,6 +363,11 @@ type Coordinator struct {
 	// localResidualSides counts queries whose plan the stage DAG refused
 	// because a join residual's re-spelling merged its two sides (arc DC).
 	localResidualSides atomic.Int64
+	// localPolicedWindow counts queries whose plan the stage DAG refused for
+	// a window over a policed scan feeding a join
+	// (dagplan.ErrPolicedWindowUnderJoinDistributed) and that ran on the
+	// coordinator-local pipeline instead.
+	localPolicedWindow atomic.Int64
 	// local executions reported to the client instead of retried on the
 	// DAG (#308) — every increment is a query the two paths might have
 	// answered differently.
@@ -1263,6 +1268,12 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// pipeline binds each leaf through its own arm.
 		if errors.Is(err, dagplan.ErrResidualSidesMergedDistributed) {
 			return c.runResidualSidesLocal(ctx, queryID, logicalPlan, planStr, start, err)
+		}
+		// And a window over a policed scan that feeds a join (arc LT): the
+		// four DAG doors answered the STORED column's pairing under the mask.
+		// The single-process pipeline answers the mask on every door.
+		if errors.Is(err, dagplan.ErrPolicedWindowUnderJoinDistributed) {
+			return c.runPolicedWindowLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		// An authorization refusal is not a planning narrative: it reaches
 		// the client as the decision's own sentence, the same one the

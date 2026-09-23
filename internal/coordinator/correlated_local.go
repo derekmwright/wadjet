@@ -291,3 +291,17 @@ func (c *Coordinator) runResidualSidesLocal(ctx context.Context, queryID string,
 func (c *Coordinator) ResidualSidesLocalRoutes() int64 {
 	return c.localResidualSides.Load()
 }
+
+// runPolicedWindowLocal runs a plan the stage DAG refused for a window over a
+// policed scan feeding a join (dagplan.ErrPolicedWindowUnderJoinDistributed)
+// on the coordinator-local single-process pipeline, which answers the mask.
+func (c *Coordinator) runPolicedWindowLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+		"a window over a policed relation feeding a join", &c.localPolicedWindow)
+}
+
+// PolicedWindowLocalRoutes reports how many plans refused for a window over a
+// policed scan feeding a join were routed to the coordinator-local pipeline.
+func (c *Coordinator) PolicedWindowLocalRoutes() int64 {
+	return c.localPolicedWindow.Load()
+}
