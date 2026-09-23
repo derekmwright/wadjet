@@ -2203,9 +2203,20 @@ are still open, rather than a claim over all of them:
   is an outer name in both enclosing column maps (the logical decorrelations'
   and the physical rerun's), as a CTE's already was.
 - A correlated non-equality whose two sides render with the same bare name
-  over a body that RENAMES its columns declines to the rerun: the stage DAG
-  re-spells a residual leaf by asking which arm moves the name, and a renaming
-  build arm moved both leaves (`total < total` became `b.amt < b.amt`).
+  is guarded WHERE THE COLLAPSE HAPPENS (round 5): the stage DAG re-spells a
+  residual leaf by asking which arm moves the name, so a renaming arm on
+  either side — through any number of pass-through layers — could move both
+  leaves onto one stage column (`total < total` became `x.amt < x.amt`). Round
+  4 predicted the renaming shapes in the planner and missed a spelling twice;
+  `dagplan.residualWithStageSpellings` now refuses any residual whose two leaves
+  land on one stage column (`ErrResidualSidesMergedDistributed`) and the
+  coordinator runs the plan single-process. The planner keeps one decline, for
+  the column-alias list over a catalog table, whose decorrelated build cannot
+  be planned single-process at all.
+- A correlated subquery whose own WITH item shadows an enclosing one is
+  refused, 0A000, by name: the rerun plans the body with the enclosing item
+  first and the CTE cache is keyed by name (docs/internals/nested-with-scope-precedence.md),
+  so it read the enclosing relation — zero rows where PostgreSQL answers.
 - Still open, filed: a name supplied by a table function's alias is read as
   outer; a `HAVING` or `LIMIT` inside an `EXISTS` body is ignored; a `LATERAL`
   item in the body answers no rows; a column-alias list over a catalog table

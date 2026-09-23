@@ -446,6 +446,10 @@ Set-operation/LATERAL bodies and outer-level aggregates lack the required evalua
 
 An unqualified name inside a correlated subquery binds to the enclosing row when the subquery's own relations do not have it, as on PostgreSQL. When the subquery's FROM reads a table function, its columns are not known at that point: `o.id IN (SELECT b.k FROM dc_in b JOIN generate_series(1, 9) g(x) ON g.x = b.k WHERE total > 100)` fails with `filter column "total" does not exist in the input schema` where PostgreSQL answers. Write the qualifier — `o.total > 100`. (ADR-0012 §5/#1104, ADR-0021 §1r)
 
+**A correlated subquery's own WITH item that shadows an outer WITH item is refused.**
+
+`WITH d AS (…) SELECT … WHERE EXISTS (WITH d AS (…) SELECT 1 FROM d …)` reads the subquery's own `d` on PostgreSQL; here it is 0A000 `a WITH item inside a correlated subquery that shadows an outer WITH item is not supported`, because the per-row execution would read the outer `d`. Rename one of the two items. (ADR-0021 §1r)
+
 **Outer aggregates in subquery WHERE are refused.**
 
 The standalone subquery cannot retain the aggregate’s outer scope: 42803 where PostgreSQL answers. (ADR-0012 §5/#809)

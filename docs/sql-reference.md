@@ -1258,10 +1258,12 @@ subquery instead — a slower right answer:
 
 They answer PostgreSQL's rows on every execution path, apart from the known
 open defects listed below; on a distributed cluster these queries run on the
-coordinator rather than across workers. A correlated comparison other than `=`
-whose two sides carry the same column name, over a subquery that renames its
-columns (`(SELECT k, amt AS total FROM t) b … WHERE total > o.total`), also
-runs this way.
+coordinator rather than across workers. So does a correlated comparison other
+than `=` whose two sides carry the same column name through a renaming layer —
+`(SELECT k, amt AS total FROM t) b … WHERE total > o.total`, a pass-through
+layer over such a table, or an outer relation that renames its own column:
+the distributed planner would read both sides of the comparison from one
+input, so the query runs single-process on the coordinator instead.
 
 **An unqualified name binds innermost-first**, as on PostgreSQL: `WHERE total
 > 100` inside a subquery whose own relations have no `total` reads the outer
@@ -1283,6 +1285,8 @@ PostgreSQL and filed; qualify the name or restate the query as noted):
 - a `LATERAL` item inside an `EXISTS` or `IN` body answers no rows;
 - a column-alias list over a table in the body (`FROM t AS b(k, total)`) and
   a `USING`-merged column that shares the outer query's name are refused;
+- a subquery's own `WITH` item with the same name as a `WITH` item of the
+  outer query is refused (SQLSTATE 0A000) — rename one of them;
 - mixed-case and quoted names follow the case concession on the differences
   page.
 
