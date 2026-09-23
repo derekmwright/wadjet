@@ -3,6 +3,8 @@
 package dagplan
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
@@ -29,46 +31,108 @@ import (
 // evaluator forces); a probe-side one is left bare. A reference neither arm
 // re-spells is left exactly as written, so a residual over two base tables is
 // byte-identical to what it was.
-func (p *StagePlanner) residualWithStageSpellings(node *logical.Node, buildAlias, filter string) string {
+//
+// A RESPELLING THAT MERGES TWO LEAVES IS REFUSED, NOT EMITTED. The side of a
+// leaf is decided by which arm MOVES its name, so two leaves that were
+// different columns in the logical residual can come out as ONE stage column:
+// a decorrelated `total < total` (outer `o.total`, inner `b.total` over a body
+// that renames `amt AS total`, through any number of pass-through layers)
+// became `b.amt < b.amt`, and an enclosing `total AS amt` turned `amt < amt`
+// into `total < total` on the probe — false for every pair, so EXISTS answered
+// no rows and NOT EXISTS every row on the DAG arms (arc DC rounds 4–5, the
+// Codex reviews' B2/B1). The respelled text cannot say which leaf was which, so
+// the plan is refused with ErrResidualSidesMergedDistributed and the
+// coordinator runs it on the single-process pipeline, which binds the two
+// leaves by their own arms and answers PostgreSQL's rows. Keeping each leaf's
+// side through the respell is the real repair (filed, `distributed`).
+func (p *StagePlanner) residualWithStageSpellings(node *logical.Node, buildAlias, filter string) (string, error) {
 	if filter == "" || node == nil || len(node.Children) != 2 {
-		return filter
+		return filter, nil
 	}
 	expr := p.PlanContext.ParseJoinCondExpr(filter)
 	if expr == nil {
-		return filter
+		return filter, nil
 	}
 	refs, err := plansql.ColumnRefs(expr)
 	if err != nil {
 		// A subquery, a window function or a node this walk does not know.
 		// The compile check beside this one refuses those by name; re-spelling
 		// what cannot be enumerated is not this function's business.
-		return filter
+		return filter, nil
 	}
+	type leaf struct {
+		orig, final string
+		bareOrig    bool
+		side        int // 0 probe, 1 build, -1 not decided (neither arm moved it)
+		moved       bool
+	}
+	leaves := make([]leaf, 0, len(refs))
 	changed := false
 	for _, r := range refs {
 		spelled := r.Column
 		if r.Table != "" {
 			spelled = r.Table + "." + r.Column
 		}
+		lf := leaf{orig: strings.ToLower(spelled), bareOrig: r.Table == "", side: -1}
 		respelled, fromBuild, ok := p.respellResidualRef(spelled, node)
-		if !ok {
-			continue
+		if ok {
+			if qual, bare, isIdent := plansql.SplitIdentRef(respelled); isIdent {
+				if qual == "" && fromBuild && buildAlias != "" {
+					qual = buildAlias
+				}
+				r.Table, r.Column = qual, bare
+				changed = true
+				lf.moved = true
+				lf.side = 0
+				if fromBuild {
+					lf.side = 1
+				}
+			}
 		}
-		qual, bare, isIdent := plansql.SplitIdentRef(respelled)
-		if !isIdent {
-			continue
+		final := r.Column
+		if r.Table != "" {
+			final = r.Table + "." + r.Column
 		}
-		if qual == "" && fromBuild && buildAlias != "" {
-			qual = buildAlias
+		lf.final = strings.ToLower(final)
+		leaves = append(leaves, lf)
+	}
+	for i := range leaves {
+		for j := i + 1; j < len(leaves); j++ {
+			a, b := leaves[i], leaves[j]
+			if a.final != b.final {
+				continue
+			}
+			merged := false
+			switch {
+			case a.orig == b.orig && a.bareOrig && (a.moved || b.moved):
+				// One bare text, moved to one arm: a residual never compares
+				// a column with itself on purpose, and the bare text is the
+				// only record that the two leaves were two sides.
+				merged = true
+			case a.orig != b.orig && (a.moved || b.moved):
+				// Two different references landed on one stage column: the
+				// enclosing `total AS amt` beside a body `amt`, or a leaf the
+				// respelling could not place beside one it moved.
+				merged = true
+			}
+			if merged {
+				return filter, fmt.Errorf("%w: the join residual %q re-spells %q and %q to the "+
+					"one stage column %q, so the two sides it compares would be read from the "+
+					"same arm", ErrResidualSidesMergedDistributed, filter, a.orig, b.orig, a.final)
+			}
 		}
-		r.Table, r.Column = qual, bare
-		changed = true
 	}
 	if !changed {
-		return filter
+		return filter, nil
 	}
-	return expr.String()
+	return expr.String(), nil
 }
+
+// ErrResidualSidesMergedDistributed hands a plan whose join residual the stage
+// re-spelling would collapse (two leaves, one stage column) to the coordinator's
+// single-process pipeline. See residualWithStageSpellings.
+var ErrResidualSidesMergedDistributed = errors.New(
+	"a join residual's two sides re-spell to one stage column")
 
 // respellResidualRef answers the name ONE reference carries on the stage, and
 // which side of the join it belongs to.

@@ -276,3 +276,18 @@ func (c *Coordinator) GroupingSetsLocalRoutes() int64 {
 func (c *Coordinator) GroupKeyLocalRoutes() int64 {
 	return c.localGroupKey.Load()
 }
+
+// runResidualSidesLocal executes a query the stage DAG refused because a join
+// residual's stage re-spelling mapped its two sides to one column
+// (dagplan.ErrResidualSidesMergedDistributed) on the coordinator-local
+// single-process pipeline.
+func (c *Coordinator) runResidualSidesLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+		"a join residual whose two sides re-spell to one stage column", &c.localResidualSides)
+}
+
+// ResidualSidesLocalRoutes reports how many plans refused for a merged join
+// residual were routed to the coordinator-local pipeline.
+func (c *Coordinator) ResidualSidesLocalRoutes() int64 {
+	return c.localResidualSides.Load()
+}

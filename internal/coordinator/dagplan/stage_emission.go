@@ -1070,8 +1070,12 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 		// alone: the single-process planner reads it against the logical
 		// stream, where the arm's own spelling is what resolves.
 		if node.JoinFilter != "" {
-			stage.JoinFilter = p.residualWithStageSpellings(
+			respelled, err := p.residualWithStageSpellings(
 				node, stage.BuildTableAlias, node.JoinFilter)
+			if err != nil {
+				p.refuseJoin(err)
+			}
+			stage.JoinFilter = respelled
 		}
 		// …and NOT IN's three-valued rule, which is a property of the
 		// PREDICATE this anti join came from and unknowable from the stage

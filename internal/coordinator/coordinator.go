@@ -360,6 +360,9 @@ type Coordinator struct {
 	// the same condition asked of ONE node kind; this one is asked of the
 	// finished stage list, which is what a second producer needed.
 	localUnbuildableStage atomic.Int64
+	// localResidualSides counts queries whose plan the stage DAG refused
+	// because a join residual's re-spelling merged its two sides (arc DC).
+	localResidualSides atomic.Int64
 	// local executions reported to the client instead of retried on the
 	// DAG (#308) — every increment is a query the two paths might have
 	// answered differently.
@@ -1253,6 +1256,13 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// task attempts later with an internal message and no SQLSTATE.
 		if errors.Is(err, dagplan.ErrUnbuildableStageDistributed) {
 			return c.runUnbuildableStageLocal(ctx, queryID, logicalPlan, planStr, start, err)
+		}
+		// And a join residual whose stage re-spelling would read both of the
+		// sides it compares from ONE arm (arc DC round 5): emitted, EXISTS
+		// answered no rows and NOT EXISTS every row. The single-process
+		// pipeline binds each leaf through its own arm.
+		if errors.Is(err, dagplan.ErrResidualSidesMergedDistributed) {
+			return c.runResidualSidesLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		// An authorization refusal is not a planning narrative: it reaches
 		// the client as the decision's own sentence, the same one the
